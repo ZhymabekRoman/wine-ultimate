@@ -335,6 +335,9 @@ static int queue_connect_notification( struct alpc_port *server_port, unsigned i
     list_add_tail( &server_port->msg_queue, &msg->entry );
     wake_up( &server_port->obj, 0 );
     reselect_alpc_port( server_port );
+    /* notify any wait completion packet associated with this port (the standard
+     * NtAssociateWaitCompletionPacket-based server wait used by CoreMessaging). */
+    signal_wait_completion_packets( &server_port->obj );
     return 1;
 }
 

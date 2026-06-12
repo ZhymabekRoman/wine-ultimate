@@ -318,6 +318,9 @@ DECL_HANDLER(create_alpc_port);
 DECL_HANDLER(connect_alpc_port);
 DECL_HANDLER(accept_alpc_connection);
 DECL_HANDLER(disconnect_alpc_port);
+DECL_HANDLER(create_wait_completion_packet);
+DECL_HANDLER(associate_wait_completion_packet);
+DECL_HANDLER(cancel_wait_completion_packet);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -633,6 +636,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_connect_alpc_port,
     (req_handler)req_accept_alpc_connection,
     (req_handler)req_disconnect_alpc_port,
+    (req_handler)req_create_wait_completion_packet,
+    (req_handler)req_associate_wait_completion_packet,
+    (req_handler)req_cancel_wait_completion_packet,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2410,4 +2416,22 @@ C_ASSERT( offsetof(struct accept_alpc_connection_reply, handle) == 8 );
 C_ASSERT( sizeof(struct accept_alpc_connection_reply) == 16 );
 C_ASSERT( offsetof(struct disconnect_alpc_port_request, handle) == 12 );
 C_ASSERT( sizeof(struct disconnect_alpc_port_request) == 16 );
-C_ASSERT( sizeof(struct disconnect_alpc_port_reply) == 8 );
+C_ASSERT( offsetof(struct create_wait_completion_packet_request, access) == 12 );
+C_ASSERT( sizeof(struct create_wait_completion_packet_request) == 16 );
+C_ASSERT( offsetof(struct create_wait_completion_packet_reply, handle) == 8 );
+C_ASSERT( sizeof(struct create_wait_completion_packet_reply) == 16 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_request, handle) == 12 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_request, completion) == 16 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_request, target) == 20 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_request, status) == 24 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_request, key) == 32 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_request, apc) == 40 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_request, information) == 48 );
+C_ASSERT( sizeof(struct associate_wait_completion_packet_request) == 56 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_reply, signaled) == 8 );
+C_ASSERT( sizeof(struct associate_wait_completion_packet_reply) == 16 );
+C_ASSERT( offsetof(struct cancel_wait_completion_packet_request, handle) == 12 );
+C_ASSERT( offsetof(struct cancel_wait_completion_packet_request, remove_signaled) == 16 );
+C_ASSERT( sizeof(struct cancel_wait_completion_packet_request) == 24 );
+C_ASSERT( offsetof(struct cancel_wait_completion_packet_reply, cancelled) == 8 );
+C_ASSERT( sizeof(struct cancel_wait_completion_packet_reply) == 16 );

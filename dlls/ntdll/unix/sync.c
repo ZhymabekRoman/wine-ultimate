@@ -2970,6 +2970,88 @@ NTSTATUS WINAPI NtQueryIoCompletion( HANDLE handle, IO_COMPLETION_INFORMATION_CL
 
 
 /***********************************************************************
+ *             NtCreateWaitCompletionPacket (NTDLL.@)
+ */
+NTSTATUS WINAPI NtCreateWaitCompletionPacket( HANDLE *handle, ACCESS_MASK access,
+                                              OBJECT_ATTRIBUTES *attr )
+{
+    unsigned int status;
+    data_size_t len;
+    struct object_attributes *objattr;
+
+    TRACE( "(%p, %x, %p)\n", handle, (int)access, attr );
+
+    if (!handle) return STATUS_ACCESS_VIOLATION;
+    *handle = 0;
+    if ((status = alloc_object_attributes( attr, &objattr, &len ))) return status;
+
+    SERVER_START_REQ( create_wait_completion_packet )
+    {
+        req->access = access;
+        wine_server_add_data( req, objattr, len );
+        if (!(status = wine_server_call( req )))
+            *handle = wine_server_ptr_handle( reply->handle );
+    }
+    SERVER_END_REQ;
+
+    free( objattr );
+    return status;
+}
+
+
+/***********************************************************************
+ *             NtAssociateWaitCompletionPacket (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAssociateWaitCompletionPacket( HANDLE handle, HANDLE completion_handle,
+                                                 HANDLE target_handle, void *key_context,
+                                                 void *apc_context, NTSTATUS io_status,
+                                                 ULONG_PTR io_status_info, BOOLEAN *already_signaled )
+{
+    unsigned int status;
+
+    TRACE( "(%p, %p, %p, %p, %p, %x, %lx, %p)\n", handle, completion_handle, target_handle,
+           key_context, apc_context, (int)io_status, (unsigned long)io_status_info, already_signaled );
+
+    SERVER_START_REQ( associate_wait_completion_packet )
+    {
+        req->handle      = wine_server_obj_handle( handle );
+        req->completion  = wine_server_obj_handle( completion_handle );
+        req->target      = wine_server_obj_handle( target_handle );
+        req->status      = io_status;
+        req->key         = (apc_param_t)(ULONG_PTR)key_context;
+        req->apc         = (apc_param_t)(ULONG_PTR)apc_context;
+        req->information = io_status_info;
+        if (!(status = wine_server_call( req )) && already_signaled)
+            *already_signaled = reply->signaled;
+    }
+    SERVER_END_REQ;
+
+    return status;
+}
+
+
+/***********************************************************************
+ *             NtCancelWaitCompletionPacket (NTDLL.@)
+ */
+NTSTATUS WINAPI NtCancelWaitCompletionPacket( HANDLE handle, BOOLEAN remove_signaled_packet )
+{
+    unsigned int status;
+
+    TRACE( "(%p, %d)\n", handle, remove_signaled_packet );
+
+    SERVER_START_REQ( cancel_wait_completion_packet )
+    {
+        req->handle          = wine_server_obj_handle( handle );
+        req->remove_signaled = remove_signaled_packet;
+        status = wine_server_call( req );
+    }
+    SERVER_END_REQ;
+
+    return status;
+}
+
+
+/***********************************************************************
  *             NtCreateSection (NTDLL.@)
  */
 NTSTATUS WINAPI NtCreateSection( HANDLE *handle, ACCESS_MASK access, const OBJECT_ATTRIBUTES *attr,

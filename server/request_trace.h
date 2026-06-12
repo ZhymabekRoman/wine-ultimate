@@ -3525,40 +3525,81 @@ static void dump_create_alpc_port_request( const struct create_alpc_port_request
 {
     fprintf( stderr, " access=%08x", req->access );
     fprintf( stderr, ", flags=%08x", req->flags );
-    fprintf( stderr, ", max_msg_len=%u", req->max_msg_len );
+    fprintf( stderr, ", max_msg_len=%08x", req->max_msg_len );
     dump_varargs_object_attributes( ", objattr=", cur_size );
 }
+
 static void dump_create_alpc_port_reply( const struct create_alpc_port_reply *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
 }
+
 static void dump_connect_alpc_port_request( const struct connect_alpc_port_request *req )
 {
     dump_async_data( " async=", &req->async );
     fprintf( stderr, ", msg_id=%08x", req->msg_id );
     dump_varargs_object_attributes( ", objattr=", cur_size );
 }
+
 static void dump_connect_alpc_port_reply( const struct connect_alpc_port_reply *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
     fprintf( stderr, ", wait=%04x", req->wait );
 }
+
 static void dump_accept_alpc_connection_request( const struct accept_alpc_connection_request *req )
 {
     fprintf( stderr, " server_port=%04x", req->server_port );
     fprintf( stderr, ", msg_id=%08x", req->msg_id );
     fprintf( stderr, ", accept=%d", req->accept );
 }
+
 static void dump_accept_alpc_connection_reply( const struct accept_alpc_connection_reply *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
 }
+
 static void dump_disconnect_alpc_port_request( const struct disconnect_alpc_port_request *req )
 {
     fprintf( stderr, " handle=%04x", req->handle );
 }
-static void dump_disconnect_alpc_port_reply( const struct disconnect_alpc_port_reply *req )
+
+static void dump_create_wait_completion_packet_request( const struct create_wait_completion_packet_request *req )
 {
+    fprintf( stderr, " access=%08x", req->access );
+    dump_varargs_object_attributes( ", objattr=", cur_size );
+}
+
+static void dump_create_wait_completion_packet_reply( const struct create_wait_completion_packet_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_associate_wait_completion_packet_request( const struct associate_wait_completion_packet_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", completion=%04x", req->completion );
+    fprintf( stderr, ", target=%04x", req->target );
+    fprintf( stderr, ", status=%08x", req->status );
+    dump_uint64( ", key=", &req->key );
+    dump_uint64( ", apc=", &req->apc );
+    dump_uint64( ", information=", &req->information );
+}
+
+static void dump_associate_wait_completion_packet_reply( const struct associate_wait_completion_packet_reply *req )
+{
+    fprintf( stderr, " signaled=%d", req->signaled );
+}
+
+static void dump_cancel_wait_completion_packet_request( const struct cancel_wait_completion_packet_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", remove_signaled=%d", req->remove_signaled );
+}
+
+static void dump_cancel_wait_completion_packet_reply( const struct cancel_wait_completion_packet_reply *req )
+{
+    fprintf( stderr, " cancelled=%d", req->cancelled );
 }
 
 typedef void (*dump_func)( const void *req );
@@ -3876,6 +3917,9 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_connect_alpc_port_request,
     (dump_func)dump_accept_alpc_connection_request,
     (dump_func)dump_disconnect_alpc_port_request,
+    (dump_func)dump_create_wait_completion_packet_request,
+    (dump_func)dump_associate_wait_completion_packet_request,
+    (dump_func)dump_cancel_wait_completion_packet_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4191,6 +4235,9 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_connect_alpc_port_reply,
     (dump_func)dump_accept_alpc_connection_reply,
     NULL,
+    (dump_func)dump_create_wait_completion_packet_reply,
+    (dump_func)dump_associate_wait_completion_packet_reply,
+    (dump_func)dump_cancel_wait_completion_packet_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4506,6 +4553,9 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "connect_alpc_port",
     "accept_alpc_connection",
     "disconnect_alpc_port",
+    "create_wait_completion_packet",
+    "associate_wait_completion_packet",
+    "cancel_wait_completion_packet",
 };
 
 static const struct

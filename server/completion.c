@@ -453,3 +453,167 @@ DECL_HANDLER(query_completion)
 
     release_object( completion );
 }
+
+
+/* wait completion packet: posts an I/O completion packet when a target object
+ * becomes signaled. Used by NtCreateWaitCompletionPacket et al. */
+
+struct wait_completion_packet
+{
+    struct object       obj;            /* object header */
+    struct list         entry;          /* entry in wait_packet_list while associated */
+    struct completion  *completion;     /* target completion port (ref held) */
+    struct object      *target;         /* object being waited on (ref held) */
+    apc_param_t         ckey;           /* completion key */
+    apc_param_t         cvalue;         /* completion value (apc context) */
+    unsigned int        status;         /* completion status */
+    apc_param_t         information;     /* completion information */
+    int                 associated;     /* currently on wait_packet_list */
+};
+
+static struct list wait_packet_list = LIST_INIT(wait_packet_list);
+
+static void wait_completion_packet_dump( struct object *obj, int verbose );
+static void wait_completion_packet_destroy( struct object *obj );
+
+static const struct object_ops wait_completion_packet_ops =
+{
+    sizeof(struct wait_completion_packet), /* size */
+    &no_type,                       /* type */
+    wait_completion_packet_dump,    /* dump */
+    NULL,                           /* add_queue */
+    NULL,                           /* remove_queue */
+    NULL,                           /* signaled */
+    NULL,                           /* satisfied */
+    no_signal,                      /* signal */
+    no_get_fd,                      /* get_fd */
+    default_get_sync,               /* get_sync */
+    default_map_access,             /* map_access */
+    default_get_sd,                 /* get_sd */
+    default_set_sd,                 /* set_sd */
+    no_get_full_name,               /* get_full_name */
+    no_lookup_name,                 /* lookup_name */
+    no_link_name,                   /* link_name */
+    NULL,                           /* unlink_name */
+    no_open_file,                   /* open_file */
+    no_kernel_obj_list,             /* get_kernel_obj_list */
+    no_close_handle,                /* close_handle */
+    wait_completion_packet_destroy  /* destroy */
+};
+
+static void wait_completion_packet_dump( struct object *obj, int verbose )
+{
+    struct wait_completion_packet *packet = (struct wait_completion_packet *)obj;
+    fprintf( stderr, "Wait completion packet target=%p completion=%p\n",
+             packet->target, packet->completion );
+}
+
+static void wait_packet_disassociate( struct wait_completion_packet *packet )
+{
+    if (!packet->associated) return;
+    list_remove( &packet->entry );
+    if (packet->completion) { release_object( packet->completion ); packet->completion = NULL; }
+    if (packet->target) { release_object( packet->target ); packet->target = NULL; }
+    packet->associated = 0;
+}
+
+static void wait_completion_packet_destroy( struct object *obj )
+{
+    struct wait_completion_packet *packet = (struct wait_completion_packet *)obj;
+    wait_packet_disassociate( packet );
+}
+
+/* called when a target object becomes signaled (e.g. an ALPC port on connect);
+ * posts the associated completion packet(s) and disassociates them (one-shot). */
+void signal_wait_completion_packets( struct object *target )
+{
+    struct wait_completion_packet *packet, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( packet, next, &wait_packet_list, struct wait_completion_packet, entry )
+    {
+        if (packet->target != target) continue;
+        if (packet->completion)
+            add_completion( packet->completion, packet->ckey, packet->cvalue,
+                            packet->status, packet->information );
+        wait_packet_disassociate( packet );
+    }
+}
+
+DECL_HANDLER(create_wait_completion_packet)
+{
+    struct wait_completion_packet *packet;
+    struct unicode_str name;
+    struct object *root;
+    const struct security_descriptor *sd;
+    const struct object_attributes *objattr = get_req_object_attributes( &sd, &name, &root );
+
+    if (!objattr) return;
+
+    if ((packet = alloc_object( &wait_completion_packet_ops )))
+    {
+        packet->completion = NULL;
+        packet->target     = NULL;
+        packet->associated = 0;
+        list_init( &packet->entry );
+        reply->handle = alloc_handle( current->process, packet, req->access, objattr->attributes );
+        release_object( packet );
+    }
+
+    if (root) release_object( root );
+}
+
+DECL_HANDLER(associate_wait_completion_packet)
+{
+    struct wait_completion_packet *packet;
+    struct completion *completion;
+    struct object *target;
+
+    packet = (struct wait_completion_packet *)get_handle_obj( current->process, req->handle,
+                                                              0, &wait_completion_packet_ops );
+    if (!packet) return;
+
+    /* one association per packet */
+    wait_packet_disassociate( packet );
+
+    completion = get_completion_obj( current->process, req->completion, IO_COMPLETION_MODIFY_STATE );
+    if (!completion)
+    {
+        release_object( packet );
+        return;
+    }
+
+    target = get_handle_obj( current->process, req->target, SYNCHRONIZE, NULL );
+    if (!target)
+    {
+        release_object( completion );
+        release_object( packet );
+        return;
+    }
+
+    packet->completion  = completion;   /* ref held */
+    packet->target      = target;       /* ref held */
+    packet->ckey        = req->key;
+    packet->cvalue      = req->apc;
+    packet->status      = req->status;
+    packet->information  = req->information;
+    packet->associated  = 1;
+    list_add_tail( &wait_packet_list, &packet->entry );
+
+    reply->signaled = 0; /* edge-triggered: completion is posted on the next target signal */
+
+    release_object( packet );
+}
+
+DECL_HANDLER(cancel_wait_completion_packet)
+{
+    struct wait_completion_packet *packet;
+
+    packet = (struct wait_completion_packet *)get_handle_obj( current->process, req->handle,
+                                                              0, &wait_completion_packet_ops );
+    if (!packet) return;
+
+    reply->cancelled = packet->associated ? 1 : 0;
+    wait_packet_disassociate( packet );
+
+    release_object( packet );
+}

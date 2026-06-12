@@ -6194,6 +6194,7 @@ struct d3dkmt_mutex_release_reply
 };
 
 
+
 struct create_alpc_port_request
 {
     struct request_header __header;
@@ -6250,6 +6251,56 @@ struct disconnect_alpc_port_request
 struct disconnect_alpc_port_reply
 {
     struct reply_header __header;
+};
+
+
+
+struct create_wait_completion_packet_request
+{
+    struct request_header __header;
+    unsigned int        access;
+    /* VARARG(objattr,object_attributes); */
+};
+struct create_wait_completion_packet_reply
+{
+    struct reply_header __header;
+    obj_handle_t        handle;
+    char __pad_12[4];
+};
+
+
+struct associate_wait_completion_packet_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+    obj_handle_t        completion;
+    obj_handle_t        target;
+    unsigned int        status;
+    char __pad_28[4];
+    apc_param_t         key;
+    apc_param_t         apc;
+    apc_param_t         information;
+};
+struct associate_wait_completion_packet_reply
+{
+    struct reply_header __header;
+    int                 signaled;
+    char __pad_12[4];
+};
+
+
+struct cancel_wait_completion_packet_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+    int                 remove_signaled;
+    char __pad_20[4];
+};
+struct cancel_wait_completion_packet_reply
+{
+    struct reply_header __header;
+    int                 cancelled;
+    char __pad_12[4];
 };
 
 
@@ -6566,6 +6617,9 @@ enum request
     REQ_connect_alpc_port,
     REQ_accept_alpc_connection,
     REQ_disconnect_alpc_port,
+    REQ_create_wait_completion_packet,
+    REQ_associate_wait_completion_packet,
+    REQ_cancel_wait_completion_packet,
     REQ_NB_REQUESTS
 };
 
@@ -6884,6 +6938,9 @@ union generic_request
     struct connect_alpc_port_request connect_alpc_port_request;
     struct accept_alpc_connection_request accept_alpc_connection_request;
     struct disconnect_alpc_port_request disconnect_alpc_port_request;
+    struct create_wait_completion_packet_request create_wait_completion_packet_request;
+    struct associate_wait_completion_packet_request associate_wait_completion_packet_request;
+    struct cancel_wait_completion_packet_request cancel_wait_completion_packet_request;
 };
 union generic_reply
 {
@@ -7200,8 +7257,11 @@ union generic_reply
     struct connect_alpc_port_reply connect_alpc_port_reply;
     struct accept_alpc_connection_reply accept_alpc_connection_reply;
     struct disconnect_alpc_port_reply disconnect_alpc_port_reply;
+    struct create_wait_completion_packet_reply create_wait_completion_packet_reply;
+    struct associate_wait_completion_packet_reply associate_wait_completion_packet_reply;
+    struct cancel_wait_completion_packet_reply cancel_wait_completion_packet_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 943
+#define SERVER_PROTOCOL_VERSION 944
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

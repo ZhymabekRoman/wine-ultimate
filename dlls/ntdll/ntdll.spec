@@ -161,6 +161,9 @@
 @ stdcall -syscall NtAlpcDisconnectPort(ptr long)
 @ stdcall -syscall NtAlpcImpersonateClientOfPort(ptr ptr ptr)
 @ stdcall -syscall NtAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr)
+@ stdcall -syscall NtAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr)
+@ stdcall -syscall NtCancelWaitCompletionPacket(ptr long)
+@ stdcall -syscall NtCreateWaitCompletionPacket(ptr long ptr)
 @ stub -syscall=0x004c NtApphelpCacheControl
 @ stdcall -syscall NtAreMappedFilesTheSame(ptr ptr)
 @ stdcall -syscall NtAssignProcessToJobObject(long long)
@@ -1241,6 +1244,9 @@
 @ stdcall -private ZwAlpcDisconnectPort(ptr long) NtAlpcDisconnectPort
 @ stdcall -private ZwAlpcImpersonateClientOfPort(ptr ptr ptr) NtAlpcImpersonateClientOfPort
 @ stdcall -private ZwAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePort
+@ stdcall -private ZwAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr) NtAssociateWaitCompletionPacket
+@ stdcall -private ZwCancelWaitCompletionPacket(ptr long) NtCancelWaitCompletionPacket
+@ stdcall -private ZwCreateWaitCompletionPacket(ptr long ptr) NtCreateWaitCompletionPacket
 @ stdcall -private ZwApphelpCacheControl() NtApphelpCacheControl
 @ stdcall -private ZwAreMappedFilesTheSame(ptr ptr) NtAreMappedFilesTheSame
 @ stdcall -private ZwAssignProcessToJobObject(long long) NtAssignProcessToJobObject

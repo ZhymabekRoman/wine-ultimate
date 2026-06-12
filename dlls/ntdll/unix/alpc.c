@@ -330,6 +330,12 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
 
     if (!ret && recv_buffer_size) *recv_buffer_size = io.Information;
 
+    /* Report that the received message carried no out-of-band attributes, so
+     * the caller's AlpcGetMessageAttribute() calls return NULL cleanly instead
+     * of dereferencing an uninitialised attribute block. */
+    if (!ret && recv_msg_attr)
+        recv_msg_attr->ValidAttributes = 0;
+
     /* Detect the wine-internal connect notification blob and turn it into a
      * proper PORT_MESSAGE in-place. */
     if (!ret && recv_msg && io.Information == 2 * sizeof(ULONG))

@@ -4311,7 +4311,7 @@ enum inproc_sync_type
 
 /* Connect to a named ALPC server port (client side) */
 @REQ(connect_alpc_port)
-    async_data_t        async;          /* async I/O parameters for blocking wait */
+    struct async_data   async;          /* async I/O parameters for blocking wait */
     unsigned int        msg_id;         /* unique message ID for this connect request */
     VARARG(objattr,object_attributes);  /* object attributes containing port name */
 @REPLY
@@ -4331,4 +4331,34 @@ enum inproc_sync_type
 /* Disconnect an ALPC port or connection */
 @REQ(disconnect_alpc_port)
     obj_handle_t        handle;         /* ALPC port or connection handle */
+@END
+
+
+/* Create a wait completion packet */
+@REQ(create_wait_completion_packet)
+    unsigned int        access;         /* desired access */
+    VARARG(objattr,object_attributes);  /* object attributes */
+@REPLY
+    obj_handle_t        handle;         /* wait packet handle */
+@END
+
+/* Associate a wait packet: post completion to a port when target signals */
+@REQ(associate_wait_completion_packet)
+    obj_handle_t        handle;         /* wait packet handle */
+    obj_handle_t        completion;     /* IO completion port handle */
+    obj_handle_t        target;         /* object to wait on */
+    unsigned int        status;         /* completion status to post */
+    apc_param_t         key;            /* completion key */
+    apc_param_t         apc;            /* completion value (apc context) */
+    apc_param_t         information;    /* completion information */
+@REPLY
+    int                 signaled;       /* was target already signaled */
+@END
+
+/* Cancel a wait completion packet association */
+@REQ(cancel_wait_completion_packet)
+    obj_handle_t        handle;         /* wait packet handle */
+    int                 remove_signaled;/* remove already-queued completion */
+@REPLY
+    int                 cancelled;      /* was an association cancelled */
 @END
