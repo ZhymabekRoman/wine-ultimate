@@ -6194,6 +6194,65 @@ struct d3dkmt_mutex_release_reply
 };
 
 
+struct create_alpc_port_request
+{
+    struct request_header __header;
+    unsigned int        access;
+    unsigned int        flags;
+    unsigned int        max_msg_len;
+    /* VARARG(objattr,object_attributes); */
+};
+struct create_alpc_port_reply
+{
+    struct reply_header __header;
+    obj_handle_t        handle;
+    char __pad_12[4];
+};
+
+
+struct connect_alpc_port_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+    struct async_data   async;
+    unsigned int        msg_id;
+    /* VARARG(objattr,object_attributes); */
+    char __pad_60[4];
+};
+struct connect_alpc_port_reply
+{
+    struct reply_header __header;
+    obj_handle_t        handle;
+    obj_handle_t        wait;
+};
+
+
+struct accept_alpc_connection_request
+{
+    struct request_header __header;
+    obj_handle_t        server_port;
+    unsigned int        msg_id;
+    int                 accept;
+};
+struct accept_alpc_connection_reply
+{
+    struct reply_header __header;
+    obj_handle_t        handle;
+    char __pad_12[4];
+};
+
+
+struct disconnect_alpc_port_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+};
+struct disconnect_alpc_port_reply
+{
+    struct reply_header __header;
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -6503,6 +6562,10 @@ enum request
     REQ_d3dkmt_object_open_name,
     REQ_d3dkmt_mutex_acquire,
     REQ_d3dkmt_mutex_release,
+    REQ_create_alpc_port,
+    REQ_connect_alpc_port,
+    REQ_accept_alpc_connection,
+    REQ_disconnect_alpc_port,
     REQ_NB_REQUESTS
 };
 
@@ -6817,6 +6880,10 @@ union generic_request
     struct d3dkmt_object_open_name_request d3dkmt_object_open_name_request;
     struct d3dkmt_mutex_acquire_request d3dkmt_mutex_acquire_request;
     struct d3dkmt_mutex_release_request d3dkmt_mutex_release_request;
+    struct create_alpc_port_request create_alpc_port_request;
+    struct connect_alpc_port_request connect_alpc_port_request;
+    struct accept_alpc_connection_request accept_alpc_connection_request;
+    struct disconnect_alpc_port_request disconnect_alpc_port_request;
 };
 union generic_reply
 {
@@ -7129,8 +7196,12 @@ union generic_reply
     struct d3dkmt_object_open_name_reply d3dkmt_object_open_name_reply;
     struct d3dkmt_mutex_acquire_reply d3dkmt_mutex_acquire_reply;
     struct d3dkmt_mutex_release_reply d3dkmt_mutex_release_reply;
+    struct create_alpc_port_reply create_alpc_port_reply;
+    struct connect_alpc_port_reply connect_alpc_port_reply;
+    struct accept_alpc_connection_reply accept_alpc_connection_reply;
+    struct disconnect_alpc_port_reply disconnect_alpc_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 942
+#define SERVER_PROTOCOL_VERSION 943
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

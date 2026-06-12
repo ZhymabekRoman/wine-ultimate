@@ -314,6 +314,10 @@ DECL_HANDLER(d3dkmt_share_objects);
 DECL_HANDLER(d3dkmt_object_open_name);
 DECL_HANDLER(d3dkmt_mutex_acquire);
 DECL_HANDLER(d3dkmt_mutex_release);
+DECL_HANDLER(create_alpc_port);
+DECL_HANDLER(connect_alpc_port);
+DECL_HANDLER(accept_alpc_connection);
+DECL_HANDLER(disconnect_alpc_port);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -625,6 +629,10 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_d3dkmt_object_open_name,
     (req_handler)req_d3dkmt_mutex_acquire,
     (req_handler)req_d3dkmt_mutex_release,
+    (req_handler)req_create_alpc_port,
+    (req_handler)req_connect_alpc_port,
+    (req_handler)req_accept_alpc_connection,
+    (req_handler)req_disconnect_alpc_port,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2382,3 +2390,24 @@ C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, key_value) == 20 );
 C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, fence_value) == 24 );
 C_ASSERT( offsetof(struct d3dkmt_mutex_release_request, runtime_size) == 32 );
 C_ASSERT( sizeof(struct d3dkmt_mutex_release_request) == 40 );
+C_ASSERT( offsetof(struct create_alpc_port_request, access) == 12 );
+C_ASSERT( offsetof(struct create_alpc_port_request, flags) == 16 );
+C_ASSERT( offsetof(struct create_alpc_port_request, max_msg_len) == 20 );
+C_ASSERT( sizeof(struct create_alpc_port_request) == 24 );
+C_ASSERT( offsetof(struct create_alpc_port_reply, handle) == 8 );
+C_ASSERT( sizeof(struct create_alpc_port_reply) == 16 );
+C_ASSERT( offsetof(struct connect_alpc_port_request, async) == 16 );
+C_ASSERT( offsetof(struct connect_alpc_port_request, msg_id) == 56 );
+C_ASSERT( sizeof(struct connect_alpc_port_request) == 64 );
+C_ASSERT( offsetof(struct connect_alpc_port_reply, handle) == 8 );
+C_ASSERT( offsetof(struct connect_alpc_port_reply, wait) == 12 );
+C_ASSERT( sizeof(struct connect_alpc_port_reply) == 16 );
+C_ASSERT( offsetof(struct accept_alpc_connection_request, server_port) == 12 );
+C_ASSERT( offsetof(struct accept_alpc_connection_request, msg_id) == 16 );
+C_ASSERT( offsetof(struct accept_alpc_connection_request, accept) == 20 );
+C_ASSERT( sizeof(struct accept_alpc_connection_request) == 24 );
+C_ASSERT( offsetof(struct accept_alpc_connection_reply, handle) == 8 );
+C_ASSERT( sizeof(struct accept_alpc_connection_reply) == 16 );
+C_ASSERT( offsetof(struct disconnect_alpc_port_request, handle) == 12 );
+C_ASSERT( sizeof(struct disconnect_alpc_port_request) == 16 );
+C_ASSERT( sizeof(struct disconnect_alpc_port_reply) == 8 );

@@ -3521,6 +3521,46 @@ static void dump_d3dkmt_mutex_release_request( const struct d3dkmt_mutex_release
     dump_varargs_bytes( ", runtime=", cur_size );
 }
 
+static void dump_create_alpc_port_request( const struct create_alpc_port_request *req )
+{
+    fprintf( stderr, " access=%08x", req->access );
+    fprintf( stderr, ", flags=%08x", req->flags );
+    fprintf( stderr, ", max_msg_len=%u", req->max_msg_len );
+    dump_varargs_object_attributes( ", objattr=", cur_size );
+}
+static void dump_create_alpc_port_reply( const struct create_alpc_port_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+static void dump_connect_alpc_port_request( const struct connect_alpc_port_request *req )
+{
+    dump_async_data( " async=", &req->async );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
+    dump_varargs_object_attributes( ", objattr=", cur_size );
+}
+static void dump_connect_alpc_port_reply( const struct connect_alpc_port_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", wait=%04x", req->wait );
+}
+static void dump_accept_alpc_connection_request( const struct accept_alpc_connection_request *req )
+{
+    fprintf( stderr, " server_port=%04x", req->server_port );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
+    fprintf( stderr, ", accept=%d", req->accept );
+}
+static void dump_accept_alpc_connection_reply( const struct accept_alpc_connection_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+static void dump_disconnect_alpc_port_request( const struct disconnect_alpc_port_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+static void dump_disconnect_alpc_port_reply( const struct disconnect_alpc_port_reply *req )
+{
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -3832,6 +3872,10 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_object_open_name_request,
     (dump_func)dump_d3dkmt_mutex_acquire_request,
     (dump_func)dump_d3dkmt_mutex_release_request,
+    (dump_func)dump_create_alpc_port_request,
+    (dump_func)dump_connect_alpc_port_request,
+    (dump_func)dump_accept_alpc_connection_request,
+    (dump_func)dump_disconnect_alpc_port_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4142,6 +4186,10 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_d3dkmt_share_objects_reply,
     (dump_func)dump_d3dkmt_object_open_name_reply,
     (dump_func)dump_d3dkmt_mutex_acquire_reply,
+    NULL,
+    (dump_func)dump_create_alpc_port_reply,
+    (dump_func)dump_connect_alpc_port_reply,
+    (dump_func)dump_accept_alpc_connection_reply,
     NULL,
 };
 
@@ -4454,6 +4502,10 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "d3dkmt_object_open_name",
     "d3dkmt_mutex_acquire",
     "d3dkmt_mutex_release",
+    "create_alpc_port",
+    "connect_alpc_port",
+    "accept_alpc_connection",
+    "disconnect_alpc_port",
 };
 
 static const struct

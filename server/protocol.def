@@ -4297,3 +4297,38 @@ enum inproc_sync_type
     data_size_t         runtime_size;   /* size of client runtime data */
     VARARG(runtime,bytes);              /* client runtime data */
 @END
+
+
+/* Create an ALPC server port */
+@REQ(create_alpc_port)
+    unsigned int        access;         /* desired access */
+    unsigned int        flags;          /* port attribute flags */
+    unsigned int        max_msg_len;    /* maximum message length */
+    VARARG(objattr,object_attributes);  /* object attributes with name */
+@REPLY
+    obj_handle_t        handle;         /* server port handle */
+@END
+
+/* Connect to a named ALPC server port (client side) */
+@REQ(connect_alpc_port)
+    async_data_t        async;          /* async I/O parameters for blocking wait */
+    unsigned int        msg_id;         /* unique message ID for this connect request */
+    VARARG(objattr,object_attributes);  /* object attributes containing port name */
+@REPLY
+    obj_handle_t        handle;         /* client-side connection handle */
+    obj_handle_t        wait;           /* handle to wait on if STATUS_PENDING */
+@END
+
+/* Accept a pending ALPC connection (server side) */
+@REQ(accept_alpc_connection)
+    obj_handle_t        server_port;    /* server listening port handle */
+    unsigned int        msg_id;         /* msg_id from the received connect notification */
+    int                 accept;         /* 1 = accept, 0 = reject */
+@REPLY
+    obj_handle_t        handle;         /* server-side connection handle */
+@END
+
+/* Disconnect an ALPC port or connection */
+@REQ(disconnect_alpc_port)
+    obj_handle_t        handle;         /* ALPC port or connection handle */
+@END
