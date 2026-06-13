@@ -35,7 +35,7 @@
 WINE_DEFAULT_DEBUG_CHANNEL(alpc);
 
 /* ALPC message types (subset of Windows LPC message types) */
-#define LPC_CONNECTION_REQUEST 11
+#define LPC_CONNECTION_REQUEST 10
 
 /* Process-global message id counter. Only needs to be unique within a single
  * server port's pending-connection list, so a global atomic is fine. */
@@ -310,6 +310,8 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     io.Information = 0;
     wait_handle = NULL;
 
+    {
+    data_size_t reply_size = 0;
     SERVER_START_REQ( read )
     {
         req->async = server_async( port_handle, &async->io, NULL, NULL, NULL, iosb_client_ptr( &io ) );
@@ -317,24 +319,28 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         wine_server_set_reply( req, recv_msg, recv_size );
         ret = wine_server_call( req );
         wait_handle = wine_server_ptr_handle( reply->wait );
+        reply_size  = wine_server_reply_size( reply );
+        /* data delivered inline (message was already queued): record it on the iosb */
+        if (ret != STATUS_PENDING)
+        {
+            io.Status      = ret;
+            io.Information  = reply_size;
+        }
     }
     SERVER_END_REQ;
 
     if (ret != STATUS_PENDING) free( async );
-    if (wait_handle)
+    else if (wait_handle)
     {
         NtWaitForSingleObject( wait_handle, FALSE, timeout );
         NtClose( wait_handle );
         ret = io.Status;
+        wait_handle = NULL;
+    }
+    if (wait_handle) NtClose( wait_handle );
     }
 
     if (!ret && recv_buffer_size) *recv_buffer_size = io.Information;
-
-    /* Report that the received message carried no out-of-band attributes, so
-     * the caller's AlpcGetMessageAttribute() calls return NULL cleanly instead
-     * of dereferencing an uninitialised attribute block. */
-    if (!ret && recv_msg_attr)
-        recv_msg_attr->ValidAttributes = 0;
 
     /* Detect the wine-internal connect notification blob and turn it into a
      * proper PORT_MESSAGE in-place. */
@@ -354,6 +360,41 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     }
 
     return ret;
+}
+
+
+/******************************************************************************
+ *           NtAlpcQueryInformation  (NTDLL.@)
+ *
+ * CoreMessaging queries AlpcBasicInformation (class 0) right after creating its
+ * registrar port and caches the returned SequenceNo. Returning an error sends it
+ * down a failure path that leaves the port object half-initialised, so provide a
+ * minimal successful answer.
+ */
+static LONG alpc_sequence_counter;
+
+NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
+                                         void *buffer, ULONG length, ULONG *ret_length )
+{
+    TRACE( "(%p, %u, %p, %u, %p)\n", port_handle, (int)class, buffer, (int)length, ret_length );
+
+    switch (class)
+    {
+    case 0: /* AlpcBasicInformation */
+    {
+        ALPC_BASIC_INFORMATION info;
+        if (length < sizeof(info)) return STATUS_INFO_LENGTH_MISMATCH;
+        info.Flags       = 0;
+        info.SequenceNo  = InterlockedIncrement( &alpc_sequence_counter );
+        info.PortContext = NULL;
+        memcpy( buffer, &info, sizeof(info) );
+        if (ret_length) *ret_length = sizeof(info);
+        return STATUS_SUCCESS;
+    }
+    default:
+        FIXME( "unsupported info class %u\n", (int)class );
+        return STATUS_INVALID_INFO_CLASS;
+    }
 }
 
 

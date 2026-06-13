@@ -160,6 +160,7 @@
 @ stdcall -syscall NtAlpcCreatePort(ptr ptr ptr)
 @ stdcall -syscall NtAlpcDisconnectPort(ptr long)
 @ stdcall -syscall NtAlpcImpersonateClientOfPort(ptr ptr ptr)
+@ stdcall -syscall NtAlpcQueryInformation(ptr long ptr long ptr)
 @ stdcall -syscall NtAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr)
 @ stdcall -syscall NtAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr)
 @ stdcall -syscall NtCancelWaitCompletionPacket(ptr long)
@@ -1243,6 +1244,7 @@
 @ stdcall -private ZwAlpcCreatePort(ptr ptr ptr) NtAlpcCreatePort
 @ stdcall -private ZwAlpcDisconnectPort(ptr long) NtAlpcDisconnectPort
 @ stdcall -private ZwAlpcImpersonateClientOfPort(ptr ptr ptr) NtAlpcImpersonateClientOfPort
+@ stdcall -private ZwAlpcQueryInformation(ptr long ptr long ptr) NtAlpcQueryInformation
 @ stdcall -private ZwAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePort
 @ stdcall -private ZwAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr) NtAssociateWaitCompletionPacket
 @ stdcall -private ZwCancelWaitCompletionPacket(ptr long) NtCancelWaitCompletionPacket
