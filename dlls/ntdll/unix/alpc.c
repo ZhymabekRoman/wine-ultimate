@@ -415,6 +415,34 @@ NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
 NTSTATUS WINAPI NtAlpcImpersonateClientOfPort( HANDLE port_handle,
                                                 ALPC_PORT_MESSAGE *msg, void *reserved )
 {
-    FIXME( "(%p, %p, %p): stub\n", port_handle, msg, reserved );
-    return STATUS_NOT_IMPLEMENTED;
+    NTSTATUS ret;
+    HANDLE proc_token = NULL, imp_token = NULL;
+    OBJECT_ATTRIBUTES attr;
+    SECURITY_QUALITY_OF_SERVICE qos;
+
+    TRACE( "(%p, %p, %p)\n", port_handle, msg, reserved );
+
+    /* In-process, same-user ALPC: impersonate the client by duplicating our own
+     * process token as an impersonation token and applying it to the current
+     * thread. Servers (e.g. CoreMessaging) impersonate during connection
+     * acceptance and reject the connection if it fails. */
+    if ((ret = NtOpenProcessToken( NtCurrentProcess(), TOKEN_DUPLICATE, &proc_token )))
+        return ret;
+
+    qos.Length              = sizeof(qos);
+    qos.ImpersonationLevel  = SecurityImpersonation;
+    qos.ContextTrackingMode = SECURITY_DYNAMIC_TRACKING;
+    qos.EffectiveOnly       = FALSE;
+    InitializeObjectAttributes( &attr, NULL, 0, NULL, NULL );
+    attr.SecurityQualityOfService = &qos;
+
+    ret = NtDuplicateToken( proc_token, TOKEN_IMPERSONATE | TOKEN_QUERY, &attr,
+                            FALSE, TokenImpersonation, &imp_token );
+    NtClose( proc_token );
+    if (ret) return ret;
+
+    ret = NtSetInformationThread( NtCurrentThread(), ThreadImpersonationToken,
+                                  &imp_token, sizeof(imp_token) );
+    NtClose( imp_token );
+    return ret;
 }
