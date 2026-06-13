@@ -312,9 +312,13 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     {
         struct alpc_wire_hdr *hdr;
         data_size_t blob_size = sizeof(*hdr) + iosb->in_size;
-        /* context the receiver sees: the connection's per-connection context
-         * (set at accept on the server-side endpoint). */
-        client_ptr_t ctx = port->listen_port ? port->peer->port_context : port->port_context;
+        /* context the receiver sees = the per-connection context.
+         * client request: our connection (peer = server side). server reply:
+         * the destination client's connection context. */
+        client_ptr_t ctx;
+        if (port->is_server)      ctx = peer->port_context;
+        else if (port->listen_port) ctx = port->peer->port_context;
+        else                      ctx = port->port_context;
 
         if (!(msg = malloc( sizeof(*msg) + blob_size )))
         {
