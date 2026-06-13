@@ -1546,13 +1546,40 @@ BOOL WINAPI GetVersionExW( OSVERSIONINFOW *info )
     return TRUE;
 }
 
+static LONG package_str_from_env( const WCHAR *var, UINT32 *length, WCHAR *name );
+
 /***********************************************************************
  *         GetCurrentApplicationUserModelId   (kernelbase.@)
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *length, WCHAR *id )
 {
-    FIXME( "(%p %p): stub\n", length, id );
-    return APPMODEL_ERROR_NO_APPLICATION;
+    LONG ret = package_str_from_env( L"WINE_PACKAGE_AUMID", length, id );
+    if (ret == APPMODEL_ERROR_NO_PACKAGE)
+    {
+        FIXME( "(%p %p): stub\n", length, id );
+        return APPMODEL_ERROR_NO_APPLICATION;
+    }
+    return ret;
+}
+
+/* EXPERIMENT: source package identity from env vars so packaged apps (WhatsApp
+ * WinUI3) get a non-empty package context. Set WINE_PACKAGE_FULL_NAME /
+ * WINE_PACKAGE_FAMILY_NAME when launching. */
+static LONG package_str_from_env( const WCHAR *var, UINT32 *length, WCHAR *name )
+{
+    WCHAR buf[512];
+    DWORD len = GetEnvironmentVariableW( var, buf, ARRAY_SIZE(buf) );
+    if (!len || len >= ARRAY_SIZE(buf)) return APPMODEL_ERROR_NO_PACKAGE;
+    len += 1; /* include NUL in the reported/required length */
+    if (!length) return ERROR_INVALID_PARAMETER;
+    if (!name || *length < len)
+    {
+        *length = len;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+    memcpy( name, buf, len * sizeof(WCHAR) );
+    *length = len;
+    return ERROR_SUCCESS;
 }
 
 /***********************************************************************
@@ -1560,8 +1587,9 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *le
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length, WCHAR *name )
 {
-    FIXME( "(%p %p): stub\n", length, name );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    LONG ret = package_str_from_env( L"WINE_PACKAGE_FAMILY_NAME", length, name );
+    if (ret == APPMODEL_ERROR_NO_PACKAGE) FIXME( "(%p %p): stub\n", length, name );
+    return ret;
 }
 
 
@@ -1570,8 +1598,9 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length,
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, WCHAR *name )
 {
-    FIXME( "(%p %p): stub\n", length, name );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    LONG ret = package_str_from_env( L"WINE_PACKAGE_FULL_NAME", length, name );
+    if (ret == APPMODEL_ERROR_NO_PACKAGE) FIXME( "(%p %p): stub\n", length, name );
+    return ret;
 }
 
 
