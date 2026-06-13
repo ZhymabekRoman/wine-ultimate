@@ -4314,6 +4314,7 @@ enum inproc_sync_type
     struct async_data   async;          /* async I/O parameters for blocking wait */
     unsigned int        msg_id;         /* unique message ID for this connect request */
     VARARG(objattr,object_attributes);  /* object attributes containing port name */
+    VARARG(connect_data,bytes);         /* client's connection message payload */
 @REPLY
     obj_handle_t        handle;         /* client-side connection handle */
     obj_handle_t        wait;           /* handle to wait on if STATUS_PENDING */

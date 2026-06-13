@@ -6218,6 +6218,7 @@ struct connect_alpc_port_request
     struct async_data   async;
     unsigned int        msg_id;
     /* VARARG(objattr,object_attributes); */
+    /* VARARG(connect_data,bytes); */
     char __pad_60[4];
 };
 struct connect_alpc_port_reply
@@ -7262,6 +7263,6 @@ union generic_reply
     struct cancel_wait_completion_packet_reply cancel_wait_completion_packet_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 944
+#define SERVER_PROTOCOL_VERSION 945
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

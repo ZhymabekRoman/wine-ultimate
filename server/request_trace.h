@@ -3539,6 +3539,7 @@ static void dump_connect_alpc_port_request( const struct connect_alpc_port_reque
     dump_async_data( " async=", &req->async );
     fprintf( stderr, ", msg_id=%08x", req->msg_id );
     dump_varargs_object_attributes( ", objattr=", cur_size );
+    dump_varargs_bytes( ", connect_data=", cur_size );
 }
 
 static void dump_connect_alpc_port_reply( const struct connect_alpc_port_reply *req )

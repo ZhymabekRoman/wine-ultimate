@@ -155,6 +155,10 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
         req->async   = server_async( NULL, &async->io, NULL, NULL, NULL, iosb_client_ptr( &io ) );
         req->msg_id  = msg_id;
         wine_server_add_data( req, objattr, len );
+        /* forward the caller's connection-message payload so the server can
+         * validate it before accepting */
+        if (connect_msg && connect_msg->DataLength)
+            wine_server_add_data( req, connect_msg + 1, connect_msg->DataLength );
         ret = wine_server_call( req );
         if (!ret || ret == STATUS_PENDING)
         {
@@ -342,20 +346,27 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
 
     if (!ret && recv_buffer_size) *recv_buffer_size = io.Information;
 
-    /* Detect the wine-internal connect notification blob and turn it into a
-     * proper PORT_MESSAGE in-place. */
-    if (!ret && recv_msg && io.Information == 2 * sizeof(ULONG))
+    /* Detect the wine-internal connect-notification blob
+     * { magic, msg_id, client_pid, client_tid, payload_size, payload... }
+     * and turn it into a proper LPC_CONNECTION_REQUEST PORT_MESSAGE in-place. */
+    if (!ret && recv_msg && io.Information >= 5 * sizeof(ULONG))
     {
-        ULONG hdr[2];
+        ULONG hdr[5];
         memcpy( hdr, recv_msg, sizeof(hdr) );
-        if (hdr[0] == 1) /* is_connect flag */
+        if (hdr[0] == 0x434e4e41) /* 'ANNC' */
         {
+            ULONG msg_id = hdr[1], pid = hdr[2], tid = hdr[3], payload = hdr[4];
+            char *src = (char *)recv_msg + 5 * sizeof(ULONG);
+
+            if (payload) memmove( (char *)recv_msg + sizeof(*recv_msg), src, payload );
             memset( recv_msg, 0, sizeof(*recv_msg) );
-            recv_msg->TotalLength = sizeof(*recv_msg);
-            recv_msg->DataLength  = 0;
+            recv_msg->DataLength  = payload;
+            recv_msg->TotalLength = sizeof(*recv_msg) + payload;
             recv_msg->Type        = LPC_CONNECTION_REQUEST;
-            recv_msg->MessageId   = hdr[1];
-            if (recv_buffer_size) *recv_buffer_size = sizeof(*recv_msg);
+            recv_msg->MessageId   = msg_id;
+            recv_msg->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
+            recv_msg->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)tid;
+            if (recv_buffer_size) *recv_buffer_size = sizeof(*recv_msg) + payload;
         }
     }
 

@@ -50,6 +50,19 @@ struct alpc_message
     /* user data bytes follow */
 };
 
+/* wine-internal connect-notification blob delivered on the listening port:
+ * { magic, msg_id, client_pid, client_tid, payload_size, payload... } */
+#define ALPC_CONNECT_MAGIC 0x434e4e41 /* 'ANNC' */
+struct alpc_connect_blob
+{
+    unsigned int magic;
+    unsigned int msg_id;
+    unsigned int client_pid;
+    unsigned int client_tid;
+    unsigned int payload_size;
+    /* payload bytes follow */
+};
+
 /* A pending (not yet accepted) client connection. */
 struct alpc_pending_conn
 {
@@ -57,6 +70,10 @@ struct alpc_pending_conn
     unsigned int     msg_id;         /* same as the connect message id */
     struct alpc_port *client_port;   /* client-side connection port object */
     struct async     *client_async;  /* async blocking NtAlpcConnectPort */
+    char            *conn_data;      /* client's connection message payload */
+    data_size_t      conn_data_size;
+    unsigned int     client_pid;
+    unsigned int     client_tid;
 };
 
 struct alpc_port;
@@ -181,8 +198,7 @@ static void alpc_port_destroy( struct object *obj )
                 async_terminate( pc->client_async, STATUS_OBJECT_NAME_NOT_FOUND );
                 release_object( pc->client_async );
             }
-            if (pc->client_port) release_object( pc->client_port );
-            free( pc );
+            if (pc->client_port) release_object( pc->client_port );            free( pc->conn_data );            free( pc );
         }
     }
     else if (port->peer)
@@ -310,27 +326,29 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
 }
 
 /* Queue a connect-notification message to the server port's msg_queue. */
-static int queue_connect_notification( struct alpc_port *server_port, unsigned int msg_id )
+static int queue_connect_notification( struct alpc_port *server_port, struct alpc_pending_conn *pc )
 {
     struct alpc_message *msg;
+    struct alpc_connect_blob *blob;
+    data_size_t blob_size = sizeof(*blob) + pc->conn_data_size;
 
-    /* The payload is { unsigned int is_connect=1, unsigned int msg_id }
-     * so ntdll can reliably detect this as a connect notification. */
+    if (!(msg = malloc( sizeof(*msg) + blob_size )))
     {
-        unsigned int hdr[2];
-        msg = malloc( sizeof(*msg) + sizeof(hdr) );
-        if (!msg)
-        {
-            set_error( STATUS_NO_MEMORY );
-            return 0;
-        }
-        hdr[0] = 1; /* is_connect flag */
-        hdr[1] = msg_id;
-        msg->is_connect = 1;
-        msg->msg_id     = msg_id;
-        msg->data_size  = sizeof(hdr);
-        memcpy( (char *)msg + sizeof(*msg), hdr, sizeof(hdr) );
+        set_error( STATUS_NO_MEMORY );
+        return 0;
     }
+    msg->is_connect = 1;
+    msg->msg_id     = pc->msg_id;
+    msg->data_size  = blob_size;
+
+    blob = (struct alpc_connect_blob *)((char *)msg + sizeof(*msg));
+    blob->magic        = ALPC_CONNECT_MAGIC;
+    blob->msg_id       = pc->msg_id;
+    blob->client_pid   = pc->client_pid;
+    blob->client_tid   = pc->client_tid;
+    blob->payload_size = pc->conn_data_size;
+    if (pc->conn_data_size)
+        memcpy( blob + 1, pc->conn_data, pc->conn_data_size );
 
     list_add_tail( &server_port->msg_queue, &msg->entry );
     wake_up( &server_port->obj, 0 );
@@ -422,12 +440,32 @@ DECL_HANDLER(connect_alpc_port)
     pc->msg_id       = req->msg_id;
     pc->client_port  = (struct alpc_port *)grab_object( client_port );
     pc->client_async = NULL;
+    pc->conn_data    = NULL;
+    pc->conn_data_size = 0;
+    pc->client_pid   = get_process_id( current->process );
+    pc->client_tid   = get_thread_id( current );
+
+    /* Capture the client's connection-message payload (follows the object
+     * attributes), which the server validates before accepting. */
+    {
+        data_size_t cdata_size;
+        const void *cdata = get_req_data_after_objattr( objattr, &cdata_size );
+        if (cdata && cdata_size)
+        {
+            if ((pc->conn_data = malloc( cdata_size )))
+            {
+                memcpy( pc->conn_data, cdata, cdata_size );
+                pc->conn_data_size = cdata_size;
+            }
+        }
+    }
 
     /* Create handle for client now; peer will be wired up after accept */
     reply->handle = alloc_handle( current->process, client_port, GENERIC_ALL, 0 );
     if (!reply->handle)
     {
         release_object( client_port );
+        free( pc->conn_data );
         free( pc );
         release_object( server_port );
         return;
@@ -435,13 +473,12 @@ DECL_HANDLER(connect_alpc_port)
 
     /* Queue connect notification to server port */
     list_add_tail( &server_port->pending_conns, &pc->entry );
-    if (!queue_connect_notification( server_port, req->msg_id ))
+    if (!queue_connect_notification( server_port, pc ))
     {
         list_remove( &pc->entry );
         close_handle( current->process, reply->handle );
         reply->handle = 0;
-        release_object( client_port );
-        free( pc );
+        release_object( client_port );        free( pc->conn_data );        free( pc );
         release_object( server_port );
         return;
     }
@@ -480,8 +517,7 @@ DECL_HANDLER(connect_alpc_port)
             }
             close_handle( current->process, reply->handle );
             reply->handle = 0;
-            release_object( client_port );
-            free( pc );
+            release_object( client_port );            free( pc->conn_data );            free( pc );
         }
     }
 
@@ -534,8 +570,7 @@ DECL_HANDLER(accept_alpc_connection)
             async_terminate( found->client_async, STATUS_CONNECTION_REFUSED );
             release_object( found->client_async );
         }
-        release_object( found->client_port );
-        free( found );
+        release_object( found->client_port );        free( found->conn_data );        free( found );
         release_object( server_port );
         return;
     }
@@ -548,8 +583,7 @@ DECL_HANDLER(accept_alpc_connection)
             async_terminate( found->client_async, STATUS_NO_MEMORY );
             release_object( found->client_async );
         }
-        release_object( found->client_port );
-        free( found );
+        release_object( found->client_port );        free( found->conn_data );        free( found );
         release_object( server_port );
         return;
     }
@@ -569,8 +603,7 @@ DECL_HANDLER(accept_alpc_connection)
         found->client_async = NULL;
     }
 
-    release_object( found->client_port );
-    free( found );
+    release_object( found->client_port );    free( found->conn_data );    free( found );
     release_object( server_port );
 }
 
