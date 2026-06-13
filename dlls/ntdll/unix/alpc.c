@@ -280,6 +280,13 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     {
         data_size_t send_size = send_msg->TotalLength;
 
+        /* The kernel stamps the message type from the send flags and assigns a
+         * unique non-zero MessageId to a new request (replies echo it back). */
+        if (flags & 0x10000)        send_msg->Type = 2; /* LPC_REPLY */
+        else if (flags & 0x20000)   send_msg->Type = 1; /* LPC_REQUEST */
+        if (!(flags & 0x10000) && !send_msg->MessageId)
+            send_msg->MessageId = next_alpc_msg_id();
+
         if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, port_handle )))
             return STATUS_NO_MEMORY;
         async->buffer = NULL;
@@ -297,8 +304,13 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         }
         SERVER_END_REQ;
 
-        if (ret != STATUS_PENDING) free( async );
-        if (wait_handle) ret = wait_async( wait_handle, FALSE );
+        if (ret == STATUS_PENDING)
+            ret = wait_async( wait_handle, FALSE );  /* frees async via the completion apc */
+        else
+        {
+            free( async );
+            if (wait_handle) NtClose( wait_handle );
+        }
 
         if (ret) return ret;
     }
