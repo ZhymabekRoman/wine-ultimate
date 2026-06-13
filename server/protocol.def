@@ -4325,6 +4325,7 @@ enum inproc_sync_type
     obj_handle_t        server_port;    /* server listening port handle */
     unsigned int        msg_id;         /* msg_id from the received connect notification */
     int                 accept;         /* 1 = accept, 0 = reject */
+    client_ptr_t        port_context;   /* per-connection context (returned in CONTEXT attr) */
 @REPLY
     obj_handle_t        handle;         /* server-side connection handle */
 @END

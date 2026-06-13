@@ -213,9 +213,10 @@ NTSTATUS WINAPI NtAlpcAcceptConnectPort( HANDLE *communication_port, HANDLE conn
 
     SERVER_START_REQ( accept_alpc_connection )
     {
-        req->server_port = wine_server_obj_handle( connection_port );
-        req->msg_id      = msg_id;
-        req->accept      = accept_connection;
+        req->server_port  = wine_server_obj_handle( connection_port );
+        req->msg_id       = msg_id;
+        req->accept       = accept_connection;
+        req->port_context = (client_ptr_t)(ULONG_PTR)port_context;
         ret = wine_server_call( req );
         if (!ret && accept_connection)
             *communication_port = wine_server_ptr_handle( reply->handle );
@@ -346,27 +347,64 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
 
     if (!ret && recv_buffer_size) *recv_buffer_size = io.Information;
 
-    /* Detect the wine-internal connect-notification blob
-     * { magic, msg_id, client_pid, client_tid, payload_size, payload... }
-     * and turn it into a proper LPC_CONNECTION_REQUEST PORT_MESSAGE in-place. */
-    if (!ret && recv_msg && io.Information >= 5 * sizeof(ULONG))
+    /* Every delivered message is prefixed by a wine-internal wire header
+     * { u32 magic,type,msg_id,pid,tid,user_size; u64 port_context }. Strip it and
+     * reconstruct the kernel-filled PORT_MESSAGE fields + CONTEXT attribute. */
+    if (!ret && recv_msg && io.Information >= 32)
     {
-        ULONG hdr[5];
-        memcpy( hdr, recv_msg, sizeof(hdr) );
-        if (hdr[0] == 0x434e4e41) /* 'ANNC' */
+        ULONG  h[6];
+        ULONGLONG port_context;
+        memcpy( h, recv_msg, sizeof(h) );
+        memcpy( &port_context, (char *)recv_msg + 24, sizeof(port_context) );
+        if (h[0] == 0x434e4e41) /* 'ANNC' */
         {
-            ULONG msg_id = hdr[1], pid = hdr[2], tid = hdr[3], payload = hdr[4];
-            char *src = (char *)recv_msg + 5 * sizeof(ULONG);
+            ULONG type = h[1], msg_id = h[2], pid = h[3], tid = h[4], usize = h[5];
+            char *src = (char *)recv_msg + 32;
+            SIZE_T total;
 
-            if (payload) memmove( (char *)recv_msg + sizeof(*recv_msg), src, payload );
-            memset( recv_msg, 0, sizeof(*recv_msg) );
-            recv_msg->DataLength  = payload;
-            recv_msg->TotalLength = sizeof(*recv_msg) + payload;
-            recv_msg->Type        = LPC_CONNECTION_REQUEST;
-            recv_msg->MessageId   = msg_id;
+            if (type == LPC_CONNECTION_REQUEST)
+            {
+                /* user bytes are the raw connection payload: build a PORT_MESSAGE */
+                if (usize) memmove( (char *)recv_msg + sizeof(*recv_msg), src, usize );
+                memset( recv_msg, 0, sizeof(*recv_msg) );
+                recv_msg->DataLength  = usize;
+                recv_msg->TotalLength = sizeof(*recv_msg) + usize;
+                recv_msg->Type        = LPC_CONNECTION_REQUEST;
+                recv_msg->MessageId   = msg_id;
+                total = sizeof(*recv_msg) + usize;
+            }
+            else
+            {
+                /* user bytes are the sender's full PORT_MESSAGE: preserve its
+                 * Type/MessageId/CallbackId (reply correlation), only stamp ClientId */
+                memmove( recv_msg, src, usize );
+                total = usize;
+            }
             recv_msg->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
             recv_msg->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)tid;
-            if (recv_buffer_size) *recv_buffer_size = sizeof(*recv_msg) + payload;
+            if (recv_buffer_size) *recv_buffer_size = total;
+
+            /* deliver the CONTEXT attribute (PortContext) the kernel would fill */
+            if (recv_msg_attr)
+            {
+                ULONG alloc = recv_msg_attr->AllocatedAttributes;
+                if (alloc & 0x20000000) /* ALPC_MESSAGE_CONTEXT_ATTRIBUTE */
+                {
+                    SIZE_T off = 8;
+                    if (alloc & 0x80000000) off += 24; /* ALPC_SECURITY_ATTR */
+                    if (alloc & 0x40000000) off += 32; /* ALPC_VIEW_ATTR */
+                    {
+                        ALPC_CONTEXT_ATTR *ctx =
+                            (ALPC_CONTEXT_ATTR *)((char *)recv_msg_attr + off);
+                        ctx->PortContext    = (void *)(ULONG_PTR)port_context;
+                        ctx->MessageContext = NULL;
+                        ctx->Sequence       = 0;
+                        ctx->MessageId      = msg_id;
+                        ctx->CallbackId     = 0;
+                    }
+                    recv_msg_attr->ValidAttributes |= 0x20000000;
+                }
+            }
         }
     }
 

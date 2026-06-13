@@ -3553,6 +3553,7 @@ static void dump_accept_alpc_connection_request( const struct accept_alpc_connec
     fprintf( stderr, " server_port=%04x", req->server_port );
     fprintf( stderr, ", msg_id=%08x", req->msg_id );
     fprintf( stderr, ", accept=%d", req->accept );
+    dump_uint64( ", port_context=", &req->port_context );
 }
 
 static void dump_accept_alpc_connection_reply( const struct accept_alpc_connection_reply *req )

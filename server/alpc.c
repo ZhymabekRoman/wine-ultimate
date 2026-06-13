@@ -50,17 +50,21 @@ struct alpc_message
     /* user data bytes follow */
 };
 
-/* wine-internal connect-notification blob delivered on the listening port:
- * { magic, msg_id, client_pid, client_tid, payload_size, payload... } */
-#define ALPC_CONNECT_MAGIC 0x434e4e41 /* 'ANNC' */
-struct alpc_connect_blob
+/* wine-internal header prefixed to every message delivered to a receiver so
+ * ntdll can reconstruct the kernel-filled PORT_MESSAGE fields (ClientId,
+ * MessageId) and the CONTEXT message attribute (PortContext). For a connection
+ * request the user bytes are the raw connect payload; for a data message they
+ * are the sender's full PORT_MESSAGE. */
+#define ALPC_WIRE_MAGIC 0x434e4e41 /* 'ANNC' */
+struct alpc_wire_hdr
 {
-    unsigned int magic;
-    unsigned int msg_id;
-    unsigned int client_pid;
-    unsigned int client_tid;
-    unsigned int payload_size;
-    /* payload bytes follow */
+    unsigned int     magic;
+    unsigned int     type;        /* LPC message type (10 = connection request) */
+    unsigned int     msg_id;
+    unsigned int     client_pid;
+    unsigned int     client_tid;
+    unsigned int     user_size;   /* bytes of user message following */
+    client_ptr_t     port_context;
 };
 
 /* A pending (not yet accepted) client connection. */
@@ -90,9 +94,13 @@ struct alpc_port
 
     /* Server port only */
     struct list         pending_conns; /* struct alpc_pending_conn */
+    struct list         connections;   /* accepted client-side ports (conn_entry) */
 
     /* Connection only */
     struct alpc_port   *peer;        /* peer connection endpoint, or NULL */
+    struct alpc_port   *listen_port; /* client side: the server's listening port */
+    client_ptr_t        port_context;/* server side: context passed to accept */
+    struct list         conn_entry;  /* client side: entry in listen_port->connections */
 };
 
 /* ---- Forward declarations ---- */
@@ -201,13 +209,20 @@ static void alpc_port_destroy( struct object *obj )
             if (pc->client_port) release_object( pc->client_port );            free( pc->conn_data );            free( pc );
         }
     }
-    else if (port->peer)
+    else
     {
-        async_wake_up( &port->peer->read_q, STATUS_PIPE_DISCONNECTED );
-        port->peer->peer = NULL;
-        port->peer = NULL;
+        if (port->peer)
+        {
+            async_wake_up( &port->peer->read_q, STATUS_PIPE_DISCONNECTED );
+            port->peer->peer = NULL;
+            port->peer = NULL;
+        }
+        /* client side: unlink from the listening port's connection list
+         * (safe even when not linked: conn_entry is list_init'd) */
+        list_remove( &port->conn_entry );
     }
 
+    if (port->listen_port) release_object( port->listen_port );
     if (port->fd) release_object( port->fd );
 }
 
@@ -265,12 +280,26 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     struct alpc_message *msg;
     struct iosb *iosb;
 
-    if (port->is_server || !port->peer)
+    if (port->is_server)
+    {
+        /* Server replying on its listening port: route to the connected client.
+         * (single-connection correlation; multi-client would match by CallbackId) */
+        struct list *head = list_head( &port->connections );
+        if (!head)
+        {
+            set_error( STATUS_PIPE_DISCONNECTED );
+            return;
+        }
+        peer = LIST_ENTRY( head, struct alpc_port, conn_entry );
+    }
+    else if (!port->peer)
     {
         set_error( STATUS_PIPE_DISCONNECTED );
         return;
     }
-    peer = port->peer;
+    /* The client side delivers to the server's listening port (where the server
+     * receives all connections' messages); the server side replies to its peer. */
+    else peer = port->listen_port ? port->listen_port : port->peer;
 
     iosb = async_get_iosb( async );
     if (!iosb->in_data || !iosb->in_size)
@@ -280,18 +309,33 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         return;
     }
 
-    msg = malloc( sizeof(*msg) + iosb->in_size );
-    if (!msg)
     {
-        release_object( iosb );
-        set_error( STATUS_NO_MEMORY );
-        return;
-    }
+        struct alpc_wire_hdr *hdr;
+        data_size_t blob_size = sizeof(*hdr) + iosb->in_size;
+        /* context the receiver sees: the connection's per-connection context
+         * (set at accept on the server-side endpoint). */
+        client_ptr_t ctx = port->listen_port ? port->peer->port_context : port->port_context;
 
-    msg->is_connect = 0;
-    msg->msg_id     = 0;
-    msg->data_size  = iosb->in_size;
-    memcpy( (char *)msg + sizeof(*msg), iosb->in_data, iosb->in_size );
+        if (!(msg = malloc( sizeof(*msg) + blob_size )))
+        {
+            release_object( iosb );
+            set_error( STATUS_NO_MEMORY );
+            return;
+        }
+        msg->is_connect = 0;
+        msg->msg_id     = 0;
+        msg->data_size  = blob_size;
+
+        hdr = (struct alpc_wire_hdr *)((char *)msg + sizeof(*msg));
+        hdr->magic        = ALPC_WIRE_MAGIC;
+        hdr->type         = 1; /* LPC_REQUEST/REPLY – distinguished by the user PORT_MESSAGE */
+        hdr->msg_id       = 0;
+        hdr->client_pid   = get_process_id( current->process );
+        hdr->client_tid   = get_thread_id( current );
+        hdr->user_size    = iosb->in_size;
+        hdr->port_context = ctx;
+        memcpy( hdr + 1, iosb->in_data, iosb->in_size );
+    }
 
     list_add_tail( &peer->msg_queue, &msg->entry );
     wake_up( &peer->obj, 0 );
@@ -310,11 +354,15 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
 
     if (!(port = alloc_object( &alpc_port_ops ))) return NULL;
 
-    port->is_server = is_server;
-    port->peer      = NULL;
+    port->is_server   = is_server;
+    port->peer        = NULL;
+    port->listen_port = NULL;
+    port->port_context = 0;
     list_init( &port->msg_queue );
     init_async_queue( &port->read_q );
     list_init( &port->pending_conns );
+    list_init( &port->connections );
+    list_init( &port->conn_entry );
 
     port->fd = alloc_pseudo_fd( &alpc_fd_ops, &port->obj, opts );
     if (!port->fd)
@@ -329,8 +377,8 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
 static int queue_connect_notification( struct alpc_port *server_port, struct alpc_pending_conn *pc )
 {
     struct alpc_message *msg;
-    struct alpc_connect_blob *blob;
-    data_size_t blob_size = sizeof(*blob) + pc->conn_data_size;
+    struct alpc_wire_hdr *hdr;
+    data_size_t blob_size = sizeof(*hdr) + pc->conn_data_size;
 
     if (!(msg = malloc( sizeof(*msg) + blob_size )))
     {
@@ -341,14 +389,16 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     msg->msg_id     = pc->msg_id;
     msg->data_size  = blob_size;
 
-    blob = (struct alpc_connect_blob *)((char *)msg + sizeof(*msg));
-    blob->magic        = ALPC_CONNECT_MAGIC;
-    blob->msg_id       = pc->msg_id;
-    blob->client_pid   = pc->client_pid;
-    blob->client_tid   = pc->client_tid;
-    blob->payload_size = pc->conn_data_size;
+    hdr = (struct alpc_wire_hdr *)((char *)msg + sizeof(*msg));
+    hdr->magic        = ALPC_WIRE_MAGIC;
+    hdr->type         = 10; /* LPC_CONNECTION_REQUEST */
+    hdr->msg_id       = pc->msg_id;
+    hdr->client_pid   = pc->client_pid;
+    hdr->client_tid   = pc->client_tid;
+    hdr->user_size    = pc->conn_data_size;
+    hdr->port_context = 0;
     if (pc->conn_data_size)
-        memcpy( blob + 1, pc->conn_data, pc->conn_data_size );
+        memcpy( hdr + 1, pc->conn_data, pc->conn_data_size );
 
     list_add_tail( &server_port->msg_queue, &msg->entry );
     wake_up( &server_port->obj, 0 );
@@ -378,11 +428,15 @@ DECL_HANDLER(create_alpc_port)
     if (get_error() != STATUS_OBJECT_NAME_EXISTS)
     {
         /* Newly created: initialize all fields */
-        port->is_server = 1;
-        port->peer      = NULL;
+        port->is_server   = 1;
+        port->peer        = NULL;
+        port->listen_port = NULL;
+        port->port_context = 0;
         list_init( &port->msg_queue );
         init_async_queue( &port->read_q );
         list_init( &port->pending_conns );
+        list_init( &port->connections );
+        list_init( &port->conn_entry );
         port->fd = alloc_pseudo_fd( &alpc_fd_ops, &port->obj, FILE_SYNCHRONOUS_IO_NONALERT );
         if (!port->fd)
         {
@@ -590,6 +644,14 @@ DECL_HANDLER(accept_alpc_connection)
 
     server_conn_port->peer  = (struct alpc_port *)grab_object( found->client_port );
     found->client_port->peer = (struct alpc_port *)grab_object( server_conn_port );
+
+    /* The server receives all client messages on its listening port, so route
+     * the client side's writes there. The server side replies to the client. */
+    found->client_port->listen_port = (struct alpc_port *)grab_object( server_port );
+    server_conn_port->port_context  = req->port_context;
+    found->client_port->port_context = req->port_context;
+    /* track the connection on the listening port for reply routing */
+    list_add_tail( &server_port->connections, &found->client_port->conn_entry );
 
     reply->handle = alloc_handle( current->process, server_conn_port,
                                    GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );

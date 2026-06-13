@@ -6235,6 +6235,7 @@ struct accept_alpc_connection_request
     obj_handle_t        server_port;
     unsigned int        msg_id;
     int                 accept;
+    client_ptr_t        port_context;
 };
 struct accept_alpc_connection_reply
 {
@@ -7263,6 +7264,6 @@ union generic_reply
     struct cancel_wait_completion_packet_reply cancel_wait_completion_packet_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 945
+#define SERVER_PROTOCOL_VERSION 946
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
