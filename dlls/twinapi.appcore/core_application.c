@@ -47,6 +47,7 @@ struct factory
 {
     IActivationFactory IActivationFactory_iface;
     ICoreApplication ICoreApplication_iface;
+    ICoreApplicationUnhandledError ICoreApplicationUnhandledError_iface;
     IStaticLifetime IStaticLifetime_iface;
     __FIMap_2_HSTRING_IInspectable *static_map;
     LONG ref;
@@ -89,6 +90,13 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
     {
         IActivationFactory_AddRef( &impl->IActivationFactory_iface );
         *out = &impl->IStaticLifetime_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ICoreApplicationUnhandledError ))
+    {
+        IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+        *out = &impl->ICoreApplicationUnhandledError_iface;
         return S_OK;
     }
 
@@ -514,10 +522,78 @@ static const IStaticLifetimeVtbl static_lifetime_vtbl =
     static_lifetime_GetCollection,
 };
 
+/* ---- ICoreApplicationUnhandledError: UnhandledErrorDetected event (semi-stub) ----
+ * XAML's DirectUI::FinalUnhandledErrorDetectedRegistration::Register (via FrameworkUdk
+ * FinalUnhandledErrorDetected_RegisterHandler) registers for this event; E_NOINTERFACE
+ * here makes XAML throw + fail-fast during init. */
+
+static inline struct factory *impl_from_ICoreApplicationUnhandledError( ICoreApplicationUnhandledError *iface )
+{
+    return CONTAINING_RECORD( iface, struct factory, ICoreApplicationUnhandledError_iface );
+}
+
+static HRESULT WINAPI unhandled_error_QueryInterface( ICoreApplicationUnhandledError *iface, REFIID iid, void **out )
+{
+    struct factory *impl = impl_from_ICoreApplicationUnhandledError( iface );
+    return IActivationFactory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI unhandled_error_AddRef( ICoreApplicationUnhandledError *iface )
+{
+    struct factory *impl = impl_from_ICoreApplicationUnhandledError( iface );
+    return IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+}
+static ULONG WINAPI unhandled_error_Release( ICoreApplicationUnhandledError *iface )
+{
+    struct factory *impl = impl_from_ICoreApplicationUnhandledError( iface );
+    return IActivationFactory_Release( &impl->IActivationFactory_iface );
+}
+static HRESULT WINAPI unhandled_error_GetIids( ICoreApplicationUnhandledError *iface, ULONG *count, IID **iids )
+{
+    FIXME( "iface %p stub!\n", iface );
+    return E_NOTIMPL;
+}
+static HRESULT WINAPI unhandled_error_GetRuntimeClassName( ICoreApplicationUnhandledError *iface, HSTRING *name )
+{
+    FIXME( "iface %p stub!\n", iface );
+    return E_NOTIMPL;
+}
+static HRESULT WINAPI unhandled_error_GetTrustLevel( ICoreApplicationUnhandledError *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI unhandled_error_add_UnhandledErrorDetected( ICoreApplicationUnhandledError *iface,
+        __FIEventHandler_1_Windows__CApplicationModel__CCore__CUnhandledErrorDetectedEventArgs *handler,
+        EventRegistrationToken *token )
+{
+    FIXME( "iface %p, handler %p, token %p semi-stub.\n", iface, handler, token );
+    if (token) token->value = 0;
+    return S_OK;
+}
+static HRESULT WINAPI unhandled_error_remove_UnhandledErrorDetected( ICoreApplicationUnhandledError *iface,
+        EventRegistrationToken token )
+{
+    FIXME( "iface %p, token %#I64x semi-stub.\n", iface, token.value );
+    return S_OK;
+}
+
+static const struct ICoreApplicationUnhandledErrorVtbl unhandled_error_vtbl =
+{
+    unhandled_error_QueryInterface,
+    unhandled_error_AddRef,
+    unhandled_error_Release,
+    unhandled_error_GetIids,
+    unhandled_error_GetRuntimeClassName,
+    unhandled_error_GetTrustLevel,
+    unhandled_error_add_UnhandledErrorDetected,
+    unhandled_error_remove_UnhandledErrorDetected,
+};
+
 static struct factory factory =
 {
     {&activation_factory_vtbl},
     {&core_application_vtbl},
+    {&unhandled_error_vtbl},
     {&static_lifetime_vtbl},
     NULL,
     1,
