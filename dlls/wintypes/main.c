@@ -150,7 +150,8 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsTypePresent(
     if (!type_name)
         return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *value = TRUE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresent(
@@ -177,7 +178,8 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsMethodPresentWithArit
     if (!type_name)
         return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *value = TRUE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
@@ -189,7 +191,8 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEventPresent(
     if (!type_name)
         return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *value = TRUE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
@@ -201,7 +204,8 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsPropertyPresent(
     if (!type_name)
         return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *value = TRUE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsReadOnlyPropertyPresent(
@@ -214,7 +218,8 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsReadOnlyPropertyPrese
     if (!type_name)
         return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *value = TRUE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsWriteablePropertyPresent(
@@ -226,7 +231,8 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsWriteablePropertyPres
     if (!type_name)
         return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *value = TRUE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsEnumNamedValuePresent(
@@ -238,7 +244,8 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEnumNamedValuePresent
     if (!enum_type_name)
         return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *value = TRUE;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsApiContractPresentByMajor(

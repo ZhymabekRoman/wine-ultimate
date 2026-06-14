@@ -255,13 +255,22 @@ static const struct ICoreApplicationViewVtbl core_application_view_vtbl =
     core_application_view_get_IsHosted,
 };
 
-static ICoreApplicationView *core_application_view_create(void)
+/* Single process-wide CoreApplicationView shared by Run + GetCurrentView; they
+ * MUST return the same object or FrameworkUdk fail-fasts. */
+static ICoreApplicationView *the_application_view;
+
+static ICoreApplicationView *core_application_view_get(void)
 {
-    struct core_application_view *impl;
-    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
-    impl->ICoreApplicationView_iface.lpVtbl = &core_application_view_vtbl;
-    impl->ref = 1;
-    return &impl->ICoreApplicationView_iface;
+    if (!the_application_view)
+    {
+        struct core_application_view *impl;
+        if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+        impl->ICoreApplicationView_iface.lpVtbl = &core_application_view_vtbl;
+        impl->ref = 1;
+        the_application_view = &impl->ICoreApplicationView_iface;
+    }
+    ICoreApplicationView_AddRef( the_application_view );
+    return the_application_view;
 }
 
 /* ICoreApplication — the static Windows.ApplicationModel.Core.CoreApplication */
@@ -348,7 +357,7 @@ static HRESULT WINAPI core_application_GetCurrentView( ICoreApplication *iface, 
 {
     FIXME( "iface %p, value %p semi-stub.\n", iface, value );
     if (!value) return E_POINTER;
-    *value = core_application_view_create();
+    *value = core_application_view_get();
     return *value ? S_OK : E_OUTOFMEMORY;
 }
 
@@ -368,7 +377,7 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
         return hr;
     }
 
-    if (!(app_view = core_application_view_create()))
+    if (!(app_view = core_application_view_get()))
     {
         IFrameworkView_Release( view );
         return E_OUTOFMEMORY;
