@@ -139,13 +139,23 @@ LONG WINAPI AppPolicyGetShowDeveloperDiagnostic(HANDLE token, AppPolicyShowDevel
 LONG WINAPI AppPolicyGetWindowingModel(HANDLE token, AppPolicyWindowingModel *policy)
 {
     static int once;
+    const WCHAR *pkg = NULL;
+    WCHAR buf[8];
 
     if(!once++)
         FIXME("%p, %p\n", token, policy);
 
-    if(policy)
+    if(!policy)
+        return ERROR_INVALID_PARAMETER;
+
+    /* A packaged app gets the Universal windowing model; classic desktop only
+     * for non-packaged processes. Detect package context via the env marker. */
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", buf, ARRAY_SIZE(buf) ))
+        *policy = AppPolicyWindowingModel_Universal;
+    else
         *policy = AppPolicyWindowingModel_ClassicDesktop;
 
+    (void)pkg;
     return ERROR_SUCCESS;
 }
 
