@@ -124,12 +124,37 @@ typedef struct PACKAGE_ID
 }
 PACKAGE_ID;
 
+typedef struct PACKAGE_INFO
+{
+    UINT32 reserved;
+    UINT32 flags;
+    WCHAR *path;
+    WCHAR *packageFullName;
+    WCHAR *packageFamilyName;
+    PACKAGE_ID packageId;
+}
+PACKAGE_INFO;
+
+#define PACKAGE_FILTER_HEAD                 0x00000010
+#define PACKAGE_FILTER_DIRECT               0x00000020
+#define PACKAGE_FILTER_RESOURCE             0x00000040
+#define PACKAGE_FILTER_BUNDLE               0x00000080
+#define PACKAGE_INFORMATION_BASIC          0x00000000
+#define PACKAGE_INFORMATION_FULL           0x00000100
+
 LONG WINAPI AppPolicyGetMediaFoundationCodecLoading(HANDLE token, AppPolicyMediaFoundationCodecLoading *policy);
 LONG WINAPI AppPolicyGetProcessTerminationMethod(HANDLE token, AppPolicyProcessTerminationMethod *policy);
 LONG WINAPI AppPolicyGetShowDeveloperDiagnostic(HANDLE token, AppPolicyShowDeveloperDiagnostic *policy);
 LONG WINAPI AppPolicyGetThreadInitializationType(HANDLE token, AppPolicyThreadInitializationType *policy);
 LONG WINAPI AppPolicyGetWindowingModel(HANDLE processToken, AppPolicyWindowingModel *policy);
 LONG WINAPI PackageIdFromFullName(const WCHAR *full_name, UINT32 flags, UINT32 *buffer_length, BYTE *buffer);
+LONG WINAPI GetCurrentApplicationUserModelId(UINT32 *length, WCHAR *id);
+LONG WINAPI GetCurrentPackageFamilyName(UINT32 *length, WCHAR *name);
+LONG WINAPI GetCurrentPackageFullName(UINT32 *length, WCHAR *name);
+LONG WINAPI GetCurrentPackageId(UINT32 *length, BYTE *buffer);
+LONG WINAPI GetCurrentPackageInfo(UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count);
+LONG WINAPI GetCurrentPackagePath(UINT32 *length, WCHAR *path);
+LONG WINAPI GetPackagePathByFullName(const WCHAR *full_name, UINT32 *length, WCHAR *path);
 
 #if defined(__cplusplus)
 }

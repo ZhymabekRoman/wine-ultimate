@@ -1547,6 +1547,8 @@ BOOL WINAPI GetVersionExW( OSVERSIONINFOW *info )
 }
 
 static LONG package_str_from_env( const WCHAR *var, UINT32 *length, WCHAR *name );
+LONG WINAPI GetCurrentPackagePath( UINT32 *length, WCHAR *path );
+LONG WINAPI GetPackagePathByFullName( const WCHAR *name, UINT32 *len, WCHAR *path );
 
 /***********************************************************************
  *         GetCurrentApplicationUserModelId   (kernelbase.@)
@@ -1604,22 +1606,88 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, W
 }
 
 
+/* get the current package full name from env into a stack buffer */
+static BOOL get_current_package_full_name( WCHAR *buf, UINT32 cch )
+{
+    UINT32 len = cch;
+    return GetCurrentPackageFullName( &len, buf ) == ERROR_SUCCESS;
+}
+
 /***********************************************************************
  *         GetCurrentPackageId   (kernelbase.@)
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buffer )
 {
-    FIXME( "(%p %p): stub\n", len, buffer );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR full_name[512];
+
+    if (!get_current_package_full_name( full_name, ARRAY_SIZE(full_name) ))
+    {
+        FIXME( "(%p %p): no package\n", len, buffer );
+        return APPMODEL_ERROR_NO_PACKAGE;
+    }
+    return PackageIdFromFullName( full_name, 0, len, buffer );
 }
 
 /***********************************************************************
  *         GetCurrentPackageInfo   (kernelbase.@)
+ *
+ * Build a single PACKAGE_INFO from the current package identity + path. The app
+ * uses this to discover its own package layout; one entry (the package itself).
  */
 LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
 {
-    FIXME( "(%#x %p %p %p): stub\n", flags, buffer_size, buffer, count );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR full_name[512], path[MAX_PATH];
+    UINT32 path_len = ARRAY_SIZE(path);
+    BYTE id_buf[512];
+    UINT32 id_len = sizeof(id_buf);
+    PACKAGE_ID *id = (PACKAGE_ID *)id_buf;
+    PACKAGE_INFO *info;
+    SIZE_T need, name_bytes, path_bytes, str_off;
+    LONG ret;
+
+    if (!buffer_size || !count) return ERROR_INVALID_PARAMETER;
+
+    if (!get_current_package_full_name( full_name, ARRAY_SIZE(full_name) ))
+    {
+        FIXME( "(%#x %p %p %p): no package\n", flags, buffer_size, buffer, count );
+        return APPMODEL_ERROR_NO_PACKAGE;
+    }
+    if ((ret = PackageIdFromFullName( full_name, 0, &id_len, id_buf ))) return ret;
+    if (GetCurrentPackagePath( &path_len, path )) path[0] = 0;
+
+    name_bytes = (wcslen( full_name ) + 1) * sizeof(WCHAR);
+    path_bytes = (wcslen( path ) + 1) * sizeof(WCHAR);
+    str_off    = sizeof(PACKAGE_INFO);
+    /* PACKAGE_INFO embeds a PACKAGE_ID with name/publisher/resource/publisherId
+     * pointers; point them into trailing storage we copy from id_buf. */
+    need = str_off + name_bytes + path_bytes
+         + (id->name ? (wcslen(id->name)+1)*sizeof(WCHAR) : 0)
+         + (id->publisher ? (wcslen(id->publisher)+1)*sizeof(WCHAR) : 0)
+         + (id->resourceId ? (wcslen(id->resourceId)+1)*sizeof(WCHAR) : 0)
+         + (id->publisherId ? (wcslen(id->publisherId)+1)*sizeof(WCHAR) : 0);
+
+    *count = 1;
+    if (*buffer_size < need || !buffer)
+    {
+        *buffer_size = need;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    info = (PACKAGE_INFO *)buffer;
+    memset( info, 0, sizeof(*info) );
+    {
+        BYTE *p = buffer + str_off;
+        info->path = (WCHAR *)p; memcpy( p, path, path_bytes ); p += path_bytes;
+        info->packageFullName = (WCHAR *)p; memcpy( p, full_name, name_bytes ); p += name_bytes;
+        info->packageFamilyName = NULL;
+        info->packageId = *id;
+#define COPYSTR(field) do { if (id->field) { info->packageId.field = (WCHAR *)p; \
+        SIZE_T b=(wcslen(id->field)+1)*sizeof(WCHAR); memcpy(p,id->field,b); p+=b; } } while(0)
+        COPYSTR(name); COPYSTR(publisher); COPYSTR(resourceId); COPYSTR(publisherId);
+#undef COPYSTR
+    }
+    *buffer_size = need;
+    return ERROR_SUCCESS;
 }
 
 /***********************************************************************
@@ -1627,8 +1695,14 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackagePath( UINT32 *length, WCHAR *path )
 {
-    FIXME( "(%p %p): stub\n", length, path );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR full_name[512];
+
+    if (!get_current_package_full_name( full_name, ARRAY_SIZE(full_name) ))
+    {
+        FIXME( "(%p %p): no package\n", length, path );
+        return APPMODEL_ERROR_NO_PACKAGE;
+    }
+    return GetPackagePathByFullName( full_name, length, path );
 }
 
 
@@ -1672,11 +1746,23 @@ LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily(const WCHAR *family_nam
  */
 LONG WINAPI GetPackagePathByFullName(const WCHAR *name, UINT32 *len, WCHAR *path)
 {
+    WCHAR env[MAX_PATH];
+    UINT32 need;
+
     if (!len || !name)
         return ERROR_INVALID_PARAMETER;
 
-    FIXME( "(%s %p %p): stub\n", debugstr_w(name), len, path );
+    /* package install path supplied at launch via WINE_PACKAGE_PATH */
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", env, ARRAY_SIZE(env) ))
+    {
+        need = wcslen( env ) + 1;
+        if (!path || *len < need) { *len = need; return ERROR_INSUFFICIENT_BUFFER; }
+        memcpy( path, env, need * sizeof(WCHAR) );
+        *len = need;
+        return ERROR_SUCCESS;
+    }
 
+    FIXME( "(%s %p %p): no package path\n", debugstr_w(name), len, path );
     return APPMODEL_ERROR_NO_PACKAGE;
 }
 
