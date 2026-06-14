@@ -43,6 +43,7 @@ extern IActivationFactory *uisettings_factory;
 extern IActivationFactory *uiviewsettings_factory;
 extern IActivationFactory *inputpane_factory;
 extern IActivationFactory *corewindow_factory;
+extern __x_ABI_CWindows_CUI_CCore_CICoreWindow *core_window_create(void);
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

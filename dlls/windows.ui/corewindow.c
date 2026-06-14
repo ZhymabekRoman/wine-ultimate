@@ -119,10 +119,10 @@ DEFINE_IINSPECTABLE( corewindow_static, ICoreWindowStatic, struct corewindow_sta
 
 static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWindowStatic *iface, ICoreWindow **windows )
 {
-    FIXME( "iface %p, windows %p stub!\n", iface, windows );
-
-    *windows = NULL;
-    return S_OK;
+    FIXME( "iface %p, windows %p semi-stub.\n", iface, windows );
+    if (!windows) return E_POINTER;
+    *windows = core_window_create();
+    return *windows ? S_OK : E_OUTOFMEMORY;
 }
 
 static const struct ICoreWindowStaticVtbl corewindow_static_vtbl =
@@ -146,3 +146,279 @@ static struct corewindow_statics corewindow_statics =
 };
 
 IActivationFactory *corewindow_factory = &corewindow_statics.IActivationFactory_iface;
+
+/* ---- minimal CoreDispatcher ---- */
+/* The typed-event-handler parameter types differ per event but are ABI-equivalent
+ * (all pointer-sized). Suppress the pointer-type mismatch for these stubs. */
+#if defined(__GNUC__) || defined(__clang__)
+#pragma GCC diagnostic ignored "-Wincompatible-function-pointer-types"
+#endif
+
+struct core_dispatcher
+{
+    ICoreDispatcher ICoreDispatcher_iface;
+    LONG ref;
+};
+
+static inline struct core_dispatcher *impl_from_ICoreDispatcher( ICoreDispatcher *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_dispatcher, ICoreDispatcher_iface );
+}
+
+static HRESULT WINAPI core_dispatcher_QueryInterface( ICoreDispatcher *iface, REFIID iid, void **out )
+{
+    struct core_dispatcher *impl = impl_from_ICoreDispatcher( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ICoreDispatcher ))
+    { ICoreDispatcher_AddRef( &impl->ICoreDispatcher_iface ); *out = &impl->ICoreDispatcher_iface; return S_OK; }
+    FIXME( "%s E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL; return E_NOINTERFACE;
+}
+static ULONG WINAPI core_dispatcher_AddRef( ICoreDispatcher *iface )
+{ return InterlockedIncrement( &impl_from_ICoreDispatcher( iface )->ref ); }
+static ULONG WINAPI core_dispatcher_Release( ICoreDispatcher *iface )
+{
+    struct core_dispatcher *impl = impl_from_ICoreDispatcher( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI core_dispatcher_GetIids( ICoreDispatcher *iface, ULONG *count, IID **iids ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_dispatcher_GetRuntimeClassName( ICoreDispatcher *iface, HSTRING *name ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_dispatcher_GetTrustLevel( ICoreDispatcher *iface, TrustLevel *level ) { FIXME("stub\n"); return E_NOTIMPL; }static HRESULT WINAPI core_dispatcher_get_AutomationProviderDelegate( ICoreDispatcher *iface, IInspectable **value )
+{ FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
+static HRESULT WINAPI core_dispatcher_put_AutomationProviderDelegate( ICoreDispatcher *iface, IInspectable *value )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_dispatcher_AcceleratorKeyActivated_add( ICoreDispatcher *iface, void *handler, EventRegistrationToken *cookie )
+{ FIXME( "stub\n" ); if (cookie) cookie->value = 0; return S_OK; }
+static HRESULT WINAPI core_dispatcher_AcceleratorKeyActivated_remove( ICoreDispatcher *iface, EventRegistrationToken cookie )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_dispatcher_ProcessEvents( ICoreDispatcher *iface, CoreProcessEventsOption options )
+{ FIXME( "iface %p, options %d stub — spinning?\n", iface, options ); return S_OK; }
+static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDispatcherPriority priority,
+        void *agileCallback, IAsyncAction **asyncAction )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI core_dispatcher_RunIdleAsync( ICoreDispatcher *iface, void *agileCallback, IAsyncAction **asyncAction )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI core_dispatcher_HasThreadAccess( ICoreDispatcher *iface, boolean *value )
+{ FIXME( "stub\n" ); if (value) *value = TRUE; return S_OK; }
+static HRESULT WINAPI core_dispatcher_get_CurrentPriority( ICoreDispatcher *iface, CoreDispatcherPriority *value )
+{ FIXME( "stub\n" ); if (value) *value = CoreDispatcherPriority_Normal; return S_OK; }
+static HRESULT WINAPI core_dispatcher_put_CurrentPriority( ICoreDispatcher *iface, CoreDispatcherPriority value )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_dispatcher_StopProcessEvents( ICoreDispatcher *iface )
+{ FIXME( "stub\n" ); return S_OK; }
+
+static const struct ICoreDispatcherVtbl core_dispatcher_vtbl =
+{
+    core_dispatcher_QueryInterface,
+    core_dispatcher_AddRef,
+    core_dispatcher_Release,
+    core_dispatcher_GetIids,
+    core_dispatcher_GetRuntimeClassName,
+    core_dispatcher_GetTrustLevel,
+    core_dispatcher_get_AutomationProviderDelegate,
+    core_dispatcher_put_AutomationProviderDelegate,
+    core_dispatcher_AcceleratorKeyActivated_add,
+    core_dispatcher_AcceleratorKeyActivated_remove,
+    core_dispatcher_ProcessEvents,
+    core_dispatcher_RunAsync,
+    core_dispatcher_RunIdleAsync,
+    core_dispatcher_HasThreadAccess,
+    core_dispatcher_get_CurrentPriority,
+    core_dispatcher_put_CurrentPriority,
+    core_dispatcher_StopProcessEvents,
+};
+
+static ICoreDispatcher *core_dispatcher_create(void)
+{
+    struct core_dispatcher *impl;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->ICoreDispatcher_iface.lpVtbl = &core_dispatcher_vtbl;
+    impl->ref = 1;
+    return &impl->ICoreDispatcher_iface;
+}
+
+/* ---- minimal CoreWindow ---- */
+
+struct core_window
+{
+    ICoreWindow ICoreWindow_iface;
+    ICoreDispatcher *dispatcher;
+    LONG ref;
+};
+
+static inline struct core_window *impl_from_ICoreWindow( ICoreWindow *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_window, ICoreWindow_iface );
+}
+
+static HRESULT WINAPI core_window_QueryInterface( ICoreWindow *iface, REFIID iid, void **out )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ICoreWindow ))
+    { ICoreWindow_AddRef( &impl->ICoreWindow_iface ); *out = &impl->ICoreWindow_iface; return S_OK; }
+    FIXME( "%s E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL; return E_NOINTERFACE;
+}
+static ULONG WINAPI core_window_AddRef( ICoreWindow *iface )
+{ return InterlockedIncrement( &impl_from_ICoreWindow( iface )->ref ); }
+static ULONG WINAPI core_window_Release( ICoreWindow *iface )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->dispatcher) ICoreDispatcher_Release( impl->dispatcher );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI core_window_GetIids( ICoreWindow *iface, ULONG *count, IID **iids ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_window_GetRuntimeClassName( ICoreWindow *iface, HSTRING *name ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_window_GetTrustLevel( ICoreWindow *iface, TrustLevel *level ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_window_get_AutomationHostProvider( ICoreWindow *iface, IInspectable **value )
+{ FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
+static HRESULT WINAPI core_window_get_Bounds( ICoreWindow *iface, Rect *value )
+{ FIXME( "stub\n" ); if (value) memset( value, 0, sizeof(*value) ); return S_OK; }
+static HRESULT WINAPI core_window_get_CustomProperties( ICoreWindow *iface, void **value )
+{ FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
+static HRESULT WINAPI core_window_get_Dispatcher( ICoreWindow *iface, ICoreDispatcher **value )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    FIXME( "iface %p semi-stub.\n", iface );
+    if (value)
+    {
+        if (impl->dispatcher) ICoreDispatcher_AddRef( impl->dispatcher );
+        *value = impl->dispatcher;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI core_window_get_FlowDirection( ICoreWindow *iface, CoreWindowFlowDirection *value )
+{ FIXME( "stub\n" ); if (value) *value = 0; return S_OK; }
+static HRESULT WINAPI core_window_put_FlowDirection( ICoreWindow *iface, CoreWindowFlowDirection value )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_window_get_IsInputEnabled( ICoreWindow *iface, boolean *value )
+{ FIXME( "stub\n" ); if (value) *value = TRUE; return S_OK; }
+static HRESULT WINAPI core_window_put_IsInputEnabled( ICoreWindow *iface, boolean value )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_window_get_PointerCursor( ICoreWindow *iface, ICoreCursor **value )
+{ FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
+static HRESULT WINAPI core_window_put_PointerCursor( ICoreWindow *iface, ICoreCursor *value )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_window_get_PointerPosition( ICoreWindow *iface, Point *value )
+{ FIXME( "stub\n" ); if (value) memset( value, 0, sizeof(*value) ); return S_OK; }
+static HRESULT WINAPI core_window_get_Visible( ICoreWindow *iface, boolean *value )
+{ FIXME( "stub\n" ); if (value) *value = TRUE; return S_OK; }
+static HRESULT WINAPI core_window_Activate( ICoreWindow *iface )
+{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+static HRESULT WINAPI core_window_Close( ICoreWindow *iface )
+{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+static HRESULT WINAPI core_window_GetAsyncKeyState( ICoreWindow *iface, int key, CoreVirtualKeyStates *state )
+{ FIXME( "stub\n" ); if (state) *state = 0; return S_OK; }
+static HRESULT WINAPI core_window_GetKeyState( ICoreWindow *iface, int key, CoreVirtualKeyStates *state )
+{ FIXME( "stub\n" ); if (state) *state = 0; return S_OK; }
+static HRESULT WINAPI core_window_ReleasePointerCapture( ICoreWindow *iface )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_window_SetPointerCapture( ICoreWindow *iface )
+{ FIXME( "stub\n" ); return S_OK; }
+
+/* event add/remove — semi-stub: accept + return token 0 */
+#define CORE_WINDOW_EVENT_ADD(name, argtype) \
+    static HRESULT WINAPI core_window_add_##name( ICoreWindow *iface, \
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_##argtype *handler, EventRegistrationToken *cookie ) \
+    { FIXME( "iface %p semi-stub.\n", iface ); if (cookie) cookie->value = 0; return S_OK; }
+#define CORE_WINDOW_EVENT_REMOVE(name) \
+    static HRESULT WINAPI core_window_remove_##name( ICoreWindow *iface, EventRegistrationToken cookie ) \
+    { FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+
+CORE_WINDOW_EVENT_ADD( Activated, Windows__CUI__CCore__CWindowActivatedEventArgs )
+CORE_WINDOW_EVENT_REMOVE( Activated )
+CORE_WINDOW_EVENT_ADD( AutomationProviderRequested, Windows__CUI__CCore__CAutomationProviderRequestedEventArgs )
+CORE_WINDOW_EVENT_REMOVE( AutomationProviderRequested )
+CORE_WINDOW_EVENT_ADD( CharacterReceived, Windows__CUI__CCore__CCharacterReceivedEventArgs )
+CORE_WINDOW_EVENT_REMOVE( CharacterReceived )
+CORE_WINDOW_EVENT_ADD( Closed, Windows__CUI__CCore__CCoreWindowEventArgs )
+CORE_WINDOW_EVENT_REMOVE( Closed )
+CORE_WINDOW_EVENT_ADD( InputEnabled, Windows__CUI__CCore__CInputEnabledEventArgs )
+CORE_WINDOW_EVENT_REMOVE( InputEnabled )
+CORE_WINDOW_EVENT_ADD( KeyDown, Windows__CUI__CCore__CKeyEventArgs )
+CORE_WINDOW_EVENT_REMOVE( KeyDown )
+CORE_WINDOW_EVENT_ADD( KeyUp, Windows__CUI__CCore__CKeyEventArgs )
+CORE_WINDOW_EVENT_REMOVE( KeyUp )
+CORE_WINDOW_EVENT_ADD( PointerMoved, Windows__CUI__CCore__CPointerEventArgs )
+CORE_WINDOW_EVENT_REMOVE( PointerMoved )
+CORE_WINDOW_EVENT_ADD( PointerPressed, Windows__CUI__CCore__CPointerEventArgs )
+CORE_WINDOW_EVENT_REMOVE( PointerPressed )
+CORE_WINDOW_EVENT_ADD( PointerReleased, Windows__CUI__CCore__CPointerEventArgs )
+CORE_WINDOW_EVENT_REMOVE( PointerReleased )
+CORE_WINDOW_EVENT_ADD( SizeChanged, Windows__CUI__CCore__CWindowSizeChangedEventArgs )
+CORE_WINDOW_EVENT_REMOVE( SizeChanged )
+CORE_WINDOW_EVENT_ADD( VisibilityChanged, Windows__CUI__CCore__CVisibilityChangedEventArgs )
+CORE_WINDOW_EVENT_REMOVE( VisibilityChanged )
+
+static const struct ICoreWindowVtbl core_window_vtbl =
+{
+    core_window_QueryInterface,
+    core_window_AddRef,
+    core_window_Release,
+    core_window_GetIids,
+    core_window_GetRuntimeClassName,
+    core_window_GetTrustLevel,
+    /* ICoreWindow properties */
+    core_window_get_AutomationHostProvider,
+    core_window_get_Bounds,
+    core_window_get_CustomProperties,
+    core_window_get_Dispatcher,
+    core_window_get_FlowDirection,
+    core_window_put_FlowDirection,
+    core_window_get_IsInputEnabled,
+    core_window_put_IsInputEnabled,
+    core_window_get_PointerCursor,
+    core_window_put_PointerCursor,
+    core_window_get_PointerPosition,
+    core_window_get_Visible,
+    core_window_Activate,
+    core_window_Close,
+    core_window_GetAsyncKeyState,
+    core_window_GetKeyState,
+    core_window_ReleasePointerCapture,
+    core_window_SetPointerCapture,
+    /* events */
+    core_window_add_Activated,
+    core_window_remove_Activated,
+    core_window_add_AutomationProviderRequested,
+    core_window_remove_AutomationProviderRequested,
+    core_window_add_CharacterReceived,
+    core_window_remove_CharacterReceived,
+    core_window_add_Closed,
+    core_window_remove_Closed,
+    core_window_add_InputEnabled,
+    core_window_remove_InputEnabled,
+    core_window_add_KeyDown,
+    core_window_remove_KeyDown,
+    core_window_add_KeyUp,
+    core_window_remove_KeyUp,
+    core_window_add_PointerMoved,
+    core_window_remove_PointerMoved,
+    core_window_add_PointerPressed,
+    core_window_remove_PointerPressed,
+    core_window_add_PointerReleased,
+    core_window_remove_PointerReleased,
+    core_window_add_SizeChanged,
+    core_window_remove_SizeChanged,
+    core_window_add_VisibilityChanged,
+    core_window_remove_VisibilityChanged,
+};
+
+/* Create a CoreWindow with its own dispatcher. */
+ICoreWindow *core_window_create(void)
+{
+    struct core_window *impl;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->ICoreWindow_iface.lpVtbl = &core_window_vtbl;
+    impl->dispatcher = core_dispatcher_create();
+    impl->ref = 1;
+    return &impl->ICoreWindow_iface;
+}

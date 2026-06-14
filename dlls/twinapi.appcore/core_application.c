@@ -18,6 +18,9 @@
  */
 
 #include "private.h"
+#include "roapi.h"
+#define WIDL_using_Windows_UI_Core
+#include "windows.ui.core.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 
@@ -345,7 +348,32 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
 
     /* drive the UWP view lifecycle: Initialize -> SetWindow -> Load -> Run */
     hr = IFrameworkView_Initialize( view, app_view );
-    if (SUCCEEDED(hr)) hr = IFrameworkView_SetWindow( view, NULL );
+    if (SUCCEEDED(hr))
+    {
+        /* get a CoreWindow for SetWindow via the WinRT activation factory */
+        IActivationFactory *cwf = NULL;
+        __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic *cws = NULL;
+        __x_ABI_CWindows_CUI_CCore_CICoreWindow *cw = NULL;
+        HSTRING class_id = NULL;
+
+        WindowsCreateString( RuntimeClass_Windows_UI_Core_CoreWindow,
+                             wcslen( RuntimeClass_Windows_UI_Core_CoreWindow ), &class_id );
+        if (SUCCEEDED(RoGetActivationFactory( class_id, &IID_IActivationFactory, (void **)&cwf )) && cwf)
+        {
+            IActivationFactory_QueryInterface( cwf, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowStatic,
+                                               (void **)&cws );
+            if (cws)
+            {
+                __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_GetForCurrentThread( cws, &cw );
+                __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_Release( cws );
+            }
+            IActivationFactory_Release( cwf );
+        }
+        WindowsDeleteString( class_id );
+
+        hr = IFrameworkView_SetWindow( view, cw );
+        if (cw) __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( cw );
+    }
     if (SUCCEEDED(hr)) hr = IFrameworkView_Load( view, NULL );
     if (SUCCEEDED(hr)) hr = IFrameworkView_Run( view );
     IFrameworkView_Uninitialize( view );
