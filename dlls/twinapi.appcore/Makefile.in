@@ -9,5 +9,6 @@ SOURCES = \
 	classes.idl \
 	client_device_information.c \
 	core_application.c \
+	static_lifetime_map.c \
 	data_transfer.c \
 	main.c

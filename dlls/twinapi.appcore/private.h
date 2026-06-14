@@ -90,3 +90,5 @@ extern IActivationFactory *data_transfer_manager_statics_factory;
     }
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
+
+extern HRESULT static_lifetime_map_create( __FIMap_2_HSTRING_IInspectable **out );

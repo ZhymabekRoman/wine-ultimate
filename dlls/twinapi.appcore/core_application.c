@@ -24,10 +24,31 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 
+/* C++/WinRT static-lifetime helper: get_activation_factory<IStaticLifetime>(class)
+ * then GetCollection() returns a process-wide IMap<HSTRING,IInspectable> used to
+ * cache static instances tied to the CoreApplication lifetime. WhatsApp/FrameworkUdk
+ * hard-requires this on the CoreApplication factory; without it XAML fail-fasts. */
+static const GUID IID_IStaticLifetime = {0x17b0e613,0x942a,0x422d,{0x90,0x4c,0xf9,0x0d,0xc7,0x1a,0x7d,0xae}};
+
+typedef struct IStaticLifetime IStaticLifetime;
+typedef struct IStaticLifetimeVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IStaticLifetime *, REFIID, void ** );
+    ULONG   (STDMETHODCALLTYPE *AddRef)( IStaticLifetime * );
+    ULONG   (STDMETHODCALLTYPE *Release)( IStaticLifetime * );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IStaticLifetime *, ULONG *, IID ** );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IStaticLifetime *, HSTRING * );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IStaticLifetime *, TrustLevel * );
+    HRESULT (STDMETHODCALLTYPE *GetCollection)( IStaticLifetime *, __FIMap_2_HSTRING_IInspectable ** );
+} IStaticLifetimeVtbl;
+struct IStaticLifetime { const IStaticLifetimeVtbl *lpVtbl; };
+
 struct factory
 {
     IActivationFactory IActivationFactory_iface;
     ICoreApplication ICoreApplication_iface;
+    IStaticLifetime IStaticLifetime_iface;
+    __FIMap_2_HSTRING_IInspectable *static_map;
     LONG ref;
 };
 
@@ -61,6 +82,13 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
     {
         IActivationFactory_AddRef( &impl->IActivationFactory_iface );
         *out = &impl->ICoreApplication_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IStaticLifetime ))
+    {
+        IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+        *out = &impl->IStaticLifetime_iface;
         return S_OK;
     }
 
@@ -411,10 +439,78 @@ static const struct ICoreApplicationVtbl core_application_vtbl =
     core_application_RunWithActivationFactories,
 };
 
+/* ---- IStaticLifetime: GetCollection returns a process-wide IMap<HSTRING,IInspectable> ---- */
+
+static inline struct factory *impl_from_IStaticLifetime( IStaticLifetime *iface )
+{
+    return CONTAINING_RECORD( iface, struct factory, IStaticLifetime_iface );
+}
+
+static HRESULT STDMETHODCALLTYPE static_lifetime_QueryInterface( IStaticLifetime *iface, REFIID iid, void **out )
+{
+    struct factory *impl = impl_from_IStaticLifetime( iface );
+    return IActivationFactory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+static ULONG STDMETHODCALLTYPE static_lifetime_AddRef( IStaticLifetime *iface )
+{
+    struct factory *impl = impl_from_IStaticLifetime( iface );
+    return IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+}
+static ULONG STDMETHODCALLTYPE static_lifetime_Release( IStaticLifetime *iface )
+{
+    struct factory *impl = impl_from_IStaticLifetime( iface );
+    return IActivationFactory_Release( &impl->IActivationFactory_iface );
+}
+static HRESULT STDMETHODCALLTYPE static_lifetime_GetIids( IStaticLifetime *iface, ULONG *count, IID **iids )
+{
+    FIXME( "iface %p stub!\n", iface );
+    return E_NOTIMPL;
+}
+static HRESULT STDMETHODCALLTYPE static_lifetime_GetRuntimeClassName( IStaticLifetime *iface, HSTRING *name )
+{
+    FIXME( "iface %p stub!\n", iface );
+    return E_NOTIMPL;
+}
+static HRESULT STDMETHODCALLTYPE static_lifetime_GetTrustLevel( IStaticLifetime *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT STDMETHODCALLTYPE static_lifetime_GetCollection( IStaticLifetime *iface,
+        __FIMap_2_HSTRING_IInspectable **value )
+{
+    struct factory *impl = impl_from_IStaticLifetime( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+
+    if (!impl->static_map)
+    {
+        HRESULT hr = static_lifetime_map_create( &impl->static_map );
+        if (FAILED(hr)) { *value = NULL; return hr; }
+    }
+    __FIMap_2_HSTRING_IInspectable_AddRef( impl->static_map );
+    *value = impl->static_map;
+    return S_OK;
+}
+
+static const IStaticLifetimeVtbl static_lifetime_vtbl =
+{
+    static_lifetime_QueryInterface,
+    static_lifetime_AddRef,
+    static_lifetime_Release,
+    static_lifetime_GetIids,
+    static_lifetime_GetRuntimeClassName,
+    static_lifetime_GetTrustLevel,
+    static_lifetime_GetCollection,
+};
+
 static struct factory factory =
 {
     {&activation_factory_vtbl},
     {&core_application_vtbl},
+    {&static_lifetime_vtbl},
+    NULL,
     1,
 };
 
