@@ -393,10 +393,30 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
     ICoreApplicationView *app_view;
     IFrameworkView *view;
     HRESULT hr;
+    HMODULE cm;
 
     FIXME( "iface %p, view_source %p semi-stub.\n", iface, view_source );
 
     if (!view_source) return E_INVALIDARG;
+
+    /* Create the DispatcherQueue BEFORE FrameworkView.Initialize — the real
+     * CoreApplication.Run does this. The DispatcherQueue drives the composition
+     * tick (CCoreServices::Tick → DCompTreeHost → CreateConversationHost) that
+     * creates the CoreUI ConversationServer (the dispatch handler at endpoint+0x58).
+     * Without it the first CoreUI message dispatches against an empty table → AV. */
+    if ((cm = GetModuleHandleW( L"CoreMessagingXP.dll" )))
+    {
+        HRESULT (WINAPI *p_create_dqc)(void *, IInspectable **) =
+            (void *)GetProcAddress( cm, "WinUICreateDispatcherQueueController" );
+        if (p_create_dqc)
+        {
+            /* DispatcherQueueOptions { dwSize=12, threadType=1(CURRENT_THREAD), apartment=2(MTA) } */
+            struct { DWORD dwSize; DWORD threadType; DWORD apartment; } opts = { 12, 1, 2 };
+            IInspectable *dqc = NULL;
+            HRESULT dqhr = p_create_dqc( &opts, &dqc );
+            FIXME( "DispatcherQueueController hr=%#lx obj=%p\n", dqhr, dqc );
+        }
+    }
 
     if (FAILED(hr = IFrameworkViewSource_CreateView( view_source, &view )))
     {
