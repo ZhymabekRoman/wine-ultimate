@@ -1,6 +1,6 @@
 /* Minimal IMap<HSTRING, IInspectable> for CoreApplication's IStaticLifetime.
  *
- * Copyright 2026 for CodeWeavers
+ * Copyright 2026 Zhymabek Roman
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Lesser General Public
