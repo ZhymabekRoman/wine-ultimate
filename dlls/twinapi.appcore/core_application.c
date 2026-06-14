@@ -31,6 +31,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 static const GUID IID_IStaticLifetime = {0x17b0e613,0x942a,0x422d,{0x90,0x4c,0xf9,0x0d,0xc7,0x1a,0x7d,0xae}};
 
 typedef struct IStaticLifetime IStaticLifetime;
+/* IStaticLifetime (17b0e613) is an IInspectable-derived interface with several
+ * methods. FrameworkUdk's FinalUnhandledErrorDetected_RegisterHandler_Impl calls
+ * vtable SLOT 11 (offset 0x58) directly: HRESULT(this, ptr, ptr). The other
+ * method slots (6..10, 12+) are unknown; stub them all to succeed so the slot-11
+ * call lands on a valid no-op instead of reading past the vtable. */
 typedef struct IStaticLifetimeVtbl
 {
     HRESULT (STDMETHODCALLTYPE *QueryInterface)( IStaticLifetime *, REFIID, void ** );
@@ -39,7 +44,13 @@ typedef struct IStaticLifetimeVtbl
     HRESULT (STDMETHODCALLTYPE *GetIids)( IStaticLifetime *, ULONG *, IID ** );
     HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IStaticLifetime *, HSTRING * );
     HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IStaticLifetime *, TrustLevel * );
-    HRESULT (STDMETHODCALLTYPE *GetCollection)( IStaticLifetime *, __FIMap_2_HSTRING_IInspectable ** );
+    HRESULT (STDMETHODCALLTYPE *GetCollection)( IStaticLifetime *, __FIMap_2_HSTRING_IInspectable ** ); /* slot 6 */
+    HRESULT (STDMETHODCALLTYPE *method7)( IStaticLifetime *, void *, void *, void * );
+    HRESULT (STDMETHODCALLTYPE *method8)( IStaticLifetime *, void *, void *, void * );
+    HRESULT (STDMETHODCALLTYPE *method9)( IStaticLifetime *, void *, void *, void * );
+    HRESULT (STDMETHODCALLTYPE *method10)( IStaticLifetime *, void *, void *, void * );
+    HRESULT (STDMETHODCALLTYPE *method11)( IStaticLifetime *, void *, void *, void * ); /* slot 11 — called by FrameworkUdk */
+    HRESULT (STDMETHODCALLTYPE *method12)( IStaticLifetime *, void *, void *, void * );
 } IStaticLifetimeVtbl;
 struct IStaticLifetime { const IStaticLifetimeVtbl *lpVtbl; };
 
@@ -47,6 +58,7 @@ struct factory
 {
     IActivationFactory IActivationFactory_iface;
     ICoreApplication ICoreApplication_iface;
+    ICoreApplication2 ICoreApplication2_iface;
     ICoreApplicationUnhandledError ICoreApplicationUnhandledError_iface;
     IStaticLifetime IStaticLifetime_iface;
     __FIMap_2_HSTRING_IInspectable *static_map;
@@ -83,6 +95,13 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
     {
         IActivationFactory_AddRef( &impl->IActivationFactory_iface );
         *out = &impl->ICoreApplication_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ICoreApplication2 ))
+    {
+        IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+        *out = &impl->ICoreApplication2_iface;
         return S_OK;
     }
 
@@ -511,6 +530,22 @@ static HRESULT STDMETHODCALLTYPE static_lifetime_GetCollection( IStaticLifetime 
     return S_OK;
 }
 
+/* Unknown IStaticLifetime methods 7..12 — no-op success. FrameworkUdk's
+ * FinalUnhandledErrorDetected_RegisterHandler_Impl calls slot 11; returning S_OK
+ * avoids the check_hresult throw + fail-fast. */
+static HRESULT STDMETHODCALLTYPE static_lifetime_method7( IStaticLifetime *iface, void *a, void *b, void *c )
+{ FIXME( "iface %p (slot7) semi-stub.\n", iface ); return S_OK; }
+static HRESULT STDMETHODCALLTYPE static_lifetime_method8( IStaticLifetime *iface, void *a, void *b, void *c )
+{ FIXME( "iface %p (slot8) semi-stub.\n", iface ); return S_OK; }
+static HRESULT STDMETHODCALLTYPE static_lifetime_method9( IStaticLifetime *iface, void *a, void *b, void *c )
+{ FIXME( "iface %p (slot9) semi-stub.\n", iface ); return S_OK; }
+static HRESULT STDMETHODCALLTYPE static_lifetime_method10( IStaticLifetime *iface, void *a, void *b, void *c )
+{ FIXME( "iface %p (slot10) semi-stub.\n", iface ); return S_OK; }
+static HRESULT STDMETHODCALLTYPE static_lifetime_method11( IStaticLifetime *iface, void *a, void *b, void *c )
+{ FIXME( "iface %p (slot11) a=%p b=%p c=%p semi-stub.\n", iface, a, b, c ); return S_OK; }
+static HRESULT STDMETHODCALLTYPE static_lifetime_method12( IStaticLifetime *iface, void *a, void *b, void *c )
+{ FIXME( "iface %p (slot12) semi-stub.\n", iface ); return S_OK; }
+
 static const IStaticLifetimeVtbl static_lifetime_vtbl =
 {
     static_lifetime_QueryInterface,
@@ -520,6 +555,12 @@ static const IStaticLifetimeVtbl static_lifetime_vtbl =
     static_lifetime_GetRuntimeClassName,
     static_lifetime_GetTrustLevel,
     static_lifetime_GetCollection,
+    static_lifetime_method7,
+    static_lifetime_method8,
+    static_lifetime_method9,
+    static_lifetime_method10,
+    static_lifetime_method11,
+    static_lifetime_method12,
 };
 
 /* ---- ICoreApplicationUnhandledError: UnhandledErrorDetected event (semi-stub) ----
@@ -589,10 +630,71 @@ static const struct ICoreApplicationUnhandledErrorVtbl unhandled_error_vtbl =
     unhandled_error_remove_UnhandledErrorDetected,
 };
 
+/* ---- ICoreApplication2: background/prelaunch events (semi-stub) ----
+ * XAML's FrameworkView::Initialize QIs CoreApplication for ICoreApplication2;
+ * E_NOINTERFACE here makes it fail-fast. */
+static inline struct factory *impl_from_ICoreApplication2( ICoreApplication2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct factory, ICoreApplication2_iface );
+}
+static HRESULT WINAPI core_application2_QueryInterface( ICoreApplication2 *iface, REFIID iid, void **out )
+{
+    return IActivationFactory_QueryInterface( &impl_from_ICoreApplication2( iface )->IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI core_application2_AddRef( ICoreApplication2 *iface )
+{
+    return IActivationFactory_AddRef( &impl_from_ICoreApplication2( iface )->IActivationFactory_iface );
+}
+static ULONG WINAPI core_application2_Release( ICoreApplication2 *iface )
+{
+    return IActivationFactory_Release( &impl_from_ICoreApplication2( iface )->IActivationFactory_iface );
+}
+static HRESULT WINAPI core_application2_GetIids( ICoreApplication2 *iface, ULONG *count, IID **iids )
+{ FIXME( "iface %p stub!\n", iface ); return E_NOTIMPL; }
+static HRESULT WINAPI core_application2_GetRuntimeClassName( ICoreApplication2 *iface, HSTRING *name )
+{ FIXME( "iface %p stub!\n", iface ); return E_NOTIMPL; }
+static HRESULT WINAPI core_application2_GetTrustLevel( ICoreApplication2 *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI core_application2_add_BackgroundActivated( ICoreApplication2 *iface,
+        __FIEventHandler_1_Windows__CApplicationModel__CActivation__CBackgroundActivatedEventArgs *handler, EventRegistrationToken *token )
+{ FIXME( "iface %p semi-stub.\n", iface ); if (token) token->value = 0; return S_OK; }
+static HRESULT WINAPI core_application2_remove_BackgroundActivated( ICoreApplication2 *iface, EventRegistrationToken token )
+{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+static HRESULT WINAPI core_application2_add_LeavingBackground( ICoreApplication2 *iface,
+        __FIEventHandler_1_Windows__CApplicationModel__CLeavingBackgroundEventArgs *handler, EventRegistrationToken *token )
+{ FIXME( "iface %p semi-stub.\n", iface ); if (token) token->value = 0; return S_OK; }
+static HRESULT WINAPI core_application2_remove_LeavingBackground( ICoreApplication2 *iface, EventRegistrationToken token )
+{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+static HRESULT WINAPI core_application2_add_EnteredBackground( ICoreApplication2 *iface,
+        __FIEventHandler_1_Windows__CApplicationModel__CEnteredBackgroundEventArgs *handler, EventRegistrationToken *token )
+{ FIXME( "iface %p semi-stub.\n", iface ); if (token) token->value = 0; return S_OK; }
+static HRESULT WINAPI core_application2_remove_EnteredBackground( ICoreApplication2 *iface, EventRegistrationToken token )
+{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+static HRESULT WINAPI core_application2_EnablePrelaunch( ICoreApplication2 *iface, boolean value )
+{ FIXME( "iface %p, value %d semi-stub.\n", iface, value ); return S_OK; }
+
+static const struct ICoreApplication2Vtbl core_application2_vtbl =
+{
+    core_application2_QueryInterface,
+    core_application2_AddRef,
+    core_application2_Release,
+    core_application2_GetIids,
+    core_application2_GetRuntimeClassName,
+    core_application2_GetTrustLevel,
+    core_application2_add_BackgroundActivated,
+    core_application2_remove_BackgroundActivated,
+    core_application2_add_LeavingBackground,
+    core_application2_remove_LeavingBackground,
+    core_application2_add_EnteredBackground,
+    core_application2_remove_EnteredBackground,
+    core_application2_EnablePrelaunch,
+};
+
 static struct factory factory =
 {
     {&activation_factory_vtbl},
     {&core_application_vtbl},
+    {&core_application2_vtbl},
     {&unhandled_error_vtbl},
     {&static_lifetime_vtbl},
     NULL,
