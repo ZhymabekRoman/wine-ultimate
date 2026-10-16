@@ -51,6 +51,7 @@ extern IActivationFactory *client_device_information_factory;
 extern IActivationFactory *analytics_info_factory;
 extern IActivationFactory *advertising_manager_factory;
 extern IActivationFactory *core_application_factory;
+extern IActivationFactory *app_instance_factory;
 extern IActivationFactory *data_transfer_manager_statics_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \

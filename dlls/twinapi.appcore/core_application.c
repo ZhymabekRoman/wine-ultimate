@@ -835,3 +835,168 @@ static struct factory factory =
 };
 
 IActivationFactory *core_application_factory = &factory.IActivationFactory_iface;
+
+/* ---- Windows.ApplicationModel.AppInstance ---- */
+
+static const GUID IID_IAppInstanceStatics = {0x9d11e77f, 0x9ea6, 0x47af, {0xa6, 0xec, 0x46, 0x78, 0x4c, 0x5b, 0xa2, 0x54}};
+
+struct app_instance_statics
+{
+    IActivationFactory IActivationFactory_iface;
+    IInspectable IAppInstanceStatics_iface;
+    LONG ref;
+};
+
+static inline struct app_instance_statics *impl_from_IActivationFactory_app_instance( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct app_instance_statics, IActivationFactory_iface );
+}
+
+static inline struct app_instance_statics *impl_from_IAppInstanceStatics( IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct app_instance_statics, IAppInstanceStatics_iface );
+}
+
+static HRESULT WINAPI app_instance_statics_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct app_instance_statics *impl = impl_from_IAppInstanceStatics( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAppInstanceStatics ))
+    {
+        *out = &impl->IAppInstanceStatics_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI app_instance_statics_AddRef( IInspectable *iface )
+{
+    struct app_instance_statics *impl = impl_from_IAppInstanceStatics( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_instance_statics_Release( IInspectable *iface )
+{
+    struct app_instance_statics *impl = impl_from_IAppInstanceStatics( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+static HRESULT WINAPI app_instance_statics_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI app_instance_statics_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI app_instance_statics_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI app_instance_statics_get_RecommendedInstance( IInspectable *iface, IInspectable **value )
+{
+    FIXME( "iface %p, value %p semi-stub.\n", iface, value );
+    if (value) *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI app_instance_statics_GetInstances( IInspectable *iface, IInspectable **value )
+{
+    FIXME( "iface %p, value %p semi-stub.\n", iface, value );
+    if (value) *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI app_instance_statics_FindOrRegisterInstanceForKey( IInspectable *iface, HSTRING key, IInspectable **result )
+{
+    FIXME( "iface %p, key %s, result %p semi-stub.\n", iface, debugstr_hstring( key ), result );
+    if (result) *result = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI app_instance_statics_Unregister( IInspectable *iface )
+{
+    FIXME( "iface %p semi-stub.\n", iface );
+    return S_OK;
+}
+static HRESULT WINAPI app_instance_statics_GetActivatedEventArgs( IInspectable *iface, IInspectable **result )
+{
+    TRACE( "iface %p, result %p\n", iface, result );
+    if (!result) return E_POINTER;
+    *result = (IInspectable *)activated_event_args_create( 0 /* ActivationKind_Launch */ );
+    return *result ? S_OK : E_OUTOFMEMORY;
+}
+
+static const void *app_instance_statics_vtbl[] =
+{
+    app_instance_statics_QueryInterface,
+    app_instance_statics_AddRef,
+    app_instance_statics_Release,
+    app_instance_statics_GetIids,
+    app_instance_statics_GetRuntimeClassName,
+    app_instance_statics_GetTrustLevel,
+    app_instance_statics_get_RecommendedInstance,
+    app_instance_statics_GetInstances,
+    app_instance_statics_FindOrRegisterInstanceForKey,
+    app_instance_statics_Unregister,
+    app_instance_statics_GetActivatedEventArgs,
+};
+
+static HRESULT WINAPI app_instance_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct app_instance_statics *impl = impl_from_IActivationFactory_app_instance( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &impl->IActivationFactory_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAppInstanceStatics ))
+    {
+        *out = &impl->IAppInstanceStatics_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI app_instance_factory_AddRef( IActivationFactory *iface )
+{
+    struct app_instance_statics *impl = impl_from_IActivationFactory_app_instance( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI app_instance_factory_Release( IActivationFactory *iface )
+{
+    struct app_instance_statics *impl = impl_from_IActivationFactory_app_instance( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+static HRESULT WINAPI app_instance_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI app_instance_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI app_instance_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI app_instance_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    FIXME( "iface %p, instance %p stub!\n", iface, instance );
+    return E_NOTIMPL;
+}
+
+static const struct IActivationFactoryVtbl app_instance_factory_vtbl =
+{
+    app_instance_factory_QueryInterface,
+    app_instance_factory_AddRef,
+    app_instance_factory_Release,
+    app_instance_factory_GetIids,
+    app_instance_factory_GetRuntimeClassName,
+    app_instance_factory_GetTrustLevel,
+    app_instance_factory_ActivateInstance,
+};
+
+static struct app_instance_statics app_instance_statics_obj =
+{
+    {&app_instance_factory_vtbl},
+    {(IInspectableVtbl *)app_instance_statics_vtbl},
+    1,
+};
+
+IActivationFactory *app_instance_factory = &app_instance_statics_obj.IActivationFactory_iface;
+
