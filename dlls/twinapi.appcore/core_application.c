@@ -240,9 +240,29 @@ static HRESULT WINAPI core_application_view_GetTrustLevel( ICoreApplicationView 
 }
 static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView *iface, __x_ABI_CWindows_CUI_CCore_CICoreWindow **value )
 {
-    FIXME( "iface %p, value %p semi-stub.\n", iface, value );
-    if (value) *value = NULL;
-    return S_OK;
+    IActivationFactory *cwf = NULL;
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic *cws = NULL;
+    HSTRING class_id = NULL;
+    HRESULT hr = S_OK;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+
+    WindowsCreateString( RuntimeClass_Windows_UI_Core_CoreWindow,
+                         wcslen( RuntimeClass_Windows_UI_Core_CoreWindow ), &class_id );
+    if (SUCCEEDED(RoGetActivationFactory( class_id, &IID_IActivationFactory, (void **)&cwf )) && cwf)
+    {
+        IActivationFactory_QueryInterface( cwf, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowStatic,
+                                           (void **)&cws );
+        if (cws)
+        {
+            hr = __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_GetForCurrentThread( cws, value );
+            __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_Release( cws );
+        }
+        IActivationFactory_Release( cwf );
+    }
+    WindowsDeleteString( class_id );
+    return hr;
 }
 struct activated_event_args
 {
@@ -262,7 +282,8 @@ static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApp
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID___x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs ))
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs ) ||
+        !memcmp( iid, "\x26\x3e\xc9\xfb\x4a\xa1\x4f\x4b\x82\xb0\x33\xbe\xd9\x20\xaf\x52", 16 ))
     {
         InterlockedIncrement( &impl->ref );
         *out = &impl->IActivatedEventArgs_iface;
@@ -476,9 +497,29 @@ static HRESULT WINAPI core_application_remove_Resuming( ICoreApplication *iface,
 
 static HRESULT WINAPI core_application_get_Properties( ICoreApplication *iface, IPropertySet **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    if (value) *value = NULL;
-    return E_NOTIMPL;
+    static IPropertySet *properties;
+    HSTRING class_id;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    if (properties)
+    {
+        *value = properties;
+        IPropertySet_AddRef( properties );
+        return S_OK;
+    }
+
+    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
+    WindowsCreateString( name, wcslen(name), &class_id );
+    hr = RoActivateInstance( class_id, (IInspectable **)&properties );
+    WindowsDeleteString( class_id );
+    if (SUCCEEDED(hr))
+    {
+        *value = properties;
+        IPropertySet_AddRef( properties );
+    }
+    return hr;
 }
 
 static HRESULT WINAPI core_application_GetCurrentView( ICoreApplication *iface, ICoreApplicationView **value )
@@ -505,14 +546,15 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
      * tick (CCoreServices::Tick → DCompTreeHost → CreateConversationHost) that
      * creates the CoreUI ConversationServer (the dispatch handler at endpoint+0x58).
      * Without it the first CoreUI message dispatches against an empty table → AV. */
-    if ((cm = GetModuleHandleW( L"CoreMessagingXP.dll" )))
+    /* Do not block on DispatcherQueueController in UWP CoreApplication.Run */
+    if (0 && (cm = GetModuleHandleW( L"CoreMessagingXP.dll" )))
     {
         HRESULT (WINAPI *p_create_dqc)(void *, IInspectable **) =
             (void *)GetProcAddress( cm, "WinUICreateDispatcherQueueController" );
         if (p_create_dqc)
         {
-            /* DispatcherQueueOptions { dwSize=12, threadType=1(CURRENT_THREAD), apartment=2(MTA) } */
-            struct { DWORD dwSize; DWORD threadType; DWORD apartment; } opts = { 12, 1, 2 };
+            /* DispatcherQueueOptions { dwSize=12, threadType=2(CURRENT_THREAD), apartment=2(MTA) } */
+            struct { DWORD dwSize; DWORD threadType; DWORD apartment; } opts = { 12, 2, 2 };
             IInspectable *dqc = NULL;
             HRESULT dqhr = p_create_dqc( &opts, &dqc );
             FIXME( "DispatcherQueueController hr=%#lx obj=%p\n", dqhr, dqc );

@@ -1647,6 +1647,10 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
         return NtContinue( context, FALSE );
 
+    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION && context)
+        ERR_(seh)("FIRST_CHANCE_AV addr %p rip=%p rsp=%p\n",
+                  rec->ExceptionAddress, (void *)context->Rip, (void *)context->Rsp);
+
     if (first_chance) return call_user_exception_dispatcher( data, rec, context );
 
     if (rec->ExceptionFlags & EXCEPTION_STACK_INVALID)
@@ -1654,8 +1658,19 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
     else if (rec->ExceptionCode == STATUS_NONCONTINUABLE_EXCEPTION)
         ERR_(seh)("Process attempted to continue execution after noncontinuable exception.\n");
     else
+    {
         ERR_(seh)("Unhandled exception code %x flags %x addr %p\n",
                   rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress );
+        if (rec->ExceptionCode == 0xe0464645 && context)
+        {
+            ULONG64 *sp = (ULONG64 *)context->Rsp;
+            int i;
+            for (i = 0; i < 32; i++)
+            {
+                ERR_(seh)("  failfast_stack[%02d] (%p) = %016llx\n", i, sp + i, sp[i]);
+            }
+        }
+    }
 
     NtTerminateProcess( NtCurrentProcess(), rec->ExceptionCode );
     return STATUS_SUCCESS;

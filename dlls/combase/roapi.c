@@ -431,9 +431,26 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
 /***********************************************************************
  *      RoFailFastWithErrorContextInternal2 (combase.@)
  */
-void WINAPI RoFailFastWithErrorContextInternal2(HRESULT error, ULONG exception_count, /* PSTOWED_EXCEPTION_INFORMATION_V2 */void *information)
+void WINAPI RoFailFastWithErrorContextInternal2(HRESULT error, ULONG exception_count, void *information)
 {
+    ULONG i;
     FIXME("%#lx, %lu, %p stub.\n", error, exception_count, information);
+    if (information && exception_count)
+    {
+        void **ptrs = (void **)information;
+        for (i = 0; i < exception_count; i++)
+        {
+            void *p = ptrs[i];
+            if (p)
+            {
+                ULONG *u = (ULONG *)p;
+                WCHAR *desc;
+                FIXME("  stowed[%lu]: sig=%#lx hr=%#lx\n", i, u[0], u[2]);
+                desc = *(WCHAR **)((char *)p + 0x38);
+                if (desc) FIXME("  stowed[%lu] desc: %s\n", i, wine_dbgstr_w(desc));
+            }
+        }
+    }
     RaiseFailFastException(NULL, NULL, 0);
 }
 
@@ -534,7 +551,7 @@ BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
  */
 BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
 {
-    FIXME("%#lx, %u, %p: stub\n", error, max_len, message);
+    FIXME("%#lx, %u, %s: stub\n", error, max_len, wine_dbgstr_wn(message, max_len));
     return FALSE;
 }
 

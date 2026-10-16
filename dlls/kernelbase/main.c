@@ -140,7 +140,7 @@ LONG WINAPI AppPolicyGetWindowingModel(HANDLE token, AppPolicyWindowingModel *po
 {
     static int once;
     const WCHAR *pkg = NULL;
-    WCHAR buf[8];
+    WCHAR buf[32];
 
     if(!once++)
         FIXME("%p, %p\n", token, policy);
@@ -156,6 +156,7 @@ LONG WINAPI AppPolicyGetWindowingModel(HANDLE token, AppPolicyWindowingModel *po
     else
         *policy = AppPolicyWindowingModel_ClassicDesktop;
 
+    FIXME("token %p, policy %p -> windowing model %d\n", token, policy, *policy);
     (void)pkg;
     return ERROR_SUCCESS;
 }

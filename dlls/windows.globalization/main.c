@@ -1045,15 +1045,16 @@ DEFINE_IINSPECTABLE(application_languages_statics, IApplicationLanguagesStatics,
 static HRESULT STDMETHODCALLTYPE application_languages_statics_get_PrimaryLanguageOverride(
         IApplicationLanguagesStatics *iface, HSTRING *value)
 {
-    FIXME("iface %p, value %p stub!\n", iface, value);
-    return E_NOTIMPL;
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    return WindowsCreateString(L"", 0, value);
 }
 
 static HRESULT STDMETHODCALLTYPE application_languages_statics_put_PrimaryLanguageOverride(
         IApplicationLanguagesStatics *iface, HSTRING value)
 {
-    FIXME("iface %p, value %s stub!\n", iface, wine_dbgstr_hstring(value));
-    return E_NOTIMPL;
+    FIXME("iface %p, value %s semi-stub!\n", iface, wine_dbgstr_hstring(value));
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE application_languages_statics_get_Languages(

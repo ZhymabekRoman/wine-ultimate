@@ -69,6 +69,14 @@ HRESULT WINAPI GetActivationFactoryByPCWSTR(const WCHAR *name, const GUID *iid, 
     return RoGetActivationFactory(str, iid, out);
 }
 
+HRESULT WINAPI Platform_Details_GetActivationFactory(void *module, HSTRING class_id, IActivationFactory **factory)
+{
+    TRACE("(%p, %s, %p)\n", module, debugstr_hstring(class_id), factory);
+    if (!factory) return E_POINTER;
+    *factory = NULL;
+    return RoGetActivationFactory(class_id, &IID_IActivationFactory, (void **)factory);
+}
+
 HRESULT WINAPI GetIidsFn(unsigned int count, unsigned int *copied, const GUID *src, GUID **dest)
 {
     TRACE("(%u, %p, %p, %p)\n", count, copied, src, dest);

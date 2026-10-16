@@ -26,8 +26,10 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winstring.h"
+#include "shlobj.h"
 
 #include "activation.h"
+#include "roapi.h"
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections

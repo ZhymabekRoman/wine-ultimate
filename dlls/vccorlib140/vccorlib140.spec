@@ -70,9 +70,9 @@
 @ cdecl -arch=win64 ?Free@Heap@Details@Platform@@SAXPEAX@Z(ptr) Free
 @ cdecl -arch=win32 ?FreeException@Heap@Details@Platform@@SAXPAX@Z(ptr) FreeException
 @ cdecl -arch=win64 ?FreeException@Heap@Details@Platform@@SAXPEAX@Z(ptr) FreeException
-@ stub -arch=i386 ?GetActivationFactory@Details@Platform@@YGJPAVModuleBase@1WRL@Microsoft@@PAUHSTRING__@@PAPAUIActivationFactory@@@Z
-@ stub -arch=arm ?GetActivationFactory@Details@Platform@@YAJPAVModuleBase@1WRL@Microsoft@@PAUHSTRING__@@PAPAUIActivationFactory@@@Z
-@ stub -arch=win64 ?GetActivationFactory@Details@Platform@@YAJPEAVModuleBase@1WRL@Microsoft@@PEAUHSTRING__@@PEAPEAUIActivationFactory@@@Z
+@ stdcall -arch=i386 ?GetActivationFactory@Details@Platform@@YGJPAVModuleBase@1WRL@Microsoft@@PAUHSTRING__@@PAPAUIActivationFactory@@@Z(ptr ptr ptr) Platform_Details_GetActivationFactory
+@ stdcall -arch=arm ?GetActivationFactory@Details@Platform@@YAJPAVModuleBase@1WRL@Microsoft@@PAUHSTRING__@@PAPAUIActivationFactory@@@Z(ptr ptr ptr) Platform_Details_GetActivationFactory
+@ stdcall -arch=win64 ?GetActivationFactory@Details@Platform@@YAJPEAVModuleBase@1WRL@Microsoft@@PEAUHSTRING__@@PEAPEAUIActivationFactory@@@Z(ptr ptr ptr) Platform_Details_GetActivationFactory
 @ stdcall -arch=i386 ?GetActivationFactoryByPCWSTR@@YGJPAXAAVGuid@Platform@@PAPAX@Z(wstr ptr ptr) GetActivationFactoryByPCWSTR
 @ stdcall -arch=arm ?GetActivationFactoryByPCWSTR@@YAJPAXAAVGuid@Platform@@PAPAX@Z(wstr ptr ptr) GetActivationFactoryByPCWSTR
 @ stdcall -arch=win64 ?GetActivationFactoryByPCWSTR@@YAJPEAXAEAVGuid@Platform@@PEAPEAX@Z(wstr ptr ptr) GetActivationFactoryByPCWSTR

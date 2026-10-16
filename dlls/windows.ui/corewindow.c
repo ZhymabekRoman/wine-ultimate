@@ -323,7 +323,8 @@ static HRESULT WINAPI core_window_QueryInterface( ICoreWindow *iface, REFIID iid
         *out = &impl->ICoreWindow_iface;
         return S_OK;
     }
-    else if (IsEqualGUID( iid, &IID_ICoreWindowInterop ))
+    else if (IsEqualGUID( iid, &IID_ICoreWindowInterop ) ||
+             !memcmp( iid, "\x29\x4a\xd6\x45\x3e\xa6\xb6\x4c\xb4\x98\x57\x81\xd2\x98\xcb\x4f", 16 ))
     {
         ICoreWindow_AddRef( &impl->ICoreWindow_iface );
         *out = &impl->ICoreWindowInterop_iface;
@@ -547,3 +548,182 @@ ICoreWindow *core_window_create(void)
     TRACE( "created CoreWindow %p, hwnd %p\n", impl, impl->hwnd );
     return &impl->ICoreWindow_iface;
 }
+
+/* ---- Windows.UI.Core.CoreCursor ---- */
+
+struct core_cursor
+{
+    ICoreCursor ICoreCursor_iface;
+    LONG ref;
+    CoreCursorType type;
+    UINT32 id;
+};
+
+static inline struct core_cursor *impl_from_ICoreCursor( ICoreCursor *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_cursor, ICoreCursor_iface );
+}
+
+static HRESULT WINAPI core_cursor_QueryInterface( ICoreCursor *iface, REFIID iid, void **out )
+{
+    struct core_cursor *impl = impl_from_ICoreCursor( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ICoreCursor ))
+    {
+        *out = &impl->ICoreCursor_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI core_cursor_AddRef( ICoreCursor *iface )
+{
+    struct core_cursor *impl = impl_from_ICoreCursor( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI core_cursor_Release( ICoreCursor *iface )
+{
+    struct core_cursor *impl = impl_from_ICoreCursor( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI core_cursor_GetIids( ICoreCursor *iface, ULONG *count, IID **iids )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI core_cursor_GetRuntimeClassName( ICoreCursor *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.CoreCursor", 26, name ); }
+static HRESULT WINAPI core_cursor_GetTrustLevel( ICoreCursor *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI core_cursor_get_Id( ICoreCursor *iface, UINT32 *value )
+{
+    struct core_cursor *impl = impl_from_ICoreCursor( iface );
+    if (!value) return E_POINTER;
+    *value = impl->id;
+    return S_OK;
+}
+static HRESULT WINAPI core_cursor_get_Type( ICoreCursor *iface, CoreCursorType *value )
+{
+    struct core_cursor *impl = impl_from_ICoreCursor( iface );
+    if (!value) return E_POINTER;
+    *value = impl->type;
+    return S_OK;
+}
+
+static const struct ICoreCursorVtbl core_cursor_vtbl =
+{
+    core_cursor_QueryInterface,
+    core_cursor_AddRef,
+    core_cursor_Release,
+    core_cursor_GetIids,
+    core_cursor_GetRuntimeClassName,
+    core_cursor_GetTrustLevel,
+    core_cursor_get_Id,
+    core_cursor_get_Type,
+};
+
+struct core_cursor_factory
+{
+    IActivationFactory IActivationFactory_iface;
+    ICoreCursorFactory ICoreCursorFactory_iface;
+    LONG ref;
+};
+
+static inline struct core_cursor_factory *impl_from_IActivationFactory_cursor( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_cursor_factory, IActivationFactory_iface );
+}
+static inline struct core_cursor_factory *impl_from_ICoreCursorFactory( ICoreCursorFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_cursor_factory, ICoreCursorFactory_iface );
+}
+
+static HRESULT WINAPI cursor_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct core_cursor_factory *impl = impl_from_IActivationFactory_cursor( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &impl->IActivationFactory_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICoreCursorFactory ))
+    {
+        *out = &impl->ICoreCursorFactory_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cursor_factory_AddRef( IActivationFactory *iface )
+{
+    struct core_cursor_factory *impl = impl_from_IActivationFactory_cursor( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI cursor_factory_Release( IActivationFactory *iface )
+{
+    struct core_cursor_factory *impl = impl_from_IActivationFactory_cursor( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+static HRESULT WINAPI cursor_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI cursor_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.CoreCursor", 26, name ); }
+static HRESULT WINAPI cursor_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI cursor_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+
+static const struct IActivationFactoryVtbl cursor_activation_factory_vtbl =
+{
+    cursor_factory_QueryInterface,
+    cursor_factory_AddRef,
+    cursor_factory_Release,
+    cursor_factory_GetIids,
+    cursor_factory_GetRuntimeClassName,
+    cursor_factory_GetTrustLevel,
+    cursor_factory_ActivateInstance,
+};
+
+static HRESULT WINAPI cursor_factory_CreateCursor( ICoreCursorFactory *iface, CoreCursorType type, UINT32 id, ICoreCursor **cursor )
+{
+    struct core_cursor *impl;
+    TRACE( "iface %p, type %d, id %u, cursor %p\n", iface, type, id, cursor );
+    if (!cursor) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->ICoreCursor_iface.lpVtbl = &core_cursor_vtbl;
+    impl->ref = 1;
+    impl->type = type;
+    impl->id = id;
+    *cursor = &impl->ICoreCursor_iface;
+    return S_OK;
+}
+
+static const struct ICoreCursorFactoryVtbl cursor_factory_vtbl =
+{
+    (void *)cursor_factory_QueryInterface,
+    (void *)cursor_factory_AddRef,
+    (void *)cursor_factory_Release,
+    (void *)cursor_factory_GetIids,
+    (void *)cursor_factory_GetRuntimeClassName,
+    (void *)cursor_factory_GetTrustLevel,
+    cursor_factory_CreateCursor,
+};
+
+static struct core_cursor_factory cursor_factory_obj =
+{
+    {&cursor_activation_factory_vtbl},
+    {&cursor_factory_vtbl},
+    1,
+};
+
+IActivationFactory *core_cursor_factory = &cursor_factory_obj.IActivationFactory_iface;
