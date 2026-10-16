@@ -181,6 +181,8 @@ static HRESULT WINAPI ftmarshaler_inner_QueryInterface(IUnknown *iface, REFIID r
         *obj = &marshaler->IUnknown_inner;
     else if (IsEqualIID(&IID_IMarshal, riid))
         *obj = &marshaler->IMarshal_iface;
+    else if (IsEqualIID(&IID_IAgileObject, riid))
+        *obj = &marshaler->IUnknown_inner;
     else
     {
         FIXME("No interface for %s\n", debugstr_guid(riid));
