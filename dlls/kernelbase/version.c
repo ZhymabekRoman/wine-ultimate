@@ -1879,3 +1879,76 @@ LONG WINAPI PackageIdFromFullName(const WCHAR *full_name, UINT32 flags, UINT32 *
 
     return ERROR_SUCCESS;
 }
+
+/***********************************************************************
+ *         PackageFamilyNameFromFullName   (kernelbase.@)
+ */
+LONG WINAPI PackageFamilyNameFromFullName(const WCHAR *full_name, UINT32 *length, WCHAR *family_name)
+{
+    const WCHAR *name, *version_str, *arch_str, *resource_id, *publisher_id;
+    UINT32 name_len, pub_len, needed;
+
+    TRACE("full_name %s, length %p, family_name %p.\n", debugstr_w(full_name), length, family_name);
+
+    if (!full_name || !length)
+        return ERROR_INVALID_PARAMETER;
+
+    name = full_name;
+    if (!(version_str = wcschr(name, L'_')))
+        return ERROR_INVALID_PARAMETER;
+
+    if (!(arch_str = wcschr(version_str + 1, L'_')))
+        return ERROR_INVALID_PARAMETER;
+
+    if (!(resource_id = wcschr(arch_str + 1, L'_')))
+        return ERROR_INVALID_PARAMETER;
+
+    if (!(publisher_id = wcschr(resource_id + 1, L'_')))
+        return ERROR_INVALID_PARAMETER;
+    ++publisher_id;
+
+    name_len = version_str - name;
+    pub_len = wcslen(publisher_id);
+    needed = name_len + 1 + pub_len + 1;
+
+    if (!family_name || *length < needed)
+    {
+        *length = needed;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    memcpy(family_name, name, name_len * sizeof(WCHAR));
+    family_name[name_len] = L'_';
+    memcpy(family_name + name_len + 1, publisher_id, (pub_len + 1) * sizeof(WCHAR));
+    *length = needed;
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         PackageFamilyNameFromId   (kernelbase.@)
+ */
+LONG WINAPI PackageFamilyNameFromId(const PACKAGE_ID *id, UINT32 *length, WCHAR *family_name)
+{
+    UINT32 name_len, pub_len, needed;
+
+    TRACE("id %p, length %p, family_name %p.\n", id, length, family_name);
+
+    if (!id || !id->name || !id->publisherId || !length)
+        return ERROR_INVALID_PARAMETER;
+
+    name_len = wcslen(id->name);
+    pub_len = wcslen(id->publisherId);
+    needed = name_len + 1 + pub_len + 1;
+
+    if (!family_name || *length < needed)
+    {
+        *length = needed;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    memcpy(family_name, id->name, name_len * sizeof(WCHAR));
+    family_name[name_len] = L'_';
+    memcpy(family_name + name_len + 1, id->publisherId, (pub_len + 1) * sizeof(WCHAR));
+    *length = needed;
+    return ERROR_SUCCESS;
+}

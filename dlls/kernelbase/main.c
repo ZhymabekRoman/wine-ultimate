@@ -148,9 +148,10 @@ LONG WINAPI AppPolicyGetWindowingModel(HANDLE token, AppPolicyWindowingModel *po
     if(!policy)
         return ERROR_INVALID_PARAMETER;
 
-    /* A packaged app gets the Universal windowing model; classic desktop only
-     * for non-packaged processes. Detect package context via the env marker. */
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", buf, ARRAY_SIZE(buf) ))
+    /* WinUI 3 / WASDK FullTrust applications require the ClassicDesktop windowing model;
+     * Universal (UWP) triggers "WinUI: Error creating an UWP Window. Creating an UWP window is not allowed."
+     * Allow override via WINE_WINDOWING_MODEL env var if needed. */
+    if (GetEnvironmentVariableW( L"WINE_WINDOWING_MODEL", buf, ARRAY_SIZE(buf) ) && !wcsicmp( buf, L"Universal" ))
         *policy = AppPolicyWindowingModel_Universal;
     else
         *policy = AppPolicyWindowingModel_ClassicDesktop;
