@@ -236,15 +236,16 @@ static enum server_fd_type alpc_fd_get_type( struct fd *fd )
 /* Deliver queued messages to pending async readers. */
 static void reselect_alpc_port( struct alpc_port *port )
 {
-    struct async *async;
+    struct alpc_message *msg, *next;
 
-    while (!list_empty( &port->msg_queue )
-           && (async = find_pending_async( &port->read_q )))
+    LIST_FOR_EACH_ENTRY_SAFE( msg, next, &port->msg_queue, struct alpc_message, entry )
     {
-        struct alpc_message *msg = LIST_ENTRY( list_head(&port->msg_queue),
-                                               struct alpc_message, entry );
-        struct iosb *iosb = async_get_iosb( async );
+        struct async *async = find_pending_alpc_async( &port->read_q, msg->msg_id );
+        struct iosb *iosb;
 
+        if (!async) continue;
+
+        iosb = async_get_iosb( async );
         if (iosb->out_size < msg->data_size)
         {
             async_request_complete( async, STATUS_BUFFER_TOO_SMALL, 0, 0, NULL );
@@ -257,7 +258,6 @@ static void reselect_alpc_port( struct alpc_port *port )
             list_remove( &msg->entry );
             free( msg );
         }
-
         release_object( iosb );
         release_object( async );
     }
@@ -327,13 +327,16 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             return;
         }
         msg->is_connect = 0;
-        msg->msg_id     = 0;
+        if (user_size >= 0x1c)
+            msg->msg_id = *(const unsigned int *)((const char *)user_data + 0x18);
+        else
+            msg->msg_id = 0;
         msg->data_size  = blob_size;
 
         hdr = (struct alpc_wire_hdr *)((char *)msg + sizeof(*msg));
         hdr->magic        = ALPC_WIRE_MAGIC;
         hdr->type         = 1; /* LPC_REQUEST/REPLY – distinguished by the user PORT_MESSAGE */
-        hdr->msg_id       = 0;
+        hdr->msg_id       = msg->msg_id;
         hdr->client_pid   = get_process_id( current->process );
         hdr->client_tid   = get_thread_id( current );
         hdr->user_size    = iosb->in_size;
@@ -425,7 +428,7 @@ DECL_HANDLER(create_alpc_port)
 
     if (!objattr) return;
 
-    port = create_named_object( root, &alpc_port_ops, &name, objattr->attributes, sd );
+    port = create_named_object( root, &alpc_port_ops, &name, objattr->attributes | OBJ_OPENIF, sd );
     if (root) release_object( root );
     if (!port) return;
 

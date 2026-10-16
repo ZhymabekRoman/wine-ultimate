@@ -927,6 +927,19 @@ struct async *find_pending_async( struct async_queue *queue )
     return NULL;
 }
 
+/* find an async in queue matching a specific ALPC message id */
+struct async *find_pending_alpc_async( struct async_queue *queue, unsigned int msg_id )
+{
+    struct async *async;
+    LIST_FOR_EACH_ENTRY( async, &queue->queue, struct async, queue_entry )
+    {
+        if (async->terminated) continue;
+        if (!async->data.apc_context || (unsigned int)async->data.apc_context == msg_id)
+            return (struct async *)grab_object( async );
+    }
+    return NULL;
+}
+
 /* cancels sync I/O on a thread */
 DECL_HANDLER(cancel_sync)
 {

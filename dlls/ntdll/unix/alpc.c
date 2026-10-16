@@ -329,9 +329,10 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
 
     {
     data_size_t reply_size = 0;
+    void *expected_id = (flags & 0x20000 && send_msg) ? (void *)(ULONG_PTR)send_msg->MessageId : NULL;
     SERVER_START_REQ( read )
     {
-        req->async = server_async( port_handle, &async->io, NULL, NULL, NULL, iosb_client_ptr( &io ) );
+        req->async = server_async( port_handle, &async->io, NULL, NULL, expected_id, iosb_client_ptr( &io ) );
         req->pos   = 0;
         wine_server_set_reply( req, recv_msg, recv_size );
         ret = wine_server_call( req );
