@@ -419,6 +419,10 @@ static NTSTATUS create_cmd_process( HANDLE token, HANDLE debug, SECURITY_ATTRIBU
  */
 BOOL WINAPI DECLSPEC_HOTPATCH CloseHandle( HANDLE handle )
 {
+    NTSTATUS status;
+
+    if (!handle || handle == INVALID_HANDLE_VALUE) return TRUE;
+
     if (handle == (HANDLE)STD_INPUT_HANDLE)
         handle = InterlockedExchangePointer( &NtCurrentTeb()->Peb->ProcessParameters->hStdInput, 0 );
     else if (handle == (HANDLE)STD_OUTPUT_HANDLE)
@@ -426,7 +430,9 @@ BOOL WINAPI DECLSPEC_HOTPATCH CloseHandle( HANDLE handle )
     else if (handle == (HANDLE)STD_ERROR_HANDLE)
         handle = InterlockedExchangePointer( &NtCurrentTeb()->Peb->ProcessParameters->hStdError, 0 );
 
-    return set_ntstatus( NtClose( handle ));
+    status = NtClose( handle );
+    if (status == STATUS_INVALID_HANDLE || status == STATUS_HANDLE_NOT_CLOSABLE) return TRUE;
+    return set_ntstatus( status );
 }
 
 

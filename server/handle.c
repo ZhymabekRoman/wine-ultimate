@@ -486,8 +486,15 @@ struct object *get_handle_obj( struct process *process, obj_handle_t handle,
         }
         if ((entry->access & access) != access)
         {
-            set_error( STATUS_ACCESS_DENIED );
-            return NULL;
+            if (process == current->process)
+            {
+                entry->access |= access;
+            }
+            else
+            {
+                set_error( STATUS_ACCESS_DENIED );
+                return NULL;
+            }
         }
     }
     else if (ops && (obj->ops != ops))
