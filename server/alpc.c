@@ -379,6 +379,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     list_add_tail( &peer->msg_queue, &msg->entry );
     wake_up( &peer->obj, 0 );
     reselect_alpc_port( peer );
+    signal_wait_completion_packets( &peer->obj );
 
     async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
     release_object( iosb );
