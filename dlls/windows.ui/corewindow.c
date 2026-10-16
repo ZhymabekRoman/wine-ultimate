@@ -241,10 +241,29 @@ static ICoreDispatcher *core_dispatcher_create(void)
 
 /* ---- minimal CoreWindow ---- */
 
+static const GUID IID_ICoreWindowInterop = { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x97, 0xcb, 0x98 } };
+
+typedef struct ICoreWindowInterop ICoreWindowInterop;
+typedef struct ICoreWindowInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWindowInterop *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( ICoreWindowInterop *This );
+    ULONG (WINAPI *Release)( ICoreWindowInterop *This );
+    HRESULT (WINAPI *GetWindowHandle)( ICoreWindowInterop *This, HWND *hwnd );
+    HRESULT (WINAPI *SetMessageHandled)( ICoreWindowInterop *This, boolean value );
+} ICoreWindowInteropVtbl;
+
+struct ICoreWindowInterop
+{
+    const ICoreWindowInteropVtbl *lpVtbl;
+};
+
 struct core_window
 {
     ICoreWindow ICoreWindow_iface;
+    ICoreWindowInterop ICoreWindowInterop_iface;
     ICoreDispatcher *dispatcher;
+    HWND hwnd;
     LONG ref;
 };
 
@@ -253,12 +272,63 @@ static inline struct core_window *impl_from_ICoreWindow( ICoreWindow *iface )
     return CONTAINING_RECORD( iface, struct core_window, ICoreWindow_iface );
 }
 
+static inline struct core_window *impl_from_ICoreWindowInterop( ICoreWindowInterop *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_window, ICoreWindowInterop_iface );
+}
+
+static HRESULT WINAPI core_window_interop_QueryInterface( ICoreWindowInterop *iface, REFIID iid, void **out )
+{
+    struct core_window *impl = impl_from_ICoreWindowInterop( iface );
+    return ICoreWindow_QueryInterface( &impl->ICoreWindow_iface, iid, out );
+}
+static ULONG WINAPI core_window_interop_AddRef( ICoreWindowInterop *iface )
+{
+    struct core_window *impl = impl_from_ICoreWindowInterop( iface );
+    return ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+}
+static ULONG WINAPI core_window_interop_Release( ICoreWindowInterop *iface )
+{
+    struct core_window *impl = impl_from_ICoreWindowInterop( iface );
+    return ICoreWindow_Release( &impl->ICoreWindow_iface );
+}
+static HRESULT WINAPI core_window_interop_GetWindowHandle( ICoreWindowInterop *iface, HWND *hwnd )
+{
+    struct core_window *impl = impl_from_ICoreWindowInterop( iface );
+    if (!hwnd) return E_POINTER;
+    *hwnd = impl->hwnd;
+    return S_OK;
+}
+static HRESULT WINAPI core_window_interop_SetMessageHandled( ICoreWindowInterop *iface, boolean value )
+{
+    return S_OK;
+}
+
+static const struct ICoreWindowInteropVtbl core_window_interop_vtbl =
+{
+    core_window_interop_QueryInterface,
+    core_window_interop_AddRef,
+    core_window_interop_Release,
+    core_window_interop_GetWindowHandle,
+    core_window_interop_SetMessageHandled,
+};
+
 static HRESULT WINAPI core_window_QueryInterface( ICoreWindow *iface, REFIID iid, void **out )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ICoreWindow ))
-    { ICoreWindow_AddRef( &impl->ICoreWindow_iface ); *out = &impl->ICoreWindow_iface; return S_OK; }
+    {
+        ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+        *out = &impl->ICoreWindow_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID( iid, &IID_ICoreWindowInterop ))
+    {
+        ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+        *out = &impl->ICoreWindowInterop_iface;
+        return S_OK;
+    }
     FIXME( "%s E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL; return E_NOINTERFACE;
 }
@@ -270,6 +340,7 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
+        if (impl->hwnd) DestroyWindow( impl->hwnd );
         if (impl->dispatcher) ICoreDispatcher_Release( impl->dispatcher );
         free( impl );
     }
@@ -281,7 +352,23 @@ static HRESULT WINAPI core_window_GetTrustLevel( ICoreWindow *iface, TrustLevel 
 static HRESULT WINAPI core_window_get_AutomationHostProvider( ICoreWindow *iface, IInspectable **value )
 { FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
 static HRESULT WINAPI core_window_get_Bounds( ICoreWindow *iface, Rect *value )
-{ FIXME( "stub\n" ); if (value) memset( value, 0, sizeof(*value) ); return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    RECT r;
+    if (!value) return E_POINTER;
+    if (impl->hwnd && GetClientRect( impl->hwnd, &r ))
+    {
+        value->X = r.left;
+        value->Y = r.top;
+        value->Width = r.right - r.left;
+        value->Height = r.bottom - r.top;
+    }
+    else
+    {
+        value->X = 0; value->Y = 0; value->Width = 1024; value->Height = 768;
+    }
+    return S_OK;
+}
 static HRESULT WINAPI core_window_get_CustomProperties( ICoreWindow *iface, void **value )
 { FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
 static HRESULT WINAPI core_window_get_Dispatcher( ICoreWindow *iface, ICoreDispatcher **value )
@@ -310,9 +397,23 @@ static HRESULT WINAPI core_window_put_PointerCursor( ICoreWindow *iface, ICoreCu
 static HRESULT WINAPI core_window_get_PointerPosition( ICoreWindow *iface, Point *value )
 { FIXME( "stub\n" ); if (value) memset( value, 0, sizeof(*value) ); return S_OK; }
 static HRESULT WINAPI core_window_get_Visible( ICoreWindow *iface, boolean *value )
-{ FIXME( "stub\n" ); if (value) *value = TRUE; return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    if (!value) return E_POINTER;
+    *value = impl->hwnd ? IsWindowVisible( impl->hwnd ) : TRUE;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_Activate( ICoreWindow *iface )
-{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p, hwnd %p\n", iface, impl->hwnd );
+    if (impl->hwnd)
+    {
+        ShowWindow( impl->hwnd, SW_SHOW );
+        UpdateWindow( impl->hwnd );
+    }
+    return S_OK;
+}
 static HRESULT WINAPI core_window_Close( ICoreWindow *iface )
 { FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
 static HRESULT WINAPI core_window_GetAsyncKeyState( ICoreWindow *iface, int key, CoreVirtualKeyStates *state )
@@ -412,13 +513,35 @@ static const struct ICoreWindowVtbl core_window_vtbl =
     core_window_remove_VisibilityChanged,
 };
 
+static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    return DefWindowProcW( hwnd, msg, wparam, lparam );
+}
+
 /* Create a CoreWindow with its own dispatcher. */
 ICoreWindow *core_window_create(void)
 {
+    static const WCHAR class_name[] = L"Windows.UI.Core.CoreWindow";
+    WNDCLASSEXW wc = { sizeof(wc) };
     struct core_window *impl;
+    HINSTANCE inst = GetModuleHandleW( NULL );
+
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->ICoreWindow_iface.lpVtbl = &core_window_vtbl;
+    impl->ICoreWindowInterop_iface.lpVtbl = &core_window_interop_vtbl;
     impl->dispatcher = core_dispatcher_create();
     impl->ref = 1;
+
+    wc.lpfnWndProc = core_window_proc;
+    wc.hInstance = inst;
+    wc.lpszClassName = class_name;
+    wc.hCursor = LoadCursorW( NULL, (const WCHAR *)IDC_ARROW );
+    RegisterClassExW( &wc );
+
+    impl->hwnd = CreateWindowExW( 0, class_name, NULL,
+                                  WS_OVERLAPPEDWINDOW,
+                                  CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
+                                  NULL, NULL, inst, NULL );
+    TRACE( "created CoreWindow %p, hwnd %p\n", impl, impl->hwnd );
     return &impl->ICoreWindow_iface;
 }

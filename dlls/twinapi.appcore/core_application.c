@@ -21,6 +21,8 @@
 #include "roapi.h"
 #define WIDL_using_Windows_UI_Core
 #include "windows.ui.core.h"
+#define WIDL_using_Windows_ApplicationModel_Activation
+#include "windows.applicationmodel.activation.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 
@@ -242,11 +244,110 @@ static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView
     if (value) *value = NULL;
     return S_OK;
 }
+struct activated_event_args
+{
+    __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs IActivatedEventArgs_iface;
+    LONG ref;
+    __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind kind;
+};
+
+static inline struct activated_event_args *impl_from_IActivatedEventArgs( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct activated_event_args, IActivatedEventArgs_iface );
+}
+
+static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, REFIID iid, void **out )
+{
+    struct activated_event_args *impl = impl_from_IActivatedEventArgs( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IActivatedEventArgs_iface;
+        return S_OK;
+    }
+    FIXME( "%s not implemented.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI activated_event_args_AddRef( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface )
+{
+    struct activated_event_args *impl = impl_from_IActivatedEventArgs( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI activated_event_args_Release( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface )
+{
+    struct activated_event_args *impl = impl_from_IActivatedEventArgs( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI activated_event_args_GetIids( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, ULONG *count, IID **iids )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI activated_event_args_GetRuntimeClassName( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, HSTRING *name )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI activated_event_args_GetTrustLevel( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, TrustLevel *level )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI activated_event_args_get_Kind( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface,
+        __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind *value )
+{
+    struct activated_event_args *impl = impl_from_IActivatedEventArgs( iface );
+    if (!value) return E_POINTER;
+    *value = impl->kind;
+    return S_OK;
+}
+static HRESULT WINAPI activated_event_args_get_PreviousExecutionState( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface,
+        __x_ABI_CWindows_CApplicationModel_CActivation_CApplicationExecutionState *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0; /* NotRunning */
+    return S_OK;
+}
+static HRESULT WINAPI activated_event_args_get_SplashScreen( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface,
+        __x_ABI_CWindows_CApplicationModel_CActivation_CISplashScreen **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgsVtbl activated_event_args_vtbl =
+{
+    activated_event_args_QueryInterface,
+    activated_event_args_AddRef,
+    activated_event_args_Release,
+    activated_event_args_GetIids,
+    activated_event_args_GetRuntimeClassName,
+    activated_event_args_GetTrustLevel,
+    activated_event_args_get_Kind,
+    activated_event_args_get_PreviousExecutionState,
+    activated_event_args_get_SplashScreen,
+};
+
+static __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *activated_event_args_create( __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind kind )
+{
+    struct activated_event_args *impl;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->IActivatedEventArgs_iface.lpVtbl = &activated_event_args_vtbl;
+    impl->ref = 1;
+    impl->kind = kind;
+    return &impl->IActivatedEventArgs_iface;
+}
+
+static __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *view_activated_handler;
+
 static HRESULT WINAPI core_application_view_add_Activated( ICoreApplicationView *iface,
         __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *handler, EventRegistrationToken *token )
 {
-    FIXME( "iface %p, handler %p, token %p semi-stub.\n", iface, handler, token );
-    if (token) token->value = 0;
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    if (token) token->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_AddRef( handler );
+        view_activated_handler = handler;
+    }
     return S_OK;
 }
 static HRESULT WINAPI core_application_view_remove_Activated( ICoreApplicationView *iface, EventRegistrationToken token )
@@ -459,6 +560,18 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
         if (cw) __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( cw );
     }
     if (SUCCEEDED(hr)) hr = IFrameworkView_Load( view, NULL );
+    if (view_activated_handler)
+    {
+        __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args =
+            activated_event_args_create( 0 /* ActivationKind_Launch */ );
+        if (args)
+        {
+            TRACE( "invoking Activated handler %p\n", view_activated_handler );
+            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_Invoke(
+                view_activated_handler, app_view, args );
+            __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs_Release( args );
+        }
+    }
     if (SUCCEEDED(hr)) hr = IFrameworkView_Run( view );
     IFrameworkView_Uninitialize( view );
 
