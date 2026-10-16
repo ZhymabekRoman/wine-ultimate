@@ -539,9 +539,11 @@ ICoreWindow *core_window_create(void)
     RegisterClassExW( &wc );
 
     impl->hwnd = CreateWindowExW( 0, class_name, NULL,
-                                  WS_OVERLAPPEDWINDOW,
+                                  WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
                                   NULL, NULL, inst, NULL );
+    ShowWindow( impl->hwnd, SW_SHOW );
+    UpdateWindow( impl->hwnd );
     TRACE( "created CoreWindow %p, hwnd %p\n", impl, impl->hwnd );
     return &impl->ICoreWindow_iface;
 }
