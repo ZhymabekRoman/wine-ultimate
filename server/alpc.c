@@ -280,27 +280,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     struct alpc_message *msg;
     struct iosb *iosb;
 
-    if (port->is_server)
-    {
-        /* Server replying on its listening port: route to the connected client.
-         * (single-connection correlation; multi-client would match by CallbackId) */
-        struct list *head = list_head( &port->connections );
-        if (!head)
-        {
-            set_error( STATUS_PIPE_DISCONNECTED );
-            return;
-        }
-        peer = LIST_ENTRY( head, struct alpc_port, conn_entry );
-    }
-    else if (!port->peer)
-    {
-        set_error( STATUS_PIPE_DISCONNECTED );
-        return;
-    }
-    /* The client side delivers to the server's listening port (where the server
-     * receives all connections' messages); the server side replies to its peer. */
-    else peer = port->listen_port ? port->listen_port : port->peer;
-
     iosb = async_get_iosb( async );
     if (!iosb->in_data || !iosb->in_size)
     {
@@ -308,6 +287,59 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         async_request_complete( async, STATUS_SUCCESS, 0, 0, NULL ); /* zero-length send */
         return;
     }
+
+    if (port->is_server)
+    {
+        /* Server replying on its listening port: route to the connected client.
+         * Match by MessageId if a client connection is waiting for this reply. */
+        struct alpc_port *conn;
+        const void *data = iosb->in_data;
+        data_size_t size = iosb->in_size;
+        unsigned int reply_id = 0;
+
+        if (size >= sizeof(struct alpc_msg_attr_hdr) && *(const unsigned int *)data == ALPC_ATTR_HDR_MAGIC)
+        {
+            data = (const char *)data + sizeof(struct alpc_msg_attr_hdr);
+            size -= sizeof(struct alpc_msg_attr_hdr);
+        }
+        if (size >= 0x1c)
+            reply_id = *(const unsigned int *)((const char *)data + 0x18);
+
+        peer = NULL;
+        if (reply_id)
+        {
+            LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+            {
+                struct async *matching = find_pending_alpc_async( &conn->read_q, reply_id );
+                if (matching)
+                {
+                    release_object( matching );
+                    peer = conn;
+                    break;
+                }
+            }
+        }
+        if (!peer)
+        {
+            struct list *head = list_head( &port->connections );
+            if (!head)
+            {
+                release_object( iosb );
+                set_error( STATUS_PIPE_DISCONNECTED );
+                return;
+            }
+            peer = LIST_ENTRY( head, struct alpc_port, conn_entry );
+        }
+    }
+    else if (!port->peer)
+    {
+        release_object( iosb );
+        set_error( STATUS_PIPE_DISCONNECTED );
+        return;
+    }
+    /* The client side delivers to the server's listening port (where the server
+     * receives all connections' messages); the server side replies to its peer. */
+    else peer = port->listen_port ? port->listen_port : port->peer;
 
     {
         struct alpc_wire_hdr *hdr;
