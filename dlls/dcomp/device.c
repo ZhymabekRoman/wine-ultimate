@@ -77,13 +77,15 @@ static HRESULT STDMETHODCALLTYPE device_QueryInterface(IDCompositionDevice *ifac
                   || IsEqualGUID(iid, &IID_IDCompositionDevice3)
                   || IsEqualGUID(iid, &IID_IDCompositionDesktopDevice)))
               || IsEqualGUID(iid, &IID_IDCompositionDesktopDevicePartner)
-              || IsEqualGUID(iid, &IID_IDCompositionDeviceUnknown))
+              || IsEqualGUID(iid, &IID_IDCompositionDeviceUnknown)
+              || !memcmp(iid, "\x68\x69\x55\x6b\x25\x2d\xe2\x11\x99\xf6\x8b\xc3\x60\x88\x70\x9b", 16))
     {
         IUnknown_AddRef(&device->IDCompositionDeviceUnknown_iface);
         *out = &device->IDCompositionDeviceUnknown_iface;
 
         if (IsEqualGUID(iid, &IID_IDCompositionDesktopDevicePartner)
-            || IsEqualGUID(iid, &IID_IDCompositionDeviceUnknown))
+            || IsEqualGUID(iid, &IID_IDCompositionDeviceUnknown)
+            || !memcmp(iid, "\x68\x69\x55\x6b\x25\x2d\xe2\x11\x99\xf6\x8b\xc3\x60\x88\x70\x9b", 16))
             FIXME("Returning undocumented interface %s %p.\n", wine_dbgstr_guid(iid), *out);
         return S_OK;
     }
@@ -1039,6 +1041,7 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateVirtualSurface(IDCompositi
 {
     FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
             width, height, pixel_format, alpha_mode, surface);
+    if (surface) *surface = NULL;
     return E_NOTIMPL;
 }
 
@@ -2023,4 +2026,13 @@ HRESULT WINAPI DCompositionCreateSharedVisualHandle(void **handle)
     *handle = (void*)0xdeadbee1;
     FIXME("--- returning a fake handle %p.\n", *handle);
     return S_OK;
+}
+
+DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handles, DWORD timeout)
+{
+    TRACE("(%u, %p, %lu)\n", count, handles, timeout);
+    if (count && handles)
+        return WaitForMultipleObjects(count, handles, FALSE, timeout);
+    Sleep(timeout < 16 ? timeout : 16);
+    return WAIT_TIMEOUT;
 }
