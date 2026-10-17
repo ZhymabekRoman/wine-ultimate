@@ -1203,6 +1203,32 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateFromSharedVisualHandle(IDC
         hr = create_visual(2, iid, (void **)out);
         FIXME("Created a IDCompositionVisual %p from a shared visual handle %p, hr %#lx.\n", *out,
               visual_handle, hr);
+        if (SUCCEEDED(hr) && out && *out)
+        {
+            struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
+            HWND hwnd = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
+            if (!hwnd) hwnd = GetActiveWindow();
+            if (!hwnd) hwnd = GetForegroundWindow();
+            if (hwnd)
+            {
+                IDCompositionTarget *target = NULL;
+                create_target(device, hwnd, TRUE, &target);
+                if (target)
+                {
+                    struct composition_target *target_impl = impl_from_IDCompositionTarget(target);
+                    target_impl->root = (IDCompositionVisual *)*out;
+                    IDCompositionVisual_AddRef(target_impl->root);
+                    ERR("DCOMP: attached shared visual %p to target %p hwnd %p\n", *out, target, hwnd);
+                }
+            }
+            if (!device->thread || device->thread_exited)
+            {
+                device->thread_exited = FALSE;
+                device->exit_thread = FALSE;
+                device->thread = CreateThread(NULL, 0, composite_thread_proc, &device->IDCompositionDevice_iface, 0, NULL);
+                ERR("DCOMP: started composite_thread_proc %p\n", device->thread);
+            }
+        }
         return hr;
     }
     else if (IsEqualGUID(iid, &IID_IDCompositionTarget))
