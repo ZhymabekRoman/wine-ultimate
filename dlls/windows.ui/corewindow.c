@@ -245,7 +245,37 @@ static HRESULT WINAPI core_dispatcher_AcceleratorKeyActivated_add( ICoreDispatch
 static HRESULT WINAPI core_dispatcher_AcceleratorKeyActivated_remove( ICoreDispatcher *iface, EventRegistrationToken cookie )
 { FIXME( "stub\n" ); return S_OK; }
 static HRESULT WINAPI core_dispatcher_ProcessEvents( ICoreDispatcher *iface, CoreProcessEventsOption options )
-{ FIXME( "iface %p, options %d stub — spinning?\n", iface, options ); return S_OK; }
+{
+    MSG msg;
+    TRACE( "iface %p, options %d\n", iface, options );
+
+    if (options == CoreProcessEventsOption_ProcessUntilQuit)
+    {
+        while (GetMessageW( &msg, NULL, 0, 0 ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
+    else if (options == CoreProcessEventsOption_ProcessOneIfPresent)
+    {
+        if (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
+    else
+    {
+        while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+        {
+            if (msg.message == WM_QUIT) break;
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
+    return S_OK;
+}
 static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDispatcherPriority priority,
         void *agileCallback, IAsyncAction **asyncAction )
 { FIXME( "stub\n" ); return E_NOTIMPL; }
@@ -268,17 +298,10 @@ static const struct ICoreDispatcherVtbl core_dispatcher_vtbl =
     core_dispatcher_GetIids,
     core_dispatcher_GetRuntimeClassName,
     core_dispatcher_GetTrustLevel,
-    core_dispatcher_get_AutomationProviderDelegate,
-    core_dispatcher_put_AutomationProviderDelegate,
-    core_dispatcher_AcceleratorKeyActivated_add,
-    core_dispatcher_AcceleratorKeyActivated_remove,
+    core_dispatcher_HasThreadAccess,
     core_dispatcher_ProcessEvents,
     core_dispatcher_RunAsync,
     core_dispatcher_RunIdleAsync,
-    core_dispatcher_HasThreadAccess,
-    core_dispatcher_get_CurrentPriority,
-    core_dispatcher_put_CurrentPriority,
-    core_dispatcher_StopProcessEvents,
 };
 
 static ICoreDispatcher *core_dispatcher_create(void)

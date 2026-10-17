@@ -118,12 +118,18 @@ static const struct IActivationFactoryVtbl factory_vtbl =
 struct application_data
 {
     IApplicationData IApplicationData_iface;
+    IApplicationData2 IApplicationData2_iface;
     LONG ref;
 };
 
 static inline struct application_data *impl_from_IApplicationData( IApplicationData *iface )
 {
     return CONTAINING_RECORD( iface, struct application_data, IApplicationData_iface );
+}
+
+static inline struct application_data *impl_from_IApplicationData2( IApplicationData2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_data, IApplicationData2_iface );
 }
 
 static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out )
@@ -138,7 +144,14 @@ static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, 
         IsEqualGUID( iid, &IID_IApplicationData ))
     {
         *out = &impl->IApplicationData_iface;
-        IInspectable_AddRef( *out );
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IApplicationData2 ))
+    {
+        *out = &impl->IApplicationData2_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
 
@@ -627,6 +640,61 @@ static const struct IApplicationDataVtbl application_data_vtbl =
     application_data_get_RoamingStorageQuota,
 };
 
+static HRESULT WINAPI application_data2_QueryInterface( IApplicationData2 *iface, REFIID iid, void **out )
+{
+    struct application_data *impl = impl_from_IApplicationData2( iface );
+    return IApplicationData_QueryInterface( &impl->IApplicationData_iface, iid, out );
+}
+static ULONG WINAPI application_data2_AddRef( IApplicationData2 *iface )
+{
+    struct application_data *impl = impl_from_IApplicationData2( iface );
+    return IApplicationData_AddRef( &impl->IApplicationData_iface );
+}
+static ULONG WINAPI application_data2_Release( IApplicationData2 *iface )
+{
+    struct application_data *impl = impl_from_IApplicationData2( iface );
+    return IApplicationData_Release( &impl->IApplicationData_iface );
+}
+static HRESULT WINAPI application_data2_GetIids( IApplicationData2 *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "stub\n" ); return E_NOTIMPL;
+}
+static HRESULT WINAPI application_data2_GetRuntimeClassName( IApplicationData2 *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Windows.Storage.ApplicationData", 30, class_name );
+}
+static HRESULT WINAPI application_data2_GetTrustLevel( IApplicationData2 *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI application_data2_get_LocalCacheFolder( IApplicationData2 *iface, IStorageFolder **value )
+{
+    WCHAR path[MAX_PATH];
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    if (!GetEnvironmentVariableW( L"LOCALAPPDATA", path, ARRAY_SIZE(path) ))
+    {
+        if (!GetEnvironmentVariableW( L"USERPROFILE", path, ARRAY_SIZE(path) ))
+            return E_FAIL;
+        lstrcatW( path, L"\\AppData\\Local" );
+    }
+    lstrcatW( path, L"\\WhatsApp\\LocalCache" );
+    return storage_folder_create( path, value );
+}
+
+static const struct IApplicationData2Vtbl application_data2_vtbl =
+{
+    application_data2_QueryInterface,
+    application_data2_AddRef,
+    application_data2_Release,
+    /* IInspectable methods */
+    application_data2_GetIids,
+    application_data2_GetRuntimeClassName,
+    application_data2_GetTrustLevel,
+    /* IApplicationData2 methods */
+    application_data2_get_LocalCacheFolder,
+};
+
 DEFINE_IINSPECTABLE( application_data_statics, IApplicationDataStatics, struct application_data_statics, IActivationFactory_iface )
 
 static HRESULT WINAPI application_data_statics_get_Current( IApplicationDataStatics *iface, IApplicationData **value )
@@ -639,6 +707,7 @@ static HRESULT WINAPI application_data_statics_get_Current( IApplicationDataStat
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 
     impl->IApplicationData_iface.lpVtbl = &application_data_vtbl;
+    impl->IApplicationData2_iface.lpVtbl = &application_data2_vtbl;
     impl->ref = 1;
 
     *value = &impl->IApplicationData_iface;
