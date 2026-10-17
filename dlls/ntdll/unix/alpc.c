@@ -173,9 +173,13 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
 
     if (wait_handle)
     {
-        NtWaitForSingleObject( wait_handle, FALSE, timeout );
-        NtClose( wait_handle );
-        ret = io.Status;
+        unsigned int wait_ret = server_wait_for_object( wait_handle, FALSE, timeout );
+        if (!wait_ret) ret = io.Status;
+        else
+        {
+            NtClose( wait_handle );
+            ret = wait_ret;
+        }
     }
 
     if (ret && ret != STATUS_PENDING && *port_handle)
@@ -350,12 +354,15 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     if (ret != STATUS_PENDING) free( async );
     else if (wait_handle)
     {
-        NtWaitForSingleObject( wait_handle, FALSE, timeout );
-        NtClose( wait_handle );
-        ret = io.Status;
+        unsigned int wait_ret = server_wait_for_object( wait_handle, FALSE, timeout );
+        if (!wait_ret) ret = io.Status;
+        else
+        {
+            NtClose( wait_handle );
+            ret = wait_ret;
+        }
         wait_handle = NULL;
     }
-    if (wait_handle) NtClose( wait_handle );
     }
 
     if (!ret && recv_buffer_size) *recv_buffer_size = io.Information;
