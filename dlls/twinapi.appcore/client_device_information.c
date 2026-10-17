@@ -23,8 +23,11 @@ WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 struct client_device_information
 {
     IEasClientDeviceInformation IEasClientDeviceInformation_iface;
+    const void *vtbl2;
     LONG ref;
 };
+
+static const void *client_device_information2_vtbl[];
 
 static inline struct client_device_information *impl_from_IEasClientDeviceInformation( IEasClientDeviceInformation *iface )
 {
@@ -35,6 +38,7 @@ static HRESULT WINAPI client_device_information_QueryInterface( IEasClientDevice
                                                                 REFIID iid, void **out )
 {
     struct client_device_information *impl = impl_from_IEasClientDeviceInformation( iface );
+    static const GUID IID_IEasClientDeviceInformation2 = {0xffb35923, 0xbb26, 0x4d6a, {0x81, 0xbc, 0x16, 0x5a, 0xee, 0x0a, 0xd7, 0x54}};
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
@@ -43,6 +47,12 @@ static HRESULT WINAPI client_device_information_QueryInterface( IEasClientDevice
         IsEqualGUID( iid, &IID_IEasClientDeviceInformation ))
     {
         IEasClientDeviceInformation_AddRef( (*out = &impl->IEasClientDeviceInformation_iface) );
+        return S_OK;
+    }
+    else if (IsEqualGUID( iid, &IID_IEasClientDeviceInformation2 ))
+    {
+        *out = &impl->vtbl2;
+        IEasClientDeviceInformation_AddRef( iface );
         return S_OK;
     }
 
@@ -206,6 +216,42 @@ static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLev
     return E_NOTIMPL;
 }
 
+static HRESULT WINAPI client_device_information2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct client_device_information *impl = CONTAINING_RECORD( (const void **)iface, struct client_device_information, vtbl2 );
+    return client_device_information_QueryInterface( &impl->IEasClientDeviceInformation_iface, iid, out );
+}
+static ULONG WINAPI client_device_information2_AddRef( void *iface )
+{
+    struct client_device_information *impl = CONTAINING_RECORD( (const void **)iface, struct client_device_information, vtbl2 );
+    return client_device_information_AddRef( &impl->IEasClientDeviceInformation_iface );
+}
+static ULONG WINAPI client_device_information2_Release( void *iface )
+{
+    struct client_device_information *impl = CONTAINING_RECORD( (const void **)iface, struct client_device_information, vtbl2 );
+    return client_device_information_Release( &impl->IEasClientDeviceInformation_iface );
+}
+static HRESULT WINAPI client_device_information_get_SystemHardwareVersion( void *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"1.0", 3, value );
+}
+static HRESULT WINAPI client_device_information_get_SystemFirmwareVersion( void *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"1.0", 3, value );
+}
+
+static const void *client_device_information2_vtbl[] =
+{
+    client_device_information2_QueryInterface,
+    client_device_information2_AddRef,
+    client_device_information2_Release,
+    client_device_information_GetIids,
+    client_device_information_GetRuntimeClassName,
+    client_device_information_GetTrustLevel,
+    client_device_information_get_SystemHardwareVersion,
+    client_device_information_get_SystemFirmwareVersion,
+};
+
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
     struct client_device_information *impl;
@@ -214,6 +260,7 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IEasClientDeviceInformation_iface.lpVtbl = &client_device_information_vtbl;
+    impl->vtbl2 = client_device_information2_vtbl;
     impl->ref = 1;
 
     *instance = (IInspectable *)&impl->IEasClientDeviceInformation_iface;

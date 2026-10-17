@@ -313,12 +313,14 @@ static HRESULT WINAPI container_get_Containers( IApplicationDataContainer *iface
     return S_OK;
 }
 
+static HRESULT container_create( ApplicationDataLocality locality, IApplicationDataContainer **out );
+
 static HRESULT WINAPI container_CreateContainer( IApplicationDataContainer *iface, HSTRING name, ApplicationDataCreateDisposition disposition, IApplicationDataContainer **container )
 {
-    FIXME( "stub\n" );
+    struct application_data_container *parent = impl_from_IApplicationDataContainer( iface );
+    TRACE( "iface %p, name %s, disposition %d, container %p\n", iface, debugstr_hstring(name), disposition, container );
     if (!container) return E_POINTER;
-    *container = NULL;
-    return S_OK;
+    return container_create( parent->locality, container );
 }
 
 static HRESULT WINAPI container_DeleteContainer( IApplicationDataContainer *iface, HSTRING name )

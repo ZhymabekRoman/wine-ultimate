@@ -442,10 +442,141 @@ static HRESULT WINAPI package_GetTrustLevel( IPackage *iface, TrustLevel *trust_
     return E_NOTIMPL;
 }
 
+struct package_id
+{
+    IPackageId IPackageId_iface;
+    LONG ref;
+};
+
+static inline struct package_id *impl_from_IPackageId( IPackageId *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_id, IPackageId_iface );
+}
+
+static HRESULT WINAPI package_id_QueryInterface( IPackageId *iface, REFIID iid, void **out )
+{
+    struct package_id *impl = impl_from_IPackageId( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IPackageId ))
+    {
+        *out = &impl->IPackageId_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_id_AddRef( IPackageId *iface )
+{
+    struct package_id *impl = impl_from_IPackageId( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI package_id_Release( IPackageId *iface )
+{
+    struct package_id *impl = impl_from_IPackageId( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI package_id_GetIids( IPackageId *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
+static HRESULT WINAPI package_id_GetRuntimeClassName( IPackageId *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.PackageId", 34, name );
+}
+static HRESULT WINAPI package_id_GetTrustLevel( IPackageId *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_id_get_Name( IPackageId *iface, HSTRING *value )
+{
+    WCHAR buf[MAX_PATH];
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"5319275A.WhatsAppDesktop" );
+    return WindowsCreateString( buf, wcslen(buf), value );
+}
+
+static HRESULT WINAPI package_id_get_Version( IPackageId *iface, struct PackageVersion *value )
+{
+    if (!value) return E_POINTER;
+    value->Major = 2;
+    value->Minor = 2620;
+    value->Build = 102;
+    value->Revision = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_id_get_Architecture( IPackageId *iface, enum __x_ABI_CWindows_CSystem_CProcessorArchitecture *value )
+{
+    if (!value) return E_POINTER;
+    *value = 9; /* X64 */
+    return S_OK;
+}
+
+static HRESULT WINAPI package_id_get_ResourceId( IPackageId *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"", 0, value );
+}
+
+static HRESULT WINAPI package_id_get_Publisher( IPackageId *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"CN=WhatsApp", 11, value );
+}
+
+static HRESULT WINAPI package_id_get_PublisherId( IPackageId *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"cv1g1gvanyjgm", 13, value );
+}
+
+static HRESULT WINAPI package_id_get_FullName( IPackageId *iface, HSTRING *value )
+{
+    WCHAR buf[MAX_PATH];
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"5319275A.WhatsAppDesktop_2.2620.102.0_x64__cv1g1gvanyjgm" );
+    return WindowsCreateString( buf, wcslen(buf), value );
+}
+
+static HRESULT WINAPI package_id_get_FamilyName( IPackageId *iface, HSTRING *value )
+{
+    WCHAR buf[MAX_PATH];
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"5319275A.WhatsAppDesktop_cv1g1gvanyjgm" );
+    return WindowsCreateString( buf, wcslen(buf), value );
+}
+
+static const struct IPackageIdVtbl package_id_vtbl =
+{
+    package_id_QueryInterface,
+    package_id_AddRef,
+    package_id_Release,
+    package_id_GetIids,
+    package_id_GetRuntimeClassName,
+    package_id_GetTrustLevel,
+    package_id_get_Name,
+    package_id_get_Version,
+    package_id_get_Architecture,
+    package_id_get_ResourceId,
+    package_id_get_Publisher,
+    package_id_get_PublisherId,
+    package_id_get_FullName,
+    package_id_get_FamilyName,
+};
+
 static HRESULT WINAPI package_get_Id( IPackage *iface, IPackageId **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct package_id *impl;
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_INVALIDARG;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IPackageId_iface.lpVtbl = &package_id_vtbl;
+    impl->ref = 1;
+    *value = &impl->IPackageId_iface;
+    return S_OK;
 }
 
 static HRESULT WINAPI package_get_InstalledLocation( IPackage *iface, IStorageFolder **value )
