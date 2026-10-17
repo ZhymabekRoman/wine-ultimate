@@ -286,13 +286,14 @@ static HRESULT WINAPI uisettings2_add_TextScaleFactorChanged( IUISettings2 *ifac
         EventRegistrationToken *cookie )
 {
     FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
-    return E_NOTIMPL;
+    *cookie = dummy_cookie;
+    return S_OK;
 }
 
 static HRESULT WINAPI uisettings2_remove_TextScaleFactorChanged( IUISettings2 *iface, EventRegistrationToken cookie )
 {
     FIXME( "iface %p, cookie %#I64x stub!\n", iface, cookie.value );
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static const struct IUISettings2Vtbl uisettings2_vtbl =
