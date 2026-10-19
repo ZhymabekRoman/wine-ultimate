@@ -1,0 +1,3479 @@
+diff --git a/configure b/configure
+index 6832c29..087c4af 100755
+--- a/configure
++++ b/configure
+@@ -1539,6 +1539,7 @@ enable_win32u
+ enable_winbio
+ enable_winbrand
+ enable_windows_applicationmodel
++enable_windows_applicationmodel_calls
+ enable_windows_devices_bluetooth
+ enable_windows_devices_enumeration
+ enable_windows_devices_radios
+@@ -1556,6 +1557,7 @@ enable_windows_media
+ enable_windows_networking_connectivity
+ enable_windows_networking_hostname
+ enable_windows_networking
++enable_windows_networking_sockets
+ enable_windows_perception_stub
+ enable_windows_security_authentication_onlineid
+ enable_windows_security_credentials_ui_userconsentverifier
+@@ -23804,6 +23806,7 @@ wine_fn_config_makefile dlls/winbrand enable_winbrand
+ wine_fn_config_makefile dlls/windebug.dll16 enable_win16
+ wine_fn_config_makefile dlls/windows.applicationmodel enable_windows_applicationmodel
+ wine_fn_config_makefile dlls/windows.applicationmodel/tests enable_tests
++wine_fn_config_makefile dlls/windows.applicationmodel.calls enable_windows_applicationmodel_calls
+ wine_fn_config_makefile dlls/windows.devices.bluetooth enable_windows_devices_bluetooth
+ wine_fn_config_makefile dlls/windows.devices.bluetooth/tests enable_tests
+ wine_fn_config_makefile dlls/windows.devices.enumeration enable_windows_devices_enumeration
+@@ -23837,6 +23840,7 @@ wine_fn_config_makefile dlls/windows.networking.connectivity/tests enable_tests
+ wine_fn_config_makefile dlls/windows.networking.hostname enable_windows_networking_hostname
+ wine_fn_config_makefile dlls/windows.networking.hostname/tests enable_tests
+ wine_fn_config_makefile dlls/windows.networking enable_windows_networking
++wine_fn_config_makefile dlls/windows.networking.sockets enable_windows_networking_sockets
+ wine_fn_config_makefile dlls/windows.perception.stub enable_windows_perception_stub
+ wine_fn_config_makefile dlls/windows.perception.stub/tests enable_tests
+ wine_fn_config_makefile dlls/windows.security.authentication.onlineid enable_windows_security_authentication_onlineid
+diff --git a/configure.ac b/configure.ac
+index f79553a..c50cbb2 100644
+--- a/configure.ac
++++ b/configure.ac
+@@ -3312,6 +3312,7 @@ WINE_CONFIG_MAKEFILE(dlls/winbrand)
+ WINE_CONFIG_MAKEFILE(dlls/windebug.dll16)
+ WINE_CONFIG_MAKEFILE(dlls/windows.applicationmodel)
+ WINE_CONFIG_MAKEFILE(dlls/windows.applicationmodel/tests)
++WINE_CONFIG_MAKEFILE(dlls/windows.applicationmodel.calls)
+ WINE_CONFIG_MAKEFILE(dlls/windows.devices.bluetooth)
+ WINE_CONFIG_MAKEFILE(dlls/windows.devices.bluetooth/tests)
+ WINE_CONFIG_MAKEFILE(dlls/windows.devices.enumeration)
+@@ -3345,6 +3346,7 @@ WINE_CONFIG_MAKEFILE(dlls/windows.networking.connectivity/tests)
+ WINE_CONFIG_MAKEFILE(dlls/windows.networking.hostname)
+ WINE_CONFIG_MAKEFILE(dlls/windows.networking.hostname/tests)
+ WINE_CONFIG_MAKEFILE(dlls/windows.networking)
++WINE_CONFIG_MAKEFILE(dlls/windows.networking.sockets)
+ WINE_CONFIG_MAKEFILE(dlls/windows.perception.stub)
+ WINE_CONFIG_MAKEFILE(dlls/windows.perception.stub/tests)
+ WINE_CONFIG_MAKEFILE(dlls/windows.security.authentication.onlineid)
+diff --git a/dlls/combase/roapi.c b/dlls/combase/roapi.c
+index bca958a..7c0654d 100644
+--- a/dlls/combase/roapi.c
++++ b/dlls/combase/roapi.c
+@@ -61,14 +61,104 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
+         return S_OK;
+     }
+ 
++    if (!wcscmp(classid, L"Windows.ApplicationModel.Background.BackgroundExecutionManager") ||
++        !wcsncmp(classid, L"Windows.Networking.PushNotifications.", 37) ||
++        !wcscmp(classid, L"Windows.ApplicationModel.AppInstance") ||
++        !wcscmp(classid, L"Microsoft.Windows.AppLifecycle.AppInstance") ||
++        !wcscmp(classid, L"Windows.ApplicationModel.StartupTask") ||
++        (!wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.", 38) &&
++         wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47)))
++    {
++        *out = wcsdup(L"twinapi.appcore.dll");
++        return S_OK;
++    }
++
++    if (!wcsncmp(classid, L"Windows.Security.Cryptography.", 30))
++    {
++        *out = wcsdup(L"cryptowinrt.dll");
++        return S_OK;
++    }
++
++    if (!wcsncmp(classid, L"Microsoft.Web.WebView2.Core.", 28))
++    {
++        *out = wcsdup(L"Microsoft.Web.WebView2.Core.dll");
++        return S_OK;
++    }
++
++    if (!wcsncmp(classid, L"WhatsAppNative.", 15))
++    {
++        if (!wcsncmp(classid, L"WhatsAppNative.Voip.", 20))
++            *out = wcsdup(L"WhatsAppNative.Voip.dll");
++        else
++            *out = wcsdup(L"WhatsAppNative.dll");
++        return S_OK;
++    }
++
++    if (!wcsncmp(classid, L"Windows.ApplicationModel.Calls.", 31))
++    {
++        *out = wcsdup(L"windows.applicationmodel.calls.dll");
++        return S_OK;
++    }
++
++    if (!wcsncmp(classid, L"Windows.Web.Http.", 17))
++    {
++        *out = wcsdup(L"windows.web.dll");
++        return S_OK;
++    }
++
++    if (!wcsncmp(classid, L"Windows.Networking.Sockets.", 27))
++    {
++        *out = wcsdup(L"windows.networking.sockets.dll");
++        return S_OK;
++    }
++
++    if (!wcsncmp(classid, L"Windows.Media.Editing.", 22) ||
++        !wcsncmp(classid, L"Windows.Media.Transcoding.", 26) ||
++        !wcsncmp(classid, L"Windows.Media.ClosedCaptioning.", 31))
++    {
++        *out = wcsdup(L"windows.media.dll");
++        return S_OK;
++    }
++
+     /* load class registry key */
+     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId",
+                       0, KEY_READ, &hkey_root))
+         return REGDB_E_READREGDB;
+     if (RegOpenKeyExW(hkey_root, classid, 0, KEY_READ, &hkey_class))
+     {
+-        WARN("Class %s not found in registry\n", debugstr_w(classid));
++        const WCHAR *dot;
+         RegCloseKey(hkey_root);
++        if ((dot = wcsrchr(classid, '.')))
++        {
++            size_t len = dot - classid;
++            WCHAR dll_name[MAX_PATH];
++            HMODULE h;
++            wcsncpy(dll_name, classid, len);
++            wcscpy(dll_name + len, L".dll");
++            if ((h = LoadLibraryW(dll_name)))
++            {
++                FreeLibrary(h);
++                ERR("combase: found packaged class %s in %s\n", debugstr_w(classid), debugstr_w(dll_name));
++                *out = wcsdup(dll_name);
++                return S_OK;
++            }
++        }
++        if ((dot = wcschr(classid, '.')))
++        {
++            size_t len = dot - classid;
++            WCHAR dll_name[MAX_PATH];
++            HMODULE h;
++            wcsncpy(dll_name, classid, len);
++            wcscpy(dll_name + len, L".dll");
++            if ((h = LoadLibraryW(dll_name)))
++            {
++                FreeLibrary(h);
++                ERR("combase: found packaged class %s in %s\n", debugstr_w(classid), debugstr_w(dll_name));
++                *out = wcsdup(dll_name);
++                return S_OK;
++            }
++        }
++        WARN("Class %s not found in registry\n", debugstr_w(classid));
+         return REGDB_E_CLASSNOTREG;
+     }
+     RegCloseKey(hkey_root);
+@@ -141,6 +231,148 @@ void WINAPI RoUninitialize(void)
+     CoUninitialize();
+ }
+ 
++static const GUID IID___IMiscCppStatics = {0x4faf8f1c, 0x82bf, 0x38b0, {0xb4, 0xf8, 0x87, 0xd9, 0xaf, 0xac, 0x4f, 0x83}};
++static const GUID IID___IMiscCppPublicNonVirtuals = {0x0ac1970e, 0xc24e, 0x391e, {0xbb, 0xad, 0xd1, 0xe4, 0x8e, 0x90, 0x1e, 0x27}};
++
++static const void *misccpp_instance_vtbl[];
++static const void *misccpp_factory_vtbl[];
++static const void *misccpp_statics_vtbl[];
++
++static const void *misccpp_instance_obj = misccpp_instance_vtbl;
++
++struct misccpp_factory_impl
++{
++    const void *factory_vtbl;
++    const void *statics_vtbl;
++};
++static struct misccpp_factory_impl misccpp_factory_obj = { misccpp_factory_vtbl, misccpp_statics_vtbl };
++
++static HRESULT WINAPI misccpp_QueryInterface(void *iface, REFIID iid, void **out)
++{
++    if (IsEqualGUID(iid, &IID_IUnknown) ||
++        IsEqualGUID(iid, &IID_IInspectable) ||
++        IsEqualGUID(iid, &IID___IMiscCppPublicNonVirtuals))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI misccpp_AddRef(void *iface) { return 2; }
++static ULONG WINAPI misccpp_Release(void *iface) { return 1; }
++static HRESULT WINAPI misccpp_GetIids(void *iface, ULONG *c, IID **i) { return E_NOTIMPL; }
++static HRESULT WINAPI misccpp_GetRuntimeClassName(void *iface, HSTRING *n)
++{
++    return WindowsCreateString(L"WhatsAppNative.MiscCpp", 22, n);
++}
++static HRESULT WINAPI misccpp_GetTrustLevel(void *iface, TrustLevel *l)
++{
++    if (l) *l = BaseTrust;
++    return S_OK;
++}
++static HRESULT WINAPI misccpp_GetTickCount(void *iface, ULONGLONG *out)
++{
++    if (out) *out = GetTickCount64();
++    return S_OK;
++}
++static HRESULT WINAPI misccpp_GetCurrThreadId(void *iface, DWORD *out)
++{
++    if (out) *out = GetCurrentThreadId();
++    return S_OK;
++}
++static HRESULT WINAPI misccpp_stub_ok(void *iface) { return S_OK; }
++static HRESULT WINAPI misccpp_stub_bool(void *iface, BOOLEAN *out)
++{
++    if (out) *out = FALSE;
++    return S_OK;
++}
++
++static const void *misccpp_instance_vtbl[] =
++{
++    misccpp_QueryInterface,
++    misccpp_AddRef,
++    misccpp_Release,
++    misccpp_GetIids,
++    misccpp_GetRuntimeClassName,
++    misccpp_GetTrustLevel,
++    misccpp_GetTickCount,
++    misccpp_GetCurrThreadId,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_bool,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_bool,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++    misccpp_stub_ok,
++};
++
++static HRESULT WINAPI misccpp_factory_QueryInterface(void *iface, REFIID iid, void **out)
++{
++    if (IsEqualGUID(iid, &IID___IMiscCppStatics))
++    {
++        *out = &misccpp_factory_obj.statics_vtbl;
++        return S_OK;
++    }
++    if (IsEqualGUID(iid, &IID_IUnknown) ||
++        IsEqualGUID(iid, &IID_IInspectable) ||
++        IsEqualGUID(iid, &IID_IActivationFactory))
++    {
++        *out = &misccpp_factory_obj.factory_vtbl;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static HRESULT WINAPI misccpp_statics_QueryInterface(void *iface, REFIID iid, void **out)
++{
++    return misccpp_factory_QueryInterface(iface, iid, out);
++}
++static HRESULT WINAPI misccpp_factory_ActivateInstance(void *iface, IInspectable **instance)
++{
++    if (instance) *instance = (IInspectable *)&misccpp_instance_obj;
++    return S_OK;
++}
++static HRESULT WINAPI misccpp_statics_ThrowExceptionIfError(void *iface, INT32 hr)
++{
++    if (FAILED(hr)) return hr;
++    return S_OK;
++}
++
++static const void *misccpp_factory_vtbl[] =
++{
++    misccpp_factory_QueryInterface,
++    misccpp_AddRef,
++    misccpp_Release,
++    misccpp_GetIids,
++    misccpp_GetRuntimeClassName,
++    misccpp_GetTrustLevel,
++    misccpp_factory_ActivateInstance,
++};
++
++static const void *misccpp_statics_vtbl[] =
++{
++    misccpp_statics_QueryInterface,
++    misccpp_AddRef,
++    misccpp_Release,
++    misccpp_GetIids,
++    misccpp_GetRuntimeClassName,
++    misccpp_GetTrustLevel,
++    misccpp_statics_ThrowExceptionIfError,
++};
++
+ /***********************************************************************
+  *      RoGetActivationFactory (combase.@)
+  */
+@@ -157,6 +389,62 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID
+     if (!iid || !class_factory)
+         return E_INVALIDARG;
+ 
++    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"WhatsAppNative.MiscCpp"))
++    {
++        return misccpp_factory_QueryInterface(NULL, iid, class_factory);
++    }
++
++    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"WhatsAppNative.Sqlite") ||
++        !wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"WhatsAppNative.SqlitePreparedStatement"))
++    {
++        HMODULE hMod = GetModuleHandleW(L"WhatsAppNative.dll");
++        if (!hMod) hMod = LoadLibraryW(L"WhatsAppNative.dll");
++        if (hMod)
++        {
++            typedef HRESULT (WINAPI *pfn_creator)(UINT32 *flags, const WCHAR *server_name, REFIID riid, void **factory);
++            pfn_creator creator = NULL;
++            const WCHAR *name = WindowsGetStringRawBuffer(classid, NULL);
++            if (!wcscmp(name, L"WhatsAppNative.Sqlite"))
++                creator = (void *)((BYTE *)hMod + 0x49320);
++            else
++                creator = (void *)((BYTE *)hMod + 0x48990);
++            UINT32 flags = 5;
++            hr = creator(&flags, NULL, iid, class_factory);
++            ERR("top-level creator for %s returned hr %#lx, factory %p\n", debugstr_w(name), hr, *class_factory);
++            if (SUCCEEDED(hr)) return S_OK;
++        }
++    }
++
++    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"WhatsAppNative.Voip.VoipFactory"))
++    {
++        HMODULE hMod = GetModuleHandleW(L"WhatsAppNative.Voip.dll");
++        if (!hMod) hMod = LoadLibraryW(L"WhatsAppNative.Voip.dll");
++        if (hMod)
++        {
++            typedef HRESULT (WINAPI *pfn_creator)(UINT32 *flags, const WCHAR *server_name, REFIID riid, void **factory);
++            pfn_creator creator = (void *)((BYTE *)hMod + 0x7ff050);
++            UINT32 flags = 5;
++            hr = creator(&flags, NULL, iid, class_factory);
++            ERR("top-level creator for WhatsAppNative.Voip.VoipFactory returned hr %#lx, factory %p\n", hr, *class_factory);
++            if (SUCCEEDED(hr)) return S_OK;
++        }
++    }
++
++    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"Windows.ApplicationModel.Resources.ResourceLoader"))
++    {
++        HMODULE hMod = LoadLibraryW(L"twinapi.appcore.dll");
++        if (hMod)
++        {
++            PFNGETACTIVATIONFACTORY pfn = (void *)GetProcAddress(hMod, "DllGetActivationFactory");
++            if (pfn && SUCCEEDED(pfn(classid, &factory)))
++            {
++                hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
++                IActivationFactory_Release(factory);
++                return hr;
++            }
++        }
++    }
++
+     if (FAILED(hr = ensure_mta()))
+         return hr;
+ 
+@@ -184,11 +472,46 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID
+     TRACE("Found library %s for class %s\n", debugstr_w(library), debugstr_hstring(classid));
+ 
+     hr = pDllGetActivationFactory(classid, &factory);
++    ERR("pDllGetActivationFactory for %s returned hr %#lx, factory %p\n", debugstr_hstring(classid), hr, factory);
++    if (FAILED(hr) && module)
++    {
++        const WCHAR *name = WindowsGetStringRawBuffer(classid, NULL);
++        typedef HRESULT (WINAPI *pfn_creator)(UINT32 *flags, const WCHAR *server_name, REFIID riid, void **factory);
++        pfn_creator creator = NULL;
++
++        if (!wcscmp(name, L"WhatsAppNative.Sqlite"))
++            creator = (void *)((BYTE *)module + 0x49320);
++        else if (!wcscmp(name, L"WhatsAppNative.MiscCpp"))
++            creator = (void *)((BYTE *)module + 0x49f50);
++        else if (!wcscmp(name, L"WhatsAppNative.SqlitePreparedStatement"))
++            creator = (void *)((BYTE *)module + 0x48990);
++
++        if (creator)
++        {
++            UINT32 flags = 5;
++            hr = creator(&flags, NULL, iid, class_factory);
++            ERR("native creator for %s returned hr %#lx, class_factory %p\n", debugstr_w(name), hr, *class_factory);
++            if (SUCCEEDED(hr))
++            {
++                TRACE("Created interface %p from native creator for %s\n", *class_factory, debugstr_w(name));
++                module = NULL;
++                goto done;
++            }
++        }
++    }
+     if (SUCCEEDED(hr))
+     {
+         hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
+         if (SUCCEEDED(hr))
+         {
++            const WCHAR *cname = WindowsGetStringRawBuffer(classid, NULL);
++            if (cname && !wcscmp(cname, L"Microsoft.UI.Content.DesktopChildSiteBridge"))
++            {
++                void *obj = *class_factory;
++                void **vtable = obj ? *(void ***)obj : NULL;
++                ERR("DesktopChildSiteBridge: obj %p, vtable %p, Create %p\n",
++                    obj, vtable, vtable ? vtable[6] : NULL);
++            }
+             TRACE("Created interface %p\n", *class_factory);
+             module = NULL;
+         }
+@@ -232,8 +555,15 @@ HRESULT WINAPI RoActivateInstance(HSTRING classid, IInspectable **instance)
+     if (SUCCEEDED(hr))
+     {
+         hr = IActivationFactory_ActivateInstance(factory, instance);
++        ERR("RoActivateInstance (%s) returned hr 0x%08lx, instance %p\n",
++            wine_dbgstr_hstring(classid), hr, instance ? *instance : NULL);
+         IActivationFactory_Release(factory);
+     }
++    else
++    {
++        ERR("RoActivateInstance (%s) RoGetActivationFactory failed hr 0x%08lx\n",
++            wine_dbgstr_hstring(classid), hr);
++    }
+ 
+     return hr;
+ }
+@@ -452,6 +782,15 @@ void WINAPI RoFailFastWithErrorContextInternal2(HRESULT error, ULONG exception_c
+                 FIXME("  stowed[%lu] at %p:\n", i, p);
+                 for (j = 0; j < 8; j++)
+                     FIXME("    [%02lu] %016llx\n", j, q[j]);
++                if (q[4])
++                {
++                    ULONG64 *bt = (ULONG64 *)q[4];
++                    DWORD count = (DWORD)(q[3] & 0xffffffff);
++                    DWORD s_idx;
++                    ERR("  stowed stack trace (count %lu):\n", count);
++                    for (s_idx = 0; s_idx < count && s_idx < 16; s_idx++)
++                        ERR("    stowed_bt[%lu] = %016llx\n", s_idx, bt[s_idx]);
++                }
+             }
+         }
+     }
+@@ -519,8 +858,9 @@ HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONF
+  */
+ HRESULT WINAPI GetRestrictedErrorInfo(IRestrictedErrorInfo **info)
+ {
+-    FIXME( "(%p)\n", info );
+-    return E_NOTIMPL;
++    TRACE( "(%p)\n", info );
++    if (info) *info = NULL;
++    return S_FALSE;
+ }
+ 
+ /***********************************************************************
+@@ -528,8 +868,8 @@ HRESULT WINAPI GetRestrictedErrorInfo(IRestrictedErrorInfo **info)
+  */
+ HRESULT WINAPI SetRestrictedErrorInfo(IRestrictedErrorInfo *info)
+ {
+-    FIXME( "(%p)\n", info );
+-    return E_NOTIMPL;
++    TRACE( "(%p)\n", info );
++    return S_OK;
+ }
+ 
+ /***********************************************************************
+@@ -537,7 +877,60 @@ HRESULT WINAPI SetRestrictedErrorInfo(IRestrictedErrorInfo *info)
+  */
+ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknown *language_exception)
+ {
+-    FIXME("%#lx, %s, %p: stub\n", error, debugstr_hstring(message), language_exception);
++    void *frames[32];
++    USHORT n_frames, k;
++
++    ERR("RoOriginateLanguageException: error %#lx, message %s, exception %p\n", error, debugstr_hstring(message), language_exception);
++    if (language_exception)
++    {
++        IRestrictedErrorInfo *restricted;
++        IErrorInfo *error_info;
++        static const GUID IID_IRestrictedErrorInfo = {0x82ba70a5, 0x79a1, 0x4fe8, {0x8c, 0xe5, 0x13, 0xe5, 0x72, 0x33, 0x9f, 0x04}};
++        static const GUID IID_IErrorInfo = {0x1cf2b43f, 0x97b2, 0x11cf, {0xb8, 0xf2, 0x00, 0xaa, 0x00, 0x6e, 0x34, 0xdb}};
++        static const GUID IID__Exception = {0xb36b5c63, 0x42ef, 0x38bc, {0xa7, 0x12, 0x34, 0x6b, 0x6a, 0x70, 0x34, 0x22}};
++        void *pException = NULL;
++
++        if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID__Exception, &pException)))
++        {
++            void **vtbl = *(void ***)pException;
++            HRESULT (STDMETHODCALLTYPE *get_ToString)(void *, BSTR *) = (void *)vtbl[7];
++            BSTR str = NULL;
++            if (SUCCEEDED(get_ToString(pException, &str)))
++            {
++                ERR("  ManagedException: %s\n", wine_dbgstr_w(str));
++                SysFreeString(str);
++            }
++            IUnknown_Release((IUnknown *)pException);
++        }
++
++        if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID_IRestrictedErrorInfo, (void **)&restricted)))
++        {
++            BSTR desc = NULL, rest = NULL, cap = NULL;
++            HRESULT code = 0;
++            if (SUCCEEDED(IRestrictedErrorInfo_GetErrorDetails(restricted, &desc, &code, &rest, &cap)))
++            {
++                ERR("  RestrictedError: desc=%s, code=%#lx, restricted=%s\n",
++                    wine_dbgstr_w(desc), code, wine_dbgstr_w(rest));
++                SysFreeString(desc);
++                SysFreeString(rest);
++                SysFreeString(cap);
++            }
++            IRestrictedErrorInfo_Release(restricted);
++        }
++        else if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID_IErrorInfo, (void **)&error_info)))
++        {
++            BSTR desc = NULL;
++            if (SUCCEEDED(IErrorInfo_GetDescription(error_info, &desc)))
++            {
++                ERR("  ErrorInfo: desc=%s\n", wine_dbgstr_w(desc));
++                SysFreeString(desc);
++            }
++            IErrorInfo_Release(error_info);
++        }
++    }
++    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
++    for (k = 0; k < n_frames; k++)
++        ERR("  originate_lang_bt[%u] = %p\n", k, frames[k]);
+     return FALSE;
+ }
+ 
+@@ -546,7 +939,13 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
+  */
+ BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
+ {
+-    FIXME("%#lx, %s: stub\n", error, debugstr_hstring(message));
++    void *frames[32];
++    USHORT n_frames, k;
++
++    ERR("%#lx, %s\n", error, debugstr_hstring(message));
++    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
++    for (k = 0; k < n_frames; k++)
++        ERR("  originate_error_bt[%u] = %p\n", k, frames[k]);
+     return FALSE;
+ }
+ 
+@@ -555,7 +954,13 @@ BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
+  */
+ BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
+ {
+-    FIXME("%#lx, %u, %s: stub\n", error, max_len, wine_dbgstr_wn(message, max_len));
++    void *frames[32];
++    USHORT n_frames, k;
++
++    ERR("RoOriginateErrorW: error %#lx, max_len %u, message %s\n", error, max_len, wine_dbgstr_wn(message, max_len));
++    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
++    for (k = 0; k < n_frames; k++)
++        ERR("  originate_bt[%u] = %p\n", k, frames[k]);
+     return FALSE;
+ }
+ 
+diff --git a/dlls/windows.web/Makefile.in b/dlls/windows.web/Makefile.in
+index aaaacd6..de7ff02 100644
+--- a/dlls/windows.web/Makefile.in
++++ b/dlls/windows.web/Makefile.in
+@@ -3,6 +3,7 @@ IMPORTS = combase
+ 
+ SOURCES = \
+ 	classes.idl \
++	http.c \
+ 	json_array.c \
+ 	json_object.c \
+ 	json_value.c \
+diff --git a/dlls/windows.web/classes.idl b/dlls/windows.web/classes.idl
+index 266f560..d5a38a9 100644
+--- a/dlls/windows.web/classes.idl
++++ b/dlls/windows.web/classes.idl
+@@ -28,3 +28,11 @@ namespace Windows.Data.Json {
+     runtimeclass JsonObject;
+     runtimeclass JsonValue;
+ }
++
++namespace Windows.Web.Http {
++    runtimeclass HttpClient;
++    runtimeclass HttpRequestMessage;
++    runtimeclass HttpResponseMessage;
++    runtimeclass HttpStringContent;
++    runtimeclass HttpMethod;
++}
+diff --git a/dlls/windows.web/main.c b/dlls/windows.web/main.c
+index bec92a8..0c97c54 100644
+--- a/dlls/windows.web/main.c
++++ b/dlls/windows.web/main.c
+@@ -45,6 +45,17 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
+     if (!wcscmp( buffer, RuntimeClass_Windows_Data_Json_JsonValue ))
+         IActivationFactory_QueryInterface( json_value_factory, &IID_IActivationFactory, (void **)factory );
+ 
++    if (!wcscmp( buffer, L"Windows.Web.Http.HttpClient" ))
++        IActivationFactory_QueryInterface( http_client_factory, &IID_IActivationFactory, (void **)factory );
++    if (!wcscmp( buffer, L"Windows.Web.Http.HttpRequestMessage" ))
++        IActivationFactory_QueryInterface( http_request_factory, &IID_IActivationFactory, (void **)factory );
++    if (!wcscmp( buffer, L"Windows.Web.Http.HttpResponseMessage" ))
++        IActivationFactory_QueryInterface( http_response_factory, &IID_IActivationFactory, (void **)factory );
++    if (!wcscmp( buffer, L"Windows.Web.Http.HttpStringContent" ))
++        IActivationFactory_QueryInterface( http_string_content_factory, &IID_IActivationFactory, (void **)factory );
++    if (!wcscmp( buffer, L"Windows.Web.Http.HttpMethod" ))
++        IActivationFactory_QueryInterface( http_method_factory, &IID_IActivationFactory, (void **)factory );
++
+     if (*factory) return S_OK;
+     return CLASS_E_CLASSNOTAVAILABLE;
+ }
+diff --git a/dlls/windows.web/private.h b/dlls/windows.web/private.h
+index 6722d69..6f12910 100644
+--- a/dlls/windows.web/private.h
++++ b/dlls/windows.web/private.h
+@@ -41,6 +41,12 @@ extern IActivationFactory *json_array_factory;
+ extern IActivationFactory *json_object_factory;
+ extern IActivationFactory *json_value_factory;
+ 
++extern IActivationFactory *http_client_factory;
++extern IActivationFactory *http_request_factory;
++extern IActivationFactory *http_response_factory;
++extern IActivationFactory *http_string_content_factory;
++extern IActivationFactory *http_method_factory;
++
+ HRESULT json_array_push( IJsonArray *iface, IJsonValue *value );
+ 
+ #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
+--- /dev/null	2026-10-17 22:37:26.392623299 +0500
++++ dlls/windows.web/http.c	2026-10-19 19:43:17.967610832 +0500
+@@ -0,0 +1,1611 @@
++/* WinRT Windows.Web.Http Implementation
++ *
++ * Copyright (C) 2026 Wine Developers
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <stdarg.h>
++#define COBJMACROS
++#include "windef.h"
++#include "winbase.h"
++#include "winstring.h"
++#include "activation.h"
++#include "roapi.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(web);
++
++static const GUID IID_IClosable = {0x3028b027, 0x6029, 0x47e6, {0x81, 0xa1, 0x65, 0x5b, 0x3b, 0x3c, 0x52, 0x0f}};
++static const GUID IID_IStringable = {0x96369f54, 0x8eb6, 0x48f0, {0xac, 0x91, 0xdd, 0x13, 0x7f, 0x61, 0xdf, 0xb7}};
++
++static const GUID IID_IHttpClient = {0x7FDA1151, 0x3574, 0x4880, {0xA8, 0xBA, 0xE6, 0xB1, 0xE0, 0x06, 0x1F, 0x3D}};
++static const GUID IID_IHttpClient2 = {0xCDD83348, 0xE8B7, 0x4CEC, {0xB1, 0xB0, 0xDC, 0x45, 0x5F, 0xE7, 0x2C, 0x92}};
++static const GUID IID_IHttpClientFactory = {0xC30C4ECA, 0xE3FA, 0x4F99, {0xAF, 0xB4, 0x63, 0xCC, 0x65, 0x00, 0x94, 0x62}};
++
++static const GUID IID_IHttpRequestMessage = {0xF5762B3C, 0x74D4, 0x4811, {0xB5, 0xDC, 0x9F, 0x8B, 0x4E, 0x2F, 0x9A, 0xBF}};
++static const GUID IID_IHttpRequestMessageFactory = {0x5BAC994E, 0x3886, 0x412E, {0xAE, 0xC3, 0x52, 0xEC, 0x7F, 0x25, 0x61, 0x6F}};
++
++static const GUID IID_IHttpResponseMessage = {0xFEE200FB, 0x8664, 0x44E0, {0x95, 0xD9, 0x42, 0x69, 0x61, 0x99, 0xBF, 0xFC}};
++static const GUID IID_IHttpResponseMessageFactory = {0x52A8AF99, 0xF095, 0x43DA, {0xB6, 0x0F, 0x7C, 0xFC, 0x2B, 0xC7, 0xEA, 0x2F}};
++
++static const GUID IID_IHttpContent = {0x6B14A441, 0xFBA7, 0x4BD2, {0xAF, 0x0A, 0x83, 0x9D, 0xE7, 0xC2, 0x95, 0xDA}};
++static const GUID IID_IHttpStringContentFactory = {0x46649D5B, 0x2E93, 0x48EB, {0x8E, 0x61, 0x19, 0x67, 0x78, 0x78, 0xE5, 0x7F}};
++
++static const GUID IID_IHttpMethod = {0x728D4022, 0x700D, 0x4FE0, {0xAF, 0xA5, 0x40, 0x29, 0x9C, 0x58, 0xDB, 0xFD}};
++static const GUID IID_IHttpMethodFactory = {0x3C51D10D, 0x36D7, 0x40F8, {0xA8, 0x6D, 0xE7, 0x59, 0xCA, 0xF2, 0xF8, 0x3F}};
++static const GUID IID_IHttpMethodStatics = {0x64D171F0, 0xD99A, 0x4153, {0x8D, 0xC6, 0xD6, 0x8C, 0xC4, 0xCC, 0xE3, 0x17}};
++
++static const GUID IID_IHttpRequestHeaderCollection = {0xAF40329B, 0xB544, 0x469B, {0x86, 0xB9, 0xAC, 0x3D, 0x46, 0x6F, 0xEA, 0x36}};
++static const GUID IID_IHttpResponseHeaderCollection = {0x7A990969, 0xFA3F, 0x41ED, {0xAA, 0xC6, 0xBF, 0x95, 0x79, 0x75, 0xC1, 0x6B}};
++static const GUID IID_IHttpContentHeaderCollection = {0x40612A44, 0x47AE, 0x4B7E, {0x91, 0x24, 0x69, 0x62, 0x8B, 0x64, 0xAA, 0x18}};
++
++static const GUID IID_IHttpTransportInformation = {0x70127198, 0xC6A7, 0x4ED0, {0x83, 0x3A, 0x83, 0xFD, 0x8B, 0x8F, 0x17, 0x8D}};
++
++static const GUID IID_IAsyncInfo = {0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
++
++static HRESULT create_http_response( INT32 status_code, void **out );
++static HRESULT create_http_string_content( HSTRING content, void **out );
++static HRESULT create_http_headers( const GUID *collection_iid, void **out );
++static HRESULT create_http_method( HSTRING method, void **out );
++static HRESULT create_async_http_op( void *result_obj, HSTRING result_str, BOOL is_str, void **out );
++
++/* --- Async Operation with Progress for HTTP --- */
++
++struct async_http_op
++{
++    const void *vtbl_op;
++    const void *vtbl_info;
++    LONG ref;
++    IInspectable *result_obj;
++    HSTRING result_str;
++    BOOL is_str;
++};
++
++static inline struct async_http_op *impl_from_async_op( void *iface )
++{
++    return (struct async_http_op *)iface;
++}
++
++static inline struct async_http_op *impl_from_async_info( void *iface )
++{
++    return (struct async_http_op *)((BYTE *)iface - sizeof(void *));
++}
++
++static HRESULT WINAPI async_http_op_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct async_http_op *impl = impl_from_async_op( iface );
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ))
++    {
++        *out = &impl->vtbl_op;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++
++    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
++    {
++        *out = &impl->vtbl_info;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++
++    /* Accept parameterized IAsyncOperation or IAsyncOperationWithProgress */
++    *out = &impl->vtbl_op;
++    InterlockedIncrement( &impl->ref );
++    return S_OK;
++}
++
++static ULONG WINAPI async_http_op_AddRef( void *iface )
++{
++    struct async_http_op *impl = impl_from_async_op( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++
++static ULONG WINAPI async_http_op_Release( void *iface )
++{
++    struct async_http_op *impl = impl_from_async_op( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->result_obj) IInspectable_Release( impl->result_obj );
++        if (impl->result_str) WindowsDeleteString( impl->result_str );
++        free( impl );
++    }
++    return ref;
++}
++
++static HRESULT WINAPI async_http_op_GetIids( void *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
++static HRESULT WINAPI async_http_op_GetRuntimeClassName( void *iface, HSTRING *name ) { return E_NOTIMPL; }
++static HRESULT WINAPI async_http_op_GetTrustLevel( void *iface, TrustLevel *level ) { if (level) *level = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI async_http_op_put_Progress( void *iface, void *handler ) { return S_OK; }
++static HRESULT WINAPI async_http_op_get_Progress( void *iface, void **handler ) { if (handler) *handler = NULL; return S_OK; }
++
++static HRESULT WINAPI async_http_op_put_Completed( void *iface, void *handler )
++{
++    if (handler)
++    {
++        typedef HRESULT (WINAPI *invoke_fn)( void *handler, void *async, int status );
++        void **vtbl = *(void ***)handler;
++        invoke_fn invoke = (invoke_fn)vtbl[3];
++        invoke( handler, iface, 1 /* Completed */ );
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI async_http_op_get_Completed( void *iface, void **handler )
++{
++    if (handler) *handler = NULL;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_http_op_GetResults( void *iface, void *results )
++{
++    struct async_http_op *impl = impl_from_async_op( iface );
++
++    if (!results) return E_POINTER;
++    if (impl->is_str)
++    {
++        HSTRING *out_str = results;
++        if (impl->result_str)
++            return WindowsDuplicateString( impl->result_str, out_str );
++        return WindowsCreateString( L"", 0, out_str );
++    }
++    else
++    {
++        IInspectable **out_obj = results;
++        if (impl->result_obj)
++            IInspectable_AddRef( impl->result_obj );
++        *out_obj = impl->result_obj;
++        return S_OK;
++    }
++}
++
++static const void *async_http_op_vtbl[] =
++{
++    async_http_op_QueryInterface,
++    async_http_op_AddRef,
++    async_http_op_Release,
++    async_http_op_GetIids,
++    async_http_op_GetRuntimeClassName,
++    async_http_op_GetTrustLevel,
++    async_http_op_put_Progress,
++    async_http_op_get_Progress,
++    async_http_op_put_Completed,
++    async_http_op_get_Completed,
++    async_http_op_GetResults,
++};
++
++static HRESULT WINAPI async_http_info_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct async_http_op *impl = impl_from_async_info( iface );
++    return async_http_op_QueryInterface( &impl->vtbl_op, iid, out );
++}
++static ULONG WINAPI async_http_info_AddRef( void *iface )
++{
++    struct async_http_op *impl = impl_from_async_info( iface );
++    return async_http_op_AddRef( &impl->vtbl_op );
++}
++static ULONG WINAPI async_http_info_Release( void *iface )
++{
++    struct async_http_op *impl = impl_from_async_info( iface );
++    return async_http_op_Release( &impl->vtbl_op );
++}
++static HRESULT WINAPI async_http_info_GetIids( void *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
++static HRESULT WINAPI async_http_info_GetRuntimeClassName( void *iface, HSTRING *name ) { return E_NOTIMPL; }
++static HRESULT WINAPI async_http_info_GetTrustLevel( void *iface, TrustLevel *level ) { if (level) *level = BaseTrust; return S_OK; }
++static HRESULT WINAPI async_http_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
++static HRESULT WINAPI async_http_info_get_Status( void *iface, int *status ) { if (status) *status = 1 /* Completed */; return S_OK; }
++static HRESULT WINAPI async_http_info_get_ErrorCode( void *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
++static HRESULT WINAPI async_http_info_Cancel( void *iface ) { return S_OK; }
++static HRESULT WINAPI async_http_info_Close( void *iface ) { return S_OK; }
++
++static const void *async_http_info_vtbl[] =
++{
++    async_http_info_QueryInterface,
++    async_http_info_AddRef,
++    async_http_info_Release,
++    async_http_info_GetIids,
++    async_http_info_GetRuntimeClassName,
++    async_http_info_GetTrustLevel,
++    async_http_info_get_Id,
++    async_http_info_get_Status,
++    async_http_info_get_ErrorCode,
++    async_http_info_Cancel,
++    async_http_info_Close,
++};
++
++static HRESULT create_async_http_op( void *result_obj, HSTRING result_str, BOOL is_str, void **out )
++{
++    struct async_http_op *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_op = async_http_op_vtbl;
++    impl->vtbl_info = async_http_info_vtbl;
++    impl->ref = 1;
++    impl->is_str = is_str;
++    if (is_str && result_str)
++        WindowsDuplicateString( result_str, &impl->result_str );
++    else if (!is_str && result_obj)
++    {
++        IInspectable_AddRef( (IInspectable *)result_obj );
++        impl->result_obj = (IInspectable *)result_obj;
++    }
++    *out = &impl->vtbl_op;
++    return S_OK;
++}
++
++/* --- Header Collections --- */
++
++struct http_headers
++{
++    const void *vtbl_headers;
++    LONG ref;
++    GUID iid;
++};
++
++static HRESULT WINAPI headers_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct http_headers *impl = iface;
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &impl->iid ) ||
++        IsEqualGUID( iid, &IID_IStringable ))
++    {
++        *out = iface;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI headers_AddRef( void *iface )
++{
++    struct http_headers *impl = iface;
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI headers_Release( void *iface )
++{
++    struct http_headers *impl = iface;
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref) free( impl );
++    return ref;
++}
++static HRESULT WINAPI headers_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI headers_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI headers_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI headers_Append( void *iface, HSTRING name, HSTRING value )
++{
++    TRACE( "name %s, value %s\n", debugstr_hstring( name ), debugstr_hstring( value ) );
++    return S_OK;
++}
++static HRESULT WINAPI headers_TryAppendWithoutValidation( void *iface, HSTRING name, HSTRING value, boolean *succeeded )
++{
++    TRACE( "name %s, value %s\n", debugstr_hstring( name ), debugstr_hstring( value ) );
++    if (succeeded) *succeeded = TRUE;
++    return S_OK;
++}
++static HRESULT WINAPI headers_stub_ok( void *iface ) { return S_OK; }
++static HRESULT WINAPI headers_stub_null( void *iface, void **out ) { if (out) *out = NULL; return S_OK; }
++
++static const void *http_headers_vtbl[] =
++{
++    headers_QueryInterface,
++    headers_AddRef,
++    headers_Release,
++    headers_GetIids,
++    headers_GetRuntimeClassName,
++    headers_GetTrustLevel,
++    headers_Append,
++    headers_TryAppendWithoutValidation,
++    headers_stub_null, headers_stub_null, headers_stub_null, headers_stub_null,
++    headers_stub_ok,   headers_stub_null, headers_stub_null, headers_stub_null,
++    headers_stub_null, headers_stub_ok,   headers_stub_null, headers_stub_null,
++    headers_stub_ok,   headers_stub_null, headers_stub_ok,   headers_stub_null,
++    headers_stub_ok,   headers_stub_null, headers_stub_ok,   headers_stub_null,
++    headers_stub_ok,   headers_stub_null, headers_stub_ok,   headers_stub_null,
++    headers_stub_ok,   headers_stub_null, headers_stub_null, headers_stub_null,
++    headers_stub_null, headers_stub_null, headers_stub_null, headers_stub_null,
++};
++
++static HRESULT create_http_headers( const GUID *collection_iid, void **out )
++{
++    struct http_headers *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_headers = http_headers_vtbl;
++    impl->ref = 1;
++    impl->iid = *collection_iid;
++    *out = impl;
++    return S_OK;
++}
++
++/* --- HttpMethod --- */
++
++struct http_method
++{
++    const void *vtbl_method;
++    const void *vtbl_stringable;
++    LONG ref;
++    HSTRING method_name;
++};
++
++static inline struct http_method *impl_from_IHttpMethod( void *iface )
++{
++    return (struct http_method *)iface;
++}
++static inline struct http_method *impl_from_method_IStringable( void *iface )
++{
++    return (struct http_method *)((BYTE *)iface - sizeof(void *));
++}
++
++static HRESULT WINAPI method_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct http_method *impl = impl_from_IHttpMethod( iface );
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IHttpMethod ))
++    {
++        *out = &impl->vtbl_method;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IStringable ))
++    {
++        *out = &impl->vtbl_stringable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI method_AddRef( void *iface )
++{
++    struct http_method *impl = impl_from_IHttpMethod( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI method_Release( void *iface )
++{
++    struct http_method *impl = impl_from_IHttpMethod( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->method_name) WindowsDeleteString( impl->method_name );
++        free( impl );
++    }
++    return ref;
++}
++static HRESULT WINAPI method_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI method_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpMethod", 26, n );
++}
++static HRESULT WINAPI method_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI method_get_Method( void *iface, HSTRING *value )
++{
++    struct http_method *impl = impl_from_IHttpMethod( iface );
++    if (!value) return E_POINTER;
++    if (impl->method_name) return WindowsDuplicateString( impl->method_name, value );
++    return WindowsCreateString( L"GET", 3, value );
++}
++
++static const void *http_method_vtbl[] =
++{
++    method_QueryInterface,
++    method_AddRef,
++    method_Release,
++    method_GetIids,
++    method_GetRuntimeClassName,
++    method_GetTrustLevel,
++    method_get_Method,
++};
++
++static HRESULT WINAPI method_str_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return method_QueryInterface( &impl_from_method_IStringable( iface )->vtbl_method, iid, out );
++}
++static ULONG WINAPI method_str_AddRef( void *iface )
++{
++    return method_AddRef( &impl_from_method_IStringable( iface )->vtbl_method );
++}
++static ULONG WINAPI method_str_Release( void *iface )
++{
++    return method_Release( &impl_from_method_IStringable( iface )->vtbl_method );
++}
++static HRESULT WINAPI method_str_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI method_str_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI method_str_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI method_str_ToString( void *iface, HSTRING *value )
++{
++    return method_get_Method( &impl_from_method_IStringable( iface )->vtbl_method, value );
++}
++
++static const void *http_method_stringable_vtbl[] =
++{
++    method_str_QueryInterface,
++    method_str_AddRef,
++    method_str_Release,
++    method_str_GetIids,
++    method_str_GetRuntimeClassName,
++    method_str_GetTrustLevel,
++    method_str_ToString,
++};
++
++static HRESULT create_http_method( HSTRING method, void **out )
++{
++    struct http_method *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_method = http_method_vtbl;
++    impl->vtbl_stringable = http_method_stringable_vtbl;
++    impl->ref = 1;
++    if (method) WindowsDuplicateString( method, &impl->method_name );
++    *out = &impl->vtbl_method;
++    return S_OK;
++}
++
++/* --- HttpStringContent (IHttpContent) --- */
++
++struct http_string_content
++{
++    const void *vtbl_content;
++    const void *vtbl_closable;
++    const void *vtbl_stringable;
++    LONG ref;
++    HSTRING content;
++    void *headers;
++};
++
++static inline struct http_string_content *impl_from_content( void *iface )
++{
++    return (struct http_string_content *)iface;
++}
++static inline struct http_string_content *impl_from_content_closable( void *iface )
++{
++    return (struct http_string_content *)((BYTE *)iface - sizeof(void *));
++}
++
++static HRESULT WINAPI content_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct http_string_content *impl = impl_from_content( iface );
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IHttpContent ))
++    {
++        *out = &impl->vtbl_content;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IClosable ))
++    {
++        *out = &impl->vtbl_closable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IStringable ))
++    {
++        *out = &impl->vtbl_stringable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI content_AddRef( void *iface )
++{
++    struct http_string_content *impl = impl_from_content( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI content_Release( void *iface )
++{
++    struct http_string_content *impl = impl_from_content( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->content) WindowsDeleteString( impl->content );
++        if (impl->headers) IUnknown_Release( (IUnknown *)impl->headers );
++        free( impl );
++    }
++    return ref;
++}
++static HRESULT WINAPI content_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI content_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpStringContent", 32, n );
++}
++static HRESULT WINAPI content_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI content_BufferAllAsync( void *iface, void **op )
++{
++    return create_async_http_op( NULL, NULL, FALSE, op );
++}
++static HRESULT WINAPI content_ReadAsBufferAsync( void *iface, void **op )
++{
++    return create_async_http_op( NULL, NULL, FALSE, op );
++}
++static HRESULT WINAPI content_ReadAsInputStreamAsync( void *iface, void **op )
++{
++    return create_async_http_op( NULL, NULL, FALSE, op );
++}
++static HRESULT WINAPI content_ReadAsStringAsync( void *iface, void **op )
++{
++    struct http_string_content *impl = impl_from_content( iface );
++    return create_async_http_op( NULL, impl->content, TRUE, op );
++}
++static HRESULT WINAPI content_TryComputeLength( void *iface, UINT64 *length, boolean *succeeded )
++{
++    struct http_string_content *impl = impl_from_content( iface );
++    UINT32 len = 0;
++    if (impl->content) WindowsGetStringRawBuffer( impl->content, &len );
++    if (length) *length = (UINT64)len * sizeof(WCHAR);
++    if (succeeded) *succeeded = TRUE;
++    return S_OK;
++}
++static HRESULT WINAPI content_WriteToStreamAsync( void *iface, void *stream, void **op )
++{
++    return create_async_http_op( NULL, NULL, FALSE, op );
++}
++static HRESULT WINAPI content_get_Headers( void *iface, void **headers )
++{
++    struct http_string_content *impl = impl_from_content( iface );
++    if (!headers) return E_POINTER;
++    if (!impl->headers) create_http_headers( &IID_IHttpContentHeaderCollection, &impl->headers );
++    IUnknown_AddRef( (IUnknown *)impl->headers );
++    *headers = impl->headers;
++    return S_OK;
++}
++
++static const void *http_content_vtbl[] =
++{
++    content_QueryInterface,
++    content_AddRef,
++    content_Release,
++    content_GetIids,
++    content_GetRuntimeClassName,
++    content_GetTrustLevel,
++    content_BufferAllAsync,
++    content_ReadAsBufferAsync,
++    content_ReadAsInputStreamAsync,
++    content_ReadAsStringAsync,
++    content_TryComputeLength,
++    content_WriteToStreamAsync,
++    content_get_Headers,
++};
++
++static HRESULT WINAPI content_closable_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return content_QueryInterface( &impl_from_content_closable( iface )->vtbl_content, iid, out );
++}
++static ULONG WINAPI content_closable_AddRef( void *iface )
++{
++    return content_AddRef( &impl_from_content_closable( iface )->vtbl_content );
++}
++static ULONG WINAPI content_closable_Release( void *iface )
++{
++    return content_Release( &impl_from_content_closable( iface )->vtbl_content );
++}
++static HRESULT WINAPI content_closable_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI content_closable_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI content_closable_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI content_closable_Close( void *iface ) { return S_OK; }
++
++static const void *http_content_closable_vtbl[] =
++{
++    content_closable_QueryInterface,
++    content_closable_AddRef,
++    content_closable_Release,
++    content_closable_GetIids,
++    content_closable_GetRuntimeClassName,
++    content_closable_GetTrustLevel,
++    content_closable_Close,
++};
++
++static HRESULT WINAPI content_str_ToString( void *iface, HSTRING *val )
++{
++    struct http_string_content *impl = (struct http_string_content *)((BYTE *)iface - 2 * sizeof(void *));
++    if (!val) return E_POINTER;
++    if (impl->content) return WindowsDuplicateString( impl->content, val );
++    return WindowsCreateString( L"", 0, val );
++}
++
++static const void *http_content_stringable_vtbl[] =
++{
++    content_closable_QueryInterface,
++    content_closable_AddRef,
++    content_closable_Release,
++    content_closable_GetIids,
++    content_closable_GetRuntimeClassName,
++    content_closable_GetTrustLevel,
++    content_str_ToString,
++};
++
++static HRESULT create_http_string_content( HSTRING content, void **out )
++{
++    struct http_string_content *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_content = http_content_vtbl;
++    impl->vtbl_closable = http_content_closable_vtbl;
++    impl->vtbl_stringable = http_content_stringable_vtbl;
++    impl->ref = 1;
++    if (content) WindowsDuplicateString( content, &impl->content );
++    *out = &impl->vtbl_content;
++    return S_OK;
++}
++
++/* --- HttpResponseMessage --- */
++
++struct http_response_message
++{
++    const void *vtbl_response;
++    const void *vtbl_closable;
++    LONG ref;
++    INT32 status_code;
++    HSTRING reason_phrase;
++    void *content;
++    void *headers;
++    void *request_message;
++    INT32 source;
++    INT32 version;
++};
++
++static inline struct http_response_message *impl_from_response( void *iface )
++{
++    return (struct http_response_message *)iface;
++}
++static inline struct http_response_message *impl_from_response_closable( void *iface )
++{
++    return (struct http_response_message *)((BYTE *)iface - sizeof(void *));
++}
++
++static HRESULT WINAPI resp_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IHttpResponseMessage ))
++    {
++        *out = &impl->vtbl_response;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IClosable ))
++    {
++        *out = &impl->vtbl_closable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI resp_AddRef( void *iface )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI resp_Release( void *iface )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->reason_phrase) WindowsDeleteString( impl->reason_phrase );
++        if (impl->content) IUnknown_Release( (IUnknown *)impl->content );
++        if (impl->headers) IUnknown_Release( (IUnknown *)impl->headers );
++        if (impl->request_message) IUnknown_Release( (IUnknown *)impl->request_message );
++        free( impl );
++    }
++    return ref;
++}
++static HRESULT WINAPI resp_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI resp_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpResponseMessage", 34, n );
++}
++static HRESULT WINAPI resp_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI resp_EnsureSuccessStatusCode( void *iface, void **value )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (impl->status_code < 200 || impl->status_code >= 300) return E_FAIL;
++    if (value)
++    {
++        *value = iface;
++        resp_AddRef( iface );
++    }
++    return S_OK;
++}
++static HRESULT WINAPI resp_get_Content( void *iface, void **content )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (!content) return E_POINTER;
++    if (!impl->content)
++    {
++        HSTRING dummy_html;
++        WindowsCreateString( L"<html><head><title>WhatsApp</title></head><body></body></html>", 60, &dummy_html );
++        create_http_string_content( dummy_html, &impl->content );
++        WindowsDeleteString( dummy_html );
++    }
++    IUnknown_AddRef( (IUnknown *)impl->content );
++    *content = impl->content;
++    return S_OK;
++}
++static HRESULT WINAPI resp_set_Content( void *iface, void *content )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (impl->content) IUnknown_Release( (IUnknown *)impl->content );
++    impl->content = content;
++    if (impl->content) IUnknown_AddRef( (IUnknown *)impl->content );
++    return S_OK;
++}
++static HRESULT WINAPI resp_get_Headers( void *iface, void **headers )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (!headers) return E_POINTER;
++    if (!impl->headers) create_http_headers( &IID_IHttpResponseHeaderCollection, &impl->headers );
++    IUnknown_AddRef( (IUnknown *)impl->headers );
++    *headers = impl->headers;
++    return S_OK;
++}
++static HRESULT WINAPI resp_get_IsSuccessStatusCode( void *iface, boolean *val )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (val) *val = (impl->status_code >= 200 && impl->status_code < 300);
++    return S_OK;
++}
++static HRESULT WINAPI resp_get_ReasonPhrase( void *iface, HSTRING *val )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (!val) return E_POINTER;
++    if (impl->reason_phrase) return WindowsDuplicateString( impl->reason_phrase, val );
++    return WindowsCreateString( L"OK", 2, val );
++}
++static HRESULT WINAPI resp_set_ReasonPhrase( void *iface, HSTRING val )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (impl->reason_phrase) WindowsDeleteString( impl->reason_phrase );
++    impl->reason_phrase = NULL;
++    if (val) WindowsDuplicateString( val, &impl->reason_phrase );
++    return S_OK;
++}
++static HRESULT WINAPI resp_get_RequestMessage( void *iface, void **req )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (!req) return E_POINTER;
++    if (impl->request_message) IUnknown_AddRef( (IUnknown *)impl->request_message );
++    *req = impl->request_message;
++    return S_OK;
++}
++static HRESULT WINAPI resp_set_RequestMessage( void *iface, void *req )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (impl->request_message) IUnknown_Release( (IUnknown *)impl->request_message );
++    impl->request_message = req;
++    if (impl->request_message) IUnknown_AddRef( (IUnknown *)impl->request_message );
++    return S_OK;
++}
++static HRESULT WINAPI resp_get_Source( void *iface, INT32 *src ) { if (src) *src = 2 /* Network */; return S_OK; }
++static HRESULT WINAPI resp_set_Source( void *iface, INT32 src ) { return S_OK; }
++static HRESULT WINAPI resp_get_StatusCode( void *iface, INT32 *code )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    if (code) *code = impl->status_code;
++    return S_OK;
++}
++static HRESULT WINAPI resp_set_StatusCode( void *iface, INT32 code )
++{
++    struct http_response_message *impl = impl_from_response( iface );
++    impl->status_code = code;
++    return S_OK;
++}
++static HRESULT WINAPI resp_get_Version( void *iface, INT32 *ver ) { if (ver) *ver = 1 /* Http11 */; return S_OK; }
++static HRESULT WINAPI resp_set_Version( void *iface, INT32 ver ) { return S_OK; }
++
++static const void *http_response_vtbl[] =
++{
++    resp_QueryInterface,
++    resp_AddRef,
++    resp_Release,
++    resp_GetIids,
++    resp_GetRuntimeClassName,
++    resp_GetTrustLevel,
++    resp_EnsureSuccessStatusCode,
++    resp_get_Content,
++    resp_set_Content,
++    resp_get_Headers,
++    resp_get_IsSuccessStatusCode,
++    resp_get_ReasonPhrase,
++    resp_set_ReasonPhrase,
++    resp_get_RequestMessage,
++    resp_set_RequestMessage,
++    resp_get_Source,
++    resp_set_Source,
++    resp_get_StatusCode,
++    resp_set_StatusCode,
++    resp_get_Version,
++    resp_set_Version,
++};
++
++static HRESULT WINAPI resp_closable_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return resp_QueryInterface( &impl_from_response_closable( iface )->vtbl_response, iid, out );
++}
++static ULONG WINAPI resp_closable_AddRef( void *iface )
++{
++    return resp_AddRef( &impl_from_response_closable( iface )->vtbl_response );
++}
++static ULONG WINAPI resp_closable_Release( void *iface )
++{
++    return resp_Release( &impl_from_response_closable( iface )->vtbl_response );
++}
++static HRESULT WINAPI resp_closable_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI resp_closable_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI resp_closable_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI resp_closable_Close( void *iface ) { return S_OK; }
++
++static const void *http_response_closable_vtbl[] =
++{
++    resp_closable_QueryInterface,
++    resp_closable_AddRef,
++    resp_closable_Release,
++    resp_closable_GetIids,
++    resp_closable_GetRuntimeClassName,
++    resp_closable_GetTrustLevel,
++    resp_closable_Close,
++};
++
++static HRESULT create_http_response( INT32 status_code, void **out )
++{
++    struct http_response_message *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_response = http_response_vtbl;
++    impl->vtbl_closable = http_response_closable_vtbl;
++    impl->ref = 1;
++    impl->status_code = status_code ? status_code : 200;
++    impl->source = 2;
++    impl->version = 1;
++    *out = &impl->vtbl_response;
++    return S_OK;
++}
++
++/* --- HttpRequestMessage --- */
++
++struct http_request_message
++{
++    const void *vtbl_request;
++    const void *vtbl_closable;
++    LONG ref;
++    void *content;
++    void *headers;
++    void *method;
++    void *uri;
++};
++
++static inline struct http_request_message *impl_from_request( void *iface )
++{
++    return (struct http_request_message *)iface;
++}
++static inline struct http_request_message *impl_from_request_closable( void *iface )
++{
++    return (struct http_request_message *)((BYTE *)iface - sizeof(void *));
++}
++
++static HRESULT WINAPI req_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IHttpRequestMessage ))
++    {
++        *out = &impl->vtbl_request;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IClosable ))
++    {
++        *out = &impl->vtbl_closable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI req_AddRef( void *iface )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI req_Release( void *iface )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->content) IUnknown_Release( (IUnknown *)impl->content );
++        if (impl->headers) IUnknown_Release( (IUnknown *)impl->headers );
++        if (impl->method) IUnknown_Release( (IUnknown *)impl->method );
++        if (impl->uri) IUnknown_Release( (IUnknown *)impl->uri );
++        free( impl );
++    }
++    return ref;
++}
++static HRESULT WINAPI req_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI req_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpRequestMessage", 33, n );
++}
++static HRESULT WINAPI req_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI req_get_Content( void *iface, void **val )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    if (!val) return E_POINTER;
++    if (impl->content) IUnknown_AddRef( (IUnknown *)impl->content );
++    *val = impl->content;
++    return S_OK;
++}
++static HRESULT WINAPI req_set_Content( void *iface, void *val )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    if (impl->content) IUnknown_Release( (IUnknown *)impl->content );
++    impl->content = val;
++    if (impl->content) IUnknown_AddRef( (IUnknown *)impl->content );
++    return S_OK;
++}
++static HRESULT WINAPI req_get_Headers( void *iface, void **val )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    if (!val) return E_POINTER;
++    if (!impl->headers) create_http_headers( &IID_IHttpRequestHeaderCollection, &impl->headers );
++    IUnknown_AddRef( (IUnknown *)impl->headers );
++    *val = impl->headers;
++    return S_OK;
++}
++static HRESULT WINAPI req_get_Method( void *iface, void **val )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    if (!val) return E_POINTER;
++    if (!impl->method) create_http_method( NULL, &impl->method );
++    IUnknown_AddRef( (IUnknown *)impl->method );
++    *val = impl->method;
++    return S_OK;
++}
++static HRESULT WINAPI req_set_Method( void *iface, void *val )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    if (impl->method) IUnknown_Release( (IUnknown *)impl->method );
++    impl->method = val;
++    if (impl->method) IUnknown_AddRef( (IUnknown *)impl->method );
++    return S_OK;
++}
++static HRESULT WINAPI req_get_Properties( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
++static HRESULT WINAPI req_get_RequestUri( void *iface, void **val )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    if (!val) return E_POINTER;
++    if (impl->uri) IUnknown_AddRef( (IUnknown *)impl->uri );
++    *val = impl->uri;
++    return S_OK;
++}
++static HRESULT WINAPI req_set_RequestUri( void *iface, void *val )
++{
++    struct http_request_message *impl = impl_from_request( iface );
++    if (impl->uri) IUnknown_Release( (IUnknown *)impl->uri );
++    impl->uri = val;
++    if (impl->uri) IUnknown_AddRef( (IUnknown *)impl->uri );
++    return S_OK;
++}
++static HRESULT WINAPI req_get_TransportInformation( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
++
++static const void *http_request_vtbl[] =
++{
++    req_QueryInterface,
++    req_AddRef,
++    req_Release,
++    req_GetIids,
++    req_GetRuntimeClassName,
++    req_GetTrustLevel,
++    req_get_Content,
++    req_set_Content,
++    req_get_Headers,
++    req_get_Method,
++    req_set_Method,
++    req_get_Properties,
++    req_get_RequestUri,
++    req_set_RequestUri,
++    req_get_TransportInformation,
++};
++
++static HRESULT WINAPI req_closable_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return req_QueryInterface( &impl_from_request_closable( iface )->vtbl_request, iid, out );
++}
++static ULONG WINAPI req_closable_AddRef( void *iface )
++{
++    return req_AddRef( &impl_from_request_closable( iface )->vtbl_request );
++}
++static ULONG WINAPI req_closable_Release( void *iface )
++{
++    return req_Release( &impl_from_request_closable( iface )->vtbl_request );
++}
++static HRESULT WINAPI req_closable_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI req_closable_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI req_closable_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI req_closable_Close( void *iface ) { return S_OK; }
++
++static const void *http_request_closable_vtbl[] =
++{
++    req_closable_QueryInterface,
++    req_closable_AddRef,
++    req_closable_Release,
++    req_closable_GetIids,
++    req_closable_GetRuntimeClassName,
++    req_closable_GetTrustLevel,
++    req_closable_Close,
++};
++
++static HRESULT create_http_request( void *method, void *uri, void **out )
++{
++    struct http_request_message *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_request = http_request_vtbl;
++    impl->vtbl_closable = http_request_closable_vtbl;
++    impl->ref = 1;
++    if (method)
++    {
++        impl->method = method;
++        IUnknown_AddRef( (IUnknown *)impl->method );
++    }
++    if (uri)
++    {
++        impl->uri = uri;
++        IUnknown_AddRef( (IUnknown *)impl->uri );
++    }
++    *out = &impl->vtbl_request;
++    return S_OK;
++}
++
++/* --- HttpClient --- */
++
++struct http_client
++{
++    const void *vtbl_client;
++    const void *vtbl_client2;
++    const void *vtbl_closable;
++    LONG ref;
++    void *default_headers;
++};
++
++static inline struct http_client *impl_from_client( void *iface )
++{
++    return (struct http_client *)iface;
++}
++static inline struct http_client *impl_from_client2( void *iface )
++{
++    return (struct http_client *)((BYTE *)iface - sizeof(void *));
++}
++static inline struct http_client *impl_from_client_closable( void *iface )
++{
++    return (struct http_client *)((BYTE *)iface - 2 * sizeof(void *));
++}
++
++static HRESULT WINAPI client_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct http_client *impl = impl_from_client( iface );
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IHttpClient ))
++    {
++        *out = &impl->vtbl_client;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IHttpClient2 ))
++    {
++        *out = &impl->vtbl_client2;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IClosable ))
++    {
++        *out = &impl->vtbl_closable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI client_AddRef( void *iface )
++{
++    struct http_client *impl = impl_from_client( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI client_Release( void *iface )
++{
++    struct http_client *impl = impl_from_client( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->default_headers) IUnknown_Release( (IUnknown *)impl->default_headers );
++        free( impl );
++    }
++    return ref;
++}
++static HRESULT WINAPI client_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI client_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpClient", 26, n );
++}
++static HRESULT WINAPI client_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI client_DeleteAsync( void *iface, void *uri, void **op )
++{
++    void *resp = NULL;
++    HRESULT hr = create_http_response( 200, &resp );
++    if (FAILED(hr)) return hr;
++    hr = create_async_http_op( resp, NULL, FALSE, op );
++    IUnknown_Release( (IUnknown *)resp );
++    return hr;
++}
++static HRESULT WINAPI client_GetAsync( void *iface, void *uri, void **op )
++{
++    void *resp = NULL;
++    HRESULT hr = create_http_response( 200, &resp );
++    if (FAILED(hr)) return hr;
++    hr = create_async_http_op( resp, NULL, FALSE, op );
++    IUnknown_Release( (IUnknown *)resp );
++    return hr;
++}
++static HRESULT WINAPI client_GetAsync2( void *iface, void *uri, INT32 opt, void **op )
++{
++    return client_GetAsync( iface, uri, op );
++}
++static HRESULT WINAPI client_GetBufferAsync( void *iface, void *uri, void **op )
++{
++    return create_async_http_op( NULL, NULL, FALSE, op );
++}
++static HRESULT WINAPI client_GetInputStreamAsync( void *iface, void *uri, void **op )
++{
++    return create_async_http_op( NULL, NULL, FALSE, op );
++}
++static HRESULT WINAPI client_GetStringAsync( void *iface, void *uri, void **op )
++{
++    HSTRING str;
++    HRESULT hr = WindowsCreateString( L"", 0, &str );
++    if (FAILED(hr)) return hr;
++    hr = create_async_http_op( NULL, str, TRUE, op );
++    WindowsDeleteString( str );
++    return hr;
++}
++static HRESULT WINAPI client_PostAsync( void *iface, void *uri, void *content, void **op )
++{
++    void *resp = NULL;
++    HRESULT hr = create_http_response( 200, &resp );
++    if (FAILED(hr)) return hr;
++    hr = create_async_http_op( resp, NULL, FALSE, op );
++    IUnknown_Release( (IUnknown *)resp );
++    return hr;
++}
++static HRESULT WINAPI client_PutAsync( void *iface, void *uri, void *content, void **op )
++{
++    return client_PostAsync( iface, uri, content, op );
++}
++static HRESULT WINAPI client_SendRequestAsync( void *iface, void *req, void **op )
++{
++    void *resp = NULL;
++    HRESULT hr = create_http_response( 200, &resp );
++    if (FAILED(hr)) return hr;
++    hr = create_async_http_op( resp, NULL, FALSE, op );
++    IUnknown_Release( (IUnknown *)resp );
++    return hr;
++}
++static HRESULT WINAPI client_SendRequestAsync2( void *iface, void *req, INT32 opt, void **op )
++{
++    return client_SendRequestAsync( iface, req, op );
++}
++static HRESULT WINAPI client_get_DefaultRequestHeaders( void *iface, void **headers )
++{
++    struct http_client *impl = impl_from_client( iface );
++    if (!headers) return E_POINTER;
++    if (!impl->default_headers) create_http_headers( &IID_IHttpRequestHeaderCollection, &impl->default_headers );
++    IUnknown_AddRef( (IUnknown *)impl->default_headers );
++    *headers = impl->default_headers;
++    return S_OK;
++}
++
++static const void *http_client_vtbl[] =
++{
++    client_QueryInterface,
++    client_AddRef,
++    client_Release,
++    client_GetIids,
++    client_GetRuntimeClassName,
++    client_GetTrustLevel,
++    client_DeleteAsync,
++    client_GetAsync,
++    client_GetAsync2,
++    client_GetBufferAsync,
++    client_GetInputStreamAsync,
++    client_GetStringAsync,
++    client_PostAsync,
++    client_PutAsync,
++    client_SendRequestAsync,
++    client_SendRequestAsync2,
++    client_get_DefaultRequestHeaders,
++};
++
++static HRESULT WINAPI client2_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return client_QueryInterface( &impl_from_client2( iface )->vtbl_client, iid, out );
++}
++static ULONG WINAPI client2_AddRef( void *iface )
++{
++    return client_AddRef( &impl_from_client2( iface )->vtbl_client );
++}
++static ULONG WINAPI client2_Release( void *iface )
++{
++    return client_Release( &impl_from_client2( iface )->vtbl_client );
++}
++static HRESULT WINAPI client2_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI client2_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI client2_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI client2_TryDeleteAsync( void *iface, void *uri, void **op ) { return client_DeleteAsync( iface, uri, op ); }
++static HRESULT WINAPI client2_TryGetAsync( void *iface, void *uri, void **op ) { return client_GetAsync( iface, uri, op ); }
++static HRESULT WINAPI client2_TryGetAsync2( void *iface, void *uri, INT32 opt, void **op ) { return client_GetAsync2( iface, uri, opt, op ); }
++static HRESULT WINAPI client2_TryGetBufferAsync( void *iface, void *uri, void **op ) { return client_GetBufferAsync( iface, uri, op ); }
++static HRESULT WINAPI client2_TryGetInputStreamAsync( void *iface, void *uri, void **op ) { return client_GetInputStreamAsync( iface, uri, op ); }
++static HRESULT WINAPI client2_TryGetStringAsync( void *iface, void *uri, void **op ) { return client_GetStringAsync( iface, uri, op ); }
++static HRESULT WINAPI client2_TryPostAsync( void *iface, void *uri, void *content, void **op ) { return client_PostAsync( iface, uri, content, op ); }
++static HRESULT WINAPI client2_TryPutAsync( void *iface, void *uri, void *content, void **op ) { return client_PutAsync( iface, uri, content, op ); }
++static HRESULT WINAPI client2_TrySendRequestAsync( void *iface, void *req, void **op ) { return client_SendRequestAsync( iface, req, op ); }
++static HRESULT WINAPI client2_TrySendRequestAsync2( void *iface, void *req, INT32 opt, void **op ) { return client_SendRequestAsync2( iface, req, opt, op ); }
++
++static const void *http_client2_vtbl[] =
++{
++    client2_QueryInterface,
++    client2_AddRef,
++    client2_Release,
++    client2_GetIids,
++    client2_GetRuntimeClassName,
++    client2_GetTrustLevel,
++    client2_TryDeleteAsync,
++    client2_TryGetAsync,
++    client2_TryGetAsync2,
++    client2_TryGetBufferAsync,
++    client2_TryGetInputStreamAsync,
++    client2_TryGetStringAsync,
++    client2_TryPostAsync,
++    client2_TryPutAsync,
++    client2_TrySendRequestAsync,
++    client2_TrySendRequestAsync2,
++};
++
++static HRESULT WINAPI client_closable_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return client_QueryInterface( &impl_from_client_closable( iface )->vtbl_client, iid, out );
++}
++static ULONG WINAPI client_closable_AddRef( void *iface )
++{
++    return client_AddRef( &impl_from_client_closable( iface )->vtbl_client );
++}
++static ULONG WINAPI client_closable_Release( void *iface )
++{
++    return client_Release( &impl_from_client_closable( iface )->vtbl_client );
++}
++static HRESULT WINAPI client_closable_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI client_closable_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI client_closable_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI client_closable_Close( void *iface ) { return S_OK; }
++
++static const void *http_client_closable_vtbl[] =
++{
++    client_closable_QueryInterface,
++    client_closable_AddRef,
++    client_closable_Release,
++    client_closable_GetIids,
++    client_closable_GetRuntimeClassName,
++    client_closable_GetTrustLevel,
++    client_closable_Close,
++};
++
++static HRESULT create_http_client( void **out )
++{
++    struct http_client *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_client = http_client_vtbl;
++    impl->vtbl_client2 = http_client2_vtbl;
++    impl->vtbl_closable = http_client_closable_vtbl;
++    impl->ref = 1;
++    *out = &impl->vtbl_client;
++    return S_OK;
++}
++
++/* --- Activation Factories --- */
++
++/* HttpClient factory */
++static HRESULT WINAPI http_client_factory_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ) ||
++        IsEqualGUID( iid, &IID_IHttpClientFactory ))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI http_client_factory_AddRef( void *iface ) { return 2; }
++static ULONG WINAPI http_client_factory_Release( void *iface ) { return 1; }
++static HRESULT WINAPI http_client_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI http_client_factory_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpClient", 26, n );
++}
++static HRESULT WINAPI http_client_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI http_client_factory_ActivateInstance( void *iface, IInspectable **instance )
++{
++    return create_http_client( (void **)instance );
++}
++static HRESULT WINAPI http_client_factory_Create( void *iface, void *filter, void **instance )
++{
++    return create_http_client( instance );
++}
++
++static const void *http_client_factory_vtbl[] =
++{
++    http_client_factory_QueryInterface,
++    http_client_factory_AddRef,
++    http_client_factory_Release,
++    http_client_factory_GetIids,
++    http_client_factory_GetRuntimeClassName,
++    http_client_factory_GetTrustLevel,
++    http_client_factory_ActivateInstance,
++    http_client_factory_Create,
++};
++static const void *http_client_factory_obj = http_client_factory_vtbl;
++IActivationFactory *http_client_factory = (IActivationFactory *)&http_client_factory_obj;
++
++/* HttpRequestMessage factory */
++static HRESULT WINAPI http_request_factory_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ) ||
++        IsEqualGUID( iid, &IID_IHttpRequestMessageFactory ))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI http_request_factory_AddRef( void *iface ) { return 2; }
++static ULONG WINAPI http_request_factory_Release( void *iface ) { return 1; }
++static HRESULT WINAPI http_request_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI http_request_factory_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpRequestMessage", 33, n );
++}
++static HRESULT WINAPI http_request_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI http_request_factory_ActivateInstance( void *iface, IInspectable **instance )
++{
++    return create_http_request( NULL, NULL, (void **)instance );
++}
++static HRESULT WINAPI http_request_factory_Create( void *iface, void *method, void *uri, void **instance )
++{
++    return create_http_request( method, uri, instance );
++}
++
++static const void *http_request_factory_vtbl[] =
++{
++    http_request_factory_QueryInterface,
++    http_request_factory_AddRef,
++    http_request_factory_Release,
++    http_request_factory_GetIids,
++    http_request_factory_GetRuntimeClassName,
++    http_request_factory_GetTrustLevel,
++    http_request_factory_ActivateInstance,
++    http_request_factory_Create,
++};
++static const void *http_request_factory_obj = http_request_factory_vtbl;
++IActivationFactory *http_request_factory = (IActivationFactory *)&http_request_factory_obj;
++
++/* HttpResponseMessage factory */
++static HRESULT WINAPI http_response_factory_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ) ||
++        IsEqualGUID( iid, &IID_IHttpResponseMessageFactory ))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI http_response_factory_AddRef( void *iface ) { return 2; }
++static ULONG WINAPI http_response_factory_Release( void *iface ) { return 1; }
++static HRESULT WINAPI http_response_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI http_response_factory_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpResponseMessage", 34, n );
++}
++static HRESULT WINAPI http_response_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI http_response_factory_ActivateInstance( void *iface, IInspectable **instance )
++{
++    return create_http_response( 200, (void **)instance );
++}
++static HRESULT WINAPI http_response_factory_Create( void *iface, INT32 status_code, void **instance )
++{
++    return create_http_response( status_code, instance );
++}
++
++static const void *http_response_factory_vtbl[] =
++{
++    http_response_factory_QueryInterface,
++    http_response_factory_AddRef,
++    http_response_factory_Release,
++    http_response_factory_GetIids,
++    http_response_factory_GetRuntimeClassName,
++    http_response_factory_GetTrustLevel,
++    http_response_factory_ActivateInstance,
++    http_response_factory_Create,
++};
++static const void *http_response_factory_obj = http_response_factory_vtbl;
++IActivationFactory *http_response_factory = (IActivationFactory *)&http_response_factory_obj;
++
++/* HttpStringContent factory */
++static HRESULT WINAPI http_string_content_factory_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ) ||
++        IsEqualGUID( iid, &IID_IHttpStringContentFactory ))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI http_string_content_factory_AddRef( void *iface ) { return 2; }
++static ULONG WINAPI http_string_content_factory_Release( void *iface ) { return 1; }
++static HRESULT WINAPI http_string_content_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI http_string_content_factory_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpStringContent", 32, n );
++}
++static HRESULT WINAPI http_string_content_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI http_string_content_factory_ActivateInstance( void *iface, IInspectable **instance )
++{
++    return create_http_string_content( NULL, (void **)instance );
++}
++static HRESULT WINAPI http_string_content_factory_CreateFromString( void *iface, HSTRING content, void **instance )
++{
++    return create_http_string_content( content, instance );
++}
++static HRESULT WINAPI http_string_content_factory_CreateFromStringWithEncoding( void *iface, HSTRING content, INT32 encoding, void **instance )
++{
++    return create_http_string_content( content, instance );
++}
++static HRESULT WINAPI http_string_content_factory_CreateFromStringWithEncodingAndMediaType( void *iface, HSTRING content, INT32 encoding, HSTRING media_type, void **instance )
++{
++    return create_http_string_content( content, instance );
++}
++
++static const void *http_string_content_factory_vtbl[] =
++{
++    http_string_content_factory_QueryInterface,
++    http_string_content_factory_AddRef,
++    http_string_content_factory_Release,
++    http_string_content_factory_GetIids,
++    http_string_content_factory_GetRuntimeClassName,
++    http_string_content_factory_GetTrustLevel,
++    http_string_content_factory_ActivateInstance,
++    http_string_content_factory_CreateFromString,
++    http_string_content_factory_CreateFromStringWithEncoding,
++    http_string_content_factory_CreateFromStringWithEncodingAndMediaType,
++};
++static const void *http_string_content_factory_obj = http_string_content_factory_vtbl;
++IActivationFactory *http_string_content_factory = (IActivationFactory *)&http_string_content_factory_obj;
++
++/* HttpMethod factory */
++static HRESULT WINAPI http_method_factory_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ) ||
++        IsEqualGUID( iid, &IID_IHttpMethodFactory ) ||
++        IsEqualGUID( iid, &IID_IHttpMethodStatics ))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI http_method_factory_AddRef( void *iface ) { return 2; }
++static ULONG WINAPI http_method_factory_Release( void *iface ) { return 1; }
++static HRESULT WINAPI http_method_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI http_method_factory_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Web.Http.HttpMethod", 26, n );
++}
++static HRESULT WINAPI http_method_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI http_method_factory_ActivateInstance( void *iface, IInspectable **instance )
++{
++    return create_http_method( NULL, (void **)instance );
++}
++static HRESULT WINAPI http_method_factory_Create( void *iface, HSTRING method, void **instance )
++{
++    return create_http_method( method, instance );
++}
++
++static HRESULT WINAPI http_method_factory_get_named( const WCHAR *name, void **val )
++{
++    HSTRING str;
++    HRESULT hr = WindowsCreateString( name, wcslen( name ), &str );
++    if (FAILED(hr)) return hr;
++    hr = create_http_method( str, val );
++    WindowsDeleteString( str );
++    return hr;
++}
++
++static HRESULT WINAPI http_method_factory_get_Delete( void *iface, void **val ) { return http_method_factory_get_named( L"DELETE", val ); }
++static HRESULT WINAPI http_method_factory_get_Get( void *iface, void **val ) { return http_method_factory_get_named( L"GET", val ); }
++static HRESULT WINAPI http_method_factory_get_Head( void *iface, void **val ) { return http_method_factory_get_named( L"HEAD", val ); }
++static HRESULT WINAPI http_method_factory_get_Options( void *iface, void **val ) { return http_method_factory_get_named( L"OPTIONS", val ); }
++static HRESULT WINAPI http_method_factory_get_Patch( void *iface, void **val ) { return http_method_factory_get_named( L"PATCH", val ); }
++static HRESULT WINAPI http_method_factory_get_Post( void *iface, void **val ) { return http_method_factory_get_named( L"POST", val ); }
++static HRESULT WINAPI http_method_factory_get_Put( void *iface, void **val ) { return http_method_factory_get_named( L"PUT", val ); }
++
++static const void *http_method_factory_vtbl[] =
++{
++    http_method_factory_QueryInterface,
++    http_method_factory_AddRef,
++    http_method_factory_Release,
++    http_method_factory_GetIids,
++    http_method_factory_GetRuntimeClassName,
++    http_method_factory_GetTrustLevel,
++    http_method_factory_ActivateInstance,
++    http_method_factory_Create,
++    http_method_factory_get_Delete,
++    http_method_factory_get_Get,
++    http_method_factory_get_Head,
++    http_method_factory_get_Options,
++    http_method_factory_get_Patch,
++    http_method_factory_get_Post,
++    http_method_factory_get_Put,
++};
++static const void *http_method_factory_obj = http_method_factory_vtbl;
++IActivationFactory *http_method_factory = (IActivationFactory *)&http_method_factory_obj;
+--- /dev/null	2026-10-17 22:37:26.392623299 +0500
++++ dlls/windows.networking.sockets/classes.idl	2026-10-19 17:24:54.008579966 +0500
+@@ -0,0 +1,7 @@
++#pragma makedep register
++#pragma winrt ns_prefix
++
++namespace Windows.Networking.Sockets {
++    runtimeclass MessageWebSocket;
++    runtimeclass StreamSocket;
++}
+--- /dev/null	2026-10-17 22:37:26.392623299 +0500
++++ dlls/windows.networking.sockets/main.c	2026-10-19 23:12:39.932012600 +0500
+@@ -0,0 +1,1195 @@
++/* WinRT Windows.Networking.Sockets Implementation
++ *
++ * Copyright (C) 2026 Wine Developers
++ *
++ * This library is free software; you can redistribute it and/or
++ * modify it under the terms of the GNU Lesser General Public
++ * License as published by the Free Software Foundation; either
++ * version 2.1 of the License, or (at your option) any later version.
++ *
++ * This library is distributed in the hope that it will be useful,
++ * but WITHOUT ANY WARRANTY; without even the implied warranty of
++ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
++ * Lesser General Public License for more details.
++ *
++ * You should have received a copy of the GNU Lesser General Public
++ * License along with this library; if not, write to the Free Software
++ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
++ */
++
++#include <stdarg.h>
++#define COBJMACROS
++#include "windef.h"
++#include "winbase.h"
++#include "winstring.h"
++#include "initguid.h"
++#include "activation.h"
++#include "roapi.h"
++#include "wine/debug.h"
++
++WINE_DEFAULT_DEBUG_CHANNEL(winsock);
++
++static const GUID IID_IClosable = {0x3028b027, 0x6029, 0x47e6, {0x81, 0xa1, 0x65, 0x5b, 0x3b, 0x3c, 0x52, 0x0f}};
++static const GUID IID_IInputStream = {0x905a0fe2, 0xbc53, 0x11df, {0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda}};
++static const GUID IID_IOutputStream = {0x905a0fe6, 0xbc53, 0x11df, {0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda}};
++static const GUID IID_IAsyncAction = {0x5a648006, 0x8428, 0x494a, {0x80, 0x7c, 0x13, 0x0b, 0x95, 0xb4, 0x34, 0xf4}};
++static const GUID IID_IAsyncInfo = {0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
++
++static const GUID IID_IStreamSocket = {0x69A22CF3, 0xFC7B, 0x4857, {0xAF, 0x38, 0xF6, 0xE7, 0xDE, 0x6A, 0x5B, 0x49}};
++static const GUID IID_IStreamSocket2 = {0x29D0E575, 0xF314, 0x4D09, {0xAD, 0xF0, 0x0F, 0xBD, 0x96, 0x7F, 0xBD, 0x9F}};
++static const GUID IID_IStreamSocket3 = {0x3F430B00, 0x9D28, 0x4854, {0xBA, 0xC3, 0x23, 0x01, 0x94, 0x1E, 0xC2, 0x23}};
++static const GUID IID_IStreamSocketStatics = {0xA420BC4A, 0x6E2E, 0x4AF5, {0xB5, 0x56, 0x35, 0x5A, 0xE0, 0xCD, 0x4F, 0x29}};
++static const GUID IID_IStreamSocketControl = {0xFE25ADF1, 0x92AB, 0x4AF3, {0x99, 0x92, 0x0F, 0x4C, 0x85, 0xE3, 0x6C, 0xC4}};
++static const GUID IID_IStreamSocketInformation = {0x3B80AE30, 0x5E68, 0x4205, {0x88, 0xF0, 0xDC, 0x85, 0xD2, 0xE2, 0x5D, 0xED}};
++
++static const GUID IID_IMessageWebSocket = {0x33727D08, 0x34D5, 0x4746, {0xAD, 0x7B, 0x8D, 0xDE, 0x5B, 0xC2, 0xEF, 0x88}};
++static const GUID IID_IMessageWebSocket2 = {0xBED0CEE7, 0xF9C8, 0x440A, {0x9A, 0xD5, 0x73, 0x72, 0x81, 0xD9, 0x74, 0x2E}};
++static const GUID IID_IMessageWebSocket3 = {0x59D9DEFB, 0x71AF, 0x4349, {0x84, 0x87, 0x91, 0x1F, 0xCF, 0x68, 0x15, 0x97}};
++static const GUID IID_IMessageWebSocketControl = {0x8118388A, 0xC629, 0x4F0A, {0x80, 0xFB, 0x81, 0xFC, 0x05, 0x53, 0x88, 0x62}};
++static const GUID IID_IWebSocket = {0xF877396F, 0x99B1, 0x4E18, {0xBC, 0x08, 0x85, 0x0C, 0x9A, 0xDF, 0x15, 0x6E}};
++static const GUID IID_IWebSocketControl = {0x2EC4BDC3, 0xD9A5, 0x455A, {0x98, 0x11, 0xDE, 0x24, 0xD4, 0x53, 0x37, 0xE9}};
++static const GUID IID_IWebSocketInformation = {0x5E01E316, 0xC92A, 0x47A5, {0xB2, 0x5F, 0x07, 0x84, 0x76, 0x39, 0xD1, 0x81}};
++
++static HRESULT create_socket_async_action( void **out );
++static HRESULT create_socket_async_op( void **out );
++static HRESULT create_socket_stream( BOOL is_input, void **out );
++static HRESULT create_stream_socket( void **out );
++static HRESULT create_message_websocket( void **out );
++
++/* --- Socket Async Action --- */
++
++struct socket_async
++{
++    const void *vtbl_async;
++    const void *vtbl_info;
++    LONG ref;
++};
++
++static inline struct socket_async *impl_from_socket_async( void *iface )
++{
++    return (struct socket_async *)iface;
++}
++static inline struct socket_async *impl_from_socket_async_info( void *iface )
++{
++    return (struct socket_async *)((BYTE *)iface - sizeof(void *));
++}
++
++static HRESULT WINAPI socket_async_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct socket_async *impl = impl_from_socket_async( iface );
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IAsyncAction ))
++    {
++        *out = &impl->vtbl_async;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
++    {
++        *out = &impl->vtbl_info;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    /* Accept any generic IAsyncOperation/Progress */
++    *out = &impl->vtbl_async;
++    InterlockedIncrement( &impl->ref );
++    return S_OK;
++}
++
++static ULONG WINAPI socket_async_AddRef( void *iface )
++{
++    struct socket_async *impl = impl_from_socket_async( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++
++static ULONG WINAPI socket_async_Release( void *iface )
++{
++    struct socket_async *impl = impl_from_socket_async( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref) free( impl );
++    return ref;
++}
++
++static HRESULT WINAPI socket_async_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_async_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_async_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI socket_async_put_Progress( void *iface, void *handler ) { return S_OK; }
++static HRESULT WINAPI socket_async_get_Progress( void *iface, void **handler ) { if (handler) *handler = NULL; return S_OK; }
++
++static HRESULT WINAPI socket_async_put_Completed( void *iface, void *handler )
++{
++    if (handler)
++    {
++        typedef HRESULT (WINAPI *invoke_fn)( void *handler, void *async, int status );
++        void **vtbl = *(void ***)handler;
++        invoke_fn invoke = (invoke_fn)vtbl[3];
++        invoke( handler, iface, 1 /* Completed */ );
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI socket_async_get_Completed( void *iface, void **handler )
++{
++    if (handler) *handler = NULL;
++    return S_OK;
++}
++
++static HRESULT WINAPI socket_async_GetResults( void *iface, void *results )
++{
++    if (results) *(UINT32 *)results = 0;
++    return S_OK;
++}
++
++static const void *socket_async_action_vtbl[] =
++{
++    socket_async_QueryInterface,
++    socket_async_AddRef,
++    socket_async_Release,
++    socket_async_GetIids,
++    socket_async_GetRuntimeClassName,
++    socket_async_GetTrustLevel,
++    socket_async_put_Completed,
++    socket_async_get_Completed,
++    socket_async_GetResults,
++};
++
++static const void *socket_async_op_vtbl[] =
++{
++    socket_async_QueryInterface,
++    socket_async_AddRef,
++    socket_async_Release,
++    socket_async_GetIids,
++    socket_async_GetRuntimeClassName,
++    socket_async_GetTrustLevel,
++    socket_async_put_Progress,
++    socket_async_get_Progress,
++    socket_async_put_Completed,
++    socket_async_get_Completed,
++    socket_async_GetResults,
++};
++
++static HRESULT WINAPI socket_info_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return socket_async_QueryInterface( &impl_from_socket_async_info( iface )->vtbl_async, iid, out );
++}
++static ULONG WINAPI socket_info_AddRef( void *iface )
++{
++    return socket_async_AddRef( &impl_from_socket_async_info( iface )->vtbl_async );
++}
++static ULONG WINAPI socket_info_Release( void *iface )
++{
++    return socket_async_Release( &impl_from_socket_async_info( iface )->vtbl_async );
++}
++static HRESULT WINAPI socket_info_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_info_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_info_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI socket_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
++static HRESULT WINAPI socket_info_get_Status( void *iface, int *status ) { if (status) *status = 1 /* Completed */; return S_OK; }
++static HRESULT WINAPI socket_info_get_ErrorCode( void *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
++static HRESULT WINAPI socket_info_Cancel( void *iface ) { return S_OK; }
++static HRESULT WINAPI socket_info_Close( void *iface ) { return S_OK; }
++
++static const void *socket_info_vtbl[] =
++{
++    socket_info_QueryInterface,
++    socket_info_AddRef,
++    socket_info_Release,
++    socket_info_GetIids,
++    socket_info_GetRuntimeClassName,
++    socket_info_GetTrustLevel,
++    socket_info_get_Id,
++    socket_info_get_Status,
++    socket_info_get_ErrorCode,
++    socket_info_Cancel,
++    socket_info_Close,
++};
++
++static HRESULT create_socket_async_action( void **out )
++{
++    struct socket_async *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_async = socket_async_action_vtbl;
++    impl->vtbl_info = socket_info_vtbl;
++    impl->ref = 1;
++    *out = &impl->vtbl_async;
++    return S_OK;
++}
++
++static HRESULT create_socket_async_op( void **out )
++{
++    struct socket_async *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_async = socket_async_op_vtbl;
++    impl->vtbl_info = socket_info_vtbl;
++    impl->ref = 1;
++    *out = &impl->vtbl_async;
++    return S_OK;
++}
++
++/* --- Socket Streams (InputStream / OutputStream) --- */
++
++struct socket_stream
++{
++    const void *vtbl_stream;
++    const void *vtbl_closable;
++    LONG ref;
++    BOOL is_input;
++};
++
++static inline struct socket_stream *impl_from_stream( void *iface )
++{
++    return (struct socket_stream *)iface;
++}
++static inline struct socket_stream *impl_from_stream_closable( void *iface )
++{
++    return (struct socket_stream *)((BYTE *)iface - sizeof(void *));
++}
++
++static HRESULT WINAPI stream_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct socket_stream *impl = impl_from_stream( iface );
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ))
++    {
++        *out = &impl->vtbl_stream;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (impl->is_input && IsEqualGUID( iid, &IID_IInputStream ))
++    {
++        *out = &impl->vtbl_stream;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (!impl->is_input && IsEqualGUID( iid, &IID_IOutputStream ))
++    {
++        *out = &impl->vtbl_stream;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IClosable ))
++    {
++        *out = &impl->vtbl_closable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI stream_AddRef( void *iface )
++{
++    struct socket_stream *impl = impl_from_stream( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI stream_Release( void *iface )
++{
++    struct socket_stream *impl = impl_from_stream( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref) free( impl );
++    return ref;
++}
++static HRESULT WINAPI stream_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI stream_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI stream_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI input_stream_ReadAsync( void *iface, void *buf, UINT32 count, int opt, void **op )
++{
++    return create_socket_async_op( op );
++}
++
++static const void *socket_input_stream_vtbl[] =
++{
++    stream_QueryInterface,
++    stream_AddRef,
++    stream_Release,
++    stream_GetIids,
++    stream_GetRuntimeClassName,
++    stream_GetTrustLevel,
++    input_stream_ReadAsync,
++};
++
++static HRESULT WINAPI output_stream_WriteAsync( void *iface, void *buf, void **op )
++{
++    return create_socket_async_op( op );
++}
++static HRESULT WINAPI output_stream_FlushAsync( void *iface, void **op )
++{
++    return create_socket_async_action( op );
++}
++
++static const void *socket_output_stream_vtbl[] =
++{
++    stream_QueryInterface,
++    stream_AddRef,
++    stream_Release,
++    stream_GetIids,
++    stream_GetRuntimeClassName,
++    stream_GetTrustLevel,
++    output_stream_WriteAsync,
++    output_stream_FlushAsync,
++};
++
++static HRESULT WINAPI stream_closable_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return stream_QueryInterface( &impl_from_stream_closable( iface )->vtbl_stream, iid, out );
++}
++static ULONG WINAPI stream_closable_AddRef( void *iface )
++{
++    return stream_AddRef( &impl_from_stream_closable( iface )->vtbl_stream );
++}
++static ULONG WINAPI stream_closable_Release( void *iface )
++{
++    return stream_Release( &impl_from_stream_closable( iface )->vtbl_stream );
++}
++static HRESULT WINAPI stream_closable_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI stream_closable_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI stream_closable_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI stream_closable_Close( void *iface ) { return S_OK; }
++
++static const void *socket_stream_closable_vtbl[] =
++{
++    stream_closable_QueryInterface,
++    stream_closable_AddRef,
++    stream_closable_Release,
++    stream_closable_GetIids,
++    stream_closable_GetRuntimeClassName,
++    stream_closable_GetTrustLevel,
++    stream_closable_Close,
++};
++
++static HRESULT create_socket_stream( BOOL is_input, void **out )
++{
++    struct socket_stream *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_stream = is_input ? socket_input_stream_vtbl : socket_output_stream_vtbl;
++    impl->vtbl_closable = socket_stream_closable_vtbl;
++    impl->ref = 1;
++    impl->is_input = is_input;
++    *out = &impl->vtbl_stream;
++    return S_OK;
++}
++
++/* --- StreamSocketControl / StreamSocketInformation --- */
++
++struct dummy_control_info
++{
++    const void *vtbl;
++    LONG ref;
++    GUID iid;
++};
++
++static HRESULT WINAPI dummy_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct dummy_control_info *impl = iface;
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &impl->iid ))
++    {
++        *out = iface;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI dummy_AddRef( void *iface )
++{
++    struct dummy_control_info *impl = iface;
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI dummy_Release( void *iface )
++{
++    struct dummy_control_info *impl = iface;
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref) free( impl );
++    return ref;
++}
++static HRESULT WINAPI dummy_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI dummy_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI dummy_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI dummy_stub_ok( void *iface ) { return S_OK; }
++static HRESULT WINAPI dummy_stub_bool( void *iface, boolean *val ) { if (val) *val = FALSE; return S_OK; }
++static HRESULT WINAPI dummy_stub_uint32( void *iface, UINT32 *val ) { if (val) *val = 0; return S_OK; }
++static HRESULT WINAPI dummy_stub_byte( void *iface, BYTE *val ) { if (val) *val = 0; return S_OK; }
++static HRESULT WINAPI dummy_stub_null( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
++static HRESULT WINAPI dummy_stub_hstring( void *iface, HSTRING *val )
++{
++    if (!val) return E_POINTER;
++    return WindowsCreateString( L"", 0, val );
++}
++
++static const void *stream_socket_control_vtbl[] =
++{
++    dummy_QueryInterface,
++    dummy_AddRef,
++    dummy_Release,
++    dummy_GetIids,
++    dummy_GetRuntimeClassName,
++    dummy_GetTrustLevel,
++    dummy_stub_bool,   /* get_KeepAlive */
++    dummy_stub_ok,     /* set_KeepAlive */
++    dummy_stub_bool,   /* get_NoDelay */
++    dummy_stub_ok,     /* set_NoDelay */
++    dummy_stub_uint32, /* get_OutboundBufferSizeInBytes */
++    dummy_stub_ok,     /* set_OutboundBufferSizeInBytes */
++    dummy_stub_byte,   /* get_OutboundUnicastHopLimit */
++    dummy_stub_ok,     /* set_OutboundUnicastHopLimit */
++    dummy_stub_uint32, /* get_QualityOfService */
++    dummy_stub_ok,     /* set_QualityOfService */
++};
++
++static const void *stream_socket_info_vtbl[] =
++{
++    dummy_QueryInterface,
++    dummy_AddRef,
++    dummy_Release,
++    dummy_GetIids,
++    dummy_GetRuntimeClassName,
++    dummy_GetTrustLevel,
++    dummy_stub_null,    /* get_BandwidthStatistics */
++    dummy_stub_null,    /* get_LocalAddress */
++    dummy_stub_hstring, /* get_LocalPort */
++    dummy_stub_uint32,  /* get_ProtectionLevel */
++    dummy_stub_null,    /* get_RemoteAddress */
++    dummy_stub_null,    /* get_RemoteHostName */
++    dummy_stub_hstring, /* get_RemotePort */
++    dummy_stub_hstring, /* get_RemoteServiceName */
++    dummy_stub_null,    /* get_RoundTripTimeStatistics */
++    dummy_stub_null,    /* get_SessionKey */
++};
++
++static HRESULT create_dummy_obj( const void *vtbl, const GUID *iid, void **out )
++{
++    struct dummy_control_info *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl = vtbl;
++    impl->ref = 1;
++    impl->iid = *iid;
++    *out = impl;
++    return S_OK;
++}
++
++/* --- StreamSocket --- */
++
++struct stream_socket
++{
++    const void *vtbl_socket;
++    const void *vtbl_socket2;
++    const void *vtbl_socket3;
++    const void *vtbl_closable;
++    LONG ref;
++    void *control;
++    void *info;
++    void *input_stream;
++    void *output_stream;
++};
++
++static inline struct stream_socket *impl_from_socket( void *iface )
++{
++    return (struct stream_socket *)iface;
++}
++static inline struct stream_socket *impl_from_socket2( void *iface )
++{
++    return (struct stream_socket *)((BYTE *)iface - sizeof(void *));
++}
++static inline struct stream_socket *impl_from_socket3( void *iface )
++{
++    return (struct stream_socket *)((BYTE *)iface - 2 * sizeof(void *));
++}
++static inline struct stream_socket *impl_from_socket_closable( void *iface )
++{
++    return (struct stream_socket *)((BYTE *)iface - 3 * sizeof(void *));
++}
++
++static HRESULT WINAPI socket_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct stream_socket *impl = impl_from_socket( iface );
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IStreamSocket ))
++    {
++        *out = &impl->vtbl_socket;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IStreamSocket2 ))
++    {
++        *out = &impl->vtbl_socket2;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IStreamSocket3 ))
++    {
++        *out = &impl->vtbl_socket3;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IClosable ))
++    {
++        *out = &impl->vtbl_closable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI socket_AddRef( void *iface )
++{
++    struct stream_socket *impl = impl_from_socket( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI socket_Release( void *iface )
++{
++    struct stream_socket *impl = impl_from_socket( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->control) IUnknown_Release( (IUnknown *)impl->control );
++        if (impl->info) IUnknown_Release( (IUnknown *)impl->info );
++        if (impl->input_stream) IUnknown_Release( (IUnknown *)impl->input_stream );
++        if (impl->output_stream) IUnknown_Release( (IUnknown *)impl->output_stream );
++        free( impl );
++    }
++    return ref;
++}
++static HRESULT WINAPI socket_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Networking.Sockets.StreamSocket", 39, n );
++}
++static HRESULT WINAPI socket_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI socket_ConnectAsync( void *iface, void *endpoint, void **op )
++{
++    TRACE( "iface %p, endpoint %p\n", iface, endpoint );
++    return create_socket_async_action( op );
++}
++static HRESULT WINAPI socket_ConnectAsync2( void *iface, void *host, HSTRING service, void **op )
++{
++    TRACE( "iface %p, service %s\n", iface, debugstr_hstring( service ) );
++    return create_socket_async_action( op );
++}
++static HRESULT WINAPI socket_ConnectAsync3( void *iface, void *endpoint, int prot, void **op )
++{
++    return create_socket_async_action( op );
++}
++static HRESULT WINAPI socket_ConnectAsync4( void *iface, void *host, HSTRING service, int prot, void **op )
++{
++    return create_socket_async_action( op );
++}
++static HRESULT WINAPI socket_UpgradeToSslAsync( void *iface, int prot, void *host, void **op )
++{
++    return create_socket_async_action( op );
++}
++static HRESULT WINAPI socket_get_Control( void *iface, void **control )
++{
++    struct stream_socket *impl = impl_from_socket( iface );
++    if (!control) return E_POINTER;
++    if (!impl->control) create_dummy_obj( stream_socket_control_vtbl, &IID_IStreamSocketControl, &impl->control );
++    IUnknown_AddRef( (IUnknown *)impl->control );
++    *control = impl->control;
++    return S_OK;
++}
++static HRESULT WINAPI socket_get_Information( void *iface, void **info )
++{
++    struct stream_socket *impl = impl_from_socket( iface );
++    if (!info) return E_POINTER;
++    if (!impl->info) create_dummy_obj( stream_socket_info_vtbl, &IID_IStreamSocketInformation, &impl->info );
++    IUnknown_AddRef( (IUnknown *)impl->info );
++    *info = impl->info;
++    return S_OK;
++}
++static HRESULT WINAPI socket_get_InputStream( void *iface, void **stream )
++{
++    struct stream_socket *impl = impl_from_socket( iface );
++    if (!stream) return E_POINTER;
++    if (!impl->input_stream) create_socket_stream( TRUE, &impl->input_stream );
++    IUnknown_AddRef( (IUnknown *)impl->input_stream );
++    *stream = impl->input_stream;
++    return S_OK;
++}
++static HRESULT WINAPI socket_get_OutputStream( void *iface, void **stream )
++{
++    struct stream_socket *impl = impl_from_socket( iface );
++    if (!stream) return E_POINTER;
++    if (!impl->output_stream) create_socket_stream( FALSE, &impl->output_stream );
++    IUnknown_AddRef( (IUnknown *)impl->output_stream );
++    *stream = impl->output_stream;
++    return S_OK;
++}
++
++static const void *stream_socket_vtbl[] =
++{
++    socket_QueryInterface,
++    socket_AddRef,
++    socket_Release,
++    socket_GetIids,
++    socket_GetRuntimeClassName,
++    socket_GetTrustLevel,
++    socket_ConnectAsync,
++    socket_ConnectAsync2,
++    socket_ConnectAsync3,
++    socket_ConnectAsync4,
++    socket_UpgradeToSslAsync,
++    socket_get_Control,
++    socket_get_Information,
++    socket_get_InputStream,
++    socket_get_OutputStream,
++};
++
++static HRESULT WINAPI socket2_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return socket_QueryInterface( &impl_from_socket2( iface )->vtbl_socket, iid, out );
++}
++static ULONG WINAPI socket2_AddRef( void *iface )
++{
++    return socket_AddRef( &impl_from_socket2( iface )->vtbl_socket );
++}
++static ULONG WINAPI socket2_Release( void *iface )
++{
++    return socket_Release( &impl_from_socket2( iface )->vtbl_socket );
++}
++static HRESULT WINAPI socket2_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket2_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket2_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI socket2_ConnectAsync( void *iface, void *host, HSTRING service, int prot, void *adapter, void **op )
++{
++    return create_socket_async_action( op );
++}
++
++static const void *stream_socket2_vtbl[] =
++{
++    socket2_QueryInterface,
++    socket2_AddRef,
++    socket2_Release,
++    socket2_GetIids,
++    socket2_GetRuntimeClassName,
++    socket2_GetTrustLevel,
++    socket2_ConnectAsync,
++};
++
++static HRESULT WINAPI socket3_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return socket_QueryInterface( &impl_from_socket3( iface )->vtbl_socket, iid, out );
++}
++static ULONG WINAPI socket3_AddRef( void *iface )
++{
++    return socket_AddRef( &impl_from_socket3( iface )->vtbl_socket );
++}
++static ULONG WINAPI socket3_Release( void *iface )
++{
++    return socket_Release( &impl_from_socket3( iface )->vtbl_socket );
++}
++static HRESULT WINAPI socket3_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket3_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket3_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI socket3_CancelIOAsync( void *iface, void **op ) { return create_socket_async_action( op ); }
++static HRESULT WINAPI socket3_stub_ok( void *iface ) { return S_OK; }
++
++static const void *stream_socket3_vtbl[] =
++{
++    socket3_QueryInterface,
++    socket3_AddRef,
++    socket3_Release,
++    socket3_GetIids,
++    socket3_GetRuntimeClassName,
++    socket3_GetTrustLevel,
++    socket3_CancelIOAsync,
++    socket3_stub_ok,
++    socket3_stub_ok,
++    socket3_stub_ok,
++    socket3_stub_ok,
++    socket3_stub_ok,
++};
++
++static HRESULT WINAPI socket_closable_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return socket_QueryInterface( &impl_from_socket_closable( iface )->vtbl_socket, iid, out );
++}
++static ULONG WINAPI socket_closable_AddRef( void *iface )
++{
++    return socket_AddRef( &impl_from_socket_closable( iface )->vtbl_socket );
++}
++static ULONG WINAPI socket_closable_Release( void *iface )
++{
++    return socket_Release( &impl_from_socket_closable( iface )->vtbl_socket );
++}
++static HRESULT WINAPI socket_closable_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_closable_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_closable_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI socket_closable_Close( void *iface ) { return S_OK; }
++
++static const void *stream_socket_closable_vtbl[] =
++{
++    socket_closable_QueryInterface,
++    socket_closable_AddRef,
++    socket_closable_Release,
++    socket_closable_GetIids,
++    socket_closable_GetRuntimeClassName,
++    socket_closable_GetTrustLevel,
++    socket_closable_Close,
++};
++
++static HRESULT create_stream_socket( void **out )
++{
++    struct stream_socket *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_socket = stream_socket_vtbl;
++    impl->vtbl_socket2 = stream_socket2_vtbl;
++    impl->vtbl_socket3 = stream_socket3_vtbl;
++    impl->vtbl_closable = stream_socket_closable_vtbl;
++    impl->ref = 1;
++    *out = &impl->vtbl_socket;
++    return S_OK;
++}
++
++/* --- MessageWebSocket --- */
++
++static const void *message_websocket_control_vtbl[] =
++{
++    dummy_QueryInterface,
++    dummy_AddRef,
++    dummy_Release,
++    dummy_GetIids,
++    dummy_GetRuntimeClassName,
++    dummy_GetTrustLevel,
++    dummy_stub_uint32, /* get_MaxMessageSize */
++    dummy_stub_ok,     /* set_MaxMessageSize */
++    dummy_stub_uint32, /* get_MessageType */
++    dummy_stub_ok,     /* set_MessageType */
++    dummy_stub_uint32, /* get_OutboundBufferSizeInBytes */
++    dummy_stub_ok,     /* set_OutboundBufferSizeInBytes */
++    dummy_stub_null,   /* get_ProxyCredential */
++    dummy_stub_ok,     /* set_ProxyCredential */
++    dummy_stub_null,   /* get_ServerCredential */
++    dummy_stub_ok,     /* set_ServerCredential */
++    dummy_stub_null,   /* get_SupportedProtocols */
++};
++
++static const void *message_websocket_info_vtbl[] =
++{
++    dummy_QueryInterface,
++    dummy_AddRef,
++    dummy_Release,
++    dummy_GetIids,
++    dummy_GetRuntimeClassName,
++    dummy_GetTrustLevel,
++    dummy_stub_null,    /* get_BandwidthStatistics */
++    dummy_stub_null,    /* get_LocalAddress */
++    dummy_stub_hstring, /* get_Protocol */
++};
++
++struct message_websocket
++{
++    const void *vtbl_msgws;
++    const void *vtbl_msgws2;
++    const void *vtbl_msgws3;
++    const void *vtbl_ws;
++    const void *vtbl_closable;
++    LONG ref;
++    void *control;
++    void *info;
++    void *output_stream;
++};
++
++static inline struct message_websocket *impl_from_msgws( void *iface )
++{
++    return (struct message_websocket *)iface;
++}
++static inline struct message_websocket *impl_from_msgws2( void *iface )
++{
++    return (struct message_websocket *)((BYTE *)iface - sizeof(void *));
++}
++static inline struct message_websocket *impl_from_msgws3( void *iface )
++{
++    return (struct message_websocket *)((BYTE *)iface - 2 * sizeof(void *));
++}
++static inline struct message_websocket *impl_from_ws( void *iface )
++{
++    return (struct message_websocket *)((BYTE *)iface - 3 * sizeof(void *));
++}
++static inline struct message_websocket *impl_from_msgws_closable( void *iface )
++{
++    return (struct message_websocket *)((BYTE *)iface - 4 * sizeof(void *));
++}
++
++static HRESULT WINAPI msgws_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    struct message_websocket *impl = impl_from_msgws( iface );
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IMessageWebSocket ))
++    {
++        *out = &impl->vtbl_msgws;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IMessageWebSocket2 ))
++    {
++        *out = &impl->vtbl_msgws2;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IMessageWebSocket3 ))
++    {
++        *out = &impl->vtbl_msgws3;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IWebSocket ))
++    {
++        *out = &impl->vtbl_ws;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IClosable ))
++    {
++        *out = &impl->vtbl_closable;
++        InterlockedIncrement( &impl->ref );
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI msgws_AddRef( void *iface )
++{
++    struct message_websocket *impl = impl_from_msgws( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++static ULONG WINAPI msgws_Release( void *iface )
++{
++    struct message_websocket *impl = impl_from_msgws( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref)
++    {
++        if (impl->control) IUnknown_Release( (IUnknown *)impl->control );
++        if (impl->info) IUnknown_Release( (IUnknown *)impl->info );
++        if (impl->output_stream) IUnknown_Release( (IUnknown *)impl->output_stream );
++        free( impl );
++    }
++    return ref;
++}
++static HRESULT WINAPI msgws_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI msgws_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Networking.Sockets.MessageWebSocket", 42, n );
++}
++static HRESULT WINAPI msgws_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI msgws_get_Control( void *iface, void **control )
++{
++    struct message_websocket *impl = impl_from_msgws( iface );
++    if (!control) return E_POINTER;
++    if (!impl->control) create_dummy_obj( message_websocket_control_vtbl, &IID_IMessageWebSocketControl, &impl->control );
++    IUnknown_AddRef( (IUnknown *)impl->control );
++    *control = impl->control;
++    return S_OK;
++}
++static HRESULT WINAPI msgws_get_Information( void *iface, void **info )
++{
++    struct message_websocket *impl = impl_from_msgws( iface );
++    if (!info) return E_POINTER;
++    if (!impl->info) create_dummy_obj( message_websocket_info_vtbl, &IID_IWebSocketInformation, &impl->info );
++    IUnknown_AddRef( (IUnknown *)impl->info );
++    *info = impl->info;
++    return S_OK;
++}
++static HRESULT WINAPI msgws_add_MessageReceived( void *iface, void *handler, INT64 *token )
++{
++    if (token) *token = 1;
++    return S_OK;
++}
++static HRESULT WINAPI msgws_remove_MessageReceived( void *iface, INT64 token ) { return S_OK; }
++
++static const void *message_websocket_vtbl[] =
++{
++    msgws_QueryInterface,
++    msgws_AddRef,
++    msgws_Release,
++    msgws_GetIids,
++    msgws_GetRuntimeClassName,
++    msgws_GetTrustLevel,
++    msgws_get_Control,
++    msgws_get_Information,
++    msgws_add_MessageReceived,
++    msgws_remove_MessageReceived,
++};
++
++static HRESULT WINAPI msgws2_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return msgws_QueryInterface( &impl_from_msgws2( iface )->vtbl_msgws, iid, out );
++}
++static ULONG WINAPI msgws2_AddRef( void *iface ) { return msgws_AddRef( &impl_from_msgws2( iface )->vtbl_msgws ); }
++static ULONG WINAPI msgws2_Release( void *iface ) { return msgws_Release( &impl_from_msgws2( iface )->vtbl_msgws ); }
++static HRESULT WINAPI msgws2_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI msgws2_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI msgws2_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI msgws2_add_ServerCustomValidationRequested( void *iface, void *handler, INT64 *token )
++{
++    if (token) *token = 1;
++    return S_OK;
++}
++static HRESULT WINAPI msgws2_remove_ServerCustomValidationRequested( void *iface, INT64 token ) { return S_OK; }
++
++static const void *message_websocket2_vtbl[] =
++{
++    msgws2_QueryInterface,
++    msgws2_AddRef,
++    msgws2_Release,
++    msgws2_GetIids,
++    msgws2_GetRuntimeClassName,
++    msgws2_GetTrustLevel,
++    msgws2_add_ServerCustomValidationRequested,
++    msgws2_remove_ServerCustomValidationRequested,
++};
++
++static HRESULT WINAPI msgws3_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return msgws_QueryInterface( &impl_from_msgws3( iface )->vtbl_msgws, iid, out );
++}
++static ULONG WINAPI msgws3_AddRef( void *iface ) { return msgws_AddRef( &impl_from_msgws3( iface )->vtbl_msgws ); }
++static ULONG WINAPI msgws3_Release( void *iface ) { return msgws_Release( &impl_from_msgws3( iface )->vtbl_msgws ); }
++static HRESULT WINAPI msgws3_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI msgws3_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI msgws3_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI msgws3_SendNonfinalFrameAsync( void *iface, void *data, void **op ) { return create_socket_async_action( op ); }
++static HRESULT WINAPI msgws3_SendFinalFrameAsync( void *iface, void *data, void **op ) { return create_socket_async_action( op ); }
++
++static const void *message_websocket3_vtbl[] =
++{
++    msgws3_QueryInterface,
++    msgws3_AddRef,
++    msgws3_Release,
++    msgws3_GetIids,
++    msgws3_GetRuntimeClassName,
++    msgws3_GetTrustLevel,
++    msgws3_SendNonfinalFrameAsync,
++    msgws3_SendFinalFrameAsync,
++};
++
++static HRESULT WINAPI ws_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return msgws_QueryInterface( &impl_from_ws( iface )->vtbl_msgws, iid, out );
++}
++static ULONG WINAPI ws_AddRef( void *iface ) { return msgws_AddRef( &impl_from_ws( iface )->vtbl_msgws ); }
++static ULONG WINAPI ws_Release( void *iface ) { return msgws_Release( &impl_from_ws( iface )->vtbl_msgws ); }
++static HRESULT WINAPI ws_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI ws_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI ws_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++
++static HRESULT WINAPI ws_ConnectAsync( void *iface, void *uri, void **op )
++{
++    TRACE( "iface %p, uri %p\n", iface, uri );
++    return create_socket_async_action( op );
++}
++static HRESULT WINAPI ws_SetRequestHeader( void *iface, HSTRING name, HSTRING val ) { return S_OK; }
++static HRESULT WINAPI ws_Close( void *iface, UINT16 code, HSTRING reason ) { return S_OK; }
++static HRESULT WINAPI ws_get_OutputStream( void *iface, void **stream )
++{
++    struct message_websocket *impl = impl_from_ws( iface );
++    if (!stream) return E_POINTER;
++    if (!impl->output_stream) create_socket_stream( FALSE, &impl->output_stream );
++    IUnknown_AddRef( (IUnknown *)impl->output_stream );
++    *stream = impl->output_stream;
++    return S_OK;
++}
++static HRESULT WINAPI ws_add_Closed( void *iface, void *handler, INT64 *token )
++{
++    if (token) *token = 1;
++    return S_OK;
++}
++static HRESULT WINAPI ws_remove_Closed( void *iface, INT64 token ) { return S_OK; }
++
++static const void *websocket_vtbl[] =
++{
++    ws_QueryInterface,
++    ws_AddRef,
++    ws_Release,
++    ws_GetIids,
++    ws_GetRuntimeClassName,
++    ws_GetTrustLevel,
++    ws_ConnectAsync,
++    ws_SetRequestHeader,
++    ws_Close,
++    ws_get_OutputStream,
++    ws_add_Closed,
++    ws_remove_Closed,
++};
++
++static HRESULT WINAPI msgws_closable_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return msgws_QueryInterface( &impl_from_msgws_closable( iface )->vtbl_msgws, iid, out );
++}
++static ULONG WINAPI msgws_closable_AddRef( void *iface ) { return msgws_AddRef( &impl_from_msgws_closable( iface )->vtbl_msgws ); }
++static ULONG WINAPI msgws_closable_Release( void *iface ) { return msgws_Release( &impl_from_msgws_closable( iface )->vtbl_msgws ); }
++static HRESULT WINAPI msgws_closable_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI msgws_closable_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI msgws_closable_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI msgws_closable_Close( void *iface ) { return S_OK; }
++
++static const void *message_websocket_closable_vtbl[] =
++{
++    msgws_closable_QueryInterface,
++    msgws_closable_AddRef,
++    msgws_closable_Release,
++    msgws_closable_GetIids,
++    msgws_closable_GetRuntimeClassName,
++    msgws_closable_GetTrustLevel,
++    msgws_closable_Close,
++};
++
++static HRESULT create_message_websocket( void **out )
++{
++    struct message_websocket *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->vtbl_msgws = message_websocket_vtbl;
++    impl->vtbl_msgws2 = message_websocket2_vtbl;
++    impl->vtbl_msgws3 = message_websocket3_vtbl;
++    impl->vtbl_ws = websocket_vtbl;
++    impl->vtbl_closable = message_websocket_closable_vtbl;
++    impl->ref = 1;
++    *out = &impl->vtbl_msgws;
++    return S_OK;
++}
++
++/* --- Activation Factories --- */
++
++static HRESULT WINAPI stream_socket_factory_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ) ||
++        IsEqualGUID( iid, &IID_IStreamSocketStatics ))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI stream_socket_factory_AddRef( void *iface ) { return 2; }
++static ULONG WINAPI stream_socket_factory_Release( void *iface ) { return 1; }
++static HRESULT WINAPI stream_socket_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI stream_socket_factory_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Networking.Sockets.StreamSocket", 39, n );
++}
++static HRESULT WINAPI stream_socket_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI stream_socket_factory_ActivateInstance( void *iface, IInspectable **instance )
++{
++    return create_stream_socket( (void **)instance );
++}
++static HRESULT WINAPI stream_socket_factory_GetEndpointPairsAsync( void *iface, void *host, HSTRING svc, void **op )
++{
++    return create_socket_async_op( op );
++}
++static HRESULT WINAPI stream_socket_factory_GetEndpointPairsAsync2( void *iface, void *host, HSTRING svc, int opt, void **op )
++{
++    return create_socket_async_op( op );
++}
++
++static const void *stream_socket_factory_vtbl[] =
++{
++    stream_socket_factory_QueryInterface,
++    stream_socket_factory_AddRef,
++    stream_socket_factory_Release,
++    stream_socket_factory_GetIids,
++    stream_socket_factory_GetRuntimeClassName,
++    stream_socket_factory_GetTrustLevel,
++    stream_socket_factory_ActivateInstance,
++    stream_socket_factory_GetEndpointPairsAsync,
++    stream_socket_factory_GetEndpointPairsAsync2,
++};
++static const void *stream_socket_factory_obj = stream_socket_factory_vtbl;
++static IActivationFactory *stream_socket_factory = (IActivationFactory *)&stream_socket_factory_obj;
++
++static HRESULT WINAPI message_websocket_factory_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IActivationFactory ))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI message_websocket_factory_AddRef( void *iface ) { return 2; }
++static ULONG WINAPI message_websocket_factory_Release( void *iface ) { return 1; }
++static HRESULT WINAPI message_websocket_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI message_websocket_factory_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    return WindowsCreateString( L"Windows.Networking.Sockets.MessageWebSocket", 42, n );
++}
++static HRESULT WINAPI message_websocket_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI message_websocket_factory_ActivateInstance( void *iface, IInspectable **instance )
++{
++    return create_message_websocket( (void **)instance );
++}
++
++static const void *message_websocket_factory_vtbl[] =
++{
++    message_websocket_factory_QueryInterface,
++    message_websocket_factory_AddRef,
++    message_websocket_factory_Release,
++    message_websocket_factory_GetIids,
++    message_websocket_factory_GetRuntimeClassName,
++    message_websocket_factory_GetTrustLevel,
++    message_websocket_factory_ActivateInstance,
++};
++static const void *message_websocket_factory_obj = message_websocket_factory_vtbl;
++static IActivationFactory *message_websocket_factory = (IActivationFactory *)&message_websocket_factory_obj;
++
++BOOL WINAPI DllMain( HINSTANCE instance, DWORD reason, void *reserved )
++{
++    return TRUE;
++}
++
++HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
++{
++    FIXME( "clsid %s, riid %s, out %p stub!\n", debugstr_guid( clsid ), debugstr_guid( riid ), out );
++    return CLASS_E_CLASSNOTAVAILABLE;
++}
++
++HRESULT WINAPI DllGetActivationFactory( HSTRING classid, void **factory )
++{
++    const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
++
++    TRACE( "class %s, factory %p.\n", debugstr_hstring( classid ), factory );
++
++    *factory = NULL;
++
++    if (!wcscmp( buffer, L"Windows.Networking.Sockets.StreamSocket" ))
++        IActivationFactory_QueryInterface( stream_socket_factory, &IID_IActivationFactory, factory );
++    if (!wcscmp( buffer, L"Windows.Networking.Sockets.MessageWebSocket" ))
++        IActivationFactory_QueryInterface( message_websocket_factory, &IID_IActivationFactory, factory );
++
++    if (*factory) return S_OK;
++    return CLASS_E_CLASSNOTAVAILABLE;
++}
++
++HRESULT WINAPI DllCanUnloadNow( void )
++{
++    return S_FALSE;
++}
++
++HRESULT WINAPI DllRegisterServer( void )
++{
++    return S_OK;
++}
++
++HRESULT WINAPI DllUnregisterServer( void )
++{
++    return S_OK;
++}
+--- /dev/null	2026-10-17 22:37:26.392623299 +0500
++++ dlls/windows.networking.sockets/Makefile.in	2026-10-19 23:13:58.747626160 +0500
+@@ -0,0 +1,6 @@
++MODULE  = windows.networking.sockets.dll
++IMPORTS = combase uuid
++
++SOURCES = \
++	classes.idl \
++	main.c
+--- /dev/null	2026-10-17 22:37:26.392623299 +0500
++++ dlls/windows.networking.sockets/windows.networking.sockets.spec	2026-10-19 17:24:54.008187689 +0500
+@@ -0,0 +1,6 @@
++@ stdcall -private DllCanUnloadNow()
++@ stdcall -private DllGetActivationFactory(ptr ptr)
++@ stdcall -private DllGetClassObject(ptr ptr ptr)
++@ stdcall -private DllMain(long long ptr)
++@ stdcall -private DllRegisterServer()
++@ stdcall -private DllUnregisterServer()
