@@ -38,12 +38,18 @@
 #include "windows.media.closedcaptioning.h"
 #define WIDL_using_Windows_Storage_Streams
 #define WIDL_using_Windows_Storage
+#include "windows.storage.h"
 #define WIDL_using_Windows_Media_MediaProperties
+#define WIDL_using_Windows_Media_Core
 #define WIDL_using_Windows_Media_Transcoding
 #include "windows.media.transcoding.h"
 
 extern IActivationFactory *captions_factory;
 extern IActivationFactory *media_transcoder_factory;
+extern IActivationFactory *media_composition_factory;
+extern IActivationFactory *media_clip_factory;
+extern IActivationFactory *audio_graph_factory;
+extern IActivationFactory *audio_graph_settings_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
@@ -83,4 +89,8 @@ extern IActivationFactory *media_transcoder_factory;
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
 
+#define WIDL_using_Windows_Media_Devices
+#include "windows.media.devices.h"
+#define WIDL_using_Windows_Media_Capture
+#include "windows.media.capture.h"
 #endif

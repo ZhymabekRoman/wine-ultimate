@@ -1,8 +1,10 @@
 MODULE  = windows.media.dll
-IMPORTS = combase
+IMPORTS = combase ole32
 
 SOURCES = \
+	audiograph.c \
 	captions.c \
 	classes.idl \
+	editing.c \
 	main.c \
 	transcoder.c

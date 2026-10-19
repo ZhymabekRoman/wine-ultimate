@@ -42,6 +42,14 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_QueryInterface( captions_factory, &IID_IActivationFactory, (void **)factory );
     if (!wcscmp( buffer, RuntimeClass_Windows_Media_Transcoding_MediaTranscoder ))
         IActivationFactory_QueryInterface( media_transcoder_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Media.Editing.MediaComposition" ))
+        IActivationFactory_QueryInterface( media_composition_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Media.Editing.MediaClip" ))
+        IActivationFactory_QueryInterface( media_clip_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Media.Audio.AudioGraph" ))
+        IActivationFactory_QueryInterface( audio_graph_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Media.Audio.AudioGraphSettings" ))
+        IActivationFactory_QueryInterface( audio_graph_settings_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;

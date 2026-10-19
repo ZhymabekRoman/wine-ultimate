@@ -23,10 +23,23 @@
 
 import "windows.media.closedcaptioning.idl";
 import "windows.media.transcoding.idl";
+import "windows.media.capture.idl";
 
 namespace Windows.Media.ClosedCaptioning {
     runtimeclass ClosedCaptionProperties;
 }
 namespace Windows.Media.Transcoding {
     runtimeclass MediaTranscoder;
+}
+namespace Windows.Media.Editing {
+    runtimeclass MediaComposition;
+    runtimeclass MediaClip;
+}
+namespace Windows.Media.Capture {
+    runtimeclass MediaCapture;
+    runtimeclass MediaCaptureInitializationSettings;
+}
+namespace Windows.Media.Audio {
+    runtimeclass AudioGraph;
+    runtimeclass AudioGraphSettings;
 }
