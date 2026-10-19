@@ -9,3 +9,4 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0022-windows.media-windows.applicationmodel.calls-Impleme.patch
 0023-twinapi-Implement-DataTransfer-Clipboard-DataPackage.patch
 0024-windows.globalization-Implement-ManifestLanguages-an.patch
+0025-windows.web-Implement-HttpClient-and-HttpStringCont.patch
