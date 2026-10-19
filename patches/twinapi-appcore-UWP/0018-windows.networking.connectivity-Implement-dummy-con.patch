@@ -1,0 +1,132 @@
+.../network_information.c                          | 1558 +++++++++++++++++---
+ 1 file changed, 1345 insertions(+), 213 deletions(-)
+
+--- Changes ---
+
+📄 dlls/windows.networking.connectivity/network_information.c
+  @@ -24,38 +24,31 @@
+  +static const GUID dummy_adapter_id = {0x11111111, 0x2222, 0x3333, {0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb}};
+   
+  -struct network_information_statics
+  +struct network_adapter
+   {
+  -    IActivationFactory IActivationFactory_iface;
+  -    INetworkInformationStatics INetworkInformationStatics_iface;
+  +    INetworkAdapter INetworkAdapter_iface;
+       LONG ref;
+   };
+   
+  -static inline struct network_information_statics *impl_from_IActivationFactory( IActivationFactory *iface )
+  +static inline struct network_adapter *impl_from_INetworkAdapter( INetworkAdapter *iface )
+   {
+  -    return CONTAINING_RECORD( iface, struct network_information_statics, IActivationFactory_iface );
+  +    return CONTAINING_RECORD( iface, struct network_adapter, INetworkAdapter_iface );
+   }
+   
+  -static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+  +static HRESULT WINAPI network_adapter_QueryInterface( INetworkAdapter *iface, REFIID iid, void **out )
+   {
+  -    struct network_information_statics *impl = impl_from_IActivationFactory( iface );
+  +    struct network_adapter *impl = impl_from_INetworkAdapter( iface );
+   
+       TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+   
+       if (IsEqualGUID( iid, &IID_IUnknown ) ||
+           IsEqualGUID( iid, &IID_IInspectable ) ||
+           IsEqualGUID( iid, &IID_IAgileObject ) ||
+  -        IsEqualGUID( iid, &IID_IActivationFactory ))
+  ... (truncated)
+  @@ -65,326 +58,1224 @@
+  -static ULONG WINAPI factory_AddRef( IActivationFactory *iface )
+  +static ULONG WINAPI network_adapter_AddRef( INetworkAdapter *iface )
+   {
+  -    struct network_information_statics *impl = impl_from_IActivationFactory( iface );
+  +    struct network_adapter *impl = impl_from_INetworkAdapter( iface );
+       ULONG ref = InterlockedIncrement( &impl->ref );
+       TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
+       return ref;
+   }
+   
+  -static ULONG WINAPI factory_Release( IActivationFactory *iface )
+  +static ULONG WINAPI network_adapter_Release( INetworkAdapter *iface )
+   {
+  -    struct network_information_statics *impl = impl_from_IActivationFactory( iface );
+  +    struct network_adapter *impl = impl_from_INetworkAdapter( iface );
+       ULONG ref = InterlockedDecrement( &impl->ref );
+       TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
+  +    if (!ref) free( impl );
+       return ref;
+   }
+   
+  -static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
+  +static HRESULT WINAPI network_adapter_GetIids( INetworkAdapter *iface, ULONG *iid_count, IID **iids )
+   {
+       FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+       return E_NOTIMPL;
+   }
+   
+  -static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
+  +static HRESULT WINAPI network_adapter_GetRuntimeClassName( INetworkAdapter *iface, HSTRING *class_name )
+  ... (truncated)
+  @@ -392,6 +1283,8 @@
+  +    if (!value) return E_POINTER;
+  +    *value = NULL;
+       return E_NOTIMPL;
+   }
+   
+  @@ -416,64 +1309,300 @@
+  +static HRESULT connection_profile_create( INetworkListManager *network_list_manager, IConnectionProfile **profile )
+  +{
+  +    struct connection_profile *impl;
+  +
+  +    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+  +    impl->IConnectionProfile_iface.lpVtbl = &connection_profile_vtbl;
+  +    impl->IConnectionProfile2_iface.lpVtbl = &connection_profile2_vtbl;
+  +    impl->ref = 1;
+  +    impl->network_list_manager = network_list_manager;
+  +    if (impl->network_list_manager)
+  +        INetworkListManager_AddRef( impl->network_list_manager );
+  +
+  +    *profile = &impl->IConnectionProfile_iface;
+  +    return S_OK;
+  +}
+  +
+  +struct connection_profiles_view
+  +{
+  +    IVectorView_ConnectionProfile IVectorView_ConnectionProfile_iface;
+  +    LONG ref;
+  +};
+  +
+  +static inline struct connection_profiles_view *impl_from_IVectorView_ConnectionProfile( IVectorView_ConnectionProfile *iface )
+  +{
+  +    return CONTAINING_RECORD( iface, struct connection_profiles_view, IVectorView_ConnectionProfile_iface );
+  +}
+  +
+  +static HRESULT WINAPI connection_profiles_view_QueryInterface( IVectorView_ConnectionProfile *iface, REFIID iid, void **out )
+  +{
+  +    struct connection_profiles_view *impl = impl_from_IVectorView_ConnectionProfile( iface );
+  ... (truncated)
+  @@ -481,20 +1610,23 @@
+  +    if (!value) return E_POINTER;
+  +    *value = NULL;
+       return E_NOTIMPL;
+   }
+   
+   static HRESULT WINAPI network_information_statics_add_NetworkStatusChanged( INetworkInformationStatics *iface, INetworkStatusChangedEventHandler *handler,
+                                                                               EventRegistrationToken *cookie )
+   {
+  -    FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
+  +    TRACE( "iface %p, handler %p, cookie %p\n", iface, handler, cookie );
+  +    if (!cookie) return E_POINTER;
+       *cookie = dummy_cookie;
+       return S_OK;
+   }
+   
+   static HRESULT WINAPI network_information_statics_remove_NetworkStatusChanged( INetworkInformationStatics *iface, EventRegistrationToken cookie )
+   {
+  -    FIXME( "iface %p, cookie %#I64x stub!\n", iface, cookie.value );
+  +    TRACE( "iface %p, cookie %#I64x\n", iface, cookie.value );
+       return S_OK;
+   }
+   
+  +1345 -213

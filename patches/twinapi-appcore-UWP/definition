@@ -2,3 +2,5 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 #Depends: kernelbase-PackageIdentity
 0016-twinapi-appmodel-storage-Implement-IPackageId-IBackg.patch
 0017-twinapi-cryptowinrt-frameworkudk-shcore-kernelbase-c.patch
+0018-windows.networking.connectivity-Implement-dummy-con.patch
+0019-windows.devices.enumeration-windows.media.devices-I.patch
