@@ -11,3 +11,5 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0024-windows.globalization-Implement-ManifestLanguages-an.patch
 0025-windows.web-Implement-HttpClient-and-HttpStringCont.patch
 0026-windows.web-windows.networking.sockets-Implement-St.patch
+0027-windows.media-Implement-AudioGraph-and-AudioDevice.patch
+0028-twinapi.appcore-Implement-HardwareIdentification-an.patch
