@@ -23,7 +23,7 @@ index 48c0762..2559495 100644
 +    runtimeclass StandardDataFormats;
  }
 diff --git a/dlls/twinapi.appcore/main.c b/dlls/twinapi.appcore/main.c
-index 8dded12..ae9ba70 100644
+index 8dded12..3803396 100644
 --- a/dlls/twinapi.appcore/main.c
 +++ b/dlls/twinapi.appcore/main.c
 @@ -56,11 +56,39 @@ void WINAPI UnregisterAppStateChangeNotification( PAPPSTATE_REGISTRATION reg )
@@ -294,27 +294,28 @@ index 8dded12..ae9ba70 100644
      return S_OK;
  }
  
-@@ -249,6 +426,885 @@ static const void *bg_manager_factory_vtbl[] =
+@@ -249,6 +426,886 @@ static const void *bg_manager_factory_vtbl[] =
      push_notification_stub,
  };
  
 +/* Background Task Registration */
-+static const GUID IID_IMapView_GUID_IBackgroundTaskRegistration = {0x78c880f6, 0xa7dc, 0x5172, {0x89, 0xda, 0x77, 0x49, 0xfc, 0x82, 0xaa, 0x82}};
-+static const GUID IID_IMapView_GUID_BackgroundTaskRegistration = {0x2c08602f, 0x40b1, 0x5e97, {0xae, 0x21, 0x5c, 0x04, 0xd7, 0xfb, 0x82, 0x9c}};
++static const GUID my_IID_IMapView_GUID_IBackgroundTaskRegistration = {0x78c880f6, 0xa7dc, 0x5172, {0x89, 0xda, 0x77, 0x49, 0xfc, 0x82, 0xaa, 0x82}};
++static const GUID my_IID_IMapView_GUID_BackgroundTaskRegistration = {0x2c08602f, 0x40b1, 0x5e97, {0xae, 0x21, 0x5c, 0x04, 0xd7, 0xfb, 0x82, 0x9c}};
 +static const GUID IID_IIterable_BackgroundTask = {0x80fb0327, 0x5a00, 0x55cc, {0x85, 0xdb, 0xa8, 0x52, 0x71, 0x99, 0x81, 0xb9}};
 +static const GUID IID_IIterable_BackgroundTask_alt1 = {0xb903efe6, 0x4f1c, 0x5969, {0xb0, 0x7d, 0xa0, 0x9d, 0xe5, 0x6c, 0xc2, 0xc0}};
 +static const GUID IID_IIterable_BackgroundTask_alt2 = {0xffe605c9, 0xf4a3, 0x57db, {0x99, 0x90, 0xcf, 0x5e, 0x8d, 0xed, 0xba, 0x6e}};
 +static const GUID IID_IIterator_BackgroundTask_alt1 = {0xbb9f243f, 0x2225, 0x5eb4, {0x9f, 0xeb, 0x61, 0xad, 0x01, 0x72, 0xd4, 0x0d}};
 +static const GUID IID_IIterator_BackgroundTask_alt2 = {0xdb77ebf3, 0x3d1a, 0x5767, {0xb5, 0xaa, 0x8f, 0x42, 0xc2, 0x53, 0x79, 0xee}};
 +
++struct twinapi_dummy_obj { const void *vtbl; };
 +static const void *empty_iterator_vtbl[];
-+static struct { const void *vtbl; } empty_iterator_obj = { empty_iterator_vtbl };
++static struct twinapi_dummy_obj empty_iterator_obj = { empty_iterator_vtbl };
 +
 +static const void *empty_map_view_vtbl[];
-+static struct { const void *vtbl; } empty_map_view_obj = { empty_map_view_vtbl };
++static struct twinapi_dummy_obj empty_map_view_obj;
 +
 +static const void *empty_iterable_vtbl[];
-+static struct { const void *vtbl; } empty_iterable_obj = { empty_iterable_vtbl };
++static struct twinapi_dummy_obj empty_iterable_obj = { empty_iterable_vtbl };
 +
 +static HRESULT WINAPI empty_iterator_QueryInterface( void *iface, REFIID iid, void **out )
 +{
@@ -386,8 +387,8 @@ index 8dded12..ae9ba70 100644
 +        *out = &empty_iterable_obj;
 +        return S_OK;
 +    }
-+    if (IsEqualGUID( iid, &IID_IMapView_GUID_IBackgroundTaskRegistration ) ||
-+        IsEqualGUID( iid, &IID_IMapView_GUID_BackgroundTaskRegistration ))
++    if (IsEqualGUID( iid, &my_IID_IMapView_GUID_IBackgroundTaskRegistration ) ||
++        IsEqualGUID( iid, &my_IID_IMapView_GUID_BackgroundTaskRegistration ))
 +    {
 +        *out = &empty_map_view_obj;
 +        return S_OK;
@@ -494,7 +495,7 @@ index 8dded12..ae9ba70 100644
 +    empty_map_view_HasKey,
 +    empty_map_view_Split,
 +};
-+static struct { const void *vtbl; } empty_map_view_obj = { empty_map_view_vtbl };
++static struct twinapi_dummy_obj empty_map_view_obj = { empty_map_view_vtbl };
 +
 +static HRESULT WINAPI bg_task_get_AllTasks( void *iface, void **tasks )
 +{
@@ -1180,7 +1181,7 @@ index 8dded12..ae9ba70 100644
  HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
  {
      FIXME( "clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out );
-@@ -273,14 +1329,35 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
+@@ -273,14 +1330,35 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
          IActivationFactory_QueryInterface( application_view_factory, &IID_IActivationFactory, (void **)factory );
      else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_Core_CoreApplication ))
          IActivationFactory_QueryInterface( core_application_factory, &IID_IActivationFactory, (void **)factory );
