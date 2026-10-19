@@ -20,10 +20,58 @@
 #pragma winrt ns_prefix
 #endif
 
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
 import "windows.foundation.idl";
+
+namespace Windows.Storage {
+    interface IStorageFile;
+}
+
+namespace Windows.Storage.Streams {
+    interface IRandomAccessStream;
+}
+
+namespace Windows.Media {
+    interface IMediaExtension;
+}
+
+namespace Windows.Media.MediaProperties {
+    interface IMediaEncodingProperties;
+    interface IMediaEncodingProfile;
+    interface IImageEncodingProperties;
+    interface IVideoEncodingProperties;
+}
+
+namespace Windows.Media.Devices {
+    interface IAudioDeviceController;
+    interface IVideoDeviceController;
+}
 
 namespace Windows.Media.Capture {
     typedef enum MediaCategory MediaCategory;
+    typedef enum MediaStreamType MediaStreamType;
+    typedef enum StreamingCaptureMode StreamingCaptureMode;
+    typedef enum PhotoCaptureSource PhotoCaptureSource;
+    typedef enum VideoRotation VideoRotation;
+    typedef enum PowerlineFrequency PowerlineFrequency;
+
+    interface IMediaCapture;
+    interface IMediaCapture2;
+    interface IMediaCapture3;
+    interface IMediaCapture4;
+    interface IMediaCapture5;
+    interface IMediaCaptureVideoPreview;
+    interface IMediaCaptureInitializationSettings;
+    interface IMediaCaptureInitializationSettings5;
+
+    runtimeclass MediaCapture;
+    runtimeclass MediaCaptureInitializationSettings;
+
+    delegate HRESULT MediaCaptureFailedEventHandler([in] Windows.Media.Capture.MediaCapture *sender, [in] IInspectable *error_event_args);
+    delegate HRESULT RecordLimitationExceededEventHandler([in] Windows.Media.Capture.MediaCapture *sender);
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0)
@@ -45,4 +93,182 @@ namespace Windows.Media.Capture {
         [contract(Windows.Foundation.UniversalApiContract, 12.0)]
         VoiceTyping    = 7,
     };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum MediaStreamType
+    {
+        VideoPreview = 0,
+        VideoRecord  = 1,
+        Audio        = 2,
+        Photo        = 3,
+        [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+        Metadata     = 4,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum StreamingCaptureMode
+    {
+        AudioAndVideo = 0,
+        Audio         = 1,
+        Video         = 2,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum PhotoCaptureSource
+    {
+        Auto         = 0,
+        VideoPreview = 1,
+        Photo        = 2,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum VideoRotation
+    {
+        None                = 0,
+        Clockwise90Degrees  = 1,
+        Clockwise180Degrees = 2,
+        Clockwise270Degrees = 3,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum PowerlineFrequency
+    {
+        Disabled   = 0,
+        FiftyHertz = 1,
+        SixtyHertz = 2,
+        [contract(Windows.Foundation.UniversalApiContract, 2.0)]
+        Auto       = 3,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Media.Capture.MediaCaptureInitializationSettings),
+        uuid(9782ba70-ea65-4900-9356-8ca887726884)
+    ]
+    interface IMediaCaptureInitializationSettings : IInspectable
+    {
+        [propput] HRESULT AudioDeviceId([in] HSTRING value);
+        [propget] HRESULT AudioDeviceId([out, retval] HSTRING *value);
+        [propput] HRESULT VideoDeviceId([in] HSTRING value);
+        [propget] HRESULT VideoDeviceId([out, retval] HSTRING *value);
+        [propput] HRESULT StreamingCaptureMode([in] Windows.Media.Capture.StreamingCaptureMode value);
+        [propget] HRESULT StreamingCaptureMode([out, retval] Windows.Media.Capture.StreamingCaptureMode *value);
+        [propput] HRESULT PhotoCaptureSource([in] Windows.Media.Capture.PhotoCaptureSource value);
+        [propget] HRESULT PhotoCaptureSource([out, retval] Windows.Media.Capture.PhotoCaptureSource *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Media.Capture.MediaCaptureInitializationSettings),
+        uuid(d5a2e3b8-2626-4e94-b7b3-5308a0f64b1a)
+    ]
+    interface IMediaCaptureInitializationSettings5 : IInspectable
+    {
+        [propget] HRESULT SourceGroup([out, retval] IInspectable **value);
+        [propput] HRESULT SourceGroup([in] IInspectable *value);
+        [propget] HRESULT SharingMode([out, retval] UINT32 *value);
+        [propput] HRESULT SharingMode([in] UINT32 value);
+        [propget] HRESULT MemoryPreference([out, retval] UINT32 *value);
+        [propput] HRESULT MemoryPreference([in] UINT32 value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Media.Capture.MediaCapture),
+        uuid(c61afbb4-fb10-4a34-ac18-ca80d9c8e7ee)
+    ]
+    interface IMediaCapture : IInspectable
+    {
+        [overload("InitializeAsync")] HRESULT InitializeAsync([out, retval] Windows.Foundation.IAsyncAction **async_info);
+        [overload("InitializeAsync")] HRESULT InitializeWithSettingsAsync([in] Windows.Media.Capture.MediaCaptureInitializationSettings *settings, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT StartRecordToStorageFileAsync([in] Windows.Media.MediaProperties.IMediaEncodingProfile *profile, [in] Windows.Storage.IStorageFile *file, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT StartRecordToStreamAsync([in] Windows.Media.MediaProperties.IMediaEncodingProfile *profile, [in] Windows.Storage.Streams.IRandomAccessStream *stream, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        [overload("StartRecordToCustomSinkAsync")] HRESULT StartRecordToCustomSinkAsync([in] Windows.Media.MediaProperties.IMediaEncodingProfile *profile, [in] Windows.Media.IMediaExtension *custom_media_sink, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        [overload("StartRecordToCustomSinkAsync")] HRESULT StartRecordToCustomSinkIdAsync([in] Windows.Media.MediaProperties.IMediaEncodingProfile *profile, [in] HSTRING custom_sink_activation_id, [in] Windows.Foundation.Collections.IPropertySet *custom_sink_settings, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT StopRecordAsync([out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT CapturePhotoToStorageFileAsync([in] Windows.Media.MediaProperties.IImageEncodingProperties *type, [in] Windows.Storage.IStorageFile *file, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT CapturePhotoToStreamAsync([in] Windows.Media.MediaProperties.IImageEncodingProperties *type, [in] Windows.Storage.Streams.IRandomAccessStream *stream, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT AddEffectAsync([in] Windows.Media.Capture.MediaStreamType media_stream_type, [in] HSTRING effect_activation_id, [in] Windows.Foundation.Collections.IPropertySet *effect_settings, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT ClearEffectsAsync([in] Windows.Media.Capture.MediaStreamType media_stream_type, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT SetEncoderProperty([in] Windows.Media.Capture.MediaStreamType media_stream_type, [in] GUID property_id, [in] IInspectable *property_value);
+        HRESULT GetEncoderProperty([in] Windows.Media.Capture.MediaStreamType media_stream_type, [in] GUID property_id, [out, retval] IInspectable **property_value);
+        [eventadd] HRESULT Failed([in] Windows.Media.Capture.MediaCaptureFailedEventHandler *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT Failed([in] EventRegistrationToken token);
+        [eventadd] HRESULT RecordLimitationExceeded([in] Windows.Media.Capture.RecordLimitationExceededEventHandler *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT RecordLimitationExceeded([in] EventRegistrationToken token);
+        [propget] HRESULT MediaCaptureSettings([out, retval] IInspectable **value);
+        [propget] HRESULT AudioDeviceController([out, retval] Windows.Media.Devices.IAudioDeviceController **value);
+        [propget] HRESULT VideoDeviceController([out, retval] Windows.Media.Devices.IVideoDeviceController **value);
+        HRESULT SetPreviewMirroring([in] boolean value);
+        HRESULT GetPreviewMirroring([out, retval] boolean *value);
+        HRESULT SetPreviewRotation([in] Windows.Media.Capture.VideoRotation value);
+        HRESULT GetPreviewRotation([out, retval] Windows.Media.Capture.VideoRotation *value);
+        HRESULT SetRecordRotation([in] Windows.Media.Capture.VideoRotation value);
+        HRESULT GetRecordRotation([out, retval] Windows.Media.Capture.VideoRotation *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Media.Capture.MediaCapture),
+        uuid(27727073-549e-447f-a20a-4f03c479d8c0)
+    ]
+    interface IMediaCaptureVideoPreview : IInspectable
+    {
+        HRESULT StartPreviewAsync([out, retval] Windows.Foundation.IAsyncAction **async_info);
+        [overload("StartPreviewToCustomSinkAsync")] HRESULT StartPreviewToCustomSinkAsync([in] Windows.Media.MediaProperties.IMediaEncodingProfile *profile, [in] Windows.Media.IMediaExtension *custom_media_sink, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        [overload("StartPreviewToCustomSinkAsync")] HRESULT StartPreviewToCustomSinkIdAsync([in] Windows.Media.MediaProperties.IMediaEncodingProfile *profile, [in] HSTRING custom_sink_activation_id, [in] Windows.Foundation.Collections.IPropertySet *custom_sink_settings, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT StopPreviewAsync([out, retval] Windows.Foundation.IAsyncAction **async_info);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Media.Capture.MediaCapture),
+        uuid(da787c22-3a9b-4720-a71e-97900a316e5a)
+    ]
+    interface IMediaCapture5 : IInspectable
+    {
+        HRESULT RemoveEffectAsync([in] Windows.Media.IMediaExtension *effect, [out, retval] Windows.Foundation.IAsyncAction **async_info);
+        HRESULT PauseRecordWithResultAsync([in] UINT32 behavior, [out, retval] IInspectable **operation);
+        HRESULT StopRecordWithResultAsync([out, retval] IInspectable **operation);
+        [propget] HRESULT FrameSources([out, retval] IInspectable **value);
+        HRESULT CreateFrameReaderAsync([in] IInspectable *input_source, [out, retval] IInspectable **value);
+        HRESULT CreateFrameReaderWithSubtypeAsync([in] IInspectable *input_source, [in] HSTRING output_subtype, [out, retval] IInspectable **value);
+        HRESULT CreateFrameReaderWithSubtypeAndSizeAsync([in] IInspectable *input_source, [in] HSTRING output_subtype, [in] IInspectable *output_size, [out, retval] IInspectable **value);
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(standard),
+        threading(mta)
+    ]
+    runtimeclass MediaCapture
+    {
+        [default] interface Windows.Media.Capture.IMediaCapture;
+        interface Windows.Media.Capture.IMediaCaptureVideoPreview;
+        [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Foundation.IClosable;
+        [contract(Windows.Foundation.UniversalApiContract, 2.0)] interface Windows.Media.Capture.IMediaCapture5;
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(standard),
+        threading(mta)
+    ]
+    runtimeclass MediaCaptureInitializationSettings
+    {
+        [default] interface Windows.Media.Capture.IMediaCaptureInitializationSettings;
+        [contract(Windows.Foundation.UniversalApiContract, 2.0)] interface Windows.Media.Capture.IMediaCaptureInitializationSettings5;
+    }
 }
