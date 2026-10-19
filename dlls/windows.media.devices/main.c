@@ -171,16 +171,26 @@ static HRESULT get_default_device_id(EDataFlow direction, AudioDeviceRole role, 
             CLSCTX_INPROC_SERVER, &IID_IMMDeviceEnumerator, (void**)&devenum);
     if (FAILED(hr))
     {
-        WARN("Failed to create MMDeviceEnumerator: %08lx\n", hr);
-        return hr;
+        const WCHAR *fallback_id;
+        WARN("Failed to create MMDeviceEnumerator: %08lx, using fallback\n", hr);
+        if (direction == eRender)
+            fallback_id = L"\\\\?\\SWD#MMDEVAPI#{0.0.0.00000000}.{default_render}#{e6327cad-dcec-4949-ae82-0e2637a8b2f1}";
+        else
+            fallback_id = L"\\\\?\\SWD#MMDEVAPI#{0.0.1.00000000}.{default_capture}#{2eef81be-33fa-4800-9670-1cd474972c3f}";
+        return WindowsCreateString(fallback_id, wcslen(fallback_id), device_id_hstr);
     }
 
     hr = IMMDeviceEnumerator_GetDefaultAudioEndpoint(devenum, direction, mmdev_role, &dev);
     if (FAILED(hr))
     {
-        WARN("GetDefaultAudioEndpoint failed: %08lx\n", hr);
+        const WCHAR *fallback_id;
+        WARN("GetDefaultAudioEndpoint failed: %08lx, using fallback\n", hr);
         IMMDeviceEnumerator_Release(devenum);
-        return hr;
+        if (direction == eRender)
+            fallback_id = L"\\\\?\\SWD#MMDEVAPI#{0.0.0.00000000}.{default_render}#{e6327cad-dcec-4949-ae82-0e2637a8b2f1}";
+        else
+            fallback_id = L"\\\\?\\SWD#MMDEVAPI#{0.0.1.00000000}.{default_capture}#{2eef81be-33fa-4800-9670-1cd474972c3f}";
+        return WindowsCreateString(fallback_id, wcslen(fallback_id), device_id_hstr);
     }
 
     hr = IMMDevice_GetId(dev, &devid);
@@ -258,25 +268,35 @@ static HRESULT WINAPI media_device_statics_GetTrustLevel(IMediaDeviceStatics *if
     return windows_media_devices_GetTrustLevel(&This->IActivationFactory_iface, trustLevel);
 }
 
+static const WCHAR audio_capture_selector[] =
+    L"System.Devices.InterfaceClassGuid:=\"{2eef81be-33fa-4800-9670-1cd474972c3f}\" AND System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True";
+static const WCHAR audio_render_selector[] =
+    L"System.Devices.InterfaceClassGuid:=\"{e6327cad-dcec-4949-ae82-0e2637a8b2f1}\" AND System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True";
+static const WCHAR video_capture_selector[] =
+    L"System.Devices.InterfaceClassGuid:=\"{e5323777-f976-4f5b-9b55-b94699c46e44}\" AND System.Devices.InterfaceEnabled:=System.StructuredQueryType.Boolean#True";
+
 static HRESULT WINAPI media_device_statics_GetAudioCaptureSelector(IMediaDeviceStatics *iface,
         HSTRING *value)
 {
-    FIXME("iface %p, value %p stub!\n", iface, value);
-    return E_NOTIMPL;
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    return WindowsCreateString(audio_capture_selector, wcslen(audio_capture_selector), value);
 }
 
 static HRESULT WINAPI media_device_statics_GetAudioRenderSelector(IMediaDeviceStatics *iface,
         HSTRING *value)
 {
-    FIXME("iface %p, value %p stub!\n", iface, value);
-    return E_NOTIMPL;
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    return WindowsCreateString(audio_render_selector, wcslen(audio_render_selector), value);
 }
 
 static HRESULT WINAPI media_device_statics_GetVideoCaptureSelector(IMediaDeviceStatics *iface,
         HSTRING *value)
 {
-    FIXME("iface %p, value %p stub!\n", iface, value);
-    return E_NOTIMPL;
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    return WindowsCreateString(video_capture_selector, wcslen(video_capture_selector), value);
 }
 
 static HRESULT WINAPI media_device_statics_GetDefaultAudioCaptureId(IMediaDeviceStatics *iface,

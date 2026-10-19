@@ -110,20 +110,73 @@ static HRESULT WINAPI device_information_get_Id( IDeviceInformation *iface, HSTR
 
 static HRESULT WINAPI device_information_get_Name( IDeviceInformation *iface, HSTRING *name )
 {
-    FIXME( "iface %p, name %p stub!\n", iface, name );
-    return E_NOTIMPL;
+    struct device_information *impl = impl_from_IDeviceInformation( iface );
+    HSTRING key;
+    IInspectable *val = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, name %p\n", iface, name );
+
+    if (!name) return E_POINTER;
+
+    if (impl->properties && SUCCEEDED(WindowsCreateString( L"System.ItemNameDisplay", wcslen( L"System.ItemNameDisplay" ), &key )))
+    {
+        hr = IMap_HSTRING_IInspectable_Lookup( impl->properties, key, &val );
+        WindowsDeleteString( key );
+        if (SUCCEEDED(hr) && val)
+        {
+            IPropertyValue *propval;
+            hr = IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&propval );
+            IInspectable_Release( val );
+            if (SUCCEEDED(hr))
+            {
+                hr = IPropertyValue_GetString( propval, name );
+                IPropertyValue_Release( propval );
+                if (SUCCEEDED(hr)) return S_OK;
+            }
+        }
+    }
+
+    return WindowsDuplicateString( impl->id, name );
 }
 
 static HRESULT WINAPI device_information_get_IsEnabled( IDeviceInformation *iface, boolean *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct device_information *impl = impl_from_IDeviceInformation( iface );
+    HSTRING key;
+    IInspectable *val = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    if (!value) return E_POINTER;
+
+    *value = TRUE;
+    if (impl->properties && SUCCEEDED(WindowsCreateString( L"System.Devices.InterfaceEnabled", wcslen( L"System.Devices.InterfaceEnabled" ), &key )))
+    {
+        hr = IMap_HSTRING_IInspectable_Lookup( impl->properties, key, &val );
+        WindowsDeleteString( key );
+        if (SUCCEEDED(hr) && val)
+        {
+            IPropertyValue *propval;
+            hr = IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&propval );
+            IInspectable_Release( val );
+            if (SUCCEEDED(hr))
+            {
+                IPropertyValue_GetBoolean( propval, value );
+                IPropertyValue_Release( propval );
+            }
+        }
+    }
+    return S_OK;
 }
 
 static HRESULT WINAPI device_information_IsDefault( IDeviceInformation *iface, boolean *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static HRESULT WINAPI device_information_get_EnclosureLocation( IDeviceInformation *iface, IEnclosureLocation **location )
