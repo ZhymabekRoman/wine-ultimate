@@ -30,6 +30,33 @@ import "windows.storage.streams.idl";
 
 namespace Windows.Security.Cryptography.Core {
     typedef enum CryptographicPublicKeyBlobType CryptographicPublicKeyBlobType;
+    typedef enum CryptographicPrivateKeyBlobType CryptographicPrivateKeyBlobType;
+
+    interface ICryptographicKey;
+    interface IEncryptedAndAuthenticatedData;
+    interface IHashComputation;
+    interface IHashAlgorithmProvider;
+    interface IHashAlgorithmProviderStatics;
+    interface ISymmetricKeyAlgorithmProvider;
+    interface ISymmetricKeyAlgorithmProviderStatics;
+    interface ICryptographicEngineStatics;
+    interface ICryptographicEngineStatics2;
+    interface IKeyDerivationParameters;
+    interface IKeyDerivationParametersStatics;
+    interface IKeyDerivationAlgorithmProvider;
+    interface IKeyDerivationAlgorithmProviderStatics;
+
+    runtimeclass CryptographicKey;
+    runtimeclass CryptographicHash;
+    runtimeclass EncryptedAndAuthenticatedData;
+    runtimeclass HashAlgorithmProvider;
+    runtimeclass SymmetricKeyAlgorithmProvider;
+    runtimeclass CryptographicEngine;
+    runtimeclass KeyDerivationParameters;
+    runtimeclass KeyDerivationAlgorithmProvider;
+    runtimeclass SymmetricAlgorithmNames;
+    runtimeclass HashAlgorithmNames;
+    runtimeclass KeyDerivationAlgorithmNames;
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0)
@@ -43,4 +70,350 @@ namespace Windows.Security.Cryptography.Core {
         [contract(Windows.Foundation.UniversalApiContract, 1.0)]
         BCryptEccFullPublicKey   = 4,
     };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum CryptographicPrivateKeyBlobType
+    {
+        Pkcs8RawPrivateKeyInfo  = 0,
+        Pkcs1RsaPrivateKey      = 1,
+        BCryptPrivateKey        = 2,
+        Capi1PrivateKey         = 3,
+        [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+        BCryptEccFullPrivateKey = 4,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.CryptographicKey),
+        uuid(ed2a3b70-8e7b-4009-8401-ffd1a62eeb27)
+    ]
+    interface ICryptographicKey : IInspectable
+    {
+        [propget] HRESULT KeySize([out, retval] UINT32 *value);
+        [overload("Export")] HRESULT ExportDefaultPrivateKeyBlobType([out, retval] Windows.Storage.Streams.IBuffer **value);
+        [overload("Export")] HRESULT ExportPrivateKeyWithBlobType([in] Windows.Security.Cryptography.Core.CryptographicPrivateKeyBlobType BlobType, [out, retval] Windows.Storage.Streams.IBuffer **value);
+        [overload("ExportPublicKey")] HRESULT ExportDefaultPublicKeyBlobType([out, retval] Windows.Storage.Streams.IBuffer **value);
+        [overload("ExportPublicKey")] HRESULT ExportPublicKeyWithBlobType([in] Windows.Security.Cryptography.Core.CryptographicPublicKeyBlobType BlobType, [out, retval] Windows.Storage.Streams.IBuffer **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.EncryptedAndAuthenticatedData),
+        uuid(6fa42fe7-1ecb-4b00-bea5-60b83f862f17)
+    ]
+    interface IEncryptedAndAuthenticatedData : IInspectable
+    {
+        [propget] HRESULT EncryptedData([out, retval] Windows.Storage.Streams.IBuffer **value);
+        [propget] HRESULT AuthenticationTag([out, retval] Windows.Storage.Streams.IBuffer **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.KeyDerivationParameters),
+        uuid(7bf05967-047b-4a8c-964a-469ffd5522e2)
+    ]
+    interface IKeyDerivationParameters : IInspectable
+    {
+        [propget] HRESULT KdfGenericBinary([out, retval] Windows.Storage.Streams.IBuffer **value);
+        [propput] HRESULT KdfGenericBinary([in] Windows.Storage.Streams.IBuffer *value);
+        [propget] HRESULT IterationCount([out, retval] UINT32 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.KeyDerivationParameters),
+        uuid(ea961fbe-f37f-4146-9dfe-a456f1735f4b)
+    ]
+    interface IKeyDerivationParametersStatics : IInspectable
+    {
+        HRESULT BuildForPbkdf2([in] Windows.Storage.Streams.IBuffer *pbkdf2Salt, [in] UINT32 iterationCount, [out, retval] Windows.Security.Cryptography.Core.KeyDerivationParameters **value);
+        HRESULT BuildForSP800108([in] Windows.Storage.Streams.IBuffer *label, [in] Windows.Storage.Streams.IBuffer *context, [out, retval] Windows.Security.Cryptography.Core.KeyDerivationParameters **value);
+        HRESULT BuildForSP80056a([in] Windows.Storage.Streams.IBuffer *algorithmId, [in] Windows.Storage.Streams.IBuffer *partyUInfo, [in] Windows.Storage.Streams.IBuffer *partyVInfo, [in] Windows.Storage.Streams.IBuffer *suppPubInfo, [in] Windows.Storage.Streams.IBuffer *suppPrivInfo, [out, retval] Windows.Security.Cryptography.Core.KeyDerivationParameters **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.CryptographicEngine),
+        uuid(9fea0639-6ff7-4c85-a095-95eb31715eb9)
+    ]
+    interface ICryptographicEngineStatics : IInspectable
+    {
+        HRESULT Encrypt([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [in] Windows.Storage.Streams.IBuffer *iv, [out, retval] Windows.Storage.Streams.IBuffer **value);
+        HRESULT Decrypt([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [in] Windows.Storage.Streams.IBuffer *iv, [out, retval] Windows.Storage.Streams.IBuffer **value);
+        HRESULT EncryptAndAuthenticate([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [in] Windows.Storage.Streams.IBuffer *nonce, [in] Windows.Storage.Streams.IBuffer *authenticatedData, [out, retval] Windows.Security.Cryptography.Core.EncryptedAndAuthenticatedData **value);
+        HRESULT DecryptAndAuthenticate([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [in] Windows.Storage.Streams.IBuffer *nonce, [in] Windows.Storage.Streams.IBuffer *authenticationTag, [in] Windows.Storage.Streams.IBuffer *authenticatedData, [out, retval] Windows.Storage.Streams.IBuffer **value);
+        HRESULT Sign([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [out, retval] Windows.Storage.Streams.IBuffer **value);
+        HRESULT VerifySignature([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [in] Windows.Storage.Streams.IBuffer *signature, [out, retval] boolean *isAuthenticated);
+        HRESULT DeriveKeyMaterial([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Security.Cryptography.Core.KeyDerivationParameters *parameters, [in] UINT32 desiredKeySize, [out, retval] Windows.Storage.Streams.IBuffer **keyMaterial);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.CryptographicEngine),
+        uuid(675948fe-df9f-4191-92c7-6ce6f58420e0)
+    ]
+    interface ICryptographicEngineStatics2 : IInspectable
+    {
+        HRESULT SignHashedData([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [out, retval] Windows.Storage.Streams.IBuffer **value);
+        HRESULT VerifySignatureWithHashInput([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [in] Windows.Storage.Streams.IBuffer *signature, [out, retval] boolean *isAuthenticated);
+        HRESULT DecryptAsync([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [in] Windows.Storage.Streams.IBuffer *iv, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IBuffer *> **value);
+        HRESULT SignAsync([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IBuffer *> **value);
+        HRESULT SignHashedDataAsync([in] Windows.Security.Cryptography.Core.CryptographicKey *key, [in] Windows.Storage.Streams.IBuffer *data, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IBuffer *> **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.SymmetricKeyAlgorithmProvider),
+        uuid(3d7e4a33-3bd0-4902-8ac8-470d50d21376)
+    ]
+    interface ISymmetricKeyAlgorithmProvider : IInspectable
+    {
+        [propget] HRESULT AlgorithmName([out, retval] HSTRING *value);
+        [propget] HRESULT BlockLength([out, retval] UINT32 *value);
+        HRESULT CreateSymmetricKey([in] Windows.Storage.Streams.IBuffer *keyMaterial, [out, retval] Windows.Security.Cryptography.Core.CryptographicKey **key);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.SymmetricKeyAlgorithmProvider),
+        uuid(8d3b2326-1f37-491f-b60e-f5431b26b483)
+    ]
+    interface ISymmetricKeyAlgorithmProviderStatics : IInspectable
+    {
+        HRESULT OpenAlgorithm([in] HSTRING algorithm, [out, retval] Windows.Security.Cryptography.Core.SymmetricKeyAlgorithmProvider **provider);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(5904d1b6-ad31-4603-a3a4-b1bda98e2562)
+    ]
+    interface IHashComputation : IInspectable
+    {
+        HRESULT Append([in] Windows.Storage.Streams.IBuffer *data);
+        HRESULT GetValueAndReset([out, retval] Windows.Storage.Streams.IBuffer **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.HashAlgorithmProvider),
+        uuid(be9b3080-b2c3-422b-bce1-ec90efb5d7b5)
+    ]
+    interface IHashAlgorithmProvider : IInspectable
+    {
+        [propget] HRESULT AlgorithmName([out, retval] HSTRING *value);
+        [propget] HRESULT HashLength([out, retval] UINT32 *value);
+        HRESULT HashData([in] Windows.Storage.Streams.IBuffer *data, [out, retval] Windows.Storage.Streams.IBuffer **value);
+        HRESULT CreateHash([out, retval] Windows.Security.Cryptography.Core.CryptographicHash **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.HashAlgorithmProvider),
+        uuid(9fac9741-5cc4-4336-ae38-6212b75a915a)
+    ]
+    interface IHashAlgorithmProviderStatics : IInspectable
+    {
+        HRESULT OpenAlgorithm([in] HSTRING algorithm, [out, retval] Windows.Security.Cryptography.Core.HashAlgorithmProvider **provider);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.KeyDerivationAlgorithmProvider),
+        uuid(e1fba83b-4671-43b7-9158-763aaa98b6bf)
+    ]
+    interface IKeyDerivationAlgorithmProvider : IInspectable
+    {
+        [propget] HRESULT AlgorithmName([out, retval] HSTRING *value);
+        HRESULT CreateKey([in] Windows.Storage.Streams.IBuffer *keyMaterial, [out, retval] Windows.Security.Cryptography.Core.CryptographicKey **key);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.KeyDerivationAlgorithmProvider),
+        uuid(0a22097a-0a1c-443b-9418-b9498aeb1603)
+    ]
+    interface IKeyDerivationAlgorithmProviderStatics : IInspectable
+    {
+        HRESULT OpenAlgorithm([in] HSTRING algorithm, [out, retval] Windows.Security.Cryptography.Core.KeyDerivationAlgorithmProvider **provider);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.SymmetricAlgorithmNames),
+        uuid(6870727b-c996-4eae-84d7-79b2aeb73b9c)
+    ]
+    interface ISymmetricAlgorithmNamesStatics : IInspectable
+    {
+        [propget] HRESULT DesCbc([out, retval] HSTRING *value);
+        [propget] HRESULT DesEcb([out, retval] HSTRING *value);
+        [propget] HRESULT TripleDesCbc([out, retval] HSTRING *value);
+        [propget] HRESULT TripleDesEcb([out, retval] HSTRING *value);
+        [propget] HRESULT Rc2Cbc([out, retval] HSTRING *value);
+        [propget] HRESULT Rc2Ecb([out, retval] HSTRING *value);
+        [propget] HRESULT AesCbc([out, retval] HSTRING *value);
+        [propget] HRESULT AesEcb([out, retval] HSTRING *value);
+        [propget] HRESULT AesGcm([out, retval] HSTRING *value);
+        [propget] HRESULT AesCcm([out, retval] HSTRING *value);
+        [propget] HRESULT AesCbcPkcs7([out, retval] HSTRING *value);
+        [propget] HRESULT AesEcbPkcs7([out, retval] HSTRING *value);
+        [propget] HRESULT DesCbcPkcs7([out, retval] HSTRING *value);
+        [propget] HRESULT DesEcbPkcs7([out, retval] HSTRING *value);
+        [propget] HRESULT TripleDesCbcPkcs7([out, retval] HSTRING *value);
+        [propget] HRESULT TripleDesEcbPkcs7([out, retval] HSTRING *value);
+        [propget] HRESULT Rc2CbcPkcs7([out, retval] HSTRING *value);
+        [propget] HRESULT Rc2EcbPkcs7([out, retval] HSTRING *value);
+        [propget] HRESULT Rc4([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.HashAlgorithmNames),
+        uuid(6b5e0516-de96-4f0a-8d57-dcc9dae36c76)
+    ]
+    interface IHashAlgorithmNamesStatics : IInspectable
+    {
+        [propget] HRESULT Md5([out, retval] HSTRING *value);
+        [propget] HRESULT Sha1([out, retval] HSTRING *value);
+        [propget] HRESULT Sha256([out, retval] HSTRING *value);
+        [propget] HRESULT Sha384([out, retval] HSTRING *value);
+        [propget] HRESULT Sha512([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Security.Cryptography.Core.KeyDerivationAlgorithmNames),
+        uuid(7b6e363e-94d2-4739-a57b-022e0c3a402a)
+    ]
+    interface IKeyDerivationAlgorithmNamesStatics : IInspectable
+    {
+        [propget] HRESULT Pbkdf2Md5([out, retval] HSTRING *value);
+        [propget] HRESULT Pbkdf2Sha1([out, retval] HSTRING *value);
+        [propget] HRESULT Pbkdf2Sha256([out, retval] HSTRING *value);
+        [propget] HRESULT Pbkdf2Sha384([out, retval] HSTRING *value);
+        [propget] HRESULT Pbkdf2Sha512([out, retval] HSTRING *value);
+        [propget] HRESULT Sp800108CtrHmacMd5([out, retval] HSTRING *value);
+        [propget] HRESULT Sp800108CtrHmacSha1([out, retval] HSTRING *value);
+        [propget] HRESULT Sp800108CtrHmacSha256([out, retval] HSTRING *value);
+        [propget] HRESULT Sp800108CtrHmacSha384([out, retval] HSTRING *value);
+        [propget] HRESULT Sp800108CtrHmacSha512([out, retval] HSTRING *value);
+        [propget] HRESULT Sp80056aConcatMd5([out, retval] HSTRING *value);
+        [propget] HRESULT Sp80056aConcatSha1([out, retval] HSTRING *value);
+        [propget] HRESULT Sp80056aConcatSha256([out, retval] HSTRING *value);
+        [propget] HRESULT Sp80056aConcatSha384([out, retval] HSTRING *value);
+        [propget] HRESULT Sp80056aConcatSha512([out, retval] HSTRING *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass CryptographicKey
+    {
+        [default] interface Windows.Security.Cryptography.Core.ICryptographicKey;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass CryptographicHash
+    {
+        [default] interface Windows.Security.Cryptography.Core.IHashComputation;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass EncryptedAndAuthenticatedData
+    {
+        [default] interface Windows.Security.Cryptography.Core.IEncryptedAndAuthenticatedData;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Security.Cryptography.Core.ICryptographicEngineStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.Security.Cryptography.Core.ICryptographicEngineStatics2, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass CryptographicEngine
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Security.Cryptography.Core.ISymmetricKeyAlgorithmProviderStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass SymmetricKeyAlgorithmProvider
+    {
+        [default] interface Windows.Security.Cryptography.Core.ISymmetricKeyAlgorithmProvider;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Security.Cryptography.Core.IHashAlgorithmProviderStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass HashAlgorithmProvider
+    {
+        [default] interface Windows.Security.Cryptography.Core.IHashAlgorithmProvider;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Security.Cryptography.Core.IKeyDerivationAlgorithmProviderStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass KeyDerivationAlgorithmProvider
+    {
+        [default] interface Windows.Security.Cryptography.Core.IKeyDerivationAlgorithmProvider;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Security.Cryptography.Core.IKeyDerivationParametersStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass KeyDerivationParameters
+    {
+        [default] interface Windows.Security.Cryptography.Core.IKeyDerivationParameters;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Security.Cryptography.Core.ISymmetricAlgorithmNamesStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass SymmetricAlgorithmNames
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Security.Cryptography.Core.IHashAlgorithmNamesStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass HashAlgorithmNames
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.Security.Cryptography.Core.IKeyDerivationAlgorithmNamesStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass KeyDerivationAlgorithmNames
+    {
+    }
 }

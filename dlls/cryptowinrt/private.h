@@ -34,12 +34,29 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_Storage_Streams
 #include "windows.storage.streams.h"
+#define WIDL_using_Windows_Security_Cryptography
+#define WIDL_using_Windows_Security_Cryptography_Core
+#include "windows.security.cryptography.core.h"
+#include "windows.security.cryptography.h"
 #define WIDL_using_Windows_Security_Credentials
 #include "windows.security.credentials.h"
 
 #include "async_private.h"
 
 extern IActivationFactory *credentials_activation_factory;
+extern IActivationFactory *dataprotection_activation_factory;
+extern IActivationFactory *cryptobuffer_activation_factory;
+extern IActivationFactory *cryptoengine_activation_factory;
+extern IActivationFactory *symmetrickey_activation_factory;
+extern IActivationFactory *hashalgorithm_activation_factory;
+extern IActivationFactory *keyderivation_activation_factory;
+extern IActivationFactory *keyderivationparams_activation_factory;
+extern IActivationFactory *symmetricalgnames_activation_factory;
+extern IActivationFactory *hashalgnames_activation_factory;
+extern IActivationFactory *keyderivationalgnames_activation_factory;
+
+extern HRESULT create_crypt_buffer( UINT32 capacity, UINT32 length, const BYTE *data, IBuffer **out );
+extern HRESULT get_buffer_data( IBuffer *buffer, BYTE **data, UINT32 *len );
 
 extern HRESULT async_operation_boolean_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
                                                IAsyncOperation_boolean **out );

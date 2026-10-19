@@ -20,10 +20,21 @@
 #pragma winrt ns_prefix
 
 import "windows.security.cryptography.idl";
+import "windows.security.cryptography.core.idl";
 import "windows.security.credentials.idl";
 
 namespace Windows.Security.Cryptography {
     runtimeclass CryptographicBuffer;
+}
+namespace Windows.Security.Cryptography.Core {
+    runtimeclass CryptographicEngine;
+    runtimeclass SymmetricKeyAlgorithmProvider;
+    runtimeclass HashAlgorithmProvider;
+    runtimeclass KeyDerivationAlgorithmProvider;
+    runtimeclass KeyDerivationParameters;
+    runtimeclass SymmetricAlgorithmNames;
+    runtimeclass HashAlgorithmNames;
+    runtimeclass KeyDerivationAlgorithmNames;
 }
 namespace Windows.Security.Credentials {
     runtimeclass KeyCredentialManager;
