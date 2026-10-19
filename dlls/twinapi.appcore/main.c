@@ -56,10 +56,38 @@ void WINAPI UnregisterAppStateChangeNotification( PAPPSTATE_REGISTRATION reg )
 }
 
 /* Async Operation Stub */
+static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
+
+struct dummy_async_impl
+{
+    const void *vtbl_op;
+    const void *vtbl_info;
+};
+
+static const void *dummy_async_op_vtbl[];
+static const void *dummy_async_info_vtbl[];
+static struct dummy_async_impl dummy_async;
+
 static HRESULT WINAPI dummy_async_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    *out = iface;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &dummy_async.vtbl_info;
+        return S_OK;
+    }
+    *out = &dummy_async.vtbl_op;
     return S_OK;
+}
+static HRESULT WINAPI dummy_async_info_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return dummy_async_QueryInterface( iface, iid, out );
 }
 static ULONG WINAPI dummy_async_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI dummy_async_Release( void *iface ) { return 1; }
@@ -85,7 +113,122 @@ static HRESULT WINAPI dummy_async_put_Completed( void *iface, void *handler )
     return S_OK;
 }
 static HRESULT WINAPI dummy_async_get_Completed( void *iface, void **handler ) { if (handler) *handler = NULL; return S_OK; }
-static HRESULT WINAPI dummy_async_GetResults( void *iface, DWORD *results ) { if (results) *results = 0 /* Denied */; return S_OK; }
+static HRESULT WINAPI push_notification_stub( void *iface, void *a, void *b, void *c )
+{
+    return E_NOTIMPL;
+}
+
+static const GUID IID_IWeakReference = {0x00000037, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static const GUID IID_IWeakReferenceSource = {0x00000038, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static const GUID IID_IBackgroundTaskRegistrationStatics = {0x4c542f69, 0xb000, 0x42ba, {0xa0, 0x93, 0x6a, 0x56, 0x3c, 0x65, 0xe3, 0xf8}};
+
+struct dummy_channel_impl { const void *vtbl; };
+static struct dummy_channel_impl dummy_channel;
+
+static HRESULT WINAPI dummy_channel_QueryInterface( void *iface, REFIID iid, void **out );
+
+static HRESULT WINAPI dummy_weakref_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IWeakReference ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI dummy_weakref_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI dummy_weakref_Release( void *iface ) { return 1; }
+static HRESULT WINAPI dummy_weakref_Resolve( void *iface, REFIID iid, void **out )
+{
+    return dummy_channel_QueryInterface( &dummy_channel, iid, out );
+}
+static const void *dummy_weakref_vtbl[] =
+{
+    dummy_weakref_QueryInterface,
+    dummy_weakref_AddRef,
+    dummy_weakref_Release,
+    dummy_weakref_Resolve,
+};
+static struct { const void *vtbl; } dummy_weakref = { dummy_weakref_vtbl };
+
+static HRESULT WINAPI dummy_channel_GetWeakReference( void *iface, void **ref )
+{
+    if (!ref) return E_POINTER;
+    *ref = &dummy_weakref;
+    return S_OK;
+}
+static const void *dummy_weakref_source_vtbl[] =
+{
+    dummy_channel_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_channel_GetWeakReference,
+};
+static struct { const void *vtbl; } dummy_weakref_source = { dummy_weakref_source_vtbl };
+
+static HRESULT WINAPI dummy_channel_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI dummy_channel_get_Uri( void *iface, HSTRING *uri )
+{
+    return WindowsCreateString( L"https://wns2-sn1.notify.windows.com/dummy", 39, uri );
+}
+
+static HRESULT WINAPI dummy_channel_get_ExpirationTime( void *iface, void *expiration_time )
+{
+    if (expiration_time) *(ULONGLONG *)expiration_time = 135000000000000000ULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI dummy_channel_Close( void *iface )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI dummy_channel_add_PushNotificationReceived( void *iface, void *handler, EventRegistrationToken *token )
+{
+    if (token) token->value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI dummy_channel_remove_PushNotificationReceived( void *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static const void *dummy_channel_vtbl[] =
+{
+    dummy_channel_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    dummy_channel_get_Uri,
+    dummy_channel_get_ExpirationTime,
+    dummy_channel_Close,
+    dummy_channel_add_PushNotificationReceived,
+    dummy_channel_remove_PushNotificationReceived,
+};
+
+static struct dummy_channel_impl dummy_channel = { dummy_channel_vtbl };
+
+static HRESULT WINAPI dummy_async_GetResults( void *iface, void **results )
+{
+    if (results) *results = &dummy_channel;
+    return S_OK;
+}
 
 static HRESULT WINAPI dummy_async_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
 static HRESULT WINAPI dummy_async_get_Status( void *iface, UINT32 *status ) { if (status) *status = 1 /* Completed */; return S_OK; }
@@ -93,7 +236,7 @@ static HRESULT WINAPI dummy_async_get_ErrorCode( void *iface, HRESULT *err ) { i
 static HRESULT WINAPI dummy_async_Cancel( void *iface ) { return S_OK; }
 static HRESULT WINAPI dummy_async_Close( void *iface ) { return S_OK; }
 
-static const void *dummy_async_vtbl[] =
+static const void *dummy_async_op_vtbl[] =
 {
     dummy_async_QueryInterface,
     dummy_async_AddRef,
@@ -104,6 +247,16 @@ static const void *dummy_async_vtbl[] =
     dummy_async_put_Completed,
     dummy_async_get_Completed,
     dummy_async_GetResults,
+};
+
+static const void *dummy_async_info_vtbl[] =
+{
+    dummy_async_info_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
     dummy_async_get_Id,
     dummy_async_get_Status,
     dummy_async_get_ErrorCode,
@@ -111,14 +264,9 @@ static const void *dummy_async_vtbl[] =
     dummy_async_Close,
 };
 
-static struct { const void *vtbl; } dummy_async = { dummy_async_vtbl };
+static struct dummy_async_impl dummy_async = { dummy_async_op_vtbl, dummy_async_info_vtbl };
 
 /* Push Notification Channel Manager */
-static HRESULT WINAPI push_notification_stub( void *iface, void *a, void *b, void *c )
-{
-    return E_NOTIMPL;
-}
-
 static HRESULT WINAPI push_notification_add_ChannelsRevoked( void *iface, void *handler, EventRegistrationToken *token )
 {
     TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
@@ -178,6 +326,14 @@ static HRESULT WINAPI push_notification_factory_GetTrustLevel( void *iface, Trus
     return S_OK;
 }
 
+static HRESULT WINAPI push_notification_CreateChannelAsync( void *iface, void **operation )
+{
+    TRACE( "iface %p, operation %p\n", iface, operation );
+    if (!operation) return E_POINTER;
+    *operation = &dummy_async;
+    return S_OK;
+}
+
 static const void *push_notification_factory_vtbl[] =
 {
     push_notification_factory_QueryInterface,
@@ -186,8 +342,8 @@ static const void *push_notification_factory_vtbl[] =
     push_notification_factory_GetIids,
     push_notification_factory_GetRuntimeClassName,
     push_notification_factory_GetTrustLevel,
-    push_notification_stub, /* ActivateInstance */
-    push_notification_stub, /* CreatePushNotificationChannelForApplicationAsync */
+    push_notification_CreateChannelAsync, /* CreatePushNotificationChannelForApplicationAsync */
+    push_notification_CreateChannelAsync,
     push_notification_stub,
     push_notification_stub,
     push_notification_stub,
@@ -206,12 +362,33 @@ static const void *push_notification_statics4_vtbl[] =
     push_notification_remove_ChannelsRevoked,
 };
 
+static HRESULT WINAPI bg_async_GetResults( void *iface, DWORD *results )
+{
+    if (results) *results = 2; /* AllowedWithAlwaysOnRealTimeConnectivity */
+    return S_OK;
+}
+
+static const void *bg_async_op_vtbl[] =
+{
+    dummy_async_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    dummy_async_put_Completed,
+    dummy_async_get_Completed,
+    bg_async_GetResults,
+};
+
+static struct dummy_async_impl bg_async = { bg_async_op_vtbl, dummy_async_info_vtbl };
+
 /* Background Execution Manager */
 static HRESULT WINAPI bg_manager_RequestAccessAsync( void *iface, void **operation )
 {
     TRACE( "iface %p, operation %p\n", iface, operation );
     if (!operation) return E_POINTER;
-    *operation = &dummy_async;
+    *operation = &bg_async;
     return S_OK;
 }
 
@@ -249,6 +426,886 @@ static const void *bg_manager_factory_vtbl[] =
     push_notification_stub,
 };
 
+/* Background Task Registration */
+static const GUID my_IID_IMapView_GUID_IBackgroundTaskRegistration = {0x78c880f6, 0xa7dc, 0x5172, {0x89, 0xda, 0x77, 0x49, 0xfc, 0x82, 0xaa, 0x82}};
+static const GUID my_IID_IMapView_GUID_BackgroundTaskRegistration = {0x2c08602f, 0x40b1, 0x5e97, {0xae, 0x21, 0x5c, 0x04, 0xd7, 0xfb, 0x82, 0x9c}};
+static const GUID IID_IIterable_BackgroundTask = {0x80fb0327, 0x5a00, 0x55cc, {0x85, 0xdb, 0xa8, 0x52, 0x71, 0x99, 0x81, 0xb9}};
+static const GUID IID_IIterable_BackgroundTask_alt1 = {0xb903efe6, 0x4f1c, 0x5969, {0xb0, 0x7d, 0xa0, 0x9d, 0xe5, 0x6c, 0xc2, 0xc0}};
+static const GUID IID_IIterable_BackgroundTask_alt2 = {0xffe605c9, 0xf4a3, 0x57db, {0x99, 0x90, 0xcf, 0x5e, 0x8d, 0xed, 0xba, 0x6e}};
+static const GUID IID_IIterator_BackgroundTask_alt1 = {0xbb9f243f, 0x2225, 0x5eb4, {0x9f, 0xeb, 0x61, 0xad, 0x01, 0x72, 0xd4, 0x0d}};
+static const GUID IID_IIterator_BackgroundTask_alt2 = {0xdb77ebf3, 0x3d1a, 0x5767, {0xb5, 0xaa, 0x8f, 0x42, 0xc2, 0x53, 0x79, 0xee}};
+
+struct twinapi_dummy_obj { const void *vtbl; };
+static const void *empty_iterator_vtbl[];
+static struct twinapi_dummy_obj empty_iterator_obj = { empty_iterator_vtbl };
+
+static const void *empty_map_view_vtbl[];
+static struct twinapi_dummy_obj empty_map_view_obj;
+
+static const void *empty_iterable_vtbl[];
+static struct twinapi_dummy_obj empty_iterable_obj = { empty_iterable_vtbl };
+
+static HRESULT WINAPI empty_iterator_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt1 ) ||
+        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt2 ))
+    {
+        *out = &empty_iterator_obj;
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI empty_iterator_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI empty_iterator_Release( void *iface ) { return 1; }
+static HRESULT WINAPI empty_iterator_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI empty_iterator_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IIterator`1", 42, n );
+}
+static HRESULT WINAPI empty_iterator_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI empty_iterator_get_Current( void *iface, void **current )
+{
+    if (current) *current = NULL;
+    return 0x8000000b /* E_BOUNDS */;
+}
+static HRESULT WINAPI empty_iterator_get_HasCurrent( void *iface, boolean *has_current ) { if (has_current) *has_current = FALSE; return S_OK; }
+static HRESULT WINAPI empty_iterator_MoveNext( void *iface, boolean *has_current ) { if (has_current) *has_current = FALSE; return S_OK; }
+static HRESULT WINAPI empty_iterator_GetMany( void *iface, unsigned int count, void **items, unsigned int *actual ) { if (actual) *actual = 0; return S_OK; }
+
+static const void *empty_iterator_vtbl[] =
+{
+    empty_iterator_QueryInterface,
+    empty_iterator_AddRef,
+    empty_iterator_Release,
+    empty_iterator_GetIids,
+    empty_iterator_GetRuntimeClassName,
+    empty_iterator_GetTrustLevel,
+    empty_iterator_get_Current,
+    empty_iterator_get_HasCurrent,
+    empty_iterator_MoveNext,
+    empty_iterator_GetMany,
+};
+
+static HRESULT WINAPI empty_iterable_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ))
+    {
+        *out = &empty_map_view_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt2 ))
+    {
+        *out = &empty_iterable_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &my_IID_IMapView_GUID_IBackgroundTaskRegistration ) ||
+        IsEqualGUID( iid, &my_IID_IMapView_GUID_BackgroundTaskRegistration ))
+    {
+        *out = &empty_map_view_obj;
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI empty_iterable_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IIterable`1", 42, n );
+}
+
+static HRESULT WINAPI empty_iterable_First( void *iface, void **first )
+{
+    TRACE( "iface %p, first %p\n", iface, first );
+    if (!first) return E_POINTER;
+    *first = &empty_iterator_obj;
+    return S_OK;
+}
+static const void *empty_iterable_vtbl[] =
+{
+    empty_iterable_QueryInterface,
+    empty_iterator_AddRef,
+    empty_iterator_Release,
+    empty_iterator_GetIids,
+    empty_iterable_GetRuntimeClassName,
+    empty_iterator_GetTrustLevel,
+    empty_iterable_First,
+};
+
+static HRESULT WINAPI empty_map_view_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IMapView_GUID_IBackgroundTaskRegistration ) ||
+        IsEqualGUID( iid, &IID_IMapView_GUID_BackgroundTaskRegistration ))
+    {
+        *out = &empty_map_view_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterable_BackgroundTask ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt2 ))
+    {
+        *out = &empty_iterable_obj;
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI empty_map_view_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI empty_map_view_Release( void *iface ) { return 1; }
+static HRESULT WINAPI empty_map_view_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI empty_map_view_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IMapView`2", 40, n );
+}
+static HRESULT WINAPI empty_map_view_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI empty_map_view_Lookup( void *iface, GUID key, void **value )
+{
+    TRACE( "iface %p, key %s, value %p\n", iface, debugstr_guid(&key), value );
+    if (value) *value = NULL;
+    return 0x8000000b /* E_BOUNDS */;
+}
+static HRESULT WINAPI empty_map_view_get_Size( void *iface, UINT32 *size )
+{
+    TRACE( "iface %p, size %p\n", iface, size );
+    if (!size) return E_POINTER;
+    *size = 0;
+    return S_OK;
+}
+static HRESULT WINAPI empty_map_view_HasKey( void *iface, GUID key, boolean *found )
+{
+    TRACE( "iface %p, key %s, found %p\n", iface, debugstr_guid(&key), found );
+    if (found) *found = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI empty_map_view_Split( void *iface, void **first, void **second )
+{
+    TRACE( "iface %p, first %p, second %p\n", iface, first, second );
+    if (first) *first = NULL;
+    if (second) *second = NULL;
+    return S_OK;
+}
+
+static const void *empty_map_view_vtbl[] =
+{
+    empty_map_view_QueryInterface,
+    empty_map_view_AddRef,
+    empty_map_view_Release,
+    empty_map_view_GetIids,
+    empty_map_view_GetRuntimeClassName,
+    empty_map_view_GetTrustLevel,
+    empty_map_view_Lookup,
+    empty_map_view_get_Size,
+    empty_map_view_HasKey,
+    empty_map_view_Split,
+};
+static struct twinapi_dummy_obj empty_map_view_obj = { empty_map_view_vtbl };
+
+static HRESULT WINAPI bg_task_get_AllTasks( void *iface, void **tasks )
+{
+    TRACE( "iface %p, tasks %p\n", iface, tasks );
+    if (!tasks) return E_POINTER;
+    *tasks = &empty_map_view_obj;
+    return S_OK;
+}
+static const void *bg_task_factory_vtbl[];
+static struct { const void *vtbl; } bg_task_obj = { bg_task_factory_vtbl };
+static HRESULT WINAPI bg_task_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IBackgroundTaskRegistrationStatics ))
+    {
+        *out = &bg_task_obj;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static const void *bg_task_factory_vtbl[] =
+{
+    bg_task_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    push_notification_factory_GetIids,
+    push_notification_factory_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    bg_task_get_AllTasks,
+};
+
+/* Windows.System.Profile.HardwareIdentification */
+static const GUID IID_IHardwareIdentificationStatics = {0x971260e0, 0xf170, 0x4a42, {0xbd, 0x55, 0xa9, 0x00, 0xb2, 0x12, 0xda, 0xe2}};
+static const GUID IID_IHardwareToken = {0x28f6d4c0, 0xfb12, 0x40a4, {0x81, 0x67, 0x7f, 0x4e, 0x03, 0xd2, 0x72, 0x4c}};
+
+struct dummy_hw_buffer_impl
+{
+    IBuffer IBuffer_iface;
+    IBufferByteAccess IBufferByteAccess_iface;
+    UINT32 capacity;
+    UINT32 length;
+    BYTE data[32];
+};
+
+static const void *hw_buffer_vtbl[];
+static const void *hw_buffer_byte_access_vtbl[];
+
+static struct dummy_hw_buffer_impl dummy_hw_buffer_id =
+{
+    { (const struct IBufferVtbl *)hw_buffer_vtbl },
+    { (const struct IBufferByteAccessVtbl *)hw_buffer_byte_access_vtbl },
+    32,
+    32,
+    {
+        0x3a, 0x7f, 0x9b, 0x1c, 0x4e, 0x82, 0xd0, 0x55,
+        0x12, 0xa4, 0xb8, 0x67, 0xef, 0x90, 0x23, 0x45,
+        0x67, 0x89, 0xab, 0xcd, 0xef, 0x01, 0x23, 0x45,
+        0x67, 0x89, 0xab, 0xcd, 0xef, 0xaa, 0xbb, 0xcc
+    }
+};
+
+static struct dummy_hw_buffer_impl dummy_hw_buffer_sig =
+{
+    { (const struct IBufferVtbl *)hw_buffer_vtbl },
+    { (const struct IBufferByteAccessVtbl *)hw_buffer_byte_access_vtbl },
+    32,
+    32,
+    {
+        0x5c, 0x21, 0x88, 0xfe, 0x90, 0x11, 0x34, 0x7a,
+        0xbb, 0xcc, 0xdd, 0xee, 0x11, 0x22, 0x33, 0x44,
+        0x55, 0x66, 0x77, 0x88, 0x99, 0x00, 0xaa, 0xbb,
+        0xcc, 0xdd, 0xee, 0xff, 0x12, 0x34, 0x56, 0x78
+    }
+};
+
+static struct dummy_hw_buffer_impl dummy_hw_buffer_cert =
+{
+    { (const struct IBufferVtbl *)hw_buffer_vtbl },
+    { (const struct IBufferByteAccessVtbl *)hw_buffer_byte_access_vtbl },
+    32,
+    32,
+    {
+        0x30, 0x82, 0x01, 0x22, 0x30, 0x81, 0xca, 0xa0,
+        0x03, 0x02, 0x01, 0x02, 0x02, 0x10, 0x12, 0x34,
+        0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34,
+        0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0, 0xaa, 0xbb
+    }
+};
+
+static HRESULT WINAPI hw_buffer_QueryInterface( IBuffer *iface, REFIID iid, void **out )
+{
+    struct dummy_hw_buffer_impl *impl = CONTAINING_RECORD( iface, struct dummy_hw_buffer_impl, IBuffer_iface );
+
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IBuffer ))
+    {
+        *out = &impl->IBuffer_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IBufferByteAccess ))
+    {
+        *out = &impl->IBufferByteAccess_iface;
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI hw_buffer_GetRuntimeClassName( IBuffer *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Storage.Streams.Buffer", 29, name );
+}
+
+static HRESULT WINAPI hw_buffer_get_Capacity( IBuffer *iface, UINT32 *value )
+{
+    struct dummy_hw_buffer_impl *impl = CONTAINING_RECORD( iface, struct dummy_hw_buffer_impl, IBuffer_iface );
+    if (!value) return E_POINTER;
+    *value = impl->capacity;
+    return S_OK;
+}
+
+static HRESULT WINAPI hw_buffer_get_Length( IBuffer *iface, UINT32 *value )
+{
+    struct dummy_hw_buffer_impl *impl = CONTAINING_RECORD( iface, struct dummy_hw_buffer_impl, IBuffer_iface );
+    if (!value) return E_POINTER;
+    *value = impl->length;
+    return S_OK;
+}
+
+static HRESULT WINAPI hw_buffer_put_Length( IBuffer *iface, UINT32 value )
+{
+    struct dummy_hw_buffer_impl *impl = CONTAINING_RECORD( iface, struct dummy_hw_buffer_impl, IBuffer_iface );
+    if (value > impl->capacity) return E_INVALIDARG;
+    impl->length = value;
+    return S_OK;
+}
+
+static const void *hw_buffer_vtbl[] =
+{
+    hw_buffer_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    hw_buffer_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    hw_buffer_get_Capacity,
+    hw_buffer_get_Length,
+    hw_buffer_put_Length,
+};
+
+static HRESULT WINAPI hw_buffer_byte_access_QueryInterface( IBufferByteAccess *iface, REFIID iid, void **out )
+{
+    struct dummy_hw_buffer_impl *impl = CONTAINING_RECORD( iface, struct dummy_hw_buffer_impl, IBufferByteAccess_iface );
+    return hw_buffer_QueryInterface( &impl->IBuffer_iface, iid, out );
+}
+
+static HRESULT WINAPI hw_buffer_byte_access_Buffer( IBufferByteAccess *iface, byte **value )
+{
+    struct dummy_hw_buffer_impl *impl = CONTAINING_RECORD( iface, struct dummy_hw_buffer_impl, IBufferByteAccess_iface );
+    if (!value) return E_POINTER;
+    *value = impl->data;
+    return S_OK;
+}
+
+static const void *hw_buffer_byte_access_vtbl[] =
+{
+    hw_buffer_byte_access_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    hw_buffer_byte_access_Buffer,
+};
+
+static HRESULT WINAPI hw_token_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IHardwareToken ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI hw_token_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.System.Profile.HardwareToken", 36, name );
+}
+
+static HRESULT WINAPI hw_token_get_Id( void *iface, IBuffer **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = &dummy_hw_buffer_id.IBuffer_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI hw_token_get_Signature( void *iface, IBuffer **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = &dummy_hw_buffer_sig.IBuffer_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI hw_token_get_Certificate( void *iface, IBuffer **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = &dummy_hw_buffer_cert.IBuffer_iface;
+    return S_OK;
+}
+
+static const void *hw_token_vtbl[] =
+{
+    hw_token_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    hw_token_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    hw_token_get_Id,
+    hw_token_get_Signature,
+    hw_token_get_Certificate,
+};
+static struct { const void *vtbl; } dummy_hw_token = { hw_token_vtbl };
+
+static HRESULT WINAPI hw_id_GetPackageSpecificToken( void *iface, IBuffer *nonce, void **token )
+{
+    TRACE( "iface %p, nonce %p, token %p\n", iface, nonce, token );
+    if (!token) return E_POINTER;
+    *token = &dummy_hw_token;
+    return S_OK;
+}
+
+static const void *hw_id_factory_vtbl[];
+static const void *hw_id_statics_vtbl[];
+static struct
+{
+    const void *vtbl_factory;
+    const void *vtbl_statics;
+} hw_id_obj = { hw_id_factory_vtbl, hw_id_statics_vtbl };
+
+static HRESULT WINAPI hw_id_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &hw_id_obj.vtbl_factory;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IHardwareIdentificationStatics ))
+    {
+        *out = &hw_id_obj.vtbl_statics;
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI hw_id_statics_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return hw_id_factory_QueryInterface( iface, iid, out );
+}
+
+static HRESULT WINAPI hw_id_factory_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.System.Profile.HardwareIdentification", 45, name );
+}
+
+static HRESULT WINAPI hw_id_factory_ActivateInstance( void *iface, void **instance )
+{
+    if (instance) *instance = NULL;
+    return E_NOTIMPL;
+}
+
+static const void *hw_id_factory_vtbl[] =
+{
+    hw_id_factory_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    hw_id_factory_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    hw_id_factory_ActivateInstance,
+};
+
+static const void *hw_id_statics_vtbl[] =
+{
+    hw_id_statics_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    hw_id_factory_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    hw_id_GetPackageSpecificToken,
+};
+
+/* StartupTask stub */
+static HRESULT WINAPI startup_task_get_State( void *iface, UINT32 *state )
+{
+    if (state) *state = 0 /* StartupTaskState_Disabled */;
+    return S_OK;
+}
+static const void *startup_task_vtbl[] =
+{
+    dummy_channel_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    push_notification_stub, /* RequestEnableAsync */
+    push_notification_stub, /* Disable */
+    startup_task_get_State, /* get_State */
+    push_notification_stub, /* get_TaskId */
+};
+static struct { const void *vtbl; } dummy_startup_task = { startup_task_vtbl };
+
+static HRESULT WINAPI dummy_startup_task_async_GetResults( void *iface, void **results )
+{
+    if (results) *results = &dummy_startup_task;
+    return S_OK;
+}
+static const void *dummy_startup_task_async_op_vtbl[];
+static const void *dummy_startup_task_async_info_vtbl[];
+static struct dummy_async_impl dummy_startup_task_async;
+
+static HRESULT WINAPI dummy_startup_task_async_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &dummy_startup_task_async.vtbl_info;
+        return S_OK;
+    }
+    *out = &dummy_startup_task_async.vtbl_op;
+    return S_OK;
+}
+static HRESULT WINAPI dummy_startup_task_async_info_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return dummy_startup_task_async_QueryInterface( iface, iid, out );
+}
+
+static const void *dummy_startup_task_async_op_vtbl[] =
+{
+    dummy_startup_task_async_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    dummy_async_put_Completed,
+    dummy_async_get_Completed,
+    dummy_startup_task_async_GetResults,
+};
+
+static const void *dummy_startup_task_async_info_vtbl[] =
+{
+    dummy_startup_task_async_info_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    dummy_async_get_Id,
+    dummy_async_get_Status,
+    dummy_async_get_ErrorCode,
+    dummy_async_Cancel,
+    dummy_async_Close,
+};
+
+static struct dummy_async_impl dummy_startup_task_async = { dummy_startup_task_async_op_vtbl, dummy_startup_task_async_info_vtbl };
+
+static HRESULT WINAPI startup_task_GetForCurrentPackageAsync( void *iface, void **operation )
+{
+    if (!operation) return E_POINTER;
+    *operation = &dummy_startup_task_async;
+    return S_OK;
+}
+
+static HRESULT WINAPI startup_task_GetAsync( void *iface, HSTRING taskId, void **operation )
+{
+    if (!operation) return E_POINTER;
+    *operation = &dummy_startup_task_async;
+    return S_OK;
+}
+
+static const void *startup_task_factory_vtbl[];
+static struct { const void *vtbl; } startup_task_factory_obj = { startup_task_factory_vtbl };
+static HRESULT WINAPI startup_task_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    *out = &startup_task_factory_obj;
+    return S_OK;
+}
+static const void *startup_task_factory_vtbl[] =
+{
+    startup_task_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    push_notification_factory_GetIids,
+    push_notification_factory_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    startup_task_GetForCurrentPackageAsync,
+    startup_task_GetAsync,
+};
+
+/* BackgroundTaskBuilder stub */
+static HRESULT WINAPI bg_task_reg_get_TaskId( void *iface, GUID *id ) { if (id) memset(id, 0x42, sizeof(GUID)); return S_OK; }
+static HRESULT WINAPI bg_task_reg_get_Name( void *iface, HSTRING *name ) { return WindowsCreateString( L"WhatsApp Push Notification", 26, name ); }
+static HRESULT WINAPI bg_task_reg_Unregister( void *iface, boolean cancel ) { return S_OK; }
+
+static const void *bg_task_reg_vtbl[] =
+{
+    dummy_channel_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    bg_task_reg_get_TaskId,
+    bg_task_reg_get_Name,
+    push_notification_stub, /* get_Trigger */
+    bg_task_reg_Unregister,
+    push_notification_stub, /* add_Progress */
+    push_notification_stub, /* remove_Progress */
+    push_notification_stub, /* add_Completed */
+    push_notification_stub, /* remove_Completed */
+};
+static struct { const void *vtbl; } dummy_bg_task_reg = { bg_task_reg_vtbl };
+
+static HRESULT WINAPI bg_builder_Register( void *iface, void **reg )
+{
+    if (!reg) return E_POINTER;
+    *reg = &dummy_bg_task_reg;
+    return S_OK;
+}
+
+static HRESULT WINAPI bg_builder_success( void *iface, void *a, void *b, void *c ) { return S_OK; }
+
+static const void *bg_builder_vtbl[] =
+{
+    dummy_channel_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    bg_builder_success,     /* put_TaskEntryPoint */
+    bg_builder_success,     /* get_TaskEntryPoint */
+    bg_builder_success,     /* SetTrigger */
+    bg_builder_success,     /* AddCondition */
+    bg_builder_success,     /* put_Name */
+    bg_builder_success,     /* get_Name */
+    bg_builder_Register,    /* Register */
+    bg_builder_success,     /* SetTaskEntryPointClsid */
+};
+static struct { const void *vtbl; } dummy_bg_builder = { bg_builder_vtbl };
+
+static HRESULT WINAPI bg_builder_factory_ActivateInstance( void *iface, void **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = &dummy_bg_builder;
+    return S_OK;
+}
+
+static const void *bg_builder_factory_vtbl[];
+static struct { const void *vtbl; } bg_builder_factory_obj = { bg_builder_factory_vtbl };
+static HRESULT WINAPI bg_builder_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    *out = &bg_builder_factory_obj;
+    return S_OK;
+}
+static const void *bg_builder_factory_vtbl[] =
+{
+    bg_builder_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    push_notification_factory_GetIids,
+    push_notification_factory_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    bg_builder_factory_ActivateInstance,
+};
+
+/* PushNotificationTrigger stub */
+static const void *push_trigger_vtbl[] =
+{
+    dummy_channel_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+};
+static struct { const void *vtbl; } dummy_push_trigger = { push_trigger_vtbl };
+
+static HRESULT WINAPI push_trigger_factory_ActivateInstance( void *iface, void **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = &dummy_push_trigger;
+    return S_OK;
+}
+static const void *push_trigger_factory_vtbl[];
+static struct { const void *vtbl; } push_trigger_factory_obj = { push_trigger_factory_vtbl };
+static HRESULT WINAPI push_trigger_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    *out = &push_trigger_factory_obj;
+    return S_OK;
+}
+static const void *push_trigger_factory_vtbl[] =
+{
+    push_trigger_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    push_notification_factory_GetIids,
+    push_notification_factory_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    push_trigger_factory_ActivateInstance,
+};
+
+/* Windows.ApplicationModel.Resources.ResourceLoader */
+static const GUID IID_IResourceLoader = {0x08524908, 0x16ef, 0x45ad, {0xa6, 0x02, 0x29, 0x36, 0x37, 0xd7, 0xe6, 0x1a}};
+static const GUID IID_IResourceLoader_old = {0x085d4365, 0xdf62, 0x44da, {0xac, 0xfa, 0xe8, 0x4c, 0x31, 0xe9, 0x8d, 0x45}};
+static const GUID IID_IResourceLoaderFactory = {0xc33a3603, 0x69dc, 0x4285, {0xa0, 0x77, 0xd5, 0xc0, 0xe4, 0x7c, 0xcb, 0xe8}};
+static const GUID IID_IResourceLoaderStatics = {0xbf777ce1, 0x19c8, 0x49c2, {0x95, 0x3c, 0x47, 0xe9, 0x22, 0x7b, 0x33, 0x4e}};
+static const GUID IID_IResourceLoaderStatics2 = {0x0cc04141, 0x6466, 0x4989, {0x94, 0x94, 0x0b, 0x82, 0xdf, 0xc5, 0x3f, 0x1f}};
+static const GUID IID_IResourceLoaderStatics2_old = {0x0cc6354d, 0x2a52, 0x4d2c, {0xae, 0x8c, 0xe5, 0x4b, 0x67, 0x95, 0xf7, 0x0b}};
+
+static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, HSTRING *value )
+{
+    TRACE( "iface %p, resource %s, value %p\n", iface, debugstr_hstring(resource), value );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( resource, value );
+}
+static HRESULT WINAPI resource_loader_GetStringForUri( void *iface, void *uri, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"", 0, value );
+}
+
+static const void *resource_loader_vtbl[];
+static struct { const void *vtbl; } resource_loader_obj = { resource_loader_vtbl };
+
+static HRESULT WINAPI resource_loader_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IResourceLoader ) ||
+        IsEqualGUID( iid, &IID_IResourceLoader_old ))
+    {
+        *out = &resource_loader_obj;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static const void *resource_loader_vtbl[] =
+{
+    resource_loader_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    resource_loader_GetString,
+    resource_loader_GetStringForUri,
+};
+
+static HRESULT WINAPI resource_loader_factory_ActivateInstance( void *iface, void **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = &resource_loader_obj;
+    return S_OK;
+}
+static HRESULT WINAPI resource_loader_factory_CreateResourceLoaderByName( void *iface, HSTRING name, void **loader )
+{
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj;
+    return S_OK;
+}
+static HRESULT WINAPI resource_loader_factory_GetStringForReference( void *iface, void *uri, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"", 0, value );
+}
+static HRESULT WINAPI resource_loader_factory_GetForCurrentView( void *iface, void **loader )
+{
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj;
+    return S_OK;
+}
+static HRESULT WINAPI resource_loader_factory_GetForCurrentViewWithName( void *iface, HSTRING name, void **loader )
+{
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj;
+    return S_OK;
+}
+static HRESULT WINAPI resource_loader_factory_GetForViewIndependentUse( void *iface, void **loader )
+{
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj;
+    return S_OK;
+}
+static HRESULT WINAPI resource_loader_factory_GetForViewIndependentUseWithName( void *iface, HSTRING name, void **loader )
+{
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj;
+    return S_OK;
+}
+
+static const void *resource_loader_factory_vtbl[];
+static struct { const void *vtbl; } resource_loader_factory_obj = { resource_loader_factory_vtbl };
+
+static HRESULT WINAPI resource_loader_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IResourceLoaderFactory ) ||
+        IsEqualGUID( iid, &IID_IResourceLoaderStatics ) ||
+        IsEqualGUID( iid, &IID_IResourceLoaderStatics2 ) ||
+        IsEqualGUID( iid, &IID_IResourceLoaderStatics2_old ))
+    {
+        *out = &resource_loader_factory_obj;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static const void *resource_loader_factory_vtbl[] =
+{
+    resource_loader_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    push_notification_factory_GetIids,
+    push_notification_factory_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    resource_loader_factory_ActivateInstance,
+    resource_loader_factory_CreateResourceLoaderByName,
+    resource_loader_factory_GetStringForReference,
+    resource_loader_factory_GetForCurrentView,
+    resource_loader_factory_GetForCurrentViewWithName,
+    resource_loader_factory_GetForViewIndependentUse,
+    resource_loader_factory_GetForViewIndependentUseWithName,
+};
+
 HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
 {
     FIXME( "clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out );
@@ -273,14 +1330,35 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( application_view_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_Core_CoreApplication ))
         IActivationFactory_QueryInterface( core_application_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, L"Windows.ApplicationModel.AppInstance" ))
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.AppInstance" ) ||
+             !wcscmp( buffer, L"Microsoft.Windows.AppLifecycle.AppInstance" ))
         IActivationFactory_QueryInterface( app_instance_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_DataTransferManager ))
         IActivationFactory_QueryInterface( data_transfer_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard ))
+        IActivationFactory_QueryInterface( clipboard_statics_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_DataPackage ))
+        IActivationFactory_QueryInterface( data_package_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_HtmlFormatHelper ))
+        IActivationFactory_QueryInterface( html_format_helper_statics_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_StandardDataFormats ))
+        IActivationFactory_QueryInterface( standard_data_formats_statics_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.Networking.PushNotifications.PushNotificationChannelManager" ))
         *factory = (IActivationFactory *)&push_notification_obj;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.BackgroundExecutionManager" ))
         *factory = (IActivationFactory *)&bg_manager_obj;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.BackgroundTaskRegistration" ))
+        *factory = (IActivationFactory *)&bg_task_obj;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.BackgroundTaskBuilder" ))
+        *factory = (IActivationFactory *)&bg_builder_factory_obj;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.PushNotificationTrigger" ))
+        *factory = (IActivationFactory *)&push_trigger_factory_obj;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.StartupTask" ))
+        *factory = (IActivationFactory *)&startup_task_factory_obj;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.Resources.ResourceLoader" ))
+        *factory = (IActivationFactory *)&resource_loader_factory_obj;
+    else if (!wcscmp( buffer, L"Windows.System.Profile.HardwareIdentification" ))
+        *factory = (IActivationFactory *)&hw_id_obj.vtbl_factory;
 
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;
