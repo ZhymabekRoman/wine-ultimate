@@ -14,3 +14,4 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0027-windows.media-Implement-AudioGraph-and-AudioDevice.patch
 0028-twinapi.appcore-Implement-HardwareIdentification-an.patch
 0028-twinapi.appcore-Implement-HardwareIdentification-an.patch
+0029-windows.storage-windows.storage.streams-Implement-S.patch
