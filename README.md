@@ -63,7 +63,7 @@ Developed during native bring-up for **WhatsApp for Windows** (`v2.2620.102.0`, 
 * **Path**: `patches/twinapi-appcore-UWP/`
 * **Target Subsystem**: `twinapi.appcore.dll`, `windows.ui.dll`, AppLifecycle, Dispatcher, Connectivity, Devices, Cryptography, Media, Calls
 * **Depends on**: `kernelbase-PackageIdentity`
-* **Patches (0001–0022)**:
+* **Patches (0001–0028)**:
   * `0001–0014`: Implements `ICoreApplication`, `CoreApplicationView`, `CoreWindow` with Win32 HWND backing, `WS_VISIBLE`, and UWP activation args.
   * `0015`: Implements `VisibilityChangedEventArgs` and `WindowSizeChangedEventArgs` in `windows.ui.dll`.
   * `0016`: Implements `IPackageId`, `IBackgroundExecutionManagerStatics`, `IPushNotificationChannelManagerStatics4`, and `container_CreateContainer`.
@@ -73,6 +73,12 @@ Developed during native bring-up for **WhatsApp for Windows** (`v2.2620.102.0`, 
   * `0020`: Implements Chromium sandbox Job Object limits (`JobObjectExtendedLimitInformation`, `JobObjectBasicLimitInformation`, `JobObjectSecurityLimitInformation`) in `kernelbase` and `ntdll`, plus `CreateRestrictedToken` with `DISABLE_MAX_PRIVILEGE`.
   * `0021`: Implements `Windows.Security.Cryptography.Core` (`CryptographicEngine`, `CryptographicKey`, `EncryptedAndAuthenticatedData`, `SymmetricKeyAlgorithmProvider` supporting AES-GCM, `CryptographicHash`, and `CryptographicBuffer`).
   * `0022`: Implements `Windows.Media.Transcoding` (`MediaTranscoder`), `Windows.Media.Editing` (`MediaComposition`, `MediaClip` with thumbnail stream for WIC), and `Windows.ApplicationModel.Calls` (`VoipCallCoordinator`, `VoipPhoneCall`).
+  * `0023`: Implements `Windows.ApplicationModel.DataTransfer` (`DataTransferManager`, `DataPackage`, `Clipboard`, `HtmlFormatHelper`).
+  * `0024`: Implements `Windows.Globalization` (`ApplicationLanguages.ManifestLanguages`, `Language.DisplayName`, `NativeName`, `Script`).
+  * `0025`: Implements `Windows.Web.Http` (`HttpClient`, `HttpRequestMessage`, `HttpResponseMessage`, `HttpStringContent`).
+  * `0026`: Implements `Windows.Networking.Sockets` (`StreamSocket`, `MessageWebSocket`).
+  * `0027`: Implements `Windows.Media.Audio` (`AudioGraph`, `AudioDeviceInputNode`, `AudioDeviceOutputNode`).
+  * `0028`: Implements `Windows.System.Profile.HardwareIdentification` (`GetPackageSpecificToken`) and `IBackgroundTaskRegistrationStatics::get_AllTasks`.
 
 ### 5. `dcomp-DCompositionCreateDevice2`
 * **Path**: `patches/dcomp-DCompositionCreateDevice2/`
