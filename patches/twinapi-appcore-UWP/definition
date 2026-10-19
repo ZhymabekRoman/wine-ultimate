@@ -8,3 +8,4 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0021-cryptowinrt-Implement-CryptographicEngine-and-Core-.patch
 0022-windows.media-windows.applicationmodel.calls-Impleme.patch
 0023-twinapi-Implement-DataTransfer-Clipboard-DataPackage.patch
+0024-windows.globalization-Implement-ManifestLanguages-an.patch
