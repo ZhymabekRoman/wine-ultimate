@@ -63,7 +63,7 @@ Developed during native bring-up for **WhatsApp for Windows** (`v2.2620.102.0`, 
 * **Path**: `patches/twinapi-appcore-UWP/`
 * **Target Subsystem**: `twinapi.appcore.dll`, `windows.ui.dll`, AppLifecycle, Dispatcher, Connectivity, Devices, Cryptography, Media, Calls
 * **Depends on**: `kernelbase-PackageIdentity`
-* **Patches (0001–0029)**:
+* **Patches (0001–0030)**:
   * `0001–0014`: Implements `ICoreApplication`, `CoreApplicationView`, `CoreWindow` with Win32 HWND backing, `WS_VISIBLE`, and UWP activation args.
   * `0015`: Implements `VisibilityChangedEventArgs` and `WindowSizeChangedEventArgs` in `windows.ui.dll`.
   * `0016`: Implements `IPackageId`, `IBackgroundExecutionManagerStatics`, `IPushNotificationChannelManagerStatics4`, and `container_CreateContainer`.
@@ -80,6 +80,7 @@ Developed during native bring-up for **WhatsApp for Windows** (`v2.2620.102.0`, 
   * `0027`: Implements `Windows.Media.Audio` (`AudioGraph`, `AudioDeviceInputNode`, `AudioDeviceOutputNode`).
   * `0028`: Implements `Windows.System.Profile.HardwareIdentification` (`GetPackageSpecificToken`) and `IBackgroundTaskRegistrationStatics::get_AllTasks`.
   * `0029`: Implements `Windows.Storage` and `Windows.Storage.Streams` IDL runtimeclasses and interfaces (`StorageFile`, `StorageFolder`, `IStorageFileStatics`, `IStorageFolderStatics`, `IDataReader`, `IDataReaderFactory`, `IStreamedFileDataRequest`).
+  * `0030`: Implements `Windows.Media.Capture` IDL definitions (`MediaCapture`, `MediaCaptureInitializationSettings`, `IMediaCapture`, `IMediaCaptureVideoPreview`, `IMediaCapture5`).
 
 ### 5. `dcomp-DCompositionCreateDevice2`
 * **Path**: `patches/dcomp-DCompositionCreateDevice2/`
