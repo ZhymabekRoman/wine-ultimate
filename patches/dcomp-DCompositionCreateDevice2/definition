@@ -16,3 +16,4 @@ Fixes: [58315] Clip Studio Paint 4 menus turn black when clicked
 # Reference: https://gitlab.winehq.org/wine/wine/-/merge_requests/9839
 0071-dcomp-Fix-CreateSurface-AV-and-attach-shared-visual.patch
 0072-dcomp-storage-ui-ntdll-Fix-compositor-clock-empty-co.patch
+0073-dcomp-dxgi-win32u-user32-Implement-composition-inpu.patch
