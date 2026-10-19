@@ -51,4 +51,11 @@ namespace Windows.ApplicationModel.Core {
 }
 namespace Windows.ApplicationModel.DataTransfer {
     runtimeclass DataTransferManager;
+    runtimeclass DataPackage;
+    runtimeclass DataPackagePropertySet;
+    runtimeclass DataPackagePropertySetView;
+    runtimeclass DataPackageView;
+    runtimeclass Clipboard;
+    runtimeclass HtmlFormatHelper;
+    runtimeclass StandardDataFormats;
 }

@@ -1,6 +1,6 @@
 EXTRADEFS = -D_CONTRACT_GEN
 MODULE    = twinapi.appcore.dll
-IMPORTS   = combase advapi32
+IMPORTS   = combase advapi32 user32
 
 SOURCES = \
 	advertising_manager.c \

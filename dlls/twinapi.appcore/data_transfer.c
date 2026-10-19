@@ -275,3 +275,79 @@ static struct data_transfer_manager_statics data_transfer_manager_statics =
 };
 
 IActivationFactory *data_transfer_manager_statics_factory = &data_transfer_manager_statics.IActivationFactory_iface;
+
+/* Clipboard statics */
+static HRESULT WINAPI clipboard_statics_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI dummy_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI dummy_factory_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI dummy_factory_GetIids( IActivationFactory *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI dummy_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *n ) { return WindowsCreateString( L"Windows.ApplicationModel.DataTransfer.Clipboard", 46, n ); }
+static HRESULT WINAPI dummy_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI dummy_factory_ActivateInstance( IActivationFactory *iface, IInspectable **inst ) { if (inst) *inst = (IInspectable *)iface; return S_OK; }
+
+static const struct IActivationFactoryVtbl clipboard_statics_factory_vtbl =
+{
+    clipboard_statics_QueryInterface,
+    dummy_factory_AddRef,
+    dummy_factory_Release,
+    dummy_factory_GetIids,
+    dummy_factory_GetRuntimeClassName,
+    dummy_factory_GetTrustLevel,
+    dummy_factory_ActivateInstance,
+};
+static struct { const struct IActivationFactoryVtbl *vtbl; } dummy_clipboard_statics_obj = { &clipboard_statics_factory_vtbl };
+IActivationFactory *clipboard_statics_factory = (IActivationFactory *)&dummy_clipboard_statics_obj;
+
+/* DataPackage factory */
+static const struct IActivationFactoryVtbl data_package_factory_vtbl =
+{
+    clipboard_statics_QueryInterface,
+    dummy_factory_AddRef,
+    dummy_factory_Release,
+    dummy_factory_GetIids,
+    dummy_factory_GetRuntimeClassName,
+    dummy_factory_GetTrustLevel,
+    dummy_factory_ActivateInstance,
+};
+static struct { const struct IActivationFactoryVtbl *vtbl; } dummy_data_package_factory_obj = { &data_package_factory_vtbl };
+IActivationFactory *data_package_factory = (IActivationFactory *)&dummy_data_package_factory_obj;
+
+/* HtmlFormatHelper statics */
+static const struct IActivationFactoryVtbl html_format_helper_factory_vtbl =
+{
+    clipboard_statics_QueryInterface,
+    dummy_factory_AddRef,
+    dummy_factory_Release,
+    dummy_factory_GetIids,
+    dummy_factory_GetRuntimeClassName,
+    dummy_factory_GetTrustLevel,
+    dummy_factory_ActivateInstance,
+};
+static struct { const struct IActivationFactoryVtbl *vtbl; } dummy_html_format_helper_obj = { &html_format_helper_factory_vtbl };
+IActivationFactory *html_format_helper_statics_factory = (IActivationFactory *)&dummy_html_format_helper_obj;
+
+/* StandardDataFormats statics */
+static const struct IActivationFactoryVtbl standard_data_formats_factory_vtbl =
+{
+    clipboard_statics_QueryInterface,
+    dummy_factory_AddRef,
+    dummy_factory_Release,
+    dummy_factory_GetIids,
+    dummy_factory_GetRuntimeClassName,
+    dummy_factory_GetTrustLevel,
+    dummy_factory_ActivateInstance,
+};
+static struct { const struct IActivationFactoryVtbl *vtbl; } dummy_standard_data_formats_obj = { &standard_data_formats_factory_vtbl };
+IActivationFactory *standard_data_formats_statics_factory = (IActivationFactory *)&dummy_standard_data_formats_obj;

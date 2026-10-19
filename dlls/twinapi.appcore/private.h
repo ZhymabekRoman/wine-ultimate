@@ -43,6 +43,10 @@
 #include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
+#define WIDL_using_Windows_Storage
+#include "windows.storage.h"
+#define WIDL_using_Windows_Storage_Streams
+#include "windows.storage.streams.h"
 
 #include "wine/debug.h"
 
@@ -53,6 +57,10 @@ extern IActivationFactory *advertising_manager_factory;
 extern IActivationFactory *core_application_factory;
 extern IActivationFactory *app_instance_factory;
 extern IActivationFactory *data_transfer_manager_statics_factory;
+extern IActivationFactory *clipboard_statics_factory;
+extern IActivationFactory *data_package_factory;
+extern IActivationFactory *html_format_helper_statics_factory;
+extern IActivationFactory *standard_data_formats_statics_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
