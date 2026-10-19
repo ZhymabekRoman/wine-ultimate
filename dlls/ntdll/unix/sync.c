@@ -1558,6 +1558,24 @@ NTSTATUS WINAPI NtQueryInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS c
         if (ret_len) *ret_len = sizeof(*basic_limit);
         return STATUS_SUCCESS;
     }
+    case JobObjectSecurityLimitInformation:
+    {
+        JOBOBJECT_SECURITY_LIMIT_INFORMATION *sec_limit = info;
+
+        if (len < sizeof(*sec_limit)) return STATUS_INFO_LENGTH_MISMATCH;
+        memset( sec_limit, 0, sizeof(*sec_limit) );
+        if (ret_len) *ret_len = sizeof(*sec_limit);
+        return STATUS_SUCCESS;
+    }
+    case JobObjectBasicUIRestrictions:
+    {
+        JOBOBJECT_BASIC_UI_RESTRICTIONS *ui_limit = info;
+
+        if (len < sizeof(*ui_limit)) return STATUS_INFO_LENGTH_MISMATCH;
+        memset( ui_limit, 0, sizeof(*ui_limit) );
+        if (ret_len) *ret_len = sizeof(*ui_limit);
+        return STATUS_SUCCESS;
+    }
     default:
         return STATUS_NOT_IMPLEMENTED;
     }
@@ -1583,12 +1601,15 @@ NTSTATUS WINAPI NtSetInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS cla
 
     case JobObjectExtendedLimitInformation:
         info_size = sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
-        limit_flags = JOB_OBJECT_EXTENDED_LIMIT_VALID_FLAGS;
+        limit_flags = JOB_OBJECT_LIMIT_VALID_FLAGS | 0x00ff0000;
         /* fall through */
     case JobObjectBasicLimitInformation:
         if (len != info_size) return STATUS_INVALID_PARAMETER;
         basic_limit = info;
-        if (basic_limit->LimitFlags & ~limit_flags) return STATUS_INVALID_PARAMETER;
+        if (basic_limit->LimitFlags & ~limit_flags)
+        {
+            WARN( "Ignoring unsupported limit flags %#x\n", (unsigned int)(basic_limit->LimitFlags & ~limit_flags) );
+        }
         SERVER_START_REQ( set_job_limits )
         {
             req->handle = wine_server_obj_handle( handle );
@@ -1609,9 +1630,14 @@ NTSTATUS WINAPI NtSetInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS cla
         }
         SERVER_END_REQ;
         break;
+    case JobObjectSecurityLimitInformation:
+        if (len < sizeof(JOBOBJECT_SECURITY_LIMIT_INFORMATION)) return STATUS_INVALID_PARAMETER;
+        FIXME( "JobObjectSecurityLimitInformation stub: %p %p %u\n", handle, info, len );
+        status = STATUS_SUCCESS;
+        break;
     case JobObjectBasicUIRestrictions:
         status = STATUS_SUCCESS;
-        /* fall through */
+        break;
     default:
         FIXME( "stub: %p %u %p %u\n", handle, class, info, len );
     }

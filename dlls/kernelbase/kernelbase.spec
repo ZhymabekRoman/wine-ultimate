@@ -69,6 +69,7 @@
 @ stdcall AreFileApisANSI()
 # @ stub AreThereVisibleLogoffScriptsInternal
 # @ stub AreThereVisibleShutdownScriptsInternal
+@ stdcall AssignProcessToJobObject(ptr ptr)
 @ stdcall AttachConsole(long)
 @ stub BaseCheckAppcompatCache
 # @ stub BaseCheckAppcompatCacheEx
@@ -200,6 +201,8 @@
 @ stdcall CreateHardLinkA(str str ptr)
 @ stdcall CreateHardLinkW(wstr wstr ptr)
 @ stdcall CreateIoCompletionPort(long long long long)
+@ stdcall CreateJobObjectA(ptr str)
+@ stdcall CreateJobObjectW(ptr wstr)
 @ stdcall CreateMemoryResourceNotification(long)
 @ stdcall CreateMutexA(ptr long str)
 @ stdcall CreateMutexExA(ptr str long long)
@@ -524,6 +527,7 @@
 @ stdcall GetDynamicTimeZoneInformation(ptr)
 @ stdcall GetDynamicTimeZoneInformationEffectiveYears(ptr ptr ptr)
 # @ stub GetEffectivePackageStatusForUser
+@ stdcall GetEffectivePackageStatusForUserSid(ptr wstr ptr)
 # @ stub GetEightBitStringToUnicodeSizeRoutine
 # @ stub GetEightBitStringToUnicodeStringRoutine
 @ stdcall -ret64 -arch=i386,x86_64 GetEnabledXStateFeatures()
@@ -639,6 +643,8 @@
 # @ stub GetPackageOSMaxVersionTested
 # @ stub GetPackagePath
 @ stdcall GetPackagePathByFullName(wstr ptr wstr)
+@ stdcall GetPackagePathByFullName2(wstr long ptr wstr)
+@ stdcall IsMrtResourceRedirectionEnabled()
 # @ stub GetPackagePathOnVolume
 # @ stub GetPackageProperty
 # @ stub GetPackagePropertyString
@@ -728,7 +734,7 @@
 @ stdcall GetSystemFirmwareTable(long long ptr long)
 @ stdcall GetSystemInfo(ptr)
 # @ stub GetSystemMetadataPath
-# @ stub GetSystemMetadataPathForPackage
+@ stdcall GetSystemMetadataPathForPackage(wstr ptr ptr)
 # @ stub GetSystemMetadataPathForPackageFamily
 @ stdcall GetSystemPreferredUILanguages(long ptr ptr ptr)
 # @ stub GetSystemStateRootFolder
@@ -899,7 +905,7 @@
 @ stdcall IsDBCSLeadByte(long)
 @ stdcall IsDBCSLeadByteEx(long long)
 @ stdcall IsDebuggerPresent()
-# @ stub IsDeveloperModeEnabled
+@ stdcall IsDeveloperModeEnabled(ptr)
 # @ stub IsDeveloperModePolicyApplied
 # @ stub IsEnclaveTypeSupported
 # @ stub IsGlobalizationUserSettingsKeyRedirected
@@ -1029,6 +1035,8 @@
 @ stdcall OpenFileById(long ptr long long ptr long)
 @ stdcall OpenFileMappingFromApp(long long wstr)
 @ stdcall OpenFileMappingW(long long wstr)
+@ stdcall OpenJobObjectA(long long str)
+@ stdcall OpenJobObjectW(long long wstr)
 # @ stub OpenGlobalizationUserSettingsKey
 @ stdcall OpenMutexW(long long wstr)
 # @ stub OpenPackageInfoByFullName
@@ -1244,6 +1252,7 @@
 @ stdcall QueryIoRingCapabilities(ptr)
 @ stdcall QueryIdleProcessorCycleTime(ptr ptr)
 @ stdcall QueryIdleProcessorCycleTimeEx(long ptr ptr)
+@ stdcall QueryInformationJobObject(long long ptr long ptr)
 @ stdcall QueryInterruptTime(ptr)
 @ stdcall QueryInterruptTimePrecise(ptr)
 @ stdcall QueryMemoryResourceNotification(ptr ptr)
@@ -1492,6 +1501,7 @@
 @ stdcall SetFileValidData(ptr int64)
 @ stdcall SetHandleCount(long)
 @ stdcall SetHandleInformation(long long long)
+@ stdcall SetInformationJobObject(long long ptr long)
 # @ stub SetIsDeveloperModeEnabled
 # @ stub SetIsSideloadingEnabled
 @ stdcall SetKernelObjectSecurity(long long ptr)
@@ -1645,6 +1655,7 @@
 @ stdcall SystemTimeToFileTime(ptr ptr)
 @ stdcall SystemTimeToTzSpecificLocalTime(ptr ptr ptr)
 @ stub SystemTimeToTzSpecificLocalTimeEx
+@ stdcall TerminateJobObject(long long)
 @ stdcall TerminateProcess(long long)
 # @ stub TerminateProcessOnMemoryExhaustion
 @ stdcall TerminateThread(long long)

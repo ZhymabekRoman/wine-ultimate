@@ -42,6 +42,11 @@ extern BOOL is_console_handle( HANDLE );
 extern const WCHAR windows_dir[];
 extern const WCHAR system_dir[];
 
+extern void get_create_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,
+                                          SECURITY_ATTRIBUTES *sa, const WCHAR *name );
+extern BOOL get_open_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,
+                                        BOOL inherit, const WCHAR *name );
+
 static const BOOL is_win64 = (sizeof(void *) > sizeof(int));
 extern BOOL is_wow64;
 

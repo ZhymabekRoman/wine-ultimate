@@ -529,7 +529,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
 
     /* Process the AppName and/or CmdLine to get module name and path */
 
-    TRACE( "app %s cmdline %s\n", debugstr_w(app_name), debugstr_w(cmd_line) );
+    ERR( "CreateProcessInternalW: app %s cmdline %s\n", debugstr_w(app_name), debugstr_w(cmd_line) );
 
     if (new_token) FIXME( "No support for returning created process token\n" );
 
@@ -686,7 +686,11 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
         info->dwProcessId = HandleToUlong( rtl_info.ClientId.UniqueProcess );
         info->dwThreadId  = HandleToUlong( rtl_info.ClientId.UniqueThread );
         if (!(flags & CREATE_SUSPENDED)) NtResumeThread( rtl_info.Thread, NULL );
-        TRACE( "started process pid %04lx tid %04lx\n", info->dwProcessId, info->dwThreadId );
+        ERR( "started process pid %04lx tid %04lx app %s\n", info->dwProcessId, info->dwThreadId, debugstr_w(app_name) );
+    }
+    else
+    {
+        ERR( "CreateProcessInternalW failed: status %#lx, app %s, cmdline %s\n", status, debugstr_w(app_name), debugstr_w(cmd_line) );
     }
 
  done:
@@ -1042,6 +1046,116 @@ BOOL WINAPI DECLSPEC_HOTPATCH IsProcessInJob( HANDLE process, HANDLE job, BOOL *
     default:
         return set_ntstatus( status );
     }
+}
+
+
+/******************************************************************************
+ *           CreateJobObjectW   (kernelbase.@)
+ */
+HANDLE WINAPI DECLSPEC_HOTPATCH CreateJobObjectW( LPSECURITY_ATTRIBUTES sa, LPCWSTR name )
+{
+    HANDLE ret = 0;
+    UNICODE_STRING nameW;
+    OBJECT_ATTRIBUTES attr;
+    NTSTATUS status;
+
+    get_create_object_attributes( &attr, &nameW, sa, name );
+
+    status = NtCreateJobObject( &ret, JOB_OBJECT_ALL_ACCESS, &attr );
+    if (status == STATUS_OBJECT_NAME_EXISTS)
+        SetLastError( ERROR_ALREADY_EXISTS );
+    else
+        SetLastError( RtlNtStatusToDosError(status) );
+    return ret;
+}
+
+
+/******************************************************************************
+ *           CreateJobObjectA   (kernelbase.@)
+ */
+HANDLE WINAPI DECLSPEC_HOTPATCH CreateJobObjectA( LPSECURITY_ATTRIBUTES attr, LPCSTR name )
+{
+    WCHAR buffer[MAX_PATH];
+
+    if (!name) return CreateJobObjectW( attr, NULL );
+
+    if (!MultiByteToWideChar( CP_ACP, 0, name, -1, buffer, MAX_PATH ))
+    {
+        SetLastError( ERROR_FILENAME_EXCED_RANGE );
+        return 0;
+    }
+    return CreateJobObjectW( attr, buffer );
+}
+
+
+/******************************************************************************
+ *           OpenJobObjectW   (kernelbase.@)
+ */
+HANDLE WINAPI DECLSPEC_HOTPATCH OpenJobObjectW( DWORD access, BOOL inherit, LPCWSTR name )
+{
+    HANDLE ret;
+    UNICODE_STRING nameW;
+    OBJECT_ATTRIBUTES attr;
+
+    if (!get_open_object_attributes( &attr, &nameW, inherit, name )) return 0;
+
+    if (!set_ntstatus( NtOpenJobObject( &ret, access, &attr ))) return 0;
+    return ret;
+}
+
+
+/******************************************************************************
+ *           OpenJobObjectA   (kernelbase.@)
+ */
+HANDLE WINAPI DECLSPEC_HOTPATCH OpenJobObjectA( DWORD access, BOOL inherit, LPCSTR name )
+{
+    WCHAR buffer[MAX_PATH];
+
+    if (!name) return OpenJobObjectW( access, inherit, NULL );
+
+    if (!MultiByteToWideChar( CP_ACP, 0, name, -1, buffer, MAX_PATH ))
+    {
+        SetLastError( ERROR_FILENAME_EXCED_RANGE );
+        return 0;
+    }
+    return OpenJobObjectW( access, inherit, buffer );
+}
+
+
+/******************************************************************************
+ *           TerminateJobObject   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH TerminateJobObject( HANDLE job, UINT exit_code )
+{
+    return set_ntstatus( NtTerminateJobObject( job, exit_code ));
+}
+
+
+/******************************************************************************
+ *           AssignProcessToJobObject   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH AssignProcessToJobObject( HANDLE job, HANDLE process )
+{
+    return set_ntstatus( NtAssignProcessToJobObject( job, process ));
+}
+
+
+/******************************************************************************
+ *           SetInformationJobObject   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH SetInformationJobObject( HANDLE job, JOBOBJECTINFOCLASS class, LPVOID info, DWORD len )
+{
+    return set_ntstatus( NtSetInformationJobObject( job, class, info, len ));
+}
+
+
+/******************************************************************************
+ *           QueryInformationJobObject   (kernelbase.@)
+ */
+BOOL WINAPI DECLSPEC_HOTPATCH QueryInformationJobObject( HANDLE job, JOBOBJECTINFOCLASS class, LPVOID info,
+                                                        DWORD len, DWORD *ret_len )
+{
+    return set_ntstatus( NtQueryInformationJobObject( job, class, info, len, ret_len ));
 }
 
 

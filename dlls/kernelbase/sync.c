@@ -86,8 +86,8 @@ NTSTATUS WINAPI BaseGetNamedObjectDirectory( HANDLE *dir )
     return status;
 }
 
-static void get_create_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,
-                                          SECURITY_ATTRIBUTES *sa, const WCHAR *name )
+void get_create_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,
+                                   SECURITY_ATTRIBUTES *sa, const WCHAR *name )
 {
     attr->Length                   = sizeof(*attr);
     attr->RootDirectory            = 0;
@@ -103,8 +103,8 @@ static void get_create_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRIN
     }
 }
 
-static BOOL get_open_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,
-                                        BOOL inherit, const WCHAR *name )
+BOOL get_open_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nameW,
+                                 BOOL inherit, const WCHAR *name )
 {
     HANDLE dir;
 

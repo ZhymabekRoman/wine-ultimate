@@ -340,13 +340,13 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         sizeof(DWORD), /* TokenSessionId */
         0,    /* TokenGroupsAndPrivileges */
         0,    /* TokenSessionReference */
-        0,    /* TokenSandBoxInert */
+        sizeof(DWORD), /* TokenSandBoxInert */
         0,    /* TokenAuditPolicy */
         0,    /* TokenOrigin */
         sizeof(TOKEN_ELEVATION_TYPE), /* TokenElevationType */
         sizeof(TOKEN_LINKED_TOKEN), /* TokenLinkedToken */
         sizeof(TOKEN_ELEVATION), /* TokenElevation */
-        0,    /* TokenHasRestrictions */
+        sizeof(DWORD), /* TokenHasRestrictions */
         0,    /* TokenAccessInformation */
         0,    /* TokenVirtualizationAllowed */
         sizeof(DWORD), /* TokenVirtualizationEnabled */
@@ -365,7 +365,7 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         0,    /* TokenDeviceGroups */
         0,    /* TokenRestrictedDeviceGroups */
         0,    /* TokenSecurityAttributes */
-        0,    /* TokenIsRestricted */
+        sizeof(DWORD), /* TokenIsRestricted */
         0     /* TokenProcessTrustLevel */
     };
 
@@ -655,6 +655,83 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         SERVER_END_REQ;
         break;
 
+    case TokenRestrictedSids:
+    {
+        void *buffer = malloc( length );
+        TOKEN_GROUPS *groups = info;
+        ULONG i, count = 0, needed_size;
+
+        SERVER_START_REQ( get_token_groups )
+        {
+            req->handle = wine_server_obj_handle( token );
+            req->attr_mask = SE_GROUP_USE_FOR_DENY_ONLY;
+            wine_server_set_reply( req, buffer, length );
+            status = wine_server_call( req );
+
+            count = reply->attr_len / sizeof(unsigned int);
+            needed_size = offsetof( TOKEN_GROUPS, Groups[count] ) + reply->sid_len;
+            if (needed_size < sizeof(TOKEN_GROUPS)) needed_size = sizeof(TOKEN_GROUPS);
+            if (status == STATUS_SUCCESS && needed_size > length) status = STATUS_BUFFER_TOO_SMALL;
+
+            if (status == STATUS_SUCCESS && groups)
+            {
+                unsigned int *attr = buffer;
+                SID *sids = (SID *)&groups->Groups[count];
+
+                groups->GroupCount = count;
+                memcpy( sids, attr + count, reply->sid_len );
+                for (i = 0; i < count; i++)
+                {
+                    groups->Groups[i].Attributes = attr[i];
+                    groups->Groups[i].Sid = sids;
+                    sids = (SID *)((char *)sids + offsetof( SID, SubAuthority[sids->SubAuthorityCount] ));
+                }
+            }
+            else if (status != STATUS_BUFFER_TOO_SMALL) needed_size = sizeof(TOKEN_GROUPS);
+        }
+        SERVER_END_REQ;
+
+        free( buffer );
+        if (retlen) *retlen = needed_size;
+        break;
+    }
+
+    case TokenHasRestrictions:
+    case TokenIsRestricted:
+    {
+        DWORD *is_restricted = info;
+
+        *is_restricted = 0;
+        SERVER_START_REQ( get_token_groups )
+        {
+            req->handle = wine_server_obj_handle( token );
+            req->attr_mask = SE_GROUP_USE_FOR_DENY_ONLY;
+            status = wine_server_call( req );
+            if (reply->attr_len > 0) *is_restricted = 1;
+            status = STATUS_SUCCESS;
+        }
+        SERVER_END_REQ;
+        break;
+    }
+
+    case TokenSandBoxInert:
+    {
+        *(DWORD *)info = 0;
+        status = STATUS_SUCCESS;
+        break;
+    }
+
+    case TokenSource:
+    {
+        TOKEN_SOURCE *source = info;
+        static const char default_source[TOKEN_SOURCE_LENGTH] = "*SYSTEM*";
+        memcpy( source->SourceName, default_source, sizeof(source->SourceName) );
+        source->SourceIdentifier.LowPart = 0;
+        source->SourceIdentifier.HighPart = 0;
+        status = STATUS_SUCCESS;
+        break;
+    }
+
     default:
         ERR( "Unhandled token information class %s\n", debugstr_TokenInformationClass(class) );
         return STATUS_NOT_IMPLEMENTED;
@@ -805,31 +882,54 @@ NTSTATUS WINAPI NtFilterToken( HANDLE token, ULONG flags, TOKEN_GROUPS *disable_
     if (flags)
         FIXME( "flags %#x unsupported\n", flags );
 
-    if (restrict_sids)
-        FIXME( "support for restricting sids not yet implemented\n" );
-
     if (privileges)
         privileges_len = privileges->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES);
 
-    if (disable_sids)
+    if (disable_sids || restrict_sids)
     {
         DWORD len, i;
         BYTE *tmp;
 
-        for (i = 0; i < disable_sids->GroupCount; i++)
+        if (disable_sids)
         {
-            SID *sid = disable_sids->Groups[i].Sid;
-            sids_len += offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
+            for (i = 0; i < disable_sids->GroupCount; i++)
+            {
+                SID *sid = disable_sids->Groups[i].Sid;
+                sids_len += offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
+            }
+        }
+        if (restrict_sids)
+        {
+            for (i = 0; i < restrict_sids->GroupCount; i++)
+            {
+                SID *sid = restrict_sids->Groups[i].Sid;
+                sids_len += offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
+            }
         }
 
         sids = malloc( sids_len );
         if (!sids) return STATUS_NO_MEMORY;
 
-        for (i = 0, tmp = (BYTE *)sids; i < disable_sids->GroupCount; i++, tmp += len)
+        tmp = (BYTE *)sids;
+        if (disable_sids)
         {
-            SID *sid = disable_sids->Groups[i].Sid;
-            len = offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
-            memcpy( tmp, disable_sids->Groups[i].Sid, len );
+            for (i = 0; i < disable_sids->GroupCount; i++)
+            {
+                SID *sid = disable_sids->Groups[i].Sid;
+                len = offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
+                memcpy( tmp, disable_sids->Groups[i].Sid, len );
+                tmp += len;
+            }
+        }
+        if (restrict_sids)
+        {
+            for (i = 0; i < restrict_sids->GroupCount; i++)
+            {
+                SID *sid = restrict_sids->Groups[i].Sid;
+                len = offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
+                memcpy( tmp, restrict_sids->Groups[i].Sid, len );
+                tmp += len;
+            }
         }
     }
 
@@ -838,7 +938,7 @@ NTSTATUS WINAPI NtFilterToken( HANDLE token, ULONG flags, TOKEN_GROUPS *disable_
         req->handle          = wine_server_obj_handle( token );
         req->flags           = flags;
         req->privileges_size = privileges_len;
-        wine_server_add_data( req, privileges->Privileges, privileges_len );
+        wine_server_add_data( req, privileges ? privileges->Privileges : NULL, privileges_len );
         wine_server_add_data( req, sids, sids_len );
         status = wine_server_call( req );
         if (!status) *new_token = wine_server_ptr_handle( reply->new_handle );
