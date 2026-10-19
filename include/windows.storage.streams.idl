@@ -36,6 +36,9 @@ namespace Windows.Storage.Streams {
     interface IBufferFactory;
     interface IBufferStatics;
     interface IContentTypeProvider;
+    interface IDataReader;
+    interface IDataReaderFactory;
+    interface IDataReaderStatics;
     interface IDataWriter;
     interface IDataWriterFactory;
     interface IInputStream;
@@ -47,6 +50,8 @@ namespace Windows.Storage.Streams {
     interface IRandomAccessStreamStatics;
     interface IRandomAccessStreamWithContentType;
     runtimeclass Buffer;
+    runtimeclass DataReader;
+    runtimeclass DataReaderLoadOperation;
     runtimeclass DataWriter;
     runtimeclass DataWriterStoreOperation;
     runtimeclass InMemoryRandomAccessStream;

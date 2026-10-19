@@ -49,6 +49,8 @@ namespace Windows.Storage {
     typedef enum NameCollisionOption NameCollisionOption;
     typedef enum StorageDeleteOption StorageDeleteOption;
     typedef enum StorageItemTypes StorageItemTypes;
+    typedef enum StorageOpenOptions StorageOpenOptions;
+    typedef enum StreamedFileFailureMode StreamedFileFailureMode;
 
     interface IApplicationData;
     interface IApplicationData2;
@@ -65,12 +67,15 @@ namespace Windows.Storage {
     interface IKnownFoldersStatics4;
     interface ISetVersionDeferral;
     interface ISetVersionRequest;
+    interface IStorageFile;
+    interface IStorageFile2;
     interface IStorageFileStatics;
     interface IStorageFileStatics2;
     interface IStorageFolder;
     interface IStorageFolderStatics;
     interface IStorageFolderStatics2;
     interface IStorageItem;
+    interface IStreamedFileDataRequest;
 
     runtimeclass ApplicationData;
     runtimeclass ApplicationDataContainer;
@@ -80,6 +85,7 @@ namespace Windows.Storage {
     runtimeclass StorageFolder;
     runtimeclass StorageFile;
     runtimeclass StorageStreamTransaction;
+    runtimeclass StreamedFileDataRequest;
 
     declare {
         interface Windows.Foundation.Collections.IKeyValuePair<HSTRING, Windows.Storage.ApplicationDataContainer *>;
@@ -242,6 +248,27 @@ namespace Windows.Storage {
         File   = 0x1,
         Folder = 0x2,
     };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        flags
+    ]
+    enum StorageOpenOptions
+    {
+        None                   = 0x0,
+        AllowOnlyReaders       = 0x1,
+        AllowReadersAndWriters = 0x2,
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum StreamedFileFailureMode
+    {
+        Failed               = 0,
+        CurrentlyUnavailable = 1,
+        Incomplete           = 2,
+    };
 #endif
 
     [
@@ -249,6 +276,21 @@ namespace Windows.Storage {
         uuid(a05791e6-cc9f-4687-acab-a364fd785463)
     ]
     delegate HRESULT ApplicationDataSetVersionHandler([in] Windows.Storage.SetVersionRequest *version);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(fef6a824-2fe1-4d07-a35b-b77c50b5f4cc)
+    ]
+    delegate HRESULT StreamedFileDataRequestedHandler([in] Windows.Storage.StreamedFileDataRequest *stream);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(1673fcce-dabd-4d50-beee-180b8a8191b6)
+    ]
+    interface IStreamedFileDataRequest : IInspectable
+    {
+        HRESULT FailAndClose([in] Windows.Storage.StreamedFileFailureMode failureMode);
+    }
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
@@ -528,6 +570,60 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(954e4bcf-0a77-42fb-b777-c2ed58a52e44)
+    ]
+    interface IStorageFile2 : IInspectable
+    {
+        [overload("OpenAsync")]
+        HRESULT OpenWithOptionsAsync(
+            [in] Windows.Storage.FileAccessMode accessMode,
+            [in] Windows.Storage.StorageOpenOptions options,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IRandomAccessStream *> **operation
+        );
+        [overload("OpenTransactedWriteAsync")]
+        HRESULT OpenTransactedWriteWithOptionsAsync(
+            [in] Windows.Storage.StorageOpenOptions options,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageStreamTransaction *> **operation
+        );
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Storage.StorageFile),
+        uuid(5984c710-daf2-43c8-8bb4-a4d3eacfd03f)
+    ]
+    interface IStorageFileStatics : IInspectable
+    {
+        HRESULT GetFileFromPathAsync(
+            [in] HSTRING path,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT GetFileFromApplicationUriAsync(
+            [in] Windows.Foundation.Uri *uri,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT CreateStreamedFileAsync(
+            [in] HSTRING display_name_with_extensions,
+            [in] Windows.Storage.StreamedFileDataRequestedHandler *data_requested,
+            [in] Windows.Storage.Streams.IRandomAccessStreamReference *thumbnail,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT ReplaceWithStreamedFileAsync(
+            [in] Windows.Storage.IStorageFile *file_to_replace,
+            [in] Windows.Storage.StreamedFileDataRequestedHandler *data_requested,
+            [in] Windows.Storage.Streams.IRandomAccessStreamReference *thumbnail,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT CreateStreamedFileFromUriAsync(
+            [in] HSTRING display_name_with_extension,
+            [in] Windows.Foundation.Uri *uri,
+            [in] Windows.Storage.Streams.IRandomAccessStreamReference *thumbnail,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+        HRESULT ReplaceWithStreamedFileFromUriAsync(
+            [in] Windows.Storage.IStorageFile *file_to_replace,
+            [in] Windows.Foundation.Uri *uri,
+            [in] Windows.Storage.Streams.IRandomAccessStreamReference *thumbnail,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFile *> **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         uuid(72d1cb78-b3ef-4f75-a80b-6fd9dae2944b)
     ]
     interface IStorageFolder : IInspectable
@@ -569,6 +665,19 @@ namespace Windows.Storage {
         [overload("GetItemsAsync")]
         HRESULT GetItemsAsyncOverloadDefaultStartAndCount(
             [out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.Storage.IStorageItem *> *> **operation
+        );
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Storage.StorageFolder),
+        uuid(08f327ff-85d5-48b9-aee9-28511e339f9f)
+    ]
+    interface IStorageFolderStatics : IInspectable
+    {
+        HRESULT GetFolderFromPathAsync(
+            [in] HSTRING path,
+            [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.StorageFolder *> **operation
         );
     }
 
@@ -668,7 +777,7 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
-        /* static(Windows.Storage.IStorageFileStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        static(Windows.Storage.IStorageFileStatics, Windows.Foundation.UniversalApiContract, 1.0),
         /* static(Windows.Storage.IStorageFileStatics2, Windows.Foundation.UniversalApiContract, 10.0) */
     ]
     runtimeclass StorageFile
@@ -682,12 +791,12 @@ namespace Windows.Storage {
         /* [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Storage.IStorageItem2; */
         /* [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Storage.IStorageItemPropertiesWithProvider; */
         /* [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Storage.IStorageFilePropertiesWithAvailability; */
-        /* [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Storage.IStorageFile2; */
+        [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Storage.IStorageFile2;
     }
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
-        /* static(Windows.Storage.IStorageFolderStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        static(Windows.Storage.IStorageFolderStatics, Windows.Foundation.UniversalApiContract, 1.0),
         /* static(Windows.Storage.IStorageFolderStatics2, Windows.Foundation.UniversalApiContract, 10.0) */
     ]
     runtimeclass StorageFolder
@@ -710,6 +819,14 @@ namespace Windows.Storage {
     {
         [default] interface Windows.Storage.IStorageStreamTransaction;
         interface Windows.Foundation.IClosable;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    runtimeclass StreamedFileDataRequest
+    {
+        [default] interface Windows.Storage.IStreamedFileDataRequest;
     }
 #endif
 }
