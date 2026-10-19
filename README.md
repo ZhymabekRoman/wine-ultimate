@@ -63,7 +63,7 @@ Developed during native bring-up for **WhatsApp for Windows** (`v2.2620.102.0`, 
 * **Path**: `patches/twinapi-appcore-UWP/`
 * **Target Subsystem**: `twinapi.appcore.dll`, `windows.ui.dll`, AppLifecycle, Dispatcher, Connectivity, Devices, Cryptography, Media, Calls
 * **Depends on**: `kernelbase-PackageIdentity`
-* **Patches (0001–0031)**:
+* **Patches (0001–0032)**:
   * `0001–0014`: Implements `ICoreApplication`, `CoreApplicationView`, `CoreWindow` with Win32 HWND backing, `WS_VISIBLE`, and UWP activation args.
   * `0015`: Implements `VisibilityChangedEventArgs` and `WindowSizeChangedEventArgs` in `windows.ui.dll`.
   * `0016`: Implements `IPackageId`, `IBackgroundExecutionManagerStatics`, `IPushNotificationChannelManagerStatics4`, and `container_CreateContainer`.
@@ -82,6 +82,7 @@ Developed during native bring-up for **WhatsApp for Windows** (`v2.2620.102.0`, 
   * `0029`: Implements `Windows.Storage` and `Windows.Storage.Streams` IDL runtimeclasses and interfaces (`StorageFile`, `StorageFolder`, `IStorageFileStatics`, `IStorageFolderStatics`, `IDataReader`, `IDataReaderFactory`, `IStreamedFileDataRequest`).
   * `0030`: Implements `Windows.Media.Capture` IDL definitions (`MediaCapture`, `MediaCaptureInitializationSettings`, `IMediaCapture`, `IMediaCaptureVideoPreview`, `IMediaCapture5`).
   * `0031`: Implements `Windows.Media.Devices` IDL definitions (`VideoDeviceController`, `MediaDeviceControl`, `MediaDeviceControlCapabilities`, `IVideoDeviceController`, `IMediaDeviceControl`).
+  * `0032`: Implements parameterized WinRT collection interfaces for `BackgroundTaskRegistration.AllTasks` (`IMapView`, `IIterable`, `IIterator`) with strict COM identity and `GetIids`, and implements `Windows.Globalization` `IVectorView` and `IIterator` runtime class names and `IInspectable` methods.
 
 ### 5. `dcomp-DCompositionCreateDevice2`
 * **Path**: `patches/dcomp-DCompositionCreateDevice2/`
