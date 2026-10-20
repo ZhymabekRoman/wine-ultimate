@@ -1,0 +1,519 @@
+diff --git a/dlls/ntdll/unix/security.c b/dlls/ntdll/unix/security.c
+index f18f967..008497d 100644
+--- a/dlls/ntdll/unix/security.c
++++ b/dlls/ntdll/unix/security.c
+@@ -340,13 +340,13 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
+         sizeof(DWORD), /* TokenSessionId */
+         0,    /* TokenGroupsAndPrivileges */
+         0,    /* TokenSessionReference */
+-        0,    /* TokenSandBoxInert */
++        sizeof(DWORD), /* TokenSandBoxInert */
+         0,    /* TokenAuditPolicy */
+         0,    /* TokenOrigin */
+         sizeof(TOKEN_ELEVATION_TYPE), /* TokenElevationType */
+         sizeof(TOKEN_LINKED_TOKEN), /* TokenLinkedToken */
+         sizeof(TOKEN_ELEVATION), /* TokenElevation */
+-        0,    /* TokenHasRestrictions */
++        sizeof(DWORD), /* TokenHasRestrictions */
+         0,    /* TokenAccessInformation */
+         0,    /* TokenVirtualizationAllowed */
+         sizeof(DWORD), /* TokenVirtualizationEnabled */
+@@ -365,7 +365,7 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
+         0,    /* TokenDeviceGroups */
+         0,    /* TokenRestrictedDeviceGroups */
+         0,    /* TokenSecurityAttributes */
+-        0,    /* TokenIsRestricted */
++        sizeof(DWORD), /* TokenIsRestricted */
+         0     /* TokenProcessTrustLevel */
+     };
+ 
+@@ -655,6 +655,83 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
+         SERVER_END_REQ;
+         break;
+ 
++    case TokenRestrictedSids:
++    {
++        void *buffer = malloc( length );
++        TOKEN_GROUPS *groups = info;
++        ULONG i, count = 0, needed_size;
++
++        SERVER_START_REQ( get_token_groups )
++        {
++            req->handle = wine_server_obj_handle( token );
++            req->attr_mask = SE_GROUP_USE_FOR_DENY_ONLY;
++            wine_server_set_reply( req, buffer, length );
++            status = wine_server_call( req );
++
++            count = reply->attr_len / sizeof(unsigned int);
++            needed_size = offsetof( TOKEN_GROUPS, Groups[count] ) + reply->sid_len;
++            if (needed_size < sizeof(TOKEN_GROUPS)) needed_size = sizeof(TOKEN_GROUPS);
++            if (status == STATUS_SUCCESS && needed_size > length) status = STATUS_BUFFER_TOO_SMALL;
++
++            if (status == STATUS_SUCCESS && groups)
++            {
++                unsigned int *attr = buffer;
++                SID *sids = (SID *)&groups->Groups[count];
++
++                groups->GroupCount = count;
++                memcpy( sids, attr + count, reply->sid_len );
++                for (i = 0; i < count; i++)
++                {
++                    groups->Groups[i].Attributes = attr[i];
++                    groups->Groups[i].Sid = sids;
++                    sids = (SID *)((char *)sids + offsetof( SID, SubAuthority[sids->SubAuthorityCount] ));
++                }
++            }
++            else if (status != STATUS_BUFFER_TOO_SMALL) needed_size = sizeof(TOKEN_GROUPS);
++        }
++        SERVER_END_REQ;
++
++        free( buffer );
++        if (retlen) *retlen = needed_size;
++        break;
++    }
++
++    case TokenHasRestrictions:
++    case TokenIsRestricted:
++    {
++        DWORD *is_restricted = info;
++
++        *is_restricted = 0;
++        SERVER_START_REQ( get_token_groups )
++        {
++            req->handle = wine_server_obj_handle( token );
++            req->attr_mask = SE_GROUP_USE_FOR_DENY_ONLY;
++            status = wine_server_call( req );
++            if (reply->attr_len > 0) *is_restricted = 1;
++            status = STATUS_SUCCESS;
++        }
++        SERVER_END_REQ;
++        break;
++    }
++
++    case TokenSandBoxInert:
++    {
++        *(DWORD *)info = 0;
++        status = STATUS_SUCCESS;
++        break;
++    }
++
++    case TokenSource:
++    {
++        TOKEN_SOURCE *source = info;
++        static const char default_source[TOKEN_SOURCE_LENGTH] = "*SYSTEM*";
++        memcpy( source->SourceName, default_source, sizeof(source->SourceName) );
++        source->SourceIdentifier.LowPart = 0;
++        source->SourceIdentifier.HighPart = 0;
++        status = STATUS_SUCCESS;
++        break;
++    }
++
+     default:
+         ERR( "Unhandled token information class %s\n", debugstr_TokenInformationClass(class) );
+         return STATUS_NOT_IMPLEMENTED;
+@@ -802,34 +879,57 @@ NTSTATUS WINAPI NtFilterToken( HANDLE token, ULONG flags, TOKEN_GROUPS *disable_
+     TRACE( "%p %#x %p %p %p %p\n", token, flags, disable_sids, privileges,
+            restrict_sids, new_token );
+ 
+-    if (flags)
+-        FIXME( "flags %#x unsupported\n", flags );
+-
+-    if (restrict_sids)
+-        FIXME( "support for restricting sids not yet implemented\n" );
++    if (flags & ~(DISABLE_MAX_PRIVILEGE | SANDBOX_INERT | LUA_TOKEN | WRITE_RESTRICTED))
++        FIXME( "flags %#x unsupported\n", (unsigned int)flags );
+ 
+     if (privileges)
+         privileges_len = privileges->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES);
+ 
+-    if (disable_sids)
++    if (disable_sids || restrict_sids)
+     {
+         DWORD len, i;
+         BYTE *tmp;
+ 
+-        for (i = 0; i < disable_sids->GroupCount; i++)
++        if (disable_sids)
++        {
++            for (i = 0; i < disable_sids->GroupCount; i++)
++            {
++                SID *sid = disable_sids->Groups[i].Sid;
++                sids_len += offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
++            }
++        }
++        if (restrict_sids)
+         {
+-            SID *sid = disable_sids->Groups[i].Sid;
+-            sids_len += offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
++            for (i = 0; i < restrict_sids->GroupCount; i++)
++            {
++                SID *sid = restrict_sids->Groups[i].Sid;
++                sids_len += offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
++            }
+         }
+ 
+         sids = malloc( sids_len );
+         if (!sids) return STATUS_NO_MEMORY;
+ 
+-        for (i = 0, tmp = (BYTE *)sids; i < disable_sids->GroupCount; i++, tmp += len)
++        tmp = (BYTE *)sids;
++        if (disable_sids)
++        {
++            for (i = 0; i < disable_sids->GroupCount; i++)
++            {
++                SID *sid = disable_sids->Groups[i].Sid;
++                len = offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
++                memcpy( tmp, disable_sids->Groups[i].Sid, len );
++                tmp += len;
++            }
++        }
++        if (restrict_sids)
+         {
+-            SID *sid = disable_sids->Groups[i].Sid;
+-            len = offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
+-            memcpy( tmp, disable_sids->Groups[i].Sid, len );
++            for (i = 0; i < restrict_sids->GroupCount; i++)
++            {
++                SID *sid = restrict_sids->Groups[i].Sid;
++                len = offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
++                memcpy( tmp, restrict_sids->Groups[i].Sid, len );
++                tmp += len;
++            }
+         }
+     }
+ 
+@@ -838,7 +938,7 @@ NTSTATUS WINAPI NtFilterToken( HANDLE token, ULONG flags, TOKEN_GROUPS *disable_
+         req->handle          = wine_server_obj_handle( token );
+         req->flags           = flags;
+         req->privileges_size = privileges_len;
+-        wine_server_add_data( req, privileges->Privileges, privileges_len );
++        wine_server_add_data( req, privileges ? privileges->Privileges : NULL, privileges_len );
+         wine_server_add_data( req, sids, sids_len );
+         status = wine_server_call( req );
+         if (!status) *new_token = wine_server_ptr_handle( reply->new_handle );
+diff --git a/dlls/ntdll/unix/sync.c b/dlls/ntdll/unix/sync.c
+index 9b6beea..99baaf2 100644
+--- a/dlls/ntdll/unix/sync.c
++++ b/dlls/ntdll/unix/sync.c
+@@ -1546,6 +1546,15 @@ NTSTATUS WINAPI NtQueryInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS c
+ 
+         if (len < sizeof(*extended_limit)) return STATUS_INFO_LENGTH_MISMATCH;
+         memset( extended_limit, 0, sizeof(*extended_limit) );
++        SERVER_START_REQ( get_job_info )
++        {
++            req->handle = wine_server_obj_handle( handle );
++            ret = wine_server_call( req );
++            if (ret == STATUS_SUCCESS)
++                extended_limit->BasicLimitInformation.LimitFlags = reply->limit_flags;
++        }
++        SERVER_END_REQ;
++        if (ret != STATUS_SUCCESS) return ret;
+         if (ret_len) *ret_len = sizeof(*extended_limit);
+         return STATUS_SUCCESS;
+     }
+@@ -1555,9 +1564,36 @@ NTSTATUS WINAPI NtQueryInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS c
+ 
+         if (len < sizeof(*basic_limit)) return STATUS_INFO_LENGTH_MISMATCH;
+         memset( basic_limit, 0, sizeof(*basic_limit) );
++        SERVER_START_REQ( get_job_info )
++        {
++            req->handle = wine_server_obj_handle( handle );
++            ret = wine_server_call( req );
++            if (ret == STATUS_SUCCESS)
++                basic_limit->LimitFlags = reply->limit_flags;
++        }
++        SERVER_END_REQ;
++        if (ret != STATUS_SUCCESS) return ret;
+         if (ret_len) *ret_len = sizeof(*basic_limit);
+         return STATUS_SUCCESS;
+     }
++    case JobObjectSecurityLimitInformation:
++    {
++        JOBOBJECT_SECURITY_LIMIT_INFORMATION *sec_limit = info;
++
++        if (len < sizeof(*sec_limit)) return STATUS_INFO_LENGTH_MISMATCH;
++        memset( sec_limit, 0, sizeof(*sec_limit) );
++        if (ret_len) *ret_len = sizeof(*sec_limit);
++        return STATUS_SUCCESS;
++    }
++    case JobObjectBasicUIRestrictions:
++    {
++        JOBOBJECT_BASIC_UI_RESTRICTIONS *ui_limit = info;
++
++        if (len < sizeof(*ui_limit)) return STATUS_INFO_LENGTH_MISMATCH;
++        memset( ui_limit, 0, sizeof(*ui_limit) );
++        if (ret_len) *ret_len = sizeof(*ui_limit);
++        return STATUS_SUCCESS;
++    }
+     default:
+         return STATUS_NOT_IMPLEMENTED;
+     }
+@@ -1583,12 +1619,17 @@ NTSTATUS WINAPI NtSetInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS cla
+ 
+     case JobObjectExtendedLimitInformation:
+         info_size = sizeof(JOBOBJECT_EXTENDED_LIMIT_INFORMATION);
+-        limit_flags = JOB_OBJECT_EXTENDED_LIMIT_VALID_FLAGS;
++        limit_flags = JOB_OBJECT_LIMIT_VALID_FLAGS | 0x00ff0000;
+         /* fall through */
+     case JobObjectBasicLimitInformation:
++        if (class == JobObjectBasicLimitInformation)
++            limit_flags = (JOB_OBJECT_LIMIT_VALID_FLAGS & ~(JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY)) | 0x00ff0000;
+         if (len != info_size) return STATUS_INVALID_PARAMETER;
+         basic_limit = info;
+-        if (basic_limit->LimitFlags & ~limit_flags) return STATUS_INVALID_PARAMETER;
++        if (basic_limit->LimitFlags & ~limit_flags)
++        {
++            WARN( "Ignoring unsupported limit flags %#x\n", (unsigned int)(basic_limit->LimitFlags & ~limit_flags) );
++        }
+         SERVER_START_REQ( set_job_limits )
+         {
+             req->handle = wine_server_obj_handle( handle );
+@@ -1609,9 +1650,14 @@ NTSTATUS WINAPI NtSetInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS cla
+         }
+         SERVER_END_REQ;
+         break;
++    case JobObjectSecurityLimitInformation:
++        if (len < sizeof(JOBOBJECT_SECURITY_LIMIT_INFORMATION)) return STATUS_INVALID_PARAMETER;
++        FIXME( "JobObjectSecurityLimitInformation stub: %p %p %u\n", handle, info, len );
++        status = STATUS_SUCCESS;
++        break;
+     case JobObjectBasicUIRestrictions:
+         status = STATUS_SUCCESS;
+-        /* fall through */
++        break;
+     default:
+         FIXME( "stub: %p %u %p %u\n", handle, class, info, len );
+     }
+diff --git a/dlls/wow64/sync.c b/dlls/wow64/sync.c
+index d5b52a5..14892ea 100644
+--- a/dlls/wow64/sync.c
++++ b/dlls/wow64/sync.c
+@@ -954,6 +954,10 @@ NTSTATUS WINAPI wow64_NtQueryInformationJobObject( UINT *args )
+         }
+         else return STATUS_INFO_LENGTH_MISMATCH;
+ 
++    case JobObjectSecurityLimitInformation:
++    case JobObjectBasicUIRestrictions:
++        return NtQueryInformationJobObject( handle, class, ptr, len, retlen );
++
+     default:
+         if (class >= MaxJobObjectInfoClass) return STATUS_INVALID_PARAMETER;
+         FIXME( "unsupported class %u\n", class );
+@@ -1440,7 +1444,11 @@ NTSTATUS WINAPI wow64_NtSetInformationJobObject( UINT *args )
+         else return STATUS_INVALID_PARAMETER;
+ 
+     case JobObjectBasicUIRestrictions:
+-        FIXME( "unsupported class JobObjectBasicUIRestrictions\n" );
++        return NtSetInformationJobObject( handle, class, ptr, len );
++
++    case JobObjectSecurityLimitInformation:
++        if (len < sizeof(DWORD)) return STATUS_INVALID_PARAMETER;
++        FIXME( "JobObjectSecurityLimitInformation stub: %p %p %u\n", handle, ptr, len );
+         return STATUS_SUCCESS;
+ 
+     case JobObjectAssociateCompletionPortInformation:   /* JOBOBJECT_ASSOCIATE_COMPLETION_PORT */
+@@ -1904,3 +1912,55 @@ NTSTATUS WINAPI wow64_NtConvertBetweenAuxiliaryCounterAndPerformanceCounter( UIN
+ 
+     return NtConvertBetweenAuxiliaryCounterAndPerformanceCounter( flags, from, to, error );
+ }
++
++
++/**********************************************************************
++ *           wow64_NtCreateWaitCompletionPacket
++ */
++NTSTATUS WINAPI wow64_NtCreateWaitCompletionPacket( UINT *args )
++{
++    ULONG *handle_ptr = get_ptr( &args );
++    ACCESS_MASK access = get_ulong( &args );
++    OBJECT_ATTRIBUTES32 *attr32 = get_ptr( &args );
++
++    struct object_attr64 attr;
++    HANDLE handle = 0;
++    NTSTATUS status;
++
++    *handle_ptr = 0;
++    status = NtCreateWaitCompletionPacket( &handle, access, objattr_32to64( &attr, attr32 ) );
++    put_handle( handle_ptr, handle );
++    return status;
++}
++
++
++/**********************************************************************
++ *           wow64_NtAssociateWaitCompletionPacket
++ */
++NTSTATUS WINAPI wow64_NtAssociateWaitCompletionPacket( UINT *args )
++{
++    HANDLE handle = get_handle( &args );
++    HANDLE completion_handle = get_handle( &args );
++    HANDLE target_handle = get_handle( &args );
++    void *key_context = get_ptr( &args );
++    void *apc_context = get_ptr( &args );
++    NTSTATUS status = get_ulong( &args );
++    ULONG_PTR status_info = get_ulong( &args );
++    BOOLEAN *already_signaled = get_ptr( &args );
++
++    return NtAssociateWaitCompletionPacket( handle, completion_handle, target_handle,
++                                           key_context, apc_context, status, status_info,
++                                           already_signaled );
++}
++
++
++/**********************************************************************
++ *           wow64_NtCancelWaitCompletionPacket
++ */
++NTSTATUS WINAPI wow64_NtCancelWaitCompletionPacket( UINT *args )
++{
++    HANDLE handle = get_handle( &args );
++    BOOLEAN remove_signaled = get_ulong( &args );
++
++    return NtCancelWaitCompletionPacket( handle, remove_signaled );
++}
+diff --git a/include/wine/server_protocol.h b/include/wine/server_protocol.h
+index b04a1d8..d3604b4 100644
+--- a/include/wine/server_protocol.h
++++ b/include/wine/server_protocol.h
+@@ -5920,9 +5920,11 @@ struct get_job_info_request
+ struct get_job_info_reply
+ {
+     struct reply_header __header;
+-    int total_processes;
+-    int active_processes;
++    int          total_processes;
++    int          active_processes;
++    unsigned int limit_flags;
+     /* VARARG(pids,uints); */
++    char __pad_20[4];
+ };
+ 
+ 
+@@ -7324,6 +7326,6 @@ union generic_reply
+     struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
+ };
+ 
+-#define SERVER_PROTOCOL_VERSION 948
++#define SERVER_PROTOCOL_VERSION 949
+ 
+ #endif /* __WINE_WINE_SERVER_PROTOCOL_H */
+diff --git a/server/process.c b/server/process.c
+index f3aa679..1baccdc 100644
+--- a/server/process.c
++++ b/server/process.c
+@@ -749,7 +749,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
+             process->handles = alloc_handle_table( process, 0 );
+         /* Note: for security reasons, starting a new process does not attempt
+          * to use the current impersonation token for the new process */
+-        process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0 );
++        process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0, 0 );
+         process->affinity = parent->affinity;
+     }
+     if (!process->handles || !process->token) goto error;
+@@ -1959,6 +1959,7 @@ DECL_HANDLER(get_job_info)
+ 
+     reply->total_processes = job->total_processes;
+     reply->active_processes = job->num_processes;
++    reply->limit_flags = job->limit_flags;
+ 
+     len = min( get_reply_max_size(), reply->active_processes * sizeof(*pids) );
+     if (len && ((pids = set_reply_data_size( len ))))
+diff --git a/server/protocol.def b/server/protocol.def
+index db61c7b..5c27003 100644
+--- a/server/protocol.def
++++ b/server/protocol.def
+@@ -4126,8 +4126,9 @@ struct handle_info
+ @REQ(get_job_info)
+     obj_handle_t handle;          /* handle to the job */
+ @REPLY
+-    int total_processes;          /* total count of processes */
+-    int active_processes;         /* count of running processes */
++    int          total_processes;  /* total count of processes */
++    int          active_processes; /* count of running processes */
++    unsigned int limit_flags;      /* limit flags */
+     VARARG(pids,uints);           /* list of active pids */
+ @END
+ 
+diff --git a/server/request_handlers.h b/server/request_handlers.h
+index 014f694..91dc9c5 100644
+--- a/server/request_handlers.h
++++ b/server/request_handlers.h
+@@ -2312,7 +2312,8 @@ C_ASSERT( offsetof(struct get_job_info_request, handle) == 12 );
+ C_ASSERT( sizeof(struct get_job_info_request) == 16 );
+ C_ASSERT( offsetof(struct get_job_info_reply, total_processes) == 8 );
+ C_ASSERT( offsetof(struct get_job_info_reply, active_processes) == 12 );
+-C_ASSERT( sizeof(struct get_job_info_reply) == 16 );
++C_ASSERT( offsetof(struct get_job_info_reply, limit_flags) == 16 );
++C_ASSERT( sizeof(struct get_job_info_reply) == 24 );
+ C_ASSERT( offsetof(struct terminate_job_request, handle) == 12 );
+ C_ASSERT( offsetof(struct terminate_job_request, status) == 16 );
+ C_ASSERT( sizeof(struct terminate_job_request) == 24 );
+diff --git a/server/request_trace.h b/server/request_trace.h
+index eed1a6d..4ff5c86 100644
+--- a/server/request_trace.h
++++ b/server/request_trace.h
+@@ -3341,6 +3341,7 @@ static void dump_get_job_info_reply( const struct get_job_info_reply *req )
+ {
+     fprintf( stderr, " total_processes=%d", req->total_processes );
+     fprintf( stderr, ", active_processes=%d", req->active_processes );
++    fprintf( stderr, ", limit_flags=%08x", req->limit_flags );
+     dump_varargs_uints( ", pids=", cur_size );
+ }
+ 
+diff --git a/server/security.h b/server/security.h
+index f4dff67..b89010a 100644
+--- a/server/security.h
++++ b/server/security.h
+@@ -67,7 +67,8 @@ extern int token_assign_label( struct token *token, const struct sid *label );
+ extern struct token *token_duplicate( struct token *src_token, unsigned primary,
+                                       int impersonation_level, const struct security_descriptor *sd,
+                                       const struct luid_attr *remove_privs, unsigned int remove_priv_count,
+-                                      const struct sid *remove_groups, unsigned int remove_group_count );
++                                      const struct sid *remove_groups, unsigned int remove_group_count,
++                                      unsigned int filter_flags );
+ extern int token_check_privileges( struct token *token, int all_required,
+                                    const struct luid_attr *reqprivs,
+                                    unsigned int count, struct luid_attr *usedprivs );
+diff --git a/server/token.c b/server/token.c
+index 8863867..1764ae1 100644
+--- a/server/token.c
++++ b/server/token.c
+@@ -575,7 +575,8 @@ static int filter_privilege( struct privilege *privilege, const struct luid_attr
+ struct token *token_duplicate( struct token *src_token, unsigned primary,
+                                int impersonation_level, const struct security_descriptor *sd,
+                                const struct luid_attr *remove_privs, unsigned int remove_priv_count,
+-                               const struct sid *remove_groups, unsigned int remove_group_count)
++                               const struct sid *remove_groups, unsigned int remove_group_count,
++                               unsigned int filter_flags )
+ {
+     const struct luid *modified_id =
+         primary || (impersonation_level == src_token->impersonation_level) ?
+@@ -627,7 +628,12 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
+     /* copy privileges */
+     LIST_FOR_EACH_ENTRY( privilege, &src_token->privileges, struct privilege, entry )
+     {
+-        if (filter_privilege( privilege, remove_privs, remove_priv_count )) continue;
++        if (filter_flags & DISABLE_MAX_PRIVILEGE)
++        {
++            if (!is_equal_luid( privilege->luid, SeChangeNotifyPrivilege )) continue;
++        }
++        else if (filter_privilege( privilege, remove_privs, remove_priv_count )) continue;
++
+         if (!privilege_add( token, privilege->luid, privilege->enabled ))
+         {
+             release_object( token );
+@@ -1334,7 +1340,7 @@ DECL_HANDLER(duplicate_token)
+                                                      TOKEN_DUPLICATE,
+                                                      &token_ops )))
+     {
+-        struct token *token = token_duplicate( src_token, req->primary, req->impersonation_level, sd, NULL, 0, NULL, 0 );
++        struct token *token = token_duplicate( src_token, req->primary, req->impersonation_level, sd, NULL, 0, NULL, 0, 0 );
+         if (token)
+         {
+             unsigned int access = req->access ? req->access : get_handle_access( current->process, req->handle );
+@@ -1362,7 +1368,7 @@ DECL_HANDLER(filter_token)
+         group_count = get_sid_count( filter_groups, get_req_data_size() - priv_count * sizeof(struct luid_attr) );
+ 
+         token = token_duplicate( src_token, src_token->primary, src_token->impersonation_level, NULL,
+-                                 filter_privileges, priv_count, filter_groups, group_count );
++                                 filter_privileges, priv_count, filter_groups, group_count, req->flags );
+         if (token)
+         {
+             unsigned int access = get_handle_access( current->process, req->handle );

@@ -18,3 +18,7 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0030-include-windows.media.capture-Add-MediaCapture-and-M.patch
 0031-include-windows.media.devices-Add-VideoDeviceControl.patch
 0032-twinapi-globalization-Fix-collections-RCW-projection.patch
+0033-twinapi-elscore-gdi32-apisetschema-Fix-ResourceLoader-a.patch
+0034-windows.storage-streams-Implement-FileIO-PathIO-DataRea.patch
+0035-kernelbase-ntdll-server-Implement-DISABLE_MAX_PRIVILEGE.patch
+0036-dcomp-dxgi-d3d11-server-Cross-process-surface-sharing-a.patch
