@@ -2609,6 +2609,7 @@ enum message_type
 #define NAMED_PIPE_MESSAGE_STREAM_WRITE 0x0001
 #define NAMED_PIPE_MESSAGE_STREAM_READ  0x0002
 #define NAMED_PIPE_NONBLOCKING_MODE     0x0004
+#define NAMED_PIPE_FIRST_INSTANCE       0x0008  /* fail if an instance of the pipe name exists */
 #define NAMED_PIPE_SERVER_END           0x8000
 
 /* Set named pipe information by handle */

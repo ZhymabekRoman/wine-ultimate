@@ -61,6 +61,7 @@ struct pipe_end
     struct pipe_end     *connection; /* the other end of the pipe */
     process_id_t         client_pid; /* process that created the client */
     process_id_t         server_pid; /* process that created the server */
+    struct process      *client_proc; /* client process, used for impersonation */
     data_size_t          buffer_size;/* size of buffered data that doesn't block caller */
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
@@ -470,6 +471,12 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
 
     pipe_end->connection = NULL;
 
+    if (pipe_end->obj.ops == &pipe_server_ops && pipe_end->client_proc)
+    {
+        release_object( pipe_end->client_proc );
+        pipe_end->client_proc = NULL;
+    }
+
     pipe_end->state = status == STATUS_PIPE_DISCONNECTED
         ? FILE_PIPE_DISCONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
     fd_async_wake_up( pipe_end->fd, ASYNC_TYPE_WAIT, status );
@@ -509,6 +516,7 @@ static void pipe_end_destroy( struct object *obj )
     free_async_queue( &pipe_end->write_q );
     if (pipe_end->fd) release_object( pipe_end->fd );
     if (pipe_end->pipe) release_object( pipe_end->pipe );
+    if (pipe_end->client_proc) release_object( pipe_end->client_proc );
 }
 
 static struct object *pipe_server_lookup_name( struct object *obj, struct unicode_str *name,
@@ -1377,13 +1385,23 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
         return;
 
     case FSCTL_PIPE_IMPERSONATE:
-        if (current->process->token) /* FIXME: use the client token */
         {
+            struct pipe_end *client = server->pipe_end.connection;
             struct token *token;
-            if (!(token = token_duplicate( current->process->token, 0, SecurityImpersonation, NULL, NULL, 0, NULL, 0 )))
+
+            if (!client)
+            {
+                set_error( STATUS_INVALID_PIPE_STATE );
                 return;
-            if (current->token) release_object( current->token );
-            current->token = token;
+            }
+            if (client->client_proc->token)
+            {
+                if (!(token = token_duplicate( client->client_proc->token, 0, SecurityImpersonation,
+                                               NULL, NULL, 0, NULL, 0 )))
+                    return;
+                if (current->token) release_object( current->token );
+                current->token = token;
+            }
         }
         return;
 
@@ -1414,6 +1432,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->fd = NULL;
     pipe_end->flags = pipe_flags;
     pipe_end->connection = NULL;
+    pipe_end->client_proc = NULL;
     pipe_end->buffer_size = buffer_size;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
@@ -1458,6 +1477,7 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
+    client->client_proc = (struct process *)grab_object( current->process );
 
     client->fd = alloc_pseudo_fd( &pipe_client_fd_ops, &client->obj, options );
     if (!client->fd)
@@ -1514,6 +1534,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.connection = client;
         client->connection = &server->pipe_end;
         server->pipe_end.client_pid = client->client_pid;
+        server->pipe_end.client_proc = (struct process *)grab_object( client->client_proc );
         client->server_pid = server->pipe_end.server_pid;
         list_remove( &server->entry );
     }
@@ -1660,6 +1681,12 @@ DECL_HANDLER(create_named_pipe)
     }
     else
     {
+        if (req->flags & NAMED_PIPE_FIRST_INSTANCE)
+        {
+            set_error( STATUS_ACCESS_DENIED );
+            release_object( pipe );
+            return;
+        }
         if (pipe->maxinstances <= pipe->instances)
         {
             set_error( STATUS_INSTANCE_NOT_AVAILABLE );

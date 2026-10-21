@@ -1436,6 +1436,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateNamedPipeW( LPCWSTR name, DWORD open_mode,
     if (open_mode & ACCESS_SYSTEM_SECURITY) access |= ACCESS_SYSTEM_SECURITY;
     if (open_mode & FILE_FLAG_WRITE_THROUGH) options |= FILE_WRITE_THROUGH;
     if (!(open_mode & FILE_FLAG_OVERLAPPED)) options |= FILE_SYNCHRONOUS_IO_NONALERT;
+    if (open_mode & FILE_FLAG_FIRST_PIPE_INSTANCE) options |= FILE_FLAG_FIRST_PIPE_INSTANCE;
     pipe_type = (pipe_mode & PIPE_TYPE_MESSAGE) != 0;
     read_mode = (pipe_mode & PIPE_READMODE_MESSAGE) != 0;
     non_block = (pipe_mode & PIPE_NOWAIT) != 0;
@@ -1522,10 +1523,9 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetNamedPipeHandleStateW( HANDLE pipe, DWORD *stat
 {
     IO_STATUS_BLOCK io;
 
-    FIXME( "%p %p %p %p %p %p %ld: semi-stub\n", pipe, state, instances, max_count, timeout, user, size );
+    TRACE( "%p %p %p %p %p %p %ld\n", pipe, state, instances, max_count, timeout, user, size );
 
-    if (max_count) *max_count = 0;
-    if (timeout) *timeout = 0;
+    if (timeout) *timeout = NMPWAIT_WAIT_FOREVER;  /* no per-handle collect timeout is stored */
     if (user && size && !GetEnvironmentVariableW( L"WINEUSERNAME", user, size )) user[0] = 0;
 
     if (state)
@@ -1538,14 +1538,15 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetNamedPipeHandleStateW( HANDLE pipe, DWORD *stat
         *state = (info.ReadMode ? PIPE_READMODE_MESSAGE : PIPE_READMODE_BYTE) |
                  (info.CompletionMode ? PIPE_NOWAIT : PIPE_WAIT);
     }
-    if (instances)
+    if (instances || max_count)
     {
         FILE_PIPE_LOCAL_INFORMATION info;
 
         if (!set_ntstatus( NtQueryInformationFile( pipe, &io, &info, sizeof(info),
                                                    FilePipeLocalInformation)))
             return FALSE;
-        *instances = info.CurrentInstances;
+        if (instances) *instances = info.CurrentInstances;
+        if (max_count) *max_count = info.MaximumInstances;
     }
     return TRUE;
 }
