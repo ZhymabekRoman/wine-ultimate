@@ -490,9 +490,12 @@ index 95df467..252d6bc 100644
 diff --git a/dlls/cryptowinrt/dataprotection.c b/dlls/cryptowinrt/dataprotection.c
 new file mode 100644
 index 0000000..ef3f56e
+diff --git a/dlls/cryptowinrt/dataprotection.c b/dlls/cryptowinrt/dataprotection.c
+new file mode 100644
+index 0000000..0000000
 --- /dev/null
 +++ b/dlls/cryptowinrt/dataprotection.c
-@@ -0,0 +1,398 @@
+@@ -0,0 +1,660 @@
 +#include "private.h"
 +#include "wine/debug.h"
 +
@@ -500,6 +503,8 @@ index 0000000..ef3f56e
 +
 +static const GUID IID_IDataProtectionProvider = {0x09639948, 0xed22, 0x4270, {0xbd, 0x1c, 0x6d, 0x72, 0xc0, 0x0f, 0x87, 0x87}};
 +static const GUID IID_IDataProtectionProviderFactory = {0xadf33dac, 0x4932, 0x4cdf, {0xac, 0x41, 0x72, 0x14, 0x33, 0x35, 0x14, 0xca}};
++static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
++static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
 +
 +struct async_buffer
 +{
@@ -522,6 +527,13 @@ index 0000000..ef3f56e
 +static HRESULT WINAPI async_buffer_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 +{
 +    struct async_buffer *impl = impl_from_IInspectable( iface );
++
++    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
++        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
++    {
++        *out = NULL;
++        return E_NOINTERFACE;
++    }
 +
 +    if (IsEqualGUID( iid, &IID_IUnknown ) ||
 +        IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -561,10 +573,18 @@ index 0000000..ef3f56e
 +    return ref;
 +}
 +
-+static HRESULT WINAPI async_buffer_GetIids( IInspectable *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
++static HRESULT WINAPI async_buffer_GetIids( IInspectable *iface, ULONG *count, IID **iids )
++{
++    if (!count || !iids) return E_POINTER;
++    *count = 0;
++    *iids = NULL;
++    return S_OK;
++}
 +static HRESULT WINAPI async_buffer_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 +{
-+    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.Streams.IBuffer>", 67, name );
++    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.Streams.IBuffer>";
++    if (!name) return E_POINTER;
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
 +}
 +static HRESULT WINAPI async_buffer_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 +{
@@ -627,12 +647,42 @@ index 0000000..ef3f56e
 +    struct async_buffer *impl = impl_from_IAsyncInfo( iface );
 +    return IInspectable_Release( &impl->IInspectable_iface );
 +}
-+static HRESULT WINAPI async_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
-+static HRESULT WINAPI async_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name ) { return E_NOTIMPL; }
-+static HRESULT WINAPI async_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level ) { if (level) *level = BaseTrust; return S_OK; }
-+static HRESULT WINAPI async_info_get_Id( IAsyncInfo *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
-+static HRESULT WINAPI async_info_get_Status( IAsyncInfo *iface, AsyncStatus *status ) { if (status) *status = Completed; return S_OK; }
-+static HRESULT WINAPI async_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error ) { if (error) *error = S_OK; return S_OK; }
++static HRESULT WINAPI async_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
++{
++    if (!count || !iids) return E_POINTER;
++    *count = 0;
++    *iids = NULL;
++    return S_OK;
++}
++static HRESULT WINAPI async_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
++{
++    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncInfo";
++    if (!name) return E_POINTER;
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
++}
++static HRESULT WINAPI async_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level )
++{
++    if (level) *level = BaseTrust;
++    return S_OK;
++}
++static HRESULT WINAPI async_info_get_Id( IAsyncInfo *iface, UINT32 *id )
++{
++    if (!id) return E_POINTER;
++    *id = 1;
++    return S_OK;
++}
++static HRESULT WINAPI async_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
++{
++    if (!status) return E_POINTER;
++    *status = Completed;
++    return S_OK;
++}
++static HRESULT WINAPI async_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error )
++{
++    if (!error) return E_POINTER;
++    *error = S_OK;
++    return S_OK;
++}
 +static HRESULT WINAPI async_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
 +static HRESULT WINAPI async_info_Close( IAsyncInfo *iface ) { return S_OK; }
 +
@@ -651,7 +701,7 @@ index 0000000..ef3f56e
 +    async_info_Close,
 +};
 +
-+static HRESULT create_async_buffer( IInspectable *buffer, void **out )
++HRESULT create_async_buffer( IInspectable *buffer, void **out )
 +{
 +    struct async_buffer *impl;
 +    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
@@ -660,6 +710,206 @@ index 0000000..ef3f56e
 +    impl->ref = 1;
 +    if (buffer) IInspectable_AddRef( buffer );
 +    impl->buffer = buffer;
++    *out = &impl->IInspectable_iface;
++    return S_OK;
++}
++
++/* --- Async Action Implementation --- */
++
++struct async_action
++{
++    IInspectable IInspectable_iface;
++    IAsyncInfo IAsyncInfo_iface;
++    LONG ref;
++};
++
++static inline struct async_action *impl_from_async_action_IInspectable( IInspectable *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_action, IInspectable_iface );
++}
++
++static inline struct async_action *impl_from_async_action_IAsyncInfo( IAsyncInfo *iface )
++{
++    return CONTAINING_RECORD( iface, struct async_action, IAsyncInfo_iface );
++}
++
++static HRESULT WINAPI async_action_QueryInterface( IInspectable *iface, REFIID iid, void **out )
++{
++    struct async_action *impl = impl_from_async_action_IInspectable( iface );
++
++    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
++        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
++    {
++        *out = NULL;
++        return E_NOINTERFACE;
++    }
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IAsyncAction ))
++    {
++        InterlockedIncrement( &impl->ref );
++        *out = &impl->IInspectable_iface;
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
++    {
++        InterlockedIncrement( &impl->ref );
++        *out = &impl->IAsyncInfo_iface;
++        return S_OK;
++    }
++
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI async_action_AddRef( IInspectable *iface )
++{
++    struct async_action *impl = impl_from_async_action_IInspectable( iface );
++    return InterlockedIncrement( &impl->ref );
++}
++
++static ULONG WINAPI async_action_Release( IInspectable *iface )
++{
++    struct async_action *impl = impl_from_async_action_IInspectable( iface );
++    ULONG ref = InterlockedDecrement( &impl->ref );
++    if (!ref) free( impl );
++    return ref;
++}
++
++static HRESULT WINAPI async_action_GetIids( IInspectable *iface, ULONG *count, IID **iids )
++{
++    if (!count || !iids) return E_POINTER;
++    *count = 0;
++    *iids = NULL;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_action_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
++{
++    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncAction";
++    if (!name) return E_POINTER;
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
++}
++
++static HRESULT WINAPI async_action_GetTrustLevel( IInspectable *iface, TrustLevel *level )
++{
++    if (level) *level = BaseTrust;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_action_put_Completed( IInspectable *iface, void *handler )
++{
++    if (handler)
++    {
++        typedef HRESULT (WINAPI *invoke_fn)( void *handler, void *async, AsyncStatus status );
++        void **vtbl = *(void ***)handler;
++        invoke_fn invoke = (invoke_fn)vtbl[3];
++        invoke( handler, iface, Completed );
++    }
++    return S_OK;
++}
++
++static HRESULT WINAPI async_action_get_Completed( IInspectable *iface, void **handler )
++{
++    if (handler) *handler = NULL;
++    return S_OK;
++}
++
++static HRESULT WINAPI async_action_GetResults( IInspectable *iface )
++{
++    return S_OK;
++}
++
++static const void *async_action_vtbl[] =
++{
++    async_action_QueryInterface,
++    async_action_AddRef,
++    async_action_Release,
++    async_action_GetIids,
++    async_action_GetRuntimeClassName,
++    async_action_GetTrustLevel,
++    async_action_put_Completed,
++    async_action_get_Completed,
++    async_action_GetResults,
++};
++
++static HRESULT WINAPI async_action_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
++{
++    struct async_action *impl = impl_from_async_action_IAsyncInfo( iface );
++    return IInspectable_QueryInterface( &impl->IInspectable_iface, iid, out );
++}
++static ULONG WINAPI async_action_info_AddRef( IAsyncInfo *iface )
++{
++    struct async_action *impl = impl_from_async_action_IAsyncInfo( iface );
++    return IInspectable_AddRef( &impl->IInspectable_iface );
++}
++static ULONG WINAPI async_action_info_Release( IAsyncInfo *iface )
++{
++    struct async_action *impl = impl_from_async_action_IAsyncInfo( iface );
++    return IInspectable_Release( &impl->IInspectable_iface );
++}
++static HRESULT WINAPI async_action_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
++{
++    if (!count || !iids) return E_POINTER;
++    *count = 0;
++    *iids = NULL;
++    return S_OK;
++}
++static HRESULT WINAPI async_action_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
++{
++    if (!name) return E_POINTER;
++    return WindowsCreateString( L"Windows.Foundation.IAsyncInfo", 27, name );
++}
++static HRESULT WINAPI async_action_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level )
++{
++    if (level) *level = BaseTrust;
++    return S_OK;
++}
++static HRESULT WINAPI async_action_info_get_Id( IAsyncInfo *iface, UINT32 *id )
++{
++    if (!id) return E_POINTER;
++    *id = 1;
++    return S_OK;
++}
++static HRESULT WINAPI async_action_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
++{
++    if (!status) return E_POINTER;
++    *status = Completed;
++    return S_OK;
++}
++static HRESULT WINAPI async_action_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error )
++{
++    if (!error) return E_POINTER;
++    *error = S_OK;
++    return S_OK;
++}
++static HRESULT WINAPI async_action_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
++static HRESULT WINAPI async_action_info_Close( IAsyncInfo *iface ) { return S_OK; }
++
++static const struct IAsyncInfoVtbl async_action_info_vtbl =
++{
++    async_action_info_QueryInterface,
++    async_action_info_AddRef,
++    async_action_info_Release,
++    async_action_info_GetIids,
++    async_action_info_GetRuntimeClassName,
++    async_action_info_GetTrustLevel,
++    async_action_info_get_Id,
++    async_action_info_get_Status,
++    async_action_info_get_ErrorCode,
++    async_action_info_Cancel,
++    async_action_info_Close,
++};
++
++HRESULT create_async_action( void **out )
++{
++    struct async_action *impl;
++    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
++    impl->IInspectable_iface.lpVtbl = (void *)async_action_vtbl;
++    impl->IAsyncInfo_iface.lpVtbl = &async_action_info_vtbl;
++    impl->ref = 1;
 +    *out = &impl->IInspectable_iface;
 +    return S_OK;
 +}
@@ -679,7 +929,13 @@ index 0000000..ef3f56e
 +{
 +    struct data_protection_provider *impl = impl_from_provider( iface );
 +
-+    ERR( "dataprotection provider QI: %s\n", debugstr_guid( iid ) );
++    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
++        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
++    {
++        *out = NULL;
++        return E_NOINTERFACE;
++    }
++
 +    if (IsEqualGUID( iid, &IID_IUnknown ) ||
 +        IsEqualGUID( iid, &IID_IInspectable ) ||
 +        IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -690,7 +946,6 @@ index 0000000..ef3f56e
 +        return S_OK;
 +    }
 +
-+    ERR( "dataprotection provider QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
 +    *out = NULL;
 +    return E_NOINTERFACE;
 +}
@@ -709,10 +964,17 @@ index 0000000..ef3f56e
 +    return ref;
 +}
 +
-+static HRESULT WINAPI provider_GetIids( void *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
++static HRESULT WINAPI provider_GetIids( void *iface, ULONG *count, IID **iids )
++{
++    if (!count || !iids) return E_POINTER;
++    *count = 0;
++    *iids = NULL;
++    return S_OK;
++}
 +static HRESULT WINAPI provider_GetRuntimeClassName( void *iface, HSTRING *name )
 +{
 +    const WCHAR class_name[] = L"Windows.Security.Cryptography.DataProtection.DataProtectionProvider";
++    if (!name) return E_POINTER;
 +    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
 +}
 +static HRESULT WINAPI provider_GetTrustLevel( void *iface, TrustLevel *level )
@@ -725,6 +987,7 @@ index 0000000..ef3f56e
 +{
 +    TRACE( "iface %p, data %p, value %p\n", iface, data, value );
 +    if (!value) return E_POINTER;
++    if (!data) return E_INVALIDARG;
 +    return create_async_buffer( (IInspectable *)data, value );
 +}
 +
@@ -732,21 +995,22 @@ index 0000000..ef3f56e
 +{
 +    TRACE( "iface %p, data %p, value %p\n", iface, data, value );
 +    if (!value) return E_POINTER;
++    if (!data) return E_INVALIDARG;
 +    return create_async_buffer( (IInspectable *)data, value );
 +}
 +
 +static HRESULT WINAPI provider_ProtectStreamAsync( void *iface, void *src, void *dest, void **value )
 +{
-+    FIXME( "stub!\n" );
-+    if (value) *value = NULL;
-+    return S_OK;
++    TRACE( "iface %p, src %p, dest %p, value %p\n", iface, src, dest, value );
++    if (!value) return E_POINTER;
++    return create_async_action( value );
 +}
 +
 +static HRESULT WINAPI provider_UnprotectStreamAsync( void *iface, void *src, void *dest, void **value )
 +{
-+    FIXME( "stub!\n" );
-+    if (value) *value = NULL;
-+    return S_OK;
++    TRACE( "iface %p, src %p, dest %p, value %p\n", iface, src, dest, value );
++    if (!value) return E_POINTER;
++    return create_async_action( value );
 +}
 +
 +static const void *provider_vtbl[] =
@@ -794,7 +1058,7 @@ index 0000000..ef3f56e
 +{
 +    struct dataprotection_factory *impl = impl_from_IActivationFactory_dp( iface );
 +
-+    ERR( "dataprotection factory QI: %s\n", debugstr_guid( iid ) );
++    TRACE( "iid %s\n", debugstr_guid( iid ) );
 +    if (IsEqualGUID( iid, &IID_IUnknown ) ||
 +        IsEqualGUID( iid, &IID_IInspectable ) ||
 +        IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -810,14 +1074,19 @@ index 0000000..ef3f56e
 +        *out = &impl->IDataProtectionProviderFactory_iface;
 +        return S_OK;
 +    }
-+    ERR( "dataprotection factory QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
 +    *out = NULL;
 +    return E_NOINTERFACE;
 +}
 +
 +static ULONG WINAPI factory_AddRef( IActivationFactory *iface ) { return 2; }
 +static ULONG WINAPI factory_Release( IActivationFactory *iface ) { return 1; }
-+static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
++static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
++{
++    if (!count || !iids) return E_POINTER;
++    *count = 0;
++    *iids = NULL;
++    return S_OK;
++}
 +static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
 +{
 +    const WCHAR class_name[] = L"Windows.Security.Cryptography.DataProtection.DataProtectionProvider";
@@ -828,20 +1097,16 @@ index 0000000..ef3f56e
 +static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 +{
 +    HRESULT hr;
-+    ERR( "dataprotection factory_ActivateInstance called: iface %p, instance %p\n", iface, instance );
 +    if (!instance) return E_POINTER;
 +    hr = create_provider( (void **)instance );
-+    ERR( "dataprotection factory_ActivateInstance returning hr %#lx, *instance %p\n", hr, *instance );
 +    return hr;
 +}
 +
 +static HRESULT WINAPI factory_CreateOverloadExplicit( void *iface, HSTRING descriptor, void **value )
 +{
 +    HRESULT hr;
-+    ERR( "dataprotection factory_CreateOverloadExplicit called: descriptor %s, value %p\n", debugstr_hstring( descriptor ), value );
 +    if (!value) return E_POINTER;
 +    hr = create_provider( value );
-+    ERR( "dataprotection factory_CreateOverloadExplicit returning hr %#lx, *value %p\n", hr, *value );
 +    return hr;
 +}
 +
@@ -891,6 +1156,7 @@ index 0000000..ef3f56e
 +};
 +
 +IActivationFactory *dataprotection_activation_factory = &dataprotection_factory_obj.IActivationFactory_iface;
+
 diff --git a/dlls/cryptowinrt/main.c b/dlls/cryptowinrt/main.c
 index fad3666..a257439 100644
 --- a/dlls/cryptowinrt/main.c

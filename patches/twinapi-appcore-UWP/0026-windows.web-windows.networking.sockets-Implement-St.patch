@@ -2261,9 +2261,12 @@ index 6722d69..6f12910 100644
 +    runtimeclass MessageWebSocket;
 +    runtimeclass StreamSocket;
 +}
---- /dev/null	2026-10-17 22:37:26.392623299 +0500
-+++ dlls/windows.networking.sockets/main.c	2026-10-19 23:12:39.932012600 +0500
-@@ -0,0 +1,1195 @@
+diff --git a/dlls/windows.networking.sockets/main.c b/dlls/windows.networking.sockets/main.c
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/dlls/windows.networking.sockets/main.c
+@@ -0,0 +1,1308 @@
 +/* WinRT Windows.Networking.Sockets Implementation
 + *
 + * Copyright (C) 2026 Wine Developers
@@ -2298,8 +2301,10 @@ index 6722d69..6f12910 100644
 +static const GUID IID_IClosable = {0x3028b027, 0x6029, 0x47e6, {0x81, 0xa1, 0x65, 0x5b, 0x3b, 0x3c, 0x52, 0x0f}};
 +static const GUID IID_IInputStream = {0x905a0fe2, 0xbc53, 0x11df, {0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda}};
 +static const GUID IID_IOutputStream = {0x905a0fe6, 0xbc53, 0x11df, {0x8c, 0x49, 0x00, 0x1e, 0x4f, 0xc6, 0x86, 0xda}};
-+static const GUID IID_IAsyncAction = {0x5a648006, 0x8428, 0x494a, {0x80, 0x7c, 0x13, 0x0b, 0x95, 0xb4, 0x34, 0xf4}};
++static const GUID IID_IAsyncAction = {0x5a648006, 0x843a, 0x4da9, {0x86, 0x5b, 0x9d, 0x26, 0xe5, 0xdf, 0xad, 0x7b}};
 +static const GUID IID_IAsyncInfo = {0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
++static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
++static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
 +
 +static const GUID IID_IStreamSocket = {0x69A22CF3, 0xFC7B, 0x4857, {0xAF, 0x38, 0xF6, 0xE7, 0xDE, 0x6A, 0x5B, 0x49}};
 +static const GUID IID_IStreamSocket2 = {0x29D0E575, 0xF314, 0x4D09, {0xAD, 0xF0, 0x0F, 0xBD, 0x96, 0x7F, 0xBD, 0x9F}};
@@ -2343,6 +2348,14 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI socket_async_QueryInterface( void *iface, REFIID iid, void **out )
 +{
 +    struct socket_async *impl = impl_from_socket_async( iface );
++
++    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
++        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
++    {
++        *out = NULL;
++        return E_NOINTERFACE;
++    }
++
 +    if (IsEqualGUID( iid, &IID_IUnknown ) ||
 +        IsEqualGUID( iid, &IID_IInspectable ) ||
 +        IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -2378,8 +2391,25 @@ index 6722d69..6f12910 100644
 +    return ref;
 +}
 +
-+static HRESULT WINAPI socket_async_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
-+static HRESULT WINAPI socket_async_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_async_GetIids( void *iface, ULONG *c, IID **i )
++{
++    if (!c || !i) return E_POINTER;
++    *c = 0;
++    *i = NULL;
++    return S_OK;
++}
++static HRESULT WINAPI socket_async_action_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncAction";
++    if (!n) return E_POINTER;
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
++}
++static HRESULT WINAPI socket_async_op_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncOperationWithProgress`2<UInt32, UInt32>";
++    if (!n) return E_POINTER;
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
++}
 +static HRESULT WINAPI socket_async_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +
 +static HRESULT WINAPI socket_async_put_Progress( void *iface, void *handler ) { return S_OK; }
@@ -2403,7 +2433,12 @@ index 6722d69..6f12910 100644
 +    return S_OK;
 +}
 +
-+static HRESULT WINAPI socket_async_GetResults( void *iface, void *results )
++static HRESULT WINAPI socket_async_action_GetResults( void *iface )
++{
++    return S_OK;
++}
++
++static HRESULT WINAPI socket_async_op_GetResults( void *iface, void *results )
 +{
 +    if (results) *(UINT32 *)results = 0;
 +    return S_OK;
@@ -2415,11 +2450,11 @@ index 6722d69..6f12910 100644
 +    socket_async_AddRef,
 +    socket_async_Release,
 +    socket_async_GetIids,
-+    socket_async_GetRuntimeClassName,
++    socket_async_action_GetRuntimeClassName,
 +    socket_async_GetTrustLevel,
 +    socket_async_put_Completed,
 +    socket_async_get_Completed,
-+    socket_async_GetResults,
++    socket_async_action_GetResults,
 +};
 +
 +static const void *socket_async_op_vtbl[] =
@@ -2428,13 +2463,13 @@ index 6722d69..6f12910 100644
 +    socket_async_AddRef,
 +    socket_async_Release,
 +    socket_async_GetIids,
-+    socket_async_GetRuntimeClassName,
++    socket_async_op_GetRuntimeClassName,
 +    socket_async_GetTrustLevel,
 +    socket_async_put_Progress,
 +    socket_async_get_Progress,
 +    socket_async_put_Completed,
 +    socket_async_get_Completed,
-+    socket_async_GetResults,
++    socket_async_op_GetResults,
 +};
 +
 +static HRESULT WINAPI socket_info_QueryInterface( void *iface, REFIID iid, void **out )
@@ -2449,12 +2484,38 @@ index 6722d69..6f12910 100644
 +{
 +    return socket_async_Release( &impl_from_socket_async_info( iface )->vtbl_async );
 +}
-+static HRESULT WINAPI socket_info_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
-+static HRESULT WINAPI socket_info_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
++static HRESULT WINAPI socket_info_GetIids( void *iface, ULONG *c, IID **i )
++{
++    if (!c || !i) return E_POINTER;
++    *c = 0;
++    *i = NULL;
++    return S_OK;
++}
++static HRESULT WINAPI socket_info_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncInfo";
++    if (!n) return E_POINTER;
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
++}
 +static HRESULT WINAPI socket_info_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
-+static HRESULT WINAPI socket_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
-+static HRESULT WINAPI socket_info_get_Status( void *iface, int *status ) { if (status) *status = 1 /* Completed */; return S_OK; }
-+static HRESULT WINAPI socket_info_get_ErrorCode( void *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
++static HRESULT WINAPI socket_info_get_Id( void *iface, UINT32 *id )
++{
++    if (!id) return E_POINTER;
++    *id = 1;
++    return S_OK;
++}
++static HRESULT WINAPI socket_info_get_Status( void *iface, int *status )
++{
++    if (!status) return E_POINTER;
++    *status = 1 /* Completed */;
++    return S_OK;
++}
++static HRESULT WINAPI socket_info_get_ErrorCode( void *iface, HRESULT *code )
++{
++    if (!code) return E_POINTER;
++    *code = S_OK;
++    return S_OK;
++}
 +static HRESULT WINAPI socket_info_Cancel( void *iface ) { return S_OK; }
 +static HRESULT WINAPI socket_info_Close( void *iface ) { return S_OK; }
 +
@@ -2476,6 +2537,7 @@ index 6722d69..6f12910 100644
 +static HRESULT create_socket_async_action( void **out )
 +{
 +    struct socket_async *impl;
++    if (!out) return E_POINTER;
 +    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 +    impl->vtbl_async = socket_async_action_vtbl;
 +    impl->vtbl_info = socket_info_vtbl;
@@ -2487,6 +2549,7 @@ index 6722d69..6f12910 100644
 +static HRESULT create_socket_async_op( void **out )
 +{
 +    struct socket_async *impl;
++    if (!out) return E_POINTER;
 +    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 +    impl->vtbl_async = socket_async_op_vtbl;
 +    impl->vtbl_info = socket_info_vtbl;
@@ -2564,7 +2627,7 @@ index 6722d69..6f12910 100644
 +
 +static HRESULT WINAPI input_stream_ReadAsync( void *iface, void *buf, UINT32 count, int opt, void **op )
 +{
-+    return create_socket_async_op( op );
++    return create_socket_async_op( (void **)op );
 +}
 +
 +static const void *socket_input_stream_vtbl[] =
@@ -2580,7 +2643,7 @@ index 6722d69..6f12910 100644
 +
 +static HRESULT WINAPI output_stream_WriteAsync( void *iface, void *buf, void **op )
 +{
-+    return create_socket_async_op( op );
++    return create_socket_async_op( (void **)op );
 +}
 +static HRESULT WINAPI output_stream_FlushAsync( void *iface, void **op )
 +{
@@ -2630,6 +2693,7 @@ index 6722d69..6f12910 100644
 +static HRESULT create_socket_stream( BOOL is_input, void **out )
 +{
 +    struct socket_stream *impl;
++    if (!out) return E_POINTER;
 +    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 +    impl->vtbl_stream = is_input ? socket_input_stream_vtbl : socket_output_stream_vtbl;
 +    impl->vtbl_closable = socket_stream_closable_vtbl;
@@ -2654,7 +2718,8 @@ index 6722d69..6f12910 100644
 +    if (IsEqualGUID( iid, &IID_IUnknown ) ||
 +        IsEqualGUID( iid, &IID_IInspectable ) ||
 +        IsEqualGUID( iid, &IID_IAgileObject ) ||
-+        IsEqualGUID( iid, &impl->iid ))
++        IsEqualGUID( iid, &impl->iid ) ||
++        (IsEqualGUID( &impl->iid, &IID_IMessageWebSocketControl ) && IsEqualGUID( iid, &IID_IWebSocketControl )))
 +    {
 +        *out = iface;
 +        InterlockedIncrement( &impl->ref );
@@ -2683,6 +2748,10 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI dummy_stub_bool( void *iface, boolean *val ) { if (val) *val = FALSE; return S_OK; }
 +static HRESULT WINAPI dummy_stub_uint32( void *iface, UINT32 *val ) { if (val) *val = 0; return S_OK; }
 +static HRESULT WINAPI dummy_stub_byte( void *iface, BYTE *val ) { if (val) *val = 0; return S_OK; }
++static HRESULT WINAPI dummy_stub_set_bool( void *iface, boolean value ) { return S_OK; }
++static HRESULT WINAPI dummy_stub_set_uint32( void *iface, UINT32 value ) { return S_OK; }
++static HRESULT WINAPI dummy_stub_set_byte( void *iface, BYTE value ) { return S_OK; }
++static HRESULT WINAPI dummy_stub_set_ptr( void *iface, void *value ) { return S_OK; }
 +static HRESULT WINAPI dummy_stub_null( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
 +static HRESULT WINAPI dummy_stub_hstring( void *iface, HSTRING *val )
 +{
@@ -2698,16 +2767,16 @@ index 6722d69..6f12910 100644
 +    dummy_GetIids,
 +    dummy_GetRuntimeClassName,
 +    dummy_GetTrustLevel,
-+    dummy_stub_bool,   /* get_KeepAlive */
-+    dummy_stub_ok,     /* set_KeepAlive */
-+    dummy_stub_bool,   /* get_NoDelay */
-+    dummy_stub_ok,     /* set_NoDelay */
-+    dummy_stub_uint32, /* get_OutboundBufferSizeInBytes */
-+    dummy_stub_ok,     /* set_OutboundBufferSizeInBytes */
-+    dummy_stub_byte,   /* get_OutboundUnicastHopLimit */
-+    dummy_stub_ok,     /* set_OutboundUnicastHopLimit */
-+    dummy_stub_uint32, /* get_QualityOfService */
-+    dummy_stub_ok,     /* set_QualityOfService */
++    dummy_stub_bool,        /* get_KeepAlive */
++    dummy_stub_set_bool,    /* put_KeepAlive */
++    dummy_stub_bool,        /* get_NoDelay */
++    dummy_stub_set_bool,    /* put_NoDelay */
++    dummy_stub_uint32,      /* get_OutboundBufferSizeInBytes */
++    dummy_stub_set_uint32,  /* put_OutboundBufferSizeInBytes */
++    dummy_stub_byte,        /* get_OutboundUnicastHopLimit */
++    dummy_stub_set_byte,    /* put_OutboundUnicastHopLimit */
++    dummy_stub_uint32,      /* get_QualityOfService */
++    dummy_stub_set_uint32,  /* put_QualityOfService */
 +};
 +
 +static const void *stream_socket_info_vtbl[] =
@@ -2733,6 +2802,7 @@ index 6722d69..6f12910 100644
 +static HRESULT create_dummy_obj( const void *vtbl, const GUID *iid, void **out )
 +{
 +    struct dummy_control_info *impl;
++    if (!out) return E_POINTER;
 +    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 +    impl->vtbl = vtbl;
 +    impl->ref = 1;
@@ -2832,9 +2902,9 @@ index 6722d69..6f12910 100644
 +}
 +static HRESULT WINAPI socket_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +
-+static HRESULT WINAPI socket_ConnectAsync( void *iface, void *endpoint, void **op )
++static HRESULT WINAPI socket_ConnectAsync( void *iface, void *endpoint, HSTRING host, HSTRING service, void **op )
 +{
-+    TRACE( "iface %p, endpoint %p\n", iface, endpoint );
++    TRACE( "iface %p, endpoint %p, service %s\n", iface, endpoint, debugstr_hstring( service ) );
 +    return create_socket_async_action( op );
 +}
 +static HRESULT WINAPI socket_ConnectAsync2( void *iface, void *host, HSTRING service, void **op )
@@ -2842,16 +2912,19 @@ index 6722d69..6f12910 100644
 +    TRACE( "iface %p, service %s\n", iface, debugstr_hstring( service ) );
 +    return create_socket_async_action( op );
 +}
-+static HRESULT WINAPI socket_ConnectAsync3( void *iface, void *endpoint, int prot, void **op )
++static HRESULT WINAPI socket_ConnectAsync3( void *iface, void *endpoint, void *host, HSTRING service, int prot, void **op )
 +{
++    TRACE( "iface %p, endpoint %p, service %s, prot %d\n", iface, endpoint, debugstr_hstring( service ), prot );
 +    return create_socket_async_action( op );
 +}
-+static HRESULT WINAPI socket_ConnectAsync4( void *iface, void *host, HSTRING service, int prot, void **op )
++static HRESULT WINAPI socket_ConnectAsync4( void *iface, void *endpoint, int prot, void **op )
 +{
++    TRACE( "iface %p, endpoint %p, prot %d\n", iface, endpoint, prot );
 +    return create_socket_async_action( op );
 +}
 +static HRESULT WINAPI socket_UpgradeToSslAsync( void *iface, int prot, void *host, void **op )
 +{
++    TRACE( "iface %p, prot %d\n", iface, prot );
 +    return create_socket_async_action( op );
 +}
 +static HRESULT WINAPI socket_get_Control( void *iface, void **control )
@@ -3006,6 +3079,7 @@ index 6722d69..6f12910 100644
 +static HRESULT create_stream_socket( void **out )
 +{
 +    struct stream_socket *impl;
++    if (!out) return E_POINTER;
 +    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 +    impl->vtbl_socket = stream_socket_vtbl;
 +    impl->vtbl_socket2 = stream_socket2_vtbl;
@@ -3026,17 +3100,17 @@ index 6722d69..6f12910 100644
 +    dummy_GetIids,
 +    dummy_GetRuntimeClassName,
 +    dummy_GetTrustLevel,
-+    dummy_stub_uint32, /* get_MaxMessageSize */
-+    dummy_stub_ok,     /* set_MaxMessageSize */
-+    dummy_stub_uint32, /* get_MessageType */
-+    dummy_stub_ok,     /* set_MessageType */
-+    dummy_stub_uint32, /* get_OutboundBufferSizeInBytes */
-+    dummy_stub_ok,     /* set_OutboundBufferSizeInBytes */
-+    dummy_stub_null,   /* get_ProxyCredential */
-+    dummy_stub_ok,     /* set_ProxyCredential */
-+    dummy_stub_null,   /* get_ServerCredential */
-+    dummy_stub_ok,     /* set_ServerCredential */
-+    dummy_stub_null,   /* get_SupportedProtocols */
++    dummy_stub_uint32,     /* get_MaxMessageSize */
++    dummy_stub_set_uint32, /* put_MaxMessageSize */
++    dummy_stub_uint32,     /* get_MessageType */
++    dummy_stub_set_uint32, /* put_MessageType */
++    dummy_stub_uint32,     /* get_OutboundBufferSizeInBytes */
++    dummy_stub_set_uint32, /* put_OutboundBufferSizeInBytes */
++    dummy_stub_null,       /* get_ProxyCredential */
++    dummy_stub_set_ptr,    /* put_ProxyCredential */
++    dummy_stub_null,       /* get_ServerCredential */
++    dummy_stub_set_ptr,    /* put_ServerCredential */
++    dummy_stub_null,       /* get_SupportedProtocols */
 +};
 +
 +static const void *message_websocket_info_vtbl[] =
@@ -3146,7 +3220,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI msgws_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI msgws_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Networking.Sockets.MessageWebSocket", 42, n );
++    static const WCHAR class_name[] = L"Windows.Networking.Sockets.MessageWebSocket";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI msgws_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +
@@ -3226,8 +3301,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI msgws3_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI msgws3_GetRuntimeClassName( void *iface, HSTRING *n ) { return E_NOTIMPL; }
 +static HRESULT WINAPI msgws3_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
-+static HRESULT WINAPI msgws3_SendNonfinalFrameAsync( void *iface, void *data, void **op ) { return create_socket_async_action( op ); }
-+static HRESULT WINAPI msgws3_SendFinalFrameAsync( void *iface, void *data, void **op ) { return create_socket_async_action( op ); }
++static HRESULT WINAPI msgws3_SendNonfinalFrameAsync( void *iface, void *data, void **op ) { return create_socket_async_op( op ); }
++static HRESULT WINAPI msgws3_SendFinalFrameAsync( void *iface, void *data, void **op ) { return create_socket_async_op( op ); }
 +
 +static const void *message_websocket3_vtbl[] =
 +{
@@ -3315,6 +3390,7 @@ index 6722d69..6f12910 100644
 +static HRESULT create_message_websocket( void **out )
 +{
 +    struct message_websocket *impl;
++    if (!out) return E_POINTER;
 +    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 +    impl->vtbl_msgws = message_websocket_vtbl;
 +    impl->vtbl_msgws2 = message_websocket2_vtbl;
@@ -3328,15 +3404,65 @@ index 6722d69..6f12910 100644
 +
 +/* --- Activation Factories --- */
 +
++static HRESULT WINAPI stream_socket_statics_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IInspectable ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID_IStreamSocketStatics ))
++    {
++        *out = iface;
++        return S_OK;
++    }
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++static ULONG WINAPI stream_socket_statics_AddRef( void *iface ) { return 2; }
++static ULONG WINAPI stream_socket_statics_Release( void *iface ) { return 1; }
++static HRESULT WINAPI stream_socket_statics_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
++static HRESULT WINAPI stream_socket_statics_GetRuntimeClassName( void *iface, HSTRING *n )
++{
++    static const WCHAR class_name[] = L"Windows.Networking.Sockets.StreamSocket";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
++}
++static HRESULT WINAPI stream_socket_statics_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
++static HRESULT WINAPI stream_socket_statics_GetEndpointPairsAsync( void *iface, void *host, HSTRING svc, IInspectable **op )
++{
++    TRACE( "svc %s\n", debugstr_hstring( svc ) );
++    return create_socket_async_op( (void **)op );
++}
++static HRESULT WINAPI stream_socket_statics_GetEndpointPairsAsync2( void *iface, void *host, HSTRING svc, int opt, IInspectable **op )
++{
++    TRACE( "svc %s, opt %d\n", debugstr_hstring( svc ), opt );
++    return create_socket_async_op( (void **)op );
++}
++
++static const void *stream_socket_statics_vtbl[] =
++{
++    stream_socket_statics_QueryInterface,
++    stream_socket_statics_AddRef,
++    stream_socket_statics_Release,
++    stream_socket_statics_GetIids,
++    stream_socket_statics_GetRuntimeClassName,
++    stream_socket_statics_GetTrustLevel,
++    stream_socket_statics_GetEndpointPairsAsync,
++    stream_socket_statics_GetEndpointPairsAsync2,
++};
++static const void *stream_socket_statics_obj = stream_socket_statics_vtbl;
++
 +static HRESULT WINAPI stream_socket_factory_QueryInterface( void *iface, REFIID iid, void **out )
 +{
 +    if (IsEqualGUID( iid, &IID_IUnknown ) ||
 +        IsEqualGUID( iid, &IID_IInspectable ) ||
 +        IsEqualGUID( iid, &IID_IAgileObject ) ||
-+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
-+        IsEqualGUID( iid, &IID_IStreamSocketStatics ))
++        IsEqualGUID( iid, &IID_IActivationFactory ))
 +    {
 +        *out = iface;
++        return S_OK;
++    }
++    if (IsEqualGUID( iid, &IID_IStreamSocketStatics ))
++    {
++        *out = (void *)&stream_socket_statics_obj;
 +        return S_OK;
 +    }
 +    *out = NULL;
@@ -3354,15 +3480,6 @@ index 6722d69..6f12910 100644
 +{
 +    return create_stream_socket( (void **)instance );
 +}
-+static HRESULT WINAPI stream_socket_factory_GetEndpointPairsAsync( void *iface, void *host, HSTRING svc, void **op )
-+{
-+    return create_socket_async_op( op );
-+}
-+static HRESULT WINAPI stream_socket_factory_GetEndpointPairsAsync2( void *iface, void *host, HSTRING svc, int opt, void **op )
-+{
-+    return create_socket_async_op( op );
-+}
-+
 +static const void *stream_socket_factory_vtbl[] =
 +{
 +    stream_socket_factory_QueryInterface,
@@ -3372,8 +3489,6 @@ index 6722d69..6f12910 100644
 +    stream_socket_factory_GetRuntimeClassName,
 +    stream_socket_factory_GetTrustLevel,
 +    stream_socket_factory_ActivateInstance,
-+    stream_socket_factory_GetEndpointPairsAsync,
-+    stream_socket_factory_GetEndpointPairsAsync2,
 +};
 +static const void *stream_socket_factory_obj = stream_socket_factory_vtbl;
 +static IActivationFactory *stream_socket_factory = (IActivationFactory *)&stream_socket_factory_obj;
@@ -3396,7 +3511,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI message_websocket_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI message_websocket_factory_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Networking.Sockets.MessageWebSocket", 42, n );
++    static const WCHAR class_name[] = L"Windows.Networking.Sockets.MessageWebSocket";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI message_websocket_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +static HRESULT WINAPI message_websocket_factory_ActivateInstance( void *iface, IInspectable **instance )
@@ -3459,6 +3575,7 @@ index 6722d69..6f12910 100644
 +{
 +    return S_OK;
 +}
+
 --- /dev/null	2026-10-17 22:37:26.392623299 +0500
 +++ dlls/windows.networking.sockets/Makefile.in	2026-10-19 23:13:58.747626160 +0500
 @@ -0,0 +1,6 @@

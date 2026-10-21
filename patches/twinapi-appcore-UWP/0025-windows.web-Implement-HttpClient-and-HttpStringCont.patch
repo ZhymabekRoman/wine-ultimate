@@ -65,9 +65,12 @@ index 6722d69..6f12910 100644
  HRESULT json_array_push( IJsonArray *iface, IJsonValue *value );
  
  #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
---- /dev/null	2026-10-17 22:37:26.392623299 +0500
-+++ dlls/windows.web/http.c	2026-10-19 19:43:17.967610832 +0500
-@@ -0,0 +1,1611 @@
+diff --git a/dlls/windows.web/http.c b/dlls/windows.web/http.c
+new file mode 100644
+index 0000000..0000000
+--- /dev/null
++++ b/dlls/windows.web/http.c
+@@ -0,0 +1,1699 @@
 +/* WinRT Windows.Web.Http Implementation
 + *
 + * Copyright (C) 2026 Wine Developers
@@ -122,9 +125,9 @@ index 6722d69..6f12910 100644
 +static const GUID IID_IHttpResponseHeaderCollection = {0x7A990969, 0xFA3F, 0x41ED, {0xAA, 0xC6, 0xBF, 0x95, 0x79, 0x75, 0xC1, 0x6B}};
 +static const GUID IID_IHttpContentHeaderCollection = {0x40612A44, 0x47AE, 0x4B7E, {0x91, 0x24, 0x69, 0x62, 0x8B, 0x64, 0xAA, 0x18}};
 +
-+static const GUID IID_IHttpTransportInformation = {0x70127198, 0xC6A7, 0x4ED0, {0x83, 0x3A, 0x83, 0xFD, 0x8B, 0x8F, 0x17, 0x8D}};
-+
 +static const GUID IID_IAsyncInfo = {0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
++static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
++static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
 +
 +static HRESULT create_http_response( INT32 status_code, void **out );
 +static HRESULT create_http_string_content( HSTRING content, void **out );
@@ -157,6 +160,13 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI async_http_op_QueryInterface( void *iface, REFIID iid, void **out )
 +{
 +    struct async_http_op *impl = impl_from_async_op( iface );
++
++    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
++        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
++    {
++        *out = NULL;
++        return E_NOINTERFACE;
++    }
 +
 +    if (IsEqualGUID( iid, &IID_IUnknown ) ||
 +        IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -199,8 +209,23 @@ index 6722d69..6f12910 100644
 +    return ref;
 +}
 +
-+static HRESULT WINAPI async_http_op_GetIids( void *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
-+static HRESULT WINAPI async_http_op_GetRuntimeClassName( void *iface, HSTRING *name ) { return E_NOTIMPL; }
++static HRESULT WINAPI async_http_op_GetIids( void *iface, ULONG *count, IID **iids )
++{
++    if (!count || !iids) return E_POINTER;
++    *count = 0;
++    *iids = NULL;
++    return S_OK;
++}
++static HRESULT WINAPI async_http_op_GetRuntimeClassName( void *iface, HSTRING *name )
++{
++    static const WCHAR str_name[] = L"Windows.Foundation.IAsyncOperationWithProgress`2<String, UInt64>";
++    static const WCHAR resp_name[] = L"Windows.Foundation.IAsyncOperationWithProgress`2<Windows.Web.Http.HttpResponseMessage, Windows.Web.Http.HttpProgress>";
++    struct async_http_op *impl = impl_from_async_op( iface );
++    if (!name) return E_POINTER;
++    if (impl->is_str)
++        return WindowsCreateString( str_name, ARRAY_SIZE(str_name) - 1, name );
++    return WindowsCreateString( resp_name, ARRAY_SIZE(resp_name) - 1, name );
++}
 +static HRESULT WINAPI async_http_op_GetTrustLevel( void *iface, TrustLevel *level ) { if (level) *level = BaseTrust; return S_OK; }
 +
 +static HRESULT WINAPI async_http_op_put_Progress( void *iface, void *handler ) { return S_OK; }
@@ -276,12 +301,38 @@ index 6722d69..6f12910 100644
 +    struct async_http_op *impl = impl_from_async_info( iface );
 +    return async_http_op_Release( &impl->vtbl_op );
 +}
-+static HRESULT WINAPI async_http_info_GetIids( void *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
-+static HRESULT WINAPI async_http_info_GetRuntimeClassName( void *iface, HSTRING *name ) { return E_NOTIMPL; }
++static HRESULT WINAPI async_http_info_GetIids( void *iface, ULONG *count, IID **iids )
++{
++    if (!count || !iids) return E_POINTER;
++    *count = 0;
++    *iids = NULL;
++    return S_OK;
++}
++static HRESULT WINAPI async_http_info_GetRuntimeClassName( void *iface, HSTRING *name )
++{
++    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncInfo";
++    if (!name) return E_POINTER;
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
++}
 +static HRESULT WINAPI async_http_info_GetTrustLevel( void *iface, TrustLevel *level ) { if (level) *level = BaseTrust; return S_OK; }
-+static HRESULT WINAPI async_http_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
-+static HRESULT WINAPI async_http_info_get_Status( void *iface, int *status ) { if (status) *status = 1 /* Completed */; return S_OK; }
-+static HRESULT WINAPI async_http_info_get_ErrorCode( void *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
++static HRESULT WINAPI async_http_info_get_Id( void *iface, UINT32 *id )
++{
++    if (!id) return E_POINTER;
++    *id = 1;
++    return S_OK;
++}
++static HRESULT WINAPI async_http_info_get_Status( void *iface, int *status )
++{
++    if (!status) return E_POINTER;
++    *status = 1 /* Completed */;
++    return S_OK;
++}
++static HRESULT WINAPI async_http_info_get_ErrorCode( void *iface, HRESULT *code )
++{
++    if (!code) return E_POINTER;
++    *code = S_OK;
++    return S_OK;
++}
 +static HRESULT WINAPI async_http_info_Cancel( void *iface ) { return S_OK; }
 +static HRESULT WINAPI async_http_info_Close( void *iface ) { return S_OK; }
 +
@@ -464,7 +515,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI method_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI method_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpMethod", 26, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpMethod";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI method_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +
@@ -600,7 +652,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI content_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI content_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpStringContent", 32, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpStringContent";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI content_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +
@@ -624,10 +677,22 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI content_TryComputeLength( void *iface, UINT64 *length, boolean *succeeded )
 +{
 +    struct http_string_content *impl = impl_from_content( iface );
++    const WCHAR *buffer;
 +    UINT32 len = 0;
-+    if (impl->content) WindowsGetStringRawBuffer( impl->content, &len );
-+    if (length) *length = (UINT64)len * sizeof(WCHAR);
-+    if (succeeded) *succeeded = TRUE;
++    int utf8_len;
++
++    /* HttpStringContent defaults to UTF-8, so the length is the UTF-8 byte count */
++    if (length) *length = 0;
++    if (succeeded) *succeeded = FALSE;
++    if (!impl->content) return S_OK;
++
++    buffer = WindowsGetStringRawBuffer( impl->content, &len );
++    utf8_len = WideCharToMultiByte( CP_UTF8, 0, buffer, len, NULL, 0, NULL, NULL );
++    if (utf8_len > 0)
++    {
++        if (length) *length = (UINT64)utf8_len;
++        if (succeeded) *succeeded = TRUE;
++    }
 +    return S_OK;
 +}
 +static HRESULT WINAPI content_WriteToStreamAsync( void *iface, void *stream, void **op )
@@ -697,11 +762,29 @@ index 6722d69..6f12910 100644
 +    return WindowsCreateString( L"", 0, val );
 +}
 +
++static inline struct http_string_content *impl_from_content_stringable( void *iface )
++{
++    return (struct http_string_content *)((BYTE *)iface - 2 * sizeof(void *));
++}
++
++static HRESULT WINAPI content_str_QueryInterface( void *iface, REFIID iid, void **out )
++{
++    return content_QueryInterface( &impl_from_content_stringable( iface )->vtbl_content, iid, out );
++}
++static ULONG WINAPI content_str_AddRef( void *iface )
++{
++    return content_AddRef( &impl_from_content_stringable( iface )->vtbl_content );
++}
++static ULONG WINAPI content_str_Release( void *iface )
++{
++    return content_Release( &impl_from_content_stringable( iface )->vtbl_content );
++}
++
 +static const void *http_content_stringable_vtbl[] =
 +{
-+    content_closable_QueryInterface,
-+    content_closable_AddRef,
-+    content_closable_Release,
++    content_str_QueryInterface,
++    content_str_AddRef,
++    content_str_Release,
 +    content_closable_GetIids,
 +    content_closable_GetRuntimeClassName,
 +    content_closable_GetTrustLevel,
@@ -789,7 +872,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI resp_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI resp_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpResponseMessage", 34, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpResponseMessage";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI resp_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +
@@ -1022,7 +1106,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI req_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI req_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpRequestMessage", 33, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpRequestMessage";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI req_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +
@@ -1225,7 +1310,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI client_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI client_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpClient", 26, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpClient";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI client_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +
@@ -1434,7 +1520,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI http_client_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI http_client_factory_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpClient", 26, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpClient";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI http_client_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +static HRESULT WINAPI http_client_factory_ActivateInstance( void *iface, IInspectable **instance )
@@ -1480,7 +1567,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI http_request_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI http_request_factory_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpRequestMessage", 33, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpRequestMessage";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI http_request_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +static HRESULT WINAPI http_request_factory_ActivateInstance( void *iface, IInspectable **instance )
@@ -1526,7 +1614,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI http_response_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI http_response_factory_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpResponseMessage", 34, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpResponseMessage";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI http_response_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +static HRESULT WINAPI http_response_factory_ActivateInstance( void *iface, IInspectable **instance )
@@ -1572,7 +1661,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI http_string_content_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI http_string_content_factory_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpStringContent", 32, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpStringContent";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI http_string_content_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +static HRESULT WINAPI http_string_content_factory_ActivateInstance( void *iface, IInspectable **instance )
@@ -1629,7 +1719,8 @@ index 6722d69..6f12910 100644
 +static HRESULT WINAPI http_method_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 +static HRESULT WINAPI http_method_factory_GetRuntimeClassName( void *iface, HSTRING *n )
 +{
-+    return WindowsCreateString( L"Windows.Web.Http.HttpMethod", 26, n );
++    static const WCHAR class_name[] = L"Windows.Web.Http.HttpMethod";
++    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
 +}
 +static HRESULT WINAPI http_method_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 +static HRESULT WINAPI http_method_factory_ActivateInstance( void *iface, IInspectable **instance )
