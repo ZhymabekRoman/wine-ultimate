@@ -41,6 +41,12 @@ extern IActivationFactory *json_array_factory;
 extern IActivationFactory *json_object_factory;
 extern IActivationFactory *json_value_factory;
 
+extern IActivationFactory *http_client_factory;
+extern IActivationFactory *http_request_factory;
+extern IActivationFactory *http_response_factory;
+extern IActivationFactory *http_string_content_factory;
+extern IActivationFactory *http_method_factory;
+
 HRESULT json_array_push( IJsonArray *iface, IJsonValue *value );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \

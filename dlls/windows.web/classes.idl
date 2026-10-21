@@ -28,3 +28,11 @@ namespace Windows.Data.Json {
     runtimeclass JsonObject;
     runtimeclass JsonValue;
 }
+
+namespace Windows.Web.Http {
+    runtimeclass HttpClient;
+    runtimeclass HttpRequestMessage;
+    runtimeclass HttpResponseMessage;
+    runtimeclass HttpStringContent;
+    runtimeclass HttpMethod;
+}

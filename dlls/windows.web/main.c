@@ -45,6 +45,17 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (!wcscmp( buffer, RuntimeClass_Windows_Data_Json_JsonValue ))
         IActivationFactory_QueryInterface( json_value_factory, &IID_IActivationFactory, (void **)factory );
 
+    if (!wcscmp( buffer, L"Windows.Web.Http.HttpClient" ))
+        IActivationFactory_QueryInterface( http_client_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Web.Http.HttpRequestMessage" ))
+        IActivationFactory_QueryInterface( http_request_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Web.Http.HttpResponseMessage" ))
+        IActivationFactory_QueryInterface( http_response_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Web.Http.HttpStringContent" ))
+        IActivationFactory_QueryInterface( http_string_content_factory, &IID_IActivationFactory, (void **)factory );
+    if (!wcscmp( buffer, L"Windows.Web.Http.HttpMethod" ))
+        IActivationFactory_QueryInterface( http_method_factory, &IID_IActivationFactory, (void **)factory );
+
     if (*factory) return S_OK;
     return CLASS_E_CLASSNOTAVAILABLE;
 }
