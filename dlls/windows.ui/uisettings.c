@@ -34,6 +34,7 @@ struct uisettings
     IUISettings3 IUISettings3_iface;
     IUISettings4 IUISettings4_iface;
     IUISettings5 IUISettings5_iface;
+    IUISettings6 IUISettings6_iface;
     struct weak_reference_source weak_reference_source;
 };
 
@@ -72,6 +73,10 @@ static HRESULT WINAPI uisettings_QueryInterface( IUISettings *iface, REFIID iid,
     else if (IsEqualGUID( iid, &IID_IUISettings5 ))
     {
         *out = &impl->IUISettings5_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IUISettings6 ))
+    {
+        *out = &impl->IUISettings6_iface;
     }
     else if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
     {
@@ -520,6 +525,52 @@ static const struct IUISettings5Vtbl uisettings5_vtbl =
     uisettings5_remove_AutoHideScrollBarsChanged,
 };
 
+DEFINE_IINSPECTABLE( uisettings6, IUISettings6, struct uisettings, IUISettings_iface );
+
+static HRESULT WINAPI uisettings6_add_AnimationsEnabledChanged( IUISettings6 *iface,
+        ITypedEventHandler_UISettings_UISettingsAnimationsEnabledChangedEventArgs *handler, EventRegistrationToken *cookie )
+{
+    FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
+    *cookie = dummy_cookie;
+    return S_OK;
+}
+
+static HRESULT WINAPI uisettings6_remove_AnimationsEnabledChanged( IUISettings6 *iface, EventRegistrationToken cookie )
+{
+    FIXME( "iface %p, cookie %#I64x stub!\n", iface, cookie.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI uisettings6_add_MessageDurationChanged( IUISettings6 *iface,
+        ITypedEventHandler_UISettings_UISettingsMessageDurationChangedEventArgs *handler, EventRegistrationToken *cookie )
+{
+    FIXME( "iface %p, handler %p, cookie %p stub!\n", iface, handler, cookie );
+    *cookie = dummy_cookie;
+    return S_OK;
+}
+
+static HRESULT WINAPI uisettings6_remove_MessageDurationChanged( IUISettings6 *iface, EventRegistrationToken cookie )
+{
+    FIXME( "iface %p, cookie %#I64x stub!\n", iface, cookie.value );
+    return S_OK;
+}
+
+static const struct IUISettings6Vtbl uisettings6_vtbl =
+{
+    uisettings6_QueryInterface,
+    uisettings6_AddRef,
+    uisettings6_Release,
+    /* IInspectable methods */
+    uisettings6_GetIids,
+    uisettings6_GetRuntimeClassName,
+    uisettings6_GetTrustLevel,
+    /* IUISettings6 methods */
+    uisettings6_add_AnimationsEnabledChanged,
+    uisettings6_remove_AnimationsEnabledChanged,
+    uisettings6_add_MessageDurationChanged,
+    uisettings6_remove_MessageDurationChanged,
+};
+
 struct uisettings_statics
 {
     IActivationFactory IActivationFactory_iface;
@@ -603,6 +654,7 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
     impl->IUISettings3_iface.lpVtbl = &uisettings3_vtbl;
     impl->IUISettings4_iface.lpVtbl = &uisettings4_vtbl;
     impl->IUISettings5_iface.lpVtbl = &uisettings5_vtbl;
+    impl->IUISettings6_iface.lpVtbl = &uisettings6_vtbl;
 
     if (FAILED(hr = weak_reference_source_init( &impl->weak_reference_source,
                                                 (IUnknown *)&impl->IUISettings_iface )))
@@ -612,7 +664,7 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
         return hr;
     }
 
-    *instance = (IInspectable *)&impl->IUISettings5_iface;
+    *instance = (IInspectable *)&impl->IUISettings6_iface;
     return S_OK;
 }
 
