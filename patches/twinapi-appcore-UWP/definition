@@ -27,3 +27,4 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0039-windows.web-windows.networking.sockets-cryptowinrt-Add-WinRT-co.patch
 0040-server-kernelbase-Named-pipe-impersonation-FIRST_PIPE.patch
 0041-windows.ui-Implement-IUISettings6.patch
+0043-twinapi-coremessaging-Fix-IReferenceTracker-QI-and-remaining-WebView2-blockers.patch
