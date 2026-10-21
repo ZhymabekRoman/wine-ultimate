@@ -22,3 +22,4 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0034-windows.storage-streams-Implement-FileIO-PathIO-DataRea.patch
 0035-kernelbase-ntdll-server-Implement-DISABLE_MAX_PRIVILEGE.patch
 0036-dcomp-dxgi-d3d11-server-Cross-process-surface-sharing-a.patch
+0037-bcp47mrm-Implement-BCP-47-language-tag-parser-and-c.patch
