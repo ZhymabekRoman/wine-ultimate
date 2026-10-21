@@ -1964,3 +1964,225 @@ index 366042d..4cd763d 100644
 +};
 +
 +IActivationFactory *power_manager_statics_factory = &factory.IActivationFactory_iface;
+diff --git a/dlls/twinapi.appcore/tests/twinapi.c b/dlls/twinapi.appcore/tests/twinapi.c
+index 61a03b3..2e150e6 100644
+--- a/dlls/twinapi.appcore/tests/twinapi.c
++++ b/dlls/twinapi.appcore/tests/twinapi.c
+@@ -34,6 +34,8 @@
+ #include "windows.foundation.h"
+ #define WIDL_using_Windows_Security_ExchangeActiveSyncProvisioning
+ #include "windows.security.exchangeactivesyncprovisioning.h"
++#define WIDL_using_Windows_System_Power
++#include "windows.system.power.h"
+ #define WIDL_using_Windows_System_Profile
+ #include "windows.system.profile.h"
+ #define WIDL_using_Windows_System_UserProfile
+@@ -339,6 +341,200 @@ static void test_DataTransferManager(void)
+     IActivationFactory_Release( factory );
+ }
+ 
++static LONG event_handler_invoke_count;
++
++struct event_handler
++{
++    __FIEventHandler_1_IInspectable IEventHandler_iface;
++    LONG ref;
++};
++
++static HRESULT WINAPI event_handler_QueryInterface( __FIEventHandler_1_IInspectable *iface, REFIID iid, void **out )
++{
++    if (!out) return E_POINTER;
++
++    if (IsEqualGUID( iid, &IID_IUnknown ) ||
++        IsEqualGUID( iid, &IID_IAgileObject ) ||
++        IsEqualGUID( iid, &IID___FIEventHandler_1_IInspectable ))
++    {
++        *out = iface;
++        __FIEventHandler_1_IInspectable_AddRef( iface );
++        return S_OK;
++    }
++
++    *out = NULL;
++    return E_NOINTERFACE;
++}
++
++static ULONG WINAPI event_handler_AddRef( __FIEventHandler_1_IInspectable *iface )
++{
++    struct event_handler *impl = CONTAINING_RECORD( iface, struct event_handler, IEventHandler_iface );
++    return InterlockedIncrement( &impl->ref );
++}
++
++static ULONG WINAPI event_handler_Release( __FIEventHandler_1_IInspectable *iface )
++{
++    struct event_handler *impl = CONTAINING_RECORD( iface, struct event_handler, IEventHandler_iface );
++    return InterlockedDecrement( &impl->ref );
++}
++
++static HRESULT WINAPI event_handler_Invoke( __FIEventHandler_1_IInspectable *iface, IInspectable *sender, IInspectable *args )
++{
++    InterlockedIncrement( &event_handler_invoke_count );
++    return S_OK;
++}
++
++static const struct __FIEventHandler_1_IInspectableVtbl event_handler_vtbl =
++{
++    event_handler_QueryInterface,
++    event_handler_AddRef,
++    event_handler_Release,
++    event_handler_Invoke,
++};
++
++static struct event_handler event_handler = { { &event_handler_vtbl }, 1 };
++
++static void test_PowerManager(void)
++{
++    static const WCHAR *class_name = RuntimeClass_Windows_System_Power_PowerManager;
++    IPowerManagerStatics *power_manager_statics;
++    IInspectable *instance;
++    IActivationFactory *factory;
++    EventRegistrationToken tokens[5], token;
++    EnergySaverStatus saver_status;
++    PowerSupplyStatus supply_status;
++    BatteryStatus battery_status;
++    INT32 remaining_percent;
++    HSTRING str;
++    TimeSpan timespan;
++    HRESULT hr;
++    LONG ref;
++    unsigned int i, j;
++
++    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++
++    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
++    WindowsDeleteString( str );
++    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
++    if (FAILED( hr ))
++    {
++        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
++        return;
++    }
++
++    check_interface( factory, &IID_IUnknown, TRUE );
++    check_interface( factory, &IID_IInspectable, TRUE );
++    check_interface( factory, &IID_IAgileObject, TRUE );
++    check_interface( factory, &IID_IActivationFactory, TRUE );
++    check_interface( factory, &IID_IPowerManagerStatics, TRUE );
++
++    hr = IActivationFactory_QueryInterface( factory, &IID_IPowerManagerStatics, (void **)&power_manager_statics );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++
++    check_interface( power_manager_statics, &IID_IUnknown, TRUE );
++    check_interface( power_manager_statics, &IID_IInspectable, TRUE );
++    check_interface( power_manager_statics, &IID_IAgileObject, TRUE );
++    check_interface( power_manager_statics, &IID_IPowerManagerStatics, TRUE );
++    check_interface( power_manager_statics, &IID_IActivationFactory, TRUE );
++
++    instance = (IInspectable *)0xdeadbeef;
++    hr = IActivationFactory_ActivateInstance( factory, &instance );
++    ok( hr == E_NOTIMPL || broken( hr == E_FAIL ), "got hr %#lx.\n", hr );
++    ok( !instance, "got instance %p.\n", instance );
++
++    battery_status = (BatteryStatus) -1;
++    hr = IPowerManagerStatics_get_BatteryStatus( power_manager_statics, &battery_status );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    ok( battery_status == BatteryStatus_NotPresent || broken( battery_status != BatteryStatus_NotPresent ),
++        "got battery status %d.\n", battery_status );
++
++    supply_status = (PowerSupplyStatus) -1;
++    hr = IPowerManagerStatics_get_PowerSupplyStatus( power_manager_statics, &supply_status );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    ok( supply_status == PowerSupplyStatus_Adequate || broken( supply_status != PowerSupplyStatus_Adequate ),
++        "got power supply status %d.\n", supply_status );
++
++    remaining_percent = -1;
++    hr = IPowerManagerStatics_get_RemainingChargePercent( power_manager_statics, &remaining_percent );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    ok( remaining_percent == 100 || broken( remaining_percent != 100 ), "got remaining percent %d.\n", remaining_percent );
++
++    saver_status = (EnergySaverStatus) -1;
++    hr = IPowerManagerStatics_get_EnergySaverStatus( power_manager_statics, &saver_status );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    ok( saver_status == EnergySaverStatus_Off || broken( saver_status != EnergySaverStatus_Off ),
++        "got energy saver status %d.\n", saver_status );
++
++    timespan.Duration = 0;
++    hr = IPowerManagerStatics_get_RemainingDischargeTime( power_manager_statics, &timespan );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    ok( timespan.Duration == -1 || broken( timespan.Duration != -1 ), "got remaining discharge time %s.\n",
++        wine_dbgstr_longlong( timespan.Duration ) );
++
++    hr = IPowerManagerStatics_get_BatteryStatus( power_manager_statics, NULL );
++    ok( hr == E_POINTER, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_get_PowerSupplyStatus( power_manager_statics, NULL );
++    ok( hr == E_POINTER, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_get_RemainingChargePercent( power_manager_statics, NULL );
++    ok( hr == E_POINTER, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_get_EnergySaverStatus( power_manager_statics, NULL );
++    ok( hr == E_POINTER, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_get_RemainingDischargeTime( power_manager_statics, NULL );
++    ok( hr == E_POINTER, "got hr %#lx.\n", hr );
++
++    hr = IPowerManagerStatics_add_BatteryStatusChanged( power_manager_statics, &event_handler.IEventHandler_iface, &tokens[0] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_add_EnergySaverStatusChanged( power_manager_statics, &event_handler.IEventHandler_iface, &tokens[1] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_add_PowerSupplyStatusChanged( power_manager_statics, &event_handler.IEventHandler_iface, &tokens[2] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_add_RemainingChargePercentChanged( power_manager_statics, &event_handler.IEventHandler_iface, &tokens[3] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_add_RemainingDischargeTimeChanged( power_manager_statics, &event_handler.IEventHandler_iface, &tokens[4] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++
++    for (i = 0; i < ARRAY_SIZE( tokens ); ++i)
++        ok( tokens[i].value != 0, "got token value %s.\n", wine_dbgstr_longlong( tokens[i].value ) );
++    for (i = 0; i < ARRAY_SIZE( tokens ); ++i)
++        for (j = i + 1; j < ARRAY_SIZE( tokens ); ++j)
++            ok( tokens[i].value != tokens[j].value, "got duplicated token value %s.\n",
++                wine_dbgstr_longlong( tokens[i].value ) );
++
++    ok( event_handler.ref == 6, "got handler ref %ld.\n", event_handler.ref );
++
++    token.value = 0;
++    hr = IPowerManagerStatics_remove_BatteryStatusChanged( power_manager_statics, token );
++    ok( hr == E_INVALIDARG || broken( hr != E_INVALIDARG ), "got hr %#lx.\n", hr );
++
++    hr = IPowerManagerStatics_add_BatteryStatusChanged( power_manager_statics, NULL, &token );
++    ok( hr == E_POINTER || broken( hr != E_POINTER ), "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_add_BatteryStatusChanged( power_manager_statics, &event_handler.IEventHandler_iface, NULL );
++    ok( hr == E_POINTER || broken( hr != E_POINTER ), "got hr %#lx.\n", hr );
++
++    hr = IPowerManagerStatics_remove_BatteryStatusChanged( power_manager_statics, tokens[0] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_remove_EnergySaverStatusChanged( power_manager_statics, tokens[1] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_remove_PowerSupplyStatusChanged( power_manager_statics, tokens[2] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_remove_RemainingChargePercentChanged( power_manager_statics, tokens[3] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++    hr = IPowerManagerStatics_remove_RemainingDischargeTimeChanged( power_manager_statics, tokens[4] );
++    ok( hr == S_OK, "got hr %#lx.\n", hr );
++
++    hr = IPowerManagerStatics_remove_BatteryStatusChanged( power_manager_statics, tokens[0] );
++    ok( hr == S_OK || broken( hr != S_OK ), "got hr %#lx.\n", hr );
++
++    ok( event_handler.ref == 1, "got handler ref %ld.\n", event_handler.ref );
++    ok( !event_handler_invoke_count, "got invoke count %ld.\n", event_handler_invoke_count );
++
++    ref = IPowerManagerStatics_Release( power_manager_statics );
++    ok( ref == 2, "got ref %ld.\n", ref );
++    ref = IActivationFactory_Release( factory );
++    ok( ref == 1, "got ref %ld.\n", ref );
++}
++
+ START_TEST(twinapi)
+ {
+     HRESULT hr;
+@@ -352,6 +548,7 @@ START_TEST(twinapi)
+     test_ApplicationView();
+     test_CoreApplication();
+     test_DataTransferManager();
++    test_PowerManager();
+ 
+     RoUninitialize();
+ }
