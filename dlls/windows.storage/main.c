@@ -36,9 +36,26 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     *factory = NULL;
 
-    if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Streams_RandomAccessStreamReference ))
+    if (!wcscmp( buffer, RuntimeClass_Windows_Storage_StorageFile ))
+        IActivationFactory_QueryInterface( storage_file_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_StorageFolder ))
+        IActivationFactory_QueryInterface( storage_folder_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_FileIO ))
+        IActivationFactory_QueryInterface( file_io_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_PathIO ))
+        IActivationFactory_QueryInterface( path_io_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Streams_Buffer ))
+        IActivationFactory_QueryInterface( buffer_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Streams_DataReader ))
+        IActivationFactory_QueryInterface( data_reader_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Streams_DataWriter ))
+        IActivationFactory_QueryInterface( data_writer_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Streams_InMemoryRandomAccessStream ))
+        IActivationFactory_QueryInterface( in_memory_random_access_stream_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Streams_RandomAccessStreamReference ))
         IActivationFactory_QueryInterface( random_access_stream_reference_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    WARN( "class %s not available, returning E_NOINTERFACE.\n", debugstr_hstring( classid ) );
+    return E_NOINTERFACE;
 }

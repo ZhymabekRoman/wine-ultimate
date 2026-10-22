@@ -305,11 +305,72 @@ static HRESULT WINAPI container_get_Values( IApplicationDataContainer *iface, IP
     return *value ? S_OK : E_FAIL;
 }
 
+static HRESULT WINAPI empty_map_view_QueryInterface( IMapView_HSTRING_ApplicationDataContainer *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_HSTRING_ApplicationDataContainer ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI empty_map_view_AddRef( IMapView_HSTRING_ApplicationDataContainer *iface ) { return 2; }
+static ULONG WINAPI empty_map_view_Release( IMapView_HSTRING_ApplicationDataContainer *iface ) { return 1; }
+static HRESULT WINAPI empty_map_view_GetIids( IMapView_HSTRING_ApplicationDataContainer *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI empty_map_view_GetRuntimeClassName( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IMapView`2", 40, n );
+}
+static HRESULT WINAPI empty_map_view_GetTrustLevel( IMapView_HSTRING_ApplicationDataContainer *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI empty_map_view_Lookup( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, IApplicationDataContainer **value )
+{
+    if (value) *value = NULL;
+    return 0x8000000b; /* E_BOUNDS */
+}
+static HRESULT WINAPI empty_map_view_get_Size( IMapView_HSTRING_ApplicationDataContainer *iface, unsigned int *size )
+{
+    if (size) *size = 0;
+    return S_OK;
+}
+static HRESULT WINAPI empty_map_view_HasKey( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING key, boolean *found )
+{
+    if (found) *found = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI empty_map_view_Split( IMapView_HSTRING_ApplicationDataContainer *iface, IMapView_HSTRING_ApplicationDataContainer **first, IMapView_HSTRING_ApplicationDataContainer **second )
+{
+    if (first) *first = NULL;
+    if (second) *second = NULL;
+    return S_OK;
+}
+
+static const struct __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainerVtbl empty_map_view_vtbl =
+{
+    empty_map_view_QueryInterface,
+    empty_map_view_AddRef,
+    empty_map_view_Release,
+    empty_map_view_GetIids,
+    empty_map_view_GetRuntimeClassName,
+    empty_map_view_GetTrustLevel,
+    empty_map_view_Lookup,
+    empty_map_view_get_Size,
+    empty_map_view_HasKey,
+    empty_map_view_Split,
+};
+
+static IMapView_HSTRING_ApplicationDataContainer empty_map_view = { (void *)&empty_map_view_vtbl };
+
 static HRESULT WINAPI container_get_Containers( IApplicationDataContainer *iface, IMapView_HSTRING_ApplicationDataContainer **value )
 {
-    FIXME( "stub\n" );
+    TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = NULL;
+    *value = &empty_map_view;
     return S_OK;
 }
 

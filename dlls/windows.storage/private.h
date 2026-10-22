@@ -38,8 +38,35 @@
 #define WIDL_using_Windows_Storage_Streams
 #include "windows.storage.h"
 #include "windows.storage.streams.h"
+#include "robuffer.h"
 
+extern IActivationFactory *storage_file_factory;
+extern IActivationFactory *storage_folder_factory;
+extern IActivationFactory *file_io_factory;
+extern IActivationFactory *path_io_factory;
+extern IActivationFactory *buffer_factory;
+extern IActivationFactory *data_reader_factory;
+extern IActivationFactory *data_writer_factory;
+extern IActivationFactory *in_memory_random_access_stream_factory;
 extern IActivationFactory *random_access_stream_reference_factory;
+
+HRESULT storage_file_create( const WCHAR *path, IStorageFile **out );
+HRESULT storage_folder_create( const WCHAR *path, IStorageFolder **out );
+HRESULT read_file_bytes( const WCHAR *path, BYTE **out_bytes, DWORD *out_size );
+HRESULT buffer_create( UINT32 capacity, IBuffer **out );
+HRESULT in_memory_stream_create( IRandomAccessStream **out );
+HRESULT in_memory_stream_create_from_file( const WCHAR *path, IRandomAccessStream **out );
+HRESULT data_reader_create( IInputStream *stream, IDataReader **out );
+HRESULT data_writer_create( IOutputStream *stream, IDataWriter **out );
+HRESULT random_access_stream_reference_create( IRandomAccessStream *stream, IRandomAccessStreamReference **out );
+
+HRESULT async_operation_inspectable_create( const GUID *iid, const WCHAR *class_name, IInspectable *result, void **out );
+HRESULT async_operation_uint32_create( const WCHAR *class_name, UINT32 result, IAsyncOperation_UINT32 **out );
+HRESULT async_operation_boolean_create( const WCHAR *class_name, boolean result, IAsyncOperation_boolean **out );
+HRESULT async_operation_hstring_create( const WCHAR *class_name, HSTRING result, IAsyncOperation_HSTRING **out );
+HRESULT async_action_create( const WCHAR *class_name, HRESULT hr_result, IAsyncAction **out );
+HRESULT async_operation_progress_buffer_create( IBuffer *result, IAsyncOperationWithProgress_IBuffer_UINT32 **out );
+HRESULT async_operation_progress_uint32_create( UINT32 result, IAsyncOperationWithProgress_UINT32_UINT32 **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
