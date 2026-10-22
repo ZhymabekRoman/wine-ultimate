@@ -1,0 +1,304 @@
+From a9ee5030b67342ef4de9537f7e9cd9160c4b0ed9 Mon Sep 17 00:00:00 2001
+From: Zhymabek Roman <robanokssamit@yandex.ru>
+Date: Thu, 22 Oct 2026 10:02:14 +0500
+Subject: [PATCH] combase: Remove hardcoded binary offset hacks for
+ WhatsAppNative activation
+
+RoGetActivationFactory() carried four blocks that reached into
+WhatsAppNative.dll / WhatsAppNative.Voip.dll by raw RVA and called the code
+found there as an activation-factory creator, plus a fabricated COM object
+implementing the IMiscCpp statics/instance interfaces by hand:
+
+  - WhatsAppNative.MiscCpp -> misccpp_factory_QueryInterface(), a vtable
+    written in combase with stub GetTickCount/GetCurrThreadId/
+    ThrowExceptionIfError methods and a GetRuntimeClassName that reports
+    WhatsAppNative.MiscCpp for an object combase invented;
+  - WhatsAppNative.Sqlite / WhatsAppNative.SqlitePreparedStatement ->
+    (BYTE *)hMod + 0x49320 / +0x48990 called as
+    HRESULT (*)(UINT32 *flags, const WCHAR *, REFIID, void **) with a
+    hardcoded flags = 5;
+  - WhatsAppNative.Voip.VoipFactory -> (BYTE *)hMod + 0x7ff050, same shape;
+  - a retry of all three offsets, +0x49f50 for MiscCpp included, whenever the
+    standard DllGetActivationFactory() call failed.
+
+Those offsets are addresses inside one specific build of the proprietary
+WhatsApp binaries.  They are not ABI, they move with every app update, they
+are only meaningful once the image base is resolved, and calling them with an
+invented argument list hands the app private functions arguments those
+functions were never written to accept.  combase must not know the internal
+layout of an application binary: a WinRT class is resolved through the
+activation factory the module exports, and through nothing else.
+
+Remove all of it.  RoGetActivationFactory() is back to the single
+get_library_for_classid() -> LoadLibraryW() -> DllGetActivationFactory() ->
+IActivationFactory_QueryInterface() path, and the per-call ERR traces of
+factory pointers and vtable slots that came in with the hacks go with it.
+The RoActivateInstance() and RoOriginate*/RoGetErrorInfo instrumentation the
+AppWindow.get_TitleBar trace in the README depends on is kept.
+
+get_library_for_classid() keeps mapping the WhatsAppNative namespace to
+WhatsAppNative.dll / WhatsAppNative.Voip.dll, and the generic longest-prefix
+side-by-side probe resolves the same names, so module lookup is unchanged;
+the classes are now served by the factories the app DLLs actually export.
+
+Verified on the same tree built both ways: WhatsApp.Root.exe boots and stays
+up 15 s in both, the compositor keeps presenting, log volume is the same
+(5908 vs 5894 lines) and the app ends in the identical documented state
+(HybridDialog fatal dialog, WebView2Loader.dll never loaded, no
+msedgewebview2.exe) -- the offsets bought no forward progress.  The three
+classes now report the app's own CLASS_E_CLASSNOTAVAILABLE (0x80040111)
+instead of a hand-made object, and REGDB_E_CLASSNOTREG stays at zero.
+
+---
+ dlls/combase/roapi.c | 218 -------------------------
+ 1 file changed, 218 deletions(-)
+
+diff --git a/dlls/combase/roapi.c b/dlls/combase/roapi.c
+index b600c10d83..4f3ad661fc 100644
+--- a/dlls/combase/roapi.c
++++ b/dlls/combase/roapi.c
+@@ -242,148 +242,6 @@
+     CoUninitialize();
+ }
+ 
+-static const GUID IID___IMiscCppStatics = {0x4faf8f1c, 0x82bf, 0x38b0, {0xb4, 0xf8, 0x87, 0xd9, 0xaf, 0xac, 0x4f, 0x83}};
+-static const GUID IID___IMiscCppPublicNonVirtuals = {0x0ac1970e, 0xc24e, 0x391e, {0xbb, 0xad, 0xd1, 0xe4, 0x8e, 0x90, 0x1e, 0x27}};
+-
+-static const void *misccpp_instance_vtbl[];
+-static const void *misccpp_factory_vtbl[];
+-static const void *misccpp_statics_vtbl[];
+-
+-static const void *misccpp_instance_obj = misccpp_instance_vtbl;
+-
+-struct misccpp_factory_impl
+-{
+-    const void *factory_vtbl;
+-    const void *statics_vtbl;
+-};
+-static struct misccpp_factory_impl misccpp_factory_obj = { misccpp_factory_vtbl, misccpp_statics_vtbl };
+-
+-static HRESULT WINAPI misccpp_QueryInterface(void *iface, REFIID iid, void **out)
+-{
+-    if (IsEqualGUID(iid, &IID_IUnknown) ||
+-        IsEqualGUID(iid, &IID_IInspectable) ||
+-        IsEqualGUID(iid, &IID___IMiscCppPublicNonVirtuals))
+-    {
+-        *out = iface;
+-        return S_OK;
+-    }
+-    *out = NULL;
+-    return E_NOINTERFACE;
+-}
+-static ULONG WINAPI misccpp_AddRef(void *iface) { return 2; }
+-static ULONG WINAPI misccpp_Release(void *iface) { return 1; }
+-static HRESULT WINAPI misccpp_GetIids(void *iface, ULONG *c, IID **i) { return E_NOTIMPL; }
+-static HRESULT WINAPI misccpp_GetRuntimeClassName(void *iface, HSTRING *n)
+-{
+-    return WindowsCreateString(L"WhatsAppNative.MiscCpp", 22, n);
+-}
+-static HRESULT WINAPI misccpp_GetTrustLevel(void *iface, TrustLevel *l)
+-{
+-    if (l) *l = BaseTrust;
+-    return S_OK;
+-}
+-static HRESULT WINAPI misccpp_GetTickCount(void *iface, ULONGLONG *out)
+-{
+-    if (out) *out = GetTickCount64();
+-    return S_OK;
+-}
+-static HRESULT WINAPI misccpp_GetCurrThreadId(void *iface, DWORD *out)
+-{
+-    if (out) *out = GetCurrentThreadId();
+-    return S_OK;
+-}
+-static HRESULT WINAPI misccpp_stub_ok(void *iface) { return S_OK; }
+-static HRESULT WINAPI misccpp_stub_bool(void *iface, BOOLEAN *out)
+-{
+-    if (out) *out = FALSE;
+-    return S_OK;
+-}
+-
+-static const void *misccpp_instance_vtbl[] =
+-{
+-    misccpp_QueryInterface,
+-    misccpp_AddRef,
+-    misccpp_Release,
+-    misccpp_GetIids,
+-    misccpp_GetRuntimeClassName,
+-    misccpp_GetTrustLevel,
+-    misccpp_GetTickCount,
+-    misccpp_GetCurrThreadId,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_bool,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_bool,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-    misccpp_stub_ok,
+-};
+-
+-static HRESULT WINAPI misccpp_factory_QueryInterface(void *iface, REFIID iid, void **out)
+-{
+-    if (IsEqualGUID(iid, &IID___IMiscCppStatics))
+-    {
+-        *out = &misccpp_factory_obj.statics_vtbl;
+-        return S_OK;
+-    }
+-    if (IsEqualGUID(iid, &IID_IUnknown) ||
+-        IsEqualGUID(iid, &IID_IInspectable) ||
+-        IsEqualGUID(iid, &IID_IActivationFactory))
+-    {
+-        *out = &misccpp_factory_obj.factory_vtbl;
+-        return S_OK;
+-    }
+-    *out = NULL;
+-    return E_NOINTERFACE;
+-}
+-static HRESULT WINAPI misccpp_statics_QueryInterface(void *iface, REFIID iid, void **out)
+-{
+-    return misccpp_factory_QueryInterface(iface, iid, out);
+-}
+-static HRESULT WINAPI misccpp_factory_ActivateInstance(void *iface, IInspectable **instance)
+-{
+-    if (instance) *instance = (IInspectable *)&misccpp_instance_obj;
+-    return S_OK;
+-}
+-static HRESULT WINAPI misccpp_statics_ThrowExceptionIfError(void *iface, INT32 hr)
+-{
+-    if (FAILED(hr)) return hr;
+-    return S_OK;
+-}
+-
+-static const void *misccpp_factory_vtbl[] =
+-{
+-    misccpp_factory_QueryInterface,
+-    misccpp_AddRef,
+-    misccpp_Release,
+-    misccpp_GetIids,
+-    misccpp_GetRuntimeClassName,
+-    misccpp_GetTrustLevel,
+-    misccpp_factory_ActivateInstance,
+-};
+-
+-static const void *misccpp_statics_vtbl[] =
+-{
+-    misccpp_statics_QueryInterface,
+-    misccpp_AddRef,
+-    misccpp_Release,
+-    misccpp_GetIids,
+-    misccpp_GetRuntimeClassName,
+-    misccpp_GetTrustLevel,
+-    misccpp_statics_ThrowExceptionIfError,
+-};
+-
+ /***********************************************************************
+  *      RoGetActivationFactory (combase.@)
+  */
+@@ -400,47 +258,6 @@
+     if (!iid || !class_factory)
+         return E_INVALIDARG;
+ 
+-    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"WhatsAppNative.MiscCpp"))
+-    {
+-        return misccpp_factory_QueryInterface(NULL, iid, class_factory);
+-    }
+-
+-    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"WhatsAppNative.Sqlite") ||
+-        !wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"WhatsAppNative.SqlitePreparedStatement"))
+-    {
+-        HMODULE hMod = GetModuleHandleW(L"WhatsAppNative.dll");
+-        if (!hMod) hMod = LoadLibraryW(L"WhatsAppNative.dll");
+-        if (hMod)
+-        {
+-            typedef HRESULT (WINAPI *pfn_creator)(UINT32 *flags, const WCHAR *server_name, REFIID riid, void **factory);
+-            pfn_creator creator = NULL;
+-            const WCHAR *name = WindowsGetStringRawBuffer(classid, NULL);
+-            if (!wcscmp(name, L"WhatsAppNative.Sqlite"))
+-                creator = (void *)((BYTE *)hMod + 0x49320);
+-            else
+-                creator = (void *)((BYTE *)hMod + 0x48990);
+-            UINT32 flags = 5;
+-            hr = creator(&flags, NULL, iid, class_factory);
+-            ERR("top-level creator for %s returned hr %#lx, factory %p\n", debugstr_w(name), hr, *class_factory);
+-            if (SUCCEEDED(hr)) return S_OK;
+-        }
+-    }
+-
+-    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"WhatsAppNative.Voip.VoipFactory"))
+-    {
+-        HMODULE hMod = GetModuleHandleW(L"WhatsAppNative.Voip.dll");
+-        if (!hMod) hMod = LoadLibraryW(L"WhatsAppNative.Voip.dll");
+-        if (hMod)
+-        {
+-            typedef HRESULT (WINAPI *pfn_creator)(UINT32 *flags, const WCHAR *server_name, REFIID riid, void **factory);
+-            pfn_creator creator = (void *)((BYTE *)hMod + 0x7ff050);
+-            UINT32 flags = 5;
+-            hr = creator(&flags, NULL, iid, class_factory);
+-            ERR("top-level creator for WhatsAppNative.Voip.VoipFactory returned hr %#lx, factory %p\n", hr, *class_factory);
+-            if (SUCCEEDED(hr)) return S_OK;
+-        }
+-    }
+-
+     if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"Windows.ApplicationModel.Resources.ResourceLoader"))
+     {
+         HMODULE hMod = LoadLibraryW(L"twinapi.appcore.dll");
+@@ -483,46 +300,11 @@
+     TRACE("Found library %s for class %s\n", debugstr_w(library), debugstr_hstring(classid));
+ 
+     hr = pDllGetActivationFactory(classid, &factory);
+-    ERR("pDllGetActivationFactory for %s returned hr %#lx, factory %p\n", debugstr_hstring(classid), hr, factory);
+-    if (FAILED(hr) && module)
+-    {
+-        const WCHAR *name = WindowsGetStringRawBuffer(classid, NULL);
+-        typedef HRESULT (WINAPI *pfn_creator)(UINT32 *flags, const WCHAR *server_name, REFIID riid, void **factory);
+-        pfn_creator creator = NULL;
+-
+-        if (!wcscmp(name, L"WhatsAppNative.Sqlite"))
+-            creator = (void *)((BYTE *)module + 0x49320);
+-        else if (!wcscmp(name, L"WhatsAppNative.MiscCpp"))
+-            creator = (void *)((BYTE *)module + 0x49f50);
+-        else if (!wcscmp(name, L"WhatsAppNative.SqlitePreparedStatement"))
+-            creator = (void *)((BYTE *)module + 0x48990);
+-
+-        if (creator)
+-        {
+-            UINT32 flags = 5;
+-            hr = creator(&flags, NULL, iid, class_factory);
+-            ERR("native creator for %s returned hr %#lx, class_factory %p\n", debugstr_w(name), hr, *class_factory);
+-            if (SUCCEEDED(hr))
+-            {
+-                TRACE("Created interface %p from native creator for %s\n", *class_factory, debugstr_w(name));
+-                module = NULL;
+-                goto done;
+-            }
+-        }
+-    }
+     if (SUCCEEDED(hr))
+     {
+         hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
+         if (SUCCEEDED(hr))
+         {
+-            const WCHAR *cname = WindowsGetStringRawBuffer(classid, NULL);
+-            if (cname && !wcscmp(cname, L"Microsoft.UI.Content.DesktopChildSiteBridge"))
+-            {
+-                void *obj = *class_factory;
+-                void **vtable = obj ? *(void ***)obj : NULL;
+-                ERR("DesktopChildSiteBridge: obj %p, vtable %p, Create %p\n",
+-                    obj, vtable, vtable ? vtable[6] : NULL);
+-            }
+             TRACE("Created interface %p\n", *class_factory);
+             module = NULL;
+         }
+

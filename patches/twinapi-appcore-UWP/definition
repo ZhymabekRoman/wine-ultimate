@@ -30,3 +30,4 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0042-ntdll-Add-ALPC-conformance-test-suite.patch
 0043-twinapi-coremessaging-Fix-IReferenceTracker-QI-and-remaining-WebView2-blockers.patch
 0044-twinapi-windows.ui-windows.media-Answer-IAgileObject-on-WinRT-activation-factories.patch
+0045-combase-Remove-hardcoded-binary-offset-hacks.patch
