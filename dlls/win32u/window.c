@@ -5703,9 +5703,6 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     RECT surface_rect;
     WND *win;
 
-    ERR( "CreateWindowEx: class %s, window %s, parent %p, style %#x\n",
-         debugstr_us(class_name), debugstr_us(window_name), parent, style );
-
     cs.lpCreateParams = params;
     cs.hInstance  = instance ? instance : class_instance;
     cs.hMenu      = menu;

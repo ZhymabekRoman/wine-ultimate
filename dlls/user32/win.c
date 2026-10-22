@@ -1845,12 +1845,6 @@ WORD WINAPI TileChildWindows( HWND parent, UINT flags )
  */
 BOOL WINAPI DestroyWindow( HWND hwnd )
 {
-    void *frames[16];
-    USHORT n = RtlCaptureStackBackTrace( 0, 16, frames, NULL );
-    USHORT i;
-    ERR( "DestroyWindow hwnd %p called by %p\n", hwnd, n > 1 ? frames[1] : NULL );
-    for (i = 0; i < n; i++)
-        ERR( "  destroy_wnd_bt[%u] = %p\n", i, frames[i] );
     return NtUserDestroyWindow( hwnd );
 }
 
