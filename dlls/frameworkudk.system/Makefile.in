@@ -1,0 +1,5 @@
+MODULE    = frameworkudk.system.dll
+IMPORTS   = kernel32
+
+SOURCES = \
+	main.c
