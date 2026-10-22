@@ -54,3 +54,10 @@ int __cdecl __uncaught_exceptions(void)
 {
     return *__processing_throw();
 }
+
+void* CDECL __GetPlatformExceptionInfo(int *flags)
+{
+    TRACE("(%p)\n", flags);
+    if (flags) *flags = 0;
+    return NULL;
+}

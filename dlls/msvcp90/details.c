@@ -1122,6 +1122,15 @@ void init_concurrency_details(void *base)
 }
 #endif
 
+#if _MSVCP_VER >= 140
+/* ?GetNextAsyncId@platform@details@Concurrency@@YAIXZ */
+unsigned int __cdecl GetNextAsyncId(void)
+{
+    static LONG id;
+    return (unsigned int)InterlockedIncrement(&id);
+}
+#endif
+
 #if _MSVCP_VER >= 110
 /* ?_Byte_reverse_table@details@Concurrency@@3QBEB */
 const BYTE byte_reverse_table[256] =
