@@ -61,14 +61,115 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    if (!wcscmp(classid, L"Windows.ApplicationModel.Background.BackgroundExecutionManager") ||
+        !wcsncmp(classid, L"Windows.Networking.PushNotifications.", 37) ||
+        !wcscmp(classid, L"Windows.ApplicationModel.AppInstance") ||
+        !wcscmp(classid, L"Microsoft.Windows.AppLifecycle.AppInstance") ||
+        !wcscmp(classid, L"Windows.ApplicationModel.StartupTask") ||
+        (!wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.", 38) &&
+         wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47)))
+    {
+        *out = wcsdup(L"twinapi.appcore.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Windows.Security.Cryptography.", 30))
+    {
+        *out = wcsdup(L"cryptowinrt.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Microsoft.Web.WebView2.Core.", 28))
+    {
+        *out = wcsdup(L"Microsoft.Web.WebView2.Core.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"WhatsAppNative.", 15))
+    {
+        if (!wcsncmp(classid, L"WhatsAppNative.Voip.", 20))
+            *out = wcsdup(L"WhatsAppNative.Voip.dll");
+        else
+            *out = wcsdup(L"WhatsAppNative.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Windows.ApplicationModel.Calls.", 31))
+    {
+        *out = wcsdup(L"windows.applicationmodel.calls.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Windows.Web.Http.", 17))
+    {
+        *out = wcsdup(L"windows.web.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Windows.Networking.Sockets.", 27))
+    {
+        *out = wcsdup(L"windows.networking.sockets.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Windows.Media.Editing.", 22) ||
+        !wcsncmp(classid, L"Windows.Media.Transcoding.", 26) ||
+        !wcsncmp(classid, L"Windows.Media.ClosedCaptioning.", 31) ||
+        !wcsncmp(classid, L"Windows.Media.Audio.", 20))
+    {
+        *out = wcsdup(L"windows.media.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Windows.Storage.Streams.", 24))
+    {
+        *out = wcsdup(L"windows.storage.dll");
+        return S_OK;
+    }
+
+    if (!wcscmp(classid, L"Windows.Storage.StorageFile") ||
+        !wcscmp(classid, L"Windows.Storage.StorageFolder") ||
+        !wcscmp(classid, L"Windows.Storage.FileIO") ||
+        !wcscmp(classid, L"Windows.Storage.PathIO"))
+    {
+        *out = wcsdup(L"windows.storage.dll");
+        return S_OK;
+    }
+
     /* load class registry key */
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId",
                       0, KEY_READ, &hkey_root))
         return REGDB_E_READREGDB;
     if (RegOpenKeyExW(hkey_root, classid, 0, KEY_READ, &hkey_class))
     {
-        WARN("Class %s not found in registry\n", debugstr_w(classid));
+        size_t len, i;
         RegCloseKey(hkey_root);
+
+        /* Unpackaged apps ship their activatable classes side-by-side in a dll named
+         * after the class namespace (e.g. Microsoft.Windows.ApplicationModel.Resources.ResourceManager
+         * is implemented by Microsoft.Windows.ApplicationModel.Resources.dll).  Probe every
+         * dot separated namespace prefix of the class id, longest first, for a loadable dll. */
+        len = lstrlenW( classid );
+        for (i = len; i > 0; i--)
+        {
+            if (classid[i - 1] != '.' || i == len) continue;
+            {
+                WCHAR dll_name[MAX_PATH];
+                HMODULE h;
+
+                if (i + 5 >= MAX_PATH) continue;
+                memcpy( dll_name, classid, i * sizeof(WCHAR) );
+                wcscpy( dll_name + i, L".dll" );
+                if ((h = LoadLibraryW( dll_name )))
+                {
+                    FreeLibrary( h );
+                    TRACE( "Found class %s in side-by-side dll %s\n", debugstr_w( classid ), debugstr_w( dll_name ) );
+                    *out = wcsdup( dll_name );
+                    return S_OK;
+                }
+            }
+        }
+        WARN("Class %s not found in registry\n", debugstr_w(classid));
         return REGDB_E_CLASSNOTREG;
     }
     RegCloseKey(hkey_root);
@@ -157,6 +258,21 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     if (!iid || !class_factory)
         return E_INVALIDARG;
 
+    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"Windows.ApplicationModel.Resources.ResourceLoader"))
+    {
+        HMODULE hMod = LoadLibraryW(L"twinapi.appcore.dll");
+        if (hMod)
+        {
+            PFNGETACTIVATIONFACTORY pfn = (void *)GetProcAddress(hMod, "DllGetActivationFactory");
+            if (pfn && SUCCEEDED(pfn(classid, &factory)))
+            {
+                hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
+                IActivationFactory_Release(factory);
+                return hr;
+            }
+        }
+    }
+
     if (FAILED(hr = ensure_mta()))
         return hr;
 
@@ -226,13 +342,20 @@ HRESULT WINAPI RoActivateInstance(HSTRING classid, IInspectable **instance)
     IActivationFactory *factory;
     HRESULT hr;
 
-    FIXME("(%p, %p): semi-stub\n", classid, instance);
+    FIXME("(%s, %p): semi-stub\n", wine_dbgstr_hstring(classid), instance);
 
     hr = RoGetActivationFactory(classid, &IID_IActivationFactory, (void **)&factory);
     if (SUCCEEDED(hr))
     {
         hr = IActivationFactory_ActivateInstance(factory, instance);
+        ERR("RoActivateInstance (%s) returned hr 0x%08lx, instance %p\n",
+            wine_dbgstr_hstring(classid), hr, instance ? *instance : NULL);
         IActivationFactory_Release(factory);
+    }
+    else
+    {
+        ERR("RoActivateInstance (%s) RoGetActivationFactory failed hr 0x%08lx\n",
+            wine_dbgstr_hstring(classid), hr);
     }
 
     return hr;
@@ -433,8 +556,13 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
  */
 void WINAPI RoFailFastWithErrorContextInternal2(HRESULT error, ULONG exception_count, void *information)
 {
-    ULONG i;
+    void *frames[32];
+    USHORT n_frames, k;
+    ULONG i, j;
     FIXME("%#lx, %lu, %p stub.\n", error, exception_count, information);
+    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
+    for (k = 0; k < n_frames; k++)
+        FIXME("  backtrace[%u] = %p\n", k, frames[k]);
     if (information && exception_count)
     {
         void **ptrs = (void **)information;
@@ -443,11 +571,19 @@ void WINAPI RoFailFastWithErrorContextInternal2(HRESULT error, ULONG exception_c
             void *p = ptrs[i];
             if (p)
             {
-                ULONG *u = (ULONG *)p;
-                WCHAR *desc;
-                FIXME("  stowed[%lu]: sig=%#lx hr=%#lx\n", i, u[0], u[2]);
-                desc = *(WCHAR **)((char *)p + 0x38);
-                if (desc) FIXME("  stowed[%lu] desc: %s\n", i, wine_dbgstr_w(desc));
+                ULONG64 *q = (ULONG64 *)p;
+                FIXME("  stowed[%lu] at %p:\n", i, p);
+                for (j = 0; j < 8; j++)
+                    FIXME("    [%02lu] %016llx\n", j, q[j]);
+                if (q[4])
+                {
+                    ULONG64 *bt = (ULONG64 *)q[4];
+                    DWORD count = (DWORD)(q[3] & 0xffffffff);
+                    DWORD s_idx;
+                    ERR("  stowed stack trace (count %lu):\n", count);
+                    for (s_idx = 0; s_idx < count && s_idx < 16; s_idx++)
+                        ERR("    stowed_bt[%lu] = %016llx\n", s_idx, bt[s_idx]);
+                }
             }
         }
     }
@@ -515,8 +651,9 @@ HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONF
  */
 HRESULT WINAPI GetRestrictedErrorInfo(IRestrictedErrorInfo **info)
 {
-    FIXME( "(%p)\n", info );
-    return E_NOTIMPL;
+    TRACE( "(%p)\n", info );
+    if (info) *info = NULL;
+    return S_FALSE;
 }
 
 /***********************************************************************
@@ -524,8 +661,8 @@ HRESULT WINAPI GetRestrictedErrorInfo(IRestrictedErrorInfo **info)
  */
 HRESULT WINAPI SetRestrictedErrorInfo(IRestrictedErrorInfo *info)
 {
-    FIXME( "(%p)\n", info );
-    return E_NOTIMPL;
+    TRACE( "(%p)\n", info );
+    return S_OK;
 }
 
 /***********************************************************************
@@ -533,7 +670,60 @@ HRESULT WINAPI SetRestrictedErrorInfo(IRestrictedErrorInfo *info)
  */
 BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknown *language_exception)
 {
-    FIXME("%#lx, %s, %p: stub\n", error, debugstr_hstring(message), language_exception);
+    void *frames[32];
+    USHORT n_frames, k;
+
+    ERR("RoOriginateLanguageException: error %#lx, message %s, exception %p\n", error, debugstr_hstring(message), language_exception);
+    if (language_exception)
+    {
+        IRestrictedErrorInfo *restricted;
+        IErrorInfo *error_info;
+        static const GUID IID_IRestrictedErrorInfo = {0x82ba70a5, 0x79a1, 0x4fe8, {0x8c, 0xe5, 0x13, 0xe5, 0x72, 0x33, 0x9f, 0x04}};
+        static const GUID IID_IErrorInfo = {0x1cf2b43f, 0x97b2, 0x11cf, {0xb8, 0xf2, 0x00, 0xaa, 0x00, 0x6e, 0x34, 0xdb}};
+        static const GUID IID__Exception = {0xb36b5c63, 0x42ef, 0x38bc, {0xa7, 0x12, 0x34, 0x6b, 0x6a, 0x70, 0x34, 0x22}};
+        void *pException = NULL;
+
+        if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID__Exception, &pException)))
+        {
+            void **vtbl = *(void ***)pException;
+            HRESULT (STDMETHODCALLTYPE *get_ToString)(void *, BSTR *) = (void *)vtbl[7];
+            BSTR str = NULL;
+            if (SUCCEEDED(get_ToString(pException, &str)))
+            {
+                ERR("  ManagedException: %s\n", wine_dbgstr_w(str));
+                SysFreeString(str);
+            }
+            IUnknown_Release((IUnknown *)pException);
+        }
+
+        if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID_IRestrictedErrorInfo, (void **)&restricted)))
+        {
+            BSTR desc = NULL, rest = NULL, cap = NULL;
+            HRESULT code = 0;
+            if (SUCCEEDED(IRestrictedErrorInfo_GetErrorDetails(restricted, &desc, &code, &rest, &cap)))
+            {
+                ERR("  RestrictedError: desc=%s, code=%#lx, restricted=%s\n",
+                    wine_dbgstr_w(desc), code, wine_dbgstr_w(rest));
+                SysFreeString(desc);
+                SysFreeString(rest);
+                SysFreeString(cap);
+            }
+            IRestrictedErrorInfo_Release(restricted);
+        }
+        else if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID_IErrorInfo, (void **)&error_info)))
+        {
+            BSTR desc = NULL;
+            if (SUCCEEDED(IErrorInfo_GetDescription(error_info, &desc)))
+            {
+                ERR("  ErrorInfo: desc=%s\n", wine_dbgstr_w(desc));
+                SysFreeString(desc);
+            }
+            IErrorInfo_Release(error_info);
+        }
+    }
+    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
+    for (k = 0; k < n_frames; k++)
+        ERR("  originate_lang_bt[%u] = %p\n", k, frames[k]);
     return FALSE;
 }
 
@@ -542,7 +732,13 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
  */
 BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
 {
-    FIXME("%#lx, %s: stub\n", error, debugstr_hstring(message));
+    void *frames[32];
+    USHORT n_frames, k;
+
+    ERR("%#lx, %s\n", error, debugstr_hstring(message));
+    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
+    for (k = 0; k < n_frames; k++)
+        ERR("  originate_error_bt[%u] = %p\n", k, frames[k]);
     return FALSE;
 }
 
@@ -551,7 +747,13 @@ BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
  */
 BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
 {
-    FIXME("%#lx, %u, %s: stub\n", error, max_len, wine_dbgstr_wn(message, max_len));
+    void *frames[32];
+    USHORT n_frames, k;
+
+    ERR("RoOriginateErrorW: error %#lx, max_len %u, message %s\n", error, max_len, wine_dbgstr_wn(message, max_len));
+    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
+    for (k = 0; k < n_frames; k++)
+        ERR("  originate_bt[%u] = %p\n", k, frames[k]);
     return FALSE;
 }
 
