@@ -95,6 +95,7 @@ SOURCES = \
 	compressapi.h \
 	comsvcs.idl \
 	concurrencysal.h \
+	config.h \
 	config.h.in \
 	consoleapi.h \
 	control.idl \
