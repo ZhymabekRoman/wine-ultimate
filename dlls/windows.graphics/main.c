@@ -400,5 +400,5 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (!wcscmp( name, RuntimeClass_Windows_Graphics_Display_DisplayInformation ))
         IActivationFactory_QueryInterface( display_info_factory, &IID_IActivationFactory, (void **)factory );
 
-    return *factory ? S_OK : CLASS_E_CLASSNOTAVAILABLE;
+    return *factory ? S_OK : E_NOINTERFACE;
 }

@@ -501,5 +501,5 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     else if (!wcscmp(name, RuntimeClass_Windows_UI_Text_Core_CoreTextServicesManager))
         IActivationFactory_QueryInterface(core_text_services_manager_factory, &IID_IActivationFactory, (void **)factory);
 
-    return *factory ? S_OK : CLASS_E_CLASSNOTAVAILABLE;
+    return *factory ? S_OK : E_NOINTERFACE;
 }

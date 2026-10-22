@@ -197,7 +197,7 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING class_str, IActivationFactory **
         IInspectable_QueryInterface( condition_effect_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return E_NOINTERFACE;
 }
 
 BOOL WINAPI DllMain( HINSTANCE instance, DWORD reason, void *reserved )

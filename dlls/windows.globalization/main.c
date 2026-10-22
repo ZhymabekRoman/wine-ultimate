@@ -89,20 +89,22 @@ static ULONG WINAPI iterator_hstring_Release( IIterator_HSTRING *iface )
 
 static HRESULT WINAPI iterator_hstring_GetIids( IIterator_HSTRING *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    if (!iid_count || !iids) return E_POINTER;
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
 }
 
 static HRESULT WINAPI iterator_hstring_GetRuntimeClassName( IIterator_HSTRING *iface, HSTRING *class_name )
 {
-    FIXME("iface %p, class_name %p stub!\n", iface, class_name);
-    return E_NOTIMPL;
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( L"Windows.Foundation.Collections.IIterator`1<String>", 50, class_name );
 }
 
 static HRESULT WINAPI iterator_hstring_GetTrustLevel( IIterator_HSTRING *iface, TrustLevel *trust_level )
 {
-    FIXME("iface %p, trust_level %p stub!\n", iface, trust_level);
-    return E_NOTIMPL;
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI iterator_hstring_get_Current( IIterator_HSTRING *iface, HSTRING *value )
@@ -226,22 +228,24 @@ static ULONG STDMETHODCALLTYPE hstring_vector_Release(IVectorView_HSTRING *iface
 static HRESULT STDMETHODCALLTYPE hstring_vector_GetIids(IVectorView_HSTRING *iface,
         ULONG *iid_count, IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    if (!iid_count || !iids) return E_POINTER;
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE hstring_vector_GetRuntimeClassName(IVectorView_HSTRING *iface,
         HSTRING *class_name)
 {
-    FIXME("iface %p, class_name %p stub!\n", iface, class_name);
-    return E_NOTIMPL;
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString(L"Windows.Foundation.Collections.IVectorView`1<String>", 49, class_name);
 }
 
 static HRESULT STDMETHODCALLTYPE hstring_vector_GetTrustLevel(IVectorView_HSTRING *iface,
         TrustLevel *trust_level)
 {
-    FIXME("iface %p, trust_level %p stub!\n", iface, trust_level);
-    return E_NOTIMPL;
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE hstring_vector_GetAt(IVectorView_HSTRING *iface,
@@ -249,7 +253,7 @@ static HRESULT STDMETHODCALLTYPE hstring_vector_GetAt(IVectorView_HSTRING *iface
 {
     struct hstring_vector *impl = impl_from_IVectorView_HSTRING(iface);
 
-    TRACE("iface %p, index %#x, value %p.\n", iface, index, value);
+    ERR("GLOBALIZATION: GetAt iface %p, index %#x, value %p.\n", iface, index, value);
 
     *value = NULL;
     if (index >= impl->count) return E_BOUNDS;
@@ -261,8 +265,9 @@ static HRESULT STDMETHODCALLTYPE hstring_vector_get_Size(IVectorView_HSTRING *if
 {
     struct hstring_vector *impl = impl_from_IVectorView_HSTRING(iface);
 
-    TRACE("iface %p, value %p.\n", iface, value);
+    ERR("GLOBALIZATION: get_Size iface %p, value %p, returning count %lu.\n", iface, value, impl->count);
 
+    if (!value) return E_POINTER;
     *value = impl->count;
     return S_OK;
 }
@@ -1189,5 +1194,5 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     }
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return E_NOINTERFACE;
 }
