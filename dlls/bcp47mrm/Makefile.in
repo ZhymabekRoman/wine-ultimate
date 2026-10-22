@@ -1,0 +1,6 @@
+MODULE    = bcp47mrm.dll
+IMPORTLIB = bcp47mrm
+IMPORTS   = kernel32
+
+SOURCES = \
+	main.c
