@@ -1,0 +1,7 @@
+#pragma makedep register
+#pragma winrt ns_prefix
+
+namespace Windows.Networking.Sockets {
+    runtimeclass MessageWebSocket;
+    runtimeclass StreamSocket;
+}

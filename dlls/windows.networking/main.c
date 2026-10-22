@@ -35,5 +35,5 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
 
     *factory = NULL;
 
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return E_NOINTERFACE;
 }
