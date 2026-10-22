@@ -28,7 +28,20 @@ static const struct
 }
 present_contracts[] =
 {
-    { L"Windows.Foundation.UniversalApiContract", 10, },
+    /*
+     * ApiInformation reports the API surface this build implements.  Wine
+     * carries the Windows App SDK surface that shipped through
+     * UniversalApiContract 16 (Windows 11 24H2, build 26100): the composition
+     * islands classes (Microsoft.UI.Content.ContentIsland, ContentSite,
+     * DesktopChildSiteBridge), the Windows.UI.Composition tree over
+     * DirectComposition, the Microsoft.UI.Windowing windowing-internal entry
+     * points and the CoreMessaging dispatcher queue.  The Windows App SDK gates
+     * its islands layer on this value: Microsoft.Internal.FrameworkUdk.dll
+     * probes the contract downward from 17 and, below the threshold, publishes
+     * E_NOTIMPL for the whole DCompPrivates islands entry set and never reaches
+     * the compositor, which leaves the AppWindowTitleBar bridge uninitialised.
+     */
+    { L"Windows.Foundation.UniversalApiContract", 16, },
 };
 
 static BOOLEAN is_api_contract_present( const HSTRING hname, unsigned int version )
@@ -251,10 +264,10 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsEnumNamedValuePresent
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsApiContractPresentByMajor(
         IApiInformationStatics *iface, HSTRING contract_name, UINT16 major_version, BOOLEAN *value)
 {
-    FIXME("iface %p, contract_name %s, major_version %u, value %p semi-stub.\n", iface,
+    TRACE("iface %p, contract_name %s, major_version %u, value %p.\n", iface,
             debugstr_hstring(contract_name), major_version, value);
 
-    if (!contract_name)
+    if (!contract_name || !value)
         return E_INVALIDARG;
 
     *value = is_api_contract_present( contract_name, major_version );
@@ -265,13 +278,14 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_IsApiContractPresentByM
         IApiInformationStatics *iface, HSTRING contract_name, UINT16 major_version,
         UINT16 minor_version, BOOLEAN *value)
 {
-    FIXME("iface %p, contract_name %s, major_version %u, minor_version %u, value %p stub!\n", iface,
+    TRACE("iface %p, contract_name %s, major_version %u, minor_version %u, value %p\n", iface,
             debugstr_hstring(contract_name), major_version, minor_version, value);
 
-    if (!contract_name)
+    if (!contract_name || !value)
         return E_INVALIDARG;
 
-    return E_NOTIMPL;
+    *value = is_api_contract_present( contract_name, major_version );
+    return S_OK;
 }
 
 static const struct IApiInformationStaticsVtbl api_information_statics_vtbl =
@@ -478,11 +492,16 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
 
     if (IsEqualIID(riid, &IID_IUnknown)
         || IsEqualIID(riid, &IID_IInspectable)
+        || IsEqualIID(riid, &IID_IAgileObject)
         || IsEqualIID(riid, &IID_IPropertyValue))
     {
         IPropertyValue_AddRef(iface);
         *out = &impl->IPropertyValue_iface;
         return S_OK;
+    }
+    else if (IsEqualIID(riid, &IID_IMarshal))
+    {
+        return CoCreateFreeThreadedMarshaler((IUnknown *)iface, (IUnknown **)out);
     }
     else if (IsEqualIID(riid, &IID_IReference_BYTE) && impl->type == PropertyType_UInt8)
     {
@@ -526,14 +545,18 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
         *out = &impl->irefs.boolean_iface;
         return S_OK;
     }
-    else if (IsEqualIID(riid, &IID_IReference_FLOAT) && impl->type == PropertyType_Single)
+    else if (IsEqualIID(riid, &IID_IReference_FLOAT) && (impl->type == PropertyType_Single || impl->type == PropertyType_Double))
     {
+        extern const struct IReference_FLOATVtbl iref_float_vtbl;
+        impl->irefs.float_iface.lpVtbl = (void *)&iref_float_vtbl;
         IReference_FLOAT_AddRef(&impl->irefs.float_iface);
         *out = &impl->irefs.float_iface;
         return S_OK;
     }
-    else if (IsEqualIID(riid, &IID_IReference_DOUBLE) && impl->type == PropertyType_Double)
+    else if (IsEqualIID(riid, &IID_IReference_DOUBLE) && (impl->type == PropertyType_Double || impl->type == PropertyType_Single))
     {
+        extern const struct IReference_DOUBLEVtbl iref_double_vtbl;
+        impl->irefs.double_iface.lpVtbl = (void *)&iref_double_vtbl;
         IReference_DOUBLE_AddRef(&impl->irefs.double_iface);
         *out = &impl->irefs.double_iface;
         return S_OK;
@@ -629,20 +652,90 @@ static ULONG STDMETHODCALLTYPE property_value_Release(IPropertyValue *iface)
 
 static HRESULT STDMETHODCALLTYPE property_value_GetIids(IPropertyValue *iface, ULONG *iid_count, IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    IID *array;
+    if (!iid_count || !iids) return E_INVALIDARG;
+    array = CoTaskMemAlloc(sizeof(IID) * 2);
+    if (!array) return E_OUTOFMEMORY;
+    array[0] = IID_IInspectable;
+    array[1] = IID_IPropertyValue;
+    *iid_count = 2;
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_GetRuntimeClassName(IPropertyValue *iface, HSTRING *class_name)
 {
-    FIXME("iface %p, class_name %p stub!\n", iface, class_name);
-    return E_NOTIMPL;
+    struct property_value *impl = impl_from_IPropertyValue(iface);
+    const WCHAR *name;
+
+    TRACE("iface %p, class_name %p, type %d.\n", iface, class_name, impl->type);
+    if (!class_name) return E_POINTER;
+
+    switch (impl->type)
+    {
+    case PropertyType_Double:
+        name = L"Windows.Foundation.IReference`1<Double>";
+        break;
+    case PropertyType_Single:
+        name = L"Windows.Foundation.IReference`1<Single>";
+        break;
+    case PropertyType_Boolean:
+        name = L"Windows.Foundation.IReference`1<Boolean>";
+        break;
+    case PropertyType_Int32:
+        name = L"Windows.Foundation.IReference`1<Int32>";
+        break;
+    case PropertyType_UInt32:
+        name = L"Windows.Foundation.IReference`1<UInt32>";
+        break;
+    case PropertyType_Int64:
+        name = L"Windows.Foundation.IReference`1<Int64>";
+        break;
+    case PropertyType_UInt64:
+        name = L"Windows.Foundation.IReference`1<UInt64>";
+        break;
+    case PropertyType_Int16:
+        name = L"Windows.Foundation.IReference`1<Int16>";
+        break;
+    case PropertyType_UInt8:
+        name = L"Windows.Foundation.IReference`1<UInt8>";
+        break;
+    case PropertyType_Char16:
+        name = L"Windows.Foundation.IReference`1<Char16>";
+        break;
+    case PropertyType_String:
+        name = L"Windows.Foundation.IReference`1<String>";
+        break;
+    case PropertyType_Guid:
+        name = L"Windows.Foundation.IReference`1<Guid>";
+        break;
+    case PropertyType_DateTime:
+        name = L"Windows.Foundation.IReference`1<Windows.Foundation.DateTime>";
+        break;
+    case PropertyType_TimeSpan:
+        name = L"Windows.Foundation.IReference`1<Windows.Foundation.TimeSpan>";
+        break;
+    case PropertyType_Point:
+        name = L"Windows.Foundation.IReference`1<Windows.Foundation.Point>";
+        break;
+    case PropertyType_Size:
+        name = L"Windows.Foundation.IReference`1<Windows.Foundation.Size>";
+        break;
+    case PropertyType_Rect:
+        name = L"Windows.Foundation.IReference`1<Windows.Foundation.Rect>";
+        break;
+    default:
+        name = RuntimeClass_Windows_Foundation_PropertyValue;
+        break;
+    }
+
+    return WindowsCreateString(name, wcslen(name), class_name);
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_GetTrustLevel(IPropertyValue *iface, TrustLevel *trust_level)
 {
-    FIXME("iface %p, trust_level %p stub!\n", iface, trust_level);
-    return E_NOTIMPL;
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_get_Type(IPropertyValue *iface, enum PropertyType *type)
@@ -710,13 +803,57 @@ static HRESULT STDMETHODCALLTYPE property_value_GetUInt64(IPropertyValue *iface,
 
 static HRESULT STDMETHODCALLTYPE property_value_GetSingle(IPropertyValue *iface, FLOAT *value)
 {
+    struct property_value *impl = impl_from_IPropertyValue(iface);
     TRACE("iface %p, value %p.\n", iface, value);
+    if (!value) return E_POINTER;
+    if (impl->type == PropertyType_Single)
+    {
+        *value = *(FLOAT *)impl->value;
+        return S_OK;
+    }
+    if (impl->type == PropertyType_Double)
+    {
+        *value = (FLOAT)*(DOUBLE *)impl->value;
+        return S_OK;
+    }
+    if (impl->type == PropertyType_Int32)
+    {
+        *value = (FLOAT)*(INT32 *)impl->value;
+        return S_OK;
+    }
+    if (impl->type == PropertyType_UInt32)
+    {
+        *value = (FLOAT)*(UINT32 *)impl->value;
+        return S_OK;
+    }
     return property_value_get_primitive(PropertyType_Single);
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_GetDouble(IPropertyValue *iface, DOUBLE *value)
 {
+    struct property_value *impl = impl_from_IPropertyValue(iface);
     TRACE("iface %p, value %p.\n", iface, value);
+    if (!value) return E_POINTER;
+    if (impl->type == PropertyType_Double)
+    {
+        *value = *(DOUBLE *)impl->value;
+        return S_OK;
+    }
+    if (impl->type == PropertyType_Single)
+    {
+        *value = (DOUBLE)*(FLOAT *)impl->value;
+        return S_OK;
+    }
+    if (impl->type == PropertyType_Int32)
+    {
+        *value = (DOUBLE)*(INT32 *)impl->value;
+        return S_OK;
+    }
+    if (impl->type == PropertyType_UInt32)
+    {
+        *value = (DOUBLE)*(UINT32 *)impl->value;
+        return S_OK;
+    }
     return property_value_get_primitive(PropertyType_Double);
 }
 
@@ -1809,7 +1946,7 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_AddRef((*factory = data_writer_activation_factory));
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return E_NOINTERFACE;
 }
 
 HRESULT WINAPI RoIsApiContractMajorVersionPresent(const WCHAR *name, UINT16 major, BOOL *result)

@@ -264,9 +264,12 @@ static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView
     WindowsDeleteString( class_id );
     return hr;
 }
+static const GUID IID_ILaunchActivatedEventArgs = {0xfbc93e26, 0xa14a, 0x4b4f, {0x82, 0xb0, 0x33, 0xbe, 0xd9, 0x20, 0xaf, 0x52}};
+
 struct activated_event_args
 {
     __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs IActivatedEventArgs_iface;
+    const void *ILaunchActivatedEventArgs_vtbl;
     LONG ref;
     __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind kind;
 };
@@ -276,20 +279,30 @@ static inline struct activated_event_args *impl_from_IActivatedEventArgs( __x_AB
     return CONTAINING_RECORD( iface, struct activated_event_args, IActivatedEventArgs_iface );
 }
 
+static inline struct activated_event_args *impl_from_ILaunchActivatedEventArgs( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct activated_event_args, ILaunchActivatedEventArgs_vtbl );
+}
+
 static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, REFIID iid, void **out )
 {
     struct activated_event_args *impl = impl_from_IActivatedEventArgs( iface );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID___x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs ) ||
-        !memcmp( iid, "\x26\x3e\xc9\xfb\x4a\xa1\x4f\x4b\x82\xb0\x33\xbe\xd9\x20\xaf\x52", 16 ))
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs ))
     {
         InterlockedIncrement( &impl->ref );
         *out = &impl->IActivatedEventArgs_iface;
         return S_OK;
     }
-    FIXME( "%s not implemented.\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_ILaunchActivatedEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ILaunchActivatedEventArgs_vtbl;
+        return S_OK;
+    }
+    ERR( "activated_event_args: %s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -308,9 +321,15 @@ static ULONG WINAPI activated_event_args_Release( __x_ABI_CWindows_CApplicationM
 static HRESULT WINAPI activated_event_args_GetIids( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, ULONG *count, IID **iids )
 { FIXME( "stub\n" ); return E_NOTIMPL; }
 static HRESULT WINAPI activated_event_args_GetRuntimeClassName( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, HSTRING *name )
-{ FIXME( "stub\n" ); return E_NOTIMPL; }
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( L"Windows.ApplicationModel.Activation.LaunchActivatedEventArgs", 59, name );
+}
 static HRESULT WINAPI activated_event_args_GetTrustLevel( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, TrustLevel *level )
-{ FIXME( "stub\n" ); return E_NOTIMPL; }
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
 static HRESULT WINAPI activated_event_args_get_Kind( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface,
         __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind *value )
 {
@@ -334,6 +353,44 @@ static HRESULT WINAPI activated_event_args_get_SplashScreen( __x_ABI_CWindows_CA
     return S_OK;
 }
 
+static HRESULT WINAPI launch_activated_event_args_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct activated_event_args *impl = impl_from_ILaunchActivatedEventArgs( iface );
+    return activated_event_args_QueryInterface( &impl->IActivatedEventArgs_iface, iid, out );
+}
+static ULONG WINAPI launch_activated_event_args_AddRef( void *iface )
+{
+    struct activated_event_args *impl = impl_from_ILaunchActivatedEventArgs( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI launch_activated_event_args_Release( void *iface )
+{
+    struct activated_event_args *impl = impl_from_ILaunchActivatedEventArgs( iface );
+    return activated_event_args_Release( &impl->IActivatedEventArgs_iface );
+}
+static HRESULT WINAPI launch_activated_event_args_get_Arguments( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"none", 4, value );
+}
+static HRESULT WINAPI launch_activated_event_args_get_TileId( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"App", 3, value );
+}
+
+static const void *launch_activated_event_args_vtbl_array[] =
+{
+    launch_activated_event_args_QueryInterface,
+    launch_activated_event_args_AddRef,
+    launch_activated_event_args_Release,
+    activated_event_args_GetIids,
+    activated_event_args_GetRuntimeClassName,
+    activated_event_args_GetTrustLevel,
+    launch_activated_event_args_get_Arguments,
+    launch_activated_event_args_get_TileId,
+};
+
 static const struct __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgsVtbl activated_event_args_vtbl =
 {
     activated_event_args_QueryInterface,
@@ -352,12 +409,33 @@ static __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *acti
     struct activated_event_args *impl;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->IActivatedEventArgs_iface.lpVtbl = &activated_event_args_vtbl;
+    impl->ILaunchActivatedEventArgs_vtbl = launch_activated_event_args_vtbl_array;
     impl->ref = 1;
     impl->kind = kind;
     return &impl->IActivatedEventArgs_iface;
 }
 
 static __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *view_activated_handler;
+
+static DWORD WINAPI trigger_activation_proc( void *arg )
+{
+    ICoreApplicationView *view = arg;
+    Sleep( 150 );
+    if (view_activated_handler && view)
+    {
+        __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args =
+            activated_event_args_create( 0 /* ActivationKind_Launch */ );
+        if (args)
+        {
+            ERR( "TWINAPI: Dispatching Launch activation to WinUI 3 CoreApplicationView %p!\n", view_activated_handler );
+            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_Invoke(
+                view_activated_handler, view, args );
+            __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs_Release( args );
+        }
+    }
+    if (view) ICoreApplicationView_Release( view );
+    return 0;
+}
 
 static HRESULT WINAPI core_application_view_add_Activated( ICoreApplicationView *iface,
         __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *handler, EventRegistrationToken *token )
@@ -368,6 +446,8 @@ static HRESULT WINAPI core_application_view_add_Activated( ICoreApplicationView 
     {
         __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_AddRef( handler );
         view_activated_handler = handler;
+        ICoreApplicationView_AddRef( iface );
+        CloseHandle( CreateThread( NULL, 0, trigger_activation_proc, iface, 0, NULL ) );
     }
     return S_OK;
 }
@@ -881,6 +961,9 @@ IActivationFactory *core_application_factory = &factory.IActivationFactory_iface
 /* ---- Windows.ApplicationModel.AppInstance ---- */
 
 static const GUID IID_IAppInstanceStatics = {0x9d11e77f, 0x9ea6, 0x47af, {0xa6, 0xec, 0x46, 0x78, 0x4c, 0x5b, 0xa2, 0x54}};
+static const GUID IID_IMicrosoftAppInstanceStatics = {0x4f414b25, 0x8330, 0x5a9b, {0xbb, 0xc1, 0x82, 0x29, 0xd4, 0x79, 0x64, 0x9d}};
+static const GUID IID_IMicrosoftAppInstanceStatics2 = {0xfe9f1885, 0x7160, 0x5397, {0xba, 0x9b, 0x58, 0x90, 0xb2, 0x4f, 0xdc, 0x04}};
+static const GUID IID_IMicrosoftAppInstance = {0x75766ae4, 0x0239, 0x5a26, {0xb9, 0xda, 0xd5, 0xbf, 0xc7, 0x5a, 0x48, 0x66}};
 
 struct app_instance_statics
 {
@@ -902,16 +985,19 @@ static inline struct app_instance_statics *impl_from_IAppInstanceStatics( IInspe
 static HRESULT WINAPI app_instance_statics_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct app_instance_statics *impl = impl_from_IAppInstanceStatics( iface );
+    ERR( "app_instance_statics QI: %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IAppInstanceStatics ))
+        IsEqualGUID( iid, &IID_IAppInstanceStatics ) ||
+        IsEqualGUID( iid, &IID_IMicrosoftAppInstanceStatics ) ||
+        IsEqualGUID( iid, &IID_IMicrosoftAppInstanceStatics2 ))
     {
         *out = &impl->IAppInstanceStatics_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
+    ERR( "app_instance_statics QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -932,35 +1018,296 @@ static HRESULT WINAPI app_instance_statics_GetRuntimeClassName( IInspectable *if
 static HRESULT WINAPI app_instance_statics_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 { if (level) *level = BaseTrust; return S_OK; }
 
+static const GUID IID_IUwpAppInstance = {0x6756488b, 0xdd4d, 0x4c26, {0xa5, 0x6e, 0xd3, 0xe4, 0xce, 0x07, 0xd8, 0x26}};
+
+static HRESULT WINAPI app_instance_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    ERR( "app_instance QI: %s\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IUwpAppInstance ) ||
+        IsEqualGUID( iid, &IID_IMicrosoftAppInstance ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    ERR( "app_instance QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI app_instance_AddRef( IInspectable *iface ) { return 2; }
+static ULONG WINAPI app_instance_Release( IInspectable *iface ) { return 1; }
+static HRESULT WINAPI app_instance_GetIids( IInspectable *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI app_instance_GetRuntimeClassName( IInspectable *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Microsoft.Windows.AppLifecycle.AppInstance", 42, n );
+}
+static HRESULT WINAPI app_instance_GetTrustLevel( IInspectable *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust; return S_OK;
+}
+static const GUID IID_IAppActivationArguments = {0x14f99eaf, 0x1580, 0x5062, {0xbd, 0xc8, 0xd5, 0xd1, 0xc3, 0x11, 0x38, 0xfb}};
+
+static HRESULT WINAPI app_activation_args_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAppActivationArguments ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI app_activation_args_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI app_activation_args_Release( void *iface ) { return 1; }
+static HRESULT WINAPI app_activation_args_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI app_activation_args_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Microsoft.Windows.AppLifecycle.AppActivationArguments", 53, n );
+}
+static HRESULT WINAPI app_activation_args_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI app_activation_args_get_Kind( void *iface, UINT32 *kind )
+{
+    ERR( "app_activation_args_get_Kind called\n" );
+    if (kind) *kind = 0 /* ExtendedActivationKind_Launch */;
+    return S_OK;
+}
+static HRESULT WINAPI app_activation_args_get_Data( void *iface, void **data )
+{
+    ERR( "app_activation_args_get_Data called\n" );
+    if (!data) return E_POINTER;
+    *data = (void *)activated_event_args_create( 0 );
+    return S_OK;
+}
+static const void *app_activation_args_vtbl[] =
+{
+    app_activation_args_QueryInterface,
+    app_activation_args_AddRef,
+    app_activation_args_Release,
+    app_activation_args_GetIids,
+    app_activation_args_GetRuntimeClassName,
+    app_activation_args_GetTrustLevel,
+    app_activation_args_get_Data,
+    app_activation_args_get_Kind,
+};
+static struct { const void *vtbl; } app_activation_args_obj = { app_activation_args_vtbl };
+
+static const void *app_instance_vtbl[];
+struct current_app_instance_impl
+{
+    const void *vtbl;
+};
+static struct current_app_instance_impl current_app_instance = { app_instance_vtbl };
+
+typedef HRESULT (WINAPI *app_activated_invoke_proc)( void *handler, void *sender, void *args );
+
+#define WM_TRIGGER_ACTIVATION (WM_USER + 777)
+static LRESULT (WINAPI *pDefWindowProcW)(HWND, UINT, WPARAM, LPARAM) = NULL;
+static BOOL (WINAPI *pDestroyWindow)(HWND) = NULL;
+static BOOL (WINAPI *pKillTimer)(HWND, UINT_PTR) = NULL;
+static BOOL (WINAPI *pPostMessageW)(HWND, UINT, WPARAM, LPARAM) = NULL;
+static UINT_PTR (WINAPI *pSetTimer)(HWND, UINT_PTR, UINT, TIMERPROC) = NULL;
+static ATOM (WINAPI *pRegisterClassExW)(const WNDCLASSEXW *) = NULL;
+static HWND (WINAPI *pCreateWindowExW)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID) = NULL;
+
+static void *g_saved_activated_handler = NULL;
+
+static LRESULT CALLBACK activation_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    ERR( "TWINAPI: activation_wndproc hwnd %p msg 0x%04x wparam 0x%Ix\n", hwnd, msg, wparam );
+    if (msg == WM_TIMER || msg == WM_TRIGGER_ACTIVATION)
+    {
+        ERR( "TWINAPI: activation_wndproc firing (msg 0x%04x) ON UI THREAD %lu!\n", msg, GetCurrentThreadId() );
+        if (pKillTimer) pKillTimer( hwnd, wparam );
+        if (g_saved_activated_handler)
+        {
+            void **vtbl = *(void ***)g_saved_activated_handler;
+            app_activated_invoke_proc invoke = (app_activated_invoke_proc)vtbl[3];
+            HRESULT hr;
+            ERR( "TWINAPI: Invoking appInstance.Activated handler %p via slot 3 %p ON UI THREAD!\n", g_saved_activated_handler, invoke );
+            hr = invoke( g_saved_activated_handler, (void *)&current_app_instance, (void *)&app_activation_args_obj );
+            ERR( "TWINAPI: invoke returned hr = 0x%08lx\n", hr );
+            IUnknown_Release( (IUnknown *)g_saved_activated_handler );
+            g_saved_activated_handler = NULL;
+        }
+        return 0;
+    }
+    return pDefWindowProcW ? pDefWindowProcW( hwnd, msg, wparam, lparam ) : 0;
+}
+
+void WINAPI TriggerAppActivation(void)
+{
+    if (g_saved_activated_handler)
+    {
+        void **vtbl = *(void ***)g_saved_activated_handler;
+        app_activated_invoke_proc invoke = (app_activated_invoke_proc)vtbl[3];
+        HRESULT hr;
+        ERR( "TWINAPI: Invoking appInstance.Activated handler %p via slot 3 %p on thread %lu!\n",
+             g_saved_activated_handler, invoke, GetCurrentThreadId() );
+        hr = invoke( g_saved_activated_handler, (void *)&current_app_instance, (void *)&app_activation_args_obj );
+        ERR( "TWINAPI: invoke returned hr = 0x%08lx\n", hr );
+        IUnknown_Release( (IUnknown *)g_saved_activated_handler );
+        g_saved_activated_handler = NULL;
+    }
+}
+
+struct find_ui_wnd_ctx
+{
+    HWND found;
+};
+
+static BOOL CALLBACK enum_ui_thread_wnd( HWND hwnd, LPARAM lp )
+{
+    struct find_ui_wnd_ctx *ctx = (struct find_ui_wnd_ctx *)lp;
+    WCHAR cls[128];
+    if (GetClassNameW( hwnd, cls, ARRAY_SIZE(cls) ))
+    {
+        if (!wcscmp( cls, L"WinUIDesktopWin32WindowClass" ) ||
+            !wcscmp( cls, L"DcppUserAdapterWindowClass" ))
+        {
+            ERR( "TWINAPI: Found target window %p class %s\n", hwnd, wine_dbgstr_w(cls) );
+            ctx->found = hwnd;
+            return FALSE;
+        }
+    }
+    return TRUE;
+}
+
+static DWORD WINAPI trigger_activation_post_proc( void *arg )
+{
+    DWORD ui_thread = (DWORD)(DWORD_PTR)arg;
+    HWND hwnd = NULL;
+    int i;
+
+    ERR( "TWINAPI: trigger_activation_post_proc started, target ui_thread %lu\n", ui_thread );
+
+    for (i = 0; i < 600; i++)
+    {
+        Sleep( 100 );
+        hwnd = FindWindowW( L"WinUIDesktopWin32WindowClass", NULL );
+        if (hwnd)
+        {
+            ERR( "TWINAPI: Posting 0x0401 to WinUIDesktopWin32WindowClass %p (after %d ms)\n", hwnd, (i + 1) * 100 );
+            PostMessageW( hwnd, 0x0401, 0, 0 );
+            break;
+        }
+    }
+    return 0;
+}
+
+static HRESULT WINAPI app_instance_UnregisterKey( IInspectable *iface ) { return S_OK; }
+static HRESULT WINAPI app_instance_RedirectActivationToAsync( IInspectable *iface, void *args, void **action ) { return E_NOTIMPL; }
+static HRESULT WINAPI app_instance_GetActivatedEventArgs( IInspectable *iface, void **result )
+{
+    ERR( "app_instance_GetActivatedEventArgs called\n" );
+    if (!result) return E_POINTER;
+    *result = (void *)&app_activation_args_obj;
+    return S_OK;
+}
+static HRESULT WINAPI app_instance_get_IsCurrent( IInspectable *iface, boolean *value )
+{
+    if (value) *value = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI app_instance_get_Key( IInspectable *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"61E9B470-92E6-482B-AFD8-38C1FB464FB5", 36, value );
+}
+static HRESULT WINAPI app_instance_get_ProcessId( IInspectable *iface, UINT32 *value )
+{
+    if (value) *value = GetCurrentProcessId();
+    return S_OK;
+}
+
+static DWORD WINAPI trigger_activation_post_thread( void *arg )
+{
+    HWND hwnd = (HWND)arg;
+    Sleep( 2500 );
+    if (pPostMessageW && hwnd)
+    {
+        ERR( "TWINAPI: Posting WM_TRIGGER_ACTIVATION to hwnd %p on UI thread\n", hwnd );
+        pPostMessageW( hwnd, WM_TRIGGER_ACTIVATION, 0, 0 );
+    }
+    return 0;
+}
+
+static DWORD WINAPI trigger_activation_worker( void *arg )
+{
+    Sleep( 2000 );
+    TriggerAppActivation();
+    return 0;
+}
+
+static HRESULT WINAPI app_instance_add_Activated( IInspectable *iface, void *handler, EventRegistrationToken *token )
+{
+    ERR( "TWINAPI: app_instance_add_Activated handler %p on thread %lu\n", handler, GetCurrentThreadId() );
+    if (token) token->value = 1;
+    if (handler)
+    {
+        IUnknown_AddRef( (IUnknown *)handler );
+        g_saved_activated_handler = handler;
+        CloseHandle( CreateThread( NULL, 0, trigger_activation_post_proc, (void *)(DWORD_PTR)GetCurrentThreadId(), 0, NULL ) );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI app_instance_remove_Activated( IInspectable *iface, EventRegistrationToken token ) { return S_OK; }
+
+static const void *app_instance_vtbl[] =
+{
+    /* IInspectable */
+    app_instance_QueryInterface,
+    app_instance_AddRef,
+    app_instance_Release,
+    app_instance_GetIids,
+    app_instance_GetRuntimeClassName,
+    app_instance_GetTrustLevel,
+    /* IAppInstance (Microsoft.Windows.AppLifecycle.IAppInstance) */
+    app_instance_UnregisterKey,             /* slot 6 */
+    app_instance_RedirectActivationToAsync, /* slot 7 */
+    app_instance_GetActivatedEventArgs,     /* slot 8 */
+    app_instance_add_Activated,             /* slot 9: add_Activated */
+    app_instance_remove_Activated,          /* slot 10: remove_Activated */
+    app_instance_get_Key,                   /* slot 11: get_Key */
+    app_instance_get_IsCurrent,             /* slot 12: get_IsCurrent */
+    app_instance_get_ProcessId,             /* slot 13: get_ProcessId */
+};
+
+
 static HRESULT WINAPI app_instance_statics_get_RecommendedInstance( IInspectable *iface, IInspectable **value )
 {
-    FIXME( "iface %p, value %p semi-stub.\n", iface, value );
-    if (value) *value = NULL;
+    ERR( "app_instance_statics_get_RecommendedInstance called\n" );
+    if (!value) return E_POINTER;
+    *value = (IInspectable *)&current_app_instance;
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_GetInstances( IInspectable *iface, IInspectable **value )
 {
-    FIXME( "iface %p, value %p semi-stub.\n", iface, value );
+    ERR( "app_instance_statics_GetInstances called\n" );
     if (value) *value = NULL;
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_FindOrRegisterInstanceForKey( IInspectable *iface, HSTRING key, IInspectable **result )
 {
-    FIXME( "iface %p, key %s, result %p semi-stub.\n", iface, debugstr_hstring( key ), result );
-    if (result) *result = NULL;
+    ERR( "app_instance_statics_FindOrRegisterInstanceForKey called: key %s\n", debugstr_hstring( key ) );
+    if (!result) return E_POINTER;
+    *result = (IInspectable *)&current_app_instance;
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_Unregister( IInspectable *iface )
 {
-    FIXME( "iface %p semi-stub.\n", iface );
+    ERR( "app_instance_statics_Unregister called\n" );
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_GetActivatedEventArgs( IInspectable *iface, IInspectable **result )
 {
-    TRACE( "iface %p, result %p\n", iface, result );
+    ERR( "app_instance_statics_GetActivatedEventArgs called\n" );
     if (!result) return E_POINTER;
-    *result = (IInspectable *)activated_event_args_create( 0 /* ActivationKind_Launch */ );
-    return *result ? S_OK : E_OUTOFMEMORY;
+    *result = (IInspectable *)&app_activation_args_obj;
+    return S_OK;
 }
 
 static const void *app_instance_statics_vtbl[] =
@@ -990,13 +1337,15 @@ static HRESULT WINAPI app_instance_factory_QueryInterface( IActivationFactory *i
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IAppInstanceStatics ))
+    if (IsEqualGUID( iid, &IID_IAppInstanceStatics ) ||
+        IsEqualGUID( iid, &IID_IMicrosoftAppInstanceStatics ) ||
+        IsEqualGUID( iid, &IID_IMicrosoftAppInstanceStatics2 ))
     {
         *out = &impl->IAppInstanceStatics_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
+    ERR( "app_instance_factory QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }

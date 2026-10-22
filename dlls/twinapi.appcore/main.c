@@ -169,13 +169,28 @@ static struct { const void *vtbl; } dummy_weakref_source = { dummy_weakref_sourc
 
 static HRESULT WINAPI dummy_channel_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = &dummy_weakref_source;
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
-        IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
     {
         *out = NULL;
         return E_NOINTERFACE;
     }
+
+    /*
+     * This QueryInterface is shared by the vtables of the push notification channel,
+     * the startup task, the background task builder and the weak reference source
+     * stubs, so it has to answer for every interface those objects are asked for.
+     */
     *out = iface;
     return S_OK;
 }
@@ -289,21 +304,36 @@ static struct
 
 static HRESULT WINAPI push_notification_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    /* {8baf9b65-77a1-4588-bd19-861529a9dcf0} */
+    static const GUID IID_IPushNotificationChannelManagerStatics = {0x8baf9b65, 0x77a1, 0x4588, {0xbd, 0x19, 0x86, 0x15, 0x29, 0xa9, 0xdc, 0xf0}};
+    /* {bc540efb-7820-5a5b-9c01-b4757f774025} */
     static const GUID IID_IPushNotificationChannelManagerStatics4 = {0xbc540efb, 0x7820, 0x5a5b, {0x9c, 0x01, 0xb4, 0x75, 0x7f, 0x77, 0x40, 0x25}};
+
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        !memcmp( iid, "\x65\x9b\xaf\x8b\xa1\x77\x88\x45\xbd\x19\x86\x15\x29\xa9\xdc\xf0", 16 ))
+        IsEqualGUID( iid, &IID_IPushNotificationChannelManagerStatics ))
     {
         *out = &push_notification_obj.vtbl_factory;
         return S_OK;
     }
-    else if (IsEqualGUID( iid, &IID_IPushNotificationChannelManagerStatics4 ))
+
+    if (IsEqualGUID( iid, &IID_IPushNotificationChannelManagerStatics4 ))
     {
         *out = &push_notification_obj.vtbl_statics4;
         return S_OK;
     }
+
+    /*
+     * The factory is agile, so it needs no custom marshaler, and the weak reference
+     * source belongs to the channel object, not to the factory.
+     */
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -401,6 +431,7 @@ static HRESULT WINAPI bg_manager_factory_QueryInterface( void *iface, REFIID iid
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
         IsEqualGUID( iid, &IID_IBackgroundExecutionManagerStatics ))
     {
@@ -427,13 +458,18 @@ static const void *bg_manager_factory_vtbl[] =
 };
 
 /* Background Task Registration */
-static const GUID my_IID_IMapView_GUID_IBackgroundTaskRegistration = {0x78c880f6, 0xa7dc, 0x5172, {0x89, 0xda, 0x77, 0x49, 0xfc, 0x82, 0xaa, 0x82}};
-static const GUID my_IID_IMapView_GUID_BackgroundTaskRegistration = {0x2c08602f, 0x40b1, 0x5e97, {0xae, 0x21, 0x5c, 0x04, 0xd7, 0xfb, 0x82, 0x9c}};
-static const GUID IID_IIterable_BackgroundTask = {0x80fb0327, 0x5a00, 0x55cc, {0x85, 0xdb, 0xa8, 0x52, 0x71, 0x99, 0x81, 0xb9}};
-static const GUID IID_IIterable_BackgroundTask_alt1 = {0xb903efe6, 0x4f1c, 0x5969, {0xb0, 0x7d, 0xa0, 0x9d, 0xe5, 0x6c, 0xc2, 0xc0}};
-static const GUID IID_IIterable_BackgroundTask_alt2 = {0xffe605c9, 0xf4a3, 0x57db, {0x99, 0x90, 0xcf, 0x5e, 0x8d, 0xed, 0xba, 0x6e}};
-static const GUID IID_IIterator_BackgroundTask_alt1 = {0xbb9f243f, 0x2225, 0x5eb4, {0x9f, 0xeb, 0x61, 0xad, 0x01, 0x72, 0xd4, 0x0d}};
-static const GUID IID_IIterator_BackgroundTask_alt2 = {0xdb77ebf3, 0x3d1a, 0x5767, {0xb5, 0xaa, 0x8f, 0x42, 0xc2, 0x53, 0x79, 0xee}};
+/* IMapView<Guid, IBackgroundTaskRegistration> */
+static const GUID my_IID_IMapView_GUID_IBackgroundTaskRegistration = {0xfbb695e5, 0x7c7b, 0x5b5c, {0xa5, 0x7b, 0x06, 0xb0, 0xad, 0xd4, 0x93, 0xac}};
+/* IMapView<Guid, BackgroundTaskRegistration> */
+static const GUID my_IID_IMapView_GUID_BackgroundTaskRegistration = {0xba3d387f, 0xf6b4, 0x566b, {0xbf, 0xd4, 0xc5, 0xa3, 0x8b, 0x6a, 0xf2, 0xc3}};
+/* IIterable<IKeyValuePair<Guid, IBackgroundTaskRegistration>> */
+static const GUID IID_IIterable_BackgroundTask = {0xcedf3c13, 0xab1e, 0x5aa1, {0xbc, 0xd6, 0x7f, 0xf0, 0xfe, 0xab, 0xfe, 0x27}};
+/* IIterable<IKeyValuePair<Guid, BackgroundTaskRegistration>> */
+static const GUID IID_IIterable_BackgroundTask_alt1 = {0x201c5249, 0x8c9d, 0x53c2, {0x82, 0x59, 0x31, 0x33, 0xfc, 0x0a, 0xb9, 0x5f}};
+/* IIterator<IKeyValuePair<Guid, IBackgroundTaskRegistration>> */
+static const GUID IID_IIterator_BackgroundTask_alt1 = {0xe38d5c4b, 0xcc8b, 0x52d5, {0xb4, 0xb0, 0xca, 0xce, 0x05, 0x80, 0xf3, 0x34}};
+/* IIterator<IKeyValuePair<Guid, BackgroundTaskRegistration>> */
+static const GUID IID_IIterator_BackgroundTask_alt2 = {0xf54ec1fe, 0x70d8, 0x5c1e, {0x8c, 0x58, 0x75, 0x8a, 0x0e, 0x6f, 0x60, 0xb9}};
 
 struct twinapi_dummy_obj { const void *vtbl; };
 static const void *empty_iterator_vtbl[];
@@ -466,7 +502,12 @@ static HRESULT WINAPI empty_iterator_QueryInterface( void *iface, REFIID iid, vo
 }
 static ULONG WINAPI empty_iterator_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI empty_iterator_Release( void *iface ) { return 1; }
-static HRESULT WINAPI empty_iterator_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI empty_iterator_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI empty_iterator_GetRuntimeClassName( void *iface, HSTRING *n )
 {
     return WindowsCreateString( L"Windows.Foundation.Collections.IIterator`1", 42, n );
@@ -509,8 +550,7 @@ static HRESULT WINAPI empty_iterable_QueryInterface( void *iface, REFIID iid, vo
     if (IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IIterable_BackgroundTask ) ||
-        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ) ||
-        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt2 ))
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ))
     {
         *out = &empty_iterable_obj;
         return S_OK;
@@ -558,15 +598,14 @@ static HRESULT WINAPI empty_map_view_QueryInterface( void *iface, REFIID iid, vo
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IMapView_GUID_IBackgroundTaskRegistration ) ||
-        IsEqualGUID( iid, &IID_IMapView_GUID_BackgroundTaskRegistration ))
+        IsEqualGUID( iid, &my_IID_IMapView_GUID_IBackgroundTaskRegistration ) ||
+        IsEqualGUID( iid, &my_IID_IMapView_GUID_BackgroundTaskRegistration ))
     {
         *out = &empty_map_view_obj;
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IIterable_BackgroundTask ) ||
-        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ) ||
-        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt2 ))
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ))
     {
         *out = &empty_iterable_obj;
         return S_OK;
@@ -577,7 +616,12 @@ static HRESULT WINAPI empty_map_view_QueryInterface( void *iface, REFIID iid, vo
 }
 static ULONG WINAPI empty_map_view_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI empty_map_view_Release( void *iface ) { return 1; }
-static HRESULT WINAPI empty_map_view_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI empty_map_view_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI empty_map_view_GetRuntimeClassName( void *iface, HSTRING *n )
 {
     return WindowsCreateString( L"Windows.Foundation.Collections.IMapView`2", 40, n );
@@ -1178,40 +1222,77 @@ static const void *push_trigger_factory_vtbl[] =
 
 /* Windows.ApplicationModel.Resources.ResourceLoader */
 static const GUID IID_IResourceLoader = {0x08524908, 0x16ef, 0x45ad, {0xa6, 0x02, 0x29, 0x36, 0x37, 0xd7, 0xe6, 0x1a}};
-static const GUID IID_IResourceLoader_old = {0x085d4365, 0xdf62, 0x44da, {0xac, 0xfa, 0xe8, 0x4c, 0x31, 0xe9, 0x8d, 0x45}};
+static const GUID IID_IResourceLoader2 = {0x10eb6ec6, 0x8138, 0x48c1, {0xbc, 0x65, 0xe1, 0xf1, 0x42, 0x07, 0x36, 0x7c}};
 static const GUID IID_IResourceLoaderFactory = {0xc33a3603, 0x69dc, 0x4285, {0xa0, 0x77, 0xd5, 0xc0, 0xe4, 0x7c, 0xcb, 0xe8}};
 static const GUID IID_IResourceLoaderStatics = {0xbf777ce1, 0x19c8, 0x49c2, {0x95, 0x3c, 0x47, 0xe9, 0x22, 0x7b, 0x33, 0x4e}};
 static const GUID IID_IResourceLoaderStatics2 = {0x0cc04141, 0x6466, 0x4989, {0x94, 0x94, 0x0b, 0x82, 0xdf, 0xc5, 0x3f, 0x1f}};
 static const GUID IID_IResourceLoaderStatics2_old = {0x0cc6354d, 0x2a52, 0x4d2c, {0xae, 0x8c, 0xe5, 0x4b, 0x67, 0x95, 0xf7, 0x0b}};
+static const GUID IID_IResourceLoaderStatics3 = {0x64609dfb, 0x64ac, 0x491b, {0x81, 0x00, 0x0e, 0x55, 0x8d, 0x61, 0xc1, 0xd0}};
 
-static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, HSTRING *value )
+struct resource_loader_impl
 {
-    TRACE( "iface %p, resource %s, value %p\n", iface, debugstr_hstring(resource), value );
-    if (!value) return E_POINTER;
-    return WindowsDuplicateString( resource, value );
-}
-static HRESULT WINAPI resource_loader_GetStringForUri( void *iface, void *uri, HSTRING *value )
-{
-    if (!value) return E_POINTER;
-    return WindowsCreateString( L"", 0, value );
-}
+    const void *vtbl_loader;
+    const void *vtbl_loader2;
+};
 
 static const void *resource_loader_vtbl[];
-static struct { const void *vtbl; } resource_loader_obj = { resource_loader_vtbl };
+static const void *resource_loader2_vtbl[];
+static struct resource_loader_impl resource_loader_obj =
+{
+    resource_loader_vtbl,
+    resource_loader2_vtbl
+};
 
 static HRESULT WINAPI resource_loader_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IResourceLoader ) ||
-        IsEqualGUID( iid, &IID_IResourceLoader_old ))
+        IsEqualGUID( iid, &IID_IResourceLoader ))
     {
-        *out = &resource_loader_obj;
+        *out = &resource_loader_obj.vtbl_loader;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceLoader2 ))
+    {
+        *out = &resource_loader_obj.vtbl_loader2;
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI resource_loader2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return resource_loader_QueryInterface( iface, iid, out );
+}
+
+static HRESULT WINAPI resource_loader_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI resource_loader_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( L"Windows.ApplicationModel.Resources.ResourceLoader", 47, name );
+}
+
+static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, HSTRING *value )
+{
+    ERR( "TWINAPI: resource_loader_GetString resource %s\n", debugstr_hstring(resource) );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( resource, value );
+}
+
+static HRESULT WINAPI resource_loader_GetStringForUri( void *iface, void *uri, HSTRING *value )
+{
+    ERR( "TWINAPI: resource_loader_GetStringForUri uri %p\n", uri );
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"", 0, value );
 }
 
 static const void *resource_loader_vtbl[] =
@@ -1219,91 +1300,198 @@ static const void *resource_loader_vtbl[] =
     resource_loader_QueryInterface,
     dummy_async_AddRef,
     dummy_async_Release,
-    dummy_async_GetIids,
-    dummy_async_GetRuntimeClassName,
+    resource_loader_GetIids,
+    resource_loader_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
     resource_loader_GetString,
+};
+
+static const void *resource_loader2_vtbl[] =
+{
+    resource_loader2_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    resource_loader_GetIids,
+    resource_loader_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
     resource_loader_GetStringForUri,
 };
 
-static HRESULT WINAPI resource_loader_factory_ActivateInstance( void *iface, void **instance )
+struct resource_loader_factory_impl
 {
-    if (!instance) return E_POINTER;
-    *instance = &resource_loader_obj;
-    return S_OK;
-}
-static HRESULT WINAPI resource_loader_factory_CreateResourceLoaderByName( void *iface, HSTRING name, void **loader )
-{
-    if (!loader) return E_POINTER;
-    *loader = &resource_loader_obj;
-    return S_OK;
-}
-static HRESULT WINAPI resource_loader_factory_GetStringForReference( void *iface, void *uri, HSTRING *value )
-{
-    if (!value) return E_POINTER;
-    return WindowsCreateString( L"", 0, value );
-}
-static HRESULT WINAPI resource_loader_factory_GetForCurrentView( void *iface, void **loader )
-{
-    if (!loader) return E_POINTER;
-    *loader = &resource_loader_obj;
-    return S_OK;
-}
-static HRESULT WINAPI resource_loader_factory_GetForCurrentViewWithName( void *iface, HSTRING name, void **loader )
-{
-    if (!loader) return E_POINTER;
-    *loader = &resource_loader_obj;
-    return S_OK;
-}
-static HRESULT WINAPI resource_loader_factory_GetForViewIndependentUse( void *iface, void **loader )
-{
-    if (!loader) return E_POINTER;
-    *loader = &resource_loader_obj;
-    return S_OK;
-}
-static HRESULT WINAPI resource_loader_factory_GetForViewIndependentUseWithName( void *iface, HSTRING name, void **loader )
-{
-    if (!loader) return E_POINTER;
-    *loader = &resource_loader_obj;
-    return S_OK;
-}
+    const void *vtbl_activation;
+    const void *vtbl_factory;
+    const void *vtbl_statics;
+    const void *vtbl_statics2;
+    const void *vtbl_statics3;
+};
 
+static const void *resource_loader_activation_vtbl[];
 static const void *resource_loader_factory_vtbl[];
-static struct { const void *vtbl; } resource_loader_factory_obj = { resource_loader_factory_vtbl };
+static const void *resource_loader_statics_vtbl[];
+static const void *resource_loader_statics2_vtbl[];
+static const void *resource_loader_statics3_vtbl[];
+
+static struct resource_loader_factory_impl resource_loader_factory_obj =
+{
+    resource_loader_activation_vtbl,
+    resource_loader_factory_vtbl,
+    resource_loader_statics_vtbl,
+    resource_loader_statics2_vtbl,
+    resource_loader_statics3_vtbl
+};
 
 static HRESULT WINAPI resource_loader_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IResourceLoaderFactory ) ||
-        IsEqualGUID( iid, &IID_IResourceLoaderStatics ) ||
-        IsEqualGUID( iid, &IID_IResourceLoaderStatics2 ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &resource_loader_factory_obj.vtbl_activation;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceLoaderFactory ))
+    {
+        *out = &resource_loader_factory_obj.vtbl_factory;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceLoaderStatics ))
+    {
+        *out = &resource_loader_factory_obj.vtbl_statics;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceLoaderStatics2 ) ||
         IsEqualGUID( iid, &IID_IResourceLoaderStatics2_old ))
     {
-        *out = &resource_loader_factory_obj;
+        *out = &resource_loader_factory_obj.vtbl_statics2;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceLoaderStatics3 ))
+    {
+        *out = &resource_loader_factory_obj.vtbl_statics3;
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
 }
 
+static HRESULT WINAPI resource_loader_factory_ActivateInstance( void *iface, void **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = &resource_loader_obj.vtbl_loader;
+    return S_OK;
+}
+
+static HRESULT WINAPI resource_loader_factory_CreateResourceLoaderByName( void *iface, HSTRING name, void **loader )
+{
+    ERR( "TWINAPI: CreateResourceLoaderByName name %s\n", debugstr_hstring(name) );
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj.vtbl_loader;
+    return S_OK;
+}
+
+static HRESULT WINAPI resource_loader_statics_GetStringForReference( void *iface, void *uri, HSTRING *value )
+{
+    ERR( "TWINAPI: GetStringForReference uri %p\n", uri );
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"", 0, value );
+}
+
+static HRESULT WINAPI resource_loader_statics2_GetForCurrentView( void *iface, void **loader )
+{
+    ERR( "TWINAPI: GetForCurrentView\n" );
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj.vtbl_loader;
+    return S_OK;
+}
+static HRESULT WINAPI resource_loader_statics2_GetForCurrentViewWithName( void *iface, HSTRING name, void **loader )
+{
+    ERR( "TWINAPI: GetForCurrentViewWithName name %s\n", debugstr_hstring(name) );
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj.vtbl_loader;
+    return S_OK;
+}
+static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUse( void *iface, void **loader )
+{
+    ERR( "TWINAPI: GetForViewIndependentUse\n" );
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj.vtbl_loader;
+    return S_OK;
+}
+static HRESULT WINAPI resource_loader_statics2_GetForViewIndependentUseWithName( void *iface, HSTRING name, void **loader )
+{
+    ERR( "TWINAPI: GetForViewIndependentUseWithName name %s\n", debugstr_hstring(name) );
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj.vtbl_loader;
+    return S_OK;
+}
+
+static HRESULT WINAPI resource_loader_statics3_GetForUIContext( void *iface, void *context, void **loader )
+{
+    ERR( "TWINAPI: GetForUIContext context %p\n", context );
+    if (!loader) return E_POINTER;
+    *loader = &resource_loader_obj.vtbl_loader;
+    return S_OK;
+}
+
+static const void *resource_loader_activation_vtbl[] =
+{
+    resource_loader_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    resource_loader_GetIids,
+    resource_loader_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    resource_loader_factory_ActivateInstance,
+};
+
 static const void *resource_loader_factory_vtbl[] =
 {
     resource_loader_factory_QueryInterface,
     push_notification_factory_AddRef,
     push_notification_factory_Release,
-    push_notification_factory_GetIids,
-    push_notification_factory_GetRuntimeClassName,
+    resource_loader_GetIids,
+    resource_loader_GetRuntimeClassName,
     push_notification_factory_GetTrustLevel,
-    resource_loader_factory_ActivateInstance,
     resource_loader_factory_CreateResourceLoaderByName,
-    resource_loader_factory_GetStringForReference,
-    resource_loader_factory_GetForCurrentView,
-    resource_loader_factory_GetForCurrentViewWithName,
-    resource_loader_factory_GetForViewIndependentUse,
-    resource_loader_factory_GetForViewIndependentUseWithName,
+};
+
+static const void *resource_loader_statics_vtbl[] =
+{
+    resource_loader_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    resource_loader_GetIids,
+    resource_loader_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    resource_loader_statics_GetStringForReference,
+};
+
+static const void *resource_loader_statics2_vtbl[] =
+{
+    resource_loader_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    resource_loader_GetIids,
+    resource_loader_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    resource_loader_statics2_GetForCurrentView,
+    resource_loader_statics2_GetForCurrentViewWithName,
+    resource_loader_statics2_GetForViewIndependentUse,
+    resource_loader_statics2_GetForViewIndependentUseWithName,
+};
+
+static const void *resource_loader_statics3_vtbl[] =
+{
+    resource_loader_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    resource_loader_GetIids,
+    resource_loader_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    resource_loader_statics3_GetForUIContext,
 };
 
 HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
@@ -1324,6 +1512,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( client_device_information_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_System_Profile_AnalyticsInfo ))
         IActivationFactory_QueryInterface( analytics_info_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_System_Power_PowerManager ))
+        IActivationFactory_QueryInterface( power_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_System_UserProfile_AdvertisingManager ))
         IActivationFactory_QueryInterface( advertising_manager_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_UI_ViewManagement_ApplicationView ))
@@ -1356,10 +1546,10 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.StartupTask" ))
         *factory = (IActivationFactory *)&startup_task_factory_obj;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.Resources.ResourceLoader" ))
-        *factory = (IActivationFactory *)&resource_loader_factory_obj;
+        *factory = (IActivationFactory *)&resource_loader_factory_obj.vtbl_activation;
     else if (!wcscmp( buffer, L"Windows.System.Profile.HardwareIdentification" ))
         *factory = (IActivationFactory *)&hw_id_obj.vtbl_factory;
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return E_NOINTERFACE;
 }

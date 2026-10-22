@@ -2593,3 +2593,20 @@ void WINAPI RecordFeatureUsage(UINT32 feature_id, UINT32 kind, UINT32 addend, co
 {
     FIXME("(%u, %u, %u, %s) stub!\n", feature_id, kind, addend, wine_dbgstr_a(origin_name));
 }
+
+void WINAPI RecordFeatureError(UINT32 feature_id, const void *error)
+{
+    FIXME("(%u, %p) stub!\n", feature_id, error);
+}
+
+void WINAPI UnsubscribeFeatureStateChangeNotification(FEATURE_STATE_CHANGE_SUBSCRIPTION subscription)
+{
+    FIXME("(%p) stub!\n", subscription);
+}
+
+UINT32 WINAPI GetFeatureVariant(UINT32 feature_id, FEATURE_CHANGE_TIME change_time, UINT32 *payload_id)
+{
+    TRACE("(%u, %u, %p) stub!\n", feature_id, change_time, payload_id);
+    if (payload_id) *payload_id = 0;
+    return 0;
+}

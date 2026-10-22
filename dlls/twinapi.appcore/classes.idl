@@ -29,6 +29,7 @@ import "windows.storage.streams.idl";
 import "windows.ui.windowmanagement.idl";
 import "windows.security.exchangeactivesyncprovisioning.idl";
 import "windows.system.profile.idl";
+import "windows.system.power.idl";
 import "windows.system.userprofile.idl";
 import "windows.ui.viewmanagement.idl";
 import "windows.applicationmodel.core.idl";
@@ -40,6 +41,9 @@ namespace Windows.Security.ExchangeActiveSyncProvisioning {
 namespace Windows.System.Profile {
     runtimeclass AnalyticsInfo;
     runtimeclass HardwareIdentification;
+}
+namespace Windows.System.Power {
+    runtimeclass PowerManager;
 }
 namespace Windows.System.UserProfile {
     runtimeclass AdvertisingManager;

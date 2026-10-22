@@ -30,23 +30,27 @@
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
-#include "windows.foundation.h"
 #define WIDL_using_Windows_Security_ExchangeActiveSyncProvisioning
-#include "windows.security.exchangeactivesyncprovisioning.h"
 #define WIDL_using_Windows_System_Profile
-#include "windows.system.profile.h"
+#define WIDL_using_Windows_System_Power
 #define WIDL_using_Windows_System_UserProfile
-#include "windows.system.userprofile.h"
 #define WIDL_using_Windows_UI_ViewManagement
-#include "windows.ui.viewmanagement.h"
 #define WIDL_using_Windows_ApplicationModel_Core
-#include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
-#include "windows.applicationmodel.datatransfer.h"
 #define WIDL_using_Windows_Storage
-#include "windows.storage.h"
 #define WIDL_using_Windows_Storage_Streams
+
+#include "windows.foundation.h"
+#include "windows.security.exchangeactivesyncprovisioning.h"
+#include "windows.system.profile.h"
+#include "windows.system.power.h"
+#include "windows.system.userprofile.h"
+#include "windows.ui.viewmanagement.h"
+#include "windows.applicationmodel.core.h"
+#include "windows.applicationmodel.datatransfer.h"
+#include "windows.storage.h"
 #include "windows.storage.streams.h"
+#include "robuffer.h"
 
 #include "wine/debug.h"
 
@@ -54,6 +58,7 @@ extern IActivationFactory *application_view_factory;
 extern IActivationFactory *client_device_information_factory;
 extern IActivationFactory *analytics_info_factory;
 extern IActivationFactory *advertising_manager_factory;
+extern IActivationFactory *power_manager_statics_factory;
 extern IActivationFactory *core_application_factory;
 extern IActivationFactory *app_instance_factory;
 extern IActivationFactory *data_transfer_manager_statics_factory;
