@@ -85,6 +85,12 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    if (!wcsncmp(classid, L"Windows.System.Threading.", 25))
+    {
+        *out = wcsdup(L"windows.system.threading.dll");
+        return S_OK;
+    }
+
     if (!wcsncmp(classid, L"WhatsAppNative.", 15))
     {
         if (!wcsncmp(classid, L"WhatsAppNative.Voip.", 20))
@@ -670,31 +676,13 @@ HRESULT WINAPI SetRestrictedErrorInfo(IRestrictedErrorInfo *info)
  */
 BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknown *language_exception)
 {
-    void *frames[32];
-    USHORT n_frames, k;
-
-    ERR("RoOriginateLanguageException: error %#lx, message %s, exception %p\n", error, debugstr_hstring(message), language_exception);
+    TRACE("error %#lx, message %s, exception %p\n", error, debugstr_hstring(message), language_exception);
     if (language_exception)
     {
         IRestrictedErrorInfo *restricted;
         IErrorInfo *error_info;
         static const GUID IID_IRestrictedErrorInfo = {0x82ba70a5, 0x79a1, 0x4fe8, {0x8c, 0xe5, 0x13, 0xe5, 0x72, 0x33, 0x9f, 0x04}};
         static const GUID IID_IErrorInfo = {0x1cf2b43f, 0x97b2, 0x11cf, {0xb8, 0xf2, 0x00, 0xaa, 0x00, 0x6e, 0x34, 0xdb}};
-        static const GUID IID__Exception = {0xb36b5c63, 0x42ef, 0x38bc, {0xa7, 0x12, 0x34, 0x6b, 0x6a, 0x70, 0x34, 0x22}};
-        void *pException = NULL;
-
-        if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID__Exception, &pException)))
-        {
-            void **vtbl = *(void ***)pException;
-            HRESULT (STDMETHODCALLTYPE *get_ToString)(void *, BSTR *) = (void *)vtbl[7];
-            BSTR str = NULL;
-            if (SUCCEEDED(get_ToString(pException, &str)))
-            {
-                ERR("  ManagedException: %s\n", wine_dbgstr_w(str));
-                SysFreeString(str);
-            }
-            IUnknown_Release((IUnknown *)pException);
-        }
 
         if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID_IRestrictedErrorInfo, (void **)&restricted)))
         {
@@ -702,8 +690,8 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
             HRESULT code = 0;
             if (SUCCEEDED(IRestrictedErrorInfo_GetErrorDetails(restricted, &desc, &code, &rest, &cap)))
             {
-                ERR("  RestrictedError: desc=%s, code=%#lx, restricted=%s\n",
-                    wine_dbgstr_w(desc), code, wine_dbgstr_w(rest));
+                TRACE("  RestrictedError: desc=%s, code=%#lx, restricted=%s\n",
+                      wine_dbgstr_w(desc), code, wine_dbgstr_w(rest));
                 SysFreeString(desc);
                 SysFreeString(rest);
                 SysFreeString(cap);
@@ -715,15 +703,12 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
             BSTR desc = NULL;
             if (SUCCEEDED(IErrorInfo_GetDescription(error_info, &desc)))
             {
-                ERR("  ErrorInfo: desc=%s\n", wine_dbgstr_w(desc));
+                TRACE("  ErrorInfo: desc=%s\n", wine_dbgstr_w(desc));
                 SysFreeString(desc);
             }
             IErrorInfo_Release(error_info);
         }
     }
-    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
-    for (k = 0; k < n_frames; k++)
-        ERR("  originate_lang_bt[%u] = %p\n", k, frames[k]);
     return FALSE;
 }
 
@@ -732,13 +717,7 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
  */
 BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
 {
-    void *frames[32];
-    USHORT n_frames, k;
-
-    ERR("%#lx, %s\n", error, debugstr_hstring(message));
-    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
-    for (k = 0; k < n_frames; k++)
-        ERR("  originate_error_bt[%u] = %p\n", k, frames[k]);
+    TRACE("%#lx, %s\n", error, debugstr_hstring(message));
     return FALSE;
 }
 
@@ -747,13 +726,7 @@ BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
  */
 BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
 {
-    void *frames[32];
-    USHORT n_frames, k;
-
-    ERR("RoOriginateErrorW: error %#lx, max_len %u, message %s\n", error, max_len, wine_dbgstr_wn(message, max_len));
-    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
-    for (k = 0; k < n_frames; k++)
-        ERR("  originate_bt[%u] = %p\n", k, frames[k]);
+    TRACE("error %#lx, max_len %u, message %s\n", error, max_len, wine_dbgstr_wn(message, max_len));
     return FALSE;
 }
 
