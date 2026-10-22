@@ -32,6 +32,7 @@
 
 #include "dxgi1_6.h"
 #include "d3d10_1.h"
+#include "d3d11_4.h"
 #include "d3d12.h"
 #ifdef DXGI_INIT_GUID
 #include "initguid.h"
@@ -194,6 +195,46 @@ HRESULT d3d12_swapchain_create(IWineDXGIFactory *factory, ID3D12CommandQueue *qu
 
 BOOL dxgi_validate_swapchain_desc(const DXGI_SWAP_CHAIN_DESC1 *desc);
 
+struct dxgi_runtime_desc
+{
+    UINT size;
+    UINT version;
+    UINT width;
+    UINT height;
+    DXGI_FORMAT format;
+    UINT unknown_0;
+    UINT unknown_1;
+    UINT keyed_mutex;
+    UINT mutex_handle;
+    UINT sync_handle;
+    UINT nt_shared;
+    UINT unknown_2;
+    UINT unknown_3;
+    UINT unknown_4;
+};
+
+struct d3d11_runtime_desc
+{
+    struct dxgi_runtime_desc dxgi;
+    D3D11_RESOURCE_DIMENSION dimension;
+    union
+    {
+        D3D10_BUFFER_DESC d3d10_buf;
+        D3D10_TEXTURE1D_DESC d3d10_1d;
+        D3D10_TEXTURE2D_DESC d3d10_2d;
+        D3D10_TEXTURE3D_DESC d3d10_3d;
+        D3D11_BUFFER_DESC d3d11_buf;
+        D3D11_TEXTURE1D_DESC d3d11_1d;
+        D3D11_TEXTURE2D_DESC d3d11_2d;
+        D3D11_TEXTURE3D_DESC d3d11_3d;
+    };
+};
+
+static inline BOOL is_kmt_handle(HANDLE h)
+{
+    return ((ULONG_PTR)h & 0xc0000000) != 0;
+}
+
 /* IDXGISurface/IDXGIResource */
 struct dxgi_resource
 {
@@ -208,6 +249,8 @@ struct dxgi_resource
     struct wined3d_resource *wined3d_resource;
     unsigned int subresource_idx;
     HDC dc;
+    UINT kmt_handle;
+    HANDLE nt_handle;
 };
 
 HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,

@@ -234,6 +234,18 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         return WINED3DERR_INVALIDCALL;
     }
 
+    if (!dst_window_override)
+    {
+        HWND target_window = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
+        if (!target_window) target_window = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
+        if (target_window)
+        {
+            ERR("WINED3D: redirecting present from win_handle %p to target_window %p\n", swapchain->win_handle, target_window);
+            ShowWindow(target_window, SW_SHOW);
+            dst_window_override = target_window;
+        }
+    }
+
     if (!src_rect)
     {
         SetRect(&s, 0, 0, desc->backbuffer_width, desc->backbuffer_height);
@@ -242,10 +254,11 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
 
     if (!dst_rect)
     {
+        HWND target = dst_window_override ? dst_window_override : swapchain->win_handle;
         if (!desc->windowed)
             SetRect(&d, 0, 0, desc->backbuffer_width, desc->backbuffer_height);
         else
-            GetClientRect(swapchain->win_handle, &d);
+            GetClientRect(target, &d);
         dst_rect = &d;
     }
 
@@ -629,6 +642,20 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
     }
 
     TRACE("Presenting DC %p.\n", context_gl->dc);
+    ERR("WINED3D: swapchain_gl_present swapchain %p dc %p win_handle %p\n", swapchain, context_gl->dc, swapchain->win_handle);
+
+    {
+        HWND target_window = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
+        if (!target_window) target_window = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
+        if (target_window)
+        {
+            HDC dst_dc = GetDC(target_window);
+            RECT rect;
+            GetClientRect(target_window, &rect);
+            BitBlt(dst_dc, 0, 0, rect.right, rect.bottom, context_gl->dc, 0, 0, SRCCOPY);
+            ReleaseDC(target_window, dst_dc);
+        }
+    }
 
     pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format - 1];
     if (context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc
@@ -1339,6 +1366,19 @@ static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchai
             draw_rect.right - draw_rect.left, draw_rect.bottom - draw_rect.top,
             src_dc, draw_rect.left, draw_rect.top, SRCCOPY);
 
+    {
+        HWND core = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
+        if (core && IsWindowVisible(core))
+        {
+            HDC core_dc = GetDC(core);
+            RECT cr;
+            GetClientRect(core, &cr);
+            BitBlt(core_dc, 0, 0, cr.right, cr.bottom, src_dc, 0, 0, SRCCOPY);
+            ReleaseDC(core, core_dc);
+            ERR("WINED3D: blitted frontbuffer to CoreWindow %p\n", core);
+        }
+    }
+
     SetRectEmpty(&swapchain->front_buffer_update);
 }
 
@@ -1555,6 +1595,19 @@ static HRESULT wined3d_swapchain_init(struct wined3d_swapchain *swapchain, struc
         FIXME("Unimplemented swap effect %#x.\n", desc->swap_effect);
 
     window = desc->device_window ? desc->device_window : device->create_parms.focus_window;
+    {
+        HWND core = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
+        if (core && IsWindowVisible(core))
+        {
+            WCHAR class_name[256];
+            if (!window || window == GetDesktopWindow() ||
+                (GetClassNameW(window, class_name, ARRAY_SIZE(class_name)) && !wcscmp(class_name, L"static")))
+            {
+                ERR("WINED3D: wined3d_swapchain_init redirecting window %p to CoreWindow %p\n", window, core);
+                window = core;
+            }
+        }
+    }
     TRACE("Using target window %p.\n", window);
 
     if (FAILED(hr = wined3d_swapchain_state_init(&swapchain->state, desc, window, device->wined3d, state_parent)))

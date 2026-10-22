@@ -18,6 +18,10 @@
  */
 
 #include "dxgi_private.h"
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
+#include "winternl.h"
+#include "wine/server.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 
@@ -382,12 +386,217 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_GetDevice(IDXGIResource1 *iface, 
     return IDXGIDevice_QueryInterface(resource->device, riid, device);
 }
 
+static BOOL get_dxgi_resource_desc(struct dxgi_resource *resource, struct d3d11_runtime_desc *desc, UINT *misc_flags)
+{
+    ID3D11Resource *d3d11_res;
+    ID3D10Resource *d3d10_res;
+
+    memset(desc, 0, sizeof(*desc));
+    desc->dxgi.size = sizeof(*desc);
+    desc->dxgi.version = 4;
+    *misc_flags = 0;
+
+    if (resource->outer_unknown &&
+        SUCCEEDED(IUnknown_QueryInterface(resource->outer_unknown, &IID_ID3D11Resource, (void **)&d3d11_res)))
+    {
+        D3D11_RESOURCE_DIMENSION dim;
+        ID3D11Resource_GetType(d3d11_res, &dim);
+        desc->dimension = dim;
+
+        switch (dim)
+        {
+            case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+            {
+                ID3D11Texture2D *tex;
+                if (SUCCEEDED(ID3D11Resource_QueryInterface(d3d11_res, &IID_ID3D11Texture2D, (void **)&tex)))
+                {
+                    ID3D11Texture2D_GetDesc(tex, &desc->d3d11_2d);
+                    ID3D11Texture2D_Release(tex);
+                    desc->dxgi.width = desc->d3d11_2d.Width;
+                    desc->dxgi.height = desc->d3d11_2d.Height;
+                    desc->dxgi.format = desc->d3d11_2d.Format;
+                    *misc_flags = desc->d3d11_2d.MiscFlags;
+                }
+                break;
+            }
+            case D3D11_RESOURCE_DIMENSION_BUFFER:
+            {
+                ID3D11Buffer *buf;
+                if (SUCCEEDED(ID3D11Resource_QueryInterface(d3d11_res, &IID_ID3D11Buffer, (void **)&buf)))
+                {
+                    ID3D11Buffer_GetDesc(buf, &desc->d3d11_buf);
+                    ID3D11Buffer_Release(buf);
+                    desc->dxgi.width = desc->d3d11_buf.ByteWidth;
+                    *misc_flags = desc->d3d11_buf.MiscFlags;
+                }
+                break;
+            }
+            case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+            {
+                ID3D11Texture1D *tex;
+                if (SUCCEEDED(ID3D11Resource_QueryInterface(d3d11_res, &IID_ID3D11Texture1D, (void **)&tex)))
+                {
+                    ID3D11Texture1D_GetDesc(tex, &desc->d3d11_1d);
+                    ID3D11Texture1D_Release(tex);
+                    desc->dxgi.width = desc->d3d11_1d.Width;
+                    desc->dxgi.format = desc->d3d11_1d.Format;
+                    *misc_flags = desc->d3d11_1d.MiscFlags;
+                }
+                break;
+            }
+            case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+            {
+                ID3D11Texture3D *tex;
+                if (SUCCEEDED(ID3D11Resource_QueryInterface(d3d11_res, &IID_ID3D11Texture3D, (void **)&tex)))
+                {
+                    ID3D11Texture3D_GetDesc(tex, &desc->d3d11_3d);
+                    ID3D11Texture3D_Release(tex);
+                    desc->dxgi.width = desc->d3d11_3d.Width;
+                    desc->dxgi.height = desc->d3d11_3d.Height;
+                    desc->dxgi.format = desc->d3d11_3d.Format;
+                    *misc_flags = desc->d3d11_3d.MiscFlags;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        ID3D11Resource_Release(d3d11_res);
+        return TRUE;
+    }
+
+    if (resource->outer_unknown &&
+        SUCCEEDED(IUnknown_QueryInterface(resource->outer_unknown, &IID_ID3D10Resource, (void **)&d3d10_res)))
+    {
+        D3D10_RESOURCE_DIMENSION dim;
+        ID3D10Resource_GetType(d3d10_res, &dim);
+        desc->dxgi.version = 1;
+
+        switch (dim)
+        {
+            case D3D10_RESOURCE_DIMENSION_TEXTURE2D:
+            {
+                ID3D10Texture2D *tex;
+                if (SUCCEEDED(ID3D10Resource_QueryInterface(d3d10_res, &IID_ID3D10Texture2D, (void **)&tex)))
+                {
+                    desc->dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+                    ID3D10Texture2D_GetDesc(tex, &desc->d3d10_2d);
+                    ID3D10Texture2D_Release(tex);
+                    desc->dxgi.width = desc->d3d10_2d.Width;
+                    desc->dxgi.height = desc->d3d10_2d.Height;
+                    desc->dxgi.format = desc->d3d10_2d.Format;
+                    *misc_flags = desc->d3d10_2d.MiscFlags;
+                }
+                break;
+            }
+            case D3D10_RESOURCE_DIMENSION_BUFFER:
+            {
+                ID3D10Buffer *buf;
+                if (SUCCEEDED(ID3D10Resource_QueryInterface(d3d10_res, &IID_ID3D10Buffer, (void **)&buf)))
+                {
+                    desc->dimension = D3D11_RESOURCE_DIMENSION_BUFFER;
+                    ID3D10Buffer_GetDesc(buf, &desc->d3d10_buf);
+                    ID3D10Buffer_Release(buf);
+                    desc->dxgi.width = desc->d3d10_buf.ByteWidth;
+                    *misc_flags = desc->d3d10_buf.MiscFlags;
+                }
+                break;
+            }
+            default:
+                break;
+        }
+        ID3D10Resource_Release(d3d10_res);
+        return TRUE;
+    }
+
+    /* Fallback to wined3d_resource */
+    if (resource->wined3d_resource)
+    {
+        struct wined3d_resource_desc wined3d_desc;
+        wined3d_mutex_lock();
+        wined3d_resource_get_desc(resource->wined3d_resource, &wined3d_desc);
+        wined3d_mutex_unlock();
+
+        desc->dimension = D3D11_RESOURCE_DIMENSION_TEXTURE2D;
+        desc->d3d11_2d.Width = wined3d_desc.width;
+        desc->d3d11_2d.Height = wined3d_desc.height;
+        desc->d3d11_2d.MipLevels = 1;
+        desc->d3d11_2d.ArraySize = 1;
+        desc->d3d11_2d.Format = dxgi_format_from_wined3dformat(wined3d_desc.format);
+        dxgi_sample_desc_from_wined3d(&desc->d3d11_2d.SampleDesc, wined3d_desc.multisample_type, wined3d_desc.multisample_quality);
+        desc->d3d11_2d.Usage = D3D11_USAGE_DEFAULT;
+        desc->d3d11_2d.BindFlags = dxgi_usage_from_wined3d_bind_flags(wined3d_desc.bind_flags);
+        desc->d3d11_2d.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+        *misc_flags = desc->d3d11_2d.MiscFlags;
+
+        desc->dxgi.width = desc->d3d11_2d.Width;
+        desc->dxgi.height = desc->d3d11_2d.Height;
+        desc->dxgi.format = desc->d3d11_2d.Format;
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 /* IDXGIResource methods */
 static HRESULT STDMETHODCALLTYPE dxgi_resource_GetSharedHandle(IDXGIResource1 *iface, HANDLE *shared_handle)
 {
-    FIXME("iface %p, shared_handle %p stub!\n", iface, shared_handle);
+    struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
+    struct d3d11_runtime_desc desc;
+    UINT misc_flags = 0;
+    NTSTATUS status;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, shared_handle %p.\n", iface, shared_handle);
+
+    if (!shared_handle)
+        return E_INVALIDARG;
+
+    if (!get_dxgi_resource_desc(resource, &desc, &misc_flags))
+        return E_FAIL;
+
+    if (misc_flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE)
+    {
+        WARN("Resource has D3D11_RESOURCE_MISC_SHARED_NTHANDLE, GetSharedHandle is invalid.\n");
+        return E_INVALIDARG;
+    }
+
+    if (!(misc_flags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX)))
+    {
+        TRACE("Resource is not shared, returning NULL handle.\n");
+        *shared_handle = NULL;
+        return S_OK;
+    }
+
+    if (resource->kmt_handle)
+    {
+        *shared_handle = (HANDLE)(ULONG_PTR)resource->kmt_handle;
+        return S_OK;
+    }
+
+    desc.dxgi.keyed_mutex = !!(misc_flags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX);
+    desc.dxgi.nt_shared = 0;
+
+    SERVER_START_REQ( d3dkmt_object_create )
+    {
+        req->type = D3DKMT_RESOURCE;
+        req->fd = -1;
+        req->value = 0;
+        wine_server_add_data( req, &desc, sizeof(desc) );
+        status = wine_server_call( req );
+        if (!status)
+            resource->kmt_handle = reply->global;
+    }
+    SERVER_END_REQ;
+
+    if (status)
+    {
+        WARN("Failed to create d3dkmt object, status %#lx.\n", status);
+        return HRESULT_FROM_NT(status);
+    }
+
+    *shared_handle = (HANDLE)(ULONG_PTR)resource->kmt_handle;
+    TRACE("Exported shared KMT handle %p (global %#x).\n", *shared_handle, resource->kmt_handle);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_resource_GetUsage(IDXGIResource1 *iface, DXGI_USAGE *usage)
@@ -478,10 +687,97 @@ static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSubresourceSurface(IDXGIRes
 static HRESULT STDMETHODCALLTYPE dxgi_resource_CreateSharedHandle(IDXGIResource1 *iface,
         const SECURITY_ATTRIBUTES *attributes, DWORD access, const WCHAR *name, HANDLE *handle)
 {
-    FIXME("iface %p, attributes %p, access %#lx, name %s, handle %p stub!\n", iface, attributes,
+    struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
+    struct d3d11_runtime_desc desc;
+    struct object_attributes *objattr = NULL;
+    data_size_t attr_len = 0;
+    data_size_t name_len = 0;
+    UINT misc_flags = 0;
+    NTSTATUS status;
+
+    TRACE("iface %p, attributes %p, access %#lx, name %s, handle %p.\n", iface, attributes,
             access, wine_dbgstr_w(name), handle);
 
-    return E_NOTIMPL;
+    if (!handle)
+        return E_POINTER;
+
+    if (!get_dxgi_resource_desc(resource, &desc, &misc_flags))
+        return E_FAIL;
+
+    if (!(misc_flags & D3D11_RESOURCE_MISC_SHARED_NTHANDLE))
+    {
+        WARN("Resource does not have D3D11_RESOURCE_MISC_SHARED_NTHANDLE.\n");
+        return E_INVALIDARG;
+    }
+
+    *handle = NULL;
+
+    if (!resource->kmt_handle)
+    {
+        desc.dxgi.keyed_mutex = !!(misc_flags & D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX);
+        desc.dxgi.nt_shared = 1;
+
+        SERVER_START_REQ( d3dkmt_object_create )
+        {
+            req->type = D3DKMT_RESOURCE;
+            req->fd = -1;
+            req->value = 0;
+            wine_server_add_data( req, &desc, sizeof(desc) );
+            status = wine_server_call( req );
+            if (!status)
+                resource->kmt_handle = reply->global;
+        }
+        SERVER_END_REQ;
+
+        if (status)
+        {
+            WARN("Failed to create d3dkmt object, status %#lx.\n", status);
+            return HRESULT_FROM_NT(status);
+        }
+    }
+
+    if (name)
+        name_len = wcslen(name) * sizeof(WCHAR);
+
+    attr_len = sizeof(struct object_attributes) + name_len;
+    if (!(objattr = calloc(1, attr_len)))
+        return E_OUTOFMEMORY;
+
+    objattr->rootdir = 0;
+    objattr->attributes = OBJ_CASE_INSENSITIVE;
+    if (attributes && attributes->bInheritHandle)
+        objattr->attributes |= OBJ_INHERIT;
+    objattr->sd_len = 0;
+    objattr->name_len = name_len;
+    if (name_len)
+        memcpy(objattr + 1, name, name_len);
+
+    SERVER_START_REQ( d3dkmt_share_objects )
+    {
+        req->resource = resource->kmt_handle;
+        req->mutex = 0;
+        req->sync = 0;
+        req->access = access;
+        wine_server_add_data( req, objattr, attr_len );
+        status = wine_server_call( req );
+        if (!status)
+        {
+            *handle = wine_server_ptr_handle( reply->handle );
+            resource->nt_handle = *handle;
+        }
+    }
+    SERVER_END_REQ;
+
+    free(objattr);
+
+    if (status)
+    {
+        WARN("Failed to share object, status %#lx.\n", status);
+        return HRESULT_FROM_NT(status);
+    }
+
+    TRACE("Created NT shared handle %p for resource %p.\n", *handle, resource);
+    return S_OK;
 }
 
 static const struct IDXGIResource1Vtbl dxgi_resource_vtbl =
@@ -539,6 +835,8 @@ HRESULT dxgi_resource_init(struct dxgi_resource *resource, IDXGIDevice *device,
     resource->device = device;
     resource->wined3d_resource = wined3d_resource;
     resource->dc = NULL;
+    resource->kmt_handle = 0;
+    resource->nt_handle = NULL;
     if (is_subresource)
     {
         resource->parent_resource = parent_resource;

@@ -185,6 +185,9 @@ static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGI
     return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
 }
 
+static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *iface,
+        UINT buffer_idx, REFIID riid, void **surface);
+
 /* IUnknown methods */
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 *iface, REFIID riid, void **object)
@@ -203,6 +206,15 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_QueryInterface(IDXGISwapChain4 
         IUnknown_AddRef(iface);
         *object = iface;
         return S_OK;
+    }
+
+    if (IsEqualGUID(riid, &IID_IDXGIResource)
+            || IsEqualGUID(riid, &IID_IDXGIResource1)
+            || IsEqualGUID(riid, &IID_IDXGISurface2)
+            || IsEqualGUID(riid, &IID_IDXGISurface1)
+            || IsEqualGUID(riid, &IID_IDXGISurface))
+    {
+        return d3d11_swapchain_GetBuffer(iface, 0, riid, object);
     }
 
     WARN("%s not implemented, returning E_NOINTERFACE\n", debugstr_guid(riid));
@@ -305,6 +317,8 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         unsigned int sync_interval, unsigned int flags)
 {
     HRESULT hr;
+
+    ERR("DXGI: d3d11_swapchain_present swapchain %p hwnd %p\n", swapchain, d3d11_swapchain_get_hwnd(swapchain));
 
     if (sync_interval > 4)
     {

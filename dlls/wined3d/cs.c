@@ -1089,6 +1089,15 @@ static void wined3d_cs_exec_draw(struct wined3d_cs *cs, const void *data)
     struct wined3d_state *state = &cs->state;
     const struct wined3d_cs_draw *op = data;
     unsigned int i;
+    static DWORD last_log;
+    DWORD now = GetTickCount();
+
+    if (now - last_log > 1000)
+    {
+        last_log = now;
+        ERR("WINED3D_CS: wined3d_cs_exec_draw indexed %d, rtv %p\n",
+            op->parameters.indexed, state->fb.render_targets[0]);
+    }
 
     base_vertex_idx = 0;
     if (!op->parameters.indirect)

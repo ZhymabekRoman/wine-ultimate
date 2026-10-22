@@ -316,14 +316,36 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForHwnd(IWineDXGIFa
     return DXGI_ERROR_UNSUPPORTED;
 }
 
+static const GUID IID_ICoreWindowInterop = { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x97, 0xcb, 0x98 } };
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForCoreWindow(IWineDXGIFactory *iface,
         IUnknown *device, IUnknown *window, const DXGI_SWAP_CHAIN_DESC1 *desc,
         IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
+    HWND hwnd = NULL;
+    HRESULT hr;
+
     FIXME("iface %p, device %p, window %p, desc %p, output %p, swapchain %p stub!\n",
             iface, device, window, desc, output, swapchain);
 
-    return E_NOTIMPL;
+    if (!window) return E_POINTER;
+
+    struct { HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+             ULONG (WINAPI *AddRef)(void *);
+             ULONG (WINAPI *Release)(void *);
+             HRESULT (WINAPI *GetWindowHandle)(void *, HWND *); } **interop = (void *)window;
+
+    hr = IUnknown_QueryInterface(window, &IID_ICoreWindowInterop, (void **)&interop);
+    if (SUCCEEDED(hr) && interop)
+    {
+        (*interop)->GetWindowHandle(interop, &hwnd);
+        IUnknown_Release((IUnknown *)interop);
+    }
+    if (!hwnd) hwnd = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
+    if (!hwnd) hwnd = GetActiveWindow();
+    if (!hwnd) hwnd = GetForegroundWindow();
+
+    return dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, desc, NULL, output, swapchain);
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_GetSharedResourceAdapterLuid(IWineDXGIFactory *iface,
@@ -337,10 +359,11 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_GetSharedResourceAdapterLuid(IWine
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusWindow(IWineDXGIFactory *iface,
         HWND window, UINT message, DWORD *cookie)
 {
-    FIXME("iface %p, window %p, message %#x, cookie %p stub!\n",
+    WARN("iface %p, window %p, message %#x, cookie %p semi-stub!\n",
             iface, window, message, cookie);
-
-    return E_NOTIMPL;
+    if (!cookie) return E_INVALIDARG;
+    *cookie = 0xbeef0001;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterStereoStatusEvent(IWineDXGIFactory *iface,
@@ -368,25 +391,59 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterStereoStatusWindow(IWineDX
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusEvent(IWineDXGIFactory *iface,
         HANDLE event, DWORD *cookie)
 {
-    FIXME("iface %p, event %p, cookie %p stub!\n", iface, event, cookie);
-
-    return E_NOTIMPL;
+    WARN("iface %p, event %p, cookie %p semi-stub!\n", iface, event, cookie);
+    if (!cookie) return E_INVALIDARG;
+    *cookie = 0xbeef0002;
+    return S_OK;
 }
 
 static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFactory *iface, DWORD cookie)
 {
-    FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
+    TRACE("iface %p, cookie %#lx semi-stub!\n", iface, cookie);
+}
+
+static BOOL CALLBACK find_top_level_window_proc(HWND hwnd, LPARAM lparam)
+{
+    HWND *out_hwnd = (HWND *)lparam;
+    WCHAR class_name[256];
+
+    if (!IsWindowVisible(hwnd) || IsIconic(hwnd))
+        return TRUE;
+
+    if (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)
+        return TRUE;
+
+    RealGetWindowClassW(hwnd, class_name, ARRAY_SIZE(class_name));
+    if (!wcscmp(class_name, L"Progman") || !wcscmp(class_name, L"Shell_TrayWnd") ||
+        !wcscmp(class_name, L"static") || !wcscmp(class_name, L"Message"))
+        return TRUE;
+
+    *out_hwnd = hwnd;
+    return FALSE;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
-    HWND hwnd;
+    HWND hwnd = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
+    if (!hwnd) hwnd = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
+    if (!hwnd) hwnd = GetActiveWindow();
+    if (!hwnd) hwnd = GetForegroundWindow();
+    if (!hwnd || hwnd == GetDesktopWindow())
+    {
+        HWND found_hwnd = NULL;
+        EnumWindows(find_top_level_window_proc, (LPARAM)&found_hwnd);
+        hwnd = found_hwnd;
+    }
+    if (hwnd)
+    {
+        HWND root = GetAncestor(hwnd, GA_ROOT);
+        if (root) hwnd = root;
+    }
+    if (!hwnd)
+        hwnd = CreateWindowA("static", NULL, WS_POPUP, 0, 0, desc->Width, desc->Height, 0, 0, 0, NULL);
 
-    FIXME("iface %p, device %p, desc %p, output %p, swapchain %p stub!\n",
-            iface, device, desc, output, swapchain);
-
-    hwnd = CreateWindowA("static", NULL, WS_POPUP, 0, 0, desc->Width, desc->Height, 0, 0, 0, NULL);
+    ERR("CreateSwapChainForComposition using hwnd %p (size %ux%u)\n", hwnd, desc->Width, desc->Height);
     return dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, desc, NULL, output, swapchain);
 }
 
@@ -490,17 +547,22 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_EnumAdapterByGpuPreference(IWineDX
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterAdaptersChangedEvent(IWineDXGIFactory *iface,
         HANDLE event, DWORD *cookie)
 {
-    FIXME("iface %p, event %p, cookie %p stub!\n", iface, event, cookie);
+    static DWORD next_cookie = 1;
+    FIXME("iface %p, event %p, cookie %p semi-stub!\n", iface, event, cookie);
 
-    return E_NOTIMPL;
+    if (!event || !cookie)
+        return E_INVALIDARG;
+
+    *cookie = InterlockedIncrement((LONG *)&next_cookie);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_UnregisterAdaptersChangedEvent(IWineDXGIFactory *iface,
         DWORD cookie)
 {
-    FIXME("iface %p, cookie %#lx stub!\n", iface, cookie);
+    FIXME("iface %p, cookie %#lx semi-stub!\n", iface, cookie);
 
-    return E_NOTIMPL;
+    return S_OK;
 }
 
 static const struct IWineDXGIFactoryVtbl dxgi_factory_vtbl =

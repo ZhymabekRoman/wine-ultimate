@@ -1717,7 +1717,7 @@ static void adapter_vk_flush_context(struct wined3d_context *context)
 {
     struct wined3d_context_vk *context_vk = wined3d_context_vk(context);
 
-    TRACE("context_vk %p.\n", context_vk);
+    ERR("WINED3D_VK: adapter_vk_flush_context context %p\n", context);
 
     wined3d_context_vk_submit_command_buffer(context_vk, 0, NULL, NULL, 0, NULL);
 }
@@ -1730,8 +1730,15 @@ static void adapter_vk_draw_primitive(struct wined3d_device *device,
     struct wined3d_context_vk *context_vk;
     VkCommandBuffer vk_command_buffer;
     uint32_t instance_count;
+    static DWORD last_log;
+    DWORD now = GetTickCount();
 
-    TRACE("device %p, state %p, parameters %p.\n", device, state, parameters);
+    if (now - last_log > 1000)
+    {
+        last_log = now;
+        ERR("WINED3D_VK: adapter_vk_draw_primitive device %p, rtv %p\n",
+            device, state->fb.render_targets[0]);
+    }
 
     context_vk = wined3d_context_vk(context_acquire(device, NULL, 0));
     vk_info = context_vk->vk_info;

@@ -22,6 +22,8 @@
 
 #define D3D11_INIT_GUID
 #include "d3d11_private.h"
+#include "inspectable.h"
+#include "winstring.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d11);
 
@@ -391,4 +393,116 @@ HRESULT WINAPI D3D11On12CreateDevice(IUnknown *device, UINT flags,
             node_mask, d3d11_device, d3d11_immediate_context, obtained_feature_level);
 
     return E_NOTIMPL;
+}
+
+static const GUID IID_IDirect3DDevice = {0xa3704f65, 0xdfee, 0x4134, {0xb5, 0x22, 0xe7, 0xdb, 0x43, 0x7c, 0x22, 0x75}};
+static const GUID IID_IDirect3DDxgiInterfaceAccess = {0xa9b3d012, 0x3df2, 0x4ee3, {0xb8, 0xd1, 0x86, 0x95, 0xf4, 0x57, 0xd3, 0xc1}};
+
+struct direct3d_device_wrapper
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    IDXGIDevice *dxgi_device;
+};
+
+static inline struct direct3d_device_wrapper *impl_from_IInspectable(IInspectable *iface)
+{
+    return CONTAINING_RECORD(iface, struct direct3d_device_wrapper, IInspectable_iface);
+}
+
+static HRESULT WINAPI d3d11_wrapper_QueryInterface(IInspectable *iface, REFIID iid, void **out)
+{
+    struct direct3d_device_wrapper *impl = impl_from_IInspectable(iface);
+
+    if (IsEqualGUID(iid, &IID_IUnknown) ||
+        IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IAgileObject) ||
+        IsEqualGUID(iid, &IID_IDirect3DDevice) ||
+        IsEqualGUID(iid, &IID_IDirect3DDxgiInterfaceAccess))
+    {
+        *out = iface;
+        InterlockedIncrement(&impl->ref);
+        return S_OK;
+    }
+
+    return IDXGIDevice_QueryInterface(impl->dxgi_device, iid, out);
+}
+
+static ULONG WINAPI d3d11_wrapper_AddRef(IInspectable *iface)
+{
+    struct direct3d_device_wrapper *impl = impl_from_IInspectable(iface);
+    return InterlockedIncrement(&impl->ref);
+}
+
+static ULONG WINAPI d3d11_wrapper_Release(IInspectable *iface)
+{
+    struct direct3d_device_wrapper *impl = impl_from_IInspectable(iface);
+    ULONG ref = InterlockedDecrement(&impl->ref);
+    if (!ref)
+    {
+        if (impl->dxgi_device) IDXGIDevice_Release(impl->dxgi_device);
+        free(impl);
+    }
+    return ref;
+}
+
+static HRESULT WINAPI d3d11_wrapper_GetIids(IInspectable *iface, ULONG *count, IID **iids)
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI d3d11_wrapper_GetRuntimeClassName(IInspectable *iface, HSTRING *name)
+{
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI d3d11_wrapper_GetTrustLevel(IInspectable *iface, TrustLevel *level)
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI d3d11_wrapper_Trim(IInspectable *iface)
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI d3d11_wrapper_GetInterface(IInspectable *iface, REFIID iid, void **object)
+{
+    struct direct3d_device_wrapper *impl = impl_from_IInspectable(iface);
+    return IDXGIDevice_QueryInterface(impl->dxgi_device, iid, object);
+}
+
+static const void *d3d11_wrapper_vtbl[] =
+{
+    d3d11_wrapper_QueryInterface,
+    d3d11_wrapper_AddRef,
+    d3d11_wrapper_Release,
+    d3d11_wrapper_GetIids,
+    d3d11_wrapper_GetRuntimeClassName,
+    d3d11_wrapper_GetTrustLevel,
+    d3d11_wrapper_Trim,
+    d3d11_wrapper_GetInterface,
+};
+
+HRESULT WINAPI CreateDirect3D11DeviceFromDXGIDevice(IDXGIDevice *dxgi_device, IInspectable **graphics_device)
+{
+    struct direct3d_device_wrapper *wrapper;
+
+    ERR("D3D11: CreateDirect3D11DeviceFromDXGIDevice dxgi_device %p, graphics_device %p\n", dxgi_device, graphics_device);
+
+    if (!dxgi_device || !graphics_device)
+        return E_INVALIDARG;
+
+    wrapper = calloc(1, sizeof(*wrapper));
+    if (!wrapper)
+        return E_OUTOFMEMORY;
+
+    wrapper->IInspectable_iface.lpVtbl = (void *)d3d11_wrapper_vtbl;
+    wrapper->ref = 1;
+    wrapper->dxgi_device = dxgi_device;
+    IDXGIDevice_AddRef(dxgi_device);
+
+    *graphics_device = &wrapper->IInspectable_iface;
+    return S_OK;
 }

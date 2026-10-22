@@ -4835,10 +4835,25 @@ static void adapter_gl_flush_context(struct wined3d_context *context)
 {
     struct wined3d_context_gl *context_gl = wined3d_context_gl(context);
 
-    TRACE("context_gl %p.\n", context_gl);
+    ERR("WINED3D: adapter_gl_flush_context context %p, valid %d\n", context, context_gl ? context_gl->valid : -1);
 
     if (context_gl->valid)
+    {
         context_gl->gl_info->gl_ops.gl.p_glFlush();
+
+        if (context->current_rt.texture)
+        {
+            struct wined3d_texture *tex = context->current_rt.texture;
+            static DWORD last_log;
+            DWORD now = GetTickCount();
+            if (now - last_log > 1000)
+            {
+                last_log = now;
+                ERR("WINED3D: adapter_gl_flush_context tex %p (%ux%u), dc %p, win %p\n",
+                    tex, tex->resource.width, tex->resource.height, context_gl->dc, context_gl->window);
+            }
+        }
+    }
 }
 
 static void adapter_gl_clear_uav(struct wined3d_context *context,

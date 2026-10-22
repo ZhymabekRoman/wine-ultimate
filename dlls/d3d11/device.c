@@ -18,6 +18,10 @@
  */
 
 #include "d3d11_private.h"
+#include "ntstatus.h"
+#define WIN32_NO_STATUS
+#include "winternl.h"
+#include "wine/server.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(d3d11);
 
@@ -771,6 +775,14 @@ static void STDMETHODCALLTYPE d3d11_device_context_DrawIndexed(ID3D11DeviceConte
         UINT index_count, UINT start_index_location, INT base_vertex_location)
 {
     struct d3d11_device_context *context = impl_from_ID3D11DeviceContext4(iface);
+    static DWORD last_log;
+    DWORD now = GetTickCount();
+
+    if (now - last_log > 1000)
+    {
+        last_log = now;
+        ERR("D3D11: DrawIndexed context %p, index_count %u\n", iface, index_count);
+    }
 
     TRACE("iface %p, index_count %u, start_index_location %u, base_vertex_location %d.\n",
             iface, index_count, start_index_location, base_vertex_location);
@@ -4591,12 +4603,114 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CreateDeferredContext(ID3D11Device
     return S_OK;
 }
 
+static HRESULT d3d11_device_create_shared_resource(ID3D11Device5 *iface,
+        const struct d3d11_runtime_desc *desc, REFIID iid, void **out)
+{
+    HRESULT hr;
+
+    switch (desc->dimension)
+    {
+        case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+        {
+            ID3D11Texture2D *texture;
+            D3D11_TEXTURE2D_DESC tex_desc = desc->d3d11_2d;
+
+            hr = ID3D11Device5_CreateTexture2D(iface, &tex_desc, NULL, &texture);
+            if (FAILED(hr))
+            {
+                WARN("Failed to create Texture2D, hr %#lx.\n", hr);
+                return hr;
+            }
+            hr = ID3D11Texture2D_QueryInterface(texture, iid, out);
+            ID3D11Texture2D_Release(texture);
+            return hr;
+        }
+        case D3D11_RESOURCE_DIMENSION_BUFFER:
+        {
+            ID3D11Buffer *buffer;
+            D3D11_BUFFER_DESC buf_desc = desc->d3d11_buf;
+
+            hr = ID3D11Device5_CreateBuffer(iface, &buf_desc, NULL, &buffer);
+            if (FAILED(hr))
+            {
+                WARN("Failed to create Buffer, hr %#lx.\n", hr);
+                return hr;
+            }
+            hr = ID3D11Buffer_QueryInterface(buffer, iid, out);
+            ID3D11Buffer_Release(buffer);
+            return hr;
+        }
+        case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+        {
+            ID3D11Texture1D *texture;
+            D3D11_TEXTURE1D_DESC tex_desc = desc->d3d11_1d;
+
+            hr = ID3D11Device5_CreateTexture1D(iface, &tex_desc, NULL, &texture);
+            if (FAILED(hr))
+            {
+                WARN("Failed to create Texture1D, hr %#lx.\n", hr);
+                return hr;
+            }
+            hr = ID3D11Texture1D_QueryInterface(texture, iid, out);
+            ID3D11Texture1D_Release(texture);
+            return hr;
+        }
+        case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+        {
+            ID3D11Texture3D *texture;
+            D3D11_TEXTURE3D_DESC tex_desc = desc->d3d11_3d;
+
+            hr = ID3D11Device5_CreateTexture3D(iface, &tex_desc, NULL, &texture);
+            if (FAILED(hr))
+            {
+                WARN("Failed to create Texture3D, hr %#lx.\n", hr);
+                return hr;
+            }
+            hr = ID3D11Texture3D_QueryInterface(texture, iid, out);
+            ID3D11Texture3D_Release(texture);
+            return hr;
+        }
+        default:
+            FIXME("Unsupported dimension %u.\n", desc->dimension);
+            return E_INVALIDARG;
+    }
+}
+
 static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource(ID3D11Device5 *iface, HANDLE resource, REFIID iid,
         void **out)
 {
-    FIXME("iface %p, resource %p, iid %s, out %p stub!\n", iface, resource, debugstr_guid(iid), out);
+    struct d3d11_runtime_desc desc;
+    NTSTATUS status;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, resource %p, iid %s, out %p.\n", iface, resource, debugstr_guid(iid), out);
+
+    if (!out)
+        return E_POINTER;
+    *out = NULL;
+
+    if (!resource || !is_kmt_handle(resource))
+    {
+        WARN("Invalid KMT handle %p.\n", resource);
+        return E_INVALIDARG;
+    }
+
+    SERVER_START_REQ( d3dkmt_object_open )
+    {
+        req->type = D3DKMT_RESOURCE;
+        req->global = (d3dkmt_handle_t)(ULONG_PTR)resource;
+        req->handle = 0;
+        wine_server_set_reply( req, &desc, sizeof(desc) );
+        status = wine_server_call( req );
+    }
+    SERVER_END_REQ;
+
+    if (status)
+    {
+        WARN("Failed to open shared resource %p, status %#lx.\n", resource, status);
+        return E_INVALIDARG;
+    }
+
+    return d3d11_device_create_shared_resource(iface, &desc, iid, out);
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device5 *iface, DXGI_FORMAT format,
@@ -5239,18 +5353,79 @@ fail:
 static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResource1(ID3D11Device5 *iface, HANDLE handle,
         REFIID iid, void **resource)
 {
-    FIXME("iface %p, handle %p, iid %s, resource %p stub!\n", iface, handle, debugstr_guid(iid), resource);
+    struct d3d11_runtime_desc desc;
+    NTSTATUS status;
 
-    return E_NOTIMPL;
+    TRACE("iface %p, handle %p, iid %s, resource %p.\n", iface, handle, debugstr_guid(iid), resource);
+
+    if (!resource)
+        return E_POINTER;
+    *resource = NULL;
+
+    if (!handle || is_kmt_handle(handle))
+    {
+        WARN("Invalid NT handle %p.\n", handle);
+        return E_INVALIDARG;
+    }
+
+    SERVER_START_REQ( d3dkmt_object_open )
+    {
+        req->type = D3DKMT_RESOURCE;
+        req->global = 0;
+        req->handle = wine_server_obj_handle( handle );
+        wine_server_set_reply( req, &desc, sizeof(desc) );
+        status = wine_server_call( req );
+    }
+    SERVER_END_REQ;
+
+    if (status)
+    {
+        WARN("Failed to open shared resource from NT handle %p, status %#lx.\n", handle, status);
+        return E_INVALIDARG;
+    }
+
+    return d3d11_device_create_shared_resource(iface, &desc, iid, resource);
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_device_OpenSharedResourceByName(ID3D11Device5 *iface, const WCHAR *name,
         DWORD access, REFIID iid, void **resource)
 {
-    FIXME("iface %p, name %s, access %#lx, iid %s, resource %p stub!\n", iface, debugstr_w(name), access,
+    HANDLE nt_handle = NULL;
+    NTSTATUS status;
+    HRESULT hr;
+
+    TRACE("iface %p, name %s, access %#lx, iid %s, resource %p.\n", iface, debugstr_w(name), access,
             debugstr_guid(iid), resource);
 
-    return E_NOTIMPL;
+    if (!resource)
+        return E_POINTER;
+    *resource = NULL;
+
+    if (!name)
+        return E_INVALIDARG;
+
+    SERVER_START_REQ( d3dkmt_object_open_name )
+    {
+        req->type = D3DKMT_RESOURCE;
+        req->access = access;
+        req->attributes = OBJ_CASE_INSENSITIVE;
+        req->rootdir = 0;
+        wine_server_add_data( req, name, wcslen(name) * sizeof(WCHAR) );
+        status = wine_server_call( req );
+        if (!status)
+            nt_handle = wine_server_ptr_handle( reply->handle );
+    }
+    SERVER_END_REQ;
+
+    if (status || !nt_handle)
+    {
+        WARN("Failed to open shared resource by name %s, status %#lx.\n", debugstr_w(name), status);
+        return E_INVALIDARG;
+    }
+
+    hr = d3d11_device_OpenSharedResource1(iface, nt_handle, iid, resource);
+    CloseHandle(nt_handle);
+    return hr;
 }
 
 static void STDMETHODCALLTYPE d3d11_device_GetImmediateContext2(ID3D11Device5 *iface,
@@ -7500,10 +7675,12 @@ static UINT STDMETHODCALLTYPE d3d10_device_GetCreationFlags(ID3D10Device1 *iface
 static HRESULT STDMETHODCALLTYPE d3d10_device_OpenSharedResource(ID3D10Device1 *iface,
         HANDLE resource_handle, REFIID guid, void **resource)
 {
-    FIXME("iface %p, resource_handle %p, guid %s, resource %p stub!\n",
+    struct d3d_device *device = impl_from_ID3D10Device(iface);
+
+    TRACE("iface %p, resource_handle %p, guid %s, resource %p.\n",
             iface, resource_handle, debugstr_guid(guid), resource);
 
-    return E_NOTIMPL;
+    return d3d11_device_OpenSharedResource(&device->ID3D11Device5_iface, resource_handle, guid, resource);
 }
 
 static void STDMETHODCALLTYPE d3d10_device_SetTextFilterSize(ID3D10Device1 *iface, UINT width, UINT height)

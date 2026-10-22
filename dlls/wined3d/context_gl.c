@@ -4805,6 +4805,18 @@ void draw_primitive(struct wined3d_device *device, const struct wined3d_state *s
         checkGLcall("disable rasterizer discard");
     }
 
+    if (rtv)
+    {
+        static DWORD last_log;
+        DWORD now = GetTickCount();
+        if (now - last_log > 1000)
+        {
+            last_log = now;
+            ERR("WINED3D: draw_primitive rtv %p (%ux%u), dc %p, win %p\n",
+                rtv, rtv->width, rtv->height, context_gl->dc, context_gl->window);
+        }
+    }
+
     context_release(context);
 
     TRACE("Draw completed.\n");
