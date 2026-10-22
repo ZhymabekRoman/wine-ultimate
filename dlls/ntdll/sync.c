@@ -314,6 +314,12 @@ NTSTATUS WINAPI RtlpWaitForCriticalSection( RTL_CRITICAL_SECTION *crit )
         if (status == STATUS_WAIT_0) break;
         if (status != WAIT_TIMEOUT) return status;
 
+        if (!crit->OwningThread)
+        {
+            WARN( "critical section %p has no owner, breaking deadlock!\n", crit );
+            break;
+        }
+
         timeout = (TRACE_ON(relay) ? 300 : 60);
 
         ERR( "section %p %s wait timed out in thread %04lx, blocked by %04lx, retrying (%u sec)\n",
@@ -1209,6 +1215,47 @@ void WINAPI RtlInitializeResource(LPRTL_RWLOCK rwl)
     rwl->rtlCS.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": RTL_RWLOCK.rtlCS");
     NtCreateSemaphore( &rwl->hExclusiveReleaseSemaphore, SEMAPHORE_ALL_ACCESS, NULL, 0, 65535 );
     NtCreateSemaphore( &rwl->hSharedReleaseSemaphore, SEMAPHORE_ALL_ACCESS, NULL, 0, 65535 );
+}
+
+/***********************************************************************
+ *           WNF Notification Stubs (NTDLL.@)
+ */
+NTSTATUS WINAPI RtlSubscribeWnfStateChangeNotification( void **subscription, ULONG64 state_name,
+                                                        ULONG change_stamp, void *callback,
+                                                        void *context, void *type_id,
+                                                        ULONG serialization_group, ULONG flags )
+{
+    FIXME( "(%p, %016llx, %lu, %p, %p, %p, %lu, %lu): stub\n",
+           subscription, (long long unsigned int)state_name, change_stamp, callback, context, type_id, serialization_group, flags );
+    if (subscription) *subscription = (void *)0xdeadbeef;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI RtlUnsubscribeWnfStateChangeNotification( void *subscription )
+{
+    FIXME( "(%p): stub\n", subscription );
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI NtQueryWnfStateData( const ULONG64 *state_name, const void *type_id, const void *explicit_scope,
+                                     ULONG *change_stamp, void *buffer, ULONG *buffer_size )
+{
+    FIXME( "(%p, %p, %p, %p, %p, %p): stub\n", state_name, type_id, explicit_scope, change_stamp, buffer, buffer_size );
+    if (change_stamp) *change_stamp = 1;
+    if (buffer_size) *buffer_size = 0;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI RtlQueryWnfStateData( ULONG64 *state_name, void *type_id, void *buffer, ULONG *buffer_size, ULONG *change_stamp )
+{
+    FIXME( "(%p, %p, %p, %p, %p): stub\n", state_name, type_id, buffer, buffer_size, change_stamp );
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI RtlPublishWnfStateData( ULONG64 *state_name, void *type_id, const void *buffer, ULONG buffer_size, void *explicit_scope )
+{
+    FIXME( "(%p, %p, %p, %lu, %p): stub\n", state_name, type_id, buffer, buffer_size, explicit_scope );
+    return STATUS_SUCCESS;
 }
 
 /***********************************************************************

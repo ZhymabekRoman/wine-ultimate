@@ -1546,6 +1546,15 @@ NTSTATUS WINAPI NtQueryInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS c
 
         if (len < sizeof(*extended_limit)) return STATUS_INFO_LENGTH_MISMATCH;
         memset( extended_limit, 0, sizeof(*extended_limit) );
+        SERVER_START_REQ( get_job_info )
+        {
+            req->handle = wine_server_obj_handle( handle );
+            ret = wine_server_call( req );
+            if (ret == STATUS_SUCCESS)
+                extended_limit->BasicLimitInformation.LimitFlags = reply->limit_flags;
+        }
+        SERVER_END_REQ;
+        if (ret != STATUS_SUCCESS) return ret;
         if (ret_len) *ret_len = sizeof(*extended_limit);
         return STATUS_SUCCESS;
     }
@@ -1555,6 +1564,15 @@ NTSTATUS WINAPI NtQueryInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS c
 
         if (len < sizeof(*basic_limit)) return STATUS_INFO_LENGTH_MISMATCH;
         memset( basic_limit, 0, sizeof(*basic_limit) );
+        SERVER_START_REQ( get_job_info )
+        {
+            req->handle = wine_server_obj_handle( handle );
+            ret = wine_server_call( req );
+            if (ret == STATUS_SUCCESS)
+                basic_limit->LimitFlags = reply->limit_flags;
+        }
+        SERVER_END_REQ;
+        if (ret != STATUS_SUCCESS) return ret;
         if (ret_len) *ret_len = sizeof(*basic_limit);
         return STATUS_SUCCESS;
     }
@@ -1604,6 +1622,8 @@ NTSTATUS WINAPI NtSetInformationJobObject( HANDLE handle, JOBOBJECTINFOCLASS cla
         limit_flags = JOB_OBJECT_LIMIT_VALID_FLAGS | 0x00ff0000;
         /* fall through */
     case JobObjectBasicLimitInformation:
+        if (class == JobObjectBasicLimitInformation)
+            limit_flags = (JOB_OBJECT_LIMIT_VALID_FLAGS & ~(JOB_OBJECT_LIMIT_PROCESS_MEMORY | JOB_OBJECT_LIMIT_JOB_MEMORY)) | 0x00ff0000;
         if (len != info_size) return STATUS_INVALID_PARAMETER;
         basic_limit = info;
         if (basic_limit->LimitFlags & ~limit_flags)

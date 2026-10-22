@@ -2744,3 +2744,12 @@ BOOLEAN WINAPI RtlSetUserFlagsHeap( HANDLE handle, ULONG flags, void *ptr, ULONG
 
     return ret;
 }
+
+/***********************************************************************
+ *           RtlDisownModuleHeapAllocation    (NTDLL.@)
+ */
+NTSTATUS WINAPI RtlDisownModuleHeapAllocation( HANDLE handle, void *ptr )
+{
+    FIXME( "(%p, %p): stub\n", handle, ptr );
+    return STATUS_SUCCESS;
+}

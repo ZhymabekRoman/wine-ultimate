@@ -1648,8 +1648,18 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
         return NtContinue( context, FALSE );
 
     if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION && context)
-        ERR_(seh)("FIRST_CHANCE_AV addr %p rip=%p rsp=%p\n",
-                  rec->ExceptionAddress, (void *)context->Rip, (void *)context->Rsp);
+    {
+        ULONG64 *sp = (ULONG64 *)context->Rsp;
+        int i;
+        ERR_(seh)("FIRST_CHANCE_AV addr %p rip=%p rsp=%p rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx rsi=%016llx rdi=%016llx r8=%016llx r9=%016llx\n",
+                  rec->ExceptionAddress, (void *)context->Rip, (void *)context->Rsp,
+                  (unsigned long long)context->Rax, (unsigned long long)context->Rbx,
+                  (unsigned long long)context->Rcx, (unsigned long long)context->Rdx,
+                  (unsigned long long)context->Rsi, (unsigned long long)context->Rdi,
+                  (unsigned long long)context->R8, (unsigned long long)context->R9);
+        for (i = 0; i < 16; i++)
+            ERR_(seh)("  av_stack[%02d] (%p) = %016llx\n", i, sp + i, sp[i]);
+    }
 
     if (first_chance) return call_user_exception_dispatcher( data, rec, context );
 
@@ -1661,11 +1671,11 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
     {
         ERR_(seh)("Unhandled exception code %x flags %x addr %p\n",
                   rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress );
-        if (rec->ExceptionCode == 0xe0464645 && context)
+        if ((rec->ExceptionCode == 0xe0464645 || rec->ExceptionCode == 0xc0000602) && context)
         {
             ULONG64 *sp = (ULONG64 *)context->Rsp;
             int i;
-            for (i = 0; i < 32; i++)
+            for (i = 0; i < 48; i++)
             {
                 ERR_(seh)("  failfast_stack[%02d] (%p) = %016llx\n", i, sp + i, sp[i]);
             }

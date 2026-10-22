@@ -37,6 +37,67 @@ WINE_DEFAULT_DEBUG_CHANNEL(alpc);
 /* ALPC message types (subset of Windows LPC message types) */
 #define LPC_CONNECTION_REQUEST 10
 
+#define ALPC_WIRE_MAGIC 0x434e4e41 /* 'ANNC' */
+struct alpc_wire_hdr
+{
+    unsigned int     magic;
+    unsigned int     type;        /* LPC message type (10 = connection request) */
+    unsigned int     msg_id;
+    unsigned int     client_pid;
+    unsigned int     client_tid;
+    unsigned int     user_size;   /* bytes of user message following */
+    client_ptr_t     port_context;
+    unsigned int     attr_flags;
+    unsigned int     view_flags;
+    client_ptr_t     view_base;
+    client_ptr_t     view_size;
+};
+
+#define ALPC_ATTR_HDR_MAGIC 0x41545452 /* 'ATTR' */
+struct alpc_msg_attr_hdr
+{
+    unsigned int     magic;
+    unsigned int     attr_flags;
+    unsigned int     view_flags;
+    unsigned int     pad;
+    client_ptr_t     view_base;
+    client_ptr_t     view_size;
+};
+
+static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG attribute_flag )
+{
+    static const struct
+    {
+        ULONG flag;
+        SIZE_T size;
+    } attribute_sizes[] =
+    {
+        { ALPC_MESSAGE_SECURITY_ATTRIBUTE,       sizeof(ALPC_SECURITY_ATTR) },
+        { ALPC_MESSAGE_VIEW_ATTRIBUTE,           sizeof(ALPC_DATA_VIEW_ATTR) },
+        { ALPC_MESSAGE_CONTEXT_ATTRIBUTE,        sizeof(ALPC_CONTEXT_ATTR) },
+        { ALPC_MESSAGE_HANDLE_ATTRIBUTE,         sizeof(ALPC_HANDLE_ATTR) },
+        { ALPC_MESSAGE_TOKEN_ATTRIBUTE,          sizeof(ALPC_TOKEN_ATTR) },
+        { ALPC_MESSAGE_DIRECT_ATTRIBUTE,         sizeof(ALPC_DIRECT_ATTR) },
+        { ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE, sizeof(ALPC_WORK_ON_BEHALF_ATTR) },
+    };
+    unsigned int i;
+    SIZE_T off = sizeof(ALPC_MESSAGE_ATTRIBUTES);
+
+    if (!attributes || !attribute_flag || (attribute_flag & (attribute_flag - 1)))
+        return NULL;
+    if ((attributes->AllocatedAttributes & attribute_flag) != attribute_flag)
+        return NULL;
+
+    for (i = 0; i < ARRAY_SIZE(attribute_sizes); i++)
+    {
+        if (attribute_sizes[i].flag == attribute_flag)
+            return (char *)attributes + off;
+        if (attributes->AllocatedAttributes & attribute_sizes[i].flag)
+            off += attribute_sizes[i].size;
+    }
+    return NULL;
+}
+
 /* Process-global message id counter. Only needs to be unique within a single
  * server port's pending-connection list, so a global atomic is fine. */
 static LONG alpc_msg_id_counter;
@@ -103,6 +164,112 @@ NTSTATUS WINAPI NtAlpcCreatePort( HANDLE *port_handle, OBJECT_ATTRIBUTES *obj_at
 
     free( objattr );
     return ret;
+}
+
+
+/******************************************************************************
+ *           NtAlpcCreatePortSection  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcCreatePortSection( HANDLE port_handle, ULONG flags,
+                                         HANDLE section_handle, SIZE_T section_size,
+                                         HANDLE *alpc_section_handle, SIZE_T *actual_section_size )
+{
+    NTSTATUS ret;
+    HANDLE sec = NULL;
+
+    TRACE( "(%p, %#x, %p, %Ix, %p, %p)\n",
+           port_handle, (unsigned int)flags, section_handle, section_size,
+           alpc_section_handle, actual_section_size );
+
+    if (!port_handle || !alpc_section_handle)
+        return STATUS_INVALID_PARAMETER;
+
+    if (section_handle)
+    {
+        ret = NtDuplicateObject( NtCurrentProcess(), section_handle,
+                                 NtCurrentProcess(), &sec,
+                                 0, 0, DUPLICATE_SAME_ACCESS );
+        if (ret) return ret;
+    }
+    else
+    {
+        LARGE_INTEGER size;
+        OBJECT_ATTRIBUTES attr;
+
+        if (!section_size) return STATUS_INVALID_PARAMETER;
+        size.QuadPart = section_size;
+        InitializeObjectAttributes( &attr, NULL, 0, NULL, NULL );
+        ret = NtCreateSection( &sec, SECTION_ALL_ACCESS, &attr, &size,
+                               PAGE_READWRITE, SEC_COMMIT, 0 );
+        if (ret) return ret;
+    }
+
+    if (actual_section_size)
+    {
+        SECTION_BASIC_INFORMATION info;
+        if (!NtQuerySection( sec, SectionBasicInformation, &info, sizeof(info), NULL ))
+            *actual_section_size = (SIZE_T)info.Size.QuadPart;
+        else
+            *actual_section_size = section_size;
+    }
+
+    *alpc_section_handle = sec;
+    return STATUS_SUCCESS;
+}
+
+
+/******************************************************************************
+ *           NtAlpcDeletePortSection  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcDeletePortSection( HANDLE port_handle, ULONG flags, HANDLE section_handle )
+{
+    TRACE( "(%p, %#x, %p)\n", port_handle, (unsigned int)flags, section_handle );
+
+    if (!port_handle || !section_handle)
+        return STATUS_INVALID_PARAMETER;
+
+    return NtClose( section_handle );
+}
+
+
+/******************************************************************************
+ *           NtAlpcCreateSectionView  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcCreateSectionView( HANDLE port_handle, ULONG flags,
+                                         ALPC_DATA_VIEW_ATTR *view_attr )
+{
+    NTSTATUS ret;
+    void *base = NULL;
+    SIZE_T size;
+
+    TRACE( "(%p, %#x, %p)\n", port_handle, (unsigned int)flags, view_attr );
+
+    if (!port_handle || !view_attr || !view_attr->SectionHandle)
+        return STATUS_INVALID_PARAMETER;
+
+    base = view_attr->ViewBase;
+    size = view_attr->ViewSize;
+    ret = NtMapViewOfSection( view_attr->SectionHandle, NtCurrentProcess(),
+                              &base, 0, 0, NULL, &size, ViewUnmap, 0, PAGE_READWRITE );
+    if (ret) return ret;
+
+    view_attr->ViewBase = base;
+    view_attr->ViewSize = size;
+    return STATUS_SUCCESS;
+}
+
+
+/******************************************************************************
+ *           NtAlpcDeleteSectionView  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcDeleteSectionView( HANDLE port_handle, ULONG flags, PVOID view_base )
+{
+    TRACE( "(%p, %#x, %p)\n", port_handle, (unsigned int)flags, view_base );
+
+    if (!port_handle || !view_base)
+        return STATUS_INVALID_PARAMETER;
+
+    return NtUnmapViewOfSection( NtCurrentProcess(), view_base );
 }
 
 
@@ -283,6 +450,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     if (send_msg)
     {
         data_size_t send_size = send_msg->TotalLength;
+        struct alpc_msg_attr_hdr attr_hdr;
 
         /* The kernel stamps the message type from the send flags and assigns a
          * unique non-zero MessageId to a new request (replies echo it back). */
@@ -290,6 +458,20 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         else if (flags & 0x20000)   send_msg->Type = 1; /* LPC_REQUEST */
         if (!(flags & 0x10000) && !send_msg->MessageId)
             send_msg->MessageId = next_alpc_msg_id();
+
+        memset( &attr_hdr, 0, sizeof(attr_hdr) );
+        attr_hdr.magic = ALPC_ATTR_HDR_MAGIC;
+        if (send_msg_attr && (send_msg_attr->ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE))
+        {
+            ALPC_DATA_VIEW_ATTR *view = get_message_attribute( send_msg_attr, ALPC_MESSAGE_VIEW_ATTRIBUTE );
+            if (view)
+            {
+                attr_hdr.attr_flags = ALPC_MESSAGE_VIEW_ATTRIBUTE;
+                attr_hdr.view_flags = view->Flags;
+                attr_hdr.view_base  = (client_ptr_t)(ULONG_PTR)view->ViewBase;
+                attr_hdr.view_size  = (client_ptr_t)view->ViewSize;
+            }
+        }
 
         if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, port_handle )))
             return STATUS_NO_MEMORY;
@@ -302,6 +484,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         {
             req->async = server_async( port_handle, &async->io, NULL, NULL, NULL, iosb_client_ptr( &io ) );
             req->pos   = 0;
+            wine_server_add_data( req, &attr_hdr, sizeof(attr_hdr) );
             wine_server_add_data( req, send_msg, send_size );
             ret = wine_server_call( req );
             wait_handle = wine_server_ptr_handle( reply->wait );
@@ -368,61 +551,68 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     if (!ret && recv_buffer_size) *recv_buffer_size = io.Information;
 
     /* Every delivered message is prefixed by a wine-internal wire header
-     * { u32 magic,type,msg_id,pid,tid,user_size; u64 port_context }. Strip it and
-     * reconstruct the kernel-filled PORT_MESSAGE fields + CONTEXT attribute. */
-    if (!ret && recv_msg && io.Information >= 32)
+     * { u32 magic,type,msg_id,pid,tid,user_size; u64 port_context, ... }. Strip it and
+     * reconstruct the kernel-filled PORT_MESSAGE fields + attributes. */
+    if (!ret && recv_msg && io.Information >= sizeof(struct alpc_wire_hdr))
     {
-        ULONG  h[6];
-        ULONGLONG port_context;
-        memcpy( h, recv_msg, sizeof(h) );
-        memcpy( &port_context, (char *)recv_msg + 24, sizeof(port_context) );
-        if (h[0] == 0x434e4e41) /* 'ANNC' */
+        struct alpc_wire_hdr hdr;
+        memcpy( &hdr, recv_msg, sizeof(hdr) );
+        if (hdr.magic == ALPC_WIRE_MAGIC)
         {
-            ULONG type = h[1], msg_id = h[2], pid = h[3], tid = h[4], usize = h[5];
-            char *src = (char *)recv_msg + 32;
+            char *src = (char *)recv_msg + sizeof(struct alpc_wire_hdr);
             SIZE_T total;
 
-            if (type == LPC_CONNECTION_REQUEST)
+            if (hdr.type == LPC_CONNECTION_REQUEST)
             {
                 /* user bytes are the raw connection payload: build a PORT_MESSAGE */
-                if (usize) memmove( (char *)recv_msg + sizeof(*recv_msg), src, usize );
+                if (hdr.user_size) memmove( (char *)recv_msg + sizeof(*recv_msg), src, hdr.user_size );
                 memset( recv_msg, 0, sizeof(*recv_msg) );
-                recv_msg->DataLength  = usize;
-                recv_msg->TotalLength = sizeof(*recv_msg) + usize;
+                recv_msg->DataLength  = hdr.user_size;
+                recv_msg->TotalLength = sizeof(*recv_msg) + hdr.user_size;
                 recv_msg->Type        = LPC_CONNECTION_REQUEST;
-                recv_msg->MessageId   = msg_id;
-                total = sizeof(*recv_msg) + usize;
+                recv_msg->MessageId   = hdr.msg_id;
+                total = sizeof(*recv_msg) + hdr.user_size;
             }
             else
             {
                 /* user bytes are the sender's full PORT_MESSAGE: preserve its
                  * Type/MessageId/CallbackId (reply correlation), only stamp ClientId */
-                memmove( recv_msg, src, usize );
-                total = usize;
+                memmove( recv_msg, src, hdr.user_size );
+                total = hdr.user_size;
             }
-            recv_msg->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)pid;
-            recv_msg->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)tid;
+            recv_msg->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)hdr.client_pid;
+            recv_msg->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)hdr.client_tid;
             if (recv_buffer_size) *recv_buffer_size = total;
 
-            /* deliver the CONTEXT attribute (PortContext) the kernel would fill */
+            /* deliver attributes */
             if (recv_msg_attr)
             {
-                ULONG alloc = recv_msg_attr->AllocatedAttributes;
-                if (alloc & 0x20000000) /* ALPC_MESSAGE_CONTEXT_ATTRIBUTE */
+                if (recv_msg_attr->AllocatedAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE)
                 {
-                    SIZE_T off = 8;
-                    if (alloc & 0x80000000) off += 24; /* ALPC_SECURITY_ATTR */
-                    if (alloc & 0x40000000) off += 32; /* ALPC_VIEW_ATTR */
+                    ALPC_CONTEXT_ATTR *ctx = get_message_attribute( recv_msg_attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
+                    if (ctx)
                     {
-                        ALPC_CONTEXT_ATTR *ctx =
-                            (ALPC_CONTEXT_ATTR *)((char *)recv_msg_attr + off);
-                        ctx->PortContext    = (void *)(ULONG_PTR)port_context;
+                        ctx->PortContext    = (void *)(ULONG_PTR)hdr.port_context;
                         ctx->MessageContext = NULL;
                         ctx->Sequence       = 0;
-                        ctx->MessageId      = msg_id;
+                        ctx->MessageId      = hdr.msg_id;
                         ctx->CallbackId     = 0;
+                        recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
                     }
-                    recv_msg_attr->ValidAttributes |= 0x20000000;
+                }
+
+                if ((hdr.attr_flags & ALPC_MESSAGE_VIEW_ATTRIBUTE) &&
+                    (recv_msg_attr->AllocatedAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE))
+                {
+                    ALPC_DATA_VIEW_ATTR *view = get_message_attribute( recv_msg_attr, ALPC_MESSAGE_VIEW_ATTRIBUTE );
+                    if (view)
+                    {
+                        view->Flags         = hdr.view_flags;
+                        view->SectionHandle = NULL;
+                        view->ViewBase      = (void *)(ULONG_PTR)hdr.view_base;
+                        view->ViewSize      = (SIZE_T)hdr.view_size;
+                        recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_VIEW_ATTRIBUTE;
+                    }
                 }
             }
         }
@@ -460,6 +650,26 @@ NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
         if (ret_length) *ret_length = sizeof(info);
         return STATUS_SUCCESS;
     }
+    default:
+        FIXME( "unsupported info class %u\n", (int)class );
+        return STATUS_INVALID_INFO_CLASS;
+    }
+}
+
+
+/******************************************************************************
+ *           NtAlpcSetInformation  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcSetInformation( HANDLE port_handle, ULONG class, void *buffer, ULONG length )
+{
+    TRACE( "(%p, %u, %p, %u)\n", port_handle, (int)class, buffer, (int)length );
+
+    switch (class)
+    {
+    case 1: /* AlpcPortSecurityDescriptorInformation: buffer is a PSECURITY_DESCRIPTOR */
+        if (!buffer) return STATUS_ACCESS_VIOLATION;
+        if (length < sizeof(PSECURITY_DESCRIPTOR)) return STATUS_INVALID_PARAMETER;
+        return NtSetSecurityObject( port_handle, DACL_SECURITY_INFORMATION, *(PSECURITY_DESCRIPTOR *)buffer );
     default:
         FIXME( "unsupported info class %u\n", (int)class );
         return STATUS_INVALID_INFO_CLASS;

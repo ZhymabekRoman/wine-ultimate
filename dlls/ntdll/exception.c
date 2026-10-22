@@ -274,6 +274,27 @@ EXCEPTION_DISPOSITION WINAPI user_callback_handler( EXCEPTION_RECORD *record, vo
     if (!(record->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)))
     {
         ERR( "ignoring exception %lx\n", record->ExceptionCode );
+        if (record->ExceptionCode == 0xc06d007f)
+        {
+            ERR( "c06d007f params %u, info %p\n", (unsigned int)record->NumberParameters, record->NumberParameters ? (void *)record->ExceptionInformation[0] : NULL );
+            if (record->NumberParameters >= 1 && record->ExceptionInformation[0])
+            {
+                struct {
+                    DWORD cb;
+                    void *pidd;
+                    void *ppfn;
+                    const char *szDll;
+                    struct { DWORD fImportByName; const char *szProcName; } dlp;
+                } *info = (void *)record->ExceptionInformation[0];
+                ERR( "delay-load info: cb %u, szDll %p, fImportByName %u, szProcName %p\n",
+                     (unsigned int)info->cb, info->szDll, (unsigned int)info->dlp.fImportByName, info->dlp.szProcName );
+                if (info->szDll) ERR( "delay-load dll: %s\n", info->szDll );
+                if (info->dlp.fImportByName && info->dlp.szProcName)
+                    ERR( "delay-load function: %s\n", info->dlp.szProcName );
+                else if (!info->dlp.fImportByName)
+                    ERR( "delay-load ordinal: %lu\n", (ULONG_PTR)info->dlp.szProcName );
+            }
+        }
         RtlUnwind( frame, KiUserCallbackDispatcherReturn, record, ULongToPtr(record->ExceptionCode) );
     }
     return ExceptionContinueSearch;

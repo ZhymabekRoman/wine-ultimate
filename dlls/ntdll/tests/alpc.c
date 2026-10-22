@@ -20,6 +20,7 @@
 
 #include <stdarg.h>
 #include <windef.h>
+#include <winbase.h>
 #include <winternl.h>
 #include <ntstatus.h>
 #include "wine/test.h"
@@ -29,6 +30,31 @@
 DECL_FUNCPTR(AlpcGetHeaderSize)
 DECL_FUNCPTR(AlpcGetMessageAttribute)
 DECL_FUNCPTR(AlpcInitializeMessageAttribute)
+DECL_FUNCPTR(NtAlpcCreatePort)
+DECL_FUNCPTR(NtAlpcConnectPort)
+DECL_FUNCPTR(NtAlpcAcceptConnectPort)
+DECL_FUNCPTR(NtAlpcDisconnectPort)
+DECL_FUNCPTR(NtAlpcQueryInformation)
+DECL_FUNCPTR(NtAlpcSendWaitReceivePort)
+DECL_FUNCPTR(NtAlpcCreatePortSection)
+DECL_FUNCPTR(NtAlpcDeletePortSection)
+DECL_FUNCPTR(NtAlpcCreateSectionView)
+DECL_FUNCPTR(NtAlpcDeleteSectionView)
+DECL_FUNCPTR(NtClose)
+
+#undef DECL_FUNCPTR
+
+/* NtAlpcSetInformation is not declared in the SDK headers, and is absent on
+ * some Windows versions; load it dynamically. */
+typedef NTSTATUS (WINAPI *NtAlpcSetInformation_t)(HANDLE port, ULONG class, void *buffer, ULONG length);
+static NtAlpcSetInformation_t pNtAlpcSetInformation;
+
+#define LPC_REQUEST_TYPE              1
+#define LPC_REPLY_TYPE                2
+#define LPC_CONNECTION_REQUEST_TYPE   10
+
+#define ALPC_BASIC_INFORMATION_CLASS       0
+#define ALPC_INVALID_INFORMATION_CLASS     0xffffffff
 
 #undef DECL_FUNCPTR
 
@@ -44,6 +70,19 @@ static void init_functions(void)
     LOAD_FUNCPTR(AlpcGetHeaderSize)
     LOAD_FUNCPTR(AlpcGetMessageAttribute)
     LOAD_FUNCPTR(AlpcInitializeMessageAttribute)
+    LOAD_FUNCPTR(NtAlpcCreatePort)
+    LOAD_FUNCPTR(NtAlpcConnectPort)
+    LOAD_FUNCPTR(NtAlpcAcceptConnectPort)
+    LOAD_FUNCPTR(NtAlpcDisconnectPort)
+    LOAD_FUNCPTR(NtAlpcQueryInformation)
+    LOAD_FUNCPTR(NtAlpcSendWaitReceivePort)
+    LOAD_FUNCPTR(NtAlpcCreatePortSection)
+    LOAD_FUNCPTR(NtAlpcDeletePortSection)
+    LOAD_FUNCPTR(NtAlpcCreateSectionView)
+    LOAD_FUNCPTR(NtAlpcDeleteSectionView)
+    LOAD_FUNCPTR(NtClose)
+
+    pNtAlpcSetInformation = (NtAlpcSetInformation_t)GetProcAddress( ntdll, "NtAlpcSetInformation" );
 
 #undef LOAD_FUNCPTR
 }
@@ -342,6 +381,991 @@ static void test_AlpcInitializeMessageAttribute(void)
     }
 }
 
+static void test_AlpcSectionView(void)
+{
+    HANDLE section = NULL;
+    SIZE_T actual_size = 0;
+    ALPC_DATA_VIEW_ATTR view;
+    NTSTATUS status;
+
+    if (!pNtAlpcCreatePortSection || !pNtAlpcCreateSectionView ||
+        !pNtAlpcDeleteSectionView || !pNtAlpcDeletePortSection)
+    {
+        win_skip("ALPC section view functions are unavailable.\n");
+        return;
+    }
+
+    /* Test invalid parameters */
+    status = pNtAlpcCreatePortSection(NULL, 0, NULL, 0x1000, &section, &actual_size);
+    ok(status == STATUS_INVALID_PARAMETER, "Expected STATUS_INVALID_PARAMETER, got %#lx\n", status);
+
+    status = pNtAlpcCreatePortSection((HANDLE)0x1234, 0, NULL, 0, &section, &actual_size);
+    ok(status == STATUS_INVALID_PARAMETER, "Expected STATUS_INVALID_PARAMETER, got %#lx\n", status);
+
+    /* Test creating port section */
+    status = pNtAlpcCreatePortSection((HANDLE)0x1234, 0, NULL, 0x1000, &section, &actual_size);
+    ok(status == STATUS_SUCCESS, "NtAlpcCreatePortSection failed: %#lx\n", status);
+    ok(section != NULL, "Expected valid section handle\n");
+    ok(actual_size >= 0x1000, "Expected actual_size >= 0x1000, got %Ix\n", actual_size);
+
+    /* Test creating section view */
+    memset(&view, 0, sizeof(view));
+    view.SectionHandle = section;
+    view.ViewSize = 0x1000;
+    status = pNtAlpcCreateSectionView((HANDLE)0x1234, 0, &view);
+    ok(status == STATUS_SUCCESS, "NtAlpcCreateSectionView failed: %#lx\n", status);
+    ok(view.ViewBase != NULL, "Expected non-NULL ViewBase\n");
+    ok(view.ViewSize >= 0x1000, "Expected ViewSize >= 0x1000, got %Ix\n", view.ViewSize);
+
+    /* Test read/write into view memory */
+    strcpy((char *)view.ViewBase, "test view buffer data");
+    ok(!strcmp((char *)view.ViewBase, "test view buffer data"), "View memory content mismatch\n");
+
+    /* Test unmapping view */
+    status = pNtAlpcDeleteSectionView((HANDLE)0x1234, 0, view.ViewBase);
+    ok(status == STATUS_SUCCESS, "NtAlpcDeleteSectionView failed: %#lx\n", status);
+
+    /* Test deleting section */
+    status = pNtAlpcDeletePortSection((HANDLE)0x1234, 0, section);
+    ok(status == STATUS_SUCCESS, "NtAlpcDeletePortSection failed: %#lx\n", status);
+}
+
+/* The Wine ALPC implementation is 64-bit only: the port lifecycle syscalls
+ * (NtAlpcConnectPort, NtAlpcSendWaitReceivePort, NtAlpcQueryInformation, ...) are
+ * not marshalled for 32-bit callers on 64-bit Wine. The message attribute helper
+ * tests above (plain PE exports) run on both architectures. */
+#ifdef _WIN64
+
+struct alpc_view_thread_args
+{
+    UNICODE_STRING *port_name;
+    NTSTATUS status;
+    void *view_base;
+};
+
+/* Client thread for the view attribute test: connect, set up a shared memory
+ * section view, and send a message carrying the view attribute. */
+static DWORD WINAPI alpc_view_client_thread( void *arg )
+{
+    struct alpc_view_thread_args *args = arg;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    ALPC_DATA_VIEW_ATTR view, *view_attr;
+    char buf[512];
+    char attrbuf[256];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    ALPC_MESSAGE_ATTRIBUTES *attr = (ALPC_MESSAGE_ATTRIBUTES *)attrbuf;
+    SIZE_T size, req_size = 0;
+    HANDLE conn = NULL, section = NULL;
+    NTSTATUS status;
+
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    memset( &view, 0, sizeof(view) );
+
+    status = pNtAlpcConnectPort( &conn, args->port_name, NULL, &port_attr, 0,
+                                 NULL, NULL, NULL, NULL, NULL, NULL );
+    if (status == STATUS_SUCCESS)
+    {
+        size = 0;
+        status = pNtAlpcCreatePortSection( conn, 0, NULL, 0x1000, &section, &size );
+        if (status == STATUS_SUCCESS)
+        {
+            view.SectionHandle = section;
+            view.ViewSize = 0x1000;
+            status = pNtAlpcCreateSectionView( conn, 0, &view );
+            if (status == STATUS_SUCCESS)
+                strcpy( (char *)view.ViewBase, "alpc shared payload 12345" );
+        }
+        args->view_base = view.ViewBase;
+
+        if (status == STATUS_SUCCESS)
+        {
+            status = pAlpcInitializeMessageAttribute( ALPC_MESSAGE_VIEW_ATTRIBUTE, attr, sizeof(attrbuf), &req_size );
+            if (status == STATUS_SUCCESS)
+            {
+                view_attr = pAlpcGetMessageAttribute( attr, ALPC_MESSAGE_VIEW_ATTRIBUTE );
+                if (view_attr)
+                {
+                    view_attr->Flags = 0;
+                    view_attr->SectionHandle = section;
+                    view_attr->ViewBase = view.ViewBase;
+                    view_attr->ViewSize = 0x1000;
+                    attr->ValidAttributes |= ALPC_MESSAGE_VIEW_ATTRIBUTE;
+                }
+                else
+                    status = STATUS_UNSUCCESSFUL;
+            }
+            if (status == STATUS_SUCCESS)
+            {
+                memset( msg, 0, sizeof(*msg) );
+                msg->DataLength = 0;
+                msg->TotalLength = sizeof(*msg);
+                status = pNtAlpcSendWaitReceivePort( conn, ALPC_MSGFLG_SYNC_REQUEST, msg, attr,
+                                                     NULL, NULL, NULL, NULL );
+            }
+        }
+        if (view.ViewBase) pNtAlpcDeleteSectionView( conn, 0, view.ViewBase );
+        if (section) pNtAlpcDeletePortSection( conn, 0, section );
+        if (conn) NtClose( conn );
+    }
+    args->status = status;
+    return 0;
+}
+
+static void test_AlpcMessageViewAttribute(void)
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\TestAlpcViewPort";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char recv_buf[512];
+    char recv_attr_buf[256];
+    ALPC_PORT_MESSAGE *recv_msg = (ALPC_PORT_MESSAGE *)recv_buf;
+    ALPC_MESSAGE_ATTRIBUTES *recv_attr = (ALPC_MESSAGE_ATTRIBUTES *)recv_attr_buf;
+    struct alpc_view_thread_args args;
+    ALPC_DATA_VIEW_ATTR *recvd_view;
+    SIZE_T recv_sz, req_attr_size = 0;
+    HANDLE server_port = NULL, server_conn = NULL, thread;
+    NTSTATUS status;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort ||
+        !pNtAlpcSendWaitReceivePort || !pNtAlpcCreatePortSection ||
+        !pNtAlpcCreateSectionView || !pNtAlpcDeleteSectionView || !pNtAlpcDeletePortSection)
+    {
+        win_skip("ALPC functions are unavailable.\n");
+        return;
+    }
+
+    memset( &args, 0, sizeof(args) );
+    args.port_name = &port_name;
+
+    RtlInitUnicodeString(&port_name, port_nameW);
+    InitializeObjectAttributes(&obj_attr, &port_name, 0, NULL, NULL);
+    memset(&port_attr, 0, sizeof(port_attr));
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort(&server_port, &obj_attr, &port_attr);
+    ok(status == STATUS_SUCCESS, "NtAlpcCreatePort failed: %#lx\n", status);
+    if (status != STATUS_SUCCESS) return;
+
+    /* The connection handshake blocks the client until the server accepts,
+     * so run the client side on a dedicated thread. */
+    thread = CreateThread( NULL, 0, alpc_view_client_thread, &args, 0, NULL );
+    ok( thread != NULL, "CreateThread failed, err %u\n", (unsigned int)GetLastError() );
+    if (!thread)
+    {
+        NtClose( server_port );
+        return;
+    }
+
+    /* Receive the connect request, accept the connection. */
+    timeout.QuadPart = -200 * 10000000LL;
+    memset( recv_buf, 0, sizeof(recv_buf) );
+    recv_sz = sizeof(recv_buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, recv_msg, &recv_sz, NULL, &timeout );
+    ok(status == STATUS_SUCCESS, "Receive connect request failed: %#lx\n", status);
+    if (status == STATUS_SUCCESS)
+    {
+        status = pNtAlpcAcceptConnectPort(&server_conn, server_port, 0, NULL, NULL, NULL, recv_msg, NULL, TRUE);
+        ok(status == STATUS_SUCCESS, "NtAlpcAcceptConnectPort failed: %#lx\n", status);
+    }
+
+    /* Server receives message with ALPC_MESSAGE_VIEW_ATTRIBUTE */
+    if (status == STATUS_SUCCESS)
+    {
+        status = pAlpcInitializeMessageAttribute(ALPC_MESSAGE_VIEW_ATTRIBUTE | ALPC_MESSAGE_CONTEXT_ATTRIBUTE,
+                                                 recv_attr, sizeof(recv_attr_buf), &req_attr_size);
+        ok(status == STATUS_SUCCESS, "AlpcInitializeMessageAttribute failed: %#lx\n", status);
+
+        memset(recv_msg, 0, sizeof(*recv_msg));
+        recv_sz = sizeof(recv_buf);
+        status = pNtAlpcSendWaitReceivePort(server_port, 0, NULL, NULL, recv_msg, &recv_sz, recv_attr, &timeout);
+        ok(status == STATUS_SUCCESS, "NtAlpcSendWaitReceivePort (receive) failed: %#lx\n", status);
+
+        if (status == STATUS_SUCCESS)
+        {
+            ok(recv_attr->ValidAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE,
+               "Expected ALPC_MESSAGE_VIEW_ATTRIBUTE in ValidAttributes, got %#lx\n", recv_attr->ValidAttributes);
+            recvd_view = pAlpcGetMessageAttribute(recv_attr, ALPC_MESSAGE_VIEW_ATTRIBUTE);
+            ok(recvd_view != NULL, "Expected recvd_view != NULL\n");
+            if (recvd_view)
+            {
+                ok(recvd_view->ViewBase == args.view_base,
+                   "Expected ViewBase %p, got %p\n", args.view_base, recvd_view->ViewBase);
+                ok(recvd_view->ViewSize == 0x1000,
+                   "Expected ViewSize 0x1000, got %Ix\n", recvd_view->ViewSize);
+                ok(!strcmp((char *)recvd_view->ViewBase, "alpc shared payload 12345"),
+                   "Received view content mismatch: %s\n", (char *)recvd_view->ViewBase);
+            }
+        }
+    }
+
+    WaitForSingleObject( thread, 30000 );
+    ok( args.status == STATUS_SUCCESS, "Client thread failed: %#lx\n", args.status );
+
+    /* Clean up */
+    if (server_conn)
+    {
+        if (pNtAlpcDisconnectPort)
+            pNtAlpcDisconnectPort(server_conn, 0);
+        pNtClose(server_conn);
+    }
+    pNtClose(server_port);
+    CloseHandle( thread );
+}
+
+static void test_NtAlpcCreatePort(void)
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestCreatePort";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    ALPC_BASIC_INFORMATION info;
+    HANDLE port = NULL, dup = NULL;
+    NTSTATUS status;
+    ULONG retlen;
+
+    if (!pNtAlpcCreatePort)
+    {
+        win_skip("NtAlpcCreatePort is unavailable.\n");
+        return;
+    }
+
+    /* Null port handle pointer. */
+    status = pNtAlpcCreatePort( NULL, NULL, NULL );
+    ok( status == STATUS_ACCESS_VIOLATION, "Got unexpected status %#lx.\n", status );
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    /* Valid server port creation. */
+    status = pNtAlpcCreatePort( &port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    ok( port != NULL, "Expected a valid port handle.\n" );
+    if (status != STATUS_SUCCESS || !port) return;
+
+    /* The handle is duplicable with the same access rights. */
+    status = NtDuplicateObject( NtCurrentProcess(), port, NtCurrentProcess(), &dup, 0, 0, DUPLICATE_SAME_ACCESS );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    ok( dup != NULL, "Expected a valid duplicated handle.\n" );
+    if (dup)
+    {
+        /* The duplicated handle is usable. */
+        retlen = 0;
+        status = pNtAlpcQueryInformation( dup, ALPC_BASIC_INFORMATION_CLASS, &info, sizeof(info), &retlen );
+        ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+        NtClose( dup );
+    }
+
+    /* Creating a port with an already existing name. */
+    {
+        HANDLE port2 = NULL;
+        status = pNtAlpcCreatePort( &port2, &obj_attr, &port_attr );
+        ok( status == STATUS_OBJECT_NAME_EXISTS || status == STATUS_OBJECT_NAME_COLLISION || status == STATUS_SUCCESS,
+            "Got unexpected status %#lx.\n", status );
+        if (port2) NtClose( port2 );
+    }
+
+    NtClose( port );
+}
+
+static void test_NtAlpcConnectPort(void)
+{
+    static const WCHAR nonexistent_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestNonexistentPort";
+    UNICODE_STRING port_name;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    HANDLE conn = NULL;
+    NTSTATUS status;
+
+    if (!pNtAlpcConnectPort)
+    {
+        win_skip("NtAlpcConnectPort is unavailable.\n");
+        return;
+    }
+
+    /* Null port handle pointer. */
+    RtlInitUnicodeString( &port_name, nonexistent_nameW );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcConnectPort( NULL, &port_name, NULL, &port_attr, 0, NULL, NULL, NULL, NULL, NULL, NULL );
+    ok( status == STATUS_ACCESS_VIOLATION, "Got unexpected status %#lx.\n", status );
+
+    /* The port does not exist. */
+    timeout.QuadPart = -100 * 10000000LL;
+    conn = NULL;
+    status = pNtAlpcConnectPort( &conn, &port_name, NULL, &port_attr, 0, NULL, NULL, NULL, NULL, NULL, &timeout );
+    ok( status == STATUS_OBJECT_NAME_NOT_FOUND, "Got unexpected status %#lx.\n", status );
+    ok( conn == NULL, "Expected NULL connection port handle.\n" );
+}
+
+static void test_NtAlpcSendWaitReceivePort(void)
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestSendRecv";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    SIZE_T size;
+    HANDLE port = NULL;
+    NTSTATUS status;
+
+    if (!pNtAlpcSendWaitReceivePort)
+    {
+        win_skip("NtAlpcSendWaitReceivePort is unavailable.\n");
+        return;
+    }
+
+    /* Invalid handle, send phase. */
+    memset( buf, 0, sizeof(*msg) );
+    msg->DataLength = 0;
+    msg->TotalLength = sizeof(*msg);
+    status = pNtAlpcSendWaitReceivePort( (HANDLE)0x1234, ALPC_MSGFLG_SYNC_REQUEST, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_INVALID_HANDLE, "Got unexpected status %#lx.\n", status );
+
+    /* Invalid handle, receive phase. */
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( (HANDLE)0x1234, 0, NULL, NULL, msg, &size, NULL, NULL );
+    ok( status == STATUS_INVALID_HANDLE, "Got unexpected status %#lx.\n", status );
+
+    /* No send, no receive: pure no-op. */
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcCreatePort( &port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    status = pNtAlpcSendWaitReceivePort( port, 0, NULL, NULL, NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+
+    /* Receive with a timeout on an empty port. */
+    timeout.QuadPart = -100 * 10000000LL;
+    memset( buf, 0, sizeof(*msg) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_TIMEOUT, "Got unexpected status %#lx.\n", status );
+
+    NtClose( port );
+}
+
+struct alpc_thread_args
+{
+    UNICODE_STRING *port_name;
+    HANDLE done_event;
+    NTSTATUS connect_status;
+    NTSTATUS send_status;
+    NTSTATUS recv_status;
+    HANDLE conn;
+    ULONG reply_type;
+    ULONG reply_msg_id;
+    ULONG reply_data_len;
+    char reply_data[64];
+    void *recv_port_context;
+};
+
+/* Client thread for the round-trip flow: connect with a connection message,
+ * send a request, receive the reply with the context attribute. */
+static DWORD WINAPI alpc_echo_client_thread( void *arg )
+{
+    struct alpc_thread_args *args = arg;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    char buf[512];
+    char attrbuf[256];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    ALPC_MESSAGE_ATTRIBUTES *attr = (ALPC_MESSAGE_ATTRIBUTES *)attrbuf;
+    ALPC_CONTEXT_ATTR *ctx;
+    SIZE_T size, req_size = 0;
+    NTSTATUS status;
+
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    /* Connect, passing a connection message payload. */
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, "ALPCCONN", 8 );
+    msg->DataLength = 8;
+    msg->TotalLength = sizeof(*msg) + 8;
+    size = sizeof(*msg) + 8;
+    args->connect_status = pNtAlpcConnectPort( &args->conn, args->port_name, NULL, &port_attr, 0,
+                                               NULL, msg, &size, NULL, NULL, NULL );
+    if (args->connect_status != STATUS_SUCCESS)
+    {
+        SetEvent( args->done_event );
+        return 0;
+    }
+
+    /* Send a request message. */
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, "REQ-payload", 11 );
+    msg->DataLength = 11;
+    msg->TotalLength = sizeof(*msg) + 11;
+    args->send_status = pNtAlpcSendWaitReceivePort( args->conn, ALPC_MSGFLG_SYNC_REQUEST, msg, NULL,
+                                                    NULL, NULL, NULL, NULL );
+    if (args->send_status != STATUS_SUCCESS)
+    {
+        SetEvent( args->done_event );
+        return 0;
+    }
+
+    /* Receive the reply, requesting the context attribute. */
+    status = pAlpcInitializeMessageAttribute( ALPC_MESSAGE_CONTEXT_ATTRIBUTE, attr, sizeof(attrbuf), &req_size );
+    if (status != STATUS_SUCCESS)
+    {
+        args->recv_status = status;
+        SetEvent( args->done_event );
+        return 0;
+    }
+    memset( buf, 0, sizeof(*msg) );
+    size = sizeof(buf);
+    args->recv_status = pNtAlpcSendWaitReceivePort( args->conn, 0, NULL, NULL, msg, &size, attr, NULL );
+    if (args->recv_status == STATUS_SUCCESS)
+    {
+        args->reply_type = msg->Type;
+        args->reply_msg_id = msg->MessageId;
+        args->reply_data_len = msg->DataLength;
+        if (msg->DataLength && msg->DataLength <= sizeof(args->reply_data))
+            memcpy( args->reply_data, msg + 1, msg->DataLength );
+        ctx = pAlpcGetMessageAttribute( attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
+        args->recv_port_context = ctx ? ctx->PortContext : NULL;
+    }
+    NtClose( args->conn );
+    args->conn = NULL;
+    SetEvent( args->done_event );
+    return 0;
+}
+
+/* Client thread for the connection-rejection flow. */
+static DWORD WINAPI alpc_reject_client_thread( void *arg )
+{
+    struct alpc_thread_args *args = arg;
+    ALPC_PORT_ATTRIBUTES port_attr;
+
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    args->conn = NULL;
+    args->connect_status = pNtAlpcConnectPort( &args->conn, args->port_name, NULL, &port_attr, 0,
+                                               NULL, NULL, NULL, NULL, NULL, NULL );
+    if (args->conn)
+    {
+        NtClose( args->conn );
+        args->conn = NULL;
+    }
+    SetEvent( args->done_event );
+    return 0;
+}
+
+/* Client thread for the disconnect flow: connect, send a request, then block
+ * receiving the reply until the server disconnects the connection. */
+static DWORD WINAPI alpc_disconnect_client_thread( void *arg )
+{
+    struct alpc_thread_args *args = arg;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    SIZE_T size;
+
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    args->conn = NULL;
+    args->connect_status = pNtAlpcConnectPort( &args->conn, args->port_name, NULL, &port_attr, 0,
+                                               NULL, NULL, NULL, NULL, NULL, NULL );
+    if (args->connect_status != STATUS_SUCCESS)
+    {
+        SetEvent( args->done_event );
+        return 0;
+    }
+
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, "REQ-payload", 11 );
+    msg->DataLength = 11;
+    msg->TotalLength = sizeof(*msg) + 11;
+    args->send_status = pNtAlpcSendWaitReceivePort( args->conn, ALPC_MSGFLG_SYNC_REQUEST, msg, NULL,
+                                                    NULL, NULL, NULL, NULL );
+
+    /* Receive with a timeout; the server disconnects the connection port,
+     * which must wake this receive up. */
+    timeout.QuadPart = -10 * 10000000LL;
+    memset( buf, 0, sizeof(*msg) );
+    size = sizeof(buf);
+    args->recv_status = pNtAlpcSendWaitReceivePort( args->conn, 0, NULL, NULL, msg, &size, NULL, &timeout );
+
+    NtClose( args->conn );
+    args->conn = NULL;
+    SetEvent( args->done_event );
+    return 0;
+}
+
+/* Full connection flow: connect, connection request delivery, accept with a
+ * PortContext, request/reply round-trip with data integrity checks and
+ * ALPC_MESSAGE_CONTEXT_ATTRIBUTE propagation, disconnect and cleanup. */
+static void test_alpc_connection_flow( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestFlow";
+    static void * const test_context = (void *)0x1122334455667788;
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    char attrbuf[256];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    ALPC_MESSAGE_ATTRIBUTES *attr = (ALPC_MESSAGE_ATTRIBUTES *)attrbuf;
+    ALPC_CONTEXT_ATTR *ctx;
+    struct alpc_thread_args args;
+    SIZE_T size, req_size;
+    HANDLE server_port = NULL, server_conn = NULL, thread, event;
+    ULONG req_id;
+    NTSTATUS status;
+    DWORD ret;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip("ALPC port functions are unavailable.\n");
+        return;
+    }
+
+    memset( &args, 0, sizeof(args) );
+    args.port_name = &port_name;
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    ok( event != NULL, "CreateEventA failed, err %u.\n", (unsigned int)GetLastError() );
+    args.done_event = event;
+    thread = CreateThread( NULL, 0, alpc_echo_client_thread, &args, 0, NULL );
+    ok( thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
+    if (!thread)
+    {
+        NtClose( server_port );
+        return;
+    }
+
+    /* Receive the connection request on the server port. */
+    timeout.QuadPart = -200 * 10000000LL;
+    req_size = 0;
+    status = pAlpcInitializeMessageAttribute( ALPC_MESSAGE_CONTEXT_ATTRIBUTE, attr, sizeof(attrbuf), &req_size );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, attr, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS)
+    {
+        WaitForSingleObject( thread, 30000 );
+        CloseHandle( thread );
+        NtClose( server_port );
+        return;
+    }
+    winetest_push_context( "connection request" );
+    ok( msg->Type == LPC_CONNECTION_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+    ok( msg->DataLength == 8, "Got unexpected DataLength %u.\n", msg->DataLength );
+    ok( !memcmp( msg + 1, "ALPCCONN", 8 ), "Got unexpected connection payload.\n" );
+    ok( msg->ClientId.UniqueProcess == (HANDLE)(DWORD_PTR)GetCurrentProcessId(),
+        "Got unexpected ClientId.\n" );
+    ok( msg->MessageId != 0, "Expected non-zero MessageId.\n" );
+    ctx = pAlpcGetMessageAttribute( attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
+    ok( ctx != NULL, "Expected a context attribute.\n" );
+    if (ctx) ok( ctx->PortContext == NULL, "Got unexpected PortContext %p.\n", ctx->PortContext );
+    req_id = msg->MessageId;
+    winetest_pop_context();
+
+    /* Accept the connection and attach the port context. */
+    server_conn = NULL;
+    status = pNtAlpcAcceptConnectPort( &server_conn, server_port, 0, NULL, NULL, test_context,
+                                       msg, NULL, TRUE );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    ok( server_conn != NULL, "Expected a valid communication port handle.\n" );
+    if (status != STATUS_SUCCESS || !server_conn)
+    {
+        WaitForSingleObject( thread, 30000 );
+        CloseHandle( thread );
+        NtClose( server_port );
+        return;
+    }
+
+    /* A receive buffer smaller than the message fails and keeps the message queued. */
+    size = 8;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_BUFFER_TOO_SMALL, "Got unexpected status %#lx.\n", status );
+
+    /* Receive the client request on the server port. */
+    req_size = 0;
+    status = pAlpcInitializeMessageAttribute( ALPC_MESSAGE_CONTEXT_ATTRIBUTE, attr, sizeof(attrbuf), &req_size );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, attr, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS)
+    {
+        WaitForSingleObject( thread, 30000 );
+        CloseHandle( thread );
+        NtClose( server_conn );
+        NtClose( server_port );
+        return;
+    }
+    winetest_push_context( "request" );
+    ok( msg->Type == LPC_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+    ok( msg->DataLength == 11, "Got unexpected DataLength %u.\n", msg->DataLength );
+    ok( !memcmp( msg + 1, "REQ-payload", 11 ), "Got unexpected request payload.\n" );
+    ok( msg->ClientId.UniqueProcess == (HANDLE)(DWORD_PTR)GetCurrentProcessId(),
+        "Got unexpected ClientId.\n" );
+    ok( msg->MessageId != 0, "Expected non-zero MessageId.\n" );
+    ok( (attr->ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE),
+        "Expected a valid context attribute, got %#lx.\n", attr->ValidAttributes );
+    ctx = pAlpcGetMessageAttribute( attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
+    ok( ctx != NULL, "Expected a context attribute.\n" );
+    if (ctx)
+    {
+        /* The PortContext passed to NtAlpcAcceptConnectPort is propagated. */
+        ok( ctx->PortContext == test_context, "Got unexpected PortContext %p.\n", ctx->PortContext );
+        ok( ctx->MessageId == msg->MessageId, "Got unexpected context MessageId %u.\n", ctx->MessageId );
+    }
+    req_id = msg->MessageId;
+    winetest_pop_context();
+
+    /* Reply to the client, echoing the request MessageId. */
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, "REPLY-payload", 13 );
+    msg->DataLength = 13;
+    msg->TotalLength = sizeof(*msg) + 13;
+    msg->MessageId = req_id;
+    status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+
+    ret = WaitForSingleObject( thread, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+
+    winetest_push_context( "client" );
+    ok( args.connect_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", args.connect_status );
+    ok( args.send_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", args.send_status );
+    ok( args.recv_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", args.recv_status );
+    if (args.recv_status == STATUS_SUCCESS)
+    {
+        ok( args.reply_type == LPC_REPLY_TYPE, "Got unexpected reply type %u.\n", args.reply_type );
+        ok( args.reply_msg_id == req_id, "Got unexpected reply MessageId %u.\n", args.reply_msg_id );
+        ok( args.reply_data_len == 13, "Got unexpected reply DataLength %u.\n", args.reply_data_len );
+        ok( !memcmp( args.reply_data, "REPLY-payload", 13 ), "Got unexpected reply payload.\n" );
+        ok( args.recv_port_context == test_context, "Got unexpected PortContext %p.\n", args.recv_port_context );
+    }
+    winetest_pop_context();
+
+    /* Disconnect the communication port and clean up. */
+    status = pNtAlpcDisconnectPort( server_conn, 0 );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+
+    status = NtClose( server_conn );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    status = NtClose( server_port );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+
+    /* Closed handles are rejected. */
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_INVALID_HANDLE, "Got unexpected status %#lx.\n", status );
+
+    CloseHandle( thread );
+    CloseHandle( event );
+}
+
+/* The server rejects the connection: NtAlpcAcceptConnectPort with
+ * accept_connection = FALSE returns success with a NULL communication port
+ * and the client receives STATUS_CONNECTION_REFUSED. */
+static void test_alpc_reject_connection( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestReject";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    struct alpc_thread_args args;
+    SIZE_T size;
+    HANDLE server_port = NULL, conn = NULL, thread, event;
+    NTSTATUS status;
+    DWORD ret;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip("ALPC port functions are unavailable.\n");
+        return;
+    }
+
+    memset( &args, 0, sizeof(args) );
+    args.port_name = &port_name;
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    args.done_event = event;
+    thread = CreateThread( NULL, 0, alpc_reject_client_thread, &args, 0, NULL );
+    ok( thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
+    if (!thread)
+    {
+        NtClose( server_port );
+        return;
+    }
+
+    /* Receive the connection request. */
+    timeout.QuadPart = -200 * 10000000LL;
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status == STATUS_SUCCESS)
+    {
+        ok( msg->Type == LPC_CONNECTION_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+
+        conn = (void *)0xdeadbeef;
+        status = pNtAlpcAcceptConnectPort( &conn, server_port, 0, NULL, NULL, NULL, msg, NULL, FALSE );
+        ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+        ok( conn == NULL, "Expected NULL communication port handle.\n" );
+    }
+
+    ret = WaitForSingleObject( thread, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+    ok( args.connect_status == STATUS_CONNECTION_REFUSED, "Got unexpected status %#lx.\n", args.connect_status );
+
+    NtClose( server_port );
+    CloseHandle( thread );
+    CloseHandle( event );
+}
+
+static void test_NtAlpcAcceptConnectPort(void)
+{
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    HANDLE conn = NULL;
+    NTSTATUS status;
+
+    if (!pNtAlpcAcceptConnectPort)
+    {
+        win_skip("NtAlpcAcceptConnectPort is unavailable.\n");
+        return;
+    }
+
+    /* Invalid connection port handle. */
+    memset( buf, 0, sizeof(*msg) );
+    conn = NULL;
+    status = pNtAlpcAcceptConnectPort( &conn, (HANDLE)0x1234, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+    ok( status == STATUS_INVALID_HANDLE, "Got unexpected status %#lx.\n", status );
+    ok( conn == NULL, "Expected NULL communication port handle.\n" );
+}
+
+/* Disconnect semantics on an accepted connection: the server disconnects its
+ * communication port and the client's pending receive is woken up. */
+static void test_alpc_disconnect_flow( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestDisconnect";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    struct alpc_thread_args args;
+    SIZE_T size;
+    HANDLE server_port = NULL, server_conn = NULL, thread, event;
+    NTSTATUS status;
+    DWORD ret;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort ||
+        !pNtAlpcSendWaitReceivePort || !pNtAlpcDisconnectPort)
+    {
+        win_skip("ALPC port functions are unavailable.\n");
+        return;
+    }
+
+    /* Invalid handle. */
+    status = pNtAlpcDisconnectPort( (HANDLE)0x1234, 0 );
+    ok( status == STATUS_INVALID_HANDLE, "Got unexpected status %#lx.\n", status );
+
+    memset( &args, 0, sizeof(args) );
+    args.port_name = &port_name;
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    args.done_event = event;
+    thread = CreateThread( NULL, 0, alpc_disconnect_client_thread, &args, 0, NULL );
+    ok( thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
+    if (!thread)
+    {
+        NtClose( server_port );
+        return;
+    }
+
+    /* Receive the connection request and accept. */
+    timeout.QuadPart = -200 * 10000000LL;
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status == STATUS_SUCCESS)
+    {
+        server_conn = NULL;
+        status = pNtAlpcAcceptConnectPort( &server_conn, server_port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+        ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    }
+
+    if (server_conn)
+    {
+        status = pNtAlpcDisconnectPort( server_conn, 0 );
+        ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+
+        ret = WaitForSingleObject( thread, 30000 );
+        ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+
+        /* The client's pending receive must be woken up by the disconnect. */
+        ok( args.connect_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", args.connect_status );
+        ok( args.recv_status == STATUS_PORT_DISCONNECTED || args.recv_status == STATUS_PIPE_DISCONNECTED ||
+            args.recv_status == STATUS_TIMEOUT, "Got unexpected status %#lx.\n", args.recv_status );
+
+        status = NtClose( server_conn );
+        ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+
+        /* The closed handle is rejected. */
+        status = pNtAlpcDisconnectPort( server_conn, 0 );
+        ok( status == STATUS_INVALID_HANDLE, "Got unexpected status %#lx.\n", status );
+    }
+    else
+    {
+        WaitForSingleObject( thread, 30000 );
+    }
+
+    NtClose( server_port );
+    CloseHandle( thread );
+    CloseHandle( event );
+}
+
+static void test_NtAlpcQueryInformation(void)
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestQueryInfo";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    ALPC_BASIC_INFORMATION info;
+    HANDLE port = NULL;
+    ULONG retlen;
+    NTSTATUS status;
+
+    if (!pNtAlpcQueryInformation)
+    {
+        win_skip("NtAlpcQueryInformation is unavailable.\n");
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort( &port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    /* AlpcBasicInformation. */
+    memset( &info, 0xa5, sizeof(info) );
+    retlen = 0;
+    status = pNtAlpcQueryInformation( port, ALPC_BASIC_INFORMATION_CLASS, &info, sizeof(info), &retlen );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    ok( retlen == sizeof(info), "Got unexpected retlen %u.\n", retlen );
+    if (status == STATUS_SUCCESS && retlen == sizeof(info))
+    {
+        ok( info.Flags == 0, "Got unexpected Flags %#lx.\n", info.Flags );
+        ok( info.PortContext == NULL, "Got unexpected PortContext %p.\n", info.PortContext );
+    }
+
+    /* Buffer too small. */
+    retlen = 0;
+    status = pNtAlpcQueryInformation( port, ALPC_BASIC_INFORMATION_CLASS, &info, sizeof(info) - 4, &retlen );
+    ok( status == STATUS_INFO_LENGTH_MISMATCH, "Got unexpected status %#lx.\n", status );
+
+    /* Null return length pointer. */
+    status = pNtAlpcQueryInformation( port, ALPC_BASIC_INFORMATION_CLASS, &info, sizeof(info), NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+
+    /* Invalid information class. */
+    retlen = 0;
+    status = pNtAlpcQueryInformation( port, ALPC_INVALID_INFORMATION_CLASS, &info, sizeof(info), &retlen );
+    ok( status == STATUS_INVALID_INFO_CLASS, "Got unexpected status %#lx.\n", status );
+
+    NtClose( port );
+}
+
+static void test_NtAlpcSetInformation(void)
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestSetInfo";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    SECURITY_DESCRIPTOR sd;
+    HANDLE port = NULL;
+    NTSTATUS status;
+
+    if (!pNtAlpcSetInformation)
+    {
+        win_skip("NtAlpcSetInformation is unavailable.\n");
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort( &port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    InitializeSecurityDescriptor( &sd, SECURITY_DESCRIPTOR_REVISION );
+    ok( SetSecurityDescriptorDacl( &sd, TRUE, NULL, FALSE ), "SetSecurityDescriptorDacl failed, err %u.\n", (unsigned int)GetLastError() );
+
+    /* AlpcPortSecurityDescriptorInformation: set the port security descriptor. */
+    status = pNtAlpcSetInformation( port, 1 /* AlpcPortSecurityDescriptorInformation */, &sd, sizeof(sd) );
+    ok( status == STATUS_SUCCESS || status == STATUS_INVALID_INFO_CLASS || status == STATUS_NOT_SUPPORTED ||
+        status == STATUS_NOT_IMPLEMENTED || status == STATUS_INVALID_PARAMETER ||
+        status == STATUS_INVALID_SYSTEM_SERVICE,
+        "Got unexpected status %#lx.\n", status );
+
+    NtClose( port );
+}
+
+#endif /* _WIN64 */
+
 START_TEST(alpc)
 {
     init_functions();
@@ -349,4 +1373,17 @@ START_TEST(alpc)
     test_AlpcGetHeaderSize();
     test_AlpcGetMessageAttribute();
     test_AlpcInitializeMessageAttribute();
+    test_AlpcSectionView();
+#ifdef _WIN64
+    test_AlpcMessageViewAttribute();
+    test_NtAlpcCreatePort();
+    test_NtAlpcConnectPort();
+    test_NtAlpcAcceptConnectPort();
+    test_NtAlpcSendWaitReceivePort();
+    test_alpc_connection_flow();
+    test_alpc_reject_connection();
+    test_alpc_disconnect_flow();
+    test_NtAlpcQueryInformation();
+    test_NtAlpcSetInformation();
+#endif
 }

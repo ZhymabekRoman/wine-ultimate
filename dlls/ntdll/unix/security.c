@@ -879,8 +879,8 @@ NTSTATUS WINAPI NtFilterToken( HANDLE token, ULONG flags, TOKEN_GROUPS *disable_
     TRACE( "%p %#x %p %p %p %p\n", token, flags, disable_sids, privileges,
            restrict_sids, new_token );
 
-    if (flags)
-        FIXME( "flags %#x unsupported\n", flags );
+    if (flags & ~(DISABLE_MAX_PRIVILEGE | SANDBOX_INERT | LUA_TOKEN | WRITE_RESTRICTED))
+        FIXME( "flags %#x unsupported\n", (unsigned int)flags );
 
     if (privileges)
         privileges_len = privileges->PrivilegeCount * sizeof(LUID_AND_ATTRIBUTES);

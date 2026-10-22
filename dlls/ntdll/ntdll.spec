@@ -158,10 +158,15 @@
 @ stdcall -syscall NtAlpcAcceptConnectPort(ptr ptr long ptr ptr ptr ptr ptr long)
 @ stdcall -syscall NtAlpcConnectPort(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr)
 @ stdcall -syscall NtAlpcCreatePort(ptr ptr ptr)
+@ stdcall -syscall NtAlpcCreatePortSection(ptr long ptr long ptr ptr)
+@ stdcall -syscall NtAlpcCreateSectionView(ptr long ptr)
+@ stdcall -syscall NtAlpcDeletePortSection(ptr long ptr)
+@ stdcall -syscall NtAlpcDeleteSectionView(ptr long ptr)
 @ stdcall -syscall NtAlpcDisconnectPort(ptr long)
 @ stdcall -syscall NtAlpcImpersonateClientOfPort(ptr ptr ptr)
 @ stdcall -syscall NtAlpcQueryInformation(ptr long ptr long ptr)
 @ stdcall -syscall NtAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr)
+@ stdcall -syscall NtAlpcSetInformation(ptr long ptr long)
 @ stdcall -syscall NtAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr)
 @ stdcall -syscall NtCancelWaitCompletionPacket(ptr long)
 @ stdcall -syscall NtCreateWaitCompletionPacket(ptr long ptr)
@@ -358,6 +363,7 @@
 @ stdcall -syscall=0x0017 NtQueryValueKey(long ptr long ptr long ptr)
 @ stdcall -syscall=0x0023 NtQueryVirtualMemory(long ptr long ptr long ptr)
 @ stdcall -syscall=0x0049 NtQueryVolumeInformationFile(long ptr ptr long long)
+@ stdcall NtQueryWnfStateData(ptr ptr ptr ptr ptr ptr)
 @ stdcall -syscall=0x0045 NtQueueApcThread(long ptr long long long)
 @ stdcall -syscall NtQueueApcThreadEx(long long ptr long long long)
 @ stdcall -syscall NtQueueApcThreadEx2(long long long ptr long long long)
@@ -650,6 +656,7 @@
 @ stdcall RtlDestroyHeap(long)
 @ stdcall RtlDestroyProcessParameters(ptr)
 @ stdcall RtlDestroyQueryDebugBuffer(ptr)
+@ stdcall RtlDisownModuleHeapAllocation(ptr ptr)
 @ stdcall RtlDetermineDosPathNameType_U(wstr)
 @ stdcall RtlDllShutdownInProgress()
 # @ stub RtlDnsHostNameToComputerName
@@ -1068,6 +1075,10 @@
 @ stdcall RtlSubAuthoritySid(ptr long)
 @ stdcall RtlSubtreePredecessor(ptr)
 @ stdcall RtlSubtreeSuccessor(ptr)
+@ stdcall RtlPublishWnfStateData(ptr ptr ptr long ptr)
+@ stdcall RtlQueryWnfStateData(ptr ptr ptr ptr ptr)
+@ stdcall RtlSubscribeWnfStateChangeNotification(ptr int64 long ptr ptr ptr long long)
+@ stdcall RtlUnsubscribeWnfStateChangeNotification(ptr)
 @ stdcall RtlSystemTimeToLocalTime(ptr ptr)
 @ stdcall RtlTimeFieldsToTime(ptr ptr)
 @ stdcall RtlTimeToElapsedTimeFields(ptr ptr)
@@ -1242,10 +1253,15 @@
 @ stdcall -private ZwAlpcAcceptConnectPort(ptr ptr long ptr ptr ptr ptr ptr long) NtAlpcAcceptConnectPort
 @ stdcall -private ZwAlpcConnectPort(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr) NtAlpcConnectPort
 @ stdcall -private ZwAlpcCreatePort(ptr ptr ptr) NtAlpcCreatePort
+@ stdcall -private ZwAlpcCreatePortSection(ptr long ptr long ptr ptr) NtAlpcCreatePortSection
+@ stdcall -private ZwAlpcCreateSectionView(ptr long ptr) NtAlpcCreateSectionView
+@ stdcall -private ZwAlpcDeletePortSection(ptr long ptr) NtAlpcDeletePortSection
+@ stdcall -private ZwAlpcDeleteSectionView(ptr long ptr) NtAlpcDeleteSectionView
 @ stdcall -private ZwAlpcDisconnectPort(ptr long) NtAlpcDisconnectPort
 @ stdcall -private ZwAlpcImpersonateClientOfPort(ptr ptr ptr) NtAlpcImpersonateClientOfPort
 @ stdcall -private ZwAlpcQueryInformation(ptr long ptr long ptr) NtAlpcQueryInformation
 @ stdcall -private ZwAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePort
+@ stdcall -private ZwAlpcSetInformation(ptr long ptr long) NtAlpcSetInformation
 @ stdcall -private ZwAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr) NtAssociateWaitCompletionPacket
 @ stdcall -private ZwCancelWaitCompletionPacket(ptr long) NtCancelWaitCompletionPacket
 @ stdcall -private ZwCreateWaitCompletionPacket(ptr long ptr) NtCreateWaitCompletionPacket
