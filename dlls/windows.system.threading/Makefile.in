@@ -1,0 +1,5 @@
+MODULE  = windows.system.threading.dll
+IMPORTS = combase oleaut32
+
+SOURCES = \
+	main.c

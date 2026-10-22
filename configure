@@ -23712,6 +23712,7 @@ wine_fn_config_makefile dlls/windows.system.profile.systemid enable_windows_syst
 wine_fn_config_makefile dlls/windows.system.profile.systemid/tests enable_tests
 wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers enable_windows_system_profile_systemmanufacturers
 wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers/tests enable_tests
+wine_fn_config_makefile dlls/windows.system.threading enable_windows_system_threading
 wine_fn_config_makefile dlls/windows.ui.composition enable_windows_ui_composition
 wine_fn_config_makefile dlls/windows.ui.composition/tests enable_tests
 wine_fn_config_makefile dlls/windows.ui.core.textinput enable_windows_ui_core_textinput
