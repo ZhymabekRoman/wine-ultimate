@@ -310,7 +310,7 @@ HRESULT get_buffer_data( IBuffer *buffer, BYTE **data, UINT32 *len )
     return S_OK;
 }
 
-static HRESULT STDMETHODCALLTYPE cryptobuffer_statics_Compare(
+HRESULT STDMETHODCALLTYPE cryptobuffer_statics_Compare(
         ICryptographicBufferStatics *iface, IBuffer *object1, IBuffer *object2, boolean *is_equal)
 {
     BYTE *d1 = NULL, *d2 = NULL;
@@ -666,8 +666,6 @@ static struct cryptobuffer_factory cryptobuffer_factory =
 
 IActivationFactory *cryptobuffer_activation_factory = &cryptobuffer_factory.IActivationFactory_iface;
 
-#include "core.c"
-
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
 {
     FIXME("clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out);
@@ -708,5 +706,5 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_QueryInterface(keyderivationalgnames_activation_factory, &IID_IActivationFactory, (void **)factory);
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return E_NOINTERFACE;
 }

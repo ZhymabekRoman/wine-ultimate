@@ -57,6 +57,9 @@ extern IActivationFactory *keyderivationalgnames_activation_factory;
 
 extern HRESULT create_crypt_buffer( UINT32 capacity, UINT32 length, const BYTE *data, IBuffer **out );
 extern HRESULT get_buffer_data( IBuffer *buffer, BYTE **data, UINT32 *len );
+extern HRESULT STDMETHODCALLTYPE cryptobuffer_statics_Compare( ICryptographicBufferStatics *iface, IBuffer *object1, IBuffer *object2, boolean *is_equal );
+extern HRESULT create_async_buffer( IInspectable *buffer, void **out );
+extern HRESULT create_async_action( void **out );
 
 extern HRESULT async_operation_boolean_create( IUnknown *invoker, IUnknown *param, async_operation_callback callback,
                                                IAsyncOperation_boolean **out );

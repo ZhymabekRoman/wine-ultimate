@@ -26,6 +26,9 @@ import "windows.security.credentials.idl";
 namespace Windows.Security.Cryptography {
     runtimeclass CryptographicBuffer;
 }
+namespace Windows.Security.Cryptography.DataProtection {
+    runtimeclass DataProtectionProvider;
+}
 namespace Windows.Security.Cryptography.Core {
     runtimeclass CryptographicEngine;
     runtimeclass SymmetricKeyAlgorithmProvider;

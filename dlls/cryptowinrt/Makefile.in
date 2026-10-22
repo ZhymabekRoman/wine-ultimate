@@ -6,6 +6,7 @@ SOURCES = \
 	async.c \
 	async_private.idl \
 	classes.idl \
+	core.c \
 	credentials.c \
 	dataprotection.c \
 	main.c
