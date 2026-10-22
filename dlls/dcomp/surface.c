@@ -62,14 +62,97 @@ static ULONG STDMETHODCALLTYPE surface_Release(IDCompositionSurfaceUnknown *ifac
 
     if (!ref)
     {
-        IUnknown_Release(surface->physical_surface);
-        IDCompositionSurfaceFactory_Release(surface->factory);
+        if (surface->physical_surface)
+            IUnknown_Release(surface->physical_surface);
+        if (surface->factory)
+            IDCompositionSurfaceFactory_Release(surface->factory);
         if (surface->draw_surface)
             ID3D11Texture2D_Release(surface->draw_surface);
         free(surface);
     }
 
     return ref;
+}
+
+static const struct IDCompositionSurfaceUnknownVtbl surface_vtbl;
+
+HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXGISurface *dxgi_surface, IUnknown **out_surface)
+{
+    struct composition_surface *surface;
+    DXGI_SURFACE_DESC desc;
+
+    if (!out_surface)
+        return E_POINTER;
+    *out_surface = NULL;
+
+    if (!dxgi_surface)
+        return E_INVALIDARG;
+
+    if (FAILED(IDXGISurface_GetDesc(dxgi_surface, &desc)))
+        return E_FAIL;
+
+    if (!(surface = calloc(1, sizeof(*surface))))
+        return E_OUTOFMEMORY;
+
+    surface->IDCompositionSurfaceUnknown_iface.lpVtbl = &surface_vtbl;
+    surface->physical_surface = (IUnknown *)dxgi_surface;
+    IDXGISurface_AddRef(dxgi_surface);
+    surface->physical_surface_iid = IID_IDXGISurface;
+    surface->width = desc.Width;
+    surface->height = desc.Height;
+    surface->pixel_format = desc.Format;
+    surface->alpha_mode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+    surface->ref = 1;
+
+    *out_surface = (IUnknown *)&surface->IDCompositionSurfaceUnknown_iface;
+    return S_OK;
+}
+
+struct composition_surface *g_last_rendered_surface = NULL;
+
+static HRESULT factory_get_dxgi_device(struct composition_surface_factory *factory, IDXGIDevice **dxgi_device)
+{
+    if (IsEqualGUID(&factory->rendering_device_iid, &IID_IDXGIDevice))
+    {
+        *dxgi_device = (IDXGIDevice *)factory->rendering_device;
+        IDXGIDevice_AddRef(*dxgi_device);
+        return S_OK;
+    }
+    else if (IsEqualGUID(&factory->rendering_device_iid, &IID_ID2D1Device))
+    {
+        ID2D1Device2 *d2d2 = NULL;
+
+        if (SUCCEEDED(IUnknown_QueryInterface(factory->rendering_device, &IID_ID2D1Device2, (void **)&d2d2)))
+        {
+            HRESULT hr = ID2D1Device2_GetDxgiDevice(d2d2, dxgi_device);
+            ID2D1Device2_Release(d2d2);
+            if (SUCCEEDED(hr) && *dxgi_device)
+                return S_OK;
+        }
+
+        if (SUCCEEDED(IUnknown_QueryInterface(factory->rendering_device, &IID_IDXGIDevice, (void **)dxgi_device)))
+            return S_OK;
+    }
+
+    *dxgi_device = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT factory_get_d3d11_device(struct composition_surface_factory *factory, ID3D11Device **d3d11_device)
+{
+    IDXGIDevice *dxgi_device = NULL;
+    HRESULT hr;
+
+    if (SUCCEEDED(IUnknown_QueryInterface(factory->rendering_device, &IID_ID3D11Device, (void **)d3d11_device)))
+        return S_OK;
+
+    hr = factory_get_dxgi_device(factory, &dxgi_device);
+    if (FAILED(hr))
+        return hr;
+
+    hr = IDXGIDevice_QueryInterface(dxgi_device, &IID_ID3D11Device, (void **)d3d11_device);
+    IDXGIDevice_Release(dxgi_device);
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *iface,
@@ -84,7 +167,7 @@ static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *
     RECT whole_rect;
     HRESULT hr;
 
-    TRACE("iface %p, rect %s, iid %s, object %p, offset %p.\n", iface, wine_dbgstr_rect(rect),
+    TRACE("DCOMP: surface_BeginDraw iface %p, rect %s, iid %s, object %p, offset %p\n", iface, wine_dbgstr_rect(rect),
             debugstr_guid(iid), object, offset);
 
     if (IsEqualGUID(iid, &IID_ID2D1DeviceContext))
@@ -115,18 +198,10 @@ static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *
 
     if (!surface->draw_surface)
     {
-        if (!IsEqualGUID(&factory->rendering_device_iid, &IID_IDXGIDevice))
-        {
-            ERR("Only IDCompositionSurfaceFactory created with an IDXGIDevice rendering device is "
-                    "currently supported, rendering device guid %s.\n",
-                    wine_dbgstr_guid(&factory->rendering_device_iid));
-            return E_NOTIMPL;
-        }
-
-        hr = IUnknown_QueryInterface(factory->rendering_device, &IID_ID3D11Device, (void **)&d3d11_device);
+        hr = factory_get_d3d11_device(factory, &d3d11_device);
         if (FAILED(hr))
         {
-            FIXME("Failed to get a d3d11 device, should a new one be created?\n");
+            FIXME("Failed to get a d3d11 device, should a new one be created? hr %#lx\n", hr);
             return hr;
         }
 
@@ -194,22 +269,16 @@ static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *if
         return DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED;
     }
     device->drawing_surface = NULL;
+    g_last_rendered_surface = surface;
     dcomp_unlock();
+    TRACE("DCOMP: surface_EndDraw surface %p (size %ux%u)\n", surface, surface->width, surface->height);
 
     /* TODO: Copy data after Commit() is called instead of doing it immediately here */
 
-    if (!IsEqualGUID(&factory->rendering_device_iid, &IID_IDXGIDevice))
-    {
-        ERR("Only IDCompositionSurfaceFactory created with an IDXGIDevice rendering device is "
-                "currently supported, rendering device guid %s.\n",
-                wine_dbgstr_guid(&factory->rendering_device_iid));
-        return E_NOTIMPL;
-    }
-
-    hr = IUnknown_QueryInterface(factory->rendering_device, &IID_ID3D11Device, (void **)&d3d11_device);
+    hr = factory_get_d3d11_device(factory, &d3d11_device);
     if (FAILED(hr))
     {
-        FIXME("Failed to get a d3d11 device, should a new one be created?\n");
+        FIXME("Failed to get a d3d11 device, should a new one be created? hr %#lx\n", hr);
         return hr;
     }
 
@@ -287,6 +356,7 @@ static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *i
     struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
     struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(surface->factory);
     struct composition_device *device = impl_from_IDCompositionDevice(factory->device);
+    IDXGIDevice *dxgi_surface_device = NULL;
     IDXGISurface *dxgi_surface;
     DXGI_SURFACE_DESC desc;
     HRESULT hr;
@@ -321,8 +391,17 @@ static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *i
     desc.Format = surface->pixel_format;
     desc.SampleDesc.Count = 1;
     desc.SampleDesc.Quality = 0;
-    hr = IDXGIDevice_CreateSurface((IDXGIDevice *)factory->rendering_device, &desc, 1,
+    hr = factory_get_dxgi_device(factory, &dxgi_surface_device);
+    if (FAILED(hr))
+    {
+        dcomp_unlock();
+        ERR("Failed to get dxgi device, hr %#lx.\n", hr);
+        return hr;
+    }
+
+    hr = IDXGIDevice_CreateSurface(dxgi_surface_device, &desc, 1,
             DXGI_USAGE_BACK_BUFFER | DXGI_USAGE_SHADER_INPUT, NULL, &dxgi_surface);
+    IDXGIDevice_Release(dxgi_surface_device);
     if (FAILED(hr))
     {
         dcomp_unlock();
@@ -1031,7 +1110,8 @@ struct composition_surface *unsafe_impl_from_IDCompositionSurface(IDCompositionS
 {
     if (!iface)
         return NULL;
-    assert((void *)iface->lpVtbl == (void *)&surface_vtbl);
+    if ((void *)iface->lpVtbl != (void *)&surface_vtbl)
+        return NULL;
     return CONTAINING_RECORD(iface, struct composition_surface, IDCompositionSurfaceUnknown_iface);
 }
 
@@ -1042,6 +1122,9 @@ HRESULT create_surface(struct composition_surface_factory *factory, UINT width, 
     const GUID *physical_surface_iid;
     IUnknown *physical_surface;
     HRESULT hr;
+
+    TRACE("DCOMP: create_surface width %u, height %u, format %#x, alpha_mode %#x\n",
+        width, height, pixel_format, alpha_mode);
 
     if (!width || !height)
         return E_INVALIDARG;
@@ -1056,35 +1139,41 @@ HRESULT create_surface(struct composition_surface_factory *factory, UINT width, 
     if (alpha_mode != DXGI_ALPHA_MODE_PREMULTIPLIED && alpha_mode != DXGI_ALPHA_MODE_IGNORE)
         return E_INVALIDARG;
 
-    if (IsEqualGUID(&factory->rendering_device_iid, &IID_IDXGIDevice))
     {
-        IDXGISurface *dxgi_surface;
-        DXGI_SURFACE_DESC desc;
+        IDXGIDevice *dxgi_device = NULL;
 
-        desc.Width = width;
-        desc.Height = height;
-        desc.Format = pixel_format;
-        desc.SampleDesc.Count = 1;
-        desc.SampleDesc.Quality = 0;
-        /* TODO: What about alpha_mode ? */
-
-        hr = IDXGIDevice_CreateSurface((IDXGIDevice *)factory->rendering_device, &desc, 1,
-                DXGI_USAGE_BACK_BUFFER | DXGI_USAGE_SHADER_INPUT, NULL, &dxgi_surface);
-        if (FAILED(hr))
+        hr = factory_get_dxgi_device(factory, &dxgi_device);
+        if (SUCCEEDED(hr) && dxgi_device)
         {
-            ERR("Failed to create a IDXGISurface.\n");
-            return hr;
-        }
+            IDXGISurface *dxgi_surface;
+            DXGI_SURFACE_DESC desc;
 
-        physical_surface = (IUnknown *)dxgi_surface;
-        physical_surface_iid = &IID_IDXGISurface;
-    }
-    else
-    {
-        FIXME("Only IDCompositionSurfaceFactory created with an IDXGIDevice rendering device is "
-              "currently supported, rendering device guid %s.\n",
-              wine_dbgstr_guid(&factory->rendering_device_iid));
-        return E_NOTIMPL;
+            desc.Width = width;
+            desc.Height = height;
+            desc.Format = pixel_format;
+            desc.SampleDesc.Count = 1;
+            desc.SampleDesc.Quality = 0;
+            /* TODO: What about alpha_mode ? */
+
+            hr = IDXGIDevice_CreateSurface(dxgi_device, &desc, 1,
+                    DXGI_USAGE_BACK_BUFFER | DXGI_USAGE_SHADER_INPUT, NULL, &dxgi_surface);
+            IDXGIDevice_Release(dxgi_device);
+            if (FAILED(hr))
+            {
+                ERR("Failed to create a IDXGISurface, hr %#lx.\n", hr);
+                return hr;
+            }
+
+            physical_surface = (IUnknown *)dxgi_surface;
+            physical_surface_iid = &IID_IDXGISurface;
+        }
+        else
+        {
+            FIXME("Only IDCompositionSurfaceFactory created with an IDXGIDevice or ID2D1Device rendering device is "
+                  "currently supported, rendering device guid %s.\n",
+                  wine_dbgstr_guid(&factory->rendering_device_iid));
+            return E_NOTIMPL;
+        }
     }
 
     surface = calloc(1, sizeof(*surface));

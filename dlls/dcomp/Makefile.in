@@ -1,4 +1,5 @@
 MODULE   = dcomp.dll
+IMPORTLIB = dcomp
 IMPORTS  = d2d1 dwmapi user32 gdi32 d3dcompiler
 
 VER_PRODUCTVERSION = 10,0,14393,0
@@ -8,4 +9,5 @@ SOURCES = \
 	device.c \
 	surface.c \
 	target.c \
+	transform.c \
 	visual.c

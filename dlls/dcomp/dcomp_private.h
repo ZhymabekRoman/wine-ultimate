@@ -20,7 +20,7 @@
 
 #include "dcomp.h"
 #include "dcomp_private_iface.h"
-#include "d2d1_1.h"
+#include "d2d1_3.h"
 #include <d3d11.h>
 #include "wine/list.h"
 
@@ -35,7 +35,62 @@ struct composition_device
     BOOL thread_exited;
     int version;
     LONG ref;
+    IUnknown *rendering_device;
+    IDCompositionSurfaceFactory *surface_factory;
+    struct list dev_entry;
 };
+
+enum dcomp_object_kind
+{
+    TRANSFORM_TRANSLATE,
+    TRANSFORM_SCALE,
+    TRANSFORM_ROTATE,
+    TRANSFORM_SKEW,
+    TRANSFORM_MATRIX,
+    TRANSFORM_TRANSLATE_3D,
+    TRANSFORM_SCALE_3D,
+    TRANSFORM_ROTATE_3D,
+    TRANSFORM_MATRIX_3D,
+    OBJECT_EFFECT_GROUP,
+    OBJECT_RECTANGLE_CLIP,
+};
+
+/* One object implements every DirectComposition transform / effect-group /
+ * rectangle-clip interface; the creation kind gates QueryInterface. */
+struct dcomp_transform
+{
+    struct IDCompositionTranslateTransform IDCompositionTranslateTransform_iface;
+    struct IDCompositionScaleTransform IDCompositionScaleTransform_iface;
+    struct IDCompositionRotateTransform IDCompositionRotateTransform_iface;
+    struct IDCompositionSkewTransform IDCompositionSkewTransform_iface;
+    struct IDCompositionMatrixTransform IDCompositionMatrixTransform_iface;
+    struct IDCompositionTranslateTransform3D IDCompositionTranslateTransform3D_iface;
+    struct IDCompositionScaleTransform3D IDCompositionScaleTransform3D_iface;
+    struct IDCompositionRotateTransform3D IDCompositionRotateTransform3D_iface;
+    struct IDCompositionMatrixTransform3D IDCompositionMatrixTransform3D_iface;
+    struct IDCompositionEffectGroup IDCompositionEffectGroup_iface;
+    struct IDCompositionRectangleClip IDCompositionRectangleClip_iface;
+    LONG ref;
+    struct composition_device *device;
+    enum dcomp_object_kind kind;
+    FLOAT offset_x, offset_y, offset_z;
+    FLOAT scale_x, scale_y, scale_z;
+    FLOAT center_x, center_y, center_z;
+    FLOAT angle, angle_x, angle_y;
+    FLOAT axis_x, axis_y, axis_z;
+    FLOAT opacity;
+    D2D_MATRIX_3X2_F matrix;
+    D3DMATRIX matrix3d;
+    FLOAT clip_left, clip_top, clip_right, clip_bottom;
+    FLOAT clip_tl_radius_x, clip_tl_radius_y;
+    FLOAT clip_tr_radius_x, clip_tr_radius_y;
+    FLOAT clip_bl_radius_x, clip_bl_radius_y;
+    FLOAT clip_br_radius_x, clip_br_radius_y;
+    IDCompositionTransform3D *transform3d;
+};
+
+struct dcomp_transform *dcomp_transform_create( struct composition_device *device,
+        enum dcomp_object_kind kind );
 
 struct composition_surface_factory
 {
@@ -68,6 +123,7 @@ struct composition_target
     IDCompositionVisual *root;
     BOOL topmost;
     HWND hwnd;
+    HANDLE shared_visual_handle;
     struct list entry;
     LONG ref;
 };
@@ -83,11 +139,14 @@ struct composition_visual
     enum DCOMPOSITION_BORDER_MODE border_mode;
     enum DCOMPOSITION_BACKFACE_VISIBILITY visibility;
     float offset_x;
+    float offset_y;
+    SIZE size;
     struct list child_visuals; /* visuals closer to head are lower in z-order */
     struct list entry;
     struct composition_visual *parent;
     BOOL is_root;
     BOOL is_child;
+    HANDLE shared_visual_handle;
     int version;
     LONG ref;
 };
@@ -140,6 +199,12 @@ HRESULT create_surface(struct composition_surface_factory *factory, UINT width, 
         DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface);
 HRESULT create_surface_factory(struct composition_device *device, IUnknown *rendering_device, IDCompositionSurfaceFactory **factory);
 HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost, IDCompositionTarget **target);
+HRESULT create_target_from_shared_visual_handle(struct composition_device *device, HANDLE shared_visual_handle, void **new_target);
 HRESULT create_visual(int version, REFIID iid, void **visual);
+HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, void **new_visual);
+HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXGISurface *dxgi_surface, IUnknown **out_surface);
+void ensure_composite_thread(struct composition_device *device);
+extern struct list dcomp_devices;
+
 
 #endif /* __WINE_DCOMP_PRIVATE_H */

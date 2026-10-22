@@ -74,6 +74,8 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             ID2D1DeviceContext_Release(visual->device_context);
         if (visual->content)
             IUnknown_Release(visual->content);
+        if (visual->shared_visual_handle)
+            CloseHandle(visual->shared_visual_handle);
         dcomp_lock();
         if (visual->is_child)
             list_remove(&visual->entry);
@@ -116,8 +118,12 @@ static HRESULT STDMETHODCALLTYPE visual_SetOffsetYAnimation(IDCompositionVisualU
 
 static HRESULT STDMETHODCALLTYPE visual_SetOffsetY(IDCompositionVisualUnknown *iface, float offset_y)
 {
-    FIXME("iface %p, offset_y %f stub!\n", iface, offset_y);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("iface %p, offset_y %f.\n", iface, offset_y);
+
+    visual->offset_y = offset_y;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetTransformObject(IDCompositionVisualUnknown *iface,
@@ -197,16 +203,18 @@ static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *ifac
 static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *iface, IUnknown *content)
 {
     struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
-    ID2D1GdiInteropRenderTarget *interop;
-    ID2D1DeviceContext *device_context;
-    IDXGISwapChain1 *dxgi_swapchain;
-    IDCompositionSurface *suface;
-    IDXGIDevice *dxgi_device;
-    ID2D1Device *d2d_device;
+    ID2D1GdiInteropRenderTarget *interop = NULL;
+    ID2D1DeviceContext *device_context = NULL;
+    IDXGISwapChain1 *dxgi_swapchain = NULL;
+    IDCompositionSurface *suface = NULL;
+    IDXGISurface *dxgi_surface = NULL;
+    ID3D11Texture2D *texture = NULL;
+    IDXGIDevice *dxgi_device = NULL;
+    ID2D1Device *d2d_device = NULL;
     const GUID *iid = NULL;
     HRESULT hr;
 
-    FIXME("iface %p, content %p semi-stub!\n", iface, content);
+    TRACE("DCOMP: visual_SetContent iface %p, content %p\n", iface, content);
 
     dcomp_lock();
 
@@ -230,12 +238,13 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
         {
             struct composition_surface *dcomp_surface = unsafe_impl_from_IDCompositionSurface(suface);
 
-            if (IsEqualGUID(&dcomp_surface->physical_surface_iid, &IID_IDXGISurface))
+            if (dcomp_surface && dcomp_surface->physical_surface &&
+                SUCCEEDED(IUnknown_QueryInterface(dcomp_surface->physical_surface, &IID_IDXGISurface, (void **)&dxgi_surface)))
             {
                 iid = &IID_IDCompositionSurface;
 
-                hr = IDXGISurface_GetDevice((IDXGISurface *)dcomp_surface->physical_surface,
-                        &IID_IDXGIDevice, (void **)&dxgi_device);
+                hr = IDXGISurface_GetDevice(dxgi_surface, &IID_IDXGIDevice, (void **)&dxgi_device);
+                IDXGISurface_Release(dxgi_surface);
                 IDCompositionSurface_Release(suface);
                 if (FAILED(hr))
                 {
@@ -252,9 +261,44 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
                 return E_INVALIDARG;
             }
         }
+        else if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISurface, (void **)&dxgi_surface)))
+        {
+            iid = &IID_IDXGISurface;
+            hr = IDXGISurface_GetDevice(dxgi_surface, &IID_IDXGIDevice, (void **)&dxgi_device);
+            IDXGISurface_Release(dxgi_surface);
+            if (FAILED(hr))
+            {
+                ERR("Failed to get the dxgi surface device, hr %#lx.\n", hr);
+                dcomp_unlock();
+                return hr;
+            }
+        }
+        else if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_ID3D11Texture2D, (void **)&texture)))
+        {
+            hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGISurface, (void **)&dxgi_surface);
+            ID3D11Texture2D_Release(texture);
+            if (SUCCEEDED(hr))
+            {
+                iid = &IID_IDXGISurface;
+                hr = IDXGISurface_GetDevice(dxgi_surface, &IID_IDXGIDevice, (void **)&dxgi_device);
+                IDXGISurface_Release(dxgi_surface);
+                if (FAILED(hr))
+                {
+                    ERR("Failed to get the dxgi surface device, hr %#lx.\n", hr);
+                    dcomp_unlock();
+                    return hr;
+                }
+            }
+            else
+            {
+                ERR("Failed to query IDXGISurface from ID3D11Texture2D, hr %#lx.\n", hr);
+                dcomp_unlock();
+                return hr;
+            }
+        }
         else
         {
-            FIXME("Only IDXGISwapChain1 or IDCompositionSurface are currently supported.\n");
+            FIXME("Only IDXGISwapChain1, IDCompositionSurface, or IDXGISurface are currently supported.\n");
             dcomp_unlock();
             return E_INVALIDARG;
         }
@@ -323,8 +367,8 @@ static HRESULT STDMETHODCALLTYPE visual_AddVisual(IDCompositionVisualUnknown *if
     struct composition_visual *parent_visual_impl = impl_from_IDCompositionVisualUnknown(iface);
     struct composition_visual *child_visual_impl, *ref_visual_impl = NULL;
 
-    FIXME("iface %p, visual %p, insert_above %d, reference_visual %p.\n", iface, visual,
-          insert_above, reference_visual);
+    TRACE("DCOMP: visual_AddVisual parent %p, child %p, insert_above %d, ref %p\n",
+        parent_visual_impl, visual, insert_above, reference_visual);
 
     if (!visual)
         return E_INVALIDARG;
@@ -521,16 +565,28 @@ static HRESULT WINAPI visual_unknown_method14(IDCompositionVisualUnknown *iface,
     return S_OK;
 }
 
+/*
+ * Private IDCompositionVisualUnknown requests.  The Windows App SDK
+ * composition-islands layer (Microsoft.UI.Windowing.Core.dll driving
+ * Microsoft.UI.Input.dll, which hosts the Microsoft.UI.Content.ContentIsland,
+ * ContentSite and DesktopChildSiteBridge classes) issues these on the site
+ * visuals while it assembles the island visual tree, and treats a failed
+ * request as "islands unavailable": it then drops the site bridge it was
+ * building, the app-side title-bar bridge member stays null, and the following
+ * layout pass dereferences it.  Wine has no compositor-side semantics for
+ * these private slots, so a request on a live visual is accepted and reported
+ * as satisfied; the value-carrying slots record the value on the trace channel.
+ */
 static HRESULT WINAPI visual_unknown_method15(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method16(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method17(IDCompositionVisualUnknown *iface)
@@ -547,15 +603,13 @@ static HRESULT WINAPI visual_unknown_method18(IDCompositionVisualUnknown *iface)
 
 static HRESULT WINAPI visual_unknown_method19(IDCompositionVisualUnknown *iface, float parameter1)
 {
-    FIXME("iface %p parameter1 %f stub!\n", iface, parameter1);
-
+    TRACE("iface %p, parameter1 %f.\n", iface, parameter1);
     return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method20(IDCompositionVisualUnknown *iface, float parameter1)
 {
-    FIXME("iface %p parameter1 %f stub!\n", iface, parameter1);
-
+    TRACE("iface %p, parameter1 %f.\n", iface, parameter1);
     return S_OK;
 }
 
@@ -1181,4 +1235,37 @@ HRESULT create_visual(int version, REFIID iid, void **new_visual)
     hr = IUnknown_QueryInterface(&visual->IDCompositionVisualUnknown_iface, iid, new_visual);
     IUnknown_Release(&visual->IDCompositionVisualUnknown_iface);
     return hr;
+}
+
+HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, void **new_visual)
+{
+    struct composition_visual *visual_impl;
+    HANDLE handle = NULL;
+    HRESULT hr;
+
+    if (!new_visual)
+        return E_POINTER;
+    *new_visual = NULL;
+
+    if (!shared_visual_handle)
+        return E_INVALIDARG;
+
+    if (!DuplicateHandle(GetCurrentProcess(), shared_visual_handle, GetCurrentProcess(), &handle, 0,
+                         FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        /* Cross-process handle: use raw handle for wineserver lookup */
+        handle = shared_visual_handle;
+    }
+
+    hr = create_visual(2, &IID_IDCompositionVisual, (void **)new_visual);
+    if (FAILED(hr))
+    {
+        if (handle != shared_visual_handle)
+            CloseHandle(handle);
+        return hr;
+    }
+
+    visual_impl = impl_from_IDCompositionVisualUnknown(*new_visual);
+    visual_impl->shared_visual_handle = handle;
+    return S_OK;
 }
