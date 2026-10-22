@@ -61,7 +61,7 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
-    if (!wcscmp(classid, L"Windows.ApplicationModel.Background.BackgroundExecutionManager") ||
+    if (!wcsncmp(classid, L"Windows.ApplicationModel.Background.", 36) ||
         !wcsncmp(classid, L"Windows.Networking.PushNotifications.", 37) ||
         !wcscmp(classid, L"Windows.ApplicationModel.AppInstance") ||
         !wcscmp(classid, L"Microsoft.Windows.AppLifecycle.AppInstance") ||

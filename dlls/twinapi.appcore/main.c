@@ -464,6 +464,11 @@ static const GUID my_IID_IMapView_GUID_IBackgroundTaskRegistration = {0xfbb695e5
 static const GUID my_IID_IMapView_GUID_BackgroundTaskRegistration = {0xba3d387f, 0xf6b4, 0x566b, {0xbf, 0xd4, 0xc5, 0xa3, 0x8b, 0x6a, 0xf2, 0xc3}};
 /* IIterable<IKeyValuePair<Guid, IBackgroundTaskRegistration>> */
 static const GUID IID_IIterable_BackgroundTask = {0xcedf3c13, 0xab1e, 0x5aa1, {0xbc, 0xd6, 0x7f, 0xf0, 0xfe, 0xab, 0xfe, 0x27}};
+/* .NET projection parameterized interface IIDs for the AllTasks map enumerable view */
+static const GUID IID_IIterable_BackgroundTask_alt2 = {0xaf86e2e0, 0xb12d, 0x4c6a, {0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90}};
+static const GUID IID_IIterable_BackgroundTask_alt3 = {0x80fb0327, 0x5a00, 0x55cc, {0x85, 0xdb, 0xa8, 0x52, 0x71, 0x99, 0x81, 0xb9}};
+/* IIterator<IKeyValuePair<Guid, BackgroundTaskRegistration>> .NET projection IID */
+static const GUID IID_IIterator_BackgroundTask_alt3 = {0x2001aea5, 0x1a86, 0x517e, {0x8b, 0xe5, 0x11, 0xd7, 0xfb, 0x59, 0x35, 0xb2}};
 /* IIterable<IKeyValuePair<Guid, BackgroundTaskRegistration>> */
 static const GUID IID_IIterable_BackgroundTask_alt1 = {0x201c5249, 0x8c9d, 0x53c2, {0x82, 0x59, 0x31, 0x33, 0xfc, 0x0a, 0xb9, 0x5f}};
 /* IIterator<IKeyValuePair<Guid, IBackgroundTaskRegistration>> */
@@ -491,7 +496,13 @@ static HRESULT WINAPI empty_iterator_QueryInterface( void *iface, REFIID iid, vo
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt1 ) ||
-        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt2 ))
+        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt2 ) ||
+        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt3 ))
+    {
+        *out = &empty_iterator_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt2 ))
     {
         *out = &empty_iterator_obj;
         return S_OK;
@@ -542,17 +553,22 @@ static HRESULT WINAPI empty_iterable_QueryInterface( void *iface, REFIID iid, vo
 
     if (!out) return E_POINTER;
 
-    if (IsEqualGUID( iid, &IID_IUnknown ))
-    {
-        *out = &empty_map_view_obj;
-        return S_OK;
-    }
-    if (IsEqualGUID( iid, &IID_IInspectable ) ||
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IIterable_BackgroundTask ) ||
-        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ))
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt2 ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt3 ))
     {
         *out = &empty_iterable_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt1 ) ||
+        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt2 ) ||
+        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt3 ))
+    {
+        *out = &empty_iterator_obj;
         return S_OK;
     }
     if (IsEqualGUID( iid, &my_IID_IMapView_GUID_IBackgroundTaskRegistration ) ||
@@ -605,9 +621,19 @@ static HRESULT WINAPI empty_map_view_QueryInterface( void *iface, REFIID iid, vo
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IIterable_BackgroundTask ) ||
-        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ))
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt1 ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt2 ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt3 ))
     {
         *out = &empty_iterable_obj;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt1 ) ||
+        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt2 ) ||
+        IsEqualGUID( iid, &IID_IIterator_BackgroundTask_alt3 ) ||
+        IsEqualGUID( iid, &IID_IIterable_BackgroundTask_alt2 ))
+    {
+        *out = &empty_iterator_obj;
         return S_OK;
     }
 
@@ -1111,6 +1137,18 @@ static const void *startup_task_factory_vtbl[] =
 static HRESULT WINAPI bg_task_reg_get_TaskId( void *iface, GUID *id ) { if (id) memset(id, 0x42, sizeof(GUID)); return S_OK; }
 static HRESULT WINAPI bg_task_reg_get_Name( void *iface, HSTRING *name ) { return WindowsCreateString( L"WhatsApp Push Notification", 26, name ); }
 static HRESULT WINAPI bg_task_reg_Unregister( void *iface, boolean cancel ) { return S_OK; }
+static HRESULT WINAPI bg_task_reg_add_event( void *iface, void *handler, INT64 *token )
+{
+    if (token) *token = 0x42;
+    return S_OK;
+}
+static HRESULT WINAPI bg_task_reg_remove_event( void *iface, INT64 token ) { return S_OK; }
+static HRESULT WINAPI bg_task_reg_Cancel( void *iface ) { return S_OK; }
+static HRESULT WINAPI bg_task_reg_get_Trigger( void *iface, void **trigger )
+{
+    if (trigger) *trigger = NULL;
+    return S_OK;
+}
 
 static const void *bg_task_reg_vtbl[] =
 {
@@ -1120,18 +1158,31 @@ static const void *bg_task_reg_vtbl[] =
     dummy_async_GetIids,
     dummy_async_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
+    bg_task_reg_add_event,     /* add_Completed */
+    bg_task_reg_remove_event,  /* remove_Completed */
+    bg_task_reg_add_event,     /* add_Progress */
+    bg_task_reg_remove_event,  /* remove_Progress */
+    bg_task_reg_Cancel,
     bg_task_reg_get_TaskId,
     bg_task_reg_get_Name,
-    push_notification_stub, /* get_Trigger */
+    bg_task_reg_get_Trigger,
     bg_task_reg_Unregister,
-    push_notification_stub, /* add_Progress */
-    push_notification_stub, /* remove_Progress */
-    push_notification_stub, /* add_Completed */
-    push_notification_stub, /* remove_Completed */
 };
 static struct { const void *vtbl; } dummy_bg_task_reg = { bg_task_reg_vtbl };
 
 static HRESULT WINAPI bg_builder_Register( void *iface, void **reg )
+{
+    if (!reg) return E_POINTER;
+    *reg = &dummy_bg_task_reg;
+    return S_OK;
+}
+static HRESULT WINAPI bg_builder_Register_name( void *iface, void *name, void **reg )
+{
+    if (!reg) return E_POINTER;
+    *reg = &dummy_bg_task_reg;
+    return S_OK;
+}
+static HRESULT WINAPI bg_builder_Register_group( void *iface, void *name, const GUID *group, void **reg )
 {
     if (!reg) return E_POINTER;
     *reg = &dummy_bg_task_reg;
@@ -1154,7 +1205,9 @@ static const void *bg_builder_vtbl[] =
     bg_builder_success,     /* AddCondition */
     bg_builder_success,     /* put_Name */
     bg_builder_success,     /* get_Name */
-    bg_builder_Register,    /* Register */
+    bg_builder_Register,    /* Register() */
+    bg_builder_Register_name,  /* Register(name) */
+    bg_builder_Register_group, /* Register(name, group) */
     bg_builder_success,     /* SetTaskEntryPointClsid */
 };
 static struct { const void *vtbl; } dummy_bg_builder = { bg_builder_vtbl };
