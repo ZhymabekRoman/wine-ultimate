@@ -627,21 +627,27 @@ static const struct IPackageVtbl package_vtbl =
 
 DEFINE_IINSPECTABLE( package_statics, IPackageStatics, struct package_statics, IActivationFactory_iface )
 
-static HRESULT WINAPI package_statics_get_Current( IPackageStatics *iface, IPackage **value )
+/* The running process is the package Wine reports, both IPackageStatics.Current
+ * and AppInfo.Package hand out an instance of it. */
+HRESULT create_package_instance( IPackage **out )
 {
     struct package *impl;
 
-    TRACE( "iface %p, value %p\n", iface, value );
-
-    if (!value) return E_INVALIDARG;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 
     impl->IPackage_iface.lpVtbl = &package_vtbl;
     impl->ref = 1;
-
-    *value = &impl->IPackage_iface;
-    TRACE( "created IPackage %p.\n", *value );
+    *out = &impl->IPackage_iface;
     return S_OK;
+}
+
+static HRESULT WINAPI package_statics_get_Current( IPackageStatics *iface, IPackage **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    if (!value) return E_INVALIDARG;
+    *value = NULL;
+    return create_package_instance( value );
 }
 
 static const struct IPackageStaticsVtbl package_statics_vtbl =

@@ -28,16 +28,22 @@
 #include "winstring.h"
 
 #include "activation.h"
+#include "roapi.h"
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Storage
+#define WIDL_using_Windows_Storage_Streams
+#define WIDL_using_Windows_System
 #include "windows.applicationmodel.h"
 
 extern IActivationFactory *package_factory;
 extern IActivationFactory *design_mode_factory;
+extern IActivationFactory *appinfo_factory;
+
+HRESULT create_package_instance( IPackage **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

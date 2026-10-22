@@ -2,6 +2,7 @@ MODULE  = windows.applicationmodel.dll
 IMPORTS = combase kernelbase
 
 SOURCES = \
+	appinfo.c \
 	classes.idl \
 	designmode.c \
 	main.c \
