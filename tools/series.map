@@ -1,0 +1,28 @@
+# tools/series.map — canonical mapping from the wine fork history to patch series.
+#
+# The canonical source of truth is branch `ultimate` of
+# github.com:ZhymabekRoman/wine-ultimate.git. Patch directories under patches/
+# are a generated artifact: run tools/export-series.sh to regenerate them.
+#
+# One record per series, in apply order. Fields are `key=value`; values with
+# spaces are quoted.
+#
+#   name=<series-dir>       directory name under patches/
+#   selection=trailer       select commits on <ref> carrying the commit-message
+#                           trailer `Series: <name>` (written by the migration
+#                           am driver); commits are emitted in topological order.
+#   fixes="..."             first line of the generated wine-staging definition
+#   depends="<a,b>"         #Depends: entries for the definition
+#
+# The vendor block (dcomp 0001-0066, Wine MR !2243) is a single commit in the
+# fork, so it exports as one entry; everything after it is per-commit.
+#
+name=dcomp-DCompositionCreateDevice2 selection=trailer fixes="[54968] dcomp: Implement DCompositionCreateDevice2 (vendor import 0001-0066 + local 0067-0077)" depends=""
+name=ntdll-NtAlpcCreatePort selection=trailer fixes="ntdll, server: Implement basic ALPC port infrastructure" depends=""
+name=ntdll-WaitCompletionPacket selection=trailer fixes="ntdll, server: Implement wait completion packets and ALPC integration" depends="ntdll-NtAlpcCreatePort"
+name=kernelbase-PackageIdentity selection=trailer fixes="kernelbase: Implement package identity APIs" depends=""
+name=twinapi-appcore-UWP selection=trailer fixes="[WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP application lifecycle" depends="kernelbase-PackageIdentity"
+name=combase-AgileObject selection=trailer fixes="combase: Answer IAgileObject on WinRT marshaled objects" depends=""
+name=coremessaging-DispatcherQueue selection=trailer fixes="coremessaging: Implement IDispatcherQueue and CoreUICreateDispatcherQueueController" depends=""
+name=profapi-UserToken selection=trailer fixes="profapi: Implement ordinal 114 stub" depends=""
+name=windows.graphics-DisplayInformation selection=trailer fixes="windows.graphics: Implement IDisplayInformation and DisplayInformation.CreateForCurrentView" depends=""

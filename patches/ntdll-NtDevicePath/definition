@@ -1,2 +1,0 @@
-Fixes: [37487] Resolve \\SystemRoot\\ prefix when opening files
-Fixes: Implement opening files through nt device paths

@@ -1,7 +1,0 @@
-Fixes: [23999] Implement MemorySectionName class in NtQueryVirtualMemory
-Fixes: [27248] Implement K32GetMappedFileName
-Depends: ntdll-NtDevicePath
-Depends: ntdll-ForceBottomUpAlloc
-Depends: ntdll-Junction_Points
-# In the process of upstreaming.
-Disabled: true

@@ -1,3 +1,0 @@
-Fixes: [51965] msxml3: IMXWrite::output to support DOMDocument.
-
-#TODO: Update tests.

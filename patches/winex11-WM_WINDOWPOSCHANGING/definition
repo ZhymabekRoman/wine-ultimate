@@ -1,3 +1,0 @@
-Fixes: [34594] Fix handling of WM_WINDOWPOS{CHANGING,CHANGED} for deactivated topmost window
-# The rebase isn't exactly clear here. This needs reinvestigation.
-Disabled: true

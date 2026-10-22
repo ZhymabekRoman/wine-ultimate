@@ -1,1 +1,0 @@
-Fixes: [22764] Use root dialog for DM_SETDEFID/DM_GETDEFID in DefDlgProc

@@ -1,1 +1,0 @@
-Fixes: [31675] oleaut32: Use correct flags to detect IDispatch interfaces.

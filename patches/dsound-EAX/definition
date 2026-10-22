@@ -1,4 +1,0 @@
-Fixes: Software support for Environmental Audio Extensions (EAX)
-Fixes: [42886] Mushroom Wars - Has no sounds.
-Depends: dsound-Fast_Mixer
-Disabled: True
