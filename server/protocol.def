@@ -4337,6 +4337,16 @@ enum inproc_sync_type
     obj_handle_t        handle;         /* ALPC port or connection handle */
 @END
 
+/* Receive a message on an ALPC port with an event packet notification:
+ * the event is signaled when the receive completes (ALPC_EVENT attribute) */
+@REQ(recv_alpc_port)
+    struct async_data   async;          /* async I/O parameters for the blocking wait */
+    obj_handle_t        port;           /* ALPC port handle to receive on */
+    obj_handle_t        event;          /* event signaled on completion, 0 = none */
+@REPLY
+    obj_handle_t        wait;           /* handle to wait on if STATUS_PENDING */
+@END
+
 #ifndef __ALPC_DATA_VIEW_ATTR_DEFINED__
 #define __ALPC_DATA_VIEW_ATTR_DEFINED__
 typedef struct _ALPC_DATA_VIEW_ATTR

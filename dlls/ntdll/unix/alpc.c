@@ -79,6 +79,7 @@ static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG a
         { ALPC_MESSAGE_TOKEN_ATTRIBUTE,          sizeof(ALPC_TOKEN_ATTR) },
         { ALPC_MESSAGE_DIRECT_ATTRIBUTE,         sizeof(ALPC_DIRECT_ATTR) },
         { ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE, sizeof(ALPC_WORK_ON_BEHALF_ATTR) },
+        { ALPC_MESSAGE_EVENT_ATTRIBUTE,          sizeof(ALPC_EVENT) },
     };
     unsigned int i;
     SIZE_T off = sizeof(ALPC_MESSAGE_ATTRIBUTES);
@@ -439,6 +440,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     unsigned int ret = STATUS_SUCCESS;
     HANDLE wait_handle = NULL;
     struct alpc_async *async;
+    ALPC_EVENT *recv_event;
     IO_STATUS_BLOCK io = { { STATUS_PENDING } };
     data_size_t recv_size = recv_buffer_size ? (data_size_t)*recv_buffer_size : 0;
 
@@ -500,6 +502,18 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         }
 
         if (ret) return ret;
+
+        /* a send-side event packet notification fires when the send completes */
+        if (send_msg_attr && (send_msg_attr->AllocatedAttributes & ALPC_MESSAGE_EVENT_ATTRIBUTE))
+        {
+            ALPC_EVENT *event = get_message_attribute( send_msg_attr, ALPC_MESSAGE_EVENT_ATTRIBUTE );
+            if (event)
+            {
+                event->UsedEntryCount = 1;
+                send_msg_attr->ValidAttributes |= ALPC_MESSAGE_EVENT_ATTRIBUTE;
+                if (event->Event) NtSetEvent( event->Event, NULL );
+            }
+        }
     }
 
     if (!recv_msg) return STATUS_SUCCESS;
@@ -514,10 +528,34 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     io.Information = 0;
     wait_handle = NULL;
 
+    recv_event = recv_msg_attr ? get_message_attribute( recv_msg_attr, ALPC_MESSAGE_EVENT_ATTRIBUTE ) : NULL;
+
     {
     data_size_t reply_size = 0;
     void *expected_id = (flags & 0x20000 && send_msg) ? (void *)(ULONG_PTR)send_msg->MessageId : NULL;
-    SERVER_START_REQ( read )
+
+    if (recv_event)
+    {
+        /* receive armed with an event packet notification: the server signals
+         * the event when the queued async completes */
+        SERVER_START_REQ( recv_alpc_port )
+        {
+            req->async = server_async( port_handle, &async->io, NULL, NULL, expected_id, iosb_client_ptr( &io ) );
+            req->port  = wine_server_obj_handle( port_handle );
+            req->event = recv_event->Event ? wine_server_obj_handle( recv_event->Event ) : 0;
+            wine_server_set_reply( req, recv_msg, recv_size );
+            ret = wine_server_call( req );
+            wait_handle = wine_server_ptr_handle( reply->wait );
+            reply_size  = wine_server_reply_size( reply );
+            if (ret != STATUS_PENDING)
+            {
+                io.Status      = ret;
+                io.Information  = reply_size;
+            }
+        }
+        SERVER_END_REQ;
+    }
+    else SERVER_START_REQ( read )
     {
         req->async = server_async( port_handle, &async->io, NULL, NULL, expected_id, iosb_client_ptr( &io ) );
         req->pos   = 0;
@@ -613,6 +651,12 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                         view->ViewSize      = (SIZE_T)hdr.view_size;
                         recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_VIEW_ATTRIBUTE;
                     }
+                }
+
+                if (recv_event)
+                {
+                    recv_event->UsedEntryCount = 1;
+                    recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_EVENT_ATTRIBUTE;
                 }
             }
         }

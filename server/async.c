@@ -539,6 +539,16 @@ void async_set_unknown_status( struct async *async )
     async->direct_result = 0;
 }
 
+/* attach a notification event to a request-based async; it is signaled when
+ * the async completes, like the event armed through the APC async data */
+void async_set_event( struct async *async, struct event *event )
+{
+    if (async->event == event) return;
+    if (event) grab_object( event );
+    if (async->event) release_object( async->event );
+    async->event = event;
+}
+
 /* set the timeout of an async operation */
 void async_set_timeout( struct async *async, timeout_t timeout, unsigned int status )
 {

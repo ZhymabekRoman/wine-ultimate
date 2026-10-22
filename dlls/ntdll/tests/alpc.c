@@ -1364,6 +1364,198 @@ static void test_NtAlpcSetInformation(void)
     NtClose( port );
 }
 
+/* Client thread for the event-notification flow: connect, wait for the start
+ * signal, then send a one-way request. */
+struct alpc_event_send_args
+{
+    UNICODE_STRING *port_name;
+    HANDLE start_event;
+    NTSTATUS connect_status;
+    NTSTATUS send_status;
+    HANDLE done_event;
+};
+
+static DWORD WINAPI alpc_event_send_thread( void *arg )
+{
+    struct alpc_event_send_args *args = arg;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    HANDLE conn = NULL;
+
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    args->connect_status = pNtAlpcConnectPort( &conn, args->port_name, NULL, &port_attr, 0,
+                                               NULL, NULL, NULL, NULL, NULL, NULL );
+    if (args->connect_status != STATUS_SUCCESS)
+    {
+        SetEvent( args->done_event );
+        return 0;
+    }
+
+    WaitForSingleObject( args->start_event, 30000 );
+
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, "EVT-payload", 11 );
+    msg->DataLength = 11;
+    msg->TotalLength = sizeof(*msg) + 11;
+    args->send_status = pNtAlpcSendWaitReceivePort( conn, 0, msg, NULL, NULL, NULL, NULL, NULL );
+
+    NtClose( conn );
+    SetEvent( args->done_event );
+    return 0;
+}
+
+/* Receive thread: blocks in NtAlpcSendWaitReceivePort on a connection armed
+ * with the ALPC_MESSAGE_EVENT_ATTRIBUTE. */
+struct alpc_event_recv_args
+{
+    HANDLE port;
+    ALPC_MESSAGE_ATTRIBUTES *attr;
+    char *buf;
+    SIZE_T size;
+    NTSTATUS status;
+};
+
+static DWORD WINAPI alpc_event_recv_thread( void *arg )
+{
+    struct alpc_event_recv_args *args = arg;
+    LARGE_INTEGER timeout;
+    SIZE_T size = args->size;
+
+    timeout.QuadPart = -10 * 10000000LL;
+    args->status = pNtAlpcSendWaitReceivePort( args->port, 0, NULL, NULL,
+                                               (ALPC_PORT_MESSAGE *)args->buf, &size, args->attr, &timeout );
+    args->size = size;
+    return 0;
+}
+
+/* A receive armed with ALPC_MESSAGE_EVENT_ATTRIBUTE must have its event
+ * signaled when a message is delivered (the CoreMessaging dispatcher wake
+ * mechanism), the attribute must be reported valid with UsedEntryCount 1. */
+static void test_alpc_event_notification( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestEventNotify";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512], attrbuf[256];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    ALPC_MESSAGE_ATTRIBUTES *attr = (ALPC_MESSAGE_ATTRIBUTES *)attrbuf;
+    ALPC_EVENT *event_attr;
+    struct alpc_event_send_args send_args;
+    struct alpc_event_recv_args recv_args;
+    SIZE_T size, req_size;
+    HANDLE server_port = NULL, server_conn = NULL;
+    HANDLE notify_event = NULL, start_event = NULL, done_event = NULL;
+    HANDLE send_thread = NULL, recv_thread = NULL;
+    NTSTATUS status;
+    DWORD ret;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort ||
+        !pNtAlpcSendWaitReceivePort || !pAlpcInitializeMessageAttribute || !pAlpcGetMessageAttribute)
+    {
+        win_skip("ALPC port functions are unavailable.\n");
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    notify_event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    ok( notify_event != NULL, "CreateEventA failed, err %u.\n", (unsigned int)GetLastError() );
+    start_event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    done_event = CreateEventA( NULL, TRUE, FALSE, NULL );
+
+    memset( &send_args, 0, sizeof(send_args) );
+    send_args.port_name = &port_name;
+    send_args.start_event = start_event;
+    send_args.done_event = done_event;
+    send_thread = CreateThread( NULL, 0, alpc_event_send_thread, &send_args, 0, NULL );
+    ok( send_thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
+    if (!send_thread) goto done;
+
+    /* Receive the connection request and accept. */
+    timeout.QuadPart = -200 * 10000000LL;
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+
+    server_conn = NULL;
+    status = pNtAlpcAcceptConnectPort( &server_conn, server_port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS || !server_conn) goto done;
+
+    /* Arm the receive with an event packet notification before the send. */
+    req_size = 0;
+    status = pAlpcInitializeMessageAttribute( ALPC_MESSAGE_EVENT_ATTRIBUTE, attr, sizeof(attrbuf), &req_size );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+    event_attr = pAlpcGetMessageAttribute( attr, ALPC_MESSAGE_EVENT_ATTRIBUTE );
+    ok( event_attr != NULL, "Expected an event attribute.\n" );
+    if (!event_attr) goto done;
+    event_attr->Event = notify_event;
+    event_attr->UsedEntryCount = 0;
+
+    memset( buf, 0, sizeof(buf) );
+    memset( &recv_args, 0, sizeof(recv_args) );
+    recv_args.port = server_conn;
+    recv_args.attr = attr;
+    recv_args.buf = buf;
+    recv_args.size = sizeof(buf);
+    recv_thread = CreateThread( NULL, 0, alpc_event_recv_thread, &recv_args, 0, NULL );
+    ok( recv_thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
+    if (!recv_thread) goto done;
+
+    /* Let the client send its request now. */
+    SetEvent( start_event );
+
+    /* The notification event must be signaled when the message is delivered. */
+    ret = WaitForSingleObject( notify_event, 5000 );
+    ok( ret == 0, "The event packet notification was not signaled, ret %u.\n", ret );
+
+    ret = WaitForSingleObject( recv_thread, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+    winetest_push_context( "receive" );
+    ok( recv_args.status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", recv_args.status );
+    ok( (attr->ValidAttributes & ALPC_MESSAGE_EVENT_ATTRIBUTE),
+        "Expected a valid event attribute, got %#lx.\n", attr->ValidAttributes );
+    ok( event_attr->UsedEntryCount == 1, "Got unexpected UsedEntryCount %u.\n",
+        (unsigned int)event_attr->UsedEntryCount );
+    ok( msg->DataLength == 11 && !memcmp( msg + 1, "EVT-payload", 11 ), "Got unexpected message payload.\n" );
+    winetest_pop_context();
+
+    ret = WaitForSingleObject( send_thread, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+    winetest_push_context( "send" );
+    ok( send_args.connect_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", send_args.connect_status );
+    ok( send_args.send_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", send_args.send_status );
+    winetest_pop_context();
+
+done:
+    if (send_thread)
+    {
+        SetEvent( start_event );
+        SetEvent( done_event );
+        CloseHandle( send_thread );
+    }
+    if (recv_thread) CloseHandle( recv_thread );
+    if (server_conn) NtClose( server_conn );
+    NtClose( server_port );
+    CloseHandle( notify_event );
+    CloseHandle( start_event );
+    CloseHandle( done_event );
+}
+
 #endif /* _WIN64 */
 
 START_TEST(alpc)
@@ -1385,5 +1577,6 @@ START_TEST(alpc)
     test_alpc_disconnect_flow();
     test_NtAlpcQueryInformation();
     test_NtAlpcSetInformation();
+    test_alpc_event_notification();
 #endif
 }

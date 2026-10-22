@@ -42,6 +42,7 @@ SIZE_T WINAPI AlpcGetHeaderSize(ULONG attribute_flags)
         {ALPC_MESSAGE_TOKEN_ATTRIBUTE, sizeof(ALPC_TOKEN_ATTR)},
         {ALPC_MESSAGE_DIRECT_ATTRIBUTE, sizeof(ALPC_DIRECT_ATTR)},
         {ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE, sizeof(ALPC_WORK_ON_BEHALF_ATTR)},
+        {ALPC_MESSAGE_EVENT_ATTRIBUTE, sizeof(ALPC_EVENT)},
     };
     unsigned int i;
     SIZE_T size;

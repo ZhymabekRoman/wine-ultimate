@@ -755,6 +755,34 @@ DECL_HANDLER(accept_alpc_connection)
     release_object( server_port );
 }
 
+DECL_HANDLER(recv_alpc_port)
+{
+    struct alpc_port *port;
+    struct async *async;
+    struct event *event = NULL;
+
+    port = (struct alpc_port *)get_handle_obj( current->process, req->port,
+                                               FILE_READ_DATA, &alpc_port_ops );
+    if (!port) return;
+
+    if (req->event && !(event = get_event_obj( current->process, req->event, EVENT_MODIFY_STATE )))
+    {
+        release_object( port );
+        return;
+    }
+
+    if ((async = create_request_async( port->fd, get_fd_comp_flags( port->fd ), &req->async, 0 )))
+    {
+        if (event) async_set_event( async, event );
+        alpc_fd_read( port->fd, async, 0 );
+        reply->wait = async_handoff( async, NULL, 1 );
+        release_object( async );
+    }
+
+    if (event) release_object( event );
+    release_object( port );
+}
+
 DECL_HANDLER(disconnect_alpc_port)
 {
     struct alpc_port *port = (struct alpc_port *)get_handle_obj( current->process,

@@ -4529,7 +4529,8 @@ typedef struct _KCONTINUE_ARGUMENT
 #define ALPC_MESSAGE_TOKEN_ATTRIBUTE            0x08000000
 #define ALPC_MESSAGE_DIRECT_ATTRIBUTE           0x04000000
 #define ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE   0x02000000
-#define ALPC_MESSAGE_ATTRIBUTE_ALL              0xfe000000
+#define ALPC_MESSAGE_EVENT_ATTRIBUTE            0x00000040 /* Event packet notification */
+#define ALPC_MESSAGE_ATTRIBUTE_ALL              0xfe000040
 
 /* Message types */
 typedef enum _ALPC_MESSAGE_TYPE
@@ -4640,6 +4641,12 @@ typedef struct _ALPC_WORK_ON_BEHALF_ATTR
 {
     ULONGLONG Ticket;
 } ALPC_WORK_ON_BEHALF_ATTR, *PALPC_WORK_ON_BEHALF_ATTR;
+
+typedef struct _ALPC_EVENT
+{
+    HANDLE Event;
+    ULONG UsedEntryCount;
+} ALPC_EVENT, *PALPC_EVENT;
 
 typedef struct _ALPC_BASIC_INFORMATION
 {

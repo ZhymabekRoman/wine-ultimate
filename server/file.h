@@ -263,6 +263,7 @@ extern void async_set_timeout( struct async *async, timeout_t timeout, unsigned 
 extern void async_set_result( struct object *obj, unsigned int status, apc_param_t total );
 extern void async_set_completion_callback( struct async *async, async_completion_callback func, void *private );
 extern void async_set_unknown_status( struct async *async );
+extern void async_set_event( struct async *async, struct event *event );
 extern void set_async_pending( struct async *async );
 extern void async_set_initial_status( struct async *async, unsigned int status );
 extern void async_wake_obj( struct async *async );
