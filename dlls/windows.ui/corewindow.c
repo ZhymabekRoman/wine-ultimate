@@ -121,8 +121,8 @@ static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWin
 {
     FIXME( "iface %p, windows %p semi-stub.\n", iface, windows );
     if (!windows) return E_POINTER;
-    *windows = core_window_create();
-    return *windows ? S_OK : E_OUTOFMEMORY;
+    *windows = NULL;
+    return S_OK;
 }
 
 static const struct ICoreWindowStaticVtbl corewindow_static_vtbl =
@@ -276,11 +276,162 @@ static HRESULT WINAPI core_dispatcher_ProcessEvents( ICoreDispatcher *iface, Cor
     }
     return S_OK;
 }
+
+struct dispatcher_async_action
+{
+    IAsyncAction IAsyncAction_iface;
+    IAsyncInfo IAsyncInfo_iface;
+    LONG ref;
+};
+
+static inline struct dispatcher_async_action *impl_from_dispatcher_IAsyncAction( IAsyncAction *iface )
+{
+    return CONTAINING_RECORD( iface, struct dispatcher_async_action, IAsyncAction_iface );
+}
+
+static inline struct dispatcher_async_action *impl_from_dispatcher_IAsyncInfo( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct dispatcher_async_action, IAsyncInfo_iface );
+}
+
+static HRESULT WINAPI dispatcher_async_action_QueryInterface( IAsyncAction *iface, REFIID iid, void **out )
+{
+    struct dispatcher_async_action *impl = impl_from_dispatcher_IAsyncAction( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAsyncAction ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IAsyncAction_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IAsyncInfo_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI dispatcher_async_action_AddRef( IAsyncAction *iface )
+{
+    return InterlockedIncrement( &impl_from_dispatcher_IAsyncAction( iface )->ref );
+}
+static ULONG WINAPI dispatcher_async_action_Release( IAsyncAction *iface )
+{
+    struct dispatcher_async_action *impl = impl_from_dispatcher_IAsyncAction( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI dispatcher_async_action_GetIids( IAsyncAction *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_action_GetRuntimeClassName( IAsyncAction *iface, HSTRING *name ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_action_GetTrustLevel( IAsyncAction *iface, TrustLevel *level ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_action_put_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler *handler )
+{
+    if (handler)
+    {
+        void (STDMETHODCALLTYPE *invoke)(void *, void *, int) = (*(void ***)handler)[3];
+        invoke( handler, iface, 1 /* Completed */ );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI dispatcher_async_action_get_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler **handler )
+{
+    if (handler) *handler = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI dispatcher_async_action_GetResults( IAsyncAction *iface ) { return S_OK; }
+
+static const struct IAsyncActionVtbl dispatcher_async_action_vtbl =
+{
+    dispatcher_async_action_QueryInterface,
+    dispatcher_async_action_AddRef,
+    dispatcher_async_action_Release,
+    dispatcher_async_action_GetIids,
+    dispatcher_async_action_GetRuntimeClassName,
+    dispatcher_async_action_GetTrustLevel,
+    dispatcher_async_action_put_Completed,
+    dispatcher_async_action_get_Completed,
+    dispatcher_async_action_GetResults,
+};
+
+static HRESULT WINAPI dispatcher_async_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
+{
+    return dispatcher_async_action_QueryInterface( &impl_from_dispatcher_IAsyncInfo( iface )->IAsyncAction_iface, iid, out );
+}
+static ULONG WINAPI dispatcher_async_info_AddRef( IAsyncInfo *iface )
+{
+    return dispatcher_async_action_AddRef( &impl_from_dispatcher_IAsyncInfo( iface )->IAsyncAction_iface );
+}
+static ULONG WINAPI dispatcher_async_info_Release( IAsyncInfo *iface )
+{
+    return dispatcher_async_action_Release( &impl_from_dispatcher_IAsyncInfo( iface )->IAsyncAction_iface );
+}
+static HRESULT WINAPI dispatcher_async_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_info_get_Id( IAsyncInfo *iface, unsigned int *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI dispatcher_async_info_get_Status( IAsyncInfo *iface, AsyncStatus *status ) { if (status) *status = 1 /* Completed */; return S_OK; }
+static HRESULT WINAPI dispatcher_async_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
+static HRESULT WINAPI dispatcher_async_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
+static HRESULT WINAPI dispatcher_async_info_Close( IAsyncInfo *iface ) { return S_OK; }
+
+static const struct IAsyncInfoVtbl dispatcher_async_info_vtbl =
+{
+    dispatcher_async_info_QueryInterface,
+    dispatcher_async_info_AddRef,
+    dispatcher_async_info_Release,
+    dispatcher_async_info_GetIids,
+    dispatcher_async_info_GetRuntimeClassName,
+    dispatcher_async_info_GetTrustLevel,
+    dispatcher_async_info_get_Id,
+    dispatcher_async_info_get_Status,
+    dispatcher_async_info_get_ErrorCode,
+    dispatcher_async_info_Cancel,
+    dispatcher_async_info_Close,
+};
+
+static IAsyncAction *dispatcher_async_action_create(void)
+{
+    struct dispatcher_async_action *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->IAsyncAction_iface.lpVtbl = &dispatcher_async_action_vtbl;
+    impl->IAsyncInfo_iface.lpVtbl = &dispatcher_async_info_vtbl;
+    impl->ref = 1;
+    return &impl->IAsyncAction_iface;
+}
+
 static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDispatcherPriority priority,
         void *agileCallback, IAsyncAction **asyncAction )
-{ FIXME( "stub\n" ); return E_NOTIMPL; }
+{
+    TRACE( "iface %p, priority %d, agileCallback %p, asyncAction %p\n", iface, priority, agileCallback, asyncAction );
+    if (agileCallback)
+    {
+        HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)agileCallback)[3];
+        invoke( agileCallback );
+    }
+    if (asyncAction)
+    {
+        *asyncAction = dispatcher_async_action_create();
+    }
+    return S_OK;
+}
+
 static HRESULT WINAPI core_dispatcher_RunIdleAsync( ICoreDispatcher *iface, void *agileCallback, IAsyncAction **asyncAction )
-{ FIXME( "stub\n" ); return E_NOTIMPL; }
+{
+    TRACE( "iface %p, agileCallback %p, asyncAction %p\n", iface, agileCallback, asyncAction );
+    if (agileCallback)
+    {
+        HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)agileCallback)[3];
+        invoke( agileCallback );
+    }
+    if (asyncAction)
+    {
+        *asyncAction = dispatcher_async_action_create();
+    }
+    return S_OK;
+}
 static HRESULT WINAPI core_dispatcher_HasThreadAccess( ICoreDispatcher *iface, boolean *value )
 { FIXME( "stub\n" ); if (value) *value = TRUE; return S_OK; }
 static HRESULT WINAPI core_dispatcher_get_CurrentPriority( ICoreDispatcher *iface, CoreDispatcherPriority *value )
@@ -488,12 +639,15 @@ static HRESULT WINAPI core_window_QueryInterface( ICoreWindow *iface, REFIID iid
 }
 static ULONG WINAPI core_window_AddRef( ICoreWindow *iface )
 { return InterlockedIncrement( &impl_from_ICoreWindow( iface )->ref ); }
+static __thread struct core_window *thread_core_window;
+
 static ULONG WINAPI core_window_Release( ICoreWindow *iface )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
+        if (thread_core_window == impl) thread_core_window = NULL;
         if (impl->hwnd) DestroyWindow( impl->hwnd );
         if (impl->dispatcher) ICoreDispatcher_Release( impl->dispatcher );
         free( impl );
@@ -917,6 +1071,22 @@ static const struct ICoreWindowVtbl core_window_vtbl =
 
 static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
+    if (msg == 0x0401)
+    {
+        HMODULE twin = GetModuleHandleW( L"twinapi.appcore.dll" );
+        void (WINAPI *pTrigger)(void) = twin ? (void *)GetProcAddress( twin, "TriggerAppActivation" ) : NULL;
+        ERR( "CoreWindow received 0x0401 on UI thread %lu, pTrigger %p\n", GetCurrentThreadId(), pTrigger );
+        if (pTrigger) pTrigger();
+        return 0;
+    }
+    if (msg == WM_ERASEBKGND) return 1;
+    if (msg == WM_PAINT)
+    {
+        PAINTSTRUCT ps;
+        HDC hdc = BeginPaint( hwnd, &ps );
+        EndPaint( hwnd, &ps );
+        return 0;
+    }
     return DefWindowProcW( hwnd, msg, wparam, lparam );
 }
 
@@ -928,6 +1098,13 @@ ICoreWindow *core_window_create(void)
     struct core_window *impl;
     HINSTANCE inst = GetModuleHandleW( NULL );
 
+    if (thread_core_window)
+    {
+        InterlockedIncrement( &thread_core_window->ref );
+        TRACE( "reusing thread CoreWindow %p, hwnd %p\n", thread_core_window, thread_core_window->hwnd );
+        return &thread_core_window->ICoreWindow_iface;
+    }
+
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->ICoreWindow_iface.lpVtbl = &core_window_vtbl;
     impl->ICoreWindowInterop_iface.lpVtbl = &core_window_interop_vtbl;
@@ -935,10 +1112,12 @@ ICoreWindow *core_window_create(void)
     impl->dispatcher = core_dispatcher_create();
     impl->ref = 1;
 
+    wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = core_window_proc;
     wc.hInstance = inst;
     wc.lpszClassName = class_name;
     wc.hCursor = LoadCursorW( NULL, (const WCHAR *)IDC_ARROW );
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClassExW( &wc );
 
     impl->hwnd = CreateWindowExW( 0, class_name, NULL,
@@ -947,6 +1126,7 @@ ICoreWindow *core_window_create(void)
                                   NULL, NULL, inst, NULL );
     ShowWindow( impl->hwnd, SW_SHOW );
     UpdateWindow( impl->hwnd );
+    thread_core_window = impl;
     TRACE( "created CoreWindow %p, hwnd %p\n", impl, impl->hwnd );
     return &impl->ICoreWindow_iface;
 }

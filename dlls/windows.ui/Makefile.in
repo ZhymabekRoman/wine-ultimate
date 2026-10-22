@@ -1,5 +1,5 @@
 MODULE  = windows.ui.dll
-IMPORTS = combase advapi32 user32
+IMPORTS = combase advapi32 user32 gdi32
 
 SOURCES = \
 	accessibilitysettings.c \
@@ -9,4 +9,5 @@ SOURCES = \
 	main.c \
 	uisettings.c \
 	uiviewsettings.c \
-	weakref.c
+	weakref.c \
+	windowing.c

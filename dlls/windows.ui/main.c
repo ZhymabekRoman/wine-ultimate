@@ -57,5 +57,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( core_cursor_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    /* This module is reached through the ext-ms-win-windowing-internal-l1-1-0 apiset as
+     * Windowing_DllGetActivationFactory, and the Windows App SDK chains that probe to its own
+     * activation factories only on E_NOINTERFACE - the value the generated C++/WinRT factories
+     * of the system modules report for classes they do not implement. */
+    return E_NOINTERFACE;
 }
