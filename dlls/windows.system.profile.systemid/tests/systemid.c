@@ -76,7 +76,8 @@ static void test_SystemIdentification_Statics(void)
 
     check_interface( factory, &IID_IUnknown, TRUE );
     check_interface( factory, &IID_IInspectable, TRUE );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    /* WinAppSDK C++/WinRT resolves an agile reference on every activation factory before using it. */
+    check_interface( factory, &IID_IAgileObject, TRUE );
 
     hr = IActivationFactory_QueryInterface( factory, &IID_ISystemIdentificationStatics, (void **)&system_id_statics );
     ok( hr == S_OK, "got hr %#lx.\n", hr );

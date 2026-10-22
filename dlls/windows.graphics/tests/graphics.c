@@ -63,7 +63,8 @@ static void test_DisplayInformationStatics(void)
     check_interface( factory, &IID_IInspectable, TRUE );
     check_interface( factory, &IID_IActivationFactory, TRUE );
     check_interface( factory, &IID_IDisplayInformationStatics, TRUE );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    /* WinAppSDK C++/WinRT resolves an agile reference on every activation factory before using it. */
+    check_interface( factory, &IID_IAgileObject, TRUE );
 
     ref = IActivationFactory_Release( factory );
     ok(ref == 1, "Got unexpected refcount %ld.\n", ref);

@@ -305,7 +305,8 @@ static void test_UISettings(void)
 
     check_interface( factory, &IID_IUnknown, TRUE );
     check_interface( factory, &IID_IInspectable, TRUE );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    /* WinAppSDK C++/WinRT resolves an agile reference on every activation factory before using it. */
+    check_interface( factory, &IID_IAgileObject, TRUE );
     check_interface( factory, &IID_IUISettings3, FALSE );
 
     hr = RoActivateInstance( str, &inspectable );
@@ -486,7 +487,7 @@ static void test_AccessibilitySettings(void)
     check_interface( factory, &IID_IUnknown, TRUE );
     check_interface( factory, &IID_IInspectable, TRUE );
     check_interface( factory, &IID_IActivationFactory, TRUE );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    check_interface( factory, &IID_IAgileObject, TRUE );
     check_interface( factory, &IID_IAccessibilitySettings, FALSE );
 
     hr = RoActivateInstance( str, &inspectable );

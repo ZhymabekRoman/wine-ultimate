@@ -85,7 +85,8 @@ static void test_EasClientDeviceInformation(void)
 
     check_interface( factory, &IID_IUnknown, TRUE );
     check_interface( factory, &IID_IInspectable, TRUE );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    /* WinAppSDK C++/WinRT resolves an agile reference on every activation factory before using it. */
+    check_interface( factory, &IID_IAgileObject, TRUE );
 
     hr = IActivationFactory_ActivateInstance( factory, (IInspectable **)&client_device_information );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
@@ -331,7 +332,7 @@ static void test_DataTransferManager(void)
 
     check_interface( factory, &IID_IUnknown, TRUE );
     check_interface( factory, &IID_IInspectable, TRUE );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    check_interface( factory, &IID_IAgileObject, TRUE );
     check_interface( factory, &IID_IActivationFactory, TRUE );
     check_interface( factory, &IID_IDataTransferManagerInterop, TRUE );
     check_interface( factory, &IID_IDataTransferManagerStatics, TRUE );

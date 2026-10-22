@@ -863,7 +863,8 @@ static void test_DeviceInformation( void )
 
     hr = IActivationFactory_QueryInterface( factory, &IID_IInspectable, (void **)&inspectable );
     ok( hr == S_OK, "got hr %#lx\n", hr );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    /* WinAppSDK C++/WinRT resolves an agile reference on every activation factory before using it. */
+    check_interface( factory, &IID_IAgileObject, TRUE );
 
     hr = IActivationFactory_QueryInterface( factory, &IID_IDeviceInformationStatics2, (void **)&device_info_statics2 );
     ok( hr == S_OK || broken( hr == E_NOINTERFACE ), "got hr %#lx\n", hr );
@@ -1426,7 +1427,7 @@ static void test_DeviceAccessInformation( void )
     ok( factory != factory2, "Got the same factory.\n" );
     IActivationFactory_Release( factory2 );
 
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    check_interface( factory, &IID_IAgileObject, TRUE );
     check_interface( factory, &IID_IDeviceAccessInformation, FALSE );
 
     hr = IActivationFactory_QueryInterface( factory, &IID_IDeviceAccessInformationStatics, (void **)&statics );

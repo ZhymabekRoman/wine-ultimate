@@ -82,7 +82,8 @@ static void test_CaptionStatics(void)
 
     check_interface( factory, &IID_IUnknown, TRUE );
     check_interface( factory, &IID_IInspectable, TRUE );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    /* WinAppSDK C++/WinRT resolves an agile reference on every activation factory before using it. */
+    check_interface( factory, &IID_IAgileObject, TRUE );
 
     hr = IActivationFactory_QueryInterface( factory, &IID_IClosedCaptionPropertiesStatics, (void **)&caption_statics );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
@@ -177,7 +178,7 @@ static void test_MediaTranscoderStatics(void)
 
     check_interface( factory, &IID_IUnknown, TRUE );
     check_interface( factory, &IID_IInspectable, TRUE );
-    check_interface( factory, &IID_IAgileObject, FALSE );
+    check_interface( factory, &IID_IAgileObject, TRUE );
     check_interface( factory, &IID_IMediaTranscoder, FALSE );
 
     hr = RoActivateInstance( str, &inspectable );

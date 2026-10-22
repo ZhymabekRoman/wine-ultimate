@@ -352,6 +352,7 @@ static HRESULT WINAPI factory_QueryInterface(IActivationFactory *iface, REFIID i
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
     if (IsEqualGUID(iid, &IID_IUnknown)
+        || IsEqualGUID(iid, &IID_IAgileObject)
         || IsEqualGUID(iid, &IID_IInspectable)
         || IsEqualGUID(iid, &IID_IActivationFactory))
     {

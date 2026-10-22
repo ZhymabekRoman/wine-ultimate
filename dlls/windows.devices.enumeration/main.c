@@ -655,6 +655,7 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ))
     {
         IInspectable_AddRef( (*out = &impl->IActivationFactory_iface) );
