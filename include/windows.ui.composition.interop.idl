@@ -25,6 +25,11 @@ import "sdkddkver.h";
 
 namespace Windows.UI.Composition {
     interface ICompositorInterop;
+    interface ICompositorDesktopInterop;
+    interface IDesktopWindowTargetInterop;
+    interface ICompositionDrawingSurfaceInterop;
+    interface ICompositionDrawingSurfaceInterop2;
+    interface ICompositionGraphicsDeviceInterop;
 
     [
         object,
@@ -36,5 +41,63 @@ namespace Windows.UI.Composition {
         HRESULT CreateCompositionSurfaceForHandle([in] HANDLE swapchain, [out, retval] ICompositionSurface **result);
         HRESULT CreateCompositionSurfaceForSwapChain([in] IUnknown *swapchain, [out, retval] ICompositionSurface **result);
         HRESULT CreateGraphicsDevice([in] IUnknown *device, [out, retval] ICompositionGraphicsDevice **result);
+    };
+
+    [
+        object,
+        uuid(29e691fa-4567-4dca-b319-d0f207eb6807),
+        pointer_default(unique)
+    ]
+    interface ICompositorDesktopInterop : IUnknown
+    {
+        HRESULT CreateDesktopWindowTarget([in] HWND hwnd, [in] BOOL isTopmost,
+            [out, retval] IInspectable **result);
+        HRESULT EnsureOnThread([in] UINT32 threadId);
+    };
+
+    [
+        object,
+        uuid(35dbf59e-e3f9-45b0-81e7-fe75f4145dc9),
+        pointer_default(unique)
+    ]
+    interface IDesktopWindowTargetInterop : IUnknown
+    {
+        HRESULT Hwnd([out] HWND *hwnd);
+    };
+
+    [
+        object,
+        uuid(fd04e6e3-fe0c-4c3c-ab19-a07601a576ee),
+        pointer_default(unique)
+    ]
+    interface ICompositionDrawingSurfaceInterop : IUnknown
+    {
+        HRESULT BeginDraw([in] const RECT *updateRect, [in] REFIID iid, [out, iid_is(iid)] void **surface, [out] POINT *offset);
+        HRESULT EndDraw();
+        HRESULT Resize([in] SIZE sizeInPixels);
+        HRESULT Scroll([in] const RECT *scrollSource, [in] const RECT *clipRegion, [in] INT32 offsetX, [in] INT32 offsetY);
+        HRESULT ResumeDraw();
+        HRESULT SuspendDraw();
+    };
+
+    [
+        object,
+        uuid(41e64aae-98c0-4239-8e95-a330dd6aa18b),
+        pointer_default(unique)
+    ]
+    interface ICompositionDrawingSurfaceInterop2 : ICompositionDrawingSurfaceInterop
+    {
+        HRESULT CopySurface([in] IUnknown *surface, [in] INT32 dstX, [in] INT32 dstY, [in] const RECT *sourceRect);
+    };
+
+    [
+        object,
+        uuid(a116ff71-f8bf-4c8a-9c98-70779a32a9c8),
+        pointer_default(unique)
+    ]
+    interface ICompositionGraphicsDeviceInterop : IUnknown
+    {
+        HRESULT GetRenderingDevice([out] IUnknown **value);
+        HRESULT SetRenderingDevice([in] IUnknown *value);
     };
 }

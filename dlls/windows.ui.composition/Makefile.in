@@ -1,0 +1,10 @@
+MODULE  = windows.ui.composition.dll
+IMPORTS = combase dcomp advapi32
+
+SOURCES = \
+	classes.idl \
+	compositor.c \
+	main.c \
+	objects.c \
+	propset.c \
+	visual.c

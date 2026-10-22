@@ -1,0 +1,35 @@
+#pragma makedep register
+#pragma winrt ns_prefix
+
+import "windows.ui.composition.idl";
+
+namespace Windows.UI.Composition {
+    runtimeclass ColorKeyFrameAnimation;
+    runtimeclass CompositionAnimation;
+    runtimeclass CompositionBrush;
+    runtimeclass CompositionClip;
+    runtimeclass CompositionColorBrush;
+    runtimeclass CompositionCommitBatch;
+    runtimeclass CompositionEasingFunction;
+    runtimeclass CompositionGraphicsDevice;
+    runtimeclass CompositionObject;
+    runtimeclass CompositionPropertySet;
+    runtimeclass CompositionScopedBatch;
+    runtimeclass CompositionSurfaceBrush;
+    runtimeclass CompositionTarget;
+    runtimeclass Compositor;
+    runtimeclass ContainerVisual;
+    runtimeclass CubicBezierEasingFunction;
+    runtimeclass ExpressionAnimation;
+    runtimeclass InsetClip;
+    runtimeclass LinearEasingFunction;
+    runtimeclass KeyFrameAnimation;
+    runtimeclass QuaternionKeyFrameAnimation;
+    runtimeclass ScalarKeyFrameAnimation;
+    runtimeclass SpriteVisual;
+    runtimeclass Vector2KeyFrameAnimation;
+    runtimeclass Vector3KeyFrameAnimation;
+    runtimeclass Vector4KeyFrameAnimation;
+    runtimeclass Visual;
+    runtimeclass VisualCollection;
+}
