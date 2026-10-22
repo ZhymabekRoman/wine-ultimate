@@ -796,7 +796,11 @@ static BOOL invoke_appwiz(void)
     return ret;
 }
 
-static BOOL get_support_msi(LPCWSTR mono_path, LPWSTR msi_path)
+/* Reads the Windows support package shipped inside the runtime at mono_path: its path
+ * goes to msi_path, its ProductVersion to version (a 15 byte buffer, left untouched if
+ * the package cannot be read). Reports whether that version is at least
+ * WINE_MONO_VERSION. */
+static BOOL get_support_msi(LPCWSTR mono_path, LPWSTR msi_path, LPSTR version)
 {
     static const WCHAR support_msi_relative[] = {'\\','s','u','p','p','o','r','t','\\','w','i','n','e','m','o','n','o','-','s','u','p','p','o','r','t','.','m','s','i',0};
     UINT (WINAPI *pMsiOpenPackageW)(LPCWSTR,ULONG*);
@@ -834,10 +838,9 @@ static BOOL get_support_msi(LPCWSTR mono_path, LPWSTR msi_path)
     if (res == ERROR_SUCCESS) {
         TRACE("found support msi version %s at %s\n", versionstringbuf, debugstr_w(msi_path));
 
-        if (compare_versions(WINE_MONO_VERSION, versionstringbuf) <= 0)
-        {
-            ret = TRUE;
-        }
+        if (version) lstrcpynA( version, versionstringbuf, 15 );
+
+        ret = compare_versions(WINE_MONO_VERSION, versionstringbuf) <= 0;
     }
 
     return ret;
@@ -852,6 +855,7 @@ static BOOL install_wine_mono(void)
     UINT (WINAPI *pMsiGetProductInfoA)(LPCSTR,LPCSTR,LPSTR,DWORD*);
     UINT (WINAPI *pMsiInstallProductW)(LPCWSTR,LPCWSTR);
     char versionstringbuf[15];
+    char support_version[15] = {0};
     char productcodebuf[39];
     UINT res;
     DWORD buffer_size;
@@ -918,12 +922,12 @@ static BOOL install_wine_mono(void)
 
     initresult = CoInitialize(NULL);
 
-    ret = get_support_msi(mono_path, support_msi_path);
+    ret = get_support_msi(mono_path, support_msi_path, support_version);
     if (!ret)
     {
         /* Try looking outside c:\windows\mono */
         ret = (get_mono_path(mono_path, TRUE) &&
-            get_support_msi(mono_path, support_msi_path));
+            get_support_msi(mono_path, support_msi_path, support_version));
     }
 
     if (ret)
@@ -939,11 +943,24 @@ static BOOL install_wine_mono(void)
             ret = TRUE;
             goto end;
         }
-        else
-            ERR("MsiInstallProduct failed, err=%i\n", res);
+
+        ERR("MsiInstallProduct failed, err=%i\n", res);
+        goto end;
     }
 
-    ret = invoke_appwiz();
+    /* Reached with a wine-mono runtime installed at mono_path whose Windows support
+     * package is missing, not registered, older than WINE_MONO_VERSION, or not
+     * installable from the runtime itself. The runtime is what the caller needs;
+     * asking the user to install a runtime they already have shows a modal dialog that
+     * takes the focus away from the app and blocks this process until it is dismissed,
+     * on every run, every time Wine is updated to expect a newer wine-mono than the
+     * installed one. Run against the installed runtime and report what is missing. */
+    WARN_(winediag)("Wine Mono runtime at %s has no support package of version %s "
+                    "(installed support package: %s), and no newer package is available. "
+                    "Install a wine-mono-%s package for full .NET support.\n",
+                    debugstr_w(mono_path), WINE_MONO_VERSION,
+                    support_version[0] ? support_version : "none", WINE_MONO_VERSION);
+    ret = TRUE;
 
 end:
     if (hmsi)
