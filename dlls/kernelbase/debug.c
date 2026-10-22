@@ -420,8 +420,22 @@ void WINAPI DECLSPEC_HOTPATCH RaiseFailFastException( EXCEPTION_RECORD *record, 
 {
     EXCEPTION_RECORD rec;
     CONTEXT ctx;
+    void *frames[32];
+    USHORT n_frames, k;
+    DWORD p_idx;
 
     WARN( "(%p, %p, %lx)\n", record, context, flags );
+    n_frames = RtlCaptureStackBackTrace( 0, 32, frames, NULL );
+    for (k = 0; k < n_frames; k++)
+        ERR( "  failfast_bt[%u] = %p\n", k, frames[k] );
+
+    if (record)
+    {
+        ERR( "  record: code=%08lx flags=%08lx addr=%p params=%lu\n",
+             record->ExceptionCode, record->ExceptionFlags, record->ExceptionAddress, record->NumberParameters );
+        for (p_idx = 0; p_idx < record->NumberParameters && p_idx < EXCEPTION_MAXIMUM_PARAMETERS; p_idx++)
+            ERR( "    param[%lu] = %016llx\n", p_idx, (unsigned long long)record->ExceptionInformation[p_idx] );
+    }
 
     if (flags & FAIL_FAST_NO_HARD_ERROR_DLG)
         TerminateProcess( GetCurrentProcess(), STATUS_FAIL_FAST_EXCEPTION );
@@ -545,6 +559,25 @@ static BOOL start_debugger( EXCEPTION_POINTERS *epointers, HANDLE event )
 
     format_exception_msg( epointers, buffer, sizeof(buffer) );
     MESSAGE( "wine: %s (thread %04lx), starting debugger...\n", buffer, GetCurrentThreadId() );
+#ifdef _WIN64
+    if (epointers && epointers->ContextRecord)
+    {
+        ULONG_PTR *sp = (ULONG_PTR *)epointers->ContextRecord->Rsp;
+        int i;
+        MESSAGE( "RIP=%p RSP=%p\n", (void *)epointers->ContextRecord->Rip, (void *)sp );
+        for (i = 0; i < 110; i++)
+            MESSAGE( "  stack[%02d] (%p) = %016Ix\n", i, &sp[i], sp[i] );
+    }
+#else
+    if (epointers && epointers->ContextRecord)
+    {
+        ULONG_PTR *sp = (ULONG_PTR *)epointers->ContextRecord->Esp;
+        int i;
+        MESSAGE( "EIP=%p ESP=%p\n", (void *)(ULONG_PTR)epointers->ContextRecord->Eip, (void *)sp );
+        for (i = 0; i < 110; i++)
+            MESSAGE( "  stack[%02d] (%p) = %08lx\n", i, &sp[i], (unsigned long)sp[i] );
+    }
+#endif
 
     InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
     if (!NtOpenKey( &dbg_key, KEY_READ, &attr ))

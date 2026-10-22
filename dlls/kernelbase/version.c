@@ -1634,18 +1634,25 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buff
  * Build a single PACKAGE_INFO from the current package identity + path. The app
  * uses this to discover its own package layout; one entry (the package itself).
  */
+LONG WINAPI PackageFamilyNameFromFullName(const WCHAR *full_name, UINT32 *length, WCHAR *family_name);
+
 LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
 {
-    WCHAR full_name[512], path[MAX_PATH];
+    WCHAR full_name[512], path[MAX_PATH], fam_name[256];
+    WCHAR fw_full_name[512], fw_path[MAX_PATH], fw_fam_name[256];
     UINT32 path_len = ARRAY_SIZE(path);
-    BYTE id_buf[512];
-    UINT32 id_len = sizeof(id_buf);
-    PACKAGE_ID *id = (PACKAGE_ID *)id_buf;
+    UINT32 fam_len = ARRAY_SIZE(fam_name);
+    BYTE id_buf[512], fw_id_buf[512];
+    UINT32 id_len = sizeof(id_buf), fw_id_len = sizeof(fw_id_buf);
+    PACKAGE_ID *id = (PACKAGE_ID *)id_buf, *fw_id = (PACKAGE_ID *)fw_id_buf;
     PACKAGE_INFO *info;
-    SIZE_T need, name_bytes, path_bytes, str_off;
+    SIZE_T need, name_bytes, path_bytes, fam_bytes, str_off;
+    SIZE_T fw_name_bytes = 0, fw_path_bytes = 0, fw_fam_bytes = 0;
+    BOOL has_fw = FALSE;
+    UINT32 pkg_count = 1;
     LONG ret;
 
-    if (!buffer_size || !count) return ERROR_INVALID_PARAMETER;
+    if (!buffer_size) return ERROR_INVALID_PARAMETER;
 
     if (!get_current_package_full_name( full_name, ARRAY_SIZE(full_name) ))
     {
@@ -1654,19 +1661,45 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
     }
     if ((ret = PackageIdFromFullName( full_name, 0, &id_len, id_buf ))) return ret;
     if (GetCurrentPackagePath( &path_len, path )) path[0] = 0;
+    fam_bytes = 0;
+    if (!PackageFamilyNameFromFullName( full_name, &fam_len, fam_name ))
+        fam_bytes = (wcslen( fam_name ) + 1) * sizeof(WCHAR);
 
     name_bytes = (wcslen( full_name ) + 1) * sizeof(WCHAR);
     path_bytes = (wcslen( path ) + 1) * sizeof(WCHAR);
-    str_off    = sizeof(PACKAGE_INFO);
-    /* PACKAGE_INFO embeds a PACKAGE_ID with name/publisher/resource/publisherId
-     * pointers; point them into trailing storage we copy from id_buf. */
-    need = str_off + name_bytes + path_bytes
+
+    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw_full_name, ARRAY_SIZE(fw_full_name) ) &&
+        GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_PATH", fw_path, ARRAY_SIZE(fw_path) ))
+    {
+        UINT32 fw_fam_len = ARRAY_SIZE(fw_fam_name);
+        if (!PackageIdFromFullName( fw_full_name, 0, &fw_id_len, fw_id_buf ))
+        {
+            has_fw = TRUE;
+            pkg_count = 2;
+            fw_name_bytes = (wcslen( fw_full_name ) + 1) * sizeof(WCHAR);
+            fw_path_bytes = (wcslen( fw_path ) + 1) * sizeof(WCHAR);
+            if (!PackageFamilyNameFromFullName( fw_full_name, &fw_fam_len, fw_fam_name ))
+                fw_fam_bytes = (wcslen( fw_fam_name ) + 1) * sizeof(WCHAR);
+        }
+    }
+
+    str_off = pkg_count * sizeof(PACKAGE_INFO);
+    need = str_off + name_bytes + path_bytes + fam_bytes
          + (id->name ? (wcslen(id->name)+1)*sizeof(WCHAR) : 0)
          + (id->publisher ? (wcslen(id->publisher)+1)*sizeof(WCHAR) : 0)
          + (id->resourceId ? (wcslen(id->resourceId)+1)*sizeof(WCHAR) : 0)
          + (id->publisherId ? (wcslen(id->publisherId)+1)*sizeof(WCHAR) : 0);
 
-    *count = 1;
+    if (has_fw)
+    {
+        need += fw_name_bytes + fw_path_bytes + fw_fam_bytes
+              + (fw_id->name ? (wcslen(fw_id->name)+1)*sizeof(WCHAR) : 0)
+              + (fw_id->publisher ? (wcslen(fw_id->publisher)+1)*sizeof(WCHAR) : 0)
+              + (fw_id->resourceId ? (wcslen(fw_id->resourceId)+1)*sizeof(WCHAR) : 0)
+              + (fw_id->publisherId ? (wcslen(fw_id->publisherId)+1)*sizeof(WCHAR) : 0);
+    }
+
+    if (count) *count = pkg_count;
     if (*buffer_size < need || !buffer)
     {
         *buffer_size = need;
@@ -1674,16 +1707,36 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
     }
 
     info = (PACKAGE_INFO *)buffer;
-    memset( info, 0, sizeof(*info) );
+    memset( info, 0, pkg_count * sizeof(PACKAGE_INFO) );
     {
         BYTE *p = buffer + str_off;
-        info->path = (WCHAR *)p; memcpy( p, path, path_bytes ); p += path_bytes;
-        info->packageFullName = (WCHAR *)p; memcpy( p, full_name, name_bytes ); p += name_bytes;
-        info->packageFamilyName = NULL;
-        info->packageId = *id;
-#define COPYSTR(field) do { if (id->field) { info->packageId.field = (WCHAR *)p; \
-        SIZE_T b=(wcslen(id->field)+1)*sizeof(WCHAR); memcpy(p,id->field,b); p+=b; } } while(0)
-        COPYSTR(name); COPYSTR(publisher); COPYSTR(resourceId); COPYSTR(publisherId);
+        info[0].path = (WCHAR *)p; memcpy( p, path, path_bytes ); p += path_bytes;
+        info[0].packageFullName = (WCHAR *)p; memcpy( p, full_name, name_bytes ); p += name_bytes;
+        if (fam_bytes)
+        {
+            info[0].packageFamilyName = (WCHAR *)p; memcpy( p, fam_name, fam_bytes ); p += fam_bytes;
+        }
+        else info[0].packageFamilyName = NULL;
+        info[0].packageId = *id;
+#define COPYSTR(dst, src, field) do { if ((src)->field) { (dst)->packageId.field = (WCHAR *)p; \
+        SIZE_T b=(wcslen((src)->field)+1)*sizeof(WCHAR); memcpy(p,(src)->field,b); p+=b; } } while(0)
+        COPYSTR(&info[0], id, name); COPYSTR(&info[0], id, publisher);
+        COPYSTR(&info[0], id, resourceId); COPYSTR(&info[0], id, publisherId);
+
+        if (has_fw)
+        {
+            info[1].flags = 0x00000001; /* PACKAGE_INFORMATION_FRAMEWORK */
+            info[1].path = (WCHAR *)p; memcpy( p, fw_path, fw_path_bytes ); p += fw_path_bytes;
+            info[1].packageFullName = (WCHAR *)p; memcpy( p, fw_full_name, fw_name_bytes ); p += fw_name_bytes;
+            if (fw_fam_bytes)
+            {
+                info[1].packageFamilyName = (WCHAR *)p; memcpy( p, fw_fam_name, fw_fam_bytes ); p += fw_fam_bytes;
+            }
+            else info[1].packageFamilyName = NULL;
+            info[1].packageId = *fw_id;
+            COPYSTR(&info[1], fw_id, name); COPYSTR(&info[1], fw_id, publisher);
+            COPYSTR(&info[1], fw_id, resourceId); COPYSTR(&info[1], fw_id, publisherId);
+        }
 #undef COPYSTR
     }
     *buffer_size = need;
@@ -1764,6 +1817,34 @@ LONG WINAPI GetPackagePathByFullName(const WCHAR *name, UINT32 *len, WCHAR *path
 
     FIXME( "(%s %p %p): no package path\n", debugstr_w(name), len, path );
     return APPMODEL_ERROR_NO_PACKAGE;
+}
+
+/***********************************************************************
+ *         GetPackagePathByFullName2   (kernelbase.@)
+ */
+LONG WINAPI GetPackagePathByFullName2(const WCHAR *name, UINT32 type, UINT32 *len, WCHAR *path)
+{
+    TRACE( "(%s %u %p %p)\n", debugstr_w(name), type, len, path );
+    return GetPackagePathByFullName( name, len, path );
+}
+
+/***********************************************************************
+ *         IsMrtResourceRedirectionEnabled   (kernelbase.@)
+ */
+BOOL WINAPI IsMrtResourceRedirectionEnabled(void)
+{
+    return FALSE;
+}
+
+/***********************************************************************
+ *         IsDeveloperModeEnabled   (kernelbase.@)
+ */
+HRESULT WINAPI IsDeveloperModeEnabled( BOOL *enabled )
+{
+    TRACE( "enabled %p\n", enabled );
+    if (!enabled) return E_INVALIDARG;
+    *enabled = FALSE;
+    return S_OK;
 }
 
 static const struct

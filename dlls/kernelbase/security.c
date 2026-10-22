@@ -642,48 +642,7 @@ BOOL WINAPI CreateRestrictedToken( HANDLE token, DWORD flags,
         memcpy( nt_disable_sids->Groups, disable_sids, disable_sid_count * sizeof(*disable_sids) );
     }
 
-    if (flags & DISABLE_MAX_PRIVILEGE)
-    {
-        DWORD priv_size = 0;
-        TOKEN_PRIVILEGES *tok_privs = NULL;
-
-        NtQueryInformationToken( token, TokenPrivileges, NULL, 0, &priv_size );
-        if (priv_size && (tok_privs = HeapAlloc( GetProcessHeap(), 0, priv_size )))
-        {
-            if (NtQueryInformationToken( token, TokenPrivileges, tok_privs, priv_size, &priv_size ) == STATUS_SUCCESS)
-            {
-                DWORD count = 0, i;
-                LUID change_notify = { SE_CHANGE_NOTIFY_PRIVILEGE, 0 };
-
-                for (i = 0; i < tok_privs->PrivilegeCount; i++)
-                {
-                    if (tok_privs->Privileges[i].Luid.LowPart != change_notify.LowPart ||
-                        tok_privs->Privileges[i].Luid.HighPart != change_notify.HighPart)
-                        count++;
-                }
-
-                if (count)
-                {
-                    nt_privs = HeapAlloc( GetProcessHeap(), 0, offsetof( TOKEN_PRIVILEGES, Privileges[count] ) );
-                    if (nt_privs)
-                    {
-                        nt_privs->PrivilegeCount = 0;
-                        for (i = 0; i < tok_privs->PrivilegeCount; i++)
-                        {
-                            if (tok_privs->Privileges[i].Luid.LowPart != change_notify.LowPart ||
-                                tok_privs->Privileges[i].Luid.HighPart != change_notify.HighPart)
-                            {
-                                nt_privs->Privileges[nt_privs->PrivilegeCount] = tok_privs->Privileges[i];
-                                nt_privs->PrivilegeCount++;
-                            }
-                        }
-                    }
-                }
-            }
-            HeapFree( GetProcessHeap(), 0, tok_privs );
-        }
-    }
-    else if (delete_priv_count)
+    if (delete_priv_count)
     {
         if (!(nt_privs = HeapAlloc( GetProcessHeap(), 0,
                                     offsetof( TOKEN_PRIVILEGES, Privileges[delete_priv_count] ) )))

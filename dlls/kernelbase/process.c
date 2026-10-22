@@ -431,7 +431,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CloseHandle( HANDLE handle )
         handle = InterlockedExchangePointer( &NtCurrentTeb()->Peb->ProcessParameters->hStdError, 0 );
 
     status = NtClose( handle );
-    if (status == STATUS_INVALID_HANDLE || status == STATUS_HANDLE_NOT_CLOSABLE) return TRUE;
+    if (status == STATUS_INVALID_HANDLE || status == STATUS_HANDLE_NOT_CLOSABLE || status == STATUS_ACCESS_DENIED) return TRUE;
     return set_ntstatus( status );
 }
 
@@ -529,7 +529,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
 
     /* Process the AppName and/or CmdLine to get module name and path */
 
-    ERR( "CreateProcessInternalW: app %s cmdline %s\n", debugstr_w(app_name), debugstr_w(cmd_line) );
+    TRACE( "app %s cmdline %s\n", debugstr_w(app_name), debugstr_w(cmd_line) );
 
     if (new_token) FIXME( "No support for returning created process token\n" );
 
@@ -686,11 +686,11 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
         info->dwProcessId = HandleToUlong( rtl_info.ClientId.UniqueProcess );
         info->dwThreadId  = HandleToUlong( rtl_info.ClientId.UniqueThread );
         if (!(flags & CREATE_SUSPENDED)) NtResumeThread( rtl_info.Thread, NULL );
-        ERR( "started process pid %04lx tid %04lx app %s\n", info->dwProcessId, info->dwThreadId, debugstr_w(app_name) );
+        TRACE( "started process pid %04lx tid %04lx\n", info->dwProcessId, info->dwThreadId );
     }
     else
     {
-        ERR( "CreateProcessInternalW failed: status %#lx, app %s, cmdline %s\n", status, debugstr_w(app_name), debugstr_w(cmd_line) );
+        WARN( "failed: status %#lx\n", status );
     }
 
  done:

@@ -134,6 +134,26 @@ LONG WINAPI AppPolicyGetShowDeveloperDiagnostic(HANDLE token, AppPolicyShowDevel
 }
 
 /***********************************************************************
+ *          GetSystemMetadataPathForPackage (KERNELBASE.@)
+ */
+HRESULT WINAPI GetSystemMetadataPathForPackage(const WCHAR *package_full_name, WCHAR *path, UINT32 *length)
+{
+    FIXME("(%s, %p, %p) stub!\n", wine_dbgstr_w(package_full_name), path, length);
+    if (length) *length = 0;
+    return HRESULT_FROM_WIN32(ERROR_NOT_FOUND);
+}
+
+/***********************************************************************
+ *          GetEffectivePackageStatusForUserSid (KERNELBASE.@)
+ */
+HRESULT WINAPI GetEffectivePackageStatusForUserSid(const void *sid, const WCHAR *package_family_name, DWORD *status)
+{
+    TRACE("(%p, %s, %p) stub!\n", sid, wine_dbgstr_w(package_family_name), status);
+    if (status) *status = 0; /* PACKAGE_STATUS_NORMAL */
+    return S_OK;
+}
+
+/***********************************************************************
  *          AppPolicyGetWindowingModel (KERNELBASE.@)
  */
 LONG WINAPI AppPolicyGetWindowingModel(HANDLE token, AppPolicyWindowingModel *policy)
