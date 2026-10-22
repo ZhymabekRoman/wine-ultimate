@@ -20,3 +20,4 @@ Fixes: [58315] Clip Studio Paint 4 menus turn black when clicked
 0074-dcomp-Implement-CreateSurface-CreateSharedResource-.patch
 0075-dcomp-Implement-top-level-HWND-coordinate-mapping-a.patch
 0076-dxgi-d3d11-server-Implement-cross-process-shared-re.patch
+0077-dcomp-Treat-VREFRESH-of-1-as-60-Hz-compositor-rate.patch

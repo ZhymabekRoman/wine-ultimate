@@ -102,7 +102,7 @@ Developed during native bring-up for **WhatsApp for Windows** (`v2.2620.102.0`, 
 ### 5. `dcomp-DCompositionCreateDevice2`
 * **Path**: `patches/dcomp-DCompositionCreateDevice2/`
 * **Target Subsystem**: DirectComposition (`dcomp.dll`), `dxgi.dll`, `d3d11.dll`, `user32.dll`, `win32u`
-* **Patches (0001–0076)**:
+* **Patches (0001–0077)**:
   * `0001–0066`: Base CodeWeavers DComposition patchset (Zhiyi Zhang).
   * `0067`: Exports 11 `DCompPrivates_*` stubs needed for `Microsoft.Internal.FrameworkUdk.dll` delay-import resolution.
   * `0068–0072`: Prevents premature compositor worker thread termination on empty initial tick, fixes compositor clock, container map view, CoreWindow `CS_OWNDC`, and SEH logging.
@@ -110,6 +110,7 @@ Developed during native bring-up for **WhatsApp for Windows** (`v2.2620.102.0`, 
   * `0074`: Implements `desktop_device_CreateSharedResource` and `desktop_device_OpenSharedResourceHandle` for `IDCompositionVisual`, and `composition_device_create_surface` with dynamic D3D11 rendering device acquisition, unblocking Edge `CreateCoreWebView2CompositionController`.
   * `0075`: Fixes top-level HWND presentation by resolving root window via `GetAncestor(target->hwnd, GA_ROOT)`, mapping child coordinates via `MapWindowPoints`, and recursively traversing `shared_visual_handle` visual trees.
   * `0076`: Implements cross-process shared resource engine (`IDXGIResource::GetSharedHandle`, `IDXGIResource1::CreateSharedHandle`, `ID3D11Device::OpenSharedResource`, `ID3D11Device1::OpenSharedResource1`, and wineserver D3DKMT cross-process handle lookup).
+  * `0077`: Treats `GetDeviceCaps(VREFRESH)` of 1 as the 60 Hz default in the composite thread — the X11 driver reports 1 under headless displays (Xvfb), which throttled the presenter to 1 fps (refresh_period 1000 ms).
 
 ---
 
