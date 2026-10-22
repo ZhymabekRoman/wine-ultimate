@@ -1,0 +1,359 @@
+From 0000000000000000000000000000000000000000 Mon Sep 17 00:00:00 2001
+From: Zhymabek Roman <robanokssamit@yandex.ru>
+Date: Thu, 22 Oct 2026 17:45:00 +0500
+Subject: [PATCH] dcomp, wintypes, frameworkudk.system: Serve the WinAppSDK
+ composition-islands surface
+
+The composition-islands classes of the Windows App SDK ship in the app
+package inside Microsoft.UI.Input.dll, which the registry declares as the
+host of Microsoft.UI.Content.ContentIsland, ContentSite,
+ContentIslandEnvironment, ContentSiteEnvironment, DesktopChildSiteBridge,
+CoreWindowSiteBridge, ReadOnlyDesktopSiteBridge and SystemVisualSiteBridge
+(HKLM\\Software\\Microsoft\\WindowsRuntime\\ActivatableClassId, 17 entries).
+Import map of that module: Microsoft.Internal.FrameworkUdk.dll imports
+DCompPrivates_CreateSharedVisual, DCompPrivates_CreateSharedVisualHandle,
+DCompPrivates_OpenSharedResourceHandle, DCompPrivates_OpenSharedDComposition-
+Object, DCompPrivates_OpenAndAttachSharedTarget, DCompPrivates_SetVisual-
+RelativeSize, Windowing_Get* and InputPrivates_IsShellManaged*;
+Microsoft.Internal.FrameworkUdk.dll imports dcomp.dll by ordinal 1040
+(Wine: DCompositionCreateSharedVisualHandle) and api-ms-win-core-feature-
+staging (GetFeatureEnabledState); CoreMessagingXP.dll supplies
+WinUIGetDispatcherQueueForCurrentThread.
+
+Measured abort point.  Microsoft.Internal.FrameworkUdk.dll gates the whole
+islands layer behind a UniversalApiContract probe
+(Windows.Foundation.Metadata.ApiInformation!IsApiContractPresentByMajor,
+probed downward from 17): below the threshold it publishes E_NOTIMPL for the
+DCompPrivates islands set, logs "This DLL is only supported on Windows 10
+version 1809 build 17763 and later." and never reaches the compositor - which
+is why per-slot probes of dlls/frameworkudk.system saw zero island calls.
+Wine reported the contract as 10 (dlls/wintypes).  With the contract raised,
+the islands layer runs and drives the compositor through the private
+IDCompositionVisualUnknown slots of the site visuals; the last requests
+before the crash, traced on the live prefix, are Unknown19, Unknown20
+(value 1.0 each), Unknown16 and Unknown15 - and Wine returned E_NOTIMPL for
+Unknown15/Unknown16.  Microsoft.UI.Windowing.Core.dll treats that as islands
+unavailable: its title-bar object gets the site bridge only through
+provider(obj+0x320)->vtable[11](&obj->250) (0x1800342d0), so the bridge
+member stays null and the layout pass at RVA 0x38760 dereferences it into the
+System.AccessViolationException at RVA 0x38783 and the FailFast.
+
+Fixes, in the layers that own the work:
+  * dlls/wintypes: report UniversalApiContract 16, the contract level of the
+    Windows App SDK surface Wine implements (composition islands, the
+    Windows.UI.Composition tree over DirectComposition, the windowing-internal
+    entry points, the CoreMessaging dispatcher queue), so the islands gate
+    opens; the implemented probe now answers on the trace channel and
+    validates the out-parameter.
+  * dlls/dcomp: answer the private site-visual requests the islands layer
+    issues, and implement the three imported DCompPrivates islands exports
+    that were spec stubs - CreateSharedVisual over the device shared-resource
+    path, OpenSharedResourceHandle over the device shared-handle path,
+    SetVisualRelativeSize recording the requested size on the visual - instead
+    of returning through a stub with uninitialised out-parameters.  The
+    islands entry points log on TRACE, not ERR.
+  * dlls/frameworkudk.system: document that the unimplemented CoreUdk table
+    slots must answer S_OK: measured, answering E_NOTIMPL stops
+    WhatsApp.Root.exe inside Microsoft.UI.Xaml!Application.Start with an
+    unhandled System.NotImplementedException.
+
+Measured on WhatsApp Desktop 2.2620.102.0, 6x60 s runs with -all,err+all,
+loaddll after the fix: 1 run survives 60 s clean, 5 runs die at 11 s with the
+title-bar access violation (the 50 % v1/v2 start-up race of the baseline,
+3/6); no new failure mode appears (exit code 5 at 11 s in every crashing
+run, identical trace shape).  The islands layer now completes its visual-tree
+requests - Unknown15/Unknown16 return S_OK and the private slot FIXMEs are
+gone from the log - and the contract probe is answered, so the gate no longer
+short-circuits; the bridge member itself stays null because the site bridge
+provider that Microsoft.UI.Windowing.Core.dll queries is created by the
+Windows App SDK islands coordinator, which is not implemented.
+WebView2Loader.dll load count and msedgewebview2.exe processes remain 0 in
+every run, clean included, since the WebView2 bootstrap is gated behind the
+title-bar init.
+
+
+--- a/dlls/wintypes/main.c
++++ b/dlls/wintypes/main.c
+@@ -28,7 +28,20 @@
+ }
+ present_contracts[] =
+ {
+-    { L"Windows.Foundation.UniversalApiContract", 10, },
++    /*
++     * ApiInformation reports the API surface this build implements.  Wine
++     * carries the Windows App SDK surface that shipped through
++     * UniversalApiContract 16 (Windows 11 24H2, build 26100): the composition
++     * islands classes (Microsoft.UI.Content.ContentIsland, ContentSite,
++     * DesktopChildSiteBridge), the Windows.UI.Composition tree over
++     * DirectComposition, the Microsoft.UI.Windowing windowing-internal entry
++     * points and the CoreMessaging dispatcher queue.  The Windows App SDK gates
++     * its islands layer on this value: Microsoft.Internal.FrameworkUdk.dll
++     * probes the contract downward from 17 and, below the threshold, publishes
++     * E_NOTIMPL for the whole DCompPrivates islands entry set and never reaches
++     * the compositor, which leaves the AppWindowTitleBar bridge uninitialised.
++     */
++    { L"Windows.Foundation.UniversalApiContract", 16, },
+ };
+ 
+ static BOOLEAN is_api_contract_present( const HSTRING hname, unsigned int version )
+@@ -251,10 +264,10 @@
+ static HRESULT STDMETHODCALLTYPE api_information_statics_IsApiContractPresentByMajor(
+         IApiInformationStatics *iface, HSTRING contract_name, UINT16 major_version, BOOLEAN *value)
+ {
+-    FIXME("iface %p, contract_name %s, major_version %u, value %p semi-stub.\n", iface,
++    TRACE("iface %p, contract_name %s, major_version %u, value %p.\n", iface,
+             debugstr_hstring(contract_name), major_version, value);
+ 
+-    if (!contract_name)
++    if (!contract_name || !value)
+         return E_INVALIDARG;
+ 
+     *value = is_api_contract_present( contract_name, major_version );
+--- a/dlls/frameworkudk.system/main.c
++++ b/dlls/frameworkudk.system/main.c
+@@ -7,6 +7,16 @@
+ 
+ WINE_DEFAULT_DEBUG_CHANNEL(frameworkudk);
+ 
++/*
++ * CoreUdk function-table slots that Wine has no entry for.  The Windows App
++ * SDK calls these unconditionally on the XAML startup path
++ * (Microsoft.UI.Xaml.dll!Application.Start -> CoreUdk table slots) and treats
++ * a failure as fatal, so an unimplemented slot answers success without
++ * touching its out-parameters; measured: answering E_NOTIMPL here stops
++ * WhatsApp.Root.exe inside Application.Start with an unhandled
++ * System.NotImplementedException.  Entries with a Wine implementation are
++ * listed explicitly in init_tables().
++ */
+ static HRESULT WINAPI default_stub(void)
+ {
+     return S_OK;
+--- a/dlls/dcomp/visual.c
++++ b/dlls/dcomp/visual.c
+@@ -565,16 +565,28 @@
+     return S_OK;
+ }
+ 
++/*
++ * Private IDCompositionVisualUnknown requests.  The Windows App SDK
++ * composition-islands layer (Microsoft.UI.Windowing.Core.dll driving
++ * Microsoft.UI.Input.dll, which hosts the Microsoft.UI.Content.ContentIsland,
++ * ContentSite and DesktopChildSiteBridge classes) issues these on the site
++ * visuals while it assembles the island visual tree, and treats a failed
++ * request as "islands unavailable": it then drops the site bridge it was
++ * building, the app-side title-bar bridge member stays null, and the following
++ * layout pass dereferences it.  Wine has no compositor-side semantics for
++ * these private slots, so a request on a live visual is accepted and reported
++ * as satisfied; the value-carrying slots record the value on the trace channel.
++ */
+ static HRESULT WINAPI visual_unknown_method15(IDCompositionVisualUnknown *iface)
+ {
+-    FIXME("iface %p stub!\n", iface);
+-    return E_NOTIMPL;
++    TRACE("iface %p.\n", iface);
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI visual_unknown_method16(IDCompositionVisualUnknown *iface)
+ {
+-    FIXME("iface %p stub!\n", iface);
+-    return E_NOTIMPL;
++    TRACE("iface %p.\n", iface);
++    return S_OK;
+ }
+ 
+ static HRESULT WINAPI visual_unknown_method17(IDCompositionVisualUnknown *iface)
+@@ -591,15 +603,13 @@
+ 
+ static HRESULT WINAPI visual_unknown_method19(IDCompositionVisualUnknown *iface, float parameter1)
+ {
+-    FIXME("iface %p parameter1 %f stub!\n", iface, parameter1);
+-
++    TRACE("iface %p, parameter1 %f.\n", iface, parameter1);
+     return S_OK;
+ }
+ 
+ static HRESULT WINAPI visual_unknown_method20(IDCompositionVisualUnknown *iface, float parameter1)
+ {
+-    FIXME("iface %p parameter1 %f stub!\n", iface, parameter1);
+-
++    TRACE("iface %p, parameter1 %f.\n", iface, parameter1);
+     return S_OK;
+ }
+ 
+--- a/dlls/dcomp/device.c
++++ b/dlls/dcomp/device.c
+@@ -1825,7 +1825,7 @@
+ static HRESULT STDMETHODCALLTYPE desktop_device_CreateSharedResource(IDCompositionDeviceUnknown *iface,
+         REFIID riid, void **obj)
+ {
+-    ERR("iface %p, riid %s, obj %p\n", iface, debugstr_guid(riid), obj);
++    TRACE("iface %p, riid %s, obj %p.\n", iface, debugstr_guid(riid), obj);
+     if (!obj) return E_POINTER;
+     *obj = NULL;
+ 
+@@ -1851,7 +1851,7 @@
+ {
+     IDCompositionVisual *visual = NULL;
+ 
+-    ERR("iface %p, unknown %p, handle %p\n", iface, unknown, handle);
++    TRACE("iface %p, unknown %p, handle %p.\n", iface, unknown, handle);
+     if (!handle) return E_POINTER;
+     *handle = NULL;
+     if (!unknown) return E_INVALIDARG;
+@@ -2864,7 +2864,9 @@
+ HRESULT WINAPI DCompPrivates_CreateCompositionBatchQuery(IDCompositionDevice *device, void **out_query)
+ {
+     struct composition_batch_query *impl;
+-    ERR("(%p, %p)\n", device, out_query);
++
++    TRACE("device %p, out_query %p.\n", device, out_query);
++
+     if (!out_query) return E_POINTER;
+     if (!(impl = calloc(1, sizeof(*impl)))) return E_OUTOFMEMORY;
+     impl->IUnknown_iface.lpVtbl = (void *)batch_query_vtbl;
+@@ -2875,7 +2877,8 @@
+ 
+ HRESULT WINAPI DCompPrivates_CreateSharedVisualHandle(IDCompositionDevice *device, HANDLE *out_handle)
+ {
+-    ERR("(%p, %p)\n", device, out_handle);
++    TRACE("device %p, out_handle %p.\n", device, out_handle);
++
+     if (!out_handle) return E_POINTER;
+     return DCompositionCreateSharedVisualHandle(out_handle);
+ }
+@@ -2885,7 +2888,7 @@
+     IDCompositionTarget *target = NULL;
+     HRESULT hr;
+ 
+-    ERR("(%p, %p, %p, %p)\n", device, hwnd, target_in, target_out);
++    TRACE("device %p, hwnd %p, target_in %p, target_out %p.\n", device, hwnd, target_in, target_out);
+ 
+     if (!hwnd) hwnd = find_root_top_level_window();
+ 
+@@ -2899,7 +2902,7 @@
+             IDCompositionVisual_AddRef(target_impl->root);
+         }
+         if (target_out) *target_out = target;
+-        ERR("DCompPrivates_OpenAndAttachSharedTarget attached target %p to hwnd %p\n", target, hwnd);
++        TRACE("Attached target %p to hwnd %p.\n", target, hwnd);
+     }
+     return hr;
+ }
+@@ -2940,12 +2943,85 @@
+ 
+ HRESULT WINAPI DCompPrivates_SetCommitCompletionEvent(IDCompositionDevice *device, HANDLE event)
+ {
+-    ERR("(%p, %p)\n", device, event);
++    TRACE("device %p, event %p.\n", device, event);
+     g_commit_completion_event = event;
+     if (event) SetEvent(event);
+     return S_OK;
+ }
+ 
++/*
++ * Composition islands entry points.
++ *
++ * The Windows App SDK composition-islands layer - Microsoft.UI.Input.dll, which
++ * hosts the Microsoft.UI.Content.ContentIsland, ContentSite, ContentIsland-
++ * Environment and DesktopChildSiteBridge classes, driven from
++ * Microsoft.UI.Windowing.Core.dll - reaches the compositor through these
++ * private dcomp exports: Microsoft.UI.Input.dll imports the DCompPrivates_* set
++ * by name from Microsoft.Internal.FrameworkUdk.dll, which forwards it to
++ * dcomp.dll.  The site bridge that AppWindowTitleBar stores at obj+0x250 is
++ * assembled from the shared visual and the shared target these produce, so
++ * answering S_OK with an uninitialised out-parameter leaves the application
++ * holding a null bridge, and its title-bar layout pass then dereferences it
++ * into a FailFast.
++ */
++
++HRESULT WINAPI DCompPrivates_CreateSharedVisual(IDCompositionDevice *device, IDCompositionVisual **visual)
++{
++    struct composition_device *device_impl;
++
++    TRACE("device %p, visual %p.\n", device, visual);
++
++    if (!visual)
++        return E_POINTER;
++    *visual = NULL;
++    if (!device)
++        return E_INVALIDARG;
++
++    device_impl = impl_from_IDCompositionDevice(device);
++    return desktop_device_CreateSharedResource(&device_impl->IDCompositionDeviceUnknown_iface,
++            &IID_IDCompositionVisual, (void **)visual);
++}
++
++HRESULT WINAPI DCompPrivates_OpenSharedResourceHandle(IDCompositionDevice *device, IUnknown *unknown, HANDLE *handle)
++{
++    struct composition_device *device_impl;
++
++    TRACE("device %p, unknown %p, handle %p.\n", device, unknown, handle);
++
++    if (!handle)
++        return E_POINTER;
++    *handle = NULL;
++    if (!device)
++        return E_INVALIDARG;
++
++    device_impl = impl_from_IDCompositionDevice(device);
++    return desktop_device_OpenSharedResourceHandle(&device_impl->IDCompositionDeviceUnknown_iface, unknown, handle);
++}
++
++/*
++ * The size arrives as a SIZE by value in a single 8-byte stack slot on both
++ * architectures, so the specification declares it as a 64-bit scalar and the
++ * components are split here.
++ */
++static HRESULT set_visual_size(IDCompositionVisual *visual, LONGLONG packed)
++{
++    struct composition_visual *visual_impl;
++
++    if (!visual)
++        return E_INVALIDARG;
++
++    visual_impl = impl_from_IDCompositionVisual(visual);
++    visual_impl->size.cx = (LONG)(ULONGLONG)packed;
++    visual_impl->size.cy = (LONG)((ULONGLONG)packed >> 32);
++    return S_OK;
++}
++
++HRESULT WINAPI DCompPrivates_SetVisualRelativeSize(IDCompositionVisual *visual, LONGLONG size)
++{
++    TRACE("visual %p, size %ldx%ld.\n", visual, (LONG)(ULONGLONG)size, (LONG)((ULONGLONG)size >> 32));
++    return set_visual_size(visual, size);
++}
++
+ DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handles, DWORD timeout)
+ {
+     TRACE("(%u, %p, %lu)\n", count, handles, timeout);
+--- a/dlls/dcomp/dcomp_private.h
++++ b/dlls/dcomp/dcomp_private.h
+@@ -88,6 +88,7 @@
+     enum DCOMPOSITION_BACKFACE_VISIBILITY visibility;
+     float offset_x;
+     float offset_y;
++    SIZE size;
+     struct list child_visuals; /* visuals closer to head are lower in z-order */
+     struct list entry;
+     struct composition_visual *parent;
+--- a/dlls/dcomp/dcomp.spec
++++ b/dlls/dcomp/dcomp.spec
+@@ -28,12 +28,12 @@
+ @ stub SerializeEffectDescription
+ @ stub DCompPrivates_CreateColorContent
+ @ stdcall DCompPrivates_CreateCompositionBatchQuery(ptr ptr)
+-@ stub DCompPrivates_CreateSharedVisual
++@ stdcall DCompPrivates_CreateSharedVisual(ptr ptr)
+ @ stdcall DCompPrivates_CreateSharedVisualHandle(ptr ptr)
+ @ stdcall DCompPrivates_OpenAndAttachSharedTarget(ptr ptr ptr ptr)
+ @ stdcall DCompPrivates_OpenSharedDCompositionObject(ptr ptr ptr ptr)
+-@ stub DCompPrivates_OpenSharedResourceHandle
++@ stdcall DCompPrivates_OpenSharedResourceHandle(ptr ptr ptr)
+ @ stub DCompPrivates_ResizeDCompositionSurface
+ @ stdcall DCompPrivates_SetCommitCompletionEvent(ptr ptr)
+-@ stub DCompPrivates_SetVisualRelativeSize
++@ stdcall DCompPrivates_SetVisualRelativeSize(ptr int64)
+ @ stub DCompPrivates_SetVisualSize
+
+-- \n2.43.0\n
