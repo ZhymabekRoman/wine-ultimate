@@ -89,7 +89,9 @@ server ALPC/d3dkmt, ntdll WNF/ALPC, twinapi, windows.ui, cryptowinrt, winrt stub
   measurement/A-B notes — read them there).
 * Applied history: 153 archived patch files → 119 applied as commits, 32 superseded by
   later dev-tree state and captured in the `wip:` commits, 66 CodeWeavers patches squashed
-  into one vendor commit. `tools/` in the migration workbench holds the am log.
+  into one vendor commit. The per-patch am log (applied / skipped / failed with the
+  strategy that worked) is in the migration workbench at
+  `~/migration-tools/am-log2.tsv`; it is not tracked here.
 
 ## Remotes
 
