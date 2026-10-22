@@ -35,3 +35,4 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0047-windows.ui.composition-frameworkudk.system-dcomp-wow64-Implement-Windows.UI.Composition-over-DirectComposition.patch
 0048-mscoree-Accept-installed-mono-runtime-without-MSI-enumeration.patch
 0049-dxgi-dcomp-d3d11-server-Fix-DXGI-factory-and-dcomp-device-creation-on-software-GL-hosts.patch
+0050-coremessaging-Implement-queued-DispatcherQueue-dispatch-with-a-message-window-pump.patch
