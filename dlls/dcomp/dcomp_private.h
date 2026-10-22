@@ -141,6 +141,7 @@ struct composition_visual
     float offset_x;
     float offset_y;
     SIZE size;
+    IDCompositionTransform *transform;
     struct list child_visuals; /* visuals closer to head are lower in z-order */
     struct list entry;
     struct composition_visual *parent;

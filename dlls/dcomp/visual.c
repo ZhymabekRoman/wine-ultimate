@@ -74,6 +74,8 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             ID2D1DeviceContext_Release(visual->device_context);
         if (visual->content)
             IUnknown_Release(visual->content);
+        if (visual->transform)
+            IDCompositionTransform_Release(visual->transform);
         if (visual->shared_visual_handle)
             CloseHandle(visual->shared_visual_handle);
         dcomp_lock();
@@ -129,8 +131,19 @@ static HRESULT STDMETHODCALLTYPE visual_SetOffsetY(IDCompositionVisualUnknown *i
 static HRESULT STDMETHODCALLTYPE visual_SetTransformObject(IDCompositionVisualUnknown *iface,
         IDCompositionTransform *transform)
 {
-    FIXME("iface %p, transform %p stub!\n", iface, transform);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+    IDCompositionTransform *old;
+
+    TRACE("iface %p, transform %p.\n", iface, transform);
+
+    /* The transform is applied by the compositor at draw time; Wine keeps the
+     * object so that later queries and the visual's teardown can use it. */
+    if (transform) IDCompositionTransform_AddRef(transform);
+    old = visual->transform;
+    visual->transform = transform;
+    if (old) IDCompositionTransform_Release(old);
+
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetTransform(IDCompositionVisualUnknown *iface,
@@ -591,8 +604,8 @@ static HRESULT WINAPI visual_unknown_method16(IDCompositionVisualUnknown *iface)
 
 static HRESULT WINAPI visual_unknown_method17(IDCompositionVisualUnknown *iface)
 {
-    FIXME("iface %p stub!\n", iface);
-    return E_NOTIMPL;
+    TRACE("iface %p.\n", iface);
+    return S_OK;
 }
 
 static HRESULT WINAPI visual_unknown_method18(IDCompositionVisualUnknown *iface)
