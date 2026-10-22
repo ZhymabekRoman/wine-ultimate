@@ -14,9 +14,9 @@
 
 2010 stub -noname SlicerControl  # NtUserSlicerControl
 
-2503 stdcall DelegateInput(ptr ptr ptr ptr ptr ptr)  # NtUserDelegateInput
+2503 stdcall -noname DelegateInput(ptr ptr ptr ptr ptr ptr) user32_DelegateInput
 2504 stdcall UndelegateInput(ptr ptr)  # NtUserUndelegateInput
-2505 stub HandleDelegatedInput  # NtUserHandleDelegatedInput
+2505 stdcall -noname HandleDelegatedInput(long long) user32_HandleDelegatedInput
 2506 stub @
 2507 stub -noname SetAutoRotation  # NtUserSetAutoRotation
 2508 stub -noname PromotePointer  # NtUserPromotePointer
@@ -68,7 +68,7 @@
 2554 stub @
 2555 stub @
 2556 stub -noname SetActivationFilter  # NtUserSetActivationFilter
-2557 stub @
+2557 stdcall -noname user32_2557(ptr ptr ptr)
 2558 stub @
 2559 stub -noname GetOwnerTransformedMonitorRect  # NtUserGetOwnerTransformedMonitorRect
 2560 stub @
@@ -85,7 +85,7 @@
 2571 stub SetCoreWindow  # NtUserSetCoreWindow
 2572 stub @
 2573 stub @
-2574 stub @
+2574 stdcall @(ptr ptr ptr ptr) user32_2574
 2575 stub @
 2576 stub -noname SetCoreWindowPartner  # NtUserSetCoreWindowPartner
 
@@ -400,7 +400,7 @@
 @ stdcall DestroyMenu(long) NtUserDestroyMenu
 # @ stub DestroyReasons
 # @ stub DestroySyntheticPointerDevice
-@ stdcall DestroyWindow(long) NtUserDestroyWindow
+@ stdcall DestroyWindow(long)
 @ stdcall DialogBoxIndirectParamA(long ptr long ptr long)
 @ stdcall DialogBoxIndirectParamAorW(long ptr long ptr long long)
 @ stdcall DialogBoxIndirectParamW(long ptr long ptr long)
@@ -696,7 +696,7 @@
 @ stdcall GetUserObjectSecurity(long ptr ptr long ptr)
 # @ stub GetWinStationInfo
 @ stdcall GetWindow(long long)
-# @ stub GetWindowBand
+@ stdcall GetWindowBand(long ptr)
 # @ stub GetWindowCompositionAttribute
 # @ stub GetWindowCompositionInfo
 @ stdcall GetWindowContextHelpId(long) NtUserGetWindowContextHelpId
@@ -804,7 +804,7 @@
 @ stdcall IsWindow(long)
 @ stdcall IsWindowArranged(long)
 @ stdcall IsWindowEnabled(long)
-# @ stub IsWindowInDestroy
+@ stdcall IsWindowInDestroy(long)
 @ stdcall IsWindowRedirectedForPrint(long)
 @ stdcall IsWindowUnicode(long)
 @ stdcall IsWindowVisible(long)

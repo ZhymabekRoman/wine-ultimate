@@ -117,6 +117,8 @@ WRAP_FUNC( NtUserDeferWindowPosAndBand, /* UINT, UINT */
 
 static void stub_syscall( const char *name )
 {
+    fprintf( stderr, "STUB SYSCALL CALLED: %s\n", name );
+    fflush( stderr );
     CONTEXT context = { .ContextFlags = CONTEXT_FULL };
     EXCEPTION_RECORD rec =
     {
@@ -139,6 +141,57 @@ static void stub_syscall( const char *name )
 
 #define SYSCALL_STUB(name) static void name(void) { stub_syscall( #name ); }
 ALL_SYSCALL_STUBS
+
+static NTSTATUS NtCreateCompositionInputSink( const void *desc, HANDLE *sink_handle )
+{
+    if (!sink_handle) return STATUS_INVALID_PARAMETER;
+    *sink_handle = (HANDLE)0x10001;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NtCreateImplicitCompositionInputSink( HWND hwnd, HANDLE *sink_handle )
+{
+    if (!sink_handle) return STATUS_INVALID_PARAMETER;
+    *sink_handle = (HANDLE)0x10001;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NtCloseCompositionInputSink( HANDLE handle )
+{
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NtDuplicateCompositionInputSink( HANDLE handle, HANDLE *out )
+{
+    if (out) *out = handle ? handle : (HANDLE)0x10001;
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NtQueryCompositionInputQueueAndTransform( HANDLE handle, void *out, void *transform )
+{
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NtQueryCompositionInputSink( HANDLE handle, void *out )
+{
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NtQueryCompositionInputSinkLuid( HANDLE handle, LUID *luid )
+{
+    if (luid)
+    {
+        luid->LowPart = 0x1234;
+        luid->HighPart = 0;
+    }
+    return STATUS_SUCCESS;
+}
+
+static NTSTATUS NtQueryCompositionInputSinkViewId( HANDLE handle, UINT32 *view_id )
+{
+    if (view_id) *view_id = 1;
+    return STATUS_SUCCESS;
+}
 
 static ULONG_PTR syscalls[] =
 {

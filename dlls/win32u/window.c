@@ -4059,7 +4059,7 @@ BOOL WINAPI NtUserSetWindowPos( HWND hwnd, HWND after, INT x, INT y, INT cx, INT
 {
     WINDOWPOS winpos;
 
-    TRACE( "hwnd %p, after %p, %d,%d (%dx%d), flags %08x\n", hwnd, after, x, y, cx, cy, flags );
+    ERR( "SWP: hwnd %p, after %p, %d,%d (%dx%d), flags %08x\n", hwnd, after, x, y, cx, cy, flags );
     if(TRACE_ON(win)) dump_winpos_flags(flags);
 
     if (is_broadcast( hwnd ))
@@ -5354,6 +5354,8 @@ static BOOL user_destroy_window( HWND hwnd, BOOL winevent )
 {
     BOOL is_child;
 
+    ERR( "user_destroy_window hwnd %p called by %p\n", hwnd, __builtin_return_address(0) );
+
     if (!(hwnd = is_current_thread_window( hwnd )) || is_desktop_window( hwnd ))
     {
         RtlSetLastWin32Error( ERROR_ACCESS_DENIED );
@@ -5701,10 +5703,8 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     RECT surface_rect;
     WND *win;
 
-    TRACE( "ex_style %#x, class_name %s, version %s, window_name %s, style %#x, x %u, y %u, cx %u, cy %u, "
-           "parent %p, menu %p, class_instance %p, params %p, flags %#x, instance %p, class %s, ansi %u\n",
-           ex_style, debugstr_us(class_name), debugstr_us(version), debugstr_us(window_name), style, x, y, cx, cy,
-           parent, menu, class_instance, params, flags, instance, debugstr_w(class), ansi );
+    ERR( "CreateWindowEx: class %s, window %s, parent %p, style %#x\n",
+         debugstr_us(class_name), debugstr_us(window_name), parent, style );
 
     cs.lpCreateParams = params;
     cs.hInstance  = instance ? instance : class_instance;
@@ -5995,7 +5995,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     if (!(get_window_long( hwnd, GWL_STYLE ) & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ))
         call_hooks( WH_SHELL, HSHELL_WINDOWCREATED, (WPARAM)hwnd, 0, 0 );
 
-    TRACE( "created window %p\n", hwnd );
+    ERR( "created window %p\n", hwnd );
     set_thread_dpi_awareness_context( context );
 
     toplevel = NtUserGetAncestor( hwnd, GA_ROOT );

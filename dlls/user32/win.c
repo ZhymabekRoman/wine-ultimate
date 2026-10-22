@@ -1190,7 +1190,24 @@ BOOL WINAPI IsWindow( HWND hwnd )
  */
 DWORD WINAPI GetWindowThreadProcessId( HWND hwnd, LPDWORD process )
 {
-    return NtUserGetWindowThread( hwnd, process );
+    DWORD proc_id = 0;
+    DWORD tid;
+
+    if (!hwnd)
+    {
+        if (process) *process = GetCurrentProcessId();
+        return GetCurrentThreadId();
+    }
+
+    tid = NtUserGetWindowThread( hwnd, &proc_id );
+    if (process) *process = proc_id;
+
+    if (proc_id == GetCurrentProcessId())
+    {
+        return GetCurrentThreadId();
+    }
+
+    return tid;
 }
 
 
@@ -1228,6 +1245,16 @@ BOOL WINAPI IsWindowArranged( HWND hwnd )
 {
     FIXME( "hwnd %p stub.\n", hwnd );
 
+    return FALSE;
+}
+
+
+/*******************************************************************
+ *		IsWindowInDestroy (USER32.@)
+ */
+BOOL WINAPI IsWindowInDestroy( HWND hwnd )
+{
+    TRACE( "hwnd %p\n", hwnd );
     return FALSE;
 }
 
@@ -1812,3 +1839,70 @@ WORD WINAPI TileChildWindows( HWND parent, UINT flags )
 {
     return TileWindows( parent, flags, NULL, 0, NULL );
 }
+
+/**********************************************************************
+ *              DestroyWindow (USER32.@)
+ */
+BOOL WINAPI DestroyWindow( HWND hwnd )
+{
+    void *frames[16];
+    USHORT n = RtlCaptureStackBackTrace( 0, 16, frames, NULL );
+    USHORT i;
+    ERR( "DestroyWindow hwnd %p called by %p\n", hwnd, n > 1 ? frames[1] : NULL );
+    for (i = 0; i < n; i++)
+        ERR( "  destroy_wnd_bt[%u] = %p\n", i, frames[i] );
+    return NtUserDestroyWindow( hwnd );
+}
+
+/**********************************************************************
+ *              user32_2574 (USER32.2574)
+ */
+void * WINAPI user32_2574( void *a, void *b, void *c, void *d )
+{
+    void *frames[16];
+    USHORT n = RtlCaptureStackBackTrace( 0, 16, frames, NULL );
+    USHORT i;
+    ERR( "user32_2574 called: a %p, b %p, c %p, d %p\n", a, b, c, d );
+    for (i = 0; i < n; i++)
+        ERR( "  user32_2574_bt[%u] = %p\n", i, frames[i] );
+    return NULL;
+}
+
+/**********************************************************************
+ *              user32_2557 (USER32.2557)
+ */
+void * WINAPI user32_2557( void *a, void *b, void *c )
+{
+    TRACE( "user32_2557 called: a %p, b %p, c %p\n", a, b, c );
+    return NULL;
+}
+
+/**********************************************************************
+ *              GetWindowBand (USER32.@)
+ */
+BOOL WINAPI GetWindowBand( HWND hwnd, DWORD *pdwBand )
+{
+    TRACE( "hwnd %p, pdwBand %p\n", hwnd, pdwBand );
+    if (!pdwBand) return FALSE;
+    *pdwBand = 0; /* ZBI_DEFAULT */
+    return TRUE;
+}
+
+/**********************************************************************
+ *              user32_DelegateInput (USER32.2503)
+ */
+BOOL WINAPI user32_DelegateInput( HWND hwnd, void *b, void *c, void *d, void *e, void *f )
+{
+    TRACE( "hwnd %p, b %p, c %p, d %p, e %p, f %p\n", hwnd, b, c, d, e, f );
+    return TRUE;
+}
+
+/**********************************************************************
+ *              user32_HandleDelegatedInput (USER32.2505)
+ */
+BOOL WINAPI user32_HandleDelegatedInput( HWND hwnd, UINT flags )
+{
+    TRACE( "hwnd %p, flags %#x\n", hwnd, flags );
+    return TRUE;
+}
+

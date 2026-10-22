@@ -1104,7 +1104,7 @@ void free_dce( struct dce *dce, HWND hwnd, struct list *drawables )
                 WARN( "GetDC() without ReleaseDC() for window %p\n", hwnd );
                 dce->count = 0;
                 set_dc_pixel_format_internal( dce->hdc, 0, drawables );
-                set_dce_flags( dce->hdc, DCHF_DISABLEDC );
+                /* do not disable DC for active window */
             }
         }
     }

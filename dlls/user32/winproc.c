@@ -104,8 +104,15 @@ static LRESULT call_window_proc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRES
 {
     WNDPROC proc = arg;
 
-    TRACE_(relay)( "\1Call window proc %p (hwnd=%p,msg=%s,wp=%08Ix,lp=%08Ix)\n",
-                   proc, hwnd, SPY_GetMsgName(msg, hwnd), wp, lp );
+    ERR( "Call winproc %p hwnd %p msg 0x%04x wp %Ix lp %Ix\n", proc, hwnd, msg, wp, lp );
+
+    if (msg == 0x0401)
+    {
+        HMODULE twin = GetModuleHandleW( L"twinapi.appcore.dll" );
+        void (WINAPI *pTrigger)(void) = twin ? (void *)GetProcAddress( twin, "TriggerAppActivation" ) : NULL;
+        ERR( "USER32: Intercepted 0x0401 on UI thread %lu, pTrigger %p\n", GetCurrentThreadId(), pTrigger );
+        if (pTrigger) pTrigger();
+    }
 
     *result = WINPROC_wrapper( proc, hwnd, msg, wp, lp );
 
