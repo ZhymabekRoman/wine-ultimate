@@ -31,3 +31,4 @@ Fixes: [WinUI3] Implement ICoreApplication, CoreWindow, DispatcherQueue and UWP 
 0043-twinapi-coremessaging-Fix-IReferenceTracker-QI-and-remaining-WebView2-blockers.patch
 0044-twinapi-windows.ui-windows.media-Answer-IAgileObject-on-WinRT-activation-factories.patch
 0045-combase-Remove-hardcoded-binary-offset-hacks.patch
+0046-windows.ui-Return-E_NOINTERFACE-from-WinRT-activation-factories-and-implement-windowing-internal-ids.patch
