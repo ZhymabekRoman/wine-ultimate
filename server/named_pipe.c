@@ -1397,7 +1397,7 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
             if (client->client_proc->token)
             {
                 if (!(token = token_duplicate( client->client_proc->token, 0, SecurityImpersonation,
-                                               NULL, NULL, 0, NULL, 0 )))
+                                               NULL, NULL, 0, NULL, 0, 0 )))
                     return;
                 if (current->token) release_object( current->token );
                 current->token = token;

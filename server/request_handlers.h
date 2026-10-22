@@ -321,6 +321,9 @@ DECL_HANDLER(disconnect_alpc_port);
 DECL_HANDLER(create_wait_completion_packet);
 DECL_HANDLER(associate_wait_completion_packet);
 DECL_HANDLER(cancel_wait_completion_packet);
+DECL_HANDLER(dcomp_create_shared_visual);
+DECL_HANDLER(dcomp_set_shared_visual_info);
+DECL_HANDLER(dcomp_get_shared_visual_info);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -639,6 +642,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_create_wait_completion_packet,
     (req_handler)req_associate_wait_completion_packet,
     (req_handler)req_cancel_wait_completion_packet,
+    (req_handler)req_dcomp_create_shared_visual,
+    (req_handler)req_dcomp_set_shared_visual_info,
+    (req_handler)req_dcomp_get_shared_visual_info,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2306,7 +2312,8 @@ C_ASSERT( offsetof(struct get_job_info_request, handle) == 12 );
 C_ASSERT( sizeof(struct get_job_info_request) == 16 );
 C_ASSERT( offsetof(struct get_job_info_reply, total_processes) == 8 );
 C_ASSERT( offsetof(struct get_job_info_reply, active_processes) == 12 );
-C_ASSERT( sizeof(struct get_job_info_reply) == 16 );
+C_ASSERT( offsetof(struct get_job_info_reply, limit_flags) == 16 );
+C_ASSERT( sizeof(struct get_job_info_reply) == 24 );
 C_ASSERT( offsetof(struct terminate_job_request, handle) == 12 );
 C_ASSERT( offsetof(struct terminate_job_request, status) == 16 );
 C_ASSERT( sizeof(struct terminate_job_request) == 24 );
@@ -2436,3 +2443,13 @@ C_ASSERT( offsetof(struct cancel_wait_completion_packet_request, remove_signaled
 C_ASSERT( sizeof(struct cancel_wait_completion_packet_request) == 24 );
 C_ASSERT( offsetof(struct cancel_wait_completion_packet_reply, cancelled) == 8 );
 C_ASSERT( sizeof(struct cancel_wait_completion_packet_reply) == 16 );
+C_ASSERT( sizeof(struct dcomp_create_shared_visual_request) == 16 );
+C_ASSERT( offsetof(struct dcomp_create_shared_visual_reply, handle) == 8 );
+C_ASSERT( sizeof(struct dcomp_create_shared_visual_reply) == 16 );
+C_ASSERT( offsetof(struct dcomp_set_shared_visual_info_request, handle) == 12 );
+C_ASSERT( offsetof(struct dcomp_set_shared_visual_info_request, target_root) == 16 );
+C_ASSERT( sizeof(struct dcomp_set_shared_visual_info_request) == 24 );
+C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_request, handle) == 12 );
+C_ASSERT( sizeof(struct dcomp_get_shared_visual_info_request) == 16 );
+C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, target_root) == 8 );
+C_ASSERT( sizeof(struct dcomp_get_shared_visual_info_reply) == 16 );

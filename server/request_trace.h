@@ -3341,6 +3341,7 @@ static void dump_get_job_info_reply( const struct get_job_info_reply *req )
 {
     fprintf( stderr, " total_processes=%d", req->total_processes );
     fprintf( stderr, ", active_processes=%d", req->active_processes );
+    fprintf( stderr, ", limit_flags=%08x", req->limit_flags );
     dump_varargs_uints( ", pids=", cur_size );
 }
 
@@ -3602,6 +3603,31 @@ static void dump_cancel_wait_completion_packet_request( const struct cancel_wait
 static void dump_cancel_wait_completion_packet_reply( const struct cancel_wait_completion_packet_reply *req )
 {
     fprintf( stderr, " cancelled=%d", req->cancelled );
+}
+
+static void dump_dcomp_create_shared_visual_request( const struct dcomp_create_shared_visual_request *req )
+{
+}
+
+static void dump_dcomp_create_shared_visual_reply( const struct dcomp_create_shared_visual_reply *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_dcomp_set_shared_visual_info_request( const struct dcomp_set_shared_visual_info_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    dump_uint64( ", target_root=", &req->target_root );
+}
+
+static void dump_dcomp_get_shared_visual_info_request( const struct dcomp_get_shared_visual_info_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_dcomp_get_shared_visual_info_reply( const struct dcomp_get_shared_visual_info_reply *req )
+{
+    dump_uint64( " target_root=", &req->target_root );
 }
 
 typedef void (*dump_func)( const void *req );
@@ -3922,6 +3948,9 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_create_wait_completion_packet_request,
     (dump_func)dump_associate_wait_completion_packet_request,
     (dump_func)dump_cancel_wait_completion_packet_request,
+    (dump_func)dump_dcomp_create_shared_visual_request,
+    (dump_func)dump_dcomp_set_shared_visual_info_request,
+    (dump_func)dump_dcomp_get_shared_visual_info_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4240,6 +4269,9 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_create_wait_completion_packet_reply,
     (dump_func)dump_associate_wait_completion_packet_reply,
     (dump_func)dump_cancel_wait_completion_packet_reply,
+    (dump_func)dump_dcomp_create_shared_visual_reply,
+    NULL,
+    (dump_func)dump_dcomp_get_shared_visual_info_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4558,6 +4590,9 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "create_wait_completion_packet",
     "associate_wait_completion_packet",
     "cancel_wait_completion_packet",
+    "dcomp_create_shared_visual",
+    "dcomp_set_shared_visual_info",
+    "dcomp_get_shared_visual_info",
 };
 
 static const struct

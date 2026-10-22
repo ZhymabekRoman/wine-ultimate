@@ -65,6 +65,21 @@ struct alpc_wire_hdr
     unsigned int     client_tid;
     unsigned int     user_size;   /* bytes of user message following */
     client_ptr_t     port_context;
+    unsigned int     attr_flags;
+    unsigned int     view_flags;
+    client_ptr_t     view_base;
+    client_ptr_t     view_size;
+};
+
+#define ALPC_ATTR_HDR_MAGIC 0x41545452 /* 'ATTR' */
+struct alpc_msg_attr_hdr
+{
+    unsigned int     magic;
+    unsigned int     attr_flags;
+    unsigned int     view_flags;
+    unsigned int     pad;
+    client_ptr_t     view_base;
+    client_ptr_t     view_size;
 };
 
 /* A pending (not yet accepted) client connection. */
@@ -331,27 +346,50 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             peer = LIST_ENTRY( head, struct alpc_port, conn_entry );
         }
     }
-    else if (!port->peer)
+    else
     {
-        release_object( iosb );
-        set_error( STATUS_PIPE_DISCONNECTED );
-        return;
+        /* Deliver to peer communication port if a receiver is waiting there,
+         * or to the listening port if the server is receiving all connections there. */
+        if (port->peer && async_waiting( &port->peer->read_q ))
+            peer = port->peer;
+        else if (port->listen_port && async_waiting( &port->listen_port->read_q ))
+            peer = port->listen_port;
+        else if (port->listen_port)
+            peer = port->listen_port;
+        else
+            peer = port->peer;
+
+        if (!peer)
+        {
+            release_object( iosb );
+            set_error( STATUS_PIPE_DISCONNECTED );
+            return;
+        }
     }
-    /* The client side delivers to the server's listening port (where the server
-     * receives all connections' messages); the server side replies to its peer. */
-    else peer = port->listen_port ? port->listen_port : port->peer;
 
     {
         struct alpc_wire_hdr *hdr;
-        data_size_t blob_size = sizeof(*hdr) + iosb->in_size;
+        struct alpc_msg_attr_hdr attr_hdr;
+        const void *user_data = iosb->in_data;
+        data_size_t user_size = iosb->in_size;
+        data_size_t blob_size;
         /* context the receiver sees = the per-connection context.
          * client request: our connection (peer = server side). server reply:
          * the destination client's connection context. */
         client_ptr_t ctx;
-        if (port->is_server)      ctx = peer->port_context;
-        else if (port->listen_port) ctx = port->peer->port_context;
-        else                      ctx = port->port_context;
+        if (port->is_server)        ctx = peer->port_context;
+        else if (port->peer)        ctx = port->peer->port_context;
+        else                        ctx = port->port_context;
 
+        memset( &attr_hdr, 0, sizeof(attr_hdr) );
+        if (user_size >= sizeof(attr_hdr) && *(const unsigned int *)user_data == ALPC_ATTR_HDR_MAGIC)
+        {
+            memcpy( &attr_hdr, user_data, sizeof(attr_hdr) );
+            user_data = (const char *)user_data + sizeof(attr_hdr);
+            user_size -= sizeof(attr_hdr);
+        }
+
+        blob_size = sizeof(*hdr) + user_size;
         if (!(msg = malloc( sizeof(*msg) + blob_size )))
         {
             release_object( iosb );
@@ -371,9 +409,13 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         hdr->msg_id       = msg->msg_id;
         hdr->client_pid   = get_process_id( current->process );
         hdr->client_tid   = get_thread_id( current );
-        hdr->user_size    = iosb->in_size;
+        hdr->user_size    = user_size;
         hdr->port_context = ctx;
-        memcpy( hdr + 1, iosb->in_data, iosb->in_size );
+        hdr->attr_flags   = attr_hdr.attr_flags;
+        hdr->view_flags   = attr_hdr.view_flags;
+        hdr->view_base    = attr_hdr.view_base;
+        hdr->view_size    = attr_hdr.view_size;
+        if (user_size) memcpy( hdr + 1, user_data, user_size );
     }
 
     list_add_tail( &peer->msg_queue, &msg->entry );
@@ -437,6 +479,10 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->client_tid   = pc->client_tid;
     hdr->user_size    = pc->conn_data_size;
     hdr->port_context = 0;
+    hdr->attr_flags   = 0;
+    hdr->view_flags   = 0;
+    hdr->view_base    = 0;
+    hdr->view_size    = 0;
     if (pc->conn_data_size)
         memcpy( hdr + 1, pc->conn_data, pc->conn_data_size );
 

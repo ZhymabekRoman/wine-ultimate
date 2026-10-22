@@ -3466,6 +3466,7 @@ struct create_named_pipe_reply
 #define NAMED_PIPE_MESSAGE_STREAM_WRITE 0x0001
 #define NAMED_PIPE_MESSAGE_STREAM_READ  0x0002
 #define NAMED_PIPE_NONBLOCKING_MODE     0x0004
+#define NAMED_PIPE_FIRST_INSTANCE       0x0008
 #define NAMED_PIPE_SERVER_END           0x8000
 
 
@@ -5920,9 +5921,11 @@ struct get_job_info_request
 struct get_job_info_reply
 {
     struct reply_header __header;
-    int total_processes;
-    int active_processes;
+    int          total_processes;
+    int          active_processes;
+    unsigned int limit_flags;
     /* VARARG(pids,uints); */
+    char __pad_20[4];
 };
 
 
@@ -6255,6 +6258,17 @@ struct disconnect_alpc_port_reply
     struct reply_header __header;
 };
 
+#ifndef __ALPC_DATA_VIEW_ATTR_DEFINED__
+#define __ALPC_DATA_VIEW_ATTR_DEFINED__
+typedef struct _ALPC_DATA_VIEW_ATTR
+{
+    ULONG Flags;
+    HANDLE SectionHandle;
+    PVOID ViewBase;
+    SIZE_T ViewSize;
+} ALPC_DATA_VIEW_ATTR, *PALPC_DATA_VIEW_ATTR;
+#endif
+
 
 
 struct create_wait_completion_packet_request
@@ -6303,6 +6317,46 @@ struct cancel_wait_completion_packet_reply
     struct reply_header __header;
     int                 cancelled;
     char __pad_12[4];
+};
+
+
+
+struct dcomp_create_shared_visual_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+};
+struct dcomp_create_shared_visual_reply
+{
+    struct reply_header __header;
+    obj_handle_t  handle;
+    char __pad_12[4];
+};
+
+
+
+struct dcomp_set_shared_visual_info_request
+{
+    struct request_header __header;
+    obj_handle_t  handle;
+    client_ptr_t  target_root;
+};
+struct dcomp_set_shared_visual_info_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct dcomp_get_shared_visual_info_request
+{
+    struct request_header __header;
+    obj_handle_t  handle;
+};
+struct dcomp_get_shared_visual_info_reply
+{
+    struct reply_header __header;
+    client_ptr_t  target_root;
 };
 
 
@@ -6622,6 +6676,9 @@ enum request
     REQ_create_wait_completion_packet,
     REQ_associate_wait_completion_packet,
     REQ_cancel_wait_completion_packet,
+    REQ_dcomp_create_shared_visual,
+    REQ_dcomp_set_shared_visual_info,
+    REQ_dcomp_get_shared_visual_info,
     REQ_NB_REQUESTS
 };
 
@@ -6943,6 +7000,9 @@ union generic_request
     struct create_wait_completion_packet_request create_wait_completion_packet_request;
     struct associate_wait_completion_packet_request associate_wait_completion_packet_request;
     struct cancel_wait_completion_packet_request cancel_wait_completion_packet_request;
+    struct dcomp_create_shared_visual_request dcomp_create_shared_visual_request;
+    struct dcomp_set_shared_visual_info_request dcomp_set_shared_visual_info_request;
+    struct dcomp_get_shared_visual_info_request dcomp_get_shared_visual_info_request;
 };
 union generic_reply
 {
@@ -7262,8 +7322,11 @@ union generic_reply
     struct create_wait_completion_packet_reply create_wait_completion_packet_reply;
     struct associate_wait_completion_packet_reply associate_wait_completion_packet_reply;
     struct cancel_wait_completion_packet_reply cancel_wait_completion_packet_reply;
+    struct dcomp_create_shared_visual_reply dcomp_create_shared_visual_reply;
+    struct dcomp_set_shared_visual_info_reply dcomp_set_shared_visual_info_reply;
+    struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 946
+#define SERVER_PROTOCOL_VERSION 950
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

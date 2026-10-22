@@ -31,6 +31,7 @@
 
 #include "file.h"
 #include "handle.h"
+#include "process.h"
 #include "request.h"
 #include "security.h"
 
@@ -554,6 +555,21 @@ static void *d3dkmt_object_open( d3dkmt_handle_t global, enum d3dkmt_type type )
     return grab_object( object );
 }
 
+struct find_shared_obj
+{
+    obj_handle_t handle;
+    const struct object_ops *ops;
+    struct object *obj;
+};
+
+static int find_shared_obj_cb( struct process *process, void *user )
+{
+    struct find_shared_obj *fso = user;
+    if ((fso->obj = get_handle_obj( process, fso->handle, 0, fso->ops )))
+        return 1;
+    return 0;
+}
+
 static struct d3dkmt_object *d3dkmt_object_open_shared( obj_handle_t handle, enum d3dkmt_type type )
 {
     struct object *obj, *ret = NULL;
@@ -567,6 +583,43 @@ static struct d3dkmt_object *d3dkmt_object_open_shared( obj_handle_t handle, enu
         release_object( obj );
         if (!ret) set_error( STATUS_INVALID_PARAMETER );
         return (struct d3dkmt_object *)ret;
+    }
+
+    if ((obj = get_handle_obj( current->process, handle, 0, &d3dkmt_object_ops )))
+    {
+        struct d3dkmt_object *d3d_obj = (struct d3dkmt_object *)obj;
+        if (d3d_obj->type == type) return d3d_obj;
+        release_object( obj );
+    }
+
+    /* Fallback: check other processes if handle was passed cross-process without duplication */
+    {
+        struct find_shared_obj fso = { handle, &dxgk_shared_resource_ops, NULL };
+        enum_processes( find_shared_obj_cb, &fso );
+        if (fso.obj)
+        {
+            struct dxgk_shared_resource *shared = (struct dxgk_shared_resource *)fso.obj;
+            if (type == D3DKMT_RESOURCE) ret = grab_object( shared->resource );
+            else if (type == D3DKMT_MUTEX && shared->mutex) ret = grab_object( shared->mutex );
+            else if (type == D3DKMT_SYNC && shared->sync) ret = grab_object( shared->sync );
+            release_object( fso.obj );
+            if (!ret) set_error( STATUS_INVALID_PARAMETER );
+            return (struct d3dkmt_object *)ret;
+        }
+    }
+
+    if (!ret)
+    {
+        struct find_shared_obj fso = { handle, &d3dkmt_object_ops, NULL };
+        enum_processes( find_shared_obj_cb, &fso );
+        if (fso.obj)
+        {
+            struct d3dkmt_object *d3d_obj = (struct d3dkmt_object *)fso.obj;
+            if (d3d_obj->type == type) ret = grab_object( &d3d_obj->obj );
+            release_object( fso.obj );
+            if (!ret) set_error( STATUS_INVALID_PARAMETER );
+            return (struct d3dkmt_object *)ret;
+        }
     }
 
     if (type != D3DKMT_SYNC) return NULL;
@@ -646,8 +699,12 @@ done:
 DECL_HANDLER(d3dkmt_object_query)
 {
     struct d3dkmt_object *object;
+    d3dkmt_handle_t global = req->global;
 
-    if (req->global) object = d3dkmt_object_open( req->global, req->type );
+    if (!global && ((req->handle & 0xc0000000) == D3DKMT_HANDLE_BIT))
+        global = req->handle;
+
+    if (global) object = d3dkmt_object_open( global, req->type );
     else object = d3dkmt_object_open_shared( req->handle, req->type );
     if (!object) return;
 
@@ -661,8 +718,12 @@ DECL_HANDLER(d3dkmt_object_open)
     data_size_t runtime_size = get_reply_max_size();
     struct d3dkmt_object *object;
     obj_handle_t handle;
+    d3dkmt_handle_t global = req->global;
 
-    if (req->global) object = d3dkmt_object_open( req->global, req->type );
+    if (!global && ((req->handle & 0xc0000000) == D3DKMT_HANDLE_BIT))
+        global = req->handle;
+
+    if (global) object = d3dkmt_object_open( global, req->type );
     else object = d3dkmt_object_open_shared( req->handle, req->type );
     if (!object) return;
 
@@ -790,4 +851,141 @@ DECL_HANDLER(d3dkmt_mutex_release)
     }
 
     release_object( mutex );
+}
+
+#define COMPOSITION_QUERY_STATE  0x1
+#define COMPOSITION_MODIFY_STATE 0x2
+
+static const WCHAR composition_name[] = {'C','o','m','p','o','s','i','t','i','o','n',0};
+
+struct type_descr composition_type =
+{
+    { composition_name, sizeof(composition_name) },                     /* name */
+    COMPOSITION_QUERY_STATE,                                            /* valid_access */
+    {                                                                   /* mapping */
+        STANDARD_RIGHTS_READ | COMPOSITION_QUERY_STATE,
+        STANDARD_RIGHTS_READ | COMPOSITION_MODIFY_STATE,
+        STANDARD_RIGHTS_READ,
+        STANDARD_RIGHTS_REQUIRED | COMPOSITION_QUERY_STATE | COMPOSITION_MODIFY_STATE,
+    },
+};
+
+struct composition
+{
+    struct object obj;                      /* object header */
+    struct process *process;                /* owner process */
+    struct process *target_process;         /* process that set target_root */
+    client_ptr_t target_root;               /* root IDCompositionVisual pointer for the target created from this shared visual */
+};
+
+static void composition_dump( struct object *obj, int verbose );
+static void composition_destroy( struct object *obj );
+
+static const struct object_ops composition_ops =
+{
+    sizeof(struct composition),             /* size */
+    &composition_type,                      /* type */
+    composition_dump,                       /* dump */
+    no_add_queue,                           /* add_queue */
+    NULL,                                   /* remove_queue */
+    NULL,                                   /* signaled */
+    NULL,                                   /* satisfied */
+    no_signal,                              /* signal */
+    no_get_fd,                              /* get_fd */
+    default_get_sync,                       /* get_sync */
+    default_map_access,                     /* map_access */
+    default_get_sd,                         /* get_sd */
+    default_set_sd,                         /* set_sd */
+    default_get_full_name,                  /* get_full_name */
+    no_lookup_name,                         /* lookup_name */
+    directory_link_name,                    /* link_name */
+    default_unlink_name,                    /* unlink_name */
+    no_open_file,                           /* open_file */
+    no_kernel_obj_list,                     /* get_kernel_obj_list */
+    no_close_handle,                        /* close_handle */
+    composition_destroy,                    /* destroy */
+};
+
+static void composition_dump( struct object *obj, int verbose )
+{
+    assert( obj->ops == &composition_ops );
+    fprintf( stderr, "Compositon\n" );
+}
+
+static void composition_destroy( struct object *obj )
+{
+    struct composition *composition = (struct composition *)obj;
+
+    if (composition->target_process) release_object( composition->target_process );
+    release_object( composition->process );
+}
+
+static struct composition *get_composition_obj( struct process *process, obj_handle_t handle, unsigned int access )
+{
+    struct find_shared_obj fso = { handle, &composition_ops, NULL };
+    struct object *obj;
+
+    if ((obj = get_handle_obj( process, handle, access, &composition_ops )))
+        return (struct composition *)obj;
+
+    enum_processes( find_shared_obj_cb, &fso );
+    return (struct composition *)fso.obj;
+}
+
+static struct composition *create_composition(void)
+{
+    struct composition *composition;
+
+    if ((composition = alloc_object( &composition_ops )))
+    {
+        composition->target_root = 0;
+        composition->target_process = NULL;
+        composition->process = (struct process *)grab_object( current->process );
+    }
+
+    return composition;
+}
+
+/* Create a DirectComposition shared visual handle */
+DECL_HANDLER(dcomp_create_shared_visual)
+{
+    struct composition *composition;
+
+    if ((composition = create_composition()))
+    {
+        reply->handle = alloc_handle_no_access_check( current->process, composition, 0, 0 );
+        release_object( composition );
+    }
+}
+
+
+/* Set info for a DirectComposition shared visual object */
+DECL_HANDLER(dcomp_set_shared_visual_info)
+{
+    struct composition *composition;
+
+    composition = get_composition_obj( current->process, req->handle, 0);
+    if (!composition) return;
+
+    if (composition->target_process) release_object( composition->target_process );
+    composition->target_process = (struct process *)grab_object( current->process );
+    composition->target_root = req->target_root;
+    release_object( composition );
+}
+
+
+/* Get info for a DirectComposition shared visual */
+DECL_HANDLER(dcomp_get_shared_visual_info)
+{
+    struct composition *composition;
+
+    composition = get_composition_obj( current->process, req->handle, 0);
+    if (!composition) return;
+
+    if (composition->target_process && composition->target_process == current->process)
+        reply->target_root = composition->target_root;
+    else
+        reply->target_root = 0;
+
+    release_object( composition );
 }

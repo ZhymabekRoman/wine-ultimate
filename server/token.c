@@ -575,7 +575,8 @@ static int filter_privilege( struct privilege *privilege, const struct luid_attr
 struct token *token_duplicate( struct token *src_token, unsigned primary,
                                int impersonation_level, const struct security_descriptor *sd,
                                const struct luid_attr *remove_privs, unsigned int remove_priv_count,
-                               const struct sid *remove_groups, unsigned int remove_group_count)
+                               const struct sid *remove_groups, unsigned int remove_group_count,
+                               unsigned int filter_flags )
 {
     const struct luid *modified_id =
         primary || (impersonation_level == src_token->impersonation_level) ?
@@ -627,7 +628,12 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
     /* copy privileges */
     LIST_FOR_EACH_ENTRY( privilege, &src_token->privileges, struct privilege, entry )
     {
-        if (filter_privilege( privilege, remove_privs, remove_priv_count )) continue;
+        if (filter_flags & DISABLE_MAX_PRIVILEGE)
+        {
+            if (!is_equal_luid( privilege->luid, SeChangeNotifyPrivilege )) continue;
+        }
+        else if (filter_privilege( privilege, remove_privs, remove_priv_count )) continue;
+
         if (!privilege_add( token, privilege->luid, privilege->enabled ))
         {
             release_object( token );
@@ -1334,7 +1340,7 @@ DECL_HANDLER(duplicate_token)
                                                      TOKEN_DUPLICATE,
                                                      &token_ops )))
     {
-        struct token *token = token_duplicate( src_token, req->primary, req->impersonation_level, sd, NULL, 0, NULL, 0 );
+        struct token *token = token_duplicate( src_token, req->primary, req->impersonation_level, sd, NULL, 0, NULL, 0, 0 );
         if (token)
         {
             unsigned int access = req->access ? req->access : get_handle_access( current->process, req->handle );
@@ -1362,7 +1368,7 @@ DECL_HANDLER(filter_token)
         group_count = get_sid_count( filter_groups, get_req_data_size() - priv_count * sizeof(struct luid_attr) );
 
         token = token_duplicate( src_token, src_token->primary, src_token->impersonation_level, NULL,
-                                 filter_privileges, priv_count, filter_groups, group_count );
+                                 filter_privileges, priv_count, filter_groups, group_count, req->flags );
         if (token)
         {
             unsigned int access = get_handle_access( current->process, req->handle );

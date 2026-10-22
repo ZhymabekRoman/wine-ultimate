@@ -749,7 +749,7 @@ struct process *create_process( int fd, struct process *parent, unsigned int fla
             process->handles = alloc_handle_table( process, 0 );
         /* Note: for security reasons, starting a new process does not attempt
          * to use the current impersonation token for the new process */
-        process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0 );
+        process->token = token_duplicate( token ? token : parent->token, TRUE, 0, NULL, NULL, 0, NULL, 0, 0 );
         process->affinity = parent->affinity;
     }
     if (!process->handles || !process->token) goto error;
@@ -1959,6 +1959,7 @@ DECL_HANDLER(get_job_info)
 
     reply->total_processes = job->total_processes;
     reply->active_processes = job->num_processes;
+    reply->limit_flags = job->limit_flags;
 
     len = min( get_reply_max_size(), reply->active_processes * sizeof(*pids) );
     if (len && ((pids = set_reply_data_size( len ))))
