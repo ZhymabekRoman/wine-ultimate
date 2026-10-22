@@ -46,5 +46,5 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_AddRef((*factory = synthesizer_factory));
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return E_NOINTERFACE;
 }

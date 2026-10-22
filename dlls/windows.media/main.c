@@ -52,5 +52,5 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_QueryInterface( audio_graph_settings_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return E_NOINTERFACE;
 }
