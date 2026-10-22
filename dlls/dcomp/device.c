@@ -2873,7 +2873,7 @@ HRESULT WINAPI DCompositionCreateDevice2(IUnknown *rendering_device, REFIID iid,
 
 HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid, void **device)
 {
-    FIXME("%p, %s, %p.\n", rendering_device, debugstr_guid(iid), device);
+    TRACE("DCOMP: DCompositionCreateDevice3 rendering_device %p, iid %s, device %p\n", rendering_device, debugstr_guid(iid), device);
 
     if (!IsEqualIID(iid, &IID_IUnknown)
             && !IsEqualIID(iid, &IID_IDCompositionDevice)

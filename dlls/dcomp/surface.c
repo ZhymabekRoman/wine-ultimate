@@ -28,6 +28,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
 static HRESULT STDMETHODCALLTYPE surface_QueryInterface(IDCompositionSurfaceUnknown *iface, REFIID iid, void **out)
 {
+    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
+
     TRACE("iface %p, iid %s, out %p!\n", iface, debugstr_guid(iid), out);
 
     if (IsEqualGUID(iid, &IID_IUnknown)
@@ -37,6 +39,22 @@ static HRESULT STDMETHODCALLTYPE surface_QueryInterface(IDCompositionSurfaceUnkn
         IUnknown_AddRef(iface);
         *out = iface;
         return S_OK;
+    }
+
+    /*
+     * A composition surface that is backed by a physical surface exposes that
+     * surface through the query interface, so that a caller which got the surface
+     * from the compositor can reach the DXGI object underneath it (BeginDraw with
+     * IID_ID2D1Surface and the IDXGISurface path both rely on this).
+     */
+    if (surface->physical_surface
+            && (IsEqualGUID(iid, &IID_IDXGISurface) || IsEqualGUID(iid, &IID_IDXGISurface1)
+                || IsEqualGUID(iid, &IID_IDXGISurface2)))
+    {
+        HRESULT hr = IUnknown_QueryInterface(surface->physical_surface, iid, out);
+
+        if (SUCCEEDED(hr))
+            return hr;
     }
 
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
