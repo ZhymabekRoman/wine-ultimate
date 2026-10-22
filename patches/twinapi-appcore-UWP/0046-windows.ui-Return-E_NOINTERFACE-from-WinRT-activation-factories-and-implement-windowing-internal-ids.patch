@@ -84,22 +84,31 @@ DllGetActivationFactory() for a class the module does not implement, such as
 Microsoft.UI.Windowing.AppWindowTitleBar, must return E_NOINTERFACE with a NULL
 factory.  It passes on x86_64 and i386.
 
-Measured on WhatsApp Desktop 2.2620.102.0 in this prefix, 120 s runs, same tree
-built both ways: the app reaches the same point in both, the log volume and the
-combase error count are identical (734 lines, 240 combase errors, 7 CLASS_E
-originations, 10 HybridDialog string lookups, WebView2Loader.dll never loaded,
-no msedgewebview2.exe process).  The AppWindowTitleBar failure that remains in
-the app does not come from this layer: the trace-pinned origin
-Microsoft.UI.Windowing.dll!Api::IAppWindow::ExportAdapter::get_TitleBar+0x1ec45
-calls the managed peer's interface dispatcher directly (System::Object::GetInterfaceDispatcher,
-then dispatcher vtable slot 10) and never enters RoGetActivationFactory, so no
-activation-factory change on the Wine side can reach it.  The remaining blocker
-is the Windows App SDK windowing/title-bar implementation and the Windows.UI.
-Composition layer behind it (Windows.UI.Composition.Compositor has no registry
-entry and no implementation here, and Microsoft.UI.Windowing.Core.dll
-dereferences the uninitialised member at +0x250 at Core.dll+0x38783 when the
-title bar object is used).
+Measured on WhatsApp Desktop 2.2620.102.0 in this prefix, 120 s runs, the same
+tree built both ways, two runs per side, every run of a side identical:
 
+                                          baseline        after
+  0x80040111 originations                     7             3
+    AppWindowTitleBar COMException origin      4             0
+  HybridDialog string lookups                  10            5
+  combase errors                              240          110
+  .NET fatal / access violation                 0            1
+  WebView2Loader.dll loads                      0            0
+  msedgewebview2.exe processes                  0            0
+
+The AppWindowTitleBar CLASS_E_CLASSNOTAVAILABLE and the .NET COMException built
+from it are gone; what is left of the 0x80040111 count is the app's own
+WhatsAppNative.MiscCpp / Sqlite / Voip.VoipFactory origination channel.  The app
+then reaches the next gap and aborts in
+Microsoft.UI.Xaml.Window.set_ExtendsContentIntoTitleBar ->
+Microsoft.UI.Windowing.Core.dll+0x38783, where the title bar object loads its
+member at +0x250 ("movq 0x250(%rcx), %rcx", then "movq (%rcx), %rax") and that
+member is null, because the composition layer that fills it does not exist
+here: RoGetActivationFactory reports "Failed to find library for
+L"Windows.UI.Composition.Compositor" - no registry entry and no implementation.
+WebView2Loader.dll is still not loaded and msedgewebview2.exe is still not
+spawned; Windows.UI.Composition over the existing dcomp engine is the next
+prerequisite, not the activation contract.
 ---
  dlls/appxdeploymentclient/main.c                   |    2 
  dlls/coremessaging/main.c                          |    2 
