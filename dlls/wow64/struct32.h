@@ -823,6 +823,7 @@ typedef struct
     ULONG ViewBase;
     ULONG ViewSize;
 } ALPC_VIEW_ATTR32, *PALPC_VIEW_ATTR32;
+typedef ALPC_VIEW_ATTR32 ALPC_DATA_VIEW_ATTR32, *PALPC_DATA_VIEW_ATTR32;
 
 typedef struct
 {

@@ -570,6 +570,84 @@ NTSTATUS WINAPI wow64_NtAlpcCreatePort( UINT *args )
 }
 
 /**********************************************************************
+ *           wow64_NtAlpcCreatePortSection
+ */
+NTSTATUS WINAPI wow64_NtAlpcCreatePortSection( UINT *args )
+{
+    HANDLE port = get_handle( &args );
+    ULONG flags = get_ulong( &args );
+    HANDLE section = get_handle( &args );
+    SIZE_T size = get_ulong( &args );
+    ULONG *alpc_section_ptr = get_ptr( &args );
+    ULONG *actual_size_ptr = get_ptr( &args );
+    HANDLE alpc_section = 0;
+    SIZE_T actual_size = 0;
+    NTSTATUS status;
+
+    status = NtAlpcCreatePortSection( port, flags, section, size,
+                                      alpc_section_ptr ? &alpc_section : NULL,
+                                      actual_size_ptr ? &actual_size : NULL );
+    if (!status)
+    {
+        if (alpc_section_ptr) put_handle( alpc_section_ptr, alpc_section );
+        if (actual_size_ptr) *actual_size_ptr = actual_size;
+    }
+    return status;
+}
+
+/**********************************************************************
+ *           wow64_NtAlpcCreateSectionView
+ */
+NTSTATUS WINAPI wow64_NtAlpcCreateSectionView( UINT *args )
+{
+    HANDLE port = get_handle( &args );
+    ULONG flags = get_ulong( &args );
+    ALPC_DATA_VIEW_ATTR32 *view32 = get_ptr( &args );
+    ALPC_DATA_VIEW_ATTR view;
+    NTSTATUS status;
+
+    if (!view32) return STATUS_INVALID_PARAMETER;
+    view.Flags = view32->Flags;
+    view.SectionHandle = LongToHandle( view32->SectionHandle );
+    view.ViewBase = UlongToPtr( view32->ViewBase );
+    view.ViewSize = view32->ViewSize;
+
+    status = NtAlpcCreateSectionView( port, flags, &view );
+    if (!status)
+    {
+        view32->Flags = view.Flags;
+        view32->SectionHandle = HandleToLong( view.SectionHandle );
+        view32->ViewBase = PtrToUlong( view.ViewBase );
+        view32->ViewSize = view.ViewSize;
+    }
+    return status;
+}
+
+/**********************************************************************
+ *           wow64_NtAlpcDeletePortSection
+ */
+NTSTATUS WINAPI wow64_NtAlpcDeletePortSection( UINT *args )
+{
+    HANDLE port = get_handle( &args );
+    ULONG flags = get_ulong( &args );
+    HANDLE section = get_handle( &args );
+
+    return NtAlpcDeletePortSection( port, flags, section );
+}
+
+/**********************************************************************
+ *           wow64_NtAlpcDeleteSectionView
+ */
+NTSTATUS WINAPI wow64_NtAlpcDeleteSectionView( UINT *args )
+{
+    HANDLE port = get_handle( &args );
+    ULONG flags = get_ulong( &args );
+    void *view_base = get_ptr( &args );
+
+    return NtAlpcDeleteSectionView( port, flags, view_base );
+}
+
+/**********************************************************************
  *           wow64_NtAlpcDisconnectPort
  */
 NTSTATUS WINAPI wow64_NtAlpcDisconnectPort( UINT *args )
@@ -592,6 +670,19 @@ NTSTATUS WINAPI wow64_NtAlpcImpersonateClientOfPort( UINT *args )
     ALPC_PORT_MESSAGE *msg;
 
     return NtAlpcImpersonateClientOfPort( handle, alpc_port_message_32to64( &msg, msg32 ? (sizeof(*msg) + msg32->DataLength) : 0, msg32, TRUE ), reserved );
+}
+
+/**********************************************************************
+ *           wow64_NtAlpcSetInformation
+ */
+NTSTATUS WINAPI wow64_NtAlpcSetInformation( UINT *args )
+{
+    HANDLE handle = get_handle( &args );
+    ULONG class = get_ulong( &args );
+    void *buffer = get_ptr( &args );
+    ULONG length = get_ulong( &args );
+
+    return NtAlpcSetInformation( handle, class, buffer, length );
 }
 
 /**********************************************************************
@@ -629,6 +720,21 @@ NTSTATUS WINAPI wow64_NtAlpcSendWaitReceivePort( UINT *args )
         put_size( size32, size - (sizeof(ALPC_PORT_MESSAGE) - sizeof(ALPC_PORT_MESSAGE32)) );
     }
     return status;
+}
+
+
+/**********************************************************************
+ *           wow64_NtAlpcQueryInformation
+ */
+NTSTATUS WINAPI wow64_NtAlpcQueryInformation( UINT *args )
+{
+    HANDLE handle = get_handle( &args );
+    ULONG class = get_ulong( &args );
+    void *buffer = get_ptr( &args );
+    ULONG length = get_ulong( &args );
+    ULONG *ret_length = get_ptr( &args );
+
+    return NtAlpcQueryInformation( handle, class, buffer, length, ret_length );
 }
 
 /***********************************************************************

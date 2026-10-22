@@ -5165,3 +5165,59 @@ NTSTATUS WINAPI wow64_NtUserDisplayConfigGetDeviceInfo( UINT *args )
 
     return NtUserDisplayConfigGetDeviceInfo( packet );
 }
+
+NTSTATUS WINAPI wow64_NtCloseCompositionInputSink( UINT *args )
+{
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI wow64_NtCreateCompositionInputSink( UINT *args )
+{
+    ULONG *sink_handle = get_ptr( &args );
+    if (sink_handle) *sink_handle = 0x10001;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI wow64_NtCreateImplicitCompositionInputSink( UINT *args )
+{
+    ULONG *sink_handle = get_ptr( &args );
+    if (sink_handle) *sink_handle = 0x10001;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI wow64_NtDuplicateCompositionInputSink( UINT *args )
+{
+    HANDLE handle = get_handle( &args );
+    ULONG *out = get_ptr( &args );
+    if (out) *out = handle ? HandleToUlong(handle) : 0x10001;
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI wow64_NtQueryCompositionInputQueueAndTransform( UINT *args )
+{
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI wow64_NtQueryCompositionInputSink( UINT *args )
+{
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI wow64_NtQueryCompositionInputSinkLuid( UINT *args )
+{
+    LUID *luid = get_ptr( &args );
+    if (luid)
+    {
+        luid->LowPart = 0x1234;
+        luid->HighPart = 0;
+    }
+    return STATUS_SUCCESS;
+}
+
+NTSTATUS WINAPI wow64_NtQueryCompositionInputSinkViewId( UINT *args )
+{
+    UINT32 *view_id = get_ptr( &args );
+    if (view_id) *view_id = 1;
+    return STATUS_SUCCESS;
+}
+

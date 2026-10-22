@@ -954,6 +954,10 @@ NTSTATUS WINAPI wow64_NtQueryInformationJobObject( UINT *args )
         }
         else return STATUS_INFO_LENGTH_MISMATCH;
 
+    case JobObjectSecurityLimitInformation:
+    case JobObjectBasicUIRestrictions:
+        return NtQueryInformationJobObject( handle, class, ptr, len, retlen );
+
     default:
         if (class >= MaxJobObjectInfoClass) return STATUS_INVALID_PARAMETER;
         FIXME( "unsupported class %u\n", class );
@@ -1440,7 +1444,11 @@ NTSTATUS WINAPI wow64_NtSetInformationJobObject( UINT *args )
         else return STATUS_INVALID_PARAMETER;
 
     case JobObjectBasicUIRestrictions:
-        FIXME( "unsupported class JobObjectBasicUIRestrictions\n" );
+        return NtSetInformationJobObject( handle, class, ptr, len );
+
+    case JobObjectSecurityLimitInformation:
+        if (len < sizeof(DWORD)) return STATUS_INVALID_PARAMETER;
+        FIXME( "JobObjectSecurityLimitInformation stub: %p %p %u\n", handle, ptr, len );
         return STATUS_SUCCESS;
 
     case JobObjectAssociateCompletionPortInformation:   /* JOBOBJECT_ASSOCIATE_COMPLETION_PORT */
@@ -1903,4 +1911,56 @@ NTSTATUS WINAPI wow64_NtConvertBetweenAuxiliaryCounterAndPerformanceCounter( UIN
     ULONGLONG *error = get_ptr( &args );
 
     return NtConvertBetweenAuxiliaryCounterAndPerformanceCounter( flags, from, to, error );
+}
+
+
+/**********************************************************************
+ *           wow64_NtCreateWaitCompletionPacket
+ */
+NTSTATUS WINAPI wow64_NtCreateWaitCompletionPacket( UINT *args )
+{
+    ULONG *handle_ptr = get_ptr( &args );
+    ACCESS_MASK access = get_ulong( &args );
+    OBJECT_ATTRIBUTES32 *attr32 = get_ptr( &args );
+
+    struct object_attr64 attr;
+    HANDLE handle = 0;
+    NTSTATUS status;
+
+    *handle_ptr = 0;
+    status = NtCreateWaitCompletionPacket( &handle, access, objattr_32to64( &attr, attr32 ) );
+    put_handle( handle_ptr, handle );
+    return status;
+}
+
+
+/**********************************************************************
+ *           wow64_NtAssociateWaitCompletionPacket
+ */
+NTSTATUS WINAPI wow64_NtAssociateWaitCompletionPacket( UINT *args )
+{
+    HANDLE handle = get_handle( &args );
+    HANDLE completion_handle = get_handle( &args );
+    HANDLE target_handle = get_handle( &args );
+    void *key_context = get_ptr( &args );
+    void *apc_context = get_ptr( &args );
+    NTSTATUS status = get_ulong( &args );
+    ULONG_PTR status_info = get_ulong( &args );
+    BOOLEAN *already_signaled = get_ptr( &args );
+
+    return NtAssociateWaitCompletionPacket( handle, completion_handle, target_handle,
+                                           key_context, apc_context, status, status_info,
+                                           already_signaled );
+}
+
+
+/**********************************************************************
+ *           wow64_NtCancelWaitCompletionPacket
+ */
+NTSTATUS WINAPI wow64_NtCancelWaitCompletionPacket( UINT *args )
+{
+    HANDLE handle = get_handle( &args );
+    BOOLEAN remove_signaled = get_ulong( &args );
+
+    return NtCancelWaitCompletionPacket( handle, remove_signaled );
 }
