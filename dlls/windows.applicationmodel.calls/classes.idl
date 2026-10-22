@@ -1,0 +1,7 @@
+#pragma makedep register
+#pragma winrt ns_prefix
+
+namespace Windows.ApplicationModel.Calls {
+    runtimeclass VoipCallCoordinator;
+    runtimeclass VoipPhoneCall;
+}
