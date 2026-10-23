@@ -399,6 +399,81 @@ error 5") and must be repaired before the parked stack can be read;
 (c) the DComp device path (`dcomp`/`dwmcorei` compositor creation) has not been
 exercised yet, since the app never reaches composition.
 
+## The park after XAML activation: loader_section / wined3d_cs AB-BA cycle
+
+Measured at tip `eb74e0827` with the repaired diagnostics (pristine app binaries, hashes
+verified against `.orig`, registry configuration only). Reproduced in 4/5 runs, stable
+thread signature, 3 repeats of every 60 s timeout per run.
+
+**The app is not waiting on a conversation, an async, an activation, or composition.**
+The main thread is deadlocked with a render thread:
+
+```
+0024:err:sync:RtlpWaitForCriticalSection section .../wined3d_main.c: wined3d_cs
+        wait timed out in thread 0024, blocked by 0148, retrying (60 sec)
+0148:err:sync:RtlpWaitForCriticalSection section .../ntdll/loader.c: loader_section
+        wait timed out in thread 0148, blocked by 0024, retrying (60 sec)
+```
+plus 8 further threads (`00f8 0158 0160 0164 0168 0174 0188 018c 01a0`) queued behind
+`loader_section`. Cycle edges, from the `+module` trace at the moment of the stall:
+
+1. **main thread 0024 owns `loader_section`**, is inside
+   `process_attach (L"dwmcorei.dll") - START` with no matching END (dwmcorei is loaded as
+   an import of `dcompi.dll`, so its `DllMain` runs under the loader lock), and is asking
+   for `wined3d_cs`. That edge is the tip commit `eb74e0827`: answering
+   `ID2D1Device`/`ID2D1Device1` on the d2d1 factory builds the implicit device inside
+   `d2d_factory_QueryInterface` — i.e. inside dwmcorei's `DllMain` — and device creation
+   enters d3d10/wined3d, which takes `wined3d_cs`. Before the tip, dwmcorei's `DllMain`
+   failed earlier, so the cycle did not exist.
+2. **thread 0148 owns `wined3d_cs`** (it is a render thread: it created the XAML windows
+   `0x1006c`/`0x10064`, and the llvmpipe worker pool hangs off it), and its last action is
+   `load_dll looking for L"opengl32.dll"` → `LdrLoadDll` → `loader_section`. The site is
+   the lazy forwarding in `dlls/gdi32/opengl.c`: `ChoosePixelFormat`/`DescribePixelFormat`
+   /`GetPixelFormat`/`SetPixelFormat`/`SwapBuffers` do
+   `if (!opengl32) opengl32 = LoadLibraryW( L"opengl32.dll" )`, and wined3d's GL init
+   calls `ChoosePixelFormat` while holding `wined3d_cs`. Preloading opengl32 does not
+   help: `LoadLibraryW` on an already-loaded module still takes the loader lock
+   (`LdrGetDllHandleEx L"opengl32.dll" -> 0x7BC10000` shows it was already mapped).
+
+Fix direction (Wine-side, no app patching): remove edge 1 — the d2d1 factory must not
+realize the implicit device during a `DllMain`. Answer the published-id query with a
+forwarder that creates the real device at first use (outside the loader lock), keeping the
+tip's published-id aliases. Edge 2 is the same class of bug as the upstream rule "a client
+lock must never be held across `LdrLoadDll`"; resolving gdi32's opengl32 forwarding at
+gdi32 init, not per call, closes it as well.
+
+### Process addressing (what the harness had wrong)
+
+* The app's **Linux** process has comm `UI thread` (its `SetThreadDescription` on the main
+  thread is propagated by Wine into `comm`), so `pgrep -x WhatsApp.Root.e` /
+  `pkill -x WhatsApp.Root.e` match nothing; select it from `/proc/<pid>/cmdline`.
+* The **Wine pid and every Wine tid** come out of the app's own TEBs: Wine on x86-64 keeps
+  the TEB in the GS segment base and `TEB+0x40/+0x48` is
+  `ClientId { UniqueProcess, UniqueThread }` — one gdb batch pass over all threads yields
+  the pid (modal non-zero value; host-injected threads, e.g. mangohud, report 0) and the
+  LWP→tid map. Non-Wine threads (llvmpipe workers) inherit the creator's TEB, which is how
+  the llvmpipe pool was traced back to `0148`.
+* gdb cannot unwind Wine: Wine's PE/ELF hybrid DLLs expose no CFI that BFD reads, so
+  `thread apply all bt` degenerates to bare addresses; and winedbg's attach path
+  (`DebugActiveProcess`) returns a stale thread list, labels the attached process
+  `C:\windows\system32\start.exe`, and mislabels the `0x140000000` module — its
+  symbolization of an attached app is unusable. Wine 11 also maps builtin code from an
+  anonymous `memfd:wine-mapping`, so `/proc/<pid>/maps` cannot name builtin modules; the
+  module bases come from the `+loaddll` trace.
+* The coreclr diagnostics IPC (the `dotnet-dump` attach path) is unreachable: wineserver
+  has no AF_UNIX transport for app sockets (`server/sock.c` uses AF_UNIX only for its own
+  `socketpair`), so the runtime's diagnostic listener never binds. `winedbg --command
+  "minidump <path>"` does write a minidump of an attached process.
+
+Harness: `~/wa-work/wa_diag150.sh` (repaired: TEB addressing, per-snapshot tid map, raw
+stack capture, minidump, window census, app state-machine tail),
+`~/wa-work/tools/btsymbol.py` (raw stack words + `+loaddll` bases + `nm` VAs → module and
+nearest function; `nm` addresses match the runtime VAs because Wine maps DLLs at their
+preferred bases), `~/wa-work/wa_lockprobe.sh` (the `+module` probe that pins the two
+in-flight `LdrLoadDll` calls), `~/wa-work/wa_pidprobe.sh`, `~/wa-work/wa_gdbprobe.sh`.
+The `ERR("created window %p")` trace in `win32u/window.c:5995` is leftover probe-era
+instrumentation and should go.
+
 ## Series on `ultimate`
 
 | Series | Patches | Notes |
