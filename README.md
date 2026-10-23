@@ -555,3 +555,103 @@ Verification (tip 6d9288cef, prefix builtins synced):
 Next gap: the combase activation fail-fast inside the XAML window proc — a class
 server activation failing during XAML content init (the recorded ActivatableClassId
 module-mapping family). webview2/edge is not reached.
+
+## The XAML window-proc activation fail-fast: cleared (ActivatableClassId module evidence)
+
+Tip `6d9288cef` died deterministically in 8/8 runs: `win32u/user32` window-proc dispatch →
+`Microsoft.ui.xaml.dll+0x213c35 → +0x291a0d → +0x28fe1a → +0x699fe → +0x695df/54d/4a4`
+(the low-RVA group is the window-proc/input-source region) → `combase+0x19114`
+(`RoFailFastWithErrorContextInternal2`) → `kernelbase!RaiseFailFastException`,
+`c0000602`, `rc=2`.
+
+**The failing activation, measured with a temporary combase probe (`roapi.c`
+`RoFailFastWithErrorContextInternal2`/`RoOriginateLanguageException` summary at ERR, removed
+before commit — the source tree is clean):**
+
+```
+RoGetActivationFactory (L"Microsoft.UI.Input.InputNonClientPointerSource",
+                        {7d0b775c-1903-5dc7-bd2f-7a4b31f0cff2}, …)
+  → DllPath Z:\…\5319275A…\Microsoft.UI.Windowing.Core.dll
+  → Class … not found in …Microsoft.UI.Windowing.Core.dll, hr 0x80004002 (E_NOINTERFACE)
+RoFailFastWithErrorContextInternal2  error 0x80004002, exception_count 1
+```
+
+The XAML window proc is in the content-island/input-source sequence — the activations
+around it resolve to `Microsoft.UI.Input.dll` (`ContentIsland`, `InputSiteBridge`,
+`InputFocusController`, `InputKeyboardSource`, `InputPreTranslateKeyboardSource`,
+`InputPointerSource`, `InputActivationListener`, `Content.DesktopChildSiteBridge`) and one
+id is pinned to `Microsoft.UI.Windowing.Core.dll` by the recorded env-prep map.
+
+**Cause: registry configuration, not a Wine gate.** `Microsoft.UI.Windowing.Core.dll` does
+not contain the class in its activation table: its image holds the class-id literal with
+**zero** absolute 8-byte pointer xrefs (a string constant), while
+`Microsoft.UI.Input.dll` holds it with one (its ClassInfo entry, stride 32
+`{name, interfaces, iids, count=2}`) and carries the activation-factory IID
+`7d0b775c-…` once. So the module answered `E_NOINTERFACE` for a class it was never the
+implementation of.
+
+**Derivation added to the env-prep generator** (`~/wa-work/tools/mk_activatable_reg.py`),
+replacing namespace-prefix guessing for the WinAppSDK modules:
+
+1. *Static activation-table index* — the C++/WinRT ClassInfo tables and the WRL creator map
+   are pointer tables, so a class id they contain is referenced by an absolute 8-byte
+   pointer inside the module's own `.rdata/.data`. 1030 ids over 13 modules; reproduces
+   **650/650** of the known `Microsoft.ui.xaml.dll` WRL map (positive control) and gives
+   `InputNonClientPointerSource → Microsoft.UI.Input.dll`,
+   `Content.ContentIsland → Microsoft.UI.Input.dll`,
+   `Composition.Compositor → dcompi.dll` (the working mapping), uniquely.
+   `Microsoft.UI.Xaml.Controls.dll` and `CoreMessagingXP.dll`/`Microsoft.UI.Windowing.dll`
+   use compiled dispatch (no pointer table) → keep the probed set / prefix rules.
+2. *Activation-factory IID multiplicity* — the IID the app asks for (logged by combase's
+   `RoGetActivationFactory` FIXME) occurs **twice** in the implementing module's interface
+   table and once in each consumer: `Microsoft.UI.Colors` `{8620a5b0-…}` →
+   `Microsoft.UI.dll` x2 (Controls/xaml x1, and Controls answered 0x80040111 in-app).
+3. *Missing builtin keys* — keys an older generation had emitted for system-provided
+   classes: `Windows.Storage.ApplicationData → windows.storage.applicationdata.dll`,
+   `Windows.ApplicationModel.Package → windows.applicationmodel.dll`,
+   `Windows.Globalization.GeographicRegion/Language → windows.globalization.dll`,
+   `…DragDrop.Core.CoreDragDropManager → dataexchange.dll`.
+
+Live DGAF matrix probing of these modules outside the app is **not usable**: loading
+`Microsoft.UI.Input.dll`/`Microsoft.UI.dll` standalone faults inside
+`DllGetActivationFactory` (`Microsoft.UI.Input.dll+0x11566`, `movq %rbx,(%r8)`) and
+`CoInitializeEx(MTA)` faults in a bare probe. Probes kept in `~/wa-work/probes/`
+(`wrl_map_scan.py`, `literal_xref_scan.py`, `activation_name_arrays.py`, `guid_scan.py`,
+`probe3.c`, `probe4.c`).
+
+**Stale-key deletion is a no-op and must stay that way until the derivation is complete.**
+The generator's deletion pattern matches `]\t` while a real `system.reg` line is
+`] <hextime>`, so deletions never fire (the README's §2b "emits `[-HKEY_…]` deletions" is
+aspirational). Measured with the pattern corrected: 209 prefix keys are not emitted by the
+current map; deleting them costs one class — `Windows.Storage.ApplicationData` — and the
+whole window-proc fail-fast returns (9 `RoFailFast*`, 15 windows, `rc=2`). The prefix
+therefore carries the union of generations; the derivation under-emits ~209 ids.
+
+Measured after the mapping fix (pristine app binaries, registry configuration only, probes
+removed from the Wine tree, no source change):
+
+| metric | tip `6d9288cef` | after |
+| --- | --- | --- |
+| `c0000602` / `RoFailFastWithErrorContextInternal2` | 8/8 runs, 1 per run | **0 / 0** |
+| app-managed fastfail `c0000409` param `0x80040154` | – | **0** |
+| battery 8 × 60 s | 8/8 `rc=2` DIED (fail-fast) | **8/8 `rc=69`**, `fatal=0`, `unhandled=1` (CLR `e0464645`) |
+| 150 s run | `rc=2` | `rc=69` (one run reached `rc=124` ALIVE) |
+| windows created | 30 | **35** (172 X windows) |
+| unresolved activations (`Failed to find library`) | – | **2**: `FakeClass.ClassName` (app's own negative probe), `Microsoft.UI.Text.FontWeights` |
+| lock timeouts / AV | 0 / 0 | 0 / 0 |
+| `WinUIDesktopWin32WindowClass` | 0 | **0** (no mapped XAML window; `wa-work/wa_combase_after.png` blank, 295 B) |
+| `WebView2Loader` / `msedgewebview2` | 0 / 0 | 0 / 0 |
+| app binaries | pristine | pristine (24da83be…, c6053f1a…, 9a42e19d…, 9353066e… == `.orig`) |
+| tests | – | combase 0 fail, d2d1 0 fail, gdi32 = baseline `dc.c GetDeviceGammaRamp`, dcomp fails (pre-existing at `d6de043f1`) |
+
+Next gaps: (a) **`Microsoft.UI.Text.FontWeights` is answered by nobody** —
+`Microsoft.ui.xaml.dll`, `Microsoft.UI.dll` and `Microsoft.UI.Xaml.Controls.dll` all return
+`CLASS_E_CLASSNOTAVAILABLE` in-app, although the id is in the XAML 650-entry map and the
+IID `cc390df6-…` occurs in `Microsoft.ui.xaml.dll`; the XAML parser then reports
+`XAML parsing failed.` (`0x802b000a`) and the app dies in its own managed path
+(`HybridDialogUnexpectedErrorOccurred`, `e0464645`, `rc=69`). The fix is a Wine-side
+provider for the class (factory answering `IActivationFactory` + the activatable IID
+`cc390df6-76b0-5807-8b9d-e949a4e623ae`, statics `Black…ExtraBlack` returning `FontWeight`)
+mapped to that builtin. (b) The ~209 under-emitted ids (start with the class-id literals of
+the framework module images, not only pointer-table ids). (c) `WinUIDesktopWin32WindowClass`
+registration, webview2/edge: not reached.
