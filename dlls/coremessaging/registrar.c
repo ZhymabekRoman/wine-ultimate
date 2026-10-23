@@ -28,19 +28,24 @@
  *      +6 u16 subid  (interface method)
  *      +8 parameters: [u32 size][payload padded to 4] per parameter.
  *
- * Measured state (WhatsApp 2.2620, self-hosted registrar, clean x86_64
- * tip build): the provider's RegisterConversation lands a moment after
- * the XAML thread's first "CoreUICore" join, the registrar lookup misses
- * and XAML degrades into a headless idle loop; when the registration
- * lands before the join, the self-hosted registrar server rejects the
- * join on its side (the registered RoutingInfo/ConversationInfo fails
- * its join validation) and the dispatcher fail-fasts in
- * Microsoft.ui.xaml.dll (RoFailFastWithErrorContext).  Remaining gap:
- * the server-side join contract - a ConversationInfo/RoutingInfo layout
- * the native registrar accepts at join validation, a join reply carrying
- * the real ExportEndpoint (the Wine server ALPC has no handle-attribute
- * duplication yet) and serving of the dispatcher queue CoreUICall
- * interface over that endpoint.
+ * Measured state (WhatsApp 2.2620, self-hosted registrar): the engine
+ * self-hosts the registrar and the XAML side registers the "CoreUICore"
+ * conversation itself (wire RegisterConversation, method 14) when its
+ * dispatcher infrastructure initialises; it serves dispatcher-queue joins
+ * for that conversation in-process.  A builtin registration of the same
+ * name collides with the engine's own (the registrar answers it result 4,
+ * already-registered), so the provider announces its thread only and
+ * serves requests the registrar routes to it.  The join reply contract
+ * implemented here mirrors the native reply sender
+ * (RegistrarServerCaller::RegisterConversationClient -> CoreUICallSend):
+ * [result, clientId, ConversationInfo(16), {serverId, u32}, peers(56 each),
+ * peerCount] with the ExportEndpoint notification handle riding the
+ * reply's ALPC handle attribute (kernel-duplicated into the requester).
+ * Remaining gap after this point: XAML's own type activation
+ * (Microsoft.UI.Xaml.Media.AcrylicBrush et al) answers E_NOINTERFACE,
+ * which the XAML object writer turns into CErrorService::ReportParserError
+ * notifications that OriginateError in Microsoft.ui.xaml.dll+0x7E4D83;
+ * the window stays headless until that activation path resolves.
  *
  * Copyright 2026 Zhymabek Roman
  *
@@ -86,6 +91,8 @@ struct registrar_provider
     CRITICAL_SECTION send_cs;               /* serialises synchronous request/response */
     ULONG client_id;                        /* RegistrarClientId handed out by RegisterThread */
     ULONG conversation_id;                  /* conversation id assigned by RegisterConversation */
+    volatile LONG next_client_id;           /* client ids handed out on joins */
+    HANDLE endpoint_event;                  /* ExportEndpoint notification event */
     volatile LONG running;
     HANDLE thread;
 };
@@ -124,6 +131,22 @@ struct tlv_reader
     const char *base;
     ULONG offset;
 };
+
+static const char *debugstr_frame( const void *data, ULONG size )
+{
+    static char buffer[0x101];
+    static const char hex[] = "0123456789abcdef";
+    const unsigned char *p = data;
+    ULONG i, n = size < 0x80 ? size : 0x80, o = 0;
+
+    for (i = 0; i < n && o + 2 < sizeof(buffer); i++)
+    {
+        buffer[o++] = hex[p[i] >> 4];
+        buffer[o++] = hex[p[i] & 15];
+    }
+    buffer[o] = 0;
+    return buffer;
+}
 
 static BOOL tlv_read( struct tlv_reader *r, const void **data, ULONG *size )
 {
@@ -352,12 +375,13 @@ static BOOL registrar_register_conversation( void )
  * dispatcher queues joining the conversation.
  */
 static NTSTATUS registrar_reply( const void *frame, ULONG frame_size,
-                                 const ALPC_CONTEXT_ATTR *recv_ctx )
+                                 const ALPC_CONTEXT_ATTR *recv_ctx, HANDLE handle )
 {
     struct
     {
         ALPC_MESSAGE_ATTRIBUTES attr;
         ALPC_CONTEXT_ATTR ctx;
+        ALPC_HANDLE_ATTR handle_attr;
     } attrs;
     char buffer[REGISTRAR_MESSAGE_SIZE];
     ALPC_PORT_MESSAGE *msg = (void *)buffer;
@@ -367,13 +391,18 @@ static NTSTATUS registrar_reply( const void *frame, ULONG frame_size,
     msg->TotalLength = sizeof(*msg) + frame_size;
     memcpy( (char *)msg + sizeof(*msg), frame, frame_size );
 
-    attrs.attr.AllocatedAttributes = ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
-    attrs.attr.ValidAttributes = ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+    attrs.attr.AllocatedAttributes = ALPC_MESSAGE_CONTEXT_ATTRIBUTE
+                                     | (handle ? ALPC_MESSAGE_HANDLE_ATTRIBUTE : 0);
+    attrs.attr.ValidAttributes = attrs.attr.AllocatedAttributes;
     attrs.ctx.PortContext = NULL;
     attrs.ctx.MessageContext = recv_ctx ? recv_ctx->MessageContext : NULL;
     attrs.ctx.Sequence = recv_ctx ? recv_ctx->Sequence : 0;
     attrs.ctx.MessageId = recv_ctx ? recv_ctx->MessageId : 0;
     attrs.ctx.CallbackId = recv_ctx ? recv_ctx->CallbackId : 0;
+    attrs.handle_attr.Flags = 0;
+    attrs.handle_attr.Handle = handle;
+    attrs.handle_attr.ObjectType = 0;
+    attrs.handle_attr.DesiredAccess = EVENT_ALL_ACCESS;
 
     return NtAlpcSendWaitReceivePort( provider.connection, ALPC_SEND_REPLY, msg,
                                       &attrs.attr, NULL, NULL, NULL, NULL );
@@ -399,21 +428,70 @@ static NTSTATUS registrar_reply( const void *frame, ULONG frame_size,
  * broadcasts; also fire-and-forget AttachPeer-family verbs 11/31) carry no
  * pending request and must not be answered.
  */
+/*
+ * Peer entry (ConversationPeerInfo, 56 bytes) the joining client routes
+ * conversation traffic by: {RoutingInfo (24), endpoint id (u32), pad,
+ * server id (u64), scope (u64), registrar client id (u32), pad}.
+ */
+struct peer_info
+{
+    ULONG routing[6];
+    ULONG endpoint;
+    ULONG pad0;
+    ULONGLONG server_id;
+    ULONGLONG scope;
+    ULONG client_id;
+    ULONG pad1;
+};
+
+/*
+ * Answer the requests the registrar routes to the provider conversation
+ * server (frame verb 2): joins (RegisterConversationClient 17,
+ * RegisterPendingConversationClientForServer 18), peer management
+ * (ClientConversationAttached 0, CompleteCrossProcConnection 4,
+ * CompleteLocalConnection 5, CloseConnection 6, ReleaseConversationClient
+ * 16, FindCrossProcConnection 13) and the dispatcher-queue connection
+ * verbs (ConnectionAccepted 11, NotifyLocalConnectionCreated 31).
+ *
+ * The reply is a queue datagram with the same 40-byte header as the
+ * request and a bare TLV stream dispatched by ALPC message-id
+ * correlation.  The TLV stream must match the requester's unmarshalling
+ * signature exactly (extra or missing parameters => protocol violation
+ * 99).  For the join, the native reply sender
+ * (RegistrarServerCaller::RegisterConversationClient -> CoreUICallSend)
+ * emits, in wire order:
+ *      result (u32)
+ *      assigned client id (u32)
+ *      ConversationInfo (16)
+ *      server block (12: {serverId u64, u32})
+ *      peers array (count * 56, ConversationPeerInfo)
+ *      peer count (u32)
+ * and the ExportEndpoint handle rides the reply message's ALPC handle
+ * attribute (kernel-duplicated into the requester).
+ * Every other verb answers with the bare [result].
+ */
 static void handle_routed_request( const void *payload, ULONG size, const ALPC_CONTEXT_ATTR *ctx )
 {
     char datagram[REGISTRAR_MESSAGE_SIZE];
     const char *item = (const char *)payload + CN_ITEM_OFFSET;
-    ULONG cmd = *(const ULONG *)((const char *)payload + 16);
     ULONG itemsize = *(const ULONG *)((const char *)payload + 32);
     ULONG verb, subid, off;
-    ULONG result = 0, zero32 = 0;
-    ULONGLONG server_id = 0, zero64 = 0;
+    ULONG result = 0;
+    ULONG client_id = 0, peer_count = 0;
     ULONG info16[4] = {0};
+    struct
+    {
+        ULONGLONG server_id;
+        ULONG extra;
+    } server_block;
+    struct peer_info peer;
+    HANDLE reply_handle = NULL;
 
     if (size < CN_ITEM_OFFSET + FRAME_HEADER_SIZE) return;
     verb = *(const USHORT *)(item + 4);
     subid = *(const USHORT *)(item + 6);
-    TRACE( "registrar routed request verb %u subid %u (item %u bytes).\n", verb, subid, itemsize );
+    TRACE( "registrar routed request verb %u subid %u (item %u bytes): %s\n",
+           verb, subid, itemsize, debugstr_frame( item, itemsize ) );
 
     /* verb 2 = request (correlated reply required); verb 0 = notification;
      * verb 3 = reply to our own outstanding request (handled by the sender) */
@@ -432,18 +510,7 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
     }
     if (verb != 2) return;
 
-    switch (subid)
-    {
-        case 11:   /* ConnectionAccepted (fire-and-forget) */
-        case 31:   /* NotifyLocalConnectionCreated (fire-and-forget) */
-            return;
-        default:
-            break;
-    }
-
-    /* reply datagram: 40-byte queue header, then a bare TLV stream
-     * (the reply item carries no call-frame header; dispatch is by ALPC
-     * message-id correlation with the pending request) */
+    /* reply datagram: 40-byte queue header, then the bare TLV stream */
     memset( datagram, 0, CN_ITEM_OFFSET );
     off = 0;
     off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &result, sizeof(result) );
@@ -452,13 +519,22 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
     {
         case 17:   /* RegisterConversationClient (join) */
         case 18:   /* RegisterPendingConversationClientForServer */
-            server_id = provider.conversation_id;
-            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &provider.conversation_id,
-                                    sizeof(provider.conversation_id) );
-            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &server_id, sizeof(server_id) );
-            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &zero32, sizeof(zero32) );
-            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, NULL, 0 );   /* no peers */
+            client_id = InterlockedIncrement( &provider.next_client_id );
+            server_block.server_id = provider.conversation_id;
+            server_block.extra = 0;
+            memset( &peer, 0, sizeof(peer) );
+            peer.routing[0] = 0;                  /* scope kind: local */
+            peer.routing[1] = provider.client_id; /* server routing = this registration */
+            peer.endpoint = 1;                    /* conversation server endpoint */
+            peer.server_id = provider.conversation_id;
+            peer.client_id = provider.client_id;
+            peer_count = 1;
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &client_id, sizeof(client_id) );
             off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, info16, sizeof(info16) );
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &server_block, sizeof(server_block) );
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &peer, sizeof(peer) );
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &peer_count, sizeof(peer_count) );
+            reply_handle = provider.endpoint_event;
             break;
         default:
             break;
@@ -467,7 +543,7 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
     *(ULONGLONG *)(datagram + 24) = CN_MAX_MSG;
     *(ULONG *)(datagram + 32) = off;                   /* item size */
 
-    registrar_reply( datagram, CN_ITEM_OFFSET + off, ctx );
+    registrar_reply( datagram, CN_ITEM_OFFSET + off, ctx, reply_handle );
 }
 
 static DWORD WINAPI provider_thread( void *param )
@@ -477,7 +553,7 @@ static DWORD WINAPI provider_thread( void *param )
     WCHAR name[128];
     UNICODE_STRING string;
     ALPC_PORT_ATTRIBUTES port_attr;
-    char connect_buf[sizeof(ALPC_PORT_MESSAGE) + 24];
+    char connect_buf[sizeof(ALPC_PORT_MESSAGE) + 160];
     ALPC_PORT_MESSAGE *connect_msg = (void *)connect_buf;
     SIZE_T connect_size = sizeof(connect_buf);
     LARGE_INTEGER delay;
@@ -523,23 +599,37 @@ static DWORD WINAPI provider_thread( void *param )
     }
     TRACE( "connected to registrar %s.\n", debugstr_w( name ) );
 
-    if (registrar_register_thread() && registrar_register_conversation())
+    /* Self-host: the CoreUI engine of the app registers the "CoreUICore"
+     * conversation itself when its dispatcher infrastructure initialises, and
+     * serves joins for it in-process.  A builtin registration of the same
+     * name collides (RegisterConversation answers result 4 - already
+     * registered - to the engine's own registration) and XAML fail-fasts, so
+     * the provider only announces its thread and serves what the registrar
+     * routes to it. */
+    if (registrar_register_thread())
     {
         struct
         {
             ALPC_MESSAGE_ATTRIBUTES attr;
             ALPC_CONTEXT_ATTR ctx;
+            ALPC_HANDLE_ATTR handle;
         } attrs;
         SIZE_T buffer_size;
         char buffer[REGISTRAR_MESSAGE_SIZE];
+
+        /* ExportEndpoint: the notification event exported (kernel-duplicated)
+         * to joining dispatcher queues so provider traffic can wake them */
+        provider.endpoint_event = CreateEventW( NULL, FALSE, FALSE, NULL );
 
         while (provider.running)
         {
             ALPC_PORT_MESSAGE *msg = (void *)buffer;
 
-            attrs.attr.AllocatedAttributes = ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+            attrs.attr.AllocatedAttributes = ALPC_MESSAGE_CONTEXT_ATTRIBUTE
+                                             | ALPC_MESSAGE_HANDLE_ATTRIBUTE;
             attrs.attr.ValidAttributes = 0;
             memset( &attrs.ctx, 0, sizeof(attrs.ctx) );
+            memset( &attrs.handle, 0, sizeof(attrs.handle) );
             buffer_size = sizeof(buffer);
 
             status = NtAlpcSendWaitReceivePort( provider.connection, 0, NULL, NULL,
@@ -549,6 +639,9 @@ static DWORD WINAPI provider_thread( void *param )
                 TRACE( "provider receive loop done, status %#lx.\n", status );
                 break;
             }
+            if (attrs.attr.ValidAttributes & ALPC_MESSAGE_HANDLE_ATTRIBUTE)
+                TRACE( "provider received handle attribute: handle %p action %u.\n",
+                       attrs.handle.Handle, attrs.handle.Flags );
             if (buffer_size >= sizeof(*msg) + FRAME_HEADER_SIZE)
             {
                 const void *payload = (const char *)msg + sizeof(*msg);
