@@ -1071,14 +1071,6 @@ static const struct ICoreWindowVtbl core_window_vtbl =
 
 static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
-    if (msg == 0x0401)
-    {
-        HMODULE twin = GetModuleHandleW( L"twinapi.appcore.dll" );
-        void (WINAPI *pTrigger)(void) = twin ? (void *)GetProcAddress( twin, "TriggerAppActivation" ) : NULL;
-        ERR( "CoreWindow received 0x0401 on UI thread %lu, pTrigger %p\n", GetCurrentThreadId(), pTrigger );
-        if (pTrigger) pTrigger();
-        return 0;
-    }
     if (msg == WM_ERASEBKGND) return 1;
     if (msg == WM_PAINT)
     {

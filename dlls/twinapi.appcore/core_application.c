@@ -417,26 +417,6 @@ static __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *acti
 
 static __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *view_activated_handler;
 
-static DWORD WINAPI trigger_activation_proc( void *arg )
-{
-    ICoreApplicationView *view = arg;
-    Sleep( 150 );
-    if (view_activated_handler && view)
-    {
-        __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args =
-            activated_event_args_create( 0 /* ActivationKind_Launch */ );
-        if (args)
-        {
-            ERR( "TWINAPI: Dispatching Launch activation to WinUI 3 CoreApplicationView %p!\n", view_activated_handler );
-            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_Invoke(
-                view_activated_handler, view, args );
-            __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs_Release( args );
-        }
-    }
-    if (view) ICoreApplicationView_Release( view );
-    return 0;
-}
-
 static HRESULT WINAPI core_application_view_add_Activated( ICoreApplicationView *iface,
         __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *handler, EventRegistrationToken *token )
 {
@@ -444,10 +424,12 @@ static HRESULT WINAPI core_application_view_add_Activated( ICoreApplicationView 
     if (token) token->value = 1;
     if (handler)
     {
+        /* registration only: the launch activation is driven by the app's
+         * own lifecycle (XAML fires OnLaunched once the CoreUI window and
+         * its conversation exist), which delivers it through this handler
+         * on the view's thread */
         __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_AddRef( handler );
         view_activated_handler = handler;
-        ICoreApplicationView_AddRef( iface );
-        CloseHandle( CreateThread( NULL, 0, trigger_activation_proc, iface, 0, NULL ) );
     }
     return S_OK;
 }
@@ -1103,102 +1085,6 @@ struct current_app_instance_impl
 };
 static struct current_app_instance_impl current_app_instance = { app_instance_vtbl };
 
-typedef HRESULT (WINAPI *app_activated_invoke_proc)( void *handler, void *sender, void *args );
-
-#define WM_TRIGGER_ACTIVATION (WM_USER + 777)
-static LRESULT (WINAPI *pDefWindowProcW)(HWND, UINT, WPARAM, LPARAM) = NULL;
-static BOOL (WINAPI *pDestroyWindow)(HWND) = NULL;
-static BOOL (WINAPI *pKillTimer)(HWND, UINT_PTR) = NULL;
-static BOOL (WINAPI *pPostMessageW)(HWND, UINT, WPARAM, LPARAM) = NULL;
-static UINT_PTR (WINAPI *pSetTimer)(HWND, UINT_PTR, UINT, TIMERPROC) = NULL;
-static ATOM (WINAPI *pRegisterClassExW)(const WNDCLASSEXW *) = NULL;
-static HWND (WINAPI *pCreateWindowExW)(DWORD, LPCWSTR, LPCWSTR, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, LPVOID) = NULL;
-
-static void *g_saved_activated_handler = NULL;
-
-static LRESULT CALLBACK activation_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
-{
-    ERR( "TWINAPI: activation_wndproc hwnd %p msg 0x%04x wparam 0x%Ix\n", hwnd, msg, wparam );
-    if (msg == WM_TIMER || msg == WM_TRIGGER_ACTIVATION)
-    {
-        ERR( "TWINAPI: activation_wndproc firing (msg 0x%04x) ON UI THREAD %lu!\n", msg, GetCurrentThreadId() );
-        if (pKillTimer) pKillTimer( hwnd, wparam );
-        if (g_saved_activated_handler)
-        {
-            void **vtbl = *(void ***)g_saved_activated_handler;
-            app_activated_invoke_proc invoke = (app_activated_invoke_proc)vtbl[3];
-            HRESULT hr;
-            ERR( "TWINAPI: Invoking appInstance.Activated handler %p via slot 3 %p ON UI THREAD!\n", g_saved_activated_handler, invoke );
-            hr = invoke( g_saved_activated_handler, (void *)&current_app_instance, (void *)&app_activation_args_obj );
-            ERR( "TWINAPI: invoke returned hr = 0x%08lx\n", hr );
-            IUnknown_Release( (IUnknown *)g_saved_activated_handler );
-            g_saved_activated_handler = NULL;
-        }
-        return 0;
-    }
-    return pDefWindowProcW ? pDefWindowProcW( hwnd, msg, wparam, lparam ) : 0;
-}
-
-void WINAPI TriggerAppActivation(void)
-{
-    if (g_saved_activated_handler)
-    {
-        void **vtbl = *(void ***)g_saved_activated_handler;
-        app_activated_invoke_proc invoke = (app_activated_invoke_proc)vtbl[3];
-        HRESULT hr;
-        ERR( "TWINAPI: Invoking appInstance.Activated handler %p via slot 3 %p on thread %lu!\n",
-             g_saved_activated_handler, invoke, GetCurrentThreadId() );
-        hr = invoke( g_saved_activated_handler, (void *)&current_app_instance, (void *)&app_activation_args_obj );
-        ERR( "TWINAPI: invoke returned hr = 0x%08lx\n", hr );
-        IUnknown_Release( (IUnknown *)g_saved_activated_handler );
-        g_saved_activated_handler = NULL;
-    }
-}
-
-struct find_ui_wnd_ctx
-{
-    HWND found;
-};
-
-static BOOL CALLBACK enum_ui_thread_wnd( HWND hwnd, LPARAM lp )
-{
-    struct find_ui_wnd_ctx *ctx = (struct find_ui_wnd_ctx *)lp;
-    WCHAR cls[128];
-    if (GetClassNameW( hwnd, cls, ARRAY_SIZE(cls) ))
-    {
-        if (!wcscmp( cls, L"WinUIDesktopWin32WindowClass" ) ||
-            !wcscmp( cls, L"DcppUserAdapterWindowClass" ))
-        {
-            ERR( "TWINAPI: Found target window %p class %s\n", hwnd, wine_dbgstr_w(cls) );
-            ctx->found = hwnd;
-            return FALSE;
-        }
-    }
-    return TRUE;
-}
-
-static DWORD WINAPI trigger_activation_post_proc( void *arg )
-{
-    DWORD ui_thread = (DWORD)(DWORD_PTR)arg;
-    HWND hwnd = NULL;
-    int i;
-
-    ERR( "TWINAPI: trigger_activation_post_proc started, target ui_thread %lu\n", ui_thread );
-
-    for (i = 0; i < 600; i++)
-    {
-        Sleep( 100 );
-        hwnd = FindWindowW( L"WinUIDesktopWin32WindowClass", NULL );
-        if (hwnd)
-        {
-            ERR( "TWINAPI: Posting 0x0401 to WinUIDesktopWin32WindowClass %p (after %d ms)\n", hwnd, (i + 1) * 100 );
-            PostMessageW( hwnd, 0x0401, 0, 0 );
-            break;
-        }
-    }
-    return 0;
-}
-
 static HRESULT WINAPI app_instance_UnregisterKey( IInspectable *iface ) { return S_OK; }
 static HRESULT WINAPI app_instance_RedirectActivationToAsync( IInspectable *iface, void *args, void **action ) { return E_NOTIMPL; }
 static HRESULT WINAPI app_instance_GetActivatedEventArgs( IInspectable *iface, void **result )
@@ -1223,38 +1109,34 @@ static HRESULT WINAPI app_instance_get_ProcessId( IInspectable *iface, UINT32 *v
     return S_OK;
 }
 
-static DWORD WINAPI trigger_activation_post_thread( void *arg )
-{
-    HWND hwnd = (HWND)arg;
-    Sleep( 2500 );
-    if (pPostMessageW && hwnd)
-    {
-        ERR( "TWINAPI: Posting WM_TRIGGER_ACTIVATION to hwnd %p on UI thread\n", hwnd );
-        pPostMessageW( hwnd, WM_TRIGGER_ACTIVATION, 0, 0 );
-    }
-    return 0;
-}
-
-static DWORD WINAPI trigger_activation_worker( void *arg )
-{
-    Sleep( 2000 );
-    TriggerAppActivation();
-    return 0;
-}
+/* AppInstance.Activated registration.  The AppLifecycle contract: the handler
+ * is invoked for activations redirected to this instance; the launch itself is
+ * delivered through GetActivatedEventArgs, and the app's own framework
+ * (Microsoft.ui.xaml driving Application.OnLaunched over the CoreUI window's
+ * conversation) drives the startup activation.  Registration stores the
+ * handler; nothing is triggered from here. */
+static void *g_activated_handler;
 
 static HRESULT WINAPI app_instance_add_Activated( IInspectable *iface, void *handler, EventRegistrationToken *token )
 {
-    ERR( "TWINAPI: app_instance_add_Activated handler %p on thread %lu\n", handler, GetCurrentThreadId() );
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
     if (token) token->value = 1;
     if (handler)
     {
         IUnknown_AddRef( (IUnknown *)handler );
-        g_saved_activated_handler = handler;
-        CloseHandle( CreateThread( NULL, 0, trigger_activation_post_proc, (void *)(DWORD_PTR)GetCurrentThreadId(), 0, NULL ) );
+        g_activated_handler = handler;
     }
     return S_OK;
 }
-static HRESULT WINAPI app_instance_remove_Activated( IInspectable *iface, EventRegistrationToken token ) { return S_OK; }
+static HRESULT WINAPI app_instance_remove_Activated( IInspectable *iface, EventRegistrationToken token )
+{
+    if (g_activated_handler)
+    {
+        IUnknown_Release( (IUnknown *)g_activated_handler );
+        g_activated_handler = NULL;
+    }
+    return S_OK;
+}
 
 static const void *app_instance_vtbl[] =
 {

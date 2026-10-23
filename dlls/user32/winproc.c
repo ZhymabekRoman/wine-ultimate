@@ -104,13 +104,6 @@ static LRESULT call_window_proc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp, LRES
 {
     WNDPROC proc = arg;
 
-    if (msg == 0x0401)
-    {
-        HMODULE twin = GetModuleHandleW( L"twinapi.appcore.dll" );
-        void (WINAPI *pTrigger)(void) = twin ? (void *)GetProcAddress( twin, "TriggerAppActivation" ) : NULL;
-        if (pTrigger) pTrigger();
-    }
-
     *result = WINPROC_wrapper( proc, hwnd, msg, wp, lp );
 
     TRACE_(relay)( "\1Ret  window proc %p (hwnd=%p,msg=%s,wp=%08Ix,lp=%08Ix) retval=%08Ix\n",

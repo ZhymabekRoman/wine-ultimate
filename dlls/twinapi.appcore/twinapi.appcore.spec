@@ -122,7 +122,6 @@
 @ stub PsmUnregisterAppStateChangeNotification
 @ stub PsmWaitForAppResume
 @ stdcall RegisterAppConstrainedChangeNotification(ptr ptr ptr)
-@ stdcall TriggerAppActivation()
 @ stdcall RegisterAppStateChangeNotification(ptr ptr ptr)
 @ stdcall UnregisterAppConstrainedChangeNotification(ptr)
 @ stdcall UnregisterAppStateChangeNotification(ptr)
