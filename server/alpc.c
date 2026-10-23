@@ -290,38 +290,100 @@ static enum server_fd_type alpc_fd_get_type( struct fd *fd )
     return FD_TYPE_DEVICE;
 }
 
-/* Deliver queued messages to pending async readers. */
+/* A connection has two client-side handles: the communication port itself, and
+ * the reserve (reverse) handle the kernel hands back in the connect reply.  They
+ * are two handles of one message queue: a receive armed on either of them takes
+ * messages queued on either, and readiness of either handle means a message
+ * waiting on either queue.  A client arms the receive for server-initiated
+ * traffic on one handle and keys its wake completion packets to that handle, so
+ * a message parked on the other handle must still be readable and must still
+ * read as readiness. */
+static struct alpc_port *alpc_port_pair( struct alpc_port *port )
+{
+    return port->reverse ? port->reverse : port->owner;
+}
+
+/* Fire the wake completion packets of every handle of the connection this port
+ * belongs to: the connection port, the reserve (reverse) handle of the same
+ * connection, and, reached from a reserve handle, its owning connection. */
+static void wake_connection_waits( struct alpc_port *port )
+{
+    struct alpc_port *ports[4], *p;
+    unsigned int i, n = 0;
+
+    ports[n++] = port;
+    if (port->owner) ports[n++] = port->owner;
+    if (port->reverse) ports[n++] = port->reverse;
+    if (port->owner && port->owner->reverse && port->owner->reverse != port)
+        ports[n++] = port->owner->reverse;
+
+    for (i = 0; i < n; i++)
+    {
+        p = ports[i];
+        signal_wait_completion_packets( &p->obj );
+        fire_wait_completion_packets( &p->obj );
+    }
+}
+
+static void update_alpc_readiness( struct alpc_port *port )
+{
+    struct alpc_port *pair = alpc_port_pair( port );
+    int ready = !list_empty( &port->msg_queue );
+
+    if (pair)
+    {
+        int pair_ready = !list_empty( &pair->msg_queue );
+        set_fd_signaled( pair->fd, pair_ready );
+        ready |= pair_ready;
+    }
+    set_fd_signaled( port->fd, ready );
+}
+
+/* Deliver queued messages to pending async readers. Messages parked on this
+ * port's own queue and messages parked on the queue of its pair (the other
+ * handle of the same connection) are both taken by the receivers armed here. */
 static void reselect_alpc_port( struct alpc_port *port )
 {
+    struct alpc_port *queues[2], *queue;
     struct alpc_message *msg, *next;
+    unsigned int i;
 
-    LIST_FOR_EACH_ENTRY_SAFE( msg, next, &port->msg_queue, struct alpc_message, entry )
+    queues[0] = port;
+    queues[1] = alpc_port_pair( port );
+
+    for (i = 0; i < 2; i++)
     {
-        struct async *async = find_pending_alpc_async( &port->read_q, msg->msg_id );
-        struct iosb *iosb;
+        if (!(queue = queues[i])) continue;
+        if (i && queue == queues[0]) continue;
 
-        if (!async) continue;
+        LIST_FOR_EACH_ENTRY_SAFE( msg, next, &queue->msg_queue, struct alpc_message, entry )
+        {
+            struct async *async = find_pending_alpc_async( &port->read_q, msg->msg_id );
+            struct iosb *iosb;
 
-        iosb = async_get_iosb( async );
-        if (iosb->out_size < msg->data_size)
-        {
-            async_request_complete( async, STATUS_BUFFER_TOO_SMALL, 0, 0, NULL );
+            if (!async) continue;
+
+            iosb = async_get_iosb( async );
+            if (iosb->out_size < msg->data_size)
+            {
+                async_request_complete( async, STATUS_BUFFER_TOO_SMALL, 0, 0, NULL );
+            }
+            else
+            {
+                void *data = (char *)msg + sizeof(*msg);
+                async_request_complete_alloc( async, STATUS_SUCCESS,
+                                               msg->data_size, msg->data_size, data );
+                list_remove( &msg->entry );
+                free( msg );
+            }
+            release_object( iosb );
+            release_object( async );
         }
-        else
-        {
-            void *data = (char *)msg + sizeof(*msg);
-            async_request_complete_alloc( async, STATUS_SUCCESS,
-                                           msg->data_size, msg->data_size, data );
-            list_remove( &msg->entry );
-            free( msg );
-        }
-        release_object( iosb );
-        release_object( async );
     }
 
-    /* a port handle is signaled while messages await a receiver; once every
-     * queued message has been delivered the handle stops being signaled */
-    if (list_empty( &port->msg_queue )) set_fd_signaled( port->fd, 0 );
+    /* a port handle is signaled while a message awaits a receiver on either of
+     * the connection's queues; once they are drained it stops being signaled */
+    update_alpc_readiness( port );
 }
 
 static void alpc_fd_read( struct fd *fd, struct async *async, file_pos_t pos )
@@ -393,31 +455,22 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             /* Nothing is waiting for this message id, so the message is not the
              * answer to a queued request: it is a message that the server side
              * originates in the reverse direction while the client itself waits
-             * for its reply.  The kernel queues such a message on the connection's
-             * reverse (reserve) port and marks that port handle signaled; the
-             * message waits on the queue until the client arms a receive there.
-             * It must not land on the client connection's own queue: a receive
-             * waiting for a reply there would consume the callback as its reply
-             * payload.  When no reverse port exists, fall back to the connection
-             * that has a receive pending (the kernel delivers an id-less message
-             * to the receiver that is waiting). */
+             * for its reply.  The kernel queues it on the connection the server
+             * accepted, and marks that connection handle ready: the client arms
+             * its receives on the connection handle (the reserve handle it got
+             * back in the connect reply is a spare it never reads), and the wake
+             * completion packets it associated are keyed to the connection.  A
+             * receive armed as the receive of a send-receive pair is armed with
+             * the id it is waiting for, so it cannot take this id-less message;
+             * only a bare receive, which is the receive armed for
+             * server-initiated traffic, does. */
             LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-                if (conn->reverse)
+                if (async_waiting( &conn->read_q ))
                 {
-                    peer = conn->reverse;
+                    peer = conn;
                     msg_type = ALPC_LPC_NEW_MESSAGE;
                     break;
                 }
-            if (!peer)
-            {
-                LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-                    if (async_waiting( &conn->read_q ))
-                    {
-                        peer = conn;
-                        msg_type = ALPC_LPC_NEW_MESSAGE;
-                        break;
-                    }
-            }
             if (!peer)
             {
                 struct list *head = list_head( &port->connections );
@@ -525,19 +578,15 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     list_add_tail( &peer->msg_queue, &msg->entry );
     wake_up( &peer->obj, 0 );
     reselect_alpc_port( peer );
-    signal_wait_completion_packets( &peer->obj );
-    fire_wait_completion_packets( &peer->obj );
-    /* a message queued on a reserve port is readiness of its connection:
-     * wake packets associated with the connection handle must fire too */
-    if (peer->owner)
-    {
-        signal_wait_completion_packets( &peer->owner->obj );
-        fire_wait_completion_packets( &peer->owner->obj );
-    }
+    /* readiness of any handle of a connection is readiness of all of them: the
+     * client keys its wake completion packets to the handle it arms the receive
+     * on, which for the server side is the listening port and for the client
+     * side may be the connection handle or its reserve handle */
+    wake_connection_waits( peer );
     /* the port handle becomes signaled while the message stays queued
-     * (delivered messages cleared it in reselect_alpc_port) */
-    if (!list_empty( &peer->msg_queue )) set_fd_signaled( peer->fd, 1 );
-    if (peer->owner && !list_empty( &peer->msg_queue )) set_fd_signaled( peer->owner->fd, 1 );
+     * (delivered messages cleared it in reselect_alpc_port); a message on a
+     * reserve port is readiness of its connection handle too */
+    update_alpc_readiness( peer );
 
     async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
     release_object( iosb );
@@ -554,10 +603,17 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
  * so the kernel fires it the moment the association is made */
 int alpc_port_ready( struct object *obj )
 {
-    struct alpc_port *port;
+    struct alpc_port *port, *pair;
 
     LIST_FOR_EACH_ENTRY( port, &alpc_port_list, struct alpc_port, list_entry )
-        if (&port->obj == obj) return !list_empty( &port->msg_queue );
+    {
+        if (&port->obj != obj) continue;
+        if (!list_empty( &port->msg_queue )) return 1;
+        /* a message waiting on the other handle of the same connection is a
+         * completed receive of this port too */
+        if ((pair = alpc_port_pair( port )) && !list_empty( &pair->msg_queue )) return 1;
+        return 0;
+    }
     return 0;
 }
 
@@ -1005,7 +1061,6 @@ DECL_HANDLER(recv_alpc_port)
         release_object( port );
         return;
     }
-
 
     if ((async = create_request_async( port->fd, get_fd_comp_flags( port->fd ), &req->async, 0 )))
     {
