@@ -950,6 +950,23 @@ struct async *find_pending_alpc_async( struct async_queue *queue, unsigned int m
     return NULL;
 }
 
+/* find the first async armed for an ALPC reply, i.e. one waiting for the
+ * reply of a specific request message id (the apc_context carries the id) */
+struct async *find_pending_alpc_reply_async( struct async_queue *queue )
+{
+    struct async *async;
+    LIST_FOR_EACH_ENTRY( async, &queue->queue, struct async, queue_entry )
+        if (!async->terminated && async->data.apc_context)
+            return (struct async *)grab_object( async );
+    return NULL;
+}
+
+/* message id a pending ALPC receive async is armed for (0 = any message) */
+unsigned int async_get_alpc_id( struct async *async )
+{
+    return (unsigned int)async->data.apc_context;
+}
+
 /* cancels sync I/O on a thread */
 DECL_HANDLER(cancel_sync)
 {

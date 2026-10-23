@@ -116,6 +116,7 @@ struct alpc_port
     struct alpc_port   *listen_port; /* client side: the server's listening port */
     client_ptr_t        port_context;/* server side: context passed to accept */
     struct list         conn_entry;  /* client side: entry in listen_port->connections */
+
 };
 
 /* ---- Forward declarations ---- */
@@ -294,6 +295,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     struct alpc_port *peer;
     struct alpc_message *msg;
     struct iosb *iosb;
+    unsigned int reply_id = 0;
 
     iosb = async_get_iosb( async );
     if (!iosb->in_data || !iosb->in_size)
@@ -306,11 +308,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     if (port->is_server)
     {
         /* Server replying on its listening port: route to the connected client.
-         * Match by MessageId if a client connection is waiting for this reply. */
+         * Match by MessageId if a client connection is waiting for this reply.
+         * The kernel also accepts a reply that carries no message id (no
+         * context supplied): it is matched to the oldest request on the
+         * connection that is still awaiting its reply, and the reply's id is
+         * stamped to that of the request. */
         struct alpc_port *conn;
         const void *data = iosb->in_data;
         data_size_t size = iosb->in_size;
-        unsigned int reply_id = 0;
 
         if (size >= sizeof(struct alpc_msg_attr_hdr) && *(const unsigned int *)data == ALPC_ATTR_HDR_MAGIC)
         {
@@ -328,6 +333,20 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 struct async *matching = find_pending_alpc_async( &conn->read_q, reply_id );
                 if (matching)
                 {
+                    release_object( matching );
+                    peer = conn;
+                    break;
+                }
+            }
+        }
+        else
+        {
+            LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+            {
+                struct async *matching = find_pending_alpc_reply_async( &conn->read_q );
+                if (matching)
+                {
+                    reply_id = async_get_alpc_id( matching );
                     release_object( matching );
                     peer = conn;
                     break;
@@ -397,10 +416,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             return;
         }
         msg->is_connect = 0;
-        if (user_size >= 0x1c)
-            msg->msg_id = *(const unsigned int *)((const char *)user_data + 0x18);
-        else
-            msg->msg_id = 0;
+        msg->msg_id = reply_id;
+        if (!msg->msg_id)
+        {
+            if (user_size >= 0x1c)
+                msg->msg_id = *(const unsigned int *)((const char *)user_data + 0x18);
+            else
+                msg->msg_id = 0;
+        }
         msg->data_size  = blob_size;
 
         hdr = (struct alpc_wire_hdr *)((char *)msg + sizeof(*msg));

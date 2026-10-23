@@ -35,7 +35,15 @@
 WINE_DEFAULT_DEBUG_CHANNEL(alpc);
 
 /* ALPC message types (subset of Windows LPC message types) */
-#define LPC_CONNECTION_REQUEST 10
+#define LPC_REQUEST            1
+#define LPC_DATAGRAM           2
+#define LPC_REPLY              0x10
+#define LPC_CONNECTION_REQUEST 10 /* matches the value server/alpc.c stamps */
+
+/* NtAlpcSendWaitReceivePort send flags */
+#define ALPC_SEND_REPLY        0x10000
+#define ALPC_SEND_REQUEST      0x20000
+#define ALPC_SEND_DATAGRAM     0x40000
 
 #define ALPC_WIRE_MAGIC 0x434e4e41 /* 'ANNC' */
 struct alpc_wire_hdr
@@ -454,12 +462,35 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         data_size_t send_size = send_msg->TotalLength;
         struct alpc_msg_attr_hdr attr_hdr;
 
-        /* The kernel stamps the message type from the send flags and assigns a
-         * unique non-zero MessageId to a new request (replies echo it back). */
-        if (flags & 0x10000)        send_msg->Type = 2; /* LPC_REPLY */
-        else if (flags & 0x20000)   send_msg->Type = 1; /* LPC_REQUEST */
-        if (!(flags & 0x10000) && !send_msg->MessageId)
+        /* The kernel stamps the message type from the send flags and owns the
+         * MessageId: a new request gets a unique non-zero id, a reply echoes
+         * back the id of the request identified by the message context, and a
+         * datagram carries no id. Applications leave these fields as zero (or
+         * echo the context back), relying on the kernel to fill them in. */
+        if (flags & ALPC_SEND_REPLY)
+        {
+            ALPC_CONTEXT_ATTR *ctx = send_msg_attr ?
+                (ALPC_CONTEXT_ATTR *)get_message_attribute( send_msg_attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE ) : NULL;
+            send_msg->Type = LPC_REPLY;
+            if (ctx) send_msg->MessageId = ctx->MessageId;
+        }
+        else if (flags & ALPC_SEND_REQUEST)
+        {
+            send_msg->Type = LPC_REQUEST;
+            if (!send_msg->MessageId) send_msg->MessageId = next_alpc_msg_id();
+        }
+        else if (flags & ALPC_SEND_DATAGRAM)
+        {
+            send_msg->Type = LPC_DATAGRAM;
+            send_msg->MessageId = 0;
+        }
+        else if (!send_msg->MessageId)
+        {
+            /* notification-style send on a connection port: kernel assigns an id
+             * only when the sender left the message uninitialized */
+            send_msg->Type = LPC_REQUEST;
             send_msg->MessageId = next_alpc_msg_id();
+        }
 
         memset( &attr_hdr, 0, sizeof(attr_hdr) );
         attr_hdr.magic = ALPC_ATTR_HDR_MAGIC;
