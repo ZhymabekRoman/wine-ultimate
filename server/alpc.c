@@ -116,10 +116,19 @@ struct alpc_port
     /* Connection only */
     struct alpc_port   *peer;        /* peer connection endpoint, or NULL */
     struct alpc_port   *listen_port; /* client side: the server's listening port */
+    struct alpc_port   *reverse;     /* client side: reserve (reverse) port for
+                                      * server-originated messages, or NULL */
     client_ptr_t        port_context;/* server side: context passed to accept */
     struct list         conn_entry;  /* client side: entry in listen_port->connections */
 
 };
+
+/* LPC message types stamped into the delivered PORT_MESSAGE header. The kernel
+ * owns this field: a reply to a pending request is LPC_REPLY, a message the
+ * server originates in the reverse direction is LPC_NEW_MESSAGE (delivered to
+ * the client's reverse/receive port, never to a request's reply slot). */
+#define ALPC_LPC_REPLY        0x02
+#define ALPC_LPC_NEW_MESSAGE  0x10
 
 /* ---- Forward declarations ---- */
 
@@ -212,6 +221,12 @@ static void alpc_port_destroy( struct object *obj )
         free( msg );
     }
 
+    if (port->reverse)
+    {
+        release_object( port->reverse );
+        port->reverse = NULL;
+    }
+
     if (port->is_server)
     {
         struct alpc_pending_conn *pc, *next_pc;
@@ -232,7 +247,7 @@ static void alpc_port_destroy( struct object *obj )
         if (port->peer)
         {
             async_wake_up( &port->peer->read_q, STATUS_PIPE_DISCONNECTED );
-            port->peer->peer = NULL;
+            if (port->peer->peer == port) port->peer->peer = NULL;
             port->peer = NULL;
         }
         /* client side: unlink from the listening port's connection list
@@ -298,6 +313,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     struct alpc_message *msg;
     struct iosb *iosb;
     unsigned int reply_id = 0;
+    unsigned int msg_type = 0;  /* LPC type to stamp into the delivered PORT_MESSAGE, 0 = keep */
 
     iosb = async_get_iosb( async );
     if (!iosb->in_data || !iosb->in_size)
@@ -334,11 +350,12 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         {
             LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
             {
-                struct async *matching = find_pending_alpc_async( &conn->read_q, reply_id );
+                struct async *matching = find_reply_alpc_async( &conn->read_q, reply_id );
                 if (matching)
                 {
                     release_object( matching );
                     peer = conn;
+                    msg_type = ALPC_LPC_REPLY;
                     break;
                 }
             }
@@ -346,14 +363,33 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         if (!peer)
         {
             /* Nothing is waiting for this message id, so the message is not the
-             * answer to a queued request: it is a call that the server side starts
-             * over this conversation while the client itself waits for its reply.
-             * Address it to the connection that has a receive pending (the kernel
-             * delivers an id-less message to the receiver that is waiting) and stamp
-             * it with id 0, so the receiver reads it as an incoming call and not as
-             * the reply to its own request. */
+             * answer to a queued request: it is a message that the server side
+             * originates in the reverse direction while the client itself waits
+             * for its reply.  The kernel delivers such a message as LPC_NEW_MESSAGE
+             * on the connection's reverse (reserve) port, where the client's
+             * callback receive is armed.  It must not land on the client
+             * connection's own queue: a receive waiting for a reply there would
+             * consume the callback as its reply payload.  Deliver to the reverse
+             * port's queue when a receive is armed there, and fall back to the
+             * connection that has a receive pending otherwise (the kernel
+             * delivers an id-less message to the receiver that is waiting). */
             LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-                if (async_waiting( &conn->read_q )) { peer = conn; break; }
+                if (conn->reverse && async_waiting( &conn->reverse->read_q ))
+                {
+                    peer = conn->reverse;
+                    msg_type = ALPC_LPC_NEW_MESSAGE;
+                    break;
+                }
+            if (!peer)
+            {
+                LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+                    if (async_waiting( &conn->read_q ))
+                    {
+                        peer = conn;
+                        msg_type = ALPC_LPC_NEW_MESSAGE;
+                        break;
+                    }
+            }
             if (!peer)
             {
                 struct list *head = list_head( &port->connections );
@@ -364,6 +400,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                     return;
                 }
                 peer = LIST_ENTRY( head, struct alpc_port, conn_entry );
+                msg_type = ALPC_LPC_NEW_MESSAGE;
             }
             reply_id = 0;
         }
@@ -442,6 +479,19 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         hdr->view_base    = attr_hdr.view_base;
         hdr->view_size    = attr_hdr.view_size;
         if (user_size) memcpy( hdr + 1, user_data, user_size );
+        if (!port->is_server && user_size >= 0x1c)
+        {
+            /* a client write echoing a message id a server receive is armed for
+             * is a reply: the kernel stamps it LPC_REPLY */
+            unsigned int mid = *(const unsigned int *)((const char *)user_data + 0x18);
+            struct async *m = mid ? find_reply_alpc_async( &peer->read_q, mid ) : NULL;
+            if (m)
+            {
+                release_object( m );
+                msg_type = ALPC_LPC_REPLY;
+            }
+        }
+        if (msg_type && user_size >= 8) *(unsigned int *)((char *)(hdr + 1) + 4) = msg_type;
     }
 
     list_add_tail( &peer->msg_queue, &msg->entry );
@@ -465,6 +515,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     port->is_server   = is_server;
     port->peer        = NULL;
     port->listen_port = NULL;
+    port->reverse     = NULL;
     port->port_context = 0;
     list_init( &port->msg_queue );
     init_async_queue( &port->read_q );
@@ -511,7 +562,6 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->view_size    = 0;
     if (pc->conn_data_size)
         memcpy( hdr + 1, pc->conn_data, pc->conn_data_size );
-
     list_add_tail( &server_port->msg_queue, &msg->entry );
     wake_up( &server_port->obj, 0 );
     reselect_alpc_port( server_port );
@@ -543,6 +593,7 @@ DECL_HANDLER(create_alpc_port)
         port->is_server   = 1;
         port->peer        = NULL;
         port->listen_port = NULL;
+        port->reverse     = NULL;
         port->port_context = 0;
         list_init( &port->msg_queue );
         init_async_queue( &port->read_q );
@@ -811,6 +862,40 @@ DECL_HANDLER(accept_alpc_connection)
     release_object( server_port );
 }
 
+DECL_HANDLER(wire_alpc_reverse_port)
+{
+    struct alpc_port *conn, *rev;
+
+    conn = (struct alpc_port *)get_handle_obj( current->process, req->conn, 0, &alpc_port_ops );
+    if (!conn) return;
+
+    rev = (struct alpc_port *)get_handle_obj( current->process, req->reverse, 0, &alpc_port_ops );
+    if (!rev)
+    {
+        release_object( conn );
+        return;
+    }
+
+    if (conn->is_server || !conn->peer || conn->reverse)
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        release_object( conn );
+        release_object( rev );
+        return;
+    }
+
+    /* The reverse port is a second client-side endpoint on the same connection:
+     * server-originated messages land on it, and replies written on it travel
+     * to the server side like those of the connection port itself. */
+    conn->reverse = (struct alpc_port *)grab_object( rev );
+    rev->peer = (struct alpc_port *)grab_object( conn->peer );
+    if (conn->listen_port) rev->listen_port = (struct alpc_port *)grab_object( conn->listen_port );
+    rev->port_context = conn->port_context;
+
+    release_object( conn );
+    release_object( rev );
+}
+
 DECL_HANDLER(recv_alpc_port)
 {
     struct alpc_port *port;
@@ -849,8 +934,11 @@ DECL_HANDLER(disconnect_alpc_port)
     if (!port->is_server && port->peer)
     {
         async_wake_up( &port->peer->read_q, STATUS_PIPE_DISCONNECTED );
-        release_object( port->peer->peer ); /* release client's ref to server */
-        port->peer->peer = NULL;
+        if (port->peer->peer == port)
+        {
+            release_object( port->peer->peer ); /* release client's ref to server */
+            port->peer->peer = NULL;
+        }
         release_object( port->peer );
         port->peer = NULL;
     }

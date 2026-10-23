@@ -955,6 +955,21 @@ struct async *find_pending_alpc_async( struct async_queue *queue, unsigned int m
     return NULL;
 }
 
+/* Find the pending async in queue armed with exactly this ALPC message id.
+ * Only the receive of a send-receive pair is armed with an id, so this matches
+ * the receiver that a reply answers and never a bare (callback) receive. */
+struct async *find_reply_alpc_async( struct async_queue *queue, unsigned int msg_id )
+{
+    struct async *async;
+    LIST_FOR_EACH_ENTRY( async, &queue->queue, struct async, queue_entry )
+    {
+        if (async->terminated) continue;
+        if (async->data.apc_context == (client_ptr_t)msg_id)
+            return (struct async *)grab_object( async );
+    }
+    return NULL;
+}
+
 /* cancels sync I/O on a thread */
 DECL_HANDLER(cancel_sync)
 {

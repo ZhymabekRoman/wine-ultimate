@@ -37,8 +37,20 @@ WINE_DEFAULT_DEBUG_CHANNEL(alpc);
 /* ALPC message types (subset of Windows LPC message types) */
 #define LPC_REQUEST            1
 #define LPC_DATAGRAM           2
-#define LPC_REPLY              0x10
+#define LPC_REPLY              0x02
+#define LPC_NEW_MESSAGE        0x10
 #define LPC_CONNECTION_REQUEST 10 /* matches the value server/alpc.c stamps */
+
+/* The kernel fills the RESERVE attribute of the connect reply with a reverse
+ * port handle: server-originated messages of the connection are delivered on
+ * it.  The app reads { port, context } at +8/+16 of the attribute. */
+#define ALPC_MESSAGE_RESERVE_ATTRIBUTE 0x80000000
+struct alpc_reserve_attr
+{
+    ULONGLONG reserved;
+    HANDLE    port;
+    PVOID     context;
+};
 
 /* NtAlpcSendWaitReceivePort send flags */
 #define ALPC_SEND_REPLY        0x10000
@@ -88,6 +100,7 @@ static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG a
         { ALPC_MESSAGE_DIRECT_ATTRIBUTE,         sizeof(ALPC_DIRECT_ATTR) },
         { ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE, sizeof(ALPC_WORK_ON_BEHALF_ATTR) },
         { ALPC_MESSAGE_EVENT_ATTRIBUTE,          sizeof(ALPC_EVENT) },
+        { ALPC_MESSAGE_RESERVE_ATTRIBUTE,        sizeof(struct alpc_reserve_attr) },
     };
     unsigned int i;
     SIZE_T off = sizeof(ALPC_MESSAGE_ATTRIBUTES);
@@ -370,6 +383,37 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
     {
         NtClose( *port_handle );
         *port_handle = NULL;
+    }
+
+    /* The kernel hands the client a reserve (reverse) port in the RESERVE
+     * attribute of the connect reply: messages the server originates in the
+     * reverse direction are delivered on it, and replies to them are written
+     * from it.  Create it and wire it onto the connection. */
+    if (!ret && *port_handle && out_msg_attr &&
+        (out_msg_attr->AllocatedAttributes & ALPC_MESSAGE_RESERVE_ATTRIBUTE))
+    {
+        struct alpc_reserve_attr *res = get_message_attribute( out_msg_attr, ALPC_MESSAGE_RESERVE_ATTRIBUTE );
+        if (res)
+        {
+            HANDLE rev = NULL;
+            if (!NtAlpcCreatePort( &rev, NULL, NULL ))
+            {
+                unsigned int wire_ret;
+                SERVER_START_REQ( wire_alpc_reverse_port )
+                {
+                    req->conn    = wine_server_obj_handle( *port_handle );
+                    req->reverse = wine_server_obj_handle( rev );
+                    wire_ret = wine_server_call( req );
+                }
+                SERVER_END_REQ;
+                if (!wire_ret)
+                {
+                    res->port = rev;
+                    out_msg_attr->ValidAttributes |= ALPC_MESSAGE_RESERVE_ATTRIBUTE;
+                }
+                else NtClose( rev );
+            }
+        }
     }
 
     return ret;

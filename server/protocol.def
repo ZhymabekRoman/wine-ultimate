@@ -4338,6 +4338,14 @@ enum inproc_sync_type
     obj_handle_t        handle;         /* ALPC port or connection handle */
 @END
 
+/* Wire a reserve (reverse) port to an accepted ALPC connection:
+ * the kernel hands the client a reverse port in the connect reply's RESERVE
+ * attribute; server-originated (reverse) messages are delivered on it */
+@REQ(wire_alpc_reverse_port)
+    obj_handle_t        conn;           /* client-side connection handle */
+    obj_handle_t        reverse;        /* fresh port to use as the reverse endpoint */
+@END
+
 /* Receive a message on an ALPC port with an event packet notification:
  * the event is signaled when the receive completes (ALPC_EVENT attribute) */
 @REQ(recv_alpc_port)
