@@ -231,6 +231,51 @@ Measured after the sync (probe-free build): battery 8×60 → 8/8 `rc=124 ALIVE`
 `msedgewebview2` counts 0, and one pre-sync run showed a 60 s `sync_cs` stall in the
 `ntoskrnl.exe` builtin (`blocked by` another thread) worth its own look.
 
+## CoreUICore dispatcher conversation (join contract, ALPC handle attributes)
+
+Tip pair `2eda257cc` + `ea645a491` (ultimate, linear after `62b11019d`).
+
+**Kernel gap closed (`2eda257cc`)**: the ALPC `LPC_HANDLE_ATTRIBUTE` path. A sender
+attaching `ALPC_MESSAGE_HANDLE_ATTRIBUTE` hands the kernel one object handle; the kernel
+duplicates it into the receiving process's handle table on delivery, reports it in the
+receiver's handle attribute with the notification action (1=created, 2=closed, 3=modified,
+4=closed-in-closing-process) and the handle count, and closes the duplicate when the
+message is dropped. Server: per-port owning process, duplication into the receiver at
+queue time with bookkeeping on the queued message (teardown closes = the close-notify
+path; delivery transfers ownership), carried as an optional block between the wine wire
+header and the user payload — the connect handshake replies land in caller buffers sized
+for the plain 72-byte header, so the header itself must not grow (an enlarged header
+stack-smashes the app's 64-byte connect buffer: the app hangs with a silent wineserver
+crash if the queued-message bookkeeping fields are not zeroed). ntdll marshals both
+directions. No protocol.def change.
+
+**Self-host conversation model (`ea645a491`)**, measured with wire probes on pristine
+binaries: the XAML engine registers the `CoreUICore` conversation itself (registrar
+method 14 on its self-host connection) and serves dispatcher-queue joins in-process.
+The builtin provider must NOT register that name — its registration answered result 4
+(already-registered) to the engine's own registration. The provider registers its thread
+only; routed joins (17/18) are answered with the native reply layout recovered from
+`RegistrarServerCaller::RegisterConversationClient` → `CoreUICallSend`:
+`[result, clientId, ConversationInfo(16), {serverId u64,u32}, peers(56-byte
+ConversationPeerInfo each), peerCount]` plus the ExportEndpoint notification handle on
+the reply's ALPC handle attribute. Unmarshal reference:
+`Thunk_Reply_RegisterConversationClient_73` (peers slot 4, count slot 10).
+
+**Failfast site identified (gap 4)**: `Microsoft.ui.xaml.dll+0x7E4D83` is
+`DirectUI::ErrorHelper::OriginateError`; the 45 startup occurrences chain through
+`CErrorService::ReportParserError → CErrorService::AddError →
+CJupiterErrorServiceListener::NotifyErrorAdded` (stowed bt, base-corrected): XAML's
+binary object writer fails to instantiate types whose WinRT activation answers
+E_NOINTERFACE — observed: `Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider`
+(combase checks `Microsoft.ui.xaml.dll`; on Windows this class lives in
+`Microsoft.UI.Xaml.Controls.dll` — env-prep registration mapping gap) and
+`Microsoft.UI.Xaml.Media.AcrylicBrush` (module correct, XAML's `DllGetActivationFactory`
+refuses on Wine). These are XAML parser/activation failures, not conversation-client
+failures: the dispatcher join is no longer the blocker after `ea645a491`. Next: correct
+class→module activation registration for XAML Controls classes and trace why
+`Microsoft.ui.xaml.dll`'s activation factory rejects `Microsoft.UI.Xaml.*` under the
+Wine self-host (likely CoreWindow/desktop-surface init state).
+
 ## Series on `ultimate`
 
 | Series | Patches | Notes |
