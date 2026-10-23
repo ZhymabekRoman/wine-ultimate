@@ -1,0 +1,93 @@
+/* WinAppSDK Microsoft.UI.Text activation surface provided by windows.ui.dll
+ *
+ * The Windows App SDK projects the UWP Windows.UI.Text.FontWeight value type
+ * (include/windows.ui.text.idl) into the Microsoft.UI.Text namespace and ships
+ * the Microsoft.UI.Text.FontWeights runtimeclass (Microsoft.UI.Text.winmd) whose
+ * statics the XAML parser activates for font-weight property values.  None of
+ * the framework modules answer DllGetActivationFactory for it (the ids are in
+ * none of their activation tables), so Wine's windows.ui.dll provides it.
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ */
+
+#pragma makedep header
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "windows.foundation.idl";
+import "windows.ui.text.idl";
+
+namespace Microsoft.UI.Text
+{
+    runtimeclass FontWeights;
+
+    /*
+     * Microsoft.UI.Text.FontWeights, Microsoft.UI.Text.winmd.  The vtable order of
+     * IFontWeightsStatics is the winmd method order (the MIDL projection): Black,
+     * Bold, ExtraBlack, ExtraBold, ExtraLight, Light, Medium, Normal, SemiBold,
+     * SemiLight, Thin - eleven property getters, each returning the
+     * Windows.UI.Text.FontWeight struct (a single UINT16).
+     */
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Microsoft.UI.Text.FontWeights),
+        uuid(386cd040-5404-5a8d-8bc7-2ca989f5c065)
+    ]
+    interface IFontWeights : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Microsoft.UI.Text.FontWeights),
+        uuid(cc390df6-76b0-5807-8b9d-e949a4e623ae)
+    ]
+    interface IFontWeightsStatics : IInspectable
+    {
+        [propget] HRESULT Black([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Bold([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT ExtraBlack([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT ExtraBold([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT ExtraLight([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Light([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Medium([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Normal([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT SemiBold([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT SemiLight([out, retval] Windows.UI.Text.FontWeight *value);
+        [propget] HRESULT Thin([out, retval] Windows.UI.Text.FontWeight *value);
+    }
+
+    /*
+     * Closed projection of Windows.Foundation.IReference`1<Windows.UI.Text.FontWeight>
+     * (the boxing interface for the FontWeight value type; the closed pinterface
+     * iid per the WinRT projection of that instantiation).  Declared as a named
+     * interface because widl can only instantiate pinterface declarations whose
+     * parameter type comes from winmd metadata; the value-type parameter here is
+     * an .idl struct.  The box object returned for the parameterized activatable
+     * class id answers QI for this iid.
+     */
+    [
+        uuid(fd27fa16-d457-5871-86d0-58728fb611af)
+    ]
+    interface IReference_FontWeight : IInspectable
+    {
+        [propget] HRESULT Value([out, retval] Windows.UI.Text.FontWeight *value);
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Microsoft.UI.Text.IFontWeightsStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass FontWeights
+    {
+        [default] interface Microsoft.UI.Text.IFontWeights;
+    }
+}

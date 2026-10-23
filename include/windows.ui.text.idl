@@ -31,6 +31,7 @@ import "windows.globalization.idl";
 namespace Windows.UI.Text
 {
     typedef enum UnderlineType UnderlineType;
+    typedef struct FontWeight FontWeight;
 
     declare
     {
@@ -60,5 +61,11 @@ namespace Windows.UI.Text
         ThickDashDotDot = 17,
         ThickDotted     = 18,
         ThickLongDash   = 19
+    };
+
+    [contract(Windows.Foundation.UniversalApiContract, 1.0)]
+    struct FontWeight
+    {
+        UINT16 Value;
     };
 }

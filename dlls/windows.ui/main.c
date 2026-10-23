@@ -56,6 +56,17 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (!wcscmp( buffer, L"Windows.UI.Core.CoreCursor" ))
         IActivationFactory_QueryInterface( core_cursor_factory, &IID_IActivationFactory, (void **)factory );
 
+    /*
+     * Windows App SDK types the XAML parser activates by class id; no framework
+     * module has them in its activation table (the WinAppSDK modules answer
+     * CLASS_E_CLASSNOTAVAILABLE for FontWeights), so the registry routes them here.
+     */
+    if (!wcscmp( buffer, RuntimeClass_Microsoft_UI_Text_FontWeights ))
+        IActivationFactory_QueryInterface( fontweights_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"Windows.Foundation.IReference`1<Windows.UI.Text.FontWeight>" ))
+        IActivationFactory_QueryInterface( fontweight_reference_factory, &IID_IActivationFactory, (void **)factory );
+
     if (*factory) return S_OK;
     /* This module is reached through the ext-ms-win-windowing-internal-l1-1-0 apiset as
      * Windowing_DllGetActivationFactory, and the Windows App SDK chains that probe to its own

@@ -34,6 +34,7 @@ import "windows.ui.core.idl";
 import "windows.ui.input.idl";
 import "windows.ui.windowmanagement.idl";
 import "windows.ui.viewmanagement.idl";
+import "windows.ui_private.idl";
 
 namespace Windows.UI.Core {
     runtimeclass CoreWindow;

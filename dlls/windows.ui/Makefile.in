@@ -5,9 +5,11 @@ SOURCES = \
 	accessibilitysettings.c \
 	classes.idl \
 	corewindow.c \
+	fontweights.c \
 	inputpane.c \
 	main.c \
 	uisettings.c \
 	uiviewsettings.c \
+	windows.ui_private.idl \
 	weakref.c \
 	windowing.c

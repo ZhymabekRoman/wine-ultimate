@@ -37,7 +37,12 @@
 #include "windows.ui.core.h"
 #define WIDL_using_Windows_UI_ViewManagement
 #include "windows.ui.viewmanagement.h"
+#define WIDL_using_Windows_UI_Text
+#define WIDL_using_Microsoft_UI_Text
+#include "windows.ui_private.h"
 
+extern IActivationFactory *fontweights_factory;
+extern IActivationFactory *fontweight_reference_factory;
 extern IActivationFactory *accessibilitysettings_factory;
 extern IActivationFactory *uisettings_factory;
 extern IActivationFactory *uiviewsettings_factory;
