@@ -206,13 +206,29 @@ static BOOL registrar_register_thread( void )
         WARN( "RegisterThread failed, status %#lx.\n", status );
         return FALSE;
     }
-    if (reply_size >= sizeof(*reply_msg) + 88)
+    if (reply_size >= sizeof(*reply_msg) + CN_ITEM_OFFSET + 8)
     {
         const char *p = (const char *)reply_msg + sizeof(*reply_msg);
+        struct tlv_reader rr;
+        const void *data;
+        ULONG size;
 
-        provider.client_id = *(const ULONG *)(p + CN_REPLY_ID_OFFSET);
-        TRACE( "registered with registrar, client id %u.\n", provider.client_id );
-        return TRUE;
+        /* reply item at +40 is a bare TLV stream (no call-frame header):
+         * RegisterThreadInfo {result, client-id pool base 0x40000, size} (12),
+         * the client-id slot (4) and the queue max size (8). */
+        rr.base = p + CN_ITEM_OFFSET;
+        rr.offset = 0;
+        if (tlv_read( &rr, &data, &size ) && size >= 12)   /* info block */
+        {
+            if (tlv_read( &rr, &data, &size ) && size >= 4)
+            {
+                provider.client_id = *(const ULONG *)data;
+                TRACE( "registered with registrar, client id %u.\n", provider.client_id );
+                return TRUE;
+            }
+        }
+        WARN( "RegisterThread reply not in TLV form.\n" );
+        return FALSE;
     }
     WARN( "RegisterThread short reply %u bytes.\n", reply_size );
     return FALSE;
@@ -221,40 +237,51 @@ static BOOL registrar_register_thread( void )
 /*
  * RegisterConversation: declare the "CoreUICore" conversation so the
  * registrar name lookup finds it when XAML dispatcher queues join.
- * verb 2 subid 14, six parameters: conversation name, server name,
- * ConversationInfo(24), RoutingInfo(16), HIDENTITY(40), ScopeID(8).
+ *
+ * The self-hosted registrar server marshals the call frame strictly: the
+ * receive host validates the TLV stream against the method signature
+ * (RemoteRegistrarServerReceiveThunk::Thunk_RegisterConversation_164) and
+ * answers any mismatch with an OnProtocolException notification carrying
+ * protocol error 99 (MessageCallReceiveHost::NotifyProtocolViolation).  The
+ * accepted signature is, in wire order:
+ *      conversation name (UTF-16 string)
+ *      server name       (UTF-16 string)
+ *      ScopeID           16 bytes {kind, id, u64}   (kind 0 = local, id 0)
+ *      ConversationInfo  16 bytes {0, itemOwner, serverStyle, connectionMode}
+ *      RoutingInfo       24 bytes (must not be all-zero: RoutingInfo::Invalid)
+ *      HIDENTITY         40 bytes (all-zero = local identity)
+ * Validation (level 2, RegisteredObjectValidator): scope kind must be 0/1/2/3/5
+ * (kind 0 with a non-zero id must equal the session id), the info fields must
+ * be in range, and the routing must not be the all-zero Invalid value.
  */
 static BOOL registrar_register_conversation( void )
 {
     static const WCHAR conversation_name[] = {'C','o','r','e','U','I','C','o','r','e',0};
     static const WCHAR server_name[] = {'W','i','n','e','C','o','r','e','M','e','s','s','a','g','i','n','g',0};
     ULONG reply_size = REGISTRAR_MESSAGE_SIZE;
-    char buffer[sizeof(ALPC_PORT_MESSAGE) + 256], reply[REGISTRAR_MESSAGE_SIZE];
+    char buffer[sizeof(ALPC_PORT_MESSAGE) + 512], reply[REGISTRAR_MESSAGE_SIZE];
     char *frame = buffer + sizeof(ALPC_PORT_MESSAGE);
     ALPC_PORT_MESSAGE *reply_msg = (void *)reply;
-    ULONG off = FRAME_HEADER_SIZE;
-    ULONG info[6] = {0};            /* ConversationInfo: itemOwner 0, serverStyle 0, connectionMode 0 */
-    ULONG routing[4];               /* RoutingInfo: scope kind + our client id */
-    BYTE identity[40] = {0};        /* HIDENTITY: local session, empty */
-    ULONG scope[2] = {0, 0};        /* ScopeID: kind 0 = local process */
+    ULONG off;
+    ULONG scope[4] = {0};               /* ScopeID: kind 0 = local process, id 0 */
+    ULONG info[4] = {0};                /* ConversationInfo: core-owned, standard style, lazy */
+    ULONG routing[6] = {0};             /* RoutingInfo: client id of this registration */
+    BYTE identity[40] = {0};            /* HIDENTITY: local, empty */
     NTSTATUS status;
     char *item;
 
-    routing[0] = 0;
     routing[1] = provider.client_id;
-    routing[2] = 0;
-    routing[3] = 0;
 
     /* item: CoreUICall call frame verb 2 subid 14 */
     item = frame + CN_ITEM_OFFSET;
-    frame_init( item, 256 - CN_ITEM_OFFSET, 2, 14 );
+    frame_init( item, 0, 2, 14 );
     off = FRAME_HEADER_SIZE;
     off = frame_append_string( item, off, conversation_name );
     off = frame_append_string( item, off, server_name );
+    off = frame_append_tlv( item, off, scope, sizeof(scope) );
     off = frame_append_tlv( item, off, info, sizeof(info) );
     off = frame_append_tlv( item, off, routing, sizeof(routing) );
     off = frame_append_tlv( item, off, identity, sizeof(identity) );
-    off = frame_append_tlv( item, off, scope, sizeof(scope) );
     *(ULONG *)item = off;
 
     /* datagram envelope */
@@ -270,34 +297,33 @@ static BOOL registrar_register_conversation( void )
         WARN( "RegisterConversation failed, status %#lx.\n", status );
         return FALSE;
     }
-    if (reply_size >= sizeof(*reply_msg) + 88)
+    if (reply_size >= sizeof(*reply_msg) + CN_ITEM_OFFSET + 8)
     {
         const char *p = (const char *)reply_msg + sizeof(*reply_msg);
-        ULONG itemsize = *(const ULONG *)(p + 56);
-        ULONG total = reply_size - sizeof(*reply_msg);
+        struct tlv_reader rr;
+        const void *data;
+        ULONG size;
+        ULONG result;
 
-        if (itemsize >= 16 && total >= 80 + itemsize)
+        /* reply item at +40 is a bare TLV stream: [result, conversation id,
+         * server id (u64)] (Reply_RegisterConversation). */
+        rr.base = p + CN_ITEM_OFFSET;
+        rr.offset = 0;
+        if (tlv_read( &rr, &data, &size ) && size >= 4)
         {
-            const char *item_reply = p + 80;
-            struct tlv_reader rr;
-            const void *data;
-            ULONG size;
-
-            rr.base = item_reply + FRAME_HEADER_SIZE;
-            rr.offset = 0;
-            if (tlv_read( &rr, &data, &size ) && size >= 4 && *(const ULONG *)data == 0)
+            result = *(const ULONG *)data;
+            if (result)
             {
-                if (tlv_read( &rr, &data, &size ) && size >= 4)
-                    provider.conversation_id = *(const ULONG *)data;
-                TRACE( "registered conversation, id %u.\n", provider.conversation_id );
-                return TRUE;
+                WARN( "RegisterConversation rejected, result %#x.\n", result );
+                return FALSE;
             }
-            WARN( "RegisterConversation rejected, result %#x.\n", *(const ULONG *)data );
-            return FALSE;
+            if (tlv_read( &rr, &data, &size ) && size >= 4)
+                provider.conversation_id = *(const ULONG *)data;
+            TRACE( "registered conversation, id %u.\n", provider.conversation_id );
+            return TRUE;
         }
-        TRACE( "RegisterConversation reply %u bytes itemsize %u (item at reply+80, need %u).\n",
-               total, itemsize, 80 + itemsize );
-        return TRUE;   /* accepted; conversation id left at the default */
+        WARN( "RegisterConversation reply not in TLV form.\n" );
+        return FALSE;
     }
     WARN( "RegisterConversation short reply %u bytes.\n", reply_size );
     return FALSE;
@@ -337,9 +363,23 @@ static NTSTATUS registrar_reply( const void *frame, ULONG frame_size,
 
 /*
  * Answer the requests the registrar routes to the provider conversation
- * server (verb 2): joins, peer management and CoreUICall verb traffic.
- * Success replies carry result 0 and the trailing words the requesters
- * unmarshal.
+ * server (frame verb 2): joins (RegisterConversationClient 17,
+ * RegisterPendingConversationClientForServer 18), peer management
+ * (ClientConversationAttached 0, FindCrossProcConnection 13,
+ * CompleteCrossProcConnection 4, CompleteLocalConnection 5, CloseConnection
+ * 6, ReleaseConversationClient 16) and CoreUICall verb traffic.
+ *
+ * The reply is a queue datagram with the same 40-byte header as the request
+ * and a call frame of verb 0 (reply) dispatched by ALPC message-id
+ * correlation.  The TLV stream must match the requester's unmarshalling
+ * signature exactly (extra or missing parameters => protocol violation 99):
+ *   join 17/18 -> Reply_RegisterConversationClient:
+ *                  [result, conversationId, serverId(u64), peer count,
+ *                   peer array, ConversationInfo(16)]
+ *   all others -> [result]
+ * Notifications (frame verb 0: OnProtocolException, conversation change
+ * broadcasts; also fire-and-forget AttachPeer-family verbs 11/31) carry no
+ * pending request and must not be answered.
  */
 static void handle_routed_request( const void *payload, ULONG size, const ALPC_CONTEXT_ATTR *ctx )
 {
@@ -349,49 +389,67 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
     ULONG itemsize = *(const ULONG *)((const char *)payload + 32);
     ULONG verb, subid, off;
     ULONG result = 0, zero32 = 0;
-    ULONGLONG zero64 = 0;
+    ULONGLONG server_id = 0, zero64 = 0;
+    ULONG info16[4] = {0};
 
-    if (size < CN_ITEM_OFFSET + 8 || cmd != 2) return;
+    if (size < CN_ITEM_OFFSET + FRAME_HEADER_SIZE) return;
     verb = *(const USHORT *)(item + 4);
     subid = *(const USHORT *)(item + 6);
     TRACE( "registrar routed request verb %u subid %u (item %u bytes).\n", verb, subid, itemsize );
 
+    /* verb 2 = request (correlated reply required); verb 0 = notification;
+     * verb 3 = reply to our own outstanding request (handled by the sender) */
+    if (verb == 0)
+    {
+        if (subid == 0)
+        {
+            struct tlv_reader rr = { item + FRAME_HEADER_SIZE, 0 };
+            const void *data;
+            ULONG sz;
+
+            if (tlv_read( &rr, &data, &sz ) && sz >= 4)
+                WARN( "registrar protocol exception %#x.\n", *(const ULONG *)data );
+        }
+        return;
+    }
     if (verb != 2) return;
 
-    /* reply datagram: 80-byte queue header, then the RPC reply frame */
-    memset( datagram, 0, 80 );
-    off = FRAME_HEADER_SIZE;
-    frame_init( datagram + 80, REGISTRAR_MESSAGE_SIZE - 80, 0, (USHORT)subid );
-    off = frame_append_tlv( datagram + 80, off, &result, sizeof(result) );
+    switch (subid)
+    {
+        case 11:   /* ConnectionAccepted (fire-and-forget) */
+        case 31:   /* NotifyLocalConnectionCreated (fire-and-forget) */
+            return;
+        default:
+            break;
+    }
+
+    /* reply datagram: 40-byte queue header, then a bare TLV stream
+     * (the reply item carries no call-frame header; dispatch is by ALPC
+     * message-id correlation with the pending request) */
+    memset( datagram, 0, CN_ITEM_OFFSET );
+    off = 0;
+    off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &result, sizeof(result) );
 
     switch (subid)
     {
         case 17:   /* RegisterConversationClient (join) */
         case 18:   /* RegisterPendingConversationClientForServer */
-        case 13:   /* FindCrossProcConnection */
-        case 4:    /* CompleteCrossProcConnection */
-        case 5:    /* CompleteLocalConnection */
-        case 6:    /* CloseConnection */
-        case 16:   /* ReleaseConversationClient */
-            off = frame_append_tlv( datagram + 80, off, &zero32, sizeof(zero32) );
-            off = frame_append_tlv( datagram + 80, off, &zero32, sizeof(zero32) );
-            off = frame_append_tlv( datagram + 80, off, &zero64, sizeof(zero64) );
+            server_id = provider.conversation_id;
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &provider.conversation_id,
+                                    sizeof(provider.conversation_id) );
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &server_id, sizeof(server_id) );
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &zero32, sizeof(zero32) );
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, NULL, 0 );   /* no peers */
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, info16, sizeof(info16) );
             break;
         default:
             break;
     }
-    *(ULONG *)(datagram + 80) = off;   /* item frame total */
-
-    *(ULONG *)(datagram + 16) = 0x30;
+    *(ULONG *)(datagram + 16) = 0;                     /* command: reply */
     *(ULONGLONG *)(datagram + 24) = CN_MAX_MSG;
-    *(ULONG *)(datagram + 32) = provider.client_id;
-    *(ULONG *)(datagram + 40) = 4;
-    *(ULONG *)(datagram + 48) = 4;
-    *(ULONG *)(datagram + 56) = off;   /* item size */
-    *(ULONGLONG *)(datagram + 64) = 1;
-    *(ULONGLONG *)(datagram + 72) = 0x10;
+    *(ULONG *)(datagram + 32) = off;                   /* item size */
 
-    registrar_reply( datagram, 80 + off, ctx );
+    registrar_reply( datagram, CN_ITEM_OFFSET + off, ctx );
 }
 
 static DWORD WINAPI provider_thread( void *param )
