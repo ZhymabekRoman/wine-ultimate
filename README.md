@@ -109,6 +109,24 @@ harness generator `~/wa-work/tools/mk_activatable_reg.py` parses the exact
 UTF-16 class names embedded in every other module):
 
 - `Microsoft.UI.Xaml.*` (650 classes, exact map) → `Microsoft.ui.xaml.dll`
+- the WinUI "Controls" set → `Microsoft.UI.Xaml.Controls.dll`: the 151 class ids
+  that module's exported `DllGetActivationFactory` answers with `S_OK` —
+  `Microsoft.UI.Xaml.Controls.*`, `…Controls.Primitives.*`, `…Automation.Peers.*`,
+  `…Controls.AnimatedVisuals.*`, `XamlControlsResources`,
+  `XamlControlsXamlMetaDataProvider` and the WinUI media types
+  (`Microsoft.UI.Xaml.Media.AcrylicBrush` and 3 more). The XAML binary does not
+  implement these: its creator map and Controls' activation dispatch are disjoint
+  (probed, zero overlap) and `Microsoft.ui.xaml.dll` answers them with
+  `0x80040111`. Controls' compiled dispatch chain also *references* class ids it
+  delegates to the XAML binary (`Microsoft.UI.Xaml.Application`,
+  `Microsoft.UI.Dispatching.DispatcherQueue`, `Microsoft.UI.Xaml.Window`,
+  `Windows.Foundation.Uri`, `Windows.Globalization.ApplicationLanguages`,
+  `Windows.ApplicationModel.DesignMode`, the `Microsoft.UI.Private.Controls.*`
+  test hooks) — mapping those to Controls costs `0x80040111` on the startup path.
+  `mk_activatable_reg.py` separates them: the answer set is the probe-derived
+  data file `tools/data/controls_classes.probed.txt` (pinned to the binary
+  sha256 `f87bcb9b…`), the chain literals are read from the PE only within 2
+  call edges of the export and serve as the delegation report
 - `Microsoft.UI.Dispatching.*` → `CoreMessagingXP.dll` (the XAML binary's map
   does *not* contain the DispatcherQueue classes; pointing them at
   `Microsoft.ui.xaml.dll` yields `0x80040111 CLASS_E_NOTSUPPORTED` at
@@ -132,7 +150,39 @@ System-provided classes resolve to Wine builtins:
 and `Windows.UI.Core.{CoreWindow,CoreCursor}` → `windows.ui.dll`. These are on
 the XAML startup path: `Microsoft.Internal.FrameworkUdk.dll!Switcher::GetOSVersion`
 fail-fasts with `0x80040154` if `ApiInformation` does not activate, and
-`FrameworkApplication::StartDesktop` fails on `UISettings`.
+`FrameworkApplication::StartDesktop` fails on `UISettings`. The remaining
+background classes the app activates during startup, each probe-verified against
+the module's `DllGetActivationFactory` (a module answers only the ids in its own
+dispatch — `Windows.ApplicationModel.Core.CoreApplication` is answered by
+`twinapi.appcore.dll`, **not** by `windows.applicationmodel.dll`; the
+AnalyticsInfo class is `Windows.System.Profile.AnalyticsInfo`, answered by
+`twinapi.appcore.dll`):
+
+```reg
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Profile.AnalyticsInfo]
+"DllPath"="C:\windows\system32\twinapi.appcore.dll"
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Media.Devices.MediaDevice]
+"DllPath"="C:\windows\system32\windows.media.devices.dll"
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Enumeration.DeviceInformation]
+"DllPath"="C:\windows\system32\windows.devices.enumeration.dll"
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Connectivity.NetworkInformation]
+"DllPath"="C:\windows\system32\windows.networking.connectivity.dll"
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.Core.CoreApplication]
+"DllPath"="C:\windows\system32\twinapi.appcore.dll"
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DesignMode]
+"DllPath"="C:\windows\system32\windows.applicationmodel.dll"
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Globalization.ApplicationLanguages]
+"DllPath"="C:\windows\system32\windows.globalization.dll"
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Foundation.Uri]
+"DllPath"="C:\windows\system32\wintypes.dll"
+```
+
+Keys left over from an earlier, wider mapping are **not** overwritten by a
+narrower import — `combase` keeps resolving the stale `DllPath` (a leftover
+`Windows.ApplicationModel.Core.CoreApplication → Microsoft.UI.Xaml.Controls.dll`
+cost a startup failure after the Controls mapping was corrected). The generator
+emits `[-HKEY_…]` deletions for every key its map no longer contains
+(`/tmp/wa_activatable_del.reg`) and the harness imports them before the map.
 
 App defaults and the build knob (per-app Windows version + the CoreMessagingXP
 wake-path knob of §1):
@@ -184,12 +234,22 @@ export WINE_FRAMEWORK_PACKAGE_FULL_NAME='Microsoft.WindowsAppRuntime.1.6_6000.51
 export WINE_FRAMEWORK_PACKAGE_PATH='Z:\path\to\packages\Microsoft.WindowsAppRuntime.1.6_6000.519.329.0_x64__8wekyb3d8bbwe'
 ```
 
-### 4. Prefix materialization
+### 3a. Prefix materialization (builtin copies must equal the build tree)
 
 Wine 11 materializes builtin PE DLLs into the prefix (`drive_c/windows/system32`,
-`syswow64`). A restored/skeleton prefix fails at `kernel32.dll` (`c0000135`);
-repopulate from the build tree (`dlls/*/x86_64-windows/*.dll` → `system32`,
+`syswow64`) and loads builtins **from the prefix**, not from `WINEDLLPATH`. A
+restored/skeleton prefix fails at `kernel32.dll` (`c0000135`); repopulate from
+the build tree (`dlls/*/x86_64-windows/*.dll` → `system32`,
 `dlls/*/i386-windows/*.dll` → `syswow64`) before first run.
+
+The copies go stale silently after a source sync: measured on this prefix, 22
+modules lagged the tip build (`combase`, `twinapi.appcore`, `windows.ui`,
+`wintypes`, `coremessaging`, `d3d11`, `dcomp`, `dxgi`, `user32`,
+`windows.system.threading`, …) — every measurement taken against them reflects
+the old tree, and a fix that lands in the tree does not reach the app.
+`~/wa-work/wa_syncbuiltins.sh` re-materializes every
+`dlls/*/x86_64-windows/*.dll` (plus the comctl32 v6 assembly copy of §2a),
+reports `new/updated/unchanged`, and is idempotent; run it after every build.
 
 ## CoreUICore self-host registrar connect (partition-connect failfast)
 
@@ -275,6 +335,69 @@ failures: the dispatcher join is no longer the blocker after `ea645a491`. Next: 
 class→module activation registration for XAML Controls classes and trace why
 `Microsoft.ui.xaml.dll`'s activation factory rejects `Microsoft.UI.Xaml.*` under the
 Wine self-host (likely CoreWindow/desktop-surface init state).
+
+## XAML activation layer: cleared (Controls mapping, d2d1 published device ids)
+
+The fail-fast site of the previous section is resolved. The `E_NOINTERFACE`
+activations that fed `CErrorService::ReportParserError` → managed
+`RaiseFailFast` (`c0000602`, `rc=2`) had three distinct causes, **none of them a
+CoreWindow/desktop-surface or `WindowsXamlManager` init gate**:
+
+1. **Module mapping (registry configuration).** `XamlControlsResources`,
+   `XamlControlsXamlMetaDataProvider`, `Microsoft.UI.Xaml.Media.AcrylicBrush`
+   and the rest of the WinUI Controls set are implemented by
+   `Microsoft.UI.Xaml.Controls.dll`. `AcrylicBrush` is *not* in
+   `Microsoft.ui.xaml.dll`'s 650-entry creator map (parsed from the PE), which is
+   why that module answered `0x80040111` for it: the refusal was a mapping gap,
+   not a runtime gate. DGAF matrix over all 3879 `Microsoft.UI.*` ids:
+   `Microsoft.ui.xaml.dll` answers 627, Controls 151, **zero overlap**.
+2. **Stale and over-broad registry keys.** Mapping every
+   `Microsoft.UI.Xaml.*` id that is not in the XAML map to `Microsoft.ui.xaml.dll`
+   (the old namespace-prefix fallback) and harvesting Controls' dispatch-chain
+   literals both produced keys for ids the module delegates
+   (`Microsoft.UI.Xaml.Application`, `Microsoft.UI.Dispatching.DispatcherQueue`,
+   `Windows.Foundation.Uri`, …); the app asked those and got `0x80040111`. See
+   §2/§2b for the corrected derivation and for deleting superseded keys.
+3. **`d2d1` published device interface ids (source gap).** `dwmcorei.dll`'s
+   `DllMain` → `Startup()` calls `D2D1CreateFactory(ID2D1Factory1)` and queries
+   the factory for `ID2D1Device` (`{6f72c0a2-6db7-46e9-9b62-b58a23f4928b}`).
+   Wine's d2d1 uses locally generated ids for the device family
+   (`ID2D1Device` = `47dd575d-…` in `include/d2d1_1.idl`) and the factory object
+   refused device queries outright, so the query returned `E_NOINTERFACE`;
+   `Startup` failed, `DllMain` returned `FALSE`, `dwmcorei` failed its image load
+   with `ERROR_DLL_INIT_FAILED` (`0x45a`), and because `dcompi.dll` imports
+   `dwmcorei` its load failed too — which fails **every**
+   `Microsoft.UI.Composition.*` activation (the app's first composition
+   activation is what raised the managed fail-fast). Fixed in `ultimate` by
+   `d2d1: answer the published device interface ids on the factory`
+   (`eb74e0827`): the factory answers the published ids of `ID2D1Device`/
+   `ID2D1Device1` with its implicit device (built on the factory's D3D10 device,
+   as `CreateDevice()` does) and the device/context objects accept the published
+   ids as aliases.
+
+Measured after the fix (pristine app binaries, hashes identical to `.orig`,
+registry configuration only, probes removed):
+
+| metric | before | after |
+| --- | --- | --- |
+| `RoGetActivationFactory … not found in` (parser chain) | 45–48 | **0** |
+| `RaiseFailFastException` | 32 | **0** |
+| 150 s run | `rc=2` DIED | **`rc=124` ALIVE**, `fatal=0`, `av=0` |
+| battery 8 × 60 s | 8/8 `rc=2` DIED | **8/8 `rc=124` ALIVE**, `fatal=0` |
+| windows created (`NtUserCreateWindowEx`) | ~10 | **19** |
+| `WebView2Loader` / `msedgewebview2` | 0 / 0 | 0 / 0 |
+| `WinUIDesktopWin32WindowClass` X windows | 0 | **0** (screenshot blank, 295 B) |
+
+The XAML-activation fail-fast is gone and the process survives the whole
+startup sequence, but the app is **parked before its XAML window**: no
+`WinUIDesktopWin32WindowClass` registration, no visible window, no WebView2
+boot. Next gaps: (a) find where the main thread parks after the activation
+layer resolves — the thread-dump step of `wa_diag150.sh` is broken (its
+`winedbg` pid detection attaches a stale pid, "Can't attach process 0020:
+error 5") and must be repaired before the parked stack can be read;
+(b) `ID2D1Device2…6` published ids are still unmapped in `d2d1`;
+(c) the DComp device path (`dcomp`/`dwmcorei` compositor creation) has not been
+exercised yet, since the app never reaches composition.
 
 ## Series on `ultimate`
 
