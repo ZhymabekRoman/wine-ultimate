@@ -34,6 +34,16 @@
 
 #include "wine/test.h"
 
+HRESULT WINAPI CoreMsgCreateSession( ULONG flags, void **session );
+HRESULT WINAPI CoreMsgGetExistingSession( void **session );
+HRESULT WINAPI CoreUICallCreateEndpointHost( void *session, void **send_out, void **recv_out );
+HRESULT WINAPI CoreUICallCreateConversationHost( void *session, IUnknown *peer, void **send_out, void **recv_out );
+HRESULT WINAPI CoreUICallComputeMaximumMessageSize( void *host, const unsigned char **type_defs, ULONG count,
+                                                    ULONG max_string, ULONG max_array, ULONG max_blob, ULONG *out );
+HRESULT WINAPI CoreUICallGetAddressOfParameterInBuffer( const void *msg, ULONG offset, ULONG index, void **out );
+HRESULT WINAPI CoreUICallSendVaList( void *host, ULONG_PTR conn, ULONG flag, USHORT verb, USHORT count,
+                                     const unsigned char *type_def, void *args );
+
 #define check_interface( obj, iid ) check_interface_( __LINE__, obj, iid )
 static void check_interface_( unsigned int line, void *obj, const IID *iid )
 {
@@ -536,6 +546,98 @@ done:
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_coreuicall_session( void )
+{
+    void *session = NULL, *session2 = NULL;
+    HRESULT hr;
+
+    hr = CoreMsgCreateSession( 0, &session );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!session, "got NULL session.\n" );
+
+    hr = CoreMsgCreateSession( 4, &session2 );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    ok( !session2, "got non-NULL session.\n" );
+
+    hr = CoreMsgCreateSession( 0, NULL );
+    ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+
+    hr = CoreMsgGetExistingSession( &session2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!session2, "got NULL session.\n" );
+    IUnknown_Release( (IUnknown *)session2 );
+    IUnknown_Release( (IUnknown *)session );
+}
+
+static void test_coreuicall_conversation( void )
+{
+    static const unsigned char td_dword[] = {1, 3, 0};
+    static const unsigned char td_byte_word[] = {2, 1, 2, 0};
+    void *session = NULL, *send = NULL, *recv = NULL, *peer_send = NULL;
+    const unsigned char *tds[] = {td_dword};
+    const unsigned char *tds2[] = {td_byte_word};
+    ULONG max = 0, val = 7;
+    void *slots[] = {&val};
+    void *addr = NULL;
+    HRESULT hr;
+
+    hr = CoreMsgCreateSession( 0, &session );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = CoreUICallCreateEndpointHost( session, &send, &recv );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!send && !!recv, "got NULL host.\n" );
+
+    hr = CoreUICallCreateEndpointHost( NULL, &send, &recv );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+
+    hr = CoreUICallComputeMaximumMessageSize( send, tds, 1, 0, 0, 0, &max );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( max == 16, "got max %u.\n", max );
+
+    hr = CoreUICallComputeMaximumMessageSize( send, tds2, 1, 0, 0, 0, &max );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( max == 24, "got max %u.\n", max );
+
+    /* 8 byte header + [u32 size=4][u32] + [u32 size=2][u16][pad] */
+    {
+        unsigned char msg[8 + 4 + 4 + 4 + 4] = {0};
+        *(ULONG *)(msg + 8) = 4;
+        *(ULONG *)(msg + 12) = 0x11223344;
+        *(ULONG *)(msg + 16) = 2;
+        *(USHORT *)(msg + 20) = 0x5566;
+
+        hr = CoreUICallGetAddressOfParameterInBuffer( msg, sizeof(msg), 0, &addr );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( addr == msg + 12, "got addr %p.\n", addr );
+        hr = CoreUICallGetAddressOfParameterInBuffer( msg, sizeof(msg), 1, &addr );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( addr == msg + 20, "got addr %p.\n", addr );
+        hr = CoreUICallGetAddressOfParameterInBuffer( msg, sizeof(msg), 2, &addr );
+        ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+    }
+
+    /* a send over an endpoint host with no peer has no destination */
+    hr = CoreUICallSendVaList( send, 0, 0, 1, 1, td_dword, slots );
+    ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
+
+    /* a conversation send is delivered to the peer; an unhandled verb fails honestly */
+    hr = CoreUICallCreateConversationHost( session, (IUnknown *)recv, &peer_send, NULL );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !!peer_send, "got NULL host.\n" );
+    hr = CoreUICallSendVaList( peer_send, 0, 0, 1, 1, td_dword, slots );
+    ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
+    ok( val == 7, "got val %u.\n", val );
+
+    hr = CoreUICallSendVaList( NULL, 0, 0, 1, 1, td_dword, slots );
+    ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+
+    IUnknown_Release( (IUnknown *)peer_send );
+    IUnknown_Release( (IUnknown *)recv );
+    IUnknown_Release( (IUnknown *)send );
+    IUnknown_Release( (IUnknown *)session );
+}
+
 START_TEST(coremessaging)
 {
     HRESULT hr;
@@ -545,6 +647,8 @@ START_TEST(coremessaging)
 
     test_CreateDispatcherQueueController();
     test_DispatcherQueueController_Statics();
+    test_coreuicall_session();
+    test_coreuicall_conversation();
 
     RoUninitialize();
 }
