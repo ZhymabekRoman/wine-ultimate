@@ -655,3 +655,89 @@ provider for the class (factory answering `IActivationFactory` + the activatable
 mapped to that builtin. (b) The ~209 under-emitted ids (start with the class-id literals of
 the framework module images, not only pointer-table ids). (c) `WinUIDesktopWin32WindowClass`
 registration, webview2/edge: not reached.
+
+
+## The XAML parse's last activation gap: FontWeights provider, complete-id emission, tray path
+
+Tip `6d9288cef` (fail-fast 0, battery 8/8 `rc=69`): the XAML parser activates
+`Microsoft.UI.Text.FontWeights` (activatable IID `cc390df6-76b0-5807-8b9d-e949a4e623ae`);
+the key is absent, the in-process namespace-prefix dll probe fails, combase returns
+`REGDB_E_CLASSNOTREG` → `RoOriginateLanguageException 0x80040111` → the parse reports
+`XAML parsing failed.` (`0x802b000a`) → the app's `HybridDialogUnexpectedErrorOccurred`
+throws CLR `e0464645` → `rc=69`. In-app probe matrix: `Microsoft.ui.xaml.dll`,
+`Microsoft.UI.dll`, `Microsoft.UI.Xaml.Controls.dll` all answer `CLASS_E_CLASSNOTAVAILABLE`.
+
+**RE (static, pristine binaries):** the class id is in **no** activation table — not the
+650-entry WRL creator map (650 ids enumerated, `Microsoft.UI.Text.*` absent), not the
+C++/WinRT ClassInfo pointer-xref set (1030 ids over 13 modules), not the `DllGetActivationFactory`
+dispatch-chain literals. The IID blob sits at `Microsoft.ui.xaml.dll+0xae4b98` (.rdata, no
+absolute pointer xrefs) with three RIP-relative `lea` **code** xrefs: the parser's *internal*
+consumer sites (`+0x8e9d9e` builds the activation descriptor from the class-name literal at
+`+0x1cb1980`, activates, then QIs the object for `cc390df6-…`). So the module implements the
+statics for its own parse use and refuses the class externally, permanently (its activation
+dispatch is table-driven). A Wine builtin provider is required; the winmd
+(`Microsoft.UI.Text.winmd`, `ikdasm`-decoded) fixes the ABI: `IFontWeightsStatics` =
+`cc390df6-…` with 11 propget methods in metadata order (Black, Bold, ExtraBlack, ExtraBold,
+ExtraLight, Light, Medium, Normal, SemiBold, SemiLight, Thin), the empty default
+`IFontWeights` = `386cd040-…`, the return struct is the UWP `Windows.UI.Text.FontWeight`
+(`{UINT16 Value}`, contract-gated).
+
+**Provider (source, `ultimate`):** `windows.ui.dll` answers the class (factory QIs
+`IActivationFactory`/`IFontWeights`/`IFontWeightsStatics`, 11 getters return the documented
+WinUI weights, `E_NOINTERFACE` for the rest, `IAgileObject` answered) + the boxed value type
+for the parameterized activatable id ``Windows.Foundation.IReference`1<Windows.UI.Text.FontWeight>``
+(closed pinterface IID `fd27fa16-d457-5871-86d0-58728fb611af`). `struct FontWeight` added to
+`include/windows.ui.text.idl` (widl resolves cross-file interface params only for typedef'd
+structs; the `declare` of the pinterface itself is rejected for `.idl`-struct params —
+widl instantiates pinterface params from winmd metadata only). `widl 11.10` defect found
+en route: a `static(…)` attribute referencing a same-file interface **without** `contract(…)`
+attributes segfaults widl (null contract deref); the interfaces carry contract attributes.
+
+**Generator (`~/wa-work/tools/mk_activatable_reg.py`) — the emission is the COMPLETE union:**
+winmd ids ∪ the 650 XAML creator-map ids ∪ the probed Controls answer set ∪ every
+activation-table-index id ∪ the Wine builtin SYSTEM_MAP. The stale-deletion pass was a
+silent no-op (its `]\t` pattern never matches system.reg's `] <hextime>` lines, so the
+prefix accumulated generations and the winmd-only emission under-emitted); fixed to match
+and to **wipe every 64-bit ActivatableClassId key, then re-emit the union** (Wow6432Node
+untouched). From the 4122-key prefix: **4122/4122 recovered, 0 lost**, emitted **4265**
+(`63 unmapped skipped`), incl. FontWeights, the FontWeight box, `Windows.ApplicationModel.AppInfo`,
+`Windows.UI.Composition.Compositor`, `Windows.UI.Notifications.BadgeUpdateManager`,
+`ToastNotificationManager`. Spot-checks pass (`Windows.Storage.ApplicationData` present,
+FontWeights → `C:\windows\system32\windows.ui.dll`).
+
+**The gap chain closed after the parse (each exposed by the previous fix, all evidence-driven):**
+AppInfo and Compositor needed only keys (providers `windows.applicationmodel.dll` /
+`windows.ui.composition.dll` already answered). `BadgeUpdateManager` and
+`ToastNotificationManager` implemented in `twinapi.appcore.dll` (the Windows facade that
+serves them on Windows): no-op badge/toast surfaces, `Setting=Enabled`, and a real empty
+`IVectorView<ScheduledToastNotification>` (the app enumerates it; `E_NOTIMPL` throws
+unhandled in the C# projection). `H.NotifyIcon.Core.TrayIcon.Create()` fail-fasted the host
+(`e0464645`) on two `Shell_NotifyIconW` results Wine did not define: the `NIM_SETVERSION`
+handshake (round-tripped to the tray window, unknown to the tray build) is answered locally,
+and the entry-set operations are answered from the shell's own table — `add` succeeds,
+`modify` requires the entry (the app's state toggle re-marshals with a **null owner window**,
+accepted by the id-only match), `delete` succeeds once; a tray-less desktop answers the same
+table. The app's own log confirms each step (`NotificationsManager`, `TrayIconManager`
+entries cleared).
+
+Measured after `a893911ff` (pristine app binaries, registry configuration only, probes
+removed, no app binary patching):
+
+| metric | tip `6d9288cef` | after |
+| --- | --- | --- |
+| `XAML parsing failed` (0x802b000a) | 1 per run | **0** |
+| unresolved activations (`Failed to find library`) | 1 (FontWeights) | **0** (only `FakeClass.ClassName`, the app's own negative probe) |
+| battery 8 × 60 s | 8/8 `rc=69` (post-parse managed death) | 8/8 `rc=69`, `fatal=0`, `av=0` (death now **after** tray init) |
+| TrayIconManager / NotificationsManager fail-fasts | – | **cleared** (app-log verified) |
+| `WinUIDesktopWin32WindowClass` | 0 | 0 (window not reached) |
+| `WebView2Loader` / `msedgewebview2` | 0 / 0 | 0 / 0 (not reached) |
+| screenshot `wa-work/wa_fontweights_after.png` | blank 295 B | blank 295 B (no XAML window; desktop root only) |
+| tests | – | combase 0 fail, wintypes 0 fail, windows.ui 0 fail (top-level `check`) |
+| app binaries | pristine | pristine (24da83be…, c6053f1a…, 9a42e19d…, 9353066e… == `.orig`) |
+
+Next gaps: (a) the app's **managed `e0464645` FailFast after the tray path** — the
+HybridDialog/WebView2 environment init is the wall (`WebView2Loader` never loads; the
+activation layer is now silent); (b) the C# projection casts the returned `IVectorView` to
+`IEnumerable` (closed pinterface QI) → `InvalidCastException` WARN (caught): answering that
+IID would silence the last logged ERROR; (c) `WinUIDesktopWin32WindowClass` registration and
+the webview2/edge surface: not reached.
