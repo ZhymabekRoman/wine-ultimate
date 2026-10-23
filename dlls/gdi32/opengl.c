@@ -39,17 +39,31 @@ static INT (WINAPI *wglGetPixelFormat)(HDC);
 static BOOL (WINAPI *wglSetPixelFormat)(HDC,INT,const PIXELFORMATDESCRIPTOR*);
 static BOOL (WINAPI *wglSwapBuffers)(HDC);
 
+/* Resolve the opengl32 forwarding at process init (gdi32 DllMain), not lazily per
+ * call. wined3d's GL init calls ChoosePixelFormat while holding the wined3d
+ * critical section; loading opengl32 from there takes loader_section under a
+ * client lock and forms an AB-BA cycle with a thread that enters the loader
+ * before taking wined3d_cs (the other edge is d2d1's implicit device, see
+ * dlls/d2d1). Never take the loader lock from a path that can be entered under a
+ * client lock. When opengl32 is absent the functions keep failing as before. */
+void opengl_init( void )
+{
+    if (!(opengl32 = LoadLibraryW( L"opengl32.dll" )))
+        return;
+
+    wglChoosePixelFormat = (void *)GetProcAddress( opengl32, "wglChoosePixelFormat" );
+    wglDescribePixelFormat = (void *)GetProcAddress( opengl32, "wglDescribePixelFormat" );
+    wglGetPixelFormat = (void *)GetProcAddress( opengl32, "wglGetPixelFormat" );
+    wglSetPixelFormat = (void *)GetProcAddress( opengl32, "wglSetPixelFormat" );
+    wglSwapBuffers = (void *)GetProcAddress( opengl32, "wglSwapBuffers" );
+}
+
 /******************************************************************************
  *		ChoosePixelFormat (GDI32.@)
  */
 INT WINAPI ChoosePixelFormat( HDC hdc, const PIXELFORMATDESCRIPTOR *pfd )
 {
-    if (!wglChoosePixelFormat)
-    {
-        if (!opengl32) opengl32 = LoadLibraryW( L"opengl32.dll" );
-        if (!(wglChoosePixelFormat = (void *)GetProcAddress( opengl32, "wglChoosePixelFormat" )))
-            return 0;
-    }
+    if (!wglChoosePixelFormat) return 0;
     return wglChoosePixelFormat( hdc, pfd );
 }
 
@@ -58,12 +72,7 @@ INT WINAPI ChoosePixelFormat( HDC hdc, const PIXELFORMATDESCRIPTOR *pfd )
  */
 INT WINAPI DescribePixelFormat( HDC hdc, INT fmt, UINT size, PIXELFORMATDESCRIPTOR *pfd )
 {
-    if (!wglDescribePixelFormat)
-    {
-        if (!opengl32) opengl32 = LoadLibraryW( L"opengl32.dll" );
-        if (!(wglDescribePixelFormat = (void *)GetProcAddress( opengl32, "wglDescribePixelFormat" )))
-            return 0;
-    }
+    if (!wglDescribePixelFormat) return 0;
     return wglDescribePixelFormat( hdc, fmt, size, pfd );
 }
 
@@ -72,12 +81,7 @@ INT WINAPI DescribePixelFormat( HDC hdc, INT fmt, UINT size, PIXELFORMATDESCRIPT
  */
 INT WINAPI GetPixelFormat( HDC hdc )
 {
-    if (!wglGetPixelFormat)
-    {
-        if (!opengl32) opengl32 = LoadLibraryW( L"opengl32.dll" );
-        if (!(wglGetPixelFormat = (void *)GetProcAddress( opengl32, "wglGetPixelFormat" )))
-            return 0;
-    }
+    if (!wglGetPixelFormat) return 0;
     return wglGetPixelFormat( hdc );
 }
 
@@ -86,12 +90,7 @@ INT WINAPI GetPixelFormat( HDC hdc )
  */
 BOOL WINAPI SetPixelFormat( HDC hdc, INT fmt, const PIXELFORMATDESCRIPTOR *pfd )
 {
-    if (!wglSetPixelFormat)
-    {
-        if (!opengl32) opengl32 = LoadLibraryW( L"opengl32.dll" );
-        if (!(wglSetPixelFormat = (void *)GetProcAddress( opengl32, "wglSetPixelFormat" )))
-            return FALSE;
-    }
+    if (!wglSetPixelFormat) return FALSE;
     return wglSetPixelFormat( hdc, fmt, pfd );
 }
 
@@ -100,11 +99,6 @@ BOOL WINAPI SetPixelFormat( HDC hdc, INT fmt, const PIXELFORMATDESCRIPTOR *pfd )
  */
 BOOL WINAPI SwapBuffers( HDC hdc )
 {
-    if (!wglSwapBuffers)
-    {
-        if (!opengl32) opengl32 = LoadLibraryW( L"opengl32.dll" );
-        if (!(wglSwapBuffers = (void *)GetProcAddress( opengl32, "wglSwapBuffers" )))
-            return FALSE;
-    }
+    if (!wglSwapBuffers) return FALSE;
     return wglSwapBuffers( hdc );
 }

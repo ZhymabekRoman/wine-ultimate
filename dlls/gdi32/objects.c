@@ -141,6 +141,7 @@ BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
 
     DisableThreadLibraryCalls( inst );
     gdi32_module = inst;
+    opengl_init();
     return TRUE;
 }
 

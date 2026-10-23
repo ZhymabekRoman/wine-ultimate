@@ -298,4 +298,6 @@ static inline int get_dib_info_size( const BITMAPINFO *info, UINT coloruse )
 
 extern HMODULE gdi32_module;
 
+void opengl_init(void);
+
 #endif /* __WINE_GDI_PRIVATE_H */
