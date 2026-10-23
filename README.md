@@ -741,3 +741,98 @@ activation layer is now silent); (b) the C# projection casts the returned `IVect
 `IEnumerable` (closed pinterface QI) → `InvalidCastException` WARN (caught): answering that
 IID would silence the last logged ERROR; (c) `WinUIDesktopWin32WindowClass` registration and
 the webview2/edge surface: not reached.
+
+
+## The managed FailFast after the tray path: the WebView2 runtime wall, and the closed-pinterface cast
+
+Tip `a893911ff` (battery 8/8 `rc=69`, `fatal=0`, `av=0`, app log stops right after a **caught**
+`InvalidCastException` WARN that follows the `TrayIconManager`/`NotificationsManager` success
+lines; CLR `e0464645`, `WebView2Loader`/`msedgewebview2` = 0, `WinUIDesktopWin32WindowClass` = 0).
+
+**The FailFast exception identity (evidence, no app patching).** With `WINEDEBUG=-all,err+all,+combase`
+the last two `RoOriginateLanguageException` calls on the faulting thread (`0024`) before
+`RaiseFailFastException` are
+
+```
+RoOriginateLanguageException error 0x80070002, message L"",                            exception 0
+RoOriginateLanguageException error 0x80070002, message L"Unable to find the specified file.", exception 00007F…
+GetRestrictedErrorInfo (…)
+record: code=e0464645 … (failfast_bt: coreclr frames → JIT frames)
+```
+
+i.e. one managed exception, created from HRESULT `0x80070002` (`Marshal.ThrowExceptionForHR` →
+`System.IO.FileNotFoundException`, the bare resource message "Unable to find the specified file."),
+then re-origined at the async boundary and left unhandled on the DispatcherQueue thread → `FailFast`.
+`coreclr` never reaches `ReportEventW` (no `.NET Runtime` event, `+eventlog` shows only the event
+service start) and the app's `applog.txt` records nothing after the WARN, so the identity is the
+combase origination pair — not the (caught) `InvalidCastException`, which is a different thread
+(`01b0`, `0x80004002`, logged and swallowed).
+
+**Root cause: the WebView2 environment probe finds no browser.** The origination sits immediately
+after `RoGetActivationFactory("Microsoft.Web.WebView2.Core.CoreWebView2Environment",
+{0e33f804-f20b-5635-8491-162aaa27517b})` answers from the app's own `Microsoft.Web.WebView2.Core.dll`.
+That assembly is the single-file WebView2 SDK: it imports `api-ms-win-core-registry` and locates the
+runtime itself, so **no** `WebView2Loader.dll` load happens (`webview2loader=0` in every run — the
+layer is entered, the loader DLL is simply not part of this SDK). The locator's probes, from `+reg`:
+
+```
+NtOpenKeyEx(… L"Software\Policies\Microsoft\Edge\WebView2\")     -> (nil)
+NtOpenKeyEx(HKLM\Software -> Microsoft -> EdgeUpdate)            -> (nil)   (+Wow6432Node, +HKCU)
+NtOpenKeyEx(… Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5})   -> never reached
+```
+
+Every one fails: the machine has **no Edge WebView2 runtime at all**
+(`find /home/olge -iname 'msedgewebview2*'` → 0 hits, no `EdgeWebView` directory, no
+`EdgeUpdate` registry key in the prefix), and the app's own `EBWebView/x64/` ships only
+`EmbeddedBrowserWebView.dll` (the client DLL, not a browser). `CreateCoreWebView2EnvironmentWithOptions`
+therefore returns `HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND)` = `0x80070002`, the projection throws
+`FileNotFoundException` in an `async void` initialiser, and the runtime fail-fasts. This one is
+**not** reachable by Wine code: the browser binary has to exist.
+
+**The caught cast: the closed pinterface QI is answered now.** The WARN stack is
+`NotificationsManager.CancelScheduledNotifications` → `Enumerable.WhereEnumerableIterator.MoveNext`
+→ `IReadOnlyListImpl`1.GetEnumerator` → `Make_IEnumerableObjRef` → `IObjectReference.As[T](iid)` →
+`ThrowExceptionForHR`. The QI trace pins the id: `sched_vector_QueryInterface
+{7a7b2a51-c182-5846-a861-4f9c036f24ad}` =
+`IID___FIIterable_1_Windows__CUI__CNotifications__CScheduledToastNotification`
+(the closed instantiation of the `IIterable`1` pinterface over the element class, computed by
+`widl` into `include/windows.ui.notifications.h`). The projection maps `IEnumerable<T>` to
+`IIterable<T>`; `E_NOINTERFACE` on the id is turned into `InvalidCastException` in the app.
+
+**Fix (source, `ea75cf587`, `twinapi.appcore`).** The scheduled-toast vector view now answers the
+closed `IIterable<ScheduledToastNotification>` on the **same object** (canonical `IUnknown`/
+`IInspectable` identity stays the vector view iface, as ComWrappers requires) and its `First()`
+hands out a real, already-exhausted `IIterator<ScheduledToastNotification>`: `get_HasCurrent` FALSE,
+`MoveNext` FALSE, `GetMany` → 0 items, `get_Current` → `E_BOUNDS`, matching the empty scheduled set.
+New `test_ToastNotificationManager` in `dlls/twinapi.appcore/tests/twinapi.c` covers the activation,
+the two closed-pinterface QIs, the identity, and the empty-enumeration contract.
+
+Measured after `ea75cf587` (app binaries re-verified byte-identical to `.orig`: CoreMessagingXP,
+FrameworkUdk, Microsoft.ui.xaml, dwmcorei all `PRISTINE`; probes removed, registry configuration only):
+
+| metric | tip `a893911ff` | after |
+| --- | --- | --- |
+| app log `InvalidCastException` / `ERROR` lines | 1 per run | **0 per run** (10 runs) |
+| battery 8 × 60 s | 8/8 `rc=69` | **3/8 `rc=124` alive**, 5/8 `rc=69`; `fatal=0`, `av=0` |
+| battery 3 × 150 s | 0/3 alive | **1/3 `rc=124`**, 2/3 `rc=69` (the failfast is now raced by the tray/webview ordering) |
+| `WebView2Loader` / `msedgewebview2` | 0 / 0 | 0 / 0 (the SDK never loads a loader DLL; the runtime is absent) |
+| `WinUIDesktopWin32WindowClass` | 0 | 0 (not reached) |
+| screenshot `wa-work/wa_managed_after.png` (t=125 s) | blank 295 B | blank 295 B (desktop root only) |
+| tests (`twinapi.appcore`, `combase`, `windows.ui`) | – | **0 failures** (direct `runtest`, harness prefix, x86_64 and i386); `wintypes` 1 pre-existing `IBufferByteAccess_Buffer returned NULL data` |
+
+Next gaps: (a) **the WebView2 runtime is the wall** — install the Edge WebView2 runtime into the
+prefix (`Program Files (x86)\Microsoft\EdgeWebView\Application\<ver>\msedgewebview2.exe` plus
+`…\Microsoft\EdgeUpdate\Clients\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` `pv` keys, HKLM/WOW6432Node/HKCU),
+then the frontier is the `msedgewebview2.exe` spawn + browser IPC handshake (nothing to spawn exists
+on this machine). (b) `IReference`1<T>` **boxing** closed pinterfaces are still refused on Wine's
+`PropertyValue` statics — 8 ids, 606 requests per run, all caught: `e7beaee7-160e-50f7-8789-d63463f979fa`
+(145×), `64bd43f8-bfee-4ec4-b7eb-2935158dae21` (104×), `02dd3ad0-b9de-4b55-a0c3-507235eae8ea` (104×),
+`0c881986-86e1-40b3-9642-9e5090a8a6b0` (82×), `dc678962-0653-4c92-92cd-95943d593900` (61×),
+`1f8cc8ba-0cc5-4799-a505-f358c9886d12` (41×), `6e704a95-4b2f-5ba8-ada5-1261c832baed` (22×),
+`3830ad99-d8da-53f3-989b-fc92ad222778` (22×, identified as the `ABI.System.Nullable_Type` vtable id in
+`WinRT.Runtime.dll`, i.e. the `System.Type` box); all eight blobs are declared in `Microsoft.ui.xaml.dll`
+(the WinUI value-type boxes) — answering them on `wintypes.dll`'s `PropertyValue` removes the last
+`fixme` flood. (c) `{11d3b13a-180e-4789-a8be-7712882893e6}` / `{5c13e51c-4f32-4726-a3fd-f3edd63da3a0}`
+are .NET-side probes asked of every WinRT object (both present in the pristine `twinapi.appcore.dll`,
+so Windows answers them); `E_NOINTERFACE` is benign, no app-log noise. (d) `WinUIDesktopWin32WindowClass`
+registration: still not reached.
