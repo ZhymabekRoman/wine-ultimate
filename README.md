@@ -58,6 +58,10 @@ The tree is an ordinary Wine tree (`configure`, `dlls/`, `include/`, `server/`, 
 no `patchinstall.py` step is needed — the series is already in the history.
 Wine-staging's own `staging/` tooling is not part of the fork.
 
+Build *from* the tip tree: a build tree whose sources lag the tip (checked with
+`diff -rq <tip> <build-source>`, sources only) produces binaries that fail the
+CoreUICore connect (see below) — always rebuild after syncing the tree.
+
 ## Environment preparation (registry configuration, no binary patching)
 
 Running a WinAppSDK/XAML-packaged app (e.g. WhatsApp Desktop 2.2620) on this fork
@@ -186,6 +190,46 @@ Wine 11 materializes builtin PE DLLs into the prefix (`drive_c/windows/system32`
 `syswow64`). A restored/skeleton prefix fails at `kernel32.dll` (`c0000135`);
 repopulate from the build tree (`dlls/*/x86_64-windows/*.dll` → `system32`,
 `dlls/*/i386-windows/*.dll` → `syswow64`) before first run.
+
+## CoreUICore self-host registrar connect (partition-connect failfast)
+
+Symptom was a deterministic startup abort: 60 s battery, 8/8 runs `rc=2`, main thread
+fail-fast at `CoreMessagingXP+0xb8fd` (`CFlat::Abandonment::FailWithException`) reached from
+`Registrar::RemoteRegistrarClient::WaitForServiceStartup`.
+
+Recovered call chain (IDA, pristine `CoreMessagingXP.dll` `24da83be…`):
+`DispatcherQueueController::CreateOnCurrentThread` → `CoreUISessionCreate` →
+`CoreUISession::EnsureInitializedWithAddRef` (self-host branch: `RegistrarHost::CreateSingleton(1)`
+→ `CreateThread(RegistrarThreadProc)` → `CoreUIRunRegistrarServer` → `CuiRegistrar::Run`) →
+`AlpcServerHost::Create$` → `AlpcServerConnection::CreateServer` → `NtAlpcCreatePort` of
+`\BaseNamedObjects\CoreMessagingRegistrar-<pid>:<Guid.Empty>` → `Win32Event::Set(startup)`;
+meanwhile the main thread's `RegistrarClient::ConnectToRegistrarServer` →
+`RemoteRegistrarClient::Connect` → `DoConnect` → `AlpcClientAdapter::Connect`. `DoConnect` returns
+the raw connect status and every status except `STATUS_ACCESS_DENIED` falls into the
+`WaitForServiceStartup` fail-fast stub — so a single rejected connect kills the process.
+
+Root cause was **not** init slowness. Measured (`+timestamp,+alpc,+loaddll,+wined3d,+d3d11`):
+registrar port created at +0.37 s, D3D11 device + feature levels in ~0.2 s, no init phase
+exceeds 0.5 s, and the native protocol already orders create-before-connect (the startup event
+is signalled *after* `NtAlpcCreatePort` returns). It was Wine's connect-reply framing: the kernel
+completes `NtAlpcConnectPort` with the server's reply message *plus* the CONTEXT attribute
+(port context, connect message id) and the RESERVE (reverse) port; the pre-tip ntdll left the
+wine wire header in the caller's buffer and filled neither attribute, so the client rejected its
+own connection. Fixed by the tip pair `1134e8dc5` (reverse/reserve port) + `b50acba1e`
+(kernel-accurate message framing). The 8/8 battery had been measuring a build tree whose
+`dlls/ntdll/unix/alpc.c` predated those commits.
+
+**Keep the build tree's source at the canonical tip.** A tree that predates `b50acba1e`
+reproduces the 8/8 fail-fast; verify with `sha256sum` that app binaries are the pristine
+`24da83be…` / `9a42e19d…` and rebuild after syncing.
+
+Measured after the sync (probe-free build): battery 8×60 → 8/8 `rc=124 ALIVE`, `fatal=0`;
+130 s and 150 s runs alive, 20 windows created (`NtUserCreateWindowEx`), 25 X windows
+(25 × `Default IME` 1×1 + one `.NET-BroadcastEventWindow`), `coreclr`/`System.*` payload loads,
+`d3d11_device_context_DrawIndexed` renders. Next gaps: no visible XAML window (no
+`WindowsXamlManager` activation attempt, root window blank), `WebView2Loader` /
+`msedgewebview2` counts 0, and one pre-sync run showed a 60 s `sync_cs` stall in the
+`ntoskrnl.exe` builtin (`blocked by` another thread) worth its own look.
 
 ## Series on `ultimate`
 
