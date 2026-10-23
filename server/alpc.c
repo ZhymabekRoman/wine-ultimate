@@ -118,6 +118,11 @@ struct alpc_port
     struct alpc_port   *listen_port; /* client side: the server's listening port */
     struct alpc_port   *reverse;     /* client side: reserve (reverse) port for
                                       * server-originated messages, or NULL */
+    struct alpc_port   *owner;       /* reverse port only: the connection it is
+                                      * the receive side of; messages queued on
+                                      * the reserve port are readiness of that
+                                      * connection, so wake notifications of the
+                                      * owner must fire too, or NULL */
     client_ptr_t        port_context;/* server side: context passed to accept */
     struct list         conn_entry;  /* client side: entry in listen_port->connections */
 
@@ -226,6 +231,12 @@ static void alpc_port_destroy( struct object *obj )
         release_object( port->reverse );
         port->reverse = NULL;
     }
+    if (port->owner)
+    {
+        if (port->owner->reverse == port) port->owner->reverse = NULL;
+        release_object( port->owner );
+        port->owner = NULL;
+    }
 
     if (port->is_server)
     {
@@ -294,6 +305,10 @@ static void reselect_alpc_port( struct alpc_port *port )
         release_object( iosb );
         release_object( async );
     }
+
+    /* a port handle is signaled while messages await a receiver; once every
+     * queued message has been delivered the handle stops being signaled */
+    if (list_empty( &port->msg_queue )) set_fd_signaled( port->fd, 0 );
 }
 
 static void alpc_fd_read( struct fd *fd, struct async *async, file_pos_t pos )
@@ -365,16 +380,16 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             /* Nothing is waiting for this message id, so the message is not the
              * answer to a queued request: it is a message that the server side
              * originates in the reverse direction while the client itself waits
-             * for its reply.  The kernel delivers such a message as LPC_NEW_MESSAGE
-             * on the connection's reverse (reserve) port, where the client's
-             * callback receive is armed.  It must not land on the client
-             * connection's own queue: a receive waiting for a reply there would
-             * consume the callback as its reply payload.  Deliver to the reverse
-             * port's queue when a receive is armed there, and fall back to the
-             * connection that has a receive pending otherwise (the kernel
-             * delivers an id-less message to the receiver that is waiting). */
+             * for its reply.  The kernel queues such a message on the connection's
+             * reverse (reserve) port and marks that port handle signaled; the
+             * message waits on the queue until the client arms a receive there.
+             * It must not land on the client connection's own queue: a receive
+             * waiting for a reply there would consume the callback as its reply
+             * payload.  When no reverse port exists, fall back to the connection
+             * that has a receive pending (the kernel delivers an id-less message
+             * to the receiver that is waiting). */
             LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-                if (conn->reverse && async_waiting( &conn->reverse->read_q ))
+                if (conn->reverse)
                 {
                     peer = conn->reverse;
                     msg_type = ALPC_LPC_NEW_MESSAGE;
@@ -498,6 +513,13 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     wake_up( &peer->obj, 0 );
     reselect_alpc_port( peer );
     signal_wait_completion_packets( &peer->obj );
+    /* a message queued on a reserve port is readiness of its connection:
+     * wake packets associated with the connection handle must fire too */
+    if (peer->owner) signal_wait_completion_packets( &peer->owner->obj );
+    /* the port handle becomes signaled while the message stays queued
+     * (delivered messages cleared it in reselect_alpc_port) */
+    if (!list_empty( &peer->msg_queue )) set_fd_signaled( peer->fd, 1 );
+    if (peer->owner && !list_empty( &peer->msg_queue )) set_fd_signaled( peer->owner->fd, 1 );
 
     async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
     release_object( iosb );
@@ -516,6 +538,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     port->peer        = NULL;
     port->listen_port = NULL;
     port->reverse     = NULL;
+    port->owner       = NULL;
     port->port_context = 0;
     list_init( &port->msg_queue );
     init_async_queue( &port->read_q );
@@ -568,6 +591,7 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     /* notify any wait completion packet associated with this port (the standard
      * NtAssociateWaitCompletionPacket-based server wait used by CoreMessaging). */
     signal_wait_completion_packets( &server_port->obj );
+    if (!list_empty( &server_port->msg_queue )) set_fd_signaled( server_port->fd, 1 );
     return 1;
 }
 
@@ -594,6 +618,7 @@ DECL_HANDLER(create_alpc_port)
         port->peer        = NULL;
         port->listen_port = NULL;
         port->reverse     = NULL;
+        port->owner       = NULL;
         port->port_context = 0;
         list_init( &port->msg_queue );
         init_async_queue( &port->read_q );
@@ -886,8 +911,12 @@ DECL_HANDLER(wire_alpc_reverse_port)
 
     /* The reverse port is a second client-side endpoint on the same connection:
      * server-originated messages land on it, and replies written on it travel
-     * to the server side like those of the connection port itself. */
+     * to the server side like those of the connection port itself.  The client
+     * created it as a listening port through NtAlpcCreatePort, but wired into
+     * the connection it is purely a communication endpoint. */
     conn->reverse = (struct alpc_port *)grab_object( rev );
+    rev->is_server = 0;
+    rev->owner = (struct alpc_port *)grab_object( conn );
     rev->peer = (struct alpc_port *)grab_object( conn->peer );
     if (conn->listen_port) rev->listen_port = (struct alpc_port *)grab_object( conn->listen_port );
     rev->port_context = conn->port_context;
@@ -911,6 +940,7 @@ DECL_HANDLER(recv_alpc_port)
         release_object( port );
         return;
     }
+
 
     if ((async = create_request_async( port->fd, get_fd_comp_flags( port->fd ), &req->async, 0 )))
     {

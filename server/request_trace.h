@@ -3568,6 +3568,12 @@ static void dump_disconnect_alpc_port_request( const struct disconnect_alpc_port
     fprintf( stderr, " handle=%04x", req->handle );
 }
 
+static void dump_wire_alpc_reverse_port_request( const struct wire_alpc_reverse_port_request *req )
+{
+    fprintf( stderr, " conn=%04x", req->conn );
+    fprintf( stderr, ", reverse=%04x", req->reverse );
+}
+
 static void dump_recv_alpc_port_request( const struct recv_alpc_port_request *req )
 {
     dump_async_data( " async=", &req->async );
@@ -3958,6 +3964,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_connect_alpc_port_request,
     (dump_func)dump_accept_alpc_connection_request,
     (dump_func)dump_disconnect_alpc_port_request,
+    (dump_func)dump_wire_alpc_reverse_port_request,
     (dump_func)dump_recv_alpc_port_request,
     (dump_func)dump_create_wait_completion_packet_request,
     (dump_func)dump_associate_wait_completion_packet_request,
@@ -4279,6 +4286,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_create_alpc_port_reply,
     (dump_func)dump_connect_alpc_port_reply,
     (dump_func)dump_accept_alpc_connection_reply,
+    NULL,
     NULL,
     (dump_func)dump_recv_alpc_port_reply,
     (dump_func)dump_create_wait_completion_packet_reply,
@@ -4602,6 +4610,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "connect_alpc_port",
     "accept_alpc_connection",
     "disconnect_alpc_port",
+    "wire_alpc_reverse_port",
     "recv_alpc_port",
     "create_wait_completion_packet",
     "associate_wait_completion_packet",
