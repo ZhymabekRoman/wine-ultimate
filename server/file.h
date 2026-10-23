@@ -242,6 +242,9 @@ extern struct reserve *get_completion_reserve_obj( struct process *process, obj_
 extern void add_completion( struct completion *completion, apc_param_t ckey, apc_param_t cvalue,
                             unsigned int status, apc_param_t information );
 extern void signal_wait_completion_packets( struct object *target );
+extern void fire_wait_completion_packets( struct object *port );
+extern struct object *find_thread_alpc_receive_port( struct thread *thread );
+extern int alpc_port_ready( struct object *port );
 extern void cleanup_thread_completion( struct thread *thread );
 
 /* serial port functions */
@@ -282,6 +285,7 @@ extern struct thread *async_get_thread( struct async *async );
 extern struct async *find_pending_async( struct async_queue *queue );
 extern struct async *find_pending_alpc_async( struct async_queue *queue, unsigned int msg_id );
 extern struct async *find_reply_alpc_async( struct async_queue *queue, unsigned int msg_id );
+extern int async_queue_has_thread( struct async_queue *queue, struct thread *thread );
 extern void cancel_terminating_process_asyncs( struct process *process );
 extern void cancel_terminating_thread_asyncs( struct thread *thread );
 extern int async_close_obj_handle( struct object *obj, struct process *process, obj_handle_t handle );

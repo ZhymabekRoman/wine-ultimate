@@ -970,6 +970,20 @@ struct async *find_reply_alpc_async( struct async_queue *queue, unsigned int msg
     return NULL;
 }
 
+/* Does a non-terminated async of this thread sit in the queue?  An ALPC
+ * wake completion packet is bound, at association time, to the receive the
+ * associating thread has in flight (ExAssociateThreadWithWaitCompletionPacket
+ * takes the Irp), so the packet's completion source is a port on which this
+ * thread is queued receiving. */
+int async_queue_has_thread( struct async_queue *queue, struct thread *thread )
+{
+    struct async *async;
+
+    LIST_FOR_EACH_ENTRY( async, &queue->queue, struct async, queue_entry )
+        if (!async->terminated && async->thread == thread) return 1;
+    return 0;
+}
+
 /* cancels sync I/O on a thread */
 DECL_HANDLER(cancel_sync)
 {

@@ -124,9 +124,21 @@ struct alpc_port
                                       * connection, so wake notifications of the
                                       * owner must fire too, or NULL */
     client_ptr_t        port_context;/* server side: context passed to accept */
+    unsigned int        client_pid;  /* thread that created the port: a wake packet
+                                      * associated with no receive in flight binds to
+                                      * the newest port of its own thread, which is
+                                      * the connection the kernel auto-arms a callback
+                                      * receive on */
+    unsigned int        client_tid;
     struct list         conn_entry;  /* client side: entry in listen_port->connections */
+    struct list         list_entry;  /* entry in alpc_port_list */
 
 };
+
+/* every live port; a wake completion packet binds, at association time, to
+ * the port on which the associating thread is queued receiving, so the
+ * association handler must be able to find it */
+static struct list alpc_port_list = LIST_INIT(alpc_port_list);
 
 /* LPC message types stamped into the delivered PORT_MESSAGE header. The kernel
  * owns this field: a reply to a pending request is LPC_REPLY, a message the
@@ -217,6 +229,7 @@ static void alpc_port_destroy( struct object *obj )
 
     if (!port->fd) return; /* creation was aborted before full init */
 
+    list_remove( &port->list_entry );
     async_wake_up( &port->read_q, STATUS_HANDLES_CLOSED );
     free_async_queue( &port->read_q );
 
@@ -513,9 +526,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     wake_up( &peer->obj, 0 );
     reselect_alpc_port( peer );
     signal_wait_completion_packets( &peer->obj );
+    fire_wait_completion_packets( &peer->obj );
     /* a message queued on a reserve port is readiness of its connection:
      * wake packets associated with the connection handle must fire too */
-    if (peer->owner) signal_wait_completion_packets( &peer->owner->obj );
+    if (peer->owner)
+    {
+        signal_wait_completion_packets( &peer->owner->obj );
+        fire_wait_completion_packets( &peer->owner->obj );
+    }
     /* the port handle becomes signaled while the message stays queued
      * (delivered messages cleared it in reselect_alpc_port) */
     if (!list_empty( &peer->msg_queue )) set_fd_signaled( peer->fd, 1 );
@@ -526,6 +544,46 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
 }
 
 /* ---- Helpers ---- */
+
+/* the port this thread is queued receiving on, if any: the wake completion
+ * packet's completion source is the receive in flight when it is associated
+ * (the kernel binds the packet to that IRP), so the associate handler
+ * resolves the binding here */
+/* is a message already queued on the port?  a wake packet bound to a port
+ * whose queue is not empty has its completion IRP finished at binding time,
+ * so the kernel fires it the moment the association is made */
+int alpc_port_ready( struct object *obj )
+{
+    struct alpc_port *port;
+
+    LIST_FOR_EACH_ENTRY( port, &alpc_port_list, struct alpc_port, list_entry )
+        if (&port->obj == obj) return !list_empty( &port->msg_queue );
+    return 0;
+}
+
+struct object *find_thread_alpc_receive_port( struct thread *thread )
+{
+    struct alpc_port *port, *candidate = NULL;
+
+    LIST_FOR_EACH_ENTRY( port, &alpc_port_list, struct alpc_port, list_entry )
+    {
+        if (async_queue_has_thread( &port->read_q, thread ))
+            return grab_object( &port->obj );
+    }
+
+    /* with no receive in flight the wake is armed for the conversation this
+     * thread is setting up: the kernel auto-arms the callback receive on the
+     * port the thread created during the handshake and binds the packet to
+     * that IRP, so the newest port this thread created is the receive the
+     * wake completes */
+    LIST_FOR_EACH_ENTRY( port, &alpc_port_list, struct alpc_port, list_entry )
+    {
+        if (port->client_tid == get_thread_id( thread ) &&
+            port->client_pid == get_process_id( current->process ))
+            candidate = port; /* creation order: the newest wins */
+    }
+    return candidate ? grab_object( &candidate->obj ) : NULL;
+}
 
 static struct alpc_port *create_alpc_port_obj( int is_server )
 {
@@ -540,6 +598,8 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     port->reverse     = NULL;
     port->owner       = NULL;
     port->port_context = 0;
+    port->client_pid  = get_process_id( current->process );
+    port->client_tid  = get_thread_id( current );
     list_init( &port->msg_queue );
     init_async_queue( &port->read_q );
     list_init( &port->pending_conns );
@@ -552,6 +612,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
         release_object( port );
         return NULL;
     }
+    list_add_tail( &alpc_port_list, &port->list_entry );
     return port;
 }
 
@@ -591,6 +652,7 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     /* notify any wait completion packet associated with this port (the standard
      * NtAssociateWaitCompletionPacket-based server wait used by CoreMessaging). */
     signal_wait_completion_packets( &server_port->obj );
+    fire_wait_completion_packets( &server_port->obj );
     if (!list_empty( &server_port->msg_queue )) set_fd_signaled( server_port->fd, 1 );
     return 1;
 }
@@ -620,6 +682,8 @@ DECL_HANDLER(create_alpc_port)
         port->reverse     = NULL;
         port->owner       = NULL;
         port->port_context = 0;
+        port->client_pid  = get_process_id( current->process );
+        port->client_tid  = get_thread_id( current );
         list_init( &port->msg_queue );
         init_async_queue( &port->read_q );
         list_init( &port->pending_conns );
@@ -631,6 +695,7 @@ DECL_HANDLER(create_alpc_port)
             release_object( port );
             return;
         }
+        list_add_tail( &alpc_port_list, &port->list_entry );
     }
 
     reply->handle = alloc_handle( current->process, port, req->access, objattr->attributes );
