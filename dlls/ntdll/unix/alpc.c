@@ -71,6 +71,9 @@ struct alpc_wire_hdr
     unsigned int     view_flags;
     client_ptr_t     view_base;
     client_ptr_t     view_size;
+    client_ptr_t     msg_context;
+    unsigned int     sequence;
+    unsigned int     callback_id;
 };
 
 #define ALPC_ATTR_HDR_MAGIC 0x41545452 /* 'ATTR' */
@@ -82,6 +85,9 @@ struct alpc_msg_attr_hdr
     unsigned int     pad;
     client_ptr_t     view_base;
     client_ptr_t     view_size;
+    client_ptr_t     msg_context;
+    unsigned int     sequence;
+    unsigned int     callback_id;
 };
 
 static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG attribute_flag )
@@ -377,6 +383,38 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
         }
     }
 
+    /* The kernel completes a connect with the server's reply message plus the
+     * attributes of the new connection: the CONTEXT attribute carrying the
+     * connection port context the server gave to NtAlpcAcceptConnectPort and
+     * the connect message id, and the RESERVE attribute carrying the reverse
+     * port and its context.  The server prefixes a wine-internal wire header
+     * with that information; strip it from the caller's buffer and fill in the
+     * attributes as the kernel would. */
+    struct alpc_wire_hdr chdr = {0};
+    if (!ret && connect_msg && io.Information >= sizeof(struct alpc_wire_hdr))
+    {
+        memcpy( &chdr, connect_msg, sizeof(chdr) );
+        if (chdr.magic == ALPC_WIRE_MAGIC)
+        {
+            if (chdr.user_size) memmove( connect_msg, (char *)connect_msg + sizeof(chdr), chdr.user_size );
+            io.Information = chdr.user_size;
+
+            if (out_msg_attr && (out_msg_attr->AllocatedAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
+            {
+                ALPC_CONTEXT_ATTR *ctx = get_message_attribute( out_msg_attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
+                if (ctx)
+                {
+                    ctx->PortContext    = (void *)(ULONG_PTR)chdr.port_context;
+                    ctx->MessageContext = NULL;
+                    ctx->Sequence       = chdr.sequence;
+                    ctx->MessageId      = chdr.msg_id;
+                    ctx->CallbackId     = chdr.callback_id;
+                    out_msg_attr->ValidAttributes |= ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+                }
+            }
+        }
+    }
+
     if (!ret && connect_msg_size) *connect_msg_size = io.Information;
 
     if (ret && ret != STATUS_PENDING && *port_handle)
@@ -409,6 +447,7 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
                 if (!wire_ret)
                 {
                     res->port = rev;
+                    res->context = (PVOID)(ULONG_PTR)chdr.port_context;
                     out_msg_attr->ValidAttributes |= ALPC_MESSAGE_RESERVE_ATTRIBUTE;
                 }
                 else NtClose( rev );
@@ -557,10 +596,24 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
             ALPC_DATA_VIEW_ATTR *view = get_message_attribute( send_msg_attr, ALPC_MESSAGE_VIEW_ATTRIBUTE );
             if (view)
             {
-                attr_hdr.attr_flags = ALPC_MESSAGE_VIEW_ATTRIBUTE;
+                attr_hdr.attr_flags |= ALPC_MESSAGE_VIEW_ATTRIBUTE;
                 attr_hdr.view_flags = view->Flags;
                 attr_hdr.view_base  = (client_ptr_t)(ULONG_PTR)view->ViewBase;
                 attr_hdr.view_size  = (client_ptr_t)view->ViewSize;
+            }
+        }
+        /* the CONTEXT attribute travels with the message: a reply echoes the
+         * MessageContext of the request it answers, and the kernel delivers
+         * that context back to the original sender on the reply */
+        if (send_msg_attr && (send_msg_attr->ValidAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
+        {
+            ALPC_CONTEXT_ATTR *ctx = get_message_attribute( send_msg_attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
+            if (ctx)
+            {
+                attr_hdr.attr_flags |= ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+                attr_hdr.msg_context = (client_ptr_t)(ULONG_PTR)ctx->MessageContext;
+                attr_hdr.sequence    = ctx->Sequence;
+                attr_hdr.callback_id = ctx->CallbackId;
             }
         }
 

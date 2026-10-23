@@ -69,6 +69,13 @@ struct alpc_wire_hdr
     unsigned int     view_flags;
     client_ptr_t     view_base;
     client_ptr_t     view_size;
+    /* CONTEXT attribute fields as the kernel fills them on delivery: the
+     * MessageContext a sender attached to a request is echoed back to it on
+     * the reply answering that request, and carries the connection port
+     * context on every message of the connection. */
+    client_ptr_t     msg_context;
+    unsigned int     sequence;
+    unsigned int     callback_id;
 };
 
 #define ALPC_ATTR_HDR_MAGIC 0x41545452 /* 'ATTR' */
@@ -80,6 +87,9 @@ struct alpc_msg_attr_hdr
     unsigned int     pad;
     client_ptr_t     view_base;
     client_ptr_t     view_size;
+    client_ptr_t     msg_context;
+    unsigned int     sequence;
+    unsigned int     callback_id;
 };
 
 /* A pending (not yet accepted) client connection. */
@@ -559,6 +569,9 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         hdr->view_flags   = attr_hdr.view_flags;
         hdr->view_base    = attr_hdr.view_base;
         hdr->view_size    = attr_hdr.view_size;
+        hdr->msg_context  = attr_hdr.msg_context;
+        hdr->sequence     = attr_hdr.sequence;
+        hdr->callback_id  = attr_hdr.callback_id;
         if (user_size) memcpy( hdr + 1, user_data, user_size );
         if (!port->is_server && user_size >= 0x1c)
         {
@@ -700,6 +713,9 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->view_flags   = 0;
     hdr->view_base    = 0;
     hdr->view_size    = 0;
+    hdr->msg_context  = 0;
+    hdr->sequence     = 0;
+    hdr->callback_id  = 0;
     if (pc->conn_data_size)
         memcpy( hdr + 1, pc->conn_data, pc->conn_data_size );
     list_add_tail( &server_port->msg_queue, &msg->entry );
@@ -989,10 +1005,41 @@ DECL_HANDLER(accept_alpc_connection)
                                    GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );
     release_object( server_conn_port );
 
-    /* Wake blocked client, carrying the server's connection reply message to it */
+    /* Wake blocked client, carrying the server's connection reply message to it.
+     * The kernel completes a connect with the server's reply message plus the
+     * attributes of the connection: the CONTEXT attribute (the connection port
+     * context the server passed to accept, the connect message id) and the
+     * RESERVE attribute (the reverse port).  Prefix a wine-internal wire header
+     * carrying that information so ntdll can fill the caller's message
+     * attributes exactly as the kernel would. */
     if (found->client_async)
     {
-        if (found->conn_reply_size)
+        struct alpc_wire_hdr *whdr;
+        data_size_t total = sizeof(*whdr) + found->conn_reply_size;
+
+        if ((whdr = malloc( total )))
+        {
+            whdr->magic        = ALPC_WIRE_MAGIC;
+            whdr->type         = 10; /* LPC_CONNECTION_REQUEST reply */
+            whdr->msg_id       = found->msg_id;
+            whdr->client_pid   = get_process_id( current->process );
+            whdr->client_tid   = get_thread_id( current );
+            whdr->user_size    = found->conn_reply_size;
+            whdr->port_context = req->port_context;
+            whdr->attr_flags   = 0x20000000; /* ALPC_MESSAGE_CONTEXT_ATTRIBUTE */
+            whdr->view_flags   = 0;
+            whdr->view_base    = 0;
+            whdr->view_size    = 0;
+            whdr->msg_context  = 0;
+            whdr->sequence     = 0;
+            whdr->callback_id  = 0;
+            if (found->conn_reply_size)
+                memcpy( whdr + 1, found->conn_reply, found->conn_reply_size );
+            async_request_complete_alloc( found->client_async, STATUS_SUCCESS,
+                                          total, total, whdr );
+            free( whdr );
+        }
+        else if (found->conn_reply_size)
             async_request_complete_alloc( found->client_async, STATUS_SUCCESS,
                                           found->conn_reply_size, found->conn_reply_size,
                                           found->conn_reply );
