@@ -94,18 +94,77 @@ the end state — see the A/B notes in the workbench harness (`wa_ver.sh set|cle
 `combase!RoGetActivationFactory` resolves a WinRT class through the activation
 context, a few hardcoded prefixes, and then the registry fallback
 `HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\<class>\DllPath`
-(`REG_SZ`/`REG_EXPAND_SZ`). The framework ships class metadata in `.winmd` files;
-enumerate them (e.g. `monodis --typedef`) and register each class against the
-implementing DLL from the app directory (the app bundles a self-contained copy):
+(`REG_SZ`, backslashes doubled for regedit's parser). The framework ships class
+metadata in `.winmd` files; enumerate them (e.g. `monodis --typedef`) and
+register each class against the module that actually implements it. The
+implementation module is a property of the binaries, not of the winmd: each
+native module answers `DllGetActivationFactory` only for the classes in its
+WRL creator map, so derive the assignment from the DLLs themselves (the
+harness generator `~/wa-work/tools/mk_activatable_reg.py` parses the exact
+650-entry creator map of `Microsoft.ui.xaml.dll` from the PE and scans the
+UTF-16 class names embedded in every other module):
 
-- `Microsoft.UI.*` / `Microsoft.Windows.AppLifecycle.*` /
-  `Microsoft.Windows.ApplicationModel.DynamicDependency.*` → `Microsoft.ui.xaml.dll` /
+- `Microsoft.UI.Xaml.*` (650 classes, exact map) → `Microsoft.ui.xaml.dll`
+- `Microsoft.UI.Dispatching.*` → `CoreMessagingXP.dll` (the XAML binary's map
+  does *not* contain the DispatcherQueue classes; pointing them at
+  `Microsoft.ui.xaml.dll` yields `0x80040111 CLASS_E_NOTSUPPORTED` at
+  `RoGetActivationFactory` and a `combase` fail-fast)
+- `Microsoft.UI.Windowing.*` → `Microsoft.UI.Windowing.dll`
+  (`InputNonClientPointerSource` → `Microsoft.UI.Windowing.Core.dll`)
+- `Microsoft.UI.Input.*` / `Microsoft.UI.Content.*` → `Microsoft.UI.Input.dll`
+- `Microsoft.UI.Composition.*` → `dcompi.dll`
+  (`…Composition.SystemBackdrops.*` → `wuceffectsi.dll`)
+- `Microsoft.Windows.ApplicationModel.Resources.*`, `Microsoft.Windows.Globalization.*`
+  → `Microsoft.Windows.ApplicationModel.Resources.dll`
+- `Microsoft.Windows.Widgets.*` → `Microsoft.Windows.Widgets.dll`
+- remaining `Microsoft.Windows.*` (AppLifecycle, DynamicDependency, Deployment,
+  AppNotifications, PushNotifications, Storage, System, AccessControl) →
   `Microsoft.WindowsAppRuntime.dll`
-- `Microsoft.UI.Xaml.*` → `Microsoft.ui.xaml.dll`
 
-Import with `wine regedit /S` (plain-ASCII `.reg`; hex values on one line are
-truncated by regedit's parser — use plain strings). The harness generator lives
-at `~/wa-work/tools/mk_activatable_reg.py` (4148 classes from the package winmds).
+System-provided classes resolve to Wine builtins:
+`Windows.Foundation.Metadata.ApiInformation` (plus `PropertyValue`,
+`PropertySet`, `Streams.Buffer`, `Streams.DataWriter`) → `wintypes.dll`;
+`Windows.UI.ViewManagement.{UISettings,UIViewSettings,AccessibilitySettings,InputPane}`
+and `Windows.UI.Core.{CoreWindow,CoreCursor}` → `windows.ui.dll`. These are on
+the XAML startup path: `Microsoft.Internal.FrameworkUdk.dll!Switcher::GetOSVersion`
+fail-fasts with `0x80040154` if `ApiInformation` does not activate, and
+`FrameworkApplication::StartDesktop` fails on `UISettings`.
+
+App defaults and the build knob (per-app Windows version + the CoreMessagingXP
+wake-path knob of §1):
+
+```reg
+[HKEY_CURRENT_USER\Software\Wine\AppDefaults\WhatsApp.Root.exe]
+"Version"="win11"
+```
+
+### 2a. winsxs common-controls v6 assembly directory
+
+The XAML binary delay-loads `comctl32.dll!InitCommonControlsEx` under its
+embedded `Microsoft.Windows.Common-Controls` v6 manifest dependency. With the
+manifest present in `windows/winsxs/manifests/` (wineboot installs it) Wine's
+loader redirects the DLL into the assembly directory, so that directory has
+to exist and carry the DLL, otherwise the delay-load fails and the loader
+aborts the process (`unimplemented function comctl32.dll.InitCommonControlsEx`):
+
+```
+drive_c/windows/winsxs/amd64_microsoft.windows.common-controls_6595b64144ccf1df_6.0.2600.2982_none_deadbeef/comctl32.dll
+```
+
+(copy of `system32/comctl32.dll`).
+
+### 2b. Pristine binaries
+
+All app and framework-package DLLs run unmodified; the three DLLs that an
+earlier workbench generation carried patched (`CoreMessagingXP.dll`
+`24da83be…`, `Microsoft.Internal.FrameworkUdk.dll` `c6053f1a…`,
+`dwmcorei.dll` `9353066e…`) are byte-identical to their `.orig` originals.
+The kernel-accurate ALPC framing commit (`fix(alpc,ntdll): kernel-accurate
+message framing`) plus the registry configuration above replace the
+`ValidateBufferHeader` / Abandonment patches: on pristine binaries the
+`CoreMsgCreateSession` handshake's connect, join request and synchronous
+reply validate (`Type=LPC_REPLY`, `TotalLength == payload + 0x50`, port
+context `== NtAlpcAcceptConnectPort` context).
 
 ### 3. Package identity environment
 
