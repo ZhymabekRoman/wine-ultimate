@@ -18,6 +18,7 @@
 
 #include "d2d1_private.h"
 #include <d3dcompiler.h>
+#include <objidl.h>
 
 WINE_DEFAULT_DEBUG_CHANNEL(d2d);
 
@@ -4848,4 +4849,381 @@ BOOL d2d_device_get_indexed_object(struct d2d_indexed_objects *objects, const GU
 
     if (object) *object = NULL;
     return FALSE;
+}
+
+
+/* Forwarder for the factory's implicit device; see the comment in d2d1_private.h.
+ * Every device method realizes the real device first (on a thread that is not
+ * inside DllMain, i.e. without loader_section held) and delegates to it through
+ * its vtable. The forwarder interface pointers are the stable client identity. */
+
+static inline struct d2d_device_forwarder *forwarder_from_ID2D1Device(ID2D1Device *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_device_forwarder, ID2D1Device_iface);
+}
+
+static inline struct d2d_device_forwarder *forwarder_from_ID2D1Device1(ID2D1Device1 *iface)
+{
+    return CONTAINING_RECORD(iface, struct d2d_device_forwarder, ID2D1Device1_iface);
+}
+
+static ULONG d2d_device_forwarder_AddRef_impl(struct d2d_device_forwarder *forwarder)
+{
+    ULONG refcount = InterlockedIncrement(&forwarder->refcount);
+
+    TRACE("%p increasing refcount to %lu.\n", forwarder, refcount);
+
+    return refcount;
+}
+
+static ULONG d2d_device_forwarder_Release_impl(struct d2d_device_forwarder *forwarder)
+{
+    ID2D1Device6 *device = forwarder->device;
+    struct d2d_factory *factory = forwarder->factory;
+    ULONG refcount = InterlockedDecrement(&forwarder->refcount);
+
+    TRACE("%p decreasing refcount to %lu.\n", forwarder, refcount);
+
+    if (!refcount)
+    {
+        if (device)
+            ID2D1Device6_Release(device);
+        DeleteCriticalSection(&forwarder->cs);
+        ID2D1Factory7_Release(&factory->ID2D1Factory7_iface);
+        free(forwarder);
+    }
+
+    return refcount;
+}
+
+static HRESULT d2d_device_forwarder_get_device(struct d2d_device_forwarder *forwarder,
+        ID2D1Device6 **device)
+{
+    HRESULT hr = S_OK;
+
+    EnterCriticalSection(&forwarder->cs);
+
+    if (!forwarder->device && FAILED(hr = d2d_factory_create_implicit_device(forwarder->factory,
+            &forwarder->device)))
+        WARN("Failed to create the implicit device, hr %#lx.\n", hr);
+
+    *device = forwarder->device;
+
+    LeaveCriticalSection(&forwarder->cs);
+
+    return hr;
+}
+
+static void d2d_device_forwarder_get_factory(struct d2d_device_forwarder *forwarder,
+        ID2D1Factory **factory)
+{
+    ID2D1Factory1 *f = (ID2D1Factory1 *)&forwarder->factory->ID2D1Factory7_iface;
+    HRESULT hr;
+
+    /* The resource factory is the factory object itself; answering this does not
+     * need the realized device. */
+    hr = ID2D1Factory1_QueryInterface(f, &IID_ID2D1Factory, (void **)factory);
+    if (FAILED(hr))
+    {
+        WARN("Failed to query the factory, hr %#lx.\n", hr);
+        *factory = NULL;
+    }
+}
+
+static HRESULT d2d_device_forwarder_QueryInterface_impl(struct d2d_device_forwarder *forwarder,
+        REFIID iid, void **out)
+{
+    ID2D1Device6 *device;
+    HRESULT hr;
+
+    if (IsEqualGUID(iid, &IID_IUnknown)
+            || IsEqualGUID(iid, &IID_ID2D1Resource)
+            || IsEqualGUID(iid, &IID_ID2D1Device)
+            || IsEqualGUID(iid, &IID_ID2D1Device_ms))
+    {
+        d2d_device_forwarder_AddRef_impl(forwarder);
+        *out = &forwarder->ID2D1Device_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID(iid, &IID_ID2D1Device1) || IsEqualGUID(iid, &IID_ID2D1Device1_ms))
+    {
+        d2d_device_forwarder_AddRef_impl(forwarder);
+        *out = &forwarder->ID2D1Device1_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID(iid, &IID_IAgileObject))   /* d2d1 objects are agile */
+    {
+        d2d_device_forwarder_AddRef_impl(forwarder);
+        *out = &forwarder->ID2D1Device_iface;
+        return S_OK;
+    }
+
+    /* Interfaces the shim does not implement are answered by the realized device
+     * with its own pointer identity; realize on demand. */
+    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
+    {
+        *out = NULL;
+        return hr;
+    }
+
+    return ID2D1Device6_QueryInterface(device, iid, out);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_QueryInterface(ID2D1Device *iface,
+        REFIID iid, void **out)
+{
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    return d2d_device_forwarder_QueryInterface_impl(forwarder_from_ID2D1Device(iface), iid, out);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_QueryInterface1(ID2D1Device1 *iface,
+        REFIID iid, void **out)
+{
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
+    return d2d_device_forwarder_QueryInterface_impl(forwarder_from_ID2D1Device1(iface), iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_forwarder_AddRef(ID2D1Device *iface)
+{
+    return d2d_device_forwarder_AddRef_impl(forwarder_from_ID2D1Device(iface));
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_forwarder_AddRef1(ID2D1Device1 *iface)
+{
+    return d2d_device_forwarder_AddRef_impl(forwarder_from_ID2D1Device1(iface));
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_forwarder_Release(ID2D1Device *iface)
+{
+    return d2d_device_forwarder_Release_impl(forwarder_from_ID2D1Device(iface));
+}
+
+static ULONG STDMETHODCALLTYPE d2d_device_forwarder_Release1(ID2D1Device1 *iface)
+{
+    return d2d_device_forwarder_Release_impl(forwarder_from_ID2D1Device1(iface));
+}
+
+static void STDMETHODCALLTYPE d2d_device_forwarder_GetFactory(ID2D1Device *iface,
+        ID2D1Factory **factory)
+{
+    TRACE("iface %p, factory %p.\n", iface, factory);
+
+    d2d_device_forwarder_get_factory(forwarder_from_ID2D1Device(iface), factory);
+}
+
+static void STDMETHODCALLTYPE d2d_device_forwarder_GetFactory1(ID2D1Device1 *iface,
+        ID2D1Factory **factory)
+{
+    TRACE("iface %p, factory %p.\n", iface, factory);
+
+    d2d_device_forwarder_get_factory(forwarder_from_ID2D1Device1(iface), factory);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreateDeviceContext(ID2D1Device *iface,
+        D2D1_DEVICE_CONTEXT_OPTIONS options, ID2D1DeviceContext **context)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
+    ID2D1Device6 *device;
+    HRESULT hr;
+
+    TRACE("iface %p, options %#x, context %p.\n", iface, options, context);
+
+    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
+        return hr;
+
+    return device->lpVtbl->CreateDeviceContext(device, options, context);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreateDeviceContext_1(ID2D1Device1 *iface,
+        D2D1_DEVICE_CONTEXT_OPTIONS options, ID2D1DeviceContext **context)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device1(iface);
+    ID2D1Device6 *device;
+    HRESULT hr;
+
+    TRACE("iface %p, options %#x, context %p.\n", iface, options, context);
+
+    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
+        return hr;
+
+    return device->lpVtbl->CreateDeviceContext(device, options, context);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreateDeviceContext1(ID2D1Device1 *iface,
+        D2D1_DEVICE_CONTEXT_OPTIONS options, ID2D1DeviceContext1 **context)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device1(iface);
+    ID2D1Device6 *device;
+    HRESULT hr;
+
+    TRACE("iface %p, options %#x, context %p.\n", iface, options, context);
+
+    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
+        return hr;
+
+    return device->lpVtbl->ID2D1Device1_CreateDeviceContext(device, options, context);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreatePrintControl(ID2D1Device *iface,
+        IWICImagingFactory *wic_factory, IPrintDocumentPackageTarget *target,
+        const D2D1_PRINT_CONTROL_PROPERTIES *desc, ID2D1PrintControl **print_control)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
+    ID2D1Device6 *device;
+    HRESULT hr;
+
+    TRACE("iface %p, wic_factory %p, target %p, desc %p, print_control %p.\n",
+            iface, wic_factory, target, desc, print_control);
+
+    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
+        return hr;
+
+    return device->lpVtbl->CreatePrintControl(device, wic_factory, target, desc, print_control);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_CreatePrintControl1(ID2D1Device1 *iface,
+        IWICImagingFactory *wic_factory, IPrintDocumentPackageTarget *target,
+        const D2D1_PRINT_CONTROL_PROPERTIES *desc, ID2D1PrintControl **print_control)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device1(iface);
+    ID2D1Device6 *device;
+    HRESULT hr;
+
+    TRACE("iface %p, wic_factory %p, target %p, desc %p, print_control %p.\n",
+            iface, wic_factory, target, desc, print_control);
+
+    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
+        return hr;
+
+    return device->lpVtbl->CreatePrintControl(device, wic_factory, target, desc, print_control);
+}
+
+#define FORWARDER_TEXTURE_MEMORY(name, impl_from, iface_type) \
+static void STDMETHODCALLTYPE name##_set_max_texture_memory(iface_type *iface, UINT64 size) \
+{ \
+    struct d2d_device_forwarder *forwarder = impl_from(iface); \
+    ID2D1Device6 *device; \
+    \
+    TRACE("iface %p, size %s.\n", iface, wine_dbgstr_longlong(size)); \
+    \
+    if (FAILED(d2d_device_forwarder_get_device(forwarder, &device))) \
+        return; \
+    \
+    device->lpVtbl->SetMaximumTextureMemory(device, size); \
+} \
+\
+static UINT64 STDMETHODCALLTYPE name##_get_max_texture_memory(iface_type *iface) \
+{ \
+    struct d2d_device_forwarder *forwarder = impl_from(iface); \
+    ID2D1Device6 *device; \
+    \
+    TRACE("iface %p.\n", iface); \
+    \
+    if (FAILED(d2d_device_forwarder_get_device(forwarder, &device))) \
+        return 0; \
+    \
+    return device->lpVtbl->GetMaximumTextureMemory(device); \
+}
+
+FORWARDER_TEXTURE_MEMORY(d2d_device_forwarder, forwarder_from_ID2D1Device, ID2D1Device)
+FORWARDER_TEXTURE_MEMORY(d2d_device_forwarder1, forwarder_from_ID2D1Device1, ID2D1Device1)
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_ClearResources(ID2D1Device *iface,
+        UINT msec_since_use)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device(iface);
+    ID2D1Device6 *device;
+    HRESULT hr;
+
+    TRACE("iface %p, msec_since_use %u.\n", iface, msec_since_use);
+
+    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
+        return hr;
+
+    return device->lpVtbl->ClearResources(device, msec_since_use);
+}
+
+static HRESULT STDMETHODCALLTYPE d2d_device_forwarder_ClearResources1(ID2D1Device1 *iface,
+        UINT msec_since_use)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device1(iface);
+    ID2D1Device6 *device;
+    HRESULT hr;
+
+    TRACE("iface %p, msec_since_use %u.\n", iface, msec_since_use);
+
+    if (FAILED(hr = d2d_device_forwarder_get_device(forwarder, &device)))
+        return hr;
+
+    return device->lpVtbl->ClearResources(device, msec_since_use);
+}
+
+static D2D1_RENDERING_PRIORITY STDMETHODCALLTYPE d2d_device_forwarder_GetRenderingPriority(
+        ID2D1Device1 *iface)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device1(iface);
+    ID2D1Device6 *device;
+
+    TRACE("iface %p.\n", iface);
+
+    if (FAILED(d2d_device_forwarder_get_device(forwarder, &device)))
+        return D2D1_RENDERING_PRIORITY_NORMAL;
+
+    return device->lpVtbl->GetRenderingPriority(device);
+}
+
+static void STDMETHODCALLTYPE d2d_device_forwarder_SetRenderingPriority(ID2D1Device1 *iface,
+        D2D1_RENDERING_PRIORITY priority)
+{
+    struct d2d_device_forwarder *forwarder = forwarder_from_ID2D1Device1(iface);
+    ID2D1Device6 *device;
+
+    TRACE("iface %p, priority %u.\n", iface, priority);
+
+    if (FAILED(d2d_device_forwarder_get_device(forwarder, &device)))
+        return;
+
+    device->lpVtbl->SetRenderingPriority(device, priority);
+}
+
+static const ID2D1DeviceVtbl d2d_device_forwarder_vtbl =
+{
+    d2d_device_forwarder_QueryInterface,
+    d2d_device_forwarder_AddRef,
+    d2d_device_forwarder_Release,
+    d2d_device_forwarder_GetFactory,
+    d2d_device_forwarder_CreateDeviceContext,
+    d2d_device_forwarder_CreatePrintControl,
+    d2d_device_forwarder_set_max_texture_memory,
+    d2d_device_forwarder_get_max_texture_memory,
+    d2d_device_forwarder_ClearResources,
+};
+
+static const ID2D1Device1Vtbl d2d_device_forwarder_vtbl1 =
+{
+    d2d_device_forwarder_QueryInterface1,
+    d2d_device_forwarder_AddRef1,
+    d2d_device_forwarder_Release1,
+    d2d_device_forwarder_GetFactory1,
+    d2d_device_forwarder_CreateDeviceContext_1,
+    d2d_device_forwarder_CreatePrintControl1,
+    d2d_device_forwarder1_set_max_texture_memory,
+    d2d_device_forwarder1_get_max_texture_memory,
+    d2d_device_forwarder_ClearResources1,
+    d2d_device_forwarder_GetRenderingPriority,
+    d2d_device_forwarder_SetRenderingPriority,
+    d2d_device_forwarder_CreateDeviceContext1,
+};
+
+void d2d_device_forwarder_init(struct d2d_device_forwarder *forwarder, struct d2d_factory *factory)
+{
+    forwarder->ID2D1Device_iface.lpVtbl = &d2d_device_forwarder_vtbl;
+    forwarder->ID2D1Device1_iface.lpVtbl = &d2d_device_forwarder_vtbl1;
+    forwarder->refcount = 1;
+    forwarder->factory = factory;
+    forwarder->device = NULL;
+    InitializeCriticalSection(&forwarder->cs);
+    ID2D1Factory7_AddRef(&factory->ID2D1Factory7_iface);
 }

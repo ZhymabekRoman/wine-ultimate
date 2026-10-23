@@ -97,8 +97,6 @@ static HRESULT d2d_factory_reload_sysmetrics(struct d2d_factory *factory)
     return S_OK;
 }
 
-static HRESULT d2d_factory_get_device(struct d2d_factory *factory, ID3D10Device1 **device);
-
 static HRESULT STDMETHODCALLTYPE d2d_factory_QueryInterface(ID2D1Factory7 *iface, REFIID iid, void **out)
 {
     struct d2d_factory *factory = impl_from_ID2D1Factory7(iface);
@@ -133,22 +131,23 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_QueryInterface(ID2D1Factory7 *iface
          * D2D1CreateFactory for ID2D1Device in its DllMain startup, and refuses to
          * initialise — failing the dwmcorei and dcompi image loads, and with them
          * every Microsoft.UI.Composition activation — when that query is rejected.
-         * Create the implicit device on top of the factory's D3D10 device, as its
-         * CreateDevice() would. */
-        const GUID *wine_iid = IsEqualGUID(iid, &IID_ID2D1Device_ms) ? &IID_ID2D1Device :
-                               IsEqualGUID(iid, &IID_ID2D1Device1_ms) ? &IID_ID2D1Device1 : iid;
-        IDXGIDevice *dxgi_device = NULL;
-        ID3D10Device1 *d3d10_device;
-        HRESULT hr;
+         * Return a forwarder for the implicit device: this query arrives with
+         * loader_section held, and the real device needs d3d10/wined3d, whose
+         * critical section a wined3d render thread can hold while it enters the
+         * loader — realizing the device here deadlocks the two. The real device is
+         * created at the first method call, outside the loader; see
+         * d2d_device_forwarder in d2d1_private.h. */
+        struct d2d_device_forwarder *forwarder;
 
-        if (FAILED(hr = d2d_factory_get_device(factory, &d3d10_device)))
-            return hr;
-        hr = ID3D10Device1_QueryInterface(d3d10_device, &IID_IDXGIDevice, (void **)&dxgi_device);
-        if (FAILED(hr))
-            return hr;
-        hr = d2d_factory_create_device((ID2D1Factory1 *)iface, dxgi_device, false, wine_iid, out);
-        IDXGIDevice_Release(dxgi_device);
-        return hr;
+        if (!(forwarder = calloc(1, sizeof(*forwarder))))
+            return E_OUTOFMEMORY;
+
+        d2d_device_forwarder_init(forwarder, factory);
+
+        *out = IsEqualGUID(iid, &IID_ID2D1Device1) || IsEqualGUID(iid, &IID_ID2D1Device1_ms)
+                ? (void *)&forwarder->ID2D1Device1_iface
+                : (void *)&forwarder->ID2D1Device_iface;
+        return S_OK;
     }
 
     WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
@@ -417,6 +416,25 @@ static HRESULT d2d_factory_get_device(struct d2d_factory *factory, ID3D10Device1
         WARN("Failed to create device, hr %#lx.\n", hr);
 
     *device = factory->device;
+    return hr;
+}
+
+HRESULT d2d_factory_create_implicit_device(struct d2d_factory *factory, ID2D1Device6 **device)
+{
+    ID3D10Device1 *d3d10_device;
+    IDXGIDevice *dxgi_device = NULL;
+    HRESULT hr;
+
+    if (FAILED(hr = d2d_factory_get_device(factory, &d3d10_device)))
+        return hr;
+
+    hr = ID3D10Device1_QueryInterface(d3d10_device, &IID_IDXGIDevice, (void **)&dxgi_device);
+    if (FAILED(hr))
+        return hr;
+
+    hr = d2d_factory_create_device((ID2D1Factory1 *)&factory->ID2D1Factory7_iface, dxgi_device, false,
+            &IID_ID2D1Device6, (void **)device);
+    IDXGIDevice_Release(dxgi_device);
     return hr;
 }
 

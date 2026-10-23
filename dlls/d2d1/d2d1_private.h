@@ -770,6 +770,47 @@ static const GUID IID_ID2D1Device1_ms =
         {0xcb4a37f1, 0x8445, 0x4974, {0xa3, 0xd1, 0x38, 0x86, 0xd9, 0x09, 0x34, 0x88}};
 static const GUID IID_ID2D1DeviceContext_ms =
         {0x1081ac57, 0xe17a, 0x4b09, {0xbd, 0xd0, 0xc8, 0xef, 0x3e, 0x0d, 0x03, 0x3d}};
+
+/* Forwarder for the factory's implicit device.
+ *
+ * Windows answers ID2D1Device queries on the d2d1 factory object with its implicit
+ * device. The DWM in-proc compositor dwmcorei.dll issues that query from its
+ * DllMain, with the loader lock (loader_section) held; realizing the device there
+ * enters d3d10/wined3d, which takes the wined3d critical section, and that is one
+ * edge of an AB-BA cycle against a render thread that owns wined3d_cs while it
+ * enters the loader (the other edge is gdi32's lazy opengl32 forwarding, see
+ * dlls/gdi32/opengl.c). Answer the query with a lightweight forwarder and create
+ * the real device at the first method call, outside any loader initialisation.
+ *
+ * Identity model: the forwarder pointer is the COM object identity the client sees
+ * for the whole life of the object. The device iids answered by the factory
+ * (ID2D1Device, ID2D1Device1 and the published Microsoft ids) always resolve to
+ * one of the two embedded forwarder interfaces, before and after realization: the
+ * forwarder becomes the device by delegation, and the pointer the client holds
+ * never changes. The realized device is internal and is never handed to the client
+ * for those iids. Queries for interfaces the shim does not implement
+ * (ID2D1Device2 and later, ID2D1DeviceContext, ...) realize on demand and return
+ * the realized device's own pointer, a self-consistent independent identity.
+ *
+ * Refcounts: the forwarder holds a ref on the factory for its whole life; the
+ * realized device takes its own factory ref, as d2d_device_init does. Releasing
+ * the forwarder releases the realized device and the forwarder's factory ref. The
+ * device is bound to the factory's implicit D3D10 device, exactly as CreateDevice()
+ * creates it on top of d2d_factory_get_device().
+ */
+struct d2d_device_forwarder
+{
+    ID2D1Device ID2D1Device_iface;
+    ID2D1Device1 ID2D1Device1_iface;
+    LONG refcount;
+
+    struct d2d_factory *factory;
+    ID2D1Device6 *device;
+    CRITICAL_SECTION cs;
+};
+
+void d2d_device_forwarder_init(struct d2d_device_forwarder *forwarder, struct d2d_factory *factory);
+HRESULT d2d_factory_create_implicit_device(struct d2d_factory *factory, ID2D1Device6 **device);
 struct d2d_effect_registration * d2d_factory_get_registered_effect(ID2D1Factory *factory,
         const GUID *effect_id);
 void d2d_factory_register_effect(struct d2d_factory *factory,
