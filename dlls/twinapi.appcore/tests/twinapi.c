@@ -46,6 +46,8 @@
 #include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
+#define WIDL_using_Windows_UI_Notifications
+#include "windows.ui.notifications.h"
 
 #include "wine/test.h"
 
@@ -536,6 +538,92 @@ static void test_PowerManager(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+static void test_ToastNotificationManager(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_UI_Notifications_ToastNotificationManager;
+    static const WCHAR *id = L"wine.twinapi.test";
+    __FIVectorView_1_Windows__CUI__CNotifications__CScheduledToastNotification *scheduled;
+    __FIIterable_1_Windows__CUI__CNotifications__CScheduledToastNotification *iterable;
+    __FIIterator_1_Windows__CUI__CNotifications__CScheduledToastNotification *iterator;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier *notifier;
+    IToastNotificationManagerStatics *toast_notification_manager_statics;
+    IActivationFactory *factory;
+    HSTRING str;
+    HRESULT hr;
+    LONG ref;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IToastNotificationManagerStatics,
+                                            (void **)&toast_notification_manager_statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = WindowsCreateString( id, wcslen( id ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IToastNotificationManagerStatics_CreateToastNotifierWithId( toast_notification_manager_statics, str, &notifier );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_GetScheduledToastNotifications( notifier, &scheduled );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* the scheduled set is enumerable: the closed pinterface instantiations are answered */
+    check_interface( scheduled, &IID___FIVectorView_1_Windows__CUI__CNotifications__CScheduledToastNotification, TRUE );
+    check_interface( scheduled, &IID___FIIterable_1_Windows__CUI__CNotifications__CScheduledToastNotification, TRUE );
+
+    hr = __FIVectorView_1_Windows__CUI__CNotifications__CScheduledToastNotification_QueryInterface(
+            scheduled, &IID___FIIterable_1_Windows__CUI__CNotifications__CScheduledToastNotification, (void **)&iterable );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = __FIIterable_1_Windows__CUI__CNotifications__CScheduledToastNotification_First( iterable, &iterator );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* the set is empty: an exhausted iterator, an empty view */
+    {
+        BOOLEAN has_current = TRUE, moved = TRUE;
+        UINT32 size = 0xc0ffee, count = 0xc0ffee;
+
+        hr = __FIIterator_1_Windows__CUI__CNotifications__CScheduledToastNotification_get_HasCurrent( iterator,
+                                                                                                      &has_current );
+        ok( hr == S_OK && !has_current, "got hr %#lx, has_current %d.\n", hr, has_current );
+        hr = __FIIterator_1_Windows__CUI__CNotifications__CScheduledToastNotification_MoveNext( iterator, &moved );
+        ok( hr == S_OK && !moved, "got hr %#lx, moved %d.\n", hr, moved );
+        hr = __FIIterator_1_Windows__CUI__CNotifications__CScheduledToastNotification_GetMany( iterator, 0, NULL, &count );
+        ok( hr == S_OK && !count, "got hr %#lx, count %u.\n", hr, count );
+        hr = __FIIterator_1_Windows__CUI__CNotifications__CScheduledToastNotification_get_Current( iterator, NULL );
+        ok( hr == E_POINTER, "got hr %#lx.\n", hr );
+
+        hr = __FIVectorView_1_Windows__CUI__CNotifications__CScheduledToastNotification_get_Size( scheduled, &size );
+        ok( hr == S_OK && !size, "got hr %#lx, size %u.\n", hr, size );
+        hr = __FIVectorView_1_Windows__CUI__CNotifications__CScheduledToastNotification_GetAt( scheduled, 0, NULL );
+        ok( hr == E_BOUNDS || hr == E_POINTER, "got hr %#lx.\n", hr );
+    }
+
+    ref = __FIIterator_1_Windows__CUI__CNotifications__CScheduledToastNotification_Release( iterator );
+    ok( !ref, "got ref %ld.\n", ref );
+    ref = __FIIterable_1_Windows__CUI__CNotifications__CScheduledToastNotification_Release( iterable );
+    ok( ref == 1, "got ref %ld.\n", ref );
+    ref = __FIVectorView_1_Windows__CUI__CNotifications__CScheduledToastNotification_Release( scheduled );
+    ok( !ref, "got ref %ld.\n", ref );
+    ref = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Release( notifier );
+    ok( !ref, "got ref %ld.\n", ref );
+
+    ref = IToastNotificationManagerStatics_Release( toast_notification_manager_statics );
+    ok( ref >= 1, "got ref %ld.\n", ref );
+    ref = IActivationFactory_Release( factory );
+    ok( ref >= 1, "got ref %ld.\n", ref );
+}
+
 START_TEST(twinapi)
 {
     HRESULT hr;
@@ -550,6 +638,7 @@ START_TEST(twinapi)
     test_CoreApplication();
     test_DataTransferManager();
     test_PowerManager();
+    test_ToastNotificationManager();
 
     RoUninitialize();
 }
