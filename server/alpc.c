@@ -47,6 +47,16 @@ struct alpc_message
     unsigned int     msg_id;     /* for connect msgs: the pending-conn id */
     int              is_connect; /* 1 = connect notification */
     data_size_t      data_size;  /* size of user data that follows */
+    /* Handle-attribute bookkeeping: a message carrying ALPC_MESSAGE_HANDLE_
+     * ATTRIBUTE has its handle duplicated into the receiving process at
+     * queue time, exactly as the kernel duplicates the object into the
+     * receiver's handle table on delivery.  While the message sits queued the
+     * duplicate is not yet owned by the receiver: dropping the message (port
+     * teardown) closes it, which is the close-notification path; delivering
+     * it transfers ownership to the receiver's process. */
+    struct process  *handle_proc;  /* receiver the duplicate lives in, NULL = none */
+    obj_handle_t     handle_id;    /* duplicate handle in handle_proc */
+    struct object   *handle_obj;   /* grabbed object the duplicate refers to */
     /* user data bytes follow */
 };
 
@@ -78,6 +88,22 @@ struct alpc_wire_hdr
     unsigned int     callback_id;
 };
 
+/* HANDLE attribute as the kernel presents it on delivery. It rides as an
+ * optional block between the wire header and the user payload, present only
+ * when attr_flags carries ALPC_MESSAGE_HANDLE_ATTRIBUTE (the connect handshake
+ * replies, whose caller buffers are sized for the plain header only, must not
+ * be enlarged by it): the handle duplicated into the receiving process (a
+ * server handle id, translated by ntdll), the notification action (1 =
+ * created, 2 = closed, 3 = modified, 4 = closed in a closing process) and the
+ * handle count. */
+struct alpc_handle_blk
+{
+    client_ptr_t     handle_id;
+    unsigned int     handle_action;
+    unsigned int     handle_count;
+    unsigned int     pad;
+};
+
 #define ALPC_ATTR_HDR_MAGIC 0x41545452 /* 'ATTR' */
 struct alpc_msg_attr_hdr
 {
@@ -90,6 +116,14 @@ struct alpc_msg_attr_hdr
     client_ptr_t     msg_context;
     unsigned int     sequence;
     unsigned int     callback_id;
+    /* sender-side HANDLE attribute: the handle to duplicate on delivery,
+     * with its desired access and count (the kernel duplicates exactly one
+     * handle per message) */
+    client_ptr_t     send_handle;
+    unsigned int     desired_access;
+    unsigned int     handle_count;
+    unsigned int     pad2;
+    unsigned int     pad3;
 };
 
 /* A pending (not yet accepted) client connection. */
@@ -113,6 +147,8 @@ struct alpc_port
 {
     struct object       obj;
     struct fd          *fd;
+    struct process     *process;     /* owning process: the target of handle-attribute
+                                      * duplication when a message queues on this port */
     int                 is_server;   /* 1 = server listening port, 0 = connection */
 
     /* Message queue – both server ports and connections use this */
@@ -232,6 +268,33 @@ static unsigned int alpc_port_map_access( struct object *obj, unsigned int acces
     return access & ~(GENERIC_READ | GENERIC_WRITE | GENERIC_EXECUTE | GENERIC_ALL);
 }
 
+/* Free a message that never reached its receiver.  A queued handle duplicate
+ * was created for a receiver that will now never pick it up: close it in the
+ * receiver's table and drop the grabbed references.  This is the kernel's
+ * close-notification path for handles parked on a destroyed port. */
+static void free_alpc_message( struct alpc_message *msg )
+{
+    if (msg->handle_id)
+    {
+        close_handle( msg->handle_proc, msg->handle_id );
+        release_object( msg->handle_obj );
+        release_object( msg->handle_proc );
+    }
+    free( msg );
+}
+
+/* The message was delivered: the receiver owns the duplicated handle now, the
+ * server just drops its bookkeeping references and must not close it. */
+static void release_alpc_message( struct alpc_message *msg )
+{
+    if (msg->handle_id)
+    {
+        release_object( msg->handle_obj );
+        release_object( msg->handle_proc );
+    }
+    free( msg );
+}
+
 static void alpc_port_destroy( struct object *obj )
 {
     struct alpc_port *port = (struct alpc_port *)obj;
@@ -246,7 +309,7 @@ static void alpc_port_destroy( struct object *obj )
     LIST_FOR_EACH_ENTRY_SAFE( msg, next_msg, &port->msg_queue, struct alpc_message, entry )
     {
         list_remove( &msg->entry );
-        free( msg );
+        free_alpc_message( msg );
     }
 
     if (port->reverse)
@@ -291,6 +354,7 @@ static void alpc_port_destroy( struct object *obj )
 
     if (port->listen_port) release_object( port->listen_port );
     if (port->fd) release_object( port->fd );
+    if (port->process) release_object( port->process );
 }
 
 /* ---- Fd ops ---- */
@@ -384,7 +448,7 @@ static void reselect_alpc_port( struct alpc_port *port )
                 async_request_complete_alloc( async, STATUS_SUCCESS,
                                                msg->data_size, msg->data_size, data );
                 list_remove( &msg->entry );
-                free( msg );
+                release_alpc_message( msg ); /* delivered: receiver owns the handle duplicate */
             }
             release_object( iosb );
             release_object( async );
@@ -520,6 +584,8 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     {
         struct alpc_wire_hdr *hdr;
         struct alpc_msg_attr_hdr attr_hdr;
+        obj_handle_t dup = 0;
+        struct object *grabbed_obj = NULL;
         const void *user_data = iosb->in_data;
         data_size_t user_size = iosb->in_size;
         data_size_t blob_size;
@@ -539,14 +605,55 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             user_size -= sizeof(attr_hdr);
         }
 
-        blob_size = sizeof(*hdr) + user_size;
+        /* Handle attribute: the kernel duplicates the sender's handle into the
+         * receiving process's handle table as the message is delivered. Perform
+         * the duplication now, at queue time (the receiver arms its receive
+         * before the sender writes, and a receive that is already in flight
+         * takes the message straight away), and bookkeep it on the message:
+         * delivery transfers ownership to the receiver, teardown closes the
+         * duplicate (the close-notification path for a handle whose receiver
+         * vanished). */
+        if (attr_hdr.attr_flags & ALPC_MESSAGE_HANDLE_ATTRIBUTE)
+        {
+            struct object *hobj = get_handle_obj( current->process,
+                        (obj_handle_t)(ULONG_PTR)attr_hdr.send_handle,
+                        attr_hdr.desired_access, NULL );
+            if (!hobj)
+            {
+                release_object( iosb );
+                return; /* get_handle_obj set the error */
+            }
+            if (!(dup = alloc_handle( peer->process, hobj, attr_hdr.desired_access, 0 )))
+            {
+                release_object( hobj );
+                release_object( iosb );
+                set_error( STATUS_NO_MEMORY );
+                return;
+            }
+            grabbed_obj = grab_object( hobj ); /* keep a reference for the queue record */
+            release_object( hobj );            /* the handle and the record own the rest */
+        }
+
+        blob_size = sizeof(*hdr) + (dup ? sizeof(struct alpc_handle_blk) : 0) + user_size;
         if (!(msg = malloc( sizeof(*msg) + blob_size )))
         {
+            if (dup)
+            {
+                close_handle( peer->process, dup );
+                release_object( grabbed_obj );
+            }
             release_object( iosb );
             set_error( STATUS_NO_MEMORY );
             return;
         }
+        memset( msg, 0, sizeof(*msg) );
         msg->is_connect = 0;
+        if (dup)
+        {
+            msg->handle_proc = (struct process *)grab_object( peer->process );
+            msg->handle_id   = dup;
+            msg->handle_obj  = grabbed_obj;
+        }
         msg->msg_id = reply_id;
         if (!msg->msg_id)
         {
@@ -572,7 +679,18 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         hdr->msg_context  = attr_hdr.msg_context;
         hdr->sequence     = attr_hdr.sequence;
         hdr->callback_id  = attr_hdr.callback_id;
-        if (user_size) memcpy( hdr + 1, user_data, user_size );
+        /* the receiver sees the duplicated handle with action "created" */
+        if (dup)
+        {
+            struct alpc_handle_blk *blk = (struct alpc_handle_blk *)(hdr + 1);
+            hdr->attr_flags |= ALPC_MESSAGE_HANDLE_ATTRIBUTE;
+            blk->handle_id     = (client_ptr_t)dup;
+            blk->handle_action = 1; /* LPC handle action: created */
+            blk->handle_count  = 1;
+            blk->pad           = 0;
+            if (user_size) memcpy( (char *)hdr + sizeof(*hdr) + sizeof(*blk), user_data, user_size );
+        }
+        else if (user_size) memcpy( hdr + 1, user_data, user_size );
         if (!port->is_server && user_size >= 0x1c)
         {
             /* a client write echoing a message id a server receive is armed for
@@ -661,6 +779,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
 
     if (!(port = alloc_object( &alpc_port_ops ))) return NULL;
 
+    port->process     = (struct process *)grab_object( current->process );
     port->is_server   = is_server;
     port->peer        = NULL;
     port->listen_port = NULL;
@@ -697,6 +816,7 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
         set_error( STATUS_NO_MEMORY );
         return 0;
     }
+    memset( msg, 0, sizeof(*msg) );
     msg->is_connect = 1;
     msg->msg_id     = pc->msg_id;
     msg->data_size  = blob_size;
@@ -716,6 +836,7 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->msg_context  = 0;
     hdr->sequence     = 0;
     hdr->callback_id  = 0;
+    hdr->attr_flags   = 0;
     if (pc->conn_data_size)
         memcpy( hdr + 1, pc->conn_data, pc->conn_data_size );
     list_add_tail( &server_port->msg_queue, &msg->entry );
@@ -748,6 +869,7 @@ DECL_HANDLER(create_alpc_port)
     if (get_error() != STATUS_OBJECT_NAME_EXISTS)
     {
         /* Newly created: initialize all fields */
+        port->process     = (struct process *)grab_object( current->process );
         port->is_server   = 1;
         port->peer        = NULL;
         port->listen_port = NULL;
@@ -1033,6 +1155,7 @@ DECL_HANDLER(accept_alpc_connection)
             whdr->msg_context  = 0;
             whdr->sequence     = 0;
             whdr->callback_id  = 0;
+            whdr->attr_flags   = 0x20000000; /* ALPC_MESSAGE_CONTEXT_ATTRIBUTE */
             if (found->conn_reply_size)
                 memcpy( whdr + 1, found->conn_reply, found->conn_reply_size );
             async_request_complete_alloc( found->client_async, STATUS_SUCCESS,

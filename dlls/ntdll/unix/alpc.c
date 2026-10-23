@@ -76,6 +76,22 @@ struct alpc_wire_hdr
     unsigned int     callback_id;
 };
 
+/* HANDLE attribute as the kernel presents it on delivery. It rides as an
+ * optional block between the wire header and the user payload, present only
+ * when attr_flags carries ALPC_MESSAGE_HANDLE_ATTRIBUTE (connect handshake
+ * replies, whose caller buffers are sized for the plain header only, are not
+ * enlarged by it): the handle duplicated into the receiving process (a server
+ * handle id, translated by ntdll), the notification action (1 = created,
+ * 2 = closed, 3 = modified, 4 = closed in a closing process) and the handle
+ * count. */
+struct alpc_handle_blk
+{
+    client_ptr_t     handle_id;
+    unsigned int     handle_action;
+    unsigned int     handle_count;
+    unsigned int     pad;
+};
+
 #define ALPC_ATTR_HDR_MAGIC 0x41545452 /* 'ATTR' */
 struct alpc_msg_attr_hdr
 {
@@ -88,6 +104,14 @@ struct alpc_msg_attr_hdr
     client_ptr_t     msg_context;
     unsigned int     sequence;
     unsigned int     callback_id;
+    /* sender-side HANDLE attribute: the handle to duplicate on delivery,
+     * with its desired access and count (the kernel duplicates exactly one
+     * handle per message) */
+    client_ptr_t     send_handle;
+    unsigned int     desired_access;
+    unsigned int     handle_count;
+    unsigned int     pad2;
+    unsigned int     pad3;
 };
 
 static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG attribute_flag )
@@ -552,6 +576,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
            port_handle, (unsigned int)flags, send_msg, send_msg_attr,
            recv_msg, recv_buffer_size, recv_msg_attr, timeout );
 
+
     /* --- Send phase --- */
     if (send_msg)
     {
@@ -614,6 +639,21 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 attr_hdr.msg_context = (client_ptr_t)(ULONG_PTR)ctx->MessageContext;
                 attr_hdr.sequence    = ctx->Sequence;
                 attr_hdr.callback_id = ctx->CallbackId;
+            }
+        }
+        /* the HANDLE attribute carries one object handle: the kernel
+         * duplicates it into the receiving process as the message is
+         * delivered, and the receiver sees the new handle with the
+         * "created" action */
+        if (send_msg_attr && (send_msg_attr->ValidAttributes & ALPC_MESSAGE_HANDLE_ATTRIBUTE))
+        {
+            ALPC_HANDLE_ATTR *h = get_message_attribute( send_msg_attr, ALPC_MESSAGE_HANDLE_ATTRIBUTE );
+            if (h)
+            {
+                attr_hdr.attr_flags |= ALPC_MESSAGE_HANDLE_ATTRIBUTE;
+                attr_hdr.send_handle = (client_ptr_t)(ULONG_PTR)h->Handle;
+                attr_hdr.desired_access = h->DesiredAccess;
+                attr_hdr.handle_count = 1;
             }
         }
 
@@ -740,6 +780,17 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         if (hdr.magic == ALPC_WIRE_MAGIC)
         {
             char *src = (char *)recv_msg + sizeof(struct alpc_wire_hdr);
+            struct alpc_handle_blk hblk = {0};
+
+            /* a delivered handle attribute rides between the header and the
+             * user payload: strip it and remember the kernel-duplicated
+             * handle for the receiver's attribute set */
+            if ((hdr.attr_flags & ALPC_MESSAGE_HANDLE_ATTRIBUTE) &&
+                io.Information >= sizeof(hdr) + sizeof(hblk))
+            {
+                memcpy( &hblk, src, sizeof(hblk) );
+                src += sizeof(hblk);
+            }
             SIZE_T total;
 
             if (hdr.type == LPC_CONNECTION_REQUEST)
@@ -795,6 +846,23 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                     }
                 }
 
+                /* the kernel duplicated the sender's handle into this process
+                 * on delivery: report it in the handle attribute with the
+                 * notification action and the handle count */
+                if ((hdr.attr_flags & ALPC_MESSAGE_HANDLE_ATTRIBUTE) && hblk.handle_id &&
+                    (recv_msg_attr->AllocatedAttributes & ALPC_MESSAGE_HANDLE_ATTRIBUTE))
+                {
+                    ALPC_HANDLE_ATTR *h = get_message_attribute( recv_msg_attr, ALPC_MESSAGE_HANDLE_ATTRIBUTE );
+                    if (h)
+                    {
+                        h->Flags         = hblk.handle_action; /* 1 = created */
+                        h->Handle        = wine_server_ptr_handle( (obj_handle_t)hblk.handle_id );
+                        h->ObjectType    = 0;
+                        h->DesiredAccess = 0;
+                        recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_HANDLE_ATTRIBUTE;
+                    }
+                }
+
                 if (recv_event)
                 {
                     recv_event->UsedEntryCount = 1;
@@ -806,6 +874,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
             }
         }
     }
+
 
     return ret;
 }
