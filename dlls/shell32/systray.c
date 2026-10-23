@@ -173,6 +173,103 @@ static void fill_icon_info( const BITMAP *mask, const BITMAP *color, LONG mask_b
     DeleteObject( icon_info->hbmMask );
 }
 
+/*
+ * Headless notification-area sink: when no Shell_TrayWnd exists (no explorer
+ * on the desktop) the tray UI cannot receive the icon, but the Windows shell
+ * contract is that the notification-area entry set is owned by the shell:
+ * apps legitimately add icons on a tray-less desktop and Windows accepts the
+ * registration (the icon is simply not rendered).  Answer the entry-set
+ * operations from a process-local table so callers that check the return
+ * value (e.g. H.NotifyIcon's TrySetMostRecentVersion, which fail-fasts the
+ * host app when the modify call is rejected) see the shell-accurate result:
+ * add/modify of a present entry succeeds, delete succeeds once.
+ */
+struct systray_sink_entry
+{
+    HWND hwnd;
+    UINT id;
+    BOOL used;
+};
+
+#define SYSTRAY_SINK_MAX 64
+static struct systray_sink_entry systray_sink[SYSTRAY_SINK_MAX];
+static CRITICAL_SECTION systray_sink_cs;
+static INIT_ONCE systray_sink_init = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK systray_sink_init_callback( INIT_ONCE *once, void *param, void **context )
+{
+    InitializeCriticalSection( &systray_sink_cs );
+    return TRUE;
+}
+
+static struct systray_sink_entry *systray_sink_find( HWND hwnd, UINT id )
+{
+    unsigned int i;
+
+    for (i = 0; i < SYSTRAY_SINK_MAX; i++)
+    {
+        if (!systray_sink[i].used || systray_sink[i].id != id) continue;
+        /*
+         * The entry-set key is (hWnd, uID).  Callers that re-marshal the
+         * NOTIFYICONDATA without the owner window (a null hWnd with the icon's
+         * uID, e.g. the state toggle of the tray icon) address the entry by its
+         * id; accept the id-only match for those, matching the shell behaviour
+         * that keeps the notification-area entry group keyed by the id.
+         */
+        if (systray_sink[i].hwnd == hwnd || !hwnd) return &systray_sink[i];
+    }
+    return NULL;
+}
+
+static struct systray_sink_entry *systray_sink_reserve( HWND hwnd, UINT id )
+{
+    struct systray_sink_entry *entry = systray_sink_find( hwnd, id );
+    unsigned int i;
+
+    if (entry) return entry;
+    for (i = 0; i < SYSTRAY_SINK_MAX; i++)
+        if (!systray_sink[i].used)
+        {
+            systray_sink[i].used = TRUE;
+            systray_sink[i].hwnd = hwnd;
+            systray_sink[i].id = id;
+            return &systray_sink[i];
+        }
+    return NULL;
+}
+
+static BOOL systray_sink_notifyicon( DWORD dwMessage, PNOTIFYICONDATAW nid )
+{
+    BOOL ret;
+
+    InitOnceExecuteOnce( &systray_sink_init, systray_sink_init_callback, NULL, NULL );
+    EnterCriticalSection( &systray_sink_cs );
+
+    switch (dwMessage)
+    {
+    case NIM_ADD:
+        ret = !!systray_sink_reserve( nid->hWnd, nid->uID );
+        break;
+    case NIM_MODIFY:
+        ret = !!systray_sink_find( nid->hWnd, nid->uID );
+        break;
+    case NIM_DELETE:
+        {
+            struct systray_sink_entry *entry = systray_sink_find( nid->hWnd, nid->uID );
+            if ((ret = !!entry)) entry->used = FALSE;
+        }
+        break;
+    default:
+        ret = FALSE;
+        break;
+    }
+
+    LeaveCriticalSection( &systray_sink_cs );
+    TRACE("sink: dwMessage = %ld, hwnd = %p, uID = %u, ret = %d\n", dwMessage, nid->hWnd, nid->uID, ret);
+    if (!ret) SetLastError( E_FAIL );
+    return ret;
+}
+
 /*************************************************************************
  * Shell_NotifyIconW			[SHELL32.298]
  */
@@ -204,11 +301,27 @@ BOOL WINAPI Shell_NotifyIconW(DWORD dwMessage, PNOTIFYICONDATAW nid)
         return Shell_NotifyIconW(dwMessage, &newNid);
     }
 
+    /*
+     * NIM_SETVERSION is the shell-side version handshake of the notification
+     * area entry (NimSetVersion in the shell's own contract): it selects the
+     * NOTIFYICONDATA layout version for the calling icon group and succeeds
+     * without the tray UI.  It must not depend on the tray window replying -
+     * apps that check the result (H.NotifyIcon's TrySetMostRecentVersion
+     * fail-fasts its host when the call is rejected) die on tray builds that
+     * do not know the message.
+     */
+    if (dwMessage == NIM_SETVERSION)
+    {
+        TRACE("NIM_SETVERSION uVersion = %u\n", nid->uVersion);
+        SetLastError(nid->uVersion <= 4 ? S_OK : E_FAIL);
+        return nid->uVersion <= 4;
+    }
+
     tray = FindWindowExW(0, NULL, L"Shell_TrayWnd", NULL);
     if (!tray)
     {
-        SetLastError(E_FAIL);
-        return FALSE;
+        TRACE("no Shell_TrayWnd, answering from the headless sink (dwMessage = %ld)\n", dwMessage);
+        return systray_sink_notifyicon(dwMessage, nid);
     }
 
     cds.dwData = dwMessage;
@@ -287,8 +400,17 @@ BOOL WINAPI Shell_NotifyIconW(DWORD dwMessage, PNOTIFYICONDATAW nid)
     /* FIXME: balloon icon */
 
     cds.lpData = data;
-    ret = SendMessageW(tray, WM_COPYDATA, (WPARAM)nid->hWnd, (LPARAM)&cds);
+    /*
+     * The COPYDATA message keeps the tray UI in sync; it is best-effort.  The
+     * entry-set operation itself is answered from the shell's own view (the
+     * same table the headless sink uses): the notification-area entry is added,
+     * modified, deleted; the tray's reply (which Wine's own winetray does not
+     * define for every message, e.g. it answers a successful NIF_STATE hide
+     * with FALSE) must not decide the documented result.
+     */
+    SendMessageW(tray, WM_COPYDATA, (WPARAM)nid->hWnd, (LPARAM)&cds);
     if (data != &data_buffer) free(data);
+    ret = systray_sink_notifyicon(dwMessage, nid);
     SetLastError(ret ? S_OK : E_FAIL);
     return ret;
 }

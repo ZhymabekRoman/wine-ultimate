@@ -1576,6 +1576,10 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.AppInstance" ) ||
              !wcscmp( buffer, L"Microsoft.Windows.AppLifecycle.AppInstance" ))
         IActivationFactory_QueryInterface( app_instance_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_UI_Notifications_BadgeUpdateManager ))
+        IActivationFactory_QueryInterface( badge_update_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_UI_Notifications_ToastNotificationManager ))
+        IActivationFactory_QueryInterface( toast_notification_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_DataTransferManager ))
         IActivationFactory_QueryInterface( data_transfer_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard ))

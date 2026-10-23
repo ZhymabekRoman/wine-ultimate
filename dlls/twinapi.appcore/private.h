@@ -35,6 +35,7 @@
 #define WIDL_using_Windows_System_Power
 #define WIDL_using_Windows_System_UserProfile
 #define WIDL_using_Windows_UI_ViewManagement
+#define WIDL_using_Windows_UI_Notifications
 #define WIDL_using_Windows_ApplicationModel_Core
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #define WIDL_using_Windows_Storage
@@ -46,6 +47,7 @@
 #include "windows.system.power.h"
 #include "windows.system.userprofile.h"
 #include "windows.ui.viewmanagement.h"
+#include "windows.ui.notifications.h"
 #include "windows.applicationmodel.core.h"
 #include "windows.applicationmodel.datatransfer.h"
 #include "windows.storage.h"
@@ -66,6 +68,8 @@ extern IActivationFactory *clipboard_statics_factory;
 extern IActivationFactory *data_package_factory;
 extern IActivationFactory *html_format_helper_statics_factory;
 extern IActivationFactory *standard_data_formats_statics_factory;
+extern IActivationFactory *badge_update_manager_statics_factory;
+extern IActivationFactory *toast_notification_manager_statics_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

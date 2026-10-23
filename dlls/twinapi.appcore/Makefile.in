@@ -5,6 +5,7 @@ IMPORTS   = combase advapi32 user32
 SOURCES = \
 	advertising_manager.c \
 	analytics_info.c \
+	badge_update_manager.c \
 	application_view.c \
 	classes.idl \
 	client_device_information.c \
@@ -12,4 +13,5 @@ SOURCES = \
 	data_transfer.c \
 	main.c \
 	power_manager.c \
-	static_lifetime_map.c
+	static_lifetime_map.c \
+	toast_notification_manager.c
