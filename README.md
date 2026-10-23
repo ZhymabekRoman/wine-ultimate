@@ -58,6 +58,76 @@ The tree is an ordinary Wine tree (`configure`, `dlls/`, `include/`, `server/`, 
 no `patchinstall.py` step is needed — the series is already in the history.
 Wine-staging's own `staging/` tooling is not part of the fork.
 
+## Environment preparation (registry configuration, no binary patching)
+
+Running a WinAppSDK/XAML-packaged app (e.g. WhatsApp Desktop 2.2620) on this fork
+needs the following *registry + environment* configuration in the test prefix.
+All of it is supported Wine-side behavior — no app DLLs are patched.
+
+### 1. Build-number knob (CoreMessagingXP wake-path selection)
+
+`CoreMessagingXP!Win32EventLoopBridge::InitializeClass` sets
+`s_isSharedUserTebSupported = (PEB->OSBuildNumber >= 25197)`. Wine's default
+prefix reports `19045`, which selects the legacy `OffThreadWaiter` wake path
+(a waiter thread parked in `NtRemoveIoCompletionEx` on the shared IOCP). Raising
+the reported build selects the modern IOCP / shared-user-TEB wake path. This is
+pure registry configuration — ntdll `version_init` reads these values into the PEB:
+
+```reg
+Windows Registry Editor Version 5.00
+
+[HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion]
+"CurrentBuild"="26100"
+"CurrentBuildNumber"="26100"
+"CurrentMajorVersionNumber"=dword:0000000a
+"CurrentMinorVersionNumber"=dword:00000000
+"UBR"=dword:00000001
+```
+
+`import` with `wine regedit /S`. Measured A/B (150 s runs, unpatched app DLLs):
+the knob flips the wake path (legacy `OffThreadWaiter` thread goes silent, the
+registrar's bare ALPC receive arms and completes) but does not by itself change
+the end state — see the A/B notes in the workbench harness (`wa_ver.sh set|clear`).
+
+### 2. ActivatableClassId registration for the WindowsAppRuntime framework
+
+`combase!RoGetActivationFactory` resolves a WinRT class through the activation
+context, a few hardcoded prefixes, and then the registry fallback
+`HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId\<class>\DllPath`
+(`REG_SZ`/`REG_EXPAND_SZ`). The framework ships class metadata in `.winmd` files;
+enumerate them (e.g. `monodis --typedef`) and register each class against the
+implementing DLL from the app directory (the app bundles a self-contained copy):
+
+- `Microsoft.UI.*` / `Microsoft.Windows.AppLifecycle.*` /
+  `Microsoft.Windows.ApplicationModel.DynamicDependency.*` → `Microsoft.ui.xaml.dll` /
+  `Microsoft.WindowsAppRuntime.dll`
+- `Microsoft.UI.Xaml.*` → `Microsoft.ui.xaml.dll`
+
+Import with `wine regedit /S` (plain-ASCII `.reg`; hex values on one line are
+truncated by regedit's parser — use plain strings). The harness generator lives
+at `~/wa-work/tools/mk_activatable_reg.py` (4148 classes from the package winmds).
+
+### 3. Package identity environment
+
+`twinapi.appcore` / package-identity series read the package graph from the
+environment (no installation is required):
+
+```bash
+export WINE_PACKAGE_FULL_NAME='5319275A.WhatsAppDesktop_2.2620.102.0_x64__cv1g1gvanyjgm'
+export WINE_PACKAGE_FAMILY_NAME='5319275A.WhatsAppDesktop_cv1g1gvanyjgm'
+export WINE_PACKAGE_AUMID='5319275A.WhatsAppDesktop_cv1g1gvanyjgm!App'
+export WINE_PACKAGE_PATH='Z:\path\to\app\package'
+export WINE_FRAMEWORK_PACKAGE_FULL_NAME='Microsoft.WindowsAppRuntime.1.6_6000.519.329.0_x64__8wekyb3d8bbwe'
+export WINE_FRAMEWORK_PACKAGE_PATH='Z:\path\to\packages\Microsoft.WindowsAppRuntime.1.6_6000.519.329.0_x64__8wekyb3d8bbwe'
+```
+
+### 4. Prefix materialization
+
+Wine 11 materializes builtin PE DLLs into the prefix (`drive_c/windows/system32`,
+`syswow64`). A restored/skeleton prefix fails at `kernel32.dll` (`c0000135`);
+repopulate from the build tree (`dlls/*/x86_64-windows/*.dll` → `system32`,
+`dlls/*/i386-windows/*.dll` → `syswow64`) before first run.
+
 ## Series on `ultimate`
 
 | Series | Patches | Notes |
