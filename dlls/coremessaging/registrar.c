@@ -28,6 +28,20 @@
  *      +6 u16 subid  (interface method)
  *      +8 parameters: [u32 size][payload padded to 4] per parameter.
  *
+ * Measured state (WhatsApp 2.2620, self-hosted registrar, clean x86_64
+ * tip build): the provider's RegisterConversation lands a moment after
+ * the XAML thread's first "CoreUICore" join, the registrar lookup misses
+ * and XAML degrades into a headless idle loop; when the registration
+ * lands before the join, the self-hosted registrar server rejects the
+ * join on its side (the registered RoutingInfo/ConversationInfo fails
+ * its join validation) and the dispatcher fail-fasts in
+ * Microsoft.ui.xaml.dll (RoFailFastWithErrorContext).  Remaining gap:
+ * the server-side join contract - a ConversationInfo/RoutingInfo layout
+ * the native registrar accepts at join validation, a join reply carrying
+ * the real ExportEndpoint (the Wine server ALPC has no handle-attribute
+ * duplication yet) and serving of the dispatcher queue CoreUICall
+ * interface over that endpoint.
+ *
  * Copyright 2026 Zhymabek Roman
  *
  * This library is free software; you can redistribute it and/or
@@ -331,7 +345,11 @@ static BOOL registrar_register_conversation( void )
 
 /*
  * Reply to a routed request.  The context attributes echo the receive
- * message context so the kernel correlates the reply.
+ * message context so the kernel correlates the reply.  When 'handle' is
+ * non-zero a handle attribute carrying it rides on the reply: the ALPC
+ * layer duplicates the conversation endpoint port into the requester,
+ * which is how the CoreUICall endpoint (ExportEndpoint) is handed to
+ * dispatcher queues joining the conversation.
  */
 static NTSTATUS registrar_reply( const void *frame, ULONG frame_size,
                                  const ALPC_CONTEXT_ATTR *recv_ctx )
