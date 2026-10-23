@@ -514,3 +514,44 @@ server ALPC/d3dkmt, ntdll WNF/ALPC, twinapi, windows.ui, cryptowinrt, winrt stub
 * `github` → `git@github.com:ZhymabekRoman/wine-ultimate.git`
 * Upstream Wine: `https://gitlab.winehq.org/wine/wine.git`
 * Wine-Staging: `https://gitlab.winehq.org/wine/wine-staging.git`
+
+## The park fix: d2d1 implicit-device forwarder + gdi32 init-time opengl32 forwarding
+
+Implemented on ultimate as two commits (pushed, linear from eb74e0827):
+
+- `d2d1: realize the factory's implicit device lazily behind a forwarder` — the
+  factory answers ID2D1Device/ID2D1Device1 (+ published Microsoft ids) with a
+  lightweight forwarder (ID2D1Device/ID2D1Device1 vtable shim). The real device is
+  created at the first method call, outside any loader initialisation; the forwarder
+  interface pointers are the stable client-visible COM identity, the realized device
+  is internal (only answers iids the shim does not implement, on demand). The
+  forwarder holds a factory ref for its life; the realized device takes its own, as
+  d2d_device_init does. D3D10 device binding is the CreateDevice() one.
+- `gdi32: resolve the opengl32 forwarding at process init` — gdi32 DllMain loads
+  opengl32 and caches wglChoosePixelFormat/wglDescribePixelFormat/wglGetPixelFormat/
+  wglSetPixelFormat/wglSwapBuffers; the per-call LoadLibraryW (loader lock under a
+  wined3d_cs holder) is gone. Module-absent semantics preserved (functions fail as
+  before).
+
+Verification (tip 6d9288cef, prefix builtins synced):
+
+- Lock probe (100 s, +module,+loaddll): **0 lock timeouts** (was 27/run), no
+  loader_section/wined3d_cs cycle signature; the main thread progresses past the old
+  park into uiautomationcore/oleacc/dataexchange (rc=0 at 100 s, was 124-parked).
+- 150 s run: app now dies on a **managed fail-fast c0000602** —
+  win32u/user32 window-proc dispatch → Microsoft.ui.xaml (+0x213c35…+0x699fe) →
+  combase+0x19114 → kernelbase RaiseFailFast. 30 windows created (incl. a
+  1280x1024), **WinUIDesktopWin32WindowClass not registered**, no mapped XAML
+  window; screenshot `wa-work/wa_deadlock_after.png` is blank. The app dies before
+  XAML window registration.
+- Battery 8x60: 8/8 rc=2 DIED, fatal=0, webview2loader=0, edge=0 (deterministic).
+- dwmcorei loads (no 0x45a), dcompi loads, Microsoft.UI.Composition.OSSupport maps —
+  the composition path from eb74e0827 survives the laziness. App binaries pristine
+  at end: CoreMessagingXP 24da83be…, FrameworkUdk c6053f1a…, Microsoft.ui.xaml
+  9a42e19d…, dwmcorei 9353066e… (== .orig set intact).
+- Tests (gdi32, dcomp, d2d1, dxgi) running in background; monitor:
+  `tail -f ~/wa-work/wa_tests_after.log`.
+
+Next gap: the combase activation fail-fast inside the XAML window proc — a class
+server activation failing during XAML content init (the recorded ActivatableClassId
+module-mapping family). webview2/edge is not reached.
