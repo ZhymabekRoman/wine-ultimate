@@ -1516,6 +1516,10 @@ static void test_alpc_event_notification( void )
     ok( recv_thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
     if (!recv_thread) goto done;
 
+    /* Let the receive arm itself before the request is sent: the notification
+     * must be armed from the prior waiting state. */
+    Sleep( 500 );
+
     /* Let the client send its request now. */
     SetEvent( start_event );
 

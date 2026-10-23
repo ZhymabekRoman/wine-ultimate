@@ -42,7 +42,11 @@ SIZE_T WINAPI AlpcGetHeaderSize(ULONG attribute_flags)
         {ALPC_MESSAGE_TOKEN_ATTRIBUTE, sizeof(ALPC_TOKEN_ATTR)},
         {ALPC_MESSAGE_DIRECT_ATTRIBUTE, sizeof(ALPC_DIRECT_ATTR)},
         {ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE, sizeof(ALPC_WORK_ON_BEHALF_ATTR)},
-        {ALPC_MESSAGE_EVENT_ATTRIBUTE, sizeof(ALPC_EVENT)},
+        /* ALPC_MESSAGE_EVENT_ATTRIBUTE (0x40) is deliberately absent: Windows
+         * reports no payload for it through AlpcGetHeaderSize (measured on
+         * Windows: AlpcGetHeaderSize(0x40) == sizeof(ALPC_MESSAGE_ATTRIBUTES))
+         * even though the attribute is allocatable and stored last; the kernel
+         * uses a separate layout table for it. */
     };
     unsigned int i;
     SIZE_T size;
@@ -83,6 +87,9 @@ NTSTATUS WINAPI AlpcInitializeMessageAttribute(ULONG attribute_flags, ALPC_MESSA
 {
     TRACE("%#lx, %p, %Ix, %p.\n", attribute_flags, buffer, buffer_size, required_buffer_size);
 
+    /* Windows reports the event packet notification attribute as allocatable
+     * (it is stored last, at the offset AlpcGetMessageAttribute computes for
+     * the lowest bit) without counting its payload in the required size. */
     *required_buffer_size = AlpcGetHeaderSize(attribute_flags);
 
     if (buffer_size < *required_buffer_size)

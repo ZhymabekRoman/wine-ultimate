@@ -657,6 +657,9 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 {
                     recv_event->UsedEntryCount = 1;
                     recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_EVENT_ATTRIBUTE;
+                    /* pulse the notification event on delivery; the queued path
+                     * also signals it server-side through the async event */
+                    if (recv_event->Event) NtSetEvent( recv_event->Event, NULL );
                 }
             }
         }
