@@ -281,8 +281,6 @@ extern struct iosb *async_get_iosb( struct async *async );
 extern struct thread *async_get_thread( struct async *async );
 extern struct async *find_pending_async( struct async_queue *queue );
 extern struct async *find_pending_alpc_async( struct async_queue *queue, unsigned int msg_id );
-extern struct async *find_pending_alpc_reply_async( struct async_queue *queue );
-extern unsigned int async_get_alpc_id( struct async *async );
 extern void cancel_terminating_process_asyncs( struct process *process );
 extern void cancel_terminating_thread_asyncs( struct thread *thread );
 extern int async_close_obj_handle( struct object *obj, struct process *process, obj_handle_t handle );

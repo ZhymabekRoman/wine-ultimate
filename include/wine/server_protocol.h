@@ -6239,6 +6239,7 @@ struct accept_alpc_connection_request
     unsigned int        msg_id;
     int                 accept;
     client_ptr_t        port_context;
+    /* VARARG(data,bytes); */
 };
 struct accept_alpc_connection_reply
 {
@@ -6256,6 +6257,23 @@ struct disconnect_alpc_port_request
 struct disconnect_alpc_port_reply
 {
     struct reply_header __header;
+};
+
+/* Receive a message on an ALPC port with an event packet notification:
+ * the event is signaled when the receive completes (ALPC_EVENT attribute) */
+struct recv_alpc_port_request
+{
+    struct request_header __header;
+    char __pad_12[4];
+    struct async_data   async;
+    obj_handle_t        port;
+    obj_handle_t        event;
+};
+struct recv_alpc_port_reply
+{
+    struct reply_header __header;
+    obj_handle_t        wait;
+    char __pad_12[4];
 };
 
 #ifndef __ALPC_DATA_VIEW_ATTR_DEFINED__
@@ -6673,6 +6691,7 @@ enum request
     REQ_connect_alpc_port,
     REQ_accept_alpc_connection,
     REQ_disconnect_alpc_port,
+    REQ_recv_alpc_port,
     REQ_create_wait_completion_packet,
     REQ_associate_wait_completion_packet,
     REQ_cancel_wait_completion_packet,
@@ -6997,6 +7016,7 @@ union generic_request
     struct connect_alpc_port_request connect_alpc_port_request;
     struct accept_alpc_connection_request accept_alpc_connection_request;
     struct disconnect_alpc_port_request disconnect_alpc_port_request;
+    struct recv_alpc_port_request recv_alpc_port_request;
     struct create_wait_completion_packet_request create_wait_completion_packet_request;
     struct associate_wait_completion_packet_request associate_wait_completion_packet_request;
     struct cancel_wait_completion_packet_request cancel_wait_completion_packet_request;
@@ -7319,6 +7339,7 @@ union generic_reply
     struct connect_alpc_port_reply connect_alpc_port_reply;
     struct accept_alpc_connection_reply accept_alpc_connection_reply;
     struct disconnect_alpc_port_reply disconnect_alpc_port_reply;
+    struct recv_alpc_port_reply recv_alpc_port_reply;
     struct create_wait_completion_packet_reply create_wait_completion_packet_reply;
     struct associate_wait_completion_packet_reply associate_wait_completion_packet_reply;
     struct cancel_wait_completion_packet_reply cancel_wait_completion_packet_reply;
@@ -7327,6 +7348,6 @@ union generic_reply
     struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 950
+#define SERVER_PROTOCOL_VERSION 952
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

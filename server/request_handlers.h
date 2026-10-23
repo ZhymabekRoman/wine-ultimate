@@ -318,6 +318,7 @@ DECL_HANDLER(create_alpc_port);
 DECL_HANDLER(connect_alpc_port);
 DECL_HANDLER(accept_alpc_connection);
 DECL_HANDLER(disconnect_alpc_port);
+DECL_HANDLER(recv_alpc_port);
 DECL_HANDLER(create_wait_completion_packet);
 DECL_HANDLER(associate_wait_completion_packet);
 DECL_HANDLER(cancel_wait_completion_packet);
@@ -639,6 +640,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_connect_alpc_port,
     (req_handler)req_accept_alpc_connection,
     (req_handler)req_disconnect_alpc_port,
+    (req_handler)req_recv_alpc_port,
     (req_handler)req_create_wait_completion_packet,
     (req_handler)req_associate_wait_completion_packet,
     (req_handler)req_cancel_wait_completion_packet,
@@ -2424,6 +2426,12 @@ C_ASSERT( offsetof(struct accept_alpc_connection_reply, handle) == 8 );
 C_ASSERT( sizeof(struct accept_alpc_connection_reply) == 16 );
 C_ASSERT( offsetof(struct disconnect_alpc_port_request, handle) == 12 );
 C_ASSERT( sizeof(struct disconnect_alpc_port_request) == 16 );
+C_ASSERT( offsetof(struct recv_alpc_port_request, async) == 16 );
+C_ASSERT( offsetof(struct recv_alpc_port_request, port) == 56 );
+C_ASSERT( offsetof(struct recv_alpc_port_request, event) == 60 );
+C_ASSERT( sizeof(struct recv_alpc_port_request) == 64 );
+C_ASSERT( offsetof(struct recv_alpc_port_reply, wait) == 8 );
+C_ASSERT( sizeof(struct recv_alpc_port_reply) == 16 );
 C_ASSERT( offsetof(struct create_wait_completion_packet_request, access) == 12 );
 C_ASSERT( sizeof(struct create_wait_completion_packet_request) == 16 );
 C_ASSERT( offsetof(struct create_wait_completion_packet_reply, handle) == 8 );

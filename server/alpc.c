@@ -91,6 +91,8 @@ struct alpc_pending_conn
     struct async     *client_async;  /* async blocking NtAlpcConnectPort */
     char            *conn_data;      /* client's connection message payload */
     data_size_t      conn_data_size;
+    char            *conn_reply;     /* server's connection reply message, delivered on accept */
+    data_size_t      conn_reply_size;
     unsigned int     client_pid;
     unsigned int     client_tid;
 };
@@ -307,12 +309,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
 
     if (port->is_server)
     {
-        /* Server replying on its listening port: route to the connected client.
-         * Match by MessageId if a client connection is waiting for this reply.
-         * The kernel also accepts a reply that carries no message id (no
-         * context supplied): it is matched to the oldest request on the
-         * connection that is still awaiting its reply, and the reply's id is
-         * stamped to that of the request. */
+        /* A reply sent on a listening port carries no connection handle, so the
+         * kernel routes it by the context of the request it answers: the message
+         * must echo back the message id of a request that a client connection is
+         * still waiting for.  A reply with no such pending request is rejected
+         * with STATUS_INVALID_INFO_CLASS; the kernel never delivers it to some
+         * other client's pending receive, and neither may we: an arbitrary
+         * message would then be handed to a client as the reply to its own
+         * request, which the sender's protocol reads as a valid (empty) payload. */
         struct alpc_port *conn;
         const void *data = iosb->in_data;
         data_size_t size = iosb->in_size;
@@ -339,30 +343,29 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 }
             }
         }
-        else
-        {
-            LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-            {
-                struct async *matching = find_pending_alpc_reply_async( &conn->read_q );
-                if (matching)
-                {
-                    reply_id = async_get_alpc_id( matching );
-                    release_object( matching );
-                    peer = conn;
-                    break;
-                }
-            }
-        }
         if (!peer)
         {
-            struct list *head = list_head( &port->connections );
-            if (!head)
+            /* Nothing is waiting for this message id, so the message is not the
+             * answer to a queued request: it is a call that the server side starts
+             * over this conversation while the client itself waits for its reply.
+             * Address it to the connection that has a receive pending (the kernel
+             * delivers an id-less message to the receiver that is waiting) and stamp
+             * it with id 0, so the receiver reads it as an incoming call and not as
+             * the reply to its own request. */
+            LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+                if (async_waiting( &conn->read_q )) { peer = conn; break; }
+            if (!peer)
             {
-                release_object( iosb );
-                set_error( STATUS_PIPE_DISCONNECTED );
-                return;
+                struct list *head = list_head( &port->connections );
+                if (!head)
+                {
+                    release_object( iosb );
+                    set_error( STATUS_PIPE_DISCONNECTED );
+                    return;
+                }
+                peer = LIST_ENTRY( head, struct alpc_port, conn_entry );
             }
-            peer = LIST_ENTRY( head, struct alpc_port, conn_entry );
+            reply_id = 0;
         }
     }
     else
@@ -605,6 +608,8 @@ DECL_HANDLER(connect_alpc_port)
     pc->client_async = NULL;
     pc->conn_data    = NULL;
     pc->conn_data_size = 0;
+    pc->conn_reply   = NULL;
+    pc->conn_reply_size = 0;
     pc->client_pid   = get_process_id( current->process );
     pc->client_tid   = get_thread_id( current );
 
@@ -650,7 +655,7 @@ DECL_HANDLER(connect_alpc_port)
     {
         struct async *async = create_request_async( client_port->fd,
                                                      get_fd_comp_flags(client_port->fd),
-                                                     &req->async, 0 );
+                                                     &req->async, 1 );
         if (async)
         {
             pc->client_async = (struct async *)grab_object( async );
@@ -725,6 +730,21 @@ DECL_HANDLER(accept_alpc_connection)
 
     list_remove( &found->entry );
 
+    /* A server that accepts completes the handshake with a connection reply message,
+     * written into the buffer that carried the connect request.  The kernel hands that
+     * message to the connecting client, which gets its connection context from it;
+     * without it the client proceeds with an empty context. */
+    if (req->accept)
+    {
+        data_size_t size = get_req_data_size();
+        const void *data = get_req_data();
+        if (data && size && (found->conn_reply = malloc( size )))
+        {
+            memcpy( found->conn_reply, data, size );
+            found->conn_reply_size = size;
+        }
+    }
+
     if (!req->accept)
     {
         /* Reject */
@@ -733,7 +753,10 @@ DECL_HANDLER(accept_alpc_connection)
             async_terminate( found->client_async, STATUS_CONNECTION_REFUSED );
             release_object( found->client_async );
         }
-        release_object( found->client_port );        free( found->conn_data );        free( found );
+        release_object( found->client_port );
+        free( found->conn_data );
+        free( found->conn_reply );
+        free( found );
         release_object( server_port );
         return;
     }
@@ -746,7 +769,10 @@ DECL_HANDLER(accept_alpc_connection)
             async_terminate( found->client_async, STATUS_NO_MEMORY );
             release_object( found->client_async );
         }
-        release_object( found->client_port );        free( found->conn_data );        free( found );
+        release_object( found->client_port );
+        free( found->conn_data );
+        free( found->conn_reply );
+        free( found );
         release_object( server_port );
         return;
     }
@@ -766,15 +792,22 @@ DECL_HANDLER(accept_alpc_connection)
                                    GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );
     release_object( server_conn_port );
 
-    /* Wake blocked client */
+    /* Wake blocked client, carrying the server's connection reply message to it */
     if (found->client_async)
     {
-        async_request_complete( found->client_async, STATUS_SUCCESS, 0, 0, NULL );
+        if (found->conn_reply_size)
+            async_request_complete_alloc( found->client_async, STATUS_SUCCESS,
+                                          found->conn_reply_size, found->conn_reply_size,
+                                          found->conn_reply );
+        else async_request_complete( found->client_async, STATUS_SUCCESS, 0, 0, NULL );
         release_object( found->client_async );
         found->client_async = NULL;
     }
 
-    release_object( found->client_port );    free( found->conn_data );    free( found );
+    release_object( found->client_port );
+    free( found->conn_data );
+    free( found->conn_reply );
+    free( found );
     release_object( server_port );
 }
 

@@ -321,8 +321,10 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
         free( objattr );
         return STATUS_NO_MEMORY;
     }
-    async->buffer = NULL;
-    async->size   = 0;
+    /* the server's connection reply is delivered as the async out data when the
+     * handshake completes on the server side, so register the caller's buffer */
+    async->buffer = connect_msg;
+    async->size   = connect_msg ? (connect_msg_size ? *connect_msg_size : connect_msg->TotalLength) : 0;
 
     msg_id = next_alpc_msg_id();
 
@@ -335,6 +337,10 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
          * validate it before accepting */
         if (connect_msg && connect_msg->DataLength)
             wine_server_add_data( req, connect_msg + 1, connect_msg->DataLength );
+        /* the server's connection reply lands in the caller's connection message */
+        if (connect_msg)
+            wine_server_set_reply( req, connect_msg,
+                                   connect_msg_size ? *connect_msg_size : connect_msg->TotalLength );
         ret = wine_server_call( req );
         if (!ret || ret == STATUS_PENDING)
         {
@@ -357,6 +363,8 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
             ret = wait_ret;
         }
     }
+
+    if (!ret && connect_msg_size) *connect_msg_size = io.Information;
 
     if (ret && ret != STATUS_PENDING && *port_handle)
     {
@@ -397,6 +405,11 @@ NTSTATUS WINAPI NtAlpcAcceptConnectPort( HANDLE *communication_port, HANDLE conn
         req->msg_id       = msg_id;
         req->accept       = accept_connection;
         req->port_context = (client_ptr_t)(ULONG_PTR)port_context;
+        /* The server writes its connection reply into the buffer that carried the
+         * connect request; hand it to the server so it can complete the handshake
+         * with it.  The buffer is the caller's, so read it as the sender sized it. */
+        if (accept_connection && connection_request->TotalLength)
+            wine_server_add_data( req, connection_request, connection_request->TotalLength );
         ret = wine_server_call( req );
         if (!ret && accept_connection)
             *communication_port = wine_server_ptr_handle( reply->handle );
@@ -491,6 +504,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
             send_msg->Type = LPC_REQUEST;
             send_msg->MessageId = next_alpc_msg_id();
         }
+
 
         memset( &attr_hdr, 0, sizeof(attr_hdr) );
         attr_hdr.magic = ALPC_ATTR_HDR_MAGIC;
