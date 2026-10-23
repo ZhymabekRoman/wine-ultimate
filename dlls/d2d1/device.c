@@ -228,6 +228,7 @@ static HRESULT STDMETHODCALLTYPE d2d_device_context_inner_QueryInterface(IUnknow
             || IsEqualGUID(iid, &IID_ID2D1DeviceContext2)
             || IsEqualGUID(iid, &IID_ID2D1DeviceContext1)
             || IsEqualGUID(iid, &IID_ID2D1DeviceContext)
+            || IsEqualGUID(iid, &IID_ID2D1DeviceContext_ms)   /* published d2d1_1 id, see d2d1_private.h */
             || IsEqualGUID(iid, &IID_ID2D1RenderTarget)
             || IsEqualGUID(iid, &IID_ID2D1Resource)
             || IsEqualGUID(iid, &IID_IUnknown))
@@ -4492,6 +4493,8 @@ static HRESULT WINAPI d2d_device_QueryInterface(ID2D1Device6 *iface, REFIID iid,
             || IsEqualGUID(iid, &IID_ID2D1Device2)
             || IsEqualGUID(iid, &IID_ID2D1Device1)
             || IsEqualGUID(iid, &IID_ID2D1Device)
+            || IsEqualGUID(iid, &IID_ID2D1Device_ms)   /* published d2d1_1 ids, see d2d1_private.h */
+            || IsEqualGUID(iid, &IID_ID2D1Device1_ms)
             || IsEqualGUID(iid, &IID_ID2D1Resource)
             || IsEqualGUID(iid, &IID_IUnknown))
     {

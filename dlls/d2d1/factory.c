@@ -97,6 +97,8 @@ static HRESULT d2d_factory_reload_sysmetrics(struct d2d_factory *factory)
     return S_OK;
 }
 
+static HRESULT d2d_factory_get_device(struct d2d_factory *factory, ID3D10Device1 **device);
+
 static HRESULT STDMETHODCALLTYPE d2d_factory_QueryInterface(ID2D1Factory7 *iface, REFIID iid, void **out)
 {
     struct d2d_factory *factory = impl_from_ID2D1Factory7(iface);
@@ -122,6 +124,31 @@ static HRESULT STDMETHODCALLTYPE d2d_factory_QueryInterface(ID2D1Factory7 *iface
         ID2D1Factory7_AddRef(iface);
         *out = &factory->ID2D1Multithread_iface;
         return S_OK;
+    }
+    else if (IsEqualGUID(iid, &IID_ID2D1Device) || IsEqualGUID(iid, &IID_ID2D1Device_ms)
+            || IsEqualGUID(iid, &IID_ID2D1Device1) || IsEqualGUID(iid, &IID_ID2D1Device1_ms))
+    {
+        /* Windows exposes the factory's implicit device through the factory object.
+         * The DWM in-proc compositor (dwmcorei.dll) queries the factory returned by
+         * D2D1CreateFactory for ID2D1Device in its DllMain startup, and refuses to
+         * initialise — failing the dwmcorei and dcompi image loads, and with them
+         * every Microsoft.UI.Composition activation — when that query is rejected.
+         * Create the implicit device on top of the factory's D3D10 device, as its
+         * CreateDevice() would. */
+        const GUID *wine_iid = IsEqualGUID(iid, &IID_ID2D1Device_ms) ? &IID_ID2D1Device :
+                               IsEqualGUID(iid, &IID_ID2D1Device1_ms) ? &IID_ID2D1Device1 : iid;
+        IDXGIDevice *dxgi_device = NULL;
+        ID3D10Device1 *d3d10_device;
+        HRESULT hr;
+
+        if (FAILED(hr = d2d_factory_get_device(factory, &d3d10_device)))
+            return hr;
+        hr = ID3D10Device1_QueryInterface(d3d10_device, &IID_IDXGIDevice, (void **)&dxgi_device);
+        if (FAILED(hr))
+            return hr;
+        hr = d2d_factory_create_device((ID2D1Factory1 *)iface, dxgi_device, false, wine_iid, out);
+        IDXGIDevice_Release(dxgi_device);
+        return hr;
     }
 
     WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));

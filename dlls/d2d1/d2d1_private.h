@@ -755,6 +755,21 @@ static inline struct d2d_factory *unsafe_impl_from_ID2D1Factory(ID2D1Factory *if
 void d2d_effects_init_builtins(struct d2d_factory *factory);
 HRESULT d2d_factory_create_device(ID2D1Factory1 *factory, IDXGIDevice *dxgi_device,
         bool allow_get_dxgi_device, REFIID iid, void **device);
+
+/* Published (Microsoft) interface identifiers of the d2d1_1 device family. Wine's
+ * own idl has always used locally generated identifiers for these interfaces, so
+ * native Windows binaries that ask for the documented ids get E_NOINTERFACE. The
+ * DWM in-proc compositor dwmcorei.dll queries the factory returned by
+ * D2D1CreateFactory for ID2D1Device during its DllMain, and the refusal fails the
+ * dwmcorei and dcompi image loads — and with them every
+ * Microsoft.UI.Composition activation. Answer the published ids as aliases of the
+ * interfaces implemented here. */
+static const GUID IID_ID2D1Device_ms =
+        {0x6f72c0a2, 0x6db7, 0x46e9, {0x9b, 0x62, 0xb5, 0x8a, 0x23, 0xf4, 0x92, 0x8b}};
+static const GUID IID_ID2D1Device1_ms =
+        {0xcb4a37f1, 0x8445, 0x4974, {0xa3, 0xd1, 0x38, 0x86, 0xd9, 0x09, 0x34, 0x88}};
+static const GUID IID_ID2D1DeviceContext_ms =
+        {0x1081ac57, 0xe17a, 0x4b09, {0xbd, 0xd0, 0xc8, 0xef, 0x3e, 0x0d, 0x03, 0x3d}};
 struct d2d_effect_registration * d2d_factory_get_registered_effect(ID2D1Factory *factory,
         const GUID *effect_id);
 void d2d_factory_register_effect(struct d2d_factory *factory,
