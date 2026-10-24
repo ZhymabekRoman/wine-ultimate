@@ -1159,3 +1159,95 @@ idles before the XAML window; registering the app's own activation classes is th
 created, WebView2 environment probe reached, `0x80070002` from the managed locator, fail-fast
 loop, `rc=69`. The battery metric is unchanged (7/8 `rc=69` + 1 alive vs 8/8 `rc=69`), so the
 advance costs no stability; it just exposes the gate that was previously hidden.
+
+## The locator decompiled: registry acceptance recipe, the DESKTOP_APP_POLICY bug, and the ARM64 payload wall
+
+`Microsoft.Web.WebView2.Core.dll` (793 176 B, app dir) is **native x64** — ilspycmd: "PE file
+does not contain any managed metadata". It is the WinRT class factory for
+`Microsoft.Web.WebView2.Core.CoreWebView2Environment`; the managed assembly beside it,
+`Microsoft.Web.WebView2.Core.Projection.dll` (685 168 B, i386 Mono), is pure CsWinRT glue
+(ilspycmd, 997 files, zero decision logic). Chain: `RoGetActivationFactory` →
+`sub_180001FC8` (CreateCoreWebView2EnvironmentWithOptions) → `sub_180002249` →
+`sub_180001844` (GetAvailableWebView2Paths).
+
+**Exact acceptance test** (all from the disassembly, no IL involved). With no
+browserExecutableFolder, channels are enumerated in order **4,3,2,1,0** (`sub_180001E5C`,
+mask 31 with default options): 4 `{BE59E8FD-089A-411B-A3B0-051D9E417818}` (Edge stable),
+3 `{65C35B14-6C1D-4122-AC46-7148CC9D6497}` (canary), 2 `{0D50BFEC-CD6A-4F9A-964C-C7416E3ACB10}`
+(dev), 1 `{2CD8A007-E189-409D-A2C8-9AF4EF3C72AA}` (beta), 0 `{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`
+(WebView2 runtime stable). Per channel, HKLM **then** HKCU
+`Software\Microsoft\EdgeUpdate\ClientState\<GUID>` (RegOpenKeyExW access 0x20219 =
+KEY_READ|KEY_WOW64_32KEY; **value type not checked**, REG_SZ and REG_EXPAND_SZ both accepted),
+reading exactly one value, **`EBWebView`**:
+
+1. non-empty (cbData ≥ 3);
+2. its **last `\`-separated component parses as N.N.N.N** (`sub_1800027F6`, 4× wcstol, '.'
+   separators) — the value must BE the versioned directory, not the Application root, and not
+   the arch token `x64` the previous recipe used (`pv`/`path`/`exepath` are never read in this
+   mode);
+3. numeric component-wise version ≥ **86.0.616.46** (the aV_0 dwords {86,0,616,46} at
+   0x180091b18, `sub_180002AF5`; "WebView2: skipped an incompatible version" is printed
+   through OutputDebugStringA otherwise);
+4. `GetFileAttributesW` + `CreateFileW(0x100021, share 7, OPEN_EXISTING)` on
+   `<value>\EBWebView\x64\EmbeddedBrowserWebView.dll` (`sub_180001076`; "WebView2: skipped
+   inaccessible" on failure).
+
+Accept ⇒ browserExecutableFolder = the value; then `LoadLibraryW('<value>\EBWebView\x64\
+EmbeddedBrowserWebView.dll')` + `GetProcAddress("CreateWebViewEnvironmentWithOptionsInternal")`
+(`sub_180003E18`). All channels failing (after a packaged-runtime fallback via
+TryCreatePackageDependency/AddPackageDependency on families `Microsoft.WebView2Runtime.{Stable,
+Beta,Dev,Canary,Internal}_8wekyb3d8bbwe`, absent in Wine) ⇒ OutputDebugStringA "WebView2:
+Failed to find an installed WebView2 runtime or non-stable Microsoft Edge installation." ⇒
+**0x80070002** — the RoOriginateLanguageException wall. `Clients\{56EB18F8-…}` mode
+(`location` + '\' + `pv`) exists only for index 0 and only when the options object sets the
+legacy Edge-beta flag.
+
+Recipe applied (`/home/olge/wa-work/envprep_wv2_locator.reg`): `EBWebView` =
+`C:\Program Files (x86)\Microsoft\EdgeWebView\Application\157.0.4341.16` on
+ClientState\{F3017226…} HKLM+HKCU; `location` = Application root on Clients\{56EB18F8…}
+HKLM+HKCU. Filesystem was already compliant (MSIX deploy: version dir + `EBWebView\x64\
+EmbeddedBrowserWebView.dll`). **Accepted** — gate evidence: `loaddll` `Loaded "C:\Program Files
+(x86)\Microsoft\EdgeWebView\Application\157.0.4341.16\EBWebView\x64\EmbeddedBrowserWebView.dll"
+… native`, `CreateWebViewEnvironmentWithOptionsInternal` executes, the host creates the mojo
+bootstrap server pipe `\\??\\pipe\\LOCAL\\mojo.<pid>.<nonce>` (CreateNamedPipeW openMode
+0x40080003), and `RoOriginateLanguageException 0x80070002` count drops to **0**.
+
+**Wine bug on the next step (fixed, wine-ultimate `7e83b8a56`)**: the loader launches the
+browser with STARTUPINFOEX and `UpdateProcThreadAttribute(PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY
+= 0x00020012, DWORD)`; Wine's `validate_proc_thread_attribute()` hit `FIXME … Unhandled
+attribute 18` → ERROR_NOT_SUPPORTED → the launch aborted **before CreateProcessW**, environment
+creation returned **0x80070032**, the managed side got a NullReference → `e0464645` FailFast
+(every ~4 s). The kernelbase fix validates the size and ignores the policy (no appcontrol in
+Wine), mirroring EXTENDED_FLAGS. After the fix the launch reaches
+`CreateProcessInternalW L"…\msedgewebview2.exe" --embedded-browser-webview=…` →
+`NtCreateUserProcess` → **0xc000007b**.
+
+**New wall, env-prep not Wine: the deployed runtime payload is ARM64.** `msedgewebview2.exe`
+machine = 0xAA64 (wv2.msix is the ARM64 package; only `EBWebView\x64\EmbeddedBrowserWebView.dll`
+is x64, which is why the locator's dll loads fine). `MicrosoftEdgeWebView2RuntimeInstallerX64.exe`
+is an **online bootstrapper**: its `.rsrc/0/B/102` stream is a GoogleUpdate CMS/tar manifest
+(magic d183000/d0c5e3c, ustar entries) whose `msedge_wv2_x64.cab` entry is 015266331703₈ bytes
+remote; the file carries only a 5.9 MB updater cab at EOF — no offline x64 browser.
+
+| metric | value |
+| --- | --- |
+| `wa_gate.sh 150` post-fix | `rc=124 ALIVE_150s`, `fatal=0`, `RaiseFailFastException=0`, `e0464645=0`, originate=3 (legacy 0x80040111 MiscCpp/Sqlite/Voip only), `orig_80070002=0`, `orig_80070032=0` |
+| `wa_gate.sh 210` | `rc=124 ALIVE_210s`, ff=0; XAML window not created in these runs (DcppUserAdapter + 960x768 desktop window + D3D11 draws; app idles after startup) |
+| deep-trace 120 s run | env chain at t≈140 s: EB dll load → mojo pipe → `UpdateProcThreadAttribute 00020012` accepted → `PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY 2` → `NtCreateUserProcess msedgewebview2.exe` → `CreateProcessInternalW failed: status 0xc000007b` (ARM64 image) → NRE → FailFast, `rc=69` |
+| `wa_battery.sh 8 60` | 1/8 `rc=124`, 7/8 `rc=69` (env chain fires ~t=40 s at battery timing; death = spawn failure chain), `fatal=0` in all 8 |
+| app binaries after all runs | `CoreMessagingXP 24da83be`, `dwmcorei 9353066e`, `Microsoft.ui.xaml 9a42e19d`, `WebView2Loader 4cd3ffd5`, `Microsoft.Web.WebView2.Core 799b8c69`, `EmbeddedBrowserWebView 4c0d799a` — PRISTINE |
+
+Screenshot `wa_locator_after.png`: **black** (295 B uniform root capture at t=105 s; the XAML
+window is not mapped; the only mapped top-level is Wine's per-process desktop window).
+
+Next gaps (ordered): (1) obtain the **x64** runtime payload — the offline package (x64
+`Microsoft.EdgeWebView2Runtime` MSIX / offline installer's `msedge_wv2_x64.cab`, not this
+bootstrapper) — and replace the ARM64 root of `Application\157.0.4341.16` (EBWebView\x64\
+EmbeddedBrowserWebView.dll can stay); (2) then the browser child tree speaks Chromium's
+named-platform-channel: the browser side calls `CreateNamedPipeW`/`ConnectNamedPipe` +
+`GetNamedPipeClientProcessId`/`GetNamedPipeClientSessionId` (the 3f84f522d attrs path is the
+wire to watch; the ImpersonateNamedPipeClient 16-failure pair only matters if the x64 browser
+exercises it); (3) controller creation on the XAML window hwnd and `Navigate` remain gated by
+the XAML activation gap (window created, never shown); (4) battery variance: env-chain fires
+t≈40 s in battery timing vs t≈140 s in gate timing — worth pinning the timing source when the
+x64 payload lands.
