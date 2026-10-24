@@ -1722,3 +1722,74 @@ partition GUID (the connect-context/engine GUID `cn_engine_guid` is already shar
 the CoreUICore conversation is served by Wine and Application.Start binds the real provider object;
 (b) implement the interfaces the XAML side QIs on that object (the QI-trace will name the IIDs —
 the core_ui QI fixme line is the capture point); (c) then XAML window map + WebView2 chain.
+
+---
+
+## Session 2026-10-25(b): the real registrar name measured — new wall is the engine's self-host accept gate
+
+**Real registrar name (measured, was gap (a)).** The server relay trace now prints every
+create/connect port name (`server/alpc.c` `trace_port_name`, gated on `WINE_ALPC_RELAY_TRACE`,
+stderr). The engine self-hosts **two** registrar names:
+`\\BaseNamedObjects\\CoreMessagingRegistrar-<pid>:00000000-0000-0000-0000-000000000000` (the
+cross-partition view, created first, tid 0x138 = the registrar thread) and, from the engine-GUID
+partition path, `\\BaseNamedObjects\\CoreMessagingRegistrar-<pid>:29324ee4-dc59-49dc-a23f-8ca11bef4227`
+— the partition GUID **is the Cn engine GUID** `cn_engine_guid`, i.e. the same value the clients
+carry in the connect port context. The provider now polls the engine-GUID name first and the
+zero-GUID name in the same attempt (both forms covered), and stops on the self-host gate's
+`STATUS_CONNECTION_REFUSED` instead of spinning. The tip premise "the engine's self-host registrar
+lives under its real partition GUID" is confirmed: the all-zero name is the one the engine
+**creates** (the provider's old zero-GUID poll was aimed at a real port, not a phantom).
+
+**Routing status.** The provider's connect now reaches the engine (relay: `CONNECT-req id N` +
+`CONNECT-data` + `ACCEPT`), byte-identical to the engine's own self-host client:
+connect payload = {engine GUID tail 8B, u64 flags, u64 context pointer}; the measured self-host
+client flags value at payload+8 is **0x00** (the provider's old 0x20 marker was not what the
+engine's own clients send). The engine's own client (main thread, tid 0x24) connects and is
+**accepted** (`ACCEPT id 5 accept 1`), sends RegisterThread (88B InterconnectQueue datagram
+verb 1 item {8, 0x10001}) and gets the 128B RegisterThreadInfo reply. The **provider** connect
+(`CONNECT-req id 8 tid 0x134`, identical payload bytes with a live context pointer) is
+**refused** (`ACCEPT id 8 accept 0` → `STATUS_CONNECTION_REFUSED`). 0 requests are ever routed
+to the provider; the join/relay/QI path stays dormant as at tip.
+
+**The accept gate decoded (IDA, full Cn symbols).** `AlpcServerHost::AcceptConnection` →
+`RemoteRegistrarServer::AcceptConnection`: the connect-context 16 bytes {GUID tail, 0} key a
+per-partition `RemoteRegistrarServer` map; the self-host partition already has the app's own
+client, the partition's connection map is keyed by an in-process session IntPtr, and a second
+connection hits the duplicate/`ProtocolException(45/46)` paths → `accept=false`. The gate is
+**structural**: the self-hosted registrar serves exactly one in-process partition (the app's
+CoreUICore thread) and validates the connect-context pointer target as a live Cn object — an
+external in-process ALPC client (the provider) is refused by design (the cross-partition
+machinery that would serve such a client is the 0xa399 Abandonment wall). A wire-connected
+provider cannot become the CoreUICore server on the engine's self-host registrar.
+
+**QI list.** Not reachable: no provider connection ⇒ no object handed to XAML ⇒ `core_ui_QueryInterface`
+never fires (0 `fixme:messaging` IID lines in the app log; the QI capture point is idle as at tip).
+
+**The AV wall unchanged.** CoreUICallReceive (CoreMessagingXP+0x8c19a, `mov (%rax),%rax`)
+still consumes the method-36 reply object slot on the engine's **own** self-host connection;
+this session the fault lands in `coreclr` (rip coreclr+0x255429 reading coreclr+0x18948f,
+rdx=0x10) = the same object-pointer-slot wall, value varies with allocation history.
+
+**Numbers.** Gate 150 s: `rc=5 DIED`, `fatal=1`, `ff=33`, `e0464645=0`, `xamlwin=0`, `edge=0`,
+`wv2loader=0`, `createdwins=14`, 178 X windows (IME-only), shot 295 B **blank**. Battery 8×60:
+**8/8 `rc=5 fatal=1 edge=0`** (identical to tip; zero regression). `alpc` unit `rc=5` = tip
+baseline (the 5 pre-existing multi-buffer failures; untouched by the relay trace, which is
+off by default). Provider connect attempts traced: 3 rounds (25/50/100 ms) + refusal stop.
+
+**App binary integrity.** All copies of every app binary are **byte-identical to each other**
+(9×CoreMessagingXP `7ee4b6c2…`, all framework-package copies identical: dwmcorei `6ffe2bbc`,
+Microsoft.ui.xaml `ec542848`, …) — no divergent/patched deployment; nothing was written to any
+app binary this session (commits touch only `server/alpc.c` + `dlls/coremessaging/registrar.c`).
+Note: the on-disk digests (`7ee4b6c2/6ffe2bbc/ec542848/daf9a810/2f18e5f0/c8303847`) do **not**
+match the trusted list carried in the README (24da83be/9353066e/9a42e19d/4cd3ffd5/799b8c69/
+4c0d799a) — prior-session metadata drift, recorded here as the measured end-state baseline.
+
+**Commit.** `ultimate ee650ff87` — coremessaging real-name poll + self-host refusal stop;
+server relay port-name/connect-data trace. WIP `ntdll` alpc files left uncommitted as found.
+
+**Next gaps:** (a) the CoreUICore conversation must be served by a client the engine **accepts**
+— i.e. the conversation registration/join has to run through the engine's in-process partition
+(not an ALPC client); the provider's role shrinks to answering what the engine routes (it routes
+nothing today); (b) the object-slot wall at CoreUICallReceive+0x8c19a must be fed a valid object
+on the engine's own self-host connection (the in-process join reply builder is the lever);
+(c) WebView2 chain untouched behind XAML.
