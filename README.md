@@ -1595,3 +1595,66 @@ app's own slurp-protocol state machine on Wine's emulated ALPC (the wake-packet 
 delivers, so the conversation *content* is the suspect: the registrar request reply payload/status
 the app's `RegisterConversation` host builds); (b) after that, XAML window map + WebView2
 locator/renderer chain.
+
+## Session 2026-10-24(b): the CommitToSlurp wall decoded — ALPC connect-by-reply, MessageId offsets, self-host marker
+
+**Slurp anatomy (IDA `CoreMessagingXP.dll`):** `AlpcServerConnection::CommitToSlurp` (RVA `0x853AA`)
+is the server side of the LPC connect dance: the registrar server thread (`tid 0138`) slurps the
+connection request notification on the **listening** port, then answers it with a zero-payload
+`NtAlpcSendWaitReceivePort(port, 0x10000 /*REPLY*/, {DataLength 40, TotalLength 80}, attrs=0)` —
+MessageId 0, no context attribute. `NtAlpcAcceptConnectPort` is **never called** (request trace:
+`accept_alpc_connection` count 0): the kernel is expected to complete the connect from the reply
+and route the server's later id-less replies by the connection's outstanding request.
+
+**Desync found (three layers, all in `server/alpc.c`):**
+1. Connect completion existed only on the explicit accept request → the provider's connect stayed
+   `PENDING`; the engine's connect reply hit the empty-connections fallback → `STATUS_PIPE_DISCONNECTED`
+   (`alpc.c` set_error) → `FailWithHR` at `0x853AA` (the deterministic 8/8 wall).
+2. The server read the sender's PORT_MESSAGE **MessageId at +0x18** — the 32-bit offset. The x64
+   `ALPC_PORT_MESSAGE` carries it at **+0x20** (Type at **+4**, right behind DataLength/TotalLength,
+   which is also where ntdll and the app stamp it). Every reply therefore correlated to id 0: the
+   armed pair receive (request id N) never took the reply, routed-request replies carried ctx id 0
+   (the historic "RegisterConversation result 99" family), and the reply was consumed by the bare
+   receive as a verb-0 notification.
+3. No outstanding-request tracking: a REPLY-flag send with id 0 (the slurp commit, the per-request
+   reply) must be answered by the connection's slurped request id.
+
+**Fix (wine `bab0b58fb`, pushed to github/ultimate):** complete pending connections from the
+REPLY-flag send on the listening port (`complete_alpc_connection`, shared with the accept route,
+port context from the reply's CONTEXT attribute); read Type/MessageId at the layout offsets
+(+4 / `4*ptr`); track the per-connection outstanding request id (client connection port, shared
+with its reserve handle) and stamp id-less replies with it, delivering the id in the delivered
+PORT_MESSAGE as the kernel does; stamp the forced type at +4 (and `ALPC_LPC_REPLY` = 1, the
+Windows LPCReply value, replacing the 0x02 that was being written into the TotalLength slot).
+
+**Provider side (wine `d526f5882`):** the engine records the client's partition GUID from the
+24-byte connect port context; a client without the engine's self-host marker (the `0x20` value the
+server echoes at +8 of every connect reply payload, carried with the Cn engine GUID tail exactly
+as the engine's own in-process clients send it) is classified **cross-partition**:
+`MessageSession::CreateConnection` → `CreateCrossPartitionReverseConnectionPort` →
+`Abandonment::Fail` (RVA `0xa399`, `params=0`) — the new wall, hit by the provider's own
+connection. The provider now mirrors the marker, echoes the join requester's own partition GUID
+into the join reply's peer RoutingInfo (zero GUID = same cross-partition branch), and keeps a
+single outstanding exchange (the engine's `AlpcConnection::DoReply` fail-fasts replying with >1
+request buffers outstanding).
+
+**Numbers:** the old wall is **gone**: 0/24 battery+gate runs show `e0464645@0x853AA`. New
+deterministic wall `e0464645@0xa399` (XAML self-host connection: DoReply count>1 / cross-partition
+reverse-port machinery, a Wine kernel-emulation gap, not the provider conversation): battery 8×60
+all `rc=69` at `0xa399` (~15–30 s); gate 150 s bimodal — one run **ALIVE_150s with ff=0,
+e0464645=0** (provider conversation fully healthy, tray dispatch + VoIP/WebLifecycle/push applog,
+`xwindows` up to 139), others die at the `0xa399` wall. `fatal=0`, `originate=0`, `edge=0`,
+`wv2loader=0`, `createdwins=14`, `xamlwin=0` (XAML window map / WebView2 chain sit behind the new
+wall). Screenshot `wa_slurp_after.png`: solid black 1280×1024 (no app window).
+
+**Tests/probes:** relay trace (behind `WINE_ALPC_RELAY_TRACE`) + wineserver `-d 1` request trace
+used for the decode (in-tree, env-gated, kept); all ad-hoc probes removed (`PROBE`/reply-trace
+greps: 0 hits in the diff); build==source parity (BUILD_RC=0, 0 warnings in `server/alpc.c`;
+`registrar.c` warnings are the file's pre-existing `%u` format style). **Pristine app hashes
+end-verified** (24da83be/9353066e/9a42e19d/4cd3ffd5/799b8c69/4c0d799a), zero app binary patching.
+
+**Next gaps:** (a) `0xa399`: the XAML-side self-host connection — `AlpcConnection::DoReply`'s
+multi-buffer reply contract (Windows ALPC multi-buffer/posted-buffer flow semantics) and
+`CreateCrossPartitionReverseConnectionPort`'s port machinery (the engine's own in-process clients
+take this branch on Windows; it needs the posted-buffer + reverse-port emulation in
+`server/alpc.c`); (b) then XAML window map + WebView2 locator/renderer chain.
