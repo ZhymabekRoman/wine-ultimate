@@ -569,6 +569,31 @@ static unsigned int alpc_oldest_outstanding( struct alpc_port *base )
     return 0;
 }
 
+/* A server that receives every connection on the listening port has no
+ * per-connection endpoint at write time (alpc_conn_base is the listening
+ * port): a request slurped there is outstanding on the connection it was
+ * routed to, so find that connection by the ids riding its outstanding
+ * list (id 0 matches the connection with the oldest outstanding request).
+ * Returns the client-side connection port, NULL = no match. */
+static struct alpc_port *alpc_conn_find_outstanding( struct alpc_port *server_port, unsigned int id )
+{
+    struct alpc_port *conn;
+
+    LIST_FOR_EACH_ENTRY( conn, &server_port->connections, struct alpc_port, conn_entry )
+    {
+        struct alpc_outstanding *o;
+
+        if (!id)
+        {
+            if (!list_empty( &conn->outstanding )) return conn;
+            continue;
+        }
+        LIST_FOR_EACH_ENTRY( o, &conn->outstanding, struct alpc_outstanding, entry )
+            if (o->id == id) return conn;
+    }
+    return NULL;
+}
+
 /* Fire the wake completion packets of every handle of the connection this port
  * belongs to: the connection port, the reserve (reverse) handle of the same
  * connection, and, reached from a reserve handle, its owning connection. */
@@ -721,7 +746,7 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
     hdr->view_base    = attr_hdr->view_base;
     hdr->view_size    = attr_hdr->view_size;
     hdr->msg_context  = attr_hdr->msg_context;
-    hdr->sequence     = seq ? seq : attr_hdr->sequence;
+    hdr->sequence     = seq ? seq - 1 : attr_hdr->sequence; /* 0-based chain index */
     hdr->callback_id  = seq ? count : attr_hdr->callback_id;
     /* the receiver sees the duplicated handle with action "created" */
     if (dup)
@@ -736,10 +761,11 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
     }
     else if (user_size) memcpy( hdr + 1, user_data, user_size );
 
-    if (reply_stamped && user_size >= ALPC_USER_MSGID_OFF + 4)
+    if ((reply_stamped || seq) && user_size >= ALPC_USER_MSGID_OFF + 4)
     {
-        /* the kernel fills the reply's MessageId with the id of the request it
-         * answers: stamp the delivered copy so the receiver sees it too */
+        /* the kernel fills the MessageId with the id of the request a reply
+         * answers, and stamps the per-buffer ids as it splits a multi-buffer
+         * send: stamp the delivered copy so the receiver sees them too */
         *(unsigned int *)((char *)(hdr + 1) + ALPC_USER_MSGID_OFF) = msg_id;
         stamped = 1;
     }
@@ -966,21 +992,55 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             }
             if (peer) alpc_drain_send_gate( peer );
         }
+        /* a reply answers the connection carrying that outstanding request
+         * even when that client arms only bare receives (the CoreMessaging
+         * receive pump): the kernel stamps the reply with the id of the
+         * request in flight, and the receive armed later takes it; an
+         * id-less reply answers the connection with the oldest outstanding */
+        if (!peer && is_reply_send)
+        {
+            conn = alpc_conn_find_outstanding( port, reply_id );
+            if (conn)
+            {
+                reply_id = alpc_pop_outstanding( conn, reply_id );
+                peer = conn;
+                msg_type = ALPC_LPC_REPLY;
+                reply_stamped = 1;
+                alpc_drain_send_gate( conn );
+            }
+        }
         if (!peer)
         {
             if (is_reply_send)
             {
-                /* A REPLY-flag send answering no outstanding request: the
-                 * kernel rejects it, it is never delivered as a fresh
-                 * message. */
-                if (relay_trace_enabled())
-                    fprintf( stderr, "ALPC relay REPLY-reject from %x:%x port %p: reply_id %u conns %d\n",
-                             sender_pid, sender_tid, (void *)port, reply_id,
-                             list_empty( &port->connections ) ? 0 : 1 );
-                release_object( iosb );
-                set_error( STATUS_INVALID_INFO_CLASS );
-                async_request_complete( async, STATUS_INVALID_INFO_CLASS, 0, 0, NULL );
-                return;
+                /* A REPLY-flag send whose request was already answered: the
+                 * kernel routes it to the connection that carried the id (the
+                 * engine answers a conversation request with a reply frame and
+                 * an ACK reply, both stamped with the request's id; the client's
+                 * receive pump takes both).  Deliver to that connection: an armed
+                 * receive first, else queue it on the connection the id belongs
+                 * to (the client arms a receive when it wants it). */
+                conn = alpc_conn_find_outstanding( port, reply_id );
+                if (!conn)
+                {
+                    LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+                        if (async_waiting( &conn->read_q ))
+                        {
+                            peer = conn;
+                            break;
+                        }
+                    if (!peer && !list_empty( &port->connections ))
+                        peer = LIST_ENTRY( list_head( &port->connections ), struct alpc_port, conn_entry );
+                }
+                else peer = conn;
+                if (!peer)
+                {
+                    release_object( iosb );
+                    set_error( STATUS_PIPE_DISCONNECTED );
+                    async_request_complete( async, STATUS_PIPE_DISCONNECTED, 0, 0, NULL );
+                    return;
+                }
+                msg_type = ALPC_LPC_REPLY;
             }
             /* Nothing is waiting for this message id, so the message is not the
              * answer to a queued request: it is a message that the server side
@@ -1026,15 +1086,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             peer = port->peer;
         else if (port->listen_port && async_waiting( &port->listen_port->read_q ))
             peer = port->listen_port;
-        else if (port->peer)
-            peer = port->peer; /* the connection's server endpoint: the message
-                                * rides the connection it belongs to, it parks
-                                * on that endpoint until the server arms a
-                                * receive (the send of the serialisation gate
-                                * starts after the server consumed its last
-                                * receive, before it arms the next one) */
+        else if (port->listen_port)
+            peer = port->listen_port; /* the server receives the traffic of every
+                                       * connection on the listening port (LPC
+                                       * connect-dance servers keep no connection
+                                       * handle); park the message there when no
+                                       * receive is armed yet */
         else
-            peer = port->listen_port;
+            peer = port->peer;
 
         if (!peer)
         {
@@ -1080,30 +1139,41 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         if (is_multi && size >= ALPC_USER_HDR_SIZE)
         {
             /* Multi-buffer send: the send buffer carries a chain of
-             * PORT_MESSAGEs, each sized by its own TotalLength.  The kernel
-             * splits the chain, stamps a distinct message id into every
-             * buffer (the sender left them zero), tags each delivered message
-             * with its position in the chain, and puts every request on the
-             * connection's outstanding list so the server can answer them all. */
+             * PORT_MESSAGEs, each sized by its own header + payload
+             * (8-aligned); the head's TotalLength covers the whole chain.
+             * The kernel splits the chain, stamps a distinct message id into
+             * every buffer (the sender left them zero), tags each delivered
+             * message with its position in the chain (index in Sequence,
+             * chain length in CallbackId, delivered in the CONTEXT
+             * attribute), and puts every request on the connection's
+             * outstanding list so the server can answer them all. */
             const char *p = (const char *)data;
             data_size_t left = size;
-            unsigned int idx = 1, chain = attr.pad3;
+            unsigned int chain = 0, idx = 0;
 
+            /* count the chain first: the sequence context carries its length */
             while (left >= ALPC_USER_HDR_SIZE)
             {
-                /* the send buffer length is carried by the head message's
-                 * TotalLength (it covers the whole chain), so each buffer's
-                 * own size is the header plus its payload, 8-aligned */
+                unsigned int tl = ALPC_USER_HDR_SIZE + ((*(const unsigned short *)p + 7) & ~7u);
+                if (tl > left) break;
+                chain++;
+                p += tl;
+                left -= tl;
+            }
+            p = (const char *)data;
+            left = size;
+            while (chain && left >= ALPC_USER_HDR_SIZE)
+            {
                 unsigned int tl = ALPC_USER_HDR_SIZE + ((*(const unsigned short *)p + 7) & ~7u);
                 unsigned int mid = *(const unsigned int *)(p + ALPC_USER_MSGID_OFF);
-                int first = (idx == 1);
+                int first = (idx == 0);
 
                 if (tl > left) break;
                 if (!mid) mid = ++alpc_stamped_id;
                 if (base) alpc_add_outstanding( base, mid );
                 if (!alpc_queue_send_message( port, peer, &attr, first ? dup : 0,
                                               first ? grabbed_obj : NULL,
-                                              p, tl, mid, 0, 0, idx, chain, sender_pid, sender_tid ))
+                                              p, tl, mid, 0, 0, idx + 1, chain, sender_pid, sender_tid ))
                 {
                     release_object( iosb );
                     return;
@@ -1112,7 +1182,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 left -= tl;
                 idx++;
             }
-            if (reply_id) alpc_pop_outstanding( base, reply_id );
             async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
             release_object( iosb );
             return;
@@ -1131,8 +1200,12 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             if (mtype == ALPC_LPC_REQUEST && mid)
             {
                 /* a request slurped on this connection joins its outstanding
-                 * list (the kernel serialises synchronous exchanges) */
+                 * list (the kernel serialises synchronous exchanges): on the
+                 * client side the connection base carries the list, on the
+                 * listening-port route the request rides the routed peer
+                 * connection */
                 if (base) alpc_add_outstanding( base, mid );
+                else if (port->is_server && peer) alpc_add_outstanding( peer, mid );
                 reply_id = mid;
             }
             else if (mtype == ALPC_LPC_REPLY && !mid && base && alpc_oldest_outstanding( base ))
@@ -1308,6 +1381,8 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     signal_wait_completion_packets( &server_port->obj );
     fire_wait_completion_packets( &server_port->obj );
     if (!list_empty( &server_port->msg_queue )) set_fd_signaled( server_port->fd, 1 );
+    if (relay_trace_enabled())
+        fprintf( stderr, "ALPC relay CONNECT-notify port %p id %u\n", (void *)server_port, pc->msg_id );
     return 1;
 }
 
@@ -1445,6 +1520,8 @@ DECL_HANDLER(connect_alpc_port)
     }
 
     /* Queue connect notification to server port */
+    if (relay_trace_enabled())
+        fprintf( stderr, "ALPC relay CONNECT-req port %p id %u\n", (void *)server_port, req->msg_id );
     list_add_tail( &server_port->pending_conns, &pc->entry );
     if (!queue_connect_notification( server_port, pc ))
     {
@@ -1558,6 +1635,10 @@ static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port
         struct alpc_wire_hdr *whdr;
         data_size_t total = sizeof(*whdr) + found->conn_reply_size;
 
+        if (relay_trace_enabled())
+            fprintf( stderr, "ALPC relay CONNECT-complete port %p id %u\n",
+                     (void *)server_port, found->msg_id );
+
         if ((whdr = malloc( total )))
         {
             whdr->magic        = ALPC_WIRE_MAGIC;
@@ -1613,6 +1694,10 @@ DECL_HANDLER(accept_alpc_connection)
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
+
+    if (relay_trace_enabled())
+        fprintf( stderr, "ALPC relay ACCEPT port %p id %u accept %d\n",
+                 (void *)server_port, req->msg_id, req->accept );
 
     /* Find pending connection by msg_id */
     LIST_FOR_EACH_ENTRY( pc, &server_port->pending_conns, struct alpc_pending_conn, entry )
