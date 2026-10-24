@@ -33,10 +33,15 @@
  * dispatcher infrastructure initialises; it serves dispatcher-queue joins
  * for that conversation in-process.  A builtin registration of the same
  * name collides with the engine's own (the registrar answers it result 4,
- * already-registered) and the engine's reply path fail-fasts when a client
- * keeps more than one request outstanding, so the provider announces its
- * thread only (one exchange in flight, like the engine's own self-host
- * clients) and serves requests the registrar routes to it.  The join reply contract
+ * already-registered).  The engine's reply path (AlpcConnection::DoReply)
+ * enforces the kernel's synchronous serialisation: it Abandonments when it
+ * replies with more than one request buffer outstanding on the connection
+ * (a reply-pending exchange of a posted-buffer conversation must be
+ * answered before the next request is taken).  The provider therefore keeps
+ * exactly one exchange in flight (send_cs) like the engine's own self-host
+ * clients; the server's sync-request serialisation gate (server/alpc.c)
+ * enforces the same contract for every client, so this is protocol
+ * compliance, not a workaround.  The join reply contract
  * implemented here mirrors the native reply sender
  * (RegistrarServerCaller::RegisterConversationClient -> CoreUICallSend):
  * [result, clientId, ConversationInfo(16), {serverId, u32}, peers(56 each),
