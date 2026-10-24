@@ -1433,3 +1433,65 @@ in `wintypes`/`windows.storage` (the CsWinRT projection probes both); (3) the `0
 `CoreWebView2.Profile` cast — the app's own `ZoomBrowserExtension` handler catches it and logs
 `Failed to get CoreWebView2.Profile` (last seen 11:44–11:52 runs, i.e. before the current gate), so it
 is downstream of the death, not the cause; (4) renderer start and XAML `Activate()` remain gated by (1).
+
+## The prerequisite chain lands: factory default-interface QI + real WinRT metadata; the wall stays CoreMessagingXP NotifyOutOfMemory (2026-10-26)
+
+Tip chain `31e2ed6ad` → `164037aa5` (six commits, pushed to `ultimate`):
+`5336b08c2` wintypes, `88f8048bc` windows.storage, `a3283f404` windows.networking.connectivity,
+`cdb3de48f` windows.globalization, `ecd3514d9` windows.ui, `164037aa5` windows.applicationmodel.
+
+**The measured E_NOINTERFACE is gone.** Windows aggregates the runtime class *default* interface (and the
+implemented interfaces) on the class **factory** object; the CsWinRT projection QIs the factory for the
+class IIDs at type registration. `wintypes`' Uri factory answered `IUriRuntimeClassFactory`/
+`IActivationFactory` only, so `RoGetActivationFactory("Windows.Foundation.Uri") +
+QI(IID_IUriRuntimeClass 9E363B3D-…)` returned `E_NOINTERFACE`. The factories now answer the default
+interface — Uri (`IUriRuntimeClass`, `IUriRuntimeClassWithAbsoluteCanonicalUri`, `IStringable`, the
+instance also gains `IStringable` with real `ToString`), Buffer (`IBuffer`), DataWriter (`IDataWriter`),
+PropertySet (`IPropertySet` marker + `IObservableMap`), StorageFile (`IStorageFile`), StorageFolder
+(`IStorageFolder`), GeographicRegion (`IGeographicRegion`), CoreWindow/CoreCursor/UIViewSettings/
+InputPane/UISettings/AccessibilitySettings, AppInfo (`IAppInfo`), Package (`IPackage`) — the factory is
+not an instance: instance method calls return `E_FAIL`, QI/refcount/inspectable metadata are live.
+`GetIids`/`GetRuntimeClassName`/`GetTrustLevel` on factories and instances are real metadata (declared
+interface IIDs from the widl headers; `GetIids` lists exactly the interfaces the object answers in QI).
+`wintypes` DataWriter `ActivateInstance` returned `S_OK` with an **uninitialized** out-pointer — fixed
+(`*instance=NULL`, `E_NOTIMPL`). All 13 `GetIids` stubs in `windows.networking.connectivity` and the
+stub sets in the rest of the audited activation surface are filled. Audit notes: `twinapi.appcore`
+factories answer *every* IID with shared dummy objects (permissive shim by design, app passes them —
+tightening would regress, left as-is); `GetTrustedTypeMetadata` exists nowhere in Wine's surface
+(grep-verified; not part of the widl `IInspectable`/factory contract).
+
+**Gate 150 s (tip, pristine app binaries, `wa_gate.sh`):** `rc=69` — the app now dies at ~45 s (the
+baseline survived to 150 s: the WebView2/mojo layer starts ~3× faster, so the same wall is reached
+earlier). `ff=33` lines = **one** `RaiseFailFastException` event (30 backtrace frames + record lines,
+same single-event signature), `e0464645=3` = that one record, `npar=0` unchanged. The failfast backtrace
+resolves cleanly this run (maps at t=70): `kernelbase!RaiseFailFastException+0x5a92` ←
+**CoreMessagingXP** `+0xb8fd/+0xb85c/+0x9cf4a/+0xa399` ← dispatch frames `+0x785e7…+0x12d72` ←
+`user32+0x5a175/+0x45147` (window-proc dispatch) ← unresolvable managed frames ← `memfd:wine-mapping`
+(coreclr JIT region) — i.e. the same `Con::Process::NotifyOutOfMemory` death on the UI thread (`tid=0x24`)
+inside a CoreMessagingXP window-proc dispatch that crosses into managed code.
+Originations (combase, now real): **4**, all in the handled population — 3× `0x80040111`
+(REGDB_E_CLASSNOTREG, messages `L"WhatsAppNative.Voip.VoipFactory"`, `L"WhatsAppNative.Sqlite"`,
+`L"WhatsAppNative.MiscCpp"` — the app's own native classes, app catches and logs) and 1× `0x80004002`
+`L"Specified cast is not valid."` (the handled `CoreWebView2.Profile` cast). Progress: `msedgewebview2.exe`
+now loads (browser + child processes in the loaddll trace), 4 `\\pipe\\LOCAL\\mojo.*` named pipes created,
+`createdwins=54`, `xamlwin=1` (the XAML window is created). `Navigate` in applog: **0**; no
+`--type=renderer` child. Screenshot `wa_uri_after.png` at t=35 s: **blank** (solid 1280×1024, 295 B).
+
+**Battery 8×60:** `rc=69` ×8 (deterministic, the early death), `fatal=0` ×8, `edge=2` ×8.
+
+**UI-thread trace at the death (`+module,+process`, last lines of tid 0024 before the failfast):**
+`gdiplus.dll` loads → `NtUserCreateWindowEx` **`H.NotifyIcon_183e58c3-…`** (the tray icon window) →
+`Shell32.dll` (app-local probe `c0000135`, system copy loads) → `ProcessPowerThrottlingState` stub →
+`load_dll "api-ms-win-core-errorhandling-l1-1-2.dll"` → `kernelbase` → **RaiseFailFastException**.
+The death is CoreMessagingXP's own out-of-memory fail-fast **during the tray-icon build dispatch**
+(H.NotifyIcon + gdiplus + Shell32), exactly the population where it died before; the activation/QI
+surface is no longer the trigger (Uri/StorageFile factories answer, the tray window is created).
+
+**Next gaps (ordered):** (1) the `NotifyOutOfMemory` trigger: CoreMessagingXP reads a global callback
+(`0x1800e5150`), calls it, then resolves `api-ms-win-core-errorhandling-l1-1-3.dll` and fail-fasts —
+decode the callback (objdump): it is the app-side commit-limit probe; find the `NtQuerySystemInformation`
+class it reads and the limit it compares against (Wine's commit accounting is the remaining suspect);
+(2) `0x80040111` activations for `WhatsAppNative.Voip.VoipFactory`/`Sqlite`/`MiscCpp` (app-side COM
+servers in the package dir — register their ActivatableClassIds via env-prep if the handlers stop being
+benign); (3) the `CoreWebView2.Profile` cast (`0x80004002`) downstream; (4) `Navigate`/renderer remain
+gated by (1).
