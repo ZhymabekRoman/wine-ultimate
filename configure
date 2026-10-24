@@ -1037,6 +1037,7 @@ enable_comsvcs
 enable_concrt140
 enable_connect
 enable_coremessaging
+enable_coreuicall
 enable_credui
 enable_crtdll
 enable_crypt32
@@ -22880,6 +22881,7 @@ wine_fn_config_makefile dlls/concrt140 enable_concrt140
 wine_fn_config_makefile dlls/concrt140/tests enable_tests
 wine_fn_config_makefile dlls/connect enable_connect
 wine_fn_config_makefile dlls/coremessaging enable_coremessaging
+wine_fn_config_makefile dlls/coreuicall enable_coreuicall
 wine_fn_config_makefile dlls/coremessaging/tests enable_tests
 wine_fn_config_makefile dlls/credui enable_credui
 wine_fn_config_makefile dlls/credui/tests enable_tests
@@ -23712,7 +23714,6 @@ wine_fn_config_makefile dlls/windows.system.profile.systemid enable_windows_syst
 wine_fn_config_makefile dlls/windows.system.profile.systemid/tests enable_tests
 wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers enable_windows_system_profile_systemmanufacturers
 wine_fn_config_makefile dlls/windows.system.profile.systemmanufacturers/tests enable_tests
-wine_fn_config_makefile dlls/windows.system.threading enable_windows_system_threading
 wine_fn_config_makefile dlls/windows.ui.composition enable_windows_ui_composition
 wine_fn_config_makefile dlls/windows.ui.composition/tests enable_tests
 wine_fn_config_makefile dlls/windows.ui.core.textinput enable_windows_ui_core_textinput

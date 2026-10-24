@@ -1,0 +1,7 @@
+MODULE    = coreuicall.dll
+IMPORTS   = combase kernel32 uuid ucrtbase
+IMPORTLIB = coreuicall
+
+SOURCES = \
+	coreuicall.c \
+	coreuicall_crt.c

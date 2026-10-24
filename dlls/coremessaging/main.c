@@ -1256,14 +1256,24 @@ static inline struct core_ui *impl_from_IUnknown( IUnknown *iface )
     return CONTAINING_RECORD( iface, struct core_ui, IUnknown_iface );
 }
 
+static const struct IUnknownVtbl core_ui_vtbl;
+
 static HRESULT WINAPI core_ui_QueryInterface( IUnknown *iface, REFIID iid, void **out )
 {
-    struct core_ui *impl = impl_from_IUnknown( iface );
-    if (!out) return E_POINTER;
-    *out = NULL;
+    struct core_ui *impl;
     TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
+    /* Vtable-ownership guard: the CoreUICall engine dispatches the vtable
+     * slot 0 of an object handed out in a conversation reply as a plain
+     * call with the client's receiver object as 'iface'; the out-pointer
+     * of that call is the caller's leftover register.  Verify that 'iface'
+     * really is this object before touching the struct, and never write
+     * through an unverified out-pointer. */
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &core_ui_vtbl) return E_NOINTERFACE;
+    if (!iid) return E_POINTER;
+    impl = impl_from_IUnknown( iface );
     if (IsEqualGUID( iid, &IID_IUnknown ))
     {
+        if (!out) return E_POINTER;
         InterlockedIncrement( &impl->ref );
         *out = &impl->IUnknown_iface;
         return S_OK;

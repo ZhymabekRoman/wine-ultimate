@@ -76,6 +76,8 @@ static inline ULONG tlv_pad( ULONG size )
  * Session object
  */
 
+static const IUnknownVtbl coreui_session_vtbl;
+
 struct coreui_session
 {
     IUnknown IUnknown_iface;
@@ -88,19 +90,34 @@ static inline struct coreui_session *impl_from_IUnknown( IUnknown *iface )
     return CONTAINING_RECORD( iface, struct coreui_session, IUnknown_iface );
 }
 
+/*
+ * QueryInterface.  The engine's CoreUICallReceive dispatch invokes the
+ * vtable slot 0 of an object handed out in a conversation reply as a plain
+ * two-argument call (this = the receiver object of the calling client,
+ * second argument = a one-byte completion flag, the third argument is the
+ * caller's leftover register value).  The 'iface' pointer is therefore not
+ * always this object, and the 'out' pointer is not always writable: the
+ * implementation verifies vtable ownership before touching the object,
+ * never writes through an unverified out-pointer, and answers
+ * E_NOINTERFACE - never S_OK with a null result - for interfaces it does
+ * not implement.
+ */
 static HRESULT WINAPI session_QueryInterface( IUnknown *iface, REFIID iid, void **out )
 {
-    struct coreui_session *impl = impl_from_IUnknown( iface );
+    struct coreui_session *impl;
 
-    if (!out) return E_POINTER;
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &coreui_session_vtbl) return E_NOINTERFACE;
+    if (!iid) return E_POINTER;
+    impl = impl_from_IUnknown( iface );
     if (IsEqualGUID( iid, &IID_IUnknown ))
     {
+        if (!out) return E_POINTER;
         *out = iface;
         session_AddRef( iface );
         return S_OK;
     }
     FIXME( "interface %s not supported.\n", debugstr_guid( iid ) );
-    *out = NULL;
     return E_NOINTERFACE;
 }
 
@@ -167,19 +184,27 @@ static inline struct coreui_call_host *send_host_from_receive( IMessageCallRecei
     return CONTAINING_RECORD( iface, struct coreui_call_host, receive_iface );
 }
 
+static const IMessageCallSendHostVtbl send_host_vtbl;
+static const IMessageCallReceiveHostVtbl receive_host_vtbl;
+
 static HRESULT WINAPI send_host_QueryInterface( IMessageCallSendHost *iface, REFIID iid, void **out )
 {
-    struct coreui_call_host *impl = send_host_from_send( iface );
+    struct coreui_call_host *impl;
 
-    if (!out) return E_POINTER;
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
+    /* Vtable-ownership guard: see session_QueryInterface.  The engine may
+     * invoke this slot with the client receiver object as 'iface'. */
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &send_host_vtbl) return E_NOINTERFACE;
+    if (!iid) return E_POINTER;
+    impl = send_host_from_send( iface );
     if (IsEqualGUID( iid, &IID_IUnknown ))
     {
+        if (!out) return E_POINTER;
         *out = iface;
         send_host_AddRef( iface );
         return S_OK;
     }
     FIXME( "interface %s not supported.\n", debugstr_guid( iid ) );
-    *out = NULL;
     return E_NOINTERFACE;
 }
 
@@ -274,17 +299,21 @@ static const IMessageCallSendHostVtbl send_host_vtbl =
 
 static HRESULT WINAPI receive_host_QueryInterface( IMessageCallReceiveHost *iface, REFIID iid, void **out )
 {
-    struct coreui_call_host *impl = send_host_from_receive( iface );
+    struct coreui_call_host *impl;
 
-    if (!out) return E_POINTER;
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
+    /* Vtable-ownership guard: see session_QueryInterface. */
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &receive_host_vtbl) return E_NOINTERFACE;
+    if (!iid) return E_POINTER;
+    impl = send_host_from_receive( iface );
     if (IsEqualGUID( iid, &IID_IUnknown ))
     {
+        if (!out) return E_POINTER;
         *out = iface;
         receive_host_AddRef( iface );
         return S_OK;
     }
     FIXME( "interface %s not supported.\n", debugstr_guid( iid ) );
-    *out = NULL;
     return E_NOINTERFACE;
 }
 
