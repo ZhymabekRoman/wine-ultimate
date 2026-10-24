@@ -17,7 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 #include "initguid.h"
 #include "inputpaneinterop.h"
 
@@ -88,8 +91,18 @@ static ULONG WINAPI inputpane_Release( IInputPane *iface )
 
 static HRESULT WINAPI inputpane_GetIids( IInputPane *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IInputPane,
+        IID_IInputPane2,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI inputpane_GetRuntimeClassName( IInputPane *iface, HSTRING *class_name )
@@ -231,6 +244,16 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         IInspectable_AddRef( *out );
         return S_OK;
     }
+    /* Windows aggregates the class default interface (IInputPane) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IInputPane ))
+    {
+        *out = &impl->IInputPane_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -254,20 +277,32 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IInputPaneStatics,
+        IID_IInputPaneInterop,
+        IID_IInputPaneStatics2,
+        IID_IInputPane,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    return WindowsCreateString( RuntimeClass_Windows_UI_ViewManagement_InputPane, lstrlenW( RuntimeClass_Windows_UI_ViewManagement_InputPane ), class_name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    **trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -384,13 +419,40 @@ static const struct IInputPaneStatics2Vtbl input_pane_statics2_vtbl =
     input_pane_statics2_GetForUIContext,
 };
 
+
+/* Windows aggregates the class default interface (IInputPane) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( factory_def, IInputPane, struct inputpane_statics, impl_from_IInputPane_factory_def,
+                      IInputPane_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI factory_def_add_Showing( IInputPane *iface, __FITypedEventHandler_2_Windows__CUI__CViewManagement__CInputPane_Windows__CUI__CViewManagement__CInputPaneVisibilityEventArgs *handler, EventRegistrationToken *token ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_remove_Showing( IInputPane *iface, EventRegistrationToken token ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_add_Hiding( IInputPane *iface, __FITypedEventHandler_2_Windows__CUI__CViewManagement__CInputPane_Windows__CUI__CViewManagement__CInputPaneVisibilityEventArgs *handler, EventRegistrationToken *token ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_remove_Hiding( IInputPane *iface, EventRegistrationToken token ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_OccludedRect( IInputPane *iface, Rect *value ) { return E_FAIL; }
+
+static const struct IInputPaneVtbl factory_def_vtbl =
+{
+    factory_def_QueryInterface,
+    factory_def_AddRef,
+    factory_def_Release,
+    factory_def_GetIids,
+    factory_def_GetRuntimeClassName,
+    factory_def_GetTrustLevel,
+    factory_def_add_Showing,
+    factory_def_remove_Showing,
+    factory_def_add_Hiding,
+    factory_def_remove_Hiding,
+    factory_def_get_OccludedRect,
+};
+
 static struct inputpane_statics inputpane_statics =
 {
     {&factory_vtbl},
     {&input_pane_interop_vtbl},
     {&input_pane_statics_vtbl},
     {&input_pane_statics2_vtbl},
-    1,
+    {&factory_def_vtbl}, 1,
 };
 
 IActivationFactory *inputpane_factory = &inputpane_statics.IActivationFactory_iface;

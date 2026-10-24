@@ -17,7 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 #include "initguid.h"
 #include "uiviewsettingsinterop.h"
 
@@ -83,8 +86,17 @@ static ULONG WINAPI uiviewsettings_Release( IUIViewSettings *iface )
 
 static HRESULT WINAPI uiviewsettings_GetIids( IUIViewSettings *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IUIViewSettings,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI uiviewsettings_GetRuntimeClassName( IUIViewSettings *iface, HSTRING *class_name )
@@ -161,6 +173,16 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IUIViewSettings) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IUIViewSettings ))
+    {
+        *out = &impl->IUIViewSettings_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -184,20 +206,31 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IUIViewSettingsStatics,
+        IID_IUIViewSettingsInterop,
+        IID_IUIViewSettings,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    return WindowsCreateString( RuntimeClass_Windows_UI_ViewManagement_UIViewSettings, lstrlenW( RuntimeClass_Windows_UI_ViewManagement_UIViewSettings ), class_name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    **trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -286,12 +319,31 @@ static const struct IUIViewSettingsStaticsVtbl ui_viewsettings_statics_vtbl =
     ui_viewsettings_statics_GetForCurrentView,
 };
 
+
+/* Windows aggregates the class default interface (IUIViewSettings) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( factory_def, IUIViewSettings, struct uiviewsettings_statics, impl_from_IUIViewSettings_factory_def,
+                      IUIViewSettings_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI factory_def_get_UserInteractionMode( IUIViewSettings *iface, UserInteractionMode *value ) { return E_FAIL; }
+
+static const struct IUIViewSettingsVtbl factory_def_vtbl =
+{
+    factory_def_QueryInterface,
+    factory_def_AddRef,
+    factory_def_Release,
+    factory_def_GetIids,
+    factory_def_GetRuntimeClassName,
+    factory_def_GetTrustLevel,
+    factory_def_get_UserInteractionMode,
+};
+
 static struct uiviewsettings_statics uiviewsettings_statics =
 {
     {&factory_vtbl},
     {&ui_viewsettings_interop_vtbl},
     {&ui_viewsettings_statics_vtbl},
-    1,
+    {&factory_def_vtbl}, 1,
 };
 
 IActivationFactory *uiviewsettings_factory = &uiviewsettings_statics.IActivationFactory_iface;

@@ -16,7 +16,10 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 
 #include "wine/debug.h"
 
@@ -101,8 +104,19 @@ static ULONG WINAPI fontweights_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI fontweights_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IActivationFactory,
+        IID_IFontWeightsStatics,
+        IID_IFontWeights,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI fontweights_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
@@ -361,8 +375,17 @@ static ULONG WINAPI fontweight_reference_factory_Release( IActivationFactory *if
 
 static HRESULT WINAPI fontweight_reference_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IActivationFactory,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI fontweight_reference_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )

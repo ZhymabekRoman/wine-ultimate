@@ -17,7 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 #include "initguid.h"
 #include "weakref.h"
 
@@ -114,8 +117,23 @@ static ULONG WINAPI uisettings_Release( IUISettings *iface )
 
 static HRESULT WINAPI uisettings_GetIids( IUISettings *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IUISettings,
+        IID_IUISettings2,
+        IID_IUISettings3,
+        IID_IUISettings4,
+        IID_IUISettings5,
+        IID_IUISettings6,
+        IID_IWeakReferenceSource,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI uisettings_GetRuntimeClassName( IUISettings *iface, HSTRING *class_name )
@@ -574,6 +592,7 @@ static const struct IUISettings6Vtbl uisettings6_vtbl =
 struct uisettings_statics
 {
     IActivationFactory IActivationFactory_iface;
+    IUISettings IUISettings_iface;
     LONG ref;
 };
 
@@ -594,6 +613,16 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         IsEqualGUID( iid, &IID_IActivationFactory ))
     {
         *out = &impl->IActivationFactory_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    /* Windows aggregates the class default interface (IUISettings) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IUISettings ))
+    {
+        *out = &impl->IUISettings_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -621,20 +650,29 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IUISettings,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    return WindowsCreateString( RuntimeClass_Windows_UI_ViewManagement_UISettings, lstrlenW( RuntimeClass_Windows_UI_ViewManagement_UISettings ), class_name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    **trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -682,10 +720,53 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+
+/* Windows aggregates the class default interface (IUISettings) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( factory_def, IUISettings, struct uisettings_statics, impl_from_IUISettings_factory_def,
+                      IUISettings_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI factory_def_get_HandPreference( IUISettings *iface, HandPreference *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_CursorSize( IUISettings *iface, Size *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_ScrollBarSize( IUISettings *iface, Size *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_ScrollBarArrowSize( IUISettings *iface, Size *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_ScrollBarThumbBoxSize( IUISettings *iface, Size *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_MessageDuration( IUISettings *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_AnimationsEnabled( IUISettings *iface, boolean *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_CaretBrowsingEnabled( IUISettings *iface, boolean *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_CaretBlinkRate( IUISettings *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_CaretWidth( IUISettings *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_DoubleClickTime( IUISettings *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_MouseHoverTime( IUISettings *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_UIElementColor( IUISettings *iface, UIElementType element, Color *value ) { return E_FAIL; }
+
+static const struct IUISettingsVtbl factory_def_vtbl =
+{
+    factory_def_QueryInterface,
+    factory_def_AddRef,
+    factory_def_Release,
+    factory_def_GetIids,
+    factory_def_GetRuntimeClassName,
+    factory_def_GetTrustLevel,
+    factory_def_get_HandPreference,
+    factory_def_get_CursorSize,
+    factory_def_get_ScrollBarSize,
+    factory_def_get_ScrollBarArrowSize,
+    factory_def_get_ScrollBarThumbBoxSize,
+    factory_def_get_MessageDuration,
+    factory_def_get_AnimationsEnabled,
+    factory_def_get_CaretBrowsingEnabled,
+    factory_def_get_CaretBlinkRate,
+    factory_def_get_CaretWidth,
+    factory_def_get_DoubleClickTime,
+    factory_def_get_MouseHoverTime,
+    factory_def_UIElementColor,
+};
+
 static struct uisettings_statics uisettings_statics =
 {
     {&factory_vtbl},
-    1,
+    {&factory_def_vtbl}, 1,
 };
 
 IActivationFactory *uisettings_factory = &uisettings_statics.IActivationFactory_iface;

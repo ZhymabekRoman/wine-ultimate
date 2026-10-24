@@ -17,7 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
@@ -78,8 +81,17 @@ static ULONG WINAPI accessibilitysettings_Release(IAccessibilitySettings *iface)
 static HRESULT WINAPI accessibilitysettings_GetIids(IAccessibilitySettings *iface, ULONG *iid_count,
                                                     IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IAccessibilitySettings,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI accessibilitysettings_GetRuntimeClassName(IAccessibilitySettings *iface,
@@ -151,6 +163,7 @@ static const struct IAccessibilitySettingsVtbl accessibilitysettings_vtbl =
 struct factory
 {
     IActivationFactory IActivationFactory_iface;
+    IAccessibilitySettings IAccessibilitySettings_iface;
     LONG ref;
 };
 
@@ -176,6 +189,16 @@ static HRESULT WINAPI factory_QueryInterface(IActivationFactory *iface, REFIID i
     }
 
     *out = NULL;
+    /* Windows aggregates the class default interface (IAccessibilitySettings) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IAccessibilitySettings ))
+    {
+        *out = &impl->IAccessibilitySettings_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
     return E_NOINTERFACE;
 }
@@ -198,20 +221,29 @@ static ULONG WINAPI factory_Release(IActivationFactory *iface)
 
 static HRESULT WINAPI factory_GetIids(IActivationFactory *iface, ULONG *iid_count, IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IAccessibilitySettings,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName(IActivationFactory *iface, HSTRING *class_name)
 {
-    FIXME("iface %p, class_name %p stub!\n", iface, class_name);
-    return E_NOTIMPL;
+    return WindowsCreateString( RuntimeClass_Windows_UI_ViewManagement_AccessibilitySettings, lstrlenW( RuntimeClass_Windows_UI_ViewManagement_AccessibilitySettings ), class_name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel(IActivationFactory *iface, TrustLevel *trust_level)
 {
-    FIXME("iface %p, trust_level %p stub!\n", iface, trust_level);
-    return E_NOTIMPL;
+    **trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_ActivateInstance(IActivationFactory *iface, IInspectable **instance)
@@ -246,10 +278,35 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+
+/* Windows aggregates the class default interface (IAccessibilitySettings) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( factory_def, IAccessibilitySettings, struct factory, impl_from_IAccessibilitySettings_factory_def,
+                      IAccessibilitySettings_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI factory_def_get_HighContrast( IAccessibilitySettings *iface, boolean *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_HighContrastScheme( IAccessibilitySettings *iface, HSTRING *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_add_HighContrastChanged( IAccessibilitySettings *iface, __FITypedEventHandler_2_Windows__CUI__CViewManagement__CAccessibilitySettings_IInspectable *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_remove_HighContrastChanged( IAccessibilitySettings *iface, EventRegistrationToken cookie ) { return E_FAIL; }
+
+static const struct IAccessibilitySettingsVtbl factory_def_vtbl =
+{
+    factory_def_QueryInterface,
+    factory_def_AddRef,
+    factory_def_Release,
+    factory_def_GetIids,
+    factory_def_GetRuntimeClassName,
+    factory_def_GetTrustLevel,
+    factory_def_get_HighContrast,
+    factory_def_get_HighContrastScheme,
+    factory_def_add_HighContrastChanged,
+    factory_def_remove_HighContrastChanged,
+};
+
 static struct factory factory =
 {
     {&factory_vtbl},
-    1,
+    {&factory_def_vtbl}, 1,
 };
 
 IActivationFactory *accessibilitysettings_factory = &factory.IActivationFactory_iface;
