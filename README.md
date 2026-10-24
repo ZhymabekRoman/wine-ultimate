@@ -927,3 +927,66 @@ first time; the `FileNotFoundException` locator FailFast is gone; app survives 1
 Remaining walls: XAML window (WinUIDesktopWin32WindowClass) not mapped, no Navigate in
 applog, browser IPC handshake (msedgewebview2 child tree: gpu/renderer/utility + named
 pipes) not completed.
+
+## CoreMessaging registrar anatomy + session-id / ProcessMessage fixes (2026-10-24)
+
+Source (github `ultimate`, linear on `ea75cf587`):
+
+- `3f84f522d` server, kernel32: named-pipe session-id connection attributes —
+  `pipe_end` carries `client_session_id`/`server_session_id` (from the creating
+  process, copied at connect, visible on both ends), `FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE`
+  answers `"ClientSessionId"`/`"ServerSessionId"`, and kernel32
+  `GetNamedPipeClientSessionId`/`GetNamedPipeServerSessionId` become the
+  `NtFsControlFile` round trip (no more self-referential PEB stubs). Chosen because
+  Chromium-family IPC verifies the pipe peer's session id during the WebView2 mojo
+  handshake — now on the critical path once the browser spawns.
+- `d87281559` coremessaging: loopback `ProcessMessage` completes the message in place
+  (header + TLVs echoed, `S_OK`) — a negative completion is **fatal** for the callers:
+  the XP dispatch layer answers it with `CFlat::Abandonment::FailWithHR` →
+  `RaiseFailFastException(0xe0464645)`. Conversation test updated to the positive
+  contract. Same commit: `NtAlpcSendWaitReceivePort` frame traces (port, lpc type,
+  msg id, verb, subid, 48-byte hex prefix) and a server relay print gated by
+  `WINE_ALPC_RELAY_TRACE` (sender tid, stamp, msg id, handle dup).
+
+The t≈140 s fail-fast is now fully symbolized (`CoreMessagingXP.dll.i64` + objdump):
+`Dispatcher::Callback_DispatchLoop → DeferredCall::Callback_Dispatch →
+Registrar::AlpcClientAdapter::Callback_ProcessIncoming →
+AlpcConnection::Callback_HandleReceivedBuffer` — the type-11 branch calls the
+connection host's vtable+24 with the connection context, and a negative HRESULT
+triggers `FailWithHR(nullptr, 0)` → `RaiseFailFast` with reason word `0xc0000482`
+(STATUS_FATAL_APP_EXIT). Registrar wire anatomy measured via the new traces:
+frame = `[u32 total][u16 verb][u16 subid][TLV…]`, **verb 1 = request, 2 = reply,
+16 = reverse notification**; connect notifications ride as type-10 items. The main
+thread's registrar client connection receives **two verb-16 ReleaseConversationClient
+notifications (target u32 = 0x138 = the engine's own registrar server thread) queued
+by the engine server at connect time, right behind its `RegisterConversation` reply**
+(id 5). They are delivered at t≈140 s, the host parses them negatively, and the process
+fail-fasts. That is the wall gating both the XAML window and the WebView2 environment
+probe (t≈148 s). The builtin registrar provider registers fine (client id 2) and
+receives **zero** routed requests — the engine self-serves `CoreUICore` joins in-process.
+WebView2 state in this build: the app loads `Microsoft.Web.WebView2.Core.dll`
+(+Projection, +LocalizationResources), never `WebView2Loader.dll`, never
+`EmbeddedBrowserWebView.dll`, zero `msedgewebview2` exec — all behind the XAML wall.
+
+Measured after both commits (app binaries re-verified `PRISTINE`: CoreMessagingXP
+`24da83be`, Microsoft.ui.xaml `9a42e19d`, dwmcorei `9353066e` == `.orig`;
+WebView2Loader `4cd3ffd5…`, Microsoft.Web.WebView2.Core `799b8c69…` == start hashes;
+no probe files in the app dir):
+
+| metric | before | after |
+| --- | --- | --- |
+| `test_namedpipe_session_id` (kernel32 pipe, full 38 466 tests) | stub | **passes**; 16 failures = pre-existing `ImpersonateNamedPipeClient` pair (pipe.c:1984/2034) |
+| `coremessaging_test` failures | 19 (flaky IAsync set) | 31 on reruns — **zero new rows** (diff vs baseline: only the updated conversation assertions pass) |
+| `wa_wv2.sh` 150 s | `rc=69`, `e0464645×3`, edge 0, routed 0, windows 238, no XAML window | identical (`rc=69`, edge 0, routed 0, windows 238) |
+| battery 8 × 60 s | 8/8 `rc=69` baseline | **8/8 `rc=69`, `fatal=0`, `av=0`** (no regression) |
+| screenshot `wa-work/wa_webview_after.png` (t=110 s) | blank 295 B | blank 295 B (desktop root only) |
+
+Next gaps: (a) capture the failing host HRESULT and object identity at
+`CoreMessagingXP+0x785c3` — in-wine `winedbg` attach to the live app returns
+**error 87** while registrar ALPC receives are in flight (debugger-attach vs async
+receive interaction: the next probe); (b) the spurious verb-16 (`ReleaseConversationClient
+0x138`) emitted by the engine server at `RegisterConversation` is the candidate trigger —
+cheap experiment: make the builtin provider connect **once** (no 25 ms retry loop; the
+three failed `NtAlpcConnectPort` attempts may create/destroy registrar client entries
+that the server then releases); (c) once the wall clears: `WebView2Loader` load →
+`msedgewebview2` spawn → mojo named pipes (session-id attributes now land).
