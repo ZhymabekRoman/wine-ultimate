@@ -76,6 +76,7 @@ struct windows_uri
 {
     IUriRuntimeClass IUriRuntimeClass_iface;
     IUriRuntimeClassWithAbsoluteCanonicalUri IUriRuntimeClassWithAbsoluteCanonicalUri_iface;
+    IStringable IStringable_iface;
     LONG ref;
 
     WCHAR *raw;
@@ -209,6 +210,7 @@ static void uri_parse( struct windows_uri *impl )
 
 static const IUriRuntimeClassVtbl uri_vtbl;
 static const IUriRuntimeClassWithAbsoluteCanonicalUriVtbl uri_acu_vtbl;
+static const IStringableVtbl uri_stringable_vtbl;
 
 static HRESULT windows_uri_create( const WCHAR *raw, struct windows_uri **out )
 {
@@ -218,6 +220,7 @@ static HRESULT windows_uri_create( const WCHAR *raw, struct windows_uri **out )
 
     impl->IUriRuntimeClass_iface.lpVtbl = &uri_vtbl;
     impl->IUriRuntimeClassWithAbsoluteCanonicalUri_iface.lpVtbl = &uri_acu_vtbl;
+    impl->IStringable_iface.lpVtbl = &uri_stringable_vtbl;
     impl->ref = 1;
     impl->raw = heap_strdup( raw );
     if (!impl->raw)
@@ -252,6 +255,12 @@ static HRESULT WINAPI uri_QueryInterface( IUriRuntimeClass *iface, REFIID iid, v
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IStringable ))
+    {
+        IInspectable_AddRef( (*out = &impl->IStringable_iface) );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -274,8 +283,21 @@ static ULONG WINAPI uri_Release( IUriRuntimeClass *iface )
 
 static HRESULT WINAPI uri_GetIids( IUriRuntimeClass *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID instance_iids[] =
+    {
+        IID_IUriRuntimeClass,
+        IID_IUriRuntimeClassWithAbsoluteCanonicalUri,
+        IID_IStringable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, instance_iids, sizeof(instance_iids) );
+    *iid_count = ARRAY_SIZE(instance_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI uri_GetRuntimeClassName( IUriRuntimeClass *iface, HSTRING *class_name )
@@ -480,11 +502,36 @@ static const IUriRuntimeClassWithAbsoluteCanonicalUriVtbl uri_acu_vtbl =
     uri_acu_get_DisplayIri,
 };
 
+DEFINE_IINSPECTABLE( uri_stringable, IStringable, struct windows_uri, IUriRuntimeClass_iface )
+
+static HRESULT WINAPI uri_stringable_ToString( IStringable *iface, HSTRING *value )
+{
+    struct windows_uri *impl = impl_from_IStringable( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    return hstr_dup( impl->raw, value );
+}
+
+static const IStringableVtbl uri_stringable_vtbl =
+{
+    uri_stringable_QueryInterface,
+    uri_stringable_AddRef,
+    uri_stringable_Release,
+    uri_stringable_GetIids,
+    uri_stringable_GetRuntimeClassName,
+    uri_stringable_GetTrustLevel,
+    uri_stringable_ToString,
+};
+
 struct uri_statics
 {
     IActivationFactory IActivationFactory_iface;
     IUriRuntimeClassFactory IUriRuntimeClassFactory_iface;
     IUriEscapeStatics IUriEscapeStatics_iface;
+    IUriRuntimeClass IUriRuntimeClass_iface;
+    IUriRuntimeClassWithAbsoluteCanonicalUri IUriRuntimeClassWithAbsoluteCanonicalUri_iface;
+    IStringable IStringable_iface;
     LONG ref;
 };
 
@@ -520,6 +567,31 @@ static HRESULT WINAPI uri_statics_QueryInterface( IActivationFactory *iface, REF
         return S_OK;
     }
 
+    /*
+     * Windows's class factory aggregates the runtime class default interface and
+     * its implemented interfaces: QI for the default IID on the factory object
+     * succeeds (CsWinRT probes the factory for the class interfaces to build its
+     * ABI surface; RoGetActivationFactory("Windows.Foundation.Uri") +
+     * IInspectable_QueryInterface(IID_IUriRuntimeClass) is the measured app path).
+     */
+    if (IsEqualGUID( iid, &IID_IUriRuntimeClass ))
+    {
+        IInspectable_AddRef( (*out = &impl->IUriRuntimeClass_iface) );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IUriRuntimeClassWithAbsoluteCanonicalUri ))
+    {
+        IInspectable_AddRef( (*out = &impl->IUriRuntimeClassWithAbsoluteCanonicalUri_iface) );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IStringable ))
+    {
+        IInspectable_AddRef( (*out = &impl->IStringable_iface) );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -539,8 +611,24 @@ static ULONG WINAPI uri_statics_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI uri_statics_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IUriRuntimeClassFactory,
+        IID_IUriEscapeStatics,
+        IID_IUriRuntimeClass,
+        IID_IUriRuntimeClassWithAbsoluteCanonicalUri,
+        IID_IStringable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI uri_statics_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
@@ -550,8 +638,8 @@ static HRESULT WINAPI uri_statics_GetRuntimeClassName( IActivationFactory *iface
 
 static HRESULT WINAPI uri_statics_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI uri_statics_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -743,11 +831,108 @@ static const IUriEscapeStaticsVtbl uri_escape_vtbl =
     uri_escape_EscapeComponent,
 };
 
+/*
+ * The factory answers the class default interface and implemented interfaces
+ * (Windows aggregates them on the factory object). The factory is not an
+ * instance: QI, reference counting and the inspectable metadata probe surface
+ * are live, instance method calls fail.
+ */
+DEFINE_IINSPECTABLE_( uri_statics_def, IUriRuntimeClass, struct uri_statics, impl_from_uri_statics_def,
+                      IUriRuntimeClass_iface, &impl->IActivationFactory_iface )
+
+#define URI_FACTORY_INSTANCE_STUB( name, proto ) \
+    static HRESULT WINAPI uri_statics_def_##name proto { return E_FAIL; }
+
+URI_FACTORY_INSTANCE_STUB( get_AbsoluteUri, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_DisplayUri, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Domain, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Extension, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Fragment, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Host, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Password, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Path, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Query, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_QueryParsed, ( IUriRuntimeClass *iface, IWwwFormUrlDecoderRuntimeClass **decoder ) )
+URI_FACTORY_INSTANCE_STUB( get_RawUri, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_SchemeName, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_UserName, ( IUriRuntimeClass *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Port, ( IUriRuntimeClass *iface, INT32 *value ) )
+URI_FACTORY_INSTANCE_STUB( get_Suspicious, ( IUriRuntimeClass *iface, boolean *value ) )
+URI_FACTORY_INSTANCE_STUB( Equals, ( IUriRuntimeClass *iface, IUriRuntimeClass *uri, boolean *value ) )
+URI_FACTORY_INSTANCE_STUB( CombineUri, ( IUriRuntimeClass *iface, HSTRING relative_uri, IUriRuntimeClass **instance ) )
+
+static const IUriRuntimeClassVtbl uri_statics_def_vtbl =
+{
+    uri_statics_def_QueryInterface,
+    uri_statics_def_AddRef,
+    uri_statics_def_Release,
+    uri_statics_def_GetIids,
+    uri_statics_def_GetRuntimeClassName,
+    uri_statics_def_GetTrustLevel,
+    uri_statics_def_get_AbsoluteUri,
+    uri_statics_def_get_DisplayUri,
+    uri_statics_def_get_Domain,
+    uri_statics_def_get_Extension,
+    uri_statics_def_get_Fragment,
+    uri_statics_def_get_Host,
+    uri_statics_def_get_Password,
+    uri_statics_def_get_Path,
+    uri_statics_def_get_Query,
+    uri_statics_def_get_QueryParsed,
+    uri_statics_def_get_RawUri,
+    uri_statics_def_get_SchemeName,
+    uri_statics_def_get_UserName,
+    uri_statics_def_get_Port,
+    uri_statics_def_get_Suspicious,
+    uri_statics_def_Equals,
+    uri_statics_def_CombineUri,
+};
+
+DEFINE_IINSPECTABLE_( uri_statics_acu, IUriRuntimeClassWithAbsoluteCanonicalUri, struct uri_statics,
+                      impl_from_uri_statics_acu, IUriRuntimeClassWithAbsoluteCanonicalUri_iface,
+                      &impl->IActivationFactory_iface )
+
+URI_FACTORY_INSTANCE_STUB( acu_get_AbsoluteCanonicalUri,
+                           ( IUriRuntimeClassWithAbsoluteCanonicalUri *iface, HSTRING *value ) )
+URI_FACTORY_INSTANCE_STUB( acu_get_DisplayIri,
+                           ( IUriRuntimeClassWithAbsoluteCanonicalUri *iface, HSTRING *value ) )
+
+static const IUriRuntimeClassWithAbsoluteCanonicalUriVtbl uri_statics_acu_vtbl =
+{
+    uri_statics_acu_QueryInterface,
+    uri_statics_acu_AddRef,
+    uri_statics_acu_Release,
+    uri_statics_acu_GetIids,
+    uri_statics_acu_GetRuntimeClassName,
+    uri_statics_acu_GetTrustLevel,
+    uri_statics_def_acu_get_AbsoluteCanonicalUri,
+    uri_statics_def_acu_get_DisplayIri,
+};
+
+DEFINE_IINSPECTABLE_( uri_statics_stringable, IStringable, struct uri_statics, impl_from_uri_statics_stringable,
+                      IStringable_iface, &impl->IActivationFactory_iface )
+
+URI_FACTORY_INSTANCE_STUB( stringable_ToString, ( IStringable *iface, HSTRING *value ) )
+
+static const IStringableVtbl uri_statics_stringable_vtbl =
+{
+    uri_statics_stringable_QueryInterface,
+    uri_statics_stringable_AddRef,
+    uri_statics_stringable_Release,
+    uri_statics_stringable_GetIids,
+    uri_statics_stringable_GetRuntimeClassName,
+    uri_statics_stringable_GetTrustLevel,
+    uri_statics_def_stringable_ToString,
+};
+
 static struct uri_statics uri_statics =
 {
     {&uri_statics_vtbl},
     {&uri_factory_vtbl},
     {&uri_escape_vtbl},
+    {&uri_statics_def_vtbl},
+    {&uri_statics_acu_vtbl},
+    {&uri_statics_stringable_vtbl},
     1,
 };
 

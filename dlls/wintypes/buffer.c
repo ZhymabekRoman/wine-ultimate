@@ -17,6 +17,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
 #include "initguid.h"
 #include "robuffer.h"
@@ -27,6 +29,7 @@ struct buffer_factory_statics
 {
     IActivationFactory IActivationFactory_iface;
     IBufferFactory IBufferFactory_iface;
+    IBuffer IBuffer_iface;
     LONG ref;
 };
 
@@ -58,6 +61,14 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface on the factory object. */
+    if (IsEqualGUID( iid, &IID_IBuffer ))
+    {
+        *out = &impl->IBuffer_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -81,20 +92,34 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IBufferFactory,
+        IID_IBuffer,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Storage.Streams.Buffer";
+
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -183,20 +208,33 @@ static ULONG WINAPI buffer_Release( IBuffer *iface )
 
 static HRESULT WINAPI buffer_GetIids( IBuffer *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID instance_iids[] =
+    {
+        IID_IBuffer,
+        IID_IBufferByteAccess,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, instance_iids, sizeof(instance_iids) );
+    *iid_count = ARRAY_SIZE(instance_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI buffer_GetRuntimeClassName( IBuffer *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Storage.Streams.Buffer";
+
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
 }
 
 static HRESULT WINAPI buffer_GetTrustLevel( IBuffer *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI buffer_get_Capacity( IBuffer *iface, UINT32 *value )
@@ -324,10 +362,37 @@ static const struct IBufferFactoryVtbl buffer_factory_statics_vtbl =
     buffer_factory_statics_Create,
 };
 
+/*
+ * Windows aggregates the class default interface (IBuffer) on the factory
+ * object: QI for IID_IBuffer on the factory succeeds (CsWinRT probes the
+ * factory for the class interfaces). The factory is not an instance; instance
+ * method calls fail.
+ */
+DEFINE_IINSPECTABLE_( buffer_factory_def, IBuffer, struct buffer_factory_statics, impl_from_buffer_factory_def,
+                      IBuffer_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI buffer_factory_def_get_Capacity( IBuffer *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI buffer_factory_def_get_Length( IBuffer *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI buffer_factory_def_put_Length( IBuffer *iface, UINT32 value ) { return E_FAIL; }
+
+static const struct IBufferVtbl buffer_factory_def_vtbl =
+{
+    buffer_factory_def_QueryInterface,
+    buffer_factory_def_AddRef,
+    buffer_factory_def_Release,
+    buffer_factory_def_GetIids,
+    buffer_factory_def_GetRuntimeClassName,
+    buffer_factory_def_GetTrustLevel,
+    buffer_factory_def_get_Capacity,
+    buffer_factory_def_get_Length,
+    buffer_factory_def_put_Length,
+};
+
 static struct buffer_factory_statics buffer_factory_statics =
 {
     {&factory_vtbl},
     {&buffer_factory_statics_vtbl},
+    {&buffer_factory_def_vtbl},
     1,
 };
 

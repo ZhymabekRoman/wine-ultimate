@@ -16,6 +16,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "initguid.h"
 #include "private.h"
 
@@ -115,22 +117,37 @@ static ULONG STDMETHODCALLTYPE api_information_statics_factory_Release(IActivati
 static HRESULT STDMETHODCALLTYPE api_information_statics_factory_GetIids(IActivationFactory *iface, ULONG *iid_count,
         IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IApiInformationStatics,
+    };
+    IID *array = CoTaskMemAlloc(sizeof(factory_iids));
+
+    TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
+
+    if (!array)
+        return E_OUTOFMEMORY;
+
+    memcpy(array, factory_iids, sizeof(factory_iids));
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_factory_GetRuntimeClassName(IActivationFactory *iface,
         HSTRING *class_name)
 {
-    FIXME("iface %p, class_name %p stub!\n", iface, class_name);
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Foundation.Metadata.ApiInformation";
+
+    return WindowsCreateString(name, ARRAY_SIZE(name) - 1, class_name);
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_factory_GetTrustLevel(IActivationFactory *iface,
         TrustLevel *trust_level)
 {
-    FIXME("iface %p, trust_level %p stub!\n", iface, trust_level);
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE api_information_statics_factory_ActivateInstance(IActivationFactory *iface,
@@ -377,22 +394,37 @@ static ULONG STDMETHODCALLTYPE property_value_statics_factory_Release(IActivatio
 static HRESULT STDMETHODCALLTYPE property_value_statics_factory_GetIids(IActivationFactory *iface, ULONG *iid_count,
         IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IPropertyValueStatics,
+    };
+    IID *array = CoTaskMemAlloc(sizeof(factory_iids));
+
+    TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
+
+    if (!array)
+        return E_OUTOFMEMORY;
+
+    memcpy(array, factory_iids, sizeof(factory_iids));
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_statics_factory_GetRuntimeClassName(IActivationFactory *iface,
         HSTRING *class_name)
 {
-    FIXME("iface %p, class_name %p stub!\n", iface, class_name);
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Foundation.PropertyValue";
+
+    return WindowsCreateString(name, ARRAY_SIZE(name) - 1, class_name);
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_statics_factory_GetTrustLevel(IActivationFactory *iface,
         TrustLevel *trust_level)
 {
-    FIXME("iface %p, trust_level %p stub!\n", iface, trust_level);
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_statics_factory_ActivateInstance(IActivationFactory *iface,

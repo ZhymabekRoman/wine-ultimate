@@ -17,6 +17,9 @@
  */
 
 #define COBJMACROS
+#include <stdarg.h>
+#include <string.h>
+
 #include <winstring.h>
 #include <objbase.h>
 #include <wine/debug.h>
@@ -49,6 +52,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
     *out = NULL;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IPropertySet ))
     {
         *out = iface;
@@ -96,20 +100,37 @@ static ULONG STDMETHODCALLTYPE propertyset_Release( IPropertySet *iface )
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "(%p, %p, %p) stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID instance_iids[] =
+    {
+        IID_IPropertySet,
+        IID_IMap_HSTRING_IInspectable,
+        IID_IMapView_HSTRING_IInspectable,
+        IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
+        IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
+        IID_IObservableMap_HSTRING_IInspectable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
+
+    TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, instance_iids, sizeof(instance_iids) );
+    *iid_count = ARRAY_SIZE(instance_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetRuntimeClassName( IPropertySet *iface, HSTRING *class_name )
 {
-    FIXME( "(%p, %p) stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
+
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetTrustLevel( IPropertySet *iface, TrustLevel *trust_level )
 {
-    FIXME( "(%p, %p) stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static const IPropertySetVtbl propertyset_vtbl =
@@ -158,6 +179,8 @@ const static IObservableMap_HSTRING_IInspectableVtbl propertyset_IObservableMap_
 struct propertyset_factory
 {
     IActivationFactory IActivationFactory_iface;
+    IPropertySet IPropertySet_iface;
+    IObservableMap_HSTRING_IInspectable IObservableMap_HSTRING_IInspectable_iface;
     LONG ref;
 };
 
@@ -176,6 +199,24 @@ static HRESULT STDMETHODCALLTYPE factory_QueryInterface( IActivationFactory *ifa
         IsEqualGUID( &IID_IActivationFactory, iid ))
     {
         *out = iface;
+        IUnknown_AddRef( (IUnknown *)*out );
+        return S_OK;
+    }
+
+    /* Windows aggregates the class default interface and implemented interfaces
+     * on the factory object (CsWinRT probes the factory for the class interfaces). */
+    if (IsEqualGUID( &IID_IPropertySet, iid ))
+    {
+        struct propertyset_factory *impl = impl_from_IActivationFactory( iface );
+        *out = &impl->IPropertySet_iface;
+        IUnknown_AddRef( (IUnknown *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( &IID_IObservableMap_HSTRING_IInspectable, iid ))
+    {
+        struct propertyset_factory *impl = impl_from_IActivationFactory( iface );
+        *out = &impl->IObservableMap_HSTRING_IInspectable_iface;
         IUnknown_AddRef( (IUnknown *)*out );
         return S_OK;
     }
@@ -200,20 +241,34 @@ static ULONG STDMETHODCALLTYPE factory_Release( IActivationFactory *iface )
 
 static HRESULT STDMETHODCALLTYPE factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "(%p, %p, %p) stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IPropertySet,
+        IID_IObservableMap_HSTRING_IInspectable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "(%p, %p) stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
+
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
 }
 
 static HRESULT STDMETHODCALLTYPE factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "(%p, %p) stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -264,9 +319,59 @@ static const IActivationFactoryVtbl propertyset_factory_vtbl =
     factory_ActivateInstance,
 };
 
+/*
+ * Windows aggregates the class default interface (the IPropertySet marker) and
+ * its implemented interfaces on the factory object: QI for those IIDs on the
+ * factory succeeds (CsWinRT probes the factory for the class interfaces). The
+ * factory is not an instance; instance method calls fail.
+ */
+DEFINE_IINSPECTABLE_( propertyset_factory_def, IPropertySet, struct propertyset_factory,
+                      impl_from_IPropertySet_propertyset_factory, IPropertySet_iface,
+                      &impl->IActivationFactory_iface )
+
+static const IPropertySetVtbl propertyset_factory_def_vtbl =
+{
+    propertyset_factory_def_QueryInterface,
+    propertyset_factory_def_AddRef,
+    propertyset_factory_def_Release,
+    propertyset_factory_def_GetIids,
+    propertyset_factory_def_GetRuntimeClassName,
+    propertyset_factory_def_GetTrustLevel,
+};
+
+DEFINE_IINSPECTABLE_( propertyset_factory_obsm, IObservableMap_HSTRING_IInspectable, struct propertyset_factory,
+                      impl_from_IObservableMap_HSTRING_IInspectable_propertyset_factory,
+                      IObservableMap_HSTRING_IInspectable_iface, &impl->IActivationFactory_iface )
+
+static HRESULT STDMETHODCALLTYPE propertyset_factory_obsm_add_MapChanged( IObservableMap_HSTRING_IInspectable *iface,
+        IMapChangedEventHandler_HSTRING_IInspectable *handler, EventRegistrationToken *token )
+{
+    return E_FAIL;
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_factory_obsm_remove_MapChanged( IObservableMap_HSTRING_IInspectable *iface,
+        EventRegistrationToken token )
+{
+    return E_FAIL;
+}
+
+static const IObservableMap_HSTRING_IInspectableVtbl propertyset_factory_obsm_vtbl =
+{
+    propertyset_factory_obsm_QueryInterface,
+    propertyset_factory_obsm_AddRef,
+    propertyset_factory_obsm_Release,
+    propertyset_factory_obsm_GetIids,
+    propertyset_factory_obsm_GetRuntimeClassName,
+    propertyset_factory_obsm_GetTrustLevel,
+    propertyset_factory_obsm_add_MapChanged,
+    propertyset_factory_obsm_remove_MapChanged,
+};
+
 static struct propertyset_factory propertyset_factory =
 {
     {&propertyset_factory_vtbl},
+    {&propertyset_factory_def_vtbl},
+    {&propertyset_factory_obsm_vtbl},
     1
 };
 
