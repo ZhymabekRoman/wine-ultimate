@@ -170,6 +170,12 @@ struct alpc_port
                                       * connection, so wake notifications of the
                                       * owner must fire too, or NULL */
     client_ptr_t        port_context;/* server side: context passed to accept */
+    /* request id of the last request slurped on this connection (tracked on
+     * the client-side connection port, shared with its reserve handle): the
+     * kernel answers a REPLY-flag send that carries no message id by the
+     * connection's outstanding request, stamping the reply's PORT_MESSAGE
+     * with that id so the sender's armed receive takes it. */
+    unsigned int        outstanding_id;
     unsigned int        client_pid;  /* thread that created the port: a wake packet
                                       * associated with no receive in flight binds to
                                       * the newest port of its own thread, which is
@@ -190,13 +196,32 @@ static struct list alpc_port_list = LIST_INIT(alpc_port_list);
  * owns this field: a reply to a pending request is LPC_REPLY, a message the
  * server originates in the reverse direction is LPC_NEW_MESSAGE (delivered to
  * the client's reverse/receive port, never to a request's reply slot). */
-#define ALPC_LPC_REPLY        0x02
+#define ALPC_LPC_REQUEST      0
+#define ALPC_LPC_REPLY        1
 #define ALPC_LPC_NEW_MESSAGE  0x10
+
+/* Field offsets inside the sender's PORT_MESSAGE carried as message user data.
+ * The client's ALPC_PORT_MESSAGE is { DataLength/TotalLength u32, Type/
+ * DataInfoOffset u32, ClientId (two client pointers), MessageId u32,
+ * ClientViewSize union }, so Type sits at +4, the ClientId begins at
+ * 2 * pointer (its natural alignment), the MessageId follows the ClientId at
+ * 4 * pointer and the header ends at 6 * pointer.  Reading the MessageId at
+ * the 32-bit position on x64 picks up the low half of the (sender-zeroed)
+ * ClientId and every reply correlates to message id 0, which strands it: a
+ * receive armed for its request's id never takes the reply and the
+ * conversation deadlocks. */
+#define ALPC_USER_TYPE_OFF   4
+#define ALPC_USER_MSGID_OFF  (4 * sizeof(client_ptr_t))
+#define ALPC_USER_HDR_SIZE   (6 * sizeof(client_ptr_t))
 
 /* ---- Forward declarations ---- */
 
 static int relay_trace_on;
 static int relay_trace_enabled( void );
+struct alpc_pending_conn;
+static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port,
+                                                   struct alpc_pending_conn *found,
+                                                   client_ptr_t port_context );
 
 static void alpc_port_dump( struct object *obj, int verbose );
 static struct fd *alpc_port_get_fd( struct object *obj );
@@ -380,6 +405,21 @@ static struct alpc_port *alpc_port_pair( struct alpc_port *port )
     return port->reverse ? port->reverse : port->owner;
 }
 
+/* The client-side connection port of the connection this port belongs to:
+ * the connection port itself (it is registered on a listening port), its
+ * reserve handle (owned by the connection port), and, reached from the
+ * server side, the peer connection port.  The connection's outstanding
+ * request id is tracked here so the connection port and its reserve handle
+ * share one reply correlation, as they share one message queue. */
+static struct alpc_port *alpc_conn_base( struct alpc_port *port )
+{
+    if (port->owner) return port->owner;         /* reserve handle: its connection */
+    if (port->is_server) return NULL;            /* listening port: no single connection */
+    if (port->listen_port) return port;          /* client-side connection port */
+    if (port->peer) return alpc_conn_base( port->peer ); /* server side: -> client side */
+    return NULL;
+}
+
 /* Fire the wake completion packets of every handle of the connection this port
  * belongs to: the connection port, the reserve (reverse) handle of the same
  * connection, and, reached from a reserve handle, its owning connection. */
@@ -481,6 +521,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     struct iosb *iosb;
     unsigned int reply_id = 0;
     unsigned int msg_type = 0;  /* LPC type to stamp into the delivered PORT_MESSAGE, 0 = keep */
+    int reply_stamped = 0;      /* the kernel filled the reply's message id */
 
     iosb = async_get_iosb( async );
     if (!iosb->in_data || !iosb->in_size)
@@ -503,17 +544,82 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         struct alpc_port *conn;
         const void *data = iosb->in_data;
         data_size_t size = iosb->in_size;
+        struct alpc_msg_attr_hdr attr;
+        unsigned short utype = 0;
 
+        memset( &attr, 0, sizeof(attr) );
         if (size >= sizeof(struct alpc_msg_attr_hdr) && *(const unsigned int *)data == ALPC_ATTR_HDR_MAGIC)
         {
+            memcpy( &attr, data, sizeof(attr) );
             data = (const char *)data + sizeof(struct alpc_msg_attr_hdr);
             size -= sizeof(struct alpc_msg_attr_hdr);
         }
-        if (size >= 0x1c)
-            reply_id = *(const unsigned int *)((const char *)data + 0x18);
+        if (size >= ALPC_USER_MSGID_OFF + 4)
+            reply_id = *(const unsigned int *)((const char *)data + ALPC_USER_MSGID_OFF);
+        if (size >= ALPC_USER_TYPE_OFF + 2)
+            utype = *(const unsigned short *)((const char *)data + ALPC_USER_TYPE_OFF);
 
         peer = NULL;
-        if (reply_id)
+        if (utype == ALPC_LPC_REPLY)
+        {
+            /* The LPC connect dance: a REPLY-flag message on the listening
+             * port answers a connection request the server slurped there.
+             * The kernel creates the connection, hands the reply's payload
+             * to the connecting client, and the server keeps no connection
+             * handle: its traffic rides the listening port. */
+            struct alpc_pending_conn *pc, *target = NULL;
+
+            LIST_FOR_EACH_ENTRY( pc, &port->pending_conns, struct alpc_pending_conn, entry )
+            {
+                if (reply_id && pc->msg_id != reply_id) continue;
+                target = pc;
+                break;  /* the oldest pending connect: the slurped request */
+            }
+            if (target)
+            {
+                if (size > ALPC_USER_HDR_SIZE
+                    && (target->conn_reply = malloc( size - ALPC_USER_HDR_SIZE )))
+                {
+                    memcpy( target->conn_reply, (const char *)data + ALPC_USER_HDR_SIZE,
+                            size - ALPC_USER_HDR_SIZE );
+                    target->conn_reply_size = size - ALPC_USER_HDR_SIZE;
+                }
+                list_remove( &target->entry );
+                if (complete_alpc_connection( port, target, attr.msg_context ))
+                {
+                    async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
+                    release_object( iosb );
+                    return;
+                }
+                set_error( STATUS_NO_MEMORY );
+                async_request_complete( async, STATUS_NO_MEMORY, 0, 0, NULL );
+                release_object( iosb );
+                return;
+            }
+            /* a reply with no echoed id answers the connection's outstanding
+             * (slurped) request: find the armed receiver for that id */
+            if (!reply_id)
+            {
+                LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+                {
+                    struct async *matching;
+
+                    if (!conn->outstanding_id) continue;
+                    matching = find_reply_alpc_async( &conn->read_q, conn->outstanding_id );
+                    if (matching)
+                    {
+                        release_object( matching );
+                        reply_id = conn->outstanding_id;
+                        conn->outstanding_id = 0;
+                        peer = conn;
+                        msg_type = ALPC_LPC_REPLY;
+                        reply_stamped = 1;
+                        break;
+                    }
+                }
+            }
+        }
+        if (!peer && reply_id)
         {
             LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
             {
@@ -658,12 +764,29 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             msg->handle_obj  = grabbed_obj;
         }
         msg->msg_id = reply_id;
-        if (!msg->msg_id)
+        if (!msg->msg_id && user_size >= ALPC_USER_MSGID_OFF + 4)
         {
-            if (user_size >= 0x1c)
-                msg->msg_id = *(const unsigned int *)((const char *)user_data + 0x18);
-            else
-                msg->msg_id = 0;
+            unsigned int mid = *(const unsigned int *)((const char *)user_data + ALPC_USER_MSGID_OFF);
+            unsigned short mtype = *(const unsigned short *)((const char *)user_data + ALPC_USER_TYPE_OFF);
+            struct alpc_port *base = alpc_conn_base( port );
+
+            if (mtype == ALPC_LPC_REQUEST && mid)
+            {
+                /* a request slurped on this connection becomes its outstanding
+                 * request: the kernel serialises one per connection */
+                if (base) base->outstanding_id = mid;
+                msg->msg_id = mid;
+            }
+            else if (mtype == ALPC_LPC_REPLY && !mid && base && base->outstanding_id)
+            {
+                /* a REPLY-flag send with no id answers the outstanding request
+                 * (LPC serialisation: slurp, process, commit): the kernel
+                 * stamps the reply with the request's id */
+                msg->msg_id = base->outstanding_id;
+                base->outstanding_id = 0;
+                reply_stamped = 1;  /* the delivered PORT_MESSAGE gets the id below */
+            }
+            else msg->msg_id = mid;
         }
         msg->data_size  = blob_size;
 
@@ -694,11 +817,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             if (user_size) memcpy( (char *)hdr + sizeof(*hdr) + sizeof(*blk), user_data, user_size );
         }
         else if (user_size) memcpy( hdr + 1, user_data, user_size );
-        if (!port->is_server && user_size >= 0x1c)
+        /* the kernel fills the reply's MessageId with the id of the request it
+         * answers: stamp the delivered copy so the receiver sees it too */
+        if (reply_stamped) *(unsigned int *)((char *)(hdr + 1) + ALPC_USER_MSGID_OFF) = msg->msg_id;
+        if (!port->is_server && user_size >= ALPC_USER_MSGID_OFF + 4)
         {
             /* a client write echoing a message id a server receive is armed for
              * is a reply: the kernel stamps it LPC_REPLY */
-            unsigned int mid = *(const unsigned int *)((const char *)user_data + 0x18);
+            unsigned int mid = msg->msg_id;
             struct async *m = mid ? find_reply_alpc_async( &peer->read_q, mid ) : NULL;
             if (m)
             {
@@ -706,7 +832,10 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 msg_type = ALPC_LPC_REPLY;
             }
         }
-        if (msg_type && user_size >= 8) *(unsigned int *)((char *)(hdr + 1) + 4) = msg_type;
+        /* the stamped type lands in the delivered PORT_MESSAGE's Type field
+         * (u16 at +4 in both the 32- and 64-bit layouts) */
+        if (msg_type && user_size >= ALPC_USER_TYPE_OFF + 2)
+            *(unsigned short *)((char *)(hdr + 1) + ALPC_USER_TYPE_OFF) = msg_type;
         if (relay_trace_enabled())
             fprintf( stderr, "ALPC relay from %x:%x port %p(%s) -> %p: msg_id %u lpc %u size %u dup %u\n",
                      hdr->client_pid, hdr->client_tid, (void *)port, port->is_server ? "srv" : "conn",
@@ -812,6 +941,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     port->reverse     = NULL;
     port->owner       = NULL;
     port->port_context = 0;
+    port->outstanding_id = 0;
     port->client_pid  = get_process_id( current->process );
     port->client_tid  = get_thread_id( current );
     list_init( &port->msg_queue );
@@ -909,6 +1039,7 @@ DECL_HANDLER(create_alpc_port)
         port->reverse     = NULL;
         port->owner       = NULL;
         port->port_context = 0;
+        port->outstanding_id = 0;
         port->client_pid  = get_process_id( current->process );
         port->client_tid  = get_thread_id( current );
         list_init( &port->msg_queue );
@@ -1061,6 +1192,104 @@ DECL_HANDLER(connect_alpc_port)
     release_object( server_port );
 }
 
+/* Complete an accepted connection: create the server-side endpoint, wire the
+ * peer links, route the client's writes to the listening port, and wake the
+ * blocked client with the server's connection reply message.
+ *
+ * The kernel accepts a connection through two doorways: the explicit
+ * NtAlpcAcceptConnectPort, and the LPC connect dance that the registrar and
+ * RPC-family servers use — the server slurps the connection request on the
+ * listening port and answers it with a REPLY-flag send on that port.  The
+ * reply's payload is the connection reply message, and the server never gets
+ * a connection handle: all its traffic rides the listening port and the
+ * kernel routes its replies by message id.  Both doorways end here.
+ *
+ * The found record is consumed.  Returns the created server-side port (with
+ * a reference for the caller) so the accept route can hand out a handle, or
+ * NULL on allocation failure. */
+static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port,
+                                                   struct alpc_pending_conn *found,
+                                                   client_ptr_t port_context )
+{
+    struct alpc_port *server_conn_port;
+
+    /* Create server-side connection endpoint and wire up the peer links */
+    if (!(server_conn_port = create_alpc_port_obj( 0 )))
+    {
+        if (found->client_async)
+        {
+            async_terminate( found->client_async, STATUS_NO_MEMORY );
+            release_object( found->client_async );
+            found->client_async = NULL;
+        }
+        release_object( found->client_port );
+        free( found->conn_data );
+        free( found->conn_reply );
+        free( found );
+        return NULL;
+    }
+
+    server_conn_port->peer  = (struct alpc_port *)grab_object( found->client_port );
+    found->client_port->peer = (struct alpc_port *)grab_object( server_conn_port );
+
+    /* The server receives all client messages on its listening port, so route
+     * the client side's writes there. The server side replies to the client. */
+    found->client_port->listen_port = (struct alpc_port *)grab_object( server_port );
+    server_conn_port->port_context  = port_context;
+    found->client_port->port_context = port_context;
+    /* track the connection on the listening port for reply routing */
+    list_add_tail( &server_port->connections, &found->client_port->conn_entry );
+
+    /* Wake blocked client, carrying the server's connection reply message to it.
+     * The kernel completes a connect with the server's reply message plus the
+     * attributes of the connection: the CONTEXT attribute (the connection port
+     * context the server passed to accept, the connect message id) and the
+     * RESERVE attribute (the reverse port).  Prefix a wine-internal wire header
+     * carrying that information so ntdll can fill the caller's message
+     * attributes exactly as the kernel would. */
+    if (found->client_async)
+    {
+        struct alpc_wire_hdr *whdr;
+        data_size_t total = sizeof(*whdr) + found->conn_reply_size;
+
+        if ((whdr = malloc( total )))
+        {
+            whdr->magic        = ALPC_WIRE_MAGIC;
+            whdr->type         = 10; /* LPC_CONNECTION_REQUEST reply */
+            whdr->msg_id       = found->msg_id;
+            whdr->client_pid   = get_process_id( current->process );
+            whdr->client_tid   = get_thread_id( current );
+            whdr->user_size    = found->conn_reply_size;
+            whdr->port_context = port_context;
+            whdr->attr_flags   = 0x20000000; /* ALPC_MESSAGE_CONTEXT_ATTRIBUTE */
+            whdr->view_flags   = 0;
+            whdr->view_base    = 0;
+            whdr->view_size    = 0;
+            whdr->msg_context  = 0;
+            whdr->sequence     = 0;
+            whdr->callback_id  = 0;
+            if (found->conn_reply_size)
+                memcpy( whdr + 1, found->conn_reply, found->conn_reply_size );
+            async_request_complete_alloc( found->client_async, STATUS_SUCCESS,
+                                          total, total, whdr );
+            free( whdr );
+        }
+        else if (found->conn_reply_size)
+            async_request_complete_alloc( found->client_async, STATUS_SUCCESS,
+                                          found->conn_reply_size, found->conn_reply_size,
+                                          found->conn_reply );
+        else async_request_complete( found->client_async, STATUS_SUCCESS, 0, 0, NULL );
+        release_object( found->client_async );
+        found->client_async = NULL;
+    }
+
+    release_object( found->client_port );
+    free( found->conn_data );
+    free( found->conn_reply );
+    free( found );
+    return server_conn_port;
+}
+
 DECL_HANDLER(accept_alpc_connection)
 {
     struct alpc_port *server_port;
@@ -1129,85 +1358,14 @@ DECL_HANDLER(accept_alpc_connection)
         return;
     }
 
-    /* Create server-side connection endpoint and wire up the peer links */
-    if (!(server_conn_port = create_alpc_port_obj( 0 )))
+    /* Create server-side connection endpoint, wire the peers, and wake the
+     * blocked client with the connection reply message. */
+    if ((server_conn_port = complete_alpc_connection( server_port, found, req->port_context )))
     {
-        if (found->client_async)
-        {
-            async_terminate( found->client_async, STATUS_NO_MEMORY );
-            release_object( found->client_async );
-        }
-        release_object( found->client_port );
-        free( found->conn_data );
-        free( found->conn_reply );
-        free( found );
-        release_object( server_port );
-        return;
+        reply->handle = alloc_handle( current->process, server_conn_port,
+                                      GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );
+        release_object( server_conn_port );
     }
-
-    server_conn_port->peer  = (struct alpc_port *)grab_object( found->client_port );
-    found->client_port->peer = (struct alpc_port *)grab_object( server_conn_port );
-
-    /* The server receives all client messages on its listening port, so route
-     * the client side's writes there. The server side replies to the client. */
-    found->client_port->listen_port = (struct alpc_port *)grab_object( server_port );
-    server_conn_port->port_context  = req->port_context;
-    found->client_port->port_context = req->port_context;
-    /* track the connection on the listening port for reply routing */
-    list_add_tail( &server_port->connections, &found->client_port->conn_entry );
-
-    reply->handle = alloc_handle( current->process, server_conn_port,
-                                   GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );
-    release_object( server_conn_port );
-
-    /* Wake blocked client, carrying the server's connection reply message to it.
-     * The kernel completes a connect with the server's reply message plus the
-     * attributes of the connection: the CONTEXT attribute (the connection port
-     * context the server passed to accept, the connect message id) and the
-     * RESERVE attribute (the reverse port).  Prefix a wine-internal wire header
-     * carrying that information so ntdll can fill the caller's message
-     * attributes exactly as the kernel would. */
-    if (found->client_async)
-    {
-        struct alpc_wire_hdr *whdr;
-        data_size_t total = sizeof(*whdr) + found->conn_reply_size;
-
-        if ((whdr = malloc( total )))
-        {
-            whdr->magic        = ALPC_WIRE_MAGIC;
-            whdr->type         = 10; /* LPC_CONNECTION_REQUEST reply */
-            whdr->msg_id       = found->msg_id;
-            whdr->client_pid   = get_process_id( current->process );
-            whdr->client_tid   = get_thread_id( current );
-            whdr->user_size    = found->conn_reply_size;
-            whdr->port_context = req->port_context;
-            whdr->attr_flags   = 0x20000000; /* ALPC_MESSAGE_CONTEXT_ATTRIBUTE */
-            whdr->view_flags   = 0;
-            whdr->view_base    = 0;
-            whdr->view_size    = 0;
-            whdr->msg_context  = 0;
-            whdr->sequence     = 0;
-            whdr->callback_id  = 0;
-            whdr->attr_flags   = 0x20000000; /* ALPC_MESSAGE_CONTEXT_ATTRIBUTE */
-            if (found->conn_reply_size)
-                memcpy( whdr + 1, found->conn_reply, found->conn_reply_size );
-            async_request_complete_alloc( found->client_async, STATUS_SUCCESS,
-                                          total, total, whdr );
-            free( whdr );
-        }
-        else if (found->conn_reply_size)
-            async_request_complete_alloc( found->client_async, STATUS_SUCCESS,
-                                          found->conn_reply_size, found->conn_reply_size,
-                                          found->conn_reply );
-        else async_request_complete( found->client_async, STATUS_SUCCESS, 0, 0, NULL );
-        release_object( found->client_async );
-        found->client_async = NULL;
-    }
-
-    release_object( found->client_port );
-    free( found->conn_data );
-    free( found->conn_reply );
-    free( found );
     release_object( server_port );
 }
 
