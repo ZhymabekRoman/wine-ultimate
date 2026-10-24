@@ -14,8 +14,7 @@
  * This file implements the builtin provider side:
  *   - a provider thread connects to the self-hosted registrar with the
  *     engine port context (24-byte connect message: engine GUID + context),
- *   - registers the thread (registrar client id) and the conversations the
- *     builtin serves,
+ *   - registers the thread (registrar client id),
  *   - runs the receive loop answering the requests the registrar routes to
  *     the provider (conversation joins, peer management, CoreUICall verb
  *     traffic) with synchronous replies.
@@ -34,18 +33,24 @@
  * dispatcher infrastructure initialises; it serves dispatcher-queue joins
  * for that conversation in-process.  A builtin registration of the same
  * name collides with the engine's own (the registrar answers it result 4,
- * already-registered), so the provider announces its thread only and
- * serves requests the registrar routes to it.  The join reply contract
+ * already-registered) and the engine's reply path fail-fasts when a client
+ * keeps more than one request outstanding, so the provider announces its
+ * thread only (one exchange in flight, like the engine's own self-host
+ * clients) and serves requests the registrar routes to it.  The join reply contract
  * implemented here mirrors the native reply sender
  * (RegistrarServerCaller::RegisterConversationClient -> CoreUICallSend):
  * [result, clientId, ConversationInfo(16), {serverId, u32}, peers(56 each),
  * peerCount] with the ExportEndpoint notification handle riding the
  * reply's ALPC handle attribute (kernel-duplicated into the requester).
- * Remaining gap after this point: XAML's own type activation
- * (Microsoft.UI.Xaml.Media.AcrylicBrush et al) answers E_NOINTERFACE,
- * which the XAML object writer turns into CErrorService::ReportParserError
- * notifications that OriginateError in Microsoft.ui.xaml.dll+0x7E4D83;
- * the window stays headless until that activation path resolves.
+ * The peer entry's RoutingInfo in the join reply carries the requester's
+ * own partition GUID (a zero GUID classifies the join cross-partition and
+ * the engine fail-fasts building the reverse connection port for it).
+ * Measured state (WhatsApp 2.2620): with this provider the app survives
+ * the registrar conversation — tray dispatch, VoIP/WebLifecycle/push
+ * subsystems run and the process lives past the 150 s gate.  XAML's own
+ * type activation (Microsoft.UI.Xaml.Media.AcrylicBrush et al,
+ * E_NOINTERFACE -> ReportParserError -> OriginateError) and the
+ * window/content-root build remain the next gap.
  *
  * Copyright 2026 Zhymabek Roman
  *
@@ -80,10 +85,26 @@ WINE_DEFAULT_DEBUG_CHANNEL(messaging);
 #define ALPC_SYNC_REQUEST       0x00020000  /* ALPC_MSGFLG_SYNC_REQUEST */
 #define ALPC_SEND_REPLY         0x00010000  /* ALPC_MSGFLG_REPLY_MESSAGE */
 
-/* Cn engine identifier: the registrar validates the 24-byte connect port
- * context against it (the engine GUID of the CoreMessaging implementation). */
+/* Cn engine identifier: the GUID of the CoreMessaging implementation, the
+ * value the engine's own clients carry in the connect port context (the
+ * provider carries the trailing 8 bytes of it, the part the engine's
+ * 64-bit connect message carries behind its kernel header). */
 static const GUID cn_engine_guid =
     { 0x29324ee4, 0xdc59, 0x49dc, { 0xa2, 0x3f, 0x8c, 0xa1, 0x1b, 0xef, 0x42, 0x27 } };
+
+/*
+ * Self-host context marker in the connect message.  The engine's registrar
+ * server echoes 0x20 at +8 of every connect reply payload (measured, it is
+ * the server's own self-host/connect flag value); presenting the same value
+ * in the connect port context marks the client as a self-host connection of
+ * this engine.  Without it the client is classified cross-partition:
+ * MessageSession::CreateConnection takes the
+ * CreateCrossPartitionReverseConnectionPort branch, which fail-fasts on
+ * Wine (Abandonment::Fail at CoreMessagingXP RVA 0xa399) because the
+ * reverse-port machinery there depends on kernel behaviour Wine does not
+ * emulate.  The provider is in-process, so it presents the marker.
+ */
+#define CN_SELFHOST_CONTEXT 0x20ull
 
 struct registrar_provider
 {
@@ -272,101 +293,6 @@ static BOOL registrar_register_thread( void )
 }
 
 /*
- * RegisterConversation: declare the "CoreUICore" conversation so the
- * registrar name lookup finds it when XAML dispatcher queues join.
- *
- * The self-hosted registrar server marshals the call frame strictly: the
- * receive host validates the TLV stream against the method signature
- * (RemoteRegistrarServerReceiveThunk::Thunk_RegisterConversation_164) and
- * answers any mismatch with an OnProtocolException notification carrying
- * protocol error 99 (MessageCallReceiveHost::NotifyProtocolViolation).  The
- * accepted signature is, in wire order:
- *      conversation name (UTF-16 string)
- *      server name       (UTF-16 string)
- *      ScopeID           16 bytes {kind, id, u64}   (kind 0 = local, id 0)
- *      ConversationInfo  16 bytes {0, itemOwner, serverStyle, connectionMode}
- *      RoutingInfo       24 bytes (must not be all-zero: RoutingInfo::Invalid)
- *      HIDENTITY         40 bytes (all-zero = local identity)
- * Validation (level 2, RegisteredObjectValidator): scope kind must be 0/1/2/3/5
- * (kind 0 with a non-zero id must equal the session id), the info fields must
- * be in range, and the routing must not be the all-zero Invalid value.
- */
-static BOOL registrar_register_conversation( void )
-{
-    static const WCHAR conversation_name[] = {'C','o','r','e','U','I','C','o','r','e',0};
-    static const WCHAR server_name[] = {'W','i','n','e','C','o','r','e','M','e','s','s','a','g','i','n','g',0};
-    ULONG reply_size = REGISTRAR_MESSAGE_SIZE;
-    char buffer[sizeof(ALPC_PORT_MESSAGE) + 512], reply[REGISTRAR_MESSAGE_SIZE];
-    char *frame = buffer + sizeof(ALPC_PORT_MESSAGE);
-    ALPC_PORT_MESSAGE *reply_msg = (void *)reply;
-    ULONG off;
-    ULONG scope[4] = {0};               /* ScopeID: kind 0 = local process, id 0 */
-    ULONG info[4] = {0};                /* ConversationInfo: core-owned, standard style, lazy */
-    ULONG routing[6] = {0};             /* RoutingInfo: client id of this registration */
-    BYTE identity[40] = {0};            /* HIDENTITY: local, empty */
-    NTSTATUS status;
-    char *item;
-
-    routing[1] = provider.client_id;
-
-    /* item: CoreUICall call frame verb 2 subid 14 */
-    item = frame + CN_ITEM_OFFSET;
-    frame_init( item, 0, 2, 14 );
-    off = FRAME_HEADER_SIZE;
-    off = frame_append_string( item, off, conversation_name );
-    off = frame_append_string( item, off, server_name );
-    off = frame_append_tlv( item, off, scope, sizeof(scope) );
-    off = frame_append_tlv( item, off, info, sizeof(info) );
-    off = frame_append_tlv( item, off, routing, sizeof(routing) );
-    off = frame_append_tlv( item, off, identity, sizeof(identity) );
-    *(ULONG *)item = off;
-
-    /* datagram envelope */
-    memset( frame, 0, CN_ITEM_OFFSET );
-    *(ULONG *)(frame + 16) = 2;
-    *(ULONGLONG *)(frame + 24) = CN_MAX_MSG;
-    *(ULONG *)(frame + 32) = off;           /* item size */
-    off += CN_ITEM_OFFSET;
-
-    status = registrar_send_request( frame, off, reply_msg, &reply_size );
-    if (status)
-    {
-        WARN( "RegisterConversation failed, status %#lx.\n", status );
-        return FALSE;
-    }
-    if (reply_size >= sizeof(*reply_msg) + CN_ITEM_OFFSET + 8)
-    {
-        const char *p = (const char *)reply_msg + sizeof(*reply_msg);
-        struct tlv_reader rr;
-        const void *data;
-        ULONG size;
-        ULONG result;
-
-        /* reply item at +40 is a bare TLV stream: [result, conversation id,
-         * server id (u64)] (Reply_RegisterConversation). */
-        rr.base = p + CN_ITEM_OFFSET;
-        rr.offset = 0;
-        if (tlv_read( &rr, &data, &size ) && size >= 4)
-        {
-            result = *(const ULONG *)data;
-            if (result)
-            {
-                WARN( "RegisterConversation rejected, result %#x.\n", result );
-                return FALSE;
-            }
-            if (tlv_read( &rr, &data, &size ) && size >= 4)
-                provider.conversation_id = *(const ULONG *)data;
-            TRACE( "registered conversation, id %u.\n", provider.conversation_id );
-            return TRUE;
-        }
-        WARN( "RegisterConversation reply not in TLV form.\n" );
-        return FALSE;
-    }
-    WARN( "RegisterConversation short reply %u bytes.\n", reply_size );
-    return FALSE;
-}
-
-/*
  * Reply to a routed request.  The context attributes echo the receive
  * message context so the kernel correlates the reply.  When 'handle' is
  * non-zero a handle attribute carrying it rides on the reply: the ALPC
@@ -487,11 +413,36 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
     struct peer_info peer;
     HANDLE reply_handle = NULL;
 
+    ULONG req_routing_guid[4] = {0};   /* requester's RoutingInfo partition GUID */
+    struct tlv_reader rq;
+    const void *pdata;
+    ULONG psz;
+
     if (size < CN_ITEM_OFFSET + FRAME_HEADER_SIZE) return;
+    if (itemsize > REGISTRAR_MESSAGE_SIZE - sizeof(ALPC_PORT_MESSAGE) - CN_ITEM_OFFSET)
+        itemsize = REGISTRAR_MESSAGE_SIZE - sizeof(ALPC_PORT_MESSAGE) - CN_ITEM_OFFSET;
     verb = *(const USHORT *)(item + 4);
     subid = *(const USHORT *)(item + 6);
     TRACE( "registrar routed request verb %u subid %u (item %u bytes): %s\n",
            verb, subid, itemsize, debugstr_frame( item, itemsize ) );
+
+    /* A join request carries the requester's RoutingInfo (24 bytes:
+     * {scope kind, id, partition GUID}).  The provider serves the
+     * conversation from the engine's own process, so the peers it reports
+     * live in the requester's partition: echo that partition GUID into the
+     * peer routing.  A zero GUID classifies the connection as
+     * cross-partition and the engine fails fast building a reverse
+     * connection port for it (MessageSession::CreateConnection). */
+    rq.offset = FRAME_HEADER_SIZE;
+    rq.base = item;
+    while (rq.offset < itemsize && tlv_read( &rq, &pdata, &psz ))
+    {
+        if (psz == 24)
+        {
+            memcpy( req_routing_guid, (const char *)pdata + 8, sizeof(req_routing_guid) );
+            break;
+        }
+    }
 
     /* verb 2 = request (correlated reply required); verb 0 = notification;
      * verb 3 = reply to our own outstanding request (handled by the sender) */
@@ -525,6 +476,10 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
             memset( &peer, 0, sizeof(peer) );
             peer.routing[0] = 0;                  /* scope kind: local */
             peer.routing[1] = provider.client_id; /* server routing = this registration */
+            peer.routing[2] = req_routing_guid[0]; /* partition GUID: the requester's own */
+            peer.routing[3] = req_routing_guid[1];
+            peer.routing[4] = req_routing_guid[2];
+            peer.routing[5] = req_routing_guid[3];
             peer.endpoint = 1;                    /* conversation server endpoint */
             peer.server_id = provider.conversation_id;
             peer.client_id = provider.client_id;
@@ -575,8 +530,12 @@ static DWORD WINAPI provider_thread( void *param )
     connect_msg = (void *)connect_buf;
     connect_msg->DataLength = 24;
     connect_msg->TotalLength = 24 + sizeof(*connect_msg);
-    /* 24-byte port context: engine GUID + zero context value */
-    memcpy( connect_buf + sizeof(*connect_msg), &cn_engine_guid, sizeof(GUID) );
+    /* 24-byte port context: the Cn engine GUID tail + self-host context
+     * marker (see cn_engine_guid / CN_SELFHOST_CONTEXT).  This matches the
+     * bytes the engine's own in-process clients' connect message carries
+     * behind the kernel header. */
+    memcpy( connect_buf + sizeof(*connect_msg), (const char *)&cn_engine_guid + 8, 8 );
+    *(ULONGLONG *)(connect_buf + sizeof(*connect_msg) + 8) = CN_SELFHOST_CONTEXT;
 
     /* The registrar is created by the CoreUI engine when the app
      * initialises its dispatcher infrastructure, after this DLL is
@@ -617,9 +576,13 @@ static DWORD WINAPI provider_thread( void *param )
      * conversation itself when its dispatcher infrastructure initialises, and
      * serves joins for it in-process.  A builtin registration of the same
      * name collides (RegisterConversation answers result 4 - already
-     * registered - to the engine's own registration) and XAML fail-fasts, so
-     * the provider only announces its thread and serves what the registrar
-     * routes to it. */
+     * registered - to the engine's own registration), so the provider only
+     * announces its thread and serves what the registrar routes to it.
+     * (The provider deliberately sends no second request while the engine
+     * may still be replying to RegisterThread: the engine's AlpcConnection
+     * reply path fail-fasts when it replies with more than one request
+     * buffer outstanding, and the in-process self-host keeps exactly one
+     * exchange in flight per connection.) */
     if (registrar_register_thread())
     {
         struct
