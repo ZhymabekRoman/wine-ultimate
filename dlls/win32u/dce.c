@@ -1840,8 +1840,16 @@ BOOL WINAPI NtUserRedrawWindow( HWND hwnd, const RECT *rect, HRGN hrgn, UINT fla
         DWORD size;
         RGNDATA *data;
 
-        if (!(size = NtGdiGetRegionData( hrgn, 0, NULL ))) return FALSE;
-        if (!(data = malloc( size ))) return FALSE;
+        if (!(size = NtGdiGetRegionData( hrgn, 0, NULL )))
+        {
+            RtlSetLastWin32Error( ERROR_INVALID_HANDLE );
+            return FALSE;
+        }
+        if (!(data = malloc( size )))
+        {
+            RtlSetLastWin32Error( ERROR_NOT_ENOUGH_MEMORY );
+            return FALSE;
+        }
         NtGdiGetRegionData( hrgn, size, data );
         if (!data->rdh.nCount)  /* empty region -> use a single all-zero rectangle */
             ret = redraw_window_rects( hwnd, flags, &empty, 1 );
