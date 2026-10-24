@@ -990,3 +990,172 @@ cheap experiment: make the builtin provider connect **once** (no 25 ms retry loo
 three failed `NtAlpcConnectPort` attempts may create/destroy registrar client entries
 that the server then releases); (c) once the wall clears: `WebView2Loader` load →
 `msedgewebview2` spawn → mojo named pipes (session-id attributes now land).
+
+## The XAML desktop window is created; the wall is the WebView2 browser locator (2026-10-26)
+
+Window anatomy, from `+class` / `+combase` / `+file` / `+reg` traces on pristine binaries
+(tip `04609dd94`, `WINEDEBUG=-all,err+all,+class`):
+
+- WinUI3's window-class registration is intact and **is reached**. Microsoft.ui.xaml.dll
+  RVA `0x213c80` is the registration function: `GetClassInfoExW(hinst, L"WinUIDesktopWin32WindowClass")`
+  → zeroed `WNDCLASSEXW` (cbSize 0x50) → `LoadIconW(NULL, 0x7f00)` → `RegisterClassExW`
+  with `lpfnWndProc = Microsoft.ui.xaml+0x219440`; the caller at `0x213bf0` is the
+  `FindWindowExW(NULL, L"WinUIDesktopWin32WindowClass", …)` singleton probe. Those are the
+  only two xrefs of the class string (`0x180a72218`).
+- Measured in-app: `trace:class:GetClassInfoExW L"WinUIDesktopWin32WindowClass" … -> not found`,
+  `trace:class:NtUserRegisterClassExWOW name=L"WinUIDesktopWin32WindowClass" hinst=0x6ffffa800000
+  style=0x3 … atom=c03a wndproc=0x6ffffaa19440`, then
+  `NtUserCreateWindowEx created window 0x1006c class L"WinUIDesktopWin32WindowClass" name L"WinUI Desktop"`,
+  and the whole WinUI windowing/content/input stack: `ReunionWindowingCaptionControls`
+  (`ReunionCaptionControlsWindow`), `Microsoft.UI.Content.DesktopChildSiteBridge`,
+  `InputSiteWindowClass`, `InputNonClientPointerSource` (`Non Client Input Sink Window`),
+  `DcppUserAdapterWindowClass`, dcomp `DXGI device window`s, `MITMessageOnlyWindowClass`.
+  The earlier note "WinUIDesktopWin32WindowClass never registered" is superseded: it registers,
+  the window is created, and it is never shown (no `SWP_SHOWWINDOW` for that hwnd — the app
+  does not reach `Window.Activate()`).
+- The wall behind the window is a .NET `FileNotFoundException` that the app turns into a
+  fail-fast every ~4 s: `trace:combase:RoOriginateLanguageException error 0x80070002,
+  message L"Unable to find the specified file."` right after the app activates
+  `Microsoft.UI.Xaml.Controls.WebView2` plus `Microsoft.Web.WebView2.Core.CoreWebView2Environment{,Options}`
+  and starts building its `HybridDialog…UnexpectedError…` UI
+  (`resource_loader_GetString L"HybridDialogRestartButton"` …). 33 fail-fasts
+  (`RaiseFailFastException code=e0464645`) per 150 s, 3 startup cycles, app exits `rc=69`,
+  `sadRecord.dat` keeps `[2.2620.102] VisibleWindow > VoipInitCtor+…`, screenshot blank.
+- Cause, from the `+reg` probe trace: the WebView2 browser locator opens
+  `…\Microsoft\EdgeUpdate\ClientState\{BE59E8FD-089A-411B-A3B0-051D9E417818}`
+  (the **stable Edge** client GUID) under HKLM, WOW6432Node and HKCU. Only the WebView2
+  runtime GUIDs `{F3017226-…}`/`{56EB18F8-…}` were registered, so the open fails and the
+  locator reports `ERROR_FILE_NOT_FOUND`.
+
+### Env-prep: stable Edge client GUID (registry only, no binary patching)
+
+`wa-work/envprep_edge_stable.reg` (`wine regedit <file>`, then `wineserver -k`) registers
+`{BE59E8FD-089A-411B-A3B0-051D9E417818}` as `Clients` **and** `ClientState` under
+`HKLM\SOFTWARE\Microsoft\EdgeUpdate`, `HKLM\SOFTWARE\WOW6432Node\Microsoft\EdgeUpdate` and
+`HKCU\SOFTWARE\Microsoft\EdgeUpdate`, pointing at the already-deployed signed 157.0.4341.16
+tree (`msedge.exe`, `msedgewebview2.exe`, `EBWebView\x64\EmbeddedBrowserWebView.dll` all present):
+`pv`, `path`, `exe`/`exes`/`exepath`, `name`, `version`, `usagestats`, and — for the
+Edge client the value is a **data path**, not the `x64` architecture token that the WebView2
+runtime GUIDs use — `EBWebView="C:\Users\olge\AppData\Local\Microsoft\Edge\EBWebView"` plus
+`dr="…\Microsoft\Edge\BrowserMetrics"` (both directories created under the prefix). With
+`EBWebView="x64"` the locator opens the key successfully and then fails the value check,
+which re-produces the same `0x80070002` one layer deeper.
+
+Measured effect of the GUID registration alone (150 s, pristine binaries):
+`rc=124 ALIVE_150s`, `Fatal error=0`, `RaiseFailFastException=0`, `e0464645=0`
+(was `rc=69`, 33 fail-fasts), `RoOriginateLanguageException … 80070002 = 0` (was 2), and the
+`EdgeUpdate` probes stop. The app no longer crash-loops; it now idles **before** creating the
+XAML window, which exposes the next wall.
+
+### Env-prep: the app's own ActivatableClassIds (registry only)
+
+The app's manifest declares 113 activation classes with **no module attribute**
+(`<ActivatableClass ActivatableClassId="WhatsAppNative.Voip.VoipFactory" ThreadingModel="both"/>`),
+and the framework generator regenerates
+`HKLM\SOFTWARE\Microsoft\WindowsRuntime\ActivatableClassId` from the framework union only, so
+every app-declared class is unregistered: combase answers
+`0x80040111` for `WhatsAppNative.Voip.VoipFactory`, `WhatsAppNative.Sqlite`,
+`WhatsAppNative.MiscCpp`. `wa-work/tools/mk_app_activatable_reg.py` derives the implementing
+module from the binaries (module exports `DllGetActivationFactory` **and** carries the class id
+as UTF-8/UTF-16; the hit set is unique for all 112 emitted ids) and emits
+`DllPath`/`TrustLevel`: `WhatsAppNative.Voip.dll` 52 ids, `WinRTAdapter.dll` 40,
+`WhatsAppNative.dll` 20. Only
+`Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.Task` has no module on disk
+(not shipped by WindowsAppRuntime 1.6 in this prefix).
+
+With both registrations the app gets back to the XAML window (`WinUIDesktopWin32WindowClass`
++ caption/bridge/input windows created) and the WebView2 locator wall is the first failure
+again — i.e. the app-class registration is a strict advance, and the remaining gate is the
+browser locator / environment handshake.
+
+### Measured chain of gate runs (150 s each, pristine app binaries, tip `cf7736bca`)
+
+`wa-work/wa_gate.sh 150` = `WINEDEBUG=-all,err+all,+combase,+file,+reg,+loaddll,+exec,+named_pipe`
+plus a t=70 window/ps census and a screenshot:
+
+| # | env-prep state | rc | `RaiseFailFast` | `e0464645` | `80070002` originations | XAML window | `WebView2Loader` load | `msedgewebview2` | X11 app window |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 1 | tip only | `69` DIED | 33 | 3 | 2 | created (`WinUI Desktop`) | 0 | 0 | none |
+| 2 | + Edge stable GUID (`path`=version dir, `EBWebView=x64`) | `124` ALIVE_150s | **0** | **0** | **0** | not created (app idles earlier) | 0 | 0 | none |
+| 3 | + app `ActivatableClassId`s | `69` DIED | 33 | 3 | 2 | created | 0 | 0 | none |
+| 4 | + `EBWebView` = absolute data path (REG_SZ) | `69` DIED | 33 | 3 | 2 | created | 0 | 0 | none |
+| 5 | + `EBWebView`/`dr` as REG_EXPAND_SZ | `69` DIED | 33 | 3 | 2 | created | 0 | 0 | none |
+| 6 | + `path` = Application root, `EBWebView=x64`, `Application\EBWebView -> 157.0.4341.16\EBWebView` symlink | `69` DIED | 33 | 3 | 2 | created | 0 | 0 | none |
+
+The registry-only fixes move real distance (run 2: the fail-fast loop and the `0x80070002`
+disappear; run 3: the app reaches XAML window creation and the whole WinUI windowing stack
+appears), and they pin the remaining gate precisely:
+
+- In the last 400 traced calls before the exception the **only** registry value the app reads is
+  `EBWebView` — six reads over the three roots — and every one succeeds.
+- Across the whole 120 112-line run there is **not one** file probe mentioning
+  `EdgeWebView`, `EmbeddedBrowserWebView.dll` or `msedgewebview2.exe`, no `exec:` line at all,
+  and no `WebView2Loader.dll` load: the composition `<path>\EBWebView\x64\EmbeddedBrowserWebView.dll`
+  is never turned into a filesystem query. The `0x80070002` is produced by the managed locator
+  deciding "no usable runtime" from the registry data alone.
+- So the four registry-layout permutations (key present, value type, `path` root vs version dir,
+  `EBWebView` as arch token vs data path, symlink satisfying both compositions) all reproduce the
+  identical wall; the decision is inside the managed locator, not in the registry layout.
+
+Next gaps (ordered, with the exact place to cut):
+
+1. **The managed locator's decision** (`Microsoft.Web.WebView2.Core.dll`, 1.0.3485.44): the
+   strings `EBWebView\x64\EmbeddedBrowserWebView.dll`,
+   `Software\Microsoft\EdgeUpdate\ClientState\`,
+   `Software\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}` and
+   `WebView2: CoreWebView2Environment failed when trying to call into EmbeddedBrowserWebView.dll. hr=0x`
+   are in the assembly; the probe order measured is `Clients\{56EB18F8…}` → `EBWebView` on the
+   three roots → `ClientState\{BE59E8FD…}` → throw. Reading that IL (ilspycmd/dotnet-ildasm on the
+   single-file Core assembly) gives the exact value set the locator demands; a Wine-side
+   `+reg`-visible answer for `pv`/`path`/`EBWebView` on the right root is the fix. The app dir
+   already carries `Microsoft.Web.WebView2.Core.dll.i64` for the native side.
+2. **The window is created, never activated**: no `SWP_SHOWWINDOW`/`ShowWindow` for the
+   `WinUIDesktopWin32WindowClass` hwnd (`0x1006c`), so nothing maps on X11 — the only mapped
+   top-level for the process is Wine's per-process desktop window (`960x768+0+0`,
+   WM_CLASS `whatsapp.root.exe`). Screenshot verdict: **blank desktop** (295 B uniform at t=70/110).
+   `Window.Activate()` is gated behind the WebView2 environment, so 1 unblocks it.
+3. After the environment succeeds: `WebView2Loader.dll` load → `msedgewebview2.exe` spawn
+   (proven once, 2 processes for 135 s, with the SxS GUID layout) → `--mojo-named-platform-channel-pipe`
+   first-pipe counts + async `ConnectNamedPipe` + the session-id attributes (`3f84f522d`), then the
+   child tree (gpu/renderer/utility) and the handshake → `CreateCoreWebView2Controller` → `Navigate`.
+4. `Microsoft.Windows.ApplicationModel.Background.UniversalBGTask.Task` has no implementing module
+   on disk (not shipped by the WindowsAppRuntime 1.6 package in this prefix).
+5. Pre-existing kernel32 `ImpersonateNamedPipeClient` test pair (16 failures) — not on the
+   Chromium named-platform-channel path, worth closing for the pipe suite.
+
+Applied env-prep state, reproducible (registry + prefix files only; app binaries untouched,
+hashes re-verified after every run):
+
+```bash
+# 1. stable Edge client GUID (Clients + ClientState x HKLM / WOW6432Node / HKCU)
+wine regedit /home/olge/wa-work/envprep_edge_stable.reg
+# 2. the app package's own 112 activation classes
+python3 -I /home/olge/wa-work/tools/mk_app_activatable_reg.py
+wine regedit /home/olge/wa-work/envprep_app_activatable.reg
+# 3. the locator's composed layout
+mkdir -p "$WINEPREFIX/drive_c/users/olge/AppData/Local/Microsoft/Edge/EBWebView" \
+         "$WINEPREFIX/drive_c/users/olge/AppData/Local/Microsoft/Edge/BrowserMetrics"
+ln -sfn 157.0.4341.16/EBWebView \
+        "$WINEPREFIX/dosdevices/c:/Program Files (x86)/Microsoft/EdgeWebView/Application/EBWebView"
+wineserver -k   # flush the registry hives
+```
+
+### Verification with the full env-prep applied (app classes + Edge GUID + layout)
+
+| metric | value |
+| --- | --- |
+| `wa_verify150.sh` 150 s | `rc=69` (app exits itself), `Fatal error=0`, `c0000005=0`, `WebView2Loader=0`, `msedgewebview2=0`, X windows 256 (all `Default IME`/shell) |
+| `wa_shot_run.sh` 150 s | `rc=69`, `Fatal error=0`, app fail-fast lines 48, windows created 42, screenshot **295 B blank** at t=125 s, census: 253 `Default IME`, 2 `DXGI device window`, 1 `dxgi_test` — no app top-level |
+| `wa_battery.sh 8 60` | 7/8 `rc=69`, 1/8 `rc=124 ALIVE_60s`, `fatal=0` in all 8, `webview2loader=0`, `edge=0` (tip baseline was 8/8 `rc=69`, `fatal=0`) |
+| app binaries after all runs | `CoreMessagingXP 24da83be == .orig`, `dwmcorei 9353066e == .orig`, `Microsoft.ui.xaml 9a42e19d`, `WebView2Loader 4cd3ffd5`, `Microsoft.Web.WebView2.Core 799b8c69` — PRISTINE |
+
+Screenshot verdict: **blank** (uniform desktop, no browser, no QR). The XAML window is created
+inside Wine but never activated, so nothing maps; the only mapped top-level with
+WM_CLASS `whatsapp.root.exe` is Wine's per-process desktop window (`960x768+0+0`).
+
+Trade-off recorded: with the Edge GUID alone the app is quiet (`ALIVE_150s`, 0 fail-fasts) but
+idles before the XAML window; registering the app's own activation classes is the correct state
+(on a real install those classes exist) and moves the app to the real gate — XAML window
+created, WebView2 environment probe reached, `0x80070002` from the managed locator, fail-fast
+loop, `rc=69`. The battery metric is unchanged (7/8 `rc=69` + 1 alive vs 8/8 `rc=69`), so the
+advance costs no stability; it just exposes the gate that was previously hidden.
