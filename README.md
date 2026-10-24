@@ -905,3 +905,25 @@ crash (t≈140 s; battery-limiter at ~55 s) — symbolize the JIT frames (btsymb
 minidump; `DOTNET_DbgEnableMiniDump` env is ignored by this app); (2) the WebView2 `EBWebView` probe
 semantics above; (3) `msedgewebview2.exe` spawn + browser IPC (nothing spawned yet; the launcher stub
 + `EBWebView` per-client deploy is on disk, ready).
+
+### WebView2 SxS (Beta) client GUID registration — locator acceptance (2026-10-24)
+
+The app's single-file `Microsoft.Web.WebView2.Core.dll` locator probes BOTH EdgeUpdate
+client GUIDs (UTF-16 strings in the assembly):
+`{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}` (Evergreen stable) and
+`{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}` (SxS/Beta). The deployed MSIX
+`MicrosoftWebView2Runtime_157.0.4341.16_Beta.msix` is a **Beta** package — its keys
+must be registered under the **SxS GUID**, not only the stable one. Registration
+(`wine regedit /s`, then `wineserver -k` to flush; `pv` as REG_SZ, `dr` as hex(2)):
+
+- `HKLM\Software\Microsoft\EdgeUpdate\Clients\{56EB18F8-B008-4CBD-B6D2-8C97FE7E9062}`
+  pv=157.0.4341.16, path=C:\Program Files (x86)\Microsoft\EdgeWebView\Application\157.0.4341.16,
+  exe=<path>\msedgewebview2.exe, name="Microsoft Edge WebView2 - Beta", dr=%LOCALAPPDATA%\Microsoft\EdgeWebView\EBWebView, usagestats=1
+- `ClientState\{56EB18F8…}`: pv, path, EBWebView="x64" (locator checks <path>\EBWebView\x64\EmbeddedBrowserWebView.dll — present)
+- Same under `HKLM\Software\WOW6432Node\…` and `HKCU\…`.
+
+Measured effect: `msedgewebview2.exe` spawns (2 processes, alive through 135 s) for the
+first time; the `FileNotFoundException` locator FailFast is gone; app survives 135 s.
+Remaining walls: XAML window (WinUIDesktopWin32WindowClass) not mapped, no Navigate in
+applog, browser IPC handshake (msedgewebview2 child tree: gpu/renderer/utility + named
+pipes) not completed.
