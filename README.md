@@ -836,3 +836,72 @@ on this machine). (b) `IReference`1<T>` **boxing** closed pinterfaces are still 
 are .NET-side probes asked of every WinRT object (both present in the pristine `twinapi.appcore.dll`,
 so Windows answers them); `E_NOINTERFACE` is benign, no app-log noise. (d) `WinUIDesktopWin32WindowClass`
 registration: still not reached.
+
+## WebView2 Runtime deployment (env-prep, signed redistributable, zero binary patching)
+
+Runtime deployed into the prefix from Microsoft's signed redistributables (no app binaries touched;
+`CoreMessagingXP 24da83be`, `FrameworkUdk c6053f1a`, `Microsoft.ui.xaml 9a42e19d`, `dwmcorei 9353066e`
+re-verified byte-identical to `.orig` at the end of this session; no probe files in the app dir).
+
+Installer identity (both fetched over TLS from Microsoft; `linkid=2108954` in the task brief is stale —
+it 302s to bing):
+
+- Evergreen **offline** installer x64: `https://go.microsoft.com/fwlink/?linkid=2124701` →
+  `msedge.sf.dl.delivery.mp.microsoft.com/.../MicrosoftEdgeWebView2RuntimeInstallerX64.exe`,
+  214,823,632 bytes, sha256 `9b0142e22e8daa92855d746ae4d1e9eeef561ccaf67d1dd452165c4af3df3191`.
+  Authenticode: leaf `CN=Microsoft Corporation` (serial 33000002334EC248564C2B5C6F000000000233,
+  notBefore 2026-04-16), issuer `Microsoft Code Signing PCA 2024` (sha256 fp `3DADFAF8…142F8F`),
+  chain roots at `Microsoft Root Certificate Authority 2011`; leaf-over-intermediate signature
+  verified with `openssl verify -partial_chain` (rc 0); embedded SignedData digest
+  `C245F07F27DDDE24CD4B367282E9B59A37006DFFD3E5FB552E772823263752AD` (sha256). The 2011 root blob is
+  unreachable from this network (`www.microsoft.com/pki` blob deleted, `ctldl.windowsupdate.com`
+  blocked, `crl.microsoft.com` 404), so the chain is recorded, not rooted.
+- The offline installer self-extracts EdgeUpdate binaries to
+  `Program Files (x86)\Microsoft\Temp\EU759e.tmp` and stalls in its elevation/progress flow under
+  wine (540 s timeout, no msiexec, no `+exec` child) — not usable headless.
+- Deployed runtime instead: **MSIX** `https://go.microsoft.com/fwlink/?linkid=2124700` →
+  `MicrosoftWebView2Runtime_157.0.4341.16_Beta.msix`, 299,693,184 bytes (285.8 MiB), sha256
+  `bcd13a9e20ee315af02ce78e23b4e98a7fa216e0c785d5c2d0fc16abdc20e653` (Beta-channel 157.0.4341.16,
+  signed package). Unzipped (MSIX = zip) and file-deployed to
+  `C:\Program Files (x86)\Microsoft\EdgeWebView\Application\157.0.4341.16\` (72 entries, 662 MB,
+  `msedgewebview2.exe` launcher stub + `EBWebView\x64\EmbeddedBrowserWebView.dll` present) with the
+  version manifest at `…\Application\157.0.4341.16.manifest`.
+- Registry (wine `regedit /s` — plain `wine regedit FILE` silently no-ops, `/s` is required):
+  `pv=157.0.4341.16`, `path=…\Application`, `exe/name/dr/usagestats`, and `EBWebView` (REG_EXPAND_SZ,
+  hex(2); `str(2):` syntax is rejected) under
+  `HKLM\Software\Microsoft\EdgeUpdate\{Clients,ClientState}\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}`,
+  `HKLM\Software\WOW6432Node\…` same, `HKCU\Software\…` same.
+
+Outcome (150 s runs, tip `ea75cf587`):
+
+- The original `System.IO.FileNotFoundException 0x80070002` FailFast **at ~20 s is gone**; the app now
+  survives to **t≈140 s** and reaches the **XAML window-proc path**: the managed fail-fast backtrace
+  maps `Microsoft.ui.xaml.dll+0x1766e7 → user32 window proc → JIT managed frames → coreclr FailFast`
+  with 19 native frames inside **wine `d2d1.dll`** (fail-fast record addr `d2d1+0x2ea399`, nested
+  `e0434352`, FailFast reason word `0xc0000482` = type-load-unachievable) fired right after the
+  `HybridTrayIconContextMenu` string loads + tray context-menu window creation. A `0x8004002
+  "Specified cast is not valid."` origination (XAML thread) precedes it.
+- The WebView2 probe (combase origination pair `0x80070002` on the main thread, now at t≈148 s)
+  **persists**: `+reg` shows the app walking `EdgeUpdate\ClientState\{F3017226-…}` and reading the
+  `EBWebView` value successfully (4 views per iteration), but **no file I/O to the runtime folder
+  ever follows** (zero `msedgewebview2`/`EdgeWebView` opens on `+file`, zero `EmbeddedBrowserWebView`
+  `LoadLibrary`, zero `+exec`/process spawn; server-side file/exec traces emit nothing during runs —
+  `wineserver -f` logs only its exit object dump). Tried `EBWebView` = `…\Application`,
+  `…\Application\157.0.4341.16`, and `…\Application\157.0.4341.16\EBWebView` — the walk is
+  byte-identical each time. The .NET SDK's own file probes (`NtQueryFullAttributesFile`-style) are
+  invisible to the `+file` channel; the SDK consumes the `EBWebView` string and rejects it without
+  filesystem follow-up. The exact `EBWebView` value semantics the loader demands remain the open
+  question (next probe: instrument `WebView2Loader.dll` `CreateCoreWebView2EnvironmentWithOptions`
+  with btsymbol/breakpoints, and dump the managed `FileNotFoundException` via mscordac on a parked
+  crash — the app ships `mscordaccore.dll`/`mscordbi.dll`).
+- Numbers: `wa_wv2.sh` 150 s: `rc=69 DIED`, `e0464645×3`, `msedgewebview2` procs in `ps` = **0**,
+  `exec:` spawn lines = 0, named-pipe lines = 0, windows 216–238 (tray/IME class), XAML desktop
+  window **not mapped**; screenshot `wa-work/wa_webview_after.png` (t=125 s) **blank 295 B** (desktop
+  root only). Battery 8×60 s: **1/8 `rc=124` alive**, 7/8 `rc=69` (deterministic fail-fast at log
+  line 721 every run; baseline was 3/8), `webview2loader=0`, `edge=0`, `fatal=0`, `av=0`.
+
+Next gaps: (1) the **d2d1/type-load fail-fast in the XAML window-proc render path** is now the first
+crash (t≈140 s; battery-limiter at ~55 s) — symbolize the JIT frames (btsymbol + mscordac on a
+minidump; `DOTNET_DbgEnableMiniDump` env is ignored by this app); (2) the WebView2 `EBWebView` probe
+semantics above; (3) `msedgewebview2.exe` spawn + browser IPC (nothing spawned yet; the launcher stub
++ `EBWebView` per-client deploy is on disk, ready).
