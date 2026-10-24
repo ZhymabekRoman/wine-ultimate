@@ -536,11 +536,11 @@ BOOL WINAPI GetNamedPipeServerProcessId( HANDLE pipe, ULONG *id )
  */
 BOOL WINAPI GetNamedPipeClientSessionId( HANDLE pipe, ULONG *id )
 {
-    FIXME( "%p, %p\n", pipe, id );
+    IO_STATUS_BLOCK iosb;
 
-    if (!id) return FALSE;
-    *id = NtCurrentTeb()->Peb->SessionId;
-    return TRUE;
+    return set_ntstatus( NtFsControlFile( pipe, NULL, NULL, NULL, &iosb,
+                                          FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE, (void *)"ClientSessionId",
+                                          sizeof("ClientSessionId"), id, sizeof(*id) ));
 }
 
 /***********************************************************************
@@ -548,11 +548,11 @@ BOOL WINAPI GetNamedPipeClientSessionId( HANDLE pipe, ULONG *id )
  */
 BOOL WINAPI GetNamedPipeServerSessionId( HANDLE pipe, ULONG *id )
 {
-    FIXME( "%p, %p\n", pipe, id );
+    IO_STATUS_BLOCK iosb;
 
-    if (!id) return FALSE;
-    *id = NtCurrentTeb()->Peb->SessionId;
-    return TRUE;
+    return set_ntstatus( NtFsControlFile( pipe, NULL, NULL, NULL, &iosb,
+                                          FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE, (void *)"ServerSessionId",
+                                          sizeof("ServerSessionId"), id, sizeof(*id) ));
 }
 
 /***********************************************************************

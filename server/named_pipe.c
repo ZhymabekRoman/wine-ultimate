@@ -61,6 +61,8 @@ struct pipe_end
     struct pipe_end     *connection; /* the other end of the pipe */
     process_id_t         client_pid; /* process that created the client */
     process_id_t         server_pid; /* process that created the server */
+    unsigned int         client_session_id; /* session of the client process */
+    unsigned int         server_session_id; /* session of the server process */
     struct process      *client_proc; /* client process, used for impersonation */
     data_size_t          buffer_size;/* size of buffered data that doesn't block caller */
     struct list          message_queue;
@@ -1293,6 +1295,16 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
         value = &pipe_end->server_pid;
         value_size = sizeof(pipe_end->server_pid);
     }
+    else if (attr_size == sizeof("ClientSessionId") && !memcmp( attr, "ClientSessionId", attr_size ))
+    {
+        value = &pipe_end->client_session_id;
+        value_size = sizeof(pipe_end->client_session_id);
+    }
+    else if (attr_size == sizeof("ServerSessionId") && !memcmp( attr, "ServerSessionId", attr_size ))
+    {
+        value = &pipe_end->server_session_id;
+        value_size = sizeof(pipe_end->server_session_id);
+    }
     else
     {
         set_error( STATUS_ILLEGAL_FUNCTION );
@@ -1452,6 +1464,7 @@ static struct pipe_server *create_pipe_server( struct named_pipe *pipe, unsigned
     init_pipe_end( &server->pipe_end, pipe, pipe_flags, pipe->insize );
     server->pipe_end.state = FILE_PIPE_LISTENING_STATE;
     server->pipe_end.server_pid = get_process_id( current->process );
+    server->pipe_end.server_session_id = current->process->session_id;
     init_async_queue( &server->listen_q );
 
     list_add_tail( &pipe->listeners, &server->entry );
@@ -1477,6 +1490,7 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
+    client->client_session_id = current->process->session_id;
     client->client_proc = (struct process *)grab_object( current->process );
 
     client->fd = alloc_pseudo_fd( &pipe_client_fd_ops, &client->obj, options );
@@ -1534,8 +1548,10 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.connection = client;
         client->connection = &server->pipe_end;
         server->pipe_end.client_pid = client->client_pid;
+        server->pipe_end.client_session_id = client->client_session_id;
         server->pipe_end.client_proc = (struct process *)grab_object( client->client_proc );
         client->server_pid = server->pipe_end.server_pid;
+        client->server_session_id = server->pipe_end.server_session_id;
         list_remove( &server->entry );
     }
     return &client->obj;
