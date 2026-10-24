@@ -541,18 +541,41 @@ static DWORD WINAPI provider_thread( void *param )
     static const WCHAR prefix[] = {'\\','B','a','s','e','N','a','m','e','d','O','b','j','e','c','t','s',
                                    '\\','C','o','r','e','M','e','s','s','a','g','i','n','g','R','e','g','i','s','t','r','a','r','-',0};
     WCHAR name[128];
+    WCHAR guid_suffix[40];
     UNICODE_STRING string;
     ALPC_PORT_ATTRIBUTES port_attr;
     char connect_buf[sizeof(ALPC_PORT_MESSAGE) + 160];
     ALPC_PORT_MESSAGE *connect_msg = (void *)connect_buf;
     SIZE_T connect_size = sizeof(connect_buf);
     LARGE_INTEGER delay;
-    NTSTATUS status;
+    NTSTATUS status = STATUS_NOT_FOUND;
 
-    lstrcpyW( name, prefix );
-    wsprintfW( name + lstrlenW( name ), L"%u:00000000-0000-0000-0000-000000000000",
-               GetCurrentProcessId() );
-    RtlInitUnicodeString( &string, name );
+    /*
+     * The self-hosted registrar port name carries the partition GUID.
+     * Measured on the wire (server relay trace of the registrar's
+     * create-port request): the engine creates the registrar under
+     *      CoreMessagingRegistrar-<pid>:29324ee4-dc59-49dc-a23f-8ca11bef4227
+     * (the Cn engine GUID, the same value its clients carry in the connect
+     * port context) and, for the cross-partition view, under the
+     * all-zero partition name
+     *      CoreMessagingRegistrar-<pid>:00000000-0000-0000-0000-000000000000.
+     * Poll the engine-GUID name first and the zero-GUID name in the same
+     * attempt, so the provider binds whichever form the engine created.
+     *
+     * Measured: the engine's self-hosted registrar accepts only its own
+     * in-process partition clients (AlpcServerHost::AcceptConnection ->
+     * RemoteRegistrarServer::AcceptConnection keys on the partition and
+     * the connect-context object, and refuses a second connection with
+     * STATUS_CONNECTION_REFUSED).  The provider is therefore refused here
+     * on Wine today; the connect loop stops on the refusal.  The polling
+     * name/format is the genuine discovery from this pass; the accept
+     * gate is the remaining wall for the routed-provider path.
+     */
+    wsprintfW( guid_suffix, L"%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+               cn_engine_guid.Data1, cn_engine_guid.Data2, cn_engine_guid.Data3,
+               cn_engine_guid.Data4[0], cn_engine_guid.Data4[1], cn_engine_guid.Data4[2],
+               cn_engine_guid.Data4[3], cn_engine_guid.Data4[4], cn_engine_guid.Data4[5],
+               cn_engine_guid.Data4[6], cn_engine_guid.Data4[7] );
 
     memset( &port_attr, 0, sizeof(port_attr) );
     port_attr.MaxMessageLength = REGISTRAR_MESSAGE_SIZE;
@@ -572,34 +595,51 @@ static DWORD WINAPI provider_thread( void *param )
     memcpy( connect_buf + sizeof(*connect_msg), (const char *)&cn_engine_guid + 8, 8 );
     *(ULONGLONG *)(connect_buf + sizeof(*connect_msg) + 8) = CN_SELFHOST_CONTEXT;
 
-    /* The registrar is created by the CoreUI engine when the app
+    /*
+     * The registrar is created by the CoreUI engine when the app
      * initialises its dispatcher infrastructure, after this DLL is
      * loaded; poll for it to appear.  The port lookup of a not-yet-created
      * registrar is a pure miss on the server (it leaves no connection
      * record behind), so the connect cost is the polling itself: back off
      * from a short interval to a long one so the thread covers the engine's
      * variable startup window with a bounded number of attempts instead of
-     * a fixed high-frequency spin. */
+     * a fixed high-frequency spin.  A refused connection (the self-host
+     * gate) is final, so stop on it rather than spinning.
+     */
     {
+        static const WCHAR zero_suffix[] = L"00000000-0000-0000-0000-000000000000";
+        const WCHAR *suffixes[] = { guid_suffix, zero_suffix };
         static const ULONG delays_ms[] = { 25, 50, 100, 250, 500 };
         ULONG attempt = 0;
 
         /* the ramped delays sum to ~925 ms; the trailing 500 ms polls
          * cover a further ~9 s, matching the old fixed 400x25 ms window
-         * with a fraction of the connect traffic */
+         * with a fraction of the connect traffic; every attempt tries
+         * both partition-GUID forms of the registrar name */
         while (provider.running && attempt < ARRAYSIZE(delays_ms) + 18)
         {
-            connect_size = sizeof(connect_buf);
-            status = NtAlpcConnectPort( &provider.connection, &string, NULL, &port_attr,
-                                        ALPC_SYNC_REQUEST, NULL, connect_msg, &connect_size,
-                                        NULL, NULL, NULL );
-            if (!status) break;
+            unsigned int i;
+
+            for (i = 0; i < ARRAYSIZE(suffixes); i++)
+            {
+                lstrcpyW( name, prefix );
+                wsprintfW( name + lstrlenW( name ), L"%u:%s", GetCurrentProcessId(), suffixes[i] );
+                RtlInitUnicodeString( &string, name );
+                connect_size = sizeof(connect_buf);
+                status = NtAlpcConnectPort( &provider.connection, &string, NULL, &port_attr,
+                                            ALPC_SYNC_REQUEST, NULL, connect_msg, &connect_size,
+                                            NULL, NULL, NULL );
+                if (!status) break;
+                if (status == STATUS_CONNECTION_REFUSED) break;   /* self-host gate: final */
+            }
+            if (!status || status == STATUS_CONNECTION_REFUSED) break;
             delay.QuadPart = -(LONGLONG)delays_ms[attempt < ARRAYSIZE(delays_ms) ? attempt
                                                                                    : ARRAYSIZE(delays_ms) - 1] * 10000;
             NtDelayExecution( FALSE, &delay );
             attempt++;
         }
     }
+    TRACE( "registrar connect status %#lx.\n", status );
     if (status)
     {
         return 0;

@@ -1395,6 +1395,41 @@ static int relay_trace_enabled( void )
     return relay_trace_on;
 }
 
+/* dump the (null-terminated) object name carried by a port request.
+ * The server stores names as UTF-16; the C library's %ls expects
+ * wchar_t, so transcode the (ASCII) object names by hand. */
+static void trace_port_name( const char *tag, const struct unicode_str *name )
+{
+    char buffer[192];
+    unsigned int i, o = 0;
+
+    if (!relay_trace_enabled()) return;
+    for (i = 0; i < name->len / sizeof(WCHAR) && o < sizeof(buffer) - 3; i++)
+        buffer[o++] = (name->str[i] < 0x20 || name->str[i] > 0x7e) ? '?' : (char)name->str[i];
+    buffer[o++] = '\n';
+    buffer[o] = 0;
+    fprintf( stderr, "ALPC relay %s port name: %s", tag, buffer );
+}
+
+static void trace_connect_data( const struct alpc_pending_conn *pc )
+{
+    static const char hex[] = "0123456789abcdef";
+    const unsigned char *p = (const unsigned char *)pc->conn_data;
+    char buffer[3 * 40 + 1];
+    unsigned int i, o = 0;
+    unsigned int n = pc->conn_data_size < 40 ? pc->conn_data_size : 40;
+
+    if (!relay_trace_enabled()) return;
+    for (i = 0; i < n; i++)
+    {
+        buffer[o++] = hex[p[i] >> 4];
+        buffer[o++] = hex[p[i] & 15];
+    }
+    buffer[o] = 0;
+    fprintf( stderr, "ALPC relay CONNECT-data id %u size %u: %s\n",
+             pc->msg_id, pc->conn_data_size, buffer );
+}
+
 DECL_HANDLER(create_alpc_port)
 {
     struct alpc_port *port;
@@ -1405,6 +1440,7 @@ DECL_HANDLER(create_alpc_port)
 
     if (!objattr) return;
 
+    trace_port_name( "create", &name );
     port = create_named_object( root, &alpc_port_ops, &name, objattr->attributes | OBJ_OPENIF, sd );
     if (root) release_object( root );
     if (!port) return;
@@ -1453,6 +1489,7 @@ DECL_HANDLER(connect_alpc_port)
 
     if (!objattr) return;
 
+    trace_port_name( "connect", &name );
     /* Look up the named server port */
     server_port = (struct alpc_port *)open_named_object(
                         root, &alpc_port_ops, &name, objattr->attributes );
@@ -1521,7 +1558,11 @@ DECL_HANDLER(connect_alpc_port)
 
     /* Queue connect notification to server port */
     if (relay_trace_enabled())
-        fprintf( stderr, "ALPC relay CONNECT-req port %p id %u\n", (void *)server_port, req->msg_id );
+    {
+        fprintf( stderr, "ALPC relay CONNECT-req port %p id %u tid %x\n",
+                 (void *)server_port, req->msg_id, pc->client_tid );
+        trace_connect_data( pc );
+    }
     list_add_tail( &server_port->pending_conns, &pc->entry );
     if (!queue_connect_notification( server_port, pc ))
     {
