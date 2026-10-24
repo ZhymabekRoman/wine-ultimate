@@ -83,6 +83,8 @@
 
 #include "wine/debug.h"
 
+#include "private.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(messaging);
 
 #define REGISTRAR_MESSAGE_SIZE  0x1000
@@ -286,7 +288,6 @@ static BOOL registrar_register_thread( void )
             if (tlv_read( &rr, &data, &size ) && size >= 4)
             {
                 provider.client_id = *(const ULONG *)data;
-                TRACE( "registered with registrar, client id %u.\n", provider.client_id );
                 return TRUE;
             }
         }
@@ -475,18 +476,27 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
     {
         case 17:   /* RegisterConversationClient (join) */
         case 18:   /* RegisterPendingConversationClientForServer */
+        {
+            /* The conversation server is the in-process CoreUICore provider
+             * object.  The requester treats the peer entry's server routing
+             * and server id as the object pointer it binds to (self-host:
+             * provider and requester share the process).  Stamping the
+             * registrar client id there hands the requester an integer it
+             * dereferences as a vtable (measured: XAML Application.Start
+             * read [client-id] and died as an AccessViolationException). */
+            void *object = core_ui_provider_object();
             client_id = InterlockedIncrement( &provider.next_client_id );
-            server_block.server_id = provider.conversation_id;
+            server_block.server_id = (ULONGLONG)(UINT_PTR)object;
             server_block.extra = 0;
             memset( &peer, 0, sizeof(peer) );
             peer.routing[0] = 0;                  /* scope kind: local */
-            peer.routing[1] = provider.client_id; /* server routing = this registration */
+            peer.routing[1] = (ULONGLONG)(UINT_PTR)object; /* server routing = in-proc object */
             peer.routing[2] = req_routing_guid[0]; /* partition GUID: the requester's own */
             peer.routing[3] = req_routing_guid[1];
             peer.routing[4] = req_routing_guid[2];
             peer.routing[5] = req_routing_guid[3];
             peer.endpoint = 1;                    /* conversation server endpoint */
-            peer.server_id = provider.conversation_id;
+            peer.server_id = (ULONGLONG)(UINT_PTR)object;
             peer.client_id = provider.client_id;
             peer_count = 1;
             off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &client_id, sizeof(client_id) );
@@ -496,6 +506,26 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
             off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &peer_count, sizeof(peer_count) );
             reply_handle = provider.endpoint_event;
             break;
+        }
+        case 36:   /* CoreUICall verb relayed to the conversation server: the
+                    * reply carries the CoreUICore provider object the requester
+                    * binds to, as the third TLV of the bare reply stream
+                    * (measured against the requester's unmarshalling walk).
+                    * A bare [result] leaves the requester's object slot at its
+                    * stale initial value, which it then dereferences as a
+                    * vtable pointer; hand back the real provider object.
+                    * Interfaces it does not implement answer E_NOINTERFACE
+                    * from its own QueryInterface. */
+        {
+            void *object = core_ui_provider_object();
+            ULONGLONG zero = 0, extra = 0;
+
+            if (!object) { WARN( "no CoreUICore provider object.\n" ); break; }
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &zero, sizeof(zero) );
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &object, sizeof(object) );
+            off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &extra, sizeof(extra) );
+            break;
+        }
         default:
             break;
     }
@@ -572,10 +602,8 @@ static DWORD WINAPI provider_thread( void *param )
     }
     if (status)
     {
-        TRACE( "registrar %s not present, status %#lx.\n", debugstr_w( name ), status );
         return 0;
     }
-    TRACE( "connected to registrar %s.\n", debugstr_w( name ) );
 
     /* Self-host: the CoreUI engine of the app registers the "CoreUICore"
      * conversation itself when its dispatcher infrastructure initialises, and

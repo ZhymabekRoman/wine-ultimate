@@ -42,6 +42,8 @@
 
 HRESULT async_action_create( IUnknown *invoker, async_operation_callback callback, IAsyncAction **out );
 
+void *core_ui_provider_object( void);
+
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \
     {                                                                                              \
