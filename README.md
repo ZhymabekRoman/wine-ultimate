@@ -1793,3 +1793,82 @@ server relay port-name/connect-data trace. WIP `ntdll` alpc files left uncommitt
 nothing today); (b) the object-slot wall at CoreUICallReceive+0x8c19a must be fed a valid object
 on the engine's own self-host connection (the in-process join reply builder is the lever);
 (c) WebView2 chain untouched behind XAML.
+
+---
+
+## Session 2026-10-25(c): the method-36 slot source decoded — the CoreUICall apiset was stubbed; coreuicall.dll now hosts it (2026-10-26)
+
+**The slot source, measured.** The dying thread (bt mapped via `+loaddll` + module table):
+`CreateDispatcherQueueControllerHelper → DispatcherQueue::RuntimeClassInitialize →
+CoreUISessionCreate → EnsureInitialized → ThreadContext::Create$/Init$ →
+RegistrarClient::Initialize → ConnectToRegistrarServer → RemoteRegistrarClient::Connect →
+RegisterThread@RemoteRegistrarClient → RegistrarServerCaller::RegisterThread →
+CoreUICallSend(+0x8c209/+0x8c372) → AlpcClientMessageCallSendHost::SubmitBuffer →
+AlpcClientConnection::SendBufferWithReply` — the engine's **own self-host registrar
+connection**; the reply returns `Callback_HandleReceivedBuffer → HandleSynchronousReply →
+ProcessReply@AlpcClientThunk → UnformatAndInvokeMethod<IAlpcClientHost> →
+Dispatcher@_Microsoft_CoreUI_Registrar_IAlpcClientHost → CoreUICallReceive(+0x8c19a)`.
+At the site `mov rax,[rax]; call [rax]` = the reply's object slot is used as **the vtable
+pointer**, invoked as `slot0(a5=receiver, &flag)` — a two-arg call; the third argument
+(ppv) is the caller's leftover register. So the slot must carry a real COM object whose QI
+tolerates: this=receiver, iid=stack bytes, out=leftover. The join/method-36 exchange is
+answered by the engine's **in-process** registrar (our ALPC provider is refused,
+`0xc0000236`, confirmed again this session); the relay frames (id 5/6) show the reply TLVs
+the engine builds for itself.
+
+**The structural defect found.** CoreMessagingXP.dll's real import directory binds its
+entire `CoreMsg*/CoreUICall*` family (CoreMsgCreateSession, CoreMsgGetExistingSession,
+CoreUICallComputeMaximumMessageSize, CoreUICallCreateConversationHost/
+CreateEndpointHost/…WithSendPriority, CoreUICallGetAddressOfParameterInBuffer,
+CoreUICallReceive, CoreUICallSend, CoreUICallSendVaList, CoreUICreateAnonymousStream) to
+`api-ms-win-crt-utility-l1-1-0.dll`. Wine's apisetschema maps that set to **ucrtbase**,
+which exports none of those names → ntdll `fixup_imports` bound every entry to
+`allocate_stub` (raise-on-call). The Wine-side CoreUICall machinery (dlls/coremessaging/
+coreuicall.c) was therefore **never reachable from the engine**: `+messaging` showed zero
+CoreUICallCreateEndpointHost/CoreUICallSend/ProcessMessage activity; the engine's
+conversation-registration pool got no servable host object; the method-36 reply object
+slot ended up carrying the XAML-managed receiver's CCW (callee rip = coreclr+0x18948f,
+faulting in the managed QI) — the slot is no longer 0/0x3f7, the wall **moved into the
+coreclr managed-QI** on the receiver.
+
+**The fix.** New builtin `dlls/coreuicall` = the host of `api-ms-win-crt-utility-l1-1-0`:
+implements the CoreUICall protocol (source shared with coremessaging via symlink;
+configure.ac + regenerated configure register the module), exports exactly the names the
+app family imports from the set, and forwards the CRT utility names actually imported
+(qsort, qsort_s, rand, rand_s, srand — union measured across every app/package binary:
+coreclr/dwmcorei/WhatsAppNative(.Voip)/dcompi/WinUIEdit/Microsoft.DirectManipulation) to
+ucrtbase. `apisetschema.spec` repoints the set. Measured: `Loaded … coreuicall.dll …
+builtin` (apiset resolves to the real host; stub wall gone; zero app-binary writes —
+CoreMessagingXP.dll == .orig verified this turn, all copies uniform `7ee4b6c2` = the
+recorded measured baseline). Provider objects hardened for the engine's real calling
+convention: vtable-ownership guard in `core_ui_/send_host_/receive_host_/session_
+QueryInterface` (slot 0 is invoked with the client receiver as `iface` and a leftover
+register as `out`): verify `iface->lpVtbl` ownership before touching the object, never
+write through an unverified out-pointer, `E_NOINTERFACE` honestly, never S_OK+null; the
+QI traces are the IID-discovery hooks for the interface-implementation pass.
+(`CoreUICreate` stays in coremessaging for the FrameworkUdk import path; its table
+remains 0-calls, XAML drives CMXP's own exports.)
+
+**Numbers.** Gate 150 s ×2: `rc=5 DIED fatal=1 ff=33 e0464645=0`, AV at
+CoreMessagingXP+0x8c19a (slot deref → coreclr callee `coreclr+0x18948f`), VoIP/
+WebLifecycle/push subsystems run in applog, `edge=0`, `xwindows=200` (IME-only), shot 295 B
+**blank**. Battery 8×60: **8/8 `rc=5 fatal=1 edge=0`** (= tip baseline, zero regression).
+`wa_alpc_run` repro `rc=5` = tip baseline. Live gdb site-capture races the early-death
+flake (fresh-wineserver runs die in ~1 s, 9-line applog); failfast records pin the state.
+
+**Build note.** `make` at tip requires `--enable-win64` (plain configure flips the primary
+to `-m32` on this multilib host → in-tree ntdll failfast dump breaks on `CONTEXT.Rsp`);
+module build done in a tmpfs shadow dir (`/tmp/wb`, disk is the binding constraint),
+artifacts installed to `wine-build` + prefix (`wa_syncbuiltins.sh` NEW coreuicall.dll).
+
+**Commit.** `ultimate 01328e4d6` — coreuicall apiset host + apisetschema repoint + QI
+hardening (configure wiring included). Pushed to `github ultimate`.
+
+**Next gaps:** (a) the callee wall is now the **managed QI on the receiver CCW** (coreclr
+interop): the XAML receiver's slot-0 QueryInterface faults inside coreclr — the managed
+side (GC/interop mode of the callback object, `ApplicationInitializationCallback` CCW)
+is the new subject; the QI-trace IID hooks will name what XAML requests once the callee
+survives; (b) if the engine pool must carry the endpoint-host object: XAML never calls the
+newly bound CoreUICallCreateEndpointHost (dead import for this path) — registration flows
+from XAML's own receiver object, so the in-process identity-table path, not our host
+creation, is the lever for the slot's **content**; (c) WebView2 chain untouched behind XAML.
