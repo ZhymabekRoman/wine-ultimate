@@ -1530,3 +1530,68 @@ tail: `gdiplus.dll` load → `H.NotifyIcon_…` window → `Shell32` → `api-ms
 commit-limit probe — and the `NtQuerySystemInformation` class/limit it compares (Wine's commit
 accounting remains the suspect). Pristine app hashes end-verified unchanged
 (24da83be/9353066e/9a42e19d/4cd3ffd5/799b8c69/4c0d799a).
+
+## The OOM fail-fast decoded: it is ALPC PORT_MESSAGE type fidelity, not memory accounting (2026-10-26)
+
+The task hypothesis (`NtQuerySystemInformation` commit-limit probe at the `[0x1800e5150]`
+callback) is **dead on static decode**: that global is `Cn::Process::OutOfMemoryHandler`,
+installed by `ConfigureNewContext` (CoreMessagingXP RVA `0xc486`), and its body
+(RVA `0xcf70`) emits **only an ETW event** (`EventWriteTransfer(System_OutOfMemory)`, gated by
+`CoreMessagingEnableBits & 2`) — it samples nothing. All 13 `NotifyOutOfMemory` call sites
+(`0x936c`) are plain allocation-failure branches (`malloc`/`HeapAlloc`/`VirtualAlloc`/`LocalAlloc`
+returning NULL); Wine allocators measured **zero failures** (TEMP ntdll heap probe: 0; VirtualAlloc
+probe: only 6 V8-sandbox `addr=0x10000 size=0x7ffd0000` `STATUS_CONFLICTING_ADDRESSES` probes).
+The CoreUI Buffering pool was dumped at the death instant via a Wine-side probe
+(`g_MediumBlockPool` bitmap at module+0xe5640): **31/32 group-0 bits free, groups 1..31 untouched**
+— no exhaustion. `TlsAlloc` never failed; `PostMessage/SendMessageCallbackW/RedrawWindow` never
+failed (TEMP win32u probes: 0 hits).
+
+The `wa_diag150` failfast bt symbolizes (module base `0x6ffffa6f0000`): record `addr` RVA `0xa399`
+is inside a **generic Abandonment stub** (`0xa390`: `sub rsp; call CFlat::Abandonment::Fail`) — the
+decompiler's `CreateCrossPartitionReverseConnectionPort$FastReturn$` label. The stack slots (raw
+`failfast_stack` dump; the x64 unwinder stops at the stub because the app's dispatch region has no
+`.pdata` entries) decode via `.pdata`/RVA to the real chain:
+`UserAdapter::OnUserDispatch` (CoreMessaging private message `0x60`, the tray dispatch) →
+`DrainCoreMessagingQueue` → `DeferredCallDispatcher::Callback_OnDispatch` →
+`RegisteredWait::DoCallback` → `AlpcClientAdapter::Callback_ProcessIncoming` →
+`AlpcConnection::Callback_ProcessIncoming` → `Callback_ProcessReceivedBuffer` →
+**`Callback_HandleReceivedBuffer` (RVA `0x78340`) → stub → `Abandonment::Fail`**.
+
+`Callback_HandleReceivedBuffer` dispatches on **`PORT_MESSAGE.u2.s2.Type`** (byte at +4):
+`0` unsolicited→host vtbl+40, `1` reply, `2` cancel, `3` sendreceive, `4` datagram, `7` keepalive-ack,
+`8`/`9`/`10`/`11` disable/dealloc/reconnect, `13` `HandleIncomingConnection`, everything else →
+**`Abandonment::Fail`** (the `0x785e2` stub; `0x16`=22 → fatal). Wine's ALPC emulation
+(`dlls/ntdll/unix/alpc.c`) stamped the **user-visible** `u2.s2.Type` with its *internal* wire values
+(request=**1**, reply=**0x02**, datagram=**2**, connection-request=**10**, new-message=**0x10**):
+the app read reply-as-cancel (the "RegisterConversation result 99" wall), request-as-reply, and
+Wine's `0x10` wake-packet stamp as type **16 → fatal contract violation**, deterministically during
+the H.NotifyIcon tray `WM_CREATE` dispatch (`call_window_proc` probe: last dispatches
+`WM_GETMINMAXINFO→WM_NCCREATE→WM_NCCALCSIZE→WM_CREATE` on the `H.NotifyIcon_0114335d-…` window,
+tid `0x24`).
+
+**Fix (wine `91e2023d6` + `139d8693d`, pushed to github/ultimate):** stamp the Windows LPC values in
+the user-visible PORT_MESSAGE (`LPCRequest 0`, `LPCReply 1`, `LPCDatagram 4`, `LPCNewConnection 7`);
+the wineserver wire header is a separate field and keeps its internal stamps. Plus win32u
+`NtUserRedrawWindow`: set last error on the two bare-`FALSE` region paths (Windows sets it; the
+dispatcher reads `GetLastError()` after a failed RedrawWindow and Wine left stale values).
+
+**Gate 150 s (clean, probes stripped):** the tray-dispatch death is **gone** — no UI-thread
+failfast, no `NotifyOutOfMemory`, `H.NotifyIcon WM_CREATE` completes. New deterministic wall, 8/8
+runs: worker tid `0138`, record `e0464645` **npar=2** (`param[0]=0xC00000B0 STATUS_PIPE_DISCONNECTED`)
+at RVA **`0x853AA` = `AlpcServerConnection::CommitToSlurp` → `FailWithHR`** — the app's registrar
+conversation handler returns DISCONNECTED (the RegisterConversation-result-99 wall surfacing as its
+own fail-fast). Applog now reaches VoIP/WebLifecycleController/push-notification subsystems (far
+past tray build). `rc=69`×8 (was bimodal 3/8 alive), `fatal=0`, `edge=0`, `createdwins=14`,
+`xamlwin=0`, `Navigate`/renderer not reached (registrar wall is upstream of WebView2 launch).
+Screenshot `wa_oom_after.png`: solid black 1280×1024 (app dead at ~50 s; no app window mapped).
+
+**Tests:** `ntdll alpc.test` and `user32 win.test` **identical rc on tip vs fix builds** (pre-existing
+failures; no regression). kernel32/kernelbase source-identical to tip. All TEMP probes removed
+(`WINEPROBE` grep: 0 hits in the tree); build==source parity verified after the final sync.
+**Pristine app hashes end-verified unchanged** (24da83be/9353066e/9a42e19d/4cd3ffd5/799b8c69/4c0d799a).
+
+Next gaps: (a) the registrar conversation completing with DISCONNECTED at `CommitToSlurp` — the
+app's own slurp-protocol state machine on Wine's emulated ALPC (the wake-packet round-trip now
+delivers, so the conversation *content* is the suspect: the registrar request reply payload/status
+the app's `RegisterConversation` host builds); (b) after that, XAML window map + WebView2
+locator/renderer chain.
