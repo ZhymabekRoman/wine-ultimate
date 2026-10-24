@@ -635,6 +635,9 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateProcessInternalW( HANDLE token, const WCHAR 
                         machine = *(USHORT *)attrs->attrs[i].value;
                         TRACE( "PROC_THREAD_ATTRIBUTE_MACHINE %x.\n", machine );
                         break;
+                    case PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY:
+                        TRACE( "PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY %lx.\n", *(ULONG *)attrs->attrs[i].value );
+                        break;
                     default:
                         FIXME("Unsupported attribute %#Ix.\n", attrs->attrs[i].attr);
                         break;
@@ -1962,6 +1965,9 @@ static inline DWORD validate_proc_thread_attribute( DWORD_PTR attr, SIZE_T size 
         break;
     case PROC_THREAD_ATTRIBUTE_GROUP_AFFINITY:
         if (size != sizeof(GROUP_AFFINITY)) return ERROR_BAD_LENGTH;
+        break;
+    case PROC_THREAD_ATTRIBUTE_DESKTOP_APP_POLICY:
+        if (size != sizeof(ULONG)) return ERROR_BAD_LENGTH;
         break;
     default:
         FIXME( "Unhandled attribute %Iu\n", attr & PROC_THREAD_ATTRIBUTE_NUMBER );
