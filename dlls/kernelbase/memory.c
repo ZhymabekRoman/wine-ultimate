@@ -1304,24 +1304,28 @@ BOOL WINAPI DECLSPEC_HOTPATCH LocalUnlock( HLOCAL handle )
 HANDLE WINAPI DECLSPEC_HOTPATCH CreateMemoryResourceNotification( MEMORY_RESOURCE_NOTIFICATION_TYPE type )
 {
     HANDLE ret;
-    UNICODE_STRING nameW;
-    OBJECT_ATTRIBUTES attr;
+    NTSTATUS status;
 
     switch (type)
     {
     case LowMemoryResourceNotification:
-        RtlInitUnicodeString( &nameW, L"\\KernelObjects\\LowMemoryCondition" );
-        break;
     case HighMemoryResourceNotification:
-        RtlInitUnicodeString( &nameW, L"\\KernelObjects\\HighMemoryCondition" );
         break;
     default:
         SetLastError( ERROR_INVALID_PARAMETER );
         return 0;
     }
 
-    InitializeObjectAttributes( &attr, &nameW, 0, 0, NULL );
-    if (!set_ntstatus( NtOpenEvent( &ret, EVENT_ALL_ACCESS, &attr ))) return 0;
+    /*
+     * Windows answers with a kernel-managed notification event that its memory
+     * manager signals. Wine has no memory pressure source to drive such an event,
+     * so hand out a private event in the state a healthy machine reports: low
+     * memory not signalled, high memory signalled. QueryMemoryResourceNotification
+     * then consistently answers 'not low memory' / 'high memory available'.
+     */
+    status = NtCreateEvent( &ret, EVENT_ALL_ACCESS, NULL, NotificationEvent,
+                            type == HighMemoryResourceNotification );
+    if (!set_ntstatus( status )) return 0;
     return ret;
 }
 
@@ -1330,19 +1334,25 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateMemoryResourceNotification( MEMORY_RESOURC
  */
 BOOL WINAPI DECLSPEC_HOTPATCH QueryMemoryResourceNotification( HANDLE handle, BOOL *state )
 {
+    if (!state)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    *state = FALSE;
     switch (WaitForSingleObject( handle, 0 ))
     {
     case WAIT_OBJECT_0:
         *state = TRUE;
         return TRUE;
     case WAIT_TIMEOUT:
-        *state = FALSE;
         return TRUE;
     }
+
     SetLastError( ERROR_INVALID_PARAMETER );
     return FALSE;
 }
-
 
 /***********************************************************************
  * Physical memory functions
