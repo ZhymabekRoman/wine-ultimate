@@ -17,7 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(storage);
 
@@ -187,9 +190,21 @@ static ULONG WINAPI storage_file_Release( IStorageFile *iface )
 
 static HRESULT WINAPI storage_file_GetIids( IStorageFile *iface, ULONG *iid_count, IID **iids )
 {
+    static const IID instance_iids[] =
+    {
+        IID_IStorageFile,
+        IID_IStorageFile2,
+        IID_IStorageItem,
+        IID_IRandomAccessStreamReference,
+        IID_IInputStreamReference,
+    };
+    IID *array;
+
     if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    if (!(array = CoTaskMemAlloc( sizeof(instance_iids) ))) return E_OUTOFMEMORY;
+    memcpy( array, instance_iids, sizeof(instance_iids) );
+    *iid_count = ARRAY_SIZE(instance_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -716,6 +731,7 @@ struct storage_file_statics
 {
     IActivationFactory IActivationFactory_iface;
     IStorageFileStatics IStorageFileStatics_iface;
+    IStorageFile IStorageFile_iface;
     LONG ref;
 };
 
@@ -747,6 +763,17 @@ static HRESULT WINAPI storage_file_factory_QueryInterface( IActivationFactory *i
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IStorageFile) on the factory
+     * object: QI for IID_IStorageFile on the factory succeeds (CsWinRT probes the
+     * factory for the class interfaces). The factory is not an instance; instance
+     * method calls fail. */
+    if (IsEqualGUID( iid, &IID_IStorageFile ))
+    {
+        *out = &impl->IStorageFile_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -766,9 +793,19 @@ static ULONG WINAPI storage_file_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI storage_file_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IStorageFileStatics,
+        IID_IStorageFile,
+    };
+    IID *array;
+
     if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    if (!(array = CoTaskMemAlloc( sizeof(factory_iids) ))) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -916,10 +953,62 @@ static const struct IStorageFileStaticsVtbl storage_file_statics_vtbl =
     storage_file_statics_ReplaceWithStreamedFileFromUriAsync,
 };
 
+DEFINE_IINSPECTABLE_( storage_file_def, IStorageFile, struct storage_file_statics, impl_from_IStorageFile_factory,
+                      IStorageFile_iface, &impl->IActivationFactory_iface )
+
+#define STORAGE_FACTORY_STUB( name, proto ) \
+    static HRESULT WINAPI name proto { return E_FAIL; }
+
+STORAGE_FACTORY_STUB( storage_file_def_get_FileType, ( IStorageFile *iface, HSTRING *value ) )
+STORAGE_FACTORY_STUB( storage_file_def_get_ContentType, ( IStorageFile *iface, HSTRING *value ) )
+STORAGE_FACTORY_STUB( storage_file_def_OpenAsync, ( IStorageFile *iface, FileAccessMode mode,
+    __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStream **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_OpenTransactedWriteAsync, ( IStorageFile *iface,
+    __FIAsyncOperation_1_Windows__CStorage__CStorageStreamTransaction **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_CopyOverloadDefaultNameAndOptions, ( IStorageFile *iface, IStorageFolder *folder,
+    __FIAsyncOperation_1_Windows__CStorage__CStorageFile **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_CopyOverloadDefaultOptions, ( IStorageFile *iface, IStorageFolder *folder,
+    HSTRING name, __FIAsyncOperation_1_Windows__CStorage__CStorageFile **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_CopyOverload, ( IStorageFile *iface, IStorageFolder *folder, HSTRING name,
+    NameCollisionOption option, __FIAsyncOperation_1_Windows__CStorage__CStorageFile **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_CopyAndReplaceAsync, ( IStorageFile *iface, IStorageFile *file,
+    IAsyncAction **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_MoveOverloadDefaultNameAndOptions, ( IStorageFile *iface, IStorageFolder *folder,
+    IAsyncAction **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_MoveOverloadDefaultOptions, ( IStorageFile *iface, IStorageFolder *folder,
+    HSTRING name, IAsyncAction **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_MoveOverload, ( IStorageFile *iface, IStorageFolder *folder, HSTRING name,
+    NameCollisionOption option, IAsyncAction **operation ) )
+STORAGE_FACTORY_STUB( storage_file_def_MoveAndReplaceAsync, ( IStorageFile *iface, IStorageFile *file,
+    IAsyncAction **operation ) )
+
+static const struct IStorageFileVtbl storage_file_def_vtbl =
+{
+    storage_file_def_QueryInterface,
+    storage_file_def_AddRef,
+    storage_file_def_Release,
+    storage_file_def_GetIids,
+    storage_file_def_GetRuntimeClassName,
+    storage_file_def_GetTrustLevel,
+    storage_file_def_get_FileType,
+    storage_file_def_get_ContentType,
+    storage_file_def_OpenAsync,
+    storage_file_def_OpenTransactedWriteAsync,
+    storage_file_def_CopyOverloadDefaultNameAndOptions,
+    storage_file_def_CopyOverloadDefaultOptions,
+    storage_file_def_CopyOverload,
+    storage_file_def_CopyAndReplaceAsync,
+    storage_file_def_MoveOverloadDefaultNameAndOptions,
+    storage_file_def_MoveOverloadDefaultOptions,
+    storage_file_def_MoveOverload,
+    storage_file_def_MoveAndReplaceAsync,
+};
+
 static struct storage_file_statics storage_file_statics_obj =
 {
     {&storage_file_factory_vtbl},
     {&storage_file_statics_vtbl},
+    {&storage_file_def_vtbl},
     1,
 };
 
@@ -988,9 +1077,18 @@ static ULONG WINAPI storage_folder_Release( IStorageFolder *iface )
 
 static HRESULT WINAPI storage_folder_GetIids( IStorageFolder *iface, ULONG *iid_count, IID **iids )
 {
+    static const IID instance_iids[] =
+    {
+        IID_IStorageFolder,
+        IID_IStorageItem,
+    };
+    IID *array;
+
     if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    if (!(array = CoTaskMemAlloc( sizeof(instance_iids) ))) return E_OUTOFMEMORY;
+    memcpy( array, instance_iids, sizeof(instance_iids) );
+    *iid_count = ARRAY_SIZE(instance_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -1364,6 +1462,7 @@ struct storage_folder_statics
 {
     IActivationFactory IActivationFactory_iface;
     IStorageFolderStatics IStorageFolderStatics_iface;
+    IStorageFolder IStorageFolder_iface;
     LONG ref;
 };
 
@@ -1395,6 +1494,14 @@ static HRESULT WINAPI storage_folder_factory_QueryInterface( IActivationFactory 
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IStorageFolder) on the factory object. */
+    if (IsEqualGUID( iid, &IID_IStorageFolder ))
+    {
+        *out = &impl->IStorageFolder_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -1414,9 +1521,19 @@ static ULONG WINAPI storage_folder_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI storage_folder_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IStorageFolderStatics,
+        IID_IStorageFolder,
+    };
+    IID *array;
+
     if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    if (!(array = CoTaskMemAlloc( sizeof(factory_iids) ))) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -1484,10 +1601,55 @@ static const struct IStorageFolderStaticsVtbl storage_folder_statics_vtbl =
     storage_folder_statics_GetFolderFromPathAsync,
 };
 
+DEFINE_IINSPECTABLE_( storage_folder_def, IStorageFolder, struct storage_folder_statics,
+                      impl_from_IStorageFolder_factory, IStorageFolder_iface, &impl->IActivationFactory_iface )
+
+STORAGE_FACTORY_STUB( storage_folder_def_CreateFileAsyncOverloadDefaultOptions, ( IStorageFolder *iface, HSTRING name,
+    __FIAsyncOperation_1_Windows__CStorage__CStorageFile **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_CreateFileAsync, ( IStorageFolder *iface, HSTRING name,
+    CreationCollisionOption options, __FIAsyncOperation_1_Windows__CStorage__CStorageFile **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_CreateFolderAsyncOverloadDefaultOptions, ( IStorageFolder *iface, HSTRING name,
+    __FIAsyncOperation_1_Windows__CStorage__CStorageFolder **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_CreateFolderAsync, ( IStorageFolder *iface, HSTRING name,
+    CreationCollisionOption options, __FIAsyncOperation_1_Windows__CStorage__CStorageFolder **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_GetFileAsync, ( IStorageFolder *iface, HSTRING name,
+    __FIAsyncOperation_1_Windows__CStorage__CStorageFile **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_GetFolderAsync, ( IStorageFolder *iface, HSTRING name,
+    __FIAsyncOperation_1_Windows__CStorage__CStorageFolder **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_GetItemAsync, ( IStorageFolder *iface, HSTRING name,
+    __FIAsyncOperation_1_Windows__CStorage__CIStorageItem **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_GetFilesAsyncOverloadDefaultOptionsStartAndCount, ( IStorageFolder *iface,
+    __FIAsyncOperation_1___FIVectorView_1_Windows__CStorage__CStorageFile **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_GetFoldersAsyncOverloadDefaultOptionsStartAndCount, ( IStorageFolder *iface,
+    __FIAsyncOperation_1___FIVectorView_1_Windows__CStorage__CStorageFolder **operation ) )
+STORAGE_FACTORY_STUB( storage_folder_def_GetItemsAsyncOverloadDefaultStartAndCount, ( IStorageFolder *iface,
+    __FIAsyncOperation_1___FIVectorView_1_Windows__CStorage__CIStorageItem **operation ) )
+
+static const struct IStorageFolderVtbl storage_folder_def_vtbl =
+{
+    storage_folder_def_QueryInterface,
+    storage_folder_def_AddRef,
+    storage_folder_def_Release,
+    storage_folder_def_GetIids,
+    storage_folder_def_GetRuntimeClassName,
+    storage_folder_def_GetTrustLevel,
+    storage_folder_def_CreateFileAsyncOverloadDefaultOptions,
+    storage_folder_def_CreateFileAsync,
+    storage_folder_def_CreateFolderAsyncOverloadDefaultOptions,
+    storage_folder_def_CreateFolderAsync,
+    storage_folder_def_GetFileAsync,
+    storage_folder_def_GetFolderAsync,
+    storage_folder_def_GetItemAsync,
+    storage_folder_def_GetFilesAsyncOverloadDefaultOptionsStartAndCount,
+    storage_folder_def_GetFoldersAsyncOverloadDefaultOptionsStartAndCount,
+    storage_folder_def_GetItemsAsyncOverloadDefaultStartAndCount,
+};
+
 static struct storage_folder_statics storage_folder_statics_obj =
 {
     {&storage_folder_factory_vtbl},
     {&storage_folder_statics_vtbl},
+    {&storage_folder_def_vtbl},
     1,
 };
 
@@ -1551,9 +1713,18 @@ static ULONG WINAPI file_io_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI file_io_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IFileIoStatics,
+    };
+    IID *array;
+
     if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    if (!(array = CoTaskMemAlloc( sizeof(factory_iids) ))) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
     return S_OK;
 }
 
