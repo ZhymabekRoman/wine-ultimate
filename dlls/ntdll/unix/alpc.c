@@ -34,17 +34,20 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(alpc);
 
-/* ALPC message types.  The user-visible PORT_MESSAGE u2.s2.Type must carry the
- * Windows LPC type values (LPCRequest 0, LPCReply 1, LPCDatagram 4,
- * LPCNewConnection 7): applications dispatch on these bytes and treat unknown
- * values as fatal contract violations.  The wine-internal wire header carried
- * between ntdll and wineserver is a separate field and keeps its own stamps
- * (server/alpc.c uses 1 for request/reply and 10 for connection requests). */
-#define LPC_REQUEST            0
-#define LPC_DATAGRAM           4
-#define LPC_REPLY              1
-#define LPC_NEW_CONNECTION     7 /* user-visible type of a connection request */
-#define LPC_NEW_MESSAGE        0x10
+/* ALPC message types.  The user-visible PORT_MESSAGE u2.s2.Type carries the
+ * classic LPC message-type values (LPCRequest 1, LPCReply 2, LPCDatagram 3,
+ * LPCConnectionRequest 10, LPCNewMessage 0xb): ALPC ports that serve the LPC
+ * protocol (every LPC server, the CoreMessaging registrar and conversation
+ * engine, and the rpcrt4 ncalpc helpers) dispatch on these bytes and treat
+ * unknown values as fatal contract violations.  The wine-internal wire header
+ * carried between ntdll and wineserver is a separate field and keeps its own
+ * stamps (server/alpc.c uses 1 for request/reply and 10 for connect
+ * notifications, translated here). */
+#define LPC_REQUEST            1
+#define LPC_DATAGRAM           3
+#define LPC_REPLY              2
+#define LPC_NEW_CONNECTION     10 /* user-visible type of a connection request */
+#define LPC_NEW_MESSAGE        0xb
 #define LPC_CONNECTION_REQUEST 10 /* internal wire hdr, matches the value server/alpc.c stamps */
 
 /* The kernel fills the RESERVE attribute of the connect reply with a reverse
@@ -137,6 +140,7 @@ static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG a
         { ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE, sizeof(ALPC_WORK_ON_BEHALF_ATTR) },
         { ALPC_MESSAGE_EVENT_ATTRIBUTE,          sizeof(ALPC_EVENT) },
         { ALPC_MESSAGE_RESERVE_ATTRIBUTE,        sizeof(struct alpc_reserve_attr) },
+        { ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE, sizeof(ALPC_MULTI_SEQ_ATTR) },
     };
     unsigned int i;
     SIZE_T off = sizeof(ALPC_MESSAGE_ATTRIBUTES);
@@ -622,7 +626,11 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         else if (flags & ALPC_SEND_REQUEST)
         {
             send_msg->Type = LPC_REQUEST;
-            if (!send_msg->MessageId) send_msg->MessageId = next_alpc_msg_id();
+            /* a multi-buffer send carries several requests: the kernel stamps
+             * a distinct MessageId into every buffer of the chain, so ntdll
+             * leaves the ids for the server to fill */
+            if (!send_msg->MessageId && !(flags & ALPC_MSGFLG_LPC_MULTI_MESSAGE))
+                send_msg->MessageId = next_alpc_msg_id();
         }
         else if (flags & ALPC_SEND_DATAGRAM)
         {
@@ -679,6 +687,18 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 attr_hdr.desired_access = h->DesiredAccess;
                 attr_hdr.handle_count = 1;
             }
+        }
+        /* the send flags travel with the message: the kernel serialises a
+         * synchronous request-reply exchange on the connection (a second
+         * synchronous request is not delivered before the first is answered),
+         * splits a multi-buffer send into per-buffer messages, and owns the
+         * per-buffer MessageIds it stamps into each; the server needs all of
+         * that to reproduce the exchange */
+        attr_hdr.pad2 = flags;
+        if (send_msg_attr && (send_msg_attr->ValidAttributes & ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE))
+        {
+            ALPC_MULTI_SEQ_ATTR *m = get_message_attribute( send_msg_attr, ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE );
+            if (m) attr_hdr.pad3 = m->SequenceCount;
         }
 
         TRACE( "send frame: port %p type %u id %u flags %#x: %s\n",
@@ -854,12 +874,32 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                     ALPC_CONTEXT_ATTR *ctx = get_message_attribute( recv_msg_attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
                     if (ctx)
                     {
+                        /* the kernel delivers the sender's context fields with
+                         * the message: a server reading a request echoes them
+                         * back on the reply (the CoreMessaging engine routes
+                         * its replies and its chunked-message reassembly by
+                         * them), and the message id is the kernel's */
                         ctx->PortContext    = (void *)(ULONG_PTR)hdr.port_context;
-                        ctx->MessageContext = NULL;
-                        ctx->Sequence       = 0;
+                        ctx->MessageContext = (void *)(ULONG_PTR)hdr.msg_context;
+                        ctx->Sequence       = hdr.sequence;
                         ctx->MessageId      = hdr.msg_id;
-                        ctx->CallbackId     = 0;
+                        ctx->CallbackId     = hdr.callback_id;
                         recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_CONTEXT_ATTRIBUTE;
+                    }
+                }
+
+                /* a message delivered from a multi-buffer send carries its
+                 * position in the chain: index in Sequence, chain length in
+                 * CallbackId (the kernel fills the sequence context from the
+                 * split it performed) */
+                if (hdr.sequence && (recv_msg_attr->AllocatedAttributes & ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE))
+                {
+                    ALPC_MULTI_SEQ_ATTR *m = get_message_attribute( recv_msg_attr, ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE );
+                    if (m)
+                    {
+                        m->SequenceNumber = hdr.sequence - 1;
+                        m->SequenceCount  = hdr.callback_id;
+                        recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE;
                     }
                 }
 

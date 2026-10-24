@@ -4530,7 +4530,20 @@ typedef struct _KCONTINUE_ARGUMENT
 #define ALPC_MESSAGE_DIRECT_ATTRIBUTE           0x04000000
 #define ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE   0x02000000
 #define ALPC_MESSAGE_EVENT_ATTRIBUTE            0x00000040 /* Event packet notification */
+#define ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE 0x00002000 /* Multi-message sequence context */
 #define ALPC_MESSAGE_ATTRIBUTE_ALL              0xfe000040
+
+/* Multi-buffer send: the send buffer carries a chain of PORT_MESSAGEs, each
+ * sized by its own TotalLength; the kernel delivers them as separate receives,
+ * stamps each with its own MessageId, and tags every delivered message with the
+ * multi-message sequence context (index in the chain, chain length). */
+#define ALPC_MSGFLG_LPC_MULTI_MESSAGE           0x00008000
+
+typedef struct _ALPC_MULTI_SEQ_ATTR
+{
+    ULONG SequenceNumber; /* 0-based index of this message in the chain */
+    ULONG SequenceCount;  /* number of messages in the chain */
+} ALPC_MULTI_SEQ_ATTR, *PALPC_MULTI_SEQ_ATTR;
 
 /* Message types */
 typedef enum _ALPC_MESSAGE_TYPE
@@ -4570,6 +4583,17 @@ typedef struct _ALPC_PORT_MESSAGE
         } DUMMYSTRUCTNAME2;
         ULONG ZeroInit;
     } DUMMYUNIONNAME2;
+#ifdef _WIN64
+    /* The x64 PORT_MESSAGE carries 8 bytes of kernel bookkeeping (u2.s2
+     * Alignment) between the type word and the ClientId: the header is 0x30
+     * bytes, ClientId sits at +0x10 and MessageId at +0x20.  Applications
+     * compiled against the Windows headers (the CoreMessaging ALPC engine
+     * among them) read and write these fields at those offsets; a layout
+     * without the pad puts MessageId at +0x18, so ids stamped by Wine-side
+     * senders read as zero to the kernel-side (and app-side) readers and
+     * reply correlation collapses. */
+    ULONGLONG Alignment;
+#endif
     union
     {
         CLIENT_ID ClientId;

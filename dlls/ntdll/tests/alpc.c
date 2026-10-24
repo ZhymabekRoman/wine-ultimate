@@ -1560,6 +1560,357 @@ done:
     CloseHandle( done_event );
 }
 
+/* Multi-buffer send: one send carrying a chain of PORT_MESSAGEs (the
+ * ALPC_MSGFLG_LPC_MULTI_MESSAGE contract) is split by the kernel into separate
+ * messages: each is delivered on its own, stamped with its own kernel-assigned
+ * MessageId, and tagged with the multi-message sequence context (index in the
+ * chain, chain length).  A server may then answer every request of the chain:
+ * the connection's outstanding list carries all of them. */
+struct multi_server_args
+{
+    HANDLE port;                     /* listening port: connect is slurped here */
+    HANDLE ready;                    /* set after accept, server loop starts */
+    HANDLE done;
+    NTSTATUS recv_status[3];
+    NTSTATUS reply_status[3];
+    ULONG recv_id[3];
+    ULONG recv_seq[3];
+    ULONG recv_count[3];
+    char recv_payload[3][8];
+    ULONG n;
+};
+
+static DWORD WINAPI multi_server_thread( void *arg )
+{
+    struct multi_server_args *a = arg;
+    char buf[512], attrbuf[256], rbuf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    ALPC_PORT_MESSAGE *rmsg = (ALPC_PORT_MESSAGE *)rbuf;
+    ALPC_MESSAGE_ATTRIBUTES *attr = (ALPC_MESSAGE_ATTRIBUTES *)attrbuf;
+    ALPC_MULTI_SEQ_ATTR *seq;
+    LARGE_INTEGER timeout;
+    HANDLE conn = NULL;
+    SIZE_T size, req_size = 0;
+    NTSTATUS status;
+    int i;
+
+    /* Accept the connection. */
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -10 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( a->port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    if (status == STATUS_SUCCESS)
+        status = pNtAlpcAcceptConnectPort( &conn, a->port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+    if (status != STATUS_SUCCESS)
+    {
+        a->n = 0;
+        SetEvent( a->done );
+        return 0;
+    }
+    SetEvent( a->ready );
+
+    pAlpcInitializeMessageAttribute( ALPC_MESSAGE_CONTEXT_ATTRIBUTE | ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE,
+                                     attr, sizeof(attrbuf), &req_size );
+    for (i = 0; i < 3; i++)
+    {
+        memset( buf, 0, sizeof(buf) );
+        memset( attr, 0, sizeof(attrbuf) );
+        pAlpcInitializeMessageAttribute( ALPC_MESSAGE_CONTEXT_ATTRIBUTE | ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE,
+                                         attr, sizeof(attrbuf), &req_size );
+        size = sizeof(buf);
+        timeout.QuadPart = -10 * 10000000LL;
+        a->recv_status[i] = pNtAlpcSendWaitReceivePort( conn, 0, NULL, NULL, msg, &size, attr, &timeout );
+        if (a->recv_status[i] != STATUS_SUCCESS) break;
+        a->recv_id[i] = msg->MessageId;
+        if (msg->DataLength >= 8) memcpy( a->recv_payload[i], msg + 1, 8 );
+        seq = pAlpcGetMessageAttribute( attr, ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE );
+        a->recv_seq[i] = seq ? seq->SequenceNumber : 0xffffffff;
+        a->recv_count[i] = seq ? seq->SequenceCount : 0;
+
+        /* Answer this request of the chain: a REPLY-flag send echoing its id. */
+        memset( rbuf, 0, sizeof(*rmsg) );
+        memcpy( rmsg + 1, msg + 1, 8 );
+        rmsg->DataLength = 8;
+        rmsg->TotalLength = sizeof(*rmsg) + 8;
+        rmsg->MessageId = msg->MessageId;
+        a->reply_status[i] = pNtAlpcSendWaitReceivePort( conn, ALPC_MSGFLG_REPLY_MESSAGE, rmsg, NULL,
+                                                         NULL, NULL, NULL, NULL );
+    }
+    a->n = i;
+    if (conn) NtClose( conn );
+    SetEvent( a->done );
+    return 0;
+}
+
+static void test_alpc_multi_buffer( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestMulti";
+    static const char payloads[3][8] = { "MULTI-0", "MULTI-1", "MULTI-2" };
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    ALPC_MESSAGE_ATTRIBUTES *attr;
+    ALPC_MULTI_SEQ_ATTR *seq;
+    ALPC_PORT_MESSAGE *msg;
+    struct multi_server_args args;
+    LARGE_INTEGER timeout;
+    char buf[512], attrbuf[256];
+    SIZE_T size, req_size;
+    HANDLE server_port = NULL, thread, conn = NULL;
+    NTSTATUS status;
+    ULONG total;
+    DWORD ret;
+    int i;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort ||
+        !pNtAlpcSendWaitReceivePort || !pAlpcInitializeMessageAttribute || !pAlpcGetMessageAttribute)
+    {
+        win_skip( "ALPC port functions are unavailable.\n" );
+        return;
+    }
+
+    memset( &args, 0, sizeof(args) );
+    args.ready = CreateEventA( NULL, TRUE, FALSE, NULL );
+    args.done = CreateEventA( NULL, TRUE, FALSE, NULL );
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    thread = CreateThread( NULL, 0, multi_server_thread, &args, 0, NULL );
+    ok( thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
+
+    /* Connect as the client. */
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcConnectPort( &conn, &port_name, NULL, &port_attr, 0, NULL,
+                                 NULL, NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected connect status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+
+    ret = WaitForSingleObject( args.ready, 10000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+
+    /* Build the chain: three messages, each sized by its own TotalLength;
+     * the send buffer length (the first message's TotalLength) covers all. */
+    memset( buf, 0, sizeof(buf) );
+    msg = (ALPC_PORT_MESSAGE *)buf;
+    total = 0;
+    for (i = 0; i < 3; i++)
+    {
+        ALPC_PORT_MESSAGE *m = (ALPC_PORT_MESSAGE *)((char *)msg + total);
+        memcpy( m + 1, payloads[i], 8 );
+        m->DataLength = 8;
+        m->TotalLength = sizeof(*m) + 8;
+        total += m->TotalLength;
+    }
+    msg->TotalLength = total; /* the whole chain travels in one send */
+
+    memset( attrbuf, 0, sizeof(attrbuf) );
+    attr = (ALPC_MESSAGE_ATTRIBUTES *)attrbuf;
+    req_size = 0;
+    pAlpcInitializeMessageAttribute( ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE, attr, sizeof(attrbuf), &req_size );
+    seq = pAlpcGetMessageAttribute( attr, ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE );
+    ok( seq != NULL, "Expected a sequence attribute.\n" );
+    if (seq)
+    {
+        seq->SequenceNumber = 0;
+        seq->SequenceCount = 3;
+    }
+    attr->ValidAttributes = ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE;
+
+    status = pNtAlpcSendWaitReceivePort( conn, ALPC_MSGFLG_LPC_MULTI_MESSAGE, msg, attr,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected multi send status %#lx.\n", status );
+
+    /* Receive the three replies (bare receives: each takes one reply). */
+    for (i = 0; i < 3; i++)
+    {
+        memset( buf, 0, sizeof(buf) );
+        size = sizeof(buf);
+        timeout.QuadPart = -10 * 10000000LL;
+        status = pNtAlpcSendWaitReceivePort( conn, 0, NULL, NULL, msg, &size, NULL, &timeout );
+        winetest_push_context( "reply %d", i );
+        ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+        if (status == STATUS_SUCCESS)
+        {
+            ok( msg->Type == LPC_REPLY_TYPE, "Got unexpected type %u.\n", msg->Type );
+            ok( msg->MessageId != 0, "Expected non-zero reply MessageId.\n" );
+            ok( msg->DataLength == 8, "Got unexpected DataLength %u.\n", msg->DataLength );
+            ok( !memcmp( msg + 1, payloads[i], 8 ), "Got unexpected reply payload.\n" );
+        }
+        winetest_pop_context();
+        if (status != STATUS_SUCCESS) break;
+    }
+
+    ret = WaitForSingleObject( args.done, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+
+    winetest_push_context( "server" );
+    ok( args.n == 3, "Server received %u messages.\n", args.n );
+    for (i = 0; i < (int)args.n; i++)
+    {
+        winetest_push_context( "msg %d", i );
+        ok( args.recv_status[i] == STATUS_SUCCESS, "Got unexpected status %#lx.\n", args.recv_status[i] );
+        ok( !memcmp( args.recv_payload[i], payloads[i], 8 ), "Got unexpected payload.\n" );
+        /* per-buffer kernel ids: non-zero, distinct, in send order */
+        ok( args.recv_id[i] != 0, "Expected non-zero MessageId.\n" );
+        ok( args.recv_seq[i] == (ULONG)i, "Got unexpected sequence %u.\n", args.recv_seq[i] );
+        ok( args.recv_count[i] == 3, "Got unexpected sequence count %u.\n", args.recv_count[i] );
+        ok( args.reply_status[i] == STATUS_SUCCESS, "Got unexpected reply status %#lx.\n", args.reply_status[i] );
+        winetest_pop_context();
+    }
+    if (args.n == 3)
+    {
+        ok( args.recv_id[0] != args.recv_id[1] && args.recv_id[1] != args.recv_id[2]
+            && args.recv_id[0] != args.recv_id[2], "Per-buffer MessageIds must be distinct.\n" );
+    }
+    winetest_pop_context();
+
+done:
+    if (conn) NtClose( conn );
+    if (thread)
+    {
+        WaitForSingleObject( thread, 30000 );
+        CloseHandle( thread );
+    }
+    CloseHandle( args.ready );
+    CloseHandle( args.done );
+    NtClose( server_port );
+}
+
+/* Synchronous serialisation: the kernel runs one synchronous request-reply
+ * exchange at a time on a connection.  Two threads send synchronous requests
+ * on the same connection concurrently; the server must never see a request
+ * arrive while the exchange of a previous one is still open (it has been
+ * replied), and every exchange completes with its own correlated reply. */
+struct ser_client_args
+{
+    HANDLE conn;      /* one connection shared by both threads */
+    const char *payload;
+    NTSTATUS send_status;
+    char reply[8];
+};
+
+static DWORD WINAPI ser_client_thread( void *arg )
+{
+    struct ser_client_args *a = arg;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    SIZE_T size;
+
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, a->payload, 8 );
+    msg->DataLength = 8;
+    msg->TotalLength = sizeof(*msg) + 8;
+    size = sizeof(buf);
+    timeout.QuadPart = -15 * 10000000LL;
+    a->send_status = pNtAlpcSendWaitReceivePort( a->conn, ALPC_MSGFLG_SYNC_REQUEST, msg, NULL,
+                                                 msg, &size, NULL, &timeout );
+    if (a->send_status == STATUS_SUCCESS && msg->DataLength >= 8) memcpy( a->reply, msg + 1, 8 );
+    return 0;
+}
+
+static void test_alpc_serialization( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestSerial";
+    static char pay_a[8] = "SER-A", pay_b[8] = "SER-B";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    struct ser_client_args ca, cb;
+    HANDLE server_port = NULL, client_conn = NULL, server_conn = NULL, ta = NULL, tb = NULL;
+    SIZE_T size;
+    NTSTATUS status;
+    DWORD ret;
+    LONG inflight = 0;
+    int i, overlap = 0, exchanges = 0;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip( "ALPC port functions are unavailable.\n" );
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    /* One connection: connect, slurp, accept. */
+    status = pNtAlpcConnectPort( &client_conn, &port_name, NULL, &port_attr, 0, NULL,
+                                 NULL, NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected connect status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -15 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    if (status == STATUS_SUCCESS)
+        status = pNtAlpcAcceptConnectPort( &server_conn, server_port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+    ok( status == STATUS_SUCCESS && server_conn != NULL, "Accept failed, status %#lx.\n", status );
+    if (status != STATUS_SUCCESS || !server_conn) goto done;
+
+    memset( &ca, 0, sizeof(ca) );
+    memset( &cb, 0, sizeof(cb) );
+    ca.conn = cb.conn = client_conn;
+    ca.payload = pay_a;
+    cb.payload = pay_b;
+    ta = CreateThread( NULL, 0, ser_client_thread, &ca, 0, NULL );
+    tb = CreateThread( NULL, 0, ser_client_thread, &cb, 0, NULL );
+    ok( ta != NULL && tb != NULL, "CreateThread failed.\n" );
+
+    /* Serve the two exchanges: the kernel starts the second synchronous
+     * request on a connection only after the reply to the first has been
+     * sent, so a request is never delivered while an exchange is open. */
+    for (i = 0; i < 2; i++)
+    {
+        memset( buf, 0, sizeof(buf) );
+        size = sizeof(buf);
+        timeout.QuadPart = -15 * 10000000LL;
+        status = pNtAlpcSendWaitReceivePort( server_conn, 0, NULL, NULL, msg, &size, NULL, &timeout );
+        if (status != STATUS_SUCCESS) break;
+        exchanges++;
+        if (InterlockedCompareExchange( &inflight, 1, 0 ) != 0) overlap++;
+        status = pNtAlpcSendWaitReceivePort( server_conn, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                             NULL, NULL, NULL, NULL );
+        InterlockedExchange( &inflight, 0 );
+        if (status != STATUS_SUCCESS) break;
+    }
+    ok( exchanges == 2, "Served %d exchanges.\n", exchanges );
+    ok( overlap == 0, "Requests were delivered with an open exchange %d times.\n", overlap );
+
+    ret = WaitForSingleObject( ta, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+    ret = WaitForSingleObject( tb, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+
+    winetest_push_context( "clients" );
+    ok( ca.send_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", ca.send_status );
+    ok( cb.send_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", cb.send_status );
+    ok( !memcmp( ca.reply, pay_a, 8 ) || !memcmp( ca.reply, pay_b, 8 ), "Got unexpected reply payload.\n" );
+    ok( !memcmp( ca.reply, cb.reply, 8 ) == 0, "Both clients got the same reply.\n" );
+    winetest_pop_context();
+
+done:
+    if (ta) CloseHandle( ta );
+    if (tb) CloseHandle( tb );
+    if (client_conn) NtClose( client_conn );
+    if (server_conn) NtClose( server_conn );
+    NtClose( server_port );
+}
 #endif /* _WIN64 */
 
 START_TEST(alpc)
@@ -1582,5 +1933,7 @@ START_TEST(alpc)
     test_NtAlpcQueryInformation();
     test_NtAlpcSetInformation();
     test_alpc_event_notification();
+    test_alpc_multi_buffer();
+    test_alpc_serialization();
 #endif
 }
