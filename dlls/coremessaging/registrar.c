@@ -558,7 +558,6 @@ static DWORD WINAPI provider_thread( void *param )
     SIZE_T connect_size = sizeof(connect_buf);
     LARGE_INTEGER delay;
     NTSTATUS status;
-    int i;
 
     lstrcpyW( name, prefix );
     wsprintfW( name + lstrlenW( name ), L"%u:00000000-0000-0000-0000-000000000000",
@@ -581,16 +580,31 @@ static DWORD WINAPI provider_thread( void *param )
 
     /* The registrar is created by the CoreUI engine when the app
      * initialises its dispatcher infrastructure, after this DLL is
-     * loaded; retry the connect until it appears. */
-    for (i = 0; i < 400 && provider.running; i++)
+     * loaded; poll for it to appear.  The port lookup of a not-yet-created
+     * registrar is a pure miss on the server (it leaves no connection
+     * record behind), so the connect cost is the polling itself: back off
+     * from a short interval to a long one so the thread covers the engine's
+     * variable startup window with a bounded number of attempts instead of
+     * a fixed high-frequency spin. */
     {
-        connect_size = sizeof(connect_buf);
-        status = NtAlpcConnectPort( &provider.connection, &string, NULL, &port_attr,
-                                    ALPC_SYNC_REQUEST, NULL, connect_msg, &connect_size,
-                                    NULL, NULL, NULL );
-        if (!status) break;
-        delay.QuadPart = -25 * 10000;  /* 25 ms */
-        NtDelayExecution( FALSE, &delay );
+        static const ULONG delays_ms[] = { 25, 50, 100, 250, 500 };
+        ULONG attempt = 0;
+
+        /* the ramped delays sum to ~925 ms; the trailing 500 ms polls
+         * cover a further ~9 s, matching the old fixed 400x25 ms window
+         * with a fraction of the connect traffic */
+        while (provider.running && attempt < ARRAYSIZE(delays_ms) + 18)
+        {
+            connect_size = sizeof(connect_buf);
+            status = NtAlpcConnectPort( &provider.connection, &string, NULL, &port_attr,
+                                        ALPC_SYNC_REQUEST, NULL, connect_msg, &connect_size,
+                                        NULL, NULL, NULL );
+            if (!status) break;
+            delay.QuadPart = -(LONGLONG)delays_ms[attempt < ARRAYSIZE(delays_ms) ? attempt
+                                                                                   : ARRAYSIZE(delays_ms) - 1] * 10000;
+            NtDelayExecution( FALSE, &delay );
+            attempt++;
+        }
     }
     if (status)
     {

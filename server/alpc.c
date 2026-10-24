@@ -779,6 +779,25 @@ struct object *find_thread_alpc_receive_port( struct thread *thread )
     return candidate ? grab_object( &candidate->obj ) : NULL;
 }
 
+/* Wake every ALPC receive parked on a process's ports.
+ *
+ * CoreMessaging parks a thread in an indefinite receive (a recv_alpc_port
+ * request-async sitting in the port's read queue).  Such a thread is inside
+ * a blocking server call with the cooperative-suspend signal blocked, so a
+ * debugger attach that suspends the process can never complete it and the
+ * attach handshake stalls.  Waking the queued receives returns the receive to
+ * its caller (with the wake status), which lets the cooperative suspend run;
+ * the caller re-arms the receive when it resumes. */
+void alpc_wake_process_receives( struct process *process )
+{
+    struct alpc_port *port;
+
+    LIST_FOR_EACH_ENTRY( port, &alpc_port_list, struct alpc_port, list_entry )
+    {
+        if (port->process == process) async_wake_up( &port->read_q, STATUS_USER_APC );
+    }
+}
+
 static struct alpc_port *create_alpc_port_obj( int is_server )
 {
     struct alpc_port *port;

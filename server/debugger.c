@@ -510,6 +510,11 @@ static int debugger_attach( struct process *process, struct thread *debugger, st
 
     suspend_process( process );
 
+    /* release threads parked in an indefinite ALPC receive so the
+     * cooperative suspend can run (CoreMessaging parks a thread in a
+     * receive; it is in a blocking call and unsuspendable until woken) */
+    alpc_wake_process_receives( process );
+
     if (!set_process_debug_flag( process, 1 ))
     {
         resume_process( process );
