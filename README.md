@@ -1251,3 +1251,91 @@ exercises it); (3) controller creation on the XAML window hwnd and `Navigate` re
 the XAML activation gap (window created, never shown); (4) battery variance: env-chain fires
 t≈40 s in battery timing vs t≈140 s in gate timing — worth pinning the timing source when the
 x64 payload lands.
+
+## The x64 WebView2 payload lands: official fixed-version cab, the Chromium tree runs under Wine, and the new wall is the managed completion path
+
+**Payload source (option b/c of the recipe, resolved).** The x64 *Evergreen standalone*
+installer `MicrosoftEdgeWebView2RuntimeInstallerX64.exe` (fwlink 2124701, 214 823 632 B) is
+**unusable offline**: its only payload resource `.rsrc/0/B/102/0` is 214 608 444 B of
+high-entropy data, `crsx`/`Cr24`/zstd-magic/gzip-magic/`msedge_wv2`/`http`/GUID-regex all
+absent from the whole stream — the CMS payload is encrypted end to end, key inside the
+closed-source updater, so there is no manifest to read. Ring probing the fwlinks gives
+2124700 -> `MicrosoftWebView2Runtime_157.0.4341.16_Beta.msix` (299 637 224 B, AppxManifest
+`ProcessorArchitecture="arm64"` — the package already deployed, arch-pinned),
+2124701 -> the x64 bootstrapper above, 2124703 -> `MicrosoftEdgeWebview2Setup.exe` (1.8 MB
+online bootstrapper); no x64 MSIX exists in that id set. What works is the **Fixed Version
+channel** on the developer page, whose `filestreamingservice` GUID URLs are embedded in the
+page JSON (escaped `\u002F`):
+
+```
+https://msedge.sf.dl.delivery.mp.microsoft.com/filestreamingservice/files/074c0930-36ad-4756-9d04-dfe0e503bd94/Microsoft.WebView2.FixedVersionRuntime.156.0.4314.42.x64.cab
+310 135 141 B, sha256 cb4612ce79a62a0be094301a72f73cf91bb250f5e83dc51886f66a083fc0694f
+```
+
+`cabextract` gives the ready-made runtime dir (674 MB, no installer, no MSIX):
+`msedgewebview2.exe` 4 911 432 B machine **0x8664** (sha256[:8] 337a496f),
+`msedge.dll` 355 157 320 B **0x8664** (e30fdd5b),
+`EBWebView\x64\EmbeddedBrowserWebView.dll` 9 079 104 B **0x8664** (c105bb00). Provenance
+cross-check: the community NuGet `WebView2.Runtime.X64/156.0.4314.42` ships byte-identical
+copies of every file it carries (`msedgewebview2.exe`, `msedge_elf.dll`, the x64 client dll)
+but **omits `msedge.dll`** — that package alone cannot run a browser, the cab can.
+Deployed as a *self-consistent* pair at
+`C:\Program Files (x86)\Microsoft\EdgeWebView\Application\156.0.4314.42`
+(`/home/olge/.wine-alpc-test/drive_c/...`), the ARM64 root of `Application\157.0.4341.16`
+(`msedgewebview2.exe` 0xAA64, `msedge.dll` 335 828 808 B 0xAA64) moved out to
+`/tmp/wv2arm64bak`, its `EBWebView\` subtree kept. Registry recipe
+`/home/olge/wa-work/envprep_wv2_x64.reg` = the df7056c9 acceptance test with
+`EBWebView`=`...\Application\156.0.4314.42`, `pv`=156.0.4314.42 (HKLM+HKCU
+`ClientState\{F3017226-...}`, `Clients\{56EB18F8-...}` `location`+`pv`), so the *client* dll
+that the locator loads and the *browser* it spawns are the same 156 build — a 157 client
+dll against a 156 browser would be a version-mismatched pair.
+
+**The browser tree runs.** `NtCreateUserProcess` of the x64 `msedgewebview2.exe` succeeds —
+no more `0xc000007b`; `+process` (the `+exec` channel **does not exist** at tip: every
+`exec_total=0` in this project's history is a dead channel, `ntdll/unix/process.c` traces
+under `+process`) shows `CreateProcessInternalW ... --type=utility --utility-sub-type=net…`
+and the children: `--embedded-browser-webview=1 --webview-exe-name=WhatsApp.Root.exe
+--webview-exe-version=1.0.0 --user-data-dir=…`, `--type=crashpad-handler`,
+`--type=utility --utility-sub-type=network`, `--type=utility --utility-sub-type=storage`,
+`--type=gpu-process` — a 5-process Chromium tree (transient; it disappears with the host,
+Chromium watches the host process handle, so a `ps` snapshot at t=70 shows 0). The browser
+process loads `msedge.dll` (355 MB) + `msedge_elf.dll`, creates its
+`Chrome_MessageWindow`/`Chrome_WidgetWin_0`, and drives the profile for real:
+`C:\users\olge\AppData\Local\WhatsApp\LocalCache\EBWebView\Default\…`
+(“Site Characteristics Database”, `Subresource Filter`, `ReplaceFileW`). Zero spawn
+failures, zero `named_pipe`-channel errors (client `\\.\pipe\LOCAL\mojo.32.436.<nonce>`,
+browser side `mojo.440.600.<nonce>` ×3, and the app opens the browser's pipe names).
+
+**App side advances to the controller, then dies in managed code.** The 156 client dll
+loads in the app; the app creates `WEBVIEW2_TEMP_PARENT` “Webview2 Temporary Parent”,
+`Chrome_WidgetWin_0` and `Microsoft.UI.Content.DesktopChildSiteBridge` in its own process —
+the `CreateCoreWebView2Controller` path is reached (it never was with the ARM64 payload).
+No `--type=renderer` child appears: no frame is ever created, so nothing loads. The
+completion never lands: every env chain ends in a .NET FailFast storm (3 × `e0464645`,
+33 × `RaiseFailFastException`, `rc=69`), with one
+`RoOriginateLanguageException 0x80004002 "Specified cast is not valid."` in the window
+(the app's `CoreWebView2.Profile` cast: applog history
+`ZoomBrowserExtension/AddBrowserExtensionToWV > Failed to get CoreWebView2.Profile`).
+`Navigate` is never reached — `applog.txt` contains **0** `navigat*` lines ever.
+
+| metric | value |
+| --- | --- |
+| `wa_gate.sh 150` (x64) | `rc=69 DIED`, lines=210 074, `fatal=0`, `ff=33`, `e0464645=3`, `originate=4`, `orig_80070002=0`, `createdwins=54`, `xamlwin=1`, `edge=244`, `ebwebview=26`, `edge_procs(t=70)=0` |
+| tree probe 90 s (`+process`) | `rc=69`, lines=137 439, `ff=33`, `e0464645=3`; child kinds: crashpad 2, network utility 2, storage utility 2, gpu-process 2, renderer 0; `NtCreateUserProcess` edge lines 10, `CreateProcessInternalW` edge 5, spawn failures 0 |
+| `wa_battery.sh 8 60` | 1/8 `rc=124 ALIVE` (`edge=0`, chain not fired) + 7/8 `rc=69` each with `edge=2` (chain fired ⇒ death), `fatal=0` in all 8 — same rc distribution as the ARM64 baseline, so the x64 payload costs no stability; every death now has the chain firing |
+| `wa_shot_run.sh 130` | `rc=69`, `ff=48`, `wins_created=54`, x windows = 10 (all “Default IME” 1×1 / 160×20), screenshot 295 B |
+| screenshot `wa_x64_after.png` | **blank/black** — uniform 295 B root capture at t=105 s: no QR, no web content, no mapped app window |
+| app binaries after all runs | `CoreMessagingXP 24da83be`, `dwmcorei 9353066e`, `Microsoft.ui.xaml 9a42e19d`, `WebView2Loader 4cd3ffd5`, `Microsoft.Web.WebView2.Core 799b8c69`, app-bundled `EmbeddedBrowserWebView 4c0d799a` — PRISTINE, zero app binary patching |
+| Wine source | unchanged this session: process creation, named pipes, mojo bootstrap and the profile I/O all work; no gap on the spawn path was worth patching |
+
+Next gaps (ordered): (1) the completion of the environment/controller round-trip —
+identify the managed exception behind the `e0464645` storm (minidump route is closed:
+`DOTNET_DbgEnableMiniDump` is a Linux-only coreclr knob, no dump is produced on Wine; the
+practical route is `winedbg` stopped on `e0464645` reading `ExceptionInformation[0]`, the
+managed exception object, then its `MethodTable` name); (2) the `0x80004002`
+`CoreWebView2.Profile` cast the app makes (ZoomBrowserExtension) — check
+`ICoreWebView2Environment12`/`ICoreWebView2Profile` on the 156 client against the app's
+`WebView2Loader`/`Microsoft.Web.WebView2.Core` expectation; (3) renderer start
+(`--type=renderer`) is untested — it is gated by a frame existing, which needs the
+controller completion; (4) XAML `Activate()`/`ShowWindow` stays unreached (no top-level
+window maps), so step-3 of the plan is now downstream of (1), not of its own gap.
