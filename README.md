@@ -1339,3 +1339,97 @@ managed exception object, then its `MethodTable` name); (2) the `0x80004002`
 (`--type=renderer`) is untested — it is gated by a frame existing, which needs the
 controller completion; (4) XAML `Activate()`/`ShowWindow` stays unreached (no top-level
 window maps), so step-3 of the plan is now downstream of (1), not of its own gap.
+
+## The FailFast decoded: it is CoreMessagingXP's own out-of-memory fail-fast, not a managed exception
+
+Tip `7e83b8a56` + x64 WebView2 `156.0.4314.42`. Route used: `gdb` attach on the Linux pid with
+python breakpoints on Wine-side exports (`ntdll!RtlRaiseException`, `combase!RoOriginateLanguageException`,
+`kernelbase!RaiseFailFastException`, `ucrtbase!_callnewh/_expand/fwprintf/fputws/fputs/fwrite`) with a
+per-run `/proc/<pid>/maps` symbolization, `+seh,+combase,+messaging,+storage,+wintypes` traces, and one
+temporary Wine-side `WARN` in `ntdll` `RtlAllocateHeap`/`RtlReAllocateHeap` (removed; the committed tree
+contains no probe). Static reading of `CoreMessagingXP.dll` (objdump) closed what the debugger could not.
+
+**The "storm" is one event.** `ff=33` per run is Wine's own dump of a *single*
+`RaiseFailFastException` call (32 backtrace frames + the `record:` line); `e0464645=3` is that same
+event (record line, `NtRaiseException` line, one stack word). The record: `code=0xE0464645`,
+`flags=0`, `NumberParameters=0`, `ExceptionAddress = CoreMessagingXP RVA 0x9399`; arguments at the
+entry are `rcx/rdi` = a stack local record, `rdx=0`, `r8=0`, and `rax = kernelbase!RaiseFailFastException`
+— i.e. the callee pointer was *resolved at runtime*. `params=0` ⇒ there is no stowed exception object,
+so the `ExceptionInformation[0]` → `MethodTable` route is closed by construction.
+
+**Who calls it** (objdump, `CoreMessagingXP.dll` `24da83be…`, RVA `0x936c`–`0x93ac`): read a global
+callback (`0x1800e5150`), call it, then `OutputDebugStringW(L"Con::Process::NotifyOutOfMemory().\r\n")`
+(string at RVA `0xb88c0`, import IAT `0xb5110`), then `GetModuleHandleExW(L"api-ms-win-core-errorhandling-l1-1-3.dll", 0, 0)`
+(string at RVA `0xb8910`) and the dynamic resolution of `RaiseFailFastException` (also imported at IAT
+`0xb4f88`), called as `RaiseFailFastException(&record, NULL, 0)`. The record's `ExceptionAddress`
+`0x9399` is the instruction right after the `OutputDebugStringW` call at `0x938d` (its 5-byte call
+padding `0x9394…0x9398`). So the fatal event is **the app's CoreMessagingXP process-out-of-memory
+fail-fast on the UI thread (`tid=0x24`)**; its captured backtrace is unusable (`0xa8fd` lands mid-
+instruction ⇒ stale stack values, not return addresses).
+
+**The managed exceptions in the window are a different, handled population.** Every .NET raise is
+`ntdll!RtlRaiseException` with `code=0xE0434352`, `info[0]=HRESULT`: 2× `0x80131502`
+(`COR_E_ARGUMENTOUTOFRANGE`) and 2× `0x80004002` (`COR_E_INVALIDCAST`, message `L"Specified cast is
+not valid."` — the `RoOriginateLanguageException` line). All four are on **worker** threads
+(`0160/0174/01b0`, `tid` from the TEB at `gs_base+0x48`) and all four are **handled** (`RtlUnwindEx`
+follows). The single `0x80004002` origination belongs to that handled cast, not to the death;
+`RoOriginateLanguageException` carries the .NET-side message string (Wine's `combase` does not
+synthesize it), which is what identifies the cast type.
+
+**Wine is not the allocator that fails.** Temporary probe over a full run: `RtlAllocateHeap` failures
+**0**; `RtlReAllocateHeap` `HEAP_REALLOC_IN_PLACE_ONLY` `STATUS_NO_MEMORY` **18**, all on `tid=00b4`,
+all for `0x330/0x364/0x36a`, all with an in-process fallback; `ntdll`'s own
+`out of memory for allocation` ERR never fires ⇒ no `NtAllocateVirtualMemory` failure. Process
+footprint at death: `VmSize 271 GB` (Chromium V8 sandbox at `0x150000000000`, a 256 GB reserve, 32/16 GB
+reserves) with `VmRSS 195 MB`, `max_map_count 1048576`, no `RLIMIT_AS`, `overcommit_memory=0` — the
+reservations all succeed. `ucrtbase!_callnewh`/`_expand` are **never called**, so the new-handler that
+CoreMessagingXP installs runs from its statically linked CRT. The event is timing-sensitive: with `gdb`
+attached it moves out of the 150–210 s window (2 runs `rc=124 ALIVE`, `ff=0`).
+
+**What the app was doing when it died** (UI thread, last trace lines): the tray-icon context menu —
+`H.NotifyIcon.WinUI` + `H.NotifyIcon.dll` load, `Microsoft.UI.Xaml.Media.Imaging.BitmapImage`,
+`MenuFlyout`, `Style`, `Setter`, `MenuFlyoutItem`, `FrameworkElement`, `UIElement`,
+`Windows.Foundation.Uri`, `Windows.Storage.StorageFile` activations, `System.Drawing.Common`,
+`System.Private.Windows.Core`, then the `H.NotifyIcon_*` window + `tooltips_class32` +
+`__wine_tray_icon` creation.
+
+**Fixes landed** (`346331f45`, `31e2ed6ad` on `ultimate`):
+`combase`: real WinRT restricted error info — an `IRestrictedErrorInfo` object (v1 IID `82ba7092…`
+and v2 `82ba70a5…`, v2 adding `ResolveReference`) stored per thread, `RoOriginate*` now originate and
+store, `SetRestrictedErrorInfo`/`GetRestrictedErrorInfo` store/take, `RoSet/GetErrorReportingFlags`
+keep the value. Previously the stubs returned `FALSE`/`S_FALSE`+`NULL` and threw the record away, so
+the WinRT↔.NET error path ran blind and every `GetRestrictedErrorInfo` consumer saw "no error info".
+`kernelbase`: `CreateMemoryResourceNotification` opened `\KernelObjects\LowMemoryCondition`, an event
+Wine never creates, so it *always* failed; `QueryMemoryResourceNotification` left `*state`
+uninitialized on its failure path. Now it hands out a private event in the healthy-machine state (low
+memory not signalled, high memory signalled) and writes `*state` up front. Observed effect: the app's
+UI-thread `CreateMemoryResourceNotification` (the .NET GC's pressure handle) now succeeds (`-> 0xE0`)
+instead of failing.
+
+| metric | before (`7e83b8a56`) | after (`31e2ed6ad`) |
+| --- | --- | --- |
+| `wa_gate.sh 150` | `rc=69`, `ff=33`, `e0464645=3`, `originate=6` (`2×80070002`, `3×80040111`, `1×80004002`), `createdwins=42`, `xamlwin=1` | `rc=69`, `ff=33`, `e0464645=3`, `originate=4` (`3×80040111`, `1×80004002`), `orig_80070002=0`, `createdwins=54`, `xamlwin=1`, `edge=244`, `ebwebview=26` |
+| FailFast record | `e0464645`/`npar=0`/`CoreMessagingXP+0x9399` | identical (the OOM fail-fast is not the error-info path) |
+| `Navigate` in `applog.txt` | 0 | 0 |
+| renderer children (`--type=renderer`) | 0 | 0 |
+| XAML window mapped | no (all top-levels 1×1 / 160×20) | no — screenshot `wa_exc_after.png` (t=55 s) 295 B **blank/black** |
+| app binaries | pristine | `CoreMessagingXP 24da83be`, `dwmcorei 9353066e`, `Microsoft.ui.xaml 9a42e19d`, `WebView2Loader 4cd3ffd5`, `Microsoft.Web.WebView2.Core 799b8c69`, app-bundled `EmbeddedBrowserWebView 4c0d799a` — PRISTINE (sha256 prefixes), zero app patching |
+
+Method limits worth keeping: breakpoints inside the app's native PE DLLs never fire (their mapped
+pages do not accept the `int3`; breakpoints in Wine-built modules fire reliably — the same probe
+captured `kernelbase`/`ntdll`/`combase` hits in the same session), so app-side sites are reachable only
+by static reading; a `call fflush(0)` in the inferior deadlocks the process (do not repeat); coreclr's
+`Unhandled exception.` report is never written (`fwprintf/fputws/fputs/fwrite` hooks saw nothing), so
+no managed text is available for the fatal event; `DOTNET_DbgEnableMiniDump` remains Linux-only.
+
+Next gaps (ordered): (1) the OOM fail-fast trigger — Wine-side allocators are clean, so the size and
+the caller live in the app's static-CRT new-handler; the only remaining handle is to answer the
+*prerequisite* the app is failing to allocate for: the tray/menu path above is where it dies, and the
+`Windows.Foundation.Uri` activation with `IID IUriRuntimeClass` (`00000035-0000-0000-c000-000000000046`)
+is answered `E_NOINTERFACE` by `wintypes`' Uri **factory** (`uri_factory_QueryInterface` answers
+`IUriRuntimeClassFactory`/`IActivationFactory` only) — Windows's class factory also answers the class's
+default interface; (2) `IUriRuntimeClass`/`IStorageFile` statics `GetIids`/`GetRuntimeClassName` stubs
+in `wintypes`/`windows.storage` (the CsWinRT projection probes both); (3) the `0x80004002`
+`CoreWebView2.Profile` cast — the app's own `ZoomBrowserExtension` handler catches it and logs
+`Failed to get CoreWebView2.Profile` (last seen 11:44–11:52 runs, i.e. before the current gate), so it
+is downstream of the death, not the cause; (4) renderer start and XAML `Activate()` remain gated by (1).
