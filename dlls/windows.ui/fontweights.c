@@ -104,7 +104,7 @@ static ULONG WINAPI fontweights_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI fontweights_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IActivationFactory,
         IID_IFontWeightsStatics,
@@ -375,7 +375,7 @@ static ULONG WINAPI fontweight_reference_factory_Release( IActivationFactory *if
 
 static HRESULT WINAPI fontweight_reference_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IActivationFactory,
     };

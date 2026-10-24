@@ -422,7 +422,7 @@ static ULONG WINAPI app_display_info_Release( IAppDisplayInfo *iface )
 
 static HRESULT WINAPI app_display_info_GetIids( IAppDisplayInfo *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IAppDisplayInfo,
     };
@@ -749,7 +749,7 @@ static ULONG WINAPI appinfo_Release( IAppInfo *iface )
 
 static HRESULT WINAPI appinfo_GetIids( IAppInfo *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IAppInfo,
         IID_IAppInfo2,
@@ -969,6 +969,7 @@ struct appinfo_statics
 {
     IActivationFactory IActivationFactory_iface;
     IAppInfoStatics IAppInfoStatics_iface;
+    IAppInfo IAppInfo_iface;
     LONG ref;
 };
 
@@ -1030,7 +1031,7 @@ static ULONG WINAPI activation_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI activation_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IAppInfoStatics,

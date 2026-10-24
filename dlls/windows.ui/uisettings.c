@@ -117,7 +117,7 @@ static ULONG WINAPI uisettings_Release( IUISettings *iface )
 
 static HRESULT WINAPI uisettings_GetIids( IUISettings *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IUISettings,
         IID_IUISettings2,
@@ -650,7 +650,7 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IUISettings,
@@ -671,7 +671,7 @@ static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HS
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    **trust_level = FullTrust;
+    *trust_level = FullTrust;
     return S_OK;
 }
 

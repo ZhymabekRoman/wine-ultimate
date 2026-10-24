@@ -74,7 +74,7 @@ static ULONG WINAPI geographic_region_Release( IGeographicRegion *iface )
 
 static HRESULT WINAPI geographic_region_GetIids( IGeographicRegion *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID instance_iids[] =
+    IID instance_iids[] =
     {
         IID_IGeographicRegion,
     };
@@ -230,7 +230,7 @@ static ULONG WINAPI activation_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI activation_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IGeographicRegionFactory,

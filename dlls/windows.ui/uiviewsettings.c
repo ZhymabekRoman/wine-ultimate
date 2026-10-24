@@ -86,7 +86,7 @@ static ULONG WINAPI uiviewsettings_Release( IUIViewSettings *iface )
 
 static HRESULT WINAPI uiviewsettings_GetIids( IUIViewSettings *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IUIViewSettings,
     };
@@ -137,6 +137,7 @@ struct uiviewsettings_statics
     IActivationFactory IActivationFactory_iface;
     IUIViewSettingsInterop IUIViewSettingsInterop_iface;
     IUIViewSettingsStatics IUIViewSettingsStatics_iface;
+    IUIViewSettings IUIViewSettings_iface;
     LONG ref;
 };
 
@@ -206,7 +207,7 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IUIViewSettingsStatics,
@@ -229,7 +230,7 @@ static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HS
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    **trust_level = FullTrust;
+    *trust_level = FullTrust;
     return S_OK;
 }
 

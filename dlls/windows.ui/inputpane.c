@@ -91,7 +91,7 @@ static ULONG WINAPI inputpane_Release( IInputPane *iface )
 
 static HRESULT WINAPI inputpane_GetIids( IInputPane *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IInputPane,
         IID_IInputPane2,
@@ -203,6 +203,7 @@ struct inputpane_statics
     IInputPaneInterop  IInputPaneInterop_iface;
     IInputPaneStatics  IInputPaneStatics_iface;
     IInputPaneStatics2 IInputPaneStatics2_iface;
+    IInputPane IInputPane_iface;
     LONG ref;
 };
 
@@ -277,7 +278,7 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IInputPaneStatics,
@@ -301,7 +302,7 @@ static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HS
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    **trust_level = FullTrust;
+    *trust_level = FullTrust;
     return S_OK;
 }
 

@@ -31,6 +31,7 @@ struct package_statics
 {
     IActivationFactory IActivationFactory_iface;
     IPackageStatics IPackageStatics_iface;
+    IPackage IPackage_iface;
     LONG ref;
 };
 
@@ -95,7 +96,7 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IPackageStatics,
@@ -117,7 +118,7 @@ static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HS
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    **trust_level = FullTrust;
+    *trust_level = FullTrust;
     return S_OK;
 }
 
@@ -200,7 +201,7 @@ static ULONG WINAPI storage_folder_Release( IStorageFolder *iface )
 
 static HRESULT WINAPI storage_folder_GetIids( IStorageFolder *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IStorageFolder,
         IID_IStorageItem,
@@ -459,7 +460,7 @@ static ULONG WINAPI package_Release( IPackage *iface )
 
 static HRESULT WINAPI package_GetIids( IPackage *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IPackage,
     };
@@ -526,7 +527,7 @@ static ULONG WINAPI package_id_Release( IPackageId *iface )
 
 static HRESULT WINAPI package_id_GetIids( IPackageId *iface, ULONG *count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IPackageId,
     };
@@ -534,10 +535,11 @@ static HRESULT WINAPI package_id_GetIids( IPackageId *iface, ULONG *count, IID *
 
     if (!array) return E_OUTOFMEMORY;
     memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
+    *count = ARRAY_SIZE(iid_array);
     *iids = array;
     return S_OK;
 }
+
 static HRESULT WINAPI package_id_GetTrustLevel( IPackageId *iface, TrustLevel *level )
 {
     if (level) *level = BaseTrust;
@@ -598,6 +600,11 @@ static HRESULT WINAPI package_id_get_FamilyName( IPackageId *iface, HSTRING *val
     if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ))
         wcscpy( buf, L"5319275A.WhatsAppDesktop_cv1g1gvanyjgm" );
     return WindowsCreateString( buf, wcslen(buf), value );
+}
+
+static HRESULT WINAPI package_id_GetRuntimeClassName( IPackageId *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.PackageId", 34, name );
 }
 
 static const struct IPackageIdVtbl package_id_vtbl =

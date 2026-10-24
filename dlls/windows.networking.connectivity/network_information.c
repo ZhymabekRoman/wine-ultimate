@@ -80,7 +80,7 @@ static ULONG WINAPI network_adapter_Release( INetworkAdapter *iface )
 
 static HRESULT WINAPI network_adapter_GetIids( INetworkAdapter *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_INetworkAdapter,
     };
@@ -233,7 +233,7 @@ static ULONG WINAPI ip_information_Release( IIPInformation *iface )
 
 static HRESULT WINAPI ip_information_GetIids( IIPInformation *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IIPInformation,
     };
@@ -363,7 +363,7 @@ static ULONG WINAPI dummy_hostname_Release( IHostName *iface )
 
 static HRESULT WINAPI dummy_hostname_GetIids( IHostName *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IHostName,
         IID_IStringable,
@@ -473,7 +473,7 @@ static ULONG WINAPI dummy_hostname_stringable_Release( IStringable *iface )
 
 static HRESULT WINAPI dummy_hostname_stringable_GetIids( IStringable *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IHostName,
         IID_IStringable,
@@ -583,7 +583,7 @@ static ULONG WINAPI hostnames_view_Release( IVectorView_HostName *iface )
 
 static HRESULT WINAPI hostnames_view_GetIids( IVectorView_HostName *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IVectorView_HostName,
     };
@@ -728,7 +728,7 @@ static ULONG WINAPI connection_cost_Release( IConnectionCost *iface )
 
 static HRESULT WINAPI connection_cost_GetIids( IConnectionCost *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IConnectionCost,
     };
@@ -862,7 +862,7 @@ static ULONG WINAPI wlan_details_Release( IWlanConnectionProfileDetails *iface )
 
 static HRESULT WINAPI wlan_details_GetIids( IWlanConnectionProfileDetails *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IWlanConnectionProfileDetails,
     };
@@ -939,7 +939,7 @@ static ULONG WINAPI empty_hstrings_AddRef( IVectorView_HSTRING *iface ) { return
 static ULONG WINAPI empty_hstrings_Release( IVectorView_HSTRING *iface ) { return 1; }
 static HRESULT WINAPI empty_hstrings_GetIids( IVectorView_HSTRING *iface, ULONG *c, IID **i )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IVectorView_HSTRING,
     };
@@ -947,10 +947,11 @@ static HRESULT WINAPI empty_hstrings_GetIids( IVectorView_HSTRING *iface, ULONG 
 
     if (!array) return E_OUTOFMEMORY;
     memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
-    *iids = array;
+    *c = ARRAY_SIZE(iid_array);
+    *i = array;
     return S_OK;
 }
+
 static HRESULT WINAPI empty_hstrings_GetTrustLevel( IVectorView_HSTRING *iface, TrustLevel *l )
 {
     if (l) *l = BaseTrust; return S_OK;
@@ -975,6 +976,11 @@ static HRESULT WINAPI empty_hstrings_GetMany( IVectorView_HSTRING *iface, unsign
 {
     if (actual) *actual = 0;
     return S_OK;
+}
+
+static HRESULT WINAPI empty_hstrings_GetRuntimeClassName( IVectorView_HSTRING *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<String>", 49, n );
 }
 
 static const struct IVectorView_HSTRINGVtbl empty_hstrings_vtbl =
@@ -1014,7 +1020,7 @@ static ULONG WINAPI empty_lan_identifiers_AddRef( IVectorView_LanIdentifier *ifa
 static ULONG WINAPI empty_lan_identifiers_Release( IVectorView_LanIdentifier *iface ) { return 1; }
 static HRESULT WINAPI empty_lan_identifiers_GetIids( IVectorView_LanIdentifier *iface, ULONG *c, IID **i )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IVectorView_LanIdentifier,
     };
@@ -1022,10 +1028,11 @@ static HRESULT WINAPI empty_lan_identifiers_GetIids( IVectorView_LanIdentifier *
 
     if (!array) return E_OUTOFMEMORY;
     memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
-    *iids = array;
+    *c = ARRAY_SIZE(iid_array);
+    *i = array;
     return S_OK;
 }
+
 static HRESULT WINAPI empty_lan_identifiers_GetTrustLevel( IVectorView_LanIdentifier *iface, TrustLevel *l )
 {
     if (l) *l = BaseTrust; return S_OK;
@@ -1050,6 +1057,11 @@ static HRESULT WINAPI empty_lan_identifiers_GetMany( IVectorView_LanIdentifier *
 {
     if (actual) *actual = 0;
     return S_OK;
+}
+
+static HRESULT WINAPI empty_lan_identifiers_GetRuntimeClassName( IVectorView_LanIdentifier *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<Windows.Networking.Connectivity.LanIdentifier>", 80, n );
 }
 
 static const struct IVectorView_LanIdentifierVtbl empty_lan_identifiers_vtbl =
@@ -1134,7 +1146,7 @@ static ULONG WINAPI connection_profile_Release( IConnectionProfile *iface )
 
 static HRESULT WINAPI connection_profile_GetIids( IConnectionProfile *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IConnectionProfile,
         IID_IConnectionProfile2,
@@ -1293,7 +1305,7 @@ static ULONG WINAPI connection_profile2_Release( IConnectionProfile2 *iface )
 
 static HRESULT WINAPI connection_profile2_GetIids( IConnectionProfile2 *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IConnectionProfile,
         IID_IConnectionProfile2,
@@ -1483,7 +1495,7 @@ static ULONG WINAPI connection_profiles_view_Release( IVectorView_ConnectionProf
 
 static HRESULT WINAPI connection_profiles_view_GetIids( IVectorView_ConnectionProfile *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IVectorView_ConnectionProfile,
     };
@@ -1635,7 +1647,7 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IActivationFactory,
         IID_INetworkInformationStatics,

@@ -81,7 +81,7 @@ static ULONG WINAPI accessibilitysettings_Release(IAccessibilitySettings *iface)
 static HRESULT WINAPI accessibilitysettings_GetIids(IAccessibilitySettings *iface, ULONG *iid_count,
                                                     IID **iids)
 {
-    static const IID iid_array[] =
+    IID iid_array[] =
     {
         IID_IAccessibilitySettings,
     };
@@ -221,7 +221,7 @@ static ULONG WINAPI factory_Release(IActivationFactory *iface)
 
 static HRESULT WINAPI factory_GetIids(IActivationFactory *iface, ULONG *iid_count, IID **iids)
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IAccessibilitySettings,
@@ -242,7 +242,7 @@ static HRESULT WINAPI factory_GetRuntimeClassName(IActivationFactory *iface, HST
 
 static HRESULT WINAPI factory_GetTrustLevel(IActivationFactory *iface, TrustLevel *trust_level)
 {
-    **trust_level = FullTrust;
+    *trust_level = FullTrust;
     return S_OK;
 }
 
