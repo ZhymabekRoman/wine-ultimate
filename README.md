@@ -1658,3 +1658,67 @@ multi-buffer reply contract (Windows ALPC multi-buffer/posted-buffer flow semant
 `CreateCrossPartitionReverseConnectionPort`'s port machinery (the engine's own in-process clients
 take this branch on Windows; it needs the posted-buffer + reverse-port emulation in
 `server/alpc.c`); (b) then XAML window map + WebView2 locator/renderer chain.
+
+## Session 2026-10-25: the 0xa399 wall gone — new wall decoded: XAML Application.Start's CoreUICall round-trip hands a client id where a pointer belongs
+
+**The wall (symbolized).** Battery 8/8, one `RaiseFailFastException` per run (7 fatal + 1 clean
+exit, the known bimodality). The fail-fast record (`c0000005 @ coreclr+0x18948f, params=0`) is a
+*synthesized* post-mortem artifact: `coreclr+0x18948f` is the `mov %rax,%rdx` right after the
+`call GetHRForException` inside `AppDomain::ExecuteMainMethod`'s handler (disassembly: `call
+0x18008d0dc`-family → `EEPolicy::HandleFatalError` at `coreclr+0x2553ac`, return `+0x1894ae` =
+bt[4]); `bt[1]=+0x21984f` = the failfast wrapper, `bt[2/3]=+0x256277/+0x2554DF` = HandleFatalError.
+The **real** hardware fault, captured with `WINEDEBUG=+seh`: `c0000005 flags=0
+rip=CoreMessagingXP+0x8c19a, info[1]=0x3f7` — a read of `0x3f7`. The managed stack (in the log
+verbatim): `WhatsApp.Program.Main → Microsoft.UI.Xaml.Application.Start →
+ABI.Microsoft.UI.Xaml.IApplicationStaticsMethods.Start` — the projection does
+`vtable = *(IntPtr*)thisPtr; slot = *(vtable + 7*8); slot(thisPtr, cb)` (decompiled from
+Microsoft.WinUI.dll; vtable slot 7 = IApplicationStatics::Start). `thisPtr` is taken from a cached
+`IObjectReference` filled by `WinRT.ActivationFactory.Get("Microsoft.UI.Xaml.Application", IID)`
+(→ `DllModule.TryLoad("Microsoft.UI.Xaml.dll")` + `DllGetActivationFactory` — combase's
+`RoGetActivationFactory` is **never called**: 0 fixme:combase lines with the channel on).
+
+**The wire site.** The AV thread is inside `CoreMessagingXP+0x18008c100`, the self-hosted-registrar
+request sender: item carries type `0x1a=26, version 2`, the method id rides in `r9d` (measured:
+36 = 0x24 at the AV caller `+0x8b396` and `+0x76b44`; 230 = 0xe6 elsewhere). After the reply,
+`+0x8c19a: mov (%rax),%rax` dereferences the reply's object slot as a vtable — the slot holds
+`0x3f7` = a small integer (registrar client id class), not a pointer. The registrar server is the
+app's own engine (measured via `+alpc`: engine thread creates/accepts the registrar port; the Wine
+provider thread `CoreMessaging.dll+0x10210` polls
+`\BaseNamedObjects\CoreMessagingRegistrar-<pid>:00000000-…`).
+
+**Poison rule.** S_OK + id-in-a-pointer-slot. The join reply's peer entry (subid 17/18) stamped
+`provider.client_id`/`provider.conversation_id` (ids) into `routing[1]`/`server_id`, which the
+requester dereferences as the CoreUICore object (self-host = same process, pointer semantics).
+Audit of recently-activated Wine modules on this path: `frameworkudk.system`'s CoreUdk
+function-table `default_stub` (≈216 slots answering S_OK with untouched out-params) is the
+same-pattern latent bomb — measured: **zero** calls into those slots on this path (per-slot tracer),
+so it is not this wall.
+
+**Fix (ultimate 60acd769b + 94e3a126f).** coremessaging: join reply (17/18) stamps the real
+in-process CoreUICore provider object pointer into `routing[1]`/`server_id`/`server_block`; relayed
+verb 36 (type 26 v2) answers `[result, pad u64, object ptr, extra u64]` (object = 3rd TLV, measured
+against the requester's unmarshalling walk); `core_ui_QueryInterface` hardened (E_POINTER,
+`*out=NULL` on failure, QI-trace — never S_OK with garbage out); `core_ui_provider_object()`
+singleton. frameworkudk.system: module renamed to `Microsoft.Internal.FrameworkUdk.System.dll`
+(the name the managed shim imports; build==source parity, spec `git mv`).
+
+**Numbers.** Battery 8×60: 7×`rc=5 fatal=1` (same AV, slot value `0x3f7`→`0x00` — the id slot),
+1×`rc=69 fatal=0` (bimodal). Gate 150 s: AV ~45 s, tray dispatch + VoIP/WebLifecycle/push healthy
+before death, `e0464645=0`, `0xa399` wall stays gone, `xamlwin=0`, `edge=0`, `wv2loader=0`.
+Screenshot `wa_interop_after.png`: **blank desktop** (no app window). `alpc` test unit: `rc=5`
+identical at tip and tree (5 failures pre-exist, not touched this session; WIP `ntdll/unix/alpc.c`
+tree changes left uncommitted as found). TEMP probes removed (frameworkudk per-slot tracer,
+coreuicall wire dumps, registrar FIXMEs — 0 TMP greps); `grep TMP` in the diff: 0. **Pristine app
+hashes end-verified** (24da83be/9353066e/9a42e19d/4cd3ffd5/799b8c69/4c0d799a), zero app patching.
+
+**Why the wall persists.** The provider thread never connects: it polls the registrar port with a
+**zero partition GUID** (`CoreMessagingRegistrar-<pid>:00000000-…`) while the engine's registrar
+lives under its real partition GUID (measured: the Wine poll repeats until death, 0 connect
+successes, 0 routed-request handlers fired — the join/relay fixes are on the provider path and are
+currently dormant for the CoreUICore conversation).
+
+**Next gaps:** (a) registrar name discovery — enumerate the registrar port for the engine's
+partition GUID (the connect-context/engine GUID `cn_engine_guid` is already shared) and connect, so
+the CoreUICore conversation is served by Wine and Application.Start binds the real provider object;
+(b) implement the interfaces the XAML side QIs on that object (the QI-trace will name the IIDs —
+the core_ui QI fixme line is the capture point); (c) then XAML window map + WebView2 chain.
