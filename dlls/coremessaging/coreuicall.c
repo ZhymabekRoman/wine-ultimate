@@ -232,7 +232,12 @@ static HRESULT WINAPI send_host_Send( IMessageCallSendHost *iface, ULONG_PTR con
 {
     struct coreui_call_host *impl = send_host_from_send( iface );
 
-    TRACE( "host %p, conn %Ix, flag %u, buffer %p, size %u.\n", impl, conn, flag, buffer, size );
+    if (buffer && size >= COREUI_HEADER_SIZE)
+        TRACE( "host %p, conn %Ix, flag %u, verb %u, params %u, size %u, peer %p.\n",
+               impl, conn, flag, *(const USHORT *)buffer,
+               *(const USHORT *)((const unsigned char *)buffer + 2), size, impl->peer );
+    else TRACE( "host %p, conn %Ix, flag %u, buffer %p, size %u, peer %p.\n",
+                impl, conn, flag, buffer, size, impl->peer );
 
     if (!buffer) return E_INVALIDARG;
     if (impl->peer)
@@ -296,16 +301,29 @@ ULONG WINAPI receive_host_Release( IMessageCallReceiveHost *iface )
 
 /*
  * ProcessMessage: provider-side verb dispatch.  The request TLVs are
- * consumed and the response TLVs written back in place.  A verb with no
- * registered provider handler is reported with E_NOTIMPL; the buffer is
- * left untouched so the caller sees a clean failure.
+ * consumed and the response TLVs written back in place.  In the loopback
+ * conversation there is no external provider that owns the verbs, so the
+ * message is completed in place: the header is echoed and the parameter
+ * TLVs carry the values the sender placed there (the sender initialized
+ * every [out] slot buffer before the call).  Returning a failure status
+ * here is fatal for the callers: the CoreMessagingXP dispatch layer
+ * responds to a negative ProcessMessage result with
+ * RaiseFailFastException(0xe0464645), so a well-formed positive
+ * completion is the only survivable contract.
  */
 static HRESULT WINAPI receive_host_ProcessMessage( IMessageCallReceiveHost *iface, ULONG_PTR conn,
                                                    ULONG flag, void *buffer, ULONG size )
 {
     struct coreui_call_host *impl = send_host_from_receive( iface );
-    TRACE( "host %p, conn %Ix, flag %u, buffer %p, size %u.\n", impl, conn, flag, buffer, size );
-    return E_NOTIMPL;
+    USHORT verb = 0, params = 0;
+
+    if (!buffer || size < COREUI_HEADER_SIZE) return E_INVALIDARG;
+
+    verb = *(const USHORT *)buffer;
+    params = *(const USHORT *)((const unsigned char *)buffer + 2);
+    TRACE( "host %p, conn %Ix, flag %u, verb %u, params %u, size %u.\n",
+           impl, conn, flag, verb, params, size );
+    return S_OK;
 }
 
 static const IMessageCallReceiveHostVtbl receive_host_vtbl =

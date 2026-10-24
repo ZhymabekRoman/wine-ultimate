@@ -557,6 +557,24 @@ NTSTATUS WINAPI NtAlpcDisconnectPort( HANDLE port_handle, ULONG flags )
  * with Type = LPC_CONNECTION_REQUEST so the caller can pass it straight to
  * NtAlpcAcceptConnectPort.
  */
+static const char *debugstr_alpc_frame( const ALPC_PORT_MESSAGE *msg, SIZE_T total )
+{
+    static char out[160];
+    const unsigned char *p = (const unsigned char *)msg;
+    SIZE_T n = total, i;
+    WORD verb = 0xffff, subid = 0xffff;
+
+    if (n >= sizeof(*msg) + 8)
+    {
+        verb  = p[sizeof(*msg) + 4] | (p[sizeof(*msg) + 5] << 8);
+        subid = p[sizeof(*msg) + 6] | (p[sizeof(*msg) + 7] << 8);
+    }
+    if (n > 48) n = 48;
+    for (i = 0; i < n; i++) sprintf( out + i * 2, "%02x", p[i] );
+    out[n * 2] = 0;
+    return wine_dbg_sprintf( "%s(len %u verb %u subid %u)", out, (unsigned int)total, verb, subid );
+}
+
 NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                                             ALPC_PORT_MESSAGE *send_msg,
                                             ALPC_MESSAGE_ATTRIBUTES *send_msg_attr,
@@ -656,6 +674,10 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 attr_hdr.handle_count = 1;
             }
         }
+
+        TRACE( "send frame: port %p type %u id %u flags %#x: %s\n",
+               port_handle, send_msg->Type, send_msg->MessageId, (unsigned int)flags,
+               debugstr_alpc_frame( send_msg, send_size ) );
 
         if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, port_handle )))
             return STATUS_NO_MEMORY;
@@ -814,6 +836,9 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
             recv_msg->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)hdr.client_pid;
             recv_msg->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)hdr.client_tid;
             if (recv_buffer_size) *recv_buffer_size = total;
+            TRACE( "recv frame: port %p type %u id %u: %s\n",
+                   port_handle, recv_msg->Type, recv_msg->MessageId,
+                   debugstr_alpc_frame( recv_msg, total ) );
 
             /* deliver attributes */
             if (recv_msg_attr)

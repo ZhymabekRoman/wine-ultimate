@@ -621,12 +621,15 @@ static void test_coreuicall_conversation( void )
     hr = CoreUICallSendVaList( send, 0, 0, 1, 1, td_dword, slots );
     ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
 
-    /* a conversation send is delivered to the peer; an unhandled verb fails honestly */
+    /* A conversation send is delivered to the peer, which completes the
+     * message in place: the call succeeds and the slot value round-trips.
+     * (A negative completion here is fatal for real callers: the
+     * CoreMessagingXP dispatch layer fail-fasts on it.) */
     hr = CoreUICallCreateConversationHost( session, (IUnknown *)recv, &peer_send, NULL );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     ok( !!peer_send, "got NULL host.\n" );
     hr = CoreUICallSendVaList( peer_send, 0, 0, 1, 1, td_dword, slots );
-    ok( hr == E_NOTIMPL, "got hr %#lx.\n", hr );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
     ok( val == 7, "got val %u.\n", val );
 
     hr = CoreUICallSendVaList( NULL, 0, 0, 1, 1, td_dword, slots );

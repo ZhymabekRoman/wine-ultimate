@@ -195,6 +195,9 @@ static struct list alpc_port_list = LIST_INIT(alpc_port_list);
 
 /* ---- Forward declarations ---- */
 
+static int relay_trace_on;
+static int relay_trace_enabled( void );
+
 static void alpc_port_dump( struct object *obj, int verbose );
 static struct fd *alpc_port_get_fd( struct object *obj );
 static void alpc_port_destroy( struct object *obj );
@@ -704,6 +707,10 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             }
         }
         if (msg_type && user_size >= 8) *(unsigned int *)((char *)(hdr + 1) + 4) = msg_type;
+        if (relay_trace_enabled())
+            fprintf( stderr, "ALPC relay from %x:%x port %p(%s) -> %p: msg_id %u lpc %u size %u dup %u\n",
+                     hdr->client_pid, hdr->client_tid, (void *)port, port->is_server ? "srv" : "conn",
+                     (void *)peer, msg->msg_id, msg_type, user_size, dup );
     }
 
     list_add_tail( &peer->msg_queue, &msg->entry );
@@ -851,6 +858,13 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
 }
 
 /* ---- Request handlers ---- */
+
+static int relay_trace_enabled( void )
+{
+    static int once;
+    if (!once++) relay_trace_on = getenv( "WINE_ALPC_RELAY_TRACE" ) != NULL;
+    return relay_trace_on;
+}
 
 DECL_HANDLER(create_alpc_port)
 {
