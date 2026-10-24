@@ -100,7 +100,7 @@ static ULONG STDMETHODCALLTYPE propertyset_Release( IPropertySet *iface )
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID instance_iids[] =
+    IID instance_iids[] =
     {
         IID_IPropertySet,
         IID_IMap_HSTRING_IInspectable,
@@ -241,7 +241,7 @@ static ULONG STDMETHODCALLTYPE factory_Release( IActivationFactory *iface )
 
 static HRESULT STDMETHODCALLTYPE factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IPropertySet,

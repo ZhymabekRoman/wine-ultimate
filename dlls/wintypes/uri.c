@@ -283,7 +283,7 @@ static ULONG WINAPI uri_Release( IUriRuntimeClass *iface )
 
 static HRESULT WINAPI uri_GetIids( IUriRuntimeClass *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID instance_iids[] =
+    IID instance_iids[] =
     {
         IID_IUriRuntimeClass,
         IID_IUriRuntimeClassWithAbsoluteCanonicalUri,
@@ -611,7 +611,7 @@ static ULONG WINAPI uri_statics_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI uri_statics_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IUriRuntimeClassFactory,

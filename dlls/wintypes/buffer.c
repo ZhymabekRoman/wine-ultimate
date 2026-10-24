@@ -92,7 +92,7 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IBufferFactory,
@@ -208,7 +208,7 @@ static ULONG WINAPI buffer_Release( IBuffer *iface )
 
 static HRESULT WINAPI buffer_GetIids( IBuffer *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID instance_iids[] =
+    IID instance_iids[] =
     {
         IID_IBuffer,
         IID_IBufferByteAccess,

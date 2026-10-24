@@ -17,10 +17,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
-#include <string.h>
-
 #include "private.h"
-#include "objbase.h"
 
 #include "wine/debug.h"
 
@@ -60,16 +57,6 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         return S_OK;
     }
 
-    /* Windows aggregates the class default interface (ICoreWindow) on the factory object
-     * (CsWinRT probes the factory for the class interfaces). The factory is not an
-     * instance; instance method calls fail. */
-    if (IsEqualGUID( iid, &IID_ICoreWindow ))
-    {
-        *out = &impl->ICoreWindow_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -93,30 +80,20 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
-    {
-        IID_IActivationFactory,
-        IID_ICoreWindowStatic,
-        IID_ICoreWindow,
-    };
-    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
-
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, factory_iids, sizeof(factory_iids) );
-    *iid_count = ARRAY_SIZE(factory_iids);
-    *iids = array;
-    return S_OK;
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( RuntimeClass_Windows_UI_Core_CoreWindow, lstrlenW( RuntimeClass_Windows_UI_Core_CoreWindow ), class_name );
+    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
+    return E_NOTIMPL;
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    **trust_level = FullTrust;
-    return S_OK;
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
 }
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -161,132 +138,11 @@ static const struct ICoreWindowStaticVtbl corewindow_static_vtbl =
     corewindow_static_GetForCurrentThread
 };
 
-
-/* Windows aggregates the class default interface (ICoreWindow) on the factory object;
- * the factory is not an instance: method calls fail. */
-DEFINE_IINSPECTABLE_( factory_def, ICoreWindow, struct corewindow_statics, impl_from_ICoreWindow_factory_def,
-                      ICoreWindow_iface, &impl->IActivationFactory_iface )
-
-static HRESULT WINAPI factory_def_get_AutomationHostProvider( ICoreWindow *iface, IInspectable **value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_Bounds( ICoreWindow *iface, Rect *value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_CustomProperties( ICoreWindow *iface, IPropertySet **value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_Dispatcher( ICoreWindow *iface, ICoreDispatcher **value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_FlowDirection( ICoreWindow *iface, CoreWindowFlowDirection *value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_put_FlowDirection( ICoreWindow *iface, CoreWindowFlowDirection value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_IsInputEnabled( ICoreWindow *iface, boolean *value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_put_IsInputEnabled( ICoreWindow *iface, boolean value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_PointerCursor( ICoreWindow *iface, ICoreCursor **value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_put_PointerCursor( ICoreWindow *iface, ICoreCursor *value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_PointerPosition( ICoreWindow *iface, Point *value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_Visible( ICoreWindow *iface, boolean *value ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_Activate( ICoreWindow *iface ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_Close( ICoreWindow *iface ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_GetAsyncKeyState( ICoreWindow *iface, VirtualKey key, CoreVirtualKeyStates *state ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_GetKeyState( ICoreWindow *iface, VirtualKey key, CoreVirtualKeyStates *state ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_ReleasePointerCapture( ICoreWindow *iface ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_SetPointerCapture( ICoreWindow *iface ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_Activated( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_Activated( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_AutomationProviderRequested( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CAutomationProviderRequestedEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_AutomationProviderRequested( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_CharacterReceived( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_CharacterReceived( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_Closed( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCoreWindowEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_Closed( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_InputEnabled( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CInputEnabledEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_InputEnabled( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_KeyDown( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_KeyDown( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_KeyUp( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_KeyUp( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_PointerCaptureLost( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_PointerCaptureLost( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_PointerEntered( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_PointerEntered( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_PointerExited( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_PointerExited( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_PointerMoved( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_PointerMoved( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_PointerPressed( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_PointerPressed( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_PointerReleased( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_PointerReleased( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_TouchHitTesting( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CTouchHitTestingEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_TouchHitTesting( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_PointerWheelChanged( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_PointerWheelChanged( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_SizeChanged( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_SizeChanged( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_VisibilityChanged( ICoreWindow *iface, __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs *handler, EventRegistrationToken *cookie ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_VisibilityChanged( ICoreWindow *iface, EventRegistrationToken cookie ) { return E_FAIL; }
-
-static const struct ICoreWindowVtbl factory_def_vtbl =
-{
-    factory_def_QueryInterface,
-    factory_def_AddRef,
-    factory_def_Release,
-    factory_def_GetIids,
-    factory_def_GetRuntimeClassName,
-    factory_def_GetTrustLevel,
-    factory_def_get_AutomationHostProvider,
-    factory_def_get_Bounds,
-    factory_def_get_CustomProperties,
-    factory_def_get_Dispatcher,
-    factory_def_get_FlowDirection,
-    factory_def_put_FlowDirection,
-    factory_def_get_IsInputEnabled,
-    factory_def_put_IsInputEnabled,
-    factory_def_get_PointerCursor,
-    factory_def_put_PointerCursor,
-    factory_def_get_PointerPosition,
-    factory_def_get_Visible,
-    factory_def_Activate,
-    factory_def_Close,
-    factory_def_GetAsyncKeyState,
-    factory_def_GetKeyState,
-    factory_def_ReleasePointerCapture,
-    factory_def_SetPointerCapture,
-    factory_def_add_Activated,
-    factory_def_remove_Activated,
-    factory_def_add_AutomationProviderRequested,
-    factory_def_remove_AutomationProviderRequested,
-    factory_def_add_CharacterReceived,
-    factory_def_remove_CharacterReceived,
-    factory_def_add_Closed,
-    factory_def_remove_Closed,
-    factory_def_add_InputEnabled,
-    factory_def_remove_InputEnabled,
-    factory_def_add_KeyDown,
-    factory_def_remove_KeyDown,
-    factory_def_add_KeyUp,
-    factory_def_remove_KeyUp,
-    factory_def_add_PointerCaptureLost,
-    factory_def_remove_PointerCaptureLost,
-    factory_def_add_PointerEntered,
-    factory_def_remove_PointerEntered,
-    factory_def_add_PointerExited,
-    factory_def_remove_PointerExited,
-    factory_def_add_PointerMoved,
-    factory_def_remove_PointerMoved,
-    factory_def_add_PointerPressed,
-    factory_def_remove_PointerPressed,
-    factory_def_add_PointerReleased,
-    factory_def_remove_PointerReleased,
-    factory_def_add_TouchHitTesting,
-    factory_def_remove_TouchHitTesting,
-    factory_def_add_PointerWheelChanged,
-    factory_def_remove_PointerWheelChanged,
-    factory_def_add_SizeChanged,
-    factory_def_remove_SizeChanged,
-    factory_def_add_VisibilityChanged,
-    factory_def_remove_VisibilityChanged,
-};
-
 static struct corewindow_statics corewindow_statics =
 {
     {&factory_vtbl},
     {&corewindow_static_vtbl},
-    {&factory_def_vtbl}, 1,
+    1,
 };
 
 IActivationFactory *corewindow_factory = &corewindow_statics.IActivationFactory_iface;
@@ -378,19 +234,46 @@ static ULONG WINAPI core_dispatcher_Release( ICoreDispatcher *iface )
     if (!ref) free( impl );
     return ref;
 }
-static HRESULT WINAPI core_dispatcher_GetIids( ICoreDispatcher *iface, ULONG *count, IID **iids )
+static HRESULT WINAPI core_dispatcher_GetIids( ICoreDispatcher *iface, ULONG *count, IID **iids ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_dispatcher_GetRuntimeClassName( ICoreDispatcher *iface, HSTRING *name ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_dispatcher_GetTrustLevel( ICoreDispatcher *iface, TrustLevel *level ) { FIXME("stub\n"); return E_NOTIMPL; }static HRESULT WINAPI core_dispatcher_get_AutomationProviderDelegate( ICoreDispatcher *iface, IInspectable **value )
+{ FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
+static HRESULT WINAPI core_dispatcher_put_AutomationProviderDelegate( ICoreDispatcher *iface, IInspectable *value )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_dispatcher_AcceleratorKeyActivated_add( ICoreDispatcher *iface, void *handler, EventRegistrationToken *cookie )
+{ FIXME( "stub\n" ); if (cookie) cookie->value = 0; return S_OK; }
+static HRESULT WINAPI core_dispatcher_AcceleratorKeyActivated_remove( ICoreDispatcher *iface, EventRegistrationToken cookie )
+{ FIXME( "stub\n" ); return S_OK; }
+static HRESULT WINAPI core_dispatcher_ProcessEvents( ICoreDispatcher *iface, CoreProcessEventsOption options )
 {
-    static const IID iid_array[] =
-    {
-        IID_ICoreDispatcher,
-        IID_ICoreAcceleratorKeys,
-    };
-    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+    MSG msg;
+    TRACE( "iface %p, options %d\n", iface, options );
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
-    *iids = array;
+    if (options == CoreProcessEventsOption_ProcessUntilQuit)
+    {
+        while (GetMessageW( &msg, NULL, 0, 0 ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
+    else if (options == CoreProcessEventsOption_ProcessOneIfPresent)
+    {
+        if (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
+    else
+    {
+        while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+        {
+            if (msg.message == WM_QUIT) break;
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
     return S_OK;
 }
 
@@ -441,19 +324,16 @@ static ULONG WINAPI dispatcher_async_action_Release( IAsyncAction *iface )
     if (!ref) free( impl );
     return ref;
 }
-static HRESULT WINAPI dispatcher_async_action_GetIids( IAsyncAction *iface, ULONG *count, IID **iids )
+static HRESULT WINAPI dispatcher_async_action_GetIids( IAsyncAction *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_action_GetRuntimeClassName( IAsyncAction *iface, HSTRING *name ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_action_GetTrustLevel( IAsyncAction *iface, TrustLevel *level ) { return E_NOTIMPL; }
+static HRESULT WINAPI dispatcher_async_action_put_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler *handler )
 {
-    static const IID iid_array[] =
+    if (handler)
     {
-        IID_IAsyncAction,
-        IID_IAsyncInfo,
-    };
-    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
-
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
-    *iids = array;
+        void (STDMETHODCALLTYPE *invoke)(void *, void *, int) = (*(void ***)handler)[3];
+        invoke( handler, iface, 1 /* Completed */ );
+    }
     return S_OK;
 }
 static HRESULT WINAPI dispatcher_async_action_get_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler **handler )
@@ -774,19 +654,27 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
     }
     return ref;
 }
-static HRESULT WINAPI core_window_GetIids( ICoreWindow *iface, ULONG *count, IID **iids )
+static HRESULT WINAPI core_window_GetIids( ICoreWindow *iface, ULONG *count, IID **iids ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_window_GetRuntimeClassName( ICoreWindow *iface, HSTRING *name ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_window_GetTrustLevel( ICoreWindow *iface, TrustLevel *level ) { FIXME("stub\n"); return E_NOTIMPL; }
+static HRESULT WINAPI core_window_get_AutomationHostProvider( ICoreWindow *iface, IInspectable **value )
+{ FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
+static HRESULT WINAPI core_window_get_Bounds( ICoreWindow *iface, Rect *value )
 {
-    static const IID iid_array[] =
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    RECT r;
+    if (!value) return E_POINTER;
+    if (impl->hwnd && GetClientRect( impl->hwnd, &r ))
     {
-        IID_ICoreWindow,
-        IID_ICoreWindowInterop,
-    };
-    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
-
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
-    *iids = array;
+        value->X = r.left;
+        value->Y = r.top;
+        value->Width = r.right - r.left;
+        value->Height = r.bottom - r.top;
+    }
+    else
+    {
+        value->X = 0; value->Y = 0; value->Width = 1024; value->Height = 768;
+    }
     return S_OK;
 }
 static HRESULT WINAPI core_window_get_CustomProperties( ICoreWindow *iface, void **value )
@@ -939,17 +827,17 @@ static ULONG WINAPI visibility_changed_args_Release( __x_ABI_CWindows_CUI_CCore_
 }
 
 static HRESULT WINAPI visibility_changed_args_GetIids( __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs *iface, ULONG *count, IID **iids )
-{
-    static const IID iid_array[] =
-    {
-        IID___x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs,
-    };
-    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+{ return E_NOTIMPL; }
+static HRESULT WINAPI visibility_changed_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.VisibilityChangedEventArgs", 41, name ); }
+static HRESULT WINAPI visibility_changed_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
-    *iids = array;
+static HRESULT WINAPI visibility_changed_args_get_Visible( __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs *iface, boolean *value )
+{
+    struct visibility_changed_args *impl = impl_from_IVisibilityChangedEventArgs( iface );
+    if (!value) return E_POINTER;
+    *value = impl->visible;
     return S_OK;
 }
 
@@ -1017,17 +905,17 @@ static ULONG WINAPI window_size_changed_args_Release( __x_ABI_CWindows_CUI_CCore
 }
 
 static HRESULT WINAPI window_size_changed_args_GetIids( __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *iface, ULONG *count, IID **iids )
-{
-    static const IID iid_array[] =
-    {
-        IID___x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs,
-    };
-    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+{ return E_NOTIMPL; }
+static HRESULT WINAPI window_size_changed_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.WindowSizeChangedEventArgs", 41, name ); }
+static HRESULT WINAPI window_size_changed_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
-    *iids = array;
+static HRESULT WINAPI window_size_changed_args_get_Size( __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *iface, Size *value )
+{
+    struct window_size_changed_args *impl = impl_from_IWindowSizeChangedEventArgs( iface );
+    if (!value) return E_POINTER;
+    *value = impl->size;
     return S_OK;
 }
 
@@ -1279,17 +1167,17 @@ static ULONG WINAPI core_cursor_Release( ICoreCursor *iface )
     return ref;
 }
 static HRESULT WINAPI core_cursor_GetIids( ICoreCursor *iface, ULONG *count, IID **iids )
-{
-    static const IID iid_array[] =
-    {
-        IID_ICoreCursor,
-    };
-    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI core_cursor_GetRuntimeClassName( ICoreCursor *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.CoreCursor", 26, name ); }
+static HRESULT WINAPI core_cursor_GetTrustLevel( ICoreCursor *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, iid_array, sizeof(iid_array) );
-    *iid_count = ARRAY_SIZE(iid_array);
-    *iids = array;
+static HRESULT WINAPI core_cursor_get_Id( ICoreCursor *iface, UINT32 *value )
+{
+    struct core_cursor *impl = impl_from_ICoreCursor( iface );
+    if (!value) return E_POINTER;
+    *value = impl->id;
     return S_OK;
 }
 static HRESULT WINAPI core_cursor_get_Type( ICoreCursor *iface, CoreCursorType *value )
@@ -1346,16 +1234,6 @@ static HRESULT WINAPI cursor_factory_QueryInterface( IActivationFactory *iface, 
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    /* Windows aggregates the class default interface (ICoreCursor) on the factory object
-     * (CsWinRT probes the factory for the class interfaces). The factory is not an
-     * instance; instance method calls fail. */
-    if (IsEqualGUID( iid, &IID_ICoreCursor ))
-    {
-        *out = &impl->ICoreCursor_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
     FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -1371,20 +1249,23 @@ static ULONG WINAPI cursor_factory_Release( IActivationFactory *iface )
     return InterlockedDecrement( &impl->ref );
 }
 static HRESULT WINAPI cursor_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
-{
-    static const IID factory_iids[] =
-    {
-        IID_IActivationFactory,
-        IID_ICoreCursorFactory,
-        IID_ICoreCursor,
-    };
-    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
+static HRESULT WINAPI cursor_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.CoreCursor", 26, name ); }
+static HRESULT WINAPI cursor_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI cursor_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{ FIXME( "stub\n" ); return E_NOTIMPL; }
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, factory_iids, sizeof(factory_iids) );
-    *iid_count = ARRAY_SIZE(factory_iids);
-    *iids = array;
-    return S_OK;
+static const struct IActivationFactoryVtbl cursor_activation_factory_vtbl =
+{
+    cursor_factory_QueryInterface,
+    cursor_factory_AddRef,
+    cursor_factory_Release,
+    cursor_factory_GetIids,
+    cursor_factory_GetRuntimeClassName,
+    cursor_factory_GetTrustLevel,
+    cursor_factory_ActivateInstance,
 };
 
 static HRESULT WINAPI cursor_factory_CreateCursor( ICoreCursorFactory *iface, CoreCursorType type, UINT32 id, ICoreCursor **cursor )
@@ -1412,32 +1293,11 @@ static const struct ICoreCursorFactoryVtbl cursor_factory_vtbl =
     cursor_factory_CreateCursor,
 };
 
-
-/* Windows aggregates the class default interface (ICoreCursor) on the factory object;
- * the factory is not an instance: method calls fail. */
-DEFINE_IINSPECTABLE_( cursor_def, ICoreCursor, struct core_cursor_factory, impl_from_ICoreCursor_cursor_def,
-                      ICoreCursor_iface, &impl->IActivationFactory_iface )
-
-static HRESULT WINAPI cursor_def_get_Id( ICoreCursor *iface, UINT32 *value ) { return E_FAIL; }
-static HRESULT WINAPI cursor_def_get_Type( ICoreCursor *iface, CoreCursorType *value ) { return E_FAIL; }
-
-static const struct ICoreCursorVtbl cursor_def_vtbl =
-{
-    cursor_def_QueryInterface,
-    cursor_def_AddRef,
-    cursor_def_Release,
-    cursor_def_GetIids,
-    cursor_def_GetRuntimeClassName,
-    cursor_def_GetTrustLevel,
-    cursor_def_get_Id,
-    cursor_def_get_Type,
-};
-
 static struct core_cursor_factory cursor_factory_obj =
 {
     {&cursor_activation_factory_vtbl},
     {&cursor_factory_vtbl},
-    {&cursor_def_vtbl}, 1,
+    1,
 };
 
 IActivationFactory *core_cursor_factory = &cursor_factory_obj.IActivationFactory_iface;

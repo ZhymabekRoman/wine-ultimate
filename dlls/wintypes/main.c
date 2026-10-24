@@ -117,7 +117,7 @@ static ULONG STDMETHODCALLTYPE api_information_statics_factory_Release(IActivati
 static HRESULT STDMETHODCALLTYPE api_information_statics_factory_GetIids(IActivationFactory *iface, ULONG *iid_count,
         IID **iids)
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IApiInformationStatics,
@@ -394,7 +394,7 @@ static ULONG STDMETHODCALLTYPE property_value_statics_factory_Release(IActivatio
 static HRESULT STDMETHODCALLTYPE property_value_statics_factory_GetIids(IActivationFactory *iface, ULONG *iid_count,
         IID **iids)
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IPropertyValueStatics,

@@ -83,7 +83,7 @@ static ULONG STDMETHODCALLTYPE data_writer_activation_factory_Release(IActivatio
 static HRESULT STDMETHODCALLTYPE data_writer_activation_factory_GetIids(IActivationFactory *iface, ULONG *iid_count,
         IID **iids)
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IDataWriter,
