@@ -17,9 +17,12 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
 #include "initguid.h"
 #include "netlistmgr.h"
+#include "objbase.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(connectivity);
 
@@ -77,8 +80,17 @@ static ULONG WINAPI network_adapter_Release( INetworkAdapter *iface )
 
 static HRESULT WINAPI network_adapter_GetIids( INetworkAdapter *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_INetworkAdapter,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI network_adapter_GetRuntimeClassName( INetworkAdapter *iface, HSTRING *class_name )
@@ -221,8 +233,17 @@ static ULONG WINAPI ip_information_Release( IIPInformation *iface )
 
 static HRESULT WINAPI ip_information_GetIids( IIPInformation *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IIPInformation,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI ip_information_GetRuntimeClassName( IIPInformation *iface, HSTRING *class_name )
@@ -342,8 +363,18 @@ static ULONG WINAPI dummy_hostname_Release( IHostName *iface )
 
 static HRESULT WINAPI dummy_hostname_GetIids( IHostName *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IHostName,
+        IID_IStringable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI dummy_hostname_GetRuntimeClassName( IHostName *iface, HSTRING *class_name )
@@ -442,7 +473,18 @@ static ULONG WINAPI dummy_hostname_stringable_Release( IStringable *iface )
 
 static HRESULT WINAPI dummy_hostname_stringable_GetIids( IStringable *iface, ULONG *iid_count, IID **iids )
 {
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IHostName,
+        IID_IStringable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI dummy_hostname_stringable_GetRuntimeClassName( IStringable *iface, HSTRING *class_name )
@@ -541,8 +583,17 @@ static ULONG WINAPI hostnames_view_Release( IVectorView_HostName *iface )
 
 static HRESULT WINAPI hostnames_view_GetIids( IVectorView_HostName *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IVectorView_HostName,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI hostnames_view_GetRuntimeClassName( IVectorView_HostName *iface, HSTRING *class_name )
@@ -677,8 +728,17 @@ static ULONG WINAPI connection_cost_Release( IConnectionCost *iface )
 
 static HRESULT WINAPI connection_cost_GetIids( IConnectionCost *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IConnectionCost,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI connection_cost_GetRuntimeClassName( IConnectionCost *iface, HSTRING *class_name )
@@ -802,8 +862,17 @@ static ULONG WINAPI wlan_details_Release( IWlanConnectionProfileDetails *iface )
 
 static HRESULT WINAPI wlan_details_GetIids( IWlanConnectionProfileDetails *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IWlanConnectionProfileDetails,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI wlan_details_GetRuntimeClassName( IWlanConnectionProfileDetails *iface, HSTRING *class_name )
@@ -868,10 +937,19 @@ static HRESULT WINAPI empty_hstrings_QueryInterface( IVectorView_HSTRING *iface,
 }
 static ULONG WINAPI empty_hstrings_AddRef( IVectorView_HSTRING *iface ) { return 2; }
 static ULONG WINAPI empty_hstrings_Release( IVectorView_HSTRING *iface ) { return 1; }
-static HRESULT WINAPI empty_hstrings_GetIids( IVectorView_HSTRING *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
-static HRESULT WINAPI empty_hstrings_GetRuntimeClassName( IVectorView_HSTRING *iface, HSTRING *n )
+static HRESULT WINAPI empty_hstrings_GetIids( IVectorView_HSTRING *iface, ULONG *c, IID **i )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<String>", 49, n );
+    static const IID iid_array[] =
+    {
+        IID_IVectorView_HSTRING,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 static HRESULT WINAPI empty_hstrings_GetTrustLevel( IVectorView_HSTRING *iface, TrustLevel *l )
 {
@@ -934,10 +1012,19 @@ static HRESULT WINAPI empty_lan_identifiers_QueryInterface( IVectorView_LanIdent
 }
 static ULONG WINAPI empty_lan_identifiers_AddRef( IVectorView_LanIdentifier *iface ) { return 2; }
 static ULONG WINAPI empty_lan_identifiers_Release( IVectorView_LanIdentifier *iface ) { return 1; }
-static HRESULT WINAPI empty_lan_identifiers_GetIids( IVectorView_LanIdentifier *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
-static HRESULT WINAPI empty_lan_identifiers_GetRuntimeClassName( IVectorView_LanIdentifier *iface, HSTRING *n )
+static HRESULT WINAPI empty_lan_identifiers_GetIids( IVectorView_LanIdentifier *iface, ULONG *c, IID **i )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<Windows.Networking.Connectivity.LanIdentifier>", 80, n );
+    static const IID iid_array[] =
+    {
+        IID_IVectorView_LanIdentifier,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 static HRESULT WINAPI empty_lan_identifiers_GetTrustLevel( IVectorView_LanIdentifier *iface, TrustLevel *l )
 {
@@ -1047,8 +1134,18 @@ static ULONG WINAPI connection_profile_Release( IConnectionProfile *iface )
 
 static HRESULT WINAPI connection_profile_GetIids( IConnectionProfile *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IConnectionProfile,
+        IID_IConnectionProfile2,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI connection_profile_GetRuntimeClassName( IConnectionProfile *iface, HSTRING *class_name )
@@ -1196,8 +1293,18 @@ static ULONG WINAPI connection_profile2_Release( IConnectionProfile2 *iface )
 
 static HRESULT WINAPI connection_profile2_GetIids( IConnectionProfile2 *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IConnectionProfile,
+        IID_IConnectionProfile2,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI connection_profile2_GetRuntimeClassName( IConnectionProfile2 *iface, HSTRING *class_name )
@@ -1376,8 +1483,17 @@ static ULONG WINAPI connection_profiles_view_Release( IVectorView_ConnectionProf
 
 static HRESULT WINAPI connection_profiles_view_GetIids( IVectorView_ConnectionProfile *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IVectorView_ConnectionProfile,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI connection_profiles_view_GetRuntimeClassName( IVectorView_ConnectionProfile *iface, HSTRING *class_name )
@@ -1519,8 +1635,18 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IActivationFactory,
+        IID_INetworkInformationStatics,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
