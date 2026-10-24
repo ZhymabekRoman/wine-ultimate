@@ -1,4 +1,4 @@
-MODULE    = frameworkudk.system.dll
+MODULE    = Microsoft.Internal.FrameworkUdk.System.dll
 IMPORTS   = kernel32
 
 SOURCES = \
