@@ -1495,3 +1495,38 @@ class it reads and the limit it compares against (Wine's commit accounting is th
 servers in the package dir — register their ActivatableClassIds via env-prep if the handlers stop being
 benign); (3) the `CoreWebView2.Profile` cast (`0x80004002`) downstream; (4) `Navigate`/renderer remain
 gated by (1).
+
+### Correction: the first numbers above were the tip baseline; the fix binaries reproduce them (2026-10-26)
+
+The gate/battery numbers in the section above were measured **before the fix binaries existed**:
+builds 1–4 of the factory work all failed to compile (the exit codes read at the time were the
+trailing `grep`'s, not `make`'s), so the prefix ran `31e2ed6ad` binaries. Compile defects found and
+fixed (`e715eaeec` wintypes, `c21e87719` windows.storage, `3e8b19730` windows.networking.hostname,
+`2a783e80a` windows.* follow-ups): `static const IID` arrays initialized from `extern const` `IID_`
+symbols (not compile-time constants outside the initguid unit — now local copies), fill-regex sites
+that swallowed the following function (one-line `GetIids` stubs — functions restored from tip),
+`**trust_level` writes, `IID_IFileIoStatics` → `IID_IFileIOStatics`, typed vtbls in the hand-written
+corewindow.c (now raw cast vtbls like the file's style), missing struct members where the substring
+guard matched the statics interface. The sweep also extended the aggregation in-scope: the
+`windows.storage/streams.c` factories (Buffer→`IBuffer`, InMemoryRandomAccessStream→
+`IRandomAccessStream`, DataReader→`IDataReader`, DataWriter→`IDataWriter`,
+RandomAccessStreamReference→`IRandomAccessStreamReference`) and the
+`windows.networking.hostname` HostName factory (`IHostName` + real factory/instance metadata).
+
+**Full build clean (`BUILD_RC=0`), prefix synced (7 DLLs updated, byte-verified).** The gate-2
+(150 s) numbers with the fix binaries are **identical to the baseline**: `rc=69` (dies ~45 s),
+one `RaiseFailFastException` event (`ff=33` lines, `e0464645=3`, `npar=0`), `originate=4` (same 3×
+`WhatsAppNative.*` classnotreg + 1× Profile cast), `createdwins=54`, `xamlwin=1`, `edge=244`
+lines/msedgewebview2 child loads, 4 mojo pipes, `Navigate=0`, no `--type=renderer`, screenshot
+blank (295 B solid 1280×1024). Battery 8×60: `rc=69`×5 / `rc=124`×3, `fatal=0`×8, `edge=2`×5/`0`×3
+(bimodal: runs that launch the WebView2 children die at ~45 s; the others live 60 s). The
+measured E_NOINTERFACE path is **confirmed closed at runtime**: the gate trace shows
+`RoGetActivationFactory(L"Windows.Foundation.Uri", {00000035-0000-0000-c000-000000000046})`
+resolving through `wintypes.dll` (was: QI refused by the factory). The wall is therefore exactly
+the task-4 branch: **the `NotifyOutOfMemory` fail-fast is independent of the activation surface**;
+it fires inside the H.NotifyIcon/gdiplus/Shell32 tray-build dispatch (UI-thread `+module,+process`
+tail: `gdiplus.dll` load → `H.NotifyIcon_…` window → `Shell32` → `api-ms-win-core-errorhandling-l1-1-2`
+→ failfast). Next: decode the CoreMessagingXP global callback (`0x1800e5150`) — the app-side
+commit-limit probe — and the `NtQuerySystemInformation` class/limit it compares (Wine's commit
+accounting remains the suspect). Pristine app hashes end-verified unchanged
+(24da83be/9353066e/9a42e19d/4cd3ffd5/799b8c69/4c0d799a).
