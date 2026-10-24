@@ -18,7 +18,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(storage);
 
@@ -100,9 +103,17 @@ static ULONG WINAPI buffer_Release( IBuffer *iface )
 
 static HRESULT WINAPI buffer_GetIids( IBuffer *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID iid_array[] =
+    {
+        IID_IBuffer,
+        IID_IBufferByteAccess,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
     return S_OK;
 }
 
@@ -224,6 +235,7 @@ struct buffer_statics
     IActivationFactory IActivationFactory_iface;
     IBufferFactory IBufferFactory_iface;
     IBufferStatics IBufferStatics_iface;
+    IBuffer IBuffer_iface;
     LONG ref;
 };
 
@@ -262,6 +274,16 @@ static HRESULT WINAPI buffer_factory_QueryInterface( IActivationFactory *iface, 
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IBuffer) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IBuffer ))
+    {
+        *out = &impl->IBuffer_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -281,9 +303,19 @@ static ULONG WINAPI buffer_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI buffer_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IBufferFactory,
+        IID_IBufferStatics,
+        IID_IBuffer,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -362,12 +394,35 @@ static const struct IBufferStaticsVtbl buffer_statics_methods_vtbl =
     buffer_statics_methods_CreateMemoryBufferOverIBuffer,
 };
 
+
+/* Windows aggregates the class default interface (IBuffer) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( buffer_def, IBuffer, struct buffer_statics, impl_from_IBuffer_buffer_def,
+                      IBuffer_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI buffer_def_get_Capacity( IBuffer *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI buffer_def_get_Length( IBuffer *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI buffer_def_put_Length( IBuffer *iface, UINT32 value ) { return E_FAIL; }
+
+static const struct IBufferVtbl buffer_def_v =
+{
+    buffer_def_QueryInterface,
+    buffer_def_AddRef,
+    buffer_def_Release,
+    buffer_def_GetIids,
+    buffer_def_GetRuntimeClassName,
+    buffer_def_GetTrustLevel,
+    buffer_def_get_Capacity,
+    buffer_def_get_Length,
+    buffer_def_put_Length,
+};
+
 static struct buffer_statics buffer_statics_obj =
 {
     {&buffer_factory_vtbl},
     {&buffer_factory_methods_vtbl},
     {&buffer_statics_methods_vtbl},
-    1,
+    {&buffer_def_v}, 1,
 };
 
 IActivationFactory *buffer_factory = &buffer_statics_obj.IActivationFactory_iface;
@@ -474,9 +529,21 @@ static ULONG WINAPI in_memory_stream_Release( IRandomAccessStream *iface )
 
 static HRESULT WINAPI in_memory_stream_GetIids( IRandomAccessStream *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID iid_array[] =
+    {
+        IID_IRandomAccessStream,
+        IID_IRandomAccessStreamWithContentType,
+        IID_IInputStream,
+        IID_IOutputStream,
+        IID_IContentTypeProvider,
+        IID_IClosable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
     return S_OK;
 }
 
@@ -831,6 +898,7 @@ HRESULT in_memory_stream_create_from_file( const WCHAR *path, IRandomAccessStrea
 struct in_memory_stream_factory_statics
 {
     IActivationFactory IActivationFactory_iface;
+    IRandomAccessStream IRandomAccessStream_iface;
     LONG ref;
 };
 
@@ -855,6 +923,16 @@ static HRESULT WINAPI in_memory_stream_factory_QueryInterface( IActivationFactor
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IRandomAccessStream) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IRandomAccessStream ))
+    {
+        *out = &impl->IRandomAccessStream_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -874,9 +952,17 @@ static ULONG WINAPI in_memory_stream_factory_Release( IActivationFactory *iface 
 
 static HRESULT WINAPI in_memory_stream_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IRandomAccessStream,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -916,10 +1002,45 @@ static const struct IActivationFactoryVtbl in_memory_stream_factory_vtbl =
     in_memory_stream_factory_ActivateInstance,
 };
 
+
+/* Windows aggregates the class default interface (IRandomAccessStream) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( ims_def, IRandomAccessStream, struct in_memory_stream_factory_statics, impl_from_IRandomAccessStream_ims_def,
+                      IRandomAccessStream_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI ims_def_get_Size( IRandomAccessStream *iface, UINT64 *value ) { return E_FAIL; }
+static HRESULT WINAPI ims_def_put_Size( IRandomAccessStream *iface, UINT64 value ) { return E_FAIL; }
+static HRESULT WINAPI ims_def_GetInputStreamAt( IRandomAccessStream *iface, UINT64 position, IInputStream **stream ) { return E_FAIL; }
+static HRESULT WINAPI ims_def_GetOutputStreamAt( IRandomAccessStream *iface, UINT64 position, IOutputStream **stream ) { return E_FAIL; }
+static HRESULT WINAPI ims_def_get_Position( IRandomAccessStream *iface, UINT64 *value ) { return E_FAIL; }
+static HRESULT WINAPI ims_def_Seek( IRandomAccessStream *iface, UINT64 position ) { return E_FAIL; }
+static HRESULT WINAPI ims_def_CloneStream( IRandomAccessStream *iface, IRandomAccessStream **stream ) { return E_FAIL; }
+static HRESULT WINAPI ims_def_get_CanRead( IRandomAccessStream *iface, boolean *value ) { return E_FAIL; }
+static HRESULT WINAPI ims_def_get_CanWrite( IRandomAccessStream *iface, boolean *value ) { return E_FAIL; }
+
+static const struct IRandomAccessStreamVtbl ims_def_v =
+{
+    ims_def_QueryInterface,
+    ims_def_AddRef,
+    ims_def_Release,
+    ims_def_GetIids,
+    ims_def_GetRuntimeClassName,
+    ims_def_GetTrustLevel,
+    ims_def_get_Size,
+    ims_def_put_Size,
+    ims_def_GetInputStreamAt,
+    ims_def_GetOutputStreamAt,
+    ims_def_get_Position,
+    ims_def_Seek,
+    ims_def_CloneStream,
+    ims_def_get_CanRead,
+    ims_def_get_CanWrite,
+};
+
 static struct in_memory_stream_factory_statics in_memory_stream_factory_obj =
 {
     {&in_memory_stream_factory_vtbl},
-    1,
+    {&ims_def_v}, 1,
 };
 
 IActivationFactory *in_memory_random_access_stream_factory = &in_memory_stream_factory_obj.IActivationFactory_iface;
@@ -1007,9 +1128,17 @@ static ULONG WINAPI data_reader_Release( IDataReader *iface )
 
 static HRESULT WINAPI data_reader_GetIids( IDataReader *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID iid_array[] =
+    {
+        IID_IDataReader,
+        IID_IClosable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
     return S_OK;
 }
 
@@ -1489,6 +1618,7 @@ struct data_reader_statics
     IActivationFactory IActivationFactory_iface;
     IDataReaderFactory IDataReaderFactory_iface;
     IDataReaderStatics IDataReaderStatics_iface;
+    IDataReader IDataReader_iface;
     LONG ref;
 };
 
@@ -1527,6 +1657,16 @@ static HRESULT WINAPI data_reader_factory_QueryInterface( IActivationFactory *if
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IDataReader) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IDataReader ))
+    {
+        *out = &impl->IDataReader_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -1546,9 +1686,19 @@ static ULONG WINAPI data_reader_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI data_reader_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IDataReaderFactory,
+        IID_IDataReaderStatics,
+        IID_IDataReader,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -1648,12 +1798,81 @@ static const struct IDataReaderStaticsVtbl data_reader_statics_methods_vtbl =
     data_reader_statics_methods_FromBuffer,
 };
 
+
+/* Windows aggregates the class default interface (IDataReader) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( dr_def, IDataReader, struct data_reader_statics, impl_from_IDataReader_dr_def,
+                      IDataReader_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI dr_def_get_UnconsumedBufferLength( IDataReader *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_get_UnicodeEncoding( IDataReader *iface, UnicodeEncoding *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_put_UnicodeEncoding( IDataReader *iface, UnicodeEncoding value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_get_ByteOrder( IDataReader *iface, ByteOrder *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_put_ByteOrder( IDataReader *iface, ByteOrder value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_get_InputStreamOptions( IDataReader *iface, InputStreamOptions *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_put_InputStreamOptions( IDataReader *iface, InputStreamOptions value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadByte( IDataReader *iface, BYTE *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadBytes( IDataReader *iface, UINT32 value_size, BYTE *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadBuffer( IDataReader *iface, UINT32 length, IBuffer **buffer ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadBoolean( IDataReader *iface, boolean *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadGuid( IDataReader *iface, GUID *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadInt16( IDataReader *iface, INT16 *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadInt32( IDataReader *iface, INT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadInt64( IDataReader *iface, INT64 *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadUInt16( IDataReader *iface, UINT16 *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadUInt32( IDataReader *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadUInt64( IDataReader *iface, UINT64 *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadSingle( IDataReader *iface, FLOAT *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadDouble( IDataReader *iface, DOUBLE *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadString( IDataReader *iface, UINT32 code_unit_count, HSTRING *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadDateTime( IDataReader *iface, DateTime *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_ReadTimeSpan( IDataReader *iface, TimeSpan *value ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_LoadAsync( IDataReader *iface, UINT32 count, __FIAsyncOperation_1_UINT32 **operation ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_DetachBuffer( IDataReader *iface, IBuffer **buffer ) { return E_FAIL; }
+static HRESULT WINAPI dr_def_DetachStream( IDataReader *iface, IInputStream **stream ) { return E_FAIL; }
+
+static const struct IDataReaderVtbl dr_def_v =
+{
+    dr_def_QueryInterface,
+    dr_def_AddRef,
+    dr_def_Release,
+    dr_def_GetIids,
+    dr_def_GetRuntimeClassName,
+    dr_def_GetTrustLevel,
+    dr_def_get_UnconsumedBufferLength,
+    dr_def_get_UnicodeEncoding,
+    dr_def_put_UnicodeEncoding,
+    dr_def_get_ByteOrder,
+    dr_def_put_ByteOrder,
+    dr_def_get_InputStreamOptions,
+    dr_def_put_InputStreamOptions,
+    dr_def_ReadByte,
+    dr_def_ReadBytes,
+    dr_def_ReadBuffer,
+    dr_def_ReadBoolean,
+    dr_def_ReadGuid,
+    dr_def_ReadInt16,
+    dr_def_ReadInt32,
+    dr_def_ReadInt64,
+    dr_def_ReadUInt16,
+    dr_def_ReadUInt32,
+    dr_def_ReadUInt64,
+    dr_def_ReadSingle,
+    dr_def_ReadDouble,
+    dr_def_ReadString,
+    dr_def_ReadDateTime,
+    dr_def_ReadTimeSpan,
+    dr_def_LoadAsync,
+    dr_def_DetachBuffer,
+    dr_def_DetachStream,
+};
+
 static struct data_reader_statics data_reader_statics_obj =
 {
     {&data_reader_factory_vtbl},
     {&data_reader_factory_methods_vtbl},
     {&data_reader_statics_methods_vtbl},
-    1,
+    {&dr_def_v}, 1,
 };
 
 IActivationFactory *data_reader_factory = &data_reader_statics_obj.IActivationFactory_iface;
@@ -1739,9 +1958,17 @@ static ULONG WINAPI data_writer_Release( IDataWriter *iface )
 
 static HRESULT WINAPI data_writer_GetIids( IDataWriter *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID iid_array[] =
+    {
+        IID_IDataWriter,
+        IID_IClosable,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
     return S_OK;
 }
 
@@ -2192,6 +2419,7 @@ struct data_writer_factory_statics
 {
     IActivationFactory IActivationFactory_iface;
     IDataWriterFactory IDataWriterFactory_iface;
+    IDataWriter IDataWriter_iface;
     LONG ref;
 };
 
@@ -2223,6 +2451,16 @@ static HRESULT WINAPI data_writer_factory_QueryInterface( IActivationFactory *if
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IDataWriter) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IDataWriter ))
+    {
+        *out = &impl->IDataWriter_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -2242,9 +2480,18 @@ static ULONG WINAPI data_writer_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI data_writer_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IDataWriterFactory,
+        IID_IDataWriter,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -2304,11 +2551,82 @@ static const struct IDataWriterFactoryVtbl data_writer_factory_methods_vtbl =
     data_writer_factory_methods_CreateDataWriter,
 };
 
+
+/* Windows aggregates the class default interface (IDataWriter) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( dw_def, IDataWriter, struct data_writer_factory_statics, impl_from_IDataWriter_dw_def,
+                      IDataWriter_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI dw_def_get_UnstoredBufferLength( IDataWriter *iface, UINT32 *value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_get_UnicodeEncoding( IDataWriter *iface, UnicodeEncoding *value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_put_UnicodeEncoding( IDataWriter *iface, UnicodeEncoding value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_get_ByteOrder( IDataWriter *iface, ByteOrder *value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_put_ByteOrder( IDataWriter *iface, ByteOrder value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteByte( IDataWriter *iface, BYTE value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteBytes( IDataWriter *iface, UINT32 value_size, BYTE *value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteBuffer( IDataWriter *iface, IBuffer *buffer ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteBufferRange( IDataWriter *iface, IBuffer *buffer, UINT32 start, UINT32 count ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteBoolean( IDataWriter *iface, boolean value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteGuid( IDataWriter *iface, GUID value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteInt16( IDataWriter *iface, INT16 value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteInt32( IDataWriter *iface, INT32 value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteInt64( IDataWriter *iface, INT64 value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteUInt16( IDataWriter *iface, UINT16 value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteUInt32( IDataWriter *iface, UINT32 value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteUInt64( IDataWriter *iface, UINT64 value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteSingle( IDataWriter *iface, FLOAT value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteDouble( IDataWriter *iface, DOUBLE value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteDateTime( IDataWriter *iface, DateTime value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteTimeSpan( IDataWriter *iface, TimeSpan value ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_WriteString( IDataWriter *iface, HSTRING value, UINT32 *code_unit_count ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_MeasureString( IDataWriter *iface, HSTRING value, UINT32 *code_unit_count ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_StoreAsync( IDataWriter *iface, __FIAsyncOperation_1_UINT32 **operation ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_FlushAsync( IDataWriter *iface, __FIAsyncOperation_1_boolean **operation ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_DetachBuffer( IDataWriter *iface, IBuffer **buffer ) { return E_FAIL; }
+static HRESULT WINAPI dw_def_DetachStream( IDataWriter *iface, IOutputStream **output_stream ) { return E_FAIL; }
+
+static const struct IDataWriterVtbl dw_def_v =
+{
+    dw_def_QueryInterface,
+    dw_def_AddRef,
+    dw_def_Release,
+    dw_def_GetIids,
+    dw_def_GetRuntimeClassName,
+    dw_def_GetTrustLevel,
+    dw_def_get_UnstoredBufferLength,
+    dw_def_get_UnicodeEncoding,
+    dw_def_put_UnicodeEncoding,
+    dw_def_get_ByteOrder,
+    dw_def_put_ByteOrder,
+    dw_def_WriteByte,
+    dw_def_WriteBytes,
+    dw_def_WriteBuffer,
+    dw_def_WriteBufferRange,
+    dw_def_WriteBoolean,
+    dw_def_WriteGuid,
+    dw_def_WriteInt16,
+    dw_def_WriteInt32,
+    dw_def_WriteInt64,
+    dw_def_WriteUInt16,
+    dw_def_WriteUInt32,
+    dw_def_WriteUInt64,
+    dw_def_WriteSingle,
+    dw_def_WriteDouble,
+    dw_def_WriteDateTime,
+    dw_def_WriteTimeSpan,
+    dw_def_WriteString,
+    dw_def_MeasureString,
+    dw_def_StoreAsync,
+    dw_def_FlushAsync,
+    dw_def_DetachBuffer,
+    dw_def_DetachStream,
+};
+
 static struct data_writer_factory_statics data_writer_factory_obj =
 {
     {&data_writer_factory_vtbl},
     {&data_writer_factory_methods_vtbl},
-    1,
+    {&dw_def_v}, 1,
 };
 
 IActivationFactory *data_writer_factory = &data_writer_factory_obj.IActivationFactory_iface;
@@ -2373,9 +2691,16 @@ static ULONG WINAPI random_access_stream_reference_Release( IRandomAccessStreamR
 
 static HRESULT WINAPI random_access_stream_reference_GetIids( IRandomAccessStreamReference *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID iid_array[] =
+    {
+        IID_IRandomAccessStreamReference,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
     return S_OK;
 }
 
@@ -2456,6 +2781,7 @@ struct random_access_stream_reference_statics
 {
     IActivationFactory IActivationFactory_iface;
     IRandomAccessStreamReferenceStatics IRandomAccessStreamReferenceStatics_iface;
+    IRandomAccessStreamReference IRandomAccessStreamReference_iface;
     LONG ref;
 };
 
@@ -2487,6 +2813,16 @@ static HRESULT WINAPI stream_ref_factory_QueryInterface( IActivationFactory *ifa
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IRandomAccessStreamReference) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IRandomAccessStreamReference ))
+    {
+        *out = &impl->IRandomAccessStreamReference_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     WARN( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -2506,9 +2842,18 @@ static ULONG WINAPI stream_ref_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI stream_ref_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IRandomAccessStreamReferenceStatics,
+        IID_IRandomAccessStreamReference,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
     return S_OK;
 }
 
@@ -2600,11 +2945,30 @@ static const struct IRandomAccessStreamReferenceStaticsVtbl stream_ref_statics_v
     stream_ref_statics_CreateFromStream,
 };
 
+
+/* Windows aggregates the class default interface (IRandomAccessStreamReference) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( sr_def, IRandomAccessStreamReference, struct random_access_stream_reference_statics, impl_from_IRandomAccessStreamReference_sr_def,
+                      IRandomAccessStreamReference_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI sr_def_OpenReadAsync( IRandomAccessStreamReference *iface, __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType **operation ) { return E_FAIL; }
+
+static const struct IRandomAccessStreamReferenceVtbl sr_def_v =
+{
+    sr_def_QueryInterface,
+    sr_def_AddRef,
+    sr_def_Release,
+    sr_def_GetIids,
+    sr_def_GetRuntimeClassName,
+    sr_def_GetTrustLevel,
+    sr_def_OpenReadAsync,
+};
+
 static struct random_access_stream_reference_statics stream_ref_statics_obj =
 {
     {&stream_ref_factory_vtbl},
     {&stream_ref_statics_vtbl},
-    1,
+    {&sr_def_v}, 1,
 };
 
 IActivationFactory *random_access_stream_reference_factory = &stream_ref_statics_obj.IActivationFactory_iface;

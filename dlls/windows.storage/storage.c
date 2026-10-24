@@ -190,7 +190,7 @@ static ULONG WINAPI storage_file_Release( IStorageFile *iface )
 
 static HRESULT WINAPI storage_file_GetIids( IStorageFile *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID instance_iids[] =
+    IID instance_iids[] =
     {
         IID_IStorageFile,
         IID_IStorageFile2,
@@ -793,7 +793,7 @@ static ULONG WINAPI storage_file_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI storage_file_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IStorageFileStatics,
@@ -1077,7 +1077,7 @@ static ULONG WINAPI storage_folder_Release( IStorageFolder *iface )
 
 static HRESULT WINAPI storage_folder_GetIids( IStorageFolder *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID instance_iids[] =
+    IID instance_iids[] =
     {
         IID_IStorageFolder,
         IID_IStorageItem,
@@ -1521,7 +1521,7 @@ static ULONG WINAPI storage_folder_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI storage_folder_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
         IID_IStorageFolderStatics,
@@ -1713,10 +1713,10 @@ static ULONG WINAPI file_io_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI file_io_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    static const IID factory_iids[] =
+    IID factory_iids[] =
     {
         IID_IActivationFactory,
-        IID_IFileIoStatics,
+        IID_IFileIOStatics,
     };
     IID *array;
 
