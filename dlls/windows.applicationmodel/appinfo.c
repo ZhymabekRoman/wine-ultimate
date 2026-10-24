@@ -422,8 +422,17 @@ static ULONG WINAPI app_display_info_Release( IAppDisplayInfo *iface )
 
 static HRESULT WINAPI app_display_info_GetIids( IAppDisplayInfo *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IAppDisplayInfo,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI app_display_info_GetRuntimeClassName( IAppDisplayInfo *iface, HSTRING *class_name )
@@ -740,8 +749,20 @@ static ULONG WINAPI appinfo_Release( IAppInfo *iface )
 
 static HRESULT WINAPI appinfo_GetIids( IAppInfo *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IAppInfo,
+        IID_IAppInfo2,
+        IID_IAppInfo3,
+        IID_IAppInfo4,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI appinfo_GetRuntimeClassName( IAppInfo *iface, HSTRING *class_name )
@@ -978,6 +999,16 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IAppInfo) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IAppInfo ))
+    {
+        *out = &impl->IAppInfo_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -999,8 +1030,19 @@ static ULONG WINAPI activation_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI activation_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IAppInfoStatics,
+        IID_IAppInfo,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI activation_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
@@ -1089,11 +1131,36 @@ static const struct IAppInfoStaticsVtbl appinfo_statics_vtbl =
     appinfo_statics_GetFromAppUserModelIdForUser,
 };
 
+
+/* Windows aggregates the class default interface (IAppInfo) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( factory_def, IAppInfo, struct appinfo_statics, impl_from_IAppInfo_factory_def,
+                      IAppInfo_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI factory_def_get_Id( IAppInfo *iface, HSTRING *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_AppUserModelId( IAppInfo *iface, HSTRING *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_DisplayInfo( IAppInfo *iface, IAppDisplayInfo **value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_PackageFamilyName( IAppInfo *iface, HSTRING *value ) { return E_FAIL; }
+
+static const struct IAppInfoVtbl factory_def_vtbl =
+{
+    factory_def_QueryInterface,
+    factory_def_AddRef,
+    factory_def_Release,
+    factory_def_GetIids,
+    factory_def_GetRuntimeClassName,
+    factory_def_GetTrustLevel,
+    factory_def_get_Id,
+    factory_def_get_AppUserModelId,
+    factory_def_get_DisplayInfo,
+    factory_def_get_PackageFamilyName,
+};
+
 static struct appinfo_statics appinfo_statics =
 {
     {&activation_factory_vtbl},
     {&appinfo_statics_vtbl},
-    1,
+    {&factory_def_vtbl}, 1,
 };
 
 IActivationFactory *appinfo_factory = &appinfo_statics.IActivationFactory_iface;

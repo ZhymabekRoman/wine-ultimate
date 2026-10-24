@@ -17,7 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(model);
@@ -86,8 +89,19 @@ static ULONG WINAPI activation_factory_Release(IActivationFactory *iface)
 
 static HRESULT WINAPI activation_factory_GetIids(IActivationFactory *iface, ULONG *iid_count, IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IActivationFactory,
+        IID_IDesignModeStatics,
+        IID_IDesignModeStatics2,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI activation_factory_GetRuntimeClassName(IActivationFactory *iface, HSTRING *class_name)

@@ -17,7 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 #include "wine/debug.h"
 
 #include "pathcch.h"
@@ -59,6 +62,16 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IPackage) on the factory object
+     * (CsWinRT probes the factory for the class interfaces). The factory is not an
+     * instance; instance method calls fail. */
+    if (IsEqualGUID( iid, &IID_IPackage ))
+    {
+        *out = &impl->IPackage_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -82,20 +95,30 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IPackageStatics,
+        IID_IPackage,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_Package, lstrlenW( RuntimeClass_Windows_ApplicationModel_Package ), class_name );
 }
 
 static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    **trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -177,8 +200,18 @@ static ULONG WINAPI storage_folder_Release( IStorageFolder *iface )
 
 static HRESULT WINAPI storage_folder_GetIids( IStorageFolder *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IStorageFolder,
+        IID_IStorageItem,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI storage_folder_GetRuntimeClassName( IStorageFolder *iface, HSTRING *class_name )
@@ -426,8 +459,17 @@ static ULONG WINAPI package_Release( IPackage *iface )
 
 static HRESULT WINAPI package_GetIids( IPackage *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID iid_array[] =
+    {
+        IID_IPackage,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI package_GetRuntimeClassName( IPackage *iface, HSTRING *class_name )
@@ -482,10 +524,19 @@ static ULONG WINAPI package_id_Release( IPackageId *iface )
     return ref;
 }
 
-static HRESULT WINAPI package_id_GetIids( IPackageId *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
-static HRESULT WINAPI package_id_GetRuntimeClassName( IPackageId *iface, HSTRING *name )
+static HRESULT WINAPI package_id_GetIids( IPackageId *iface, ULONG *count, IID **iids )
 {
-    return WindowsCreateString( L"Windows.ApplicationModel.PackageId", 34, name );
+    static const IID iid_array[] =
+    {
+        IID_IPackageId,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
 }
 static HRESULT WINAPI package_id_GetTrustLevel( IPackageId *iface, TrustLevel *level )
 {
@@ -663,11 +714,36 @@ static const struct IPackageStaticsVtbl package_statics_vtbl =
     package_statics_get_Current,
 };
 
+
+/* Windows aggregates the class default interface (IPackage) on the factory object;
+ * the factory is not an instance: method calls fail. */
+DEFINE_IINSPECTABLE_( factory_def, IPackage, struct package_statics, impl_from_IPackage_factory_def,
+                      IPackage_iface, &impl->IActivationFactory_iface )
+
+static HRESULT WINAPI factory_def_get_Id( IPackage *iface, IPackageId **value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_InstalledLocation( IPackage *iface, IStorageFolder **value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_IsFramework( IPackage *iface, boolean *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_get_Dependencies( IPackage *iface, __FIVectorView_1_Windows__CApplicationModel__CPackage **value ) { return E_FAIL; }
+
+static const struct IPackageVtbl factory_def_vtbl =
+{
+    factory_def_QueryInterface,
+    factory_def_AddRef,
+    factory_def_Release,
+    factory_def_GetIids,
+    factory_def_GetRuntimeClassName,
+    factory_def_GetTrustLevel,
+    factory_def_get_Id,
+    factory_def_get_InstalledLocation,
+    factory_def_get_IsFramework,
+    factory_def_get_Dependencies,
+};
+
 static struct package_statics package_statics =
 {
     {&factory_vtbl},
     {&package_statics_vtbl},
-    1,
+    {&factory_def_vtbl}, 1,
 };
 
 IActivationFactory *package_factory = &package_statics.IActivationFactory_iface;

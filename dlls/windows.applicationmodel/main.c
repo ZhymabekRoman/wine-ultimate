@@ -18,7 +18,10 @@
  */
 
 #include "initguid.h"
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 
 #include "wine/debug.h"
 
