@@ -17,7 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <string.h>
+
 #include "private.h"
+#include "objbase.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(locale);
 
@@ -71,8 +74,19 @@ static ULONG WINAPI geographic_region_Release( IGeographicRegion *iface )
 
 static HRESULT WINAPI geographic_region_GetIids( IGeographicRegion *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID instance_iids[] =
+    {
+        IID_IGeographicRegion,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, instance_iids, sizeof(instance_iids) );
+    *iid_count = ARRAY_SIZE(instance_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI geographic_region_GetRuntimeClassName( IGeographicRegion *iface, HSTRING *class_name )
@@ -156,6 +170,7 @@ struct geographic_region_factory
 {
     IActivationFactory IActivationFactory_iface;
     IGeographicRegionFactory IGeographicRegionFactory_iface;
+    IGeographicRegion IGeographicRegion_iface;
     LONG ref;
 };
 
@@ -185,6 +200,13 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
         return S_OK;
     }
 
+    /* Windows aggregates the class default interface (IGeographicRegion) on the factory object. */
+    if (IsEqualGUID( iid, &IID_IGeographicRegion ))
+    {
+        IInspectable_AddRef( (*out = &factory->IGeographicRegion_iface) );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -208,20 +230,34 @@ static ULONG WINAPI activation_factory_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI activation_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID factory_iids[] =
+    {
+        IID_IActivationFactory,
+        IID_IGeographicRegionFactory,
+        IID_IGeographicRegion,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, factory_iids, sizeof(factory_iids) );
+    *iid_count = ARRAY_SIZE(factory_iids);
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI activation_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Globalization.GeographicRegion";
+
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
 }
 
 static HRESULT WINAPI activation_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI activation_factory_ActivateInstance( IActivationFactory *iface, IInspectable **out )
@@ -273,10 +309,49 @@ static const struct IGeographicRegionFactoryVtbl geographic_region_factory_vtbl 
     geographic_region_factory_CreateGeographicRegion,
 };
 
+/*
+ * Windows aggregates the class default interface (IGeographicRegion) on the
+ * factory object: QI for IID_IGeographicRegion on the factory succeeds
+ * (CsWinRT probes the factory for the class interfaces). The factory is not an
+ * instance; instance method calls fail.
+ */
+DEFINE_IINSPECTABLE_( activation_factory_def, IGeographicRegion, struct geographic_region_factory,
+                      impl_from_IGeographicRegion_factory, IGeographicRegion_iface,
+                      &impl->IActivationFactory_iface )
+
+#define GEOGRAPHIC_REGION_FACTORY_STUB( name, proto ) \
+    static HRESULT WINAPI activation_factory_def_##name proto { return E_FAIL; }
+
+GEOGRAPHIC_REGION_FACTORY_STUB( get_Code, ( IGeographicRegion *iface, HSTRING *value ) )
+GEOGRAPHIC_REGION_FACTORY_STUB( get_CodeTwoLetter, ( IGeographicRegion *iface, HSTRING *value ) )
+GEOGRAPHIC_REGION_FACTORY_STUB( get_CodeThreeLetter, ( IGeographicRegion *iface, HSTRING *value ) )
+GEOGRAPHIC_REGION_FACTORY_STUB( get_CodeThreeDigit, ( IGeographicRegion *iface, HSTRING *value ) )
+GEOGRAPHIC_REGION_FACTORY_STUB( get_DisplayName, ( IGeographicRegion *iface, HSTRING *value ) )
+GEOGRAPHIC_REGION_FACTORY_STUB( get_NativeName, ( IGeographicRegion *iface, HSTRING *value ) )
+GEOGRAPHIC_REGION_FACTORY_STUB( get_CurrenciesInUse, ( IGeographicRegion *iface, __FIVectorView_1_HSTRING **value ) )
+
+static const struct IGeographicRegionVtbl activation_factory_def_vtbl =
+{
+    activation_factory_def_QueryInterface,
+    activation_factory_def_AddRef,
+    activation_factory_def_Release,
+    activation_factory_def_GetIids,
+    activation_factory_def_GetRuntimeClassName,
+    activation_factory_def_GetTrustLevel,
+    activation_factory_def_get_Code,
+    activation_factory_def_get_CodeTwoLetter,
+    activation_factory_def_get_CodeThreeLetter,
+    activation_factory_def_get_CodeThreeDigit,
+    activation_factory_def_get_DisplayName,
+    activation_factory_def_get_NativeName,
+    activation_factory_def_get_CurrenciesInUse,
+};
+
 static struct geographic_region_factory factory =
 {
     {&activation_factory_vtbl},
     {&geographic_region_factory_vtbl},
+    {&activation_factory_def_vtbl},
     1,
 };
 
