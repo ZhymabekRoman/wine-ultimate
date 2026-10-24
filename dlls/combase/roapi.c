@@ -562,38 +562,8 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
  */
 void WINAPI RoFailFastWithErrorContextInternal2(HRESULT error, ULONG exception_count, void *information)
 {
-    void *frames[32];
-    USHORT n_frames, k;
-    ULONG i, j;
-    FIXME("%#lx, %lu, %p stub.\n", error, exception_count, information);
-    n_frames = RtlCaptureStackBackTrace(0, 32, frames, NULL);
-    for (k = 0; k < n_frames; k++)
-        FIXME("  backtrace[%u] = %p\n", k, frames[k]);
-    if (information && exception_count)
-    {
-        void **ptrs = (void **)information;
-        for (i = 0; i < exception_count; i++)
-        {
-            void *p = ptrs[i];
-            if (p)
-            {
-                ULONG64 *q = (ULONG64 *)p;
-                FIXME("  stowed[%lu] at %p:\n", i, p);
-                for (j = 0; j < 8; j++)
-                    FIXME("    [%02lu] %016llx\n", j, q[j]);
-                if (q[4])
-                {
-                    ULONG64 *bt = (ULONG64 *)q[4];
-                    DWORD count = (DWORD)(q[3] & 0xffffffff);
-                    DWORD s_idx;
-                    ERR("  stowed stack trace (count %lu):\n", count);
-                    for (s_idx = 0; s_idx < count && s_idx < 16; s_idx++)
-                        ERR("    stowed_bt[%lu] = %016llx\n", s_idx, bt[s_idx]);
-                }
-            }
-        }
-    }
-    RaiseFailFastException(NULL, NULL, 0);
+    FIXME( "%#lx, %lu, %p: stowed exception information is not reported\n", error, exception_count, information );
+    RaiseFailFastException( NULL, NULL, 0 );
 }
 
 /***********************************************************************
@@ -652,14 +622,240 @@ HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONF
     return S_OK;
 }
 
+/*
+ * WinRT restricted error info: the per-thread error record that language exceptions
+ * originate into, and that error propagation across WinRT boundaries reads back.
+ */
+
+/* IRestrictedErrorInfo v2 (GetErrorDetails, GetReference, ResolveReference). */
+static const GUID IID_IRestrictedErrorInfo2 = {0x82ba70a5, 0x79a1, 0x4fe8, {0x8c, 0xe5, 0x13, 0xe5, 0x72, 0x33, 0x9f, 0x04}};
+
+struct restricted_error_info
+{
+    IRestrictedErrorInfo IRestrictedErrorInfo_iface;
+    LONG refcount;
+    HRESULT error;
+    BSTR description;
+    BSTR restricted_description;
+    BSTR capability;
+    IUnknown *language_exception;
+};
+
+static inline struct restricted_error_info *impl_from_IRestrictedErrorInfo( IRestrictedErrorInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct restricted_error_info, IRestrictedErrorInfo_iface );
+}
+
+static HRESULT WINAPI restricted_error_info_QueryInterface( IRestrictedErrorInfo *iface, REFIID iid, void **out )
+{
+    struct restricted_error_info *impl = impl_from_IRestrictedErrorInfo( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( &IID_IUnknown, iid ) ||
+        IsEqualGUID( &IID_IRestrictedErrorInfo, iid ) ||
+        IsEqualGUID( &IID_IRestrictedErrorInfo2, iid ))
+    {
+        *out = &impl->IRestrictedErrorInfo_iface;
+        IRestrictedErrorInfo_AddRef( *out );
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI restricted_error_info_AddRef( IRestrictedErrorInfo *iface )
+{
+    struct restricted_error_info *impl = impl_from_IRestrictedErrorInfo( iface );
+    return InterlockedIncrement( &impl->refcount );
+}
+
+static ULONG WINAPI restricted_error_info_Release( IRestrictedErrorInfo *iface )
+{
+    struct restricted_error_info *impl = impl_from_IRestrictedErrorInfo( iface );
+    ULONG ref = InterlockedDecrement( &impl->refcount );
+
+    if (!ref)
+    {
+        if (impl->language_exception) IUnknown_Release( impl->language_exception );
+        SysFreeString( impl->description );
+        SysFreeString( impl->restricted_description );
+        SysFreeString( impl->capability );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI restricted_error_info_GetErrorDetails( IRestrictedErrorInfo *iface, BSTR *desc,
+                                                             HRESULT *error, BSTR *restricted, BSTR *sid )
+{
+    struct restricted_error_info *impl = impl_from_IRestrictedErrorInfo( iface );
+
+    TRACE( "iface %p, desc %p, error %p, restricted %p, sid %p.\n", iface, desc, error, restricted, sid );
+
+    if (!desc || !error || !restricted || !sid) return E_INVALIDARG;
+
+    *desc       = impl->description           ? SysAllocString( impl->description )           : NULL;
+    *restricted = impl->restricted_description ? SysAllocString( impl->restricted_description ) : NULL;
+    *sid        = impl->capability            ? SysAllocString( impl->capability )            : NULL;
+    *error      = impl->error;
+
+    return (impl->description || impl->restricted_description) ? S_OK : S_FALSE;
+}
+
+static HRESULT WINAPI restricted_error_info_GetReference( IRestrictedErrorInfo *iface, BSTR *reference )
+{
+    TRACE( "iface %p, reference %p.\n", iface, reference );
+
+    if (!reference) return E_INVALIDARG;
+    *reference = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI restricted_error_info_ResolveReference( IRestrictedErrorInfo *iface, HSTRING reference,
+                                                              BSTR *desc )
+{
+    TRACE( "iface %p, reference %s, desc %p.\n", iface, debugstr_hstring( reference ), desc );
+
+    if (!desc) return E_INVALIDARG;
+    *desc = NULL;
+    return S_FALSE;
+}
+
+/*
+ * The v2 interface extends v1 with ResolveReference; a single object answers both,
+ * since the additional method is appended to the vtable.
+ */
+static const struct restricted_error_info_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IRestrictedErrorInfo *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IRestrictedErrorInfo *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IRestrictedErrorInfo *iface );
+    HRESULT (STDMETHODCALLTYPE *GetErrorDetails)( IRestrictedErrorInfo *iface, BSTR *desc, HRESULT *error,
+                                                  BSTR *restricted, BSTR *sid );
+    HRESULT (STDMETHODCALLTYPE *GetReference)( IRestrictedErrorInfo *iface, BSTR *reference );
+    HRESULT (STDMETHODCALLTYPE *ResolveReference)( IRestrictedErrorInfo *iface, HSTRING reference, BSTR *desc );
+}
+restricted_error_info_vtbl =
+{
+    restricted_error_info_QueryInterface,
+    restricted_error_info_AddRef,
+    restricted_error_info_Release,
+    restricted_error_info_GetErrorDetails,
+    restricted_error_info_GetReference,
+    restricted_error_info_ResolveReference,
+};
+
+static HRESULT create_restricted_error_info( HRESULT error, const WCHAR *description, const WCHAR *restricted,
+                                             IUnknown *language_exception, IRestrictedErrorInfo **out )
+{
+    struct restricted_error_info *impl;
+
+    if (!out) return E_INVALIDARG;
+    *out = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+
+    impl->IRestrictedErrorInfo_iface.lpVtbl = (const IRestrictedErrorInfoVtbl *)&restricted_error_info_vtbl;
+    impl->refcount = 1;
+    impl->error = error;
+    if (description) impl->description = SysAllocString( description );
+    if (restricted) impl->restricted_description = SysAllocString( restricted );
+    if (language_exception)
+    {
+        impl->language_exception = language_exception;
+        IUnknown_AddRef( language_exception );
+    }
+
+    *out = &impl->IRestrictedErrorInfo_iface;
+    return S_OK;
+}
+
+/* The restricted error info is stored per thread; the store is consulted by the
+ * propagation helpers and by COM proxies crossing apartment boundaries. */
+static RTL_SRWLOCK error_info_lock = RTL_SRWLOCK_INIT;
+
+struct error_info_entry
+{
+    ULONG tid;
+    IRestrictedErrorInfo *info;
+};
+
+static struct error_info_entry *error_info_entries;
+static ULONG error_info_count, error_info_alloc;
+
+static void store_thread_error_info( IRestrictedErrorInfo *info )
+{
+    ULONG tid = HandleToUlong( NtCurrentTeb()->ClientId.UniqueThread );
+    IRestrictedErrorInfo *old = NULL;
+    ULONG i;
+
+    RtlAcquireSRWLockExclusive( &error_info_lock );
+
+    for (i = 0; i < error_info_count; i++)
+    {
+        if (error_info_entries[i].tid == tid)
+        {
+            old = error_info_entries[i].info;
+            error_info_entries[i].info = info;
+            RtlReleaseSRWLockExclusive( &error_info_lock );
+            if (old) IRestrictedErrorInfo_Release( old );
+            return;
+        }
+    }
+
+    if (error_info_count == error_info_alloc)
+    {
+        ULONG alloc = error_info_alloc ? error_info_alloc * 2 : 8;
+        struct error_info_entry *entries = realloc( error_info_entries, alloc * sizeof(*entries) );
+        if (!entries)
+        {
+            RtlReleaseSRWLockExclusive( &error_info_lock );
+            if (info) IRestrictedErrorInfo_Release( info );
+            return;
+        }
+        error_info_entries = entries;
+        error_info_alloc = alloc;
+    }
+
+    error_info_entries[error_info_count].tid  = tid;
+    error_info_entries[error_info_count].info = info;
+    error_info_count++;
+    RtlReleaseSRWLockExclusive( &error_info_lock );
+}
+
+static IRestrictedErrorInfo *take_thread_error_info( void )
+{
+    ULONG tid = HandleToUlong( NtCurrentTeb()->ClientId.UniqueThread );
+    IRestrictedErrorInfo *info = NULL;
+    ULONG i;
+
+    RtlAcquireSRWLockExclusive( &error_info_lock );
+
+    for (i = 0; i < error_info_count; i++)
+    {
+        if (error_info_entries[i].tid == tid)
+        {
+            info = error_info_entries[i].info;
+            error_info_entries[i].info = NULL;
+            break;
+        }
+    }
+
+    RtlReleaseSRWLockExclusive( &error_info_lock );
+    return info;
+}
+
 /***********************************************************************
  *      GetRestrictedErrorInfo (combase.@)
  */
 HRESULT WINAPI GetRestrictedErrorInfo(IRestrictedErrorInfo **info)
 {
     TRACE( "(%p)\n", info );
-    if (info) *info = NULL;
-    return S_FALSE;
+
+    if (!info) return E_POINTER;
+    if (!(*info = take_thread_error_info())) return S_FALSE;
+    return S_OK;
 }
 
 /***********************************************************************
@@ -668,6 +864,9 @@ HRESULT WINAPI GetRestrictedErrorInfo(IRestrictedErrorInfo **info)
 HRESULT WINAPI SetRestrictedErrorInfo(IRestrictedErrorInfo *info)
 {
     TRACE( "(%p)\n", info );
+
+    if (info) IRestrictedErrorInfo_AddRef( info );
+    store_thread_error_info( info );
     return S_OK;
 }
 
@@ -676,40 +875,21 @@ HRESULT WINAPI SetRestrictedErrorInfo(IRestrictedErrorInfo *info)
  */
 BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknown *language_exception)
 {
-    TRACE("error %#lx, message %s, exception %p\n", error, debugstr_hstring(message), language_exception);
-    if (language_exception)
-    {
-        IRestrictedErrorInfo *restricted;
-        IErrorInfo *error_info;
-        static const GUID IID_IRestrictedErrorInfo = {0x82ba70a5, 0x79a1, 0x4fe8, {0x8c, 0xe5, 0x13, 0xe5, 0x72, 0x33, 0x9f, 0x04}};
-        static const GUID IID_IErrorInfo = {0x1cf2b43f, 0x97b2, 0x11cf, {0xb8, 0xf2, 0x00, 0xaa, 0x00, 0x6e, 0x34, 0xdb}};
+    IRestrictedErrorInfo *info;
+    BOOL ret = FALSE;
 
-        if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID_IRestrictedErrorInfo, (void **)&restricted)))
-        {
-            BSTR desc = NULL, rest = NULL, cap = NULL;
-            HRESULT code = 0;
-            if (SUCCEEDED(IRestrictedErrorInfo_GetErrorDetails(restricted, &desc, &code, &rest, &cap)))
-            {
-                TRACE("  RestrictedError: desc=%s, code=%#lx, restricted=%s\n",
-                      wine_dbgstr_w(desc), code, wine_dbgstr_w(rest));
-                SysFreeString(desc);
-                SysFreeString(rest);
-                SysFreeString(cap);
-            }
-            IRestrictedErrorInfo_Release(restricted);
-        }
-        else if (SUCCEEDED(IUnknown_QueryInterface(language_exception, &IID_IErrorInfo, (void **)&error_info)))
-        {
-            BSTR desc = NULL;
-            if (SUCCEEDED(IErrorInfo_GetDescription(error_info, &desc)))
-            {
-                TRACE("  ErrorInfo: desc=%s\n", wine_dbgstr_w(desc));
-                SysFreeString(desc);
-            }
-            IErrorInfo_Release(error_info);
-        }
+    TRACE( "error %#lx, message %s, exception %p\n", error, debugstr_hstring( message ), language_exception );
+
+    if (!language_exception) return FALSE;
+
+    if (SUCCEEDED( create_restricted_error_info( error, WindowsGetStringRawBuffer( message, NULL ), NULL,
+                                                 language_exception, &info ) ))
+    {
+        SetRestrictedErrorInfo( info );
+        IRestrictedErrorInfo_Release( info );
+        ret = TRUE;
     }
-    return FALSE;
+    return ret;
 }
 
 /***********************************************************************
@@ -717,8 +897,19 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
  */
 BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
 {
-    TRACE("%#lx, %s\n", error, debugstr_hstring(message));
-    return FALSE;
+    IRestrictedErrorInfo *info;
+    BOOL ret = FALSE;
+
+    TRACE( "%#lx, %s\n", error, debugstr_hstring( message ) );
+
+    if (SUCCEEDED( create_restricted_error_info( error, WindowsGetStringRawBuffer( message, NULL ), NULL,
+                                                 NULL, &info ) ))
+    {
+        SetRestrictedErrorInfo( info );
+        IRestrictedErrorInfo_Release( info );
+        ret = TRUE;
+    }
+    return ret;
 }
 
 /***********************************************************************
@@ -726,8 +917,25 @@ BOOL WINAPI RoOriginateError(HRESULT error, HSTRING message)
  */
 BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
 {
-    TRACE("error %#lx, max_len %u, message %s\n", error, max_len, wine_dbgstr_wn(message, max_len));
-    return FALSE;
+    IRestrictedErrorInfo *info;
+    BOOL ret = FALSE;
+
+    TRACE( "error %#lx, max_len %u, message %s\n", error, max_len, wine_dbgstr_wn( message, max_len ) );
+
+    if (!message) return FALSE;
+
+    {
+        BSTR str = SysAllocStringLen( message, max_len );
+        if (!str) return FALSE;
+        if (SUCCEEDED( create_restricted_error_info( error, str, NULL, NULL, &info ) ))
+        {
+            SetRestrictedErrorInfo( info );
+            IRestrictedErrorInfo_Release( info );
+            ret = TRUE;
+        }
+        SysFreeString( str );
+    }
+    return ret;
 }
 
 /***********************************************************************
@@ -735,16 +943,20 @@ BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
  */
 HRESULT WINAPI RoReportUnhandledError(IRestrictedErrorInfo *info)
 {
-    FIXME("(%p): stub\n", info);
+    TRACE( "(%p)\n", info );
     return S_OK;
 }
+
+static UINT32 error_reporting_flags = RO_ERROR_REPORTING_USESETERRORINFO;
 
 /***********************************************************************
  *      RoSetErrorReportingFlags (combase.@)
  */
 HRESULT WINAPI RoSetErrorReportingFlags(UINT32 flags)
 {
-    FIXME("(%08x): stub\n", flags);
+    TRACE("(%#x)\n", flags);
+
+    error_reporting_flags = flags;
     return S_OK;
 }
 
@@ -758,7 +970,7 @@ HRESULT WINAPI RoGetErrorReportingFlags(UINT32 *flags)
     if (!flags)
         return E_POINTER;
 
-    *flags = RO_ERROR_REPORTING_USESETERRORINFO;
+    *flags = error_reporting_flags;
     return S_OK;
 }
 
