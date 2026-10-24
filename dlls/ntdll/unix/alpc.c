@@ -34,12 +34,18 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(alpc);
 
-/* ALPC message types (subset of Windows LPC message types) */
-#define LPC_REQUEST            1
-#define LPC_DATAGRAM           2
-#define LPC_REPLY              0x02
+/* ALPC message types.  The user-visible PORT_MESSAGE u2.s2.Type must carry the
+ * Windows LPC type values (LPCRequest 0, LPCReply 1, LPCDatagram 4,
+ * LPCNewConnection 7): applications dispatch on these bytes and treat unknown
+ * values as fatal contract violations.  The wine-internal wire header carried
+ * between ntdll and wineserver is a separate field and keeps its own stamps
+ * (server/alpc.c uses 1 for request/reply and 10 for connection requests). */
+#define LPC_REQUEST            0
+#define LPC_DATAGRAM           4
+#define LPC_REPLY              1
+#define LPC_NEW_CONNECTION     7 /* user-visible type of a connection request */
 #define LPC_NEW_MESSAGE        0x10
-#define LPC_CONNECTION_REQUEST 10 /* matches the value server/alpc.c stamps */
+#define LPC_CONNECTION_REQUEST 10 /* internal wire hdr, matches the value server/alpc.c stamps */
 
 /* The kernel fills the RESERVE attribute of the connect reply with a reverse
  * port handle: server-originated messages of the connection are delivered on
@@ -822,7 +828,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 memset( recv_msg, 0, sizeof(*recv_msg) );
                 recv_msg->DataLength  = hdr.user_size;
                 recv_msg->TotalLength = sizeof(*recv_msg) + hdr.user_size;
-                recv_msg->Type        = LPC_CONNECTION_REQUEST;
+                recv_msg->Type        = LPC_NEW_CONNECTION;
                 recv_msg->MessageId   = hdr.msg_id;
                 total = sizeof(*recv_msg) + hdr.user_size;
             }
