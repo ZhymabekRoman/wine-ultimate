@@ -948,7 +948,8 @@ static HRESULT do_composite(const struct composition_target *target, struct comp
         }
 
         if (!rendered_any && !visual_tree_has_content(child_root) &&
-            g_last_rendered_surface && g_last_rendered_surface->physical_surface)
+            g_last_rendered_surface && g_last_rendered_surface->physical_surface &&
+            g_last_rendered_surface != target->composited_surface)
         {
             IDXGISurface *surface = NULL;
             if (SUCCEEDED(IUnknown_QueryInterface(g_last_rendered_surface->physical_surface,
@@ -958,6 +959,7 @@ static HRESULT do_composite(const struct composition_target *target, struct comp
                     g_last_rendered_surface, target->hwnd);
                 do_composite_dxgi_surface(target, visual, surface);
                 IDXGISurface_Release(surface);
+                ((struct composition_target *)target)->composited_surface = g_last_rendered_surface;
                 rendered_any = TRUE;
             }
         }
@@ -1033,9 +1035,18 @@ static HRESULT do_composite(const struct composition_target *target, struct comp
 
         if (dxgi_surface)
         {
-            do_composite_dxgi_surface(target, visual, dxgi_surface);
+            /* Change/commit-driven: only re-blit when the visual content changed. The 16 ms
+             * refresh loop must NOT re-copy an unchanged (often empty/black) surface every tick,
+             * which clobbers the app's own Present-to-window frames and thrashes D2D/D3D
+             * resources. The compositor paints on change; the swapchain Present path owns the
+             * window drawable in between. */
+            if (visual->content_version != visual->composited_version)
+            {
+                do_composite_dxgi_surface(target, visual, dxgi_surface);
+                visual->composited_version = visual->content_version;
+                rendered_any = TRUE;
+            }
             IDXGISurface_Release(dxgi_surface);
-            rendered_any = TRUE;
         }
     }
 

@@ -370,6 +370,10 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
         visual->interop = interop;
     }
 
+    /* Mark the visual's content as changed so the compositor re-blits it to the window
+     * exactly once (change/commit-driven), instead of re-copying it every refresh tick. */
+    visual->content_version++;
+
     dcomp_unlock();
     return S_OK;
 }

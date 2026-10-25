@@ -125,6 +125,7 @@ struct composition_target
     HWND hwnd;
     HANDLE shared_visual_handle;
     struct list entry;
+    struct composition_surface *composited_surface; /* last fallback surface blitted to the window */
     LONG ref;
 };
 
@@ -149,6 +150,8 @@ struct composition_visual
     BOOL is_child;
     HANDLE shared_visual_handle;
     int version;
+    unsigned int content_version;   /* bumped whenever the visual content is (re)set: change counter */
+    unsigned int composited_version;/* content_version as of the last blit to the window */
     LONG ref;
 };
 
