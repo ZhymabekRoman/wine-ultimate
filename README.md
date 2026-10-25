@@ -2122,3 +2122,84 @@ single-pending-request reply correlation (drop/defer replies whose echoed id has
 pending request) so the len-0 ack (MSG B) and duplicate reply (MSG C) never reach
 `CoreUICallReceive` on a virgin stack; (b) then RegisterConversation verb composition
 can proceed; (c) XAML window mapping + WebView2 chain remain behind that wall.
+
+## Single-pending-request reply correlation in the relay (tip 4830676ca)
+
+**Exchange measured on the relay (ids as the kernel stamps them).** One
+connection, registrar self-hosted in the app process (pid 20, tid 24 client
+face, tid 130 engine face), three relayed messages after
+CONNECT-req/ACCEPT/CONNECT-complete (id 1):
+
+| # | direction | msg id | size | framing payload | role |
+|---|-----------|--------|------|-----------------|------|
+| A | conn -> listening port | 2 | 88 | 8 (`{headerSize 8, verb 1, method 1}`) | PrepareConnection request |
+| C | server -> conn | **0** | 128 | 48 (`{verb 48, method 0}`) | verb reply, the payload the client unmarshals |
+| B | server -> conn | **2** | 80 | **0** | completion ack, echoing the request id |
+
+Order is racy (C-then-B and B-then-C both measured). The reply-shaped frame with
+**no id of its own** (C) is the verb reply: with the kernel's serialisation of one
+exchange per connection it answers the request in flight, so it is stamped with
+that request's id (2) and takes the reply slot - the client's `SendWaitReceivePort`
+receive of its own request receives the real 128-byte verb-48 shape. The ack (B),
+arriving after the slot is spent, answers nothing outstanding: the kernel drops it,
+and the relay now drops it (send completed with `STATUS_INVALID_DEVICE_REQUEST`,
+never queued, never delivered). A payload-less ack whose id-armed receive is not
+yet armed is consumed as the correlation of the exchange and is never parked for a
+bare receive - a bare receive is the receive armed for server-originated traffic,
+and feeding it a zero-length reply is exactly what produced the
+`UnmarshalReceive` S_OK early-out and the unwritten verb slot.
+
+**Wine-side change (server/alpc.c + dlls/ntdll/unix/alpc.c audit, pushed ultimate
+4830676ca).** Replies are correlated by the outstanding-request list the request
+joined when it was delivered (`alpc_add_outstanding`), per route: the connection
+base for connection traffic, the routed peer connection for listening-port
+traffic. Reply path: pop the answered request, stamp the delivered PORT_MESSAGE
+with the popped id (`ALPC_USER_MSGID_OFF`) and `LPC_REPLY`, hand it to the receive
+armed with exactly that id (`find_reply_alpc_async`), else park it as the kernel's
+pending reply; a reply for a request the connection does not have outstanding is
+refused with `STATUS_INVALID_DEVICE_REQUEST` and not queued (server and client
+routes). The reply framing identity (`TotalLength == payload + 80`, 40-byte
+framing header, payload word at +0x48) is factored into `alpc_frame_payload_len`
+and shared with the kernel-slot stamping of 2e5d909c7, so the ack/data-reply
+discriminator and the length-identity stamp are one definition. The client-side
+receive loop was verified, not changed: ntdll arms the receive of a
+`ALPC_MSGFLG_SYNC_REQUEST` (0x20000) send with the sent message id
+(`expected_id` -> `server_async` -> `find_reply_alpc_async`), and a bare receive
+takes only id-0/stamped server-originated traffic, matching the routing above.
+
+**Numbers.** Gate 150s x2: **rc=69, fatal=0, ff=24** (43302/43304 lines,
+deterministic), 14 windows created, 21 X windows, e0464645 x2 with
+`param[0] = 0xc0000010` (STATUS_INVALID_DEVICE_REQUEST). Baseline (2e5d909c7) was
+rc=5, fatal=1, ff=33, 43442/43429 lines. Battery 8/8 rc=69 fatal=0
+(webview2loader=0, edge=0). Screenshot 1280x1024, 1 colour, mean=0 **BLACK**
+(`wa-work/wa_corr_after.png`). App binaries pristine (CoreMessagingXP 7ee4b6c2,
+Microsoft.ui.xaml ec542848, dwmcorei 6ffe2bbc, FrameworkUdk 98f99f09 == .orig;
+WebView2Loader has no `.orig` baseline in the package - measured copies feabaafa /
+2b051028 / daf9a810, never loaded in these runs). ntdll alpc suite **green**:
+1726 tests, 0 failures, 0 skipped, with the new `test_alpc_duplicate_reply_drop`
+(reply of an unanswered id -> `STATUS_INVALID_DEVICE_REQUEST` and the client's next
+receive times out, i.e. the refused reply was never queued).
+
+**Interpretation.** The AV at the unwritten verb slot (CoreMessagingXP+0x8c19a) is
+gone: the len-0 ack and the stale reply no longer reach `CoreUICallReceive` on a
+virgin stack, and the verb-48 payload is delivered as the request's reply with
+correct MessageId + framing (payload word 48, chunk 0/1). The exchange now stops
+one step later and in managed code: the engine commits its **second** reply frame
+for the same request id, and the kernel's refusal of that commit (`0xc0000010`)
+becomes a `RaiseFailFastException` in the messaging layer.
+
+**Next gaps.** (a) The double commit: on Windows the slurped connect request of
+the listening port is a **separate** outstanding request, so both commits are
+accepted. Modelling that (requests also ride the listening port's slurp queue,
+naming the connection they came from) was implemented and measured: both frames
+delivered, no refusal, gate rc=69 ff=34 fatal=0 - the verb frame then reaches the
+receiver as a second answer to a completed request (the tip's stale-reply face
+returns), so it is not the way; the fix belongs to the connect-completion shape
+(the ack must complete the connect/exchange that owns it, not the verb exchange).
+(b) The verb-48 record's param layout: the 48-byte payload of the verb reply must
+satisfy the receiver's descriptor bounds (CMXP `.rdata` type at +0xb43c0, group
+verbId 0 -> 29-verb array at +0xaaa80, `byte@10 == payload[descOffset]`); the
+descriptors are static and the payload arrives verbatim from the app's own engine,
+so bounds must be measured dynamically on the delivered copy before that is closed.
+(c) XAML window mapping (0 `WinUIDesktopWin32WindowClass` created) and the WebView2
+chain (0 WebView2Loader loads, 0 msedgewebview2) remain behind the fail-fast.
