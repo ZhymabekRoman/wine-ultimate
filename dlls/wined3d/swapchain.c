@@ -216,6 +216,7 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         unsigned int swap_interval, uint32_t flags)
 {
     const struct wined3d_swapchain_desc *desc = &swapchain->state.desc;
+    HWND target_window = dst_window_override;
     RECT s, d;
 
     TRACE("swapchain %p, src_rect %s, dst_rect %s, dst_window_override %p, swap_interval %u, flags %#x.\n",
@@ -225,6 +226,32 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
     if (flags)
         FIXME("Ignoring flags %#x.\n", flags);
 
+    /* Resolve the present target before taking the wined3d critical section. The target
+     * window is owned by the app's UI thread, which re-enters wined3d from its window
+     * procedures (DComp/D2D rendering). A synchronous window-manager call here (ShowWindow
+     * sends WM_WINE_SETWINDOWPOS to that thread) would block the mutex holder on a thread
+     * that is blocked on the mutex, deadlocking every wined3d user in the process. Show
+     * the target once, asynchronously (a posted message never blocks the sender). */
+    if (!target_window)
+    {
+        target_window = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
+        if (!target_window)
+            target_window = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
+        if (target_window)
+        {
+            if (!swapchain->redirect_shown)
+            {
+                swapchain->redirect_shown = true;
+                ShowWindowAsync(target_window, SW_SHOW);
+            }
+            dst_window_override = target_window;
+        }
+        else
+        {
+            target_window = swapchain->win_handle;
+        }
+    }
+
     wined3d_mutex_lock();
 
     if (!swapchain->back_buffers)
@@ -232,18 +259,6 @@ HRESULT CDECL wined3d_swapchain_present(struct wined3d_swapchain *swapchain,
         WARN("Swapchain doesn't have a backbuffer, returning WINED3DERR_INVALIDCALL.\n");
         wined3d_mutex_unlock();
         return WINED3DERR_INVALIDCALL;
-    }
-
-    if (!dst_window_override)
-    {
-        HWND target_window = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
-        if (!target_window) target_window = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
-        if (target_window)
-        {
-            ERR("WINED3D: redirecting present from win_handle %p to target_window %p\n", swapchain->win_handle, target_window);
-            ShowWindow(target_window, SW_SHOW);
-            dst_window_override = target_window;
-        }
     }
 
     if (!src_rect)
@@ -642,20 +657,13 @@ static void swapchain_gl_present(struct wined3d_swapchain *swapchain,
     }
 
     TRACE("Presenting DC %p.\n", context_gl->dc);
-    ERR("WINED3D: swapchain_gl_present swapchain %p dc %p win_handle %p\n", swapchain, context_gl->dc, swapchain->win_handle);
 
-    {
-        HWND target_window = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
-        if (!target_window) target_window = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
-        if (target_window)
-        {
-            HDC dst_dc = GetDC(target_window);
-            RECT rect;
-            GetClientRect(target_window, &rect);
-            BitBlt(dst_dc, 0, 0, rect.right, rect.bottom, context_gl->dc, 0, 0, SRCCOPY);
-            ReleaseDC(target_window, dst_dc);
-        }
-    }
+    /* No window-GDI (GetDC/BitBlt) may run on the command stream thread: window DCs take
+     * the winex11 window-data lock and round-trip to the X server. The UI thread holds that
+     * lock in its window-position/message handlers while its window procedures re-enter
+     * wined3d (waiting on the critical section that the drained queue's emitters hold), so
+     * a window blit here closes a lock cycle and parks the whole queue. The GL present
+     * below (swapchain_blit / wglSwapBuffers into the window's drawable) owns the drawable. */
 
     pixel_format = &wined3d_adapter_gl(swapchain->device->adapter)->pixel_formats[context_gl->pixel_format - 1];
     if (context_gl->dc == wined3d_device_gl(swapchain->device)->backup_dc
@@ -1365,19 +1373,6 @@ static void swapchain_gdi_frontbuffer_updated(struct wined3d_swapchain *swapchai
     BitBlt(swapchain->dc, draw_rect.left - offset.x, draw_rect.top - offset.y,
             draw_rect.right - draw_rect.left, draw_rect.bottom - draw_rect.top,
             src_dc, draw_rect.left, draw_rect.top, SRCCOPY);
-
-    {
-        HWND core = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
-        if (core && IsWindowVisible(core))
-        {
-            HDC core_dc = GetDC(core);
-            RECT cr;
-            GetClientRect(core, &cr);
-            BitBlt(core_dc, 0, 0, cr.right, cr.bottom, src_dc, 0, 0, SRCCOPY);
-            ReleaseDC(core, core_dc);
-            ERR("WINED3D: blitted frontbuffer to CoreWindow %p\n", core);
-        }
-    }
 
     SetRectEmpty(&swapchain->front_buffer_update);
 }
