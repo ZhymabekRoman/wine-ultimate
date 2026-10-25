@@ -199,7 +199,12 @@ struct alpc_port
      * request, stamping the reply's PORT_MESSAGE with that id so the sender's
      * armed receive takes it, and serialises synchronous request-reply
      * exchanges: a second synchronous send is parked on the connection's send
-     * gate until the reply pops the exchange in flight. */
+     * gate until the reply pops the exchange in flight.
+     * On a listening port the same list carries the connect requests slurped
+     * there, each outstanding until the server commits its connect exchange
+     * with the zero-payload REPLY-flag send on the listening port: the connect
+     * domain of reply correlation, kept apart from the data requests of the
+     * connections (which ride each connection's own list). */
     struct list         outstanding; /* list of struct alpc_outstanding */
     struct list         send_gate;   /* list of struct alpc_gate_entry */
     unsigned int        client_pid;  /* thread that created the port: a wake packet
@@ -250,7 +255,7 @@ static void alpc_gate_clear( struct alpc_port *base, unsigned int status );
 struct alpc_pending_conn;
 static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port,
                                                    struct alpc_pending_conn *found,
-                                                   client_ptr_t port_context );
+                                                   client_ptr_t port_context, int open_commit );
 
 static void alpc_port_dump( struct object *obj, int verbose );
 static struct fd *alpc_port_get_fd( struct object *obj );
@@ -967,7 +972,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                     target->conn_reply_size = size - ALPC_USER_HDR_SIZE;
                 }
                 list_remove( &target->entry );
-                if (complete_alpc_connection( port, target, attr.msg_context ))
+                if (complete_alpc_connection( port, target, attr.msg_context, 0 ))
                 {
                     async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
                     release_object( iosb );
@@ -978,8 +983,54 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 release_object( iosb );
                 return;
             }
+            /* The connect exchange's own completion.  A REPLY-flag send on a
+             * listening port is correlated first by the outstanding exchange of
+             * *that listening port* — the connect request the server slurped
+             * there — and only then by the data requests of the connections it
+             * carries.  The server's commit of a slurped connect (the LPC
+             * datagram commit, CoreMessaging's AlpcServerConnection::CommitToSlurp)
+             * is a REPLY-flag send on the listening port that carries no payload
+             * at all (the framing shape's payload word is zero: an 80-byte
+             * frame), and it is a second commit the kernel accepts next to the
+             * verb reply of the data request — the engine commits its connect and
+             * its verb reply, and both must be taken.  The kernel routes the send
+             * by the listening port and stamps the connect request's id, so the
+             * message id on the wire is the sender's own composition (zero here):
+             * match the listening port's outstanding connect slot by id when it
+             * echoes one, else its oldest open exchange.  The commit completes
+             * the connect, so it is consumed — never queued: a delivered
+             * zero-length frame takes the receiver's unmarshal early-out (S_OK)
+             * without writing the verb record, and the guarded dispatch then
+             * calls the unwritten slot.  With no connect slot open the frame
+             * answers nothing in its own domain and the kernel refuses it. */
+            if (!alpc_frame_payload_len( data, size ))
+            {
+                unsigned int cid = alpc_pop_outstanding( port, reply_id );
+
+                if (!cid) cid = alpc_pop_outstanding( port, 0 );
+                if (cid)
+                {
+                    if (relay_trace_enabled())
+                        fprintf( stderr, "ALPC relay CONNECT-commit port %p id %u (wire %u)\n",
+                                 (void *)port, cid, reply_id );
+                    async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
+                    release_object( iosb );
+                    return;
+                }
+                if (relay_trace_enabled())
+                    fprintf( stderr, "ALPC relay DROP connect commit port %p: no connect outstanding\n",
+                             (void *)port );
+                release_object( iosb );
+                set_error( STATUS_INVALID_DEVICE_REQUEST );
+                async_request_complete( async, STATUS_INVALID_DEVICE_REQUEST, 0, 0, NULL );
+                return;
+            }
+
             /* a reply with no echoed id answers the connection's oldest
-             * outstanding (slurped) request: find the armed receiver for it */
+             * outstanding (slurped) request: find the armed receiver for it.
+             * The pop *is* the correlation — the request in flight is answered
+             * here and stamped with its id — so the correlation pass below must
+             * not pop the same slot a second time and refuse the reply. */
             if (!reply_id)
             {
                 LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
@@ -996,13 +1047,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                         peer = conn;
                         msg_type = ALPC_LPC_REPLY;
                         reply_stamped = 1;
+                        reply_resolved = 1;
                         alpc_drain_send_gate( conn );
                         break;
                     }
                 }
             }
         }
-        if (is_reply_send)
+        if (is_reply_send && !reply_resolved)
         {
             /* Kernel reply correlation.  A connection carries one outstanding
              * request at a time (a server that posts several buffers, or splits
@@ -1026,16 +1078,23 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
              *    request in flight (the kernel serialises one exchange per
              *    connection), and is stamped with that request's id.
              *
-             * The registrar exchange measured on the relay is of exactly that
-             * shape: the PrepareConnection request (id N, 88 bytes), then two
-             * reply frames — the verb reply (128 bytes, framing payload length
-             * non-zero, no id of its own) and the exchange's completion ack
-             * (80 bytes, framing payload length 0, echoing id N), in either
-             * order.  The verb reply is the payload the client unmarshals, so it
-             * takes the reply slot of the request; the ack, arriving after the
-             * slot is spent, answers nothing outstanding and is dropped. */
+             * The registrar exchange measured on the relay is of that shape, and
+             * the engine commits it twice: the PrepareConnection request (id N,
+             * 88 bytes) rides the connection and stays outstanding until the
+             * verb reply answers it (128 bytes, framing payload length non-zero,
+             * no id of its own — the payload the client unmarshals, so it takes
+             * the request's reply slot), and the connect exchange is committed by
+             * the zero-payload REPLY-flag send on the listening port (80 bytes,
+             * framing payload length 0, and no message id of its own either: the
+             * kernel stamps the connect request's id) — that commit is correlated
+             * in the block above, on the listening port's outstanding connect
+             * slot, before any connection's data request is touched, in either
+             * order.  Two outstanding slots, one commit each: the connect slot on
+             * the listening port and the data request on the connection.  A reply
+             * that answers nothing in its own correlation domain is the refused
+             * duplicate. */
             struct alpc_port *oc;
-            unsigned int popped, payload = alpc_frame_payload_len( data, size );
+            unsigned int popped;
 
             oc = alpc_conn_find_outstanding( port, reply_id );
             popped = oc ? alpc_pop_outstanding( oc, reply_id ) : 0;
@@ -1049,19 +1108,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 reply_stamped = 1;
                 armed = reply_id ? find_reply_alpc_async( &oc->read_q, reply_id ) : NULL;
                 if (armed) release_object( armed ); /* the armed receive takes it */
-                else if (!payload)
-                {
-                    /* the completion ack of an exchange whose receive is not
-                     * armed: the correlation, not a data reply — a bare receive
-                     * must not take it */
-                    if (relay_trace_enabled())
-                        fprintf( stderr, "ALPC relay CONSUME ack id %u port %p: no receive armed\n",
-                                 reply_id, (void *)oc );
-                    alpc_drain_send_gate( oc );
-                    async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
-                    release_object( iosb );
-                    return;
-                }
                 alpc_drain_send_gate( oc );
             }
             else
@@ -1276,25 +1322,34 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
 
         if (!reply_resolved && !reply_id && !msg_type)
         {
-            unsigned int mid = 0, mtype = 0;
+            unsigned int mid = 0;
 
             if (size >= ALPC_USER_MSGID_OFF + 4)
-            {
                 mid = *(const unsigned int *)((const char *)data + ALPC_USER_MSGID_OFF);
-                mtype = *(const unsigned short *)((const char *)data + ALPC_USER_TYPE_OFF);
-            }
 
-            if (mtype == ALPC_LPC_REQUEST && mid)
+            if (mid)
             {
                 /* the request joins the outstanding list of the connection it
                  * is delivered on (the kernel serialises synchronous
                  * exchanges): on the client side the connection base carries
                  * the list, on the listening-port route the request rides the
                  * routed peer connection, and a request the server originates
-                 * in the reverse direction rides the client's connection */
+                 * in the reverse direction rides the client's connection.
+                 *
+                 * A non-reply send that carries a message id of its own *is*
+                 * the request leg of an exchange: the kernel owns the Type slot
+                 * and stamps it on delivery, so a sender that composes its
+                 * message id itself leaves Type zero (the messaging layer's
+                 * PrepareConnection request is of that shape — a synchronous
+                 * send, id 2, Type 0) and the registration must not be keyed on
+                 * the sender's Type.  A datagram carries no id, and a reply
+                 * never reaches this point, so the id alone identifies it. */
                 if (base) alpc_add_outstanding( base, mid );
                 else if (port->is_server && peer) alpc_add_outstanding( peer, mid );
                 reply_id = mid;
+                if (relay_trace_enabled())
+                    fprintf( stderr, "ALPC relay REQUEST id %u port %p base %p size %u flags %#x\n",
+                             mid, (void *)port, (void *)base, size, send_flags );
             }
         }
 
@@ -1704,10 +1759,23 @@ DECL_HANDLER(connect_alpc_port)
  *
  * The found record is consumed.  Returns the created server-side port (with
  * a reference for the caller) so the accept route can hand out a handle, or
- * NULL on allocation failure. */
+ * NULL on allocation failure.
+ *
+ * `open_commit` says which doorway completed the connect.  A server that
+ * accepted the connection explicitly (NtAlpcAcceptConnectPort) has created the
+ * connection object, but the connect request it slurped on the listening port
+ * is *still outstanding there*: the connect exchange owns a completion of its
+ * own — the server's LPC datagram commit, a zero-payload REPLY-flag send on the
+ * listening port (CoreMessaging's AlpcServerConnection::CommitToSlurp) — and
+ * the kernel keeps the slurped request on the listening port's outstanding list
+ * until that send arrives.  So the accept route registers the connect id on the
+ * listening port (a slot of its own, separate from the data requests of the
+ * connection, which ride the connection's outstanding list).  When the
+ * completion send itself is the connect dance's reply on the listening port,
+ * the commit has already arrived and no slot is opened. */
 static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port,
                                                    struct alpc_pending_conn *found,
-                                                   client_ptr_t port_context )
+                                                   client_ptr_t port_context, int open_commit )
 {
     struct alpc_port *server_conn_port;
 
@@ -1737,6 +1805,11 @@ static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port
     found->client_port->port_context = port_context;
     /* track the connection on the listening port for reply routing */
     list_add_tail( &server_port->connections, &found->client_port->conn_entry );
+
+    /* the slurped connect request stays outstanding on the listening port
+     * until the server commits the connect exchange with its zero-payload
+     * REPLY-flag send there (see the write path's connect-commit rule) */
+    if (open_commit) alpc_add_outstanding( server_port, found->msg_id );
 
     /* Wake blocked client, carrying the server's connection reply message to it.
      * The kernel completes a connect with the server's reply message plus the
@@ -1865,8 +1938,10 @@ DECL_HANDLER(accept_alpc_connection)
     }
 
     /* Create server-side connection endpoint, wire the peers, and wake the
-     * blocked client with the connection reply message. */
-    if ((server_conn_port = complete_alpc_connection( server_port, found, req->port_context )))
+     * blocked client with the connection reply message.  The connect exchange
+     * keeps its own outstanding slot on the listening port: the server commits
+     * it with a zero-payload REPLY-flag send there. */
+    if ((server_conn_port = complete_alpc_connection( server_port, found, req->port_context, 1 )))
     {
         reply->handle = alloc_handle( current->process, server_conn_port,
                                       GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );

@@ -2043,6 +2043,143 @@ done:
     if (client_conn) NtClose( client_conn );
     NtClose( server_port );
 }
+
+/* The connect exchange commits on its own slot.  The connection request a
+ * server slurps on a listening port is outstanding *there* — its own exchange,
+ * separate from the data requests of the connections it carries.  A server that
+ * accepted the connection explicitly has created the connection, and still
+ * commits the connect exchange with a zero-payload REPLY-flag send on the
+ * listening port (the LPC datagram commit, CoreMessaging's
+ * AlpcServerConnection::CommitToSlurp): the kernel routes that send by the
+ * listening port, stamps the slurped connect request's id (the wire id is the
+ * sender's own composition) and accepts it, so the server can commit twice —
+ * the connect and the data reply — without the second commit being refused.
+ * A commit with no outstanding connect answers nothing: the kernel refuses it
+ * and the refused frame must never reach a receiver as a reply. */
+static void test_alpc_connect_commit( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestConnCommit";
+    static const char payload[] = "CMT-01";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    struct ser_client_args ca;
+    HANDLE server_port = NULL, server_conn = NULL, client_conn = NULL, thread = NULL;
+    ULONG cid = 0, connect_id;
+    SIZE_T size;
+    NTSTATUS status;
+    DWORD ret;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip( "ALPC port functions are unavailable.\n" );
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    memset( &ca, 0, sizeof(ca) );
+    ca.port_name = &port_name;
+    ca.payload = payload;
+    thread = CreateThread( NULL, 0, ser_connect_thread, &ca, 0, NULL );
+    ok( thread != NULL, "CreateThread failed.\n" );
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -15 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected slurp status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+    connect_id = msg->MessageId;
+    ok( connect_id != 0, "Expected a non-zero connect MessageId.\n" );
+
+    server_conn = NULL;
+    status = pNtAlpcAcceptConnectPort( &server_conn, server_port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+    ok( status == STATUS_SUCCESS, "Got unexpected accept status %#lx.\n", status );
+    ret = WaitForSingleObject( thread, 10000 );
+    ok( ret == 0 && ca.connect_status == STATUS_SUCCESS, "Connect failed, status %#lx.\n", ca.connect_status );
+    client_conn = ca.conn;
+    if (status != STATUS_SUCCESS || ca.connect_status != STATUS_SUCCESS) goto done;
+
+    /* The connect commit: a zero-payload REPLY-flag frame on the listening port
+     * in the messaging layer's framing shape (DataLength 40 + 40 framing bytes =
+     * TotalLength 80, payload word zero) with a message id the sender composed
+     * itself — not the connect id. */
+    memset( buf, 0, sizeof(buf) );
+    msg->MessageId = connect_id + 0x1000;
+    msg->DataLength = 40;
+    msg->TotalLength = 80;
+    status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    winetest_push_context( "connect commit" );
+    ok( status == STATUS_SUCCESS, "Got unexpected connect-commit status %#lx.\n", status );
+    winetest_pop_context();
+    if (status != STATUS_SUCCESS) goto done;
+
+    /* the connection works: a full exchange served on the listening port */
+    memset( &ca, 0, sizeof(ca) );
+    ca.conn = client_conn;
+    ca.payload = payload;
+    CloseHandle( thread );
+    thread = CreateThread( NULL, 0, ser_client_thread, &ca, 0, NULL );
+    ok( thread != NULL, "CreateThread failed.\n" );
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -15 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected request status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+    cid = msg->MessageId;
+    memcpy( buf + sizeof(*msg), payload, 8 );
+    msg->DataLength = 8;
+    msg->TotalLength = sizeof(*msg) + 8;
+    status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected reply status %#lx.\n", status );
+
+    ret = WaitForSingleObject( thread, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", (unsigned int)ret );
+    winetest_push_context( "client" );
+    ok( ca.send_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", ca.send_status );
+    ok( !memcmp( ca.reply, payload, 8 ), "Got unexpected reply payload.\n" );
+    winetest_pop_context();
+
+    /* A second commit (or an ack echoing the data request the connection
+     * already answered) has no outstanding request in its correlation domain:
+     * the kernel refuses it, and the refused frame must not be queued on the
+     * connection for the client's next receive to consume. */
+    winetest_push_context( "second commit" );
+    memset( buf, 0, sizeof(buf) );
+    msg->MessageId = cid;
+    msg->DataLength = 40;
+    msg->TotalLength = 80;
+    status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_INVALID_DEVICE_REQUEST, "Got unexpected second-commit status %#lx.\n", status );
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -3 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( client_conn, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_TIMEOUT, "Refused commit reached the client, status %#lx.\n", status );
+    winetest_pop_context();
+
+done:
+    if (thread) CloseHandle( thread );
+    if (server_conn) NtClose( server_conn );
+    if (client_conn) NtClose( client_conn );
+    NtClose( server_port );
+}
 #endif /* _WIN64 */
 
 START_TEST(alpc)
@@ -2068,5 +2205,6 @@ START_TEST(alpc)
     test_alpc_multi_buffer();
     test_alpc_serialization();
     test_alpc_duplicate_reply_drop();
+    test_alpc_connect_commit();
 #endif
 }
