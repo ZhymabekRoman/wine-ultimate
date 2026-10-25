@@ -1367,29 +1367,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
 
 /* ---- Helpers ---- */
 
-/* the port this thread is queued receiving on, if any: the wake completion
- * packet's completion source is the receive in flight when it is associated
- * (the kernel binds the packet to that IRP), so the associate handler
- * resolves the binding here */
-/* is a message already queued on the port?  a wake packet bound to a port
- * whose queue is not empty has its completion IRP finished at binding time,
- * so the kernel fires it the moment the association is made */
-int alpc_port_ready( struct object *obj )
-{
-    struct alpc_port *port, *pair;
-
-    LIST_FOR_EACH_ENTRY( port, &alpc_port_list, struct alpc_port, list_entry )
-    {
-        if (&port->obj != obj) continue;
-        if (!list_empty( &port->msg_queue )) return 1;
-        /* a message waiting on the other handle of the same connection is a
-         * completed receive of this port too */
-        if ((pair = alpc_port_pair( port )) && !list_empty( &pair->msg_queue )) return 1;
-        return 0;
-    }
-    return 0;
-}
-
 struct object *find_thread_alpc_receive_port( struct thread *thread )
 {
     struct alpc_port *port, *candidate = NULL;

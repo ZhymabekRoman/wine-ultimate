@@ -6325,7 +6325,7 @@ struct associate_wait_completion_packet_request
     obj_handle_t        completion;
     obj_handle_t        target;
     unsigned int        status;
-    char __pad_28[4];
+    int                 wake_up_app;
     apc_param_t         key;
     apc_param_t         apc;
     apc_param_t         information;
@@ -7366,6 +7366,6 @@ union generic_reply
     struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 965
+#define SERVER_PROTOCOL_VERSION 966
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

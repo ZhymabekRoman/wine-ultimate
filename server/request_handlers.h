@@ -2445,6 +2445,7 @@ C_ASSERT( offsetof(struct associate_wait_completion_packet_request, handle) == 1
 C_ASSERT( offsetof(struct associate_wait_completion_packet_request, completion) == 16 );
 C_ASSERT( offsetof(struct associate_wait_completion_packet_request, target) == 20 );
 C_ASSERT( offsetof(struct associate_wait_completion_packet_request, status) == 24 );
+C_ASSERT( offsetof(struct associate_wait_completion_packet_request, wake_up_app) == 28 );
 C_ASSERT( offsetof(struct associate_wait_completion_packet_request, key) == 32 );
 C_ASSERT( offsetof(struct associate_wait_completion_packet_request, apc) == 40 );
 C_ASSERT( offsetof(struct associate_wait_completion_packet_request, information) == 48 );

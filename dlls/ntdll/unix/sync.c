@@ -3051,24 +3051,24 @@ NTSTATUS WINAPI NtCreateWaitCompletionPacket( HANDLE *handle, ACCESS_MASK access
 NTSTATUS WINAPI NtAssociateWaitCompletionPacket( HANDLE handle, HANDLE completion_handle,
                                                  HANDLE target_handle, void *key_context,
                                                  void *apc_context, NTSTATUS io_status,
-                                                 ULONG_PTR io_status_info, BOOLEAN *already_signaled )
+                                                 ULONG_PTR io_status_info, BOOLEAN wake_up_app )
 {
     unsigned int status;
 
-    TRACE( "(%p, %p, %p, %p, %p, %x, %lx, %p)\n", handle, completion_handle, target_handle,
-           key_context, apc_context, (int)io_status, (unsigned long)io_status_info, already_signaled );
+    TRACE( "(%p, %p, %p, %p, %p, %x, %lx, %d)\n", handle, completion_handle, target_handle,
+           key_context, apc_context, (int)io_status, (unsigned long)io_status_info, wake_up_app );
 
     SERVER_START_REQ( associate_wait_completion_packet )
     {
-        req->handle      = wine_server_obj_handle( handle );
-        req->completion  = wine_server_obj_handle( completion_handle );
-        req->target      = wine_server_obj_handle( target_handle );
-        req->status      = io_status;
-        req->key         = (apc_param_t)(ULONG_PTR)key_context;
-        req->apc         = (apc_param_t)(ULONG_PTR)apc_context;
-        req->information = io_status_info;
-        if (!(status = wine_server_call( req )) && already_signaled)
-            *already_signaled = reply->signaled;
+        req->handle       = wine_server_obj_handle( handle );
+        req->completion   = wine_server_obj_handle( completion_handle );
+        req->target       = wine_server_obj_handle( target_handle );
+        req->status       = io_status;
+        req->wake_up_app  = wake_up_app;
+        req->key          = (apc_param_t)(ULONG_PTR)key_context;
+        req->apc          = (apc_param_t)(ULONG_PTR)apc_context;
+        req->information  = io_status_info;
+        status = wine_server_call( req );
     }
     SERVER_END_REQ;
 

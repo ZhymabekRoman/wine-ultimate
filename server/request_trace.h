@@ -3603,6 +3603,7 @@ static void dump_associate_wait_completion_packet_request( const struct associat
     fprintf( stderr, ", completion=%04x", req->completion );
     fprintf( stderr, ", target=%04x", req->target );
     fprintf( stderr, ", status=%08x", req->status );
+    fprintf( stderr, ", wake_up_app=%d", req->wake_up_app );
     dump_uint64( ", key=", &req->key );
     dump_uint64( ", apc=", &req->apc );
     dump_uint64( ", information=", &req->information );

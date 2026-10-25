@@ -167,7 +167,7 @@
 @ stdcall -syscall NtAlpcQueryInformation(ptr long ptr long ptr)
 @ stdcall -syscall NtAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr)
 @ stdcall -syscall NtAlpcSetInformation(ptr long ptr long)
-@ stdcall -syscall NtAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr)
+@ stdcall -syscall NtAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr long)
 @ stdcall -syscall NtCancelWaitCompletionPacket(ptr long)
 @ stdcall -syscall NtCreateWaitCompletionPacket(ptr long ptr)
 @ stub -syscall=0x004c NtApphelpCacheControl
@@ -1262,7 +1262,7 @@
 @ stdcall -private ZwAlpcQueryInformation(ptr long ptr long ptr) NtAlpcQueryInformation
 @ stdcall -private ZwAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePort
 @ stdcall -private ZwAlpcSetInformation(ptr long ptr long) NtAlpcSetInformation
-@ stdcall -private ZwAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr ptr) NtAssociateWaitCompletionPacket
+@ stdcall -private ZwAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr long) NtAssociateWaitCompletionPacket
 @ stdcall -private ZwCancelWaitCompletionPacket(ptr long) NtCancelWaitCompletionPacket
 @ stdcall -private ZwCreateWaitCompletionPacket(ptr long ptr) NtCreateWaitCompletionPacket
 @ stdcall -private ZwApphelpCacheControl() NtApphelpCacheControl

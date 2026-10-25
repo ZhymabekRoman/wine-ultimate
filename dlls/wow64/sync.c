@@ -1946,11 +1946,11 @@ NTSTATUS WINAPI wow64_NtAssociateWaitCompletionPacket( UINT *args )
     void *apc_context = get_ptr( &args );
     NTSTATUS status = get_ulong( &args );
     ULONG_PTR status_info = get_ulong( &args );
-    BOOLEAN *already_signaled = get_ptr( &args );
+    BOOLEAN wake_up_app = get_ulong( &args );
 
     return NtAssociateWaitCompletionPacket( handle, completion_handle, target_handle,
-                                           key_context, apc_context, status, status_info,
-                                           already_signaled );
+                                            key_context, apc_context, status, status_info,
+                                            wake_up_app );
 }
 
 

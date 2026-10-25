@@ -471,6 +471,7 @@ struct wait_completion_packet
     apc_param_t         cvalue;         /* completion value (apc context) */
     unsigned int        status;         /* completion status */
     apc_param_t         information;     /* completion information */
+    int                 wake_up_app;    /* an I/O wake signals the target too */
     int                 associated;     /* currently on wait_packet_list */
 };
 
@@ -521,16 +522,23 @@ static void wait_packet_disassociate( struct wait_completion_packet *packet )
     packet->associated = 0;
 }
 
-/* Fire one associated packet.  The kernel wake is the full sequence: the
- * target object itself is signaled (the dispatcher parks on the event —
- * posting only an I/O completion packet never wakes it), which wakes the
- * waiting thread, and the packet completion is delivered to the I/O
- * completion object.  Autorepeat is off — the only mode this interface
- * drives — so the packet disassociates after firing; the app re-associates
- * it at the end of every dispatch cycle. */
-static void wake_packet_fire( struct wait_completion_packet *packet )
+/* Fire one associated packet: the packet completion is delivered to the I/O
+ * completion object, and the packet disassociates (autorepeat is off — the
+ * only mode this interface drives — so the app re-associates it at the end of
+ * every dispatch cycle).
+ *
+ * Signalling the target belongs to one wake source only.  When the wake's
+ * source is an I/O — the receive the packet was bound to — the completion of
+ * that I/O is what the kernel reports, and the target (the event the
+ * dispatcher parks on) has to be signaled for the parked thread to wake,
+ * because posting an I/O completion packet alone never wakes it.  When the
+ * wake's source is the target's own signal the target is signaled already:
+ * signalling it again re-arms the very condition that fired the wake, and an
+ * app that re-associates the packet after every dispatch cycle then fires it
+ * forever, at the cost of the thread that owns the wake. */
+static void wake_packet_fire( struct wait_completion_packet *packet, int signal_target )
 {
-    if (packet->target)
+    if (signal_target && packet->target)
     {
         struct object *sync = packet->target->ops->get_sync( packet->target );
         if (sync)
@@ -552,7 +560,8 @@ static void wait_completion_packet_destroy( struct object *obj )
 }
 
 /* called when a target object becomes signaled; fires the packets
- * associated with it. */
+ * associated with it.  The signal that fires the wake is the caller's, so the
+ * target is signaled already and is not signalled again here. */
 void signal_wait_completion_packets( struct object *target )
 {
     struct wait_completion_packet *packet, *next;
@@ -560,13 +569,15 @@ void signal_wait_completion_packets( struct object *target )
     LIST_FOR_EACH_ENTRY_SAFE( packet, next, &wait_packet_list, struct wait_completion_packet, entry )
     {
         if (packet->target != target) continue;
-        wake_packet_fire( packet );
+        wake_packet_fire( packet, 0 );
     }
 }
 
 /* called when a message is queued on an ALPC port: readiness of the port is
  * completion of the IRP of the receive armed on it, which fires the wake
- * packets bound to that port at association time. */
+ * packets bound to that port at association time.  Completing an I/O is the
+ * one wake source that also signals the target, and only when the app asked
+ * for it (SignalAndWakeUpApp). */
 void fire_wait_completion_packets( struct object *port )
 {
     struct wait_completion_packet *packet, *next;
@@ -574,7 +585,7 @@ void fire_wait_completion_packets( struct object *port )
     LIST_FOR_EACH_ENTRY_SAFE( packet, next, &wait_packet_list, struct wait_completion_packet, entry )
     {
         if (packet->receive_port != port) continue;
-        wake_packet_fire( packet );
+        wake_packet_fire( packet, packet->wake_up_app );
     }
 }
 
@@ -593,6 +604,7 @@ DECL_HANDLER(create_wait_completion_packet)
         packet->completion   = NULL;
         packet->target       = NULL;
         packet->receive_port = NULL;
+        packet->wake_up_app  = 0;
         packet->associated   = 0;
         list_init( &packet->entry );
         reply->handle = alloc_handle( current->process, packet, req->access, objattr->attributes );
@@ -630,13 +642,14 @@ DECL_HANDLER(associate_wait_completion_packet)
         return;
     }
 
-    packet->completion  = completion;   /* ref held */
-    packet->target      = target;       /* ref held */
-    packet->ckey        = req->key;
-    packet->cvalue      = req->apc;
-    packet->status      = req->status;
+    packet->completion   = completion;  /* ref held */
+    packet->target       = target;      /* ref held */
+    packet->ckey         = req->key;
+    packet->cvalue       = req->apc;
+    packet->status       = req->status;
     packet->information  = req->information;
-    packet->associated  = 1;
+    packet->wake_up_app  = req->wake_up_app;
+    packet->associated   = 1;
     list_add_tail( &wait_packet_list, &packet->entry );
 
     /* the wake's completion source is the receive in flight on the
@@ -645,22 +658,22 @@ DECL_HANDLER(associate_wait_completion_packet)
     packet->receive_port = find_thread_alpc_receive_port( current );
 
     /* the kernel fires immediately when the wake is already complete at
-     * association time: the target object is signaled, or the port the
-     * packet bound to has a message queued (its receive IRP is finished).
-     * This is what lets the app re-arm the wake every cycle: arm after
-     * processing, and a message that arrived meanwhile wakes at once */
+     * association time, i.e. the target object is signaled.  A receive that
+     * is still in flight is not a completed wake — its completion is what
+     * fires the packet later — so the bound port is not examined here.  The
+     * fire consumes the signal that completed the wait, so re-arming the
+     * packet after processing reports only a wake that completed again. */
     reply->signaled = 0;
     {
         struct object *sync = target->ops->get_sync( target );
         int ready = (sync && sync->ops->signaled && sync->ops->signaled( sync, NULL ));
-        if (sync) release_object( sync );
-        if (!ready && packet->receive_port && alpc_port_ready( packet->receive_port ))
-            ready = 1;
         if (ready)
         {
             reply->signaled = 1;
-            wake_packet_fire( packet );
+            if (sync) reset_sync( sync );  /* the wake takes the signal */
+            wake_packet_fire( packet, 0 );
         }
+        if (sync) release_object( sync );
     }
 
     release_object( packet );

@@ -246,7 +246,6 @@ extern void signal_wait_completion_packets( struct object *target );
 extern void fire_wait_completion_packets( struct object *port );
 extern struct object *find_thread_alpc_receive_port( struct thread *thread );
 extern void alpc_wake_process_receives( struct process *process );
-extern int alpc_port_ready( struct object *port );
 extern void cleanup_thread_completion( struct thread *thread );
 
 /* serial port functions */

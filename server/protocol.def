@@ -4382,6 +4382,7 @@ typedef struct _ALPC_DATA_VIEW_ATTR
     obj_handle_t        completion;     /* IO completion port handle */
     obj_handle_t        target;         /* object to wait on */
     unsigned int        status;         /* completion status to post */
+    int                 wake_up_app;    /* signal the target when the bound I/O completes */
     apc_param_t         key;            /* completion key */
     apc_param_t         apc;            /* completion value (apc context) */
     apc_param_t         information;    /* completion information */
