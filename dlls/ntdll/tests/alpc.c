@@ -56,6 +56,18 @@ static NtAlpcSetInformation_t pNtAlpcSetInformation;
 #define ALPC_BASIC_INFORMATION_CLASS       0
 #define ALPC_INVALID_INFORMATION_CLASS     0xffffffff
 
+/* A connection request is the kernel-synthesized message a server receives on
+ * its listening port; the receiver's engine parses it with the Windows
+ * PORT_MESSAGE layout, where ClientId.UniqueProcess sits at +1*sizeof(pointer)
+ * and UniqueThread at +2*sizeof(pointer) (the connecting thread).  Read the id
+ * at those offsets so the assertion is layout-faithful on x64. */
+static BOOL read_client_id( const ALPC_PORT_MESSAGE *msg, ULONG_PTR *pid, ULONG_PTR *tid )
+{
+    *pid = *(const ULONG_PTR *)((const char *)msg + 1 * sizeof(void *));
+    *tid = *(const ULONG_PTR *)((const char *)msg + 2 * sizeof(void *));
+    return TRUE;
+}
+
 #undef DECL_FUNCPTR
 
 static void init_functions(void)
@@ -924,6 +936,7 @@ static void test_alpc_connection_flow( void )
     SIZE_T size, req_size;
     HANDLE server_port = NULL, server_conn = NULL, thread, event;
     ULONG req_id;
+    ULONG_PTR cid_pid = 0, cid_tid = 0;
     NTSTATUS status;
     DWORD ret;
 
@@ -976,8 +989,12 @@ static void test_alpc_connection_flow( void )
     ok( msg->Type == LPC_CONNECTION_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
     ok( msg->DataLength == 8, "Got unexpected DataLength %u.\n", msg->DataLength );
     ok( !memcmp( msg + 1, "ALPCCONN", 8 ), "Got unexpected connection payload.\n" );
-    ok( msg->ClientId.UniqueProcess == (HANDLE)(DWORD_PTR)GetCurrentProcessId(),
-        "Got unexpected ClientId.\n" );
+    /* A connection request is the kernel-synthesized message the receiver's
+     * engine parses with the Windows PORT_MESSAGE layout; its ClientId carries
+     * the connecting thread.  Read it at the Windows offsets. */
+    ok( read_client_id( msg, &cid_pid, &cid_tid ), "Connect request ClientId missing.\n" );
+    ok( cid_pid == (ULONG_PTR)GetCurrentProcessId(), "Got unexpected connect ClientId.UniqueProcess.\n" );
+    ok( cid_tid == (ULONG_PTR)GetThreadId( thread ), "Got unexpected connect ClientId.UniqueThread.\n" );
     ok( msg->MessageId != 0, "Expected non-zero MessageId.\n" );
     ctx = pAlpcGetMessageAttribute( attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE );
     ok( ctx != NULL, "Expected a context attribute.\n" );
@@ -2180,6 +2197,114 @@ done:
     if (client_conn) NtClose( client_conn );
     NtClose( server_port );
 }
+
+struct conn_cid_args
+{
+    UNICODE_STRING *port_name;
+    NTSTATUS connect_status;
+    HANDLE conn;
+};
+
+static DWORD WINAPI conn_cid_thread( void *arg )
+{
+    struct conn_cid_args *a = arg;
+    ALPC_PORT_ATTRIBUTES port_attr;
+
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    a->conn = NULL;
+    a->connect_status = pNtAlpcConnectPort( &a->conn, a->port_name, NULL, &port_attr, 0,
+                                            NULL, NULL, NULL, NULL, NULL, NULL );
+    return 0;
+}
+
+/* The kernel stamps a connection request's PORT_MESSAGE.ClientId with the
+ * connecting thread.  Each connect carries its own caller {pid, tid} - both
+ * non-zero - and a re-connect from a new thread carries the NEW thread's id,
+ * not the first client's.  This is the id the registrar engine reads. */
+static void test_alpc_connect_clientid( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestConnClientId";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    struct conn_cid_args a1 = {0}, a2 = {0};
+    HANDLE server_port = NULL, conn = NULL, t1 = NULL, t2 = NULL;
+    DWORD tid1 = 0, tid2 = 0;
+    ULONG_PTR pid = 0, tid = 0;
+    SIZE_T size;
+    NTSTATUS status;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip( "ALPC port functions are unavailable.\n" );
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    a1.port_name = &port_name;
+    t1 = CreateThread( NULL, 0, conn_cid_thread, &a1, 0, NULL );
+    ok( t1 != NULL, "CreateThread failed.\n" );
+    tid1 = GetThreadId( t1 );
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -15 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected connect-1 status %#lx.\n", status );
+    if (status == STATUS_SUCCESS)
+    {
+        winetest_push_context( "connect 1" );
+        ok( msg->Type == LPC_CONNECTION_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+        read_client_id( msg, &pid, &tid );
+        ok( pid == (ULONG_PTR)GetCurrentProcessId(), "Connect-1 UniqueProcess=%lu.\n", pid );
+        ok( tid != 0 && tid == (ULONG_PTR)tid1, "Connect-1 UniqueThread=%lu tid1=%lu.\n", tid, tid1 );
+        winetest_pop_context();
+        conn = NULL;
+        pNtAlpcAcceptConnectPort( &conn, server_port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+        if (conn) NtClose( conn );
+    }
+    WaitForSingleObject( t1, 10000 );
+    CloseHandle( t1 );
+
+    a2.port_name = &port_name;
+    t2 = CreateThread( NULL, 0, conn_cid_thread, &a2, 0, NULL );
+    ok( t2 != NULL, "CreateThread failed.\n" );
+    tid2 = GetThreadId( t2 );
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -15 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected connect-2 status %#lx.\n", status );
+    if (status == STATUS_SUCCESS)
+    {
+        winetest_push_context( "connect 2" );
+        ok( msg->Type == LPC_CONNECTION_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+        read_client_id( msg, &pid, &tid );
+        ok( pid == (ULONG_PTR)GetCurrentProcessId(), "Connect-2 UniqueProcess=%lu.\n", pid );
+        ok( tid != 0 && tid == (ULONG_PTR)tid2, "Connect-2 UniqueThread=%lu tid2=%lu.\n", tid, tid2 );
+        ok( tid2 != tid1, "The two connect threads share a tid.\n" );
+        conn = NULL;
+        pNtAlpcAcceptConnectPort( &conn, server_port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+        if (conn) NtClose( conn );
+        winetest_pop_context();
+    }
+    WaitForSingleObject( t2, 10000 );
+    CloseHandle( t2 );
+
+    NtClose( server_port );
+}
 #endif /* _WIN64 */
 
 START_TEST(alpc)
@@ -2206,5 +2331,6 @@ START_TEST(alpc)
     test_alpc_serialization();
     test_alpc_duplicate_reply_drop();
     test_alpc_connect_commit();
+    test_alpc_connect_clientid();
 #endif
 }

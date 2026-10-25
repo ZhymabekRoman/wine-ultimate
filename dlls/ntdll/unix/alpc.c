@@ -850,6 +850,19 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 recv_msg->Type        = LPC_NEW_CONNECTION;
                 recv_msg->MessageId   = hdr.msg_id;
                 total = sizeof(*recv_msg) + hdr.user_size;
+                /* The kernel stamps a connection request's PORT_MESSAGE with the
+                 * connecting thread's client id.  The connection request is the one
+                 * message the receiver's engine parses with the Windows PORT_MESSAGE
+                 * layout - ClientId.UniqueProcess at +1*sizeof(void*), UniqueThread at
+                 * +2*sizeof(void*) - not Wine's shifted in-process layout the relay
+                 * correlation uses for ordinary messages (MessageId at +4*sizeof).
+                 * Filling the id through the struct writes it into the shifted slots,
+                 * leaving the Windows process-id slot (the +1*sizeof pad Wine reserves
+                 * for kernel alignment) zero; the registrar's partition gate reads that
+                 * zero as the companion client id and fails the connect.  Stamp the id
+                 * at the offsets the engine reads. */
+                *(client_ptr_t *)((char *)recv_msg + 1 * sizeof(void *)) = hdr.client_pid;
+                *(client_ptr_t *)((char *)recv_msg + 2 * sizeof(void *)) = hdr.client_tid;
             }
             else
             {
@@ -857,9 +870,9 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                  * Type/MessageId/CallbackId (reply correlation), only stamp ClientId */
                 memmove( recv_msg, src, hdr.user_size );
                 total = hdr.user_size;
+                recv_msg->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)hdr.client_pid;
+                recv_msg->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)hdr.client_tid;
             }
-            recv_msg->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)hdr.client_pid;
-            recv_msg->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)hdr.client_tid;
             if (recv_buffer_size) *recv_buffer_size = total;
             TRACE( "recv frame: port %p type %u id %u: %s\n",
                    port_handle, recv_msg->Type, recv_msg->MessageId,
