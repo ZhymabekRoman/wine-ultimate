@@ -1354,23 +1354,3 @@ HRESULT WINAPI CoreUICreate( void **out )
     return S_OK;
 }
 
-/*
- * The process-wide CoreUICore provider object.  The registrar hands this
- * object to conversation clients that ask the server for the CoreUICore
- * provider; it is the same IUnknown CoreUICreate vends.  One instance per
- * process: the reference is held for the process lifetime (the provider
- * outlives every conversation), client references come and go through
- * AddRef/Release on the object itself.
- */
-void *core_ui_provider_object( void )
-{
-    static struct core_ui *provider;
-    struct core_ui *impl;
-
-    if (provider) return &provider->IUnknown_iface;
-    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
-    impl->IUnknown_iface.lpVtbl = &core_ui_vtbl;
-    impl->ref = 1;
-    if (InterlockedCompareExchangePointer( (void **)&provider, impl, NULL )) free( impl );
-    return &provider->IUnknown_iface;
-}

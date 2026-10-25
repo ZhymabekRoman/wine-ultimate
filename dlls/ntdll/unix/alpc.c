@@ -573,7 +573,7 @@ NTSTATUS WINAPI NtAlpcDisconnectPort( HANDLE port_handle, ULONG flags )
  */
 static const char *debugstr_alpc_frame( const ALPC_PORT_MESSAGE *msg, SIZE_T total )
 {
-    static char out[160];
+    static char out[1024];
     const unsigned char *p = (const unsigned char *)msg;
     SIZE_T n = total, i;
     WORD verb = 0xffff, subid = 0xffff;
@@ -583,7 +583,7 @@ static const char *debugstr_alpc_frame( const ALPC_PORT_MESSAGE *msg, SIZE_T tot
         verb  = p[sizeof(*msg) + 4] | (p[sizeof(*msg) + 5] << 8);
         subid = p[sizeof(*msg) + 6] | (p[sizeof(*msg) + 7] << 8);
     }
-    if (n > 48) n = 48;
+    if (n > 400) n = 400;
     for (i = 0; i < n; i++) sprintf( out + i * 2, "%02x", p[i] );
     out[n * 2] = 0;
     return wine_dbg_sprintf( "%s(len %u verb %u subid %u)", out, (unsigned int)total, verb, subid );

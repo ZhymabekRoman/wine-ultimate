@@ -8,4 +8,3 @@ SOURCES = \
 	classes.idl \
 	coreuicall.c \
 	main.c \
-	registrar.c
