@@ -2061,3 +2061,64 @@ IL-stub precodes — the managed delegate-stub resolution (`GetDelegateMarshalli
 path in coreclr) fails on Wine and the first dispatch jumps to address 0; no Wine code
 is on that path (measured: apiset forwarders never invoked, payload verbatim);
 (b) the XAML window and the WebView2 chain remain behind that wall.
+
+## The type-definition descriptor hunt: wire decode of the self-host exchange (tip 8dda46e98 -> 2e5d909c7)
+
+**Task premise refuted by measurement.** The CoreUICore "type-definition descriptor"
+does not flow on the wire: every `MsgCallTypeDefinition` consumed at the fault site is
+a **static `.rdata` structure inside CoreMessagingXP.dll** (registrar server Type
+`+0xb4270`, registrar client Type `+0xb43c0` -> verb group at `+0xb43b0` =
+`{verbId 0, 29 sub-verbs, verbs array +0xaaa80}`, conversation Types `+0xb4858/+0xb4868`).
+The entries base is a loader-relocated image pointer - it can never be NULL in a mapped
+module. XAML is a pure session consumer: its entire CoreMessaging import surface is
+`CoreMsgCreateSession` (IAT `xaml+0x9e30d0`, called from `CXcpDispatcher::Init`
+`xaml+0xb0610`); no verb tables, stubs, or `CoreUICall*` imports exist in XAML (verified
+string/import/export/PDB sweeps; the literal "CoreUICore" exists in **no** module). The
+verb-stub producer pattern (BamoImpl Join -> `CoreUICallCreateConversationHost` with a
+static `?Type@...` descriptor) lives in Microsoft.UI.Input.dll (`input+0xdd8c4`) et al.
+
+**The exchange, hexdumped end-to-end (TEMP relay payload probe, removed).** Exactly
+three messages cross the relay, deterministically, then death: (A) client request 88B:
+PORT_MESSAGE-shaped framing DataLength 48/TotalLength 88/MessageId@32, AlpcBuffer
+flags 2, call header `{headerSize 8, verb 1, method 1}` = registrar-server
+PrepareConnection; (B) server ack reply 80B (zero payload); (C) server reply 128B
+(call header `{headerSize 0, verb 48, method 0}`, 48B parameter region). No
+RegisterConversation verb-14 exchange is ever composed.
+
+**Death mechanism (measured with a TEMP segv near-null register probe, removed).**
+At the receiver, `AlpcBuffer::ValidateBufferHeader` enforces the identity
+`TotalLength == framing.length(user byte 72) + 80` and the chunk pair
+`chunkIndex < chunkCount` (user bytes 64/66) before any verb dispatch. The relayed
+copies carry the senders' zeroed/stale slots (A: length word `0x08000000`), the request
+is refused as a protocol exception, and the receiver of a reply whose length word is 0
+takes `payload = NULL, len = 0` (`& -(len != 0)` masking in `HandleSynchronousReply`):
+`UnmarshalReceive` returns S_OK at its zero-length early-out **without writing the
+verb-record slot**, and `CoreUICallReceive+0x8c19a` executes `mov rax,[rax]` on the
+uninitialized stack slot (= 0) -> first-chance c0000005 at address 0 (rax=0,
+callee never starts), coreclr -> FailFast AccessViolationException (the ff=33 face).
+The earlier "IL-stub precode / managed delegate-stub resolution" reading is superseded:
+no managed code is on this path; the slot is a never-written stack local.
+
+**Wine-side change (server/alpc.c, pushed ultimate 2e5d909c7).** The relay now stamps
+the kernel-owned per-message framing slots on delivered requests/replies: chunkIndex,
+chunkCount=1 (chain values for multi-buffer sends), and payload-length =
+`user_size - 80`, gated on the framing signature (DataLength == user_size-40 &&
+TotalLength == user_size && user_size >= 80) - unreachable for standard
+PORT_MESSAGE-shaped traffic, so ntdll/tests/alpc shapes are untouched. Verified via a
+TEMP post-write probe that the stamps land in the delivered copies (A: len 8, B: len 0,
+C: len 48), which passes the server length-identity gate.
+
+**Numbers.** Gate 150s x2: rc=5 DIED fatal=1 ff=33 (43442/43429 lines, deterministic,
+identical to baseline); battery 8/8 rc=5 fatal=1; screenshot 295B blank/black
+(`wa-work/wa_typedef_after.png`); app binaries pristine (CoreMessagingXP 7ee4b6c2,
+Microsoft.ui.xaml ec542848, dwmcorei 6ffe2bbc, FrameworkUdk 98f99f09 == .orig;
+WebView2Loader daf9a810 = measured baseline copy, trusted-list drift noted).
+
+**Next gaps.** (a) The self-host registrar handshake shape: the reply the client
+dispatches (MSG C call header `verb 48, method 0`) indexes verb groups absent from the
+receiver's static Type; on Windows the second reply to the same request never reaches
+the client (kernel single-pending-request reply semantics) - the relay needs
+single-pending-request reply correlation (drop/defer replies whose echoed id has no
+pending request) so the len-0 ack (MSG B) and duplicate reply (MSG C) never reach
+`CoreUICallReceive` on a virgin stack; (b) then RegisterConversation verb composition
+can proceed; (c) XAML window mapping + WebView2 chain remain behind that wall.
