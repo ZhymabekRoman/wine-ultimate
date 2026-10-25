@@ -785,6 +785,30 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
     if (msg_type && user_size >= ALPC_USER_TYPE_OFF + 2)
         *(unsigned short *)((char *)(hdr + 1) + ALPC_USER_TYPE_OFF) = msg_type;
 
+    /* The kernel stamps the per-message header slots every delivered request
+     * and reply carries; the messaging framing laid over them encodes a
+     * payload-length identity (TotalLength == length + 80) and a chunk pair
+     * (index < count) that both endpoints validate before any verb is
+     * dispatched.  A relayed message never passes the kernel, so the
+     * delivered copy carries the sender's zeroed slots: every exchange is
+     * refused as a protocol exception, and a refusal reply with a zero
+     * length field makes the receiver dispatch an uninitialized verb slot
+     * (guarded call to address 0).  Stamp the chunk pair and the payload
+     * length as the kernel would. */
+    if (user_size >= 80)
+    {
+        unsigned char *msg_data = (unsigned char *)(hdr + 1) + (dup ? sizeof(struct alpc_handle_blk) : 0);
+        unsigned short data_len = *(const unsigned short *)msg_data;
+        unsigned short total_len = *(const unsigned short *)(msg_data + 2);
+
+        if (total_len == user_size && data_len + 40 == user_size)
+        {
+            *(unsigned short *)(msg_data + 0x40) = seq ? seq - 1 : 0; /* chunk index */
+            *(unsigned short *)(msg_data + 0x42) = seq ? count : 1;   /* chunk count */
+            *(unsigned int *)(msg_data + 0x48) = user_size - 80;      /* payload length */
+        }
+    }
+
     list_add_tail( &peer->msg_queue, &msg->entry );
     wake_up( &peer->obj, 0 );
     reselect_alpc_port( peer );
