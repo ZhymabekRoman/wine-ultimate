@@ -2833,14 +2833,14 @@ request mix becomes real work (`read_change`, `get_handle_fd`, `create_mapping`,
 `dcomp_get_shared_visual_info`). The browser now provisions `EBWebView\Default` — 32 profile
 directories including **`Extension Rules`, `Extension Scripts`, `Extension State`**, the
 ExtensionService/RulesRegistry/ExtensionStateService state that was never created before
-(`Default` itself did not exist in earlier eras). Gate 150 s ×5: `ALIVE_150s fatal=0 ff=0
-cs_timeouts=0`, `edge@120=6`, `BORN=5 GONE=none`, `createdwins` 127-165, `xamlwin=1`,
-`rendwin=1`, `mangohud=0`, no new crashpad reports, `originate` 7-11. Battery 8/8 `ALIVE_60s
-fatal=0 cs=0 loader=0`, wins 129-152, browser launches 12-13 (baseline parity). Suites at parity:
-dcomp 1160/36f, d3d11 562750/784todo/112f/8sk, dxgi `rc=124` at the 300 s cap. App binaries
-pristine 4/4. **`navigate=0 webwa=0` in every run — Navigate is NOT reached.** Screenshot
-`$HOME/wa-work/wa_ext2_after.png` (t=130 s of a 160 s gate, 295 B, 1280×1024, 1 colour)
-**BLACK**, as in the previous eras.
+(`Default` itself did not exist in earlier eras). Post-fix runs on the deployed fix (`/tmp/wb`: wineserver md5 `6441dd9a…`, ntdll md5 `91f343c0…`): gate 150 s
+`ALIVE_150s fatal=0 ff=0 cs_timeouts=0 edge@120=6 BORN=5 GONE=none createdwins=141 xamlwin=1 rendwin=1 mangohud=0`,
+**`navigate=0 webwa=0` — Navigate is NOT reached**; app binaries pristine 4/4. The 5 × 150 s gates (`createdwins`
+127-165, `originate` 7-11, no new crashpad reports), the 8 × 60 s battery (8/8 `ALIVE_60s fatal=0 cs=0 loader=0`,
+wins 129-152, browser launches 12-13) and the suites (dcomp 1160/36f, d3d11 562750/784todo/112f/8sk, dxgi `rc=124`
+at the 300 s cap) are the **pre-fix `b31bbdc12` baseline** measured in this session; the fixed build is re-verified by
+`/tmp/wa/verify_fix.sh` (pristine → gate 160 s whose frame at t=130 s is staged as `wa_ext2_after.png` → battery 8×60
+→ suites), log `/tmp/wa/verify_fix.log`. The pre-fix frame at t=130 s (295 B, 1280×1024, 1 colour) is **BLACK**.
 
 **New wall, measured: the WebView2 channel invitation is never accepted.** With the pump healthy,
 the full `WINEDEBUG=+server` request trace (affordable now: ~70 req/s) shows the topology:
