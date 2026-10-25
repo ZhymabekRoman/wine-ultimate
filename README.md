@@ -2530,4 +2530,59 @@ staging can't be made to complete: make the zoom await non-fatal (app-side gate 
 `FailuresService.Investigate` swallows), i.e. drive `AddBrowserExtensionAsync` to fault fast
 so `OnCoreWebView2Initialized` reaches `TrySetResult` and `StartNavigation` fires.
 
-## Session 2026-10-25(e): the extension-staging wall 
+## Session 2026-10-25(e): the extension-staging wall
+
+## Session 2026-10-25(f): the app-internal `wined3d_cs` present-path deadlock — resolved
+
+**Anatomy (measured).** The contended lock is the module-global wined3d mutex (debug name
+`"../wine-src/dlls/wined3d/wined3d_main.c: wined3d_cs"`), one per process; the per-device command
+stream is a lock-free ring queue whose worker never holds the mutex. Gate logs show 3–7
+`RtlpWaitForCriticalSection … wined3d_cs` 60 s timeouts per 150 s run; first at t≈25 s; the owner
+tid (0410/0414/0418/0424 across runs) is the app thread that created the composition swapchain:
+the log's last words from it are `CreateSwapChainForComposition using hwnd 0x1006C (1058x1024)` →
+`d3d11_swapchain_present` → `redirecting present from win_handle 0x1006C to target_window 0x1006C`
+→ dwmapi.dll load, then silence. gdb thread dumps (TEB-ClientId tid map, raw-word symbolization;
+winedbg attach **segfaulted the wineserver** — `req_select`/`set_reply_data(data=0x80)`, fixed below)
+show every wined3d_cs worker idle in a condvar wait and no thread shallow-stacked in wined3d: the
+owner sits deep in a `ShowWindow` → `send_message` chain, the 60 s-timeout waiter is the app UI
+thread's wndproc re-entering wined3d.
+
+**Root cause.** Three fork sites performed window-manager / window-GDI operations while holding the
+global wined3d critical section (or on the queue worker thread):
+1. `wined3d_swapchain_present` called `ShowWindow(target, SW_SHOW)` on **every present** under the
+   mutex. `ShowWindow` synchronously sends `WM_WINE_SETWINDOWPOS` to the window owner (the app UI
+   thread). That thread re-enters wined3d from its window procedures (DComp/D2D rendering) and
+   blocks on the mutex the present caller holds → 2-node cycle, fires at the first present.
+2. `swapchain_gl_present` ran `GetDC(target)` + `BitBlt` + `ReleaseDC` on the **cs worker thread**:
+   window DCs take the winex11 window-data lock and round-trip to X. The UI thread holds that lock
+   in its window-position handlers while its wndproc blocks on the mutex; queue emitters spin on
+   queue drain with the mutex held → the 4-node cycle: mutex-holder→UI thread, UI thread→window
+   lock, cs thread→window lock, emitter(mutex)→cs thread.
+3. `swapchain_gdi_frontbuffer_updated` repeated the same cross-thread `GetDC/BitBlt` on the cs thread.
+(The classic X11↔wined3d lock-order rule — never take an X/window round-trip or cross-thread send
+under the wined3d critical section — reproduced in the present path; the fork had already fixed one
+instance of this family in `gdi32/opengl.c`.)
+
+**Fix (clean, bounded, tip → commits below).** Resolve the present redirect target *before* the
+critical section and show it **once, asynchronously** (`ShowWindowAsync`, a posted message, guarded
+by a new `swapchain->redirect_shown` flag); remove the cs-thread window-GDI blits — the GL present
+(`swapchain_blit`/`wglSwapBuffers` into the window's drawable, which the swapchain init already
+binds to the CoreWindow) owns the drawable. Plus `server`: guard the `req_select` APC dequeue
+against a concurrently consumed APC (`thread_dequeue_apc()` → NULL → `&apc->call` = 0x80 → SIGSEGV,
+captured from a systemd-coredump core of wineserver).
+
+**Numbers.** Gate 150 s ×4 (2 pre/blit-removal, 2 final): `cs_timeouts=0` in every run (tip: 3–7),
+`rc=124 ALIVE_150s fatal=0 ff=0`, `originate=7`, `createdwins=142`, `xamlwin=1`, `ebwebview=26`.
+Battery 8/8 `ALIVE_60s fatal=0`, browser-launch parity with tip (`edge=12/13` log refs per 60 s).
+Suites post-fix: dcomp 1160 tests / 36 failures, d3d11 562750 tests / 112 failures / 8 skipped,
+dxgi run capped at 300 s — baseline (pre-fix wined3d) comparison: IDENTICAL (see above). App
+binaries pristine 4/4 (`*.dll == *.orig`). **Screenshot verdict** `$HOME/wa-work/wa_csfix_after.png`
+@ t=120 s: **BLACK** (295 B) — unchanged from tip; present reaches the window, nothing painted.
+
+**Navigate status.** Not reached (`navigate=0`, `web.whatsapp=0`, no `StartNavigation` in applog).
+The deadlock was the pump-starvation amplifier upstream of the park; with the pump healthy the wall
+is the same as 2026-10-25(e): the browser process spawns (edge log refs 642–1458/run; alive in the
+early window), stages, and tears down before `AddBrowserExtensionAsync` completes; in some runs the
+app never reaches browser creation at all (run-to-run variance, present at tip too). **Next gap:**
+the browser-process teardown during extension staging (8407732f); the app-side wined3d_cs
+deadlock that starved the client IPC pump is now closed, so the teardown probe can be read clean. 
