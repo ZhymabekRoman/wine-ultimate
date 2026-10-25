@@ -2786,3 +2786,111 @@ the next session's battery/gate runs.
 `EmbeddedBrowserWebView.dll` — instrument the mojo request/response boundary client-side (the
 only remaining place before staging), the browser side is now provably pumping and file-clean;
 (2) compositing: live render widget, black X root; (3) free disk, then re-baseline the battery.
+
+## Session 2026-10-26: the wake-completion-packet re-arm storm closed — the wall moves to the WebView2 channel invitation (wine tip `a55a58cf3`, branch `ultimate`)
+
+**The stall is a request storm on the app's UI thread, not an IPC reply.** A `strace -f` of the
+client's wineserver socket (fd 118 = request, 114 = reply) over a 26 s window at t=17-43 s gives
+2,133,157 syscall lines, of which **2,100,093 belong to one thread** (`top -H` name `UI thread`).
+Decoding the request stream with the `@REQ` order of `server/protocol.def` (request header is
+`{int req; data_size_t request_size; data_size_t reply_size;}` = 12 bytes, reply header 8):
+
+| request | count / 26 s | decoded fields |
+| --- | --- | --- |
+| `associate_wait_completion_packet` (314) | 393,954 | packet `0x5a8`, port `0x5a4`, target `0x588`, key `0x40000002`, reply `signaled=1` in 384,689 |
+| `remove_completion` (267) | 501,348 | port `0x5a4`, reply `ckey=0x40000002 status=0` (the packet just posted) |
+| `add_completion` (266) | 107,447 | port `0x5a4`, `reserve_handle=0x598` |
+
+`REMOVE -> ASSOC -> REMOVE -> ASSOC` at ~20k cycles/s for the whole window, i.e. 40k syscalls/s
+(~75 % of one core) spent on a wake that never sleeps — the pump of the thread that owns the
+app's dispatcher, the WebView2 client's completion delivery and the XAML window procedures.
+The browser tree is *idle* in the same window (704 strace lines in 24 s, no ALPC traffic at all),
+which is why the earlier sessions saw "no completion on `Chrome_MessageWindow`": the client
+thread never reaches the code that sends the staging request.
+
+**Root cause (three coupled fidelity gaps in the fork's wake-packet layer).**
+`NtAssociateWaitCompletionPacket`'s 8th parameter is Windows' **`BOOLEAN SignalAndWakeUpApp`**
+(input). The fork declared it `BOOLEAN *already_signaled` (out) and the protocol did not carry it
+at all, so the app's value — a `BOOLEAN`, `FALSE` in every measured call (a non-zero value would
+have made Wine write through `0x1` and fault) — was read as a pointer and discarded, and
+`wake_packet_fire()` signalled the target object on *every* firing. Signalling the target of a
+wake that the target's own signal caused re-arms the exact condition that fired it, and the
+association-time readiness test (`sync->ops->signaled`) never consumed the signal, so the next
+`associate` reported `signaled=1` again, forever.
+
+**Fix.** Carry `SignalAndWakeUpApp` in the associate request (ntdll stub, wow64 thunk, spec,
+`winternl.h`, `protocol.def`) and use it where Windows uses it: an I/O wake (the receive the
+packet was bound to) signals the target **only when the app asked for it**; a wake fired by the
+target's own signal never signals it. A wake already complete at association time is a completed
+wait, so it **consumes** the signal that completed it. A receive that is still in flight is not a
+completed wake, so the association handler stops testing the bound port, and the
+`alpc_port_ready()` helper (which also counted the peer handle's queue as a completed receive of
+this handle) is removed.
+
+**Numbers.** Same 26 s window after the fix: `associate` 393,954 → **30**, `remove_completion`
+501,348 → **5,914**, wineserver requests on the client socket ~1,000,000 → **~1,700**; the
+request mix becomes real work (`read_change`, `get_handle_fd`, `create_mapping`, `queue_apc`,
+`dcomp_get_shared_visual_info`). The browser now provisions `EBWebView\Default` — 32 profile
+directories including **`Extension Rules`, `Extension Scripts`, `Extension State`**, the
+ExtensionService/RulesRegistry/ExtensionStateService state that was never created before
+(`Default` itself did not exist in earlier eras). Gate 150 s ×5: `ALIVE_150s fatal=0 ff=0
+cs_timeouts=0`, `edge@120=6`, `BORN=5 GONE=none`, `createdwins` 127-165, `xamlwin=1`,
+`rendwin=1`, `mangohud=0`, no new crashpad reports, `originate` 7-11. Battery 8/8 `ALIVE_60s
+fatal=0 cs=0 loader=0`, wins 129-152, browser launches 12-13 (baseline parity). Suites at parity:
+dcomp 1160/36f, d3d11 562750/784todo/112f/8sk, dxgi `rc=124` at the 300 s cap. App binaries
+pristine 4/4. **`navigate=0 webwa=0` in every run — Navigate is NOT reached.** Screenshot
+`$HOME/wa-work/wa_ext2_after.png` (t=130 s of a 160 s gate, 295 B, 1280×1024, 1 colour)
+**BLACK**, as in the previous eras.
+
+**New wall, measured: the WebView2 channel invitation is never accepted.** With the pump healthy,
+the full `WINEDEBUG=+server` request trace (affordable now: ~70 req/s) shows the topology:
+
+* the client (tid `01b0`) creates `\\.\pipe\LOCAL\mojo.32.432.<rand>` —
+  `create_named_pipe(access=c0180000, options=FILE_SYNCHRONOUS_IO_NONALERT, sharing=3,
+  disposition=3, maxinstances=1, 4096/4096, timeout=+5.0)` — and then **connects to it itself**
+  (tid `01b8`, `open_file_object(...) = 0`); one name, one instance, both ends in the client;
+* it launches `msedgewebview2.exe --embedded-browser-webview=1 ... --embedded-browser-webview-enable-extension --mojo-named-platform-channel-pipe=32.432.<rand>`
+  with **`handles_size=0, handles={}`** (no inherited handles) — the extension feature switch
+  **is** passed, which refutes the `--embedded-browser-webview-enable-extension` hypothesis;
+* the browser (pid 436) creates and self-connects 13 of **its own** pipes
+  `mojo.436.592.*`/`mojo.436.544.*` for its child channels (children are launched with
+  `--mojo-platform-channel-handle=<int>` **and** a non-empty inherited-handle list — that
+  machinery works, which is why the renderer/network/gpu tree is healthy), and **never touches
+  the client's pipe: not one request for that name, not even a failed one**;
+* the client-side mojo proxy is therefore unbound, `AddBrowserExtensionAsync` puts nothing on
+  any transport, the runtime starts no timeout for the operation, and the app's
+  `OnCoreWebView2Initialized` parks on the await, keeping `StartNavigation`/`Navigate` unreachable.
+
+**Ranked for the next session.** (1) Chromium's `NamedPlatformChannel` serializes **two** names
+(`"<outgoing> <incoming>"`, split on a space, `size() != 2` ⇒ invalid channel); the value observed
+carries **one** token, so the browser's accept yields an empty channel and it boots as a
+standalone browser. The open question is why the client's pair-creation yielded one pipe: the
+client's single-instance self-connect **succeeds** in Wine, so the inviter may take a degraded
+path — probe `kernelbase` `CreateNamedPipeW`/`CreateFileW` at bootstrap for both directions, and
+Wine's single-instance connect/`maxinstances` semantics in `server/named_pipe.c`.
+(2) `GetHandleInformation` returns `E_NOTIMPL` in Wine, so the client's `ValidateHandleFlags`
+marks the pair `kAutoFromHandle` and the invitation path is skipped. (3) the client-side mojo
+version gate (`IsVersionSupportedForMethod`) drops the request silently. Browser-side staging
+itself is healthy: it now provisions the profile and the extension state, and only waits for a
+request that is never sent.
+
+**Measurement notes.** `WINEDEBUG=+named_pipe` is not a channel in this tree (the pipe code has no
+client debug channel: the useful channels are `+file` and the wineserver's own `+server` request
+dump, `server/trace.c:trace_request()`, which prints every request with names and arguments —
+the decisive instrument, and cheap at the fixed request rate). `gdb -p` on this stack resolves no
+symbols (all frames `?? ()`); the working combination is a raw-word stack scan + a
+`/proc/<pid>/maps` snapshot (harness: `/tmp/wa/x1.sh` strace+gdb+census, `/tmp/wa/reqlist.py`
+request-code histogram, `/tmp/wa/dec3.py` protocol decoder with the correct header offsets,
+`/tmp/wa/x2.sh` per-thread rate + staging census, `/tmp/wa/x3.sh` full `+server` trace).
+A `ps -eo comm=` filter must match the truncated Wine comm (`WhatsApp.Root.e`,
+`msedgewebview2.`). The root filesystem was **100 % full** at session start (552 MB free): 21 GB
+of Chromium `BrowserMetrics` telemetry under `~/.config/shared-chrome-profile`, systemd coredumps,
+journal and stale harness logs were removed (now 29 GB free) — runs taken while the disk is full
+show the disk-driven degraded mode (`SqliteException … session.db … disk I/O error`,
+`createdwins≈38`, no browser) and must be discarded. Harness: `/tmp/wa/gate_td.sh` (DUR=160 puts
+the frame at t=130 s), `/tmp/wa/battery.sh 8 60`, `/tmp/wa/suite_one.sh <dcomp|d3d11|dxgi> <cap>`,
+`/tmp/wa/sync.sh` after every deploy. Build: `make -C /tmp/wine/wine-build -j8 -k` (the tree's
+`programs/cmd/tests/testlist.c` rule is missing, so `-k` is required), protocol regeneration is
+`cd /tmp/wine/wine-src && perl tools/make_requests` (the build does not regenerate
+`include/wine/server_protocol.h` on its own), deploy `rsync -a` build→`/tmp/wb` then
+`/tmp/wa/sync.sh`.
