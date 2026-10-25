@@ -2586,3 +2586,64 @@ early window), stages, and tears down before `AddBrowserExtensionAsync` complete
 app never reaches browser creation at all (run-to-run variance, present at tip too). **Next gap:**
 the browser-process teardown during extension staging (8407732f); the app-side wined3d_cs
 deadlock that starved the client IPC pump is now closed, so the teardown probe can be read clean. 
+## Session 2026-10-25(g): the msedgewebview2 teardown measured — three of the recorded facts were measurement artifacts (tip `0a639446c`)
+
+**The census was blind.** Wine's loader sets the Linux `comm` of a PE process to `<exe>.exe`, truncated
+by the kernel to 15 chars → `msedgewebview2.`. Every harness census used `pgrep -x msedgewebview2`
+(gate.sh, gate_csfix.sh, brlife.sh, brdump.sh) which can never match, and the gate's `ps -eo comm |
+grep -c msedgewebview2` samples only the *substring* (works) — so the two census styles disagreed and
+the recorded "browser spawns in 3/5 gates, 2/5 never spawn" spread is mostly an artifact. With
+`pgrep -f 'msedgewebview2[.]exe'` (cmdline match) the browser tree spawns at **t≈2 s in every run**
+that reaches webview creation, with the full child set (crashpad-handler, gpu-process, utility×2,
+renderer = 6 processes).
+
+**Machine hygiene.** 2354 leaked Wine PE processes were found running (`svchost.exe`×789,
+`plugplay.exe`×787, `rpcss.exe`×778, `explorer.exe`×754, `winedevice.exe`×130) — `pkill -9 -x
+wineserver` strands every client of the killed server, so each prior harness run leaked ~6 hung
+processes. They are reaped; all harness scripts now sweep `comm ~ /\.exe$/` before and after each run
+(one harness at a time, no cross-run pollution).
+
+**GPU-process CHECK loop, host-side.** `/etc/environment` sets `MANGOHUD=1`, so MangoHud's **implicit
+Vulkan layer** (`/usr/share/vulkan/implicit_layer.d/MangoHud.x86_64.json`) loads into the Wine GPU
+process (Chromium Dawn/Graphite). Crashpad minidumps in
+`…/WhatsApp/LocalCache/EBWebView/Crashpad/reports/` carry exception `0x80000003` (Chromium
+`IMMEDIATE_CRASH` = `int3`, i.e. a CHECK, not an access violation) at `msedge.dll+0x27d2a3`, four of
+them inside the first 25 s, and the census shows the `gpu-process` pid replaced every ~2 s (6
+restarts by t=18). Harness fix: `unset MANGOHUD; DISABLE_MANGOHUD=1;
+VK_LOADER_LAYERS_DISABLE='~implicit~'; VK_INSTANCE_LAYERS=`. Measured after the fix: zero
+`[MANGOHUD]` lines, zero new crashpad dumps during a 150 s run, no restart storm, 6 webview processes
+alive at t=120.
+
+**Teardown initiator.** It is not the app: the `user_destroy_window` events for
+`Chrome_WidgetWin_1`, `Chrome_RenderWidgetHostHWND`, `Chrome_MessageWindow` all sit at t=150–151 s,
+i.e. the harness kill; no `WEBVIEW2_TEMP_PARENT`/bridge destroy precedes anything. It is not the mojo
+pipe: the invitation pipe (`\\.\pipe\LOCAL\mojo.<browser_pid>.*`) is created and connected at
+t=1.8–2.4 s. It is the browser itself: gdb snapshots of the browser at t=40 and t=90 show
+`CrBrowserMain` (tid `0x1b8`) at an **identical** libc futex PC in both, with no Wine syscall trace
+from that tid after t≈10 s, and the process then exits from a non-UI thread's
+`NtUserPostQuitMessage` (exit code 2) at ~140 s from spawn — the clean shutdown (Local State flush,
+window destroys, no CHECK/FATAL) that 2026-10-25(e) recorded. So the wall is a Chromium-internal
+watchdog closing a browser whose UI thread has stopped pumping; with the pump stopped the
+`AddBrowserExtensionAsync` completion is never emitted, the client's TCS parks, `Navigate` is never
+reached.
+
+**Startup bimodality (real, not census).** Battery 8×60 with the fixed env: 5/8 runs reach the webview
+stage (`created window` 130–148, webview tree live), 3/8 stall earlier (wins 33–50, no browser).
+That, not browser-spawn variance, is the source of the old 3/5 figure.
+
+**Numbers.** Gate 150 s ×3 (`tdg1..3`): `ALIVE_150s`, `fatal=0 ff=0 cs_timeouts=0`; tdg1/tdg2
+`BORN=5 GONE=none edge_max=6 edge@120=6`, 1.75 M lines, `originate=7 createdwins=141 xamlwin=1`,
+`navigate=0 webwa=0`, `mangohud=0`, 0 new crashpad dumps; tdg3 = the early-stall mode (edge=0, wins=67,
+originate=4). Battery 8/8 `ALIVE_60s fatal=0`. Suites at tip with the fresh tree (dcomp/d3d11/dxgi):
+see `/tmp/wa/suite_*_td.log` (parity with the 2026-10-25(f) baseline). App binaries pristine 4/4
+(`CoreMessagingXP.dll`, `dwmcorei.dll`, `Microsoft.Internal.FrameworkUdk.dll`,
+`Microsoft.ui.xaml.dll` == `.orig`). Screenshots at t=120/130 stay 295 B (black X root).
+
+**Tools added.** `tools/mdump2.py` (crashpad minidump: exception record, CONTEXT, module list, stack
+scan → module+offset) and `tools/symres.py` (maps → module+symbol resolver over the ELF `.so`s).
+
+**Next gaps.** (1) the browser UI-thread wedge: it blocks with no wineserver traffic, so the
+Wine-side suspect is the wake path of the browser's own message-pump wait
+(`MsgWaitForMultipleObjectsEx`/queue wake for the pump's posted work) — reproduce minimally outside
+WhatsApp before patching; (2) the 3/8 early-stall startup mode (`createdwins` 33–67, no browser);
+(3) compositing/present: a live 1058×1024 render widget with a black X root.
