@@ -481,7 +481,9 @@ static void alpc_add_outstanding( struct alpc_port *base, unsigned int id )
 /* Answer an outstanding request: with an id, pop that request (the reply
  * echoes the id of the request it answers); with id 0, pop the oldest (the
  * kernel serialises one exchange per connection, so a reply that carries no
- * id answers the request in flight).  Returns the popped id, 0 = none. */
+ * id of its own answers the request in flight).  Returns the popped id,
+ * 0 = none: the connection has nothing outstanding to answer, and the kernel
+ * refuses such a reply. */
 static unsigned int alpc_pop_outstanding( struct alpc_port *base, unsigned int id )
 {
     struct alpc_outstanding *o;
@@ -567,6 +569,25 @@ static unsigned int alpc_oldest_outstanding( struct alpc_port *base )
     if (base && !list_empty( &base->outstanding ))
         return LIST_ENTRY( list_head( &base->outstanding ), struct alpc_outstanding, entry )->id;
     return 0;
+}
+
+/* The messaging layer lays a framing header over the ALPC PORT_MESSAGE whose
+ * slots the kernel owns: the delivered message carries a payload length that
+ * must satisfy the length identity (TotalLength == payload + 80, a 40-byte
+ * framing header inside the ALPC header), and the receiver validates it before
+ * it dispatches a verb.  Returns the payload length of a message in that
+ * framing shape, (unsigned int)-1 = the message is not in it. */
+static unsigned int alpc_frame_payload_len( const void *data, data_size_t size )
+{
+    const unsigned char *p = data;
+    unsigned short data_len, total_len;
+
+    if (size < 80) return (unsigned int)-1;
+    data_len  = *(const unsigned short *)p;
+    total_len = *(const unsigned short *)(p + 2);
+    if (total_len != (unsigned short)size || data_len + 40 != (unsigned short)size)
+        return (unsigned int)-1;
+    return *(const unsigned int *)(p + 0x48);
 }
 
 /* A server that receives every connection on the listening port has no
@@ -795,13 +816,10 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
      * length field makes the receiver dispatch an uninitialized verb slot
      * (guarded call to address 0).  Stamp the chunk pair and the payload
      * length as the kernel would. */
-    if (user_size >= 80)
     {
         unsigned char *msg_data = (unsigned char *)(hdr + 1) + (dup ? sizeof(struct alpc_handle_blk) : 0);
-        unsigned short data_len = *(const unsigned short *)msg_data;
-        unsigned short total_len = *(const unsigned short *)(msg_data + 2);
 
-        if (total_len == user_size && data_len + 40 == user_size)
+        if (alpc_frame_payload_len( msg_data, user_size ) != (unsigned int)-1)
         {
             *(unsigned short *)(msg_data + 0x40) = seq ? seq - 1 : 0; /* chunk index */
             *(unsigned short *)(msg_data + 0x42) = seq ? count : 1;   /* chunk count */
@@ -846,6 +864,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     unsigned int utype = 0;
     unsigned int msg_type = 0;  /* LPC type to stamp into the delivered PORT_MESSAGE, 0 = keep */
     int reply_stamped = 0;      /* the kernel filled the reply's message id */
+    int reply_resolved = 0;     /* the reply's correlation was settled above */
     int is_reply_send, is_multi;
 
     iosb = async_get_iosb( async );
@@ -983,89 +1002,85 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 }
             }
         }
-        if (!peer && reply_id)
+        if (is_reply_send)
         {
-            LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+            /* Kernel reply correlation.  A connection carries one outstanding
+             * request at a time (a server that posts several buffers, or splits
+             * a multi-buffer send, has one entry per request id).  A reply
+             * echoes the id of the request it answers, is stamped with that id,
+             * and goes to the receive armed with the id — the receive of the
+             * sender's send-receive pair; a reply that finds no receiver armed
+             * rides the connection's queue as the kernel's pending reply, for
+             * the receive armed with the id next.  The cases:
+             *
+             *  - the id answers an outstanding request of a connection: pop it.
+             *  - the id answers nothing (the request was already answered): the
+             *    kernel refuses the reply with STATUS_INVALID_DEVICE_REQUEST and
+             *    never queues nor delivers it.  A delivered duplicate reaches the
+             *    receiver as a second answer to a request whose reply it already
+             *    consumed: the messaging layer reads the stale frame, its
+             *    unmarshal of a zero-length payload takes an S_OK early-out
+             *    without writing the verb record, and the guarded dispatch reads
+             *    the unwritten slot.
+             *  - a reply-shaped frame carrying no id of its own answers the
+             *    request in flight (the kernel serialises one exchange per
+             *    connection), and is stamped with that request's id.
+             *
+             * The registrar exchange measured on the relay is of exactly that
+             * shape: the PrepareConnection request (id N, 88 bytes), then two
+             * reply frames — the verb reply (128 bytes, framing payload length
+             * non-zero, no id of its own) and the exchange's completion ack
+             * (80 bytes, framing payload length 0, echoing id N), in either
+             * order.  The verb reply is the payload the client unmarshals, so it
+             * takes the reply slot of the request; the ack, arriving after the
+             * slot is spent, answers nothing outstanding and is dropped. */
+            struct alpc_port *oc;
+            unsigned int popped, payload = alpc_frame_payload_len( data, size );
+
+            oc = alpc_conn_find_outstanding( port, reply_id );
+            popped = oc ? alpc_pop_outstanding( oc, reply_id ) : 0;
+            if (popped)
             {
-                struct async *matching = find_reply_alpc_async( &conn->read_q, reply_id );
-                if (matching)
-                {
-                    release_object( matching );
-                    peer = conn;
-                    msg_type = ALPC_LPC_REPLY;
-                    alpc_pop_outstanding( conn, reply_id );
-                    break;
-                }
-            }
-            /* No receive is armed for the id (the client armed a bare receive
-             * after its send, as the CoreMessaging engine's receive pump
-             * does): the reply still answers the outstanding request carrying
-             * that id, and the kernel delivers it to the receive the client
-             * arms next. */
-            if (!peer)
-            {
-                LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-                {
-                    if (alpc_pop_outstanding( conn, reply_id ))
-                    {
-                        peer = conn;
-                        msg_type = ALPC_LPC_REPLY;
-                        break;
-                    }
-                }
-            }
-            if (peer) alpc_drain_send_gate( peer );
-        }
-        /* a reply answers the connection carrying that outstanding request
-         * even when that client arms only bare receives (the CoreMessaging
-         * receive pump): the kernel stamps the reply with the id of the
-         * request in flight, and the receive armed later takes it; an
-         * id-less reply answers the connection with the oldest outstanding */
-        if (!peer && is_reply_send)
-        {
-            conn = alpc_conn_find_outstanding( port, reply_id );
-            if (conn)
-            {
-                reply_id = alpc_pop_outstanding( conn, reply_id );
-                peer = conn;
+                struct async *armed;
+
+                reply_id = popped;
+                peer = oc;
                 msg_type = ALPC_LPC_REPLY;
                 reply_stamped = 1;
-                alpc_drain_send_gate( conn );
+                armed = reply_id ? find_reply_alpc_async( &oc->read_q, reply_id ) : NULL;
+                if (armed) release_object( armed ); /* the armed receive takes it */
+                else if (!payload)
+                {
+                    /* the completion ack of an exchange whose receive is not
+                     * armed: the correlation, not a data reply — a bare receive
+                     * must not take it */
+                    if (relay_trace_enabled())
+                        fprintf( stderr, "ALPC relay CONSUME ack id %u port %p: no receive armed\n",
+                                 reply_id, (void *)oc );
+                    alpc_drain_send_gate( oc );
+                    async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
+                    release_object( iosb );
+                    return;
+                }
+                alpc_drain_send_gate( oc );
             }
+            else
+            {
+                /* the kernel drops it: no request is outstanding to answer, so
+                 * the reply is never queued and never delivered, and the send
+                 * completes with the kernel's refusal */
+                if (relay_trace_enabled())
+                    fprintf( stderr, "ALPC relay DROP reply id %u port %p: request already answered\n",
+                             reply_id, (void *)port );
+                release_object( iosb );
+                set_error( STATUS_INVALID_DEVICE_REQUEST );
+                async_request_complete( async, STATUS_INVALID_DEVICE_REQUEST, 0, 0, NULL );
+                return;
+            }
+            reply_resolved = 1;
         }
         if (!peer)
         {
-            if (is_reply_send)
-            {
-                /* A REPLY-flag send whose request was already answered: the
-                 * kernel routes it to the connection that carried the id (the
-                 * engine answers a conversation request with a reply frame and
-                 * an ACK reply, both stamped with the request's id; the client's
-                 * receive pump takes both).  Deliver to that connection: an armed
-                 * receive first, else queue it on the connection the id belongs
-                 * to (the client arms a receive when it wants it). */
-                conn = alpc_conn_find_outstanding( port, reply_id );
-                if (!conn)
-                {
-                    LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
-                        if (async_waiting( &conn->read_q ))
-                        {
-                            peer = conn;
-                            break;
-                        }
-                    if (!peer && !list_empty( &port->connections ))
-                        peer = LIST_ENTRY( list_head( &port->connections ), struct alpc_port, conn_entry );
-                }
-                else peer = conn;
-                if (!peer)
-                {
-                    release_object( iosb );
-                    set_error( STATUS_PIPE_DISCONNECTED );
-                    async_request_complete( async, STATUS_PIPE_DISCONNECTED, 0, 0, NULL );
-                    return;
-                }
-                msg_type = ALPC_LPC_REPLY;
-            }
             /* Nothing is waiting for this message id, so the message is not the
              * answer to a queued request: it is a message that the server side
              * originates in the reverse direction while the client itself waits
@@ -1124,6 +1139,54 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             release_object( iosb );
             set_error( STATUS_PIPE_DISCONNECTED );
             return;
+        }
+
+        if (is_reply_send && base)
+        {
+            /* The same correlation on a client-side connection: a reply answers
+             * the connection's outstanding request (the request the server
+             * originated there, or the exchange the client itself opened), is
+             * stamped with that request's id, and goes to the receive armed
+             * with the id.  A reply for a request the connection does not have
+             * outstanding is refused by the kernel with
+             * STATUS_INVALID_DEVICE_REQUEST: it is never queued and never
+             * delivered, so the receiver never sees a second answer to a
+             * request it already consumed. */
+            unsigned int popped = alpc_pop_outstanding( base, reply_id );
+            unsigned int payload = alpc_frame_payload_len( data, size );
+            struct async *armed;
+
+            if (!popped)
+            {
+                /* the kernel drops it: never queued, never delivered, and the
+                 * send completes with the kernel's refusal */
+                if (relay_trace_enabled())
+                    fprintf( stderr, "ALPC relay DROP reply id %u port %p: request not outstanding\n",
+                             reply_id, (void *)port );
+                release_object( iosb );
+                set_error( STATUS_INVALID_DEVICE_REQUEST );
+                async_request_complete( async, STATUS_INVALID_DEVICE_REQUEST, 0, 0, NULL );
+                return;
+            }
+            reply_id = popped;
+            msg_type = ALPC_LPC_REPLY;
+            reply_stamped = 1;
+            armed = reply_id ? find_reply_alpc_async( &peer->read_q, reply_id ) : NULL;
+            if (armed) release_object( armed ); /* the armed receive takes it */
+            else if (!payload)
+            {
+                /* the completion ack with no receive armed for the id: the
+                 * correlation of the exchange, not a data reply */
+                if (relay_trace_enabled())
+                    fprintf( stderr, "ALPC relay CONSUME ack id %u port %p: no receive armed\n",
+                             reply_id, (void *)port );
+                alpc_drain_send_gate( base );
+                async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
+                release_object( iosb );
+                return;
+            }
+            alpc_drain_send_gate( base );
+            reply_resolved = 1;
         }
     }
 
@@ -1211,7 +1274,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             return;
         }
 
-        if (!reply_id && !msg_type)
+        if (!reply_resolved && !reply_id && !msg_type)
         {
             unsigned int mid = 0, mtype = 0;
 
@@ -1223,29 +1286,16 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
 
             if (mtype == ALPC_LPC_REQUEST && mid)
             {
-                /* a request slurped on this connection joins its outstanding
-                 * list (the kernel serialises synchronous exchanges): on the
-                 * client side the connection base carries the list, on the
-                 * listening-port route the request rides the routed peer
-                 * connection */
+                /* the request joins the outstanding list of the connection it
+                 * is delivered on (the kernel serialises synchronous
+                 * exchanges): on the client side the connection base carries
+                 * the list, on the listening-port route the request rides the
+                 * routed peer connection, and a request the server originates
+                 * in the reverse direction rides the client's connection */
                 if (base) alpc_add_outstanding( base, mid );
                 else if (port->is_server && peer) alpc_add_outstanding( peer, mid );
                 reply_id = mid;
             }
-            else if (mtype == ALPC_LPC_REPLY && !mid && base && alpc_oldest_outstanding( base ))
-            {
-                /* a REPLY-flag send with no id answers the oldest outstanding
-                 * request (LPC serialisation: slurp, process, commit): the
-                 * kernel stamps the reply with the request's id */
-                reply_id = alpc_pop_outstanding( base, 0 );
-                reply_stamped = 1;
-                alpc_drain_send_gate( base );
-            }
-        }
-        else if (reply_id && base)
-        {
-            /* an explicitly correlated reply pops its request */
-            if (alpc_pop_outstanding( base, reply_id )) alpc_drain_send_gate( base );
         }
 
         if (!alpc_queue_send_message( port, peer, &attr, dup, grabbed_obj,

@@ -1923,6 +1923,126 @@ done:
     if (client_conn) NtClose( client_conn );
     NtClose( server_port );
 }
+
+/* Single-outstanding-request reply correlation: a connection carries one
+ * request at a time and the reply that echoes its id answers it.  A second
+ * reply for that request is refused by the kernel (the request is no longer
+ * outstanding): the send fails, and the refused reply is never queued on the
+ * connection, so the client's next receive must not see it.  A refused reply
+ * that was delivered instead reaches the receiver as a second answer to a
+ * request whose reply it already consumed. */
+static void test_alpc_duplicate_reply_drop( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestDupReply";
+    static const char payload[] = "DUP-01";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    struct ser_client_args ca;
+    HANDLE server_port = NULL, client_conn = NULL, thread = NULL;
+    ULONG cid = 0;
+    SIZE_T size;
+    NTSTATUS status;
+    DWORD ret;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip( "ALPC port functions are unavailable.\n" );
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    /* connect on a thread, slurp the connection request on the listening port
+     * and complete the connect by the REPLY-flag send (the LPC connect dance) */
+    memset( &ca, 0, sizeof(ca) );
+    ca.port_name = &port_name;
+    ca.payload = payload;
+    thread = CreateThread( NULL, 0, ser_connect_thread, &ca, 0, NULL );
+    ok( thread != NULL, "CreateThread failed.\n" );
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -15 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected slurp status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+    cid = msg->MessageId;
+    memset( buf, 0, sizeof(*msg) );
+    msg->MessageId = cid;
+    msg->TotalLength = sizeof(*msg);
+    status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected connect-reply status %#lx.\n", status );
+    ret = WaitForSingleObject( thread, 10000 );
+    ok( ret == 0 && ca.connect_status == STATUS_SUCCESS, "Connect failed, status %#lx.\n", ca.connect_status );
+    client_conn = ca.conn;
+    if (ca.connect_status != STATUS_SUCCESS) goto done;
+
+    /* one synchronous exchange: the client's receive is armed with the id of
+     * the request it sent, and the reply echoes that id */
+    memset( &ca, 0, sizeof(ca) );
+    ca.conn = client_conn;
+    ca.payload = payload;
+    CloseHandle( thread );
+    thread = CreateThread( NULL, 0, ser_client_thread, &ca, 0, NULL );
+    ok( thread != NULL, "CreateThread failed.\n" );
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -15 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected request status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+    cid = msg->MessageId;
+    ok( cid != 0, "Expected a non-zero request MessageId.\n" );
+    memcpy( buf + sizeof(*msg), payload, 8 );
+    msg->DataLength = 8;
+    msg->TotalLength = sizeof(*msg) + 8;
+    status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected reply status %#lx.\n", status );
+
+    ret = WaitForSingleObject( thread, 30000 );
+    ok( ret == 0, "WaitForSingleObject failed, ret %u.\n", ret );
+    winetest_push_context( "client" );
+    ok( ca.send_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", ca.send_status );
+    ok( !memcmp( ca.reply, payload, 8 ), "Got unexpected reply payload.\n" );
+    winetest_pop_context();
+
+    /* A reply for a message id no request of the connection carries — the id of
+     * an exchange that was already answered, or one never issued — has no
+     * request to answer: the kernel drops it, and it must not be queued on the
+     * connection for the client's next receive to consume as a reply. */
+    winetest_push_context( "unanswered" );
+    msg->MessageId = cid + 0x1000;
+    msg->DataLength = 8;
+    msg->TotalLength = sizeof(*msg) + 8;
+    status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_INVALID_DEVICE_REQUEST, "Got unexpected status %#lx.\n", status );
+
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    timeout.QuadPart = -3 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( client_conn, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_TIMEOUT, "Reply of an unanswered request reached the client, status %#lx.\n", status );
+    winetest_pop_context();
+
+done:
+    if (thread) CloseHandle( thread );
+    if (client_conn) NtClose( client_conn );
+    NtClose( server_port );
+}
 #endif /* _WIN64 */
 
 START_TEST(alpc)
@@ -1947,5 +2067,6 @@ START_TEST(alpc)
     test_alpc_event_notification();
     test_alpc_multi_buffer();
     test_alpc_serialization();
+    test_alpc_duplicate_reply_drop();
 #endif
 }
