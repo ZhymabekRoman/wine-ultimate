@@ -2279,3 +2279,72 @@ builtins under a new wineserver and ntdll tests die silently (rc=5, no winetest
 output). Suite runner: `rm -f dlls/ntdll/tests/x86_64-windows/alpc.ok && make -C
 $HOME/wine-build dlls/ntdll/tests/x86_64-windows/alpc.ok` (needs `DISPLAY=:97` and
 `WINEDEBUG=+winetest`; `-all` silences the summary line).
+
+### Second registrar connect: the accept-0 condition is the app's own client-id/session gate (tip `6995fda2d`)
+
+The engine's self-rejection of the second (partition) registrar connect is now traced end to
+end, statically (IDA `CoreMessagingXP.dll`: `AlpcServerConnection::HandleIncomingConnection`
+`+0x8573c`, `AlpcServerThunk::AcceptConnection` `+0x5fb20`,
+`AlpcServerHost::Microsoft_CoreUI_Registrar_IAlpcServerHost_AcceptConnection$` `+0x165a0`,
+`RemoteRegistrarServer::AcceptConnection` `+0x606b8`,
+`RemoteRegistrarServer::CreateContextForNewMessageSession` `+0x61e7c`,
+`AlpcServerConnection::QuerySessionID` `+0x85b20`, `AlpcServerHost::s_runMode` `+0xe5ad0`)
+and dynamically (gdb attach, `/tmp/wa/acc_probe*.sh`).
+
+**The accept-0 condition.** `CreateContextForNewMessageSession` opens with a switch on the
+*session-id* word (`+0x6204a`): only **0, 1, 2** are legal, and each carries a companion
+cross-check (`+0x6208a` for id 0, `+0x62061` for ids 1/2). Any other value, or a failed
+cross-check, throws `ProtocolException(ProtocolError 47)` at `+0x626af`. That exception is
+caught by `RemoteRegistrarServer::AcceptConnection`'s handler, which then returns **FALSE**,
+so `NtAlpcAcceptConnectPort` is called with `AcceptConnection = FALSE` — this is the relay's
+`ACCEPT … accept 0`; the thread then raises the managed fail-fast (one event, `ff=15`,
+`rc=2`). Measured on the second connect: the session id is **0** (the switch value in `%ecx`
+at `+0x6204d`), `QuerySessionID` returns **S_OK** (`%ebx=0` at `+0x85c2a`, i.e.
+`NtAlpcImpersonateClientOfPort` + `OpenThreadToken` + `GetTokenInformation(TokenSessionId)`
+all work on Wine), and the *cross-check companion word* is **0** — for the first connect the
+same gate passes, so the discriminator is that companion word, not the session id, not
+`s_runMode` (measured **1**), not the LPC type bit (`a2 = 0` at the thunk for both).
+The companion word is `RemoteRegistrarServer::AcceptConnection`'s 4th int (`%r9d`), fed by
+`AlpcServerHost::AcceptConnection`'s `a4/a5`, i.e. the ALPC layer's **client-id pair of the
+connect request**: measured at `+0x606b8` for the second connect `cat=0, a3=32 (pid 0x20),
+a4=0` — the engine refuses a connect whose companion client id is zero. The Wine server
+*knows* that thread (`CONNECT-req … tid 184`), so the remaining gap is how the connect
+request's client id reaches the engine's accept-info (the `ClientId` the engine reads is
+stamped by `dlls/ntdll/unix/alpc.c` from the wire header on delivery, `+0x861`); pinning that
+field's producer is the next step, and the fix belongs in the connect-request delivery, not
+in the relay's correlation.
+
+**Refuted hypotheses.** (a) *verb-48 descriptor bounds produce garbage registrar state* —
+no: the refusal is a bounded protocol check on client identity, not a payload-shape failure;
+the verb reply is delivered and the conversation state is not consulted on this path.
+(b) *the CoreUICore partition queue must exist first* — no: the accept decision is made
+before any queue is touched. (task item 3) *a Wine-side single-pending gate rejects the
+second connect* — **refuted**: the relay never refuses it. `drop=0` across every probe run,
+`CONNECT-notify id 3` is queued and `ACCEPT id 3` arrives from the app, so the whole connect
+exchange (id 1 done, id 3 new) is served by the per-connect slots shipped in `6995fda2d`;
+the refusal is composed inside the app.
+*The partition connect targets a real-GUID registrar name* — **refuted on this binary**: the
+connect payload GUID is byte-identical for both connects
+(`00000000-0000-0000-0000-a23f8ca11bef4227`, the engine-GUID tail with `Data1..3 = 0`), both
+asks name the **zero-GUID** port, and `AlpcServerHost::AcceptConnection$` finds the *same*
+`RemoteRegistrarServer` in its GUID map — one self-host instance serves both. After the first
+exchange the only new port the relay sees is an **unnamed** create
+(`ALPC relay create port name:` with an empty name), the shape of the app-local
+cross-partition reverse-connection port whose body in this binary is the abandonment stub
+`MessageSession::CreateCrossPartitionReverseConnectionPort$FastReturn$` (`+0xa390`, 10 bytes):
+the app-local engine has no cross-partition support to reach, so no
+`CoreMessagingRegistrar-<pid>:29324ee4-…` name is ever created.
+
+**Face unchanged, no source change shipped.** Seven instrumented runs on tip
+`6995fda2d` (fresh build rsynced into `/tmp/wb`, `sync.sh` applied): every run
+`APP_RC=2`, `fatal=0`, `ff=15`, relay `CONNECT id1/ACCEPT 1/commit(wire 0)` →
+verb request 88B → verb reply 128B → `CONNECT id 3 tid 184` → `ACCEPT id 3 accept 0`.
+`$HOME/wine-src` and `$HOME/wine-am` are clean at `6995fda2d`; no probe code entered the
+tree (all instrumentation is gdb-side, kept in `/tmp/wa/acc_probe*.sh`).
+
+**Harness note (repro trap).** `/tmp/wb/wine` must be a **symlink to
+`/tmp/wb/tools/wine/wine`**, not a copy: the build-tree launcher resolves
+`<dir-of-exe>/../../dlls/ntdll/ntdll.so`, so a copy at `/tmp/wb/wine` searches
+`/dlls/ntdll/ntdll.so` and dies with `wine: could not load ntdll.so`. Sync the full build
+outputs (`dlls/ libs/ loader/ server/ programs/ tools/` with `*.so *.dll *.exe`), then
+`ln -s /tmp/wb/tools/wine/wine /tmp/wb/wine`, then `sync.sh`.
