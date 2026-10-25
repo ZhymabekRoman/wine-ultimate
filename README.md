@@ -2458,3 +2458,74 @@ blank browser; QR requires `Navigate`.
 `Navigate(web.whatsapp.com)` → QR. The gate is application/network-level (WNS push channel,
 `ClientKey`), not the ALPC relay: the conversation is established and clean. When content
 paints, the change-driven compositor + GL present will show it.
+
+---
+
+## App-init hypotheses closed: push channel and ClientKey are not the gate; the wall is the Zoom extension-install IPC (tip 539036d03)
+
+**Push channel is NOT a gate — the surface works.** Decompiled `WebLifecycleController.cs`:
+`DoRefreshChannelSource` → `CreatePushNotificationChannelWithRetryAsync(5,5000)` logs
+"Finished attempt N" *only after a successful* `await CreatePushNotificationChannelForApplicationAsync()`;
+the applog shows `Starting attempt 1` + `Finished attempt 1` at the same millisecond, no attempt 2,
+no "Failed to create WNS push channel" — success on the first try. `+combase` trace:
+`RoGetActivationFactory("Windows.Networking.PushNotifications.PushNotificationChannelManager",
+{8baf9b65-…dcf0})` and Statics4 `{bc540efb-…4025}` resolve to `twinapi.appcore.dll` — the app's **own**
+copy loaded from the package dir — and complete synchronously. `Warmup()` is fire-and-forget `async void`.
+No new Wine builtin was needed (no `windows.networking.pushnotification` dll added; the 0046-era
+routing rule in `combase/roapi.c` + the app's twinapi carry the contract; QR flow needs no push delivery).
+
+**ClientKey null is benign by design.** `MediaFilesService.Initialize(SessionData)` subscribes to
+`loginSession.OnLogin`; the ClientKey is delivered by the **web layer** through the `ClientKeyBridge`
+registered on `CoreWebView2` after QR linking. First launch has no session → null → warn → return.
+It is downstream of `Navigate`, not upstream; nothing gates on it.
+
+**`envprep_app_activatable.reg` applied** (112 `HKLM\…\WindowsRuntime\ActivatableClassId` keys, DllPath →
+the package's `WhatsAppNative.dll`/`Voip.dll`; `regedit /s` + `wineserver -w`, verified via `reg query`).
+Effect measured: `WhatsAppNative.dll` now **loads** and `Logger`/`WamGlobalBuffer`/`WhatsAppNativeInit`
+and friends activate. Three classes still fail **inside the app's own DLL** —
+`WhatsAppNative.Sqlite`/`.MiscCpp`/`.Voip.VoipFactory` → `DllGetActivationFactory` E_NOINTERFACE
+(names absent from the native factory table); the app catches and degrades (voip off, sqlite bridge stub).
+
+**New progress: the WebView2 Chromium tree runs complete.** Process census at t=80 s shows browser +
+crashpad + `network.mojom.NetworkService` + `storage.mojom.StorageService` + **`--type=renderer`**
+(first renderer ever on this stack) + gpu-process; the network service holds an ESTABLISHED TLS
+connection to 443 (real internet via Wine sockets). `WEBVIEW2_TEMP_PARENT`, `InputSiteWindowClass`,
+`Chrome_WidgetWin_0` ×4 windows, about:blank 1058×1024 window mapped.
+
+**Bootstrap wall decoded.** `MainWindow.BootstrapWebviewCoreAsync` →
+`EnsureWebViewInitializedAsync` → `CreateWithOptionsAsync` (completes — browser spawns) →
+`EnsureCoreWebView2Async` → `await _coreInitializationSource.Task`, completed only at the end of
+`OnCoreWebView2Initialized`, which awaits `BinaryTransparency.AddBrowserExtensionToWV` (skipped if
+flag off) → `ZoomBrowserExtension.AddBrowserExtensionToWV` → … → `TrySetResult`. The applog shows
+**zero** lines from that handler in this era — no `Failed bootstrap ZoomBrowserExtension` Log.Error,
+no zoom Investigate in `sadRecord.dat` (which holds only the boot `VoipInitCtor` record) — while the
+extension-folder bootstrap (`LocalCache\ZoomExtension\background.js|manifest.json`) completes. The
+handler therefore parks at `await coreWebView2Profile.AddBrowserExtensionAsync(text)`. Browser-side
+(`+file`, browser tid): the install request is processed — probes `Default\Policy\User Extension
+Install Policy`/`Signing Key` (not present, default path), `Default\Extensions` (not present),
+`extensions_crx_cache`, then an atomic `Local State` JSON write (tmp+move+cleanup) — staging advances
+and **the completion response never reaches the client**: app-side `MojoThread` and all browser
+threads sit in `poll` (gdb thread dumps, app + browser, t=80 s), the tab stays about:blank,
+`ConfigureWebViewBridges`/`StartNavigation`/`Navigate(web.whatsapp.com)` are never reached. The lone
+`0x80004002 "Specified cast is not valid."` origination is the early toast/AppInstance activation cast
+(the ea75cf587-era closed cast, worker tid, pre-WebView2) — **not** a `CoreWebView2.Profile` cast
+(no Profile-failure trace exists in this era). The QI is pure in-process CLR↔`EmbeddedBrowserWebView.dll`
+(no combase/ole traffic — unobservable on the Wine side, and not implicated by any trace).
+
+**Numbers.** Gate 150 s ×2: `rc=124 ALIVE fatal=0 ff=0 e0464645=0`, `originate=7` identical set
+(deterministic), `createdwins=144`, `xamlwin=1`, swapchain present reaches 0x1006C. Battery 8/8
+`ALIVE_60s fatal=0`. alpc suite **1755/0/0/0**. App binaries pristine (4 × `*.dll == *.orig`).
+Two `wined3d_cs` crit-section wait-timeout err lines in gate 1 (blocked-by loader thread, retried,
+non-fatal) — watch item. **Screenshot verdict** `$HOME/wa-work/wa_wns_after.png` and `wa_ext_after.png`
+@ t=120 s: **BLACK** (295 B blank) — XAML surface present, webview never navigated.
+
+**Next gap.** The `AddBrowserExtensionAsync` completion (browser→client over the mojo named-pipe IPC,
+browser has staged to `Local State`) never lands client-side — Chromium-internal IPC boundary, no
+Wine code on that path (client = `EmbeddedBrowserWebView.dll` 156, loader-free path via locator
+registry; `WebView2Loader.dll` never loads, as expected for SDK 1.0.3485.44). Candidate probes:
+browser-side staging completion after `Local State` persist (Preferences MAC registry leg
+`Software\Microsoft\EdgeWebView\PreferenceMACs\…\extensions.settings`), and the three
+`0x80040154` (empty message) class-not-registered originations. A clean unblock path if browser-side
+staging can't be made to complete: make the zoom await non-fatal (app-side gate is `Profile`-dependent;
+`FailuresService.Investigate` swallows), i.e. drive `AddBrowserExtensionAsync` to fault fast
+so `OnCoreWebView2Initialized` reaches `TrySetResult` and `StartNavigation` fires.
