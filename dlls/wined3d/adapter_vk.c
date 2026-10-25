@@ -89,34 +89,54 @@ static HRESULT hresult_from_vk_result(VkResult vr)
     }
 }
 
+/* Loader state for the Vulkan renderer. LoadLibrary()/GetProcAddress() take the
+ * loader lock, which must not be entered while the wined3d critical section is
+ * held; adapter initialisation runs under that critical section. The Vulkan
+ * module is therefore referenced once for the lifetime of the process and
+ * shared by all adapters, and the ntdll entry point is resolved at attach. */
+static HMODULE vulkan_module;
+static void *vulkan_get_instance_proc_addr;
+static const char *(CDECL *wine_get_version_func)(void);
+
+void wined3d_init_vk_module(void)
+{
+    if (!wine_get_version_func)
+        wine_get_version_func = (void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version");
+}
+
 static BOOL wined3d_load_vulkan(struct wined3d_vk_info *vk_info)
 {
     struct vulkan_ops *vk_ops = &vk_info->vk_ops;
 
-    if (!(vk_info->vulkan_lib = LoadLibraryA("winevulkan.dll"))
-            && !(vk_info->vulkan_lib = LoadLibraryA("vulkan-1.dll")))
+    if (!vulkan_module)
     {
-        WARN("Failed to load vulkan-1.dll.\n");
-        return FALSE;
+        if (!(vulkan_module = LoadLibraryA("winevulkan.dll"))
+                && !(vulkan_module = LoadLibraryA("vulkan-1.dll")))
+        {
+            WARN("Failed to load vulkan-1.dll.\n");
+            return FALSE;
+        }
+
+        if (!(vulkan_get_instance_proc_addr = (void *)GetProcAddress(vulkan_module, "vkGetInstanceProcAddr")))
+        {
+            FreeLibrary(vulkan_module);
+            vulkan_module = NULL;
+            return FALSE;
+        }
     }
 
-    vk_ops->vkGetInstanceProcAddr = (void *)GetProcAddress(vk_info->vulkan_lib, "vkGetInstanceProcAddr");
-    if (!vk_ops->vkGetInstanceProcAddr)
-    {
-        FreeLibrary(vk_info->vulkan_lib);
-        return FALSE;
-    }
+    vk_info->vulkan_lib = vulkan_module;
+    vk_ops->vkGetInstanceProcAddr = vulkan_get_instance_proc_addr;
 
     return TRUE;
 }
 
 static void wined3d_unload_vulkan(struct wined3d_vk_info *vk_info)
 {
-    if (vk_info->vulkan_lib)
-    {
-        FreeLibrary(vk_info->vulkan_lib);
-        vk_info->vulkan_lib = NULL;
-    }
+    /* The reference taken in wined3d_load_vulkan() is held for the lifetime of
+     * the process so that it can be shared without taking the loader lock again;
+     * the Vulkan driver is not unloaded while wined3d is loaded. */
+    vk_info->vulkan_lib = NULL;
 }
 
 static void adapter_vk_destroy(struct wined3d_adapter *adapter)
@@ -1911,10 +1931,15 @@ static const struct wined3d_adapter_ops wined3d_adapter_vk_ops =
 
 static unsigned int wined3d_get_wine_vk_version(void)
 {
-    const char * (CDECL *wine_get_version)(void) = (void *)GetProcAddress( GetModuleHandleW(L"ntdll.dll"),
-                                                                           "wine_get_version" );
+    const char * (CDECL *wine_get_version)(void) = wine_get_version_func;
     const char *ptr;
     int major, minor;
+
+    if (!wine_get_version)
+    {
+        wined3d_init_vk_module();
+        wine_get_version = wine_get_version_func;
+    }
 
     if (!wine_get_version) return VK_MAKE_VERSION(1, 0, 0);
 

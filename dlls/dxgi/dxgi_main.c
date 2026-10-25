@@ -99,37 +99,51 @@ static BOOL get_layer(enum dxgi_device_layer_id id, struct dxgi_device_layer *la
 
 static HRESULT register_d3d10core_layers(HMODULE d3d10core)
 {
+    HRESULT (WINAPI *d3d11core_register_layers)(void);
+    HMODULE mod;
+    HRESULT hr;
+
+    if (dxgi_main.d3d10core)
+        return S_OK;
+
+    /* GetModuleHandleEx() and GetProcAddress() take the loader lock. The loader
+     * lock must never be taken while the wined3d critical section is held: a
+     * thread inside DllMain owns the loader lock and can call into wined3d, so
+     * resolving these entry points under the critical section deadlocks. Resolve
+     * them first and only take the critical section for the registration itself. */
+    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (const char *)d3d10core, &mod))
+        return E_FAIL;
+
+    if (!(d3d11core_register_layers = (void *)GetProcAddress(mod, "D3D11CoreRegisterLayers")))
+    {
+        FreeLibrary(mod);
+        return E_FAIL;
+    }
+
     wined3d_mutex_lock();
 
     if (!dxgi_main.d3d10core)
     {
-        HRESULT hr;
-        HRESULT (WINAPI *d3d11core_register_layers)(void);
-        HMODULE mod;
-        BOOL ret;
-
-        if (!(ret = GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS, (const char *)d3d10core, &mod)))
-        {
-            wined3d_mutex_unlock();
-            return E_FAIL;
-        }
-
-        d3d11core_register_layers = (void *)GetProcAddress(mod, "D3D11CoreRegisterLayers");
         hr = d3d11core_register_layers();
         if (FAILED(hr))
         {
             ERR("Failed to register d3d11 layers, returning %#lx.\n", hr);
             FreeLibrary(mod);
-            wined3d_mutex_unlock();
-            return hr;
         }
-
-        dxgi_main.d3d10core = mod;
+        else
+        {
+            dxgi_main.d3d10core = mod;
+        }
+    }
+    else
+    {
+        FreeLibrary(mod);
+        hr = S_OK;
     }
 
     wined3d_mutex_unlock();
 
-    return S_OK;
+    return hr;
 }
 
 HRESULT WINAPI DXGID3D10CreateDevice(HMODULE d3d10core, IDXGIFactory *factory, IDXGIAdapter *adapter,

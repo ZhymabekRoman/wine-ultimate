@@ -5026,6 +5026,33 @@ static float wined3d_adapter_find_fill_offset(struct wined3d_caps_gl_ctx *ctx)
     return -1.0f / 64.0f;
 }
 
+/* Entry points of opengl32.dll, resolved at process attach. GetModuleHandle()
+ * and GetProcAddress() take the loader lock, which must not be entered while
+ * the wined3d critical section is held; adapter initialisation runs under that
+ * critical section, so the pointers are looked up in advance and copied. */
+static struct wined3d_gl_funcs gl_funcs;
+static BOOL gl_funcs_valid;
+
+static void wined3d_resolve_gl_funcs(struct wined3d_gl_funcs *funcs)
+{
+    HMODULE mod_gl = GetModuleHandleA("opengl32.dll");
+
+#define USE_GL_FUNC(f) funcs->gl.p_##f = (void *)GetProcAddress(mod_gl, #f);
+    ALL_GL_FUNCS
+#undef USE_GL_FUNC
+    funcs->wgl.p_wglSwapBuffers = (void *)GetProcAddress(mod_gl, "wglSwapBuffers");
+    funcs->wgl.p_wglGetPixelFormat = (void *)GetProcAddress(mod_gl, "wglGetPixelFormat");
+}
+
+void wined3d_init_gl_module(void)
+{
+    if (gl_funcs_valid || !GetModuleHandleA("opengl32.dll"))
+        return;
+
+    wined3d_resolve_gl_funcs(&gl_funcs);
+    gl_funcs_valid = TRUE;
+}
+
 static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         unsigned int ordinal, unsigned int wined3d_creation_flags)
 {
@@ -5063,14 +5090,19 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     if (!wined3d_adapter_init(&adapter_gl->a, ordinal, luid, &wined3d_adapter_gl_ops))
         return FALSE;
 
-    /* Dynamically load all GL core functions */
+    /* Dynamically load all GL core functions. */
+    if (!gl_funcs_valid)
+        wined3d_init_gl_module();
+
+    if (gl_funcs_valid)
     {
-        HMODULE mod_gl = GetModuleHandleA("opengl32.dll");
-#define USE_GL_FUNC(f) gl_info->gl_ops.gl.p_##f = (void *)GetProcAddress(mod_gl, #f);
-        ALL_GL_FUNCS
-#undef USE_GL_FUNC
-        gl_info->gl_ops.wgl.p_wglSwapBuffers = (void *)GetProcAddress(mod_gl, "wglSwapBuffers");
-        gl_info->gl_ops.wgl.p_wglGetPixelFormat = (void *)GetProcAddress(mod_gl, "wglGetPixelFormat");
+        gl_info->gl_ops.gl = gl_funcs.gl;
+        gl_info->gl_ops.wgl.p_wglSwapBuffers = gl_funcs.wgl.p_wglSwapBuffers;
+        gl_info->gl_ops.wgl.p_wglGetPixelFormat = gl_funcs.wgl.p_wglGetPixelFormat;
+    }
+    else
+    {
+        wined3d_resolve_gl_funcs(&gl_info->gl_ops);
     }
 
     gl_info->p_glEnableWINE = gl_info->gl_ops.gl.p_glEnable;

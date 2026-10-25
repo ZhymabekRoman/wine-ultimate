@@ -52,6 +52,14 @@
 #include "wine/list.h"
 #include "wine/rbtree.h"
 
+/* Loader state that must be resolved while the loader lock is already owned by
+ * this thread and no other thread is running, i.e. at DLL_PROCESS_ATTACH.
+ * See wined3d_dll_init(). */
+HMODULE wined3d_get_module_handle(void);
+void wined3d_cs_init(void);
+void wined3d_init_gl_module(void);
+void wined3d_init_vk_module(void);
+
 static inline size_t align(size_t addr, size_t alignment)
 {
     return (addr + (alignment - 1)) & ~(alignment - 1);

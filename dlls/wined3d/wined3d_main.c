@@ -81,6 +81,8 @@ struct wined3d_swapchain_state_table
 static struct wined3d_wndproc_table wndproc_table;
 static struct wined3d_swapchain_state_table swapchain_state_table;
 
+static HMODULE wined3d_module;
+
 static CRITICAL_SECTION wined3d_cs;
 static CRITICAL_SECTION_DEBUG wined3d_cs_debug =
 {
@@ -268,6 +270,11 @@ static void vkd3d_log_callback(const char *fmt, va_list args)
 
     vsnprintf(buffer, sizeof(buffer), fmt, args);
     __wine_dbg_output(buffer);
+}
+
+HMODULE wined3d_get_module_handle(void)
+{
+    return wined3d_module;
 }
 
 static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
@@ -491,6 +498,21 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
     }
 
     vkd3d_utils_set_log_callback(vkd3d_log_callback);
+
+    wined3d_module = hInstDLL;
+
+    /* Resolve everything wined3d needs from the PE loader at attach time.
+     * GetModuleHandle(), GetProcAddress() and LoadLibrary() all take the loader
+     * lock, and the loader lock must never be taken while the wined3d critical
+     * section is held: a thread that is inside DllMain already owns the loader
+     * lock, and such a thread can call into wined3d (a DirectComposition / DXGI
+     * interop DLL creating a device during process attach is enough), which
+     * deadlocks against a thread resolving a DLL entry point under the wined3d
+     * critical section. During process attach the loader lock is owned by this
+     * thread and no other thread is running, so these calls are safe there. */
+    wined3d_cs_init();
+    wined3d_init_gl_module();
+    wined3d_init_vk_module();
 
     return TRUE;
 }

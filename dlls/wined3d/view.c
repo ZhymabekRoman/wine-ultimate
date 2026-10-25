@@ -1946,8 +1946,9 @@ static VkPipeline create_uav_pipeline(struct wined3d_context_vk *context_vk,
     vk_info = context_vk->vk_info;
     context = &context_vk->c;
 
-    if (!GetModuleHandleExA(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS | GET_MODULE_HANDLE_EX_FLAG_UNCHANGED_REFCOUNT,
-                           (const char *)create_uav_pipeline, &module))
+    /* The module handle is cached at process attach: a loader call here would
+     * take the loader lock under the wined3d critical section. */
+    if (!(module = wined3d_get_module_handle()))
     {
         ERR("Failed to get a reference to the current module, last error %ld.\n", GetLastError());
         return VK_NULL_HANDLE;

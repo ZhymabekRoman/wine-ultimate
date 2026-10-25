@@ -27,6 +27,7 @@ WINE_DECLARE_DEBUG_CHANNEL(frametime);
 
 static NTSTATUS (WINAPI *pNtAlertThreadByThreadId)(HANDLE tid);
 static NTSTATUS (WINAPI *pNtWaitForAlertByThreadId)(void *addr, const LARGE_INTEGER *timeout);
+static HMODULE wined3d_cs_module;
 
 #define WINED3D_INITIAL_CS_SIZE 4096
 
@@ -3568,16 +3569,11 @@ static DWORD WINAPI wined3d_cs_run(void *ctx)
     struct wined3d_cs_queue *queue;
     unsigned int spin_count = 0;
     struct wined3d_cs *cs = ctx;
-    HMODULE wined3d_module;
     unsigned int poll = 0;
     bool run = true;
 
     TRACE("Started.\n");
     SetThreadDescription(GetCurrentThread(), L"wined3d_cs");
-
-    /* Copy the module handle to a local variable to avoid racing with the
-     * thread freeing "cs" before the FreeLibraryAndExitThread() call. */
-    wined3d_module = cs->wined3d_module;
 
     list_init(&cs->query_poll_list);
     cs->thread_id = GetCurrentThreadId();
@@ -3616,7 +3612,30 @@ static DWORD WINAPI wined3d_cs_run(void *ctx)
     cs->queue[WINED3D_CS_QUEUE_MAP].tail = cs->queue[WINED3D_CS_QUEUE_MAP].head;
     cs->queue[WINED3D_CS_QUEUE_DEFAULT].tail = cs->queue[WINED3D_CS_QUEUE_DEFAULT].head;
     TRACE("Stopped.\n");
-    FreeLibraryAndExitThread(wined3d_module, 0);
+    /* The module reference that keeps wined3d loaded while this thread runs was
+     * taken in wined3d_cs_init(); it is held for the lifetime of the process, so
+     * the thread can simply exit here. */
+    ExitThread(0);
+}
+
+void wined3d_cs_init(void)
+{
+    HMODULE ntdll = GetModuleHandleW(L"ntdll.dll");
+
+    if (!pNtAlertThreadByThreadId)
+    {
+        pNtAlertThreadByThreadId = (void *)GetProcAddress(ntdll, "NtAlertThreadByThreadId");
+        pNtWaitForAlertByThreadId = (void *)GetProcAddress(ntdll, "NtWaitForAlertByThreadId");
+    }
+
+    /* Pin wined3d for the lifetime of the process so that the command stream
+     * thread can never run in an unloaded module. Taking one reference per
+     * command stream would require a loader call from under the wined3d critical
+     * section, which must not happen. */
+    if (!wined3d_cs_module
+            && !GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
+                    (const WCHAR *)wined3d_cs_run, &wined3d_cs_module))
+        wined3d_cs_module = wined3d_get_module_handle();
 }
 
 void CDECL wined3d_device_context_flush_mapped_buffer(struct wined3d_device_context *context,
@@ -3689,13 +3708,10 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
     {
         cs->c.ops = &wined3d_cs_mt_ops;
 
-        if (!pNtAlertThreadByThreadId)
-        {
-            HANDLE ntdll = GetModuleHandleW(L"ntdll.dll");
-
-            pNtAlertThreadByThreadId = (void *)GetProcAddress(ntdll, "NtAlertThreadByThreadId");
-            pNtWaitForAlertByThreadId = (void *)GetProcAddress(ntdll, "NtWaitForAlertByThreadId");
-        }
+        /* The alert syscalls are resolved at process attach (wined3d_cs_init);
+         * GetModuleHandle()/GetProcAddress() must not be called here, because the
+         * wined3d critical section is held. If they are unavailable the event
+         * fallback below is used. */
 
         if (!pNtAlertThreadByThreadId && !(cs->event = CreateEventW(NULL, FALSE, FALSE, NULL)))
         {
@@ -3710,8 +3726,7 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
             goto fail;
         }
 
-        if (!(GetModuleHandleExW(GET_MODULE_HANDLE_EX_FLAG_FROM_ADDRESS,
-                (const WCHAR *)wined3d_cs_run, &cs->wined3d_module)))
+        if (!(cs->wined3d_module = wined3d_cs_module))
         {
             ERR("Failed to get wined3d module handle.\n");
             CloseHandle(cs->present_event);
@@ -3724,7 +3739,6 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
         if (!(cs->thread = CreateThread(NULL, 0, wined3d_cs_run, cs, 0, NULL)))
         {
             ERR("Failed to create wined3d command stream thread.\n");
-            FreeLibrary(cs->wined3d_module);
             CloseHandle(cs->present_event);
             if (cs->event)
                 CloseHandle(cs->event);
