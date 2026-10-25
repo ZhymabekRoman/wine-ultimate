@@ -2529,3 +2529,5 @@ browser-side staging completion after `Local State` persist (Preferences MAC reg
 staging can't be made to complete: make the zoom await non-fatal (app-side gate is `Profile`-dependent;
 `FailuresService.Investigate` swallows), i.e. drive `AddBrowserExtensionAsync` to fault fast
 so `OnCoreWebView2Initialized` reaches `TrySetResult` and `StartNavigation` fires.
+
+## Session 2026-10-25(e): the extension-staging wall 
