@@ -4534,16 +4534,12 @@ typedef struct _KCONTINUE_ARGUMENT
 #define ALPC_MESSAGE_ATTRIBUTE_ALL              0xfe000040
 
 /* Multi-buffer send: the send buffer carries a chain of PORT_MESSAGEs, each
- * sized by its own TotalLength; the kernel delivers them as separate receives,
- * stamps each with its own MessageId, and tags every delivered message with the
- * multi-message sequence context (index in the chain, chain length). */
+ * sized by its own header + payload; the kernel delivers them as separate
+ * receives, stamps each with its own MessageId, and carries the multi-message
+ * sequence context (index in the chain in CONTEXT Sequence, chain length in
+ * CONTEXT CallbackId) with every delivered message.  The sequence attribute
+ * bit allocates no payload of its own. */
 #define ALPC_MSGFLG_LPC_MULTI_MESSAGE           0x00008000
-
-typedef struct _ALPC_MULTI_SEQ_ATTR
-{
-    ULONG SequenceNumber; /* 0-based index of this message in the chain */
-    ULONG SequenceCount;  /* number of messages in the chain */
-} ALPC_MULTI_SEQ_ATTR, *PALPC_MULTI_SEQ_ATTR;
 
 /* Message types */
 typedef enum _ALPC_MESSAGE_TYPE

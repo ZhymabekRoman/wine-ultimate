@@ -477,14 +477,24 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
         case 17:   /* RegisterConversationClient (join) */
         case 18:   /* RegisterPendingConversationClientForServer */
         {
-            /* The conversation server is the in-process CoreUICore provider
-             * object.  The requester treats the peer entry's server routing
-             * and server id as the object pointer it binds to (self-host:
-             * provider and requester share the process).  Stamping the
-             * registrar client id there hands the requester an integer it
-             * dereferences as a vtable (measured: XAML Application.Start
-             * read [client-id] and died as an AccessViolationException). */
-            void *object = core_ui_provider_object();
+            /* The requester reads the peer entry's server routing and the
+             * server block's server id back as the conversation server
+             * object, and the engine's receive dispatch calls vtable slot 0
+             * of the object its own frame supplies (measured on the
+             * CoreMessagingXP receive path: the slot is filled on the
+             * caller's side from the engine's registration pool, and no
+             * object pointer of a reply payload is ever loaded as that
+             * object - the reply's contract fields are the payload header
+             * size, the direction word and the verb index).  Stamping the
+             * registrar client id there handed the requester an integer it
+             * dereferences as a vtable (measured: XAML Application.Start read
+             * [client-id]), and stamping a foreign object - the in-process
+             * CoreUICore provider object among them - is unservable: it is
+             * not the peer the requester registered, and it answers
+             * E_NOINTERFACE for the interface the requester binds.  Keep the
+             * field null (the engine's own "no object" sentinel) and let the
+             * engine's registration supply the object. */
+            void *object = NULL;
             client_id = InterlockedIncrement( &provider.next_client_id );
             server_block.server_id = (ULONGLONG)(UINT_PTR)object;
             server_block.extra = 0;
@@ -508,19 +518,22 @@ static void handle_routed_request( const void *payload, ULONG size, const ALPC_C
             break;
         }
         case 36:   /* CoreUICall verb relayed to the conversation server: the
-                    * reply carries the CoreUICore provider object the requester
-                    * binds to, as the third TLV of the bare reply stream
-                    * (measured against the requester's unmarshalling walk).
-                    * A bare [result] leaves the requester's object slot at its
-                    * stale initial value, which it then dereferences as a
-                    * vtable pointer; hand back the real provider object.
-                    * Interfaces it does not implement answer E_NOINTERFACE
-                    * from its own QueryInterface. */
+                    * reply keeps the measured TLV shape of the native reply
+                    * sender - [result], the two 8-byte words around the
+                    * server-object field - with the object field null.
+                    * The object field is the engine's own conversation
+                    * object (its registration pool fills it, on the
+                    * requester's side); substituting the in-process CoreUICore
+                    * provider object here hands the requester a foreign
+                    * pointer that it dispatches vtable slot 0 on as soon as
+                    * the reply is consumed, and that object answers
+                    * E_NOINTERFACE for every interface the requester binds.
+                    * A null field is the engine's documented "no object"
+                    * sentinel; it is the requester's own state machine that
+                    * has to supply the real one. */
         {
-            void *object = core_ui_provider_object();
-            ULONGLONG zero = 0, extra = 0;
+            ULONGLONG zero = 0, object = 0, extra = 0;
 
-            if (!object) { WARN( "no CoreUICore provider object.\n" ); break; }
             off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &zero, sizeof(zero) );
             off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &object, sizeof(object) );
             off = frame_append_tlv( datagram + CN_ITEM_OFFSET, off, &extra, sizeof(extra) );

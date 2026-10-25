@@ -140,7 +140,11 @@ static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG a
         { ALPC_MESSAGE_WORK_ON_BEHALF_ATTRIBUTE, sizeof(ALPC_WORK_ON_BEHALF_ATTR) },
         { ALPC_MESSAGE_EVENT_ATTRIBUTE,          sizeof(ALPC_EVENT) },
         { ALPC_MESSAGE_RESERVE_ATTRIBUTE,        sizeof(struct alpc_reserve_attr) },
-        { ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE, sizeof(ALPC_MULTI_SEQ_ATTR) },
+        /* ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE (0x2000) allocates no
+         * payload: Windows measures AlpcGetHeaderSize(0x2000) == header only.
+         * The kernel delivers the multi-message sequence in the CONTEXT
+         * attribute (Sequence = index in the chain, CallbackId = chain
+         * length), which the receive path echoes from the wire header. */
     };
     unsigned int i;
     SIZE_T off = sizeof(ALPC_MESSAGE_ATTRIBUTES);
@@ -695,11 +699,6 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
          * per-buffer MessageIds it stamps into each; the server needs all of
          * that to reproduce the exchange */
         attr_hdr.pad2 = flags;
-        if (send_msg_attr && (send_msg_attr->ValidAttributes & ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE))
-        {
-            ALPC_MULTI_SEQ_ATTR *m = get_message_attribute( send_msg_attr, ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE );
-            if (m) attr_hdr.pad3 = m->SequenceCount;
-        }
 
         TRACE( "send frame: port %p type %u id %u flags %#x: %s\n",
                port_handle, send_msg->Type, send_msg->MessageId, (unsigned int)flags,
@@ -889,19 +888,10 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 }
 
                 /* a message delivered from a multi-buffer send carries its
-                 * position in the chain: index in Sequence, chain length in
-                 * CallbackId (the kernel fills the sequence context from the
-                 * split it performed) */
-                if (hdr.sequence && (recv_msg_attr->AllocatedAttributes & ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE))
-                {
-                    ALPC_MULTI_SEQ_ATTR *m = get_message_attribute( recv_msg_attr, ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE );
-                    if (m)
-                    {
-                        m->SequenceNumber = hdr.sequence - 1;
-                        m->SequenceCount  = hdr.callback_id;
-                        recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_MULTI_MESSAGE_SEQ_ATTRIBUTE;
-                    }
-                }
+                 * position in the chain in the CONTEXT attribute: index in
+                 * Sequence, chain length in CallbackId (the kernel fills the
+                 * sequence context into the context from the split it
+                 * performed; 0x2000 allocates no payload of its own) */
 
                 if ((hdr.attr_flags & ALPC_MESSAGE_VIEW_ATTRIBUTE) &&
                     (recv_msg_attr->AllocatedAttributes & ALPC_MESSAGE_VIEW_ATTRIBUTE))

@@ -59,10 +59,40 @@
 #include "objbase.h"
 
 #include "wine/debug.h"
+#include "wine/exception.h"
 
 #include "coreuicall.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(messaging);
+
+/*
+ * Probe a caller supplied interface identifier.
+ *
+ * The conversation engine dispatches vtable slot 0 of the object a
+ * conversation reply carries as a plain call with its own registers left in
+ * place (measured on the CoreMessagingXP receiver dispatch): the first
+ * argument is the address of the reply slot - not an interface pointer of
+ * this object - and the second argument is the caller's leftover register
+ * (measured value 0x10, the verb of the pending request), not a readable
+ * REFIID.  Slot 0 must therefore not read through - or print - the second
+ * argument before it is probed.  Copy the guid through a guarded read; a
+ * probe fault means the caller never intended a QueryInterface here, and the
+ * answer is E_NOINTERFACE / E_POINTER, never S_OK with a null result.
+ */
+static BOOL probe_refiid( REFIID iid, GUID *buf )
+{
+    if (!iid) return FALSE;
+    __TRY
+    {
+        *buf = *iid;
+    }
+    __EXCEPT_ALL
+    {
+        return FALSE;
+    }
+    __ENDTRY
+    return TRUE;
+}
 
 #define COREUI_HEADER_SIZE  8
 #define COREUI_MAX_PARAMS   0x10
@@ -105,32 +135,39 @@ static inline struct coreui_session *impl_from_IUnknown( IUnknown *iface )
 static HRESULT WINAPI session_QueryInterface( IUnknown *iface, REFIID iid, void **out )
 {
     struct coreui_session *impl;
+    GUID guid;
 
-    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
     if (!iface || !iface->lpVtbl || iface->lpVtbl != &coreui_session_vtbl) return E_NOINTERFACE;
-    if (!iid) return E_POINTER;
+    if (!probe_refiid( iid, &guid )) return E_POINTER;
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( &guid ) );
     impl = impl_from_IUnknown( iface );
-    if (IsEqualGUID( iid, &IID_IUnknown ))
+    if (IsEqualGUID( &guid, &IID_IUnknown ))
     {
         if (!out) return E_POINTER;
         *out = iface;
         session_AddRef( iface );
         return S_OK;
     }
-    FIXME( "interface %s not supported.\n", debugstr_guid( iid ) );
+    FIXME( "interface %s not supported.\n", debugstr_guid( &guid ) );
     return E_NOINTERFACE;
 }
 
 ULONG WINAPI session_AddRef( IUnknown *iface )
 {
-    struct coreui_session *impl = impl_from_IUnknown( iface );
-    return InterlockedIncrement( &impl->ref );
+    /* Ownership guard as in session_QueryInterface: slots 1 and 2 are
+     * dispatched on the same path, so 'iface' may name foreign memory. */
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &coreui_session_vtbl) return 1;
+    return InterlockedIncrement( &impl_from_IUnknown( iface )->ref );
 }
 
 ULONG WINAPI session_Release( IUnknown *iface )
 {
-    struct coreui_session *impl = impl_from_IUnknown( iface );
-    ULONG ref = InterlockedDecrement( &impl->ref );
+    struct coreui_session *impl;
+    ULONG ref;
+
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &coreui_session_vtbl) return 0;
+    impl = impl_from_IUnknown( iface );
+    ref = InterlockedDecrement( &impl->ref );
 
     if (!ref)
     {
@@ -190,34 +227,41 @@ static const IMessageCallReceiveHostVtbl receive_host_vtbl;
 static HRESULT WINAPI send_host_QueryInterface( IMessageCallSendHost *iface, REFIID iid, void **out )
 {
     struct coreui_call_host *impl;
+    GUID guid;
 
-    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
-    /* Vtable-ownership guard: see session_QueryInterface.  The engine may
-     * invoke this slot with the client receiver object as 'iface'. */
+    /* Vtable-ownership and guid-probe guards: see session_QueryInterface.
+     * The engine may invoke this slot with the client receiver slot as
+     * 'iface' and a leftover register as 'iid'. */
     if (!iface || !iface->lpVtbl || iface->lpVtbl != &send_host_vtbl) return E_NOINTERFACE;
-    if (!iid) return E_POINTER;
+    if (!probe_refiid( iid, &guid )) return E_POINTER;
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( &guid ) );
     impl = send_host_from_send( iface );
-    if (IsEqualGUID( iid, &IID_IUnknown ))
+    if (IsEqualGUID( &guid, &IID_IUnknown ))
     {
         if (!out) return E_POINTER;
         *out = iface;
         send_host_AddRef( iface );
         return S_OK;
     }
-    FIXME( "interface %s not supported.\n", debugstr_guid( iid ) );
+    FIXME( "interface %s not supported.\n", debugstr_guid( &guid ) );
     return E_NOINTERFACE;
 }
 
 ULONG WINAPI send_host_AddRef( IMessageCallSendHost *iface )
 {
-    struct coreui_call_host *impl = send_host_from_send( iface );
-    return InterlockedIncrement( &impl->ref );
+    /* Ownership guard as in session_QueryInterface. */
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &send_host_vtbl) return 1;
+    return InterlockedIncrement( &send_host_from_send( iface )->ref );
 }
 
 ULONG WINAPI send_host_Release( IMessageCallSendHost *iface )
 {
-    struct coreui_call_host *impl = send_host_from_send( iface );
-    ULONG ref = InterlockedDecrement( &impl->ref );
+    struct coreui_call_host *impl;
+    ULONG ref;
+
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &send_host_vtbl) return 0;
+    impl = send_host_from_send( iface );
+    ref = InterlockedDecrement( &impl->ref );
 
     if (!ref)
     {
@@ -300,31 +344,34 @@ static const IMessageCallSendHostVtbl send_host_vtbl =
 static HRESULT WINAPI receive_host_QueryInterface( IMessageCallReceiveHost *iface, REFIID iid, void **out )
 {
     struct coreui_call_host *impl;
+    GUID guid;
 
-    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
-    /* Vtable-ownership guard: see session_QueryInterface. */
+    /* Vtable-ownership and guid-probe guards: see session_QueryInterface. */
     if (!iface || !iface->lpVtbl || iface->lpVtbl != &receive_host_vtbl) return E_NOINTERFACE;
-    if (!iid) return E_POINTER;
+    if (!probe_refiid( iid, &guid )) return E_POINTER;
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( &guid ) );
     impl = send_host_from_receive( iface );
-    if (IsEqualGUID( iid, &IID_IUnknown ))
+    if (IsEqualGUID( &guid, &IID_IUnknown ))
     {
         if (!out) return E_POINTER;
         *out = iface;
         receive_host_AddRef( iface );
         return S_OK;
     }
-    FIXME( "interface %s not supported.\n", debugstr_guid( iid ) );
+    FIXME( "interface %s not supported.\n", debugstr_guid( &guid ) );
     return E_NOINTERFACE;
 }
 
 ULONG WINAPI receive_host_AddRef( IMessageCallReceiveHost *iface )
 {
-    struct coreui_call_host *impl = send_host_from_receive( iface );
-    return InterlockedIncrement( &impl->ref );
+    /* Ownership guard as in session_QueryInterface. */
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &receive_host_vtbl) return 1;
+    return InterlockedIncrement( &send_host_from_receive( iface )->ref );
 }
 
 ULONG WINAPI receive_host_Release( IMessageCallReceiveHost *iface )
 {
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &receive_host_vtbl) return 0;
     return send_host_Release( &send_host_from_receive( iface )->send_iface );
 }
 

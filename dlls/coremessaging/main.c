@@ -27,8 +27,37 @@
 #include "wingdi.h"
 #include "winuser.h"
 #include "wine/list.h"
+#include "wine/exception.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(messaging);
+
+/*
+ * Probe a caller supplied interface identifier.
+ *
+ * The CoreMessaging conversation engine dispatches vtable slot 0 of the
+ * object a conversation reply carries as a plain call with its own registers
+ * left in place (measured on the CoreMessagingXP receiver dispatch): the first
+ * argument is the address of the reply slot, not an interface pointer of this
+ * object, and the second argument is the caller's leftover register (measured
+ * value 0x10, the verb of the pending request), not a readable REFIID.  A slot
+ * 0 implementation may therefore not read through - or print - the second
+ * argument before it has been probed.  Copy the guid through a guarded read;
+ * a probe fault means the caller never intended a QueryInterface here.
+ */
+static BOOL probe_refiid( REFIID iid, GUID *buf )
+{
+    if (!iid) return FALSE;
+    __TRY
+    {
+        *buf = *iid;
+    }
+    __EXCEPT_ALL
+    {
+        return FALSE;
+    }
+    __ENDTRY
+    return TRUE;
+}
 
 struct dispatcher_queue_controller_statics
 {
@@ -1261,37 +1290,47 @@ static const struct IUnknownVtbl core_ui_vtbl;
 static HRESULT WINAPI core_ui_QueryInterface( IUnknown *iface, REFIID iid, void **out )
 {
     struct core_ui *impl;
-    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( iid ) );
-    /* Vtable-ownership guard: the CoreUICall engine dispatches the vtable
-     * slot 0 of an object handed out in a conversation reply as a plain
-     * call with the client's receiver object as 'iface'; the out-pointer
-     * of that call is the caller's leftover register.  Verify that 'iface'
-     * really is this object before touching the struct, and never write
-     * through an unverified out-pointer. */
+    GUID guid;
+
+    /* Vtable-ownership guard: the engine dispatches the vtable slot 0 of an
+     * object handed out in a conversation reply as a plain call with its own
+     * registers left in place; 'iface' is then the address of the reply slot
+     * (not an interface pointer of this object) and 'iid' is the caller's
+     * leftover register.  Verify that 'iface' really is this object before
+     * touching the struct, probe 'iid' before reading or printing it, and
+     * never write through an unverified out-pointer. */
     if (!iface || !iface->lpVtbl || iface->lpVtbl != &core_ui_vtbl) return E_NOINTERFACE;
-    if (!iid) return E_POINTER;
+    if (!probe_refiid( iid, &guid )) return E_POINTER;
+    TRACE( "iface %p, iid %s.\n", iface, debugstr_guid( &guid ) );
     impl = impl_from_IUnknown( iface );
-    if (IsEqualGUID( iid, &IID_IUnknown ))
+    if (IsEqualGUID( &guid, &IID_IUnknown ))
     {
         if (!out) return E_POINTER;
         InterlockedIncrement( &impl->ref );
         *out = &impl->IUnknown_iface;
         return S_OK;
     }
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( &guid ) );
     return E_NOINTERFACE;
 }
 
 static ULONG WINAPI core_ui_AddRef( IUnknown *iface )
 {
-    struct core_ui *impl = impl_from_IUnknown( iface );
-    return InterlockedIncrement( &impl->ref );
+    /* Ownership guard as in core_ui_QueryInterface: vtable slots 1 and 2 are
+     * dispatched on the same path, so 'iface' may name foreign memory.  Do
+     * not touch a foreign object's reference count. */
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &core_ui_vtbl) return 1;
+    return InterlockedIncrement( &impl_from_IUnknown( iface )->ref );
 }
 
 static ULONG WINAPI core_ui_Release( IUnknown *iface )
 {
-    struct core_ui *impl = impl_from_IUnknown( iface );
-    ULONG ref = InterlockedDecrement( &impl->ref );
+    struct core_ui *impl;
+    ULONG ref;
+
+    if (!iface || !iface->lpVtbl || iface->lpVtbl != &core_ui_vtbl) return 0;
+    impl = impl_from_IUnknown( iface );
+    ref = InterlockedDecrement( &impl->ref );
     if (!ref) free( impl );
     return ref;
 }
