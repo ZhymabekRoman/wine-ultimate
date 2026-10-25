@@ -1993,3 +1993,71 @@ built by the app's CoreUICore client (.NET cflat interop) — the entry slots mu
 generation, and no Wine code is on the path; (b) the engine's single-partition accept gate
 (`0xc0000236`) keeps the routed-provider path — the only place Wine composes registrar
 replies — unreachable; (c) WebView2 chain untouched behind XAML.
+
+---
+
+## Session 2026-10-25(d): the fault decoded dynamically — call to a NULL verb entry; provider and apiset loopback removed (forwarders), payload identity verified (2026-10-26)
+
+**Dynamic capture (TEMP `dlls/ntdll/exception.c` probe at `dispatch_exception` entry —
+shipped removed; the first-chance CONTEXT is the truth, the failfast record is not).**
+One first-chance `c0000005` per run: `rip = CoreMessagingXP+0x8c19a`, `rax = 0`,
+`nparams=2 p0=p1=0` — the guarded indirect call loads the verb-record slot that
+`UnmarshalReceive` stamps as `entries[i].array + 16*verbId` and **the slot pointer is
+NULL**; the load of `[0]` faults and the callee never starts. `rcx = rbx =` the
+receiver-slot address (a CoreMessagingXP stack slot holding a heap object pointer,
+`[slot]` readable), `rdx =` the param-pointer array (16 qwords: frame/heap/ntdll
+pointers, all readable; trailing entries carry frame junk, e.g. `0x000000007ffdb07c`).
+No reply-payload pointer is dereferenced at the fault: the poisoned field is the verb
+record's qword0 (entry) path itself, reading back NULL (fast face) — the gate/battery
+face ends in coreclr FailFast whose record (`addr = coreclr+0x18948f`, `params=0`) is
+**synthesized** (`System.AccessViolationException`, `CONTEXT.Rip` = the IL-stub
+dispatch entry): the entry is an **unresolved IL-stub precode** whose dispatcher reads
+the CoreMessagingXP frame as a transition frame. Both faces are one cause: the managed
+entry for the received verb was never resolved to real stub code.
+
+**Payload identity verified end-to-end.** TEMP hex dumps (server enqueue payload = the
+delivered copy, up to 400 B; client send/recv frames; `WINE_ALPC_RELAY_TRACE` + `+alpc`)
+on every registrar exchange: relay copies payloads verbatim; the stamps (`Type` at +4,
+`MessageId` at +0x20) live inside the 48-byte PORT_MESSAGE header. The **provider's
+composed replies** (80-byte join-shape, verb word `0x20`, client id `0x20`) were the
+Wine-side payload producer answering the XAML CoreUICore client (tid 0024 ↔ provider
+connection exchanges measured); they are gone with the provider — the client now speaks
+to the engine's own self-host registrar and the observed reply frames are the engine's
+native ones.
+
+**Tree (commit `8dda46e98`, `ultimate`):** `dlls/coremessaging/registrar.c` deleted
+(provider thread, join/verb-36 replies, DllMain); `core_ui_provider_object` removed from
+`main.c`/`private.h`; `dlls/coremessaging/coreuicall.c` rewritten as **thin forwarders**
+to the real `CoreMessagingXP.dll` exports (the Windows apiset implementation *is*
+CoreMessagingXP; `CoreUICallSend` gathers the va-list slots per the documented
+convention and enters `CoreUICallSendVaList`). Import-table measurements justify the
+forwarder shape: `Microsoft.ui.xaml.dll` imports only `CoreMsgCreateSession` from
+CoreMessagingXP, and CoreMessagingXP's own import table contains **no CoreUICall
+family** (its `api-ms-win-crt-utility` import is `rand_s` only) — XAML P/Invokes the
+entry points on CoreMessagingXP directly, the apiset hosted by `coreuicall.dll` never
+received the registrations (forwarder TRACEs observed silent), and the verb table the
+native dispatch reads is built by XAML's own P/Invokes. `+alpc` frame hexdump cap raised
+48 → 400 bytes for payload auditing.
+
+**Numbers.** Gate 150 s ×2: `rc=5 fatal=1 ff=33`, 43 419 log lines (deterministic),
+failfast record `addr=coreclr+0x18948f params=0` in both. Battery 8×60: 8/8
+`rc=5 fatal=1`, identical record. Screenshot `$HOME/wa-work/wa_callee_after.png`:
+295 B — 1280×1024, one unique colour: **blank/black**, 8 IME windows only, no XAML
+window, no WebView2/edge processes. App binaries pristine: `CoreMessagingXP.dll`,
+`dwmcorei.dll`, `Microsoft.ui.xaml.dll`, `Microsoft.Internal.FrameworkUdk.dll` equal to
+`.orig`; `WebView2Loader.dll` `4cd3ffd5`.
+
+**Environment.** `/` was 100 % full: `sudo tune2fs -m 1 /dev/nvme0n1p2` freed ~16 G for
+user writes (ext4 reserve was swallowing the 18 G of free blocks). All builds and logs
+this session ran on tmpfs: shadow build `/tmp/wb` (full-tree `make` fails on an
+unrelated missing `dlls/activeds/tests` dir — build the touched dirs:
+`make -C /tmp/wb/dlls/{ntdll,coremessaging,coreuicall} server`), harness copies + logs
+in `/tmp/wa` (`gate.sh`, `battery.sh`, `shot.sh`, `proberun.sh`). `pgrep -x
+'WhatsApp.Root.e'` finds nothing in this environment (comm is not set to the app name
+here); the app Linux process is a `wine64` child — locate it via `/proc/*/cmdline`.
+
+**Next gaps:** (a) the XAML cflat receive-verb records carry qword0 = 0 / unresolved
+IL-stub precodes — the managed delegate-stub resolution (`GetDelegateMarshallingStub`
+path in coreclr) fails on Wine and the first dispatch jumps to address 0; no Wine code
+is on that path (measured: apiset forwarders never invoked, payload verbatim);
+(b) the XAML window and the WebView2 chain remain behind that wall.
