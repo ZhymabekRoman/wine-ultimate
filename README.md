@@ -1872,3 +1872,124 @@ survives; (b) if the engine pool must carry the endpoint-host object: XAML never
 newly bound CoreUICallCreateEndpointHost (dead import for this path) — registration flows
 from XAML's own receiver object, so the in-process identity-table path, not our host
 creation, is the lever for the slot's **content**; (c) WebView2 chain untouched behind XAML.
+
+---
+
+## Session 2026-10-25(d): the "managed CCW QueryInterface" reading refuted — the slot is a verb record, slot 0 is a 2-arg receive thunk (wine-am `c18d61a73`)
+
+**The QI direction, decided by RE of the caller.** `CoreMessagingXP+0x8c19a` is inside the
+module's **own export** `CoreUICallReceive` (`0x18008c100`), not a consumer of the apiset:
+
+```
+18008c14b lea rcx,[rsp+var_1C8]        ; 80-byte ReceiveProcessor (rsp+0x40)
+18008c16b call ReceiveProcessor::UnmarshalReceive      ; 0x18008d100
+18008c178 mov edx,[rsp+var_178]        ; processor.errorCode
+18008c17f lea rcx,[rsp+var_128]        ; processor param-pointer array (qword 20+)
+18008c187 mov rax,[rsp+var_130]        ; processor qword 19  <-- the "object"
+18008c18f neg edx / sbb rdx,rdx / and rdx,rcx   ; rdx = param array | NULL
+18008c197 mov rcx,rbx                  ; a5 = &receiver slot (caller's stack)
+18008c19a mov rax,[rax] ; guard_dispatch_icall     ; HRESULT checked (test/js)
+```
+
+`[rsp+var_130]` = **processor qword 19**, written only at `0x18008d250` as
+`entries[i].array + 16*verbId`. The slot is a **16-byte `MsgCallTypeDefinition` verb
+record**: qword0 = entry function pointer, word@8 = parameter offset in the payload
+(bounds-checked `0x18008d289`), byte@10 = parameter count (must equal
+`payload[descOffset]`, `0x18008d2a3`). Proven entry ABI, confirmed by
+`Thunk_RegisterConversation_164` (`0x1800662e0`: `v6 = *a1`; `a2[0..5]` = parameters):
+
+```
+HRESULT entry(void *receiver_slot /*rcx=a5*/, void *param_pointers_or_flag /*rdx*/)
+```
+
+**Two arguments. Not a COM call: no vtable load, no QueryInterface, no AddRef/Release.**
+The "byte flag" of the earlier reading is the param-pointer array base (`processor+0xA0`);
+the callee writes out-parameters through it, the caller never reads a byte. `r8/r9` are
+untouched leftovers — exactly the garbage the crash shows. The verb tables are CMXP
+`.rdata` (`0x1800aa350` server/requests id 1, 23 verbs, verb 14 = RegisterConversation
+payload@164 6 params; `0x1800aaa80` client/replies id 0, 29 verbs, verb 20 =
+Reply_RegisterConversation payload@67 4 params); every descriptor offset equals the thunk
+name suffix (`Reply_RegisterConversation_67`). Failure inside `UnmarshalReceive` routes to
+`host->vtable[+32]` (OnProtocolException) and forces a negative HRESULT, so the 0x8c19a
+call is reached **only** with a fully validated descriptor.
+
+**Consequence for the "object in the slot" theory.** Inside CMXP the slot can only ever be
+`entries[i].array + 16*verbId` (a `.rdata` address), so it can never be `0x3f7` and never a
+reply-payload field: the receiver is created on the **caller's frame** by CMXP itself
+(`0x18001777b` → `RemoteRegistrarServer`, `0x18002dd19` → `RemoteRegistrarClient`,
+`0x18008b38d` → `ConversationControlEndpoint`, slot from `[this+88]`, refcounted with
+`System::Object::ReleaseNotFrozen$` = a .NET **CFlat** `System::Object*`). The reply's
+contract fields are the header size (26-bit dword size in dwords, top 6 bits zero), the
+direction word `word@4` (0 reply / 1 request) and the verb index `word@6`. **Stamping an
+object pointer into a reply is the wrong fix.** Measured at the fault: the verb record's
+qword0 held a managed entry pointer (callee `coreclr+0x18948f`, `.text`, and the fault is
+*inside* that stub) — the type definition handed to `CoreUICallReceive` carries managed
+entries where native receive thunks belong.
+
+**XAML supplies nothing.** `Microsoft.ui.xaml.dll`'s Start is
+`DirectUI::FrameworkApplicationFactory::Start` (`0x1801a66f0`, vtable slot 11 of
+`0x180a51ec0`): it stores the callback **raw** (`ComPtr::operator=` `0x18018a070`, AddRef
+only, single global `g_spApplicationInitializationCallback`), and the only use is vtable
+**slot 3 = Invoke** (`0x1801a74a5 mov rax,[rcx]; 0x1801a74b2 mov rax,[rax+18h]`,
+standard COM ABI, `rdx` = `ApplicationInitializationCallbackParams`). The module's
+**entire** CoreMessaging import set is one name, `CoreMsgCreateSession` (IAT
+`0x1809e30d0`, from `CXcpDispatcher::Init` `0x1800b0610`, rcx=0 → `IMessageSession**` →
+`GetMessageLoopExtensions`); it imports **no** `CoreUICall*`, `CoreMessaging.dll`,
+`api-ms-win-crt-utility`, never QIs the callback, allocates no wrapper (all
+`lea rax, offset ??; mov [rcx], rax` sites store C++ vtables), and the strings
+`CoreUICore|CoreUICall|RegisterConversation|CFlat|XamlRoom` are absent (the CFlat hits are
+`CBezierFlattener`). So the managed-callback → conversation handoff is not in XAML: the
+call site that supplies the managed-entry type definition is the app's own CoreUICore
+client on the .NET/cflat side.
+
+**Wine-side truth of the live path (survey of every stamp site).** The relay is a byte pipe
+for payloads: `server/alpc.c` stamps `MessageId` (`:764`), LPC Type (`:785`), the
+wine-internal wire header, the 32-byte handle block and reply correlation
+(`:896-1077`); `dlls/ntdll/unix/alpc.c` owns PORT_MESSAGE header fields (`:623-650`,
+`:843-925`) — payload bytes start at +48 and are `memcpy`'d verbatim, so **no relay write
+can reach the object field**. Our own stamps (`core_ui_provider_object()` at
+`registrar.c:489/493/499/525`) sit behind the provider connect, which the engine refuses
+(`STATUS_CONNECTION_REFUSED 0xc0000236` — the **only** `+messaging` line in a full run), so
+`handle_routed_request` (join 17/18, relayed verb 36) is dead code on the live path.
+
+**Fixes shipped (`c18d61a73`, all in the builtins, no app patching).**
+* Slot-0 argument probing: every `QueryInterface` of the CoreUICall family and of the
+  CoreUICore provider object printed `debugstr_guid(iid)` at entry, **ahead of its own
+  vtable-ownership guard** — with the engine's leftover-register second argument that
+  TRACE faults inside our builtin. Copy the guid through a guarded read (`probe_refiid`,
+  `__TRY/__EXCEPT_ALL`), print/compare the copy, answer `E_NOINTERFACE`/`E_POINTER`; extend
+  the ownership guard to `AddRef`/`Release` (dispatched the same way) so a foreign `this`
+  never touches our refcounts.
+* Substitution removed: the join reply and the relayed-verb reply keep the measured TLV
+  shape and carry **null** in the object fields (the engine's own "no object" sentinel)
+  with the contract documented; the provider object is not the peer the requester
+  registered and answers `E_NOINTERFACE` for everything it binds.
+* `dlls/ntdll/tests/alpc.c`: the serialization rewrite dropped `ca.payload` (null copy in
+  `ser_client_thread`); restored. This tree is configured **without tests** (`TESTS` empty
+  in the generated Makefile), so the suite is not built here.
+
+**Numbers.** Gate 150 s ×2: `rc=5`, `fatal=1`, `ff=33`, `av=1`, fault address
+`coreclr+0x18948f` in both, `createdwins=14`, `xamlwin=0`, `wv2loader=0`, `edge=0`,
+`messaging traces=1` (the provider refusal). Battery 8×60: 8/8 `rc=5 fatal=1 av=1`, callee
+`coreclr+0x18948f` in all eight. ALPC app repro: `rc=5` at baseline. Screenshot
+`wa-work/wa_ccw_after.png` — 1280×1024, **one unique colour, mean 0: black** (no XAML
+window, no browser surface, no QR/loading content). App binaries pristine:
+`CoreMessagingXP.dll`, `Microsoft.ui.xaml.dll`, `Microsoft.Internal.FrameworkUdk.dll`,
+`dwmcorei.dll` compare equal to `.orig`; `WebView2Loader.dll` `4cd3ffd5`.
+Gate counter note: `wa_gate.sh` greps the raw NUL-laden log, which under-counts
+`Fatal error`/`RaiseFailFastException`; the counters above come from the
+`tr -d '\000'` copy (the pattern `fatal=0` in a raw-log gate summary is an artefact).
+
+**Environment note.** `/` hit 100 % mid-session (a 1.2 GB WebView2 analysis dir, prior
+sessions' 500 MB+ IDA unpacked work files, and ~1.5 GB of stale harness logs in Trash that
+are hardlinked to live files, so `rm` on the Trash copy frees nothing). All run logs this
+session went to tmpfs (`/tmp`), the only filesystem with room; IDA unpacked
+`.id0/.id1/.til/.nam` are removable while no `.lok` exists (the packed `.i64` is
+authoritative).
+
+**Next gaps:** (a) the type definition whose verb records carry managed entry pointers is
+built by the app's CoreUICore client (.NET cflat interop) — the entry slots must be native
+`entry(receiver_slot, params)` thunks; that lives in app binaries and .NET's stub
+generation, and no Wine code is on the path; (b) the engine's single-partition accept gate
+(`0xc0000236`) keeps the routed-provider path — the only place Wine composes registrar
+replies — unreachable; (c) WebView2 chain untouched behind XAML.
