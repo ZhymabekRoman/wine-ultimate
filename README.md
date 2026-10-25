@@ -2400,3 +2400,61 @@ process shows `about:blank` at 1058×1024, so the wall moves to (a) compositing 
 present to the X root (screenshot) and (b) the real WebView2 `Navigate`/QR content (network +
 the registrar's RegisterConversation verb driving the page load). The accept-0 / fail-fast
 wall is resolved.
+
+## Compositing present to the X root: compositor goes change/commit-driven (tip 539036d03)
+
+The window maps and the browser shows `about:blank` at 1058×1024, yet the X root is black.
+Measured the present pipeline with `+dcomp,+dxgi` on a 150 s run (the compositor is now quiet
+enough to trace).
+
+**Who presents what.** `dxgi_factory_CreateSwapChainForComposition` (this fork binds a
+composition swapchain to a real top-level) makes the 1058×1024 content swapchain on the
+`WinUIDesktopWin32WindowClass` window (0x1006C = GA_ROOT of 0x10084). The app calls
+`IDXGISwapChain::Present` on it — **only 2 times in 150 s** (WebView2 idle at `about:blank`) —
+which routes `d3d11_swapchain_present → wined3d_swapchain_present` and lands in
+`swapchain_gl_present win_handle 0x1006C` + "redirecting present to target_window 0x1006C".
+The d3d11 device is GL (`WARP not implemented, falling back to hardware`, `WineD3D_OpenGL`
+windows), so the GL present path is live.
+
+**The break.** `dcomp`'s `composite_thread_proc` is a 16 ms busy-loop: every tick it walks each
+target's visual tree and, for every visual carrying content, runs `do_composite_dxgi_surface`
+(D2D GdiInterop copy + `BitBlt` to `GetDC(root_hwnd)`). That fired **52470 blits/150 s**
+(≈350/s across the two dcomp devices), blitting small 1×1/46×32/790×32 surfaces — which are
+black (the app has painted nothing, no `Navigate`) — over the window at 60 Hz, clobbering the
+app's own 2 present frames and thrashing D2D/D3D resources (created/destroyed per blit). Net:
+black. Not a missing CreateTargetForHwnd, not VirtualSurfaceContentProvider — the compositor
+was overpainting the present.
+
+**Fix (dcomp only, clean LGPL, zero app patching).** Add a change counter: `composition_visual.
+content_version` bumped in `visual_SetContent`; `do_composite` blits a visual's surface only
+when `content_version != composited_version`, recording it after. The shared-visual fallback
+blit is gated the same way on `composition_target.composited_surface`. The compositor paints
+once per change; the swapchain `Present` path owns the window drawable in between, so presented
+frames persist.
+
+**Evidence.** Compositor blits drop **52470 → 52/150 s**; the full **1058×1024** frame blit
+fires; `swapchain_gl_present` reaches 0x1006C. Battery 8/8 `ALIVE_60s fatal=0 edge=12`; alpc
+suite **1755/0**; gate 150 s `rc=124 fatal=0`. App binaries pristine (all 5 `*.dll == *.orig`:
+CoreMessagingXP/Microsoft.ui.xaml/dwmcorei/FrameworkUdk).
+
+**Wall (b) — Navigate — is NOT ALPC-gated.** `+alpc` verb trace over 90 s: the relay's
+request/reply conversation on the partition ports (0x578/0x618/0x620/0x1dc requests, 0x1d0
+replies) increments cleanly through message ids 4→18, `NtAlpcAcceptConnectPort accept=1`,
+**zero `alpc:err/fixme/warn`** — the accept-0/ProtocolException wall from the prior tip is
+gone, the registrar conversation is healthy. The app survives 90 s (`fatal=0`) and stalls at
+application-level init: the applog's last line is
+`WebLifecycleController/CreatePushNotificationChannelWithRetryAsync` (a ~67 s timer, attempt 1
+only); `MediaFilesService/Initialize: ClientKey is null`. No `CreateCoreWebView2Controller`,
+no `Navigate`, no `web.whatsapp`.
+
+**Screenshot verdict `$HOME/wa-work/wa_present_after.png` @ t=100 s: BLACK** (1,310,660 black /
+60 white of 1.31 M px). The present pipeline now reaches the window and the full frame blits,
+so black is the app-painted surface, not a compositor gap: with no `Navigate` the 1058×1024
+composition surface is uninitialized (black) and the WebView2 child (0x1007C, the
+`DesktopChildSiteBridge` host) is `about:blank`. Best reachable present verdict today is a
+blank browser; QR requires `Navigate`.
+
+**Next gap.** Drive the app past WebLifecycleController to `CreateCoreWebView2Controller` →
+`Navigate(web.whatsapp.com)` → QR. The gate is application/network-level (WNS push channel,
+`ClientKey`), not the ALPC relay: the conversation is established and clean. When content
+paints, the change-driven compositor + GL present will show it.
