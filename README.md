@@ -2700,3 +2700,89 @@ call itself (no completion emitted by the browser for `AddBrowserExtensionAsync`
 staged `ZoomBrowserExtension` now that its pump is healthy (probe the staging call in-process: policy/
 MACs/ACL path vs extension manifest load); (2) the app-side push/voip init tail; (3) compositing:
 live render widget, black X root.
+
+## Session 2026-10-25(i): the loader-lock ↔ wined3d-critical-section cycle closed; extension staging is still client-side (wine tip `b31bbdc12`, branch `ultimate`)
+
+**The early-stall mode of 25(g) gap (2) is a two-node lock cycle, not startup variance.**
+Trace-amplified runs (`WINEDEBUG=…,+file`) reproduce it deterministically; light-trace runs
+hit it at the recorded ~3/8 rate. `err:sync` gives the cycle directly, identical in four
+independent runs:
+
+```
+0024: wined3d_main.c: wined3d_cs  wait timed out, blocked by 0144   (holds loader_section)
+0144: ntdll/loader.c: loader_section wait timed out, blocked by 0024 (holds wined3d_cs)
+```
+
+The `loader_section` holder is the app UI thread inside `LdrLoadDll` of the package's
+`dcompi.dll` (its last `+loaddll` lines are `dwmcorei.dll`, `dcompi.dll`), whose process-attach
+path calls into DirectComposition/DXGI and therefore wants the global wined3d mutex. The
+wined3d mutex holder is a worker in GL adapter init (`+win`: `created window … class
+L"WineD3D_OpenGL" name L"WineD3D fake window"`, i.e. `wined3d_caps_gl_ctx_create`), and the
+`+module` trace shows it parked inside a loader call: `LdrGetDllHandleEx flags 0x1 …` prints
+its entry line and never prints its result line. DllMain owns the loader lock for its whole
+duration, so the cycle is closed by *any* loader call made under the wined3d critical section.
+
+**Fix (clean, one commit, `wined3d: Resolve loader state at process attach`).** Resolve every
+loader operation wined3d used to perform lazily under the critical section once at
+`DLL_PROCESS_ATTACH`, where the loader lock is already owned by this thread and no other
+thread runs:
+
+| site | was | now |
+| --- | --- | --- |
+| `adapter_gl.c` `wined3d_adapter_gl_init` | `GetModuleHandleA("opengl32.dll")` + ~200 `GetProcAddress` under the mutex | entry-point table resolved at attach, struct-copied per adapter (fallback keeps the old path if opengl32 is not loaded at attach) |
+| `cs.c` `wined3d_cs_create` | `GetModuleHandleW(L"ntdll.dll")` + 2 `GetProcAddress` + `GetModuleHandleExW(FROM_ADDRESS)` per command stream, under the mutex | `wined3d_cs_init()` at attach; the module is pinned once for the process, so the cs thread ends with `ExitThread()` instead of `FreeLibraryAndExitThread()` |
+| `view.c` `create_uav_pipeline` | `GetModuleHandleExA(FROM_ADDRESS|UNCHANGED_REFCOUNT)` under the mutex | cached `wined3d_get_module_handle()` from `DllMain` |
+| `adapter_vk.c` | `LoadLibraryA("winevulkan.dll")` + `GetProcAddress` per adapter, and `GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version")`, under the mutex | module + `vkGetInstanceProcAddr` referenced once for the process and shared by all adapters; the ntdll pointer resolved at attach |
+| `dxgi/dxgi_main.c` `register_d3d10core_layers` | `GetModuleHandleExA(FROM_ADDRESS)` + `GetProcAddress` **inside** `wined3d_mutex_lock()` | handle and `D3D11CoreRegisterLayers` resolved before the critical section; only the registration runs under it |
+
+The `+module` trace confirms the opengl32 lookup is gone from adapter init and the remaining
+in-mutex loader calls are gone. **Residual, not fixable Wine-side:** with the heaviest trace a
+worker holding the wined3d mutex was seen blocked in `LdrGetDllHandleEx` issued by the *app's
+own* managed interop code (`dlls/kernelbase/loader.c:352` is the only `GetModuleHandleExW(
+UNCHANGED_REFCOUNT)` call site in the tree, i.e. the app calls it itself) — the same call
+under the D3D lock would deadlock on Windows too.
+
+**Numbers.** Deadlock counters, 70 s trace-amplified runs (`-all,err+all,fixme+all,+loaddll,+file`):
+tip `loader_timeouts=11-12, cs_timeouts=2, createdwins=19` (no browser ever) → fix
+`loader_timeouts=0, cs_timeouts=0`; battery 8/8 `ALIVE_60s fatal=0`, `loader=0 cs=0` in every
+run log. Gate 150 s (`g1`): `ALIVE_150s`, `BORN=5 GONE=none edge_max=6 edge@120=6`,
+`fatal=0 ff=0 cs_timeouts=0`, `createdwins=141 xamlwin=1 ebwebview=26 rendwin=1`,
+`navigate=0 webwa=0`, mangohud=0. Suites at parity with the 25(f)/25(h) baseline: dcomp
+1160/36f, d3d11 562750/112f/8 skipped (784 todo), dxgi rc=124 at the 300 s cap. App binaries
+pristine 4/4 (`CoreMessagingXP.dll`, `dwmcorei.dll`, `Microsoft.Internal.FrameworkUdk.dll`,
+`Microsoft.ui.xaml.dll` == `.orig`).
+
+**Extension-staging wall: the client never reaches the staging file I/O.** New probes with a
+fully healthy browser tree (6 processes alive through t=150 s, pump fix of 25(h) in place):
+`+file` census over the whole run shows the `Default\Policy` directory and `Default\Extensions`
+are **never created** (per-tick census `policy=none extdir=no` to t=102 s), i.e. the WebView2
+client SDK does not get as far as writing the install policy / staging the folder — the stall
+is upstream of the file layer, inside `EmbeddedBrowserWebView.dll`'s `AddBrowserExtension`
+request path. The app-side part of the bootstrap does complete: the `ZoomExtension` folder is
+probed and written by the UI thread (`GetFileAttributesExW …\LocalCache\ZoomExtension`, 72
+`+file` lines). The client's delivery window exists — `Chrome_MessageWindow` is created on the
+app UI thread (hwnd `0x5008a`, instance = `EmbeddedBrowserWebView.dll`) — so the completion
+channel is present and simply never carries a completion. Chromium's extension-dir watcher
+machinery is armed and behaves to Windows semantics: `ReadDirectoryChangesW(h, buf, 5520,
+subdir=1, filter=0x11f, …overlapped)` → `NtNotifyChangeDirectoryFile(…, 5520, 0x11f, watched=1)`
+on two browser threads, pending (correct: no change to report). Chromium's own logging is not
+obtainable — `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` is ignored by this runtime (no
+`--log-file=`, no `EBWebView/debug.log`, with `--enable-logging` in several spellings), so the
+browser side of the install cannot be observed from inside Chromium.
+
+**Screenshot verdict.** `$HOME/wa-work/wa_ext_after.png` (frame of the healthy `g1` gate run at
+t≈120 s, 295 B): **BLACK** — XAML root present, render widget live, webview never navigated.
+
+**Environment note (affects measurement).** The root filesystem reached 100 % (0 available
+1K blocks) during this session; freed ~700 MB of stale systemd coredumps + journal and the
+prefix's browser caches. While it is full the app itself fails on its own storage
+(`applog`: `SqliteException … "session.db" … disk I/O error`), which puts every run into a
+`createdwins≈38`, no-browser mode — that mode is disk-driven, not Wine-driven, and the
+battery's `wins=38 edge=0` figures above must be read with it. Gate runs taken while space
+was available show the normal `createdwins=141` + live browser tree. Clean up disk before
+the next session's battery/gate runs.
+
+**Next gaps.** (1) the client-side `AddBrowserExtension` request path in
+`EmbeddedBrowserWebView.dll` — instrument the mojo request/response boundary client-side (the
+only remaining place before staging), the browser side is now provably pumping and file-clean;
+(2) compositing: live render widget, black X root; (3) free disk, then re-baseline the battery.
