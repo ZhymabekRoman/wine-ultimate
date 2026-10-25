@@ -2001,6 +2001,23 @@ static void test_GetTokenInformation(void)
         ok(!is_app_container, "is_app_container = %lx\n", is_app_container);
     }
 
+    {
+        TOKEN_SECURITY_ATTRIBUTES_INFORMATION *attrs;
+
+        size = 0;
+        ret = GetTokenInformation(token, TokenSecurityAttributes, NULL, 0, &size);
+        ok(!ret && GetLastError() == ERROR_INSUFFICIENT_BUFFER,
+           "GetTokenInformation(TokenSecurityAttributes) ret %d error %lu\n", ret, GetLastError());
+        ok(size == sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), "size = %lu\n", size);
+
+        attrs = malloc(size);
+        ret = GetTokenInformation(token, TokenSecurityAttributes, attrs, size, &size);
+        ok(ret, "GetTokenInformation(TokenSecurityAttributes) failed: %lu\n", GetLastError());
+        ok(attrs->Version == TOKEN_SECURITY_ATTRIBUTES_INFORMATION_VERSION, "Version = %u\n", attrs->Version);
+        ok(attrs->AttributeCount == 0, "AttributeCount = %u\n", attrs->AttributeCount);
+        free(attrs);
+    }
+
     CloseHandle(token);
 }
 

@@ -364,7 +364,7 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         0,    /* TokenRestrictedDeviceClaimAttributes */
         0,    /* TokenDeviceGroups */
         0,    /* TokenRestrictedDeviceGroups */
-        0,    /* TokenSecurityAttributes */
+        sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenSecurityAttributes */
         sizeof(DWORD), /* TokenIsRestricted */
         0     /* TokenProcessTrustLevel */
     };
@@ -729,6 +729,19 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         source->SourceIdentifier.LowPart = 0;
         source->SourceIdentifier.HighPart = 0;
         status = STATUS_SUCCESS;
+        break;
+    }
+
+    case TokenSecurityAttributes:
+    {
+        TOKEN_SECURITY_ATTRIBUTES_INFORMATION *attrs = info;
+
+        /* A token that is not running inside an appcontainer carries no security
+         * attributes; report an empty attribute list. */
+        attrs->Version = TOKEN_SECURITY_ATTRIBUTES_INFORMATION_VERSION;
+        attrs->Reserved = 0;
+        attrs->AttributeCount = 0;
+        attrs->AttributeList.pAttributeListV1 = NULL;
         break;
     }
 
