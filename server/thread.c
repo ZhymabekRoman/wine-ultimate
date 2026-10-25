@@ -2032,23 +2032,28 @@ DECL_HANDLER(select)
 
     if (get_error() == STATUS_USER_APC && get_reply_max_size() >= sizeof(union apc_call))
     {
-        apc = thread_dequeue_apc( current, 0 );
-        set_reply_data( &apc->call, sizeof(apc->call) );
-        release_object( apc );
+        /* the queued APC may have been consumed by a concurrent request */
+        if ((apc = thread_dequeue_apc( current, 0 )))
+        {
+            set_reply_data( &apc->call, sizeof(apc->call) );
+            release_object( apc );
+        }
     }
     else if (get_error() == STATUS_KERNEL_APC && get_reply_max_size() >= sizeof(union apc_call))
     {
-        apc = thread_dequeue_apc( current, 1 );
-        if ((reply->apc_handle = alloc_handle( current->process, apc, SYNCHRONIZE, 0 )))
+        if ((apc = thread_dequeue_apc( current, 1 )))
         {
-            set_reply_data( &apc->call, sizeof(apc->call) );
+            if ((reply->apc_handle = alloc_handle( current->process, apc, SYNCHRONIZE, 0 )))
+            {
+                set_reply_data( &apc->call, sizeof(apc->call) );
+            }
+            else
+            {
+                apc->executed = 1;
+                signal_sync( apc->sync );
+            }
+            release_object( apc );
         }
-        else
-        {
-            apc->executed = 1;
-            signal_sync( apc->sync );
-        }
-        release_object( apc );
     }
     else if (reply->signaled && get_reply_max_size() >= sizeof(union apc_call) + sizeof(struct context_data) &&
              current->context && current->suspend_cookie == req->cookie)
