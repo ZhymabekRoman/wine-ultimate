@@ -2647,3 +2647,56 @@ Wine-side suspect is the wake path of the browser's own message-pump wait
 (`MsgWaitForMultipleObjectsEx`/queue wake for the pump's posted work) — reproduce minimally outside
 WhatsApp before patching; (2) the 3/8 early-stall startup mode (`createdwins` 33–67, no browser);
 (3) compositing/present: a live 1058×1024 render widget with a black X root.
+
+## Session 2026-10-25(h): the msg-queue wake wedge closed — 20/20 pump matrix, browser alive past the 140 s watchdog (wine tip `18da5ef0`, branch `ultimate`)
+
+**Repro first (gap (1) from 25(g)).** `dlls/user32/tests/msgloop.c` (opt-in stress test, `WINE_MSGLOOP_ITER`
+gated, registered in the user32 test list): one thread parks in `MsgWaitForMultipleObjectsEx` while a waker
+fires one wake source per iteration — posted window message, `PostThreadMessageW`, `SetTimer`, event handle,
+IOCP — in two orders (source strictly before the wait is armed; source racing the arming) and two call
+shapes: conforming `mask=QS_ALLINPUT, flags=MWMO_INPUTAVAILABLE` and the Chromium pump shape
+`mask=MWMO_INPUTAVAILABLE (0x4), flags=0`. A watchdog declares a lost wake when progress stops for 5 s.
+Harness `/tmp/wa/msgloop_matrix.sh` sweeps all 20 combinations.
+
+**Root cause.** `NtUserMsgWaitForMultipleObjectsEx` passed only the caller's mask as the server queue
+wake/changed masks. The pump shape gives `wake_mask=0`, `changed_mask=0x4` (`QS_MOUSEBUTTON`): a newly
+posted/timer/sent message sets `QS_POSTMESSAGE/QS_TIMER/QS_SENDMESSAGE` in the queue shm, the server
+`get_queue_status()` stays 0, `signal_sync` is never armed, and the pump sleeps in
+`NtWaitForMultipleObjects` on the queue handle with the message sitting in the queue — exactly the
+`t40/t90` identical-PC futex wedge of 25(g), reached by the WebView2 `CrBrowserMain` UI pump. The event
+mask gates *hardware input* only; the queue's message conditions (posted, sent, timer, paint, hotkey)
+always satisfy a message-queue wait — new arrivals via the changed mask, and, when `MWMO_INPUTAVAILABLE`
+is set, messages already queued via the wake mask.
+
+**Fix (`win32u: Wake message-queue waits on queued messages`, pushed `github/ultimate`).**
+Client-side, one define + mask composition: `QUEUE_MSG_WAKE_BITS
+(QS_POSTMESSAGE|QS_ALLPOSTMESSAGE|QS_SENDMESSAGE|QS_TIMER|QS_PAINT|QS_HOTKEY)` is OR-ed into the
+changed mask unconditionally and into the wake mask when `MWMO_INPUTAVAILABLE` is requested. Server
+`queue.c` untouched — the sync-invariant path (`set_queue_bits`/`set_queue_mask`/`get_message` arming
+each re-evaluate `get_queue_status` → signal/reset) was verified sound; it only ever lacked the bits.
+
+**Matrix.** 20/20 pass, 2000 iterations per combo, probe-free build (`postmsg/postthread/timer/event/ioc
+× before/race × ia=0/1`, all rc=0, zero watchdog hits).
+
+**Gate 150 s (`wa_nav`)**: `ALIVE_150s`, `BORN=5 GONE=none edge_max=6 edge@120=6`, `fatal=0 ff=0
+cs_timeouts=0`, `createdwins=141 xamlwin=1 rendwin=1 ebwebview=26`, `navigate=0 webwa=0`, shot
+`~/wa-work/wa_nav_after.png` @≈130 s 295 B (black X root). **Gate 180 s (`nav180`)**: sampling extended
+past the old teardown point: `edge@125/130/135/140/145/150=6`, `GONE=none`, `ALIVE_180s` — the
+~140 s non-UI-thread `PostQuitMessage(2)` teardown of 25(g) is gone; all four crashpad dumps in the
+150 s run carry the harness-kill timestamp. The browser UI thread keeps pumping.
+
+**Battery 8×60**: 8/8 `ALIVE_60s`, `fatal=0`, `edge=12` webview log refs, `wins=141–142` every run —
+the early-stall startup mode of 25(g) did not appear in this battery. **Suites** (fresh tree, parity
+with 25(f) baseline): dcomp 1160 executed/36 failures, d3d11 562750/112f/8 skipped, dxgi rc=124 (300 s
+cap, as baseline). **App binaries pristine 4/4.**
+
+**Navigate status.** Not reached (`navigate=0 webwa=0`, no `AddBrowserExtension` markers in applog; app
+tail parks at `WebLifecycleController/CreatePushNotificationChannelWithRetryAsync Finished attempt 1` +
+voip, identical to the best pre-fix runs). The browser-side pump wall is closed; the client-side TCS
+still never observes an extension-staging completion, so the wall moves upstream to the app's staging
+call itself (no completion emitted by the browser for `AddBrowserExtensionAsync`, no marker in applog).
+
+**Next gaps.** (1) why the browser never emits the `AddBrowserExtensionAsync` completion for the
+staged `ZoomBrowserExtension` now that its pump is healthy (probe the staging call in-process: policy/
+MACs/ACL path vs extension manifest load); (2) the app-side push/voip init tail; (3) compositing:
+live render widget, black X root.
