@@ -45,6 +45,10 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 #define QS_HARDWARE     0x40000000
 #define QS_INTERNAL     (QS_DRIVER | QS_HARDWARE)
 
+/* queue conditions that are messages, not hardware input events: a message pump's
+ * event mask gates the latter only, the former always satisfy a message-queue wait */
+#define QUEUE_MSG_WAKE_BITS (QS_POSTMESSAGE | QS_ALLPOSTMESSAGE | QS_SENDMESSAGE | QS_TIMER | QS_PAINT | QS_HOTKEY)
+
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
 static LONG atomic_load_long( const volatile LONG *ptr )
@@ -3485,8 +3489,13 @@ DWORD WINAPI NtUserMsgWaitForMultipleObjectsEx( DWORD count, const HANDLE *handl
     for (i = 0; i < count; i++) wait_handles[i] = normalize_std_handle( handles[i] );
     wait_handles[count] = get_server_queue_handle();
 
+    /* The event mask gates hardware input only.  The queue's message conditions - sent,
+     * posted, timer, paint and hotkey messages - are not "events" of the requested type:
+     * a newly queued message always satisfies the wait, and, when MWMO_INPUTAVAILABLE is
+     * requested, a message already sitting in the queue does too, independently of mask. */
     return wait_objects( count+1, wait_handles, timeout,
-                         (flags & MWMO_INPUTAVAILABLE) ? mask : 0, mask, flags );
+                         (flags & MWMO_INPUTAVAILABLE) ? mask | QUEUE_MSG_WAKE_BITS : 0,
+                         mask | QUEUE_MSG_WAKE_BITS, flags );
 }
 
 /***********************************************************************
