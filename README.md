@@ -2203,3 +2203,79 @@ descriptors are static and the payload arrives verbatim from the app's own engin
 so bounds must be measured dynamically on the delivered copy before that is closed.
 (c) XAML window mapping (0 `WinUIDesktopWin32WindowClass` created) and the WebView2
 chain (0 WebView2Loader loads, 0 msedgewebview2) remain behind the fail-fast.
+
+## The connect-completion shape: two commits, two outstanding slots (tip 6995fda2d)
+
+**The kernel state machine, re-derived for the same exchange (probes in the relay,
+since removed; the ordering is deterministic across 6 runs).** The
+listening-port slurp of a connect is a **separate outstanding exchange** of the
+listening port: accepting the connection (`NtAlpcAcceptConnectPort`) creates the
+connection, and the server *still* has to commit the connect, which it does with
+the LPC datagram commit - a REPLY-flag send on the listening port whose framing
+payload word is zero. So the engine commits **twice**, and the two commits live in
+**different correlation domains**:
+
+| # | direction | wire id | size | framing payload | domain / role |
+|---|-----------|---------|------|-----------------|---------------|
+| A | conn -> listening port | 2 (**Type 0**) | 88 | 8 | the verb request; rides the *connection's* outstanding list |
+| B | listening port (server face) | **0** | 80 | **0** | the *connect* commit; correlates on the *listening port's* outstanding connect slot |
+| C | listening port -> conn | 2 (context echo) | 128 | 48 | the verb reply; answers A, stamped 2, taken by the armed receive |
+
+Two readings of the earlier tips are refuted by the measurement: the ack does **not**
+echo the request id (wire id is **0** - the kernel owns that slot and stamps the
+connect id), and it is **not** a duplicate to drop; it is the completion of an
+exchange of its own. Measured with 4830676ca shipped, the engine's commit was
+refused with `STATUS_INVALID_DEVICE_REQUEST` (`0xc0000010` = the param of the
+managed `e0464645` fail-fast).
+
+**Wine-side gaps closed (server/alpc.c, ultimate `6995fda2d`).** (1) The accepted
+connect keeps its slurped request outstanding on the *listening port*
+(`alpc_add_outstanding(server_port, pc->msg_id)` in `complete_alpc_connection`,
+only for the accept doorway - the slurp-reply doorway *is* the commit). (2) A
+REPLY-flag send on a listening port whose framing payload length is 0 is correlated
+on that slot **first** (by id when it echoes one, else the oldest open exchange) and
+consumed there: never queued (a delivered zero-length frame takes the receiver's
+`UnmarshalReceive` S_OK early-out and dispatches the unwritten verb slot), and
+refused when no connect exchange is open, so a genuine duplicate keeps 4830676ca's
+`STATUS_INVALID_DEVICE_REQUEST` drop. (3) A request is registered by the message id
+the sender composed, **not** by the sender's `Type`: the kernel owns the `Type` slot,
+so the messaging layer's PrepareConnection request arrives as `Type 0, id 2` and was
+never registered - which is why the verb reply had nothing to answer ("request
+already answered"). (4) The armed-receive path that answers the request in flight
+*is* the correlation: it now marks the reply resolved, so the pass below no longer
+pops the same slot a second time and refuses the reply it just answered.
+
+**Numbers.** Gate 150s x2: **rc=2, fatal=0, ff=15 lines (one fail-fast event),
+`e0464645` = 0** (was rc=69, fatal=0, ff=24, `e0464645` x2 with `param[0]=0xc0000010`);
+relay **drop=0** (was 1), `CONNECT-commit port ... id 1 (wire 0)` accepted, verb reply
+delivered (`msg_id 2 lpc 2 size 128`); 46388/46385 lines, 25 windows created, 34 X
+windows, 0 `WinUIDesktopWin32WindowClass`, 0 WebView2Loader, 0 msedgewebview2. Battery
+8x60: **8/8 rc=2 fatal=0 webview2loader=0 edge=0** (deterministic). The app now dies
+~0.5s in (was: it survived the whole window), so the t=70 screen and the t=10 screen
+are identical: 1280x1024, 1 colour, mean=0 **BLACK** (`wa-work/wa_connshape_after.png`).
+ntdll alpc suite **green: 1741 tests, 0 failures, 0 skipped** - `test_alpc_connect_commit`
+added (accept the connect, commit it with a zero-payload REPLY-flag frame on the
+listening port carrying a *foreign* id -> `STATUS_SUCCESS` and the connection still
+serves a full exchange; a second commit -> `STATUS_INVALID_DEVICE_REQUEST` and the
+client's next receive times out, so the refused frame was never queued). App binaries
+pristine (md5 CoreMessagingXP 7ee4b6c2, Microsoft.ui.xaml ec542848, dwmcorei 6ffe2bbc,
+FrameworkUdk 98f99f09 == `.orig`).
+
+**New wall (measured, the reason rc=2 not rc=124).** With the exchange complete, a
+**second** CONNECT (id 3, tid 0x184) arrives on the same
+`\BaseNamedObjects\CoreMessagingRegistrar-32` port, and the engine answers it with
+`NtAlpcAcceptConnectPort(accept = FALSE)` - its own rejection - after which that
+thread raises the fail-fast (15 frames, managed region) and the process exits `2`
+~0.5s in. So the remaining gate is the app-side accept decision for the second
+(partition) connection: the conversation state the engine built from the verb-48
+answer, i.e. the descriptor bounds of that 48-byte payload (previous gap (b)) and the
+CoreUICore partition queue, not the relay's connect-completion shape. XAML window
+mapping and the WebView2 chain stay behind it.
+
+**Harness note.** `/tmp/wa/sync.sh` copies `/tmp/wb` **into** the prefix, so a build
+in `$HOME/wine-build` must be rsynced into `/tmp/wb` (dlls + `server/wineserver` +
+`tools/wine/wine`) *before* `sync.sh`; with a stale `/tmp/wb` the prefix gets old
+builtins under a new wineserver and ntdll tests die silently (rc=5, no winetest
+output). Suite runner: `rm -f dlls/ntdll/tests/x86_64-windows/alpc.ok && make -C
+$HOME/wine-build dlls/ntdll/tests/x86_64-windows/alpc.ok` (needs `DISPLAY=:97` and
+`WINEDEBUG=+winetest`; `-all` silences the summary line).
