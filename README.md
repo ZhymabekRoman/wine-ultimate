@@ -2348,3 +2348,55 @@ tree (all instrumentation is gdb-side, kept in `/tmp/wa/acc_probe*.sh`).
 `/dlls/ntdll/ntdll.so` and dies with `wine: could not load ntdll.so`. Sync the full build
 outputs (`dlls/ libs/ loader/ server/ programs/ tools/` with `*.so *.dll *.exe`), then
 `ln -s /tmp/wb/tools/wine/wine /tmp/wb/wine`, then `sync.sh`.
+
+### The zero companion client id: connect-request ClientId stamped at the Windows offsets (tip `158cb9625`)
+
+The gap the previous note pinned is closed. The wire header carries the connecting thread
+correctly (relay `CONNECT-req … tid 184` = the partition thread) and ntdll stamps it on
+delivery (`alpc.c:861`); an in-process trace of the delivered connect request and of the
+buffer the app hands to `NtAlpcAcceptConnectPort` shows the tid **reaches the app intact**.
+The loss is a **layout** mismatch, not a missing stamp.
+
+Wine's `ALPC_PORT_MESSAGE` (`include/winternl.h:4562`) reserves an 8-byte
+`ULONGLONG Alignment` field at `+0x08` on x64, so its `ClientId` sits at `+0x10` and
+`MessageId` at `+0x20`. The relay correlation and Wine's own tests use that shifted layout
+(`ALPC_USER_MSGID_OFF = 4*sizeof`). The connection request, however, is the one message the
+receiver's *engine* parses, and `CoreMessagingXP` (a shipped Windows binary) reads it with
+the **real Windows `PORT_MESSAGE` layout**: `ClientId.UniqueProcess` at `+0x08`,
+`UniqueThread` at `+0x10`, `MessageId` at `+0x18` (the `double DoNotUseThisField` union
+forces 8-byte alignment, so no pad is needed — Wine's pad is spurious). Filling the
+delivered id through Wine's struct writes the pid into the `+0x10` slot (which the engine
+reads as the thread) and leaves the engine's process-id slot (`+0x08`, Wine's `Alignment`
+pad) **zero**. The partition gate reads that zero as the companion client id
+(`RemoteRegistrarServer::AcceptConnection` `%r9d = 0`) → `ProtocolException 47` at
+`+0x626af` → accept FALSE → fail-fast. The first connect passed because its session-0 path
+cross-checks the slot that happened to carry the (non-zero) pid.
+
+**Fix (ntdll only).** In `NtAlpcSendWaitReceivePort`'s `LPC_CONNECTION_REQUEST` branch, stamp
+the connect request's `ClientId` at the Windows offsets — `*(client_ptr_t*)(recv_msg + 1*sizeof)
+= client_pid`, `+2*sizeof = client_tid` — scoped to the connection request only; ordinary
+messages keep the shifted struct fill the relay correlation depends on. This touches neither
+the server nor the relay framing (length identity `payload+80`, `ALPC_USER_HDR_SIZE`,
+multi-chunk boundaries all untouched).
+
+**Accept=1 evidence.** Relay flips to `ACCEPT id 3 accept 1` (partition connect, was
+`accept 0`), and now `id 6/8 accept 1` too; `CONNECT-req … tid 184` accepted. The delivered
+bytes confirm pid `0x20` at `+0x08`, tid `0x184` at `+0x10`, `MessageId 3` at `+0x20`.
+
+**Face (gate 150 s ×2, battery 8×60, pristine binaries).** `APP_RC=124 ALIVE`, `fatal=0`,
+`ff=0`, `e0464645=0` (was `rc=2`, `ff=15`, dies ~0.5 s). XAML window maps
+(`WinUIDesktopWin32WindowClass` "WinUI Desktop", `xamlwin=1`, 144 windows). WebView2 chain
+live: `msedgewebview2.exe` running with an `about:blank` 1058×1024 browser window,
+`WEBVIEW2_TEMP_PARENT`, `Chrome_WidgetWin_0`/`Chrome_MessageWindow`, Edge mojo pipes
+(`pipe_edge=17`); registrar RPC flows (`REQUEST` conversation over the newly accepted
+partition ports). Battery 8/8 `ALIVE_60s fatal=0`. Screenshot `$HOME/wa-work/wa_clientid_after.png`:
+**black** (window mapped, content not composited to the X root — the present/compositor gap,
+not ALPC). alpc suite 1755/0 with the new two-connect `test_alpc_connect_clientid` (each
+connect carries its caller `{pid,tid}`, the re-connect carries the new tid). App binaries
+pristine: every `*.dll == *.dll.orig` (CoreMessagingXP/Microsoft.ui.xaml/dwmcorei verified).
+
+**Next gaps:** the screenshot is black — the XAML/WebView window is mapped and the browser
+process shows `about:blank` at 1058×1024, so the wall moves to (a) compositing the swapchain
+present to the X root (screenshot) and (b) the real WebView2 `Navigate`/QR content (network +
+the registrar's RegisterConversation verb driving the page load). The accept-0 / fail-fast
+wall is resolved.
