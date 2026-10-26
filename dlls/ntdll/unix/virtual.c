@@ -1201,6 +1201,40 @@ static void set_page_vprot( const void *addr, size_t size, BYTE vprot )
 #endif
 }
 
+static BOOL is_page_vprot_all( const void *addr, size_t size, BYTE vprot )
+{
+    size_t idx = (size_t)addr >> page_shift;
+    size_t end = ((size_t)addr + size + page_mask) >> page_shift;
+
+#ifdef _WIN64
+    while (idx >> pages_vprot_shift != end >> pages_vprot_shift)
+    {
+        size_t dir_size = pages_vprot_mask + 1 - (idx & pages_vprot_mask);
+        const BYTE *ptr = pages_vprot[idx >> pages_vprot_shift];
+        size_t i;
+        if (!ptr) return FALSE;
+        ptr += (idx & pages_vprot_mask);
+        for (i = 0; i < dir_size; i++)
+            if (ptr[i] != vprot) return FALSE;
+        idx += dir_size;
+    }
+    {
+        const BYTE *ptr = pages_vprot[idx >> pages_vprot_shift];
+        size_t rem = end - idx;
+        size_t i;
+        if (!ptr) return FALSE;
+        ptr += (idx & pages_vprot_mask);
+        for (i = 0; i < rem; i++)
+            if (ptr[i] != vprot) return FALSE;
+    }
+#else
+    size_t i;
+    for (i = idx; i < end; i++)
+        if (pages_vprot[i] != vprot) return FALSE;
+#endif
+    return TRUE;
+}
+
 
 /***********************************************************************
  *           set_page_vprot_bits
@@ -2010,6 +2044,10 @@ static BOOL set_vprot( struct file_view *view, void *base, size_t size, BYTE vpr
     {
         if (enable_write_exceptions && is_vprot_exec_write( vprot )) vprot |= VPROT_WRITEWATCH;
         else if (use_kernel_writewatch && view->protect & VPROT_WRITEWATCH) vprot &= ~VPROT_WRITEWATCH;
+
+        if (!(view->protect & VPROT_WRITEWATCH) && !enable_write_exceptions && is_page_vprot_all( base, size, vprot ))
+            return TRUE;
+
         set_page_vprot( base, size, vprot );
     }
     return !mprotect_range( base, size, 0, 0 );

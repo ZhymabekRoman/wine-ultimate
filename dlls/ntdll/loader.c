@@ -1064,12 +1064,20 @@ static int find_name_in_exports( HMODULE module, const IMAGE_EXPORT_DIRECTORY *e
     const WORD *ordinals = get_rva( module, exports->AddressOfNameOrdinals );
     const DWORD *names = get_rva( module, exports->AddressOfNames );
     int min = 0, max = exports->NumberOfNames - 1;
+    unsigned char first = (unsigned char)name[0];
 
     while (min <= max)
     {
         int res, pos = (min + max) / 2;
         char *ename = get_rva( module, names[pos] );
-        if (!(res = strcmp( ename, name ))) return ordinals[pos];
+        unsigned char efirst = (unsigned char)ename[0];
+
+        if (efirst != first)
+            res = (int)efirst - (int)first;
+        else
+            res = strcmp( ename, name );
+
+        if (!res) return ordinals[pos];
         if (res > 0) max = pos - 1;
         else min = pos + 1;
     }
@@ -1095,7 +1103,7 @@ static FARPROC find_named_export( HMODULE module, const IMAGE_EXPORT_DIRECTORY *
     if (hint >= 0 && hint < exports->NumberOfNames)
     {
         char *ename = get_rva( module, names[hint] );
-        if (!strcmp( ename, name ))
+        if (ename[0] == name[0] && !strcmp( ename, name ))
             return find_ordinal_export( module, exports, exp_size, ordinals[hint], load_path, importer, is_dynamic );
     }
 
