@@ -249,8 +249,6 @@ static struct list alpc_port_list = LIST_INIT(alpc_port_list);
 
 /* ---- Forward declarations ---- */
 
-static int relay_trace_on;
-static int relay_trace_enabled( void );
 static void alpc_gate_clear( struct alpc_port *base, unsigned int status );
 struct alpc_pending_conn;
 static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port,
@@ -559,8 +557,6 @@ static void alpc_drain_send_gate( struct alpc_port *base )
 
         list_remove( &g->entry );
         async = g->async;
-        if (relay_trace_enabled())
-            fprintf( stderr, "ALPC relay DRAIN base %p gated send\n", (void *)base );
         alpc_fd_write( g->port->fd, async, 0 );
         release_object( g->async );
         release_object( g->port );
@@ -845,10 +841,6 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
      * reserve port is readiness of its connection handle too */
     update_alpc_readiness( peer );
 
-    if (relay_trace_enabled())
-        fprintf( stderr, "ALPC relay from %x:%x port %p(%s) -> %p: msg_id %u lpc %u size %u seq %u/%u\n",
-                 hdr->client_pid, hdr->client_tid, (void *)port, port->is_server ? "srv" : "conn",
-                 (void *)peer, msg_id, msg_type, user_size, seq, count );
     return 1;
 }
 
@@ -920,10 +912,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     if (base && !port->is_server && !is_reply_send && !is_multi
         && (send_flags & ALPC_MSGFLG_SYNC_REQUEST) && !list_empty( &base->outstanding ))
     {
-        if (relay_trace_enabled())
-            fprintf( stderr, "ALPC relay GATE from %x:%x port %p: umid %u outstanding %u\n",
-                     sender_pid, sender_tid, (void *)port, reply_id,
-                     alpc_oldest_outstanding( base ) );
         alpc_gate_add( base, port, async );
         set_error( STATUS_PENDING );
         release_object( iosb );
@@ -1010,16 +998,10 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 if (!cid) cid = alpc_pop_outstanding( port, 0 );
                 if (cid)
                 {
-                    if (relay_trace_enabled())
-                        fprintf( stderr, "ALPC relay CONNECT-commit port %p id %u (wire %u)\n",
-                                 (void *)port, cid, reply_id );
                     async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
                     release_object( iosb );
                     return;
                 }
-                if (relay_trace_enabled())
-                    fprintf( stderr, "ALPC relay DROP connect commit port %p: no connect outstanding\n",
-                             (void *)port );
                 release_object( iosb );
                 set_error( STATUS_INVALID_DEVICE_REQUEST );
                 async_request_complete( async, STATUS_INVALID_DEVICE_REQUEST, 0, 0, NULL );
@@ -1115,9 +1097,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 /* the kernel drops it: no request is outstanding to answer, so
                  * the reply is never queued and never delivered, and the send
                  * completes with the kernel's refusal */
-                if (relay_trace_enabled())
-                    fprintf( stderr, "ALPC relay DROP reply id %u port %p: request already answered\n",
-                             reply_id, (void *)port );
                 release_object( iosb );
                 set_error( STATUS_INVALID_DEVICE_REQUEST );
                 async_request_complete( async, STATUS_INVALID_DEVICE_REQUEST, 0, 0, NULL );
@@ -1206,9 +1185,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             {
                 /* the kernel drops it: never queued, never delivered, and the
                  * send completes with the kernel's refusal */
-                if (relay_trace_enabled())
-                    fprintf( stderr, "ALPC relay DROP reply id %u port %p: request not outstanding\n",
-                             reply_id, (void *)port );
                 release_object( iosb );
                 set_error( STATUS_INVALID_DEVICE_REQUEST );
                 async_request_complete( async, STATUS_INVALID_DEVICE_REQUEST, 0, 0, NULL );
@@ -1223,9 +1199,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             {
                 /* the completion ack with no receive armed for the id: the
                  * correlation of the exchange, not a data reply */
-                if (relay_trace_enabled())
-                    fprintf( stderr, "ALPC relay CONSUME ack id %u port %p: no receive armed\n",
-                             reply_id, (void *)port );
                 alpc_drain_send_gate( base );
                 async_request_complete( async, STATUS_SUCCESS, iosb->in_size, 0, NULL );
                 release_object( iosb );
@@ -1347,9 +1320,6 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 if (base) alpc_add_outstanding( base, mid );
                 else if (port->is_server && peer) alpc_add_outstanding( peer, mid );
                 reply_id = mid;
-                if (relay_trace_enabled())
-                    fprintf( stderr, "ALPC relay REQUEST id %u port %p base %p size %u flags %#x\n",
-                             mid, (void *)port, (void *)base, size, send_flags );
             }
         }
 
@@ -1487,55 +1457,14 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     signal_wait_completion_packets( &server_port->obj );
     fire_wait_completion_packets( &server_port->obj );
     if (!list_empty( &server_port->msg_queue )) set_fd_signaled( server_port->fd, 1 );
-    if (relay_trace_enabled())
-        fprintf( stderr, "ALPC relay CONNECT-notify port %p id %u\n", (void *)server_port, pc->msg_id );
     return 1;
 }
 
 /* ---- Request handlers ---- */
 
-static int relay_trace_enabled( void )
-{
-    static int once;
-    if (!once++) relay_trace_on = getenv( "WINE_ALPC_RELAY_TRACE" ) != NULL;
-    return relay_trace_on;
-}
-
 /* dump the (null-terminated) object name carried by a port request.
  * The server stores names as UTF-16; the C library's %ls expects
  * wchar_t, so transcode the (ASCII) object names by hand. */
-static void trace_port_name( const char *tag, const struct unicode_str *name )
-{
-    char buffer[192];
-    unsigned int i, o = 0;
-
-    if (!relay_trace_enabled()) return;
-    for (i = 0; i < name->len / sizeof(WCHAR) && o < sizeof(buffer) - 3; i++)
-        buffer[o++] = (name->str[i] < 0x20 || name->str[i] > 0x7e) ? '?' : (char)name->str[i];
-    buffer[o++] = '\n';
-    buffer[o] = 0;
-    fprintf( stderr, "ALPC relay %s port name: %s", tag, buffer );
-}
-
-static void trace_connect_data( const struct alpc_pending_conn *pc )
-{
-    static const char hex[] = "0123456789abcdef";
-    const unsigned char *p = (const unsigned char *)pc->conn_data;
-    char buffer[3 * 40 + 1];
-    unsigned int i, o = 0;
-    unsigned int n = pc->conn_data_size < 40 ? pc->conn_data_size : 40;
-
-    if (!relay_trace_enabled()) return;
-    for (i = 0; i < n; i++)
-    {
-        buffer[o++] = hex[p[i] >> 4];
-        buffer[o++] = hex[p[i] & 15];
-    }
-    buffer[o] = 0;
-    fprintf( stderr, "ALPC relay CONNECT-data id %u size %u: %s\n",
-             pc->msg_id, pc->conn_data_size, buffer );
-}
-
 DECL_HANDLER(create_alpc_port)
 {
     struct alpc_port *port;
@@ -1546,7 +1475,6 @@ DECL_HANDLER(create_alpc_port)
 
     if (!objattr) return;
 
-    trace_port_name( "create", &name );
     port = create_named_object( root, &alpc_port_ops, &name, objattr->attributes | OBJ_OPENIF, sd );
     if (root) release_object( root );
     if (!port) return;
@@ -1595,7 +1523,6 @@ DECL_HANDLER(connect_alpc_port)
 
     if (!objattr) return;
 
-    trace_port_name( "connect", &name );
     /* Look up the named server port */
     server_port = (struct alpc_port *)open_named_object(
                         root, &alpc_port_ops, &name, objattr->attributes );
@@ -1663,12 +1590,6 @@ DECL_HANDLER(connect_alpc_port)
     }
 
     /* Queue connect notification to server port */
-    if (relay_trace_enabled())
-    {
-        fprintf( stderr, "ALPC relay CONNECT-req port %p id %u tid %x\n",
-                 (void *)server_port, req->msg_id, pc->client_tid );
-        trace_connect_data( pc );
-    }
     list_add_tail( &server_port->pending_conns, &pc->entry );
     if (!queue_connect_notification( server_port, pc ))
     {
@@ -1800,10 +1721,6 @@ static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port
         struct alpc_wire_hdr *whdr;
         data_size_t total = sizeof(*whdr) + found->conn_reply_size;
 
-        if (relay_trace_enabled())
-            fprintf( stderr, "ALPC relay CONNECT-complete port %p id %u\n",
-                     (void *)server_port, found->msg_id );
-
         if ((whdr = malloc( total )))
         {
             whdr->magic        = ALPC_WIRE_MAGIC;
@@ -1859,10 +1776,6 @@ DECL_HANDLER(accept_alpc_connection)
         set_error( STATUS_INVALID_PARAMETER );
         return;
     }
-
-    if (relay_trace_enabled())
-        fprintf( stderr, "ALPC relay ACCEPT port %p id %u accept %d\n",
-                 (void *)server_port, req->msg_id, req->accept );
 
     /* Find pending connection by msg_id */
     LIST_FOR_EACH_ENTRY( pc, &server_port->pending_conns, struct alpc_pending_conn, entry )
