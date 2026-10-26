@@ -1285,7 +1285,14 @@ int server_pipe( int fd[2] )
 
     if (have_pipe2)
     {
-        if (!(ret = pipe2( fd, O_CLOEXEC ))) return ret;
+        if (!(ret = pipe2( fd, O_CLOEXEC )))
+        {
+#ifdef F_SETPIPE_SZ
+            fcntl( fd[0], F_SETPIPE_SZ, 256 * 1024 );
+            fcntl( fd[1], F_SETPIPE_SZ, 256 * 1024 );
+#endif
+            return ret;
+        }
         if (errno == ENOSYS || errno == EINVAL) have_pipe2 = FALSE;  /* don't try again */
     }
 #endif
@@ -1293,6 +1300,10 @@ int server_pipe( int fd[2] )
     {
         fcntl( fd[0], F_SETFD, FD_CLOEXEC );
         fcntl( fd[1], F_SETFD, FD_CLOEXEC );
+#ifdef F_SETPIPE_SZ
+        fcntl( fd[0], F_SETPIPE_SZ, 256 * 1024 );
+        fcntl( fd[1], F_SETPIPE_SZ, 256 * 1024 );
+#endif
     }
     return ret;
 }

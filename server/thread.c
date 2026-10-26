@@ -517,6 +517,10 @@ struct thread *create_thread( int fd, struct process *process, const struct secu
             file_set_error();
             return NULL;
         }
+#ifdef F_SETPIPE_SZ
+        fcntl( request_pipe[0], F_SETPIPE_SZ, 256 * 1024 );
+        fcntl( request_pipe[1], F_SETPIPE_SZ, 256 * 1024 );
+#endif
         if (send_client_fd( process, request_pipe[1], SERVER_PROTOCOL_VERSION ) == -1)
         {
             close( request_pipe[0] );
