@@ -9,10 +9,6 @@
  * version 2.1 of the License, or (at your option) any later version.
  */
 
-#if 0
-#pragma makedep unix
-#endif
-
 #include <stdarg.h>
 
 #include "ntstatus.h"
