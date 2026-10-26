@@ -3592,6 +3592,17 @@ Implemented Tier-1 architectural enhancements based on second-opinion kernel ana
 - Cleaned up untracked temporary files `&1` and `output/`.
 - Wine commit `1a537f11` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(a): Idempotent mprotect bypass and fast 1st-character export lookup filter (wine tip `06428f26`, branch `ultimate`)
+
+Implemented idempotent memory protection bypass and fast PE export name filtering in ntdll:
+- `dlls/ntdll/unix/virtual.c::set_vprot()`: Added `is_page_vprot_all()` to check if all pages in the target address range already carry the requested `vprot`. When page protections are already identical (and neither write-watch nor write-exceptions apply), skips `mprotect_range()` and the synchronous Linux `mprotect()` syscall entirely. Eliminates kernel `mmap_lock` contention and TLB shootdown overhead during repetitive V8 / partition_alloc `VirtualProtect` touch cycles.
+  - Test suite verified: `ntdll_test.exe virtual` passed **4,182 tests** with 0 regressions.
+- `dlls/ntdll/loader.c::find_name_in_exports()` & `find_named_export()`: Added fast first-character comparison `efirst != first` to determine lexicographical ordering before invoking libc `strcmp()`. In sorted PE export tables, ~95% of binary search steps diverge on the first byte.
+  - **Measured (Win32 benchmark `bench_export_search2.c` on 1,204 real Kernel32 exports)**: lookup latency dropped from 21.50 ns to **15.97 ns per lookup (1.35x faster)**.
+  - Test suite verified: `ntdll_test.exe info` ran **2,150 tests** with 0 export or loader regressions.
+- Wine commit `06428f26` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
