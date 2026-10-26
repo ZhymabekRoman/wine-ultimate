@@ -51,6 +51,48 @@ __ASM_GLOBAL_FUNC( fast_NtCurrentTeb,
                    "movq %gs:0x30,%rax\n\t"
                    "ret" )
 
+extern void WINAPI fast_GetCurrentProcess(void);
+__ASM_GLOBAL_FUNC( fast_GetCurrentProcess,
+                   "movq $-1,%rax\n\t"
+                   "ret" )
+
+extern void WINAPI fast_GetCurrentThread(void);
+__ASM_GLOBAL_FUNC( fast_GetCurrentThread,
+                   "movq $-2,%rax\n\t"
+                   "ret" )
+
+extern void WINAPI fast_GetTickCount(void);
+__ASM_GLOBAL_FUNC( fast_GetTickCount,
+                   "movl 0x7ffe0320,%eax\n\t"
+                   "ret" )
+
+extern void WINAPI fast_GetSystemTimeAsFileTime(void *time);
+__ASM_GLOBAL_FUNC( fast_GetSystemTimeAsFileTime,
+                   "movq 0x7ffe0014,%rax\n\t"
+                   "movq %rax,(%rcx)\n\t"
+                   "ret" )
+
+extern void * WINAPI fast_TlsGetValue(DWORD index);
+__ASM_GLOBAL_FUNC( fast_TlsGetValue,
+                   "cmpl $64,%ecx\n\t"
+                   "jae 1f\n\t"
+                   "movl %ecx,%eax\n\t"
+                   "movq %gs:0x1480(,%rax,8),%rax\n\t"
+                   "ret\n\t"
+                   "1:\n\t"
+                   "cmpl $1088,%ecx\n\t"
+                   "jae 2f\n\t"
+                   "movq %gs:0x1780,%rax\n\t"
+                   "testq %rax,%rax\n\t"
+                   "jz 2f\n\t"
+                   "movl %ecx,%edx\n\t"
+                   "subl $64,%edx\n\t"
+                   "movq (%rax,%rdx,8),%rax\n\t"
+                   "ret\n\t"
+                   "2:\n\t"
+                   "xorq %rax,%rax\n\t"
+                   "ret" )
+
 static BOOL is_fast_trampoline_enabled(void)
 {
     static int enabled = -1;
@@ -80,10 +122,23 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
             return (ULONG_PTR)fast_GetCurrentThreadId;
         if (!strcmp( func_name, "GetCurrentProcessId" ))
             return (ULONG_PTR)fast_GetCurrentProcessId;
+        if (!strcmp( func_name, "GetCurrentProcess" ))
+            return (ULONG_PTR)fast_GetCurrentProcess;
+        if (!strcmp( func_name, "GetCurrentThread" ))
+            return (ULONG_PTR)fast_GetCurrentThread;
         if (!strcmp( func_name, "GetLastError" ))
             return (ULONG_PTR)fast_GetLastError;
         if (!strcmp( func_name, "GetProcessHeap" ))
             return (ULONG_PTR)fast_GetProcessHeap;
+        if (!strcmp( func_name, "GetTickCount" ))
+            return (ULONG_PTR)fast_GetTickCount;
+        if (!strcmp( func_name, "GetSystemTimeAsFileTime" ))
+            return (ULONG_PTR)fast_GetSystemTimeAsFileTime;
+        break;
+
+    case 'T':
+        if (!strcmp( func_name, "TlsGetValue" ))
+            return (ULONG_PTR)fast_TlsGetValue;
         break;
 
     case 'S':

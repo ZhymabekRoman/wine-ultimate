@@ -2098,6 +2098,13 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
                           : find_ordinal_export( module, exports, exp_size, ord - exports->Base, NULL, wm, TRUE );
         if (proc)
         {
+#ifdef __x86_64__
+            if (name && is_module_eligible_for_inline_patch( wm->ldr.BaseDllName.Buffer, module ))
+            {
+                ULONG_PTR fast_tramp = get_fast_iat_trampoline( name->Buffer );
+                if (fast_tramp) proc = (void *)fast_tramp;
+            }
+#endif
             *address = proc;
             ret = STATUS_SUCCESS;
         }
