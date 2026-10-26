@@ -3007,10 +3007,23 @@ struct shm_dentry_node {
 struct shm_dentry_dir {
     uint64_t dev;
     uint64_t ino;
-    uint64_t mtime;
+    uint64_t mtime_ns;
     uint32_t ready;
     uint16_t buckets[SHM_DENTRY_HASH_SIZE];
 };
+
+/* directory modification time in nanoseconds; second granularity is far too
+ * coarse to detect create/delete events that happen within the same second */
+static inline uint64_t dentry_stat_mtime_ns( const struct stat *st )
+{
+#ifdef HAVE_STRUCT_STAT_ST_MTIM
+    return (uint64_t)st->st_mtim.tv_sec * 1000000000 + st->st_mtim.tv_nsec;
+#elif defined(HAVE_STRUCT_STAT_ST_MTIMESPEC)
+    return (uint64_t)st->st_mtimespec.tv_sec * 1000000000 + st->st_mtimespec.tv_nsec;
+#else
+    return (uint64_t)st->st_mtime * 1000000000ull;
+#endif
+}
 
 struct shm_dentry_cache {
     uint32_t magic;
@@ -3042,6 +3055,9 @@ static inline void shm_dentry_unlock( struct shm_dentry_cache *shm )
 }
 
 static struct shm_dentry_cache *shm_dentry_cache = NULL;
+
+/* diagnostic kill-switch for the in-process/SHM VFS dentry caches */
+static int vfs_cache_disabled = -1;
 
 static void init_shm_dentry_cache(void)
 {
@@ -3084,7 +3100,7 @@ static void init_shm_dentry_cache(void)
 struct dentry_cache_dir {
     dev_t dev;
     ino_t ino;
-    time_t mtime;
+    uint64_t mtime_ns;
     struct dentry_node *buckets[DENTRY_HASH_SIZE];
 };
 
@@ -3216,7 +3232,8 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
     if ((fd = openat( root_fd, unix_name, O_RDONLY )) == -1) return errno_to_status( errno );
 
     /* In-memory Dentry Cache fast path */
-    if (!fstat( fd, &st ))
+    if (vfs_cache_disabled == -1) vfs_cache_disabled = getenv( "WINE_DISABLE_VFS_CACHE" ) != NULL;
+    if (!vfs_cache_disabled && !fstat( fd, &st ))
     {
         struct dentry_cache_dir *cache = NULL;
         unsigned int h = dentry_hash_w( name, length );
@@ -3231,7 +3248,7 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
                 struct shm_dentry_dir *sdir = &shm_dentry_cache->dirs[i];
                 if (sdir->dev == st.st_dev && sdir->ino == st.st_ino)
                 {
-                    if (sdir->mtime == st.st_mtime && __atomic_load_n( &sdir->ready, __ATOMIC_ACQUIRE ))
+                    if (sdir->mtime_ns == dentry_stat_mtime_ns( &st ) && __atomic_load_n( &sdir->ready, __ATOMIC_ACQUIRE ))
                     {
                         uint16_t node_idx = sdir->buckets[shm_h];
                         unix_name[pos - 1] = '/';
@@ -3261,7 +3278,7 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
         {
             if (dentry_dirs[i].dev == st.st_dev && dentry_dirs[i].ino == st.st_ino)
             {
-                if (dentry_dirs[i].mtime == st.st_mtime) cache = &dentry_dirs[i];
+                if (dentry_dirs[i].mtime_ns == dentry_stat_mtime_ns( &st )) cache = &dentry_dirs[i];
                 else free_dentry_dir( &dentry_dirs[i] );
                 break;
             }
@@ -3305,7 +3322,7 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
             memset( new_cache->buckets, 0, sizeof(new_cache->buckets) );
             new_cache->dev = st.st_dev;
             new_cache->ino = st.st_ino;
-            new_cache->mtime = st.st_mtime;
+            new_cache->mtime_ns = dentry_stat_mtime_ns( &st );
 
             if (shm_dentry_cache)
             {
@@ -3316,7 +3333,7 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
                     memset( new_sdir->buckets, 0, sizeof(new_sdir->buckets) );
                     new_sdir->dev = st.st_dev;
                     new_sdir->ino = st.st_ino;
-                    new_sdir->mtime = st.st_mtime;
+                    new_sdir->mtime_ns = dentry_stat_mtime_ns( &st );
                     new_sdir->ready = 0;
                 }
             }
