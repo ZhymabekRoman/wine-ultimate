@@ -1352,6 +1352,57 @@ static enum server_fd_type mapping_get_fd_type( struct fd *fd )
     return FD_TYPE_FILE;
 }
 
+struct claimed_base
+{
+    client_ptr_t base;
+    mem_size_t size;
+};
+
+static struct claimed_base *claimed_bases;
+static unsigned int claimed_count;
+static unsigned int claimed_alloc;
+
+static int is_map_addr_claimed( client_ptr_t base, mem_size_t size )
+{
+    unsigned int i;
+    client_ptr_t end = base + size;
+    for (i = 0; i < claimed_count; i++)
+    {
+        if (base < claimed_bases[i].base + claimed_bases[i].size && end > claimed_bases[i].base)
+            return 1;
+    }
+    return 0;
+}
+
+static void claim_map_addr( client_ptr_t base, mem_size_t size )
+{
+    if (claimed_count == claimed_alloc)
+    {
+        unsigned int new_alloc = max( 32, claimed_alloc * 2 );
+        struct claimed_base *new_claimed = realloc( claimed_bases, new_alloc * sizeof(*claimed_bases) );
+        if (!new_claimed) return;
+        claimed_alloc = new_alloc;
+        claimed_bases = new_claimed;
+    }
+    claimed_bases[claimed_count].base = base;
+    claimed_bases[claimed_count].size = size;
+    claimed_count++;
+}
+
+static void release_claimed_base( client_ptr_t base )
+{
+    unsigned int i;
+    for (i = 0; i < claimed_count; i++)
+    {
+        if (claimed_bases[i].base == base)
+        {
+            claimed_bases[i] = claimed_bases[claimed_count - 1];
+            claimed_count--;
+            break;
+        }
+    }
+}
+
 /* assign a mapping address to a PE image mapping */
 static client_ptr_t assign_map_address( struct mapping *mapping )
 {
@@ -1365,6 +1416,16 @@ static client_ptr_t assign_map_address( struct mapping *mapping )
     if ((ret = get_fd_map_address( mapping->fd ))) return ret;
 
     size += granularity_mask + 1;  /* leave some free space between mappings */
+
+    /* Try preferred base first to avoid relocations and Copy-On-Write overhead */
+    if (mapping->image.base && (mapping->image.base >= 0x10000) &&
+        !is_map_addr_claimed( mapping->image.base, size ))
+    {
+        ret = mapping->image.base;
+        claim_map_addr( ret, size );
+        set_fd_map_address( mapping->fd, ret, size );
+        return ret;
+    }
 
     for (i = 0; i < range->count; i++)
     {
@@ -1383,6 +1444,8 @@ void free_map_addr( client_ptr_t base, mem_size_t size )
     unsigned int i;
     client_ptr_t end = base + size;
     struct addr_range *range = (base >> 32) ? &ranges64 : &ranges32;
+
+    release_claimed_base( base );
 
     for (i = 0; i < range->count; i++)
     {
