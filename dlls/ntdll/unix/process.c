@@ -77,6 +77,8 @@ static ULONG execute_flags = MEM_EXECUTE_OPTION_DISABLE;
 
 static UINT process_error_mode;
 ULONG process_cookie = 0xdeadbeef;
+static PROCESS_BASIC_INFORMATION cached_self_pbi;
+static int self_pbi_cached = 0;
 
 static char **build_argv( const UNICODE_STRING *cmdline, int reserved )
 {
@@ -1113,8 +1115,6 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
 
     case ProcessBasicInformation:
         {
-            static PROCESS_BASIC_INFORMATION cached_self_pbi;
-            static int self_pbi_cached = 0;
             PROCESS_BASIC_INFORMATION pbi;
             const ULONG_PTR affinity_mask = get_system_affinity_mask();
 
@@ -1722,6 +1722,7 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
             ret = wine_server_call( req );
         }
         SERVER_END_REQ;
+        if (handle == NtCurrentProcess()) self_pbi_cached = 0;
         break;
     }
     case ProcessPriorityClass:
@@ -1739,6 +1740,7 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
                 ret = wine_server_call( req );
             }
             SERVER_END_REQ;
+            if (handle == NtCurrentProcess()) self_pbi_cached = 0;
         }
         break;
 
@@ -1756,6 +1758,7 @@ NTSTATUS WINAPI NtSetInformationProcess( HANDLE handle, PROCESSINFOCLASS class, 
                 ret = wine_server_call( req );
             }
             SERVER_END_REQ;
+            if (handle == NtCurrentProcess()) self_pbi_cached = 0;
         }
         break;
 
