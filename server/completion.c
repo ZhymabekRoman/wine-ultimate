@@ -113,6 +113,11 @@ static void completion_wait_destroy( struct object *obj )
 {
     struct completion_wait *wait = (struct completion_wait *)obj;
 
+    if (wait->completion)
+    {
+        list_remove( &wait->wait_queue_entry );
+        wait->completion = NULL;
+    }
     free( wait->msg );
 }
 
@@ -188,10 +193,17 @@ static void completion_destroy( struct object *obj)
 {
     struct completion *completion = (struct completion *) obj;
     struct comp_msg *tmp, *next;
+    struct completion_wait *wait, *wait_next;
 
     LIST_FOR_EACH_ENTRY_SAFE( tmp, next, &completion->queue, struct comp_msg, queue_entry )
     {
         free( tmp );
+    }
+
+    LIST_FOR_EACH_ENTRY_SAFE( wait, wait_next, &completion->wait_queue, struct completion_wait, wait_queue_entry )
+    {
+        wait->completion = NULL;
+        list_remove( &wait->wait_queue_entry );
     }
 
     if (completion->sync) release_object( completion->sync );
@@ -256,6 +268,7 @@ static struct completion_wait *create_completion_wait( struct thread *thread )
     wait->completion = NULL;
     wait->thread = thread;
     wait->msg = NULL;
+    list_init( &wait->wait_queue_entry );
     if (!(wait->handle = alloc_handle( current->process, wait, SYNCHRONIZE, 0 )))
     {
         release_object( &wait->obj );
