@@ -149,6 +149,7 @@ DECL_HANDLER(ioctl);
 DECL_HANDLER(set_irp_result);
 DECL_HANDLER(create_named_pipe);
 DECL_HANDLER(set_named_pipe_info);
+DECL_HANDLER(get_named_pipe_shm);
 DECL_HANDLER(create_window);
 DECL_HANDLER(destroy_window);
 DECL_HANDLER(get_desktop_window);
@@ -472,6 +473,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_set_irp_result,
     (req_handler)req_create_named_pipe,
     (req_handler)req_set_named_pipe_info,
+    (req_handler)req_get_named_pipe_shm,
     (req_handler)req_create_window,
     (req_handler)req_destroy_window,
     (req_handler)req_get_desktop_window,
@@ -1504,6 +1506,12 @@ C_ASSERT( sizeof(struct create_named_pipe_reply) == 16 );
 C_ASSERT( offsetof(struct set_named_pipe_info_request, handle) == 12 );
 C_ASSERT( offsetof(struct set_named_pipe_info_request, flags) == 16 );
 C_ASSERT( sizeof(struct set_named_pipe_info_request) == 24 );
+C_ASSERT( offsetof(struct get_named_pipe_shm_request, handle) == 12 );
+C_ASSERT( sizeof(struct get_named_pipe_shm_request) == 16 );
+C_ASSERT( offsetof(struct get_named_pipe_shm_reply, mapping) == 8 );
+C_ASSERT( offsetof(struct get_named_pipe_shm_reply, is_server) == 12 );
+C_ASSERT( offsetof(struct get_named_pipe_shm_reply, size) == 16 );
+C_ASSERT( sizeof(struct get_named_pipe_shm_reply) == 24 );
 C_ASSERT( offsetof(struct create_window_request, parent) == 12 );
 C_ASSERT( offsetof(struct create_window_request, owner) == 16 );
 C_ASSERT( offsetof(struct create_window_request, atom) == 20 );

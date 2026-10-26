@@ -3483,6 +3483,20 @@ struct set_named_pipe_info_reply
 };
 
 
+struct get_named_pipe_shm_request
+{
+    struct request_header __header;
+    obj_handle_t   handle;
+};
+struct get_named_pipe_shm_reply
+{
+    struct reply_header __header;
+    obj_handle_t   mapping;
+    unsigned int   is_server;
+    mem_size_t     size;
+};
+
+
 struct create_window_request
 {
     struct request_header __header;
@@ -6537,6 +6551,7 @@ enum request
     REQ_set_irp_result,
     REQ_create_named_pipe,
     REQ_set_named_pipe_info,
+    REQ_get_named_pipe_shm,
     REQ_create_window,
     REQ_destroy_window,
     REQ_get_desktop_window,
@@ -6863,6 +6878,7 @@ union generic_request
     struct set_irp_result_request set_irp_result_request;
     struct create_named_pipe_request create_named_pipe_request;
     struct set_named_pipe_info_request set_named_pipe_info_request;
+    struct get_named_pipe_shm_request get_named_pipe_shm_request;
     struct create_window_request create_window_request;
     struct destroy_window_request destroy_window_request;
     struct get_desktop_window_request get_desktop_window_request;
@@ -7187,6 +7203,7 @@ union generic_reply
     struct set_irp_result_reply set_irp_result_reply;
     struct create_named_pipe_reply create_named_pipe_reply;
     struct set_named_pipe_info_reply set_named_pipe_info_reply;
+    struct get_named_pipe_shm_reply get_named_pipe_shm_reply;
     struct create_window_reply create_window_reply;
     struct destroy_window_reply destroy_window_reply;
     struct get_desktop_window_reply get_desktop_window_reply;
@@ -7366,6 +7383,6 @@ union generic_reply
     struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 966
+#define SERVER_PROTOCOL_VERSION 967
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -2618,6 +2618,15 @@ enum message_type
     unsigned int   flags;
 @END
 
+/* Get shared memory buffer for named pipe */
+@REQ(get_named_pipe_shm)
+    obj_handle_t   handle;
+@REPLY
+    obj_handle_t   mapping;
+    unsigned int   is_server;
+    mem_size_t     size;
+@END
+
 /* Create a window */
 @REQ(create_window)
     user_handle_t  parent;      /* parent window */
