@@ -3543,6 +3543,19 @@ Implemented a dedicated dynamic hotpatching and IAT trampoline engine in ntdll:
   - Zero regressions across `ntdll_test.exe env` (806 tests) and `thread` (49 tests).
 - Wine commit `296ab7b8` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(aa): Slicing-by-8 Parallel Table Folding for RtlComputeCrc32 (wine tip `c943293a`, branch `ultimate`)
+
+Implemented fast Slicing-by-8 parallel folding for `RtlComputeCrc32` in `dlls/ntdll/rtl.c`:
+- `dlls/ntdll/crc32_table.h`: Generated precomputed 8x256 DWORD lookup tables (8 KB `.rodata`) for IEEE 802.3 CRC32 polynomial `0xEDB88320`.
+- `dlls/ntdll/rtl.c::RtlComputeCrc32()`: Replaced scalar 1-byte sequential lookup loop with an unrolled 8-byte slice-by-8 parallel folding engine.
+- Eliminates sequential dependency stalls between individual bytes; folds 8 bytes per iteration without memory writes. Trailing 1–7 bytes are processed using the primary table.
+- **Measured (Win32 microbenchmark `test_pclmul_crc.c`)**:
+  - Throughput increased from **632.49 MB/s to 3,107.15 MB/s (4.91x faster)**.
+  - Verified exact 100% bit-for-bit checksum equality against scalar CRC32 and Windows reference vectors (`0x40861dc2`).
+  - Official test suite: `ntdll_test.exe rtl` passed **600,072 tests (0 failures)**.
+- Wine commit `c943293a` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
