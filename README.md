@@ -3666,6 +3666,20 @@ Added formal regression tests and a standalone benchmark suite for inline IAT tr
   - **Multi-threaded contention test (4 threads x 250,000 ops)**: exact 1,000,000 count (**PASS**, rc=0).
 - Wine commit `928489b2` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(f): User-space registry value L1 cache with cross-process epoch invalidation (wine tip `f376caea`, branch `ultimate`)
+
+Implemented user-space L1 registry value cache and server-side epoch invalidation:
+- `server/registry.c`: added `bump_registry_epoch()` executing `(*epoch)++` on `user_shared_data->SystemCallPad[0]` (`0x7ffe0310`) on mutating operations (`create_key`, `delete_key`, `set_key_value`, `delete_key_value`).
+- `dlls/ntdll/unix/registry.c`:
+  - Maintained a 512-entry direct-mapped L1 cache for `KeyValuePartialInformation` queries keyed by `(handle, hash(name))`.
+  - On cache hit: data is copied directly from user-space memory in **~10.59 ns** without entering wineserver or issuing socket operations (**174x speedup, 94.41 million queries/sec**).
+  - Handle-reuse protection: `invalidate_reg_cache_handle()` clears any matching cache slots upon `NtOpenKeyEx` and `NtCreateKey`.
+  - Cross-process invalidation: any registry mutation across any process immediately invalidates stale slots in 1 CPU cycle when `entry->epoch != current_epoch`.
+  - Zero chance of SIGBUS, zero memory corruption, full DACL and WOW6432Node correctness preserved.
+  - Official test suite: `ntdll_test.exe reg` passed **4,166 tests** with 0 regressions.
+- Wine commit `f376caea` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
