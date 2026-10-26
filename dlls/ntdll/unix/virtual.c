@@ -1779,6 +1779,20 @@ static void free_view( struct file_view *view )
 }
 
 
+#define VQUERY_CACHE_SIZE 32
+struct vquery_cache_entry {
+    const void *base_page;
+    MEMORY_BASIC_INFORMATION info;
+    unsigned int gen;
+};
+static struct vquery_cache_entry vquery_cache[VQUERY_CACHE_SIZE];
+static unsigned int vquery_cache_gen = 1;
+
+static inline void invalidate_vquery_cache(void)
+{
+    __atomic_add_fetch( &vquery_cache_gen, 1, __ATOMIC_RELEASE );
+}
+
 /***********************************************************************
  *           unregister_view
  *
@@ -1786,6 +1800,7 @@ static void free_view( struct file_view *view )
  */
 static void unregister_view( struct file_view *view )
 {
+    invalidate_vquery_cache();
     if (mmap_is_in_reserved_area( view->base, view->size ))
         free_ranges_remove_view( view );
     wine_rb_remove( &views_tree, &view->entry );
@@ -1814,6 +1829,7 @@ static void delete_view( struct file_view *view ) /* [in] View */
  */
 static void register_view( struct file_view *view )
 {
+    invalidate_vquery_cache();
     wine_rb_put( &views_tree, view->base, &view->entry );
     if (mmap_is_in_reserved_area( view->base, view->size ))
         free_ranges_insert_view( view );
@@ -5799,7 +5815,25 @@ static unsigned int get_basic_memory_info( HANDLE process, LPCVOID addr,
         return result.virtual_query.status;
     }
 
-    if ((status = fill_basic_memory_info( addr, info ))) return status;
+    {
+        const void *base_page = ROUND_ADDR( addr, page_mask );
+        unsigned int idx = ((ULONG_PTR)base_page >> 12) % VQUERY_CACHE_SIZE;
+        struct vquery_cache_entry *entry = &vquery_cache[idx];
+        unsigned int gen = __atomic_load_n( &vquery_cache_gen, __ATOMIC_ACQUIRE );
+
+        if (entry->base_page == base_page && entry->gen == gen)
+        {
+            *info = entry->info;
+            if (res_len) *res_len = sizeof(*info);
+            return STATUS_SUCCESS;
+        }
+
+        if ((status = fill_basic_memory_info( addr, info ))) return status;
+
+        entry->base_page = base_page;
+        entry->info = *info;
+        entry->gen = gen;
+    }
 
     if (res_len) *res_len = sizeof(*info);
     return STATUS_SUCCESS;
