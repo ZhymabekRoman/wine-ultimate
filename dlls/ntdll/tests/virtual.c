@@ -3556,6 +3556,29 @@ static void test_exec_memory_writes(void)
     RtlRemoveVectoredExceptionHandler( handler );
 }
 
+static void test_pe_preferred_image_base(void)
+{
+    HMODULE mod;
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS *nt;
+
+    mod = GetModuleHandleA( "ntdll.dll" );
+    ok( mod != NULL, "GetModuleHandleA ntdll failed\n" );
+    dos = (IMAGE_DOS_HEADER *)mod;
+    if (dos->e_magic == IMAGE_DOS_SIGNATURE)
+    {
+        nt = (IMAGE_NT_HEADERS *)((char *)mod + dos->e_lfanew);
+        if (nt->Signature == IMAGE_NT_SIGNATURE)
+        {
+            ULONG_PTR preferred = (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+                ? ((IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase
+                : ((IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.ImageBase;
+            ok( (ULONG_PTR)mod == preferred,
+                "ntdll mapped at %p, expected preferred ImageBase %Ix\n", mod, preferred );
+        }
+    }
+}
+
 START_TEST(virtual)
 {
     HMODULE mod;
@@ -3615,5 +3638,6 @@ START_TEST(virtual)
     test_syscall_abi();
     test_query_region_information();
     test_query_image_information();
+    test_pe_preferred_image_base();
     test_exec_memory_writes();
 }
