@@ -3525,6 +3525,25 @@ Implemented user-space non-modifying `PeekMessageW` fast-path in `dlls/win32u/me
   - Executed **5,000,000 PeekMessage calls in 1.607 s** (**321.33 ns per call**, delivering **3.11 million calls/sec**).
 - Wine commit `e0a9e731` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(z): Fast IAT Trampoline Engine and Module Heuristics for TEB/PEB Getters (wine tip `296ab7b8`, branch `ultimate`)
+
+Implemented a dedicated dynamic hotpatching and IAT trampoline engine in ntdll:
+- `dlls/ntdll/inline_patch.h` & `inline_patch.c`: Dedicated subsystem providing native 16-byte aligned assembly trampolines in `.text` for ultra-frequent TEB/PEB getters:
+  - `GetCurrentThreadId` (`mov eax, gs:[0x48]; ret`)
+  - `GetCurrentProcessId` (`mov eax, gs:[0x40]; ret`)
+  - `GetLastError` / `RtlGetLastWin32Error` (`mov eax, gs:[0x68]; ret`)
+  - `SetLastError` / `RtlSetLastWin32Error` (`mov gs:[0x68], ecx; ret`)
+  - `GetProcessHeap` (`mov rax, gs:[0x60]; mov rax, [rax+0x30]; ret`)
+  - `NtCurrentTeb` (`mov rax, gs:[0x30]; ret`)
+- `dlls/ntdll/loader.c::import_dll()`: During PE IAT binding, evaluates module eligibility heuristics (`is_module_eligible_for_inline_patch()`). Binds matching imports directly to `.text` trampolines, bypassing export redirection through `kernelbase.dll`/`kernel32.dll`.
+- Zero Copy-On-Write in caller `.text` sections; preserves DEP/NX safety; opt-out via `WINE_NO_INLINE_PATCH=1`.
+- **Measured (Win32 PE x86_64 benchmark `bench_iat_hotpatch.exe`)**:
+  - Executed **50,000,000 IAT `GetCurrentThreadId` calls in 0.047 s** (**0.95 ns per call**, delivering **1.05 BILLION calls/sec**).
+  - Verified 100% correct return values across thread IDs, process IDs, last-error values, and heap handles.
+  - Zero regressions across `ntdll_test.exe env` (806 tests) and `thread` (49 tests).
+- Wine commit `296ab7b8` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
