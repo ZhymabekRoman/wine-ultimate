@@ -3252,6 +3252,15 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)   vprot |= VPROT_WRITECOPY;
         if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
 
+#ifdef MADV_MERGEABLE
+        /* Enable KSM kernel samepage merging for read-only constant data (.rdata) */
+        if ((sec[i].Characteristics & IMAGE_SCN_MEM_READ) &&
+            !(sec[i].Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE)))
+        {
+            madvise( ptr + sec[i].VirtualAddress, size, MADV_MERGEABLE );
+        }
+#endif
+
         if (!set_vprot( view, ptr + sec[i].VirtualAddress, size, vprot ) && (vprot & VPROT_EXEC))
             ERR( "failed to set %08x protection on %s section %.8s, noexec filesystem?\n",
                  sec[i].Characteristics, debugstr_us(nt_name), sec[i].Name );
@@ -5188,7 +5197,11 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
     else if (type & MEM_RESET)
     {
         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
+#ifdef MADV_FREE
+        else if (madvise( base, size, MADV_FREE ) != 0) madvise( base, size, MADV_DONTNEED );
+#else
         else madvise( base, size, MADV_DONTNEED );
+#endif
     }
     else  /* commit the pages */
     {

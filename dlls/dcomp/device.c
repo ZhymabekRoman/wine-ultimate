@@ -1148,6 +1148,9 @@ static void collect_visual_frames(struct composition_target *target, struct comp
     if (!visual || depth > 256)
         return;
 
+    if (visual->visibility == DCOMPOSITION_BACKFACE_VISIBILITY_HIDDEN)
+        return;
+
     pt.x += (LONG)visual->offset_x;
     pt.y += (LONG)visual->offset_y;
 
