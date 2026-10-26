@@ -2894,3 +2894,89 @@ the frame at t=130 s), `/tmp/wa/battery.sh 8 60`, `/tmp/wa/suite_one.sh <dcomp|d
 `cd /tmp/wine/wine-src && perl tools/make_requests` (the build does not regenerate
 `include/wine/server_protocol.h` on its own), deploy `rsync -a` build→`/tmp/wb` then
 `/tmp/wa/sync.sh`.
+
+## Session 2026-10-26(b): the Mojo channel invitation wall is down — the browser connects and the protocol runs; the new wall is one swallowed request (wine tip `43456e877`, branch `ultimate`)
+
+Disk unblocked (36 GB on `/`, 17 GB on `/tmp`); all tools live. The deployed tip
+`a55a58cf3` (wake-completion fix) was measured directly with a full wineserver request
+trace (`WINEDEBUG=-all,+server`, 75 s run, `/tmp/wa/mojo_trace.sh` → `/tmp/wa/mojo_srv.log`).
+
+**The premise of the session is disproven — the channel invitation completes.** The app's
+mojo thread (pid 32, tid 01b0) creates `\\??\pipe\LOCAL\mojo.32.432.<rand>`
+(message mode, `maxinstances=1`, 4 KiB), issues overlapped `FSCTL_PIPE_LISTEN`, queries
+`GetNamedPipeClientProcessId`/`ServerProcessId` (string-input FSCTL, code `0x00110030`),
+launches `msedgewebview2.exe` with `handles_size=0`, and the browser (pid 436, tid 01b8)
+opens **the exact same name** — `open_file_object` returns SUCCESS (handle 05fc → dup 0624).
+The `LOCAL\` sub-namespace hypothesis is dead code: Wine's named-pipe lookup
+(`named_pipe_device_lookup_name` → `find_object` in `server/object.c`) compares the **full
+relative string case-insensitively** against the device namespace, and `namespace_add` stores
+the full multi-component name at create, so `LOCAL\mojo.X` created and `LOCAL\mojo.X` opened
+match flatly. The "client self-connect" of session (i) was a thread misattribution: the opener
+is the browser's thread 01b8, not the app.
+
+**The WebView2 protocol runs end to end.** App writes carry `CreateCoreWebView2Environment`
+(payload contains the AUMID `5319275A…!App`, `WhatsApp.Root.exe`, `1.0.0`); the browser answers
+and the app consumes the replies: `{"id":1,"result":{"identifier":"1"}}`
+(AddBrowserExtension → identifier "1") and `{"id":2,"result":{}}`. The browser navigates the
+webview to `about:blank` (string seen in a write payload), creates `Chrome_RenderWidgetHostHWND`,
+and renderer (pid 592, 10 channels), gpu-process (pid 696) and utility children (3+1 channels)
+are all connected. `CrBrowserMain` pumps on a 180 ms timer at t=70 s and t=90 s (stacks byte-identical
+except the select-timeout word — alive, not wedged). Delivery accounting is clean: 38/38 browser
+writes complete, the app-side reader completes via the IO completion port (`remove_completion` on
+key 08c4 with `information` = message size; the `read()` reply staying PENDING is by design),
+15 writes-pending + 33 reads-pending is Chromium's flow-control depth, not a wedge. No
+`WM_COPYDATA` and no `Chrome_HandleTransmissionWindow` appear — no platform handles cross the
+channel at this protocol depth.
+
+**The new wall.** The app's final 64-byte request — interface id `0x3ccd0fb301`, method `0x16`,
+args `[0x18, 0x11, 0x01]` — is delivered to the browser (the browser's pending read fires via
+APC, `get_async_result` returns exactly those bytes), and the browser **never answers**. The app
+then idles healthily (39 reads issued, no spin, UI thread processed the `WM_APP+1` completion
+on its `Chrome_MessageWindow`) and `Navigate(web.whatsapp.com)` stays unreachable:
+`navigate=0 webwa=0`, the t=130 s frame is pure black.
+
+**Leading candidate.** The same gate run logs, in the browser process,
+`RtlpWaitForCriticalSection … dcomp/device.c: dcomp_cs wait timed out in thread 01a8, blocked
+by 01a0, retrying (60 s)` — the compositor thread 01a0 (the `dcomp_get_shared_visual_info` /
+`compare_objects` loop) holds the dcomp critical section for >60 s while 01a8 waits. Browser-side
+visual attachment of the webview runs through that lock, so the swallowed request plausibly
+queues behind it.
+
+**Gate-end crashpad dumps explained.** The 4 dumps per gate (`0x80000003` at
+`msedge.dll+0x487d2a3`, 4-thread children) carry mtimes equal to the gate's teardown: they are
+channel-disconnect `CHECK`s fired when the gate kills the session, not mid-run crashes
+(`0x487d2a3` is the `int3` sled after a noreturn `__security_check_cookie` tail — Chromium's
+`ImmediateCrash` landing). Mid-run child death is intermittent: one `brdump.sh` run lost all
+six browser processes by t=60 s with the same dump PC.
+
+**Probe strip.** `WINE_ALPC_RELAY_TRACE` is removed from `server/alpc.c` (87 lines: gate
+variable, `relay_trace_enabled`, `trace_port_name`, `trace_connect_data`, and all 19 gated
+sites), commit `43456e877`, pushed to `github/ultimate`. Final deployed build is probe-free:
+wineserver md5 `cc9d0a8794d930e85571ed83cfcc96aa`, ntdll `91f343c035f774a7e670e14f94ebc9ff`.
+
+**Verified on the probe-free build.** Pristine app binaries 4/4 OK. Gate 160: ALIVE,
+BORN=5, edge_max=6, fatal=0 ff=0 cs_timeouts=0, createdwins=141, xamlwin=1, rendwin=1,
+navigate=0 webwa=0; screenshot `~/wa-work/wa_mojo_after.png` (t=130) = pure black (single
+color) — blank browser, no QR. Battery 8×60 s: 8/8 `ALIVE_60s fatal=0`, edge children present
+every run (wins 141–142). Suites at parity: dcomp 1160 tests/36 f, d3d11 562750/112 f/8 sk,
+dxgi at the 300 s cap.
+
+**Ranked for the next session.** (1) The browser's `dcomp_cs` long hold (01a0 holder, 01a8
+60 s waiter): capture the holder's stack mid-stall (`/tmp/wa/brdump.sh` — fixed this session:
+`pgrep -f msedgewebview2[.]exe`, snaps at 40/55/70/90) and trace the `dcomp_*` request stream
+of 01a0; the CreateWebview visual-attach is the suspected swallowed request. (2) Decode
+interface `0x3ccd0fb301` method `0x16`: the id is a mojom version hash, **not** present as a
+constant in `EmbeddedBrowserWebView.dll`; scan `msedge.dll` (355 MB, the scan was killed
+mid-run) or intercept the browser-side dispatcher by string xrefs around the handler.
+(3) Mid-run child death at `msedge.dll+0x487d2a3` (4-thread service procs) — reproduce
+with `--enable-logging` to stderr if the runtime honors it under Wine.
+
+**Measurement notes.** Crashpad minidumps use a **108-byte** module-list stride (not the
+canonical 112) — parser `/tmp/wa/mdmp.py` (exception stream at fixed 15×u64
+ExceptionInformation; `Rip` at CONTEXT+0xF8). `pgrep -x msedgewebview2` matches nothing
+under Wine (comm truncates to `msedgewebview2.ex`); use `pgrep -f 'msedgewebview2[.]exe'`.
+Pipe IOCP completions surface as `remove_completion`, never as `read()` replies — counting
+`read() = 0` under-reports delivery by design. The `+server` channel is set from the client's
+`WINEDEBUG` (the client forwards the server debug level at connect). Harness:
+`/tmp/wa/mojo_trace.sh` (full `+server` trace + mojo-section extraction),
+`/tmp/wa/mdmp.py`, `/tmp/wa/brdump.sh` (fixed), `/tmp/wa/gate_td.sh`, `/tmp/wa/verify_fix.sh`.
