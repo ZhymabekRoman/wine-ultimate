@@ -152,6 +152,32 @@ NTSTATUS WINAPI RtlDestroyEnvironment(PWSTR env)
     return STATUS_SUCCESS;
 }
 
+#define RCU_ENV_RETIRE_MAX 8
+static WCHAR *rcu_retired_envs[RCU_ENV_RETIRE_MAX];
+static unsigned int rcu_retire_idx = 0;
+
+static void rcu_retire_env( WCHAR *old_env )
+{
+    WCHAR *to_free = NULL;
+
+    if (!old_env) return;
+
+    if (rcu_retired_envs[rcu_retire_idx])
+        to_free = rcu_retired_envs[rcu_retire_idx];
+
+    rcu_retired_envs[rcu_retire_idx] = old_env;
+    rcu_retire_idx = (rcu_retire_idx + 1) % RCU_ENV_RETIRE_MAX;
+
+    if (to_free)
+        RtlFreeHeap( GetProcessHeap(), 0, to_free );
+}
+
+static inline const WCHAR *get_rcu_environment(void)
+{
+    RTL_USER_PROCESS_PARAMETERS *params = NtCurrentTeb()->Peb->ProcessParameters;
+    return __atomic_load_n( (WCHAR * const *)&params->Environment, __ATOMIC_ACQUIRE );
+}
+
 static LPCWSTR ENV_FindVariable(PCWSTR var, PCWSTR name, unsigned namelen)
 {
     while (*var)
@@ -194,12 +220,8 @@ NTSTATUS WINAPI RtlQueryEnvironmentVariable_U(PWSTR env,
     namelen = name->Length / sizeof(WCHAR);
     if (!namelen) return nts;
 
-    if (!env)
-    {
-        RtlAcquirePebLock();
-        var = NtCurrentTeb()->Peb->ProcessParameters->Environment;
-    }
-    else var = env;
+    var = env ? env : get_rcu_environment();
+    if (!var) return nts;
 
     var = ENV_FindVariable(var, name->Buffer, namelen);
     if (var != NULL)
@@ -213,8 +235,6 @@ NTSTATUS WINAPI RtlQueryEnvironmentVariable_U(PWSTR env,
         }
         else nts = STATUS_BUFFER_TOO_SMALL;
     }
-
-    if (!env) RtlReleasePebLock();
 
     return nts;
 }
@@ -232,12 +252,8 @@ NTSTATUS WINAPI RtlQueryEnvironmentVariable( WCHAR *env, const WCHAR *name, SIZE
 
     if (!namelen) return nts;
 
-    if (!env)
-    {
-        RtlAcquirePebLock();
-        var = NtCurrentTeb()->Peb->ProcessParameters->Environment;
-    }
-    else var = env;
+    var = env ? env : get_rcu_environment();
+    if (!var) return nts;
 
     var = ENV_FindVariable(var, name, namelen);
     if (var != NULL)
@@ -256,8 +272,6 @@ NTSTATUS WINAPI RtlQueryEnvironmentVariable( WCHAR *env, const WCHAR *name, SIZE
     }
     *return_length = len;
 
-    if (!env) RtlReleasePebLock();
-
     return nts;
 }
 
@@ -274,15 +288,15 @@ void WINAPI RtlSetCurrentEnvironment(PWSTR new_env, PWSTR* old_env)
     RtlAcquirePebLock();
 
     prev = NtCurrentTeb()->Peb->ProcessParameters->Environment;
-    NtCurrentTeb()->Peb->ProcessParameters->Environment = new_env;
+    __atomic_store_n( &NtCurrentTeb()->Peb->ProcessParameters->Environment, new_env, __ATOMIC_RELEASE );
     NtCurrentTeb()->Peb->ProcessParameters->EnvironmentSize = RtlSizeHeap( GetProcessHeap(), 0, new_env );
-
-    RtlReleasePebLock();
 
     if (old_env)
         *old_env = prev;
     else
-        RtlDestroyEnvironment( prev );
+        rcu_retire_env( prev );
+
+    RtlReleasePebLock();
 }
 
 
@@ -324,9 +338,55 @@ NTSTATUS WINAPI RtlSetEnvironmentVariable(PWSTR* penv, PUNICODE_STRING name,
     }
     if (!value && !*p) goto done;  /* Value to remove doesn't exist */
 
-    /* Realloc the buffer */
+    /* Calculate change in length */
     len = value ? len + value->Length / sizeof(WCHAR) + 2 : 0;
     if (*p) len -= wcslen(p) + 1;  /* The name already exists */
+
+    if (!penv)
+    {
+        SIZE_T new_size = max( RtlSizeHeap( GetProcessHeap(), 0, env ), (old_size + len) * sizeof(WCHAR) );
+        LPWSTR new_env = RtlAllocateHeap( GetProcessHeap(), 0, new_size );
+        LPWSTR dst;
+        WCHAR *prev;
+
+        if (!new_env)
+        {
+            nts = STATUS_NO_MEMORY;
+            goto done;
+        }
+
+        /* Copy up to p */
+        memcpy( new_env, env, (p - env) * sizeof(WCHAR) );
+        dst = new_env + (p - env);
+
+        /* Set the new string */
+        if (value)
+        {
+            memcpy( dst, name->Buffer, name->Length );
+            dst += name->Length / sizeof(WCHAR);
+            *dst++ = '=';
+            memcpy( dst, value->Buffer, value->Length );
+            dst += value->Length / sizeof(WCHAR);
+            *dst++ = 0;
+        }
+
+        /* Copy remaining variables after p */
+        if (*p)
+        {
+            LPWSTR next = p + wcslen(p) + 1;
+            memcpy( dst, next, (old_size - (next - env)) * sizeof(WCHAR) );
+        }
+        else
+        {
+            *dst++ = 0;
+        }
+
+        prev = NtCurrentTeb()->Peb->ProcessParameters->Environment;
+        __atomic_store_n( &NtCurrentTeb()->Peb->ProcessParameters->Environment, new_env, __ATOMIC_RELEASE );
+        NtCurrentTeb()->Peb->ProcessParameters->EnvironmentSize = new_size;
+        rcu_retire_env( prev );
+        goto done;
+    }
 
     if (len < 0)
     {
@@ -349,12 +409,7 @@ NTSTATUS WINAPI RtlSetEnvironmentVariable(PWSTR* penv, PUNICODE_STRING name,
         p = new_env + (p - env);
 
         RtlDestroyEnvironment(env);
-        if (!penv)
-        {
-            NtCurrentTeb()->Peb->ProcessParameters->Environment = new_env;
-            NtCurrentTeb()->Peb->ProcessParameters->EnvironmentSize = new_size;
-        }
-        else *penv = new_env;
+        *penv = new_env;
     }
     else
     {
