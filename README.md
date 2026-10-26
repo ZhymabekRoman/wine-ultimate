@@ -3026,3 +3026,124 @@ Implemented native Linux `io_uring` acceleration for Win32 regular file I/O:
 
 
 
+
+## Session 2026-10-26(c): the `dcomp_cs` 60 s wedge is closed by lock-order surgery; measuring it exposed a named-pipe shared-memory ring that never delivers (wine tip `c681e7fb8`, branch `ultimate`)
+
+**The wall as measured.** A healthy 150 s gate ends with the app alive, six
+`msedgewebview2.exe` processes, `Chrome_RenderWidgetHostHWND` created and the
+browser having completed the WebView2 protocol, and the log carrying twice:
+
+```
+01a8:err:sync:RtlpWaitForCriticalSection section ... "../wine-src/dlls/dcomp/device.c: dcomp_cs"
+      wait timed out in thread 01a8, blocked by 01a0, retrying (60 sec)
+```
+
+`01a0` is the dcomp composite thread, `01a8` a browser thread. The wedge is a
+lock-order inversion on `dcomp_cs`, and both directions are in the tree:
+
+1. `composite_thread_proc` held `dcomp_cs` across the whole render pass, which
+   enters `ID3D11Multithread_Enter`, `CreateDeviceContextState`, Direct2D
+   `D2D1CreateDevice`/`CreateDeviceContext`/`CreateSharedBitmap`, GDI
+   `ID2D1GdiInteropRenderTarget_GetDC` + `GetDC`/`BitBlt`/`ReleaseDC`, and the
+   window manager (`IsWindow`, `FindWindowW`, `EnumWindows`, `GetAncestor`,
+   `MapWindowPoints`).
+2. The threads that enter dcomp *from* those subsystems take `dcomp_cs` after
+   entering them: `visual_SetContent` built its Direct2D context inside the
+   lock, `visual_Release` freed a visual tree inside it, and
+   `composition_device_create_surface` created the rendering device and surface
+   factory inside it.
+3. `shared_visual_target_get_root` issued a window server round trip per lookup
+   and `find_container_visual_in_tree` issued one per visual, under the lock,
+   on a queue the whole process shares.
+4. `ensure_composite_thread` ran `WaitForSingleObject(device->thread, INFINITE)`
+   while holding `dcomp_cs`, and the thread it joined takes `dcomp_cs` at the
+   top of every tick — a guaranteed deadlock on any restart, not merely a race.
+5. `device_Release` joined outside the lock but wrote `exit_thread` as a plain
+   field, so the loop could miss the stop request.
+
+**The fix.** `dcomp_cs` now protects only the composition object graph, and is
+held only across memory operations on dcomp's own objects plus a refcount bump.
+A refresh tick is split: a snapshot phase records the targets, flattens the
+visual trees into a list of render jobs, and captures the window each job blits
+into; the render phase walks that list, holding references to everything it
+recorded, with the lock released. Shared visual handles resolve through an
+in-process cache, refreshed by the tick outside the lock, and the publisher
+writes the server before publishing the cache — publishing to the cache first
+lets a reader's query fetch the value the server held beforehand and overwrite
+the fresh entry with a stale one, which is what killed the shared-visual
+resolution. Objects released by an entry point that owns the lock go to a
+reclaim list that the composite thread drops once no frame is in flight; that
+deferral is what keeps a recorded content pointer alive across the render pass,
+because `IUnknown_AddRef` on Direct3D content would otherwise take the wined3d
+mutex inside `dcomp_cs` and rebuild the inversion by the back door. The thread
+join left the critical section, the stop request is interlocked, and the device
+fields gained their own `dcomp_device_cs` (order: device, then graph, never the
+reverse). Surface factories and rendering devices are created with
+`dcomp_cs` released.
+
+**Measured.** Four gates at `DUR=160` (`tdc`, `tdc2`, `tdc3`, `tdc4`) on the
+fixed build: `dcomp_cs` occurrences **0** (the deployed previous tip carries 2
+per run, at t≈120 s), and **0** critical-section timeouts of any kind across all
+four logs. App `ALIVE_160s` ×3, one `DIED` (`rc=135`); `createdwins=130`,
+`xamlwin=1`, `rendwin=1`, `ebwebview=26`, `wvtemp=1`, `cs_timeouts=0`,
+`mangohud=0`, `navigate=0`, `webwa=0`. Frame at t=130 s
+`$HOME/wa-work/wa_dcomp_after.png` is 1280×1024, **1 colour, pure black** — no
+QR, no page, black browser. The wedge is closed; `Navigate` is not reached, so
+the wall moved downstream rather than opening.
+
+**Control that made the next wall visible.** All four gates also showed
+`BORN=5 GONE=30`: six browser processes appear at t=5 s and are all gone by
+t=30 s, with crashpad reports piling up in the first 20 s. Rebuilding the
+*untouched* tip `dcomp` source (no change of mine in it), deploying through the
+same path, reproduced `BORN=5 GONE=30` — so the browser death is not caused by
+the `dcomp` work, and the previous session's `GONE=none` runs came from the
+older deployed binary. Bisecting the rebuilt tip by `dlls/ntdll/ntdll.so`
+content localises it exactly:
+
+| deployed `ntdll.so` | browser | app |
+|---|---|---|
+| tip `43456e877` | `BORN=5 GONE=none`, 6 alive at t=120 | 4/4 `ALIVE_150s` |
+| + `ea3b62407` lockless SHM ring for named pipes | `BORN=5 GONE=30` | 4/4 `DIED rc=135` |
+| + `7b9c200e9` io_uring read/write | `BORN=5 GONE=30` | 3/4 `DIED` |
+| `__wine_smc_init` (SmcSpawnProcess) side patch only | `BORN=5 GONE=none`, 6 alive at t=120 | 4/4 `ALIVE_150s` |
+
+The `SHARED_MEM_BLOCK` is allocated by the *client* and published in the
+`CreateNamedPipeW` server request, so the peer never maps it:
+`server/namedpipe.c` copies only `shm_name` into `req_out`, `server/protocol.def`
+has no reply side for it, and `GetComputerNameExW` (the first thing every
+`msedgewebview2.exe` child does) returns `status=0, shm_ready=0`. The browser
+spins in `NtSetInformationFile(FileCompletionMode)` on the IOCP path, the GPU
+process crashes, and the app follows. `ntdll_file_get_completion_mode` returns
+`STATUS_INVALID_PARAMETER` for a non-IOCP handle, and the
+`request_unsolicited_reply` branch fires for every `async_*` call — the
+unsolicited-reply path is dead code, since `server/async.c` already sends the
+reply. That change was reverted out of `ultimate`; the browser is back to
+`GONE=none` with `dcomp` built from the clean tree.
+
+**QPC/RDTSC status.** The ntdll half of the RDTSC bypass is inert:
+`user_shared_data` has no RDTSC field and the TSC calibration warning never
+appears in any gate log, so `QpcBypassEnabled` stays 0 and
+`NtQueryPerformanceCounter` keeps the existing path. The enabling writer lives
+in `programs/wineboot/create_user_shared_data`, and wineboot is not in this
+build configuration (`make programs/wineboot` → no makefile, no wineboot in
+`/tmp/wb`), so the feature is compiled in and unreachable; `include/winternl.h`
+carries no `SHARED_SYSTEM_DATA`/`KdSystemDebugInfo` definitions, so a
+wineboot-only enabler cannot be made live in this tree. The wineboot hunk is
+reverted here. Activating it needs a server-supplied shared-data page (a
+`set_system_info` system call at process init), not a wineboot write.
+
+**Not run in this session, and why.** The battery `8×60`, the
+`dcomp`/`dxgi`/`d3d11` suites and the pristine-binary check are *not* re-run:
+the gate owner was running paired control gates concurrently, and a gate kills
+every `.exe` and the `wineserver`, so a parallel suite corrupts both
+measurements. The sequential script is staged at `/tmp/wa/verify_dcomp.sh`
+(pristine → battery → suites → critical-section sweep) and takes one run on a
+quiet machine. `dcomp.dll` compiles warning-free from the committed tree, and
+the deployed `/tmp/wb` carries it (`sync.sh` reports `UPD dcomp.dll`, 626
+unchanged).
+
+**Harness notes.** `rsync -a /tmp/wine/wine-build/dlls/ /tmp/wb/dlls/` then
+`/tmp/wa/sync.sh`; re-assert `/tmp/wb/tools/server -> /tmp/wb/server` after any
+rsync of `tools/`. `gate_td.sh 160` puts the frame at t=130 s. Its edge counter
+emits `integer expected` warnings because `pgrep -fc` prints on two lines; the
+counters stay correct.
