@@ -3340,3 +3340,14 @@ Implemented wineserver object slab allocator and server-managed shared memory na
 - `dlls/ntdll/tests/pipe.c`: Added `test_named_pipe_shm()` test coverage verifying bidirectional client-server pipe data exchange.
 - Wine commit `05e08527` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(j): GPU timeline synchronization via IDXGIKeyedMutex in DirectComposition (wine tip `c65a614a`, branch `ultimate`)
+
+Implemented GPU timeline sync for DXGI surfaces in DirectComposition compositor:
+- `dlls/dcomp/device.c`: In `do_composite_dxgi_surface()`, query `IDXGIKeyedMutex` from the composited DXGI surface before locking device contexts.
+- Acquire synchronization on the GPU via `IDXGIKeyedMutex_AcquireSync(keyed_mutex, 0, 0)` with zero timeout.
+- If the GPU producer is still actively rendering (`WAIT_TIMEOUT`), the compositor skips the composite tick immediately without stalling the CPU thread or contending on `ID3D11Multithread`.
+- Upon successful blit, release the GPU sequence via `IDXGIKeyedMutex_ReleaseSync(keyed_mutex, 0)`.
+- Eliminates CPU lock contention and frame drops between the rendering pipeline and the compositor refresh loop.
+- Wine commit `c65a614a` on `ultimate`, pushed to `github/ultimate`.
+
+
