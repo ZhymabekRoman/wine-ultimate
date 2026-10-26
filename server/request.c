@@ -336,7 +336,7 @@ void read_request( struct thread *thread )
         {
             /* no data, handle request at once */
             call_req_handler( thread );
-            return;
+            goto drain;
         }
         if (!(thread->req_data = malloc( thread->req_toread )))
         {
@@ -359,7 +359,7 @@ void read_request( struct thread *thread )
             call_req_handler( thread );
             free( thread->req_data );
             thread->req_data = NULL;
-            return;
+            goto drain;
         }
     }
 
@@ -370,6 +370,29 @@ error:
         fatal_protocol_error( thread, "partial read %d\n", ret );
     else if (errno != EWOULDBLOCK && (EWOULDBLOCK == EAGAIN || errno != EAGAIN))
         fatal_protocol_error( thread, "read: %s\n", strerror( errno ));
+    return;
+
+drain:
+    /* Opportunistic drain: if thread has another request queued, process it immediately */
+    while (thread->request_fd && !thread->wait && !thread->reply_towrite && !thread->req_toread)
+    {
+        ret = recv( get_unix_fd( thread->request_fd ), &thread->req, sizeof(thread->req), MSG_DONTWAIT );
+        if (ret != sizeof(thread->req)) break;
+        if (!(thread->req_toread = thread->req.request_header.request_size))
+        {
+            call_req_handler( thread );
+        }
+        else
+        {
+            if (!(thread->req_data = malloc( thread->req_toread )))
+            {
+                fatal_protocol_error( thread, "no memory for %u bytes request %d\n",
+                                      thread->req_toread, thread->req.request_header.req );
+                return;
+            }
+            break;
+        }
+    }
 }
 
 /* receive a file descriptor on the process socket */
