@@ -3488,6 +3488,17 @@ Implemented kernel Huge Page hints for large anonymous virtual allocations:
 - Evaluated and rejected manual SIMD string conversion (GCC -O2 already auto-vectorizes scalar loops at 1.30 ns).
 - Wine commit `ea2c6e4c` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(v): COM activation — per-user classes + packaged manifest ExeServer (wine tip `e1ab3618`, branch `ultimate`)
+
+Closed the CLSCTX_LOCAL_SERVER activation wall hit by WhatsApp Desktop (CLSID `{daa52b27-8897-50af-ada5-c6c71bb64e17}`, a SHA1-derived WinRT-style class activated by an `msedgewebview2.exe` child on the browser-extension path after `ZoomBrowserExtension.Bootstrap`):
+- `dlls/combase/combase.c::open_key_for_clsid()`: on Windows HKCR is the merged view of `HKCU\Software\Classes` + `HKLM\Software\Classes` with per-user entries taking priority; Wine opened `\Registry\Machine\Software\Classes` directly, so per-user COM registrations were invisible and `create_server()` reported `class … not registered` without ever launching a server. Added `open_user_classes_key()` (HKCU root via `RegOpenKeyExW`, WOW64 flags honored); lookup is now user-first with machine fallback, handles closed.
+- `dlls/combase/rpc.c::create_server()`: added `get_manifest_server_command()` — when the registry has no `LocalServer32`, parse the current package's `AppxManifest.xml` (`com:Extension`/`com:ComServer`/`com:ExeServer`), compose `"package\Executable" Arguments`, launch with `-Embedding`; the existing 30 s `CoRegisterClassObject` wait loop in `rpc_get_local_class_object()` then covers the registration race.
+- Evidence: with only the HKCU registration present (HKLM entry removed), pre-fix = 6x `not registered` + 6x `no class object … context 0x4`; post-fix = 0x `not registered` — the server is launched (the stock `msedgewebview2.exe` has no `-Embedding` COM-server mode, so it exits; caller gets E_NOINTERFACE as a WARN, matching Windows behavior for a dead server).
+- Verification: battery 8x60s all alive, 0 fatal; suites combase roapi/string (309+598) and ole32 compobj/ole_server/marshal/usrmarshal/defaulthandler (1229+33+1239+750+38) — 0 failures; pristine app binaries 4/4; gate screenshot t=130 black (QR not reached: app parks pre-`CreateCoreWebView2Environment`).
+- Session stability: a stale `/dev/shm/wine-vfs-dentry-$UID` left by `wineserver -9` kills (SHM dentry cache, tip `596f5fbb`) spins `wineboot` in a loader loop — harnesses now delete it at session start.
+- Wine commit `e1ab3618` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
