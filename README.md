@@ -3648,6 +3648,25 @@ Implemented delay-loaded IAT hooking, lock-free atomic critical sections, and O(
 - All official test suites: `ntdll_test.exe sync` (429 tests) and `thread` (49 tests) passed with 0 regressions.
 - Wine commit `b508f4cc` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(e): Test coverage and comprehensive benchmark suite for inline IAT trampolines (wine tip `928489b2`, branch `ultimate`)
+
+Added formal regression tests and a standalone benchmark suite for inline IAT trampolines:
+- `dlls/ntdll/tests/thread.c::test_inline_patch_trampolines()`:
+  - Verified pointer identity: `GetProcAddress(kernel32, "GetCurrentThreadId")` matches IAT entry.
+  - Verified pseudohandles: `GetCurrentProcess() == (HANDLE)-1`, `GetCurrentThread() == (HANDLE)-2`.
+  - Verified TEB getters: `GetCurrentThreadId`, `GetCurrentProcessId`, `GetProcessHeap`.
+  - Verified LastError roundtrip: `SetLastError` / `GetLastError` (0x12345678) and `RtlSetLastWin32Error` / `RtlGetLastWin32Error` (0x87654321).
+  - Verified TLS slots: allocation, inlined retrieval, and release.
+  - Verified lock-free critical section fast path: validates uncontended `LockCount` transitions (-1 -> 0 -> -1) and `RecursionCount` transitions (0 -> 1 -> 0).
+  - Official test suite: `ntdll_test.exe thread` passed **67/67 tests (0 failures)**.
+- `tools/bench_inline_patch.c`:
+  - Standalone Win32 PE x86_64 verification and benchmark utility.
+  - **Throughput benchmark (40,000,000 calls)**: **0.90 ns per call (1,113.82 MILLION calls/sec)**.
+  - **Critical section benchmark (10,000,000 pairs)**: **3.53 ns per Enter+Leave pair (283.45 MILLION pairs/sec)**.
+  - **Multi-threaded contention test (4 threads x 250,000 ops)**: exact 1,000,000 count (**PASS**, rc=0).
+- Wine commit `928489b2` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
