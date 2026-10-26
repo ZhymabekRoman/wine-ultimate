@@ -3884,3 +3884,106 @@ applog window diff), `seed_probe.sh` (seeded-state determinism, bootstrap-error 
 `wine_probes.patch` (ALPC flow + `queue_async` callers) and `named_pipe.c.probed` (pipe lifecycle).
 The deployed wineserver must be rebuilt clean after probing (`make server/wineserver` + `cp` — a running
 server holds the file: `Text file busy`).
+
+## Session 2026-10-27 — nonblocking connect contract fixed (wine tip `a2073a5e0`, branch `ultimate`); the Chromium Network Service crash is gone, the browser-process `/GS` crash is the remaining wall
+
+**What is fixed.** `server/sock.c` (commit `a2073a5e0`): a `connect()` on a **nonblocking** socket
+must not tell its caller whether the connection came up, and must not tell it that the connection
+failed. Windows answers `WSAEWOULDBLOCK` in both cases and reports the result on the connect event
+(`FD_CONNECT` / `AFD_POLL_CONNECT_ERR`, and through `getsockopt( SO_ERROR )`). Wine reported a Linux
+connect that completed synchronously as **success**, and a synchronously failed route lookup
+(`ENETUNREACH`, which is what an IPv6 target gives on a host with no IPv6 route) as
+**`WSAENETUNREACH`**. Both deviate. The handler now returns `STATUS_DEVICE_NOT_READY`
+(`-> WSAEWOULDBLOCK` in `ws2_32`) for a synchronous connect request on a nonblocking socket, and
+posts the event the caller is waiting for: connect+write when Linux completed the connect, the
+latched connect error plus the matching `AFD_POLL` completion when Linux failed it. The error goes
+into `sock->errors[AFD_POLL_BIT_CONNECT_ERR]` (which `sock_error()` and `IOCTL_AFD_WINE_GET_SO_ERROR`
+already surface) and is cleared when a new connect starts.
+
+**The Chromium side, pinned exactly.** The utility child that dies is
+`--type=utility --utility-sub-type=network.mojom.NetworkService`; its crashpad minidump carries
+`EXCEPTION_BREAKPOINT` at `msedge.dll+0x5499b8e` (EdgeWebView 156.0.4314.42). The `.pdata` entry
+gives the function `0x185499900..0x185499c31`; disassembled from its start (a linear sweep at the
+`int3` lands mid-stream and is misleading) the tail is
+
+```
+185499aa8: mov $0x98000011,%edx            ; SIO_UDP_CONNRESET  -> a datagram socket
+185499ab3: call *[ws2_32 IAT]              ; WSAIoctl(SIO_UDP_CONNRESET)
+185499ac8: mov 0x8(%rsi),%rcx
+185499acc: call *[ws2_32 IAT + 0x4]        ; ws2_32!connect (ordinal 4)
+185499ad2: test %eax,%eax
+185499ad4: je   0x185499b8e                ; int3  == CHECK_EQ(result, SOCKET_ERROR)
+185499ada: call *[ws2_32 IAT + 0x111]      ; WSAGetLastError (ordinal 111)
+185499ae0: cmp  $0x2733,%eax               ; WSAEWOULDBLOCK
+```
+
+i.e. `net::UDPSocketWin::Connect` requires `connect()` to fail with `WSAEWOULDBLOCK`; Wine handed it
+a success (v4 path) or `WSAENETUNREACH` (v6 path), the `CHECK` fired, the network service died, the
+browser lost its network context, and the mojom request the host is waiting on stayed queued. The
+target is a DNS-over-QUIC endpoint (`2603:1020:201:10::10f:443` / `150.171.22.17:443`, UDP/443), so
+the path is only exercised when the app resolves a DoQ server — which is why the crash is
+one-per-run, not every-run. Related environment gap: `ipconfig /all` in the prefix lists **no DNS
+servers at all** (`GetAdaptersAddresses` reports none, no `NameServer` value in `system.reg`), so
+Chromium's Secure DNS configuration is what drives this connect; `+winsock` gives
+`fixme:winsock:WSALookupServiceBeginW (…0xff0…) Stub!` (WPAD) on the same path.
+
+**The deferral alone is not sufficient — measured.** With only the `WSAEWOULDBLOCK` deferral and no
+event posted, the 160 s gate degraded to `BORN=never edge_max=0`: the WebView2 family never started,
+because a caller that armed `WSAEventSelect()` before connecting waits for an `FD_CONNECT` that Wine
+then never posts (a socket that Linux connected immediately never transitions through
+`SOCK_CONNECTING`, so `sock_dispatch_events()` posts nothing). Posting
+`AFD_POLL_BIT_CONNECT`/`AFD_POLL_BIT_WRITE` + `complete_async_polls(POLLOUT)` + `post_sock_messages`
+restored `BORN=5 GONE=none edge_max=6`.
+
+**Test.** `test_connect_unreachable` in `dlls/ws2_32/tests/sock.c`: nonblocking TCP connect to
+`2001:db8::1:80` must return `WSAEWOULDBLOCK`, and when the socket signals, `getsockopt(SO_ERROR)`
+must carry a connect failure. Note for future runs: the target must be *routable-failing*, not
+merely non-routable — an unbound socket on a host that has *some* IPv6 route (netbird) gets
+`EINPROGRESS` and passes on both sides; the app's connect fails at the route lookup because
+Chromium binds the socket to an interface address first, which the test does not reproduce, so the
+test is a contract guard rather than a reproducer of this case.
+`ws2_32_test.exe sock` A/B with the same 200 s window, back-to-back: baseline 7 failures, patched 7
+failures, failure sets **identical** (the 7 are host-environment: `sendto` to `::1` = 10051 with no
+IPv6 route, and `SIO_ADDRESS_LIST_QUERY` size assertions that track the host's interface set — they
+moved between 7 and 33 across runs *without* any patch, so compare same-window runs only).
+
+**Gate (160 s, clean extension dirs).** Before: `ALIVE_160s BORN=5 GONE=none edge_max=6`,
+3–4 crashpad dumps/run of which **one is always the network service** (`msedge.dll+0x5499b8e`).
+After: `ALIVE_160s BORN=5 GONE=none edge_max=6 createdwins=140 xamlwin=1 rendwin=2`, 4 dumps,
+**all four at `msedge.dll+0x487d2a3`, none from the network service**. `navigate=0 webwa=0`,
+screenshot 295 bytes. The stated goal (network service alive, `Navigate(web.whatsapp.com)`) is
+**not** reached: the wall has moved, it has not closed.
+
+**The remaining wall, identified.** `msedge.dll+0x487d2a3`, 3–6 dumps/run, dumps are 53263 bytes
+with a command line that has no `--type=` → the **browser** process. The `int3` sits inside the
+compiler's `__security_check_cookie` stub — the `.pdata` entry is `0x18487d28d..0x18487d7d8`, whose
+body is `mov 0x320(%rsp),%rcx; xor %rsp,%rcx; call 0x1836d37f0` and `0x1836d37f0` compares `%rcx`
+against the guard global at `0x1941f3040` and tail-calls the report path. So the browser process is
+suffering a **stack buffer security-check failure (a `/GS` stack overrun)** 3–6 times per run, and
+the family that restarts is `gpu-process` (×3) and `utility` (×3), which matches the observed
+pinned-at-6 process census. The `AddBrowserExtension` reply wall reported in the previous session is
+downstream of this: a browser process that takes a stack overrun every ~30 s does not complete the
+profile request. Next step is to find the Wine API that writes past a caller-supplied length (the
+usual cause is a size-probing `Get*/Read*` call that returns more bytes than `nBufferLength`), not
+to instrument Chromium further.
+
+**Minidump forensics recipe (no ptrace, so crashpad's lock is irrelevant).** Crashpad's dumps are
+self-contained: parse the `MDMP` header (stream directory entries are **12** bytes, stream directory
+RVA at header offset **12**), take `ThreadListStream`(3, 48-byte entries, context `Rip` at context
+offset 248, `Rsp` 152), `ModuleListStream`(4, 108-byte entries, module name is a `MINIDUMP_STRING`
+whose length is a **byte** count), `ExceptionStream`(6, `ExceptionAddress` at +24) and
+`MemoryListStream`(5) for stack scanning; map an address to `module+rva` and read the function bounds
+from the PE **Exception directory (data directory index 3)** entries `Begin/End/UnwindInfo` (filter
+out entries whose `End` is outside `SizeOfImage`, they poison a bisect). Scripts:
+`/tmp/wa/tools/{mdp,walk,xfn,win,iat}.py`. The `.rdata` IAT slots decode through
+`objdump -x`'s import listing, which prints **RVAs** (subtract the image base) and marks ordinal
+imports by the number in the Hint column — ws2_32 ordinal 4 is `connect`, ordinal 111 is
+`WSAGetLastError`.
+
+**Harnesses added.** `nsprobe.sh` (census keyed on `--type=` + `--utility-sub-type=` with
+`/proc/<pid>/stat` start-time so a *restart* of the same type is visible as a new start time, dump
+diff, applog byte-window diff), `logprobe.sh` (`WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS=--enable-logging=stderr`
+— note it produces no Chromium output in EBWebView: WebView2 installs its own log handler, so the
+`LOG(FATAL)`/`CHECK` text never reaches the host's stderr, only the dump does), `wsprobe.sh`
+(`WINEDEBUG=-all,+winsock,+exec,+seh,+tls` + a `fprintf` probe in `sock_connect` printing
+`pid/ret/errno/synchronous/nonblocking/type/state`, which is what named the deviation).
