@@ -3447,3 +3447,118 @@ Implemented fast inline GUID comparison in `dlls/dcomp/`:
 
 
 
+
+## Session 2026-10-26(m): the env-RCU retirement is a use-after-free, `GONE=30` is a harness artifact, and the live wall is a `CLSCTX_LOCAL_SERVER` activation that Wine never launches (wine tips `2816fcc4e 1bf47947e 83c801f61`, branch `ultimate`)
+
+**The browser death at t≈30 s is the gate, not Wine.** Same deployed build, two runs, the
+only difference being the debug-channel weight:
+
+| gate | `WINEDEBUG` | browser | app | RpcSs | dumps |
+|---|---|---|---|---|---|
+| `gate_td.sh 160` | `-all,err+all,+loaddll,+exec,+win` (7520 lines) | `BORN=5 GONE=30` | `APP_RC=1` (exits) | **fails to start ×6** (`process_send_start_message … RpcSs failed to start`) | 0 mid-run |
+| `gate_light.sh 160` | `-all,err+all` (707 lines) | `BORN=5`, 6 children alive at `edge@120…155` | `APP_RC=124 ALIVE_160s` | **0 failures** | 0 mid-run, 4 at teardown |
+
+The six `msedgewebview2.exe` are alive for the whole run when the trace is light, so the
+t≈25-30 s clean exit (0 int3, 0 crashpad) is the WebView2 host-handshake watchdog expiring
+because tracing makes the host answer late. Every `GONE=30` in the last five sessions' gates
+is this artifact. RpcSs starts correctly under light tracing: `ServiceMain → RPCSS_Initialize →
+RegisterServiceCtrlHandlerExW → SetServiceStatus(0x4 RUNNING)`, `service_start returning 0`;
+under heavy tracing `services.exe!process_send_start_message` times out in
+`ConnectNamedPipe`+`WaitForMultipleObjects(service_pipe_timeout)`.
+
+**The wall that stays, deterministic in every run.** Six times, in the same second the app's
+own log stops (last app line `WebLifecycleController/CreatePushNotificationChannelWithRetryAsync`):
+
+```
+0264:err:ole:create_server class {daa52b27-8897-50af-ada5-c6c71bb64e17} not registered
+0264:err:ole:com_get_class_object no class object {…} could be created for context 0x4
+```
+
+That is `dlls/combase/rpc.c:create_server()` → RPCSS `IRpcSS::GetClassObject` → nothing. After
+it the app parks (`MojoThread` sits in a msg wait), `AddBrowserExtension` is absent,
+`navigate=0 webwa=0`, and the t=130/160 s frame is 1280×1024, 1 colour, pure black.
+Wine's RPCSS (`programs/rpcss`, `ImagePath=C:\windows\system32\rpcss.exe`, present in the
+prefix) answers only from registrations made by live processes
+(`irpcss_server_register` ← `CoRegisterClassObject`); nothing in Wine launches a registry
+`LocalServer32` image on demand, so a `CLSCTX_LOCAL_SERVER` activation of a class that no
+running process registered cannot succeed. The CLSID is a UUIDv5 (3rd group `50af`) and is
+**not** a literal anywhere: not in the app package, the WindowsAppSDK packages, the
+EdgeWebView runtime incl. `msedge.dll` (355 MB), the prefix `system32`, the prefix registry,
+or the Wine tree — searched as lowercase/uppercase ASCII, UTF-16LE and raw 16-byte
+little-endian. UUIDv5 brute force over 41681 names harvested from winmd/dll/exe and 1017
+`ActivatableClassId` strings from every AppxManifest, namespaces for class/interface/struct/
+enum/delegate, forms `name`,`NAME`,`name+interface/+struct/+enum/+delegate`: **no pre-image**.
+It is computed at runtime, so the caller has to be caught live.
+
+**Not the GPU/DComp path.** `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS` =
+`--disable-direct-composition`, `--disable-gpu-compositing`, `--disable-gpu
+--disable-software-rasterizer` all give the identical outcome (browser alive, `create_server`
+fails ×6, 0 webview markers in `applog.txt`) — the visual-attachment hypothesis is dead.
+
+**Landed (clean LGPL, no probes, no app binary touched, pushed to `github/ultimate`).**
+1. `2816fcc4e ntdll: Keep the PEB lock around process environment access.` — reverts `6d7e94c8`.
+   `RtlQueryEnvironmentVariable{_U}` walked the block with `FastPebLock` dropped, and
+   `RtlSetEnvironmentVar` pushed the replaced block into a fixed ring of **8** retired blocks
+   and freed the 9th: a reader that latched the pointer keeps scanning a block that eight
+   `SetEnvironmentVariable()` calls from any thread can free, and the PEB lock is what the
+   rest of ntdll uses to serialise `ProcessParameters` writes. Readers run on every
+   `getenv()`, writers on every process start (a browser engine writes a per-child
+   environment and then more), so the window is reached in practice.
+   `ntdll_test.exe env`: **806 tests, 0 failures** after the revert, including the other
+   series' `test_concurrent_env_rcu()`.
+2. `1bf47947e ntdll: Remove the named pipe shared memory fast path.` — reverts `bfbd49bcb`
+   `05e08527b` `989be330d`. `get_named_pipe_shm` is a `STATUS_NOT_IMPLEMENTED` stub, so the
+   path is dead weight in the hottest library entry points; `pipe_handle_remove()` has **no
+   caller**, so a closed handle whose value is recycled re-attaches the old pipe ring;
+   `pipe_shm_ring_write()` silently truncates `len` to the space left in the ring and returns
+   the short length — on a message-mode pipe that splits a message in the stream; and the
+   writer stores `waiters = 0` *before* `FUTEX_WAKE`, so a reader that set the flag in between
+   sleeps on a full queue. Header and test deleted; the server request stays as the reserved
+   stub, so the protocol is unchanged (966).
+3. `83c801f61 server: Remove the unused slab pool header.` — `server/slab.h` has been
+   unreferenced since `1f922078a`; `alloc_object()`/`free_object()` use `mem_alloc`/`free`.
+
+**Measured on the fixed build** (`make install prefix=/tmp/wbnew` + `sync.sh`;
+source == build == deployed; the string `WINE_PIPE_SHM` is gone from the deployed `ntdll.so`):
+light gate 160 — `ALIVE_160s`, `BORN=5`, 6 children at `edge@120…155`, `fatal=0 ff=0
+cs_timeouts=0 rpcss_fail=0`, 0 mid-run dumps, `create_server` fails 6, screenshot
+`~/wa-work/v2_after.png` 295 bytes / 1 colour = **pure black, no QR, no page**.
+Battery 8×60 — 6/8 `ALIVE_60s`, `fatal=0` in all 8, `wins=145`, edge children present in
+7/8 (exits: one clean `rc=0`, one `rc=135`). Suites at parity — dcomp 1160/41 f/28 todo,
+d3d11 562750/112 f/8 sk, dxgi at the cap, ntdll `env` 806/0 f. Pristine app binaries **4/4**.
+
+**Operational hazard, and why numbers move.** `/tmp/wine/wine-src`, `/tmp/wine/wine-build`,
+`/tmp/wbnew` and `/home/olge/.wine-alpc-test` are shared with parallel sessions: the tip moved
+twice during this session (`6d7e94c8` → `e443f3916` → `6dabdf9ef`) and a checkout discarded
+staged work mid-session. Every gate/suite script `kill -9`s all `.exe` and the `wineserver`,
+so a gate run by another agent truncates this run (two runs here ended with the app gone at
+t=10-45 s). Trust the light-gate invariants (`create_server ×6`, browser alive to t=155 s),
+not the per-run `APP_RC`. `/tmp` is a 31 GB tmpfs: an unfiltered `+server` trace writes
+**~270 MB/s** (12 GB in 45 s, filled the volume and killed the session); a 545 MB stale log,
+the superseded `/tmp/wb` deployment (9.7 GB) and `/tmp/proxy-debug` (1.6 GB) were removed.
+
+**Ranked for the next session.** (1) Catch the caller of the failing activation: break on
+`combase!CoGetClassObject` RVA `0xbb90` and `combase!CoCreateInstance` RVA `0xaab0` (deployed
+`combase.dll`), print `*rdi` as a GUID, `$esi`/`$edx` as the context and `*(void**)$sp` as the
+return address, map it through the maps snapshot — that names the module that asks for
+`{daa52b27-…}` with `CLSCTX_LOCAL_SERVER`. (2) Then the Wine-side fix: registry-driven
+local-server launch in `combase` (read `HKCR\CLSID\{…}\LocalServer32` + `AppID`, start the
+image with `-Embedding`, poll `IRpcSS::GetClassObject` until the server registers the class,
+then continue the activation) — the gap is structural: Wine's RPCSS has no class cache.
+(3) `services.exe`: raise/derive `service_pipe_timeout` under load, or start `RpcSs` at boot
+in the ALPC/app harness, so the heavy-trace gate stops reporting the 6 RpcSs failures.
+(4) The mojom `0x3ccd0fb301`/method `0x16` decode is only worth chasing after (1)+(2): the
+host cannot answer while it is parked on the COM activation.
+
+**Harness added (read-only, `/tmp/wa/`).** `gate_light.sh` (light gate: edge/app census per 5 s,
+screenshot byte+colour count, `applog.txt` webview markers, crashpad-dump count, RpcSs counter),
+`mt4.sh` (volume-bounded `+server` trace: `wineserver -f | tr '\0' '\n' | grep --line-buffered
+| awk` cap — the `tr` is required, the trace records are NUL-terminated),
+`stk2.sh` + `dumpstacks.py` (per-thread raw-stack → `module+0xRVA` + stack strings, for the app
+and the browser at t=45 s), `matrix.sh` (browser-argument probe), `ccprobe.sh` + `peexport.py`
+(PE export RVA/nearest-export tool + the CoGetClassObject breakpoint probe),
+`findclsid.py` (ASCII/UTF-16/raw-GUID binary search), `winrtclsid.py` (UUIDv5 pre-image
+search). `gdb` cannot unwind Wine's PE-only builtins — this build has **no** `combase.so`
+/`ole32.so` (only 33 ELF modules), so `thread apply all bt` returns `?? ()`; use PE RVAs from
+`peexport.py` (the section table has `SizeOfRawData == 0`, so file offset == RVA) and raw-stack
+scans. `python3 -I` for anything reading these trees; `/tmp` is tmpfs.
