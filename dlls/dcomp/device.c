@@ -152,19 +152,19 @@ static const GUID dcomp_device5_guid =
 
 static BOOL is_device_version_guid(REFIID iid)
 {
-    return IsEqualGUID(iid, &dcomp_device4_guid) || IsEqualGUID(iid, &dcomp_device5_guid);
+    return dcomp_is_equal_guid(iid, &dcomp_device4_guid) || dcomp_is_equal_guid(iid, &dcomp_device5_guid);
 }
 
 static BOOL is_partner_guid(REFIID iid)
 {
-    return IsEqualGUID(iid, &IID_IDCompositionDesktopDevicePartner)
-        || IsEqualGUID(iid, &IID_IDCompositionDeviceUnknown)
-        || !memcmp(iid, "\xfe\x33\x46\x5f\x08\x1e\xb8\x4c\x8c\x75\xce\x24\x33\x3f\x56\x02", 16)
-        || !memcmp(iid, "\x8d\x46\xf6\x75\x8e\x1b\x7c\x44\x9b\xc6\x75\xfe\xa8\x0b\x5b\x25", 16)
-        || !memcmp(iid, "\xc4\x2e\x68\x25\xa4\x73\x22\x40\xa0\x4f\x1b\xbe\x6d\xc3\xe1\xf0", 16)
-        || !memcmp(iid, "\x5f\x27\x1a\x3c\x75\xf1\x76\x46\x92\xb4\x06\x15\x30\xb2\xf2\xf7", 16)
-        || !memcmp(iid, "\xac\x1f\xb3\xdf\x91\xba\x57\x4b\xac\xed\xe7\x34\x7f\x50\x67\xe0", 16)
-        || !memcmp(iid, "\x58\x61\x4b\xd1\xfa\xc3\xce\x4b\x9c\x1f\xb6\x1d\x86\x65\xea\xb0", 16);
+    return dcomp_is_equal_guid(iid, &IID_IDCompositionDesktopDevicePartner)
+        || dcomp_is_equal_guid(iid, &IID_IDCompositionDeviceUnknown)
+        || dcomp_is_equal_guid(iid, (const GUID *)"\xfe\x33\x46\x5f\x08\x1e\xb8\x4c\x8c\x75\xce\x24\x33\x3f\x56\x02")
+        || dcomp_is_equal_guid(iid, (const GUID *)"\x8d\x46\xf6\x75\x8e\x1b\x7c\x44\x9b\xc6\x75\xfe\xa8\x0b\x5b\x25")
+        || dcomp_is_equal_guid(iid, (const GUID *)"\xc4\x2e\x68\x25\xa4\x73\x22\x40\xa0\x4f\x1b\xbe\x6d\xc3\xe1\xf0")
+        || dcomp_is_equal_guid(iid, (const GUID *)"\x5f\x27\x1a\x3c\x75\xf1\x76\x46\x92\xb4\x06\x15\x30\xb2\xf2\xf7")
+        || dcomp_is_equal_guid(iid, (const GUID *)"\xac\x1f\xb3\xdf\x91\xba\x57\x4b\xac\xed\xe7\x34\x7f\x50\x67\xe0")
+        || dcomp_is_equal_guid(iid, (const GUID *)"\x58\x61\x4b\xd1\xfa\xc3\xce\x4b\x9c\x1f\xb6\x1d\x86\x65\xea\xb0");
 }
 
 static HRESULT STDMETHODCALLTYPE device_QueryInterface(IDCompositionDevice *iface,
@@ -174,22 +174,22 @@ static HRESULT STDMETHODCALLTYPE device_QueryInterface(IDCompositionDevice *ifac
 
     TRACE("iface %p, iid %s, out %p\n", iface, debugstr_guid(iid), out);
 
-    if (IsEqualGUID(iid, &IID_IUnknown)
-            || IsEqualGUID(iid, &IID_IDCompositionDevice))
+    if (dcomp_is_equal_guid(iid, &IID_IUnknown)
+            || dcomp_is_equal_guid(iid, &IID_IDCompositionDevice))
     {
         IUnknown_AddRef(&device->IDCompositionDevice_iface);
         *out = &device->IDCompositionDevice_iface;
         return S_OK;
     }
-    else if (!memcmp(iid, "\x68\x69\x55\x6b\x25\x2d\xe2\x11\x99\xf6\x8b\xc3\x60\x88\x70\x9b", 16))
+    else if (dcomp_is_equal_guid(iid, (const GUID *)"\x68\x69\x55\x6b\x25\x2d\xe2\x11\x99\xf6\x8b\xc3\x60\x88\x70\x9b"))
     {
         *out = &dcomp_6b556968_obj;
         return S_OK;
     }
     else if ((device->version >= 2
-              && (IsEqualGUID(iid, &IID_IDCompositionDevice2)
-                  || IsEqualGUID(iid, &IID_IDCompositionDevice3)
-                  || IsEqualGUID(iid, &IID_IDCompositionDesktopDevice)
+              && (dcomp_is_equal_guid(iid, &IID_IDCompositionDevice2)
+                  || dcomp_is_equal_guid(iid, &IID_IDCompositionDevice3)
+                  || dcomp_is_equal_guid(iid, &IID_IDCompositionDesktopDevice)
                   || is_device_version_guid(iid)))
               || is_partner_guid(iid))
     {

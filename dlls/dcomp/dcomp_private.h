@@ -197,6 +197,13 @@ static inline struct composition_visual *impl_from_IDCompositionVisualUnknown(ID
     return CONTAINING_RECORD(iface, struct composition_visual, IDCompositionVisualUnknown_iface);
 }
 
+static inline BOOL dcomp_is_equal_guid(const GUID *a, const GUID *b)
+{
+    const ULONG64 *a64 = (const ULONG64 *)a;
+    const ULONG64 *b64 = (const ULONG64 *)b;
+    return a == b || ((a64[0] == b64[0]) && (a64[1] == b64[1]));
+}
+
 void dcomp_lock(void);
 void dcomp_unlock(void);
 void dcomp_reclaim_push(IUnknown *object);

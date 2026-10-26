@@ -34,10 +34,10 @@ static HRESULT STDMETHODCALLTYPE visual_QueryInterface(IDCompositionVisualUnknow
 
     TRACE("iface %p, iid %s, out %p stub!\n", iface, debugstr_guid(iid), out);
 
-    if (IsEqualGUID(iid, &IID_IUnknown)
-            || IsEqualGUID(iid, &IID_IDCompositionVisual)
-            || (visual->version >= 2 && IsEqualGUID(iid, &IID_IDCompositionVisual2))
-            || IsEqualGUID(iid, &IID_IDCompositionVisualUnknown))
+    if (dcomp_is_equal_guid(iid, &IID_IUnknown)
+            || dcomp_is_equal_guid(iid, &IID_IDCompositionVisual)
+            || (visual->version >= 2 && dcomp_is_equal_guid(iid, &IID_IDCompositionVisual2))
+            || dcomp_is_equal_guid(iid, &IID_IDCompositionVisualUnknown))
     {
         IUnknown_AddRef(&visual->IDCompositionVisualUnknown_iface);
         *out = &visual->IDCompositionVisualUnknown_iface;
