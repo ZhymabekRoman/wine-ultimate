@@ -65,6 +65,15 @@ struct notify
 
 static const WCHAR key_name[] = {'K','e','y'};
 
+static inline void bump_registry_epoch(void)
+{
+    if (user_shared_data)
+    {
+        volatile timeout_t *epoch = (volatile timeout_t *)((char *)user_shared_data + 0x310);
+        (*epoch)++;
+    }
+}
+
 struct type_descr key_type =
 {
     { key_name, sizeof(key_name) },   /* name */
@@ -2199,6 +2208,7 @@ DECL_HANDLER(create_key)
 
     if ((key = create_key( parent, &name, req->options, access, objattr->attributes, sd )))
     {
+        bump_registry_epoch();
         if ((class = get_req_data_after_objattr( objattr, &key->classlen )))
         {
             key->classlen = (key->classlen / sizeof(WCHAR)) * sizeof(WCHAR);
@@ -2241,6 +2251,7 @@ DECL_HANDLER(delete_key)
     if (key)
     {
         delete_key( key, 0 );
+        bump_registry_epoch();
         release_object( key );
     }
 }
@@ -2288,6 +2299,7 @@ DECL_HANDLER(set_key_value)
         const char *data = (const char *)get_req_data() + req->namelen;
 
         set_value( key, &name, req->type, data, datalen );
+        bump_registry_epoch();
         release_object( key );
     }
 }
@@ -2327,6 +2339,7 @@ DECL_HANDLER(delete_key_value)
     if ((key = get_hkey_obj( req->hkey, KEY_SET_VALUE )))
     {
         delete_value( key, &name );
+        bump_registry_epoch();
         release_object( key );
     }
 }

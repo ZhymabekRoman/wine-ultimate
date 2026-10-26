@@ -38,6 +38,43 @@ WINE_DEFAULT_DEBUG_CHANNEL(reg);
 /* maximum length of a value name in bytes (without terminating null) */
 #define MAX_VALUE_LENGTH (16383 * sizeof(WCHAR))
 
+struct reg_val_cache_entry {
+    ULONGLONG epoch;
+    HANDLE handle;
+    ULONG name_hash;
+    ULONG type;
+    ULONG total;
+    BYTE data[256];
+};
+
+#define REG_CACHE_SIZE 512
+static struct reg_val_cache_entry reg_val_cache[REG_CACHE_SIZE];
+
+static inline ULONGLONG get_reg_epoch(void)
+{
+    if (!user_shared_data) return 0;
+    return *(volatile ULONGLONG *)((char *)user_shared_data + 0x310);
+}
+
+static inline ULONG hash_val_name(const UNICODE_STRING *name)
+{
+    ULONG hash = 5381;
+    const WCHAR *p = name->Buffer;
+    unsigned int len = name->Length / sizeof(WCHAR);
+    while (len--) hash = ((hash << 5) + hash) + (*p++ | 0x20);
+    return hash;
+}
+
+static inline void invalidate_reg_cache_handle(HANDLE handle)
+{
+    unsigned int i;
+    for (i = 0; i < REG_CACHE_SIZE; i++)
+    {
+        if (reg_val_cache[i].handle == handle)
+            reg_val_cache[i].handle = 0;
+    }
+}
+
 
 NTSTATUS open_hkcu_key( const char *path, HANDLE *key )
 {
@@ -109,6 +146,7 @@ NTSTATUS WINAPI NtCreateKey( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRI
     }
 
     TRACE( "<- %p\n", *key );
+    if (!ret && *key) invalidate_reg_cache_handle(*key);
     free( objattr );
     return ret;
 }
@@ -156,6 +194,7 @@ NTSTATUS WINAPI NtOpenKeyEx( HANDLE *key, ACCESS_MASK access, const OBJECT_ATTRI
     }
     SERVER_END_REQ;
     TRACE("<- %p\n", *key);
+    if (!ret && *key) invalidate_reg_cache_handle(*key);
     return ret;
 }
 
@@ -526,6 +565,31 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
     case KeyValuePartialInformation:
         min_size = fixed_size = FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data);
         data_ptr = ((KEY_VALUE_PARTIAL_INFORMATION *)info)->Data;
+        if (length >= sizeof(KEY_VALUE_PARTIAL_INFORMATION))
+        {
+            ULONGLONG epoch = get_reg_epoch();
+            ULONG name_hash = hash_val_name(name) ^ (ULONG)(ULONG_PTR)handle;
+            struct reg_val_cache_entry *entry = &reg_val_cache[name_hash & (REG_CACHE_SIZE - 1)];
+
+            if (entry->epoch == epoch && entry->handle == handle && entry->name_hash == name_hash)
+            {
+                KEY_VALUE_PARTIAL_INFORMATION *part = info;
+                *result_len = FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + entry->total;
+                if (length < *result_len)
+                {
+                    part->TitleIndex = 0;
+                    part->Type = entry->type;
+                    part->DataLength = entry->total;
+                    memcpy(part->Data, entry->data, length - min_size);
+                    return STATUS_BUFFER_OVERFLOW;
+                }
+                part->TitleIndex = 0;
+                part->Type = entry->type;
+                part->DataLength = entry->total;
+                if (entry->total) memcpy(part->Data, entry->data, entry->total);
+                return STATUS_SUCCESS;
+            }
+        }
         break;
 
     case KeyValuePartialInformationAlign64:
@@ -550,6 +614,20 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
             *result_len = fixed_size + (info_class == KeyValueBasicInformation ? 0 : reply->total);
             if (length < min_size) ret = STATUS_BUFFER_TOO_SMALL;
             else if (length < *result_len) ret = STATUS_BUFFER_OVERFLOW;
+
+            if (!ret && info_class == KeyValuePartialInformation && reply->total <= sizeof(reg_val_cache[0].data))
+            {
+                ULONGLONG epoch = get_reg_epoch();
+                ULONG name_hash = hash_val_name(name) ^ (ULONG)(ULONG_PTR)handle;
+                struct reg_val_cache_entry *entry = &reg_val_cache[name_hash & (REG_CACHE_SIZE - 1)];
+
+                entry->epoch = epoch;
+                entry->handle = handle;
+                entry->name_hash = name_hash;
+                entry->type = reply->type;
+                entry->total = reply->total;
+                if (data_ptr && reply->total) memcpy(entry->data, data_ptr, reply->total);
+            }
         }
     }
     SERVER_END_REQ;
