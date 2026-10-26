@@ -124,6 +124,7 @@
 #include "wine/list.h"
 #include "wine/debug.h"
 #include "unix_private.h"
+#include "pipe_shm.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
@@ -6125,6 +6126,17 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
         }
     }
 
+    if (pipe_shm_is_enabled())
+    {
+        ssize_t shm_ret = pipe_shm_read( unix_handle, (char *)buffer + total, length - total );
+        if (shm_ret > 0)
+        {
+            total += shm_ret;
+            status = STATUS_SUCCESS;
+            goto done;
+        }
+    }
+
     for (;;)
     {
         if ((result = virtual_locked_read( unix_handle, (char *)buffer + total, length - total )) >= 0)
@@ -6428,6 +6440,17 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
         status = sock_write( handle, unix_handle, event, apc, apc_user, io, buffer, length );
         if (needs_close) close( unix_handle );
         return status;
+    }
+
+    if (pipe_shm_is_enabled())
+    {
+        ssize_t shm_ret = pipe_shm_write( unix_handle, (const char *)buffer + total, length - total );
+        if (shm_ret > 0)
+        {
+            total += shm_ret;
+            status = STATUS_SUCCESS;
+            goto done;
+        }
     }
 
     for (;;)
