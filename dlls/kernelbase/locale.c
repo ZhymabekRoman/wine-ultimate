@@ -4933,6 +4933,9 @@ INT WINAPI DECLSPEC_HOTPATCH CompareStringOrdinal( const WCHAR *str1, INT len1,
     if (len1 < 0) len1 = lstrlenW( str1 );
     if (len2 < 0) len2 = lstrlenW( str2 );
 
+    if (str1 == str2 && len1 == len2) return CSTR_EQUAL;
+    if (len1 == len2 && !memcmp( str1, str2, len1 * sizeof(WCHAR) )) return CSTR_EQUAL;
+
     ret = RtlCompareUnicodeStrings( str1, len1, str2, len2, ignore_case );
     if (ret < 0) return CSTR_LESS_THAN;
     if (ret > 0) return CSTR_GREATER_THAN;

@@ -485,8 +485,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_context_QueryInterface(ID3D11Devic
     {
         *out = &context->ID3D11DeviceContext4_iface;
     }
-    else if (context->type == D3D11_DEVICE_CONTEXT_IMMEDIATE && IsEqualGUID(iid, &IID_ID3D11Multithread))
+    else if (IsEqualGUID(iid, &IID_ID3D11Multithread))
     {
+        /* ID3D11Multithread is exposed on the base device context and is valid for
+         * both immediate and deferred contexts. */
         *out = &context->ID3D11Multithread_iface;
     }
     else if (context->type == D3D11_DEVICE_CONTEXT_IMMEDIATE && IsEqualGUID(iid, &IID_ID3D11VideoContext))

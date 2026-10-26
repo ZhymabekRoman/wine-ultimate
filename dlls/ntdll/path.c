@@ -96,6 +96,12 @@ ULONG WINAPI RtlIsDosDeviceName_U( PCWSTR dos_name )
     /* find start of file name */
     for (p = start; *p; p++) if (IS_SEPARATOR(*p)) start = p + 1;
 
+    if (!*start) return 0;
+    {
+        WCHAR c = *start | 0x20;
+        if (c != 'a' && c != 'c' && c != 'l' && c != 'n' && c != 'p') return 0;
+    }
+
     /* truncate at extension and ':' */
     for (end = start; *end; end++) if (*end == '.' || *end == ':') break;
     end--;
@@ -261,23 +267,32 @@ NTSTATUS WINAPI RtlDosPathNameToNtPathName_U_WithStatus(const WCHAR *dos_path, U
         goto out;
     }
 
-    wcscpy(ntpath->Buffer, L"\\??\\");
-    switch (RtlDetermineDosPathNameType_U(ptr))
     {
-    case RtlPathTypeUncAbsolute: /* \\foo */
-        offset = 2;
-        wcscat(ntpath->Buffer, L"UNC\\");
-        break;
-    case RtlPathTypeLocalDevice: /* \\.\foo */
-        offset = 4;
-        break;
-    default:
-        offset = 0;
-        break;
-    }
+        WCHAR *dst = ntpath->Buffer;
+        DWORD ptr_len = wcslen(ptr);
 
-    wcscat(ntpath->Buffer, ptr + offset);
-    ntpath->Length = wcslen(ntpath->Buffer) * sizeof(WCHAR);
+        memcpy(dst, L"\\??\\", 4 * sizeof(WCHAR));
+        dst += 4;
+
+        switch (RtlDetermineDosPathNameType_U(ptr))
+        {
+        case RtlPathTypeUncAbsolute: /* \\foo */
+            memcpy(dst, L"UNC\\", 4 * sizeof(WCHAR));
+            dst += 4;
+            offset = 2;
+            break;
+        case RtlPathTypeLocalDevice: /* \\.\foo */
+            offset = 4;
+            break;
+        default:
+            offset = 0;
+            break;
+        }
+
+        memcpy(dst, ptr + offset, (ptr_len - offset + 1) * sizeof(WCHAR));
+        dst += ptr_len - offset;
+        ntpath->Length = (dst - ntpath->Buffer) * sizeof(WCHAR);
+    }
 
     if (file_part && *file_part)
         *file_part = ntpath->Buffer + ntpath->Length / sizeof(WCHAR) - wcslen(*file_part);
