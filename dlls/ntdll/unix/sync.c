@@ -2544,7 +2544,18 @@ NTSTATUS WINAPI NtQuerySystemTime( LARGE_INTEGER *time )
 #ifdef HAVE_CLOCK_GETTIME
     struct timespec ts;
     static clockid_t clock_id = CLOCK_MONOTONIC; /* placeholder */
+#endif
 
+    if (user_shared_data)
+    {
+        do {
+            time->HighPart = user_shared_data->SystemTime.High1Time;
+            time->LowPart  = user_shared_data->SystemTime.LowPart;
+        } while (time->HighPart != user_shared_data->SystemTime.High2Time);
+        return STATUS_SUCCESS;
+    }
+
+#ifdef HAVE_CLOCK_GETTIME
     if (clock_id == CLOCK_MONOTONIC)
     {
 #ifdef CLOCK_REALTIME_COARSE

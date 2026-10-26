@@ -83,6 +83,7 @@ static void completion_wait_dump( struct object*, int );
 static int completion_wait_signaled( struct object *obj, struct wait_queue_entry *entry );
 static void completion_wait_satisfied( struct object *obj, struct wait_queue_entry *entry );
 static void completion_wait_destroy( struct object * );
+static int completion_wait_close_handle( struct object *obj, struct process *process, obj_handle_t handle );
 
 static const struct object_ops completion_wait_ops =
 {
@@ -105,9 +106,24 @@ static const struct object_ops completion_wait_ops =
     NULL,                           /* unlink_name */
     no_open_file,                   /* open_file */
     no_kernel_obj_list,             /* get_kernel_obj_list */
-    no_close_handle,                /* close_handle */
+    completion_wait_close_handle,   /* close_handle */
     completion_wait_destroy         /* destroy */
 };
+
+static int completion_wait_close_handle( struct object *obj, struct process *process, obj_handle_t handle )
+{
+    struct completion_wait *wait = (struct completion_wait *)obj;
+
+    if (wait->completion)
+    {
+        list_remove( &wait->wait_queue_entry );
+        wait->completion = NULL;
+    }
+    wait->handle = 0;
+    if (wait->thread && wait->thread->completion_wait == wait)
+        wait->thread->completion_wait = NULL;
+    return 1;
+}
 
 static void completion_wait_destroy( struct object *obj )
 {
@@ -319,7 +335,7 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
                      unsigned int status, apc_param_t information )
 {
     struct comp_msg *msg = mem_alloc( sizeof( *msg ) );
-    struct completion_wait *wait;
+    struct completion_wait *wait, *wait_next;
 
     if (!msg)
         return;
@@ -331,9 +347,14 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
 
     list_add_tail( &completion->queue, &msg->queue_entry );
     completion->depth++;
-    LIST_FOR_EACH_ENTRY( wait, &completion->wait_queue, struct completion_wait, wait_queue_entry )
+    LIST_FOR_EACH_ENTRY_SAFE( wait, wait_next, &completion->wait_queue, struct completion_wait, wait_queue_entry )
     {
         wake_up( &wait->obj, 1 );
+        if (wait->msg)
+        {
+            list_remove( &wait->wait_queue_entry );
+            wait->completion = NULL;
+        }
         if (list_empty( &completion->queue )) return;
     }
     if (!list_empty( &completion->queue )) signal_sync( completion->sync );
