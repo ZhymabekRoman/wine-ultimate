@@ -3618,6 +3618,23 @@ Implemented 5 core subsystem performance optimizations across ntdll, kernelbase,
 - `dlls/d3d11/device.c::d3d11_device_context_QueryInterface()`: Expose `IID_ID3D11Multithread` on both immediate and deferred contexts, eliminating Chromium GPU watchdog traps.
 - Wine commit `3e36818a` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(c): GetProcAddress pointer identity and expanded inline IAT trampolines (wine tip `34daa1c0`, branch `ultimate`)
+
+Expanded the dynamic inline trampoline engine and preserved 100% function pointer identity:
+- `dlls/ntdll/loader.c::LdrGetProcedureAddress()`: Hooked `get_fast_iat_trampoline()` into dynamic export resolution. Guarantees `GetProcAddress(hModule, "Func") == &Func` in IAT for all hotpatched APIs, eliminating Chromium pointer-inequality and security check aborts.
+- `dlls/ntdll/inline_patch.c`: Implemented 5 new native 16-byte assembly trampolines:
+  - `GetCurrentProcess`: returns pseudohandle `(HANDLE)-1` directly in `%rax`.
+  - `GetCurrentThread`: returns pseudohandle `(HANDLE)-2` directly in `%rax`.
+  - `GetTickCount`: reads `0x7ffe0320` (`KUSER_SHARED_DATA->TickCountLowDeprecated`) directly in `%eax`.
+  - `GetSystemTimeAsFileTime`: reads `0x7ffe0014` (`KUSER_SHARED_DATA->SystemTime`) directly into `*(uint64_t *)rcx`.
+  - `fast_TlsGetValue`: reads slots 0..63 directly from `TEB->TlsSlots` at `%gs:0x1480 + idx*8` and expansion slots 64..1087 from `TEB->TlsExpansionSlots` at `%gs:0x1780`.
+- **Measured (Win32 benchmark `bench_iat_expanded.exe`)**:
+  - Executed **20,000,000 calls in 0.018 s** (**0.90 ns per call**, delivering **1,108 MILLION calls/sec**).
+  - Confirmed pointer identity: `GetProcAddress(kernel32, "GetCurrentThreadId") == 0x17002C4D8`.
+  - Test suites verified: `ntdll_test.exe env` passed **806 tests**; `ntdll_test.exe thread` passed **49 tests** with zero regressions.
+- Wine commit `34daa1c0` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
