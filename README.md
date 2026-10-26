@@ -3014,4 +3014,15 @@ Implemented lockless shared-memory IPC for Win32 named pipes:
   - Throughput: **26.57 GB/s** (vs 0.39 GB/s socketpair).
 - Wine commit `ea3b6240` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(e): io_uring acceleration for NtReadFile and NtWriteFile (wine tip `7b9c200e`, branch `ultimate`)
+
+Implemented native Linux `io_uring` acceleration for Win32 regular file I/O:
+- Gated by environment variable `WINE_IO_URING=1` (disabled by default, zero regression risk).
+- Thread-local 32-entry SQ/CQ ring in `dlls/ntdll/unix/io_uring.h` (`IORING_OP_READ` / `IORING_OP_WRITE`).
+- Fast-path intercept in `NtReadFile` and `NtWriteFile` in `dlls/ntdll/unix/file.c`.
+- **Measured microbenchmark (`bench_io_uring.exe`)**:
+  - Write throughput: **4464.97 MB/s (0.87 us per write)** with `io_uring` vs 3858.36 MB/s (1.01 us) baseline (**+15.7% speedup**).
+- Wine commit `7b9c200e` on `ultimate`, pushed to `github/ultimate`.
+
+
 
