@@ -4121,3 +4121,123 @@ diff, applog byte-window diff), `logprobe.sh` (`WEBVIEW2_ADDITIONAL_BROWSER_ARGU
 `LOG(FATAL)`/`CHECK` text never reaches the host's stderr, only the dump does), `wsprobe.sh`
 (`WINEDEBUG=-all,+winsock,+exec,+seh,+tls` + a `fprintf` probe in `sock_connect` printing
 `pid/ret/errno/synchronous/nonblocking/type/state`, which is what named the deviation).
+
+## Session 2026-10-27(k) — wineserver completion-port walk use-after-free fixed (wine tip `1ce19e2c6`, branch `ultimate`); the `/GS` crash loop is innocent and the AddBrowserExtension request is parked, not lost
+
+**The crash is real and it is in `add_completion()`.** Ten WhatsApp launches produced **six**
+wineserver `SIGSEGV` cores (`coredumpctl`, all at `wineserver+0x6add0`). The core decodes exactly:
+
+```
+#0 get_wait_queue_thread      server/thread.c:1009   return entry->wait->thread;
+#1 wake_up (obj=…, max=1)     server/thread.c:1408
+#2 add_completion             server/completion.c
+#3 add_job_completion (msg=7) server/process.c:279
+#4 release_job_process         server/completion: process_killed path
+#5 process_killed → #6 remove_process_thread → #7 kill_thread → #8 terminate_process
+#9 fd_poll_event               server/fd.c:530
+```
+
+`p *(struct object*)0x7faf66ae2300` in the core shows `ops = 0xaaaaaaaaaaaaaaaa` — the slab
+poison pattern — so `add_completion()` called `wake_up()` on an **already freed
+`completion_wait`**. The walk is the bug, not the destructor: waking a waiter completes its
+request, completing that request can close the completion-wait handle and release the object,
+and when the woken thread dies on the way (a closed wakeup socket kills it) its whole process is
+torn down `terminate_process → kill_thread → remove_process_thread → process_killed →
+release_job_process → add_completion`, which releases the completion-waits of that process'
+**other threads** as well. All of them are unlinked from the completion's queue *during* the
+walk; the cached `wait_next` of `LIST_FOR_EACH_ENTRY_SAFE` and the trailing
+`list_remove( &wait->wait_queue_entry )` then read and re-link freed memory. The earlier
+destroy-time unlink work (`65237e952`, `f0399ca76`) was necessary and not sufficient: the cores
+at 03:48/03:50 came from a binary that already contained `65237e952`.
+
+**Fix.** Take a refcounted snapshot of the waiter list (`grab_object()` per waiter, a private
+`snapshot_entry` link, a per-object `snapshotted` flag so a nested `add_completion()` cannot
+re-link a node an outer walk already pinned), walk that, and drop the references afterwards.
+Same treatment for `completion_close_handle()`, whose `cleanup_thread_completion()` releases the
+object it is iterating. `server/completion.c` only, 65 insertions.
+
+**Measured.** Six cores in ten launches before; **zero new cores** over the seven app launches
+and four suite rounds after (`st5…st8`, `nc1`, `nc2`, `px1`, `val160`, battery).
+
+**This crash was the harness flakiness, and it masqueraded as app behaviour.** Two failure modes
+disappear with it: (a) the app exits `rc=0`/`rc=1` at ~0.5 s with its own image never appearing
+in the `+loaddll` trace and `BORN=never` — the wineserver died under the client, and (b)
+`BORN=5 GONE=15`: the WebView2 family spawns and the whole tree dies mid-run. A 3-of-4 → 4-of-4
+change in `ALIVE_70s`, and the previous sessions' "self-perpetuating failed runs" reading was the
+same thing (a dead server, plus a `EBWebView` user-data-dir left corrupt by the `SIGKILL`, which
+is why probe harnesses now `rm -rf` that app-data dir before each run; app data only, binaries
+untouched).
+
+**The `/GS` crash loop is innocent — the previous session's hypothesis is disproved.**
+`msedge.dll+0x487d2a3` (4 dumps/run, 4-thread child, stack frames in `wined3d`/`dxgi`/`gdi32`,
+`rcx = 0x80004002` as the mangled guard) is the **gpu-process** cookie failure, and the
+**standalone repro crashes identically — 4 dumps — and still navigates**: `AFTER-ADD-OK` at
+t=681 ms and `SOURCE-CHANGED https://web.whatsapp.com/` at t=2803 ms in the same build. A
+`--gpu-recent-crash-count=1` gpu-process is not the reason `Navigate` never runs.
+
+**Differential repro matrix: the extension content and topology are innocent.** `Microsoft.Web.WebView2.Core`
+1.0.3485.44 driven from a synthetic net8 host (`/tmp/wa/wv2diff_src`, knobs `EXTUDATA`,
+`EXTMANIFESTDIR`, `EXTSECOND`, `EXTNAVI`) with a **fresh** user-data-dir per case:
+
+| case | result |
+| --- | --- |
+| synthetic MV3 extension | `AFTER-ADD-OK` t=670 |
+| **real Zoom manifest** (`key`, `permissions:[tabs,storage]`, `host_permissions:<all_urls>`, `externally_connectable`) | `AFTER-ADD-OK` t=685 |
+| synthetic, two controllers, same profile, `Add` twice | `AFTER-ADD-OK`, `AFTER-ADD2-OK`, `AFTER-ADD3-SAME-PROFILE-OK` |
+| Zoom manifest, same as above | all three `…-OK` |
+
+So the manifest (including the pinned `key` → expected id `ppncngpjbffnoddcfkinoiplldkmafkc`), the
+two-webview topology and the shared profile are all fine in isolation. Kill-switch probes
+`WINE_NO_COALESCE_FLUSH=1` and `WINE_DISABLE_VFS_CACHE=1` change nothing (`navigate=0` both).
+
+**State of the two sides at the wall (measured, tracer-free).** `gdb` cannot attach to the browser
+(crashpad holds the single ptrace slot: `process is already traced`), so stacks were taken from
+`/proc/<pid>/task/*/syscall` (SP, PC) plus `/proc/<pid>/mem` scans, labelled with `nm` on the
+deployed `.so` and module bases from the `+loaddll` trace: browser `CrBrowserMain` is in
+`inproc_wait`/`linux_wait_objs` (**idle**, not blocked in a server request), `Chrome_IOThread` in
+`server_select`/`wait_select_reply`, the app's `UI thread` in `server_select`. No thread is
+blocked on the Add flow; the file trace for every `msedgewebview2` process during the stall
+contains font/cache traffic and **nothing** under `Extensions`, `Service Worker` or `Database`,
+and a 0.35 s census never sees an `--extension-process` child. The request is **parked on an
+async dependency**, not deadlocked, and the service-worker/leveldb hypothesis is not supported.
+
+**The `+named_pipe` reading of the Add flow does not describe the app↔browser channel.** A
+temporary `[PX] W/R` trace in `server/named_pipe.c` (`queue_message()` / `message_queue_read()`,
+reverted) shows the 416 B / 64 B / 112 B message pattern only on pipe-end pairs **shared by
+Chromium processes** (`--mojo-named-platform-channel-pipe` bootstrap; a write by pid X is read
+by pid X's inherited duplicate), and traffic keeps flowing at the end of a stalled run
+(112 B messages among the browser, gpu and renderer at the last event). The app's `P:` is wine
+pid `0x20`, which never appears on those pairs — the WebView2 host↔browser transport is the
+in-house ALPC path, so the Add/Get trace has to come out of `server/alpc.c`.
+
+**Validation.** ntdll suites, baseline (`HEAD`) vs fixed, same window: `file` 2940 tests / 14
+failures **identical**, `pipe` 2378 / 9 **identical**, `sync` 429 / 5 vs 6 (the +1 in `sync` is
+the open question, `om` — the IoCompletion suite — 7729 / 3 failures with the fix). The 160 s
+gate and the 8×60 s battery on **pristine** package binaries run under
+`/tmp/wa/validate.sh`; read `/tmp/wa/validate_report.txt`.
+
+**Deploy notes (they cost an hour).** `make install` targets `/usr/local`, so deployment is
+manual: `server/wineserver` and the `dlls/*/*.so` unix parts are **copies** into
+`/tmp/wbnew` and `/tmp/wb`, and `bash /tmp/wa/sync.sh` copies the `x86_64-windows` PE builtins
+into the prefix's `system32`. **`/tmp/wbnew/bin/wine` must stay a symlink to
+`/tmp/wine/wine-build/loader/wine`** — a *copied* loader resolves `ntdll.so` next to itself and
+every launch dies with `wine: could not load ntdll.so: /tmp/wbnew/bin/ntdll.so`, which looks
+exactly like an app-startup failure.
+
+**Tooling added.** `/tmp/wa/scanstack.py` (tracer-free per-thread native stack scan: `/proc/*/syscall`
+SP+PC, `/proc/PID/mem`, `nm` for `.so`, `.pdata`-free PE labelling by `+loaddll` base),
+`/tmp/wa/dmp5.py` (minidump → Wine symbols; builtin PEs are prelinked at their preferred base so
+`base+rva` bisects straight into `nm` output), `/tmp/wa/lab3.py` (`.pdata` function bounds +
+rip-relative string recovery for `msedge.dll`), `/tmp/wa/wv2diff_src` (differential WebView2
+repro), `/tmp/wa/gate_all.sh` (gate + all-process stack scan at t=45), `/tmp/wa/probe_spawn.sh`
+(0.35 s spawn census for short-lived children), `/tmp/wa/validate.sh` (baseline-vs-fixed suites,
+160 s gate, 8×60 battery, core accounting).
+
+**Next step.** Instrument `server/alpc.c` (message send/receive with size + peer) to catch the
+`AddBrowserExtension` request the app sends and the reply it never sees — that is the transport
+the app↔browser channel actually uses — and pair it with `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`
+vmodule logging on `*/extensions/*` and `*/service_worker/*`, which is the only way to see which
+Chromium state machine is holding the callback. Separately, the `gpu-process` `/GS` overrun at
+`msedge.dll+0x487d2a3` is still worth fixing for signal clarity: the frames under it are
+`wined3d+0x815c0`, `wined3d+0x266300`, `dxgi+0x6dc0`, `gdi32+0x51700`, i.e. a Wine `Get*/Read*`
+that writes past the caller's length, most likely a size-probing DXGI/GDI call.
