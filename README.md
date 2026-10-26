@@ -3688,6 +3688,17 @@ Re-enabled the wineserver object slab allocator strictly as an internal server m
 - Official test suite: `ntdll_test.exe om` passed **7,729 tests** with 0 regressions.
 - Wine commit `38e53727` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(h): Fix completion_wait and completion use-after-free list unlinking (wine tip `65237e95`, branch `ultimate`)
+
+Fixed critical use-after-free in wineserver IOCP completion handling causing SIGSEGV coredumps on process teardown:
+- `server/completion.c::completion_wait_destroy()`: unlinked `wait->wait_queue_entry` from `completion->wait_queue` and cleared `wait->completion` upon object destruction. Previously, destroying a `completion_wait` object left a dangling pointer inside `completion->wait_queue`.
+- `server/completion.c::completion_destroy()`: unlinked all remaining `wait_queue_entry` items from active `completion_wait` objects before freeing the completion port.
+- `server/completion.c::create_completion_wait()`: initialized `wait->wait_queue_entry` via `list_init()`.
+- Eliminates the recurring `SEGV_MAPERR` in `add_completion() -> wake_up() -> get_wait_queue_thread()` triggered during process cleanup when `release_job_process()` posts `JOB_OBJECT_MSG_EXIT_PROCESS` to associated job completion ports.
+- Verified: `extrepro.sh` runs end-to-end without crashing wineserver (0 new coredumps).
+- Wine commit `65237e95` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
