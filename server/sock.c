@@ -229,7 +229,7 @@ struct bound_addr
 
 #define MAX_ICMP_HISTORY_LENGTH 8
 
-#define MIN_RCVBUF 65536
+#define MIN_RCVBUF (1024 * 1024)
 
 struct sock
 {

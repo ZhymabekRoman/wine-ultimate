@@ -1088,8 +1088,20 @@ static NTSTATUS try_send( int fd, struct async_send_ioctl *async )
     hdr.msg_iov = async->iov + async->iov_cursor;
     hdr.msg_iovlen = async->count - async->iov_cursor;
 
+#if defined(MSG_ZEROCOPY)
+    if (sock_type == SOCK_STREAM && async->iov[async->iov_cursor].iov_len >= 4096)
+        async->unix_flags |= MSG_ZEROCOPY;
+#endif
+
     while ((ret = sendmsg( fd, &hdr, async->unix_flags )) == -1)
     {
+#if defined(MSG_ZEROCOPY)
+        if ((async->unix_flags & MSG_ZEROCOPY) && (errno == ENOBUFS || errno == EOPNOTSUPP || errno == EINVAL))
+        {
+            async->unix_flags &= ~MSG_ZEROCOPY;
+            continue;
+        }
+#endif
         if (errno == EISCONN)
         {
             hdr.msg_name = NULL;

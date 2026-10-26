@@ -214,36 +214,101 @@ BOOLEAN WINAPI RtlAreBitsClear( const RTL_BITMAP *bitmap, ULONG start, ULONG cou
  */
 ULONG WINAPI RtlFindSetBits(PCRTL_BITMAP lpBits, ULONG ulCount, ULONG ulHint)
 {
-  ULONG ulPos, ulEnd;
+    ULONG ulPos, ulEnd, total;
+    const ULONG *buf;
 
-  TRACE("(%p,%lu,%lu)\n", lpBits, ulCount, ulHint);
+    TRACE("(%p,%lu,%lu)\n", lpBits, ulCount, ulHint);
 
-  if (!lpBits || !ulCount || ulCount > lpBits->SizeOfBitMap)
-    return ~0U;
+    if (!lpBits || !ulCount || ulCount > lpBits->SizeOfBitMap)
+        return ~0U;
 
-  ulEnd = lpBits->SizeOfBitMap;
+    total = lpBits->SizeOfBitMap;
+    buf = lpBits->Buffer;
 
-  if (ulHint + ulCount > lpBits->SizeOfBitMap)
-    ulHint = 0;
-
-  ulPos = ulHint;
-
-  while (ulPos < ulEnd)
-  {
-    /* FIXME: This could be made a _lot_ more efficient */
-    if (RtlAreBitsSet(lpBits, ulPos, ulCount))
-      return ulPos;
-
-    /* Start from the beginning if we hit the end and had a hint */
-    if (ulPos == ulEnd - 1 && ulHint)
+    if (ulCount == 1)
     {
-      ulEnd = ulHint;
-      ulPos = ulHint = 0;
+        ULONG words = (total + 31) / 32;
+        ULONG start_word = (ulHint < total) ? ulHint / 32 : 0;
+        ULONG bit_offset = (ulHint < total) ? ulHint % 32 : 0;
+        ULONG mask = buf[start_word] & (~0U << bit_offset);
+        ULONG idx;
+
+        if (mask)
+        {
+            ULONG pos = start_word * 32 + __builtin_ctz(mask);
+            if (pos < total) return pos;
+        }
+
+        for (idx = start_word + 1; idx < words; idx++)
+        {
+            if (buf[idx] != 0)
+            {
+                ULONG pos = idx * 32 + __builtin_ctz(buf[idx]);
+                return (pos < total) ? pos : ~0U;
+            }
+        }
+
+        if (ulHint > 0)
+        {
+            for (idx = 0; idx <= start_word; idx++)
+            {
+                if (buf[idx] != 0)
+                {
+                    ULONG pos = idx * 32 + __builtin_ctz(buf[idx]);
+                    if (pos < total && pos < ulHint) return pos;
+                    if (pos >= ulHint) break;
+                }
+            }
+        }
+        return ~0U;
     }
-    else
-      ulPos++;
-  }
-  return ~0U;
+
+    ulEnd = total;
+    if (ulHint + ulCount > total) ulHint = 0;
+    ulPos = ulHint;
+
+    while (ulPos < ulEnd)
+    {
+        ULONG word;
+        ULONG bit;
+        ULONG clear_bits;
+
+        if (ulPos + ulCount > total)
+        {
+            if (ulHint)
+            {
+                ulEnd = ulHint;
+                ulPos = 0;
+                ulHint = 0;
+                continue;
+            }
+            break;
+        }
+
+        word = ulPos / 32;
+        bit = ulPos % 32;
+        clear_bits = ~buf[word] >> bit;
+
+        if (clear_bits & 1)
+        {
+            ULONG skip = __builtin_ctz(~clear_bits);
+            ulPos += skip ? skip : 1;
+            continue;
+        }
+
+        if (RtlAreBitsSet(lpBits, ulPos, ulCount))
+            return ulPos;
+
+        if (ulPos == ulEnd - 1 && ulHint)
+        {
+            ulEnd = ulHint;
+            ulPos = 0;
+            ulHint = 0;
+        }
+        else
+            ulPos++;
+    }
+    return ~0U;
 }
 
 /*************************************************************************
@@ -261,36 +326,101 @@ ULONG WINAPI RtlFindSetBits(PCRTL_BITMAP lpBits, ULONG ulCount, ULONG ulHint)
  */
 ULONG WINAPI RtlFindClearBits(PCRTL_BITMAP lpBits, ULONG ulCount, ULONG ulHint)
 {
-  ULONG ulPos, ulEnd;
+    ULONG ulPos, ulEnd, total;
+    const ULONG *buf;
 
-  TRACE("(%p,%lu,%lu)\n", lpBits, ulCount, ulHint);
+    TRACE("(%p,%lu,%lu)\n", lpBits, ulCount, ulHint);
 
-  if (!lpBits || !ulCount || ulCount > lpBits->SizeOfBitMap)
-    return ~0U;
+    if (!lpBits || !ulCount || ulCount > lpBits->SizeOfBitMap)
+        return ~0U;
 
-  ulEnd = lpBits->SizeOfBitMap;
+    total = lpBits->SizeOfBitMap;
+    buf = lpBits->Buffer;
 
-  if (ulHint + ulCount > lpBits->SizeOfBitMap)
-    ulHint = 0;
-
-  ulPos = ulHint;
-
-  while (ulPos < ulEnd)
-  {
-    /* FIXME: This could be made a _lot_ more efficient */
-    if (RtlAreBitsClear(lpBits, ulPos, ulCount))
-      return ulPos;
-
-    /* Start from the beginning if we hit the end and started from ulHint */
-    if (ulPos == ulEnd - 1 && ulHint)
+    if (ulCount == 1)
     {
-      ulEnd = ulHint;
-      ulPos = ulHint = 0;
+        ULONG words = (total + 31) / 32;
+        ULONG start_word = (ulHint < total) ? ulHint / 32 : 0;
+        ULONG bit_offset = (ulHint < total) ? ulHint % 32 : 0;
+        ULONG mask = ~buf[start_word] & (~0U << bit_offset);
+        ULONG idx;
+
+        if (mask)
+        {
+            ULONG pos = start_word * 32 + __builtin_ctz(mask);
+            if (pos < total) return pos;
+        }
+
+        for (idx = start_word + 1; idx < words; idx++)
+        {
+            if (buf[idx] != ~0U)
+            {
+                ULONG pos = idx * 32 + __builtin_ctz(~buf[idx]);
+                return (pos < total) ? pos : ~0U;
+            }
+        }
+
+        if (ulHint > 0)
+        {
+            for (idx = 0; idx <= start_word; idx++)
+            {
+                if (buf[idx] != ~0U)
+                {
+                    ULONG pos = idx * 32 + __builtin_ctz(~buf[idx]);
+                    if (pos < total && pos < ulHint) return pos;
+                    if (pos >= ulHint) break;
+                }
+            }
+        }
+        return ~0U;
     }
-    else
-      ulPos++;
-  }
-  return ~0U;
+
+    ulEnd = total;
+    if (ulHint + ulCount > total) ulHint = 0;
+    ulPos = ulHint;
+
+    while (ulPos < ulEnd)
+    {
+        ULONG word;
+        ULONG bit;
+        ULONG set_bits;
+
+        if (ulPos + ulCount > total)
+        {
+            if (ulHint)
+            {
+                ulEnd = ulHint;
+                ulPos = 0;
+                ulHint = 0;
+                continue;
+            }
+            break;
+        }
+
+        word = ulPos / 32;
+        bit = ulPos % 32;
+        set_bits = buf[word] >> bit;
+
+        if (set_bits & 1)
+        {
+            ULONG skip = __builtin_ctz(~set_bits);
+            ulPos += skip ? skip : 1;
+            continue;
+        }
+
+        if (RtlAreBitsClear(lpBits, ulPos, ulCount))
+            return ulPos;
+
+        if (ulPos == ulEnd - 1 && ulHint)
+        {
+            ulEnd = ulHint;
+            ulPos = 0;
+            ulHint = 0;
+        }
+        else
+            ulPos++;
+    }
+    return ~0U;
 }
 
 /*************************************************************************
