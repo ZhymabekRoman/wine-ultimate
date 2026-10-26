@@ -3166,7 +3166,9 @@ In `server/mapping.c`:
 - When `map_addr == image.base`, `delta == 0`, skipping relocation processing completely.
 - `.text` pages remain clean, file-backed, and shared across all processes in Linux Page Cache (saving up to ~1.4 GB RAM across multi-process WebView2 trees).
 - Falls back to dynamic address range allocation if the preferred base collides.
-- Wine commit `151a32ff` on `ultimate`, pushed to `github/ultimate`.
+- Added test coverage in `dlls/ntdll/tests/virtual.c::test_pe_preferred_image_base()` verifying that preferred image base is preserved at load time.
+- Wine commits `151a32ff` (server mapping) and `aeed0f31` (ntdll tests) on `ultimate`, pushed to `github/ultimate`.
+
 
 
 
