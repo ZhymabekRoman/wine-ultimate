@@ -3782,3 +3782,90 @@ CONTEXT rip@0xF8 rsp@0x60), `nativebt*.sh`, `rcrun.sh` (app exit-code capture),
 `bisect_suites.sh` (baseline-vs-fixed wineserver suites). `wine ps` is `wine tasklist`
 (wine pid == applog `P:`); `createdump.exe` in the package is the crash-hook variant
 (no pid CLI); `dotnet-dump` cannot reach the wine diagnostics socket.
+
+## Session 2026-10-26c — delete-on-close with a live enumeration handle fixed (wine tip `f0dc23d2c`, branch `ultimate`); the AddBrowserExtension wall narrowed to a quiesced browser
+
+**What is fixed.** `server/fd.c` (commit `f0dc23d2c`): a delete-on-close disposition belongs to the
+*file*, not to the handle that set it. `System.IO`'s directory enumerator (`FindFirstFileExW` +
+`NtQueryDirectoryFile`, used by `Directory.Delete(path, recursive: true)`) keeps a **second handle open
+across `RemoveDirectoryW`**, so the close of the disposition handle is not the last close. The unlink
+stayed in `inode->closed` for the idle sweep (`unlink_closed_fd` at wineserver idle), and in that window
+path queries answered from the pending-close marker (`NtQueryFullAttributesFile -> c0000034`) while
+`NtCreateFile(FILE_CREATE)` of the same name answered **`STATUS_OBJECT_NAME_COLLISION` (c0000035)**.
+`Directory.CreateDirectory` swallows `ERROR_ALREADY_EXISTS`, so the app proceeded, `CopyFileExW` of a
+child then resolved through the marked directory and failed with `ERROR_FILE_NOT_FOUND` — the app-side
+signature `FileNotFoundException: ZoomBrowserExtension/Bootstrap > ... LocalCache\ZoomExtension\background.js`
+at `System.IO.FileSystem.CopyFile`. Fix: when a close empties `inode->open` (and no byte-range locks
+remain), flush the pending non-POSIX (`FILE_DISPOSITION_DELETE` without `FILE_DISPOSITION_POSIX_SEMANTICS`)
+deletions of that inode right away (`inode_flush_pending_deletes`). The `4c1b1381f` fast path only
+covered the case where the fd carrying the flag *was* the last one — it is now subsumed.
+
+**Test (new, in the suite).** `test_delete_on_close_dir_last_handle` in `dlls/ntdll/tests/file.c`:
+open the dir twice (`DELETE` + `FILE_READ_ATTRIBUTES`, the second playing the enumeration handle),
+set `FileDispositionInformation`, close the disposition handle, close the enumeration handle, then
+require: name gone, `FILE_CREATE`+`FILE_DIRECTORY_FILE` of the same name = `STATUS_SUCCESS`,
+child `FILE_CREATE` = `STATUS_SUCCESS`, child visible via `NtQueryFullAttributesFile`.
+On the pre-fix wineserver: `recreate ... c0000035`, `creating a file inside ... c000000f`,
+`the created file is not visible ... c0000034` (three failures, the app's exact chain).
+Post-fix: passes; `ntdll_test.exe file` = 2940 tests, **8 failures** — byte-identical to the
+pre-existing 8 (`file.c:3137` x2, `3332`, `3335`, + the two `todo` marks), no regression.
+
+**What is NOT fixed.** The *seeded* trigger (extension dirs already present, populated with
+`background.js`/`manifest.json`) still produces bootstrap failures: `seed_probe.sh` (seed dirs,
+run 45 s, count `Bootstrap > Failed` lines in the applog window) reports `bootstrap-errors: 2`
+in runs 1 and 2 with the fix deployed. The NT-level sequence in the new test is clean, so the
+residual trigger is elsewhere in the app's sequence (`File.Copy` with `COPYFILE_FAIL_IF_EXISTS`,
+the exact `FindClose`/`RemoveDirectoryW` interleaving, or the recursive-delete of a dir whose
+children are themselves marked) — extend the test to the exact Win32 call order to catch it.
+With clean state (`rm -rf` both dirs) staging was 4/4 deterministic in `stage_probe.sh` (stable
+inodes, right file counts, no applog Bootstrap line).
+
+**The real wall (`navigate=0`), narrowed.** Gate 160 s at this tip: `APP_RC=124 ALIVE_160s`,
+`BORN=5 GONE=none edge_max=6`, `createdwins=145 xamlwin=1 rendwin=2`, **0 crashpad dumps**
+(the `msedge.dll+0x487d2a3` int3 family is gone), `navigate=0 webwa=0`, screenshot 295 bytes
+(one colour). The app reaches `OnCoreWebView2Initialized` and awaits
+`CoreWebView2Profile.AddBrowserExtensionAsync`; the extension dirs are staged correctly, so
+this is now purely a host->browser reply problem. Evidence from an instrumented wineserver
+(named-pipe + ALPC + `queue_async` probes; patches saved as `/tmp/wa/wine_probes.patch` and
+`/tmp/wa/named_pipe.c.probed`):
+- The WebView2 host<->browser channel **is a named pipe** (the "+alpc/named pipes are silent" reading
+  was wrong). `server/named_pipe.c` probes show the app (wine pid `0020`) as the **pipe server**
+  (`listen ... flags 00000008 bufsz 4096`) pairing with the browser (`PAIR serverpid 0020 clientpid 0218`),
+  then a clean request/reply ping-pong (`read pid 0020` / `write pid 0218` alternating). The **last**
+  event on that connection is `read pid 0020 ... mqempty 1`: the host is blocked waiting for a browser
+  reply that never comes. `pipe_end_read/write/disconnect/transceive`, `listen`, `client-open`,
+  `server-create` and `PAIR` are the probe points.
+- ALPC is **not** the WebView2 transport: every ALPC message in a 40 s run is intra-process
+  (`cur 0020 port ... pid 0020 peer ... peerpid 0020`, sizes 168/196/204/256/332, ids 1..18) — the
+  CoreMessaging/CoreUICall self-hosted registrar conversation; it ends with an armed receive, which is
+  the idle pump state, not the stall.
+- The browser family is quiesced, not crashed (0 dumps). The last `queue_async` activity for the
+  browser children is a repeated pair of queueing sites ~2.9 KB apart in one server function, on two
+  async queues 16 bytes apart belonging to one fd (an object with 2-3 `async_queue` fields plus a
+  separate fd — pipe-ends have their queues inline, so it is *not* the named-pipe model; candidates
+  `serial`, `mailslot`, `console`/`winstation`). ASLR made the captured caller addresses unusable
+  (the in-run `/proc/<wineserver>/maps` capture kept failing) — capturing the base in-run is the
+  cheap next step, `addr2line -f -C -e server/wineserver <off>` then names the site.
+- `/tmp/wa/blockprobe.sh` (zero-instrumentation census: `/proc/<pid>/task/*/syscall|wchan` + fd tables,
+  keyed by `--type=`): the app UI thread sits in `read(fd=10, 16)` = a deferred wineserver request
+  (the fork's server channel is a `pipe()` pair, `F_SETPIPE_SZ` in `668e61cc8`, so both ends show up
+  as one inode in the same process); the browser's `Chrome_IOThread` sits in the same shape on fd `0x68`.
+  No pipe inode is shared between the app and the browser — that is expected: the data rides the
+  **server's** `iosb` buffers (`pipe_end_write` queues a message on the peer's read queue), not a
+  Linux pipe.
+
+**Next.** (1) Capture the wineserver text base in-run and symbolize the two `queue_async` callers to
+name the object the browser parks on. (2) Dump the first 32 bytes of each `pipe_end_write` on the
+host<->browser connection to see the last mojom request the host sent (header + method id) and whether
+the browser's read ever consumed it. (3) Extend the ntdll test to the app's exact `File.Copy`/`FindClose`
+order to catch the seeded-state trigger. (4) Only then re-open the DComp/visual-tree wall: with
+`Navigate` never called there is no page to composite, so the black screenshot is downstream of this wall.
+
+**Harnesses added.** `stage_probe.sh` (clean-state staging determinism, per-run inode/file snapshots +
+applog window diff), `seed_probe.sh` (seeded-state determinism, bootstrap-error count),
+`blockprobe.sh` (per-thread syscall/wchan/fd census for the app and every `--type=` browser process),
+`pipe_probe_run.sh` / `final_probe.sh` / `cap2.sh` (instrumented-wineserver runs), `runtest.sh`
+(ntdll suite against the deployed `/tmp/wbnew`), `env.sh` (the gate env in one source). Probe sources:
+`wine_probes.patch` (ALPC flow + `queue_async` callers) and `named_pipe.c.probed` (pipe lifecycle).
+The deployed wineserver must be rebuilt clean after probing (`make server/wineserver` + `cp` — a running
+server holds the file: `Text file busy`).
