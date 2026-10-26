@@ -3351,3 +3351,46 @@ Implemented GPU timeline sync for DXGI surfaces in DirectComposition compositor:
 - Wine commit `c65a614a` on `ultimate`, pushed to `github/ultimate`.
 
 
+## Session 2026-10-26(k): the msedge.dll+0x487d2a3 FATAL is dead — dcomp companion exports + the dxgi→dcomp dependency edge; the GPU children now initialize and present (wine tips `6703a04e6 873b12d7c 1f922078a`, branch `ultimate`)
+
+**The pad is a `LOG(FATAL)` int3 in `ui/gl/direct_composition_support.cc CreateCompositionDevices`, and it fires on
+`GetProcAddress`, not on any interface.** String block `0x131860a0` decodes to `..\..\ui\gl\direct_composition_support.cc`
+with messages `Failed to load dxgi.dll`, `Failed to load dcomp.dll`, `GetProcAddress failed for DCompositionCreateDevice3`,
+`DCompositionCreateDevice3 failed: `(772), `Failed to retrieve IDCompositionDevice3: ` (780), and the resolved name set
+`DCompositionCreateDevice3, DCompositionGetFrameId, DCompositionGetStatistics, DCompositionWaitForCompositorClock`.
+The function resolves those four by name from the **loaded** dcomp module (`GetModuleHandleW` + `GetProcAddress`,
+module-handle null-checks at `+0x487d100/0x120`) and `LOG(FATAL)`s at the int3 pad `+0x487d2a3`. In release WebView2 a
+FATAL never logs (`ShouldCreateLogMessage(FATAL) == false`) — that is why no `device.cc` string ever appears in stderr and
+why every prior "read the FATAL line" attempt was empty. Two Wine defects made the chain die, and the crashpad RIP
+`0x487d2a3` in the 4-thread children (21-29 s, 4 dumps/run) was their union:
+1. **Wine dcomp.dll exported neither `DCompositionGetFrameId` nor `DCompositionGetStatistics`** — the name resolution
+   returned NULL → FATAL. Fixed: `6703a04e6 dcomp: Implement DCompositionCreateDevice3 companion entry points.` — both
+   functions over an emulated compositor clock derived from the query performance counter at a nominal 60 Hz, so the frame
+   id advances monotonically and the statistics return a consistent timestamp.
+2. **The GPU child never has dcomp.dll loaded.** It loads d3d11/dxgi (ANGLE → wined3d GL); on Windows dcomp.dll is a
+   static dependency of the graphics stack, so `GetModuleHandleW(L"dcomp.dll")` finds it; in Wine it returned NULL → FATAL
+   (the crashpad module list of every dead child: 4 modules, no dcomp, no dxgi — dead before the D3D path). Fixed:
+   `873b12d7c dxgi: Load the composition library at process attach.` — dxgi loads dcomp.dll at `DLL_PROCESS_ATTACH`,
+   matching the Windows dependency edge; the trace shows every child now: `...EdgeWebView...dcomp.dll not found` (altered
+   search path probe) → `Loaded C:\windows\system32\dcomp.dll: builtin` at dxgi attach, t=5 s, before the FATAL window.
+3. Deployment archaeology: the unproven slab allocator + per-pipe 256 KB SHM commits (b8ed8b05c/829be8e40/bfbd49bcb) were
+   removed from the server (`1f922078a server: Maintain SERVER_PROTOCOL_VERSION 966 to preserve ABI compatibility`,
+   `STATUS_NOT_IMPLEMENTED` stub for the request). 9308 runaway `explorer.exe` from a services restart loop and a full
+   `/tmp` were cleared; the deployment chain was rebuilt coherently (`make install` → `/tmp/wbnew`, prefix via `sync.sh`,
+   loader selfdir pairs), because the deployed loader/ntdll/wineserver had drifted across three protocol generations.
+
+**Measured: the crash is dead.** 9 consecutive gate runs (3×60 s + battery 6×60 s + 160 s): `fatal=0`, **0 crashpad dumps**
+(was 4/run, 2× at `msedge.dll+0x487d2a3` + browser cascade at `+0x462ea9e`), deterministic `APP_RC=124 ALIVE` with
+`createdwins=140`, `xamlwin=1`, `rendwin=2`. The GPU children run the full path: `WineDXGI_DeviceWindow`,
+`dxgi_factory_CreateSwapChainForComposition ... (size 1058x1024)`, `d3d11_swapchain_present` (live frame presents),
+`ps` at t=15 s shows `--type=gpu-process` and `--type=renderer`. `GONE=30` persists **as a clean exit, not a crash**
+(zero dumps, zero int3): the browser shuts down at t≈25-30 s because the WebView2 host handshake no longer completes —
+`AddBrowserExtension` is absent from `applog.txt` (ground truth had `{"id":1,"result":{"identifier":"1"}}`),
+`originate=0`, `navigate=0`, `webwa=0`. The next wall is the host↔browser mojo request (`0x3ccd0fb301`/method `0x16`),
+not the GPU children. Frame at t=130 s (`wa_qr_after.png`): 1280×1024, exactly 1 colour — pure black (no QR, no page,
+no blank browser surface mapped).
+
+**Suites vs baselines: no regressions.** dcomp 1160 executed / 41 failures == baseline; d3d11 562751 executed / 113
+failures == baseline; dxgi hits the 300 s cap identically to baseline. Battery 6/6 `ALIVE_60s wins=140 fatal=0`.
+Pristine app binaries 4/4 (`CoreMessagingXP.dll dwmcorei.dll Microsoft.Internal.FrameworkUdk.dll Microsoft.ui.xaml.dll`),
+zero probe markers in the deployed dcomp/dxgi/ntdll/wineserver.
