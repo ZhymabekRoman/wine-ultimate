@@ -41,7 +41,7 @@ static inline int wine_uring_is_enabled(void)
     if (enabled == -1)
     {
         const char *env = getenv("WINE_IO_URING");
-        enabled = (env && *env && strcmp(env, "0") != 0) ? 1 : 0;
+        enabled = (!env || strcmp(env, "0") != 0) ? 1 : 0;
     }
     return enabled;
 }
