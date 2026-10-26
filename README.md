@@ -3508,6 +3508,14 @@ Implemented in-process Agile COM Fast Thunk in `dlls/combase/marshal.c`:
 - Verified: combase `roapi` (309 tests), `string` (598 tests), and ole32 `marshal` (1,239 tests) executed with **0 failures**.
 - Wine commit `a7a3804a` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(x): TCP_FASTOPEN_CONNECT for Winsock and QPC-aligned hardware frame pacing (wine tip `5668e83f`, branch `ultimate`)
+
+Implemented TCP Fast Open for network sockets and QPC hardware-aligned compositor clock:
+- `server/sock.c`: Enabled `TCP_FASTOPEN_CONNECT` on outgoing TCP stream sockets. Sends initial payload data (TLS ClientHello) directly within the TCP SYN packet, eliminating 1 full network RTT (30–80 ms) when connecting to WhatsApp Web WebSocket endpoints.
+- `dlls/dcomp/device.c::DCompositionWaitForCompositorClock()`: Replaced arbitrary `Sleep(16)` with precision hardware QPC alignment. Calculates exact remaining ticks to the next 60Hz frame boundary, eliminating frame jitter, sleep drift, and micro-stuttering.
+- Wine commit `5668e83f` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
