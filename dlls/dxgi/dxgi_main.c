@@ -264,3 +264,17 @@ HRESULT WINAPI DXGIGetDebugInterface1(UINT flags, REFIID iid, void **debug)
     WARN("Returning DXGI_ERROR_SDK_COMPONENT_MISSING.\n");
     return DXGI_ERROR_SDK_COMPONENT_MISSING;
 }
+
+HRESULT WINAPI DXGIDisableVBlankVirtualization(void)
+{
+    FIXME("Stub.\n");
+
+    return S_OK;
+}
+
+HRESULT WINAPI DXGIEnableVBlankVirtualization(void)
+{
+    FIXME("Stub.\n");
+
+    return S_OK;
+}

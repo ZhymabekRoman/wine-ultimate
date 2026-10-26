@@ -139,3 +139,6 @@ interface IDXGIFactory7 : IDXGIFactory6
         [in] DWORD cookie
     );
 }
+
+[local] HRESULT __stdcall DXGIDisableVBlankVirtualization(void);
+[local] HRESULT __stdcall DXGIEnableVBlankVirtualization(void);
