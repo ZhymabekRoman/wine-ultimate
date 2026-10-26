@@ -517,6 +517,67 @@ static void test_arm64_skip_loader_init(void)
     CloseHandle( thread );
 }
 
+static void test_inline_patch_trampolines(void)
+{
+#ifdef __x86_64__
+    HMODULE kernel32 = GetModuleHandleA("kernel32.dll");
+    void *p_get_tid, *p_get_heap;
+    RTL_CRITICAL_SECTION cs;
+    DWORD tls_idx;
+    void *tls_val;
+    HANDLE hproc, hthread;
+
+    if (!kernel32) return;
+
+    /* 1. Pointer identity test: GetProcAddress vs IAT */
+    p_get_tid = (void *)GetProcAddress(kernel32, "GetCurrentThreadId");
+    ok(p_get_tid != NULL, "failed to get GetCurrentThreadId\n");
+
+    p_get_heap = (void *)GetProcAddress(kernel32, "GetProcessHeap");
+    ok(p_get_heap != NULL, "failed to get GetProcessHeap\n");
+
+    /* 2. Pseudohandles */
+    hproc = GetCurrentProcess();
+    ok(hproc == (HANDLE)(LONG_PTR)-1, "GetCurrentProcess expected -1, got %p\n", hproc);
+
+    hthread = GetCurrentThread();
+    ok(hthread == (HANDLE)(LONG_PTR)-2, "GetCurrentThread expected -2, got %p\n", hthread);
+
+    /* 3. TEB getters correctness */
+    ok(GetCurrentThreadId() == (DWORD)(DWORD_PTR)NtCurrentTeb()->ClientId.UniqueThread,
+       "GetCurrentThreadId mismatch\n");
+    ok(GetCurrentProcessId() == (DWORD)(DWORD_PTR)NtCurrentTeb()->ClientId.UniqueProcess,
+       "GetCurrentProcessId mismatch\n");
+    ok((ULONG_PTR)GetProcessHeap() == (ULONG_PTR)NtCurrentTeb()->Peb->ProcessHeap,
+       "GetProcessHeap mismatch\n");
+
+    /* 4. LastError roundtrip */
+    SetLastError(0x12345678);
+    ok(GetLastError() == 0x12345678, "GetLastError expected 0x12345678, got %#lx\n", GetLastError());
+    RtlSetLastWin32Error(0x87654321);
+    ok(RtlGetLastWin32Error() == 0x87654321, "RtlGetLastWin32Error expected 0x87654321, got %#lx\n", RtlGetLastWin32Error());
+
+    /* 5. TLS slot inlining */
+    tls_idx = TlsAlloc();
+    ok(tls_idx != TLS_OUT_OF_INDEXES, "TlsAlloc failed\n");
+    ok(TlsSetValue(tls_idx, (void *)0xDEADBEEF), "TlsSetValue failed\n");
+    tls_val = TlsGetValue(tls_idx);
+    ok(tls_val == (void *)0xDEADBEEF, "TlsGetValue expected 0xDEADBEEF, got %p\n", tls_val);
+    ok(TlsFree(tls_idx), "TlsFree failed\n");
+
+    /* 6. Lock-free critical section fast path */
+    RtlInitializeCriticalSection(&cs);
+    RtlEnterCriticalSection(&cs);
+    ok(cs.LockCount == 0, "uncontended LockCount expected 0, got %ld\n", cs.LockCount);
+    ok(cs.RecursionCount == 1, "RecursionCount expected 1, got %ld\n", cs.RecursionCount);
+    ok(cs.OwningThread == ULongToHandle(GetCurrentThreadId()), "OwningThread mismatch\n");
+    RtlLeaveCriticalSection(&cs);
+    ok(cs.LockCount == -1, "unlocked LockCount expected -1, got %ld\n", cs.LockCount);
+    ok(cs.RecursionCount == 0, "unlocked RecursionCount expected 0, got %ld\n", cs.RecursionCount);
+    RtlDeleteCriticalSection(&cs);
+#endif
+}
+
 START_TEST(thread)
 {
     init_function_pointers();
@@ -548,4 +609,5 @@ START_TEST(thread)
     test_thread_bypass_process_freeze();
     test_NtQueueApcThreadEx();
     test_skip_thread_attach();
+    test_inline_patch_trampolines();
 }
