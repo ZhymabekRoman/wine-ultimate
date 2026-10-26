@@ -3008,11 +3008,14 @@ struct shm_dentry_dir {
     uint64_t dev;
     uint64_t ino;
     uint64_t mtime;
+    uint32_t ready;
     uint16_t buckets[SHM_DENTRY_HASH_SIZE];
 };
 
 struct shm_dentry_cache {
     uint32_t magic;
+    uint32_t lock;
+    uint64_t server_start;
     uint32_t dir_count;
     uint32_t node_count;
     uint32_t name_pool_used;
@@ -3021,6 +3024,23 @@ struct shm_dentry_cache {
     char name_pool[SHM_NAME_POOL_SIZE];
 };
 
+static inline void shm_dentry_lock( struct shm_dentry_cache *shm )
+{
+    while (__atomic_test_and_set( &shm->lock, __ATOMIC_ACQUIRE ))
+    {
+#if defined(__x86_64__) || defined(__i386__)
+        __builtin_ia32_pause();
+#elif defined(__aarch64__)
+        __asm__ __volatile__( "yield" );
+#endif
+    }
+}
+
+static inline void shm_dentry_unlock( struct shm_dentry_cache *shm )
+{
+    __atomic_clear( &shm->lock, __ATOMIC_RELEASE );
+}
+
 static struct shm_dentry_cache *shm_dentry_cache = NULL;
 
 static void init_shm_dentry_cache(void)
@@ -3028,7 +3048,10 @@ static void init_shm_dentry_cache(void)
     char shm_path[64];
     int fd;
 
-    if (shm_dentry_cache) return;
+    if (shm_dentry_cache)
+    {
+        if (shm_dentry_cache->server_start == (uint64_t)server_start_time) return;
+    }
 
     snprintf( shm_path, sizeof(shm_path), "/dev/shm/wine-vfs-dentry-%u", (unsigned int)getuid() );
     fd = open( shm_path, O_RDWR | O_CREAT, 0600 );
@@ -3040,11 +3063,17 @@ static void init_shm_dentry_cache(void)
         if (ptr != MAP_FAILED)
         {
             shm_dentry_cache = (struct shm_dentry_cache *)ptr;
-            if (shm_dentry_cache->magic != 0x5744454E)
+            if (shm_dentry_cache->magic != 0x5744454E || shm_dentry_cache->server_start != (uint64_t)server_start_time)
             {
-                memset( ptr, 0, sizeof(struct shm_dentry_cache) );
-                shm_dentry_cache->magic = 0x5744454E;
-                shm_dentry_cache->node_count = 1;
+                shm_dentry_lock( shm_dentry_cache );
+                if (shm_dentry_cache->magic != 0x5744454E || shm_dentry_cache->server_start != (uint64_t)server_start_time)
+                {
+                    memset( ptr, 0, sizeof(struct shm_dentry_cache) );
+                    shm_dentry_cache->server_start = (uint64_t)server_start_time;
+                    shm_dentry_cache->node_count = 1;
+                    shm_dentry_cache->magic = 0x5744454E;
+                }
+                shm_dentry_unlock( shm_dentry_cache );
             }
         }
     }
@@ -3202,7 +3231,7 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
                 struct shm_dentry_dir *sdir = &shm_dentry_cache->dirs[i];
                 if (sdir->dev == st.st_dev && sdir->ino == st.st_ino)
                 {
-                    if (sdir->mtime == st.st_mtime)
+                    if (sdir->mtime == st.st_mtime && __atomic_load_n( &sdir->ready, __ATOMIC_ACQUIRE ))
                     {
                         uint16_t node_idx = sdir->buckets[shm_h];
                         unix_name[pos - 1] = '/';
@@ -3278,13 +3307,18 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
             new_cache->ino = st.st_ino;
             new_cache->mtime = st.st_mtime;
 
-            if (shm_dentry_cache && shm_dentry_cache->dir_count < SHM_DENTRY_MAX_DIRS)
+            if (shm_dentry_cache)
             {
-                new_sdir = &shm_dentry_cache->dirs[shm_dentry_cache->dir_count++];
-                memset( new_sdir->buckets, 0, sizeof(new_sdir->buckets) );
-                new_sdir->dev = st.st_dev;
-                new_sdir->ino = st.st_ino;
-                new_sdir->mtime = st.st_mtime;
+                shm_dentry_lock( shm_dentry_cache );
+                if (shm_dentry_cache->dir_count < SHM_DENTRY_MAX_DIRS)
+                {
+                    new_sdir = &shm_dentry_cache->dirs[shm_dentry_cache->dir_count++];
+                    memset( new_sdir->buckets, 0, sizeof(new_sdir->buckets) );
+                    new_sdir->dev = st.st_dev;
+                    new_sdir->ino = st.st_ino;
+                    new_sdir->mtime = st.st_mtime;
+                    new_sdir->ready = 0;
+                }
             }
 
             unix_name[pos - 1] = '/';
@@ -3329,6 +3363,15 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
                 }
             }
             closedir( dir );
+            if (new_sdir)
+            {
+                __atomic_store_n( &new_sdir->ready, 1, __ATOMIC_RELEASE );
+                shm_dentry_unlock( shm_dentry_cache );
+            }
+            else if (shm_dentry_cache)
+            {
+                shm_dentry_unlock( shm_dentry_cache );
+            }
             pthread_mutex_unlock( &dentry_mutex );
             if (found_status == STATUS_SUCCESS) return STATUS_SUCCESS;
             goto not_found;
