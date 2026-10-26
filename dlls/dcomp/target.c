@@ -109,6 +109,7 @@ static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
 {
     struct composition_target *target = impl_from_IDCompositionTarget(iface);
     struct composition_visual *composition_visual;
+    IDCompositionVisual *old_root;
 
     TRACE("DCOMP: target_SetRoot iface %p, target %p, visual %p, hwnd %p\n", iface, target, visual, target->hwnd);
 
@@ -127,18 +128,27 @@ static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
         IDCompositionVisual_AddRef(visual);
     }
 
-    if (target->root)
-    {
-        composition_visual = impl_from_IDCompositionVisual(target->root);
-        composition_visual->is_root = FALSE;
-        IDCompositionVisual_Release(target->root);
-    }
+    old_root = target->root;
+    if (old_root)
+        impl_from_IDCompositionVisual(old_root)->is_root = FALSE;
     target->root = visual;
 
-    if (target->shared_visual_handle)
-        shared_visual_target_set_root(target->shared_visual_handle, target->root);
-
     dcomp_unlock();
+
+    /* The window server write, the cache publish and the release of the previous
+     * root all run with dcomp_cs released. The order matters: the cache is what
+     * readers consult, so it must not become visible before the server holds the
+     * same value, or a reader's query fetches the previous value and overwrites
+     * the cache with it. Releasing the old root can free a visual tree. */
+    if (target->shared_visual_handle)
+    {
+        shared_visual_target_set_root(target->shared_visual_handle, visual);
+        shared_visual_cache_set(target->shared_visual_handle, visual);
+    }
+
+    if (old_root)
+        IDCompositionVisual_Release(old_root);
+
     ensure_composite_thread(impl_from_IDCompositionDevice(target->device));
     return S_OK;
 }

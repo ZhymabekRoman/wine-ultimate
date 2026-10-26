@@ -31,8 +31,8 @@ struct composition_device
     IDCompositionSurfaceUnknown *drawing_surface;
     struct list targets;
     HANDLE thread;
-    BOOL exit_thread;
-    BOOL thread_exited;
+    LONG exit_thread;
+    LONG thread_exited;
     int version;
     LONG ref;
     IUnknown *rendering_device;
@@ -199,6 +199,8 @@ static inline struct composition_visual *impl_from_IDCompositionVisualUnknown(ID
 
 void dcomp_lock(void);
 void dcomp_unlock(void);
+void dcomp_reclaim_push(IUnknown *object);
+void shared_visual_cache_set(HANDLE handle, IDCompositionVisual *root);
 HRESULT create_surface(struct composition_surface_factory *factory, UINT width, UINT height,
         DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface);
 HRESULT create_surface_factory(struct composition_device *device, IUnknown *rendering_device, IDCompositionSurfaceFactory **factory);

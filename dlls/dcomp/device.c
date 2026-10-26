@@ -40,6 +40,19 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
+/* Guards device->rendering_device and device->surface_factory, both of which
+ * are created by calls into Direct3D. Locking order is dcomp_device_cs before
+ * dcomp_cs, never the reverse, and dcomp_cs is never held across the creation
+ * itself. */
+static CRITICAL_SECTION dcomp_device_cs;
+static CRITICAL_SECTION_DEBUG dcomp_device_debug =
+{
+    0, 0, &dcomp_device_cs,
+    { &dcomp_device_debug.ProcessLocksList, &dcomp_device_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": dcomp_device_cs") }
+};
+static CRITICAL_SECTION dcomp_device_cs = { &dcomp_device_debug, -1, 0, 0, 0, 0 };
+
 static CRITICAL_SECTION dcomp_cs;
 static CRITICAL_SECTION_DEBUG dcomp_debug =
 {
@@ -61,6 +74,9 @@ void dcomp_unlock(void)
 
 struct list dcomp_devices = LIST_INIT(dcomp_devices);
 
+/* A kernel call, not a window server round trip and not a lock: it is the only
+ * call permitted while dcomp_cs is held, because it cannot be delayed by
+ * another thread of this process. */
 static inline BOOL compare_handles(HANDLE h1, HANDLE h2)
 {
     if (h1 == h2) return TRUE;
@@ -203,7 +219,7 @@ static ULONG STDMETHODCALLTYPE device_Release(IDCompositionDevice *iface)
 
         if (device->thread)
         {
-            device->exit_thread = TRUE;
+            InterlockedExchange(&device->exit_thread, TRUE);
             WaitForSingleObject(device->thread, INFINITE);
             CloseHandle(device->thread);
             device->thread = NULL;
@@ -544,8 +560,14 @@ static HWND find_root_top_level_window(void)
     return hwnd;
 }
 
+/* Renders one frame into the window of 'target'. Must be called with dcomp_cs
+ * released: it enters Direct3D, Direct2D, GDI and the window manager. The
+ * Direct2D context and interop target are the ones captured for the frame and
+ * are not owned here; 'pt' is the already accumulated visual offset chain. */
 static void do_composite_dxgi_surface(const struct composition_target *target,
-                                      const struct composition_visual *visual,
+                                      HWND target_hwnd, POINT pt,
+                                      ID2D1DeviceContext *d2d_context_in,
+                                      ID2D1GdiInteropRenderTarget *interop_in,
                                       IDXGISurface *dxgi_surface)
 {
     ID3DDeviceContextState *state = NULL, *old_state = NULL;
@@ -564,8 +586,6 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
     ID2D1Device *d2d_device = NULL;
     IDXGIDevice *dxgi_dev = NULL;
     HWND root_hwnd = NULL;
-    POINT pt = {0, 0};
-    const struct composition_visual *v;
     HDC dst_dc, src_dc;
     D2D1_SIZE_U size;
     HRESULT hr;
@@ -577,12 +597,6 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
         D3D_FEATURE_LEVEL_10_1,
         D3D_FEATURE_LEVEL_10_0,
     };
-
-    if (!target->root)
-    {
-        ERR("Target has no root.\n");
-        goto done;
-    }
 
     hr = IDXGISurface_GetDevice(dxgi_surface, &IID_ID3D11Device1, (void **)&d3d11_device);
     if (FAILED(hr))
@@ -653,8 +667,8 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
     bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_GDI_COMPATIBLE;
     bitmap_desc.colorContext = NULL;
 
-    d2d_context = visual->device_context;
-    interop = visual->interop;
+    d2d_context = d2d_context_in;
+    interop = interop_in;
 
     if (!d2d_context || !interop)
     {
@@ -714,32 +728,23 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
         goto done;
     }
 
-    if (target->hwnd && IsWindow(target->hwnd) && IsWindowVisible(target->hwnd))
+    if (target_hwnd && IsWindow(target_hwnd) && IsWindowVisible(target_hwnd))
     {
         WCHAR class_name[64];
-        RealGetWindowClassW(target->hwnd, class_name, ARRAY_SIZE(class_name));
+        RealGetWindowClassW(target_hwnd, class_name, ARRAY_SIZE(class_name));
         if (wcscmp(class_name, L"static") != 0)
         {
-            root_hwnd = GetAncestor(target->hwnd, GA_ROOT);
+            root_hwnd = GetAncestor(target_hwnd, GA_ROOT);
             if (!root_hwnd)
-                root_hwnd = target->hwnd;
+                root_hwnd = target_hwnd;
 
-            if (root_hwnd != target->hwnd)
-                MapWindowPoints(target->hwnd, root_hwnd, &pt, 1);
+            if (root_hwnd != target_hwnd)
+                MapWindowPoints(target_hwnd, root_hwnd, &pt, 1);
         }
     }
 
     if (!root_hwnd || !IsWindow(root_hwnd))
         root_hwnd = find_root_top_level_window();
-
-    {
-        unsigned int depth = 0;
-        for (v = visual; v && depth < 256; v = v->parent, depth++)
-        {
-            pt.x += (LONG)v->offset_x;
-            pt.y += (LONG)v->offset_y;
-        }
-    }
 
     if (root_hwnd)
     {
@@ -748,7 +753,7 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
         {
             BitBlt(dst_dc, pt.x, pt.y, size.width, size.height, src_dc, 0, 0, SRCCOPY);
             TRACE("DCOMP: blitted frame %ux%u to root_hwnd %p (target hwnd %p at %ld,%ld)\n",
-                (unsigned int)size.width, (unsigned int)size.height, root_hwnd, target->hwnd, pt.x, pt.y);
+                (unsigned int)size.width, (unsigned int)size.height, root_hwnd, target_hwnd, pt.x, pt.y);
             ReleaseDC(root_hwnd, dst_dc);
         }
         else
@@ -793,23 +798,97 @@ done:
         ID3D11Device1_Release(d3d11_device);
 }
 
-static struct composition_visual * shared_visual_target_get_root(HANDLE shared_visual_handle)
+/*
+ * A shared visual handle is created and consumed inside one process; the
+ * window server only maps it to the root pointer of the target that published
+ * it. That mapping is a window server round trip, and the server is the queue
+ * every thread of the process is serialised on, so it is cached in process.
+ * The cache is written by the publisher and refreshed by the composite tick
+ * outside dcomp_cs; code that owns dcomp_cs only reads memory.
+ */
+struct shared_visual_entry
 {
-    struct composition_visual *visual = NULL;
+    HANDLE handle;
+    IDCompositionVisual *root;
+    struct list entry;
+};
+
+static IDCompositionVisual *shared_visual_cache_lookup(HANDLE handle);
+static struct composition_visual *shared_visual_cached_root(HANDLE shared_visual_handle);
+
+static struct list shared_visual_cache = LIST_INIT(shared_visual_cache);
+
+static IDCompositionVisual *shared_visual_cache_lookup(HANDLE handle)
+{
+    struct shared_visual_entry *entry;
+
+    LIST_FOR_EACH_ENTRY(entry, &shared_visual_cache, struct shared_visual_entry, entry)
+        if (entry->handle == handle)
+            return entry->root;
+
+    return NULL;
+}
+
+/* dcomp_cs held. */
+void shared_visual_cache_set(HANDLE handle, IDCompositionVisual *root)
+{
+    struct shared_visual_entry *entry;
+
+    LIST_FOR_EACH_ENTRY(entry, &shared_visual_cache, struct shared_visual_entry, entry)
+    {
+        if (entry->handle == handle)
+        {
+            entry->root = root;
+            return;
+        }
+    }
+
+    if ((entry = malloc(sizeof(*entry))))
+    {
+        entry->handle = handle;
+        entry->root = root;
+        list_add_tail(&shared_visual_cache, &entry->entry);
+    }
+}
+
+/* Window server round trip: must run with dcomp_cs released. */
+IDCompositionVisual *shared_visual_query_root(HANDLE shared_visual_handle)
+{
+    IDCompositionVisual *root = NULL;
     NTSTATUS status;
 
     SERVER_START_REQ(dcomp_get_shared_visual_info)
     {
         req->handle = wine_server_obj_handle(shared_visual_handle);
         if (!(status = wine_server_call(req)))
-            visual = impl_from_IDCompositionVisual(wine_server_get_ptr(reply->target_root));
+            root = wine_server_get_ptr(reply->target_root);
     }
     SERVER_END_REQ;
 
     if (status)
-        ERR("dcomp_get_shared_visual_info failed, not in the same process? status %#lx.\n", status);
+    {
+        struct composition_visual *cached;
 
-    return visual;
+        ERR("dcomp_get_shared_visual_info failed, not in the same process? status %#lx.\n", status);
+        cached = shared_visual_cached_root(shared_visual_handle);
+        return cached ? (IDCompositionVisual *)&cached->IDCompositionVisualUnknown_iface : NULL;
+    }
+
+    /* Publish the mapping on every successful query, including a cleared root:
+     * a target that lost its root must not keep serving the stale one. */
+    dcomp_lock();
+    shared_visual_cache_set(shared_visual_handle, root);
+    dcomp_unlock();
+
+    return root;
+}
+
+/* dcomp_cs held: memory only. */
+static struct composition_visual *shared_visual_cached_root(HANDLE shared_visual_handle)
+{
+    IDCompositionVisual *root = shared_visual_cache_lookup(shared_visual_handle);
+
+    return root ? impl_from_IDCompositionVisual(root) : NULL;
 }
 
 static struct composition_visual *find_container_visual_in_tree(struct composition_visual *visual,
@@ -826,7 +905,7 @@ static struct composition_visual *find_container_visual_in_tree(struct compositi
         if (compare_handles(visual->shared_visual_handle, shared_handle))
             return visual;
 
-        if (target_root && shared_visual_target_get_root(visual->shared_visual_handle) == target_root)
+        if (target_root && shared_visual_cached_root(visual->shared_visual_handle) == target_root)
             return visual;
     }
 
@@ -884,7 +963,7 @@ static struct composition_visual *resolve_shared_visual_root(HANDLE shared_handl
     if (!shared_handle)
         return NULL;
 
-    root = shared_visual_target_get_root(shared_handle);
+    root = shared_visual_cached_root(shared_handle);
     if (root && (root->content || !list_empty(&root->child_visuals)))
         return root;
 
@@ -919,248 +998,649 @@ static BOOL visual_tree_has_content(struct composition_visual *visual)
     return FALSE;
 }
 
-static HRESULT do_composite(const struct composition_target *target, struct composition_visual *visual)
+/*
+ * Locking: dcomp_cs protects the composition object graph - the device list,
+ * the target lists, the visual trees and the per-target bookkeeping. It may
+ * only be held across pure memory operations on dcomp's own objects, plus a
+ * refcount bump on one. Entering Direct3D, Direct2D, GDI, the window manager
+ * or the window server from inside the critical section inverts against the
+ * threads that call into dcomp from those subsystems - a browser compositor
+ * thread calling SetContent() already owns the Direct3D device lock, and the
+ * window server is the queue every thread of the process is serialised on -
+ * and that inversion parks the composite thread inside the critical section
+ * for a full 60 second critical section timeout, which blocks visual
+ * attachment and everything that follows it.
+ *
+ * A refresh tick therefore runs in five steps: collect the shared visual
+ * handles and the target snapshots with the critical section held; resolve
+ * those handles with the window server and resolve the window each target
+ * composites into with the critical section released; flatten the visual trees
+ * into a list of self-contained render jobs with the critical section held;
+ * take the Direct3D references and blit with the critical section released;
+ * write the bookkeeping back with the critical section held.
+ *
+ * Content, Direct2D contexts and interop targets are only ever referenced by
+ * the visual that owns them, so a frame keeps the visual alive while it
+ * records their pointers, and the objects released by a dcomp entry point that
+ * owns the critical section are deferred to the reclaim list below and dropped
+ * at the start of the next tick. A recorded pointer therefore cannot be freed
+ * while a frame is in flight.
+ */
+
+static struct list dcomp_reclaim_list = LIST_INIT(dcomp_reclaim_list);
+
+struct dcomp_reclaim_entry
 {
-    struct composition_visual *child_visual;
-    IDXGISurface *dxgi_surface = NULL;
-    BOOL rendered_any = FALSE;
-    HRESULT hr;
+    IUnknown *object;
+    struct list entry;
+};
 
-    if (!visual)
-        return E_POINTER;
+void dcomp_reclaim_push(IUnknown *object)
+{
+    struct dcomp_reclaim_entry *entry = malloc(sizeof(*entry));
 
-    TRACE("DCOMP: do_composite visual %p, shared_handle %p, content %p, has_children %d\n",
-        visual, visual->shared_visual_handle, visual->content, !list_empty(&visual->child_visuals));
+    if (!entry)
+    {
+        /* Out of memory: releasing here is safe on the caller's side, which is
+         * dropping the last dcomp reference and is not inside the composite
+         * tick that recorded the pointer. */
+        IUnknown_Release(object);
+        return;
+    }
+
+    entry->object = object;
+    dcomp_lock();
+    list_add_tail(&dcomp_reclaim_list, &entry->entry);
+    dcomp_unlock();
+}
+
+static void dcomp_reclaim_drain(void)
+{
+    struct dcomp_reclaim_entry *entry, *entry_next;
+    struct list list;
+
+    list_init(&list);
+    dcomp_lock();
+    LIST_FOR_EACH_ENTRY_SAFE(entry, entry_next, &dcomp_reclaim_list, struct dcomp_reclaim_entry, entry)
+    {
+        list_remove(&entry->entry);
+        list_add_tail(&list, &entry->entry);
+    }
+    dcomp_unlock();
+
+    /* Releasing enters Direct3D and GDI: run with the critical section released. */
+    LIST_FOR_EACH_ENTRY_SAFE(entry, entry_next, &list, struct dcomp_reclaim_entry, entry)
+    {
+        list_remove(&entry->entry);
+        IUnknown_Release(entry->object);
+        free(entry);
+    }
+}
+
+/* One queued blit: the pointers it needs, with the references that keep the
+ * dcomp objects alive across the render pass. */
+struct composite_frame
+{
+    struct composition_target *target;
+    struct composition_visual *visual;        /* refcounted */
+    struct composition_surface *surface;      /* refcounted, set for the fallback blit */
+    IUnknown *content;                        /* raw visual->content, referenced at render time */
+    ID2D1DeviceContext *device_context;       /* raw visual->device_context */
+    ID2D1GdiInteropRenderTarget *interop;     /* raw visual->interop */
+    IUnknown *frame_content;                  /* references taken outside the critical section */
+    ID2D1DeviceContext *frame_context;
+    ID2D1GdiInteropRenderTarget *frame_interop;
+    unsigned int version;                     /* content_version this frame renders */
+    HWND target_hwnd;
+    POINT pt;                                 /* accumulated visual offset chain */
+    BOOL is_fallback;
+    BOOL rendered;
+    struct list entry;
+};
+
+/* A target plus the window it composites into, for the steps that must run
+ * outside the critical section. */
+struct target_snapshot
+{
+    struct composition_target *target;        /* refcounted */
+    struct composition_visual *root;          /* refcounted, may be NULL */
+    struct composition_visual *container;     /* refcounted, may be NULL */
+    struct composition_target *host_target;   /* refcounted, may be NULL */
+    HWND hwnd;
+    HWND resolved_hwnd;
+    BOOL needs_hwnd;
+    BOOL use_container;
+    struct list entry;
+};
+
+struct handle_entry
+{
+    HANDLE handle;
+    struct list entry;
+};
+
+static void composite_frame_init(struct composite_frame *frame, struct composition_target *target,
+        struct composition_visual *visual, HWND target_hwnd, POINT pt)
+{
+    frame->target = target;
+    frame->visual = visual;
+    frame->surface = NULL;
+    frame->content = NULL;
+    frame->device_context = NULL;
+    frame->interop = NULL;
+    frame->version = 0;
+    frame->frame_content = NULL;
+    frame->frame_context = NULL;
+    frame->frame_interop = NULL;
+    frame->target_hwnd = target_hwnd;
+    frame->pt = pt;
+    frame->is_fallback = FALSE;
+    frame->rendered = FALSE;
+    list_init(&frame->entry);
+}
+
+static void collect_visual_frames(struct composition_target *target, struct composition_visual *visual,
+        HWND target_hwnd, POINT pt, unsigned int depth, struct list *frames, unsigned int *queued)
+{
+    struct composition_visual *child, *child_root;
+    struct composite_frame *frame;
+
+    if (!visual || depth > 256)
+        return;
+
+    pt.x += (LONG)visual->offset_x;
+    pt.y += (LONG)visual->offset_y;
 
     if (visual->shared_visual_handle)
     {
-        struct composition_visual *child_root = resolve_shared_visual_root(visual->shared_visual_handle);
-        TRACE("DCOMP: do_composite visual %p shared_handle %p -> child_root %p\n",
-            visual, visual->shared_visual_handle, child_root);
+        child_root = resolve_shared_visual_root(visual->shared_visual_handle);
         if (child_root && child_root != visual)
-        {
-            struct composition_visual *old_parent = child_root->parent;
-            child_root->parent = visual;
-            hr = do_composite(target, child_root);
-            child_root->parent = old_parent;
-            if (SUCCEEDED(hr))
-                rendered_any = TRUE;
-        }
+            collect_visual_frames(target, child_root, target_hwnd, pt, depth + 1, frames, queued);
 
-        if (!rendered_any && !visual_tree_has_content(child_root) &&
-            g_last_rendered_surface && g_last_rendered_surface->physical_surface &&
-            g_last_rendered_surface != target->composited_surface)
+        if (!*queued && !visual_tree_has_content(child_root) && g_last_rendered_surface
+                && g_last_rendered_surface->physical_surface
+                && g_last_rendered_surface != target->composited_surface)
         {
-            IDXGISurface *surface = NULL;
-            if (SUCCEEDED(IUnknown_QueryInterface(g_last_rendered_surface->physical_surface,
-                    &IID_IDXGISurface, (void **)&surface)))
+            if ((frame = malloc(sizeof(*frame))))
             {
-                TRACE("DCOMP: fallback blitting g_last_rendered_surface %p to hwnd %p\n",
-                    g_last_rendered_surface, target->hwnd);
-                do_composite_dxgi_surface(target, visual, surface);
-                IDXGISurface_Release(surface);
-                ((struct composition_target *)target)->composited_surface = g_last_rendered_surface;
-                rendered_any = TRUE;
+                composite_frame_init(frame, target, visual, target_hwnd, pt);
+                frame->surface = g_last_rendered_surface;
+                IDCompositionSurfaceUnknown_AddRef(&frame->surface->IDCompositionSurfaceUnknown_iface);
+                IDCompositionVisual_AddRef((IDCompositionVisual *)&visual->IDCompositionVisualUnknown_iface);
+                frame->is_fallback = TRUE;
+                list_add_tail(frames, &frame->entry);
+                (*queued)++;
             }
         }
     }
 
-    /* Render content */
-    if (visual->content)
+    if (visual->content && visual->content_version != visual->composited_version)
     {
-        IDCompositionSurface *surface = NULL;
-        IDXGISwapChain1 *swapchain = NULL;
-        IDXGISwapChain *swapchain_v1 = NULL;
-        ID3D11Texture2D *texture = NULL;
-        ID3D11Resource *d3d_res = NULL;
-        IDXGIResource *dxgi_res = NULL;
-        dxgi_surface = NULL;
+        if ((frame = malloc(sizeof(*frame))))
+        {
+            composite_frame_init(frame, target, visual, target_hwnd, pt);
+            frame->content = visual->content;
+            frame->device_context = visual->device_context;
+            frame->interop = visual->interop;
+            frame->version = visual->content_version;
+            IDCompositionVisual_AddRef((IDCompositionVisual *)&visual->IDCompositionVisualUnknown_iface);
+            list_add_tail(frames, &frame->entry);
+            (*queued)++;
+        }
+    }
 
-        TRACE("DCOMP: do_composite visual %p has content %p iid %s\n",
-            visual, visual->content, debugstr_guid(&visual->content_iid));
+    LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
+        collect_visual_frames(target, child, target_hwnd, pt, depth + 1, frames, queued);
+}
 
-        if (SUCCEEDED(IUnknown_QueryInterface(visual->content, &IID_IDCompositionSurface, (void **)&surface)))
+/* Pure memory: gather the shared visual handles in use, so that the window
+ * server round-trips that resolve them can run outside the critical section. */
+static void collect_visual_handles(struct composition_visual *visual, struct list *handles,
+        unsigned int depth)
+{
+    struct composition_visual *child;
+    struct handle_entry *entry;
+
+    if (!visual || depth > 256)
+        return;
+
+    if (visual->shared_visual_handle)
+    {
+        LIST_FOR_EACH_ENTRY(entry, handles, struct handle_entry, entry)
+            if (entry->handle == visual->shared_visual_handle)
+                return;
+
+        if ((entry = malloc(sizeof(*entry))))
         {
-            struct composition_surface *surface_impl = unsafe_impl_from_IDCompositionSurface(surface);
-            if (surface_impl)
+            entry->handle = visual->shared_visual_handle;
+            list_add_tail(handles, &entry->entry);
+        }
+    }
+
+    LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
+        collect_visual_handles(child, handles, depth + 1);
+}
+
+static void snapshot_device_targets(struct composition_device *device, struct list *snapshots,
+        struct list *handles)
+{
+    struct composition_target *target;
+    struct target_snapshot *snap;
+
+    dcomp_lock();
+    LIST_FOR_EACH_ENTRY(target, &device->targets, struct composition_target, entry)
+    {
+        if (!(snap = malloc(sizeof(*snap))))
+            continue;
+
+        snap->target = target;
+        IDCompositionTarget_AddRef(&target->IDCompositionTarget_iface);
+        snap->root = target->root ? impl_from_IDCompositionVisual(target->root) : NULL;
+        if (snap->root)
+            IDCompositionVisual_AddRef((IDCompositionVisual *)&snap->root->IDCompositionVisualUnknown_iface);
+        snap->hwnd = target->hwnd;
+        snap->resolved_hwnd = NULL;
+        snap->needs_hwnd = FALSE;
+        snap->use_container = FALSE;
+        snap->container = NULL;
+        snap->host_target = NULL;
+
+        if (target->shared_visual_handle)
+        {
+            struct handle_entry *entry;
+            if ((entry = malloc(sizeof(*entry))))
             {
-                if (surface_impl->physical_surface)
-                    IUnknown_QueryInterface(surface_impl->physical_surface, &IID_IDXGISurface, (void **)&dxgi_surface);
-                if (!dxgi_surface && surface_impl->draw_surface)
-                    ID3D11Texture2D_QueryInterface(surface_impl->draw_surface, &IID_IDXGISurface, (void **)&dxgi_surface);
+                entry->handle = target->shared_visual_handle;
+                list_add_tail(handles, &entry->entry);
             }
-            IDCompositionSurface_Release(surface);
-        }
-        else if (SUCCEEDED(IUnknown_QueryInterface(visual->content, &IID_IDXGISwapChain1, (void **)&swapchain)))
-        {
-            /* The front buffer is the last back buffer because the composition swapchain must
-                     * be created with DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL */
-            hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_IDXGISurface,
-                                           (void **)&dxgi_surface);
-            IDXGISwapChain1_Release(swapchain);
-            if (FAILED(hr))
-            {
-                ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
-            }
-        }
-        else if (SUCCEEDED(IUnknown_QueryInterface(visual->content, &IID_IDXGISwapChain, (void **)&swapchain_v1)))
-        {
-            hr = IDXGISwapChain_GetBuffer(swapchain_v1, 0, &IID_IDXGISurface,
-                                          (void **)&dxgi_surface);
-            IDXGISwapChain_Release(swapchain_v1);
-            if (FAILED(hr))
-            {
-                ERR("Failed to get the swapchain buffer, hr %#lx.\n", hr);
-            }
-        }
-        else if (SUCCEEDED(IUnknown_QueryInterface(visual->content, &IID_IDXGISurface, (void **)&dxgi_surface)))
-        {
-            /* direct IDXGISurface */
-        }
-        else if (SUCCEEDED(IUnknown_QueryInterface(visual->content, &IID_ID3D11Texture2D, (void **)&texture)))
-        {
-            ID3D11Texture2D_QueryInterface(texture, &IID_IDXGISurface, (void **)&dxgi_surface);
-            ID3D11Texture2D_Release(texture);
-        }
-        else if (SUCCEEDED(IUnknown_QueryInterface(visual->content, &IID_ID3D11Resource, (void **)&d3d_res)))
-        {
-            ID3D11Resource_QueryInterface(d3d_res, &IID_IDXGISurface, (void **)&dxgi_surface);
-            ID3D11Resource_Release(d3d_res);
-        }
-        else if (SUCCEEDED(IUnknown_QueryInterface(visual->content, &IID_IDXGIResource, (void **)&dxgi_res)))
-        {
-            IDXGIResource_QueryInterface(dxgi_res, &IID_IDXGISurface, (void **)&dxgi_surface);
-            IDXGIResource_Release(dxgi_res);
         }
 
-        if (dxgi_surface)
+        if (target->root)
+            collect_visual_handles(impl_from_IDCompositionVisual(target->root), handles, 0);
+
+        snap->container = NULL;
+        snap->host_target = NULL;
+        list_add_tail(snapshots, &snap->entry);
+    }
+    dcomp_unlock();
+}
+
+static void warm_shared_visual_cache(struct list *handles)
+{
+    struct handle_entry *entry;
+
+    /* Window server round-trips, outside the critical section. */
+    LIST_FOR_EACH_ENTRY(entry, handles, struct handle_entry, entry)
+    {
+        IDCompositionVisual *root = shared_visual_query_root(entry->handle);
+
+        dcomp_lock();
+        shared_visual_cache_set(entry->handle, root);
+        dcomp_unlock();
+    }
+}
+
+static void resolve_target_windows(struct list *snapshots)
+{
+    struct target_snapshot *snap;
+
+    LIST_FOR_EACH_ENTRY(snap, snapshots, struct target_snapshot, entry)
+    {
+        if (snap->hwnd && IsWindow(snap->hwnd))
+            continue;
+        snap->needs_hwnd = TRUE;
+    }
+}
+
+/* A target without a usable window is attached to the visual tree that hosts it.
+ * The walk itself is memory plus cache lookups; the window calls that follow it
+ * run outside the critical section. */
+static void find_target_containers(struct list *snapshots)
+{
+    struct composition_target *host_target;
+    struct target_snapshot *snap;
+
+    dcomp_lock();
+    LIST_FOR_EACH_ENTRY(snap, snapshots, struct target_snapshot, entry)
+    {
+        if (!snap->needs_hwnd)
+            continue;
+
+        snap->container = find_root_visual_container(snap->target, &host_target);
+        if (snap->container)
+            IDCompositionVisual_AddRef((IDCompositionVisual *)&snap->container->IDCompositionVisualUnknown_iface);
+        if ((snap->host_target = host_target))
+            IDCompositionTarget_AddRef(&host_target->IDCompositionTarget_iface);
+    }
+    dcomp_unlock();
+}
+
+/* Window manager calls: validate the window each snapshot will composite into,
+ * with dcomp_cs released, so that the applying step below is pure memory. */
+static void validate_target_windows(struct list *snapshots)
+{
+    struct target_snapshot *snap;
+
+    LIST_FOR_EACH_ENTRY(snap, snapshots, struct target_snapshot, entry)
+    {
+        if (!snap->needs_hwnd)
+            continue;
+
+        if (snap->host_target && snap->host_target->hwnd && IsWindow(snap->host_target->hwnd))
         {
-            /* Change/commit-driven: only re-blit when the visual content changed. The 16 ms
-             * refresh loop must NOT re-copy an unchanged (often empty/black) surface every tick,
-             * which clobbers the app's own Present-to-window frames and thrashes D2D/D3D
-             * resources. The compositor paints on change; the swapchain Present path owns the
-             * window drawable in between. */
-            if (visual->content_version != visual->composited_version)
-            {
-                do_composite_dxgi_surface(target, visual, dxgi_surface);
-                visual->composited_version = visual->content_version;
-                rendered_any = TRUE;
-            }
+            snap->use_container = TRUE;
+            snap->resolved_hwnd = snap->host_target->hwnd;
+            continue;
+        }
+
+        snap->resolved_hwnd = find_root_top_level_window();
+    }
+}
+
+static void collect_device_frames(struct composition_device *device, struct list *snapshots,
+        struct list *frames)
+{
+    struct composition_visual *root;
+    struct target_snapshot *snap;
+    POINT pt = {0, 0};
+    unsigned int queued = 0;
+
+    dcomp_lock();
+    LIST_FOR_EACH_ENTRY(snap, snapshots, struct target_snapshot, entry)
+    {
+        struct composition_target *target = snap->target;
+
+        if (!(root = snap->root))
+            continue;
+
+        if (!snap->needs_hwnd)
+        {
+            collect_visual_frames(target, root, target->hwnd, pt, 0, frames, &queued);
+            continue;
+        }
+
+        if (snap->use_container && !root->parent)
+        {
+            target->hwnd = snap->resolved_hwnd;
+            root->parent = snap->container;
+        }
+        else if (snap->resolved_hwnd)
+        {
+            target->hwnd = snap->resolved_hwnd;
+        }
+
+        collect_visual_frames(target, root, target->hwnd, pt, 0, frames, &queued);
+    }
+    dcomp_unlock();
+}
+
+static IDXGISurface *frame_get_surface(struct composite_frame *frame)
+{
+    ID3D11Texture2D *texture = NULL;
+    IDXGISwapChain1 *swapchain = NULL;
+    IDXGISwapChain *swapchain_v1 = NULL;
+    IDCompositionSurface *surface = NULL;
+    IDXGIResource *dxgi_res = NULL;
+    ID3D11Resource *d3d_res = NULL;
+    IDXGISurface *dxgi_surface = NULL;
+    HRESULT hr;
+
+    if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDCompositionSurface, (void **)&surface)))
+    {
+        struct composition_surface *surface_impl = unsafe_impl_from_IDCompositionSurface(surface);
+
+        if (surface_impl)
+        {
+            if (surface_impl->physical_surface)
+                IUnknown_QueryInterface(surface_impl->physical_surface, &IID_IDXGISurface, (void **)&dxgi_surface);
+            if (!dxgi_surface && surface_impl->draw_surface)
+                ID3D11Texture2D_QueryInterface(surface_impl->draw_surface, &IID_IDXGISurface, (void **)&dxgi_surface);
+        }
+        if (!dxgi_surface)
+            IUnknown_AddRef(surface); /* hand out the surface itself */
+        IDCompositionSurface_Release(surface);
+    }
+    else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain1, (void **)&swapchain)))
+    {
+        /* The front buffer is the last back buffer because the composition swapchain must
+         * be created with DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL */
+        hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
+        IDXGISwapChain1_Release(swapchain);
+        if (FAILED(hr))
+            ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
+    }
+    else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain_v1)))
+    {
+        hr = IDXGISwapChain_GetBuffer(swapchain_v1, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
+        IDXGISwapChain_Release(swapchain_v1);
+        if (FAILED(hr))
+            ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
+    }
+    else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISurface, (void **)&dxgi_surface)))
+    {
+        /* direct IDXGISurface */
+    }
+    else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_ID3D11Texture2D, (void **)&texture)))
+    {
+        ID3D11Texture2D_QueryInterface(texture, &IID_IDXGISurface, (void **)&dxgi_surface);
+        ID3D11Texture2D_Release(texture);
+    }
+    else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_ID3D11Resource, (void **)&d3d_res)))
+    {
+        ID3D11Resource_QueryInterface(d3d_res, &IID_IDXGISurface, (void **)&dxgi_surface);
+        ID3D11Resource_Release(d3d_res);
+    }
+    else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGIResource, (void **)&dxgi_res)))
+    {
+        IDXGIResource_QueryInterface(dxgi_res, &IID_IDXGISurface, (void **)&dxgi_surface);
+        IDXGIResource_Release(dxgi_res);
+    }
+
+    return dxgi_surface;
+}
+
+static void render_composite_frame(struct composite_frame *frame)
+{
+    IDXGISurface *dxgi_surface;
+
+    if (frame->is_fallback)
+    {
+        TRACE("DCOMP: fallback blitting surface %p to hwnd %p.\n", frame->surface, frame->target_hwnd);
+        if (SUCCEEDED(IUnknown_QueryInterface(frame->surface->physical_surface,
+                &IID_IDXGISurface, (void **)&dxgi_surface)))
+        {
+            do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
+                    NULL, NULL, dxgi_surface);
             IDXGISurface_Release(dxgi_surface);
+            frame->rendered = TRUE;
         }
+        return;
     }
 
-    LIST_FOR_EACH_ENTRY(child_visual, &visual->child_visuals, struct composition_visual, entry)
+    if (!(frame->frame_content = frame->content))
+        return;
+
+    /* Taking the references enters the Direct3D device: run outside the critical
+     * section. The pointers are alive because the frame holds a reference to the
+     * visual that owns them and dcomp defers the release of a replaced content. */
+    IUnknown_AddRef(frame->frame_content);
+    if ((frame->frame_context = frame->device_context))
+        ID2D1DeviceContext_AddRef(frame->frame_context);
+    if ((frame->frame_interop = frame->interop))
+        ID2D1GdiInteropRenderTarget_AddRef(frame->frame_interop);
+
+    if ((dxgi_surface = frame_get_surface(frame)))
     {
-        if (SUCCEEDED(do_composite(target, child_visual)))
-            rendered_any = TRUE;
+        /* Change/commit driven: only re-blit when the visual content changed. The
+         * refresh loop must not re-copy an unchanged (often empty or black) surface
+         * every tick, which clobbers the app's own Present-to-window frames and
+         * thrashes the Direct2D and Direct3D resources. The compositor paints on
+         * change, the swapchain Present path owns the window drawable in between. */
+        do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
+                frame->frame_context, frame->frame_interop, dxgi_surface);
+        IDXGISurface_Release(dxgi_surface);
+        frame->rendered = TRUE;
     }
 
-    return rendered_any ? S_OK : S_FALSE;
+    if (frame->frame_interop)
+        ID2D1GdiInteropRenderTarget_Release(frame->frame_interop);
+    if (frame->frame_context)
+        ID2D1DeviceContext_Release(frame->frame_context);
+    IUnknown_Release(frame->frame_content);
+    frame->frame_content = NULL;
+}
+
+/* Runs with dcomp_cs released: dropping the visual reference can release its
+ * content, which enters Direct3D and GDI. The content, context and interop
+ * references taken for the render pass are already dropped by the renderer. */
+static void composite_frame_release(struct composite_frame *frame)
+{
+    if (frame->visual)
+        IDCompositionVisual_Release((IDCompositionVisual *)&frame->visual->IDCompositionVisualUnknown_iface);
+    if (frame->surface)
+        IDCompositionSurfaceUnknown_Release(&frame->surface->IDCompositionSurfaceUnknown_iface);
+    free(frame);
+}
+
+static void target_snapshot_release(struct target_snapshot *snap)
+{
+    if (snap->container)
+        IDCompositionVisual_Release((IDCompositionVisual *)&snap->container->IDCompositionVisualUnknown_iface);
+    if (snap->host_target)
+        IDCompositionTarget_Release(&snap->host_target->IDCompositionTarget_iface);
+    if (snap->root)
+        IDCompositionVisual_Release((IDCompositionVisual *)&snap->root->IDCompositionVisualUnknown_iface);
+    IDCompositionTarget_Release(&snap->target->IDCompositionTarget_iface);
+    free(snap);
+}
+
+static void composite_device(struct composition_device *device)
+{
+    struct target_snapshot *snap, *snap_next;
+    struct handle_entry *entry, *entry_next;
+    struct composite_frame *frame, *frame_next;
+    struct list snapshots, frames, handles;
+    unsigned int count = 0;
+
+    list_init(&snapshots);
+    list_init(&frames);
+    list_init(&handles);
+
+    /* Objects released by the application's dcomp calls since the previous tick
+     * are safe to drop now: no frame of that tick is in flight any more. */
+    dcomp_reclaim_drain();
+
+    snapshot_device_targets(device, &snapshots, &handles);
+    warm_shared_visual_cache(&handles);
+    resolve_target_windows(&snapshots);
+    find_target_containers(&snapshots);
+    validate_target_windows(&snapshots);
+    collect_device_frames(device, &snapshots, &frames);
+
+    LIST_FOR_EACH_ENTRY(frame, &frames, struct composite_frame, entry)
+    {
+        render_composite_frame(frame);
+        if (frame->rendered)
+            count++;
+    }
+
+    dcomp_lock();
+    LIST_FOR_EACH_ENTRY(frame, &frames, struct composite_frame, entry)
+    {
+        if (!frame->rendered)
+            continue;
+        if (frame->is_fallback)
+            frame->target->composited_surface = frame->surface;
+        else
+            frame->visual->composited_version = frame->version;
+    }
+    dcomp_unlock();
+
+    LIST_FOR_EACH_ENTRY_SAFE(frame, frame_next, &frames, struct composite_frame, entry)
+    {
+        list_remove(&frame->entry);
+        composite_frame_release(frame);
+    }
+    LIST_FOR_EACH_ENTRY_SAFE(snap, snap_next, &snapshots, struct target_snapshot, entry)
+    {
+        list_remove(&snap->entry);
+        target_snapshot_release(snap);
+    }
+    LIST_FOR_EACH_ENTRY_SAFE(entry, entry_next, &handles, struct handle_entry, entry)
+    {
+        list_remove(&entry->entry);
+        free(entry);
+    }
+
+    if (count)
+        TRACE("DCOMP: composited %u frames.\n", count);
 }
 
 static DWORD WINAPI composite_thread_proc(void *iface)
 {
     struct composition_device *device = impl_from_IDCompositionDevice(iface);
-    unsigned int count, frequency, refresh_period;
-    struct composition_target *target;
-    struct composition_visual *visual;
+    unsigned int frequency, refresh_period;
     HDC hdc;
-    static DWORD last_log;
 
     /* TODO: Implement and use D3DKMTWaitForVerticalBlankEvent() */
     hdc = GetDC(0);
     frequency = hdc ? GetDeviceCaps(hdc, VREFRESH) : 0;
-    if (frequency <= 1) frequency = 60;
+    if (frequency <= 1)
+        frequency = 60;
     refresh_period = 1000 / frequency;
-    if (refresh_period == 0) refresh_period = 16;
-    if (hdc) ReleaseDC(0, hdc);
+    if (refresh_period == 0)
+        refresh_period = 16;
+    if (hdc)
+        ReleaseDC(0, hdc);
 
     TRACE("DCOMP: composite_thread_proc started, refresh_period %u ms\n", refresh_period);
 
-    while (TRUE)
+    while (!device->exit_thread)
     {
-        DWORD now = GetTickCount();
-        BOOL should_log = (now - last_log > 3000);
-        if (should_log) last_log = now;
-
-        dcomp_lock();
-
-        count = 0;
-        LIST_FOR_EACH_ENTRY(target, &device->targets, struct composition_target, entry)
-        {
-            if (!target->root && target->shared_visual_handle)
-            {
-                struct composition_visual *resolved_root = resolve_shared_visual_root(target->shared_visual_handle);
-                if (resolved_root)
-                {
-                    target->root = (IDCompositionVisual *)&resolved_root->IDCompositionVisualUnknown_iface;
-                    IDCompositionVisual_AddRef(target->root);
-                }
-            }
-
-            if (!target->root)
-            {
-                if (should_log) TRACE("DCOMP: target %p hwnd %p has NO root\n", target, target->hwnd);
-                continue;
-            }
-
-            if (!target->hwnd || !IsWindow(target->hwnd))
-            {
-                struct composition_target *host_target = NULL;
-                struct composition_visual *container = find_root_visual_container(target, &host_target);
-                if (container && host_target && host_target->hwnd && IsWindow(host_target->hwnd))
-                {
-                    target->hwnd = host_target->hwnd;
-                    if (target->root && !impl_from_IDCompositionVisual(target->root)->parent)
-                        impl_from_IDCompositionVisual(target->root)->parent = container;
-                    if (should_log)
-                        TRACE("DCOMP: resolved target %p container visual %p host_target %p hwnd %p\n",
-                            target, container, host_target, target->hwnd);
-                }
-                else
-                {
-                    target->hwnd = find_root_top_level_window();
-                }
-            }
-
-            visual = impl_from_IDCompositionVisual(target->root);
-            if (should_log) TRACE("DCOMP: tick compositing target %p hwnd %p root %p\n", target, target->hwnd, visual);
-            if (SUCCEEDED(do_composite(target, visual)))
-                count++;
-        }
-
-        if (should_log && count)
-            TRACE("DCOMP: composited %u targets\n", count);
-        else
-            (void)count;
-
-        dcomp_unlock();
-
-        if (device->exit_thread)
-            break;
-
+        composite_device(device);
         Sleep(refresh_period);
     }
 
-    device->thread_exited = TRUE;
+    TRACE("DCOMP: composite_thread_proc exiting.\n");
+    InterlockedExchange(&device->thread_exited, TRUE);
     return 0;
 }
 
 void ensure_composite_thread(struct composition_device *device)
 {
+    HANDLE thread = NULL;
+
     dcomp_lock();
-    if (!device->thread || device->thread_exited)
+    if (device->thread && !device->thread_exited)
     {
-        if (device->thread)
-        {
-            device->exit_thread = TRUE;
-            WaitForSingleObject(device->thread, INFINITE);
-            CloseHandle(device->thread);
-        }
-        device->thread_exited = FALSE;
-        device->exit_thread = FALSE;
-        device->thread = CreateThread(NULL, 0, composite_thread_proc, &device->IDCompositionDevice_iface, 0, NULL);
+        dcomp_unlock();
+        return;
+    }
+
+    /* Hand over a running thread and ask it to stop. The join runs with the
+     * critical section released: the composite thread takes the critical section
+     * on every tick, so joining while holding it waits for a thread that is
+     * itself waiting for the lock. */
+    if (device->thread)
+    {
+        InterlockedExchange(&device->exit_thread, TRUE);
+        thread = device->thread;
+        device->thread = NULL;
+    }
+    InterlockedExchange(&device->thread_exited, FALSE);
+    dcomp_unlock();
+
+    if (thread)
+    {
+        WaitForSingleObject(thread, INFINITE);
+        CloseHandle(thread);
+    }
+
+    dcomp_lock();
+    if (!device->thread)
+    {
+        device->thread = CreateThread(NULL, 0, composite_thread_proc,
+                &device->IDCompositionDevice_iface, 0, NULL);
         TRACE("DCOMP: started composite_thread_proc %p\n", device->thread);
     }
     dcomp_unlock();
@@ -1305,6 +1785,7 @@ static HRESULT composition_device_create_surface(struct composition_device *devi
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionSurface **surface)
 {
+    IDCompositionSurfaceFactory *factory;
     HRESULT hr;
 
     TRACE("DCOMP: CreateSurface device %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p\n",
@@ -1315,7 +1796,7 @@ static HRESULT composition_device_create_surface(struct composition_device *devi
 
     *surface = NULL;
 
-    dcomp_lock();
+    EnterCriticalSection(&dcomp_device_cs);
 
     if (!device->surface_factory)
     {
@@ -1324,7 +1805,7 @@ static HRESULT composition_device_create_surface(struct composition_device *devi
         hr = device_get_or_create_rendering_device(device, &rendering_device);
         if (FAILED(hr) || !rendering_device)
         {
-            dcomp_unlock();
+            LeaveCriticalSection(&dcomp_device_cs);
             ERR("Failed to get rendering device for composition device %p, hr %#lx.\n", device, hr);
             return hr;
         }
@@ -1333,15 +1814,20 @@ static HRESULT composition_device_create_surface(struct composition_device *devi
         IUnknown_Release(rendering_device);
         if (FAILED(hr))
         {
-            dcomp_unlock();
+            LeaveCriticalSection(&dcomp_device_cs);
             ERR("Failed to create surface factory for composition device %p, hr %#lx.\n", device, hr);
             return hr;
         }
     }
 
-    dcomp_unlock();
+    factory = device->surface_factory;
+    LeaveCriticalSection(&dcomp_device_cs);
 
-    return create_surface(impl_from_IDCompositionSurfaceFactory(device->surface_factory),
+    if (!factory)
+        return E_FAIL;
+
+    /* Creating the surface enters Direct3D and Direct2D. */
+    return create_surface(impl_from_IDCompositionSurfaceFactory(factory),
             width, height, pixel_format, alpha_mode, surface);
 }
 

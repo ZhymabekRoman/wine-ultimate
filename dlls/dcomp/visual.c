@@ -68,16 +68,14 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
 
     if (!ref)
     {
-        if (visual->interop)
-            ID2D1GdiInteropRenderTarget_Release(visual->interop);
-        if (visual->device_context)
-            ID2D1DeviceContext_Release(visual->device_context);
-        if (visual->content)
-            IUnknown_Release(visual->content);
-        if (visual->transform)
-            IDCompositionTransform_Release(visual->transform);
-        if (visual->shared_visual_handle)
-            CloseHandle(visual->shared_visual_handle);
+        ID2D1GdiInteropRenderTarget *interop = visual->interop;
+        ID2D1DeviceContext *device_context = visual->device_context;
+        IUnknown *content = visual->content;
+
+        visual->interop = NULL;
+        visual->device_context = NULL;
+        visual->content = NULL;
+
         dcomp_lock();
         if (visual->is_child)
             list_remove(&visual->entry);
@@ -88,6 +86,20 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             child->parent = NULL;
         }
         dcomp_unlock();
+
+        /* A composite snapshot holds a reference to this visual, so reaching zero
+         * means no snapshot references these objects any more. Releasing them
+         * enters Direct3D and GDI, so it runs outside the critical section. */
+        if (interop)
+            ID2D1GdiInteropRenderTarget_Release(interop);
+        if (device_context)
+            ID2D1DeviceContext_Release(device_context);
+        if (content)
+            IUnknown_Release(content);
+        if (visual->transform)
+            IDCompositionTransform_Release(visual->transform);
+        if (visual->shared_visual_handle)
+            CloseHandle(visual->shared_visual_handle);
         free(visual);
     }
 
@@ -224,13 +236,17 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
     ID3D11Texture2D *texture = NULL;
     IDXGIDevice *dxgi_device = NULL;
     ID2D1Device *d2d_device = NULL;
+    ID2D1GdiInteropRenderTarget *old_interop;
+    ID2D1DeviceContext *old_context;
+    IUnknown *old_content;
     const GUID *iid = NULL;
     HRESULT hr;
 
     TRACE("DCOMP: visual_SetContent iface %p, content %p\n", iface, content);
 
-    dcomp_lock();
-
+    /* Identifying the content and building the Direct2D context below enters
+     * Direct3D and Direct2D, so it runs with dcomp_cs released; only the pointer
+     * swap is done under it. */
     if (content)
     {
         if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain1,
@@ -243,7 +259,6 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
             if (FAILED(hr))
             {
                 ERR("Failed to get the swapchain device, hr %#lx.\n", hr);
-                dcomp_unlock();
                 return hr;
             }
         }
@@ -262,7 +277,6 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
                 if (FAILED(hr))
                 {
                     ERR("Failed to get the dxgi surface device, hr %#lx.\n", hr);
-                    dcomp_unlock();
                     return hr;
                 }
             }
@@ -270,7 +284,6 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
             {
                 FIXME("Only IDCompositionSurface from IDXGISurface is currently supported.\n");
                 IDCompositionSurface_Release(suface);
-                dcomp_unlock();
                 return E_INVALIDARG;
             }
         }
@@ -282,7 +295,6 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
             if (FAILED(hr))
             {
                 ERR("Failed to get the dxgi surface device, hr %#lx.\n", hr);
-                dcomp_unlock();
                 return hr;
             }
         }
@@ -298,21 +310,18 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
                 if (FAILED(hr))
                 {
                     ERR("Failed to get the dxgi surface device, hr %#lx.\n", hr);
-                    dcomp_unlock();
                     return hr;
                 }
             }
             else
             {
                 ERR("Failed to query IDXGISurface from ID3D11Texture2D, hr %#lx.\n", hr);
-                dcomp_unlock();
                 return hr;
             }
         }
         else
         {
             FIXME("Only IDXGISwapChain1, IDCompositionSurface, or IDXGISurface are currently supported.\n");
-            dcomp_unlock();
             return E_INVALIDARG;
         }
 
@@ -321,7 +330,6 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
         if (FAILED(hr))
         {
             ERR("Failed to create a D2D device, hr %#lx.\n", hr);
-            dcomp_unlock();
             return hr;
         }
 
@@ -331,7 +339,6 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
         if (FAILED(hr))
         {
             ERR("Failed to create a D2D device context, hr %#lx.\n", hr);
-            dcomp_unlock();
             return hr;
         }
 
@@ -340,26 +347,18 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
         {
             ERR("Failed to get a ID2D1GdiInteropRenderTarget, hr %#lx.\n", hr);
             ID2D1DeviceContext_Release(device_context);
-            dcomp_unlock();
             return hr;
         }
     }
 
-    if (visual->interop)
-    {
-        ID2D1GdiInteropRenderTarget_Release(visual->interop);
-        visual->interop = NULL;
-    }
-    if (visual->device_context)
-    {
-        ID2D1DeviceContext_Release(visual->device_context);
-        visual->device_context = NULL;
-    }
-    if (visual->content)
-    {
-        IUnknown_Release(visual->content);
-        visual->content = NULL;
-    }
+    dcomp_lock();
+
+    old_interop = visual->interop;
+    old_context = visual->device_context;
+    old_content = visual->content;
+    visual->interop = NULL;
+    visual->device_context = NULL;
+    visual->content = NULL;
 
     if (content)
     {
@@ -375,6 +374,17 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
     visual->content_version++;
 
     dcomp_unlock();
+
+    /* Releasing the replaced objects enters Direct3D and GDI, and a composite
+     * snapshot may still hold their pointers: defer them to the reclaim list,
+     * which the composite thread drops once no frame is in flight. */
+    if (old_interop)
+        dcomp_reclaim_push((IUnknown *)old_interop);
+    if (old_context)
+        dcomp_reclaim_push((IUnknown *)old_context);
+    if (old_content)
+        dcomp_reclaim_push(old_content);
+
     return S_OK;
 }
 
