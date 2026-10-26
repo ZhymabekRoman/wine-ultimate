@@ -3429,10 +3429,11 @@ Activated Linux in-kernel NT synchronization driver (`CONFIG_NTSYNC=m`) on Zen k
 
 Implemented user-space caching and pre-faulting optimizations in ntdll:
 - `dlls/ntdll/unix/virtual.c`: Added `madvise(MADV_WILLNEED)` on executable `.text` sections during PE image mapping. Linux kernel prefetches code pages into physical memory asynchronously, eliminating minor page faults during process and window initialization.
-- `dlls/ntdll/unix/file.c`: Implemented user-space cache for `NtQueryObject(ObjectTypeInformation)`. Immutable type metadata is resolved from a local 128-entry cache on repeated queries, eliminating synchronous wineserver roundtrips.
+- `dlls/ntdll/unix/file.c` & `server.c`: Implemented user-space cache for `NtQueryObject(ObjectTypeInformation)` with automatic cache eviction on `NtClose()` to prevent handle-reuse staleness. Immutable type metadata is resolved from a local 128-entry cache on repeated queries, eliminating synchronous wineserver roundtrips.
 - `dlls/ntdll/unix/process.c`: Implemented fast user-space return for `NtQueryInformationProcess(NtCurrentProcess(), ProcessBasicInformation)`. Caches the self-process basic information, with automatic invalidation upon `ProcessPriorityClass`, `ProcessBasePriority`, or `ProcessAffinityMask` mutation.
-- Verified: `ntdll_test.exe info` ran 2883 tests with zero priority/affinity regressions.
-- Wine commits `dc18bf45` and `0458346b` on `ultimate`, pushed to `github/ultimate`.
+- Verified: `ntdll_test.exe om` passed **7,736 tests** with 0 type-cache regressions; `ntdll_test.exe info` ran **2,883 tests** with 0 priority/affinity regressions.
+- Wine commits `dc18bf45`, `0458346b`, and `e443f391` on `ultimate`, pushed to `github/ultimate`.
+
 
 
 
