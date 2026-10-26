@@ -43,6 +43,7 @@
 #endif
 #include <poll.h>
 #include <sys/stat.h>
+#include <sys/mman.h>
 #ifdef HAVE_SYS_STATVFS_H
 # include <sys/statvfs.h>
 #endif
@@ -2992,6 +2993,64 @@ struct dentry_node {
     char name[1];
 };
 
+#define SHM_DENTRY_MAX_DIRS 128
+#define SHM_DENTRY_HASH_SIZE 512
+#define SHM_NAME_POOL_SIZE 2097152
+#define SHM_MAX_NODES 65535
+
+struct shm_dentry_node {
+    uint32_t name_offset;
+    uint16_t name_len;
+    uint16_t next_idx;
+};
+
+struct shm_dentry_dir {
+    uint64_t dev;
+    uint64_t ino;
+    uint64_t mtime;
+    uint16_t buckets[SHM_DENTRY_HASH_SIZE];
+};
+
+struct shm_dentry_cache {
+    uint32_t magic;
+    uint32_t dir_count;
+    uint32_t node_count;
+    uint32_t name_pool_used;
+    struct shm_dentry_dir dirs[SHM_DENTRY_MAX_DIRS];
+    struct shm_dentry_node nodes[SHM_MAX_NODES];
+    char name_pool[SHM_NAME_POOL_SIZE];
+};
+
+static struct shm_dentry_cache *shm_dentry_cache = NULL;
+
+static void init_shm_dentry_cache(void)
+{
+    char shm_path[64];
+    int fd;
+
+    if (shm_dentry_cache) return;
+
+    snprintf( shm_path, sizeof(shm_path), "/dev/shm/wine-vfs-dentry-%u", (unsigned int)getuid() );
+    fd = open( shm_path, O_RDWR | O_CREAT, 0600 );
+    if (fd < 0) return;
+
+    if (ftruncate( fd, sizeof(struct shm_dentry_cache) ) == 0)
+    {
+        void *ptr = mmap( NULL, sizeof(struct shm_dentry_cache), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+        if (ptr != MAP_FAILED)
+        {
+            shm_dentry_cache = (struct shm_dentry_cache *)ptr;
+            if (shm_dentry_cache->magic != 0x5744454E)
+            {
+                memset( ptr, 0, sizeof(struct shm_dentry_cache) );
+                shm_dentry_cache->magic = 0x5744454E;
+                shm_dentry_cache->node_count = 1;
+            }
+        }
+    }
+    close( fd );
+}
+
 #define DENTRY_HASH_SIZE 256
 struct dentry_cache_dir {
     dev_t dev;
@@ -3134,6 +3193,40 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
         unsigned int h = dentry_hash_w( name, length );
         unsigned int i;
 
+        init_shm_dentry_cache();
+        if (shm_dentry_cache)
+        {
+            unsigned int shm_h = h % SHM_DENTRY_HASH_SIZE;
+            for (i = 0; i < shm_dentry_cache->dir_count; i++)
+            {
+                struct shm_dentry_dir *sdir = &shm_dentry_cache->dirs[i];
+                if (sdir->dev == st.st_dev && sdir->ino == st.st_ino)
+                {
+                    if (sdir->mtime == st.st_mtime)
+                    {
+                        uint16_t node_idx = sdir->buckets[shm_h];
+                        unix_name[pos - 1] = '/';
+                        while (node_idx && node_idx < shm_dentry_cache->node_count)
+                        {
+                            struct shm_dentry_node *sn = &shm_dentry_cache->nodes[node_idx];
+                            const char *sname = &shm_dentry_cache->name_pool[sn->name_offset];
+                            ret = ntdll_umbstowcs( sname, sn->name_len, buffer, MAX_DIR_ENTRY_LEN );
+                            if (ret == length && !wcsnicmp( buffer, name, ret ))
+                            {
+                                strcpy( unix_name + pos, sname );
+                                close( fd );
+                                return STATUS_SUCCESS;
+                            }
+                            node_idx = sn->next_idx;
+                        }
+                        close( fd );
+                        goto not_found;
+                    }
+                    break;
+                }
+            }
+        }
+
         pthread_mutex_lock( &dentry_mutex );
         for (i = 0; i < dentry_dir_count; i++)
         {
@@ -3169,6 +3262,7 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
         if ((dir = fdopendir( fd )))
         {
             struct dentry_cache_dir *new_cache;
+            struct shm_dentry_dir *new_sdir = NULL;
             NTSTATUS found_status = STATUS_OBJECT_NAME_NOT_FOUND;
 
             if (i < dentry_dir_count) new_cache = &dentry_dirs[i];
@@ -3184,18 +3278,44 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
             new_cache->ino = st.st_ino;
             new_cache->mtime = st.st_mtime;
 
+            if (shm_dentry_cache && shm_dentry_cache->dir_count < SHM_DENTRY_MAX_DIRS)
+            {
+                new_sdir = &shm_dentry_cache->dirs[shm_dentry_cache->dir_count++];
+                memset( new_sdir->buckets, 0, sizeof(new_sdir->buckets) );
+                new_sdir->dev = st.st_dev;
+                new_sdir->ino = st.st_ino;
+                new_sdir->mtime = st.st_mtime;
+            }
+
             unix_name[pos - 1] = '/';
 
             while ((de = readdir( dir )))
             {
                 size_t dlen = strlen( de->d_name );
                 struct dentry_node *node = malloc( sizeof(struct dentry_node) + dlen );
+                unsigned int dh = dentry_hash_a( de->d_name );
+
                 if (node)
                 {
-                    unsigned int dh = dentry_hash_a( de->d_name );
                     memcpy( node->name, de->d_name, dlen + 1 );
                     node->next = new_cache->buckets[dh];
                     new_cache->buckets[dh] = node;
+                }
+
+                if (new_sdir && shm_dentry_cache->name_pool_used + dlen + 1 < SHM_NAME_POOL_SIZE
+                    && shm_dentry_cache->node_count < SHM_MAX_NODES - 1)
+                {
+                    uint32_t name_off = shm_dentry_cache->name_pool_used;
+                    uint16_t n_idx = shm_dentry_cache->node_count++;
+                    unsigned int sdh = dh % SHM_DENTRY_HASH_SIZE;
+
+                    memcpy( &shm_dentry_cache->name_pool[name_off], de->d_name, dlen + 1 );
+                    shm_dentry_cache->name_pool_used += dlen + 1;
+
+                    shm_dentry_cache->nodes[n_idx].name_offset = name_off;
+                    shm_dentry_cache->nodes[n_idx].name_len = dlen;
+                    shm_dentry_cache->nodes[n_idx].next_idx = new_sdir->buckets[sdh];
+                    new_sdir->buckets[sdh] = n_idx;
                 }
 
                 if (found_status != STATUS_SUCCESS)
