@@ -93,6 +93,44 @@ __ASM_GLOBAL_FUNC( fast_TlsGetValue,
                    "xorq %rax,%rax\n\t"
                    "ret" )
 
+extern void WINAPI fast_EnterCriticalSection( RTL_CRITICAL_SECTION *crit );
+__ASM_GLOBAL_FUNC( fast_EnterCriticalSection,
+                   "movl $-1,%eax\n\t"
+                   "xorl %edx,%edx\n\t"
+                   "lock cmpxchgl %edx,0x8(%rcx)\n\t"
+                   "jnz 1f\n\t"
+                   "movl %gs:0x48,%eax\n\t"
+                   "movq %rax,0x10(%rcx)\n\t"
+                   "movl $1,0xc(%rcx)\n\t"
+                   "ret\n\t"
+                   "1:\n\t"
+                   "jmp RtlEnterCriticalSection" )
+
+extern void WINAPI fast_LeaveCriticalSection( RTL_CRITICAL_SECTION *crit );
+__ASM_GLOBAL_FUNC( fast_LeaveCriticalSection,
+                   "cmpl $1,0xc(%rcx)\n\t"
+                   "jne 1f\n\t"
+                   "xorl %eax,%eax\n\t"
+                   "movl $-1,%edx\n\t"
+                   "lock cmpxchgl %edx,0x8(%rcx)\n\t"
+                   "jnz 1f\n\t"
+                   "movq $0,0x10(%rcx)\n\t"
+                   "movl $0,0xc(%rcx)\n\t"
+                   "ret\n\t"
+                   "1:\n\t"
+                   "jmp RtlLeaveCriticalSection" )
+
+static inline DWORD fnv1a_32( const char *str )
+{
+    DWORD hash = 2166136261u;
+    while (*str)
+    {
+        hash ^= (BYTE)*str++;
+        hash *= 16777619u;
+    }
+    return hash;
+}
+
 static BOOL is_fast_trampoline_enabled(void)
 {
     static int enabled = -1;
@@ -112,51 +150,31 @@ static BOOL is_fast_trampoline_enabled(void)
 
 ULONG_PTR get_fast_iat_trampoline( const char *func_name )
 {
+    DWORD hash;
+
     if (!is_fast_trampoline_enabled()) return 0;
     if (!func_name) return 0;
 
-    switch (func_name[0])
+    hash = fnv1a_32( func_name );
+    switch (hash)
     {
-    case 'G':
-        if (!strcmp( func_name, "GetCurrentThreadId" ))
-            return (ULONG_PTR)fast_GetCurrentThreadId;
-        if (!strcmp( func_name, "GetCurrentProcessId" ))
-            return (ULONG_PTR)fast_GetCurrentProcessId;
-        if (!strcmp( func_name, "GetCurrentProcess" ))
-            return (ULONG_PTR)fast_GetCurrentProcess;
-        if (!strcmp( func_name, "GetCurrentThread" ))
-            return (ULONG_PTR)fast_GetCurrentThread;
-        if (!strcmp( func_name, "GetLastError" ))
-            return (ULONG_PTR)fast_GetLastError;
-        if (!strcmp( func_name, "GetProcessHeap" ))
-            return (ULONG_PTR)fast_GetProcessHeap;
-        if (!strcmp( func_name, "GetTickCount" ))
-            return (ULONG_PTR)fast_GetTickCount;
-        if (!strcmp( func_name, "GetSystemTimeAsFileTime" ))
-            return (ULONG_PTR)fast_GetSystemTimeAsFileTime;
-        break;
-
-    case 'T':
-        if (!strcmp( func_name, "TlsGetValue" ))
-            return (ULONG_PTR)fast_TlsGetValue;
-        break;
-
-    case 'S':
-        if (!strcmp( func_name, "SetLastError" ))
-            return (ULONG_PTR)fast_SetLastError;
-        break;
-
-    case 'R':
-        if (!strcmp( func_name, "RtlGetLastWin32Error" ))
-            return (ULONG_PTR)fast_GetLastError;
-        if (!strcmp( func_name, "RtlSetLastWin32Error" ))
-            return (ULONG_PTR)fast_SetLastError;
-        break;
-
-    case 'N':
-        if (!strcmp( func_name, "NtCurrentTeb" ))
-            return (ULONG_PTR)fast_NtCurrentTeb;
-        break;
+    case 0xebcdfe95u: if (!strcmp(func_name, "GetCurrentThreadId")) return (ULONG_PTR)fast_GetCurrentThreadId; break;
+    case 0x020a0780u: if (!strcmp(func_name, "GetCurrentProcessId")) return (ULONG_PTR)fast_GetCurrentProcessId; break;
+    case 0x6dd8a845u: if (!strcmp(func_name, "GetCurrentProcess")) return (ULONG_PTR)fast_GetCurrentProcess; break;
+    case 0x9bc5a608u: if (!strcmp(func_name, "GetCurrentThread")) return (ULONG_PTR)fast_GetCurrentThread; break;
+    case 0x5056df37u: if (!strcmp(func_name, "GetLastError")) return (ULONG_PTR)fast_GetLastError; break;
+    case 0x86fe8652u: if (!strcmp(func_name, "GetProcessHeap")) return (ULONG_PTR)fast_GetProcessHeap; break;
+    case 0x0f4d8b55u: if (!strcmp(func_name, "GetTickCount")) return (ULONG_PTR)fast_GetTickCount; break;
+    case 0xee9d4374u: if (!strcmp(func_name, "GetSystemTimeAsFileTime")) return (ULONG_PTR)fast_GetSystemTimeAsFileTime; break;
+    case 0xccd84087u: if (!strcmp(func_name, "TlsGetValue")) return (ULONG_PTR)fast_TlsGetValue; break;
+    case 0x21ddcd8bu: if (!strcmp(func_name, "SetLastError")) return (ULONG_PTR)fast_SetLastError; break;
+    case 0xb2524fccu: if (!strcmp(func_name, "RtlGetLastWin32Error")) return (ULONG_PTR)fast_GetLastError; break;
+    case 0x9ebeaab8u: if (!strcmp(func_name, "RtlSetLastWin32Error")) return (ULONG_PTR)fast_SetLastError; break;
+    case 0x3f30200bu: if (!strcmp(func_name, "NtCurrentTeb")) return (ULONG_PTR)fast_NtCurrentTeb; break;
+    case 0xe91b4077u: if (!strcmp(func_name, "EnterCriticalSection")) return (ULONG_PTR)fast_EnterCriticalSection; break;
+    case 0xc70dd340u: if (!strcmp(func_name, "LeaveCriticalSection")) return (ULONG_PTR)fast_LeaveCriticalSection; break;
+    case 0x97c0ce0fu: if (!strcmp(func_name, "RtlEnterCriticalSection")) return (ULONG_PTR)fast_EnterCriticalSection; break;
+    case 0xaf2a3c58u: if (!strcmp(func_name, "RtlLeaveCriticalSection")) return (ULONG_PTR)fast_LeaveCriticalSection; break;
     }
 
     return 0;

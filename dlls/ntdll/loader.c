@@ -3866,6 +3866,19 @@ void* WINAPI LdrResolveDelayLoadedAPI( void* base, const IMAGE_DELAYLOAD_DESCRIP
     name = get_rva(base, desc->DllNameRVA);
     id = addr - pIAT;
 
+#ifdef __x86_64__
+    if (!IMAGE_SNAP_BY_ORDINAL(pINT[id].u1.Ordinal))
+    {
+        const IMAGE_IMPORT_BY_NAME* iibn = get_rva(base, pINT[id].u1.AddressOfData);
+        ULONG_PTR fast_tramp = get_fast_iat_trampoline((const char *)iibn->Name);
+        if (fast_tramp)
+        {
+            pIAT[id].u1.Function = fast_tramp;
+            return (void *)fast_tramp;
+        }
+    }
+#endif
+
     if (!*phmod)
     {
         if (!RtlCreateUnicodeStringFromAsciiz(&mod, name))
