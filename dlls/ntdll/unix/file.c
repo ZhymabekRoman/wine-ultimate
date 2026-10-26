@@ -7779,6 +7779,14 @@ static void *put_object_type_info( OBJECT_TYPE_INFORMATION *p, struct object_typ
     return (char *)(p + 1) + ((p->TypeName.MaximumLength + align) & ~align);
 }
 
+struct cached_type_entry {
+    HANDLE handle;
+    char buffer[sizeof(struct object_type_info) + 64];
+};
+#define TYPE_CACHE_MAX 128
+static struct cached_type_entry type_cache[TYPE_CACHE_MAX];
+static unsigned int type_cache_count = 0;
+
 /**************************************************************************
  *           NtQueryObject   (NTDLL.@)
  */
@@ -7858,16 +7866,39 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
     {
         OBJECT_TYPE_INFORMATION *p = ptr;
         char buffer[sizeof(struct object_type_info) + 64];
-        struct object_type_info *info = (struct object_type_info *)buffer;
+        struct object_type_info *info = NULL;
+        unsigned int i;
 
-        SERVER_START_REQ( get_object_type )
+        for (i = 0; i < type_cache_count; i++)
         {
-            req->handle = wine_server_obj_handle( handle );
-            wine_server_set_reply( req, buffer, sizeof(buffer) );
-            status = wine_server_call( req );
+            if (type_cache[i].handle == handle)
+            {
+                info = (struct object_type_info *)type_cache[i].buffer;
+                break;
+            }
         }
-        SERVER_END_REQ;
-        if (status) break;
+
+        if (!info)
+        {
+            SERVER_START_REQ( get_object_type )
+            {
+                req->handle = wine_server_obj_handle( handle );
+                wine_server_set_reply( req, buffer, sizeof(buffer) );
+                status = wine_server_call( req );
+            }
+            SERVER_END_REQ;
+            if (status) break;
+
+            info = (struct object_type_info *)buffer;
+            if (type_cache_count < TYPE_CACHE_MAX)
+            {
+                type_cache[type_cache_count].handle = handle;
+                memcpy( type_cache[type_cache_count].buffer, buffer, sizeof(buffer) );
+                type_cache_count++;
+            }
+        }
+        else status = STATUS_SUCCESS;
+
         if (sizeof(*p) + info->name_len + sizeof(WCHAR) <= len)
         {
             put_object_type_info( p, info );

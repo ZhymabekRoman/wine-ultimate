@@ -3261,6 +3261,14 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         }
 #endif
 
+#ifdef MADV_WILLNEED
+        /* Pre-fault executable code sections (.text) asynchronously to eliminate startup page-fault stalls */
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
+        {
+            madvise( ptr + sec[i].VirtualAddress, size, MADV_WILLNEED );
+        }
+#endif
+
         if (!set_vprot( view, ptr + sec[i].VirtualAddress, size, vprot ) && (vprot & VPROT_EXEC))
             ERR( "failed to set %08x protection on %s section %.8s, noexec filesystem?\n",
                  sec[i].Characteristics, debugstr_us(nt_name), sec[i].Name );

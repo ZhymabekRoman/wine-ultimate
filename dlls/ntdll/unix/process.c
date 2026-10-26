@@ -1113,6 +1113,8 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
 
     case ProcessBasicInformation:
         {
+            static PROCESS_BASIC_INFORMATION cached_self_pbi;
+            static int self_pbi_cached = 0;
             PROCESS_BASIC_INFORMATION pbi;
             const ULONG_PTR affinity_mask = get_system_affinity_mask();
 
@@ -1121,6 +1123,14 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                 if (!info) ret = STATUS_ACCESS_VIOLATION;
                 else
                 {
+                    if (handle == NtCurrentProcess() && self_pbi_cached)
+                    {
+                        memcpy( info, &cached_self_pbi, sizeof(PROCESS_BASIC_INFORMATION) );
+                        len = sizeof(PROCESS_BASIC_INFORMATION);
+                        ret = STATUS_SUCCESS;
+                        break;
+                    }
+
                     SERVER_START_REQ(get_process_info)
                     {
                         req->handle = wine_server_obj_handle( handle );
@@ -1138,6 +1148,11 @@ NTSTATUS WINAPI NtQueryInformationProcess( HANDLE handle, PROCESSINFOCLASS class
                                     pbi.PebBaseAddress = (PEB *)((char *)pbi.PebBaseAddress + 0x1000);
                                 else
                                     pbi.PebBaseAddress = NULL;
+                            }
+                            if (handle == NtCurrentProcess())
+                            {
+                                cached_self_pbi = pbi;
+                                self_pbi_cached = 1;
                             }
                         }
                     }
