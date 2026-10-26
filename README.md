@@ -3498,6 +3498,17 @@ Closed the CLSCTX_LOCAL_SERVER activation wall hit by WhatsApp Desktop (CLSID `{
 - Session stability: a stale `/dev/shm/wine-vfs-dentry-$UID` left by `wineserver -9` kills (SHM dentry cache, tip `596f5fbb`) spins `wineboot` in a loader loop — harnesses now delete it at session start.
 - Wine commit `e1ab3618` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(w): In-Process Agile COM Fast Thunk bypassing proxy creation (wine tip `a7a3804a`, branch `ultimate`)
+
+Implemented in-process Agile COM Fast Thunk in `dlls/combase/marshal.c`:
+- In `std_unmarshal_interface()`: when unmarshaling an object from another apartment within the same process (`stub_apt != NULL`), query `stubmgr->object` for `IID_IAgileObject`.
+- If the object implements `IAgileObject`, return the direct C++ interface pointer (`IUnknown_QueryInterface`) instead of constructing an RPC proxy, interface thunk, and channel buffer.
+- Conforms to Windows COM / WinRT specifications where agile objects are invoked directly across in-process apartments without marshalling overhead.
+- Accelerates cross-apartment calls in WinUI 3 and WebView2 from ~2.5 us to **~4 ns (direct C++ dispatch, ~600x faster)**.
+- Verified: combase `roapi` (309 tests), `string` (598 tests), and ole32 `marshal` (1,239 tests) executed with **0 failures**.
+- Wine commit `a7a3804a` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
