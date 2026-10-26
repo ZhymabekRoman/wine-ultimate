@@ -593,6 +593,7 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
     ID3D11DeviceContext1 *d3d11_device_context1 = NULL;
     ID3D11DeviceContext *d3d11_device_context = NULL;
     ID3D11Multithread *multithread = NULL;
+    IDXGIKeyedMutex *keyed_mutex = NULL;
     D2D1_BITMAP_PROPERTIES1 bitmap_desc;
     ID2D1Bitmap1 *target_bitmap = NULL;
     ID3D11Device1 *d3d11_device = NULL;
@@ -639,6 +640,18 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
     {
         ERR("Failed to query ID3D11Multithread, hr %#lx.\n", hr);
         goto done;
+    }
+
+    if (SUCCEEDED(IDXGISurface_QueryInterface(dxgi_surface, &IID_IDXGIKeyedMutex, (void **)&keyed_mutex)))
+    {
+        hr = IDXGIKeyedMutex_AcquireSync(keyed_mutex, 0, 0);
+        if (hr == (HRESULT)WAIT_TIMEOUT)
+        {
+            /* GPU producer is still rendering into the surface; skip composite tick without stalling CPU */
+            IDXGIKeyedMutex_Release(keyed_mutex);
+            keyed_mutex = NULL;
+            goto done;
+        }
     }
 
     ID3D11Multithread_SetMultithreadProtected(multithread, TRUE);
@@ -815,6 +828,11 @@ done:
         ID3D11DeviceContext_Release(d3d11_device_context);
     if (d3d11_device)
         ID3D11Device1_Release(d3d11_device);
+    if (keyed_mutex)
+    {
+        IDXGIKeyedMutex_ReleaseSync(keyed_mutex, 0);
+        IDXGIKeyedMutex_Release(keyed_mutex);
+    }
 }
 
 /*
