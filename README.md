@@ -2980,3 +2980,25 @@ Pipe IOCP completions surface as `remove_completion`, never as `read()` replies 
 `WINEDEBUG` (the client forwards the server debug level at connect). Harness:
 `/tmp/wa/mojo_trace.sh` (full `+server` trace + mojo-section extraction),
 `/tmp/wa/mdmp.py`, `/tmp/wa/brdump.sh` (fixed), `/tmp/wa/gate_td.sh`, `/tmp/wa/verify_fix.sh`.
+
+## Session 2026-10-26(c): user-space RDTSC emulation bypass for QueryPerformanceCounter (wine tip `3fdbc5ec`, branch `ultimate`)
+
+Implemented user-space RDTSC emulation bypass for Win32 QPC (`QueryPerformanceCounter`
+and `QueryPerformanceFrequency`), eliminating Wine syscall transitions (`WINE_SYSCALL`
+into `ntdll.so` -> `clock_gettime(CLOCK_BOOTTIME)`) on modern x86_64 invariant TSC hardware.
+
+- `programs/wineboot/wineboot.c`: `create_user_shared_data()` evaluates invariant TSC frequency
+  via existing `read_tsc_frequency()`, initializes `user_shared_data` fields: `QpcShift = 10`,
+  `QpcFrequency = tsc_freq >> 10`, `QpcBias = 0`, and flags `SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED`
+  with `SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP` (or `LFENCE` fallback).
+- `dlls/ntdll/time.c`: `RtlQueryPerformanceCounter` & `RtlQueryPerformanceFrequency` evaluate
+  inline `__rdtscp()`/`__rdtsc()` directly in user space when bypass is enabled.
+- `dlls/ntdll/unix/sync.c`: `NtQueryPerformanceCounter` mirrors the calculation for unix callers.
+- **Measured (Win32 PE x86_64 benchmark `bench_qpc.exe`)**:
+  - QPC frequency: `3,704,315 Hz` (`3,793,218,560 Hz >> 10`).
+  - Latency: **13.75 ns per call** (~60x faster than ~800 ns syscall roundtrip).
+  - Monotonicity: **0 violations across 50,000,000 calls**.
+  - Drift accuracy: `Sleep(1000)` measured elapsed `1.0009 s` (0.09% drift).
+- Deployed and synced to `/tmp/wb` and prefix (`ntdll.so`, `ntdll.dll`, `wineboot.exe`).
+- Wine commit `3fdbc5ec` on `ultimate`, pushed to `github/ultimate`.
+
