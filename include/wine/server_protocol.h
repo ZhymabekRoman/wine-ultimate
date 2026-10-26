@@ -7383,6 +7383,6 @@ union generic_reply
     struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 967
+#define SERVER_PROTOCOL_VERSION 966
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

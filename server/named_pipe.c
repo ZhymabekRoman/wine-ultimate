@@ -68,7 +68,6 @@ struct pipe_end
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
     struct async_queue   write_q;    /* write queue */
-    struct object       *shm;        /* shared memory ring buffer mapping */
 };
 
 struct pipe_server
@@ -519,7 +518,6 @@ static void pipe_end_destroy( struct object *obj )
     free_async_queue( &pipe_end->write_q );
     if (pipe_end->fd) release_object( pipe_end->fd );
     if (pipe_end->pipe) release_object( pipe_end->pipe );
-    if (pipe_end->shm) release_object( pipe_end->shm );
     if (pipe_end->client_proc) release_object( pipe_end->client_proc );
 }
 
@@ -1448,7 +1446,6 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->connection = NULL;
     pipe_end->client_proc = NULL;
     pipe_end->buffer_size = buffer_size;
-    pipe_end->shm = NULL;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
     list_init( &pipe_end->message_queue );
@@ -1546,12 +1543,6 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
 
     if ((client = create_pipe_client( pipe, pipe->outsize, options )))
     {
-        struct object *shm = create_pipe_shm_mapping( 256 * 1024 );
-        if (shm)
-        {
-            server->pipe_end.shm = shm;
-            client->shm = grab_object( shm );
-        }
         async_wake_up( &server->listen_q, STATUS_SUCCESS );
         server->pipe_end.state = FILE_PIPE_CONNECTED_STATE;
         server->pipe_end.connection = client;
@@ -1774,29 +1765,5 @@ DECL_HANDLER(set_named_pipe_info)
 
 DECL_HANDLER(get_named_pipe_shm)
 {
-    struct pipe_end *pipe_end;
-
-    pipe_end = (struct pipe_end *)get_handle_obj( current->process, req->handle,
-                                                  0, &pipe_server_ops );
-    if (!pipe_end)
-    {
-        if (get_error() != STATUS_OBJECT_TYPE_MISMATCH)
-            return;
-
-        clear_error();
-        pipe_end = (struct pipe_end *)get_handle_obj( current->process, req->handle,
-                                                      0, &pipe_client_ops );
-        if (!pipe_end) return;
-    }
-
-    if (pipe_end->connection && pipe_end->shm)
-    {
-        reply->mapping = alloc_handle( current->process, pipe_end->shm,
-                                       SECTION_MAP_READ | SECTION_MAP_WRITE, 0 );
-        reply->is_server = (pipe_end->obj.ops == &pipe_server_ops);
-        reply->size = 256 * 1024;
-    }
-    else set_error( STATUS_PIPE_DISCONNECTED );
-
-    release_object( pipe_end );
+    set_error( STATUS_NOT_IMPLEMENTED );
 }

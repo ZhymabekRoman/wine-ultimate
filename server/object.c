@@ -42,7 +42,6 @@
 #include "security.h"
 #include "handle.h"
 #include "request.h"
-#include "slab.h"
 
 
 struct namespace
@@ -302,7 +301,7 @@ WCHAR *default_get_full_name( struct object *obj, data_size_t max, data_size_t *
 /* allocate and initialize an object */
 void *alloc_object( const struct object_ops *ops )
 {
-    struct object *obj = wine_slab_alloc( ops->size );
+    struct object *obj = mem_alloc( ops->size );
     if (obj)
     {
         obj->refcount     = 1;
@@ -325,14 +324,13 @@ void *alloc_object( const struct object_ops *ops )
 /* free an object once it has been destroyed */
 static void free_object( struct object *obj )
 {
-    size_t size = obj->ops->size;
     free( obj->sd );
     obj->ops->type->obj_count--;
 #ifdef DEBUG_OBJECTS
     list_remove( &obj->obj_list );
     memset( obj, 0xaa, obj->ops->size );
 #endif
-    wine_slab_free( obj, size );
+    free( obj );
 }
 
 /* find an object by name starting from the specified root */

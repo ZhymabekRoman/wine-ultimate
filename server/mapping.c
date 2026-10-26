@@ -1518,13 +1518,6 @@ void set_session_mapping( struct mapping *mapping )
     list_add_tail( &session.blocks, &block->entry );
 }
 
-struct object *create_pipe_shm_mapping( mem_size_t size )
-{
-    struct unicode_str name = { 0, 0 };
-    struct mapping *m = create_mapping( NULL, &name, 0, size, SEC_COMMIT, 0, FILE_READ_DATA | FILE_WRITE_DATA, NULL );
-    return m ? &m->obj : NULL;
-}
-
 static struct session_block *grow_session_mapping( mem_size_t needed )
 {
     size_t old_size = session_mapping->size, new_size;

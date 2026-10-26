@@ -194,7 +194,6 @@ extern struct object *create_user_data_mapping( struct object *root, const struc
 extern struct mapping *create_session_mapping( struct object *root, const struct unicode_str *name,
                                                unsigned int attr, const struct security_descriptor *sd );
 extern void set_session_mapping( struct mapping *mapping );
-extern struct object *create_pipe_shm_mapping( mem_size_t size );
 
 extern session_shm_t *shared_session;
 extern volatile void *alloc_shared_object( mem_size_t shm_size );
