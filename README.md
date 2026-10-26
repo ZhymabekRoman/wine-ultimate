@@ -3169,6 +3169,15 @@ In `server/mapping.c`:
 - Added test coverage in `dlls/ntdll/tests/virtual.c::test_pe_preferred_image_base()` verifying that preferred image base is preserved at load time.
 - Wine commits `151a32ff` (server mapping) and `aeed0f31` (ntdll tests) on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(h): Low-Memory & Page Cache optimizations (wine tip `e4840d68`, branch `ultimate`)
+
+Implemented kernel memory management optimizations across ntdll and dcomp:
+- `dlls/ntdll/unix/virtual.c`: `VirtualAlloc(MEM_RESET)` now uses `madvise(MADV_FREE)` (falling back to `MADV_DONTNEED`), allowing the Linux kernel to lazily reclaim pages under memory pressure while eliminating zero-fill page faults when pages are reused by V8/Chromium.
+- `dlls/ntdll/unix/virtual.c`: Enabled Kernel Samepage Merging (`MADV_MERGEABLE`) for PE `.rdata` sections, deduplicating identical WinRT vtables, GUIDs, and string constants across multi-process WebView2 trees.
+- `dlls/dcomp/device.c`: Skip collecting and blitting hidden visual subtrees (`DCOMPOSITION_BACKFACE_VISIBILITY_HIDDEN`), reducing compositor CPU cycles and GPU texture allocation for occluded XAML controls.
+- Wine commit `e4840d68` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
