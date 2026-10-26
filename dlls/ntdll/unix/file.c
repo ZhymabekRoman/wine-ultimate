@@ -2987,6 +2987,53 @@ NTSTATUS WINAPI NtQueryDirectoryFile( HANDLE handle, HANDLE event, PIO_APC_ROUTI
     return status;
 }
 
+struct dentry_node {
+    struct dentry_node *next;
+    char name[1];
+};
+
+#define DENTRY_HASH_SIZE 256
+struct dentry_cache_dir {
+    dev_t dev;
+    ino_t ino;
+    time_t mtime;
+    struct dentry_node *buckets[DENTRY_HASH_SIZE];
+};
+
+#define DENTRY_MAX_DIRS 64
+static struct dentry_cache_dir dentry_dirs[DENTRY_MAX_DIRS];
+static unsigned int dentry_dir_count = 0;
+static pthread_mutex_t dentry_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline unsigned int dentry_hash_w( const WCHAR *s, int len )
+{
+    unsigned int h = 5381;
+    while (len-- > 0) h = ((h << 5) + h) + (unsigned int)RtlDowncaseUnicodeChar(*s++);
+    return h % DENTRY_HASH_SIZE;
+}
+
+static inline unsigned int dentry_hash_a( const char *s )
+{
+    unsigned int h = 5381;
+    while (*s) h = ((h << 5) + h) + (unsigned int)tolower((unsigned char)*s++);
+    return h % DENTRY_HASH_SIZE;
+}
+
+static void free_dentry_dir( struct dentry_cache_dir *dir )
+{
+    unsigned int i;
+    for (i = 0; i < DENTRY_HASH_SIZE; i++)
+    {
+        struct dentry_node *node = dir->buckets[i];
+        while (node)
+        {
+            struct dentry_node *next = node->next;
+            free( node );
+            node = next;
+        }
+        dir->buckets[i] = NULL;
+    }
+}
 
 /***********************************************************************
  *           find_file_in_dir
@@ -3079,6 +3126,98 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
 #endif /* VFAT_IOCTL_READDIR_BOTH */
 
     if ((fd = openat( root_fd, unix_name, O_RDONLY )) == -1) return errno_to_status( errno );
+
+    /* In-memory Dentry Cache fast path */
+    if (!fstat( fd, &st ))
+    {
+        struct dentry_cache_dir *cache = NULL;
+        unsigned int h = dentry_hash_w( name, length );
+        unsigned int i;
+
+        pthread_mutex_lock( &dentry_mutex );
+        for (i = 0; i < dentry_dir_count; i++)
+        {
+            if (dentry_dirs[i].dev == st.st_dev && dentry_dirs[i].ino == st.st_ino)
+            {
+                if (dentry_dirs[i].mtime == st.st_mtime) cache = &dentry_dirs[i];
+                else free_dentry_dir( &dentry_dirs[i] );
+                break;
+            }
+        }
+
+        if (cache)
+        {
+            struct dentry_node *node;
+            unix_name[pos - 1] = '/';
+            for (node = cache->buckets[h]; node; node = node->next)
+            {
+                ret = ntdll_umbstowcs( node->name, strlen(node->name), buffer, MAX_DIR_ENTRY_LEN );
+                if (ret == length && !wcsnicmp( buffer, name, ret ))
+                {
+                    strcpy( unix_name + pos, node->name );
+                    pthread_mutex_unlock( &dentry_mutex );
+                    close( fd );
+                    return STATUS_SUCCESS;
+                }
+            }
+            pthread_mutex_unlock( &dentry_mutex );
+            close( fd );
+            goto not_found;
+        }
+
+        /* Not cached: read directory once and populate cache */
+        if ((dir = fdopendir( fd )))
+        {
+            struct dentry_cache_dir *new_cache;
+            NTSTATUS found_status = STATUS_OBJECT_NAME_NOT_FOUND;
+
+            if (i < dentry_dir_count) new_cache = &dentry_dirs[i];
+            else if (dentry_dir_count < DENTRY_MAX_DIRS) new_cache = &dentry_dirs[dentry_dir_count++];
+            else
+            {
+                new_cache = &dentry_dirs[0];
+                free_dentry_dir( new_cache );
+            }
+
+            memset( new_cache->buckets, 0, sizeof(new_cache->buckets) );
+            new_cache->dev = st.st_dev;
+            new_cache->ino = st.st_ino;
+            new_cache->mtime = st.st_mtime;
+
+            unix_name[pos - 1] = '/';
+
+            while ((de = readdir( dir )))
+            {
+                size_t dlen = strlen( de->d_name );
+                struct dentry_node *node = malloc( sizeof(struct dentry_node) + dlen );
+                if (node)
+                {
+                    unsigned int dh = dentry_hash_a( de->d_name );
+                    memcpy( node->name, de->d_name, dlen + 1 );
+                    node->next = new_cache->buckets[dh];
+                    new_cache->buckets[dh] = node;
+                }
+
+                if (found_status != STATUS_SUCCESS)
+                {
+                    ret = ntdll_umbstowcs( de->d_name, dlen, buffer, MAX_DIR_ENTRY_LEN );
+                    if (ret == length && !wcsnicmp( buffer, name, ret ))
+                    {
+                        strcpy( unix_name + pos, de->d_name );
+                        found_status = STATUS_SUCCESS;
+                    }
+                }
+            }
+            closedir( dir );
+            pthread_mutex_unlock( &dentry_mutex );
+            if (found_status == STATUS_SUCCESS) return STATUS_SUCCESS;
+            goto not_found;
+        }
+        pthread_mutex_unlock( &dentry_mutex );
+        close( fd );
+        return errno_to_status( errno );
+    }
+
     if (!(dir = fdopendir( fd )))
     {
         close( fd );
