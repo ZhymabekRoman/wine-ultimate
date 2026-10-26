@@ -68,6 +68,8 @@ struct completion_wait
     struct thread     *thread;
     struct comp_msg   *msg;
     struct list        wait_queue_entry;
+    struct list        snapshot_entry;  /* entry in a private walk list, see take_waiters_snapshot() */
+    int                snapshotted;     /* snapshot_entry is linked and obj holds an extra ref */
 };
 
 struct completion
@@ -240,16 +242,60 @@ static struct object *completion_get_sync( struct object *obj )
     return grab_object( completion->sync );
 }
 
+/* Pin the current waiters of a completion port onto a private walk list.
+ *
+ * Waking a waiter completes its request, and completing that request can close the
+ * completion-wait handle and release the object.  When the woken thread dies on the
+ * way - a closed wakeup socket kills it - its whole process is torn down
+ * (terminate_process -> kill_thread -> remove_process_thread -> process_killed ->
+ * release_job_process -> add_completion), which releases the completion-waits owned
+ * by that process' other threads as well.  All of those objects are unlinked from
+ * this completion's wait queue while a caller is walking that queue, so walking it
+ * directly follows pointers into freed memory.  Holding a reference per waiter keeps
+ * the objects alive across the walk; the per-object flag stops a nested
+ * add_completion() from re-linking a list node that is already on a snapshot list.
+ */
+static void take_waiters_snapshot( struct completion *completion, struct list *waiting )
+{
+    struct completion_wait *wait;
+
+    list_init( waiting );
+    LIST_FOR_EACH_ENTRY( wait, &completion->wait_queue, struct completion_wait, wait_queue_entry )
+    {
+        if (wait->snapshotted) continue;
+        wait->snapshotted = 1;
+        grab_object( &wait->obj );
+        list_add_tail( waiting, &wait->snapshot_entry );
+    }
+}
+
+static void release_waiters_snapshot( struct list *waiting )
+{
+    struct completion_wait *wait, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( wait, next, waiting, struct completion_wait, snapshot_entry )
+    {
+        list_remove( &wait->snapshot_entry );
+        wait->snapshotted = 0;
+        release_object( &wait->obj );
+    }
+}
+
 static int completion_close_handle( struct object *obj, struct process *process, obj_handle_t handle )
 {
     struct completion *completion = (struct completion *)obj;
     struct completion_wait *wait, *wait_next;
+    struct list waiting;
 
     if (completion->obj.handle_count != 1) return 1;
 
-    LIST_FOR_EACH_ENTRY_SAFE( wait, wait_next, &completion->wait_queue, struct completion_wait, wait_queue_entry )
+    /* cleanup_thread_completion() below releases the object, and the wake can tear the
+     * woken thread's process down, releasing other waiters of this port the same way;
+     * walk a refcounted snapshot of the queue instead of the queue itself. */
+    take_waiters_snapshot( completion, &waiting );
+    LIST_FOR_EACH_ENTRY_SAFE( wait, wait_next, &waiting, struct completion_wait, snapshot_entry )
     {
-        assert( wait->completion );
+        if (!wait->completion) continue;
         wait->completion = NULL;
         list_remove( &wait->wait_queue_entry );
         if (!wait->msg)
@@ -258,6 +304,7 @@ static int completion_close_handle( struct object *obj, struct process *process,
             cleanup_thread_completion( wait->thread );
         }
     }
+    release_waiters_snapshot( &waiting );
     signal_sync( completion->sync );
     return 1;
 }
@@ -291,7 +338,9 @@ static struct completion_wait *create_completion_wait( struct thread *thread )
     wait->completion = NULL;
     wait->thread = thread;
     wait->msg = NULL;
+    wait->snapshotted = 0;
     list_init( &wait->wait_queue_entry );
+    list_init( &wait->snapshot_entry );
     if (!(wait->handle = alloc_handle( current->process, wait, SYNCHRONIZE, 0 )))
     {
         release_object( &wait->obj );
@@ -336,6 +385,7 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
 {
     struct comp_msg *msg = mem_alloc( sizeof( *msg ) );
     struct completion_wait *wait, *wait_next;
+    struct list waiting;
 
     if (!msg)
         return;
@@ -347,16 +397,24 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
 
     list_add_tail( &completion->queue, &msg->queue_entry );
     completion->depth++;
-    LIST_FOR_EACH_ENTRY_SAFE( wait, wait_next, &completion->wait_queue, struct completion_wait, wait_queue_entry )
+    take_waiters_snapshot( completion, &waiting );
+    LIST_FOR_EACH_ENTRY_SAFE( wait, wait_next, &waiting, struct completion_wait, snapshot_entry )
     {
-        wake_up( &wait->obj, 1 );
+        if (wait->completion) wake_up( &wait->obj, 1 );
         if (wait->msg)
         {
-            list_remove( &wait->wait_queue_entry );
-            wait->completion = NULL;
+            if (wait->completion)
+            {
+                list_remove( &wait->wait_queue_entry );
+                wait->completion = NULL;
+            }
+            list_remove( &wait->snapshot_entry );
+            wait->snapshotted = 0;
+            release_object( &wait->obj );
         }
-        if (list_empty( &completion->queue )) return;
+        if (list_empty( &completion->queue )) break;
     }
+    release_waiters_snapshot( &waiting );
     if (!list_empty( &completion->queue )) signal_sync( completion->sync );
 }
 
