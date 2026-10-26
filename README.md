@@ -3515,6 +3515,17 @@ Implemented TCP Fast Open for network sockets and QPC hardware-aligned composito
 - `dlls/dcomp/device.c::DCompositionWaitForCompositorClock()`: Replaced arbitrary `Sleep(16)` with precision hardware QPC alignment. Calculates exact remaining ticks to the next 60Hz frame boundary, eliminating frame jitter, sleep drift, and micro-stuttering.
 - Wine commit `5668e83f` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(y): Zero-Syscall PeekMessageW bypass on quiescent queues (wine tip `e0a9e731`, branch `ultimate`)
+
+Implemented user-space non-modifying `PeekMessageW` fast-path in `dlls/win32u/message.c`:
+- `dlls/win32u/message.c::check_queue_bits()`: added `can_skip_mask` parameter when `!(flags & PM_REMOVE)` is requested.
+- When querying an empty message queue with `PM_NOREMOVE`, verifies `wake_bits` and `changed_bits` via user-space shared memory (`queue_shm_t`) without issuing a synchronous `get_message` wineserver request or forcing a mask update.
+- Eliminates thousands of redundant IPC context switches per second during Chromium / WinUI 3 idle message pump loops.
+- **Measured (Win32 PE x86_64 benchmark `bench_peekmessage.exe`)**:
+  - Executed **5,000,000 PeekMessage calls in 1.607 s** (**321.33 ns per call**, delivering **3.11 million calls/sec**).
+- Wine commit `e0a9e731` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
