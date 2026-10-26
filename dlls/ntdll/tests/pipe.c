@@ -3141,6 +3141,53 @@ static void test_async_cancel_on_handle_close(void)
     CloseHandle(process_handle);
 }
 
+static void test_named_pipe_shm(void)
+{
+    HANDLE server, client;
+    IO_STATUS_BLOCK iosb;
+    HANDLE event;
+    NTSTATUS status;
+    char write_buf[128] = "WINESERVER_SHM_TEST_PAYLOAD";
+    char read_buf[128] = {0};
+
+    status = create_pipe(&server, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, FILE_SYNCHRONOUS_IO_NONALERT);
+    ok(!status, "create_pipe failed: %lx\n", status);
+
+    event = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ok(event != NULL, "CreateEventW failed: %lu\n", GetLastError());
+
+    status = listen_pipe(server, event, &iosb, FALSE);
+    ok(status == STATUS_PENDING || status == STATUS_SUCCESS, "listen_pipe failed: %lx\n", status);
+
+    client = CreateFileW(testpipe, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL);
+    ok(client != INVALID_HANDLE_VALUE, "CreateFileW failed: %lu\n", GetLastError());
+
+    /* Test client -> server write and read */
+    status = NtWriteFile(client, NULL, NULL, NULL, &iosb, write_buf, strlen(write_buf) + 1, NULL, NULL);
+    ok(!status, "NtWriteFile client failed: %lx\n", status);
+    ok(iosb.Information == strlen(write_buf) + 1, "written %Iu bytes\n", iosb.Information);
+
+    status = NtReadFile(server, NULL, NULL, NULL, &iosb, read_buf, sizeof(read_buf), NULL, NULL);
+    ok(!status, "NtReadFile server failed: %lx\n", status);
+    ok(iosb.Information == strlen(write_buf) + 1, "read %Iu bytes\n", iosb.Information);
+    ok(!strcmp(read_buf, write_buf), "data mismatch: got '%s' expected '%s'\n", read_buf, write_buf);
+
+    /* Test server -> client write and read */
+    strcpy(write_buf, "WINESERVER_SHM_REPLY_PAYLOAD");
+    memset(read_buf, 0, sizeof(read_buf));
+
+    status = NtWriteFile(server, NULL, NULL, NULL, &iosb, write_buf, strlen(write_buf) + 1, NULL, NULL);
+    ok(!status, "NtWriteFile server failed: %lx\n", status);
+
+    status = NtReadFile(client, NULL, NULL, NULL, &iosb, read_buf, sizeof(read_buf), NULL, NULL);
+    ok(!status, "NtReadFile client failed: %lx\n", status);
+    ok(!strcmp(read_buf, write_buf), "reply mismatch: got '%s'\n", read_buf);
+
+    CloseHandle(client);
+    CloseHandle(server);
+    CloseHandle(event);
+}
+
 START_TEST(pipe)
 {
     char **argv;
@@ -3216,6 +3263,7 @@ START_TEST(pipe)
     test_empty_name();
     test_pipe_names();
     test_async_cancel_on_handle_close();
+    test_named_pipe_shm();
 
     pipe_for_each_state(create_pipe_server, connect_pipe, test_pipe_state);
     pipe_for_each_state(create_pipe_server, connect_and_write_pipe, test_pipe_with_data_state);
