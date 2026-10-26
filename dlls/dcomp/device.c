@@ -137,6 +137,24 @@ static const void *dcomp_6b556968_vtbl[] =
 
 static struct { const void *vtbl; } dcomp_6b556968_obj = { dcomp_6b556968_vtbl };
 
+/*
+ * IDCompositionDevice4 (composition textures, Windows 11 22H2) and
+ * IDCompositionDevice5 (dynamic textures) are not implemented.  A composition device
+ * created through DCompositionCreateDevice[23] answers them with the same object it
+ * uses for IDCompositionDevice2/3/IDCompositionDesktopDevice, whose extra slots are
+ * stubs, so that a client requesting the newest device version can use the
+ * implemented functionality instead of failing device creation.
+ */
+static const GUID dcomp_device4_guid =
+{ 0x85fc5cca, 0x2da6, 0x494c, { 0x86, 0xb6, 0x4a, 0x77, 0x5c, 0x04, 0x9b, 0x8a } };
+static const GUID dcomp_device5_guid =
+{ 0x2c6bebfe, 0xa603, 0x472f, { 0xaf, 0x34, 0xd2, 0x44, 0x33, 0x56, 0xe6, 0x1b } };
+
+static BOOL is_device_version_guid(REFIID iid)
+{
+    return IsEqualGUID(iid, &dcomp_device4_guid) || IsEqualGUID(iid, &dcomp_device5_guid);
+}
+
 static BOOL is_partner_guid(REFIID iid)
 {
     return IsEqualGUID(iid, &IID_IDCompositionDesktopDevicePartner)
@@ -171,7 +189,8 @@ static HRESULT STDMETHODCALLTYPE device_QueryInterface(IDCompositionDevice *ifac
     else if ((device->version >= 2
               && (IsEqualGUID(iid, &IID_IDCompositionDevice2)
                   || IsEqualGUID(iid, &IID_IDCompositionDevice3)
-                  || IsEqualGUID(iid, &IID_IDCompositionDesktopDevice)))
+                  || IsEqualGUID(iid, &IID_IDCompositionDesktopDevice)
+                  || is_device_version_guid(iid)))
               || is_partner_guid(iid))
     {
         IUnknown_AddRef(&device->IDCompositionDeviceUnknown_iface);
@@ -3365,6 +3384,7 @@ HRESULT WINAPI DCompositionCreateDevice2(IUnknown *rendering_device, REFIID iid,
             && !IsEqualIID(iid, &IID_IDCompositionDevice2)
             && !IsEqualIID(iid, &IID_IDCompositionDevice3)
             && !IsEqualIID(iid, &IID_IDCompositionDesktopDevice)
+            && !is_device_version_guid(iid)
             && !is_partner_guid(iid))
         return E_NOINTERFACE;
 
@@ -3380,6 +3400,7 @@ HRESULT WINAPI DCompositionCreateDevice3(IUnknown *rendering_device, REFIID iid,
             && !IsEqualIID(iid, &IID_IDCompositionDevice2)
             && !IsEqualIID(iid, &IID_IDCompositionDevice3)
             && !IsEqualIID(iid, &IID_IDCompositionDesktopDevice)
+            && !is_device_version_guid(iid)
             && !is_partner_guid(iid))
         return E_NOINTERFACE;
 
