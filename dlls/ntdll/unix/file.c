@@ -7129,6 +7129,55 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
 }
 
 
+#define FLUSH_COALESCE_CACHE_SIZE 64
+struct flush_coalesce_entry
+{
+    int fd;
+    uint64_t last_sync_ms;
+};
+static struct flush_coalesce_entry flush_coalesce_cache[FLUSH_COALESCE_CACHE_SIZE];
+static unsigned int flush_coalesce_cache_idx = 0;
+
+static inline BOOL should_coalesce_file_flush( int fd )
+{
+    static int enabled = -1;
+    struct timespec ts;
+    uint64_t now_ms, delta;
+    unsigned int i;
+
+    if (enabled == -1)
+    {
+        const char *env = getenv( "WINE_NO_COALESCE_FLUSH" );
+        enabled = (env && *env && strcmp( env, "0" ) != 0) ? 0 : 1;
+    }
+    if (!enabled) return FALSE;
+
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    now_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
+
+    for (i = 0; i < FLUSH_COALESCE_CACHE_SIZE; i++)
+    {
+        if (flush_coalesce_cache[i].fd == fd)
+        {
+            delta = now_ms - flush_coalesce_cache[i].last_sync_ms;
+            if (delta < 3)
+            {
+#ifdef linux
+                sync_file_range( fd, 0, 0, SYNC_FILE_RANGE_WRITE );
+#endif
+                return TRUE;
+            }
+            flush_coalesce_cache[i].last_sync_ms = now_ms;
+            return FALSE;
+        }
+    }
+
+    flush_coalesce_cache[flush_coalesce_cache_idx].fd = fd;
+    flush_coalesce_cache[flush_coalesce_cache_idx].last_sync_ms = now_ms;
+    flush_coalesce_cache_idx = (flush_coalesce_cache_idx + 1) % FLUSH_COALESCE_CACHE_SIZE;
+    return FALSE;
+}
+
 /******************************************************************************
  *              NtFlushBuffersFile   (NTDLL.@)
  */
@@ -7161,7 +7210,14 @@ NTSTATUS WINAPI NtFlushBuffersFileEx( HANDLE handle, ULONG flags, void *params, 
 
     if (!ret && (type == FD_TYPE_FILE || type == FD_TYPE_DIR || type == FD_TYPE_CHAR))
     {
-        if (fsync(fd)) ret = errno_to_status( errno );
+#ifdef linux
+        if (!should_coalesce_file_flush( fd ))
+        {
+            if (fdatasync( fd )) ret = errno_to_status( errno );
+        }
+#else
+        if (fsync( fd )) ret = errno_to_status( errno );
+#endif
         io->Status      = ret;
         io->Information = 0;
     }
