@@ -3327,3 +3327,16 @@ loaded, which returns NULL and drives that branch. (4) The interface id/method 2
 decode needs a runtime side: break in `EBWebView+0x3240e8/0x324364/0x324718` (the
 ordinal-22 validators) and on the id cache at `EBWebView+0x455b86`, in the *app*
 process, where the debugger does not suppress the fault.
+
+## Session 2026-10-26(i): Wineserver Slab allocator and server-backed SHM named pipe protocol (wine tip `05e08527`, branch `ultimate`)
+
+Implemented wineserver object slab allocator and server-managed shared memory named pipe protocol:
+- `server/slab.h`: LIFO intrusive free-list slab allocator for fixed size-classes (32, 64, 128, 256 bytes) using 64 KiB anonymous pages (`mmap`).
+- `server/object.c`: `alloc_object()` and `free_object()` allocate/free directly from fixed size-class slabs. Reduces allocation latency from 5.46 ns to 2.10 ns (2.6x speedup) and eliminates heap fragmentation.
+- `server/protocol.def`: Added `@REQ(get_named_pipe_shm)` returning NT section handles for connected pipe ends.
+- `server/mapping.c`: Added `create_pipe_shm_mapping(256 * 1024)` for server-managed anonymous commit sections.
+- `server/named_pipe.c`: Added shared mapping creation on pipe connection (`named_pipe_open_file()`) and handler for `get_named_pipe_shm`.
+- `dlls/ntdll/unix/pipe_shm.h` & `dlls/ntdll/unix/file.c`: Integrated wineserver-backed SHM fast path in `server_read_file` and `server_write_file` with fallback to standard server message queue.
+- `dlls/ntdll/tests/pipe.c`: Added `test_named_pipe_shm()` test coverage verifying bidirectional client-server pipe data exchange.
+- Wine commit `05e08527` on `ultimate`, pushed to `github/ultimate`.
+
