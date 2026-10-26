@@ -34,6 +34,7 @@
 #include "wine/debug.h"
 #include "wine/list.h"
 #include "ntdll_misc.h"
+#include "inline_patch.h"
 #include "ddk/ntddk.h"
 #include "ddk/wdm.h"
 
@@ -1241,6 +1242,14 @@ static BOOL import_dll( WINE_MODREF *wm, const IMAGE_IMPORT_DESCRIPTOR *descr, L
         {
             IMAGE_IMPORT_BY_NAME *pe_name;
             pe_name = get_rva( module, (DWORD)import_list->u1.AddressOfData );
+#ifdef __x86_64__
+            if (is_module_eligible_for_inline_patch( wm->ldr.BaseDllName.Buffer, module ))
+                thunk_list->u1.Function = get_fast_iat_trampoline( (const char *)pe_name->Name );
+            else
+                thunk_list->u1.Function = 0;
+
+            if (!thunk_list->u1.Function)
+#endif
             thunk_list->u1.Function = (ULONG_PTR)find_named_export( imp_mod, exports, exp_size,
                                                                     (const char*)pe_name->Name,
                                                                     pe_name->Hint, load_path, wm, FALSE );

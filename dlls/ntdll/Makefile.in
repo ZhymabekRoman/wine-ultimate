@@ -24,6 +24,7 @@ SOURCES = \
 	exception.c \
 	handletable.c \
 	heap.c \
+	inline_patch.c \
 	large_int.c \
 	loader.c \
 	locale.c \
