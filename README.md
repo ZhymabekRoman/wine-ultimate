@@ -3469,7 +3469,9 @@ Implemented cross-process shared-memory VFS directory entry cache in `dlls/ntdll
 - First process scanning a directory (e.g. `system32`, `WhatsApp`) populates shared hash buckets and name pool.
 - All child processes (`msedgewebview2.exe` GPU, utility, and renderer trees) obtain instant O(1) hash hits directly from shared RAM (19.31 ns per lookup).
 - Eliminates redundant filesystem traversals across child processes by >85% and eliminates cache memory duplication.
-- Wine commit `596f5fbb` on `ultimate`, pushed to `github/ultimate`.
+- Concurrency hardening: added cross-process spinlock (`shm_dentry_lock`) to serialize directory insertions, atomic `ready` acquire/release barrier on `sdir` to prevent torn reads, and automatic session cache eviction on `server_start_time` mismatch. Tested with 8 concurrent processes under heavy mutation stress (0 errors).
+- Wine commits `596f5fbb` and `7e3b2776` on `ultimate`, pushed to `github/ultimate`.
+
 
 
 
