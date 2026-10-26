@@ -1960,6 +1960,7 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
      * retrieve it again */
     fd = remove_fd_from_cache( handle );
     close_inproc_sync( handle );
+    invalidate_type_cache( handle );
 
     SERVER_START_REQ( close_handle )
     {

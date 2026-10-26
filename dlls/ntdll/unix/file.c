@@ -7787,6 +7787,19 @@ struct cached_type_entry {
 static struct cached_type_entry type_cache[TYPE_CACHE_MAX];
 static unsigned int type_cache_count = 0;
 
+void invalidate_type_cache( HANDLE handle )
+{
+    unsigned int i;
+    for (i = 0; i < type_cache_count; i++)
+    {
+        if (type_cache[i].handle == handle)
+        {
+            type_cache[i] = type_cache[--type_cache_count];
+            break;
+        }
+    }
+}
+
 /**************************************************************************
  *           NtQueryObject   (NTDLL.@)
  */
