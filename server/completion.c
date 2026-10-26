@@ -248,16 +248,23 @@ static int completion_close_handle( struct object *obj, struct process *process,
 
 void cleanup_thread_completion( struct thread *thread )
 {
-    if (!thread->completion_wait) return;
+    struct completion_wait *wait = thread->completion_wait;
+    obj_handle_t handle;
 
-    if (thread->completion_wait->handle)
-    {
-        close_handle( thread->process, thread->completion_wait->handle );
-        thread->completion_wait->handle = 0;
-    }
-    if (thread->completion_wait->completion) list_remove( &thread->completion_wait->wait_queue_entry );
-    release_object( &thread->completion_wait->obj );
+    if (!wait) return;
+
     thread->completion_wait = NULL;
+    if (wait->completion)
+    {
+        list_remove( &wait->wait_queue_entry );
+        wait->completion = NULL;
+    }
+    if ((handle = wait->handle))
+    {
+        wait->handle = 0;
+        close_handle( thread->process, handle );
+    }
+    release_object( &wait->obj );
 }
 
 static struct completion_wait *create_completion_wait( struct thread *thread )
@@ -406,16 +413,17 @@ DECL_HANDLER(remove_completion)
     if (current->completion_wait)
     {
         list_remove( &current->completion_wait->wait_queue_entry );
+        current->completion_wait->completion = NULL;
     }
     else if (!(current->completion_wait = create_completion_wait( current )))
     {
         release_object( completion );
         return;
     }
-    current->completion_wait->completion = completion;
-    list_add_head( &completion->wait_queue, &current->completion_wait->wait_queue_entry );
     if (!entry)
     {
+        current->completion_wait->completion = completion;
+        list_add_head( &completion->wait_queue, &current->completion_wait->wait_queue_entry );
         reply->wait_handle = current->completion_wait->handle;
         set_error( STATUS_PENDING );
     }

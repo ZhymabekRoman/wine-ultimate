@@ -18,6 +18,9 @@
  */
 
 #include <stdarg.h>
+#if defined(__i386__) || defined(__x86_64__)
+#include <intrin.h>
+#endif
 #include "ntstatus.h"
 #include "windef.h"
 #include "winternl.h"
@@ -38,6 +41,60 @@ static CRITICAL_SECTION random_cs = { &random_debug, -1, 0, 0, 0, 0 };
 static char random_buf[sizeof(SYSTEM_INTERRUPT_INFORMATION) * MAX_CPUS];
 static ULONG random_len;
 static ULONG random_pos;
+
+static inline BOOL has_rdrand(void)
+{
+    static int supported = -1;
+    if (supported == -1)
+    {
+#if defined(__i386__) || defined(__x86_64__)
+        int regs[4];
+        __cpuid( regs, 1 );
+        supported = (regs[2] & (1 << 30)) != 0;
+#else
+        supported = 0;
+#endif
+    }
+    return supported;
+}
+
+static inline BOOL fill_random_rdrand( void *buffer, ULONG len )
+{
+#if defined(__x86_64__)
+    BYTE *ptr = buffer;
+    while (len >= 8)
+    {
+        ULONG64 val;
+        unsigned char ok;
+        int retry = 10;
+        do {
+            __asm__ volatile ("rdrand %0; setc %1" : "=r" (val), "=qm" (ok));
+        } while (!ok && --retry);
+        if (!ok) return FALSE;
+        *(ULONG64 *)ptr = val;
+        ptr += 8;
+        len -= 8;
+    }
+    if (len > 0)
+    {
+        ULONG64 val;
+        unsigned char ok;
+        int retry = 10;
+        do {
+            __asm__ volatile ("rdrand %0; setc %1" : "=r" (val), "=qm" (ok));
+        } while (!ok && --retry);
+        if (!ok) return FALSE;
+        while (len--)
+        {
+            *ptr++ = (BYTE)val;
+            val >>= 8;
+        }
+    }
+    return TRUE;
+#else
+    return FALSE;
+#endif
+}
 
 /* FIXME: assumes interrupt information provides sufficient randomness */
 static BOOL fill_random_buffer(void)
@@ -61,6 +118,12 @@ static BOOL fill_random_buffer(void)
 BOOLEAN WINAPI SystemFunction036( void *buffer, ULONG len )
 {
     char *ptr = buffer;
+
+    if (!len) return TRUE;
+    if (!buffer) return FALSE;
+
+    if (has_rdrand() && fill_random_rdrand( buffer, len ))
+        return TRUE;
 
     EnterCriticalSection( &random_cs );
     while (len)
