@@ -29,6 +29,9 @@
 #include <string.h>
 #include <limits.h>
 #include <time.h>
+#if defined(__x86_64__) || defined(__i386__)
+#include <intrin.h>
+#endif
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -381,6 +384,25 @@ LONGLONG WINAPI RtlGetSystemTimePrecise( void )
  */
 BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceCounter( LARGE_INTEGER *counter )
 {
+#if defined(__x86_64__) || defined(__i386__)
+    if (user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED)
+    {
+        ULONGLONG tsc;
+        if (user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP)
+        {
+            unsigned int aux;
+            tsc = __rdtscp( &aux );
+        }
+        else
+        {
+            if (user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE)
+                _mm_lfence();
+            tsc = __rdtsc();
+        }
+        counter->QuadPart = (tsc + user_shared_data->QpcBias) >> user_shared_data->QpcShift;
+        return TRUE;
+    }
+#endif
     NtQueryPerformanceCounter( counter, NULL );
     return TRUE;
 }
@@ -390,6 +412,11 @@ BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceCounter( LARGE_INTEGER *counter
  */
 BOOL WINAPI DECLSPEC_HOTPATCH RtlQueryPerformanceFrequency( LARGE_INTEGER *frequency )
 {
+    if (user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED)
+    {
+        frequency->QuadPart = user_shared_data->QpcFrequency;
+        return TRUE;
+    }
     frequency->QuadPart = TICKSPERSEC;
     return TRUE;
 }

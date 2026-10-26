@@ -349,6 +349,29 @@ static void create_user_shared_data(void)
     data->SuiteMask                   = version.wSuiteMask;
     wcscpy( data->NtSystemRoot, L"C:\\windows" );
 
+    {
+        UINT64 tsc_freq = read_tsc_frequency();
+        if (tsc_freq)
+        {
+            data->QpcShift = 10;
+            data->QpcFrequency = tsc_freq >> 10;
+            data->QpcBias = 0;
+            data->QpcBypassEnabled = SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED;
+#if defined(__i386__) || defined(__x86_64__)
+            {
+                int regs[4];
+                __cpuid( regs, 0x80000001 );
+                if (regs[3] & (1 << 27))
+                    data->QpcBypassEnabled |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP;
+                else
+                    data->QpcBypassEnabled |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE;
+            }
+#endif
+            TRACE( "QPC bypass enabled: freq %I64u Hz (shift %u), flags 0x%x\n",
+                   data->QpcFrequency, data->QpcShift, data->QpcBypassEnabled );
+        }
+    }
+
     UnmapViewOfFile( data );
 }
 

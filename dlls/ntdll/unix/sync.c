@@ -27,6 +27,10 @@
 
 #include "config.h"
 
+#if defined(__x86_64__) || defined(__i386__)
+#include <x86intrin.h>
+#endif
+
 #include <assert.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -2516,6 +2520,26 @@ NTSTATUS WINAPI NtDelayExecution( BOOLEAN alertable, const LARGE_INTEGER *timeou
  */
 NTSTATUS WINAPI NtQueryPerformanceCounter( LARGE_INTEGER *counter, LARGE_INTEGER *frequency )
 {
+#if defined(__x86_64__) || defined(__i386__)
+    if (user_shared_data && (user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED))
+    {
+        ULONGLONG tsc;
+        if (user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP)
+        {
+            unsigned int aux;
+            tsc = __rdtscp( &aux );
+        }
+        else
+        {
+            if (user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE)
+                _mm_lfence();
+            tsc = __rdtsc();
+        }
+        counter->QuadPart = (tsc + user_shared_data->QpcBias) >> user_shared_data->QpcShift;
+        if (frequency) frequency->QuadPart = user_shared_data->QpcFrequency;
+        return STATUS_SUCCESS;
+    }
+#endif
     counter->QuadPart = monotonic_counter();
     if (frequency) frequency->QuadPart = TICKSPERSEC;
     return STATUS_SUCCESS;
