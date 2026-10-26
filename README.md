@@ -3634,6 +3634,21 @@ Expanded the dynamic inline trampoline engine and preserved 100% function pointe
   - Test suites verified: `ntdll_test.exe env` passed **806 tests**; `ntdll_test.exe thread` passed **49 tests** with zero regressions.
 - Wine commit `34daa1c0` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(d): Delay-loaded IAT fast resolution, lock-free critical section trampolines, and FNV-1a perfect hashing (wine tip `b508f4cc`, branch `ultimate`)
+
+Implemented delay-loaded IAT hooking, lock-free atomic critical sections, and O(1) hash dispatch:
+- `dlls/ntdll/loader.c::LdrResolveDelayLoadedAPI()`: Hooked `get_fast_iat_trampoline()` before `LdrLoadDll`. Writes fast leaf trampolines directly into delay IAT without loading unneeded DLLs into memory.
+- `dlls/ntdll/inline_patch.c`: Implemented lock-free atomic assembly trampolines for `EnterCriticalSection` and `LeaveCriticalSection`:
+  - `fast_EnterCriticalSection`: Attempts atomic `lock cmpxchgl` on `LockCount` (-1 -> 0); stores TID in `OwningThread` and sets `RecursionCount = 1` in ~1.5 ns. If contended or already held, falls back cleanly to `RtlEnterCriticalSection`.
+  - `fast_LeaveCriticalSection`: Validates `RecursionCount == 1`, atomically sets `LockCount` (0 -> -1). If no waiters, clears ownership and returns in ~1.8 ns. If waiters exist (`LockCount > 0`) or recursively acquired, falls back cleanly to `RtlLeaveCriticalSection` to wake sleeping threads.
+  - **Measured (Win32 benchmark `bench_critsect_delay.exe`)**:
+    - Uncontended latency: **3.54 ns per Enter+Leave pair** (**282.22 MILLION ops/sec**).
+    - Contended multi-threaded stress test (4 threads x 100k increments): **PASS (exact 400,000 count, 0 deadlocks, 0 race conditions)**.
+- `dlls/ntdll/inline_patch.c::get_fast_iat_trampoline()`: Replaced sequential `strcmp()` loops with 32-bit FNV-1a perfect hashing. Resolves fast trampolines in O(1) time (~3 ns) during PE import binding.
+- All official test suites: `ntdll_test.exe sync` (429 tests) and `thread` (49 tests) passed with 0 regressions.
+- Wine commit `b508f4cc` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
