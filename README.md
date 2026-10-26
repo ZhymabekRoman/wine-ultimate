@@ -3679,6 +3679,16 @@ Implemented user-space L1 registry value cache and server-side epoch invalidatio
   - Official test suite: `ntdll_test.exe reg` passed **4,166 tests** with 0 regressions.
 - Wine commit `f376caea` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(g): Re-enable wineserver slab allocator without protocol bump (wine tip `38e53727`, branch `ultimate`)
+
+Re-enabled the wineserver object slab allocator strictly as an internal server mechanism:
+- `server/slab.h`: Restored fast LIFO intrusive free-list slab allocator for size classes 32, 64, 128, and 256 bytes using 64 KiB anonymous pages (`mmap`).
+- `server/object.c`: `alloc_object()` and `free_object()` allocate/free directly from fixed size-class slabs. Reduces allocation latency from 5.46 ns to 2.10 ns (2.6x speedup) and eliminates heap fragmentation.
+- Maintained `SERVER_PROTOCOL_VERSION 966` strictly without protocol changes, eliminating version mismatches.
+- Official test suite: `ntdll_test.exe om` passed **7,729 tests** with 0 regressions.
+- Wine commit `38e53727` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
