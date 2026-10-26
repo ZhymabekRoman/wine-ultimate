@@ -1239,6 +1239,12 @@ static void inode_add_closed_fd( struct inode *inode, struct closed_fd *fd )
         if (fd->unix_fd != -1) close( fd->unix_fd );
         fd->unix_fd = -1;
         list_add_head( &inode->closed, &fd->entry );
+        /* delete-on-close: when this was the last open handle and no locks
+         * remain, the name must disappear from the filesystem right away.
+         * Deferring the unlink to the idle sweep lets a immediate recreate
+         * (delete dir + mkdir same name) collide with the stale on-disk
+         * entry while path queries report it as already deleted. */
+        if (list_empty( &inode->open )) unlink_closed_fd( inode, fd );
     }
     else  /* no locks on this inode and no unlink, get rid of the fd */
     {
