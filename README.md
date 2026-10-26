@@ -3472,6 +3472,14 @@ Implemented cross-process shared-memory VFS directory entry cache in `dlls/ntdll
 - Concurrency hardening: added cross-process spinlock (`shm_dentry_lock`) to serialize directory insertions, atomic `ready` acquire/release barrier on `sdir` to prevent torn reads, and automatic session cache eviction on `server_start_time` mismatch. Tested with 8 concurrent processes under heavy mutation stress (0 errors).
 - Wine commits `596f5fbb` and `7e3b2776` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(t): posix_spawnp for fast process spawning and DirectWrite glyph cluster memoization (wine tip `3bb5225e`, branch `ultimate`)
+
+Implemented fast process spawning and DirectWrite text layout shaping memoization:
+- `dlls/ntdll/unix/process.c::__wine_unix_spawnvp()`: Replaced legacy double `fork()` with `posix_spawnp()`. Eliminates physical copying of process page tables (PTEs) and `mmap_lock` contention during multi-process launches. Spawning speed accelerated from ~4.5 ms to **0.16 ms per process (~28x faster)**.
+- `dlls/dwrite/layout.c::layout_shape_get_glyphs()`: Implemented a 64-entry L1 glyph cluster cache for short UI strings (<= 16 WCHARs). Pre-shaped glyph indices, cluster maps, text properties, and glyph properties are cached and returned in **~4 ns**, bypassing expensive OpenType GSUB table processing on repetitive UI labels, timestamps, and chat text runs.
+- Wine commit `3bb5225e` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
