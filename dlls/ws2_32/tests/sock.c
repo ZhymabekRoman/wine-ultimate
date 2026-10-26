@@ -14949,6 +14949,54 @@ static void test_afunix(void)
     test_afunix_path( path );
 }
 
+static void test_connect_unreachable(void)
+{
+    static const char target[] = "2001:db8::1"; /* RFC 3849 documentation prefix: not routable */
+    struct sockaddr_in6 addr = { .sin6_family = AF_INET6, .sin6_port = htons( 80 ) };
+    fd_set write_set, except_set;
+    struct timeval tv;
+    int ret, value, len = sizeof(value);
+    SOCKET sock;
+
+    /* A connect() on a nonblocking connection-mode socket never reports the failure of
+     * the connection to its caller: it returns WSAEWOULDBLOCK and the reason is
+     * delivered on the connect event and through getsockopt( SO_ERROR ). On Windows the
+     * connect of a socket with no route to the target fails that way; the failure of the
+     * route lookup must not be visible to the connect() call itself. */
+    sock = socket( AF_INET6, SOCK_STREAM, IPPROTO_TCP );
+    if (sock == INVALID_SOCKET)
+    {
+        win_skip( "no IPv6 support, error %u\n", WSAGetLastError() );
+        return;
+    }
+    set_blocking( sock, FALSE );
+    ok( inet_pton( AF_INET6, target, &addr.sin6_addr ) == 1, "failed to parse %s\n", target );
+
+    SetLastError( 0xdeadbeef );
+    ret = connect( sock, (struct sockaddr *)&addr, sizeof(addr) );
+    ok( ret == SOCKET_ERROR, "connect returned %d\n", ret );
+    ok( WSAGetLastError() == WSAEWOULDBLOCK, "got error %u\n", WSAGetLastError() );
+
+    FD_ZERO( &write_set );
+    FD_SET( sock, &write_set );
+    FD_ZERO( &except_set );
+    FD_SET( sock, &except_set );
+    tv.tv_sec = 2;
+    tv.tv_usec = 0;
+    ret = select( sock + 1, NULL, &write_set, &except_set, &tv );
+    if (ret > 0)
+    {
+        /* the socket is signalled: the failure must be queryable as the connect error */
+        ret = getsockopt( sock, SOL_SOCKET, SO_ERROR, (char *)&value, &len );
+        ok( !ret, "getsockopt failed, error %u\n", WSAGetLastError() );
+        ok( value == WSAENETUNREACH || value == WSAEHOSTUNREACH || value == WSAENETDOWN
+              || value == WSAEADDRNOTAVAIL || value == WSAECONNREFUSED || value == WSAECONNRESET
+              || value == WSAEWOULDBLOCK || value == WSATRY_AGAIN || value == WSAETIMEDOUT,
+            "got SO_ERROR %u\n", value );
+    }
+    closesocket( sock );
+}
+
 START_TEST( sock )
 {
     int i;
@@ -15032,6 +15080,7 @@ START_TEST( sock )
     test_icmp();
     test_icmpv6();
     test_connect_udp();
+    test_connect_unreachable();
     test_tcp_sendto_recvfrom();
     test_broadcast();
     test_send_buffering();

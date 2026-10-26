@@ -2506,6 +2506,24 @@ static int sock_get_ntstatus( int err )
     }
 }
 
+/* Errors that a nonblocking Windows connect() does not report synchronously: the call
+ * returns WSAEWOULDBLOCK and the failure is delivered on the connect event instead. */
+static int is_deferred_connect_error( int error )
+{
+    switch (error)
+    {
+    case ENETUNREACH:
+    case EHOSTUNREACH:
+    case ENETDOWN:
+    case ETIMEDOUT:
+    case ECONNREFUSED:
+    case ECONNRESET:
+        return 1;
+    default:
+        return 0;
+    }
+}
+
 static struct accept_req *alloc_accept_req( struct sock *sock, struct sock *acceptsock, struct async *async,
                                             const struct afd_accept_into_params *params )
 {
@@ -2753,6 +2771,7 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
             setsockopt( unix_fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &enable, sizeof(enable) );
         }
 #endif
+        sock->errors[AFD_POLL_BIT_CONNECT_ERR] = 0;
         ret = connect( unix_fd, &unix_addr.addr, unix_len );
         if (ret < 0 && errno == ECONNABORTED)
         {
@@ -2786,6 +2805,24 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
 
         if (ret < 0 && errno != EINPROGRESS)
         {
+            /* Windows never reports the failure of a connect on a nonblocking socket to
+             * the connect() caller: the call returns WSAEWOULDBLOCK and the reason is
+             * delivered on the connect event (FD_CONNECT / AFD_POLL_CONNECT_ERR) and
+             * through getsockopt( SO_ERROR ). Linux can fail the connect synchronously
+             * when the route lookup fails (ENETUNREACH / EHOSTUNREACH / ENETDOWN), which
+             * is what happens for an address family that has no configured route, e.g.
+             * IPv6 on an IPv4-only host. Latch the error and synthesize the connect
+             * event, so that the pending-completion contract of a nonblocking connect is
+             * the same as on Windows. */
+            if (params->synchronous && sock->nonblocking && is_deferred_connect_error( errno ))
+            {
+                sock->errors[AFD_POLL_BIT_CONNECT_ERR] = errno;
+                post_socket_event( sock, AFD_POLL_BIT_CONNECT_ERR );
+                complete_async_polls( sock, POLLERR, errno );
+                post_sock_messages( sock );
+                set_error( STATUS_DEVICE_NOT_READY );
+                return;
+            }
             set_error( sock_get_ntstatus( errno ) );
             return;
         }
@@ -2806,6 +2843,24 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
             {
                 sock->state = SOCK_CONNECTED;
                 sock->connect_time = current_time;
+            }
+
+            /* A caller of a nonblocking socket never learns from connect() that the
+             * connection is already up: Windows returns WSAEWOULDBLOCK (with the
+             * association itself established, which is why a datagram connect to a
+             * reachable peer is complete by the time the connect event arrives) and
+             * reports the result on the connect event. Linux completes connects to a
+             * local or directly connected peer synchronously, so report the same
+             * WSAEWOULDBLOCK here. */
+            if (params->synchronous && sock->nonblocking)
+            {
+                post_socket_event( sock, AFD_POLL_BIT_CONNECT );
+                post_socket_event( sock, AFD_POLL_BIT_WRITE );
+                complete_async_polls( sock, POLLOUT, 0 );
+                post_sock_messages( sock );
+                sock_reselect( sock );
+                set_error( STATUS_DEVICE_NOT_READY );
+                return;
             }
 
             if (!send_len) return;
