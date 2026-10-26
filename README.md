@@ -3157,6 +3157,18 @@ Resolved the long-standing FIXME in `dlls/kernelbase/thread.c:1249`:
   - Test suite: `kernel32_test.exe fiber` passed (32,948 tests).
 - Wine commit `5c9d9aad` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(g): preferred PE ImageBase assignment to eliminate .text Copy-On-Write (wine tip `151a32ff`, branch `ultimate`)
+
+In `server/mapping.c`:
+- Wine previously allocated all PE DLL mapping addresses strictly from dynamic `ranges64` (`0x600000000000`), forcing `delta = map_addr - image.base != 0` for 100% of 64-bit DLLs.
+- This forced `ntdll/unix/virtual.c::map_image_into_view()` to execute `process_relocation_block()`, dirtying `.text` pages and triggering Linux kernel Copy-On-Write (COW) across all child processes.
+- Updated `assign_map_address()`: if a DLL's preferred `ImageBase` is unclaimed and `>= 0x10000`, wineserver honors `mapping->image.base` directly.
+- When `map_addr == image.base`, `delta == 0`, skipping relocation processing completely.
+- `.text` pages remain clean, file-backed, and shared across all processes in Linux Page Cache (saving up to ~1.4 GB RAM across multi-process WebView2 trees).
+- Falls back to dynamic address range allocation if the preferred base collides.
+- Wine commit `151a32ff` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 **Harness notes.** `rsync -a /tmp/wine/wine-build/dlls/ /tmp/wb/dlls/` then
 `/tmp/wa/sync.sh`; re-assert `/tmp/wb/tools/server -> /tmp/wb/server` after any
