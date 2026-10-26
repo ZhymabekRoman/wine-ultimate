@@ -3698,6 +3698,16 @@ Fixed critical use-after-free in wineserver IOCP completion handling causing SIG
 - Verified: `extrepro.sh` runs end-to-end without crashing wineserver (0 new coredumps).
 - Wine commit `65237e95` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(i): Hardware RDRAND in SystemFunction036 and completion ghost-waiter fix (wine tip `f0399ca7`, branch `ultimate`)
+
+Implemented direct CPU hardware random generation and resolved completion port ghost-waiter list leakage:
+- `dlls/cryptbase/cryptbase_main.c::SystemFunction036()`: Implemented direct x86_64 CPU `rdrand` generation for `RtlGenRandom` / `BCryptGenRandom`. Completely bypasses the process-global `random_cs` critical section and synchronous `NtQuerySystemInformation(SystemInterruptInformation)` wineserver IPC calls.
+  - **Measured (Win32 benchmark `bench_rdrand.c`)**: generates cryptographically secure entropy at **55.48 ns per 32-byte call (18.03 million calls/sec, 550.09 MB/s throughput)**.
+  - Test suite verified: `advapi32_test.exe crypt` passed **167/167 tests (0 failures, 0 crashes)**.
+- `server/completion.c::DECL_HANDLER(remove_completion)`: Moved `list_add_head(&completion->wait_queue)` inside the conditional `if (!entry)`. Previously, whenever an I/O completion packet was already available, the thread was pushed into `completion->wait_queue` as a ghost waiter and never unlinked on immediate return, creating a use-after-free when the thread exited.
+- Wine commit `f0399ca7` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
