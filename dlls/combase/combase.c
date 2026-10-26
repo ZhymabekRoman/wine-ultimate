@@ -303,6 +303,33 @@ static LSTATUS open_classes_key(HKEY hkey, const WCHAR *name, REGSAM access, HKE
     return RtlNtStatusToDosError(NtOpenKey((HANDLE *)retkey, access, &attr));
 }
 
+/* Open a key relative to HKCU\Software\Classes.  Per-user COM registrations live
+ * there, and HKCR is a merged view of HKCU\Software\Classes and HKLM\Software\Classes
+ * where the per-user entries have priority. */
+static LSTATUS open_user_classes_key(const WCHAR *name, REGSAM access, HKEY *retkey)
+{
+    static const WCHAR classesW[] = L"Software\\Classes";
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING nameW;
+    NTSTATUS status;
+    HKEY root;
+
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, classesW, 0, access, &root))
+        return ERROR_FILE_NOT_FOUND;
+
+    attr.Length = sizeof(attr);
+    attr.RootDirectory = root;
+    attr.ObjectName = &nameW;
+    attr.Attributes = 0;
+    attr.SecurityDescriptor = NULL;
+    attr.SecurityQualityOfService = NULL;
+    RtlInitUnicodeString( &nameW, name );
+
+    status = NtOpenKey( (HANDLE *)retkey, access, &attr );
+    NtClose( root );
+    return RtlNtStatusToDosError( status );
+}
+
 HRESULT open_key_for_clsid(REFCLSID clsid, const WCHAR *keyname, REGSAM access, HKEY *subkey)
 {
     static const WCHAR clsidW[] = L"CLSID\\";
@@ -312,7 +339,9 @@ HRESULT open_key_for_clsid(REFCLSID clsid, const WCHAR *keyname, REGSAM access, 
 
     lstrcpyW(path, clsidW);
     StringFromGUID2(clsid, path + lstrlenW(clsidW), CHARS_IN_GUID);
-    res = open_classes_key(HKEY_CLASSES_ROOT, path, access, &key);
+    res = open_user_classes_key(path, access, &key);
+    if (res == ERROR_FILE_NOT_FOUND)
+        res = open_classes_key(HKEY_CLASSES_ROOT, path, access, &key);
     if (res == ERROR_FILE_NOT_FOUND)
         return REGDB_E_CLASSNOTREG;
     else if (res != ERROR_SUCCESS)

@@ -19,12 +19,15 @@
  */
 
 #include <stdarg.h>
+#include <ctype.h>
+#include <wchar.h>
 
 #define COBJMACROS
 
 #include "windef.h"
 #include "winbase.h"
 #include "winsvc.h"
+#include "appmodel.h"
 #include "servprov.h"
 
 #include "wine/debug.h"
@@ -473,6 +476,147 @@ static HRESULT create_local_service(REFCLSID rclsid)
     return hr;
 }
 
+/* read a whole UTF-16LE file into a NUL-terminated heap buffer, return NULL on failure */
+static WCHAR *read_utf16_file( const WCHAR *path )
+{
+    LARGE_INTEGER size;
+    DWORD total;
+    HANDLE file;
+    WCHAR *buffer;
+
+    if ((file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_DELETE, NULL,
+                             OPEN_EXISTING, 0, NULL )) == INVALID_HANDLE_VALUE)
+        return NULL;
+    if (!GetFileSizeEx( file, &size ) || size.QuadPart <= 0 || size.QuadPart > (LONGLONG)16 << 20
+        || size.QuadPart % sizeof(WCHAR))
+    {
+        CloseHandle( file );
+        return NULL;
+    }
+    total = (DWORD)size.QuadPart;
+    if (!(buffer = calloc( 1, total + sizeof(WCHAR) )))
+    {
+        CloseHandle( file );
+        return NULL;
+    }
+    if (!ReadFile( file, buffer, total, &total, NULL ) || total % sizeof(WCHAR))
+    {
+        CloseHandle( file );
+        free( buffer );
+        return NULL;
+    }
+    CloseHandle( file );
+    buffer[total / sizeof(WCHAR)] = 0;
+    return buffer;
+}
+
+static void ascii_strlwr( WCHAR *str )
+{
+    for ( ; *str; str++) if (*str < 128) *str = tolower( *str );
+}
+
+/* return a pointer just past the '=' of the given (already lowercased) attribute
+ * in the [start,end) tag range, or NULL if absent */
+static const WCHAR *find_attr_in_tag( const WCHAR *start, const WCHAR *end, const WCHAR *attr )
+{
+    SIZE_T len = wcslen( attr );
+    WCHAR *p;
+
+    for (p = (WCHAR *)start; p + len < end; p++)
+    {
+        if (!wcsncmp( p, attr, len ) && p[len] == '=')
+            return p + len + 1;
+    }
+    return NULL;
+}
+
+static void copy_attr_value( WCHAR *dst, DWORD size, const WCHAR *value )
+{
+    const WCHAR *p;
+    DWORD n = 0;
+
+    for (p = value; *p && *p != L'"' && n < size - 1; p++)
+        dst[n++] = *p;
+    dst[n] = 0;
+}
+
+/*
+ * get_manifest_server_command() - resolve a CLSID to the launch command of a
+ * packaged COM server declared in the current package's manifest
+ * (com:Extension / com:ComServer / com:ExeServer elements).
+ */
+static HRESULT get_manifest_server_command( REFCLSID rclsid, WCHAR *command, DWORD size )
+{
+    static const WCHAR manifestW[] = L"\\AppxManifest.xml";
+    static const WCHAR class_idW[] = L":class id=\"";
+    static const WCHAR exeserverW[] = L":exeserver";
+    static const WCHAR executableW[] = L"executable=\"";
+    static const WCHAR argumentsW[] = L"arguments=\"";
+    WCHAR path[MAX_PATH], guid[CHARS_IN_GUID], needle[ARRAY_SIZE(class_idW) + CHARS_IN_GUID];
+    WCHAR exe[MAX_PATH], args[512];
+    UINT32 len = ARRAY_SIZE( path );
+    WCHAR *xml, *lower, *p, *q, *end, *tag = NULL;
+
+    if (GetCurrentPackagePath( &len, path ) || !len || len >= MAX_PATH)
+        return REGDB_E_CLASSNOTREG;
+    lstrcpynW( path + lstrlenW( path ), manifestW, ARRAY_SIZE( path ) - lstrlenW( path ) );
+    if (!(xml = read_utf16_file( path )))
+        return REGDB_E_CLASSNOTREG;
+    if (!(lower = calloc( lstrlenW( xml ) + 1, sizeof(WCHAR) )))
+    {
+        free( xml );
+        return REGDB_E_CLASSNOTREG;
+    }
+    lstrcpyW( lower, xml );
+    ascii_strlwr( lower );
+
+    StringFromGUID2( rclsid, guid, ARRAY_SIZE( guid ) );
+    guid[CHARS_IN_GUID - 2] = 0; /* strip closing brace */
+    ascii_strlwr( guid );
+    lstrcpyW( needle, class_idW );
+    lstrcatW( needle, guid + 1 ); /* skip opening brace */
+    lstrcatW( needle, L"\"" );
+
+    if ((p = wcsstr( lower, needle )))
+    {
+        /* find the last ExeServer tag preceding the class element */
+        for (q = lower; (q = wcsstr( q, exeserverW )) && q < p; q++)
+        {
+            end = wcschr( q, L'>' );
+            if (end && end < p) tag = q;
+        }
+    }
+
+    if (tag)
+    {
+        end = wcschr( tag, L'>' );
+        p = (WCHAR *)find_attr_in_tag( tag, end, executableW );
+        if (p) copy_attr_value( exe, ARRAY_SIZE( exe ), p );
+        else exe[0] = 0;
+        q = (WCHAR *)find_attr_in_tag( tag, end, argumentsW );
+        if (q) copy_attr_value( args, ARRAY_SIZE( args ), q );
+        else args[0] = 0;
+    }
+
+    free( lower );
+    free( xml );
+
+    if (!tag || !exe[0] || lstrlenW( path ) + lstrlenW( exe ) + lstrlenW( args ) + 17 >= size)
+        return REGDB_E_CLASSNOTREG;
+
+    lstrcpyW( command, L"\"" );
+    lstrcatW( command, path );
+    lstrcatW( command, L"\\" );
+    lstrcatW( command, exe );
+    lstrcatW( command, L"\"" );
+    if (args[0])
+    {
+        lstrcatW( command, L" " );
+        lstrcatW( command, args );
+    }
+    return S_OK;
+}
+
 static HRESULT create_server(REFCLSID rclsid, HANDLE *process)
 {
     static const WCHAR  embeddingW[] = L" -Embedding";
@@ -497,6 +641,8 @@ static HRESULT create_server(REFCLSID rclsid, HANDLE *process)
     }
     if (FAILED(hr))
     {
+        if (SUCCEEDED(get_manifest_server_command(rclsid, command, ARRAY_SIZE(command))))
+            goto start;
         ERR("class %s not registered\n", debugstr_guid(rclsid));
         return hr;
     }
@@ -509,6 +655,7 @@ static HRESULT create_server(REFCLSID rclsid, HANDLE *process)
         return REGDB_E_CLASSNOTREG; /* FIXME: check retval */
     }
 
+start:
     memset(&sinfo, 0, sizeof(sinfo));
     sinfo.cb = sizeof(sinfo);
 
