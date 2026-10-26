@@ -25,6 +25,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(dxgi);
 struct dxgi_main
 {
     HMODULE d3d10core;
+    HMODULE dcomp;
     struct dxgi_device_layer *device_layers;
     UINT layer_count;
 };
@@ -34,6 +35,7 @@ static void dxgi_main_cleanup(void)
 {
     free(dxgi_main.device_layers);
     FreeLibrary(dxgi_main.d3d10core);
+    FreeLibrary(dxgi_main.dcomp);
 }
 
 BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
@@ -42,6 +44,10 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
     {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(inst);
+            /* On Windows the composition engine is a static dependency of the
+             * graphics stack, so a process that loads this dll also has the
+             * composition library loaded.  Load it here to match. */
+            dxgi_main.dcomp = LoadLibraryExW( L"dcomp.dll", NULL, LOAD_WITH_ALTERED_SEARCH_PATH );
             break;
 
         case DLL_PROCESS_DETACH:
