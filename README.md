@@ -3425,5 +3425,15 @@ Activated Linux in-kernel NT synchronization driver (`CONFIG_NTSYNC=m`) on Zen k
 - **Measured (Win32 PE x86_64 benchmark `bench_ntsync_speed.exe`)**:
   - Executed **1,000,000 full SetEvent + WaitForSingleObject cycles in 0.318 s** (**317.65 ns per cycle**, ~5x faster than ~1600 ns wineserver roundtrip).
 
+## Session 2026-10-26(o): PE code pre-faulting, ObjectTypeInformation cache, and self-PBI fast path (wine tips `dc18bf45`, `0458346b`, branch `ultimate`)
+
+Implemented user-space caching and pre-faulting optimizations in ntdll:
+- `dlls/ntdll/unix/virtual.c`: Added `madvise(MADV_WILLNEED)` on executable `.text` sections during PE image mapping. Linux kernel prefetches code pages into physical memory asynchronously, eliminating minor page faults during process and window initialization.
+- `dlls/ntdll/unix/file.c`: Implemented user-space cache for `NtQueryObject(ObjectTypeInformation)`. Immutable type metadata is resolved from a local 128-entry cache on repeated queries, eliminating synchronous wineserver roundtrips.
+- `dlls/ntdll/unix/process.c`: Implemented fast user-space return for `NtQueryInformationProcess(NtCurrentProcess(), ProcessBasicInformation)`. Caches the self-process basic information, with automatic invalidation upon `ProcessPriorityClass`, `ProcessBasePriority`, or `ProcessAffinityMask` mutation.
+- Verified: `ntdll_test.exe info` ran 2883 tests with zero priority/affinity regressions.
+- Wine commits `dc18bf45` and `0458346b` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
