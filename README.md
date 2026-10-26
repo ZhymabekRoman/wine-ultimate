@@ -3407,3 +3407,13 @@ Implemented lock-free Read-Copy-Update (RCU) for process environment variables i
   - Official test suite: `ntdll_test.exe env` passed **603/603 tests (0 failures)**.
 - Wine commit `6d7e94c8` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(m): opportunistic request draining in wineserver (wine tip `ce6b8a8a`, branch `ultimate`)
+
+Implemented opportunistic request draining for client sockets in `server/request.c`:
+- In `read_request()`: immediately after completing a request handler (`call_req_handler`), check if the client thread has another request queued in the socket buffer via non-blocking `recv(..., MSG_DONTWAIT)`.
+- If queued, dispatch the next request immediately in the same turn without returning to `epoll_wait`.
+- Eliminates kernel `epoll_wait` roundtrips and context switches for back-to-back and pipelined requests from client processes.
+- Safely stops draining if the thread enters a wait state or has pending reply writes.
+- Wine commit `ce6b8a8a` on `ultimate`, pushed to `github/ultimate`.
+
+
