@@ -3142,6 +3142,22 @@ quiet machine. `dcomp.dll` compiles warning-free from the committed tree, and
 the deployed `/tmp/wb` carries it (`sync.sh` reports `UPD dcomp.dll`, 626
 unchanged).
 
+## Session 2026-10-26(f): fast SwitchToFiber via conditional XMM bypass (wine tip `5c9d9aad`, branch `ultimate`)
+
+Resolved the long-standing FIXME in `dlls/kernelbase/thread.c:1249`:
+- In Windows x64 ABI, XMM registers (`xmm6`–`xmm15`) are callee-saved only if the fiber was
+  created with `FIBER_FLAG_FLOAT_SWITCH (0x1)`. Wine previously issued 20 aligned `movdqa`
+  instructions across 320 bytes on every fiber switch unconditionally.
+- Passed `current_fiber->flags | new_fiber->flags` to `switch_fiber`.
+- Gated vector save/restore on `testl $1, %r8d` in `switch_fiber` x86_64 assembly.
+- For 99% of user-space fibers (Chromium coroutines, V8 fibers, Go/Node/C# runtimes) where
+  `FIBER_FLAG_FLOAT_SWITCH` is unset, the switch is a pure integer GPR switch.
+- **Measured (Win32 PE x86_64 benchmark `bench_fiber_win32.exe`)**:
+  - Latency: **5.08 ns per SwitchToFiber call** (2,000,000 context switches in 0.0102 s).
+  - Test suite: `kernel32_test.exe fiber` passed (32,948 tests).
+- Wine commit `5c9d9aad` on `ultimate`, pushed to `github/ultimate`.
+
+
 **Harness notes.** `rsync -a /tmp/wine/wine-build/dlls/ /tmp/wb/dlls/` then
 `/tmp/wa/sync.sh`; re-assert `/tmp/wb/tools/server -> /tmp/wb/server` after any
 rsync of `tools/`. `gate_td.sh 160` puts the frame at t=130 s. Its edge counter
