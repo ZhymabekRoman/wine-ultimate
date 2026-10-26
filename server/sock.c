@@ -2746,6 +2746,13 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
             unix_addr.in.sin_addr.s_addr = htonl( INADDR_LOOPBACK );
 
         memcpy( &peer_addr, &unix_addr, sizeof(unix_addr) );
+#ifdef TCP_FASTOPEN_CONNECT
+        if (sock->type == SOCK_STREAM && (unix_addr.addr.sa_family == AF_INET || unix_addr.addr.sa_family == AF_INET6))
+        {
+            int enable = 1;
+            setsockopt( unix_fd, IPPROTO_TCP, TCP_FASTOPEN_CONNECT, &enable, sizeof(enable) );
+        }
+#endif
         ret = connect( unix_fd, &unix_addr.addr, unix_len );
         if (ret < 0 && errno == ECONNABORTED)
         {

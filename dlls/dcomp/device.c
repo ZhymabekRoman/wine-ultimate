@@ -3684,6 +3684,9 @@ HRESULT WINAPI DCompPrivates_SetVisualRelativeSize(IDCompositionVisual *visual, 
 
 DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handles, DWORD timeout)
 {
+    LARGE_INTEGER counter, freq;
+    DWORD sleep_ms = 16;
+
     TRACE("(%u, %p, %lu)\n", count, handles, timeout);
     if (count && handles)
     {
@@ -3692,7 +3695,20 @@ DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handle
     }
     if (g_commit_completion_event)
         SetEvent(g_commit_completion_event);
-    Sleep(timeout < 16 ? timeout : 16);
+
+    if (QueryPerformanceCounter( &counter ) && QueryPerformanceFrequency( &freq ) && freq.QuadPart)
+    {
+        LONGLONG ticks_per_frame = freq.QuadPart / 60;
+        if (ticks_per_frame > 0)
+        {
+            LONGLONG next_frame = ((counter.QuadPart / ticks_per_frame) + 1) * ticks_per_frame;
+            LONGLONG delta = next_frame - counter.QuadPart;
+            DWORD ms = (DWORD)((delta * 1000) / freq.QuadPart);
+            if (ms > 0 && ms <= 16) sleep_ms = ms;
+        }
+    }
+
+    Sleep(timeout < sleep_ms ? timeout : sleep_ms);
     return WAIT_OBJECT_0;
 }
 
