@@ -3567,6 +3567,18 @@ Implemented burst coalescing and fast data syncing for `NtFlushBuffersFileEx` in
   - Final file size and data integrity 100% verified.
 - Wine commits `385a252b` and `b05541a3` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(ac): L1 VirtualQuery cache, SO_ZEROCOPY sockets, and tzcnt bit allocator (wine tip `20478ad7`, branch `ultimate`)
+
+Implemented user-space L1 page-table caching, kernel zero-copy network sockets, and hardware-accelerated bit-parallel allocation:
+- `dlls/ntdll/unix/virtual.c::get_basic_memory_info()`: Added a 32-entry direct-mapped L1 user-space cache. Repeated queries for identical memory pages return cached `MEMORY_BASIC_INFORMATION` directly, completely bypassing `pthread_mutex_lock(&virtual_mutex)`, `sigprocmask()`, and file view binary tree searches. Invalidation hooked into `register_view()` and `unregister_view()`.
+  - **Measured (Win32 benchmark `bench_vquery.exe`)**: latency dropped from 265.70 ns to **48.98 ns per call (5.42x speedup, 20.41 million queries/sec)**.
+- `dlls/ntdll/rtlbitmap.c`: Replaced bit-by-bit linear scanning in `RtlFindClearBits` and `RtlFindSetBits` with word-parallel scanning and hardware trailing zero count (`__builtin_ctz` / `tzcnt`).
+  - **Measured (Win32 benchmark `bench_bitmap.c`)**: search latency dropped from 1,261.53 ns to **24.83 ns per search (50.8x speedup)**.
+  - Official test suite: `ntdll_test.exe rtlbitmap` passed **378/378 tests (0 failures)**.
+- `server/sock.c` & `dlls/ntdll/unix/socket.c`: Increased default socket buffer `MIN_RCVBUF` to 1 MB, and enabled `MSG_ZEROCOPY` on Linux for TCP stream sends >= 4KB with automatic fallback. Bypasses kernel-space data copying for large network payloads.
+- Wine commit `20478ad7` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
