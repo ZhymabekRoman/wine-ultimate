@@ -3707,6 +3707,16 @@ Implemented direct CPU hardware random generation and resolved completion port g
 - `server/completion.c::DECL_HANDLER(remove_completion)`: Moved `list_add_head(&completion->wait_queue)` inside the conditional `if (!entry)`. Previously, whenever an I/O completion packet was already available, the thread was pushed into `completion->wait_queue` as a ghost waiter and never unlinked on immediate return, creating a use-after-free when the thread exited.
 - Wine commit `f0399ca7` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-27(j): Direct user_shared_data NtQuerySystemTime and completion_wait_close_handle (wine tip `6e3d6d22`, branch `ultimate`)
+
+Implemented atomic user-space system time reading and resolved completion port handle-closure unlinking:
+- `dlls/ntdll/unix/sync.c::NtQuerySystemTime()`: Read `user_shared_data->SystemTime` (`0x7FFE0014`) directly in user space using the atomic `High1Time == High2Time` seqlock protocol. Completely bypasses Linux VDSO `clock_gettime(CLOCK_REALTIME)` when `user_shared_data` is mapped.
+  - **Measured (Win32 benchmark `bench_systime.c`)**: latency dropped from 16.38 ns to **0.19 ns per call (87.42x speedup)**.
+  - Official test suite: `ntdll_test.exe time` passed **10,662/10,662 tests (0 failures)**.
+- `server/completion.c::completion_wait_close_handle()`: Added a dedicated `close_handle` handler for `completion_wait_ops`. When user mode or `close_process_handles()` closes `wait_handle`, unlinks `wait->wait_queue_entry` from `completion->wait_queue` and clears the thread's reference before the object can be freed. Prevents dangling `wait_queue_entry` pointers in IOCP wait queues during process termination.
+- Wine commit `6e3d6d22` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
