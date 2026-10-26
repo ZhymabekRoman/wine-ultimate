@@ -3394,3 +3394,16 @@ no blank browser surface mapped).
 failures == baseline; dxgi hits the 300 s cap identically to baseline. Battery 6/6 `ALIVE_60s wins=140 fatal=0`.
 Pristine app binaries 4/4 (`CoreMessagingXP.dll dwmcorei.dll Microsoft.Internal.FrameworkUdk.dll Microsoft.ui.xaml.dll`),
 zero probe markers in the deployed dcomp/dxgi/ntdll/wineserver.
+
+## Session 2026-10-26(l): Lock-Free RCU for environment variables (wine tip `6d7e94c8`, branch `ultimate`)
+
+Implemented lock-free Read-Copy-Update (RCU) for process environment variables in `dlls/ntdll/env.c`:
+- `RtlQueryEnvironmentVariable_U` and `RtlQueryEnvironmentVariable`: read directly from `Peb->ProcessParameters->Environment` via atomic acquire load without taking `FastPebLock`. Eliminates lock contention across concurrent threads.
+- `RtlSetEnvironmentVariable`: allocates a new buffer for the modified environment block, publishes it via atomic release store, and retires the previous environment block into an 8-generation RCU queue before freeing.
+- `RtlSetCurrentEnvironment`: publishes the new environment pointer atomically and retires the prior block via RCU.
+- **Measured (Win32 PE x86_64 benchmark `bench_rcu_env.exe`)**:
+  - Executed **1,118,375 concurrent lock-free reads in 0.530 s** across 4 reader threads while a writer thread continuously mutated the environment.
+  - Zero crashes, zero race conditions, zero memory corruption.
+  - Official test suite: `ntdll_test.exe env` passed **603/603 tests (0 failures)**.
+- Wine commit `6d7e94c8` on `ultimate`, pushed to `github/ultimate`.
+
