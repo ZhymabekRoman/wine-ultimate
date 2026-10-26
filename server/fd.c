@@ -1217,6 +1217,37 @@ static int inode_has_pending_close( struct inode *inode, const char *path )
     return 0;
 }
 
+/* Delete-on-close is a property of the file, not of the handle that set the
+ * disposition: the name has to disappear as soon as the last open handle of the
+ * inode is gone.  Flushing the pending non-POSIX deletions here keeps a create
+ * of the same name (delete dir + mkdir dir, as System.IO's recursive delete +
+ * CreateDirectory does) from colliding with an entry that path queries already
+ * report as deleted. */
+static void inode_flush_pending_deletes( struct inode *inode )
+{
+    struct list *ptr = list_head( &inode->closed );
+
+    while (ptr)
+    {
+        struct closed_fd *fd = LIST_ENTRY( ptr, struct closed_fd, entry );
+        struct list *next = list_next( &inode->closed, ptr );
+
+        if ((fd->disp_flags & FILE_DISPOSITION_DELETE) && !(fd->disp_flags & FILE_DISPOSITION_POSIX_SEMANTICS))
+        {
+            if (fd->unix_fd != -1)
+            {
+                close( fd->unix_fd );
+                fd->unix_fd = -1;
+            }
+            unlink_closed_fd( inode, fd );
+            list_remove( ptr );
+            free( fd->unix_name );
+            free( fd );
+        }
+        ptr = next;
+    }
+}
+
 /* add fd to the inode list of file descriptors to close */
 static void inode_add_closed_fd( struct inode *inode, struct closed_fd *fd )
 {
@@ -1239,12 +1270,6 @@ static void inode_add_closed_fd( struct inode *inode, struct closed_fd *fd )
         if (fd->unix_fd != -1) close( fd->unix_fd );
         fd->unix_fd = -1;
         list_add_head( &inode->closed, &fd->entry );
-        /* delete-on-close: when this was the last open handle and no locks
-         * remain, the name must disappear from the filesystem right away.
-         * Deferring the unlink to the idle sweep lets a immediate recreate
-         * (delete dir + mkdir same name) collide with the stale on-disk
-         * entry while path queries report it as already deleted. */
-        if (list_empty( &inode->open )) unlink_closed_fd( inode, fd );
     }
     else  /* no locks on this inode and no unlink, get rid of the fd */
     {
@@ -1252,6 +1277,8 @@ static void inode_add_closed_fd( struct inode *inode, struct closed_fd *fd )
         free( fd->unix_name );
         free( fd );
     }
+
+    if (list_empty( &inode->open ) && list_empty( &inode->locks )) inode_flush_pending_deletes( inode );
 }
 
 

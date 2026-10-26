@@ -4224,6 +4224,84 @@ static void _test_completion_flags(unsigned line, HANDLE handle, DWORD expected_
     ok_(__FILE__,line)((info.Flags & expected_flags) == expected_flags, "got %08lx\n", info.Flags);
 }
 
+/* A directory marked for deletion is unlinked when its last open handle closes.
+ * Directory enumeration (System.IO's enumerator, RemoveDirectoryW callers) keeps a
+ * second handle to the directory open across RemoveDirectoryW, so the close of the
+ * disposition handle is not the last one; the delete must still happen on the close
+ * of the enumeration handle, and recreating the same name right after must work. */
+static void test_delete_on_close_dir_last_handle( void )
+{
+    char path[MAX_PATH];
+    WCHAR dirW[MAX_PATH], fileW[MAX_PATH + 16], ntdirW[MAX_PATH + 20], ntfileW[MAX_PATH + 24];
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING dir_name, file_name;
+    IO_STATUS_BLOCK io;
+    FILE_DISPOSITION_INFORMATION fdi;
+    FILE_NETWORK_OPEN_INFORMATION basic;
+    NTSTATUS status;
+    HANDLE handle, find_handle;
+
+    GetTempPathA( MAX_PATH, path );
+    strcat( path, "dirrace" );
+    itoa( GetCurrentProcessId(), path + strlen( path ), 10 );
+    strcat( path, ".tmp" );
+    CreateDirectoryA( path, NULL );
+
+    MultiByteToWideChar( CP_ACP, 0, path, -1, dirW, MAX_PATH );
+    wcscpy( ntdirW, L"\\??\\" );
+    wcscat( ntdirW, dirW );
+    wcscpy( fileW, dirW );
+    wcscat( fileW, L"\\f.txt" );
+    wcscpy( ntfileW, L"\\??\\" );
+    wcscat( ntfileW, fileW );
+
+    RtlInitUnicodeString( &dir_name, ntdirW );
+
+    InitializeObjectAttributes( &attr, &dir_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtCreateFile( &handle, DELETE | FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io, NULL, 0,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+                            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
+    ok( status == STATUS_SUCCESS, "could not open dir for delete, status %lx\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    InitializeObjectAttributes( &attr, &dir_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtCreateFile( &find_handle, FILE_READ_ATTRIBUTES | SYNCHRONIZE, &attr, &io, NULL, 0,
+                            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
+                            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
+    ok( status == STATUS_SUCCESS, "could not open dir as enumeration handle, status %lx\n", status );
+    if (status != STATUS_SUCCESS) { pNtClose( handle ); return; }
+
+    fdi.DoDeleteFile = TRUE;
+    status = pNtSetInformationFile( handle, &io, &fdi, sizeof fdi, FileDispositionInformation );
+    ok( status == STATUS_SUCCESS, "FileDispositionInformation status %lx\n", status );
+
+    pNtClose( handle );      /* not the last handle: the dir only becomes delete-pending */
+    pNtClose( find_handle ); /* the last handle closes here: Windows deletes the dir */
+
+    InitializeObjectAttributes( &attr, &dir_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtQueryFullAttributesFile( &attr, &basic );
+    ok( status == STATUS_OBJECT_NAME_NOT_FOUND, "dir should be gone after the last close, got %lx\n", status );
+
+    InitializeObjectAttributes( &attr, &dir_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtCreateFile( &handle, FILE_READ_ATTRIBUTES, &attr, &io, NULL, 0, 0, FILE_CREATE,
+                            FILE_DIRECTORY_FILE, NULL, 0 );
+    ok( status == STATUS_SUCCESS, "recreating the just-deleted dir failed, status %lx\n", status );
+    if (status == STATUS_SUCCESS) pNtClose( handle );
+
+    RtlInitUnicodeString( &file_name, ntfileW );
+    InitializeObjectAttributes( &attr, &file_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtCreateFile( &handle, GENERIC_WRITE, &attr, &io, NULL, 0, 0, FILE_CREATE, 0, NULL, 0 );
+    ok( status == STATUS_SUCCESS, "creating a file inside the recreated dir failed, status %lx\n", status );
+    if (status == STATUS_SUCCESS) pNtClose( handle );
+
+    InitializeObjectAttributes( &attr, &file_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = pNtQueryFullAttributesFile( &attr, &basic );
+    ok( status == STATUS_SUCCESS, "the created file is not visible, status %lx\n", status );
+
+    DeleteFileW( fileW );
+    RemoveDirectoryW( dirW );
+}
+
 static void test_file_completion_information(void)
 {
     DECLSPEC_ALIGN(TEST_OVERLAPPED_READ_SIZE) static unsigned char aligned_buf[TEST_OVERLAPPED_READ_SIZE];
@@ -7430,6 +7508,7 @@ START_TEST(file)
     test_file_link_information(FileLinkInformationEx);
     test_file_link_information_ex();
     test_file_disposition_information();
+    test_delete_on_close_dir_last_handle();
     test_file_completion_information();
     test_file_id_information();
     test_file_access_information();
