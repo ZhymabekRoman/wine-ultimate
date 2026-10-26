@@ -124,8 +124,6 @@
 #include "wine/list.h"
 #include "wine/debug.h"
 #include "unix_private.h"
-#include "pipe_shm.h"
-#include "io_uring.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
@@ -6081,18 +6079,6 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
 
         if (offset && offset->QuadPart != FILE_USE_FILE_POINTER_POSITION)
         {
-            if (wine_uring_is_enabled())
-            {
-                ssize_t ures = wine_uring_pread( unix_handle, buffer, length, offset->QuadPart );
-                if (ures >= 0)
-                {
-                    if (!async_read) lseek( unix_handle, offset->QuadPart + ures, SEEK_SET );
-                    total = ures;
-                    status = (total || !length) ? STATUS_SUCCESS : STATUS_END_OF_FILE;
-                    goto done;
-                }
-            }
-
             /* async I/O doesn't make sense on regular files */
             while ((result = virtual_locked_pread( unix_handle, buffer, length, offset->QuadPart )) == -1)
             {
@@ -6136,17 +6122,6 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
             status = register_async_file_read( handle, event, apc, apc_user, iosb_ptr,
                                                buffer, total, length, FALSE );
             goto err;
-        }
-    }
-
-    if (pipe_shm_is_enabled())
-    {
-        ssize_t shm_ret = pipe_shm_read( unix_handle, (char *)buffer + total, length - total );
-        if (shm_ret > 0)
-        {
-            total += shm_ret;
-            status = STATUS_SUCCESS;
-            goto done;
         }
     }
 
@@ -6420,18 +6395,6 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
                 goto done;
             }
 
-            if (wine_uring_is_enabled())
-            {
-                ssize_t ures = wine_uring_pwrite( unix_handle, buffer, length, off );
-                if (ures >= 0)
-                {
-                    if (!async_write) lseek( unix_handle, off + ures, SEEK_SET );
-                    total = ures;
-                    status = STATUS_SUCCESS;
-                    goto done;
-                }
-            }
-
             /* async I/O doesn't make sense on regular files */
             while ((result = pwrite( unix_handle, buffer, length, off )) == -1)
             {
@@ -6465,17 +6428,6 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
         status = sock_write( handle, unix_handle, event, apc, apc_user, io, buffer, length );
         if (needs_close) close( unix_handle );
         return status;
-    }
-
-    if (pipe_shm_is_enabled())
-    {
-        ssize_t shm_ret = pipe_shm_write( unix_handle, (const char *)buffer + total, length - total );
-        if (shm_ret > 0)
-        {
-            total += shm_ret;
-            status = STATUS_SUCCESS;
-            goto done;
-        }
     }
 
     for (;;)
