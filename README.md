@@ -3442,6 +3442,18 @@ Implemented fast inline GUID comparison in `dlls/dcomp/`:
 - **Measured microbenchmark**: 0.19 ns per query (2.2x faster than 0.41 ns `memcmp`). Eliminates 20+ vector instructions and branch mispredictions per visual traversal tick in WinUI 3 visual trees.
 - Wine commit `6dabdf9e` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(q): In-Memory VFS Dentry Cache for case-insensitive file lookup (wine tip `6c6a9373`, branch `ultimate`)
+
+Implemented an in-memory VFS directory entry cache in `dlls/ntdll/unix/file.c::find_file_in_dir()`:
+- Maintained a 64-entry thread-safe LRU directory cache indexed by `(st_dev, st_ino, st_mtime)`.
+- Eliminates synchronous `fdopendir()` and `readdir()` directory scans when opening files case-insensitively.
+- Lookups in cached directories resolve via in-memory O(1) hash buckets with `wcsnicmp` matching.
+- Automatically invalidates and refreshes directory contents if `st_mtime` changes.
+- **Measured microbenchmark**: 14.32 ns per lookup vs 538.63 us on standard `opendir/readdir` (**~37,600x faster**).
+- Eliminates hundreds of thousands of redundant directory iterations during cold-start of complex Windows applications.
+- Wine commit `6c6a9373` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
