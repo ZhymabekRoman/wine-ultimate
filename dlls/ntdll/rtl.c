@@ -881,12 +881,36 @@ void WINAPI RtlAssert(void *assertion, void *filename, ULONG linenumber, char *m
  * RETURNS
  *  The cumulative CRC32 of dwInitial and iLen bytes of the pData block.
  */
+#include "crc32_table.h"
+
 DWORD WINAPI RtlComputeCrc32(DWORD dwInitial, const BYTE *pData, INT iLen)
 {
-    crc32_state state = { .crc = ~dwInitial };
+    UINT32 crc = ~dwInitial;
+    const BYTE *p = pData;
+    INT len = iLen;
 
-    crc32_update( &state, pData, iLen );
-    return ~state.crc;
+    if (!pData || iLen <= 0) return dwInitial;
+
+    while (len >= 8)
+    {
+        UINT32 one = *(const UINT32 *)p ^ crc;
+        UINT32 two = *(const UINT32 *)(p + 4);
+        crc = crc32_table8[7][one & 0xFF] ^
+              crc32_table8[6][(one >> 8) & 0xFF] ^
+              crc32_table8[5][(one >> 16) & 0xFF] ^
+              crc32_table8[4][one >> 24] ^
+              crc32_table8[3][two & 0xFF] ^
+              crc32_table8[2][(two >> 8) & 0xFF] ^
+              crc32_table8[1][(two >> 16) & 0xFF] ^
+              crc32_table8[0][two >> 24];
+        p += 8;
+        len -= 8;
+    }
+
+    while (len--)
+        crc = crc32_table8[0][(crc ^ *p++) & 0xFF] ^ (crc >> 8);
+
+    return ~crc;
 }
 
 
