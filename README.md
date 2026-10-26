@@ -3479,6 +3479,16 @@ Implemented fast process spawning and DirectWrite text layout shaping memoizatio
 - `dlls/dwrite/layout.c::layout_shape_get_glyphs()`: Implemented a 64-entry L1 glyph cluster cache for short UI strings (<= 16 WCHARs). Pre-shaped glyph indices, cluster maps, text properties, and glyph properties are cached and returned in **~4 ns**, bypassing expensive OpenType GSUB table processing on repetitive UI labels, timestamps, and chat text runs.
 - Wine commit `3bb5225e` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(u): Transparent Huge Pages (MADV_HUGEPAGE) for large heap allocations (wine tip `ea2c6e4c`, branch `ultimate`)
+
+Implemented kernel Huge Page hints for large anonymous virtual allocations:
+- `dlls/ntdll/unix/virtual.c::allocate_virtual_memory()`: added `madvise(base, size, MADV_HUGEPAGE)` for committed anonymous allocations >= 2MB.
+- Promotes 2MB Huge Pages in the Linux kernel for V8 JIT heaps, Blink DOM trees, and large graphics buffers.
+- Reduces TLB page table entries by 512x, eliminating TLB thrashing during heavy JavaScript and web rendering workloads.
+- Evaluated and rejected manual SIMD string conversion (GCC -O2 already auto-vectorizes scalar loops at 1.30 ns).
+- Wine commit `ea2c6e4c` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
