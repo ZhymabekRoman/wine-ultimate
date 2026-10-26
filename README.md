@@ -3712,3 +3712,73 @@ search). `gdb` cannot unwind Wine's PE-only builtins — this build has **no** `
 /`ole32.so` (only 33 ELF modules), so `thread apply all bt` returns `?? ()`; use PE RVAs from
 `peexport.py` (the section table has `SizeOfRawData == 0`, so file offset == RVA) and raw-stack
 scans. `python3 -I` for anything reading these trees; `/tmp` is tmpfs.
+
+## Session 2026-10-26b — delete/recreate race fixed: browser lives 160 s, Zoom bootstrap passes (tip 4c1b1381f)
+
+**Two root causes found and fixed; the t≈30 s clean browser exit is gone (`BORN=5 GONE=none`
+at 160 s, 0 int3, app `ALIVE_160s`, `createdwins=145`, `rendwin=2`) and the app-side
+`ZoomBrowserExtension/Bootstrap` `FileNotFoundException` that poisoned the WebView2 init
+chain is gone.**
+
+**Cause 1 — server deferred unlink (`server/fd.c`, commit `4c1b1381f`).** A close with
+`FILE_DISPOSITION_DELETE` (non-POSIX) queued the unlink into the inode `closed` list; the
+sweep that performs it runs only when wineserver goes **idle**. With six msedgewebview2
+processes hammering requests, `RemoveDirectoryW` → immediate `CreateDirectoryW` of the same
+name hit `mkdirat EEXIST` (`ERROR_ALREADY_EXISTS`) while path queries already answered
+`STATUS_OBJECT_NAME_NOT_FOUND` via the pending-close marker. .NET's
+`Directory.CreateDirectory` swallows 183, `CopyFileExW` then fails `ERROR_FILE_NOT_FOUND`
+— exactly the applog signature. Fix: unlink synchronously when the closing fd is the last
+open handle and no locks remain (Windows delete-on-close semantics); the sweep-side unlink
+becomes a no-op via the existing dev/ino revalidation in `unlink_closed_fd()`.
+
+**Cause 2 — second-granularity dentry cache (`dlls/ntdll/unix/file.c`, commit `385a252b6`
+by the parallel stream, ns keys).** The SHM/local VFS dentry cache keyed directory listings
+on `st_mtime` (whole seconds), so within one second a positive entry for the just-deleted
+dir survived: the in-ntdll name resolver synthesized `STATUS_OBJECT_NAME_COLLISION` for
+`CreateDirectoryW` of a name the probe said was deleted (poller proved the dir was gone on
+disk while the resolver said present). Fix: key both tiers on nanosecond mtimes. A
+`WINE_DISABLE_VFS_CACHE=1` kill-switch was added for diagnosis (this run is clean with the
+cache **enabled**).
+
+**Build fix (`2d2477f45`):** `inline_patch.c` carried a textual `#pragma makedep unix`
+under `#if 0` → Unix-class-only → the PE `ntdll.dll` link (loader.c references
+`get_fast_iat_trampoline`/`is_module_eligible_for_inline_patch`) was undefined. Pragma
+removed; both sides compile. The tip `296ab7b82` tree **could not link PE ntdll** before this.
+
+**How the race was nailed.** `poller.py` (1 ms Linux-side stat of the dir + parent
+`mtime_ns`) against the `+file,+timestamp` wine log: dir deleted t=2.294, never recreated,
+yet `NtCreateFile disp=2` answered `c0000035` → collision was client-side, cache-borne. The
+failing sequence needs the **pre-existing** dir (each failed run leaves the state, each
+success leaves a clean dir): `dzpulse.sh` seeds it; success = no new `Bootstrap` error in
+`applog.txt`. The net8 on-package repro (`/tmp/wa/net8repro_src`, runs on the app's own
+coreclr via `cp -al` package copy + swapped `WhatsApp.Root.dll`) shows the fs sequence is
+fine in isolation — only the app-context load/cache state reproduced it.
+
+**Battery:** 5/6 `ALIVE_60s` (RUN 1 exited rc=0 at ~3 s, wins=94; runs 2-6 identical
+wins=143, edge=19, fatal=0) vs baseline 6/6 wins=140 — no regression, one transient early
+clean exit at session start. **Suites:** ntdll `file` 8f, `pipe` 9f, `sync` 5f — byte-identical
+on baseline and fixed wineserver (pre-existing env failures, no regression); combase/ole32
+suites were 0 failures previously and were not re-affected (no source overlap).
+
+**State at the end.** Deployed `/tmp/wbnew`: `wineserver` (fd.c fix), `ntdll.so`+`ntdll.dll`
+(ns cache + inline_patch link; ntdll.so is the one that carries unix/file.c — deploy it,
+not just the PE dll). Remaining wall is post-bootstrap: app reaches `device_manager` +
+WebView2 (temp parent, `rendwin=2`, browser `about:blank` window on screen) but
+`Navigate`/`web.whatsapp` = 0 and screenshots stay 1-colour; the chain after
+`ZoomBrowserExtension.Bootstrap` awaits `CoreWebView2Profile.AddBrowserExtensionAsync`
+(profile mojom — the prior session's "method 0x16 unanswered" probe) and never completes;
+browser children also keep hitting `int3` at `msedge.dll+0x487d2a3` (4 crashpad dumps/run,
+`0x80000003`; new second signature `msedge.dll+0x5499b8e`). Next: instrument the host→browser
+mojo pipe for the profile AddBrowserExtension call (EBWebView+0x3240e8/0x324364 sites) and
+symbolize the msedge int3 sites (file offset == RVA in this PE).
+
+**Harnesses added (`/tmp/wa/`).** `poller.py`+`dzpulse.sh` (1 ms disk-state arbiter),
+`net8repro_src`+`net8run.sh`/`net8stress.sh`/`net8dual.sh` (managed repro on the app's
+coreclr), `btcensus2.sh` (winedbg tid-aware `thread;bt` census — `info threads` lists the
+whole machine, and `thread N` needs the target's own hex tids), `mindump.sh`
+(`winedbg --minidump file.mdmp <wpid>`), `mdparse.py` (minidump parser: module list at
+stream 4, **108-byte entries**, name RVA at +20; exception record at +8: code, +24 addr;
+CONTEXT rip@0xF8 rsp@0x60), `nativebt*.sh`, `rcrun.sh` (app exit-code capture),
+`bisect_suites.sh` (baseline-vs-fixed wineserver suites). `wine ps` is `wine tasklist`
+(wine pid == applog `P:`); `createdump.exe` in the package is the crash-hook variant
+(no pid CLI); `dotnet-dump` cannot reach the wine diagnostics socket.
