@@ -17,6 +17,8 @@
 @ stdcall DCompositionCreateDevice3(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice(ptr ptr ptr)
 @ stub DCompositionCreateSurfaceHandle
+@ stdcall DCompositionGetFrameId(ptr)
+@ stdcall DCompositionGetStatistics(ptr ptr)
 @ stdcall DCompositionWaitForCompositorClock(long ptr long)
 @ stub DeserializeEffectDescription
 @ stdcall -private DllCanUnloadNow()

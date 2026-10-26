@@ -3695,3 +3695,41 @@ DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handle
     Sleep(timeout < 16 ? timeout : 16);
     return WAIT_OBJECT_0;
 }
+
+static ULONGLONG get_emulated_compositor_frame_id(void)
+{
+    LARGE_INTEGER counter, freq;
+    ULONGLONG seconds, rem;
+
+    QueryPerformanceCounter( &counter );
+    QueryPerformanceFrequency( &freq );
+    seconds = counter.QuadPart / freq.QuadPart;
+    rem = counter.QuadPart % freq.QuadPart;
+    return seconds * 60 + (rem * 60) / freq.QuadPart;
+}
+
+HRESULT WINAPI DCompositionGetFrameId( ULONGLONG *frame_id )
+{
+    TRACE( "(%p)\n", frame_id );
+
+    if (!frame_id)
+        return E_INVALIDARG;
+
+    *frame_id = get_emulated_compositor_frame_id();
+    return S_OK;
+}
+
+HRESULT WINAPI DCompositionGetStatistics( ULONGLONG *frame_id, LARGE_INTEGER *update_time )
+{
+    LARGE_INTEGER now;
+
+    TRACE( "(%p, %p)\n", frame_id, update_time );
+
+    if (!frame_id || !update_time)
+        return E_INVALIDARG;
+
+    *frame_id = get_emulated_compositor_frame_id();
+    QueryPerformanceCounter( &now );
+    update_time->QuadPart = now.QuadPart;
+    return S_OK;
+}
