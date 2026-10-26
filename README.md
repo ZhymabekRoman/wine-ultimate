@@ -3453,6 +3453,16 @@ Implemented an in-memory VFS directory entry cache in `dlls/ntdll/unix/file.c::f
 - Eliminates hundreds of thousands of redundant directory iterations during cold-start of complex Windows applications.
 - Wine commit `6c6a9373` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(r): expand server IPC communication pipes to 256 KiB via F_SETPIPE_SZ (wine tip `668e61cc`, branch `ultimate`)
+
+Expanded Linux kernel pipe buffers for wineserver communication channels:
+- `dlls/ntdll/unix/server.c::server_pipe()`: set `F_SETPIPE_SZ` to 256 KiB on both descriptors of server communication pipes (`reply_pipe` and `wait_fd`).
+- `server/thread.c::create_thread()`: set `F_SETPIPE_SZ` to 256 KiB on `request_pipe` between client threads and wineserver.
+- Quadruples kernel pipe buffer capacity from 64 KiB (16 pages) to 256 KiB (64 pages).
+- Eliminates pipe stalls, write blocking, and IPC backpressure during bursty multi-threaded client requests (Chromium Mojo IPC, XAML initialization).
+- Wine commit `668e61cc` on `ultimate`, pushed to `github/ultimate`.
+
+
 
 
 
