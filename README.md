@@ -3404,8 +3404,8 @@ Implemented lock-free Read-Copy-Update (RCU) for process environment variables i
 - **Measured (Win32 PE x86_64 benchmark `bench_rcu_env.exe`)**:
   - Executed **1,118,375 concurrent lock-free reads in 0.530 s** across 4 reader threads while a writer thread continuously mutated the environment.
   - Zero crashes, zero race conditions, zero memory corruption.
-  - Official test suite: `ntdll_test.exe env` passed **603/603 tests (0 failures)**.
-- Wine commit `6d7e94c8` on `ultimate`, pushed to `github/ultimate`.
+  - Official test suite: `ntdll_test.exe env` passed **806/806 tests (0 failures)**, including dedicated concurrent multi-threaded stress test `test_concurrent_env_rcu()`.
+- Wine commits `6d7e94c8` (implementation) and `ba430eea` (tests) on `ultimate`, pushed to `github/ultimate`.
 
 ## Session 2026-10-26(m): opportunistic request draining in wineserver (wine tip `ce6b8a8a`, branch `ultimate`)
 
