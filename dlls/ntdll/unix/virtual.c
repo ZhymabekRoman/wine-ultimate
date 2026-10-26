@@ -5227,6 +5227,14 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
             }
             SERVER_END_REQ;
         }
+
+#ifdef MADV_HUGEPAGE
+        /* Enable Transparent Huge Pages for large anonymous allocations (>= 2MB) */
+        if (!status && size >= 2 * 1024 * 1024 && view && !(view->protect & SEC_FILE))
+        {
+            madvise( base, size, MADV_HUGEPAGE );
+        }
+#endif
     }
 
     if (!status && (attributes & MEM_EXTENDED_PARAMETER_EC_CODE))
