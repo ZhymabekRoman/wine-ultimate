@@ -3186,3 +3186,144 @@ Implemented kernel memory management optimizations across ntdll and dcomp:
 rsync of `tools/`. `gate_td.sh 160` puts the frame at t=130 s. Its edge counter
 emits `integer expected` warnings because `pgrep -fc` prints on two lines; the
 counters stay correct.
+
+## Session 2026-26-10 (g): the browser tree dies at t≈30 s — the "swallowed request" is downstream of a dead browser; the interface id is not a string hash (wine tips `9dfca5b44 b2b97df9c 520c5e3ed 7c53f52d6`, branch `ultimate`)
+
+**The premise is stale and the wall is earlier than the mojo request.** On a coherent
+build (source == deployed; the tree at `e4840d68e`) every gate of 70–160 s gives
+`APP ALIVE_160s`, `createdwins=130`, `xamlwin=1`, `rendwin=1`, `ebwebview=26`,
+`wvtemp=1`, `cs_timeouts=0`, `dcomp_cs=0`, `navigate=0`, `webwa=0`, and
+**`BORN=5 GONE=30`**: six `msedgewebview2.exe` appear at t=5 s and **all are gone by
+t=30 s**, with four crashpad reports per run at **+21 s, +25 s, +29 s (4-thread
+children) and +31 s (50-thread browser)**. A browser that is dead cannot answer
+interface `0x3ccd0fb301` method `0x16`; the frame at t=130 s is 1280×1024, one colour,
+pure black. "6 edge processes live through 160 s+" belongs to an older deployed
+binary, not to the current tip.
+
+**Decode of the interface id: negative, and the negative is the result.** `0x3ccd0fb301`
+occurs **zero** times in `EmbeddedBrowserWebView.dll` (x64, 8.7 MB) and in `msedge.dll`
+(355 MB) in every encoding (`<Q`, `>Q`, low dword, 5-byte LE `01 b3 0f cd 3c`, 5-byte
+BE). The mojom FNV-1a machinery is present (basis/prime pairs at EBWebView file
+`0x219c29+0x219c4c`, `0x21e3ac+0x21e3bf`, `0x4548a2+0x454954`, xor-then-imul order), and
+brute force of FNV-1a64 and FNV-1(64), truncated to 48 bits and `>>16`, with version
+folding `v=0..8`, over **every printable string in both files** yields **no** match —
+so the id is computed at runtime, not `trunc(hash(name))`, and no interface can be
+named from it. EBWebView carries 25 interface names, all `embedded_browser*.mojom.*`
+(EmbeddedBrowser `0x6f9188`, Host `0x6faeb8`, HostViaBrowser `0x6fae78`,
+WebViewHostEventDispatcher `0x6fae78/0x6fae10`, EmbeddedBrowserProfile `0x6fa790`,
+EmbeddedBrowserClient `0x6f9a40`, DedicatedWorkerHost `0x6faf58`,
+TextInputClientWebView `0x70a378`, network.mojom.DataPipeGetter `0x70a468`); every name
+string has **zero xrefs** and dispatch is by 24-byte `{u32 key, code*, code*}` tables
+(763 entries, e.g. `0x6f91b0` for EmbeddedBrowser) — **no table key is `0x16`**. The
+only stores of `0x16` to `[reg+0x10]` are at RVA `0x324217, 0x3243dd, 0x3246ab, 0x324859`
+(functions `0x3240e8, 0x324364, 0x324718`) and they are mojom `MessageValidator` walks
+for ordinal 22, not send paths. Method 22 has **no recovered name**; naming it requires
+runtime evidence.
+
+**Where the children die.** The 4-thread children crash at
+`msedge.dll+0x487d2a3` — an `int3` noreturn pad. The function that owns the pad
+references the string block `0x131860a0…0x13186260` (source-file string + lines
+`0x304=772`, `0x30c=780`): `Failed to load dxgi.dll`, `Failed to load dcomp.dll`,
+`Blocklisted due to third party modules`, `GetProcAddress failed for
+DCompositionCreateDevice3`, `DXGIDisableVBlankVirtualization`,
+`Failed to disable VBlank virtualization: `, `DCompositionGetFrameId`,
+`DCompositionGetStatistics`, `DCompositionWaitForCompositorClock`,
+`DCompositionCreateDevice3 failed: `, `Failed to retrieve IDCompositionDevice3: ` —
+i.e. Chromium's `ui/dc/win/device.cc Device::Create`, with `LOG(FATAL)` branches at
+`0x487d147` (772) and `0x487d1ef` (780). The 50-thread browser crashes at
+`msedge.dll+0x462ea9e`; its stack carries `ReconfigureAfterNetworkRestart`,
+`chrome\browser\component_updater\pki_metadata_component_installer.cc`,
+`ThreadPool_RunTask`, `QueueSubscribe`,
+`components\crash\core\browser\edge_code_integrity_event_data_manager.cc` — a
+component-updater/PKI task after a network restart, i.e. the cascade after the GPU
+child loss, not an independent fault.
+
+**Fixes landed (clean Wine LGPL, four commits, pushed to `github/ultimate`).**
+1. `9dfca5b44 dcomp: Answer IDCompositionDevice4 and IDCompositionDevice5.` Wine
+   answered `E_NOINTERFACE` for `IID_IDCompositionDevice5`
+   (`2c6bebfe-a603-472f-af34-d2443356e61b`) and `IDCompositionDevice4`
+   (`85fc5cca-2da6-494c-86b6-4a775c049b8a`); Chromium's `Device::Create` requests
+   `IDCompositionDevice5` via `IID_PPV_ARGS`. The device now answers both with the
+   object used for Device2/3/DesktopDevice (its extra slots `34/35/36` are the
+   `Unknown5/6/7` `E_NOTIMPL` stubs of the 129-entry `desktop_device_vtbl`, so no
+   vtable overrun) and `DCompositionCreateDevice2/3` accept the ids.
+   **Measured: `GONE=30` unchanged (m5).**
+2. `b2b97df9c dxgi: Implement empty DXGIDisableVBlankVirtualization and
+   DXGIEnableVBlankVirtualization.` Wine's `dxgi.dll` exported exactly six functions;
+   a client that resolves the export and checks the HRESULT treats the missing export
+   as the failure it logs. **Measured: `GONE=30` unchanged (m6).**
+3. `520c5e3ed dxgi: Register a window class for the factory device window.`
+   `dxgi_factory_get_device_window()` created its helper window with class `"static"`,
+   which `dlls/comctl32/commctrl.c:115` registers — a DXGI-only process has no comctl32,
+   so the create failed: `err:dxgi:dxgi_factory_get_device_window Failed to create a
+   window.` appeared **once in every one of the six browser processes** (6/run). With a
+   dxgi-owned `WineDXGI_DeviceWindow` class the count is **0** (m8). This is a real
+   defect fixed and measured; it does not change `GONE`.
+4. `7c53f52d6 ntdll: Remove the named pipe shared memory ring and the io_uring
+   read/write fast path.` The SHM block is allocated by the pipe server side only, so
+   the peer never maps it, and one of the two (`63c3a2ca2`, committed during this
+   session) was **enabled by default**. **Measured: `GONE=30` unchanged (m9)** — the
+   README's earlier attribution of the browser death to these paths is refuted.
+
+**The decisive negative: the death is timing-sensitive, not API-shaped.** With `gdb`
+attached to all six `msedgewebview2.exe` processes and breakpoints on both FATAL
+branches (`+0x487d147`, `+0x487d1ef`), on both crash pads (`+0x487d2a3`, `+0x462ea9f`),
+on `dxgi!DXGIDisableVBlankVirtualization` and on `dcomp!DCompositionCreateDevice3`
+(IID + HRESULT), a 60 s gate produced **zero crashpad reports** — the tree is healthy
+under a debugger, so none of the breakpoints could observe the crash. Without a
+debugger the same build produced four reports at the same PCs. Chromium's own logging
+did not help: `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS="--enable-logging[=stderr] --v=0
+--log-file=…"` produced no `chrome_debug.log` in the CWD, in the user-data dir, or on
+stderr (only `favorites_diagnostic.log`/`settings_diagnostic.log`).
+
+**Verified.** Battery 8×60: **8/8 `ALIVE_60s fatal=0`** (runs 5–8 healthy:
+`wins 117–140, edge=12`; runs 1–4 in the first-run/degraded mode `wins 32–49, edge=2`).
+Suites at parity: **dcomp 1160 tests/41 f/28 todo** (identical to baseline), **dxgi at
+the 300 s cap** (baseline behaviour), **d3d11 562751 tests/113 f/8 sk** (baseline
+562750/112/8). **Pristine app binaries 4/4 OK** (`CoreMessagingXP.dll`, `dwmcorei.dll`,
+`Microsoft.Internal.FrameworkUdk.dll`, `Microsoft.ui.xaml.dll` vs `.orig`). Gate build
+identity after deploy: `dcomp.dll b8367f12…`, `dxgi.dll 48d8cbce…`,
+`ntdll.so 362b0000…`, `wineserver 316add13…`; the final build has no probe and no app
+binary is modified.
+
+**Harness built this session (all read-only, in `/home/olge/wa-work/tools/`).**
+`btsym2.py` maps raw-stack words through a `/proc/<pid>/maps` snapshot (module +
+file-offset + PE RVA, ELF symbols via cached `nm`); note msedge.dll's code maps as
+`r--p`, so filter by module name, not by the `x` bit, and split maps lines with
+`split(None, 5)` — the prefix path contains spaces (this is why the older
+`btsym3.py`/`br_*_sym.txt` module names were garbage). `mdmpbt.py` backtraces
+crashpad minidumps (verified strides: **module 108**, **thread 48**, **memory
+descriptor 16** with `DataSize` at +8 and `Rva` at +12, `CONTEXT.Rip = +0x100`;
+streams: 3 ThreadList, 4 ModuleList, **5 MemoryList**, 6 Exception, 7 SystemInfo).
+`mdmpmsg.py` resolves stack pointers into a module's on-disk `.rdata` and prints the
+strings — that is how the browser's PKI/component-updater frames and the
+`device.cc` string block were recovered. `pestr.py` prints every rip-relative string
+in a disassembly range (used to identify the FATAL string block), `peiat.py` maps IAT
+slots to import names. Gate/probe scripts: `/tmp/wa/gate_td.sh`, `/tmp/wa/g1.sh`
+(inject `WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS`), `/tmp/wa/p3.sh` (attach-on-appear
+breakpoint probe), `/tmp/wa/battery.sh`, `/tmp/wa/suite_one.sh`.
+
+**Operational traps recorded.** `/tmp` is a 31 GB tmpfs and one 160 s gate writes
+~560 MB (×2 with the `tr -d '\000'` copy): at 91 % full the app reproduces the
+degraded mode (`createdwins≈38`, no browser). 10.9 GB of stale logs were removed; keep
+`/tmp` above ~10 GB free and keep only the newest gate log. Four commits
+(`151a32ffa`, `aeed0f31f`, `63c3a2ca2`, `e4840d68e`) appeared on `ultimate` mid-session
+from a subagent that was instructed to be read-only, one of them flipping io_uring on by
+default; `source == deployed` must be re-checked (md5 of `/tmp/wine/wine-build/...` vs
+`/tmp/wb/...`) before trusting any gate, because a half-synced tree yields
+`wine client error: version mismatch 967/966` and a useless run.
+
+**Ranked for the next session.** (1) Get the FATAL text without a debugger: read the
+`msedgewebview2.exe` `create_process` command line from a `+server` trace to confirm
+which switches the app passes, then force logging via the app's own
+`--browser-arguments` path or via `HKCU\Software\Policies\Microsoft\Edge\WebView\*`;
+Chromium's own line identifies the branch. (2) Non-invasive Wine-side timing trace of
+the child's death: `+loaddll,+dxgi,+dcomp,+d3d11,+wined3d` on the child only, plus the
+`wineserver` request stream of the dying pid, to find what the child stops servicing at
+t≈20 s. (3) The third candidate in `Device::Create` is the blocklist/module path
+(`Blocklisted due to third party modules`, `Failed to load dcomp.dll`) — check Wine's
+`GetModuleHandleW("dcomp.dll"/"dxgi.dll")` for a process where the builtin is not yet
+loaded, which returns NULL and drives that branch. (4) The interface id/method 22
+decode needs a runtime side: break in `EBWebView+0x3240e8/0x324364/0x324718` (the
+ordinal-22 validators) and on the id cache at `EBWebView+0x455b86`, in the *app*
+process, where the debugger does not suppress the fault.
