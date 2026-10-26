@@ -749,6 +749,27 @@ static HRESULT std_unmarshal_interface(MSHCTX dest_context, void *dest_context_d
     {
         if ((stubmgr = get_stub_manager(stub_apt, obj.std.oid)))
         {
+            IUnknown *agile_test = NULL;
+
+            /* In-process Agile COM Fast Thunk: if the object supports IAgileObject,
+             * it is safe to access directly across apartments within the same process.
+             * Return the direct interface pointer, bypassing proxy and RPC channel creation! */
+            if (SUCCEEDED(IUnknown_QueryInterface(stubmgr->object, &IID_IAgileObject, (void **)&agile_test)))
+            {
+                IUnknown_Release(agile_test);
+                TRACE("In-process Agile object %p detected for iid %s, returning direct pointer\n",
+                      stubmgr->object, debugstr_guid(riid));
+                hres = IUnknown_QueryInterface(stubmgr->object, riid, ppv);
+
+                if (!stub_manager_is_table_marshaled(stubmgr, &obj.std.ipid))
+                    stub_manager_ext_release(stubmgr, obj.std.cPublicRefs, obj.std.flags & SORFP_TABLEWEAK, FALSE);
+
+                stub_manager_int_release(stubmgr);
+                apartment_release(stub_apt);
+                apartment_release(apt);
+                return hres;
+            }
+
             if (!stub_manager_notify_unmarshal(stubmgr, &obj.std.ipid))
                 hres = CO_E_OBJNOTCONNECTED;
             if (SUCCEEDED(hres) && !dest_context_known)
