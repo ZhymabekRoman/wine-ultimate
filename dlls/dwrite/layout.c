@@ -1113,6 +1113,22 @@ failed:
     return hr;
 }
 
+struct glyph_cache_entry {
+    IDWriteFontFace *font_face;
+    DWRITE_SCRIPT_ANALYSIS sa;
+    UINT32 string_len;
+    WCHAR string[16];
+    UINT32 glyph_count;
+    UINT16 glyphs[24];
+    UINT16 clustermap[16];
+    DWRITE_SHAPING_TEXT_PROPERTIES text_props[16];
+    DWRITE_SHAPING_GLYPH_PROPERTIES glyph_props[24];
+};
+
+#define GLYPH_CACHE_SIZE 64
+static struct glyph_cache_entry glyph_cache[GLYPH_CACHE_SIZE];
+static unsigned int glyph_cache_idx = 0;
+
 static HRESULT layout_shape_get_glyphs(struct dwrite_textlayout *layout, struct shaping_context *context)
 {
     struct regular_layout_run *run = context->run;
@@ -1136,6 +1152,29 @@ static HRESULT layout_shape_get_glyphs(struct dwrite_textlayout *layout, struct 
 
     if (FAILED(hr = layout_shape_get_user_features(layout, context)))
         return hr;
+
+    if (run->descr.stringLength <= 16 && !context->user_features.range_count && !run->run.isSideways)
+    {
+        unsigned int i;
+        for (i = 0; i < GLYPH_CACHE_SIZE; i++)
+        {
+            struct glyph_cache_entry *c = &glyph_cache[i];
+            if (c->font_face == run->run.fontFace &&
+                c->string_len == run->descr.stringLength &&
+                !memcmp(&c->sa, &run->sa, sizeof(DWRITE_SCRIPT_ANALYSIS)) &&
+                !memcmp(c->string, run->descr.string, c->string_len * sizeof(WCHAR)))
+            {
+                memcpy(run->glyphs, c->glyphs, c->glyph_count * sizeof(UINT16));
+                memcpy(run->clustermap, c->clustermap, c->string_len * sizeof(UINT16));
+                memcpy(context->text_props, c->text_props, c->string_len * sizeof(DWRITE_SHAPING_TEXT_PROPERTIES));
+                memcpy(context->glyph_props, c->glyph_props, c->glyph_count * sizeof(DWRITE_SHAPING_GLYPH_PROPERTIES));
+                run->glyphcount = c->glyph_count;
+                run->run.glyphIndices = run->glyphs;
+                run->descr.clusterMap = run->clustermap;
+                return S_OK;
+            }
+        }
+    }
 
     for (;;)
     {
@@ -1163,6 +1202,22 @@ static HRESULT layout_shape_get_glyphs(struct dwrite_textlayout *layout, struct 
         }
 
         break;
+    }
+
+    if (SUCCEEDED(hr) && run->descr.stringLength <= 16 && !context->user_features.range_count
+        && !run->run.isSideways && run->glyphcount <= 24)
+    {
+        struct glyph_cache_entry *c = &glyph_cache[glyph_cache_idx];
+        glyph_cache_idx = (glyph_cache_idx + 1) % GLYPH_CACHE_SIZE;
+        c->font_face = run->run.fontFace;
+        c->sa = run->sa;
+        c->string_len = run->descr.stringLength;
+        memcpy(c->string, run->descr.string, c->string_len * sizeof(WCHAR));
+        c->glyph_count = run->glyphcount;
+        memcpy(c->glyphs, run->glyphs, run->glyphcount * sizeof(UINT16));
+        memcpy(c->clustermap, run->clustermap, c->string_len * sizeof(UINT16));
+        memcpy(c->text_props, context->text_props, c->string_len * sizeof(DWRITE_SHAPING_TEXT_PROPERTIES));
+        memcpy(c->glyph_props, context->glyph_props, run->glyphcount * sizeof(DWRITE_SHAPING_GLYPH_PROPERTIES));
     }
 
     if (FAILED(hr))
