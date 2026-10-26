@@ -124,7 +124,6 @@
 #include "wine/list.h"
 #include "wine/debug.h"
 #include "unix_private.h"
-#include "pipe_shm.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
@@ -5724,47 +5723,6 @@ static unsigned int server_read_file( HANDLE handle, HANDLE event, PIO_APC_ROUTI
     HANDLE wait_handle;
     ULONG options;
 
-    if (pipe_shm_is_enabled())
-    {
-        struct wine_pipe_handle_entry *entry = pipe_handle_lookup( handle );
-        if (!entry)
-        {
-            SERVER_START_REQ( get_named_pipe_shm )
-            {
-                req->handle = wine_server_obj_handle( handle );
-                if (!wine_server_call( req ))
-                {
-                    int unix_fd, needs_close;
-                    HANDLE mapping = wine_server_ptr_handle( reply->mapping );
-                    unsigned int is_srv = reply->is_server;
-                    size_t shm_sz = reply->size;
-
-                    if (server_get_unix_fd( mapping, FILE_READ_DATA|FILE_WRITE_DATA, &unix_fd, &needs_close, NULL, NULL ) == STATUS_SUCCESS)
-                    {
-                        void *ptr = mmap( NULL, shm_sz, PROT_READ|PROT_WRITE, MAP_SHARED, unix_fd, 0 );
-                        if (needs_close) close( unix_fd );
-                        if (ptr != MAP_FAILED)
-                            entry = pipe_handle_insert( handle, ptr, is_srv, shm_sz );
-                    }
-                    NtClose( mapping );
-                }
-            }
-            SERVER_END_REQ;
-        }
-
-        if (entry)
-        {
-            struct wine_pipe_ring *ring = entry->is_server ? &entry->seg->c2s : &entry->seg->s2c;
-            ssize_t ret = pipe_shm_ring_read( ring, (uint8_t *)buffer, size );
-            if (ret > 0)
-            {
-                set_sync_iosb( io, STATUS_SUCCESS, ret, 0 );
-                if (event) NtSetEvent( event, NULL );
-                return STATUS_SUCCESS;
-            }
-        }
-    }
-
     if (!(async = (struct async_irp *)alloc_fileio( sizeof(*async), irp_completion, handle )))
         return STATUS_NO_MEMORY;
 
@@ -5799,47 +5757,6 @@ static unsigned int server_write_file( HANDLE handle, HANDLE event, PIO_APC_ROUT
     unsigned int status;
     HANDLE wait_handle;
     ULONG options;
-
-    if (pipe_shm_is_enabled())
-    {
-        struct wine_pipe_handle_entry *entry = pipe_handle_lookup( handle );
-        if (!entry)
-        {
-            SERVER_START_REQ( get_named_pipe_shm )
-            {
-                req->handle = wine_server_obj_handle( handle );
-                if (!wine_server_call( req ))
-                {
-                    int unix_fd, needs_close;
-                    HANDLE mapping = wine_server_ptr_handle( reply->mapping );
-                    unsigned int is_srv = reply->is_server;
-                    size_t shm_sz = reply->size;
-
-                    if (server_get_unix_fd( mapping, FILE_READ_DATA|FILE_WRITE_DATA, &unix_fd, &needs_close, NULL, NULL ) == STATUS_SUCCESS)
-                    {
-                        void *ptr = mmap( NULL, shm_sz, PROT_READ|PROT_WRITE, MAP_SHARED, unix_fd, 0 );
-                        if (needs_close) close( unix_fd );
-                        if (ptr != MAP_FAILED)
-                            entry = pipe_handle_insert( handle, ptr, is_srv, shm_sz );
-                    }
-                    NtClose( mapping );
-                }
-            }
-            SERVER_END_REQ;
-        }
-
-        if (entry)
-        {
-            struct wine_pipe_ring *ring = entry->is_server ? &entry->seg->s2c : &entry->seg->c2s;
-            ssize_t ret = pipe_shm_ring_write( ring, (const uint8_t *)buffer, size );
-            if (ret > 0)
-            {
-                set_sync_iosb( io, STATUS_SUCCESS, ret, 0 );
-                if (event) NtSetEvent( event, NULL );
-                return STATUS_SUCCESS;
-            }
-        }
-    }
 
     if (!(async = (struct async_irp *)alloc_fileio( sizeof(*async), irp_completion, handle )))
         return STATUS_NO_MEMORY;
