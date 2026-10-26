@@ -720,6 +720,72 @@ static void test_RtlSetEnvironmentVariable(void)
     ok(!status, "got %#lx\n", status);
 }
 
+struct rcu_test_ctx {
+    volatile BOOL stop;
+    volatile LONG reads_completed;
+};
+
+static DWORD WINAPI rcu_reader_proc(LPVOID param)
+{
+    struct rcu_test_ctx *ctx = param;
+    UNICODE_STRING name, val;
+    WCHAR val_buf[64];
+    NTSTATUS status;
+
+    RtlInitUnicodeString(&name, L"WINE_RCU_CONCURRENT_VAR");
+    val.Buffer = val_buf;
+    val.MaximumLength = sizeof(val_buf);
+
+    while (!ctx->stop)
+    {
+        val.Length = 0;
+        status = RtlQueryEnvironmentVariable_U(NULL, &name, &val);
+        if (!status)
+            InterlockedIncrement(&ctx->reads_completed);
+    }
+    return 0;
+}
+
+static void test_concurrent_env_rcu(void)
+{
+    struct rcu_test_ctx ctx = { FALSE, 0 };
+    HANDLE readers[4];
+    UNICODE_STRING name, val;
+    WCHAR val_buf[64];
+    NTSTATUS status;
+    int i;
+
+    RtlInitUnicodeString(&name, L"WINE_RCU_CONCURRENT_VAR");
+    RtlInitUnicodeString(&val, L"Initial_RCU_Value_0");
+    status = RtlSetEnvironmentVariable(NULL, &name, &val);
+    ok(!status, "RtlSetEnvironmentVariable initial failed: %lx\n", status);
+
+    for (i = 0; i < 4; i++)
+        readers[i] = CreateThread(NULL, 0, rcu_reader_proc, &ctx, 0, NULL);
+
+    /* Mutate the variable 200 times concurrently while 4 reader threads query lock-free */
+    for (i = 1; i <= 200; i++)
+    {
+        swprintf(val_buf, ARRAY_SIZE(val_buf), L"Mutated_RCU_Value_%d", i);
+        RtlInitUnicodeString(&val, val_buf);
+        status = RtlSetEnvironmentVariable(NULL, &name, &val);
+        ok(!status, "RtlSetEnvironmentVariable iteration %d failed: %lx\n", i, status);
+        Sleep(1);
+    }
+
+    ctx.stop = TRUE;
+    WaitForMultipleObjects(4, readers, TRUE, INFINITE);
+    for (i = 0; i < 4; i++) CloseHandle(readers[i]);
+
+    /* Cleanup */
+    status = RtlSetEnvironmentVariable(NULL, &name, NULL);
+    ok(!status, "RtlSetEnvironmentVariable delete failed: %lx\n", status);
+
+    trace("test_concurrent_env_rcu: completed %ld lock-free reads during 200 concurrent mutations\n",
+          ctx.reads_completed);
+    ok(ctx.reads_completed > 1000, "expected >1000 lock-free reads, got %ld\n", ctx.reads_completed);
+}
+
 START_TEST(env)
 {
     HMODULE mod = GetModuleHandleA("ntdll.dll");
@@ -740,4 +806,5 @@ START_TEST(env)
     test_RtlSetCurrentEnvironment();
     test_RtlSetEnvironmentVariable();
     test_RtlExpandEnvironmentStrings();
+    test_concurrent_env_rcu();
 }
