@@ -669,14 +669,57 @@ HRESULT dxgi_factory_create(REFIID riid, void **factory, BOOL extended)
     return hr;
 }
 
+static LRESULT CALLBACK dxgi_device_window_proc(HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam)
+{
+    return DefWindowProcA(hwnd, msg, wparam, lparam);
+}
+
+/* The "static" window class is registered by comctl32, which a process that only uses
+ * DXGI does not necessarily have loaded. Register a class of our own for the device
+ * window, so that the window does not depend on the common controls being present. */
+static ATOM dxgi_register_device_window_class(void)
+{
+    static const char class_name[] = "WineDXGI_DeviceWindow";
+    static LONG atom;
+    ATOM ret;
+    WNDCLASSA wc;
+
+    if ((ret = (ATOM)atom))
+        return ret;
+
+    memset(&wc, 0, sizeof(wc));
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = dxgi_device_window_proc;
+    wc.hInstance = GetModuleHandleA("dxgi.dll");
+    wc.lpszClassName = class_name;
+
+    if (!(ret = RegisterClassA(&wc)))
+    {
+        ERR("Failed to register window class '%s', err %lu.\n", class_name, GetLastError());
+        return 0;
+    }
+
+    InterlockedCompareExchange(&atom, ret, 0);
+    return ret;
+}
+
 HWND dxgi_factory_get_device_window(struct dxgi_factory *factory)
 {
     wined3d_mutex_lock();
 
     if (!factory->device_window)
     {
-        if (!(factory->device_window = CreateWindowA("static", "DXGI device window",
-                WS_DISABLED, 0, 0, 0, 0, NULL, NULL, NULL, NULL)))
+        ATOM atom = dxgi_register_device_window_class();
+        HWND window = NULL;
+
+        if (atom)
+            window = CreateWindowExA(0, (const char *)MAKEINTATOM(atom), "DXGI device window",
+                    WS_DISABLED, 0, 0, 0, 0, NULL, NULL, NULL, NULL);
+        if (!window)
+            window = CreateWindowA("static", "DXGI device window",
+                    WS_DISABLED, 0, 0, 0, 0, NULL, NULL, NULL, NULL);
+
+        if (!(factory->device_window = window))
         {
             wined3d_mutex_unlock();
             ERR("Failed to create a window.\n");
