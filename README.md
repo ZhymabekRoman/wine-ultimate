@@ -3017,7 +3017,7 @@ Implemented lockless shared-memory IPC for Win32 named pipes:
 ## Session 2026-10-26(e): io_uring acceleration for NtReadFile and NtWriteFile (wine tip `7b9c200e`, branch `ultimate`)
 
 Implemented native Linux `io_uring` acceleration for Win32 regular file I/O:
-- Gated by environment variable `WINE_IO_URING=1` (disabled by default, zero regression risk).
+- Enabled by default (opt-out via `WINE_IO_URING=0`, commit `63c3a2ca`).
 - Thread-local 32-entry SQ/CQ ring in `dlls/ntdll/unix/io_uring.h` (`IORING_OP_READ` / `IORING_OP_WRITE`).
 - Fast-path intercept in `NtReadFile` and `NtWriteFile` in `dlls/ntdll/unix/file.c`.
 - **Measured microbenchmark (`bench_io_uring.exe`)**:
