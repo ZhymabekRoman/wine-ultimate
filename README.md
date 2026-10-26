@@ -3187,7 +3187,7 @@ rsync of `tools/`. `gate_td.sh 160` puts the frame at t=130 s. Its edge counter
 emits `integer expected` warnings because `pgrep -fc` prints on two lines; the
 counters stay correct.
 
-## Session 2026-26-10 (g): the browser tree dies at t≈30 s — the "swallowed request" is downstream of a dead browser; the interface id is not a string hash (wine tips `9dfca5b44 b2b97df9c 520c5e3ed 7c53f52d6`, branch `ultimate`)
+## Session 2026-10-26(g): the browser tree dies at t≈30 s — the "swallowed request" is downstream of a dead browser; the interface id is not a string hash (wine tips `9dfca5b44 b2b97df9c 520c5e3ed 7c53f52d6`, branch `ultimate`)
 
 **The premise is stale and the wall is earlier than the mojo request.** On a coherent
 build (source == deployed; the tree at `e4840d68e`) every gate of 70–160 s gives
