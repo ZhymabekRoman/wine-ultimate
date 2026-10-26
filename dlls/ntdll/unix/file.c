@@ -125,6 +125,7 @@
 #include "wine/debug.h"
 #include "unix_private.h"
 #include "pipe_shm.h"
+#include "io_uring.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
@@ -6080,6 +6081,18 @@ NTSTATUS WINAPI NtReadFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, vo
 
         if (offset && offset->QuadPart != FILE_USE_FILE_POINTER_POSITION)
         {
+            if (wine_uring_is_enabled())
+            {
+                ssize_t ures = wine_uring_pread( unix_handle, buffer, length, offset->QuadPart );
+                if (ures >= 0)
+                {
+                    if (!async_read) lseek( unix_handle, offset->QuadPart + ures, SEEK_SET );
+                    total = ures;
+                    status = (total || !length) ? STATUS_SUCCESS : STATUS_END_OF_FILE;
+                    goto done;
+                }
+            }
+
             /* async I/O doesn't make sense on regular files */
             while ((result = virtual_locked_pread( unix_handle, buffer, length, offset->QuadPart )) == -1)
             {
@@ -6405,6 +6418,18 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
             {
                 status = STATUS_INVALID_PARAMETER;
                 goto done;
+            }
+
+            if (wine_uring_is_enabled())
+            {
+                ssize_t ures = wine_uring_pwrite( unix_handle, buffer, length, off );
+                if (ures >= 0)
+                {
+                    if (!async_write) lseek( unix_handle, off + ures, SEEK_SET );
+                    total = ures;
+                    status = STATUS_SUCCESS;
+                    goto done;
+                }
             }
 
             /* async I/O doesn't make sense on regular files */
