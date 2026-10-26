@@ -3416,4 +3416,14 @@ Implemented opportunistic request draining for client sockets in `server/request
 - Safely stops draining if the thread enters a wait state or has pending reply writes.
 - Wine commit `ce6b8a8a` on `ultimate`, pushed to `github/ultimate`.
 
+## Session 2026-10-26(n): in-kernel NT synchronization via /dev/ntsync
+
+Activated Linux in-kernel NT synchronization driver (`CONFIG_NTSYNC=m`) on Zen kernel:
+- Loaded and enabled persistent auto-load for `ntsync.ko` (`/etc/modules-load.d/ntsync.conf`), exposing `/dev/ntsync` (`crw-rw-rw-`).
+- Wine 11.10 built-in `inproc_sync` (`server/inproc_sync.c` and `dlls/ntdll/unix/sync.c`) auto-activates `linux_wait_objs` when `/dev/ntsync` is present.
+- Mutexes, semaphores, and events bypass wineserver socket roundtrips: `NtWaitForMultipleObjects` and `NtWaitForSingleObject` execute direct kernel ioctls (`NTSYNC_IOC_WAIT_ANY` / `NTSYNC_IOC_WAIT_ALL`).
+- **Measured (Win32 PE x86_64 benchmark `bench_ntsync_speed.exe`)**:
+  - Executed **1,000,000 full SetEvent + WaitForSingleObject cycles in 0.318 s** (**317.65 ns per cycle**, ~5x faster than ~1600 ns wineserver roundtrip).
+
+
 
