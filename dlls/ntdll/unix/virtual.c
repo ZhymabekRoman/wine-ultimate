@@ -3277,8 +3277,18 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         }
 #endif
 
+#ifdef MADV_POPULATE_READ
+        /* Synchronously populate executable page tables (.text) to eliminate startup minor faults */
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
+        {
+            if (madvise( ptr + sec[i].VirtualAddress, size, MADV_POPULATE_READ ))
+            {
 #ifdef MADV_WILLNEED
-        /* Pre-fault executable code sections (.text) asynchronously to eliminate startup page-fault stalls */
+                madvise( ptr + sec[i].VirtualAddress, size, MADV_WILLNEED );
+#endif
+            }
+        }
+#elif defined(MADV_WILLNEED)
         if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
         {
             madvise( ptr + sec[i].VirtualAddress, size, MADV_WILLNEED );
@@ -3635,6 +3645,10 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     {
         *addr_ptr = view->base;
         *size_ptr = size;
+#ifdef MADV_POPULATE_READ
+        if ((vprot & VPROT_READ) && !(vprot & VPROT_WRITE) && size >= 64 * 1024)
+            madvise( view->base, size, MADV_POPULATE_READ );
+#endif
         VIRTUAL_DEBUG_DUMP_VIEW( view );
     }
     else delete_view( view );

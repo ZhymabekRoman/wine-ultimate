@@ -3139,6 +3139,37 @@ static void free_dentry_dir( struct dentry_cache_dir *dir )
     }
 }
 
+#ifndef RESOLVE_CACHED
+#define RESOLVE_CACHED 0x20
+#endif
+
+#ifndef __NR_openat2
+#define __NR_openat2 437
+#endif
+
+struct wine_open_how {
+    uint64_t flags;
+    uint64_t mode;
+    uint64_t resolve;
+};
+
+static inline int openat_cached( int dirfd, const char *pathname, int flags )
+{
+#if defined(linux) && defined(__x86_64__)
+    struct wine_open_how how;
+    int fd;
+
+    memset( &how, 0, sizeof(how) );
+    how.flags = flags;
+    how.resolve = RESOLVE_CACHED;
+
+    fd = syscall( __NR_openat2, dirfd, pathname, &how, sizeof(how) );
+    if (fd >= 0) return fd;
+    if (errno != EAGAIN && errno != ENOSYS) return -1;
+#endif
+    return openat( dirfd, pathname, flags );
+}
+
 /***********************************************************************
  *           find_file_in_dir
  *
@@ -3184,7 +3215,7 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
 #ifdef VFAT_IOCTL_READDIR_BOTH
     if (is_name_8_dot_3)
     {
-        int fd = openat( root_fd, unix_name, O_RDONLY | O_DIRECTORY );
+        int fd = openat_cached( root_fd, unix_name, O_RDONLY | O_DIRECTORY );
         if (fd != -1)
         {
             KERNEL_DIRENT kde[2];
@@ -3229,7 +3260,7 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
     }
 #endif /* VFAT_IOCTL_READDIR_BOTH */
 
-    if ((fd = openat( root_fd, unix_name, O_RDONLY )) == -1) return errno_to_status( errno );
+    if ((fd = openat_cached( root_fd, unix_name, O_RDONLY )) == -1) return errno_to_status( errno );
 
     /* In-memory Dentry Cache fast path */
     if (vfs_cache_disabled == -1) vfs_cache_disabled = getenv( "WINE_DISABLE_VFS_CACHE" ) != NULL;
