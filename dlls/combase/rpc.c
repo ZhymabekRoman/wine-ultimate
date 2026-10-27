@@ -185,6 +185,65 @@ static LONG WINAPI rpc_filter(EXCEPTION_POINTERS *eptr)
     return I_RpcExceptionFilter(eptr->ExceptionRecord->ExceptionCode);
 }
 
+static BOOL start_rpcss_direct(void)
+{
+    static const WCHAR rpcss_exeW[] = L"C:\\windows\\system32\\rpcss.exe";
+    static const WCHAR mutex_nameW[] = L"Global\\WineRpcssDirectStart";
+    static const char pipe_name[] = "\\\\.\\pipe\\lrpc\\irpcss";
+    ULONGLONG start_time;
+    HANDLE mutex, process = 0;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    BOOL ret = FALSE;
+
+    TRACE("starting rpcss directly\n");
+
+    mutex = CreateMutexW( NULL, FALSE, mutex_nameW );
+    if (mutex) WaitForSingleObject( mutex, 10000 );
+
+    if (WaitNamedPipeA( pipe_name, 1 ))
+    {
+        ret = TRUE;
+        goto done;
+    }
+
+    memset( &si, 0, sizeof(si) );
+    si.cb = sizeof(si);
+    if (CreateProcessW( rpcss_exeW, NULL, NULL, NULL, FALSE, DETACHED_PROCESS,
+                        NULL, NULL, &si, &pi ))
+    {
+        CloseHandle( pi.hThread );
+        process = pi.hProcess;
+    }
+    else
+    {
+        ERR("Failed to launch rpcss.exe, error %ld\n", GetLastError());
+        goto done;
+    }
+
+    start_time = GetTickCount64();
+    while (GetTickCount64() - start_time < 15000)
+    {
+        if (WaitNamedPipeA( pipe_name, 1 ))
+        {
+            ret = TRUE;
+            break;
+        }
+        if (process && WaitForSingleObject( process, 0 ) == WAIT_OBJECT_0)
+            break;
+        Sleep( 100 );
+    }
+
+done:
+    if (process) CloseHandle( process );
+    if (mutex)
+    {
+        ReleaseMutex( mutex );
+        CloseHandle( mutex );
+    }
+    return ret;
+}
+
 static BOOL start_rpcss(void)
 {
     SERVICE_STATUS_PROCESS status;
@@ -196,7 +255,10 @@ static BOOL start_rpcss(void)
     if (!(scm = OpenSCManagerW(NULL, NULL, 0)))
     {
         ERR("Failed to open service manager\n");
-        return FALSE;
+        /* The service control manager is not reachable from this process
+         * session; start the RpcSs endpoints directly so that local COM
+         * server activation keeps working. */
+        return start_rpcss_direct();
     }
 
     if (!(service = OpenServiceW(scm, L"RpcSs", SERVICE_START | SERVICE_QUERY_STATUS)))
@@ -620,12 +682,14 @@ static HRESULT get_manifest_server_command( REFCLSID rclsid, WCHAR *command, DWO
 static HRESULT create_server(REFCLSID rclsid, HANDLE *process)
 {
     static const WCHAR  embeddingW[] = L" -Embedding";
+    static const WCHAR  processidW[] = L" /PROCESSID:";
+    static const WCHAR  clsidW[] = L" --clsid=";
     HKEY                key;
     int                 arch = (sizeof(void *) > sizeof(int)) ? 64 : 32;
     REGSAM              opposite = (arch == 64) ? KEY_WOW64_32KEY : KEY_WOW64_64KEY;
     BOOL                is_wow64 = FALSE, is_opposite = FALSE;
     HRESULT             hr;
-    WCHAR               command[MAX_PATH + ARRAY_SIZE(embeddingW)];
+    WCHAR               command[MAX_PATH + ARRAY_SIZE(embeddingW) + ARRAY_SIZE(processidW) + ARRAY_SIZE(clsidW) + 2 * CHARS_IN_GUID];
     DWORD               size = (MAX_PATH+1) * sizeof(WCHAR);
     STARTUPINFOW        sinfo;
     PROCESS_INFORMATION pinfo;
@@ -659,9 +723,16 @@ start:
     memset(&sinfo, 0, sizeof(sinfo));
     sinfo.cb = sizeof(sinfo);
 
-    /* EXE servers are started with the -Embedding switch. */
+    /* EXE servers are started with the -Embedding switch.  Windows also
+     * appends the activated CLSID as /PROCESSID:{GUID} so that servers
+     * registering their class objects themselves can pick it up.  Servers
+     * using the Chromium switch conventions expect --clsid={GUID}. */
 
     lstrcatW(command, embeddingW);
+    lstrcatW(command, processidW);
+    StringFromGUID2( rclsid, command + wcslen( command ), CHARS_IN_GUID );
+    lstrcatW(command, clsidW);
+    StringFromGUID2( rclsid, command + wcslen( command ), CHARS_IN_GUID );
 
     TRACE("activating local server %s for %s\n", debugstr_w(command), debugstr_guid(rclsid));
 
@@ -807,9 +878,12 @@ HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
         {
             if (SUCCEEDED(CoWaitForMultipleHandles(0, 1000, (process != 0), &process, &index)) && process && !index)
             {
-                WARN("Server for %s failed to start.\n", debugstr_guid(rclsid));
-                CloseHandle(process);
-                return E_NOINTERFACE;
+                /* The launched process may be a transient launcher that
+                 * hands the activation over to an already running instance
+                 * which registers the class object itself.  Keep polling
+                 * for the registration instead of failing right away. */
+                WARN("Server process for %s exited, keep waiting for registration.\n", debugstr_guid(rclsid));
+                break;
             }
         } while (GetTickCount() - start_ticks < 1000);
 

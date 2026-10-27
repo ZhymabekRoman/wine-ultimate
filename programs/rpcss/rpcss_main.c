@@ -252,7 +252,15 @@ static void WINAPI ServiceMain( DWORD argc, LPWSTR *argv )
     exit_event = CreateEventW( NULL, TRUE, FALSE, NULL );
 
     service_handle = RegisterServiceCtrlHandlerExW( rpcssW, service_handler, NULL );
-    if (!service_handle) return;
+    if (!service_handle)
+    {
+        /* Not running under the service control manager; serve the
+         * endpoints until the process is terminated. */
+        TRACE( "running without the service control manager\n" );
+        WaitForSingleObject( exit_event, INFINITE );
+        TRACE( "service stopped\n" );
+        return;
+    }
 
     status.dwServiceType             = SERVICE_WIN32;
     status.dwCurrentState            = SERVICE_RUNNING;
@@ -279,6 +287,12 @@ int __cdecl wmain( int argc, WCHAR *argv[] )
         { NULL, NULL }
     };
 
-    StartServiceCtrlDispatcherW( service_table );
+    if (!StartServiceCtrlDispatcherW( service_table ))
+    {
+        /* Not launched by the service control manager; run the service
+         * directly so that the IRpcSS endpoints are available even when
+         * the SCM cannot be reached. */
+        ServiceMain( 0, NULL );
+    }
     return 0;
 }

@@ -71,6 +71,7 @@
 #include <wine/list.h>
 #include <wine/asm.h>
 #include <wine/debug.h>
+#include <tlhelp32.h>
 
 #include <shlobj.h>
 #include <shobjidl.h>
@@ -1446,6 +1447,26 @@ static int ProcessWindowsFileProtection(void)
     return 1;
 }
 
+static BOOL services_process_running( const WCHAR *name )
+{
+    PROCESSENTRY32W entry = { .dwSize = sizeof(entry) };
+    BOOL found = FALSE;
+    HANDLE snapshot;
+
+    if ((snapshot = CreateToolhelp32Snapshot( TH32CS_SNAPPROCESS, 0 )) != INVALID_HANDLE_VALUE)
+    {
+        if (Process32FirstW( snapshot, &entry ))
+        {
+            do
+            {
+                if (!_wcsicmp( entry.szExeFile, name )) found = TRUE;
+            } while (!found && Process32NextW( snapshot, &entry ));
+        }
+        CloseHandle( snapshot );
+    }
+    return found;
+}
+
 static BOOL start_services_process(void)
 {
     static const WCHAR svcctl_started_event[] = SVCCTL_STARTED_EVENT;
@@ -1453,15 +1474,36 @@ static BOOL start_services_process(void)
     STARTUPINFOW si = { sizeof(si) };
     HANDLE wait_handles[2];
 
+    /* A running services.exe sets this event once its RPC server is listening.
+     * Start a new instance only when none is up; a second instance would take
+     * over the svcctl pipe endpoint from the first one and leave the service
+     * control manager unreachable for all clients. */
+    if ((wait_handles[0] = CreateEventW( NULL, TRUE, FALSE, svcctl_started_event )))
+    {
+        if (WaitForSingleObject( wait_handles[0], 0 ) == WAIT_OBJECT_0)
+        {
+            CloseHandle( wait_handles[0] );
+            return TRUE;
+        }
+    }
+
+    if (services_process_running( L"services.exe" ))
+    {
+        if (wait_handles[0]) CloseHandle( wait_handles[0] );
+        return TRUE;
+    }
+
     if (!CreateProcessW(L"C:\\windows\\system32\\services.exe", NULL,
                         NULL, NULL, TRUE, DETACHED_PROCESS, NULL, L"C:\\windows\\system32", &si, &pi))
     {
         WINE_ERR("Couldn't start services.exe: error %lu\n", GetLastError());
+        if (wait_handles[0]) CloseHandle( wait_handles[0] );
         return FALSE;
     }
     CloseHandle(pi.hThread);
 
-    wait_handles[0] = CreateEventW(NULL, TRUE, FALSE, svcctl_started_event);
+    if (!wait_handles[0])
+        wait_handles[0] = CreateEventW(NULL, TRUE, FALSE, svcctl_started_event);
     wait_handles[1] = pi.hProcess;
 
     /* wait for the event to become available or the process to exit */
