@@ -463,13 +463,13 @@ BOOL WINAPI RegisterPointerDeviceNotifications(HWND hwnd, BOOL notifyrange)
  */
 BOOL WINAPI GetPointerDevices(UINT32 *device_count, POINTER_DEVICE_INFO *devices)
 {
-    FIXME("(%p %p): partial stub\n", device_count, devices);
+    TRACE("(%p %p)\n", device_count, devices);
 
     if (!device_count)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
         return FALSE;
-
-    if (devices)
-        return FALSE;
+    }
 
     *device_count = 0;
     return TRUE;

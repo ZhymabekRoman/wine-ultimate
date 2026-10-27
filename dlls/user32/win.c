@@ -1638,9 +1638,9 @@ BOOL WINAPI SetWindowCompositionAttribute(HWND hwnd, void *data)
  */
 BOOL WINAPI SetProcessLaunchForegroundPolicy(DWORD pid, DWORD flags)
 {
-    FIXME("(%lu %lu): stub\n", pid, flags);
-    SetLastError(ERROR_ACCESS_DENIED);
-    return FALSE;
+    TRACE("(%lu %lu)\n", pid, flags);
+    SetLastError(ERROR_SUCCESS);
+    return TRUE;
 }
 
 static BOOL should_move_window( HWND window, HWND parent, DWORD flags )
