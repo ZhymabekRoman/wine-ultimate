@@ -38,6 +38,7 @@
 #include "handle.h"
 #include "thread.h"
 #include "request.h"
+#include "unicode.h"
 #include "security.h"
 #include "process.h"
 
@@ -591,6 +592,33 @@ static struct object *named_pipe_device_lookup_name( struct object *obj, struct 
 
     if ((found = find_object( device->pipes, name, attr | OBJ_CASE_INSENSITIVE )))
         name->len = 0;
+    else
+    {
+        static const WCHAR localW[] = {'L','O','C','A','L','\\'};
+        struct unicode_str alt_name;
+
+        /* Windows NPFS aliases \Device\NamedPipe\LOCAL\<name> to \Device\NamedPipe\<name>. */
+        if (name->len >= sizeof(localW) && !memicmp_strW( name->str, localW, sizeof(localW) ))
+        {
+            alt_name.str = name->str + 6;
+            alt_name.len = name->len - sizeof(localW);
+            if ((found = find_object( device->pipes, &alt_name, attr | OBJ_CASE_INSENSITIVE )))
+                name->len = 0;
+        }
+        else
+        {
+            WCHAR buf[256];
+            if (name->len / sizeof(WCHAR) + 6 < ARRAY_SIZE(buf))
+            {
+                memcpy( buf, localW, sizeof(localW) );
+                memcpy( buf + 6, name->str, name->len );
+                alt_name.str = buf;
+                alt_name.len = name->len + sizeof(localW);
+                if ((found = find_object( device->pipes, &alt_name, attr | OBJ_CASE_INSENSITIVE )))
+                    name->len = 0;
+            }
+        }
+    }
 
     return found;
 }
