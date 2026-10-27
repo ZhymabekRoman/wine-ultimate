@@ -791,6 +791,9 @@ HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
         if (SUCCEEDED(hr = rpcss_get_class_object(rclsid, &objref)))
             break;
 
+        if (hr == HRESULT_FROM_WIN32(RPC_S_SERVER_UNAVAILABLE))
+            return REGDB_E_CLASSNOTREG;
+
         if (tries == 1)
         {
             if ((hr = create_local_service(rclsid)) && (hr = create_server(rclsid, &process)) &&
