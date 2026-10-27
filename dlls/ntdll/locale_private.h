@@ -25,6 +25,24 @@
 #include "winbase.h"
 #include "winnls.h"
 
+/* SSE2 is used to widen runs of 7-bit ASCII bytes to UTF-16 in bulk. Enable the
+ * intrinsics only where they are guaranteed to be both available and legal for
+ * the translation unit: x86 targets that advertise __SSE2__ (always true for the
+ * x86_64 PE and Unix builds, i386 only when built with -msse2) and compilers that
+ * ship <emmintrin.h>. Everything else keeps the portable scalar code.
+ *
+ * Define NO_SSE2_UTF8 to compile the reference scalar code even on a host that
+ * supports SSE2; tools/bench_utf8_simd.c uses this to A/B the two implementations. */
+#if !defined(NO_SSE2_UTF8)
+# if (defined(__GNUC__) || defined(__clang__)) && (defined(__x86_64__) || defined(__i386__)) && defined(__SSE2__)
+#  include <emmintrin.h>
+#  define HAVE_SSE2_UTF8 1
+# elif defined(_MSC_VER) && (defined(_M_X64) || (defined(_M_IX86_FP) && _M_IX86_FP >= 2))
+#  include <emmintrin.h>
+#  define HAVE_SSE2_UTF8 1
+# endif
+#endif
+
 /* NLS codepage file format:
  *
  * header:
@@ -341,11 +359,25 @@ static inline NTSTATUS utf8_wcstombs_size( const WCHAR *src, unsigned int srclen
 
 static inline NTSTATUS utf8_mbstowcs_size( const char *src, unsigned int srclen, unsigned int *reslen )
 {
-    unsigned int res, len;
+    unsigned int res, len = 0;
     NTSTATUS status = STATUS_SUCCESS;
     const char *srcend = src + srclen;
 
-    for (len = 0; src < srcend; len++)
+#ifdef HAVE_SSE2_UTF8
+    while (srcend - src >= 16)
+    {
+        __m128i chunk = _mm_loadu_si128( (const __m128i *)src );
+        if (_mm_movemask_epi8( chunk ) == 0)
+        {
+            src += 16;
+            len += 16;
+            continue;
+        }
+        break;
+    }
+#endif
+
+    for (; src < srcend; len++)
     {
         unsigned char ch = *src++;
         if (ch < 0x80) continue;
@@ -426,6 +458,25 @@ static inline NTSTATUS utf8_mbstowcs( WCHAR *dst, unsigned int dstlen, unsigned 
     NTSTATUS status = STATUS_SUCCESS;
     const char *srcend = src + srclen;
     WCHAR *dstend = dst + dstlen;
+
+#ifdef HAVE_SSE2_UTF8
+    while ((srcend - src >= 16) && (dstend - dst >= 16))
+    {
+        __m128i chunk = _mm_loadu_si128( (const __m128i *)src );
+        if (_mm_movemask_epi8( chunk ) == 0)
+        {
+            __m128i zero = _mm_setzero_si128();
+            __m128i lo = _mm_unpacklo_epi8( chunk, zero );
+            __m128i hi = _mm_unpackhi_epi8( chunk, zero );
+            _mm_storeu_si128( (__m128i *)dst, lo );
+            _mm_storeu_si128( (__m128i *)(dst + 8), hi );
+            src += 16;
+            dst += 16;
+            continue;
+        }
+        break;
+    }
+#endif
 
     while ((dst < dstend) && (src < srcend))
     {
