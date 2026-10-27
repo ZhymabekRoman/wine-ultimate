@@ -37,7 +37,7 @@
 #include "winuser.h"
 #include "winternl.h"
 
-#define HASH_SIZE     37
+#define HASH_SIZE     257
 #define MIN_HASH_SIZE 4
 #define MAX_HASH_SIZE 0x200
 

@@ -76,7 +76,7 @@ static RTL_ATOM_TABLE_ENTRY *find_entry( RTL_ATOM_TABLE table, const WCHAR *name
 
     while (entry)
     {
-        if (!RtlCompareUnicodeStrings( entry->Name, entry->NameLength, name, len, TRUE )) break;
+        if (entry->NameLength == len && !RtlCompareUnicodeStrings( entry->Name, entry->NameLength, name, len, TRUE )) break;
         entry = entry->HashLink;
     }
     return entry;
