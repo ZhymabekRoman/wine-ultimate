@@ -357,7 +357,7 @@ static void shrink_handle_table( struct handle_table *table )
     table->entries = new_entries;
 }
 
-static void inherit_handle( struct process *parent, const obj_handle_t handle, struct handle_table *table )
+static void inherit_handle( struct process *parent, const obj_handle_t handle, struct handle_table *table, int force )
 {
     struct handle_entry *dst, *src;
     int index;
@@ -365,7 +365,8 @@ static void inherit_handle( struct process *parent, const obj_handle_t handle, s
     dst = table->entries;
 
     src = get_handle( parent, handle );
-    if (!src || !(src->access & RESERVED_INHERIT)) return;
+    if (!src) return;
+    if (!force && !(src->access & RESERVED_INHERIT)) return;
     index = handle_to_index( handle );
     if (dst[index].ptr) return;
     grab_object_for_handle( src->ptr );
@@ -395,12 +396,12 @@ struct handle_table *copy_handle_table( struct process *process, struct process 
 
         for (i = 0; i < handle_count; i++)
         {
-            inherit_handle( parent, handles[i], table );
+            inherit_handle( parent, handles[i], table, 1 );
         }
 
         for (i = 0; i < 3; i++)
         {
-            inherit_handle( parent, std_handles[i], table );
+            inherit_handle( parent, std_handles[i], table, 0 );
         }
     }
     else
