@@ -66,6 +66,17 @@ __ASM_GLOBAL_FUNC( fast_GetTickCount,
                    "movl 0x7ffe0320,%eax\n\t"
                    "ret" )
 
+extern ULONGLONG WINAPI fast_GetTickCount64(void);
+__ASM_GLOBAL_FUNC( fast_GetTickCount64,
+                   "1:\n\t"
+                   "movl 0x7ffe0324,%edx\n\t"
+                   "movl 0x7ffe0320,%eax\n\t"
+                   "cmpl 0x7ffe0328,%edx\n\t"
+                   "jne 1b\n\t"
+                   "shlq $32,%rdx\n\t"
+                   "orq %rdx,%rax\n\t"
+                   "ret" )
+
 extern void WINAPI fast_GetSystemTimeAsFileTime(void *time);
 __ASM_GLOBAL_FUNC( fast_GetSystemTimeAsFileTime,
                    "1:\n\t"
@@ -97,6 +108,48 @@ __ASM_GLOBAL_FUNC( fast_TlsGetValue,
                    "ret\n\t"
                    "2:\n\t"
                    "xorq %rax,%rax\n\t"
+                   "ret" )
+
+BOOL WINAPI slow_TlsSetValueExpansion( DWORD index, void *val )
+{
+    TEB *teb = NtCurrentTeb();
+    if (!teb->TlsExpansionSlots)
+    {
+        teb->TlsExpansionSlots = RtlAllocateHeap( teb->Peb->ProcessHeap, HEAP_ZERO_MEMORY, 1024 * sizeof(void *) );
+        if (!teb->TlsExpansionSlots)
+        {
+            teb->LastErrorValue = 14; /* ERROR_NOT_ENOUGH_MEMORY */
+            return FALSE;
+        }
+    }
+    teb->TlsExpansionSlots[index - 64] = val;
+    return TRUE;
+}
+
+extern BOOL WINAPI fast_TlsSetValue( DWORD index, void *val );
+__ASM_GLOBAL_FUNC( fast_TlsSetValue,
+                   "cmpl $64,%ecx\n\t"
+                   "jae 1f\n\t"
+                   "movl %ecx,%eax\n\t"
+                   "movq %rdx,%gs:0x1480(,%rax,8)\n\t"
+                   "movl $1,%eax\n\t"
+                   "ret\n\t"
+                   "1:\n\t"
+                   "cmpl $1088,%ecx\n\t"
+                   "jae 3f\n\t"
+                   "movq %gs:0x1780,%rax\n\t"
+                   "testq %rax,%rax\n\t"
+                   "jz 2f\n\t"
+                   "movl %ecx,%r8d\n\t"
+                   "subl $64,%r8d\n\t"
+                   "movq %rdx,(%rax,%r8,8)\n\t"
+                   "movl $1,%eax\n\t"
+                   "ret\n\t"
+                   "2:\n\t"
+                   "jmp slow_TlsSetValueExpansion\n\t"
+                   "3:\n\t"
+                   "movl $87,%gs:0x68\n\t"
+                   "xorl %eax,%eax\n\t"
                    "ret" )
 
 extern void WINAPI fast_EnterCriticalSection( RTL_CRITICAL_SECTION *crit );
@@ -171,11 +224,14 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0x5056df37u: if (!strcmp(func_name, "GetLastError")) return (ULONG_PTR)fast_GetLastError; break;
     case 0x86fe8652u: if (!strcmp(func_name, "GetProcessHeap")) return (ULONG_PTR)fast_GetProcessHeap; break;
     case 0x0f4d8b55u: if (!strcmp(func_name, "GetTickCount")) return (ULONG_PTR)fast_GetTickCount; break;
+    case 0x18017917u: if (!strcmp(func_name, "GetTickCount64")) return (ULONG_PTR)fast_GetTickCount64; break;
     case 0xee9d4374u: if (!strcmp(func_name, "GetSystemTimeAsFileTime")) return (ULONG_PTR)fast_GetSystemTimeAsFileTime; break;
     case 0xccd84087u: if (!strcmp(func_name, "TlsGetValue")) return (ULONG_PTR)fast_TlsGetValue; break;
+    case 0x7e0db2f3u: if (!strcmp(func_name, "TlsSetValue")) return (ULONG_PTR)fast_TlsSetValue; break;
     case 0x21ddcd8bu: if (!strcmp(func_name, "SetLastError")) return (ULONG_PTR)fast_SetLastError; break;
     case 0xb2524fccu: if (!strcmp(func_name, "RtlGetLastWin32Error")) return (ULONG_PTR)fast_GetLastError; break;
     case 0x9ebeaab8u: if (!strcmp(func_name, "RtlSetLastWin32Error")) return (ULONG_PTR)fast_SetLastError; break;
+    case 0xa343d69au: if (!strcmp(func_name, "RtlGetProcessHeap")) return (ULONG_PTR)fast_GetProcessHeap; break;
     case 0x3f30200bu: if (!strcmp(func_name, "NtCurrentTeb")) return (ULONG_PTR)fast_NtCurrentTeb; break;
     case 0xe91b4077u: if (!strcmp(func_name, "EnterCriticalSection")) return (ULONG_PTR)fast_EnterCriticalSection; break;
     case 0xc70dd340u: if (!strcmp(func_name, "LeaveCriticalSection")) return (ULONG_PTR)fast_LeaveCriticalSection; break;
