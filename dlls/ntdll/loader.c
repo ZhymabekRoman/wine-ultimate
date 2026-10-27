@@ -2208,10 +2208,7 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
                 {
                     if (!p_real_CreateWebViewEnvironmentWithOptionsInternal &&
                         !strcmp( name->Buffer, "CreateWebViewEnvironmentWithOptionsInternal" ))
-                    {
-                        DbgPrint( "PROBE: hooked CreateWebViewEnvironmentWithOptionsInternal! real=%p\n", proc );
                         p_real_CreateWebViewEnvironmentWithOptionsInternal = proc;
-                    }
                     proc = (void *)fast_tramp;
                 }
             }
