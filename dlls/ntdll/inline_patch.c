@@ -690,17 +690,18 @@ HRESULT WINAPI fast_CreateWebViewEnvironmentWithOptionsInternal( int a1, int a2,
         RtlInitUnicodeString( &u_eb, L"EmbeddedBrowserWebView.dll" );
         if (LdrGetDllHandle( NULL, 0, &u_eb, &hEb ) == STATUS_SUCCESS && hEb)
         {
-            /* Hook both slot 22 (0xb0 at 0x6c5228) and slot 23 (0xb8 at 0x6c5230) to resolve ABI discrepancy */
-            void **slot22 = (void **)((char *)hEb + 0x6c5228);
-            void **slot23 = (void **)((char *)hEb + 0x6c5230);
-            ULONG old_prot;
-            void *base = slot22;
-            SIZE_T size = 2 * sizeof(void *);
-            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, PAGE_EXECUTE_READWRITE, &old_prot );
-            *slot22 = (void *)hook_Profile_AddBrowserExtension;
-            *slot23 = (void *)hook_Profile_AddBrowserExtension;
-            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, old_prot, &old_prot );
-            ERR( "PROBE: successfully hooked EmbeddedBrowserWebViewProfile slots 22 and 23 at %p and %p!\n", slot22, slot23 );
+            void **slot = (void **)((char *)hEb + 0x6c5230);
+            if (*slot != (void *)hook_Profile_AddBrowserExtension)
+            {
+                ULONG old_prot;
+                void *base = slot;
+                SIZE_T size = sizeof(void *);
+                p_orig_Profile_AddBrowserExtension = (void *)*slot;
+                NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, PAGE_EXECUTE_READWRITE, &old_prot );
+                *slot = (void *)hook_Profile_AddBrowserExtension;
+                NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, old_prot, &old_prot );
+                ERR( "PROBE: successfully hooked EmbeddedBrowserWebViewProfile::AddBrowserExtension vtable slot at %p! orig=%p\n", slot, p_orig_Profile_AddBrowserExtension );
+            }
         }
     }
 
