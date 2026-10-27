@@ -108,9 +108,9 @@ static void stub_list_load( void )
             if (clsids)
             {
                 unsigned int n = stub_list.count;
-                for (p = data, j = 0; *p; p += wcslen( p ) + 1, j++)
+                for (p = data; *p; p += wcslen( p ) + 1)
                 {
-                    if (SUCCEEDED( CLSIDFromString( p, &clsids[n + j] ) ))
+                    if (SUCCEEDED( CLSIDFromString( p, &clsids[n] ) ))
                         n++;
                 }
                 stub_list.clsids = clsids;
