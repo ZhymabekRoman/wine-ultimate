@@ -20,6 +20,8 @@
 
 #ifdef __x86_64__
 
+#include <emmintrin.h>  /* SSE2 probe used by fast_RtlInitUnicodeString */
+
 extern void WINAPI fast_GetCurrentThreadId(void);
 __ASM_GLOBAL_FUNC( fast_GetCurrentThreadId,
                    "movl %gs:0x48,%eax\n\t"
@@ -204,6 +206,59 @@ __ASM_GLOBAL_FUNC( fast_IsProcessorFeaturePresent,
                    "xorl %eax,%eax\n\t"
                    "ret" )
 
+/* Fast inline IAT trampoline for RtlInitUnicodeString.
+ *
+ * RtlInitUnicodeString is one of the hottest calls made into ntdll: every
+ * UNICODE_STRING built by a builtin for an API call (directory, key and
+ * object names) runs the generic strlenW + field fill in rtlstr.c. The fast
+ * path here answers every string of up to 7 wide characters from a single
+ * unaligned 16-byte SSE2 probe: the terminator is located with
+ * _mm_cmpeq_epi16 against zero plus a movemask, so the byte length is the
+ * trailing-zero count of the mask (two mask bits per wide character).
+ *
+ * The 16-byte probe is only taken when it stays inside the caller's 4K page.
+ * A source string is not owned by us, and an unaligned load that reaches into
+ * the next page would fault when that page is unmapped (a string placed at
+ * the tail of a page by VirtualAlloc is a real case), so page-crossing probes
+ * go straight to the generic implementation.
+ *
+ * Everything the fast path writes is exactly what RtlInitUnicodeString
+ * writes: Buffer aliases the source, Length is the byte length without the
+ * terminator, MaximumLength adds the terminator. Longer strings (and
+ * page-crossing ones) tail-call the real implementation, which is ABI
+ * identical, so the trampoline is transparent to the caller.
+ */
+void WINAPI fast_RtlInitUnicodeString( PUNICODE_STRING target, PCWSTR source )
+{
+    if (!target) return;
+
+    if (!source)
+    {
+        target->Buffer = NULL;
+        target->Length = 0;
+        target->MaximumLength = 0;
+        return;
+    }
+
+    target->Buffer = (PWSTR)source;
+
+    if (((ULONG_PTR)source & 0xfff) <= 0xff0)  /* the 16-byte probe is page-contained */
+    {
+        __m128i chunk = _mm_loadu_si128( (const __m128i *)source );
+        int mask = _mm_movemask_epi8( _mm_cmpeq_epi16( chunk, _mm_setzero_si128() ));
+
+        if (mask)
+        {
+            USHORT len = (USHORT)__builtin_ctz( (unsigned int)mask );  /* bytes, no terminator */
+            target->Length = len;
+            target->MaximumLength = len + 2;  /* + terminating NUL */
+            return;
+        }
+    }
+
+    RtlInitUnicodeString( target, source );
+}
+
 static inline DWORD fnv1a_32( const char *str )
 {
     DWORD hash = 2166136261u;
@@ -265,6 +320,7 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0xc6be3f6fu: if (!strcmp(func_name, "RtlRunOnceExecuteOnce")) return (ULONG_PTR)fast_RtlRunOnceExecuteOnce; break;
     case 0x7aa3f32au: if (!strcmp(func_name, "IsProcessorFeaturePresent")) return (ULONG_PTR)fast_IsProcessorFeaturePresent; break;
     case 0xd1c44ba2u: if (!strcmp(func_name, "RtlIsProcessorFeaturePresent")) return (ULONG_PTR)fast_IsProcessorFeaturePresent; break;
+    case 0x3376500fu: if (!strcmp(func_name, "RtlInitUnicodeString")) return (ULONG_PTR)fast_RtlInitUnicodeString; break;
     }
 
     return 0;

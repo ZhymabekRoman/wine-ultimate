@@ -942,6 +942,47 @@ static NTSTATUS walk_node_dependencies( LDR_DDAG_NODE *node, void *context,
 }
 
 /*************************************************************************
+ *		forward L1 cache
+ *
+ * A 64-entry direct-mapped cache in front of the forwarded export resolution
+ * path. Resolving a forward (kernel32 -> kernelbase -> ntdll) the slow way
+ * costs a strrchr on the forward string, a module name build, a module list
+ * walk, an export directory parse and a binary search over thousands of
+ * names, and LdrGetProcedureAddress repeats all of that on every single call
+ * for the same forwarded name.
+ *
+ * The (module, forward) pointer pair is a stable key: the forward string is
+ * an ASCII string inside the export directory of 'module' itself (it is the
+ * string that find_ordinal_export() reads out of that export table), so both
+ * halves of the key live in the same image and die together with it. The
+ * strcmp() fallback therefore never dereferences a wild pointer: it is only
+ * reached when the key module matches, and 'module' is guaranteed to be
+ * mapped by the caller (find_ordinal_export() is reading its export table to
+ * produce 'forward'). Reloading an image at the same base address keeps those
+ * reads inside the mapped range, so at worst a slot compares unequal and the
+ * full resolution runs.
+ *
+ * Synchronization: every access happens with the loader_section lock held
+ * (find_forwarded_export() contract), so slot updates need no atomics. Only
+ * successful resolutions are cached; failures keep falling through to the
+ * full path, which reports the error the caller expects.
+ */
+struct forward_cache_entry
+{
+    HMODULE     module;   /* image that owns the forward string            */
+    const char *forward;  /* forward string inside that image's export dir */
+    FARPROC     proc;     /* resolved target (never NULL in a live slot)   */
+};
+
+#define FORWARD_L1_CACHE_SIZE 64
+static struct forward_cache_entry forward_l1_cache[FORWARD_L1_CACHE_SIZE];
+
+static inline UINT forward_l1_index( HMODULE module, const char *forward )
+{
+    return (UINT)((((ULONG_PTR)module >> 4) ^ ((ULONG_PTR)forward >> 3)) & (FORWARD_L1_CACHE_SIZE - 1));
+}
+
+/*************************************************************************
  *		find_forwarded_export
  *
  * Find the final function pointer for a forwarded function.
@@ -956,6 +997,17 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
     const char *end = strrchr(forward, '.');
     FARPROC proc = NULL;
     BOOL wm_loaded = FALSE;
+    const UINT idx = forward_l1_index( module, forward );
+
+    /* L1 hit: exact pointer identity of the (module, forward) key. */
+    if (forward_l1_cache[idx].module == module && forward_l1_cache[idx].forward == forward)
+        return forward_l1_cache[idx].proc;
+
+    /* L1 hit: same module, string-equal forward reached through a different
+       pointer (e.g. the same forward re-read from a re-parsed export dir). */
+    if (forward_l1_cache[idx].module == module && forward_l1_cache[idx].forward &&
+        !strcmp( forward_l1_cache[idx].forward, forward ))
+        return forward_l1_cache[idx].proc;
 
     if (!end) return NULL;
     if (build_import_name( importer, mod_name, forward, end - forward )) return NULL;
@@ -1007,6 +1059,14 @@ static FARPROC find_forwarded_export( HMODULE module, const char *forward, LPCWS
             " If you are using builtin %s, try using the native one instead.\n",
             forward, debugstr_w(get_modref(module)->ldr.FullDllName.Buffer),
             debugstr_w(get_modref(module)->ldr.BaseDllName.Buffer) );
+    }
+    else if (!TRACE_ON( relay ) && !TRACE_ON( snoop ))
+    {
+        /* Populate the L1 slot. The relay/snoop channels hand out per-importer
+         * wrapper pointers (RELAY_GetProcAddress / SNOOP_GetProcAddress) and
+         * the cache key carries no importer, so the slot stays empty while
+         * either channel is on and every lookup takes the full path. */
+        forward_l1_cache[idx] = (struct forward_cache_entry){ module, forward, proc };
     }
     return proc;
 }

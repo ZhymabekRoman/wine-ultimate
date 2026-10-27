@@ -35,6 +35,7 @@ enum fast_trampoline_id {
     FAST_TRAMP_LEAVE_CRITICAL_SECTION,
     FAST_TRAMP_RTL_RUN_ONCE_EXECUTE_ONCE,
     FAST_TRAMP_IS_PROCESSOR_FEATURE_PRESENT,
+    FAST_TRAMP_RTL_INIT_UNICODE_STRING,
     FAST_TRAMP_COUNT
 };
 
@@ -42,6 +43,14 @@ enum fast_trampoline_id {
    RtlIsProcessorFeaturePresent: direct KUSER_SHARED_DATA->ProcessorFeatures
    byte load (0x7ffe0274) with a bounds check against PROCESSOR_FEATURE_MAX. */
 extern BOOL WINAPI fast_IsProcessorFeaturePresent( DWORD feature );
+
+/* Native x86_64 inline implementation of RtlInitUnicodeString: a single
+   unaligned 16-byte SSE2 probe locates the terminator for strings of up to 7
+   wide characters (Buffer aliases the source, Length is the byte length,
+   MaximumLength adds the terminator). Page-crossing probes and longer strings
+   tail-call the generic RtlInitUnicodeString, so the trampoline is
+   semantically identical to the export it replaces. */
+extern void WINAPI fast_RtlInitUnicodeString( PUNICODE_STRING target, PCWSTR source );
 
 /* Fast IAT trampoline lookup */
 ULONG_PTR get_fast_iat_trampoline( const char *func_name );
