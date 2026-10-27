@@ -2076,6 +2076,36 @@ NTSTATUS WINAPI LdrUnlockLoaderLock( ULONG flags, ULONG_PTR magic )
 }
 
 
+/*
+ * L1 negative probe cache for LdrGetProcedureAddress.
+ *
+ * Applications (Chromium, .NET 8, WinUI 3) probe for optional/absent Windows
+ * APIs at startup; every miss costs a loader_section acquisition plus a PE
+ * export table binary search + strcmp scan before returning
+ * STATUS_PROCEDURE_NOT_FOUND. A small direct-mapped cache keyed on
+ * (module, name hash) short-circuits repeated probes for names that were
+ * already proven missing from a module's export table. Entries are only
+ * created after find_named_export() returns NULL, so a hit can never mask a
+ * real export: export sets are immutable while a module is mapped. All
+ * accesses happen under loader_section, so no extra synchronization is
+ * needed.
+ */
+struct neg_probe_cache_entry
+{
+    HMODULE module;
+    DWORD hash;
+};
+#define NEG_PROBE_CACHE_SIZE 64
+static struct neg_probe_cache_entry neg_probe_cache[NEG_PROBE_CACHE_SIZE];
+
+static inline DWORD hash_proc_name( const char *name )
+{
+    DWORD hash = 2166136261u;
+    while (*name) { hash ^= (BYTE)*name++; hash *= 16777619u; }
+    return hash;
+}
+
+
 /******************************************************************
  *		LdrGetProcedureAddress  (NTDLL.@)
  */
@@ -2084,7 +2114,9 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
 {
     IMAGE_EXPORT_DIRECTORY *exports;
     WINE_MODREF *wm;
-    DWORD exp_size;
+    DWORD exp_size, name_hash = 0;
+    unsigned int cache_idx = 0;
+    BOOL cache_valid = FALSE;
     NTSTATUS ret = STATUS_PROCEDURE_NOT_FOUND;
 
     RtlEnterCriticalSection( &loader_section );
@@ -2094,6 +2126,16 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
     else if ((exports = RtlImageDirectoryEntryToData( module, TRUE,
                                                       IMAGE_DIRECTORY_ENTRY_EXPORT, &exp_size )))
     {
+        if (name && name->Buffer)
+        {
+            name_hash = hash_proc_name( name->Buffer ) ^ (DWORD)(ULONG_PTR)module;
+            cache_idx = name_hash & (NEG_PROBE_CACHE_SIZE - 1);
+            if (neg_probe_cache[cache_idx].module == module &&
+                neg_probe_cache[cache_idx].hash == name_hash)
+                goto done; /* negative cache hit: export was already proven missing */
+            cache_valid = TRUE;
+        }
+
         void *proc = name ? find_named_export( module, exports, exp_size, name->Buffer, -1, NULL, wm, TRUE )
                           : find_ordinal_export( module, exports, exp_size, ord - exports->Base, NULL, wm, TRUE );
         if (proc)
@@ -2112,9 +2154,15 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
         {
             WARN( "%s (ordinal %lu) not found in %s\n", debugstr_a(name ? name->Buffer : NULL),
                   ord, debugstr_us(&wm->ldr.FullDllName) );
+            if (cache_valid) /* name lookup failed: record the negative result */
+            {
+                neg_probe_cache[cache_idx].module = module;
+                neg_probe_cache[cache_idx].hash = name_hash;
+            }
         }
     }
 
+done:
     RtlLeaveCriticalSection( &loader_section );
     return ret;
 }
