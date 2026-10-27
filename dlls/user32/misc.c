@@ -22,6 +22,7 @@
  */
 
 #include <stdarg.h>
+#include <string.h>
 
 #include "windef.h"
 #include "wine/windef16.h"
@@ -526,10 +527,21 @@ BOOL WINAPI GetPointerType(UINT32 id, POINTER_INPUT_TYPE *type)
 
 BOOL WINAPI GetPointerInfo(UINT32 id, POINTER_INFO *info)
 {
-    FIXME("(%d %p): stub\n", id, info);
+    TRACE("(%d %p)\n", id, info);
 
-    SetLastError(ERROR_INVALID_PARAMETER);
-    return FALSE;
+    if (!info)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
+    memset(info, 0, sizeof(*info));
+    info->pointerType = PT_MOUSE;
+    info->pointerId = id;
+    info->pointerFlags = POINTER_FLAG_INRANGE | POINTER_FLAG_INCONTACT | POINTER_FLAG_PRIMARY;
+    GetCursorPos(&info->ptPixelLocation);
+    info->ptHimetricLocation = info->ptPixelLocation;
+    return TRUE;
 }
 
 LRESULT WINAPI ImeWndProcA( HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam )
