@@ -84,15 +84,20 @@ int main(int argc, char **argv)
     /* 3. Timers & KUSER_SHARED_DATA Verification                    */
     /* ------------------------------------------------------------- */
     tick1 = GetTickCount();
+    ULONGLONG tick64_1 = GetTickCount64();
     GetSystemTimeAsFileTime(&ft1);
     Sleep(10);
     tick2 = GetTickCount();
+    ULONGLONG tick64_2 = GetTickCount64();
     GetSystemTimeAsFileTime(&ft2);
 
     uint64_t ns_elapsed = (*((uint64_t *)&ft2) - *((uint64_t *)&ft1)) * 100;
     printf("\n[3] Timers & KUSER_SHARED_DATA:\n");
     printf("    GetTickCount() progression: %lu -> %lu (delta %lu ms): %s\n",
            tick1, tick2, tick2 - tick1, (tick2 >= tick1) ? "PASS" : "FAIL");
+    printf("    GetTickCount64() progression: %llu -> %llu (delta %llu ms): %s\n",
+           (unsigned long long)tick64_1, (unsigned long long)tick64_2,
+           (unsigned long long)(tick64_2 - tick64_1), (tick64_2 >= tick64_1) ? "PASS" : "FAIL");
     printf("    GetSystemTimeAsFileTime() delta: %llu ns (~%llu ms): PASS\n",
            (unsigned long long)ns_elapsed, (unsigned long long)(ns_elapsed / 1000000));
 
@@ -100,11 +105,12 @@ int main(int argc, char **argv)
     /* 4. TLS Slot Inlining                                          */
     /* ------------------------------------------------------------- */
     tls_idx = TlsAlloc();
-    TlsSetValue(tls_idx, (void *)0x1234ABCD);
+    BOOL set_ok = TlsSetValue(tls_idx, (void *)0x1234ABCD);
     void *tls_got = TlsGetValue(tls_idx);
     printf("\n[4] TLS Slot Inlining:\n");
-    printf("    Slot %lu: set 0x1234ABCD, got %p: %s\n",
-           (unsigned long)tls_idx, tls_got, (tls_got == (void *)0x1234ABCD) ? "PASS" : "FAIL");
+    printf("    Slot %lu: set 0x1234ABCD (ok=%d), got %p: %s\n",
+           (unsigned long)tls_idx, set_ok, tls_got,
+           (set_ok && tls_got == (void *)0x1234ABCD) ? "PASS" : "FAIL");
     TlsFree(tls_idx);
 
     /* ------------------------------------------------------------- */
