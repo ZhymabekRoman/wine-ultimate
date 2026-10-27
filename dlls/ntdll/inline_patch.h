@@ -92,9 +92,6 @@ extern DWORD WINAPI fast_GetActiveProcessorCount( WORD group );
 extern BOOLEAN WINAPI fast_RtlEqualUnicodeString( const UNICODE_STRING *s1, const UNICODE_STRING *s2,
                                                   BOOLEAN case_in_sensitive );
 
-extern void *p_real_CreateWebViewEnvironmentWithOptionsInternal;
-extern HRESULT WINAPI fast_CreateWebViewEnvironmentWithOptionsInternal( int a1, int a2, const WCHAR *a3, void *options, void *handler, void *arg6, void *arg7, void *arg8 );
-
 /* Fast IAT trampoline lookup */
 ULONG_PTR get_fast_iat_trampoline( const char *func_name );
 

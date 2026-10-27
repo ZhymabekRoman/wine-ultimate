@@ -532,82 +532,9 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0x3a2f5799u: if (!strcmp(func_name, "GetVersion")) return (ULONG_PTR)fast_GetVersion; break;
     case 0x647a8efau: if (!strcmp(func_name, "GetActiveProcessorCount")) return (ULONG_PTR)fast_GetActiveProcessorCount; break;
     case 0x8af4c873u: if (!strcmp(func_name, "RtlEqualUnicodeString")) return (ULONG_PTR)fast_RtlEqualUnicodeString; break;
-    case 0x1e57d724u: if (!strcmp(func_name, "CreateWebViewEnvironmentWithOptionsInternal")) return (ULONG_PTR)fast_CreateWebViewEnvironmentWithOptionsInternal; break;
     }
 
     return 0;
-}
-
-void *p_real_CreateWebViewEnvironmentWithOptionsInternal = NULL;
-
-struct wine_wv2_options_proxy
-{
-    void **lpVtbl;
-    void *orig_options;
-    LONG refcount;
-};
-
-static HRESULT WINAPI wine_wv2_options_QueryInterface( void *iface, const GUID *riid, void **ppv )
-{
-    struct wine_wv2_options_proxy *this = (struct wine_wv2_options_proxy *)iface;
-    static const GUID iid_options6 = {0x57d29cc3, 0xc84f, 0x42a0, {0xb0, 0xe2, 0xef, 0xfb, 0xd5, 0xe1, 0x79, 0xde}};
-    HRESULT (WINAPI *orig_QI)( void *, const GUID *, void ** );
-
-    if (!ppv) return 0x80070057; /* E_INVALIDARG */
-    *ppv = NULL;
-
-    /* Mask ICoreWebView2EnvironmentOptions6 so WebView2 disables the browser extension Mojo path */
-    if (!memcmp( riid, &iid_options6, sizeof(GUID) ))
-        return 0x80004002; /* E_NOINTERFACE */
-
-    if (!this->orig_options) return 0x80004002;
-    orig_QI = *(void ***)this->orig_options ? (HRESULT (WINAPI *)(void *, const GUID *, void **))(**(void ****)this->orig_options) : NULL;
-    if (!orig_QI) return 0x80004002;
-    return orig_QI( this->orig_options, riid, ppv );
-}
-
-static ULONG WINAPI wine_wv2_options_AddRef( void *iface )
-{
-    struct wine_wv2_options_proxy *this = (struct wine_wv2_options_proxy *)iface;
-    return InterlockedIncrement( &this->refcount );
-}
-
-static ULONG WINAPI wine_wv2_options_Release( void *iface )
-{
-    struct wine_wv2_options_proxy *this = (struct wine_wv2_options_proxy *)iface;
-    ULONG ref = InterlockedDecrement( &this->refcount );
-    if (!ref) RtlFreeHeap( NtCurrentTeb()->Peb->ProcessHeap, 0, this );
-    return ref;
-}
-
-static void *wine_wv2_options_vtbl[] =
-{
-    wine_wv2_options_QueryInterface,
-    wine_wv2_options_AddRef,
-    wine_wv2_options_Release
-};
-
-HRESULT WINAPI fast_CreateWebViewEnvironmentWithOptionsInternal( int a1, int a2, const WCHAR *a3, void *options, void *handler, void *arg6, void *arg7, void *arg8 )
-{
-    HRESULT (WINAPI *p_real)(int, int, const WCHAR *, void *, void *, void *, void *, void *) = p_real_CreateWebViewEnvironmentWithOptionsInternal;
-    void *wrapped_options = options;
-
-    if (options)
-    {
-        struct wine_wv2_options_proxy *proxy = RtlAllocateHeap( NtCurrentTeb()->Peb->ProcessHeap, 0, sizeof(*proxy) );
-        if (proxy)
-        {
-            proxy->lpVtbl = wine_wv2_options_vtbl;
-            proxy->orig_options = options;
-            proxy->refcount = 1;
-            wrapped_options = proxy;
-        }
-    }
-
-    if (p_real)
-        return p_real( a1, a2, a3, wrapped_options, handler, arg6, arg7, arg8 );
-
-    return 0x80004005; /* E_FAIL */
 }
 
 BOOL is_module_eligible_for_inline_patch( const WCHAR *module_name, void *base )
