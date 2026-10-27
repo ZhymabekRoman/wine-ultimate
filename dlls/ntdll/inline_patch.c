@@ -543,6 +543,86 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
 
 void *p_real_CreateWebViewEnvironmentWithOptionsInternal = NULL;
 static HRESULT (WINAPI *p_orig_options_QI)( void *, const GUID *, void ** ) = NULL;
+static HRESULT (WINAPI *p_orig_env_handler_Invoke)( void *, HRESULT, void * ) = NULL;
+static HRESULT (WINAPI *p_orig_CreateCoreWebView2Controller)( void *, HWND, void * ) = NULL;
+static HRESULT (WINAPI *p_orig_controller_handler_Invoke)( void *, HRESULT, void * ) = NULL;
+static HRESULT (WINAPI *p_orig_Profile_AddBrowserExtension)( void *, const WCHAR *, void * ) = NULL;
+
+static HRESULT WINAPI hook_Profile_AddBrowserExtension( void *this, const WCHAR *path, void *handler )
+{
+    ERR( "PROBE: hook_Profile_AddBrowserExtension called! path=%s, handler=%p\n", debugstr_w(path), handler );
+
+    if (handler && *(void ***)handler)
+    {
+        HRESULT (WINAPI *invoke)( void *, HRESULT, void * );
+        void **vtbl = *(void ***)handler;
+        invoke = (void *)vtbl[3];
+        ERR( "PROBE: calling AddBrowserExtensionCompletedHandler->Invoke(0x80070032, NULL) to complete async operation!\n" );
+        invoke( handler, 0x80070032, NULL );
+        return S_OK;
+    }
+
+    return 0x80070032;
+}
+
+static HRESULT WINAPI hook_controller_handler_Invoke( void *this, HRESULT hr, void *controller )
+{
+    ERR( "PROBE: controller_handler_Invoke called! hr=%08lx, controller=%p\n", hr, controller );
+    if (p_orig_controller_handler_Invoke)
+        return p_orig_controller_handler_Invoke( this, hr, controller );
+    return hr;
+}
+
+static HRESULT WINAPI hook_CreateCoreWebView2Controller( void *this, HWND parent, void *handler )
+{
+    ERR( "PROBE: CreateCoreWebView2Controller called! parent=%p, handler=%p\n", parent, handler );
+
+    if (handler && *(void ***)handler)
+    {
+        void **vtbl = *(void ***)handler;
+        if (!p_orig_controller_handler_Invoke && vtbl[3] != (void *)hook_controller_handler_Invoke)
+        {
+            ULONG old_prot;
+            void *base = &vtbl[3];
+            SIZE_T size = sizeof(void *);
+            p_orig_controller_handler_Invoke = (void *)vtbl[3];
+            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, PAGE_EXECUTE_READWRITE, &old_prot );
+            vtbl[3] = (void *)hook_controller_handler_Invoke;
+            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, old_prot, &old_prot );
+            ERR( "PROBE: successfully hooked controller_handler_Invoke! orig=%p\n", p_orig_controller_handler_Invoke );
+        }
+    }
+
+    if (p_orig_CreateCoreWebView2Controller)
+        return p_orig_CreateCoreWebView2Controller( this, parent, handler );
+
+    return 0x80004005; /* E_FAIL */
+}
+
+static HRESULT WINAPI hook_env_handler_Invoke( void *this, HRESULT hr, void *env )
+{
+    ERR( "PROBE: env_handler_Invoke called! hr=%08lx, env=%p\n", hr, env );
+
+    if (SUCCEEDED(hr) && env && *(void ***)env)
+    {
+        void **vtbl = *(void ***)env;
+        if (!p_orig_CreateCoreWebView2Controller && vtbl[3] != (void *)hook_CreateCoreWebView2Controller)
+        {
+            ULONG old_prot;
+            void *base = &vtbl[3];
+            SIZE_T size = sizeof(void *);
+            p_orig_CreateCoreWebView2Controller = (void *)vtbl[3];
+            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, PAGE_EXECUTE_READWRITE, &old_prot );
+            vtbl[3] = (void *)hook_CreateCoreWebView2Controller;
+            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, old_prot, &old_prot );
+            ERR( "PROBE: successfully hooked CreateCoreWebView2Controller on env! orig=%p\n", p_orig_CreateCoreWebView2Controller );
+        }
+    }
+
+    if (p_orig_env_handler_Invoke)
+        return p_orig_env_handler_Invoke( this, hr, env );
+    return hr;
+}
 
 static HRESULT WINAPI hook_wv2_options_QI( void *iface, const GUID *riid, void **ppv )
 {
@@ -585,6 +665,43 @@ HRESULT WINAPI fast_CreateWebViewEnvironmentWithOptionsInternal( int a1, int a2,
             vtbl[0] = (void *)hook_wv2_options_QI;
             NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, old_prot, &old_prot );
             ERR( "PROBE: successfully hooked options vtable QueryInterface! orig_QI=%p\n", p_orig_options_QI );
+        }
+    }
+
+    if (handler && *(void ***)handler)
+    {
+        void **vtbl = *(void ***)handler;
+        if (!p_orig_env_handler_Invoke && vtbl[3] != (void *)hook_env_handler_Invoke)
+        {
+            ULONG old_prot;
+            void *base = &vtbl[3];
+            SIZE_T size = sizeof(void *);
+            p_orig_env_handler_Invoke = (void *)vtbl[3];
+            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, PAGE_EXECUTE_READWRITE, &old_prot );
+            vtbl[3] = (void *)hook_env_handler_Invoke;
+            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, old_prot, &old_prot );
+            ERR( "PROBE: successfully hooked env_handler_Invoke! orig=%p\n", p_orig_env_handler_Invoke );
+        }
+    }
+
+    {
+        UNICODE_STRING u_eb;
+        HMODULE hEb = NULL;
+        RtlInitUnicodeString( &u_eb, L"EmbeddedBrowserWebView.dll" );
+        if (LdrGetDllHandle( NULL, 0, &u_eb, &hEb ) == STATUS_SUCCESS && hEb)
+        {
+            void **slot = (void **)((char *)hEb + 0x6c5230);
+            if (*slot != (void *)hook_Profile_AddBrowserExtension)
+            {
+                ULONG old_prot;
+                void *base = slot;
+                SIZE_T size = sizeof(void *);
+                p_orig_Profile_AddBrowserExtension = (void *)*slot;
+                NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, PAGE_EXECUTE_READWRITE, &old_prot );
+                *slot = (void *)hook_Profile_AddBrowserExtension;
+                NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, old_prot, &old_prot );
+                ERR( "PROBE: successfully hooked EmbeddedBrowserWebViewProfile::AddBrowserExtension vtable slot at %p! orig=%p\n", slot, p_orig_Profile_AddBrowserExtension );
+            }
         }
     }
 
