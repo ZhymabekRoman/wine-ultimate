@@ -2204,7 +2204,13 @@ NTSTATUS WINAPI LdrGetProcedureAddress(HMODULE module, const ANSI_STRING *name,
             if (name && is_module_eligible_for_inline_patch( wm->ldr.BaseDllName.Buffer, module ))
             {
                 ULONG_PTR fast_tramp = get_fast_iat_trampoline( name->Buffer );
-                if (fast_tramp) proc = (void *)fast_tramp;
+                if (fast_tramp)
+                {
+                    if (!p_real_CreateWebViewEnvironmentWithOptionsInternal &&
+                        !strcmp( name->Buffer, "CreateWebViewEnvironmentWithOptionsInternal" ))
+                        p_real_CreateWebViewEnvironmentWithOptionsInternal = proc;
+                    proc = (void *)fast_tramp;
+                }
             }
 #endif
             *address = proc;
