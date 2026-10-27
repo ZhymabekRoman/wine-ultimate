@@ -4241,3 +4241,63 @@ Chromium state machine is holding the callback. Separately, the `gpu-process` `/
 `msedge.dll+0x487d2a3` is still worth fixing for signal clarity: the frames under it are
 `wined3d+0x815c0`, `wined3d+0x266300`, `dxgi+0x6dc0`, `gdi32+0x51700`, i.e. a Wine `Get*/Read*`
 that writes past the caller's length, most likely a size-probing DXGI/GDI call.
+
+## Session 2026-10-27(l) - completion sync stale-signal spin fixed (wine tip `8d1fb1dc9`, branch `ultimate`); the Add request is proven never written client-side, and the repro answers it in 2 ms on the same build
+
+**What is fixed.** `server/completion.c` (commit `8d1fb1dc9`): the deferred
+`remove_completion` protocol parks its second response on the completion's sync
+object; `add_completion()` signals that object while the queue is non-empty.
+A packet consumed through the wake path (`completion_wait_satisfied` +
+`get_thread_completion`) empties the queue without clearing the signal, so
+every later arm completes against the stale signal and the pump thread spins at
+server round-trip rate. A request-count probe measured the spin: three pump
+threads of the app returned ~29.5M/29.0M/14.1M PENDING `remove_completion`
+replies in one 100 s window (~200k/s each) - the completion-port twin of the
+wake-packet re-arm spin closed in `a55a58cf3`. Arm now clears the stale signal
+when the queue is empty. The spin as measured in the app is fed by coreclr
+thread-pump threads that self-wake through the in-kernel ntsync path (~200k/s,
+intermittent: other runs show <50k completions total); the fix removes the
+completion-port leg of that loop and is parity-neutral everywhere else.
+
+**The wall, re-proven client-side with wire probes.** `server/named_pipe.c`
+probes (send/queue/deliver, payload heads, pids, pipe names) over full gates:
+- The app<->browser channel is `\\pipe\\LOCAL\\mojo.<pid>.<id>.<nonce>`; every
+  pre-Add exchange is a clean ping-pong and the browser answers ALL requests.
+- In the working repro (`extrepro.sh`, same build, same SDK 1.0.3485.44, same
+  browser 156.0.4314.42) the wire shows, after the init burst, **15 x 192-byte
+  interface-bind requests (ids 07-15)** and the Add as a **112-byte request
+  (name 0x14) carrying the 78-byte extension path**, answered by the browser
+  ~2 ms later (`BEFORE-ADD` 5691 ms -> `AFTER-ADD-OK` 5693 ms, then
+  `SOURCE-CHANGED https://web.whatsapp.com/`).
+- In the app the 192-byte bind burst and the path-carrying request are **absent
+  from the wire entirely** (host sends only the init burst + one-way events);
+  the browser family is alive and idle (gdb census: CrBrowserMain on ntsync,
+  Chrome_IOThread on a deferred read), the host's pump threads are parked in
+  normal idle, and no server request from the app is swallowed
+  (`wineserver -d 1` + PENDING scan: only a benign `remove_completion` at end).
+  The `AddBrowserExtensionAsync` await therefore parks in the host's own SDK
+  task dispatch (the BindProfile/Add tasks are never delivered to the mojo IO
+  thread's write path), not in the transport, not in the browser, not in ALPC.
+
+**ALPC innocence re-measured.** With `server/alpc.c` send/deliver/read-arm
+probes over 100 s gates: every ALPC message is intra-process (0020->0020,
+CoreMessaging self-hosted registrar conversation), zero `alpc:err/fixme/warn`,
+94 probe events per run - the "ALPC relay" reading is dead at this tip.
+
+**Numbers.** Gate 160 (fixclean): wins 167, xamlwin 1, rendwin 2, fatal 0,
+RaiseFailFastException 0, 4 gpu-process crashpad dumps, screenshot blank as
+baseline. Battery 8/8 `ALIVE_60s` fatal=0 (wins 140, one run 171). Suites at
+byte-parity with baseline: ntdll file 2940/14f/2sk, pipe 2378/9f, sync 429/5f.
+No new wineserver cores. App binaries pristine 4/4
+(CoreMessagingXP/Microsoft.ui.xaml/dwmcorei/FrameworkUdk == *.orig).
+
+**Next gap.** The app-side SDK never hands the BindProfile/AddBrowserExtension
+write to the mojo IO thread. The repro proves the SDK+runtime pair functions;
+the delta is the WinUI (Microsoft.UI.dll XAML WebView2) hosting context. Next
+step: instrument the host-side boundary - `EmbeddedBrowserWebView.dll` COM
+call arrival vs the `MojoThread` task-wake path (the census shows MojoThread
+parked in a deferred `wait` while the churn threads spin), i.e. trace the
+`base::TaskRunner::PostTask` wake of the SDK IO thread (wake-packet assoc and
+the in-kernel ntsync target signal handoff) for the pump that owns the mojo
+writing sequence.
+
