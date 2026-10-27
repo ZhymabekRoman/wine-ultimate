@@ -358,10 +358,10 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         0,    /* TokenCapabilities */
         sizeof(TOKEN_APPCONTAINER_INFORMATION) + sizeof(SID), /* TokenAppContainerSid */
         0,    /* TokenAppContainerNumber */
-        0,    /* TokenUserClaimAttributes*/
-        0,    /* TokenDeviceClaimAttributes */
-        0,    /* TokenRestrictedUserClaimAttributes */
-        0,    /* TokenRestrictedDeviceClaimAttributes */
+        sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenUserClaimAttributes */
+        sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenDeviceClaimAttributes */
+        sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenRestrictedUserClaimAttributes */
+        sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenRestrictedDeviceClaimAttributes */
         0,    /* TokenDeviceGroups */
         0,    /* TokenRestrictedDeviceGroups */
         sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenSecurityAttributes */
@@ -732,6 +732,10 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         break;
     }
 
+    case TokenUserClaimAttributes:
+    case TokenDeviceClaimAttributes:
+    case TokenRestrictedUserClaimAttributes:
+    case TokenRestrictedDeviceClaimAttributes:
     case TokenSecurityAttributes:
     {
         TOKEN_SECURITY_ATTRIBUTES_INFORMATION *attrs = info;
@@ -742,6 +746,7 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         attrs->Reserved = 0;
         attrs->AttributeCount = 0;
         attrs->AttributeList.pAttributeListV1 = NULL;
+        status = STATUS_SUCCESS;
         break;
     }
 
