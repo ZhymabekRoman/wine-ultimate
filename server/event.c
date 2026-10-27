@@ -412,13 +412,34 @@ DECL_HANDLER(open_event)
 /* do an event operation */
 DECL_HANDLER(event_op)
 {
-    struct event_sync *sync;
     struct event *event;
 
     if (!(event = get_event_obj( current->process, req->handle, EVENT_MODIFY_STATE ))) return;
-    assert( event->sync->ops == &event_sync_ops ); /* never called with inproc syncs */
-    sync = (struct event_sync *)event->sync;
 
+    if (event->sync->ops != &event_sync_ops)
+    {
+        reply->state = 0;
+        switch (req->op)
+        {
+        case PULSE_EVENT:
+            set_event( event );
+            reset_event( event );
+            break;
+        case SET_EVENT:
+            set_event( event );
+            break;
+        case RESET_EVENT:
+            reset_event( event );
+            break;
+        default:
+            set_error( STATUS_INVALID_PARAMETER );
+            break;
+        }
+        release_object( event );
+        return;
+    }
+
+    struct event_sync *sync = (struct event_sync *)event->sync;
     reply->state = sync->signaled;
     switch(req->op)
     {
