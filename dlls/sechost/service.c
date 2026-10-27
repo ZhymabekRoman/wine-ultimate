@@ -2043,6 +2043,7 @@ static DWORD WINAPI device_notify_proc( void *arg )
     struct list events = LIST_INIT(events);
     plugplay_rpc_handle handle = NULL;
     DWORD code = 0;
+    unsigned int retry;
     unsigned int size;
     WCHAR *path;
     BYTE *buf;
@@ -2062,15 +2063,23 @@ static DWORD WINAPI device_notify_proc( void *arg )
         return err;
     }
 
-    __TRY
+    /* the plugplay service may still be starting up, retry the connection for a while */
+    for (retry = 0; retry < 10; retry++)
     {
-        handle = plugplay_register_listener();
+        __TRY
+        {
+            handle = plugplay_register_listener();
+            err = ERROR_SUCCESS;
+        }
+        __EXCEPT(rpc_filter)
+        {
+            err = map_exception_code( GetExceptionCode() );
+        }
+        __ENDTRY
+
+        if (handle) break;
+        Sleep( 100 );
     }
-    __EXCEPT(rpc_filter)
-    {
-        err = map_exception_code( GetExceptionCode() );
-    }
-    __ENDTRY
 
     if (!handle)
     {

@@ -454,7 +454,7 @@ BOOL WINAPI IsWindowRedirectedForPrint( HWND hwnd )
  */
 BOOL WINAPI RegisterPointerDeviceNotifications(HWND hwnd, BOOL notifyrange)
 {
-    FIXME("(%p %d): stub\n", hwnd, notifyrange);
+    TRACE("(%p %d)\n", hwnd, notifyrange);
     return TRUE;
 }
 

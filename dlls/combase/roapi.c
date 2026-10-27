@@ -282,6 +282,13 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     if (FAILED(hr = ensure_mta()))
         return hr;
 
+    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"Windows.System.UserProfile.DiagnosticsSettings") ||
+        !wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"Windows.System.Profile.PlatformDiagnosticsAndUsageDataSettings"))
+    {
+        TRACE("No activation factory for %s\n", debugstr_hstring(classid));
+        return REGDB_E_CLASSNOTREG;
+    }
+
     hr = get_library_for_classid(WindowsGetStringRawBuffer(classid, NULL), &library);
     if (FAILED(hr))
     {
