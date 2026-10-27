@@ -3427,7 +3427,7 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
 
     do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
-    while (ret == count - 1 && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
+    while (ret == count - 1 && check_internal_bits( QS_DRIVER ) && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
 
     if (HIWORD(ret)) /* is it an error code? */
     {
