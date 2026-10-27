@@ -592,6 +592,8 @@ HRESULT WINAPI fast_CreateWebViewEnvironmentWithOptionsInternal( int a1, int a2,
     HRESULT (WINAPI *p_real)(int, int, const WCHAR *, void *, void *, void *, void *, void *) = p_real_CreateWebViewEnvironmentWithOptionsInternal;
     void *wrapped_options = options;
 
+    DbgPrint( "PROBE: fast_CreateWebViewEnvironmentWithOptionsInternal called! options=%p, handler=%p\n", options, handler );
+
     if (options)
     {
         struct wine_wv2_options_proxy *proxy = RtlAllocateHeap( NtCurrentTeb()->Peb->ProcessHeap, 0, sizeof(*proxy) );
