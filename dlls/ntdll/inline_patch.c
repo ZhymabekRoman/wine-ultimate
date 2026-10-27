@@ -179,6 +179,21 @@ __ASM_GLOBAL_FUNC( fast_LeaveCriticalSection,
                    "1:\n\t"
                    "jmp RtlLeaveCriticalSection" )
 
+extern DWORD WINAPI fast_RtlRunOnceExecuteOnce( RTL_RUN_ONCE *once, PRTL_RUN_ONCE_INIT_FN func, void *param, void **context );
+__ASM_GLOBAL_FUNC( fast_RtlRunOnceExecuteOnce,
+                   "movq (%rcx),%rax\n\t"
+                   "testb $2,%al\n\t"
+                   "jz 1f\n\t"
+                   "testq %r9,%r9\n\t"
+                   "jz 2f\n\t"
+                   "andq $-4,%rax\n\t"
+                   "movq %rax,(%r9)\n\t"
+                   "2:\n\t"
+                   "xorl %eax,%eax\n\t"
+                   "ret\n\t"
+                   "1:\n\t"
+                   "jmp RtlRunOnceExecuteOnce" )
+
 static inline DWORD fnv1a_32( const char *str )
 {
     DWORD hash = 2166136261u;
@@ -237,6 +252,7 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0xc70dd340u: if (!strcmp(func_name, "LeaveCriticalSection")) return (ULONG_PTR)fast_LeaveCriticalSection; break;
     case 0x97c0ce0fu: if (!strcmp(func_name, "RtlEnterCriticalSection")) return (ULONG_PTR)fast_EnterCriticalSection; break;
     case 0xaf2a3c58u: if (!strcmp(func_name, "RtlLeaveCriticalSection")) return (ULONG_PTR)fast_LeaveCriticalSection; break;
+    case 0xc6be3f6fu: if (!strcmp(func_name, "RtlRunOnceExecuteOnce")) return (ULONG_PTR)fast_RtlRunOnceExecuteOnce; break;
     }
 
     return 0;
