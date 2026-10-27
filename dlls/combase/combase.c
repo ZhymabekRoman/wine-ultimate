@@ -1897,16 +1897,16 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
     /* Next try out of process */
     if (clscontext & CLSCTX_LOCAL_SERVER)
     {
-        hr = rpc_get_local_class_object(rclsid, riid, obj);
-        if (SUCCEEDED(hr))
-            return hr;
-
         /* A configured stub class answers for a local server class which, on
          * Windows, is registered by an already running process that owns the
          * server's profile; launching the registered executable here would
          * collide with that profile and park the activation. */
         if (com_is_stub_local_server(rclsid))
             return com_get_stub_class_object(rclsid, riid, obj);
+
+        hr = rpc_get_local_class_object(rclsid, riid, obj);
+        if (SUCCEEDED(hr))
+            return hr;
     }
 
     /* Finally try remote: this requires networked DCOM (a lot of work) */
