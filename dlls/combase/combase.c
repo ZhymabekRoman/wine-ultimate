@@ -1900,6 +1900,13 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
         hr = rpc_get_local_class_object(rclsid, riid, obj);
         if (SUCCEEDED(hr))
             return hr;
+
+        /* A configured stub class answers for a local server class which, on
+         * Windows, is registered by an already running process that owns the
+         * server's profile; launching the registered executable here would
+         * collide with that profile and park the activation. */
+        if (com_is_stub_local_server(rclsid))
+            return com_get_stub_class_object(rclsid, riid, obj);
     }
 
     /* Finally try remote: this requires networked DCOM (a lot of work) */
@@ -3254,6 +3261,20 @@ HRESULT WINAPI CoRegisterClassObject(REFCLSID rclsid, IUnknown *object, DWORD cl
 
         hr = rpc_register_local_server(&newclass->clsid, marshal_stream, flags, &newclass->rpcss_cookie);
         IStream_Release(marshal_stream);
+        if (FAILED(hr))
+        {
+            /* The class object is not reachable for other processes; revoke
+             * the local registration and report the failure to the caller. */
+            WARN("failed to register class object %s with rpcss, %#lx\n", debugstr_guid(rclsid), hr);
+            EnterCriticalSection(&registered_classes_cs);
+            list_remove(&newclass->entry);
+            LeaveCriticalSection(&registered_classes_cs);
+            IUnknown_Release(newclass->object);
+            free(newclass);
+            *cookie = 0;
+            apartment_release(apt);
+            return hr;
+        }
     }
 
     apartment_release(apt);

@@ -17,4 +17,5 @@ SOURCES = \
 	rpc.c \
 	string.c \
 	stubmanager.c \
+	stubserver.c \
 	usrmarshal.c

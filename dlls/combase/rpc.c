@@ -878,11 +878,14 @@ HRESULT rpc_get_local_class_object(REFCLSID rclsid, REFIID riid, void **obj)
         {
             if (SUCCEEDED(CoWaitForMultipleHandles(0, 1000, (process != 0), &process, &index)) && process && !index)
             {
+                DWORD code = 0;
+                GetExitCodeProcess( process, &code );
                 /* The launched process may be a transient launcher that
                  * hands the activation over to an already running instance
                  * which registers the class object itself.  Keep polling
                  * for the registration instead of failing right away. */
-                WARN("Server process for %s exited, keep waiting for registration.\n", debugstr_guid(rclsid));
+                WARN("Server process for %s exited with code %lu, keep waiting for registration.\n",
+                     debugstr_guid(rclsid), code);
                 break;
             }
         } while (GetTickCount() - start_ticks < 1000);
