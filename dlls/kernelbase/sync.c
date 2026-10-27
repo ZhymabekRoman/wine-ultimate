@@ -1262,9 +1262,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetQueuedCompletionStatus( HANDLE port, LPDWORD co
                                    get_nt_timeout( &wait_time, timeout ) );
     if (status == STATUS_SUCCESS)
     {
-        static OVERLAPPED dummy_ov;
         *count = iosb.Information;
-        if (!*overlapped) *overlapped = &dummy_ov;
         if (iosb.Status >= 0) return TRUE;
         SetLastError( RtlNtStatusToDosError(iosb.Status) );
         return FALSE;
@@ -1290,17 +1288,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetQueuedCompletionStatusEx( HANDLE port, OVERLAPP
 
     ret = NtRemoveIoCompletionEx( port, (FILE_IO_COMPLETION_INFORMATION *)entries, count,
                                   written, get_nt_timeout( &time, timeout ), alertable );
-    if (ret == STATUS_SUCCESS)
-    {
-        ULONG i;
-        static OVERLAPPED dummy_ov;
-        if (written)
-        {
-            for (i = 0; i < *written; i++)
-                if (!entries[i].lpOverlapped) entries[i].lpOverlapped = &dummy_ov;
-        }
-        return TRUE;
-    }
+    if (ret == STATUS_SUCCESS) return TRUE;
     else if (ret == STATUS_TIMEOUT)   SetLastError( WAIT_TIMEOUT );
     else if (ret == STATUS_USER_APC)  SetLastError( WAIT_IO_COMPLETION );
     else if (ret == STATUS_ABANDONED) SetLastError( ERROR_ABANDONED_WAIT_0 );
@@ -1752,8 +1740,6 @@ BOOL WINAPI DECLSPEC_HOTPATCH WaitNamedPipeW( LPCWSTR name, DWORD timeout )
 
     status = NtFsControlFile( pipe_dev, NULL, NULL, NULL, &iosb, FSCTL_PIPE_WAIT,
                               pipe_wait, wait_size, NULL, 0 );
-
-    ERR( "PROBE: WaitNamedPipeW %s timeout=%lu -> status=%08lx\n", debugstr_w(name), timeout, status );
 
     HeapFree( GetProcessHeap(), 0, pipe_wait );
     NtClose( pipe_dev );

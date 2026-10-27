@@ -15,11 +15,8 @@
 #define WIN32_NO_STATUS
 #include "windef.h"
 #include "winternl.h"
-#include "wine/debug.h"
 #include "ntdll_misc.h"
 #include "inline_patch.h"
-
-WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
 
 #ifdef __x86_64__
 
@@ -542,54 +539,75 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
 }
 
 void *p_real_CreateWebViewEnvironmentWithOptionsInternal = NULL;
-static HRESULT (WINAPI *p_orig_options_QI)( void *, const GUID *, void ** ) = NULL;
 
-static HRESULT WINAPI hook_wv2_options_QI( void *iface, const GUID *riid, void **ppv )
+struct wine_wv2_options_proxy
 {
+    void **lpVtbl;
+    void *orig_options;
+    LONG refcount;
+};
+
+static HRESULT WINAPI wine_wv2_options_QueryInterface( void *iface, const GUID *riid, void **ppv )
+{
+    struct wine_wv2_options_proxy *this = (struct wine_wv2_options_proxy *)iface;
     static const GUID iid_options6 = {0x57d29cc3, 0xc84f, 0x42a0, {0xb0, 0xe2, 0xef, 0xfb, 0xd5, 0xe1, 0x79, 0xde}};
+    HRESULT (WINAPI *orig_QI)( void *, const GUID *, void ** );
 
     if (!ppv) return 0x80070057; /* E_INVALIDARG */
     *ppv = NULL;
 
-    ERR( "PROBE: hook_wv2_options_QI called for %s\n", wine_dbgstr_guid(riid) );
-
     /* Mask ICoreWebView2EnvironmentOptions6 so WebView2 disables the browser extension Mojo path */
     if (!memcmp( riid, &iid_options6, sizeof(GUID) ))
-    {
-        ERR( "PROBE: MASKED ICoreWebView2EnvironmentOptions6! Returning E_NOINTERFACE\n" );
         return 0x80004002; /* E_NOINTERFACE */
-    }
 
-    if (p_orig_options_QI)
-        return p_orig_options_QI( iface, riid, ppv );
-
-    return 0x80004002; /* E_NOINTERFACE */
+    if (!this->orig_options) return 0x80004002;
+    orig_QI = *(void ***)this->orig_options ? (HRESULT (WINAPI *)(void *, const GUID *, void **))(**(void ****)this->orig_options) : NULL;
+    if (!orig_QI) return 0x80004002;
+    return orig_QI( this->orig_options, riid, ppv );
 }
+
+static ULONG WINAPI wine_wv2_options_AddRef( void *iface )
+{
+    struct wine_wv2_options_proxy *this = (struct wine_wv2_options_proxy *)iface;
+    return InterlockedIncrement( &this->refcount );
+}
+
+static ULONG WINAPI wine_wv2_options_Release( void *iface )
+{
+    struct wine_wv2_options_proxy *this = (struct wine_wv2_options_proxy *)iface;
+    ULONG ref = InterlockedDecrement( &this->refcount );
+    if (!ref) RtlFreeHeap( NtCurrentTeb()->Peb->ProcessHeap, 0, this );
+    return ref;
+}
+
+static void *wine_wv2_options_vtbl[] =
+{
+    wine_wv2_options_QueryInterface,
+    wine_wv2_options_AddRef,
+    wine_wv2_options_Release
+};
 
 HRESULT WINAPI fast_CreateWebViewEnvironmentWithOptionsInternal( int a1, int a2, const WCHAR *a3, void *options, void *handler, void *arg6, void *arg7, void *arg8 )
 {
     HRESULT (WINAPI *p_real)(int, int, const WCHAR *, void *, void *, void *, void *, void *) = p_real_CreateWebViewEnvironmentWithOptionsInternal;
+    void *wrapped_options = options;
 
-    ERR( "PROBE: fast_CreateWebViewEnvironmentWithOptionsInternal called! options=%p, handler=%p\n", options, handler );
+    DbgPrint( "PROBE: fast_CreateWebViewEnvironmentWithOptionsInternal called! options=%p, handler=%p\n", options, handler );
 
-    if (options && *(void ***)options)
+    if (options)
     {
-        void **vtbl = *(void ***)options;
-        if (!p_orig_options_QI && vtbl[0] != (void *)hook_wv2_options_QI)
+        struct wine_wv2_options_proxy *proxy = RtlAllocateHeap( NtCurrentTeb()->Peb->ProcessHeap, 0, sizeof(*proxy) );
+        if (proxy)
         {
-            ULONG old_prot;
-            void *base = &vtbl[0];
-            SIZE_T size = sizeof(void *);
-            p_orig_options_QI = (void *)vtbl[0];
-            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, PAGE_EXECUTE_READWRITE, &old_prot );
-            vtbl[0] = (void *)hook_wv2_options_QI;
-            NtProtectVirtualMemory( NtCurrentProcess(), &base, &size, old_prot, &old_prot );
-            ERR( "PROBE: successfully hooked options vtable QueryInterface! orig_QI=%p\n", p_orig_options_QI );
+            proxy->lpVtbl = wine_wv2_options_vtbl;
+            proxy->orig_options = options;
+            proxy->refcount = 1;
+            wrapped_options = proxy;
         }
     }
 
     if (p_real)
-        return p_real( a1, a2, a3, options, handler, arg6, arg7, arg8 );
+        return p_real( a1, a2, a3, wrapped_options, handler, arg6, arg7, arg8 );
 
     return 0x80004005; /* E_FAIL */
 }
