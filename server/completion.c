@@ -504,6 +504,16 @@ DECL_HANDLER(remove_completion)
         current->completion_wait->completion = completion;
         list_add_head( &completion->wait_queue, &current->completion_wait->wait_queue_entry );
         reply->wait_handle = current->completion_wait->handle;
+        /* A packet consumed through the wake path (completion_wait_satisfied
+         * handing the message to the thread, get_thread_completion taking it)
+         * leaves the queue empty without clearing the sync object that the
+         * deferred remove_completion protocol parks polling clients on.  The
+         * stale signal then completes every subsequent arm of that wait
+         * immediately: a client-side spin that saturates the server with
+         * PENDING round-trips on the thread that owns a message pump.  The
+         * queue is empty at this point, so take the stale signal back;
+         * add_completion() signals it again when a packet actually arrives. */
+        if (list_empty( &completion->queue )) reset_sync( completion->sync );
         set_error( STATUS_PENDING );
     }
     else
