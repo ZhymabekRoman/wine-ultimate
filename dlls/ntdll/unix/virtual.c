@@ -3542,6 +3542,15 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
     }
     if (NT_SUCCESS(status))
     {
+#ifdef MADV_HUGEPAGE
+        if (size >= 2 * 1024 * 1024)
+        {
+            madvise( view->base, size, MADV_HUGEPAGE );
+#ifdef MADV_COLLAPSE
+            madvise( view->base, size, MADV_COLLAPSE );
+#endif
+        }
+#endif
         if (is_builtin && !offset) add_builtin_module( view->base, NULL );
         *addr_ptr = view->base;
         *size_ptr = size;
