@@ -544,6 +544,7 @@ struct inproc_sync
     unsigned int   access;    /* handle access rights */
     unsigned short type;      /* enum inproc_sync_type as short to save space */
     unsigned short closed;    /* fd has been closed but sync is still referenced */
+    unsigned short has_wait_packet; /* handle is associated with a wait completion packet */
 };
 
 #define INPROC_SYNC_CACHE_BLOCK_SIZE  (65536 / sizeof(struct inproc_sync))
@@ -606,6 +607,7 @@ static struct inproc_sync *cache_inproc_sync( HANDLE handle, struct inproc_sync 
     cache->access = sync->access;
     cache->type = sync->type;
     cache->closed = sync->closed;
+    cache->has_wait_packet = sync->has_wait_packet;
     /* Make sure we set the other members before the refcount; this store needs
      * release semantics [paired with the load in get_cached_inproc_sync()].
      * Set the refcount to 2 (one for the handle, one for the caller). */
@@ -1154,12 +1156,22 @@ NTSTATUS WINAPI NtOpenEvent( HANDLE *handle, ACCESS_MASK access, const OBJECT_AT
  */
 NTSTATUS WINAPI NtSetEvent( HANDLE handle, LONG *prev_state )
 {
+    struct inproc_sync stack, *sync;
+    BOOL has_wait_packet = 0;
     unsigned int ret;
 
     TRACE( "handle %p, prev_state %p\n", handle, prev_state );
 
+    if (!get_inproc_sync( handle, INPROC_SYNC_EVENT, 0, &stack, &sync ))
+    {
+        has_wait_packet = sync->has_wait_packet;
+        release_inproc_sync( sync );
+    }
+
     if ((ret = inproc_set_event( handle, prev_state )) != STATUS_NOT_IMPLEMENTED)
-        return ret;
+    {
+        if (!has_wait_packet) return ret;
+    }
 
     SERVER_START_REQ( event_op )
     {
@@ -3079,9 +3091,16 @@ NTSTATUS WINAPI NtAssociateWaitCompletionPacket( HANDLE handle, HANDLE completio
                                                  ULONG_PTR io_status_info, BOOLEAN wake_up_app )
 {
     unsigned int status;
+    struct inproc_sync stack, *sync;
 
     TRACE( "(%p, %p, %p, %p, %p, %x, %lx, %d)\n", handle, completion_handle, target_handle,
            key_context, apc_context, (int)io_status, (unsigned long)io_status_info, wake_up_app );
+
+    if (!get_inproc_sync( target_handle, INPROC_SYNC_UNKNOWN, 0, &stack, &sync ))
+    {
+        sync->has_wait_packet = 1;
+        release_inproc_sync( sync );
+    }
 
     SERVER_START_REQ( associate_wait_completion_packet )
     {

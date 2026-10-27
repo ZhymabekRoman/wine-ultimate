@@ -62,6 +62,7 @@ struct inproc_sync
 static struct list inproc_mutexes = LIST_INIT( inproc_mutexes );
 
 static void inproc_sync_dump( struct object *obj, int verbose );
+static int inproc_sync_signaled( struct object *obj, struct wait_queue_entry *entry );
 static int inproc_sync_signal( struct object *obj, unsigned int access, int signal );
 static void inproc_sync_destroy( struct object *obj );
 
@@ -72,7 +73,7 @@ static const struct object_ops inproc_sync_ops =
     inproc_sync_dump,           /* dump */
     no_add_queue,               /* add_queue */
     NULL,                       /* remove_queue */
-    NULL,                       /* signaled */
+    inproc_sync_signaled,       /* signaled */
     NULL,                       /* satisfied */
     inproc_sync_signal,         /* signal */
     no_get_fd,                  /* get_fd */
@@ -191,6 +192,18 @@ void reset_inproc_sync( struct inproc_sync *sync )
     __u32 count;
     if (debug_level) fprintf( stderr, "reset_inproc_event %d\n", sync->fd );
     ioctl( sync->fd, NTSYNC_IOC_EVENT_RESET, &count );
+}
+
+static int inproc_sync_signaled( struct object *obj, struct wait_queue_entry *entry )
+{
+    struct inproc_sync *sync = (struct inproc_sync *)obj;
+    if (sync->type == INPROC_SYNC_EVENT || sync->type == INPROC_SYNC_INTERNAL)
+    {
+        struct ntsync_event_args args = { 0 };
+        if (!ioctl( sync->fd, NTSYNC_IOC_EVENT_READ, &args ))
+            return args.signaled;
+    }
+    return 0;
 }
 
 static int inproc_sync_signal( struct object *obj, unsigned int access, int signal )

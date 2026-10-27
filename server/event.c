@@ -34,6 +34,7 @@
 #include "thread.h"
 #include "request.h"
 #include "security.h"
+#include "file.h"
 
 static const WCHAR event_name[] = {'E','v','e','n','t'};
 
@@ -268,6 +269,7 @@ struct event *get_event_obj( struct process *process, obj_handle_t handle, unsig
 void set_event( struct event *event )
 {
     signal_sync( event->sync );
+    signal_wait_completion_packets( &event->obj );
 }
 
 void reset_event( struct event *event )
