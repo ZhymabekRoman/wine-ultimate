@@ -37,6 +37,14 @@ static DWORD WINAPI ContentionWorker(LPVOID param)
     return 0;
 }
 
+typedef DWORD (WINAPI *pfn_RtlRunOnceExecuteOnce)( void *once, void *func, void *param, void **context );
+
+static DWORD WINAPI TestRtlRunOnceCallback( void *once, void *param, void **context )
+{
+    if (context) *context = (void *)0xCAFEFEE0;
+    return 1;
+}
+
 int main(int argc, char **argv)
 {
     HMODULE hK32;
@@ -112,6 +120,19 @@ int main(int argc, char **argv)
            (unsigned long)tls_idx, set_ok, tls_got,
            (set_ok && tls_got == (void *)0x1234ABCD) ? "PASS" : "FAIL");
     TlsFree(tls_idx);
+
+    /* ------------------------------------------------------------- */
+    /* 4b. RtlRunOnce Inlining & Correctness                         */
+    /* ------------------------------------------------------------- */
+    RTL_RUN_ONCE run_once = { 0 };
+    void *ctx1 = NULL, *ctx2 = NULL;
+    pfn_RtlRunOnceExecuteOnce p_run_once = (pfn_RtlRunOnceExecuteOnce)GetProcAddress(GetModuleHandleA("ntdll.dll"), "RtlRunOnceExecuteOnce");
+    DWORD ro_ok1 = p_run_once ? p_run_once(&run_once, TestRtlRunOnceCallback, NULL, &ctx1) : 1;
+    DWORD ro_ok2 = p_run_once ? p_run_once(&run_once, TestRtlRunOnceCallback, NULL, &ctx2) : 1;
+    printf("\n[4b] RtlRunOnce Fast Inlining:\n");
+    printf("    RtlRunOnceExecuteOnce: 1st=%lu ctx=%p, 2nd=%lu ctx=%p: %s\n",
+           ro_ok1, ctx1, ro_ok2, ctx2,
+           (ro_ok1 == 0 && ro_ok2 == 0 && ctx1 == (void *)0xCAFEFEE0 && ctx2 == (void *)0xCAFEFEE0) ? "PASS" : "FAIL");
 
     /* ------------------------------------------------------------- */
     /* 5. Throughput Benchmark (GetCurrentThreadId + GetTickCount)    */
