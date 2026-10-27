@@ -68,7 +68,13 @@ __ASM_GLOBAL_FUNC( fast_GetTickCount,
 
 extern void WINAPI fast_GetSystemTimeAsFileTime(void *time);
 __ASM_GLOBAL_FUNC( fast_GetSystemTimeAsFileTime,
-                   "movq 0x7ffe0014,%rax\n\t"
+                   "1:\n\t"
+                   "movl 0x7ffe0018,%edx\n\t"
+                   "movl 0x7ffe0014,%eax\n\t"
+                   "cmpl 0x7ffe001c,%edx\n\t"
+                   "jne 1b\n\t"
+                   "shlq $32,%rdx\n\t"
+                   "orq %rdx,%rax\n\t"
                    "movq %rax,(%rcx)\n\t"
                    "ret" )
 
@@ -110,12 +116,12 @@ extern void WINAPI fast_LeaveCriticalSection( RTL_CRITICAL_SECTION *crit );
 __ASM_GLOBAL_FUNC( fast_LeaveCriticalSection,
                    "cmpl $1,0xc(%rcx)\n\t"
                    "jne 1f\n\t"
-                   "xorl %eax,%eax\n\t"
-                   "movl $-1,%edx\n\t"
-                   "lock cmpxchgl %edx,0x8(%rcx)\n\t"
-                   "jnz 1f\n\t"
                    "movq $0,0x10(%rcx)\n\t"
                    "movl $0,0xc(%rcx)\n\t"
+                   "lock decl 0x8(%rcx)\n\t"
+                   "js 2f\n\t"
+                   "jmp RtlpUnWaitCriticalSection\n\t"
+                   "2:\n\t"
                    "ret\n\t"
                    "1:\n\t"
                    "jmp RtlLeaveCriticalSection" )

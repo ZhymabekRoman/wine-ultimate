@@ -42,6 +42,7 @@ struct reg_val_cache_entry {
     ULONGLONG epoch;
     HANDLE handle;
     ULONG name_hash;
+    ULONG name_len;
     ULONG type;
     ULONG total;
     BYTE data[256];
@@ -59,8 +60,12 @@ static inline ULONGLONG get_reg_epoch(void)
 static inline ULONG hash_val_name(const UNICODE_STRING *name)
 {
     ULONG hash = 5381;
-    const WCHAR *p = name->Buffer;
-    unsigned int len = name->Length / sizeof(WCHAR);
+    const WCHAR *p;
+    unsigned int len;
+
+    if (!name || !name->Buffer || !name->Length) return 0;
+    p = name->Buffer;
+    len = name->Length / sizeof(WCHAR);
     while (len--) hash = ((hash << 5) + hash) + (*p++ | 0x20);
     return hash;
 }
@@ -568,10 +573,12 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
         if (length >= sizeof(KEY_VALUE_PARTIAL_INFORMATION))
         {
             ULONGLONG epoch = get_reg_epoch();
+            ULONG name_len = name ? name->Length : 0;
             ULONG name_hash = hash_val_name(name) ^ (ULONG)(ULONG_PTR)handle;
             struct reg_val_cache_entry *entry = &reg_val_cache[name_hash & (REG_CACHE_SIZE - 1)];
 
-            if (entry->epoch == epoch && entry->handle == handle && entry->name_hash == name_hash)
+            if (entry->handle == handle && entry->name_hash == name_hash &&
+                entry->name_len == name_len && __atomic_load_n(&entry->epoch, __ATOMIC_ACQUIRE) == epoch)
             {
                 KEY_VALUE_PARTIAL_INFORMATION *part = info;
                 *result_len = FIELD_OFFSET(KEY_VALUE_PARTIAL_INFORMATION, Data) + entry->total;
@@ -618,15 +625,18 @@ NTSTATUS WINAPI NtQueryValueKey( HANDLE handle, const UNICODE_STRING *name,
             if (!ret && info_class == KeyValuePartialInformation && reply->total <= sizeof(reg_val_cache[0].data))
             {
                 ULONGLONG epoch = get_reg_epoch();
+                ULONG name_len = name ? name->Length : 0;
                 ULONG name_hash = hash_val_name(name) ^ (ULONG)(ULONG_PTR)handle;
                 struct reg_val_cache_entry *entry = &reg_val_cache[name_hash & (REG_CACHE_SIZE - 1)];
 
-                entry->epoch = epoch;
+                entry->epoch = 0;
                 entry->handle = handle;
                 entry->name_hash = name_hash;
+                entry->name_len = name_len;
                 entry->type = reply->type;
                 entry->total = reply->total;
                 if (data_ptr && reply->total) memcpy(entry->data, data_ptr, reply->total);
+                __atomic_store_n(&entry->epoch, epoch, __ATOMIC_RELEASE);
             }
         }
     }

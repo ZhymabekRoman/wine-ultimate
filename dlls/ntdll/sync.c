@@ -356,6 +356,13 @@ NTSTATUS WINAPI RtlpUnWaitCriticalSection( RTL_CRITICAL_SECTION *crit )
  */
 NTSTATUS WINAPI RtlEnterCriticalSection( RTL_CRITICAL_SECTION *crit )
 {
+    if (InterlockedCompareExchange( &crit->LockCount, 0, -1 ) == -1)
+    {
+        crit->OwningThread   = ULongToHandle(GetCurrentThreadId());
+        crit->RecursionCount = 1;
+        return STATUS_SUCCESS;
+    }
+
     if (crit->SpinCount)
     {
         ULONG count;

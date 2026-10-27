@@ -447,8 +447,8 @@ BOOLEAN WINAPI RtlEqualString( const STRING *s1, const STRING *s2, BOOLEAN CaseI
 BOOLEAN WINAPI RtlEqualUnicodeString( const UNICODE_STRING *s1, const UNICODE_STRING *s2,
                                       BOOLEAN CaseInsensitive )
 {
-    if (s1->Buffer == s2->Buffer) return TRUE;
     if (s1->Length != s2->Length) return FALSE;
+    if (s1->Buffer == s2->Buffer) return TRUE;
     if (!CaseInsensitive) return !memcmp( s1->Buffer, s2->Buffer, s1->Length );
     if (!memcmp( s1->Buffer, s2->Buffer, s1->Length )) return TRUE;
     return !RtlCompareUnicodeString( s1, s2, CaseInsensitive );

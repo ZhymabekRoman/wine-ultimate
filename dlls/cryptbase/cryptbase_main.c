@@ -47,7 +47,7 @@ static inline BOOL has_rdrand(void)
     static int supported = -1;
     if (supported == -1)
     {
-#if defined(__i386__) || defined(__x86_64__)
+#if defined(__x86_64__)
         int regs[4];
         __cpuid( regs, 1 );
         supported = (regs[2] & (1 << 30)) != 0;
@@ -69,6 +69,7 @@ static inline BOOL fill_random_rdrand( void *buffer, ULONG len )
         int retry = 10;
         do {
             __asm__ volatile ("rdrand %0; setc %1" : "=r" (val), "=qm" (ok));
+            if (!ok) YieldProcessor();
         } while (!ok && --retry);
         if (!ok) return FALSE;
         *(ULONG64 *)ptr = val;
@@ -82,6 +83,7 @@ static inline BOOL fill_random_rdrand( void *buffer, ULONG len )
         int retry = 10;
         do {
             __asm__ volatile ("rdrand %0; setc %1" : "=r" (val), "=qm" (ok));
+            if (!ok) YieldProcessor();
         } while (!ok && --retry);
         if (!ok) return FALSE;
         while (len--)

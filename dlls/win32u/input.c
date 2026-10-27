@@ -798,19 +798,13 @@ SHORT WINAPI NtUserGetAsyncKeyState( INT key )
     BYTE state = 0;
     SHORT ret = 0;
 
-    static LONGLONG last_async_key_time;
-    LARGE_INTEGER counter, freq;
-    LONGLONG now;
+    DWORD now = *(volatile DWORD *)0x7ffe0320;
+    static volatile LONG last_async_key_time;
 
     if (key < 0 || key >= 256) return 0;
 
-    NtQueryPerformanceCounter( &counter, &freq );
-    now = counter.QuadPart * 1000 / freq.QuadPart;
-    if (now != last_async_key_time)
-    {
-        last_async_key_time = now;
+    if (now != (DWORD)last_async_key_time && InterlockedExchange(&last_async_key_time, now) != now)
         check_for_events( QS_ALLINPUT );
-    }
 
     while ((status = get_shared_desktop( &lock, &desktop_shm )) == STATUS_PENDING)
         state = desktop_shm->keystate[key];
