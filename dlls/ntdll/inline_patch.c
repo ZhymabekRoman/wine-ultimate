@@ -194,6 +194,16 @@ __ASM_GLOBAL_FUNC( fast_RtlRunOnceExecuteOnce,
                    "1:\n\t"
                    "jmp RtlRunOnceExecuteOnce" )
 
+extern BOOL WINAPI fast_IsProcessorFeaturePresent( DWORD feature );
+__ASM_GLOBAL_FUNC( fast_IsProcessorFeaturePresent,
+                   "cmpl $64,%ecx\n\t"
+                   "jae 1f\n\t"
+                   "movzbl 0x7ffe0274(%rcx),%eax\n\t"
+                   "ret\n\t"
+                   "1:\n\t"
+                   "xorl %eax,%eax\n\t"
+                   "ret" )
+
 static inline DWORD fnv1a_32( const char *str )
 {
     DWORD hash = 2166136261u;
@@ -253,6 +263,8 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0x97c0ce0fu: if (!strcmp(func_name, "RtlEnterCriticalSection")) return (ULONG_PTR)fast_EnterCriticalSection; break;
     case 0xaf2a3c58u: if (!strcmp(func_name, "RtlLeaveCriticalSection")) return (ULONG_PTR)fast_LeaveCriticalSection; break;
     case 0xc6be3f6fu: if (!strcmp(func_name, "RtlRunOnceExecuteOnce")) return (ULONG_PTR)fast_RtlRunOnceExecuteOnce; break;
+    case 0x7aa3f32au: if (!strcmp(func_name, "IsProcessorFeaturePresent")) return (ULONG_PTR)fast_IsProcessorFeaturePresent; break;
+    case 0xd1c44ba2u: if (!strcmp(func_name, "RtlIsProcessorFeaturePresent")) return (ULONG_PTR)fast_IsProcessorFeaturePresent; break;
     }
 
     return 0;

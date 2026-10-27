@@ -34,8 +34,14 @@ enum fast_trampoline_id {
     FAST_TRAMP_ENTER_CRITICAL_SECTION,
     FAST_TRAMP_LEAVE_CRITICAL_SECTION,
     FAST_TRAMP_RTL_RUN_ONCE_EXECUTE_ONCE,
+    FAST_TRAMP_IS_PROCESSOR_FEATURE_PRESENT,
     FAST_TRAMP_COUNT
 };
+
+/* Native x86_64 inline implementation of IsProcessorFeaturePresent /
+   RtlIsProcessorFeaturePresent: direct KUSER_SHARED_DATA->ProcessorFeatures
+   byte load (0x7ffe0274) with a bounds check against PROCESSOR_FEATURE_MAX. */
+extern BOOL WINAPI fast_IsProcessorFeaturePresent( DWORD feature );
 
 /* Fast IAT trampoline lookup */
 ULONG_PTR get_fast_iat_trampoline( const char *func_name );
