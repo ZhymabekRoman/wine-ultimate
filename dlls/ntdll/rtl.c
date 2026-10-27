@@ -1040,7 +1040,16 @@ ULONG WINAPI RtlRandom (PULONG seed)
  */
 ULONG WINAPI RtlRandomEx( ULONG *seed )
 {
-    WARN( "semi-stub: should use a different algorithm\n" );
+#if defined(__x86_64__)
+    ULONG val;
+    unsigned char ok;
+    __asm__ volatile ("rdrand %0; setc %1" : "=r" (val), "=qm" (ok));
+    if (ok)
+    {
+        if (seed) *seed = val;
+        return val & 0x7fffffff;
+    }
+#endif
     return RtlRandom( seed );
 }
 

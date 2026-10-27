@@ -1981,8 +1981,8 @@ static void bin_try_enable( struct heap *heap, struct bin *bin )
     BOOL enable = FALSE;
 
     if (bin == heap->bins && alloc > 0x10) enable = TRUE;
-    else if (bin - heap->bins < 0x30 && alloc > 0x800) enable = TRUE;
-    else if (bin - heap->bins < 0x30 && alloc - freed > 0x10) enable = TRUE;
+    else if (bin - heap->bins < 0x30 && alloc > 0x20) enable = TRUE;
+    else if (bin - heap->bins < 0x30 && alloc - freed > 0x08) enable = TRUE;
     else if (alloc - freed > 0x400000 / block_size) enable = TRUE;
     if (!enable) return;
 
