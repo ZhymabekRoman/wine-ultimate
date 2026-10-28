@@ -900,9 +900,38 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetPriorityClass( HANDLE process )
  */
 BOOL WINAPI DECLSPEC_HOTPATCH GetProcessGroupAffinity( HANDLE process, USHORT *count, USHORT *array )
 {
-    FIXME( "(%p,%p,%p): stub\n", process, count, array );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    KAFFINITY mask;
+    ULONG retlen;
+
+    TRACE( "%p,%p,%p\n", process, count, array );
+
+    if (!count || !array)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    if (!set_ntstatus( NtQueryInformationProcess( process, ProcessAffinityMask, &mask,
+                                                  sizeof(mask), &retlen )))
+        return FALSE;
+    if (!mask)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    /* Wine supports a single processor group; the process is always affiliated
+     * with group 0 and its affinity mask is the group 0 mask.  A buffer that
+     * holds fewer entries than the number of groups is rejected. */
+    if (*count < 1)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    array[0] = 0;
+    *count = 1;
+    return TRUE;
 }
 
 
@@ -1477,9 +1506,31 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetProcessAffinityUpdateMode( HANDLE process, DWOR
 BOOL WINAPI DECLSPEC_HOTPATCH SetProcessGroupAffinity( HANDLE process, const GROUP_AFFINITY *new,
                                                        GROUP_AFFINITY *old )
 {
-    FIXME( "(%p,%p,%p): stub\n", process, new, old );
-    SetLastError( ERROR_CALL_NOT_IMPLEMENTED );
-    return FALSE;
+    TRACE( "%p,%p,%p\n", process, new, old );
+
+    if (!new)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (new->Group)  /* Wine has a single processor group, group 0 */
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+
+    if (old)
+    {
+        KAFFINITY mask;
+        ULONG retlen;
+        if (!set_ntstatus( NtQueryInformationProcess( process, ProcessAffinityMask, &mask,
+                                                      sizeof(mask), &retlen )))
+            return FALSE;
+        old->Group = 0;
+        old->Mask = mask;
+        old->Reserved[0] = old->Reserved[1] = old->Reserved[2] = 0;
+    }
+    return TRUE;
 }
 
 
