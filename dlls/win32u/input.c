@@ -2650,7 +2650,10 @@ BOOL WINAPI NtUserEnableMouseInPointer( BOOL enable )
  */
 BOOL WINAPI NtUserEnableMouseInPointerForThread( void )
 {
-    FIXME( "stub!\n" );
+    /* The thread-local mouse-in-pointer flag can only be enabled on a system
+     * with pointer devices.  Wine reports SM_DIGITIZER == 0 and SM_TABLETPC
+     * == 0, so the consistent answer for a non-touch device is failure. */
+    TRACE( "stub, returning FALSE\n" );
     RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }
@@ -2854,7 +2857,10 @@ BOOL WINAPI NtUserClipCursor( const RECT *rect )
  */
 BOOL WINAPI NtUserRegisterTouchPadCapable( BOOL capable )
 {
-    FIXME( "capable %u stub!\n", capable );
+    /* Registering a touch pad succeeds only on a touch-capable device; Wine
+     * reports SM_DIGITIZER == 0 and SM_TABLETPC == 0, so the consistent
+     * answer for a non-touch device is failure. */
+    TRACE( "capable %u, returning FALSE\n", capable );
     RtlSetLastWin32Error( ERROR_CALL_NOT_IMPLEMENTED );
     return FALSE;
 }
