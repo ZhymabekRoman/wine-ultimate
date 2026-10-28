@@ -195,6 +195,19 @@ struct alpc_port
      * was created; AlpcBasicInformation reports them back unchanged. */
     unsigned int        flags;
 
+    /* Maximum message length (ALPC_PORT_ATTRIBUTES.MaxMessageLength) as
+     * supplied at create; sends on the port are bounded by it (the kernel
+     * refuses a larger send with STATUS_INVALID_BUFFER_SIZE). */
+    data_size_t         max_msg_len;
+
+    /* Connect-request id counter (listening ports only): the kernel assigns
+     * the id of a connection request on the target listening port, so two
+     * client processes connecting the same named port can never collide.  A
+     * process-local counter hands both the same id, and the accept path then
+     * completes the wrong pending connection and hangs the second client in
+     * connect. */
+    unsigned int        connect_id;
+
     /* Message queue – both server ports and connections use this */
     struct list         msg_queue;
     struct async_queue  read_q;
@@ -1478,6 +1491,8 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     port->port_context = 0;
     port->sequence_no = 0;
     port->flags       = 0;
+    port->max_msg_len = 0;
+    port->connect_id  = 0;
     port->client_pid  = get_process_id( current->process );
     port->client_tid  = get_thread_id( current );
     list_init( &port->msg_queue );
@@ -1580,6 +1595,8 @@ DECL_HANDLER(create_alpc_port)
         port->port_context = 0;
         port->sequence_no = 0;
         port->flags       = req->flags;
+        port->max_msg_len = req->max_msg_len;
+        port->connect_id  = 0;
         port->client_pid  = get_process_id( current->process );
         port->client_tid  = get_thread_id( current );
         list_init( &port->msg_queue );
@@ -1645,7 +1662,16 @@ DECL_HANDLER(connect_alpc_port)
         set_error( STATUS_NO_MEMORY );
         return;
     }
-    pc->msg_id       = req->msg_id;
+    /* The kernel assigns the connect-request id on the target listening port.
+     * The client's req->msg_id (a process-local counter starting at 1) is
+     * ignored: two processes (e.g. the WhatsApp host and msedgewebview2.exe)
+     * connecting the same named port would both claim id 1, accept_alpc_
+     * connection would complete the wrong pending connection, and the second
+     * client would hang in connect.  Key correlation on the port's own
+     * counter instead; the delivered connect notification and the connect
+     * reply echo this id, and NtAlpcAcceptConnectPort / the REPLY-flag connect
+     * commit correlate by it. */
+    pc->msg_id       = ++server_port->connect_id;
     pc->client_port  = (struct alpc_port *)grab_object( client_port );
     pc->client_async = NULL;
     pc->conn_data    = NULL;
@@ -1717,7 +1743,7 @@ DECL_HANDLER(connect_alpc_port)
                 LIST_FOR_EACH_ENTRY_SAFE( m, next, &server_port->msg_queue,
                                            struct alpc_message, entry )
                 {
-                    if (m->is_connect && m->msg_id == req->msg_id)
+                    if (m->is_connect && m->msg_id == pc->msg_id)
                     {
                         list_remove( &m->entry );
                         free( m );

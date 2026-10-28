@@ -164,8 +164,13 @@ static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG a
     return NULL;
 }
 
-/* Process-global message id counter. Only needs to be unique within a single
- * server port's pending-connection list, so a global atomic is fine. */
+/* Process-global counter for the MessageId of data requests the sender
+ * composes itself (the ALPC_SEND_REQUEST path).  A connection has a single
+ * client, so a process-local counter is unique in the connection's
+ * correlation domain.  Connect-request ids are *not* taken from here: the
+ * kernel assigns them on the target listening port, and the server allocates
+ * them per port (two processes connecting the same named port must not
+ * collide). */
 static LONG alpc_msg_id_counter;
 
 static unsigned int next_alpc_msg_id(void)
@@ -350,7 +355,6 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
                                     ALPC_MESSAGE_ATTRIBUTES *in_msg_attr, LARGE_INTEGER *timeout )
 {
     unsigned int ret;
-    unsigned int msg_id;
     HANDLE wait_handle = NULL;
     OBJECT_ATTRIBUTES port_obj_attr;
     data_size_t len;
@@ -383,12 +387,14 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
     async->buffer = connect_msg;
     async->size   = connect_msg ? (connect_msg_size ? *connect_msg_size : connect_msg->TotalLength) : 0;
 
-    msg_id = next_alpc_msg_id();
-
     SERVER_START_REQ( connect_alpc_port )
     {
         req->async   = server_async( NULL, &async->io, NULL, NULL, NULL, iosb_client_ptr( &io ) );
-        req->msg_id  = msg_id;
+        /* the kernel assigns the connect-request id on the listening port;
+         * the server allocates it from the port's counter and echoes it on
+         * the connect notification and the connect reply.  req->msg_id is
+         * kept on the wire (append-only protocol) but carries no meaning. */
+        req->msg_id  = 0;
         wine_server_add_data( req, objattr, len );
         /* forward the caller's connection-message payload so the server can
          * validate it before accepting */
