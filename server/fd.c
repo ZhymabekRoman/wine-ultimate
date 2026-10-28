@@ -3267,13 +3267,26 @@ DECL_HANDLER(set_completion_info)
 
     if (fd)
     {
-        if (is_fd_overlapped( fd ) && !fd->completion)
+        struct completion *completion = get_completion_obj( current->process, req->chandle, IO_COMPLETION_MODIFY_STATE );
+
+        if (completion)
         {
-            fd->completion = get_completion_obj( current->process, req->chandle, IO_COMPLETION_MODIFY_STATE );
-            fd->comp_key = req->ckey;
-            set_fd_signaled( fd, 1 );
+            if (!is_fd_overlapped( fd )) set_error( STATUS_INVALID_PARAMETER );
+            else if (fd->completion && fd->completion != completion)
+            {
+                /* a handle can only be associated with a single completion port */
+                set_error( STATUS_INVALID_PARAMETER );
+                release_object( completion );
+            }
+            else
+            {
+                /* re-associating with the same port is allowed to change the completion key */
+                if (fd->completion) release_object( fd->completion );
+                fd->completion = completion;
+                fd->comp_key = req->ckey;
+                set_fd_signaled( fd, 1 );
+            }
         }
-        else set_error( STATUS_INVALID_PARAMETER );
         release_object( fd );
     }
 }
