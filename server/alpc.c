@@ -702,9 +702,16 @@ static void reselect_alpc_port( struct alpc_port *port )
                 void *data = (char *)msg + sizeof(*msg);
                 async_request_complete_alloc( async, STATUS_SUCCESS,
                                                msg->data_size, msg->data_size, data );
-                list_remove( &msg->entry );
-                release_alpc_message( msg ); /* delivered: receiver owns the handle duplicate */
             }
+            /* The kernel consumes the message on both statuses.  A message left
+             * parked on an undersized receive keeps the port signaled, so every
+             * later receive of that connection fails the same way and the handle
+             * the message's attributes duplicated into the receiver's table is
+             * pinned for the lifetime of the connection: one oversized message
+             * poisons the port.  Once consumed the receiver owns the handle
+             * duplicate. */
+            list_remove( &msg->entry );
+            release_alpc_message( msg );
             release_object( iosb );
             release_object( async );
         }
