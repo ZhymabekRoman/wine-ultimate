@@ -1016,10 +1016,10 @@ static void test_alpc_connection_flow( void )
         return;
     }
 
-    /* A receive buffer smaller than the message fails and keeps the message queued. */
-    size = 8;
-    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
-    ok( status == STATUS_BUFFER_TOO_SMALL, "Got unexpected status %#lx.\n", status );
+    /* The contract of a receive buffer smaller than the message — it fails with
+     * STATUS_BUFFER_TOO_SMALL and consumes the message — is exercised by
+     * test_alpc_small_buffer_receive(), which drives it deterministically; it
+     * cannot ride this round-trip, which needs the request it receives here. */
 
     /* Receive the client request on the server port. */
     req_size = 0;
@@ -2221,7 +2221,16 @@ static DWORD WINAPI conn_cid_thread( void *arg )
 /* The kernel stamps a connection request's PORT_MESSAGE.ClientId with the
  * connecting thread.  Each connect carries its own caller {pid, tid} - both
  * non-zero - and a re-connect from a new thread carries the NEW thread's id,
- * not the first client's.  This is the id the registrar engine reads. */
+ * not the first client's.  This is the id the registrar engine reads.
+ *
+ * Note the boundary this harness cannot reach: the connect message id is taken
+ * from a counter that is per-process, so two threads of this test process share
+ * it and get distinct ids.  A second *process* connecting the same named port
+ * restarts that counter, and the ids the two clients get collide; correlating
+ * the connect replies by id then picks the wrong pending connection.  Covering
+ * that needs a child process (CreateProcess on the test exe plus a
+ * winetest_get_mainargs() child branch and named events for the handshake),
+ * none of which this file's harness uses. */
 static void test_alpc_connect_clientid( void )
 {
     static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestConnClientId";
@@ -2307,6 +2316,475 @@ static void test_alpc_connect_clientid( void )
 }
 #endif /* _WIN64 */
 
+/* AlpcBasicInformation.SequenceNo is the port's message sequence counter: the
+ * kernel advances it as every message is queued on the port, so it equals the
+ * number of messages the receiver has taken from that port.  CoreMessaging
+ * reads it at the start of a multi-message ("slurp") exchange and compares it
+ * with the number of messages it has received to confirm that the exchange
+ * arrived as a contiguous pair; an answer that does not move with the receive
+ * count never matches, the pair is never confirmed, and the exchange stalls.
+ * Drive one connect and two request/reply exchanges over a single listening
+ * port and assert the counter after every receive. */
+struct seq_client_args
+{
+    UNICODE_STRING *port_name;
+    HANDLE done_event;
+    NTSTATUS connect_status;
+    NTSTATUS send_status[2];
+    NTSTATUS recv_status[2];
+    HANDLE conn;
+};
+
+/* Client thread: connect, then run two request/reply exchanges.  The requests
+ * are plain (non-synchronous) sends whose replies the thread takes with a bare
+ * receive, so the second request is queued only once the first exchange has
+ * completed: the server's view of the queue is deterministic. */
+static DWORD WINAPI alpc_seq_client_thread( void *arg )
+{
+    struct seq_client_args *args = arg;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    SIZE_T size;
+    int i;
+
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    args->conn = NULL;
+    args->connect_status = pNtAlpcConnectPort( &args->conn, args->port_name, NULL, &port_attr, 0,
+                                               NULL, NULL, NULL, NULL, NULL, NULL );
+    if (args->connect_status != STATUS_SUCCESS)
+    {
+        SetEvent( args->done_event );
+        return 0;
+    }
+
+    for (i = 0; i < 2; i++)
+    {
+        static const char * const payloads[] = { "SEQ-first", "SEQ-second" };
+        SIZE_T len = 9 + i;
+
+        memset( buf, 0, sizeof(*msg) );
+        memcpy( msg + 1, payloads[i], len );
+        msg->DataLength = len;
+        msg->TotalLength = sizeof(*msg) + len;
+        args->send_status[i] = pNtAlpcSendWaitReceivePort( args->conn, 0, msg, NULL,
+                                                           NULL, NULL, NULL, NULL );
+        if (args->send_status[i] != STATUS_SUCCESS) break;
+
+        timeout.QuadPart = -20 * 10000000LL;
+        memset( buf, 0, sizeof(*msg) );
+        size = sizeof(buf);
+        args->recv_status[i] = pNtAlpcSendWaitReceivePort( args->conn, 0, NULL, NULL,
+                                                           msg, &size, NULL, &timeout );
+        if (args->recv_status[i] != STATUS_SUCCESS) break;
+    }
+
+    NtClose( args->conn );
+    args->conn = NULL;
+    SetEvent( args->done_event );
+    return 0;
+}
+
+static void test_alpc_query_sequence_no( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestSeqNo";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    ALPC_BASIC_INFORMATION info;
+    LARGE_INTEGER timeout;
+    struct seq_client_args args;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    unsigned int sequence[4];
+    ULONG retlen, req_id;
+    SIZE_T size;
+    HANDLE server_port = NULL, server_conn = NULL, thread, event;
+    NTSTATUS status;
+    int i;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort
+        || !pNtAlpcSendWaitReceivePort || !pNtAlpcQueryInformation)
+    {
+        win_skip("ALPC port functions are unavailable.\n");
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    /* A freshly created port has queued nothing. */
+    memset( &info, 0xa5, sizeof(info) );
+    retlen = 0;
+    status = pNtAlpcQueryInformation( server_port, ALPC_BASIC_INFORMATION_CLASS, &info, sizeof(info), &retlen );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS)
+    {
+        NtClose( server_port );
+        return;
+    }
+    sequence[0] = info.SequenceNo;
+    winetest_push_context( "fresh port" );
+    ok( sequence[0] == 0, "Got unexpected SequenceNo %u.\n", sequence[0] );
+    winetest_pop_context();
+
+    memset( &args, 0, sizeof(args) );
+    args.port_name = &port_name;
+    event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    ok( event != NULL, "CreateEventA failed, err %u.\n", (unsigned int)GetLastError() );
+    args.done_event = event;
+    thread = CreateThread( NULL, 0, alpc_seq_client_thread, &args, 0, NULL );
+    ok( thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
+    if (!thread)
+    {
+        CloseHandle( event );
+        NtClose( server_port );
+        return;
+    }
+
+    timeout.QuadPart = -20 * 10000000LL;
+
+    /* The connect notification is the first message queued on the port.  The
+     * client is still inside NtAlpcConnectPort until the accept below, so it
+     * cannot have queued its request yet. */
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS)
+    {
+        WaitForSingleObject( thread, 30000 );
+        CloseHandle( thread );
+        CloseHandle( event );
+        NtClose( server_port );
+        return;
+    }
+    winetest_push_context( "connection request" );
+    ok( msg->Type == LPC_CONNECTION_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+    req_id = msg->MessageId;
+    winetest_pop_context();
+
+    server_conn = NULL;
+    status = pNtAlpcAcceptConnectPort( &server_conn, server_port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS || !server_conn)
+    {
+        WaitForSingleObject( thread, 30000 );
+        CloseHandle( thread );
+        CloseHandle( event );
+        NtClose( server_port );
+        return;
+    }
+
+    memset( &info, 0xa5, sizeof(info) );
+    retlen = 0;
+    status = pNtAlpcQueryInformation( server_port, ALPC_BASIC_INFORMATION_CLASS, &info, sizeof(info), &retlen );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    sequence[1] = info.SequenceNo;
+    winetest_push_context( "after 1 receive" );
+    ok( sequence[1] == 1, "Got unexpected SequenceNo %u.\n", sequence[1] );
+    winetest_pop_context();
+
+    /* Receive the first request and answer it. */
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS)
+    {
+        WaitForSingleObject( thread, 30000 );
+        CloseHandle( thread );
+        CloseHandle( event );
+        NtClose( server_conn );
+        NtClose( server_port );
+        return;
+    }
+    winetest_push_context( "request 1" );
+    ok( msg->Type == LPC_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+    ok( msg->DataLength == 9, "Got unexpected DataLength %u.\n", msg->DataLength );
+    ok( !memcmp( msg + 1, "SEQ-first", 9 ), "Got unexpected request payload.\n" );
+    req_id = msg->MessageId;
+    winetest_pop_context();
+
+    memset( &info, 0xa5, sizeof(info) );
+    retlen = 0;
+    status = pNtAlpcQueryInformation( server_port, ALPC_BASIC_INFORMATION_CLASS, &info, sizeof(info), &retlen );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    sequence[2] = info.SequenceNo;
+    winetest_push_context( "after 2 receives" );
+    ok( sequence[2] == 2, "Got unexpected SequenceNo %u.\n", sequence[2] );
+    winetest_pop_context();
+
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, "REPLY-1", 7 );
+    msg->DataLength = 7;
+    msg->TotalLength = sizeof(*msg) + 7;
+    msg->MessageId = req_id;
+    status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                         NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+
+    /* Receive the second request: the client queues it only once the reply above
+     * has reached it, so this is the third message on the port. */
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status == STATUS_SUCCESS)
+    {
+        winetest_push_context( "request 2" );
+        ok( msg->Type == LPC_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+        ok( msg->DataLength == 10, "Got unexpected DataLength %u.\n", msg->DataLength );
+        ok( !memcmp( msg + 1, "SEQ-second", 10 ), "Got unexpected request payload.\n" );
+        req_id = msg->MessageId;
+        winetest_pop_context();
+
+        memset( &info, 0xa5, sizeof(info) );
+        retlen = 0;
+        status = pNtAlpcQueryInformation( server_port, ALPC_BASIC_INFORMATION_CLASS, &info, sizeof(info), &retlen );
+        ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+        sequence[3] = info.SequenceNo;
+        winetest_push_context( "after 3 receives" );
+        ok( sequence[3] == 3, "Got unexpected SequenceNo %u.\n", sequence[3] );
+        winetest_pop_context();
+
+        memset( buf, 0, sizeof(*msg) );
+        memcpy( msg + 1, "REPLY-2", 7 );
+        msg->DataLength = 7;
+        msg->TotalLength = sizeof(*msg) + 7;
+        msg->MessageId = req_id;
+        status = pNtAlpcSendWaitReceivePort( server_port, ALPC_MSGFLG_REPLY_MESSAGE, msg, NULL,
+                                             NULL, NULL, NULL, NULL );
+        ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    }
+
+    /* The counter must move with the receive count: a constant cannot match the
+     * count the client compares it against. */
+    for (i = 1; i < 4; i++)
+        ok( sequence[i] > sequence[i - 1], "SequenceNo %u did not advance from %u.\n",
+            sequence[i], sequence[i - 1] );
+    ok( sequence[3] != sequence[0], "SequenceNo is constant at %u.\n", sequence[0] );
+
+    winetest_push_context( "client" );
+    ok( args.connect_status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", args.connect_status );
+    for (i = 0; i < 2; i++)
+    {
+        winetest_push_context( "exchange %d", i );
+        ok( args.send_status[i] == STATUS_SUCCESS, "Got unexpected status %#lx.\n", args.send_status[i] );
+        ok( args.recv_status[i] == STATUS_SUCCESS, "Got unexpected status %#lx.\n", args.recv_status[i] );
+        winetest_pop_context();
+    }
+    winetest_pop_context();
+
+    WaitForSingleObject( thread, 30000 );
+    CloseHandle( thread );
+    CloseHandle( event );
+    NtClose( server_conn );
+    NtClose( server_port );
+}
+
+/* A receive buffer smaller than the queued message fails with
+ * STATUS_BUFFER_TOO_SMALL, and the kernel consumes the message on that status.
+ * If the message stayed queued the port would remain signaled: every later
+ * receive of the connection would take the same message and fail the same way
+ * forever, and a handle the message's attributes duplicated into the receiver's
+ * table would be pinned for the lifetime of the connection. */
+struct small_buf_client_args
+{
+    UNICODE_STRING *port_name;
+    HANDLE done_event;
+    HANDLE sent_event;    /* the first request is queued */
+    HANDLE send2_event;   /* the server has consumed it, queue the second request */
+    HANDLE sent2_event;   /* the second request is queued */
+    HANDLE drained_event; /* the server took the second request, safe to close */
+    NTSTATUS connect_status;
+    NTSTATUS send_status[2];
+    HANDLE conn;
+};
+
+static DWORD WINAPI alpc_small_buf_client_thread( void *arg )
+{
+    struct small_buf_client_args *args = arg;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    args->conn = NULL;
+    args->connect_status = pNtAlpcConnectPort( &args->conn, args->port_name, NULL, &port_attr, 0,
+                                               NULL, NULL, NULL, NULL, NULL, NULL );
+    if (args->connect_status != STATUS_SUCCESS)
+    {
+        SetEvent( args->drained_event );
+        SetEvent( args->done_event );
+        return 0;
+    }
+
+    /* Queue the first request; the server consumes it with an undersized
+     * receive before releasing the second send. */
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, "SMALL-first", 11 );
+    msg->DataLength = 11;
+    msg->TotalLength = sizeof(*msg) + 11;
+    args->send_status[0] = pNtAlpcSendWaitReceivePort( args->conn, 0, msg, NULL,
+                                                       NULL, NULL, NULL, NULL );
+    SetEvent( args->sent_event );
+    if (args->send_status[0] != STATUS_SUCCESS)
+    {
+        SetEvent( args->drained_event );
+        SetEvent( args->done_event );
+        return 0;
+    }
+
+    WaitForSingleObject( args->send2_event, 30000 );
+
+    memset( buf, 0, sizeof(*msg) );
+    memcpy( msg + 1, "SMALL-second", 12 );
+    msg->DataLength = 12;
+    msg->TotalLength = sizeof(*msg) + 12;
+    args->send_status[1] = pNtAlpcSendWaitReceivePort( args->conn, 0, msg, NULL,
+                                                       NULL, NULL, NULL, NULL );
+    SetEvent( args->sent2_event );
+
+    /* Keep the connection open until the server has taken the second request,
+     * which closes the peer's queues. */
+    WaitForSingleObject( args->drained_event, 30000 );
+
+    NtClose( args->conn );
+    args->conn = NULL;
+    SetEvent( args->done_event );
+    return 0;
+}
+
+static void test_alpc_small_buffer_receive( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestSmallBuf";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    LARGE_INTEGER timeout, short_timeout;
+    struct small_buf_client_args args;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    SIZE_T size;
+    HANDLE server_port = NULL, server_conn = NULL, thread;
+    NTSTATUS status;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip("ALPC port functions are unavailable.\n");
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    memset( &args, 0, sizeof(args) );
+    args.port_name = &port_name;
+    args.done_event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    args.sent_event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    args.send2_event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    args.sent2_event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    args.drained_event = CreateEventA( NULL, TRUE, FALSE, NULL );
+    ok( args.done_event && args.sent_event && args.send2_event && args.sent2_event && args.drained_event,
+        "CreateEventA failed, err %u.\n", (unsigned int)GetLastError() );
+    if (!args.done_event || !args.sent_event || !args.send2_event || !args.sent2_event || !args.drained_event)
+    {
+        NtClose( server_port );
+        return;
+    }
+    thread = CreateThread( NULL, 0, alpc_small_buf_client_thread, &args, 0, NULL );
+    ok( thread != NULL, "CreateThread failed, err %u.\n", (unsigned int)GetLastError() );
+    if (!thread)
+    {
+        CloseHandle( args.done_event );
+        CloseHandle( args.sent_event );
+        CloseHandle( args.send2_event );
+        CloseHandle( args.sent2_event );
+        CloseHandle( args.drained_event );
+        NtClose( server_port );
+        return;
+    }
+
+    timeout.QuadPart = -20 * 10000000LL;
+    short_timeout.QuadPart = -3 * 10000000LL;
+
+    /* Take the connect notification and accept. */
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) goto done;
+
+    server_conn = NULL;
+    status = pNtAlpcAcceptConnectPort( &server_conn, server_port, 0, NULL, NULL, NULL, msg, NULL, TRUE );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS || !server_conn) goto done;
+
+    /* Wait for the first request to be queued, then under-size the receive. */
+    ok( WaitForSingleObject( args.sent_event, 30000 ) == 0, "The client did not queue its request.\n" );
+    memset( buf, 0, sizeof(buf) );
+    size = 8;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    winetest_push_context( "undersized receive" );
+    ok( status == STATUS_BUFFER_TOO_SMALL, "Got unexpected status %#lx.\n", status );
+    winetest_pop_context();
+
+    /* The message was consumed with that status: the queue is drained, so a
+     * second undersized receive finds no message at all.  A message left on the
+     * queue makes this return STATUS_BUFFER_TOO_SMALL for the rest of the
+     * connection's lifetime. */
+    memset( buf, 0, sizeof(buf) );
+    size = 8;
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &short_timeout );
+    winetest_push_context( "port drained" );
+    ok( status == STATUS_TIMEOUT, "Got unexpected status %#lx.\n", status );
+    winetest_pop_context();
+
+    /* The connection must still work: the next request is delivered intact. */
+    SetEvent( args.send2_event );
+    ok( WaitForSingleObject( args.sent2_event, 30000 ) == 0, "The client did not queue its second request.\n" );
+    memset( buf, 0, sizeof(buf) );
+    size = sizeof(buf);
+    status = pNtAlpcSendWaitReceivePort( server_port, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    winetest_push_context( "after the undersized receive" );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status == STATUS_SUCCESS)
+    {
+        ok( msg->Type == LPC_REQUEST_TYPE, "Got unexpected type %u.\n", msg->Type );
+        ok( msg->DataLength == 12, "Got unexpected DataLength %u.\n", msg->DataLength );
+        ok( !memcmp( msg + 1, "SMALL-second", 12 ), "Got unexpected request payload.\n" );
+    }
+    winetest_pop_context();
+    SetEvent( args.drained_event );
+
+done:
+    WaitForSingleObject( thread, 30000 );
+    CloseHandle( thread );
+    CloseHandle( args.done_event );
+    CloseHandle( args.sent_event );
+    CloseHandle( args.send2_event );
+    CloseHandle( args.sent2_event );
+    CloseHandle( args.drained_event );
+    if (server_conn) NtClose( server_conn );
+    NtClose( server_port );
+}
+
 START_TEST(alpc)
 {
     init_functions();
@@ -2332,5 +2810,7 @@ START_TEST(alpc)
     test_alpc_duplicate_reply_drop();
     test_alpc_connect_commit();
     test_alpc_connect_clientid();
+    test_alpc_query_sequence_no();
+    test_alpc_small_buffer_receive();
 #endif
 }
