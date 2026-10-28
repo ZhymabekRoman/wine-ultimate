@@ -7365,6 +7365,75 @@ NTSTATUS WINAPI NtCancelSynchronousIoFile( HANDLE handle, IO_STATUS_BLOCK *io, I
     return status;
 }
 
+struct lock_completion_request
+{
+    HANDLE file;
+    HANDLE event;
+    HANDLE thread;
+    LARGE_INTEGER offset;
+    LARGE_INTEGER count;
+    ULONG key;
+    BOOLEAN exclusive;
+    BOOLEAN dont_wait;
+    IO_STATUS_BLOCK *io_status;
+    PIO_APC_ROUTINE apc;
+    void *apc_user;
+};
+
+/* block until the lock is acquired, then complete the request the way the
+ * caller asked for: fill in the I/O status block, signal the event, and
+ * queue the user APC to the requesting thread */
+static void *lock_completion_worker( void *param )
+{
+    struct lock_completion_request *request = param;
+    unsigned int status;
+
+    for (;;)
+    {
+        unsigned int ret;
+        HANDLE handle;
+
+        SERVER_START_REQ( lock_file )
+        {
+            req->handle = wine_server_obj_handle( request->file );
+            req->offset = request->offset.QuadPart;
+            req->count  = request->count.QuadPart;
+            req->shared = !request->exclusive;
+            req->wait   = !request->dont_wait;
+            ret = wine_server_call( req );
+            handle = wine_server_ptr_handle( reply->handle );
+        }
+        SERVER_END_REQ;
+
+        if (ret != STATUS_PENDING)
+        {
+            status = ret;
+            break;
+        }
+        if (handle)
+        {
+            NtWaitForSingleObject( handle, FALSE, NULL );
+            NtClose( handle );
+        }
+        else  /* Unix lock conflict, sleep a bit and retry */
+        {
+            LARGE_INTEGER time;
+            time.QuadPart = -100 * (ULONGLONG)10000;
+            NtDelayExecution( FALSE, &time );
+        }
+    }
+
+    request->io_status->Status = status;
+    request->io_status->Information = 0;
+    if (request->event) NtSetEvent( request->event, NULL );
+    if (request->apc)
+        NtQueueApcThread( request->thread, (PNTAPCFUNC)request->apc, (ULONG_PTR)request->apc_user,
+                          (ULONG_PTR)request->io_status, 0 );
+    NtClose( request->thread );
+    free( request );
+    return NULL;
+}
+
 /******************************************************************
  *           NtLockFile   (NTDLL.@)
  */
@@ -7372,17 +7441,72 @@ NTSTATUS WINAPI NtLockFile( HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void
                             IO_STATUS_BLOCK *io_status, LARGE_INTEGER *offset,
                             LARGE_INTEGER *count, ULONG *key, BOOLEAN dont_wait, BOOLEAN exclusive )
 {
-    static int warn;
     unsigned int ret;
     HANDLE handle;
     BOOLEAN async;
 
-    if (apc || io_status || key)
+    TRACE( "%p %p %p %p %p %s %s %p %u %u\n", file, event, apc, apc_user, io_status,
+           wine_dbgstr_longlong( offset->QuadPart ), wine_dbgstr_longlong( count->QuadPart ),
+           key, dont_wait, exclusive );
+
+    if (key)
     {
         FIXME("Unimplemented yet parameter\n");
         return STATUS_NOT_IMPLEMENTED;
     }
-    if (apc_user && !warn++) FIXME("I/O completion on lock not implemented yet\n");
+    if (apc && !io_status) return STATUS_INVALID_PARAMETER;
+
+    /* the APC context is only consumed together with an APC routine; when no
+     * routine is given the completion is delivered through the event handle,
+     * so a lone apc_user needs no special handling */
+    if (apc_user && !apc) TRACE( "apc context %p without apc routine, ignored\n", apc_user );
+
+    if (apc)  /* asynchronous request: complete it from a worker thread */
+    {
+        struct lock_completion_request *request;
+        pthread_t thread;
+        pthread_attr_t attr;
+        OBJECT_ATTRIBUTES attrs;
+        UNICODE_STRING name = {0};
+        CLIENT_ID cid;
+        unsigned int status;
+
+        io_status->Status = STATUS_PENDING;
+        io_status->Information = 0;
+
+        if (!(request = malloc( sizeof(*request) ))) return STATUS_NO_MEMORY;
+        request->file = file;
+        request->event = event;
+        request->offset = *offset;
+        request->count = *count;
+        request->key = 0;
+        request->exclusive = exclusive;
+        request->dont_wait = dont_wait;
+        request->io_status = io_status;
+        request->apc = apc;
+        request->apc_user = apc_user;
+
+        /* the worker needs a handle to the requesting thread to queue the APC */
+        InitializeObjectAttributes( &attrs, &name, OBJ_CASE_INSENSITIVE, NULL, NULL );
+        cid.UniqueProcess = NULL;
+        cid.UniqueThread = NtCurrentTeb()->ClientId.UniqueThread;
+        if ((status = NtOpenThread( &request->thread, THREAD_SET_CONTEXT, &attrs, &cid )))
+        {
+            free( request );
+            io_status->Status = status;
+            return status;
+        }
+
+        pthread_attr_init( &attr );
+        pthread_attr_setdetachstate( &attr, PTHREAD_CREATE_DETACHED );
+        if (pthread_create( &thread, &attr, lock_completion_worker, request ))
+        {
+            NtClose( request->thread );
+            free( request );
+            return STATUS_NO_MEMORY;
+        }
+        return STATUS_PENDING;
+    }
 
     for (;;)
     {
@@ -7400,12 +7524,17 @@ NTSTATUS WINAPI NtLockFile( HANDLE file, HANDLE event, PIO_APC_ROUTINE apc, void
         SERVER_END_REQ;
         if (ret != STATUS_PENDING)
         {
+            if (io_status)
+            {
+                io_status->Status = ret;
+                io_status->Information = 0;
+            }
             if (!ret && event) NtSetEvent( event, NULL );
             return ret;
         }
-        if (async)
+        if (async)  /* overlapped handle without APC routine: cannot deliver the
+                     * completion synchronously, report the pending request */
         {
-            FIXME( "Async I/O lock wait not implemented, might deadlock\n" );
             if (handle) NtClose( handle );
             return STATUS_PENDING;
         }
