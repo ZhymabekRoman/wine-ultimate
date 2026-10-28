@@ -60,6 +60,12 @@ struct alpc_message
     /* user data bytes follow */
 };
 
+/* Compile-time switch for the per-message dumps of relayed ALPC traffic.  Off
+ * by default: the dumps ride wineserver's message path, so a stderr write per
+ * ALPC message dominates the timing of the exchange being traced.  Define to
+ * enable them. */
+/* #define ALPC_DEBUG_TRACE */
+
 /* wine-internal header prefixed to every message delivered to a receiver so
  * ntdll can reconstruct the kernel-filled PORT_MESSAGE fields (ClientId,
  * MessageId) and the CONTEXT message attribute (PortContext). For a connection
@@ -648,7 +654,6 @@ static void wake_connection_waits( struct alpc_port *port )
     for (i = 0; i < n; i++)
     {
         p = ports[i];
-        fprintf( stderr, "CALL_FROM_wake_connection_waits: p=%p\n", p );
         signal_wait_completion_packets( &p->obj );
         fire_wait_completion_packets( &p->obj );
     }
@@ -859,6 +864,7 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
         }
     }
 
+#ifdef ALPC_DEBUG_TRACE
     {
         char hex[600];
         int k, len = min( user_size, 260 );
@@ -868,6 +874,7 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
                  port, peer, msg_type, user_size,
                  (msg_type == ALPC_LPC_REPLY || reply_stamped), hex );
     }
+#endif
     peer->sequence_no++;
     list_add_tail( &peer->msg_queue, &msg->entry );
     wake_up( &peer->obj, 0 );

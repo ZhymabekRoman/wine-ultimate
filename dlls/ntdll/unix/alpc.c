@@ -607,9 +607,6 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     TRACE( "(%p, %#x, %p, %p, %p, %p, %p, %p)\n",
            port_handle, (unsigned int)flags, send_msg, send_msg_attr,
            recv_msg, recv_buffer_size, recv_msg_attr, timeout );
-    fprintf( stderr, "NTDLL: NtAlpcSendWaitReceivePort port=%p flags=%x send=%p recv=%p timeout=%p caller=%p\n",
-             port_handle, (unsigned int)flags, send_msg, recv_msg, timeout, __builtin_return_address(0) );
-
 
     /* --- Send phase --- */
     if (send_msg)
