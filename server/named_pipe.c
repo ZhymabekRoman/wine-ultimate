@@ -1315,6 +1315,11 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
 
     if (attr_size == sizeof("ClientProcessId") && !memcmp( attr, "ClientProcessId", attr_size ))
     {
+        if (!pipe_end->connection)
+        {
+            set_error( STATUS_PIPE_NOT_AVAILABLE );
+            return;
+        }
         value = &pipe_end->client_pid;
         value_size = sizeof(pipe_end->client_pid);
     }
@@ -1325,6 +1330,11 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
     }
     else if (attr_size == sizeof("ClientSessionId") && !memcmp( attr, "ClientSessionId", attr_size ))
     {
+        if (!pipe_end->connection)
+        {
+            set_error( STATUS_PIPE_NOT_AVAILABLE );
+            return;
+        }
         value = &pipe_end->client_session_id;
         value_size = sizeof(pipe_end->client_session_id);
     }
@@ -1472,6 +1482,10 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->fd = NULL;
     pipe_end->flags = pipe_flags;
     pipe_end->connection = NULL;
+    pipe_end->client_pid = 0;
+    pipe_end->server_pid = 0;
+    pipe_end->client_session_id = 0;
+    pipe_end->server_session_id = 0;
     pipe_end->client_proc = NULL;
     pipe_end->buffer_size = buffer_size;
     init_async_queue( &pipe_end->read_q );
@@ -1575,8 +1589,8 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.state = FILE_PIPE_CONNECTED_STATE;
         server->pipe_end.connection = client;
         client->connection = &server->pipe_end;
-        server->pipe_end.client_pid = client->client_pid;
-        server->pipe_end.client_session_id = client->client_session_id;
+        server->pipe_end.client_pid = client->client_proc->id;
+        server->pipe_end.client_session_id = client->client_proc->session_id;
         server->pipe_end.client_proc = (struct process *)grab_object( client->client_proc );
         client->server_pid = server->pipe_end.server_pid;
         client->server_session_id = server->pipe_end.server_session_id;
