@@ -767,14 +767,13 @@ static void alpc_fd_read( struct fd *fd, struct async *async, file_pos_t pos )
 {
     struct alpc_port *port = get_fd_user( fd );
 
-    if (!port->is_server && !async_get_apc_context( async ) && list_empty( &port->msg_queue ) &&
-        (!alpc_port_pair( port ) || list_empty( &alpc_port_pair( port )->msg_queue )))
-    {
-        update_alpc_readiness( port );
-        set_error( STATUS_UNSUCCESSFUL );
-        return;
-    }
-
+    /* A receive on an empty queue is armed and parks (STATUS_PENDING):
+     * NtAlpcSendWaitReceivePort with no Timeout blocks, with a real Timeout
+     * expires as STATUS_TIMEOUT, and with a zero Timeout polls — the
+     * STATUS_UNSUCCESSFUL poll result is the client's, which owns the
+     * Timeout.  Answering UNSUCCESSFUL here (as this used to for
+     * non-APC-context receives) returned a bare blocking receive on a
+     * connection port immediately and poisoned the armed-receive model. */
     queue_async( &port->read_q, async );
     reselect_alpc_port( port );
     set_error( STATUS_PENDING );

@@ -814,7 +814,15 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         else
         {
             NtClose( wait_handle );
-            ret = wait_ret;
+            /* Windows NtAlpcSendWaitReceivePort timeout semantics: a NULL
+             * Timeout blocks until a message arrives, a real Timeout expires
+             * as STATUS_TIMEOUT, and a zero Timeout polls the queue and
+             * reports STATUS_UNSUCCESSFUL when nothing is queued.  The
+             * server parks every empty-queue receive, so translate the poll
+             * expiry here. */
+            if (wait_ret == STATUS_TIMEOUT && timeout && !timeout->QuadPart)
+                ret = STATUS_UNSUCCESSFUL;
+            else ret = wait_ret;
         }
         wait_handle = NULL;
     }
