@@ -26,6 +26,9 @@
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
+#include <sys/stat.h>
+#include <sys/time.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -1233,9 +1236,57 @@ NTSTATUS WINAPI NtAllocateLocallyUniqueId( LUID *luid )
 
 /***********************************************************************
  *             NtAllocateUuids  (NTDLL.@)
+ *
+ * Returns the state of the system time + sequence that is used to build
+ * time-based UUIDs: a 60-bit unique id derived from the machine and boot
+ * time (pTimeLimit), the high bits of the time value (pHighTime), a
+ * monotonically increasing sequence number (pLastCounter) and a random
+ * seed (pLastId).  The id is stable for the lifetime of the process and
+ * differs across processes on the same machine.
  */
+static ULONGLONG splitmix64_next( ULONGLONG *state )
+{
+    ULONGLONG z = *state += 0x9e3779b97f4a7c15;
+    z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9;
+    z = (z ^ (z >> 27)) * 0x94d049bb133111eb;
+    return z ^ (z >> 31);
+}
+
 NTSTATUS WINAPI NtAllocateUuids( ULARGE_INTEGER *time, ULONG *delta, ULONG *sequence, UCHAR *seed )
 {
-    FIXME( "(%p,%p,%p,%p), stub.\n", time, delta, sequence, seed );
+    static ULARGE_INTEGER time_limit;
+    static ULONG delta_high;
+    static ULONG sequence_number;
+    static ULONG seed_value;
+    static int initialized;
+
+    TRACE( "%p %p %p %p\n", time, delta, sequence, seed );
+
+    if (!time || !delta || !sequence || !seed) return STATUS_INVALID_PARAMETER;
+
+    if (!initialized)
+    {
+        ULONGLONG state, machine = (ULONGLONG)(unsigned int)gethostid();
+        struct stat st;
+        struct timeval tv;
+
+        /* mix in machine identity, process start time and current time */
+        if (stat( "/proc/self", &st ) != -1) machine ^= (ULONGLONG)st.st_ctime << 17;
+        if (gettimeofday( &tv, NULL ) != -1) machine ^= ((ULONGLONG)tv.tv_sec << 7) ^ tv.tv_usec;
+        state = (machine ^ ((ULONGLONG)getpid() * 0x9e3779b97f4a7c15)) | 1;
+
+        time_limit.QuadPart = splitmix64_next( &state ) & 0x0fffffffffffffffull;  /* 60-bit unique id */
+        if (!time_limit.QuadPart) time_limit.QuadPart = 1;
+        delta_high = (ULONG)(splitmix64_next( &state ) >> 40) | 1;
+        seed_value = (ULONG)splitmix64_next( &state );
+        sequence_number = 1;
+        initialized = 1;
+    }
+
+    time->QuadPart = time_limit.QuadPart;
+    *delta = delta_high;
+    *sequence = sequence_number++;
+    *(ULONG *)seed = seed_value;
+
     return STATUS_SUCCESS;
 }
