@@ -3662,6 +3662,18 @@ static void dump_dcomp_get_shared_visual_info_reply( const struct dcomp_get_shar
     dump_uint64( " target_root=", &req->target_root );
 }
 
+static void dump_alpc_query_port_request( const struct alpc_query_port_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_alpc_query_port_reply( const struct alpc_query_port_reply *req )
+{
+    fprintf( stderr, " flags=%08x", req->flags );
+    fprintf( stderr, ", sequence_no=%08x", req->sequence_no );
+    dump_uint64( ", port_context=", &req->port_context );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -3986,6 +3998,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dcomp_create_shared_visual_request,
     (dump_func)dump_dcomp_set_shared_visual_info_request,
     (dump_func)dump_dcomp_get_shared_visual_info_request,
+    (dump_func)dump_alpc_query_port_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4310,6 +4323,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dcomp_create_shared_visual_reply,
     NULL,
     (dump_func)dump_dcomp_get_shared_visual_info_reply,
+    (dump_func)dump_alpc_query_port_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4634,6 +4648,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "dcomp_create_shared_visual",
     "dcomp_set_shared_visual_info",
     "dcomp_get_shared_visual_info",
+    "alpc_query_port",
 };
 
 static const struct

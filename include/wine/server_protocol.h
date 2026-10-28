@@ -6407,6 +6407,28 @@ struct dcomp_get_shared_visual_info_reply
 };
 
 
+/* Query basic information about an ALPC port (AlpcBasicInformation).
+ * SequenceNo is the port's message sequence counter: the kernel assigns it
+ * to every message as the message is queued on the port. CoreMessaging's
+ * client connection slurp protocol compares the value read at the start of
+ * a message pair with the number of messages it has received to detect pair
+ * completion; a constant answer never matches, so the state machine parks
+ * its next NtAlpcSendWaitReceivePort on an already-empty queue and the UI
+ * thread blocks forever in EnsureMainWindowInitialized. */
+struct alpc_query_port_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+};
+struct alpc_query_port_reply
+{
+    struct reply_header __header;
+    unsigned int        flags;
+    unsigned int        sequence_no;
+    client_ptr_t        port_context;
+};
+
+
 enum request
 {
     REQ_new_process,
@@ -6729,6 +6751,7 @@ enum request
     REQ_dcomp_create_shared_visual,
     REQ_dcomp_set_shared_visual_info,
     REQ_dcomp_get_shared_visual_info,
+    REQ_alpc_query_port,
     REQ_NB_REQUESTS
 };
 
@@ -7056,6 +7079,7 @@ union generic_request
     struct dcomp_create_shared_visual_request dcomp_create_shared_visual_request;
     struct dcomp_set_shared_visual_info_request dcomp_set_shared_visual_info_request;
     struct dcomp_get_shared_visual_info_request dcomp_get_shared_visual_info_request;
+    struct alpc_query_port_request alpc_query_port_request;
 };
 union generic_reply
 {
@@ -7381,8 +7405,9 @@ union generic_reply
     struct dcomp_create_shared_visual_reply dcomp_create_shared_visual_reply;
     struct dcomp_set_shared_visual_info_reply dcomp_set_shared_visual_info_reply;
     struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
+    struct alpc_query_port_reply alpc_query_port_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 966
+#define SERVER_PROTOCOL_VERSION 967
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

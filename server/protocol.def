@@ -4428,3 +4428,20 @@ typedef struct _ALPC_DATA_VIEW_ATTR
 @REPLY
     client_ptr_t  target_root;                /* root IDCompositionVisual pointer for the target created from this shared visual */
 @END
+
+
+/* Query basic information about an ALPC port (AlpcBasicInformation).
+ * SequenceNo is the port's message sequence counter: the kernel assigns it
+ * to every message as the message is queued on the port. CoreMessaging's
+ * client connection slurp protocol compares the value read at the start of
+ * a message pair with the number of messages it has received to detect pair
+ * completion; a constant answer never matches, so the state machine parks
+ * its next NtAlpcSendWaitReceivePort on an already-empty queue and the UI
+ * thread blocks forever in EnsureMainWindowInitialized. */
+@REQ(alpc_query_port)
+    obj_handle_t        handle;         /* ALPC port handle */
+@REPLY
+    unsigned int        flags;          /* port attribute flags */
+    unsigned int        sequence_no;    /* last assigned message sequence number */
+    client_ptr_t        port_context;   /* port context */
+@END

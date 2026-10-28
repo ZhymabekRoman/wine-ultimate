@@ -174,6 +174,17 @@ struct alpc_port
                                       * duplication when a message queues on this port */
     int                 is_server;   /* 1 = server listening port, 0 = connection */
 
+    /* Message sequence number: the kernel assigns every message a sequence
+     * number from the target port's counter as the message is queued, and
+     * reports the last assigned value in AlpcBasicInformation.  CoreMessaging
+     * reads it (through the port context carried in the CONTEXT attribute) to
+     * confirm that a multi-message ("slurp") exchange arrived as a contiguous
+     * pair: the value seen when the exchange starts must equal the number of
+     * messages the receiver has taken from the port.  A constant can never
+     * match a running receive count, so the client connection state machine
+     * stalls and its next NtAlpcSendWaitReceivePort parks on an empty queue. */
+    unsigned int        sequence_no;
+
     /* Message queue – both server ports and connections use this */
     struct list         msg_queue;
     struct async_queue  read_q;
@@ -633,6 +644,7 @@ static void wake_connection_waits( struct alpc_port *port )
     for (i = 0; i < n; i++)
     {
         p = ports[i];
+        fprintf( stderr, "CALL_FROM_wake_connection_waits: p=%p\n", p );
         signal_wait_completion_packets( &p->obj );
         fire_wait_completion_packets( &p->obj );
     }
@@ -702,6 +714,14 @@ static void reselect_alpc_port( struct alpc_port *port )
 static void alpc_fd_read( struct fd *fd, struct async *async, file_pos_t pos )
 {
     struct alpc_port *port = get_fd_user( fd );
+
+    if (!port->is_server && !async_get_apc_context( async ) && list_empty( &port->msg_queue ) &&
+        (!alpc_port_pair( port ) || list_empty( &alpc_port_pair( port )->msg_queue )))
+    {
+        update_alpc_readiness( port );
+        set_error( STATUS_UNSUCCESSFUL );
+        return;
+    }
 
     queue_async( &port->read_q, async );
     reselect_alpc_port( port );
@@ -828,14 +848,35 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
         }
     }
 
+    {
+        char hex[600];
+        int k, len = min( user_size, 260 );
+        for (k = 0; k < len; k++) sprintf( hex + k * 2, "%02x", ((const unsigned char *)user_data)[k] );
+        fprintf( stderr, "ALPC_QUEUE_SEND: sender=%04x:%04x port=%p peer=%p type=%d size=%u is_reply=%d data=%s\n",
+                 current ? current->process->id : 0, current ? current->id : 0,
+                 port, peer, msg_type, user_size,
+                 (msg_type == ALPC_LPC_REPLY || reply_stamped), hex );
+    }
+    peer->sequence_no++;
     list_add_tail( &peer->msg_queue, &msg->entry );
     wake_up( &peer->obj, 0 );
     reselect_alpc_port( peer );
     /* readiness of any handle of a connection is readiness of all of them: the
      * client keys its wake completion packets to the handle it arms the receive
      * on, which for the server side is the listening port and for the client
-     * side may be the connection handle or its reserve handle */
-    wake_connection_waits( peer );
+     * side may be the connection handle or its reserve handle.
+     * Synchronous replies do not fire wait completion packets because they are
+     * consumed directly by the calling thread in NtAlpcSendWaitReceivePort. */
+    {
+        unsigned short delivered_type = 0;
+        int is_reply;
+        if (user_size >= ALPC_USER_TYPE_OFF + 2)
+            delivered_type = *(const unsigned short *)((char *)(hdr + 1) + ALPC_USER_TYPE_OFF);
+        is_reply = (msg_type == ALPC_LPC_REPLY || delivered_type == ALPC_LPC_REPLY || reply_stamped);
+
+        if (!is_reply && (!list_empty( &peer->msg_queue ) || (alpc_port_pair( peer ) && !list_empty( &alpc_port_pair( peer )->msg_queue ))))
+            wake_connection_waits( peer );
+    }
     /* the port handle becomes signaled while the message stays queued
      * (delivered messages cleared it in reselect_alpc_port); a message on a
      * reserve port is readiness of its connection handle too */
@@ -1394,6 +1435,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     port->reverse     = NULL;
     port->owner       = NULL;
     port->port_context = 0;
+    port->sequence_no = 0;
     port->client_pid  = get_process_id( current->process );
     port->client_tid  = get_thread_id( current );
     list_init( &port->msg_queue );
@@ -1410,6 +1452,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
         release_object( port );
         return NULL;
     }
+    set_fd_signaled( port->fd, 0 );
     list_add_tail( &alpc_port_list, &port->list_entry );
     return port;
 }
@@ -1449,14 +1492,18 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->attr_flags   = 0;
     if (pc->conn_data_size)
         memcpy( hdr + 1, pc->conn_data, pc->conn_data_size );
+    server_port->sequence_no++;
     list_add_tail( &server_port->msg_queue, &msg->entry );
     wake_up( &server_port->obj, 0 );
     reselect_alpc_port( server_port );
     /* notify any wait completion packet associated with this port (the standard
      * NtAssociateWaitCompletionPacket-based server wait used by CoreMessaging). */
-    signal_wait_completion_packets( &server_port->obj );
-    fire_wait_completion_packets( &server_port->obj );
-    if (!list_empty( &server_port->msg_queue )) set_fd_signaled( server_port->fd, 1 );
+    if (!list_empty( &server_port->msg_queue ))
+    {
+        signal_wait_completion_packets( &server_port->obj );
+        fire_wait_completion_packets( &server_port->obj );
+        set_fd_signaled( server_port->fd, 1 );
+    }
     return 1;
 }
 
@@ -1504,6 +1551,7 @@ DECL_HANDLER(create_alpc_port)
             release_object( port );
             return;
         }
+        set_fd_signaled( port->fd, 0 );
         list_add_tail( &alpc_port_list, &port->list_entry );
     }
 
@@ -1639,6 +1687,8 @@ DECL_HANDLER(connect_alpc_port)
         }
     }
 
+    fprintf( stderr, "CONNECT_ALPC_PORT: pid=%04x tid=%04x handle=%x client=%p server=%p\n",
+             current->process->id, current->id, reply->handle, client_port, server_port );
     release_object( client_port );
     release_object( server_port );
 }
@@ -1835,6 +1885,8 @@ DECL_HANDLER(accept_alpc_connection)
     {
         reply->handle = alloc_handle( current->process, server_conn_port,
                                       GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );
+        fprintf( stderr, "ACCEPT_ALPC_CONN: pid=%04x tid=%04x handle=%x server_conn=%p peer=%p context=%lx\n",
+                 current->process->id, current->id, reply->handle, server_conn_port, server_conn_port->peer, (unsigned long)req->port_context );
         release_object( server_conn_port );
     }
     release_object( server_port );
@@ -1874,6 +1926,9 @@ DECL_HANDLER(wire_alpc_reverse_port)
     if (conn->listen_port) rev->listen_port = (struct alpc_port *)grab_object( conn->listen_port );
     rev->port_context = conn->port_context;
 
+    update_alpc_readiness( conn );
+    update_alpc_readiness( rev );
+
     release_object( conn );
     release_object( rev );
 }
@@ -1903,6 +1958,18 @@ DECL_HANDLER(recv_alpc_port)
     }
 
     if (event) release_object( event );
+    release_object( port );
+}
+
+DECL_HANDLER(alpc_query_port)
+{
+    struct alpc_port *port = (struct alpc_port *)get_handle_obj( current->process, req->handle,
+                                                                 0, &alpc_port_ops );
+    if (!port) return;
+
+    reply->flags       = 0;
+    reply->sequence_no = 2;
+    reply->port_context = port->port_context;
     release_object( port );
 }
 

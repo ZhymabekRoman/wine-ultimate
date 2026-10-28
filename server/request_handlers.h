@@ -327,6 +327,7 @@ DECL_HANDLER(cancel_wait_completion_packet);
 DECL_HANDLER(dcomp_create_shared_visual);
 DECL_HANDLER(dcomp_set_shared_visual_info);
 DECL_HANDLER(dcomp_get_shared_visual_info);
+DECL_HANDLER(alpc_query_port);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -651,6 +652,7 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_dcomp_create_shared_visual,
     (req_handler)req_dcomp_set_shared_visual_info,
     (req_handler)req_dcomp_get_shared_visual_info,
+    (req_handler)req_alpc_query_port,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2475,3 +2477,9 @@ C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_request, handle) == 12 );
 C_ASSERT( sizeof(struct dcomp_get_shared_visual_info_request) == 16 );
 C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, target_root) == 8 );
 C_ASSERT( sizeof(struct dcomp_get_shared_visual_info_reply) == 16 );
+C_ASSERT( offsetof(struct alpc_query_port_request, handle) == 12 );
+C_ASSERT( sizeof(struct alpc_query_port_request) == 16 );
+C_ASSERT( offsetof(struct alpc_query_port_reply, flags) == 8 );
+C_ASSERT( offsetof(struct alpc_query_port_reply, sequence_no) == 12 );
+C_ASSERT( offsetof(struct alpc_query_port_reply, port_context) == 16 );
+C_ASSERT( sizeof(struct alpc_query_port_reply) == 24 );

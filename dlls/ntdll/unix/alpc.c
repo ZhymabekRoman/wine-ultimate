@@ -607,6 +607,8 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     TRACE( "(%p, %#x, %p, %p, %p, %p, %p, %p)\n",
            port_handle, (unsigned int)flags, send_msg, send_msg_attr,
            recv_msg, recv_buffer_size, recv_msg_attr, timeout );
+    fprintf( stderr, "NTDLL: NtAlpcSendWaitReceivePort port=%p flags=%x send=%p recv=%p timeout=%p caller=%p\n",
+             port_handle, (unsigned int)flags, send_msg, recv_msg, timeout, __builtin_return_address(0) );
 
 
     /* --- Send phase --- */
@@ -957,12 +959,20 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
 /******************************************************************************
  *           NtAlpcQueryInformation  (NTDLL.@)
  *
- * CoreMessaging queries AlpcBasicInformation (class 0) right after creating its
- * registrar port and caches the returned SequenceNo. Returning an error sends it
- * down a failure path that leaves the port object half-initialised, so provide a
- * minimal successful answer.
+ * CoreMessaging queries AlpcBasicInformation (class 0) on the connection port
+ * carried in a received message's CONTEXT PortContext, at the start of every
+ * multi-message ("slurp") exchange, and compares the returned SequenceNo with
+ * the number of messages it has received on that port: when they match, the
+ * exchange arrived as a contiguous pair and the connection's receive state
+ * machine completes.  SequenceNo is the port's message sequence counter, which
+ * the kernel advances as each message is queued on the port, so it must be
+ * tracked per port by the server.  A constant answer never matches a running
+ * receive count: the pair is never confirmed, and the client's next
+ * NtAlpcSendWaitReceivePort parks on an already drained queue with no timeout,
+ * deadlocking the UI thread inside AppWindow::EnsureMainWindowInitialized.
+ * Returning an error is worse: it sends CoreMessaging down a failure path that
+ * leaves the port object half-initialised.
  */
-static LONG alpc_sequence_counter;
 
 NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
                                          void *buffer, ULONG length, ULONG *ret_length )
@@ -974,10 +984,29 @@ NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
     case 0: /* AlpcBasicInformation */
     {
         ALPC_BASIC_INFORMATION info;
+        unsigned int ret;
+
         if (length < sizeof(info)) return STATUS_INFO_LENGTH_MISMATCH;
+        if (!port_handle) return STATUS_INVALID_HANDLE;
+
         info.Flags       = 0;
-        info.SequenceNo  = InterlockedIncrement( &alpc_sequence_counter );
+        info.SequenceNo  = 0;
         info.PortContext = NULL;
+
+        SERVER_START_REQ( alpc_query_port )
+        {
+            req->handle = wine_server_obj_handle( port_handle );
+            ret = wine_server_call( req );
+            if (!ret)
+            {
+                info.Flags       = reply->flags;
+                info.SequenceNo  = reply->sequence_no;
+                info.PortContext = (void *)(ULONG_PTR)reply->port_context;
+            }
+        }
+        SERVER_END_REQ;
+        if (ret) return ret;
+
         memcpy( buffer, &info, sizeof(info) );
         if (ret_length) *ret_length = sizeof(info);
         return STATUS_SUCCESS;
