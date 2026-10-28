@@ -35,6 +35,7 @@
 
 #include "wine/exception.h"
 #include "wine/asm.h"
+#include "wine/list.h"
 #include "kernelbase.h"
 #include "wine/debug.h"
 
@@ -821,13 +822,34 @@ LONG WINAPI UnhandledExceptionFilter( EXCEPTION_POINTERS *epointers )
 }
 
 
+struct wer_block
+{
+    struct list entry;
+    void *address;
+    DWORD size;
+};
+
+static CRITICAL_SECTION wer_cs;
+static INIT_ONCE wer_init_once = INIT_ONCE_STATIC_INIT;
+static struct list wer_blocks = LIST_INIT(wer_blocks);
+static DWORD wer_flags;
+
+static BOOL init_wer_table( INIT_ONCE *once, void *param, void **context )
+{
+    RtlInitializeCriticalSection( &wer_cs );
+    return TRUE;
+}
+
 /***********************************************************************
  *         WerGetFlags   (kernelbase.@)
  */
 HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerGetFlags( HANDLE process, DWORD *flags )
 {
-    FIXME( "(%p, %p) stub\n", process, flags );
-    return E_NOTIMPL;
+    TRACE( "(%p, %p)\n", process, flags );
+
+    if (!flags) return E_INVALIDARG;
+    *flags = wer_flags;  /* the flags are process-local, the handle is ignored */
+    return S_OK;
 }
 
 
@@ -857,8 +879,20 @@ HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerRegisterFile( const WCHAR *file, WER_R
  */
 HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerRegisterMemoryBlock( void *block, DWORD size )
 {
-    FIXME( "(%p %ld) stub\n", block, size );
-    return E_NOTIMPL;
+    struct wer_block *entry;
+
+    TRACE( "%p %ld\n", block, size );
+
+    if (!block || !size) return E_INVALIDARG;
+    if (!(entry = RtlAllocateHeap( GetProcessHeap(), 0, sizeof(*entry) ))) return E_OUTOFMEMORY;
+    entry->address = block;
+    entry->size = size;
+
+    InitOnceExecuteOnce( &wer_init_once, init_wer_table, NULL, NULL );
+    RtlEnterCriticalSection( &wer_cs );
+    list_add_tail( &wer_blocks, &entry->entry );
+    RtlLeaveCriticalSection( &wer_cs );
+    return S_OK;
 }
 
 
@@ -877,7 +911,9 @@ HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerRegisterRuntimeExceptionModule( const 
  */
 HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerSetFlags( DWORD flags )
 {
-    FIXME("(%ld) stub\n", flags);
+    TRACE( "%ld\n", flags );
+
+    wer_flags = flags;  /* WER reporting is not implemented, record the flags for WerGetFlags */
     return S_OK;
 }
 
@@ -907,8 +943,28 @@ HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerUnregisterFile( const WCHAR *file )
  */
 HRESULT WINAPI /* DECLSPEC_HOTPATCH */ WerUnregisterMemoryBlock( void *block )
 {
-    FIXME( "(%p) stub\n", block );
-    return E_NOTIMPL;
+    struct wer_block *entry, *next;
+    BOOL found = FALSE;
+
+    TRACE( "%p\n", block );
+
+    InitOnceExecuteOnce( &wer_init_once, init_wer_table, NULL, NULL );
+    RtlEnterCriticalSection( &wer_cs );
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &wer_blocks, struct wer_block, entry )
+    {
+        if (entry->address == block)
+        {
+            list_remove( &entry->entry );
+            RtlFreeHeap( GetProcessHeap(), 0, entry );
+            found = TRUE;
+            break;
+        }
+    }
+    RtlLeaveCriticalSection( &wer_cs );
+
+    if (!found)  /* Windows does not report unregistered blocks as an error */
+        TRACE( "%p not registered\n", block );
+    return S_OK;
 }
 
 
