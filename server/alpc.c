@@ -284,6 +284,7 @@ static struct list alpc_port_list = LIST_INIT(alpc_port_list);
 /* ---- Forward declarations ---- */
 
 static void alpc_gate_clear( struct alpc_port *base, unsigned int status );
+static struct alpc_port *alpc_conn_base( struct alpc_port *port );
 struct alpc_pending_conn;
 static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port,
                                                    struct alpc_pending_conn *found,
