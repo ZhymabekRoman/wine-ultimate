@@ -939,13 +939,103 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetProcessId( HANDLE process )
 }
 
 
+/* Wine's winnt.h still uses the Windows 8 ordering of PROCESS_MITIGATION_POLICY
+ * (with ProcessStrictHandleCheckPolicy at 3, ProcessSystemCallDisablePolicy at 4
+ * and ProcessMitigationOptionsMask at 5), while programs built against the
+ * Windows 10 and 11 SDKs pass the newer class numbers.  Applications such as
+ * Chromium's sandbox use the modern numbering, so the numeric classes below
+ * follow the Windows 11 SDK winnt.h; the measured GetProcessMitigationPolicy
+ * call with class 11 and a 4-byte buffer is ProcessWin32kDisablePolicy in that
+ * numbering (and ProcessSystemCallFilterPolicy in the Windows 8 numbering,
+ * which is also served from the same slot). */
+#define MITIGATION_POLICY_DEP                     0
+#define MITIGATION_POLICY_ASLR                    1
+#define MITIGATION_POLICY_DYNAMIC_CODE            2
+#define MITIGATION_POLICY_CACFG                   3
+#define MITIGATION_POLICY_EXTENSION_POINT_DISABLE 4
+#define MITIGATION_POLICY_SIGNATURE               5
+#define MITIGATION_POLICY_FONT_DISABLE            6
+#define MITIGATION_POLICY_IMAGE_LOAD              7
+#define MITIGATION_POLICY_SYSCALL_DISABLE         8
+#define MITIGATION_POLICY_REDIRECTION_TRUST       9
+#define MITIGATION_POLICY_PAYLOAD_ROTATION        10
+#define MITIGATION_POLICY_WIN32K_DISABLE          11
+#define MITIGATION_POLICY_CET_SHADOW_STACKS       12
+#define MITIGATION_POLICY_ASG_FEATURE_CONTROL     13
+#define MITIGATION_POLICY_COUNT                   24
+
+/* policies whose buffer is a single DWORD on Windows 11 */
+#define MITIGATION_POLICY_IS_DWORD(p)  ((p) == 8 || (p) == 11 || (p) == 12)
+
+static CRITICAL_SECTION mitigation_cs;
+static INIT_ONCE mitigation_init_once = INIT_ONCE_STATIC_INIT;
+static ULONGLONG mitigation_values[MITIGATION_POLICY_COUNT];
+static BYTE mitigation_set[MITIGATION_POLICY_COUNT];
+
+static BOOL init_mitigation_table( INIT_ONCE *once, void *param, void **context )
+{
+    RtlInitializeCriticalSection( &mitigation_cs );
+    return TRUE;
+}
+
+/* default policy values for a process that never called SetProcessMitigationPolicy,
+ * modelled on a default Win32 process on Windows 11 x86_64: DEP enabled/opt-in,
+ * bottom-up ASLR and high-entropy VA enabled, CFG enabled, ACG disabled,
+ * win32k system calls disabled only for CIG-enabled (MicrosoftSignedOnly) processes,
+ * CET shadow stacks, payload rotation and redirection trust disabled */
+static ULONGLONG get_default_mitigation_value( unsigned int policy )
+{
+    switch (policy)
+    {
+    case MITIGATION_POLICY_DEP: return 3;  /* EnableExecution | OptIn */
+    case MITIGATION_POLICY_ASLR: return 5; /* EnableBottomUpRandomization | EnableHighEntropyVA */
+    case MITIGATION_POLICY_CACFG: return 2; /* Enable */
+    case MITIGATION_POLICY_WIN32K_DISABLE:
+        if (mitigation_set[MITIGATION_POLICY_SIGNATURE] &&
+            (mitigation_values[MITIGATION_POLICY_SIGNATURE] & 4 /* MicrosoftSignedOnly */))
+            return 1;
+        return 0;
+    default:
+        return 0;
+    }
+}
+
 /**********************************************************************
  *           GetProcessMitigationPolicy   (kernelbase.@)
  */
 BOOL WINAPI /* DECLSPEC_HOTPATCH */ GetProcessMitigationPolicy( HANDLE process, PROCESS_MITIGATION_POLICY policy,
                                                           void *buffer, SIZE_T length )
 {
-    FIXME( "(%p, %u, %p, %Iu): stub\n", process, policy, buffer, length );
+    unsigned int id = (unsigned int)policy;
+    ULONGLONG value;
+
+    TRACE( "%p, %u, %p, %Iu\n", process, policy, buffer, length );
+
+    if (!buffer || id >= MITIGATION_POLICY_COUNT)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (length < (MITIGATION_POLICY_IS_DWORD(id) ? 4 : 8))
+    {
+        SetLastError( ERROR_BAD_LENGTH );
+        return FALSE;
+    }
+
+    /* the policy table is process-local; querying another process's policy is
+     * not supported, so the defaults for an unhardened process are returned */
+    if (process != GetCurrentProcess() && GetProcessId( process ) != GetCurrentProcessId())
+    {
+        memset( buffer, 0, length );
+        return TRUE;
+    }
+
+    InitOnceExecuteOnce( &mitigation_init_once, init_mitigation_table, NULL, NULL );
+    RtlEnterCriticalSection( &mitigation_cs );
+    value = mitigation_set[id] ? mitigation_values[id] : get_default_mitigation_value( id );
+    RtlLeaveCriticalSection( &mitigation_cs );
+
+    memcpy( buffer, &value, min(length, sizeof(value)) );
     return TRUE;
 }
 
@@ -1399,7 +1489,29 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetProcessGroupAffinity( HANDLE process, const GRO
 BOOL WINAPI /* DECLSPEC_HOTPATCH */ SetProcessMitigationPolicy( PROCESS_MITIGATION_POLICY policy,
                                                           void *buffer, SIZE_T length )
 {
-    FIXME( "(%d, %p, %Iu): stub\n", policy, buffer, length );
+    unsigned int id = (unsigned int)policy;
+    ULONGLONG value = 0;
+
+    TRACE( "%u, %p, %Iu\n", policy, buffer, length );
+
+    if (!buffer || id >= MITIGATION_POLICY_COUNT)
+    {
+        SetLastError( ERROR_INVALID_PARAMETER );
+        return FALSE;
+    }
+    if (length < (MITIGATION_POLICY_IS_DWORD(id) ? 4 : 8) || length > sizeof(value))
+    {
+        SetLastError( ERROR_BAD_LENGTH );
+        return FALSE;
+    }
+
+    memcpy( &value, buffer, min(length, sizeof(value)) );
+
+    InitOnceExecuteOnce( &mitigation_init_once, init_mitigation_table, NULL, NULL );
+    RtlEnterCriticalSection( &mitigation_cs );
+    mitigation_values[id] = value;
+    mitigation_set[id] = 1;
+    RtlLeaveCriticalSection( &mitigation_cs );
     return TRUE;
 }
 
