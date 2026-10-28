@@ -1131,6 +1131,17 @@ static void reselect_write_queue( struct pipe_end *pipe_end )
 static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
 {
     struct pipe_end *pipe_end = get_fd_user( fd );
+    const WCHAR *pname;
+    data_size_t plen;
+
+    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
+    if (debug_level)
+    {
+        fprintf( stderr, "PIPE_READ: pid=%04x pipe_end=%p pipe=%p name=", current->process->id, pipe_end, pipe_end->pipe );
+        if (pname) dump_strW( pname, plen, stderr, "[]" );
+        else fprintf( stderr, "(null)" );
+        fprintf( stderr, " state=%d nonblocking=%d\n", pipe_end->state, !!(pipe_end->flags & NAMED_PIPE_NONBLOCKING_MODE) );
+    }
 
     switch (pipe_end->state)
     {
@@ -1163,6 +1174,26 @@ static void pipe_end_write( struct fd *fd, struct async *async, file_pos_t pos )
     struct pipe_end *pipe_end = get_fd_user( fd );
     struct pipe_message *message;
     struct iosb *iosb;
+    const WCHAR *pname;
+    data_size_t plen;
+
+    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
+    if (debug_level)
+    {
+        fprintf( stderr, "PIPE_WRITE: pid=%04x pipe_end=%p pipe=%p name=", current->process->id, pipe_end, pipe_end->pipe );
+        if (pname) dump_strW( pname, plen, stderr, "[]" );
+        else fprintf( stderr, "(null)" );
+        fprintf( stderr, " size=%u state=%d", (unsigned)get_req_data_size(), pipe_end->state );
+        if (get_req_data_size() > 0)
+        {
+            const unsigned char *pdata = get_req_data();
+            data_size_t dlen = get_req_data_size() > 32 ? 32 : get_req_data_size();
+            data_size_t k;
+            fprintf( stderr, " data=" );
+            for (k = 0; k < dlen; k++) fprintf( stderr, "%02x", pdata[k] );
+        }
+        fprintf( stderr, "\n" );
+    }
 
     switch (pipe_end->state)
     {
@@ -1567,6 +1598,18 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
     struct pipe_server *server;
     struct pipe_end *client;
     unsigned int pipe_sharing;
+    const WCHAR *pname;
+    data_size_t plen;
+
+    pname = get_object_name( &pipe->obj, &plen );
+    if (debug_level)
+    {
+        fprintf( stderr, "NAMED_PIPE_OPEN_FILE: name=" );
+        if (pname) dump_strW( pname, plen, stderr, "[]" );
+        else fprintf( stderr, "(null)" );
+        fprintf( stderr, " pipe=%p listeners_empty=%d access=%08x sharing=%08x\n",
+                 pipe, list_empty( &pipe->listeners ), access, pipe->sharing );
+    }
 
     if (list_empty( &pipe->listeners ))
     {
@@ -1646,6 +1689,15 @@ static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async
             name.str = buffer->Name;
             name.len = (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR);
             if (!(pipe = open_named_object( &device->obj, &named_pipe_ops, &name, 0 ))) return;
+
+            if (debug_level)
+            {
+                fprintf( stderr, "FSCTL_PIPE_WAIT: name=" );
+                dump_strW( buffer->Name, (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR), stderr, "[]" );
+                fprintf( stderr, " timeout=%lld listeners_empty=%d\n",
+                         (long long)(buffer->TimeoutSpecified ? buffer->Timeout.QuadPart : pipe->timeout),
+                         list_empty( &pipe->listeners ) );
+            }
 
             if (list_empty( &pipe->listeners ))
             {

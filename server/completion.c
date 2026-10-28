@@ -648,6 +648,9 @@ static void wait_packet_disassociate( struct wait_completion_packet *packet )
  * forever, at the cost of the thread that owns the wake. */
 static void wake_packet_fire( struct wait_completion_packet *packet, int signal_target )
 {
+    if (debug_level)
+        fprintf( stderr, "WAKE_PACKET_FIRE: packet=%p target=%p comp=%p key=%lx apc=%lx sig=%d\n",
+                 packet, packet->target, packet->completion, (unsigned long)packet->ckey, (unsigned long)packet->cvalue, signal_target );
     if (signal_target && packet->target)
     {
         struct object *sync = packet->target->ops->get_sync( packet->target );
@@ -676,9 +679,13 @@ void signal_wait_completion_packets( struct object *target )
 {
     struct wait_completion_packet *packet, *next;
 
+    if (debug_level)
+        fprintf( stderr, "SIGNAL_WAIT_COMPLETION_PACKETS: target=%p\n", target );
     LIST_FOR_EACH_ENTRY_SAFE( packet, next, &wait_packet_list, struct wait_completion_packet, entry )
     {
         if (packet->target != target) continue;
+        if (debug_level)
+            fprintf( stderr, "  -> firing packet %p for target %p\n", packet, target );
         wake_packet_fire( packet, 0 );
     }
 }
@@ -692,9 +699,13 @@ void fire_wait_completion_packets( struct object *port )
 {
     struct wait_completion_packet *packet, *next;
 
+    if (debug_level)
+        fprintf( stderr, "FIRE_WAIT_COMPLETION_PACKETS: port=%p\n", port );
     LIST_FOR_EACH_ENTRY_SAFE( packet, next, &wait_packet_list, struct wait_completion_packet, entry )
     {
         if (packet->receive_port != port) continue;
+        if (debug_level)
+            fprintf( stderr, "  -> firing packet %p for receive_port %p\n", packet, port );
         wake_packet_fire( packet, packet->wake_up_app );
     }
 }

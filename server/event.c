@@ -35,6 +35,7 @@
 #include "request.h"
 #include "security.h"
 #include "file.h"
+#include "process.h"
 
 static const WCHAR event_name[] = {'E','v','e','n','t'};
 
@@ -258,6 +259,12 @@ struct event *create_event( struct object *root, const struct unicode_str *name,
             }
         }
     }
+    if (event && debug_level)
+    {
+        fprintf( stderr, "CREATE_EVENT: pid=%04x tid=%04x event=%p sync=%p manual=%d init=%d\n",
+                 current ? current->process->id : 0, current ? current->id : 0,
+                 &event->obj, event->sync, manual_reset, initial_state );
+    }
     return event;
 }
 
@@ -269,11 +276,17 @@ struct event *get_event_obj( struct process *process, obj_handle_t handle, unsig
 void set_event( struct event *event )
 {
     signal_sync( event->sync );
+    if (debug_level)
+        fprintf( stderr, "CALL_FROM_set_event: pid=%04x tid=%04x event=%p sync=%p\n",
+                 current ? current->process->id : 0, current ? current->id : 0, &event->obj, event->sync );
     signal_wait_completion_packets( &event->obj );
 }
 
 void reset_event( struct event *event )
 {
+    if (debug_level)
+        fprintf( stderr, "CALL_FROM_reset_event: pid=%04x tid=%04x event=%p sync=%p\n",
+                 current ? current->process->id : 0, current ? current->id : 0, &event->obj, event->sync );
     reset_sync( event->sync );
 }
 
@@ -413,8 +426,13 @@ DECL_HANDLER(open_event)
 DECL_HANDLER(event_op)
 {
     struct event *event;
+    struct event_sync *sync;
 
     if (!(event = get_event_obj( current->process, req->handle, EVENT_MODIFY_STATE ))) return;
+
+    fprintf( stderr, "EVENT_OP: pid=%04x tid=%04x op=%d handle=%x event=%p\n",
+             current ? current->process->id : 0, current ? current->id : 0,
+             req->op, req->handle, &event->obj );
 
     if (event->sync->ops != &event_sync_ops)
     {
@@ -439,7 +457,7 @@ DECL_HANDLER(event_op)
         return;
     }
 
-    struct event_sync *sync = (struct event_sync *)event->sync;
+    sync = (struct event_sync *)event->sync;
     reply->state = sync->signaled;
     switch(req->op)
     {
