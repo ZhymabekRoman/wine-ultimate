@@ -1231,7 +1231,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateIoCompletionPort( HANDLE handle, HANDLE po
         return 0;
     }
 
-    if (handle != INVALID_HANDLE_VALUE)
+    if (handle && handle != INVALID_HANDLE_VALUE)
     {
         info.CompletionPort = ret;
         info.CompletionKey = key;
