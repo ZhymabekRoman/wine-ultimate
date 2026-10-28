@@ -433,7 +433,30 @@ static void alpc_port_destroy( struct object *obj )
     {
         if (port->peer)
         {
+            struct alpc_port *peer_base = alpc_conn_base( port->peer );
+            struct alpc_outstanding *o, *next_o;
+
             async_wake_up( &port->peer->read_q, STATUS_PIPE_DISCONNECTED );
+            /* Mirror the disconnect path: a synchronous send parked on the
+             * serialisation gate must be released with the connection, and the
+             * connection's outstanding ids drained.  Without this a peer that
+             * dies mid-exchange leaves the gated SYNC_REQUEST sender parked in
+             * wait_async forever (the gate entries pin references to this very
+             * port), and every later sync send on the live side is gated
+             * behind the stale outstanding entry — the connection deadlocks
+             * permanently. */
+            alpc_gate_clear( port->peer, STATUS_PIPE_DISCONNECTED );
+            alpc_gate_clear( port, STATUS_PIPE_DISCONNECTED );
+            if (peer_base && peer_base != port)
+            {
+                alpc_gate_clear( peer_base, STATUS_PIPE_DISCONNECTED );
+                LIST_FOR_EACH_ENTRY_SAFE( o, next_o, &peer_base->outstanding,
+                                          struct alpc_outstanding, entry )
+                {
+                    list_remove( &o->entry );
+                    free( o );
+                }
+            }
             if (port->peer->peer == port) port->peer->peer = NULL;
             port->peer = NULL;
         }
