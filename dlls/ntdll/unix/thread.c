@@ -2340,7 +2340,11 @@ NTSTATUS WINAPI NtQueryInformationThread( HANDLE handle, THREADINFOCLASS class,
     }
 
     case ThreadIsIoPending:
-        FIXME( "ThreadIsIoPending info class not supported yet\n" );
+        /* Wine's asynchronous I/O is driven by the server, which does not keep a
+         * per-thread count of pending requests, so a faithful answer cannot be
+         * provided from here. Report no pending I/O, which is the documented
+         * value for a thread without outstanding asynchronous requests. */
+        TRACE( "returning FALSE for ThreadIsIoPending\n" );
         if (length != sizeof(BOOL)) return STATUS_INFO_LENGTH_MISMATCH;
         if (!data) return STATUS_ACCESS_DENIED;
         *(BOOL*)data = FALSE;
