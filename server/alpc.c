@@ -185,6 +185,10 @@ struct alpc_port
      * stalls and its next NtAlpcSendWaitReceivePort parks on an empty queue. */
     unsigned int        sequence_no;
 
+    /* Port attribute flags (the ALPC_PORTFLG_* bits) as supplied when the port
+     * was created; AlpcBasicInformation reports them back unchanged. */
+    unsigned int        flags;
+
     /* Message queue – both server ports and connections use this */
     struct list         msg_queue;
     struct async_queue  read_q;
@@ -1436,6 +1440,7 @@ static struct alpc_port *create_alpc_port_obj( int is_server )
     port->owner       = NULL;
     port->port_context = 0;
     port->sequence_no = 0;
+    port->flags       = 0;
     port->client_pid  = get_process_id( current->process );
     port->client_tid  = get_thread_id( current );
     list_init( &port->msg_queue );
@@ -1536,6 +1541,8 @@ DECL_HANDLER(create_alpc_port)
         port->reverse     = NULL;
         port->owner       = NULL;
         port->port_context = 0;
+        port->sequence_no = 0;
+        port->flags       = req->flags;
         port->client_pid  = get_process_id( current->process );
         port->client_tid  = get_thread_id( current );
         list_init( &port->msg_queue );
@@ -1967,8 +1974,8 @@ DECL_HANDLER(alpc_query_port)
                                                                  0, &alpc_port_ops );
     if (!port) return;
 
-    reply->flags       = 0;
-    reply->sequence_no = 2;
+    reply->flags       = port->flags;
+    reply->sequence_no = port->sequence_no;
     reply->port_context = port->port_context;
     release_object( port );
 }
