@@ -5948,6 +5948,7 @@ static BOOL irp_completion( void *user, ULONG_PTR *info, unsigned int *status )
             req->user_arg = wine_server_client_ptr( async );
             wine_server_set_reply( req, async->buffer, async->size );
             *status = virtual_locked_server_call( req );
+            *info = wine_server_reply_size( req );
         }
         SERVER_END_REQ;
     }

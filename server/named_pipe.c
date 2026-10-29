@@ -1057,6 +1057,14 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
             }
         } while (write_pos < out_size);
 
+        if (status == STATUS_BUFFER_OVERFLOW)
+        {
+            /* a truncated message-mode read consumes the whole message; the remainder is lost */
+            message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
+            wake_message( message, message->iosb->in_size );
+            free_message( message );
+        }
+
         async_request_complete( async, status, out_size, out_size, buf );
     }
 
