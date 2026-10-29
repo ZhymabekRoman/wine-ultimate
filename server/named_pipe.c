@@ -83,6 +83,7 @@ struct named_pipe
 {
     struct object       obj;         /* object header */
     int                 message_mode;
+    int                 message_read_mode; /* default read mode of connected clients */
     unsigned int        sharing;
     unsigned int        maxinstances;
     unsigned int        outsize;
@@ -1568,7 +1569,7 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     if (!client)
         return NULL;
 
-    init_pipe_end( client, pipe, 0, buffer_size );
+    init_pipe_end( client, pipe, pipe->message_read_mode ? NAMED_PIPE_MESSAGE_STREAM_READ : 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
     client->client_session_id = current->process->session_id;
@@ -1790,6 +1791,7 @@ DECL_HANDLER(create_named_pipe)
         pipe->maxinstances = req->maxinstances;
         pipe->timeout = req->timeout;
         pipe->message_mode = (req->flags & NAMED_PIPE_MESSAGE_STREAM_WRITE) != 0;
+        pipe->message_read_mode = (req->flags & NAMED_PIPE_MESSAGE_STREAM_READ) != 0;
         pipe->sharing = req->sharing;
         if (sd) default_set_sd( &pipe->obj, sd, OWNER_SECURITY_INFORMATION |
                                                 GROUP_SECURITY_INFORMATION |
