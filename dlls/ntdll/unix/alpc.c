@@ -69,11 +69,6 @@ struct alpc_reserve_attr
 
 #define ALPC_WIRE_MAGIC 0x434e4e41 /* 'ANNC' */
 
-/* The delivered message's port context slot carries a wineserver handle id (of
- * the port the message was queued on) when this attr_flags bit is set; the
- * server stamps it on a connect notification.  Translate it into a client
- * handle, which is what the receiver's ALPC calls take. */
-#define ALPC_WIRE_CTX_IS_HANDLE 0x00000001
 struct alpc_wire_hdr
 {
     unsigned int     magic;
@@ -1154,13 +1149,19 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                          * back on the reply (the CoreMessaging engine routes
                          * its replies and its chunked-message reassembly by
                          * them), and the message id is the kernel's */
-                        /* A connect notification's context is the port the
-                         * notification is queued on, which for the receiver is
-                         * the handle it is receiving on; ntdll is the only layer
-                         * that has that handle.  A plain send carries the
-                         * sender's opaque context value instead. */
-                        ctx->PortContext    = (hdr.attr_flags & ALPC_WIRE_CTX_IS_HANDLE) ?
-                                              port_handle : (void *)(ULONG_PTR)hdr.port_context;
+                        /* The slot is the receiver's own context value, as the
+                         * kernel echoes it: for an ordinary send the per-connection
+                         * context the server passed to NtAlpcAcceptConnectPort, for
+                         * a connect notification the context registered with the
+                         * port the notification is queued on (nothing registers one,
+                         * so null).  Both are the app's own bits, so pass them
+                         * through untouched.  The app reads the value back as a
+                         * pointer - CoreMessaging's accept path dereferences it at
+                         * CoreMessagingXP+0x85b48 to take the port handle out of it
+                         * - so stamping a wineserver handle in here hands the app a
+                         * small integer where it expects a pointer: its null test
+                         * does not catch a handle, and it faults on that value. */
+                        ctx->PortContext    = (void *)(ULONG_PTR)hdr.port_context;
                         ctx->MessageContext = (void *)(ULONG_PTR)hdr.msg_context;
                         ctx->Sequence       = hdr.sequence;
                         ctx->MessageId      = hdr.msg_id;
