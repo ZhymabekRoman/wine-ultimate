@@ -2141,25 +2141,33 @@ static void output_filenames_obj_dir( const struct makefile *make, struct strarr
 /*******************************************************************
  *         is_wine_config_header
  *
- * Check if a resolved include is Wine's generated config.h. The path has to
- * be built the same way makedep builds it, so that the check behaves the same
- * for in-tree builds (srcdir = "."), relative out-of-tree builds and absolute
- * out-of-tree builds. A plain "include/config.h" comparison only matches in
- * an in-tree build, which makes the check silently vanish in the others.
+ * Check if a resolved include is Wine's generated config.h. It is reached in
+ * two path forms: as the header in the build directory, "include/config.h",
+ * and as the generated file in the source directory, which carries the srcdir
+ * prefix. Comparing against one form alone makes the check vanish for the
+ * sources that resolve through the other, which is why the same tree passes
+ * out of tree and fails in tree.
  */
 static bool is_wine_config_header( const struct incl_file *file )
 {
-    static const char *name;
+    static const char *src_name;
 
-    if (!name) name = root_src_dir_path( "include/config.h" );
-    return file->filename && !strcmp( file->filename, name );
+    if (!file->filename) return false;
+    if (!strcmp( file->filename, "include/config.h" )) return true;
+    if (!root_src_dir) return false;
+    if (!src_name) src_name = root_src_dir_path( "include/config.h" );
+    return !strcmp( file->filename, src_name );
 }
 
 
 /*******************************************************************
  *         get_dependencies
+ *
+ * Collect the dependencies of 'source' out of the include tree rooted at
+ * 'file'; 'depth' is how far 'file' sits below the source file itself, so
+ * the includes the source makes on its own are the ones at depth 1.
  */
-static void get_dependencies( struct incl_file *file, struct incl_file *source )
+static void get_dependencies( struct incl_file *file, struct incl_file *source, unsigned int depth )
 {
     if (!file->filename) return;
 
@@ -2180,7 +2188,7 @@ static void get_dependencies( struct incl_file *file, struct incl_file *source )
         file->owner = source;
 
         /* sanity checks */
-        if (is_wine_config_header( file ) && file->included_by == source &&
+        if (is_wine_config_header( file ) && depth == 1 &&
             file != *ARRAY_ENTRY( &source->files, 0, struct incl_file * ))
         {
             input_file_name = source->filename;
@@ -2192,7 +2200,7 @@ static void get_dependencies( struct incl_file *file, struct incl_file *source )
         }
     }
 
-    ARRAY_FOR_EACH( ptr, &file->files, struct incl_file * ) get_dependencies( *ptr, source );
+    ARRAY_FOR_EACH( ptr, &file->files, struct incl_file * ) get_dependencies( *ptr, source, depth + 1 );
 }
 
 
@@ -4878,7 +4886,7 @@ static void load_sources( struct makefile *make )
     add_generated_sources( make );
 
     LIST_FOR_EACH_ENTRY( file, &make->includes, struct incl_file, entry ) parse_file( make, file, false );
-    LIST_FOR_EACH_ENTRY( file, &make->sources, struct incl_file, entry ) get_dependencies( file, file );
+    LIST_FOR_EACH_ENTRY( file, &make->sources, struct incl_file, entry ) get_dependencies( file, file, 0 );
 
     STRARRAY_FOR_EACH( imp, &make->delayimports )
         strarray_add_uniq( &delay_import_libs, get_base_name( imp ));
