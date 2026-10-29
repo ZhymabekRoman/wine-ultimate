@@ -79,6 +79,28 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Classes consumed during XAML control construction: they fall through to the
+     * ActivatableClassId registry lookup (absent in this unpackaged prefix) and return
+     * REGDB_E_CLASSNOTREG, stalling the UI thread before the WebView2 environment is
+     * created.  Route them to the Wine modules that already export DllGetActivationFactory. */
+    if (!wcsncmp(classid, L"Windows.UI.ViewManagement.", 26))
+    {
+        *out = wcsdup(L"windows.ui.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Windows.Foundation.", 19))
+    {
+        *out = wcsdup(L"wintypes.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"Windows.Storage.ApplicationData", 29))
+    {
+        *out = wcsdup(L"windows.storage.applicationdata.dll");
+        return S_OK;
+    }
+
     /* Microsoft.Web.WebView2.Core.* is an unpackaged native WinRT server shipped
      * side-by-side by the app.  It is resolved through the ActivatableClassId\DllPath
      * registry mapping (absolute path) below, so that the server loads regardless of
