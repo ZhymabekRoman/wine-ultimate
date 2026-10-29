@@ -156,24 +156,24 @@
 @ stdcall -syscall=0x0018 NtAllocateVirtualMemory(long ptr long ptr long long)
 @ stdcall -syscall NtAllocateVirtualMemoryEx(long ptr ptr long long ptr long)
 @ stdcall -syscall NtAlpcAcceptConnectPort(ptr ptr long ptr ptr ptr ptr ptr long)
-@ stdcall -syscall NtAlpcCancelMessage(ptr long ptr)
+@ stdcall -syscall -arch=win64 NtAlpcCancelMessage(ptr long ptr)
 @ stdcall -syscall NtAlpcConnectPort(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr)
-@ stdcall -syscall NtAlpcConnectPortEx(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr)
+@ stdcall -syscall -arch=win64 NtAlpcConnectPortEx(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr)
 @ stdcall -syscall NtAlpcCreatePort(ptr ptr ptr)
 @ stdcall -syscall NtAlpcCreatePortSection(ptr long ptr long ptr ptr)
-@ stdcall -syscall NtAlpcCreateResource(ptr ptr long ptr)
+@ stdcall -syscall -arch=win64 NtAlpcCreateResource(ptr ptr long ptr)
 @ stdcall -syscall NtAlpcCreateSectionView(ptr long ptr)
 @ stdcall -syscall NtAlpcDeletePortSection(ptr long ptr)
-@ stdcall -syscall NtAlpcDeleteResource(ptr ptr long)
+@ stdcall -syscall -arch=win64 NtAlpcDeleteResource(ptr ptr long)
 @ stdcall -syscall NtAlpcDeleteSectionView(ptr long ptr)
 @ stdcall -syscall NtAlpcDisconnectPort(ptr long)
 @ stdcall -syscall NtAlpcImpersonateClientOfPort(ptr ptr ptr)
-@ stdcall -syscall NtAlpcOpenSenderProcess(ptr ptr ptr)
-@ stdcall -syscall NtAlpcOpenSenderThread(ptr ptr ptr)
+@ stdcall -syscall -arch=win64 NtAlpcOpenSenderProcess(ptr ptr ptr)
+@ stdcall -syscall -arch=win64 NtAlpcOpenSenderThread(ptr ptr ptr)
 @ stdcall -syscall NtAlpcQueryInformation(ptr long ptr long ptr)
-@ stdcall -syscall NtAlpcQueryInformationMessage(ptr ptr long ptr long ptr)
+@ stdcall -syscall -arch=win64 NtAlpcQueryInformationMessage(ptr ptr long ptr long ptr)
 @ stdcall -syscall NtAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr)
-@ stdcall -syscall NtAlpcSendWaitReceivePortEx(ptr long ptr ptr ptr ptr ptr ptr ptr)
+@ stdcall -syscall -arch=win64 NtAlpcSendWaitReceivePortEx(ptr long ptr ptr ptr ptr ptr ptr ptr)
 @ stdcall -syscall NtAlpcSetInformation(ptr long ptr long)
 @ stdcall -syscall NtAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr long)
 @ stdcall -syscall NtCancelWaitCompletionPacket(ptr long)
@@ -1253,24 +1253,24 @@
 @ stdcall -private ZwAlertThread(long) NtAlertThread
 @ stdcall -private ZwAlertThreadByThreadId(ptr) NtAlertThreadByThreadId
 @ stdcall -private ZwAlpcAcceptConnectPort(ptr ptr long ptr ptr ptr ptr ptr long) NtAlpcAcceptConnectPort
-@ stdcall -private ZwAlpcCancelMessage(ptr long ptr) NtAlpcCancelMessage
+@ stdcall -private -arch=win64 ZwAlpcCancelMessage(ptr long ptr) NtAlpcCancelMessage
 @ stdcall -private ZwAlpcConnectPort(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr) NtAlpcConnectPort
-@ stdcall -private ZwAlpcConnectPortEx(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr) NtAlpcConnectPortEx
+@ stdcall -private -arch=win64 ZwAlpcConnectPortEx(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr) NtAlpcConnectPortEx
 @ stdcall -private ZwAlpcCreatePort(ptr ptr ptr) NtAlpcCreatePort
 @ stdcall -private ZwAlpcCreatePortSection(ptr long ptr long ptr ptr) NtAlpcCreatePortSection
-@ stdcall -private ZwAlpcCreateResource(ptr ptr long ptr) NtAlpcCreateResource
+@ stdcall -private -arch=win64 ZwAlpcCreateResource(ptr ptr long ptr) NtAlpcCreateResource
 @ stdcall -private ZwAlpcCreateSectionView(ptr long ptr) NtAlpcCreateSectionView
 @ stdcall -private ZwAlpcDeletePortSection(ptr long ptr) NtAlpcDeletePortSection
-@ stdcall -private ZwAlpcDeleteResource(ptr ptr long) NtAlpcDeleteResource
+@ stdcall -private -arch=win64 ZwAlpcDeleteResource(ptr ptr long) NtAlpcDeleteResource
 @ stdcall -private ZwAlpcDeleteSectionView(ptr long ptr) NtAlpcDeleteSectionView
 @ stdcall -private ZwAlpcDisconnectPort(ptr long) NtAlpcDisconnectPort
 @ stdcall -private ZwAlpcImpersonateClientOfPort(ptr ptr ptr) NtAlpcImpersonateClientOfPort
-@ stdcall -private ZwAlpcOpenSenderProcess(ptr ptr ptr) NtAlpcOpenSenderProcess
-@ stdcall -private ZwAlpcOpenSenderThread(ptr ptr ptr) NtAlpcOpenSenderThread
+@ stdcall -private -arch=win64 ZwAlpcOpenSenderProcess(ptr ptr ptr) NtAlpcOpenSenderProcess
+@ stdcall -private -arch=win64 ZwAlpcOpenSenderThread(ptr ptr ptr) NtAlpcOpenSenderThread
 @ stdcall -private ZwAlpcQueryInformation(ptr long ptr long ptr) NtAlpcQueryInformation
-@ stdcall -private ZwAlpcQueryInformationMessage(ptr ptr long ptr long ptr) NtAlpcQueryInformationMessage
+@ stdcall -private -arch=win64 ZwAlpcQueryInformationMessage(ptr ptr long ptr long ptr) NtAlpcQueryInformationMessage
 @ stdcall -private ZwAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePort
-@ stdcall -private ZwAlpcSendWaitReceivePortEx(ptr long ptr ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePortEx
+@ stdcall -private -arch=win64 ZwAlpcSendWaitReceivePortEx(ptr long ptr ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePortEx
 @ stdcall -private ZwAlpcSetInformation(ptr long ptr long) NtAlpcSetInformation
 @ stdcall -private ZwAllocateLocallyUniqueId(ptr) NtAllocateLocallyUniqueId
 @ stdcall -private ZwAllocateReserveObject(ptr ptr long) NtAllocateReserveObject
