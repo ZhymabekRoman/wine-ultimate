@@ -516,6 +516,13 @@ static HRESULT _property_value_get_primitive_array(IPropertyValue *iface, Proper
     return S_OK;
 }
 
+/*
+ * The Single/Double IReference vtables are chosen dynamically in the QueryInterface below, so they
+ * have to be visible there.  Keep them file-local, like every other vtable in this file.
+ */
+static const struct IReference_FLOATVtbl iref_float_vtbl;
+static const struct IReference_DOUBLEVtbl iref_double_vtbl;
+
 static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *iface, REFIID riid, void **out)
 {
     struct property_value *impl = impl_from_IPropertyValue(iface);
@@ -579,7 +586,6 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
     }
     else if (IsEqualIID(riid, &IID_IReference_FLOAT) && (impl->type == PropertyType_Single || impl->type == PropertyType_Double))
     {
-        extern const struct IReference_FLOATVtbl iref_float_vtbl;
         impl->irefs.float_iface.lpVtbl = (void *)&iref_float_vtbl;
         IReference_FLOAT_AddRef(&impl->irefs.float_iface);
         *out = &impl->irefs.float_iface;
@@ -587,7 +593,6 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
     }
     else if (IsEqualIID(riid, &IID_IReference_DOUBLE) && (impl->type == PropertyType_Double || impl->type == PropertyType_Single))
     {
-        extern const struct IReference_DOUBLEVtbl iref_double_vtbl;
         impl->irefs.double_iface.lpVtbl = (void *)&iref_double_vtbl;
         IReference_DOUBLE_AddRef(&impl->irefs.double_iface);
         *out = &impl->irefs.double_iface;
