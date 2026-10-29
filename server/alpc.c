@@ -986,6 +986,24 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         size -= sizeof(attr);
     }
     send_flags = attr.pad2;
+
+    /* The port's MaxMessageLength bounds every send: a message larger than
+     * the port attribute is refused with STATUS_INVALID_BUFFER_SIZE, never
+     * queued.  A client-side send is bounded by the listening port it
+     * delivers to (the server receives the traffic of every connection
+     * there); a send on the listening port is bounded by that port. */
+    {
+        data_size_t max_len = port->is_server ? port->max_msg_len :
+                              (port->listen_port ? port->listen_port->max_msg_len : 0);
+        if (max_len && size > max_len)
+        {
+            release_object( iosb );
+            set_error( STATUS_INVALID_BUFFER_SIZE );
+            async_request_complete( async, STATUS_INVALID_BUFFER_SIZE, 0, 0, NULL );
+            return;
+        }
+    }
+
     if (size >= ALPC_USER_MSGID_OFF + 4)
         reply_id = *(const unsigned int *)((const char *)data + ALPC_USER_MSGID_OFF);
     if (size >= ALPC_USER_TYPE_OFF + 2)

@@ -61,10 +61,11 @@ struct alpc_reserve_attr
     PVOID     context;
 };
 
-/* NtAlpcSendWaitReceivePort send flags */
-#define ALPC_SEND_REPLY        0x10000
-#define ALPC_SEND_REQUEST      0x20000
-#define ALPC_SEND_DATAGRAM     0x40000
+/* NtAlpcSendWaitReceivePort send flags come from the documented
+ * ALPC_MSGFLG_* set (include/winternl.h).  Note that 0x00040000 is
+ * ALPC_MSGFLG_TERMINATION (documented ALPC_MSGFLG_TERMINATE), not a datagram
+ * flag: a datagram send is marked by PORT_MESSAGE.Type == LPC_DATAGRAM, the
+ * flag bits carry no datagram value. */
 
 #define ALPC_WIRE_MAGIC 0x434e4e41 /* 'ANNC' */
 struct alpc_wire_hdr
@@ -615,24 +616,43 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
            recv_msg, recv_buffer_size, recv_msg_attr, timeout );
 
     /* --- Send phase --- */
-    if (send_msg)
+    /* ALPC_MSGFLG_REPLY_WAIT_ONLY sends nothing: it only waits for the reply
+     * of the request named by the message context, so the send leg is
+     * skipped and the receive arms for that request's id. */
+    if (send_msg && !(flags & ALPC_MSGFLG_REPLY_WAIT_ONLY))
     {
         data_size_t send_size = send_msg->TotalLength;
         struct alpc_msg_attr_hdr attr_hdr;
+
+        /* ALPC_MSGFLG_RELEASE_MESSAGE: Windows defers consumption of a
+         * delivered message until the receiver releases it (LPC
+         * request-buffer recycling).  This design consumes the queued
+         * message as the receive completes it (the copy is already in the
+         * receiver's buffer), so there is no deferred state to release and
+         * the flag is accepted as a no-op. */
+        if (flags & (ALPC_MSGFLG_PC_MESSAGE | ALPC_MSGFLG_TERMINATION | ALPC_MSGFLG_REQUEST_USER_APC |
+                     ALPC_MSGFLG_SYNC_CLIENT_WAIT | ALPC_MSGFLG_SYNC_CLIENT_RETURN))
+            FIXME( "send flags %#x unimplemented: PC_MESSAGE needs the protected-code payload path, "
+                   "TERMINATION the kernel port-closed notification, REQUEST_USER_APC/SYNC_CLIENT_* "
+                   "the kernel-internal delivery bookkeeping\n", (unsigned int)flags );
+
+        /* ALPC_MSGFLG_EMPTY_MESSAGE: send a 0-length message, no user buffer
+         * travels (the kernel delivers the bare PORT_MESSAGE header). */
+        if (flags & ALPC_MSGFLG_EMPTY_MESSAGE) send_size = 0;
 
         /* The kernel stamps the message type from the send flags and owns the
          * MessageId: a new request gets a unique non-zero id, a reply echoes
          * back the id of the request identified by the message context, and a
          * datagram carries no id. Applications leave these fields as zero (or
          * echo the context back), relying on the kernel to fill them in. */
-        if (flags & ALPC_SEND_REPLY)
+        if (flags & ALPC_MSGFLG_REPLY_MESSAGE)
         {
             ALPC_CONTEXT_ATTR *ctx = send_msg_attr ?
                 (ALPC_CONTEXT_ATTR *)get_message_attribute( send_msg_attr, ALPC_MESSAGE_CONTEXT_ATTRIBUTE ) : NULL;
             send_msg->Type = LPC_REPLY;
             if (ctx) send_msg->MessageId = ctx->MessageId;
         }
-        else if (flags & ALPC_SEND_REQUEST)
+        else if (flags & ALPC_MSGFLG_SYNC_REQUEST)
         {
             send_msg->Type = LPC_REQUEST;
             /* a multi-buffer send carries several requests: the kernel stamps
@@ -641,9 +661,9 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
             if (!send_msg->MessageId && !(flags & ALPC_MSGFLG_LPC_MULTI_MESSAGE))
                 send_msg->MessageId = next_alpc_msg_id();
         }
-        else if (flags & ALPC_SEND_DATAGRAM)
+        else if (send_msg->Type == LPC_DATAGRAM)
         {
-            send_msg->Type = LPC_DATAGRAM;
+            /* a datagram is marked by the message type, not a flag bit */
             send_msg->MessageId = 0;
         }
         else if (!send_msg->MessageId)
@@ -766,7 +786,10 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
 
     {
     data_size_t reply_size = 0;
-    void *expected_id = (flags & 0x20000 && send_msg) ? (void *)(ULONG_PTR)send_msg->MessageId : NULL;
+    /* the receive of a send-receive pair arms for the id of the request it
+     * sends; REPLY_WAIT_ONLY arms for the id of the request it only awaits */
+    void *expected_id = (send_msg && (flags & (ALPC_MSGFLG_SYNC_REQUEST | ALPC_MSGFLG_REPLY_WAIT_ONLY))) ?
+                        (void *)(ULONG_PTR)send_msg->MessageId : NULL;
 
     if (recv_event)
     {

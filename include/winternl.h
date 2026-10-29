@@ -4520,6 +4520,22 @@ typedef struct _KCONTINUE_ARGUMENT
 #define ALPC_MSGFLG_NONE                        0x00000000
 #define ALPC_MSGFLG_REPLY_MESSAGE               0x00010000 /* Message is a reply */
 #define ALPC_MSGFLG_SYNC_REQUEST                0x00020000 /* Synchronously send and receive message */
+#define ALPC_MSGFLG_TERMINATION                 0x00040000 /* Port-termination notification (documented
+                                                             * as ALPC_MSGFLG_TERMINATE; the kernel
+                                                             * delivers the port-closed message type) */
+#define ALPC_MSGFLG_REQUEST_USER_APC            0x00080000 /* Deliver the request via a user APC */
+#define ALPC_MSGFLG_RELEASE_MESSAGE             0x00100000 /* Receiver releases the delivered message */
+#define ALPC_MSGFLG_SYNC_CLIENT_WAIT            0x00200000 /* Kernel-side client wait completion */
+#define ALPC_MSGFLG_SYNC_CLIENT_RETURN          0x00800000 /* Kernel-side client return */
+#define ALPC_MSGFLG_PC_MESSAGE                  0x01000000 /* Protected-code (CFG) message */
+#define ALPC_MSGFLG_EMPTY_MESSAGE               0x00400000 /* Send a 0-length message, no user buffer */
+#define ALPC_MSGFLG_REPLY_WAIT_ONLY             0x02000000 /* No send: wait for the reply of the
+                                                            * request identified by the context */
+/* LUNATIC_* (the kernel's internal per-message control bits, INFO/WAIT/REPLY/
+ * REQUEST/TERMINATE in the ntdll symbol set): these drive kernel-internal
+ * delivery bookkeeping (worker-thread handoff and terminate bookkeeping) with
+ * no documented userspace contract; the kernel consumes them.  Not
+ * implemented: this relay has no kernel-internal delivery states to steer. */
 
 /* Message attribute flags */
 #define ALPC_MESSAGE_SECURITY_ATTRIBUTE         0x80000000
