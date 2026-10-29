@@ -57,6 +57,12 @@ struct alpc_message
     struct process  *handle_proc;  /* receiver the duplicate lives in, NULL = none */
     obj_handle_t     handle_id;    /* duplicate handle in handle_proc */
     struct object   *handle_obj;   /* grabbed object the duplicate refers to */
+    /* Same bookkeeping for a VIEW-attribute section duplicated into the
+     * receiver: dropping the message closes the duplicate, delivery
+     * transfers it to the receiver. */
+    struct process  *sec_proc;
+    obj_handle_t     sec_id;
+    struct object   *sec_obj;
     /* user data bytes follow */
 };
 
@@ -92,6 +98,11 @@ struct alpc_wire_hdr
     client_ptr_t     msg_context;
     unsigned int     sequence;
     unsigned int     callback_id;
+    /* data-view section: a send that carries a VIEW attribute with a section
+     * handle has that section duplicated into the receiving process at
+     * delivery (the kernel duplicates it into the receiver's handle table);
+     * this is the duplicated handle id in the receiver, 0 = no view section */
+    client_ptr_t     view_section;
 };
 
 /* HANDLE attribute as the kernel presents it on delivery. It rides as an
@@ -130,6 +141,10 @@ struct alpc_msg_attr_hdr
     unsigned int     handle_count;
     unsigned int     pad2;
     unsigned int     pad3;
+    /* sender-side VIEW attribute: the section handle to duplicate into the
+     * receiver on delivery (the kernel duplicates the section backing the
+     * view; the receiver maps it through NtAlpcCreateSectionView) */
+    client_ptr_t     send_section;
 };
 
 /* A pending (not yet accepted) client connection. */
@@ -281,6 +296,12 @@ static struct list alpc_port_list = LIST_INIT(alpc_port_list);
 #define ALPC_USER_MSGID_OFF  (4 * sizeof(client_ptr_t))
 #define ALPC_USER_HDR_SIZE   (6 * sizeof(client_ptr_t))
 
+/* The kernel carries at most 256 bytes of inline data in a PORT_MESSAGE;
+ * a larger payload must ride a data view (the sender attaches a VIEW
+ * attribute and the kernel transports the section).  A send with more inline
+ * data and no view is refused. */
+#define ALPC_MAX_INLINE_DATA_SIZE 256
+
 /* ---- Forward declarations ---- */
 
 static void alpc_gate_clear( struct alpc_port *base, unsigned int status );
@@ -375,6 +396,12 @@ static void free_alpc_message( struct alpc_message *msg )
         release_object( msg->handle_obj );
         release_object( msg->handle_proc );
     }
+    if (msg->sec_id)
+    {
+        close_handle( msg->sec_proc, msg->sec_id );
+        release_object( msg->sec_obj );
+        release_object( msg->sec_proc );
+    }
     free( msg );
 }
 
@@ -386,6 +413,11 @@ static void release_alpc_message( struct alpc_message *msg )
     {
         release_object( msg->handle_obj );
         release_object( msg->handle_proc );
+    }
+    if (msg->sec_id)
+    {
+        release_object( msg->sec_obj );
+        release_object( msg->sec_proc );
     }
     free( msg );
 }
@@ -787,6 +819,7 @@ static void alpc_fd_read( struct fd *fd, struct async *async, file_pos_t pos )
 static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *peer,
                                     struct alpc_msg_attr_hdr *attr_hdr,
                                     obj_handle_t dup, struct object *grabbed_obj,
+                                    obj_handle_t sec_dup, struct object *sec_obj,
                                     const void *user_data, data_size_t user_size,
                                     unsigned int msg_id, unsigned int msg_type,
                                     int reply_stamped, unsigned int seq, unsigned int count,
@@ -813,6 +846,11 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
             close_handle( peer->process, dup );
             release_object( grabbed_obj );
         }
+        if (sec_dup)
+        {
+            close_handle( peer->process, sec_dup );
+            release_object( sec_obj );
+        }
         set_error( STATUS_NO_MEMORY );
         return 0;
     }
@@ -823,6 +861,12 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
         msg->handle_proc = (struct process *)grab_object( peer->process );
         msg->handle_id   = dup;
         msg->handle_obj  = grabbed_obj;
+    }
+    if (sec_dup)
+    {
+        msg->sec_proc = (struct process *)grab_object( peer->process );
+        msg->sec_id   = sec_dup;
+        msg->sec_obj  = sec_obj;
     }
     msg->msg_id    = msg_id;
     msg->data_size = blob_size;
@@ -842,6 +886,7 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
     hdr->msg_context  = attr_hdr->msg_context;
     hdr->sequence     = seq ? seq - 1 : attr_hdr->sequence; /* 0-based chain index */
     hdr->callback_id  = seq ? count : attr_hdr->callback_id;
+    hdr->view_section = sec_dup;
     /* the receiver sees the duplicated handle with action "created" */
     if (dup)
     {
@@ -1002,6 +1047,18 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             async_request_complete( async, STATUS_INVALID_BUFFER_SIZE, 0, 0, NULL );
             return;
         }
+    }
+
+    /* Inline data is bounded by ALPC_MAX_INLINE_DATA_SIZE: a message with
+     * more DataLength and no data view cannot ride the kernel's inline
+     * transport and is refused; larger payloads must send the section. */
+    if (!(attr.attr_flags & ALPC_MESSAGE_VIEW_ATTRIBUTE) && size >= 2 &&
+        *(const unsigned short *)data > ALPC_MAX_INLINE_DATA_SIZE)
+    {
+        release_object( iosb );
+        set_error( STATUS_INVALID_BUFFER_SIZE );
+        async_request_complete( async, STATUS_INVALID_BUFFER_SIZE, 0, 0, NULL );
+        return;
     }
 
     if (size >= ALPC_USER_MSGID_OFF + 4)
@@ -1323,8 +1380,36 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     }
 
     {
-        obj_handle_t dup = 0;
-        struct object *grabbed_obj = NULL;
+        obj_handle_t dup = 0, sec_dup = 0;
+        struct object *grabbed_obj = NULL, *sec_obj = NULL;
+
+        /* Data view attribute: the kernel duplicates the sender's section
+         * into the receiving process at delivery, and the receiver maps the
+         * duplicated handle through NtAlpcCreateSectionView.  Duplicate it
+         * at queue time (same point as the handle attribute) and bookkeep it
+         * on the message: delivery transfers ownership, teardown closes the
+         * duplicate. */
+        if ((attr.attr_flags & ALPC_MESSAGE_VIEW_ATTRIBUTE) && attr.send_section)
+        {
+            struct object *sec = get_handle_obj( current->process,
+                            (obj_handle_t)(ULONG_PTR)attr.send_section,
+                            SECTION_MAP_READ | SECTION_MAP_WRITE, NULL );
+            if (!sec)
+            {
+                release_object( iosb );
+                return; /* get_handle_obj set the error */
+            }
+            if (!(sec_dup = alloc_handle( peer->process, sec,
+                                          SECTION_MAP_READ | SECTION_MAP_WRITE, 0 )))
+            {
+                release_object( sec );
+                release_object( iosb );
+                set_error( STATUS_NO_MEMORY );
+                return;
+            }
+            sec_obj = grab_object( sec );   /* keep a reference for the queue record */
+            release_object( sec );
+        }
 
         /* Handle attribute: the kernel duplicates the sender's handle into the
          * receiving process's handle table as the message is delivered. Perform
@@ -1375,6 +1460,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
             {
                 unsigned int tl = ALPC_USER_HDR_SIZE + ((*(const unsigned short *)p + 7) & ~7u);
                 if (tl > left) break;
+                if (!(attr.attr_flags & ALPC_MESSAGE_VIEW_ATTRIBUTE) &&
+                    *(const unsigned short *)p > ALPC_MAX_INLINE_DATA_SIZE)
+                {
+                    release_object( iosb );
+                    set_error( STATUS_INVALID_BUFFER_SIZE );
+                    async_request_complete( async, STATUS_INVALID_BUFFER_SIZE, 0, 0, NULL );
+                    return;
+                }
                 chain++;
                 p += tl;
                 left -= tl;
@@ -1392,6 +1485,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 if (base) alpc_add_outstanding( base, mid );
                 if (!alpc_queue_send_message( port, peer, &attr, first ? dup : 0,
                                               first ? grabbed_obj : NULL,
+                                              first ? sec_dup : 0, first ? sec_obj : NULL,
                                               p, tl, mid, 0, 0, idx + 1, chain, sender_pid, sender_tid ))
                 {
                     release_object( iosb );
@@ -1437,6 +1531,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
         }
 
         if (!alpc_queue_send_message( port, peer, &attr, dup, grabbed_obj,
+                                      sec_dup, sec_obj,
                                       data, size, reply_id, msg_type, reply_stamped, 0, 0, sender_pid, sender_tid ))
         {
             release_object( iosb );
@@ -1564,6 +1659,7 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->msg_context  = 0;
     hdr->sequence     = 0;
     hdr->callback_id  = 0;
+    hdr->view_section = 0;
     hdr->attr_flags   = 0;
     if (pc->conn_data_size)
         memcpy( hdr + 1, pc->conn_data, pc->conn_data_size );
@@ -1875,6 +1971,7 @@ static struct alpc_port *complete_alpc_connection( struct alpc_port *server_port
             whdr->msg_context  = 0;
             whdr->sequence     = 0;
             whdr->callback_id  = 0;
+            whdr->view_section = 0;
             if (found->conn_reply_size)
                 memcpy( whdr + 1, found->conn_reply, found->conn_reply_size );
             async_request_complete_alloc( found->client_async, STATUS_SUCCESS,

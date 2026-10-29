@@ -84,6 +84,11 @@ struct alpc_wire_hdr
     client_ptr_t     msg_context;
     unsigned int     sequence;
     unsigned int     callback_id;
+    /* data-view section: a send that carries a VIEW attribute with a section
+     * handle has that section duplicated into the receiving process at
+     * delivery (the kernel duplicates it into the receiver's handle table);
+     * this is the duplicated handle id in the receiver, 0 = no view section */
+    client_ptr_t     view_section;
 };
 
 /* HANDLE attribute as the kernel presents it on delivery. It rides as an
@@ -122,6 +127,10 @@ struct alpc_msg_attr_hdr
     unsigned int     handle_count;
     unsigned int     pad2;
     unsigned int     pad3;
+    /* sender-side VIEW attribute: the section handle to duplicate into the
+     * receiver on delivery (the kernel duplicates the section backing the
+     * view; the receiver maps it through NtAlpcCreateSectionView) */
+    client_ptr_t     send_section;
 };
 
 static void *get_message_attribute( ALPC_MESSAGE_ATTRIBUTES *attributes, ULONG attribute_flag )
@@ -880,6 +889,10 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 attr_hdr.view_flags = view->Flags;
                 attr_hdr.view_base  = (client_ptr_t)(ULONG_PTR)view->ViewBase;
                 attr_hdr.view_size  = (client_ptr_t)view->ViewSize;
+                /* the kernel transports the *section*, not the sender's view:
+                 * hand the section handle to the server for duplication into
+                 * the receiver */
+                attr_hdr.send_section = (client_ptr_t)(ULONG_PTR)view->SectionHandle;
             }
         }
         /* the CONTEXT attribute travels with the message: a reply echoes the
@@ -1143,9 +1156,23 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                     if (view)
                     {
                         view->Flags         = hdr.view_flags;
-                        view->SectionHandle = NULL;
-                        view->ViewBase      = (void *)(ULONG_PTR)hdr.view_base;
-                        view->ViewSize      = (SIZE_T)hdr.view_size;
+                        if (hdr.view_section)
+                        {
+                            /* the kernel duplicated the sender's section into
+                             * this process on delivery: report the
+                             * duplicated handle; the receiver maps it with
+                             * NtAlpcCreateSectionView (ViewBase/ViewSize are
+                             * filled by the map) */
+                            view->SectionHandle = wine_server_ptr_handle( (obj_handle_t)hdr.view_section );
+                            view->ViewBase      = NULL;
+                            view->ViewSize      = (SIZE_T)hdr.view_size;
+                        }
+                        else
+                        {
+                            view->SectionHandle = NULL;
+                            view->ViewBase      = (void *)(ULONG_PTR)hdr.view_base;
+                            view->ViewSize      = (SIZE_T)hdr.view_size;
+                        }
                         recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_VIEW_ATTRIBUTE;
                     }
                 }
