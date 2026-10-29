@@ -6428,6 +6428,24 @@ struct alpc_query_port_reply
     client_ptr_t        port_context;
 };
 
+/* Cancel the outstanding request a connection carries for a message id
+ * (NtAlpcCancelMessage): the request leaves the connection's outstanding
+ * list, every receive armed for that id completes with STATUS_CANCELLED, and
+ * the serialisation gate opens for the next request. */
+struct alpc_cancel_message_request
+{
+    struct request_header __header;
+    obj_handle_t        handle;
+    unsigned int        msg_id;
+    char __pad_20[4];
+};
+struct alpc_cancel_message_reply
+{
+    struct reply_header __header;
+    int                 cancelled;
+    char __pad_12[4];
+};
+
 
 enum request
 {
@@ -6752,6 +6770,7 @@ enum request
     REQ_dcomp_set_shared_visual_info,
     REQ_dcomp_get_shared_visual_info,
     REQ_alpc_query_port,
+    REQ_alpc_cancel_message,
     REQ_NB_REQUESTS
 };
 
@@ -7080,6 +7099,7 @@ union generic_request
     struct dcomp_set_shared_visual_info_request dcomp_set_shared_visual_info_request;
     struct dcomp_get_shared_visual_info_request dcomp_get_shared_visual_info_request;
     struct alpc_query_port_request alpc_query_port_request;
+    struct alpc_cancel_message_request alpc_cancel_message_request;
 };
 union generic_reply
 {
@@ -7406,8 +7426,9 @@ union generic_reply
     struct dcomp_set_shared_visual_info_reply dcomp_set_shared_visual_info_reply;
     struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
     struct alpc_query_port_reply alpc_query_port_reply;
+    struct alpc_cancel_message_reply alpc_cancel_message_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 967
+#define SERVER_PROTOCOL_VERSION 968
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

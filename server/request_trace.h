@@ -3674,6 +3674,17 @@ static void dump_alpc_query_port_reply( const struct alpc_query_port_reply *req 
     dump_uint64( ", port_context=", &req->port_context );
 }
 
+static void dump_alpc_cancel_message_request( const struct alpc_cancel_message_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", msg_id=%08x", req->msg_id );
+}
+
+static void dump_alpc_cancel_message_reply( const struct alpc_cancel_message_reply *req )
+{
+    fprintf( stderr, " cancelled=%d", req->cancelled );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -3999,6 +4010,7 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dcomp_set_shared_visual_info_request,
     (dump_func)dump_dcomp_get_shared_visual_info_request,
     (dump_func)dump_alpc_query_port_request,
+    (dump_func)dump_alpc_cancel_message_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4324,6 +4336,7 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_dcomp_get_shared_visual_info_reply,
     (dump_func)dump_alpc_query_port_reply,
+    (dump_func)dump_alpc_cancel_message_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4649,6 +4662,7 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "dcomp_set_shared_visual_info",
     "dcomp_get_shared_visual_info",
     "alpc_query_port",
+    "alpc_cancel_message",
 };
 
 static const struct
