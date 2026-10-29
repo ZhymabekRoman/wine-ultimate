@@ -1310,6 +1310,12 @@ NTSTATUS WINAPI NtAlpcImpersonateClientOfPort( HANDLE port_handle,
      * process token as an impersonation token and applying it to the current
      * thread. Servers (e.g. CoreMessaging) impersonate during connection
      * acceptance and reject the connection if it fails. */
+    /* FIXME: real client-token impersonation.  The kernel impersonates the
+     * *client's* primary/dominant token as recorded on the connection (with
+     * the ALPC_PORTFLG_ALLOWIMPERSONATION gate and the client's session);
+     * this fakes it with the server's own process token, so cross-user and
+     * token-restricted clients are indistinguishable.  Needs the server to
+     * carry the client's token on the connection and a get-token request. */
     if ((ret = NtOpenProcessToken( NtCurrentProcess(), TOKEN_DUPLICATE, &proc_token )))
         return ret;
 

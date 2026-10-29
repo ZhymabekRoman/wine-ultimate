@@ -291,7 +291,13 @@ static struct list alpc_port_list = LIST_INIT(alpc_port_list);
  * the 32-bit position on x64 picks up the low half of the (sender-zeroed)
  * ClientId and every reply correlates to message id 0, which strands it: a
  * receive armed for its request's id never takes the reply and the
- * conversation deadlocks. */
+ * conversation deadlocks.
+ *
+ * Known limitation: these offsets assume the 64-bit PORT_MESSAGE layout.
+ * The relay parses the sender's PORT_MESSAGE at fixed client_ptr_t offsets;
+ * a 32-bit client (i386 PORT_MESSAGE: u32-sized ClientId pointers, MessageId
+ * at +12) would be read at the wrong slots.  The install is x86_64-only;
+ * supporting wow64 senders needs a per-client-layout decode. */
 #define ALPC_USER_TYPE_OFF   4
 #define ALPC_USER_MSGID_OFF  (4 * sizeof(client_ptr_t))
 #define ALPC_USER_HDR_SIZE   (6 * sizeof(client_ptr_t))
