@@ -79,12 +79,10 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
-    if (!wcsncmp(classid, L"Microsoft.Web.WebView2.Core.", 28))
-    {
-        *out = wcsdup(L"Microsoft.Web.WebView2.Core.dll");
-        return S_OK;
-    }
-
+    /* Microsoft.Web.WebView2.Core.* is an unpackaged native WinRT server shipped
+     * side-by-side by the app.  It is resolved through the ActivatableClassId\DllPath
+     * registry mapping (absolute path) below, so that the server loads regardless of
+     * the activating process's own application directory. */
     if (!wcsncmp(classid, L"Windows.System.Threading.", 25))
     {
         *out = wcsdup(L"windows.system.threading.dll");
