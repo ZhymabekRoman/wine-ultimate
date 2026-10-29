@@ -78,6 +78,14 @@ struct alpc_message
  * request the user bytes are the raw connect payload; for a data message they
  * are the sender's full PORT_MESSAGE. */
 #define ALPC_WIRE_MAGIC 0x434e4e41 /* 'ANNC' */
+
+/* Tag on the wire header's attr_flags: this delivered message is a connect
+ * notification, whose port context is the port the notification is queued on -
+ * a handle in the receiving process, which only ntdll can name.  An ordinary
+ * send carries the sender's opaque context value in that slot instead.  The low
+ * bit is not an ALPC message-attribute bit, so the two are told apart without
+ * enlarging the header. */
+#define ALPC_WIRE_CTX_IS_HANDLE 0x00000001
 struct alpc_wire_hdr
 {
     unsigned int     magic;
@@ -775,7 +783,14 @@ static void reselect_alpc_port( struct alpc_port *port )
             iosb = async_get_iosb( async );
             if (iosb->out_size < msg->data_size)
             {
-                async_request_complete( async, STATUS_BUFFER_TOO_SMALL, 0, 0, NULL );
+                /* Report the length the message needs in the io result.  The
+                 * kernel does; a receiver that only grows its buffer and retries
+                 * when the returned size exceeds the buffer it passed (the
+                 * CoreMessaging receive park site) cannot recover from a zero
+                 * there, and takes the failure as fatal.  Nothing is written, so
+                 * out_size stays 0; the message is consumed below, as on the
+                 * success branch. */
+                async_request_complete( async, STATUS_BUFFER_TOO_SMALL, msg->data_size, 0, NULL );
             }
             else
             {
@@ -1657,8 +1672,20 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->client_pid   = pc->client_pid;
     hdr->client_tid   = pc->client_tid;
     hdr->user_size    = pc->conn_data_size;
-    hdr->port_context = 0;
-    hdr->attr_flags   = 0;
+    /* The port context of a connection request names the port the request is
+     * queued on: the server hands it back to NtAlpcAcceptConnectPort as the
+     * connection context, and a server that slurps the connect exchange queries
+     * it (AlpcBasicInformation, class 0) to read that port's message sequence
+     * number - the slurp is confirmed when the sequence number equals the number
+     * of messages it has taken.  A zero there leaves such a client calling
+     * NtAlpcQueryInformation with a null handle, which is STATUS_INVALID_HANDLE,
+     * which CoreMessaging treats as fatal.  Tag the notification so ntdll stamps
+     * the receiver's own handle for this port: this port's sequence_no is bumped
+     * for exactly the messages the notification is queued among, and the handle
+     * is valid in the process that owns the server port, which is the process
+     * that receives connect notifications on it. */
+    hdr->port_context = 0;  /* the handle is the receiver's own, stamped by ntdll */
+    hdr->attr_flags   = ALPC_WIRE_CTX_IS_HANDLE;
     hdr->view_flags   = 0;
     hdr->view_base    = 0;
     hdr->view_size    = 0;
@@ -1666,7 +1693,6 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->sequence     = 0;
     hdr->callback_id  = 0;
     hdr->view_section = 0;
-    hdr->attr_flags   = 0;
     if (pc->conn_data_size)
         memcpy( hdr + 1, pc->conn_data, pc->conn_data_size );
     server_port->sequence_no++;

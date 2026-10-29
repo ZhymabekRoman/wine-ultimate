@@ -3134,6 +3134,133 @@ done:
     if (server_port) NtClose( server_port );
 }
 
+/* AlpcBasicInformation is { ULONG Flags; ULONG SequenceNo; PVOID PortContext; }
+ * - 16 bytes on x86_64, 12 on i386.  Pin the length contract that the
+ * dispatcher's slurp probe depends on: AlpcBuffer::CommitToSlurp
+ * (0x180085ef0) calls NtAlpcQueryInformation( port, AlpcBasicInformation, &buf,
+ * 16, NULL ) and reads the sequence number at offset +4, treating any negative
+ * status as fatal (FailWithHR -> __fastfail).  On x86_64 that Length is exactly
+ * the structure, so it must be answered with Flags and SequenceNo filled; the
+ * size is architecture dependent, so assert the value that the caller's Length
+ * corresponds to rather than a constant. */
+static void test_alpc_query_basic_length( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestQueryLen";
+    UNICODE_STRING port_name;
+    OBJECT_ATTRIBUTES obj_attr;
+    ALPC_PORT_ATTRIBUTES port_attr;
+    ULONG len, retlen;
+    char buf[64];
+    HANDLE server_port = NULL;
+    NTSTATUS status;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcQueryInformation)
+    {
+        win_skip("ALPC port functions are unavailable.\n");
+        return;
+    }
+
+    RtlInitUnicodeString( &port_name, port_nameW );
+    InitializeObjectAttributes( &obj_attr, &port_name, 0, NULL, NULL );
+    memset( &port_attr, 0, sizeof(port_attr) );
+    port_attr.MaxMessageLength = 0x1000;
+    status = pNtAlpcCreatePort( &server_port, &obj_attr, &port_attr );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    if (status != STATUS_SUCCESS) return;
+
+    /* the whole structure: this is the call CoreMessaging makes (Length = 16 on
+     * x86_64), and the sequence number it reads at +4 must be there */
+    memset( buf, 0xa5, sizeof(buf) );
+    retlen = 0;
+    status = pNtAlpcQueryInformation( server_port, ALPC_BASIC_INFORMATION_CLASS, buf,
+                                      sizeof(ALPC_BASIC_INFORMATION), &retlen );
+    winetest_push_context( "length %u", (unsigned int)sizeof(ALPC_BASIC_INFORMATION) );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    ok( retlen == sizeof(ALPC_BASIC_INFORMATION), "Got unexpected retlen %u.\n", retlen );
+    ok( *(ULONG *)buf == 0, "Got unexpected Flags %u.\n", *(ULONG *)buf );
+    ok( *(ULONG *)(buf + 4) == 0, "Got unexpected SequenceNo %u.\n", *(ULONG *)(buf + 4) );
+    winetest_pop_context();
+
+    /* a length that cannot hold the whole structure is bounced, and writes
+     * nothing: this is the gate CoreMessaging's Length = 16 passes on x86_64 */
+    for (len = 0; len < sizeof(ALPC_BASIC_INFORMATION); len += 4)
+    {
+        memset( buf, 0xa5, sizeof(buf) );
+        retlen = 0;
+        status = pNtAlpcQueryInformation( server_port, ALPC_BASIC_INFORMATION_CLASS, buf, len, &retlen );
+        winetest_push_context( "length %u", len );
+        ok( status == STATUS_INFO_LENGTH_MISMATCH, "Got unexpected status %#lx.\n", status );
+        ok( *(ULONG *)buf == 0xa5a5a5a5, "Wrote to the buffer at length %u.\n", len );
+        winetest_pop_context();
+    }
+
+    /* a length larger than the structure is accepted */
+    memset( buf, 0xa5, sizeof(buf) );
+    retlen = 0;
+    status = pNtAlpcQueryInformation( server_port, ALPC_BASIC_INFORMATION_CLASS, buf, sizeof(buf), &retlen );
+    winetest_push_context( "length %u", (unsigned int)sizeof(buf) );
+    ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
+    ok( *(ULONG *)buf == 0, "Got unexpected Flags %u.\n", *(ULONG *)buf );
+    winetest_pop_context();
+
+    NtClose( server_port );
+}
+
+/* A receive too small for the queued message fails with STATUS_BUFFER_TOO_SMALL
+ * and reports the length the message needs.  The message itself is consumed on
+ * that status (test_alpc_small_buffer_receive), so the reported length is the
+ * only thing a receiver can act on: CoreMessaging's receive park site
+ * (AlpcConnection::Callback_ProcessIncoming, 0x180078866) reallocs and retries
+ * only when the returned size is greater than the buffer it passed, and takes
+ * anything else as fatal.  A zero there is not actionable. */
+static void test_alpc_small_buffer_report( void )
+{
+    static const WCHAR port_nameW[] = L"\\BaseNamedObjects\\WineAlpcTestSmallReport";
+    HANDLE server_port = NULL, server_conn = NULL, client_conn = NULL, thread = NULL;
+    LARGE_INTEGER timeout;
+    char buf[512];
+    ALPC_PORT_MESSAGE *msg = (ALPC_PORT_MESSAGE *)buf;
+    SIZE_T size;
+    NTSTATUS status;
+
+    if (!pNtAlpcCreatePort || !pNtAlpcConnectPort || !pNtAlpcAcceptConnectPort || !pNtAlpcSendWaitReceivePort)
+    {
+        win_skip("ALPC port functions are unavailable.\n");
+        return;
+    }
+
+    status = alpc_setup_connection( port_nameW, &server_port, &server_conn, &client_conn, &thread, FALSE );
+    if (status != STATUS_SUCCESS || !client_conn)
+    {
+        win_skip( "connection setup failed, status %#lx.\n", status );
+        goto done;
+    }
+
+    /* Queue a request larger than the receive buffer used below. */
+    memset( buf, 0, sizeof(buf) );
+    memcpy( msg + 1, "LEN-report", 10 );
+    msg->DataLength = 10;
+    msg->TotalLength = sizeof(*msg) + 10;
+    status = pNtAlpcSendWaitReceivePort( client_conn, 0, msg, NULL, NULL, NULL, NULL, NULL );
+    ok( status == STATUS_SUCCESS, "Got unexpected send status %#lx.\n", status );
+
+    memset( buf, 0, sizeof(buf) );
+    size = 8;
+    timeout.QuadPart = -15 * 10000000LL;
+    status = pNtAlpcSendWaitReceivePort( server_conn, 0, NULL, NULL, msg, &size, NULL, &timeout );
+    winetest_push_context( "undersized receive" );
+    ok( status == STATUS_BUFFER_TOO_SMALL, "Got unexpected status %#lx.\n", status );
+    ok( size > 8, "The required length was not reported, got %lu.\n", (unsigned long)size );
+    ok( size == sizeof(*msg) + 10, "Got unexpected required length %lu.\n", (unsigned long)size );
+    winetest_pop_context();
+
+done:
+    if (thread) CloseHandle( thread );
+    if (client_conn) NtClose( client_conn );
+    if (server_conn) NtClose( server_conn );
+    if (server_port) NtClose( server_port );
+}
+
 START_TEST(alpc)
 {
     init_functions();
@@ -3161,6 +3288,8 @@ START_TEST(alpc)
     test_alpc_connect_clientid();
     test_alpc_query_sequence_no();
     test_alpc_small_buffer_receive();
+    test_alpc_query_basic_length();
+    test_alpc_small_buffer_report();
     test_alpc_connect_port_ex();
     test_alpc_open_sender();
     test_alpc_cancel_message();

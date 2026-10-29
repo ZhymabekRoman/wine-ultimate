@@ -68,6 +68,12 @@ struct alpc_reserve_attr
  * flag bits carry no datagram value. */
 
 #define ALPC_WIRE_MAGIC 0x434e4e41 /* 'ANNC' */
+
+/* The delivered message's port context slot carries a wineserver handle id (of
+ * the port the message was queued on) when this attr_flags bit is set; the
+ * server stamps it on a connect notification.  Translate it into a client
+ * handle, which is what the receiver's ALPC calls take. */
+#define ALPC_WIRE_CTX_IS_HANDLE 0x00000001
 struct alpc_wire_hdr
 {
     unsigned int     magic;
@@ -1059,6 +1065,20 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
     }
 
     if (!ret && recv_buffer_size) *recv_buffer_size = io.Information;
+    else if (ret == STATUS_BUFFER_TOO_SMALL && recv_buffer_size)
+    {
+        /* The kernel reports the length the queued message needs on this status
+         * (the server carries it in the io status Information field).  A client
+         * that grew its buffer and retried on this status - CoreMessaging's
+         * receive park site does exactly that, and only retries when the
+         * returned size exceeds the buffer it passed - needs a real number
+         * here; leaving the caller's size untouched makes the oversize message
+         * unanswerable.  Strip the wine-internal wire header so the number is
+         * the message length, in the units the caller sized its buffer in. */
+        data_size_t needed = io.Information;
+        if (needed >= sizeof(struct alpc_wire_hdr)) needed -= sizeof(struct alpc_wire_hdr);
+        *recv_buffer_size = needed;
+    }
 
     /* Every delivered message is prefixed by a wine-internal wire header
      * { u32 magic,type,msg_id,pid,tid,user_size; u64 port_context, ... }. Strip it and
@@ -1134,7 +1154,13 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                          * back on the reply (the CoreMessaging engine routes
                          * its replies and its chunked-message reassembly by
                          * them), and the message id is the kernel's */
-                        ctx->PortContext    = (void *)(ULONG_PTR)hdr.port_context;
+                        /* A connect notification's context is the port the
+                         * notification is queued on, which for the receiver is
+                         * the handle it is receiving on; ntdll is the only layer
+                         * that has that handle.  A plain send carries the
+                         * sender's opaque context value instead. */
+                        ctx->PortContext    = (hdr.attr_flags & ALPC_WIRE_CTX_IS_HANDLE) ?
+                                              port_handle : (void *)(ULONG_PTR)hdr.port_context;
                         ctx->MessageContext = (void *)(ULONG_PTR)hdr.msg_context;
                         ctx->Sequence       = hdr.sequence;
                         ctx->MessageId      = hdr.msg_id;
@@ -1206,7 +1232,6 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         }
     }
 
-
     return ret;
 }
 
@@ -1239,32 +1264,44 @@ NTSTATUS WINAPI NtAlpcQueryInformation( HANDLE port_handle, ULONG class,
     case 0: /* AlpcBasicInformation */
     {
         ALPC_BASIC_INFORMATION info;
-        unsigned int ret;
+        unsigned int ret = 0;
+        NTSTATUS st;
 
-        if (length < sizeof(info)) return STATUS_INFO_LENGTH_MISMATCH;
-        if (!port_handle) return STATUS_INVALID_HANDLE;
+        memset( &info, 0, sizeof(info) );
 
-        info.Flags       = 0;
-        info.SequenceNo  = 0;
-        info.PortContext = NULL;
-
-        SERVER_START_REQ( alpc_query_port )
+        /* AlpcBasicInformation is { Flags, SequenceNo, PortContext }: 16 bytes on
+         * x86_64 (the context slot needs 8-byte alignment), 12 on i386.  The
+         * length gate is the whole structure, which is what Windows enforces
+         * (test_alpc_query_basic_length / test_NtAlpcQueryInformation pin a
+         * sizeof-4 request to STATUS_INFO_LENGTH_MISMATCH).  CoreMessaging's
+         * slurp probe (AlpcBuffer::CommitToSlurp, 0x180085ef0) passes
+         * Length = 16, which on x86_64 is exactly the structure, so it is
+         * answered here; the gate is not the source of a fail-fast on that call. */
+        if (length < sizeof(info)) st = STATUS_INFO_LENGTH_MISMATCH;
+        else if (!port_handle) st = STATUS_INVALID_HANDLE;
+        else
         {
-            req->handle = wine_server_obj_handle( port_handle );
-            ret = wine_server_call( req );
-            if (!ret)
+            SERVER_START_REQ( alpc_query_port )
             {
-                info.Flags       = reply->flags;
-                info.SequenceNo  = reply->sequence_no;
-                info.PortContext = (void *)(ULONG_PTR)reply->port_context;
+                req->handle = wine_server_obj_handle( port_handle );
+                ret = wine_server_call( req );
+                if (!ret)
+                {
+                    info.Flags       = reply->flags;
+                    info.SequenceNo  = reply->sequence_no;
+                    info.PortContext = (void *)(ULONG_PTR)reply->port_context;
+                }
+            }
+            SERVER_END_REQ;
+            if (ret) st = ret;
+            else
+            {
+                memcpy( buffer, &info, length < sizeof(info) ? length : sizeof(info) );
+                if (ret_length) *ret_length = sizeof(info);
+                st = STATUS_SUCCESS;
             }
         }
-        SERVER_END_REQ;
-        if (ret) return ret;
-
-        memcpy( buffer, &info, sizeof(info) );
-        if (ret_length) *ret_length = sizeof(info);
-        return STATUS_SUCCESS;
+        return st;
     }
     default:
         FIXME( "unsupported info class %u\n", (int)class );
