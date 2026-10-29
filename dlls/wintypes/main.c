@@ -523,6 +523,14 @@ static HRESULT _property_value_get_primitive_array(IPropertyValue *iface, Proper
 static const struct IReference_FLOATVtbl iref_float_vtbl;
 static const struct IReference_DOUBLEVtbl iref_double_vtbl;
 
+/*
+ * The CLR projects IReference<TimeSpan> through its own mangled IID, which is what
+ * WinRT.Runtime.dll asks the unboxing property values for.  WIDL derives a different IID for the
+ * instantiation from the .idl, so answer both to keep the native and the managed callers
+ * satisfied.
+ */
+static const GUID IID_IReference_TimeSpan_clr = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
+
 static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *iface, REFIID riid, void **out)
 {
     struct property_value *impl = impl_from_IPropertyValue(iface);
@@ -604,7 +612,8 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
         *out = &impl->irefs.datetime_iface;
         return S_OK;
     }
-    else if (IsEqualIID(riid, &IID_IReference_TimeSpan) && impl->type == PropertyType_TimeSpan)
+    else if ((IsEqualIID(riid, &IID_IReference_TimeSpan) || IsEqualIID(riid, &IID_IReference_TimeSpan_clr))
+             && impl->type == PropertyType_TimeSpan)
     {
         IReference_TimeSpan_AddRef(&impl->irefs.timespan_iface);
         *out = &impl->irefs.timespan_iface;
