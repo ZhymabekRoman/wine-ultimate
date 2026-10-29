@@ -1278,18 +1278,6 @@
 @ stdcall -private ZwAllocateUuids(ptr ptr ptr ptr) NtAllocateUuids
 @ stdcall -private ZwAllocateVirtualMemory(long ptr long ptr long long) NtAllocateVirtualMemory
 @ stdcall -private ZwAllocateVirtualMemoryEx(long ptr ptr long long ptr long) NtAllocateVirtualMemoryEx
-@ stdcall -private ZwAlpcAcceptConnectPort(ptr ptr long ptr ptr ptr ptr ptr long) NtAlpcAcceptConnectPort
-@ stdcall -private ZwAlpcConnectPort(ptr ptr ptr ptr long ptr ptr ptr ptr ptr ptr) NtAlpcConnectPort
-@ stdcall -private ZwAlpcCreatePort(ptr ptr ptr) NtAlpcCreatePort
-@ stdcall -private ZwAlpcCreatePortSection(ptr long ptr long ptr ptr) NtAlpcCreatePortSection
-@ stdcall -private ZwAlpcCreateSectionView(ptr long ptr) NtAlpcCreateSectionView
-@ stdcall -private ZwAlpcDeletePortSection(ptr long ptr) NtAlpcDeletePortSection
-@ stdcall -private ZwAlpcDeleteSectionView(ptr long ptr) NtAlpcDeleteSectionView
-@ stdcall -private ZwAlpcDisconnectPort(ptr long) NtAlpcDisconnectPort
-@ stdcall -private ZwAlpcImpersonateClientOfPort(ptr ptr ptr) NtAlpcImpersonateClientOfPort
-@ stdcall -private ZwAlpcQueryInformation(ptr long ptr long ptr) NtAlpcQueryInformation
-@ stdcall -private ZwAlpcSendWaitReceivePort(ptr long ptr ptr ptr ptr ptr ptr) NtAlpcSendWaitReceivePort
-@ stdcall -private ZwAlpcSetInformation(ptr long ptr long) NtAlpcSetInformation
 @ stdcall -private ZwAssociateWaitCompletionPacket(ptr ptr ptr ptr ptr long ptr long) NtAssociateWaitCompletionPacket
 @ stdcall -private ZwCancelWaitCompletionPacket(ptr long) NtCancelWaitCompletionPacket
 @ stdcall -private ZwCreateWaitCompletionPacket(ptr long ptr) NtCreateWaitCompletionPacket
