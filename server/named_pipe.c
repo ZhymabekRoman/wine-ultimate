@@ -1058,14 +1058,19 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
             }
         } while (write_pos < out_size);
 
-        if (status == STATUS_BUFFER_OVERFLOW)
-        {
-            /* a truncated message-mode read consumes the whole message; the remainder is lost */
-            message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
-            wake_message( message, message->iosb->in_size );
-            free_message( message );
-        }
-
+        /* A read that stops short of the message end is not the end of the
+         * message: message mode is read as a stream here, with message->read_pos
+         * carried across requests, and the caller keeps reading until the whole
+         * message is delivered.  rpcrt4's servers read a received packet as
+         * several requests (16-byte common header, rest of the header, payload),
+         * so the first read of a bind packet is always short of its end.  Freeing
+         * the message here destroyed the packet between those reads: the reader
+         * got its leading bytes, the following read found nothing, and the RPC
+         * call died with RPC_S_CALL_FAILED_DELAY (1726) - which surfaces as
+         * OpenSCManagerW() failing with 1722/1726 and services.exe logging
+         * "receiving command result timed out" for every service it starts.
+         * Leave the remainder queued; the delivered size is reported from the
+         * completion, which is what 1a5440320 needed in the first place. */
         async_request_complete( async, status, out_size, out_size, buf );
     }
 
