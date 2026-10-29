@@ -1820,27 +1820,44 @@ static void handle_shutdown_msg(DWORD msg, DWORD accept)
 
 static BOOL service_run_main_thread(void)
 {
-    DWORD i, n, ret;
+    DWORD i, n, ret, err;
+    ULONGLONG start_time;
     HANDLE wait_handles[MAXIMUM_WAIT_OBJECTS];
     UINT wait_services[MAXIMUM_WAIT_OBJECTS];
     struct dispatcher_data *disp = malloc( sizeof(*disp) );
-
-    disp->manager = OpenSCManagerW( NULL, NULL, SC_MANAGER_CONNECT );
-    if (!disp->manager)
-    {
-        ERR("failed to open service manager error %lu\n", GetLastError());
-        free( disp );
-        return FALSE;
-    }
 
     disp->pipe = service_open_pipe();
     if (disp->pipe == INVALID_HANDLE_VALUE)
     {
         WARN("failed to create control pipe error %lu\n", GetLastError());
-        CloseServiceHandle( disp->manager );
         free( disp );
         SetLastError( ERROR_FAILED_SERVICE_CONTROLLER_CONNECT );
         return FALSE;
+    }
+
+    /*
+     * OpenSCManagerW() is a loopback RPC call, and the svcctl endpoint of this very process is
+     * published asynchronously by RPC_Init() (programs/services/rpc.c) through
+     * RpcServerListen( 1, RPC_C_LISTEN_MAX_CALLS_DEFAULT, TRUE ).  The endpoint can still be
+     * missing when the first service is started: NdrClientCall then raises
+     * RPC_S_SERVER_UNAVAILABLE and the handle comes back null with error 1722.  Failing here
+     * took the whole process down, which left the SCM unreachable for the rest of the session
+     * and every CLSCTX_LOCAL_SERVER activation with it, so give the endpoint the same bounded
+     * window that start_rpcss_direct() gives the RpcSs pipe before declaring it broken.
+     */
+    start_time = GetTickCount64();
+    while (!(disp->manager = OpenSCManagerW( NULL, NULL, SC_MANAGER_CONNECT )))
+    {
+        err = GetLastError();
+        if (GetTickCount64() - start_time >= 15000)
+        {
+            ERR("failed to open service manager error %lu\n", err);
+            CloseHandle( disp->pipe );
+            free( disp );
+            SetLastError( err );
+            return FALSE;
+        }
+        Sleep( 100 );
     }
 
     service_event = CreateEventW( NULL, FALSE, FALSE, NULL );
