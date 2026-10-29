@@ -1186,6 +1186,28 @@ static BOOL service_accepts_control(const struct service_entry *service, DWORD d
     return FALSE;
 }
 
+/* The OVERLAPPED of a pipe operation, and on the read side the result buffer the
+ * caller handed us, are only owned by us while the operation is in flight.  A
+ * pending operation completes into whatever memory those live in: returning from
+ * this function destroys the frame that holds the OVERLAPPED and unwinds the
+ * caller's frame that holds the result, and the completion then writes through
+ * pointers that no longer belong to anybody - which is how services.exe ends up
+ * jumping to address 0.  Cancel the operation and poll until it is no longer in
+ * flight, so that every return path leaves nothing referencing this frame.
+ *
+ * Polling the status (rather than waiting on the event) is deliberate: the shared
+ * event is manual-reset and carries the signal of the operation before it, so a
+ * wait on it cannot prove that the cancelled operation has finished. */
+static void cancel_pending_io( HANDLE pipe, OVERLAPPED *overlapped )
+{
+    DWORD count, start = GetTickCount();
+
+    CancelIoEx( pipe, overlapped );
+    while (!GetOverlappedResult( pipe, overlapped, &count, FALSE )
+           && GetLastError() == ERROR_IO_INCOMPLETE && GetTickCount() - start < 5000)
+        Sleep(1);
+}
+
 /******************************************************************************
  * process_send_command
  */
@@ -1198,6 +1220,7 @@ static BOOL process_send_command(struct process_entry *process, const void *data
     overlapped.Offset = 0;
     overlapped.OffsetHigh = 0;
     overlapped.hEvent = process->overlapped_event;
+    ResetEvent( process->overlapped_event );
     r = WriteFile(process->control_pipe, data, size, &count, &overlapped);
     if (!r && GetLastError() == ERROR_IO_PENDING)
     {
@@ -1205,6 +1228,7 @@ static BOOL process_send_command(struct process_entry *process, const void *data
         if (ret == WAIT_TIMEOUT)
         {
             WINE_ERR("sending command timed out\n");
+            cancel_pending_io( process->control_pipe, &overlapped );
             *result = ERROR_SERVICE_REQUEST_TIMEOUT;
             return FALSE;
         }
@@ -1216,6 +1240,10 @@ static BOOL process_send_command(struct process_entry *process, const void *data
         *result  = (!r ? GetLastError() : ERROR_WRITE_FAULT);
         return FALSE;
     }
+    /* a new operation needs its own OVERLAPPED state and its own signal */
+    overlapped.Offset = 0;
+    overlapped.OffsetHigh = 0;
+    ResetEvent( process->overlapped_event );
     r = ReadFile(process->control_pipe, result, sizeof *result, &count, &overlapped);
     if (!r && GetLastError() == ERROR_IO_PENDING)
     {
@@ -1223,6 +1251,7 @@ static BOOL process_send_command(struct process_entry *process, const void *data
         if (ret == WAIT_TIMEOUT)
         {
             WINE_ERR("receiving command result timed out\n");
+            cancel_pending_io( process->control_pipe, &overlapped );
             *result = ERROR_SERVICE_REQUEST_TIMEOUT;
             return FALSE;
         }
