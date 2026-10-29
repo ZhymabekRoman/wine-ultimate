@@ -1058,14 +1058,6 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
             }
         } while (write_pos < out_size);
 
-        if (status == STATUS_BUFFER_OVERFLOW)
-        {
-            /* a truncated message-mode read consumes the whole message; the remainder is lost */
-            message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
-            wake_message( message, message->iosb->in_size );
-            free_message( message );
-        }
-
         async_request_complete( async, status, out_size, out_size, buf );
     }
 
@@ -1569,7 +1561,13 @@ static struct pipe_end *create_pipe_client( struct named_pipe *pipe, data_size_t
     if (!client)
         return NULL;
 
-    init_pipe_end( client, pipe, pipe->message_read_mode ? NAMED_PIPE_MESSAGE_STREAM_READ : 0, buffer_size );
+    /* The read mode of a connected client handle starts out as pipe, independent of
+     * the read mode recorded in the create specification of the pipe's server end.
+     * Inheriting the specification here made byte-mode clients take the message-mode
+     * read path: a read smaller than the queued message returned STATUS_BUFFER_OVERFLOW
+     * instead of the requested bytes, and the peer write that fed it was reported
+     * pending with its event never signaled and its APC never delivered. */
+    init_pipe_end( client, pipe, 0, buffer_size );
     client->state = FILE_PIPE_CONNECTED_STATE;
     client->client_pid = get_process_id( current->process );
     client->client_session_id = current->process->session_id;
