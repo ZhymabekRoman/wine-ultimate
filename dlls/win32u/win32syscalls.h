@@ -3088,7 +3088,7 @@
 #endif
 #define ALL_SYSCALL_STUBS \
     SYSCALL_STUB( NtBindCompositionSurface ) \
-    /* SYSCALL_STUB( NtCloseCompositionInputSink ) */ \
+    SYSCALL_STUB( NtCloseCompositionInputSink ) \
     SYSCALL_STUB( NtCompositionInputThread ) \
     SYSCALL_STUB( NtCompositionSetDropTarget ) \
     SYSCALL_STUB( NtCompositorNotifyExitWindows ) \
@@ -3096,9 +3096,9 @@
     SYSCALL_STUB( NtCompositorUpdateLastInputTime ) \
     SYSCALL_STUB( NtConfigureInputSpace ) \
     SYSCALL_STUB( NtConfirmCompositionSurfaceIndependentFlipEntry ) \
-    /* SYSCALL_STUB( NtCreateCompositionInputSink ) */ \
+    SYSCALL_STUB( NtCreateCompositionInputSink ) \
     SYSCALL_STUB( NtCreateCompositionSurfaceHandle ) \
-    /* SYSCALL_STUB( NtCreateImplicitCompositionInputSink ) */ \
+    SYSCALL_STUB( NtCreateImplicitCompositionInputSink ) \
     SYSCALL_STUB( NtDCompositionAddCrossDeviceVisualChild ) \
     SYSCALL_STUB( NtDCompositionBeginFrame ) \
     SYSCALL_STUB( NtDCompositionBoostCompositorClock ) \
@@ -3159,7 +3159,7 @@
     SYSCALL_STUB( NtDCompositionWaitForChannel ) \
     SYSCALL_STUB( NtDCompositionWaitForCompositorClock ) \
     SYSCALL_STUB( NtDesktopCaptureBits ) \
-    /* SYSCALL_STUB( NtDuplicateCompositionInputSink ) */ \
+    SYSCALL_STUB( NtDuplicateCompositionInputSink ) \
     SYSCALL_STUB( NtDxgkCancelPresents ) \
     SYSCALL_STUB( NtDxgkCheckSinglePlaneForMultiPlaneOverlaySupport ) \
     SYSCALL_STUB( NtDxgkConnectDoorbell ) \
@@ -3616,10 +3616,10 @@
     SYSCALL_STUB( NtOpenCompositionSurfaceSectionInfo ) \
     SYSCALL_STUB( NtOpenCompositionSurfaceSwapChainHandleInfo ) \
     SYSCALL_STUB( NtQueryCompositionInputIsImplicit ) \
-    /* SYSCALL_STUB( NtQueryCompositionInputQueueAndTransform ) */ \
-    /* SYSCALL_STUB( NtQueryCompositionInputSink ) */ \
-    /* SYSCALL_STUB( NtQueryCompositionInputSinkLuid ) */ \
-    /* SYSCALL_STUB( NtQueryCompositionInputSinkViewId ) */ \
+    SYSCALL_STUB( NtQueryCompositionInputQueueAndTransform ) \
+    SYSCALL_STUB( NtQueryCompositionInputSink ) \
+    SYSCALL_STUB( NtQueryCompositionInputSinkLuid ) \
+    SYSCALL_STUB( NtQueryCompositionInputSinkViewId ) \
     SYSCALL_STUB( NtQueryCompositionSurfaceBinding ) \
     SYSCALL_STUB( NtQueryCompositionSurfaceFrameRate ) \
     SYSCALL_STUB( NtQueryCompositionSurfaceHDRMetaData ) \
