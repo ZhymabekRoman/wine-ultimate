@@ -2139,6 +2139,24 @@ static void output_filenames_obj_dir( const struct makefile *make, struct strarr
 
 
 /*******************************************************************
+ *         is_wine_config_header
+ *
+ * Check if a resolved include is Wine's generated config.h. The path has to
+ * be built the same way makedep builds it, so that the check behaves the same
+ * for in-tree builds (srcdir = "."), relative out-of-tree builds and absolute
+ * out-of-tree builds. A plain "include/config.h" comparison only matches in
+ * an in-tree build, which makes the check silently vanish in the others.
+ */
+static bool is_wine_config_header( const struct incl_file *file )
+{
+    static const char *name;
+
+    if (!name) name = root_src_dir_path( "include/config.h" );
+    return file->filename && !strcmp( file->filename, name );
+}
+
+
+/*******************************************************************
  *         get_dependencies
  */
 static void get_dependencies( struct incl_file *file, struct incl_file *source )
@@ -2162,7 +2180,7 @@ static void get_dependencies( struct incl_file *file, struct incl_file *source )
         file->owner = source;
 
         /* sanity checks */
-        if (!strcmp( file->filename, "include/config.h" ) &&
+        if (is_wine_config_header( file ) && file->included_by == source &&
             file != *ARRAY_ENTRY( &source->files, 0, struct incl_file * ))
         {
             input_file_name = source->filename;
