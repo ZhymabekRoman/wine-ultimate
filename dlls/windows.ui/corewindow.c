@@ -148,11 +148,6 @@ static struct corewindow_statics corewindow_statics =
 IActivationFactory *corewindow_factory = &corewindow_statics.IActivationFactory_iface;
 
 /* ---- minimal CoreDispatcher ---- */
-/* The typed-event-handler parameter types differ per event but are ABI-equivalent
- * (all pointer-sized). Suppress the pointer-type mismatch for these stubs. */
-#if defined(__GNUC__) || defined(__clang__)
-#pragma GCC diagnostic ignored "-Wincompatible-function-pointer-types"
-#endif
 
 struct core_dispatcher
 {
@@ -192,7 +187,9 @@ static HRESULT WINAPI core_dispatcher_keys_GetRuntimeClassName( ICoreAccelerator
 { return WindowsCreateString( L"Windows.UI.Core.CoreDispatcher", 30, name ); }
 static HRESULT WINAPI core_dispatcher_keys_GetTrustLevel( ICoreAcceleratorKeys *iface, TrustLevel *level )
 { if (level) *level = BaseTrust; return S_OK; }
-static HRESULT WINAPI core_dispatcher_keys_add( ICoreAcceleratorKeys *iface, void *handler, EventRegistrationToken *cookie )
+static HRESULT WINAPI core_dispatcher_keys_add( ICoreAcceleratorKeys *iface,
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreDispatcher_Windows__CUI__CCore__CAcceleratorKeyEventArgs *handler,
+        EventRegistrationToken *cookie )
 { if (cookie) cookie->value = 1; return S_OK; }
 static HRESULT WINAPI core_dispatcher_keys_remove( ICoreAcceleratorKeys *iface, EventRegistrationToken cookie )
 { return S_OK; }
@@ -403,7 +400,7 @@ static IAsyncAction *dispatcher_async_action_create(void)
 }
 
 static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDispatcherPriority priority,
-        void *agileCallback, IAsyncAction **asyncAction )
+        __x_ABI_CWindows_CUI_CCore_CIDispatchedHandler *agileCallback, IAsyncAction **asyncAction )
 {
     TRACE( "iface %p, priority %d, agileCallback %p, asyncAction %p\n", iface, priority, agileCallback, asyncAction );
     if (agileCallback)
@@ -418,7 +415,8 @@ static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDisp
     return S_OK;
 }
 
-static HRESULT WINAPI core_dispatcher_RunIdleAsync( ICoreDispatcher *iface, void *agileCallback, IAsyncAction **asyncAction )
+static HRESULT WINAPI core_dispatcher_RunIdleAsync( ICoreDispatcher *iface,
+        __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandler *agileCallback, IAsyncAction **asyncAction )
 {
     TRACE( "iface %p, agileCallback %p, asyncAction %p\n", iface, agileCallback, asyncAction );
     if (agileCallback)
@@ -677,7 +675,7 @@ static HRESULT WINAPI core_window_get_Bounds( ICoreWindow *iface, Rect *value )
     }
     return S_OK;
 }
-static HRESULT WINAPI core_window_get_CustomProperties( ICoreWindow *iface, void **value )
+static HRESULT WINAPI core_window_get_CustomProperties( ICoreWindow *iface, __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet **value )
 { FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
 static HRESULT WINAPI core_window_get_Dispatcher( ICoreWindow *iface, ICoreDispatcher **value )
 {
@@ -736,9 +734,9 @@ static HRESULT WINAPI core_window_Activate( ICoreWindow *iface )
 }
 static HRESULT WINAPI core_window_Close( ICoreWindow *iface )
 { FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
-static HRESULT WINAPI core_window_GetAsyncKeyState( ICoreWindow *iface, int key, CoreVirtualKeyStates *state )
+static HRESULT WINAPI core_window_GetAsyncKeyState( ICoreWindow *iface, __x_ABI_CWindows_CSystem_CVirtualKey key, CoreVirtualKeyStates *state )
 { FIXME( "stub\n" ); if (state) *state = 0; return S_OK; }
-static HRESULT WINAPI core_window_GetKeyState( ICoreWindow *iface, int key, CoreVirtualKeyStates *state )
+static HRESULT WINAPI core_window_GetKeyState( ICoreWindow *iface, __x_ABI_CWindows_CSystem_CVirtualKey key, CoreVirtualKeyStates *state )
 { FIXME( "stub\n" ); if (state) *state = 0; return S_OK; }
 static HRESULT WINAPI core_window_ReleasePointerCapture( ICoreWindow *iface )
 { FIXME( "stub\n" ); return S_OK; }
