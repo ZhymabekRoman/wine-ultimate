@@ -31,6 +31,11 @@ struct dxgi_main
 };
 static struct dxgi_main dxgi_main;
 
+/* Own module handle, cached at process attach.  GetModuleHandleA() takes the
+ * loader lock; caching it here keeps every later window-class registration from
+ * calling a loader API while the wined3d critical section is held. */
+HMODULE dxgi_module;
+
 static void dxgi_main_cleanup(void)
 {
     free(dxgi_main.device_layers);
@@ -44,6 +49,7 @@ BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
     {
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(inst);
+            dxgi_module = inst;
             /* On Windows the composition engine is a static dependency of the
              * graphics stack, so a process that loads this dll also has the
              * composition library loaded.  Load it here to match. */

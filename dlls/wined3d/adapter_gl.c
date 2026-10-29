@@ -283,7 +283,7 @@ static BOOL wined3d_caps_gl_ctx_create_attribs(struct wined3d_caps_gl_ctx *caps_
 {
     HGLRC new_ctx;
 
-    if (!(gl_info->p_wglCreateContextAttribsARB = (void *)wglGetProcAddress("wglCreateContextAttribsARB")))
+    if (!(gl_info->p_wglCreateContextAttribsARB = (void *)gl_info->gl_ops.wgl.p_wglGetProcAddress("wglCreateContextAttribsARB")))
         return TRUE;
 
     if (!(new_ctx = context_create_wgl_attribs(gl_info, caps_gl_ctx->dc, NULL)))
@@ -2060,7 +2060,7 @@ static void enumerate_gl_extensions(struct wined3d_gl_info *gl_info,
 
 static void load_gl_funcs(struct wined3d_gl_info *gl_info)
 {
-#define USE_GL_FUNC(pfn) gl_info->gl_ops.ext.p_##pfn = (void *)wglGetProcAddress(#pfn);
+#define USE_GL_FUNC(pfn) gl_info->gl_ops.ext.p_##pfn = (void *)gl_info->gl_ops.wgl.p_wglGetProcAddress(#pfn);
     /* GL_APPLE_fence */
     USE_GL_FUNC(glDeleteFencesAPPLE)
     USE_GL_FUNC(glFinishFenceAPPLE)
@@ -5042,6 +5042,7 @@ static void wined3d_resolve_gl_funcs(struct wined3d_gl_funcs *funcs)
 #undef USE_GL_FUNC
     funcs->wgl.p_wglSwapBuffers = (void *)GetProcAddress(mod_gl, "wglSwapBuffers");
     funcs->wgl.p_wglGetPixelFormat = (void *)GetProcAddress(mod_gl, "wglGetPixelFormat");
+    funcs->wgl.p_wglGetProcAddress = (void *)GetProcAddress(mod_gl, "wglGetProcAddress");
 }
 
 void wined3d_init_gl_module(void)
@@ -5099,6 +5100,7 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
         gl_info->gl_ops.gl = gl_funcs.gl;
         gl_info->gl_ops.wgl.p_wglSwapBuffers = gl_funcs.wgl.p_wglSwapBuffers;
         gl_info->gl_ops.wgl.p_wglGetPixelFormat = gl_funcs.wgl.p_wglGetPixelFormat;
+        gl_info->gl_ops.wgl.p_wglGetProcAddress = gl_funcs.wgl.p_wglGetProcAddress;
     }
     else
     {

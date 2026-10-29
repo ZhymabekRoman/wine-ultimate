@@ -690,7 +690,7 @@ static ATOM dxgi_register_device_window_class(void)
     memset(&wc, 0, sizeof(wc));
     wc.style = CS_HREDRAW | CS_VREDRAW;
     wc.lpfnWndProc = dxgi_device_window_proc;
-    wc.hInstance = GetModuleHandleA("dxgi.dll");
+    wc.hInstance = dxgi_module;
     wc.lpszClassName = class_name;
 
     if (!(ret = RegisterClassA(&wc)))
@@ -705,31 +705,48 @@ static ATOM dxgi_register_device_window_class(void)
 
 HWND dxgi_factory_get_device_window(struct dxgi_factory *factory)
 {
+    ATOM atom;
+    HWND window;
+
+    if ((window = factory->device_window))
+        return window;
+
+    /* Registering the window class, resolving the module handle it needs and
+     * creating the window all reach the PE loader: RegisterClassA(),
+     * CreateWindowExA() and GetModuleHandleA() take the loader lock.  The loader
+     * lock must never be taken while the wined3d critical section is held (a
+     * thread inside DllMain owns the loader lock and can call into wined3d, which
+     * deadlocks - see wined3d_main.c DllMain).  Do all of that work first, outside
+     * the critical section, and take the critical section only to publish. */
+    atom = dxgi_register_device_window_class();
+
+    if (atom)
+        window = CreateWindowExA(0, (const char *)MAKEINTATOM(atom), "DXGI device window",
+                WS_DISABLED, 0, 0, 0, 0, NULL, NULL, NULL, NULL);
+    if (!window)
+        window = CreateWindowA("static", "DXGI device window",
+                WS_DISABLED, 0, 0, 0, 0, NULL, NULL, NULL, NULL);
+
+    if (!window)
+    {
+        ERR("Failed to create a window.\n");
+        return NULL;
+    }
+    SetWindowPos(window, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+
     wined3d_mutex_lock();
 
     if (!factory->device_window)
     {
-        ATOM atom = dxgi_register_device_window_class();
-        HWND window = NULL;
-
-        if (atom)
-            window = CreateWindowExA(0, (const char *)MAKEINTATOM(atom), "DXGI device window",
-                    WS_DISABLED, 0, 0, 0, 0, NULL, NULL, NULL, NULL);
-        if (!window)
-            window = CreateWindowA("static", "DXGI device window",
-                    WS_DISABLED, 0, 0, 0, 0, NULL, NULL, NULL, NULL);
-
-        if (!(factory->device_window = window))
-        {
-            wined3d_mutex_unlock();
-            ERR("Failed to create a window.\n");
-            return NULL;
-        }
-        SetWindowPos(factory->device_window, HWND_BOTTOM, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+        factory->device_window = window;
+        window = NULL;
         TRACE("Created device window %p for factory %p.\n", factory->device_window, factory);
     }
 
     wined3d_mutex_unlock();
+
+    if (window)
+        DestroyWindow(window);
 
     return factory->device_window;
 }

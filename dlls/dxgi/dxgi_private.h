@@ -122,6 +122,8 @@ struct dxgi_factory
 
 HRESULT dxgi_factory_create(REFIID riid, void **factory, BOOL extended);
 HWND dxgi_factory_get_device_window(struct dxgi_factory *factory);
+
+extern HMODULE dxgi_module;
 struct dxgi_factory *unsafe_impl_from_IDXGIFactory(IDXGIFactory *iface);
 
 /* IDXGIDevice */
