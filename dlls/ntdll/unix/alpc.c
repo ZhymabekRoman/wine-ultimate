@@ -569,6 +569,200 @@ NTSTATUS WINAPI NtAlpcDisconnectPort( HANDLE port_handle, ULONG flags )
 
 
 /******************************************************************************
+ *           NtAlpcCancelMessage  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcCancelMessage( HANDLE port_handle, ULONG flags, ALPC_CONTEXT_ATTR *msg_context )
+{
+    unsigned int ret;
+
+    TRACE( "(%p, %#x, %p)\n", port_handle, (unsigned int)flags, msg_context );
+
+    if (!msg_context) return STATUS_INVALID_PARAMETER;
+
+    SERVER_START_REQ( alpc_cancel_message )
+    {
+        req->handle = wine_server_obj_handle( port_handle );
+        req->msg_id = msg_context->MessageId;
+        ret = wine_server_call( req );
+        if (!ret && !reply->cancelled) ret = STATUS_NOT_FOUND;
+    }
+    SERVER_END_REQ;
+
+    return ret;
+}
+
+
+/******************************************************************************
+ *           NtAlpcQueryInformationMessage  (NTDLL.@)
+ *
+ * The information the kernel stamps into a delivered message is carried in
+ * the PORT_MESSAGE itself and on the port: the message context (port context,
+ * message context, sequence, the kernel-assigned message id and callback id)
+ * is answerable from that state.  The SID / token-modified-id / handle
+ * classes describe kernel bookkeeping of the sending security context that
+ * this relay does not carry.
+ */
+NTSTATUS WINAPI NtAlpcQueryInformationMessage( HANDLE port_handle, ALPC_PORT_MESSAGE *msg,
+                                               ULONG class, void *buffer, ULONG length, ULONG *ret_length )
+{
+    TRACE( "(%p, %p, %u, %p, %u, %p)\n", port_handle, msg, (int)class, buffer, (int)length, ret_length );
+
+    if (!msg) return STATUS_INVALID_PARAMETER;
+
+    switch (class)
+    {
+    case 0: /* message context information (ALPC_CONTEXT_ATTR) */
+    {
+        ALPC_CONTEXT_ATTR ctx;
+        unsigned int ret;
+
+        if (length < sizeof(ctx)) return STATUS_INFO_LENGTH_MISMATCH;
+        memset( &ctx, 0, sizeof(ctx) );
+        ctx.MessageId  = msg->MessageId;
+
+        SERVER_START_REQ( alpc_query_port )
+        {
+            req->handle = wine_server_obj_handle( port_handle );
+            ret = wine_server_call( req );
+            if (!ret) ctx.PortContext = (void *)(ULONG_PTR)reply->port_context;
+        }
+        SERVER_END_REQ;
+        if (ret) return ret;
+
+        memcpy( buffer, &ctx, sizeof(ctx) );
+        if (ret_length) *ret_length = sizeof(ctx);
+        return STATUS_SUCCESS;
+    }
+    case 3: /* handle information: { HANDLE handle, ULONG object_type_info } */
+        FIXME( "AlpcMessageHandleInformation unimplemented: the relay duplicates the sender's\n" );
+        FIXME( "handle at delivery only and keeps no per-message handle record to answer from.\n" );
+        return STATUS_NOT_IMPLEMENTED;
+    default:
+        FIXME( "unsupported message info class %u\n", (int)class );
+        return STATUS_INVALID_INFO_CLASS;
+    }
+}
+
+
+/******************************************************************************
+ *           NtAlpcOpenSenderProcess  (NTDLL.@)
+ *
+ * The delivered PORT_MESSAGE carries the sending thread's client id (the
+ * server stamps it), so the sender is opened by that id.
+ */
+NTSTATUS WINAPI NtAlpcOpenSenderProcess( HANDLE *process_handle, HANDLE port_handle,
+                                         ALPC_PORT_MESSAGE *msg )
+{
+    OBJECT_ATTRIBUTES attr;
+    CLIENT_ID cid;
+
+    TRACE( "(%p, %p, %p)\n", process_handle, port_handle, msg );
+
+    if (!process_handle) return STATUS_ACCESS_VIOLATION;
+    if (!msg) return STATUS_INVALID_PARAMETER;
+    *process_handle = NULL;
+
+    /* FIXME: the kernel opens the sender in the client's session and checks
+     * the connection's impersonation level; the relay authenticates the
+     * client id from the stamped PORT_MESSAGE only. */
+    cid = msg->ClientId;
+    InitializeObjectAttributes( &attr, NULL, 0, NULL, NULL );
+    return NtOpenProcess( process_handle, PROCESS_ALL_ACCESS, &attr, &cid );
+}
+
+
+/******************************************************************************
+ *           NtAlpcOpenSenderThread  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcOpenSenderThread( HANDLE *thread_handle, HANDLE port_handle,
+                                        ALPC_PORT_MESSAGE *msg )
+{
+    OBJECT_ATTRIBUTES attr;
+    CLIENT_ID cid;
+
+    TRACE( "(%p, %p, %p)\n", thread_handle, port_handle, msg );
+
+    if (!thread_handle) return STATUS_ACCESS_VIOLATION;
+    if (!msg) return STATUS_INVALID_PARAMETER;
+    *thread_handle = NULL;
+
+    cid = msg->ClientId;
+    InitializeObjectAttributes( &attr, NULL, 0, NULL, NULL );
+    return NtOpenThread( thread_handle, THREAD_ALL_ACCESS, &attr, &cid );
+}
+
+
+/******************************************************************************
+ *           NtAlpcConnectPortEx  (NTDLL.@)
+ *
+ * The OBJECT_ATTRIBUTES-based variant of NtAlpcConnectPort: the target port
+ * is named by the connection port object attributes, the rest of the
+ * handshake is the same connect path.
+ */
+NTSTATUS WINAPI NtAlpcConnectPortEx( HANDLE *port_handle, OBJECT_ATTRIBUTES *conn_port_attr,
+                                     OBJECT_ATTRIBUTES *obj_attr, ALPC_PORT_ATTRIBUTES *port_attr,
+                                     DWORD flags, PSECURITY_DESCRIPTOR server_sd,
+                                     ALPC_PORT_MESSAGE *connect_msg, SIZE_T *connect_msg_size,
+                                     ALPC_MESSAGE_ATTRIBUTES *out_msg_attr,
+                                     ALPC_MESSAGE_ATTRIBUTES *in_msg_attr, LARGE_INTEGER *timeout )
+{
+    TRACE( "(%p, %p, %p, %p, %#x, %p, %p, %p, %p, %p, %p)\n",
+           port_handle, conn_port_attr, obj_attr, port_attr, (unsigned int)flags,
+           server_sd, connect_msg, connect_msg_size, out_msg_attr, in_msg_attr, timeout );
+
+    if (!conn_port_attr || !conn_port_attr->ObjectName) return STATUS_INVALID_PARAMETER;
+    if (server_sd) FIXME( "server security descriptor requirements are not enforced\n" );
+
+    return NtAlpcConnectPort( port_handle, conn_port_attr->ObjectName, obj_attr, port_attr,
+                              flags, NULL, connect_msg, connect_msg_size,
+                              out_msg_attr, in_msg_attr, timeout );
+}
+
+
+/******************************************************************************
+ *           NtAlpcSendWaitReceivePortEx  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcSendWaitReceivePortEx( HANDLE port_handle, DWORD flags,
+                                             ALPC_PORT_MESSAGE *send_msg,
+                                             ALPC_MESSAGE_ATTRIBUTES *send_msg_attr,
+                                             ALPC_PORT_MESSAGE *recv_msg,
+                                             SIZE_T *recv_buffer_size,
+                                             ALPC_MESSAGE_ATTRIBUTES *recv_msg_attr,
+                                             LARGE_INTEGER *timeout )
+{
+    FIXME( "(%p, %#x, %p, %p, %p, %p, %p, %p) stub: the Ex variant adds the extended "
+           "completion context; the plain path does not model it\n",
+           port_handle, (unsigned int)flags, send_msg, send_msg_attr,
+           recv_msg, recv_buffer_size, recv_msg_attr, timeout );
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+
+/******************************************************************************
+ *           NtAlpcCreateResource  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcCreateResource( HANDLE port_handle, PVOID view_base, SIZE_T view_size,
+                                      void *resource )
+{
+    FIXME( "(%p, %p, %Iu, %p) stub: section-resource tracking (the kernel registers a\n"
+           " view as a port resource for cross-process view reserving) is not implemented\n",
+           port_handle, view_base, view_size, resource );
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+
+/******************************************************************************
+ *           NtAlpcDeleteResource  (NTDLL.@)
+ */
+NTSTATUS WINAPI NtAlpcDeleteResource( HANDLE port_handle, HANDLE resource_handle, ULONG flags )
+{
+    FIXME( "(%p, %p, %#x) stub: section-resource tracking is not implemented\n",
+           port_handle, resource_handle, (unsigned int)flags );
+    return STATUS_NOT_IMPLEMENTED;
+}
+
+
+/******************************************************************************
  *           NtAlpcSendWaitReceivePort  (NTDLL.@)
  *
  * Combined send + wait-for-receive on an ALPC port or connection.

@@ -4445,3 +4445,14 @@ typedef struct _ALPC_DATA_VIEW_ATTR
     unsigned int        sequence_no;    /* last assigned message sequence number */
     client_ptr_t        port_context;   /* port context */
 @END
+
+/* Cancel the outstanding request a connection carries for a message id
+ * (NtAlpcCancelMessage): the request leaves the connection's outstanding
+ * list, every receive armed for that id completes with STATUS_CANCELLED, and
+ * the serialisation gate opens for the next request. */
+@REQ(alpc_cancel_message)
+    obj_handle_t        handle;         /* ALPC connection port handle */
+    unsigned int        msg_id;         /* MessageId of the request to cancel */
+@REPLY
+    int                 cancelled;      /* a request was outstanding and is cancelled */
+@END

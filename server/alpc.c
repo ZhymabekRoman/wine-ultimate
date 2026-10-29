@@ -2049,6 +2049,59 @@ DECL_HANDLER(recv_alpc_port)
     release_object( port );
 }
 
+DECL_HANDLER(alpc_cancel_message)
+{
+    struct alpc_port *port, *base, *peer;
+    struct async *async;
+
+    port = (struct alpc_port *)get_handle_obj( current->process, req->handle,
+                                               0, &alpc_port_ops );
+    if (!port) return;
+
+    base = alpc_conn_base( port );
+    if (!base)
+    {
+        release_object( port );
+        set_error( STATUS_INVALID_PARAMETER );
+        return;
+    }
+
+    /* The request must be outstanding on the connection to be cancellable;
+     * a message id the connection does not carry is not a pending send. */
+    if (!alpc_pop_outstanding( base, req->msg_id ))
+    {
+        release_object( port );
+        set_error( STATUS_NOT_FOUND );
+        return;
+    }
+    reply->cancelled = 1;
+
+    /* Deliver the cancellation to every receive armed for that request: the
+     * sender's send-receive pair on this port and the peer side's armed
+     * receive take STATUS_CANCELLED in place of a reply that will never
+     * come. */
+    async = find_reply_alpc_async( &port->read_q, req->msg_id );
+    if (async)
+    {
+        async_terminate( async, STATUS_CANCELLED );
+        release_object( async );
+    }
+    peer = port->peer;
+    if (peer)
+    {
+        async = find_reply_alpc_async( &peer->read_q, req->msg_id );
+        if (async)
+        {
+            async_terminate( async, STATUS_CANCELLED );
+            release_object( async );
+        }
+    }
+    /* the cancelled request was the exchange in flight: the gate opens */
+    alpc_drain_send_gate( base );
+
+    release_object( port );
+}
+
 DECL_HANDLER(alpc_query_port)
 {
     struct alpc_port *port = (struct alpc_port *)get_handle_obj( current->process, req->handle,
