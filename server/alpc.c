@@ -79,13 +79,6 @@ struct alpc_message
  * are the sender's full PORT_MESSAGE. */
 #define ALPC_WIRE_MAGIC 0x434e4e41 /* 'ANNC' */
 
-/* Tag on the wire header's attr_flags: this delivered message is a connect
- * notification, whose port context is the port the notification is queued on -
- * a handle in the receiving process, which only ntdll can name.  An ordinary
- * send carries the sender's opaque context value in that slot instead.  The low
- * bit is not an ALPC message-attribute bit, so the two are told apart without
- * enlarging the header. */
-#define ALPC_WIRE_CTX_IS_HANDLE 0x00000001
 struct alpc_wire_hdr
 {
     unsigned int     magic;
@@ -1674,18 +1667,23 @@ static int queue_connect_notification( struct alpc_port *server_port, struct alp
     hdr->user_size    = pc->conn_data_size;
     /* The port context of a connection request names the port the request is
      * queued on: the server hands it back to NtAlpcAcceptConnectPort as the
-     * connection context, and a server that slurps the connect exchange queries
-     * it (AlpcBasicInformation, class 0) to read that port's message sequence
-     * number - the slurp is confirmed when the sequence number equals the number
-     * of messages it has taken.  A zero there leaves such a client calling
-     * NtAlpcQueryInformation with a null handle, which is STATUS_INVALID_HANDLE,
-     * which CoreMessaging treats as fatal.  Tag the notification so ntdll stamps
-     * the receiver's own handle for this port: this port's sequence_no is bumped
-     * for exactly the messages the notification is queued among, and the handle
-     * is valid in the process that owns the server port, which is the process
-     * that receives connect notifications on it. */
-    hdr->port_context = 0;  /* the handle is the receiver's own, stamped by ntdll */
-    hdr->attr_flags   = ALPC_WIRE_CTX_IS_HANDLE;
+     * connection context.  A port registers no context of its own - the
+     * documented ALPC_PORT_ATTRIBUTES carries no context slot (CoreMessaging
+     * builds a 0x48-byte one, memset to zero), so what the kernel delivers here
+     * is null, and the server reads the port handle from its own connection
+     * object: CoreMessaging's accept path (CoreMessagingXP+0x180085b20) tests
+     * this slot and, when it is null, loads the handle from [this-0x48] and
+     * calls NtAlpcImpersonateClientOfPort with that.
+     *
+     * Do not stamp the port's handle into this slot.  The app treats the value
+     * as the pointer it registered and dereferences it (0x180085b48,
+     * "mov rcx,[rax]" with rax = the context), so a handle - non-null, so the
+     * app's own null test does not catch it - faults on the handle value:
+     * measured as a c0000005 read of 0x1d4 at CoreMessagingXP+0x85b48, 0x1d4
+     * being exactly the port handle stamped.  A null here is both what Windows
+     * delivers and what the app's fallback path is written for. */
+    hdr->port_context = 0;
+    hdr->attr_flags   = 0;
     hdr->view_flags   = 0;
     hdr->view_base    = 0;
     hdr->view_size    = 0;
