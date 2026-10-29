@@ -330,9 +330,16 @@ static HRESULT WINAPI push_notification_factory_QueryInterface( void *iface, REF
     }
 
     /*
-     * The factory is agile, so it needs no custom marshaler, and the weak reference
-     * source belongs to the channel object, not to the factory.
+     * The .NET projection asks the factory for its weak reference when it registers the
+     * ChannelsRevoked event handler, so hand out the shared weak reference source stub that
+     * the rest of this file's objects use.  The factory is agile, so it needs no marshaler.
      */
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = &dummy_weakref_source;
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
