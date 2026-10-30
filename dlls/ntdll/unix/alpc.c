@@ -978,7 +978,20 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         }
     }
 
-    if (!recv_msg) return STATUS_SUCCESS;
+    /* ALPC_MSGFLG_REPLY_WAIT_ONLY is purely a receive operation (the send leg
+     * was skipped above).  When called with no user receive buffer it still
+     * performs the wait against the connection/reply slot and enforces the
+     * timeout semantics; provide a local scratch buffer so it enters the
+     * receive phase instead of early-returning success. */
+    char dummy_buf[sizeof(ALPC_PORT_MESSAGE)];
+    data_size_t dummy_size = sizeof(dummy_buf);
+
+    if (!recv_msg && (flags & ALPC_MSGFLG_REPLY_WAIT_ONLY))
+    {
+        recv_msg = (ALPC_PORT_MESSAGE *)dummy_buf;
+        recv_size = dummy_size;
+    }
+    else if (!recv_msg) return STATUS_SUCCESS;
 
     /* --- Receive phase --- */
     if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, port_handle )))
@@ -1044,6 +1057,15 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         if (!wait_ret) ret = io.Status;
         else
         {
+            IO_STATUS_BLOCK cancel_io;
+
+            /* The wait expired or was interrupted: cancel the in-flight receive
+             * async on the server side so it no longer sits in the port's read_q.
+             * Leaving it queued lets a later send be consumed by this already-
+             * dead receive (the wildcard apc_context == 0 matcher takes any
+             * message), stranding the caller whose armed receive arrived after
+             * the send. */
+            NtCancelIoFileEx( port_handle, &io, &cancel_io );
             NtClose( wait_handle );
             /* Windows NtAlpcSendWaitReceivePort timeout semantics: a NULL
              * Timeout blocks until a message arrives, a real Timeout expires
@@ -1185,20 +1207,34 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                         view->Flags         = hdr.view_flags;
                         if (hdr.view_section)
                         {
-                            /* the kernel duplicated the sender's section into
-                             * this process on delivery: report the
-                             * duplicated handle; the receiver maps it with
-                             * NtAlpcCreateSectionView (ViewBase/ViewSize are
-                             * filled by the map) */
-                            view->SectionHandle = wine_server_ptr_handle( (obj_handle_t)hdr.view_section );
-                            view->ViewBase      = NULL;
-                            view->ViewSize      = (SIZE_T)hdr.view_size;
+                            /* The kernel duplicates the sender's section into
+                             * the receiver at delivery and maps it into the
+                             * receiving process's address space: the receiver
+                             * sees the mapped ViewBase and the duplicated
+                             * SectionHandle (which it may later unmap or
+                             * delete through NtAlpcDeleteSectionView). */
+                            void *base = NULL;
+                            SIZE_T size = (SIZE_T)hdr.view_size;
+                            HANDLE sec = wine_server_ptr_handle( (obj_handle_t)hdr.view_section );
+
+                            view->SectionHandle = sec;
+                            if (!NtMapViewOfSection( sec, NtCurrentProcess(), &base, 0, 0, NULL,
+                                                     &size, ViewUnmap, 0, PAGE_READWRITE ))
+                            {
+                                view->ViewBase = base;
+                                view->ViewSize = size;
+                            }
+                            else
+                            {
+                                view->ViewBase = NULL;
+                                view->ViewSize = (SIZE_T)hdr.view_size;
+                            }
                         }
                         else
                         {
                             view->SectionHandle = NULL;
-                            view->ViewBase      = (void *)(ULONG_PTR)hdr.view_base;
-                            view->ViewSize      = (SIZE_T)hdr.view_size;
+                            view->ViewBase      = NULL;
+                            view->ViewSize      = 0;
                         }
                         recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_VIEW_ATTRIBUTE;
                     }
@@ -1323,7 +1359,7 @@ NTSTATUS WINAPI NtAlpcSetInformation( HANDLE port_handle, ULONG class, void *buf
     case 1: /* AlpcPortSecurityDescriptorInformation: buffer is a PSECURITY_DESCRIPTOR */
         if (!buffer) return STATUS_ACCESS_VIOLATION;
         if (length < sizeof(PSECURITY_DESCRIPTOR)) return STATUS_INVALID_PARAMETER;
-        return NtSetSecurityObject( port_handle, DACL_SECURITY_INFORMATION, *(PSECURITY_DESCRIPTOR *)buffer );
+        return NtSetSecurityObject( port_handle, DACL_SECURITY_INFORMATION, buffer );
     default:
         FIXME( "unsupported info class %u\n", (int)class );
         return STATUS_INVALID_INFO_CLASS;
