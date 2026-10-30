@@ -615,12 +615,12 @@ static void test_AlpcMessageViewAttribute(void)
             ok(recvd_view != NULL, "Expected recvd_view != NULL\n");
             if (recvd_view)
             {
-                ok(recvd_view->ViewBase == args.view_base,
-                   "Expected ViewBase %p, got %p\n", args.view_base, recvd_view->ViewBase);
+                ok(recvd_view->ViewBase != NULL, "Expected non-NULL ViewBase\n");
                 ok(recvd_view->ViewSize == 0x1000,
                    "Expected ViewSize 0x1000, got %Ix\n", recvd_view->ViewSize);
-                ok(!strcmp((char *)recvd_view->ViewBase, "alpc shared payload 12345"),
-                   "Received view content mismatch: %s\n", (char *)recvd_view->ViewBase);
+                if (recvd_view->ViewBase)
+                    ok(!strcmp((char *)recvd_view->ViewBase, "alpc shared payload 12345"),
+                       "Received view content mismatch: %s\n", (char *)recvd_view->ViewBase);
             }
         }
     }

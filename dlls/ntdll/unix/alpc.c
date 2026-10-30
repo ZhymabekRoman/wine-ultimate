@@ -1185,20 +1185,34 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                         view->Flags         = hdr.view_flags;
                         if (hdr.view_section)
                         {
-                            /* the kernel duplicated the sender's section into
-                             * this process on delivery: report the
-                             * duplicated handle; the receiver maps it with
-                             * NtAlpcCreateSectionView (ViewBase/ViewSize are
-                             * filled by the map) */
-                            view->SectionHandle = wine_server_ptr_handle( (obj_handle_t)hdr.view_section );
-                            view->ViewBase      = NULL;
-                            view->ViewSize      = (SIZE_T)hdr.view_size;
+                            /* The kernel duplicates the sender's section into
+                             * the receiver at delivery and maps it into the
+                             * receiving process's address space: the receiver
+                             * sees the mapped ViewBase and the duplicated
+                             * SectionHandle (which it may later unmap or
+                             * delete through NtAlpcDeleteSectionView). */
+                            void *base = NULL;
+                            SIZE_T size = (SIZE_T)hdr.view_size;
+                            HANDLE sec = wine_server_ptr_handle( (obj_handle_t)hdr.view_section );
+
+                            view->SectionHandle = sec;
+                            if (!NtMapViewOfSection( sec, NtCurrentProcess(), &base, 0, 0, NULL,
+                                                     &size, ViewUnmap, 0, PAGE_READWRITE ))
+                            {
+                                view->ViewBase = base;
+                                view->ViewSize = size;
+                            }
+                            else
+                            {
+                                view->ViewBase = NULL;
+                                view->ViewSize = (SIZE_T)hdr.view_size;
+                            }
                         }
                         else
                         {
                             view->SectionHandle = NULL;
-                            view->ViewBase      = (void *)(ULONG_PTR)hdr.view_base;
-                            view->ViewSize      = (SIZE_T)hdr.view_size;
+                            view->ViewBase      = NULL;
+                            view->ViewSize      = 0;
                         }
                         recv_msg_attr->ValidAttributes |= ALPC_MESSAGE_VIEW_ATTRIBUTE;
                     }
