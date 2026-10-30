@@ -1044,6 +1044,15 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         if (!wait_ret) ret = io.Status;
         else
         {
+            IO_STATUS_BLOCK cancel_io;
+
+            /* The wait expired or was interrupted: cancel the in-flight receive
+             * async on the server side so it no longer sits in the port's read_q.
+             * Leaving it queued lets a later send be consumed by this already-
+             * dead receive (the wildcard apc_context == 0 matcher takes any
+             * message), stranding the caller whose armed receive arrived after
+             * the send. */
+            NtCancelIoFileEx( port_handle, &io, &cancel_io );
             NtClose( wait_handle );
             /* Windows NtAlpcSendWaitReceivePort timeout semantics: a NULL
              * Timeout blocks until a message arrives, a real Timeout expires
