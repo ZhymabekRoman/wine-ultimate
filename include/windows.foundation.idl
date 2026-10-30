@@ -361,7 +361,7 @@ namespace Windows.Foundation {
 
     [
         contract(Windows.Foundation.FoundationContract, 1.0),
-        uuid(11d3b13a-180e-4789-a8be-7712882893e6)
+        uuid(4bd682dd-7554-40e9-9a9b-82654ede7e62)
     ]
     interface IPropertyValue : IInspectable
     {

@@ -524,12 +524,12 @@ static const struct IReference_FLOATVtbl iref_float_vtbl;
 static const struct IReference_DOUBLEVtbl iref_double_vtbl;
 
 /*
- * The CLR projects IReference<TimeSpan> through its own mangled IID, which is what
- * WinRT.Runtime.dll asks the unboxing property values for.  WIDL derives a different IID for the
- * instantiation from the .idl, so answer both to keep the native and the managed callers
- * satisfied.
+ * CoreCLR's ComWrappers probes for XAML reference tracking interfaces on COM/WinRT
+ * wrappers.  Property values do not participate in reference tracker walks, so return
+ * E_NOINTERFACE explicitly without noisy FIXME spew.
  */
-static const GUID IID_IReference_TimeSpan_clr = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
+static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
 
 static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *iface, REFIID riid, void **out)
 {
@@ -545,6 +545,12 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
         IPropertyValue_AddRef(iface);
         *out = &impl->IPropertyValue_iface;
         return S_OK;
+    }
+    else if (IsEqualIID(riid, &IID_IReferenceTracker)
+             || IsEqualIID(riid, &IID_IReferenceTrackerTarget))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
     }
     else if (IsEqualIID(riid, &IID_IMarshal))
     {
@@ -612,8 +618,7 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
         *out = &impl->irefs.datetime_iface;
         return S_OK;
     }
-    else if ((IsEqualIID(riid, &IID_IReference_TimeSpan) || IsEqualIID(riid, &IID_IReference_TimeSpan_clr))
-             && impl->type == PropertyType_TimeSpan)
+    else if (IsEqualIID(riid, &IID_IReference_TimeSpan) && impl->type == PropertyType_TimeSpan)
     {
         IReference_TimeSpan_AddRef(&impl->irefs.timespan_iface);
         *out = &impl->irefs.timespan_iface;
