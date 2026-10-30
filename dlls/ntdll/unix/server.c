@@ -801,10 +801,19 @@ unsigned int server_wait( const union select_op *select_op, data_size_t size, UI
 
     if (abs_timeout < 0)
     {
+        /* a relative timeout is given in 100 ns units and counts down; the server
+         * wants the absolute deadline it counts against.  Build it exactly like
+         * get_absolute_timeout() does for the fast multiplex path, i.e. now - rel
+         * from the system time, not rel - now from the (uninitialized) performance
+         * counter: the latter is negative for every finite timeout, so the server
+         * sees a deadline far in the past and answers the wait with STATUS_TIMEOUT
+         * at once.  That is what makes GetQueuedCompletionStatus(10000) behave as
+         * a zero-timeout poll, so an overlapped named pipe connect that completes
+         * one round trip later is never picked up from the completion port. */
         LARGE_INTEGER now;
 
-        NtQueryPerformanceCounter( &now, NULL );
-        abs_timeout -= now.QuadPart;
+        NtQuerySystemTime( &now );
+        abs_timeout = now.QuadPart - abs_timeout;
     }
 
     ret = server_select( select_op, size, flags, abs_timeout, NULL, &apc );
