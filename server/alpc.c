@@ -746,67 +746,63 @@ static void update_alpc_readiness( struct alpc_port *port )
         set_fd_signaled( pair->fd, pair_ready );
         ready |= pair_ready;
     }
+    if (port->is_server)
+    {
+        struct alpc_port *conn;
+        LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+            if (conn->peer && !list_empty( &conn->peer->msg_queue ))
+            {
+                ready = 1;
+                break;
+            }
+    }
     set_fd_signaled( port->fd, ready );
 }
 
+static void deliver_alpc_queue( struct alpc_port *port, struct alpc_port *queue )
+{
+    struct alpc_message *msg, *next;
+
+    if (!queue) return;
+    LIST_FOR_EACH_ENTRY_SAFE( msg, next, &queue->msg_queue, struct alpc_message, entry )
+    {
+        struct async *async = find_pending_alpc_async( &port->read_q, msg->msg_id );
+        struct iosb *iosb;
+
+        if (!async) continue;
+
+        iosb = async_get_iosb( async );
+        if (iosb->out_size < msg->data_size)
+        {
+            async_request_complete( async, STATUS_BUFFER_TOO_SMALL, msg->data_size, 0, NULL );
+        }
+        else
+        {
+            void *data = (char *)msg + sizeof(*msg);
+            async_request_complete_alloc( async, STATUS_SUCCESS,
+                                           msg->data_size, msg->data_size, data );
+        }
+        list_remove( &msg->entry );
+        release_alpc_message( msg );
+        release_object( iosb );
+        release_object( async );
+    }
+}
+
 /* Deliver queued messages to pending async readers. Messages parked on this
- * port's own queue and messages parked on the queue of its pair (the other
- * handle of the same connection) are both taken by the receivers armed here. */
+ * port's own queue, on the queue of its pair (the other handle of the same
+ * connection), and, for a listening port, on the server communication ports
+ * of its accepted connections, are all taken by receivers armed here. */
 static void reselect_alpc_port( struct alpc_port *port )
 {
-    struct alpc_port *queues[2], *queue;
-    struct alpc_message *msg, *next;
-    unsigned int i;
-
-    queues[0] = port;
-    queues[1] = alpc_port_pair( port );
-
-    for (i = 0; i < 2; i++)
+    deliver_alpc_queue( port, port );
+    if (alpc_port_pair( port )) deliver_alpc_queue( port, alpc_port_pair( port ) );
+    if (port->is_server)
     {
-        if (!(queue = queues[i])) continue;
-        if (i && queue == queues[0]) continue;
-
-        LIST_FOR_EACH_ENTRY_SAFE( msg, next, &queue->msg_queue, struct alpc_message, entry )
-        {
-            struct async *async = find_pending_alpc_async( &port->read_q, msg->msg_id );
-            struct iosb *iosb;
-
-            if (!async) continue;
-
-            iosb = async_get_iosb( async );
-            if (iosb->out_size < msg->data_size)
-            {
-                /* Report the length the message needs in the io result.  The
-                 * kernel does; a receiver that only grows its buffer and retries
-                 * when the returned size exceeds the buffer it passed (the
-                 * CoreMessaging receive park site) cannot recover from a zero
-                 * there, and takes the failure as fatal.  Nothing is written, so
-                 * out_size stays 0; the message is consumed below, as on the
-                 * success branch. */
-                async_request_complete( async, STATUS_BUFFER_TOO_SMALL, msg->data_size, 0, NULL );
-            }
-            else
-            {
-                void *data = (char *)msg + sizeof(*msg);
-                async_request_complete_alloc( async, STATUS_SUCCESS,
-                                               msg->data_size, msg->data_size, data );
-            }
-            /* The kernel consumes the message on both statuses.  A message left
-             * parked on an undersized receive keeps the port signaled, so every
-             * later receive of that connection fails the same way and the handle
-             * the message's attributes duplicated into the receiver's table is
-             * pinned for the lifetime of the connection: one oversized message
-             * poisons the port.  Once consumed the receiver owns the handle
-             * duplicate. */
-            list_remove( &msg->entry );
-            release_alpc_message( msg );
-            release_object( iosb );
-            release_object( async );
-        }
+        struct alpc_port *conn;
+        LIST_FOR_EACH_ENTRY( conn, &port->connections, struct alpc_port, conn_entry )
+            if (conn->peer) deliver_alpc_queue( port, conn->peer );
     }
-
-    /* a port handle is signaled while a message awaits a receiver on either of
-     * the connection's queues; once they are drained it stops being signaled */
     update_alpc_readiness( port );
 }
 
@@ -974,6 +970,13 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
     list_add_tail( &peer->msg_queue, &msg->entry );
     wake_up( &peer->obj, 0 );
     reselect_alpc_port( peer );
+    /* A message queued on a server communication port is also readable by a
+     * receive armed on the listening port that accepted this connection. */
+    if (!peer->is_server && !peer->listen_port && peer->peer && peer->peer->listen_port)
+    {
+        wake_up( &peer->peer->listen_port->obj, 0 );
+        reselect_alpc_port( peer->peer->listen_port );
+    }
     /* readiness of any handle of a connection is readiness of all of them: the
      * client keys its wake completion packets to the handle it arms the receive
      * on, which for the server side is the listening port and for the client
@@ -1326,20 +1329,14 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     }
     else
     {
-        /* Deliver to peer communication port if a receiver is waiting there,
-         * or to the listening port if the server is receiving all connections there. */
-        if (is_reply_send && port->peer)
-            peer = port->peer; /* a reply belongs to the connection's client side */
-        else if (port->peer && async_waiting( &port->peer->read_q ))
+        /* Deliver to peer communication port: client messages of an accepted
+         * connection belong on that connection's server communication port.
+         * Reselect on the listening port will also pick them up if the server
+         * receives all connections there. */
+        if (port->peer)
             peer = port->peer;
-        else if (port->listen_port && async_waiting( &port->listen_port->read_q ))
-            peer = port->listen_port;
         else if (port->listen_port)
-            peer = port->listen_port; /* the server receives the traffic of every
-                                       * connection on the listening port (LPC
-                                       * connect-dance servers keep no connection
-                                       * handle); park the message there when no
-                                       * receive is armed yet */
+            peer = port->listen_port;
         else
             peer = port->peer;
 
