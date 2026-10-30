@@ -1323,7 +1323,7 @@ NTSTATUS WINAPI NtAlpcSetInformation( HANDLE port_handle, ULONG class, void *buf
     case 1: /* AlpcPortSecurityDescriptorInformation: buffer is a PSECURITY_DESCRIPTOR */
         if (!buffer) return STATUS_ACCESS_VIOLATION;
         if (length < sizeof(PSECURITY_DESCRIPTOR)) return STATUS_INVALID_PARAMETER;
-        return NtSetSecurityObject( port_handle, DACL_SECURITY_INFORMATION, *(PSECURITY_DESCRIPTOR *)buffer );
+        return NtSetSecurityObject( port_handle, DACL_SECURITY_INFORMATION, buffer );
     default:
         FIXME( "unsupported info class %u\n", (int)class );
         return STATUS_INVALID_INFO_CLASS;
