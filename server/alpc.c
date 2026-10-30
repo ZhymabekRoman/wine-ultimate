@@ -303,11 +303,11 @@ static struct list alpc_port_list = LIST_INIT(alpc_port_list);
 #define ALPC_USER_MSGID_OFF  (4 * sizeof(client_ptr_t))
 #define ALPC_USER_HDR_SIZE   (6 * sizeof(client_ptr_t))
 
-/* The kernel carries at most 256 bytes of inline data in a PORT_MESSAGE;
+/* Inline data in a PORT_MESSAGE can be up to PORT_MAX_MESSAGE_LENGTH (65536);
  * a larger payload must ride a data view (the sender attaches a VIEW
  * attribute and the kernel transports the section).  A send with more inline
  * data and no view is refused. */
-#define ALPC_MAX_INLINE_DATA_SIZE 256
+#define ALPC_MAX_INLINE_DATA_SIZE 65536
 
 /* ---- Forward declarations ---- */
 
@@ -1013,6 +1013,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
     struct alpc_msg_attr_hdr attr;
     const void *data;
     data_size_t size;
+    data_size_t max_len;
     unsigned int reply_id = 0;
     unsigned int send_flags = 0;
     unsigned int utype = 0;
@@ -1054,23 +1055,21 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
      * queued.  A client-side send is bounded by the listening port it
      * delivers to (the server receives the traffic of every connection
      * there); a send on the listening port is bounded by that port. */
+    max_len = port->is_server ? port->max_msg_len :
+              (port->listen_port ? port->listen_port->max_msg_len : 0);
+    if (max_len && size > max_len)
     {
-        data_size_t max_len = port->is_server ? port->max_msg_len :
-                              (port->listen_port ? port->listen_port->max_msg_len : 0);
-        if (max_len && size > max_len)
-        {
-            release_object( iosb );
-            set_error( STATUS_INVALID_BUFFER_SIZE );
-            async_request_complete( async, STATUS_INVALID_BUFFER_SIZE, 0, 0, NULL );
-            return;
-        }
+        release_object( iosb );
+        set_error( STATUS_INVALID_BUFFER_SIZE );
+        async_request_complete( async, STATUS_INVALID_BUFFER_SIZE, 0, 0, NULL );
+        return;
     }
 
     /* Inline data is bounded by ALPC_MAX_INLINE_DATA_SIZE: a message with
      * more DataLength and no data view cannot ride the kernel's inline
      * transport and is refused; larger payloads must send the section. */
     if (!(attr.attr_flags & ALPC_MESSAGE_VIEW_ATTRIBUTE) && size >= 2 &&
-        *(const unsigned short *)data > ALPC_MAX_INLINE_DATA_SIZE)
+        *(const unsigned short *)data > (max_len ? max_len : ALPC_MAX_INLINE_DATA_SIZE))
     {
         release_object( iosb );
         set_error( STATUS_INVALID_BUFFER_SIZE );
@@ -1472,7 +1471,7 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                 unsigned int tl = ALPC_USER_HDR_SIZE + ((*(const unsigned short *)p + 7) & ~7u);
                 if (tl > left) break;
                 if (!(attr.attr_flags & ALPC_MESSAGE_VIEW_ATTRIBUTE) &&
-                    *(const unsigned short *)p > ALPC_MAX_INLINE_DATA_SIZE)
+                    *(const unsigned short *)p > (max_len ? max_len : ALPC_MAX_INLINE_DATA_SIZE))
                 {
                     release_object( iosb );
                     set_error( STATUS_INVALID_BUFFER_SIZE );

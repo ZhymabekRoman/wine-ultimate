@@ -6553,8 +6553,23 @@ static void test_SetFocus_process(void)
     DestroyWindow( hwnd );
 }
 
+struct thread_notify_param
+{
+    HWND hwnd;
+    INT ret;
+};
+
+static DWORD WINAPI thread_notify_proc( void *param )
+{
+    struct thread_notify_param *p = param;
+    p->ret = pScheduleDispatchNotification( p->hwnd );
+    return 0;
+}
+
 static void test_ScheduleDispatchNotification(void)
 {
+    struct thread_notify_param thread_param;
+    HANDLE thread;
     HWND hwnd;
     INT ret;
 
@@ -6573,7 +6588,18 @@ static void test_ScheduleDispatchNotification(void)
     ret = pScheduleDispatchNotification(hwnd);
     ok(ret == 2, "Got unexpected %d.\n", ret);
 
+    thread_param.hwnd = hwnd;
+    thread_param.ret = -1;
+    thread = CreateThread(NULL, 0, thread_notify_proc, &thread_param, 0, NULL);
+    ok(!!thread, "CreateThread failed %lu.\n", GetLastError());
+    WaitForSingleObject(thread, INFINITE);
+    CloseHandle(thread);
+    ok(thread_param.ret == 1, "Got unexpected cross-thread %d.\n", thread_param.ret);
+
     DestroyWindow(hwnd);
+
+    ret = pScheduleDispatchNotification(hwnd);
+    ok(!ret, "Got unexpected destroyed %d.\n", ret);
 }
 
 static void test_DelegateInput(void)

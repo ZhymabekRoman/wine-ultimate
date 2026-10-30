@@ -2870,12 +2870,14 @@ BOOL WINAPI NtUserRegisterTouchPadCapable( BOOL capable )
  */
 INT WINAPI NtUserScheduleDispatchNotification( HWND hwnd )
 {
-    FIXME("hwnd %p stub!\n", hwnd);
+    DWORD target_thread;
 
-    if (is_window(hwnd))
-        return 2;
+    if (!is_window( hwnd )) return 0;
+    if (!(target_thread = get_window_thread( hwnd, NULL ))) return 0;
 
-    return 0;
+    if (target_thread == GetCurrentThreadId()) return 2;
+
+    return 1;
 }
 
 /**********************************************************************

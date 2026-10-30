@@ -258,10 +258,16 @@ struct user_thread_info *get_user_thread_info(void)
             {
                 TEB64 *teb64 = (TEB64 *)(UINT_PTR)teb->GdiBatchCount;
                 info->client_info = (struct ntuser_thread_info *)teb64->Win32ClientInfo;
+                if (!teb64->Win32ClientInfo[12])
+                    teb64->Win32ClientInfo[12] = (ULONG64)(UINT_PTR)&teb64->Win32ClientInfo[14];
             }
             else
 #endif
-            info->client_info = (struct ntuser_thread_info *)teb->Win32ClientInfo;
+            {
+                info->client_info = (struct ntuser_thread_info *)teb->Win32ClientInfo;
+                if (!teb->Win32ClientInfo[12])
+                    teb->Win32ClientInfo[12] = (ULONG_PTR)&teb->Win32ClientInfo[14];
+            }
         }
     }
     return info;

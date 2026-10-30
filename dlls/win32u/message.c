@@ -2909,6 +2909,27 @@ static BOOL process_hardware_message( MSG *msg, UINT hw_id, const struct hardwar
 }
 
 /***********************************************************************
+ *           sync_client_queue_status
+ *
+ * Mirror the shared queue bits into the Windows client queue status structure
+ * (TEB->Win32ClientInfo[12]) that Windows-specific dispatch code (CoreMessagingXP,
+ * WinUI 3) polls directly.
+ */
+static void sync_client_queue_status( const queue_shm_t *queue_shm )
+{
+    TEB *teb = NtCurrentTeb();
+    struct win32_client_queue_status *qs;
+
+    if (!teb) return;
+    if (!teb->Win32ClientInfo[12])
+        teb->Win32ClientInfo[12] = (ULONG_PTR)&teb->Win32ClientInfo[14];
+    qs = (struct win32_client_queue_status *)teb->Win32ClientInfo[12];
+    qs->wake_bits = queue_shm->wake_bits;
+    qs->changed_bits = queue_shm->changed_bits;
+    qs->changed_bits_v5 = queue_shm->changed_bits;
+}
+
+/***********************************************************************
  *           check_queue_bits
  *
  * returns TRUE and the queue wake bits and changed bits if we can skip a server request
@@ -2924,6 +2945,7 @@ static BOOL check_queue_bits( UINT wake_mask, UINT changed_mask, UINT signal_bit
 
     while ((status = get_shared_queue( &lock, &queue_shm )) == STATUS_PENDING)
     {
+        sync_client_queue_status( queue_shm );
         if (internal) skip = !(queue_shm->internal_bits & QS_HARDWARE);
         /* if the masks need an update and caller cannot skip mask sync */
         else if (!can_skip_mask && queue_shm->wake_mask != wake_mask) skip = FALSE;
@@ -3300,8 +3322,11 @@ static BOOL is_queue_signaled(void)
     UINT status;
 
     while ((status = get_shared_queue( &lock, &queue_shm )) == STATUS_PENDING)
+    {
+        sync_client_queue_status( queue_shm );
         signaled = (queue_shm->wake_bits & queue_shm->wake_mask) ||
                    (queue_shm->changed_bits & queue_shm->changed_mask);
+    }
     if (status) return FALSE;
 
     return signaled;

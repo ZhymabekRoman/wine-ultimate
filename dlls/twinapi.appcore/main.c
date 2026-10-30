@@ -1125,6 +1125,12 @@ static const void *startup_task_factory_vtbl[];
 static struct { const void *vtbl; } startup_task_factory_obj = { startup_task_factory_vtbl };
 static HRESULT WINAPI startup_task_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
     *out = &startup_task_factory_obj;
     return S_OK;
 }
@@ -1230,6 +1236,12 @@ static const void *bg_builder_factory_vtbl[];
 static struct { const void *vtbl; } bg_builder_factory_obj = { bg_builder_factory_vtbl };
 static HRESULT WINAPI bg_builder_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
     *out = &bg_builder_factory_obj;
     return S_OK;
 }
@@ -1266,6 +1278,12 @@ static const void *push_trigger_factory_vtbl[];
 static struct { const void *vtbl; } push_trigger_factory_obj = { push_trigger_factory_vtbl };
 static HRESULT WINAPI push_trigger_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
     *out = &push_trigger_factory_obj;
     return S_OK;
 }

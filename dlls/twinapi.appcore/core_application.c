@@ -1000,10 +1000,19 @@ static HRESULT WINAPI app_instance_statics_GetRuntimeClassName( IInspectable *if
 static HRESULT WINAPI app_instance_statics_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 { if (level) *level = BaseTrust; return S_OK; }
 
+static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
 static const GUID IID_IUwpAppInstance = {0x6756488b, 0xdd4d, 0x4c26, {0xa5, 0x6e, 0xd3, 0xe4, 0xce, 0x07, 0xd8, 0x26}};
 
 static HRESULT WINAPI app_instance_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
     ERR( "app_instance QI: %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -1033,6 +1042,13 @@ static const GUID IID_IAppActivationArguments = {0x14f99eaf, 0x1580, 0x5062, {0x
 
 static HRESULT WINAPI app_activation_args_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||

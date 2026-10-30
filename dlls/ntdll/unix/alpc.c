@@ -92,6 +92,29 @@ struct alpc_wire_hdr
     client_ptr_t     view_section;
 };
 
+/* In Windows x64 ALPC, connect_msg expects a 40-byte PORT_MESSAGE header
+ * (sizeof(PORT_MESSAGE) with 64-bit alignment pad, where ClientId.UniqueProcess
+ * sits at offset 8 and ClientId.UniqueThread sits at offset 16). */
+struct alpc_connect_msg_hdr
+{
+    USHORT      DataLength;
+    USHORT      TotalLength;
+    USHORT      Type;
+    USHORT      DataInfoOffset;
+    CLIENT_ID   ClientId;
+    ULONG       MessageId;
+    ULONG       Reserved;
+    ULONG       CallbackId;
+    ULONG       Reserved2;
+};
+#ifdef _WIN64
+C_ASSERT( sizeof(struct alpc_connect_msg_hdr) == 40 );
+C_ASSERT( offsetof(struct alpc_connect_msg_hdr, ClientId.UniqueProcess) == 8 );
+C_ASSERT( offsetof(struct alpc_connect_msg_hdr, ClientId.UniqueThread) == 16 );
+C_ASSERT( offsetof(struct alpc_connect_msg_hdr, MessageId) == 24 );
+C_ASSERT( offsetof(struct alpc_connect_msg_hdr, CallbackId) == 32 );
+#endif
+
 /* HANDLE attribute as the kernel presents it on delivery. It rides as an
  * optional block between the wire header and the user payload, present only
  * when attr_flags carries ALPC_MESSAGE_HANDLE_ATTRIBUTE (connect handshake
@@ -209,6 +232,7 @@ static BOOL alpc_async_completion( void *user, ULONG_PTR *info, unsigned int *st
             req->user_arg = wine_server_client_ptr( async );
             if (async->buffer) wine_server_set_reply( req, async->buffer, async->size );
             *status = virtual_locked_server_call( req );
+            *info   = wine_server_reply_size( req );
         }
         SERVER_END_REQ;
     }
@@ -365,12 +389,14 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
                                     ALPC_MESSAGE_ATTRIBUTES *out_msg_attr,
                                     ALPC_MESSAGE_ATTRIBUTES *in_msg_attr, LARGE_INTEGER *timeout )
 {
+    struct alpc_wire_hdr chdr;
     unsigned int ret;
     HANDLE wait_handle = NULL;
     OBJECT_ATTRIBUTES port_obj_attr;
-    data_size_t len;
+    data_size_t len, async_buf_size;
     struct object_attributes *objattr;
     struct alpc_async *async;
+    char reply_buf[1024];
     IO_STATUS_BLOCK io = { { STATUS_PENDING } };
 
     TRACE( "(%p, %s, %p, %p, %#x, %p, %p, %p, %p, %p, %p)\n",
@@ -393,10 +419,8 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
         free( objattr );
         return STATUS_NO_MEMORY;
     }
-    /* the server's connection reply is delivered as the async out data when the
-     * handshake completes on the server side, so register the caller's buffer */
-    async->buffer = connect_msg;
-    async->size   = connect_msg ? (connect_msg_size ? *connect_msg_size : connect_msg->TotalLength) : 0;
+    async->buffer = reply_buf;
+    async->size = sizeof(reply_buf);
 
     SERVER_START_REQ( connect_alpc_port )
     {
@@ -411,10 +435,8 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
          * validate it before accepting */
         if (connect_msg && connect_msg->DataLength)
             wine_server_add_data( req, connect_msg + 1, connect_msg->DataLength );
-        /* the server's connection reply lands in the caller's connection message */
-        if (connect_msg)
-            wine_server_set_reply( req, connect_msg,
-                                   connect_msg_size ? *connect_msg_size : connect_msg->TotalLength );
+        /* the server's connection reply lands in the async buffer */
+        wine_server_set_reply( req, reply_buf, sizeof(reply_buf) );
         ret = wine_server_call( req );
         if (!ret || ret == STATUS_PENDING)
         {
@@ -425,7 +447,16 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
     SERVER_END_REQ;
 
     free( objattr );
-    if (ret != STATUS_PENDING) free( async );
+    if (ret && ret != STATUS_PENDING)
+    {
+        free( async );
+        if (*port_handle)
+        {
+            NtClose( *port_handle );
+            *port_handle = NULL;
+        }
+        return ret;
+    }
 
     if (wait_handle)
     {
@@ -445,14 +476,35 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
      * port and its context.  The server prefixes a wine-internal wire header
      * with that information; strip it from the caller's buffer and fill in the
      * attributes as the kernel would. */
-    struct alpc_wire_hdr chdr = {0};
-    if (!ret && connect_msg && io.Information >= sizeof(struct alpc_wire_hdr))
+    memset( &chdr, 0, sizeof(chdr) );
+    if (!ret && io.Information >= sizeof(struct alpc_wire_hdr))
     {
-        memcpy( &chdr, connect_msg, sizeof(chdr) );
+        memcpy( &chdr, reply_buf, sizeof(chdr) );
         if (chdr.magic == ALPC_WIRE_MAGIC)
         {
-            if (chdr.user_size) memmove( connect_msg, (char *)connect_msg + sizeof(chdr), chdr.user_size );
-            io.Information = chdr.user_size;
+            if (connect_msg)
+            {
+                struct alpc_connect_msg_hdr *hdr = (struct alpc_connect_msg_hdr *)connect_msg;
+                size_t max_size = connect_msg_size ? *connect_msg_size : 64;
+                size_t copy_size = 0;
+
+                memset( connect_msg, 0, min(max_size, (size_t)40) );
+                hdr->DataLength             = chdr.user_size;
+                hdr->TotalLength            = 40 + chdr.user_size;
+                hdr->Type                   = chdr.type;
+                hdr->DataInfoOffset         = 0;
+                hdr->ClientId.UniqueProcess = (HANDLE)(ULONG_PTR)chdr.client_pid;
+                hdr->ClientId.UniqueThread  = (HANDLE)(ULONG_PTR)chdr.client_tid;
+                hdr->MessageId              = chdr.msg_id;
+                hdr->CallbackId             = chdr.callback_id;
+
+                if (max_size > 40 && chdr.user_size)
+                {
+                    copy_size = min((size_t)chdr.user_size, max_size - 40);
+                    memcpy( (char *)connect_msg + 40, (char *)reply_buf + sizeof(chdr), copy_size );
+                }
+                io.Information = 40 + copy_size;
+            }
 
             if (out_msg_attr && (out_msg_attr->AllocatedAttributes & ALPC_MESSAGE_CONTEXT_ATTRIBUTE))
             {
@@ -510,6 +562,8 @@ NTSTATUS WINAPI NtAlpcConnectPort( HANDLE *port_handle, UNICODE_STRING *port_nam
         }
     }
 
+    TRACE( "NtAlpcConnectPort returning %#x, port_handle %p, info %lu\n",
+           ret, *port_handle, connect_msg_size ? (unsigned long)*connect_msg_size : 0 );
     return ret;
 }
 

@@ -128,6 +128,21 @@ struct ntuser_thread_info
     UINT64         wmchar_data;       /* client data for WM_CHAR mappings */
 };
 
+/* Queue status bits layout, Windows stores a pointer to this in
+ * TEB->Win32ClientInfo[12]. In CoreMessagingXP (GetQueueStatusReadonlyInternal):
+ * LOWORD tests offset 4 (v6[2]) against wake_bits (fsWakeBits).
+ * HIWORD tests offset 6 (v6[3]) on build < 19516 or offset 8 (v6[4]) on build >= 19516
+ * against changed_bits (fsChangeBits).
+ * Wine mirrors the shared queue bits here. */
+struct win32_client_queue_status
+{
+    unsigned short send_sticky;     /* offset 0 */
+    unsigned short unused;          /* offset 2 */
+    unsigned short wake_bits;       /* offset 4: v6[2] - LOWORD of GetQueueStatus */
+    unsigned short changed_bits;    /* offset 6: v6[3] - HIWORD of GetQueueStatus (build < 19516) */
+    unsigned int   changed_bits_v5; /* offset 8: v6[4] - HIWORD of GetQueueStatus (build >= 19516) */
+};
+
 #ifndef WINE_UNIX_LIB
 static inline struct ntuser_thread_info *NtUserGetThreadInfo(void)
 {

@@ -144,6 +144,9 @@ BOOL com_is_stub_local_server( REFCLSID rclsid )
  * slots all return S_OK without touching their arguments.
  */
 
+static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
+
 struct stub_server_object
 {
     IUnknown IUnknown_u;
@@ -164,6 +167,11 @@ static HRESULT WINAPI stub_server_QueryInterface( IUnknown *iface, REFIID riid, 
     if (!obj)
         return E_INVALIDARG;
     *obj = NULL;
+
+    if (IsEqualGUID( riid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( riid, &IID_IReferenceTrackerTarget ))
+        return E_NOINTERFACE;
+
     IUnknown_AddRef( iface );
     *obj = iface;
     return S_OK;
