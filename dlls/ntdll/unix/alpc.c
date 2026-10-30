@@ -978,7 +978,20 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
         }
     }
 
-    if (!recv_msg) return STATUS_SUCCESS;
+    /* ALPC_MSGFLG_REPLY_WAIT_ONLY is purely a receive operation (the send leg
+     * was skipped above).  When called with no user receive buffer it still
+     * performs the wait against the connection/reply slot and enforces the
+     * timeout semantics; provide a local scratch buffer so it enters the
+     * receive phase instead of early-returning success. */
+    char dummy_buf[sizeof(ALPC_PORT_MESSAGE)];
+    data_size_t dummy_size = sizeof(dummy_buf);
+
+    if (!recv_msg && (flags & ALPC_MSGFLG_REPLY_WAIT_ONLY))
+    {
+        recv_msg = (ALPC_PORT_MESSAGE *)dummy_buf;
+        recv_size = dummy_size;
+    }
+    else if (!recv_msg) return STATUS_SUCCESS;
 
     /* --- Receive phase --- */
     if (!(async = (struct alpc_async *)alloc_fileio( sizeof(*async), alpc_async_completion, port_handle )))
