@@ -26,6 +26,29 @@
 #define WIDL_using_Windows_UI_Core
 #include "windows.ui.core.h"
 
+static const GUID IID_ICoreWindowInterop = { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f } };
+
+typedef struct ICoreWindowInterop ICoreWindowInterop;
+typedef struct ICoreWindowInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWindowInterop *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( ICoreWindowInterop *This );
+    ULONG (WINAPI *Release)( ICoreWindowInterop *This );
+    HRESULT (WINAPI *GetWindowHandle)( ICoreWindowInterop *This, HWND *hwnd );
+    HRESULT (WINAPI *SetMessageHandled)( ICoreWindowInterop *This, boolean value );
+} ICoreWindowInteropVtbl;
+
+struct ICoreWindowInterop
+{
+    const ICoreWindowInteropVtbl *lpVtbl;
+};
+
+#define ICoreWindowInterop_QueryInterface(This,riid,ppvObject) (This)->lpVtbl->QueryInterface(This,riid,ppvObject)
+#define ICoreWindowInterop_AddRef(This) (This)->lpVtbl->AddRef(This)
+#define ICoreWindowInterop_Release(This) (This)->lpVtbl->Release(This)
+#define ICoreWindowInterop_GetWindowHandle(This,hwnd) (This)->lpVtbl->GetWindowHandle(This,hwnd)
+#define ICoreWindowInterop_SetMessageHandled(This,value) (This)->lpVtbl->SetMessageHandled(This,value)
+
 #define check_interface( obj, iid, exp ) check_interface_( __LINE__, obj, iid, exp )
 static void check_interface_( unsigned int line, void *obj, const IID *iid, BOOL supported )
 {
@@ -45,6 +68,9 @@ static void test_CoreWindow(void)
     ICoreWindowStatic *core_window_static;
     IActivationFactory *factory;
     ICoreWindow *core_window;
+    ICoreWindowInterop *interop;
+    ICoreDispatcher *dispatcher;
+    HWND hwnd;
     HSTRING str;
     HRESULT hr;
     LONG ref;
@@ -78,11 +104,37 @@ static void test_CoreWindow(void)
     ok( hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr );
     }
 
-    /* How to create a ICoreWindow? */
-    core_window = (ICoreWindow *)0xdeadbeef;
+    /* Test GetForCurrentThread, Dispatcher, and ICoreWindowInterop */
+    core_window = NULL;
     hr = ICoreWindowStatic_GetForCurrentThread( core_window_static, &core_window );
     ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
-    ok( core_window == NULL, "Got unexpected core_window.\n" );
+    ok( core_window != NULL, "Expected non-NULL core_window.\n" );
+
+    if (core_window)
+    {
+        dispatcher = NULL;
+        hr = ICoreWindow_get_Dispatcher( core_window, &dispatcher );
+        ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
+        ok( dispatcher != NULL, "Expected non-NULL dispatcher.\n" );
+        if (dispatcher)
+            ICoreDispatcher_Release( dispatcher );
+
+        interop = NULL;
+        hr = ICoreWindow_QueryInterface( core_window, &IID_ICoreWindowInterop, (void **)&interop );
+        ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
+        ok( interop != NULL, "Expected non-NULL interop.\n" );
+
+        if (interop)
+        {
+            hwnd = NULL;
+            hr = ICoreWindowInterop_GetWindowHandle( interop, &hwnd );
+            ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
+            ok( hwnd != NULL, "Expected non-NULL hwnd.\n" );
+            ICoreWindowInterop_Release( interop );
+        }
+
+        ICoreWindow_Release( core_window );
+    }
 
     ICoreWindowStatic_Release( core_window_static );
 

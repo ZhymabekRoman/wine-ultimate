@@ -115,13 +115,56 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+/* ---- minimal CoreWindow ---- */
+
+static const GUID IID_ICoreWindowInterop = { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f } };
+
+typedef struct ICoreWindowInterop ICoreWindowInterop;
+typedef struct ICoreWindowInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWindowInterop *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( ICoreWindowInterop *This );
+    ULONG (WINAPI *Release)( ICoreWindowInterop *This );
+    HRESULT (WINAPI *GetWindowHandle)( ICoreWindowInterop *This, HWND *hwnd );
+    HRESULT (WINAPI *SetMessageHandled)( ICoreWindowInterop *This, boolean value );
+} ICoreWindowInteropVtbl;
+
+struct ICoreWindowInterop
+{
+    const ICoreWindowInteropVtbl *lpVtbl;
+};
+
+struct core_window
+{
+    ICoreWindow ICoreWindow_iface;
+    ICoreWindowInterop ICoreWindowInterop_iface;
+    IInspectable dummy_iface;
+    ICoreDispatcher *dispatcher;
+    HWND hwnd;
+    LONG ref;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs *visibility_changed_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *size_changed_handler;
+};
+
+static __thread struct core_window *thread_core_window;
+
 DEFINE_IINSPECTABLE( corewindow_static, ICoreWindowStatic, struct corewindow_statics, IActivationFactory_iface )
 
 static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWindowStatic *iface, ICoreWindow **windows )
 {
-    FIXME( "iface %p, windows %p semi-stub.\n", iface, windows );
+    TRACE( "iface %p, windows %p.\n", iface, windows );
     if (!windows) return E_POINTER;
-    *windows = NULL;
+
+    if (!thread_core_window)
+    {
+        *windows = core_window_create();
+        if (!*windows) return E_FAIL;
+    }
+    else
+    {
+        *windows = &thread_core_window->ICoreWindow_iface;
+        ICoreWindow_AddRef( *windows );
+    }
     return S_OK;
 }
 
@@ -463,37 +506,6 @@ static ICoreDispatcher *core_dispatcher_create(void)
     return &impl->ICoreDispatcher_iface;
 }
 
-/* ---- minimal CoreWindow ---- */
-
-static const GUID IID_ICoreWindowInterop = { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x97, 0xcb, 0x98 } };
-
-typedef struct ICoreWindowInterop ICoreWindowInterop;
-typedef struct ICoreWindowInteropVtbl
-{
-    HRESULT (WINAPI *QueryInterface)( ICoreWindowInterop *This, REFIID riid, void **ppvObject );
-    ULONG (WINAPI *AddRef)( ICoreWindowInterop *This );
-    ULONG (WINAPI *Release)( ICoreWindowInterop *This );
-    HRESULT (WINAPI *GetWindowHandle)( ICoreWindowInterop *This, HWND *hwnd );
-    HRESULT (WINAPI *SetMessageHandled)( ICoreWindowInterop *This, boolean value );
-} ICoreWindowInteropVtbl;
-
-struct ICoreWindowInterop
-{
-    const ICoreWindowInteropVtbl *lpVtbl;
-};
-
-struct core_window
-{
-    ICoreWindow ICoreWindow_iface;
-    ICoreWindowInterop ICoreWindowInterop_iface;
-    IInspectable dummy_iface;
-    ICoreDispatcher *dispatcher;
-    HWND hwnd;
-    LONG ref;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs *visibility_changed_handler;
-    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *size_changed_handler;
-};
-
 static inline struct core_window *impl_from_dummy( IInspectable *iface )
 {
     return CONTAINING_RECORD( iface, struct core_window, dummy_iface );
@@ -637,7 +649,6 @@ static HRESULT WINAPI core_window_QueryInterface( ICoreWindow *iface, REFIID iid
 }
 static ULONG WINAPI core_window_AddRef( ICoreWindow *iface )
 { return InterlockedIncrement( &impl_from_ICoreWindow( iface )->ref ); }
-static __thread struct core_window *thread_core_window;
 
 static ULONG WINAPI core_window_Release( ICoreWindow *iface )
 {
