@@ -4146,6 +4146,237 @@ static void test_GetOverlappedResultEx(void)
     CloseHandle(server);
 }
 
+/* Child process: connect to the server end of pipename and write a single message.
+ * 'delay' is applied after the connection is established and before the write, so that the
+ * parent has armed its read request first (the order the mojo bootstrap over a named pipe
+ * produces: the pipe server end arms the request, the peer process writes the message). */
+static void child_process_write_message_pipe( const char *pipename, int delay )
+{
+    static const char msg[] = "mojo message";
+    HANDLE file;
+    DWORD written;
+    BOOL ret;
+
+    file = CreateFileA( pipename, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+    if (file == INVALID_HANDLE_VALUE)
+    {
+        trace( "child: CreateFileA(%s) failed, error %lu\n", pipename, GetLastError() );
+        return;
+    }
+
+    if (delay) Sleep( delay );
+
+    SetLastError( 0xdeadbeef );
+    ret = WriteFile( file, msg, sizeof(msg), &written, NULL );
+    trace( "child: WriteFile returned %d, written %lu, error %lu\n", ret, written, GetLastError() );
+
+    /* Stay alive so that the connection isn't broken while the parent reads the message. */
+    Sleep( 5000 );
+    CloseHandle( file );
+}
+
+/* Server end of a pipe bound (or not) to an I/O completion port, arming an overlapped read
+ * (ReadFile, or TransceiveFile which is what the mojo bootstrap issues: NtDeviceIoControlFile
+ * with FSCTL_PIPE_TRANSCEIVE = 0x282040) before a child process writes a message from the
+ * client end of the same pipe instance. */
+static void iocp_read_from_server_end( const char *pipename, DWORD pipe_type, BOOL use_iocp,
+                                       BOOL use_transceive, int child_delay )
+{
+    static const char msg[] = "mojo message";
+    ULONG_PTR key = 0xdeadbeef;
+    OVERLAPPED ovl, *oResult = NULL;
+    PROCESS_INFORMATION pi;
+    STARTUPINFOA si = {0};
+    char cmdline[300];
+    HANDLE server, port = NULL;
+    DWORD size = 0xdeadbeef, err, wait;
+    BOOL ret;
+    char **argv;
+    char buf[512];
+
+    winetest_get_mainargs( &argv );
+
+    server = CreateNamedPipeA( pipename, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                               pipe_type | PIPE_WAIT, 1, 1024, 1024,
+                               NMPWAIT_USE_DEFAULT_WAIT, NULL );
+    ok(server != INVALID_HANDLE_VALUE, "CreateNamedPipe failed, error %lu\n", GetLastError());
+    if (server == INVALID_HANDLE_VALUE) return;
+
+    if (use_iocp)
+    {
+        port = CreateIoCompletionPort( server, NULL, 0x1234, 1 );
+        ok(!!port, "CreateIoCompletionPort failed, error %lu\n", GetLastError());
+        if (!port) { CloseHandle( server ); return; }
+    }
+
+    sprintf( cmdline, "%s pipe write_message_pipe %s %d", argv[0], pipename, child_delay );
+    ret = CreateProcessA( NULL, cmdline, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi );
+    ok(ret, "CreateProcess failed, error %lu\n", GetLastError());
+    if (!ret)
+    {
+        CloseHandle( port );
+        CloseHandle( server );
+        return;
+    }
+
+    /* Synchronous connect, so that the read below is armed before the child writes. */
+    SetLastError( 0xdeadbeef );
+    ret = ConnectNamedPipe( server, NULL );
+    err = GetLastError();
+    ok(ret || err == ERROR_PIPE_CONNECTED, "ConnectNamedPipe returned %u, error %lu\n", ret, err);
+    if (!ret && err != ERROR_PIPE_CONNECTED)
+    {
+        TerminateProcess( pi.hProcess, 0 );
+        CloseHandle( pi.hThread );
+        CloseHandle( pi.hProcess );
+        CloseHandle( port );
+        CloseHandle( server );
+        return;
+    }
+
+    memset( buf, 0, sizeof(buf) );
+    memset( &ovl, 0, sizeof(ovl) );
+    ovl.hEvent = CreateEventW( NULL, TRUE, FALSE, NULL );
+    SetLastError( 0xdeadbeef );
+    if (use_transceive)
+    {
+        /* the mojo bootstrap over a named pipe issues FSCTL_PIPE_TRANSCEIVE (0x282040) */
+        static const char payload[] = "x";
+        ret = DeviceIoControl( server, FSCTL_PIPE_TRANSCEIVE, (void *)payload, sizeof(payload),
+                               buf, sizeof(buf), &size, &ovl );
+        err = GetLastError();
+        ok(!ret && err == ERROR_IO_PENDING, "overlapped FSCTL_PIPE_TRANSCEIVE returned %u, error %lu\n", ret, err);
+    }
+    else
+    {
+        ret = ReadFile( server, buf, sizeof(buf), &size, &ovl );
+        err = GetLastError();
+        ok(ret || err == ERROR_IO_PENDING, "overlapped ReadFile returned %u, error %lu\n", ret, err);
+    }
+
+    if (use_iocp)
+    {
+        SetLastError( 0xdeadbeef );
+        ret = GetQueuedCompletionStatus( port, &size, &key, &oResult, 2000 );
+        err = GetLastError();
+        trace( "iocp read completion: ret %u, size %lu, key %Iu, overlapped %p, error %lu\n",
+               ret, size, key, oResult, err );
+        ok(ret, "GetQueuedCompletionStatus for server-end read failed, error %lu\n", err);
+        if (ret)
+        {
+            ok(key == 0x1234, "got completion key %Iu\n", key);
+            ok(oResult == &ovl, "got overlapped pointer %p\n", oResult);
+            ok(size == sizeof(msg), "got size %lu\n", size);
+            ok(!memcmp( buf, msg, sizeof(msg) ), "got content %.*s\n", (int)size, buf);
+        }
+    }
+    else
+    {
+        wait = WaitForSingleObject( ovl.hEvent, 2000 );
+        ok(wait == WAIT_OBJECT_0, "wait for read event returned %lu\n", wait);
+        if (wait == WAIT_OBJECT_0)
+        {
+            ret = GetOverlappedResult( server, &ovl, &size, FALSE );
+            ok(ret, "GetOverlappedResult failed, error %lu\n", GetLastError());
+            ok(size == sizeof(msg), "got size %lu\n", size);
+            ok(!memcmp( buf, msg, sizeof(msg) ), "got content %.*s\n", (int)size, buf);
+        }
+    }
+
+    if (!ret) pCancelIoEx( server, &ovl );
+
+    CloseHandle( pi.hThread );
+    CloseHandle( pi.hProcess );
+    CloseHandle( ovl.hEvent );
+    CloseHandle( port );
+    CloseHandle( server );
+}
+
+static void test_iocp_read_server_end(void)
+{
+    static const struct
+    {
+        const char *pipename;
+        DWORD type;
+        BOOL use_iocp, use_transceive;
+        int child_delay;
+    } variants[] =
+    {
+        /* message mode, server end bound to a completion port: the peer write must complete
+         * the pending overlapped read as a completion packet on that port */
+        { PIPENAME "iocp_message",          PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE, TRUE,  FALSE, 0 },
+        /* control: byte mode on a completion port */
+        { PIPENAME "iocp_byte",             PIPE_TYPE_BYTE,                            TRUE,  FALSE, 0 },
+        /* control: message mode with an event-based (non-completion-port) overlapped read */
+        { PIPENAME "iocp_message_event",    PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE, FALSE, FALSE, 0 },
+        /* the mojo bootstrap shape: message-mode server end on a completion port, request armed
+         * before the peer writes, issued through FSCTL_PIPE_TRANSCEIVE (0x282040) */
+        { PIPENAME "iocp_transceive",       PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE, TRUE,  TRUE,  700 },
+        /* control: same armed transceive, with an event instead of a completion port */
+        { PIPENAME "iocp_transceive_event", PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE, FALSE, TRUE,  700 },
+        /* the mojo bootstrap names live in the \Device\NamedPipe\LOCAL\ form */
+        { "\\\\.\\pipe\\LOCAL\\tests_pipe.c_iocp_local", PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
+          TRUE, TRUE, 700 },
+    };
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE( variants ); i++)
+    {
+        trace( "pipe iocp variant %s\n", variants[i].pipename );
+        iocp_read_from_server_end( variants[i].pipename, variants[i].type, variants[i].use_iocp,
+                                   variants[i].use_transceive, variants[i].child_delay );
+    }
+}
+
+/* An overlapped write issued at the client end of a message-mode pipe, with the client handle
+ * bound to a completion port, must produce a completion packet on that port. */
+static void test_iocp_write_from_client_end(void)
+{
+    static const char msg[] = "mojo message";
+    ULONG_PTR key = 0xdeadbeef;
+    OVERLAPPED ovl, *oResult = NULL;
+    HANDLE server, client, port;
+    DWORD written, err;
+    BOOL ret;
+
+    server = CreateNamedPipeA( PIPENAME, PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                               1, 1024, 1024, NMPWAIT_USE_DEFAULT_WAIT, NULL );
+    ok(server != INVALID_HANDLE_VALUE, "CreateNamedPipe failed, error %lu\n", GetLastError());
+    if (server == INVALID_HANDLE_VALUE) return;
+
+    client = CreateFileA( PIPENAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, FILE_FLAG_OVERLAPPED, NULL );
+    ok(client != INVALID_HANDLE_VALUE, "CreateFile failed, error %lu\n", GetLastError());
+    if (client == INVALID_HANDLE_VALUE) { CloseHandle( server ); return; }
+
+    port = CreateIoCompletionPort( client, NULL, 0x1234, 1 );
+    ok(!!port, "CreateIoCompletionPort failed, error %lu\n", GetLastError());
+
+    memset( &ovl, 0, sizeof(ovl) );
+    ovl.hEvent = CreateEventW( NULL, TRUE, FALSE, NULL );
+    SetLastError( 0xdeadbeef );
+    ret = WriteFile( client, msg, sizeof(msg), &written, &ovl );
+    err = GetLastError();
+    ok(ret || err == ERROR_IO_PENDING, "overlapped WriteFile returned %u, error %lu\n", ret, err);
+
+    SetLastError( 0xdeadbeef );
+    ret = GetQueuedCompletionStatus( port, &written, &key, &oResult, 2000 );
+    err = GetLastError();
+    trace( "iocp write completion: ret %u, size %lu, key %Iu, overlapped %p, error %lu\n",
+           ret, written, key, oResult, err );
+    ok(ret, "GetQueuedCompletionStatus for client-end write failed, error %lu\n", err);
+    if (ret)
+    {
+        ok(key == 0x1234, "got completion key %Iu\n", key);
+        ok(oResult == &ovl, "got overlapped pointer %p\n", oResult);
+        ok(written == sizeof(msg), "got size %lu\n", written);
+    }
+
+    CloseHandle( ovl.hEvent );
+    CloseHandle( port );
+    CloseHandle( client );
+    CloseHandle( server );
+}
+
 static void child_process_exit_process_async(DWORD parent_pid, HANDLE parent_pipe)
 {
     OVERLAPPED overlapped = {0};
@@ -4343,6 +4574,13 @@ START_TEST(pipe)
             child_process_check_session_id(id);
             return;
         }
+        if (!strcmp(argv[2], "write_message_pipe"))
+        {
+            int delay = 0;
+            sscanf( argv[4], "%d", &delay );
+            child_process_write_message_pipe( argv[3], delay );
+            return;
+        }
         if (!strcmp(argv[2], "exit_process_async"))
         {
             HANDLE handle;
@@ -4380,6 +4618,8 @@ START_TEST(pipe)
     test_nowait(PIPE_TYPE_BYTE);
     test_nowait(PIPE_TYPE_MESSAGE);
     test_GetOverlappedResultEx();
+    test_iocp_read_server_end();
+    test_iocp_write_from_client_end();
     test_exit_process_async();
     test_CancelSynchronousIo();
 }
