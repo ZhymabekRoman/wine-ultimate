@@ -21,7 +21,6 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(composition);
 
-static HRESULT compositor_ensure_device( struct compositor *impl );
 static HRESULT WINAPI compositor_CreateColorBrush( struct ICompositor *iface, struct ICompositionColorBrush **result );
 static HRESULT WINAPI compositor_CreateColorBrushWithColor( struct ICompositor *iface, Color color,
         struct ICompositionColorBrush **result );
@@ -32,23 +31,39 @@ static HRESULT WINAPI compositor_CreateInsetClipWithInsets( struct ICompositor *
 static HRESULT WINAPI compositor_CreateSurfaceBrushWithSurface( struct ICompositor *iface,
         struct ICompositionSurface *surface, struct ICompositionSurfaceBrush **result );
 
-static HRESULT compositor_ensure_device( struct compositor *impl )
+HRESULT compositor_ensure_device( struct compositor *impl )
 {
     HRESULT hr;
 
-    if (impl->device2) return S_OK;
+    if (impl->desktop_device || impl->device2 || impl->device) return S_OK;
 
-    if (FAILED( hr = DCompositionCreateDevice2( NULL, &IID_IDCompositionDevice2,
+    if (SUCCEEDED( hr = DCompositionCreateDevice2( NULL, &IID_IDCompositionDevice2,
             (void **)&impl->device2 ) ))
-        return hr;
-    if (FAILED( hr = IDCompositionDevice2_QueryInterface( impl->device2,
-            &IID_IDCompositionDesktopDevice, (void **)&impl->desktop_device ) ))
     {
-        IDCompositionDevice2_Release( impl->device2 );
-        impl->device2 = NULL;
-        return hr;
+        if (FAILED( IDCompositionDevice2_QueryInterface( impl->device2,
+                &IID_IDCompositionDesktopDevice, (void **)&impl->desktop_device ) ))
+        {
+            impl->desktop_device = NULL;
+        }
+        if (FAILED( IDCompositionDevice2_QueryInterface( impl->device2,
+                &IID_IDCompositionDevice, (void **)&impl->device ) ))
+        {
+            impl->device = NULL;
+        }
+        return S_OK;
     }
-    return S_OK;
+
+    if (SUCCEEDED( hr = DCompositionCreateDevice( NULL, &IID_IDCompositionDevice,
+            (void **)&impl->device ) ))
+    {
+        IDCompositionDevice_QueryInterface( impl->device, &IID_IDCompositionDesktopDevice,
+                (void **)&impl->desktop_device );
+        IDCompositionDevice_QueryInterface( impl->device, &IID_IDCompositionDevice2,
+                (void **)&impl->device2 );
+        return S_OK;
+    }
+
+    return hr;
 }
 
 static inline struct compositor *impl_from_ICompositor( struct ICompositor *iface )
@@ -110,6 +125,7 @@ static ULONG WINAPI compositor_Release( struct ICompositor *iface )
     {
         if (impl->desktop_device) IDCompositionDesktopDevice_Release( impl->desktop_device );
         if (impl->device2) IDCompositionDevice2_Release( impl->device2 );
+        if (impl->device) IDCompositionDevice_Release( impl->device );
         free( impl );
     }
     return ref;

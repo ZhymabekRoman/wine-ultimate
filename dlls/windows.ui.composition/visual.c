@@ -94,6 +94,17 @@ static HRESULT WINAPI visual_QueryInterface( struct IVisual *iface, REFIID iid, 
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IDCompositionVisual ) || IsEqualGUID( iid, &IID_IDCompositionVisual2 ))
+    {
+        if (!impl->dcomp_visual)
+        {
+            *out = NULL;
+            return E_NOINTERFACE;
+        }
+        *out = impl->dcomp_visual;
+        IDCompositionVisual_AddRef( impl->dcomp_visual );
+        return S_OK;
+    }
     /* Public composable factory interfaces; the composition tree is a stub, so
      * these return the object itself (the IInspectable prologue is shared). */
     if (IsEqualGUID( iid, &IID_IVisualFactory ) || IsEqualGUID( iid, &IID_IContainerVisualFactory ))
@@ -126,6 +137,8 @@ static ULONG WINAPI visual_Release( struct IVisual *iface )
         if (impl->clip) IInspectable_Release( (IInspectable *)impl->clip );
         if (impl->properties)
             IInspectable_Release( (IInspectable *)prop_set_get_iface( impl->properties ) );
+        if (impl->dcomp_visual)
+            IDCompositionVisual_Release( impl->dcomp_visual );
         if (impl->compositor)
             IInspectable_Release( (IInspectable *)&impl->compositor->ICompositor_iface );
         free( impl );
@@ -222,13 +235,49 @@ VISUAL_GETTER_ENUM( BackfaceVisibility, enum CompositionBackfaceVisibility, back
 VISUAL_GETTER_ENUM( BorderMode, enum CompositionBorderMode, border_mode )
 VISUAL_GETTER_VECTOR3( CenterPoint, center_point )
 VISUAL_GETTER_ENUM( CompositeMode, enum CompositionCompositeMode, composite_mode )
-VISUAL_GETTER_VECTOR3( Offset, offset )
+
+static HRESULT WINAPI visual_get_Offset( struct IVisual *iface, Vector3 *value )
+{
+    struct visual *impl = impl_from_IVisual( iface );
+    if (!value) return E_POINTER;
+    *value = impl->offset;
+    return S_OK;
+}
+
+static HRESULT WINAPI visual_put_Offset( struct IVisual *iface, Vector3 value )
+{
+    struct visual *impl = impl_from_IVisual( iface );
+    TRACE( "iface %p, value %g, %g, %g.\n", iface, value.X, value.Y, value.Z );
+    impl->offset = value;
+    if (impl->dcomp_visual)
+    {
+        IDCompositionVisual_SetOffsetX( impl->dcomp_visual, value.X );
+        IDCompositionVisual_SetOffsetY( impl->dcomp_visual, value.Y );
+    }
+    return S_OK;
+}
+
 VISUAL_GETTER_FLOAT( Opacity, opacity )
 VISUAL_GETTER_FLOAT( RotationAngle, rotation_angle )
 VISUAL_GETTER_FLOAT( RotationAngleInDegrees, rotation_angle_in_degrees )
 VISUAL_GETTER_VECTOR3( RotationAxis, rotation_axis )
 VISUAL_GETTER_VECTOR3( Scale, scale )
-VISUAL_GETTER_VECTOR2( Size, size )
+
+static HRESULT WINAPI visual_get_Size( struct IVisual *iface, Vector2 *value )
+{
+    struct visual *impl = impl_from_IVisual( iface );
+    if (!value) return E_POINTER;
+    *value = impl->size;
+    return S_OK;
+}
+
+static HRESULT WINAPI visual_put_Size( struct IVisual *iface, Vector2 value )
+{
+    struct visual *impl = impl_from_IVisual( iface );
+    TRACE( "iface %p, value %g, %g.\n", iface, value.X, value.Y );
+    impl->size = value;
+    return S_OK;
+}
 
 static HRESULT WINAPI visual_get_Clip( struct IVisual *iface, struct ICompositionClip **value )
 {
@@ -549,6 +598,18 @@ static struct visual *visual_create( struct compositor *compositor, BOOL is_spri
     impl->orientation.Y = 0.0f;
     impl->orientation.Z = 0.0f;
     impl->orientation.W = 1.0f;
+
+    if (compositor)
+    {
+        compositor_ensure_device( compositor );
+        if (compositor->device)
+            IDCompositionDevice_CreateVisual( compositor->device, &impl->dcomp_visual );
+        else if (compositor->desktop_device)
+            IDCompositionDesktopDevice_CreateVisual( compositor->desktop_device, (IDCompositionVisual2 **)&impl->dcomp_visual );
+        else if (compositor->device2)
+            IDCompositionDevice2_CreateVisual( compositor->device2, (IDCompositionVisual2 **)&impl->dcomp_visual );
+    }
+
     if (compositor) IInspectable_AddRef( (IInspectable *)&compositor->ICompositor_iface );
     return impl;
 }
@@ -622,6 +683,8 @@ static ULONG WINAPI collection_Release( struct IVisualCollection *iface )
         for (i = 0; i < impl->count; i++)
         {
             struct visual *child = impl->items[i];
+            if (impl->owner && impl->owner->dcomp_visual && child->dcomp_visual)
+                IDCompositionVisual_RemoveVisual( impl->owner->dcomp_visual, child->dcomp_visual );
             if (child->parent == impl->owner) visual_reparent( child, NULL );
             IInspectable_Release( (IInspectable *)&child->IVisual_iface );
         }
@@ -673,6 +736,7 @@ static HRESULT collection_insert( struct visual_collection *impl, unsigned int i
 {
     HRESULT hr;
 
+    if (!child) return E_INVALIDARG;
     if ((hr = collection_reserve( impl, impl->count + 1 )) != S_OK) return hr;
 
     if (index > impl->count) index = impl->count;
@@ -682,6 +746,8 @@ static HRESULT collection_insert( struct visual_collection *impl, unsigned int i
     impl->count++;
     IInspectable_AddRef( (IInspectable *)&child->IVisual_iface );
     visual_reparent( child, impl->owner );
+    if (impl->owner && impl->owner->dcomp_visual && child->dcomp_visual)
+        IDCompositionVisual_AddVisual( impl->owner->dcomp_visual, child->dcomp_visual, FALSE, NULL );
     return S_OK;
 }
 
@@ -694,6 +760,8 @@ static HRESULT collection_remove_at( struct visual_collection *impl, unsigned in
     memmove( &impl->items[index], &impl->items[index + 1],
             (impl->count - index - 1) * sizeof(*impl->items) );
     impl->count--;
+    if (impl->owner && impl->owner->dcomp_visual && child->dcomp_visual)
+        IDCompositionVisual_RemoveVisual( impl->owner->dcomp_visual, child->dcomp_visual );
     if (child->parent == impl->owner) visual_reparent( child, NULL );
     IInspectable_Release( (IInspectable *)&child->IVisual_iface );
     return S_OK;
@@ -712,7 +780,15 @@ static HRESULT WINAPI collection_get_Count( struct IVisualCollection *iface, INT
 
 static struct visual *visual_from_IVisual_iface( struct IVisual *visual_iface )
 {
-    return impl_from_IVisual( (struct IVisual *)visual_iface );
+    struct IVisual *vis = NULL;
+    struct visual *impl;
+
+    if (!visual_iface) return NULL;
+    if (FAILED( IUnknown_QueryInterface( (IUnknown *)visual_iface, &IID_IVisual, (void **)&vis ) ))
+        return NULL;
+    impl = impl_from_IVisual( vis );
+    IUnknown_Release( (IUnknown *)vis );
+    return impl;
 }
 
 static HRESULT WINAPI collection_InsertAbove( struct IVisualCollection *iface,

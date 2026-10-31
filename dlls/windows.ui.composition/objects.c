@@ -2144,6 +2144,17 @@ static HRESULT WINAPI target_QueryInterface( struct ICompositionTarget *iface, R
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IDCompositionTarget ))
+    {
+        if (!impl->dcomp_target)
+        {
+            *out = NULL;
+            return E_NOINTERFACE;
+        }
+        *out = impl->dcomp_target;
+        IDCompositionTarget_AddRef( impl->dcomp_target );
+        return S_OK;
+    }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -2163,9 +2174,13 @@ static ULONG WINAPI target_Release( struct ICompositionTarget *iface )
 
     if (!ref)
     {
+        if (impl->dcomp_target)
+        {
+            IDCompositionTarget_SetRoot( impl->dcomp_target, NULL );
+            IDCompositionTarget_Release( impl->dcomp_target );
+        }
         if (impl->root)
             IInspectable_Release( (IInspectable *)&impl->root->IVisual_iface );
-        if (impl->dcomp_target) IDCompositionTarget_Release( impl->dcomp_target );
         comp_release_refs( impl->compositor, impl->properties );
         free( impl );
     }
@@ -2232,14 +2247,47 @@ static HRESULT WINAPI target_put_Root( struct ICompositionTarget *iface, struct 
                 (void **)&root ) ))
             return E_NOINTERFACE;
     }
+    if (impl->root == (value ? visual_from_IVisual( &root->IVisual_iface ) : NULL))
+    {
+        if (root) IInspectable_Release( (IInspectable *)&root->IVisual_iface );
+        return S_OK;
+    }
+    if (impl->dcomp_target && impl->root && impl->root->dcomp_visual)
+    {
+        IDCompositionTarget_SetRoot( impl->dcomp_target, NULL );
+    }
     if (impl->root) IInspectable_Release( (IInspectable *)&impl->root->IVisual_iface );
     impl->root = value ? visual_from_IVisual( &root->IVisual_iface ) : NULL;
     if (impl->root)
     {
         IInspectable_AddRef( (IInspectable *)&impl->root->IVisual_iface );
         IInspectable_Release( (IInspectable *)&root->IVisual_iface );
-        /* The WinRT visual tree is a stub; attach a DirectComposition visual to the
-         * target only once the WinRT visuals carry a backing IDCompositionVisual. */
+
+        if (impl->dcomp_target)
+        {
+            if (!impl->root->dcomp_visual && impl->compositor)
+            {
+                compositor_ensure_device( impl->compositor );
+                if (impl->compositor->device)
+                    IDCompositionDevice_CreateVisual( impl->compositor->device, &impl->root->dcomp_visual );
+                else if (impl->compositor->desktop_device)
+                    IDCompositionDesktopDevice_CreateVisual( impl->compositor->desktop_device,
+                            (IDCompositionVisual2 **)&impl->root->dcomp_visual );
+                else if (impl->compositor->device2)
+                    IDCompositionDevice2_CreateVisual( impl->compositor->device2,
+                            (IDCompositionVisual2 **)&impl->root->dcomp_visual );
+            }
+            if (impl->root->dcomp_visual)
+            {
+                IDCompositionVisual_SetOffsetX( impl->root->dcomp_visual, impl->root->offset.X );
+                IDCompositionVisual_SetOffsetY( impl->root->dcomp_visual, impl->root->offset.Y );
+                IDCompositionTarget_SetRoot( impl->dcomp_target, impl->root->dcomp_visual );
+            }
+        }
+    }
+    else if (impl->dcomp_target)
+    {
+        IDCompositionTarget_SetRoot( impl->dcomp_target, NULL );
     }
     return S_OK;
 }

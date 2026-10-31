@@ -112,6 +112,7 @@ struct compositor
     struct IClosable IClosable_iface;
     LONG ref;
     /* Lazily created DirectComposition bridge. */
+    struct IDCompositionDevice *device;
     struct IDCompositionDevice2 *device2;
     struct IDCompositionDesktopDevice *desktop_device;
 };
@@ -332,6 +333,7 @@ struct visual
     Vector3 scale;
     Vector2 size;
     Matrix4x4 transform_matrix;
+    IDCompositionVisual *dcomp_visual;
 };
 
 struct visual_collection
@@ -348,6 +350,7 @@ struct visual_collection
 
 /* Object constructors, defined in propset.c / visual.c / objects.c / compositor.c. */
 struct compositor *compositor_create( void );
+HRESULT compositor_ensure_device( struct compositor *impl );
 struct prop_set *prop_set_create( struct compositor *compositor );
 struct visual *container_visual_create( struct compositor *compositor );
 struct visual *sprite_visual_create( struct compositor *compositor );

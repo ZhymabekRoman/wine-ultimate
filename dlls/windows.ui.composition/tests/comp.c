@@ -312,6 +312,34 @@ static void test_desktop_target( struct ICompositor *compositor, HWND hwnd )
     ICompositorDesktopInterop_Release( interop );
 }
 
+/*
+ * WhatsApp Desktop path: the unpackaged app calls RoGetActivationFactory for
+ * "Windows.UI.Composition.Compositor" with no
+ * Software\Microsoft\WindowsRuntime\ActivatableClassId entry in the prefix.
+ * combase must resolve the class through its built-in namespace routing to
+ * windows.ui.composition.dll, exactly as it routes Windows.UI.ViewManagement.*
+ * to windows.ui.dll.
+ */
+static void test_activation_without_registry( void )
+{
+    struct ICompositor *compositor = NULL;
+    IActivationFactory *factory = NULL;
+    HSTRING str;
+    HRESULT hr;
+
+    WindowsCreateString( RuntimeClass_Windows_UI_Composition_Compositor,
+            ARRAYSIZE( RuntimeClass_Windows_UI_Composition_Compositor ) - 1, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK, "RoGetActivationFactory should resolve Compositor without registry registration, hr %#lx.\n", hr );
+    if (factory) IActivationFactory_Release( factory );
+
+    factory = NULL;
+    hr = RoGetActivationFactory( str, &IID_ICompositor, (void **)&compositor );
+    ok( hr == S_OK && compositor, "RoGetActivationFactory(IID_ICompositor) should succeed, hr %#lx.\n", hr );
+    WindowsDeleteString( str );
+    if (compositor) ICompositor_Release( compositor );
+}
+
 static BOOL register_test_class( void )
 {
     static const WCHAR path[] = L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.UI.Composition.Compositor";
@@ -359,6 +387,10 @@ START_TEST( comp )
         win_skip( "failed to initialize COM.\n" );
         return;
     }
+
+    /* Probe before any registry registration exists (fresh prefix): this is the
+     * exact path that logs "Failed to find library" in the WhatsApp Desktop trace. */
+    test_activation_without_registry();
 
     if (!register_test_class())
     {

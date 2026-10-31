@@ -61,7 +61,8 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
-    if (!wcsncmp(classid, L"Windows.ApplicationModel.Background.", 36) ||
+    if (!wcsncmp(classid, L"Windows.ApplicationModel.Core.", 30) ||
+        !wcsncmp(classid, L"Windows.ApplicationModel.Background.", 36) ||
         !wcsncmp(classid, L"Windows.Networking.PushNotifications.", 37) ||
         !wcscmp(classid, L"Windows.ApplicationModel.AppInstance") ||
         !wcscmp(classid, L"Microsoft.Windows.AppLifecycle.AppInstance") ||
@@ -80,13 +81,44 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* PRM/MRT resources layer: .NET Native (mrt100/SharedLibrary System.SR),
+     * Microsoft.UI.Xaml and the app's compiled ResourceManager.Current call
+     * sites activate Windows.ApplicationModel.Resources.Core.ResourceContext
+     * during startup (Calculator: 8x) and FailFast c0000602 when it is absent.
+     * Windows.System.MemoryManager is co-hosted as a no-op stub (1x warning). */
+    if (!wcsncmp(classid, L"Windows.ApplicationModel.Resources.Core.", 38) ||
+        !wcscmp(classid, L"Windows.System.MemoryManager"))
+    {
+        *out = wcsdup(L"windows.applicationmodel.resources.core.dll");
+        return S_OK;
+    }
+
     /* Classes consumed during XAML control construction: they fall through to the
      * ActivatableClassId registry lookup (absent in this unpackaged prefix) and return
      * REGDB_E_CLASSNOTREG, stalling the UI thread before the WebView2 environment is
      * created.  Route them to the Wine modules that already export DllGetActivationFactory. */
+    if (!wcsncmp(classid, L"Windows.UI.Xaml.", 16) ||
+        !wcscmp(classid, L"Windows.UI.Xaml") ||
+        !wcscmp(classid, L"Windows.UI.ColorHelper"))
+    {
+        *out = wcsdup(L"windows.ui.xaml.dll");
+        return S_OK;
+    }
+
     if (!wcsncmp(classid, L"Windows.UI.ViewManagement.", 26))
     {
         *out = wcsdup(L"windows.ui.dll");
+        return S_OK;
+    }
+
+    /* Unpackaged WinUI 3 apps (WhatsApp Desktop) resolve the Compositor through this
+     * table: the ActivatableClassId entries are registered only under Wow6432Node in
+     * the prefix, so the 64-bit view lookup returns REGDB_E_CLASSNOTREG and
+     * RoGetActivationFactory logs "Failed to find library".  Route the namespace to
+     * the builtin composition module, mirroring the ViewManagement route above. */
+    if (!wcsncmp(classid, L"Windows.UI.Composition.", 23))
+    {
+        *out = wcsdup(L"windows.ui.composition.dll");
         return S_OK;
     }
 

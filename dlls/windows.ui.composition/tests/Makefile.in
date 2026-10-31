@@ -1,5 +1,6 @@
 TESTDLL   = windows.ui.composition.dll
-IMPORTS   = combase ole32 advapi32 user32 kernel32 uuid
+IMPORTS   = combase ole32 advapi32 user32 kernel32 uuid dcomp
 
 SOURCES = \
-	comp.c
+	comp.c \
+	composition.c
