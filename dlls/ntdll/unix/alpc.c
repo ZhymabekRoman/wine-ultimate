@@ -590,6 +590,7 @@ NTSTATUS WINAPI NtAlpcAcceptConnectPort( HANDLE *communication_port, HANDLE conn
     if (!connection_request) return STATUS_INVALID_PARAMETER;
 
     msg_id = connection_request->MessageId;
+    if (!msg_id) msg_id = *(const unsigned int *)((const char *)connection_request + 24);
 
     SERVER_START_REQ( accept_alpc_connection )
     {
@@ -1197,6 +1198,7 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                  * at the offsets the engine reads. */
                 *(client_ptr_t *)((char *)recv_msg + 1 * sizeof(void *)) = hdr.client_pid;
                 *(client_ptr_t *)((char *)recv_msg + 2 * sizeof(void *)) = hdr.client_tid;
+                *(unsigned int *)((char *)recv_msg + 24) = hdr.msg_id;
             }
             else
             {
