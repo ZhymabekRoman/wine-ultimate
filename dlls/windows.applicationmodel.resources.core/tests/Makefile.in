@@ -1,0 +1,5 @@
+TESTDLL = windows.applicationmodel.resources.core.dll
+IMPORTS = combase ole32 uuid
+
+SOURCES = \
+	core.c

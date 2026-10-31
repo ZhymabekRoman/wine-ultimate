@@ -1,0 +1,15 @@
+#pragma makedep register
+#pragma winrt ns_prefix
+
+namespace Windows.ApplicationModel.Resources.Core {
+    runtimeclass ResourceContext;
+    runtimeclass ResourceManager;
+    runtimeclass ResourceMap;
+    runtimeclass ResourceCandidate;
+    runtimeclass NamedResource;
+    runtimeclass ResourceQualifier;
+}
+
+namespace Windows.System {
+    runtimeclass MemoryManager;
+}

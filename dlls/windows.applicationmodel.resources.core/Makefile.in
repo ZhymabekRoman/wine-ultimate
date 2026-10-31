@@ -1,0 +1,7 @@
+MODULE  = windows.applicationmodel.resources.core.dll
+IMPORTS = combase uuid kernelbase
+
+SOURCES = \
+	classes.idl \
+	main.c \
+	pri.c
