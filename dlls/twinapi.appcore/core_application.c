@@ -181,10 +181,28 @@ static const struct IActivationFactoryVtbl activation_factory_vtbl =
 
 /* ICoreApplicationView — a per-process application view (minimal). */
 
+static const GUID IID_ICoreApplicationView2_custom = {0x68eb7adf, 0x917f, 0x4885, {0x9e, 0x78, 0x81, 0xb3, 0x7b, 0x37, 0xf4, 0x60}};
+static const GUID IID_ICoreApplicationView3_custom = {0x07ebe1b3, 0xa4cf, 0x4550, {0xab, 0x70, 0xb0, 0x7e, 0x85, 0x33, 0x0b, 0xc8}};
+static const GUID IID_ICoreApplicationViewTitleBar_custom = {0x08d17364, 0x4e43, 0x40e2, {0xa4, 0x70, 0x36, 0x64, 0xf0, 0xe0, 0xb9, 0x6c}};
+
+struct core_application_view_title_bar
+{
+    ICoreApplicationViewTitleBar ICoreApplicationViewTitleBar_iface;
+    LONG ref;
+    boolean extend_view_into_title_bar;
+    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable *is_visible_changed_handler;
+    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable *layout_metrics_changed_handler;
+};
+
+static HRESULT core_application_view_title_bar_create( ICoreApplicationViewTitleBar **value );
+
 struct core_application_view
 {
     ICoreApplicationView ICoreApplicationView_iface;
+    ICoreApplicationView2 ICoreApplicationView2_iface;
+    ICoreApplicationView3 ICoreApplicationView3_iface;
     LONG ref;
+    ICoreApplicationViewTitleBar *title_bar;
 };
 
 static inline struct core_application_view *impl_from_ICoreApplicationView( ICoreApplicationView *iface )
@@ -192,9 +210,22 @@ static inline struct core_application_view *impl_from_ICoreApplicationView( ICor
     return CONTAINING_RECORD( iface, struct core_application_view, ICoreApplicationView_iface );
 }
 
+static inline struct core_application_view *impl_from_ICoreApplicationView2( ICoreApplicationView2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_application_view, ICoreApplicationView2_iface );
+}
+
+static inline struct core_application_view *impl_from_ICoreApplicationView3( ICoreApplicationView3 *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_application_view, ICoreApplicationView3_iface );
+}
+
 static HRESULT WINAPI core_application_view_QueryInterface( ICoreApplicationView *iface, REFIID iid, void **out )
 {
     struct core_application_view *impl = impl_from_ICoreApplicationView( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -204,6 +235,23 @@ static HRESULT WINAPI core_application_view_QueryInterface( ICoreApplicationView
         *out = &impl->ICoreApplicationView_iface;
         return S_OK;
     }
+
+    if (IsEqualGUID( iid, &IID_ICoreApplicationView2 ) ||
+        IsEqualGUID( iid, &IID_ICoreApplicationView2_custom ))
+    {
+        ICoreApplicationView_AddRef( &impl->ICoreApplicationView_iface );
+        *out = &impl->ICoreApplicationView2_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ICoreApplicationView3 ) ||
+        IsEqualGUID( iid, &IID_ICoreApplicationView3_custom ))
+    {
+        ICoreApplicationView_AddRef( &impl->ICoreApplicationView_iface );
+        *out = &impl->ICoreApplicationView3_iface;
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -219,7 +267,13 @@ static ULONG WINAPI core_application_view_Release( ICoreApplicationView *iface )
 {
     struct core_application_view *impl = impl_from_ICoreApplicationView( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref) free( impl );
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
+    if (!ref)
+    {
+        if (impl->title_bar)
+            ICoreApplicationViewTitleBar_Release( impl->title_bar );
+        free( impl );
+    }
     return ref;
 }
 
@@ -230,13 +284,14 @@ static HRESULT WINAPI core_application_view_GetIids( ICoreApplicationView *iface
 }
 static HRESULT WINAPI core_application_view_GetRuntimeClassName( ICoreApplicationView *iface, HSTRING *name )
 {
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
+    if (!name) return E_POINTER;
+    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_Core_CoreApplicationView,
+                                wcslen( RuntimeClass_Windows_ApplicationModel_Core_CoreApplicationView ), name );
 }
 static HRESULT WINAPI core_application_view_GetTrustLevel( ICoreApplicationView *iface, TrustLevel *level )
 {
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
+    if (level) *level = BaseTrust;
+    return S_OK;
 }
 static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView *iface, __x_ABI_CWindows_CUI_CCore_CICoreWindow **value )
 {
@@ -466,6 +521,391 @@ static const struct ICoreApplicationViewVtbl core_application_view_vtbl =
     core_application_view_get_IsHosted,
 };
 
+/* ICoreApplicationViewTitleBar implementation */
+
+static inline struct core_application_view_title_bar *impl_from_ICoreApplicationViewTitleBar( ICoreApplicationViewTitleBar *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_application_view_title_bar, ICoreApplicationViewTitleBar_iface );
+}
+
+static HRESULT WINAPI core_application_view_title_bar_QueryInterface( ICoreApplicationViewTitleBar *iface,
+        REFIID iid, void **out )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ICoreApplicationViewTitleBar ) ||
+        IsEqualGUID( iid, &IID_ICoreApplicationViewTitleBar_custom ))
+    {
+        ICoreApplicationViewTitleBar_AddRef( &impl->ICoreApplicationViewTitleBar_iface );
+        *out = &impl->ICoreApplicationViewTitleBar_iface;
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI core_application_view_title_bar_AddRef( ICoreApplicationViewTitleBar *iface )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    TRACE( "iface %p, ref %lu\n", iface, ref );
+    return ref;
+}
+
+static ULONG WINAPI core_application_view_title_bar_Release( ICoreApplicationViewTitleBar *iface )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    TRACE( "iface %p, ref %lu\n", iface, ref );
+    if (!ref)
+    {
+        if (impl->is_visible_changed_handler)
+            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->is_visible_changed_handler );
+        if (impl->layout_metrics_changed_handler)
+            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->layout_metrics_changed_handler );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_GetIids( ICoreApplicationViewTitleBar *iface,
+        ULONG *count, IID **iids )
+{
+    FIXME( "iface %p, count %p, iids %p stub!\n", iface, count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_GetRuntimeClassName( ICoreApplicationViewTitleBar *iface,
+        HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_Core_CoreApplicationViewTitleBar,
+                                wcslen( RuntimeClass_Windows_ApplicationModel_Core_CoreApplicationViewTitleBar ), name );
+}
+
+static HRESULT WINAPI core_application_view_title_bar_GetTrustLevel( ICoreApplicationViewTitleBar *iface,
+        TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_put_ExtendViewIntoTitleBar( ICoreApplicationViewTitleBar *iface,
+        boolean value )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+    TRACE( "iface %p, value %d\n", iface, value );
+    impl->extend_view_into_title_bar = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_get_ExtendViewIntoTitleBar( ICoreApplicationViewTitleBar *iface,
+        boolean *value )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = impl->extend_view_into_title_bar;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_get_SystemOverlayLeftInset( ICoreApplicationViewTitleBar *iface,
+        DOUBLE *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = 0.0;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_get_SystemOverlayRightInset( ICoreApplicationViewTitleBar *iface,
+        DOUBLE *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = 0.0;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_get_Height( ICoreApplicationViewTitleBar *iface,
+        DOUBLE *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = 32.0;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_add_LayoutMetricsChanged( ICoreApplicationViewTitleBar *iface,
+        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable *handler,
+        EventRegistrationToken *token )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    if (token) token->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_AddRef( handler );
+        if (impl->layout_metrics_changed_handler)
+            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->layout_metrics_changed_handler );
+        impl->layout_metrics_changed_handler = handler;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_remove_LayoutMetricsChanged( ICoreApplicationViewTitleBar *iface,
+        EventRegistrationToken token )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+    TRACE( "iface %p, token %#I64x\n", iface, token.value );
+    if (impl->layout_metrics_changed_handler)
+    {
+        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->layout_metrics_changed_handler );
+        impl->layout_metrics_changed_handler = NULL;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_get_IsVisible( ICoreApplicationViewTitleBar *iface,
+        boolean *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = TRUE;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_add_IsVisibleChanged( ICoreApplicationViewTitleBar *iface,
+        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable *handler,
+        EventRegistrationToken *token )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    if (token) token->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_AddRef( handler );
+        if (impl->is_visible_changed_handler)
+            __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->is_visible_changed_handler );
+        impl->is_visible_changed_handler = handler;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view_title_bar_remove_IsVisibleChanged( ICoreApplicationViewTitleBar *iface,
+        EventRegistrationToken token )
+{
+    struct core_application_view_title_bar *impl = impl_from_ICoreApplicationViewTitleBar( iface );
+    TRACE( "iface %p, token %#I64x\n", iface, token.value );
+    if (impl->is_visible_changed_handler)
+    {
+        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationViewTitleBar_IInspectable_Release( impl->is_visible_changed_handler );
+        impl->is_visible_changed_handler = NULL;
+    }
+    return S_OK;
+}
+
+static const struct ICoreApplicationViewTitleBarVtbl core_application_view_title_bar_vtbl =
+{
+    core_application_view_title_bar_QueryInterface,
+    core_application_view_title_bar_AddRef,
+    core_application_view_title_bar_Release,
+    core_application_view_title_bar_GetIids,
+    core_application_view_title_bar_GetRuntimeClassName,
+    core_application_view_title_bar_GetTrustLevel,
+    core_application_view_title_bar_put_ExtendViewIntoTitleBar,
+    core_application_view_title_bar_get_ExtendViewIntoTitleBar,
+    core_application_view_title_bar_get_SystemOverlayLeftInset,
+    core_application_view_title_bar_get_SystemOverlayRightInset,
+    core_application_view_title_bar_get_Height,
+    core_application_view_title_bar_add_LayoutMetricsChanged,
+    core_application_view_title_bar_remove_LayoutMetricsChanged,
+    core_application_view_title_bar_get_IsVisible,
+    core_application_view_title_bar_add_IsVisibleChanged,
+    core_application_view_title_bar_remove_IsVisibleChanged,
+};
+
+static HRESULT core_application_view_title_bar_create( ICoreApplicationViewTitleBar **value )
+{
+    struct core_application_view_title_bar *impl;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->ICoreApplicationViewTitleBar_iface.lpVtbl = &core_application_view_title_bar_vtbl;
+    impl->ref = 1;
+    *value = &impl->ICoreApplicationViewTitleBar_iface;
+    return S_OK;
+}
+
+/* ICoreApplicationView2 implementation */
+
+static HRESULT WINAPI core_application_view2_QueryInterface( ICoreApplicationView2 *iface, REFIID iid, void **out )
+{
+    struct core_application_view *impl = impl_from_ICoreApplicationView2( iface );
+    return core_application_view_QueryInterface( &impl->ICoreApplicationView_iface, iid, out );
+}
+
+static ULONG WINAPI core_application_view2_AddRef( ICoreApplicationView2 *iface )
+{
+    struct core_application_view *impl = impl_from_ICoreApplicationView2( iface );
+    return core_application_view_AddRef( &impl->ICoreApplicationView_iface );
+}
+
+static ULONG WINAPI core_application_view2_Release( ICoreApplicationView2 *iface )
+{
+    struct core_application_view *impl = impl_from_ICoreApplicationView2( iface );
+    return core_application_view_Release( &impl->ICoreApplicationView_iface );
+}
+
+static HRESULT WINAPI core_application_view2_GetIids( ICoreApplicationView2 *iface, ULONG *count, IID **iids )
+{
+    FIXME( "iface %p stub!\n", iface );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI core_application_view2_GetRuntimeClassName( ICoreApplicationView2 *iface, HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_Core_CoreApplicationView,
+                                wcslen( RuntimeClass_Windows_ApplicationModel_Core_CoreApplicationView ), name );
+}
+
+static HRESULT WINAPI core_application_view2_GetTrustLevel( ICoreApplicationView2 *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view2_get_Dispatcher( ICoreApplicationView2 *iface,
+        __x_ABI_CWindows_CUI_CCore_CICoreDispatcher **value )
+{
+    struct core_application_view *impl = impl_from_ICoreApplicationView2( iface );
+    __x_ABI_CWindows_CUI_CCore_CICoreWindow *window = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+
+    hr = core_application_view_get_CoreWindow( &impl->ICoreApplicationView_iface, &window );
+    if (FAILED(hr)) return hr;
+    if (!window) return E_FAIL;
+
+    hr = __x_ABI_CWindows_CUI_CCore_CICoreWindow_get_Dispatcher( window, value );
+    __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( window );
+    return hr;
+}
+
+static const struct ICoreApplicationView2Vtbl core_application_view2_vtbl =
+{
+    core_application_view2_QueryInterface,
+    core_application_view2_AddRef,
+    core_application_view2_Release,
+    core_application_view2_GetIids,
+    core_application_view2_GetRuntimeClassName,
+    core_application_view2_GetTrustLevel,
+    core_application_view2_get_Dispatcher,
+};
+
+/* ICoreApplicationView3 implementation */
+
+static HRESULT WINAPI core_application_view3_QueryInterface( ICoreApplicationView3 *iface, REFIID iid, void **out )
+{
+    struct core_application_view *impl = impl_from_ICoreApplicationView3( iface );
+    return core_application_view_QueryInterface( &impl->ICoreApplicationView_iface, iid, out );
+}
+
+static ULONG WINAPI core_application_view3_AddRef( ICoreApplicationView3 *iface )
+{
+    struct core_application_view *impl = impl_from_ICoreApplicationView3( iface );
+    return core_application_view_AddRef( &impl->ICoreApplicationView_iface );
+}
+
+static ULONG WINAPI core_application_view3_Release( ICoreApplicationView3 *iface )
+{
+    struct core_application_view *impl = impl_from_ICoreApplicationView3( iface );
+    return core_application_view_Release( &impl->ICoreApplicationView_iface );
+}
+
+static HRESULT WINAPI core_application_view3_GetIids( ICoreApplicationView3 *iface, ULONG *count, IID **iids )
+{
+    FIXME( "iface %p stub!\n", iface );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI core_application_view3_GetRuntimeClassName( ICoreApplicationView3 *iface, HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_Core_CoreApplicationView,
+                                wcslen( RuntimeClass_Windows_ApplicationModel_Core_CoreApplicationView ), name );
+}
+
+static HRESULT WINAPI core_application_view3_GetTrustLevel( ICoreApplicationView3 *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view3_get_IsComponent( ICoreApplicationView3 *iface, boolean *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view3_get_TitleBar( ICoreApplicationView3 *iface,
+        ICoreApplicationViewTitleBar **value )
+{
+    struct core_application_view *impl = impl_from_ICoreApplicationView3( iface );
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    if (!impl->title_bar)
+    {
+        HRESULT hr = core_application_view_title_bar_create( &impl->title_bar );
+        if (FAILED(hr)) return hr;
+    }
+    ICoreApplicationViewTitleBar_AddRef( impl->title_bar );
+    *value = impl->title_bar;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view3_add_HostedViewClosing( ICoreApplicationView3 *iface,
+        __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CCore__CHostedViewClosingEventArgs *handler,
+        EventRegistrationToken *token )
+{
+    FIXME( "iface %p, handler %p, token %p stub!\n", iface, handler, token );
+    if (token) token->value = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_application_view3_remove_HostedViewClosing( ICoreApplicationView3 *iface,
+        EventRegistrationToken token )
+{
+    FIXME( "iface %p, token %#I64x stub!\n", iface, token.value );
+    return S_OK;
+}
+
+static const struct ICoreApplicationView3Vtbl core_application_view3_vtbl =
+{
+    core_application_view3_QueryInterface,
+    core_application_view3_AddRef,
+    core_application_view3_Release,
+    core_application_view3_GetIids,
+    core_application_view3_GetRuntimeClassName,
+    core_application_view3_GetTrustLevel,
+    core_application_view3_get_IsComponent,
+    core_application_view3_get_TitleBar,
+    core_application_view3_add_HostedViewClosing,
+    core_application_view3_remove_HostedViewClosing,
+};
+
 /* Single process-wide CoreApplicationView shared by Run + GetCurrentView; they
  * MUST return the same object or FrameworkUdk fail-fasts. */
 static ICoreApplicationView *the_application_view;
@@ -477,6 +917,8 @@ static ICoreApplicationView *core_application_view_get(void)
         struct core_application_view *impl;
         if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
         impl->ICoreApplicationView_iface.lpVtbl = &core_application_view_vtbl;
+        impl->ICoreApplicationView2_iface.lpVtbl = &core_application_view2_vtbl;
+        impl->ICoreApplicationView3_iface.lpVtbl = &core_application_view3_vtbl;
         impl->ref = 1;
         the_application_view = &impl->ICoreApplicationView_iface;
     }
@@ -559,6 +1001,7 @@ static HRESULT WINAPI core_application_remove_Resuming( ICoreApplication *iface,
 
 static HRESULT WINAPI core_application_get_Properties( ICoreApplication *iface, IPropertySet **value )
 {
+    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
     static IPropertySet *properties;
     HSTRING class_id;
     HRESULT hr;
@@ -572,7 +1015,6 @@ static HRESULT WINAPI core_application_get_Properties( ICoreApplication *iface, 
         return S_OK;
     }
 
-    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
     WindowsCreateString( name, wcslen(name), &class_id );
     hr = RoActivateInstance( class_id, (IInspectable **)&properties );
     WindowsDeleteString( class_id );
