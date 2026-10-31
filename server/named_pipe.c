@@ -1676,7 +1676,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
     pname = get_object_name( &pipe->obj, &plen );
     if (debug_level)
     {
-        fprintf( stderr, "NAMED_PIPE_OPEN_FILE: name=" );
+        fprintf( stderr, "NAMED_PIPE_OPEN_FILE: pid=%04x name=", current->process->id );
         if (pname) dump_strW( pname, plen, stderr, "[]" );
         else fprintf( stderr, "(null)" );
         fprintf( stderr, " pipe=%p listeners_empty=%d access=%08x sharing=%08x\n",

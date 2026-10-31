@@ -30,6 +30,7 @@
 #include "wine/test.h"
 
 #define PIPENAME "\\\\.\\PiPe\\tests_pipe.c"
+#define LOCALPIPENAME "\\\\.\\pipe\\LOCAL\\tests_pipe_local"
 
 #define NB_SERVER_LOOPS 8
 
@@ -3560,6 +3561,96 @@ static void test_namedpipe_process_id(void)
     CloseHandle(server);
 }
 
+/* Mojo/ipcz invitation shape (invitation.cc:128/132): the peer-process lookup runs on
+ * both ends of a message-mode pipe named \\.\pipe\LOCAL\mojo.<pid>.<tid>.<rand>,
+ * the client end being connected from a *different* process than the creator.
+ */
+static void child_process_check_pid_local(DWORD server_pid)
+{
+    DWORD current = GetProcessId(GetCurrentProcess());
+    HANDLE pipe;
+    ULONG pid;
+    BOOL ret;
+
+    pipe = CreateFileA(LOCALPIPENAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                       FILE_ATTRIBUTE_NORMAL, NULL);
+    ok(pipe != INVALID_HANDLE_VALUE, "local: child CreateFile got %lu\n", GetLastError());
+    if (pipe == INVALID_HANDLE_VALUE) return;
+
+    pid = 0;
+    ret = pGetNamedPipeClientProcessId(pipe, &pid);
+    ok(ret, "local: child GetNamedPipeClientProcessId got %lu\n", GetLastError());
+    ok(pid == current, "local: child client pid %04lx expected %04lx\n", pid, current);
+
+    pid = 0;
+    ret = pGetNamedPipeServerProcessId(pipe, &pid);
+    ok(ret, "local: child GetNamedPipeServerProcessId got %lu\n", GetLastError());
+    ok(pid == server_pid, "local: child server pid %04lx expected %04lx\n", pid, server_pid);
+
+    ret = WriteFile(pipe, "q", 1, &pid, NULL);
+    ok(ret, "local: child WriteFile got %lu\n", GetLastError());
+    Sleep(500); /* keep the connection alive while the parent checks the server end */
+    CloseHandle(pipe);
+}
+
+static void test_namedpipe_process_id_local(void)
+{
+    PROCESS_INFORMATION process_info;
+    HANDLE server;
+    OVERLAPPED overlapped;
+    ULONG pid;
+    BOOL ret;
+
+    if (!pGetNamedPipeClientProcessId)
+    {
+        win_skip("GetNamedPipeClientProcessId not available\n");
+        return;
+    }
+
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    server = CreateNamedPipeA(LOCALPIPENAME, FILE_FLAG_OVERLAPPED | PIPE_ACCESS_DUPLEX,
+                              PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                              1, 5000, 6000, NMPWAIT_USE_DEFAULT_WAIT, NULL);
+    ok(server != INVALID_HANDLE_VALUE, "local: CreateNamedPipe got %lu\n", GetLastError());
+    if (server == INVALID_HANDLE_VALUE) return;
+    ret = ConnectNamedPipe(server, &overlapped);
+    ok(!ret && GetLastError() == ERROR_IO_PENDING, "local: ConnectNamedPipe got %lu\n", GetLastError());
+
+    create_check_id_process("checkpidlocal", GetProcessId(GetCurrentProcess()), &process_info);
+
+    /* complete the connection, then consume the child's byte while it is still connected */
+    ret = WaitForSingleObject(overlapped.hEvent, 10000) == WAIT_OBJECT_0
+          && GetOverlappedResult(server, &overlapped, (DWORD *)&pid, TRUE);
+    ok(ret, "local: ConnectNamedPipe completion got %lu\n", GetLastError());
+    CloseHandle(overlapped.hEvent);
+
+    memset(&overlapped, 0, sizeof(overlapped));
+    overlapped.hEvent = CreateEventW(NULL, TRUE, FALSE, NULL);
+    ret = ReadFile(server, &pid, 1, NULL, &overlapped);
+    if (!ret && GetLastError() == ERROR_IO_PENDING)
+    {
+        ret = WaitForSingleObject(overlapped.hEvent, 10000) == WAIT_OBJECT_0
+              && GetOverlappedResult(server, &overlapped, (DWORD *)&pid, TRUE);
+    }
+    ok(ret, "local: server ReadFile got %lu\n", GetLastError());
+
+    pid = 0;
+    ret = pGetNamedPipeClientProcessId(server, &pid);
+    ok(ret, "local: server GetNamedPipeClientProcessId got %lu\n", GetLastError());
+    ok(pid == process_info.dwProcessId, "local: server client pid %04lx expected %04lx\n",
+       pid, process_info.dwProcessId);
+
+    pid = 0;
+    ret = pGetNamedPipeServerProcessId(server, &pid);
+    ok(ret, "local: server GetNamedPipeServerProcessId got %lu\n", GetLastError());
+    ok(pid == GetProcessId(GetCurrentProcess()), "local: server pid %04lx\n", pid);
+
+    wait_child_process(&process_info);
+    CloseHandle(overlapped.hEvent);
+    CloseHandle(server);
+}
+
 static void child_process_check_session_id(DWORD server_id)
 {
     DWORD current;
@@ -4566,6 +4657,13 @@ START_TEST(pipe)
             child_process_check_pid(pid);
             return;
         }
+        if (!strcmp(argv[2], "checkpidlocal"))
+        {
+            DWORD pid = GetProcessId(GetCurrentProcess());
+            sscanf(argv[3], "%lx", &pid);
+            child_process_check_pid_local(pid);
+            return;
+        }
         if (!strcmp(argv[2], "checksessionid"))
         {
             DWORD id;
@@ -4612,6 +4710,7 @@ START_TEST(pipe)
     test_overlapped_transport(FALSE, FALSE);
     test_TransactNamedPipe();
     test_namedpipe_process_id();
+    test_namedpipe_process_id_local();
     test_namedpipe_session_id();
     test_multiple_instances();
     test_wait_pipe();

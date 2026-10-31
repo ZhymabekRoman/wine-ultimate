@@ -1513,6 +1513,10 @@ DECL_HANDLER(open_process)
         reply->handle = alloc_handle( current->process, process, req->access, req->attributes );
         release_object( process );
     }
+    if (debug_level)
+        fprintf( stderr, "WA_OPENPROC: caller=%04x target=%04x access=%08x attrs=%08x -> %s%08x\n",
+                 current->process->id, req->pid, req->access, req->attributes,
+                 reply->handle ? "" : "FAIL", reply->handle );
 }
 
 /* terminate a process */
