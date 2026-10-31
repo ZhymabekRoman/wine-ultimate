@@ -316,36 +316,73 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForHwnd(IWineDXGIFa
     return DXGI_ERROR_UNSUPPORTED;
 }
 
-static const GUID IID_ICoreWindowInterop = { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x97, 0xcb, 0x98 } };
+static const GUID IID_ICoreWindowInterop = { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f } };
+
+typedef struct ICoreWindowInterop ICoreWindowInterop;
+typedef struct ICoreWindowInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)(ICoreWindowInterop *This, REFIID riid, void **ppvObject);
+    ULONG (WINAPI *AddRef)(ICoreWindowInterop *This);
+    ULONG (WINAPI *Release)(ICoreWindowInterop *This);
+    HRESULT (WINAPI *GetWindowHandle)(ICoreWindowInterop *This, HWND *hwnd);
+    HRESULT (WINAPI *SetMessageHandled)(ICoreWindowInterop *This, boolean value);
+} ICoreWindowInteropVtbl;
+
+struct ICoreWindowInterop
+{
+    const ICoreWindowInteropVtbl *lpVtbl;
+};
+
+#define ICoreWindowInterop_QueryInterface(This,riid,ppvObject) (This)->lpVtbl->QueryInterface(This,riid,ppvObject)
+#define ICoreWindowInterop_AddRef(This) (This)->lpVtbl->AddRef(This)
+#define ICoreWindowInterop_Release(This) (This)->lpVtbl->Release(This)
+#define ICoreWindowInterop_GetWindowHandle(This,hwnd) (This)->lpVtbl->GetWindowHandle(This,hwnd)
+#define ICoreWindowInterop_SetMessageHandled(This,value) (This)->lpVtbl->SetMessageHandled(This,value)
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForCoreWindow(IWineDXGIFactory *iface,
         IUnknown *device, IUnknown *window, const DXGI_SWAP_CHAIN_DESC1 *desc,
         IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
+    ICoreWindowInterop *interop = NULL;
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc;
     HWND hwnd = NULL;
     HRESULT hr;
 
-    FIXME("iface %p, device %p, window %p, desc %p, output %p, swapchain %p stub!\n",
+    TRACE("iface %p, device %p, window %p, desc %p, output %p, swapchain %p.\n",
             iface, device, window, desc, output, swapchain);
 
-    if (!window) return E_POINTER;
+    if (!device || !window || !desc || !swapchain)
+        return DXGI_ERROR_INVALID_CALL;
 
-    struct { HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
-             ULONG (WINAPI *AddRef)(void *);
-             ULONG (WINAPI *Release)(void *);
-             HRESULT (WINAPI *GetWindowHandle)(void *, HWND *); } **interop = (void *)window;
+    swapchain_desc = *desc;
 
     hr = IUnknown_QueryInterface(window, &IID_ICoreWindowInterop, (void **)&interop);
     if (SUCCEEDED(hr) && interop)
     {
-        (*interop)->GetWindowHandle(interop, &hwnd);
-        IUnknown_Release((IUnknown *)interop);
+        hr = ICoreWindowInterop_GetWindowHandle(interop, &hwnd);
+        ICoreWindowInterop_Release(interop);
+        if (FAILED(hr))
+            hwnd = NULL;
     }
     if (!hwnd) hwnd = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
     if (!hwnd) hwnd = GetActiveWindow();
     if (!hwnd) hwnd = GetForegroundWindow();
 
-    return dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, desc, NULL, output, swapchain);
+    if (!hwnd)
+    {
+        WARN("Unable to resolve HWND for CoreWindow %p.\n", window);
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (swapchain_desc.SwapEffect != DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+            && swapchain_desc.SwapEffect != DXGI_SWAP_EFFECT_FLIP_DISCARD)
+    {
+        swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        if (swapchain_desc.BufferCount < 2)
+            swapchain_desc.BufferCount = 2;
+    }
+
+    return dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, &swapchain_desc, NULL, output, swapchain);
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_GetSharedResourceAdapterLuid(IWineDXGIFactory *iface,
@@ -425,26 +462,55 @@ static BOOL CALLBACK find_top_level_window_proc(HWND hwnd, LPARAM lparam)
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
         IUnknown *device, const DXGI_SWAP_CHAIN_DESC1 *desc, IDXGIOutput *output, IDXGISwapChain1 **swapchain)
 {
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc;
     HWND hwnd = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
-    if (!hwnd) hwnd = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
-    if (!hwnd) hwnd = GetActiveWindow();
-    if (!hwnd) hwnd = GetForegroundWindow();
-    if (!hwnd || hwnd == GetDesktopWindow())
+    BOOL core_window = FALSE;
+
+    TRACE("iface %p, device %p, desc %p, output %p, swapchain %p.\n",
+            iface, device, desc, output, swapchain);
+
+    if (!device || !desc || !swapchain)
     {
-        HWND found_hwnd = NULL;
-        EnumWindows(find_top_level_window_proc, (LPARAM)&found_hwnd);
-        hwnd = found_hwnd;
+        WARN("Invalid pointer.\n");
+        return DXGI_ERROR_INVALID_CALL;
     }
+
+    swapchain_desc = *desc;
+
     if (hwnd)
     {
-        HWND root = GetAncestor(hwnd, GA_ROOT);
-        if (root) hwnd = root;
+        core_window = TRUE;
     }
-    if (!hwnd)
-        hwnd = CreateWindowA("static", NULL, WS_POPUP, 0, 0, desc->Width, desc->Height, 0, 0, 0, NULL);
+    else
+    {
+        hwnd = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
+        if (!hwnd) hwnd = GetActiveWindow();
+        if (!hwnd) hwnd = GetForegroundWindow();
+        if (!hwnd || hwnd == GetDesktopWindow())
+        {
+            HWND found_hwnd = NULL;
+            EnumWindows(find_top_level_window_proc, (LPARAM)&found_hwnd);
+            hwnd = found_hwnd;
+        }
+        if (hwnd)
+        {
+            HWND root = GetAncestor(hwnd, GA_ROOT);
+            if (root) hwnd = root;
+        }
+    }
 
-    ERR("CreateSwapChainForComposition using hwnd %p (size %ux%u)\n", hwnd, desc->Width, desc->Height);
-    return dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, desc, NULL, output, swapchain);
+    if (!hwnd)
+        hwnd = CreateWindowA("static", NULL, WS_POPUP, 0, 0, swapchain_desc.Width, swapchain_desc.Height, 0, 0, 0, NULL);
+
+    if (core_window || hwnd)
+    {
+        swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        if (swapchain_desc.BufferCount < 2)
+            swapchain_desc.BufferCount = 2;
+    }
+
+    ERR("CreateSwapChainForComposition using hwnd %p (size %ux%u)\n", hwnd, swapchain_desc.Width, swapchain_desc.Height);
+    return dxgi_factory_CreateSwapChainForHwnd(iface, device, hwnd, &swapchain_desc, NULL, output, swapchain);
 }
 
 static UINT STDMETHODCALLTYPE dxgi_factory_GetCreationFlags(IWineDXGIFactory *iface)

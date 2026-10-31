@@ -4879,6 +4879,224 @@ static void test_swapchain_parameters(void)
     DestroyWindow(window);
 }
 
+static const GUID IID_ICoreWindowInterop = { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f } };
+
+typedef struct ICoreWindowInterop ICoreWindowInterop;
+typedef struct ICoreWindowInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)(ICoreWindowInterop *This, REFIID riid, void **ppvObject);
+    ULONG (WINAPI *AddRef)(ICoreWindowInterop *This);
+    ULONG (WINAPI *Release)(ICoreWindowInterop *This);
+    HRESULT (WINAPI *GetWindowHandle)(ICoreWindowInterop *This, HWND *hwnd);
+    HRESULT (WINAPI *SetMessageHandled)(ICoreWindowInterop *This, BOOL value);
+} ICoreWindowInteropVtbl;
+
+struct ICoreWindowInterop
+{
+    const ICoreWindowInteropVtbl *lpVtbl;
+};
+
+#define ICoreWindowInterop_QueryInterface(This,riid,ppvObject) (This)->lpVtbl->QueryInterface(This,riid,ppvObject)
+#define ICoreWindowInterop_AddRef(This) (This)->lpVtbl->AddRef(This)
+#define ICoreWindowInterop_Release(This) (This)->lpVtbl->Release(This)
+#define ICoreWindowInterop_GetWindowHandle(This,hwnd) (This)->lpVtbl->GetWindowHandle(This,hwnd)
+#define ICoreWindowInterop_SetMessageHandled(This,value) (This)->lpVtbl->SetMessageHandled(This,value)
+
+struct test_core_window
+{
+    ICoreWindowInterop ICoreWindowInterop_iface;
+    LONG refcount;
+    HWND hwnd;
+};
+
+static inline struct test_core_window *impl_from_test_core_window(ICoreWindowInterop *iface)
+{
+    return CONTAINING_RECORD(iface, struct test_core_window, ICoreWindowInterop_iface);
+}
+
+static HRESULT WINAPI test_core_window_QueryInterface(ICoreWindowInterop *iface, REFIID riid, void **out)
+{
+    if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_ICoreWindowInterop))
+    {
+        ICoreWindowInterop_AddRef(iface);
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI test_core_window_AddRef(ICoreWindowInterop *iface)
+{
+    struct test_core_window *window = impl_from_test_core_window(iface);
+    return InterlockedIncrement(&window->refcount);
+}
+
+static ULONG WINAPI test_core_window_Release(ICoreWindowInterop *iface)
+{
+    struct test_core_window *window = impl_from_test_core_window(iface);
+    return InterlockedDecrement(&window->refcount);
+}
+
+static HRESULT WINAPI test_core_window_GetWindowHandle(ICoreWindowInterop *iface, HWND *hwnd)
+{
+    struct test_core_window *window = impl_from_test_core_window(iface);
+    *hwnd = window->hwnd;
+    return S_OK;
+}
+
+static HRESULT WINAPI test_core_window_SetMessageHandled(ICoreWindowInterop *iface, BOOL value)
+{
+    return S_OK;
+}
+
+static const struct ICoreWindowInteropVtbl test_core_window_vtbl =
+{
+    test_core_window_QueryInterface,
+    test_core_window_AddRef,
+    test_core_window_Release,
+    test_core_window_GetWindowHandle,
+    test_core_window_SetMessageHandled,
+};
+
+static void test_swapchain_composition(void)
+{
+    DXGI_SWAP_CHAIN_DESC1 swapchain_desc;
+    DXGI_SWAP_CHAIN_DESC result_desc;
+    IDXGISwapChain1 *swapchain;
+    IDXGIFactory2 *factory2;
+    IDXGIFactory *factory;
+    IDXGIAdapter *adapter;
+    IDXGIDevice *device;
+    WNDCLASSW wc = {0};
+    HWND core_window;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(device = create_device(0)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = IDXGIDevice_GetAdapter(device, &adapter);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIAdapter_GetParent(adapter, &IID_IDXGIFactory, (void **)&factory);
+    IDXGIAdapter_Release(adapter);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDXGIFactory_QueryInterface(factory, &IID_IDXGIFactory2, (void **)&factory2);
+    IDXGIFactory_Release(factory);
+    if (FAILED(hr))
+    {
+        win_skip("IDXGIFactory2 not available.\n");
+        refcount = IDXGIDevice_Release(device);
+        ok(!refcount, "Device has %lu references left.\n", refcount);
+        return;
+    }
+
+    /* 1. Test CreateSwapChainForComposition prioritizing CoreWindow */
+    wc.lpfnWndProc = DefWindowProcW;
+    wc.hInstance = GetModuleHandleW(NULL);
+    wc.lpszClassName = L"Windows.UI.Core.CoreWindow";
+    RegisterClassW(&wc);
+
+    core_window = CreateWindowExW(0, L"Windows.UI.Core.CoreWindow", L"Test CoreWindow",
+            WS_OVERLAPPEDWINDOW | WS_VISIBLE, 100, 100, 640, 480, NULL, NULL, GetModuleHandleW(NULL), NULL);
+    ok(core_window != NULL, "Failed to create CoreWindow, error %lu.\n", GetLastError());
+
+    memset(&swapchain_desc, 0, sizeof(swapchain_desc));
+    swapchain_desc.Width = 640;
+    swapchain_desc.Height = 480;
+    swapchain_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+    swapchain_desc.Stereo = FALSE;
+    swapchain_desc.SampleDesc.Count = 1;
+    swapchain_desc.SampleDesc.Quality = 0;
+    swapchain_desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    swapchain_desc.BufferCount = 2;
+    swapchain_desc.Scaling = DXGI_SCALING_STRETCH;
+    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    swapchain_desc.AlphaMode = DXGI_ALPHA_MODE_UNSPECIFIED;
+    swapchain_desc.Flags = 0;
+
+    hr = IDXGIFactory2_CreateSwapChainForComposition(factory2, (IUnknown *)device,
+            &swapchain_desc, NULL, &swapchain);
+    ok(hr == S_OK, "CreateSwapChainForComposition failed, hr %#lx.\n", hr);
+
+    if (SUCCEEDED(hr))
+    {
+        memset(&result_desc, 0, sizeof(result_desc));
+        hr = IDXGISwapChain1_GetDesc(swapchain, &result_desc);
+        ok(hr == S_OK, "GetDesc failed, hr %#lx.\n", hr);
+        ok(result_desc.OutputWindow == core_window,
+                "Expected OutputWindow %p, got %p.\n", core_window, result_desc.OutputWindow);
+        ok(result_desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                "Expected SwapEffect DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL (%#x), got %#x.\n",
+                DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, result_desc.SwapEffect);
+
+        hr = IDXGISwapChain1_Present(swapchain, 0, 0);
+        ok(hr == S_OK, "Present failed, hr %#lx.\n", hr);
+
+        refcount = IDXGISwapChain1_Release(swapchain);
+        ok(!refcount, "Swapchain has %lu references left.\n", refcount);
+    }
+
+    /* 2. Test swap effect configured as FLIP_SEQUENTIAL even if caller supplied DISCARD */
+    swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_DISCARD;
+    swapchain_desc.BufferCount = 1;
+    hr = IDXGIFactory2_CreateSwapChainForComposition(factory2, (IUnknown *)device,
+            &swapchain_desc, NULL, &swapchain);
+    ok(hr == S_OK, "CreateSwapChainForComposition failed with DISCARD desc, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        memset(&result_desc, 0, sizeof(result_desc));
+        hr = IDXGISwapChain1_GetDesc(swapchain, &result_desc);
+        ok(hr == S_OK, "GetDesc failed, hr %#lx.\n", hr);
+        ok(result_desc.OutputWindow == core_window,
+                "Expected OutputWindow %p, got %p.\n", core_window, result_desc.OutputWindow);
+        ok(result_desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+                "Expected SwapEffect DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL (%#x), got %#x.\n",
+                DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL, result_desc.SwapEffect);
+        refcount = IDXGISwapChain1_Release(swapchain);
+        ok(!refcount, "Swapchain has %lu references left.\n", refcount);
+    }
+
+    DestroyWindow(core_window);
+    UnregisterClassW(L"Windows.UI.Core.CoreWindow", GetModuleHandleW(NULL));
+
+    /* 3. Test CreateSwapChainForCoreWindow with ICoreWindowInterop */
+    {
+        struct test_core_window mock_core;
+        HWND test_win = create_window();
+
+        mock_core.ICoreWindowInterop_iface.lpVtbl = &test_core_window_vtbl;
+        mock_core.refcount = 1;
+        mock_core.hwnd = test_win;
+
+        swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        swapchain_desc.BufferCount = 2;
+
+        hr = IDXGIFactory2_CreateSwapChainForCoreWindow(factory2, (IUnknown *)device,
+                (IUnknown *)&mock_core.ICoreWindowInterop_iface, &swapchain_desc, NULL, &swapchain);
+        ok(hr == S_OK, "CreateSwapChainForCoreWindow failed, hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            memset(&result_desc, 0, sizeof(result_desc));
+            hr = IDXGISwapChain1_GetDesc(swapchain, &result_desc);
+            ok(hr == S_OK, "GetDesc failed, hr %#lx.\n", hr);
+            ok(result_desc.OutputWindow == test_win,
+                    "Expected OutputWindow %p, got %p.\n", test_win, result_desc.OutputWindow);
+            refcount = IDXGISwapChain1_Release(swapchain);
+            ok(!refcount, "Swapchain has %lu references left.\n", refcount);
+        }
+        DestroyWindow(test_win);
+    }
+
+    refcount = IDXGIFactory2_Release(factory2);
+    refcount = IDXGIDevice_Release(device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_swapchain_present(IUnknown *device, BOOL is_d3d12)
 {
     static const DWORD flags[] = {0, DXGI_PRESENT_TEST};
@@ -8573,6 +8791,11 @@ START_TEST(dxgi)
             use_adapter_idx = atoi(argv[++i]);
         else if (!strcmp(argv[i], "--single"))
             use_mt = FALSE;
+        else if (!strcmp(argv[i], "--composition"))
+        {
+            test_swapchain_composition();
+            return;
+        }
     }
 
     queue_test(test_adapter_desc);
@@ -8600,6 +8823,7 @@ START_TEST(dxgi)
     test_gamma_control();
     test_multi_adapter();
     test_swapchain_parameters();
+    test_swapchain_composition();
     test_swapchain_window_styles();
     run_on_d3d10(test_set_fullscreen);
     run_on_d3d10(test_resize_target);
