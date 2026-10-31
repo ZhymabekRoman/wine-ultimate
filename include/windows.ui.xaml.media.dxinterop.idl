@@ -1,0 +1,42 @@
+/*
+ * Copyright (C) 2026 Wine project
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+import "oaidl.idl";
+import "dxgi.idl";
+
+[
+    object,
+    uuid(f92f19d2-3ade-45a6-a20c-f6f1ea90554b),
+    local,
+    pointer_default(unique)
+]
+interface ISwapChainPanelNative : IUnknown
+{
+    HRESULT SetSwapChain([in] IDXGISwapChain *swapChain);
+}
+
+[
+    object,
+    uuid(d2521730-6d90-4ae7-af63-400949bf6b9d),
+    local,
+    pointer_default(unique)
+]
+interface ISwapChainPanelNative2 : ISwapChainPanelNative
+{
+    HRESULT SetSwapChainHandle([in] HANDLE swapChainHandle);
+}

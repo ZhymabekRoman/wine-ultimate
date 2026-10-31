@@ -1,7 +1,9 @@
 MODULE  = windows.ui.xaml.dll
-IMPORTS = combase
+IMPORTS = combase user32
 
 SOURCES = \
+	application.c \
 	classes.idl \
 	color_helper.c \
-	main.c
+	main.c \
+	swapchain_panel.c

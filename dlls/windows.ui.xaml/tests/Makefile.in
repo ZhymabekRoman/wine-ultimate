@@ -2,4 +2,5 @@ TESTDLL = windows.ui.xaml.dll
 IMPORTS = combase
 
 SOURCES = \
+	dxinterop.c \
 	xaml.c

@@ -28,16 +28,31 @@
 #include "winstring.h"
 
 #include "activation.h"
+#include "roapi.h"
+#include "windowscontracts.h"
 
 #include "wine/debug.h"
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
-#include "windows.foundation.h"
 #define WIDL_using_Windows_UI
+#define WIDL_using_Windows_UI_Core
+#define WIDL_using_Windows_ApplicationModel_Core
+#define WIDL_using_Windows_UI_Xaml
+#define WIDL_using_Windows_UI_Xaml_Controls
+
+#include "windows.foundation.h"
 #include "windows.ui.h"
+#include "windows.applicationmodel.core.h"
+#include "windows.ui.core.h"
+#include "windows.ui.xaml.h"
+
+#include "dxgi.h"
+#include "windows.ui.xaml.media.dxinterop.h"
 
 extern IActivationFactory *color_helper_factory;
+extern IActivationFactory *swapchain_panel_factory;
+extern IActivationFactory *application_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

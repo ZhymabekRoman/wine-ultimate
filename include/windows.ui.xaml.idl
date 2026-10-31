@@ -38,6 +38,10 @@ import "windows.ui.input.idl";
 import "windows.ui.xaml.interop.idl";
 
 namespace Windows.UI.Xaml {
+    interface IApplication;
+    interface IApplicationFactory;
+    interface IApplicationStatics;
+    interface IApplicationInitializationCallbackParams;
     interface IDataTemplateKey;
     interface IDependencyObject;
     interface IDependencyProperty;
@@ -47,6 +51,8 @@ namespace Windows.UI.Xaml {
     interface IPropertyMetadataFactory;
     interface IPropertyMetadataStatics;
 
+    runtimeclass Application;
+    runtimeclass ApplicationInitializationCallbackParams;
     runtimeclass DataTemplateKey;
     runtimeclass DependencyObject;
     runtimeclass DependencyProperty;
@@ -252,5 +258,95 @@ namespace Windows.UI.Xaml {
     runtimeclass PropertyMetadata
     {
         [default] interface Windows.UI.Xaml.IPropertyMetadata;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(53aab374-1b6c-487c-87b2-38b4ff4473e1)
+    ]
+    delegate HRESULT ApplicationInitializationCallback([in] Windows.UI.Xaml.ApplicationInitializationCallbackParams *p);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Xaml.ApplicationInitializationCallbackParams),
+        uuid(3c471375-9c34-4b17-9102-12632e27b94b)
+    ]
+    interface IApplicationInitializationCallbackParams : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Xaml.Application),
+        uuid(78f13b8e-9091-4178-9e5c-c7ea3215264b)
+    ]
+    interface IApplication : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Xaml.Application),
+        uuid(25f99625-93d3-4a16-9092-7470f3f6c8d7)
+    ]
+    interface IApplicationStatics : IInspectable
+    {
+        HRESULT Start([in] Windows.UI.Xaml.ApplicationInitializationCallback *callback);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Xaml.Application),
+        uuid(92dc89b9-d224-4347-9755-e889419b4e33)
+    ]
+    interface IApplicationFactory : IInspectable
+    {
+        HRESULT CreateInstance([in] IInspectable *outer, [out] IInspectable **inner, [out, retval] Windows.UI.Xaml.Application **instance);
+    }
+
+    [
+        composable(Windows.UI.Xaml.IApplicationFactory, public, Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        static(Windows.UI.Xaml.IApplicationStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both)
+    ]
+    runtimeclass Application
+    {
+        [default] interface Windows.UI.Xaml.IApplication;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass ApplicationInitializationCallbackParams
+    {
+        [default] interface Windows.UI.Xaml.IApplicationInitializationCallbackParams;
+    }
+}
+
+namespace Windows.UI.Xaml.Controls {
+    interface ISwapChainPanel;
+    runtimeclass SwapChainPanel;
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.UI.Xaml.Controls.SwapChainPanel),
+        uuid(67f23a9d-59d4-4bbd-9442-f83190a618d7)
+    ]
+    interface ISwapChainPanel : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both)
+    ]
+    runtimeclass SwapChainPanel
+    {
+        [default] interface Windows.UI.Xaml.Controls.ISwapChainPanel;
     }
 }

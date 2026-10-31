@@ -85,6 +85,59 @@ static void test_ColorHelper(void)
     IActivationFactory_Release( factory );
 }
 
+static const GUID IID_ISwapChainPanelNative = {0xf92f19d2, 0x3ade, 0x45a6, {0xa2, 0x0c, 0xf6, 0xf1, 0xea, 0x90, 0x55, 0x4b}};
+
+static void test_Application(void)
+{
+    static const WCHAR *class_name = L"Windows.UI.Xaml.Application";
+    IActivationFactory *factory = NULL;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "WindowsCreateString failed, hr %#lx\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "RoGetActivationFactory failed, hr %#lx\n", hr );
+
+    if (SUCCEEDED(hr))
+    {
+        check_interface( factory, &IID_IUnknown, FALSE );
+        check_interface( factory, &IID_IInspectable, FALSE );
+        check_interface( factory, &IID_IActivationFactory, FALSE );
+        IActivationFactory_Release( factory );
+    }
+}
+
+static void test_SwapChainPanel(void)
+{
+    static const WCHAR *class_name = L"Windows.UI.Xaml.Controls.SwapChainPanel";
+    IActivationFactory *factory = NULL;
+    IUnknown *native_panel = NULL;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "WindowsCreateString failed, hr %#lx\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "RoGetActivationFactory failed, hr %#lx\n", hr );
+
+    if (SUCCEEDED(hr))
+    {
+        check_interface( factory, &IID_IUnknown, FALSE );
+        check_interface( factory, &IID_IInspectable, FALSE );
+        check_interface( factory, &IID_IActivationFactory, FALSE );
+
+        hr = IActivationFactory_QueryInterface( factory, &IID_ISwapChainPanelNative, (void **)&native_panel );
+        ok( hr == S_OK, "QueryInterface ISwapChainPanelNative failed, hr %#lx\n", hr );
+        if (SUCCEEDED(hr))
+            IUnknown_Release( native_panel );
+
+        IActivationFactory_Release( factory );
+    }
+}
+
 START_TEST(xaml)
 {
     HRESULT hr;
@@ -93,6 +146,8 @@ START_TEST(xaml)
     ok( hr == S_OK, "RoInitialize failed, hr %#lx\n", hr );
 
     test_ColorHelper();
+    test_Application();
+    test_SwapChainPanel();
 
     RoUninitialize();
 }
