@@ -2237,8 +2237,15 @@ done:
 static void set_security_cookie( ULONG_PTR *cookie )
 {
     static ULONG seed;
+    void *protect_base = cookie;
+    SIZE_T protect_size = sizeof(*cookie);
+    ULONG protect_old;
+    BOOL restore = FALSE;
 
     TRACE( "initializing security cookie %p\n", cookie );
+
+    if (!NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size, PAGE_READWRITE, &protect_old ))
+        restore = TRUE;
 
     if (!seed) seed = NtGetTickCount() ^ GetCurrentProcessId();
     for (;;)
@@ -2258,6 +2265,9 @@ static void set_security_cookie( ULONG_PTR *cookie )
         else
             break;
     }
+
+    if (restore)
+        NtProtectVirtualMemory( NtCurrentProcess(), &protect_base, &protect_size, protect_old, &protect_old );
 }
 
 
