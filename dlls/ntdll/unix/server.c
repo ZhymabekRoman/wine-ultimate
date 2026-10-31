@@ -696,13 +696,23 @@ static void invoke_system_apc( const union apc_call *call, union apc_result *res
 
         result->type = call->type;
 
-        result->dup_handle.status = NtDuplicateObject( NtCurrentProcess(),
-                                                       wine_server_ptr_handle(call->dup_handle.src_handle),
-                                                       wine_server_ptr_handle(call->dup_handle.dst_process),
-                                                       &dst_handle, call->dup_handle.access,
-                                                       call->dup_handle.attributes, call->dup_handle.options );
+        if (!call->dup_handle.dst_process)
+        {
+            /* DuplicateHandle( source_process, handle, NULL, NULL, 0, FALSE, DUPLICATE_CLOSE_SOURCE )
+             * does not duplicate anything: it closes the handle in the source process,
+             * which is the process this apc is running in. */
+            result->dup_handle.status = NtClose( wine_server_ptr_handle( call->dup_handle.src_handle ));
+        }
+        else
+        {
+            result->dup_handle.status = NtDuplicateObject( NtCurrentProcess(),
+                                                           wine_server_ptr_handle(call->dup_handle.src_handle),
+                                                           wine_server_ptr_handle(call->dup_handle.dst_process),
+                                                           &dst_handle, call->dup_handle.access,
+                                                           call->dup_handle.attributes, call->dup_handle.options );
+            if (!self) NtClose( wine_server_ptr_handle(call->dup_handle.dst_process) );
+        }
         result->dup_handle.handle = wine_server_obj_handle( dst_handle );
-        if (!self) NtClose( wine_server_ptr_handle(call->dup_handle.dst_process) );
         break;
     }
     default:
@@ -1896,7 +1906,9 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
         ret = server_queue_process_apc( source_process, &call, &result );
         if (ret != STATUS_SUCCESS) return ret;
 
-        if (!result.dup_handle.status)
+        /* a null destination handle is valid: DuplicateHandle( source, handle, NULL, NULL,
+         * 0, FALSE, DUPLICATE_CLOSE_SOURCE ) only closes the handle in the source process */
+        if (dest && !result.dup_handle.status)
             *dest = wine_server_ptr_handle( result.dup_handle.handle );
         return result.dup_handle.status;
     }

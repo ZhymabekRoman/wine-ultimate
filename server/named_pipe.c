@@ -1318,15 +1318,37 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
 {
     struct pipe_message *message;
     struct iosb *iosb;
+    const WCHAR *pname;
+    data_size_t plen;
+
+    /* FSCTL_PIPE_TRANSCEIVE (0x282040) is the call the Chromium/ipcz named-pipe
+     * bootstrap uses to push a message and pull the reply in one request, so the
+     * status of every one of them is the evidence for the app<->browser stall. */
+    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
+    if (debug_level)
+    {
+        fprintf( stderr, "WA_TRANSCEIVE: pid=%04x pipe_end=%p pipe=%p name=", current->process->id,
+                 pipe_end, pipe_end->pipe );
+        if (pname) dump_strW( pname, plen, stderr, "[]" );
+        else fprintf( stderr, "(null)" );
+        fprintf( stderr, " state=%d conn=%p msgread=%d in=%u out=%u\n", pipe_end->state, pipe_end->connection,
+                 !!(pipe_end->flags & NAMED_PIPE_MESSAGE_STREAM_READ), (unsigned)get_req_data_size(),
+                 (unsigned)get_reply_max_size() );
+    }
 
     if (!pipe_end->connection)
     {
+        if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: status=%08x (%s)\n",
+                 pipe_end->pipe ? (unsigned int)STATUS_INVALID_PIPE_STATE : (unsigned int)STATUS_PIPE_DISCONNECTED,
+                 pipe_end->pipe ? "INVALID_PIPE_STATE" : "PIPE_DISCONNECTED" );
         set_error( pipe_end->pipe ? STATUS_INVALID_PIPE_STATE : STATUS_PIPE_DISCONNECTED );
         return;
     }
 
     if (!(pipe_end->flags & NAMED_PIPE_MESSAGE_STREAM_READ))
     {
+        if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: status=%08x (INVALID_READ_MODE)\n",
+                 (unsigned int)STATUS_INVALID_READ_MODE );
         set_error( STATUS_INVALID_READ_MODE );
         return;
     }
@@ -1334,6 +1356,8 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     /* not allowed if we already have read data buffered */
     if (!list_empty( &pipe_end->message_queue ))
     {
+        if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: status=%08x (PIPE_BUSY)\n",
+                 (unsigned int)STATUS_PIPE_BUSY );
         set_error( STATUS_PIPE_BUSY );
         return;
     }
@@ -1344,11 +1368,17 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     /* transaction never blocks on write, so just queue a message without async */
     message = queue_message( pipe_end->connection, iosb );
     release_object( iosb );
-    if (!message) return;
+    if (!message)
+    {
+        if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: queue_message failed, no status set\n" );
+        return;
+    }
     reselect_read_queue( pipe_end->connection, 0 );
 
     queue_async( &pipe_end->read_q, async );
     reselect_read_queue( pipe_end, 0 );
+    if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: status=%08x (PENDING, queued on read_q)\n",
+                             (unsigned int)STATUS_PENDING );
     set_error( STATUS_PENDING );
 }
 
@@ -1390,9 +1420,17 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
     }
     else
     {
+        if (debug_level)
+            fprintf( stderr, "WA_CONNATTR: pid=%04x unknown attr size=%u -> ILLEGAL_FUNCTION\n",
+                     current->process->id, (unsigned int)attr_size );
         set_error( STATUS_ILLEGAL_FUNCTION );
         return;
     }
+
+    if (debug_level)
+        fprintf( stderr, "WA_CONNATTR: pid=%04x conn=%p attr=%.*s val=%08x\n", current->process->id,
+                 pipe_end->connection, (int)(attr_size - 1), attr,
+                 value_size == 4 ? *(unsigned int *)value : 0 );
 
     if (get_reply_max_size() < value_size)
     {
@@ -1405,6 +1443,20 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
 
 static void pipe_end_ioctl( struct pipe_end *pipe_end, ioctl_code_t code, struct async *async )
 {
+    const WCHAR *pname;
+    data_size_t plen;
+
+    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
+    if (debug_level)
+    {
+        fprintf( stderr, "WA_IOCTL: pid=%04x code=%08x pipe_end=%p pipe=%p name=", current->process->id,
+                 code, pipe_end, pipe_end->pipe );
+        if (pname) dump_strW( pname, plen, stderr, "[]" );
+        else fprintf( stderr, "(null)" );
+        fprintf( stderr, " state=%d conn=%p spid=%04x cpid=%04x\n", pipe_end->state, pipe_end->connection,
+                 pipe_end->server_pid, pipe_end->client_pid );
+    }
+
     switch(code)
     {
     case FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE:

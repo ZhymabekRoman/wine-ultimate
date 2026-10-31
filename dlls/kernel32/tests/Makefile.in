@@ -18,6 +18,7 @@ SOURCES = \
 	file.c \
 	format_msg.c \
 	generated.c \
+	handle.c \
 	heap.c \
 	loader.c \
 	locale.c \

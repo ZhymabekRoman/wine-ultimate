@@ -1623,9 +1623,8 @@ void kill_thread( struct thread *thread, int violent_death )
     thread->state = TERMINATED;
     thread->exit_time = current_time;
     if (current == thread) current = NULL;
-    if (debug_level)
-        fprintf( stderr,"%04x: *killed* exit_code=%d\n",
-                 thread->id, thread->exit_code );
+    fprintf( stderr, "SERVER thread %04x (proc %04x) *killed* exit_code=%x\n",
+             thread->id, thread->process ? thread->process->id : 0, thread->exit_code );
     if (thread->wait)
     {
         while (thread->wait) end_wait( thread, STATUS_THREAD_IS_TERMINATING );
@@ -2158,7 +2157,14 @@ DECL_HANDLER(queue_apc)
         break;
     case APC_DUP_HANDLE:
         process = get_process_from_handle( req->handle, PROCESS_DUP_HANDLE );
-        if (process && process != current->process)
+        if (debug_level)
+            fprintf( stderr, "WA_APCDUP: caller=%04x target=%04x src_handle=%08x dst=%08x opts=%08x\n",
+                     current->process->id, process ? process->id : 0,
+                     (unsigned int)apc->call.dup_handle.src_handle, (unsigned int)apc->call.dup_handle.dst_process,
+                     (unsigned int)apc->call.dup_handle.options );
+        /* a null destination process handle means "close the handle in the source process",
+         * there is nothing to translate into the target in that case */
+        if (process && process != current->process && apc->call.dup_handle.dst_process)
         {
             /* duplicate the destination process handle into the target process */
             obj_handle_t handle = duplicate_handle( current->process, apc->call.dup_handle.dst_process,

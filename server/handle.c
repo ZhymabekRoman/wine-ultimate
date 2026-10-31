@@ -691,10 +691,12 @@ DECL_HANDLER(set_handle_info)
 DECL_HANDLER(dup_handle)
 {
     struct process *src, *dst = NULL;
+    process_id_t src_id = 0, dst_id = 0;
 
     reply->handle = 0;
     if ((src = get_process_from_handle( req->src_process, PROCESS_DUP_HANDLE )))
     {
+        src_id = src->id;
         if (req->options & DUPLICATE_MAKE_GLOBAL)
         {
             reply->handle = duplicate_handle( src, req->src_handle, NULL,
@@ -702,6 +704,7 @@ DECL_HANDLER(dup_handle)
         }
         else if ((dst = get_process_from_handle( req->dst_process, PROCESS_DUP_HANDLE )))
         {
+            dst_id = dst->id;
             reply->handle = duplicate_handle( src, req->src_handle, dst,
                                               req->access, req->attributes, req->options );
             release_object( dst );
@@ -711,6 +714,10 @@ DECL_HANDLER(dup_handle)
             close_handle( src, req->src_handle );
         release_object( src );
     }
+    if (debug_level)
+        fprintf( stderr, "WA_DUP: caller=%04x src=%04x dst=%04x handle=%08x opts=%08x access=%08x -> %08x status=%08x\n",
+                 current->process->id, src_id, dst_id, (unsigned int)req->src_handle, (unsigned int)req->options,
+                 (unsigned int)req->access, (unsigned int)reply->handle, (unsigned int)get_error() );
 }
 
 DECL_HANDLER(get_object_info)
