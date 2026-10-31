@@ -66,6 +66,7 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         !wcscmp(classid, L"Windows.ApplicationModel.AppInstance") ||
         !wcscmp(classid, L"Microsoft.Windows.AppLifecycle.AppInstance") ||
         !wcscmp(classid, L"Windows.ApplicationModel.StartupTask") ||
+        !wcsncmp(classid, L"Windows.UI.ViewManagement.ApplicationView", 41) ||
         (!wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.", 38) &&
          wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47)))
     {

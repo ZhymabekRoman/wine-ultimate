@@ -245,11 +245,25 @@ static void test_AdvertisingManager(void)
 
 static void test_ApplicationView(void)
 {
+    static const GUID IID_IApplicationView_alt =
+        {0xd222d3c7, 0x71a8, 0x495d, {0x95, 0x46, 0x04, 0x33, 0x0f, 0xb3, 0x3d, 0x76}};
+    static const GUID IID_IApplicationView3_alt =
+        {0x907f6222, 0xdf3d, 0x4794, {0x98, 0x76, 0x1f, 0x42, 0xe5, 0x87, 0xb2, 0xe1}};
+    static const GUID IID_IApplicationViewTitleBar_alt =
+        {0x00924509, 0x5480, 0x4cf8, {0xac, 0x71, 0x71, 0x22, 0xdd, 0x51, 0x8c, 0x77}};
     static const WCHAR *class_name = RuntimeClass_Windows_UI_ViewManagement_ApplicationView;
     IApplicationViewStatics2 *app_view_statics2;
+    IApplicationViewTitleBar *title_bar, *title_bar2;
+    IApplicationView *app_view, *app_view_check;
+    IApplicationView2 *app_view2;
+    IApplicationView3 *app_view3;
     IActivationFactory *factory;
-    IApplicationView *app_view;
+    __FIReference_1_Color *color;
+    boolean overlays = TRUE;
+    boolean fullscreen = TRUE;
+    HSTRING title = NULL;
     HSTRING str;
+    INT32 id = 0;
     HRESULT hr;
     LONG ref;
 
@@ -278,7 +292,111 @@ static void test_ApplicationView(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
 
     hr = IApplicationViewStatics2_GetForCurrentView( app_view_statics2, &app_view );
-    ok( hr == 0x80070490, "got hr %#lx.\n", hr );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( app_view != NULL, "got NULL app_view\n" );
+
+    if (SUCCEEDED( hr ) && app_view)
+    {
+        check_interface( app_view, &IID_IUnknown, TRUE );
+        check_interface( app_view, &IID_IInspectable, TRUE );
+        check_interface( app_view, &IID_IAgileObject, TRUE );
+        check_interface( app_view, &IID_IApplicationView, TRUE );
+        check_interface( app_view, &IID_IApplicationView_alt, TRUE );
+        check_interface( app_view, &IID_IApplicationView2, TRUE );
+        check_interface( app_view, &IID_IApplicationView3, TRUE );
+        check_interface( app_view, &IID_IApplicationView3_alt, TRUE );
+
+        /* Test singleton behavior */
+        hr = IApplicationViewStatics2_GetForCurrentView( app_view_statics2, &app_view_check );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( app_view_check == app_view, "expected same singleton instance %p != %p\n", app_view_check, app_view );
+        IApplicationView_Release( app_view_check );
+
+        /* Test IApplicationView properties */
+        hr = IApplicationView_get_Id( app_view, &id );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( id == 1, "got id %d\n", (int)id );
+
+        hr = IApplicationView_get_IsFullScreen( app_view, &fullscreen );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( fullscreen == FALSE, "got fullscreen %d\n", fullscreen );
+
+        hr = IApplicationView_get_Title( app_view, &title );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (title) WindowsDeleteString( title );
+
+        /* Test IApplicationView2 */
+        hr = IApplicationView_QueryInterface( app_view, &IID_IApplicationView2, (void **)&app_view2 );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr ))
+        {
+            hr = IApplicationView2_get_SuppressSystemOverlays( app_view2, &overlays );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( overlays == FALSE, "got overlays %d\n", overlays );
+
+            hr = IApplicationView2_put_SuppressSystemOverlays( app_view2, TRUE );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+            hr = IApplicationView2_get_SuppressSystemOverlays( app_view2, &overlays );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( overlays == TRUE, "got overlays %d\n", overlays );
+
+            IApplicationView2_Release( app_view2 );
+        }
+
+        /* Test IApplicationView3 */
+        hr = IApplicationView_QueryInterface( app_view, &IID_IApplicationView3, (void **)&app_view3 );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr ))
+        {
+            title_bar = NULL;
+            hr = IApplicationView3_get_TitleBar( app_view3, &title_bar );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( title_bar != NULL, "got NULL title_bar\n" );
+
+            if (SUCCEEDED( hr ) && title_bar)
+            {
+                check_interface( title_bar, &IID_IUnknown, TRUE );
+                check_interface( title_bar, &IID_IInspectable, TRUE );
+                check_interface( title_bar, &IID_IAgileObject, TRUE );
+                check_interface( title_bar, &IID_IApplicationViewTitleBar, TRUE );
+                check_interface( title_bar, &IID_IApplicationViewTitleBar_alt, TRUE );
+
+                color = (void *)0xdeadbeef;
+                hr = IApplicationViewTitleBar_get_ForegroundColor( title_bar, &color );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                ok( color == NULL, "got non-NULL color %p\n", color );
+
+                color = (void *)0xdeadbeef;
+                hr = IApplicationViewTitleBar_get_BackgroundColor( title_bar, &color );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                ok( color == NULL, "got non-NULL color %p\n", color );
+
+                color = (void *)0xdeadbeef;
+                hr = IApplicationViewTitleBar_get_ButtonForegroundColor( title_bar, &color );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                ok( color == NULL, "got non-NULL color %p\n", color );
+
+                color = (void *)0xdeadbeef;
+                hr = IApplicationViewTitleBar_get_ButtonBackgroundColor( title_bar, &color );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                ok( color == NULL, "got non-NULL color %p\n", color );
+
+                /* Test cached title bar */
+                title_bar2 = NULL;
+                hr = IApplicationView3_get_TitleBar( app_view3, &title_bar2 );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                ok( title_bar2 == title_bar, "expected same title bar instance %p != %p\n", title_bar2, title_bar );
+                IApplicationViewTitleBar_Release( title_bar2 );
+
+                IApplicationViewTitleBar_Release( title_bar );
+            }
+
+            IApplicationView3_Release( app_view3 );
+        }
+
+        IApplicationView_Release( app_view );
+    }
 
     IApplicationViewStatics2_Release( app_view_statics2 );
 
