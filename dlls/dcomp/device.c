@@ -1821,20 +1821,16 @@ static HRESULT device_get_or_create_rendering_device(struct composition_device *
     return hr;
 }
 
-static HRESULT composition_device_create_surface(struct composition_device *device,
-        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
-        IDCompositionSurface **surface)
+/* Every surface the device creates comes from its own IDCompositionSurfaceFactory;
+ * a client that never called IDCompositionDevice2::CreateSurfaceFactory() gets one
+ * built on the device's rendering device (a default D3D11 device when the client
+ * passed no rendering device at all).  The factory is created under
+ * dcomp_device_cs and used outside it. */
+static HRESULT device_get_or_create_surface_factory(struct composition_device *device,
+        IDCompositionSurfaceFactory **out_factory)
 {
     IDCompositionSurfaceFactory *factory;
     HRESULT hr;
-
-    TRACE("DCOMP: CreateSurface device %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p\n",
-        device, width, height, pixel_format, alpha_mode, surface);
-
-    if (!surface)
-        return E_POINTER;
-
-    *surface = NULL;
 
     EnterCriticalSection(&dcomp_device_cs);
 
@@ -1866,8 +1862,52 @@ static HRESULT composition_device_create_surface(struct composition_device *devi
     if (!factory)
         return E_FAIL;
 
+    *out_factory = factory;
+    return S_OK;
+}
+
+static HRESULT composition_device_create_surface(struct composition_device *device,
+        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
+        IDCompositionSurface **surface)
+{
+    IDCompositionSurfaceFactory *factory;
+    HRESULT hr;
+
+    TRACE("DCOMP: CreateSurface device %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p\n",
+        device, width, height, pixel_format, alpha_mode, surface);
+
+    if (!surface)
+        return E_POINTER;
+
+    *surface = NULL;
+
+    if (FAILED(hr = device_get_or_create_surface_factory(device, &factory)))
+        return hr;
+
     /* Creating the surface enters Direct3D and Direct2D. */
     return create_surface(impl_from_IDCompositionSurfaceFactory(factory),
+            width, height, pixel_format, alpha_mode, surface);
+}
+
+static HRESULT composition_device_create_virtual_surface(struct composition_device *device,
+        UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
+        IDCompositionVirtualSurface **surface)
+{
+    IDCompositionSurfaceFactory *factory;
+    HRESULT hr;
+
+    TRACE("DCOMP: CreateVirtualSurface device %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p\n",
+        device, width, height, pixel_format, alpha_mode, surface);
+
+    if (!surface)
+        return E_POINTER;
+
+    *surface = NULL;
+
+    if (FAILED(hr = device_get_or_create_surface_factory(device, &factory)))
+        return hr;
+
+    return create_virtual_surface(impl_from_IDCompositionSurfaceFactory(factory),
             width, height, pixel_format, alpha_mode, surface);
 }
 
@@ -1884,9 +1924,9 @@ static HRESULT STDMETHODCALLTYPE device_CreateVirtualSurface(IDCompositionDevice
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionVirtualSurface **surface)
 {
-    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
-            width, height, pixel_format, alpha_mode, surface);
-    return E_NOTIMPL;
+    struct composition_device *device = impl_from_IDCompositionDevice(iface);
+
+    return composition_device_create_virtual_surface(device, width, height, pixel_format, alpha_mode, surface);
 }
 
 static inline BOOL is_kmt_handle(HANDLE h)
@@ -1929,6 +1969,14 @@ static HRESULT STDMETHODCALLTYPE device_CreateSurfaceFromHandle(IDCompositionDev
     {
         hr = ID3D11Device_OpenSharedResource(d3d11_device, handle, &IID_IDXGISurface, (void **)&dxgi_surface);
         ID3D11Device_Release(d3d11_device);
+    }
+    else
+    {
+        /* A rendering device that is not an ID3D11Device (an IDXGIDevice or ID2D1Device
+         * from a client that never passed a D3D11 device) has no shared-resource
+         * opening entry point at all; report that instead of succeeding with a NULL
+         * surface. */
+        hr = E_NOINTERFACE;
     }
     IUnknown_Release(rendering_device);
 
@@ -2204,6 +2252,47 @@ static HRESULT STDMETHODCALLTYPE device_CheckDeviceState(IDCompositionDevice *if
     return S_OK;
 }
 
+/*
+ * Method coverage of the composition device (IDCompositionDevice vtable).
+ *
+ *   Commit, WaitForCommitCompletion, GetFrameStatistics   implemented; the compositor
+ *                                                          is emulated, see composite_thread_proc()
+ *   CreateTargetForHwnd, CreateVisual                     implemented (target.c, visual.c)
+ *   CreateSurface, CreateVirtualSurface                   implemented (surface.c) through the device
+ *                                                          surface factory, which is created on demand
+ *   CreateSurfaceFromHandle                               implemented when the rendering device is an
+ *                                                          ID3D11Device(1): the handle is opened with
+ *                                                          OpenSharedResource[1] as an IDXGISurface and
+ *                                                          wrapped; E_NOINTERFACE for a rendering
+ *                                                          device that is only IDXGIDevice/ID2D1Device
+ *   CreateSurfaceFromHwnd                                 semi-stub: returns a new B8G8R8A8 surface of
+ *                                                          the window client size, not the window's own
+ *                                                          redirection surface
+ *   Create{Translate,Scale,Rotate,Skew,Matrix}Transform   implemented (transform.c)
+ *   Create{Translate,Scale,Rotate,Matrix}Transform3D      implemented (transform.c)
+ *   CreateTransformGroup, CreateTransform3DGroup          E_NOTIMPL: a group is a transform whose
+ *                                                          effective matrix is the concatenation of its
+ *                                                          children, the object in transform.c
+ *                                                          implements single transforms only and no
+ *                                                          client of this fork builds groups, so a group
+ *                                                          the compositor would silently ignore is not
+ *                                                          faked up
+ *   CreateEffectGroup, CreateRectangleClip                implemented (transform.c)
+ *   CreateAnimation                                       E_NOTIMPL: this tree has no animation
+ *                                                          byte-code parser in dlls/dcomp, and the
+ *                                                          Set*Animation entry points reject the
+ *                                                          animation pointer
+ *   CheckDeviceState                                      implemented: the device is never lost,
+ *                                                          *valid = TRUE
+ *
+ * No DirectComposition interface has a SetMaxSize() entry point: the device
+ * interfaces are IDCompositionDevice{,2,3}, IDCompositionDesktopDevice{,Partner} and
+ * the private IDCompositionDeviceUnknown (checked against include/dcomp.idl and
+ * dlls/dcomp/dcomp_private_iface.idl), the surface, virtual surface, surface factory
+ * and target interfaces are checked as well, and none declares it.  The interface
+ * that changes a surface size is IDCompositionVirtualSurface::Resize(), and the size
+ * is validated at creation time by create_surface().
+ */
 static const struct IDCompositionDeviceVtbl device_vtbl =
 {
     /* IUnknown methods */
@@ -2326,9 +2415,10 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateVirtualSurface(IDCompositi
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionVirtualSurface **surface)
 {
-    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
-            width, height, pixel_format, alpha_mode, surface);
-    return E_NOTIMPL;
+    struct composition_device *device = impl_from_IDCompositionDeviceUnknown(iface);
+
+    return device_CreateVirtualSurface(&device->IDCompositionDevice_iface, width, height,
+            pixel_format, alpha_mode, surface);
 }
 
 static HRESULT STDMETHODCALLTYPE desktop_device_CreateTranslateTransform(IDCompositionDeviceUnknown *iface,
@@ -3213,6 +3303,27 @@ static HRESULT STDMETHODCALLTYPE desktop_device_Unknown99(IDCompositionDeviceUnk
     return E_NOTIMPL;
 }
 
+/*
+ * Every method of IDCompositionDevice2 (Commit, WaitForCommitCompletion,
+ * GetFrameStatistics, CreateVisual, CreateSurfaceFactory, CreateSurface,
+ * CreateVirtualSurface, the transforms, CreateEffectGroup, CreateRectangleClip), of
+ * IDCompositionDesktopDevice (CreateTargetForHwnd, CreateSurfaceFromHandle,
+ * CreateSurfaceFromHwnd) and of IDCompositionDesktopDevicePartner for visuals
+ * (CreateSharedResource, OpenSharedResourceHandle, CreateFromSharedVisualHandle) is
+ * implemented.  The 99 IDCompositionDeviceUnknown slots stay E_NOTIMPL: the
+ * interface is unnamed, its methods are numbered, and their parameters are unknown,
+ * so no target-specific behaviour can be attached to them.
+ *
+ * QueryInterface answers IDCompositionDevice3 with this object, so the v3 layout
+ * shares this vtable.  The 13 methods IDCompositionDevice3 adds
+ * (CreateGaussianBlurEffect ... CreateAffineTransform2DEffect) sit at slots 25..37,
+ * which is exactly where IDCompositionDesktopDevice's three methods and the partner
+ * interface's three methods sit.  One object cannot serve both layouts; the desktop
+ * layout wins because it is the one clients of this fork use (Chromium queries
+ * IDCompositionDevice3 and then calls only IDCompositionDevice2 slots, which are
+ * slots 3..24 and are identical in both layouts), so the device effect creation
+ * methods must not be called through an IDCompositionDevice3 pointer.
+ */
 static const struct IDCompositionDeviceUnknownVtbl desktop_device_vtbl =
 {
     /* IUnknown methods */
@@ -3383,6 +3494,18 @@ static HRESULT create_device(int version, IUnknown *rendering_device, REFIID iid
     return hr;
 }
 
+/*
+ * The device returned here answers every device version through QueryInterface
+ * (IDCompositionDevice, IDCompositionDevice2, IDCompositionDevice3,
+ * IDCompositionDesktopDevice and the desktop partner interfaces) even when it was
+ * created through the v1 entry point, and it is built with the version of the
+ * newest device interface.  That is deliberate: Chromium's
+ * ui/gl/direct_composition_support.cc InitializeDirectComposition() calls
+ * DCompositionCreateDevice() and then immediately queries the returned device for
+ * IDCompositionDevice3, so a v1-only device fails the GPU process' composition
+ * setup.  The v1 entry point still only accepts IID_IDCompositionDevice as its
+ * 'iid' argument, matching Windows.
+ */
 HRESULT WINAPI DCompositionCreateDevice(IDXGIDevice *dxgi_device, REFIID iid, void **device)
 {
     TRACE("%p, %s, %p\n", dxgi_device, debugstr_guid(iid), device);
@@ -3390,7 +3513,7 @@ HRESULT WINAPI DCompositionCreateDevice(IDXGIDevice *dxgi_device, REFIID iid, vo
     if (!IsEqualIID(iid, &IID_IDCompositionDevice))
         return E_NOINTERFACE;
 
-    return create_device(1, (IUnknown *)dxgi_device, iid, device);
+    return create_device(3, (IUnknown *)dxgi_device, iid, device);
 }
 
 HRESULT WINAPI DCompositionCreateDevice2(IUnknown *rendering_device, REFIID iid, void **device)

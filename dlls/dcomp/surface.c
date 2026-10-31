@@ -17,12 +17,18 @@
  */
 #include <stdarg.h>
 #include <assert.h>
+#include <stdlib.h>
 
 #define COBJMACROS
 #include "windef.h"
 #include "winbase.h"
 #include "dcomp_private.h"
 #include "wine/debug.h"
+
+/* wine/heap.h and the winecrt0 heap helpers are not present in this tree;
+ * use the same local shim as dlls/wintypes/uri.c */
+#define heap_calloc(num,size) calloc( num, size )
+#define heap_free(ptr) free( ptr )
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
@@ -34,7 +40,8 @@ static HRESULT STDMETHODCALLTYPE surface_QueryInterface(IDCompositionSurfaceUnkn
 
     if (IsEqualGUID(iid, &IID_IUnknown)
             || IsEqualGUID(iid, &IID_IDCompositionSurface)
-            || IsEqualGUID(iid, &IID_IDCompositionSurfaceUnknown))
+            || IsEqualGUID(iid, &IID_IDCompositionSurfaceUnknown)
+            || (surface->is_virtual && IsEqualGUID(iid, &IID_IDCompositionVirtualSurface)))
     {
         IUnknown_AddRef(iface);
         *out = iface;
@@ -86,6 +93,7 @@ static ULONG STDMETHODCALLTYPE surface_Release(IDCompositionSurfaceUnknown *ifac
             IDCompositionSurfaceFactory_Release(surface->factory);
         if (surface->draw_surface)
             ID3D11Texture2D_Release(surface->draw_surface);
+        free(surface->trim_rects);
         free(surface);
     }
 
@@ -200,10 +208,9 @@ static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *
         rect = &whole_rect;
     }
 
-    /* TODO: Check if IDCompositionSurface is virtual when virtual IDCompositionSurface is implemented */
-
-    /* The first BeginDraw must use the whole surface for non-virtual IDCompositionSurface */
-    if (!surface->draw_surface && !(rect->left == 0 && rect->top == 0
+    /* The first BeginDraw must use the whole surface for non-virtual IDCompositionSurface;
+     * a virtual surface is resizable and scrollable, so it accepts any in-bounds sub-rect. */
+    if (!surface->is_virtual && !surface->draw_surface && !(rect->left == 0 && rect->top == 0
             && rect->right == surface->width && rect->bottom == surface->height))
         return E_INVALIDARG;
 
@@ -259,7 +266,18 @@ static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *
 
     hr = IUnknown_QueryInterface(surface->draw_surface, iid, object);
     if (FAILED(hr))
+    {
+        /* The draw never started: release the claim taken above, otherwise the surface
+         * stays 'being rendered' and every later BeginDraw / Resize is rejected with
+         * DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED.  Chromium's first BeginDraw asks
+         * for ID2D1Surface, which is not what backs the surface here, so this path is
+         * taken on the way to a working IID_ID3D11Texture2D / IID_ID3D11Surface draw. */
+        dcomp_lock();
+        if (device->drawing_surface == &surface->IDCompositionSurfaceUnknown_iface)
+            device->drawing_surface = NULL;
+        dcomp_unlock();
         return hr;
+    }
 
     offset->x = rect->left;
     offset->y = rect->top;
@@ -368,18 +386,18 @@ static HRESULT STDMETHODCALLTYPE surface_Unknown2(IDCompositionSurfaceUnknown *i
     return E_NOTIMPL;
 }
 
-/* Undocumented. Looks like a resize method. */
-static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
+/* Replaces the surface backing with one of the new size.  Both the undocumented
+ * IDCompositionSurfaceUnknown slot 3 and IDCompositionVirtualSurface::Resize() do
+ * exactly this, so the work lives here; the size check and the 'being rendered'
+ * rejection are the same for both callers. */
+static HRESULT composition_surface_resize(struct composition_surface *surface, UINT width, UINT height)
 {
-    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
     struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(surface->factory);
     struct composition_device *device = impl_from_IDCompositionDevice(factory->device);
     IDXGIDevice *dxgi_surface_device = NULL;
     IDXGISurface *dxgi_surface;
     DXGI_SURFACE_DESC desc;
     HRESULT hr;
-
-    FIXME("iface %p width %d height %d!\n", iface, width, height);
 
     if (!width || !height)
         return E_INVALIDARG;
@@ -430,8 +448,22 @@ static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *i
     surface->width = width;
     surface->height = height;
     surface->physical_surface = (IUnknown *)dxgi_surface;
+    /* A resized surface has no trimmed area any more, the rectangles describe the old size. */
+    free(surface->trim_rects);
+    surface->trim_rects = NULL;
+    surface->trim_count = 0;
     dcomp_unlock();
     return S_OK;
+}
+
+/* Undocumented. Looks like a resize method. */
+static HRESULT STDMETHODCALLTYPE surface_Unknown3(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
+{
+    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
+
+    FIXME("iface %p width %d height %d!\n", iface, width, height);
+
+    return composition_surface_resize(surface, width, height);
 }
 
 static HRESULT STDMETHODCALLTYPE surface_Unknown4(IDCompositionSurfaceUnknown *iface)
@@ -1124,25 +1156,121 @@ static const struct IDCompositionSurfaceUnknownVtbl surface_vtbl =
     surface_Unknown99,
 };
 
+/* IDCompositionVirtualSurface::Resize().  Same resize as the private slot 3 above;
+ * Windows additionally keeps the previously drawn content, which Wine's compositor
+ * does not need because the surface is re-drawn by the client after a resize. */
+static HRESULT STDMETHODCALLTYPE surface_Resize(IDCompositionSurfaceUnknown *iface, UINT width, UINT height)
+{
+    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
+
+    TRACE("iface %p, width %u, height %u.\n", iface, width, height);
+
+    return composition_surface_resize(surface, width, height);
+}
+
+/* IDCompositionVirtualSurface::Trim(): tells the compositor which rectangles of a
+ * virtual surface are not used, so that they may be dropped from the surface.  The
+ * rectangles are validated and remembered (they are observable through the surface
+ * state, and the call has to reject an out-of-surface rectangle and a surface that
+ * is currently being drawn); Wine composites a virtual surface by blitting the
+ * whole surface to the target window, so trimming a rectangle out of the presented
+ * content is not implemented. */
+static HRESULT STDMETHODCALLTYPE surface_Trim(IDCompositionSurfaceUnknown *iface,
+        const RECT *rectangles, UINT count)
+{
+    struct composition_surface *surface = impl_from_IDCompositionSurfaceUnknown(iface);
+    struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(surface->factory);
+    struct composition_device *device = impl_from_IDCompositionDevice(factory->device);
+    RECT *new_rects = NULL;
+    UINT i;
+
+    TRACE("iface %p, rectangles %p, count %u.\n", iface, rectangles, count);
+
+    if (!count && !rectangles)
+    {
+        dcomp_lock();
+        free(surface->trim_rects);
+        surface->trim_rects = NULL;
+        surface->trim_count = 0;
+        dcomp_unlock();
+        return S_OK;
+    }
+
+    if (!rectangles)
+        return E_INVALIDARG;
+
+    for (i = 0; i < count; i++)
+    {
+        const RECT *r = &rectangles[i];
+
+        if (r->left < 0 || r->top < 0 || r->right > (int)surface->width
+                || r->bottom > (int)surface->height || r->right <= r->left || r->bottom <= r->top)
+            return E_INVALIDARG;
+    }
+
+    if (!(new_rects = heap_calloc(count, sizeof(*new_rects))))
+        return E_OUTOFMEMORY;
+
+    dcomp_lock();
+    if (device->drawing_surface == &surface->IDCompositionSurfaceUnknown_iface)
+    {
+        dcomp_unlock();
+        heap_free(new_rects);
+        return DCOMPOSITION_ERROR_SURFACE_BEING_RENDERED;
+    }
+    free(surface->trim_rects);
+    for (i = 0; i < count; i++)
+        new_rects[i] = rectangles[i];
+    surface->trim_rects = new_rects;
+    surface->trim_count = count;
+    dcomp_unlock();
+
+    return S_OK;
+}
+
+/*
+ * IDCompositionVirtualSurface has the layout of IDCompositionSurface (BeginDraw,
+ * EndDraw, SuspendDraw, ResumeDraw, Scroll) followed by Resize() and Trim().  The
+ * first eight slots are shared with surface_vtbl above, so a virtual surface is
+ * the same object with a vtable whose slots 8 and 9 (the private Unknown1/Unknown2
+ * slots, unused here) are Resize() and Trim().  Kept as a plain function pointer
+ * array because the two slot signatures differ from the private interface's.
+ */
+static const void *virtual_surface_vtbl[] =
+{
+    surface_QueryInterface,   /* 0 (0x00) IUnknown */
+    surface_AddRef,           /* 1 (0x08) */
+    surface_Release,          /* 2 (0x10) */
+    surface_BeginDraw,        /* 3 (0x18) */
+    surface_EndDraw,          /* 4 (0x20) */
+    surface_SuspendDraw,      /* 5 (0x28) */
+    surface_ResumeDraw,       /* 6 (0x30) */
+    surface_Scroll,           /* 7 (0x38) */
+    surface_Resize,           /* 8 (0x40) IDCompositionVirtualSurface::Resize */
+    surface_Trim,             /* 9 (0x48) IDCompositionVirtualSurface::Trim */
+};
+
 struct composition_surface *unsafe_impl_from_IDCompositionSurface(IDCompositionSurface *iface)
 {
     if (!iface)
         return NULL;
-    if ((void *)iface->lpVtbl != (void *)&surface_vtbl)
+    if ((void *)iface->lpVtbl != (void *)&surface_vtbl
+            && (void *)iface->lpVtbl != (void *)&virtual_surface_vtbl)
         return NULL;
     return CONTAINING_RECORD(iface, struct composition_surface, IDCompositionSurfaceUnknown_iface);
 }
 
-HRESULT create_surface(struct composition_surface_factory *factory, UINT width, UINT height,
-        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface)
+static HRESULT create_surface_impl(struct composition_surface_factory *factory, UINT width, UINT height,
+        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, BOOL is_virtual,
+        IDCompositionSurface **dcomp_surface)
 {
     struct composition_surface *surface;
     const GUID *physical_surface_iid;
     IUnknown *physical_surface;
     HRESULT hr;
 
-    TRACE("DCOMP: create_surface width %u, height %u, format %#x, alpha_mode %#x\n",
-        width, height, pixel_format, alpha_mode);
+    TRACE("DCOMP: create_surface width %u, height %u, format %#x, alpha_mode %#x, virtual %d\n",
+        width, height, pixel_format, alpha_mode, is_virtual);
 
     if (!width || !height)
         return E_INVALIDARG;
@@ -1198,7 +1326,7 @@ HRESULT create_surface(struct composition_surface_factory *factory, UINT width, 
     if (!surface)
         return E_OUTOFMEMORY;
 
-    surface->IDCompositionSurfaceUnknown_iface.lpVtbl = &surface_vtbl;
+    surface->IDCompositionSurfaceUnknown_iface.lpVtbl = is_virtual ? (void *)virtual_surface_vtbl : &surface_vtbl;
     surface->factory = &factory->IDCompositionSurfaceFactory_iface;
     IDCompositionSurfaceFactory_AddRef(surface->factory);
     surface->physical_surface = physical_surface;
@@ -1207,10 +1335,24 @@ HRESULT create_surface(struct composition_surface_factory *factory, UINT width, 
     surface->height = height;
     surface->pixel_format = pixel_format;
     surface->alpha_mode = alpha_mode;
+    surface->is_virtual = is_virtual;
     surface->ref = 1;
 
     *dcomp_surface = (IDCompositionSurface *)&surface->IDCompositionSurfaceUnknown_iface;
     return S_OK;
+}
+
+HRESULT create_surface(struct composition_surface_factory *factory, UINT width, UINT height,
+        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface)
+{
+    return create_surface_impl(factory, width, height, pixel_format, alpha_mode, FALSE, dcomp_surface);
+}
+
+HRESULT create_virtual_surface(struct composition_surface_factory *factory, UINT width, UINT height,
+        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionVirtualSurface **surface)
+{
+    return create_surface_impl(factory, width, height, pixel_format, alpha_mode, TRUE,
+            (IDCompositionSurface **)surface);
 }
 
 static HRESULT STDMETHODCALLTYPE factory_QueryInterface(IDCompositionSurfaceFactory *iface, REFIID iid, void **out)
@@ -1272,9 +1414,17 @@ static HRESULT STDMETHODCALLTYPE factory_CreateVirtualSurface(IDCompositionSurfa
         UINT width, UINT height, DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode,
         IDCompositionVirtualSurface **surface)
 {
-    FIXME("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p stub!\n", iface,
+    struct composition_surface_factory *factory = impl_from_IDCompositionSurfaceFactory(iface);
+
+    TRACE("iface %p, width %u, height %u, format %#x, alpha_mode %#x, surface %p.\n", iface,
             width, height, pixel_format, alpha_mode, surface);
-    return E_NOTIMPL;
+
+    if (!surface)
+        return E_POINTER;
+
+    *surface = NULL;
+
+    return create_virtual_surface(factory, width, height, pixel_format, alpha_mode, surface);
 }
 
 static const struct IDCompositionSurfaceFactoryVtbl factory_vtbl =

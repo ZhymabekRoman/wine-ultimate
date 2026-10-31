@@ -113,6 +113,9 @@ struct composition_surface
     UINT height;
     DXGI_FORMAT pixel_format;
     DXGI_ALPHA_MODE alpha_mode;
+    BOOL is_virtual;          /* answers IDCompositionVirtualSurface, BeginDraw takes sub-rects */
+    RECT *trim_rects;         /* copy of the last Trim() rectangles, see surface_Trim() */
+    UINT trim_count;
     LONG ref;
 };
 
@@ -210,6 +213,8 @@ void dcomp_reclaim_push(IUnknown *object);
 void shared_visual_cache_set(HANDLE handle, IDCompositionVisual *root);
 HRESULT create_surface(struct composition_surface_factory *factory, UINT width, UINT height,
         DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionSurface **dcomp_surface);
+HRESULT create_virtual_surface(struct composition_surface_factory *factory, UINT width, UINT height,
+        DXGI_FORMAT pixel_format, DXGI_ALPHA_MODE alpha_mode, IDCompositionVirtualSurface **surface);
 HRESULT create_surface_factory(struct composition_device *device, IUnknown *rendering_device, IDCompositionSurfaceFactory **factory);
 HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost, IDCompositionTarget **target);
 HRESULT create_target_from_shared_visual_handle(struct composition_device *device, HANDLE shared_visual_handle, void **new_target);

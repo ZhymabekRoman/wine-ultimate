@@ -239,9 +239,13 @@ static void test_DCompositionCreateDevice(void)
 
     check_interface(dcomp_device, &IID_IUnknown, TRUE);
     check_interface(dcomp_device, &IID_IDCompositionDevice, TRUE);
-    /* Device created from DCompositionCreateDevice() doesn't support IDCompositionDevice2 */
-    check_interface(dcomp_device, &IID_IDCompositionDevice2, FALSE);
-    check_interface(dcomp_device, &IID_IDCompositionDesktopDevice, FALSE);
+    /* This fork answers the newer device versions on a device created through
+     * DCompositionCreateDevice() as well: Chromium's InitializeDirectComposition()
+     * queries IDCompositionDevice3 on exactly that device.  Upstream Windows returns
+     * E_NOINTERFACE here. */
+    check_interface(dcomp_device, &IID_IDCompositionDevice2, TRUE);
+    check_interface(dcomp_device, &IID_IDCompositionDevice3, TRUE);
+    check_interface(dcomp_device, &IID_IDCompositionDesktopDevice, TRUE);
     check_interface(dcomp_device, &IID_IDCompositionDesktopDevicePartner, TRUE);
     check_interface(dcomp_device, &IID_IDCompositionDeviceUnknown, TRUE);
     check_inherited_interface(dcomp_device, &IID_IDCompositionDesktopDevicePartner, &IID_IDCompositionDeviceUnknown);
