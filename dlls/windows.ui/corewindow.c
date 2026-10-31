@@ -142,8 +142,11 @@ struct core_window
     ICoreDispatcher *dispatcher;
     HWND hwnd;
     LONG ref;
+    float width;
+    float height;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs *visibility_changed_handler;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *size_changed_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs *activated_handler;
 };
 
 static __thread struct core_window *thread_core_window;
@@ -659,6 +662,12 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
         if (thread_core_window == impl) thread_core_window = NULL;
         if (impl->hwnd) DestroyWindow( impl->hwnd );
         if (impl->dispatcher) ICoreDispatcher_Release( impl->dispatcher );
+        if (impl->visibility_changed_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs_Release( impl->visibility_changed_handler );
+        if (impl->size_changed_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Release( impl->size_changed_handler );
+        if (impl->activated_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Release( impl->activated_handler );
         free( impl );
     }
     return ref;
@@ -729,22 +738,18 @@ static HRESULT WINAPI core_window_Activate( ICoreWindow *iface )
     if (impl->hwnd)
     {
         ShowWindow( impl->hwnd, SW_SHOW );
+        SetForegroundWindow( impl->hwnd );
         UpdateWindow( impl->hwnd );
-    }
-    if (impl->visibility_changed_handler)
-    {
-        __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs *args = visibility_changed_args_create( TRUE );
-        if (args)
-        {
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs_Invoke(
-                impl->visibility_changed_handler, &impl->ICoreWindow_iface, args );
-            __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs_Release( args );
-        }
     }
     return S_OK;
 }
 static HRESULT WINAPI core_window_Close( ICoreWindow *iface )
-{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p, hwnd %p\n", iface, impl->hwnd );
+    if (impl->hwnd) PostMessageW( impl->hwnd, WM_CLOSE, 0, 0 );
+    return S_OK;
+}
 static HRESULT WINAPI core_window_GetAsyncKeyState( ICoreWindow *iface, __x_ABI_CWindows_CSystem_CVirtualKey key, CoreVirtualKeyStates *state )
 { FIXME( "stub\n" ); if (state) *state = 0; return S_OK; }
 static HRESULT WINAPI core_window_GetKeyState( ICoreWindow *iface, __x_ABI_CWindows_CSystem_CVirtualKey key, CoreVirtualKeyStates *state )
@@ -763,8 +768,6 @@ static HRESULT WINAPI core_window_SetPointerCapture( ICoreWindow *iface )
     static HRESULT WINAPI core_window_remove_##name( ICoreWindow *iface, EventRegistrationToken cookie ) \
     { FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
 
-CORE_WINDOW_EVENT_ADD( Activated, Windows__CUI__CCore__CWindowActivatedEventArgs )
-CORE_WINDOW_EVENT_REMOVE( Activated )
 CORE_WINDOW_EVENT_ADD( AutomationProviderRequested, Windows__CUI__CCore__CAutomationProviderRequestedEventArgs )
 CORE_WINDOW_EVENT_REMOVE( AutomationProviderRequested )
 CORE_WINDOW_EVENT_ADD( CharacterReceived, Windows__CUI__CCore__CCharacterReceivedEventArgs )
@@ -950,6 +953,110 @@ static __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *window_size_chan
     return &impl->IWindowSizeChangedEventArgs_iface;
 }
 
+struct window_activated_args
+{
+    __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs IWindowActivatedEventArgs_iface;
+    LONG ref;
+    CoreWindowActivationState state;
+};
+
+static inline struct window_activated_args *impl_from_IWindowActivatedEventArgs( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct window_activated_args, IWindowActivatedEventArgs_iface );
+}
+
+static HRESULT WINAPI window_activated_args_QueryInterface( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface, REFIID iid, void **out )
+{
+    struct window_activated_args *impl = impl_from_IWindowActivatedEventArgs( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IWindowActivatedEventArgs_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI window_activated_args_AddRef( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface )
+{
+    struct window_activated_args *impl = impl_from_IWindowActivatedEventArgs( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI window_activated_args_Release( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface )
+{
+    struct window_activated_args *impl = impl_from_IWindowActivatedEventArgs( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI window_activated_args_GetIids( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface, ULONG *count, IID **iids )
+{ return E_NOTIMPL; }
+static HRESULT WINAPI window_activated_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.WindowActivatedEventArgs", 39, name ); }
+static HRESULT WINAPI window_activated_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI window_activated_args_get_WindowActivationState( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface,
+    __x_ABI_CWindows_CUI_CCore_CCoreWindowActivationState *value )
+{
+    struct window_activated_args *impl = impl_from_IWindowActivatedEventArgs( iface );
+    if (!value) return E_POINTER;
+    *value = impl->state;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgsVtbl window_activated_args_vtbl =
+{
+    window_activated_args_QueryInterface,
+    window_activated_args_AddRef,
+    window_activated_args_Release,
+    window_activated_args_GetIids,
+    window_activated_args_GetRuntimeClassName,
+    window_activated_args_GetTrustLevel,
+    window_activated_args_get_WindowActivationState,
+};
+
+static __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *window_activated_args_create( CoreWindowActivationState state )
+{
+    struct window_activated_args *impl;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->IWindowActivatedEventArgs_iface.lpVtbl = &window_activated_args_vtbl;
+    impl->ref = 1;
+    impl->state = state;
+    return &impl->IWindowActivatedEventArgs_iface;
+}
+
+static HRESULT WINAPI core_window_add_Activated( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs *handler, EventRegistrationToken *cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p, handler %p\n", iface, handler );
+    if (cookie) cookie->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_AddRef( handler );
+        impl->activated_handler = handler;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI core_window_remove_Activated( ICoreWindow *iface, EventRegistrationToken cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p\n", iface );
+    if (impl->activated_handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Release( impl->activated_handler );
+        impl->activated_handler = NULL;
+    }
+    return S_OK;
+}
+
 static HRESULT WINAPI core_window_add_SizeChanged( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *handler, EventRegistrationToken *cookie )
 {
@@ -958,16 +1065,8 @@ static HRESULT WINAPI core_window_add_SizeChanged( ICoreWindow *iface,
     if (cookie) cookie->value = 1;
     if (handler)
     {
-        __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *args;
         __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_AddRef( handler );
         impl->size_changed_handler = handler;
-        args = window_size_changed_args_create( 1016.0f, 734.0f );
-        if (args)
-        {
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Invoke(
-                handler, &impl->ICoreWindow_iface, args );
-            __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs_Release( args );
-        }
     }
     return S_OK;
 }
@@ -990,16 +1089,8 @@ static HRESULT WINAPI core_window_add_VisibilityChanged( ICoreWindow *iface,
     if (cookie) cookie->value = 1;
     if (handler)
     {
-        __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs *args;
         __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs_AddRef( handler );
         impl->visibility_changed_handler = handler;
-        args = visibility_changed_args_create( TRUE );
-        if (args)
-        {
-            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs_Invoke(
-                handler, &impl->ICoreWindow_iface, args );
-            __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs_Release( args );
-        }
     }
     return S_OK;
 }
@@ -1080,15 +1171,98 @@ static const struct ICoreWindowVtbl core_window_vtbl =
 
 static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
-    if (msg == WM_ERASEBKGND) return 1;
-    if (msg == WM_PAINT)
+    struct core_window *impl = (struct core_window *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
+
+    if (!impl && msg == WM_NCCREATE)
+    {
+        CREATESTRUCTW *cs = (CREATESTRUCTW *)lparam;
+        impl = (struct core_window *)cs->lpCreateParams;
+        SetWindowLongPtrW( hwnd, GWLP_USERDATA, (LONG_PTR)impl );
+    }
+    if (!impl)
+        impl = thread_core_window;
+
+    switch (msg)
+    {
+    case WM_ERASEBKGND:
+        return 1;
+
+    case WM_PAINT:
     {
         PAINTSTRUCT ps;
-        HDC hdc = BeginPaint( hwnd, &ps );
+        BeginPaint( hwnd, &ps );
         EndPaint( hwnd, &ps );
         return 0;
     }
-    return DefWindowProcW( hwnd, msg, wparam, lparam );
+
+    case WM_SIZE:
+    {
+        float width = (float)LOWORD( lparam );
+        float height = (float)HIWORD( lparam );
+        if (impl && (width != impl->width || height != impl->height))
+        {
+            impl->width = width;
+            impl->height = height;
+            if (impl->size_changed_handler)
+            {
+                __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *args =
+                    window_size_changed_args_create( width, height );
+                if (args)
+                {
+                    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Invoke(
+                        impl->size_changed_handler, &impl->ICoreWindow_iface, args );
+                    __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs_Release( args );
+                }
+            }
+        }
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+    }
+
+    case WM_SHOWWINDOW:
+    {
+        if (impl && impl->visibility_changed_handler)
+        {
+            __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs *args =
+                visibility_changed_args_create( !!wparam );
+            if (args)
+            {
+                __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs_Invoke(
+                    impl->visibility_changed_handler, &impl->ICoreWindow_iface, args );
+                __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs_Release( args );
+            }
+        }
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+    }
+
+    case WM_ACTIVATE:
+    {
+        if (LOWORD( wparam ) != WA_INACTIVE && impl && impl->activated_handler)
+        {
+            CoreWindowActivationState state = (LOWORD( wparam ) == WA_CLICKACTIVE) ?
+                CoreWindowActivationState_PointerActivated : CoreWindowActivationState_CodeActivated;
+            __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *args =
+                window_activated_args_create( state );
+            if (args)
+            {
+                __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Invoke(
+                    impl->activated_handler, &impl->ICoreWindow_iface, args );
+                __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs_Release( args );
+            }
+        }
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+    }
+
+    case WM_CLOSE:
+        PostQuitMessage( 0 );
+        return 0;
+
+    case WM_NCDESTROY:
+        SetWindowLongPtrW( hwnd, GWLP_USERDATA, 0 );
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+
+    default:
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
+    }
 }
 
 /* Create a CoreWindow with its own dispatcher. */
@@ -1121,13 +1295,18 @@ ICoreWindow *core_window_create(void)
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     RegisterClassExW( &wc );
 
+    thread_core_window = impl;
+
     impl->hwnd = CreateWindowExW( 0, class_name, NULL,
                                   WS_OVERLAPPEDWINDOW | WS_VISIBLE,
                                   CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
-                                  NULL, NULL, inst, NULL );
-    ShowWindow( impl->hwnd, SW_SHOW );
-    UpdateWindow( impl->hwnd );
-    thread_core_window = impl;
+                                  NULL, NULL, inst, impl );
+    if (impl->hwnd)
+    {
+        SetWindowLongPtrW( impl->hwnd, GWLP_USERDATA, (LONG_PTR)impl );
+        ShowWindow( impl->hwnd, SW_SHOW );
+        UpdateWindow( impl->hwnd );
+    }
     TRACE( "created CoreWindow %p, hwnd %p\n", impl, impl->hwnd );
     return &impl->ICoreWindow_iface;
 }
