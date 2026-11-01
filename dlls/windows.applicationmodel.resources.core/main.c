@@ -248,7 +248,8 @@ static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
 static HRESULT WINAPI svv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
 {
-    struct str_vector *impl = svv_from( iface );
+
+    if (!item) return E_POINTER;    struct str_vector *impl = svv_from( iface );
     if (index >= impl->count) return E_BOUNDS;
     *item = impl->items[index];
     return S_OK;
@@ -261,7 +262,8 @@ static HRESULT WINAPI svv_Size( void *iface, UINT32 *size )
 }
 static HRESULT WINAPI svv_GetView( void *iface, void **view )
 {
-    *view = iface;
+
+    if (!view) return E_POINTER;    *view = iface;
     incr( &svv_from( iface )->ref );
     return S_OK;
 }
@@ -304,7 +306,8 @@ static HRESULT WINAPI ivv_GetRuntimeClassName( void *iface, HSTRING *n ) { retur
 static HRESULT WINAPI ivv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI ivv_GetAt( void *iface, UINT32 index, void **item )
 {
-    struct iface_vector *impl = ivv_from( iface );
+
+    if (!item) return E_POINTER;    struct iface_vector *impl = ivv_from( iface );
     if (index >= impl->count) return E_BOUNDS;
     *item = impl->items[index];
     return S_OK;
@@ -317,7 +320,8 @@ static HRESULT WINAPI ivv_Size( void *iface, UINT32 *size )
 }
 static HRESULT WINAPI ivv_GetView( void *iface, void **view )
 {
-    *view = iface;
+
+    if (!view) return E_POINTER;    *view = iface;
     incr( &ivv_from( iface )->ref );
     return S_OK;
 }
@@ -400,7 +404,8 @@ static HRESULT WINAPI mv_Size( void *iface, UINT32 *size )
 }
 static HRESULT WINAPI mv_GetView( void *iface, void **view )
 {
-    *view = iface;
+
+    if (!view) return E_POINTER;    *view = iface;
     incr( &mv_from( iface )->ref );
     return S_OK;
 }
@@ -442,7 +447,8 @@ static HRESULT WINAPI rmv_GetRuntimeClassName( void *iface, HSTRING *n ) { retur
 static HRESULT WINAPI rmv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rmv_Get( void *iface, HSTRING key, void **map )
 {
-    struct rm_map_view *impl = rmv_from( iface );
+
+    if (!map) return E_POINTER;    struct rm_map_view *impl = rmv_from( iface );
     const WCHAR *raw = WindowsGetStringRawBuffer( key, NULL );
     UINT32 i;
     for (i = 0; i < impl->count; i++)
@@ -470,7 +476,8 @@ static HRESULT WINAPI rmv_Size( void *iface, UINT32 *size )
 }
 static HRESULT WINAPI rmv_GetView( void *iface, void **view )
 {
-    *view = iface;
+
+    if (!view) return E_POINTER;    *view = iface;
     incr( &rmv_from( iface )->ref );
     return S_OK;
 }
@@ -744,6 +751,7 @@ static struct iterator *iter_new( UINT8 kind, void *src, UINT32 count, const voi
 
 static HRESULT WINAPI svv_First( void *iface, void **first )
 {
+    if (!first) return E_POINTER;
     struct str_vector *impl = svv_from( iface );
     struct iterator *it = iter_new( IT_STRING, impl, impl->count, iterator_string_vtbl );
     if (!it) return E_OUTOFMEMORY;
@@ -753,6 +761,7 @@ static HRESULT WINAPI svv_First( void *iface, void **first )
 
 static HRESULT WINAPI ivv_First( void *iface, void **first )
 {
+    if (!first) return E_POINTER;
     struct iface_vector *impl = ivv_from( iface );
     struct iterator *it = iter_new( IT_IFACE, impl, impl->count, iterator_pair_vtbl );
     if (!it) return E_OUTOFMEMORY;
@@ -762,6 +771,7 @@ static HRESULT WINAPI ivv_First( void *iface, void **first )
 
 static HRESULT WINAPI mv_First( void *iface, void **first )
 {
+    if (!first) return E_POINTER;
     struct map_view *impl = mv_from( iface );
     struct iterator *it;
     TRACE( "First\n" );
@@ -773,6 +783,7 @@ static HRESULT WINAPI mv_First( void *iface, void **first )
 
 static HRESULT WINAPI rmv_First( void *iface, void **first )
 {
+    if (!first) return E_POINTER;
     struct rm_map_view *impl = rmv_from( iface );
     struct iterator *it = iter_new( IT_RMPAIR, impl, impl->count, iterator_pair_vtbl );
     if (!it) return E_OUTOFMEMORY;
@@ -920,7 +931,8 @@ static HRESULT WINAPI cand_ValueAsString( void *iface, HSTRING *v )
 }
 static HRESULT WINAPI cand_GetValueAsFileAsync( void *iface, void **op )
 {
-    FIXME( "stub\n" );
+
+    if (!op) return E_POINTER;    FIXME( "stub\n" );
     *op = NULL;
     return E_NOTIMPL;
 }
@@ -1007,7 +1019,8 @@ static void ensure_cs(void)
 static HRESULT create_candidate( const WCHAR *full, WCHAR *value, const pri_qual *quals, UINT32 qcount,
                                  struct res_candidate **out )
 {
-    struct res_candidate *cand = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*cand) );
+
+    if (!out) return E_POINTER;    struct res_candidate *cand = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*cand) );
     if (!cand) return E_OUTOFMEMORY;
     cand->vt_cand = res_candidate_vtbl;
     cand->vt_cand2 = res_candidate2_vtbl;
@@ -1110,14 +1123,16 @@ static HRESULT WINAPI map_GetRuntimeClassName( void *iface, HSTRING *n ) { retur
 static HRESULT WINAPI map_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI map_Uri( void *iface, HSTRING *uri )
 {
-    WCHAR buf[2200];
+
+    if (!uri) return E_POINTER;    WCHAR buf[2200];
     lstrcpyW( buf, L"ms-appx:///" );
     if (map_from( iface )->prefix) lstrcatW( buf, map_from( iface )->prefix );
     return WindowsCreateString( buf, (UINT32)lstrlenW( buf ), uri );
 }
 static HRESULT WINAPI map_GetValue( void *iface, HSTRING key, void **out )
 {
-    struct res_map *impl = map_from( iface );
+
+    if (!out) return E_POINTER;    struct res_map *impl = map_from( iface );
     struct res_candidate *cand;
     HRESULT hr = map_lookup( impl, WindowsGetStringRawBuffer( key, NULL ), &cand );
     TRACE( "key %s hr=%08x\n", debugstr_hstring( key ), hr );
@@ -1129,7 +1144,8 @@ static HRESULT WINAPI map_GetValue( void *iface, HSTRING key, void **out )
 static HRESULT WINAPI map_GetValueForContext( void *iface, HSTRING key, void *context, void **out );
 static HRESULT WINAPI map_GetSubtree( void *iface, HSTRING name, void **out )
 {
-    struct res_map *impl = map_from( iface );
+
+    if (!out) return E_POINTER;    struct res_map *impl = map_from( iface );
     const WCHAR *raw = WindowsGetStringRawBuffer( name, NULL );
     WCHAR prefix[1024];
     UINT32 i;
@@ -1196,7 +1212,8 @@ static HRESULT WINAPI map2_GetRuntimeClassName( void *iface, HSTRING *n ) { retu
 static HRESULT WINAPI map2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI map2_GetByIndex( void *iface, UINT32 index, void **out )
 {
-    struct res_map *impl = map2_from( iface );
+
+    if (!out) return E_POINTER;    struct res_map *impl = map2_from( iface );
     WCHAR namebuf[2048];
     WCHAR *value = NULL;
     pri_qual *quals = NULL;
@@ -1610,7 +1627,8 @@ static struct res_context *the_current_context;
 
 static HRESULT get_current_context( void **out )
 {
-    if (!the_current_context)
+
+    if (!out) return E_POINTER;    if (!the_current_context)
     {
         HRESULT hr = create_context( &the_current_context );
         if (FAILED( hr )) return hr;
@@ -1671,7 +1689,8 @@ static HRESULT WINAPI rcf_GetRuntimeClassName( void *iface, HSTRING *n ) { retur
 static HRESULT WINAPI rcf_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rcf_ActivateInstance( void *iface, void **instance )
 {
-    struct res_context *ctx;
+
+    if (!instance) return E_POINTER;    struct res_context *ctx;
     HRESULT hr = create_context( &ctx );
     TRACE( "ResourceContext::ActivateInstance\n" );
     if (SUCCEEDED( hr )) *instance = &ctx->vt_ctx;
@@ -1767,7 +1786,8 @@ static HRESULT WINAPI rc81_GetRuntimeClassName( void *iface, HSTRING *n ) { retu
 static HRESULT WINAPI rc81_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc81_Create( void *iface, void **out )
 {
-    struct res_context *ctx;
+
+    if (!out) return E_POINTER;    struct res_context *ctx;
     HRESULT hr = create_context( &ctx );
     TRACE( "Create\n" );
     if (SUCCEEDED( hr )) *out = &ctx->vt_ctx;
@@ -1775,7 +1795,8 @@ static HRESULT WINAPI rc81_Create( void *iface, void **out )
 }
 static HRESULT WINAPI rc81_CreateWithCurrentView( void *iface, void *view, void **out )
 {
-    return rc81_Create( iface, out );
+
+    if (!out) return E_POINTER;    return rc81_Create( iface, out );
 }
 static const void *rc_v81_vtbl[] =
 {

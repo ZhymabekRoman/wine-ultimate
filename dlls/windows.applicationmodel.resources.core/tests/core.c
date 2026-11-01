@@ -589,8 +589,16 @@ static void test_getiids_nullargs( void )
     {
         hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, ULONG *, IID **))VT(v81, 3))(v81, NULL, NULL);
         ok( hr == E_POINTER, "getiids: IResourceContext(v81) GetIids(NULL,NULL) hr=%08x (expect E_POINTER)\n", hr );
+        /* mrt100_app measured calling CreateWithCurrentView(view, NULL)
+         * (AV at rc81_CreateWithCurrentView+0x28 -> catch/rethrow loop) */
+        hr = CALL( v81, 7, (void *)0x1, NULL );  /* CreateWithCurrentView(view, NULL) */
+        ok( hr == E_POINTER, "getiids: CreateWithCurrentView(view,NULL) hr=%08x (expect E_POINTER)\n", hr );
+        hr = CALL( v81, 6, NULL );  /* Create(NULL) */
+        ok( hr == E_POINTER, "getiids: Create(NULL) hr=%08x (expect E_POINTER)\n", hr );
         CALL( v81, 2, (ULONG*)&hr );
     }
+    hr = CALL( factory, 6, NULL );  /* IActivationFactory::ActivateInstance(NULL) */
+    ok( hr == E_POINTER, "getiids: ActivateInstance(NULL) hr=%08x (expect E_POINTER)\n", hr );
     CALL( factory, 2, (ULONG*)&hr );
 
     /* same probe pattern on collection count slots: mrt100_app measured
