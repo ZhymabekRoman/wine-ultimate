@@ -4,38 +4,71 @@
 #include <windows.h>
 
 /*
- * Minimal reader for the "mrm_pri2" (PRI v2 / MRT) container.
+ * Reader for the "mrm_pri2" (PRI v2 / MRT) container.
  *
- * Implemented subset (verified against Calculator's resources.pri):
- *   - 32-byte file header: magic[8] "mrm_pri2", u32 version, u32 filesize,
- *     u32 headersize, u32 sectiontablesize, u16 count, u16 0xffff, u32 0.
- *   - section directory: 32-byte entries {char name[16]; u64 reserved;
- *     u32 offset; u32 size}, entries named "[mrm_res_map2_]", "[mrm_dataitem]",
- *     "[mrm_decn_info]", "[mrm_hschemaex]", "[mrm_pridescex]".
- *   - the res_map2 section begins with a NUL-separated ASCII table of the
- *     hierarchical resource names ('\'-separated); we index that table.
- *   - value resolution: the "mrm_data" blob after the sections holds UTF-16
- *     value strings; we search it for an exact (case-insensitive) match of
- *     the leaf name.  When no match is found the leaf name itself is
- *     returned as the candidate value (documented stub tier).
+ * Implemented (verified field-by-field against Microsoft.WindowsCalculator
+ * resources.pri; format per the community "Package Resource Index File
+ * Format" specification, chausner/PriTools):
+ *   - 32-byte file header + section directory (32-byte entries, offsets
+ *     relative to the first-section offset) + 32-byte section headers.
+ *   - hierarchical schema section ([mrm_hschemaex]): scope/item name tree
+ *     with the 12-byte u16-indexed name entries (parent / full-path length /
+ *     flags bits 0-3 = name offset high bits, bit 4 scope, bit 5 ASCII
+ *     block), the scope child tables, the item index-property table, and
+ *     the Unicode + ASCII name blocks; full names are joined with '\'.
+ *   - decision info section ([mrm_decn_info]): distinct qualifiers (type,
+ *     value, priority), qualifier sets, decisions, u16 index table, UTF-16
+ *     value block.
+ *   - resource map section ([mrm_res_map2_]): u16 item-to-iteminfo-group /
+ *     iteminfo-group / iteminfo tables (incl. the virtual-group convention
+ *     for groupIndex >= group count), the 7-entry resource value type
+ *     table and the 8-byte candidate records (data-item section / index).
+ *   - data item sections ([mrm_dataitem]): string/blob offset tables;
+ *     string encoding per resource value type (ANSI / UTF-8 / UTF-16).
+ *   - lookup: name -> item -> (decision, first candidate) -> best candidate
+ *     for a qualifier context (exact / wildcard scoring ordered by the
+ *     decn priority, Language priority 0) -> value string + qualifiers.
  *
- * Not implemented (format gaps, documented):
- *   - hschemaex qualifier-aware candidate selection (top/resource name index
- *     tables, qualifier atom matching against decn_info defaults).
- *   - res_map2 u16 index arrays mapping a resource name to its
- *     resourceValueIndex/dataitem entries (needed to return the *primary*
- *     qualified value and to enumerate per-qualifier candidates).
- *   - "[mrm_fileid_]" file-path resources (URI/FilePath candidates).
+ * Not implemented (documented tier): the embedded-data candidate block
+ * (candidate type 0, absent from mrm_pri2 app files), the resmap2 table
+ * extension block (u32 table variants), referenced-file sections
+ * (ms-resource file URIs) and the "[def_hnamesx]" default-name section.
  */
 
 typedef struct pri_index pri_index;
 
+/* qualifier name/value pair; names are the MRT context spellings
+ * (Language, Scale, Contrast, HomeRegion, TargetSize, LayoutDirection,
+ *  Theme, AltForm, DXLanguage, Configuration, DeviceFamily, Custom) */
+typedef struct
+{
+    WCHAR *name;
+    WCHAR *value;
+} pri_qual;
+
 pri_index *pri_load( const WCHAR *path );
 void pri_release( pri_index *index );
+
+/* top-level scopes of the primary resource map */
 UINT32 pri_top_count( pri_index *index );
 BOOL pri_top_name( pri_index *index, UINT32 index_, WCHAR *buffer, DWORD len );
-BOOL pri_lookup( pri_index *index, const WCHAR *key, WCHAR *name_out, DWORD name_len, WCHAR **value_out );
+
+/* all items of the primary map, ordered by item index property */
 UINT32 pri_name_count( pri_index *index );
 BOOL pri_name( pri_index *index, UINT32 index_, WCHAR *buffer, DWORD len );
+
+/* scoped enumeration: prefix is "Scope\" ("" or NULL = whole map) */
+UINT32 pri_map_count( pri_index *index, const WCHAR *prefix );
+BOOL pri_map_fullname( pri_index *index, const WCHAR *prefix, UINT32 i, WCHAR *buffer, DWORD len );
+
+/* resolve by map position / by full name.
+ * ctx carries the ResourceContext qualifier values used for candidate
+ * selection.  On success *value_out and *quals_out are heap allocations
+ * released with pri_free_result. */
+BOOL pri_map_get( pri_index *index, const WCHAR *prefix, UINT32 i, const pri_qual *ctx, UINT32 ctxcount,
+                  WCHAR *name_buf, DWORD name_len, WCHAR **value_out, pri_qual **quals_out, UINT32 *qcount_out );
+BOOL pri_lookup( pri_index *index, const WCHAR *key, const pri_qual *ctx, UINT32 ctxcount,
+                 WCHAR *name_buf, DWORD name_len, WCHAR **value_out, pri_qual **quals_out, UINT32 *qcount_out );
+void pri_free_result( WCHAR *value, pri_qual *quals );
 
 #endif /* __WINE_MRT_PRI_H */

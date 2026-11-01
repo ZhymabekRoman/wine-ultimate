@@ -61,6 +61,8 @@ static const GUID IID_IResourceManager_g          = {0xf744d97b, 0x9988, 0x44fb,
 static const GUID IID_IResourceManager2_g         = {0x9d66fe6c, 0xa4d7, 0x4c23, {0x9e, 0x85, 0x67, 0x5f, 0x30, 0x4c, 0x25, 0x2d}};
 static const GUID IID_IResourceManagerStatics_g   = {0x1cc0fdfc, 0x69ee, 0x4e43, {0x99, 0x01, 0x47, 0xf1, 0x26, 0x87, 0xba, 0xf7}};
 static const GUID IID_IResourceMap_g              = {0x72284824, 0xdb8c, 0x42f8, {0xb0, 0x8c, 0x53, 0xff, 0x35, 0x7d, 0xad, 0x82}};
+static const GUID IID_IResourceMap2_g             = {0xd4a52cd1, 0xc6a5, 0x4824, {0x94, 0x53, 0xcc, 0x86, 0x18, 0x5b, 0x6f, 0xd4}}; /* (unverified) */
+static const GUID IID_IResourceContext2_g         = {0xb6d312f1, 0xbc62, 0x4208, {0xb8, 0xa1, 0xb8, 0x42, 0xc0, 0xc4, 0xbb, 0x54}}; /* (unverified) */
 static const GUID IID_IResourceCandidate_g        = {0xaf5207d9, 0xc433, 0x4764, {0xb3, 0xfd, 0x8f, 0xa6, 0xbf, 0xbc, 0xba, 0xdc}};
 static const GUID IID_IResourceCandidate2_g       = {0x69e5b468, 0xf6fc, 0x4013, {0xaa, 0xa2, 0xd5, 0x3f, 0x17, 0x57, 0xd3, 0xb5}};
 static const GUID IID_IResourceCandidate3_g       = {0x08ae97f8, 0x517a, 0x4674, {0x95, 0x8c, 0x4a, 0x3c, 0x7c, 0xd2, 0xcc, 0x6b}};
@@ -192,6 +194,12 @@ static HRESULT WINAPI rmv_First( void *iface, void **first );
 /* forward */
 struct res_map;
 struct res_candidate;
+struct res_context;
+static inline struct res_context *ctx_from( void *iface );
+static HRESULT map_lookup_ctx( struct res_map *map, const WCHAR *key, const pri_qual *ctx, UINT32 ctxcount,
+                               struct res_candidate **out );
+static const void *res_context2_vtbl[];
+static const void *res_map2_vtbl[];
 
 
 /* ------------------------------------------------------------------ */
@@ -950,10 +958,12 @@ static volatile LONG cs_done;
 struct res_map
 {
     const void *vt_map;
+    const void *vt_map2;   /* IResourceMap2: [II 5][GetByIndex 6][GetCount 7][GetFullCount 8][FullGetByIndex 9] */
     LONG ref;
     WCHAR *prefix;  /* subtree prefix "X\" for GetSubtree("X"), NULL for main map */
 };
 static inline struct res_map *map_from( void *iface ) { return (struct res_map *)iface; }
+static inline struct res_map *map2_from( void *iface ) { return (struct res_map *)((BYTE *)iface - sizeof(void *)); }
 
 static struct kv_pair default_qualifiers[] =
 {
@@ -974,7 +984,8 @@ static void ensure_cs(void)
     InterlockedExchange(&cs_done, 2);
 }
 
-static HRESULT create_candidate( const WCHAR *full, WCHAR *value, struct res_candidate **out )
+static HRESULT create_candidate( const WCHAR *full, WCHAR *value, const pri_qual *quals, UINT32 qcount,
+                                 struct res_candidate **out )
 {
     struct res_candidate *cand = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*cand) );
     if (!cand) return E_OUTOFMEMORY;
@@ -984,34 +995,72 @@ static HRESULT create_candidate( const WCHAR *full, WCHAR *value, struct res_can
     cand->ref = 1;
     cand->full_name = full ? lstrdupW( full ) : NULL;
     cand->value = value;
-    cand->qpairs = default_qualifiers;
-    cand->qcount = ARRAYSIZE( default_qualifiers );
+    if (quals && qcount)
+    {
+        /* pri qualifier strings are stable for the lifetime of the index;
+         * share them (name strings come from the static type table). */
+        cand->qpairs = HeapAlloc( GetProcessHeap(), 0, qcount * sizeof(*cand->qpairs) );
+        if (cand->qpairs)
+        {
+            memcpy( cand->qpairs, quals, qcount * sizeof(*cand->qpairs) );
+            cand->qcount = qcount;
+        }
+    }
+    if (!cand->qpairs)
+    {
+        cand->qpairs = default_qualifiers;
+        cand->qcount = ARRAYSIZE( default_qualifiers );
+    }
     *out = cand;
     return S_OK;
 }
 
+/* default context qualifier set used when a lookup carries no ResourceContext */
+static const pri_qual *default_pri_ctx( UINT32 *count )
+{
+    *count = ARRAYSIZE( default_qualifiers );
+    return (const pri_qual *)default_qualifiers;
+}
+
 struct res_map;
 static const void *res_map_vtbl[];
-static HRESULT map_lookup( struct res_map *map, const WCHAR *key, struct res_candidate **out )
+static HRESULT map_lookup_ctx( struct res_map *map, const WCHAR *key, const pri_qual *ctx, UINT32 ctxcount,
+                               struct res_candidate **out )
 {
     WCHAR full[2048], namebuf[2048];
     WCHAR *value = NULL;
+    pri_qual *quals = NULL;
+    UINT32 qcount = 0;
 
     init_pri();
     full[0] = 0;
     if (map->prefix) lstrcpynW( full, map->prefix, ARRAYSIZE( full ));
     lstrcatW( full, key );
 
-    if (the_index && pri_lookup( the_index, full, namebuf, ARRAYSIZE( namebuf ), &value ))
-        return create_candidate( full, value, out );
+    if (the_index && pri_lookup( the_index, full, ctx, ctxcount, namebuf, ARRAYSIZE( namebuf ),
+                                 &value, &quals, &qcount ))
+    {
+        /* the candidate adopts the heap value string; only the qualifier-set
+         * array is released here (its strings are index-owned) */
+        HRESULT hr = create_candidate( full, value, quals, qcount, out );
+        pri_free_result( NULL, quals );
+        return hr;
+    }
     /* documented stub tier: key-as-value so MRT lookups never fail */
     WARN( "resources.pri lookup failed for %s, using key as value\n", debugstr_w( full ) );
     {
         WCHAR *v = HeapAlloc( GetProcessHeap(), 0, (wcslen( key ) + 1) * sizeof(WCHAR) );
         if (!v) return E_OUTOFMEMORY;
         wcscpy( v, key );
-        return create_candidate( full, v, out );
+        return create_candidate( full, v, NULL, 0, out );
     }
+}
+
+static HRESULT map_lookup( struct res_map *map, const WCHAR *key, struct res_candidate **out )
+{
+    UINT32 ctxcount;
+    const pri_qual *ctx = default_pri_ctx( &ctxcount );
+    return map_lookup_ctx( map, key, ctx, ctxcount, out );
 }
 
 static HRESULT WINAPI map_QueryInterface( void *iface, REFIID iid, void **out )
@@ -1024,7 +1073,13 @@ static HRESULT WINAPI map_QueryInterface( void *iface, REFIID iid, void **out )
         incr( &impl->ref );
         return S_OK;
     }
-    FIXME( "%s not implemented (Map2/Map3 GetCount/FullCount)\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IResourceMap2_g ))
+    {
+        *out = &impl->vt_map2;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "%s not implemented (Map3 GetInt32/GetInts/GetUri/GetEmbedded/GetView/GetString)\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1050,10 +1105,8 @@ static HRESULT WINAPI map_GetValue( void *iface, HSTRING key, void **out )
     else *out = NULL;
     return hr;
 }
-static HRESULT WINAPI map_GetValueForContext( void *iface, HSTRING key, void *context, void **out )
-{
-    return map_GetValue( iface, key, out );
-}
+/* defined after struct res_context (needs its qualifier storage layout) */
+static HRESULT WINAPI map_GetValueForContext( void *iface, HSTRING key, void *context, void **out );
 static HRESULT WINAPI map_GetSubtree( void *iface, HSTRING name, void **out )
 {
     struct res_map *impl = map_from( iface );
@@ -1092,6 +1145,7 @@ static HRESULT WINAPI map_GetSubtree( void *iface, HSTRING name, void **out )
         if (sub)
         {
             sub->vt_map = res_map_vtbl;
+            sub->vt_map2 = res_map2_vtbl;
             sub->ref = 2;
             sub->prefix = lstrdupW( prefix );
             subtree_maps[subtree_count++] = sub;
@@ -1108,6 +1162,64 @@ static const void *res_map_vtbl[] =
 {
     map_QueryInterface, map_AddRef, map_Release, map_GetIids, map_GetRuntimeClassName, map_GetTrustLevel,
     map_Uri, map_GetValue, map_GetValueForContext, map_GetSubtree,
+};
+
+/* IResourceMap2: [II 5][GetByIndex 6][GetCount 7][GetFullCount 8][FullGetByIndex 9] */
+static HRESULT WINAPI map2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return map_QueryInterface( map2_from( iface ), iid, out );
+}
+static ULONG WINAPI map2_AddRef( void *iface ) { return incr( &map2_from( iface )->ref ); }
+static ULONG WINAPI map2_Release( void *iface ) { return decr( &map2_from( iface )->ref ); }
+static HRESULT WINAPI map2_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI map2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCEMAP, n ); }
+static HRESULT WINAPI map2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+static HRESULT WINAPI map2_GetByIndex( void *iface, UINT32 index, void **out )
+{
+    struct res_map *impl = map2_from( iface );
+    WCHAR namebuf[2048];
+    WCHAR *value = NULL;
+    pri_qual *quals = NULL;
+    UINT32 qcount = 0;
+    struct res_candidate *cand;
+    UINT32 ctxcount;
+
+    *out = NULL;
+    init_pri();
+    if (the_index && pri_map_get( the_index, impl->prefix, index, default_pri_ctx( &ctxcount ), ctxcount,
+                                  namebuf, ARRAYSIZE( namebuf ), &value, &quals, &qcount ))
+    {
+        HRESULT hr = create_candidate( namebuf, value, quals, qcount, &cand );
+        pri_free_result( NULL, quals );
+        if (SUCCEEDED( hr )) *out = &cand->vt_cand;
+        return hr;
+    }
+    if (the_index && index < pri_map_count( the_index, impl->prefix )) return E_FAIL;
+    return E_BOUNDS;
+}
+static HRESULT WINAPI map2_GetCount( void *iface, UINT32 *count )
+{
+    struct res_map *impl = map2_from( iface );
+    init_pri();
+    *count = the_index ? pri_map_count( the_index, impl->prefix ) : 0;
+    return S_OK;
+}
+static HRESULT WINAPI map2_GetFullCount( void *iface, UINT32 *count )
+{
+    /* candidate-level (full) enumeration is not exposed by the pri reader
+     * tables in use; report the named-resource count (documented tier) */
+    FIXME( "GetFullCount reported as GetCount\n" );
+    return map2_GetCount( iface, count );
+}
+static HRESULT WINAPI map2_FullGetByIndex( void *iface, UINT32 index, void **out )
+{
+    FIXME( "FullGetByIndex handled as GetByIndex\n" );
+    return map2_GetByIndex( iface, index, out );
+}
+static const void *res_map2_vtbl[] =
+{
+    map2_QueryInterface, map2_AddRef, map2_Release, map2_GetIids, map2_GetRuntimeClassName, map2_GetTrustLevel,
+    map2_GetByIndex, map2_GetCount, map2_GetFullCount, map2_FullGetByIndex,
 };
 
 /* ------------------------------------------------------------------ */
@@ -1207,13 +1319,35 @@ struct res_context
 {
     const void *vt_ctx;
     const void *vt_named;     /* IResourceContextNamed (unverified) */
+    const void *vt_ctx2;      /* IResourceContext2 (unverified): [II 5][SetQualifierValue 6]
+                               * [TrySetName 7][TrySetPackage 8][SetAllQualifiers 9] */
     LONG ref;
+    struct kv_pair *qpairs;   /* mutable qualifier storage (shared static strings + heap dups) */
+    UINT32 qcount;
     struct map_view qualifiers;
     struct str_vector languages;
     HSTRING lang_items[1];
 };
 static inline struct res_context *ctx_from( void *iface ) { return (struct res_context *)iface; }
 static inline struct res_context *ctx_named_from( void *iface ) { return (struct res_context *)((BYTE *)iface - sizeof(void *)); }
+static inline struct res_context *ctx2_from( void *iface ) { return (struct res_context *)((BYTE *)iface - 2 * sizeof(void *)); }
+
+static HRESULT WINAPI map_GetValueForContext( void *iface, HSTRING key, void *context, void **out )
+{
+    struct res_map *impl = map_from( iface );
+    struct res_candidate *cand = NULL;
+    struct res_context *ctx = context ? ctx_from( context ) : NULL;
+    HRESULT hr;
+
+    if (ctx && ctx->qcount)
+        hr = map_lookup_ctx( impl, WindowsGetStringRawBuffer( key, NULL ),
+                             (const pri_qual *)ctx->qpairs, ctx->qcount, &cand );
+    else hr = map_lookup( impl, WindowsGetStringRawBuffer( key, NULL ), &cand );
+    TRACE( "key %s ctx %p hr=%08x\n", debugstr_hstring( key ), context, hr );
+    if (SUCCEEDED( hr )) *out = &cand->vt_cand;
+    else *out = NULL;
+    return hr;
+}
 
 static HRESULT WINAPI ctx_QueryInterface( void *iface, REFIID iid, void **out )
 {
@@ -1232,6 +1366,12 @@ static HRESULT WINAPI ctx_QueryInterface( void *iface, REFIID iid, void **out )
         incr( &impl->ref );
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IResourceContext2_g ))
+    {
+        *out = &impl->vt_ctx2;
+        incr( &impl->ref );
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IResourceContext_v81_g ))
     {
         *out = &impl->vt_ctx;
@@ -1243,7 +1383,26 @@ static HRESULT WINAPI ctx_QueryInterface( void *iface, REFIID iid, void **out )
     return E_NOINTERFACE;
 }
 static ULONG WINAPI ctx_AddRef( void *iface ) { return incr( &ctx_from( iface )->ref ); }
-static ULONG WINAPI ctx_Release( void *iface ) { return decr( &ctx_from( iface )->ref ); }
+static ULONG WINAPI ctx_Release( void *iface )
+{
+    struct res_context *impl = ctx_from( iface );
+    LONG ref = decr( &impl->ref );
+    /* create_context / ctx_Clone heap-copy every key and value, so uniform
+     * release is safe (the shared static default_qualifiers array is never
+     * installed as impl->qpairs) */
+    if (!ref && impl->qpairs)
+    {
+        UINT32 i;
+        for (i = 0; i < impl->qcount; i++)
+        {
+            HeapFree( GetProcessHeap(), 0, (void *)impl->qpairs[i].key );
+            HeapFree( GetProcessHeap(), 0, (void *)impl->qpairs[i].value );
+        }
+        HeapFree( GetProcessHeap(), 0, impl->qpairs );
+        impl->qpairs = NULL;
+    }
+    return ref;
+}
 static HRESULT WINAPI ctx_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI ctx_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI ctx_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
@@ -1294,14 +1453,24 @@ static const void *res_context_named_vtbl[] =
 static HRESULT create_context( struct res_context **out )
 {
     struct res_context *ctx = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ctx) );
+    UINT32 i;
     if (!ctx) return E_OUTOFMEMORY;
     ctx->vt_ctx = res_context_vtbl;
     ctx->vt_named = res_context_named_vtbl;
+    ctx->vt_ctx2 = res_context2_vtbl;
     ctx->ref = 1;
+    ctx->qcount = ARRAYSIZE( default_qualifiers );
+    ctx->qpairs = HeapAlloc( GetProcessHeap(), 0, ctx->qcount * sizeof(*ctx->qpairs) );
+    if (!ctx->qpairs) { HeapFree( GetProcessHeap(), 0, ctx ); return E_OUTOFMEMORY; }
+    for (i = 0; i < ctx->qcount; i++)
+    {
+        ctx->qpairs[i].key = lstrdupW( default_qualifiers[i].key );
+        ctx->qpairs[i].value = lstrdupW( default_qualifiers[i].value );
+    }
     ctx->qualifiers.vt_mv = map_view_vtbl;
     ctx->qualifiers.ref = 1;
-    ctx->qualifiers.pairs = default_qualifiers;
-    ctx->qualifiers.count = ARRAYSIZE( default_qualifiers );
+    ctx->qualifiers.pairs = ctx->qpairs;
+    ctx->qualifiers.count = ctx->qcount;
     ctx->languages.vt_vv = str_vector_vtbl;
     ctx->languages.ref = 1;
     ctx->languages.items = ctx->lang_items;
@@ -1311,13 +1480,92 @@ static HRESULT create_context( struct res_context **out )
     return S_OK;
 }
 
+static HRESULT context_set_qualifier( struct res_context *ctx, const WCHAR *name, const WCHAR *value )
+{
+    UINT32 i;
+    for (i = 0; i < ctx->qcount; i++)
+    {
+        if (!lstrcmpiW( ctx->qpairs[i].key, name ))
+        {
+            WCHAR *dup = lstrdupW( value );
+            if (!dup) return E_OUTOFMEMORY;
+            HeapFree( GetProcessHeap(), 0, (void *)ctx->qpairs[i].value );
+            ctx->qpairs[i].value = dup;
+            return S_OK;
+        }
+    }
+    {
+        struct kv_pair *grown = HeapReAlloc( GetProcessHeap(), 0, ctx->qpairs,
+                                             (ctx->qcount + 1) * sizeof(*ctx->qpairs) );
+        if (!grown) return E_OUTOFMEMORY;
+        ctx->qpairs = grown;
+        ctx->qpairs[ctx->qcount].key = lstrdupW( name );
+        ctx->qpairs[ctx->qcount].value = lstrdupW( value );
+        if (!ctx->qpairs[ctx->qcount].key || !ctx->qpairs[ctx->qcount].value) return E_OUTOFMEMORY;
+        ctx->qcount++;
+        /* the live QualifierValues view must track the (re)allocated array */
+        ctx->qualifiers.pairs = ctx->qpairs;
+        ctx->qualifiers.count = ctx->qcount;
+        return S_OK;
+    }
+}
+
 static HRESULT WINAPI ctx_Clone( void *iface, void **out )
 {
+    struct res_context *src = ctx_from( iface );
     struct res_context *ctx;
     HRESULT hr = create_context( &ctx );
-    if (SUCCEEDED( hr )) *out = &ctx->vt_ctx;
+    if (SUCCEEDED( hr ))
+    {
+        UINT32 i;
+        for (i = 0; i < ctx->qcount && i < src->qcount; i++)
+            context_set_qualifier( ctx, src->qpairs[i].key, src->qpairs[i].value );
+        *out = &ctx->vt_ctx;
+    }
     return hr;
 }
+
+/* IResourceContext2 */
+static HRESULT WINAPI ctx2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return ctx_QueryInterface( ctx2_from( iface ), iid, out );
+}
+static ULONG WINAPI ctx2_AddRef( void *iface ) { return incr( &ctx2_from( iface )->ref ); }
+static ULONG WINAPI ctx2_Release( void *iface ) { return ctx_Release( &ctx2_from( iface )->vt_ctx ); }
+static HRESULT WINAPI ctx2_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI ctx2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
+static HRESULT WINAPI ctx2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+static HRESULT WINAPI ctx2_SetQualifierValue( void *iface, HSTRING value, HSTRING name )
+{
+    struct res_context *impl = ctx2_from( iface );
+    const WCHAR *v = WindowsGetStringRawBuffer( value, NULL );
+    const WCHAR *n = WindowsGetStringRawBuffer( name, NULL );
+    TRACE( "%s = %s\n", debugstr_w( n ), debugstr_w( v ) );
+    if (!n || !v) return E_INVALIDARG;
+    return context_set_qualifier( impl, n, v );
+}
+static HRESULT WINAPI ctx2_TrySetName( void *iface, HSTRING name, INT32 *ok )
+{
+    FIXME( "stub\n" );
+    *ok = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ctx2_TrySetPackage( void *iface, HSTRING package, INT32 *ok )
+{
+    FIXME( "stub\n" );
+    *ok = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ctx2_SetAllQualifiers( void *iface, void *qualifiers )
+{
+    FIXME( "stub (IResourceContext2::SetAllQualifiers: IMapView<HSTRING,HSTRING> iteration)\n" );
+    return S_OK;
+}
+static const void *res_context2_vtbl[] =
+{
+    ctx2_QueryInterface, ctx2_AddRef, ctx2_Release, ctx2_GetIids, ctx2_GetRuntimeClassName, ctx2_GetTrustLevel,
+    ctx2_SetQualifierValue, ctx2_TrySetName, ctx2_TrySetPackage, ctx2_SetAllQualifiers,
+};
 
 /* ------------------------------------------------------------------ */
 /* factories                                                           */
@@ -1519,7 +1767,7 @@ struct res_manager
 static inline struct res_manager *rm_from( void *iface ) { return (struct res_manager *)iface; }
 static inline struct res_manager *rm2_from( void *iface ) { return (struct res_manager *)((BYTE *)iface - sizeof(void *)); }
 
-static struct res_map main_map = { NULL, 1, NULL };
+static struct res_map main_map = { NULL, NULL, 1, NULL };
 
 static HRESULT WINAPI rm_QueryInterface( void *iface, REFIID iid, void **out )
 {
@@ -1798,18 +2046,21 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
     if (!wcscmp( buffer, RTCLASS_RESOURCECONTEXT ))
     {
         main_map.vt_map = res_map_vtbl;
+        main_map.vt_map2 = res_map2_vtbl;
         *factory = (void *)&rc_factory_inst.vt_primary;
         return S_OK;
     }
     if (!wcscmp( buffer, RTCLASS_RESOURCEMANAGER ))
     {
         main_map.vt_map = res_map_vtbl;
+        main_map.vt_map2 = res_map2_vtbl;
         *factory = (void *)&rm_factory_inst.vt_primary;
         return S_OK;
     }
     if (!wcscmp( buffer, RTCLASS_RESOURCEMAP ))
     {
         main_map.vt_map = res_map_vtbl;
+        main_map.vt_map2 = res_map2_vtbl;
         *factory = (void *)&map_factory_inst.vt_primary;
         return S_OK;
     }

@@ -71,6 +71,13 @@ static const IID IID_IResourceManager_loc = {0xf744d97b, 0x9988, 0x44fb, {0xab, 
 static const IID IID_IResourceMap_loc = {0x72284824, 0xdb8c, 0x42f8, {0xb0, 0x8c, 0x53, 0xff, 0x35, 0x7d, 0xad, 0x82}};
 static const IID IID_IResourceCandidate_loc = {0xaf5207d9, 0xc433, 0x4764, {0xb3, 0xfd, 0x8f, 0xa6, 0xbf, 0xbc, 0xba, 0xdc}};
 static const IID IID_IInspectable_loc = {0xaf86e2e0, 0xbcdf, 0x11ce, {0x9c, 0x40, 0x00, 0xaa, 0x00, 0x3d, 0xd9, 0x21}};
+/* v1-era interface identities, (unverified) like the module's 8.1 entries:
+ * IResourceMap2 [II 5][GetByIndex 6][GetCount 7][GetFullCount 8][FullGetByIndex 9]
+ * IResourceContext2 [II 5][SetQualifierValue 6][TrySetName 7][TrySetPackage 8][SetAllQualifiers 9]
+ * The module and this test agree on these constants; the app-facing surfaces
+ * (IResourceMap GetValue/GetValueForContext, IResourceContext) are verified. */
+static const IID IID_IResourceMap2_loc = {0xd4a52cd1, 0xc6a5, 0x4824, {0x94, 0x53, 0xcc, 0x86, 0x18, 0x5b, 0x6f, 0xd4}};
+static const IID IID_IResourceContext2_loc = {0xb6d312f1, 0xbc62, 0x4208, {0xb8, 0xa1, 0xb8, 0x42, 0xc0, 0xc4, 0xbb, 0x54}};
 
 /* vtable slot helpers; IInspectable occupies slots 0..5 (3 IUnknown + 3 extra) */
 #define VT(obj, idx) (((void ***)((char *)(obj)))[0][(idx)])
@@ -234,6 +241,285 @@ done_factory:
     CALL(factory, 2, (ULONG*)&hr);
 }
 
+/* read a candidate's ValueAsString into buf; returns string length or -1 */
+static int cand_get_value( void *cand, WCHAR *buf, DWORD buflen )
+{
+    void *cand2 = NULL;
+    HSTRING value = NULL;
+    HRESULT hr;
+    int len = -1;
+
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(cand, 0))(cand, &IID_IResourceCandidate_loc, &cand2);
+    if (FAILED( hr ) || !cand2) return -1;
+    hr = CALL( cand2, 10, &value );  /* get_ValueAsString */
+    if (SUCCEEDED( hr ) && value)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( value, NULL );
+        len = raw ? lstrlenW( raw ) : 0;
+        if (buf && (DWORD)len < buflen) memcpy( buf, raw, (len + 1) * sizeof(*buf) );
+        WindowsDeleteString( value );
+    }
+    CALL( cand2, 2, (ULONG*)&hr );
+    return len;
+}
+
+/* read a candidate qualifier value; returns length or -1 */
+static int cand_qualifier( void *cand, const WCHAR *qual, WCHAR *buf, DWORD buflen )
+{
+    void *cand2 = NULL;
+    HSTRING hname = NULL, hvalue = NULL;
+    HRESULT hr;
+    int len = -1;
+
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(cand, 0))(cand, &IID_IResourceCandidate_loc, &cand2);
+    if (FAILED( hr ) || !cand2) return -1;
+    WindowsCreateString( qual, (UINT32)lstrlenW( qual ), &hname );
+    hr = CALL( cand2, 12, hname, &hvalue );  /* GetQualifierValue */
+    if (SUCCEEDED( hr ) && hvalue)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( hvalue, NULL );
+        len = raw ? lstrlenW( raw ) : 0;
+        if (buf && (DWORD)len < buflen) memcpy( buf, raw, (len + 1) * sizeof(*buf) );
+        WindowsDeleteString( hvalue );
+    }
+    WindowsDeleteString( hname );
+    CALL( cand2, 2, (ULONG*)&hr );
+    return len;
+}
+
+static BOOL contains( const WCHAR *hay, const WCHAR *needle )
+{
+    return !!wcsstr( hay, needle );
+}
+
+/*
+ * Real-lookups test against the Microsoft.WindowsCalculator resources.pri
+ * fixture (608760 bytes).  Ground-truth expectations decoded from the
+ * fixture's res_map2 / hschemaex / decn_info / dataitem sections:
+ *   - main resource map holds 1323 items (661 scopes);
+ *   - "Resources\CalculatorModeText" is a string item with EN-US/EN-GB
+ *     candidates, value "Calculator";
+ *   - subtree "Resources" holds 1166 items;
+ *   - "Files\Assets\CalculatorAppList.png" has 129 file-path candidates
+ *     qualified by Contrast / TargetSize / AltForm.
+ */
+static void test_real_pri_lookup( void )
+{
+    void *factory = NULL, *rm = NULL, *map = NULL, *map2 = NULL;
+    void *cand = NULL, *ctx = NULL, *ctx2 = NULL, *sub = NULL;
+    WCHAR buf[2048], val[4096];
+    UINT32 count = 0;
+    HRESULT hr;
+
+    set_pri_env();
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceManager", &factory );
+    ok( hr == S_OK, "fixture: RoGetActivationFactory(ResourceManager) hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceManagerStatics_loc, &rm);
+    if (FAILED( hr )) goto done;
+    hr = CALL( rm, 6, &rm );  /* IResourceManagerStatics::Current */
+    if (FAILED( hr ) || !rm) goto done;
+    {
+        void *rm2 = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
+        if (FAILED( hr )) goto done;
+        hr = CALL( rm2, 6, &map );  /* get_MainResourceMap */
+        CALL( rm2, 2, (ULONG*)&hr );
+    }
+    ok( SUCCEEDED( hr ) && map, "fixture: get_MainResourceMap hr=%08x\n", hr );
+    if (FAILED( hr ) || !map) goto done;
+
+    /* IResourceMap2: GetCount over the real map */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(map, 0))(map, &IID_IResourceMap2_loc, &map2);
+    ok( hr == S_OK && map2, "fixture: QI IResourceMap2 hr=%08x\n", hr );
+    if (FAILED( hr ) || !map2) goto done;
+    hr = CALL( map2, 7, &count );  /* GetCount */
+    ok( SUCCEEDED( hr ) && count == 1323, "fixture: MainResourceMap::GetCount = %u hr=%08x (expect 1323)\n", count, hr );
+
+    /* GetByIndex(0): CEngineStrings\10 (first item by index property) */
+    cand = NULL;
+    hr = CALL( map2, 6, 0, &cand );  /* GetByIndex */
+    ok( SUCCEEDED( hr ) && cand, "fixture: GetByIndex(0) hr=%08x\n", hr );
+    if (SUCCEEDED( hr ) && cand)
+    {
+        int len = cand_get_value( cand, val, ARRAYSIZE( val ) );
+        ok( len > 0, "fixture: GetByIndex(0) value length %d\n", len );
+        CALL( cand, 2, (ULONG*)&hr );
+    }
+    /* out-of-range index */
+    cand = (void *)0x1;
+    hr = CALL( map2, 6, count + 10, &cand );
+    ok( hr == E_BOUNDS || FAILED( hr ), "fixture: GetByIndex(oob) hr=%08x\n", hr );
+    if (cand && cand != (void *)0x1) CALL( cand, 2, (ULONG*)&hr );
+
+    /* GetByKey via IResourceMap::GetValue on a verified key */
+    {
+        HSTRING hkey;
+        HSTRING_HEADER hdr;
+        WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &hdr, &hkey );
+        cand = NULL;
+        hr = CALL( map, 7, hkey, &cand );  /* GetValue */
+        ok( SUCCEEDED( hr ) && cand, "fixture: GetValue(Resources\\CalculatorModeText) hr=%08x\n", hr );
+        WindowsDeleteString( hkey );
+        if (SUCCEEDED( hr ) && cand)
+        {
+            int len = cand_get_value( cand, val, ARRAYSIZE( val ) );
+            ok( len == 10 && !wcscmp( val, L"Calculator" ), "fixture: CalculatorModeText value '%s' len %d\n",
+                len > 0 ? val : L"(none)", len );
+            len = cand_qualifier( cand, L"Language", buf, ARRAYSIZE( buf ) );
+            ok( len > 0, "fixture: candidate Language qualifier len %d\n", len );
+            CALL( cand, 2, (ULONG*)&hr );
+        }
+    }
+
+    /* GetSubtree("Resources") -> scoped count + relative lookup */
+    {
+        HSTRING hname;
+        HSTRING_HEADER hdr;
+        void *sub2 = NULL;
+        WindowsCreateStringReference( L"Resources", 9, &hdr, &hname );
+        hr = CALL( map, 9, hname, &sub );  /* GetSubtree */
+        WindowsDeleteString( hname );
+        ok( SUCCEEDED( hr ) && sub, "fixture: GetSubtree(Resources) hr=%08x\n", hr );
+        if (SUCCEEDED( hr ) && sub)
+        {
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(sub, 0))(sub, &IID_IResourceMap2_loc, &sub2);
+            if (SUCCEEDED( hr ) && sub2)
+            {
+                UINT32 subcount = 0;
+                hr = CALL( sub2, 7, &subcount );
+                ok( SUCCEEDED( hr ) && subcount == 1166, "fixture: Resources subtree count = %u (expect 1166) hr=%08x\n",
+                    subcount, hr );
+                CALL( sub2, 2, (ULONG*)&hr );
+            }
+            {
+                HSTRING hkey;
+                HSTRING_HEADER khdr;
+                WindowsCreateStringReference( L"CalculatorModeText", 18, &khdr, &hkey );
+                cand = NULL;
+                hr = CALL( sub, 7, hkey, &cand );
+                WindowsDeleteString( hkey );
+                ok( SUCCEEDED( hr ) && cand, "fixture: subtree GetValue(CalculatorModeText) hr=%08x\n", hr );
+                if (SUCCEEDED( hr ) && cand)
+                {
+                    int len = cand_get_value( cand, val, ARRAYSIZE( val ) );
+                    ok( len == 10 && !wcscmp( val, L"Calculator" ), "fixture: subtree value '%s' len %d\n",
+                        len > 0 ? val : L"(none)", len );
+                    CALL( cand, 2, (ULONG*)&hr );
+                }
+            }
+        }
+    }
+
+    /* ResourceContext qualifier filtering: create a context, set Language=en-GB,
+     * and the resolved candidate must carry the EN-GB qualifier. */
+    {
+        void *cfactory = NULL;
+        HSTRING hval, hname;
+        hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &cfactory );
+        ok( hr == S_OK, "fixture: RoGetActivationFactory(ResourceContext) hr=%08x\n", hr );
+        if (hr == S_OK)
+        {
+            hr = CALL( cfactory, 6, &ctx );  /* ActivateInstance */
+            ok( SUCCEEDED( hr ) && ctx, "fixture: ResourceContext ActivateInstance hr=%08x\n", hr );
+        }
+        if (ctx)
+        {
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(ctx, 0))(ctx, &IID_IResourceContext2_loc, &ctx2);
+            ok( hr == S_OK && ctx2, "fixture: QI IResourceContext2 hr=%08x\n", hr );
+            if (SUCCEEDED( hr ) && ctx2)
+            {
+                WindowsCreateString( L"en-GB", 5, &hval );
+                WindowsCreateString( L"Language", 8, &hname );
+                hr = CALL( ctx2, 6, hval, hname );  /* SetQualifierValue(value, name) */
+                ok( SUCCEEDED( hr ), "fixture: SetQualifierValue(en-GB, Language) hr=%08x\n", hr );
+                WindowsDeleteString( hval );
+                WindowsDeleteString( hname );
+                CALL( ctx2, 2, (ULONG*)&hr );
+            }
+            {
+                HSTRING hkey;
+                HSTRING_HEADER khdr;
+                WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &khdr, &hkey );
+                cand = NULL;
+                hr = CALL( map, 8, hkey, ctx, &cand );  /* GetValueForContext */
+                WindowsDeleteString( hkey );
+                ok( SUCCEEDED( hr ) && cand, "fixture: GetValueForContext(en-GB) hr=%08x\n", hr );
+                if (SUCCEEDED( hr ) && cand)
+                {
+                    int len = cand_qualifier( cand, L"Language", buf, ARRAYSIZE( buf ) );
+                    ok( len == 5 && !wcsicmp( buf, L"en-GB" ), "fixture: EN-GB candidate selected, qualifier '%s' len %d\n",
+                        len > 0 ? buf : L"(none)", len );
+                    CALL( cand, 2, (ULONG*)&hr );
+                }
+            }
+        }
+    }
+
+    /* TargetSize/Contrast/AltForm filtering on the Files subtree */
+    if (ctx)
+    {
+        void *cfactory2 = NULL;
+        hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &cfactory2 );
+        if (ctx2) ctx2 = NULL;
+        {
+            void *ctx3 = NULL;
+            HSTRING hval, hname;
+            hr = CALL( cfactory2, 6, &ctx3 );
+            if (SUCCEEDED( hr ) && ctx3)
+            {
+                hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(ctx3, 0))(ctx3, &IID_IResourceContext2_loc, &ctx2);
+                if (SUCCEEDED( hr ) && ctx2)
+                {
+                    WindowsCreateString( L"White", 5, &hval );
+                    WindowsCreateString( L"Contrast", 8, &hname );
+                    CALL( ctx2, 6, hval, hname );
+                    WindowsDeleteString( hval );
+                    WindowsDeleteString( hname );
+                    WindowsCreateString( L"96", 2, &hval );
+                    WindowsCreateString( L"TargetSize", 10, &hname );
+                    CALL( ctx2, 6, hval, hname );
+                    WindowsDeleteString( hval );
+                    WindowsDeleteString( hname );
+                    WindowsCreateString( L"UNPLATED", 8, &hval );
+                    WindowsCreateString( L"AltForm", 7, &hname );
+                    CALL( ctx2, 6, hval, hname );
+                    WindowsDeleteString( hval );
+                    WindowsDeleteString( hname );
+                }
+                {
+                    HSTRING hkey;
+                    HSTRING_HEADER khdr;
+                    static const WCHAR key[] = L"Files\\Assets\\CalculatorAppList.png";
+                    WindowsCreateStringReference( key, (UINT32)(sizeof(key)/sizeof(WCHAR) - 1), &khdr, &hkey );
+                    cand = NULL;
+                    hr = CALL( map, 8, hkey, ctx3, &cand );
+                    WindowsDeleteString( hkey );
+                    ok( SUCCEEDED( hr ) && cand, "fixture: GetValueForContext(Files item) hr=%08x\n", hr );
+                    if (SUCCEEDED( hr ) && cand)
+                    {
+                        int len = cand_get_value( cand, val, ARRAYSIZE( val ) );
+                        ok( len > 0 && contains( val, L"targetsize-96" ) && contains( val, L"contrast-white" )
+                           && contains( val, L"altform-unplated" ),
+                           "fixture: filtered path value '%s' len %d\n", len > 0 ? val : L"(none)", len );
+                        CALL( cand, 2, (ULONG*)&hr );
+                    }
+                }
+                CALL( ctx3, 2, (ULONG*)&hr );
+            }
+        }
+    }
+
+done:
+    if (ctx2) CALL( ctx2, 2, (ULONG*)&hr );
+    if (ctx) CALL( ctx, 2, (ULONG*)&hr );
+    if (sub) CALL( sub, 2, (ULONG*)&hr );
+    if (map2) CALL( map2, 2, (ULONG*)&hr );
+    if (map) CALL( map, 2, (ULONG*)&hr );
+    CALL( factory, 2, (ULONG*)&hr );
+}
+
 static void test_memorymanager_activation(void)
 {
     void *factory = NULL, *obj = NULL;
@@ -264,6 +550,7 @@ START_TEST(core)
     test_resourcecontext_activation();
     set_pri_env();
     test_resourcemanager_lookup();
+    test_real_pri_lookup();
     test_memorymanager_activation();
 
     RoUninitialize();
