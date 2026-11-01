@@ -3706,6 +3706,9 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
     if (wined3d_settings.cs_multithreaded & WINED3D_CSMT_ENABLE
             && !RtlIsCriticalSectionLockedByThread(NtCurrentTeb()->Peb->LoaderLock))
     {
+        unsigned int cs_count;
+        HANDLE thread;
+
         cs->c.ops = &wined3d_cs_mt_ops;
 
         /* The alert syscalls are resolved at process attach (wined3d_cs_init);
@@ -3736,7 +3739,21 @@ struct wined3d_cs *wined3d_cs_create(struct wined3d_device *device,
             goto fail;
         }
 
-        if (!(cs->thread = CreateThread(NULL, 0, wined3d_cs_run, cs, 0, NULL)))
+        /* Starting a thread is the loader's business: ntdll runs the
+         * DLL_THREAD_ATTACH notifications of every module of the process for the
+         * new thread, and that takes the loader lock. A thread that is inside
+         * DllMain owns the loader lock and reaches this code through d3d11 (its
+         * own DllMain creating a device, which is what the DirectComposition ->
+         * d2d1 -> dxgi chain of a startup does), so starting the thread while the
+         * wined3d critical section is held -- which our callers hold across the
+         * whole device creation call -- is the AB-BA cycle that freezes the
+         * process. The command stream is not published yet, so start the thread
+         * with the critical section dropped and restore the nesting after it. */
+        cs_count = wined3d_cs_release_for_loader();
+        thread = CreateThread(NULL, 0, wined3d_cs_run, cs, 0, NULL);
+        wined3d_cs_restore_for_loader( cs_count );
+
+        if (!(cs->thread = thread))
         {
             ERR("Failed to create wined3d command stream thread.\n");
             CloseHandle(cs->present_event);

@@ -1649,6 +1649,7 @@ static DWORD WINAPI composite_thread_proc(void *iface)
 void ensure_composite_thread(struct composition_device *device)
 {
     HANDLE thread = NULL;
+    BOOL start, published = FALSE;
 
     dcomp_lock();
     if (device->thread && !device->thread_exited)
@@ -1677,13 +1678,41 @@ void ensure_composite_thread(struct composition_device *device)
     }
 
     dcomp_lock();
-    if (!device->thread)
-    {
-        device->thread = CreateThread(NULL, 0, composite_thread_proc,
-                &device->IDCompositionDevice_iface, 0, NULL);
-        TRACE("DCOMP: started composite_thread_proc %p\n", device->thread);
-    }
+    start = !device->thread;
     dcomp_unlock();
+
+    if (start)
+    {
+        /* Starting a thread reaches the PE loader: ntdll logs the thread creation
+         * event under the loader lock. A thread that is inside DllMain owns that
+         * lock and reaches this code (the DirectComposition device of the
+         * composition client is created from a DllMain), so starting the
+         * composite thread with the device critical section held is the AB-BA
+         * cycle that freezes the process. Start it with the lock released and
+         * publish the handle under the lock; a thread that lost the race is asked
+         * to exit and closed. */
+        thread = CreateThread(NULL, 0, composite_thread_proc,
+                &device->IDCompositionDevice_iface, CREATE_SUSPENDED, NULL);
+
+        dcomp_lock();
+        if (!device->thread)
+        {
+            device->thread = thread;
+            published = TRUE;
+        }
+        TRACE("DCOMP: started composite_thread_proc %p\n", device->thread);
+        dcomp_unlock();
+
+        /* The thread is created suspended so that the publish above happens
+         * before it runs; a starter that lost the race cancels its own thread,
+         * which has not executed a single instruction. */
+        if (published) ResumeThread( thread );
+        else if (thread)
+        {
+            TerminateThread( thread, 0 );
+            CloseHandle( thread );
+        }
+    }
 }
 
 static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
@@ -1740,20 +1769,45 @@ static HRESULT STDMETHODCALLTYPE device_CreateVisual(IDCompositionDevice *iface,
     return hr;
 }
 
+/* Resolved during process attach. LoadLibrary() and GetProcAddress() take the
+ * loader lock, which must never be entered while a critical section is held: a
+ * thread inside DllMain owns the loader lock and can reach the same Direct3D code
+ * from its own initialisation, so the rendering device a client call creates has
+ * to be built without any loader traffic. The reference is kept for the lifetime
+ * of the process; on Windows the composition engine's Direct3D dependency is a
+ * static one, so the module is loaded in every case as well. */
+static HMODULE dcomp_d3d11_module;
+static HRESULT (WINAPI *pD3D11CreateDevice)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT,
+        const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
+
+static void dcomp_init_rendering_module(void)
+{
+    if (dcomp_d3d11_module) return;
+
+    if (!(dcomp_d3d11_module = LoadLibraryA("d3d11.dll")))
+        return;
+
+    if (!(pD3D11CreateDevice = (void *)GetProcAddress(dcomp_d3d11_module, "D3D11CreateDevice")))
+    {
+        FreeLibrary(dcomp_d3d11_module);
+        dcomp_d3d11_module = NULL;
+    }
+}
+
+BOOL WINAPI DllMain(HINSTANCE inst, DWORD reason, void *reserved)
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        DisableThreadLibraryCalls(inst);
+        dcomp_init_rendering_module();
+    }
+    return TRUE;
+}
+
 static HRESULT get_default_rendering_device(IUnknown **out_device)
 {
-    static HMODULE d3d11_mod = NULL;
-    static HRESULT (WINAPI *pD3D11CreateDevice)(IDXGIAdapter *, D3D_DRIVER_TYPE, HMODULE, UINT,
-            const D3D_FEATURE_LEVEL *, UINT, UINT, ID3D11Device **, D3D_FEATURE_LEVEL *, ID3D11DeviceContext **);
     ID3D11Device *d3d11_device = NULL;
     HRESULT hr = E_FAIL;
-
-    if (!d3d11_mod)
-    {
-        d3d11_mod = LoadLibraryA("d3d11.dll");
-        if (d3d11_mod)
-            pD3D11CreateDevice = (void *)GetProcAddress(d3d11_mod, "D3D11CreateDevice");
-    }
 
     if (pD3D11CreateDevice)
     {
@@ -1824,45 +1878,52 @@ static HRESULT device_get_or_create_rendering_device(struct composition_device *
 /* Every surface the device creates comes from its own IDCompositionSurfaceFactory;
  * a client that never called IDCompositionDevice2::CreateSurfaceFactory() gets one
  * built on the device's rendering device (a default D3D11 device when the client
- * passed no rendering device at all).  The factory is created under
- * dcomp_device_cs and used outside it. */
+ * passed no rendering device at all).  Both are created *outside* dcomp_device_cs:
+ * creating them enters Direct3D, which loads dlls and takes the wined3d critical
+ * section, and the loader lock must never be entered while a critical section is
+ * held (a thread inside DllMain owns the loader lock and reaches the same code).
+ * The reference published first wins; the returned pointer is the device's own
+ * reference, not an extra one. */
 static HRESULT device_get_or_create_surface_factory(struct composition_device *device,
         IDCompositionSurfaceFactory **out_factory)
 {
-    IDCompositionSurfaceFactory *factory;
+    IDCompositionSurfaceFactory *factory, *published;
+    IUnknown *rendering_device = NULL;
     HRESULT hr;
 
     EnterCriticalSection(&dcomp_device_cs);
-
-    if (!device->surface_factory)
-    {
-        IUnknown *rendering_device = NULL;
-
-        hr = device_get_or_create_rendering_device(device, &rendering_device);
-        if (FAILED(hr) || !rendering_device)
-        {
-            LeaveCriticalSection(&dcomp_device_cs);
-            ERR("Failed to get rendering device for composition device %p, hr %#lx.\n", device, hr);
-            return hr;
-        }
-
-        hr = create_surface_factory(device, rendering_device, &device->surface_factory);
-        IUnknown_Release(rendering_device);
-        if (FAILED(hr))
-        {
-            LeaveCriticalSection(&dcomp_device_cs);
-            ERR("Failed to create surface factory for composition device %p, hr %#lx.\n", device, hr);
-            return hr;
-        }
-    }
-
     factory = device->surface_factory;
     LeaveCriticalSection(&dcomp_device_cs);
 
-    if (!factory)
-        return E_FAIL;
+    if (factory)
+    {
+        *out_factory = factory;
+        return S_OK;
+    }
 
-    *out_factory = factory;
+    if (FAILED(hr = device_get_or_create_rendering_device(device, &rendering_device)) || !rendering_device)
+    {
+        ERR("Failed to get rendering device for composition device %p, hr %#lx.\n", device, hr);
+        return hr;
+    }
+
+    hr = create_surface_factory(device, rendering_device, &factory);
+    IUnknown_Release(rendering_device);
+    if (FAILED(hr))
+    {
+        ERR("Failed to create surface factory for composition device %p, hr %#lx.\n", device, hr);
+        return hr;
+    }
+
+    EnterCriticalSection(&dcomp_device_cs);
+    if (!device->surface_factory)
+        device->surface_factory = factory;
+    published = device->surface_factory;
+    LeaveCriticalSection(&dcomp_device_cs);
+
+    if (published != factory) IDCompositionSurfaceFactory_Release(factory);
+
+    *out_factory = published;
     return S_OK;
 }
 

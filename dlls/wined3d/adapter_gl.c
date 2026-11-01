@@ -5033,10 +5033,8 @@ static float wined3d_adapter_find_fill_offset(struct wined3d_caps_gl_ctx *ctx)
 static struct wined3d_gl_funcs gl_funcs;
 static BOOL gl_funcs_valid;
 
-static void wined3d_resolve_gl_funcs(struct wined3d_gl_funcs *funcs)
+static void wined3d_resolve_gl_funcs(struct wined3d_gl_funcs *funcs, HMODULE mod_gl)
 {
-    HMODULE mod_gl = GetModuleHandleA("opengl32.dll");
-
 #define USE_GL_FUNC(f) funcs->gl.p_##f = (void *)GetProcAddress(mod_gl, #f);
     ALL_GL_FUNCS
 #undef USE_GL_FUNC
@@ -5047,10 +5045,19 @@ static void wined3d_resolve_gl_funcs(struct wined3d_gl_funcs *funcs)
 
 void wined3d_init_gl_module(void)
 {
-    if (gl_funcs_valid || !GetModuleHandleA("opengl32.dll"))
+    HMODULE mod_gl;
+
+    if (gl_funcs_valid)
         return;
 
-    wined3d_resolve_gl_funcs(&gl_funcs);
+    /* Take the module reference here, during process attach, so that adapter
+     * initialisation never calls the loader: this thread owns the loader lock
+     * here and no other thread is running. The reference is kept for the
+     * lifetime of the process. */
+    if (!(mod_gl = LoadLibraryA("opengl32.dll")))
+        return;
+
+    wined3d_resolve_gl_funcs(&gl_funcs, mod_gl);
     gl_funcs_valid = TRUE;
 }
 
@@ -5091,20 +5098,15 @@ static BOOL wined3d_adapter_gl_init(struct wined3d_adapter_gl *adapter_gl,
     if (!wined3d_adapter_init(&adapter_gl->a, ordinal, luid, &wined3d_adapter_gl_ops))
         return FALSE;
 
-    /* Dynamically load all GL core functions. */
-    if (!gl_funcs_valid)
-        wined3d_init_gl_module();
-
+    /* The opengl32 entry points were resolved at process attach (see
+     * wined3d_init_gl_module); this runs under the wined3d critical section and
+     * must not call the loader. Without them there is no GL support, as before. */
     if (gl_funcs_valid)
     {
         gl_info->gl_ops.gl = gl_funcs.gl;
         gl_info->gl_ops.wgl.p_wglSwapBuffers = gl_funcs.wgl.p_wglSwapBuffers;
         gl_info->gl_ops.wgl.p_wglGetPixelFormat = gl_funcs.wgl.p_wglGetPixelFormat;
         gl_info->gl_ops.wgl.p_wglGetProcAddress = gl_funcs.wgl.p_wglGetProcAddress;
-    }
-    else
-    {
-        wined3d_resolve_gl_funcs(&gl_info->gl_ops);
     }
 
     gl_info->p_glEnableWINE = gl_info->gl_ops.gl.p_glEnable;

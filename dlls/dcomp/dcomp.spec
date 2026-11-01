@@ -22,6 +22,7 @@
 @ stdcall DCompositionWaitForCompositorClock(long ptr long)
 @ stub DeserializeEffectDescription
 @ stdcall -private DllCanUnloadNow()
+@ stdcall -private DllMain(long long ptr)
 @ stub DllGetActivationFactory
 @ stub DllGetClassObject
 @ stub DwmEnableMMCSS

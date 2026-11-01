@@ -60,6 +60,14 @@ void wined3d_cs_init(void);
 void wined3d_init_gl_module(void);
 void wined3d_init_vk_module(void);
 
+/* The loader lock must never be taken while the wined3d critical section is
+ * held. A path that is entered with the critical section held (our callers
+ * take it) and that has to call into the PE loader drops the critical section
+ * with these two functions and restores the ownership count afterwards.
+ * See wined3d_cs_release_for_loader() in wined3d_main.c. */
+unsigned int wined3d_cs_release_for_loader(void);
+void wined3d_cs_restore_for_loader(unsigned int count);
+
 static inline size_t align(size_t addr, size_t alignment)
 {
     return (addr + (alignment - 1)) & ~(alignment - 1);

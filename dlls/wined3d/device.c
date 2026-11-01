@@ -5343,18 +5343,33 @@ void CDECL wined3d_device_get_gamma_ramp(const struct wined3d_device *device,
 
 HDC wined3d_device_gl_get_backup_dc(struct wined3d_device_gl *device_gl)
 {
+    unsigned int cs_count;
+    HWND window;
+
     TRACE("device_gl %p.\n", device_gl);
 
     if (!device_gl->backup_dc)
     {
         TRACE("Creating the backup window for device %p.\n", device_gl);
 
-        if (!(device_gl->backup_wnd = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, "WineD3D fake window",
-                WS_OVERLAPPEDWINDOW, 10, 10, 10, 10, NULL, NULL, NULL, NULL)))
+        /* Creating the window reaches the PE loader (the window class of the
+         * module), and the loader lock must not be taken under the wined3d
+         * critical section our callers hold here, so create it with the critical
+         * section dropped and publish it under the critical section: a
+         * concurrent call that created a window in the meantime keeps its own. */
+        cs_count = wined3d_cs_release_for_loader();
+        window = CreateWindowA(WINED3D_OPENGL_WINDOW_CLASS_NAME, "WineD3D fake window",
+                WS_OVERLAPPEDWINDOW, 10, 10, 10, 10, NULL, NULL, NULL, NULL);
+        wined3d_cs_restore_for_loader( cs_count );
+
+        if (!window)
         {
             ERR("Failed to create a window.\n");
             return NULL;
         }
+
+        if (InterlockedCompareExchangePointer(&device_gl->backup_wnd, window, NULL))
+            DestroyWindow(window);
 
         if (!(device_gl->backup_dc = GetDC(device_gl->backup_wnd)))
         {

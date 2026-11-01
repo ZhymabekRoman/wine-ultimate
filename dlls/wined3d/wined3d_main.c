@@ -573,6 +573,48 @@ void WINAPI wined3d_mutex_unlock(void)
     LeaveCriticalSection(&wined3d_cs);
 }
 
+/* Release the wined3d critical section for as long as this thread holds it and
+ * return how deep that was; wined3d_cs_restore_for_loader() takes it back the
+ * same number of times, so a caller that nested the lock keeps its nesting.
+ *
+ * The loader lock must never be taken while this critical section is held. A
+ * thread that is inside DllMain owns the loader lock and can reach wined3d
+ * (the d2d1 -> dxgi -> wined3d chain that creating a DirectComposition device
+ * runs is enough); a thread that calls the loader -- resolving a dll entry
+ * point, registering a window class, creating a window, selecting a pixel
+ * format -- while it owns the wined3d critical section then waits for the
+ * loader lock, and the two threads deadlock. Every remaining thread of the
+ * process queues behind them, which is the freeze and not a slow start.
+ *
+ * Resolving everything at process attach (see wined3d_dll_init) removes the
+ * entry points from that set, but adapter initialisation has a different shape:
+ * it needs a rendered context, so it cannot run before the modules it drives
+ * are in the process, and it creates a window and queries the driver. Our
+ * callers (the d3d9, d3d11, dxgi and dcomp entry points) hold the critical
+ * section across the whole creation call, so the only place its ownership can
+ * be handed over is here, inside wined3d.
+ *
+ * Only call this around work on objects that no other thread can reach yet:
+ * the adapter being created, the device being initialised. */
+unsigned int wined3d_cs_release_for_loader(void)
+{
+    unsigned int count = 0;
+
+    while (RtlIsCriticalSectionLockedByThread(&wined3d_cs))
+    {
+        LeaveCriticalSection(&wined3d_cs);
+        ++count;
+    }
+
+    return count;
+}
+
+void wined3d_cs_restore_for_loader(unsigned int count)
+{
+    while (count--)
+        EnterCriticalSection(&wined3d_cs);
+}
+
 static void wined3d_wndproc_mutex_lock(void)
 {
     EnterCriticalSection(&wined3d_wndproc_cs);

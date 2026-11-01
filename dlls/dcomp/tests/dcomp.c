@@ -27,6 +27,7 @@
 #include "initguid.h"
 #include <d2d1_1.h>
 #include <d3d10_1.h>
+#include <dxgi1_2.h>
 #include <d3d11.h>
 #include "dcomp.h"
 #include "dcomp_private_iface.h"
@@ -205,6 +206,13 @@ static IDXGISwapChain *create_swapchain_(unsigned int line, IDXGIDevice *device,
 
     return swapchain;
 }
+
+/* The lock-order conformance test for this path (creating the default
+ * rendering device must not load a dll, and the wined3d critical section
+ * must be released for the loader work of adapter init) lives in
+ * loader_lock.c: it needs a process that has not created any device yet,
+ * and the tests of this file have already created devices, which loads
+ * d3d11.dll for the whole process, so it can never observe the lazy path. */
 
 static void test_DCompositionCreateDevice(void)
 {

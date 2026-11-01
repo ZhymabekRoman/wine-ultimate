@@ -1,7 +1,11 @@
 TESTDLL = dcomp.dll
-IMPORTS = d2d1 d3d10_1 user32 gdi32
+# d3d11 is deliberately not imported: the loader-lock test watches for the
+# dll being loaded lazily, which an import table entry would hide.
+IMPORTS = d2d1 d3d10_1 user32 gdi32 ntdll wined3d
 
 PARENTSRC = ../
 SOURCES = \
 	dcomp.c \
-	dcomp_chromium.c
+	dcomp_chromium.c \
+	loader_lock.c \
+	rendering_device_lock.c

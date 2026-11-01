@@ -1190,9 +1190,18 @@ HRESULT CDECL wined3d_adapter_register_budget_change_notification(const struct w
 
     if (!notification_thread)
     {
+        unsigned int cs_count;
+
         notification_thread_stop_event = CreateEventW(0, FALSE, FALSE, NULL);
+
+        /* Starting a thread reaches the PE loader (ntdll logs the thread creation
+         * event under the loader lock), and the loader lock must not be waited
+         * for under the wined3d critical section, which is held here: a thread
+         * inside DllMain owns it and reaches wined3d through d3d11. */
+        cs_count = wined3d_cs_release_for_loader();
         notification_thread = CreateThread(NULL, 0, notification_thread_func,
                 notification_thread_stop_event, 0, NULL);
+        wined3d_cs_restore_for_loader( cs_count );
     }
     wined3d_mutex_unlock();
     return WINED3D_OK;
@@ -3501,16 +3510,32 @@ const struct wined3d_parent_ops wined3d_null_parent_ops =
 
 HRESULT wined3d_init(struct wined3d *wined3d, uint32_t flags)
 {
+    unsigned int cs_count;
+    struct wined3d_adapter *adapter;
+
     wined3d->ref = 1;
     wined3d->flags = flags;
 
     TRACE("Initialising adapters.\n");
 
-    if (!(wined3d->adapters[0] = wined3d_adapter_create(0, flags)))
+    /* Adapter initialisation is the loader-sensitive part of creating a device:
+     * it creates the caps window of the adapter (CreateWindowEx reaches the PE
+     * loader for the window class of the module), selects a pixel format, and
+     * asks opengl32 (or the Vulkan loader) for driver entry points. The loader
+     * lock must not be taken under the wined3d critical section, which our
+     * callers hold here, so drop it for the duration of the adapter creation
+     * and restore the count afterwards. The adapter is not reachable from
+     * another thread until it is published below. */
+    cs_count = wined3d_cs_release_for_loader();
+    adapter = wined3d_adapter_create( 0, flags );
+    wined3d_cs_restore_for_loader( cs_count );
+
+    if (!adapter)
     {
         WARN("Failed to create adapter.\n");
         return E_FAIL;
     }
+    wined3d->adapters[0] = adapter;
     wined3d->adapter_count = 1;
 
     return WINED3D_OK;

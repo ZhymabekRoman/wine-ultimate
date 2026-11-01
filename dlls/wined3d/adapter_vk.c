@@ -98,32 +98,47 @@ static HMODULE vulkan_module;
 static void *vulkan_get_instance_proc_addr;
 static const char *(CDECL *wine_get_version_func)(void);
 
+static BOOL wined3d_resolve_vulkan_module(void)
+{
+    if (vulkan_module)
+        return TRUE;
+
+    if (!(vulkan_module = LoadLibraryA("winevulkan.dll"))
+            && !(vulkan_module = LoadLibraryA("vulkan-1.dll")))
+    {
+        WARN("Failed to load vulkan-1.dll.\n");
+        return FALSE;
+    }
+
+    if (!(vulkan_get_instance_proc_addr = (void *)GetProcAddress(vulkan_module, "vkGetInstanceProcAddr")))
+    {
+        FreeLibrary(vulkan_module);
+        vulkan_module = NULL;
+        return FALSE;
+    }
+
+    return TRUE;
+}
+
 void wined3d_init_vk_module(void)
 {
     if (!wine_get_version_func)
         wine_get_version_func = (void *)GetProcAddress(GetModuleHandleW(L"ntdll.dll"), "wine_get_version");
+
+    /* Take the module reference here, during process attach: wined3d_load_vulkan()
+     * is reached from adapter initialisation, which runs under the wined3d
+     * critical section and must not call the loader. */
+    wined3d_resolve_vulkan_module();
 }
 
 static BOOL wined3d_load_vulkan(struct wined3d_vk_info *vk_info)
 {
     struct vulkan_ops *vk_ops = &vk_info->vk_ops;
 
-    if (!vulkan_module)
-    {
-        if (!(vulkan_module = LoadLibraryA("winevulkan.dll"))
-                && !(vulkan_module = LoadLibraryA("vulkan-1.dll")))
-        {
-            WARN("Failed to load vulkan-1.dll.\n");
-            return FALSE;
-        }
-
-        if (!(vulkan_get_instance_proc_addr = (void *)GetProcAddress(vulkan_module, "vkGetInstanceProcAddr")))
-        {
-            FreeLibrary(vulkan_module);
-            vulkan_module = NULL;
-            return FALSE;
-        }
-    }
+    /* No loader calls: the module was resolved at process attach. Without it
+     * there is no Vulkan support, as before. */
+    if (!wined3d_resolve_vulkan_module())
+        return FALSE;
 
     vk_info->vulkan_lib = vulkan_module;
     vk_ops->vkGetInstanceProcAddr = vulkan_get_instance_proc_addr;
@@ -1935,11 +1950,8 @@ static unsigned int wined3d_get_wine_vk_version(void)
     const char *ptr;
     int major, minor;
 
-    if (!wine_get_version)
-    {
-        wined3d_init_vk_module();
-        wine_get_version = wine_get_version_func;
-    }
+    /* wine_get_version_func was resolved at process attach (wined3d_init_vk_module);
+     * this runs under the wined3d critical section and must not call the loader. */
 
     if (!wine_get_version) return VK_MAKE_VERSION(1, 0, 0);
 
