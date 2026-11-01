@@ -77,6 +77,9 @@ static const IID IID_IInspectable_loc = {0xaf86e2e0, 0xbcdf, 0x11ce, {0x9c, 0x40
  * The module and this test agree on these constants; the app-facing surfaces
  * (IResourceMap GetValue/GetValueForContext, IResourceContext) are verified. */
 static const IID IID_IResourceMap2_loc = {0xd4a52cd1, 0xc6a5, 0x4824, {0x94, 0x53, 0xcc, 0x86, 0x18, 0x5b, 0x6f, 0xd4}};
+/* objidl!IAgileObject (free-threaded marker, no methods beyond IUnknown);
+ * mrt100_app's QI chain probes it on every WinRT object it touches */
+static const IID IID_IAgileObject_loc = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}};
 static const IID IID_IResourceContext2_loc = {0xb6d312f1, 0xbc62, 0x4208, {0xb8, 0xa1, 0xb8, 0x42, 0xc0, 0xc4, 0xbb, 0x54}};
 
 /* vtable slot helpers; IInspectable occupies slots 0..5 (3 IUnknown + 3 extra) */
@@ -520,6 +523,42 @@ done:
     CALL( factory, 2, (ULONG*)&hr );
 }
 
+/* mrt100_app QIs IAgileObject {94ea2b94-e9cc-49e0-c0ff-ee64ca8f5b90} on the
+ * ResourceContext factory during startup (observed live QI chain); a miss
+ * makes combase apartment-marshal the factory.  Every module object answers
+ * it with its primary interface. */
+static void test_iagile( void )
+{
+    void *factory = NULL, *obj = NULL, *cand = NULL;
+    HRESULT hr;
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "iagile: ResourceContext factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IAgileObject_loc, &obj);
+    ok( hr == S_OK && obj, "iagile: QI factory hr=%08x obj=%p\n", hr, obj );
+    if (obj) CALL( obj, 2, (ULONG*)&hr );
+    obj = NULL;
+
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &obj);
+    if (SUCCEEDED( hr ) && obj)
+    {
+        void *obj2 = NULL;
+        hr = CALL( obj, 6, &cand );  /* GetForCurrentView */
+        if (SUCCEEDED( hr ) && cand)
+        {
+            void *c2 = NULL;
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(cand, 0))(cand, &IID_IAgileObject_loc, &c2);
+            ok( hr == S_OK && c2, "iagile: QI context hr=%08x\n", hr );
+            if (c2) CALL( c2, 2, (ULONG*)&hr );
+            CALL( cand, 2, (ULONG*)&hr );
+            cand = NULL;
+        }
+        CALL( obj, 2, (ULONG*)&hr );
+    }
+    CALL( factory, 2, (ULONG*)&hr );
+}
+
 static void test_memorymanager_activation(void)
 {
     void *factory = NULL, *obj = NULL;
@@ -551,6 +590,7 @@ START_TEST(core)
     set_pri_env();
     test_resourcemanager_lookup();
     test_real_pri_lookup();
+    test_iagile();
     test_memorymanager_activation();
 
     RoUninitialize();

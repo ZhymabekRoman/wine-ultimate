@@ -220,6 +220,7 @@ static inline struct str_vector *svv_from( void *iface ) { return (struct str_ve
 static HRESULT WINAPI svv_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct str_vector *impl = svv_from( iface );
+    TRACE( "iid %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         param_iid_eq( iid, 2, ELEM_VECTORVIEW L"`1", ELEM_STRING ) ||
@@ -342,6 +343,7 @@ static inline struct map_view *mv_from( void *iface ) { return (struct map_view 
 static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct map_view *impl = mv_from( iface );
+    TRACE( "iid %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         param_iid_eq( iid, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING ))
@@ -363,11 +365,13 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
     struct map_view *impl = mv_from( iface );
     const WCHAR *raw = WindowsGetStringRawBuffer( key, NULL );
     UINT32 i;
+    TRACE( "Lookup %s\n", debugstr_w( raw ) );
     for (i = 0; i < impl->count; i++)
     {
         if (!lstrcmpiW( raw, impl->pairs[i].key ))
             return WindowsCreateString( impl->pairs[i].value, (UINT32)lstrlenW( impl->pairs[i].value ), value );
     }
+    TRACE( "Lookup %s -> ELEMENT_NOT_FOUND\n", debugstr_w( raw ) );
     return ELEMENT_NOT_FOUND_E; /* ELEMENT_NOT_FOUND */
 }
 static HRESULT WINAPI mv_HasKey( void *iface, HSTRING key, INT32 *has )
@@ -615,7 +619,9 @@ static inline struct iterator *iter_from( void *iface ) { return (struct iterato
 static HRESULT WINAPI iter_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct iterator *impl = iter_from( iface );
-    BOOL ok = IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+    BOOL ok;
+    TRACE( "iid %s\n", debugstr_guid( iid ) );
+    ok = IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
               IsEqualGUID( iid, &IID_IAgileObject );
     if (!ok)
     {
@@ -745,7 +751,9 @@ static HRESULT WINAPI ivv_First( void *iface, void **first )
 static HRESULT WINAPI mv_First( void *iface, void **first )
 {
     struct map_view *impl = mv_from( iface );
-    struct iterator *it = iter_new( IT_KVPAIR, impl, impl->count, iterator_pair_vtbl );
+    struct iterator *it;
+    TRACE( "First\n" );
+    it = iter_new( IT_KVPAIR, impl, impl->count, iterator_pair_vtbl );
     if (!it) return E_OUTOFMEMORY;
     *first = &it->vt_it;
     return S_OK;
@@ -1409,17 +1417,19 @@ static HRESULT WINAPI ctx_GetTrustLevel( void *iface, INT32 *t ) { return get_tr
 static HRESULT WINAPI ctx_QualifierValues( void *iface, void **out )
 {
     struct res_context *impl = ctx_from( iface );
+    TRACE( "get_QualifierValues\n" );
     *out = &impl->qualifiers.vt_mv;
     incr( &impl->qualifiers.ref );
     return S_OK;
 }
-static HRESULT WINAPI ctx_Reset( void *iface ) { return S_OK; }
-static HRESULT WINAPI ctx_ResetQualifierValues( void *iface, void *names ) { return S_OK; }
-static HRESULT WINAPI ctx_OverrideToMatch( void *iface, void *qualifiers ) { return S_OK; }
+static HRESULT WINAPI ctx_Reset( void *iface ) { TRACE( "stub\n" ); return S_OK; }
+static HRESULT WINAPI ctx_ResetQualifierValues( void *iface, void *names ) { TRACE( "stub\n" ); return S_OK; }
+static HRESULT WINAPI ctx_OverrideToMatch( void *iface, void *qualifiers ) { TRACE( "stub\n" ); return S_OK; }
 static HRESULT WINAPI ctx_Clone( void *iface, void **out );
 static HRESULT WINAPI ctx_Languages( void *iface, void **out )
 {
     struct res_context *impl = ctx_from( iface );
+    TRACE( "get_Languages\n" );
     *out = &impl->languages.vt_vv;
     incr( &impl->languages.ref );
     return S_OK;
@@ -1668,6 +1678,7 @@ static HRESULT WINAPI rcs_GetRuntimeClassName( void *iface, HSTRING *n ) { retur
 static HRESULT WINAPI rcs_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rcs_CreateMatchingContext( void *iface, void *qualifiers, void **out )
 {
+    TRACE( "CreateMatchingContext\n" );
     return get_current_context( out );
 }
 static const void *rc_statics_vtbl[] =
@@ -1708,7 +1719,11 @@ static ULONG WINAPI rc3_Release( void *iface ) { return 1; }
 static HRESULT WINAPI rc3_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI rc3_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI rc3_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
-static HRESULT WINAPI rc3_SetGlobalQualifierValueWithPersistence( void *iface, HSTRING value, HSTRING name, INT32 persist ) { return S_OK; }
+static HRESULT WINAPI rc3_SetGlobalQualifierValueWithPersistence( void *iface, HSTRING value, HSTRING name, INT32 persist )
+{
+    TRACE( "stub\n" );
+    return S_OK;
+}
 static const void *rc_statics3_vtbl[] =
 {
     rc3_QueryInterface, rc3_AddRef, rc3_Release, rc3_GetIids, rc3_GetRuntimeClassName, rc3_GetTrustLevel,
@@ -1722,6 +1737,7 @@ static HRESULT WINAPI rc4_GetRuntimeClassName( void *iface, HSTRING *n ) { retur
 static HRESULT WINAPI rc4_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc4_GetForUIContext( void *iface, void *context, void **out )
 {
+    TRACE( "GetForUIContext\n" );
     return get_current_context( out );
 }
 static const void *rc_statics4_vtbl[] =
@@ -1740,6 +1756,7 @@ static HRESULT WINAPI rc81_Create( void *iface, void **out )
 {
     struct res_context *ctx;
     HRESULT hr = create_context( &ctx );
+    TRACE( "Create\n" );
     if (SUCCEEDED( hr )) *out = &ctx->vt_ctx;
     return hr;
 }
