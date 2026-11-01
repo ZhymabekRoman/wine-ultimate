@@ -1096,6 +1096,15 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
             if (cws)
             {
                 __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_GetForCurrentThread( cws, &cw );
+                if (!cw)
+                {
+                    HMODULE wui = LoadLibraryW( L"windows.ui.dll" );
+                    if (wui)
+                    {
+                        void *(WINAPI *p_create)(void) = (void *)GetProcAddress( wui, "CoreWindow_Create" );
+                        if (p_create) cw = p_create();
+                    }
+                }
                 __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_Release( cws );
             }
             IActivationFactory_Release( cwf );
@@ -1389,6 +1398,75 @@ static const GUID IID_IMicrosoftAppInstanceStatics = {0x4f414b25, 0x8330, 0x5a9b
 static const GUID IID_IMicrosoftAppInstanceStatics2 = {0xfe9f1885, 0x7160, 0x5397, {0xba, 0x9b, 0x58, 0x90, 0xb2, 0x4f, 0xdc, 0x04}};
 static const GUID IID_IMicrosoftAppInstance = {0x75766ae4, 0x0239, 0x5a26, {0xb9, 0xda, 0xd5, 0xbf, 0xc7, 0x5a, 0x48, 0x66}};
 
+static const GUID IID_IWeakReference = {0x00000037, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+static const GUID IID_IWeakReferenceSource = {0x00000038, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+
+typedef HRESULT (STDMETHODCALLTYPE *qi_fn)( const void *iface, REFIID iid, void **out );
+
+/*
+ * IWeakReferenceSource for the AppLifecycle objects.  Every WinRT server object
+ * answers IWeakReferenceSource: the .NET/WinRT callable wrapper, the C++/WinRT
+ * weak_ref helper and the event registration code all QI for it in order to
+ * keep a non-owning reference, and callers QI it on the AppInstance object
+ * handed out by IMicrosoftAppInstanceStatics::RecommendedInstance.  The objects
+ * below are static singletons with a fixed reference count, so their weak
+ * reference always resolves back to the owner it was created from.
+ */
+struct static_weakref
+{
+    const void *vtbl;
+    const void *owner;
+    qi_fn qi;
+};
+
+struct static_weakref_source
+{
+    const void *vtbl;
+    const struct static_weakref *weakref;
+};
+
+static struct static_weakref app_instance_weakref;
+static struct static_weakref app_instance_statics_weakref;
+static struct static_weakref app_activation_args_weakref;
+static struct static_weakref_source app_instance_weakref_source;
+static struct static_weakref_source app_instance_statics_weakref_source;
+static struct static_weakref_source app_activation_args_weakref_source;
+
+static HRESULT WINAPI static_weakref_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IWeakReference ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI static_weakref_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI static_weakref_Release( void *iface ) { return 1; }
+static HRESULT WINAPI static_weakref_Resolve( void *iface, REFIID iid, void **out )
+{
+    struct static_weakref *ref = (struct static_weakref *)iface;
+
+    return ref->qi( ref->owner, iid, out );
+}
+static const void *static_weakref_vtbl[] =
+{
+    static_weakref_QueryInterface,
+    static_weakref_AddRef,
+    static_weakref_Release,
+    static_weakref_Resolve,
+};
+
+static HRESULT WINAPI static_weakref_source_GetWeakReference( void *iface, void **ref )
+{
+    struct static_weakref_source *source = (struct static_weakref_source *)iface;
+
+    if (!ref) return E_POINTER;
+    *ref = (void *)source->weakref;
+    return S_OK;
+}
+
 struct app_instance_statics
 {
     IActivationFactory IActivationFactory_iface;
@@ -1409,7 +1487,12 @@ static inline struct app_instance_statics *impl_from_IAppInstanceStatics( IInspe
 static HRESULT WINAPI app_instance_statics_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct app_instance_statics *impl = impl_from_IAppInstanceStatics( iface );
-    ERR( "app_instance_statics QI: %s\n", debugstr_guid( iid ) );
+    TRACE( "app_instance_statics QI: %s\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = &app_instance_statics_weakref_source;
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -1421,7 +1504,7 @@ static HRESULT WINAPI app_instance_statics_QueryInterface( IInspectable *iface, 
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    ERR( "app_instance_statics QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
+    TRACE( "app_instance_statics QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1455,7 +1538,12 @@ static HRESULT WINAPI app_instance_QueryInterface( IInspectable *iface, REFIID i
         return E_NOINTERFACE;
     }
 
-    ERR( "app_instance QI: %s\n", debugstr_guid( iid ) );
+    TRACE( "app_instance QI: %s\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = &app_instance_weakref_source;
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -1465,7 +1553,7 @@ static HRESULT WINAPI app_instance_QueryInterface( IInspectable *iface, REFIID i
         *out = iface;
         return S_OK;
     }
-    ERR( "app_instance QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
+    TRACE( "app_instance QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1491,6 +1579,11 @@ static HRESULT WINAPI app_activation_args_QueryInterface( void *iface, REFIID ii
         return E_NOINTERFACE;
     }
 
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource ))
+    {
+        *out = &app_activation_args_weakref_source;
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -1512,13 +1605,13 @@ static HRESULT WINAPI app_activation_args_GetRuntimeClassName( void *iface, HSTR
 static HRESULT WINAPI app_activation_args_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 static HRESULT WINAPI app_activation_args_get_Kind( void *iface, UINT32 *kind )
 {
-    ERR( "app_activation_args_get_Kind called\n" );
+    TRACE( "app_activation_args_get_Kind called\n" );
     if (kind) *kind = 0 /* ExtendedActivationKind_Launch */;
     return S_OK;
 }
 static HRESULT WINAPI app_activation_args_get_Data( void *iface, void **data )
 {
-    ERR( "app_activation_args_get_Data called\n" );
+    TRACE( "app_activation_args_get_Data called\n" );
     if (!data) return E_POINTER;
     *data = (void *)activated_event_args_create( 0 );
     return S_OK;
@@ -1547,7 +1640,7 @@ static HRESULT WINAPI app_instance_UnregisterKey( IInspectable *iface ) { return
 static HRESULT WINAPI app_instance_RedirectActivationToAsync( IInspectable *iface, void *args, void **action ) { return E_NOTIMPL; }
 static HRESULT WINAPI app_instance_GetActivatedEventArgs( IInspectable *iface, void **result )
 {
-    ERR( "app_instance_GetActivatedEventArgs called\n" );
+    TRACE( "app_instance_GetActivatedEventArgs called\n" );
     if (!result) return E_POINTER;
     *result = (void *)&app_activation_args_obj;
     return S_OK;
@@ -1619,32 +1712,32 @@ static const void *app_instance_vtbl[] =
 
 static HRESULT WINAPI app_instance_statics_get_RecommendedInstance( IInspectable *iface, IInspectable **value )
 {
-    ERR( "app_instance_statics_get_RecommendedInstance called\n" );
+    TRACE( "app_instance_statics_get_RecommendedInstance called\n" );
     if (!value) return E_POINTER;
     *value = (IInspectable *)&current_app_instance;
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_GetInstances( IInspectable *iface, IInspectable **value )
 {
-    ERR( "app_instance_statics_GetInstances called\n" );
+    TRACE( "app_instance_statics_GetInstances called\n" );
     if (value) *value = NULL;
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_FindOrRegisterInstanceForKey( IInspectable *iface, HSTRING key, IInspectable **result )
 {
-    ERR( "app_instance_statics_FindOrRegisterInstanceForKey called: key %s\n", debugstr_hstring( key ) );
+    TRACE( "app_instance_statics_FindOrRegisterInstanceForKey called: key %s\n", debugstr_hstring( key ) );
     if (!result) return E_POINTER;
     *result = (IInspectable *)&current_app_instance;
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_Unregister( IInspectable *iface )
 {
-    ERR( "app_instance_statics_Unregister called\n" );
+    TRACE( "app_instance_statics_Unregister called\n" );
     return S_OK;
 }
 static HRESULT WINAPI app_instance_statics_GetActivatedEventArgs( IInspectable *iface, IInspectable **result )
 {
-    ERR( "app_instance_statics_GetActivatedEventArgs called\n" );
+    TRACE( "app_instance_statics_GetActivatedEventArgs called\n" );
     if (!result) return E_POINTER;
     *result = (IInspectable *)&app_activation_args_obj;
     return S_OK;
@@ -1685,7 +1778,7 @@ static HRESULT WINAPI app_instance_factory_QueryInterface( IActivationFactory *i
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    ERR( "app_instance_factory QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
+    TRACE( "app_instance_factory QI NOT IMPLEMENTED: %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1730,4 +1823,73 @@ static struct app_instance_statics app_instance_statics_obj =
 };
 
 IActivationFactory *app_instance_factory = &app_instance_statics_obj.IActivationFactory_iface;
+
+/*
+ * Weak reference sources: the vtable of a source is the owner's IInspectable
+ * vtable with GetWeakReference in the seventh slot, so a caller that QIs the
+ * owner for IWeakReferenceSource gets an interface whose QI/AddRef/Release
+ * behave exactly like the owner's.
+ */
+static const void *app_instance_weakref_source_vtbl[] =
+{
+    app_instance_QueryInterface,
+    app_instance_AddRef,
+    app_instance_Release,
+    static_weakref_source_GetWeakReference,
+};
+
+static const void *app_instance_statics_weakref_source_vtbl[] =
+{
+    app_instance_statics_QueryInterface,
+    app_instance_statics_AddRef,
+    app_instance_statics_Release,
+    static_weakref_source_GetWeakReference,
+};
+
+static const void *app_activation_args_weakref_source_vtbl[] =
+{
+    app_activation_args_QueryInterface,
+    app_activation_args_AddRef,
+    app_activation_args_Release,
+    static_weakref_source_GetWeakReference,
+};
+
+static struct static_weakref app_instance_weakref =
+{
+    static_weakref_vtbl,
+    &current_app_instance,
+    (qi_fn)app_instance_QueryInterface,
+};
+
+static struct static_weakref_source app_instance_weakref_source =
+{
+    app_instance_weakref_source_vtbl,
+    &app_instance_weakref,
+};
+
+static struct static_weakref app_instance_statics_weakref =
+{
+    static_weakref_vtbl,
+    &app_instance_statics_obj.IAppInstanceStatics_iface,
+    (qi_fn)app_instance_statics_QueryInterface,
+};
+
+static struct static_weakref_source app_instance_statics_weakref_source =
+{
+    app_instance_statics_weakref_source_vtbl,
+    &app_instance_statics_weakref,
+};
+
+static struct static_weakref app_activation_args_weakref =
+{
+    static_weakref_vtbl,
+    &app_activation_args_obj,
+    (qi_fn)app_activation_args_QueryInterface,
+};
+
+static struct static_weakref_source app_activation_args_weakref_source =
+{
+    app_activation_args_weakref_source_vtbl,
+    &app_activation_args_weakref,
+};
 

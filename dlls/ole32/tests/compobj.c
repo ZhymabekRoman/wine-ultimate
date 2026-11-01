@@ -4682,6 +4682,65 @@ static void test_oletlsdata(void)
             "Unexpected flags %#lx.\n", flags);
 }
 
+static void test_local_server_surrogate_hosting(void)
+{
+    static const CLSID clsid = {0xd3f4b7b1, 0x7f2a, 0x4c9a, {0x9d, 0x5c, 0x8e, 0x2b, 0x1a, 0x6f, 0x4c, 0x30}};
+    static const CLSID appid = {0xa1e2c3d4, 0x5b6a, 0x4789, {0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x78}};
+    WCHAR appid_str[39], clsid_str[39]; /* 39 = CHARS_IN_GUID */
+    IUnknown *obj = NULL;
+    HKEY clsid_root, appid_root, hkey;
+    LONG lr;
+    HRESULT hr;
+
+    StringFromGUID2( &clsid, clsid_str, ARRAY_SIZE( clsid_str ) );
+    StringFromGUID2( &appid, appid_str, ARRAY_SIZE( appid_str ) );
+
+    if (RegOpenKeyExW( HKEY_CLASSES_ROOT, L"CLSID", 0, KEY_WRITE, &clsid_root ))
+    {
+        win_skip( "could not open the CLSID key, skipping surrogate hosting tests\n" );
+        return;
+    }
+    lr = RegCreateKeyExW( clsid_root, clsid_str, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL );
+    if (!lr)
+    {
+        RegSetValueExW( hkey, L"AppID", 0, REG_SZ, (const BYTE *)appid_str, (lstrlenW( appid_str ) + 1) * sizeof(WCHAR) );
+        RegCloseKey( hkey );
+    }
+    if (RegOpenKeyExW( HKEY_CLASSES_ROOT, L"AppID", 0, KEY_WRITE, &appid_root ))
+    {
+        win_skip( "could not open the AppID key, skipping surrogate hosting tests\n" );
+        RegDeleteKeyW( clsid_root, clsid_str );
+        RegCloseKey( clsid_root );
+        return;
+    }
+    lr = RegCreateKeyExW( appid_root, appid_str, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL );
+    if (lr)
+    {
+        win_skip( "could not create the AppID test key, skipping surrogate hosting tests\n" );
+        RegDeleteKeyW( clsid_root, clsid_str );
+        RegCloseKey( appid_root );
+        RegCloseKey( clsid_root );
+        return;
+    }
+    /* The AppID key deliberately has no DllSurrogate value: the class is not
+     * surrogate hosted, so a local server activation must report it as
+     * unavailable instead of starting the default surrogate process. */
+
+    hr = CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    ok( hr == S_OK || hr == S_FALSE, "got hr %#lx.\n", hr );
+
+    hr = CoCreateInstance( &clsid, NULL, CLSCTX_LOCAL_SERVER, &IID_IUnknown, (void **)&obj );
+    ok( hr == REGDB_E_CLASSNOTREG, "got hr %#lx.\n", hr );
+    ok( !obj, "got %p.\n", obj );
+
+    CoUninitialize();
+    RegCloseKey( hkey );
+    RegDeleteKeyW( appid_root, appid_str );
+    RegCloseKey( appid_root );
+    RegDeleteKeyW( clsid_root, clsid_str );
+    RegCloseKey( clsid_root );
+}
+
 START_TEST(compobj)
 {
     init_funcs();
@@ -4701,6 +4760,7 @@ START_TEST(compobj)
     test_ole_menu();
     test_CoGetClassObject();
     test_CoCreateInstanceEx();
+    test_local_server_surrogate_hosting();
     test_CoRegisterMessageFilter();
     test_CoRegisterPSClsid();
     test_CoGetPSClsid();

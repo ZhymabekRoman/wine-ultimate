@@ -971,7 +971,7 @@ Description="RPC service"
 DisplayName="Remote Procedure Call (RPC)"
 ServiceBinary="%11%\rpcss.exe"
 ServiceType=32
-StartType=3
+StartType=2
 ErrorControl=1
 
 [ScardSvrService]

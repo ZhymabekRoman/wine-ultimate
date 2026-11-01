@@ -27,6 +27,7 @@
 #include "winstring.h"
 #include "winternl.h"
 #include "roapi.h"
+#include "weakreference.h"
 #include "shobjidl_core.h"
 
 #define WIDL_using_Windows_Foundation
@@ -559,6 +560,81 @@ static void test_CoreApplication(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+/* Microsoft.Windows.AppLifecycle.IMicrosoftAppInstanceStatics */
+static const GUID IID_IMicrosoftAppInstanceStatics =
+    {0x4f414b25, 0x8330, 0x5a9b, {0xbb, 0xc1, 0x82, 0x29, 0xd4, 0x79, 0x64, 0x9d}};
+
+static void test_AppInstance(void)
+{
+    static const WCHAR *class_name = L"Microsoft.Windows.AppLifecycle.AppInstance";
+    HRESULT (STDMETHODCALLTYPE *get_RecommendedInstance)( IInspectable *obj, IInspectable **value );
+    IWeakReferenceSource *weak_ref_source;
+    IActivationFactory *factory;
+    IWeakReference *weak_ref;
+    IInspectable *statics, *instance, *resolved;
+    void **vtable;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IMicrosoftAppInstanceStatics, (void **)&statics );
+    IActivationFactory_Release( factory );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED( hr ))
+        return;
+
+    /* get_RecommendedInstance follows the six IInspectable slots. */
+    vtable = *(void **)(void *)statics;
+    get_RecommendedInstance = (HRESULT (STDMETHODCALLTYPE *)( IInspectable *, IInspectable ** ))vtable[6];
+    instance = NULL;
+    hr = get_RecommendedInstance( statics, &instance );
+    IInspectable_Release( statics );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED( hr ) || !instance)
+        return;
+
+    check_interface( instance, &IID_IUnknown, TRUE );
+    check_interface( instance, &IID_IInspectable, TRUE );
+    check_interface( instance, &IID_IAgileObject, TRUE );
+    check_interface( instance, &IID_IWeakReferenceSource, TRUE );
+
+    /* Every WinRT server object answers IWeakReferenceSource: the .NET/WinRT
+     * callable wrapper, C++/WinRT weak_ref and the event registration helpers
+     * QI for it on the AppInstance object handed out by RecommendedInstance. */
+    weak_ref_source = NULL;
+    hr = IInspectable_QueryInterface( instance, &IID_IWeakReferenceSource, (void **)&weak_ref_source );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED( hr ) && weak_ref_source)
+    {
+        weak_ref = NULL;
+        hr = IWeakReferenceSource_GetWeakReference( weak_ref_source, &weak_ref );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr ) && weak_ref)
+        {
+            resolved = NULL;
+            hr = IWeakReference_Resolve( weak_ref, &IID_IInspectable, (IInspectable **)&resolved );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( resolved == instance, "weak reference resolved to %p, expected %p.\n", resolved, instance );
+            if (resolved) IInspectable_Release( resolved );
+            IWeakReference_Release( weak_ref );
+        }
+        IWeakReferenceSource_Release( weak_ref_source );
+    }
+
+    IInspectable_Release( instance );
+}
+
 static void test_DataTransferManager(void)
 {
     static const WCHAR *class_name = RuntimeClass_Windows_ApplicationModel_DataTransfer_DataTransferManager;
@@ -880,6 +956,7 @@ START_TEST(twinapi)
     test_AdvertisingManager();
     test_ApplicationView();
     test_CoreApplication();
+    test_AppInstance();
     test_DataTransferManager();
     test_PowerManager();
     test_ToastNotificationManager();

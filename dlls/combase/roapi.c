@@ -81,18 +81,6 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
-    /* PRM/MRT resources layer: .NET Native (mrt100/SharedLibrary System.SR),
-     * Microsoft.UI.Xaml and the app's compiled ResourceManager.Current call
-     * sites activate Windows.ApplicationModel.Resources.Core.ResourceContext
-     * during startup (Calculator: 8x) and FailFast c0000602 when it is absent.
-     * Windows.System.MemoryManager is co-hosted as a no-op stub (1x warning). */
-    if (!wcsncmp(classid, L"Windows.ApplicationModel.Resources.Core.", 38) ||
-        !wcscmp(classid, L"Windows.System.MemoryManager"))
-    {
-        *out = wcsdup(L"windows.applicationmodel.resources.core.dll");
-        return S_OK;
-    }
-
     /* Classes consumed during XAML control construction: they fall through to the
      * ActivatableClassId registry lookup (absent in this unpackaged prefix) and return
      * REGDB_E_CLASSNOTREG, stalling the UI thread before the WebView2 environment is
@@ -108,17 +96,6 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
     if (!wcsncmp(classid, L"Windows.UI.ViewManagement.", 26))
     {
         *out = wcsdup(L"windows.ui.dll");
-        return S_OK;
-    }
-
-    /* Unpackaged WinUI 3 apps (WhatsApp Desktop) resolve the Compositor through this
-     * table: the ActivatableClassId entries are registered only under Wow6432Node in
-     * the prefix, so the 64-bit view lookup returns REGDB_E_CLASSNOTREG and
-     * RoGetActivationFactory logs "Failed to find library".  Route the namespace to
-     * the builtin composition module, mirroring the ViewManagement route above. */
-    if (!wcsncmp(classid, L"Windows.UI.Composition.", 23))
-    {
-        *out = wcsdup(L"windows.ui.composition.dll");
         return S_OK;
     }
 
@@ -605,14 +582,14 @@ HRESULT WINAPI RoActivateInstance(HSTRING classid, IInspectable **instance)
     if (SUCCEEDED(hr))
     {
         hr = IActivationFactory_ActivateInstance(factory, instance);
-        ERR("RoActivateInstance (%s) returned hr 0x%08lx, instance %p\n",
-            wine_dbgstr_hstring(classid), hr, instance ? *instance : NULL);
+        TRACE("RoActivateInstance (%s) returned hr %#lx, instance %p\n",
+              wine_dbgstr_hstring(classid), hr, instance ? *instance : NULL);
         IActivationFactory_Release(factory);
     }
     else
     {
-        ERR("RoActivateInstance (%s) RoGetActivationFactory failed hr 0x%08lx\n",
-            wine_dbgstr_hstring(classid), hr);
+        WARN("RoActivateInstance (%s) RoGetActivationFactory failed hr %#lx\n",
+             wine_dbgstr_hstring(classid), hr);
     }
 
     return hr;

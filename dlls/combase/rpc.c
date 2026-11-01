@@ -792,11 +792,25 @@ static HRESULT create_surrogate_server(REFCLSID rclsid, HANDLE *process)
     }
 
     size = (MAX_PATH + 1) * sizeof(WCHAR);
+    command[0] = 0;
     ret = RegQueryValueExW(key, L"DllSurrogate", NULL, NULL, (LPBYTE)command, &size);
     RegCloseKey(key);
-    if (ret || !size || !command[0])
+    if (ret)
     {
-        TRACE("No value for DllSurrogate key\n");
+        /*
+         * Only an existing (empty) DllSurrogate value asks for the default
+         * surrogate; a class whose AppID has no such value is not surrogate
+         * hosted at all.  Starting dllhost.exe for it parks the activation for
+         * a second on a server which cannot host the class and then fails with
+         * E_NOINTERFACE instead of REGDB_E_CLASSNOTREG.
+         */
+        TRACE("No DllSurrogate value for %s\n", debugstr_guid(rclsid));
+        return REGDB_E_CLASSNOTREG;
+    }
+
+    if (!command[0])
+    {
+        TRACE("Empty DllSurrogate value, using the default surrogate\n");
 
         if ((sizeof(void *) == 8 || is_wow64) && opposite == KEY_WOW64_32KEY)
             GetSystemWow64DirectoryW(command, MAX_PATH - ARRAY_SIZE(L"\\dllhost.exe"));
