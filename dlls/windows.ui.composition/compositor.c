@@ -17,6 +17,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <stdbool.h>
+
 #include "private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(composition);
@@ -685,11 +687,65 @@ struct compositor *compositor_create( void )
  * with the default interface, or ActivateInstance) creates a new compositor instance.
  */
 
+/*
+ * Microsoft.UI.Composition.IInteropCompositorFactoryPartner {22118adf-23f1-4801-bcfa-
+ * 66cbf48cc51b} is the interface the WinUI 3 XAML root asks the Compositor activation
+ * factory for: Microsoft.ui.xaml.dll!ActivationFactoryCache::GetInteropCompositorFactoryPartner()
+ * calls RoGetActivationFactory for it and, on failure, goes straight through OnFailure ->
+ * TraceForFailFast -> FailFastWithStowedExceptions (verified in IDA), which is how the app
+ * UI thread dies with the compositor await never completing.
+ *
+ * Windows hosts it on Microsoft::UI::Composition::CompositorFactory (dcompi.dll), a WRL
+ * Implements<FtmBase, IInteropCompositorFactoryPartner> + ICompositorStatics +
+ * IInteropCompositorFactoryRestricted object; the partner is handed out as a selector
+ * vftable of that same instance, so it is one object answering the activation interfaces
+ * and the partner interface alike.  Its layout is IUnknown + IActivationFactory +
+ * CreateInteropCompositor + CheckEnabled (dcompi vftable 0x180122c40, methods 0x18005a5d0
+ * and 0x180056d00).  There is no published IDL for it, so it is declared here.
+ *
+ * CreateInteropCompositor / CheckEnabled report E_NOTIMPL: this module bridges WinRT
+ * composition onto in-process DirectComposition and has no server compositor to hand out,
+ * and returning a compositor that is not wired into the XAML pipeline would let XAML build
+ * a visual tree that is never presented.  ICompositorStatics and
+ * IInteropCompositorFactoryRestricted are implemented by the Windows factory as well;
+ * their IIDs are not in any binary on this system (they are only reachable through the
+ * WRL CanCastTo chain at dcompi 0x180040f78) and are deliberately left out rather than
+ * guessed.
+ */
+const GUID IID_IInteropCompositorFactoryPartner =
+    { 0x22118adf, 0x23f1, 0x4801, { 0xbc, 0xfa, 0x66, 0xcb, 0xf4, 0x8c, 0xc5, 0x1b } };
+
+typedef struct IInteropCompositorFactoryPartner IInteropCompositorFactoryPartner;
+typedef struct IInteropCompositorFactoryPartnerVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IInteropCompositorFactoryPartner *iface, REFIID riid, void **obj );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IInteropCompositorFactoryPartner *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IInteropCompositorFactoryPartner *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IInteropCompositorFactoryPartner *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IInteropCompositorFactoryPartner *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IInteropCompositorFactoryPartner *iface, TrustLevel *level );
+    HRESULT (STDMETHODCALLTYPE *CreateInteropCompositor)( IInteropCompositorFactoryPartner *iface,
+            IUnknown *device, IUnknown *callback, REFIID riid, void **result );
+    HRESULT (STDMETHODCALLTYPE *CheckEnabled)( IInteropCompositorFactoryPartner *iface,
+            bool *enabled, bool *available );
+} IInteropCompositorFactoryPartnerVtbl;
+struct IInteropCompositorFactoryPartner
+{
+    const struct IInteropCompositorFactoryPartnerVtbl *lpVtbl;
+};
+
 struct compositor_factory
 {
     struct IActivationFactory IActivationFactory_iface;
+    struct IInteropCompositorFactoryPartner IInteropCompositorFactoryPartner_iface;
     LONG ref;
 };
+
+static inline struct compositor_factory *impl_from_IInteropCompositorFactoryPartner(
+        struct IInteropCompositorFactoryPartner *iface )
+{
+    return CONTAINING_RECORD( iface, struct compositor_factory, IInteropCompositorFactoryPartner_iface );
+}
 
 static inline struct compositor_factory *impl_from_IActivationFactory( struct IActivationFactory *iface )
 {
@@ -723,6 +779,15 @@ static HRESULT WINAPI factory_QueryInterface( struct IActivationFactory *iface, 
         hr = ICompositor_QueryInterface( &compositor->ICompositor_iface, iid, out );
         IInspectable_Release( (IInspectable *)&compositor->ICompositor_iface ); /* drop creation ref */
         return hr;
+    }
+
+    /* The WinUI 3 XAML root requests this interface from the activation factory and
+     * fail-fasts when it is refused: hand out the partner selector of the same object. */
+    if (IsEqualGUID( iid, &IID_IInteropCompositorFactoryPartner ))
+    {
+        *out = &impl->IInteropCompositorFactoryPartner_iface;
+        IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
+        return S_OK;
     }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -784,9 +849,95 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+/*
+ * IInteropCompositorFactoryPartner, served by the same instance as the activation factory
+ * (see the declaration above for the layout evidence).
+ */
+
+static HRESULT WINAPI partner_QueryInterface( struct IInteropCompositorFactoryPartner *iface,
+        REFIID iid, void **out )
+{
+    struct compositor_factory *impl = impl_from_IInteropCompositorFactoryPartner( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IInteropCompositorFactoryPartner ))
+    {
+        *out = &impl->IInteropCompositorFactoryPartner_iface;
+        IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
+        return S_OK;
+    }
+
+    return factory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+
+static ULONG WINAPI partner_AddRef( struct IInteropCompositorFactoryPartner *iface )
+{
+    return factory_AddRef( &impl_from_IInteropCompositorFactoryPartner( iface )->IActivationFactory_iface );
+}
+
+static ULONG WINAPI partner_Release( struct IInteropCompositorFactoryPartner *iface )
+{
+    return factory_Release( &impl_from_IInteropCompositorFactoryPartner( iface )->IActivationFactory_iface );
+}
+
+static HRESULT WINAPI partner_GetIids( struct IInteropCompositorFactoryPartner *iface,
+        ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI partner_GetRuntimeClassName( struct IInteropCompositorFactoryPartner *iface,
+        HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_UI_Composition_Compositor,
+            ARRAYSIZE( RuntimeClass_Windows_UI_Composition_Compositor ) - 1, class_name );
+}
+
+static HRESULT WINAPI partner_GetTrustLevel( struct IInteropCompositorFactoryPartner *iface,
+        TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI partner_CreateInteropCompositor( struct IInteropCompositorFactoryPartner *iface,
+        IUnknown *device, IUnknown *callback, REFIID riid, void **result )
+{
+    /* Windows hands the caller a server-side interop compositor driven through the
+     * composition partner channel; this module is an in-process DirectComposition bridge
+     * with no such channel, so refuse instead of returning a compositor XAML would present
+     * to nothing. */
+    FIXME( "iface %p, device %p, callback %p, riid %s, result %p: no composition partner channel, returning E_NOTIMPL.\n",
+            iface, device, callback, debugstr_guid( riid ), result );
+    if (result) *result = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI partner_CheckEnabled( struct IInteropCompositorFactoryPartner *iface,
+        bool *enabled, bool *available )
+{
+    FIXME( "iface %p, enabled %p, available %p: returning E_NOTIMPL.\n", iface, enabled, available );
+    return E_NOTIMPL;
+}
+
+static const struct IInteropCompositorFactoryPartnerVtbl partner_vtbl =
+{
+    partner_QueryInterface,
+    partner_AddRef,
+    partner_Release,
+    partner_GetIids,
+    partner_GetRuntimeClassName,
+    partner_GetTrustLevel,
+    partner_CreateInteropCompositor,
+    partner_CheckEnabled,
+};
+
 static struct compositor_factory compositor_factory =
 {
     {&factory_vtbl},
+    {&partner_vtbl},
     1,
 };
 

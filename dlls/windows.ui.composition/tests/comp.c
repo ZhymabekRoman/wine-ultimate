@@ -20,6 +20,7 @@
 
 #include <stdarg.h>
 #include <stddef.h>
+#include <stdbool.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -313,31 +314,221 @@ static void test_desktop_target( struct ICompositor *compositor, HWND hwnd )
 }
 
 /*
- * WhatsApp Desktop path: the unpackaged app calls RoGetActivationFactory for
- * "Windows.UI.Composition.Compositor" with no
- * Software\Microsoft\WindowsRuntime\ActivatableClassId entry in the prefix.
- * combase must resolve the class through its built-in namespace routing to
- * windows.ui.composition.dll, exactly as it routes Windows.UI.ViewManagement.*
- * to windows.ui.dll.
+ * The unpackaged WinUI 3 startup path (WhatsApp Desktop): the app's XAML root activates
+ * Windows.UI.Composition.Compositor while the prefix has NO
+ * Software\Microsoft\WindowsRuntime\ActivatableClassId entry for it, because such an app
+ * registers its classes through the framework package.  combase has to resolve the class
+ * to this module through its own routing; a miss shows up in the app trace as
+ * "err:combase:roapi.c:325 Failed to find library for Windows.UI.Composition.Compositor"
+ * and the UI thread then parks.
+ *
+ * The .NET projection (WinRTModule.GetActivationFactory<I>(runtimeClassId, iid)) and the
+ * C++/WinRT projection pass the class interface IID (IID_ICompositor), not
+ * IID_IActivationFactory, so both request shapes are pinned here, together with the
+ * factory methods the XAML root calls on the resulting compositor.
  */
 static void test_activation_without_registry( void )
 {
+    struct IVisualCollection *collection = NULL;
+    struct ICompositionPropertySet *props = NULL;
+    struct ICompositionColorBrush *brush = NULL;
     struct ICompositor *compositor = NULL;
+    struct IContainerVisual *visual = NULL;
+    struct ISpriteVisual *sprite = NULL;
     IActivationFactory *factory = NULL;
-    HSTRING str;
+    IInspectable *instance = NULL;
+    HSTRING str, name = NULL;
+    INT32 count = -1;
     HRESULT hr;
 
-    WindowsCreateString( RuntimeClass_Windows_UI_Composition_Compositor,
+    /* The prefix registers this class for the built-in module (loader/wine.inf.in); drop
+     * the key so this probe exercises the route combase has to provide when no
+     * ActivatableClassId entry exists, as on a prefix that predates the registration. */
+    RegDeleteKeyW( HKEY_LOCAL_MACHINE,
+            L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.UI.Composition.Compositor" );
+
+    hr = WindowsCreateString( RuntimeClass_Windows_UI_Composition_Compositor,
             ARRAYSIZE( RuntimeClass_Windows_UI_Composition_Compositor ) - 1, &str );
-    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
-    ok( hr == S_OK, "RoGetActivationFactory should resolve Compositor without registry registration, hr %#lx.\n", hr );
-    if (factory) IActivationFactory_Release( factory );
+    ok( hr == S_OK, "failed to create class name string, %#lx.\n", hr );
+
+    compositor = NULL;
+    hr = RoGetActivationFactory( str, &IID_ICompositor, (void **)&compositor );
+    ok( hr == S_OK, "RoGetActivationFactory(IID_ICompositor) failed, hr %#lx.\n", hr );
+    ok( !!compositor, "RoGetActivationFactory(IID_ICompositor) returned compositor %p.\n", compositor );
 
     factory = NULL;
-    hr = RoGetActivationFactory( str, &IID_ICompositor, (void **)&compositor );
-    ok( hr == S_OK && compositor, "RoGetActivationFactory(IID_ICompositor) should succeed, hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK, "RoGetActivationFactory(IID_IActivationFactory) failed, hr %#lx.\n", hr );
+    ok( !!factory, "RoGetActivationFactory(IID_IActivationFactory) returned factory %p.\n", factory );
+
+    instance = NULL;
+    hr = RoActivateInstance( str, &instance );
+    ok( hr == S_OK, "RoActivateInstance failed, hr %#lx.\n", hr );
+    ok( !!instance, "RoActivateInstance returned instance %p.\n", instance );
+    if (instance) IInspectable_Release( instance );
+
+    if (factory)
+    {
+        instance = NULL;
+        hr = IActivationFactory_ActivateInstance( factory, &instance );
+        ok( hr == S_OK && instance, "ActivateInstance failed, hr %#lx.\n", hr );
+        if (instance)
+        {
+            struct ICompositor *activated = NULL;
+            hr = IInspectable_QueryInterface( instance, &IID_ICompositor, (void **)&activated );
+            ok( hr == S_OK && activated, "failed to QI the activated instance for ICompositor, hr %#lx.\n", hr );
+            if (activated) ICompositor_Release( activated );
+
+            name = NULL;
+            hr = IInspectable_GetRuntimeClassName( instance, &name );
+            ok( hr == S_OK, "GetRuntimeClassName failed, hr %#lx.\n", hr );
+            ok( !wcscmp( WindowsGetStringRawBuffer( name, NULL ),
+                         RuntimeClass_Windows_UI_Composition_Compositor ),
+                    "got class name %s.\n", debugstr_w( WindowsGetStringRawBuffer( name, NULL ) ) );
+            WindowsDeleteString( name );
+        }
+        IInspectable_Release( instance );
+    }
+    if (instance) IInspectable_Release( instance );
+
+    if (!compositor)
+    {
+        /* Nothing to exercise: the class did not resolve, which is the regression this
+         * test pins.  Skip the compositor-body checks instead of crashing. */
+        if (factory) IActivationFactory_Release( factory );
+        WindowsDeleteString( str );
+        return;
+    }
+
+    /* The compositor the app gets must build the visual tree the XAML root asks for. */
+    visual = NULL;
+    hr = ICompositor_CreateContainerVisual( compositor, &visual );
+    ok( hr == S_OK && visual, "failed to create container visual, hr %#lx.\n", hr );
+    if (visual)
+    {
+        collection = NULL;
+        hr = IContainerVisual_get_Children( visual, &collection );
+        ok( hr == S_OK && collection, "failed to get visual children, hr %#lx.\n", hr );
+        if (collection)
+        {
+            count = -1;
+            hr = IVisualCollection_get_Count( collection, &count );
+            ok( hr == S_OK && count == 0, "new container visual has %d children, hr %#lx.\n", count, hr );
+            IVisualCollection_Release( collection );
+        }
+        IContainerVisual_Release( visual );
+    }
+
+    sprite = NULL;
+    hr = ICompositor_CreateSpriteVisual( compositor, &sprite );
+    ok( hr == S_OK && sprite, "failed to create sprite visual, hr %#lx.\n", hr );
+    if (sprite) ISpriteVisual_Release( sprite );
+
+    brush = NULL;
+    hr = ICompositor_CreateColorBrush( compositor, &brush );
+    ok( hr == S_OK && brush, "failed to create brush, hr %#lx.\n", hr );
+    if (brush) ICompositionColorBrush_Release( brush );
+
+    props = NULL;
+    hr = ICompositor_CreatePropertySet( compositor, &props );
+    ok( hr == S_OK && props, "failed to create property set, hr %#lx.\n", hr );
+    if (props) ICompositionPropertySet_Release( props );
+
+    ICompositor_Release( compositor );
+    if (factory) IActivationFactory_Release( factory );
     WindowsDeleteString( str );
-    if (compositor) ICompositor_Release( compositor );
+}
+
+/*
+ * The WinUI 3 XAML root caches the Compositor's interop partner factory:
+ * Microsoft.ui.xaml.dll!ActivationFactoryCache::GetInteropCompositorFactoryPartner()
+ * calls RoGetActivationFactory( Compositor class name, IID_IInteropCompositorFactoryPartner )
+ * and, when that call fails, runs straight into FailFastWithStowedExceptions (verified in
+ * IDA: OnFailure -> TraceForFailFast -> FailFastWithStowedExceptions).  The interface is
+ * Microsoft.UI.Composition.IInteropCompositorFactoryPartner {22118adf-23f1-4801-bcfa-
+ * 66cbf48cc51b}, recovered from dcompi.dll's Microsoft::UI::Composition::CompositorFactory,
+ * which is WRL Implements<FtmBase, IInteropCompositorFactoryPartner> + ICompositorStatics +
+ * IInteropCompositorFactoryRestricted.  Its vtable (dcompi 0x180122c40) is
+ * IUnknown + IActivationFactory + CreateInteropCompositor + CheckEnabled, so the factory
+ * has to answer this QI as the same activatable factory object.
+ */
+/* Declared here (not from a header): the interface has no published IDL in the tree. The
+ * slot order below is the one dcompi.dll's factory object exposes, not an assumption:
+ * vftable 0x180122c40 = QueryInterface, AddRef, Release, GetIids, GetRuntimeClassName,
+ * GetTrustLevel, CreateInteropCompositor (0x18005a5d0), CheckEnabled (0x180056d00). */
+typedef struct IInteropCompositorFactoryPartner IInteropCompositorFactoryPartner;
+typedef struct IInteropCompositorFactoryPartnerVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IInteropCompositorFactoryPartner *iface, REFIID riid, void **obj );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IInteropCompositorFactoryPartner *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IInteropCompositorFactoryPartner *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IInteropCompositorFactoryPartner *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IInteropCompositorFactoryPartner *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IInteropCompositorFactoryPartner *iface, TrustLevel *level );
+    HRESULT (STDMETHODCALLTYPE *CreateInteropCompositor)( IInteropCompositorFactoryPartner *iface,
+            IUnknown *device, IUnknown *callback, REFIID riid, void **result );
+    HRESULT (STDMETHODCALLTYPE *CheckEnabled)( IInteropCompositorFactoryPartner *iface, bool *enabled, bool *second );
+} IInteropCompositorFactoryPartnerVtbl;
+struct IInteropCompositorFactoryPartner { const struct IInteropCompositorFactoryPartnerVtbl *lpVtbl; };
+
+#define IPartner_QueryInterface(p,a,b)        (p)->lpVtbl->QueryInterface(p,a,b)
+#define IPartner_Release(p)                   (p)->lpVtbl->Release(p)
+#define IPartner_CreateInteropCompositor(p,a,b,c,d) (p)->lpVtbl->CreateInteropCompositor(p,a,b,c,d)
+#define IPartner_CheckEnabled(p,a,b)          (p)->lpVtbl->CheckEnabled(p,a,b)
+
+static const IID IID_IInteropCompositorFactoryPartner_test =
+    { 0x22118adf, 0x23f1, 0x4801, { 0xbc, 0xfa, 0x66, 0xcb, 0xf4, 0x8c, 0xc5, 0x1b } };
+
+static void test_interop_partner_factory( void )
+{
+    IInteropCompositorFactoryPartner *partner = NULL;
+    IActivationFactory *factory = NULL;
+    IUnknown *unknown = NULL;
+    HSTRING str;
+    bool a = true, b = true;
+    HRESULT hr;
+
+    hr = WindowsCreateString( RuntimeClass_Windows_UI_Composition_Compositor,
+            ARRAYSIZE( RuntimeClass_Windows_UI_Composition_Compositor ) - 1, &str );
+    ok( hr == S_OK, "failed to create class name string, %#lx.\n", hr );
+
+    partner = NULL;
+    hr = RoGetActivationFactory( str, &IID_IInteropCompositorFactoryPartner_test, (void **)&partner );
+    ok( hr == S_OK && partner, "RoGetActivationFactory(IInteropCompositorFactoryPartner) failed, hr %#lx.\n", hr );
+
+    if (!partner)
+    {
+        WindowsDeleteString( str );
+        return;
+    }
+
+    /* The partner is the activatable factory itself: dcompi hands out a selector vftable of
+     * the same instance, so the activation interfaces answer through it. */
+    unknown = NULL;
+    hr = IPartner_QueryInterface( partner, &IID_IUnknown, (void **)&unknown );
+    ok( hr == S_OK && unknown, "QI for IUnknown on the partner failed, hr %#lx.\n", hr );
+    IUnknown_Release( unknown );
+
+    factory = NULL;
+    hr = IPartner_QueryInterface( partner, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK && factory, "QI for IActivationFactory on the partner failed, hr %#lx.\n", hr );
+
+    /* CreateInteropCompositor is what the XAML root drives on this interface. The bridge
+     * has no server-compositor handoff, so it must report E_NOTIMPL with a NULL result
+     * rather than hand back a compositor that is not wired to the XAML pipeline. */
+    unknown = NULL;
+    hr = IPartner_CreateInteropCompositor( partner, NULL, NULL, &IID_IUnknown, (void **)&unknown );
+    ok( hr == E_NOTIMPL, "CreateInteropCompositor should report E_NOTIMPL, hr %#lx.\n", hr );
+    ok( !unknown, "CreateInteropCompositor left output %p.\n", unknown );
+
+    a = b = true;
+    hr = IPartner_CheckEnabled( partner, &a, &b );
+    ok( hr == E_NOTIMPL, "CheckEnabled should report E_NOTIMPL, hr %#lx.\n", hr );
+    ok( a && b, "CheckEnabled wrote to its outputs, a %d b %d.\n", a, b );
+
+    if (factory) IActivationFactory_Release( factory );
+    IPartner_Release( partner );
+    WindowsDeleteString( str );
 }
 
 static BOOL register_test_class( void )
@@ -388,9 +579,10 @@ START_TEST( comp )
         return;
     }
 
-    /* Probe before any registry registration exists (fresh prefix): this is the
-     * exact path that logs "Failed to find library" in the WhatsApp Desktop trace. */
+    /* Probe before any ActivatableClassId registration exists (fresh prefix): this is the
+     * exact shape of the unpackaged WinUI 3 startup activation. */
     test_activation_without_registry();
+    test_interop_partner_factory();
 
     if (!register_test_class())
     {
