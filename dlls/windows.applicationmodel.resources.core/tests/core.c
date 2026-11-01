@@ -569,8 +569,8 @@ static void test_iagile( void )
  * overflow right after the second ResourceContext activation). */
 static void test_getiids_nullargs( void )
 {
-    static const IID IID_IResourceContext_v81_loc = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
-    void *factory = NULL, *v81 = NULL;
+    static const IID IID_IReferenceTracker_loc = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+    void *factory = NULL, *rt = NULL;
     ULONG count = 0xdead;
     IID *iids = (void *)0x1;
     HRESULT hr;
@@ -588,18 +588,21 @@ static void test_getiids_nullargs( void )
     hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, ULONG *, IID **))VT(factory, 3))(factory, NULL, NULL);
     ok( hr == E_POINTER, "getiids: factory GetIids(NULL,NULL) hr=%08x (expect E_POINTER)\n", hr );
 
-    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContext_v81_loc, &v81);
-    if (SUCCEEDED( hr ) && v81)
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IReferenceTracker_loc, &rt);
+    if (SUCCEEDED( hr ) && rt)
     {
-        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, ULONG *, IID **))VT(v81, 3))(v81, NULL, NULL);
-        ok( hr == E_POINTER, "getiids: IResourceContext(v81) GetIids(NULL,NULL) hr=%08x (expect E_POINTER)\n", hr );
-        /* mrt100_app measured calling CreateWithCurrentView(view, NULL)
-         * (AV at rc81_CreateWithCurrentView+0x28 -> catch/rethrow loop) */
-        hr = CALL( v81, 7, (void *)0x1, NULL );  /* CreateWithCurrentView(view, NULL) */
-        ok( hr == E_POINTER, "getiids: CreateWithCurrentView(view,NULL) hr=%08x (expect E_POINTER)\n", hr );
-        hr = CALL( v81, 6, NULL );  /* Create(NULL) */
-        ok( hr == E_POINTER, "getiids: Create(NULL) hr=%08x (expect E_POINTER)\n", hr );
-        CALL( v81, 2, (ULONG*)&hr );
+        /* IReferenceTracker slots carry no out-params except
+         * FindTrackerTargets/GetReferenceTrackerManager, whose NULL probes
+         * must be E_POINTER.  The no-argument notifications (slots 3/7 -- the
+         * two measured AV sites) must ignore the caller's argument registers
+         * entirely, so passing junk here is both legal and harmless. */
+        hr = CALL( rt, 5, NULL );  /* FindTrackerTargets(NULL) */
+        ok( hr == E_POINTER, "getiids: FindTrackerTargets(NULL) hr=%08x (expect E_POINTER)\n", hr );
+        hr = CALL( rt, 6, NULL );  /* GetReferenceTrackerManager(NULL) */
+        ok( hr == E_POINTER, "getiids: GetReferenceTrackerManager(NULL) hr=%08x (expect E_POINTER)\n", hr );
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, void *, void *))VT(rt, 3))( rt, (void *)0x1, (void *)0x2 );
+        ok( hr == S_OK, "getiids: ConnectFromTrackerSource hr=%08x (expect S_OK, no writes)\n", hr );
+        CALL( rt, 2, (ULONG*)&hr );
     }
     hr = CALL( factory, 6, NULL );  /* IActivationFactory::ActivateInstance(NULL) */
     ok( hr == E_POINTER, "getiids: ActivateInstance(NULL) hr=%08x (expect E_POINTER)\n", hr );
@@ -704,21 +707,17 @@ done:
     CALL( factory, 2, (ULONG*)&hr );
 }
 
-/* The Calculator crash-loop (280x c0000005, sr2.log 47150+) was settled as
- * caller-side: both AV sites decode to the 8.1 IResourceContext {11d3b13a}
- * interface on the factory singleton -- rc81_GetIids writing *count with the
- * caller passing count = 0x24 (a value, not a pointer) and
- * rc81_CreateWithCurrentView writing *out with out = unmapped heap.  The
- * faulting writes are exactly what Windows' own IInspectable::GetIids /
- * class-factory Create methods do: dereference the caller's out params.
- * These tests pin the module side of that verdict:
+/* The Calculator crash-loop (280x c0000005, sr2.log 47150+) is a module-side
+ * interface-identity defect, not caller state: {11d3b13a-...} is
+ * IReferenceTracker, and the two AV sites are the module's own writes through
+ * registers of a NO-ARGUMENT call (see test_reference_tracker_identity).
+ * What is pinned here:
  *  (a) the lazy the_current_context singleton is immune to the
  *      create_context re-entrancy window (DeviceFamily registry read inside
  *      creation): N threads race the cold path, all get the one valid
  *      context, no corruption, no AV;
- *  (b) the two measured caller shapes fault inside the module on the caller
- *      arguments (Windows-parity) and leave the module fully functional --
- *      the app survives 280 faults precisely because module state is intact.
+ *  (b) the app's entry shape (QI IResourceContextStatics2 -> GetForCurrentView
+ *      on the cold singleton) survives 400 concurrent drives.
  */
 #define HAMMER_THREADS 8
 #define HAMMER_ITERS   50
@@ -831,93 +830,182 @@ static void test_current_context_reentrancy( void )
     CALL( factory, 2, &hr );
 }
 
-/* mrt100's measured call shapes on IResourceContext(v81) and the module-side
- * verdict (settled against the deployed binary, sr2.log 47150+):
+/* The CLR reference tracker walks IReferenceTracker
+ * {11d3b13a-180e-4789-a8be-7712882893e6} (windows.ui.xaml.hosting.referencetracker.idl,
+ * IUnknown-derived) on every WinRT object .NET Native wraps:
+ *   [3] ConnectFromTrackerSource   [4] DisconnectFromTrackerSource
+ *   [5] FindTrackerTargets         [6] GetReferenceTrackerManager
+ *   [7] AddRefFromTrackerSource    [8] ReleaseFromTrackerSource
+ *   [9] PegFromTrackerSource
+ * Slots 3, 4, 7, 8 and 9 take NO arguments.  The module used to answer this
+ * QI with an IInspectable + Create/CreateWithCurrentView shaped vtable, so the
+ * app's no-argument call at slot 3 ran GetIids ("movl $0,(%rdx)") and the
+ * no-argument call at slot 7 ran CreateWithCurrentView ("mov %rax,(%rbx)"):
+ * both wrote through registers the caller never set (rdx = 0x24, r8 = stale
+ * heap) -- exactly the two AVs at 0x1800085ac and 0x18000854d.  A call site
+ * that passes no out-params cannot be "caller state", which is what the
+ * earlier verdict in this file claimed.
  *
- *   AV1: rip rc81_GetIids+0xc = "movl $0x0,(%rdx)" with rdx = 0x24 and
- *        rcx = &rc_factory_inst.vt_v81 -- mrt100 passed the VALUE 36 as the
- *        ULONG* count out-param.  Windows' own IInspectable::GetIids writes
- *        *count unconditionally after the NULL probe (this module's code is
- *        slot-identical), so the identical fault occurs on Windows: the
- *        invalid pointer is caller state, not module state.
- *   AV2: rip rc81_CreateWithCurrentView+0x2d = "mov %rax,(%rbx)" with
- *        rbx = out = unmapped heap -- mrt100's RCW out slot was freed.
- *        rdx = HSTRING "en-US" pointing into this module's .rdata, i.e. a
- *        string the app legitimately received from the module earlier
- *        (Languages[0] / qualifier values), proving the module objects are
- *        alive and string-intact at fault time.
- *
- * In-process the 0x24/freed shapes cannot be probed without taking the test
- * process down with them (no __try in this toolchain, and Windows-parity
- * forbids guarding the write itself -- that would be the forbidden band-aid:
- * returning S_OK with a skipped count write = garbage).  What the suite pins
- * instead: every v81 entry responds correctly to well-formed and NULL
- * arguments, and the lazy singleton survives 280 fault-equivalents of
- * hammering (reentrancy test above). */
-static void test_mrt100_caller_shapes( void )
+ * The probes below are those two write sites made safe and observable: the
+ * arguments point at mapped sentinels, so the old vtable clobbers them (red)
+ * and the tracker contract leaves them untouched (green).
+ */
+static void test_reference_tracker_identity( void )
 {
-    static const IID IID_IResourceContext_v81_loc = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
-    void *factory = NULL, *v81 = NULL, *ctx = NULL;
-    IID *iids = NULL;
-    ULONG count = 0xdead;
-    HSTRING hview = NULL;
-    HSTRING_HEADER hdr;
+    static const IID IID_IReferenceTracker_loc = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+    static const IID IID_IReferenceTrackerManager_loc = {0x3cf184b4, 0x7ccb, 0x4dda, {0x84, 0x55, 0x7e, 0x6c, 0xe9, 0x9a, 0x32, 0x98}};
+    void *factory = NULL, *rt = NULL, *rt2 = NULL, *inspectable = NULL;
+    void *ctx1 = NULL, *ctx2 = NULL, *mgr = NULL, *cb = NULL;
+    IID *iids = NULL, *arr;
+    ULONG count = 0, i, found_tracker = 0, found_statics2 = 0, found_context = 0;
+    ULONG probe = 0x24;                 /* the exact rdx value of AV1 */
+    void *sentinel = (void *)0x5b5b5b5b;/* the exact r8 value class of AV2 */
+    HSTRING name = NULL;
+    const WCHAR *raw;
     HRESULT hr;
 
     hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
-    ok( hr == S_OK, "shapes: factory hr=%08x\n", hr );
+    ok( hr == S_OK, "tracker: factory hr=%08x\n", hr );
     if (hr != S_OK) return;
-    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContext_v81_loc, &v81);
-    if (FAILED( hr ) || !v81)
+
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( factory, 0 ))( factory, &IID_IReferenceTracker_loc, &rt );
+    ok( hr == S_OK && rt, "tracker: QI(IReferenceTracker) hr=%08x obj=%p\n", hr, rt );
+    if (FAILED( hr ) || !rt) { CALL( factory, 2, &hr ); return; }
+
+    /* AV1 site: slot 3 must be the no-argument ConnectFromTrackerSource, so it
+     * may not write through the ULONG pointer / IID pointer pair that the old
+     * GetIids slot wrote. */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, ULONG *, IID **))VT( rt, 3 ))( rt, &probe, &iids );
+    ok( hr == S_OK, "tracker: ConnectFromTrackerSource hr=%08x\n", hr );
+    ok( probe == 0x24, "tracker: slot 3 wrote the caller's ULONG* (probe=%u, expect 0x24 untouched)\n", probe );
+    ok( iids == NULL, "tracker: slot 3 wrote the caller's IID** (iids=%p, expect untouched)\n", iids );
+
+    /* AV2 site: slot 7 must be the no-argument AddRefFromTrackerSource, so it
+     * may not write the out-param the old CreateWithCurrentView slot wrote. */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, void *, void **))VT( rt, 7 ))( rt, (void *)0x1, &sentinel );
+    ok( hr == S_OK, "tracker: AddRefFromTrackerSource hr=%08x\n", hr );
+    ok( sentinel == (void *)0x5b5b5b5b, "tracker: slot 7 wrote the caller's out param (got %p)\n", sentinel );
+
+    /* the rest of the walk: all notifications are no-argument and S_OK */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *))VT( rt, 4 ))( rt );
+    ok( hr == S_OK, "tracker: DisconnectFromTrackerSource hr=%08x\n", hr );
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *))VT( rt, 8 ))( rt );
+    ok( hr == S_OK, "tracker: ReleaseFromTrackerSource hr=%08x\n", hr );
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *))VT( rt, 9 ))( rt );
+    ok( hr == S_OK, "tracker: PegFromTrackerSource hr=%08x\n", hr );
+
+    /* FindTrackerTargets: NULL is E_POINTER, a callback is accepted and no
+     * tracker target is reported (the module owns no managed objects). */
+    hr = CALL( rt, 5, NULL );
+    ok( hr == E_POINTER, "tracker: FindTrackerTargets(NULL) hr=%08x\n", hr );
+    cb = (void *)0x1234; /* never dereferenced: the object reports no targets */
+    hr = CALL( rt, 5, cb );
+    ok( hr == S_OK, "tracker: FindTrackerTargets(callback) hr=%08x\n", hr );
+
+    /* GetReferenceTrackerManager: CoreRT calls through the result without
+     * checking the HRESULT, so the object has to hand out a real
+     * IReferenceTrackerManager.  Its slots are the GC cycle notifications. */
+    hr = CALL( rt, 6, NULL );
+    ok( hr == E_POINTER, "tracker: GetReferenceTrackerManager(NULL) hr=%08x\n", hr );
+    mgr = NULL;
+    hr = CALL( rt, 6, &mgr );
+    ok( hr == S_OK && mgr, "tracker: GetReferenceTrackerManager hr=%08x mgr=%p\n", hr, mgr );
+    if (SUCCEEDED( hr ) && mgr)
     {
-        todo_wine ok( 0, "shapes: v81 QI hr=%08x (module lacks IResourceContext v81 identity)\n", hr );
-        CALL( factory, 2, &hr );
-        return;
+        void *mgr2 = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *))VT( mgr, 3 ))( mgr );  /* ReferenceTrackingStarted */
+        ok( hr == S_OK, "tracker: ReferenceTrackingStarted hr=%08x\n", hr );
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, int))VT( mgr, 4 ))( mgr, 0 );  /* FindTrackerTargetsCompleted */
+        ok( hr == S_OK, "tracker: FindTrackerTargetsCompleted hr=%08x\n", hr );
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *))VT( mgr, 5 ))( mgr );  /* ReferenceTrackingCompleted */
+        ok( hr == S_OK, "tracker: ReferenceTrackingCompleted hr=%08x\n", hr );
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, void *))VT( mgr, 6 ))( mgr, NULL );  /* SetReferenceTrackerHost */
+        ok( hr == E_POINTER, "tracker: SetReferenceTrackerHost(NULL) hr=%08x\n", hr );
+        /* a real host: the manager keeps a reference to it */
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, void *))VT( mgr, 6 ))( mgr, factory );
+        ok( hr == S_OK, "tracker: SetReferenceTrackerHost(factory) hr=%08x\n", hr );
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( mgr, 0 ))( mgr, &IID_IReferenceTrackerManager_loc, &mgr2 );
+        ok( hr == S_OK && mgr2 == mgr, "tracker: manager QI identity hr=%08x mgr2=%p\n", hr, mgr2 );
+        if (mgr2) CALL( mgr2, 2, &hr );
+        CALL( mgr, 2, &hr );
     }
 
-    /* well-formed GetIids: S_OK, empty set (module publishes no IIDs) */
-    hr = CALL( v81, 3, &count, &iids );
-    ok( hr == S_OK && count == 0, "shapes: v81 GetIids(&count,&iids) hr=%08x count=%u\n", hr, count );
+    /* COM identity: the tracker interface is the object, so it QIs back to
+     * itself stably and reaches the object's IInspectable (RoGetActivationFactory
+     * callers and the CLR tracker both rely on that). */
+    rt2 = NULL;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( rt, 0 ))( rt, &IID_IReferenceTracker_loc, &rt2 );
+    ok( hr == S_OK && rt2 == rt, "tracker: QI back hr=%08x rt2=%p rt=%p\n", hr, rt2, rt );
+    if (rt2) CALL( rt2, 2, &hr );
+    inspectable = NULL;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( rt, 0 ))( rt, &IID_IInspectable_loc, &inspectable );
+    ok( hr == S_OK && inspectable, "tracker: QI(IInspectable) from tracker hr=%08x obj=%p\n", hr, inspectable );
+    if (inspectable)
+    {
+        hr = CALL( inspectable, 4, &name );  /* GetRuntimeClassName */
+        ok( hr == S_OK, "tracker: GetRuntimeClassName hr=%08x\n", hr );
+        raw = WindowsGetStringRawBuffer( name, NULL );
+        ok( raw && !lstrcmpW( raw, L"Windows.ApplicationModel.Resources.Core.ResourceContext" ),
+            "tracker: class name %s\n", wine_dbgstr_w( raw ) );
+        WindowsDeleteString( name );
+        CALL( inspectable, 2, &hr );
+    }
+
+    /* IInspectable::GetIids must fill a real count and a CoTaskMemFree-able
+     * array carrying the class's interface set (the old slot reported an
+     * empty set, which desyncs the caller's interface map). */
+    hr = CALL( factory, 3, &count, &iids );
+    ok( hr == S_OK && count > 1 && iids, "tracker: GetIids hr=%08x count=%u iids=%p\n", hr, count, iids );
+    arr = iids;
+    for (i = 0; arr && i < count; i++)
+    {
+        if (!memcmp( &arr[i], &IID_IReferenceTracker_loc, sizeof(IID) )) found_tracker++;
+        if (!memcmp( &arr[i], &IID_IResourceContextStatics2_loc, sizeof(IID) )) found_statics2++;
+        if (!memcmp( &arr[i], &IID_IResourceContext_loc, sizeof(IID) )) found_context++;
+    }
+    ok( found_tracker == 1, "tracker: GetIids array carries IReferenceTracker (n=%u)\n", found_tracker );
+    ok( found_statics2 == 1, "tracker: GetIids array carries IResourceContextStatics2 (n=%u)\n", found_statics2 );
+    ok( found_context == 1, "tracker: GetIids array carries IResourceContext (n=%u)\n", found_context );
     CoTaskMemFree( iids );
-    iids = NULL;
+    hr = CALL( factory, 3, NULL, NULL );
+    ok( hr == E_POINTER, "tracker: GetIids(NULL,NULL) hr=%08x\n", hr );
 
-    /* NULL probes (the deployed guards): E_POINTER, no writes */
-    hr = CALL( v81, 3, NULL, NULL );
-    ok( hr == E_POINTER, "shapes: v81 GetIids(NULL,NULL) hr=%08x (expect E_POINTER)\n", hr );
-
-    /* CreateWithCurrentView with a real view HSTRING + real out: context */
-    WindowsCreateStringReference( L"en-US", 5, &hdr, &hview );
-    hr = CALL( v81, 7, hview, &ctx );
-    ok( SUCCEEDED( hr ) && ctx, "shapes: v81 CreateWithCurrentView(view,&ctx) hr=%08x\n", hr );
-    WindowsDeleteString( hview );
-    if (ctx) CALL( ctx, 2, &hr );
-
-    hr = CALL( v81, 6, &ctx );  /* Create */
-    ok( SUCCEEDED( hr ) && ctx, "shapes: v81 Create(&ctx) hr=%08x\n", hr );
-    if (ctx)
+    /* per-activation identity: activating twice hands out distinct objects,
+     * each of which carries its own tracker interface */
+    hr = CALL( factory, 6, &ctx1 );  /* IActivationFactory::ActivateInstance */
+    ok( hr == S_OK && ctx1, "tracker: ActivateInstance#1 hr=%08x\n", hr );
+    hr = CALL( factory, 6, &ctx2 );
+    ok( hr == S_OK && ctx2, "tracker: ActivateInstance#2 hr=%08x\n", hr );
+    if (ctx1 && ctx2)
+        ok( ctx1 != ctx2, "tracker: per-activation distinct objects (ctx1=%p ctx2=%p)\n", ctx1, ctx2 );
+    if (ctx1)
     {
-        void *mv = NULL;
-        /* fresh context is a full functional object: QualifierValues live */
-        hr = CALL( ctx, 6, &mv );  /* get_QualifierValues on IResourceContext */
-        ok( SUCCEEDED( hr ) && mv, "shapes: created context QualifierValues hr=%08x\n", hr );
-        if (mv) CALL( mv, 2, &hr );
-        CALL( ctx, 2, &hr );
+        rt2 = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( ctx1, 0 ))( ctx1, &IID_IReferenceTracker_loc, &rt2 );
+        ok( hr == S_OK && rt2 && rt2 != rt, "tracker: instance carries its own tracker hr=%08x obj=%p\n", hr, rt2 );
+        if (rt2)
+        {
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *))VT( rt2, 3 ))( rt2 );
+            ok( hr == S_OK, "tracker: instance ConnectFromTrackerSource hr=%08x\n", hr );
+            CALL( rt2, 2, &hr );
+        }
+        CALL( ctx1, 2, &hr );
     }
+    if (ctx2) CALL( ctx2, 2, &hr );
 
-    /* singleton undamaged by the whole exercise */
+    /* the factory singleton is undamaged by the whole walk */
     {
         void *statics = NULL;
-        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &statics);
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( factory, 0 ))( factory, &IID_IResourceContextStatics2_loc, &statics );
         if (SUCCEEDED( hr ) && statics)
         {
-            ctx = NULL;
-            hr = CALL( statics, 6, &ctx );
-            ok( SUCCEEDED( hr ) && ctx, "shapes: singleton intact after shapes hr=%08x ctx=%p\n", hr, ctx );
-            if (ctx) CALL( ctx, 2, &hr );
+            hr = CALL( statics, 6, &ctx1 );  /* GetForCurrentView */
+            ok( SUCCEEDED( hr ) && ctx1, "tracker: singleton intact after walk hr=%08x\n", hr );
+            if (ctx1) CALL( ctx1, 2, &hr );
             CALL( statics, 2, &hr );
         }
     }
-    CALL( v81, 2, &hr );
+    CALL( rt, 2, &hr );
     CALL( factory, 2, &hr );
 }
 
@@ -956,7 +1044,7 @@ START_TEST(core)
     test_getiids_nullargs();
     test_qualifier_set();
     test_current_context_reentrancy();
-    test_mrt100_caller_shapes();
+    test_reference_tracker_identity();
     test_memorymanager_activation();
 
     RoUninitialize();

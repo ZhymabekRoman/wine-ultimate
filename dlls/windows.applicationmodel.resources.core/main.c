@@ -75,13 +75,28 @@ static const GUID IID_IActivationFactory_g_       = {0x00000035, 0x0000, 0x0000,
  * by the RoGetParameterizedIID machinery; the plain vtable is what MRT callers use,
  * so we do not register static IIDs for them. */
 #define ELEMENT_NOT_FOUND_E HRESULT_FROM_WIN32(0x490L)
-/* Live-captured on Calculator (wbappgate run 2026-10-31): .NET Native RCW
- * queries this IID on both the ResourceContext factory and the activated
- * instance right after activation; answering E_NOINTERFACE leads to an
- * unhandled exception and FailFast c0000602 in SharedLibrary.dll.  This is
- * the Windows 8.1 generation identity for the ResourceContext class
- * (factory semantics: Create/CreateWithCurrentView). */
-static const GUID IID_IResourceContext_v81_g      = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+/* {11d3b13a-180e-4789-a8be-7712882893e6} is IReferenceTracker, declared by
+ * windows.ui.xaml.hosting.referencetracker.idl.  It is NOT a ResourceContext
+ * interface: the earlier entry here ("Windows 8.1 class identity with
+ * Create/CreateWithCurrentView") was a guess and is the root cause of the
+ * Calculator crash-loop (see the IReferenceTracker block further down).
+ *
+ * Live-captured on Calculator: the .NET Native RCW (mrt100_app/SharedLibrary)
+ * QIs this IID on the ResourceContext factory and on the activated instance
+ * right after activation, and answering E_NOINTERFACE leads to an unhandled
+ * exception and FailFast c0000602 in SharedLibrary.dll, so the contract has
+ * to be implemented.  Slot layout is fixed by the SDK declaration (and by the
+ * CsWinRT IReferenceTrackerVftbl projection) and inherits from IUnknown, not
+ * from IInspectable:
+ *   [3] ConnectFromTrackerSource   [4] DisconnectFromTrackerSource
+ *   [5] FindTrackerTargets         [6] GetReferenceTrackerManager
+ *   [7] AddRefFromTrackerSource    [8] ReleaseFromTrackerSource
+ *   [9] PegFromTrackerSource
+ */
+static const GUID IID_IReferenceTracker_g         = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+/* IReferenceTrackerManager (same idl): the GC reference-tracking cycle
+ * notifications the CLR drives around FindTrackerTargets. */
+static const GUID IID_IReferenceTrackerManager_g  = {0x3cf184b4, 0x7ccb, 0x4dda, {0x84, 0x55, 0x7e, 0x6c, 0xe9, 0x9a, 0x32, 0x98}};
 static const GUID IID_IResourceContextNamed_g     = {0x12f5efaf, 0x45fb, 0x4669, {0x93, 0x5c, 0x3f, 0x38, 0xa9, 0x0d, 0xab, 0x26}}; /* (unverified, 8.1 metadata) */
 
 #define RTCLASS_RESOURCECONTEXT   L"Windows.ApplicationModel.Resources.Core.ResourceContext"
@@ -152,6 +167,81 @@ static HRESULT simple_get_iids( void *iface, ULONG *count, IID **iids )
     *iids = NULL;
     return S_OK;
 }
+
+/* Windows publishes the class's interface set from IInspectable::GetIids and
+ * allocates the array with CoTaskMemAlloc so the caller releases it with
+ * CoTaskMemFree.  ole32's CoTaskMem* are process-heap wrappers, so the array
+ * is allocated from the process heap directly: taking an ole32 import in a
+ * module that combase activates is a load-order hazard. */
+static HRESULT fill_iids( const IID *const *table, ULONG count, ULONG *out_count, IID **out_iids )
+{
+    IID *array;
+    ULONG i;
+
+    if (!out_count || !out_iids) return E_POINTER;
+    *out_count = 0;
+    *out_iids = NULL;
+    if (!(array = HeapAlloc( GetProcessHeap(), 0, count * sizeof(*array) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < count; i++) array[i] = *table[i];
+    *out_count = count;
+    *out_iids = array;
+    return S_OK;
+}
+
+/* Interface set of the ResourceContext class object (the class's own
+ * interfaces; IUnknown/IInspectable are implied and are not listed). */
+static const IID *const rc_class_iids[] =
+{
+    &IID_IActivationFactory_g_,
+    &IID_IResourceContext_g,
+    &IID_IResourceContext2_g,
+    &IID_IResourceContextNamed_g,
+    &IID_IResourceContextStatics_g,
+    &IID_IResourceContextStatics2_g,
+    &IID_IResourceContextStatics3_g,
+    &IID_IResourceContextStatics4_g,
+    &IID_IReferenceTracker_g,
+    &IID_IAgileObject,
+};
+/* Interface set of an activated ResourceContext instance. */
+static const IID *const ctx_class_iids[] =
+{
+    &IID_IResourceContext_g,
+    &IID_IResourceContext2_g,
+    &IID_IResourceContextNamed_g,
+    &IID_IReferenceTracker_g,
+    &IID_IAgileObject,
+};
+
+/* IReferenceTracker state, embedded in every object whose identity the CLR
+ * reference tracker walks.  The first member is the interface slot, so
+ * &obj->rt is the IReferenceTracker interface pointer. */
+struct ref_tracker
+{
+    const void *vt_tracker;  /* IReferenceTracker */
+    SIZE_T primary_off;      /* byte offset of the owning object's primary slot */
+    LONG sources;            /* tracker sources connected */
+    LONG ext_refs;           /* external (GC-held) references bookkept for a source */
+    LONG pegs;               /* PegFromTrackerSource count */
+};
+static const void *rc_tracker_vtbl[];
+
+/* IReferenceTrackerManager [3] ReferenceTrackingStarted
+ *                           [4] FindTrackerTargetsCompleted(BOOL walkFailed)
+ *                           [5] ReferenceTrackingCompleted
+ *                           [6] SetReferenceTrackerHost(IReferenceTrackerHost*)
+ * The module owns no garbage-collected objects, so a tracking cycle reports no
+ * targets and is a bookkeeping no-op; the CLR host pointer is retained for the
+ * lifetime of the process, as the platform manager does. */
+struct ref_tracker_manager
+{
+    const void *vt_manager;
+    LONG ref;
+    void *host;       /* IReferenceTrackerHost supplied by the CLR */
+    LONG cycles;      /* tracking cycles started */
+    LONG walks;       /* target walks completed */
+    LONG walk_failed; /* last walk reported a failure */
+};
 
 static HRESULT WINAPI get_trust_base( void *iface, INT32 *trust )
 {
@@ -1389,6 +1479,7 @@ struct res_context
     const void *vt_named;     /* IResourceContextNamed (unverified) */
     const void *vt_ctx2;      /* IResourceContext2 (unverified): [II 5][SetQualifierValue 6]
                                * [TrySetName 7][TrySetPackage 8][SetAllQualifiers 9] */
+    struct ref_tracker rt;    /* IReferenceTracker identity */
     LONG ref;
     struct kv_pair *qpairs;   /* mutable qualifier storage (shared static strings + heap dups) */
     UINT32 qcount;
@@ -1440,9 +1531,9 @@ static HRESULT WINAPI ctx_QueryInterface( void *iface, REFIID iid, void **out )
         incr( &impl->ref );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IResourceContext_v81_g ))
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
     {
-        *out = &impl->vt_ctx;
+        *out = &impl->rt;
         incr( &impl->ref );
         return S_OK;
     }
@@ -1471,7 +1562,7 @@ static ULONG WINAPI ctx_Release( void *iface )
     }
     return ref;
 }
-static HRESULT WINAPI ctx_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI ctx_GetIids( void *iface, ULONG *c, IID **i ) { return fill_iids( ctx_class_iids, ARRAYSIZE( ctx_class_iids ), c, i ); }
 static HRESULT WINAPI ctx_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI ctx_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI ctx_QualifierValues( void *iface, void **out )
@@ -1528,6 +1619,8 @@ static HRESULT create_context( struct res_context **out )
     ctx->vt_ctx = res_context_vtbl;
     ctx->vt_named = res_context_named_vtbl;
     ctx->vt_ctx2 = res_context2_vtbl;
+    ctx->rt.vt_tracker = rc_tracker_vtbl;
+    ctx->rt.primary_off = offsetof( struct res_context, rt );
     ctx->ref = 1;
     ctx->qcount = ARRAYSIZE( default_qualifiers );
     ctx->qpairs = HeapAlloc( GetProcessHeap(), 0, ctx->qcount * sizeof(*ctx->qpairs) );
@@ -1684,7 +1777,7 @@ struct rc_factory
     const void *vt_statics2; /* IResourceContextStatics2 */
     const void *vt_statics3;
     const void *vt_statics4;
-    const void *vt_v81;      /* IResourceContext (8.1 class identity): [II 5][Create 6][CreateWithCurrentView 7] */
+    struct ref_tracker rt;   /* IReferenceTracker identity */
 };
 static struct rc_factory *rcf_from( void *iface ) { return (struct rc_factory *)iface; }
 static struct rc_factory *rcf_from_s( void *iface, size_t off ) { return (struct rc_factory *)((BYTE *)iface - off); }
@@ -1739,9 +1832,9 @@ static HRESULT WINAPI rcf_QueryInterface( void *iface, REFIID iid, void **out )
         *out = &impl->vt_statics4;
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IResourceContext_v81_g ))
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
     {
-        *out = &impl->vt_v81;
+        *out = &impl->rt;
         return S_OK;
     }
     FIXME( "%s not implemented\n", debugstr_guid( iid ) );
@@ -1750,7 +1843,7 @@ static HRESULT WINAPI rcf_QueryInterface( void *iface, REFIID iid, void **out )
 }
 static ULONG WINAPI rcf_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI rcf_Release( void *iface ) { return 1; }
-static HRESULT WINAPI rcf_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI rcf_GetIids( void *iface, ULONG *c, IID **i ) { return fill_iids( rc_class_iids, ARRAYSIZE( rc_class_iids ), c, i ); }
 static HRESULT WINAPI rcf_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI rcf_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rcf_ActivateInstance( void *iface, void **instance )
@@ -1789,7 +1882,7 @@ static const void *rc_statics_vtbl[] =
 static HRESULT WINAPI rc2_QueryInterface( void *iface, REFIID iid, void **out ) { return rcf_QueryInterface( rcf_from_s( iface, offsetof(struct rc_factory, vt_statics2) ), iid, out ); }
 static ULONG WINAPI rc2_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI rc2_Release( void *iface ) { return 1; }
-static HRESULT WINAPI rc2_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI rc2_GetIids( void *iface, ULONG *c, IID **i ) { return fill_iids( rc_class_iids, ARRAYSIZE( rc_class_iids ), c, i ); }
 static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI rc2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc2_GetForCurrentView( void *iface, void **out )
@@ -1830,7 +1923,7 @@ static const void *rc_statics3_vtbl[] =
 static HRESULT WINAPI rc4_QueryInterface( void *iface, REFIID iid, void **out ) { return rcf_QueryInterface( rcf_from_s( iface, offsetof(struct rc_factory, vt_statics4) ), iid, out ); }
 static ULONG WINAPI rc4_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI rc4_Release( void *iface ) { return 1; }
-static HRESULT WINAPI rc4_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI rc4_GetIids( void *iface, ULONG *c, IID **i ) { return fill_iids( rc_class_iids, ARRAYSIZE( rc_class_iids ), c, i ); }
 static HRESULT WINAPI rc4_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI rc4_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc4_GetForUIContext( void *iface, void *context, void **out )
@@ -1843,35 +1936,196 @@ static const void *rc_statics4_vtbl[] =
     rc4_QueryInterface, rc4_AddRef, rc4_Release, rc4_GetIids, rc4_GetRuntimeClassName, rc4_GetTrustLevel,
     rc4_GetForUIContext,
 };
-/* 8.1 class identity on the factory: Create / CreateWithCurrentView -> a context */
-static HRESULT WINAPI rc81_QueryInterface( void *iface, REFIID iid, void **out ) { return rcf_QueryInterface( rcf_from_s( iface, offsetof(struct rc_factory, vt_v81) ), iid, out ); }
-static ULONG WINAPI rc81_AddRef( void *iface ) { return 2; }
-static ULONG WINAPI rc81_Release( void *iface ) { return 1; }
-static HRESULT WINAPI rc81_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
-static HRESULT WINAPI rc81_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
-static HRESULT WINAPI rc81_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
-static HRESULT WINAPI rc81_Create( void *iface, void **out )
+/* ------------------------------------------------------------------ */
+/* IReferenceTracker (IID {11d3b13a-...}, see the note at the top)      */
+/* ------------------------------------------------------------------ */
+/* The CLR reference tracker QIs the object for this IID and, when the QI
+ * succeeds, walks slots 3..9.  Slots 3, 4, 7, 8 and 9 take NO arguments, so
+ * the callee must not read rdx/r8.  Handing out an IInspectable-shaped vtable
+ * for this IID is what produced the Calculator crash-loop: the app's
+ * no-argument call at slot 3 executed GetIids, whose "*count = 0" wrote
+ * through rdx (= 0x24, stale register content), and the no-argument call at
+ * slot 7 executed CreateWithCurrentView, whose "*out = context" wrote through
+ * r8 (= stale heap).  Both SEH-catched faults corrupted the app's tracker
+ * walk and fed the 280x c0000005 loop.  Note that neither call site passes
+ * out-params at all, so the earlier "caller state" verdict cannot hold.
+ *
+ * Semantics implemented: this module owns no garbage-collected objects, so it
+ * reports no tracker targets and has no XAML reference tracker manager; the
+ * tracker-source notifications are bookkept on the object. */
+static inline struct ref_tracker *tracker_from( void *iface ) { return (struct ref_tracker *)iface; }
+/* the object's vtable entry idx: iface -> vtable base -> entry */
+static inline void *vtbl_slot( void *iface, int idx ) { return ((void **)(*(void **)iface))[idx]; }
+static inline ULONG owner_addref( void *owner ) { return ((ULONG (WINAPI *)(void *))vtbl_slot( owner, 1 ))( owner ); }
+/* The owning object begins at its primary interface slot, which precedes this
+ * tracker slot by primary_off.  Derived at compile time (offsetof) so the
+ * identity cannot end up pointing at a NULL or stale owner. */
+static inline void *tracker_owner( struct ref_tracker *impl ) { return (char *)impl - impl->primary_off; }
+static inline int tracker_owner_valid( struct ref_tracker *impl )
 {
-
-    if (!out) return E_POINTER;    struct res_context *ctx;
-    HRESULT hr = create_context( &ctx );
-    TRACE( "Create\n" );
-    if (SUCCEEDED( hr )) *out = &ctx->vt_ctx;
-    return hr;
+    void *owner = tracker_owner( impl );
+    return owner && owner != (void *)impl;
 }
-static HRESULT WINAPI rc81_CreateWithCurrentView( void *iface, void *view, void **out )
-{
 
-    if (!out) return E_POINTER;    return rc81_Create( iface, out );
-}
-static const void *rc_v81_vtbl[] =
+
+static HRESULT WINAPI rt_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    rc81_QueryInterface, rc81_AddRef, rc81_Release, rc81_GetIids, rc81_GetRuntimeClassName, rc81_GetTrustLevel,
-    rc81_Create, rc81_CreateWithCurrentView,
+    struct ref_tracker *impl = tracker_from( iface );
+    void *owner = tracker_owner( impl );
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = &impl->vt_tracker;
+        if (tracker_owner_valid( impl )) owner_addref( owner );
+        return S_OK;
+    }
+    if (!tracker_owner_valid( impl ))
+    {
+        /* Defensive: an uninitialised tracker identity must report
+         * E_NOINTERFACE, never walk a foreign vtable. */
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    /* every other interface of the object is reachable from this one */
+    return ((HRESULT (WINAPI *)(void *, REFIID, void **))vtbl_slot( owner, 0 ))( owner, iid, out );
+}
+static ULONG WINAPI rt_AddRef( void *iface )
+{
+    struct ref_tracker *impl = tracker_from( iface );
+    return tracker_owner_valid( impl ) ? owner_addref( tracker_owner( impl ) ) : 2;
+}
+static ULONG WINAPI rt_Release( void *iface )
+{
+    struct ref_tracker *impl = tracker_from( iface );
+    if (!tracker_owner_valid( impl )) return 1;
+    return ((ULONG (WINAPI *)(void *))vtbl_slot( tracker_owner( impl ), 2 ))( tracker_owner( impl ) );
+}
+static HRESULT WINAPI rt_ConnectFromTrackerSource( void *iface )
+{
+    struct ref_tracker *impl = tracker_from( iface );
+    TRACE( "%p: tracker source connected\n", impl );
+    InterlockedIncrement( &impl->sources );
+    return S_OK;
+}
+static HRESULT WINAPI rt_DisconnectFromTrackerSource( void *iface )
+{
+    struct ref_tracker *impl = tracker_from( iface );
+    TRACE( "%p: tracker source disconnected\n", impl );
+    if (InterlockedDecrement( &impl->sources ) < 0) InterlockedIncrement( &impl->sources );
+    return S_OK;
+}
+static HRESULT WINAPI rt_FindTrackerTargets( void *iface, void *callback )
+{
+    if (!callback) return E_POINTER;
+    /* No tracker targets: the module holds no references to garbage-collected
+     * (managed) objects, so FoundTrackerTarget is never called back. */
+    return S_OK;
+}
+static const void *rc_manager_vtbl[];
+static struct ref_tracker_manager rc_tracker_manager;   /* defined with the manager impl below */
+
+static HRESULT WINAPI rt_GetReferenceTrackerManager( void *iface, void **manager )
+{
+    struct ref_tracker_manager *impl = &rc_tracker_manager;
+
+    if (!manager) return E_POINTER;
+    /* CoreRT drives the manager around every tracking walk and does not
+     * tolerate a NULL result, and the platform does implement this interface,
+     * so hand out the process-wide manager instance. */
+    *manager = &impl->vt_manager;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
+}
+
+static HRESULT WINAPI mgr_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct ref_tracker_manager *impl = (struct ref_tracker_manager *)iface;
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IReferenceTrackerManager_g )
+        || IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = &impl->vt_manager;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI mgr_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct ref_tracker_manager *)iface)->ref );
+}
+static ULONG WINAPI mgr_Release( void *iface )
+{
+    return InterlockedDecrement( &((struct ref_tracker_manager *)iface)->ref );
+}
+static HRESULT WINAPI mgr_ReferenceTrackingStarted( void *iface )
+{
+    struct ref_tracker_manager *impl = (struct ref_tracker_manager *)iface;
+    TRACE( "%p: reference tracking started\n", impl );
+    InterlockedIncrement( &impl->cycles );
+    return S_OK;
+}
+static HRESULT WINAPI mgr_FindTrackerTargetsCompleted( void *iface, int walk_failed )
+{
+    struct ref_tracker_manager *impl = (struct ref_tracker_manager *)iface;
+    InterlockedIncrement( &impl->walks );
+    impl->walk_failed = walk_failed;
+    return S_OK;
+}
+static HRESULT WINAPI mgr_ReferenceTrackingCompleted( void *iface )
+{
+    TRACE( "%p: reference tracking completed\n", (struct ref_tracker_manager *)iface );
+    return S_OK;
+}
+static HRESULT WINAPI mgr_SetReferenceTrackerHost( void *iface, void *host )
+{
+    struct ref_tracker_manager *impl = (struct ref_tracker_manager *)iface;
+
+    if (!host) return E_POINTER;
+    if (!impl->host)
+    {
+        owner_addref( host );
+        impl->host = host;   /* retained for the lifetime of the process */
+    }
+    return S_OK;
+}
+static const void *rc_manager_vtbl[] =
+{
+    mgr_QueryInterface, mgr_AddRef, mgr_Release,
+    mgr_ReferenceTrackingStarted, mgr_FindTrackerTargetsCompleted,
+    mgr_ReferenceTrackingCompleted, mgr_SetReferenceTrackerHost,
+};
+static struct ref_tracker_manager rc_tracker_manager = { rc_manager_vtbl, 1, NULL, 0, 0, 0 };
+static HRESULT WINAPI rt_AddRefFromTrackerSource( void *iface )
+{
+    InterlockedIncrement( &tracker_from( iface )->ext_refs );
+    return S_OK;
+}
+static HRESULT WINAPI rt_ReleaseFromTrackerSource( void *iface )
+{
+    struct ref_tracker *impl = tracker_from( iface );
+    if (InterlockedDecrement( &impl->ext_refs ) < 0) InterlockedIncrement( &impl->ext_refs );
+    return S_OK;
+}
+static HRESULT WINAPI rt_PegFromTrackerSource( void *iface )
+{
+    InterlockedIncrement( &tracker_from( iface )->pegs );
+    return S_OK;
+}
+static const void *rc_tracker_vtbl[] =
+{
+    rt_QueryInterface, rt_AddRef, rt_Release,
+    rt_ConnectFromTrackerSource, rt_DisconnectFromTrackerSource, rt_FindTrackerTargets,
+    rt_GetReferenceTrackerManager, rt_AddRefFromTrackerSource, rt_ReleaseFromTrackerSource,
+    rt_PegFromTrackerSource,
 };
 static struct rc_factory rc_factory_inst =
 {
-    rc_factory_vtbl, rc_statics_vtbl, rc_statics2_vtbl, rc_statics3_vtbl, rc_statics4_vtbl, rc_v81_vtbl,
+    rc_factory_vtbl, rc_statics_vtbl, rc_statics2_vtbl, rc_statics3_vtbl, rc_statics4_vtbl,
+    { rc_tracker_vtbl, offsetof( struct rc_factory, rt ), 0, 0, 0 },
 };
 
 /* ResourceManager */

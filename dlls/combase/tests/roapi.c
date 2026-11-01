@@ -755,11 +755,17 @@ static void test_composition_activation_route(void)
  * (IID_IResourceContext, {2fa22f4b-707e-4b27-ad0d-d0d8cd468fd2}) directly, the C++/WinRT
  * factory shape passes IID_IActivationFactory; pin both.
  */
-/* The class-interface request shape is the 8.1-generation default interface
- * IID_IResourceContext {11d3b13a-180e-4789-a8be-7712882893e6} (Create/CreateWithCurrentView),
- * live-captured from the .NET Native MRT RCW on Calculator: mrt100_app/SharedLibrary QIs
- * exactly this IID on the ResourceContext factory right after activation.  The 19041 metadata
- * IID {2fa22f4b-...} is the instance interface, not a factory-requestable one. */
+/* The request shape .NET Native MRT (mrt100_app/SharedLibrary) sends on the
+ * ResourceContext factory right after activation is IReferenceTracker
+ * {11d3b13a-180e-4789-a8be-7712882893e6} (windows.ui.xaml.hosting.referencetracker.idl,
+ * IUnknown-derived: [3]ConnectFromTrackerSource [4]DisconnectFromTrackerSource
+ * [5]FindTrackerTargets [6]GetReferenceTrackerManager [7]AddRefFromTrackerSource
+ * [8]ReleaseFromTrackerSource [9]PegFromTrackerSource).  The CLR reference
+ * tracker walks those slots once the QI succeeds, so the routed module has to
+ * answer the IID with the tracker contract (slots 3/4/7/8/9 take no arguments;
+ * answering them in IInspectable shape writes through the caller's registers
+ * and produced Calculator's 280x c0000005 loop).  The 19041 metadata IID
+ * {2fa22f4b-...} is the instance interface, not a factory-requestable one. */
 static const GUID guid_iresourcecontext_v81 = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
 
 static void test_resources_core_activation_route(void)
@@ -813,6 +819,31 @@ static void test_resources_core_activation_route(void)
             ok(!wcscmp(raw, resourcecontext_name), "got instance class name %s.\n", debugstr_w(raw));
             WindowsDeleteString(class_name);
             IInspectable_Release(inspectable);
+        }
+
+        /* The QI'd pointer is the object, so the tracker slots the CLR walks
+         * have to answer as IReferenceTracker.  Slots 3 and 7 are no-argument
+         * calls; the sentinels below are the two measured AV write targets
+         * (rdx = 0x24 at slot 3, r8 = stale heap at slot 7), so a vtable in
+         * IInspectable shape clobbers them and the contract leaves them. */
+        {
+            void **vt = *(void **)context;
+            ULONG probe = 0x24;
+            IID *piids = NULL;
+            void *sentinel = (void *)0x5b5b5b5b;
+            void *mgr = (void *)0x1;
+
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, ULONG *, IID **))vt[3])(context, &probe, &piids);
+            ok(hr == S_OK, "ConnectFromTrackerSource returned %#lx.\n", hr);
+            ok(probe == 0x24, "slot 3 wrote the caller's ULONG* (%u).\n", probe);
+            ok(!piids, "slot 3 wrote the caller's IID** (%p).\n", piids);
+
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, void *, void **))vt[7])(context, (void *)0x1, &sentinel);
+            ok(hr == S_OK, "AddRefFromTrackerSource returned %#lx.\n", hr);
+            ok(sentinel == (void *)0x5b5b5b5b, "slot 7 wrote the caller's out param (%p).\n", sentinel);
+
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, void **))vt[6])(context, &mgr);
+            ok(hr == S_OK && mgr, "GetReferenceTrackerManager returned %#lx mgr=%p.\n", hr, mgr);
         }
         release_activation_result(context);
     }
