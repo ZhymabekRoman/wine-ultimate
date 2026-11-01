@@ -479,13 +479,22 @@ struct IInteropCompositorFactoryPartner { const struct IInteropCompositorFactory
 static const IID IID_IInteropCompositorFactoryPartner_test =
     { 0x22118adf, 0x23f1, 0x4801, { 0xbc, 0xfa, 0x66, 0xcb, 0xf4, 0x8c, 0xc5, 0x1b } };
 
+static const IID IID_test_unimplemented =
+    { 0x11223344, 0x5566, 0x7788, { 0x99, 0xaa, 0xbb, 0xcc, 0xdd, 0xee, 0xff, 0x00 } };
+
 static void test_interop_partner_factory( void )
 {
     IInteropCompositorFactoryPartner *partner = NULL;
     IActivationFactory *factory = NULL;
     IUnknown *unknown = NULL;
-    HSTRING str;
+    ICompositorInterop *interop = NULL;
+    struct ICompositor *compositor = NULL, *compositor2 = NULL;
+    IContainerVisual *visual = NULL;
+    IVisualCollection *collection = NULL;
+    HSTRING str, name;
     bool a = true, b = true;
+    ULONG ref;
+    INT count;
     HRESULT hr;
 
     hr = WindowsCreateString( RuntimeClass_Windows_UI_Composition_Compositor,
@@ -513,18 +522,91 @@ static void test_interop_partner_factory( void )
     hr = IPartner_QueryInterface( partner, &IID_IActivationFactory, (void **)&factory );
     ok( hr == S_OK && factory, "QI for IActivationFactory on the partner failed, hr %#lx.\n", hr );
 
-    /* CreateInteropCompositor is what the XAML root drives on this interface. The bridge
-     * has no server-compositor handoff, so it must report E_NOTIMPL with a NULL result
-     * rather than hand back a compositor that is not wired to the XAML pipeline. */
-    unknown = NULL;
-    hr = IPartner_CreateInteropCompositor( partner, NULL, NULL, &IID_IUnknown, (void **)&unknown );
-    ok( hr == E_NOTIMPL, "CreateInteropCompositor should report E_NOTIMPL, hr %#lx.\n", hr );
-    ok( !unknown, "CreateInteropCompositor left output %p.\n", unknown );
+    /* CreateInteropCompositor is what the WinUI-side clients drive on this interface:
+     * Microsoft.UI.Windowing.Core.dll!CTitleBar::EvaluateNonClientCustomizationSupported
+     * (0x18003249a, TitleBar.cxx) calls it as (NULL, NULL, IID_ICompositor) right after
+     * the QI above, and Microsoft.ui.xaml.dll!DCompTreeHost::CreateWinRTInteropCompositionDevice
+     * (0x1802357b8) calls it as (NULL, callback, IDCompositionDesktopDevicePartner).
+     * dcompi.dll's CompositorFactory::CreateInteropCompositor (0x18005a5d0) constructs a
+     * fresh compositor object per call and QIs it for the requested riid (0x18005a759);
+     * on this bridge that object is the module's own Compositor, so the call must hand
+     * back a working ICompositor for the riid XAML passes. */
+    compositor = NULL;
+    hr = IPartner_CreateInteropCompositor( partner, NULL, NULL, &IID_ICompositor, (void **)&compositor );
+    ok( hr == S_OK && compositor, "CreateInteropCompositor(ICompositor) failed, hr %#lx.\n", hr );
 
-    a = b = true;
+    if (compositor)
+    {
+        /* It is the activatable class's compositor: same runtime class name, the root
+         * interface answers as its own IUnknown (object identity), and it builds the
+         * visual tree the XAML root asks for. */
+        name = NULL;
+        hr = ICompositor_GetRuntimeClassName( compositor, &name );
+        ok( hr == S_OK, "GetRuntimeClassName on the interop compositor failed, hr %#lx.\n", hr );
+        ok( !wcscmp( WindowsGetStringRawBuffer( name, NULL ),
+                     RuntimeClass_Windows_UI_Composition_Compositor ),
+                "got class name %s.\n", debugstr_w( WindowsGetStringRawBuffer( name, NULL ) ) );
+        WindowsDeleteString( name );
+
+        unknown = NULL;
+        hr = ICompositor_QueryInterface( compositor, &IID_IUnknown, (void **)&unknown );
+        ok( hr == S_OK && unknown == (IUnknown *)compositor,
+                "root ICompositor QI'd IUnknown %p (self %p), hr %#lx.\n", unknown, compositor, hr );
+        IUnknown_Release( unknown );
+
+        visual = NULL;
+        hr = ICompositor_CreateContainerVisual( compositor, &visual );
+        ok( hr == S_OK && visual, "interop compositor failed to create container visual, hr %#lx.\n", hr );
+        if (visual)
+        {
+            collection = NULL;
+            hr = IContainerVisual_get_Children( visual, &collection );
+            ok( hr == S_OK && collection, "failed to get visual children, hr %#lx.\n", hr );
+            if (collection)
+            {
+                count = -1;
+                hr = IVisualCollection_get_Count( collection, &count );
+                ok( hr == S_OK && count == 0, "new container visual has %d children, hr %#lx.\n", count, hr );
+                IVisualCollection_Release( collection );
+            }
+            IContainerVisual_Release( visual );
+        }
+
+        /* Refcount sanity: a balanced AddRef/Release pair leaves the caller's reference. */
+        ref = ICompositor_AddRef( compositor );
+        ICompositor_Release( compositor );
+        ok( ref >= 1, "interop compositor refcount started at %u.\n", ref );
+    }
+
+    /* Fresh object per call: dcompi runs the constructor + QI + release of the local
+     * reference for every CreateInteropCompositor. */
+    compositor2 = NULL;
+    hr = IPartner_CreateInteropCompositor( partner, NULL, NULL, &IID_ICompositor, (void **)&compositor2 );
+    ok( hr == S_OK && compositor2 && compositor2 != compositor,
+            "second CreateInteropCompositor returned %p (first %p), hr %#lx.\n", compositor2, compositor, hr );
+
+    /* riid is a pass-through QI of the constructed compositor, and a refused interface
+     * comes back NULL with its HRESULT (dcompi nulls the result before the work,
+     * 0x18005a609, and never writes an object on the failure path). */
+    interop = NULL;
+    hr = IPartner_CreateInteropCompositor( partner, NULL, NULL, &IID_ICompositorInterop, (void **)&interop );
+    ok( hr == S_OK && interop, "CreateInteropCompositor(ICompositorInterop) failed, hr %#lx.\n", hr );
+    if (interop) ICompositorInterop_Release( interop );
+
+    unknown = NULL;
+    hr = IPartner_CreateInteropCompositor( partner, NULL, NULL, &IID_test_unimplemented, (void **)&unknown );
+    ok( hr == E_NOINTERFACE, "CreateInteropCompositor(unimplemented riid) should give E_NOINTERFACE, hr %#lx.\n", hr );
+    ok( !unknown, "CreateInteropCompositor left output %p for an unimplemented riid.\n", unknown );
+
+    if (compositor2) ICompositor_Release( compositor2 );
+    if (compositor) ICompositor_Release( compositor );
+
+    /* CheckEnabled: dcompi's CompositorFactory::CheckEnabled (0x180056d00) writes true
+     * to both bools and returns S_OK unconditionally: there is no registry gate. */
+    a = b = false;
     hr = IPartner_CheckEnabled( partner, &a, &b );
-    ok( hr == E_NOTIMPL, "CheckEnabled should report E_NOTIMPL, hr %#lx.\n", hr );
-    ok( a && b, "CheckEnabled wrote to its outputs, a %d b %d.\n", a, b );
+    ok( hr == S_OK, "CheckEnabled failed, hr %#lx.\n", hr );
+    ok( a && b, "CheckEnabled must report enabled and available, a %d b %d.\n", a, b );
 
     if (factory) IActivationFactory_Release( factory );
     IPartner_Release( partner );

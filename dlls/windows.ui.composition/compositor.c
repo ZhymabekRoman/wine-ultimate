@@ -703,14 +703,26 @@ struct compositor *compositor_create( void )
  * CreateInteropCompositor + CheckEnabled (dcompi vftable 0x180122c40, methods 0x18005a5d0
  * and 0x180056d00).  There is no published IDL for it, so it is declared here.
  *
- * CreateInteropCompositor / CheckEnabled report E_NOTIMPL: this module bridges WinRT
- * composition onto in-process DirectComposition and has no server compositor to hand out,
- * and returning a compositor that is not wired into the XAML pipeline would let XAML build
- * a visual tree that is never presented.  ICompositorStatics and
- * IInteropCompositorFactoryRestricted are implemented by the Windows factory as well;
- * their IIDs are not in any binary on this system (they are only reachable through the
- * WRL CanCastTo chain at dcompi 0x180040f78) and are deliberately left out rather than
- * guessed.
+ * CreateInteropCompositor hands out this module's own Compositor QI'd for the requested
+ * riid (the Windows factory builds a fresh InteropCompositor per call and QIs it the same
+ * way, dcompi 0x18005a5d0/0x18005a759); CheckEnabled reports enabled and available the way
+ * dcompi 0x180056d00 does.  The observed callers are Microsoft.UI.Windowing.Core.dll!
+ * CTitleBar::EvaluateNonClientCustomizationSupported (0x18003249a, TitleBar.cxx):
+ * RoGetActivationFactory(Windows.UI.Composition.Compositor, IActivationFactory), QI
+ * {22118adf-...}, CreateInteropCompositor(NULL, NULL, ICompositor {b403ca50-7f8c-4e83-
+ * 985f-cc45060036d8}) and then a QI for {ca67b562-1c32-4017-9dd9-3d4b7e2510aa} on the
+ * returned compositor, which sets the static s_nonClientSupport capability flag when it
+ * succeeds; and Microsoft.ui.xaml.dll!DCompTreeHost::CreateWinRTInteropCompositionDevice
+ * (0x1802357b8), which passes a DCompInteropCompositorPartnerCallback and requests
+ * {d14b6158-c3fa-4bce-9c1f-b61d8665eab0} (IDCompositionDesktopDevicePartner, see
+ * dlls/dcomp/dcomp_private_iface.idl).  {ca67b562-...} is not documented anywhere in this
+ * tree and is not implemented: the probe degrades to the s_nonClientSupport=false fallback
+ * path.  The Windows factory also answers ICompositorStatics {6baa947a-f103-55c6-91ad-
+ * 3d275bea65c4} and IInteropCompositorFactoryRestricted {b27006d1-d095-432c-9d79-
+ * 038d269d7aa3}; those IIDs are RECOVERED, not documented: they are the guid_of
+ * comparisons of the WRL CanCastTo chain at dcompi 0x180040f78 (cmp at 0x18004102f
+ * matches 0x6baa947a, the following cmp at 0x180041063 matches 0xb27006d1, in
+ * Implements<> template order), and no caller on this system requests them.
  */
 const GUID IID_IInteropCompositorFactoryPartner =
     { 0x22118adf, 0x23f1, 0x4801, { 0xbc, 0xfa, 0x66, 0xcb, 0xf4, 0x8c, 0xc5, 0x1b } };
@@ -902,24 +914,84 @@ static HRESULT WINAPI partner_GetTrustLevel( struct IInteropCompositorFactoryPar
     return E_NOTIMPL;
 }
 
+/* Bind a caller-supplied rendering device, mirroring the lazy bridge in
+ * compositor_ensure_device(): dcompi's CreateInteropCompositor hands the device
+ * argument to InteropCompositor::RuntimeClassInitialize (0x1800f0800), which feeds it
+ * to Compositor::RuntimeClassInitialize to create the DirectComposition device.  Both
+ * observed callers pass a NULL device (Microsoft.UI.Windowing.Core.dll!CTitleBar::
+ * EvaluateNonClientCustomizationSupported 0x180032609 and Microsoft.ui.xaml.dll!
+ * DCompTreeHost::CreateWinRTInteropCompositionDevice 0x180235843), which leaves the
+ * device lazily created on first use. */
+static HRESULT compositor_init_render_device( struct compositor *impl, IUnknown *render_target )
+{
+    HRESULT hr;
+
+    if (FAILED( hr = DCompositionCreateDevice2( render_target, &IID_IDCompositionDevice2,
+            (void **)&impl->device2 ) ))
+        return hr;
+
+    if (FAILED( IDCompositionDevice2_QueryInterface( impl->device2,
+            &IID_IDCompositionDesktopDevice, (void **)&impl->desktop_device ) ))
+    {
+        impl->desktop_device = NULL;
+    }
+    if (FAILED( IDCompositionDevice2_QueryInterface( impl->device2,
+            &IID_IDCompositionDevice, (void **)&impl->device ) ))
+    {
+        impl->device = NULL;
+    }
+    return S_OK;
+}
+
 static HRESULT WINAPI partner_CreateInteropCompositor( struct IInteropCompositorFactoryPartner *iface,
         IUnknown *device, IUnknown *callback, REFIID riid, void **result )
 {
-    /* Windows hands the caller a server-side interop compositor driven through the
-     * composition partner channel; this module is an in-process DirectComposition bridge
-     * with no such channel, so refuse instead of returning a compositor XAML would present
-     * to nothing. */
-    FIXME( "iface %p, device %p, callback %p, riid %s, result %p: no composition partner channel, returning E_NOTIMPL.\n",
+    struct compositor *compositor;
+    HRESULT hr;
+
+    TRACE( "iface %p, device %p, callback %p, riid %s, result %p.\n",
             iface, device, callback, debugstr_guid( riid ), result );
-    if (result) *result = NULL;
-    return E_NOTIMPL;
+
+    if (!result) return E_POINTER;
+    *result = NULL;
+
+    /* dcompi's CompositorFactory::CreateInteropCompositor (0x18005a5d0) constructs a fresh
+     * Microsoft.UI.Composition.InteropCompositor per call (0x18005a60c), runs
+     * RuntimeClassInitialize with the device and callback arguments (0x18005a6c7), QIs the
+     * object for the requested riid (0x18005a759), and returns that; the local reference
+     * is dropped.  The bridge's compositor object is the in-process equivalent: this
+     * module's own Compositor over DirectComposition. */
+    if (!(compositor = compositor_create() )) return E_OUTOFMEMORY;
+
+    if (device && FAILED( hr = compositor_init_render_device( compositor, device ) ))
+        goto done;
+
+    /* The callback (IInteropCompositorPartnerCallback; XAML's implementation is
+     * Microsoft.ui.xaml.dll vftable 0x180a8e620: IUnknown + NotifyDirty (0x18022e750,
+     * arming DCompTreeHost::RequestMainDCompDeviceCommit) + one more slot) is stored by
+     * dcompi at InteropCompositor+1240 (0x1800f08ec) and fired by the server frame pump
+     * of the Microsoft.UI nesting channel.  This module composites in-process through
+     * DirectComposition and has no frame pump to fire it from; Windowing.Core's probe
+     * passes NULL.  Accepted and not wired, honestly. */
+    hr = ICompositor_QueryInterface( &compositor->ICompositor_iface, riid, result );
+
+done:
+    IInspectable_Release( (IInspectable *)&compositor->ICompositor_iface ); /* drop creation ref */
+    return hr;
 }
 
 static HRESULT WINAPI partner_CheckEnabled( struct IInteropCompositorFactoryPartner *iface,
         bool *enabled, bool *available )
 {
-    FIXME( "iface %p, enabled %p, available %p: returning E_NOTIMPL.\n", iface, enabled, available );
-    return E_NOTIMPL;
+    TRACE( "iface %p, enabled %p, available %p.\n", iface, enabled, available );
+
+    if (!enabled || !available) return E_POINTER;
+
+    /* dcompi's CompositorFactory::CheckEnabled (0x180056d00) writes true to both
+     * outputs and returns S_OK unconditionally; there is no registry or config gate. */
+    *enabled = true;
+    *available = true;
+    return S_OK;
 }
 
 static const struct IInteropCompositorFactoryPartnerVtbl partner_vtbl =
