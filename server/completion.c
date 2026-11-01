@@ -35,6 +35,7 @@
 #include "handle.h"
 #include "request.h"
 #include "thread.h"
+#include "process.h"
 
 
 static const WCHAR completion_name[] = {'I','o','C','o','m','p','l','e','t','i','o','n'};
@@ -397,6 +398,10 @@ void add_completion( struct completion *completion, apc_param_t ckey, apc_param_
 
     list_add_tail( &completion->queue, &msg->queue_entry );
     completion->depth++;
+    if (debug_level)
+        fprintf( stderr, "WA_IOP: ENQ pid=%04x port=%p key=%016llx status=%08x info=%llu depth=%u\n",
+                 current->process->id, completion, (unsigned long long)ckey, status,
+                 (unsigned long long)information, completion->depth );
     take_waiters_snapshot( completion, &waiting );
     LIST_FOR_EACH_ENTRY_SAFE( wait, wait_next, &waiting, struct completion_wait, snapshot_entry )
     {
@@ -499,6 +504,10 @@ DECL_HANDLER(remove_completion)
         release_object( completion );
         return;
     }
+    if (debug_level)
+        fprintf( stderr, "WA_IOP: DEQ pid=%04x tid=%04x port=%p hit=%d alertable=%d\n",
+                 current->process->id, current->id, completion, !list_empty( &completion->queue ),
+                 req->alertable );
     if (!entry)
     {
         current->completion_wait->completion = completion;

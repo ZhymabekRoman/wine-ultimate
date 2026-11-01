@@ -107,6 +107,69 @@ struct named_pipe_device_file
     struct named_pipe_device *device;      /* named pipe device */
 };
 
+/* Decode the Chromium/ipcz message frame carried on \\.\pipe\LOCAL\mojo.* pipes:
+ * 16-byte prologue (u32 0x10, u32 num_bytes, u64 tracking) + 24-byte ipcz Message
+ * header (op byte at +18, u64 seq at +24).  Logging op/seq/len per direction gives
+ * the op-histogram evidence for the app<->browser EmbeddedBrowser binding stall
+ * (missing AcceptParcelDriverObjects 0x21 / RequestMemory 0x40 / ProvideMemory 0x41). */
+static void wa_ipcz_trace( char dir, process_id_t pid, const struct pipe_end *pipe_end,
+                           const void *data, data_size_t len )
+{
+    static const WCHAR mojoW[] = {'M','O','J','O'};  /* case-insensitive match */
+    const unsigned char *p = data;
+    data_size_t plen, i, nch;
+    const WCHAR *pname;
+    unsigned int magic, num_bytes = 0;
+    unsigned char op = 0;
+    unsigned long long seq = (unsigned long long)-1;
+
+    if (!debug_level) return;
+    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
+    nch = plen / sizeof(WCHAR);
+    if (!pname || nch < 4) return;
+    for (i = 0; i + 4 <= nch; i++)
+    {
+        if ((pname[i] & ~0x20) == mojoW[0] && (pname[i+1] & ~0x20) == mojoW[1] &&
+            (pname[i+2] & ~0x20) == mojoW[2] && (pname[i+3] & ~0x20) == mojoW[3]) break;
+    }
+    if (i + 4 > nch) return;  /* not a mojo pipe */
+    if (len < 32) return;
+    memcpy( &magic, p, 4 );
+    if (magic != 0x10) return;
+    memcpy( &num_bytes, p + 4, 4 );
+    op = p[18];
+    memcpy( &seq, p + 24, 8 );
+    fprintf( stderr, "WA_IPCZ: dir=%c pid=%04x op=%02x seq=%llu len=%u num_bytes=%u\n",
+             dir, pid, op, seq, (unsigned)len, num_bytes );
+
+    /* Full payload dump for the app<->browser link (WA_IPCZ_DUMP_PAIR="hexpid:hexpid"
+     * matched against the pipe end's server_pid/client_pid) and for every
+     * ConnectFromBrokerToBroker (op 0x07), whose body carries the ipcz driver-id
+     * negotiation that gates AcceptParcelDriverObjects (0x21) on the link. */
+    {
+        static int pair_a, pair_b, parsed;
+        if (!parsed)
+        {
+            const char *s = getenv( "WA_IPCZ_DUMP_PAIR" );
+            parsed = 1;
+            if (s) sscanf( s, "%x:%x", (unsigned int *)&pair_a, (unsigned int *)&pair_b );
+        }
+        if (op == 0x07 ||
+            (pipe_end->server_pid < 0x400 && pipe_end->client_pid && op != 0x00) ||  /* app-hosted link (app is the only mojo participant with pid < 0x400) */
+            (pair_a && ((pipe_end->server_pid == (process_id_t)pair_a && pipe_end->client_pid == (process_id_t)pair_b) ||
+                        (pipe_end->server_pid == (process_id_t)pair_b && pipe_end->client_pid == (process_id_t)pair_a))))
+        {
+            data_size_t dump_len = num_bytes < len ? num_bytes : len;
+            data_size_t k;
+            if (dump_len > 640) dump_len = 640;
+            fprintf( stderr, "WA_IPCZ_FULL: dir=%c pid=%04x spid=%04x cpid=%04x op=%02x seq=%llu len=%u hex=",
+                     dir, pid, pipe_end->server_pid, pipe_end->client_pid, op, seq, (unsigned)len );
+            for (k = 0; k < dump_len; k++) fprintf( stderr, "%02x", p[k] );
+            fprintf( stderr, "\n" );
+        }
+    }
+}
+
 static void named_pipe_dump( struct object *obj, int verbose );
 static unsigned int named_pipe_map_access( struct object *obj, unsigned int access );
 static WCHAR *named_pipe_get_full_name( struct object *obj, data_size_t max, data_size_t *ret_len );
@@ -1027,6 +1090,8 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
     message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
     if (!message->read_pos && message->iosb->in_size == iosb->out_size) /* fast path */
     {
+        wa_ipcz_trace( 'R', async_get_thread( async )->process->id, pipe_end,
+                       message->iosb->in_data, message->iosb->in_size );
         async_request_complete( async, status, out_size, out_size, message->iosb->in_data );
         message->iosb->in_data = NULL;
         wake_message( message, message->iosb->in_size );
@@ -1057,6 +1122,8 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
                 free_message(message);
             }
         } while (write_pos < out_size);
+
+        wa_ipcz_trace( 'R', async_get_thread( async )->process->id, pipe_end, buf, out_size );
 
         /* A read that stops short of the message end is not the end of the
          * message: message mode is read as a stream here, with message->read_pos
@@ -1224,6 +1291,8 @@ static void pipe_end_write( struct fd *fd, struct async *async, file_pos_t pos )
         return;
     }
 
+    wa_ipcz_trace( 'W', current->process->id, pipe_end, get_req_data(), get_req_data_size() );
+
     if (!pipe_end->pipe->message_mode && !get_req_data_size()) return;
 
     iosb = async_get_iosb( async );
@@ -1365,6 +1434,7 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     iosb = async_get_iosb( async );
     /* ignore output buffer copy transferred because of METHOD_NEITHER */
     iosb->in_size -= iosb->out_size;
+    wa_ipcz_trace( 'W', current->process->id, pipe_end, get_req_data(), iosb->in_size );
     /* transaction never blocks on write, so just queue a message without async */
     message = queue_message( pipe_end->connection, iosb );
     release_object( iosb );
