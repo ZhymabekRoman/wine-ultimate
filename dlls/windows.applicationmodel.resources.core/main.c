@@ -2025,6 +2025,12 @@ static HRESULT WINAPI rt_FindTrackerTargets( void *iface, void *callback )
 static const void *rc_manager_vtbl[];
 static struct ref_tracker_manager rc_tracker_manager;   /* defined with the manager impl below */
 
+static const void *rc_manager_vtbl[];
+static struct ref_tracker_manager rc_tracker_manager;   /* defined with the manager impl below */
+
+static const void *rc_manager_vtbl[];
+static struct ref_tracker_manager rc_tracker_manager;   /* defined with the manager impl below */
+
 static HRESULT WINAPI rt_GetReferenceTrackerManager( void *iface, void **manager )
 {
     struct ref_tracker_manager *impl = &rc_tracker_manager;

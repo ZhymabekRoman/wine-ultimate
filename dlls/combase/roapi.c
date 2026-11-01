@@ -418,10 +418,6 @@ done:
     return hr;
 }
 
-/*
- * SHA-256, as specified by FIPS 180-4.  combase does not import bcrypt, and the only user here
- * hashes a short, fully in-memory signature, so this stays a single-shot private helper.
- */
 struct str_buf
 {
     char *data;
@@ -478,58 +474,52 @@ static BOOL str_buf_add_utf8( struct str_buf *buf, const WCHAR *str, size_t len 
     return TRUE;
 }
 
-static void sha256( const char *msg, size_t len, BYTE out[32] )
+/*
+ * SHA-1 (FIPS 180-4), single shot.  The parameterized-IID algorithm below is a UUIDv5-style
+ * SHA-1 hash; combase does not import bcrypt, and the hashed input is a short signature string,
+ * so this stays a private helper.
+ */
+static void sha1( const BYTE *msg, size_t len, BYTE out[20] )
 {
-    static const DWORD k[64] =
-    {
-        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
-        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
-        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
-        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
-        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
-        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
-        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
-        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
-    };
-    DWORD h[8] = {0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19};
-    size_t total = len + 1, padded, block, i;
+    DWORD h[5] = {0x67452301, 0xefcdab89, 0x98badcfe, 0x10325476, 0xc3d2e1f0};
+    size_t padded = ((len + 8) / 64 + 1) * 64, block, i;
     ULONGLONG bits = (ULONGLONG)len * 8;
-    BYTE *buf = calloc( 1, ((total + 8 + 63) / 64) * 64 );
+    BYTE *buf = calloc( 1, padded );
 
     if (!buf) return;
-    padded = ((total + 8 + 63) / 64) * 64;
     memcpy( buf, msg, len );
     buf[len] = 0x80;
     for (i = 0; i < 8; i++) buf[padded - 1 - i] = (BYTE)(bits >> (8 * i));
 
     for (block = 0; block < padded; block += 64)
     {
-        DWORD w[64], a, b, c, d, e, f, g, hh;
+        DWORD w[80], a, b, c, d, e;
 
         for (i = 0; i < 16; i++)
             w[i] = (buf[block + i * 4] << 24) | (buf[block + i * 4 + 1] << 16)
                    | (buf[block + i * 4 + 2] << 8) | buf[block + i * 4 + 3];
-        for (i = 16; i < 64; i++)
+        for (i = 16; i < 80; i++)
         {
-            DWORD s0 = ((w[i-15] >> 7) | (w[i-15] << 25)) ^ ((w[i-15] >> 18) | (w[i-15] << 14)) ^ (w[i-15] >> 3);
-            DWORD s1 = ((w[i-2] >> 17) | (w[i-2] << 15)) ^ ((w[i-2] >> 19) | (w[i-2] << 13)) ^ (w[i-2] >> 10);
-            w[i] = w[i-16] + s0 + w[i-7] + s1;
+            DWORD t = w[i-3] ^ w[i-8] ^ w[i-14] ^ w[i-16];
+            w[i] = (t << 1) | (t >> 31);
         }
-        a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4]; f = h[5]; g = h[6]; hh = h[7];
-        for (i = 0; i < 64; i++)
+        a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4];
+        for (i = 0; i < 80; i++)
         {
-            DWORD s1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7));
-            DWORD ch = (e & f) ^ (~e & g);
-            DWORD t1 = hh + s1 + ch + k[i] + w[i];
-            DWORD s0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10));
-            DWORD maj = (a & b) ^ (a & c) ^ (b & c);
-            DWORD t2 = s0 + maj;
-            hh = g; g = f; f = e; e = d + t1; d = c; c = b; b = a; a = t1 + t2;
-        }
-        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
-    }
+            DWORD k, f;
 
-    for (i = 0; i < 8; i++)
+            if (i < 20)      { k = 0x5a827999; f = (b & c) | (~b & d); }
+            else if (i < 40) { k = 0x6ed9eba1; f = b ^ c ^ d; }
+            else if (i < 60) { k = 0x8f1bbcdc; f = (b & c) | (b & d) | (c & d); }
+            else             { k = 0xca62c1d6; f = b ^ c ^ d; }
+            {
+                DWORD t = ((a << 5) | (a >> 27)) + f + e + k + w[i];
+                e = d; d = c; c = (b << 30) | (b >> 2); b = a; a = t;
+            }
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e;
+    }
+    for (i = 0; i < 5; i++)
     {
         out[i * 4] = h[i] >> 24;
         out[i * 4 + 1] = h[i] >> 16;
@@ -540,79 +530,347 @@ static void sha256( const char *msg, size_t len, BYTE out[32] )
 }
 
 /*
- * Rebuild the type signature out of the flat element array that RoParseTypeName() produces, e.g.
- * { "Windows.Foundation.Collections.IIterator`1", "Windows.Foundation.Collections.IKeyValuePair`2",
- *   "guid", "...IBackgroundTaskRegistration" } ->
- * "Windows.Foundation.Collections.IIterator`1<Windows.Foundation.Collections.IKeyValuePair`2<guid,...>>".
- * An element with a trailing "`N" carries N following arguments, which is exactly the flat form.
+ * Parameterized interface IDs (PIIDs) and the metadata-derived signatures for the well-known
+ * Windows.Foundation / Windows.Foundation.Collections surface.  RoGetParameterizedTypeInstanceIID
+ * derives the instance IID as a UUIDv5-style SHA-1 over the UTF-8 type signature string
+ * "pinterface({piid};arg1;...)" (see "The Windows Runtime type system", MDN signature grammar),
+ * hashed with the wrt_pinterface namespace GUID 11f47ad5-7b73-42c0-abae-878b1e16adee fed as
+ * RFC-4122-order octets; the leading 16 hash octets become the GUID with Data1/Data2 read
+ * big-endian, Data3 stamped with version 5 and Data4[0] with the RFC-4122 variant (validated
+ * against the published instantiation IIDs: IMapView<HSTRING,HSTRING> = 1e036276-2f60-55f6-
+ * b7f3-f86079e6900b, IKeyValuePair<HSTRING,HSTRING> = 60310303-49c5-52e6-abc6-a9b36eccc716,
+ * EventHandler<object> = 849456a8-1179-530e-910d-ddadfb6f476d, IReference<HSTRING> = fd416dfb-
+ * 2a07-52eb-aae3-dfce14116c05).  The PIIDs below are the values from the Windows metadata,
+ * matching the projection table embedded in Calculator's SharedLibrary.dll (UTF-16 strings
+ * 6a79e863 IIterator, faa585ea IIterable, bbe1fa4c IVectorView, 913337e9 IVector, 3c2925fe IMap,
+ * 65df2bf5 IMapView, 02b51929 IKeyValuePair, e480ce40 IObservableMap, 61c17706 IReference, ...).
  */
-static BOOL build_type_signature( struct str_buf *buf, const WCHAR **elements, UINT32 count, UINT32 *index )
+struct named_guid
 {
-    const WCHAR *name = WindowsGetStringRawBuffer( (HSTRING)elements[*index], NULL );
-    UINT32 arity = 0, i;
-    const WCHAR *tick;
+    const WCHAR *name;
+    const GUID guid;
+};
 
-    if (!name) name = elements[*index];
+static const struct named_guid pinterface_names[] =
+{
+    { L"Windows.Foundation.Collections.IIterable`1",                {0xfaa585ea, 0x6214, 0x4217, {0xaf, 0xda, 0x7f, 0x46, 0xde, 0x58, 0x69, 0xb3}}},
+    { L"Windows.Foundation.Collections.IIterator`1",                {0x6a79e863, 0x4300, 0x459a, {0x99, 0x66, 0xcb, 0xb6, 0x60, 0x96, 0x3e, 0xe1}}},
+    { L"Windows.Foundation.Collections.IKeyValuePair`2",            {0x02b51929, 0xc1c4, 0x4a7e, {0x89, 0x40, 0x03, 0x12, 0xb5, 0xc1, 0x85, 0x00}}},
+    { L"Windows.Foundation.Collections.IMap`2",                     {0x3c2925fe, 0x8519, 0x45c1, {0xaa, 0x79, 0x19, 0x7b, 0x67, 0x18, 0xc1, 0xc1}}},
+    { L"Windows.Foundation.Collections.IMapView`2",                 {0x65df2bf5, 0xbf39, 0x41b5, {0xae, 0xbc, 0x5a, 0x9d, 0x86, 0x5e, 0x47, 0x2b}}},
+    { L"Windows.Foundation.Collections.IVector`1",                  {0x913337e9, 0x11a1, 0x4345, {0xa3, 0xa2, 0x4e, 0x7f, 0x95, 0x6e, 0x22, 0x2d}}},
+    { L"Windows.Foundation.Collections.IVectorView`1",              {0xbbe1fa4c, 0xb0e3, 0x4583, {0xba, 0xef, 0x1f, 0x1b, 0x2e, 0x48, 0x3e, 0x56}}},
+    { L"Windows.Foundation.Collections.IObservableMap`2",           {0xe480ce40, 0xa338, 0x4ada, {0xad, 0xcf, 0x27, 0x22, 0x72, 0xe4, 0x8c, 0xb9}}},
+    { L"Windows.Foundation.Collections.IObservableVector`1",        {0x5917eb53, 0x50b4, 0x4a0d, {0xb3, 0x09, 0x65, 0x86, 0x2b, 0x3f, 0x1d, 0xbc}}},
+    { L"Windows.Foundation.Collections.IMapChangedEventArgs`1",     {0x9939f4df, 0x050a, 0x4c0f, {0xaa, 0x60, 0x77, 0x07, 0x5f, 0x9c, 0x47, 0x77}}},
+    { L"Windows.Foundation.Collections.MapChangedEventHandler`2",   {0x179517f3, 0x94ee, 0x41f8, {0xbd, 0xdc, 0x76, 0x8a, 0x89, 0x55, 0x44, 0xf3}}},
+    { L"Windows.Foundation.Collections.VectorChangedEventHandler`1",{0x0c051752, 0x9fbf, 0x4c70, {0xaa, 0x0c, 0x0e, 0x4c, 0x82, 0xd9, 0xa7, 0x61}}},
+    { L"Windows.Foundation.IReference`1",                           {0x61c17706, 0x2d65, 0x11e0, {0x9a, 0xe8, 0xd4, 0x85, 0x64, 0x01, 0x54, 0x72}}},
+    { L"Windows.Foundation.IReferenceArray`1",                      {0x61c17707, 0x2d65, 0x11e0, {0x9a, 0xe8, 0xd4, 0x85, 0x64, 0x01, 0x54, 0x72}}},
+    { L"Windows.Foundation.EventHandler`1",                         {0x61c1770d, 0x2d65, 0x11e0, {0x9a, 0xe8, 0xd4, 0x85, 0x64, 0x01, 0x54, 0x72}}},
+    { L"Windows.Foundation.TypedEventHandler`2",                    {0x61c1770e, 0x2d65, 0x11e0, {0x9a, 0xe8, 0xd4, 0x85, 0x64, 0x01, 0x54, 0x72}}},
+    { L"Windows.Foundation.IAsyncActionWithProgress`1",             {0x1f6db258, 0xe803, 0x48a1, {0x95, 0x46, 0xeb, 0x73, 0x53, 0x39, 0x88, 0x84}}},
+    { L"Windows.Foundation.IAsyncOperation`1",                      {0x9fc2b0bb, 0xe446, 0x44e2, {0xaa, 0x61, 0x9c, 0xab, 0x8f, 0x63, 0x6a, 0xf2}}},
+    { L"Windows.Foundation.IAsyncOperationWithProgress`2",          {0xb5d036d7, 0xe297, 0x498f, {0xba, 0x60, 0x02, 0x89, 0xe7, 0x6e, 0x23, 0xdd}}},
+    { L"Windows.Foundation.AsyncOperationProgressHandler`2",        {0x55690902, 0x0aab, 0x421a, {0x87, 0x78, 0xf8, 0xce, 0x50, 0x26, 0xd7, 0x58}}},
+    { L"Windows.Foundation.AsyncOperationCompletedHandler`1",       {0xfcdcf02c, 0xe5d8, 0x4478, {0x91, 0x5a, 0x4d, 0x90, 0xb7, 0x4b, 0x83, 0xa5}}},
+    { L"Windows.Foundation.AsyncOperationWithProgressCompletedHandler`2",
+                                                                     {0xe85df41d, 0x6aa7, 0x46e3, {0xa8, 0xe2, 0xf0, 0x09, 0xd8, 0x40, 0xc6, 0x27}}},
+    { L"Windows.Foundation.AsyncActionProgressHandler`1",           {0x6d844858, 0x0cff, 0x4590, {0xae, 0x89, 0x95, 0xa5, 0xa5, 0xc8, 0xb4, 0xb8}}},
+    { L"Windows.Foundation.AsyncActionWithProgressCompletedHandler`1",
+                                                                     {0x9c029f91, 0xcc84, 0x44fd, {0xac, 0x26, 0x0a, 0x6c, 0x4e, 0x55, 0x52, 0x81}}},
+};
+
+static const struct named_guid iid_names[] =
+{
+    { L"Windows.Foundation.IInspectable",           {0xaf86e2e0, 0xbd9d, 0x45a5, {0x83, 0x78, 0x42, 0xd2, 0x07, 0x0e, 0xe4, 0x18}}},
+    { L"Windows.Foundation.IStringable",            {0x96369f54, 0x8eb6, 0x48f0, {0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3}}},
+    { L"Windows.Foundation.IActivationFactory",     {0x06499997, 0xf7b4, 0x45fe, {0xb7, 0x63, 0x75, 0x77, 0xd1, 0xd3, 0xcb, 0x4a}}},
+    { L"Windows.Foundation.IReferenceTracker",      {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}}},
+    { L"Windows.Foundation.IAgileObject",           {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}}},
+};
+
+/*
+ * Base type / struct / enum / class signatures from the metadata (MS-WDMDB grammar).  The
+ * struct and enum field lists below match the literals CoreRT carries in Calculator's
+ * SharedLibrary.dll (e.g. struct(Windows.UI.Xaml.Interop.TypeName;string;enum(Windows.UI.Xaml.Interop.TypeKind;i4))
+ * and enum(Windows.Foundation.Metadata.AttributeTargets;u4)), which pins the field order.
+ * The rc() default-interface IIDs are the fork-verified WinRT interface IIDs.
+ */
+struct named_sig
+{
+    const WCHAR *name;
+    const char *sig;
+};
+
+static const struct named_sig base_sigs[] =
+{
+    { L"Windows.Foundation.Boolean", "b1" },
+    { L"Windows.Foundation.Char", "c2" },
+    { L"Windows.Foundation.Int16", "i2" },
+    { L"Windows.Foundation.UInt16", "u2" },
+    { L"Windows.Foundation.Int32", "i4" },
+    { L"Windows.Foundation.UInt32", "u4" },
+    { L"Windows.Foundation.Int64", "i8" },
+    { L"Windows.Foundation.UInt64", "u8" },
+    { L"Windows.Foundation.Single", "f4" },
+    { L"Windows.Foundation.Double", "f8" },
+    { L"Windows.Foundation.String", "string" },
+    { L"Windows.Foundation.Guid", "g16" },
+    { L"Windows.Foundation.Object", "cinterface(IInspectable)" },
+    { L"Windows.Foundation.IInspectable", "cinterface(IInspectable)" },
+};
+
+static const struct named_sig struct_sigs[] =
+{
+    { L"Windows.Foundation.Point", "struct(Windows.Foundation.Point;f4;f4)" },
+    { L"Windows.Foundation.Size", "struct(Windows.Foundation.Size;f4;f4)" },
+    { L"Windows.Foundation.Rect", "struct(Windows.Foundation.Rect;f4;f4;f4;f4)" },
+    { L"Windows.Foundation.HResult", "struct(Windows.Foundation.HResult;i4)" },
+    { L"Windows.Foundation.DateTime", "struct(Windows.Foundation.DateTime;i8)" },
+    { L"Windows.Foundation.TimeSpan", "struct(Windows.Foundation.TimeSpan;i8)" },
+    { L"Windows.Foundation.DateTimeOffset", "struct(Windows.Foundation.DateTimeOffset;i8)" },
+    { L"Windows.Foundation.EventRegistrationToken", "struct(Windows.Foundation.EventRegistrationToken;i8)" },
+    { L"Windows.Foundation.Numerics.Vector2", "struct(Windows.Foundation.Numerics.Vector2;f4;f4)" },
+    { L"Windows.Foundation.Numerics.Vector3", "struct(Windows.Foundation.Numerics.Vector3;f4;f4;f4)" },
+    { L"Windows.Foundation.Numerics.Vector4", "struct(Windows.Foundation.Numerics.Vector4;f4;f4;f4;f4)" },
+    { L"Windows.Foundation.Numerics.Plane", "struct(Windows.Foundation.Numerics.Plane;f4;f4;f4;f4)" },
+    { L"Windows.Foundation.Numerics.Quaternion", "struct(Windows.Foundation.Numerics.Quaternion;f4;f4;f4;f4)" },
+    { L"Windows.Foundation.Numerics.Matrix3x2", "struct(Windows.Foundation.Numerics.Matrix3x2;f4;f4;f4;f4;f4;f4)" },
+    { L"Windows.Foundation.Numerics.Matrix4x4",
+      "struct(Windows.Foundation.Numerics.Matrix4x4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4)" },
+    { L"Windows.UI.Color", "struct(Windows.UI.Color;u8;u8;u8;u8)" },
+    { L"Windows.UI.Xaml.CornerRadius", "struct(Windows.UI.Xaml.CornerRadius;f4;f4)" },
+    { L"Windows.UI.Xaml.Duration", "struct(Windows.UI.Xaml.Duration;i8;enum(Windows.UI.Xaml.DurationType;i4))" },
+    { L"Windows.UI.Xaml.GridLength", "struct(Windows.UI.Xaml.GridLength;f4;enum(Windows.UI.Xaml.GridUnitType;i4))" },
+    { L"Windows.UI.Xaml.Controls.Primitives.GeneratorPosition",
+      "struct(Windows.UI.Xaml.Controls.Primitives.GeneratorPosition;i4;i4)" },
+    { L"Windows.UI.Xaml.Media.Matrix", "struct(Windows.UI.Xaml.Media.Matrix;f4;f4;f4;f4;f4;f4)" },
+    { L"Windows.UI.Xaml.Media.Media3D.Matrix3D",
+      "struct(Windows.UI.Xaml.Media.Media3D.Matrix3D;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4;f4)" },
+    { L"Windows.UI.Xaml.Media.Animation.KeyTime", "struct(Windows.UI.Xaml.Media.Animation.KeyTime;i8)" },
+    { L"Windows.UI.Xaml.Media.Animation.RepeatBehavior",
+      "struct(Windows.UI.Xaml.Media.Animation.RepeatBehavior;f4;f8;f8;enum(Windows.UI.Xaml.Media.Animation.RepeatBehaviorType;i4))" },
+    { L"Windows.UI.Xaml.Interop.TypeName",
+      "struct(Windows.UI.Xaml.Interop.TypeName;string;enum(Windows.UI.Xaml.Interop.TypeKind;i4))" },
+};
+
+static const struct named_sig enum_sigs[] =
+{
+    { L"Windows.UI.Xaml.DurationType", "enum(Windows.UI.Xaml.DurationType;i4)" },
+    { L"Windows.UI.Xaml.GridUnitType", "enum(Windows.UI.Xaml.GridUnitType;i4)" },
+    { L"Windows.UI.Xaml.Controls.Primitives.GeneratorDirection", "enum(Windows.UI.Xaml.Controls.Primitives.GeneratorDirection;i4)" },
+    { L"Windows.UI.Xaml.Media.Animation.RepeatBehaviorType", "enum(Windows.UI.Xaml.Media.Animation.RepeatBehaviorType;i4)" },
+    { L"Windows.UI.Xaml.Interop.TypeKind", "enum(Windows.UI.Xaml.Interop.TypeKind;i4)" },
+    { L"Windows.Foundation.Metadata.AttributeTargets", "enum(Windows.Foundation.Metadata.AttributeTargets;u4)" },
+    { L"Windows.Foundation.PropertyType", "enum(Windows.Foundation.PropertyType;i4)" },
+    { L"Windows.Foundation.Collections.CollectionChange", "enum(Windows.Foundation.Collections.CollectionChange;i4)" },
+};
+
+static const struct named_sig rc_sigs[] =
+{
+    { L"Windows.Foundation.Uri", "rc(Windows.Foundation.Uri;{9e365e57-48b2-4160-956f-c7385120bbfc})" },
+    { L"Windows.ApplicationModel.Resources.Core.ResourceMap",
+      "rc(Windows.ApplicationModel.Resources.Core.ResourceMap;{72284824-db8c-42f8-b08c-53ff357dad82})" },
+    { L"Windows.ApplicationModel.Resources.Core.ResourceCandidate",
+      "rc(Windows.ApplicationModel.Resources.Core.ResourceCandidate;{af5207d9-c433-4764-b3fd-8fa6bfbcbadc})" },
+    { L"Windows.ApplicationModel.Resources.Core.ResourceQualifier",
+      "rc(Windows.ApplicationModel.Resources.Core.ResourceQualifier;{785da5b2-4afd-4376-a888-c5f9a6b7a05c})" },
+    { L"Windows.ApplicationModel.Resources.Core.NamedResource",
+      "rc(Windows.ApplicationModel.Resources.Core.NamedResource;{1c98c219-0b13-4240-89a5-d495dc189a00})" },
+    { L"Windows.ApplicationModel.Resources.Core.ResourceManager",
+      "rc(Windows.ApplicationModel.Resources.Core.ResourceManager;{f744d97b-9988-44fb-abd6-5378844cfa8b})" },
+    { L"Windows.ApplicationModel.Resources.Core.ResourceContext",
+      "rc(Windows.ApplicationModel.Resources.Core.ResourceContext;{2fa22f4b-707e-4b27-ad0d-d0d8cd468fd2})" },
+};
+
+static const char *const base_keywords[] = { "b1", "i1", "u1", "c2", "i2", "u2", "i4", "u4", "i8", "u8",
+                                             "f4", "f8", "g16", "string", "cinterface(IInspectable)" };
+
+static void fmt_guid_ascii( const GUID *guid, char *out )
+{
+    static const char hex[] = "0123456789abcdef";
+    BYTE b[16];
+    int i;
+
+    b[0] = guid->Data1 >> 24; b[1] = guid->Data1 >> 16; b[2] = guid->Data1 >> 8; b[3] = guid->Data1;
+    b[4] = guid->Data2 >> 8; b[5] = guid->Data2;
+    b[6] = guid->Data3 >> 8; b[7] = guid->Data3;
+    memcpy( &b[8], guid->Data4, 8 );
+    for (i = 0; i < 16; i++)
+    {
+        *out++ = hex[b[i] >> 4];
+        *out++ = hex[b[i] & 0x0f];
+        if (i == 3 || i == 5 || i == 7 || i == 9) *out++ = '-';
+    }
+    *out = 0;
+}
+
+/*
+ * Build one type signature element out of the flat name-element array that RoParseTypeName()
+ * produces (plain PCWSTR, not HSTRING).  An element with a trailing "`N" is a parameterized
+ * type carrying N following argument elements; the pinterface/pdelegate instance signature is
+ * "pinterface({piid};arg1;...)" for both, per the WinRT type-system grammar.
+ */
+static HRESULT build_element_sig( struct str_buf *buf, const WCHAR **elements, UINT32 count, UINT32 *index )
+{
+    const WCHAR *name = elements[*index];
+    UINT32 arity = 0, i;
+    const WCHAR *tick = wcschr( name, L'`' );
+    char ascii[48];
+
     (*index)++;
 
-    if (!str_buf_add_utf8( buf, name, wcslen( name ) )) return FALSE;
-
-    if ((tick = wcschr( name, L'`' )))
+    if (tick)
     {
         const WCHAR *p = tick + 1;
         while (*p >= L'0' && *p <= L'9') arity = arity * 10 + (*p++ - L'0');
-        if (!str_buf_add( buf, "<", 1 )) return FALSE;
+    }
+
+    if (arity)
+    {
+        for (i = 0; i < ARRAY_SIZE( pinterface_names ); i++)
+        {
+            if (!lstrcmpW( name, pinterface_names[i].name )) break;
+        }
+        if (i == ARRAY_SIZE( pinterface_names ))
+        {
+            TRACE( "no PIID for %s\n", debugstr_w( name ) );
+            return RO_E_METADATA_NAME_NOT_FOUND;
+        }
+        fmt_guid_ascii( &pinterface_names[i].guid, ascii );
+        if (!str_buf_add( buf, "pinterface({", 12 )) return E_OUTOFMEMORY;
+        if (!str_buf_add( buf, ascii, lstrlenA( ascii ) )) return E_OUTOFMEMORY;
+        if (!str_buf_add( buf, "};", 2 )) return E_OUTOFMEMORY;
         for (i = 0; i < arity; i++)
         {
-            if (*index >= count) return FALSE;
-            if (i && !str_buf_add( buf, ",", 1 )) return FALSE;
-            if (!build_type_signature( buf, elements, count, index )) return FALSE;
+            HRESULT hr;
+
+            if (i && !str_buf_add( buf, ";", 1 )) return E_OUTOFMEMORY;
+            if (*index >= count) return RO_E_METADATA_INVALID_TYPE_FORMAT;
+            if (FAILED( (hr = build_element_sig( buf, elements, count, index )) )) return hr;
         }
-        if (!str_buf_add( buf, ">", 1 )) return FALSE;
+        if (!str_buf_add( buf, ")", 1 )) return E_OUTOFMEMORY;
+        return S_OK;
     }
-    return TRUE;
+
+    for (i = 0; i < ARRAY_SIZE( base_sigs ); i++)
+        if (!lstrcmpW( name, base_sigs[i].name ))
+            return str_buf_add( buf, base_sigs[i].sig, lstrlenA( base_sigs[i].sig ) ) ? S_OK : E_OUTOFMEMORY;
+    for (i = 0; i < ARRAY_SIZE( struct_sigs ); i++)
+        if (!lstrcmpW( name, struct_sigs[i].name ))
+            return str_buf_add( buf, struct_sigs[i].sig, lstrlenA( struct_sigs[i].sig ) ) ? S_OK : E_OUTOFMEMORY;
+    for (i = 0; i < ARRAY_SIZE( enum_sigs ); i++)
+        if (!lstrcmpW( name, enum_sigs[i].name ))
+            return str_buf_add( buf, enum_sigs[i].sig, lstrlenA( enum_sigs[i].sig ) ) ? S_OK : E_OUTOFMEMORY;
+    for (i = 0; i < ARRAY_SIZE( rc_sigs ); i++)
+        if (!lstrcmpW( name, rc_sigs[i].name ))
+            return str_buf_add( buf, rc_sigs[i].sig, lstrlenA( rc_sigs[i].sig ) ) ? S_OK : E_OUTOFMEMORY;
+    for (i = 0; i < ARRAY_SIZE( base_keywords ); i++)
+    {
+        int j;
+        for (j = 0; base_keywords[i][j]; j++)
+            if (name[j] != (WCHAR)(unsigned char)base_keywords[i][j]) break;
+        if (!base_keywords[i][j] && !name[j])
+            return str_buf_add( buf, base_keywords[i], lstrlenA( base_keywords[i] ) ) ? S_OK : E_OUTOFMEMORY;
+    }
+    for (i = 0; i < ARRAY_SIZE( iid_names ); i++)
+    {
+        if (!lstrcmpW( name, iid_names[i].name ))
+        {
+            fmt_guid_ascii( &iid_names[i].guid, ascii );
+            if (!str_buf_add( buf, "{", 1 )) return E_OUTOFMEMORY;
+            if (!str_buf_add( buf, ascii, lstrlenA( ascii ) )) return E_OUTOFMEMORY;
+            if (!str_buf_add( buf, "}", 1 )) return E_OUTOFMEMORY;
+            return S_OK;
+        }
+    }
+
+    TRACE( "unresolvable element %s\n", debugstr_w( name ) );
+    return RO_E_METADATA_NAME_NOT_FOUND;
 }
 
 /***********************************************************************
  *      RoGetParameterizedTypeInstanceIID (combase.@)
  *
- * Derives the IID of a parameterized ("pinterface") type instance as documented in the WinRT type
- * system: rebuild the type signature from the flat name-element array, hash its UTF-8 encoding
- * with SHA-256 and use the leading 16 bytes as a version-5 GUID (Data3 high nibble 5, Data4[0]
- * variant 10xx).  The element names are used verbatim, which is what the .NET projection passes
- * for the instantiations it requests (IIterable, IIterator, IKeyValuePair, IMap, IMapView,
- * IObservableVector, IReference, ...), so the algorithm is generic over all of them.
+ * Computes the IID of a parameterized ("pinterface") type instance per the documented
+ * Windows algorithm: build the MS-WDMDB type signature string from the flat name-element
+ * array ("pinterface({piid};arg;...)"), take SHA-1 over the wrt_pinterface namespace octets
+ * (11f47ad5-7b73-42c0-abae-878b1e16adee, mixed-endian) plus the UTF-8 signature, use the
+ * leading 16 bytes as the GUID and stamp UUID version 5 (Data3 high nibble) and the RFC 4122
+ * variant (Data4[0] high bits).  Unresolvable names return RO_E_METADATA_NAME_NOT_FOUND
+ * instead of a fabricated IID.
  *
- * Not implemented: the metadata-locator lookup (the parameter is ignored, as in Wine's other Ro*
- * entry points) and the ROPARAMIIDHANDLE cache handle, which is reported as invalid.
+ * Not implemented: the IRoMetaDataLocator metadata-locator lookup (the parameter is ignored,
+ * as in Wine's other Ro* entry points) and the ROPARAMIIDHANDLE cache handle, which is
+ * reported as invalid.
  */
 HRESULT WINAPI RoGetParameterizedTypeInstanceIID(UINT32 name_element_count, const WCHAR **name_elements,
                                                  const IRoMetaDataLocator *meta_data_locator, GUID *iid,
                                                  ROPARAMIIDHANDLE *hiid)
 {
+    static const BYTE namespace_octets[16] =
+        {0x11, 0xf4, 0x7a, 0xd5, 0x7b, 0x73, 0x42, 0xc0, 0xab, 0xae, 0x87, 0x8b, 0x1e, 0x16, 0xad, 0xee};
     struct str_buf buf = { 0 };
     UINT32 index = 0;
-    BYTE hash[32];
+    BYTE hash[20];
     GUID guid;
+    HRESULT hr;
 
     TRACE( "%u %p %p %p %p\n", name_element_count, name_elements, meta_data_locator, iid, hiid );
 
     if (hiid) *hiid = INVALID_HANDLE_VALUE;
-    if (iid) *iid = GUID_NULL;
     if (!iid || !name_elements || !name_element_count) return E_INVALIDARG;
+    *iid = GUID_NULL;
 
     if (!(buf.data = malloc( buf.size = 128 ))) return E_OUTOFMEMORY;
-    if (!build_type_signature( &buf, name_elements, name_element_count, &index ) || index != name_element_count)
+
+    /* A single non-generic element resolves to the element's own metadata IID. */
+    if (!wcschr( name_elements[0], L'`' ))
     {
+        UINT32 i;
+
+        if (name_element_count != 1)
+        {
+            free( buf.data );
+            return RO_E_METADATA_INVALID_TYPE_FORMAT;
+        }
+        for (i = 0; i < ARRAY_SIZE( iid_names ); i++)
+        {
+            if (!lstrcmpW( name_elements[0], iid_names[i].name ))
+            {
+                TRACE( "%s -> %s\n", debugstr_w( name_elements[0] ), debugstr_guid( &iid_names[i].guid ) );
+                *iid = iid_names[i].guid;
+                free( buf.data );
+                return S_OK;
+            }
+        }
+        TRACE( "unresolvable name %s\n", debugstr_w( name_elements[0] ) );
         free( buf.data );
-        return RO_E_METADATA_INVALID_TYPE_FORMAT;
+        return RO_E_METADATA_NAME_NOT_FOUND;
     }
 
-    sha256( buf.data, buf.len, hash );
+    hr = build_element_sig( &buf, name_elements, name_element_count, &index );
+    if (SUCCEEDED( hr ) && index != name_element_count) hr = E_INVALIDARG;
+    if (FAILED( hr ))
+    {
+        free( buf.data );
+        return hr;
+    }
+
+    {
+        /* SHA-1(namespace + signature): feed the signature after the namespace octets. */
+        BYTE *input = HeapAlloc( GetProcessHeap(), 0, sizeof(namespace_octets) + buf.len );
+        if (!input) { free( buf.data ); return E_OUTOFMEMORY; }
+        memcpy( input, namespace_octets, sizeof(namespace_octets) );
+        memcpy( input + sizeof(namespace_octets), buf.data, buf.len );
+        sha1( input, sizeof(namespace_octets) + buf.len, hash );
+        HeapFree( GetProcessHeap(), 0, input );
+    }
 
     guid.Data1 = ((DWORD)hash[0] << 24) | ((DWORD)hash[1] << 16) | ((DWORD)hash[2] << 8) | hash[3];
     guid.Data2 = (WORD)(((DWORD)hash[4] << 8) | hash[5]);
-    guid.Data3 = (WORD)((((DWORD)hash[6] << 8) | hash[7]) & 0x0fff) | 0x5000;
+    guid.Data3 = (WORD)((((hash[6] & 0x0f) | 0x50) << 8) | hash[7]);
     guid.Data4[0] = (BYTE)((hash[8] & 0x3f) | 0x80);
     memcpy( &guid.Data4[1], &hash[9], 7 );
 

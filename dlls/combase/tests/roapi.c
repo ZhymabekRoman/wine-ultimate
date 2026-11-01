@@ -26,6 +26,7 @@
 
 #include "initguid.h"
 #include "roapi.h"
+#include "roparameterizediid.h"
 #include "roerrorapi.h"
 
 #include "wine/test.h"
@@ -680,6 +681,12 @@ static void test_composition_activation_route(void)
     const WCHAR *raw;
     HRESULT hr;
 
+    /* The prefix registers this class for the built-in module (loader/wine.inf.in); remove
+     * the key so the probe exercises combase's own routing, which is what an unpackaged
+     * app needs on a prefix that has no ActivatableClassId entry. */
+    RegDeleteKeyW(HKEY_LOCAL_MACHINE,
+            L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId\\Windows.UI.Composition.Compositor");
+
     hr = RoInitialize(RO_INIT_MULTITHREADED);
     ok(hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr);
 
@@ -860,6 +867,115 @@ static void test_resources_core_activation_route(void)
     RoUninitialize();
 }
 
+/*
+ * RoGetParameterizedTypeInstanceIID conformance: Windows derives the IID as a
+ * UUIDv5-style SHA-1 hash (namespace 11f47ad5-7b73-42c0-abae-878b1e16adee) over the
+ * UTF-8 "pinterface({piid};arg;...)" signature string of the instantiation
+ * (MS-WDMDB signatures / "The Windows Runtime type system" docs; the same
+ * algorithm CoreRT's ComputeIID uses: the "pinterface(" / ";i4)" /
+ * "struct(Windows.UI.Xaml.Interop.TypeName;string;enum(Windows.UI.Xaml.Interop.TypeKind;i4))"
+ * literals and the 11f47ad5 namespace string are present in Calculator's SharedLibrary.dll).
+ * The expected IIDs below are the values produced by that algorithm with the
+ * metadata PIIDs (windows-rs generated metadata / the app's own PIID table).
+ */
+HRESULT WINAPI RoGetParameterizedTypeInstanceIID(UINT32 name_element_count, const WCHAR **name_elements,
+                                                 const void *meta_data_locator, GUID *iid,
+                                                 ROPARAMIIDHANDLE *hiid);
+
+static void test_RoGetParameterizedTypeInstanceIID(void)
+{
+    static const WCHAR imapview[]  = L"Windows.Foundation.Collections.IMapView`2";
+    static const WCHAR imap[]      = L"Windows.Foundation.Collections.IMap`2";
+    static const WCHAR ivectorview[] = L"Windows.Foundation.Collections.IVectorView`1";
+    static const WCHAR ivector[]   = L"Windows.Foundation.Collections.IVector`1";
+    static const WCHAR iiterable[] = L"Windows.Foundation.Collections.IIterable`1";
+    static const WCHAR iiterator[] = L"Windows.Foundation.Collections.IIterator`1";
+    static const WCHAR ikvp[]      = L"Windows.Foundation.Collections.IKeyValuePair`2";
+    static const WCHAR ireference[] = L"Windows.Foundation.IReference`1";
+    static const WCHAR iobservablemap[] = L"Windows.Foundation.Collections.IObservableMap`2";
+    static const WCHAR string_name[] = L"Windows.Foundation.String";
+    static const WCHAR int32_name[]  = L"Windows.Foundation.Int32";
+    static const WCHAR string_kw[]   = L"string";
+    static const WCHAR int32_kw[]    = L"i4";
+    static const WCHAR resmap[] = L"Windows.ApplicationModel.Resources.Core.ResourceMap";
+
+    static const struct { const WCHAR *elems[5]; UINT32 count; GUID iid; } vectors[] =
+    {
+        { { imapview, string_name, string_name }, 3, {0x1e036276, 0x2f60, 0x55f6, {0xb7, 0xf3, 0xf8, 0x60, 0x79, 0xe6, 0x90, 0x0b}} },
+        { { imap, string_name, string_name },     3, {0xf6d1f700, 0x49c2, 0x52ae, {0x81, 0x54, 0x82, 0x6f, 0x99, 0x08, 0x77, 0x3c}} },
+        { { ivectorview, string_name },           2, {0x2f13c006, 0xa03a, 0x5f69, {0xb0, 0x90, 0x75, 0xa4, 0x3e, 0x33, 0x42, 0x3e}} },
+        { { ivector, string_name },               2, {0x98b9acc1, 0x4b56, 0x532e, {0xac, 0x73, 0x03, 0xd5, 0x29, 0x1c, 0xca, 0x90}} },
+        { { iiterable, string_name },             2, {0xe2fcc7c1, 0x3bfc, 0x5a0b, {0xb2, 0xb0, 0x72, 0xe7, 0x69, 0xd1, 0xcb, 0x7e}} },
+        { { iiterator, string_name },             2, {0x8c304ebb, 0x6615, 0x50a4, {0x88, 0x29, 0x87, 0x9e, 0xcd, 0x44, 0x32, 0x36}} },
+        { { ikvp, string_name, string_name },     3, {0x60310303, 0x49c5, 0x52e6, {0xab, 0xc6, 0xa9, 0xb3, 0x6e, 0xcc, 0xc7, 0x16}} },
+        { { iiterable, ikvp, string_name, string_name }, 4, {0xe9bdaaf0, 0xcbf6, 0x5c72, {0xbe, 0x90, 0x29, 0xcb, 0xf3, 0xa1, 0x31, 0x9b}} },
+        { { iiterator, ikvp, string_name, string_name }, 4, {0x05eb86f1, 0x7140, 0x5517, {0xb8, 0x8d, 0xcb, 0xae, 0xbe, 0x57, 0xe6, 0xb1}} },
+        { { imapview, string_name, ivectorview, string_name }, 4, {0xf232b158, 0xb565, 0x52ec, {0xab, 0x09, 0x03, 0xb7, 0x08, 0xef, 0x96, 0x86}} },
+        { { imap, string_name, ivectorview, string_name },     4, {0xb63397c9, 0x5d89, 0x530b, {0xbe, 0xcf, 0x2b, 0x84, 0x3a, 0x15, 0xc4, 0xe4}} },
+        { { ireference, string_name },            2, {0xfd416dfb, 0x2a07, 0x52eb, {0xaa, 0xe3, 0xdf, 0xce, 0x14, 0x11, 0x6c, 0x05}} },
+        { { ireference, int32_name },             2, {0x548cefbd, 0xbc8a, 0x5fa0, {0x8d, 0xf2, 0x95, 0x74, 0x40, 0xfc, 0x8b, 0xf4}} },
+        { { iobservablemap, string_name, string_name }, 3, {0xac7f26f2, 0xfeb7, 0x5b2a, {0x8a, 0xc4, 0x34, 0x5b, 0xc6, 0x2c, 0xae, 0xde}} },
+        { { imapview, string_kw, string_kw },     3, {0x1e036276, 0x2f60, 0x55f6, {0xb7, 0xf3, 0xf8, 0x60, 0x79, 0xe6, 0x90, 0x0b}} },
+        { { iiterable, int32_kw },                2, {0x81a643fb, 0xf51c, 0x5565, {0x83, 0xc4, 0xf9, 0x64, 0x25, 0x77, 0x7b, 0x66}} },
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(vectors); i++)
+    {
+        GUID iid;
+        ROPARAMIIDHANDLE handle = 0;
+        HRESULT hr;
+
+        iid = GUID_NULL;
+        hr = RoGetParameterizedTypeInstanceIID(vectors[i].count, (const WCHAR **)vectors[i].elems, NULL, &iid, &handle);
+        ok(hr == S_OK, "vector %u returned %#lx.\n", i, hr);
+        if (hr == S_OK)
+            ok(IsEqualGUID(&iid, &vectors[i].iid), "vector %u got %s, expected %s.\n",
+               i, debugstr_guid(&iid), debugstr_guid(&vectors[i].iid));
+    }
+
+    /* arg count / shape errors */
+    {
+        const WCHAR *bad_arity[] = { imapview, string_name };                 /* 2 of 3 */
+        const WCHAR *too_many[]  = { imapview, string_name, string_name, string_name };
+        const WCHAR *unknown[]   = { L"Not.A.Known.Interface`1", string_name };
+        const WCHAR *not_generic[] = { string_name };
+        GUID iid;
+        ROPARAMIIDHANDLE handle = 0;
+        HRESULT hr;
+
+        hr = RoGetParameterizedTypeInstanceIID(2, bad_arity, NULL, &iid, &handle);
+        ok(hr == RO_E_METADATA_INVALID_TYPE_FORMAT || broken(hr == E_INVALIDARG),
+           "short args returned %#lx.\n", hr);
+
+        hr = RoGetParameterizedTypeInstanceIID(4, too_many, NULL, &iid, &handle);
+        ok(hr == E_INVALIDARG, "extra args returned %#lx.\n", hr);
+
+        hr = RoGetParameterizedTypeInstanceIID(2, unknown, NULL, &iid, &handle);
+        ok(hr == RO_E_METADATA_NAME_NOT_FOUND, "unknown name returned %#lx.\n", hr);
+
+        hr = RoGetParameterizedTypeInstanceIID(1, not_generic, NULL, &iid, &handle);
+        ok(hr != S_OK, "non-generic base type returned %#lx.\n", hr);
+
+        hr = RoGetParameterizedTypeInstanceIID(1, (const WCHAR *[]){ L"Windows.Foundation.IStringable" }, NULL, &iid, &handle);
+        ok(hr == S_OK, "non-generic interface returned %#lx.\n", hr);
+        {
+            static const GUID istringable = {0x96369f54, 0x8eb6, 0x48f0, {0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3}};
+            ok(IsEqualGUID(&iid, &istringable), "IStringable got %s.\n", debugstr_guid(&iid));
+        }
+
+        hr = RoGetParameterizedTypeInstanceIID(0, NULL, NULL, &iid, &handle);
+        ok(hr == E_INVALIDARG, "empty elements returned %#lx.\n", hr);
+
+        hr = RoGetParameterizedTypeInstanceIID(2, (const WCHAR *[]){ ivectorview, resmap }, NULL, &iid, &handle);
+        ok(hr == S_OK, "IVectorView<ResourceMap> returned %#lx.\n", hr);
+        {
+            static const GUID viv_resmap = {0xf2656ef5, 0xfc27, 0x5c24, {0xa8, 0xc2, 0x16, 0x97, 0xe0, 0xbe, 0x73, 0x6f}};
+            ok(IsEqualGUID(&iid, &viv_resmap), "IVectorView<ResourceMap> got %s.\n", debugstr_guid(&iid));
+        }
+    }
+}
+
 START_TEST(roapi)
 {
     BOOL ret;
@@ -870,6 +986,7 @@ START_TEST(roapi)
     test_ActivationFactories();
     test_composition_activation_route();
     test_resources_core_activation_route();
+    test_RoGetParameterizedTypeInstanceIID();
     test_RoGetAgileReference();
     test_RoGetErrorReportingFlags();
 
