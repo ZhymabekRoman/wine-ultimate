@@ -142,6 +142,10 @@ static WCHAR *lstrdupW( const WCHAR *str )
 
 static HRESULT simple_get_iids( void *iface, ULONG *count, IID **iids )
 {
+    /* mrt100_app probes GetIids with NULL out-params; writing through them
+     * raises an access violation that feeds .NET Native's catch/rethrow
+     * loop (measured: stack overflow right after the 2nd activation) */
+    if (!count || !iids) return E_POINTER;
     *count = 0;
     *iids = NULL;
     return S_OK;
@@ -149,6 +153,7 @@ static HRESULT simple_get_iids( void *iface, ULONG *count, IID **iids )
 
 static HRESULT WINAPI get_trust_base( void *iface, INT32 *trust )
 {
+    if (!trust) return E_POINTER;
     *trust = 0; /* BaseTrust */
     return S_OK;
 }
@@ -250,6 +255,7 @@ static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
 }
 static HRESULT WINAPI svv_Size( void *iface, UINT32 *size )
 {
+    if (!size) return E_POINTER;
     *size = svv_from( iface )->count;
     return S_OK;
 }
@@ -305,6 +311,7 @@ static HRESULT WINAPI ivv_GetAt( void *iface, UINT32 index, void **item )
 }
 static HRESULT WINAPI ivv_Size( void *iface, UINT32 *size )
 {
+    if (!size) return E_POINTER;
     *size = ivv_from( iface )->count;
     return S_OK;
 }
@@ -379,6 +386,7 @@ static HRESULT WINAPI mv_HasKey( void *iface, HSTRING key, INT32 *has )
     struct map_view *impl = mv_from( iface );
     const WCHAR *raw = WindowsGetStringRawBuffer( key, NULL );
     UINT32 i;
+    if (!has) return E_POINTER;
     *has = FALSE;
     for (i = 0; i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->pairs[i].key )) { *has = TRUE; break; }
@@ -386,6 +394,7 @@ static HRESULT WINAPI mv_HasKey( void *iface, HSTRING key, INT32 *has )
 }
 static HRESULT WINAPI mv_Size( void *iface, UINT32 *size )
 {
+    if (!size) return E_POINTER;
     *size = mv_from( iface )->count;
     return S_OK;
 }
@@ -653,7 +662,9 @@ static HRESULT WINAPI iter_GetTrustLevel( void *iface, INT32 *t ) { return get_t
 static HRESULT WINAPI iter_MoveNext( void *iface, INT32 *result )
 {
     struct iterator *impl = iter_from( iface );
-    UINT32 next = impl->begun ? impl->idx + 1 : 0;
+    UINT32 next;
+    if (!result) return E_POINTER;
+    next = impl->begun ? impl->idx + 1 : 0;
     impl->begun = 1;
     if (next < impl->count) { impl->idx = next; *result = TRUE; }
     else { impl->idx = impl->count; *result = FALSE; }
@@ -662,6 +673,7 @@ static HRESULT WINAPI iter_MoveNext( void *iface, INT32 *result )
 static HRESULT WINAPI iter_HasCurrent( void *iface, INT32 *result )
 {
     struct iterator *impl = iter_from( iface );
+    if (!result) return E_POINTER;
     *result = impl->begun && impl->idx < impl->count;
     return S_OK;
 }
@@ -1209,6 +1221,7 @@ static HRESULT WINAPI map2_GetCount( void *iface, UINT32 *count )
 {
     struct res_map *impl = map2_from( iface );
     init_pri();
+    if (!count) return E_POINTER;  /* mrt100_app probes with NULL */
     *count = the_index ? pri_map_count( the_index, impl->prefix ) : 0;
     return S_OK;
 }

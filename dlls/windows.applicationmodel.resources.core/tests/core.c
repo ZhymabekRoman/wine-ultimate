@@ -559,6 +559,98 @@ static void test_iagile( void )
     CALL( factory, 2, (ULONG*)&hr );
 }
 
+/* mrt100_app probes IInspectable::GetIids with NULL out-params; the module
+ * must answer E_POINTER, not write through NULL (measured: an access
+ * violation here starts mrt100's catch/rethrow loop -> managed stack
+ * overflow right after the second ResourceContext activation). */
+static void test_getiids_nullargs( void )
+{
+    static const IID IID_IResourceContext_v81_loc = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+    void *factory = NULL, *v81 = NULL;
+    ULONG count = 0xdead;
+    IID *iids = (void *)0x1;
+    HRESULT hr;
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "getiids: factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+
+    /* normal call succeeds */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, ULONG *, IID **))VT(factory, 3))(factory, &count, &iids);
+    ok( hr == S_OK, "getiids: normal GetIids hr=%08x\n", hr );
+    CoTaskMemFree( iids );
+
+    /* probe call: NULL count + NULL array must not crash */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, ULONG *, IID **))VT(factory, 3))(factory, NULL, NULL);
+    ok( hr == E_POINTER, "getiids: factory GetIids(NULL,NULL) hr=%08x (expect E_POINTER)\n", hr );
+
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContext_v81_loc, &v81);
+    if (SUCCEEDED( hr ) && v81)
+    {
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, ULONG *, IID **))VT(v81, 3))(v81, NULL, NULL);
+        ok( hr == E_POINTER, "getiids: IResourceContext(v81) GetIids(NULL,NULL) hr=%08x (expect E_POINTER)\n", hr );
+        CALL( v81, 2, (ULONG*)&hr );
+    }
+    CALL( factory, 2, (ULONG*)&hr );
+
+    /* same probe pattern on collection count slots: mrt100_app measured
+     * calling IResourceMap2::GetCount(NULL) (AV at pri_map_count) */
+    set_pri_env();
+    {
+        void *rmfactory = NULL, *rm = NULL, *map = NULL, *map2 = NULL, *ctx = NULL, *lang = NULL;
+        hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceManager", &rmfactory );
+        if (hr == S_OK)
+        {
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rmfactory, 0))(rmfactory, &IID_IResourceManagerStatics_loc, &rm);
+            if (SUCCEEDED( hr )) CALL( rm, 6, &rm );  /* Current */
+            if (rm)
+            {
+                void *rm2 = NULL;
+                hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
+                if (SUCCEEDED( hr )) CALL( rm2, 6, &map );  /* get_MainResourceMap */
+                CALL( rm2, 2, (ULONG*)&hr );
+            }
+            if (map)
+            {
+                hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(map, 0))(map, &IID_IResourceMap2_loc, &map2);
+                if (SUCCEEDED( hr ) && map2)
+                {
+                    hr = CALL( map2, 7, NULL );  /* GetCount(NULL) */
+                    ok( hr == E_POINTER, "getiids: IResourceMap2::GetCount(NULL) hr=%08x (expect E_POINTER)\n", hr );
+                    CALL( map2, 2, (ULONG*)&hr );
+                }
+                CALL( map, 2, (ULONG*)&hr );
+            }
+            CALL( rm, 2, (ULONG*)&hr );
+            CALL( rmfactory, 2, (ULONG*)&hr );
+        }
+        /* IVectorView::Size(NULL) on the context Languages view */
+        hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+        if (hr == S_OK)
+        {
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &ctx);
+            if (SUCCEEDED( hr ) && ctx)
+            {
+                void *view = NULL;
+                hr = CALL( ctx, 6, &view );  /* GetForCurrentView */
+                if (SUCCEEDED( hr ) && view)
+                {
+                    hr = CALL( view, 11, &lang );  /* get_Languages: IVectorView<HSTRING> */
+                    if (SUCCEEDED( hr ) && lang)
+                    {
+                        hr = CALL( lang, 7, NULL );  /* Size(NULL) */
+                        ok( hr == E_POINTER, "getiids: Languages Size(NULL) hr=%08x (expect E_POINTER)\n", hr );
+                        CALL( lang, 2, (ULONG*)&hr );
+                    }
+                    CALL( view, 2, (ULONG*)&hr );
+                }
+                CALL( ctx, 2, (ULONG*)&hr );
+            }
+            CALL( factory, 2, (ULONG*)&hr );
+        }
+    }
+}
+
 static void test_memorymanager_activation(void)
 {
     void *factory = NULL, *obj = NULL;
@@ -591,6 +683,7 @@ START_TEST(core)
     test_resourcemanager_lookup();
     test_real_pri_lookup();
     test_iagile();
+    test_getiids_nullargs();
     test_memorymanager_activation();
 
     RoUninitialize();
