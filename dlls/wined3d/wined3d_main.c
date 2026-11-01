@@ -475,6 +475,11 @@ static BOOL wined3d_dll_init(HINSTANCE hInstDLL)
             ERR_(winediag)("Using the HLSL-based FFP backend.\n");
             wined3d_settings.ffp_hlsl = tmpvalue;
         }
+        if (!get_config_key_dword(hkey, appkey, env, "cpu_blit_yuv", &tmpvalue))
+        {
+            ERR_(winediag)("Doing Y'CbCr conversion blits on the CPU.\n");
+            wined3d_settings.cpu_blit_yuv = tmpvalue;
+        }
     }
 
     if (appkey) RegCloseKey( appkey );

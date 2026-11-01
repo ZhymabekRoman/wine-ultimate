@@ -45,6 +45,12 @@ UINT d3d11_video_processor_format_support(DXGI_FORMAT format)
         {DXGI_FORMAT_R8G8B8A8_UNORM_SRGB, D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT | D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT},
         {DXGI_FORMAT_R16G16B16A16_FLOAT,  D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT | D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT},
         {DXGI_FORMAT_R8G8_UNORM,          D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT},
+        /* NV12 stays input-only: the blit path converts Y'CbCr input into an RGB
+         * destination, it never writes Y'CbCr, so the OUTPUT bit (which promises
+         * "can be the target of a video processor blit") is not advertised. The
+         * NV12 -> RGB conversion capability is reported by
+         * CheckVideoProcessorFormatConversion, which is what a consumer probes
+         * before setting up a Y'CbCr -> RGB video processor blit. */
         {DXGI_FORMAT_NV12,                D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT},
         {DXGI_FORMAT_YUY2,                D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT},
     };
@@ -63,6 +69,72 @@ UINT d3d11_video_processor_format_support(DXGI_FORMAT format)
 static bool d3d11_video_processor_format_is_yuv(DXGI_FORMAT format)
 {
     return format == DXGI_FORMAT_NV12 || format == DXGI_FORMAT_YUY2;
+}
+
+static bool d3d11_video_processor_colour_space_is_ycbcr(DXGI_COLOR_SPACE_TYPE space)
+{
+    switch (space)
+    {
+        case DXGI_COLOR_SPACE_YCBCR_FULL_G22_NONE_P709_X601:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601:
+        case DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P601:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709:
+        case DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P709:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P2020:
+        case DXGI_COLOR_SPACE_YCBCR_FULL_G22_LEFT_P2020:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_LEFT_P2020:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_TOPLEFT_P2020:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G2084_TOPLEFT_P2020:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_GHLG_TOPLEFT_P2020:
+        case DXGI_COLOR_SPACE_YCBCR_FULL_GHLG_TOPLEFT_P2020:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G24_LEFT_P709:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G24_LEFT_P2020:
+        case DXGI_COLOR_SPACE_YCBCR_STUDIO_G24_TOPLEFT_P2020:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+static bool d3d11_video_processor_colour_space_is_rgb(DXGI_COLOR_SPACE_TYPE space)
+{
+    return space <= DXGI_COLOR_SPACE_RGB_STUDIO_G22_NONE_P2020
+            || space == DXGI_COLOR_SPACE_RGB_FULL_G2084_NONE_P2020
+            || space == DXGI_COLOR_SPACE_RGB_STUDIO_G2084_NONE_P2020
+            || space == DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P2020
+            || space == DXGI_COLOR_SPACE_RGB_STUDIO_G24_NONE_P709
+            || space == DXGI_COLOR_SPACE_RGB_STUDIO_G24_NONE_P2020;
+}
+
+/* Pick the Y'CbCr -> RGB matrix for a stream from the colour space recorded by
+ * VideoProcessorSetStreamColorSpace(). D3D11 exposes the matrix coefficient set
+ * as one bit (YCbCr_Matrix: 0 = BT.709, 1 = BT.601) and the nominal range as
+ * Nominal_Range (0 = undefined, 1 = 0-255, 2 = 16-235, 3 = 8-96 xvYCC).
+ *
+ * A stream that was never given a colour space converts with BT.601
+ * coefficients and the studio range expanded to full, which is what video
+ * content is expected to use (and what wined3d's historic blitter does).
+ * The Usage (video/computer) and YCbCr_xvYCC bits are recorded but not applied;
+ * the SMPTE 240M ("601L") matrix isn't reachable through this struct, only
+ * through the DXGI colour space of a conversion query. */
+static enum wined3d_yuv_matrix d3d11_video_processor_yuv_matrix(
+        const struct d3d_video_processor_stream_state *state)
+{
+    const D3D11_VIDEO_PROCESSOR_COLOR_SPACE *space = &state->color_space;
+    bool limited_range;
+
+    if (!state->has_color_space)
+        return WINED3D_YUV_MATRIX_DEFAULT;
+
+    /* Nominal_Range 0 (undefined), 2 (studio) and 3 (xvYCC) all use the reduced
+     * luma range; only 1 is full range. */
+    limited_range = space->Nominal_Range != 1;
+
+    if (space->YCbCr_Matrix)
+        return limited_range ? WINED3D_YUV_MATRIX_601_LIMITED : WINED3D_YUV_MATRIX_601_FULL;
+
+    return limited_range ? WINED3D_YUV_MATRIX_709_LIMITED : WINED3D_YUV_MATRIX_709_FULL;
 }
 
 /* ID3D11VideoProcessorEnumerator methods */
@@ -210,9 +282,11 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_processor_enumerator_GetVideoProces
         return E_INVALIDARG;
 
     /* Only the features our blit path actually implements are reported: stream
-     * constriction, and the pass-through rate conversion. Colour space conversion,
-     * filters, rotation, luma key, alpha palette and stereo are not implemented, so
-     * the corresponding capability bits are cleared. */
+     * constriction, and the pass-through rate conversion. Filters, rotation,
+     * luma key, alpha palette and stereo are not implemented, so the
+     * corresponding capability bits are cleared. Colour space conversion has no
+     * FeatureCaps bit in D3D11; the Y'CbCr -> RGB blit is advertised through
+     * CheckVideoProcessorFormatConversion instead. */
     caps->DeviceCaps = 0;
     caps->FeatureCaps = D3D11_VIDEO_PROCESSOR_FEATURE_CAPS_CONSTRICTION;
     caps->FilterCaps = 0;
@@ -458,9 +532,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_processor_enumerator1_CheckVideoPro
     input_flags = d3d11_video_processor_format_support(input_format);
     output_flags = d3d11_video_processor_format_support(output_format);
 
-    /* Our blit path is a wined3d surface blit. It copies within a format family, and
-     * converts YUY2 to RGB, which is all wined3d's conversion blitter implements; NV12
-     * is only readable through sampling, so NV12 -> RGB conversion is not supported. */
+    /* Our blit path is a wined3d surface blit. It copies within a format family,
+     * and it converts Y'CbCr input (NV12, YUY2) to an RGB destination with the
+     * matrix and nominal range taken from the stream colour space. Writing
+     * Y'CbCr is not implemented, so Y'CbCr output formats stay unsupported. */
     *supported = false;
     if (!(input_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT)
             || !(output_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT))
@@ -468,6 +543,11 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_processor_enumerator1_CheckVideoPro
 
     if (!d3d11_video_processor_format_is_yuv(input_format)
             && !d3d11_video_processor_format_is_yuv(output_format))
+        *supported = true;
+    else if (d3d11_video_processor_format_is_yuv(input_format)
+            && !d3d11_video_processor_format_is_yuv(output_format)
+            && d3d11_video_processor_colour_space_is_ycbcr(input_colour_space)
+            && d3d11_video_processor_colour_space_is_rgb(output_colour_space))
         *supported = true;
     else if (input_format == DXGI_FORMAT_YUY2 && output_format != DXGI_FORMAT_NV12)
         *supported = true;
@@ -1212,6 +1292,7 @@ HRESULT d3d_video_processor_blt(struct d3d11_device_context *context, struct d3d
     unsigned int dst_sub_resource_idx = output_view->sub_resource_idx;
     RECT dst_bounds, src_bounds, dst_rect, src_rect;
     struct d3d_video_processor_stream_state *state;
+    struct wined3d_blt_fx blt_fx;
     HRESULT hr;
     unsigned int i;
 
@@ -1261,16 +1342,20 @@ HRESULT d3d_video_processor_blt(struct d3d11_device_context *context, struct d3d
                 || !d3d11_rect_width(&dst_rect) || !d3d11_rect_height(&dst_rect))
             continue;
 
-        /* Nearest for a 1:1 copy, bilinear when stretching. Filters, rotation, colour
-         * space conversion, luma key, alpha fill and stereo modes are recorded in the
-         * stream state but are not applied by this path; NV12 sources cannot be
-         * converted by wined3d's blitter and surface as a plain plane pair. */
+        /* Nearest for a 1:1 copy, bilinear when stretching. Filters, rotation,
+         * luma key, alpha fill and stereo modes are recorded in the stream state
+         * but are not applied by this path. A Y'CbCr source is converted to the
+         * RGB destination by wined3d's conversion blitter, using the matrix and
+         * nominal range recorded by VideoProcessorSetStreamColorSpace(). */
         filter = (d3d11_rect_width(&src_rect) == d3d11_rect_width(&dst_rect)
                 && d3d11_rect_height(&src_rect) == d3d11_rect_height(&dst_rect))
                 ? WINED3D_TEXF_POINT : WINED3D_TEXF_LINEAR;
 
+        memset(&blt_fx, 0, sizeof(blt_fx));
+        blt_fx.yuv_matrix = d3d11_video_processor_yuv_matrix(state);
+
         hr = wined3d_device_context_blt(context->wined3d_context, dst_texture, dst_sub_resource_idx, &dst_rect,
-                src_texture, input_view->sub_resource_idx, &src_rect, 0, NULL, filter);
+                src_texture, input_view->sub_resource_idx, &src_rect, 0, &blt_fx, filter);
         if (FAILED(hr))
         {
             WARN("Failed to blit stream %u, hr %#lx.\n", i, hr);

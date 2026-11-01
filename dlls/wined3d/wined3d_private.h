@@ -493,6 +493,10 @@ struct wined3d_settings
     bool check_float_constants;
     bool cb_access_map_w;
     bool ffp_hlsl;
+    /* Force the CPU blitter for Y'CbCr -> RGB conversions, so the software
+     * conversion path can be exercised on hardware that has a GLSL blitter.
+     * Set through WINE_D3D_CONFIG=cpu_blit_yuv=1. */
+    bool cpu_blit_yuv;
 };
 
 extern struct wined3d_settings wined3d_settings;
@@ -2002,7 +2006,26 @@ enum wined3d_blit_op
     WINED3D_BLIT_OP_COLOR_BLIT_CKEY,
     WINED3D_BLIT_OP_DEPTH_BLIT,
     WINED3D_BLIT_OP_RAW_BLIT,
+    /* Y'CbCr source converted to an RGB destination. The conversion matrix and
+     * nominal range come from the blit fx (struct wined3d_blt_fx::yuv_matrix). */
+    WINED3D_BLIT_OP_COLOR_BLIT_YUV,
 };
+
+/* Row-major 3x4 matrix that maps a sampled Y'CbCr texel to RGB:
+ *
+ *   {r, g, b} = m[row] * {luminance, chroma_v, chroma_u, 1.0}
+ *
+ * The luminance and chroma components are the normalised [0,1] values that the
+ * sampling fixups read out of the source texture, so the matrix also carries the
+ * nominal range expansion (studio 16-235/16-240 -> full 0-255) in its bias
+ * column. */
+struct wined3d_yuv_rgb_matrix
+{
+    float m[3][4];
+};
+
+const struct wined3d_yuv_rgb_matrix *wined3d_get_yuv_matrix(enum wined3d_yuv_matrix id);
+bool wined3d_format_is_yuv_source(const struct wined3d_format *format);
 
 struct wined3d_blitter
 {
@@ -2020,7 +2043,8 @@ struct wined3d_blitter_ops
             struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx, DWORD src_location,
             const RECT *src_rect, struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
             DWORD dst_location, const RECT *dst_rect, const struct wined3d_color_key *colour_key,
-            enum wined3d_texture_filter_type filter, const struct wined3d_format *resolve_format);
+            enum wined3d_texture_filter_type filter, const struct wined3d_format *resolve_format,
+            const struct wined3d_blt_fx *fx);
 };
 
 struct wined3d_blitter *wined3d_cpu_blitter_create(void);

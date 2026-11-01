@@ -179,6 +179,471 @@ static bool readback_texture(ID3D11Device *device, ID3D11DeviceContext *context,
     return true;
 }
 
+/* Expected Y'CbCr -> RGB result for the video processor conversion, computed
+ * from the same definition the implementation uses:
+ *
+ *   Y  = Kr*R + Kg*G + Kb*B,  Kg = 1 - Kr - Kb
+ *   R  = Y + (2 - 2*Kr)*Cr,  B = Y + (2 - 2*Kb)*Cb
+ *   G  = (Y - Kr*R - Kb*B) / Kg
+ *
+ * with the nominal range expanded first: studio (nominal) range maps luma
+ * 16-235 and chroma 16-240 (centre 128) onto the full 0-255 range an RGB
+ * destination uses, full range only recentres chroma on 128. */
+static unsigned int yuv_quantise(float v)
+{
+    if (v <= 0.0f)
+        return 0;
+    if (v >= 1.0f)
+        return 255;
+    return (unsigned int)(v * 255.0f + 0.5f);
+}
+
+static void yuv_expected_rgb(bool bt709, bool limited_range,
+        unsigned int y, unsigned int u, unsigned int v, unsigned int *r, unsigned int *g, unsigned int *b)
+{
+    const float kr = bt709 ? 0.2126f : 0.299f;
+    const float kb = bt709 ? 0.0722f : 0.114f;
+    const float kg = 1.0f - kr - kb;
+    float luma_scale, luma_bias, chroma_scale, chroma_bias;
+    float luma, cb, cr, rf, gf, bf;
+
+    if (limited_range)
+    {
+        luma_scale = 255.0f / 219.0f;
+        luma_bias = -(16.0f / 255.0f) * luma_scale;
+        chroma_scale = 255.0f / 224.0f;
+        chroma_bias = -(128.0f / 255.0f) * chroma_scale;
+    }
+    else
+    {
+        luma_scale = 1.0f;
+        luma_bias = 0.0f;
+        chroma_scale = 1.0f;
+        chroma_bias = -0.5f;
+    }
+
+    luma = y / 255.0f * luma_scale + luma_bias;
+    cb = u / 255.0f * chroma_scale + chroma_bias;
+    cr = v / 255.0f * chroma_scale + chroma_bias;
+
+    rf = luma + (2.0f - 2.0f * kr) * cr;
+    bf = luma + (2.0f - 2.0f * kb) * cb;
+    gf = (luma - kr * rf - kb * bf) / kg;
+
+    *r = yuv_quantise(rf);
+    *g = yuv_quantise(gf);
+    *b = yuv_quantise(bf);
+}
+
+static void set_stream_colour_space(ID3D11VideoContext *video_context, ID3D11VideoProcessor *processor,
+        unsigned int stream, bool bt709, unsigned int nominal_range)
+{
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE colour_space;
+
+    memset(&colour_space, 0, sizeof(colour_space));
+    colour_space.Usage = 0;               /* Video. */
+    colour_space.RGB_Range = nominal_range == 2;
+    colour_space.YCbCr_Matrix = bt709 ? 0 : 1;
+    colour_space.YCbCr_xvYCC = 0;
+    colour_space.Nominal_Range = nominal_range;
+
+    ID3D11VideoContext_VideoProcessorSetStreamColorSpace(video_context, processor, stream, &colour_space);
+}
+
+/* Create an NV12 texture filled with a solid Y'CbCr colour through a CPU write
+ * map, the way a decoder hands frames to the video processor. The layout is the
+ * planar one: a WxH luminance plane followed by H/2 rows of R8G8 chroma pairs,
+ * both with the row pitch Map() reports. */
+static ID3D11Texture2D *create_filled_nv12_texture(ID3D11Device *device, ID3D11DeviceContext *context,
+        unsigned int w, unsigned int h, unsigned int y, unsigned int u, unsigned int v)
+{
+    D3D11_TEXTURE2D_DESC texture_desc;
+    D3D11_MAPPED_SUBRESOURCE map;
+    ID3D11Texture2D *texture;
+    unsigned int x, row;
+    HRESULT hr;
+
+    texture_desc.Width = w;
+    texture_desc.Height = h;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_NV12;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.SampleDesc.Quality = 0;
+    /* Y'CbCr formats take no CPU access on a default texture, so fill a staging
+     * surface; the video processor reads the frame from there. */
+    texture_desc.Usage = D3D11_USAGE_STAGING;
+    texture_desc.BindFlags = 0;
+    texture_desc.CPUAccessFlags = D3D11_CPU_ACCESS_WRITE | D3D11_CPU_ACCESS_READ;
+    texture_desc.MiscFlags = 0;
+
+    if (FAILED(hr = ID3D11Device_CreateTexture2D(device, &texture_desc, NULL, &texture)))
+        return NULL;
+
+    if (FAILED(hr = ID3D11DeviceContext_Map(context, (ID3D11Resource *)texture, 0, D3D11_MAP_WRITE, 0, &map)))
+    {
+        ID3D11Texture2D_Release(texture);
+        return NULL;
+    }
+
+    memset(map.pData, y, map.RowPitch * h);
+
+    for (row = 0; row < h / 2; ++row)
+    {
+        BYTE *chroma = (BYTE *)map.pData + map.RowPitch * h + row * map.RowPitch;
+
+        for (x = 0; x < w / 2; ++x)
+        {
+            chroma[2 * x] = u;
+            chroma[2 * x + 1] = v;
+        }
+    }
+
+    ID3D11DeviceContext_Unmap(context, (ID3D11Resource *)texture, 0);
+
+    return texture;
+}
+
+static void check_nv12_blt_pixels(const DWORD *data, unsigned int w, unsigned int h,
+        unsigned int x0, unsigned int x1, unsigned int y0, unsigned int y1,
+        unsigned int expected_r, unsigned int expected_g, unsigned int expected_b, const char *context)
+{
+    unsigned int x, y, bad = 0, first = 0;
+    static const unsigned int tolerance = 2;
+
+    for (y = y0; y < y1; ++y)
+    {
+        for (x = x0; x < x1; ++x)
+        {
+            const DWORD pixel = data[y * w + x];
+            const unsigned int b = pixel & 0xff, g = (pixel >> 8) & 0xff;
+            const unsigned int r = (pixel >> 16) & 0xff, a = (pixel >> 24) & 0xff;
+
+            if (abs((int)r - (int)expected_r) > tolerance || abs((int)g - (int)expected_g) > tolerance
+                    || abs((int)b - (int)expected_b) > tolerance || a != 0xff)
+            {
+                if (!bad)
+                    first = pixel;
+                ++bad;
+            }
+        }
+    }
+
+    ok(!bad, "Got %u of %u pixels not {%u, %u, %u, 0xff} in %s, first bad %#x.\n",
+            bad, (x1 - x0) * (y1 - y0), expected_r, expected_g, expected_b, context, first);
+}
+
+static ID3D11Texture2D *create_nv12_texture(ID3D11Device *device, unsigned int w, unsigned int h)
+{
+    ID3D11Texture2D *texture;
+
+    /* D3D11 wants Y'CbCr textures without bind flags; also probe the shader
+     * resource binding a video processor input view is built from. */
+    if ((texture = create_texture(device, w, h, DXGI_FORMAT_NV12, D3D11_BIND_SHADER_RESOURCE, 0)))
+        return texture;
+
+    return create_texture(device, w, h, DXGI_FORMAT_NV12, 0, 0);
+}
+
+/* Create the video processor plumbing for an NV12 -> BGRA blit, run one blit of
+ * a fully initialised NV12 source and read the destination back. */
+static void run_nv12_blt(ID3D11Device *device, ID3D11DeviceContext *context,
+        ID3D11VideoDevice *video_device, ID3D11VideoContext *video_context,
+        ID3D11VideoProcessorEnumerator *enumerator, ID3D11VideoProcessor *processor,
+        unsigned int w, unsigned int h, unsigned int y, unsigned int u, unsigned int v,
+        bool set_colour_space, bool bt709, unsigned int nominal_range,
+        const RECT *src_rect, const RECT *dst_rect, const float *clear_colour,
+        unsigned int dst_w, unsigned int dst_h, DWORD **out)
+{
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC output_desc;
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC input_desc;
+    ID3D11VideoProcessorOutputView *output_view = NULL;
+    ID3D11VideoProcessorInputView *input_view = NULL;
+    ID3D11VideoProcessor *p = processor;
+    ID3D11Texture2D *dst, *src;
+    ID3D11RenderTargetView *rtv;
+    D3D11_VIDEO_PROCESSOR_STREAM stream;
+    HRESULT hr;
+
+    *out = NULL;
+
+    src = create_filled_nv12_texture(device, context, w, h, y, u, v);
+    dst = create_texture(device, dst_w, dst_h, DXGI_FORMAT_B8G8R8A8_UNORM,
+            D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE, 0);
+    if (!src || !dst)
+    {
+        skip("Failed to create the NV12 source or BGRA destination.\n");
+        if (src) ID3D11Texture2D_Release(src);
+        if (dst) ID3D11Texture2D_Release(dst);
+        return;
+    }
+
+    input_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
+    input_desc.Texture2D.MipSlice = 0;
+    input_desc.Texture2D.ArraySlice = 0;
+    hr = ID3D11VideoDevice_CreateVideoProcessorInputView(video_device, (ID3D11Resource *)src, enumerator,
+            &input_desc, &input_view);
+    ok(hr == S_OK, "Got hr %#lx for the NV12 input view.\n", hr);
+
+    output_desc.ViewDimension = D3D11_VPOV_DIMENSION_TEXTURE2D;
+    output_desc.Texture2D.MipSlice = 0;
+    hr = ID3D11VideoDevice_CreateVideoProcessorOutputView(video_device, (ID3D11Resource *)dst, enumerator,
+            &output_desc, &output_view);
+    ok(hr == S_OK, "Got hr %#lx for the BGRA output view.\n", hr);
+
+    if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)dst, NULL, &rtv)))
+    {
+        ID3D11DeviceContext_ClearRenderTargetView(context, rtv, clear_colour);
+        ID3D11RenderTargetView_Release(rtv);
+    }
+
+    if (set_colour_space)
+        set_stream_colour_space(video_context, p, 0, bt709, nominal_range);
+    else
+        ID3D11VideoContext_VideoProcessorSetStreamColorSpace(video_context, p, 0, NULL);
+
+    ID3D11VideoContext_VideoProcessorSetStreamSourceRect(video_context, p, 0, src_rect ? TRUE : FALSE,
+            (RECT *)src_rect);
+    ID3D11VideoContext_VideoProcessorSetStreamDestRect(video_context, p, 0, dst_rect ? TRUE : FALSE,
+            (RECT *)dst_rect);
+
+    memset(&stream, 0, sizeof(stream));
+    stream.Enable = TRUE;
+    stream.OutputIndex = 0;
+    stream.pInputSurface = input_view;
+
+    hr = ID3D11VideoContext_VideoProcessorBlt(video_context, p, output_view, 0, 1, &stream);
+    ok(hr == S_OK, "Got hr %#lx for the NV12 -> BGRA blit.\n", hr);
+
+    if (SUCCEEDED(hr))
+        readback_texture(device, context, dst, dst_w, dst_h, out);
+
+    if (input_view)
+        ID3D11VideoProcessorInputView_Release(input_view);
+    if (output_view)
+        ID3D11VideoProcessorOutputView_Release(output_view);
+    ID3D11Texture2D_Release(src);
+    ID3D11Texture2D_Release(dst);
+}
+
+/* NV12 -> RGB conversion through the video processor: the matrix and nominal
+ * range come from VideoProcessorSetStreamColorSpace(), and the default (no
+ * colour space set) is BT.601 with the studio range expanded to full. */
+static void test_video_processor_nv12_blt(void)
+{
+    static const float black[4] = {0.0f, 0.0f, 0.0f, 1.0f};
+    static const float sentinel[4] = {1.0f, 0.0f, 0.0f, 1.0f};
+    const unsigned int w = 64, h = 32;
+    ID3D11VideoProcessorEnumerator *enumerator = NULL;
+    ID3D11VideoProcessor *processor = NULL;
+    ID3D11VideoDevice *video_device;
+    ID3D11VideoContext *video_context;
+    ID3D11DeviceContext *context = NULL;
+    ID3D11Device *device;
+    ULONG refcount;
+    HRESULT hr;
+
+    if (!(device = create_device()))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    get_video_interfaces(device, &video_device, &video_context);
+    if (!video_device || !video_context)
+    {
+        skip("Failed to get video interfaces.\n");
+        if (video_device)
+            ID3D11VideoDevice_Release(video_device);
+        if (video_context)
+            ID3D11VideoContext_Release(video_context);
+        ID3D11Device_Release(device);
+        return;
+    }
+
+    ID3D11Device_GetImmediateContext(device, &context);
+
+    hr = create_enumerator(video_device, w, h, &enumerator);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    hr = ID3D11VideoDevice_CreateVideoProcessor(video_device, enumerator, 0, &processor);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    {
+        ID3D11Texture2D *probe = create_nv12_texture(device, w, h);
+
+        if (probe)
+            ID3D11Texture2D_Release(probe);
+        else
+        {
+            skip("Failed to create an NV12 texture.\n");
+            goto done;
+        }
+    }
+
+    /* Studio range black and white: the conversion expands 16 and 235 to 0 and
+     * 255, so a neutral studio source becomes pure black / pure white. */
+    {
+        unsigned int r, g, b;
+        DWORD *data;
+
+        run_nv12_blt(device, context, video_device, video_context, enumerator, processor,
+                w, h, 16, 128, 128, false, false, 0, NULL, NULL, sentinel, w, h, &data);
+        if (data)
+        {
+            yuv_expected_rgb(false, true, 16, 128, 128, &r, &g, &b);
+            /* Studio range expands to the full range: 16 luma and neutral chroma
+             * is black on an RGB destination. */
+            ok(r == 0 && g == 0 && b == 0, "Got studio black {%u, %u, %u}.\n", r, g, b);
+            check_nv12_blt_pixels(data, w, h, 0, w, 0, h, r, g, b, "studio-range black NV12 blit");
+            free(data);
+        }
+
+        run_nv12_blt(device, context, video_device, video_context, enumerator, processor,
+                w, h, 235, 128, 128, false, false, 0, NULL, NULL, black, w, h, &data);
+        if (data)
+        {
+            yuv_expected_rgb(false, true, 235, 128, 128, &r, &g, &b);
+            /* 235 luma is the studio-range white point, expanding to 255. */
+            ok(r == 255 && g == 255 && b == 255, "Got studio white {%u, %u, %u}.\n", r, g, b);
+            check_nv12_blt_pixels(data, w, h, 0, w, 0, h, r, g, b, "studio-range white NV12 blit");
+            free(data);
+        }
+    }
+
+    /* A saturated red chroma corner (the classic BT.601 test colour). */
+    {
+        unsigned int r, g, b, r709, g709, b709;
+        DWORD *data601 = NULL, *data709 = NULL;
+
+        run_nv12_blt(device, context, video_device, video_context, enumerator, processor,
+                w, h, 81, 90, 240, true, false, 2, NULL, NULL, black, w, h, &data601);
+        run_nv12_blt(device, context, video_device, video_context, enumerator, processor,
+                w, h, 81, 90, 240, true, true, 2, NULL, NULL, black, w, h, &data709);
+
+        yuv_expected_rgb(false, true, 81, 90, 240, &r, &g, &b);
+        yuv_expected_rgb(true, true, 81, 90, 240, &r709, &g709, &b709);
+
+        /* The matrices must be observably different, otherwise the colour space
+         * state isn't reaching the conversion. */
+        ok(abs((int)g - (int)g709) > 4 || abs((int)b - (int)b709) > 4,
+                "BT.601 {%u, %u, %u} and BT.709 {%u, %u, %u} are indistinguishable.\n",
+                r, g, b, r709, g709, b709);
+
+        if (data601)
+        {
+            check_nv12_blt_pixels(data601, w, h, 0, w, 0, h, r, g, b, "BT.601 studio red NV12 blit");
+            free(data601);
+        }
+        if (data709)
+        {
+            check_nv12_blt_pixels(data709, w, h, 0, w, 0, h, r709, g709, b709, "BT.709 studio red NV12 blit");
+            free(data709);
+        }
+    }
+
+    /* Full range: no luma expansion, chroma centred on 128. */
+    {
+        unsigned int r, g, b;
+        DWORD *data;
+
+        run_nv12_blt(device, context, video_device, video_context, enumerator, processor,
+                w, h, 0, 128, 128, true, false, 1, NULL, NULL, sentinel, w, h, &data);
+        if (data)
+        {
+            yuv_expected_rgb(false, false, 0, 128, 128, &r, &g, &b);
+            check_nv12_blt_pixels(data, w, h, 0, w, 0, h, r, g, b, "full-range black NV12 blit");
+            free(data);
+        }
+
+        run_nv12_blt(device, context, video_device, video_context, enumerator, processor,
+                w, h, 255, 255, 0, true, false, 1, NULL, NULL, black, w, h, &data);
+        if (data)
+        {
+            yuv_expected_rgb(false, false, 255, 255, 0, &r, &g, &b);
+            check_nv12_blt_pixels(data, w, h, 0, w, 0, h, r, g, b, "full-range chroma NV12 blit");
+            free(data);
+        }
+    }
+
+    /* Sub-rect plus stretch: the top half of a 32x32 NV12 source (a distinct
+     * colour) is halved into the top-left quadrant of the destination. */
+    {
+        const unsigned int s = 32, d = 32;
+        unsigned int r, g, b;
+        DWORD *data;
+        RECT src_rect = {0, 0, 32, 16}, dst_rect = {0, 0, 16, 16};
+
+        run_nv12_blt(device, context, video_device, video_context, enumerator, processor,
+                s, s, 200, 60, 180, true, false, 2, &src_rect, &dst_rect, black, d, d, &data);
+        if (data)
+        {
+            yuv_expected_rgb(false, true, 200, 60, 180, &r, &g, &b);
+            check_nv12_blt_pixels(data, d, d, 0, 16, 0, 16, r, g, b, "stretched NV12 sub-rect blit");
+            /* Outside the destination rectangle the clear must survive. */
+            ok(data[20 * d + 20] == 0xff000000, "Got %#x outside the destination rect.\n", data[20 * d + 20]);
+            free(data);
+        }
+    }
+
+    /* Conversion capability reporting for the shape consumers probe. */
+    {
+        struct ID3D11VideoProcessorEnumerator1 *enumerator1;
+        BOOL supported;
+
+        hr = ID3D11VideoProcessorEnumerator_QueryInterface(enumerator,
+                &IID_ID3D11VideoProcessorEnumerator1, (void **)&enumerator1);
+        if (SUCCEEDED(hr))
+        {
+            supported = false;
+            hr = ID3D11VideoProcessorEnumerator1_CheckVideoProcessorFormatConversion(enumerator1,
+                    DXGI_FORMAT_NV12, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601,
+                    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, &supported);
+            ok(hr == S_OK, "Got hr %#lx.\n", hr);
+            ok(supported, "NV12 -> BGRA conversion not supported.\n");
+
+            supported = false;
+            hr = ID3D11VideoProcessorEnumerator1_CheckVideoProcessorFormatConversion(enumerator1,
+                    DXGI_FORMAT_NV12, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P709,
+                    DXGI_FORMAT_R8G8B8A8_UNORM, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709, &supported);
+            ok(hr == S_OK, "Got hr %#lx.\n", hr);
+            ok(supported, "NV12 -> RGBA conversion not supported.\n");
+
+            /* Writing Y'CbCr is not implemented. */
+            supported = true;
+            hr = ID3D11VideoProcessorEnumerator1_CheckVideoProcessorFormatConversion(enumerator1,
+                    DXGI_FORMAT_B8G8R8A8_UNORM, DXGI_COLOR_SPACE_RGB_FULL_G22_NONE_P709,
+                    DXGI_FORMAT_NV12, DXGI_COLOR_SPACE_YCBCR_STUDIO_G22_LEFT_P601, &supported);
+            ok(hr == S_OK, "Got hr %#lx.\n", hr);
+            ok(!supported, "Got BGRA -> NV12 reported as supported.\n");
+
+            ID3D11VideoProcessorEnumerator1_Release(enumerator1);
+        }
+    }
+
+done:
+    if (context)
+        ID3D11DeviceContext_Release(context);
+    if (processor)
+    {
+        refcount = ID3D11VideoProcessor_Release(processor);
+        ok(!refcount, "Processor has %lu references left.\n", refcount);
+    }
+    if (enumerator)
+    {
+        refcount = ID3D11VideoProcessorEnumerator_Release(enumerator);
+        ok(!refcount, "Enumerator has %lu references left.\n", refcount);
+    }
+    ID3D11VideoContext_Release(video_context);
+    ID3D11VideoDevice_Release(video_device);
+    refcount = ID3D11Device_Release(device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_video_processor_enumerator(void)
 {
     D3D11_VIDEO_PROCESSOR_FILTER_RANGE filter_range;
@@ -244,6 +709,10 @@ static void test_video_processor_enumerator(void)
     hr = ID3D11VideoProcessorEnumerator_CheckVideoProcessorFormat(enumerator, DXGI_FORMAT_NV12, &flags);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
     ok(flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT, "Got flags %#x for NV12.\n", flags);
+    /* The blit path converts Y'CbCr input to RGB, it never writes Y'CbCr, so
+     * NV12 has no OUTPUT bit; NV12 -> RGB is reported by
+     * CheckVideoProcessorFormatConversion below. */
+    ok(!(flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT), "Got flags %#x for NV12.\n", flags);
 
     hr = ID3D11VideoProcessorEnumerator_CheckVideoProcessorFormat(enumerator, DXGI_FORMAT_UNKNOWN, &flags);
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
@@ -988,13 +1457,24 @@ static void test_video_processor_blt(void)
     hr = ID3D11VideoContext_VideoProcessorBlt(video_context, processor, output_view, 0, 1, &stream);
     ok(hr == S_OK, "Got hr %#lx for a disabled stream.\n", hr);
 
-    /* NV12 -> RGB conversion is not supported by the blit path; document that here. */
+    /* NV12 -> BGRA conversion blit: supported, and it must overwrite the
+     * destination. The source is never filled, so only "the destination
+     * changed" is asserted here; the pixel-exact conversion is covered by
+     * test_video_processor_nv12_blt(). */
     {
         ID3D11Texture2D *nv12;
 
-        nv12 = create_texture(device, w, h, DXGI_FORMAT_NV12, D3D11_BIND_SHADER_RESOURCE, 0);
+        nv12 = create_nv12_texture(device, w, h);
         if (nv12)
         {
+            /* The input view below replaces the one the earlier part of the test
+             * created; release it first so it does not leak. */
+            if (input_view)
+            {
+                ID3D11VideoProcessorInputView_Release(input_view);
+                input_view = NULL;
+            }
+
             input_desc.ViewDimension = D3D11_VPIV_DIMENSION_TEXTURE2D;
             input_desc.Texture2D.MipSlice = 0;
             input_desc.Texture2D.ArraySlice = 0;
@@ -1007,9 +1487,31 @@ static void test_video_processor_blt(void)
                 stream.Enable = TRUE;
                 stream.OutputIndex = 0;
                 stream.pInputSurface = input_view;
+
+                if (SUCCEEDED(ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)dst, NULL, &rtv)))
+                {
+                    ID3D11DeviceContext_ClearRenderTargetView(context, rtv, sentinel);
+                    ID3D11RenderTargetView_Release(rtv);
+                }
+
                 hr = ID3D11VideoContext_VideoProcessorBlt(video_context, processor, output_view, 0, 1, &stream);
-                ok(FAILED(hr), "Got hr %#lx for NV12 -> BGRA blit.\n", hr);
+                ok(hr == S_OK, "Got hr %#lx for NV12 -> BGRA blit.\n", hr);
+
+                if (SUCCEEDED(hr) && readback_texture(device, context, dst, w, h, &data))
+                {
+                    unsigned int changed = 0;
+
+                    for (y = 0; y < h; ++y)
+                        for (x = 0; x < w; ++x)
+                            if (data[y * w + x] != sentinel_value)
+                                ++changed;
+                    ok(changed > w * h / 2, "Got %u of %u pixels written by the NV12 conversion blit.\n",
+                            changed, w * h);
+                    free(data);
+                }
+
                 ID3D11VideoProcessorInputView_Release(input_view);
+                input_view = NULL;
             }
             ID3D11Texture2D_Release(nv12);
         }
@@ -1155,6 +1657,9 @@ static void test_video_processor_format_support(void)
     ok(hr == S_OK, "Got hr %#lx.\n", hr);
     ok(support & D3D11_FORMAT_SUPPORT_VIDEO_PROCESSOR_INPUT, "Got support %#x.\n", support);
     ok(support & D3D11_FORMAT_SUPPORT_DECODER_OUTPUT, "Got support %#x.\n", support);
+    /* NV12 is a Y'CbCr input format: the video processor converts it to RGB, it
+     * never writes Y'CbCr, so OUTPUT stays clear. */
+    ok(!(support & D3D11_FORMAT_SUPPORT_VIDEO_PROCESSOR_OUTPUT), "Got support %#x.\n", support);
 
     hr = ID3D11Device_CheckFormatSupport(device, DXGI_FORMAT_R32G32_FLOAT, &support);
     ok(hr == S_OK || hr == E_FAIL, "Got hr %#lx.\n", hr);
@@ -1173,6 +1678,7 @@ START_TEST(video)
     test_video_processor();
     test_video_processor_state();
     test_video_processor_blt();
+    test_video_processor_nv12_blt();
     test_video_decoder_profile_support();
     test_video_processor_format_support();
 }

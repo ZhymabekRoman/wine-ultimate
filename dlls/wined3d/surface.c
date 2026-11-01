@@ -1286,19 +1286,204 @@ static void cpu_blitter_clear(struct wined3d_blitter *blitter, struct wined3d_de
     }
 }
 
+/* Sample one Y'CbCr texel out of the NV12 layout and apply the conversion
+ * matrix. Both NV12 flavours wined3d knows about store the same byte layout:
+ * a WxH luminance plane, followed by the chroma plane. For the planar
+ * (Direct3D 10/11) format that plane is H/2 rows of R8G8 pairs starting at
+ * height * row_pitch; for the Direct3D 9 overlay format the surface is stored
+ * as height * 3 / 2 byte rows and the chroma plane starts at the same offset,
+ * which is what the COMPLEX_FIXUP_NV12 sampling fixup reads off the GL texture.
+ * Either way, chroma for (x, y) is at (height + y / 2) * row_pitch + (x & ~1). */
+static void wined3d_nv12_sample(const BYTE *src, unsigned int row_pitch, unsigned int height,
+        unsigned int x, unsigned int y, const struct wined3d_yuv_rgb_matrix *matrix,
+        float *r, float *g, float *b)
+{
+    const float luma = src[y * row_pitch + x] / 255.0f;
+    const BYTE *chroma = src + (height + y / 2) * row_pitch + (x & ~1u);
+    const float chroma_u = chroma[0] / 255.0f;
+    const float chroma_v = chroma[1] / 255.0f;
+    unsigned int row;
+
+    for (row = 0; row < 3; ++row)
+    {
+        float v = matrix->m[row][0] * luma + matrix->m[row][1] * chroma_v
+                + matrix->m[row][2] * chroma_u + matrix->m[row][3];
+
+        v = v < 0.0f ? 0.0f : (v > 1.0f ? 1.0f : v);
+        if (row == 0)
+            *r = v;
+        else if (row == 1)
+            *g = v;
+        else
+            *b = v;
+    }
+}
+
+/* CPU side Y'CbCr -> RGB32 conversion blit, used when the GLSL blitter isn't
+ * available (no shader support, the Vulkan renderer, or the cpu_blit_yuv
+ * knob). Nearest-neighbour sampling only; scaling with filtering stays with the
+ * GLSL blitter. Destination is written into the sysmem location of the
+ * destination sub-resource. */
+/* Pick a CPU-side location for a sub-resource: prefer one the sub-resource
+ * already holds, otherwise fall back to its map_binding. */
+static DWORD sub_resource_cpu_location(struct wined3d_texture *texture, unsigned int sub_resource_idx)
+{
+    static const DWORD cpu_locations = WINED3D_LOCATION_SYSMEM | WINED3D_LOCATION_BUFFER;
+    DWORD locations = texture->sub_resources[sub_resource_idx].locations;
+
+    if ((texture->resource.map_binding & cpu_locations) && (locations & texture->resource.map_binding))
+        return texture->resource.map_binding;
+
+    if (locations & WINED3D_LOCATION_BUFFER)
+        return WINED3D_LOCATION_BUFFER;
+
+    if (locations & WINED3D_LOCATION_SYSMEM)
+        return WINED3D_LOCATION_SYSMEM;
+
+    if (texture->resource.map_binding & cpu_locations)
+        return texture->resource.map_binding;
+
+    return 0;
+}
+
+static HRESULT surface_cpu_blt_yuv_rgb(struct wined3d_texture *dst_texture, unsigned int dst_sub_resource_idx,
+        const struct wined3d_box *dst_box, struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx,
+        const struct wined3d_box *src_box, const struct wined3d_blt_fx *fx, struct wined3d_context *context)
+{
+    const struct wined3d_format *src_format = src_texture->resource.format;
+    const struct wined3d_format *dst_format = dst_texture->resource.format;
+    const struct wined3d_yuv_rgb_matrix *matrix = wined3d_get_yuv_matrix(fx ? fx->yuv_matrix
+            : WINED3D_YUV_MATRIX_DEFAULT);
+    unsigned int src_width = src_box->right - src_box->left;
+    unsigned int src_height = src_box->bottom - src_box->top;
+    unsigned int dst_width = dst_box->right - dst_box->left;
+    unsigned int dst_height = dst_box->bottom - dst_box->top;
+    struct wined3d_bo_address src_data, dst_data;
+    struct wined3d_range dst_range;
+    DWORD src_cpu_location, dst_cpu_location;
+    unsigned int x, y, sx, sy, xinc, yinc;
+    unsigned int src_pitch, src_slice_pitch, dst_pitch, dst_slice_pitch, height;
+    BYTE *dst_base, *dst_row, *src_base;
+    unsigned int bpp;
+
+    /* Both supported layouts are byte-per-pixel with a luminance plane of
+     * height * row_pitch bytes followed by the chroma plane. */
+    if (src_format->id != WINED3DFMT_NV12_PLANAR && src_format->id != WINED3DFMT_NV12)
+    {
+        FIXME("Conversion of %s on the CPU is not implemented.\n", debug_d3dformat(src_format->id));
+        return E_NOTIMPL;
+    }
+
+    if (dst_format->byte_count < 3 || dst_format->byte_count > 4
+            || dst_format->red_offset % 8 || dst_format->green_offset % 8 || dst_format->blue_offset % 8
+            || dst_format->alpha_offset % 8)
+    {
+        FIXME("Conversion to %s on the CPU is not implemented.\n", debug_d3dformat(dst_format->id));
+        return E_NOTIMPL;
+    }
+
+    /* Prefer a location the application already wrote into: a planar Y'CbCr
+     * resource has no OpenGL representation, so downloading its GPU location
+     * over a valid sysmem copy would replace the frame with garbage. */
+    src_cpu_location = sub_resource_cpu_location(src_texture, src_sub_resource_idx);
+    dst_cpu_location = sub_resource_cpu_location(dst_texture, dst_sub_resource_idx);
+
+    if (!src_cpu_location || !dst_cpu_location)
+    {
+        WARN("No CPU-accessible location for a %s -> %s conversion blit.\n",
+                debug_d3dformat(src_format->id), debug_d3dformat(dst_format->id));
+        return WINED3DERR_INVALIDCALL;
+    }
+
+    if (!wined3d_texture_load_location(src_texture, src_sub_resource_idx, context, src_cpu_location)
+            || !wined3d_texture_load_location(dst_texture, dst_sub_resource_idx, context, dst_cpu_location))
+    {
+        WARN("Failed to load the conversion blit resources into %s / %s.\n",
+                wined3d_debug_location(src_cpu_location), wined3d_debug_location(dst_cpu_location));
+        return WINED3DERR_INVALIDCALL;
+    }
+
+    wined3d_texture_get_pitch(src_texture, src_sub_resource_idx % src_texture->level_count,
+            &src_pitch, &src_slice_pitch);
+    wined3d_texture_get_pitch(dst_texture, dst_sub_resource_idx % dst_texture->level_count,
+            &dst_pitch, &dst_slice_pitch);
+    wined3d_texture_get_bo_address(src_texture, src_sub_resource_idx, &src_data, src_cpu_location);
+    wined3d_texture_get_bo_address(dst_texture, dst_sub_resource_idx, &dst_data, dst_cpu_location);
+
+    src_base = wined3d_context_map_bo_address(context, &src_data,
+            src_texture->sub_resources[src_sub_resource_idx].size, WINED3D_MAP_READ);
+    dst_base = wined3d_context_map_bo_address(context, &dst_data,
+            dst_texture->sub_resources[dst_sub_resource_idx].size, WINED3D_MAP_WRITE);
+
+    /* The luminance plane spans the resource height; the chroma plane follows
+     * it, so sampling is clamped to the Y plane. */
+    height = wined3d_texture_get_level_height(src_texture, src_sub_resource_idx % src_texture->level_count);
+
+    dst_range.offset = 0;
+    dst_range.size = dst_texture->sub_resources[dst_sub_resource_idx].size;
+
+    xinc = (src_width << 16) / dst_width;
+    yinc = (src_height << 16) / dst_height;
+    bpp = dst_format->byte_count;
+
+    for (y = 0; y < dst_height; ++y)
+    {
+        float r, g, b;
+
+        sy = min(src_box->top + ((y * yinc) >> 16), height - 1);
+        dst_row = dst_base + (dst_box->top + y) * dst_pitch + dst_box->left * bpp;
+
+        for (x = 0; x < dst_width; ++x)
+        {
+            sx = src_box->left + ((x * xinc) >> 16);
+
+            wined3d_nv12_sample(src_base, src_pitch, height, sx, sy, matrix, &r, &g, &b);
+
+            dst_row[dst_format->red_offset / 8] = (BYTE)lrintf(r * 255.0f);
+            dst_row[dst_format->green_offset / 8] = (BYTE)lrintf(g * 255.0f);
+            dst_row[dst_format->blue_offset / 8] = (BYTE)lrintf(b * 255.0f);
+            if (dst_format->alpha_size)
+                dst_row[dst_format->alpha_offset / 8] = 0xff;
+
+            dst_row += bpp;
+        }
+    }
+
+    wined3d_context_unmap_bo_address(context, &dst_data, 1, &dst_range);
+    wined3d_context_unmap_bo_address(context, &src_data, 0, NULL);
+
+    wined3d_texture_validate_location(dst_texture, dst_sub_resource_idx, dst_texture->resource.map_binding);
+    wined3d_texture_invalidate_location(dst_texture, dst_sub_resource_idx, ~dst_texture->resource.map_binding);
+
+    return S_OK;
+}
+
 static DWORD cpu_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_op op,
         struct wined3d_context *context, struct wined3d_texture *src_texture, unsigned int src_sub_resource_idx,
         DWORD src_location, const RECT *src_rect, struct wined3d_texture *dst_texture,
         unsigned int dst_sub_resource_idx, DWORD dst_location, const RECT *dst_rect,
         const struct wined3d_color_key *color_key, enum wined3d_texture_filter_type filter,
-        const struct wined3d_format *resolve_format)
+        const struct wined3d_format *resolve_format, const struct wined3d_blt_fx *fx)
 {
     struct wined3d_box dst_box = {dst_rect->left, dst_rect->top, dst_rect->right, dst_rect->bottom, 0, 1};
     struct wined3d_box src_box = {src_rect->left, src_rect->top, src_rect->right, src_rect->bottom, 0, 1};
-    struct wined3d_blt_fx fx;
+    struct wined3d_blt_fx local_fx;
     DWORD flags = 0;
 
-    memset(&fx, 0, sizeof(fx));
+    if (op == WINED3D_BLIT_OP_COLOR_BLIT_YUV)
+    {
+        if (SUCCEEDED(surface_cpu_blt_yuv_rgb(dst_texture, dst_sub_resource_idx, &dst_box,
+                src_texture, src_sub_resource_idx, &src_box, fx, context)))
+        {
+            wined3d_texture_load_location(dst_texture, dst_sub_resource_idx, context, dst_location);
+            return dst_location | (dst_texture->sub_resources[dst_sub_resource_idx].locations
+                    & dst_texture->resource.map_binding);
+        }
+
+        return dst_location;
+    }
+
+    memset(&local_fx, 0, sizeof(local_fx));
     switch (op)
     {
         case WINED3D_BLIT_OP_COLOR_BLIT:
@@ -1312,7 +1497,7 @@ static DWORD cpu_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
             break;
         case WINED3D_BLIT_OP_COLOR_BLIT_CKEY:
             flags |= WINED3D_BLT_SRC_CKEY_OVERRIDE | WINED3D_BLT_FX;
-            fx.src_color_key = *color_key;
+            local_fx.src_color_key = *color_key;
             break;
         default:
             FIXME("Unhandled op %#x.\n", op);
@@ -1320,7 +1505,7 @@ static DWORD cpu_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
     }
 
     if (FAILED(surface_cpu_blt(dst_texture, dst_sub_resource_idx, &dst_box,
-            src_texture, src_sub_resource_idx, &src_box, flags, &fx, filter)))
+            src_texture, src_sub_resource_idx, &src_box, flags, &local_fx, filter)))
         ERR("Failed to blit.\n");
     wined3d_texture_load_location(dst_texture, dst_sub_resource_idx, context, dst_location);
 
@@ -1391,9 +1576,11 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
     DWORD dst_location, valid_locations;
     struct wined3d_context *context;
     enum wined3d_blit_op blit_op;
+    struct wined3d_blt_fx local_fx;
     RECT src_rect, dst_rect;
     bool src_ds, dst_ds;
 
+    static const struct wined3d_blt_fx zero_fx;
     static const DWORD simple_blit = WINED3D_BLT_SRC_CKEY
             | WINED3D_BLT_SRC_CKEY_OVERRIDE
             | WINED3D_BLT_ALPHA_TEST
@@ -1497,7 +1684,7 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
         context = context_acquire(device, dst_texture, dst_sub_resource_idx);
         valid_locations = device->blitter->ops->blitter_blit(device->blitter, blit_op, context,
                 src_texture, src_sub_resource_idx, src_texture->resource.draw_binding, &src_rect,
-                dst_texture, dst_sub_resource_idx, dst_location, &dst_rect, NULL, filter, resolve_format);
+                dst_texture, dst_sub_resource_idx, dst_location, &dst_rect, NULL, filter, resolve_format, fx);
         context_release(context);
 
         wined3d_texture_validate_location(dst_texture, dst_sub_resource_idx, valid_locations);
@@ -1522,7 +1709,23 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
     }
 
     blit_op = WINED3D_BLIT_OP_COLOR_BLIT;
-    if (flags & WINED3D_BLT_SRC_CKEY_OVERRIDE)
+    if (convert && wined3d_format_is_yuv_source(src_texture->resource.format)
+            && dst_texture->resource.format->byte_count >= 3
+            && !dst_texture->resource.format->depth_size && !dst_texture->resource.format->stencil_size
+            && !(dst_texture->resource.format->attrs & WINED3D_FORMAT_ATTR_BLOCKS))
+    {
+        /* Y'CbCr -> RGB conversion blit. The matrix and nominal range travel in
+         * the blit fx; colour keying and the sysmem shortcuts don't combine
+         * with conversion, so this takes precedence over the key flags. Sanitize
+         * the matrix id: it is part of the blitter program cache key. */
+        local_fx = fx ? *fx : zero_fx;
+        if (local_fx.yuv_matrix >= WINED3D_YUV_MATRIX_COUNT)
+            local_fx.yuv_matrix = WINED3D_YUV_MATRIX_DEFAULT;
+        fx = &local_fx;
+
+        blit_op = WINED3D_BLIT_OP_COLOR_BLIT_YUV;
+    }
+    else if (flags & WINED3D_BLT_SRC_CKEY_OVERRIDE)
     {
         colour_key = &fx->src_color_key;
         blit_op = WINED3D_BLIT_OP_COLOR_BLIT_CKEY;
@@ -1632,7 +1835,7 @@ HRESULT texture2d_blt(struct wined3d_texture *dst_texture, unsigned int dst_sub_
 
     valid_locations = device->blitter->ops->blitter_blit(device->blitter, blit_op, context,
             src_texture, src_sub_resource_idx, src_texture->resource.draw_binding, &src_rect,
-            dst_texture, dst_sub_resource_idx, dst_location, &dst_rect, colour_key, filter, resolve_format);
+            dst_texture, dst_sub_resource_idx, dst_location, &dst_rect, colour_key, filter, resolve_format, fx);
 
     context_release(context);
 

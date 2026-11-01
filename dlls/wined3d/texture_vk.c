@@ -1590,7 +1590,7 @@ static DWORD vk_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit_
         DWORD src_location, const RECT *src_rect, struct wined3d_texture *dst_texture,
         unsigned int dst_sub_resource_idx, DWORD dst_location, const RECT *dst_rect,
         const struct wined3d_color_key *colour_key, enum wined3d_texture_filter_type filter,
-        const struct wined3d_format *resolve_format)
+        const struct wined3d_format *resolve_format, const struct wined3d_blt_fx *fx)
 {
     const struct wined3d_format_vk *src_format_vk = wined3d_format_vk(src_texture->resource.format);
     const struct wined3d_format_vk *dst_format_vk = wined3d_format_vk(dst_texture->resource.format);
@@ -2030,7 +2030,8 @@ next:
 
     TRACE("Forwarding to blitter %p.\n", next);
     return next->ops->blitter_blit(next, op, context, src_texture, src_sub_resource_idx, src_location,
-            src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, colour_key, filter, resolve_format);
+            src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, colour_key, filter,
+            resolve_format, fx);
 }
 
 static const struct wined3d_blitter_ops vk_blitter_ops =

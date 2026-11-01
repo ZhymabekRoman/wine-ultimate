@@ -715,6 +715,9 @@ struct d3d_video_processor_stream_state
 
     D3D11_VIDEO_FRAME_FORMAT frame_format;
     D3D11_VIDEO_PROCESSOR_COLOR_SPACE color_space;
+    /* False until VideoProcessorSetStreamColorSpace() records a colour space, so
+     * that a stream that never set one converts with the video default matrix. */
+    BOOL has_color_space;
 
     D3D11_VIDEO_PROCESSOR_OUTPUT_RATE output_rate;
     BOOL output_rate_repeat;

@@ -3676,6 +3676,7 @@ static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamColorSp
         return;
 
     impl->streams[stream_idx].color_space = *space;
+    impl->streams[stream_idx].has_color_space = TRUE;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamOutputRate(

@@ -12144,6 +12144,10 @@ struct glsl_blitter_args
 {
     GLenum texture_type;
     struct color_fixup_desc fixup;
+    /* Enum wined3d_yuv_matrix; WINED3D_YUV_MATRIX_DEFAULT keeps the historic
+     * hard-coded BT.601 studio-range coefficients. It is part of the program
+     * cache key, so every colour space gets its own program. */
+    unsigned int yuv_matrix;
     unsigned short use_colour_key;
 };
 
@@ -12479,6 +12483,7 @@ static void glsl_blitter_generate_yuv_shader(struct wined3d_string_buffer *buffe
         const char *output, const char *tex_type, const char *swizzle)
 {
     enum complex_fixup complex_fixup = get_complex_fixup(args->fixup);
+    const struct wined3d_yuv_rgb_matrix *matrix = NULL;
 
     /* Drivers disagree on whether the Y'CbCr components should be interpreted
      * as being in the [0,255] range (NVidia, but this is configurable) or the
@@ -12487,7 +12492,23 @@ static void glsl_blitter_generate_yuv_shader(struct wined3d_string_buffer *buffe
      * of which only matches the frame if the reduced range is used, so we side
      * with the reduced range here. */
 
-    shader_addline(buffer, "const vec4 yuv_coef = vec4(1.596, -0.392, -0.813, 2.017);\n");
+    if (args->yuv_matrix)
+        matrix = wined3d_get_yuv_matrix(args->yuv_matrix);
+
+    if (matrix)
+    {
+        /* Row-major {luminance, chroma_v, chroma_u, 1.0} rows, pre-multiplied
+         * with the nominal range expansion. */
+        shader_addline(buffer, "const vec4 yuv_row0 = vec4(%e, %e, %e, %e);\n",
+                matrix->m[0][0], matrix->m[0][1], matrix->m[0][2], matrix->m[0][3]);
+        shader_addline(buffer, "const vec4 yuv_row1 = vec4(%e, %e, %e, %e);\n",
+                matrix->m[1][0], matrix->m[1][1], matrix->m[1][2], matrix->m[1][3]);
+        shader_addline(buffer, "const vec4 yuv_row2 = vec4(%e, %e, %e, %e);\n",
+                matrix->m[2][0], matrix->m[2][1], matrix->m[2][2], matrix->m[2][3]);
+    }
+    else
+        shader_addline(buffer, "const vec4 yuv_coef = vec4(1.596, -0.392, -0.813, 2.017);\n");
+
     shader_addline(buffer, "float luminance;\n");
     shader_addline(buffer, "vec2 texcoord;\n");
     shader_addline(buffer, "vec2 chroma;\n");
@@ -12525,15 +12546,30 @@ static void glsl_blitter_generate_yuv_shader(struct wined3d_string_buffer *buffe
             return;
     }
 
-    /* Calculate the final result. Formula is taken from
-     * http://www.fourcc.org/fccyvrgb.php. Note that the chroma
-     * ranges from -0.5 to 0.5. */
-    shader_addline(buffer, "\n    chroma.xy -= 0.5;\n");
-    shader_addline(buffer, "    luminance = (luminance - 0.063) * 1.164;\n");
+    if (matrix)
+    {
+        /* chroma.x is Cr (V), chroma.y is Cb (U); the matrix rows are in the
+         * same {luminance, Cr, Cb, 1.0} order. The source is video data, so the
+         * destination alpha is opaque, matching the D3D11 video processor's
+         * default opaque alpha fill mode. */
+        shader_addline(buffer, "\n    vec4 yuv = vec4(luminance, chroma.x, chroma.y, 1.0);\n");
+        shader_addline(buffer, "    %s.x = dot(yuv_row0, yuv);\n", output);
+        shader_addline(buffer, "    %s.y = dot(yuv_row1, yuv);\n", output);
+        shader_addline(buffer, "    %s.z = dot(yuv_row2, yuv);\n", output);
+        shader_addline(buffer, "    %s.a = 1.0;\n", output);
+    }
+    else
+    {
+        /* Calculate the final result. Formula is taken from
+         * http://www.fourcc.org/fccyvrgb.php. Note that the chroma
+         * ranges from -0.5 to 0.5. */
+        shader_addline(buffer, "\n    chroma.xy -= 0.5;\n");
+        shader_addline(buffer, "    luminance = (luminance - 0.063) * 1.164;\n");
 
-    shader_addline(buffer, "    %s.x = luminance + chroma.x * yuv_coef.x;\n", output);
-    shader_addline(buffer, "    %s.y = luminance + chroma.y * yuv_coef.y + chroma.x * yuv_coef.z;\n", output);
-    shader_addline(buffer, "    %s.z = luminance + chroma.y * yuv_coef.w;\n", output);
+        shader_addline(buffer, "    %s.x = luminance + chroma.x * yuv_coef.x;\n", output);
+        shader_addline(buffer, "    %s.y = luminance + chroma.y * yuv_coef.y + chroma.x * yuv_coef.z;\n", output);
+        shader_addline(buffer, "    %s.z = luminance + chroma.y * yuv_coef.w;\n", output);
+    }
     if (args->use_colour_key)
         shader_glsl_generate_colour_key_test(buffer, output, "colour_key.low", "colour_key.high");
 
@@ -12722,7 +12758,8 @@ static void glsl_blitter_upload_palette(struct wined3d_glsl_blitter *blitter,
 
 /* Context activation is done by the caller. */
 static struct glsl_blitter_program *glsl_blitter_get_program(struct wined3d_glsl_blitter *blitter,
-        struct wined3d_context_gl *context_gl, const struct wined3d_texture_gl *texture_gl, BOOL use_colour_key)
+        struct wined3d_context_gl *context_gl, const struct wined3d_texture_gl *texture_gl,
+        BOOL use_colour_key, enum wined3d_yuv_matrix yuv_matrix)
 {
     const struct wined3d_gl_info *gl_info = context_gl->gl_info;
     struct glsl_blitter_program *program;
@@ -12732,6 +12769,7 @@ static struct glsl_blitter_program *glsl_blitter_get_program(struct wined3d_glsl
     memset(&args, 0, sizeof(args));
     args.texture_type = texture_gl->target;
     args.fixup = texture_gl->t.resource.format->color_fixup;
+    args.yuv_matrix = yuv_matrix;
     args.use_colour_key = use_colour_key;
 
     if ((entry = wine_rb_get(&blitter->programs, &args)))
@@ -12788,10 +12826,32 @@ static BOOL glsl_blitter_supported(enum wined3d_blit_op blit_op, const struct wi
     }
 
     if (blit_op != WINED3D_BLIT_OP_COLOR_BLIT && blit_op != WINED3D_BLIT_OP_COLOR_BLIT_CKEY
-            && blit_op != WINED3D_BLIT_OP_COLOR_BLIT_ALPHATEST)
+            && blit_op != WINED3D_BLIT_OP_COLOR_BLIT_ALPHATEST
+            && blit_op != WINED3D_BLIT_OP_COLOR_BLIT_YUV)
     {
         TRACE("Unsupported blit_op %#x.\n", blit_op);
         return FALSE;
+    }
+
+    if (blit_op == WINED3D_BLIT_OP_COLOR_BLIT_YUV)
+    {
+        if (wined3d_settings.cpu_blit_yuv)
+        {
+            TRACE("Y'CbCr conversion blit forced to the CPU blitter.\n");
+            return FALSE;
+        }
+
+        if (src_format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+        {
+            /* The planar (Direct3D 10/11) NV12 texture has no OpenGL storage: a
+             * planar resource is two GL textures (an R8 luma plane and a half
+             * resolution R8G8 chroma plane), and wined3d's OpenGL backend does
+             * not create planar texture views yet (see the FIXME in
+             * create_texture_view). Sample-from-planar is therefore not
+             * available; the conversion runs on the CPU blitter. */
+            TRACE("Planar Y'CbCr source is not texturable on OpenGL, deferring.\n");
+            return FALSE;
+        }
     }
 
     if (src_resource->type != WINED3D_RTYPE_TEXTURE_2D)
@@ -12844,8 +12904,10 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
         DWORD src_location, const RECT *src_rect, struct wined3d_texture *dst_texture,
         unsigned int dst_sub_resource_idx, DWORD dst_location, const RECT *dst_rect,
         const struct wined3d_color_key *colour_key, enum wined3d_texture_filter_type filter,
-        const struct wined3d_format *resolve_format)
+        const struct wined3d_format *resolve_format, const struct wined3d_blt_fx *fx)
 {
+    enum wined3d_yuv_matrix yuv_matrix = fx ? fx->yuv_matrix : WINED3D_YUV_MATRIX_DEFAULT;
+
     struct wined3d_texture_gl *src_texture_gl = wined3d_texture_gl(src_texture);
     struct wined3d_texture_gl *dst_texture_gl = wined3d_texture_gl(dst_texture);
     struct wined3d_context_gl *context_gl = wined3d_context_gl(context);
@@ -12878,7 +12940,7 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
         TRACE("Forwarding to blitter %p.\n", next);
         return next->ops->blitter_blit(next, op, context, src_texture, src_sub_resource_idx, src_location,
                 src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, colour_key, filter,
-                resolve_format);
+                resolve_format, fx);
     }
 
     glsl_blitter = CONTAINING_RECORD(blitter, struct wined3d_glsl_blitter, blitter);
@@ -12952,7 +13014,11 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
         colour_key = NULL;
     }
 
-    if (!(program = glsl_blitter_get_program(glsl_blitter, context_gl, src_texture_gl, !!colour_key)))
+    if (op != WINED3D_BLIT_OP_COLOR_BLIT_YUV)
+        yuv_matrix = WINED3D_YUV_MATRIX_DEFAULT;
+
+    if (!(program = glsl_blitter_get_program(glsl_blitter, context_gl, src_texture_gl,
+            !!colour_key, yuv_matrix)))
     {
         ERR("Failed to get blitter program.\n");
         return dst_location;

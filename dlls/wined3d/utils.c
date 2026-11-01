@@ -4485,6 +4485,151 @@ BOOL wined3d_formats_are_srgb_variants(enum wined3d_format_id format1, enum wine
 }
 
 /*****************************************************************************
+ * Y'CbCr -> RGB conversion matrices
+ *
+ * The matrices are derived from the luma/chroma weights (Kr, Kb) of each
+ * colour matrix definition, in the same form the D3D11 / DXGI colour spaces
+ * name them:
+ *
+ *   Y  = Kr*R + Kg*G + Kb*B,           Kg = 1 - Kr - Kb
+ *   Cb = (B - Y) / (2 - 2*Kb)   ->  B = Y + (2 - 2*Kb)*Cb
+ *   Cr = (R - Y) / (2 - 2*Kr)   ->  R = Y + (2 - 2*Kr)*Cr
+ *   G  = (Y - Kr*R - Kb*B) / Kg
+ *
+ * Sampled texel components are normalised to [0,1], so the matrix also folds in
+ * the nominal range expansion. For the studio ("limited", "nominal") range luma
+ * spans 16-235 and chroma spans 16-240 around a 128 centre, which is expanded to
+ * the full 0-255 range the RGB destination uses; for the full range only the
+ * chroma centre shift applies. Expanding is what a D3D11 video processor does
+ * when it converts a video source into an RGB output surface.
+ */
+struct wined3d_yuv_coefficients
+{
+    float kr;
+    float kb;
+};
+
+static const struct wined3d_yuv_coefficients yuv_coefficients[] =
+{
+    {0.2126f, 0.0722f},  /* ITU-R BT.709. */
+    {0.299f, 0.114f},    /* ITU-R BT.601, SMPTE 170M. */
+    {0.2126f, 0.082f},   /* SMPTE 240M, the "601L" matrix. */
+};
+
+static struct wined3d_yuv_rgb_matrix yuv_matrices[WINED3D_YUV_MATRIX_COUNT];
+static INIT_ONCE yuv_matrix_once = INIT_ONCE_STATIC_INIT;
+
+static void init_yuv_matrix(struct wined3d_yuv_rgb_matrix *matrix,
+        const struct wined3d_yuv_coefficients *coeffs, bool limited_range)
+{
+    const float kg = 1.0f - coeffs->kr - coeffs->kb;
+    float luma_scale, luma_bias, chroma_scale, chroma_centre;
+    float r_v, g_v, g_u, b_u;
+    unsigned int row;
+
+    if (limited_range)
+    {
+        luma_scale = 255.0f / 219.0f;
+        luma_bias = -(16.0f / 255.0f) * luma_scale;
+        chroma_scale = 255.0f / 224.0f;
+        chroma_centre = 128.0f / 255.0f;
+    }
+    else
+    {
+        luma_scale = 1.0f;
+        luma_bias = 0.0f;
+        chroma_scale = 1.0f;
+        chroma_centre = 0.5f;
+    }
+
+    r_v = (2.0f - 2.0f * coeffs->kr) * chroma_scale;
+    b_u = (2.0f - 2.0f * coeffs->kb) * chroma_scale;
+    g_v = -(coeffs->kr * (2.0f - 2.0f * coeffs->kr) / kg) * chroma_scale;
+    g_u = -(coeffs->kb * (2.0f - 2.0f * coeffs->kb) / kg) * chroma_scale;
+
+    /* Columns are {luminance, chroma_v (Cr), chroma_u (Cb), 1.0}. */
+    matrix->m[0][0] = luma_scale;
+    matrix->m[0][1] = r_v;
+    matrix->m[0][2] = 0.0f;
+    matrix->m[1][0] = luma_scale;
+    matrix->m[1][1] = g_v;
+    matrix->m[1][2] = g_u;
+    matrix->m[2][0] = luma_scale;
+    matrix->m[2][1] = 0.0f;
+    matrix->m[2][2] = b_u;
+
+    /* The chroma columns multiply the raw sampled component, so the bias has to
+     * shift by the chroma centre scaled through the same column. */
+    for (row = 0; row < 3; ++row)
+        matrix->m[row][3] = luma_bias - (matrix->m[row][1] + matrix->m[row][2]) * chroma_centre;
+}
+
+static void init_yuv_matrices(void)
+{
+    static const struct
+    {
+        unsigned int coefficients;
+        bool limited_range;
+    }
+    matrix_selection[WINED3D_YUV_MATRIX_COUNT] =
+    {
+        {1, true},   /* WINED3D_YUV_MATRIX_DEFAULT: BT.601, studio range. */
+        {0, true},   /* WINED3D_YUV_MATRIX_709_LIMITED. */
+        {0, false},  /* WINED3D_YUV_MATRIX_709_FULL. */
+        {1, true},   /* WINED3D_YUV_MATRIX_601_LIMITED. */
+        {1, false},  /* WINED3D_YUV_MATRIX_601_FULL. */
+        {2, true},   /* WINED3D_YUV_MATRIX_601L_LIMITED. */
+        {2, false},  /* WINED3D_YUV_MATRIX_601L_FULL. */
+    };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE(yuv_matrices); ++i)
+        init_yuv_matrix(&yuv_matrices[i], &yuv_coefficients[matrix_selection[i].coefficients],
+                matrix_selection[i].limited_range);
+}
+
+static BOOL CALLBACK init_yuv_matrices_cb( PINIT_ONCE once, PVOID parameter, PVOID *context )
+{
+    init_yuv_matrices();
+    return TRUE;
+}
+
+const struct wined3d_yuv_rgb_matrix *wined3d_get_yuv_matrix(enum wined3d_yuv_matrix id)
+{
+    InitOnceExecuteOnce(&yuv_matrix_once, init_yuv_matrices_cb, NULL, NULL);
+
+    if (id >= WINED3D_YUV_MATRIX_COUNT)
+        id = WINED3D_YUV_MATRIX_DEFAULT;
+
+    return &yuv_matrices[id];
+}
+
+/* Formats a Y'CbCr -> RGB conversion blit can read. The planar NV12 format is
+ * the Direct3D 10/11 video format (a Y plane followed by a half-resolution
+ * R8G8 chroma plane); the COMPLEX_FIXUP formats are the Direct3D 9 overlay
+ * layouts, which the sampling fixups read straight off the GL texture. */
+bool wined3d_format_is_yuv_source(const struct wined3d_format *format)
+{
+    if (format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+        return format->id == WINED3DFMT_NV12_PLANAR && format->byte_count == 1
+                && format->plane_formats[0] == WINED3DFMT_R8_UINT
+                && format->plane_formats[1] == WINED3DFMT_R8G8_UINT;
+
+    switch (get_complex_fixup(format->color_fixup))
+    {
+        case COMPLEX_FIXUP_NV12:
+        case COMPLEX_FIXUP_YV12:
+        case COMPLEX_FIXUP_YUY2:
+        case COMPLEX_FIXUP_UYVY:
+        case COMPLEX_FIXUP_YUV:
+            return true;
+
+        default:
+            return false;
+    }
+}
+
+/*****************************************************************************
  * Trace formatting of useful values
  */
 const char *debug_box(const struct wined3d_box *box)

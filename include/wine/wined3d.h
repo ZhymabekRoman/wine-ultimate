@@ -2035,12 +2035,32 @@ struct wined3d_color_key
                                             * to be treated as Color Key, inclusive */
 };
 
+/* Y'CbCr to RGB conversion matrices a blit can be asked to use. The value is a
+ * matrix/range pair selector; it is stored in struct wined3d_blt_fx and is only
+ * consulted for blits whose source format carries a Y'CbCr colour fixup.
+ * MATRIX_DEFAULT keeps the historic wined3d blitter behaviour, which is
+ * BT.601 coefficients with the studio (16-235 / 16-240) range expanded to the
+ * full 0-255 range, i.e. the conversion a D3D11 video processor applies for
+ * video sources. */
+enum wined3d_yuv_matrix
+{
+    WINED3D_YUV_MATRIX_DEFAULT = 0,
+    WINED3D_YUV_MATRIX_709_LIMITED,
+    WINED3D_YUV_MATRIX_709_FULL,
+    WINED3D_YUV_MATRIX_601_LIMITED,
+    WINED3D_YUV_MATRIX_601_FULL,
+    WINED3D_YUV_MATRIX_601L_LIMITED,
+    WINED3D_YUV_MATRIX_601L_FULL,
+    WINED3D_YUV_MATRIX_COUNT
+};
+
 struct wined3d_blt_fx
 {
     uint32_t fx;
     struct wined3d_color_key dst_color_key;
     struct wined3d_color_key src_color_key;
     enum wined3d_format_id resolve_format_id;
+    enum wined3d_yuv_matrix yuv_matrix;
 };
 
 struct wined3d_buffer_desc
