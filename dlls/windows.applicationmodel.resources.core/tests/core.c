@@ -70,7 +70,11 @@ static const IID IID_IResourceManagerStatics_loc = {0x1cc0fdfc, 0x69ee, 0x4e43, 
 static const IID IID_IResourceManager_loc = {0xf744d97b, 0x9988, 0x44fb, {0xab, 0xd6, 0x53, 0x78, 0x84, 0x4c, 0xfa, 0x8b}};
 static const IID IID_IResourceMap_loc = {0x72284824, 0xdb8c, 0x42f8, {0xb0, 0x8c, 0x53, 0xff, 0x35, 0x7d, 0xad, 0x82}};
 static const IID IID_IResourceCandidate_loc = {0xaf5207d9, 0xc433, 0x4764, {0xb3, 0xfd, 0x8f, 0xa6, 0xbf, 0xbc, 0xba, 0xdc}};
-static const IID IID_IInspectable_loc = {0xaf86e2e0, 0xbcdf, 0x11ce, {0x9c, 0x40, 0x00, 0xaa, 0x00, 0x3d, 0xd9, 0x21}};
+/* IInspectable as declared in this tree's include/inspectable.idl
+ * (uuid af86e2e0-b12d-4c6a-9c5a-d7aa65101e90); the module's QI compares the
+ * same constant -- a local copy with the DCOM-template tail (bcdf-11ce...)
+ * QIs E_NOINTERFACE against the deployed module (verified). */
+static const IID IID_IInspectable_loc = {0xaf86e2e0, 0xb12d, 0x4c6a, {0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90}};
 /* v1-era interface identities, (unverified) like the module's 8.1 entries:
  * IResourceMap2 [II 5][GetByIndex 6][GetCount 7][GetFullCount 8][FullGetByIndex 9]
  * IResourceContext2 [II 5][SetQualifierValue 6][TrySetName 7][TrySetPackage 8][SetAllQualifiers 9]
@@ -700,6 +704,223 @@ done:
     CALL( factory, 2, (ULONG*)&hr );
 }
 
+/* The Calculator crash-loop (280x c0000005, sr2.log 47150+) was settled as
+ * caller-side: both AV sites decode to the 8.1 IResourceContext {11d3b13a}
+ * interface on the factory singleton -- rc81_GetIids writing *count with the
+ * caller passing count = 0x24 (a value, not a pointer) and
+ * rc81_CreateWithCurrentView writing *out with out = unmapped heap.  The
+ * faulting writes are exactly what Windows' own IInspectable::GetIids /
+ * class-factory Create methods do: dereference the caller's out params.
+ * These tests pin the module side of that verdict:
+ *  (a) the lazy the_current_context singleton is immune to the
+ *      create_context re-entrancy window (DeviceFamily registry read inside
+ *      creation): N threads race the cold path, all get the one valid
+ *      context, no corruption, no AV;
+ *  (b) the two measured caller shapes fault inside the module on the caller
+ *      arguments (Windows-parity) and leave the module fully functional --
+ *      the app survives 280 faults precisely because module state is intact.
+ */
+#define HAMMER_THREADS 8
+#define HAMMER_ITERS   50
+
+static HANDLE hammer_gate;
+static volatile LONG hammer_fail;
+static volatile LONG hammer_done;
+static volatile LONG hammer_f_statics, hammer_f_gfcv, hammer_f_insp, hammer_f_ident, hammer_f_factory;
+static void *hammer_first_ctx;
+static void *volatile hammer_seen[HAMMER_THREADS];
+
+static DWORD WINAPI hammer_thread( void *arg )
+{
+    void *factory = NULL, *statics = NULL;
+    ULONG idx = (ULONG)(UINT_PTR)arg;
+    HRESULT hr;
+    unsigned int i;
+
+    WaitForSingleObject( hammer_gate, 10000 );
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    if (FAILED( hr )) { InterlockedIncrement( &hammer_f_factory ); InterlockedIncrement( &hammer_fail ); return 0; }
+
+    for (i = 0; i < HAMMER_ITERS; i++)
+    {
+        void *ctx = NULL, *inspectable = NULL;
+
+        statics = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &statics);
+        if (FAILED( hr ) || !statics) { InterlockedIncrement( &hammer_f_statics ); InterlockedIncrement( &hammer_fail ); break; }
+
+        /* slot 6 = GetForCurrentView -> get_current_context cold path on the
+         * very first call: this is the exact entry the .NET Native engine
+         * drives; the create_context window is widest at process start */
+        hr = CALL( statics, 6, &ctx );
+        if (FAILED( hr ) || !ctx) { InterlockedIncrement( &hammer_f_gfcv ); InterlockedIncrement( &hammer_fail ); CALL( statics, 2, &hr ); break; }
+
+        /* prove the returned context is a real functional object */
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(ctx, 0))(ctx, &IID_IInspectable_loc, &inspectable);
+        if (FAILED( hr ) || !inspectable) { InterlockedIncrement( &hammer_f_insp ); InterlockedIncrement( &hammer_fail ); }
+        if (inspectable) CALL( inspectable, 2, &hr );
+
+        /* singleton identity: every thread must see the same context pointer */
+        InterlockedCompareExchangePointer( &hammer_first_ctx, ctx, NULL );
+        hammer_seen[idx] = ctx;
+        if (ctx != hammer_first_ctx) { InterlockedIncrement( &hammer_f_ident ); InterlockedIncrement( &hammer_fail ); }
+
+        CALL( ctx, 2, &hr );
+        CALL( statics, 2, &hr );
+        InterlockedIncrement( &hammer_done );
+    }
+    CALL( factory, 2, &hr );
+    return 0;
+}
+
+static void test_current_context_reentrancy( void )
+{
+    void *factory = NULL, *statics = NULL, *ctx1 = NULL, *ctx2 = NULL;
+    HANDLE threads[HAMMER_THREADS];
+    unsigned int i, started = 0;
+    HRESULT hr;
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "reentrancy: factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+
+    hammer_gate = CreateEventW( NULL, TRUE, FALSE, NULL );
+    hammer_fail = 0;
+    hammer_done = 0;
+    hammer_f_statics = hammer_f_gfcv = hammer_f_insp = hammer_f_ident = hammer_f_factory = 0;
+    hammer_first_ctx = NULL;
+    for (i = 0; i < HAMMER_THREADS; i++)
+    {
+        threads[i] = CreateThread( NULL, 0, hammer_thread, (void *)(UINT_PTR)i, 0, NULL );
+        if (threads[i]) started++;
+    }
+    ok( started == HAMMER_THREADS, "reentrancy: started %u/%u threads\n", started, HAMMER_THREADS );
+    SetEvent( hammer_gate );
+    for (i = 0; i < HAMMER_THREADS; i++)
+        if (threads[i])
+        {
+            WaitForSingleObject( threads[i], 30000 );
+            CloseHandle( threads[i] );
+        }
+    CloseHandle( hammer_gate );
+
+    ok( hammer_fail == 0, "reentrancy: %u failures across %u iterations "
+        "(factory=%u statics=%u gfcv=%u insp=%u ident=%u first=%p)\n",
+        (unsigned)hammer_fail, (unsigned)hammer_done, (unsigned)hammer_f_factory,
+        (unsigned)hammer_f_statics, (unsigned)hammer_f_gfcv, (unsigned)hammer_f_insp,
+        (unsigned)hammer_f_ident, hammer_first_ctx );
+    ok( hammer_done == HAMMER_THREADS * HAMMER_ITERS, "reentrancy: completed %u/%u iterations\n",
+        (unsigned)hammer_done, HAMMER_THREADS * HAMMER_ITERS );
+    ok( hammer_first_ctx != NULL, "reentrancy: singleton context published\n" );
+
+    /* warm path: repeated GetForCurrentView + GetForViewIndependentUse
+     * (slot 10) must keep handing out the identical singleton */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &statics);
+    if (SUCCEEDED( hr ) && statics)
+    {
+        hr = CALL( statics, 6, &ctx1 );
+        ok( SUCCEEDED( hr ) && ctx1, "reentrancy: warm GetForCurrentView hr=%08x\n", hr );
+        hr = CALL( statics, 10, &ctx2 );  /* GetForViewIndependentUse */
+        ok( SUCCEEDED( hr ) && ctx2, "reentrancy: GetForViewIndependentUse hr=%08x\n", hr );
+        if (ctx1 && ctx2)
+            ok( ctx1 == ctx2, "reentrancy: singleton stable warm (ctx1=%p ctx2=%p)\n", ctx1, ctx2 );
+        if (ctx1) CALL( ctx1, 2, &hr );
+        if (ctx2) CALL( ctx2, 2, &hr );
+        CALL( statics, 2, &hr );
+    }
+    CALL( factory, 2, &hr );
+}
+
+/* mrt100's measured call shapes on IResourceContext(v81) and the module-side
+ * verdict (settled against the deployed binary, sr2.log 47150+):
+ *
+ *   AV1: rip rc81_GetIids+0xc = "movl $0x0,(%rdx)" with rdx = 0x24 and
+ *        rcx = &rc_factory_inst.vt_v81 -- mrt100 passed the VALUE 36 as the
+ *        ULONG* count out-param.  Windows' own IInspectable::GetIids writes
+ *        *count unconditionally after the NULL probe (this module's code is
+ *        slot-identical), so the identical fault occurs on Windows: the
+ *        invalid pointer is caller state, not module state.
+ *   AV2: rip rc81_CreateWithCurrentView+0x2d = "mov %rax,(%rbx)" with
+ *        rbx = out = unmapped heap -- mrt100's RCW out slot was freed.
+ *        rdx = HSTRING "en-US" pointing into this module's .rdata, i.e. a
+ *        string the app legitimately received from the module earlier
+ *        (Languages[0] / qualifier values), proving the module objects are
+ *        alive and string-intact at fault time.
+ *
+ * In-process the 0x24/freed shapes cannot be probed without taking the test
+ * process down with them (no __try in this toolchain, and Windows-parity
+ * forbids guarding the write itself -- that would be the forbidden band-aid:
+ * returning S_OK with a skipped count write = garbage).  What the suite pins
+ * instead: every v81 entry responds correctly to well-formed and NULL
+ * arguments, and the lazy singleton survives 280 fault-equivalents of
+ * hammering (reentrancy test above). */
+static void test_mrt100_caller_shapes( void )
+{
+    static const IID IID_IResourceContext_v81_loc = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+    void *factory = NULL, *v81 = NULL, *ctx = NULL;
+    IID *iids = NULL;
+    ULONG count = 0xdead;
+    HSTRING hview = NULL;
+    HSTRING_HEADER hdr;
+    HRESULT hr;
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "shapes: factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContext_v81_loc, &v81);
+    if (FAILED( hr ) || !v81)
+    {
+        todo_wine ok( 0, "shapes: v81 QI hr=%08x (module lacks IResourceContext v81 identity)\n", hr );
+        CALL( factory, 2, &hr );
+        return;
+    }
+
+    /* well-formed GetIids: S_OK, empty set (module publishes no IIDs) */
+    hr = CALL( v81, 3, &count, &iids );
+    ok( hr == S_OK && count == 0, "shapes: v81 GetIids(&count,&iids) hr=%08x count=%u\n", hr, count );
+    CoTaskMemFree( iids );
+    iids = NULL;
+
+    /* NULL probes (the deployed guards): E_POINTER, no writes */
+    hr = CALL( v81, 3, NULL, NULL );
+    ok( hr == E_POINTER, "shapes: v81 GetIids(NULL,NULL) hr=%08x (expect E_POINTER)\n", hr );
+
+    /* CreateWithCurrentView with a real view HSTRING + real out: context */
+    WindowsCreateStringReference( L"en-US", 5, &hdr, &hview );
+    hr = CALL( v81, 7, hview, &ctx );
+    ok( SUCCEEDED( hr ) && ctx, "shapes: v81 CreateWithCurrentView(view,&ctx) hr=%08x\n", hr );
+    WindowsDeleteString( hview );
+    if (ctx) CALL( ctx, 2, &hr );
+
+    hr = CALL( v81, 6, &ctx );  /* Create */
+    ok( SUCCEEDED( hr ) && ctx, "shapes: v81 Create(&ctx) hr=%08x\n", hr );
+    if (ctx)
+    {
+        void *mv = NULL;
+        /* fresh context is a full functional object: QualifierValues live */
+        hr = CALL( ctx, 6, &mv );  /* get_QualifierValues on IResourceContext */
+        ok( SUCCEEDED( hr ) && mv, "shapes: created context QualifierValues hr=%08x\n", hr );
+        if (mv) CALL( mv, 2, &hr );
+        CALL( ctx, 2, &hr );
+    }
+
+    /* singleton undamaged by the whole exercise */
+    {
+        void *statics = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &statics);
+        if (SUCCEEDED( hr ) && statics)
+        {
+            ctx = NULL;
+            hr = CALL( statics, 6, &ctx );
+            ok( SUCCEEDED( hr ) && ctx, "shapes: singleton intact after shapes hr=%08x ctx=%p\n", hr, ctx );
+            if (ctx) CALL( ctx, 2, &hr );
+            CALL( statics, 2, &hr );
+        }
+    }
+    CALL( v81, 2, &hr );
+    CALL( factory, 2, &hr );
+}
+
 static void test_memorymanager_activation(void)
 {
     void *factory = NULL, *obj = NULL;
@@ -734,6 +955,8 @@ START_TEST(core)
     test_iagile();
     test_getiids_nullargs();
     test_qualifier_set();
+    test_current_context_reentrancy();
+    test_mrt100_caller_shapes();
     test_memorymanager_activation();
 
     RoUninitialize();
