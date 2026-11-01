@@ -3265,10 +3265,6 @@ DECL_HANDLER(set_completion_info)
 {
     struct fd *fd = get_handle_fd_obj( current->process, req->handle, 0 );
 
-    if (debug_level)
-        fprintf( stderr, "WA_IOP: ATTACH pid=%04x fd=%p handle=%08x port=%08x ckey=%016llx\n",
-                 current->process->id, fd, req->handle, req->chandle,
-                 (unsigned long long)req->ckey );
     if (fd)
     {
         struct completion *completion = get_completion_obj( current->process, req->chandle, IO_COMPLETION_MODIFY_STATE );
@@ -3299,10 +3295,6 @@ DECL_HANDLER(set_completion_info)
 DECL_HANDLER(add_fd_completion)
 {
     struct fd *fd = get_handle_fd_obj( current->process, req->handle, 0 );
-    if (debug_level)
-        fprintf( stderr, "WA_IOP: FDENQ pid=%04x fd=%p hasport=%d key=%016llx status=%08x info=%u\n",
-                 current->process->id, fd, (fd && fd->completion) ? 1 : 0,
-                 (unsigned long long)(fd ? fd->comp_key : 0), req->status, req->information );
     if (fd)
     {
         if (fd->completion && (req->async || !(fd->comp_flags & FILE_SKIP_COMPLETION_PORT_ON_SUCCESS)))
