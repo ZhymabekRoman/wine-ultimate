@@ -676,6 +676,160 @@ HRESULT d3d_video_decoder_create(struct d3d_device *device, const D3D11_VIDEO_DE
         const D3D11_VIDEO_DECODER_CONFIG *config, struct d3d_video_decoder **decoder);
 struct d3d_video_decoder *unsafe_impl_from_ID3D11VideoDecoder(ID3D11VideoDecoder *iface);
 
+UINT d3d11_video_processor_format_support(DXGI_FORMAT format);
+
+/* ID3D11VideoProcessorEnumerator, ID3D11VideoProcessorEnumerator1 */
+struct d3d_video_processor_enumerator
+{
+    ID3D11VideoProcessorEnumerator ID3D11VideoProcessorEnumerator_iface;
+    ID3D11VideoProcessorEnumerator1 ID3D11VideoProcessorEnumerator1_iface;
+    LONG refcount;
+
+    struct wined3d_private_store private_store;
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc;
+    struct d3d_device *device;
+};
+
+HRESULT d3d_video_processor_enumerator_create(struct d3d_device *device,
+        const D3D11_VIDEO_PROCESSOR_CONTENT_DESC *desc, struct d3d_video_processor_enumerator **enumerator);
+struct d3d_video_processor_enumerator *unsafe_impl_from_ID3D11VideoProcessorEnumerator(
+        ID3D11VideoProcessorEnumerator *iface);
+
+/* Number of video processor input streams we keep per-stream state for. */
+#define D3D11_VP_MAX_STREAMS 32u
+/* The number of alpha palette entries a stream accepts. */
+#define D3D11_VP_MAX_ALPHA_PALETTE 256u
+
+struct d3d_video_processor_stream_filter
+{
+    BOOL enable;
+    int level;
+};
+
+struct d3d_video_processor_stream_state
+{
+    RECT source_rect;
+    BOOL has_source_rect;
+    RECT dest_rect;
+    BOOL has_dest_rect;
+
+    D3D11_VIDEO_FRAME_FORMAT frame_format;
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE color_space;
+
+    D3D11_VIDEO_PROCESSOR_OUTPUT_RATE output_rate;
+    BOOL output_rate_repeat;
+    DXGI_RATIONAL custom_rate;
+
+    D3D11_VIDEO_PROCESSOR_ALPHA_FILL_MODE alpha_fill_mode;
+    UINT alpha_fill_stream_index;
+
+    BOOL has_alpha;
+    float alpha;
+
+    BOOL has_luma_key;
+    float luma_key_lower;
+    float luma_key_upper;
+
+    BOOL has_stereo_format;
+    D3D11_VIDEO_PROCESSOR_STEREO_FORMAT stereo_format;
+    BOOL left_view_frame0;
+    BOOL base_view_frame0;
+    D3D11_VIDEO_PROCESSOR_STEREO_FLIP_MODE flip_mode;
+    int mono_offset;
+
+    BOOL has_rotation;
+    D3D11_VIDEO_PROCESSOR_ROTATION rotation;
+
+    BOOL has_pixel_aspect_ratio;
+    DXGI_RATIONAL src_aspect_ratio;
+    DXGI_RATIONAL dst_aspect_ratio;
+
+    BOOL auto_processing_mode;
+
+    UINT palette_count;
+    UINT palette[D3D11_VP_MAX_ALPHA_PALETTE];
+
+    struct d3d_video_processor_stream_filter filters[D3D11_VIDEO_PROCESSOR_FILTER_STEREO_ADJUSTMENT + 1];
+};
+
+/* ID3D11VideoProcessor */
+struct d3d_video_processor
+{
+    ID3D11VideoProcessor ID3D11VideoProcessor_iface;
+    LONG refcount;
+
+    struct wined3d_private_store private_store;
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc;
+    UINT rate_conversion_index;
+    struct d3d_video_processor_enumerator *enumerator;
+
+    RECT output_target_rect;
+    BOOL has_output_target_rect;
+    D3D11_VIDEO_COLOR output_background_color;
+    BOOL output_background_color_yuv;
+    D3D11_VIDEO_PROCESSOR_COLOR_SPACE output_color_space;
+    D3D11_VIDEO_PROCESSOR_ALPHA_FILL_MODE output_alpha_fill_mode;
+    UINT output_alpha_fill_stream_index;
+    SIZE output_constriction_size;
+    BOOL has_output_constriction;
+    BOOL output_stereo_mode;
+
+    struct d3d_video_processor_stream_state streams[D3D11_VP_MAX_STREAMS];
+
+    struct d3d_device *device;
+};
+
+HRESULT d3d_video_processor_create(struct d3d_device *device,
+        struct d3d_video_processor_enumerator *enumerator, UINT rate_conversion_index,
+        struct d3d_video_processor **processor);
+struct d3d_video_processor *unsafe_impl_from_ID3D11VideoProcessor(ID3D11VideoProcessor *iface);
+
+/* ID3D11VideoProcessorInputView */
+struct d3d_video_processor_input_view
+{
+    ID3D11VideoProcessorInputView ID3D11VideoProcessorInputView_iface;
+    LONG refcount;
+
+    struct wined3d_private_store private_store;
+    D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC desc;
+    ID3D11Resource *resource;
+    struct wined3d_texture *wined3d_texture;
+    unsigned int sub_resource_idx;
+    struct d3d_video_processor_enumerator *enumerator;
+    struct d3d_device *device;
+};
+
+HRESULT d3d_video_processor_input_view_create(struct d3d_device *device, ID3D11Resource *resource,
+        struct d3d_video_processor_enumerator *enumerator, const D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC *desc,
+        struct d3d_video_processor_input_view **view);
+struct d3d_video_processor_input_view *unsafe_impl_from_ID3D11VideoProcessorInputView(
+        ID3D11VideoProcessorInputView *iface);
+
+/* ID3D11VideoProcessorOutputView */
+struct d3d_video_processor_output_view
+{
+    ID3D11VideoProcessorOutputView ID3D11VideoProcessorOutputView_iface;
+    LONG refcount;
+
+    struct wined3d_private_store private_store;
+    D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC desc;
+    ID3D11Resource *resource;
+    struct wined3d_texture *wined3d_texture;
+    unsigned int sub_resource_idx;
+    struct d3d_video_processor_enumerator *enumerator;
+    struct d3d_device *device;
+};
+
+HRESULT d3d_video_processor_output_view_create(struct d3d_device *device, ID3D11Resource *resource,
+        struct d3d_video_processor_enumerator *enumerator, const D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC *desc,
+        struct d3d_video_processor_output_view **view);
+struct d3d_video_processor_output_view *unsafe_impl_from_ID3D11VideoProcessorOutputView(
+        ID3D11VideoProcessorOutputView *iface);
+
+HRESULT d3d_video_processor_blt(struct d3d11_device_context *context, struct d3d_video_processor *processor,
+        struct d3d_video_processor_output_view *output_view, UINT stream_count,
+        const D3D11_VIDEO_PROCESSOR_STREAM *streams);
+
 /* Layered device */
 enum dxgi_device_layer_id
 {

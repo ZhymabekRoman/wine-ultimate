@@ -458,6 +458,10 @@ interface ID3D11VideoDevice1 : ID3D11VideoDevice
         const DXGI_RATIONAL *framerate,
         D3D11_VIDEO_SAMPLE_DESC *recommended_output_desc
     );
+    HRESULT GetVideoProfileSupported(
+        const GUID *video_profile,
+        BOOL *supported
+    );
 }
 
 [

@@ -3428,247 +3428,655 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_context_DecoderExtension(ID3D11Vide
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetOutputTargetRect(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, BOOL enable, const RECT *rect)
 {
-    FIXME("iface %p, processor %p, enable %d, rect %s, stub!\n", iface, processor, enable, wine_dbgstr_rect(rect));
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, enable %d, rect %s.\n",
+            iface, processor, enable, wine_dbgstr_rect(rect));
+
+    if (!impl)
+        return;
+
+    impl->has_output_target_rect = enable;
+    if (enable)
+        impl->output_target_rect = *rect;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetOutputBackgroundColor(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, BOOL yuv, const D3D11_VIDEO_COLOR *color)
 {
-    FIXME("iface %p, processor %p, yuv %d, color {%.8e, %.8e, %.8e, %.8e}, stub!\n",
-            iface, processor, yuv, color->RGBA.R, color->RGBA.G, color->RGBA.B, color->RGBA.A);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, yuv %d, color %p.\n",
+            iface, processor, yuv, color);
+
+    if (!impl)
+        return;
+
+    impl->output_background_color_yuv = yuv;
+    if (color)
+        impl->output_background_color = *color;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetOutputColorSpace(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, const D3D11_VIDEO_PROCESSOR_COLOR_SPACE *space)
 {
-    FIXME("iface %p, processor %p, space %p, stub!\n", iface, processor, space);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, space %p.\n",
+            iface, processor, space);
+
+    if (!impl)
+        return;
+
+    if (space)
+        impl->output_color_space = *space;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetOutputAlphaFillMode(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, D3D11_VIDEO_PROCESSOR_ALPHA_FILL_MODE mode, UINT stream_idx)
 {
-    FIXME("iface %p, processor %p, mode %#x, stream_idx %u, stub!\n", iface, processor, mode, stream_idx);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, mode %#x, stream_idx %u.\n",
+            iface, processor, mode, stream_idx);
+
+    if (!impl)
+        return;
+
+    impl->output_alpha_fill_mode = mode;
+    impl->output_alpha_fill_stream_index = stream_idx;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetOutputConstriction(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, BOOL enable, SIZE size)
 {
-    FIXME("iface %p, processor %p, enable %d, size (%lux%lu), stub!\n", iface, processor, enable, size.cx, size.cy);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, enable %d, size (%ldx%ld).\n",
+            iface, processor, enable, size.cx, size.cy);
+
+    if (!impl)
+        return;
+
+    impl->has_output_constriction = enable;
+    impl->output_constriction_size = size;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetOutputStereoMode(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, BOOL enable)
 {
-    FIXME("iface %p, processor %p, enable %d, stub!\n", iface, processor, enable);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, enable %d.\n",
+            iface, processor, enable);
+
+    if (!impl)
+        return;
+
+    impl->output_stereo_mode = enable;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetOutputExtension(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, const GUID *guid, UINT size, void *data)
 {
-    FIXME("iface %p, processor %p, guid %s, size %u, data %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, guid %s, size %u, data %p.\n",
             iface, processor, debugstr_guid(guid), size, data);
-    return E_NOTIMPL;
+
+    if (!impl)
+        return E_INVALIDARG;
+
+    /* We implement no video processor extensions. */
+    return E_INVALIDARG;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetOutputTargetRect(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, BOOL *enabled, RECT *rect)
 {
-    FIXME("iface %p, processor %p, enabled %p, rect %p, stub!\n", iface, processor, enabled, rect);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, enabled %p, rect %s.\n",
+            iface, processor, enabled, wine_dbgstr_rect(rect));
+
+    if (!impl)
+        return;
+
+    if (enabled)
+        *enabled = impl->has_output_target_rect;
+    if (rect)
+        *rect = impl->output_target_rect;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetOutputBackgroundColor(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, BOOL *yuv, D3D11_VIDEO_COLOR *color)
 {
-    FIXME("iface %p, processor %p, yuv %p, color %p, stub!\n", iface, processor, yuv, color);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, yuv %p, color %p.\n",
+            iface, processor, yuv, color);
+
+    if (!impl)
+        return;
+
+    if (yuv)
+        *yuv = impl->output_background_color_yuv;
+    if (color)
+        *color = impl->output_background_color;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetOutputColorSpace(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, D3D11_VIDEO_PROCESSOR_COLOR_SPACE *space)
 {
-    FIXME("iface %p, processor %p, space %p, stub!\n", iface, processor, space);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, space %p.\n",
+            iface, processor, space);
+
+    if (!impl)
+        return;
+
+    if (space)
+        *space = impl->output_color_space;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetOutputAlphaFillMode(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, D3D11_VIDEO_PROCESSOR_ALPHA_FILL_MODE *mode, UINT *stream_idx)
 {
-    FIXME("iface %p, processor %p, mode %p, stream_idx %p, stub!\n", iface, processor, mode, stream_idx);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, mode %p, stream_idx %p.\n",
+            iface, processor, mode, stream_idx);
+
+    if (!impl)
+        return;
+
+    if (mode)
+        *mode = impl->output_alpha_fill_mode;
+    if (stream_idx)
+        *stream_idx = impl->output_alpha_fill_stream_index;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetOutputConstriction(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, BOOL *enabled, SIZE *size)
 {
-    FIXME("iface %p, processor %p, enabled %p, size %p, stub!\n", iface, processor, enabled, size);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, enabled %p, size %p.\n",
+            iface, processor, enabled, size);
+
+    if (!impl)
+        return;
+
+    if (enabled)
+        *enabled = impl->has_output_constriction;
+    if (size)
+        *size = impl->output_constriction_size;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetOutputStereoMode(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, BOOL *enabled)
 {
-    FIXME("iface %p, processor %p, enabled %p, stub!\n", iface, processor, enabled);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, enabled %p.\n",
+            iface, processor, enabled);
+
+    if (!impl)
+        return;
+
+    if (enabled)
+        *enabled = impl->output_stereo_mode;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetOutputExtension(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, const GUID *guid, UINT size, void *data)
 {
-    FIXME("iface %p, processor %p, guid %s, size %u, data %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, guid %s, size %u, data %p.\n",
             iface, processor, debugstr_guid(guid), size, data);
-    return E_NOTIMPL;
+
+    if (!impl)
+        return E_INVALIDARG;
+
+    /* We implement no video processor extensions. */
+    return E_INVALIDARG;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamFrameFormat(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, D3D11_VIDEO_FRAME_FORMAT format)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, format %#x, stub!\n", iface, processor, stream_idx, format);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, format %#x.\n",
+            iface, processor, stream_idx, format);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].frame_format = format;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamColorSpace(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, const D3D11_VIDEO_PROCESSOR_COLOR_SPACE *space)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, space %p, stub!\n", iface, processor, stream_idx, space);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, space %p.\n",
+            iface, processor, stream_idx, space);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS || !space)
+        return;
+
+    impl->streams[stream_idx].color_space = *space;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamOutputRate(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, UINT stream_idx,
         D3D11_VIDEO_PROCESSOR_OUTPUT_RATE rate, BOOL repeat, const DXGI_RATIONAL *custom_rate)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, rate %#x, repeat %d, custom_rate %u/%u, stub!\n",
-            iface, processor, stream_idx, rate, repeat, custom_rate->Numerator, custom_rate->Denominator);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, rate %#x, repeat %d, custom_rate %p.\n",
+            iface, processor, stream_idx, rate, repeat, custom_rate);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].output_rate = rate;
+    impl->streams[stream_idx].output_rate_repeat = repeat;
+    if (custom_rate)
+        impl->streams[stream_idx].custom_rate = *custom_rate;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamSourceRect(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL enable, const RECT *rect)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %d, rect %s, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %d, rect %s.\n",
             iface, processor, stream_idx, enable, wine_dbgstr_rect(rect));
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].has_source_rect = enable;
+    if (enable)
+        impl->streams[stream_idx].source_rect = *rect;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamDestRect(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL enable, const RECT *rect)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %d, rect %s, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %d, rect %s.\n",
             iface, processor, stream_idx, enable, wine_dbgstr_rect(rect));
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].has_dest_rect = enable;
+    if (enable)
+        impl->streams[stream_idx].dest_rect = *rect;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamAlpha(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL enable, float alpha)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %d, alpha %.8e, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %d, alpha %.8e.\n",
             iface, processor, stream_idx, enable, alpha);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].has_alpha = enable;
+    impl->streams[stream_idx].alpha = alpha;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamPalette(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, UINT entry_count, const UINT *entries)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, entry_count %u, entries %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+    struct d3d_video_processor_stream_state *state;
+    unsigned int i;
+
+    TRACE("iface %p, processor %p, stream_idx %u, entry_count %u, entries %p.\n",
             iface, processor, stream_idx, entry_count, entries);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    state = &impl->streams[stream_idx];
+    state->palette_count = 0;
+
+    if (!entries)
+        return;
+
+    for (i = 0; i < entry_count && i < D3D11_VP_MAX_ALPHA_PALETTE; ++i)
+        state->palette[state->palette_count++] = entries[i];
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamPixelAspectRatio(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, UINT stream_idx,
         BOOL enable, const DXGI_RATIONAL *src_ratio, const DXGI_RATIONAL *dst_ratio)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %d, src_ratio %u/%u, dst_ratio %u/%u stub!\n",
-            iface, processor, stream_idx, enable, src_ratio->Numerator, src_ratio->Denominator,
-            dst_ratio->Numerator, dst_ratio->Denominator);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %d, src_ratio %p, dst_ratio %p.\n",
+            iface, processor, stream_idx, enable, src_ratio, dst_ratio);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].has_pixel_aspect_ratio = enable;
+    if (src_ratio)
+        impl->streams[stream_idx].src_aspect_ratio = *src_ratio;
+    if (dst_ratio)
+        impl->streams[stream_idx].dst_aspect_ratio = *dst_ratio;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamLumaKey(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL enable, float lower, float upper)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %d, lower %.8e, upper %.8e, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %d, lower %.8e, upper %.8e.\n",
             iface, processor, stream_idx, enable, lower, upper);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].has_luma_key = enable;
+    impl->streams[stream_idx].luma_key_lower = lower;
+    impl->streams[stream_idx].luma_key_upper = upper;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamStereoFormat(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL enable, D3D11_VIDEO_PROCESSOR_STEREO_FORMAT format,
         BOOL left_view_frame0, BOOL base_view_frame0, D3D11_VIDEO_PROCESSOR_STEREO_FLIP_MODE flip_mode, int mono_offset)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %d, format %#x,"
-            " left_view_frame0 %d, base_view_frame0 %d, flip_mode %#x, mono_offset %d, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %d, format %#x, left_view_frame0 %d, base_view_frame0 %d, flip_mode %#x, mono_offset %d.\n",
             iface, processor, stream_idx, enable, format, left_view_frame0, base_view_frame0, flip_mode, mono_offset);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].has_stereo_format = enable;
+    impl->streams[stream_idx].stereo_format = format;
+    impl->streams[stream_idx].left_view_frame0 = left_view_frame0;
+    impl->streams[stream_idx].base_view_frame0 = base_view_frame0;
+    impl->streams[stream_idx].flip_mode = flip_mode;
+    impl->streams[stream_idx].mono_offset = mono_offset;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamAutoProcessingMode(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, UINT stream_idx, BOOL enable)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %d, stub!\n", iface, processor, stream_idx, enable);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %d.\n",
+            iface, processor, stream_idx, enable);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].auto_processing_mode = enable;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamFilter(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, D3D11_VIDEO_PROCESSOR_FILTER filter, BOOL enable, int level)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, filter %#x, enable %d, level %d, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, filter %#x, enable %d, level %d.\n",
             iface, processor, stream_idx, filter, enable, level);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS || filter >= ARRAY_SIZE(impl->streams[0].filters))
+        return;
+
+    impl->streams[stream_idx].filters[filter].enable = enable;
+    impl->streams[stream_idx].filters[filter].level = level;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamExtension(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, const GUID *guid, UINT size, void *data)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, guid %s, size %u, data %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, guid %s, size %u, data %p.\n",
             iface, processor, stream_idx, debugstr_guid(guid), size, data);
-    return E_NOTIMPL;
+
+    if (!impl)
+        return E_INVALIDARG;
+
+    /* We implement no video processor extensions. */
+    return E_INVALIDARG;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamFrameFormat(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, D3D11_VIDEO_FRAME_FORMAT *format)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, format %p, stub!\n", iface, processor, stream_idx, format);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, format %p.\n",
+            iface, processor, stream_idx, format);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS || !format)
+        return;
+
+    *format = impl->streams[stream_idx].frame_format;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamColorSpace(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, D3D11_VIDEO_PROCESSOR_COLOR_SPACE *space)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, space %p, stub!\n", iface, processor, stream_idx, space);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, space %p.\n",
+            iface, processor, stream_idx, space);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS || !space)
+        return;
+
+    *space = impl->streams[stream_idx].color_space;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamOutputRate(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, UINT stream_idx,
         D3D11_VIDEO_PROCESSOR_OUTPUT_RATE *rate, BOOL *repeat, DXGI_RATIONAL *custom_rate)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, rate %p, repeat %p, custom_rate %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, rate %p, repeat %p, custom_rate %p.\n",
             iface, processor, stream_idx, rate, repeat, custom_rate);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    if (rate)
+        *rate = impl->streams[stream_idx].output_rate;
+    if (repeat)
+        *repeat = impl->streams[stream_idx].output_rate_repeat;
+    if (custom_rate)
+        *custom_rate = impl->streams[stream_idx].custom_rate;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamSourceRect(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL *enabled, RECT *rect)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enabled %p, rect %p, stub!\n",
-            iface, processor, stream_idx, enabled, rect);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enabled %p, rect %s.\n",
+            iface, processor, stream_idx, enabled, wine_dbgstr_rect(rect));
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    if (enabled)
+        *enabled = impl->streams[stream_idx].has_source_rect;
+    if (rect)
+        *rect = impl->streams[stream_idx].source_rect;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamDestRect(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL *enabled, RECT *rect)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enabled %p, rect %p, stub!\n",
-            iface, processor, stream_idx, enabled, rect);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enabled %p, rect %s.\n",
+            iface, processor, stream_idx, enabled, wine_dbgstr_rect(rect));
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    if (enabled)
+        *enabled = impl->streams[stream_idx].has_dest_rect;
+    if (rect)
+        *rect = impl->streams[stream_idx].dest_rect;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamAlpha(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL *enabled, float *alpha)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enabled %p, alpha %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enabled %p, alpha %p.\n",
             iface, processor, stream_idx, enabled, alpha);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    if (enabled)
+        *enabled = impl->streams[stream_idx].has_alpha;
+    if (alpha)
+        *alpha = impl->streams[stream_idx].alpha;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamPalette(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, UINT count, UINT *entries)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, count %u, entries %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+    const struct d3d_video_processor_stream_state *state;
+    unsigned int i;
+
+    TRACE("iface %p, processor %p, stream_idx %u, count %u, entries %p.\n",
             iface, processor, stream_idx, count, entries);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS || !entries)
+        return;
+
+    state = &impl->streams[stream_idx];
+
+    for (i = 0; i < count; ++i)
+        entries[i] = i < state->palette_count ? state->palette[i] : 0;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamPixelAspectRatio(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, UINT stream_idx,
         BOOL *enabled, DXGI_RATIONAL *src_ratio, DXGI_RATIONAL *dst_ratio)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enabled %p, src_ratio %p, dst_ratio %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enabled %p, src_ratio %p, dst_ratio %p.\n",
             iface, processor, stream_idx, enabled, src_ratio, dst_ratio);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    if (enabled)
+        *enabled = impl->streams[stream_idx].has_pixel_aspect_ratio;
+    if (src_ratio)
+        *src_ratio = impl->streams[stream_idx].src_aspect_ratio;
+    if (dst_ratio)
+        *dst_ratio = impl->streams[stream_idx].dst_aspect_ratio;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamLumaKey(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL *enabled, float *lower, float *upper)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enabled %p, lower %p, upper %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enabled %p, lower %p, upper %p.\n",
             iface, processor, stream_idx, enabled, lower, upper);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    if (enabled)
+        *enabled = impl->streams[stream_idx].has_luma_key;
+    if (lower)
+        *lower = impl->streams[stream_idx].luma_key_lower;
+    if (upper)
+        *upper = impl->streams[stream_idx].luma_key_upper;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamStereoFormat(
@@ -3676,40 +4084,105 @@ static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamStereoF
         D3D11_VIDEO_PROCESSOR_STEREO_FORMAT *format, BOOL *left_view_frame0,
         BOOL *base_view_frame0, D3D11_VIDEO_PROCESSOR_STEREO_FLIP_MODE *flip_mode, int *mono_offset)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enabled %p, format %p, left_view_frame0 %p,"
-            " base_view_frame0 %p flip_mode %p, mono_offset %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enabled %p, format %p, left_view_frame0 %p, base_view_frame0 %p, flip_mode %p, mono_offset %p.\n",
             iface, processor, stream_idx, enabled, format, left_view_frame0, base_view_frame0, flip_mode, mono_offset);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    if (enabled)
+        *enabled = impl->streams[stream_idx].has_stereo_format;
+    if (format)
+        *format = impl->streams[stream_idx].stereo_format;
+    if (left_view_frame0)
+        *left_view_frame0 = impl->streams[stream_idx].left_view_frame0;
+    if (base_view_frame0)
+        *base_view_frame0 = impl->streams[stream_idx].base_view_frame0;
+    if (flip_mode)
+        *flip_mode = impl->streams[stream_idx].flip_mode;
+    if (mono_offset)
+        *mono_offset = impl->streams[stream_idx].mono_offset;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamAutoProcessingMode(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, UINT stream_idx, BOOL *enabled)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enabled %p, stub!\n", iface, processor, stream_idx, enabled);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enabled %p.\n",
+            iface, processor, stream_idx, enabled);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS || !enabled)
+        return;
+
+    *enabled = impl->streams[stream_idx].auto_processing_mode;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamFilter(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, UINT stream_idx,
         D3D11_VIDEO_PROCESSOR_FILTER filter, BOOL *enabled, int *level)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, filter %#x, enabled %p, level %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, filter %#x, enabled %p, level %p.\n",
             iface, processor, stream_idx, filter, enabled, level);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS || filter >= ARRAY_SIZE(impl->streams[0].filters))
+        return;
+
+    if (enabled)
+        *enabled = impl->streams[stream_idx].filters[filter].enable;
+    if (level)
+        *level = impl->streams[stream_idx].filters[filter].level;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamExtension(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, const GUID *guid, UINT size, void *data)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, guid %s, size %u, data %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, guid %s, size %u, data %p.\n",
             iface, processor, stream_idx, debugstr_guid(guid), size, data);
-    return E_NOTIMPL;
+
+    if (!impl)
+        return E_INVALIDARG;
+
+    /* We implement no video processor extensions. */
+    return E_INVALIDARG;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_context_VideoProcessorBlt(
         ID3D11VideoContext *iface, ID3D11VideoProcessor *processor, ID3D11VideoProcessorOutputView *view,
         UINT frame_idx, UINT stream_count, const D3D11_VIDEO_PROCESSOR_STREAM *streams)
 {
-    FIXME("iface %p, processor %p, view %p, frame_idx %u, stream_count %u, streams %p, stub!\n",
+    struct d3d11_device_context *context = impl_from_ID3D11VideoContext(iface);
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+    struct d3d_video_processor_output_view *view_impl;
+
+    TRACE("iface %p, processor %p, view %p, frame_idx %u, stream_count %u, streams %p.\n",
             iface, processor, view, frame_idx, stream_count, streams);
-    return E_NOTIMPL;
+
+    if (!impl)
+        return E_INVALIDARG;
+
+    if (!(view_impl = unsafe_impl_from_ID3D11VideoProcessorOutputView(view)))
+        return E_INVALIDARG;
+
+    if (stream_count && !streams)
+        return E_INVALIDARG;
+
+    return d3d_video_processor_blt(context, impl, view_impl, stream_count, streams);
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_context_NegotiateCryptoSessionKeyExchange(
@@ -3783,15 +4256,39 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_context_ConfigureAuthenticatedChann
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorSetStreamRotation(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL enable, D3D11_VIDEO_PROCESSOR_ROTATION rotation)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %d, rotation %#x, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %d, rotation %#x.\n",
             iface, processor, stream_idx, enable, rotation);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    impl->streams[stream_idx].has_rotation = enable;
+    impl->streams[stream_idx].rotation = rotation;
 }
 
 static void STDMETHODCALLTYPE d3d11_video_context_VideoProcessorGetStreamRotation(ID3D11VideoContext *iface,
         ID3D11VideoProcessor *processor, UINT stream_idx, BOOL *enable, D3D11_VIDEO_PROCESSOR_ROTATION *rotation)
 {
-    FIXME("iface %p, processor %p, stream_idx %u, enable %p, rotation %p, stub!\n",
+    struct d3d_video_processor *impl = unsafe_impl_from_ID3D11VideoProcessor(processor);
+
+    TRACE("iface %p, processor %p, stream_idx %u, enable %p, rotation %p.\n",
             iface, processor, stream_idx, enable, rotation);
+
+    if (!impl)
+        return;
+
+    if (stream_idx >= D3D11_VP_MAX_STREAMS)
+        return;
+
+    if (enable)
+        *enable = impl->streams[stream_idx].has_rotation;
+    if (rotation)
+        *rotation = impl->streams[stream_idx].rotation;
 }
 
 static const ID3D11VideoContextVtbl d3d11_video_context_vtbl =
@@ -4724,6 +5221,7 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device5 *
     enum wined3d_format_id wined3d_format;
     D3D_FEATURE_LEVEL feature_level;
     struct wined3d *wined3d;
+    unsigned int video_processor_flags;
     unsigned int i;
 
     static const struct
@@ -4783,6 +5281,15 @@ static HRESULT STDMETHODCALLTYPE d3d11_device_CheckFormatSupport(ID3D11Device5 *
         *format_support |= flag_mapping[i].flag;
     }
     wined3d_mutex_unlock();
+
+    if (format == DXGI_FORMAT_NV12)
+        *format_support |= D3D11_FORMAT_SUPPORT_DECODER_OUTPUT;
+
+    video_processor_flags = d3d11_video_processor_format_support(format);
+    if (video_processor_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_INPUT)
+        *format_support |= D3D11_FORMAT_SUPPORT_VIDEO_PROCESSOR_INPUT;
+    if (video_processor_flags & D3D11_VIDEO_PROCESSOR_FORMAT_SUPPORT_OUTPUT)
+        *format_support |= D3D11_FORMAT_SUPPORT_VIDEO_PROCESSOR_OUTPUT;
 
     if (feature_level < D3D_FEATURE_LEVEL_10_0)
         *format_support &= ~D3D11_FORMAT_SUPPORT_BUFFER;
@@ -7940,9 +8447,27 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_device_CreateVideoDecoder(ID3D11Vid
 static HRESULT STDMETHODCALLTYPE d3d11_video_device_CreateVideoProcessor(ID3D11VideoDevice1 *iface,
         ID3D11VideoProcessorEnumerator *enumerator, UINT rate_conversion_index, ID3D11VideoProcessor **processor)
 {
-    FIXME("iface %p, enumerator %p, rate_conversion_index %u, processor %p, stub!\n",
+    struct d3d_device *device = impl_from_ID3D11VideoDevice1(iface);
+    struct d3d_video_processor_enumerator *enumerator_impl;
+    struct d3d_video_processor *object;
+    HRESULT hr;
+
+    TRACE("iface %p, enumerator %p, rate_conversion_index %u, processor %p.\n",
             iface, enumerator, rate_conversion_index, processor);
-    return E_NOTIMPL;
+
+    if (!processor)
+        return E_INVALIDARG;
+
+    *processor = NULL;
+
+    if (!(enumerator_impl = unsafe_impl_from_ID3D11VideoProcessorEnumerator(enumerator)))
+        return E_INVALIDARG;
+
+    if (FAILED(hr = d3d_video_processor_create(device, enumerator_impl, rate_conversion_index, &object)))
+        return hr;
+
+    *processor = &object->ID3D11VideoProcessor_iface;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_device_CreateAuthenticatedChannel(ID3D11VideoDevice1 *iface,
@@ -7987,23 +8512,79 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_device_CreateVideoProcessorInputVie
         ID3D11VideoDevice1 *iface, ID3D11Resource *resource, ID3D11VideoProcessorEnumerator *enumerator,
         const D3D11_VIDEO_PROCESSOR_INPUT_VIEW_DESC *desc, ID3D11VideoProcessorInputView **view)
 {
-    FIXME("iface %p, resource %p, enumerator %p, desc %p, view %p, stub!\n", iface, resource, enumerator, desc, view);
-    return E_NOTIMPL;
+    struct d3d_device *device = impl_from_ID3D11VideoDevice1(iface);
+    struct d3d_video_processor_enumerator *enumerator_impl;
+    struct d3d_video_processor_input_view *object;
+    HRESULT hr;
+
+    TRACE("iface %p, resource %p, enumerator %p, desc %p, view %p.\n", iface, resource, enumerator, desc, view);
+
+    if (!view)
+        return E_INVALIDARG;
+
+    *view = NULL;
+
+    if (!resource)
+        return E_INVALIDARG;
+
+    if (!(enumerator_impl = unsafe_impl_from_ID3D11VideoProcessorEnumerator(enumerator)))
+        return E_INVALIDARG;
+
+    if (FAILED(hr = d3d_video_processor_input_view_create(device, resource, enumerator_impl, desc, &object)))
+        return hr;
+
+    *view = &object->ID3D11VideoProcessorInputView_iface;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_device_CreateVideoProcessorOutputView(
         ID3D11VideoDevice1 *iface, ID3D11Resource *resource, ID3D11VideoProcessorEnumerator *enumerator,
         const D3D11_VIDEO_PROCESSOR_OUTPUT_VIEW_DESC *desc, ID3D11VideoProcessorOutputView **view)
 {
-    FIXME("iface %p, resource %p, enumerator %p, desc %p, view %p, stub!\n", iface, resource, enumerator, desc, view);
-    return E_NOTIMPL;
+    struct d3d_device *device = impl_from_ID3D11VideoDevice1(iface);
+    struct d3d_video_processor_enumerator *enumerator_impl;
+    struct d3d_video_processor_output_view *object;
+    HRESULT hr;
+
+    TRACE("iface %p, resource %p, enumerator %p, desc %p, view %p.\n", iface, resource, enumerator, desc, view);
+
+    if (!view)
+        return E_INVALIDARG;
+
+    *view = NULL;
+
+    if (!resource)
+        return E_INVALIDARG;
+
+    if (!(enumerator_impl = unsafe_impl_from_ID3D11VideoProcessorEnumerator(enumerator)))
+        return E_INVALIDARG;
+
+    if (FAILED(hr = d3d_video_processor_output_view_create(device, resource, enumerator_impl, desc, &object)))
+        return hr;
+
+    *view = &object->ID3D11VideoProcessorOutputView_iface;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_device_CreateVideoProcessorEnumerator(ID3D11VideoDevice1 *iface,
         const D3D11_VIDEO_PROCESSOR_CONTENT_DESC *desc, ID3D11VideoProcessorEnumerator **enumerator)
 {
-    FIXME("iface %p, desc %p, enumerator %p, stub!\n", iface, desc, enumerator);
-    return E_NOTIMPL;
+    struct d3d_device *device = impl_from_ID3D11VideoDevice1(iface);
+    struct d3d_video_processor_enumerator *object;
+    HRESULT hr;
+
+    TRACE("iface %p, desc %p, enumerator %p.\n", iface, desc, enumerator);
+
+    if (!desc || !enumerator)
+        return E_INVALIDARG;
+
+    *enumerator = NULL;
+
+    if (FAILED(hr = d3d_video_processor_enumerator_create(device, desc, &object)))
+        return hr;
+
+    *enumerator = &object->ID3D11VideoProcessorEnumerator_iface;
+    return S_OK;
 }
 
 static UINT STDMETHODCALLTYPE d3d11_video_device_GetVideoDecoderProfileCount(ID3D11VideoDevice1 *iface)
@@ -8028,8 +8609,60 @@ static HRESULT STDMETHODCALLTYPE d3d11_video_device_GetVideoDecoderProfile(
 static HRESULT STDMETHODCALLTYPE d3d11_video_device_CheckVideoDecoderFormat(
         ID3D11VideoDevice1 *iface, const GUID *profile, DXGI_FORMAT format, BOOL *supported)
 {
-    FIXME("iface %p, profile %s, format %#x, supported %p, stub!\n", iface, debugstr_guid(profile), format, supported);
-    return E_NOTIMPL;
+    struct d3d_device *device = impl_from_ID3D11VideoDevice1(iface);
+    GUID wined3d_profile;
+    unsigned int i, count;
+
+    TRACE("iface %p, profile %s, format %s, supported %p.\n",
+            iface, debugstr_guid(profile), debug_dxgi_format(format), supported);
+
+    if (!profile || !supported)
+        return E_INVALIDARG;
+
+    /* wined3d's video decoder implementation only produces NV12 output. */
+    *supported = false;
+
+    count = wined3d_device_get_video_decode_profile_count(device->wined3d_device);
+    for (i = 0; i < count; ++i)
+    {
+        if (FAILED(wined3d_device_get_video_decode_profile(device->wined3d_device, i, &wined3d_profile)))
+            continue;
+        if (IsEqualGUID(&wined3d_profile, profile))
+        {
+            *supported = format == DXGI_FORMAT_NV12;
+            return S_OK;
+        }
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE d3d11_video_device_GetVideoProfileSupported(
+        ID3D11VideoDevice1 *iface, const GUID *profile, BOOL *supported)
+{
+    struct d3d_device *device = impl_from_ID3D11VideoDevice1(iface);
+    GUID wined3d_profile;
+    unsigned int i, count;
+
+    TRACE("iface %p, profile %s, supported %p.\n", iface, debugstr_guid(profile), supported);
+
+    if (!profile || !supported)
+        return E_INVALIDARG;
+
+    count = wined3d_device_get_video_decode_profile_count(device->wined3d_device);
+    for (i = 0; i < count; ++i)
+    {
+        if (FAILED(wined3d_device_get_video_decode_profile(device->wined3d_device, i, &wined3d_profile)))
+            continue;
+        if (IsEqualGUID(&wined3d_profile, profile))
+        {
+            *supported = true;
+            return S_OK;
+        }
+    }
+
+    *supported = false;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_video_device_GetVideoDecoderConfigCount(ID3D11VideoDevice1 *iface,
@@ -8144,6 +8777,7 @@ static const struct ID3D11VideoDevice1Vtbl d3d11_video_device1_vtbl =
     d3d11_video_device_GetVideoDecoderCaps,
     d3d11_video_device_CheckVideoDecoderDownsampling,
     d3d11_video_device_RecommendVideoDecoderDownsampleParameters,
+    d3d11_video_device_GetVideoProfileSupported,
 };
 
 /* IWineDXGIDeviceParent IUnknown methods */
