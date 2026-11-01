@@ -129,6 +129,30 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Microsoft.UI.Composition.* is the Microsoft.WindowsAppRuntime composition namespace
+     * that Microsoft.ui.xaml.dll activates for its composition tree:
+     * ActivationFactoryCache::GetInteropCompositorFactoryPartner (0x18023586c) requests
+     * Microsoft.UI.Composition.Compositor for IInteropCompositorFactoryPartner {22118adf}
+     * and GetCompositionEasingFunctionStatics (0x18024f53c) requests
+     * Microsoft.UI.Composition.CompositionEasingFunction; both FailFast the process when the
+     * class does not resolve, and DCompTreeHost::CreateWinRTInteropCompositionDevice
+     * (0x1802357b8) FailFasts when the factory refuses CreateInteropCompositor.  An
+     * unpackaged app ships the provider (dcompi.dll) in its framework package, so an
+     * unpackaged prefix has no ActivatableClassId key for these classes, and the
+     * side-by-side probe below finds no "Microsoft.UI.Composition.dll" either: the
+     * RoGetActivationFactory that opens the composition channel answers
+     * REGDB_E_CLASSNOTREG.  Route the two classes XAML activates there to the builtin
+     * provider, exact-match like the Windows.UI.Composition.Compositor route above: the
+     * remaining Microsoft.UI.Composition classes are created through the Compositor, and a
+     * prefix-separation route (wcsncmp over the namespace) is length-sensitive - comparing
+     * past the literal's NUL makes it never match - so it is not used. */
+    if (!wcscmp(classid, L"Microsoft.UI.Composition.Compositor") ||
+        !wcscmp(classid, L"Microsoft.UI.Composition.CompositionEasingFunction"))
+    {
+        *out = wcsdup(L"dcompi.dll");
+        return S_OK;
+    }
+
     if (!wcsncmp(classid, L"Windows.Foundation.", 19))
     {
         *out = wcsdup(L"wintypes.dll");

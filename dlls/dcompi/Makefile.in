@@ -1,0 +1,10 @@
+MODULE    = dcompi.dll
+IMPORTLIB = dcompi
+IMPORTS   = combase dcomp advapi32
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	factory.c \
+	interop.c \
+	main.c

@@ -61,6 +61,7 @@ AddReg=\
     ControlClass,\
     CurrentVersion,\
     Debugger,\
+    DcompiActivation,\
     DirectX,\
     Fonts,\
     LicenseInformation,\
@@ -651,6 +652,17 @@ HKLM,"Software\Microsoft\OLE","EnableRemoteConnect",,"N"
 HKCR,CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b},,2,"Start Menu Cache and App Resolver"
 HKCR,CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b}\InprocServer32,,2,"%11%\appresolver.dll"
 HKCR,CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b}\InprocServer32,"ThreadingModel",2,"Both"
+
+; The Microsoft.UI composition provider of the Microsoft.WindowsAppRuntime package.  An
+; unpackaged WinUI 3 app registers its activatable classes through its framework package, so
+; a prefix has no Microsoft.UI.Composition.* keys; Microsoft.ui.xaml.dll then fails the
+; RoGetActivationFactory of Microsoft.UI.Composition.Compositor and FailFasts the process in
+; DCompTreeHost::CreateWinRTInteropCompositionDevice.  Register the class with the builtin
+; provider, in the 64-bit view combase reads, exactly as Windows does.
+[DcompiActivation]
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,"DllPath",2,"%12%\dcompi.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,"ThreadingModel",0x10001,2
 
 [Printing]
 HKLM,%Control%\Print\Monitors\Local Port,"Driver",2,"localspl.dll"

@@ -1,0 +1,5 @@
+TESTDLL   = dcompi.dll
+IMPORTS   = dcompi combase ole32 advapi32 user32 kernel32 uuid
+
+SOURCES = \
+	dcompi.c

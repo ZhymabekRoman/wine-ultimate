@@ -996,6 +996,7 @@ enable_amsi
 enable_amstream
 enable_apisetschema
 enable_apphelp
+enable_appresolver
 enable_appwiz_cpl
 enable_appxdeploymentclient
 enable_atl
@@ -1118,6 +1119,7 @@ enable_dbgeng
 enable_dbghelp
 enable_dciman32
 enable_dcomp
+enable_dcompi
 enable_ddraw
 enable_ddrawex
 enable_desk_cpl
@@ -1527,6 +1529,7 @@ enable_winbio
 enable_winbrand
 enable_windows_applicationmodel_calls
 enable_windows_applicationmodel
+enable_windows_applicationmodel_resources_core
 enable_windows_devices_bluetooth
 enable_windows_devices_enumeration
 enable_windows_devices_radios
@@ -22816,6 +22819,8 @@ wine_fn_config_makefile dlls/amstream/tests enable_tests
 wine_fn_config_makefile dlls/apisetschema enable_apisetschema
 wine_fn_config_makefile dlls/apphelp enable_apphelp
 wine_fn_config_makefile dlls/apphelp/tests enable_tests
+wine_fn_config_makefile dlls/appresolver enable_appresolver
+wine_fn_config_makefile dlls/appresolver/tests enable_tests
 wine_fn_config_makefile dlls/appwiz.cpl enable_appwiz_cpl
 wine_fn_config_makefile dlls/appxdeploymentclient enable_appxdeploymentclient
 wine_fn_config_makefile dlls/atl enable_atl
@@ -23007,6 +23012,8 @@ wine_fn_config_makefile dlls/dbghelp/tests enable_tests
 wine_fn_config_makefile dlls/dciman32 enable_dciman32
 wine_fn_config_makefile dlls/dcomp enable_dcomp
 wine_fn_config_makefile dlls/dcomp/tests enable_tests
+wine_fn_config_makefile dlls/dcompi enable_dcompi
+wine_fn_config_makefile dlls/dcompi/tests enable_tests
 wine_fn_config_makefile dlls/ddeml.dll16 enable_win16
 wine_fn_config_makefile dlls/ddraw enable_ddraw
 wine_fn_config_makefile dlls/ddraw/tests enable_tests
@@ -23665,6 +23672,7 @@ wine_fn_config_makefile dlls/windebug.dll16 enable_win16
 wine_fn_config_makefile dlls/windows.applicationmodel.calls enable_windows_applicationmodel_calls
 wine_fn_config_makefile dlls/windows.applicationmodel enable_windows_applicationmodel
 wine_fn_config_makefile dlls/windows.applicationmodel/tests enable_tests
+wine_fn_config_makefile dlls/windows.applicationmodel.resources.core enable_windows_applicationmodel_resources_core
 wine_fn_config_makefile dlls/windows.devices.bluetooth enable_windows_devices_bluetooth
 wine_fn_config_makefile dlls/windows.devices.bluetooth/tests enable_tests
 wine_fn_config_makefile dlls/windows.devices.enumeration enable_windows_devices_enumeration
