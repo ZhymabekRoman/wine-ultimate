@@ -1031,6 +1031,190 @@ static void test_memorymanager_activation(void)
     CALL(factory, 2, (ULONG*)&hr);
 }
 
+/* IInspectable::GetRuntimeClassName of the parameterized collection objects
+ * must answer the .NET-spelling runtime class name: the full 'Windows.…'
+ * prefix, the backtick-N arity and the '<…>' argument list, spelling the
+ * HSTRING element as 'System.String' (the 'Windows.Foundation.String' spelling
+ * belongs to the parameterized-IID signature grammar only).
+ *
+ * .NET Native's loose-binding RCW path parses this string
+ * (IInspectable::GetRuntimeClassName -> Internal.NativeFormat.NativeParser) to
+ * pick the marshaling of the parameterized interface's parameters.  Measured on
+ * the Calculator run: with a name carrying no arity and no arguments the
+ * shared-reference-types adapter stays in charge, so
+ * McgMarshal.ObjectToComInterface marshals the string key as an IInspectable
+ * CCW instead of an HSTRING; the callee reads a null raw buffer, answers
+ * ELEMENT_NOT_FOUND, the app retries five times and RaiseFailFastException
+ * (c0000602) kills the process.  The length must also be the text itself: a
+ * literal count larger than the literal copies the tail of the following
+ * literal (measured: "Foundation.Collections.IMapView\0Win" for count 35).
+ */
+static void check_class_name( void *obj, const WCHAR *expected )
+{
+    HSTRING name = NULL;
+    HRESULT hr = CALL( obj, 4, &name );  /* IInspectable::GetRuntimeClassName */
+    const WCHAR *raw;
+    UINT32 len = 0;
+
+    ok( hr == S_OK && name, "GetRuntimeClassName hr=%08x name=%p\n", hr, name );
+    if (FAILED( hr ) || !name) return;
+
+    raw = WindowsGetStringRawBuffer( name, &len );
+    ok( !lstrcmpW( raw, expected ), "class name %s, want %s\n", wine_dbgstr_w( raw ), wine_dbgstr_w( expected ) );
+    ok( len == (UINT32)lstrlenW( expected ), "class name length %u, want %u\n", len, (UINT32)lstrlenW( expected ) );
+    WindowsDeleteString( name );
+}
+
+static void test_parameterized_class_names(void)
+{
+    static const WCHAR name_mapview_ss[] = L"Windows.Foundation.Collections.IMapView`2<System.String,System.String>";
+    static const WCHAR name_mapview_sm[] = L"Windows.Foundation.Collections.IMapView`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>";
+    static const WCHAR name_vector_s[]   = L"Windows.Foundation.Collections.IVectorView`1<System.String>";
+    static const WCHAR name_vector_rq[]  = L"Windows.Foundation.Collections.IVectorView`1<Windows.ApplicationModel.Resources.Core.ResourceQualifier>";
+    static const WCHAR name_kvp_ss[]     = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,System.String>";
+    static const WCHAR name_kvp_sm[]     = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>";
+    static const WCHAR name_iter_s[]     = L"Windows.Foundation.Collections.IIterator`1<System.String>";
+    static const WCHAR name_iter_kvp_ss[] = L"Windows.Foundation.Collections.IIterator`1<Windows.Foundation.Collections.IKeyValuePair`2<System.String,System.String>>";
+    static const WCHAR name_iter_kvp_sm[] = L"Windows.Foundation.Collections.IIterator`1<Windows.Foundation.Collections.IKeyValuePair`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>>";
+    void *factory = NULL, *ctx = NULL, *map = NULL, *vec = NULL, *it = NULL, *pair = NULL;
+    void *rmfactory = NULL, *rm = NULL, *rm2 = NULL, *rmap = NULL, *it2 = NULL, *pair2 = NULL;
+    void *cand = NULL, *cand2 = NULL, *quals = NULL;
+    HSTRING_HEADER khdr;
+    HSTRING hkey = NULL;
+    INT32 has = 0;
+    HRESULT hr;
+
+    set_pri_env();
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "class names: ResourceContext factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = CALL( factory, 6, &ctx );  /* IActivationFactory::ActivateInstance */
+    ok( hr == S_OK && ctx, "class names: ActivateInstance hr=%08x\n", hr );
+    if (!ctx) goto done_factory;
+
+    /* QualifierValues: IMapView<HSTRING,HSTRING> + its pair iterator chain */
+    hr = CALL( ctx, 6, &map );  /* IResourceContext::get_QualifierValues */
+    ok( hr == S_OK && map, "class names: get_QualifierValues hr=%08x\n", hr );
+    if (map)
+    {
+        check_class_name( map, name_mapview_ss );
+        hr = CALL( map, 10, &it );  /* IIterable::First */
+        ok( hr == S_OK && it, "class names: QualifierValues First hr=%08x\n", hr );
+        if (it)
+        {
+            check_class_name( it, name_iter_kvp_ss );
+            hr = CALL( it, 6, &has );  /* IIterator::MoveNext */
+            ok( hr == S_OK && has, "class names: QualifierValues MoveNext hr=%08x has=%d\n", hr, has );
+            hr = CALL( it, 7, &pair );  /* IIterator::get_Current -> IKeyValuePair */
+            ok( hr == S_OK && pair, "class names: QualifierValues Current hr=%08x\n", hr );
+            if (pair)
+            {
+                check_class_name( pair, name_kvp_ss );
+                CALL( pair, 2, &hr );
+            }
+            CALL( it, 2, &hr );
+        }
+        CALL( map, 2, &hr );
+    }
+
+    /* Languages: IVectorView<HSTRING> + its string iterator */
+    hr = CALL( ctx, 11, &vec );  /* IResourceContext::get_Languages */
+    ok( hr == S_OK && vec, "class names: get_Languages hr=%08x\n", hr );
+    if (vec)
+    {
+        check_class_name( vec, name_vector_s );
+        hr = CALL( vec, 9, &it );  /* IVectorView [GetAt 6][Size 7][GetView 8], IIterable::First 9 */
+        ok( hr == S_OK && it, "class names: Languages First hr=%08x\n", hr );
+        if (it)
+        {
+            check_class_name( it, name_iter_s );
+            CALL( it, 2, &hr );
+        }
+        CALL( vec, 2, &hr );
+    }
+    CALL( ctx, 2, &hr );
+    CALL( factory, 2, &hr );
+    factory = NULL;
+
+    /* AllResourceMaps: IMapView<HSTRING,IResourceMap*> + its pair iterator chain */
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceManager", &rmfactory );
+    ok( hr == S_OK, "class names: ResourceManager factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = CALL( rmfactory, 0, &IID_IResourceManagerStatics_loc, &rm );
+    ok( hr == S_OK && rm, "class names: QI IResourceManagerStatics hr=%08x\n", hr );
+    if (hr != S_OK) goto done_rmfactory;
+    hr = CALL( rm, 6, &rm );  /* IResourceManagerStatics::get_Current */
+    ok( SUCCEEDED( hr ) && rm, "class names: ResourceManager Current hr=%08x\n", hr );
+    if (FAILED( hr ) || !rm) goto done_rm;
+    hr = CALL( rm, 0, &IID_IResourceManager_loc, &rm2 );
+    ok( hr == S_OK && rm2, "class names: QI IResourceManager hr=%08x\n", hr );
+    if (hr == S_OK)
+    {
+        hr = CALL( rm2, 7, &rmap );  /* IResourceManager::get_AllResourceMaps */
+        ok( hr == S_OK && rmap, "class names: get_AllResourceMaps hr=%08x\n", hr );
+        if (rmap)
+        {
+            check_class_name( rmap, name_mapview_sm );
+            hr = CALL( rmap, 10, &it2 );  /* IIterable::First */
+            ok( hr == S_OK && it2, "class names: AllResourceMaps First hr=%08x\n", hr );
+            if (it2)
+            {
+                check_class_name( it2, name_iter_kvp_sm );
+                has = 0;
+                hr = CALL( it2, 6, &has );  /* MoveNext */
+                ok( hr == S_OK && has, "class names: AllResourceMaps MoveNext hr=%08x has=%d\n", hr, has );
+                hr = CALL( it2, 7, &pair2 );  /* get_Current */
+                ok( hr == S_OK && pair2, "class names: AllResourceMaps Current hr=%08x\n", hr );
+                if (pair2)
+                {
+                    check_class_name( pair2, name_kvp_sm );
+                    CALL( pair2, 2, &hr );
+                }
+                CALL( it2, 2, &hr );
+            }
+            CALL( rmap, 2, &hr );
+        }
+        /* MainResourceMap -> a candidate -> its Qualifiers vector */
+        hr = CALL( rm2, 6, &map );
+        ok( hr == S_OK && map, "class names: get_MainResourceMap hr=%08x\n", hr );
+        if (SUCCEEDED( hr ) && map)
+        {
+            WindowsCreateStringReference( L"Calculator", 10, &khdr, &hkey );
+            hr = CALL( map, 7, hkey, &cand );  /* IResourceMap::GetValue */
+            ok( SUCCEEDED( hr ) && cand, "class names: GetValue hr=%08x\n", hr );
+            if (SUCCEEDED( hr ) && cand)
+            {
+                hr = CALL( cand, 0, &IID_IResourceCandidate_loc, &cand2 );
+                ok( hr == S_OK && cand2, "class names: QI IResourceCandidate hr=%08x\n", hr );
+                if (hr == S_OK)
+                {
+                    hr = CALL( cand2, 6, &quals );  /* IResourceCandidate::get_Qualifiers */
+                    ok( hr == S_OK && quals, "class names: get_Qualifiers hr=%08x\n", hr );
+                    if (quals)
+                    {
+                        check_class_name( quals, name_vector_rq );
+                        CALL( quals, 2, &hr );
+                    }
+                    CALL( cand2, 2, &hr );
+                }
+                CALL( cand, 2, &hr );
+            }
+            if (hkey) WindowsDeleteString( hkey );
+            CALL( map, 2, &hr );
+        }
+        CALL( rm2, 2, &hr );
+    }
+done_rm:
+    CALL( rm, 2, &hr );
+done_rmfactory:
+    CALL( rmfactory, 2, &hr );
+    return;
+
+done_factory:
+    CALL( factory, 2, &hr );
+}
+
 START_TEST(core)
 {
     HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
@@ -1045,6 +1229,7 @@ START_TEST(core)
     test_qualifier_set();
     test_current_context_reentrancy();
     test_reference_tracker_identity();
+    test_parameterized_class_names();
     test_memorymanager_activation();
 
     RoUninitialize();

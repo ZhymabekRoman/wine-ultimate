@@ -274,6 +274,79 @@ HRESULT WINAPI RoGetParameterizedTypeInstanceIID( UINT32 name_element_count, con
 #define ELEM_RESQUALIFIER L"Windows.ApplicationModel.Resources.Core.ResourceQualifier"
 #define ELEM_NAMEDRES     L"Windows.ApplicationModel.Resources.Core.NamedResource"
 
+/* IInspectable::GetRuntimeClassName answers the parameterized interface's name
+ * in .NET spelling -- 'Windows.<ns>.IMapView`2<System.String,System.String>'.
+ * Two spellings must not be mixed up: the signature grammar of
+ * RoGetParameterizedTypeInstanceIID names the HSTRING element
+ * 'Windows.Foundation.String' (ELEM_STRING above), while the runtime class name
+ * canonicalizes it to 'System.String'.
+ *
+ * This is not cosmetic.  .NET Native's loose-binding RCW path asks
+ * GetRuntimeClassName and parses the answer
+ * (Internal.NativeFormat.NativeParser) to learn the interface's arity and type
+ * arguments, and from them the marshaling of each parameter.  Measured on the
+ * Calculator run: with a name that has no arity and no argument list the parse
+ * yields nothing, the shared-reference-types adapter stays in charge, and
+ * McgMarshal.ObjectToComInterface marshals the string key of
+ * IMapView<HSTRING,HSTRING>::Get as an IInspectable CCW instead of an HSTRING.
+ * The callee then reads a null raw buffer (probe: the handle was never produced
+ * by any combase string API and its payload held allocator free-list links),
+ * answers ELEMENT_NOT_FOUND, the app re-creates the ResourceContext and retries
+ * five times, and RaiseFailFastException (c0000602) ends the process.
+ *
+ * The length always comes from lstrlenW: the previous literal counts overread
+ * the literal (count 35 for a 31-character string emitted
+ * "Foundation.Collections.IMapView\0Win", copying the tail of the next literal).
+ */
+#define ELEM_CLASS_STRING L"System.String"
+
+static const WCHAR *elem_class_name( const WCHAR *elem )
+{
+    if (!elem) return L"IInspectable";
+    if (!lstrcmpW( elem, ELEM_STRING )) return ELEM_CLASS_STRING;
+    if (!lstrcmpW( elem, ELEM_RESOURCEMAP )) return ELEM_RESOURCEMAP;
+    if (!lstrcmpW( elem, ELEM_RESQUALIFIER )) return ELEM_RESQUALIFIER;
+    if (!lstrcmpW( elem, ELEM_RESCANDIDATE )) return ELEM_RESCANDIDATE;
+    if (!lstrcmpW( elem, ELEM_NAMEDRES )) return ELEM_NAMEDRES;
+    return elem;
+}
+
+static void class_name_append( WCHAR *buf, SIZE_T size, const WCHAR *part )
+{
+    SIZE_T pos = lstrlenW( buf );
+
+    if (pos + lstrlenW( part ) >= size) return; /* keep the truncation NUL in range */
+    lstrcpynW( buf + pos, part, (INT)(size - pos) );
+}
+
+/* "<base><`N><arg0,arg1,...>" -- nested parameterized names are formatted into
+ * a buffer first and passed back in as one argument. */
+static void format_param_class( WCHAR *buf, SIZE_T size, const WCHAR *base, const WCHAR *arity,
+                                const WCHAR *const *args, UINT32 argc )
+{
+    UINT32 i;
+
+    if (!size) return;
+    buf[0] = 0;
+    class_name_append( buf, size, base );
+    class_name_append( buf, size, arity );
+    for (i = 0; i < argc; i++)
+    {
+        class_name_append( buf, size, i ? L"," : L"<" );
+        class_name_append( buf, size, args[i] );
+    }
+    if (argc) class_name_append( buf, size, L">" );
+}
+
+static HRESULT param_class_name( const WCHAR *base, const WCHAR *arity, const WCHAR *const *args,
+                                 UINT32 argc, HSTRING *out )
+{
+    WCHAR buf[512];
+
+    if (!out) return E_POINTER;
+    format_param_class( buf, ARRAYSIZE( buf ), base, arity, args, argc );
+    return className( buf, out );
+}
 
 static BOOL param_iid_eq( REFIID iid, UINT32 count, ... );
 #define IT_STRING 0
@@ -335,7 +408,9 @@ static ULONG WINAPI svv_Release( void *iface ) { return decr( &svv_from( iface )
 static HRESULT WINAPI svv_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<Windows.Foundation.String>", 78, n );
+    static const WCHAR *args[] = { ELEM_CLASS_STRING };
+
+    return param_class_name( ELEM_VECTORVIEW, L"`1", args, 1, n );
 }
 static HRESULT WINAPI svv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
@@ -394,7 +469,12 @@ static HRESULT WINAPI ivv_QueryInterface( void *iface, REFIID iid, void **out )
 static ULONG WINAPI ivv_AddRef( void *iface ) { return incr( &ivv_from( iface )->ref ); }
 static ULONG WINAPI ivv_Release( void *iface ) { return decr( &ivv_from( iface )->ref ); }
 static HRESULT WINAPI ivv_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
-static HRESULT WINAPI ivv_GetRuntimeClassName( void *iface, HSTRING *n ) { return WindowsCreateString( L"Foundation.Collections.IVectorView", 37, n ); }
+static HRESULT WINAPI ivv_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    const WCHAR *args[1] = { elem_class_name( ivv_from( iface )->elem ) };
+
+    return param_class_name( ELEM_VECTORVIEW, L"`1", args, 1, n );
+}
 static HRESULT WINAPI ivv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI ivv_GetAt( void *iface, UINT32 index, void **item )
 {
@@ -461,7 +541,12 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
 static ULONG WINAPI mv_AddRef( void *iface ) { return incr( &mv_from( iface )->ref ); }
 static ULONG WINAPI mv_Release( void *iface ) { return decr( &mv_from( iface )->ref ); }
 static HRESULT WINAPI mv_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
-static HRESULT WINAPI mv_GetRuntimeClassName( void *iface, HSTRING *n ) { return WindowsCreateString( L"Foundation.Collections.IMapView", 35, n ); }
+static HRESULT WINAPI mv_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR *args[] = { ELEM_CLASS_STRING, ELEM_CLASS_STRING };
+
+    return param_class_name( ELEM_MAPVIEW, L"`2", args, 2, n );
+}
 static HRESULT WINAPI mv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
 {
@@ -535,7 +620,12 @@ static HRESULT WINAPI rmv_QueryInterface( void *iface, REFIID iid, void **out )
 static ULONG WINAPI rmv_AddRef( void *iface ) { return incr( &rmv_from( iface )->ref ); }
 static ULONG WINAPI rmv_Release( void *iface ) { return decr( &rmv_from( iface )->ref ); }
 static HRESULT WINAPI rmv_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
-static HRESULT WINAPI rmv_GetRuntimeClassName( void *iface, HSTRING *n ) { return WindowsCreateString( L"Foundation.Collections.IMapView", 35, n ); }
+static HRESULT WINAPI rmv_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR *args[] = { ELEM_CLASS_STRING, ELEM_RESOURCEMAP };
+
+    return param_class_name( ELEM_MAPVIEW, L"`2", args, 2, n );
+}
 static HRESULT WINAPI rmv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rmv_Get( void *iface, HSTRING key, void **map )
 {
@@ -630,8 +720,9 @@ static ULONG WINAPI pair_Release( void *iface ) { return decr( &pair_from( iface
 static HRESULT WINAPI pair_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI pair_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.IKeyValuePair`2<Windows.Foundation.String,Windows.Foundation.String>",
-                                 113, n );
+    static const WCHAR *args[] = { ELEM_CLASS_STRING, ELEM_CLASS_STRING };
+
+    return param_class_name( ELEM_KEYVALUEPAIR, L"`2", args, 2, n );
 }
 static HRESULT WINAPI pair_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI pair_Key( void *iface, HSTRING *v )
@@ -678,8 +769,9 @@ static ULONG WINAPI rmpair_Release( void *iface ) { return decr( &rmpair_from( i
 static HRESULT WINAPI rmpair_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI rmpair_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.IKeyValuePair`2<Windows.Foundation.String,Windows.ApplicationModel.Resources.Core.ResourceMap>",
-                                 149, n );
+    static const WCHAR *args[] = { ELEM_CLASS_STRING, ELEM_RESOURCEMAP };
+
+    return param_class_name( ELEM_KEYVALUEPAIR, L"`2", args, 2, n );
 }
 static HRESULT WINAPI rmpair_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rmpair_Key( void *iface, HSTRING *v )
@@ -755,7 +847,30 @@ static ULONG WINAPI iter_Release( void *iface ) { return decr( &iter_from( iface
 static HRESULT WINAPI iter_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI iter_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.IIterator", 40, n );
+    struct iterator *impl = iter_from( iface );
+    static const WCHAR *ss[] = { ELEM_CLASS_STRING, ELEM_CLASS_STRING };
+    static const WCHAR *sm[] = { ELEM_CLASS_STRING, ELEM_RESOURCEMAP };
+    WCHAR inner[512];
+    const WCHAR *args[1];
+
+    switch (impl->kind)
+    {
+    case IT_KVPAIR:
+        format_param_class( inner, ARRAYSIZE( inner ), ELEM_KEYVALUEPAIR, L"`2", ss, 2 );
+        args[0] = inner;
+        break;
+    case IT_RMPAIR:
+        format_param_class( inner, ARRAYSIZE( inner ), ELEM_KEYVALUEPAIR, L"`2", sm, 2 );
+        args[0] = inner;
+        break;
+    case IT_IFACE:
+        args[0] = elem_class_name( impl->src.iv->elem );
+        break;
+    default:  /* IT_STRING */
+        args[0] = ELEM_CLASS_STRING;
+        break;
+    }
+    return param_class_name( ELEM_ITERATOR, L"`1", args, 1, n );
 }
 static HRESULT WINAPI iter_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI iter_MoveNext( void *iface, INT32 *result )
