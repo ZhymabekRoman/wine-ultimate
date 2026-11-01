@@ -2256,7 +2256,19 @@ static int get_window_swap_interval( HWND hwnd )
     int interval;
     WND *win;
 
-    if (!(win = get_win_ptr( hwnd )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS) return 0;
+    if (!hwnd) return 0;
+    if (!(win = get_win_ptr( hwnd )) || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
+    {
+        /* window is owned by another process: the interval is stored in the server */
+        SERVER_START_REQ( get_swap_interval )
+        {
+            req->window = wine_server_user_handle( hwnd );
+            wine_server_call( req );
+            interval = reply->interval;
+        }
+        SERVER_END_REQ;
+        return max( interval, 0 );
+    }
     interval = win->swap_interval;
     release_win_ptr( win );
 
@@ -2394,13 +2406,29 @@ static BOOL win32u_wglSwapIntervalEXT( int interval )
     }
     if (win == WND_DESKTOP || win == WND_OTHER_PROCESS)
     {
-        WARN( "setting swap interval on win %p not supported\n", hwnd );
+        /* window is owned by another process: store the interval in the server */
+        release_win_ptr( win );
+        SERVER_START_REQ( set_swap_interval )
+        {
+            req->window   = wine_server_user_handle( hwnd );
+            req->interval = interval;
+            wine_server_call( req );
+        }
+        SERVER_END_REQ;
         return TRUE;
     }
 
     TRACE( "setting window %p swap interval %d\n", hwnd, interval );
     win->swap_interval = interval;
     release_win_ptr( win );
+
+    SERVER_START_REQ( set_swap_interval )
+    {
+        req->window   = wine_server_user_handle( hwnd );
+        req->interval = interval;
+        wine_server_call( req );
+    }
+    SERVER_END_REQ;
     return TRUE;
 }
 
@@ -2418,8 +2446,16 @@ static int win32u_wglGetSwapIntervalEXT(void)
     }
     if (win == WND_DESKTOP || win == WND_OTHER_PROCESS)
     {
-        WARN( "setting swap interval on win %p not supported\n", hwnd );
-        return TRUE;
+        /* window is owned by another process: read the interval from the server */
+        release_win_ptr( win );
+        SERVER_START_REQ( get_swap_interval )
+        {
+            req->window = wine_server_user_handle( hwnd );
+            wine_server_call( req );
+            interval = reply->interval;
+        }
+        SERVER_END_REQ;
+        return max( interval, 0 );
     }
     interval = win->swap_interval;
     release_win_ptr( win );

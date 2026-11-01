@@ -6446,6 +6446,60 @@ struct alpc_cancel_message_reply
     char __pad_12[4];
 };
 
+/* Set the pixel format of a window. On Windows the pixel format is a global
+ * (kernel-side) window attribute: a process rendering into a window it does
+ * not own (e.g. a multi-process GPU compositor) sets and queries it there. */
+struct set_pixel_format_request
+{
+    struct request_header __header;
+    user_handle_t       window;
+    int                 format;
+    int                 internal;
+};
+struct set_pixel_format_reply
+{
+    struct reply_header __header;
+};
+
+
+struct get_pixel_format_request
+{
+    struct request_header __header;
+    user_handle_t       window;
+};
+struct get_pixel_format_reply
+{
+    struct reply_header __header;
+    int                 format;
+    char __pad_12[4];
+};
+
+
+struct set_swap_interval_request
+{
+    struct request_header __header;
+    user_handle_t       window;
+    int                 interval;
+    char __pad_20[4];
+};
+struct set_swap_interval_reply
+{
+    struct reply_header __header;
+};
+
+
+struct get_swap_interval_request
+{
+    struct request_header __header;
+    user_handle_t       window;
+};
+struct get_swap_interval_reply
+{
+    struct reply_header __header;
+    int                 interval;
+    char __pad_12[4];
+};
+
 
 enum request
 {
@@ -6771,6 +6825,10 @@ enum request
     REQ_dcomp_get_shared_visual_info,
     REQ_alpc_query_port,
     REQ_alpc_cancel_message,
+    REQ_set_pixel_format,
+    REQ_get_pixel_format,
+    REQ_set_swap_interval,
+    REQ_get_swap_interval,
     REQ_NB_REQUESTS
 };
 
@@ -7100,6 +7158,10 @@ union generic_request
     struct dcomp_get_shared_visual_info_request dcomp_get_shared_visual_info_request;
     struct alpc_query_port_request alpc_query_port_request;
     struct alpc_cancel_message_request alpc_cancel_message_request;
+    struct set_pixel_format_request set_pixel_format_request;
+    struct get_pixel_format_request get_pixel_format_request;
+    struct set_swap_interval_request set_swap_interval_request;
+    struct get_swap_interval_request get_swap_interval_request;
 };
 union generic_reply
 {
@@ -7427,8 +7489,12 @@ union generic_reply
     struct dcomp_get_shared_visual_info_reply dcomp_get_shared_visual_info_reply;
     struct alpc_query_port_reply alpc_query_port_reply;
     struct alpc_cancel_message_reply alpc_cancel_message_reply;
+    struct set_pixel_format_reply set_pixel_format_reply;
+    struct get_pixel_format_reply get_pixel_format_reply;
+    struct set_swap_interval_reply set_swap_interval_reply;
+    struct get_swap_interval_reply get_swap_interval_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 968
+#define SERVER_PROTOCOL_VERSION 970
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

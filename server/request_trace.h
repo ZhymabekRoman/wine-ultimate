@@ -3685,6 +3685,39 @@ static void dump_alpc_cancel_message_reply( const struct alpc_cancel_message_rep
     fprintf( stderr, " cancelled=%d", req->cancelled );
 }
 
+static void dump_set_pixel_format_request( const struct set_pixel_format_request *req )
+{
+    fprintf( stderr, " window=%08x", req->window );
+    fprintf( stderr, ", format=%d", req->format );
+    fprintf( stderr, ", internal=%d", req->internal );
+}
+
+static void dump_get_pixel_format_request( const struct get_pixel_format_request *req )
+{
+    fprintf( stderr, " window=%08x", req->window );
+}
+
+static void dump_get_pixel_format_reply( const struct get_pixel_format_reply *req )
+{
+    fprintf( stderr, " format=%d", req->format );
+}
+
+static void dump_set_swap_interval_request( const struct set_swap_interval_request *req )
+{
+    fprintf( stderr, " window=%08x", req->window );
+    fprintf( stderr, ", interval=%d", req->interval );
+}
+
+static void dump_get_swap_interval_request( const struct get_swap_interval_request *req )
+{
+    fprintf( stderr, " window=%08x", req->window );
+}
+
+static void dump_get_swap_interval_reply( const struct get_swap_interval_reply *req )
+{
+    fprintf( stderr, " interval=%d", req->interval );
+}
+
 typedef void (*dump_func)( const void *req );
 
 static const dump_func req_dumpers[REQ_NB_REQUESTS] =
@@ -4011,6 +4044,10 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dcomp_get_shared_visual_info_request,
     (dump_func)dump_alpc_query_port_request,
     (dump_func)dump_alpc_cancel_message_request,
+    (dump_func)dump_set_pixel_format_request,
+    (dump_func)dump_get_pixel_format_request,
+    (dump_func)dump_set_swap_interval_request,
+    (dump_func)dump_get_swap_interval_request,
 };
 
 static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
@@ -4337,6 +4374,10 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_dcomp_get_shared_visual_info_reply,
     (dump_func)dump_alpc_query_port_reply,
     (dump_func)dump_alpc_cancel_message_reply,
+    NULL,
+    (dump_func)dump_get_pixel_format_reply,
+    NULL,
+    (dump_func)dump_get_swap_interval_reply,
 };
 
 static const char * const req_names[REQ_NB_REQUESTS] =
@@ -4663,6 +4704,10 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "dcomp_get_shared_visual_info",
     "alpc_query_port",
     "alpc_cancel_message",
+    "set_pixel_format",
+    "get_pixel_format",
+    "set_swap_interval",
+    "get_swap_interval",
 };
 
 static const struct
@@ -4683,6 +4728,7 @@ static const struct
     { "BUFFER_TOO_SMALL",            STATUS_BUFFER_TOO_SMALL },
     { "CANCELLED",                   STATUS_CANCELLED },
     { "CANNOT_DELETE",               STATUS_CANNOT_DELETE },
+    { "CANNOT_IMPERSONATE",          STATUS_CANNOT_IMPERSONATE },
     { "CANT_OPEN_ANONYMOUS",         STATUS_CANT_OPEN_ANONYMOUS },
     { "CHILD_MUST_BE_VOLATILE",      STATUS_CHILD_MUST_BE_VOLATILE },
     { "CONNECTION_ABORTED",          STATUS_CONNECTION_ABORTED },

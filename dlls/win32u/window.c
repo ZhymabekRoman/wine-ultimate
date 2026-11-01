@@ -1635,15 +1635,42 @@ BOOL set_window_pixel_format( HWND hwnd, int format, BOOL internal )
     WND *win = get_win_ptr( hwnd );
     BOOL changed = FALSE;
 
-    if (!win || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
+    if (!win)
     {
-        WARN( "setting format %d on win %p semi-stub!\n", format, hwnd );
-        NtUserPostMessage( hwnd, WM_WINE_SETPIXELFORMAT, format, internal );
+        WARN( "setting format %d on invalid win %p\n", format, hwnd );
         return FALSE;
     }
+
+    if (win == WND_DESKTOP || win == WND_OTHER_PROCESS)
+    {
+        /* The pixel format is a global window attribute: store it in the server so
+         * that it persists and can be queried from any process, and notify the
+         * owning process so that its client-side cache stays in sync. */
+        SERVER_START_REQ( set_pixel_format )
+        {
+            req->window   = wine_server_user_handle( hwnd );
+            req->format   = format;
+            req->internal = internal;
+            wine_server_call( req );
+        }
+        SERVER_END_REQ;
+        if (!internal) NtUserPostMessage( hwnd, WM_WINE_SETPIXELFORMAT, format, internal );
+        return TRUE;
+    }
+
     if (!internal) win->pixel_format = format;
     if (format && !win->clip_clients) changed = win->clip_clients = TRUE;
     release_win_ptr( win );
+
+    /* mirror the format to the server so that other processes can see it */
+    SERVER_START_REQ( set_pixel_format )
+    {
+        req->window   = wine_server_user_handle( hwnd );
+        req->format   = format;
+        req->internal = internal;
+        wine_server_call( req );
+    }
+    SERVER_END_REQ;
 
     if (changed) update_window_state( hwnd );
     return TRUE;
@@ -1656,8 +1683,14 @@ int get_window_pixel_format( HWND hwnd )
 
     if (!win || win == WND_DESKTOP || win == WND_OTHER_PROCESS)
     {
-        WARN( "getting format on win %p not supported\n", hwnd );
-        return -1;
+        SERVER_START_REQ( get_pixel_format )
+        {
+            req->window = wine_server_user_handle( hwnd );
+            wine_server_call( req );
+            ret = reply->format;
+        }
+        SERVER_END_REQ;
+        return ret;
     }
 
     ret = win->pixel_format;

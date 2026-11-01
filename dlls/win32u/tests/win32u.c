@@ -1848,6 +1848,157 @@ static void test_inter_process_child( HWND hwnd )
     PostMessageA( hwnd, WM_USER, 0, 0 );
 }
 
+static void test_pixel_format_child( HWND hwnd, const char *mode, int fmt )
+{
+    PIXELFORMATDESCRIPTOR pfd = { sizeof(pfd), 1,
+        PFD_DRAW_TO_WINDOW|PFD_SUPPORT_OPENGL|PFD_DOUBLEBUFFER, PFD_TYPE_RGBA,
+        16, 5, 0, 0, 0, 0, 0, 1, 0, 0, 0, 0, 5, 1, 0, PFD_MAIN_PLANE, 0, 24, 8 };
+    typedef BOOL (APIENTRY *p_wglSwapIntervalEXT)(int);
+    typedef int (APIENTRY *p_wglGetSwapIntervalEXT)(void);
+    p_wglSwapIntervalEXT set_interval;
+    p_wglGetSwapIntervalEXT get_interval;
+    HGLRC rc;
+    HDC hdc;
+
+    hdc = GetDC( hwnd );
+    ok( hdc != NULL, "child GetDC(%p) failed, error %lu\n", hwnd, GetLastError() );
+    if (!hdc) return;
+
+    if (!strcmp( mode, "get" ))
+    {
+        int got = GetPixelFormat( hdc );
+        ok( got == fmt, "child got pixel format %d, expected %d\n", got, fmt );
+    }
+    else if (!strcmp( mode, "set" ))
+    {
+        ok( SetPixelFormat( hdc, fmt, &pfd ), "child SetPixelFormat(%d) failed, error %lu\n",
+            fmt, GetLastError() );
+        ok( GetPixelFormat( hdc ) == fmt, "child got pixel format %d after set, expected %d\n",
+            GetPixelFormat( hdc ), fmt );
+    }
+    else if (!strcmp( mode, "swap" ))
+    {
+        rc = wglCreateContext( hdc );
+        ok( rc != NULL, "child wglCreateContext on foreign window failed, error %lu\n",
+            GetLastError() );
+        if (rc && wglMakeCurrent( hdc, rc ))
+        {
+            set_interval = (void *)wglGetProcAddress( "wglSwapIntervalEXT" );
+            get_interval = (void *)wglGetProcAddress( "wglGetSwapIntervalEXT" );
+            if (set_interval && get_interval)
+            {
+                ok( set_interval( fmt ), "child wglSwapIntervalEXT(%d) failed\n", fmt );
+                ok( get_interval() == fmt, "child got swap interval %d, expected %d\n",
+                    get_interval(), fmt );
+            }
+            wglMakeCurrent( NULL, NULL );
+        }
+        if (rc) wglDeleteContext( rc );
+    }
+    ReleaseDC( hwnd, hdc );
+}
+
+static void test_pixel_format( char **argv )
+{
+    typedef BOOL (APIENTRY *p_wglSwapIntervalEXT)(int);
+    typedef int (APIENTRY *p_wglGetSwapIntervalEXT)(void);
+    p_wglSwapIntervalEXT set_interval;
+    p_wglGetSwapIntervalEXT get_interval;
+    PIXELFORMATDESCRIPTOR pfd = {0}, pfd2 = {0}, desc = {0};
+    char buf[128];
+    HGLRC rc;
+    HWND hwnd;
+    HDC hdc;
+    int chosen, chosen2;
+
+    hwnd = CreateWindowExA( 0, "static", "pixfmt", WS_POPUP|WS_VISIBLE, 0,0,64,64,
+                            GetDesktopWindow(), 0, 0, NULL );
+    ok( hwnd != NULL, "CreateWindowExA failed, error %lu\n", GetLastError() );
+    if (!hwnd) return;
+
+    hdc = GetDC( hwnd );
+    ok( hdc != NULL, "GetDC failed, error %lu\n", GetLastError() );
+    if (!hdc)
+    {
+        DestroyWindow( hwnd );
+        return;
+    }
+
+    pfd.nSize = sizeof(pfd);
+    pfd.nVersion = 1;
+    pfd.dwFlags = PFD_DRAW_TO_WINDOW|PFD_SUPPORT_OPENGL|PFD_DOUBLEBUFFER;
+    pfd.iPixelType = PFD_TYPE_RGBA;
+    pfd.cColorBits = 32;
+    chosen = ChoosePixelFormat( hdc, &pfd );
+    ok( chosen > 0, "ChoosePixelFormat returned %d\n", chosen );
+
+    if (chosen > 0)
+    {
+        desc.nSize = sizeof(desc);
+        desc.nVersion = 1;
+        ok( DescribePixelFormat( hdc, chosen, sizeof(desc), &desc ) > 0,
+            "DescribePixelFormat(%d) failed\n", chosen );
+        ok( desc.iPixelType == PFD_TYPE_RGBA, "iPixelType = %u\n", desc.iPixelType );
+        ok( desc.cColorBits >= 16, "cColorBits = %u\n", desc.cColorBits );
+        ok( desc.dwFlags & PFD_DOUBLEBUFFER, "dwFlags = %#lx\n", desc.dwFlags );
+
+        ok( GetPixelFormat( hdc ) == 0, "GetPixelFormat on unset window returned %d\n",
+            GetPixelFormat( hdc ) );
+        ok( SetPixelFormat( hdc, chosen, &pfd ), "SetPixelFormat(%d) failed, error %lu\n",
+            chosen, GetLastError() );
+        ok( GetPixelFormat( hdc ) == chosen, "GetPixelFormat returned %d, expected %d\n",
+            GetPixelFormat( hdc ), chosen );
+        ok( SetPixelFormat( hdc, chosen, &pfd ), "repeated SetPixelFormat(%d) failed\n", chosen );
+
+        /* the pixel format is a global window attribute: a foreign process sees it */
+        sprintf( buf, "pixel_format get %Ix %d", (INT_PTR)hwnd, chosen );
+        run_in_process( argv, buf );
+
+        /* a foreign process can set it, and the change is visible here too */
+        pfd2 = pfd;
+        pfd2.cColorBits = 16;
+        pfd2.cAlphaBits = 8;
+        pfd2.cDepthBits = 16;
+        chosen2 = ChoosePixelFormat( hdc, &pfd2 );
+        if (chosen2 > 0 && chosen2 != chosen)
+        {
+            /* the foreign process sets a new format (global, server-side) ... */
+            sprintf( buf, "pixel_format set %Ix %d", (INT_PTR)hwnd, chosen2 );
+            run_in_process( argv, buf );
+            /* ... and a fresh process sees the format it stored: the attribute
+               persists on the window, independently of any message delivery */
+            sprintf( buf, "pixel_format get %Ix %d", (INT_PTR)hwnd, chosen2 );
+            run_in_process( argv, buf );
+        }
+        else skip( "no second distinct pixel format available (chosen %d)\n", chosen2 );
+    }
+
+    /* the swap interval of a window rendered to from a foreign process is global too */
+    sprintf( buf, "pixel_format swap %Ix 3", (INT_PTR)hwnd );
+    run_in_process( argv, buf );
+
+    /* same-process swap interval round-trip */
+    rc = wglCreateContext( hdc );
+    if (rc && wglMakeCurrent( hdc, rc ))
+    {
+        set_interval = (void *)wglGetProcAddress( "wglSwapIntervalEXT" );
+        get_interval = (void *)wglGetProcAddress( "wglGetSwapIntervalEXT" );
+        if (set_interval && get_interval)
+        {
+            ok( set_interval( 2 ), "wglSwapIntervalEXT(2) failed\n" );
+            ok( get_interval() == 2, "wglGetSwapIntervalEXT returned %d, expected 2\n",
+                get_interval() );
+        }
+        else skip( "WGL_EXT_swap_control not available\n" );
+        wglMakeCurrent( NULL, NULL );
+    }
+    else skip( "could not create a GL context on the test window\n" );
+    if (rc) wglDeleteContext( rc );
+
+    ReleaseDC( hwnd, hdc );
+    DestroyWindow( hwnd );
+}
+
 static DWORD CALLBACK test_NtUserGetPointerInfoList_thread( void *arg )
 {
     POINTER_INFO pointer_info[4] = {0};
@@ -3019,6 +3170,12 @@ START_TEST(win32u)
         return;
     }
 
+    if (argc > 5 && !strcmp( argv[2], "pixel_format" ))
+    {
+        test_pixel_format_child( LongToHandle( strtol( argv[3], NULL, 16 )), argv[4], atoi( argv[5] ));
+        return;
+    }
+
     if (argc > 3 && !strcmp( argv[2], "NtUserEnableMouseInPointer" ))
     {
         winetest_push_context( "enable %s", argv[3] );
@@ -3048,6 +3205,7 @@ START_TEST(win32u)
     test_message_filter();
     test_timer();
     test_inter_process_messages( argv[0] );
+    test_pixel_format( argv );
     test_wndproc_hook();
 
     test_NtUserCloseWindowStation();

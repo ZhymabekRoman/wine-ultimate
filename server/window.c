@@ -89,6 +89,8 @@ struct window
     WCHAR           *text;            /* window caption text */
     data_size_t      text_len;        /* length of window caption */
     unsigned int     paint_flags;     /* various painting flags */
+    int              pixel_format;    /* pixel format set on the window, 0 = none */
+    int              swap_interval;   /* OpenGL surface swap interval */
     int              prop_inuse;      /* number of in-use window properties */
     int              prop_alloc;      /* number of allocated window properties */
     struct property *properties;      /* window properties array */
@@ -674,6 +676,8 @@ static struct window *create_window( struct window *parent, struct window *owner
     win->text           = NULL;
     win->text_len       = 0;
     win->paint_flags    = 0;
+    win->pixel_format   = 0;
+    win->swap_interval  = 1;
     win->prop_inuse     = 0;
     win->prop_alloc     = 0;
     win->properties     = NULL;
@@ -3191,6 +3195,48 @@ DECL_HANDLER(get_window_properties)
         data++;
         count--;
     }
+}
+
+
+/* Set the pixel format of a window */
+DECL_HANDLER(set_pixel_format)
+{
+    struct window *win = get_window( req->window );
+
+    if (!win) return;
+    if (!req->internal) win->pixel_format = req->format;
+}
+
+
+/* Get the pixel format of a window */
+DECL_HANDLER(get_pixel_format)
+{
+    struct window *win = get_window( req->window );
+
+    reply->format = -1;
+    if (!win) return;
+    reply->format = win->pixel_format;
+}
+
+
+/* Set the OpenGL swap interval of a window */
+DECL_HANDLER(set_swap_interval)
+{
+    struct window *win = get_window( req->window );
+
+    if (!win) return;
+    win->swap_interval = req->interval;
+}
+
+
+/* Get the OpenGL swap interval of a window */
+DECL_HANDLER(get_swap_interval)
+{
+    struct window *win = get_window( req->window );
+
+    reply->interval = -1;
+    if (!win) return;
+    reply->interval = win->swap_interval;
 }
 
 

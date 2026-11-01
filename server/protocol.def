@@ -4456,3 +4456,32 @@ typedef struct _ALPC_DATA_VIEW_ATTR
 @REPLY
     int                 cancelled;      /* a request was outstanding and is cancelled */
 @END
+
+/* Set the pixel format of a window. On Windows the pixel format is a global
+ * (kernel-side) window attribute: a process rendering into a window it does
+ * not own (e.g. a multi-process GPU compositor) sets and queries it there. */
+@REQ(set_pixel_format)
+    user_handle_t       window;         /* handle to the window */
+    int                 format;         /* pixel format index */
+    int                 internal;       /* per-DC internal set, don't store on the window */
+@END
+
+/* Get the pixel format of a window */
+@REQ(get_pixel_format)
+    user_handle_t       window;         /* handle to the window */
+@REPLY
+    int                 format;         /* pixel format index, 0 if none, -1 if invalid */
+@END
+
+/* Set the OpenGL surface swap interval of a window */
+@REQ(set_swap_interval)
+    user_handle_t       window;         /* handle to the window */
+    int                 interval;       /* swap interval value */
+@END
+
+/* Get the OpenGL surface swap interval of a window */
+@REQ(get_swap_interval)
+    user_handle_t       window;         /* handle to the window */
+@REPLY
+    int                 interval;       /* swap interval value, -1 if invalid window */
+@END

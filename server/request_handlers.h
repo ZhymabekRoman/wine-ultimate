@@ -329,6 +329,10 @@ DECL_HANDLER(dcomp_set_shared_visual_info);
 DECL_HANDLER(dcomp_get_shared_visual_info);
 DECL_HANDLER(alpc_query_port);
 DECL_HANDLER(alpc_cancel_message);
+DECL_HANDLER(set_pixel_format);
+DECL_HANDLER(get_pixel_format);
+DECL_HANDLER(set_swap_interval);
+DECL_HANDLER(get_swap_interval);
 
 typedef void (*req_handler)( const void *req, void *reply );
 static const req_handler req_handlers[REQ_NB_REQUESTS] =
@@ -655,6 +659,10 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_dcomp_get_shared_visual_info,
     (req_handler)req_alpc_query_port,
     (req_handler)req_alpc_cancel_message,
+    (req_handler)req_set_pixel_format,
+    (req_handler)req_get_pixel_format,
+    (req_handler)req_set_swap_interval,
+    (req_handler)req_get_swap_interval,
 };
 
 C_ASSERT( sizeof(abstime_t) == 8 );
@@ -2490,3 +2498,18 @@ C_ASSERT( offsetof(struct alpc_cancel_message_request, msg_id) == 16 );
 C_ASSERT( sizeof(struct alpc_cancel_message_request) == 24 );
 C_ASSERT( offsetof(struct alpc_cancel_message_reply, cancelled) == 8 );
 C_ASSERT( sizeof(struct alpc_cancel_message_reply) == 16 );
+C_ASSERT( offsetof(struct set_pixel_format_request, window) == 12 );
+C_ASSERT( offsetof(struct set_pixel_format_request, format) == 16 );
+C_ASSERT( offsetof(struct set_pixel_format_request, internal) == 20 );
+C_ASSERT( sizeof(struct set_pixel_format_request) == 24 );
+C_ASSERT( offsetof(struct get_pixel_format_request, window) == 12 );
+C_ASSERT( sizeof(struct get_pixel_format_request) == 16 );
+C_ASSERT( offsetof(struct get_pixel_format_reply, format) == 8 );
+C_ASSERT( sizeof(struct get_pixel_format_reply) == 16 );
+C_ASSERT( offsetof(struct set_swap_interval_request, window) == 12 );
+C_ASSERT( offsetof(struct set_swap_interval_request, interval) == 16 );
+C_ASSERT( sizeof(struct set_swap_interval_request) == 24 );
+C_ASSERT( offsetof(struct get_swap_interval_request, window) == 12 );
+C_ASSERT( sizeof(struct get_swap_interval_request) == 16 );
+C_ASSERT( offsetof(struct get_swap_interval_reply, interval) == 8 );
+C_ASSERT( sizeof(struct get_swap_interval_reply) == 16 );
