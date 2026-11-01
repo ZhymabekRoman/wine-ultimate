@@ -2157,11 +2157,6 @@ DECL_HANDLER(queue_apc)
         break;
     case APC_DUP_HANDLE:
         process = get_process_from_handle( req->handle, PROCESS_DUP_HANDLE );
-        if (debug_level)
-            fprintf( stderr, "WA_APCDUP: caller=%04x target=%04x src_handle=%08x dst=%08x opts=%08x\n",
-                     current->process->id, process ? process->id : 0,
-                     (unsigned int)apc->call.dup_handle.src_handle, (unsigned int)apc->call.dup_handle.dst_process,
-                     (unsigned int)apc->call.dup_handle.options );
         /* a null destination process handle means "close the handle in the source process",
          * there is nothing to translate into the target in that case */
         if (process && process != current->process && apc->call.dup_handle.dst_process)

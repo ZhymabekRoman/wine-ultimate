@@ -258,14 +258,7 @@ struct event *create_event( struct object *root, const struct unicode_str *name,
                 return NULL;
             }
         }
-    }
-    if (event && debug_level)
-    {
-        fprintf( stderr, "CREATE_EVENT: pid=%04x tid=%04x event=%p sync=%p manual=%d init=%d\n",
-                 current ? current->process->id : 0, current ? current->id : 0,
-                 &event->obj, event->sync, manual_reset, initial_state );
-    }
-    return event;
+    }    return event;
 }
 
 struct event *get_event_obj( struct process *process, obj_handle_t handle, unsigned int access )

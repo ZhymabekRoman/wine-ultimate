@@ -52,6 +52,19 @@ struct pipe_message
     struct async        *async;      /* async of pending write */
 };
 
+/* An instance caches, for both of the pipe ends it connected, the peer ids that
+ * FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE and FSCTL_PIPE_IMPERSONATE report: the client pid
+ * and session, the server pid and session, and the client process (for the token).
+ * Windows keeps that cache queryable when the connection dies from a handle close on
+ * either end, and drops it only when the server explicitly calls DisconnectNamedPipe().
+ */
+enum conn_info_state
+{
+    CONN_INFO_NONE,     /* never connected */
+    CONN_INFO_VALID,    /* connected, or torn down by a handle close */
+    CONN_INFO_CLEARED   /* dropped by an explicit DisconnectNamedPipe() */
+};
+
 struct pipe_end
 {
     struct object        obj;        /* object header */
@@ -65,6 +78,7 @@ struct pipe_end
     unsigned int         client_session_id; /* session of the client process */
     unsigned int         server_session_id; /* session of the server process */
     struct process      *client_proc; /* client process, used for impersonation */
+    enum conn_info_state conn_info;  /* state of the cached peer ids above */
     data_size_t          buffer_size;/* size of buffered data that doesn't block caller */
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
@@ -475,10 +489,16 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
 
     pipe_end->connection = NULL;
 
-    if (pipe_end->obj.ops == &pipe_server_ops && pipe_end->client_proc)
+    /* Only an explicit DisconnectNamedPipe() invalidates the cached peer ids of a server
+     * end; a teardown (handle close, status != STATUS_PIPE_DISCONNECTED) leaves them
+     * queryable.  Releasing them in both cases made the peer lookups of a pipe whose
+     * client handle had already been closed answer ERROR_PIPE_BUSY (231), and
+     * ImpersonateNamedPipeClient() on the same instance ERROR_BAD_PIPE (230). */
+    if (pipe_end->obj.ops == &pipe_server_ops && status == STATUS_PIPE_DISCONNECTED)
     {
-        release_object( pipe_end->client_proc );
+        if (pipe_end->client_proc) release_object( pipe_end->client_proc );
         pipe_end->client_proc = NULL;
+        pipe_end->conn_info = CONN_INFO_CLEARED;
     }
 
     pipe_end->state = status == STATUS_PIPE_DISCONNECTED
@@ -498,6 +518,9 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
     if (connection)
     {
         connection->connection = NULL;
+        /* the client end loses its copy of the peer ids only on an explicit disconnect;
+         * it then reports the connection as not connected, not as an unavailable pipe */
+        if (status == STATUS_PIPE_DISCONNECTED) connection->conn_info = CONN_INFO_CLEARED;
         pipe_end_disconnect( connection, status );
     }
 }
@@ -1145,18 +1168,6 @@ static void reselect_write_queue( struct pipe_end *pipe_end )
 static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
 {
     struct pipe_end *pipe_end = get_fd_user( fd );
-    const WCHAR *pname;
-    data_size_t plen;
-
-    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
-    if (debug_level)
-    {
-        fprintf( stderr, "PIPE_READ: pid=%04x pipe_end=%p pipe=%p name=", current->process->id, pipe_end, pipe_end->pipe );
-        if (pname) dump_strW( pname, plen, stderr, "[]" );
-        else fprintf( stderr, "(null)" );
-        fprintf( stderr, " state=%d nonblocking=%d\n", pipe_end->state, !!(pipe_end->flags & NAMED_PIPE_NONBLOCKING_MODE) );
-    }
-
     switch (pipe_end->state)
     {
     case FILE_PIPE_CONNECTED_STATE:
@@ -1188,27 +1199,6 @@ static void pipe_end_write( struct fd *fd, struct async *async, file_pos_t pos )
     struct pipe_end *pipe_end = get_fd_user( fd );
     struct pipe_message *message;
     struct iosb *iosb;
-    const WCHAR *pname;
-    data_size_t plen;
-
-    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
-    if (debug_level)
-    {
-        fprintf( stderr, "PIPE_WRITE: pid=%04x pipe_end=%p pipe=%p name=", current->process->id, pipe_end, pipe_end->pipe );
-        if (pname) dump_strW( pname, plen, stderr, "[]" );
-        else fprintf( stderr, "(null)" );
-        fprintf( stderr, " size=%u state=%d", (unsigned)get_req_data_size(), pipe_end->state );
-        if (get_req_data_size() > 0)
-        {
-            const unsigned char *pdata = get_req_data();
-            data_size_t dlen = get_req_data_size() > 32 ? 32 : get_req_data_size();
-            data_size_t k;
-            fprintf( stderr, " data=" );
-            for (k = 0; k < dlen; k++) fprintf( stderr, "%02x", pdata[k] );
-        }
-        fprintf( stderr, "\n" );
-    }
-
     switch (pipe_end->state)
     {
     case FILE_PIPE_CONNECTED_STATE:
@@ -1321,34 +1311,15 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     const WCHAR *pname;
     data_size_t plen;
 
-    /* FSCTL_PIPE_TRANSCEIVE (0x282040) is the call the Chromium/ipcz named-pipe
-     * bootstrap uses to push a message and pull the reply in one request, so the
-     * status of every one of them is the evidence for the app<->browser stall. */
-    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
-    if (debug_level)
-    {
-        fprintf( stderr, "WA_TRANSCEIVE: pid=%04x pipe_end=%p pipe=%p name=", current->process->id,
-                 pipe_end, pipe_end->pipe );
-        if (pname) dump_strW( pname, plen, stderr, "[]" );
-        else fprintf( stderr, "(null)" );
-        fprintf( stderr, " state=%d conn=%p msgread=%d in=%u out=%u\n", pipe_end->state, pipe_end->connection,
-                 !!(pipe_end->flags & NAMED_PIPE_MESSAGE_STREAM_READ), (unsigned)get_req_data_size(),
-                 (unsigned)get_reply_max_size() );
-    }
 
     if (!pipe_end->connection)
     {
-        if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: status=%08x (%s)\n",
-                 pipe_end->pipe ? (unsigned int)STATUS_INVALID_PIPE_STATE : (unsigned int)STATUS_PIPE_DISCONNECTED,
-                 pipe_end->pipe ? "INVALID_PIPE_STATE" : "PIPE_DISCONNECTED" );
         set_error( pipe_end->pipe ? STATUS_INVALID_PIPE_STATE : STATUS_PIPE_DISCONNECTED );
         return;
     }
 
     if (!(pipe_end->flags & NAMED_PIPE_MESSAGE_STREAM_READ))
     {
-        if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: status=%08x (INVALID_READ_MODE)\n",
-                 (unsigned int)STATUS_INVALID_READ_MODE );
         set_error( STATUS_INVALID_READ_MODE );
         return;
     }
@@ -1356,8 +1327,6 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     /* not allowed if we already have read data buffered */
     if (!list_empty( &pipe_end->message_queue ))
     {
-        if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: status=%08x (PIPE_BUSY)\n",
-                 (unsigned int)STATUS_PIPE_BUSY );
         set_error( STATUS_PIPE_BUSY );
         return;
     }
@@ -1370,16 +1339,26 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     release_object( iosb );
     if (!message)
     {
-        if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: queue_message failed, no status set\n" );
         return;
     }
     reselect_read_queue( pipe_end->connection, 0 );
 
     queue_async( &pipe_end->read_q, async );
     reselect_read_queue( pipe_end, 0 );
-    if (debug_level) fprintf( stderr, "WA_TRANSCEIVE_STATUS: status=%08x (PENDING, queued on read_q)\n",
-                             (unsigned int)STATUS_PENDING );
     set_error( STATUS_PENDING );
+}
+
+/* Peer ids are served from the instance cache, not from a live connection: an end keeps
+ * them queryable while its connection was torn down by a handle close, and stops serving
+ * them once the server explicitly disconnected the instance.  A never-connected instance
+ * keeps reporting the pipe as unavailable. */
+static int pipe_end_connection_info_available( struct pipe_end *pipe_end )
+{
+    if (pipe_end->conn_info == CONN_INFO_VALID) return 1;
+    if (pipe_end->conn_info == CONN_INFO_CLEARED)
+        set_error( pipe_end->obj.ops == &pipe_server_ops ? STATUS_NOT_FOUND : STATUS_PIPE_DISCONNECTED );
+    else set_error( STATUS_PIPE_NOT_AVAILABLE );
+    return 0;
 }
 
 static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
@@ -1390,47 +1369,34 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
 
     if (attr_size == sizeof("ClientProcessId") && !memcmp( attr, "ClientProcessId", attr_size ))
     {
-        if (!pipe_end->connection)
-        {
-            set_error( STATUS_PIPE_NOT_AVAILABLE );
-            return;
-        }
+        if (!pipe_end_connection_info_available( pipe_end )) return;
         value = &pipe_end->client_pid;
         value_size = sizeof(pipe_end->client_pid);
     }
     else if (attr_size == sizeof("ServerProcessId") && !memcmp( attr, "ServerProcessId", attr_size ))
     {
+        /* the server pid of a server end is its own creator, always known */
+        if (pipe_end->obj.ops == &pipe_client_ops && !pipe_end_connection_info_available( pipe_end )) return;
         value = &pipe_end->server_pid;
         value_size = sizeof(pipe_end->server_pid);
     }
     else if (attr_size == sizeof("ClientSessionId") && !memcmp( attr, "ClientSessionId", attr_size ))
     {
-        if (!pipe_end->connection)
-        {
-            set_error( STATUS_PIPE_NOT_AVAILABLE );
-            return;
-        }
+        if (!pipe_end_connection_info_available( pipe_end )) return;
         value = &pipe_end->client_session_id;
         value_size = sizeof(pipe_end->client_session_id);
     }
     else if (attr_size == sizeof("ServerSessionId") && !memcmp( attr, "ServerSessionId", attr_size ))
     {
+        if (pipe_end->obj.ops == &pipe_client_ops && !pipe_end_connection_info_available( pipe_end )) return;
         value = &pipe_end->server_session_id;
         value_size = sizeof(pipe_end->server_session_id);
     }
     else
     {
-        if (debug_level)
-            fprintf( stderr, "WA_CONNATTR: pid=%04x unknown attr size=%u -> ILLEGAL_FUNCTION\n",
-                     current->process->id, (unsigned int)attr_size );
         set_error( STATUS_ILLEGAL_FUNCTION );
         return;
     }
-
-    if (debug_level)
-        fprintf( stderr, "WA_CONNATTR: pid=%04x conn=%p attr=%.*s val=%08x\n", current->process->id,
-                 pipe_end->connection, (int)(attr_size - 1), attr,
-                 value_size == 4 ? *(unsigned int *)value : 0 );
 
     if (get_reply_max_size() < value_size)
     {
@@ -1443,20 +1409,6 @@ static void pipe_end_get_connection_attribute( struct pipe_end *pipe_end )
 
 static void pipe_end_ioctl( struct pipe_end *pipe_end, ioctl_code_t code, struct async *async )
 {
-    const WCHAR *pname;
-    data_size_t plen;
-
-    pname = pipe_end->pipe ? get_object_name( &pipe_end->pipe->obj, &plen ) : NULL;
-    if (debug_level)
-    {
-        fprintf( stderr, "WA_IOCTL: pid=%04x code=%08x pipe_end=%p pipe=%p name=", current->process->id,
-                 code, pipe_end, pipe_end->pipe );
-        if (pname) dump_strW( pname, plen, stderr, "[]" );
-        else fprintf( stderr, "(null)" );
-        fprintf( stderr, " state=%d conn=%p spid=%04x cpid=%04x\n", pipe_end->state, pipe_end->connection,
-                 pipe_end->server_pid, pipe_end->client_pid );
-    }
-
     switch(code)
     {
     case FSCTL_PIPE_GET_CONNECTION_ATTRIBUTE:
@@ -1533,17 +1485,21 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
 
     case FSCTL_PIPE_IMPERSONATE:
         {
-            struct pipe_end *client = server->pipe_end.connection;
+            /* Impersonation runs from the client process cached on the instance, which
+             * survives the client's handle close - Windows keeps impersonating after the
+             * client has exited.  Before any client connected the request reports
+             * ERROR_CANNOT_IMPERSONATE, not ERROR_BAD_PIPE. */
+            struct process *client_proc = server->pipe_end.client_proc;
             struct token *token;
 
-            if (!client)
+            if (!client_proc)
             {
-                set_error( STATUS_INVALID_PIPE_STATE );
+                set_error( STATUS_CANNOT_IMPERSONATE );
                 return;
             }
-            if (client->client_proc->token)
+            if (client_proc->token)
             {
-                if (!(token = token_duplicate( client->client_proc->token, 0, SecurityImpersonation,
+                if (!(token = token_duplicate( client_proc->token, 0, SecurityImpersonation,
                                                NULL, NULL, 0, NULL, 0, 0 )))
                     return;
                 if (current->token) release_object( current->token );
@@ -1584,6 +1540,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->client_session_id = 0;
     pipe_end->server_session_id = 0;
     pipe_end->client_proc = NULL;
+    pipe_end->conn_info = CONN_INFO_NONE;
     pipe_end->buffer_size = buffer_size;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
@@ -1670,19 +1627,6 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
     struct pipe_server *server;
     struct pipe_end *client;
     unsigned int pipe_sharing;
-    const WCHAR *pname;
-    data_size_t plen;
-
-    pname = get_object_name( &pipe->obj, &plen );
-    if (debug_level)
-    {
-        fprintf( stderr, "NAMED_PIPE_OPEN_FILE: pid=%04x name=", current->process->id );
-        if (pname) dump_strW( pname, plen, stderr, "[]" );
-        else fprintf( stderr, "(null)" );
-        fprintf( stderr, " pipe=%p listeners_empty=%d access=%08x sharing=%08x\n",
-                 pipe, list_empty( &pipe->listeners ), access, pipe->sharing );
-    }
-
     if (list_empty( &pipe->listeners ))
     {
         set_error( STATUS_PIPE_NOT_AVAILABLE );
@@ -1704,11 +1648,15 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.state = FILE_PIPE_CONNECTED_STATE;
         server->pipe_end.connection = client;
         client->connection = &server->pipe_end;
+        /* a reused instance (disconnect + listen) caches the new client only */
+        if (server->pipe_end.client_proc) release_object( server->pipe_end.client_proc );
+        server->pipe_end.client_proc = (struct process *)grab_object( client->client_proc );
         server->pipe_end.client_pid = client->client_proc->id;
         server->pipe_end.client_session_id = client->client_proc->session_id;
-        server->pipe_end.client_proc = (struct process *)grab_object( client->client_proc );
         client->server_pid = server->pipe_end.server_pid;
         client->server_session_id = server->pipe_end.server_session_id;
+        server->pipe_end.conn_info = CONN_INFO_VALID;
+        client->conn_info = CONN_INFO_VALID;
         list_remove( &server->entry );
     }
     return &client->obj;
@@ -1761,15 +1709,6 @@ static void named_pipe_dir_ioctl( struct fd *fd, ioctl_code_t code, struct async
             name.str = buffer->Name;
             name.len = (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR);
             if (!(pipe = open_named_object( &device->obj, &named_pipe_ops, &name, 0 ))) return;
-
-            if (debug_level)
-            {
-                fprintf( stderr, "FSCTL_PIPE_WAIT: name=" );
-                dump_strW( buffer->Name, (buffer->NameLength / sizeof(WCHAR)) * sizeof(WCHAR), stderr, "[]" );
-                fprintf( stderr, " timeout=%lld listeners_empty=%d\n",
-                         (long long)(buffer->TimeoutSpecified ? buffer->Timeout.QuadPart : pipe->timeout),
-                         list_empty( &pipe->listeners ) );
-            }
 
             if (list_empty( &pipe->listeners ))
             {

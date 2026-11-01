@@ -3513,8 +3513,8 @@ static void test_namedpipe_process_id(void)
 
     SetLastError(0xdeadbeef);
     ret = pGetNamedPipeClientProcessId(server, &pid);
-    todo_wine ok(!ret, "success\n");
-    todo_wine ok(GetLastError() == ERROR_NOT_FOUND, "got %lu\n", GetLastError());
+    ok(!ret, "success\n");
+    ok(GetLastError() == ERROR_NOT_FOUND, "got %lu\n", GetLastError());
 
     pid = 0;
     ret = pGetNamedPipeServerProcessId(server, &pid);
@@ -3523,13 +3523,13 @@ static void test_namedpipe_process_id(void)
 
     SetLastError(0xdeadbeef);
     ret = pGetNamedPipeClientProcessId(client, &pid);
-    todo_wine ok(!ret, "success\n");
-    todo_wine ok(GetLastError() == ERROR_PIPE_NOT_CONNECTED, "got %lu\n", GetLastError());
+    ok(!ret, "success\n");
+    ok(GetLastError() == ERROR_PIPE_NOT_CONNECTED, "got %lu\n", GetLastError());
 
     SetLastError(0xdeadbeef);
     ret = pGetNamedPipeServerProcessId(client, &pid);
-    todo_wine ok(!ret, "success\n");
-    todo_wine ok(GetLastError() == ERROR_PIPE_NOT_CONNECTED, "got %lu\n", GetLastError());
+    ok(!ret, "success\n");
+    ok(GetLastError() == ERROR_PIPE_NOT_CONNECTED, "got %lu\n", GetLastError());
     CloseHandle(client);
     CloseHandle(server);
 
@@ -3746,8 +3746,8 @@ static void test_namedpipe_session_id(void)
 
     SetLastError(0xdeadbeef);
     ret = pGetNamedPipeClientSessionId(server, &id);
-    todo_wine ok(!ret, "success\n");
-    todo_wine ok(GetLastError() == ERROR_NOT_FOUND, "got %lu\n", GetLastError());
+    ok(!ret, "success\n");
+    ok(GetLastError() == ERROR_NOT_FOUND, "got %lu\n", GetLastError());
 
     id = 0;
     ret = pGetNamedPipeServerSessionId(server, &id);
@@ -3756,13 +3756,13 @@ static void test_namedpipe_session_id(void)
 
     SetLastError(0xdeadbeef);
     ret = pGetNamedPipeClientSessionId(client, &id);
-    todo_wine ok(!ret, "success\n");
-    todo_wine ok(GetLastError() == ERROR_PIPE_NOT_CONNECTED, "got %lu\n", GetLastError());
+    ok(!ret, "success\n");
+    ok(GetLastError() == ERROR_PIPE_NOT_CONNECTED, "got %lu\n", GetLastError());
 
     SetLastError(0xdeadbeef);
     ret = pGetNamedPipeServerSessionId(client, &id);
-    todo_wine ok(!ret, "success\n");
-    todo_wine ok(GetLastError() == ERROR_PIPE_NOT_CONNECTED, "got %lu\n", GetLastError());
+    ok(!ret, "success\n");
+    ok(GetLastError() == ERROR_PIPE_NOT_CONNECTED, "got %lu\n", GetLastError());
     CloseHandle(client);
     CloseHandle(server);
 
@@ -3792,6 +3792,106 @@ static void test_namedpipe_session_id(void)
 
     CloseHandle(overlapped.hEvent);
     CloseHandle(server);
+}
+
+/* Instance-availability + connection-attribute shape used by Chromium's
+ * NamedPlatformChannel/PipeBusyMitigation (the mojo invitation pipe of the WebView2
+ * runtime: message mode, maxinstances = 1, quotas 0x1000).  While the single instance is
+ * connected a second client open must report the instance as busy, the connection
+ * attributes of a *closed* client must stay queryable on the server instance, an explicit
+ * DisconnectNamedPipe() must invalidate them, and the retrying client must be served by
+ * the re-armed instance with its own attributes.
+ */
+static void test_pipe_busy_mitigation(void)
+{
+    HANDLE server, client, client2;
+    OVERLAPPED ov;
+    ULONG pid;
+    BOOL ret;
+
+    if (!pGetNamedPipeClientProcessId)
+    {
+        win_skip("GetNamedPipeClientProcessId not available\n");
+        return;
+    }
+
+    server = CreateNamedPipeA( PIPENAME, PIPE_ACCESS_DUPLEX | FILE_FLAG_OVERLAPPED,
+                               PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                               1, 0x1000, 0x1000, NMPWAIT_USE_DEFAULT_WAIT, NULL );
+    ok( server != INVALID_HANDLE_VALUE, "busy: CreateNamedPipe got %lu\n", GetLastError());
+    if (server == INVALID_HANDLE_VALUE) return;
+
+    memset( &ov, 0, sizeof(ov));
+    ov.hEvent = CreateEventW( NULL, TRUE, FALSE, NULL );
+    ret = ConnectNamedPipe( server, &ov );
+    ok( !ret && GetLastError() == ERROR_IO_PENDING, "busy: ConnectNamedPipe got %lu\n", GetLastError());
+
+    client = CreateFileA( PIPENAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                          FILE_ATTRIBUTE_NORMAL, NULL );
+    ok( client != INVALID_HANDLE_VALUE, "busy: first client got %lu\n", GetLastError());
+    ok( WaitForSingleObject( ov.hEvent, 10000 ) == WAIT_OBJECT_0, "busy: connect not completed\n");
+    CloseHandle( ov.hEvent );
+
+    pid = 0;
+    ret = pGetNamedPipeClientProcessId( server, &pid );
+    ok( ret, "busy: connected client pid got %lu\n", GetLastError());
+    ok( pid == GetProcessId( GetCurrentProcess()), "busy: connected client pid %04lx\n", pid );
+
+    /* the only instance is connected: the open must report it busy */
+    SetLastError( 0xdeadbeef );
+    client2 = CreateFileA( PIPENAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL );
+    ok( client2 == INVALID_HANDLE_VALUE && GetLastError() == ERROR_PIPE_BUSY,
+        "busy: second client got %lu\n", GetLastError());
+
+    /* an explicit disconnect drops the cached connection info of the instance */
+    ret = DisconnectNamedPipe( server );
+    ok( ret, "busy: DisconnectNamedPipe got %lu\n", GetLastError());
+
+    SetLastError( 0xdeadbeef );
+    pid = 0;
+    ret = pGetNamedPipeClientProcessId( server, &pid );
+    ok( !ret && GetLastError() == ERROR_NOT_FOUND, "busy: disconnected client pid got %lu\n", GetLastError());
+
+    /* the mitigation: the server re-arms, the retrying client is served by that instance */
+    memset( &ov, 0, sizeof(ov));
+    ov.hEvent = CreateEventW( NULL, TRUE, FALSE, NULL );
+    ret = ConnectNamedPipe( server, &ov );
+    ok( !ret && GetLastError() == ERROR_IO_PENDING, "busy: re-arm got %lu\n", GetLastError());
+
+    ret = WaitNamedPipeA( PIPENAME, 200 );
+    ok( ret, "busy: WaitNamedPipe got %lu\n", GetLastError());
+
+    SetLastError( 0xdeadbeef );
+    client2 = CreateFileA( PIPENAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING,
+                           FILE_ATTRIBUTE_NORMAL, NULL );
+    ok( client2 != INVALID_HANDLE_VALUE, "busy: retry client got %lu\n", GetLastError());
+    ok( WaitForSingleObject( ov.hEvent, 10000 ) == WAIT_OBJECT_0, "busy: re-arm not completed\n");
+    CloseHandle( ov.hEvent );
+
+    if (client2 != INVALID_HANDLE_VALUE)
+    {
+        pid = 0;
+        ret = pGetNamedPipeClientProcessId( client2, &pid );
+        ok( ret, "busy: new client own pid got %lu\n", GetLastError());
+        ok( pid == GetProcessId( GetCurrentProcess()), "busy: new client own pid %04lx\n", pid );
+
+        pid = 0;
+        ret = pGetNamedPipeServerProcessId( client2, &pid );
+        ok( ret, "busy: new client server pid got %lu\n", GetLastError());
+        ok( pid == GetProcessId( GetCurrentProcess()), "busy: new client server pid %04lx\n", pid );
+        CloseHandle( client2 );
+    }
+
+    /* the closed client handle keeps the instance's connection info queryable */
+    CloseHandle( client );
+
+    pid = 0;
+    ret = pGetNamedPipeClientProcessId( server, &pid );
+    ok( ret, "busy: closed client pid got %lu\n", GetLastError());
+    ok( pid == GetProcessId( GetCurrentProcess()), "busy: closed client pid %04lx\n", pid );
+
+    CloseHandle( server );
 }
 
 static void test_multiple_instances(void)
@@ -4712,6 +4812,7 @@ START_TEST(pipe)
     test_namedpipe_process_id();
     test_namedpipe_process_id_local();
     test_namedpipe_session_id();
+    test_pipe_busy_mitigation();
     test_multiple_instances();
     test_wait_pipe();
     test_nowait(PIPE_TYPE_BYTE);
