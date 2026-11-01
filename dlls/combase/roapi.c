@@ -81,6 +81,18 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* PRM/MRT resources layer: .NET Native (mrt100/SharedLibrary System.SR),
+     * Microsoft.UI.Xaml and the app's compiled ResourceManager.Current call
+     * sites activate Windows.ApplicationModel.Resources.Core.ResourceContext
+     * during startup (Calculator: 8x) and FailFast c0000602 when it is absent.
+     * Windows.System.MemoryManager is co-hosted as a no-op stub (1x warning). */
+    if (!wcsncmp(classid, L"Windows.ApplicationModel.Resources.Core.", 38) ||
+        !wcscmp(classid, L"Windows.System.MemoryManager"))
+    {
+        *out = wcsdup(L"windows.applicationmodel.resources.core.dll");
+        return S_OK;
+    }
+
     /* Classes consumed during XAML control construction: they fall through to the
      * ActivatableClassId registry lookup (absent in this unpackaged prefix) and return
      * REGDB_E_CLASSNOTREG, stalling the UI thread before the WebView2 environment is
@@ -96,6 +108,24 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
     if (!wcsncmp(classid, L"Windows.UI.ViewManagement.", 26))
     {
         *out = wcsdup(L"windows.ui.dll");
+        return S_OK;
+    }
+
+    /* Windows.UI.Composition.Compositor is the class the XAML/Composition root of an
+     * unpackaged WinUI 3 app activates on its UI thread (WhatsApp Desktop startup).  Such
+     * an app registers its activatable classes through its framework package, so an
+     * unpackaged prefix has no ActivatableClassId key for the class: the registry lookup
+     * below returns REGDB_E_CLASSNOTREG, RoGetActivationFactory logs "Failed to find
+     * library" and the UI thread parks with the await on the compositor never completing.
+     * Windows hosts the class in Windows.UI.Composition.dll (inproc, ThreadingModel Both)
+     * and WinAppSDK self-contained apps activate it in-proc, so route the class to the
+     * builtin module that implements its activation factory, mirroring the
+     * Windows.UI.ViewManagement route above.  Keep the route exact-match: the sibling
+     * Windows.UI.Composition classes are not activatable (they come from the Compositor
+     * factory) and must keep falling through to the registry lookup. */
+    if (!wcscmp(classid, L"Windows.UI.Composition.Compositor"))
+    {
+        *out = wcsdup(L"windows.ui.composition.dll");
         return S_OK;
     }
 

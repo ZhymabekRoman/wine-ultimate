@@ -1,0 +1,5 @@
+TESTDLL   = appresolver.dll
+IMPORTS   = appresolver ole32 propsys shell32 user32 advapi32 uuid
+
+SOURCES = \
+	appresolver.c

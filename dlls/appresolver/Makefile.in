@@ -1,0 +1,9 @@
+MODULE    = appresolver.dll
+IMPORTLIB = appresolver
+IMPORTS   = ole32 shell32 user32 advapi32 uuid
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	main.c \
+	resolver.c

@@ -639,6 +639,196 @@ static void test_RoGetErrorReportingFlags(void)
     ok(flags == RO_ERROR_REPORTING_USESETERRORINFO, "Got unexpected flag %#x.\n", flags);
 }
 
+/*
+ * Windows.UI.Composition.Compositor is the class the XAML/Composition root of an
+ * unpackaged WinUI 3 app (WhatsApp Desktop) activates during startup.  Such an app
+ * registers its activatable classes through the framework package, so the prefix has no
+ * Software\Microsoft\WindowsRuntime\ActivatableClassId key for it and the registry
+ * lookup fails; combase has to resolve the class to the builtin windows.ui.composition
+ * module the same way it resolves the Windows.UI.ViewManagement.* classes.  A miss is
+ * logged as "Failed to find library for Windows.UI.Composition.Compositor" and stalls
+ * the app UI thread.
+ *
+ * The .NET projection (WinRTModule.GetActivationFactory<I>(runtimeClassId, iid)) and the
+ * C++/WinRT projection both pass the *class interface* IID (IID_ICompositor,
+ * {b403ca50-7f8c-4e83-985f-cc45060036d8}) to RoGetActivationFactory, not
+ * IID_IActivationFactory, so both request shapes are pinned below.
+ */
+static const GUID guid_icompositor = {0xb403ca50, 0x7f8c, 0x4e83, {0x98, 0x5f, 0xcc, 0x45, 0x06, 0x00, 0x36, 0xd8}};
+
+/* Releases an activation result whose vtable is not declared in this test file: the
+ * QueryInterface reference plus the reference handed out by RoGetActivationFactory. */
+static void release_activation_result(void *obj)
+{
+    IUnknown *unknown = NULL;
+
+    if (!obj) return;
+    if (((IInspectable *)obj)->lpVtbl->QueryInterface((IInspectable *)obj, &IID_IUnknown, (void **)&unknown) == S_OK)
+    {
+        IUnknown_Release(unknown);
+        IUnknown_Release(unknown);
+    }
+}
+
+static void test_composition_activation_route(void)
+{
+    static const WCHAR compositor_name[] = L"Windows.UI.Composition.Compositor";
+    IActivationFactory *factory = NULL;
+    IInspectable *inspectable = NULL;
+    void *compositor = NULL, *second = NULL;
+    HSTRING str, class_name = NULL;
+    const WCHAR *raw;
+    HRESULT hr;
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr);
+
+    hr = WindowsCreateString(compositor_name, ARRAY_SIZE(compositor_name) - 1, &str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+
+    /* The projection request shape: class interface IID straight from the class name. */
+    hr = RoGetActivationFactory(str, &guid_icompositor, &compositor);
+    ok(hr == S_OK, "RoGetActivationFactory(IID_ICompositor) returned %#lx.\n", hr);
+    ok(!!compositor, "got compositor %p.\n", compositor);
+
+    /* The factory request shape. */
+    hr = RoGetActivationFactory(str, &IID_IActivationFactory, (void **)&factory);
+    ok(hr == S_OK, "RoGetActivationFactory(IID_IActivationFactory) returned %#lx.\n", hr);
+    ok(!!factory, "got factory %p.\n", factory);
+
+    if (factory)
+    {
+        class_name = NULL;
+        hr = IActivationFactory_GetRuntimeClassName(factory, &class_name);
+        ok(hr == S_OK, "GetRuntimeClassName returned %#lx.\n", hr);
+        raw = WindowsGetStringRawBuffer(class_name, NULL);
+        ok(!wcscmp(raw, compositor_name), "got class name %s.\n", debugstr_w(raw));
+        WindowsDeleteString(class_name);
+    }
+
+    if (compositor)
+    {
+        /* The routed module has to hand out the Compositor object itself, not the
+         * factory, so the WinRT identity interfaces answer for it. */
+        hr = IInspectable_QueryInterface((IInspectable *)compositor, &IID_IInspectable, (void **)&inspectable);
+        ok(hr == S_OK && inspectable, "QI for IInspectable returned %#lx.\n", hr);
+        if (inspectable)
+        {
+            class_name = NULL;
+            hr = IInspectable_GetRuntimeClassName(inspectable, &class_name);
+            ok(hr == S_OK, "IInspectable::GetRuntimeClassName returned %#lx.\n", hr);
+            raw = WindowsGetStringRawBuffer(class_name, NULL);
+            ok(!wcscmp(raw, compositor_name), "got instance class name %s.\n", debugstr_w(raw));
+            WindowsDeleteString(class_name);
+        }
+        if (inspectable) IInspectable_Release(inspectable);
+
+        /* Activating twice must create independent compositors, as on Windows. */
+        second = NULL;
+        hr = RoGetActivationFactory(str, &guid_icompositor, &second);
+        ok(hr == S_OK && second, "second activation returned %#lx, %p.\n", hr, second);
+        ok(!second || second != compositor, "activation returned the same object %p.\n", second);
+        release_activation_result(second);
+    }
+
+    /* RoActivateInstance goes through the same route. */
+    inspectable = NULL;
+    hr = RoActivateInstance(str, &inspectable);
+    ok(hr == S_OK, "RoActivateInstance returned %#lx.\n", hr);
+    ok(!!inspectable, "got instance %p.\n", inspectable);
+    if (inspectable) IInspectable_Release(inspectable);
+
+    WindowsDeleteString(str);
+    if (factory) IActivationFactory_Release(factory);
+    release_activation_result(compositor);
+    RoUninitialize();
+}
+
+/*
+ * Windows.ApplicationModel.Resources.Core.ResourceContext is the class that .NET Native
+ * MRT (mrt100_app/SharedLibrary System.SR) and Microsoft.UI.Xaml activate through
+ * ResourceManager.Current at startup; a missing route makes RoGetActivationFactory
+ * return REGDB_E_CLASSNOTREG and the app FailFasts with c0000602 (live-captured on
+ * Calculator).  The route has to resolve the namespace to the builtin
+ * windows.applicationmodel.resources.core module, as the Windows.ApplicationModel.Core.*
+ * route does for twinapi.appcore.  The .NET projection passes the class interface IID
+ * (IID_IResourceContext, {2fa22f4b-707e-4b27-ad0d-d0d8cd468fd2}) directly, the C++/WinRT
+ * factory shape passes IID_IActivationFactory; pin both.
+ */
+/* The class-interface request shape is the 8.1-generation default interface
+ * IID_IResourceContext {11d3b13a-180e-4789-a8be-7712882893e6} (Create/CreateWithCurrentView),
+ * live-captured from the .NET Native MRT RCW on Calculator: mrt100_app/SharedLibrary QIs
+ * exactly this IID on the ResourceContext factory right after activation.  The 19041 metadata
+ * IID {2fa22f4b-...} is the instance interface, not a factory-requestable one. */
+static const GUID guid_iresourcecontext_v81 = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+
+static void test_resources_core_activation_route(void)
+{
+    static const WCHAR resourcecontext_name[] = L"Windows.ApplicationModel.Resources.Core.ResourceContext";
+    IActivationFactory *factory = NULL;
+    IInspectable *inspectable = NULL;
+    void *context = NULL;
+    HSTRING str;
+    const WCHAR *raw;
+    HRESULT hr;
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr);
+
+    hr = WindowsCreateString(resourcecontext_name, ARRAY_SIZE(resourcecontext_name) - 1, &str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+
+    /* The projection request shape: class interface IID straight from the class name. */
+    hr = RoGetActivationFactory(str, &guid_iresourcecontext_v81, &context);
+    ok(hr == S_OK, "RoGetActivationFactory(IID_IResourceContext_v81) returned %#lx.\n", hr);
+    ok(!!context, "got resourcecontext %p.\n", context);
+
+    /* The factory request shape. */
+    hr = RoGetActivationFactory(str, &IID_IActivationFactory, (void **)&factory);
+    ok(hr == S_OK, "RoGetActivationFactory(IID_IActivationFactory) returned %#lx.\n", hr);
+    ok(!!factory, "got factory %p.\n", factory);
+
+    if (factory)
+    {
+        HSTRING class_name = NULL;
+        hr = IActivationFactory_GetRuntimeClassName(factory, &class_name);
+        ok(hr == S_OK, "GetRuntimeClassName returned %#lx.\n", hr);
+        raw = WindowsGetStringRawBuffer(class_name, NULL);
+        ok(!wcscmp(raw, resourcecontext_name), "got class name %s.\n", debugstr_w(raw));
+        WindowsDeleteString(class_name);
+    }
+
+    if (context)
+    {
+        /* The routed module has to hand out the ResourceContext object itself, not the
+         * factory, so the WinRT identity interfaces answer for it. */
+        HSTRING class_name = NULL;
+        hr = IInspectable_QueryInterface((IInspectable *)context, &IID_IInspectable, (void **)&inspectable);
+        ok(hr == S_OK && inspectable, "QI for IInspectable returned %#lx.\n", hr);
+        if (inspectable)
+        {
+            hr = IInspectable_GetRuntimeClassName(inspectable, &class_name);
+            ok(hr == S_OK, "IInspectable::GetRuntimeClassName returned %#lx.\n", hr);
+            raw = WindowsGetStringRawBuffer(class_name, NULL);
+            ok(!wcscmp(raw, resourcecontext_name), "got instance class name %s.\n", debugstr_w(raw));
+            WindowsDeleteString(class_name);
+            IInspectable_Release(inspectable);
+        }
+        release_activation_result(context);
+    }
+
+    /* RoActivateInstance goes through the same route. */
+    inspectable = NULL;
+    hr = RoActivateInstance(str, &inspectable);
+    ok(hr == S_OK, "RoActivateInstance returned %#lx.\n", hr);
+    ok(!!inspectable, "got instance %p.\n", inspectable);
+    if (inspectable) IInspectable_Release(inspectable);
+
+    WindowsDeleteString(str);
+    if (factory) IActivationFactory_Release(factory);
+    RoUninitialize();
+}
+
 START_TEST(roapi)
 {
     BOOL ret;
@@ -647,6 +837,8 @@ START_TEST(roapi)
 
     test_implicit_mta();
     test_ActivationFactories();
+    test_composition_activation_route();
+    test_resources_core_activation_route();
     test_RoGetAgileReference();
     test_RoGetErrorReportingFlags();
 

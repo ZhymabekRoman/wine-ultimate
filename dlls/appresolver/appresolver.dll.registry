@@ -1,0 +1,6 @@
+[HKLM\Software\Classes\CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b}]
+@="Start Menu Cache and App Resolver"
+
+[HKLM\Software\Classes\CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b}\InprocServer32]
+@="appresolver.dll"
+"ThreadingModel"="Both"

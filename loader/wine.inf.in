@@ -67,6 +67,7 @@ AddReg=\
     MCI,\
     Misc,\
     OLE,\
+    AppResolver,\
     Printing,\
     Services, \
     SessionMgr,\
@@ -645,6 +646,11 @@ HKCU,Software\Microsoft\Windows\Shell\Associations\UrlAssociations\https\UserCho
 [OLE]
 HKLM,"Software\Microsoft\OLE","EnableDCOM",,"Y"
 HKLM,"Software\Microsoft\OLE","EnableRemoteConnect",,"N"
+
+[AppResolver]
+HKCR,CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b},,2,"Start Menu Cache and App Resolver"
+HKCR,CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b}\InprocServer32,,2,"%11%\appresolver.dll"
+HKCR,CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b}\InprocServer32,"ThreadingModel",2,"Both"
 
 [Printing]
 HKLM,%Control%\Print\Monitors\Local Port,"Driver",2,"localspl.dll"
