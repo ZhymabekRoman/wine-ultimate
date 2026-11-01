@@ -34652,6 +34652,56 @@ static void test_user_defined_annotation(void)
     release_test_context(&test_context);
 }
 
+static void test_immediate_context_device_qi(void)
+{
+    struct d3d11_test_context test_context;
+    unsigned int flags1, flags2;
+    ID3D11DeviceContext *context;
+    ID3D11Device1 *device1, *device1b;
+    ID3D11Device *device;
+    HRESULT hr;
+
+    if (!init_test_context(&test_context, NULL))
+        return;
+
+    hr = ID3D11DeviceContext_QueryInterface(test_context.immediate_context,
+            &IID_ID3D11Device1, (void **)&device1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    hr = ID3D11DeviceContext_QueryInterface(test_context.immediate_context,
+            &IID_ID3D11Device, (void **)&device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        ID3D11Device_Release(device);
+
+    hr = ID3D11Device_QueryInterface(test_context.device,
+            &IID_ID3D11Device1, (void **)&device1b);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    flags1 = ID3D11Device1_GetCreationFlags(device1);
+    flags2 = ID3D11Device1_GetCreationFlags(device1b);
+    ok(flags1 == flags2, "Got unexpected flags %#x, expected %#x.\n", flags1, flags2);
+
+    ID3D11Device1_Release(device1b);
+    ID3D11Device1_Release(device1);
+
+done:
+    hr = ID3D11Device_CreateDeferredContext(test_context.device, 0, &context);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = ID3D11DeviceContext_QueryInterface(context, &IID_ID3D11Device1, (void **)&device1);
+        ok(hr == E_NOINTERFACE, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            ID3D11Device1_Release(device1);
+        ID3D11DeviceContext_Release(context);
+    }
+
+    release_test_context(&test_context);
+}
+
 static void test_logic_op(void)
 {
     D3D11_FEATURE_DATA_D3D11_OPTIONS options;
@@ -37720,6 +37770,7 @@ START_TEST(d3d11)
     queue_test(test_constant_buffer_offset);
     queue_test(test_dynamic_map_synchronization);
     queue_test(test_user_defined_annotation);
+    queue_test(test_immediate_context_device_qi);
     queue_test(test_logic_op);
     queue_test(test_rtv_depth_slice);
     queue_test(test_vertex_formats);

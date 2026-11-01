@@ -28,6 +28,7 @@ struct wined3d_decoder
     struct wined3d_decoder_desc desc;
     struct wined3d_buffer *bitstream, *parameters, *matrix, *slice_control;
     struct wined3d_decoder_output_view *output_view;
+    bool in_frame;
 
     /* Accessed from both the CS and application threads. */
     CRITICAL_SECTION feedback_cs;
@@ -1336,6 +1337,19 @@ HRESULT CDECL wined3d_decoder_begin_frame(struct wined3d_decoder *decoder,
 {
     TRACE("decoder %p, view %p.\n", decoder, view);
 
+    if (!view)
+    {
+        /* Native DecodeFrame has no output view; decode runs into the decoder's
+         * internal picture store. */
+        if (decoder->in_frame)
+        {
+            ERR("Already in frame.\n");
+            return E_INVALIDARG;
+        }
+        decoder->in_frame = true;
+        return S_OK;
+    }
+
     if (decoder->output_view)
     {
         ERR("Already in frame.\n");
@@ -1344,6 +1358,7 @@ HRESULT CDECL wined3d_decoder_begin_frame(struct wined3d_decoder *decoder,
 
     wined3d_decoder_output_view_incref(view);
     decoder->output_view = view;
+    decoder->in_frame = true;
 
     return S_OK;
 }
@@ -1352,11 +1367,16 @@ HRESULT CDECL wined3d_decoder_end_frame(struct wined3d_decoder *decoder)
 {
     TRACE("decoder %p.\n", decoder);
 
-    if (!decoder->output_view)
+    if (!decoder->in_frame)
     {
         ERR("Not in frame.\n");
         return E_INVALIDARG;
     }
+
+    decoder->in_frame = false;
+
+    if (!decoder->output_view)
+        return S_OK;
 
     wined3d_decoder_output_view_decref(decoder->output_view);
     decoder->output_view = NULL;
@@ -1369,11 +1389,14 @@ HRESULT CDECL wined3d_decoder_decode(struct wined3d_decoder *decoder,
 {
     TRACE("decoder %p, bitstream_size %u, slice_control_size %u.\n", decoder, bitstream_size, slice_control_size);
 
-    if (!decoder->output_view)
+    if (!decoder->in_frame)
     {
         ERR("Not in frame.\n");
         return E_INVALIDARG;
     }
+
+    if (!decoder->output_view)
+        return S_OK;
 
     wined3d_cs_emit_decode(decoder, decoder->output_view, bitstream_size, slice_control_size);
     return S_OK;

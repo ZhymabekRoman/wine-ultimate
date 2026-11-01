@@ -1672,6 +1672,100 @@ static void test_video_processor_format_support(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+
+static void test_video_context1(void)
+{
+    ID3D11VideoContext1 *video_context1, *video_context1b;
+    ID3D11VideoProcessor *processor;
+    ID3D11VideoProcessorEnumerator *enumerator;
+    D3D11_VIDEO_PROCESSOR_CONTENT_DESC desc;
+    ID3D11VideoDevice *video_device;
+    ID3D11VideoContext *video_context;
+    ID3D11DeviceContext *context, *deferred;
+    D3D_FEATURE_LEVEL level;
+    ID3D11Device *device;
+    unsigned int max_support;
+    BOOL enable;
+    HRESULT hr;
+
+    hr = D3D11CreateDevice(NULL, D3D_DRIVER_TYPE_HARDWARE, NULL, 0, NULL, 0,
+            D3D11_SDK_VERSION, &device, &level, &context);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (FAILED(hr))
+        return;
+
+    /* The immediate context must expose the native ID3D11VideoContext1; Chromium's
+     * GPU process CHECK-fails on the refusal. */
+    hr = ID3D11DeviceContext_QueryInterface(context, &IID_ID3D11VideoContext1, (void **)&video_context1);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    hr = ID3D11VideoContext1_QueryInterface(video_context1, &IID_ID3D11VideoContext, (void **)&video_context);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+        ID3D11VideoContext_Release(video_context);
+
+    hr = ID3D11Device_QueryInterface(device, &IID_ID3D11VideoDevice, (void **)&video_device);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = ID3D11VideoDevice_QueryInterface(video_device, &IID_ID3D11VideoContext1, (void **)&video_context1b);
+        ok(hr == E_NOINTERFACE, "Got hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            ID3D11VideoContext1_Release(video_context1b);
+
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(ID3D11VideoContext1 *, const GUID *, const GUID *,
+                unsigned int, unsigned int *))((void **)video_context1->lpVtbl)[62])(video_context1,
+                &D3D11_DECODER_PROFILE_H264_VLD_FGT, &D3D11_DECODER_PROFILE_H264_VLD_FGT, 0, &max_support);
+        ok(hr == S_OK, "Got hr %#lx.\n", hr);
+        ok(max_support == 2, "Got max_support %#x.\n", max_support);
+
+        desc = make_content_desc(640, 480);
+        hr = ID3D11VideoDevice_CreateVideoProcessorEnumerator(video_device, &desc, &enumerator);
+        if (SUCCEEDED(hr))
+        {
+            hr = ID3D11VideoDevice_CreateVideoProcessor(video_device, enumerator, 0, &processor);
+            if (SUCCEEDED(hr))
+            {
+                RECT rect = {1, 2, 641, 482}, rect2 = {0};
+                ID3D11VideoContext *vc;
+
+                hr = ID3D11VideoContext1_QueryInterface(video_context1, &IID_ID3D11VideoContext, (void **)&vc);
+                ok(hr == S_OK, "Got hr %#lx.\n", hr);
+                ID3D11VideoContext_VideoProcessorSetOutputTargetRect(vc, processor, TRUE, &rect);
+
+                hr = ((HRESULT (STDMETHODCALLTYPE *)(ID3D11VideoContext1 *, ID3D11VideoProcessor *, BOOL *, RECT *))
+                        ((void **)video_context1->lpVtbl)[20])(video_context1, processor, &enable, &rect2);
+                ok(enable, "Got enable %d.\n", enable);
+                ok(rect2.left == rect.left && rect2.top == rect.top
+                        && rect2.right == rect.right && rect2.bottom == rect.bottom,
+                        "Got rect (%ld,%ld)-(%ld,%ld).\n", rect2.left, rect2.top, rect2.right, rect2.bottom);
+
+                ID3D11VideoProcessor_Release(processor);
+            }
+            ID3D11VideoProcessorEnumerator_Release(enumerator);
+        }
+        ID3D11VideoDevice_Release(video_device);
+    }
+    ID3D11VideoContext1_Release(video_context1);
+
+done:
+    hr = ID3D11Device_CreateDeferredContext(device, 0, &deferred);
+    ok(hr == S_OK, "Got hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        hr = ID3D11DeviceContext_QueryInterface(deferred, &IID_ID3D11VideoContext1, (void **)&video_context1);
+        ok(hr == E_NOINTERFACE, "Got hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            ID3D11VideoContext1_Release(video_context1);
+        ID3D11DeviceContext_Release(deferred);
+    }
+
+    ID3D11DeviceContext_Release(context);
+    ID3D11Device_Release(device);
+}
+
 START_TEST(video)
 {
     test_video_processor_enumerator();
@@ -1681,4 +1775,5 @@ START_TEST(video)
     test_video_processor_nv12_blt();
     test_video_decoder_profile_support();
     test_video_processor_format_support();
+    test_video_context1();
 }
