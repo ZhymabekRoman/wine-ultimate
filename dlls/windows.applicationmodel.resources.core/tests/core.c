@@ -659,6 +659,47 @@ static void test_getiids_nullargs( void )
     }
 }
 
+/* ResourceContext.QualifierValues documented core set (MSDN
+ * Windows.ApplicationModel.Resources.Core.ResourceContext):
+ * Language, Contrast, TargetSize, Scale, LayoutDirection, HomeRegion,
+ * DXLanguage, AltForm, UserLanguage, UserHomeRegion, UserLocaleName,
+ * DeviceFamily.  mrt100_app's context pipeline reads these keys. */
+static void test_qualifier_set( void )
+{
+    static const WCHAR *core[] = { L"Language", L"Contrast", L"TargetSize", L"Scale",
+                                   L"LayoutDirection", L"HomeRegion", L"DXLanguage", L"AltForm",
+                                   L"UserLanguage", L"UserHomeRegion", L"UserLocaleName", L"DeviceFamily" };
+    void *factory = NULL, *statics = NULL, *ctx = NULL, *mv = NULL;
+    HRESULT hr;
+    UINT32 i;
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "quals: factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &statics);
+    if (FAILED( hr )) goto done;
+    hr = CALL( statics, 6, &ctx );  /* GetForCurrentView */
+    if (FAILED( hr ) || !ctx) goto done;
+    hr = CALL( ctx, 6, &mv );  /* get_QualifierValues: IMapView<HSTRING,HSTRING> */
+    if (FAILED( hr ) || !mv) goto done;
+    for (i = 0; i < ARRAYSIZE( core ); i++)
+    {
+        HSTRING hkey;
+        HSTRING_HEADER hdr;
+        INT32 has = 0;
+        WindowsCreateStringReference( core[i], (UINT32)lstrlenW( core[i] ), &hdr, &hkey );
+        hr = CALL( mv, 7, hkey, &has );  /* HasKey */
+        ok( SUCCEEDED( hr ) && has, "quals: QualifierValues has %s (has=%d hr=%08x)\n",
+            wine_dbgstr_w( core[i] ), has, hr );
+        WindowsDeleteString( hkey );
+    }
+done:
+    if (mv) CALL( mv, 2, (ULONG*)&hr );
+    if (ctx) CALL( ctx, 2, (ULONG*)&hr );
+    if (statics) CALL( statics, 2, (ULONG*)&hr );
+    CALL( factory, 2, (ULONG*)&hr );
+}
+
 static void test_memorymanager_activation(void)
 {
     void *factory = NULL, *obj = NULL;
@@ -692,6 +733,7 @@ START_TEST(core)
     test_real_pri_lookup();
     test_iagile();
     test_getiids_nullargs();
+    test_qualifier_set();
     test_memorymanager_activation();
 
     RoUninitialize();

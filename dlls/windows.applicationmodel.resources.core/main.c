@@ -41,6 +41,8 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winstring.h"
+#include "winnls.h"
+#include "winreg.h"
 #include "initguid.h"
 #include "activation.h"
 #include "wine/debug.h"
@@ -1007,7 +1009,35 @@ static struct kv_pair default_qualifiers[] =
     { L"DXLanguage", L"full" },
     { L"LayoutDirection", L"ltr" },
     { L"AltForm", L"uninstalled" },
+    /* UWP-era keys of the documented QualifierValues set (mrt100_app
+     * context pipeline).  Language/locale keys are overwritten from the
+     * user profile in create_context; UserHomeRegion keeps the neutral
+     * world region 001 (same source as HomeRegion: PRM reports 001 when
+     * no region is resolved); DeviceFamily is resolved from the app-model
+     * registry in create_context. */
+    { L"UserLanguage", L"en-US" },
+    { L"UserHomeRegion", L"001" },
+    { L"UserLocaleName", L"en-US" },
+    { L"DeviceFamily", L"Windows.Desktop" },
 };
+
+/* app-model device family: the registry value Windows exposes; desktop
+ * editions report "Windows.Desktop". */
+static void get_device_family( WCHAR *buf, DWORD cch )
+{
+    HKEY hkey;
+
+    lstrcpynW( buf, L"Windows.Desktop", cch );
+    if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion",
+                       0, KEY_READ, &hkey ) == ERROR_SUCCESS)
+    {
+        DWORD type = 0, size = cch * sizeof(WCHAR);
+        if (RegQueryValueExW( hkey, L"DeviceFamily", NULL, &type, (BYTE *)buf, &size ) != ERROR_SUCCESS
+            || type != REG_SZ)
+            lstrcpynW( buf, L"Windows.Desktop", cch );
+        RegCloseKey( hkey );
+    }
+}
 
 static void ensure_cs(void)
 {
@@ -1506,6 +1536,42 @@ static HRESULT create_context( struct res_context **out )
     {
         ctx->qpairs[i].key = lstrdupW( default_qualifiers[i].key );
         ctx->qpairs[i].value = lstrdupW( default_qualifiers[i].value );
+    }
+    /* fill user-profile-sourced keys from the same APIs Windows PRM uses */
+    {
+        WCHAR localeName[LOCALE_NAME_MAX_LENGTH], family[64];
+        if (GetUserDefaultLocaleName( localeName, ARRAYSIZE( localeName ) ) > 0)
+        {
+            static const WCHAR *locale_keys[] = { L"UserLanguage", L"UserLocaleName" };
+            UINT32 k;
+            for (k = 0; k < ARRAYSIZE( locale_keys ); k++)
+            {
+                UINT32 j;
+                for (j = 0; j < ctx->qcount; j++)
+                    if (!lstrcmpiW( ctx->qpairs[j].key, locale_keys[k] ))
+                    {
+                        WCHAR *v = lstrdupW( localeName );
+                        if (v)
+                        {
+                            HeapFree( GetProcessHeap(), 0, ctx->qpairs[j].value );
+                            ctx->qpairs[j].value = v;
+                        }
+                        break;
+                    }
+            }
+        }
+        get_device_family( family, ARRAYSIZE( family ) );
+        for (i = 0; i < ctx->qcount; i++)
+            if (!lstrcmpiW( ctx->qpairs[i].key, L"DeviceFamily" ))
+            {
+                WCHAR *v = lstrdupW( family );
+                if (v)
+                {
+                    HeapFree( GetProcessHeap(), 0, ctx->qpairs[i].value );
+                    ctx->qpairs[i].value = v;
+                }
+                break;
+            }
     }
     ctx->qualifiers.vt_mv = map_view_vtbl;
     ctx->qualifiers.ref = 1;
