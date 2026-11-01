@@ -1277,12 +1277,14 @@ HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, voi
     if (!shared_visual_handle)
         return E_INVALIDARG;
 
+    /* The handle reaches the receiving process through the mojo handle transfer,
+     * which DuplicateHandles it into this process's table; a self-duplication is
+     * what validates it.  A handle that does not name an object in this process
+     * is bogus: the raw value means nothing in the wineserver lookup, so report
+     * it instead of binding a visual to it. */
     if (!DuplicateHandle(GetCurrentProcess(), shared_visual_handle, GetCurrentProcess(), &handle, 0,
                          FALSE, DUPLICATE_SAME_ACCESS))
-    {
-        /* Cross-process handle: use raw handle for wineserver lookup */
-        handle = shared_visual_handle;
-    }
+        return E_INVALIDARG;
 
     hr = create_visual(2, &IID_IDCompositionVisual, (void **)new_visual);
     if (FAILED(hr))

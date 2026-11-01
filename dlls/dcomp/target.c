@@ -218,18 +218,17 @@ HRESULT create_target_from_shared_visual_handle(struct composition_device *devic
     if (!shared_visual_handle)
         return E_INVALIDARG;
 
+    /* See create_visual_from_shared_visual_handle(): the mojo transfer
+     * DuplicateHandles the handle into this process, and a self-duplication is
+     * what validates it.  A value that names no object here is bogus. */
     if (!DuplicateHandle(GetCurrentProcess(), shared_visual_handle, GetCurrentProcess(), &handle, 0,
                          FALSE, DUPLICATE_SAME_ACCESS))
-    {
-        /* Cross-process handle: use raw handle for wineserver lookup */
-        handle = shared_visual_handle;
-    }
+        return E_INVALIDARG;
 
     target = calloc(1, sizeof(*target));
     if (!target)
     {
-        if (handle != shared_visual_handle)
-            CloseHandle(handle);
+        CloseHandle(handle);
         return E_OUTOFMEMORY;
     }
 

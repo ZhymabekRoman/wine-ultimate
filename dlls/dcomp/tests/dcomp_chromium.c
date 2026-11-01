@@ -52,6 +52,20 @@ static const GUID IID_dcomp_commit_event =
 static const GUID guid_c37ea93a_e7aa_450b =
 { 0xc37ea93a, 0xe7aa, 0x450b, { 0xb1, 0x6f, 0x97, 0x46, 0xcb, 0x04, 0x07, 0xf3 } };
 
+/*
+ * Private IDCompositionDesktopDevicePartner, the interface WebView2's
+ * ClientWindow::ConnectToBrowserWithVisual() (EmbeddedBrowserWebView.dll
+ * :0x1800492e8) queries on the composition device, and on which it calls
+ * CreateSharedResource() at vftable offset 216 (slot 27, :0x180049343),
+ * OpenSharedResourceHandle() at offset 224 (slot 28, :0x18004937b), while the
+ * receiving side of the pair calls CreateFromSharedVisualHandle() at offset 232
+ * (slot 29).  The layout is IDCompositionDesktopDevice (that is, the
+ * IDCompositionDevice2 layout with the three desktop slots) plus these three.
+ * Defined statically; the public GUIDs are defined by dcomp.c in this executable.
+ */
+static const GUID IID_dcomp_desktop_device_partner =
+{ 0xd14b6158, 0xc3fa, 0x4bce, { 0x9c, 0x1f, 0xb6, 0x1d, 0x86, 0x65, 0xea, 0xb0 } };
+
 static IDXGIDevice *create_device(unsigned int flags)
 {
     IDXGIDevice *dxgi_device;
@@ -404,6 +418,165 @@ static void test_device_entry_points_and_state(IDXGIDevice *dxgi_device)
     IDCompositionDevice_Release(device);
 }
 
+/*
+ * The WebView2 visual-bind sequence, exactly as ClientWindow::ConnectToBrowserWithVisual()
+ * (EmbeddedBrowserWebView.dll :0x1800491fe) drives it: QI of {d14b6158-c3fa-4bce-
+ * 9c1f-b61d8665eab0} on the device, then CreateSharedResource(IID_IDCompositionVisual)
+ * through vftable offset 216, OpenSharedResourceHandle through offset 224, and the
+ * handle consumed by CreateFromSharedResourceHandle through offset 232 on the
+ * receiving device.  The app calls these by vftable offset, so the test calls them
+ * by vftable offset too.  The handle leaves the app process through
+ * HandlesInTransitionHelper::TransferHandle (mojo, DuplicateHandle based) and the
+ * app's delegate closes its own copy afterwards: the handle must be a duplicable
+ * server object handle, not a pointer.
+ */
+static void test_desktop_device_partner(IDXGIDevice *dxgi_device)
+{
+    HRESULT (STDMETHODCALLTYPE *pCreateSharedResource)(void *iface, REFIID riid, void **obj);
+    HRESULT (STDMETHODCALLTYPE *pOpenSharedResourceHandle)(void *iface, IUnknown *unknown, HANDLE *handle);
+    HRESULT (STDMETHODCALLTYPE *pCreateFromSharedVisualHandle)(void *iface, HANDLE handle, REFIID iid, void **out);
+    HRESULT (STDMETHODCALLTYPE *pSlot16)(void *iface, IDCompositionTranslateTransform3D **transform);
+    IDCompositionTranslateTransform3D *transform3d;
+    IDCompositionDevice *device, *receiver;
+    IDCompositionDevice2 *device2;
+    IDCompositionVisual *visual;
+    IUnknown *partner, *receiver_partner, *unknown;
+    HANDLE handle, dup;
+    IUnknown *out;
+    HRESULT hr;
+
+    hr = pDCompositionCreateDevice(dxgi_device, &IID_IDCompositionDevice, (void **)&device);
+    ok(hr == S_OK, "DCompositionCreateDevice hr %#lx, expected S_OK.\n", hr);
+    if (FAILED(hr))
+        return;
+
+    /* The app QIs the private partner interface (:0x1800492e8); the gate block
+     * never runs when this fails. */
+    partner = NULL;
+    hr = IDCompositionDevice_QueryInterface(device, &IID_dcomp_desktop_device_partner, (void **)&partner);
+    ok(hr == S_OK, "QI {d14b6158-c3fa-4bce-9c1f-b61d8665eab0} hr %#lx, expected S_OK.\n", hr);
+    ok(partner != NULL, "QI {d14b6158} returned no interface.\n");
+    if (FAILED(hr) || !partner)
+    {
+        IDCompositionDevice_Release(device);
+        return;
+    }
+
+    /* Same object as IDCompositionDevice2, as on Windows: the QI'd device vftable
+     * is the extended one, slots 3..26 are the IDCompositionDevice2/
+     * IDCompositionDesktopDevice methods. */
+    hr = IDCompositionDevice_QueryInterface(device, &IID_IDCompositionDevice2, (void **)&device2);
+    ok(hr == S_OK, "IDCompositionDevice2 hr %#lx, expected S_OK.\n", hr);
+    ok((IUnknown *)device2 == partner, "partner QI returns a different object than IDCompositionDevice2.\n");
+    IDCompositionDevice2_Release(device2);
+
+    pCreateSharedResource = (void *)((*(void ***)partner)[27]);
+    pOpenSharedResourceHandle = (void *)((*(void ***)partner)[28]);
+    pCreateFromSharedVisualHandle = (void *)((*(void ***)partner)[29]);
+
+    /* Slot 16 (offset 128) of this interface is CreateTranslateTransform3D in the
+     * IDCompositionDevice2 layout; WebView2's :0x180049296 gate predicate is the
+     * delegate's Controller::HasClosed, not this slot, but the app-side block does
+     * require a working transform factory on the queried object. */
+    transform3d = NULL;
+    pSlot16 = (void *)((*(void ***)partner)[16]);
+    hr = pSlot16(partner, &transform3d);
+    ok(hr == S_OK, "partner slot 16 (CreateTranslateTransform3D) hr %#lx, expected S_OK.\n", hr);
+    ok(transform3d != NULL, "partner slot 16 returned no transform.\n");
+    if (SUCCEEDED(hr) && transform3d)
+        IDCompositionTranslateTransform3D_Release(transform3d);
+
+    /* :0x180049343: CreateSharedResource(&IID_IDCompositionVisual, &resource). */
+    visual = NULL;
+    hr = pCreateSharedResource(partner, &IID_IDCompositionVisual, (void **)&visual);
+    ok(hr == S_OK, "CreateSharedResource(IID_IDCompositionVisual) hr %#lx, expected S_OK.\n", hr);
+    ok(visual != NULL, "CreateSharedResource returned no resource.\n");
+    if (FAILED(hr) || !visual)
+        goto done;
+
+    /* The resource answers its own interface (offset 128 = AddVisual, used by
+     * SetHostRootVisualTarget :0x180049936) and is a usable visual. */
+    unknown = NULL;
+    hr = IDCompositionVisual_QueryInterface(visual, &IID_IDCompositionVisual, (void **)&unknown);
+    ok(hr == S_OK, "resource QI IDCompositionVisual hr %#lx, expected S_OK.\n", hr);
+    if (SUCCEEDED(hr))
+        IDCompositionVisual_Release(unknown);
+    hr = IDCompositionVisual_SetOffsetX(visual, 0.0f);
+    ok(hr == S_OK, "SetOffsetX hr %#lx, expected S_OK.\n", hr);
+
+    /* :0x18004937b: OpenSharedResourceHandle(resource, &handle). */
+    handle = NULL;
+    hr = pOpenSharedResourceHandle(partner, (IUnknown *)visual, &handle);
+    ok(hr == S_OK, "OpenSharedResourceHandle hr %#lx, expected S_OK.\n", hr);
+    ok(handle && handle != INVALID_HANDLE_VALUE, "OpenSharedResourceHandle returned handle %p.\n", handle);
+    if (FAILED(hr) || !handle || handle == INVALID_HANDLE_VALUE)
+        goto done;
+
+    /* The handle crosses to the browser process through DuplicateHandle-based
+     * mojo transfer and the app closes its copy: it must be a real object handle. */
+    dup = NULL;
+    ok(DuplicateHandle(GetCurrentProcess(), handle, GetCurrentProcess(), &dup, 0, TRUE, DUPLICATE_SAME_ACCESS),
+            "shared resource handle %p is not duplicable.\n", handle);
+    if (dup)
+        CloseHandle(dup);
+
+    /* Receiver side (the browser process in the app): a second device opens the
+     * handle and gets a visual bound to the shared resource, in-process round-trip. */
+    receiver = NULL;
+    hr = pDCompositionCreateDevice(dxgi_device, &IID_IDCompositionDevice, (void **)&receiver);
+    ok(hr == S_OK, "receiver DCompositionCreateDevice hr %#lx, expected S_OK.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        receiver_partner = NULL;
+        hr = IDCompositionDevice_QueryInterface(receiver, &IID_dcomp_desktop_device_partner, (void **)&receiver_partner);
+        ok(hr == S_OK, "receiver QI {d14b6158} hr %#lx, expected S_OK.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            out = NULL;
+            hr = pCreateFromSharedVisualHandle(receiver_partner, handle, &IID_IDCompositionVisual, &out);
+            ok(hr == S_OK, "CreateFromSharedVisualHandle hr %#lx, expected S_OK.\n", hr);
+            ok(out != NULL, "CreateFromSharedVisualHandle returned no object.\n");
+            if (SUCCEEDED(hr) && out)
+            {
+                unknown = NULL;
+                hr = IUnknown_QueryInterface(out, &IID_IDCompositionVisual, (void **)&unknown);
+                ok(hr == S_OK, "round-trip object QI IDCompositionVisual hr %#lx, expected S_OK.\n", hr);
+                if (SUCCEEDED(hr))
+                    IDCompositionVisual_Release(unknown);
+                IUnknown_Release(out);
+            }
+            IUnknown_Release(receiver_partner);
+        }
+
+        /* A bogus handle must fail cleanly. */
+        out = NULL;
+        hr = pCreateFromSharedVisualHandle(receiver_partner ? receiver_partner : partner,
+                (HANDLE)(UINT_PTR)0x1234, &IID_IDCompositionVisual, &out);
+        ok(FAILED(hr), "CreateFromSharedVisualHandle(bogus handle) hr %#lx, expected failure.\n", hr);
+        if (SUCCEEDED(hr) && out)
+            IUnknown_Release(out);
+
+        IDCompositionDevice_Release(receiver);
+    }
+
+    /* Error paths: NULL arguments fail cleanly, with a NULL out. */
+    hr = pOpenSharedResourceHandle(partner, NULL, &handle);
+    ok(hr == E_INVALIDARG, "OpenSharedResourceHandle(NULL) hr %#lx, expected E_INVALIDARG.\n", hr);
+    hr = pOpenSharedResourceHandle(partner, (IUnknown *)visual, NULL);
+    ok(hr == E_POINTER, "OpenSharedResourceHandle(NULL out) hr %#lx, expected E_POINTER.\n", hr);
+    out = (void *)0x1;
+    hr = pCreateSharedResource(partner, &IID_IDCompositionVisual, NULL);
+    ok(hr == E_POINTER, "CreateSharedResource(NULL out) hr %#lx, expected E_POINTER.\n", hr);
+
+done:
+    if (handle && handle != INVALID_HANDLE_VALUE)
+        CloseHandle(handle);
+    if (visual)
+        IDCompositionVisual_Release(visual);
+    IUnknown_Release(partner);
+    IDCompositionDevice_Release(device);
+}
+
 START_TEST(dcomp_chromium)
 {
     IDCompositionDevice *device;
@@ -439,6 +612,7 @@ START_TEST(dcomp_chromium)
     test_commit_completion_event(dxgi_device);
     test_virtual_surface(dxgi_device);
     test_device_entry_points_and_state(dxgi_device);
+    test_desktop_device_partner(dxgi_device);
 
     /* A device created without a rendering device must still complete the sequence:
      * the composition surface factory is built on a default D3D11 device. */
