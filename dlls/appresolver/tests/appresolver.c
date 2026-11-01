@@ -21,6 +21,10 @@
 
 #include "wine/test.h"
 
+/*
+ * Vtable layout pinned from Microsoft.Toolkit.Uwp.Notifications.dll ComImport
+ * metadata and Microsoft.Internal.FrameworkUdk.dll native call sites.
+ */
 typedef struct IApplicationResolver IApplicationResolver;
 
 typedef struct IApplicationResolverVtbl
@@ -30,21 +34,20 @@ typedef struct IApplicationResolverVtbl
     ULONG   (STDMETHODCALLTYPE *AddRef)(IApplicationResolver *This);
     ULONG   (STDMETHODCALLTYPE *Release)(IApplicationResolver *This);
     /*** IApplicationResolver methods ***/
-    /*  3 */ HRESULT (STDMETHODCALLTYPE *GetAppIDForWindow)(IApplicationResolver *This, HWND hwnd,
+    /*  3 */ HRESULT (STDMETHODCALLTYPE *GetAppIDForShortcut)(void);
+    /*  4 */ HRESULT (STDMETHODCALLTYPE *GetAppIDForShortcutObject)(void);
+    /*  5 */ HRESULT (STDMETHODCALLTYPE *GetAppIDForWindow)(IApplicationResolver *This, HWND hwnd,
             PWSTR *appid, BOOL *relaunch_required, DWORD *host_type, DWORD *reliability);
-    /*  4 */ HRESULT (STDMETHODCALLTYPE *GetWindowFromAppID)(IApplicationResolver *This,
-            const WCHAR *appid, HWND *hwnd);
-    /*  5 */ HRESULT (STDMETHODCALLTYPE *GetFirstWindowFromAppID)(void);
-    /*  6 */ HRESULT (STDMETHODCALLTYPE *GetWindowFromWindow)(void);
-    /*  7 */ HRESULT (STDMETHODCALLTYPE *GetAppIDForProcess)(IApplicationResolver *This,
-            DWORD pid, PWSTR *appid);
-    /*  8 */ HRESULT (STDMETHODCALLTYPE *RelaunchApplication)(void);
-    /*  9 */ HRESULT (STDMETHODCALLTYPE *SetWindowFromAppID)(void);
-    /* 10 */ HRESULT (STDMETHODCALLTYPE *GetIconPath)(void);
-    /* 11 */ HRESULT (STDMETHODCALLTYPE *GetShortNamePath)(void);
-    /* 12 */ HRESULT (STDMETHODCALLTYPE *GetAppIDForCurrentProcess)(void);
-    /* 13 */ HRESULT (STDMETHODCALLTYPE *reserved_13)(void);
-    /* 14 */ HRESULT (STDMETHODCALLTYPE *reserved_14)(void);
+    /*  6 */ HRESULT (STDMETHODCALLTYPE *GetAppIDForProcess)(IApplicationResolver *This, DWORD pid,
+            PWSTR *appid, BOOL *pinning_prevented, BOOL *explicit_appid, BOOL *embedded_shortcut_valid);
+    /*  7 */ HRESULT (STDMETHODCALLTYPE *GetShortcutForProcess)(void);
+    /*  8 */ HRESULT (STDMETHODCALLTYPE *GetBestShortcutForAppID)(void);
+    /*  9 */ HRESULT (STDMETHODCALLTYPE *GetBestShortcutAndAppIDForAppPath)(void);
+    /* 10 */ HRESULT (STDMETHODCALLTYPE *CanPinApp)(void);
+    /* 11 */ HRESULT (STDMETHODCALLTYPE *CanPinAppShortcut)(void);
+    /* 12 */ HRESULT (STDMETHODCALLTYPE *GetRelaunchProperties)(void);
+    /* 13 */ HRESULT (STDMETHODCALLTYPE *GenerateShortcutFromWindowProperties)(void);
+    /* 14 */ HRESULT (STDMETHODCALLTYPE *GenerateShortcutFromItemProperties)(void);
     /* 15 */ HRESULT (STDMETHODCALLTYPE *reserved_15)(void);
 } IApplicationResolverVtbl;
 
@@ -56,9 +59,9 @@ interface IApplicationResolver
 #define IApplicationResolver_QueryInterface(p,a,b) (p)->lpVtbl->QueryInterface(p,a,b)
 #define IApplicationResolver_AddRef(p) (p)->lpVtbl->AddRef(p)
 #define IApplicationResolver_Release(p) (p)->lpVtbl->Release(p)
-#define IApplicationResolver_GetAppIDForWindow(p,a,b,c,d,e) (p)->lpVtbl->GetAppIDForWindow(p,a,b,c,d,e)
-#define IApplicationResolver_GetWindowFromAppID(p,a,b) (p)->lpVtbl->GetWindowFromAppID(p,a,b)
-#define IApplicationResolver_GetAppIDForProcess(p,a,b) (p)->lpVtbl->GetAppIDForProcess(p,a,b)
+#define IApplicationResolver_GetAppIDForWindow(p,a,b) (p)->lpVtbl->GetAppIDForWindow(p,a,b,0,0,0)
+#define IApplicationResolver_GetAppIDForWindow5(p,a,b,c,d,e) (p)->lpVtbl->GetAppIDForWindow(p,a,b,c,d,e)
+#define IApplicationResolver_GetAppIDForProcess(p,a,b,c,d,e) (p)->lpVtbl->GetAppIDForProcess(p,a,b,c,d,e)
 
 /* {660b90c8-73a9-4b58-8cae-355b7f55341b} */
 DEFINE_GUID(CLSID_StartMenuCacheAndAppResolver,
@@ -66,7 +69,7 @@ DEFINE_GUID(CLSID_StartMenuCacheAndAppResolver,
 /* {de25675a-72de-44b4-9373-05170450c140} */
 DEFINE_GUID(IID_IApplicationResolver,
     0xde25675a, 0x72de, 0x44b4, 0x93, 0x73, 0x05, 0x17, 0x04, 0x50, 0xc1, 0x40);
-/* {46a6eff-aa6b-4b44-8fb3-b30d626d17a3}: NOT the interface used by the caller, must E_NOINTERFACE */
+/* {46a6eff-aa6b-4b44-8fb3-b30d626d17a3}: NOT the interface used by the callers, must E_NOINTERFACE */
 DEFINE_GUID(IID_MysteryResolver,
     0x46a6eff, 0xaa6b, 0x4b44, 0x8f, 0xb3, 0xb3, 0x0d, 0x62, 0x6d, 0x17, 0xa3);
 
@@ -150,6 +153,7 @@ static void test_create_instance_ex(void)
 static void test_appid_for_process(void)
 {
     IApplicationResolver *resolver = create_resolver(CLSCTX_INPROC_SERVER);
+    BOOL pinning = TRUE, explicit_flag = TRUE, embedded = TRUE;
     WCHAR path[2048];
     PWSTR appid = NULL;
     HRESULT hr;
@@ -158,7 +162,8 @@ static void test_appid_for_process(void)
     if (!resolver) return;
 
     /* with no explicit AUMID set, Windows falls back to the executable path */
-    hr = IApplicationResolver_GetAppIDForProcess(resolver, GetCurrentProcessId(), &appid);
+    hr = IApplicationResolver_GetAppIDForProcess(resolver, GetCurrentProcessId(), &appid,
+                                                 &pinning, &explicit_flag, &embedded);
     ok(hr == S_OK, "GetAppIDForProcess(self) failed, hr %#lx.\n", hr);
     if (SUCCEEDED(hr) && appid)
     {
@@ -172,7 +177,10 @@ static void test_appid_for_process(void)
     hr = SetCurrentProcessExplicitAppUserModelID(process_aumid);
     ok(hr == S_OK, "SetCurrentProcessExplicitAppUserModelID failed, hr %#lx.\n", hr);
 
-    hr = IApplicationResolver_GetAppIDForProcess(resolver, GetCurrentProcessId(), &appid);
+    /* the full Toolkit projection shape: pid + four out-params, all written */
+    pinning = explicit_flag = embedded = TRUE;
+    hr = IApplicationResolver_GetAppIDForProcess(resolver, GetCurrentProcessId(), &appid,
+                                                 &pinning, &explicit_flag, &embedded);
     ok(hr == S_OK, "GetAppIDForProcess(self, explicit) failed, hr %#lx.\n", hr);
     if (SUCCEEDED(hr) && appid)
     {
@@ -181,13 +189,18 @@ static void test_appid_for_process(void)
         CoTaskMemFree(appid);
         appid = NULL;
     }
+    ok(pinning == FALSE, "pinning_prevented written %d, expected FALSE.\n", pinning);
+    ok(explicit_flag == FALSE, "explicit_appid written %d, expected FALSE.\n", explicit_flag);
+    ok(embedded == FALSE, "embedded_shortcut_valid written %d, expected FALSE.\n", embedded);
 
     /* out param validation */
-    hr = IApplicationResolver_GetAppIDForProcess(resolver, GetCurrentProcessId(), NULL);
+    hr = IApplicationResolver_GetAppIDForProcess(resolver, GetCurrentProcessId(), NULL,
+                                                 NULL, NULL, NULL);
     ok(hr == E_INVALIDARG, "GetAppIDForProcess(NULL out) returned %#lx, expected E_INVALIDARG.\n", hr);
 
     /* dead pid must fail, not fabricate a string */
-    hr = IApplicationResolver_GetAppIDForProcess(resolver, 0xffffffff, &appid);
+    hr = IApplicationResolver_GetAppIDForProcess(resolver, 0xffffffff, &appid,
+                                                 &pinning, &explicit_flag, &embedded);
     ok(FAILED(hr), "GetAppIDForProcess(invalid pid) returned %#lx, expected failure.\n", hr);
     ok(!appid, "expected NULL appid on failure, got %s.\n", debugstr_w(appid));
     CoTaskMemFree(appid);
@@ -204,19 +217,15 @@ static HWND create_test_window(void)
 {
     WNDCLASSEXW cls = { .cbSize = sizeof(cls), .lpfnWndProc = wnd_proc,
                         .lpszClassName = L"appresolver_test_class" };
-    static HWND result;
 
     if (!RegisterClassExW(&cls)) return NULL;
-    result = CreateWindowExW(0, cls.lpszClassName, L"appresolver test", 0,
-                             0, 0, 100, 100, NULL, NULL, NULL, NULL);
-    return result;
+    return CreateWindowExW(0, cls.lpszClassName, L"appresolver test", 0,
+                           0, 0, 100, 100, NULL, NULL, NULL, NULL);
 }
 
 static void test_appid_for_window(void)
 {
     IApplicationResolver *resolver = create_resolver(CLSCTX_INPROC_SERVER);
-    BOOL relaunch = TRUE;
-    DWORD host_type = 0xdead, reliability = 0xdead;
     PWSTR appid = NULL;
     IPropertyStore *store;
     PROPVARIANT pv;
@@ -225,12 +234,21 @@ static void test_appid_for_window(void)
 
     if (!resolver) return;
 
-    /* process explicit AUMID (set by previous test) must be inherited by windows */
+    /* the native FrameworkUdk shape: (NULL, &appid) = current app id, no extra writes */
+    hr = IApplicationResolver_GetAppIDForWindow(resolver, NULL, &appid);
+    ok(hr == S_OK, "GetAppIDForWindow(NULL, &appid) failed, hr %#lx.\n", hr);
+    if (SUCCEEDED(hr) && appid)
+    {
+        ok(!lstrcmpW(appid, process_aumid), "expected %s, got %s.\n",
+           debugstr_w(process_aumid), debugstr_w(appid));
+        CoTaskMemFree(appid);
+        appid = NULL;
+    }
+
     hwnd = create_test_window();
     ok(hwnd != NULL, "CreateWindowExW failed, gle %lu.\n", GetLastError());
 
-    hr = IApplicationResolver_GetAppIDForWindow(resolver, hwnd, &appid, &relaunch,
-                                                &host_type, &reliability);
+    hr = IApplicationResolver_GetAppIDForWindow5(resolver, hwnd, &appid, NULL, NULL, NULL);
     ok(hr == S_OK, "GetAppIDForWindow failed, hr %#lx.\n", hr);
     if (SUCCEEDED(hr) && appid)
     {
@@ -239,7 +257,6 @@ static void test_appid_for_window(void)
         CoTaskMemFree(appid);
         appid = NULL;
     }
-    ok(!relaunch, "expected relaunch_required FALSE, got %d.\n", relaunch);
 
     /* documented precedence: the window property store AppUserModelID wins over
      * the process explicit value (Wine's window property store is a stub, todo) */
@@ -255,9 +272,9 @@ static void test_appid_for_window(void)
         PropVariantClear(&pv);
         ok(hr == S_OK, "IPropertyStore::SetValue failed, hr %#lx.\n", hr);
         hr = IPropertyStore_Commit(store);
-        ok(hr == S_OK, "IPropertyStore::Save failed, hr %#lx.\n", hr);
+        ok(hr == S_OK, "IPropertyStore::Commit failed, hr %#lx.\n", hr);
 
-        hr = IApplicationResolver_GetAppIDForWindow(resolver, hwnd, &appid, NULL, NULL, NULL);
+        hr = IApplicationResolver_GetAppIDForWindow5(resolver, hwnd, &appid, NULL, NULL, NULL);
         ok(hr == S_OK, "GetAppIDForWindow failed, hr %#lx.\n", hr);
         todo_wine
         ok(appid && !lstrcmpW(appid, window_aumid), "expected window value %s, got %s.\n",
@@ -267,22 +284,8 @@ static void test_appid_for_window(void)
         IPropertyStore_Release(store);
     }
 
-    /* invalid window */
-    hr = IApplicationResolver_GetAppIDForWindow(resolver, NULL, &appid, NULL, NULL, NULL);
-    ok(hr == E_INVALIDARG, "GetAppIDForWindow(NULL) returned %#lx, expected E_INVALIDARG.\n", hr);
-    hr = IApplicationResolver_GetAppIDForWindow(resolver, hwnd, NULL, NULL, NULL, NULL);
+    hr = IApplicationResolver_GetAppIDForWindow5(resolver, hwnd, NULL, NULL, NULL, NULL);
     ok(hr == E_INVALIDARG, "GetAppIDForWindow(NULL out) returned %#lx, expected E_INVALIDARG.\n", hr);
-
-    /* GetWindowFromAppID matches the window whose effective AUMID is the window
-     * store value; on Wine the window store is stubbed, so this is native-only */
-    {
-        HWND found = NULL;
-        hr = IApplicationResolver_GetWindowFromAppID(resolver, window_aumid, &found);
-        todo_wine
-        ok(hr == S_OK, "GetWindowFromAppID returned %#lx, expected S_OK.\n", hr);
-        todo_wine
-        ok(found == hwnd, "expected hwnd %p, got %p.\n", hwnd, found);
-    }
 
     DestroyWindow(hwnd);
     IApplicationResolver_Release(resolver);
@@ -295,14 +298,16 @@ static void test_notimpl_slots(void)
     if (!resolver) return;
 
     /* every slot the module does not implement must return E_NOTIMPL, never S_OK */
-    ok(resolver->lpVtbl->GetFirstWindowFromAppID() == E_NOTIMPL, "slot 5 must be E_NOTIMPL.\n");
-    ok(resolver->lpVtbl->GetWindowFromWindow() == E_NOTIMPL, "slot 6 must be E_NOTIMPL.\n");
-    ok(resolver->lpVtbl->RelaunchApplication() == E_NOTIMPL, "slot 8 must be E_NOTIMPL.\n");
-    ok(resolver->lpVtbl->SetWindowFromAppID() == E_NOTIMPL, "slot 9 must be E_NOTIMPL.\n");
-    ok(resolver->lpVtbl->GetIconPath() == E_NOTIMPL, "slot 10 must be E_NOTIMPL.\n");
-    ok(resolver->lpVtbl->GetShortNamePath() == E_NOTIMPL, "slot 11 must be E_NOTIMPL.\n");
-    ok(resolver->lpVtbl->GetAppIDForCurrentProcess() == E_NOTIMPL, "slot 12 must be E_NOTIMPL.\n");
-    ok(resolver->lpVtbl->reserved_13() == E_NOTIMPL, "slot 13 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->GetAppIDForShortcut() == E_NOTIMPL, "slot 3 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->GetAppIDForShortcutObject() == E_NOTIMPL, "slot 4 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->GetShortcutForProcess() == E_NOTIMPL, "slot 7 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->GetBestShortcutForAppID() == E_NOTIMPL, "slot 8 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->GetBestShortcutAndAppIDForAppPath() == E_NOTIMPL, "slot 9 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->CanPinApp() == E_NOTIMPL, "slot 10 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->CanPinAppShortcut() == E_NOTIMPL, "slot 11 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->GetRelaunchProperties() == E_NOTIMPL, "slot 12 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->GenerateShortcutFromWindowProperties() == E_NOTIMPL, "slot 13 must be E_NOTIMPL.\n");
+    ok(resolver->lpVtbl->GenerateShortcutFromItemProperties() == E_NOTIMPL, "slot 14 must be E_NOTIMPL.\n");
     ok(resolver->lpVtbl->reserved_15() == E_NOTIMPL, "slot 15 must be E_NOTIMPL.\n");
 
     IApplicationResolver_Release(resolver);
@@ -330,24 +335,24 @@ static void test_factory(void)
 
 static void test_can_unload(void)
 {
-    static HRESULT (WINAPI *pDllCanUnloadNow)(void);
+    static HRESULT (WINAPI *pCanUnload)(void);
     IApplicationResolver *resolver;
 
-    if (!pDllCanUnloadNow)
+    if (!pCanUnload)
     {
-        pDllCanUnloadNow = (void *)GetProcAddress(hAppresolver, "DllCanUnloadNow");
-        ok(pDllCanUnloadNow != NULL, "DllCanUnloadNow not exported.\n");
-        if (!pDllCanUnloadNow) return;
+        pCanUnload = (void *)GetProcAddress(hAppresolver, "DllCanUnloadNow");
+        ok(pCanUnload != NULL, "DllCanUnloadNow not exported.\n");
+        if (!pCanUnload) return;
     }
 
-    ok(pDllCanUnloadNow() == S_OK, "expected S_OK with no live objects.\n");
+    ok(pCanUnload() == S_OK, "expected S_OK with no live objects.\n");
     resolver = create_resolver(CLSCTX_INPROC_SERVER);
     if (resolver)
     {
-        ok(pDllCanUnloadNow() == S_FALSE, "expected S_FALSE with a live object.\n");
+        ok(pCanUnload() == S_FALSE, "expected S_FALSE with a live object.\n");
         IApplicationResolver_Release(resolver);
     }
-    ok(pDllCanUnloadNow() == S_OK, "expected S_OK after release.\n");
+    ok(pCanUnload() == S_OK, "expected S_OK after release.\n");
 }
 
 START_TEST(appresolver)

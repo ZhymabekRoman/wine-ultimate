@@ -100,19 +100,22 @@ static HRESULT get_window_appid(HWND hwnd, PWSTR *out)
     *out = NULL;
 
     /* documented precedence: window property store value wins over process default */
-    hr = SHGetPropertyStoreForWindow(hwnd, &IID_IPropertyStore, (void **)&store);
-    if (SUCCEEDED(hr) && store)
+    if (hwnd)
     {
-        PropVariantInit(&pv);
-        hr = IPropertyStore_GetValue(store, &PKEY_AppUserModel_ID, &pv);
-        IPropertyStore_Release(store);
-        if (SUCCEEDED(hr) && pv.vt == VT_LPWSTR && pv.pwszVal && pv.pwszVal[0])
+        hr = SHGetPropertyStoreForWindow(hwnd, &IID_IPropertyStore, (void **)&store);
+        if (SUCCEEDED(hr) && store)
         {
-            hr = dup_appid(pv.pwszVal, out);
+            PropVariantInit(&pv);
+            hr = IPropertyStore_GetValue(store, &PKEY_AppUserModel_ID, &pv);
+            IPropertyStore_Release(store);
+            if (SUCCEEDED(hr) && pv.vt == VT_LPWSTR && pv.pwszVal && pv.pwszVal[0])
+            {
+                hr = dup_appid(pv.pwszVal, out);
+                PropVariantClear(&pv);
+                return hr;
+            }
             PropVariantClear(&pv);
-            return hr;
         }
-        PropVariantClear(&pv);
     }
 
     return get_process_appid(out);
@@ -167,7 +170,11 @@ static ULONG WINAPI AppResolver_Release(IApplicationResolver *iface)
  * IApplicationResolver
  */
 
-/* slot 3 */
+/* slot 5; the native onecore caller passes only (hwnd, &appid), so the extra
+ * out-params are never written: a 2-arg caller leaves garbage registers in
+ * r8/r9 and touching them would corrupt memory.  A 5-arg caller (the .NET
+ * Toolkit projection) receives its BOOL out-params from the marshaller's
+ * zero-initialised locals, i.e. FALSE, which is the correct answer. */
 static HRESULT WINAPI AppResolver_GetAppIDForWindow(IApplicationResolver *iface, HWND hwnd,
         PWSTR *appid, BOOL *relaunch_required, DWORD *host_type, DWORD *reliability)
 {
@@ -176,64 +183,24 @@ static HRESULT WINAPI AppResolver_GetAppIDForWindow(IApplicationResolver *iface,
     if (!appid) return E_INVALIDARG;
     *appid = NULL;
 
-    if (!hwnd || !IsWindow(hwnd)) return E_INVALIDARG;
-
-    if (relaunch_required) *relaunch_required = FALSE;
-    if (host_type) *host_type = 0;
-    if (reliability) *reliability = 0;
-
+    /* documented: a NULL window queries the current application's app id */
     return get_window_appid(hwnd, appid);
 }
 
-/* slot 4 */
-struct find_appid_ctx
-{
-    const WCHAR *appid;
-    HWND hwnd;
-};
-
-static BOOL CALLBACK find_appid_enum(HWND hwnd, LPARAM lparam)
-{
-    struct find_appid_ctx *ctx = (struct find_appid_ctx *)lparam;
-    PWSTR appid = NULL;
-
-    if (GetWindowThreadProcessId(hwnd, NULL) != GetCurrentProcessId()) return TRUE;
-    if (get_window_appid(hwnd, &appid) != S_OK) return TRUE;
-
-    if (appid && !lstrcmpiW(appid, ctx->appid))
-    {
-        CoTaskMemFree(appid);
-        ctx->hwnd = hwnd;
-        return FALSE;
-    }
-    CoTaskMemFree(appid);
-    return TRUE;
-}
-
-static HRESULT WINAPI AppResolver_GetWindowFromAppID(IApplicationResolver *iface,
-        const WCHAR *appid, HWND *hwnd)
-{
-    struct find_appid_ctx ctx = { appid, NULL };
-
-    TRACE("(%p %s %p)\n", iface, debugstr_w(appid), hwnd);
-
-    if (!appid || !hwnd) return E_INVALIDARG;
-    *hwnd = NULL;
-
-    EnumWindows(find_appid_enum, (LPARAM)&ctx);
-    if (!ctx.hwnd) return E_FAIL;
-    *hwnd = ctx.hwnd;
-    return S_OK;
-}
-
-/* slot 7 */
+/* slot 6, full 5-arg shape (Toolkit: pid + 4 out-params) */
 static HRESULT WINAPI AppResolver_GetAppIDForProcess(IApplicationResolver *iface,
-        DWORD pid, PWSTR *appid)
+        DWORD pid, PWSTR *appid, BOOL *pinning_prevented, BOOL *explicit_appid,
+        BOOL *embedded_shortcut_valid)
 {
-    TRACE("(%p %lx %p)\n", iface, pid, appid);
+    TRACE("(%p %lx %p %p %p %p)\n", iface, pid, appid, pinning_prevented,
+          explicit_appid, embedded_shortcut_valid);
 
     if (!appid) return E_INVALIDARG;
     *appid = NULL;
+
+    if (pinning_prevented) *pinning_prevented = FALSE;
+    if (explicit_appid) *explicit_appid = FALSE;
+    if (embedded_shortcut_valid) *embedded_shortcut_valid = FALSE;
 
     if (pid == GetCurrentProcessId())
         return get_process_appid(appid);
@@ -258,17 +225,18 @@ static HRESULT WINAPI AppResolver_GetAppIDForProcess(IApplicationResolver *iface
     }
 }
 
-/* unimplemented slots */
+/* unimplemented slots (never fabricate success on these) */
 #define NOTIMPL(name) static HRESULT WINAPI name(void) { FIXME("stub\n"); return E_NOTIMPL; }
-NOTIMPL(AppResolver_GetFirstWindowFromAppID)
-NOTIMPL(AppResolver_GetWindowFromWindow)
-NOTIMPL(AppResolver_RelaunchApplication)
-NOTIMPL(AppResolver_SetWindowFromAppID)
-NOTIMPL(AppResolver_GetIconPath)
-NOTIMPL(AppResolver_GetShortNamePath)
-NOTIMPL(AppResolver_GetAppIDForCurrentProcess)
-NOTIMPL(AppResolver_reserved_13)
-NOTIMPL(AppResolver_reserved_14)
+NOTIMPL(AppResolver_GetAppIDForShortcut)
+NOTIMPL(AppResolver_GetAppIDForShortcutObject)
+NOTIMPL(AppResolver_GetShortcutForProcess)
+NOTIMPL(AppResolver_GetBestShortcutForAppID)
+NOTIMPL(AppResolver_GetBestShortcutAndAppIDForAppPath)
+NOTIMPL(AppResolver_CanPinApp)
+NOTIMPL(AppResolver_CanPinAppShortcut)
+NOTIMPL(AppResolver_GetRelaunchProperties)
+NOTIMPL(AppResolver_GenerateShortcutFromWindowProperties)
+NOTIMPL(AppResolver_GenerateShortcutFromItemProperties)
 NOTIMPL(AppResolver_reserved_15)
 
 static const IApplicationResolverVtbl AppResolver_vtbl =
@@ -276,19 +244,19 @@ static const IApplicationResolverVtbl AppResolver_vtbl =
     AppResolver_QueryInterface,
     AppResolver_AddRef,
     AppResolver_Release,
-    AppResolver_GetAppIDForWindow,
-    AppResolver_GetWindowFromAppID,
-    AppResolver_GetFirstWindowFromAppID,
-    AppResolver_GetWindowFromWindow,
-    AppResolver_GetAppIDForProcess,
-    AppResolver_RelaunchApplication,
-    AppResolver_SetWindowFromAppID,
-    AppResolver_GetIconPath,
-    AppResolver_GetShortNamePath,
-    AppResolver_GetAppIDForCurrentProcess,
-    AppResolver_reserved_13,
-    AppResolver_reserved_14,
-    AppResolver_reserved_15,
+    AppResolver_GetAppIDForShortcut,             /*  3 */
+    AppResolver_GetAppIDForShortcutObject,       /*  4 */
+    AppResolver_GetAppIDForWindow,               /*  5 */
+    AppResolver_GetAppIDForProcess,              /*  6 */
+    AppResolver_GetShortcutForProcess,           /*  7 */
+    AppResolver_GetBestShortcutForAppID,         /*  8 */
+    AppResolver_GetBestShortcutAndAppIDForAppPath, /* 9 */
+    AppResolver_CanPinApp,                       /* 10 */
+    AppResolver_CanPinAppShortcut,               /* 11 */
+    AppResolver_GetRelaunchProperties,           /* 12 */
+    AppResolver_GenerateShortcutFromWindowProperties, /* 13 */
+    AppResolver_GenerateShortcutFromItemProperties,   /* 14 */
+    AppResolver_reserved_15,                     /* 15 */
 };
 
 HRESULT appresolver_create(REFIID riid, void **ppv)
