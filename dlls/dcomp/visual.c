@@ -70,10 +70,12 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
     {
         ID2D1GdiInteropRenderTarget *interop = visual->interop;
         ID2D1DeviceContext *device_context = visual->device_context;
+        IDCompositionClip *clip = visual->clip;
         IUnknown *content = visual->content;
 
         visual->interop = NULL;
         visual->device_context = NULL;
+        visual->clip = NULL;
         visual->content = NULL;
 
         dcomp_lock();
@@ -94,6 +96,8 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             ID2D1GdiInteropRenderTarget_Release(interop);
         if (device_context)
             ID2D1DeviceContext_Release(device_context);
+        if (clip)
+            IDCompositionClip_Release(clip);
         if (content)
             IUnknown_Release(content);
         if (visual->transform)
@@ -214,15 +218,48 @@ static HRESULT STDMETHODCALLTYPE visual_SetBorderMode(IDCompositionVisualUnknown
 static HRESULT STDMETHODCALLTYPE visual_SetClipObject(IDCompositionVisualUnknown *iface,
         IDCompositionClip *clip)
 {
-    FIXME("iface %p, clip %p stub!\n", iface, clip);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+    IDCompositionClip *old;
+
+    TRACE("DCOMP: visual_SetClipObject iface %p, clip %p.\n", iface, clip);
+
+    /* A NULL clip object removes any current clip.  The Wine compositor does not
+     * apply clip geometry to the window, so the clip object is stored and refcounted
+     * (matching the real COM lifetime contract) and the call succeeds, which is what
+     * Chromium's DCLayerTree::VisualTree::BuildTree requires (COM_CHECK on SetClipObject). */
+    dcomp_lock();
+    old = visual->clip;
+    if (clip)
+        IDCompositionClip_AddRef(clip);
+    visual->clip = clip;
+    visual->has_rect_clip = FALSE;
+    dcomp_unlock();
+
+    if (old)
+        IDCompositionClip_Release(old);
+    return S_OK;
 }
 
 /* C++ method: SetClip(THIS_ const D2D_RECT_F &rect).  Use pointer instead of reference */
 static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *iface, const D2D_RECT_F *rect)
 {
-    FIXME("iface %p, rect %p stub!\n", iface, rect);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+
+    TRACE("DCOMP: visual_SetClip iface %p, rect %p.\n", iface, rect);
+
+    /* Store the rectangle clip and succeed; the compositor does not apply it.  The
+     * rect is by-value (a reference in the C++ signature), so it is always valid. */
+    dcomp_lock();
+    visual->rect_clip = *rect;
+    visual->has_rect_clip = TRUE;
+    if (visual->clip)
+    {
+        IDCompositionClip_Release(visual->clip);
+        visual->clip = NULL;
+    }
+    dcomp_unlock();
+
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *iface, IUnknown *content)

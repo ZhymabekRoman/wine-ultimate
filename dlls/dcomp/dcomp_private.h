@@ -146,6 +146,9 @@ struct composition_visual
     float offset_y;
     SIZE size;
     IDCompositionTransform *transform;
+    IDCompositionClip *clip;        /* geometry clip set via SetClipObject; stored, not composited (conformance: accept + refcount) */
+    D2D_RECT_F rect_clip;           /* rectangle clip set via SetClip */
+    BOOL has_rect_clip;             /* TRUE when rect_clip is set (SetClip with non-NULL rect) */
     struct list child_visuals; /* visuals closer to head are lower in z-order */
     struct list entry;
     struct composition_visual *parent;

@@ -1441,6 +1441,61 @@ static void test_visual_SetBackFaceVisibility(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_visual_SetClipObject(void)
+{
+    IDCompositionDesktopDevice *dcomp_device;
+    IDCompositionVisual *visual;
+    IDCompositionRectangleClip *clip;
+    IDXGISwapChain *swapchain;
+    IDXGIDevice *dxgi_device;
+    ULONG refcount;
+    HRESULT hr;
+    HWND hwnd;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hwnd = create_window();
+    swapchain = create_swapchain(dxgi_device, hwnd);
+    hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDesktopDevice, (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDesktopDevice_CreateVisual(dcomp_device, &visual);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Chromium's DCLayerTree::VisualTree::BuildTree COM_CHECKs SetClipObject; a NULL
+     * clip removes the clip and must succeed. */
+    hr = IDCompositionVisual_SetClipObject(visual, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionDesktopDevice_CreateRectangleClip(dcomp_device, &clip);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDCompositionVisual_SetClipObject(visual, (IDCompositionClip *)clip);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Setting a rectangle clip clears the clip object and succeeds. */
+    hr = IDCompositionVisual_SetClip(visual, &(const D2D_RECT_F){0.0f, 0.0f, 50.0f, 60.0f});
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Clear both. */
+    hr = IDCompositionVisual_SetClipObject(visual, NULL);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    refcount = IDCompositionRectangleClip_Release(clip);
+    ok(!refcount, "Clip has %lu references left.\n", refcount);
+
+    IDCompositionVisual_Release(visual);
+    refcount = IDCompositionDesktopDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    IDXGISwapChain_Release(swapchain);
+    DestroyWindow(hwnd);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_visual_SetOffsetX(void)
 {
     IDCompositionDevice *dcomp_device;
@@ -2258,6 +2313,7 @@ START_TEST(dcomp)
     test_visual_SetBitmapInterpolationMode();
     test_visual_SetBorderMode();
     test_visual_SetBackFaceVisibility();
+    test_visual_SetClipObject();
     test_visual_SetOffsetX();
     test_visual_SetOffsetXAnimation();
     test_visual_AddVisual();
