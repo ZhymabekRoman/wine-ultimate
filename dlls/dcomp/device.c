@@ -3933,3 +3933,21 @@ HRESULT WINAPI DCompositionGetStatistics( ULONGLONG *frame_id, LARGE_INTEGER *up
     update_time->QuadPart = now.QuadPart;
     return S_OK;
 }
+
+/*
+ * DCompositionBoostCompositorClock() asks the window compositor to raise the update cadence
+ * of its clock, i.e. to drive the visual tree faster while a boosted frame is pending. It is
+ * a request that reports failure only through its HRESULT, and returns no compositor state.
+ * The Chromium/WebView2 compositor code resolves this name through GetProcAddress(), so the
+ * export has to be present for that lookup to succeed.
+ *
+ * Our emulated compositor clock runs at a fixed 60Hz cadence (see
+ * get_emulated_compositor_frame_id()) and keeps no boost state, so there is nothing to raise:
+ * the request is acknowledged and otherwise ignored.
+ */
+HRESULT WINAPI DCompositionBoostCompositorClock( BOOL boost )
+{
+    TRACE( "(%d)\n", boost );
+
+    return S_OK;
+}

@@ -425,6 +425,30 @@ static void test_DCompositionWaitForCompositorClock(void)
     ok(!pDCompositionWaitForCompositorClock, "GetProcAddress() succeeded.\n");
 }
 
+static void test_DCompositionBoostCompositorClock(void)
+{
+    HRESULT (WINAPI *pDCompositionBoostCompositorClock)(BOOL boost);
+    HMODULE module;
+    HRESULT hr;
+
+    module = GetModuleHandleW(L"dcomp.dll");
+    ok(!!module, "GetModuleHandleW failed.\n");
+
+    /* Referenced by name through GetProcAddress() from the Chromium/WebView2 compositor
+       code path; the export must be present for that lookup to succeed. */
+    pDCompositionBoostCompositorClock = (void *)GetProcAddress(module, "DCompositionBoostCompositorClock");
+    ok(!!pDCompositionBoostCompositorClock, "DCompositionBoostCompositorClock() is not exported.\n");
+    if (!pDCompositionBoostCompositorClock) return;
+
+    /* Documented behavior: the boost request is acknowledged with S_OK. The emulated
+       compositor clock runs at a fixed cadence, so the request itself is a no-op. */
+    hr = pDCompositionBoostCompositorClock(TRUE);
+    ok(hr == S_OK, "DCompositionBoostCompositorClock(TRUE) returned %#lx, expected S_OK.\n", hr);
+
+    hr = pDCompositionBoostCompositorClock(FALSE);
+    ok(hr == S_OK, "DCompositionBoostCompositorClock(FALSE) returned %#lx, expected S_OK.\n", hr);
+}
+
 static void test_device_CreateTargetForHwnd(void)
 {
     IDCompositionTarget *target, *target2, *target3;
@@ -2298,6 +2322,7 @@ START_TEST(dcomp)
     test_DCompositionCreateDevice3();
     test_DCompositionCreateSharedVisualHandle();
     test_DCompositionWaitForCompositorClock();
+    test_DCompositionBoostCompositorClock();
     test_IDCompositionDesktopDevicePartner();
     test_IDCompositionDeviceUnknown();
     test_IDCompositionVisualUnknown();

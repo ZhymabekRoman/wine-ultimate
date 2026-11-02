@@ -13,6 +13,7 @@
 @ stub CreateEffectDescription
 @ stub DCompositionAttachMouseDragToHwnd
 @ stub DCompositionAttachMouseWheelToHwnd
+@ stdcall DCompositionBoostCompositorClock(long)
 @ stdcall DCompositionCreateDevice2(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice3(ptr ptr ptr)
 @ stdcall DCompositionCreateDevice(ptr ptr ptr)
