@@ -545,6 +545,8 @@ struct inproc_sync
     unsigned short type;      /* enum inproc_sync_type as short to save space */
     unsigned short closed;    /* fd has been closed but sync is still referenced */
     unsigned short has_wait_packet; /* handle is associated with a wait completion packet */
+    unsigned short unsupported;     /* server has no inproc sync object for this handle (negative cache) */
+    unsigned short non_waitable;    /* a single-object wait on this handle was rejected as OBJECT_TYPE_MISMATCH */
 };
 
 #define INPROC_SYNC_CACHE_BLOCK_SIZE  (65536 / sizeof(struct inproc_sync))
@@ -608,6 +610,8 @@ static struct inproc_sync *cache_inproc_sync( HANDLE handle, struct inproc_sync 
     cache->type = sync->type;
     cache->closed = sync->closed;
     cache->has_wait_packet = sync->has_wait_packet;
+    cache->unsupported = sync->unsupported;
+    cache->non_waitable = sync->non_waitable;
     /* Make sure we set the other members before the refcount; this store needs
      * release semantics [paired with the load in get_cached_inproc_sync()].
      * Set the refcount to 2 (one for the handle, one for the caller). */
@@ -640,7 +644,8 @@ static void release_inproc_sync( struct inproc_sync *sync )
     LONG ref = InterlockedDecrement( &sync->refcount );
 
     assert( ref >= 0 );
-    if (!ref) close( fd );
+    /* negative cache entries carry no fd */
+    if (!ref && fd >= 0) close( fd );
 }
 
 static struct inproc_sync *get_cached_inproc_sync( HANDLE handle )
@@ -686,6 +691,8 @@ static NTSTATUS get_server_inproc_sync( HANDLE handle, struct inproc_sync *sync 
             sync->access = reply->access;
             sync->type = reply->type;
             sync->closed = 0;
+            sync->unsupported = 0;
+            sync->non_waitable = 0;
         }
     }
     SERVER_END_REQ;
@@ -720,12 +727,54 @@ static NTSTATUS get_inproc_sync( HANDLE handle, enum inproc_sync_type desired_ty
         {
             if ((ret = get_server_inproc_sync( handle, stack )))
             {
+                if (ret == STATUS_NOT_IMPLEMENTED)
+                {
+                    /* The server answered that this object has no synchronisation
+                     * object at all (type 0): tokens, sections, registry keys, ALPC
+                     * ports. Every object that can be waited on - event, mutex,
+                     * semaphore, thread, process, and every fd-backed object
+                     * (pipe, serial, console, socket, file) - owns an internal
+                     * sync object and therefore gets an fd here. Record that
+                     * fact, so the fast path stops issuing one get_inproc_sync_fd
+                     * request per call: a Chromium MsgWait that includes a token
+                     * handle asked 11.7M times in 100 s, and the server round
+                     * trips starved the relay. */
+                    stack->refcount = 1;
+                    stack->fd = -1;
+                    stack->access = 0;
+                    stack->type = INPROC_SYNC_UNKNOWN;
+                    stack->closed = 0;
+                    stack->has_wait_packet = 0;
+                    stack->unsupported = 1;
+                    stack->non_waitable = 0;
+                    sync = cache_inproc_sync( handle, stack );
+                    release_inproc_sync( sync );
+                }
                 server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
                 return ret;
             }
             sync = cache_inproc_sync( handle, stack );
         }
         server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
+    }
+
+    if (sync->non_waitable)
+    {
+        /* A single-object wait on this handle was already rejected by the server
+         * as STATUS_OBJECT_TYPE_MISMATCH. Windows validates the object type when
+         * the wait is entered, so report the same failure right away instead of
+         * re-arming the identical wait; the caller's loop then does not turn a
+         * rejected handle into a server round trip per iteration. */
+        release_inproc_sync( sync );
+        return STATUS_OBJECT_TYPE_MISMATCH;
+    }
+
+    if (sync->unsupported)
+    {
+        /* Cached "no sync object"; no server request needed to learn it again.
+         * The caller falls back to the server-side wait, which is authoritative. */
+        release_inproc_sync( sync );
+        return STATUS_NOT_IMPLEMENTED;
     }
 
     if (desired_type != INPROC_SYNC_UNKNOWN && desired_type != sync->type)
@@ -777,6 +826,28 @@ void close_inproc_sync( HANDLE handle )
         release_inproc_sync( cache );
         release_inproc_sync( cache );
     }
+}
+
+/* Remember that a single-object wait on "handle" was rejected as
+ * STATUS_OBJECT_TYPE_MISMATCH, so the next one fails without a server request.
+ * Only ever called for single-handle waits: multi-handle sets can contain
+ * handles that the server waits on without a sync object (wait completion
+ * packets, message queues), and those must keep working. */
+static void cache_nonwaitable_handle( HANDLE handle )
+{
+    struct inproc_sync *cache;
+    sigset_t sigset;
+
+    if (inproc_device_fd < 0) return;
+    if (is_pseudo_handle( handle )) return;
+
+    server_enter_uninterrupted_section( &fd_cache_mutex, &sigset );
+    if ((cache = get_cached_inproc_sync( handle )))
+    {
+        if (cache->unsupported && !cache->has_wait_packet) cache->non_waitable = 1;
+        release_inproc_sync( cache );
+    }
+    server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
 }
 
 static NTSTATUS inproc_release_semaphore( HANDLE handle, ULONG count, ULONG *prev_count )
@@ -2395,6 +2466,7 @@ NTSTATUS WINAPI NtWaitForMultipleObjects( DWORD count, const HANDLE *handles, WA
     select_op.wait.op = type == WaitAll ? SELECT_WAIT_ALL : SELECT_WAIT;
     for (i = 0; i < count; i++) select_op.wait.handles[i] = wine_server_obj_handle( handles[i] );
     ret = server_wait( &select_op, offsetof( union select_op, wait.handles[count] ), flags, timeout );
+    if (ret == STATUS_OBJECT_TYPE_MISMATCH && count == 1) cache_nonwaitable_handle( handles[0] );
     TRACE( "-> %#x\n", ret );
     return ret;
 }
@@ -2421,6 +2493,7 @@ NTSTATUS WINAPI NtWaitForSingleObject( HANDLE handle, BOOLEAN alertable, const L
     select_op.wait.op = SELECT_WAIT;
     select_op.wait.handles[0] = wine_server_obj_handle( handle );
     ret = server_wait( &select_op, offsetof( union select_op, wait.handles[1] ), flags, timeout );
+    if (ret == STATUS_OBJECT_TYPE_MISMATCH) cache_nonwaitable_handle( handle );
     TRACE( "-> %#x\n", ret );
     return ret;
 }

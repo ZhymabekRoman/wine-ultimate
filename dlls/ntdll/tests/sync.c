@@ -1439,6 +1439,142 @@ static void test_barrier(void)
  *
  * A pump that sleeps costs iterations * 16 ms; one that spins costs about a single
  * quantum, so the wall clock cost of a fixed burst is the observable difference. */
+/* A handle to an object that has no synchronisation object at all - a section, a
+ * token, a registry key - cannot be waited on. The rejection must reach the caller
+ * as STATUS_OBJECT_TYPE_MISMATCH immediately, and it must not cost a server round
+ * trip per call. Regression guarded: a Chromium MsgWait whose set included a token
+ * handle re-armed the identical wait 11.7M times in 100 s and asked the server for
+ * an in-process sync fd on every iteration, which starved the relay.
+ */
+static void test_nonwaitable_handle_wait( void )
+{
+    static const NTSTATUS status_type_mismatch = STATUS_OBJECT_TYPE_MISMATCH;
+    static const unsigned int iterations = 20000;
+    NTSTATUS (WINAPI *pNtCreateSection)(HANDLE *, ACCESS_MASK, const OBJECT_ATTRIBUTES *,
+                                        const LARGE_INTEGER *, ULONG, ULONG, HANDLE);
+    DWORD (WINAPI *pMsgWaitForMultipleObjectsEx)(DWORD, const HANDLE *, DWORD, DWORD, DWORD);
+    BOOL (WINAPI *pOpenProcessToken)(HANDLE, DWORD, HANDLE *);
+    unsigned int i, bad = 0;
+    LARGE_INTEGER size, timeout;
+    DWORD start, elapsed, last;
+    NTSTATUS status;
+    HANDLE section = 0, token = 0, pipe, server, event, handles[2];
+    HMODULE ntdll, user32, advapi32;
+
+    ntdll = GetModuleHandleA("ntdll.dll");
+    user32 = LoadLibraryA("user32.dll");
+    advapi32 = LoadLibraryA("advapi32.dll");
+    pNtCreateSection = (void *)GetProcAddress(ntdll, "NtCreateSection");
+    pMsgWaitForMultipleObjectsEx = (void *)GetProcAddress(user32, "MsgWaitForMultipleObjectsEx");
+    pOpenProcessToken = (void *)GetProcAddress(advapi32, "OpenProcessToken");
+
+    /* Guards first. Every fd-backed object (pipe, serial, console, socket) owns an
+     * internal sync object, so the negative cache of "this object has no sync
+     * object" must never be applied to it, and real sync objects must keep their
+     * normal timing. */
+    server = CreateNamedPipeW(L"\\\\.\\pipe\\p50_nonwaitable_guard", PIPE_ACCESS_INBOUND, 0,
+                              1, 512, 512, 0, NULL);
+    pipe = CreateFileW(L"\\\\.\\pipe\\p50_nonwaitable_guard", GENERIC_WRITE, 0, NULL,
+                       OPEN_EXISTING, 0, NULL);
+    if (server != INVALID_HANDLE_VALUE && pipe != INVALID_HANDLE_VALUE)
+    {
+        /* Wine's verdict for a block-mode pipe handle is what it is; the invariant
+         * the negative cache must not break is that it is stable and cheap, i.e. no
+         * per-iteration server round trip and no rejection as a non-waitable object. */
+        DWORD r1 = WaitForSingleObject(pipe, 0), r2;
+        start = GetTickCount();
+        for (i = 0; i < 2000; i++) r2 = WaitForSingleObject(pipe, 0);
+        elapsed = GetTickCount() - start;
+        ok(r1 == r2, "pipe handle wait should be stable, got %u then %u\n", (unsigned int)r1, (unsigned int)r2);
+        ok(elapsed < 1000, "2000 pipe handle waits took %u ms\n", (unsigned int)elapsed);
+        skip("pipe handle wait verdict: %u\n", (unsigned int)r1);
+        ok(WaitForSingleObject(server, 0) != WAIT_ABANDONED_0, "pipe server handle wait is abandoned\n");
+    }
+    else winetest_skip("pipe pair");
+    if (pipe != INVALID_HANDLE_VALUE) CloseHandle(pipe);
+    if (server != INVALID_HANDLE_VALUE) CloseHandle(server);
+
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    ok(WaitForSingleObject(event, 20) == WAIT_TIMEOUT, "unsigaled event should time out\n");
+    SetEvent(event);
+    ok(WaitForSingleObject(event, 0) == WAIT_OBJECT_0, "signaled event should be ready\n");
+    CloseHandle(event);
+
+    if (!pNtCreateSection)
+    {
+        winetest_skip("NtCreateSection");
+        return;
+    }
+
+    size.QuadPart = 0x1000;
+    status = pNtCreateSection(&section, SECTION_QUERY | SYNCHRONIZE, NULL, &size,
+                              0x04 /*PAGE_READWRITE*/, 0x8000000 /*SEC_COMMIT*/, 0);
+    if (status != 0 || !section)
+    {
+        winetest_skip("NtCreateSection");
+        return;
+    }
+
+    timeout.QuadPart = -160000; /* 16 ms */
+
+    /* A token owns no synchronisation object; this is the handle class that made a
+     * browser MsgWait loop ask the server for an in-process sync fd 11.7M times.
+     * Single-object waits must be rejected at once, and after the first call at no
+     * server cost, because Windows validates the object type on wait entry. */
+    if (!pOpenProcessToken || !pOpenProcessToken(GetCurrentProcess(), 0x00020000 /*TOKEN_READ*/, &token) || !token)
+    {
+        winetest_skip("OpenProcessToken");
+        return;
+    }
+    start = GetTickCount();
+    for (i = 0; i < iterations; i++)
+    {
+        status = pNtWaitForMultipleObjects(1, &token, WaitAny, FALSE, &timeout);
+        if (status != status_type_mismatch) bad++;
+    }
+    elapsed = GetTickCount() - start;
+    ok(bad == 0, "%u of %u single-object waits on a token returned a status other than "
+                 "STATUS_OBJECT_TYPE_MISMATCH\n", bad, iterations);
+    ok(elapsed < 1000, "%u single-object waits on a token slept %u ms, expected no waiting "
+                       "and no server round trip per call\n", iterations, (unsigned int)elapsed);
+
+    /* MsgWait with the same handle: user32 reports the failure, and the call returns
+     * at once rather than sleeping for the 16 ms timeout. */
+    if (pMsgWaitForMultipleObjectsEx)
+    {
+        bad = 0;
+        start = GetTickCount();
+        for (i = 0; i < 500; i++)
+        {
+            DWORD r = pMsgWaitForMultipleObjectsEx(1, &token, 16, 0x0003 /*QS_ALLINPUT*/,
+                                                   0x0001 /*MWMO_INPUTAVAILABLE*/);
+            if (r != WAIT_FAILED) bad++;
+        }
+        elapsed = GetTickCount() - start;
+        last = GetLastError();
+        ok(bad == 0, "%u of 500 MsgWait calls with a token handle returned a value other than "
+                     "WAIT_FAILED\n", bad);
+        ok(last == ERROR_INVALID_HANDLE, "GetLastError after MsgWait is %u, expected ERROR_INVALID_HANDLE\n",
+           (unsigned int)last);
+        ok(elapsed < 2000, "500 MsgWait calls with a token handle slept %u ms\n", (unsigned int)elapsed);
+    }
+    else winetest_skip("MsgWaitForMultipleObjectsEx");
+
+    status = pNtWaitForMultipleObjects(1, &section, WaitAny, FALSE, &timeout);
+    ok(status == status_type_mismatch, "single-object wait on a section returned %#lx\n", status);
+
+    /* Multi-object set: the whole wait must fail, never report the good handle. */
+    event = CreateEventW(NULL, FALSE, FALSE, NULL);
+    handles[0] = event;
+    handles[1] = token;
+    status = pNtWaitForMultipleObjects(2, handles, WaitAny, FALSE, &timeout);
+    ok(status == status_type_mismatch, "two-handle wait with a non-waitable handle returned %#lx\n", status);
+    CloseHandle(event);
+
+    CloseHandle(section);
+    if (token) CloseHandle(token);
+}
+
 static void test_system_time_deadline( void )
 {
     static const unsigned int iterations = 50, delay_ms = 16, min_ontime = 37;
@@ -1539,8 +1675,9 @@ START_TEST(sync)
     pRtlBarrier                     = (void *)GetProcAddress(module, "RtlBarrier");
 
     /* Runs first on purpose: ntdll:sync stalls later in this tree (keyed events,
-     * completion port scheduling), and the deadline invariant is independent of
+     * completion port scheduling), and both of these are independent of
      * everything else in the file. */
+    test_nonwaitable_handle_wait();
     test_system_time_deadline();
     test_wait_on_address();
     test_event();
