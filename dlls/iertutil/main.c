@@ -561,3 +561,14 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     IUnknown_AddRef(*factory);
     return S_OK;
 }
+
+/***********************************************************************
+ *      SetWebPlatformSecurityManagerFactoryCallback (iertutil.811)
+ *
+ * Called by Windows.UI.Xaml.dll during Application init to hook its security manager factory.
+ */
+HRESULT WINAPI SetWebPlatformSecurityManagerFactoryCallback( void *callback )
+{
+    FIXME( "%p: stub\n", callback );
+    return S_OK;
+}

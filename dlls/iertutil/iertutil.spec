@@ -7,3 +7,5 @@
 @ stdcall PrivateCoInternetCombineIUri(ptr ptr long ptr long)
 @ stdcall PrivateCoInternetParseIUri(ptr long long ptr long ptr long)
 @ stdcall wine_get_canonicalized_uri(ptr)
+# Imported by ordinal from Windows.UI.Xaml.dll
+811 stdcall SetWebPlatformSecurityManagerFactoryCallback(ptr)

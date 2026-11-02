@@ -645,6 +645,7 @@ apiset ext-ms-win-shell32-shellfolders-l1-2-1 = windows.storage.dll
 apiset ext-ms-win-storage-iscsidsc-l1-1-0 =
 apiset ext-ms-win-sxs-oleautomation-l1-1-0 = sxs.dll
 apiset ext-ms-win-sysmain-sfltapi-l1-1-0 =
+apiset ext-ms-win-sysmain-pfsapi-l1-1-0 = wineuwp.dll
 apiset ext-ms-win-system-metrics-override-l1-1-1 =
 apiset ext-ms-win-test-sys1-l1-1-0 =
 apiset ext-ms-win-test-sys2-l1-1-0 =

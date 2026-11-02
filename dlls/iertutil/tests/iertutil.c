@@ -362,9 +362,48 @@ static void test_IUriRuntimeClass(void)
     RoUninitialize();
 }
 
+static void test_SetWebPlatformSecurityManagerFactoryCallback(void)
+{
+    void *by_ordinal, *by_name;
+    HRESULT (WINAPI *p_callback)(void *callback);
+    HMODULE module;
+    HRESULT hr;
+
+    winetest_push_context("SetWebPlatformSecurityManagerFactoryCallback");
+
+    /* Windows.UI.Xaml.dll imports this by ordinal 811. Load the module explicitly: the --dll test
+     * module mechanism is gone in this Wine, so the test DLL is not preloaded into the process. */
+    module = LoadLibraryA("iertutil.dll");
+    ok(module != NULL, "Failed to load iertutil.dll, err %lu.\n", GetLastError());
+    if (!module)
+    {
+        winetest_pop_context();
+        return;
+    }
+
+    by_ordinal = (void *) GetProcAddress(module, MAKEINTRESOURCEA(811));
+    by_name = (void *) GetProcAddress(module, "SetWebPlatformSecurityManagerFactoryCallback");
+    ok(by_ordinal != NULL, "Ordinal 811 does not resolve.\n");
+    ok(by_name != NULL, "SetWebPlatformSecurityManagerFactoryCallback does not resolve.\n");
+    ok(by_ordinal == by_name, "Ordinal 811 %p and name %p are not the same entry point.\n", by_ordinal, by_name);
+
+    /* Call only once both forms agree on the entry point. */
+    p_callback = (by_ordinal && by_ordinal == by_name) ? (void *) by_ordinal : NULL;
+    if (p_callback)
+    {
+        hr = p_callback(NULL);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    }
+
+    FreeLibrary(module);
+    winetest_pop_context();
+}
 
 START_TEST(iertutil)
 {
+    /* Runs first on purpose: the Uri tests below damage the heap (their baseline failures end in an
+     * access violation inside wintypes.dll), which used to abort the process before this test ran. */
+    test_SetWebPlatformSecurityManagerFactoryCallback();
     test_IUriRuntimeClassFactory();
     test_IUriRuntimeClass();
 }

@@ -1,0 +1,8 @@
+MODULE    = wineuwp.dll
+ENABLE_ARCHS = x86_64
+IMPORTS   = kernel32
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	main.c
