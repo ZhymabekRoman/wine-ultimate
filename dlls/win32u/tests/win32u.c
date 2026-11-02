@@ -3155,6 +3155,107 @@ static void test_NtUserRegisterWindowMessage(void)
     ok( !wcscmp( buf, L"#0xabc" ), "buf = %s\n", debugstr_w(buf) );
 }
 
+#define MSGWAKE_MSG (WM_APP + 1)
+
+static DWORD WINAPI msgwake_poster( void *arg )
+{
+    Sleep( 50 );
+    PostMessageW( (HWND)arg, MSGWAKE_MSG, 0, 0 );
+    return 0;
+}
+
+static void msgwake_drain( BOOL *got )
+{
+    MSG msg;
+
+    while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+    {
+        if (msg.message == MSGWAKE_MSG) *got = TRUE;
+        TranslateMessage( &msg );
+        DispatchMessageW( &msg );
+    }
+}
+
+/*
+ * MsgWaitForMultipleObjectsEx has to time out while nothing is pending, and a message
+ * posted from another thread has to end the wait early. The queue condition reaches the
+ * waiter through the queue wake bits, so dropping the server queue handle out of the
+ * client wait set must not cost either of those two properties.
+ */
+static void test_MsgWakeViaPostMessage( void )
+{
+    static const WCHAR clsname[] = L"wine_test_msgwake";
+    WNDCLASSW wc = { .lpfnWndProc = DefWindowProcW, .hInstance = GetModuleHandleA( 0 ), .lpszClassName = clsname };
+    HANDLE handles[2], event, event2, thread;
+    BOOL got = FALSE;
+    MSG msg;
+    DWORD time, r;
+
+    ok( RegisterClassW( &wc ), "RegisterClassW error %lu\n", GetLastError() );
+    HWND hwnd = CreateWindowExW( 0, clsname, L"msgwake", 0, 0, 0, 8, 8, HWND_MESSAGE, NULL, wc.hInstance, NULL );
+    ok( hwnd != NULL, "CreateWindowExW error %lu\n", GetLastError() );
+    if (!hwnd) return;
+
+    event = CreateEventW( NULL, FALSE, FALSE, NULL );
+    event2 = CreateEventW( NULL, TRUE, FALSE, NULL );
+    ok( event != NULL && event2 != NULL, "CreateEventW error %lu\n", GetLastError() );
+
+    /* drop whatever window creation queued */
+    while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+    {
+        TranslateMessage( &msg );
+        DispatchMessageW( &msg );
+    }
+
+    /* timeout path: an event that is never set, and nothing queued */
+    time = GetTickCount();
+    r = MsgWaitForMultipleObjectsEx( 1, &event, 100, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
+    ok( r == WAIT_TIMEOUT, "MsgWait returned %ld, expected WAIT_TIMEOUT\n", r );
+    ok( GetTickCount() - time >= 50, "MsgWait returned after %lu ms, expected ~100\n", GetTickCount() - time );
+
+    /* wake path: a message posted from another thread must end the wait, and be reported
+     * through the queue index, which is one past the caller's handles */
+    thread = CreateThread( NULL, 0, msgwake_poster, hwnd, 0, NULL );
+    time = GetTickCount();
+    r = MsgWaitForMultipleObjectsEx( 1, &event, 20000, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
+    ok( r == WAIT_OBJECT_0 + 1, "MsgWait returned %ld, expected the queue index %ld\n", r, WAIT_OBJECT_0 + 1 );
+    ok( GetTickCount() - time < 10000, "MsgWait was not woken by a posted message, %lu ms\n", GetTickCount() - time );
+    WaitForSingleObject( thread, 5000 );
+    CloseHandle( thread );
+
+    /* MWMO_INPUTAVAILABLE: the posted message is still queued, so the queue is ready now */
+    r = MsgWaitForMultipleObjectsEx( 1, &event, 100, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
+    ok( r == WAIT_OBJECT_0 + 1, "MsgWait returned %ld, expected the queue index for a queued message\n", r );
+    msgwake_drain( &got );
+    ok( got, "the posted message was not retrieved\n" );
+
+    /* no handles of the caller's: the queue alone has to be woken by a posted message */
+    got = FALSE;
+    thread = CreateThread( NULL, 0, msgwake_poster, hwnd, 0, NULL );
+    time = GetTickCount();
+    r = MsgWaitForMultipleObjectsEx( 0, NULL, 20000, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
+    ok( r == WAIT_OBJECT_0, "MsgWait returned %ld, expected the queue index %ld\n", r, WAIT_OBJECT_0 );
+    ok( GetTickCount() - time < 10000, "MsgWait was not woken by a posted message, %lu ms\n", GetTickCount() - time );
+    WaitForSingleObject( thread, 5000 );
+    CloseHandle( thread );
+    msgwake_drain( &got );
+    ok( got, "the posted message was not retrieved (no handles)\n" );
+
+    /* MWMO_WAITALL: the queue is part of the set that all has to be ready, so a wait
+     * whose handles are not all signaled has to time out */
+    handles[0] = event;
+    handles[1] = event2;
+    SetEvent( event2 );
+    r = MsgWaitForMultipleObjectsEx( 2, handles, 100, QS_ALLINPUT, MWMO_WAITALL );
+    ok( r == WAIT_TIMEOUT, "MsgWait(WAITALL) returned %ld, expected WAIT_TIMEOUT\n", r );
+    ResetEvent( event2 );
+
+    CloseHandle( event );
+    CloseHandle( event2 );
+    DestroyWindow( hwnd );
+    UnregisterClassW( clsname, wc.hInstance );
+}
+
 START_TEST(win32u)
 {
     char **argv;
@@ -3204,6 +3305,7 @@ START_TEST(win32u)
     test_menu();
     test_message_filter();
     test_timer();
+    test_MsgWakeViaPostMessage();
     test_inter_process_messages( argv[0] );
     test_pixel_format( argv );
     test_wndproc_hook();

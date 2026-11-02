@@ -3424,8 +3424,17 @@ static inline LARGE_INTEGER *get_nt_timeout( LARGE_INTEGER *time, DWORD timeout 
     return time;
 }
 
-/* wait for message or signaled handle */
-static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DWORD wake_mask, DWORD changed_mask, DWORD flags )
+/* wait for message or signaled handle.
+ *
+ * "queue_in_set" tells whether the last entry of "handles" is the server queue handle:
+ * that handle is the queue's wake-up source, and the only queue condition that is
+ * cleared by draining instead of by the application is QS_DRIVER, so the drain-and-retry
+ * loop below is meaningful for that shape only.  Callers that carry the queue condition
+ * through the shared queue wake bits (see msg_wait_queue_wake_bits) pass FALSE, so that
+ * a wake-up of one of the caller's own handles is never swallowed by that loop.
+ */
+static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DWORD wake_mask,
+                           DWORD changed_mask, DWORD flags, BOOL queue_in_set )
 {
     struct thunk_lock_params params = {.dispatch.callback = thunk_lock_callback};
     WAIT_TYPE type = flags & MWMO_WAITALL ? WaitAll : WaitAny;
@@ -3457,7 +3466,8 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
 
     do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
-    while (ret == count - 1 && check_internal_bits( QS_DRIVER ) && !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
+    while (queue_in_set && ret == count - 1 && check_internal_bits( QS_DRIVER ) &&
+           !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
 
     if (HIWORD(ret)) /* is it an error code? */
     {
@@ -3466,7 +3476,7 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     }
 
     if (ret == WAIT_TIMEOUT && !count && !timeout) NtYieldExecution();
-    if (ret == count - 1) get_user_thread_info()->last_driver_time = get_driver_check_time();
+    if (queue_in_set && ret == count - 1) get_user_thread_info()->last_driver_time = get_driver_check_time();
 
     KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
 
@@ -3485,7 +3495,7 @@ static DWORD wait_objects( DWORD count, const HANDLE *handles, DWORD timeout,
 
     flush_window_surfaces( TRUE );
 
-    return wait_message( count, handles, timeout, wake_mask, changed_mask, flags );
+    return wait_message( count, handles, timeout, wake_mask, changed_mask, flags, TRUE );
 }
 
 static HANDLE normalize_std_handle( HANDLE handle )
@@ -3500,6 +3510,101 @@ static HANDLE normalize_std_handle( HANDLE handle )
     return handle;
 }
 
+/* Longest MsgWait that is served from the wake bits.  A wake-bits wait notices a message
+ * that arrives while the thread is waiting on its own handles only when the wait ends, so
+ * the bound is also the bound on the added wake latency and on the extra per-call requests
+ * (idle event, mask sync) that the shape makes.  100 ms covers every pump period in use -
+ * 16 ms for every GUI thread and every Chromium message loop, and the 10..50 ms timers that
+ * drive them - while longer parks and infinite parks, where one wake per message is worth
+ * more than a saved round trip, keep the queue handle and stay event-driven. */
+#define MSGWAIT_WAKE_BITS_TIMEOUT_MAX 100
+
+/* A park with no handles of the caller's has nothing to wake it, so its timeout is slept
+ * in slices and the queue is consulted at every boundary: 16 ms is the wake latency that
+ * the shape gets, and the slice costs no server request, because process_driver_events
+ * skips set_queue_mask while the shared queue reports the masks it already has. */
+#define MSGWAIT_WAKE_BITS_SLICE 16
+
+/*
+ * Is the queue condition readable in this process?  set_queue_mask keeps the wake bits
+ * and the changed bits of the shared memory queue in step with the masks of the current
+ * call, and the server drives the queue's own sync object from exactly the same
+ * condition, so a thread that can read that shared queue does not need the server queue
+ * handle in its client wait set to know that the queue is signaled.
+ */
+static BOOL queue_wake_bits_available( void )
+{
+    struct object_lock lock = OBJECT_LOCK_INIT;
+    const queue_shm_t *queue_shm;
+    NTSTATUS status;
+
+    while ((status = get_shared_queue( &lock, &queue_shm )) == STATUS_PENDING)
+    {
+        /* nothing to read here: the second pass releases the seq lock and reports status */
+    }
+
+    return !status;
+}
+
+/*
+ * MsgWaitForMultipleObjectsEx for threads whose queue condition is carried by the wake
+ * bits: the caller's handles are waited on alone, and the queue condition is read in the
+ * shared memory that set_queue_mask maintains, before the wait and after it.
+ *
+ * Appending get_server_queue_handle() to the client wait set is what pushes the whole
+ * wait set to the server: the queue's synchronisation object is an in-process one whose
+ * server side has no wait queue entry, so a server-side wait that contains the queue
+ * handle is answered STATUS_OBJECT_TYPE_MISMATCH (and a single handle that the
+ * in-process sync layer cannot serve - a token, a section, a port - is enough to force
+ * the set server-side).  For the 16 ms pumps that every Chromium message loop and every
+ * GUI thread runs, that is a rejected server round trip per iteration, and a rejected
+ * wait is a wait that the caller restarts immediately: the pump stops sleeping and the
+ * server stops serving anything else.
+ */
+static DWORD msg_wait_queue_wake_bits( DWORD count, const HANDLE *handles, DWORD timeout,
+                                       DWORD wake_mask, DWORD changed_mask, DWORD flags )
+{
+    LARGE_INTEGER time, *abs;
+    HANDLE event;
+    DWORD ret;
+
+    /* allocating the queue handle is also what allocates the thread's idle event */
+    get_server_queue_handle();
+    flush_window_surfaces( TRUE );
+
+    /* Install this call's masks exactly as the queue-handle shape does, and take the queue
+     * state that it reports: the return value of process_driver_events is the signaled
+     * state of the queue, which is what the queue handle in the wait set would have
+     * reported on entry, a message that is already queued included. */
+    if (process_driver_events( QS_ALLINPUT, wake_mask, changed_mask )) return count;
+
+    if (!count)  /* nothing of the caller's to wake us: sleep the timeout, watching the bits */
+    {
+        DWORD elapsed = 0;
+
+        if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
+
+        while (elapsed < timeout)
+        {
+            DWORD slice = (timeout - elapsed < MSGWAIT_WAKE_BITS_SLICE) ? timeout - elapsed : MSGWAIT_WAKE_BITS_SLICE;
+
+            abs = get_nt_timeout( &time, slice );
+            NtDelayExecution( FALSE, abs );
+            elapsed += slice;
+            if (is_queue_signaled()) return count;
+        }
+        return WAIT_TIMEOUT;
+    }
+
+    ret = wait_message( count, handles, timeout, wake_mask, changed_mask, flags, FALSE );
+
+    /* The wait expired: the wake bits carry what the queue handle would have reported. A
+     * message posted while the thread slept on its own handles is reported here, one pump
+     * period late at worst, which is the price of not being in the wait set. */
+    if (ret == WAIT_TIMEOUT && is_queue_signaled()) return count;
+    return ret;
+}
+
 /***********************************************************************
  *           NtUserMsgWaitForMultipleObjectsEx   (win32u.@)
  */
@@ -3507,7 +3612,7 @@ DWORD WINAPI NtUserMsgWaitForMultipleObjectsEx( DWORD count, const HANDLE *handl
                                                 DWORD timeout, DWORD mask, DWORD flags )
 {
     HANDLE wait_handles[MAXIMUM_WAIT_OBJECTS];
-    DWORD i;
+    DWORD wake_mask, changed_mask, i;
 
     if (count > MAXIMUM_WAIT_OBJECTS-1)
     {
@@ -3515,17 +3620,25 @@ DWORD WINAPI NtUserMsgWaitForMultipleObjectsEx( DWORD count, const HANDLE *handl
         return WAIT_FAILED;
     }
 
-    /* add the queue to the handle list */
+    /* add the caller's handles to the wait list */
     for (i = 0; i < count; i++) wait_handles[i] = normalize_std_handle( handles[i] );
-    wait_handles[count] = get_server_queue_handle();
 
     /* The event mask gates hardware input only.  The queue's message conditions - sent,
      * posted, timer, paint and hotkey messages - are not "events" of the requested type:
      * a newly queued message always satisfies the wait, and, when MWMO_INPUTAVAILABLE is
      * requested, a message already sitting in the queue does too, independently of mask. */
-    return wait_objects( count+1, wait_handles, timeout,
-                         (flags & MWMO_INPUTAVAILABLE) ? mask | QUEUE_MSG_WAKE_BITS : 0,
-                         mask | QUEUE_MSG_WAKE_BITS, flags );
+    wake_mask    = (flags & MWMO_INPUTAVAILABLE) ? mask | QUEUE_MSG_WAKE_BITS : 0;
+    changed_mask = mask | QUEUE_MSG_WAKE_BITS;
+
+    /* The shapes left out here keep the server queue handle in the wait set, because the
+     * wake bits cannot carry their wake-up: MWMO_WAITALL has to wait for the queue along
+     * with every handle, and a long or infinite park wants a wake, not a poll. */
+    if (timeout <= MSGWAIT_WAKE_BITS_TIMEOUT_MAX && !(flags & MWMO_WAITALL) && queue_wake_bits_available())
+        return msg_wait_queue_wake_bits( count, wait_handles, timeout, wake_mask, changed_mask, flags );
+
+    /* add the queue to the handle list */
+    wait_handles[count] = get_server_queue_handle();
+    return wait_objects( count+1, wait_handles, timeout, wake_mask, changed_mask, flags );
 }
 
 /***********************************************************************
@@ -3818,7 +3931,7 @@ static void wait_message_reply( UINT flags )
             continue;
         }
 
-        wait_message( 1, &server_queue, INFINITE, wake_mask, wake_mask, 0 );
+        wait_message( 1, &server_queue, INFINITE, wake_mask, wake_mask, 0, TRUE );
     }
 }
 

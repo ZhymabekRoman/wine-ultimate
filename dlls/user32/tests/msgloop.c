@@ -49,6 +49,8 @@ enum order { ORD_BEFORE, ORD_RACE, ORD_COUNT };
 static const char *const ord_names[ORD_COUNT] = { "before", "race" };
 
 static int src, order, use_input_avail;
+static DWORD timeout_ms = INFINITE; /* WINE_MSGLOOP_TIMEOUT bounds the park, to test the
+                                       finite-timeout pump shape as well as the parked one */
 static volatile LONG done_iter;
 static volatile LONG wedged;
 static HANDLE req_ev, ack_ev, wake_ev, iocp;
@@ -178,7 +180,7 @@ static void run_combination( LONG iterations )
          * the pending-state check.  use_input_avail=1: the shape used by Chromium's
          * message pump - MWMO_INPUTAVAILABLE passed in the event mask slot, flags 0,
          * which relies on a newly posted message always waking the wait. */
-        r = MsgWaitForMultipleObjectsEx( count, handle_array, INFINITE,
+        r = MsgWaitForMultipleObjectsEx( count, handle_array, timeout_ms,
                                          use_input_avail ? MWMO_INPUTAVAILABLE : QS_ALLINPUT,
                                          use_input_avail ? 0 : MWMO_INPUTAVAILABLE );
         if (r == WAIT_TIMEOUT)
@@ -210,6 +212,7 @@ START_TEST(msgloop)
     if (!env) return; /* opt-in stress test */
     iterations = atol( env );
     if (iterations < 1) iterations = DEFAULT_ITER;
+    if ((env = getenv( "WINE_MSGLOOP_TIMEOUT" ))) timeout_ms = atol( env );
     if ((env = getenv( "WINE_MSGLOOP_SRC" ))) only_src = atoi( env );
     if ((env = getenv( "WINE_MSGLOOP_ORDER" ))) only_order = atoi( env );
     if ((env = getenv( "WINE_MSGLOOP_IA" ))) only_ia = atoi( env );
