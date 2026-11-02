@@ -3959,6 +3959,31 @@ BOOLEAN WINAPI RtlDllShutdownInProgress(void)
     return process_detaching;
 }
 
+/* notification codes used with the MSVC delay-load failure hook (delayimp.h).
+ * DELAYLOAD_GPA_FAILURE (4) is dliGetProcAddr; code 3 is dliNotePreLoadLibrary. */
+#define DLI_NOTE_PRE_LOAD_LIBRARY 3
+#define DLI_GET_PROC_ADDR         4
+
+static void fill_delayinfo( DELAYLOAD_INFO *info, void *base, const IMAGE_DELAYLOAD_DESCRIPTOR *desc,
+                            IMAGE_THUNK_DATA *addr, const IMAGE_THUNK_DATA *thunk )
+{
+    info->Size = sizeof(*info);
+    info->DelayloadDescriptor = desc;
+    info->ThunkAddress = addr;
+    info->TargetDllName = get_rva( base, desc->DllNameRVA );
+    info->TargetApiDescriptor.ImportDescribedByName = !IMAGE_SNAP_BY_ORDINAL(thunk->u1.Ordinal);
+    /* a union: the import name for an import by name. The failure callback of .NET Native's
+     * mrt100_app.dll compares it with strings, and the ordinal's low word left in it was a
+     * wild pointer that faulted in its DllMain. */
+    if (info->TargetApiDescriptor.ImportDescribedByName)
+    {
+        const IMAGE_IMPORT_BY_NAME *iibn = get_rva( base, thunk->u1.AddressOfData );
+        info->TargetApiDescriptor.Description.Name = iibn->Name;
+    }
+    else info->TargetApiDescriptor.Description.Ordinal = LOWORD(thunk->u1.Ordinal);
+    info->Unused = NULL;
+}
+
 /****************************************************************************
  *              LdrResolveDelayLoadedAPI   (NTDLL.@)
  */
@@ -3999,14 +4024,30 @@ void* WINAPI LdrResolveDelayLoadedAPI( void* base, const IMAGE_DELAYLOAD_DESCRIP
 
     if (!*phmod)
     {
-        if (!RtlCreateUnicodeStringFromAsciiz(&mod, name))
+        /* as on Windows the DLL gets a chance to supply the module itself (dliNotePreLoadLibrary) */
+        if (dllhook)
         {
-            nts = STATUS_NO_MEMORY;
-            goto fail;
+            DELAYLOAD_INFO info;
+            fill_delayinfo( &info, base, desc, addr, &pINT[id] );
+            info.TargetModuleBase = NULL;
+            info.LastError = 0;
+            *phmod = (HMODULE)dllhook( DLI_NOTE_PRE_LOAD_LIBRARY, &info );
         }
-        nts = LdrLoadDll(NULL, 0, &mod, phmod);
-        RtlFreeUnicodeString(&mod);
-        if (nts) goto fail;
+        if (!*phmod)
+        {
+            if (!RtlCreateUnicodeStringFromAsciiz(&mod, name))
+            {
+                nts = STATUS_NO_MEMORY;
+                goto fail;
+            }
+            nts = LdrLoadDll(NULL, 0, &mod, phmod);
+            RtlFreeUnicodeString(&mod);
+            if (nts)
+            {
+                *phmod = NULL;
+                goto fail;
+            }
+        }
     }
 
     if (IMAGE_SNAP_BY_ORDINAL(pINT[id].u1.Ordinal))
@@ -4026,18 +4067,14 @@ void* WINAPI LdrResolveDelayLoadedAPI( void* base, const IMAGE_DELAYLOAD_DESCRIP
     }
 
 fail:
-    delayinfo.Size = sizeof(delayinfo);
-    delayinfo.DelayloadDescriptor = desc;
-    delayinfo.ThunkAddress = addr;
-    delayinfo.TargetDllName = name;
-    delayinfo.TargetApiDescriptor.ImportDescribedByName = !IMAGE_SNAP_BY_ORDINAL(pINT[id].u1.Ordinal);
-    delayinfo.TargetApiDescriptor.Description.Ordinal = LOWORD(pINT[id].u1.Ordinal);
+    fill_delayinfo( &delayinfo, base, desc, addr, &pINT[id] );
     delayinfo.TargetModuleBase = *phmod;
-    delayinfo.Unused = NULL;
-    delayinfo.LastError = nts;
+    delayinfo.LastError = RtlNtStatusToDosError( nts );
 
-    if (dllhook)
-        return dllhook(4, &delayinfo);
+    /* the system hook (kernelbase's DelayLoadFailureHook) runs when the DLL's own hook declines
+     * (returns NULL), as on Windows: mrt100_app.dll's hook handles only SetProcessValidCallTargets,
+     * and returning its NULL made the caller jump to address 0 */
+    if (dllhook && (fp = dllhook( DLI_GET_PROC_ADDR, &delayinfo ))) return fp;
 
     if (IMAGE_SNAP_BY_ORDINAL(pINT[id].u1.Ordinal))
     {

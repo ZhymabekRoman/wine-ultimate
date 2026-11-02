@@ -13,6 +13,7 @@ SOURCES = \
 	generated.c \
 	info.c \
 	large_int.c \
+	loader.c \
 	om.c \
 	path.c \
 	pipe.c \

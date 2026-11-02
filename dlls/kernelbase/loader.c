@@ -212,7 +212,10 @@ FARPROC WINAPI DECLSPEC_HOTPATCH DelayLoadFailureHook( LPCSTR name, LPCSTR funct
         ERR( "failed to delay load %s.%u\n", name, LOWORD(function) );
     args[0] = (ULONG_PTR)name;
     args[1] = (ULONG_PTR)function;
-    RaiseException( EXCEPTION_WINE_STUB, EXCEPTION_NONCONTINUABLE, 2, args );
+    /* Windows' kernelbase (26100) raises ERROR_DELAY_LOAD_FAILED (0x505) with (dll, function)
+     * args; .NET Native's mrt100_app.dll delay-loads mrt100.dll in DllMain and its __except
+     * filter takes the built-in in-DLL fallback only on exactly this code. */
+    RaiseException( ERROR_DELAY_LOAD_FAILED, EXCEPTION_NONCONTINUABLE, 2, args );
     return NULL;
 }
 
