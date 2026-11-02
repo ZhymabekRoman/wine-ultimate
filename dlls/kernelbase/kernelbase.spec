@@ -139,7 +139,7 @@
 @ stdcall ClearCommError(long ptr ptr)
 # @ stub CloseGlobalizationUserSettingsKey
 @ stdcall CloseHandle(long)
-# @ stub ClosePackageInfo
+@ stdcall ClosePackageInfo(ptr)
 # @ stub ClosePrivateNamespace
 @ stdcall ClosePseudoConsole(ptr)
 @ stdcall CloseState(ptr)
@@ -391,6 +391,7 @@
 @ stdcall FlsAlloc(ptr)
 @ stdcall FlsFree(long)
 @ stdcall FlsGetValue(long)
+@ stdcall FlsGetValue2(long)
 @ stdcall FlsSetValue(long ptr)
 @ stdcall FlushConsoleInputBuffer(long)
 @ stdcall FlushFileBuffers(long)
@@ -632,7 +633,7 @@
 @ stdcall GetOverlappedResult(long ptr ptr long)
 @ stdcall GetOverlappedResultEx(long ptr ptr long long)
 # @ stub GetPackageApplicationContext
-# @ stub GetPackageApplicationIds
+@ stdcall GetPackageApplicationIds(wstr int128 ptr ptr)
 # @ stub GetPackageApplicationProperty
 # @ stub GetPackageApplicationPropertyString
 # @ stub GetPackageApplicationResourcesContext
@@ -1043,7 +1044,7 @@
 @ stdcall OpenJobObjectW(long long wstr)
 @ stdcall OpenGlobalizationUserSettingsKey(long long ptr)
 @ stdcall OpenMutexW(long long wstr)
-# @ stub OpenPackageInfoByFullName
+@ stdcall OpenPackageInfoByFullName(wstr long ptr)
 # @ stub OpenPackageInfoByFullNameForUser
 # @ stub OpenPrivateNamespaceW
 @ stdcall OpenProcess(long long long)

@@ -226,6 +226,7 @@
 @ stdcall CloseConsoleHandle(long)
 @ stdcall -import CloseHandle(long)
 # @ stub ClosePrivateNamespace
+@ stdcall ClosePackageInfo(ptr) kernelbase.ClosePackageInfo
 @ stdcall CloseProfileUserMapping()
 @ stdcall -import ClosePseudoConsole(ptr)
 @ stub CloseSystemHandle
@@ -514,6 +515,7 @@
 @ stdcall -import FindNextVolumeW(long ptr long)
 @ stdcall -import FindNLSString(long long wstr long wstr long ptr)
 @ stdcall -import FindNLSStringEx(wstr long wstr long wstr long ptr ptr ptr long)
+@ stdcall FindPackagesByPackageFamily(wstr long ptr ptr ptr ptr ptr) kernelbase.FindPackagesByPackageFamily
 @ stdcall FindResourceA(long str str)
 @ stdcall FindResourceExA(long str str long)
 @ stdcall -import FindResourceExW(long wstr wstr long)
@@ -781,6 +783,7 @@
 @ stdcall -import GetOverlappedResultEx(long ptr ptr long long)
 @ stdcall -import GetUserDefaultGeoName(ptr long)
 @ stdcall -import GetUserPreferredUILanguages(long ptr ptr ptr)
+@ stdcall GetPackageApplicationIds(wstr int128 ptr ptr) kernelbase.GetPackageApplicationIds
 @ stdcall GetPackageFamilyName(long ptr ptr) kernelbase.GetPackageFamilyName
 @ stdcall GetPackageFullName(long ptr ptr) kernelbase.GetPackageFullName
 @ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr) kernelbase.GetPackagesByPackageFamily
@@ -1161,6 +1164,7 @@
 # @ stub OpenPrivateNamespaceW
 @ stdcall -import OpenProcess(long long long)
 @ stdcall -import OpenProcessToken(long long ptr)
+@ stdcall OpenPackageInfoByFullName(wstr long ptr) kernelbase.OpenPackageInfoByFullName
 @ stdcall OpenProfileUserMapping()
 @ stdcall OpenSemaphoreA(long long str)
 @ stdcall -import OpenSemaphoreW(long long wstr)

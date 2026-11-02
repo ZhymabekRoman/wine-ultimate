@@ -2136,6 +2136,245 @@ LONG WINAPI FindPackagesByPackageFamily( const WCHAR *family, UINT32 count, WCHA
     }
     return ERROR_SUCCESS;
 }
+/*
+ * Package-info blocks.
+ *
+ * OpenPackageInfoByFullName hands the caller a single heap block: a tagged
+ * header, the PACKAGE_INFO struct, then every string the struct points at. That
+ * layout lets ClosePackageInfo release what Open allocated in one HeapFree, and
+ * the tag is what tells our blocks apart from the array entries a
+ * FindPackagesByPackageFamily caller owns -- for those Windows releases the
+ * strings, not the entry, so tagging keeps us from freeing caller memory.
+ */
+#define PACKAGE_INFO_BLOCK_TAG 0x57696e5061636b31ULL /* "WinPack1" */
+
+struct package_info_block
+{
+    UINT64 tag;
+    UINT32 reserved[2];
+    PACKAGE_INFO info;
+    WCHAR strings[];
+};
+
+static void copy_str_to_block( struct package_info_block *block, SIZE_T *cch, WCHAR **field, const WCHAR *str )
+{
+    SIZE_T len;
+
+    if (!str) { *field = NULL; return; }
+    len = wcslen( str ) + 1;
+    *field = block->strings + *cch;
+    memcpy( *field, str, len * sizeof( WCHAR ) );
+    *cch += len;
+}
+
+static void free_package_info_strings( PACKAGE_INFO *info )
+{
+    WCHAR **fields[] = { &info->path, &info->packageFullName, &info->packageFamilyName,
+                         &info->packageId.name, &info->packageId.publisher,
+                         &info->packageId.resourceId, &info->packageId.publisherId };
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE( fields ); i++)
+    {
+        HeapFree( GetProcessHeap(), 0, fields[i][0] );
+        fields[i][0] = NULL;
+    }
+}
+
+/* One package-info block for full_name + path, carrying the same identity fields
+ * GetCurrentPackageInfo and FindPackagesByPackageFamily produce. */
+static HRESULT package_info_block_from_name( const WCHAR *full_name, const WCHAR *path,
+                                             struct package_info_block **ret )
+{
+    WCHAR family[256] = L"";
+    UINT32 family_len = ARRAY_SIZE( family ), id_len = 0;
+    struct package_info_block *block;
+    PACKAGE_ID *id;
+    BYTE *id_buffer;
+    SIZE_T strings = 0, cch = 0;
+
+    if (PackageIdFromFullName( full_name, 0, &id_len, NULL ) != ERROR_INSUFFICIENT_BUFFER)
+        return HRESULT_FROM_WIN32( APPMODEL_ERROR_PACKAGE_IDENTITY_CORRUPT );
+    if (!(id_buffer = HeapAlloc( GetProcessHeap(), 0, id_len ))) return E_OUTOFMEMORY;
+    if (PackageIdFromFullName( full_name, 0, &id_len, id_buffer ))
+    {
+        HeapFree( GetProcessHeap(), 0, id_buffer );
+        return HRESULT_FROM_WIN32( APPMODEL_ERROR_PACKAGE_IDENTITY_CORRUPT );
+    }
+    id = (PACKAGE_ID *)id_buffer;
+
+    if (PackageFamilyNameFromFullName( full_name, &family_len, family )) family[0] = 0;
+
+    strings = wcslen( full_name ) + 1;
+    if (path) strings += wcslen( path ) + 1;
+    if (family[0]) strings += wcslen( family ) + 1;
+    if (id->name) strings += wcslen( id->name ) + 1;
+    if (id->publisher) strings += wcslen( id->publisher ) + 1;
+    if (id->resourceId) strings += wcslen( id->resourceId ) + 1;
+    if (id->publisherId) strings += wcslen( id->publisherId ) + 1;
+
+    if (!(block = HeapAlloc( GetProcessHeap(), 0, sizeof(*block) + strings * sizeof( WCHAR ) )))
+    {
+        HeapFree( GetProcessHeap(), 0, id_buffer );
+        return E_OUTOFMEMORY;
+    }
+    memset( block, 0, sizeof(*block) );
+    block->tag = PACKAGE_INFO_BLOCK_TAG;
+    block->info.packageId = *id;
+    copy_str_to_block( block, &cch, &block->info.path, path );
+    copy_str_to_block( block, &cch, &block->info.packageFullName, full_name );
+    copy_str_to_block( block, &cch, &block->info.packageFamilyName, family[0] ? family : NULL );
+    copy_str_to_block( block, &cch, &block->info.packageId.name, id->name );
+    copy_str_to_block( block, &cch, &block->info.packageId.publisher, id->publisher );
+    copy_str_to_block( block, &cch, &block->info.packageId.resourceId, id->resourceId );
+    copy_str_to_block( block, &cch, &block->info.packageId.publisherId, id->publisherId );
+
+    HeapFree( GetProcessHeap(), 0, id_buffer );
+    *ret = block;
+    return S_OK;
+}
+
+/* Path of an env-layer package: the package itself uses WINE_PACKAGE_PATH, its
+ * framework WINE_FRAMEWORK_PACKAGE_PATH. NULL when the variable is not set. */
+static const WCHAR *env_package_path( BOOL framework, WCHAR *buffer, UINT32 cch )
+{
+    buffer[0] = 0;
+    if (GetEnvironmentVariableW( framework ? L"WINE_FRAMEWORK_PACKAGE_PATH" : L"WINE_PACKAGE_PATH", buffer, cch ))
+        return buffer;
+    return NULL;
+}
+
+/***********************************************************************
+ *         OpenPackageInfoByFullName   (kernelbase.@)
+ *
+ * The identity this process has is env-var driven (see GetCurrentPackageFullName),
+ * so exactly one package can be opened: the one WINE_PACKAGE_FULL_NAME names. The
+ * PACKAGE_INFO handed back carries the fields GetCurrentPackageInfo builds, path
+ * included, and ClosePackageInfo releases it.
+ *
+ * A name that does not parse as a package full name reports the appmodel
+ * identity-corrupt code, a well-formed name of any other package the appmodel
+ * no-package code (include/winerror.h: APPMODEL_ERROR_PACKAGE_IDENTITY_CORRUPT,
+ * APPMODEL_ERROR_NO_PACKAGE); the documented return of this API is an HRESULT.
+ */
+LONG WINAPI OpenPackageInfoByFullName( const WCHAR *full_name, UINT32 reserved, PACKAGE_INFO **info )
+{
+    WCHAR current[512], path[512];
+    struct package_info_block *block;
+    const WCHAR *pkg_path;
+    UINT32 id_len = 0;
+    HRESULT hr;
+
+    TRACE( "(%s %#x %p)\n", debugstr_w( full_name ), reserved, info );
+
+    if (!full_name || !info) return E_INVALIDARG;
+    *info = NULL;
+    if (reserved) FIXME( "(%s %#x %p): reserved argument is not supported.\n", debugstr_w( full_name ), reserved, info );
+
+    /* shape first, so a malformed name is told apart from an unknown package */
+    if (PackageIdFromFullName( full_name, 0, &id_len, NULL ) != ERROR_INSUFFICIENT_BUFFER)
+        return HRESULT_FROM_WIN32( APPMODEL_ERROR_PACKAGE_IDENTITY_CORRUPT );
+
+    if (!get_current_package_full_name( current, ARRAY_SIZE( current ) ) || wcsicmp( current, full_name ))
+        return HRESULT_FROM_WIN32( APPMODEL_ERROR_NO_PACKAGE );
+
+    pkg_path = env_package_path( FALSE, path, ARRAY_SIZE( path ) );
+    if ((hr = package_info_block_from_name( full_name, pkg_path, &block )) != S_OK) return hr;
+    *info = &block->info;
+    return S_OK;
+}
+
+
+/***********************************************************************
+ *         ClosePackageInfo   (kernelbase.@)
+ *
+ * Releases a block OpenPackageInfoByFullName handed back. An entry the caller
+ * owns (from FindPackagesByPackageFamily) keeps its struct -- only the strings
+ * we allocated for it are released, which is what Windows does for those.
+ */
+LONG WINAPI ClosePackageInfo( PACKAGE_INFO *info )
+{
+    struct package_info_block *block = CONTAINING_RECORD( info, struct package_info_block, info );
+
+    TRACE( "%p\n", info );
+
+    if (!info) return E_INVALIDARG;
+    if (block->tag == PACKAGE_INFO_BLOCK_TAG)
+    {
+        HeapFree( GetProcessHeap(), 0, block );
+        return S_OK;
+    }
+    free_package_info_strings( info );
+    return S_OK;
+}
+
+
+/***********************************************************************
+ *         GetPackageApplicationIds   (kernelbase.@)
+ *
+ * Answers from the env-var identity, the only identity there is: the packages in
+ * the queried family are the running package and, when WINE_FRAMEWORK_PACKAGE_FULL_NAME
+ * names one, its framework -- the same set FindPackagesByPackageFamily reports.
+ * The enumeration type GUID is not discriminated. Passing no array is the count
+ * query. Each HPKG is a package-info block ClosePackageInfo releases; the array
+ * itself Windows frees with FreePackageEnum, which is not implemented here.
+ */
+LONG WINAPI GetPackageApplicationIds( const WCHAR *family_name, GUID package_enumeration_type,
+                                      UINT32 *count, HPKG *packages )
+{
+    static int once;
+    const WCHAR *names[2] = { NULL, NULL };
+    BOOL framework[2] = { FALSE, FALSE };
+    WCHAR full[512] = L"", fam_cur[256], path[512], fw_full[512] = L"", fw_path[512];
+    UINT32 n = 0, i, j, fam_len = ARRAY_SIZE( fam_cur );
+    HPKG *handles = NULL;
+
+    TRACE( "(%s %s %p %p)\n", debugstr_w( family_name ), debugstr_guid( &package_enumeration_type ), count, packages );
+
+    if (!family_name || !count) return E_INVALIDARG;
+    if (packages) *packages = NULL;
+    if (!once++) FIXME( "(%s %s %p %p): answering from the env-var identity, the enumeration type is not discriminated.\n",
+                        debugstr_w( family_name ), debugstr_guid( &package_enumeration_type ), count, packages );
+
+    if (get_current_package_full_name( full, ARRAY_SIZE( full ) ) &&
+        !PackageFamilyNameFromFullName( full, &fam_len, fam_cur ) && !wcsicmp( fam_cur, family_name ))
+        names[n++] = full;
+
+    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw_full, ARRAY_SIZE( fw_full ) ))
+    {
+        WCHAR fam_fw[256];
+        UINT32 len = ARRAY_SIZE( fam_fw );
+        if (!PackageFamilyNameFromFullName( fw_full, &len, fam_fw ) && !wcsicmp( fam_fw, family_name ))
+        {
+            framework[n] = TRUE;
+            names[n++] = fw_full;
+        }
+    }
+
+    *count = n;
+    if (!packages || !n) return ERROR_SUCCESS;
+
+    if (!(handles = HeapAlloc( GetProcessHeap(), 0, n * sizeof(*handles) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < n; i++)
+    {
+        const WCHAR *pkg_path = env_package_path( framework[i], framework[i] ? fw_path : path,
+                                                  ARRAY_SIZE( path ) );
+        struct package_info_block *block;
+        HRESULT hr = package_info_block_from_name( names[i], pkg_path, &block );
+
+        if (hr != S_OK)
+        {
+            for (j = 0; j < i; j++) ClosePackageInfo( (PACKAGE_INFO *)handles[j] );
+            HeapFree( GetProcessHeap(), 0, handles );
+            return hr;
+        }
+        handles[i] = (HPKG)&block->info;
+    }
+    *packages = (HPKG)handles;
+    return ERROR_SUCCESS;
+}
+
+
 /***********************************************************************
  *         IsMrtResourceRedirectionEnabled   (kernelbase.@)
  */

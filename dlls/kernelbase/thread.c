@@ -1298,6 +1298,23 @@ PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue( DWORD index )
 
 
 /***********************************************************************
+ *           FlsGetValue2   (kernelbase.@)
+ *
+ * The callback-free reader of the same FLS slot FlsGetValue reads. ntdll has no
+ * RtlFlsGetValue2; RtlFlsGetValue runs no callbacks either, so it is the whole
+ * difference. msedge.dll looks this up in kernelbase.dll directly.
+ */
+PVOID WINAPI DECLSPEC_HOTPATCH FlsGetValue2( DWORD index )
+{
+    void *data = NULL;
+
+    if (!set_ntstatus( RtlFlsGetValue( index, &data ))) return NULL;
+    SetLastError( ERROR_SUCCESS );
+    return data;
+}
+
+
+/***********************************************************************
  *           FlsSetValue   (kernelbase.@)
  */
 BOOL WINAPI DECLSPEC_HOTPATCH FlsSetValue( DWORD index, PVOID data )

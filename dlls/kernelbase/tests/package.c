@@ -39,6 +39,11 @@ typedef LONG (WINAPI *info2_fn)( UINT32 flags, UINT64 buffer_size, BYTE *buffer,
 typedef LONG (WINAPI *find_fn)( const WCHAR *family, UINT32 count, WCHAR *full_names, UINT32 *full_names_len,
                                 PACKAGE_INFO *package_info, UINT32 *package_info_count, void *filter );
 typedef LONG (WINAPI *close_state_fn)( void *state );
+typedef void *(WINAPI *fls_get2_fn)( DWORD index );
+typedef LONG (WINAPI *open_info_fn)( const WCHAR *full_name, UINT32 reserved, PACKAGE_INFO **info );
+typedef LONG (WINAPI *close_info_fn)( PACKAGE_INFO *info );
+/* GetPackageApplicationIds takes the package enumeration type (a GUID) by value. */
+typedef LONG (WINAPI *app_ids_fn)( const WCHAR *family, GUID type, UINT32 *count, HANDLE *packages );
 
 static void *kb_export( const char *name )
 {
@@ -219,6 +224,141 @@ static void test_close_state( void )
     ok( p( (void *)1 ) == ERROR_SUCCESS, "CloseState returned an error\n" );
 }
 
+/* FlsGetValue2 is the callback-free reader of the same FLS slot FlsGetValue
+ * reads; msedge.dll 136 looks it up in kernelbase.dll directly. */
+static void test_fls_get_value2( void )
+{
+    fls_get2_fn get2 = (void *)kb_export( "FlsGetValue2" );
+    DWORD index;
+
+    ok( get2 != NULL, "FlsGetValue2 not exported\n" );
+    if (!get2) return;
+
+    ok( get2( 0 ) == NULL, "reserved index returned %p\n", get2( 0 ) );
+
+    index = FlsAlloc( NULL );
+    ok( index != FLS_OUT_OF_INDEXES, "FlsAlloc failed\n" );
+    if (index == FLS_OUT_OF_INDEXES) return;
+
+    ok( get2( index ) == NULL, "fresh slot returned %p\n", get2( index ) );
+    ok( FlsSetValue( index, (void *)0x1234 ), "FlsSetValue failed\n" );
+    ok( get2( index ) == (void *)0x1234, "slot value %p\n", get2( index ) );
+    ok( get2( index ) == FlsGetValue( index ), "value2 %p value %p\n", get2( index ), FlsGetValue( index ) );
+
+    ok( FlsSetValue( index, NULL ), "clear FlsSetValue failed\n" );
+    ok( get2( index ) == NULL, "cleared slot returned %p\n", get2( index ) );
+    ok( FlsFree( index ), "FlsFree failed\n" );
+}
+
+/* The identity OpenPackageInfoByFullName hands back has to be the one
+ * GetCurrentPackageInfo builds for the running package. */
+static void check_info_against_current( const char *name, const PACKAGE_INFO *info )
+{
+    BYTE buffer[8192];
+    PACKAGE_INFO *ref = (PACKAGE_INFO *)buffer;
+    UINT32 size = sizeof( buffer ), count = 0;
+    LONG ret = GetCurrentPackageInfo( 0, &size, buffer, &count );
+
+    ok( ret == ERROR_SUCCESS && count == 1, "%s reference ret %ld count %u\n", name, ret, count );
+    if (ret != ERROR_SUCCESS || count != 1) return;
+
+    ok( info->reserved == ref->reserved, "%s reserved %u\n", name, info->reserved );
+    ok( info->flags == ref->flags, "%s flags %#x\n", name, info->flags );
+    ok( info->path && !wcscmp( info->path, ref->path ), "%s path %s\n", name, debugstr_w( info->path ) );
+    ok( info->packageFullName && !wcscmp( info->packageFullName, ref->packageFullName ),
+        "%s full name %s\n", name, debugstr_w( info->packageFullName ) );
+    ok( info->packageFamilyName && !wcscmp( info->packageFamilyName, ref->packageFamilyName ),
+        "%s family %s\n", name, debugstr_w( info->packageFamilyName ) );
+    ok( info->packageId.processorArchitecture == ref->packageId.processorArchitecture,
+        "%s arch %#x\n", name, info->packageId.processorArchitecture );
+    ok( info->packageId.version.Version == ref->packageId.version.Version,
+        "%s version %#llx\n", name, info->packageId.version.Version );
+    ok( info->packageId.name && !wcscmp( info->packageId.name, ref->packageId.name ),
+        "%s id name %s\n", name, debugstr_w( info->packageId.name ) );
+    ok( info->packageId.publisherId && !wcscmp( info->packageId.publisherId, ref->packageId.publisherId ),
+        "%s publisher id %s\n", name, debugstr_w( info->packageId.publisherId ) );
+    ok( info->packageId.resourceId && !wcscmp( info->packageId.resourceId, ref->packageId.resourceId ),
+        "%s resource id %s\n", name, debugstr_w( info->packageId.resourceId ) );
+    ok( info->packageFullName && !wcscmp( info->packageFullName, FULL_NAME ),
+        "%s full name is not the test package %s\n", name, debugstr_w( info->packageFullName ) );
+}
+
+/*
+ * Documented return values of OpenPackageInfoByFullName for a name we have no
+ * identity for, taken from the APPMODEL codes in include/winerror.h:3387-3389:
+ * a name that does not parse as a package full name reports the identity-corrupt
+ * code, a well-formed name of another package the no-package code.
+ */
+#define HR_CORRUPT_NAME   HRESULT_FROM_WIN32( APPMODEL_ERROR_PACKAGE_IDENTITY_CORRUPT )
+#define HR_NO_PACKAGE     HRESULT_FROM_WIN32( APPMODEL_ERROR_NO_PACKAGE )
+
+static void test_open_package_info_by_full_name( void )
+{
+    open_info_fn open = (void *)kb_export( "OpenPackageInfoByFullName" );
+    close_info_fn close = (void *)kb_export( "ClosePackageInfo" );
+    PACKAGE_INFO *info = (PACKAGE_INFO *)0x1;
+    LONG ret;
+
+    ok( open != NULL, "OpenPackageInfoByFullName not exported\n" );
+    if (!open) return;
+
+    info = NULL;
+    ret = open( FULL_NAME, 0, &info );
+    ok( ret == S_OK && info != NULL, "open ret %#lx info %p\n", ret, info );
+    if (ret == S_OK && info)
+    {
+        check_info_against_current( "open", info );
+        if (close) ok( close( info ) == S_OK, "close returned an error\n" );
+    }
+
+    info = NULL;
+    ret = open( L"garbage", 0, &info );
+    ok( ret == HR_CORRUPT_NAME && !info, "bogus name ret %#lx info %p\n", ret, info );
+
+    info = NULL;
+    ret = open( L"NotExist_1.2.3.4_x64__8wekyb3d8bbwe", 0, &info );
+    ok( ret == HR_NO_PACKAGE && !info, "absent package ret %#lx info %p\n", ret, info );
+
+    ok( open( NULL, 0, &info ) == E_INVALIDARG, "null name not rejected\n" );
+    ok( open( FULL_NAME, 0, NULL ) == E_INVALIDARG, "null out not rejected\n" );
+
+    if (close) ok( close( NULL ) == E_INVALIDARG, "close of null not rejected\n" );
+}
+
+static void test_get_package_application_ids( void )
+{
+    app_ids_fn f = (void *)kb_export( "GetPackageApplicationIds" );
+    HANDLE packages = NULL;
+    UINT32 count = 0xdead;
+    GUID type;
+    LONG ret;
+
+    ok( f != NULL, "GetPackageApplicationIds not exported\n" );
+    if (!f) return;
+
+    memset( &type, 0, sizeof(type) );
+
+    /* query: the count of packages in our own family, without an array */
+    ret = f( FAMILY_NAME, type, &count, NULL );
+    ok( ret == ERROR_SUCCESS && count >= 1, "query ret %#lx count %u\n", ret, count );
+
+    /* fill: one HPKG per package in the family */
+    count = 0;
+    packages = NULL;
+    ret = f( FAMILY_NAME, type, &count, &packages );
+    ok( ret == ERROR_SUCCESS, "fill ret %#lx\n", ret );
+    ok( count >= 1, "fill count %u\n", count );
+    ok( packages != NULL, "fill array %p\n", packages );
+
+    /* a family that is not ours resolves to nothing */
+    count = 0xdead;
+    ret = f( L"NotExist_8wekyb3d8bbwe", type, &count, NULL );
+    ok( ret == ERROR_SUCCESS && count == 0, "absent family ret %#lx count %u\n", ret, count );
+
+    ok( f( NULL, type, &count, NULL ) == E_INVALIDARG, "null family not rejected\n" );
+    ok( f( FAMILY_NAME, type, NULL, NULL ) == E_INVALIDARG, "null count not rejected\n" );
+}
+
 START_TEST( package )
 {
     set_test_env();
@@ -228,5 +368,8 @@ START_TEST( package )
     test_package_contexts();
     test_find_packages_by_family();
     test_close_state();
+    test_fls_get_value2();
+    test_open_package_info_by_full_name();
+    test_get_package_application_ids();
     clear_test_env();
 }

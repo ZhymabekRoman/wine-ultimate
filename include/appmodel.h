@@ -192,6 +192,14 @@ LONG WINAPI FindPackagesByPackageFamily(const WCHAR *family, UINT32 count, WCHAR
 LONG WINAPI CloseState(void *state);
 LONG WINAPI GetPackagePathByFullName(const WCHAR *full_name, UINT32 *length, WCHAR *path);
 
+/* Package handle of the package-family enumeration APIs. */
+DECLARE_HANDLE(HPKG);
+
+LONG WINAPI OpenPackageInfoByFullName(const WCHAR *full_name, UINT32 reserved, PACKAGE_INFO **info);
+LONG WINAPI ClosePackageInfo(PACKAGE_INFO *info);
+LONG WINAPI GetPackageApplicationIds(const WCHAR *family_name, GUID package_enumeration_type,
+                                     UINT32 *count, HPKG *packages);
+
 #if defined(__cplusplus)
 }
 #endif
