@@ -1,0 +1,9 @@
+MODULE    = windows.staterepositorycore.dll
+ENABLE_ARCHS = x86_64
+IMPORTS   = uuid combase advapi32 kernelbase
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	main.c \
+	staterepository.c

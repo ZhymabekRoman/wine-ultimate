@@ -1828,6 +1828,314 @@ LONG WINAPI GetPackagePathByFullName2(const WCHAR *name, UINT32 type, UINT32 *le
     return GetPackagePathByFullName( name, len, path );
 }
 
+
+/*
+ * Package identity v2/v3 layer.
+ *
+ * Extends the env-var driven v1 layer (WINE_PACKAGE_FULL_NAME / WINE_PACKAGE_PATH /
+ * WINE_FRAMEWORK_PACKAGE_*) to the widened APIs packaged UWP apps ask for on
+ * Win10+: 64-bit buffer sizes, the extended PACKAGE_INFO2/PACKAGE_INFO3 layouts,
+ * package context strings, FindPackagesByPackageFamily, and CloseState.
+ * The context strings are opaque on Windows; the only identity this layer has
+ * is the full name, so the context APIs hand that back. Family queries answer
+ * against the running package and its framework, the only packages there are.
+ */
+
+#define PACKAGE_INSTALL_STATE_AVAILABLE_ 0
+#define PACKAGE_TARGET_DEVICE_FAMILY_    L"Windows.Desktop"
+#define PACKAGE_INSTALLATION_LCID_       0x0409
+#define PACKAGE_INFORMATION_FRAMEWORK_   0x00000001
+
+static LONG current_package_info_ext( const UINT32 flags, SIZE_T buffer_size, BYTE *buffer,
+                                      UINT32 *count, UINT32 version, SIZE_T entry_size )
+{
+    BYTE scratch[8192], *heap_scratch = NULL;
+    UINT32 cnt = 0, i, j, sz;
+    PACKAGE_INFO *src, *base;
+    SIZE_T str_total = 0, out_need, off;
+    LONG ret;
+
+    sz = sizeof(scratch);
+    ret = GetCurrentPackageInfo( flags, &sz, scratch, &cnt );
+    if (ret == ERROR_INSUFFICIENT_BUFFER)
+    {
+        if (!(heap_scratch = HeapAlloc( GetProcessHeap(), 0, sz ))) return ERROR_OUTOFMEMORY;
+        sz = heap_scratch ? sz : 0;
+        ret = GetCurrentPackageInfo( flags, &sz, heap_scratch, &cnt );
+        src = (PACKAGE_INFO *)heap_scratch;
+    }
+    else src = (PACKAGE_INFO *)scratch;
+    if (ret)
+    {
+        HeapFree( GetProcessHeap(), 0, heap_scratch );
+        return ret;
+    }
+
+    for (i = 0; i < cnt; i++)
+    {
+        const WCHAR *strs[7] = { src[i].path, src[i].packageFullName, src[i].packageFamilyName,
+                                 src[i].packageId.name, src[i].packageId.publisher,
+                                 src[i].packageId.resourceId, src[i].packageId.publisherId };
+        for (j = 0; j < ARRAY_SIZE( strs ); j++)
+            if (strs[j]) str_total += (wcslen( strs[j] ) + 1) * sizeof( WCHAR );
+        if (version == 3) str_total += (wcslen( PACKAGE_TARGET_DEVICE_FAMILY_ ) + 1) * sizeof( WCHAR );
+    }
+
+    out_need = (SIZE_T)cnt * entry_size + str_total;
+    if (count) *count = cnt;
+    if (!buffer || buffer_size < out_need)
+    {
+        HeapFree( GetProcessHeap(), 0, heap_scratch );
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    off = (SIZE_T)cnt * entry_size;
+    for (i = 0; i < cnt; i++)
+    {
+        BYTE *dst = buffer + (SIZE_T)i * entry_size;
+        memcpy( dst, &src[i], sizeof(PACKAGE_INFO) );
+        base = (PACKAGE_INFO *)dst;
+        *(UINT32 *)(dst + sizeof(PACKAGE_INFO)) = PACKAGE_INSTALL_STATE_AVAILABLE_;
+        if (version == 3)
+        {
+            *(UINT32 *)(dst + sizeof(PACKAGE_INFO) + 4) = PACKAGE_INSTALLATION_LCID_;
+            *(const WCHAR **)(dst + sizeof(PACKAGE_INFO) + 8) = NULL;
+        }
+#define COPY_FIELD(f) do { if (base->f) { SIZE_T b = (wcslen( base->f ) + 1) * sizeof(WCHAR); \
+            WCHAR *np = (WCHAR *)(buffer + off); memcpy( np, base->f, b ); off += b; base->f = np; } } while (0)
+        COPY_FIELD( path );
+        COPY_FIELD( packageFullName );
+        COPY_FIELD( packageFamilyName );
+#define COPY_IDFIELD(f) do { if (base->packageId.f) { SIZE_T b = (wcslen( base->packageId.f ) + 1) * sizeof(WCHAR); \
+            WCHAR *np = (WCHAR *)(buffer + off); memcpy( np, base->packageId.f, b ); off += b; base->packageId.f = np; } } while (0)
+        COPY_IDFIELD( name );
+        COPY_IDFIELD( publisher );
+        COPY_IDFIELD( resourceId );
+        COPY_IDFIELD( publisherId );
+#undef COPY_FIELD
+#undef COPY_IDFIELD
+        if (version == 3)
+        {
+            static const WCHAR tdf[] = PACKAGE_TARGET_DEVICE_FAMILY_;
+            SIZE_T b = (wcslen( tdf ) + 1) * sizeof( WCHAR );
+            WCHAR *np = (WCHAR *)(buffer + off);
+            memcpy( np, tdf, b );
+            off += b;
+            *(const WCHAR **)(dst + sizeof(PACKAGE_INFO) + 8) = np;
+        }
+    }
+
+    HeapFree( GetProcessHeap(), 0, heap_scratch );
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         GetCurrentPackageInfo2   (kernelbase.@)
+ */
+LONG WINAPI GetCurrentPackageInfo2( const UINT32 flags, UINT64 buffer_size, BYTE *buffer, UINT32 *count )
+{
+    return current_package_info_ext( flags, buffer_size, buffer, count, 2, sizeof(PACKAGE_INFO2) );
+}
+
+/***********************************************************************
+ *         GetCurrentPackageInfo3   (kernelbase.@)
+ */
+LONG WINAPI GetCurrentPackageInfo3( const UINT32 flags, UINT64 buffer_size, BYTE *buffer, UINT32 *count )
+{
+    return current_package_info_ext( flags, buffer_size, buffer, count, 3, sizeof(PACKAGE_INFO3) );
+}
+
+/***********************************************************************
+ *         GetCurrentPackagePath2   (kernelbase.@)
+ */
+LONG WINAPI GetCurrentPackagePath2( const UINT32 flags, UINT32 *length, WCHAR *path )
+{
+    TRACE( "(%#x %p %p)\n", flags, length, path );
+    return GetCurrentPackagePath( length, path );
+}
+
+static LONG package_context_from_env( const UINT32 flags, UINT32 *length, WCHAR *buffer )
+{
+    static int once;
+    if (!once++) FIXME( "package contexts are opaque on Windows; returning the package full name.\n" );
+    return package_str_from_env( L"WINE_PACKAGE_FULL_NAME", length, buffer );
+}
+
+/***********************************************************************
+ *         GetCurrentPackageContext   (kernelbase.@)
+ */
+LONG WINAPI GetCurrentPackageContext( const UINT32 flags, UINT32 *length, WCHAR *buffer )
+{
+    TRACE( "(%#x %p %p)\n", flags, length, buffer );
+    return package_context_from_env( flags, length, buffer );
+}
+
+/***********************************************************************
+ *         GetCurrentPackageApplicationContext   (kernelbase.@)
+ */
+LONG WINAPI GetCurrentPackageApplicationContext( const UINT32 flags, UINT32 *length, WCHAR *buffer )
+{
+    TRACE( "(%#x %p %p)\n", flags, length, buffer );
+    return package_context_from_env( flags, length, buffer );
+}
+
+/***********************************************************************
+ *         GetCurrentPackageApplicationResourcesContext   (kernelbase.@)
+ */
+LONG WINAPI GetCurrentPackageApplicationResourcesContext( const UINT32 flags, UINT32 *length, WCHAR *buffer )
+{
+    TRACE( "(%#x %p %p)\n", flags, length, buffer );
+    return package_context_from_env( flags, length, buffer );
+}
+
+/***********************************************************************
+ *         GetCurrentPackageGlobalizationContext   (kernelbase.@)
+ */
+LONG WINAPI GetCurrentPackageGlobalizationContext( const UINT32 flags, UINT32 *length, WCHAR *buffer )
+{
+    TRACE( "(%#x %p %p)\n", flags, length, buffer );
+    return package_context_from_env( flags, length, buffer );
+}
+
+/***********************************************************************
+ *         CloseState   (kernelbase.@)
+ *
+ * State handles belong to the StateRepository service, which is not here; the
+ * SRPC/SRCache clients (see dlls/windows.staterepositorycore) treat a closed
+ * handle as nothing, so closing is a no-op that reports success.
+ */
+LONG WINAPI CloseState( void *state )
+{
+    TRACE( "%p\n", state );
+    return ERROR_SUCCESS;
+}
+
+/* The PACKAGE_INFO strings handed to FindPackagesByPackageFamily callers stay
+ * live: ClosePackageInfo is a stub and the SRPC consumers keep reading the
+ * fields they were given, so the strings are process-static copies. */
+static WCHAR *dupw_static( const WCHAR *str )
+{
+    SIZE_T bytes;
+
+    if (!str) return NULL;
+    bytes = (wcslen( str ) + 1) * sizeof( WCHAR );
+    WCHAR *p = HeapAlloc( GetProcessHeap(), 0, bytes );
+    if (p) memcpy( p, str, bytes );
+    return p;
+}
+
+static void fill_package_info_entry( PACKAGE_INFO *info, const WCHAR *full_name, const WCHAR *path, BOOL framework )
+{
+    BYTE id_buf[512];
+    WCHAR fam[256];
+    UINT32 id_len = sizeof(id_buf), fam_len = ARRAY_SIZE(fam);
+    PACKAGE_ID *id = (PACKAGE_ID *)id_buf;
+
+    memset( info, 0, sizeof(*info) );
+    info->flags = framework ? PACKAGE_INFORMATION_FRAMEWORK_ : 0;
+    info->packageFullName = dupw_static( full_name );
+    info->path = dupw_static( path );
+    if (!PackageFamilyNameFromFullName( full_name, &fam_len, fam )) info->packageFamilyName = dupw_static( fam );
+    if (!PackageIdFromFullName( full_name, 0, &id_len, id_buf ))
+    {
+        info->packageId = *id;
+        info->packageId.name = dupw_static( id->name );
+        info->packageId.publisher = dupw_static( id->publisher );
+        info->packageId.resourceId = dupw_static( id->resourceId );
+        info->packageId.publisherId = dupw_static( id->publisherId );
+    }
+}
+
+/***********************************************************************
+ *         FindPackagesByPackageFamily   (kernelbase.@)
+ *
+ * Answers for the packages the env layer knows about: the running package and
+ * its framework. A family that matches neither resolves to nothing, which is
+ * what an uninstalled family does on Windows.
+ */
+LONG WINAPI FindPackagesByPackageFamily( const WCHAR *family, UINT32 count, WCHAR *full_names,
+                                         UINT32 *full_names_len, PACKAGE_INFO *package_info,
+                                         UINT32 *package_info_count, void *filter )
+{
+    static int once;
+    const WCHAR *names[2] = { NULL, NULL }, *paths[2] = { NULL, NULL };
+    BOOL framework[2] = { FALSE, FALSE };
+    WCHAR full[512] = L"", fam_cur[256], path[512] = L"";
+    WCHAR fw_full[512] = L"", fw_path[512] = L"";
+    UINT32 n = 0, total = 0, i, fam_len;
+
+    if (!family || !full_names_len) return ERROR_INVALID_PARAMETER;
+    if (!once++) FIXME( "(%s %u %p %p %p %p %p): answering from the env-var identity\n",
+                        debugstr_w( family ), count, full_names, full_names_len, package_info,
+                        package_info_count, filter );
+
+    fam_len = ARRAY_SIZE( fam_cur );
+    if (get_current_package_full_name( full, ARRAY_SIZE( full) ) &&
+        !PackageFamilyNameFromFullName( full, &fam_len, fam_cur ) && !wcsicmp( fam_cur, family ))
+    {
+        names[n] = full;
+        if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", path, ARRAY_SIZE( path ) )) paths[n] = path;
+        n++;
+    }
+    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw_full, ARRAY_SIZE( fw_full ) ))
+    {
+        WCHAR fam_fw[256];
+        UINT32 len = ARRAY_SIZE( fam_fw );
+        if (!PackageFamilyNameFromFullName( fw_full, &len, fam_fw ) && !wcsicmp( fam_fw, family ))
+        {
+            names[n] = fw_full;
+            if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_PATH", fw_path, ARRAY_SIZE( fw_path ) ))
+                paths[n] = fw_path;
+            framework[n] = TRUE;
+            n++;
+        }
+    }
+
+    for (i = 0; i < n; i++) total += lstrlenW( names[i] ) + 1;
+    if (n > 1) total += n - 1;
+
+    if (!count)  /* query: report the sizes, write nothing */
+    {
+        *full_names_len = total;
+        if (package_info_count) *package_info_count = n;
+        return ERROR_SUCCESS;
+    }
+
+    if (full_names && *full_names_len >= total)
+    {
+        WCHAR *p = full_names;
+        for (i = 0; i < n; i++)
+        {
+            if (i) *p++ = L' ';
+            memcpy( p, names[i], (lstrlenW( names[i] ) + 1) * sizeof( WCHAR ) );
+            p += lstrlenW( names[i] ) + 1;
+        }
+        *full_names_len = lstrlenW( full_names ) + 1;
+    }
+    else
+    {
+        if (full_names && total) full_names[0] = 0;
+        *full_names_len = total;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    if (package_info_count)
+    {
+        UINT32 requested = *package_info_count;
+        if (package_info)
+        {
+            if (requested < n)
+            {
+                *package_info_count = n;
+                return ERROR_INSUFFICIENT_BUFFER;
+            }
+            for (i = 0; i < n; i++)
+                fill_package_info_entry( &package_info[i], names[i], paths[i], framework[i] );
+        }
+        *package_info_count = n;
+    }
+    return ERROR_SUCCESS;
+}
 /***********************************************************************
  *         IsMrtResourceRedirectionEnabled   (kernelbase.@)
  */

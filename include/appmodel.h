@@ -135,6 +135,32 @@ typedef struct PACKAGE_INFO
 }
 PACKAGE_INFO;
 
+typedef struct PACKAGE_INFO2
+{
+    UINT32 reserved;
+    UINT32 flags;
+    WCHAR *path;
+    WCHAR *packageFullName;
+    WCHAR *packageFamilyName;
+    PACKAGE_ID packageId;
+    UINT32 packageInstallState;
+}
+PACKAGE_INFO2;
+
+typedef struct PACKAGE_INFO3
+{
+    UINT32 reserved;
+    UINT32 flags;
+    WCHAR *path;
+    WCHAR *packageFullName;
+    WCHAR *packageFamilyName;
+    PACKAGE_ID packageId;
+    UINT32 packageInstallState;
+    UINT32 installationLcid;
+    const WCHAR *targetDeviceFamily;
+}
+PACKAGE_INFO3;
+
 #define PACKAGE_FILTER_HEAD                 0x00000010
 #define PACKAGE_FILTER_DIRECT               0x00000020
 #define PACKAGE_FILTER_RESOURCE             0x00000040
@@ -153,7 +179,17 @@ LONG WINAPI GetCurrentPackageFamilyName(UINT32 *length, WCHAR *name);
 LONG WINAPI GetCurrentPackageFullName(UINT32 *length, WCHAR *name);
 LONG WINAPI GetCurrentPackageId(UINT32 *length, BYTE *buffer);
 LONG WINAPI GetCurrentPackageInfo(UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count);
+LONG WINAPI GetCurrentPackageInfo2(UINT32 flags, UINT64 buffer_size, BYTE *buffer, UINT32 *count);
+LONG WINAPI GetCurrentPackageInfo3(UINT32 flags, UINT64 buffer_size, BYTE *buffer, UINT32 *count);
 LONG WINAPI GetCurrentPackagePath(UINT32 *length, WCHAR *path);
+LONG WINAPI GetCurrentPackagePath2(UINT32 flags, UINT32 *length, WCHAR *path);
+LONG WINAPI GetCurrentPackageContext(UINT32 flags, UINT32 *length, WCHAR *buffer);
+LONG WINAPI GetCurrentPackageApplicationContext(UINT32 flags, UINT32 *length, WCHAR *buffer);
+LONG WINAPI GetCurrentPackageApplicationResourcesContext(UINT32 flags, UINT32 *length, WCHAR *buffer);
+LONG WINAPI GetCurrentPackageGlobalizationContext(UINT32 flags, UINT32 *length, WCHAR *buffer);
+LONG WINAPI FindPackagesByPackageFamily(const WCHAR *family, UINT32 count, WCHAR *full_names, UINT32 *full_names_len,
+                                        PACKAGE_INFO *package_info, UINT32 *package_info_count, void *filter);
+LONG WINAPI CloseState(void *state);
 LONG WINAPI GetPackagePathByFullName(const WCHAR *full_name, UINT32 *length, WCHAR *path);
 
 #if defined(__cplusplus)

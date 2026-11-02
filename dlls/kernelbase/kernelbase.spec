@@ -142,7 +142,7 @@
 # @ stub ClosePackageInfo
 # @ stub ClosePrivateNamespace
 @ stdcall ClosePseudoConsole(ptr)
-# @ stub CloseState
+@ stdcall CloseState(ptr)
 # @ stub CloseStateAtom
 # @ stub CloseStateChangeNotification
 # @ stub CloseStateContainer
@@ -383,7 +383,7 @@
 @ stdcall FindNextFileW(long ptr)
 @ stdcall FindNextStreamW(long ptr)
 @ stdcall FindNextVolumeW(long ptr long)
-# @ stub FindPackagesByPackageFamily
+@ stdcall FindPackagesByPackageFamily(wstr long ptr ptr ptr ptr ptr)
 @ stdcall FindResourceExW(long wstr wstr long)
 @ stdcall FindResourceW(long wstr wstr)
 @ stdcall FindStringOrdinal(long wstr long wstr long long)
@@ -490,14 +490,18 @@
 @ stdcall GetCurrentConsoleFontEx(long long ptr)
 @ stdcall GetCurrentDirectoryA(long ptr)
 @ stdcall GetCurrentDirectoryW(long ptr)
-# @ stub GetCurrentPackageApplicationContext
-# @ stub GetCurrentPackageApplicationResourcesContext
-# @ stub GetCurrentPackageContext
+@ stdcall GetCurrentPackageApplicationContext(long ptr ptr)
+@ stdcall GetCurrentPackageApplicationResourcesContext(long ptr ptr)
+@ stdcall GetCurrentPackageContext(long ptr ptr)
 @ stdcall GetCurrentPackageFamilyName(ptr ptr)
 @ stdcall GetCurrentPackageFullName(ptr ptr)
+@ stdcall GetCurrentPackageGlobalizationContext(long ptr ptr)
 @ stdcall GetCurrentPackageId(ptr ptr)
 @ stdcall GetCurrentPackageInfo(long ptr ptr ptr)
+@ stdcall GetCurrentPackageInfo2(long long ptr ptr ptr)
+@ stdcall GetCurrentPackageInfo3(long long ptr ptr ptr)
 @ stdcall GetCurrentPackagePath(ptr ptr)
+@ stdcall GetCurrentPackagePath2(long ptr ptr)
 # @ stub GetCurrentPackageResourcesContext
 # @ stub GetCurrentPackageSecurityContext
 @ stdcall -norelay GetCurrentProcess() kernelbase_GetCurrentProcess

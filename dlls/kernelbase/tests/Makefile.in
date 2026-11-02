@@ -5,6 +5,7 @@ SOURCES = \
 	file.c \
 	locale.c \
 	memory.c \
+	package.c \
 	path.c \
 	process.c \
 	rsrc.rc \
