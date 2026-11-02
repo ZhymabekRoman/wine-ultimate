@@ -107,6 +107,88 @@ static const GUID IID_IResourceContextNamed_g     = {0x12f5efaf, 0x45fb, 0x4669,
 #define RTCLASS_RESOURCEQUALIFIER L"Windows.ApplicationModel.Resources.Core.ResourceQualifier"
 #define RTCLASS_MEMORYMANAGER     L"Windows.System.MemoryManager"
 
+/*
+ * HSTRING virtualization: Windows' winrtstring handles carry a type tag in the
+ * low 3 bits (payload 8-byte aligned, tags occupy the free low bits); plain
+ * WindowsCreateString handles have low bits 0. .NET Native / CoreRT passes
+ * managed GC strings straight through as HSTRING arguments (the app's AOT code
+ * does exactly this for IMapView<,>::Get keys: p49 trace "mv_Get Lookup
+ * (null)" x5 -> ELEMENT_NOT_FOUND -> failfast c0000602):
+ *   0 = heap handle (this tree's combase hstring_private)
+ *   1 = atom-table string: we own no atom table to resolve against; report,
+ *       never fabricate a buffer
+ *   2 = inline buffer {UINT32 cch; WCHAR chars[cch+1]} at (handle & ~7)
+ *   7 = managed string object at (handle & ~7). x64 GC String ABI:
+ *       MethodTable*@+0x00, int32 cch@+0x08, chars inline right after the
+ *       length field -- coreclr puts m_firstChar at +0x0C, the RTString
+ *       layout note at +0x10. Probe both and adopt the offset whose
+ *       chars[cch] NUL-terminates: offsets proven at runtime, not assumed.
+ * TRUE on decode (buf filled, len optional); atom/undecodable is FALSE and
+ * the caller must NOT fabricate (no match).
+ */
+static BOOL hstring_decode( HSTRING h, const WCHAR **buf, UINT32 *len )
+{
+    static const WCHAR empty_str[1];
+    static const WORD char7_offsets[] = { 0x0C, 0x10 };
+    UINT_PTR v = (UINT_PTR)h;
+    UINT32 tag = (UINT32)(v & 7), cch, i;
+    const BYTE *addr = (const BYTE *)(v & ~(UINT_PTR)7);
+
+    if (len) *len = 0;
+    *buf = NULL;
+
+    if (!h)
+    {
+        *buf = empty_str; /* WindowsGetStringRawBuffer(NULL) semantics */
+        return TRUE;
+    }
+    if (!tag)
+    {
+        *buf = WindowsGetStringRawBuffer( h, len );
+        return TRUE;
+    }
+    if (tag == 2)
+    {
+        cch = *(const UINT32 *)addr;
+        if (cch && cch < 0x10000)
+        {
+            const WCHAR *c = (const WCHAR *)(addr + 4);
+            if (!c[cch])
+            {
+                TRACE( "hstring %p decoded: tag 2, len %u\n", h, cch );
+                *buf = c;
+                if (len) *len = cch;
+                return TRUE;
+            }
+        }
+        TRACE( "hstring %p: tag 2 undecodable\n", h );
+        return FALSE;
+    }
+    if (tag == 7)
+    {
+        cch = *(const UINT32 *)(addr + 8);
+        if (cch && cch < 0x10000)
+        {
+            for (i = 0; i < ARRAYSIZE( char7_offsets ); i++)
+            {
+                const WCHAR *c = (const WCHAR *)(addr + char7_offsets[i]);
+                if (!c[cch])
+                {
+                    TRACE( "hstring %p decoded: tag 7, len %u, chars@+0x%02x\n", h, cch, char7_offsets[i] );
+                    *buf = c;
+                    if (len) *len = cch;
+                    return TRUE;
+                }
+            }
+        }
+        TRACE( "hstring %p: tag 7 undecodable\n", h );
+        return FALSE;
+    }
+    if (tag == 1) FIXME( "atom hstring %p: no atom table to resolve against\n", h );
+    else TRACE( "hstring %p: unknown tag %u\n", h, tag );
+    return FALSE;
+}
+
 /* ------------------------------------------------------------------ */
 /* pri state                                                           */
 /* ------------------------------------------------------------------ */
@@ -551,10 +633,12 @@ static HRESULT WINAPI mv_GetTrustLevel( void *iface, INT32 *t ) { return get_tru
 static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
 {
     struct map_view *impl = mv_from( iface );
-    const WCHAR *raw = WindowsGetStringRawBuffer( key, NULL );
+    const WCHAR *raw;
     UINT32 i;
+
+    if (!hstring_decode( key, &raw, NULL )) raw = NULL; /* atom: no match, no fabrication */
     TRACE( "Lookup %s\n", debugstr_w( raw ) );
-    for (i = 0; i < impl->count; i++)
+    for (i = 0; raw && i < impl->count; i++)
     {
         if (!lstrcmpiW( raw, impl->pairs[i].key ))
             return WindowsCreateString( impl->pairs[i].value, (UINT32)lstrlenW( impl->pairs[i].value ), value );
@@ -565,10 +649,11 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
 static HRESULT WINAPI mv_HasKey( void *iface, HSTRING key, INT32 *has )
 {
     struct map_view *impl = mv_from( iface );
-    const WCHAR *raw = WindowsGetStringRawBuffer( key, NULL );
+    const WCHAR *raw;
     UINT32 i;
     if (!has) return E_POINTER;
     *has = FALSE;
+    if (!hstring_decode( key, &raw, NULL )) return S_OK;
     for (i = 0; i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->pairs[i].key )) { *has = TRUE; break; }
     return S_OK;
@@ -631,8 +716,9 @@ static HRESULT WINAPI rmv_Get( void *iface, HSTRING key, void **map )
 {
 
     if (!map) return E_POINTER;    struct rm_map_view *impl = rmv_from( iface );
-    const WCHAR *raw = WindowsGetStringRawBuffer( key, NULL );
+    const WCHAR *raw;
     UINT32 i;
+    if (!hstring_decode( key, &raw, NULL )) return ELEMENT_NOT_FOUND_E;
     for (i = 0; i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->entries[i].key ))
         {
@@ -644,9 +730,10 @@ static HRESULT WINAPI rmv_Get( void *iface, HSTRING key, void **map )
 static HRESULT WINAPI rmv_HasKey( void *iface, HSTRING key, INT32 *has )
 {
     struct rm_map_view *impl = rmv_from( iface );
-    const WCHAR *raw = WindowsGetStringRawBuffer( key, NULL );
+    const WCHAR *raw;
     UINT32 i;
     *has = FALSE;
+    if (!hstring_decode( key, &raw, NULL )) return S_OK;
     for (i = 0; i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->entries[i].key )) { *has = TRUE; break; }
     return S_OK;
@@ -1146,9 +1233,10 @@ static HRESULT WINAPI cand_GetValueAsFileAsync( void *iface, void **op )
 static HRESULT WINAPI cand_GetQualifierValue( void *iface, HSTRING name, HSTRING *value )
 {
     struct res_candidate *impl = cand_from( iface );
-    const WCHAR *raw = WindowsGetStringRawBuffer( name, NULL );
+    const WCHAR *raw;
     UINT32 i;
-    for (i = 0; i < impl->qcount; i++)
+    if (!hstring_decode( name, &raw, NULL )) return ELEMENT_NOT_FOUND_E;
+    for (i = 0; raw && i < impl->qcount; i++)
         if (!lstrcmpiW( raw, impl->qpairs[i].key ))
             return WindowsCreateString( impl->qpairs[i].value, (UINT32)lstrlenW( impl->qpairs[i].value ), value );
     return ELEMENT_NOT_FOUND_E;
@@ -1369,8 +1457,19 @@ static HRESULT WINAPI map_GetValue( void *iface, HSTRING key, void **out )
 
     if (!out) return E_POINTER;    struct res_map *impl = map_from( iface );
     struct res_candidate *cand;
-    HRESULT hr = map_lookup( impl, WindowsGetStringRawBuffer( key, NULL ), &cand );
-    TRACE( "key %s hr=%08x\n", debugstr_hstring( key ), hr );
+    const WCHAR *raw;
+    HRESULT hr;
+
+    /* debugstr_hstring(key) below would read the combase header of a
+     * virtualized (tagged) app handle: decode first, trace the decoded key. */
+    if (!hstring_decode( key, &raw, NULL ))
+    {
+        TRACE( "key (undecodable hstring %p) -> ELEMENT_NOT_FOUND\n", key );
+        *out = NULL;
+        return ELEMENT_NOT_FOUND_E;
+    }
+    hr = map_lookup( impl, raw, &cand );
+    TRACE( "key %s hr=%08x\n", debugstr_w( raw ), hr );
     if (SUCCEEDED( hr )) *out = &cand->vt_cand;
     else *out = NULL;
     return hr;
@@ -1381,11 +1480,12 @@ static HRESULT WINAPI map_GetSubtree( void *iface, HSTRING name, void **out )
 {
 
     if (!out) return E_POINTER;    struct res_map *impl = map_from( iface );
-    const WCHAR *raw = WindowsGetStringRawBuffer( name, NULL );
+    const WCHAR *raw;
     WCHAR prefix[1024];
     UINT32 i;
 
-    TRACE( "name %s\n", debugstr_hstring( name ) );
+    if (!hstring_decode( name, &raw, NULL )) return E_INVALIDARG;
+    TRACE( "name %s\n", debugstr_w( raw ) );
     lstrcpyW( prefix, raw );
     if (prefix[lstrlenW( prefix ) - 1] != L'\\') lstrcatW( prefix, L"\\" );
     if (impl->prefix) lstrcatW( prefix, impl->prefix );
@@ -1613,11 +1713,19 @@ static HRESULT WINAPI map_GetValueForContext( void *iface, HSTRING key, void *co
     struct res_context *ctx = context ? ctx_from( context ) : NULL;
     HRESULT hr;
 
-    if (ctx && ctx->qcount)
-        hr = map_lookup_ctx( impl, WindowsGetStringRawBuffer( key, NULL ),
-                             (const pri_qual *)ctx->qpairs, ctx->qcount, &cand );
-    else hr = map_lookup( impl, WindowsGetStringRawBuffer( key, NULL ), &cand );
-    TRACE( "key %s ctx %p hr=%08x\n", debugstr_hstring( key ), context, hr );
+    {
+        const WCHAR *raw;
+        if (!hstring_decode( key, &raw, NULL ))
+        {
+            TRACE( "key (undecodable hstring %p) ctx %p -> ELEMENT_NOT_FOUND\n", key, context );
+            *out = NULL;
+            return ELEMENT_NOT_FOUND_E;
+        }
+        if (ctx && ctx->qcount)
+            hr = map_lookup_ctx( impl, raw, (const pri_qual *)ctx->qpairs, ctx->qcount, &cand );
+        else hr = map_lookup( impl, raw, &cand );
+        TRACE( "key %s ctx %p hr=%08x\n", debugstr_w( raw ), context, hr );
+    }
     if (SUCCEEDED( hr )) *out = &cand->vt_cand;
     else *out = NULL;
     return hr;
@@ -1852,8 +1960,9 @@ static HRESULT WINAPI ctx2_GetTrustLevel( void *iface, INT32 *t ) { return get_t
 static HRESULT WINAPI ctx2_SetQualifierValue( void *iface, HSTRING value, HSTRING name )
 {
     struct res_context *impl = ctx2_from( iface );
-    const WCHAR *v = WindowsGetStringRawBuffer( value, NULL );
-    const WCHAR *n = WindowsGetStringRawBuffer( name, NULL );
+    const WCHAR *v, *n;
+    if (!hstring_decode( value, &v, NULL )) v = NULL;
+    if (!hstring_decode( name, &n, NULL )) n = NULL;
     TRACE( "%s = %s\n", debugstr_w( n ), debugstr_w( v ) );
     if (!n || !v) return E_INVALIDARG;
     return context_set_qualifier( impl, n, v );
@@ -2413,7 +2522,8 @@ static HRESULT WINAPI rms_Current( void *iface, void **out )
 }
 static HRESULT WINAPI rms_IsResourceReference( void *iface, HSTRING resource, INT32 *result )
 {
-    const WCHAR *raw = WindowsGetStringRawBuffer( resource, NULL );
+    const WCHAR *raw;
+    if (!hstring_decode( resource, &raw, NULL )) { *result = FALSE; return S_OK; }
     *result = !!wcschr( raw, L'/' );
     return S_OK;
 }

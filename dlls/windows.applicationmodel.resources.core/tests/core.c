@@ -53,6 +53,7 @@
 #define COBJMACROS
 #include "initguid.h"
 #include <stdarg.h>
+#include <stddef.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -85,6 +86,9 @@ static const IID IID_IResourceMap2_loc = {0xd4a52cd1, 0xc6a5, 0x4824, {0x94, 0x5
  * mrt100_app's QI chain probes it on every WinRT object it touches */
 static const IID IID_IAgileObject_loc = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}};
 static const IID IID_IResourceContext2_loc = {0xb6d312f1, 0xbc62, 0x4208, {0xb8, 0xa1, 0xb8, 0x42, 0xc0, 0xc4, 0xbb, 0x54}};
+
+/* IMapView::Get miss: same constant as the module's ELEMENT_NOT_FOUND_E */
+#define ELEMENT_NOT_FOUND_HR HRESULT_FROM_WIN32(0x490L)
 
 /* vtable slot helpers; IInspectable occupies slots 0..5 (3 IUnknown + 3 extra) */
 #define VT(obj, idx) (((void ***)((char *)(obj)))[0][(idx)])
@@ -1215,6 +1219,158 @@ done_factory:
     CALL( factory, 2, &hr );
 }
 
+/*
+ * Virtualized HSTRINGs (.NET Native / CoreRT): the AOT'd app (CalculatorApp.dll)
+ * passes managed GC strings directly as HSTRING arguments -- the low 3 bits of
+ * the handle carry a type tag, the payload is 8-byte aligned (tags 1/2/7 need
+ * 3 free low bits):
+ *   tag 0 = plain WindowsCreateString handle (low bits 0)
+ *   tag 1 = atom-table string (no local table: not resolvable here, not tested)
+ *   tag 2 = inline buffer {UINT32 cch; WCHAR chars[cch+1]} at handle & ~7
+ *   tag 7 = managed string object at handle & ~7; x64 GC String ABI:
+ *           MethodTable*@+0x00, int32 cch@+0x08, chars inline right after the
+ *           length (coreclr: +0x0C; the RTString layout note says +0x10).
+ *           Both candidate char offsets are exercised; the module must decode
+ *           the NUL-terminated one (offsets proven at runtime, not assumed).
+ * The p49 Calculator trace showed mv_Get Lookup (null) x5 from exactly these
+ * keys (QualifierValues Get("Language")), i.e. the module read the tagged
+ * handle as a plain hstring_private and got a NULL/garbage raw buffer.
+ */
+typedef struct { void *mt; UINT32 cch; WCHAR chars[16]; } virtstr_0c;  /* chars @ +0x0C */
+typedef struct { void *mt; UINT32 cch; UINT32 pad; WCHAR chars[16]; } virtstr_10;  /* chars @ +0x10 */
+typedef struct { UINT32 cch; WCHAR chars[16]; } virtbuf_2;             /* chars @ +0x04 */
+
+C_ASSERT(offsetof(virtstr_0c, cch) == 0x08);
+C_ASSERT(offsetof(virtstr_0c, chars) == 0x0C);
+C_ASSERT(offsetof(virtstr_10, cch) == 0x08);
+C_ASSERT(offsetof(virtstr_10, chars) == 0x10);
+C_ASSERT(offsetof(virtbuf_2, chars) == 0x04);
+
+static void test_virtualized_hstring(void)
+{
+    void *factory = NULL, *ctx = NULL, *ctx2 = NULL, *mv = NULL;
+    void *rmfactory = NULL, *rms = NULL, *rm2 = NULL, *map = NULL, *cand = NULL;
+    HSTRING hval = NULL;
+    HRESULT hr;
+    DECLSPEC_ALIGN(8) virtstr_0c s0c, s0c_miss;
+    DECLSPEC_ALIGN(8) virtstr_10 s10, s10calc;
+    DECLSPEC_ALIGN(8) virtbuf_2 b2;
+    HSTRING h7c, h7t, h2, hmiss, hcalc;
+
+    C_ASSERT(sizeof(virtstr_0c) % 8 == 0);
+    C_ASSERT(sizeof(virtstr_10) % 8 == 0);
+    /* virtualized tags need 8-byte-aligned payloads (low 3 bits free) */
+    ok(((UINT_PTR)&s0c % 8) == 0, "virt-hstring: s0c alignment\n");
+    ok(((UINT_PTR)&s10 % 8) == 0, "virt-hstring: s10 alignment\n");
+    ok(((UINT_PTR)&b2 % 8) == 0, "virt-hstring: b2 alignment\n");
+
+    hr = get_factory(L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory);
+    ok(hr == S_OK, "virt-hstring: RoGetActivationFactory(ResourceContext) hr=%08x\n", hr);
+    if (hr != S_OK) return;
+    hr = CALL(factory, 6, &ctx2);  /* ActivateInstance */
+    ok(SUCCEEDED(hr) && ctx2, "virt-hstring: ActivateInstance hr=%08x\n", hr);
+    if (FAILED(hr) || !ctx2) goto done_factory;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(ctx2, 0))(ctx2, &IID_IResourceContext_loc, &ctx);
+    ok(hr == S_OK && ctx, "virt-hstring: QI IResourceContext hr=%08x\n", hr);
+    if (FAILED(hr) || !ctx) goto done_factory;
+    hr = CALL(ctx, 6, &mv);  /* get_QualifierValues: IMapView<HSTRING,HSTRING> */
+    ok(hr == S_OK && mv, "virt-hstring: get_QualifierValues hr=%08x\n", hr);
+    if (FAILED(hr) || !mv) goto done_factory;
+
+    /* tag 7 over a coreclr-layout GC string: cch@+0x08, chars@+0x0C ("Language") */
+    s0c.mt = NULL; s0c.cch = 8; lstrcpyW(s0c.chars, L"Language");
+    h7c = (HSTRING)((char *)&s0c + 7);
+    hr = CALL(mv, 6, h7c, &hval);  /* IMapView::Get */
+    ok(SUCCEEDED(hr) && hval, "virt-hstring tag7(+0x0c): QualifierValues Get(Language) hr=%08x\n", hr);
+    if (SUCCEEDED(hr) && hval)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer(hval, NULL);
+        ok(raw && *raw, "virt-hstring tag7(+0x0c): value is empty\n");
+        WindowsDeleteString(hval);
+        hval = NULL;
+    }
+
+    /* tag 7 over the +0x10 char offset (RTString layout note) */
+    s10.mt = NULL; s10.cch = 8; s10.pad = 0; lstrcpyW(s10.chars, L"Language");
+    h7t = (HSTRING)((char *)&s10 + 7);
+    hr = CALL(mv, 6, h7t, &hval);
+    ok(SUCCEEDED(hr) && hval, "virt-hstring tag7(+0x10): QualifierValues Get(Language) hr=%08x\n", hr);
+    if (SUCCEEDED(hr) && hval)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer(hval, NULL);
+        ok(raw && *raw, "virt-hstring tag7(+0x10): value is empty\n");
+        WindowsDeleteString(hval);
+        hval = NULL;
+    }
+
+    /* tag 2 inline length-prefixed buffer */
+    b2.cch = 8; lstrcpyW(b2.chars, L"Language");
+    h2 = (HSTRING)((char *)&b2 + 2);
+    hr = CALL(mv, 6, h2, &hval);
+    ok(SUCCEEDED(hr) && hval, "virt-hstring tag2: QualifierValues Get(Language) hr=%08x\n", hr);
+    if (SUCCEEDED(hr) && hval)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer(hval, NULL);
+        ok(raw && *raw, "virt-hstring tag2: value is empty\n");
+        WindowsDeleteString(hval);
+        hval = NULL;
+    }
+
+    /* HasKey must see the decoded key too */
+    {
+        INT32 has = -1;
+        hr = CALL(mv, 7, h7c, &has);  /* IMapView::HasKey */
+        ok(hr == S_OK && has, "virt-hstring tag7: HasKey(Language) hr=%08x has=%d\n", hr, has);
+    }
+
+    /* negative: real virtualized key that is NOT in the map -> ELEMENT_NOT_FOUND,
+     * not (null)-lookup, not a crash */
+    s0c_miss.mt = NULL; s0c_miss.cch = 7; lstrcpyW(s0c_miss.chars, L"NoSuchQ");
+    hmiss = (HSTRING)((char *)&s0c_miss + 7);
+    hr = CALL(mv, 6, hmiss, &hval);
+    ok(hr == ELEMENT_NOT_FOUND_HR, "virt-hstring tag7: Get(NoSuchQual) hr=%08x (expect ELEMENT_NOT_FOUND)\n", hr);
+
+    /* the same blind spot on IResourceMap::GetValue (map_lookup path):
+     * ResourceManager.Current -> MainResourceMap -> GetValue(Calculator|tag7) */
+    hr = get_factory(L"Windows.ApplicationModel.Resources.Core.ResourceManager", &rmfactory);
+    ok(hr == S_OK, "virt-hstring: RoGetActivationFactory(ResourceManager) hr=%08x\n", hr);
+    if (hr == S_OK)
+    {
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rmfactory, 0))(rmfactory, &IID_IResourceManagerStatics_loc, &rms);
+        if (SUCCEEDED(hr))
+        {
+            void *rm = NULL;
+            hr = CALL(rms, 6, &rm);  /* IResourceManagerStatics::Current */
+            if (SUCCEEDED(hr) && rm)
+            {
+                hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
+                if (SUCCEEDED(hr) && rm2)
+                {
+                    hr = CALL(rm2, 6, &map);  /* get_MainResourceMap */
+                    if (SUCCEEDED(hr) && map)
+                    {
+                        s10calc.mt = NULL; s10calc.cch = 10; s10calc.pad = 0; lstrcpyW(s10calc.chars, L"Calculator");
+                        hcalc = (HSTRING)((char *)&s10calc + 7);
+                        hr = CALL(map, 7, hcalc, &cand);  /* IResourceMap::GetValue */
+                        ok(SUCCEEDED(hr) && cand, "virt-hstring tag7: MainResourceMap::GetValue(Calculator) hr=%08x\n", hr);
+                        if (cand) CALL(cand, 2, (ULONG *)&hr);
+                    }
+                    CALL(rm2, 2, (ULONG *)&hr);
+                }
+                CALL(rm, 2, (ULONG *)&hr);
+            }
+            CALL(rms, 2, (ULONG *)&hr);
+        }
+        CALL(rmfactory, 2, (ULONG *)&hr);
+    }
+
+    CALL(mv, 2, (ULONG *)&hr);
+done_factory:
+    if (ctx) CALL(ctx, 2, (ULONG *)&hr);
+    if (ctx2) CALL(ctx2, 2, (ULONG *)&hr);
+    CALL(factory, 2, (ULONG *)&hr);
+}
+
 START_TEST(core)
 {
     HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
@@ -1224,6 +1380,7 @@ START_TEST(core)
     set_pri_env();
     test_resourcemanager_lookup();
     test_real_pri_lookup();
+    test_virtualized_hstring();
     test_iagile();
     test_getiids_nullargs();
     test_qualifier_set();
