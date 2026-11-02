@@ -128,6 +128,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(file);
 WINE_DECLARE_DEBUG_CHANNEL(winediag);
+WINE_DECLARE_DEBUG_CHANNEL(flushstats);
 
 #define MAX_DOS_DRIVES 26
 
@@ -7162,52 +7163,140 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
 
 
 #define FLUSH_COALESCE_CACHE_SIZE 64
+#define FLUSH_COALESCE_WINDOW_MS 3
+
 struct flush_coalesce_entry
 {
-    int fd;
-    uint64_t last_sync_ms;
+    dev_t dev;              /* identity of the flushed file: struct stat st_dev */
+    ino_t ino;              /* identity of the flushed file: struct stat st_ino */
+    uint64_t last_sync_ms;  /* monotonic time of the last real fdatasync() for this file */
+    BOOL last_was_real;     /* the last flush of this file completed a real fdatasync() */
+    BOOL used;
 };
 static struct flush_coalesce_entry flush_coalesce_cache[FLUSH_COALESCE_CACHE_SIZE];
 static unsigned int flush_coalesce_cache_idx = 0;
+static pthread_mutex_t flush_coalesce_mutex = PTHREAD_MUTEX_INITIALIZER;
 
-static inline BOOL should_coalesce_file_flush( int fd )
+enum flush_action
+{
+    FLUSH_REAL_FIRST,    /* first flush ever seen for this file */
+    FLUSH_REAL_EXPIRED,  /* previous real flush of this file is older than the burst window */
+    FLUSH_REAL_CHAIN,    /* previous flush of this file was deferred: never defer twice in a row */
+    FLUSH_REAL_NONE,     /* no coalescing policy applied: env toggle off, or no file identity */
+    FLUSH_COALESCED      /* burst flush of the same file, previous flush was a real one */
+};
+
+/***********************************************************************
+ *           should_coalesce_file_flush
+ *
+ * Decides how to answer a flush request for 'fd'. Burst coalescing (a non-blocking
+ * sync_file_range() in place of a real fdatasync()) is granted only for a verified
+ * burst of flushes of the very same file:
+ *
+ *  - the cache is keyed by the (st_dev, st_ino) identity that fstat() reports for
+ *    the fd, never by the fd number: fd numbers are recycled constantly (the server
+ *    dups a fresh fd into the client for every handle, and the kernel reuses freed
+ *    numbers), so an fd number says nothing about which file it currently is;
+ *  - the previous flush for that exact identity must have been a real, completed
+ *    fdatasync(), so a file is never deferred twice in a row; the deferral window
+ *    for any file is therefore bounded by FLUSH_COALESCE_WINDOW_MS;
+ *  - the first flush of a file, and every flush following a deferred one, is real.
+ *
+ * fstat() and the sync syscalls are kept outside the cache lock, which only ever
+ * covers the cache array itself (same layout as the dentry dev/ino cache above).
+ */
+static inline enum flush_action should_coalesce_file_flush( int fd, dev_t *dev, ino_t *ino,
+                                                            unsigned int *slot )
 {
     static int enabled = -1;
     struct timespec ts;
-    uint64_t now_ms, delta;
-    unsigned int i;
+    struct stat st;
+    uint64_t now_ms;
+    unsigned int i, free_idx = FLUSH_COALESCE_CACHE_SIZE;
+    struct flush_coalesce_entry *entry = NULL;
+    enum flush_action action = FLUSH_REAL_FIRST;
+
+    *slot = FLUSH_COALESCE_CACHE_SIZE;  /* no cache slot is tied to this flush */
 
     if (enabled == -1)
     {
         const char *env = getenv( "WINE_NO_COALESCE_FLUSH" );
         enabled = (env && *env && strcmp( env, "0" ) != 0) ? 0 : 1;
     }
-    if (!enabled) return FALSE;
+    if (!enabled) return FLUSH_REAL_NONE;
+
+    if (fstat( fd, &st ) == -1) return FLUSH_REAL_NONE;  /* unknown file, always be safe */
+    *dev = st.st_dev;
+    *ino = st.st_ino;
 
     clock_gettime( CLOCK_MONOTONIC, &ts );
     now_ms = (uint64_t)ts.tv_sec * 1000 + ts.tv_nsec / 1000000;
 
+    pthread_mutex_lock( &flush_coalesce_mutex );
+
     for (i = 0; i < FLUSH_COALESCE_CACHE_SIZE; i++)
     {
-        if (flush_coalesce_cache[i].fd == fd)
+        if (!flush_coalesce_cache[i].used)
         {
-            delta = now_ms - flush_coalesce_cache[i].last_sync_ms;
-            if (delta < 3)
-            {
-#ifdef linux
-                sync_file_range( fd, 0, 0, SYNC_FILE_RANGE_WRITE );
-#endif
-                return TRUE;
-            }
-            flush_coalesce_cache[i].last_sync_ms = now_ms;
-            return FALSE;
+            if (free_idx == FLUSH_COALESCE_CACHE_SIZE) free_idx = i;
+            continue;
+        }
+        if (flush_coalesce_cache[i].dev == st.st_dev && flush_coalesce_cache[i].ino == st.st_ino)
+        {
+            entry = &flush_coalesce_cache[i];
+            break;
         }
     }
 
-    flush_coalesce_cache[flush_coalesce_cache_idx].fd = fd;
-    flush_coalesce_cache[flush_coalesce_cache_idx].last_sync_ms = now_ms;
-    flush_coalesce_cache_idx = (flush_coalesce_cache_idx + 1) % FLUSH_COALESCE_CACHE_SIZE;
-    return FALSE;
+    if (entry)
+    {
+        *slot = entry - flush_coalesce_cache;
+        if (now_ms - entry->last_sync_ms >= FLUSH_COALESCE_WINDOW_MS)
+        {
+            entry->last_sync_ms = now_ms;
+            entry->last_was_real = TRUE;
+            action = FLUSH_REAL_EXPIRED;
+        }
+        else if (entry->last_was_real)
+        {
+            /* same file, inside the window, last flush was a real one: defer this one */
+            entry->last_was_real = FALSE;
+            action = FLUSH_COALESCED;
+        }
+        else
+        {
+            /* previous flush was deferred: chain breaker, this one must be a real one */
+            entry->last_was_real = TRUE;
+            action = FLUSH_REAL_CHAIN;
+        }
+    }
+    else
+    {
+        /* first flush of this file (or a recycled cache slot): always a real one */
+        i = (free_idx < FLUSH_COALESCE_CACHE_SIZE) ? free_idx : flush_coalesce_cache_idx;
+        entry = &flush_coalesce_cache[i];
+        *slot = i;
+        entry->used = TRUE;
+        entry->dev = st.st_dev;
+        entry->ino = st.st_ino;
+        entry->last_sync_ms = now_ms;
+        entry->last_was_real = TRUE;
+        flush_coalesce_cache_idx = (i + 1) % FLUSH_COALESCE_CACHE_SIZE;
+    }
+
+    pthread_mutex_unlock( &flush_coalesce_mutex );
+    return action;
+}
+
+
+/* A real flush of the slot just failed, so no durability was reached: make the next
+ * flush of that file a real one as well. */
+static inline void flush_coalesce_record_failure( unsigned int slot )
+{
+    if (slot >= FLUSH_COALESCE_CACHE_SIZE) return;
+    pthread_mutex_lock( &flush_coalesce_mutex );
+    flush_coalesce_cache[slot].last_was_real = FALSE;
+    pthread_mutex_unlock( &flush_coalesce_mutex );
 }
 
 /******************************************************************************
@@ -7243,10 +7332,23 @@ NTSTATUS WINAPI NtFlushBuffersFileEx( HANDLE handle, ULONG flags, void *params, 
     if (!ret && (type == FD_TYPE_FILE || type == FD_TYPE_DIR || type == FD_TYPE_CHAR))
     {
 #ifdef linux
-        if (!should_coalesce_file_flush( fd ))
+    {
+        static const char *const flush_reason[] = { "first", "expired", "chain", "none", "coalesced" };
+        dev_t dev = 0;
+        ino_t ino = 0;
+        unsigned int slot;
+        enum flush_action action = should_coalesce_file_flush( fd, &dev, &ino, &slot );
+
+        if (action == FLUSH_COALESCED) sync_file_range( fd, 0, 0, SYNC_FILE_RANGE_WRITE );
+        else if (fdatasync( fd ))
         {
-            if (fdatasync( fd )) ret = errno_to_status( errno );
+            ret = errno_to_status( errno );
+            flush_coalesce_record_failure( slot );
         }
+
+        TRACE_(flushstats)( "%s fd=%d dev=%llu ino=%llu ret=%08x\n", flush_reason[action], fd,
+                            (unsigned long long)dev, (unsigned long long)ino, (unsigned int)ret );
+    }
 #else
         if (fsync( fd )) ret = errno_to_status( errno );
 #endif

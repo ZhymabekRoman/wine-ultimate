@@ -5908,6 +5908,144 @@ static void test_flush_buffers_file(void)
     DeleteFileA(buffer);
 }
 
+struct flush_hammer_data
+{
+    char   path[MAX_PATH];
+    ULONG  id;
+    ULONG  iterations;
+    ULONG  failures;
+};
+
+/* Write, flush (several times in a burst), close, reopen and read back. Every
+ * iteration recreates the file, so the unix file descriptor of the previous
+ * iteration is recycled by the next one - the case burst flush coalescing keyed on
+ * the raw fd number confused. Content must always come back intact, and concurrent
+ * hammers must not deadlock or crash. */
+static DWORD WINAPI flush_hammer_thread( void *param )
+{
+    struct flush_hammer_data *data = param;
+    IO_STATUS_BLOCK io_status_block;
+    char expected[64], buffer[64];
+    ULONG i, len;
+    DWORD size;
+    HANDLE file;
+    NTSTATUS status;
+
+    for (i = 0; i < data->iterations; i++)
+    {
+        len = sprintf( expected, "flush-%u-%lu\n", data->id, i );
+        file = CreateFileA( data->path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                            FILE_ATTRIBUTE_NORMAL, NULL );
+        if (file == INVALID_HANDLE_VALUE) { data->failures++; continue; }
+
+        if (!WriteFile( file, expected, len, &size, NULL ) || size != len)
+        {
+            data->failures++;
+            CloseHandle( file );
+            continue;
+        }
+
+        /* burst of flushes of the same file, then close: the very next open reuses
+         * the fd number for a brand new file */
+        FlushFileBuffers( file );
+        status = pNtFlushBuffersFile( file, &io_status_block );
+        if (status != STATUS_SUCCESS) data->failures++;
+        FlushFileBuffers( file );
+
+        CloseHandle( file );
+
+        file = CreateFileA( data->path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, 0, NULL );
+        if (file == INVALID_HANDLE_VALUE) { data->failures++; continue; }
+        memset( buffer, 0, sizeof(buffer) );
+        if (!ReadFile( file, buffer, sizeof(buffer) - 1, &size, NULL )) data->failures++;
+        else if (size != len || memcmp( buffer, expected, len ))
+        {
+            data->failures++;
+            trace( "content mismatch in iteration %lu: '%s' != '%s'\n", i, debugstr_a( buffer ),
+                   debugstr_a( expected ));
+        }
+        CloseHandle( file );
+        if (!DeleteFileA( data->path )) data->failures++;
+    }
+    return 0;
+}
+
+static void test_flush_coalesce_identity(void)
+{
+    struct flush_hammer_data data[8];
+    IO_STATUS_BLOCK io_status_block;
+    HANDLE thread[8], file, second;
+    char path[MAX_PATH], dir[MAX_PATH], buffer[64];
+    ULONG i, failures = 0;
+    DWORD size;
+    NTSTATUS status;
+
+    GetTempPathA( MAX_PATH, dir );
+
+    /* fd number reuse: flush the first file, close it, create a different file (which
+     * reuses the fd number) and flush it immediately, well inside the coalescing burst
+     * window. The second flush must be answered for the second file, and the content of
+     * both files must be readable afterwards. */
+    GetTempFileNameA( dir, "fcr", 0, path );
+    file = CreateFileA( path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                        FILE_ATTRIBUTE_NORMAL, NULL );
+    ok( file != INVALID_HANDLE_VALUE, "failed to create file, error %lu.\n", GetLastError());
+    if (file != INVALID_HANDLE_VALUE)
+    {
+        ok( WriteFile( file, "first", 5, &size, NULL ) && size == 5, "write failed.\n" );
+        status = pNtFlushBuffersFile( file, &io_status_block );
+        ok( status == STATUS_SUCCESS, "first flush: got %#lx.\n", status );
+        CloseHandle( file );
+    }
+    DeleteFileA( path );
+
+    GetTempFileNameA( dir, "fcr", 1, path );
+    second = CreateFileA( path, GENERIC_READ | GENERIC_WRITE, 0, NULL, CREATE_ALWAYS,
+                          FILE_ATTRIBUTE_NORMAL, NULL );
+    ok( second != INVALID_HANDLE_VALUE, "failed to create the second file, error %lu.\n",
+        GetLastError());
+    if (second != INVALID_HANDLE_VALUE)
+    {
+        ok( WriteFile( second, "second", 6, &size, NULL ) && size == 6, "write failed.\n" );
+        status = pNtFlushBuffersFile( second, &io_status_block );
+        ok( status == STATUS_SUCCESS, "reused-fd flush: got %#lx.\n", status );
+        ok( FlushFileBuffers( second ), "FlushFileBuffers failed, error %lu.\n", GetLastError());
+        CloseHandle( second );
+
+        file = CreateFileA( path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                            OPEN_EXISTING, 0, NULL );
+        ok( file != INVALID_HANDLE_VALUE, "could not reopen, error %lu.\n", GetLastError());
+        if (file != INVALID_HANDLE_VALUE)
+        {
+            memset( buffer, 0, sizeof(buffer) );
+            ok( ReadFile( file, buffer, sizeof(buffer) - 1, &size, NULL ) && size == 6
+                && !memcmp( buffer, "second", 6 ), "content mismatch: '%s'.\n", debugstr_a( buffer ));
+            CloseHandle( file );
+        }
+        DeleteFileA( path );
+    }
+
+    /* concurrent hammer: 8 threads recreating and flushing their own file */
+    for (i = 0; i < ARRAY_SIZE( thread ); i++)
+    {
+        sprintf( path, "%s\\fch%u.tmp", dir, i );
+        strcpy( data[i].path, path );
+        data[i].id = i;
+        data[i].iterations = 50;
+        data[i].failures = 0;
+        thread[i] = CreateThread( NULL, 0, flush_hammer_thread, &data[i], 0, NULL );
+        ok( thread[i] != NULL, "could not create thread %u.\n", i );
+    }
+    WaitForMultipleObjects( ARRAY_SIZE( thread ), thread, TRUE, INFINITE );
+    for (i = 0; i < ARRAY_SIZE( thread ); i++)
+    {
+        failures += data[i].failures;
+        CloseHandle( thread[i] );
+    }
+    ok( failures == 0, "flush/reuse hammer: %u failures.\n", failures );
+}
+
 static void test_query_ea(void)
 {
 #define EA_BUFFER_SIZE 4097
@@ -7522,6 +7660,7 @@ START_TEST(file)
     test_ioctl();
     test_query_ea();
     test_flush_buffers_file();
+    test_flush_coalesce_identity();
     test_mailslot_name();
     test_reparse_points();
     test_file_map_large_size();
