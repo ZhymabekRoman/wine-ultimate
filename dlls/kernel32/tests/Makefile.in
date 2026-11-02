@@ -24,6 +24,7 @@ SOURCES = \
 	locale.c \
 	mailslot.c \
 	module.c \
+	mojo_relay.c \
 	path.c \
 	pipe.c \
 	power.c \

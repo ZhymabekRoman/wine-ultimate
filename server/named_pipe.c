@@ -50,6 +50,19 @@ struct pipe_message
     data_size_t          read_pos;   /* already read bytes */
     struct iosb         *iosb;       /* message iosb */
     struct async        *async;      /* async of pending write */
+    struct list         *relay;      /* WA_MOJO_RELAY handle boxes, NULL when none */
+};
+
+struct relay_box
+{
+    struct list          entry;      /* entry in the message relay list */
+    data_size_t          offset;     /* position of the in-band u64 handle slot in the message */
+    obj_handle_t         src;        /* handle value as written, in the writer process */
+    unsigned int         access;     /* access on the source handle (DUPLICATE_SAME_ACCESS) */
+    struct process      *writer;     /* writer process (grabbed) */
+    struct object       *obj;        /* source object (grabbed), resolved at write time */
+    obj_handle_t         dst;        /* handle duplicated into the reader, 0 = not yet */
+    struct process      *reader;     /* process dst belongs to, NULL while not duplicated */
 };
 
 /* An instance caches, for both of the pipe ends it connected, the peer ids that
@@ -120,6 +133,286 @@ struct named_pipe_device_file
     struct fd                *fd;          /* pseudo-fd for ioctls */
     struct named_pipe_device *device;      /* named pipe device */
 };
+
+/* WA_PIPEX: opt-in message-mode payload capture for wire-format analysis.
+ * Enabled with WA_PIPEX_DUMP=1 in the wineserver environment; only pipes whose
+ * name contains WA_PIPEX_FILTER (default "mojo.") are dumped, so production
+ * gates stay untouched.  Each captured event is one line on stderr:
+ *   WA_PIPEX: W|R|P pid=<winpid> seq=<n> end=<ptr> len=<n> name=<ascii> hex=<bytes>
+ * W = bytes written into the peer's queue, R = bytes delivered to a reader,
+ * P = bytes peeked.  Hex is capped at ~7.9 KB per event. */
+static int wapipex_on = -1;
+static const char *wapipex_filter = "mojo.";
+static WCHAR wapipex_wfilter[64];
+static size_t wapipex_wfilter_len;
+static unsigned int wapipex_seq;
+
+static int wapipex_wanted( struct pipe_end *pipe_end )
+{
+    const WCHAR *hay, *p;
+    unsigned int nchars, i;
+
+    if (wapipex_on < 0)
+    {
+        const char *e = getenv( "WA_PIPEX_FILTER" );
+        wapipex_on = !!getenv( "WA_PIPEX_DUMP" );
+        if (e) wapipex_filter = e;
+        for (i = 0; wapipex_filter[i] && i < sizeof(wapipex_wfilter) / sizeof(WCHAR) - 1; i++)
+            wapipex_wfilter[i] = (WCHAR)(unsigned char)wapipex_filter[i];
+        wapipex_wfilter[i] = 0;
+        wapipex_wfilter_len = i;
+    }
+    if (!wapipex_on || !wapipex_wfilter_len) return 0;
+    if (!pipe_end || !pipe_end->pipe || !pipe_end->pipe->obj.name) return 0;
+    hay = pipe_end->pipe->obj.name->name;
+    nchars = pipe_end->pipe->obj.name->len / sizeof(WCHAR);
+    if (nchars < wapipex_wfilter_len) return 0;
+    for (p = hay; p + wapipex_wfilter_len <= hay + nchars; p++)
+        if (!memcmp( p, wapipex_wfilter, wapipex_wfilter_len * sizeof(WCHAR) )) return 1;
+    return 0;
+}
+
+static void wapipex_dump( const char *kind, struct pipe_end *end, process_id_t pid,
+                          const void *data, data_size_t len )
+{
+    static const char hexd[] = "0123456789abcdef";
+    static char line[16384];
+    const WCHAR *nname;
+    unsigned int nchars;
+    char *p, *endp;
+    const unsigned char *b = data;
+    unsigned int i;
+
+    if (!wapipex_wanted( end )) return;
+    nname = end->pipe->obj.name->name;
+    nchars = end->pipe->obj.name->len / sizeof(WCHAR);
+    p = line + snprintf( line, sizeof(line), "WA_PIPEX: %s pid=%04x seq=%u end=%p len=%u name=",
+                         kind, pid, ++wapipex_seq, end, len );
+    endp = line + sizeof(line) - 4;
+    for (i = 0; i < nchars && p < line + 600; i++)
+        *p++ = nname[i] < 128 ? (char)nname[i] : '?';
+    *p++ = ' ';
+    memcpy( p, "hex=", 4 ); p += 4;
+    for (i = 0; i < len && p < endp; i++)
+    {
+        *p++ = hexd[b[i] >> 4];
+        *p++ = hexd[b[i] & 0x0f];
+    }
+    *p++ = '\n';
+    *p = 0;
+    fputs( line, stderr );
+}
+
+/* WA_MOJO_RELAY: delivery-time relay of in-band handles on mojo invitation pipes.
+ *
+ * The app<->browser bootstrap of WebView2 runs over message-mode named pipes
+ * \\.\pipe\LOCAL\mojo.<pid>.<tid>.<rand>.  ipcz/mojo frames ride the pipe as a
+ * 16-byte prologue [u32 magic 0x10, u32 frame_len, u64 ts] + a 24-byte mojo
+ * header [u16 header_size 24, u16 type, u16 version, u16 pad, u64 seq, u64
+ * version_info] + body; the in-band handle fields serialize the raw process-local
+ * HANDLE of the writer (Chromium SerializeObject), and the reader's
+ * DeserializeObject expects to use it in its own process.  On Windows the
+ * writer's SDK performs DuplicateHandle(writer -> peer, opts=3
+ * SAME_ACCESS|CLOSE_SOURCE) before writing; Wine has no such leg on this path,
+ * so the peer receives a writer-local value it cannot resolve: the
+ * GetBufferResponse shared-buffer handle never maps, the SharedBufferFeature
+ * consumer stalls silently and CreateCoreWebView2CompositionController never
+ * answers.
+ *
+ * With WA_MOJO_RELAY=1 (kill-switch WINE_MOJO_RELAY=0) the server supplies the
+ * missing leg on these pipes only: on write it walks the frames of the queued
+ * payload and resolves the handle slots of the op table below in the writer
+ * process; at READ delivery it allocates a handle for the object in the reader
+ * process and patches the delivered payload copy (queue iosb data, read buffer,
+ * peek buffer - server-side copies only) with that value; once the message is
+ * fully consumed it closes the writer's source handle, mirroring the observed
+ * opts=3 CLOSE_SOURCE semantics (WA_MOJO_RELAY_NOCLOSE=1 keeps the source open).
+ * Env-off runs are byte-identical to before.
+ */
+static int relay_on = -1;
+static int relay_no_close;
+
+static int relay_wanted( struct pipe_end *pipe_end )
+{
+    static const WCHAR prefixW[] = {'L','O','C','A','L','\\','m','o','j','o','.'};
+
+    if (relay_on < 0)
+    {
+        const char *kill = getenv( "WINE_MOJO_RELAY" );
+        relay_no_close = !!getenv( "WA_MOJO_RELAY_NOCLOSE" );
+        relay_on = (kill && !strcmp( kill, "0" )) ? 0 : !!getenv( "WA_MOJO_RELAY" );
+    }
+    if (!relay_on) return 0;
+    if (!pipe_end || !pipe_end->pipe || !pipe_end->pipe->obj.name) return 0;
+    if (pipe_end->pipe->obj.name->len < sizeof(prefixW)) return 0;
+    return !memicmp_strW( pipe_end->pipe->obj.name->name, prefixW, sizeof(prefixW) );
+}
+
+/* in-band handle slots per mojo message type (body-relative offsets, -1 = none);
+ * verified against the g35/g38 WA_PIPEX captures of the app<->browser bootstrap:
+ * GetBufferResponse words [0x18][handle][result], EstablishGroupChannelRequest
+ * [0x30][handle][handle][..], PassProxyOnChannelRequest [0x10][handle],
+ * EstablishBrokerChannelRequest [0x20][handle][..], DuplicateBufferResponse
+ * [id][id][version][handle] (+8/+16 are shared-buffer ids, not handles). */
+static const struct relay_op
+{
+    unsigned short type;
+    short slot1, slot2;
+} relay_ops[] =
+{
+    { 13,  8, -1 },  /* OpenChannelRequest { channel: handle<channel_endpoint> } */
+    { 20, 24, -1 },  /* DuplicateBufferResponse { buffer } */
+    { 21,  8, -1 },  /* GetBufferRequest { buffer: handle<pending_buffer> } */
+    { 22,  8, -1 },  /* GetBufferResponse { buffer: handle<shared_buffer> } */
+    { 32,  8, -1 },  /* EstablishBrokerChannelRequest { broker: handle<bootstrap> } */
+    { 33,  8, -1 },  /* EstablishBrokerChannelResponse { broker } */
+    { 34,  8, 16 },  /* EstablishGroupChannelRequest { group, channel } */
+    { 35,  8, -1 },  /* EstablishGroupChannelResponse { broker } */
+    { 36,  8, -1 },  /* PassProxyOnChannelRequest { interface_endpoint } */
+    { 38,  8, -1 },  /* PassInterfaceEndpointRequest { interface_endpoint } */
+};
+
+static void relay_scan( struct pipe_end *writer_end, struct pipe_message *message,
+                        const void *data, data_size_t len )
+{
+    static const unsigned int relay_max_frame = 1 << 20;
+    const unsigned char *b = data;
+    data_size_t off = 0;
+
+    if (!relay_wanted( writer_end ) || len < 48) return;
+
+    while (off + 48 <= len)
+    {
+        unsigned int magic = b[off] | (b[off+1] << 8) | (b[off+2] << 16) | ((unsigned int)b[off+3] << 24);
+        data_size_t fnum, body;
+        unsigned short type, hdr;
+        int i, s, k;
+
+        if (magic != 0x10) break;  /* frames must start at a message boundary */
+        fnum = b[off+4] | (b[off+5] << 8) | (b[off+6] << 16) | ((unsigned int)b[off+7] << 24);
+        if (fnum < 48 || fnum > relay_max_frame) break;
+        hdr = b[off+16] | (b[off+17] << 8);
+        if (hdr != 24) break;
+        type = b[off+18] | (b[off+19] << 8);
+        body = off + 40;
+
+        for (i = 0; i < (int)ARRAY_SIZE(relay_ops); i++)
+            if (relay_ops[i].type == type) break;
+
+        if (i < ARRAY_SIZE(relay_ops))
+        {
+            const short slots[2] = { relay_ops[i].slot1, relay_ops[i].slot2 };
+
+            for (s = 0; s < 2; s++)
+            {
+                struct relay_box *box;
+                data_size_t so;
+                unsigned long long v = 0;
+                obj_handle_t h;
+                struct object *obj;
+
+                if (slots[s] < 0) continue;
+                so = body + slots[s];
+                if (so + 8 > off + fnum || so + 8 > len) continue;  /* slot lands in a later fragment */
+                for (k = 7; k >= 0; k--) v = (v << 8) | b[so+k];
+                if (v >> 32) continue;        /* not a 32-bit handle value (e.g. -1 = empty) */
+                h = (obj_handle_t)v;
+                if (h < 0x10) continue;       /* serialized empty handle */
+                if (!(obj = get_handle_obj( current->process, h, 0, NULL )))
+                {
+                    clear_error();
+                    continue;                 /* not a handle in the writer: leave bytes untouched */
+                }
+                if (!(box = mem_alloc( sizeof(*box) )))
+                {
+                    release_object( obj );
+                    return;
+                }
+                if (!message->relay)
+                {
+                    if (!(message->relay = malloc( sizeof(*message->relay) )))
+                    {
+                        free( box );
+                        release_object( obj );
+                        return;
+                    }
+                    list_init( message->relay );
+                }
+                box->offset = so;
+                box->src    = h;
+                box->access = get_handle_access( current->process, h );
+                box->writer = (struct process *)grab_object( current->process );
+                box->obj    = obj;
+                box->dst    = 0;
+                box->reader = NULL;
+                list_add_tail( message->relay, &box->entry );
+                fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u src=%04x access=%08x\n",
+                         current->process->id, type, so, h, box->access );
+            }
+        }
+        off += fnum;
+    }
+}
+
+/* duplicate the in-band objects into 'reader' and patch the delivered copy of
+ * the message bytes [msg_start, msg_start+len) which land at 'out' */
+static void relay_patch( struct pipe_message *message, struct process *reader,
+                         data_size_t msg_start, data_size_t len, void *out )
+{
+    struct relay_box *box;
+    data_size_t msg_end = msg_start + len;
+
+    if (!message->relay) return;
+
+    LIST_FOR_EACH_ENTRY( box, message->relay, struct relay_box, entry )
+    {
+        unsigned char bytes[8];
+        data_size_t s, e;
+        int k;
+
+        if (box->offset >= msg_end || box->offset + 8 <= msg_start) continue;
+
+        if (!box->dst || box->reader != reader)
+        {
+            obj_handle_t dst = alloc_handle( reader, box->obj, box->access, 0 );
+            if (!dst)
+            {
+                clear_error();
+                continue;  /* keep the raw value; the reader sees what Windows would report */
+            }
+            fprintf( stderr, "WA_RELAY: D pid=%04x src=%04x -> pid=%04x dst=%04x off=%u\n",
+                     box->writer->id, box->src, reader->id, dst, box->offset );
+            if (box->reader) release_object( box->reader );  /* old value leaks in the old reader */
+            box->dst    = dst;
+            box->reader = (struct process *)grab_object( reader );
+        }
+        for (k = 0; k < 8; k++) bytes[k] = (unsigned char)(box->dst >> (8*k));
+        s = max( box->offset, msg_start ) - msg_start;
+        e = min( box->offset + 8, msg_end ) - msg_start;
+        memcpy( (char *)out + s, bytes + (s - (box->offset - msg_start)), e - s );
+    }
+}
+
+static void relay_free( struct pipe_message *message, int close_src )
+{
+    struct relay_box *box, *next;
+
+    if (!message->relay) return;
+    LIST_FOR_EACH_ENTRY_SAFE( box, next, message->relay, struct relay_box, entry )
+    {
+        if (close_src)
+        {
+            close_handle( box->writer, box->src );  /* mojo consumed the in-band handle (opts=3) */
+            fprintf( stderr, "WA_RELAY: C pid=%04x src=%04x off=%u\n", box->writer->id, box->src, box->offset );
+        }
+        release_object( box->writer );
+        if (box->reader) release_object( box->reader );
+        release_object( box->obj );
+        free( box );
+    }
+    free( message->relay );
+    message->relay = NULL;
+}
 
 static void named_pipe_dump( struct object *obj, int verbose );
 static unsigned int named_pipe_map_access( struct object *obj, unsigned int access );
@@ -459,6 +752,7 @@ static struct pipe_message *queue_message( struct pipe_end *pipe_end, struct ios
     message->iosb = (struct iosb *)grab_object( iosb );
     message->async = NULL;
     message->read_pos = 0;
+    message->relay = NULL;
     list_add_tail( &pipe_end->message_queue, &message->entry );
     return message;
 }
@@ -476,6 +770,7 @@ static void wake_message( struct pipe_message *message, data_size_t result )
 
 static void free_message( struct pipe_message *message )
 {
+    relay_free( message, 0 );  /* dropped, not consumed: leave the source handles alone */
     list_remove( &message->entry );
     if (message->iosb) release_object( message->iosb );
     free( message );
@@ -1050,8 +1345,13 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
     message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
     if (!message->read_pos && message->iosb->in_size == iosb->out_size) /* fast path */
     {
+        relay_patch( message, async_get_thread( async )->process, 0, message->iosb->in_size,
+                     message->iosb->in_data );
+        wapipex_dump( "R", pipe_end, async_get_thread( async )->process->id,
+                      message->iosb->in_data, message->iosb->in_size );
         async_request_complete( async, status, out_size, out_size, message->iosb->in_data );
         message->iosb->in_data = NULL;
+        relay_free( message, !relay_no_close );  /* fully consumed: relay closes the source */
         wake_message( message, message->iosb->in_size );
         free_message( message );
     }
@@ -1071,15 +1371,23 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
         {
             message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
             writing = min( out_size - write_pos, message->iosb->in_size - message->read_pos );
-            if (writing) memcpy( buf + write_pos, (const char *)message->iosb->in_data + message->read_pos, writing );
+            if (writing)
+            {
+                memcpy( buf + write_pos, (const char *)message->iosb->in_data + message->read_pos, writing );
+                relay_patch( message, async_get_thread( async )->process, message->read_pos, writing,
+                             buf + write_pos );
+            }
             write_pos += writing;
             message->read_pos += writing;
             if (message->read_pos == message->iosb->in_size)
             {
+                relay_free( message, !relay_no_close );  /* fully consumed: relay closes the source */
                 wake_message(message, message->iosb->in_size);
                 free_message(message);
             }
         } while (write_pos < out_size);
+
+        wapipex_dump( "R", pipe_end, async_get_thread( async )->process->id, buf, out_size );
 
         /* A read that stops short of the message end is not the end of the
          * message: message mode is read as a stream here, with message->read_pos
@@ -1216,10 +1524,14 @@ static void pipe_end_write( struct fd *fd, struct async *async, file_pos_t pos )
 
     if (!pipe_end->pipe->message_mode && !get_req_data_size()) return;
 
+    wapipex_dump( "W", pipe_end, current->process->id, get_req_data(), get_req_data_size() );
+
     iosb = async_get_iosb( async );
     message = queue_message( pipe_end->connection, iosb );
     release_object( iosb );
     if (!message) return;
+
+    relay_scan( pipe_end, message, get_req_data(), get_req_data_size() );
 
     message->async = (struct async *)grab_object( async );
     queue_async( &pipe_end->write_q, async );
@@ -1297,10 +1609,13 @@ static void pipe_end_peek( struct pipe_end *pipe_end )
             writing = min( reply_size - write_pos, message->iosb->in_size - message->read_pos );
             memcpy( buffer->Data + write_pos, (const char *)message->iosb->in_data + message->read_pos,
                     writing );
+            relay_patch( message, current->process, message->read_pos, writing, buffer->Data + write_pos );
             write_pos += writing;
             if (write_pos == reply_size) break;
         }
     }
+    if (reply_size)
+        wapipex_dump( "P", pipe_end, current->process->id, buffer->Data, reply_size );
     if (message_length > reply_size) set_error( STATUS_BUFFER_OVERFLOW );
 }
 
@@ -1334,6 +1649,7 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     iosb = async_get_iosb( async );
     /* ignore output buffer copy transferred because of METHOD_NEITHER */
     iosb->in_size -= iosb->out_size;
+    wapipex_dump( "W", pipe_end, current->process->id, iosb->in_data, iosb->in_size );
     /* transaction never blocks on write, so just queue a message without async */
     message = queue_message( pipe_end->connection, iosb );
     release_object( iosb );
@@ -1341,6 +1657,7 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     {
         return;
     }
+    relay_scan( pipe_end, message, message->iosb->in_data, message->iosb->in_size );
     reselect_read_queue( pipe_end->connection, 0 );
 
     queue_async( &pipe_end->read_q, async );
