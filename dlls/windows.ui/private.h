@@ -50,6 +50,9 @@ extern IActivationFactory *inputpane_factory;
 extern IActivationFactory *corewindow_factory;
 extern IActivationFactory *core_cursor_factory;
 extern __x_ABI_CWindows_CUI_CCore_CICoreWindow *core_window_create(void);
+extern HRESULT PrivateCreateCoreWindow( DWORD window_type, const WCHAR *title, INT x, INT y,
+                                        UINT width, UINT height, DWORD flags, HWND parent,
+                                        const GUID *iid, void **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

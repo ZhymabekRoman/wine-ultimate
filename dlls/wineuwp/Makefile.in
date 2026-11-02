@@ -1,8 +1,10 @@
 MODULE    = wineuwp.dll
 ENABLE_ARCHS = x86_64
-IMPORTS   = kernel32
+IMPORTS   = combase kernelbase user32 ole32 uuid
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 
 SOURCES = \
-	main.c
+	clientadapter.c \
+	main.c \
+	navigation.c

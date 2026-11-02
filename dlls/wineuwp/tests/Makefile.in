@@ -1,5 +1,5 @@
 TESTDLL   = wineuwp.dll
-IMPORTS   = kernel32
+IMPORTS   = kernel32 ole32 uuid combase
 
 SOURCES = \
 	wineuwp.c

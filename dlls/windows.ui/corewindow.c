@@ -134,12 +134,68 @@ struct ICoreWindowInterop
     const ICoreWindowInteropVtbl *lpVtbl;
 };
 
+/* WindowServer's navigation client property, private, named from CoreUIComponents' symbols. Windows
+ * puts the shell's INavigationClient on a CoreWindow when its window factory makes the window; a
+ * view whose window has none fails CoreApplicationView::PrepareToActivateAsync with E_NOTIMPL, so
+ * the activation never reaches the app. wineuwp's in-process broker puts its stand-in client here
+ * (dlls/wineuwp/navigation.c). */
+typedef struct ICoreWindowNavigation ICoreWindowNavigation;
+typedef struct ICoreWindowNavigationVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWindowNavigation *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( ICoreWindowNavigation *This );
+    ULONG (WINAPI *Release)( ICoreWindowNavigation *This );
+    HRESULT (WINAPI *GetIids)( ICoreWindowNavigation *This, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( ICoreWindowNavigation *This, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( ICoreWindowNavigation *This, TrustLevel *level );
+    HRESULT (WINAPI *get_NavigationClient)( ICoreWindowNavigation *This, IUnknown **client );
+    HRESULT (WINAPI *put_NavigationClient)( ICoreWindowNavigation *This, IUnknown *client );
+} ICoreWindowNavigationVtbl;
+
+struct ICoreWindowNavigation
+{
+    const ICoreWindowNavigationVtbl *lpVtbl;
+};
+
+static const GUID IID_ICoreWindowNavigation =
+    { 0xbb4cbbe9, 0x65af, 0x4730, { 0x9e, 0xd2, 0xab, 0xbd, 0xb5, 0xcc, 0x15, 0xb9 } };
+
+/* The shell's window client adapter property (ICoreWindowAdapterInterop), installed with
+ * SetWindowClientAdapter. On Windows this is CoreUIComponents' NavigationClientWindowClientAdapter,
+ * and Windows.UI's WindowServer hands its sub-adapters to twinapi.appcore. This module's builtins
+ * read none of them, so the getters answer NULL — the state a window with no adapter is in — and the
+ * adapter itself is kept for whoever asks. */
+typedef struct ICoreWindowAdapterInterop ICoreWindowAdapterInterop;
+typedef struct ICoreWindowAdapterInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWindowAdapterInterop *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( ICoreWindowAdapterInterop *This );
+    ULONG (WINAPI *Release)( ICoreWindowAdapterInterop *This );
+    HRESULT (WINAPI *GetIids)( ICoreWindowAdapterInterop *This, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( ICoreWindowAdapterInterop *This, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( ICoreWindowAdapterInterop *This, TrustLevel *level );
+    void *sub_adapters[7];  /* app activation, display, frame, positioner, presenter, title bar ... */
+    HRESULT (WINAPI *SetWindowClientAdapter)( ICoreWindowAdapterInterop *This, IUnknown *adapter );
+} ICoreWindowAdapterInteropVtbl;
+
+struct ICoreWindowAdapterInterop
+{
+    const ICoreWindowAdapterInteropVtbl *lpVtbl;
+};
+
+static const GUID IID_ICoreWindowAdapterInterop =
+    { 0x7a5b6fd1, 0xcd73, 0x4b6c, { 0x9c, 0xf4, 0x2e, 0x86, 0x9e, 0xaf, 0x47, 0x0a } };
+
 struct core_window
 {
     ICoreWindow ICoreWindow_iface;
     ICoreWindowInterop ICoreWindowInterop_iface;
+    ICoreWindowNavigation ICoreWindowNavigation_iface;
+    ICoreWindowAdapterInterop ICoreWindowAdapterInterop_iface;
     IInspectable dummy_iface;
     ICoreDispatcher *dispatcher;
+    IUnknown *navigation_client;
+    IUnknown *window_client_adapter;
     HWND hwnd;
     LONG ref;
     float width;
@@ -160,14 +216,12 @@ static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWin
 
     if (!thread_core_window)
     {
-        *windows = core_window_create();
-        if (!*windows) return E_FAIL;
+        *windows = NULL;
+        return S_OK;
     }
-    else
-    {
-        *windows = &thread_core_window->ICoreWindow_iface;
-        ICoreWindow_AddRef( *windows );
-    }
+
+    *windows = &thread_core_window->ICoreWindow_iface;
+    ICoreWindow_AddRef( *windows );
     return S_OK;
 }
 
@@ -635,6 +689,18 @@ static HRESULT WINAPI core_window_QueryInterface( ICoreWindow *iface, REFIID iid
         *out = &impl->ICoreWindowInterop_iface;
         return S_OK;
     }
+    else if (IsEqualGUID( iid, &IID_ICoreWindowNavigation ))
+    {
+        ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+        *out = &impl->ICoreWindowNavigation_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID( iid, &IID_ICoreWindowAdapterInterop ))
+    {
+        ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+        *out = &impl->ICoreWindowAdapterInterop_iface;
+        return S_OK;
+    }
     else if (!memcmp( iid, "\x3d\x7e\xa1\x42\x71\x71\x9a\x43\xb1\xfa\xa3\x1b\x7b\x95\x74\x89", 16 ) ||
              !memcmp( iid, "\xd8\x79\x27\xc1\xd2\x85\xe5\x43\x90\x1a\x95\xdd\x4f\x8e\xcb\xa3", 16 ) ||
              !memcmp( iid, "\x05\x2a\x88\x5f\x94\xd5\xbc\x48\x9a\x5a\xfd\x3b\x9c\xe9\x03\x90", 16 ) ||
@@ -662,6 +728,8 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
         if (thread_core_window == impl) thread_core_window = NULL;
         if (impl->hwnd) DestroyWindow( impl->hwnd );
         if (impl->dispatcher) ICoreDispatcher_Release( impl->dispatcher );
+        if (impl->navigation_client) IUnknown_Release( impl->navigation_client );
+        if (impl->window_client_adapter) IUnknown_Release( impl->window_client_adapter );
         if (impl->visibility_changed_handler)
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs_Release( impl->visibility_changed_handler );
         if (impl->size_changed_handler)
@@ -1265,8 +1333,153 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
     }
 }
 
-/* Create a CoreWindow with its own dispatcher. */
-ICoreWindow *core_window_create(void)
+/* ---- the shell's window properties: navigation client, window client adapter ---- */
+
+static inline struct core_window *impl_from_ICoreWindowNavigation( ICoreWindowNavigation *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_window, ICoreWindowNavigation_iface );
+}
+
+static inline struct core_window *impl_from_ICoreWindowAdapterInterop( ICoreWindowAdapterInterop *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_window, ICoreWindowAdapterInterop_iface );
+}
+
+static HRESULT WINAPI core_window_navigation_QueryInterface( ICoreWindowNavigation *iface, REFIID iid, void **out )
+{
+    struct core_window *impl = impl_from_ICoreWindowNavigation( iface );
+    return ICoreWindow_QueryInterface( &impl->ICoreWindow_iface, iid, out );
+}
+static ULONG WINAPI core_window_navigation_AddRef( ICoreWindowNavigation *iface )
+{
+    struct core_window *impl = impl_from_ICoreWindowNavigation( iface );
+    return ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+}
+static ULONG WINAPI core_window_navigation_Release( ICoreWindowNavigation *iface )
+{
+    struct core_window *impl = impl_from_ICoreWindowNavigation( iface );
+    return ICoreWindow_Release( &impl->ICoreWindow_iface );
+}
+static HRESULT WINAPI core_window_navigation_GetIids( ICoreWindowNavigation *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI core_window_navigation_GetRuntimeClassName( ICoreWindowNavigation *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Core.CoreWindow", 26, name );
+}
+static HRESULT WINAPI core_window_navigation_GetTrustLevel( ICoreWindowNavigation *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI core_window_navigation_get_NavigationClient( ICoreWindowNavigation *iface, IUnknown **client )
+{
+    struct core_window *impl = impl_from_ICoreWindowNavigation( iface );
+
+    TRACE( "iface %p, client %p.\n", iface, client );
+    if (!client) return E_POINTER;
+    *client = impl->navigation_client;
+    if (*client) IUnknown_AddRef( *client );
+    return S_OK;
+}
+static HRESULT WINAPI core_window_navigation_put_NavigationClient( ICoreWindowNavigation *iface, IUnknown *client )
+{
+    struct core_window *impl = impl_from_ICoreWindowNavigation( iface );
+
+    TRACE( "iface %p, client %p.\n", iface, client );
+    if (impl->navigation_client) IUnknown_Release( impl->navigation_client );
+    impl->navigation_client = client;
+    if (client) IUnknown_AddRef( client );
+    return S_OK;
+}
+
+static const ICoreWindowNavigationVtbl core_window_navigation_vtbl =
+{
+    core_window_navigation_QueryInterface,
+    core_window_navigation_AddRef,
+    core_window_navigation_Release,
+    core_window_navigation_GetIids,
+    core_window_navigation_GetRuntimeClassName,
+    core_window_navigation_GetTrustLevel,
+    core_window_navigation_get_NavigationClient,
+    core_window_navigation_put_NavigationClient,
+};
+
+static HRESULT WINAPI core_window_adapter_QueryInterface( ICoreWindowAdapterInterop *iface, REFIID iid, void **out )
+{
+    struct core_window *impl = impl_from_ICoreWindowAdapterInterop( iface );
+    return ICoreWindow_QueryInterface( &impl->ICoreWindow_iface, iid, out );
+}
+static ULONG WINAPI core_window_adapter_AddRef( ICoreWindowAdapterInterop *iface )
+{
+    struct core_window *impl = impl_from_ICoreWindowAdapterInterop( iface );
+    return ICoreWindow_AddRef( &impl->ICoreWindow_iface );
+}
+static ULONG WINAPI core_window_adapter_Release( ICoreWindowAdapterInterop *iface )
+{
+    struct core_window *impl = impl_from_ICoreWindowAdapterInterop( iface );
+    return ICoreWindow_Release( &impl->ICoreWindow_iface );
+}
+static HRESULT WINAPI core_window_adapter_GetIids( ICoreWindowAdapterInterop *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI core_window_adapter_GetRuntimeClassName( ICoreWindowAdapterInterop *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Core.CoreWindow", 26, name );
+}
+static HRESULT WINAPI core_window_adapter_GetTrustLevel( ICoreWindowAdapterInterop *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+/* The sub-adapter getters: this module has no consumer for any of them, and NULL is what a window
+ * with no adapter reports, which is what every caller of these saw before an adapter existed. */
+static HRESULT WINAPI core_window_adapter_no_adapter( ICoreWindowAdapterInterop *iface, IUnknown **out )
+{
+    TRACE( "iface %p.\n", iface );
+    if (out) *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI core_window_adapter_SetWindowClientAdapter( ICoreWindowAdapterInterop *iface, IUnknown *adapter )
+{
+    struct core_window *impl = impl_from_ICoreWindowAdapterInterop( iface );
+
+    TRACE( "iface %p, adapter %p.\n", iface, adapter );
+    if (impl->window_client_adapter) IUnknown_Release( impl->window_client_adapter );
+    impl->window_client_adapter = adapter;
+    if (adapter) IUnknown_AddRef( adapter );
+    return S_OK;
+}
+
+static const ICoreWindowAdapterInteropVtbl core_window_adapter_vtbl =
+{
+    core_window_adapter_QueryInterface,
+    core_window_adapter_AddRef,
+    core_window_adapter_Release,
+    core_window_adapter_GetIids,
+    core_window_adapter_GetRuntimeClassName,
+    core_window_adapter_GetTrustLevel,
+    {
+        (void *)core_window_adapter_no_adapter, (void *)core_window_adapter_no_adapter,
+        (void *)core_window_adapter_no_adapter, (void *)core_window_adapter_no_adapter,
+        (void *)core_window_adapter_no_adapter, (void *)core_window_adapter_no_adapter,
+        (void *)core_window_adapter_no_adapter,
+    },
+    core_window_adapter_SetWindowClientAdapter,
+};
+
+/* Create a CoreWindow with its own dispatcher. The shell's window factory hands the window its
+ * title, position and size (PrivateCreateCoreWindow below); the plain WinRT path has no arguments
+ * and keeps the size this module has always used, which is why the geometry is applied only when
+ * the caller asked for it. */
+static struct core_window *create_core_window( const WCHAR *title, INT x, INT y, UINT width, UINT height,
+                                               BOOL set_geometry )
 {
     static const WCHAR class_name[] = L"Windows.UI.Core.CoreWindow";
     WNDCLASSEXW wc = { sizeof(wc) };
@@ -1275,14 +1488,25 @@ ICoreWindow *core_window_create(void)
 
     if (thread_core_window)
     {
-        InterlockedIncrement( &thread_core_window->ref );
-        TRACE( "reusing thread CoreWindow %p, hwnd %p\n", thread_core_window, thread_core_window->hwnd );
-        return &thread_core_window->ICoreWindow_iface;
+        impl = thread_core_window;
+        InterlockedIncrement( &impl->ref );
+        if (set_geometry)
+        {
+            /* A factory can be asked for a window of a different size than the one this thread
+             * already has; the view follows the window, so move it rather than make a second. */
+            if (title) SetWindowTextW( impl->hwnd, title );
+            SetWindowPos( impl->hwnd, NULL, x, y, width, height,
+                          SWP_NOZORDER | SWP_NOACTIVATE | (x == CW_USEDEFAULT ? SWP_NOMOVE : 0) );
+        }
+        TRACE( "reusing thread CoreWindow %p, hwnd %p\n", impl, impl->hwnd );
+        return impl;
     }
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->ICoreWindow_iface.lpVtbl = &core_window_vtbl;
     impl->ICoreWindowInterop_iface.lpVtbl = &core_window_interop_vtbl;
+    impl->ICoreWindowNavigation_iface.lpVtbl = &core_window_navigation_vtbl;
+    impl->ICoreWindowAdapterInterop_iface.lpVtbl = &core_window_adapter_vtbl;
     impl->dummy_iface.lpVtbl = (void *)dummy_vtbl;
     impl->dispatcher = core_dispatcher_create();
     impl->ref = 1;
@@ -1297,9 +1521,9 @@ ICoreWindow *core_window_create(void)
 
     thread_core_window = impl;
 
-    impl->hwnd = CreateWindowExW( 0, class_name, NULL,
+    impl->hwnd = CreateWindowExW( 0, class_name, title,
                                   WS_OVERLAPPEDWINDOW | WS_VISIBLE,
-                                  CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768,
+                                  x, y, width, height,
                                   NULL, NULL, inst, impl );
     if (impl->hwnd)
     {
@@ -1308,7 +1532,52 @@ ICoreWindow *core_window_create(void)
         UpdateWindow( impl->hwnd );
     }
     TRACE( "created CoreWindow %p, hwnd %p\n", impl, impl->hwnd );
-    return &impl->ICoreWindow_iface;
+    return impl;
+}
+
+ICoreWindow *core_window_create( void )
+{
+    struct core_window *impl = create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, FALSE );
+
+    return impl ? &impl->ICoreWindow_iface : NULL;
+}
+
+/* Windows' shell makes a view's CoreWindow through its UAP window factory, which ends in this
+ * private windows.ui export; wineuwp's in-process broker stand-in calls it the same way, and it is
+ * what lets a view get a CoreWindow the shell would otherwise have to hand it.
+ *
+ * window_type is the factory's switch: 1 is the main window of a view. The flags and the parent are
+ * the shell's UAP window options, which this module has no use for: the window it makes is the one
+ * the thread has, and a thread has exactly one. */
+HRESULT PrivateCreateCoreWindow( DWORD window_type, const WCHAR *title, INT x, INT y,
+                                 UINT width, UINT height, DWORD flags, HWND parent,
+                                 const GUID *iid, void **out )
+{
+    struct core_window *impl;
+    HRESULT hr;
+
+    TRACE( "window_type %lu, title %s, x %d, y %d, size %ux%u, flags %#lx, parent %p.\n",
+           window_type, debugstr_w( title ), x, y, width, height, flags, parent );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (window_type != 1)
+    {
+        FIXME( "window type %lu not supported.\n", window_type );
+        return E_NOTIMPL;
+    }
+    if (!width || !height) return E_INVALIDARG;
+
+    if (!(impl = create_core_window( title, x, y, width, height, TRUE ))) return E_OUTOFMEMORY;
+
+    if (!iid)
+    {
+        *out = &impl->ICoreWindow_iface;
+        return S_OK;
+    }
+    hr = ICoreWindow_QueryInterface( &impl->ICoreWindow_iface, iid, (void **)out );
+    ICoreWindow_Release( &impl->ICoreWindow_iface );
+    return hr;
 }
 
 /* ---- Windows.UI.Core.CoreCursor ---- */

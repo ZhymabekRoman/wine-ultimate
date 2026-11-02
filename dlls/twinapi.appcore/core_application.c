@@ -1034,10 +1034,269 @@ static HRESULT WINAPI core_application_GetCurrentView( ICoreApplication *iface, 
     return *value ? S_OK : E_OUTOFMEMORY;
 }
 
+/* ---- the shell's activation handshake, through wineuwp's in-process brokers -------------------
+ *
+ * A packaged app's CoreApplication::Run registers its activation object with the shell's
+ * ActivatableApplicationRegistrar and hands the process state manager to RegisterWithPSM. The shell
+ * then calls Activate back on the app, and the app's activation factory asks the shell's
+ * CoreWindowBroker for the window factory that makes the view's CoreWindow. No prefix has those
+ * brokers, so wineuwp provides all three in-process (dlls/wineuwp); this is the app side of it.
+ *
+ * The order is the shell's and XAML is strict about it: CreateCoreWindow, SetWindowAndGetDispatcher,
+ * Load, PrepareToActivate, Activate. Configuring a CoreWindow twice is not harmless —
+ * DXamlCore::ConfigureCoreWindow returns E_UNEXPECTED, XAML stows it and fail-fasts — so a brokered
+ * run configures the window exactly once and skips the direct path below.
+ *
+ * All of this is behind WINE_UWP_BROKERS. The unpackaged path (WinUI 3, dcompi, appresolver) is
+ * byte-for-byte the path it has always been, and a brokered run that cannot reach the brokers falls
+ * back to it.
+ */
+static const GUID CLSID_ActivatableApplicationRegistrar_ =
+    { 0xdea794e0, 0x1c1d, 0x4363, { 0xb1, 0x71, 0x98, 0xd0, 0xb1, 0x70, 0x35, 0x86 } };
+static const GUID IID_IActivatableApplicationRegistrar_ =
+    { 0x036c57fc, 0xe73d, 0x4f3a, { 0xb0, 0x95, 0x8b, 0x81, 0x3f, 0xa2, 0xf7, 0x64 } };
+static const GUID IID_IActivatableApplication_ =
+    { 0x92696c00, 0x7578, 0x48e1, { 0xac, 0x1a, 0x2c, 0xa9, 0x09, 0xe2, 0xc8, 0xcf } };
+static const GUID CLSID_CoreWindowBroker_ =
+    { 0x3480a401, 0xbde9, 0x4407, { 0xbc, 0x02, 0x79, 0x8a, 0x86, 0x6a, 0xc0, 0x51 } };
+static const GUID IID_ICoreWindowBroker_ =
+    { 0x0f4accb1, 0xd8f9, 0x4011, { 0xba, 0x37, 0x25, 0x57, 0x92, 0x5a, 0x78, 0xcf } };
+static const GUID IID_ICoreWindowFactory_ =
+    { 0xcd292360, 0x2763, 0x4085, { 0x8a, 0x9f, 0x74, 0xb2, 0x24, 0xa2, 0x91, 0x75 } };
+static const GUID SID_window_factory_ =
+    { 0xd98fd14a, 0x522a, 0x4d59, { 0xb8, 0x75, 0x81, 0x1e, 0x83, 0x91, 0x9a, 0x9e } };
+static const GUID CLSID_PsmBroker_ =
+    { 0x02844640, 0xe37c, 0x4322, { 0xa3, 0xb8, 0x4c, 0x61, 0xa2, 0xe5, 0x88, 0x79 } };
+static const GUID IID_IPsmBroker_ =
+    { 0x33c255c3, 0x1a86, 0x45fc, { 0x94, 0x98, 0xf6, 0x0d, 0x8f, 0x56, 0xb9, 0xd3 } };
+static const GUID IID_ICoreWindowNavigation_ =
+    { 0xbb4cbbe9, 0x65af, 0x4730, { 0x9e, 0xd2, 0xab, 0xbd, 0xb5, 0xcc, 0x15, 0xb9 } };
+static const GUID IID_INavigationClientPrepareToActivate_ =
+    { 0x075be329, 0x825a, 0x4f2a, { 0xa8, 0xaf, 0xcd, 0x2f, 0x9a, 0x81, 0x02, 0xec } };
+
+static BOOL use_shell_brokers( void )
+{
+    static int cached = -1;
+
+    if (cached < 0) cached = GetEnvironmentVariableW( L"WINE_UWP_BROKERS", NULL, 0 ) ? 1 : 0;
+    return cached == 1;
+}
+
+/* The shell's brokers speak private interfaces no header describes, so their vtables are indexed. */
+static HRESULT broker_QueryService( IUnknown *broker, const GUID *service, const GUID *iid, void **out )
+{
+    HRESULT (WINAPI *func)( void *, const GUID *, const GUID *, void ** ) = (void *)(*(void ***)broker)[3];
+
+    return func( broker, service, iid, out );
+}
+static HRESULT factory_CreateCoreWindow( IUnknown *factory, HSTRING title, IUnknown **window )
+{
+    HRESULT (WINAPI *func)( void *, HSTRING, void ** ) = (void *)(*(void ***)factory)[6];
+
+    return func( factory, title, (void **)window );
+}
+static HRESULT registrar_RegisterActivatableApplication( IUnknown *registrar, IUnknown *app )
+{
+    HRESULT (WINAPI *func)( void *, IUnknown * ) = (void *)(*(void ***)registrar)[3];
+
+    return func( registrar, app );
+}
+
+struct broker_app
+{
+    const void *lpVtbl;
+    LONG ref;
+    IFrameworkView *view;
+    ICoreApplicationView *app_view;
+};
+
+static inline struct broker_app *impl_from_broker_app( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct broker_app, lpVtbl );
+}
+
+static HRESULT WINAPI broker_app_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IActivatableApplication_ ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl_from_broker_app( iface )->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI broker_app_AddRef( void *iface ) { return InterlockedIncrement( &impl_from_broker_app( iface )->ref ); }
+static ULONG WINAPI broker_app_Release( void *iface ) { return InterlockedDecrement( &impl_from_broker_app( iface )->ref ); }
+static HRESULT WINAPI broker_app_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI broker_app_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.Core.ApplicationActivationFactory", 61, name );
+}
+static HRESULT WINAPI broker_app_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+/* The view's Activated event: what a XAML app's Application.OnLaunched hangs off. */
+static void invoke_view_activated( ICoreApplicationView *app_view )
+{
+    __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args;
+
+    if (!view_activated_handler) return;
+    if (!(args = activated_event_args_create( 0 /* ActivationKind_Launch */ ))) return;
+    TRACE( "invoking Activated handler %p\n", view_activated_handler );
+    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs_Invoke(
+        view_activated_handler, app_view, args );
+    __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs_Release( args );
+}
+
+/* CoreApplicationView::PrepareToActivateAsync, from the shell's side: it asks the window's
+ * navigation client (the property wineuwp put there when it made the window) for a completed
+ * IAsyncAction. A window with no navigation client fails this with E_NOTIMPL, which is what the
+ * shell treats as "this view cannot be activated". */
+static HRESULT prepare_to_activate( IUnknown *window )
+{
+    IUnknown *host = NULL, *client = NULL, *prepare = NULL, *action = NULL;
+    HRESULT (WINAPI *get_NavigationClient)( void *, IUnknown ** );
+    HRESULT (WINAPI *PrepareToActivate)( void *, UINT64, void ** );
+    HRESULT hr;
+
+    if (FAILED( hr = IUnknown_QueryInterface( window, &IID_ICoreWindowNavigation_, (void **)&host ) ))
+    {
+        WARN( "CoreWindow has no navigation client property, hr %#lx.\n", hr );
+        return hr;
+    }
+    get_NavigationClient = (void *)(*(void ***)host)[6];
+    hr = get_NavigationClient( host, &client );
+    if (FAILED( hr ) || !client)
+    {
+        WARN( "no navigation client on the window, hr %#lx.\n", hr );
+        if (FAILED( hr )) goto done;
+        hr = E_NOTIMPL;
+        goto done;
+    }
+    if (FAILED( hr = IUnknown_QueryInterface( client, &IID_INavigationClientPrepareToActivate_,
+                                              (void **)&prepare ) ))
+        goto done;
+    PrepareToActivate = (void *)(*(void ***)prepare)[6];
+    hr = PrepareToActivate( prepare, 0, (void **)&action );
+    TRACE( "PrepareToActivate hr %#lx, action %p.\n", hr, action );
+    if (action) IUnknown_Release( action );
+done:
+    if (prepare) IUnknown_Release( prepare );
+    if (client) IUnknown_Release( client );
+    if (host) IUnknown_Release( host );
+    return hr;
+}
+
+/* ApplicationActivationFactory::Activate: the shell's callback, which gets the view its CoreWindow
+ * from the broker and runs the shell's view startup on it, on this thread — the view's apartment. */
+static HRESULT WINAPI broker_app_Activate( void *iface, HSTRING aumid, HSTRING contract,
+        HSTRING activation_id, HSTRING extra, IInspectable *args, UINT64 cookie, UINT32 options )
+{
+    struct broker_app *app = impl_from_broker_app( iface );
+    IUnknown *broker = NULL, *service = NULL, *factory = NULL, *window = NULL;
+    HSTRING title = NULL;
+    HRESULT hr;
+
+    TRACE( "aumid %s, contract %s.\n", debugstr_hstring( aumid ), debugstr_hstring( contract ) );
+
+    /* CoreApplication::GetWindowFactory: CoCreate the broker, ask it for the window factory
+     * service, QI the factory off the object it hands back. */
+    if (FAILED( hr = CoCreateInstance( &CLSID_CoreWindowBroker_, NULL, CLSCTX_INPROC_SERVER,
+                                       &IID_ICoreWindowBroker_, (void **)&broker ) ))
+    {
+        WARN( "no CoreWindowBroker in this prefix, hr %#lx.\n", hr );
+        goto done;
+    }
+    if (FAILED( hr = broker_QueryService( broker, &SID_window_factory_, &IID_ICoreWindowFactory_,
+                                          (void **)&service ) ))
+    {
+        WARN( "broker has no window factory service, hr %#lx.\n", hr );
+        goto done;
+    }
+    if (FAILED( hr = IUnknown_QueryInterface( service, &IID_ICoreWindowFactory_, (void **)&factory ) ))
+        goto done;
+    /* the window's text is the app model entry id, which is what the shell names it with */
+    if (SUCCEEDED( WindowsDuplicateString( aumid, &title ) ) && !title)
+        WindowsCreateString( L"App", 3, &title );
+    if (!title) WindowsCreateString( L"App", 3, &title );
+    if (FAILED( hr = factory_CreateCoreWindow( factory, title, &window ) ))
+    {
+        WARN( "CreateCoreWindow failed, hr %#lx.\n", hr );
+        goto done;
+    }
+    /* SetWindowAndGetDispatcher: the CoreWindow carries its own dispatcher, which is what the view
+     * asks for alongside the window. This is the only place the window is configured. */
+    hr = IFrameworkView_SetWindow( app->view, (void *)window );
+    if (SUCCEEDED( hr )) hr = IFrameworkView_Load( app->view, NULL );
+    if (SUCCEEDED( hr )) prepare_to_activate( window );   /* best effort; the shell does not stop on it */
+    if (SUCCEEDED( hr )) invoke_view_activated( app->app_view );
+done:
+    WindowsDeleteString( title );
+    if (window) IUnknown_Release( window );
+    if (factory) IUnknown_Release( factory );
+    if (service) IUnknown_Release( service );
+    if (broker) IUnknown_Release( broker );
+    return hr;
+}
+
+static const void *broker_app_vtbl[] =
+{
+    broker_app_QueryInterface, broker_app_AddRef, broker_app_Release,
+    broker_app_GetIids, broker_app_GetRuntimeClassName, broker_app_GetTrustLevel,
+    broker_app_Activate,
+};
+
+static HRESULT core_application_broker_handshake( IFrameworkView *view, ICoreApplicationView *app_view )
+{
+    struct broker_app app;
+    IUnknown *psm = NULL, *registrar = NULL;
+    HRESULT hr;
+
+    /* RegisterWithPSM CoCreates the process state manager's broker in-process on Windows; nothing
+     * here tracks process state, and the app stops waiting on the service. */
+    if (FAILED( hr = CoCreateInstance( &CLSID_PsmBroker_, NULL, CLSCTX_INPROC_SERVER,
+                                       &IID_IPsmBroker_, (void **)&psm ) ))
+    {
+        WARN( "no PsmBroker in this prefix, hr %#lx.\n", hr );
+        return hr;
+    }
+    IUnknown_Release( psm );
+
+    if (FAILED( hr = CoCreateInstance( &CLSID_ActivatableApplicationRegistrar_, NULL, CLSCTX_INPROC_SERVER,
+                                       &IID_IActivatableApplicationRegistrar_, (void **)&registrar ) ))
+    {
+        WARN( "no ActivatableApplicationRegistrar in this prefix, hr %#lx.\n", hr );
+        return hr;
+    }
+
+    app.lpVtbl = broker_app_vtbl;
+    app.ref = 1;
+    app.view = view;
+    app.app_view = app_view;
+
+    /* CoreApplication::RegisterActivatableApplication, slot 3. The broker runs the activation on
+     * this thread, which is the apartment CoreApplication::Run — and so the view — belongs to. */
+    hr = registrar_RegisterActivatableApplication( registrar, (IUnknown *)&app.lpVtbl );
+    TRACE( "RegisterActivatableApplication hr %#lx, app refcount %ld.\n", hr, app.ref );
+    IUnknown_Release( registrar );
+    return hr;
+}
+
 static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkViewSource *view_source )
 {
     ICoreApplicationView *app_view;
     IFrameworkView *view;
+    BOOL brokered;
     HRESULT hr;
     HMODULE cm;
 
@@ -1079,7 +1338,12 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
 
     /* drive the UWP view lifecycle: Initialize -> SetWindow -> Load -> Run */
     hr = IFrameworkView_Initialize( view, app_view );
-    if (SUCCEEDED(hr))
+    /* WINE_UWP_BROKERS: let the shell's brokers, provided in-process by wineuwp, hand the view its
+     * CoreWindow and drive its startup. A run that cannot reach them falls back to the path below,
+     * which is what an unpackaged app has always taken. */
+    brokered = use_shell_brokers() && SUCCEEDED( core_application_broker_handshake( view, app_view ) );
+
+    if (!brokered && SUCCEEDED(hr))
     {
         /* get a CoreWindow for SetWindow via the WinRT activation factory */
         IActivationFactory *cwf = NULL;
@@ -1114,8 +1378,8 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
         hr = IFrameworkView_SetWindow( view, cw );
         if (cw) __x_ABI_CWindows_CUI_CCore_CICoreWindow_Release( cw );
     }
-    if (SUCCEEDED(hr)) hr = IFrameworkView_Load( view, NULL );
-    if (view_activated_handler)
+    if (!brokered && SUCCEEDED(hr)) hr = IFrameworkView_Load( view, NULL );
+    if (!brokered && view_activated_handler)
     {
         __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args =
             activated_event_args_create( 0 /* ActivationKind_Launch */ );

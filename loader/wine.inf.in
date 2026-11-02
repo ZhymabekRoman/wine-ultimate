@@ -74,7 +74,8 @@ AddReg=\
     SessionMgr,\
     ThemeManager,\
     WinRTActivatableClasses,\
-    AppModelActivation
+    AppModelActivation,\
+    WineuwpActivation
 
 [DefaultInstall]
 Needs=BaseInstall
@@ -726,6 +727,22 @@ HKCR,CLSID\{660b90c8-73a9-4b58-8cae-355b7f55341b}\InprocServer32,"ThreadingModel
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,"DllPath",2,"%12%\dcompi.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,"ThreadingModel",0x10001,2
+
+; The shell brokers a packaged (UWP) app CoCreates when it starts: the activatable application
+; registrar the app hands its activation object to, the CoreWindow factory broker a view's
+; CoreWindow comes from, and the process state manager's broker. Windows runs the first and the
+; second out of process, in the shell; a prefix has no shell, so wineuwp.dll provides all three
+; in-process. ThreadingModel Both because the activation arrives on the app's view thread.
+[WineuwpActivation]
+HKCR,CLSID\{dea794e0-1c1d-4363-b171-98d0b1703586},,2,"ActivatableApplicationRegistrar (wine-uwp)"
+HKCR,CLSID\{dea794e0-1c1d-4363-b171-98d0b1703586}\InprocServer32,,2,"%12%\wineuwp.dll"
+HKCR,CLSID\{dea794e0-1c1d-4363-b171-98d0b1703586}\InprocServer32,"ThreadingModel",2,"Both"
+HKCR,CLSID\{3480a401-bde9-4407-bc02-798a866ac051},,2,"CoreWindowBroker (wine-uwp)"
+HKCR,CLSID\{3480a401-bde9-4407-bc02-798a866ac051}\InprocServer32,,2,"%12%\wineuwp.dll"
+HKCR,CLSID\{3480a401-bde9-4407-bc02-798a866ac051}\InprocServer32,"ThreadingModel",2,"Both"
+HKCR,CLSID\{02844640-e37c-4322-a3b8-4c61a2e58879},,2,"PsmBroker (wine-uwp)"
+HKCR,CLSID\{02844640-e37c-4322-a3b8-4c61a2e58879}\InprocServer32,,2,"%12%\wineuwp.dll"
+HKCR,CLSID\{02844640-e37c-4322-a3b8-4c61a2e58879}\InprocServer32,"ThreadingModel",2,"Both"
 
 [Printing]
 HKLM,%Control%\Print\Monitors\Local Port,"Driver",2,"localspl.dll"

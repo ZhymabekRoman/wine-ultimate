@@ -12,3 +12,9 @@
 @ stdcall Windowing_GetWindowIdFromWindow(ptr ptr)
 @ stub CreateControlInput
 @ stub CreateControlInputEx
+@ stdcall CoreWindow_Create() core_window_create
+
+# The shell's UAP window factory ends here: it gives a view's CoreWindow its title and geometry.
+# wineuwp's in-process CoreWindowBroker stand-in reaches it the same way (by ordinal, as Windows'
+# twinapi.appcore does), which is why the ordinal is pinned.
+1500 stdcall -private PrivateCreateCoreWindow(long wstr long long long long long ptr ptr ptr)
