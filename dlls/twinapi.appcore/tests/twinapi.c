@@ -49,6 +49,7 @@
 #include "windows.applicationmodel.core.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #include "windows.applicationmodel.datatransfer.h"
+#define WIDL_using_Windows_Data_Xml_Dom
 #define WIDL_using_Windows_UI_Notifications
 #include "windows.ui.notifications.h"
 
@@ -888,6 +889,62 @@ static void test_ToastNotificationManager(void)
                                             (void **)&toast_notification_manager_statics );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
 
+    /* the projection of the class carries the later static interfaces too */
+    check_interface( factory, &IID_IToastNotificationManagerStatics2, TRUE );
+    check_interface( factory, &IID_IToastNotificationManagerStatics4, TRUE );
+    check_interface( factory, &IID_IToastNotificationManagerStatics5, TRUE );
+
+    {
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationManagerStatics2 *statics2;
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationManagerStatics4 *statics4;
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationManagerStatics5 *statics5;
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationManagerForUser *for_user;
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier *notifier2;
+
+        hr = IActivationFactory_QueryInterface( factory, &IID_IToastNotificationManagerStatics5,
+                                                (void **)&statics5 );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        /* ToastNotificationManager.GetDefault() is the entry the .NET projection
+         * of the notification path reaches its notifier through */
+        hr = IToastNotificationManagerStatics5_GetDefault( statics5, &for_user );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (hr == S_OK)
+        {
+            hr = IToastNotificationManagerForUser_CreateToastNotifier( for_user, &notifier2 );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            if (hr == S_OK)
+            {
+                __x_ABI_CWindows_CUI_CNotifications_CNotificationSetting setting = 0xc0ffee;
+                hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_get_Setting( notifier2, &setting );
+                ok( hr == S_OK && setting == NotificationSetting_Enabled, "got hr %#lx, setting %d.\n", hr, setting );
+                __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Release( notifier2 );
+            }
+            IToastNotificationManagerForUser_Release( for_user );
+        }
+        IToastNotificationManagerStatics5_Release( statics5 );
+
+        hr = IActivationFactory_QueryInterface( factory, &IID_IToastNotificationManagerStatics4,
+                                                (void **)&statics4 );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = IToastNotificationManagerStatics4_ConfigureNotificationMirroring( statics4,
+                                                                              NotificationMirroring_Allowed );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        IToastNotificationManagerStatics4_Release( statics4 );
+
+        hr = IActivationFactory_QueryInterface( factory, &IID_IToastNotificationManagerStatics2,
+                                                (void **)&statics2 );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        /* the history surface is not implemented; the call reports that, it does
+         * not hand out an object the tray path would then drive blind */
+        {
+            __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationHistory *history = (void *)0x1;
+            hr = IToastNotificationManagerStatics2_get_History( statics2, &history );
+            ok( hr == E_NOTIMPL || hr == S_OK, "got hr %#lx.\n", hr );
+            if (hr == S_OK && history) IToastNotificationHistory_Release( history );
+        }
+        IToastNotificationManagerStatics2_Release( statics2 );
+    }
+
     hr = WindowsCreateString( id, wcslen( id ), &str );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     hr = IToastNotificationManagerStatics_CreateToastNotifierWithId( toast_notification_manager_statics, str, &notifier );
@@ -944,6 +1001,112 @@ static void test_ToastNotificationManager(void)
     ok( ref >= 1, "got ref %ld.\n", ref );
 }
 
+static void test_ToastNotification(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_UI_Notifications_ToastNotification;
+    static const WCHAR *xml_class_name = RuntimeClass_Windows_Data_Xml_Dom_XmlDocument;
+    static const WCHAR *tag = L"wine.tag";
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationFactory *toast_notification_factory;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotification *toast_notification;
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotification2 *toast_notification2;
+    __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *xml_document;
+    IInspectable *instance;
+    IActivationFactory *factory, *xml_factory;
+    IUnknown *content_unk, *document_unk;
+    HSTRING str;
+    HRESULT hr;
+    LONG ref;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    check_interface( factory, &IID_IToastNotificationFactory, TRUE );
+
+    /* the payload DOM the notification path builds its content in */
+    hr = WindowsCreateString( xml_class_name, wcslen( xml_class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&xml_factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (hr != S_OK)
+    {
+        IActivationFactory_Release( factory );
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( xml_class_name ) );
+        return;
+    }
+    hr = IActivationFactory_ActivateInstance( xml_factory, &instance );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IInspectable_QueryInterface( instance, &IID_IXmlDocument, (void **)&xml_document );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IToastNotificationFactory,
+                                            (void **)&toast_notification_factory );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IToastNotificationFactory_CreateToastNotification( toast_notification_factory, xml_document,
+                                                            &toast_notification );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* the notification keeps the content document it was created with */
+    {
+        __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *content;
+
+        hr = IToastNotification_get_Content( toast_notification, &content );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = IXmlDocument_QueryInterface( content, &IID_IUnknown, (void **)&content_unk );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        hr = IXmlDocument_QueryInterface( xml_document, &IID_IUnknown, (void **)&document_unk );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( content_unk == document_unk, "content %p, document %p.\n", content_unk, document_unk );
+        IUnknown_Release( document_unk );
+        IUnknown_Release( content_unk );
+        IXmlDocument_Release( content );
+    }
+
+    /* the tag/group surface of the notification round-trips */
+    hr = IToastNotification_QueryInterface( toast_notification, &IID_IToastNotification2,
+                                            (void **)&toast_notification2 );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = WindowsCreateString( tag, wcslen( tag ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IToastNotification2_put_Tag( toast_notification2, str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IToastNotification2_get_Tag( toast_notification2, &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( !lstrcmpW( WindowsGetStringRawBuffer( str, NULL ), tag ), "got %s.\n",
+        wine_dbgstr_w( WindowsGetStringRawBuffer( str, NULL ) ) );
+    WindowsDeleteString( str );
+    ref = IToastNotification2_Release( toast_notification2 );
+    ok( ref == 1, "got ref %ld.\n", ref );
+
+    ref = __x_ABI_CWindows_CUI_CNotifications_CIToastNotification_Release( toast_notification );
+    ok( !ref, "got ref %ld.\n", ref );
+    ref = IToastNotificationFactory_Release( toast_notification_factory );
+    ok( ref >= 1, "got ref %ld.\n", ref );
+
+    /* the class is activatable with an interface: no parameterless activation */
+    hr = IActivationFactory_ActivateInstance( factory, NULL );
+    ok( hr == E_NOINTERFACE || hr == E_FAIL || hr == E_POINTER, "got hr %#lx.\n", hr );
+
+    /* the document is also referenced by the instance the activation returned */
+    ref = IXmlDocument_Release( xml_document );
+    ok( ref == 1, "got ref %ld.\n", ref );
+    ref = IInspectable_Release( instance );
+    ok( !ref, "got ref %ld.\n", ref );
+    ref = IActivationFactory_Release( xml_factory );
+    ok( ref >= 1, "got ref %ld.\n", ref );
+    ref = IActivationFactory_Release( factory );
+    ok( ref >= 1, "got ref %ld.\n", ref );
+}
+
 START_TEST(twinapi)
 {
     HRESULT hr;
@@ -960,6 +1123,7 @@ START_TEST(twinapi)
     test_DataTransferManager();
     test_PowerManager();
     test_ToastNotificationManager();
+    test_ToastNotification();
 
     RoUninitialize();
 }

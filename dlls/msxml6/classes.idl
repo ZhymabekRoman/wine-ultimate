@@ -1,0 +1,20 @@
+#pragma makedep register
+#pragma winrt ns_prefix
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.foundation.collections.idl";
+import "windows.foundation.metadata.idl";
+import "windows.storage.idl";
+import "windows.storage.streams.idl";
+import "windows.data.xml.dom.idl";
+
+namespace Windows.Data.Xml.Dom {
+    runtimeclass XmlDocument;
+}
+namespace Windows.Data.Xml.Xsl {
+    runtimeclass XsltProcessor;
+}

@@ -75,6 +75,36 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Windows.UI.Notifications.* is the toast/badge surface: the app's tray and
+     * notification path activates Windows.UI.Notifications.ToastNotification-
+     * Manager (Microsoft.Toolkit ToastNotificationManagerCompat.CreateToast-
+     * Notifier logs "Failed initializing notifications" when the class does not
+     * resolve) and hands the toast payload to ToastContentFactory/ToastNotification.
+     * Windows serves the namespace out of twinapi.appcore.dll; an unpackaged
+     * prefix has no ActivatableClassId key for the classes, so route the namespace
+     * to the module that implements the classes' DllGetActivationFactory, like the
+     * Windows.ApplicationModel.Core route above.  The namespace split is exact on
+     * the trailing dot: the remaining Windows.UI.Notifications classes (the tile
+     * and badge-manager surface twinapi does not implement) keep answering
+     * E_NOINTERFACE from that factory. */
+    if (!wcsncmp(classid, L"Windows.UI.Notifications.", 25))
+    {
+        *out = wcsdup(L"twinapi.appcore.dll");
+        return S_OK;
+    }
+
+    /* Windows.Data.Xml.Dom.XmlDocument is the DOM the notification path builds its
+     * toast payload into (IToastNotificationFactory::CreateToastNotification takes
+     * the class), and Windows.Data.Xml.Xsl.XsltProcessor is its transform partner.
+     * This tree's MSXML DOM provider, msxml6.dll, implements the classes'
+     * DllGetActivationFactory over the msxml6 DOM, so route the namespace there for
+     * the same unpackaged-prefix reason as the two routes above. */
+    if (!wcsncmp(classid, L"Windows.Data.Xml.", 17))
+    {
+        *out = wcsdup(L"msxml6.dll");
+        return S_OK;
+    }
+
     if (!wcsncmp(classid, L"Windows.Security.Cryptography.", 30))
     {
         *out = wcsdup(L"cryptowinrt.dll");

@@ -75,7 +75,8 @@ AddReg=\
     ThemeManager,\
     WinRTActivatableClasses,\
     AppModelActivation,\
-    WineuwpActivation
+    WineuwpActivation,
+    ShellWinRTActivation
 
 [DefaultInstall]
 Needs=BaseInstall
@@ -575,6 +576,24 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor,"DllPath",2,"%12%\windows.ui.composition.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,"DllPath",2,"%12%\twinapi.appcore.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManagerForUser,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManagerForUser,"DllPath",2,"%12%\twinapi.appcore.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManagerForUser,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotification,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotification,"DllPath",2,"%12%\twinapi.appcore.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotification,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotifier,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotifier,"DllPath",2,"%12%\twinapi.appcore.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotifier,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlDocument,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlDocument,"DllPath",2,"%12%\msxml6.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Dom.XmlDocument,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Xsl.XsltProcessor,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Xsl.XsltProcessor,"DllPath",2,"%12%\msxml6.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Data.Xml.Xsl.XsltProcessor,"ThreadingModel",0x10001,2
 
 ; App-model activation classes hosted by Wine built-in modules: MRT resource classes and the
 ; package classes.  combase resolves RoGetActivationFactory through DllPath here; unpackaged
@@ -743,6 +762,45 @@ HKCR,CLSID\{3480a401-bde9-4407-bc02-798a866ac051}\InprocServer32,"ThreadingModel
 HKCR,CLSID\{02844640-e37c-4322-a3b8-4c61a2e58879},,2,"PsmBroker (wine-uwp)"
 HKCR,CLSID\{02844640-e37c-4322-a3b8-4c61a2e58879}\InprocServer32,,2,"%12%\wineuwp.dll"
 HKCR,CLSID\{02844640-e37c-4322-a3b8-4c61a2e58879}\InprocServer32,"ThreadingModel",2,"Both"
+
+; The shell/broker WinRT classes the modern app stack activates by name: the Web
+; Account Manager (Windows.Security.Authentication.Web.Core, used by MSAL-based
+; login) and the push notification channel manager (Windows.Networking.PushNotifications).
+; Windows registers every activatable class under the ActivatableClassId key with its
+; DllPath and ThreadingModel, and combase resolves RoGetActivationFactory through it; an
+; unpackaged prefix has no such registrations, so the built-in providers are seeded here,
+; in the 64-bit view combase reads, in the exact [DcompiActivation] format.
+[ShellWinRTActivation]
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager,"DllPath",2,"%12%\windows.security.authentication.web.core.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebAuthenticationCoreManager,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenRequest,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenRequest,"DllPath",2,"%12%\windows.security.authentication.web.core.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenRequest,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenRequestResult,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenRequestResult,"DllPath",2,"%12%\windows.security.authentication.web.core.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenRequestResult,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenResponse,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenResponse,"DllPath",2,"%12%\windows.security.authentication.web.core.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebTokenResponse,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebProviderError,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebProviderError,"DllPath",2,"%12%\windows.security.authentication.web.core.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Authentication.Web.Core.WebProviderError,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccountProvider,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccountProvider,"DllPath",2,"%12%\windows.security.authentication.web.core.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccountProvider,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccount,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccount,"DllPath",2,"%12%\windows.security.authentication.web.core.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccount,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannel,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannel,"DllPath",2,"%12%\windows.networking.pushnotifications.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannel,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManager,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManager,"DllPath",2,"%12%\windows.networking.pushnotifications.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManager,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManagerForUser,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManagerForUser,"DllPath",2,"%12%\windows.networking.pushnotifications.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManagerForUser,"ThreadingModel",0x10001,2
 
 [Printing]
 HKLM,%Control%\Print\Monitors\Local Port,"Driver",2,"localspl.dll"

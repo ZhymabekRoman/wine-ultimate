@@ -70,6 +70,7 @@ extern IActivationFactory *html_format_helper_statics_factory;
 extern IActivationFactory *standard_data_formats_statics_factory;
 extern IActivationFactory *badge_update_manager_statics_factory;
 extern IActivationFactory *toast_notification_manager_statics_factory;
+extern IActivationFactory *toast_notification_factory;
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

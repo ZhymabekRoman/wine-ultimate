@@ -59,6 +59,8 @@ namespace Windows.UI.Notifications {
     runtimeclass BadgeUpdateManager;
     runtimeclass BadgeUpdater;
     runtimeclass ToastNotificationManager;
+    runtimeclass ToastNotificationManagerForUser;
+    runtimeclass ToastNotification;
     runtimeclass ToastNotifier;
 }
 namespace Windows.ApplicationModel.DataTransfer {

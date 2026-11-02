@@ -1,8 +1,9 @@
 TESTDLL = msxml6.dll
-IMPORTS = oleaut32 ole32
+IMPORTS = combase oleaut32 ole32
 
 SOURCES = \
 	domdoc.c \
 	httpreq.c \
 	saxreader.c \
-	schema.c
+	schema.c \
+	xmlwinrt.c
