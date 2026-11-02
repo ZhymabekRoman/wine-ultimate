@@ -43,6 +43,7 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 WINE_DECLARE_DEBUG_CHANNEL(snoop);
 WINE_DECLARE_DEBUG_CHANNEL(loaddll);
 WINE_DECLARE_DEBUG_CHANNEL(imports);
+WINE_DECLARE_DEBUG_CHANNEL(loader);  /* for the SxS path redirection trace */
 
 #ifdef _WIN64
 #define DEFAULT_SECURITY_COOKIE_64  (((ULONGLONG)0x00002b99 << 32) | 0x2ddfa232)
@@ -3390,6 +3391,100 @@ done:
 }
 
 /***********************************************************************
+ *	is_builtin_image_header
+ *
+ * Check the "Wine builtin DLL" signature that winebuild writes right after
+ * the DOS header. This is the same test build_module() uses to recognize a
+ * builtin image, applied here to a file header read before mapping.
+ */
+static BOOL is_builtin_image_header( const IMAGE_DOS_HEADER *dos, DWORD size )
+{
+    static const char builtin_signature[] = "Wine builtin DLL";
+    const char *signature = (const char *)(dos + 1);
+
+    if (size < sizeof(*dos) + sizeof(builtin_signature)) return FALSE;
+    if (dos->e_magic != IMAGE_DOS_SIGNATURE) return FALSE;
+    if (dos->e_lfanew < (LONG)(sizeof(*dos) + sizeof(builtin_signature))) return FALSE;
+    return !memcmp( signature, builtin_signature, sizeof(builtin_signature) );
+}
+
+
+/***********************************************************************
+ *	file_has_builtin_signature
+ *
+ * Read the image header of the file named by nt_name and tell whether it is a
+ * Wine builtin, without mapping it.
+ */
+static BOOL file_has_builtin_signature( UNICODE_STRING *nt_name )
+{
+    BYTE header[128];
+    OBJECT_ATTRIBUTES attr;
+    IO_STATUS_BLOCK io;
+    LARGE_INTEGER offset;
+    NTSTATUS status;
+    HANDLE handle;
+
+    InitializeObjectAttributes( &attr, nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = NtOpenFile( &handle, SYNCHRONIZE | GENERIC_READ, &attr, &io,
+                         FILE_SHARE_READ | FILE_SHARE_DELETE,
+                         FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE );
+    if (status) return FALSE;
+
+    offset.QuadPart = 0;
+    status = NtReadFile( handle, 0, NULL, NULL, &io, header, sizeof(header), &offset, NULL );
+    NtClose( handle );
+    if (status) return FALSE;
+
+    return is_builtin_image_header( (const IMAGE_DOS_HEADER *)header, (DWORD)io.Information );
+}
+
+
+/***********************************************************************
+ *	redirect_path_to_builtin
+ *
+ * Chromium/WebView2 probes its side-by-side directory by explicit path, e.g.
+ * "<exe dir>\WebView2\dcomp.dll". Those probe files are absent, and an
+ * explicit path gets no system directory fallback, so the probe fails with
+ * STATUS_DLL_NOT_FOUND even though a Wine builtin of the same base name is
+ * installed: our builtins are --wine-builtin PEs, they cannot be staged into
+ * a SxS directory as native files.
+ *
+ * Redirect such a failed probe to the builtin with the same base name. The
+ * system directory name of the base name is the name a normal builtin load
+ * uses, so the module identity (modref, base name, full name, exports) is
+ * exactly the one a normal builtin load produces.
+ *
+ * Scope is kept minimal on purpose: this is called only after the request
+ * path itself was probed and turned out to be absent, and only a file
+ * carrying the Wine builtin signature is accepted, so a native file that
+ * exists - at the request path or in the system directory - is never masked.
+ */
+static NTSTATUS redirect_path_to_builtin( const WCHAR *libname, UNICODE_STRING *nt_name,
+                                          WINE_MODREF **pwm, HANDLE *mapping,
+                                          SECTION_IMAGE_INFORMATION *image_info, struct file_id *id )
+{
+    const WCHAR *p, *base = libname;
+    NTSTATUS status;
+
+    for (p = libname; *p; p++) if (*p == '\\' || *p == '/') base = p + 1;
+    if (base == libname || !*base) return STATUS_DLL_NOT_FOUND;  /* no path to redirect */
+
+    build_sysdir_nt_name( base, nt_name );
+    if (!file_has_builtin_signature( nt_name ))
+    {
+        RtlFreeUnicodeString( nt_name );
+        return STATUS_DLL_NOT_FOUND;
+    }
+
+    status = open_dll_file( nt_name, pwm, mapping, image_info, id );
+    if (status) RtlFreeUnicodeString( nt_name );
+    else TRACE_(loader)( "redirecting SxS path %s to builtin %s\n",
+                         debugstr_w(libname), debugstr_us(nt_name) );
+    return status;
+}
+
+
+/***********************************************************************
  *	find_dll_file
  *
  * Find the file (or already loaded module) for a given dll name.
@@ -3444,8 +3539,19 @@ static NTSTATUS find_dll_file( const WCHAR *load_path, const WCHAR *libname, UNI
         if (status == STATUS_DLL_NOT_FOUND)
             status = find_builtin_without_file( libname, nt_name, pwm, mapping, image_info, id );
     }
-    else if (!(status = RtlDosPathNameToNtPathName_U_WithStatus( libname, nt_name, NULL, NULL )))
-        status = open_dll_file( nt_name, pwm, mapping, image_info, id );
+    else
+    {
+        if (!(status = RtlDosPathNameToNtPathName_U_WithStatus( libname, nt_name, NULL, NULL )))
+            status = open_dll_file( nt_name, pwm, mapping, image_info, id );
+
+        /* an explicit path whose file is absent gets no system directory
+         * fallback: redirect it to the builtin of the same base name */
+        if (status == STATUS_DLL_NOT_FOUND && !*pwm)
+        {
+            RtlFreeUnicodeString( nt_name );
+            status = redirect_path_to_builtin( libname, nt_name, pwm, mapping, image_info, id );
+        }
+    }
 
     if (status == STATUS_NOT_SUPPORTED) status = STATUS_INVALID_IMAGE_FORMAT;
 

@@ -305,6 +305,116 @@ static void test_default_handler( void )
         code, CHILD_OK );
 }
 
+/*
+ * Explicit-path builtin redirection.
+ *
+ * Chromium/WebView2 probes its side-by-side directory by explicit path:
+ * "<exe dir>\WebView2\dcomp.dll". The probe file is absent, and an explicit
+ * path gets no system directory fallback, so the load fails outright with
+ * ERROR_MOD_NOT_FOUND even though a Wine builtin of the same base name is
+ * installed - our builtins are --wine-builtin PEs and cannot be staged into
+ * a SxS directory as native files.
+ *
+ * The loader must redirect a failed explicit-path probe to the builtin with
+ * the same base name (base name matched case-insensitively), and the loaded
+ * module must be the very module a normal builtin load produces, so that
+ * GetModuleHandleA of the bare name finds it and FreeLibrary releases it.
+ * A base name that is not a Wine builtin must keep failing: the redirection
+ * never masks an existing native file.
+ */
+static void test_sxs_path_builtin_redirect( void )
+{
+    char tmp[MAX_PATH], dir[MAX_PATH], sxs[MAX_PATH], path[MAX_PATH];
+    HMODULE mod, ref;
+    FARPROC proc;
+
+    if (!winetest_platform_is_wine)
+    {
+        winetest_push_context( "sxs-redirect" );
+        skip( "Wine loader builtin redirection, not applicable on Windows\n" );
+        winetest_pop_context();
+        return;
+    }
+
+    if (!GetTempPathA( ARRAY_SIZE(tmp), tmp ) || !tmp[0])
+    {
+        winetest_push_context( "sxs-redirect" );
+        skip( "no temp path\n" );
+        winetest_pop_context();
+        return;
+    }
+
+    /* the SxS directory exists, the probed file does not: that is exactly what
+     * the Chromium SxS probe looks like in Wine */
+    sprintf( dir, "%swine-sxs-probe-%lu", tmp, GetCurrentProcessId() );
+    CreateDirectoryA( dir, NULL );
+    sprintf( sxs, "%s\\WebView2", dir );
+    CreateDirectoryA( sxs, NULL );
+    if (GetFileAttributesA( sxs ) == INVALID_FILE_ATTRIBUTES)
+    {
+        skip( "cannot create %s\n", sxs );
+        return;
+    }
+
+    /* the redirection target has to be installed in this prefix */
+    if (GetFileAttributesA( "C:\\windows\\system32\\kernelbase.dll" ) == INVALID_FILE_ATTRIBUTES)
+    {
+        winetest_push_context( "sxs-redirect" );
+        skip( "no builtin file in the system directory\n" );
+        winetest_pop_context();
+        RemoveDirectoryA( sxs );
+        RemoveDirectoryA( dir );
+        return;
+    }
+
+    winetest_push_context( "sxs-redirect" );
+
+    /* an already loaded builtin: the probe must yield the existing module */
+    sprintf( path, "%s\\kernelbase.dll", sxs );
+    ref = GetModuleHandleA( "kernelbase.dll" );
+    ok( ref != NULL, "kernelbase is not loaded\n" );
+    mod = LoadLibraryA( path );
+    ok( mod != NULL, "LoadLibraryA(%s) failed, error %lu\n", path, GetLastError() );
+    ok( mod == ref, "SxS probe module %p != kernelbase module %p\n", mod, ref );
+    if (mod)
+    {
+        BOOL freed = FreeLibrary( mod );
+        ok( freed, "FreeLibrary(%p) failed, error %lu\n", mod, GetLastError() );
+    }
+
+    /* base name matching is case-insensitive */
+    sprintf( path, "%s\\KERNELBASE.DLL", sxs );
+    mod = LoadLibraryA( path );
+    ok( mod == ref, "case-insensitive SxS probe module %p != kernelbase module %p\n", mod, ref );
+    if (mod) FreeLibrary( mod );
+
+    /* a builtin that is not loaded yet: the probe must produce a full builtin
+     * load, with the exports of the builtin available */
+    sprintf( path, "%s\\version.dll", sxs );
+    mod = LoadLibraryA( path );
+    ok( mod != NULL, "LoadLibraryA(%s) failed, error %lu\n", path, GetLastError() );
+    if (mod)
+    {
+        ok( mod == GetModuleHandleA( "version.dll" ),
+            "SxS probe module %p != version module %p\n", mod, GetModuleHandleA( "version.dll" ) );
+        proc = GetProcAddress( mod, "GetFileVersionInfoA" );
+        ok( proc != NULL, "no GetFileVersionInfoA in %p\n", mod );
+        FreeLibrary( mod );
+    }
+
+    /* a base name that is not a Wine builtin keeps failing */
+    sprintf( path, "%s\\wine-sxs-probe-missing.dll", sxs );
+    mod = LoadLibraryA( path );
+    ok( mod == NULL, "LoadLibraryA(%s) returned %p, expected NULL\n", path, mod );
+    ok( GetLastError() == ERROR_MOD_NOT_FOUND, "error %lu, expected ERROR_MOD_NOT_FOUND\n",
+        GetLastError() );
+
+    winetest_pop_context();
+
+    RemoveDirectoryA( sxs );
+    RemoveDirectoryA( dir );
+}
+
 START_TEST( loader )
 {
     char **argv;
@@ -319,6 +429,8 @@ START_TEST( loader )
         run_child_mode();
         return;
     }
+
+    test_sxs_path_builtin_redirect();
 
     pLdrResolveDelayLoadedAPI = (void *)GetProcAddress( hntdll, "LdrResolveDelayLoadedAPI" );
     if (!pLdrResolveDelayLoadedAPI)
