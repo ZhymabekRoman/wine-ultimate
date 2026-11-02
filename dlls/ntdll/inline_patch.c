@@ -510,7 +510,13 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0x86fe8652u: if (!strcmp(func_name, "GetProcessHeap")) return (ULONG_PTR)fast_GetProcessHeap; break;
     case 0x0f4d8b55u: if (!strcmp(func_name, "GetTickCount")) return (ULONG_PTR)fast_GetTickCount; break;
     case 0x18017917u: if (!strcmp(func_name, "GetTickCount64")) return (ULONG_PTR)fast_GetTickCount64; break;
-    case 0xee9d4374u: if (!strcmp(func_name, "GetSystemTimeAsFileTime")) return (ULONG_PTR)fast_GetSystemTimeAsFileTime; break;
+    /* GetSystemTimeAsFileTime / GetSystemTimePreciseAsFileTime are deliberately not
+     * trampolined: the trampoline is a bare read of KUSER_SHARED_DATA->SystemTime,
+     * which is the server's 16 ms snapshot, while NtQuerySystemTime interpolates that
+     * snapshot with the monotonic clock. Patched modules would then build absolute
+     * deadlines ("now + 16 ms") out of the coarse copy and the wait would expire
+     * instantly, spinning the message pump, and the two clock readings visible in one
+     * process would disagree by up to a quantum. Keep the real entry point. */
     case 0xccd84087u: if (!strcmp(func_name, "TlsGetValue")) return (ULONG_PTR)fast_TlsGetValue; break;
     case 0x7e0db2f3u: if (!strcmp(func_name, "TlsSetValue")) return (ULONG_PTR)fast_TlsSetValue; break;
     case 0x21ddcd8bu: if (!strcmp(func_name, "SetLastError")) return (ULONG_PTR)fast_SetLastError; break;
@@ -528,7 +534,7 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0x3376500fu: if (!strcmp(func_name, "RtlInitUnicodeString")) return (ULONG_PTR)fast_RtlInitUnicodeString; break;
     case 0xfdd349f7u: if (!strcmp(func_name, "QueryPerformanceFrequency")) return (ULONG_PTR)fast_QueryPerformanceFrequency; break;
     case 0xc05d1acfu: if (!strcmp(func_name, "RtlQueryPerformanceFrequency")) return (ULONG_PTR)fast_QueryPerformanceFrequency; break;
-    case 0x65c1bfcbu: if (!strcmp(func_name, "GetSystemTimePreciseAsFileTime")) return (ULONG_PTR)fast_GetSystemTimePreciseAsFileTime; break;
+    /* (GetSystemTimePreciseAsFileTime: see the note on GetSystemTimeAsFileTime above.) */
     case 0x3a2f5799u: if (!strcmp(func_name, "GetVersion")) return (ULONG_PTR)fast_GetVersion; break;
     case 0x647a8efau: if (!strcmp(func_name, "GetActiveProcessorCount")) return (ULONG_PTR)fast_GetActiveProcessorCount; break;
     case 0x8af4c873u: if (!strcmp(func_name, "RtlEqualUnicodeString")) return (ULONG_PTR)fast_RtlEqualUnicodeString; break;

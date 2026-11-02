@@ -50,6 +50,7 @@ static NTSTATUS (WINAPI *pNtSetEvent)( HANDLE, LONG * );
 static NTSTATUS (WINAPI *pNtSetEventBoostPriority)( HANDLE );
 static NTSTATUS (WINAPI *pNtWaitForAlertByThreadId)( void *, const LARGE_INTEGER * );
 static NTSTATUS (WINAPI *pNtWaitForKeyedEvent)( HANDLE, const void *, BOOLEAN, const LARGE_INTEGER * );
+static NTSTATUS (WINAPI *pNtWaitForMultipleObjects)( ULONG, const HANDLE *, WAIT_TYPE, BOOLEAN, const LARGE_INTEGER * );
 static BOOLEAN  (WINAPI *pRtlAcquireResourceExclusive)( RTL_RWLOCK *, BOOLEAN );
 static BOOLEAN  (WINAPI *pRtlAcquireResourceShared)( RTL_RWLOCK *, BOOLEAN );
 static void     (WINAPI *pRtlDeleteResource)( RTL_RWLOCK * );
@@ -1427,6 +1428,69 @@ static void test_barrier(void)
     }
 }
 
+/* Every Windows GUI message pump arms a short absolute deadline built from the system
+ * clock: MsgWaitForMultipleObjectsEx(timeout 16 ms) becomes a wait for
+ * "system time now + 16 ms". The system clock is published to the apps by the wine
+ * server, and the publish interval is a quantum (16 ms, server/fd.c), so a deadline
+ * taken from a clock that is one quantum stale is already in the past. The wait then
+ * returns STATUS_TIMEOUT immediately, the pump loops, and every iteration costs a
+ * fresh round trip: thousands of waits per second, which starves the server and
+ * freezes every timer, watchdog and socket timeout in the process.
+ *
+ * A pump that sleeps costs iterations * 16 ms; one that spins costs about a single
+ * quantum, so the wall clock cost of a fixed burst is the observable difference. */
+static void test_system_time_deadline( void )
+{
+    static const unsigned int iterations = 50, delay_ms = 16, min_ontime = 37;
+    LARGE_INTEGER now, deadline, start, end, freq, iter_start, iter_end;
+    LONGLONG total_ms;
+    unsigned int i, ontime = 0;
+    NTSTATUS status;
+    HANDLE event;
+    OBJECT_ATTRIBUTES attr;
+
+    if (!pNtQuerySystemTime || !pNtWaitForMultipleObjects || !pNtCreateEvent || !pNtClose)
+    {
+        win_skip( "needed functions not present\n" );
+        return;
+    }
+    if (!QueryPerformanceFrequency( &freq ) || !freq.QuadPart)
+    {
+        win_skip( "no performance counter\n" );
+        return;
+    }
+
+    InitializeObjectAttributes( &attr, NULL, 0, 0, NULL );
+    status = pNtCreateEvent( &event, SYNCHRONIZE | EVENT_MODIFY_STATE, &attr, NotificationEvent, FALSE );
+    ok( status == STATUS_SUCCESS, "got %#lx\n", status );
+    if (status) return;
+
+    QueryPerformanceCounter( &start );
+    for (i = 0; i < iterations; i++)
+    {
+        pNtQuerySystemTime( &now );
+        deadline.QuadPart = now.QuadPart + (LONGLONG)delay_ms * 10000;
+
+        QueryPerformanceCounter( &iter_start );
+        status = pNtWaitForMultipleObjects( 1, &event, WaitAny, FALSE, &deadline );
+        QueryPerformanceCounter( &iter_end );
+
+        ok( status == STATUS_TIMEOUT, "iteration %u: got status %#lx\n", i, status );
+        if ((iter_end.QuadPart - iter_start.QuadPart) * 1000 / freq.QuadPart >= delay_ms / 2) ontime++;
+    }
+    QueryPerformanceCounter( &end );
+    total_ms = (end.QuadPart - start.QuadPart) * 1000 / freq.QuadPart;
+
+    trace( "%u waits with a %u ms absolute deadline took %s ms, %u of them slept\n",
+           iterations, delay_ms, wine_dbgstr_longlong( total_ms ), ontime );
+    ok( total_ms >= (LONGLONG)iterations * delay_ms / 2,
+        "%u waits with a %u ms absolute deadline took %s ms; the deadline is expiring instantly\n",
+        iterations, delay_ms, wine_dbgstr_longlong( total_ms ) );
+    ok( ontime >= min_ontime, "only %u of %u waits slept at least half the deadline\n", ontime, iterations );
+
+    pNtClose( event );
+}
+
 START_TEST(sync)
 {
     HMODULE module = GetModuleHandleA("ntdll.dll");
@@ -1460,6 +1524,7 @@ START_TEST(sync)
     pNtSetEventBoostPriority        = (void *)GetProcAddress(module, "NtSetEventBoostPriority");
     pNtWaitForAlertByThreadId       = (void *)GetProcAddress(module, "NtWaitForAlertByThreadId");
     pNtWaitForKeyedEvent            = (void *)GetProcAddress(module, "NtWaitForKeyedEvent");
+    pNtWaitForMultipleObjects       = (void *)GetProcAddress(module, "NtWaitForMultipleObjects");
     pRtlAcquireResourceExclusive    = (void *)GetProcAddress(module, "RtlAcquireResourceExclusive");
     pRtlAcquireResourceShared       = (void *)GetProcAddress(module, "RtlAcquireResourceShared");
     pRtlDeleteResource              = (void *)GetProcAddress(module, "RtlDeleteResource");
@@ -1473,6 +1538,10 @@ START_TEST(sync)
     pRtlDeleteBarrier               = (void *)GetProcAddress(module, "RtlDeleteBarrier");
     pRtlBarrier                     = (void *)GetProcAddress(module, "RtlBarrier");
 
+    /* Runs first on purpose: ntdll:sync stalls later in this tree (keyed events,
+     * completion port scheduling), and the deadline invariant is independent of
+     * everything else in the file. */
+    test_system_time_deadline();
     test_wait_on_address();
     test_event();
     test_mutant();

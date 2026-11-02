@@ -2560,10 +2560,43 @@ NTSTATUS WINAPI NtQuerySystemTime( LARGE_INTEGER *time )
 
     if (user_shared_data)
     {
+        LARGE_INTEGER system_time, interrupt_time;
+
         do {
-            time->HighPart = user_shared_data->SystemTime.High1Time;
-            time->LowPart  = user_shared_data->SystemTime.LowPart;
-        } while (time->HighPart != user_shared_data->SystemTime.High2Time);
+            system_time.HighPart = user_shared_data->SystemTime.High1Time;
+            system_time.LowPart  = user_shared_data->SystemTime.LowPart;
+        } while (system_time.HighPart != user_shared_data->SystemTime.High2Time);
+
+        /* The server writes SystemTime and InterruptTime (the monotonic clock read
+         * next to it) in one burst, and it only wakes to refresh them every 16 ms
+         * (server/fd.c user_shared_data_timeout), so the raw page value is a clock
+         * with a 16 ms quantum that can be a full quantum stale. Apps build absolute
+         * deadlines out of it, and the universal one is a message pump's "now + 16 ms"
+         * (MsgWaitForMultipleObjectsEx): a deadline taken from a quantum-stale clock
+         * is already in the past when the wait runs, so the wait reports a timeout
+         * immediately, the pump loops, and every iteration costs a fresh round trip.
+         * That is tens of thousands of waits a second, which starves the server and
+         * with it every timer, socket timeout and watchdog in the process.
+         *
+         * InterruptTime is the server's monotonic reading (CLOCK_BOOTTIME) at the
+         * moment SystemTime was sampled, so adding the monotonic time elapsed since
+         * that sample gives a system clock that advances continuously between server
+         * wakeups. */
+        do {
+            interrupt_time.HighPart = user_shared_data->InterruptTime.High1Time;
+            interrupt_time.LowPart  = user_shared_data->InterruptTime.LowPart;
+        } while (interrupt_time.HighPart != user_shared_data->InterruptTime.High2Time);
+
+        {
+            /* monotonic_counter() is the same clock the server sampled InterruptTime
+             * from (CLOCK_BOOTTIME, falling back to CLOCK_MONOTONIC), so the two are
+             * directly comparable; the elapsed part is never negative on a running
+             * system, and clamping covers a clock stepped backwards. */
+            LONGLONG elapsed = (LONGLONG)monotonic_counter() - interrupt_time.QuadPart;
+            time->QuadPart = system_time.QuadPart + (elapsed > 0 ? elapsed : 0);
+            return STATUS_SUCCESS;
+        }
+        time->QuadPart = system_time.QuadPart;
         return STATUS_SUCCESS;
     }
 

@@ -3429,17 +3429,22 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
 {
     struct thunk_lock_params params = {.dispatch.callback = thunk_lock_callback};
     WAIT_TYPE type = flags & MWMO_WAITALL ? WaitAll : WaitAny;
-    LARGE_INTEGER time, now, *abs;
+    LARGE_INTEGER time, *abs;
     void *ret_ptr;
     ULONG ret_len;
     HANDLE event;
     DWORD ret;
 
-    if ((abs = get_nt_timeout( &time, timeout )))
-    {
-        NtQuerySystemTime( &now );
-        abs->QuadPart = now.QuadPart - abs->QuadPart;
-    }
+    /* Keep the timeout in the relative (negative) form that get_nt_timeout produces.
+     * Turning it into "system time now + timeout" makes the pump's deadline depend on
+     * the app-visible system clock, which the server republishes on a 16 ms quantum:
+     * for the 16 ms pumps that every GUI thread and every Chromium message loop runs,
+     * a quantum-stale clock puts the deadline at or before the instant the wait runs,
+     * the wait returns STATUS_TIMEOUT without sleeping, and the pump spins at tens of
+     * thousands of iterations a second. Both the in-process ntsync wait and the server
+     * select resolve a relative timeout against the monotonic clock, which is what the
+     * caller actually means. */
+    abs = get_nt_timeout( &time, timeout );
 
     if (!KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len ) &&
         ret_len == sizeof(params.locks))
