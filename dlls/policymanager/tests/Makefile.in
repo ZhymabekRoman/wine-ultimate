@@ -1,0 +1,5 @@
+TESTDLL   = policymanager.dll
+IMPORTS   = kernel32
+
+SOURCES = \
+	policymanager.c

@@ -1,0 +1,5 @@
+TESTDLL   = firewallapi.dll
+IMPORTS   = kernel32
+
+SOURCES = \
+	firewallapi.c

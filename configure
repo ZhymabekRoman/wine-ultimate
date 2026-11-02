@@ -1172,6 +1172,7 @@ enable_evr
 enable_explorerframe
 enable_faultrep
 enable_feclient
+enable_firewallapi
 enable_fltlib
 enable_fltmgr_sys
 enable_fntcache
@@ -1396,6 +1397,7 @@ enable_packager
 enable_pdh
 enable_photometadatahandler
 enable_pidgen
+enable_policymanager
 enable_powrprof
 enable_printui
 enable_prntvpt
@@ -23103,6 +23105,8 @@ wine_fn_config_makefile dlls/explorerframe/tests enable_tests
 wine_fn_config_makefile dlls/faultrep enable_faultrep
 wine_fn_config_makefile dlls/faultrep/tests enable_tests
 wine_fn_config_makefile dlls/feclient enable_feclient
+wine_fn_config_makefile dlls/firewallapi enable_firewallapi
+wine_fn_config_makefile dlls/firewallapi/tests enable_tests
 wine_fn_config_makefile dlls/fltlib enable_fltlib
 wine_fn_config_makefile dlls/fltmgr.sys enable_fltmgr_sys
 wine_fn_config_makefile dlls/fntcache enable_fntcache
@@ -23452,6 +23456,8 @@ wine_fn_config_makefile dlls/pdh enable_pdh
 wine_fn_config_makefile dlls/pdh/tests enable_tests
 wine_fn_config_makefile dlls/photometadatahandler enable_photometadatahandler
 wine_fn_config_makefile dlls/pidgen enable_pidgen
+wine_fn_config_makefile dlls/policymanager enable_policymanager
+wine_fn_config_makefile dlls/policymanager/tests enable_tests
 wine_fn_config_makefile dlls/powrprof enable_powrprof
 wine_fn_config_makefile dlls/printui enable_printui
 wine_fn_config_makefile dlls/prntvpt enable_prntvpt
