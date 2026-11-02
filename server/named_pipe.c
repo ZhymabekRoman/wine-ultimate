@@ -400,11 +400,25 @@ static void relay_free( struct pipe_message *message, int close_src )
     if (!message->relay) return;
     LIST_FOR_EACH_ENTRY_SAFE( box, next, message->relay, struct relay_box, entry )
     {
-        if (close_src)
+        /* gate49: ipcz SerializeObject() writes the writer's *own* handle value in-band and the
+         * writer keeps it (Windows does DuplicateHandle(writer -> peer) without CLOSE_SOURCE for
+         * process objects: the peer needs a process handle for GetProcessId/TerminateProcess/
+         * GetExitCodeProcess and the writer keeps its own).  Closing it here freed the browser's
+         * handle out from under it (trace: 'D pid=042c src=003c -> pid=053c' then 'C pid=042c
+         * src=003c'), so the browser's next GetProcessId(003c) hit a dead table slot:
+         * server get_handle_obj -> STATUS_INVALID_HANDLE (0xc0000001) -> ERROR_INVALID_HANDLE (6)
+         * -> GetProcessId()==0 -> Chromium CHECK int3 in msedge.dll+0x2d2e44c.
+         * Never close a process object on this path; other in-band objects (shared buffers,
+         * endpoints, events) keep the opts=3 close to avoid leaking table slots.
+         */
+        if (close_src && box->obj->ops->type != &process_type)
         {
             close_handle( box->writer, box->src );  /* mojo consumed the in-band handle (opts=3) */
             fprintf( stderr, "WA_RELAY: C pid=%04x src=%04x off=%u\n", box->writer->id, box->src, box->offset );
         }
+        else if (close_src)
+            fprintf( stderr, "WA_RELAY: K pid=%04x src=%04x off=%u (process handle kept)\n",
+                     box->writer->id, box->src, box->offset );
         release_object( box->writer );
         if (box->reader) release_object( box->reader );
         release_object( box->obj );
