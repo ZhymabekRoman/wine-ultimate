@@ -1037,7 +1037,7 @@
 @ stdcall OpenFileMappingW(long long wstr)
 @ stdcall OpenJobObjectA(long long str)
 @ stdcall OpenJobObjectW(long long wstr)
-# @ stub OpenGlobalizationUserSettingsKey
+@ stdcall OpenGlobalizationUserSettingsKey(long long ptr)
 @ stdcall OpenMutexW(long long wstr)
 # @ stub OpenPackageInfoByFullName
 # @ stub OpenPackageInfoByFullNameForUser

@@ -4712,10 +4712,46 @@ BOOL WINAPI DECLSPEC_HOTPATCH Internal_EnumUILanguages( UILANGUAGE_ENUMPROCW pro
 	SetLastError( ERROR_INVALID_PARAMETER );
 	return FALSE;
     }
-    if (flags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME))
+    if (flags & ~(MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME | MUI_THREAD_LANGUAGES))
     {
 	SetLastError( ERROR_INVALID_FLAGS );
 	return FALSE;
+    }
+
+    if (flags & MUI_THREAD_LANGUAGES)
+    {
+        /* the thread's UI language list instead of every installed locale */
+        DWORD lang_flags = flags & (MUI_LANGUAGE_ID | MUI_LANGUAGE_NAME);
+        ULONG count = 0, size = 0;
+        WCHAR *buffer, *p;
+        BOOL ret = TRUE;
+
+        if (!lang_flags) lang_flags = MUI_LANGUAGE_NAME;
+        if (!GetThreadPreferredUILanguages( lang_flags, &count, NULL, &size )) return FALSE;
+        if (!(buffer = HeapAlloc( GetProcessHeap(), 0, size * sizeof(WCHAR) )))
+        {
+            SetLastError( ERROR_NOT_ENOUGH_MEMORY );
+            return FALSE;
+        }
+        if (!(ret = GetThreadPreferredUILanguages( lang_flags, &count, buffer, &size )))
+        {
+            HeapFree( GetProcessHeap(), 0, buffer );
+            return FALSE;
+        }
+        for (p = buffer; *p; p += lstrlenW( p ) + 1)
+        {
+            if (unicode)
+            {
+                if (!proc( p, param )) break;
+            }
+            else
+            {
+                WideCharToMultiByte( CP_ACP, 0, p, -1, nameA, sizeof(nameA), NULL, NULL );
+                if (!((UILANGUAGE_ENUMPROCA)proc)( nameA, param )) break;
+            }
+        }
+        HeapFree( GetProcessHeap(), 0, buffer );
+        return TRUE;
     }
 
     for (i = 0; i < locale_table->nb_lcnames; i++)
@@ -6494,6 +6530,31 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetUserPreferredUILanguages( DWORD flags, ULONG *c
                                                            WCHAR *buffer, ULONG *size )
 {
     return set_ntstatus( RtlGetUserPreferredUILanguages( flags, 0, count, buffer, size ));
+}
+
+
+/******************************************************************************
+ *	OpenGlobalizationUserSettingsKey   (kernelbase.@)
+ */
+NTSTATUS WINAPI OpenGlobalizationUserSettingsKey( ACCESS_MASK access, ULONG reserved, HKEY *ret_key )
+{
+    static const WCHAR key_name[] = L"Control Panel\\International";
+    LONG ret;
+
+    if (!ret_key) return STATUS_INVALID_PARAMETER;
+    *ret_key = 0;
+
+    ret = RegOpenKeyExW( HKEY_CURRENT_USER, key_name, 0, access, ret_key );
+    if (!ret) return STATUS_SUCCESS;
+
+    SetLastError( ret );
+    switch (ret)
+    {
+    case ERROR_FILE_NOT_FOUND:  return STATUS_OBJECT_NAME_NOT_FOUND;
+    case ERROR_PATH_NOT_FOUND:  return STATUS_OBJECT_PATH_NOT_FOUND;
+    case ERROR_ACCESS_DENIED:   return STATUS_ACCESS_DENIED;
+    default:                    return STATUS_UNSUCCESSFUL;
+    }
 }
 
 
