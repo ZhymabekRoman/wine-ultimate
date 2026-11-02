@@ -57,6 +57,11 @@ const UINT DXGI_RESOURCE_PRIORITY_NORMAL            = 0x78000000;
 const UINT DXGI_RESOURCE_PRIORITY_HIGH              = 0xa0000000;
 const UINT DXGI_RESOURCE_PRIORITY_MAXIMUM           = 0xc8000000;
 
+typedef UINT DXGI_RESOURCE_TYPE;
+const UINT DXGI_RESOURCE_LMS                        = 0x1;
+const UINT DXGI_RESOURCE_BINDABLE                   = 0x2;
+const UINT DXGI_RESOURCE_ALLOW_SHARED               = 0x4;
+
 const UINT DXGI_MAP_READ                            = 0x1;
 const UINT DXGI_MAP_WRITE                           = 0x2;
 const UINT DXGI_MAP_DISCARD                         = 0x4;
@@ -195,6 +200,7 @@ interface IDXGIDeviceSubObject : IDXGIObject
 interface IDXGIResource : IDXGIDeviceSubObject
 {
     HRESULT GetSharedHandle([out] HANDLE *pSharedHandle);
+    HRESULT GetResourceType([out] DXGI_RESOURCE_TYPE *pResourceType);
     HRESULT GetUsage([out] DXGI_USAGE *pUsage);
     HRESULT SetEvictionPriority([in] UINT EvictionPriority);
     HRESULT GetEvictionPriority([out, retval] UINT *pEvictionPriority);

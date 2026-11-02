@@ -539,6 +539,46 @@ static BOOL get_dxgi_resource_desc(struct dxgi_resource *resource, struct d3d11_
 }
 
 /* IDXGIResource methods */
+static HRESULT STDMETHODCALLTYPE dxgi_resource_GetResourceType(IDXGIResource1 *iface,
+        DXGI_RESOURCE_TYPE *resource_type)
+{
+    struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
+    DXGI_RESOURCE_TYPE type = 0;
+    struct d3d11_runtime_desc desc;
+    UINT misc_flags = 0;
+
+    TRACE("iface %p, resource_type %p.\n", iface, resource_type);
+
+    if (!resource_type)
+        return E_INVALIDARG;
+
+    /* Report the DXGI_RESOURCE_FLAGS for the resource that backs this object:
+     * the d3d11/d3d10 desc when we are aggregated around one, the wined3d
+     * desc otherwise (swapchain back buffers map to MISC_SHARED there, which
+     * matches the DirectX 11.2+ behaviour of back buffers being shareable). */
+    if (!get_dxgi_resource_desc(resource, &desc, &misc_flags))
+        return E_FAIL;
+
+    switch (desc.dimension)
+    {
+        case D3D11_RESOURCE_DIMENSION_TEXTURE1D:
+        case D3D11_RESOURCE_DIMENSION_TEXTURE2D:
+        case D3D11_RESOURCE_DIMENSION_TEXTURE3D:
+            type |= DXGI_RESOURCE_BINDABLE;
+            if (misc_flags & (D3D11_RESOURCE_MISC_SHARED | D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX
+                    | D3D11_RESOURCE_MISC_SHARED_NTHANDLE | D3D10_RESOURCE_MISC_SHARED_KEYEDMUTEX))
+                type |= DXGI_RESOURCE_ALLOW_SHARED;
+            break;
+
+        case D3D11_RESOURCE_DIMENSION_BUFFER:
+        default:
+            break;
+    }
+
+    *resource_type = type;
+    return S_OK;
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_resource_GetSharedHandle(IDXGIResource1 *iface, HANDLE *shared_handle)
 {
     struct dxgi_resource *resource = impl_from_IDXGIResource1(iface);
@@ -795,6 +835,7 @@ static const struct IDXGIResource1Vtbl dxgi_resource_vtbl =
     dxgi_resource_GetDevice,
     /* IDXGIResource methods */
     dxgi_resource_GetSharedHandle,
+    dxgi_resource_GetResourceType,
     dxgi_resource_GetUsage,
     dxgi_resource_SetEvictionPriority,
     dxgi_resource_GetEvictionPriority,

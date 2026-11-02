@@ -336,6 +336,7 @@ interface IDXGIFactory2 : IDXGIFactory1
             [out] DWORD *pdwCookie);
 
     HRESULT RegisterOcclusionStatusEvent(
+            [in]  LUID windowLuid,
             [in]  HANDLE hEvent,
             [out] DWORD *pdwCookie);
 

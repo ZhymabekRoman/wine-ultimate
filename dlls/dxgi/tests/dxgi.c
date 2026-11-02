@@ -5092,6 +5092,177 @@ static void test_swapchain_composition(void)
         DestroyWindow(test_win);
     }
 
+    /* 4. Chromium composition path: QI the resources backing a composition
+     * swapchain for IDXGIResource and ask for their resource type. A
+     * GetResourceType slot layout mismatch is invisible to QI, so check the
+     * returned flags as well. */
+    {
+        IDXGISwapChain1 *composition_swapchain;
+
+        swapchain_desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        swapchain_desc.BufferCount = 2;
+        hr = IDXGIFactory2_CreateSwapChainForComposition(factory2, (IUnknown *)device,
+                &swapchain_desc, NULL, &composition_swapchain);
+        ok(hr == S_OK, "CreateSwapChainForComposition failed, hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            IDXGIResource *resource;
+            IDXGIResource1 *resource1;
+
+            hr = IDXGISwapChain1_QueryInterface(composition_swapchain, &IID_IDXGIResource, (void **)&resource);
+            ok(hr == S_OK, "Swapchain should expose IDXGIResource (backbuffer 0), hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+                IDXGIResource_Release(resource);
+
+            resource1 = (IDXGIResource1 *)0xdeadbeef;
+            hr = IDXGISwapChain_GetBuffer((IDXGISwapChain *)composition_swapchain, 0, &IID_IDXGIResource1, (void **)&resource1);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            ok(!resource1 || hr == S_OK, "Got unexpected pointer %p.\n", resource1);
+            if (SUCCEEDED(hr))
+            {
+                DXGI_RESOURCE_TYPE resource_type = 0xdeadbeef;
+
+                hr = IDXGIResource1_GetResourceType(resource1, &resource_type);
+                ok(hr == S_OK, "GetResourceType failed, hr %#lx.\n", hr);
+                ok(hr == S_OK && (resource_type & DXGI_RESOURCE_BINDABLE),
+                        "Expected bindable backbuffer, got type %#x.\n", resource_type);
+                IDXGIResource1_Release(resource1);
+            }
+
+            refcount = IDXGISwapChain1_Release(composition_swapchain);
+            ok(!refcount, "Swapchain has %lu references left.\n", refcount);
+        }
+    }
+
+    /* 5. d3d11 2D textures exposed as IDXGIResource: GetResourceType must
+     * report BINDABLE for plain textures and ALLOW_SHARED for shared ones. */
+    {
+        IDXGIDevice *dxgi11_device;
+
+        dxgi11_device = create_d3d11_device();
+        if (dxgi11_device)
+        {
+            ID3D11Device *d3d11_device;
+            D3D11_TEXTURE2D_DESC texture_desc;
+            IDXGIResource1 *resource1;
+            IDXGIResource *resource;
+            ID3D11Texture2D *texture;
+
+            hr = IDXGIDevice_QueryInterface(dxgi11_device, &IID_ID3D11Device, (void **)&d3d11_device);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                memset(&texture_desc, 0, sizeof(texture_desc));
+                texture_desc.Width = 64;
+                texture_desc.Height = 64;
+                texture_desc.MipLevels = 1;
+                texture_desc.ArraySize = 1;
+                texture_desc.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+                texture_desc.SampleDesc.Count = 1;
+                texture_desc.Usage = D3D11_USAGE_DEFAULT;
+                texture_desc.BindFlags = 0;
+                texture_desc.MiscFlags = 0;
+
+                hr = ID3D11Device_CreateTexture2D(d3d11_device, &texture_desc, NULL, &texture);
+                ok(hr == S_OK, "CreateTexture2D failed, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr))
+                {
+                    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&resource);
+                    ok(hr == S_OK, "Texture should expose IDXGIResource, hr %#lx.\n", hr);
+                    if (SUCCEEDED(hr))
+                        IDXGIResource_Release(resource);
+
+                    resource1 = (IDXGIResource1 *)0xdeadbeef;
+                    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource1, (void **)&resource1);
+                    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                    ok(!resource1 || hr == S_OK, "Got unexpected pointer %p.\n", resource1);
+                    if (SUCCEEDED(hr))
+                    {
+                        DXGI_RESOURCE_TYPE resource_type = 0xdeadbeef;
+
+                        hr = IDXGIResource1_GetResourceType(resource1, &resource_type);
+                        ok(hr == S_OK, "GetResourceType failed, hr %#lx.\n", hr);
+                        ok(resource_type == DXGI_RESOURCE_BINDABLE,
+                                "Expected resource type %#x, got %#x.\n", DXGI_RESOURCE_BINDABLE, resource_type);
+                        IDXGIResource1_Release(resource1);
+                    }
+                    ID3D11Texture2D_Release(texture);
+                }
+
+                texture_desc.MiscFlags = D3D11_RESOURCE_MISC_SHARED;
+                hr = ID3D11Device_CreateTexture2D(d3d11_device, &texture_desc, NULL, &texture);
+                ok(hr == S_OK, "CreateTexture2D with MISC_SHARED failed, hr %#lx.\n", hr);
+                if (SUCCEEDED(hr))
+                {
+                    resource1 = (IDXGIResource1 *)0xdeadbeef;
+                    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource1, (void **)&resource1);
+                    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+                    ok(!resource1 || hr == S_OK, "Got unexpected pointer %p.\n", resource1);
+                    if (SUCCEEDED(hr))
+                    {
+                        DXGI_RESOURCE_TYPE resource_type = 0xdeadbeef;
+
+                        hr = IDXGIResource1_GetResourceType(resource1, &resource_type);
+                        ok(hr == S_OK, "GetResourceType failed, hr %#lx.\n", hr);
+                        ok(resource_type == (DXGI_RESOURCE_BINDABLE | DXGI_RESOURCE_ALLOW_SHARED),
+                                "Expected resource type %#x, got %#x.\n",
+                                DXGI_RESOURCE_BINDABLE | DXGI_RESOURCE_ALLOW_SHARED, resource_type);
+                        IDXGIResource1_Release(resource1);
+                    }
+                    ID3D11Texture2D_Release(texture);
+                }
+                ID3D11Device_Release(d3d11_device);
+            }
+            IDXGIDevice_Release(dxgi11_device);
+        }
+        else
+            win_skip("Failed to create a d3d11 device.\n");
+    }
+
+    /* 6. Factory occlusion status registration and IsCurrent, as used by
+     * Chromium to validate the factory and track window occlusion. Chromium
+     * creates its factory with CreateDXGIFactory2. */
+    {
+        IDXGIFactory2 *chromium_factory;
+        IDXGIFactory1 *factory1;
+        LUID luid = { 0x1234, 0x5678 };
+        HANDLE event;
+        DWORD cookie;
+
+        hr = pCreateDXGIFactory2(0, &IID_IDXGIFactory2, (void **)&chromium_factory);
+        ok(hr == S_OK, "CreateDXGIFactory2 failed, hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+        {
+            hr = IDXGIFactory2_QueryInterface(chromium_factory, &IID_IDXGIFactory1, (void **)&factory1);
+            ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+            if (SUCCEEDED(hr))
+            {
+                ok(IDXGIFactory1_IsCurrent(factory1), "Expected the factory to be current.\n");
+                IDXGIFactory1_Release(factory1);
+            }
+
+            event = CreateEventW(NULL, FALSE, FALSE, NULL);
+            ok(event != NULL, "CreateEventW failed, error %lu.\n", GetLastError());
+
+            cookie = 0;
+            hr = IDXGIFactory2_RegisterOcclusionStatusEvent(chromium_factory, luid, event, &cookie);
+            ok(hr == S_OK, "RegisterOcclusionStatusEvent failed, hr %#lx.\n", hr);
+            ok(cookie, "Got a zero occlusion status cookie.\n");
+            IDXGIFactory2_UnregisterOcclusionStatus(chromium_factory, cookie);
+            IDXGIFactory2_UnregisterOcclusionStatus(chromium_factory, cookie); /* Unknown cookies must be tolerated. */
+
+            cookie = 0;
+            hr = IDXGIFactory2_RegisterOcclusionStatusWindow(chromium_factory, create_window(), WM_USER + 1, &cookie);
+            ok(hr == S_OK, "RegisterOcclusionStatusWindow failed, hr %#lx.\n", hr);
+            ok(cookie, "Got a zero occlusion status cookie.\n");
+            IDXGIFactory2_UnregisterOcclusionStatus(chromium_factory, cookie);
+
+            if (event)
+                CloseHandle(event);
+            IDXGIFactory2_Release(chromium_factory);
+        }
+    }
+
     refcount = IDXGIFactory2_Release(factory2);
     refcount = IDXGIDevice_Release(device);
     ok(!refcount, "Device has %lu references left.\n", refcount);

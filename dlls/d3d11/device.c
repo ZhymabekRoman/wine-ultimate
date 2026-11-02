@@ -6490,9 +6490,12 @@ static UINT STDMETHODCALLTYPE d3d11_device_GetCreationFlags(ID3D11Device5 *iface
     return 0;
 }
 
+/* Wine's d3d11 device is never removed (there is no GPU reset or driver
+ * teardown path to report), so the honest answer is always S_OK. Chromium
+ * queries this every few frames, so keep the implementation quiet. */
 static HRESULT STDMETHODCALLTYPE d3d11_device_GetDeviceRemovedReason(ID3D11Device5 *iface)
 {
-    WARN("iface %p stub!\n", iface);
+    TRACE("iface %p.\n", iface);
 
     return S_OK;
 }

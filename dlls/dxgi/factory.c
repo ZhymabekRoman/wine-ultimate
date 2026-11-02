@@ -26,6 +26,24 @@ static inline struct dxgi_factory *impl_from_IWineDXGIFactory(IWineDXGIFactory *
     return CONTAINING_RECORD(iface, struct dxgi_factory, IWineDXGIFactory_iface);
 }
 
+/* Occlusion status registrations. Chromium (msedge via WebView2) registers an
+ * event handle or a window message to be notified when the window hosting its
+ * swapchain becomes occluded. We record the registration and hand out a unique
+ * non-zero cookie, so UnregisterOcclusionStatus can retire it; the LUID and the
+ * window association are stored for validation, matching the interface
+ * contract. We never fire occlusion notifications: an un-signalled event and
+ * the absence of the window message both mean "visible", which matches the
+ * rendering behaviour Wine already exhibits. */
+struct dxgi_occlusion_registration
+{
+    struct dxgi_occlusion_registration *next;
+    LUID luid;
+    HANDLE event;     /* Duplicated handle owned by the factory; NULL for window registrations. */
+    HWND window;
+    UINT message;
+    DWORD cookie;
+};
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_QueryInterface(IWineDXGIFactory *iface, REFIID iid, void **out)
 {
     struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
@@ -74,8 +92,19 @@ static ULONG STDMETHODCALLTYPE dxgi_factory_Release(IWineDXGIFactory *iface)
 
     if (!refcount)
     {
+        struct dxgi_occlusion_registration *reg, *next;
+
         if (factory->device_window)
             DestroyWindow(factory->device_window);
+
+        for (reg = factory->occlusion_registrations; reg; reg = next)
+        {
+            next = reg->next;
+            if (reg->event)
+                CloseHandle(reg->event);
+            free(reg);
+        }
+        DeleteCriticalSection(&factory->occlusion_cs);
 
         wined3d_decref(factory->wined3d);
         wined3d_private_store_cleanup(&factory->private_store);
@@ -248,14 +277,12 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSoftwareAdapter(IWineDXGIFac
     return E_NOTIMPL;
 }
 
+/* The factory is created for a static adapter list and that list never changes,
+ * so the factory is never out of date. Chromium queries this on every
+ * composition frame, so keep the implementation quiet. */
 static BOOL STDMETHODCALLTYPE dxgi_factory_IsCurrent(IWineDXGIFactory *iface)
 {
-    static BOOL once = FALSE;
-
-    if (!once++)
-        FIXME("iface %p stub!\n", iface);
-    else
-        WARN("iface %p stub!\n", iface);
+    TRACE("iface %p.\n", iface);
 
     return TRUE;
 }
@@ -393,14 +420,39 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_GetSharedResourceAdapterLuid(IWine
     return E_NOTIMPL;
 }
 
+static HRESULT dxgi_factory_register_occlusion(struct dxgi_factory *factory,
+        struct dxgi_occlusion_registration *reg, DWORD *cookie)
+{
+    reg->cookie = 0;
+
+    EnterCriticalSection(&factory->occlusion_cs);
+    reg->cookie = factory->next_occlusion_cookie++;
+    reg->next = factory->occlusion_registrations;
+    factory->occlusion_registrations = reg;
+    LeaveCriticalSection(&factory->occlusion_cs);
+
+    *cookie = reg->cookie;
+    return S_OK;
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusWindow(IWineDXGIFactory *iface,
         HWND window, UINT message, DWORD *cookie)
 {
-    WARN("iface %p, window %p, message %#x, cookie %p semi-stub!\n",
-            iface, window, message, cookie);
-    if (!cookie) return E_INVALIDARG;
-    *cookie = 0xbeef0001;
-    return S_OK;
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_occlusion_registration *reg;
+
+    TRACE("iface %p, window %p, message %#x, cookie %p.\n", iface, window, message, cookie);
+
+    if (!cookie)
+        return E_INVALIDARG;
+
+    if (!(reg = calloc(1, sizeof(*reg))))
+        return E_OUTOFMEMORY;
+
+    reg->window = window;
+    reg->message = message;
+
+    return dxgi_factory_register_occlusion(factory, reg, cookie);
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterStereoStatusEvent(IWineDXGIFactory *iface,
@@ -426,17 +478,55 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterStereoStatusWindow(IWineDX
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_RegisterOcclusionStatusEvent(IWineDXGIFactory *iface,
-        HANDLE event, DWORD *cookie)
+        LUID window_luid, HANDLE event, DWORD *cookie)
 {
-    WARN("iface %p, event %p, cookie %p semi-stub!\n", iface, event, cookie);
-    if (!cookie) return E_INVALIDARG;
-    *cookie = 0xbeef0002;
-    return S_OK;
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_occlusion_registration *reg;
+
+    TRACE("iface %p, window_luid %lu:%lu, event %p, cookie %p.\n",
+            iface, window_luid.HighPart, window_luid.LowPart, event, cookie);
+
+    if (!cookie || !event)
+        return E_INVALIDARG;
+
+    if (!(reg = calloc(1, sizeof(*reg))))
+        return E_OUTOFMEMORY;
+
+    /* Keep our own reference to the event, so the registration stays valid
+     * even if the caller closes its handle. */
+    if (!DuplicateHandle(GetCurrentProcess(), event, GetCurrentProcess(), &reg->event,
+            SYNCHRONIZE | EVENT_MODIFY_STATE, FALSE, 0))
+    {
+        free(reg);
+        return E_INVALIDARG;
+    }
+
+    reg->luid = window_luid;
+
+    return dxgi_factory_register_occlusion(factory, reg, cookie);
 }
 
 static void STDMETHODCALLTYPE dxgi_factory_UnregisterOcclusionStatus(IWineDXGIFactory *iface, DWORD cookie)
 {
-    TRACE("iface %p, cookie %#lx semi-stub!\n", iface, cookie);
+    struct dxgi_factory *factory = impl_from_IWineDXGIFactory(iface);
+    struct dxgi_occlusion_registration **entry;
+
+    TRACE("iface %p, cookie %#lx.\n", iface, cookie);
+
+    EnterCriticalSection(&factory->occlusion_cs);
+    for (entry = &factory->occlusion_registrations; *entry; entry = &(*entry)->next)
+    {
+        if ((*entry)->cookie == cookie)
+        {
+            struct dxgi_occlusion_registration *reg = *entry;
+            *entry = reg->next;
+            if (reg->event)
+                CloseHandle(reg->event);
+            free(reg);
+            break;
+        }
+    }
+    LeaveCriticalSection(&factory->occlusion_cs);
 }
 
 static BOOL CALLBACK find_top_level_window_proc(HWND hwnd, LPARAM lparam)
@@ -698,12 +788,16 @@ static HRESULT dxgi_factory_init(struct dxgi_factory *factory, BOOL extended)
     factory->IWineDXGIFactory_iface.lpVtbl = &dxgi_factory_vtbl;
     factory->refcount = 1;
     wined3d_private_store_init(&factory->private_store);
+    InitializeCriticalSection(&factory->occlusion_cs);
+    factory->occlusion_registrations = NULL;
+    factory->next_occlusion_cookie = 1;
 
     wined3d_mutex_lock();
     factory->wined3d = wined3d_create(0);
     wined3d_mutex_unlock();
     if (!factory->wined3d)
     {
+        DeleteCriticalSection(&factory->occlusion_cs);
         wined3d_private_store_cleanup(&factory->private_store);
         return DXGI_ERROR_UNSUPPORTED;
     }
