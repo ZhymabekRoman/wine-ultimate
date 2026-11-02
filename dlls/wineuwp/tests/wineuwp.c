@@ -122,6 +122,8 @@ DEFINE_GUID(IID_ICoreWindow,                       0x79b9d5f2, 0x879e, 0x4b89, 0
 DEFINE_GUID(IID_ICoreWindowNavigation,             0xbb4cbbe9, 0x65af, 0x4730, 0x9e, 0xd2, 0xab, 0xbd, 0xb5, 0xcc, 0x15, 0xb9);
 DEFINE_GUID(CLSID_PsmBroker,                       0x02844640, 0xe37c, 0x4322, 0xa3, 0xb8, 0x4c, 0x61, 0xa2, 0xe5, 0x88, 0x79);
 DEFINE_GUID(IID_IPsmBroker,                        0x33c255c3, 0x1a86, 0x45fc, 0x94, 0x98, 0xf6, 0x0d, 0x8f, 0x56, 0xb9, 0xd3);
+/* the navigation client's PrepareToActivate contract twinapi's brokered Activate drives (slot 6) */
+DEFINE_GUID(IID_INavigationClientPrepareToActivate, 0x075be329, 0x825a, 0x4f2a, 0xa8, 0xaf, 0xcd, 0x2f, 0x9a, 0x81, 0x02, 0xec);
 
 /* CoreApplication::GetWindowFactory asks the broker for this private service, and slot 5 on. */
 static const GUID SID_window_factory = { 0xd98fd14a, 0x522a, 0x4d59, { 0xb8, 0x75, 0x81, 0x1e, 0x83, 0x91, 0x9a, 0x9e } };
@@ -402,6 +404,71 @@ done:
     winetest_pop_context();
 }
 
+/* PrepareToActivate as the brokered Activate drives it (twinapi core_application.c
+ * prepare_to_activate): the window's navigation client, QI'd for
+ * INavigationClientPrepareToActivate {075be329}, slot 6, with a completed IAsyncAction out.
+ * E_NOTIMPL here is the value the shell treats as "this view cannot be activated"; the broker
+ * attaches a navigation client that answers, so the activation contract step has to be reached.
+ */
+static void test_prepare_to_activate( void )
+{
+    static const WCHAR title[] = L"App";
+    IUnknown *broker = NULL, *service = NULL, *factory = NULL;
+    IUnknown *window = NULL, *nav = NULL, *client = NULL, *prepare = NULL, *action = NULL;
+    HSTRING str = NULL;
+    HRESULT hr;
+
+    winetest_push_context( "PrepareToActivate" );
+
+    hr = CoCreateInstance( &CLSID_CoreWindowBroker, NULL, CLSCTX_INPROC_SERVER,
+                           &IID_ICoreWindowBroker, (void **)&broker );
+    ok( hr == S_OK, "CoCreateInstance broker returned %#lx.\n", hr );
+    if (FAILED( hr )) goto done;
+
+    hr = call_query_service( broker, &SID_window_factory, &IID_ICoreWindowFactory, (void **)&service );
+    ok( hr == S_OK, "QueryService SID_window_factory returned %#lx.\n", hr );
+    if (FAILED( hr )) goto done;
+
+    hr = IUnknown_QueryInterface( service, &IID_ICoreWindowFactory, (void **)&factory );
+    ok( hr == S_OK, "QI ICoreWindowFactory returned %#lx.\n", hr );
+    if (FAILED( hr )) goto done;
+
+    WindowsCreateString( title, ARRAY_SIZE( title ) - 1, &str );
+    hr = call_create_core_window( factory, str, &window );
+    ok( hr == S_OK && window, "CreateCoreWindow returned %#lx, window %p.\n", hr, window );
+    if (!window) goto done;
+
+    /* step 4 of the activation contract: navigation client -> prepare interface -> PrepareToActivate */
+    hr = IUnknown_QueryInterface( window, &IID_ICoreWindowNavigation, (void **)&nav );
+    ok( hr == S_OK && nav, "window QI ICoreWindowNavigation returned %#lx, nav %p.\n", hr, nav );
+    if (!nav) goto done;
+
+    client = NULL;
+    hr = call_slot( nav, 6, &client, NULL, NULL, NULL );   /* get_NavigationClient */
+    ok( hr == S_OK && client, "get_NavigationClient returned %#lx, client %p.\n", hr, client );
+    if (!client) goto done;
+
+    hr = IUnknown_QueryInterface( client, &IID_INavigationClientPrepareToActivate, (void **)&prepare );
+    ok( hr == S_OK && prepare, "client QI INavigationClientPrepareToActivate returned %#lx, prepare %p.\n", hr, prepare );
+    if (!prepare) goto done;
+
+    hr = call_slot( prepare, 6, NULL /* UINT64 arg = 0 */, &action, NULL, NULL );   /* PrepareToActivate */
+    ok( hr == S_OK, "PrepareToActivate returned %#lx, expected S_OK (E_NOTIMPL fails the activation).\n", hr );
+    ok( action != NULL, "PrepareToActivate returned action %p, expected a completed IAsyncAction.\n", action );
+
+done:
+    WindowsDeleteString( str );
+    if (action) IUnknown_Release( action );
+    if (prepare) IUnknown_Release( prepare );
+    if (client) IUnknown_Release( client );
+    if (nav) IUnknown_Release( nav );
+    if (window) IUnknown_Release( window );
+    if (factory) IUnknown_Release( factory );
+    if (service) IUnknown_Release( service );
+    if (broker) IUnknown_Release( broker );
+    winetest_pop_context();
+}
+
 /* A stand-in app object: what CoreApplication::Run hands the registrar, an activation factory
  * cloaking IActivatableApplication {92696c00}. Its Activate is the callback the shell makes, and
  * it is what raises the app's OnLaunched. */
@@ -538,6 +605,7 @@ START_TEST( wineuwp )
     test_qi_matrix();
     test_register_null();
     test_create_core_window();
+    test_prepare_to_activate();
     test_activate_callback();
     CoUninitialize();
 }

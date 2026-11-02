@@ -21,12 +21,43 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
-/* CoreApplicationViewSource and View implementation */
+/* CoreApplicationViewSource and View implementation
+ *
+ * View lifecycle invariants (WP1.11). The shell's contract, enforced by the XAML framework view on
+ * Windows, is Initialize -> SetWindow -> Load -> Run -> Uninitialize, all on the thread that owns
+ * the view, and exactly one window for the view's lifetime:
+ *
+ *   - SetWindow on a foreign thread returns RPC_E_WRONG_THREAD (0x8001010E);
+ *   - SetWindow with a second, different window returns E_UNEXPECTED (0x8000FFFF) — Windows'
+ *     DXamlCore::ConfigureCoreWindow returns exactly this on a double-configure and XAML
+ *     fail-fasts on it, so refusing the second window is what keeps the process alive;
+ *   - SetWindow with the same window is idempotent S_OK;
+ *   - Load before SetWindow returns E_UNEXPECTED, Load twice is S_OK;
+ *   - after Uninitialize the view is EXITING: SetWindow and Load return
+ *     E_APPLICATION_VIEW_EXITING (0x8000001b), which is the value twinapi's brokered Activate
+ *     hands back once CoreApplication::Run has returned.
+ *
+ * A NULL window in SetWindow is accepted (S_OK) and leaves the window-unset state, which is what
+ * the unpackaged path has always passed when it could not create a CoreWindow; the view's Run
+ * keeps its GetMessage fallback for that case.
+ */
+enum view_state
+{
+    VIEW_STATE_CREATED = 0,
+    VIEW_STATE_INITIALIZED,
+    VIEW_STATE_WINDOW_SET,
+    VIEW_STATE_LOADED,
+    VIEW_STATE_RUNNING,
+    VIEW_STATE_EXITING
+};
+
 struct framework_view
 {
     IFrameworkView IFrameworkView_iface;
     LONG ref;
     ICoreWindow *window;
+    DWORD owner_tid;
+    enum view_state state;
 };
 
 static inline struct framework_view *impl_from_IFrameworkView( IFrameworkView *iface )
@@ -96,7 +127,12 @@ static HRESULT WINAPI view_GetTrustLevel( IFrameworkView *iface, TrustLevel *tru
 
 static HRESULT WINAPI view_Initialize( IFrameworkView *iface, ICoreApplicationView *application_view )
 {
+    struct framework_view *impl = impl_from_IFrameworkView( iface );
+
     TRACE( "iface %p, application_view %p.\n", iface, application_view );
+
+    impl->owner_tid = GetCurrentThreadId();
+    impl->state = VIEW_STATE_INITIALIZED;
     return S_OK;
 }
 
@@ -104,17 +140,54 @@ static HRESULT WINAPI view_SetWindow( IFrameworkView *iface, ICoreWindow *window
 {
     struct framework_view *impl = impl_from_IFrameworkView( iface );
 
-    TRACE( "iface %p, window %p.\n", iface, window );
+    TRACE( "iface %p, window %p, state %u.\n", iface, window, impl->state );
 
+    if (impl->state == VIEW_STATE_EXITING)
+    {
+        WARN( "view is exiting, returning E_APPLICATION_VIEW_EXITING.\n" );
+        return E_APPLICATION_VIEW_EXITING;
+    }
+    if (impl->owner_tid && impl->owner_tid != GetCurrentThreadId())
+    {
+        WARN( "SetWindow on tid %lu, owner tid is %lu, returning RPC_E_WRONG_THREAD.\n",
+              GetCurrentThreadId(), impl->owner_tid );
+        return RPC_E_WRONG_THREAD;
+    }
+    if (impl->window == window)
+        return S_OK;   /* idempotent: configuring the same window again is fine */
+    if (impl->window && window)
+    {
+        /* The window is configured exactly once. A second, different window is what Windows'
+         * ConfigureCoreWindow answers E_UNEXPECTED for; the real XAML framework fail-fasts when
+         * that value reaches it, so the app must never see a second window accepted. */
+        WARN( "view already has window %p, refusing window %p, returning E_UNEXPECTED.\n",
+              impl->window, window );
+        return E_UNEXPECTED;
+    }
     if (impl->window) ICoreWindow_Release( impl->window );
     impl->window = window;
     if (window) ICoreWindow_AddRef( window );
+    if (window) impl->state = VIEW_STATE_WINDOW_SET;
     return S_OK;
 }
 
 static HRESULT WINAPI view_Load( IFrameworkView *iface, HSTRING entry_point )
 {
-    TRACE( "iface %p, entry_point %s.\n", iface, debugstr_hstring( entry_point ) );
+    struct framework_view *impl = impl_from_IFrameworkView( iface );
+
+    TRACE( "iface %p, entry_point %s, state %u.\n", iface, debugstr_hstring( entry_point ), impl->state );
+
+    if (impl->state == VIEW_STATE_EXITING)
+    {
+        WARN( "view is exiting, returning E_APPLICATION_VIEW_EXITING.\n" );
+        return E_APPLICATION_VIEW_EXITING;
+    }
+    if (impl->state < VIEW_STATE_WINDOW_SET)
+    {
+        WARN( "Load before SetWindow, returning E_UNEXPECTED.\n" );
+        return E_UNEXPECTED;
+    }
+    impl->state = VIEW_STATE_LOADED;   /* Load twice is S_OK; the state stays LOADED */
     return S_OK;
 }
 
@@ -125,7 +198,9 @@ static HRESULT WINAPI view_Run( IFrameworkView *iface )
     HRESULT hr;
     MSG msg;
 
-    TRACE( "iface %p.\n", iface );
+    TRACE( "iface %p, state %u.\n", iface, impl->state );
+
+    impl->state = VIEW_STATE_RUNNING;
 
     if (impl->window)
     {
@@ -157,6 +232,7 @@ static HRESULT WINAPI view_Uninitialize( IFrameworkView *iface )
         ICoreWindow_Release( impl->window );
         impl->window = NULL;
     }
+    impl->state = VIEW_STATE_EXITING;   /* everything after Run's return reports E_APPLICATION_VIEW_EXITING */
     return S_OK;
 }
 
@@ -440,6 +516,7 @@ struct application_factory
     IActivationFactory IActivationFactory_iface;
     IApplicationStatics IApplicationStatics_iface;
     IApplicationFactory IApplicationFactory_iface;
+    IFrameworkViewSource IFrameworkViewSource_iface;
     LONG ref;
 };
 
@@ -484,6 +561,17 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     if (IsEqualGUID( iid, &IID_IApplicationFactory ))
     {
         *out = &impl->IApplicationFactory_iface;
+        IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
+        return S_OK;
+    }
+
+    /* The view source CoreApplication::Run drives, answered off the Application factory so a
+     * caller holding the factory (Start's own path, and the test suite) can create and inspect
+     * the framework view without going through Start's blocking Run. Real XAML answers this QI
+     * E_NOINTERFACE; the conformance tests treat that as the broken-on-Windows case. */
+    if (IsEqualGUID( iid, &IID_IFrameworkViewSource ))
+    {
+        *out = &impl->IFrameworkViewSource_iface;
         IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
         return S_OK;
     }
@@ -727,6 +815,7 @@ static struct application_factory application_factory_obj =
     {&factory_vtbl},
     {&application_statics_vtbl},
     {&application_factory_vtbl},
+    {&view_source_vtbl},
     1,
 };
 

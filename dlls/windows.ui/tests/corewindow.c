@@ -443,6 +443,289 @@ static void test_CoreWindow_events(void)
     IActivationFactory_Release( factory );
 }
 
+/* ---- PrivateCreateCoreWindow (windows.ui ordinal 1500) and dispatcher threading (WP1.11) ---- */
+
+typedef HRESULT (WINAPI *PrivateCreateCoreWindow_t)( DWORD type, const WCHAR *title, INT x, INT y,
+        UINT width, UINT height, DWORD flags, HWND parent, const GUID *iid, void **out );
+
+static PrivateCreateCoreWindow_t get_private_create_core_window( void )
+{
+    HMODULE ui = LoadLibraryW( L"windows.ui.dll" );
+
+    if (!ui) return NULL;
+    return (PrivateCreateCoreWindow_t)GetProcAddress( ui, (const char *)(ULONG_PTR)1500 );
+}
+
+static PrivateCreateCoreWindow_t p_private_create;
+static void *main_window;
+static HANDLE pcw_event;
+static HRESULT pcw_hr;
+static void *foreign_window;
+
+static DWORD WINAPI create_window_thread( LPVOID param );
+
+static void test_PrivateCreateCoreWindow( void )
+{
+    static const WCHAR title[] = L"App";
+    void *w2 = NULL, *w3 = NULL;
+    HANDLE thread;
+    DWORD tid;
+    HRESULT hr;
+
+    winetest_push_context( "PrivateCreateCoreWindow" );
+
+    p_private_create = get_private_create_core_window();
+    ok( p_private_create != NULL, "GetProcAddress( windows.ui.dll, ordinal 1500 ) failed.\n" );
+    if (!p_private_create) goto done;
+
+    main_window = NULL;
+    hr = p_private_create( 1, title, 0, 0, 800, 600, 0, NULL, NULL, &main_window );
+    ok( hr == S_OK && main_window, "PrivateCreateCoreWindow(1) returned %#lx, window %p.\n", hr, main_window );
+
+    /* a thread has exactly one CoreWindow: the second call gives back the same one, moved */
+    hr = p_private_create( 1, title, 0, 0, 700, 500, 0, NULL, NULL, &w2 );
+    ok( hr == S_OK, "second PrivateCreateCoreWindow(1) returned %#lx.\n", hr );
+    ok( w2 == main_window, "second call returned window %p, expected the same %p.\n", w2, main_window );
+
+    hr = p_private_create( 2, title, 0, 0, 800, 600, 0, NULL, NULL, &w3 );
+    ok( hr == E_NOTIMPL, "window type 2 returned %#lx, expected E_NOTIMPL.\n", hr );
+
+    hr = p_private_create( 1, title, 0, 0, 0, 600, 0, NULL, NULL, &w3 );
+    ok( hr == E_INVALIDARG, "width 0 returned %#lx, expected E_INVALIDARG.\n", hr );
+
+    /* a thread's window belongs to its thread: a created window on another thread is a window */
+    foreign_window = NULL;
+    pcw_hr = 0xdeadbeef;
+    pcw_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    thread = CreateThread( NULL, 0, create_window_thread, NULL, 0, &tid );
+    ok( thread != NULL, "CreateThread failed, error %lu.\n", GetLastError() );
+    if (thread)
+    {
+        WaitForSingleObject( pcw_event, 5000 );
+        ok( pcw_hr == S_OK, "thread PrivateCreateCoreWindow returned %#lx.\n", pcw_hr );
+        ok( foreign_window != NULL && foreign_window != main_window,
+            "thread window %p, expected a new window (not the main thread's %p).\n", foreign_window, main_window );
+        CloseHandle( thread );
+    }
+    CloseHandle( pcw_event );
+
+done:
+    winetest_pop_context();
+}
+
+static DWORD WINAPI create_window_thread( LPVOID param )
+{
+    static const WCHAR title[] = L"App";
+
+    pcw_hr = p_private_create( 1, title, 0, 0, 640, 480, 0, NULL, NULL, &foreign_window );
+    SetEvent( pcw_event );
+    return 0;
+}
+
+struct dispatched_handler
+{
+    IDispatchedHandler IDispatchedHandler_iface;
+    LONG ref;
+    LONG invoked;
+};
+
+static inline struct dispatched_handler *impl_from_dispatched( IDispatchedHandler *iface )
+{
+    return CONTAINING_RECORD( iface, struct dispatched_handler, IDispatchedHandler_iface );
+}
+
+static HRESULT WINAPI dh_QueryInterface( IDispatchedHandler *iface, REFIID iid, void **out )
+{
+    struct dispatched_handler *impl = impl_from_dispatched( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IDispatchedHandler ))
+    {
+        *out = &impl->IDispatchedHandler_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI dh_AddRef( IDispatchedHandler *iface )
+{
+    return InterlockedIncrement( &impl_from_dispatched( iface )->ref );
+}
+static ULONG WINAPI dh_Release( IDispatchedHandler *iface )
+{
+    return InterlockedDecrement( &impl_from_dispatched( iface )->ref );
+}
+static HRESULT WINAPI dh_Invoke( IDispatchedHandler *iface )
+{
+    InterlockedIncrement( &impl_from_dispatched( iface )->invoked );
+    return S_OK;
+}
+
+static const IDispatchedHandlerVtbl dispatched_handler_vtbl =
+{
+    dh_QueryInterface,
+    dh_AddRef,
+    dh_Release,
+    dh_Invoke,
+};
+
+struct idle_handler
+{
+    IIdleDispatchedHandler IIdleDispatchedHandler_iface;
+    LONG ref;
+    LONG invoked;
+};
+
+static inline struct idle_handler *impl_from_idle( IIdleDispatchedHandler *iface )
+{
+    return CONTAINING_RECORD( iface, struct idle_handler, IIdleDispatchedHandler_iface );
+}
+
+static HRESULT WINAPI idle_QueryInterface( IIdleDispatchedHandler *iface, REFIID iid, void **out )
+{
+    struct idle_handler *impl = impl_from_idle( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IIdleDispatchedHandler ))
+    {
+        *out = &impl->IIdleDispatchedHandler_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI idle_AddRef( IIdleDispatchedHandler *iface )
+{
+    return InterlockedIncrement( &impl_from_idle( iface )->ref );
+}
+static ULONG WINAPI idle_Release( IIdleDispatchedHandler *iface )
+{
+    return InterlockedDecrement( &impl_from_idle( iface )->ref );
+}
+static HRESULT WINAPI idle_Invoke( IIdleDispatchedHandler *iface, __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandlerArgs *args )
+{
+    InterlockedIncrement( &impl_from_idle( iface )->invoked );
+    return S_OK;
+}
+
+static const IIdleDispatchedHandlerVtbl idle_handler_vtbl =
+{
+    idle_QueryInterface,
+    idle_AddRef,
+    idle_Release,
+    idle_Invoke,
+};
+
+static ICoreDispatcher *foreign_dispatcher;
+static struct dispatched_handler *foreign_handler;
+static struct idle_handler *foreign_idle;
+static HANDLE disp_event;
+static boolean foreign_has_access = TRUE;
+static LONG invoked_at_return = 0xdead;
+
+static DWORD WINAPI dispatcher_thread( LPVOID param )
+{
+    IAsyncAction *action = NULL;
+    HRESULT hr;
+
+    hr = ICoreDispatcher_get_HasThreadAccess( foreign_dispatcher, &foreign_has_access );
+    ok( hr == S_OK, "foreign HasThreadAccess returned %#lx.\n", hr );
+
+    hr = ICoreDispatcher_RunAsync( foreign_dispatcher, CoreDispatcherPriority_Normal,
+                                   &foreign_handler->IDispatchedHandler_iface, &action );
+    ok( hr == S_OK, "foreign RunAsync returned %#lx.\n", hr );
+    invoked_at_return = foreign_handler->invoked;
+    if (action) IAsyncAction_Release( action );
+
+    action = NULL;
+    hr = ICoreDispatcher_RunIdleAsync( foreign_dispatcher, &foreign_idle->IIdleDispatchedHandler_iface, &action );
+    ok( hr == S_OK, "foreign RunIdleAsync returned %#lx.\n", hr );
+    if (action) IAsyncAction_Release( action );
+
+    SetEvent( disp_event );
+    return 0;
+}
+
+static void test_Dispatcher_threading( void )
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_UI_Core_CoreWindow;
+    ICoreWindowStatic *core_window_static;
+    IActivationFactory *factory;
+    struct dispatched_handler handler = { { &dispatched_handler_vtbl }, 1, 0 };
+    struct idle_handler idle = { { &idle_handler_vtbl }, 1, 0 };
+    ICoreWindow *core_window = NULL;
+    ICoreDispatcher *dispatcher = NULL;
+    HSTRING str;
+    HANDLE thread;
+    DWORD tid;
+    boolean access;
+    HRESULT hr;
+
+    winetest_push_context( "dispatcher threading" );
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED( hr )) goto done;
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICoreWindowStatic, (void **)&core_window_static );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = ICoreWindowStatic_GetForCurrentThread( core_window_static, &core_window );
+    ok( hr == S_OK && core_window, "GetForCurrentThread returned %#lx, window %p.\n", hr, core_window );
+    if (!core_window && p_private_create)
+    {
+        /* a module without on-demand creation: the shell's factory call is the documented way in */
+        void *w = NULL;
+        if (SUCCEEDED( p_private_create( 1, L"App", 0, 0, 800, 600, 0, NULL, NULL, &w ) ))
+            core_window = (ICoreWindow *)w;
+    }
+    if (!core_window) goto done;
+
+    hr = ICoreWindow_get_Dispatcher( core_window, &dispatcher );
+    ok( hr == S_OK && dispatcher, "get_Dispatcher returned %#lx, dispatcher %p.\n", hr, dispatcher );
+    if (!dispatcher) goto done;
+
+    access = FALSE;
+    hr = ICoreDispatcher_get_HasThreadAccess( dispatcher, &access );
+    ok( hr == S_OK && access, "owner HasThreadAccess returned %#lx, access %d, expected TRUE.\n", hr, access );
+
+    /* foreign thread: HasThreadAccess FALSE, RunAsync/RunIdleAsync land in the owner's queue and
+     * only run when the owner pumps — they must not run inline on the calling thread */
+    foreign_dispatcher = dispatcher;
+    foreign_handler = &handler;
+    foreign_idle = &idle;
+    foreign_has_access = TRUE;
+    disp_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    thread = CreateThread( NULL, 0, dispatcher_thread, NULL, 0, &tid );
+    ok( thread != NULL, "CreateThread failed, error %lu.\n", GetLastError() );
+    if (thread)
+    {
+        WaitForSingleObject( disp_event, 5000 );
+        ok( foreign_has_access == FALSE, "foreign HasThreadAccess returned %d, expected FALSE.\n", foreign_has_access );
+        ok( invoked_at_return == 0,
+            "foreign RunAsync ran %ld times at return, expected 0 (must queue to the owner).\n", invoked_at_return );
+        CloseHandle( thread );
+    }
+    CloseHandle( disp_event );
+
+    hr = ICoreDispatcher_ProcessEvents( dispatcher, CoreProcessEventsOption_ProcessOneAndAllPending );
+    ok( hr == S_OK, "ProcessEvents returned %#lx.\n", hr );
+    ok( handler.invoked == 1, "RunAsync handler ran %ld times after ProcessEvents, expected 1.\n", handler.invoked );
+    ok( idle.invoked == 1, "RunIdleAsync handler ran %ld times after ProcessEvents, expected 1.\n", idle.invoked );
+
+    /* the owner thread keeps running its callbacks inline */
+    hr = ICoreDispatcher_RunAsync( dispatcher, CoreDispatcherPriority_Normal, &handler.IDispatchedHandler_iface, NULL );
+    ok( hr == S_OK, "owner RunAsync returned %#lx.\n", hr );
+    ok( handler.invoked == 2, "owner RunAsync ran inline: invoked %ld, expected 2.\n", handler.invoked );
+
+    ICoreDispatcher_Release( dispatcher );
+    ICoreWindow_Release( core_window );
+    ICoreWindowStatic_Release( core_window_static );
+    IActivationFactory_Release( factory );
+done:
+    winetest_pop_context();
+}
+
 START_TEST(corewindow)
 {
     HRESULT hr;
@@ -452,6 +735,8 @@ START_TEST(corewindow)
 
     test_CoreWindow();
     test_CoreWindow_events();
+    test_PrivateCreateCoreWindow();
+    test_Dispatcher_threading();
 
     RoUninitialize();
 }

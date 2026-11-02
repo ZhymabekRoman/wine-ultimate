@@ -207,6 +207,9 @@ struct core_window
 
 static __thread struct core_window *thread_core_window;
 
+static struct core_window *create_core_window( const WCHAR *title, INT x, INT y, UINT width, UINT height,
+                                               BOOL set_geometry );
+
 DEFINE_IINSPECTABLE( corewindow_static, ICoreWindowStatic, struct corewindow_statics, IActivationFactory_iface )
 
 static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWindowStatic *iface, ICoreWindow **windows )
@@ -214,11 +217,10 @@ static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWin
     TRACE( "iface %p, windows %p.\n", iface, windows );
     if (!windows) return E_POINTER;
 
-    if (!thread_core_window)
-    {
-        *windows = NULL;
-        return S_OK;
-    }
+    /* A CoreWindow is the thread's window, and asking for it is how the thread gets one: the
+     * window is created on demand, on the calling (owning) thread, as Windows' factory does. */
+    if (!thread_core_window && !create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, FALSE ))
+        return E_OUTOFMEMORY;
 
     *windows = &thread_core_window->ICoreWindow_iface;
     ICoreWindow_AddRef( *windows );
@@ -249,10 +251,24 @@ IActivationFactory *corewindow_factory = &corewindow_statics.IActivationFactory_
 
 /* ---- minimal CoreDispatcher ---- */
 
+/* The owner thread's window queue is the dispatcher's queue: a foreign-thread RunAsync posts the
+ * callback to the window, and the owner's ProcessEvents (which pumps the thread's messages) drains
+ * it. The owner thread's RunAsync stays inline — an app like an unpackaged WinUI 3 process drives
+ * its own dispatcher on the window thread and gets the callback exactly where it always did. */
+#define WM_CORE_DISPATCHER_POST (WM_APP + 1)
+
+struct dispatcher_post
+{
+    void *handler;   /* IDispatchedHandler / IIdleDispatchedHandler, AddRef'd for the flight */
+    BOOL idle;
+};
+
 struct core_dispatcher
 {
     ICoreDispatcher ICoreDispatcher_iface;
     ICoreAcceleratorKeys ICoreAcceleratorKeys_iface;
+    struct core_window *window;   /* the owning window: its hwnd is the queue's door, its thread the owner */
+    DWORD owner_tid;
     LONG ref;
 };
 
@@ -499,15 +515,46 @@ static IAsyncAction *dispatcher_async_action_create(void)
     return &impl->IAsyncAction_iface;
 }
 
+/* Owner-thread call: run inline. Foreign call: hand the callback to the owner thread's queue via
+ * its window; it runs when the owner pumps (ProcessEvents, and the Run/ProcessUntilQuit loops).
+ * With no window or a dead queue to post to, inline is the only way the callback is not lost. */
+static void dispatcher_run_or_post( struct core_dispatcher *impl, void *agileCallback, BOOL idle )
+{
+    HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)agileCallback)[3];
+
+    if (GetCurrentThreadId() == impl->owner_tid)
+    {
+        invoke( agileCallback );
+        return;
+    }
+    if (impl->window && impl->window->hwnd)
+    {
+        struct dispatcher_post *post = malloc( sizeof(*post) );
+        if (post)
+        {
+            post->handler = agileCallback;
+            post->idle = idle;
+            IUnknown_AddRef( (IUnknown *)agileCallback );
+            if (PostMessageW( impl->window->hwnd, WM_CORE_DISPATCHER_POST, 0, (LPARAM)post ))
+            {
+                TRACE( "dispatcher %p: posted callback %p (idle %d) to owner tid %lu.\n",
+                       impl, agileCallback, idle, impl->owner_tid );
+                return;
+            }
+            free( post );
+            IUnknown_Release( (IUnknown *)agileCallback );
+        }
+    }
+    invoke( agileCallback );
+}
+
 static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDispatcherPriority priority,
         __x_ABI_CWindows_CUI_CCore_CIDispatchedHandler *agileCallback, IAsyncAction **asyncAction )
 {
+    struct core_dispatcher *impl = impl_from_ICoreDispatcher( iface );
+
     TRACE( "iface %p, priority %d, agileCallback %p, asyncAction %p\n", iface, priority, agileCallback, asyncAction );
-    if (agileCallback)
-    {
-        HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)agileCallback)[3];
-        invoke( agileCallback );
-    }
+    if (agileCallback) dispatcher_run_or_post( impl, agileCallback, FALSE );
     if (asyncAction)
     {
         *asyncAction = dispatcher_async_action_create();
@@ -518,12 +565,10 @@ static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDisp
 static HRESULT WINAPI core_dispatcher_RunIdleAsync( ICoreDispatcher *iface,
         __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandler *agileCallback, IAsyncAction **asyncAction )
 {
+    struct core_dispatcher *impl = impl_from_ICoreDispatcher( iface );
+
     TRACE( "iface %p, agileCallback %p, asyncAction %p\n", iface, agileCallback, asyncAction );
-    if (agileCallback)
-    {
-        HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)agileCallback)[3];
-        invoke( agileCallback );
-    }
+    if (agileCallback) dispatcher_run_or_post( impl, agileCallback, TRUE );
     if (asyncAction)
     {
         *asyncAction = dispatcher_async_action_create();
@@ -531,7 +576,14 @@ static HRESULT WINAPI core_dispatcher_RunIdleAsync( ICoreDispatcher *iface,
     return S_OK;
 }
 static HRESULT WINAPI core_dispatcher_HasThreadAccess( ICoreDispatcher *iface, boolean *value )
-{ FIXME( "stub\n" ); if (value) *value = TRUE; return S_OK; }
+{
+    struct core_dispatcher *impl = impl_from_ICoreDispatcher( iface );
+
+    TRACE( "iface %p, owner tid %lu, current tid %lu.\n", iface, impl->owner_tid, GetCurrentThreadId() );
+    if (!value) return E_POINTER;
+    *value = (GetCurrentThreadId() == impl->owner_tid);
+    return S_OK;
+}
 static HRESULT WINAPI core_dispatcher_get_CurrentPriority( ICoreDispatcher *iface, CoreDispatcherPriority *value )
 { FIXME( "stub\n" ); if (value) *value = CoreDispatcherPriority_Normal; return S_OK; }
 static HRESULT WINAPI core_dispatcher_put_CurrentPriority( ICoreDispatcher *iface, CoreDispatcherPriority value )
@@ -553,12 +605,14 @@ static const struct ICoreDispatcherVtbl core_dispatcher_vtbl =
     core_dispatcher_RunIdleAsync,
 };
 
-static ICoreDispatcher *core_dispatcher_create(void)
+static ICoreDispatcher *core_dispatcher_create( struct core_window *window )
 {
     struct core_dispatcher *impl;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->ICoreDispatcher_iface.lpVtbl = &core_dispatcher_vtbl;
     impl->ICoreAcceleratorKeys_iface.lpVtbl = &core_dispatcher_keys_vtbl;
+    impl->window = window;
+    impl->owner_tid = GetCurrentThreadId();   /* the creating thread is the dispatcher's and window's owner */
     impl->ref = 1;
     return &impl->ICoreDispatcher_iface;
 }
@@ -1324,6 +1378,25 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
         PostQuitMessage( 0 );
         return 0;
 
+    case WM_CORE_DISPATCHER_POST:
+    {
+        /* A foreign-thread RunAsync/RunIdleAsync rides the window queue; this runs on the owner
+         * thread, drained by its ProcessEvents pump. */
+        struct dispatcher_post *post = (struct dispatcher_post *)lparam;
+        if (post)
+        {
+            void *handler = post->handler;
+            free( post );
+            if (handler)
+            {
+                HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)handler)[3];
+                invoke( handler );
+                IUnknown_Release( (IUnknown *)handler );
+            }
+        }
+        return 0;
+    }
+
     case WM_NCDESTROY:
         SetWindowLongPtrW( hwnd, GWLP_USERDATA, 0 );
         return DefWindowProcW( hwnd, msg, wparam, lparam );
@@ -1508,7 +1581,7 @@ static struct core_window *create_core_window( const WCHAR *title, INT x, INT y,
     impl->ICoreWindowNavigation_iface.lpVtbl = &core_window_navigation_vtbl;
     impl->ICoreWindowAdapterInterop_iface.lpVtbl = &core_window_adapter_vtbl;
     impl->dummy_iface.lpVtbl = (void *)dummy_vtbl;
-    impl->dispatcher = core_dispatcher_create();
+    impl->dispatcher = core_dispatcher_create( impl );
     impl->ref = 1;
 
     wc.style = CS_OWNDC | CS_HREDRAW | CS_VREDRAW;

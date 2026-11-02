@@ -1047,6 +1047,16 @@ static HRESULT WINAPI core_application_GetCurrentView( ICoreApplication *iface, 
  * DXamlCore::ConfigureCoreWindow returns E_UNEXPECTED, XAML stows it and fail-fasts — so a brokered
  * run configures the window exactly once and skips the direct path below.
  *
+ * These invariants are enforced inline, by the builtin modules: the windows.ui.xaml framework view
+ * records the thread that Initialized it and its one window, and answers a foreign-thread
+ * SetWindow RPC_E_WRONG_THREAD, a second window E_UNEXPECTED, Load-before-SetWindow E_UNEXPECTED,
+ * and everything after Uninitialize E_APPLICATION_VIEW_EXITING. Native Windows twinapi.appcore /
+ * windows.ui.xaml (if a prefix ever loads them) carry their own enforcement, which is unobservable
+ * from here; the builtin path is the one this handshake runs on. The one-window-per-thread rule
+ * (windows.ui's per-thread CoreWindow) is the anti-split invariant: a view whose CoreWindow and
+ * dispatcher live on one thread cannot be torn across two, which is the failure the brokered
+ * handshake is built to prevent.
+ *
  * All of this is behind WINE_UWP_BROKERS. The unpackaged path (WinUI 3, dcompi, appresolver) is
  * byte-for-byte the path it has always been, and a brokered run that cannot reach the brokers falls
  * back to it.
@@ -1229,6 +1239,7 @@ static HRESULT WINAPI broker_app_Activate( void *iface, HSTRING aumid, HSTRING c
     if (SUCCEEDED( WindowsDuplicateString( aumid, &title ) ) && !title)
         WindowsCreateString( L"App", 3, &title );
     if (!title) WindowsCreateString( L"App", 3, &title );
+    TRACE( "step 1/5 CreateCoreWindow.\n" );
     if (FAILED( hr = factory_CreateCoreWindow( factory, title, &window ) ))
     {
         WARN( "CreateCoreWindow failed, hr %#lx.\n", hr );
@@ -1236,9 +1247,20 @@ static HRESULT WINAPI broker_app_Activate( void *iface, HSTRING aumid, HSTRING c
     }
     /* SetWindowAndGetDispatcher: the CoreWindow carries its own dispatcher, which is what the view
      * asks for alongside the window. This is the only place the window is configured. */
+    TRACE( "step 2/5 SetWindowAndGetDispatcher.\n" );
     hr = IFrameworkView_SetWindow( app->view, (void *)window );
+    if (hr == E_APPLICATION_VIEW_EXITING)
+    {
+        /* The view's Run has returned and Uninitialize ran: the shell's contract says an
+         * activation of an exiting view is refused, and 0x8000001b is the value Windows answers. */
+        TRACE( "step 2/5: view is exiting (Run returned), activation refused with E_APPLICATION_VIEW_EXITING.\n" );
+        goto done;
+    }
+    TRACE( "step 3/5 Load, hr %#lx.\n", hr );
     if (SUCCEEDED( hr )) hr = IFrameworkView_Load( app->view, NULL );
+    TRACE( "step 4/5 PrepareToActivate.\n" );
     if (SUCCEEDED( hr )) prepare_to_activate( window );   /* best effort; the shell does not stop on it */
+    TRACE( "step 5/5 Activate: invoking Activated handler.\n" );
     if (SUCCEEDED( hr )) invoke_view_activated( app->app_view );
 done:
     WindowsDeleteString( title );

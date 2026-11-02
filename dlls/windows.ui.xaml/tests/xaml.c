@@ -30,6 +30,10 @@
 #include "windows.foundation.h"
 #define WIDL_using_Windows_UI
 #include "windows.ui.h"
+#define WIDL_using_Windows_UI_Core
+#include "windows.ui.core.h"
+#define WIDL_using_Windows_ApplicationModel_Core
+#include "windows.applicationmodel.core.h"
 
 #include "wine/test.h"
 
@@ -109,6 +113,251 @@ static void test_Application(void)
     }
 }
 
+/* ---- view lifecycle invariants (WP1.11) ----
+ *
+ * The Application factory answers IFrameworkViewSource with the view source whose CreateView makes
+ * the framework view CoreApplication::Run drives (real XAML answers this QI E_NOINTERFACE, so the
+ * checks are the broken-on-Windows case). A minimal CoreWindow stand-in is enough: the view stores
+ * the pointer and keeps a reference, nothing else calls into it.
+ */
+
+struct fake_window
+{
+    ICoreWindow ICoreWindow_iface;
+    LONG ref;
+};
+
+static inline struct fake_window *impl_from_fake( ICoreWindow *iface )
+{
+    return CONTAINING_RECORD( iface, struct fake_window, ICoreWindow_iface );
+}
+
+static HRESULT WINAPI fake_QueryInterface( ICoreWindow *iface, REFIID iid, void **out )
+{
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI fake_AddRef( ICoreWindow *iface )
+{
+    return InterlockedIncrement( &impl_from_fake( iface )->ref );
+}
+static ULONG WINAPI fake_Release( ICoreWindow *iface )
+{
+    return InterlockedDecrement( &impl_from_fake( iface )->ref );
+}
+
+static const ICoreWindowVtbl fake_window_vtbl =
+{
+    fake_QueryInterface,
+    fake_AddRef,
+    fake_Release,
+};
+
+static void fake_window_init( struct fake_window *w )
+{
+    w->ICoreWindow_iface.lpVtbl = &fake_window_vtbl;
+    w->ref = 1;
+}
+
+static IFrameworkViewSource *get_view_source( void )
+{
+    static const WCHAR *class_name = L"Windows.UI.Xaml.Application";
+    IActivationFactory *factory = NULL;
+    IFrameworkViewSource *source = NULL;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED( hr )) return NULL;
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_IFrameworkViewSource, (void **)&source );
+    IActivationFactory_Release( factory );
+    ok( hr == S_OK || broken( hr == E_NOINTERFACE ), "QI IFrameworkViewSource got hr %#lx.\n", hr );
+    return source;
+}
+
+static IFrameworkView *create_view( IFrameworkViewSource *source )
+{
+    IFrameworkView *view = NULL;
+    HRESULT hr = IFrameworkViewSource_CreateView( source, &view );
+    ok( hr == S_OK, "CreateView got hr %#lx.\n", hr );
+    return view;
+}
+
+static void test_View_SetWindow( IFrameworkViewSource *source )
+{
+    struct fake_window w1, w2;
+    IFrameworkView *view;
+    HRESULT hr;
+
+    winetest_push_context( "SetWindow" );
+
+    fake_window_init( &w1 );
+    fake_window_init( &w2 );
+
+    view = create_view( source );
+    if (!view) goto done;
+
+    hr = IFrameworkView_Initialize( view, NULL );
+    ok( hr == S_OK, "Initialize got hr %#lx.\n", hr );
+
+    hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
+    ok( hr == S_OK, "SetWindow(w1) got hr %#lx, expected S_OK.\n", hr );
+
+    hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
+    ok( hr == S_OK, "SetWindow(w1) again got hr %#lx, expected S_OK.\n", hr );
+
+    hr = IFrameworkView_SetWindow( view, &w2.ICoreWindow_iface );
+    ok( hr == E_UNEXPECTED, "SetWindow(w2) got hr %#lx, expected E_UNEXPECTED.\n", hr );
+
+    IFrameworkView_Release( view );
+done:
+    winetest_pop_context();
+}
+
+static void test_View_Load( IFrameworkViewSource *source )
+{
+    struct fake_window w1;
+    IFrameworkView *view;
+    HRESULT hr;
+
+    winetest_push_context( "Load" );
+
+    fake_window_init( &w1 );
+
+    view = create_view( source );
+    if (!view) goto done;
+
+    hr = IFrameworkView_Initialize( view, NULL );
+    ok( hr == S_OK, "Initialize got hr %#lx.\n", hr );
+
+    hr = IFrameworkView_Load( view, NULL );
+    ok( hr == E_UNEXPECTED, "Load before SetWindow got hr %#lx, expected E_UNEXPECTED.\n", hr );
+
+    hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
+    ok( hr == S_OK, "SetWindow got hr %#lx.\n", hr );
+
+    hr = IFrameworkView_Load( view, NULL );
+    ok( hr == S_OK, "Load after SetWindow got hr %#lx, expected S_OK.\n", hr );
+
+    hr = IFrameworkView_Load( view, NULL );
+    ok( hr == S_OK, "Load twice got hr %#lx, expected S_OK.\n", hr );
+
+    IFrameworkView_Release( view );
+done:
+    winetest_pop_context();
+}
+
+static HANDLE foreign_thread;
+static HANDLE foreign_event;
+static HRESULT foreign_hr;
+static IFrameworkView *foreign_view;
+static ICoreWindow *foreign_window;
+
+static DWORD WINAPI set_window_thread( LPVOID param )
+{
+    foreign_hr = IFrameworkView_SetWindow( foreign_view, foreign_window );
+    SetEvent( foreign_event );
+    return 0;
+}
+
+static void test_View_SetWindow_foreign_thread( IFrameworkViewSource *source )
+{
+    struct fake_window w1;
+    IFrameworkView *view;
+    DWORD tid;
+    HRESULT hr;
+
+    winetest_push_context( "SetWindow foreign thread" );
+
+    fake_window_init( &w1 );
+
+    view = create_view( source );
+    if (!view) goto done;
+
+    hr = IFrameworkView_Initialize( view, NULL );
+    ok( hr == S_OK, "Initialize got hr %#lx.\n", hr );
+
+    foreign_view = view;
+    foreign_window = &w1.ICoreWindow_iface;
+    foreign_hr = 0xdeadbeef;
+    foreign_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+
+    foreign_thread = CreateThread( NULL, 0, set_window_thread, NULL, 0, &tid );
+    ok( foreign_thread != NULL, "CreateThread failed, error %lu.\n", GetLastError() );
+    if (foreign_thread)
+    {
+        WaitForSingleObject( foreign_event, 5000 );
+        ok( foreign_hr == RPC_E_WRONG_THREAD,
+            "SetWindow from foreign thread got hr %#lx, expected RPC_E_WRONG_THREAD.\n", foreign_hr );
+        CloseHandle( foreign_thread );
+    }
+    CloseHandle( foreign_event );
+
+    /* the owner thread may still set its window: the foreign call changed nothing */
+    hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
+    ok( hr == S_OK, "owner SetWindow after foreign attempt got hr %#lx, expected S_OK.\n", hr );
+
+    IFrameworkView_Release( view );
+done:
+    winetest_pop_context();
+}
+
+static void test_View_exiting( IFrameworkViewSource *source )
+{
+    struct fake_window w1;
+    IFrameworkView *view;
+    HRESULT hr;
+
+    winetest_push_context( "exiting view" );
+
+    fake_window_init( &w1 );
+
+    view = create_view( source );
+    if (!view) goto done;
+
+    hr = IFrameworkView_Initialize( view, NULL );
+    ok( hr == S_OK, "Initialize got hr %#lx.\n", hr );
+    hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
+    ok( hr == S_OK, "SetWindow got hr %#lx.\n", hr );
+    hr = IFrameworkView_Uninitialize( view );
+    ok( hr == S_OK, "Uninitialize got hr %#lx.\n", hr );
+
+    hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
+    ok( hr == E_APPLICATION_VIEW_EXITING,
+        "SetWindow after Uninitialize got hr %#lx, expected E_APPLICATION_VIEW_EXITING.\n", hr );
+
+    hr = IFrameworkView_Load( view, NULL );
+    ok( hr == E_APPLICATION_VIEW_EXITING,
+        "Load after Uninitialize got hr %#lx, expected E_APPLICATION_VIEW_EXITING.\n", hr );
+
+    IFrameworkView_Release( view );
+done:
+    winetest_pop_context();
+}
+
+static void test_View_lifecycle( void )
+{
+    IFrameworkViewSource *source = get_view_source();
+
+    if (!source)
+    {
+        win_skip( "no IFrameworkViewSource seam on the Application factory.\n" );
+        return;
+    }
+
+    test_View_SetWindow( source );
+    test_View_Load( source );
+    test_View_SetWindow_foreign_thread( source );
+    test_View_exiting( source );
+
+    IFrameworkViewSource_Release( source );
+}
+
 static void test_SwapChainPanel(void)
 {
     static const WCHAR *class_name = L"Windows.UI.Xaml.Controls.SwapChainPanel";
@@ -148,6 +397,7 @@ START_TEST(xaml)
     test_ColorHelper();
     test_Application();
     test_SwapChainPanel();
+    test_View_lifecycle();
 
     RoUninitialize();
 }
