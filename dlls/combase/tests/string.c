@@ -736,6 +736,249 @@ static void test_marshal(void)
     free(buffer);
 }
 
+/*
+ * Virtualized (tagged) HSTRINGs.  WinRT virtualized-string producers (.NET
+ * Native / CoreRT AOT code in particular) pass handles whose low 3 bits carry
+ * a type tag with the payload 8-byte aligned at (handle & ~7):
+ *
+ *   0 = plain heap handle (this file's existing tests)
+ *   1 = atom-table string: no atom table to resolve against -- must not AV,
+ *       must not free, must not fabricate content
+ *   2 = inline buffer {UINT32 cch; WCHAR chars[cch+1]} at (handle & ~7)
+ *   7 = managed GC string: MethodTable*@+0x00, UINT32 cch@+0x08, chars at
+ *       +0x0C (coreclr m_firstChar) or +0x10 (RTString layout note)
+ *
+ * Windows semantics asserted: decoded length, NUL-terminated UTF-16 raw
+ * buffer, and WindowsDeleteString on a virtualized handle = no-op success
+ * (virtualized handles are not heap-owned, so deleting must not free).
+ */
+
+#define MT_FILLER     ((void *)0xdeadbeefcafe1234) /* MethodTable* slot */
+#define PAYLOAD_SIZE  80
+
+static DECLSPEC_ALIGN(8) BYTE managed_a[PAYLOAD_SIZE];   /* chars at +0x0C (coreclr) */
+static DECLSPEC_ALIGN(8) BYTE managed_b[PAYLOAD_SIZE];   /* chars at +0x10 (RTString) */
+static DECLSPEC_ALIGN(8) BYTE managed_null[PAYLOAD_SIZE];/* chars at +0x0C, embedded NUL */
+static DECLSPEC_ALIGN(8) BYTE managed_empty[PAYLOAD_SIZE];/* cch 0 */
+static DECLSPEC_ALIGN(8) BYTE managed_bad[PAYLOAD_SIZE]; /* no NUL terminator */
+static DECLSPEC_ALIGN(8) BYTE managed_huge[PAYLOAD_SIZE]; /* out-of-range cch */
+static DECLSPEC_ALIGN(8) BYTE inline_ok[PAYLOAD_SIZE];   /* tag 2 payload */
+static DECLSPEC_ALIGN(8) BYTE inline_null[PAYLOAD_SIZE]; /* tag 2, embedded NUL */
+static DECLSPEC_ALIGN(8) BYTE inline_empty[PAYLOAD_SIZE];/* tag 2, cch 0 */
+
+static const WCHAR virt_content[] = L"abcdef";
+static const WCHAR virt_null[] = { 'a', 0, 'c', 0 };
+static const WCHAR virt_tail[] = L"cdef";
+static const WCHAR virt_cat[] = L"abcdefabcdef";
+static const WCHAR virt_trim_start[] = L"bcdef";
+static const WCHAR virt_trim_end[] = L"abcde";
+static const WCHAR virt_char_a[] = L"a";
+static const WCHAR virt_char_f[] = L"f";
+
+static HSTRING make_handle( const void *payload, UINT32 tag )
+{
+    return (HSTRING)(UINT_PTR)((UINT_PTR)payload | tag);
+}
+
+static void init_managed( BYTE *p, const WCHAR *chars, UINT32 cch, WORD chars_offset )
+{
+    memset( p, 0, PAYLOAD_SIZE );
+    *(void **)(p + 0x00) = MT_FILLER;
+    *(UINT32 *)(p + 0x08) = cch;
+    if (chars_offset == 0x10) *(WORD *)(p + 0x0C) = 'X'; /* the +0x0C probe must fail */
+    memcpy( p + chars_offset, chars, (cch + 1) * sizeof(WCHAR) );
+}
+
+static void init_inline( BYTE *p, const WCHAR *chars, UINT32 cch )
+{
+    memset( p, 0, PAYLOAD_SIZE );
+    *(UINT32 *)(p + 0x00) = cch;
+    memcpy( p + 4, chars, (cch + 1) * sizeof(WCHAR) );
+}
+
+#define check_decoded(str, content, length, has_null) _check_decoded( __LINE__, str, content, length, has_null )
+static void _check_decoded( int line, HSTRING str, LPCWSTR content, UINT32 length, BOOL has_null_expected )
+{
+    BOOL has_null = 0xaa;
+    LPCWSTR ptr;
+    UINT32 out_length = 0x55;
+
+    ok_(__FILE__, line)( WindowsIsStringEmpty( str ) == (length == 0),
+                         "line %d: WindowsIsStringEmpty(%p), length %u\n", line, str, length );
+    ok_(__FILE__, line)( WindowsGetStringLen( str ) == length, "line %d: WindowsGetStringLen(%p) returned %u, expected %u\n",
+                         line, str, WindowsGetStringLen( str ), length );
+    ptr = WindowsGetStringRawBuffer( str, &out_length );
+    ok_(__FILE__, line)( ptr != NULL, "line %d: WindowsGetStringRawBuffer(%p) returned NULL\n", line, str );
+    if (!ptr) return;
+    ok_(__FILE__, line)( out_length == length, "line %d: raw size %u, expected %u\n", line, out_length, length );
+    ok_(__FILE__, line)( !memcmp( ptr, content, length * sizeof(WCHAR) ), "line %d: got raw buffer %s\n",
+                         line, debugstr_wn( ptr, length ) );
+    ok_(__FILE__, line)( ptr[length] == 0, "line %d: raw buffer is not NUL-terminated\n", line );
+    ptr = WindowsGetStringRawBuffer( str, NULL );
+    ok_(__FILE__, line)( ptr != NULL, "line %d: WindowsGetStringRawBuffer(%p, NULL) returned NULL\n", line, str );
+    ok_(__FILE__, line)( WindowsStringHasEmbeddedNull( str, &has_null ) == S_OK,
+                         "line %d: WindowsStringHasEmbeddedNull(%p) failed\n", line, str );
+    ok_(__FILE__, line)( has_null == has_null_expected,
+                         "line %d: got has_null %d, expected %d, content length %u\n", line, has_null, has_null_expected, length );
+}
+
+#define check_undecoded(str) _check_undecoded( __LINE__, str )
+static void _check_undecoded( int line, HSTRING str )
+{
+    LPCWSTR ptr;
+    UINT32 out_length = 0x55;
+    INT32 res = 0x55;
+    HSTRING plain;
+
+    /* Undecodable handles must report the empty string (same as WindowsGetStringRawBuffer(NULL)
+     * does): never a fabricated buffer, never a crash. */
+    ok_(__FILE__, line)( WindowsGetStringLen( str ) == 0, "line %d: WindowsGetStringLen(%p) returned %u\n",
+                         line, str, WindowsGetStringLen( str ) );
+    ptr = WindowsGetStringRawBuffer( str, &out_length );
+    ok_(__FILE__, line)( ptr != NULL, "line %d: raw buffer NULL\n", line );
+    if (ptr)
+    {
+        ok_(__FILE__, line)( out_length == 0, "line %d: raw size %u\n", line, out_length );
+        ok_(__FILE__, line)( ptr[0] == 0, "line %d: fabricated content %s\n", line, debugstr_w( ptr ) );
+    }
+    ok_(__FILE__, line)( WindowsIsStringEmpty( str ) == TRUE, "line %d: IsStringEmpty\n", line );
+    ok(WindowsCreateString( virt_content, 6, &plain ) == S_OK, "Failed to create plain string\n");
+    ok_(__FILE__, line)( WindowsCompareStringOrdinal( str, plain, &res ) == S_OK,
+                         "line %d: WindowsCompareStringOrdinal(%p) failed\n", line, str );
+    ok_(__FILE__, line)( res == -1, "line %d: got %d, expected -1\n", line, res );
+    WindowsDeleteString( plain );
+}
+
+static void test_virtualized_hstring(void)
+{
+    HSTRING str, plain, dup, out;
+    INT32 res;
+    BYTE snapshot[PAYLOAD_SIZE];
+
+    init_managed( managed_a, virt_content, 6, 0x0C );
+    init_managed( managed_b, virt_content, 6, 0x10 );
+    init_managed( managed_null, virt_null, 3, 0x0C );
+    init_managed( managed_empty, L"", 0, 0x0C );
+    init_inline( inline_ok, virt_content, 6 );
+    init_inline( inline_null, virt_null, 3 );
+    init_inline( inline_empty, L"", 0 );
+    memset( managed_bad, 'x', PAYLOAD_SIZE );
+    *(void **)(managed_bad + 0x00) = MT_FILLER;
+    *(UINT32 *)(managed_bad + 0x08) = 6; /* no NUL at any probe offset */
+    memset( managed_huge, 'x', PAYLOAD_SIZE );
+    *(void **)(managed_huge + 0x00) = MT_FILLER;
+    *(UINT32 *)(managed_huge + 0x08) = 0xffffffff;
+
+    /* Tag 7, both documented managed char offsets. */
+    str = make_handle( managed_a, 7 );
+    check_decoded( str, virt_content, 6, FALSE );
+    str = make_handle( managed_b, 7 );
+    check_decoded( str, virt_content, 6, FALSE );
+
+    /* Tag 2 inline buffer. */
+    str = make_handle( inline_ok, 2 );
+    check_decoded( str, virt_content, 6, FALSE );
+
+    /* Embedded NUL is content, not a terminator: length 3, has_null TRUE. */
+    str = make_handle( managed_null, 7 );
+    check_decoded( str, virt_null, 3, TRUE );
+    str = make_handle( inline_null, 2 );
+    check_decoded( str, virt_null, 3, TRUE );
+
+    /* Zero-length virtualized strings decode as empty. */
+    str = make_handle( managed_empty, 7 );
+    check_decoded( str, L"", 0, FALSE );
+    str = make_handle( inline_empty, 2 );
+    check_decoded( str, L"", 0, FALSE );
+
+    /* Atoms, unknown tags, bad offsets and out-of-range lengths: report empty. */
+    check_undecoded( (HSTRING)(UINT_PTR)0x1235 );        /* atom, payload not mapped */
+    check_undecoded( make_handle( managed_bad, 7 ) );    /* no NUL terminator */
+    check_undecoded( make_handle( managed_huge, 7 ) );   /* cch out of range */
+    check_undecoded( make_handle( managed_a, 3 ) );      /* unknown tag */
+    check_undecoded( make_handle( managed_a, 1 ) );      /* atom tag over a live payload */
+    check_undecoded( (HSTRING)(UINT_PTR)1 );             /* null payload, tag 1 */
+    check_undecoded( (HSTRING)(UINT_PTR)2 );             /* null payload, tag 2 */
+    check_undecoded( (HSTRING)(UINT_PTR)7 );             /* null payload, tag 7 */
+
+    /* Comparison must see the decoded content on both sides. */
+    ok(WindowsCreateString( virt_content, 6, &plain ) == S_OK, "Failed to create plain string\n");
+    str = make_handle( managed_a, 7 );
+    res = 0x55;
+    ok(WindowsCompareStringOrdinal( str, plain, &res ) == S_OK, "Failed to compare virtualized string\n");
+    ok(!res, "got %d, expected 0\n", res );
+    res = 0x55;
+    ok(WindowsCompareStringOrdinal( plain, str, &res ) == S_OK, "Failed to compare virtualized string\n");
+    ok(!res, "got %d, expected 0\n", res );
+    res = 0x55;
+    ok(WindowsCompareStringOrdinal( str, make_handle( managed_b, 7 ), &res ) == S_OK, "Failed to compare virtualized strings\n");
+    ok(!res, "got %d, expected 0\n", res );
+    res = 0x55;
+    ok(WindowsCompareStringOrdinal( str, make_handle( inline_ok, 2 ), &res ) == S_OK, "Failed to compare virtualized strings\n");
+    ok(!res, "got %d, expected 0\n", res );
+    res = 0x55;
+    ok(WindowsCompareStringOrdinal( str, NULL, &res ) == S_OK, "Failed to compare virtualized string\n");
+    ok(res == 1, "got %d, expected 1\n", res );
+    res = 0x55;
+    ok(WindowsCompareStringOrdinal( NULL, str, &res ) == S_OK, "Failed to compare virtualized string\n");
+    ok(res == -1, "got %d, expected -1\n", res );
+
+    /* Content operations decode their virtualized inputs. */
+    out = NULL;
+    ok(WindowsSubstring( str, 2, &out ) == S_OK, "WindowsSubstring failed\n");
+    check_string( out, virt_tail, 4, FALSE );
+    ok(WindowsDeleteString( out ) == S_OK, "Failed to delete substring\n");
+    out = NULL;
+    ok(WindowsSubstringWithSpecifiedLength( str, 1, 3, &out ) == S_OK, "WindowsSubstringWithSpecifiedLength failed\n");
+    check_string( out, L"bcd", 3, FALSE );
+    ok(WindowsDeleteString( out ) == S_OK, "Failed to delete substring\n");
+    out = NULL;
+    ok(WindowsConcatString( str, plain, &out ) == S_OK, "WindowsConcatString failed\n");
+    check_string( out, virt_cat, 12, FALSE );
+    ok(WindowsDeleteString( out ) == S_OK, "Failed to delete concatenated string\n");
+    ok(WindowsCreateString( virt_char_a, 1, &dup ) == S_OK, "Failed to create trim set\n");
+    out = NULL;
+    ok(WindowsTrimStringStart( str, dup, &out ) == S_OK, "WindowsTrimStringStart failed\n");
+    check_string( out, virt_trim_start, 5, FALSE );
+    ok(WindowsDeleteString( out ) == S_OK, "Failed to delete trimmed string\n");
+    WindowsDeleteString( dup );
+    ok(WindowsCreateString( virt_char_f, 1, &dup ) == S_OK, "Failed to create trim set\n");
+    out = NULL;
+    ok(WindowsTrimStringEnd( str, dup, &out ) == S_OK, "WindowsTrimStringEnd failed\n");
+    check_string( out, virt_trim_end, 5, FALSE );
+    ok(WindowsDeleteString( out ) == S_OK, "Failed to delete trimmed string\n");
+    WindowsDeleteString( dup );
+    out = NULL;
+    ok(WindowsDuplicateString( str, &dup ) == S_OK, "WindowsDuplicateString failed\n");
+    ok(dup == str, "got %p, expected %p\n", dup, str );
+    check_decoded( dup, virt_content, 6, FALSE );
+    ok(WindowsDeleteString( dup ) == S_OK, "Failed to delete duplicate\n");
+    WindowsDeleteString( plain );
+
+    /* Deleting a virtualized handle must be a successful no-op: the payloads above live in
+     * static (non-heap) memory, so any free() would corrupt the allocator, and any write
+     * would show up in the snapshot compare below. */
+    str = make_handle( managed_a, 7 );
+    memcpy( snapshot, managed_a, PAYLOAD_SIZE );
+    ok(WindowsDeleteString( str ) == S_OK, "WindowsDeleteString(tag 7) failed\n");
+    ok(WindowsDeleteString( str ) == S_OK, "second WindowsDeleteString(tag 7) failed\n");
+    ok(!memcmp( snapshot, managed_a, PAYLOAD_SIZE ), "tag 7 payload was modified or freed\n");
+    str = make_handle( inline_ok, 2 );
+    memcpy( snapshot, inline_ok, PAYLOAD_SIZE );
+    ok(WindowsDeleteString( str ) == S_OK, "WindowsDeleteString(tag 2) failed\n");
+    ok(!memcmp( snapshot, inline_ok, PAYLOAD_SIZE ), "tag 2 payload was modified or freed\n");
+    ok(WindowsDeleteString( (HSTRING)(UINT_PTR)0x1235 ) == S_OK, "WindowsDeleteString(atom) failed\n");
+    dup = NULL;
+    ok(WindowsDuplicateString( (HSTRING)(UINT_PTR)0x1235, &dup ) == S_OK, "WindowsDuplicateString(atom) failed\n");
+    ok(dup == (HSTRING)(UINT_PTR)0x1235, "got %p, expected the atom handle unchanged\n", dup );
+    ok(WindowsDeleteString( dup ) == S_OK, "Failed to delete the duplicated atom handle\n");
+
+    /* A heap allocation after all of the above proves the allocator survived the deletes. */
+    ok(WindowsCreateString( virt_content, 6, &plain ) == S_OK, "Allocator corrupted by deleting virtualized handles\n");
+    check_decoded( plain, virt_content, 6, FALSE );
+    ok(WindowsDeleteString( plain ) == S_OK, "Failed to delete plain string\n");
+}
+
 START_TEST(string)
 {
     test_create_delete();
@@ -748,4 +991,5 @@ START_TEST(string)
     test_trim();
     test_hstring_struct();
     test_marshal();
+    test_virtualized_hstring();
 }
