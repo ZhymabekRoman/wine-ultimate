@@ -693,7 +693,11 @@ static void key_release( HSTRING tmp, BOOL owned )
 
 /* ------------------------------------------------------------------ */
 /* IVectorView<HSTRING> (Languages) / IVectorView<T*> generic          */
-/* slots: [II 5][GetAt 6][Size 7][GetView 8][First 9]                  */
+/* ABI (include/windows.foundation.collections.idl:249, IVectorView<T> */
+/* requires IIterable<T>): [II 5][GetAt 6][Size 7][IndexOf 8]          */
+/* [GetMany 9][First 10].  IVectorView has no GetView slot -- that is   */
+/* IVector's (idl:267), and the IObservableVector face below carries    */
+/* it at its own delegated position.                                   */
 /* ------------------------------------------------------------------ */
 
 struct str_vector
@@ -753,25 +757,31 @@ static HRESULT WINAPI svv_Size( void *iface, UINT32 *size )
     *size = svv_from( iface )->count;
     return S_OK;
 }
+/* IVectorView::IndexOf (idl:254), slot 8.  Ordinal comparison through
+ * WindowsCompareStringOrdinal (include/winstring.h:28): the projection compares
+ * language tags case-sensitively, and the case-insensitive lstrcmpiW this slot
+ * used before reported a hit for "en-US" against the stored "en-us" and handed
+ * the caller an index whose value does not equal the key it searched for.  A
+ * null HSTRING is the empty string in the Windows.String projection, so it is a
+ * legal search key and not a missing argument. */
 static HRESULT WINAPI svv_IndexOf( void *iface, HSTRING item, UINT32 *index, INT32 *found )
 {
     struct str_vector *impl = svv_from( iface );
-    const WCHAR *raw;
-    HSTRING tmp;
-    BOOL owned;
     UINT32 i;
 
     if (!index || !found) return E_POINTER;
     *index = 0;
     *found = FALSE;
-    if (!item) return S_OK;
-    if (!key_decode( item, &raw, &tmp, &owned )) return S_OK;
-    for (i = 0; raw && i < impl->count; i++)
+    for (i = 0; i < impl->count; i++)
     {
-        const WCHAR *cand = WindowsGetStringRawBuffer( impl->items[i], NULL );
-        if (cand && !lstrcmpiW( raw, cand )) { *index = i; *found = TRUE; break; }
+        INT32 order = 1;
+
+        if (FAILED( WindowsCompareStringOrdinal( item, impl->items[i], &order ))) continue;
+        if (order) continue;
+        *index = i;
+        *found = TRUE;
+        return S_OK;
     }
-    key_release( tmp, owned );
     return S_OK;
 }
 static HRESULT WINAPI svv_GetMany( void *iface, UINT32 start, UINT32 size, HSTRING *items, UINT32 *count )
@@ -1059,7 +1069,8 @@ static const void *str_vector_vtbl[] =
 };
 
 /* IVectorView<T*> for interface pointers (candidates, qualifiers, maps, named resources)
- * slots identical: GetAt, Size, GetView */
+ * slots identical to the HSTRING view above: GetAt 6, Size 7, IndexOf 8,
+ * GetMany 9, and the delegated IIterable First 10 (idl:249-256). */
 struct iface_vector
 {
     const void *vt_vv;
@@ -1108,22 +1119,86 @@ static HRESULT WINAPI ivv_Size( void *iface, UINT32 *size )
     *size = ivv_from( iface )->count;
     return S_OK;
 }
-static HRESULT WINAPI ivv_GetView( void *iface, void **view )
+/* IndexOf (idl:254), slot 8.  The elements are interface pointers, and the
+ * caller may legitimately hold any face of the element (IResourceCandidate,
+ * IInspectable, a pinterface), so equality is decided on COM identity: QI
+ * (IUnknown) on both sides, which every real COM object answers with the same
+ * pointer for the same object.  A non-COM element pointer is probed under SEH
+ * and simply does not match; the caller is never faulted. */
+static HRESULT WINAPI ivv_IndexOf( void *iface, void *item, UINT32 *index, INT32 *found )
 {
+    struct iface_vector *impl = ivv_from( iface );
+    UINT32 i;
 
-    if (!view) return E_POINTER;    *view = iface;
-    incr( &ivv_from( iface )->ref );
+    if (!index || !found) return E_POINTER;
+    *index = 0;
+    *found = FALSE;
+    if (!item) return S_OK;
+    for (i = 0; i < impl->count; i++)
+    {
+        void *mine = NULL, *theirs = NULL;
+        BOOL same = (impl->items[i] == item);
+
+        if (!same)
+        {
+            __TRY
+            {
+                if (FAILED( CCW_SLOT0( impl->items[i] )( impl->items[i], &IID_IUnknown, &mine ))) mine = NULL;
+                if (FAILED( CCW_SLOT0( item )( item, &IID_IUnknown, &theirs ))) theirs = NULL;
+            }
+            __EXCEPT_ALL
+            {
+                mine = NULL;
+                theirs = NULL;
+            }
+            __ENDTRY
+            same = (mine && mine == theirs);
+        }
+        if (mine) CCW_SLOT2( mine )( mine );
+        if (theirs) CCW_SLOT2( theirs )( theirs );
+        if (same)
+        {
+            *index = i;
+            *found = TRUE;
+            return S_OK;
+        }
+    }
+    return S_OK;
+}
+
+/* GetMany (idl:255), slot 9: copy at most `size` elements starting at `start`
+ * into the caller's buffer and report the count actually written; the
+ * same-borrowed-pointer semantics as GetAt above. */
+static HRESULT WINAPI ivv_GetMany( void *iface, UINT32 start, UINT32 size, void **items, UINT32 *count )
+{
+    struct iface_vector *impl = ivv_from( iface );
+    UINT32 n;
+
+    if (!count) return E_POINTER;
+    if (size && !items) return E_POINTER;
+    n = (start < impl->count) ? impl->count - start : 0;
+    if (n > size) n = size;
+    if (items && n) memcpy( items, impl->items + start, n * sizeof(*items) );
+    *count = n;
     return S_OK;
 }
 static const void *iface_vector_vtbl[] =
 {
     ivv_QueryInterface, ivv_AddRef, ivv_Release, ivv_GetIids, ivv_GetRuntimeClassName, ivv_GetTrustLevel,
-    ivv_GetAt, ivv_Size, ivv_GetView, ivv_First,
+    ivv_GetAt, ivv_Size, ivv_IndexOf, ivv_GetMany, ivv_First,
 };
 
 /* ------------------------------------------------------------------ */
 /* IMapView<HSTRING,HSTRING> (QualifierValues)                         */
-/* slots: [II 5][Get 6][HasKey 7][Size 8][GetView 9]                   */
+/* ABI (include/windows.foundation.collections.idl:198, IMapView<K,V>  */
+/* requires IIterable<IKeyValuePair<K,V>>): [II 5][Get 6][Size 7]      */
+/* [HasKey 8][Split 9][First 10].  The order of the pair at 7/8 is     */
+/* Size then HasKey -- the idl spells the members Lookup, Size,        */
+/* HasKey, Split and the projection binds the vtable by that order, so */
+/* a swapped pair hands the caller a UINT32* where it wrote a boolean  */
+/* and a boolean where it read a count.  There is no GetView slot in   */
+/* IMapView: that member belongs to IMap (idl:218) and lives on the    */
+/* observable face, which delegates IMap, below.                       */
 /* ------------------------------------------------------------------ */
 
 struct kv_pair
@@ -1215,6 +1290,9 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
     HRESULT hr = ELEMENT_NOT_FOUND_E;
     UINT32 i;
 
+    if (!value) return E_POINTER;
+    *value = NULL;
+
     /* key_decode: HSTRING payload, else the managed-string CCW surface */
     if (!key_decode( key, &raw, &tmp, &owned )) raw = NULL; /* no key: no match, no fabrication */
     TRACE( "Lookup %s\n", debugstr_w( raw ) );
@@ -1237,9 +1315,20 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
             break;
         }
     }
-    if (FAILED( hr )) TRACE( "Lookup %s -> ELEMENT_NOT_FOUND\n", debugstr_w( raw ) );
+    if (FAILED( hr ))
+    {
+        /* ELEMENT_NOT_FOUND must still leave the [out, retval] HSTRING written.
+         * The projections do not check the code before reading the retval
+         * (C++/WinRT's find() and the .NET IDictionary adapter both materialise
+         * the value first), so an unwritten -- in practice null -- HSTRING is
+         * what the CoreRT marshaller then dereferences on the miss path.  Hand
+         * back the empty string, keep the documented failure code: the caller's
+         * branch is unchanged, its read of *value is defined. */
+        TRACE( "Lookup %s -> ELEMENT_NOT_FOUND\n", debugstr_w( raw ) );
+        if (WindowsCreateString( L"", 0, value ) != S_OK) *value = NULL;
+    }
     key_release( tmp, owned );
-    return hr; /* ELEMENT_NOT_FOUND */
+    return hr; /* ELEMENT_NOT_FOUND, retval written as the empty string */
 }
 static HRESULT WINAPI mv_HasKey( void *iface, HSTRING key, INT32 *has )
 {
@@ -1262,17 +1351,36 @@ static HRESULT WINAPI mv_Size( void *iface, UINT32 *size )
     *size = mv_from( iface )->count;
     return S_OK;
 }
+/* GetView is an IMap member (idl:218), not an IMapView member: it is reachable
+ * only through the observable face, which delegates IMap (slot 11 there), and
+ * the view it returns is this same snapshot. */
 static HRESULT WINAPI mv_GetView( void *iface, void **view )
 {
-
-    if (!view) return E_POINTER;    *view = iface;
+    if (!view) return E_POINTER;
+    *view = iface;
     incr( &mv_from( iface )->ref );
     return S_OK;
+}
+/* Split (idl:204), IMapView slot 9.  Real Windows splits the view into two
+ * halves; this view is a snapshot of the PRM qualifier set, there is no
+ * meaningful split, and nothing in the tree (module, app trace, tests) drives
+ * the slot.  Answer E_NOTIMPL with both [out] parameters written: an
+ * unimplemented member still has to satisfy the ABI's out-params, so a caller
+ * that does index it gets a defined null pair plus a failure code instead of
+ * the garbage an unwritten out-param would leave. */
+static HRESULT WINAPI mv_Split( void *iface, void **first, void **second )
+{
+    TRACE( "Split on a snapshot view: E_NOTIMPL\n" );
+    if (first) *first = NULL;
+    if (second) *second = NULL;
+    return E_NOTIMPL;
 }
 static const void *map_view_vtbl[] =
 {
     mv_QueryInterface, mv_AddRef, mv_Release, mv_GetIids, mv_GetRuntimeClassName, mv_GetTrustLevel,
-    mv_Get, mv_HasKey, mv_Size, mv_GetView, mv_First,
+    /* idl:201-205 order, then the delegated IIterable member of the requires
+     * clause; 11 slots, no GetView (see the block comment above) */
+    mv_Get, mv_Size, mv_HasKey, mv_Split, mv_First,
 };
 
 /* ------------------------------------------------------------------ */
@@ -1284,15 +1392,24 @@ static const void *map_view_vtbl[] =
 /* IInspectable quintet (build tree include/windows.foundation.         */
 /* collections.h:846-847), and that is the shape wine's only            */
 /* IObservableMap implementation uses                                   */
-/* (dlls/wintypes/propertyset.c:164-177, 8 slots total).  The delegated  */
-/* IMap members follow, ordered by the map prefix the app already        */
-/* drives on this very object (Lookup 6, HasKey 7, Size 8, GetView 9 in  */
-/* map_view_vtbl above, live-validated on Calculator), so IMap's block   */
-/* runs Lookup, HasKey, Size, GetView, Insert, Remove, Clear, then the   */
-/* IIterable First of IMap's own requires clause.  get_MapChanged has    */
-/* no ABI slot at all (widl emits no accessor for an event), so it is    */
-/* answered as the trailing slot: a caller that asks gets a live         */
-/* handler object, and no caller can index into it.                      */
+/* (dlls/wintypes/propertyset.c:164-177, 8 slots total).  The own       */
+/* members come first, the delegated interface after -- the same        */
+/* flattening the observable vector face uses on this app (add@6 lands  */
+/* there, sr15).  The delegated block is IMap, because idl:229 spells   */
+/* IObservableMap<K,V> as `requires IMap<K,V>' (not IMapView), so IMap's */
+/* members follow in idl:215-221 order: Lookup 8, Size 9, HasKey 10,    */
+/* GetView 11, Insert 12, Remove 13, Clear 14, then the IIterable First */
+/* of IMap's own requires clause at 15 -- 16 slots, indices 0..15, the  */
+/* full ABI: note Size at 9 and HasKey at 10, matching IMap's          */
+/* declaration order (the same 7/8 pair fix as map_view_vtbl above).    */
+/* get_MapChanged has no ABI slot at all (widl emits no accessor for an */
+/* event, and the real ABI ends at slot 15), so it is not in the        */
+/* delegated block: it sits past the ABI as the trailing slot 16, where */
+/* no real caller can reach it (nothing in the metadata indexes past    */
+/* First), and it exists only to hand our own per-registration handler  */
+/* face (struct map_event_reg, map_event_handler_vtbl) to a caller that */
+/* asks -- the tests are that caller.  A production caller subscribes   */
+/* through add_MapChanged and never sees this slot.                     */
 /*                                                                      */
 /* Every slot returns S_OK and no MapChanged is ever raised: the view is */
 /* a snapshot of the PRM qualifier set (see mv_Get), so there is no      */
@@ -1490,6 +1607,15 @@ static HRESULT WINAPI om_remove_MapChanged( void *iface, INT64 token )
     {
         if (map_event_token( reg ) == token)
         {
+            /* Deregister: the node leaves the list here.  omh_Release() below
+             * drops the list's reference and, at ref 0, unlinks through
+             * reg->owner; clearing the owner first used to skip that unlink and
+             * leave the list head pointing at the freed node, so the next
+             * remove_MapChanged (the adapter's Dispose removes twice) walked
+             * freed memory.  Unlink while owner is still valid, then drop the
+             * reference -- the same order the observable vector's
+             * remove_VectorChanged uses. */
+            map_event_reg_unlink( impl, reg );
             reg->linked = FALSE;
             reg->owner = NULL;
             omh_Release( &reg->vt_handler );  /* the list's reference */
@@ -1557,9 +1683,12 @@ static const void *map_view_observable_vtbl[] =
     om_QueryInterface, om_AddRef, om_Release, om_GetIids, om_GetRuntimeClassName, om_GetTrustLevel,
     /* IObservableMap<HSTRING,HSTRING> own members (widl: add 6, remove 7) */
     om_add_MapChanged, om_remove_MapChanged,
-    /* delegated IMap<HSTRING,HSTRING> members, then its delegated IIterable */
-    om_Lookup, om_HasKey, om_Size, om_GetView, om_Insert, om_Remove, om_Clear, om_First,
-    /* trailing, no ABI slot (see the layout note) */
+    /* delegated IMap<HSTRING,HSTRING> members in idl:215-221 order (Lookup 8,
+     * Size 9, HasKey 10, GetView 11, Insert 12, Remove 13, Clear 14), then the
+     * IIterable member of IMap's own requires clause at 15 */
+    om_Lookup, om_Size, om_HasKey, om_GetView, om_Insert, om_Remove, om_Clear, om_First,
+    /* past the ABI (the real vtable ends at 15): our own accessor for the
+     * per-registration handler face, see the layout note */
     om_get_MapChanged,
 };
 
@@ -1600,8 +1729,11 @@ static HRESULT WINAPI rmv_GetRuntimeClassName( void *iface, HSTRING *n )
 static HRESULT WINAPI rmv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rmv_Get( void *iface, HSTRING key, void **map )
 {
+    struct rm_map_view *impl;
 
-    if (!map) return E_POINTER;    struct rm_map_view *impl = rmv_from( iface );
+    if (!map) return E_POINTER;
+    *map = NULL;  /* the miss paths below keep the [out] retval written */
+    impl = rmv_from( iface );
     const WCHAR *raw;
     HSTRING tmp;
     BOOL owned;
@@ -1636,17 +1768,22 @@ static HRESULT WINAPI rmv_Size( void *iface, UINT32 *size )
     *size = rmv_from( iface )->count;
     return S_OK;
 }
-static HRESULT WINAPI rmv_GetView( void *iface, void **view )
+/* Split (idl:204), IMapView slot 9: same snapshot answer as mv_Split above;
+ * IMapView<HSTRING,IResourceMap*> has no GetView (that is the IMap member, and
+ * no mutable map of resource maps is exposed here). */
+static HRESULT WINAPI rmv_Split( void *iface, void **first, void **second )
 {
-
-    if (!view) return E_POINTER;    *view = iface;
-    incr( &rmv_from( iface )->ref );
-    return S_OK;
+    TRACE( "Split on a snapshot view: E_NOTIMPL\n" );
+    if (first) *first = NULL;
+    if (second) *second = NULL;
+    return E_NOTIMPL;
 }
 static const void *rm_map_view_vtbl[] =
 {
     rmv_QueryInterface, rmv_AddRef, rmv_Release, rmv_GetIids, rmv_GetRuntimeClassName, rmv_GetTrustLevel,
-    rmv_Get, rmv_HasKey, rmv_Size, rmv_GetView, rmv_First,
+    /* idl:201-205 order (Get 6, Size 7, HasKey 8, Split 9) + delegated
+     * IIterable First 10, the same IMapView layout as map_view_vtbl */
+    rmv_Get, rmv_Size, rmv_HasKey, rmv_Split, rmv_First,
 };
 
 /* ------------------------------------------------------------------ */

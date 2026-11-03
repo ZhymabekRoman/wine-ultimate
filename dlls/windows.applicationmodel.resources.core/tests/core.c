@@ -94,6 +94,7 @@ static const IID IID_IResourceContext2_loc = {0xb6d312f1, 0xbc62, 0x4208, {0xb8,
 /* vtable slot helpers; IInspectable occupies slots 0..5 (3 IUnknown + 3 extra) */
 #define VT(obj, idx) (((void ***)((char *)(obj)))[0][(idx)])
 #define CALL(obj, idx, ...) ((HRESULT (STDMETHODCALLTYPE *)(void *, ...))VT(obj, idx))((void *)(obj), __VA_ARGS__)
+#define QI_SLOT(obj, iid, out) ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(obj, 0))((void *)(obj), iid, out)
 
 static HRESULT get_factory(const WCHAR *classid, void **factory)
 {
@@ -147,8 +148,9 @@ static void test_resourcecontext_activation(void)
         if (qualmap)
         {
             UINT32 size = 0;
-            /* IMapView slots: [0..5 II][6 Get][7 HasKey][8 Size][9 GetView] */
-            hr = CALL(qualmap, 8, &size);
+            /* IMapView slots (idl:201-205 + delegated IIterable):
+             * [0..5 II][6 Get][7 Size][8 HasKey][9 Split][10 First] */
+            hr = CALL(qualmap, 7, &size);
             ok(SUCCEEDED(hr) && size > 0, "QualifierValues size=%u hr=%08x\n", size, hr);
             CALL(qualmap, 2, (ULONG*)&hr);
         }
@@ -655,11 +657,20 @@ static void test_getiids_nullargs( void )
                 hr = CALL( ctx, 6, &view );  /* GetForCurrentView */
                 if (SUCCEEDED( hr ) && view)
                 {
-                    hr = CALL( view, 11, &lang );  /* get_Languages: IVectorView<HSTRING> */
+                    hr = CALL( view, 11, &lang );  /* get_Languages: the IObservableVector<HSTRING> face */
                     if (SUCCEEDED( hr ) && lang)
                     {
-                        hr = CALL( lang, 7, NULL );  /* Size(NULL) */
-                        ok( hr == E_POINTER, "getiids: Languages Size(NULL) hr=%08x (expect E_POINTER)\n", hr );
+                        void *langs = NULL;
+                        /* the observable face is [add 6][remove 7] then the delegated
+                         * IVector block (idl:265-269), so GetView is slot 10 and the
+                         * IVectorView face it returns has its own Size at slot 7 */
+                        hr = CALL( lang, 10, &langs );
+                        if (SUCCEEDED( hr ) && langs)
+                        {
+                            hr = CALL( langs, 7, NULL );  /* IVectorView::Size(NULL) */
+                            ok( hr == E_POINTER, "getiids: IVectorView Size@7(NULL) hr=%08x (expect E_POINTER)\n", hr );
+                            CALL( langs, 2, (ULONG*)&hr );
+                        }
                         CALL( lang, 2, (ULONG*)&hr );
                     }
                     CALL( view, 2, (ULONG*)&hr );
@@ -700,7 +711,7 @@ static void test_qualifier_set( void )
         HSTRING_HEADER hdr;
         INT32 has = 0;
         WindowsCreateStringReference( core[i], (UINT32)lstrlenW( core[i] ), &hdr, &hkey );
-        hr = CALL( mv, 7, hkey, &has );  /* HasKey */
+        hr = CALL( mv, 8, hkey, &has );  /* HasKey (idl order: Get 6, Size 7, HasKey 8) */
         ok( SUCCEEDED( hr ) && has, "quals: QualifierValues has %s (has=%d hr=%08x)\n",
             wine_dbgstr_w( core[i] ), has, hr );
         WindowsDeleteString( hkey );
@@ -1075,6 +1086,7 @@ static void test_parameterized_class_names(void)
     static const WCHAR name_mapview_ss[] = L"Windows.Foundation.Collections.IMapView`2<System.String,System.String>";
     static const WCHAR name_mapview_sm[] = L"Windows.Foundation.Collections.IMapView`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>";
     static const WCHAR name_vector_s[]   = L"Windows.Foundation.Collections.IVectorView`1<System.String>";
+    static const WCHAR name_vector_observable_s[] = L"Windows.Foundation.Collections.IObservableVector`1<System.String>";
     static const WCHAR name_vector_rq[]  = L"Windows.Foundation.Collections.IVectorView`1<Windows.ApplicationModel.Resources.Core.ResourceQualifier>";
     static const WCHAR name_kvp_ss[]     = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,System.String>";
     static const WCHAR name_kvp_sm[]     = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>";
@@ -1128,13 +1140,31 @@ static void test_parameterized_class_names(void)
     ok( hr == S_OK && vec, "class names: get_Languages hr=%08x\n", hr );
     if (vec)
     {
-        check_class_name( vec, name_vector_s );
-        hr = CALL( vec, 9, &it );  /* IVectorView [GetAt 6][Size 7][GetView 8], IIterable::First 9 */
-        ok( hr == S_OK && it, "class names: Languages First hr=%08x\n", hr );
-        if (it)
+        /* the property is declared IObservableVector<string> and the face it
+         * hands out names itself as such (the loose-binding RCW parses the name
+         * to learn what it holds); the IVectorView name belongs to the read-only
+         * face GetView below returns */
+        check_class_name( vec, name_vector_observable_s );
+        /* Languages hands out the IObservableVector face: own members add 6 /
+         * remove 7, then the delegated IVector block (idl:265-269), so GetView
+         * -- an IVector member -- sits at 10, and the face it returns is the
+         * IVectorView, laid out [GetAt 6][Size 7][IndexOf 8][GetMany 9]
+         * [First 10] (idl:249-256). */
+        hr = CALL( vec, 10, &it );  /* IVector::GetView -> the IVectorView face */
+        ok( hr == S_OK && it, "class names: Languages GetView@10 hr=%08x\n", hr );
+        if (SUCCEEDED( hr ) && it)
         {
-            check_class_name( it, name_iter_s );
+            check_class_name( it, name_vector_s );
+            hr = CALL( it, 10, &pair );  /* IVectorView::First, slot 10 */
+            ok( hr == S_OK && pair, "class names: Languages First@10 hr=%08x\n", hr );
+            if (pair)
+            {
+                check_class_name( pair, name_iter_s );
+                CALL( pair, 2, &hr );
+                pair = NULL;
+            }
             CALL( it, 2, &hr );
+            it = NULL;
         }
         CALL( vec, 2, &hr );
     }
@@ -1320,7 +1350,7 @@ static void test_virtualized_hstring(void)
     /* HasKey must see the decoded key too */
     {
         INT32 has = -1;
-        hr = CALL(mv, 7, h7c, &has);  /* IMapView::HasKey */
+        hr = CALL(mv, 8, h7c, &has);  /* IMapView::HasKey, slot 8 (idl: Get 6, Size 7, HasKey 8) */
         ok(hr == S_OK && has, "virt-hstring tag7: HasKey(Language) hr=%08x has=%d\n", hr, has);
     }
 
@@ -1328,8 +1358,18 @@ static void test_virtualized_hstring(void)
      * not (null)-lookup, not a crash */
     s0c_miss.mt = NULL; s0c_miss.cch = 7; lstrcpyW(s0c_miss.chars, L"NoSuchQ");
     hmiss = (HSTRING)((char *)&s0c_miss + 7);
+    /* the miss writes the retval (a null HSTRING *is* the empty string in the
+     * Windows.String projection, combase/string.c:221: WindowsCreateString of a
+     * zero-length source yields the null handle), so the sentinel shows whether
+     * the callee touched the [out] parameter at all */
+    hval = (HSTRING)0x1;
     hr = CALL(mv, 6, hmiss, &hval);
     ok(hr == ELEMENT_NOT_FOUND_HR, "virt-hstring tag7: Get(NoSuchQual) hr=%08x (expect ELEMENT_NOT_FOUND)\n", hr);
+    ok(hval != (HSTRING)0x1, "virt-hstring tag7: Get(NoSuchQual) left the retval unwritten (%p)\n", (void *)hval);
+    ok(WindowsGetStringLen(hval) == 0, "virt-hstring tag7: Get(NoSuchQual) retval length %u, want the empty string\n",
+       WindowsGetStringLen(hval));
+    if (hval && hval != (HSTRING)0x1) WindowsDeleteString(hval);
+    hval = NULL;
 
     /* the same blind spot on IResourceMap::GetValue (map_lookup path):
      * ResourceManager.Current -> MainResourceMap -> GetValue(Calculator|tag7) */
@@ -1615,16 +1655,21 @@ static void test_ccw_string_key( void )
 
     /* HasKey sees the same key */
     has = -1;
-    hr = CALL( mv, 7, (HSTRING)&ccw_lang, &has );
+    hr = CALL( mv, 8, (HSTRING)&ccw_lang, &has );  /* HasKey, slot 8 */
     ok( hr == S_OK && has, "ccw-key: QualifierValues HasKey(CCW \"Language\") hr=%08x has=%d\n", hr, has );
 
-    /* a CCW naming an absent qualifier must not manufacture a hit */
-    hval = NULL;
+    /* a CCW naming an absent qualifier must not manufacture a hit; the sentinel
+     * under the call shows whether the miss path writes the [out] retval at all
+     * (a null HSTRING is the empty string, so it is a legal written value) */
+    hval = (HSTRING)0x1;
     hr = CALL( mv, 6, (HSTRING)&ccw_absent, &hval );
     ok( hr == ELEMENT_NOT_FOUND_HR, "ccw-key: Get(CCW \"NoSuchQualifier\") hr=%08x (expect ELEMENT_NOT_FOUND)\n", hr );
-    if (hval) WindowsDeleteString( hval );
+    ok( hval != (HSTRING)0x1, "ccw-key: miss left the retval unwritten (sentinel %p)\n", (void *)hval );
+    ok( WindowsGetStringLen( hval ) == 0, "ccw-key: miss retval length %u, want the empty string\n", WindowsGetStringLen( hval ) );
+    if (hval && hval != (HSTRING)0x1) WindowsDeleteString( hval );
+    hval = NULL;
     has = -1;
-    hr = CALL( mv, 7, (HSTRING)&ccw_absent, &has );
+    hr = CALL( mv, 8, (HSTRING)&ccw_absent, &has );  /* HasKey, slot 8 */
     ok( hr == S_OK && !has, "ccw-key: HasKey(CCW \"NoSuchQualifier\") hr=%08x has=%d\n", hr, has );
 
     /* the IReference`1<String> pinterface surface (get_Value, slot 6) */
@@ -1639,24 +1684,32 @@ static void test_ccw_string_key( void )
     }
 
     /* a COM object that answers no key surface: no hit, no crash */
-    hval = NULL;
+    hval = (HSTRING)0x1;
     hr = CALL( mv, 6, (HSTRING)&ccw_plain, &hval );
     ok( hr == ELEMENT_NOT_FOUND_HR, "ccw-key: Get(plain CCW) hr=%08x (expect ELEMENT_NOT_FOUND)\n", hr );
-    if (hval) WindowsDeleteString( hval );
+    ok( hval != (HSTRING)0x1, "ccw-key: plain-CCW miss left the retval unwritten (sentinel %p)\n", (void *)hval );
+    ok( WindowsGetStringLen( hval ) == 0, "ccw-key: plain-CCW miss retval length %u, want the empty string\n",
+        WindowsGetStringLen( hval ) );
+    if (hval && hval != (HSTRING)0x1) WindowsDeleteString( hval );
+    hval = NULL;
     has = -1;
-    hr = CALL( mv, 7, (HSTRING)&ccw_plain, &has );
+    hr = CALL( mv, 8, (HSTRING)&ccw_plain, &has );  /* HasKey, slot 8 */
     ok( hr == S_OK && !has, "ccw-key: HasKey(plain CCW) hr=%08x has=%d\n", hr, has );
 
     /* not a COM pointer at all: the QI must be SEH-guarded, the process must
      * survive and the answer stay ELEMENT_NOT_FOUND */
-    hval = NULL;
+    hval = (HSTRING)0x1;
     hr = CALL( mv, 6, (HSTRING)&ccw_junk, &hval );
     ok( hr == ELEMENT_NOT_FOUND_HR, "ccw-key: Get(non-Ccw pointer) hr=%08x (expect ELEMENT_NOT_FOUND)\n", hr );
-    if (hval) WindowsDeleteString( hval );
+    ok( hval != (HSTRING)0x1, "ccw-key: non-Ccw miss left the retval unwritten (sentinel %p)\n", (void *)hval );
+    ok( WindowsGetStringLen( hval ) == 0, "ccw-key: non-Ccw miss retval length %u, want the empty string\n",
+        WindowsGetStringLen( hval ) );
+    if (hval && hval != (HSTRING)0x1) WindowsDeleteString( hval );
+    hval = NULL;
     has = -1;
-    hr = CALL( mv, 7, (HSTRING)&ccw_junk, &has );
+    hr = CALL( mv, 8, (HSTRING)&ccw_junk, &has );  /* HasKey, slot 8 */
     ok( hr == S_OK && !has, "ccw-key: HasKey(non-Ccw pointer) hr=%08x has=%d\n", hr, has );
-    hr = CALL( mv, 8, &has );  /* the map is still intact after the AV probes */
+    hr = CALL( mv, 7, &has );  /* Size, slot 7: the map is still intact after the AV probes */
     ok( SUCCEEDED( hr ) && has > 0, "ccw-key: QualifierValues Size after AV probes hr=%08x size=%d\n", hr, has );
 
     /* IResourceMap::GetValue takes the same key shape (MainResourceMap) */
@@ -1830,12 +1883,357 @@ static void *obs_delegate = obs_delegate_vtbl;
  * then remove_MapChanged directly after IInspectable (build tree
  * include/windows.foundation.collections.h:846-847), the same two slots
  * wine's only IObservableMap implementation uses
- * (dlls/wintypes/propertyset.c:164-177).  The delegated IMap members follow,
- * in the live-validated map order (Lookup, HasKey, Size, GetView, per the
- * IMapView slots the app already drives at 6..9).  WinRT events expose no
- * get_ accessor in the ABI, so get_MapChanged is answered at the trailing
- * slot only.
+ * (dlls/wintypes/propertyset.c:164-177).  The delegated block is IMap, because
+ * include/windows.foundation.collections.idl:229 spells IObservableMap<K,V> as
+ * `requires IMap<K,V>', and its members follow in the idl:215-221 order:
+ * Lookup 8, Size 9, HasKey 10, GetView 11, Insert 12, Remove 13, Clear 14,
+ * then the IIterable member of IMap's own requires clause at 15.  WinRT events
+ * expose no get_ accessor in the ABI, so get_MapChanged sits past that block
+ * (slot 16, unreachable for a caller that follows the metadata) and is pinned
+ * by test_collections_abi_slots as the module's own accessor, not a slot.
  */
+
+/* -------------------------------------------------------------------- */
+/* Collections ABI slot probes: the layout the projections bind.         */
+/*                                                                       */
+/* Every expectation here is the member order of this tree's metadata    */
+/* source, include/windows.foundation.collections.idl, read the way widl */
+/* flattens it -- the interface's own members, then the block of its     */
+/* `requires' clause:                                                    */
+/*                                                                       */
+/*   IMapView<K,V>       idl:198-206, requires IIterable<KVP>:           */
+/*     [II 5][Get 6][Size 7][HasKey 8][Split 9][First 10]                */
+/*   IVectorView<T>      idl:249-256, requires IIterable<T>:             */
+/*     [II 5][GetAt 6][Size 7][IndexOf 8][GetMany 9][First 10]           */
+/*   IObservableMap<K,V> idl:228-234, requires IMap<K,V> (idl:212-222):  */
+/*     [II 5][add 6][remove 7][Lookup 8][Size 9][HasKey 10][GetView 11]  */
+/*     [Insert 12][Remove 13][Clear 14][First 15]                        */
+/*                                                                       */
+/* Why the position of a member is a correctness question and not a      */
+/* style one: the caller has no name to look up, it indexes.  Bind Size   */
+/* and HasKey the other way round and the projection writes an INT32     */
+/* boolean through a UINT32* and reads a count as a pointer; answer      */
+/* GetView where the projection calls Split (idl:204 spells Split for    */
+/* IMapView, GetView is the IMap member at idl:218) and it receives one  */
+/* self-AddRef'd pointer where it unwraps two half-maps.  Both shapes    */
+/* were live in this module before this test existed.                    */
+/*                                                                       */
+/* The last probe pins the retval rule: ELEMENT_NOT_FOUND is a code, not */
+/* an excuse to leave the [out, retval] HSTRING unwritten -- the .NET     */
+/* Native / C++/WinRT adapters materialise the value before they branch  */
+/* on the code, so a null retval on the miss path is a null the caller   */
+/* dereferences.                                                        */
+/* -------------------------------------------------------------------- */
+
+static const WCHAR *elems_vectorview_s[] = { L"Windows.Foundation.Collections.IVectorView`1",
+                                             L"Windows.Foundation.String" };
+static const WCHAR *elems_obsm_abi[] = { L"Windows.Foundation.Collections.IObservableMap`2",
+                                         L"Windows.Foundation.String", L"Windows.Foundation.String" };
+
+static void test_collections_abi_slots( void )
+{
+    static const WCHAR name_vv_s[] = L"Windows.Foundation.Collections.IVectorView`1<System.String>";
+    /* published instance IID of IVectorView<string>: the literal the Calculator
+     * MRT engine QIs on the Languages object (observed in the +resources trace:
+     * ov_QueryInterface languages QI {2f13c006-a03a-5f69-b090-75a43e33423e}) */
+    static const GUID iid_vv_s_published = {0x2f13c006, 0xa03a, 0x5f69, {0xb0, 0x90, 0x75, 0xa4, 0x3e, 0x33, 0x42, 0x3e}};
+    void *factory = NULL, *statics = NULL, *ctx = NULL, *mv = NULL, *lang = NULL, *vv = NULL;
+    void *rmfactory = NULL, *rms = NULL, *rm = NULL, *rm2 = NULL, *rmaps = NULL;
+    void *map = NULL, *cand = NULL, *cand2 = NULL, *quals = NULL, *q0 = NULL;
+    void *om = NULL, *view = NULL, *it = NULL, *pair = NULL;
+    HSTRING gbuf[4];
+    HSTRING hlang = NULL, habsent = NULL, hval = NULL, hkey = NULL, hitem = NULL, hres = NULL;
+    HSTRING_HEADER hdr, hdr2, hdr3;  /* one per live reference: reusing a header rewrites the referenced string */
+    UINT32 size = 0xdead, osize = 0, vsize = 0, qsize = 0, idx = 0xdead, got = 0xdead, qgot = 0xdead, len = 0xdead;
+    INT32 has = -1, found = -1, qfound = -1, replaced = -1;
+    GUID iid_vv, iid_obsm;
+    void *first = (void *)0x1, *second = (void *)0x1;
+    unsigned int i;
+    HRESULT hr;
+
+    set_pri_env();
+    for (i = 0; i < ARRAYSIZE( gbuf ); i++) gbuf[i] = NULL;
+
+    /* ---------------- IMapView<HSTRING,HSTRING> (QualifierValues) ---------------- */
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "abi: ResourceContext factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = QI_SLOT( factory, &IID_IResourceContextStatics2_loc, &statics );
+    if (FAILED( hr )) goto done;
+    hr = CALL( statics, 6, &ctx );            /* GetForCurrentView */
+    if (FAILED( hr ) || !ctx) goto done;
+    hr = CALL( ctx, 6, &mv );                 /* get_QualifierValues */
+    ok( hr == S_OK && mv, "abi: get_QualifierValues hr=%08x\n", hr );
+    if (FAILED( hr ) || !mv) goto done;
+
+    size = 0;
+    hr = CALL( mv, 7, &size );                /* Size, slot 7 */
+    ok( hr == S_OK && size > 0, "abi: QualifierValues Size@7 hr=%08x size=%u\n", hr, size );
+    osize = size;
+
+    WindowsCreateStringReference( L"Language", 8, &hdr, &hlang );
+    WindowsCreateStringReference( L"NoSuchQualifier", 15, &hdr2, &habsent );
+
+    has = -1;
+    hr = CALL( mv, 8, hlang, &has );          /* HasKey, slot 8 */
+    ok( hr == S_OK && has, "abi: QualifierValues HasKey@8(Language) hr=%08x has=%d\n", hr, has );
+    has = -1;
+    hr = CALL( mv, 8, habsent, &has );
+    ok( hr == S_OK && !has, "abi: QualifierValues HasKey@8(absent) hr=%08x has=%d\n", hr, has );
+
+    first = second = (void *)0x1;
+    hr = CALL( mv, 9, &first, &second );      /* Split, slot 9 */
+    ok( hr == E_NOTIMPL && !first && !second,
+        "abi: QualifierValues Split@9 hr=%08x first=%p second=%p (want E_NOTIMPL and both out-params written null)\n",
+        hr, first, second );
+
+    it = NULL;
+    hr = CALL( mv, 10, &it );                 /* IIterable::First, slot 10 */
+    ok( hr == S_OK && it, "abi: QualifierValues First@10 hr=%08x\n", hr );
+    if (it) CALL( it, 2, (ULONG *)&hr );
+
+    /* the miss path: code ELEMENT_NOT_FOUND, retval written (empty) */
+    hval = (HSTRING)0x1;
+    hr = CALL( mv, 6, habsent, &hval );       /* Get, slot 6 */
+    ok( hr == ELEMENT_NOT_FOUND_HR, "abi: QualifierValues Get@6(absent) hr=%08x (want ELEMENT_NOT_FOUND)\n", hr );
+    ok( hval != (HSTRING)0x1, "abi: ELEMENT_NOT_FOUND left the retval unwritten (sentinel %p)\n", (void *)hval );
+    /* the written value is the empty string: combase/string.c:221 represents a
+     * zero-length source as the null handle, which is the empty HSTRING */
+    len = WindowsGetStringLen( hval );
+    ok( len == 0, "abi: not-found retval length=%u, want 0 (the empty string)\n", len );
+    if (hval && hval != (HSTRING)0x1) WindowsDeleteString( hval );
+    hval = NULL;
+
+    /* ---------------- IObservableMap (delegates IMap at 8..15) ---------------- */
+    hr = RoGetParameterizedTypeInstanceIID( 3, elems_obsm_abi, NULL, &iid_obsm, NULL );
+    ok( hr == S_OK, "abi: PIID(IObservableMap<string,string>) hr=%08x\n", hr );
+    if (SUCCEEDED( hr ))
+    {
+        hr = QI_SLOT( mv, &iid_obsm, &om );
+        ok( hr == S_OK && om, "abi: QI(IObservableMap) hr=%08x obj=%p\n", hr, om );
+        if (om)
+        {
+            hval = NULL;
+            hr = CALL( om, 8, hlang, &hval );       /* Lookup, slot 8 */
+            ok( hr == S_OK && hval, "abi: observable Lookup@8(Language) hr=%08x\n", hr );
+            if (hval) WindowsDeleteString( hval );
+            hval = NULL;
+
+            size = 0;
+            hr = CALL( om, 9, &size );              /* Size, slot 9 */
+            ok( hr == S_OK && size == osize, "abi: observable Size@9 hr=%08x size=%u map size=%u\n", hr, size, osize );
+
+            has = -1;
+            hr = CALL( om, 10, hlang, &has );       /* HasKey, slot 10 */
+            ok( hr == S_OK && has, "abi: observable HasKey@10(Language) hr=%08x has=%d\n", hr, has );
+
+            view = NULL;
+            hr = CALL( om, 11, &view );             /* GetView, slot 11 (an IMap member, idl:218) */
+            ok( hr == S_OK && view, "abi: observable GetView@11 hr=%08x view=%p\n", hr, view );
+            if (view)
+            {
+                vsize = 0;
+                hr = CALL( view, 7, &vsize );       /* the view is an IMapView: Size at 7 */
+                ok( hr == S_OK && vsize == osize, "abi: GetView@11 view Size@7 hr=%08x size=%u want %u\n", hr, vsize, osize );
+                CALL( view, 2, (ULONG *)&hr );
+            }
+            replaced = -1;
+            hr = CALL( om, 12, hlang, hlang, &replaced );  /* Insert, slot 12 (snapshot: accepted, no-op) */
+            ok( hr == S_OK, "abi: observable Insert@12 hr=%08x\n", hr );
+            hr = CALL( om, 13, hlang );             /* Remove, slot 13 */
+            ok( hr == S_OK, "abi: observable Remove@13 hr=%08x\n", hr );
+            hr = CALL( om, 14, 0 );                 /* Clear, slot 14 */
+            ok( hr == S_OK, "abi: observable Clear@14 hr=%08x\n", hr );
+            it = NULL;
+            hr = CALL( om, 15, &it );               /* IMap's delegated IIterable::First, slot 15 */
+            ok( hr == S_OK && it, "abi: observable First@15 hr=%08x\n", hr );
+            if (it) CALL( it, 2, (ULONG *)&hr );
+        }
+    }
+
+    /* ---------------- IVectorView<HSTRING> (Languages) ---------------- */
+    hr = CALL( ctx, 11, &lang );                    /* get_Languages: IObservableVector face */
+    ok( hr == S_OK && lang, "abi: get_Languages hr=%08x\n", hr );
+    if (SUCCEEDED( hr ) && lang)
+    {
+        size = 0;
+        hr = CALL( lang, 9, &size );                /* observable vector Size, slot 9 */
+        ok( hr == S_OK && size >= 1, "abi: Languages Size@9 hr=%08x size=%u\n", hr, size );
+        osize = size;
+
+        hr = RoGetParameterizedTypeInstanceIID( 2, elems_vectorview_s, NULL, &iid_vv, NULL );
+        ok( hr == S_OK, "abi: PIID(IVectorView<string>) hr=%08x\n", hr );
+        if (SUCCEEDED( hr ))
+        {
+            ok( IsEqualGUID( &iid_vv, &iid_vv_s_published ), "abi: computed IVectorView<string> PIID %s, published %s\n",
+                wine_dbgstr_guid( &iid_vv ), wine_dbgstr_guid( &iid_vv_s_published ) );
+            vv = NULL;
+            hr = QI_SLOT( lang, &iid_vv, &vv );
+            ok( hr == S_OK && vv, "abi: QI(IVectorView<string>) hr=%08x obj=%p\n", hr, vv );
+            if (vv)
+            {
+                check_class_name( vv, name_vv_s );
+
+                size = 0;
+                hr = CALL( vv, 7, &size );          /* Size, slot 7 */
+                ok( hr == S_OK && size == osize, "abi: IVectorView<string> Size@7 hr=%08x size=%u want %u\n", hr, size, osize );
+
+                hitem = NULL;
+                hr = CALL( vv, 6, 0, &hitem );      /* GetAt, slot 6 (borrowed, not released) */
+                ok( hr == S_OK && hitem, "abi: IVectorView<string> GetAt@6(0) hr=%08x\n", hr );
+
+                idx = 0xdead;
+                found = -1;
+                hr = CALL( vv, 8, hitem, &idx, &found );   /* IndexOf, slot 8 */
+                ok( hr == S_OK && found && idx == 0, "abi: IndexOf@8(item 0) hr=%08x idx=%u found=%d\n", hr, idx, found );
+
+                got = 0xdead;
+                gbuf[0] = gbuf[1] = NULL;
+                hr = CALL( vv, 9, 0, 2, gbuf, &got );      /* GetMany, slot 9 */
+                ok( hr == S_OK && got == (osize > 2 ? 2 : osize) && gbuf[0] == hitem,
+                    "abi: GetMany@9(0,2) hr=%08x got=%u want %u first=%p item=%p\n",
+                    hr, got, (osize > 2 ? 2u : osize), gbuf[0], hitem );
+
+                it = NULL;
+                hr = CALL( vv, 10, &it );           /* IIterable::First, slot 10 */
+                ok( hr == S_OK && it, "abi: IVectorView<string> First@10 hr=%08x\n", hr );
+                if (it) CALL( it, 2, (ULONG *)&hr );
+            }
+        }
+        CALL( lang, 2, (ULONG *)&hr );
+        lang = NULL;
+    }
+
+    /* ---------------- IMapView<HSTRING,IResourceMap*> + IVectorView<T*> ---------------- */
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceManager", &rmfactory );
+    ok( hr == S_OK, "abi: ResourceManager factory hr=%08x\n", hr );
+    if (FAILED( hr )) goto done;
+    hr = QI_SLOT( rmfactory, &IID_IResourceManagerStatics_loc, &rms );
+    if (FAILED( hr )) goto done;
+    hr = CALL( rms, 6, &rm );                       /* get_Current */
+    if (FAILED( hr ) || !rm) goto done;
+    hr = QI_SLOT( rm, &IID_IResourceManager_loc, &rm2 );
+    if (FAILED( hr ) || !rm2) goto done;
+
+    hr = CALL( rm2, 7, &rmaps );                    /* get_AllResourceMaps */
+    ok( hr == S_OK && rmaps, "abi: get_AllResourceMaps hr=%08x\n", hr );
+    if (SUCCEEDED( hr ) && rmaps)
+    {
+        size = 0;
+        hr = CALL( rmaps, 7, &size );               /* Size, slot 7 */
+        ok( hr == S_OK && size > 0, "abi: AllResourceMaps Size@7 hr=%08x size=%u\n", hr, size );
+        first = second = (void *)0x1;
+        hr = CALL( rmaps, 9, &first, &second );     /* Split, slot 9 */
+        ok( hr == E_NOTIMPL && !first && !second, "abi: AllResourceMaps Split@9 hr=%08x first=%p second=%p\n", hr, first, second );
+        it = NULL;
+        hr = CALL( rmaps, 10, &it );                /* First, slot 10 */
+        ok( hr == S_OK && it, "abi: AllResourceMaps First@10 hr=%08x\n", hr );
+        if (it)
+        {
+            has = 0;
+            hr = CALL( it, 6, &has );
+            ok( hr == S_OK && has, "abi: AllResourceMaps MoveNext hr=%08x has=%d\n", hr, has );
+            pair = NULL;
+            hr = CALL( it, 7, &pair );
+            if (SUCCEEDED( hr ) && pair)
+            {
+                hkey = NULL;
+                hr = CALL( pair, 6, &hkey );        /* IKeyValuePair::Key */
+                ok( hr == S_OK && hkey, "abi: pair Key hr=%08x\n", hr );
+                if (SUCCEEDED( hr ) && hkey)
+                {
+                    has = -1;
+                    hr = CALL( rmaps, 8, hkey, &has );  /* HasKey, slot 8 */
+                    ok( hr == S_OK && has, "abi: AllResourceMaps HasKey@8(the key First yielded) hr=%08x has=%d\n", hr, has );
+                    WindowsDeleteString( hkey );
+                    hkey = NULL;
+                }
+                CALL( pair, 2, (ULONG *)&hr );
+            }
+            CALL( it, 2, (ULONG *)&hr );
+            it = NULL;
+        }
+        CALL( rmaps, 2, (ULONG *)&hr );
+        rmaps = NULL;
+    }
+
+    hr = CALL( rm2, 6, &map );                      /* get_MainResourceMap */
+    if (SUCCEEDED( hr ) && map)
+    {
+        WindowsCreateStringReference( L"Calculator", 10, &hdr3, &hres );
+        cand = NULL;
+        hr = CALL( map, 7, hres, &cand );           /* IResourceMap::GetValue */
+        ok( SUCCEEDED( hr ) && cand, "abi: GetValue(Calculator) hr=%08x\n", hr );
+        if (SUCCEEDED( hr ) && cand)
+        {
+            hr = QI_SLOT( cand, &IID_IResourceCandidate_loc, &cand2 );
+            if (SUCCEEDED( hr ))
+            {
+                hr = CALL( cand2, 6, &quals );      /* get_Qualifiers: IVectorView<ResourceQualifier> */
+                ok( hr == S_OK && quals, "abi: get_Qualifiers hr=%08x\n", hr );
+                if (SUCCEEDED( hr ) && quals)
+                {
+                    qsize = 0;
+                    hr = CALL( quals, 7, &qsize );  /* Size, slot 7 */
+                    ok( hr == S_OK && qsize > 0, "abi: Qualifiers Size@7 hr=%08x size=%u\n", hr, qsize );
+
+                    q0 = NULL;
+                    hr = CALL( quals, 6, 0, &q0 );  /* GetAt, slot 6 (borrowed) */
+                    ok( hr == S_OK && q0, "abi: Qualifiers GetAt@6(0) hr=%08x\n", hr );
+
+                    idx = 0xdead;
+                    qfound = -1;
+                    hr = CALL( quals, 8, q0, &idx, &qfound );   /* IndexOf, slot 8 */
+                    ok( hr == S_OK && qfound && idx == 0, "abi: Qualifiers IndexOf@8(element 0) hr=%08x idx=%u found=%d\n",
+                        hr, idx, qfound );
+
+                    idx = 0xdead;
+                    qfound = -1;
+                    hr = CALL( quals, 8, &obs_delegate, &idx, &qfound );  /* not an element: no hit, no fault */
+                    ok( hr == S_OK && !qfound, "abi: Qualifiers IndexOf@8(foreign object) hr=%08x found=%d\n", hr, qfound );
+
+                    qgot = 0xdead;
+                    gbuf[0] = gbuf[1] = NULL;
+                    hr = CALL( quals, 9, 0, 2, gbuf, &qgot );  /* GetMany, slot 9 */
+                    ok( hr == S_OK && qgot == (qsize > 2 ? 2 : qsize) && gbuf[0] == q0,
+                        "abi: Qualifiers GetMany@9(0,2) hr=%08x got=%u want %u first=%p elem=%p\n",
+                        hr, qgot, (qsize > 2 ? 2u : qsize), gbuf[0], q0 );
+
+                    it = NULL;
+                    hr = CALL( quals, 10, &it );    /* IIterable::First, slot 10 */
+                    ok( hr == S_OK && it, "abi: Qualifiers First@10 hr=%08x\n", hr );
+                    if (it) CALL( it, 2, (ULONG *)&hr );
+                    CALL( quals, 2, (ULONG *)&hr );
+                    quals = NULL;
+                }
+                CALL( cand2, 2, (ULONG *)&hr );
+            }
+            CALL( cand, 2, (ULONG *)&hr );
+        }
+        CALL( map, 2, (ULONG *)&hr );
+        map = NULL;
+    }
+
+done:
+    if (hval && hval != (HSTRING)0x1) WindowsDeleteString( hval );
+    if (om) CALL( om, 2, (ULONG *)&hr );
+    if (mv) CALL( mv, 2, (ULONG *)&hr );
+    if (vv) CALL( vv, 2, (ULONG *)&hr );
+    if (lang) CALL( lang, 2, (ULONG *)&hr );
+    if (quals) CALL( quals, 2, (ULONG *)&hr );
+    if (map) CALL( map, 2, (ULONG *)&hr );
+    if (cand2) CALL( cand2, 2, (ULONG *)&hr );
+    if (cand) CALL( cand, 2, (ULONG *)&hr );
+    if (rmaps) CALL( rmaps, 2, (ULONG *)&hr );
+    if (rm2) CALL( rm2, 2, (ULONG *)&hr );
+    if (rm) CALL( rm, 2, (ULONG *)&hr );
+    if (rms) CALL( rms, 2, (ULONG *)&hr );
+    if (rmfactory) CALL( rmfactory, 2, (ULONG *)&hr );
+    if (ctx) CALL( ctx, 2, (ULONG *)&hr );
+    if (statics) CALL( statics, 2, (ULONG *)&hr );
+    if (factory) CALL( factory, 2, (ULONG *)&hr );
+}
+
 static void test_observable_map( void )
 {
     static const WCHAR *elems_obsm[] = { L"Windows.Foundation.Collections.IObservableMap`2",
@@ -2223,6 +2621,7 @@ START_TEST(core)
     test_memorymanager_activation();
     test_observable_map();
     test_delegate_event_registration();
+    test_collections_abi_slots();
 
     RoUninitialize();
 }
