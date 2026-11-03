@@ -17,6 +17,9 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <stdlib.h>
+#include <string.h>
+
 #include "private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
@@ -40,7 +43,31 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
  * A NULL window in SetWindow is accepted (S_OK) and leaves the window-unset state, which is what
  * the unpackaged path has always passed when it could not create a CoreWindow; the view's Run
  * keeps its GetMessage fallback for that case.
+ *
+ * The builtins enforce this contract ONLY under WINE_XAML_STRICT_LIFECYCLE (set, not "0");
+ * the default is the pre-WP1.11 permissive accept. Live bisect: the unpackaged WinUI3 client
+ * (WhatsApp Desktop) activates and pumps the view across threads, and these refusals — our
+ * invention for builtins, native XAML enforces through its own private paths, not this public
+ * IFrameworkView — regressed it, blocking managed init before the WebView2 browser spawns.
+ * The owner_tid and state recording stay live in both modes; permissive mode only TRACEs the
+ * would-be violation and accepts. The mirror of this line is the WP1.11 contract block in
+ * dlls/twinapi.appcore/core_application.c (twinapi's broker step is unaffected: bisect
+ * exonerated it; its E_APPLICATION_VIEW_EXITING passthrough only fires in a brokered run).
  */
+
+/* The mode latches on first use (one getenv per process); the env must be set in the process
+ * environment before the first framework-view call, exactly like WINE_UWP_BROKERS. */
+static BOOL strict_lifecycle_enabled( void )
+{
+    static int cached = -1;   /* latched on the first call: -1 unknown, 0 permissive, 1 strict */
+
+    if (cached == -1)
+    {
+        const char *v = getenv( "WINE_XAML_STRICT_LIFECYCLE" );
+        cached = v && strcmp( v, "0" ) != 0;
+    }
+    return cached;
+}
 enum view_state
 {
     VIEW_STATE_CREATED = 0,
@@ -140,18 +167,29 @@ static HRESULT WINAPI view_SetWindow( IFrameworkView *iface, ICoreWindow *window
 {
     struct framework_view *impl = impl_from_IFrameworkView( iface );
 
+    BOOL strict = strict_lifecycle_enabled();
+
     TRACE( "iface %p, window %p, state %u.\n", iface, window, impl->state );
 
     if (impl->state == VIEW_STATE_EXITING)
     {
-        WARN( "view is exiting, returning E_APPLICATION_VIEW_EXITING.\n" );
-        return E_APPLICATION_VIEW_EXITING;
+        if (strict)
+        {
+            WARN( "view is exiting, returning E_APPLICATION_VIEW_EXITING.\n" );
+            return E_APPLICATION_VIEW_EXITING;
+        }
+        TRACE( "lifecycle: SetWindow after Uninitialize (strict=off, accepted).\n" );
     }
     if (impl->owner_tid && impl->owner_tid != GetCurrentThreadId())
     {
-        WARN( "SetWindow on tid %lu, owner tid is %lu, returning RPC_E_WRONG_THREAD.\n",
-              GetCurrentThreadId(), impl->owner_tid );
-        return RPC_E_WRONG_THREAD;
+        if (strict)
+        {
+            WARN( "SetWindow on tid %lu, owner tid is %lu, returning RPC_E_WRONG_THREAD.\n",
+                  GetCurrentThreadId(), impl->owner_tid );
+            return RPC_E_WRONG_THREAD;
+        }
+        TRACE( "lifecycle: SetWindow from foreign tid %lu, owner tid %lu (strict=off, accepted).\n",
+               GetCurrentThreadId(), impl->owner_tid );
     }
     if (impl->window == window)
         return S_OK;   /* idempotent: configuring the same window again is fine */
@@ -160,9 +198,14 @@ static HRESULT WINAPI view_SetWindow( IFrameworkView *iface, ICoreWindow *window
         /* The window is configured exactly once. A second, different window is what Windows'
          * ConfigureCoreWindow answers E_UNEXPECTED for; the real XAML framework fail-fasts when
          * that value reaches it, so the app must never see a second window accepted. */
-        WARN( "view already has window %p, refusing window %p, returning E_UNEXPECTED.\n",
-              impl->window, window );
-        return E_UNEXPECTED;
+        if (strict)
+        {
+            WARN( "view already has window %p, refusing window %p, returning E_UNEXPECTED.\n",
+                  impl->window, window );
+            return E_UNEXPECTED;
+        }
+        TRACE( "lifecycle: SetWindow replaces window %p with %p (strict=off, accepted).\n",
+               impl->window, window );
     }
     if (impl->window) ICoreWindow_Release( impl->window );
     impl->window = window;
@@ -175,17 +218,27 @@ static HRESULT WINAPI view_Load( IFrameworkView *iface, HSTRING entry_point )
 {
     struct framework_view *impl = impl_from_IFrameworkView( iface );
 
+    BOOL strict = strict_lifecycle_enabled();
+
     TRACE( "iface %p, entry_point %s, state %u.\n", iface, debugstr_hstring( entry_point ), impl->state );
 
     if (impl->state == VIEW_STATE_EXITING)
     {
-        WARN( "view is exiting, returning E_APPLICATION_VIEW_EXITING.\n" );
-        return E_APPLICATION_VIEW_EXITING;
+        if (strict)
+        {
+            WARN( "view is exiting, returning E_APPLICATION_VIEW_EXITING.\n" );
+            return E_APPLICATION_VIEW_EXITING;
+        }
+        TRACE( "lifecycle: Load after Uninitialize (strict=off, accepted).\n" );
     }
-    if (impl->state < VIEW_STATE_WINDOW_SET)
+    else if (impl->state < VIEW_STATE_WINDOW_SET)
     {
-        WARN( "Load before SetWindow, returning E_UNEXPECTED.\n" );
-        return E_UNEXPECTED;
+        if (strict)
+        {
+            WARN( "Load before SetWindow, returning E_UNEXPECTED.\n" );
+            return E_UNEXPECTED;
+        }
+        TRACE( "lifecycle: Load before SetWindow (strict=off, accepted).\n" );
     }
     impl->state = VIEW_STATE_LOADED;   /* Load twice is S_OK; the state stays LOADED */
     return S_OK;

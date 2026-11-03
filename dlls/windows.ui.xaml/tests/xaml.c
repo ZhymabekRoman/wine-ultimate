@@ -18,6 +18,8 @@
 #define COBJMACROS
 #include "initguid.h"
 #include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -119,7 +121,27 @@ static void test_Application(void)
  * the framework view CoreApplication::Run drives (real XAML answers this QI E_NOINTERFACE, so the
  * checks are the broken-on-Windows case). A minimal CoreWindow stand-in is enough: the view stores
  * the pointer and keeps a reference, nothing else calls into it.
+ *
+ * The strict refusals are opt-in on the builtin (WINE_XAML_STRICT_LIFECYCLE, live bisect: the
+ * unpackaged WinUI3 client activates and pumps across threads, and refusing that pattern
+ * regressed it; the builtin defaults to the pre-WP1.11 permissive accept). The builtin latches the
+ * environment on first use, so a single test process runs in exactly one mode and the assertions
+ * below match the mode of the current environment: with WINE_XAML_STRICT_LIFECYCLE set they assert
+ * the strict refusals, unset they assert the permissive accepts. Run the suite both ways to cover
+ * both shapes; SetEnvironmentVariableA inside the test cannot flip a latched mode mid-process, so
+ * the mode is chosen by the environment of the test run, not by the test.
  */
+static BOOL strict_mode( void )
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        const char *v = getenv( "WINE_XAML_STRICT_LIFECYCLE" );
+        cached = v && strcmp( v, "0" ) != 0;
+    }
+    return cached;
+}
 
 struct fake_window
 {
@@ -212,7 +234,10 @@ static void test_View_SetWindow( IFrameworkViewSource *source )
     ok( hr == S_OK, "SetWindow(w1) again got hr %#lx, expected S_OK.\n", hr );
 
     hr = IFrameworkView_SetWindow( view, &w2.ICoreWindow_iface );
-    ok( hr == E_UNEXPECTED, "SetWindow(w2) got hr %#lx, expected E_UNEXPECTED.\n", hr );
+    if (strict_mode())
+        ok( hr == E_UNEXPECTED, "SetWindow(w2) got hr %#lx, expected E_UNEXPECTED.\n", hr );
+    else
+        ok( hr == S_OK, "SetWindow(w2) got hr %#lx, expected S_OK (strict=off, second window accepted).\n", hr );
 
     IFrameworkView_Release( view );
 done:
@@ -236,7 +261,10 @@ static void test_View_Load( IFrameworkViewSource *source )
     ok( hr == S_OK, "Initialize got hr %#lx.\n", hr );
 
     hr = IFrameworkView_Load( view, NULL );
-    ok( hr == E_UNEXPECTED, "Load before SetWindow got hr %#lx, expected E_UNEXPECTED.\n", hr );
+    if (strict_mode())
+        ok( hr == E_UNEXPECTED, "Load before SetWindow got hr %#lx, expected E_UNEXPECTED.\n", hr );
+    else
+        ok( hr == S_OK, "Load before SetWindow got hr %#lx, expected S_OK (strict=off, accepted).\n", hr );
 
     hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
     ok( hr == S_OK, "SetWindow got hr %#lx.\n", hr );
@@ -292,13 +320,18 @@ static void test_View_SetWindow_foreign_thread( IFrameworkViewSource *source )
     if (foreign_thread)
     {
         WaitForSingleObject( foreign_event, 5000 );
-        ok( foreign_hr == RPC_E_WRONG_THREAD,
-            "SetWindow from foreign thread got hr %#lx, expected RPC_E_WRONG_THREAD.\n", foreign_hr );
+        if (strict_mode())
+            ok( foreign_hr == RPC_E_WRONG_THREAD,
+                "SetWindow from foreign thread got hr %#lx, expected RPC_E_WRONG_THREAD.\n", foreign_hr );
+        else
+            ok( foreign_hr == S_OK,
+                "SetWindow from foreign thread got hr %#lx, expected S_OK (strict=off, accepted).\n", foreign_hr );
         CloseHandle( foreign_thread );
     }
     CloseHandle( foreign_event );
 
-    /* the owner thread may still set its window: the foreign call changed nothing */
+    /* the owner thread may still set its window: strict, the foreign call changed nothing;
+     * permissive, the foreign call took the same window, so this is the idempotent path */
     hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
     ok( hr == S_OK, "owner SetWindow after foreign attempt got hr %#lx, expected S_OK.\n", hr );
 
@@ -328,12 +361,20 @@ static void test_View_exiting( IFrameworkViewSource *source )
     ok( hr == S_OK, "Uninitialize got hr %#lx.\n", hr );
 
     hr = IFrameworkView_SetWindow( view, &w1.ICoreWindow_iface );
-    ok( hr == E_APPLICATION_VIEW_EXITING,
-        "SetWindow after Uninitialize got hr %#lx, expected E_APPLICATION_VIEW_EXITING.\n", hr );
+    if (strict_mode())
+        ok( hr == E_APPLICATION_VIEW_EXITING,
+            "SetWindow after Uninitialize got hr %#lx, expected E_APPLICATION_VIEW_EXITING.\n", hr );
+    else
+        ok( hr == S_OK,
+            "SetWindow after Uninitialize got hr %#lx, expected S_OK (strict=off, accepted).\n", hr );
 
     hr = IFrameworkView_Load( view, NULL );
-    ok( hr == E_APPLICATION_VIEW_EXITING,
-        "Load after Uninitialize got hr %#lx, expected E_APPLICATION_VIEW_EXITING.\n", hr );
+    if (strict_mode())
+        ok( hr == E_APPLICATION_VIEW_EXITING,
+            "Load after Uninitialize got hr %#lx, expected E_APPLICATION_VIEW_EXITING.\n", hr );
+    else
+        ok( hr == S_OK,
+            "Load after Uninitialize got hr %#lx, expected S_OK (strict=off, accepted).\n", hr );
 
     IFrameworkView_Release( view );
 done:
