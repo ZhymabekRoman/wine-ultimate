@@ -1775,6 +1775,186 @@ done_factory:
     CALL( factory, 2, (ULONG *)&hr );
 }
 
+/* The IMapView<,>/IObservableMap<,> instance IIDs are computed with the same
+ * combase algorithm the module's QI uses (prototype + include at the CCW-key
+ * test above); the elements are the signature-grammar names, not the
+ * System.String spelling. */
+static const WCHAR *elems_mapview[] = { L"Windows.Foundation.Collections.IMapView`2",
+                                        L"Windows.Foundation.String", L"Windows.Foundation.String" };
+
+/* The smallest thing the app can hand to add_MapChanged: a delegate-shaped
+ * object (vtable in slot 0, IUnknown at 0..2, Invoke where the delegate's own
+ * slots begin).  It answers no QI at all, which is exactly the hostile case:
+ * the callee must store it, not interrogate it. */
+static HRESULT WINAPI obs_delegate_QI( void *iface, const IID *iid, void **out )
+{
+    if (out) *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI obs_delegate_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI obs_delegate_Release( void *iface ) { return 1; }
+static HRESULT WINAPI obs_delegate_Invoke( void *iface, void *sender, void *args ) { return S_OK; }
+static void *obs_delegate_vtbl[] =
+{
+    obs_delegate_QI, obs_delegate_AddRef, obs_delegate_Release,
+    obs_delegate_Invoke, obs_delegate_Invoke, obs_delegate_Invoke, obs_delegate_Invoke,
+};
+static void *obs_delegate = obs_delegate_vtbl;
+
+/*
+ * IObservableMap<HSTRING,HSTRING> on ResourceContext.QualifierValues.
+ *
+ * The failfast c0000602 chain that this closes: mrt100_app projects the
+ * QualifierValues map as a managed IDictionary<string,string>, whose WinRT
+ * adapter QIs the map object for the pinterface IID of
+ * IObservableMap`2<System.String,System.String> (the projection needs the
+ * MapChanged event to keep the adapter's dirty state coherent).  Answering
+ * E_NOINTERFACE raises the projection's COMException, and the exception's SR
+ * message resource -- the key decoded live by the module's own mv_Get,
+ * L"Windows.Foundation.Collections.MapChangedEventHandler`2[System.String,System.String]"
+ * (sr13: Lookup ... -> ELEMENT_NOT_FOUND x5) -- misses in the PRI, so the
+ * message load FailFasts c0000602.  The map has to answer the QI and the
+ * WinRT event pair.
+ *
+ * The IID is computed, never copied: the base interface name plus 'string'
+ * arguments through RoGetParameterizedTypeInstanceIID (same machinery the
+ * module's QI uses, dlls/combase/roapi.c).  The expected constant is the
+ * published IObservableMap<string,string> instance IID asserted by
+ * dlls/combase/tests/roapi.c:917; it is *not* the IMapView<string,string> IID
+ * 1e036276-2f60-55f6-b7f3-f86079e6900b that the map already answers
+ * (dlls/combase/tests/roapi.c:904).  Both are pinned here so a base-IID table
+ * swap cannot pass.
+ *
+ * Slot order for the observable interface: this tree's widl output for the
+ * [eventadd]/[eventremove] pair emits IObservableMap_impl with add_MapChanged
+ * then remove_MapChanged directly after IInspectable (build tree
+ * include/windows.foundation.collections.h:846-847), the same two slots
+ * wine's only IObservableMap implementation uses
+ * (dlls/wintypes/propertyset.c:164-177).  The delegated IMap members follow,
+ * in the live-validated map order (Lookup, HasKey, Size, GetView, per the
+ * IMapView slots the app already drives at 6..9).  WinRT events expose no
+ * get_ accessor in the ABI, so get_MapChanged is answered at the trailing
+ * slot only.
+ */
+static void test_observable_map( void )
+{
+    static const WCHAR *elems_obsm[] = { L"Windows.Foundation.Collections.IObservableMap`2",
+                                         L"Windows.Foundation.String", L"Windows.Foundation.String" };
+    static const WCHAR *elems_vec[] = { L"Windows.Foundation.Collections.IObservableVector`1",
+                                        L"Windows.Foundation.String" };
+    static const WCHAR name_obsm_ss[] = L"Windows.Foundation.Collections.IObservableMap`2<System.String,System.String>";
+    static const GUID iid_obsm_expected = {0xac7f26f2, 0xfeb7, 0x5b2a, {0x8a, 0xc4, 0x34, 0x5b, 0xc6, 0x2c, 0xae, 0xde}};
+    void *factory = NULL, *statics = NULL, *ctx = NULL, *mv = NULL, *om = NULL, *om2 = NULL, *handler = NULL;
+    void *om_again = NULL;
+    HSTRING hkey = NULL, hval = NULL;
+    HSTRING_HEADER hdr;
+    INT64 token = 0;
+    GUID iid_obsm, iid_vec;
+    HRESULT hr;
+
+    hr = RoGetParameterizedTypeInstanceIID( 3, elems_obsm, NULL, &iid_obsm, NULL );
+    ok( hr == S_OK, "obsmap: RoGetParameterizedTypeInstanceIID(IObservableMap`2<string,string>) hr=%08x\n", hr );
+    if (FAILED( hr )) return;
+    ok( IsEqualGUID( &iid_obsm, &iid_obsm_expected ),
+        "obsmap: computed PIID %s, want published %s\n", wine_dbgstr_guid( &iid_obsm ), wine_dbgstr_guid( &iid_obsm_expected ) );
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "obsmap: factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &statics);
+    if (FAILED( hr )) goto done_factory;
+    hr = CALL( statics, 6, &ctx );  /* IResourceContextStatics2::GetForCurrentView */
+    if (FAILED( hr ) || !ctx) goto done_factory;
+    hr = CALL( ctx, 6, &mv );  /* IResourceContext::get_QualifierValues */
+    ok( hr == S_OK && mv, "obsmap: get_QualifierValues hr=%08x\n", hr );
+    if (FAILED( hr ) || !mv) goto done_factory;
+
+    /* 1. the QI the app drives */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(mv, 0))(mv, &iid_obsm, &om);
+    ok( hr == S_OK && om, "obsmap: QI(IObservableMap<string,string>) hr=%08x obj=%p\n", hr, om );
+
+    /* 2. identity: the same object answers IMapView and IInspectable; the
+     *    IMapView members of the observable vtable delegate (Lookup at the
+     *    delegated-IMap slot returns the real qualifier value). */
+    if (om)
+    {
+        void *inspectable = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(om, 0))(om, &IID_IInspectable_loc, &inspectable);
+        ok( hr == S_OK && inspectable == mv, "obsmap: QI(IInspectable) from observable hr=%08x obj=%p mv=%p\n",
+            hr, inspectable, mv );
+        if (inspectable) CALL( inspectable, 2, (ULONG *)&hr );
+
+        WindowsCreateStringReference( L"Language", 8, &hdr, &hkey );
+        hval = NULL;
+        hr = CALL( om, 8, hkey, &hval );  /* IMap::Lookup through the observable vtable */
+        ok( SUCCEEDED( hr ) && hval, "obsmap: observable Lookup(Language) hr=%08x value=%p\n", hr, hval );
+        if (hval) WindowsDeleteString( hval );
+        WindowsDeleteString( hkey );
+        hkey = NULL;
+
+        /* 3. the WinRT event pair, with a minimal delegate IUnknown: the
+         *    handler has to be accepted opaquely (this fixture's delegate
+         *    answers no QueryInterface at all, so a callee that interrogates
+         *    it fails the app's own registration). */
+        hr = CALL( om, 6, &obs_delegate, &token );  /* add_MapChanged */
+        ok( hr == S_OK, "obsmap: add_MapChanged hr=%08x\n", hr );
+        ok( token != 0, "obsmap: add_MapChanged token=%I64d (must be nonzero)\n", token );
+
+        hr = CALL( om, 16, &handler );  /* get_MapChanged */
+        ok( hr == S_OK && handler, "obsmap: get_MapChanged hr=%08x handler=%p\n", hr, handler );
+
+        hr = CALL( om, 7, token );  /* remove_MapChanged */
+        ok( hr == S_OK, "obsmap: remove_MapChanged hr=%08x\n", hr );
+
+        check_class_name( om, name_obsm_ss );
+    }
+
+    /* 4. COM identity across the two vtables of the one object: a second QI
+     *    for the observable PIID hands back the same pointer, and the map
+     *    object reached from the observable pointer is the map the context
+     *    handed out (QualifierValues is a view, not a per-call object). */
+    if (om)
+    {
+        om_again = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(om, 0))(om, &iid_obsm, &om_again);
+        ok( hr == S_OK && om_again == om, "obsmap: QI identity hr=%08x obj=%p om=%p\n", hr, om_again, om );
+        if (om_again) CALL( om_again, 2, (ULONG *)&hr );
+
+        om2 = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(om, 0))(om, &IID_IResourceContext_loc, &om2);
+        ok( hr == E_NOINTERFACE && !om2, "obsmap: QI(IResourceContext) from map hr=%08x obj=%p (expect E_NOINTERFACE)\n",
+            hr, om2 );
+    }
+
+    /* 5. existing QI answers are unchanged: an unimplemented pinterface stays
+     *    E_NOINTERFACE, the IMapView PIID still resolves. */
+    hr = RoGetParameterizedTypeInstanceIID( 2, elems_vec, NULL, &iid_vec, NULL );
+    if (SUCCEEDED( hr ))
+    {
+        om2 = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(mv, 0))(mv, &iid_vec, &om2);
+        ok( hr == E_NOINTERFACE && !om2, "obsmap: QI(IObservableVector<string>) hr=%08x obj=%p (expect E_NOINTERFACE)\n",
+            hr, om2 );
+    }
+    hr = RoGetParameterizedTypeInstanceIID( 3, elems_mapview, NULL, &iid_vec, NULL );
+    if (SUCCEEDED( hr ))
+    {
+        om2 = NULL;
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(mv, 0))(mv, &iid_vec, &om2);
+        ok( hr == S_OK && om2, "obsmap: QI(IMapView<string,string>) still hr=%08x obj=%p\n", hr, om2 );
+        if (om2) CALL( om2, 2, (ULONG *)&hr );
+    }
+
+done_factory:
+    if (handler) CALL( handler, 2, (ULONG *)&hr );
+    if (om) CALL( om, 2, (ULONG *)&hr );
+    if (hkey) WindowsDeleteString( hkey );
+    if (mv) CALL( mv, 2, (ULONG *)&hr );
+    if (ctx) CALL( ctx, 2, (ULONG *)&hr );
+    if (statics) CALL( statics, 2, (ULONG *)&hr );
+    CALL( factory, 2, (ULONG *)&hr );
+}
+
 START_TEST(core)
 {
     HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
@@ -1793,6 +1973,7 @@ START_TEST(core)
     test_reference_tracker_identity();
     test_parameterized_class_names();
     test_memorymanager_activation();
+    test_observable_map();
 
     RoUninitialize();
 }

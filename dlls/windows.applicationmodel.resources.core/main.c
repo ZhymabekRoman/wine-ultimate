@@ -349,6 +349,8 @@ HRESULT WINAPI RoGetParameterizedTypeInstanceIID( UINT32 name_element_count, con
 #define ELEM_STRING       L"Windows.Foundation.String"
 #define ELEM_KEYVALUEPAIR L"Windows.Foundation.Collections.IKeyValuePair"
 #define ELEM_MAPVIEW      L"Windows.Foundation.Collections.IMapView"
+#define ELEM_OBSERVABLEMAP L"Windows.Foundation.Collections.IObservableMap"
+#define ELEM_MAPCHANGEDHANDLER L"Windows.Foundation.Collections.MapChangedEventHandler"
 #define ELEM_VECTORVIEW   L"Windows.Foundation.Collections.IVectorView"
 #define ELEM_ITERABLE     L"Windows.Foundation.Collections.IIterable"
 #define ELEM_ITERATOR     L"Windows.Foundation.Collections.IIterator"
@@ -513,6 +515,7 @@ static const GUID IID_IStringable_g = {0x96369f54, 0x8eb6, 0x48f0, {0xab, 0xce, 
 
 typedef HRESULT (STDMETHODCALLTYPE *ccw_qi_t)( void *iface, REFIID iid, void **out );
 typedef HRESULT (STDMETHODCALLTYPE *ccw_release_t)( void *iface );
+typedef ULONG (STDMETHODCALLTYPE *ccw_addref_t)( void *iface );
 typedef HRESULT (STDMETHODCALLTYPE *ccw_out_hstring_t)( void *iface, HSTRING *out );
 
 /* a CCW's vtable is the pointer in the object's first slot; its entries are
@@ -520,6 +523,7 @@ typedef HRESULT (STDMETHODCALLTYPE *ccw_out_hstring_t)( void *iface, HSTRING *ou
 static inline const void **ccw_vtable( const void *obj ) { return (const void **)((const void **)obj)[0]; }
 
 #define CCW_SLOT0( o )  ((ccw_qi_t)ccw_vtable( o )[0])          /* IUnknown::QueryInterface */
+#define CCW_SLOT1( o )  ((ccw_addref_t)ccw_vtable( o )[1])      /* IUnknown::AddRef */
 #define CCW_SLOT2( o )  ((ccw_release_t)ccw_vtable( o )[2])     /* IUnknown::Release */
 #define CCW_SLOT6( o )  ((ccw_out_hstring_t)ccw_vtable( o )[6]) /* IStringable::ToString /
                                                                   IReference`1<T>::get_Value */
@@ -779,14 +783,21 @@ struct kv_pair
     const WCHAR *value;
 };
 
+struct map_event_reg;
+
 struct map_view
 {
-    const void *vt_mv;
+    const void *vt_mv;   /* IMapView<HSTRING,HSTRING> (the set the app reads) */
+    const void *vt_om;   /* IObservableMap<HSTRING,HSTRING>: the same object,
+                          * the event surface .NET Native's IDictionary
+                          * adapter QIs (see the observable block below) */
     LONG ref;
     const struct kv_pair *pairs;
     UINT32 count;
+    struct map_event_reg *regs;  /* MapChanged registrations, interlocked list */
 };
 static inline struct map_view *mv_from( void *iface ) { return (struct map_view *)iface; }
+static const void *map_view_observable_vtbl[];
 
 static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
 {
@@ -797,6 +808,34 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
         param_iid_eq( iid, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_mv;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    /* .NET Native's IDictionary<string,string> adapter QIs the map it gets
+     * from ResourceContext::QualifierValues for the
+     * IObservableMap`2<System.String,System.String> pinterface IID: the
+     * adapter subscribes to MapChanged to keep the managed dictionary coherent.
+     * E_NOINTERFACE raises the projection's COMException, and that exception's
+     * SR message resource
+     * "Windows.Foundation.Collections.MapChangedEventHandler`2[System.String,System.String]"
+     * is not in the PRI, so loading the message FailFasts c0000602 (sr13: the
+     * key arrives decoded at mv_Get and answers ELEMENT_NOT_FOUND x5).
+     *
+     * The IID is computed from the base interface name plus the 'string'
+     * arguments by RoGetParameterizedTypeInstanceIID, like the IMapView branch
+     * above, and it is a different IID: IMapView<string,string> is
+     * 1e036276-2f60-55f6-b7f3-f86079e6900b (dlls/combase/tests/roapi.c:904),
+     * IObservableMap<string,string> is ac7f26f2-feb7-5b2a-8ac4-345bc62caede
+     * (dlls/combase/tests/roapi.c:917).  Deriving both through the shared
+     * computation matters: include/windows.foundation.collections.idl spells
+     * the two base uuid()s the other way round (IDL:196 gives IMapView
+     * e480ce40-... and IDL:226 gives IObservableMap 65df2bf5-...) from the
+     * metadata table the computation uses (dlls/combase/roapi.c:644,647), and
+     * only the latter pairing reproduces the published instance IIDs and the
+     * IMapView QI the app already drives successfully against this map. */
+    if (param_iid_eq( iid, 3, ELEM_OBSERVABLEMAP L"`2", ELEM_STRING, ELEM_STRING ))
+    {
+        *out = &impl->vt_om;
         incr( &impl->ref );
         return S_OK;
     }
@@ -869,6 +908,294 @@ static const void *map_view_vtbl[] =
 {
     mv_QueryInterface, mv_AddRef, mv_Release, mv_GetIids, mv_GetRuntimeClassName, mv_GetTrustLevel,
     mv_Get, mv_HasKey, mv_Size, mv_GetView, mv_First,
+};
+
+/* ------------------------------------------------------------------ */
+/* IObservableMap<HSTRING,HSTRING> on the QualifierValues view         */
+/*                                                                     */
+/* Slot layout.  WinRT events are add/remove only: widl emits, for the  */
+/* [eventadd]/[eventremove] pair of IObservableMap, an IObservableMap_  */
+/* impl with add_MapChanged then remove_MapChanged directly after the   */
+/* IInspectable quintet (build tree include/windows.foundation.         */
+/* collections.h:846-847), and that is the shape wine's only            */
+/* IObservableMap implementation uses                                   */
+/* (dlls/wintypes/propertyset.c:164-177, 8 slots total).  The delegated  */
+/* IMap members follow, ordered by the map prefix the app already        */
+/* drives on this very object (Lookup 6, HasKey 7, Size 8, GetView 9 in  */
+/* map_view_vtbl above, live-validated on Calculator), so IMap's block   */
+/* runs Lookup, HasKey, Size, GetView, Insert, Remove, Clear, then the   */
+/* IIterable First of IMap's own requires clause.  get_MapChanged has    */
+/* no ABI slot at all (widl emits no accessor for an event), so it is    */
+/* answered as the trailing slot: a caller that asks gets a live         */
+/* handler object, and no caller can index into it.                      */
+/*                                                                      */
+/* Every slot returns S_OK and no MapChanged is ever raised: the view is */
+/* a snapshot of the PRM qualifier set (see mv_Get), so there is no      */
+/* mutation to report, and the app's adapter only needs the subscription */
+/* to succeed.  Handlers are stored opaque -- the projection's delegate  */
+/* is never interrogated, only AddRef'd (its own QI may answer nothing,  */
+/* as the IStringable/IReference key CCWs already show).                 */
+/* ------------------------------------------------------------------ */
+
+struct map_event_reg
+{
+    const void *vt_handler;  /* the MapChangedEventHandler<HSTRING,HSTRING> face */
+    LONG ref;
+    void *handler;           /* the client's delegate, AddRef'd, treated as opaque */
+    struct map_view *owner;  /* the list it is linked into, NULL once unlinked */
+    struct map_event_reg *next;
+    BOOL linked;
+};
+/* The token is the registration's own address: nonzero by construction, stable
+ * for the whole registration, and self-validating on remove (no counter to
+ * wrap and no allocation-table coupling). */
+static inline INT64 map_event_token( struct map_event_reg *reg ) { return (INT64)(INT_PTR)reg; }
+static inline struct map_event_reg *omh_from( void *iface ) { return (struct map_event_reg *)iface; }
+static inline struct map_view *om_from( void *iface ) { return CONTAINING_RECORD( iface, struct map_view, vt_om ); }
+
+static const void *map_event_handler_vtbl[];
+static ULONG WINAPI omh_Release( void *iface );
+
+static void map_event_reg_unlink( struct map_view *map, struct map_event_reg *reg )
+{
+    struct map_event_reg *cur, **slot;
+
+    for (slot = (struct map_event_reg **)&map->regs; (cur = *slot); )
+    {
+        if (cur == reg)
+        {
+            if (InterlockedCompareExchangePointer( (void *volatile *)slot, cur->next, cur ) == cur) return;
+            return;  /* the slot moved under us: a concurrent remove took it */
+        }
+        slot = (struct map_event_reg **)&cur->next;
+    }
+}
+
+static struct map_event_reg *map_event_reg_new( struct map_view *owner, void *handler )
+{
+    struct map_event_reg *reg = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*reg) );
+
+    if (!reg) return NULL;
+    reg->vt_handler = map_event_handler_vtbl;
+    reg->ref = 1;
+    reg->handler = handler;
+    reg->owner = owner;
+    reg->linked = (owner != NULL);
+    if (handler)
+    {
+        /* The handler is an arbitrary CCW: probe it, never fault the caller. */
+        __TRY
+        {
+            CCW_SLOT1( handler )( handler );
+        }
+        __EXCEPT_ALL
+        {
+            reg->handler = NULL;  /* not a COM pointer: keep it, report nothing */
+        }
+        __ENDTRY
+    }
+    return reg;
+}
+
+static void map_event_reg_free_list( struct map_view *map )
+{
+    struct map_event_reg *reg = map->regs;
+
+    map->regs = NULL;
+    while (reg)
+    {
+        struct map_event_reg *next = reg->next;
+        reg->linked = FALSE;
+        reg->owner = NULL;
+        omh_Release( &reg->vt_handler );
+        reg = next;
+    }
+}
+
+static HRESULT WINAPI omh_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct map_event_reg *impl = omh_from( iface );
+
+    TRACE( "iid %s\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        param_iid_eq( iid, 3, ELEM_MAPCHANGEDHANDLER L"`2", ELEM_STRING, ELEM_STRING ))
+    {
+        *out = &impl->vt_handler;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI omh_AddRef( void *iface ) { return incr( &omh_from( iface )->ref ); }
+static ULONG WINAPI omh_Release( void *iface )
+{
+    struct map_event_reg *impl = omh_from( iface );
+    LONG ref = decr( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->linked && impl->owner) map_event_reg_unlink( impl->owner, impl );
+        if (impl->handler)
+        {
+            __TRY
+            {
+                CCW_SLOT2( impl->handler )( impl->handler );
+            }
+            __EXCEPT_ALL
+            {
+            }
+            __ENDTRY
+        }
+        HeapFree( GetProcessHeap(), 0, impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI omh_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI omh_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR *args[] = { ELEM_CLASS_STRING, ELEM_CLASS_STRING };
+
+    return param_class_name( ELEM_MAPCHANGEDHANDLER, L"`2", args, 2, n );
+}
+static HRESULT WINAPI omh_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+/* IMapChangedEventHandler::Invoke: reached only if something raised the event.
+ * Nothing does (the view is a snapshot), so this is the quiet S_OK. */
+static HRESULT WINAPI omh_Invoke( void *iface, void *sender, void *args )
+{
+    TRACE( "MapChanged Invoke on a snapshot view (no change is ever raised)\n" );
+    return S_OK;
+}
+static const void *map_event_handler_vtbl[] =
+{
+    omh_QueryInterface, omh_AddRef, omh_Release, omh_GetIids, omh_GetRuntimeClassName, omh_GetTrustLevel,
+    omh_Invoke,
+};
+
+/* IUnknown/IInspectable of the observable face: the two vtables share the one
+ * map_view, so identity (and the refcount) runs through the map's own
+ * implementation, which is what a QI from either pointer must return. */
+static HRESULT WINAPI om_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return mv_QueryInterface( &om_from( iface )->vt_mv, iid, out );
+}
+static ULONG WINAPI om_AddRef( void *iface ) { return mv_AddRef( &om_from( iface )->vt_mv ); }
+static ULONG WINAPI om_Release( void *iface ) { return mv_Release( &om_from( iface )->vt_mv ); }
+static HRESULT WINAPI om_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI om_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR *args[] = { ELEM_CLASS_STRING, ELEM_CLASS_STRING };
+
+    /* The observable face names itself: the loose-binding RCW parses this name
+     * to learn the arity and the type arguments of the interface it QIs (see
+     * the ELEM_CLASS_STRING note), so answering the IMapView name from the
+     * observable pointer would describe an interface the caller did not ask
+     * for.  The IMapView face keeps its own answer, unchanged. */
+    return param_class_name( ELEM_OBSERVABLEMAP, L"`2", args, 2, n );
+}
+static HRESULT WINAPI om_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+
+static HRESULT WINAPI om_add_MapChanged( void *iface, void *handler, INT64 *token )
+{
+    struct map_view *impl = om_from( iface );
+    struct map_event_reg *reg;
+
+    if (!token) return E_POINTER;
+    *token = 0;
+    if (!(reg = map_event_reg_new( impl, handler ))) return E_OUTOFMEMORY;
+    for (;;)
+    {
+        struct map_event_reg *head = impl->regs;
+
+        reg->next = head;
+        if (InterlockedCompareExchangePointer( (void *volatile *)&impl->regs, reg, head ) == head) break;
+    }
+    *token = map_event_token( reg );
+    TRACE( "add_MapChanged handler %p token %p\n", handler, (void *)(INT_PTR)*token );
+    return S_OK;
+}
+
+static HRESULT WINAPI om_remove_MapChanged( void *iface, INT64 token )
+{
+    struct map_view *impl = om_from( iface );
+    struct map_event_reg *reg;
+
+    for (reg = impl->regs; reg; reg = reg->next)
+    {
+        if (map_event_token( reg ) == token)
+        {
+            reg->linked = FALSE;
+            reg->owner = NULL;
+            omh_Release( &reg->vt_handler );  /* the list's reference */
+            return S_OK;
+        }
+    }
+    /* Unknown or already-removed token: the adapter releases in its Dispose
+     * path and may remove twice; that is not a failure for a snapshot view. */
+    return S_OK;
+}
+
+static HRESULT WINAPI om_get_MapChanged( void *iface, void **handler )
+{
+    struct map_view *impl = om_from( iface );
+    struct map_event_reg *reg;
+
+    if (!handler) return E_POINTER;
+    *handler = NULL;
+    for (reg = impl->regs; reg; reg = reg->next)
+    {
+        *handler = &reg->vt_handler;
+        incr( &reg->ref );
+        return S_OK;
+    }
+    /* Nothing registered: hand back a live, unregistered handler object rather
+     * than S_OK with a null out-param (the projection dereferences it).  Not
+     * linked into any list, so the caller's Release frees it. */
+    if (!(reg = map_event_reg_new( NULL, NULL ))) return E_OUTOFMEMORY;
+    *handler = &reg->vt_handler;
+    return S_OK;
+}
+
+/* Delegated IMap members: same map, same implementation, one slot block over. */
+static HRESULT WINAPI om_Lookup( void *iface, HSTRING key, HSTRING *value )
+{
+    return mv_Get( &om_from( iface )->vt_mv, key, value );
+}
+static HRESULT WINAPI om_HasKey( void *iface, HSTRING key, INT32 *has )
+{
+    return mv_HasKey( &om_from( iface )->vt_mv, key, has );
+}
+static HRESULT WINAPI om_Size( void *iface, UINT32 *size )
+{
+    return mv_Size( &om_from( iface )->vt_mv, size );
+}
+static HRESULT WINAPI om_GetView( void *iface, void **view )
+{
+    return mv_GetView( &om_from( iface )->vt_mv, view );
+}
+/* The qualifier set is a PRM-derived snapshot; a write has no target, so the
+ * mutation members are accepted and do nothing (and MapChanged is not raised). */
+static HRESULT WINAPI om_Insert( void *iface, HSTRING key, HSTRING value, INT32 *replaced )
+{
+    if (replaced) *replaced = FALSE;
+    TRACE( "Insert on a snapshot view: accepted, nothing stored\n" );
+    return S_OK;
+}
+static HRESULT WINAPI om_Remove( void *iface, HSTRING key ) { TRACE( "Remove on a snapshot view: no-op\n" ); return S_OK; }
+static HRESULT WINAPI om_Clear( void *iface ) { TRACE( "Clear on a snapshot view: no-op\n" ); return S_OK; }
+static HRESULT WINAPI om_First( void *iface, void **first ) { return mv_First( &om_from( iface )->vt_mv, first ); }
+
+static const void *map_view_observable_vtbl[] =
+{
+    /* IUnknown, IInspectable */
+    om_QueryInterface, om_AddRef, om_Release, om_GetIids, om_GetRuntimeClassName, om_GetTrustLevel,
+    /* IObservableMap<HSTRING,HSTRING> own members (widl: add 6, remove 7) */
+    om_add_MapChanged, om_remove_MapChanged,
+    /* delegated IMap<HSTRING,HSTRING> members, then its delegated IIterable */
+    om_Lookup, om_HasKey, om_Size, om_GetView, om_Insert, om_Remove, om_Clear, om_First,
+    /* trailing, no ABI slot (see the layout note) */
+    om_get_MapChanged,
 };
 
 /* IMapView<HSTRING, IResourceMap*> for AllResourceMaps: same slots, Get
@@ -1986,6 +2313,10 @@ static ULONG WINAPI ctx_Release( void *iface )
 {
     struct res_context *impl = ctx_from( iface );
     LONG ref = decr( &impl->ref );
+    /* The QualifierValues view is embedded, so its MapChanged registrations
+     * ride the context's lifetime: drop them with the object (each Release
+     * also drops the client delegate it AddRef'd on add). */
+    if (!ref && impl->qualifiers.regs) map_event_reg_free_list( &impl->qualifiers );
     /* create_context / ctx_Clone heap-copy every key and value, so uniform
      * release is safe (the shared static default_qualifiers array is never
      * installed as impl->qpairs) */
@@ -2107,6 +2438,7 @@ static HRESULT create_context( struct res_context **out )
             }
     }
     ctx->qualifiers.vt_mv = map_view_vtbl;
+    ctx->qualifiers.vt_om = map_view_observable_vtbl;  /* the same object's IObservableMap face */
     ctx->qualifiers.ref = 1;
     ctx->qualifiers.pairs = ctx->qpairs;
     ctx->qualifiers.count = ctx->qcount;
