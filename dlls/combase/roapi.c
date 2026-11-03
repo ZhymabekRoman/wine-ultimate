@@ -66,11 +66,29 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         !wcscmp(classid, L"Windows.ApplicationModel.AppInstance") ||
         !wcscmp(classid, L"Microsoft.Windows.AppLifecycle.AppInstance") ||
         !wcscmp(classid, L"Windows.ApplicationModel.StartupTask") ||
-        !wcsncmp(classid, L"Windows.UI.ViewManagement.ApplicationView", 41) ||
-        (!wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.", 38) &&
-         wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47)))
+        !wcsncmp(classid, L"Windows.UI.ViewManagement.ApplicationView", 41))
     {
         *out = wcsdup(L"twinapi.appcore.dll");
+        return S_OK;
+    }
+
+    /* Windows.ApplicationModel.DataTransfer.* is the clipboard/share surface
+     * (DataPackage, DataPackageView, Clipboard, StandardDataFormats, the
+     * share-UI classes): Windows hosts the namespace's implementation in
+     * windows.applicationmodel.dataexchange.dll, so route the namespace to the
+     * own-name builtin module that implements the classes'
+     * DllGetActivationFactory, per the own-name module rule this file already
+     * applies to Windows.Networking.PushNotifications and Windows.Web.Http.
+     * The twinapi.appcore.dll stand-ins for these classes were dummy factories
+     * whose QI-everything shape handed the factory itself out as every
+     * interface; the real module answers the metadata surfaces.  The
+     * DragDrop/DragDrop.Core sub-namespaces are separate classes not served
+     * here and keep falling through, exact on the trailing dot like the
+     * Windows.UI.Notifications route below. */
+    if (!wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.", 38) &&
+        wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47))
+    {
+        *out = wcsdup(L"windows.applicationmodel.dataexchange.dll");
         return S_OK;
     }
 
@@ -86,6 +104,28 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
     if (!wcsncmp(classid, L"Windows.Networking.PushNotifications.", 37))
     {
         *out = wcsdup(L"windows.networking.pushnotifications.dll");
+        return S_OK;
+    }
+
+    /* Windows.Security.Authentication.Web.Core.* is the MSA web-auth surface
+     * (WebAuthenticationCoreManager, WebTokenRequest/Result/Response,
+     * WebProviderError + the Windows.Security.Credentials WebAccount/WebAccount-
+     * Provider classes): an unpackaged prefix has no ActivatableClassId keys for
+     * them, and the gate trace shows the msedge children probing
+     * WebAuthenticationCoreManager repeatedly (5x gate59).  Windows hosts the
+     * namespace in windows.security.authentication.web.core.dll, so route it to
+     * the own-name builtin implementing the classes' DllGetActivationFactory
+     * (born-completed ops, UserCancel contract), per the own-name module rule
+     * above.  The Windows.Security.Credentials pair shares the module (their
+     * Web* providers are the web-auth types), routed on their own prefixes. */
+    if (!wcsncmp(classid, L"Windows.Security.Authentication.Web.Core.", 41))
+    {
+        *out = wcsdup(L"windows.security.authentication.web.core.dll");
+        return S_OK;
+    }
+    if (!wcsncmp(classid, L"Windows.Security.Credentials.Web", 32))
+    {
+        *out = wcsdup(L"windows.security.authentication.web.core.dll");
         return S_OK;
     }
 
