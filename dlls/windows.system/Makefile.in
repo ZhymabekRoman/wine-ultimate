@@ -1,0 +1,8 @@
+MODULE  = windows.system.dll
+IMPORTS = combase kernelbase advapi32 uuid
+
+SOURCES = \
+	classes.idl \
+	async.c \
+	main.c \
+	user.c

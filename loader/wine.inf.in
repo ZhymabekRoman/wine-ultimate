@@ -76,7 +76,9 @@ AddReg=\
     WinRTActivatableClasses,\
     AppModelActivation,\
     WineuwpActivation,
-    ShellWinRTActivation
+    ShellWinRTActivation,\
+    ProbeClassesActivation,
+    DataTransferActivation
 
 [DefaultInstall]
 Needs=BaseInstall
@@ -801,6 +803,68 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Pus
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManagerForUser,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManagerForUser,"DllPath",2,"%12%\windows.networking.pushnotifications.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannelManagerForUser,"ThreadingModel",0x10001,2
+
+; The clipboard/share WinRT classes of Windows.ApplicationModel.DataTransfer,
+; served by windows.applicationmodel.dataexchange.dll (the dll Windows hosts
+; the namespace's implementation in).  combase routes the namespace to the
+; module before consulting the registry; the seeds keep the classes resolvable
+; through the plain ActivatableClassId lookup too, in the exact
+; [ShellWinRTActivation] format.
+[DataTransferActivation]
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackage,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackage,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackage,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackageView,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackageView,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackageView,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackagePropertySet,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackagePropertySet,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackagePropertySet,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackagePropertySetView,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackagePropertySetView,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackagePropertySetView,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.Clipboard,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.Clipboard,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.Clipboard,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.StandardDataFormats,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.StandardDataFormats,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.StandardDataFormats,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataTransferManager,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataTransferManager,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataTransferManager,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.HtmlFormatHelper,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.HtmlFormatHelper,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.HtmlFormatHelper,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ShareProvider,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ShareProvider,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ShareProvider,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ShareUIOptions,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ShareUIOptions,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ShareUIOptions,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ClipboardContentOptions,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ClipboardContentOptions,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.ClipboardContentOptions,"ThreadingModel",0x10001,2
+
+; The app-visible probe classes of the Windows.System / Windows.Devices.Input namespaces: the
+; gate traces show one 'Failed to find library' line per class (EducationSettings from client
+; 042c, PenDevice from client 0468, Windows.System.User in the older-era traces), each of which
+; is a RoGetActivationFactory probe that retry-loops on the REGDB_E_CLASSNOTREG answer.  Windows
+; registers every activatable class under the ActivatableClassId key with its DllPath and
+; ThreadingModel and combase resolves RoGetActivationFactory through it; an unpackaged prefix has
+; no such registrations, so the builtin providers are seeded here in the 64-bit view combase
+; reads, in the exact [ShellWinRTActivation] format.  ThreadingModel 2 (Both): the probes arrive
+; on the app's UI thread and on its background/worker threads alike.
+[ProbeClassesActivation]
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Profile.EducationSettings,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Profile.EducationSettings,"DllPath",2,"%12%\windows.system.profile.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Profile.EducationSettings,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Input.PenDevice,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Input.PenDevice,"DllPath",2,"%12%\windows.devices.input.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Input.PenDevice,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,"DllPath",2,"%12%\windows.system.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,"ThreadingModel",0x10001,2
 
 [Printing]
 HKLM,%Control%\Print\Monitors\Local Port,"Driver",2,"localspl.dll"

@@ -1,0 +1,5 @@
+TESTDLL = windows.devices.input.dll
+IMPORTS = combase kernelbase
+
+SOURCES = \
+	pendevice.c

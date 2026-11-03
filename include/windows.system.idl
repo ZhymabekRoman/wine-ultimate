@@ -56,6 +56,7 @@ namespace Windows.System
     interface IDispatcherQueueTimer;
     interface IUser;
     interface IUserStatics;
+    interface IUserStatics2;
     interface IUserChangedEventArgs;
     interface IUserChangedEventArgs2;
 
@@ -70,6 +71,11 @@ namespace Windows.System
     {
         interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Foundation.Collections.IPropertySet *>;
         interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Storage.Streams.IRandomAccessStreamReference *>;
+        interface Windows.Foundation.Collections.IVectorView<Windows.System.User *>;
+        interface Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *>;
+        interface Windows.Foundation.IAsyncOperation<Windows.System.User *>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Windows.System.User *>;
         interface Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IPropertySet *>;
         interface Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IRandomAccessStreamReference *>;
         interface Windows.Foundation.TypedEventHandler<Windows.System.DispatcherQueue *, IInspectable *>;
@@ -478,6 +484,55 @@ namespace Windows.System
         HRESULT GetPictureAsync([in] Windows.System.UserPictureSize desired_size, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Storage.Streams.IRandomAccessStreamReference *> **operation);
     }
 
+    /*
+     * Windows.System.User statics: the class older-era gate traces probe (the app's
+     * per-user globalization/push-notification paths resolve Windows.System.User through
+     * RoGetActivationFactory, and each 'Failed to find library' line is a probe that
+     * retry-loops on the REGDB_E_CLASSNOTREG answer).  Interface IIDs and vtable layout are
+     * taken from the windows-rs metadata projection (crates/libs/windows/src/Windows/System/
+     * mod.rs: :2521 IUserStatics IID with the CreateWatcher/FindAllAsync/FindAllAsyncByType/
+     * FindAllAsyncByTypeAndStatus/GetFromId slots in that order at :2530-2534, :2536
+     * IUserStatics2 IID with its single GetDefault slot at :2545, :3864 runtime class name).
+     * GetDefault is contract v12.0 per the method page "Windows.System.User.GetDefault" on
+     * learn.microsoft.com (device family Windows 10, version 2104, introduced in
+     * 10.0.20348.0).
+     *
+     * Deliberately NOT declared: User.GetSystemUser and a User.NonInspectableType member.
+     * Neither exists in the fetched windows-rs projection of the namespace (no
+     * 'GetSystemUser'/'NonInspectableType' hit in Windows/System/mod.rs), so their interface
+     * membership and IIDs are unverifiable here and are left out rather than guessed.
+     *
+     * CreateWatcher's retval is typed IInspectable * instead of Windows.System.UserWatcher *:
+     * widl requires a runtime class used as a retval to carry a default interface, and the
+     * tree implements no watcher (the method answers E_NOTIMPL below), so declaring the whole
+     * IUserWatcher/UserWatcherStatus surface to type a slot that never returns an object is
+     * not worth the idl growth.  The slot count, order and pointer-ness are unchanged, which
+     * is what the caller's metadata-derived vtable depends on.
+     */
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.System.User),
+        uuid(155eb23b-242a-45e0-a2e9-3171fc6a7fdd)
+    ]
+    interface IUserStatics : IInspectable
+    {
+        HRESULT CreateWatcher([out, retval] IInspectable **result);
+        HRESULT FindAllAsync([out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *> **operation);
+        HRESULT FindAllAsyncByType([in] Windows.System.UserType value, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *> **operation);
+        HRESULT FindAllAsyncByTypeAndStatus([in] Windows.System.UserType type, [in] Windows.System.UserAuthenticationStatus status, [out, retval] Windows.Foundation.IAsyncOperation<Windows.Foundation.Collections.IVectorView<Windows.System.User *> *> **operation);
+        HRESULT GetFromId([in] HSTRING nonroamableid, [out, retval] Windows.System.User **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 12.0),
+        exclusiveto(Windows.System.User),
+        uuid(74a37e11-2eb5-4487-b0d5-2c6790e013e9)
+    ]
+    interface IUserStatics2 : IInspectable
+    {
+        HRESULT GetDefault([out, retval] Windows.System.User **result);
+    }
+
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         exclusiveto(Windows.System.UserChangedEventArgs),
@@ -529,10 +584,16 @@ namespace Windows.System
         [default] interface Windows.System.IDispatcherQueueTimer;
     }
 
+    /*
+     * The UserWatcher class is only referenced by IUserStatics.CreateWatcher as a pointer
+     * retval; the tree implements no watcher, so it stays an opaque forward declaration above
+     * (widl rejects a full definition with no interface or static factory).
+     */
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
         marshaling_behavior(agile),
-        /* static(Windows.System.IUserStatics, Windows.Foundation.UniversalApiContract, 1.0), */
+        static(Windows.System.IUserStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.System.IUserStatics2, Windows.Foundation.UniversalApiContract, 12.0),
         threading(both),
     ]
     runtimeclass User

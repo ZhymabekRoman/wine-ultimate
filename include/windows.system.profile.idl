@@ -36,10 +36,12 @@ namespace Windows.System.Profile {
     interface IAnalyticsVersionInfo2;
     interface ISystemIdentificationInfo;
     interface ISystemIdentificationStatics;
+    interface IEducationSettingsStatics;
     runtimeclass AnalyticsVersionInfo;
     runtimeclass AnalyticsInfo;
     runtimeclass SystemIdentification;
     runtimeclass SystemIdentificationInfo;
+    runtimeclass EducationSettings;
 
     [contract(Windows.Foundation.UniversalApiContract, 3.0)]
     enum SystemIdentificationSource
@@ -135,5 +137,36 @@ namespace Windows.System.Profile {
     runtimeclass SystemIdentificationInfo
     {
         [default] interface Windows.System.Profile.ISystemIdentificationInfo;
+    }
+
+    /*
+     * Windows.System.Profile.EducationSettings: the class the app stack probes for the
+     * education-mode flag (gate50: one 'Failed to find library' line from client 042c,
+     * which retry-loops on the REGDB_E_CLASSNOTREG answer).  The statics interface IID and
+     * the single-member vtable layout are taken from the windows-rs metadata projection
+     * (crates/libs/windows/src/Windows/System/Profile/mod.rs:226 defines the interface IID,
+     * :235 the one IsEducationEnvironment slot after the IInspectable prologue, and :108 the
+     * runtime class name); the class carries no instance interface.  Contract v4.0 per the
+     * class page "Windows.System.Profile.EducationSettings" on learn.microsoft.com
+     * (device family Windows 10 Creators Update, introduced in 10.0.15063.0).
+     */
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        exclusiveto(Windows.System.Profile.EducationSettings),
+        uuid(fc53f0ef-4d3e-4e13-9b23-505f4d091e92)
+    ]
+    interface IEducationSettingsStatics : IInspectable
+    {
+        [propget] HRESULT IsEducationEnvironment([out, retval] boolean *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 4.0),
+        marshaling_behavior(agile),
+        static(Windows.System.Profile.IEducationSettingsStatics, Windows.Foundation.UniversalApiContract, 4.0),
+        threading(both)
+    ]
+    runtimeclass EducationSettings
+    {
     }
 }

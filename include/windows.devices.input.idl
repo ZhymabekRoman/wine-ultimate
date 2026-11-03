@@ -33,8 +33,11 @@ namespace Windows.Devices.Input {
     interface IPointerDevice;
     interface IPointerDevice2;
     interface IPointerDeviceStatics;
+    interface IPenDevice;
+    interface IPenDeviceStatics;
 
     runtimeclass PointerDevice;
+    runtimeclass PenDevice;
 
     declare {
         interface Windows.Foundation.Collections.IVectorView<Windows.Devices.Input.PointerDevice *>;
@@ -111,5 +114,55 @@ namespace Windows.Devices.Input {
     {
         [default] interface Windows.Devices.Input.IPointerDevice;
         [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.Devices.Input.IPointerDevice2;
+    }
+
+    /*
+     * Windows.Devices.Input.PenDevice: the pen-metadata class the app input stack probes
+     * (gate50: one 'Failed to find library' line from client 0468, which retry-loops on the
+     * REGDB_E_CLASSNOTREG answer).  Interface IIDs and vtable layout are taken from the
+     * windows-rs metadata projection (crates/libs/windows/src/Windows/Devices/Input/mod.rs:
+     * :93 IPenDevice IID with the single PenId slot at :102, :118 IPenDeviceStatics IID with
+     * the single GetFromPointerId slot at :127, :547 runtime class name).  Contract v8.0 per
+     * the class page "Windows.Devices.Input.PenDevice" on learn.microsoft.com (device family
+     * Windows 10, version 1903, introduced in 10.0.18362.0).
+     *
+     * Deliberately NOT declared here:
+     *   - IPenDevice2 (SimpleHapticsController, windows-rs :104/:114): its retval is
+     *     Windows.Devices.Input.Haptics / Windows.Devices.Haptics.SimpleHapticsController,
+     *     which this tree has no idl for, and the class is not probed.  A factory that
+     *     advertises the statics answers E_NOINTERFACE for it, which is the honest answer.
+     *   - Windows.Devices.Input.PenIlbrInformation: no entry for it exists in the windows-rs
+     *     metadata projection of this namespace (no 'PenIlbr' hit in the fetched
+     *     Windows/Devices/Input/mod.rs), so its interface IID is unverifiable and the class
+     *     is left unimplemented rather than guessed (IID rule: never from memory).
+     */
+    [
+        contract(Windows.Foundation.UniversalApiContract, 8.0),
+        exclusiveto(Windows.Devices.Input.PenDevice),
+        uuid(31856eba-a738-5a8c-b8f6-f97ef68d18ef)
+    ]
+    interface IPenDevice : IInspectable
+    {
+        [propget] HRESULT PenId([out, retval] GUID *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 8.0),
+        exclusiveto(Windows.Devices.Input.PenDevice),
+        uuid(9dfbbe01-0966-5180-bcb4-b85060e39479)
+    ]
+    interface IPenDeviceStatics : IInspectable
+    {
+        HRESULT GetFromPointerId([in] UINT32 pointer_id, [out, retval] Windows.Devices.Input.PenDevice **result);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 8.0),
+        marshaling_behavior(none),
+        static(Windows.Devices.Input.IPenDeviceStatics, Windows.Foundation.UniversalApiContract, 8.0)
+    ]
+    runtimeclass PenDevice
+    {
+        [default] interface Windows.Devices.Input.IPenDevice;
     }
 }

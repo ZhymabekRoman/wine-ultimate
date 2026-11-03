@@ -310,6 +310,42 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* The three app-visible probe classes of the Windows.System and Windows.Devices.Input
+     * namespaces: the live gate traces log one 'Failed to find library' line for each of them
+     * (Windows.System.Profile.EducationSettings from client 042c, Windows.Devices.Input.PenDevice
+     * from client 0468, Windows.System.User in the older-era traces).  Every such line is a
+     * RoGetActivationFactory probe that answers REGDB_E_CLASSNOTREG and that the app then
+     * retry-loops on: an unpackaged app registers its activatable classes through its framework
+     * package, so the prefix has no ActivatableClassId key for these classes and the registry
+     * lookup below (plus the side-by-side namespace-dll probe) finds nothing.  Route each class
+     * to the builtin module that implements its DllGetActivationFactory, in the exact style of
+     * the routes above.
+     *
+     * Exact-match on purpose: a namespace-prefix route (wcsncmp) over Windows.System. would
+     * swallow Windows.System.UserProfile.* and Windows.System.Profile.SystemId/
+     * SystemManufacturers, which today fall through to the registry lookup and the existing
+     * per-class routes, and over Windows.Devices.Input. would swallow the PointerDevice/
+     * TouchPanel classes of the namespace that this module does not implement.  Those classes
+     * must keep answering REGDB_E_CLASSNOTREG: advertising a factory that cannot serve them is
+     * a worse app-visible answer than the honest not-registered one. */
+    if (!wcscmp(classid, L"Windows.System.Profile.EducationSettings"))
+    {
+        *out = wcsdup(L"windows.system.profile.dll");
+        return S_OK;
+    }
+
+    if (!wcscmp(classid, L"Windows.Devices.Input.PenDevice"))
+    {
+        *out = wcsdup(L"windows.devices.input.dll");
+        return S_OK;
+    }
+
+    if (!wcscmp(classid, L"Windows.System.User"))
+    {
+        *out = wcsdup(L"windows.system.dll");
+        return S_OK;
+    }
+
     /* load class registry key */
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId",
                       0, KEY_READ, &hkey_root))

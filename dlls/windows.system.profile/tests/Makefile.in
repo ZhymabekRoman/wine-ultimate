@@ -1,0 +1,5 @@
+TESTDLL = windows.system.profile.dll
+IMPORTS = combase kernelbase
+
+SOURCES = \
+	education.c
