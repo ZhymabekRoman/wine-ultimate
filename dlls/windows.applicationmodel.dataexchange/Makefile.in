@@ -1,0 +1,17 @@
+MODULE  = windows.applicationmodel.dataexchange.dll
+ENABLE_ARCHS = x86_64
+IMPORTS = combase uuid kernelbase ole32
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	classes.idl \
+	async.c \
+	clipboard.c \
+	collections.c \
+	data_package.c \
+	data_package_view.c \
+	main.c \
+	property_set.c \
+	share.c \
+	standard_formats.c
