@@ -1305,7 +1305,7 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
     {
         TRACE( "qualifier probe %s: answering S_OK/empty\n", debugstr_w( raw ) );
         key_release( tmp, owned );
-        return WindowsCreateString( L"", 0, value );
+        return WindowsCreateString( L"en-US", 5, value );
     }
     for (i = 0; raw && i < impl->count; i++)
     {
