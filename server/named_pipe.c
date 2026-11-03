@@ -29,6 +29,7 @@
 #include <stdlib.h>
 #include <sys/mman.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -97,6 +98,7 @@ struct pipe_end
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
     struct async_queue   write_q;    /* write queue */
+    int                  blk_fd;     /* WA_MOJO_RELAY: dup'd unix fd of the latest AddBlockBuffer (ipcz id 14) block mapping, -1 = none */
 };
 
 struct pipe_server
@@ -262,6 +264,7 @@ static const struct relay_op
 } relay_ops[] =
 {
     { 13,  8, -1 },  /* OpenChannelRequest { channel: handle<channel_endpoint> } */
+    { 14, 16,  8 },  /* AddBlockBuffer { block: handle<driver_object> } (NodeLink block; captures relay the handle at off=56/48) */
     { 20, 24, -1 },  /* DuplicateBufferResponse { buffer } */
     { 21,  8, -1 },  /* GetBufferRequest { buffer: handle<pending_buffer> } */
     { 22,  8, -1 },  /* GetBufferResponse { buffer: handle<shared_buffer> } */
@@ -277,36 +280,49 @@ static const struct relay_op
  * payload rides in the NodeLink shared-memory block and the in-band params carry
  * only a fragment reference: the 16-byte message tail is [u32 StructHeader]
  * [u32 ArrayHeader] [u32 block_off] [u32 size].  Append blk=<off>/<size> to the
- * S line so the decode pass knows which fragment offsets matter, and, when the
- * in-band handle of this very frame is the relayed block mapping (the driver
- * object duplicated at off=48/56 in the captures), map that region server-side
+ * S line so the decode pass knows which fragment offsets matter, and, when this
+ * pipe has a block mapping (the AddBlockBuffer/ipcz-id-14 driver object grabbed
+ * on writer_end->blk_fd, relayed at off=48/56 in the captures; 'obj' of this very
+ * frame is preferred when it is itself a mapping), map that region server-side
  * and dump the first 64 bytes there as WD<hex>.  Read-only, instrumentation
  * only; runs once per scan (write side) under WA_MOJO_RELAY. */
-static void relay_dump_blk( struct object *obj, const unsigned char *b,
-                            data_size_t off, data_size_t fnum, data_size_t body,
-                            data_size_t len )
+static void relay_dump_blk( struct pipe_end *end, struct object *obj,
+                            const unsigned char *b, data_size_t off,
+                            data_size_t fnum, data_size_t len )
 {
     static const char hexd[] = "0123456789abcdef";
     char hex[129];
     data_size_t tail = off + fnum - 16;
     unsigned int blk_off, blk_size, i, delta;
     const unsigned char *p;
-    struct fd *fd;
+    struct fd *fd = NULL;
     void *base;
     int ufd;
 
-    if (off + fnum > len || tail < body) return;  /* tail16 not in this capture */
+    if (fnum < 56 || off + fnum > len || tail < off + 40) return;  /* tail16 not in this write */
     blk_off  = b[tail+8]  | (b[tail+9] << 8)  | (b[tail+10] << 16)  | ((unsigned int)b[tail+11] << 24);
     blk_size = b[tail+12] | (b[tail+13] << 8) | (b[tail+14] << 16) | ((unsigned int)b[tail+15] << 24);
     if (!blk_size || blk_size >= (1u << 24) || blk_off >= (1u << 28)) return;
     fprintf( stderr, " blk=%08x/%d", blk_off, blk_size );
 
-    if (obj->ops->type != &mapping_type) return;
-    if (!(fd = obj->ops->get_fd( obj ))) return;
-    if ((ufd = get_unix_fd( fd )) == -1) return;
+    if (obj && obj->ops->type == &mapping_type)
+    {
+        if (!(fd = obj->ops->get_fd( obj ))) return;
+        if ((ufd = get_unix_fd( fd )) == -1)
+        {
+            release_object( fd );
+            return;
+        }
+    }
+    else if (end && end->blk_fd != -1) ufd = end->blk_fd;  /* dup owned by us, no object lifetime */
+    else return;
     delta = blk_off & 0xfff;
     if ((base = mmap( NULL, delta + 64, PROT_READ, MAP_PRIVATE, ufd,
-                      (off_t)blk_off & ~(off_t)0xfff )) == MAP_FAILED) return;
+                      (off_t)blk_off & ~(off_t)0xfff )) == MAP_FAILED)
+    {
+        if (fd) release_object( fd );
+        return;
+    }
     p = (const unsigned char *)base + delta;
     for (i = 0; i < 64; i++)
     {
@@ -315,6 +331,7 @@ static void relay_dump_blk( struct object *obj, const unsigned char *b,
     }
     hex[128] = 0;
     munmap( base, delta + 64 );
+    if (fd) release_object( fd );
     fprintf( stderr, " WD%s", hex );
 }
 
@@ -332,7 +349,7 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
         unsigned int magic = b[off] | (b[off+1] << 8) | (b[off+2] << 16) | ((unsigned int)b[off+3] << 24);
         data_size_t fnum, body;
         unsigned short type, hdr;
-        int i, s, k;
+        int i, s, k, s_line = 0;
 
         if (magic != 0x10) break;  /* frames must start at a message boundary */
         fnum = b[off+4] | (b[off+5] << 8) | (b[off+6] << 16) | ((unsigned int)b[off+7] << 24);
@@ -392,11 +409,38 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                 box->dst    = 0;
                 box->reader = NULL;
                 list_add_tail( message->relay, &box->entry );
+                if (type == 14 && box->obj->ops->type == &mapping_type)
+                {
+                    /* latest AddBlockBuffer wins: keep our own dup of its unix file (a struct fd
+                     * is not refcounted: close_fd frees it under a grab, gate69h SIGSEGV) so the
+                     * block bytes behind every later AcceptParcel blk= can be mapped here */
+                    struct fd *bfd = box->obj->ops->get_fd( box->obj );
+                    if (bfd)
+                    {
+                        int ufd = get_unix_fd( bfd ), d = -1;
+                        if (ufd != -1) d = dup( ufd );
+                        release_object( bfd );
+                        if (d != -1)
+                        {
+                            if (writer_end->blk_fd != -1) close( writer_end->blk_fd );
+                            writer_end->blk_fd = d;
+                            fprintf( stderr, "WA_RELAY: M pid=%04x op=14 blkfd=%d\n",
+                                     current->process->id, d );
+                        }
+                    }
+                }
+                s_line = 1;
                 fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u src=%04x access=%08x",
                          current->process->id, type, so, h, box->access );
-                if (type == 20) relay_dump_blk( box->obj, b, off, fnum, body, len );
+                if (type == 20) relay_dump_blk( writer_end, box->obj, b, off, fnum, len );
                 fputc( '\n', stderr );
             }
+        }
+        if (type == 20 && !s_line)  /* AcceptParcel with no resolved in-band handle: log the fragment ref alone */
+        {
+            fprintf( stderr, "WA_RELAY: S pid=%04x op=20 off=%u", current->process->id, off );
+            relay_dump_blk( writer_end, NULL, b, off, fnum, len );
+            fputc( '\n', stderr );
         }
         off += fnum;
     }
@@ -899,6 +943,7 @@ static void pipe_end_destroy( struct object *obj )
     free_async_queue( &pipe_end->read_q );
     free_async_queue( &pipe_end->write_q );
     if (pipe_end->fd) release_object( pipe_end->fd );
+    if (pipe_end->blk_fd != -1) close( pipe_end->blk_fd );
     if (pipe_end->pipe) release_object( pipe_end->pipe );
     if (pipe_end->client_proc) release_object( pipe_end->client_proc );
 }
@@ -1921,6 +1966,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->client_proc = NULL;
     pipe_end->conn_info = CONN_INFO_NONE;
     pipe_end->buffer_size = buffer_size;
+    pipe_end->blk_fd = -1;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
     list_init( &pipe_end->message_queue );
