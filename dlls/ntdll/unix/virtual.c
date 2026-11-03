@@ -262,6 +262,29 @@ static inline BOOL is_vprot_exec_write( BYTE vprot )
     return (vprot & VPROT_EXEC) && (vprot & (VPROT_WRITE | VPROT_WRITECOPY));
 }
 
+/* A/B gate for layer-2: the VPROT_EXEC_SUSPENDED fault-driven exec/write
+ * alternation for private EXEC+WRITE pages.  Layer-1 (compound PAGE_*
+ * normalisation in get_vprot_flags) is always active; layer-2 is enabled by
+ * default and becomes inert when WINE_DISABLE_VPROT_LAYER2=1 is present in
+ * the environment: the flag is then never set on a vprot and every branch
+ * that consumes it is skipped, giving pure layer-1 behaviour.
+ * The env var is evaluated lazily exactly once (same tri-state trick as
+ * vfs_cache_disabled in file.c); a benign race between threads evaluating it
+ * concurrently is acceptable for an A/B experiment. */
+static int layer2_disabled_state = -1;  /* -1 = unset, 0 = enabled, 1 = disabled */
+
+static inline BOOL layer2_disabled(void)
+{
+    int state = layer2_disabled_state;
+    if (state == -1)
+    {
+        const char *env = getenv( "WINE_DISABLE_VPROT_LAYER2" );
+        state = (env && env[0] == '1') ? 1 : 0;
+        layer2_disabled_state = state;
+    }
+    return state;
+}
+
 /* mmap() anonymous memory at a fixed address */
 void *anon_mmap_fixed( void *start, size_t size, int prot, int flags )
 {
@@ -1419,7 +1442,7 @@ static int get_unix_prot( BYTE vprot )
         if (vprot & VPROT_WRITECOPY) prot |= PROT_WRITE | PROT_READ;
         if (vprot & VPROT_EXEC) prot |= PROT_EXEC | PROT_READ;
         if (vprot & VPROT_WRITEWATCH) prot &= ~PROT_WRITE;
-        if (vprot & VPROT_EXEC_SUSPENDED) prot &= ~PROT_EXEC;
+        if (!layer2_disabled() && (vprot & VPROT_EXEC_SUSPENDED)) prot &= ~PROT_EXEC;
     }
     if (!prot) prot = PROT_NONE;
     return prot;
@@ -4758,7 +4781,7 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, 
         }
         else ret = grow_thread_stack( data, page, &stack_info );
     }
-    else if ((err == EXCEPTION_EXECUTE_FAULT || err == EXCEPTION_READ_FAULT) && (vprot & VPROT_EXEC_SUSPENDED))
+    else if (!layer2_disabled() && (err == EXCEPTION_EXECUTE_FAULT || err == EXCEPTION_READ_FAULT) && (vprot & VPROT_EXEC_SUSPENDED))
     {
         /* a write was granted to this page earlier, which had to remove host
          * execution permission; restore it and re-arm the write watch */
@@ -4777,8 +4800,10 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, 
                 /* on windows a write to a private read/write/execute allocation never
                  * faults, so it must not be reported to the process. when the host
                  * refuses writable executable mappings, grant the write by suspending
-                 * execution of that page; it is restored on the next execute fault. */
-                if (view && !(view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | SEC_COMMIT)))
+                 * execution of that page; it is restored on the next execute fault.
+                 * with layer-2 disabled this grant is never made (the flag is not set),
+                 * so executable-memory writes are reported as in pure layer-1. */
+                if (!layer2_disabled() && view && !(view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | SEC_COMMIT)))
                 {
                     set_page_vprot_bits( page, host_page_size, VPROT_EXEC_SUSPENDED, VPROT_WRITEWATCH );
                     mprotect_range( page, host_page_size, 0, 0 );
