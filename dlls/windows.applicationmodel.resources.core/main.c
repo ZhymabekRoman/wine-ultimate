@@ -710,6 +710,30 @@ struct str_vector
     struct vec_event_reg *regs;   /* VectorChanged registrations, interlocked list */
 };
 
+/* A/B experiment (hstrab, arm R): the Languages element is handed out as a
+ * WindowsCreateStringReference-based HSTRING.  CoreRT (mrt100_app Redhawk)
+ * consumes the returned HSTRING's raw buffer directly; the suspect is the
+ * heap-string representation (malloc'ed combase hstring_private, tag-0
+ * handle).  A reference string is {flags = HSTRING_REFERENCE_FLAG, length,
+ * str} with handle == header (dlls/combase/string.c struct hstring_header:
+ * 4 ULONGs + pointer = the 24-byte x64 HSTRING_HEADER); the header must
+ * outlive every use of the handle, so it is static here and the buffer is
+ * the static, NUL-terminated, immutable "en-US".  A "fresh" reference per
+ * call rewrites the identical triple, i.e. returns the same handle: the
+ * ref discipline is unchanged from the heap-string arm (GetAt answers a
+ * borrowed handle, WindowsDeleteString on a reference is a no-op, context
+ * teardown leaves the shared header in place). */
+static const WCHAR lang_enUS[] = L"en-US";
+static HSTRING_HEADER lang_header;
+
+static inline HRESULT lang_ref_of( HSTRING item, HSTRING *out )
+{
+    UINT32 len = 0;
+    const WCHAR *raw = WindowsGetStringRawBuffer( item, &len );
+
+    return WindowsCreateStringReference( raw, len, &lang_header, out );
+}
+
 static inline struct str_vector *ov_from( void *iface ) { return (struct str_vector *)iface; }
 static inline struct str_vector *svv_from( void *iface ) { return CONTAINING_RECORD( iface, struct str_vector, vt_vv ); }
 
@@ -749,8 +773,7 @@ static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
     TRACE( "svv_GetAt %u\n", index );
     if (!item) return E_POINTER;    struct str_vector *impl = svv_from( iface );
     if (index >= impl->count) return E_BOUNDS;
-    *item = impl->items[index];
-    return S_OK;
+    return lang_ref_of( impl->items[index], item );
 }
 static HRESULT WINAPI svv_Size( void *iface, UINT32 *size )
 {
@@ -797,7 +820,11 @@ static HRESULT WINAPI svv_GetMany( void *iface, UINT32 start, UINT32 size, HSTRI
     if (size && !items) return E_POINTER;
     n = (start < impl->count) ? impl->count - start : 0;
     if (n > size) n = size;
-    if (items && n) memcpy( items, impl->items + start, n * sizeof(*items) );
+    if (items && n)
+    {
+        UINT32 i;
+        for (i = 0; i < n; i++) lang_ref_of( impl->items[start + i], items + i );
+    }
     *count = n;
     return S_OK;
 }
@@ -1021,8 +1048,7 @@ static HRESULT WINAPI ov_GetAt( void *iface, UINT32 index, HSTRING *item )
     TRACE( "ov_GetAt %u\n", index );
     if (!item) return E_POINTER;
     if (index >= impl->count) return E_BOUNDS;
-    *item = impl->items[index];
-    return S_OK;
+    return lang_ref_of( impl->items[index], item );
 }
 static HRESULT WINAPI ov_Size( void *iface, UINT32 *size )
 {
@@ -2971,7 +2997,15 @@ static HRESULT create_context( struct res_context **out )
     ctx->languages.ref = 1;
     ctx->languages.items = ctx->lang_items;
     ctx->languages.count = 1;
-    WindowsCreateString( L"en-US", 5, &ctx->lang_items[0] );
+    /* arm D: store the Languages element as a WindowsDuplicateString of the
+     * reference (combase duplicate-of-reference -> WindowsCreateString, i.e.
+     * the allocated/heap-flag hstring_private), isolating the stored element
+     * representation from the reference handle GetAt hands out. */
+    {
+        HSTRING ref;
+        WindowsCreateStringReference( lang_enUS, 5, &lang_header, &ref );
+        WindowsDuplicateString( ref, &ctx->lang_items[0] );
+    }
     *out = ctx;
     return S_OK;
 }

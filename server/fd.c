@@ -151,6 +151,9 @@ struct fd
     WCHAR               *nt_name;     /* NT file name */
     data_size_t          nt_namelen;  /* length of NT file name */
     int                  unix_fd;     /* unix file descriptor */
+    int                  sync_pipe[2];/* in-process sync fd (read side) mirroring the signaled
+                                       * state, created on demand for get_inproc_sync_fd;
+                                       * [1] is the server write side, -1 = none */
     unsigned int         no_fd_status;/* status to return when unix_fd is -1 */
     unsigned int         cacheable :1;/* can the fd be cached on the client side? */
     unsigned int         fs_locks :1; /* can we use filesystem locks for this fd? */
@@ -1655,6 +1658,8 @@ static void fd_destroy( struct object *obj )
         if (fd->unix_fd != -1) close( fd->unix_fd );
         free( fd->unix_name );
     }
+    if (fd->sync_pipe[0] != -1) close( fd->sync_pipe[0] );
+    if (fd->sync_pipe[1] != -1) close( fd->sync_pipe[1] );
     if (fd->sync) release_object( fd->sync );
 }
 
@@ -1768,6 +1773,8 @@ static struct fd *alloc_fd_object(void)
     fd->nt_namelen = 0;
     fd->cacheable  = 0;
     fd->fs_locks   = 1;
+    fd->sync_pipe[0] = -1;
+    fd->sync_pipe[1] = -1;
     fd->poll_index = -1;
     fd->completion = NULL;
     fd->comp_flags = 0;
@@ -1810,6 +1817,8 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
     fd->unix_fd    = -1;
     fd->cacheable  = 0;
     fd->fs_locks   = 0;
+    fd->sync_pipe[0] = -1;
+    fd->sync_pipe[1] = -1;
     fd->poll_index = -1;
     fd->completion = NULL;
     fd->comp_flags = 0;
@@ -2230,6 +2239,39 @@ void set_fd_signaled( struct fd *fd, int signaled )
     if (fd->comp_flags & FILE_SKIP_SET_EVENT_ON_HANDLE) return;
     if (signaled) signal_sync( fd->sync );
     else reset_sync( fd->sync );
+
+    /* mirror into the in-process sync fd, if one was handed out: a byte in the
+     * pipe makes the read side (the fd the client polls) readable when signaled */
+    if (fd->sync_pipe[1] != -1)
+    {
+        char c = 1;
+        if (signaled) (void)!write( fd->sync_pipe[1], &c, 1 );
+        else (void)!read( fd->sync_pipe[0], &c, 1 );
+    }
+}
+
+/* return a pollable fd whose readability mirrors the fd's signaled state, created
+ * on the first call; the read side is the one handed to the client so that the
+ * in-process fast path can wait on a fd-backed object (e.g. a named pipe) without
+ * a wineserver round trip per wait. returns -1 if the pipe pair cannot be made. */
+int fd_get_inproc_sync_fd( struct fd *fd )
+{
+    if (fd->sync_pipe[0] == -1)
+    {
+        char c = 1;
+        int fds[2];
+
+        if (pipe( fds ) == -1) return -1;
+        fcntl( fds[0], F_SETFL, O_NONBLOCK );
+        fcntl( fds[1], F_SETFL, O_NONBLOCK );
+        fcntl( fds[0], F_SETFD, FD_CLOEXEC );
+        fcntl( fds[1], F_SETFD, FD_CLOEXEC );
+        fd->sync_pipe[0] = fds[0];  /* read side -> client */
+        fd->sync_pipe[1] = fds[1];  /* write side -> server */
+        if (check_fd_events( fd, POLLIN ) & POLLIN)  /* seed with the current signaled state */
+            (void)!write( fds[1], &c, 1 );
+    }
+    return fd->sync_pipe[0];
 }
 
 /* check if events are pending and if yes return which one(s) */

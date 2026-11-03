@@ -312,8 +312,15 @@ DECL_HANDLER(get_inproc_sync_fd)
 
     reply->access = get_handle_access( current->process, req->handle );
 
-    if ((fd = get_obj_inproc_sync( obj, &reply->type )) < 0) set_error( STATUS_NOT_IMPLEMENTED );
-    else send_client_fd( current->process, fd, req->handle );
+    if ((fd = get_obj_inproc_sync( obj, &reply->type )) < 0)
+    {
+        /* fd-backed objects without an ntsync sync (the named pipe ends and the
+         * server-created internal syncs) fall back to a pollable pipe pair that
+         * mirrors their signaled state, so the client fast path stops paying a
+         * wineserver round trip per wait on them. */
+        if ((fd = named_pipe_get_inproc_sync_fd( obj, &reply->type )) < 0) set_error( STATUS_NOT_IMPLEMENTED );
+    }
+    if (fd >= 0) send_client_fd( current->process, fd, req->handle );
 
     release_object( obj );
 }

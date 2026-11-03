@@ -4108,6 +4108,47 @@ static void test_wait_pipe(void)
     CloseHandle(ov.hEvent);
 }
 
+/* The client fast path (NtWaitForSingleObject / MsgWait*) asks the server for the
+ * object's in-process sync fd (get_inproc_sync_fd) and polls it in the kernel, so a
+ * wait on a pipe handle must not cost a wineserver round trip per iteration.  The
+ * pipe's sync fd mirrors its signaled state (peer has data to read); this checks
+ * that the server hands back a working fd that tracks the round trip.  On builds
+ * without an in-process sync provider the fd request is negative-cached and the
+ * server-side wait is authoritative, so the same assertions must hold either way. */
+static void test_pipe_inproc_sync(void)
+{
+    HANDLE server, client;
+    char buf[8];
+    DWORD n;
+    BOOL ret;
+
+    server = CreateNamedPipeA( PIPENAME, PIPE_ACCESS_DUPLEX, PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                               1, 1024, 1024, NMPWAIT_USE_DEFAULT_WAIT, NULL );
+    ok( server != INVALID_HANDLE_VALUE, "got invalid handle\n" );
+    client = CreateFileA( PIPENAME, GENERIC_READ | GENERIC_WRITE, 0, NULL, OPEN_EXISTING, 0, NULL );
+    ok( client != INVALID_HANDLE_VALUE, "got invalid handle\n" );
+    ConnectNamedPipe( server, NULL );  /* the CreateFile above already served the instance */
+
+    /* A synchronous reader with no I/O in flight is signaled; the client fast path
+     * (NtWaitForSingleObject) asks the server for the pipe's in-process sync fd and
+     * polls it in the kernel, so the returned fd must reflect that state. */
+    ok( WaitForSingleObject( client, 0 ) == WAIT_OBJECT_0, "idle reader not signaled\n" );
+
+    /* The peer writes: the reader has data to consume and stays signaled. */
+    ret = WriteFile( server, "abc", 3, &n, NULL );
+    ok( ret && n == 3, "write got %lu\n", GetLastError() );
+    ok( WaitForSingleObject( client, 0 ) == WAIT_OBJECT_0, "reader not signaled with data queued\n" );
+
+    /* Draining the message leaves the reader idle again, i.e. signaled. */
+    n = 0;
+    ret = ReadFile( client, buf, sizeof(buf), &n, NULL );
+    ok( ret && n == 3, "read got %lu/%lu\n", ret, n );
+    ok( WaitForSingleObject( client, 0 ) == WAIT_OBJECT_0, "reader not signaled after draining\n" );
+
+    CloseHandle( client );
+    CloseHandle( server );
+}
+
 static void test_nowait(DWORD pipe_type)
 {
     HANDLE piperead, pipewrite, file;
@@ -4815,6 +4856,7 @@ START_TEST(pipe)
     test_pipe_busy_mitigation();
     test_multiple_instances();
     test_wait_pipe();
+    test_pipe_inproc_sync();
     test_nowait(PIPE_TYPE_BYTE);
     test_nowait(PIPE_TYPE_MESSAGE);
     test_GetOverlappedResultEx();

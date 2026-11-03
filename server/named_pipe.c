@@ -850,6 +850,24 @@ static struct fd *pipe_end_get_fd( struct object *obj )
     return (struct fd *) grab_object( pipe_end->fd );
 }
 
+/* in-process sync fd for a named pipe handle: its sync object (the fd's internal
+ * event) is polled by the client's NtWaitForSingleObject / MsgWait fast path; when
+ * that event has no ntsync fd the request used to answer NOT_IMPLEMENTED and every
+ * wait cost a wineserver round trip.  Hand back the fd's pollable sync pipe (read
+ * side), reported as an event so the client treats it as a signaled/waitable fd. */
+int named_pipe_get_inproc_sync_fd( struct object *obj, int *type )
+{
+    struct fd *fd = get_obj_fd( obj );
+    int ret = -1;
+
+    if (fd)
+    {
+        if ((ret = fd_get_inproc_sync_fd( fd )) != -1) *type = INPROC_SYNC_EVENT;
+        release_object( fd );
+    }
+    return ret;
+}
+
 static struct pipe_message *queue_message( struct pipe_end *pipe_end, struct iosb *iosb )
 {
     struct pipe_message *message;
