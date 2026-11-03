@@ -2351,54 +2351,6 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
             if (!(flags & MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION) &&
                 check_atl_thunk( data, sigcontext, &rec, &context.c ))
                 return;
-            /*
-             * DEP-off thaw: a process that disabled DEP (NtSetInformationProcess
-             * ProcessExecuteFlags MEM_EXECUTE_OPTION_DISABLE, or a .NET Native
-             * image with the matching DllCharacteristics) has writable pages
-             * executable on Windows -- the managed code heap carries patchable
-             * thunks and retarget stubs that are jumped to.  Wine's heap pages
-             * map host-PROT_EXEC only when the Windows protection said so, so
-             * the first jump faults EXECUTE here.  Grant PAGE_EXECUTE_READWRITE
-             * to the committed writable page once and resume: exactly the
-             * Windows behaviour the app assumes (measured: Calculator's
-             * retarget loop faulted on its own heap page, 0x...c298 in an
-             * rw-p anon VMA, ~280x per pass, leaking a funclet frame per pass
-             * into the 1 MB main-stack reserve).
-             */
-            if (flags & MEM_EXECUTE_OPTION_DISABLE)
-            {
-                static void *thawed[16];
-                static unsigned int thawed_count;
-                MEMORY_BASIC_INFORMATION info;
-                SIZE_T old_size;
-                ULONG i, new_prot;
-
-                for (i = 0; i < thawed_count && i < ARRAYSIZE( thawed ); i++)
-                    if (thawed[i] == siginfo->si_addr) break;
-                if (i >= thawed_count && thawed_count < ARRAYSIZE( thawed ))
-                {
-                    if (!NtQueryVirtualMemory( GetCurrentProcess(), siginfo->si_addr, MemoryBasicInformation,
-                                               &info, sizeof(info), &old_size ) &&
-                        info.State == MEM_COMMIT &&
-                        (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE |
-                                         PAGE_EXECUTE_WRITECOPY)))
-                    {
-                        new_prot = info.Protect & ~(PAGE_NOCACHE | PAGE_WRITECOMBINE | PAGE_GUARD |
-                                                    PAGE_NOACCESS);
-                        if (!(new_prot & PAGE_EXECUTE)) new_prot |= PAGE_EXECUTE_READWRITE;
-                        if (!NtProtectVirtualMemory( GetCurrentProcess(), &info.BaseAddress,
-                                                     &info.RegionSize, new_prot, &old_size ))
-                        {
-                            thawed[thawed_count++] = siginfo->si_addr;
-                            TRACE_(seh)( "DEP-off thaw: %p -> %08x (%u pages)\n",
-                                         info.BaseAddress, new_prot,
-                                         (unsigned int)(info.RegionSize / 0x1000) );
-                            leave_handler( data, sigcontext );
-                            return;
-                        }
-                    }
-                }
-            }
         }
         break;
     case TRAP_x86_ALIGNFLT:  /* Alignment check exception */
