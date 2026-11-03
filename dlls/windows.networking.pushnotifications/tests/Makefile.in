@@ -1,0 +1,5 @@
+TESTDLL = windows.networking.pushnotifications.dll
+IMPORTS = combase ole32 uuid
+
+SOURCES = \
+	pushnotifications.c

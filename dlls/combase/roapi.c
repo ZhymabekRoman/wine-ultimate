@@ -63,7 +63,6 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
 
     if (!wcsncmp(classid, L"Windows.ApplicationModel.Core.", 30) ||
         !wcsncmp(classid, L"Windows.ApplicationModel.Background.", 36) ||
-        !wcsncmp(classid, L"Windows.Networking.PushNotifications.", 37) ||
         !wcscmp(classid, L"Windows.ApplicationModel.AppInstance") ||
         !wcscmp(classid, L"Microsoft.Windows.AppLifecycle.AppInstance") ||
         !wcscmp(classid, L"Windows.ApplicationModel.StartupTask") ||
@@ -72,6 +71,21 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
          wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47)))
     {
         *out = wcsdup(L"twinapi.appcore.dll");
+        return S_OK;
+    }
+
+    /* Windows.Networking.PushNotifications.* is the WNS channel surface: an
+     * unpackaged prefix has no ActivatableClassId key for the classes, so route
+     * the namespace to windows.networking.pushnotifications.dll, the module that
+     * implements the classes' DllGetActivationFactory, per the own-name module
+     * rule this file already applies to Windows.ApplicationModel.Core,
+     * Windows.UI.Notifications and Windows.Security.Cryptography.  The module
+     * covers the whole surface the twinapi.appcore stub answered (statics and
+     * the ChannelsRevoked event) plus the statics2/statics3 GetForUser/GetDefault
+     * points, the channel creation operations and the channel object. */
+    if (!wcsncmp(classid, L"Windows.Networking.PushNotifications.", 37))
+    {
+        *out = wcsdup(L"windows.networking.pushnotifications.dll");
         return S_OK;
     }
 

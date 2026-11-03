@@ -1,0 +1,12 @@
+MODULE  = windows.networking.pushnotifications.dll
+ENABLE_ARCHS = x86_64
+IMPORTS = combase uuid kernelbase ole32
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	classes.idl \
+	async.c \
+	channel.c \
+	main.c \
+	manager.c
