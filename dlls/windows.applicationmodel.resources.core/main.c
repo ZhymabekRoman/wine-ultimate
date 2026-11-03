@@ -746,6 +746,7 @@ static HRESULT WINAPI svv_GetTrustLevel( void *iface, INT32 *t ) { return get_tr
 static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
 {
 
+    TRACE( "svv_GetAt %u\n", index );
     if (!item) return E_POINTER;    struct str_vector *impl = svv_from( iface );
     if (index >= impl->count) return E_BOUNDS;
     *item = impl->items[index];
@@ -755,6 +756,7 @@ static HRESULT WINAPI svv_Size( void *iface, UINT32 *size )
 {
     if (!size) return E_POINTER;
     *size = svv_from( iface )->count;
+    TRACE( "svv_Size -> %u\n", *size );
     return S_OK;
 }
 /* IVectorView::IndexOf (idl:254), slot 8.  Ordinal comparison through
@@ -769,6 +771,7 @@ static HRESULT WINAPI svv_IndexOf( void *iface, HSTRING item, UINT32 *index, INT
     struct str_vector *impl = svv_from( iface );
     UINT32 i;
 
+    TRACE( "svv_IndexOf\n" );
     if (!index || !found) return E_POINTER;
     *index = 0;
     *found = FALSE;
@@ -789,6 +792,7 @@ static HRESULT WINAPI svv_GetMany( void *iface, UINT32 start, UINT32 size, HSTRI
     struct str_vector *impl = svv_from( iface );
     UINT32 n;
 
+    TRACE( "svv_GetMany start=%u size=%u\n", start, size );
     if (!count) return E_POINTER;
     if (size && !items) return E_POINTER;
     n = (start < impl->count) ? impl->count - start : 0;
@@ -1014,6 +1018,7 @@ static HRESULT WINAPI ov_GetAt( void *iface, UINT32 index, HSTRING *item )
 {
     struct str_vector *impl = ov_from( iface );
 
+    TRACE( "ov_GetAt %u\n", index );
     if (!item) return E_POINTER;
     if (index >= impl->count) return E_BOUNDS;
     *item = impl->items[index];
@@ -1023,12 +1028,14 @@ static HRESULT WINAPI ov_Size( void *iface, UINT32 *size )
 {
     if (!size) return E_POINTER;
     *size = ov_from( iface )->count;
+    TRACE( "ov_Size -> %u\n", *size );
     return S_OK;
 }
 static HRESULT WINAPI ov_GetView( void *iface, void **view )
 {
     struct str_vector *impl = ov_from( iface );
 
+    TRACE( "ov_GetView\n" );
     if (!view) return E_POINTER;
     *view = &impl->vt_vv;
     incr( &impl->ref );
@@ -1046,6 +1053,7 @@ static HRESULT WINAPI ov_RemoveAtEnd( void *iface ) { return S_OK; }
 static HRESULT WINAPI ov_Clear( void *iface ) { return S_OK; }
 static HRESULT WINAPI ov_GetMany( void *iface, UINT32 start, UINT32 size, HSTRING *items, UINT32 *count )
 {
+    TRACE( "ov_GetMany start=%u size=%u\n", start, size );
     return svv_GetMany( &ov_from( iface )->vt_vv, start, size, items, count );
 }
 static HRESULT WINAPI ov_ReplaceAll( void *iface, UINT32 count, HSTRING *items ) { return S_OK; }
@@ -1739,6 +1747,7 @@ static HRESULT WINAPI rmv_Get( void *iface, HSTRING key, void **map )
     BOOL owned;
     UINT32 i;
     if (!key_decode( key, &raw, &tmp, &owned )) return ELEMENT_NOT_FOUND_E;
+    TRACE( "rmv_Get Lookup %s\n", debugstr_w( raw ) );
     for (i = 0; raw && i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->entries[i].key ))
         {
@@ -2075,6 +2084,7 @@ static struct iterator *iter_new( UINT8 kind, void *src, UINT32 count, const voi
 
 static HRESULT WINAPI svv_First( void *iface, void **first )
 {
+    TRACE( "svv_First\n" );
     if (!first) return E_POINTER;
     struct str_vector *impl = svv_from( iface );
     struct iterator *it = iter_new( IT_STRING, impl, impl->count, iterator_string_vtbl );
@@ -2085,6 +2095,7 @@ static HRESULT WINAPI svv_First( void *iface, void **first )
 
 static HRESULT WINAPI ov_First( void *iface, void **first )
 {
+    TRACE( "ov_First\n" );
     if (!first) return E_POINTER;
     struct str_vector *impl = ov_from( iface );
     struct iterator *it = iter_new( IT_STRING, impl, impl->count, iterator_string_vtbl );
