@@ -2293,6 +2293,62 @@ static inline BOOL check_invalid_gsbase( struct thread_data *data, ucontext_t *u
  *
  * Handler for SIGSEGV and related errors.
  */
+/*
+ * Thaw scope: WINE_DEP_THAW_EXES='a.exe:b.exe' whitelists main-image
+ * basenames for the DEP-off execute thaw.  A process that disabled DEP
+ * (ProcessExecuteFlags MEM_EXECUTE_OPTION_DISABLE -- .NET Native images via
+ * DllCharacteristics) has writable pages executable on Windows: Calculator
+ * and WhatsApp's CLR jump into patchable stubs inside their RW GC heap,
+ * which Wine maps NX, and the jump faults EXECUTE forever (Calculator's
+ * retarget loop burned the whole 1 MB main-stack reserve).  Grant
+ * PAGE_EXECUTE_READWRITE to the faulted committed writable page once and
+ * resume.  Chromium children also run DEP-off for JIT but use guard-page
+ * control flow their VEH expects to fault (NOACCESS pages are excluded)
+ * and explicit RX allocations, and thawing pages their protocol expects to
+ * fault corrupted it: with a global thaw the msedge.dll+0x2d2e44c CHECK
+ * fired (gate60/61: browser gone); without any thaw the .NET clients die
+ * (gate63: WhatsApp root gone early).  So the shim is opt-in per image.
+ */
+static BOOL thaw_allowed( void )
+{
+    static int cached = -1;
+    const char *list;
+
+    if (cached >= 0) return cached;
+    list = getenv( "WINE_DEP_THAW_EXES" );
+    cached = 0;
+    if (list && list[0])
+    {
+        extern PEB *peb;
+        const WCHAR *path = peb->ProcessParameters->ImagePathName.Buffer;
+        const WCHAR *base = path, *p;
+        for (p = path; *p; p++) if (*p == L'\\' || *p == L'/') base = p + 1;
+        while (*list)
+        {
+            const char *end = strchr( list, ':' );
+            size_t len = end ? (size_t)(end - list) : strlen( list );
+            WCHAR wbuf[128];
+            size_t i, blen = wcslen( base );
+            (void)wbuf;
+            if (len && len < ARRAYSIZE( wbuf ))
+            {
+                BOOL match = (blen == len);
+                for (i = 0; match && i < len; i++)
+                {
+                    WCHAR a = base[i], b = (WCHAR)(unsigned char)list[i];
+                    if (a >= L'A' && a <= L'Z') a += 32;
+                    if (b >= L'A' && b <= L'Z') b += 32;
+                    if (a != b) match = FALSE;
+                }
+                if (match && !base[len]) { cached = 1; break; }
+            }
+            if (!end) break;
+            list = end + 1;
+        }
+    }
+    return cached;
+}
+
 static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
 {
     ucontext_t *sigcontext = _sigcontext;
@@ -2351,6 +2407,40 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
             if (!(flags & MEM_EXECUTE_OPTION_DISABLE_THUNK_EMULATION) &&
                 check_atl_thunk( data, sigcontext, &rec, &context.c ))
                 return;
+            if ((flags & MEM_EXECUTE_OPTION_DISABLE) && thaw_allowed())
+            {
+                static void *thawed[16];
+                static unsigned int thawed_count;
+                MEMORY_BASIC_INFORMATION info;
+                SIZE_T old_size;
+                ULONG i, new_prot;
+
+                for (i = 0; i < thawed_count && i < ARRAYSIZE( thawed ); i++)
+                    if (thawed[i] == siginfo->si_addr) break;
+                if (i >= thawed_count && thawed_count < ARRAYSIZE( thawed ))
+                {
+                    if (!NtQueryVirtualMemory( GetCurrentProcess(), siginfo->si_addr, MemoryBasicInformation,
+                                               &info, sizeof(info), &old_size ) &&
+                        info.State == MEM_COMMIT &&
+                        (info.Protect & (PAGE_READWRITE | PAGE_WRITECOPY | PAGE_EXECUTE_READWRITE |
+                                         PAGE_EXECUTE_WRITECOPY)))
+                    {
+                        new_prot = info.Protect & ~(PAGE_NOCACHE | PAGE_WRITECOMBINE | PAGE_GUARD |
+                                                    PAGE_NOACCESS);
+                        if (!(new_prot & PAGE_EXECUTE)) new_prot |= PAGE_EXECUTE_READWRITE;
+                        if (!NtProtectVirtualMemory( GetCurrentProcess(), &info.BaseAddress,
+                                                     &info.RegionSize, new_prot, &old_size ))
+                        {
+                            thawed[thawed_count++] = siginfo->si_addr;
+                            TRACE_(seh)( "DEP-off thaw: %p -> %08x (%u pages)\n",
+                                         info.BaseAddress, new_prot,
+                                         (unsigned int)(info.RegionSize / 0x1000) );
+                            leave_handler( data, sigcontext );
+                            return;
+                        }
+                    }
+                }
+            }
         }
         break;
     case TRAP_x86_ALIGNFLT:  /* Alignment check exception */
