@@ -54,6 +54,19 @@
 #include "windows.ui.h"
 #include "windows.applicationmodel.datatransfer.h"
 
+/* The DragDrop.Core surface (CoreDragDropManager) of the module; the
+ * interfaces are the include/windows.applicationmodel.datatransfer.dragdrop.core.idl
+ * and include/dragdropinterop.idl shapes. */
+#define WIDL_using_Windows_Graphics_Imaging
+#define WIDL_using_Windows_ApplicationModel_DataTransfer_DragDrop
+#define WIDL_using_Windows_ApplicationModel_DataTransfer_DragDrop_Core
+#include "windows.graphics.imaging.h"
+#include "windows.applicationmodel.datatransfer.dragdrop.h"
+#include "windows.applicationmodel.datatransfer.dragdrop.core.h"
+#include "dragdropinterop.h"
+
+typedef __FITypedEventHandler_2_Windows__CApplicationModel__CDataTransfer__CDragDrop__CCore__CCoreDragDropManager_Windows__CApplicationModel__CDataTransfer__CDragDrop__CCore__CCoreDropOperationTargetRequestedEventArgs TargetRequestedHandler;
+typedef __FITypedEventHandler_2_Windows__CApplicationModel__CDataTransfer__CDragDrop__CCore__CCoreDragDropManager_Windows__CApplicationModel__CDataTransfer__CDragDrop__CCore__CCoreDropOperationTargetRequestedEventArgsVtbl TargetRequestedHandlerVtbl;
 
 /* See the module's private.h: the interop interface declaration mirrors
  * include/shobjidl_core.idl:42 and include/shobjidl_core.h. */
@@ -878,6 +891,192 @@ static void test_share_surface( void )
     IHtmlFormatHelperStatics_Release( helper );
 }
 
+/* ------------------------------------------- DragDrop.Core CoreDragDropManager */
+
+/* The TargetRequested delegate of the test: a refcounted object, so the test
+ * sees the manager take the registration reference and give it back on
+ * remove. */
+static LONG handler_refs;
+static ULONG target_requested_invocations;
+
+static HRESULT WINAPI trhandler_QueryInterface( TargetRequestedHandler *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs ))
+    {
+        *out = iface;
+        InterlockedIncrement( &handler_refs );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI trhandler_AddRef( TargetRequestedHandler *iface ) { return InterlockedIncrement( &handler_refs ); }
+static ULONG WINAPI trhandler_Release( TargetRequestedHandler *iface ) { return InterlockedDecrement( &handler_refs ); }
+
+static HRESULT WINAPI trhandler_Invoke( TargetRequestedHandler *iface, ICoreDragDropManager *sender,
+                                        ICoreDropOperationTargetRequestedEventArgs *args )
+{
+    target_requested_invocations++;
+    return S_OK;
+}
+
+static const TargetRequestedHandlerVtbl trhandler_vtbl =
+{
+    trhandler_QueryInterface,
+    trhandler_AddRef,
+    trhandler_Release,
+    trhandler_Invoke,
+};
+
+static TargetRequestedHandler target_requested_handler = { &trhandler_vtbl };
+
+static BOOL iid_in_list( const IID *iids, ULONG count, const IID *iid )
+{
+    ULONG i;
+
+    for (i = 0; i < count; i++)
+        if (IsEqualGUID( &iids[i], iid )) return TRUE;
+    return FALSE;
+}
+
+static void test_core_drag_drop( void )
+{
+    static const WCHAR core_ddm_class[] = L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager";
+    ICoreDragDropManagerStatics *statics = NULL, *statics2 = NULL;
+    IDragDropManagerInterop *interop = NULL;
+    ICoreDragDropManager *manager = NULL, *manager2 = NULL;
+    IActivationFactory *factory;
+    IInspectable *instance = NULL;
+    EventRegistrationToken token, token2, token3;
+    TrustLevel trust = 0xdeadbeef;
+    IID *iids = NULL;
+    HSTRING name = NULL;
+    ULONG count = 0;
+    BOOLEAN enabled = FALSE;
+
+    /* A foreign IID: nothing outside the declared interface set is answered. */
+    static const IID foreign = { 0x12345678, 0x1234, 0x1234, { 0x12, 0x34, 0x56, 0x78, 0x9a, 0xbc, 0xde, 0xf0 } };
+
+    factory = get_factory( core_ddm_class );
+    ok( !!factory, "no CoreDragDropManager factory.\n" );
+    if (!factory) return;
+
+    /* The projections reach the class through its statics and its window interop. */
+    statics = (ICoreDragDropManagerStatics *)0xdeadbeef;
+    check_hr( IActivationFactory_QueryInterface( factory, &IID_ICoreDragDropManagerStatics, (void **)&statics ), S_OK );
+    ok( !!statics, "no ICoreDragDropManagerStatics.\n" );
+    interop = (IDragDropManagerInterop *)0xdeadbeef;
+    check_hr( IActivationFactory_QueryInterface( factory, &IID_IDragDropManagerInterop, (void **)&interop ), S_OK );
+    ok( !!interop, "no IDragDropManagerInterop.\n" );
+
+    /* RoActivateInstance hands out the manager, which answers the default interface. */
+    check_hr( IActivationFactory_ActivateInstance( factory, &instance ), S_OK );
+    ok( !!instance, "no instance.\n" );
+    manager = (ICoreDragDropManager *)0xdeadbeef;
+    check_hr( IInspectable_QueryInterface( instance, &IID_ICoreDragDropManager, (void **)&manager ), S_OK );
+    ok( !!manager, "no ICoreDragDropManager on the instance.\n" );
+    manager2 = (ICoreDragDropManager *)0xdeadbeef;
+    check_hr( ICoreDragDropManager_QueryInterface( manager, &IID_ICoreDragDropManager, (void **)&manager2 ), S_OK );
+    ok( (void *)manager2 == (void *)manager, "the default interface is not the instance.\n" );
+    if (manager2) ICoreDragDropManager_Release( manager2 );
+
+    /* GetForCurrentView answers S_OK with a usable manager. */
+    manager2 = (ICoreDragDropManager *)0xdeadbeef;
+    check_hr( ICoreDragDropManagerStatics_GetForCurrentView( statics, &manager2 ), S_OK );
+    ok( !!manager2, "no manager for the current view.\n" );
+    if (manager2)
+    {
+        check_hr( ICoreDragDropManager_get_AreConcurrentOperationsEnabled( manager2, &enabled ), S_OK );
+        ICoreDragDropManager_Release( manager2 );
+    }
+
+    /* A foreign IID is refused on both the manager and the factory. */
+    statics2 = (ICoreDragDropManagerStatics *)0xdeadbeef;
+    check_hr( ICoreDragDropManager_QueryInterface( manager, &foreign, (void **)&statics2 ), E_NOINTERFACE );
+    if (statics2) ICoreDragDropManagerStatics_Release( statics2 );
+    manager2 = (ICoreDragDropManager *)0xdeadbeef;
+    check_hr( IActivationFactory_QueryInterface( factory, &foreign, (void **)&manager2 ), E_NOINTERFACE );
+    if (manager2) ICoreDragDropManager_Release( manager2 );
+
+    /* The factory is not the manager: its default-interface IID is refused. */
+    manager2 = (ICoreDragDropManager *)0xdeadbeef;
+    check_hr( IActivationFactory_QueryInterface( factory, &IID_ICoreDragDropManager, (void **)&manager2 ),
+              E_NOINTERFACE );
+    if (manager2) ICoreDragDropManager_Release( manager2 );
+
+    /* GetForWindow hands out the manager for the requested interface only. */
+    manager2 = (ICoreDragDropManager *)0xdeadbeef;
+    check_hr( IDragDropManagerInterop_GetForWindow( interop, (HWND)0x1234, &IID_ICoreDragDropManager,
+                                                    (void **)&manager2 ), S_OK );
+    ok( !!manager2, "no manager for the window.\n" );
+    statics2 = (ICoreDragDropManagerStatics *)0xdeadbeef;
+    check_hr( IDragDropManagerInterop_GetForWindow( interop, (HWND)0x1234, &IID_ICoreDragDropManagerStatics,
+                                                    (void **)&statics2 ), E_NOINTERFACE );
+    if (manager2) ICoreDragDropManager_Release( manager2 );
+    if (statics2) ICoreDragDropManagerStatics_Release( statics2 );
+
+    /* The event points: registration takes a reference and a nonzero token,
+     * remove is idempotent and a null delegate is the documented E_POINTER. */
+    handler_refs = 0;
+    token.value = 0;
+    check_hr( ICoreDragDropManager_add_TargetRequested( manager, &target_requested_handler, &token ), S_OK );
+    ok( token.value != 0, "got token %s.\n", wine_dbgstr_longlong( token.value ) );
+    ok( handler_refs == 1, "the manager does not hold the delegate reference (refs %ld).\n", handler_refs );
+    token2.value = 0;
+    check_hr( ICoreDragDropManager_add_TargetRequested( manager, &target_requested_handler, &token2 ), S_OK );
+    ok( token2.value && token2.value != token.value, "token %s reused.\n", wine_dbgstr_longlong( token2.value ) );
+    ok( handler_refs == 2, "the second registration is not held (refs %ld).\n", handler_refs );
+    token3.value = -1;
+    check_hr( ICoreDragDropManager_add_TargetRequested( manager, NULL, &token3 ), E_POINTER );
+    ok( token3.value == -1, "a token was written for the null-delegate registration (%s).\n",
+        wine_dbgstr_longlong( token3.value ) );
+    check_hr( ICoreDragDropManager_remove_TargetRequested( manager, token ), S_OK );
+    ok( handler_refs == 1, "remove did not release the delegate (refs %ld).\n", handler_refs );
+    check_hr( ICoreDragDropManager_remove_TargetRequested( manager, token ), S_OK );
+    ok( handler_refs == 1, "the repeated remove released twice (refs %ld).\n", handler_refs );
+    token.value = 0;   /* the zero token was never issued: accepted as a no-op */
+    check_hr( ICoreDragDropManager_remove_TargetRequested( manager, token ), S_OK );
+    check_hr( ICoreDragDropManager_remove_TargetRequested( manager, token2 ), S_OK );
+    ok( handler_refs == 0, "the last registration is not released (refs %ld).\n", handler_refs );
+
+    /* AreConcurrentOperationsEnabled is the manager's own state. */
+    check_hr( ICoreDragDropManager_get_AreConcurrentOperationsEnabled( manager, &enabled ), S_OK );
+    ok( enabled, "concurrent operations disabled by default.\n" );
+    check_hr( ICoreDragDropManager_put_AreConcurrentOperationsEnabled( manager, FALSE ), S_OK );
+    check_hr( ICoreDragDropManager_get_AreConcurrentOperationsEnabled( manager, &enabled ), S_OK );
+    ok( !enabled, "the property did not stick.\n" );
+
+    /* The IInspectable surface names the class and lists the real interfaces. */
+    check_hr( ICoreDragDropManager_GetRuntimeClassName( manager, &name ), S_OK );
+    ok( str_eq( name, core_ddm_class ), "got class name %s.\n", debugstr_w( WindowsGetStringRawBuffer( name, NULL ) ) );
+    WindowsDeleteString( name );
+    name = NULL;
+    check_hr( ICoreDragDropManager_GetTrustLevel( manager, &trust ), S_OK );
+    ok( trust == 0, "got trust level %u.\n", trust );
+    check_hr( ICoreDragDropManager_GetIids( manager, &count, &iids ), S_OK );
+    ok( count >= 1 && !!iids, "got %lu iids.\n", count );
+    if (iids)
+    {
+        ok( iid_in_list( iids, count, &IID_ICoreDragDropManager ), "GetIids omits the default interface.\n" );
+        ok( iid_in_list( iids, count,
+                         &IID_ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs ),
+            "GetIids omits the TargetRequested delegate interface.\n" );
+        CoTaskMemFree( iids );
+    }
+
+    /* The manager stores the delegate; it has no drag session to raise it in,
+     * so nothing may have been invoked behind the app's back. */
+    ok( target_requested_invocations == 0, "got %lu invocations.\n", target_requested_invocations );
+
+    ICoreDragDropManager_Release( manager );
+    IInspectable_Release( instance );
+    ICoreDragDropManagerStatics_Release( statics );
+    IDragDropManagerInterop_Release( interop );
+    IActivationFactory_Release( factory );
+}
+
 START_TEST( dataexchange )
 {
     HRESULT hr;
@@ -891,6 +1090,7 @@ START_TEST( dataexchange )
     test_standard_formats();
     test_format_keys();
     test_share_surface();
+    test_core_drag_drop();
 
     RoUninitialize();
 }

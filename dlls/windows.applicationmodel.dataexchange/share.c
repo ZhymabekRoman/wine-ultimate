@@ -1,4 +1,5 @@
-/* WinRT DataTransferManager, HtmlFormatHelper, ShareProvider, share options
+/* WinRT DataTransferManager, HtmlFormatHelper, ShareProvider, share options,
+ * DragDrop.Core CoreDragDropManager
  *
  * Copyright 2026 Wine Developers
  *
@@ -18,6 +19,18 @@
  */
 
 #include "private.h"
+
+/* The DragDrop.Core family (CoreDragDropManager at the end of this file) is
+ * declared in include/windows.applicationmodel.datatransfer.dragdrop.core.idl
+ * and its window entry point in include/dragdropinterop.idl; the GUIDs are
+ * defined in main.c, which owns the dll's WinRT GUID set. */
+#define WIDL_using_Windows_Graphics_Imaging
+#define WIDL_using_Windows_ApplicationModel_DataTransfer_DragDrop
+#define WIDL_using_Windows_ApplicationModel_DataTransfer_DragDrop_Core
+#include "windows.graphics.imaging.h"
+#include "windows.applicationmodel.datatransfer.dragdrop.h"
+#include "windows.applicationmodel.datatransfer.dragdrop.core.h"
+#include "dragdropinterop.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dataexchange);
 
@@ -1208,18 +1221,119 @@ static const void *clipboard_content_options_vtbl[] =
 };
 
 
-/* CoreDragDropManager: the client activates it during CoreWindow drag-drop
- * wiring; without the class RoActivateInstance answers REGDB_E_CLASSNOTREG
- * and the .NET projection RaiseFailFastException (param 0x80040154) kills
- * the process (gate64).  Stand-in object answering the IInspectable surface;
- * specific interfaces answer E_NOINTERFACE until a caller demands one. */
-struct core_ddm
+/* --------------------------------------------------------- DragDrop.Core -- */
+
+/*
+ * CoreDragDropManager, the class of the Windows.ApplicationModel.DataTransfer.
+ * DragDrop.Core namespace that this dll hosts.  The WinAppSDK client
+ * (Microsoft.UI.Input.dll, with Microsoft.ui.xaml.dll for the statics)
+ * activates the class and queries the *factory* for
+ * ICoreDragDropManagerStatics (0x9542fdca-da12-4c1c-8d06-041db29733c3,
+ * GetForCurrentView) and for IDragDropManagerInterop
+ * (0x5ad8cba7-4c01-4dac-9074-827894292d63, GetForWindow) - the packed IIDs of
+ * all three of ICoreDragDropManager (0x7d56d344-8464-4faf-aa49-37ea6e2d7bd1),
+ * IDragDropManagerInterop and ICoreDropOperationTarget are present in
+ * Microsoft.UI.Input.dll, the statics IID in Microsoft.ui.xaml.dll - and
+ * queries the manager it gets back for ICoreDragDropManager to register its
+ * TargetRequested handler.  The previous stand-in answered none of that: its
+ * QueryInterface ended in E_NOINTERFACE (0x80004002), which is exactly the
+ * code the .NET Native projection hands to RaiseFailFastException at startup.
+ *
+ * Everything below is the shape include/windows.applicationmodel.datatransfer.
+ * dragdrop.core.idl and include/dragdropinterop.idl declare.  The contract
+ * has no "GetForCoreWindow" method and no CoreDragDropTarget interface (the
+ * window entry point is IDragDropManagerInterop::GetForWindow, which takes
+ * the HWND; CoreDragDropTarget is not in this tree's metadata and is not
+ * referenced by the app), so the manager records the window it was created
+ * for and stops there.  ICoreDropOperationTarget, its event args,
+ * CoreDragInfo and CoreDragUIOverride stay E_NOINTERFACE on the manager, as
+ * Windows answers them: those objects only take part in a live drag session,
+ * which has no orchestrator in a prefix, and in the TargetRequested flow the
+ * target is the client's own object, handed to us.
+ *
+ * The event points store the delegate and produce an increasing, never-zero
+ * EventRegistrationToken; remove accepts any token and is idempotent, as the
+ * projections tolerate.
+ */
+
+static LONG next_core_ddm_token = 1;   /* InterlockedIncrement: first token 2, never 0 */
+
+#define CORE_DDM_MAX_HANDLERS 8
+
+struct core_ddm_registration
 {
-    const void *vtable;
-    LONG ref;
+    IUnknown *handler;                 /* owned; NULL = free slot */
+    EventRegistrationToken token;
 };
 
+struct core_ddm
+{
+    const void *manager_vtbl;   /* ICoreDragDropManager at offset 0 */
+    LONG ref;
+    HWND hwnd;                  /* the window GetForWindow created this manager for */
+    BOOLEAN concurrent;         /* AreConcurrentOperationsEnabled, TRUE as on Windows */
+    struct core_ddm_registration handlers[CORE_DDM_MAX_HANDLERS];
+};
+
+/* IInspectable::GetIids answers a CoTaskMemAlloc-allocated array; every
+ * GetIids point of the module fills its real interface set this way. */
+static HRESULT fill_iids( const IID *const *list, ULONG count, ULONG *out_count, IID **out_iids )
+{
+    IID *arr;
+    ULONG i;
+
+    if (!out_count || !out_iids) return E_POINTER;
+    if (!(arr = CoTaskMemAlloc( count * sizeof(*arr) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < count; i++) arr[i] = *list[i];
+    *out_count = count;
+    *out_iids = arr;
+    return S_OK;
+}
+
 static inline struct core_ddm *impl_from_core_ddm( const void *iface ) { return (struct core_ddm *)iface; }
+
+static HRESULT core_ddm_add_handler( struct core_ddm *impl, IUnknown *handler, EventRegistrationToken *token )
+{
+    ULONG i;
+
+    if (!token) return E_POINTER;
+    if (!handler) return E_POINTER;
+    token->value = 0;
+
+    IUnknown_AddRef( handler );
+    for (i = 0; i < ARRAY_SIZE( impl->handlers ); i++)
+    {
+        if (!impl->handlers[i].handler &&
+            InterlockedCompareExchangePointer( (void **)&impl->handlers[i].handler, handler, NULL ) == NULL)
+        {
+            /* The token is published after the slot is claimed, so a remove
+             * racing with this add can only miss the token (and is accepted
+             * as a no-op), never release a delegate still registered. */
+            impl->handlers[i].token.value = InterlockedIncrement( &next_core_ddm_token );
+            *token = impl->handlers[i].token;
+            return S_OK;
+        }
+    }
+    IUnknown_Release( handler );
+    return E_OUTOFMEMORY;   /* table full; Windows appends, 8 registrations is ample here */
+}
+
+static HRESULT core_ddm_remove_handler( struct core_ddm *impl, EventRegistrationToken token )
+{
+    ULONG i;
+
+    if (!token.value) return S_OK;
+    for (i = 0; i < ARRAY_SIZE( impl->handlers ); i++)
+    {
+        if (impl->handlers[i].handler && impl->handlers[i].token.value == token.value)
+        {
+            IUnknown *handler = InterlockedExchangePointer( (void **)&impl->handlers[i].handler, NULL );
+            impl->handlers[i].token.value = 0;
+            if (handler) IUnknown_Release( handler );
+        }
+    }
+    return S_OK;   /* unknown tokens accepted: remove is idempotent */
+}
 
 static HRESULT WINAPI cddm_QueryInterface( const void *iface, REFIID iid, void **out )
 {
@@ -1229,7 +1343,7 @@ static HRESULT WINAPI cddm_QueryInterface( const void *iface, REFIID iid, void *
     if (!out) return E_POINTER;
     *out = NULL;
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ))
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ICoreDragDropManager ))
     {
         *out = (void *)impl;
         InterlockedIncrement( &impl->ref );
@@ -1248,18 +1362,23 @@ static ULONG WINAPI cddm_Release( const void *iface )
     return ref;
 }
 
+static const WCHAR core_ddm_class[] = L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager";
+
 static HRESULT WINAPI cddm_GetIids( const void *iface, ULONG *count, IID **iids )
 {
-    if (!count || !iids) return E_POINTER;
-    *count = 0;
-    *iids = NULL;
-    return S_OK;
+    static const IID *const list[] =
+    {
+        &IID_ICoreDragDropManager,
+        &IID_ITypedEventHandler_CoreDragDropManager_CoreDropOperationTargetRequestedEventArgs,
+    };
+
+    return fill_iids( list, ARRAY_SIZE( list ), count, iids );
 }
 
 static HRESULT WINAPI cddm_GetRuntimeClassName( const void *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager",
-                                73, name );
+    if (!name) return E_POINTER;
+    return WindowsCreateString( core_ddm_class, lstrlenW( core_ddm_class ), name );
 }
 
 static HRESULT WINAPI cddm_GetTrustLevel( const void *iface, TrustLevel *trust )
@@ -1269,19 +1388,280 @@ static HRESULT WINAPI cddm_GetTrustLevel( const void *iface, TrustLevel *trust )
     return S_OK;
 }
 
+static HRESULT WINAPI cddm_add_TargetRequested( const void *iface, void *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return core_ddm_add_handler( impl_from_core_ddm( iface ), (IUnknown *)handler, token );
+}
+
+static HRESULT WINAPI cddm_remove_TargetRequested( const void *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %s.\n", iface, wine_dbgstr_longlong( token.value ) );
+    return core_ddm_remove_handler( impl_from_core_ddm( iface ), token );
+}
+
+static HRESULT WINAPI cddm_get_AreConcurrentOperationsEnabled( const void *iface, BOOLEAN *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = impl_from_core_ddm( iface )->concurrent;
+    return S_OK;
+}
+
+static HRESULT WINAPI cddm_put_AreConcurrentOperationsEnabled( const void *iface, BOOLEAN value )
+{
+    TRACE( "iface %p, value %d.\n", iface, value );
+    impl_from_core_ddm( iface )->concurrent = value;
+    return S_OK;
+}
+
 static const void *core_ddm_vtbl[] =
 {
-    cddm_QueryInterface, cddm_AddRef, cddm_Release, cddm_GetIids, cddm_GetRuntimeClassName, cddm_GetTrustLevel,
+    cddm_QueryInterface,
+    cddm_AddRef,
+    cddm_Release,
+    cddm_GetIids,
+    cddm_GetRuntimeClassName,
+    cddm_GetTrustLevel,
+    cddm_add_TargetRequested,
+    cddm_remove_TargetRequested,
+    cddm_get_AreConcurrentOperationsEnabled,
+    cddm_put_AreConcurrentOperationsEnabled,
 };
 
-IInspectable *create_core_drag_drop_manager( void )
+static struct core_ddm *create_core_ddm( HWND hwnd )
 {
     struct core_ddm *impl;
+
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
-    impl->vtable = core_ddm_vtbl;
+    impl->manager_vtbl = core_ddm_vtbl;
     impl->ref = 1;
-    return (IInspectable *)impl;
+    impl->hwnd = hwnd;
+    impl->concurrent = TRUE;
+    return impl;
 }
+
+/* The class factory is the object the projection reaches the statics and the
+ * window interop through, so it carries the three interface groups of the
+ * class: IActivationFactory, ICoreDragDropManagerStatics and
+ * IDragDropManagerInterop. */
+struct core_ddm_factory
+{
+    const void *factory_vtbl;   /* IActivationFactory at offset 0 */
+    const void *statics_vtbl;   /* ICoreDragDropManagerStatics at offset 1 pointer */
+    const void *interop_vtbl;   /* IDragDropManagerInterop at offset 2 pointers */
+    LONG ref;
+};
+
+static const void *core_ddm_factory_vtbl[];
+static const void *core_ddm_statics_vtbl[];
+static const void *core_ddm_interop_vtbl[];
+
+/* Every interface group of the object shares the IUnknown/entry-point
+ * implementations; resolve the object from the group's vtable pointer so one
+ * set of method bodies serves every group at its own field offset. */
+static struct core_ddm_factory *impl_from_core_ddm_factory( const void *iface )
+{
+    static const void *groups[] = { core_ddm_factory_vtbl, core_ddm_statics_vtbl, core_ddm_interop_vtbl };
+    static const int offsets[] = { 0, 1, 2 };
+    const void *vtbl = *(const void *const *)iface;
+    int i;
+
+    for (i = 0; i < (int)ARRAY_SIZE( groups ); i++)
+        if (vtbl == groups[i])
+            return (struct core_ddm_factory *)((const BYTE *)iface - offsets[i] * sizeof(void *));
+    return (struct core_ddm_factory *)iface;
+}
+
+static HRESULT WINAPI cddf_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    struct core_ddm_factory *impl = impl_from_core_ddm_factory( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = (void *)impl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ICoreDragDropManagerStatics ))
+    {
+        *out = (void *)&impl->statics_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IDragDropManagerInterop ))
+    {
+        *out = (void *)&impl->interop_vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI cddf_AddRef( const void *iface )
+{
+    return InterlockedIncrement( &impl_from_core_ddm_factory( iface )->ref );
+}
+
+static ULONG WINAPI cddf_Release( const void *iface )
+{
+    return InterlockedDecrement( &impl_from_core_ddm_factory( iface )->ref );
+}
+
+static HRESULT WINAPI cddf_GetIids( const void *iface, ULONG *count, IID **iids )
+{
+    static const IID *const list[] =
+    {
+        &IID_ICoreDragDropManagerStatics,
+        &IID_IDragDropManagerInterop,
+    };
+
+    return fill_iids( list, ARRAY_SIZE( list ), count, iids );
+}
+
+static HRESULT WINAPI cddf_GetRuntimeClassName( const void *iface, HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( core_ddm_class, lstrlenW( core_ddm_class ), name );
+}
+
+static HRESULT WINAPI cddf_GetTrustLevel( const void *iface, TrustLevel *trust )
+{
+    if (!trust) return E_POINTER;
+    *trust = 0; /* TrustLevel_Base */
+    return S_OK;
+}
+
+static HRESULT WINAPI cddf_ActivateInstance( const void *iface, IInspectable **instance )
+{
+    struct core_ddm *impl;
+
+    TRACE( "iface %p, instance %p.\n", iface, instance );
+
+    if (!instance) return E_POINTER;
+    *instance = NULL;
+    if (!(impl = create_core_ddm( 0 ))) return E_OUTOFMEMORY;
+    *instance = (IInspectable *)impl;
+    return S_OK;
+}
+
+static const void *core_ddm_factory_vtbl[] =
+{
+    cddf_QueryInterface,
+    cddf_AddRef,
+    cddf_Release,
+    cddf_GetIids,
+    cddf_GetRuntimeClassName,
+    cddf_GetTrustLevel,
+    cddf_ActivateInstance,
+};
+
+static HRESULT WINAPI cddfs_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    return cddf_QueryInterface( (void *)impl_from_core_ddm_factory( iface ), iid, out );
+}
+
+static ULONG WINAPI cddfs_AddRef( const void *iface )
+{
+    return cddf_AddRef( (void *)impl_from_core_ddm_factory( iface ) );
+}
+
+static ULONG WINAPI cddfs_Release( const void *iface )
+{
+    return cddf_Release( (void *)impl_from_core_ddm_factory( iface ) );
+}
+
+static HRESULT WINAPI cddfs_GetForCurrentView( const void *iface, ICoreDragDropManager **value )
+{
+    struct core_ddm *impl;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!(impl = create_core_ddm( 0 ))) return E_OUTOFMEMORY;
+    *value = (ICoreDragDropManager *)impl;   /* the manager group sits at offset 0 */
+    return S_OK;
+}
+
+static const void *core_ddm_statics_vtbl[] =
+{
+    cddfs_QueryInterface,
+    cddfs_AddRef,
+    cddfs_Release,
+    cddf_GetIids,
+    cddf_GetRuntimeClassName,
+    cddf_GetTrustLevel,
+    cddfs_GetForCurrentView,
+};
+
+static HRESULT WINAPI cddfi_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    return cddf_QueryInterface( (void *)impl_from_core_ddm_factory( iface ), iid, out );
+}
+
+static ULONG WINAPI cddfi_AddRef( const void *iface )
+{
+    return cddf_AddRef( (void *)impl_from_core_ddm_factory( iface ) );
+}
+
+static ULONG WINAPI cddfi_Release( const void *iface )
+{
+    return cddf_Release( (void *)impl_from_core_ddm_factory( iface ) );
+}
+
+/* include/dragdropinterop.idl: the window entry point of the class hands out
+ * the manager for the requested interface; the window is recorded on the
+ * manager (the contract's window parameter is the HWND, not an object). */
+static HRESULT WINAPI cddfi_GetForWindow( const void *iface, HWND hwnd, REFIID riid, void **out )
+{
+    struct core_ddm *impl;
+    HRESULT hr;
+
+    TRACE( "iface %p, hwnd %p, iid %s, out %p.\n", iface, hwnd, debugstr_guid( riid ), out );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!(impl = create_core_ddm( hwnd ))) return E_OUTOFMEMORY;
+    hr = cddm_QueryInterface( (void *)impl, riid, out );
+    cddm_Release( (void *)impl );
+    return hr;
+}
+
+/* IDragDropManagerInterop derives from IInspectable (include/dragdropinterop.idl),
+ * so its group carries the full IInspectable prefix before GetForWindow. */
+static const void *core_ddm_interop_vtbl[] =
+{
+    cddfi_QueryInterface,
+    cddfi_AddRef,
+    cddfi_Release,
+    cddf_GetIids,
+    cddf_GetRuntimeClassName,
+    cddf_GetTrustLevel,
+    cddfi_GetForWindow,
+};
+
+static struct core_ddm_factory the_core_ddm_factory =
+{
+    core_ddm_factory_vtbl,
+    core_ddm_statics_vtbl,
+    core_ddm_interop_vtbl,
+    1,
+};
+
+IActivationFactory *core_drag_drop_manager_factory = (IActivationFactory *)&the_core_ddm_factory;
 
 IInspectable *create_share_ui_options( void )
 {

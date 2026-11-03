@@ -97,6 +97,30 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager is
+     * the drag/drop manager of the WinAppSDK input surface: Microsoft.UI.Input.dll
+     * (and Microsoft.ui.xaml.dll for the statics) activates the class, queries the
+     * factory for ICoreDragDropManagerStatics (0x9542fdca-da12-4c1c-8d06-041db29733c3)
+     * and IDragDropManagerInterop (0x5ad8cba7-4c01-4dac-9074-827894292d63), and the
+     * manager for ICoreDragDropManager (0x7d56d344-8464-4faf-aa49-37ea6e2d7bd1) to
+     * register its TargetRequested handler.  twinapi.appcore.dll has no such class,
+     * so an unpackaged prefix answers it the twinapi dummy factory: the
+     * QI-everything shape hands the factory itself out as every one of those
+     * interfaces and the method slots report E_NOTIMPL, which the .NET Native
+     * projection turns into RaiseFailFastException (0x80004002) at startup.
+     * Windows hosts the namespace in windows.applicationmodel.dataexchange.dll,
+     * whose builtin implements the class's DllGetActivationFactory, so route this
+     * one class there under the same WINE_ENABLE_DATAEXCHANGE opt-in as the rest of
+     * the namespace; the remaining DragDrop.Core classes (CoreDragInfo,
+     * CoreDragUIOverride, the event args) keep falling through, and WebView2
+     * children keep the dummy. */
+    if (!wcscmp( classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager" ) &&
+        dataexchange_enabled())
+    {
+        *out = wcsdup(L"windows.applicationmodel.dataexchange.dll");
+        return S_OK;
+    }
+
     /* Windows.ApplicationModel.DataTransfer.* is the clipboard/share surface
      * (DataPackage, DataPackageView, Clipboard, StandardDataFormats, the
      * share-UI classes): Windows hosts the namespace's implementation in
@@ -107,8 +131,9 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
      * The twinapi.appcore.dll stand-ins for these classes were dummy factories
      * whose QI-everything shape handed the factory itself out as every
      * interface; the real module answers the metadata surfaces.  The
-     * DragDrop/DragDrop.Core sub-namespaces are separate classes not served
-     * here and keep falling through, exact on the trailing dot like the
+     * DragDrop/DragDrop.Core sub-namespaces are separate classes: the
+     * CoreDragDropManager class is routed by the rule above, the rest keeps
+     * falling through, exact on the trailing dot like the
      * Windows.UI.Notifications route below. */
     if (!wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.", 38) &&
         wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47) &&

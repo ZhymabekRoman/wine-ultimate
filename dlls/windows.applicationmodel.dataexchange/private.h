@@ -175,6 +175,7 @@ extern const WCHAR format_custom[];
 
 extern IActivationFactory *clipboard_statics_factory;
 extern IActivationFactory *standard_data_formats_factory;
+extern IActivationFactory *core_drag_drop_manager_factory;
 extern IActivationFactory *data_transfer_manager_factory;
 extern IActivationFactory *html_format_helper_factory;
 extern IActivationFactory *share_provider_factory;
