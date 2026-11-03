@@ -27,6 +27,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/types.h>
 
 #include "ntstatus.h"
@@ -272,6 +273,51 @@ static const struct relay_op
     { 38,  8, -1 },  /* PassInterfaceEndpointRequest { interface_endpoint } */
 };
 
+/* WA_MOJO_RELAY: on AcceptParcel (ipcz message_id 20, the relay's "op=20") the
+ * payload rides in the NodeLink shared-memory block and the in-band params carry
+ * only a fragment reference: the 16-byte message tail is [u32 StructHeader]
+ * [u32 ArrayHeader] [u32 block_off] [u32 size].  Append blk=<off>/<size> to the
+ * S line so the decode pass knows which fragment offsets matter, and, when the
+ * in-band handle of this very frame is the relayed block mapping (the driver
+ * object duplicated at off=48/56 in the captures), map that region server-side
+ * and dump the first 64 bytes there as WD<hex>.  Read-only, instrumentation
+ * only; runs once per scan (write side) under WA_MOJO_RELAY. */
+static void relay_dump_blk( struct object *obj, const unsigned char *b,
+                            data_size_t off, data_size_t fnum, data_size_t body,
+                            data_size_t len )
+{
+    static const char hexd[] = "0123456789abcdef";
+    char hex[129];
+    data_size_t tail = off + fnum - 16;
+    unsigned int blk_off, blk_size, i, delta;
+    const unsigned char *p;
+    struct fd *fd;
+    void *base;
+    int ufd;
+
+    if (off + fnum > len || tail < body) return;  /* tail16 not in this capture */
+    blk_off  = b[tail+8]  | (b[tail+9] << 8)  | (b[tail+10] << 16)  | ((unsigned int)b[tail+11] << 24);
+    blk_size = b[tail+12] | (b[tail+13] << 8) | (b[tail+14] << 16) | ((unsigned int)b[tail+15] << 24);
+    if (!blk_size || blk_size >= (1u << 24) || blk_off >= (1u << 28)) return;
+    fprintf( stderr, " blk=%08x/%d", blk_off, blk_size );
+
+    if (obj->ops->type != &mapping_type) return;
+    if (!(fd = obj->ops->get_fd( obj ))) return;
+    if ((ufd = get_unix_fd( fd )) == -1) return;
+    delta = blk_off & 0xfff;
+    if ((base = mmap( NULL, delta + 64, PROT_READ, MAP_PRIVATE, ufd,
+                      (off_t)blk_off & ~(off_t)0xfff )) == MAP_FAILED) return;
+    p = (const unsigned char *)base + delta;
+    for (i = 0; i < 64; i++)
+    {
+        hex[2*i]   = hexd[p[i] >> 4];
+        hex[2*i+1] = hexd[p[i] & 0x0f];
+    }
+    hex[128] = 0;
+    munmap( base, delta + 64 );
+    fprintf( stderr, " WD%s", hex );
+}
+
 static void relay_scan( struct pipe_end *writer_end, struct pipe_message *message,
                         const void *data, data_size_t len )
 {
@@ -346,8 +392,10 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                 box->dst    = 0;
                 box->reader = NULL;
                 list_add_tail( message->relay, &box->entry );
-                fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u src=%04x access=%08x\n",
+                fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u src=%04x access=%08x",
                          current->process->id, type, so, h, box->access );
+                if (type == 20) relay_dump_blk( box->obj, b, off, fnum, body, len );
+                fputc( '\n', stderr );
             }
         }
         off += fnum;
