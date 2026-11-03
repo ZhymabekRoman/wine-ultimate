@@ -2700,6 +2700,72 @@ static void test_NtProtectVirtualMemory(void)
     ok(status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status);
 }
 
+static void test_NtProtectVirtualMemory_compound(void)
+{
+    static const DWORD exe_mask = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    static const struct
+    {
+        DWORD protect;
+        DWORD expected;
+    }
+    tests[] =
+    {
+        { PAGE_EXECUTE_READWRITE | PAGE_READWRITE, PAGE_EXECUTE_READWRITE },         /* 0x44 */
+        { PAGE_EXECUTE_READ | PAGE_READONLY, PAGE_EXECUTE_READ },                    /* 0x22 */
+        { PAGE_EXECUTE | PAGE_READWRITE, PAGE_EXECUTE_READWRITE },                   /* 0x14 */
+        { PAGE_EXECUTE_READ | PAGE_READWRITE, PAGE_EXECUTE_READWRITE },              /* 0x24 */
+        { PAGE_EXECUTE_READWRITE | PAGE_READONLY, PAGE_EXECUTE_READWRITE },          /* 0x42 */
+        { PAGE_EXECUTE_WRITECOPY | PAGE_WRITECOPY, PAGE_EXECUTE_WRITECOPY },         /* 0x88 */
+        { PAGE_EXECUTE | PAGE_EXECUTE_READ, PAGE_EXECUTE_READ },                     /* 0x30 */
+        { PAGE_EXECUTE | PAGE_READONLY, PAGE_EXECUTE_READ },                         /* 0x12 */
+        { PAGE_EXECUTE_READWRITE | PAGE_READWRITE | PAGE_GUARD, PAGE_EXECUTE_READWRITE | PAGE_GUARD },
+    };
+    NTSTATUS status;
+    SIZE_T size;
+    DWORD old_prot;
+    void *addr;
+    size_t i;
+
+    for (i = 0; i < ARRAY_SIZE(tests); i++)
+    {
+        MEMORY_BASIC_INFORMATION info;
+
+        addr = NULL;
+        size = page_size;
+        status = NtAllocateVirtualMemory(NtCurrentProcess(), &addr, 0, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+        ok(status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status);
+
+        /* windows accepts the PAGE_EXECUTE_* bits as modifiers of the base access rights */
+        old_prot = 0;
+        status = NtProtectVirtualMemory(NtCurrentProcess(), &addr, &size, tests[i].protect, &old_prot);
+        ok(status == STATUS_SUCCESS, "Unexpected status %08lx for protection %02lx.\n", status, tests[i].protect);
+
+        if (status == STATUS_SUCCESS)
+        {
+            status = NtQueryVirtualMemory(NtCurrentProcess(), addr, MemoryBasicInformation, &info, sizeof(info), NULL);
+            ok(status == STATUS_SUCCESS && (info.Protect & (exe_mask | PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY | PAGE_GUARD)) == tests[i].expected,
+               "Unexpected protection %08lx for protection %02lx.\n", info.Protect, tests[i].protect);
+        }
+
+        size = page_size;
+        status = NtFreeVirtualMemory(NtCurrentProcess(), &addr, &size, MEM_RELEASE);
+        ok(status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status);
+    }
+
+    /* nonsense base access combinations stay rejected */
+    addr = NULL;
+    size = page_size;
+    status = NtAllocateVirtualMemory(NtCurrentProcess(), &addr, 0, &size, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    ok(status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status);
+    status = NtProtectVirtualMemory(NtCurrentProcess(), &addr, &size, PAGE_READONLY | PAGE_NOACCESS, &old_prot);
+    ok(status == STATUS_INVALID_PAGE_PROTECTION, "Unexpected status %08lx.\n", status);
+    status = NtProtectVirtualMemory(NtCurrentProcess(), &addr, &size, 0, &old_prot);
+    ok(status == STATUS_INVALID_PAGE_PROTECTION, "Unexpected status %08lx.\n", status);
+    size = page_size;
+    status = NtFreeVirtualMemory(NtCurrentProcess(), &addr, &size, MEM_RELEASE);
+    ok(status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status);
+}
+
 static void test_prefetch(void)
 {
     NTSTATUS status;
@@ -3627,6 +3693,7 @@ START_TEST(virtual)
     test_NtAllocateVirtualMemoryEx_address_requirements();
     test_NtFreeVirtualMemory();
     test_NtProtectVirtualMemory();
+    test_NtProtectVirtualMemory_compound();
     test_RtlCreateUserStack();
     test_NtMapViewOfSection();
     test_NtMapViewOfSectionEx();

@@ -294,8 +294,10 @@
 @ stub RoFreeParameterizedTypeExtra
 @ stub RoGetActivatableClassRegistration
 @ stdcall RoGetActivationFactory(ptr ptr ptr)
+@ stdcall RoGetActivationFactoryForHost(ptr ptr ptr ptr)
 @ stdcall RoGetAgileReference(long ptr ptr ptr)
 @ stdcall RoGetApartmentIdentifier(ptr)
+@ stdcall RoGetClassNameAndVersion(ptr ptr ptr ptr)
 @ stdcall RoGetErrorReportingFlags(ptr)
 @ stub RoGetMatchingRestrictedErrorInfo
 @ stdcall RoGetParameterizedTypeInstanceIID(long ptr ptr ptr ptr)
@@ -313,7 +315,7 @@
 @ stub RoReportFailedDelegate
 @ stdcall RoReportUnhandledError(ptr)
 @ stub RoResolveRestrictedErrorInfoReference
-@ stub RoRevokeActivationFactories
+@ stdcall RoRevokeActivationFactories(ptr)
 @ stdcall RoSetErrorReportingFlags(long)
 @ stub RoTransformError
 @ stub RoTransformErrorW

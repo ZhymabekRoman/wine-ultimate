@@ -1207,6 +1207,82 @@ static const void *clipboard_content_options_vtbl[] =
     coptions_get_HistoryFormats,
 };
 
+
+/* CoreDragDropManager: the client activates it during CoreWindow drag-drop
+ * wiring; without the class RoActivateInstance answers REGDB_E_CLASSNOTREG
+ * and the .NET projection RaiseFailFastException (param 0x80040154) kills
+ * the process (gate64).  Stand-in object answering the IInspectable surface;
+ * specific interfaces answer E_NOINTERFACE until a caller demands one. */
+struct core_ddm
+{
+    const void *vtable;
+    LONG ref;
+};
+
+static inline struct core_ddm *impl_from_core_ddm( const void *iface ) { return (struct core_ddm *)iface; }
+
+static HRESULT WINAPI cddm_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    struct core_ddm *impl = impl_from_core_ddm( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = (void *)impl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI cddm_AddRef( const void *iface ) { return InterlockedIncrement( &impl_from_core_ddm( iface )->ref ); }
+static ULONG WINAPI cddm_Release( const void *iface )
+{
+    struct core_ddm *impl = impl_from_core_ddm( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI cddm_GetIids( const void *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI cddm_GetRuntimeClassName( const void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager",
+                                73, name );
+}
+
+static HRESULT WINAPI cddm_GetTrustLevel( const void *iface, TrustLevel *trust )
+{
+    if (!trust) return E_POINTER;
+    *trust = 0; /* TrustLevel_Base */
+    return S_OK;
+}
+
+static const void *core_ddm_vtbl[] =
+{
+    cddm_QueryInterface, cddm_AddRef, cddm_Release, cddm_GetIids, cddm_GetRuntimeClassName, cddm_GetTrustLevel,
+};
+
+IInspectable *create_core_drag_drop_manager( void )
+{
+    struct core_ddm *impl;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->vtable = core_ddm_vtbl;
+    impl->ref = 1;
+    return (IInspectable *)impl;
+}
+
 IInspectable *create_share_ui_options( void )
 {
     struct simple_options *impl;

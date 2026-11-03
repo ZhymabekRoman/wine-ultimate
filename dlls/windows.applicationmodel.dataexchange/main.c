@@ -136,6 +136,7 @@ static const struct IActivationFactoryVtbl class_factory_vtbl =
 #define DEFINE_CLASS_FACTORY( name, create_func )                                                  \
     static struct class_factory name = { { &class_factory_vtbl }, 1, create_func }
 
+IInspectable *create_core_drag_drop_manager( void );
 IInspectable *create_share_ui_options( void );
 IInspectable *create_clipboard_content_options( void );
 
@@ -148,6 +149,7 @@ DEFINE_CLASS_FACTORY( data_package_factory, create_data_package );
 DEFINE_CLASS_FACTORY( data_package_view_factory, create_data_package_view_standin );
 DEFINE_CLASS_FACTORY( property_set_factory, create_property_set );
 DEFINE_CLASS_FACTORY( property_set_view_factory, create_property_set_view_standin );
+DEFINE_CLASS_FACTORY( core_drag_drop_manager_factory, create_core_drag_drop_manager );
 DEFINE_CLASS_FACTORY( share_ui_options_factory, create_share_ui_options );
 DEFINE_CLASS_FACTORY( clipboard_content_options_factory, create_clipboard_content_options );
 
@@ -190,6 +192,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( html_format_helper_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( name, RuntimeClass_Windows_ApplicationModel_DataTransfer_ShareProvider ))
         IActivationFactory_QueryInterface( share_provider_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( name, L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager" ))
+        IActivationFactory_QueryInterface( &core_drag_drop_manager_factory.IActivationFactory_iface, &IID_IActivationFactory,
+                                           (void **)factory );
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

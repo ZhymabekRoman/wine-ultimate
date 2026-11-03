@@ -40,6 +40,29 @@ struct activatable_class_data
     DWORD threading_model;
 };
 
+/*
+ * WINE_ENABLE_DATAEXCHANGE=1 opts a process into the builtin
+ * windows.applicationmodel.dataexchange.dll for the
+ * Windows.ApplicationModel.DataTransfer.* namespace.  Default off:
+ * Chromium/WebView2 children (msedgewebview2, network utility) activate
+ * DataTransfer classes and tolerate REGDB_E_CLASSNOTREG (they fall back to
+ * their own clipboard paths); a partial builtin answers them a live factory
+ * and the msedge.dll+0x2d2e44c CHECK fires (gate60: browser gone at t100,
+ * gate59 with the same binaries was green -- the registry seeds of the p54
+ * wave are the only delta).  Store scenarios opt in; WP1.11 env-gate
+ * convention.
+ */
+static BOOL dataexchange_enabled( void )
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        const char *v = getenv( "WINE_ENABLE_DATAEXCHANGE" );
+        cached = (v && v[0] && v[0] != '0');
+    }
+    return cached;
+}
+
 static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
 {
     ACTCTX_SECTION_KEYED_DATA data;
@@ -86,7 +109,8 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
      * here and keep falling through, exact on the trailing dot like the
      * Windows.UI.Notifications route below. */
     if (!wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.", 38) &&
-        wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47))
+        wcsncmp(classid, L"Windows.ApplicationModel.DataTransfer.DragDrop.", 47) &&
+        dataexchange_enabled())
     {
         *out = wcsdup(L"windows.applicationmodel.dataexchange.dll");
         return S_OK;
@@ -429,6 +453,8 @@ done:
 }
 
 
+static BOOL find_registered_factory(const WCHAR *classid, PFNGETACTIVATIONFACTORY *callback);
+
 /***********************************************************************
  *      RoInitialize (combase.@)
  */
@@ -491,6 +517,23 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     {
         TRACE("No activation factory for %s\n", debugstr_hstring(classid));
         return REGDB_E_CLASSNOTREG;
+    }
+
+    {
+        PFNGETACTIVATIONFACTORY registered_callback;
+        if (find_registered_factory(WindowsGetStringRawBuffer(classid, NULL), &registered_callback))
+        {
+            /* The process registered this class itself (RoRegisterActivationFactories):
+             * that registration outranks the routes and the ActivatableClassId registry,
+             * it is the process's own statement about its classes. */
+            hr = registered_callback(classid, &factory);
+            if (SUCCEEDED(hr))
+            {
+                hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
+                IActivationFactory_Release(factory);
+            }
+            return hr;
+        }
     }
 
     hr = get_library_for_classid(WindowsGetStringRawBuffer(classid, NULL), &library);
@@ -1027,6 +1070,94 @@ HRESULT WINAPI RoActivateInstance(HSTRING classid, IInspectable **instance)
     return hr;
 }
 
+/***********************************************************************
+ *      RoGetActivationFactoryForHost (combase.@)
+ *
+ * Host-scoped activation: host_id names the packaged app process that hosts the
+ * activatable class; the empty string is the current, unpackaged process.  Wine has
+ * no packaging runtime: every activatable provider is a builtin resident in the
+ * current process, so any host id resolves identically through the in-proc path and
+ * unresolvable classes keep the honest REGDB_E_CLASSNOTREG answer.
+ */
+HRESULT WINAPI RoGetActivationFactoryForHost(HSTRING host_id, HSTRING class_id, REFIID iid, void **class_factory)
+{
+    FIXME("(%s, %s, %s, %p): host scoping is not implemented\n",
+          debugstr_hstring(host_id), debugstr_hstring(class_id), debugstr_guid(iid), class_factory);
+
+    /* The empty hostId is NULL by the HSTRING convention and names the current
+     * process, so a NULL host_id is the valid in-proc case, not an argument error. */
+    if (!class_id || !iid || !class_factory)
+        return E_INVALIDARG;
+
+    return RoGetActivationFactory(class_id, iid, class_factory);
+}
+
+static BOOL parse_version_number(const WCHAR **p, UINT32 *out)
+{
+    UINT32 v = 0;
+    BOOL any = FALSE;
+
+    while (**p >= L'0' && **p <= L'9')
+    {
+        v = v * 10 + (**p - L'0');
+        (*p)++;
+        any = TRUE;
+    }
+    if (!any)
+        return FALSE;
+    *out = v;
+    return TRUE;
+}
+
+/***********************************************************************
+ *      RoGetClassNameAndVersion (combase.@)
+ *
+ * Splits a class name into the bare class name (returned through the caller's
+ * HSTRING_HEADER fast-allocation buffer, referencing the input string) and the
+ * class version (major<<16|minor).  The versioned type-reference form is
+ * "Namespace.Class, Version=MAJOR.MINOR"; a name without a well-formed version
+ * suffix answers the name itself with version 0.
+ */
+HRESULT WINAPI RoGetClassNameAndVersion(HSTRING activatable_class_id, HSTRING *class_name,
+                                        HSTRING_HEADER *class_header, UINT32 *version)
+{
+    const WCHAR *raw, *sep;
+    UINT32 len, maj = 0, min = 0;
+
+    TRACE("(%s, %p, %p, %p)\n", debugstr_hstring(activatable_class_id), class_name, class_header, version);
+
+    if (!activatable_class_id || !class_name || !class_header || !version)
+        return E_INVALIDARG;
+
+    *class_name = NULL;
+    *version = 0;
+    raw = WindowsGetStringRawBuffer(activatable_class_id, &len);
+    if (!raw)
+        return E_INVALIDARG;
+
+    sep = wcschr(raw, L',');
+    if (sep && !wcsncmp(sep, L", Version=", 10))
+    {
+        const WCHAR *p = sep + 10;
+        UINT32 a = 0, b = 0;
+        if (parse_version_number(&p, &a) && *p == L'.')
+        {
+            p++;
+            if (parse_version_number(&p, &b))
+            {
+                maj = a;
+                min = b;
+                len = (UINT32)(sep - raw);
+            }
+        }
+    }
+
+    *version = (maj << 16) | min;
+    if (len != WindowsGetStringLen(activatable_class_id))
+        return WindowsCreateString(raw, len, class_name);
+    return WindowsCreateStringReference(raw, len, class_header, class_name);
+}
+
 struct agile_reference
 {
     IAgileReference IAgileReference_iface;
@@ -1271,14 +1402,143 @@ HRESULT WINAPI RoGetServerActivatableClasses(HSTRING name, HSTRING **classes, DW
     return S_OK;
 }
 
+/*
+ * In-process registered activation factories: the registration kind of WinRT
+ * activation.  A WinRT server module registers its classes' factory callbacks with
+ * RoRegisterActivationFactories; RoGetActivationFactory then resolves the registered
+ * classes through the callbacks, and RoRevokeActivationFactories undoes the whole
+ * registration.  vccorlib140.dll statically imports both entry points from
+ * api-ms-win-core-winrt-l1-1-0 (msedgewebview2.exe, every C++/CX component); the
+ * FIXME stub answered S_OK while discarding the registration and the @stub line for
+ * Revoke aborted the calling process, so registrations never resolved (the WebView2
+ * core-server classes answered REGDB_E_CLASSNOTREG right after "successful"
+ * registration).
+ *
+ * The activation-context section and the routes/ActivatableClassId registry lookup
+ * in get_library_for_classid answer for classes the process did not register; a
+ * registration is the process's own statement about its classes, so
+ * RoGetActivationFactory consults it first.
+ */
+struct registered_factory
+{
+    struct registered_factory *next;
+    HSTRING class;                          /* duplicated class name */
+    PFNGETACTIVATIONFACTORY callback;
+    struct factory_registration *registration; /* owning cookie */
+};
+
+struct factory_registration
+{
+    struct registered_factory *entries;     /* the cookie's entry array */
+};
+
+static RTL_SRWLOCK registered_factories_lock = RTL_SRWLOCK_INIT;
+static struct registered_factory *registered_factories;
+
+static BOOL find_registered_factory(const WCHAR *classid, PFNGETACTIVATIONFACTORY *callback)
+{
+    struct registered_factory *entry;
+    BOOL found = FALSE;
+
+    RtlAcquireSRWLockShared(&registered_factories_lock);
+    for (entry = registered_factories; entry; entry = entry->next)
+    {
+        if (!wcscmp(WindowsGetStringRawBuffer(entry->class, NULL), classid))
+        {
+            *callback = entry->callback;
+            found = TRUE;
+            break;
+        }
+    }
+    RtlReleaseSRWLockShared(&registered_factories_lock);
+    return found;
+}
+
 /***********************************************************************
  *      RoRegisterActivationFactories (combase.@)
  */
 HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONFACTORY *callbacks,
                                              UINT32 count, RO_REGISTRATION_COOKIE *cookie)
 {
-    FIXME("(%p, %p, %d, %p): stub\n", classes, callbacks, count, cookie);
+    struct factory_registration *registration;
+    struct registered_factory *entries;
+    UINT32 i;
 
+    TRACE("(%p, %p, %u, %p)\n", classes, callbacks, count, cookie);
+
+    if (!classes || !callbacks || !count || !cookie)
+        return E_INVALIDARG;
+
+    for (i = 0; i < count; i++)
+        if (!classes[i] || !callbacks[i])
+            return E_INVALIDARG;
+
+    if (!(registration = calloc(1, sizeof(*registration))))
+        return E_OUTOFMEMORY;
+    if (!(entries = calloc(count, sizeof(*entries))))
+    {
+        free(registration);
+        return E_OUTOFMEMORY;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        HRESULT hr = WindowsDuplicateString(classes[i], &entries[i].class);
+        if (FAILED(hr))
+        {
+            UINT32 j;
+            for (j = 0; j < i; j++)
+                WindowsDeleteString(entries[j].class);
+            free(entries);
+            free(registration);
+            return hr;
+        }
+        entries[i].callback = callbacks[i];
+        entries[i].registration = registration;
+    }
+
+    RtlAcquireSRWLockExclusive(&registered_factories_lock);
+    for (i = 0; i < count; i++)
+    {
+        entries[i].next = registered_factories;
+        registered_factories = &entries[i];
+    }
+    RtlReleaseSRWLockExclusive(&registered_factories_lock);
+
+    registration->entries = entries;
+    *cookie = (RO_REGISTRATION_COOKIE)registration;
+    return S_OK;
+}
+
+/***********************************************************************
+ *      RoRevokeActivationFactories (combase.@)
+ */
+HRESULT WINAPI RoRevokeActivationFactories(RO_REGISTRATION_COOKIE cookie)
+{
+    struct factory_registration *registration = (struct factory_registration *)cookie;
+    struct registered_factory **link, *entry;
+
+    TRACE("(%p)\n", cookie);
+
+    if (!cookie)
+        return E_INVALIDARG;
+
+    RtlAcquireSRWLockExclusive(&registered_factories_lock);
+    link = &registered_factories;
+    while ((entry = *link))
+    {
+        if (entry->registration == registration)
+        {
+            *link = entry->next;
+            WindowsDeleteString(entry->class);
+        }
+        else
+            link = &entry->next;
+    }
+    RtlReleaseSRWLockExclusive(&registered_factories_lock);
+
+    free(registration->entries);
+    free(registration);
     return S_OK;
 }
 

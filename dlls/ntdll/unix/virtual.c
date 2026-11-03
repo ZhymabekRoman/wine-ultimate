@@ -138,6 +138,7 @@ struct file_view
 #define VPROT_GUARD      0x10
 #define VPROT_COMMITTED  0x20
 #define VPROT_WRITEWATCH 0x40
+#define VPROT_EXEC_SUSPENDED 0x80  /* host mapping has no exec: write access was granted */
 /* per-mapping protection flags */
 #define VPROT_ARM64EC          0x0100  /* view may contain ARM64EC code */
 #define VPROT_SYSTEM           0x0200  /* system view (underlying mmap not under our control) */
@@ -1418,6 +1419,7 @@ static int get_unix_prot( BYTE vprot )
         if (vprot & VPROT_WRITECOPY) prot |= PROT_WRITE | PROT_READ;
         if (vprot & VPROT_EXEC) prot |= PROT_EXEC | PROT_READ;
         if (vprot & VPROT_WRITEWATCH) prot &= ~PROT_WRITE;
+        if (vprot & VPROT_EXEC_SUSPENDED) prot &= ~PROT_EXEC;
     }
     if (!prot) prot = PROT_NONE;
     return prot;
@@ -1953,6 +1955,28 @@ static DWORD get_win32_prot( BYTE vprot, unsigned int map_prot )
  */
 static NTSTATUS get_vprot_flags( DWORD protect, unsigned int *vprot, BOOL image )
 {
+    static const DWORD exe_mask = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    static const DWORD acc_mask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
+    DWORD type = protect & 0xff;
+
+    /* windows treats the PAGE_EXECUTE_* bits as modifiers that may be combined
+     * with the base access rights, e.g. PAGE_EXECUTE_READWRITE | PAGE_READWRITE
+     * (0x44) requests read/write/execute and is accepted. Normalise such
+     * compound forms to the single canonical value with the same rights
+     * instead of rejecting them as an invalid protection. */
+    if ((type & exe_mask) && !(type & ~(exe_mask | acc_mask | PAGE_NOACCESS)))
+    {
+        const BOOL has_write = !!(type & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE));
+        const BOOL has_writecopy = !!(type & (PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY));
+        const BOOL has_read = !!(type & (acc_mask | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+
+        if (has_writecopy) type = PAGE_EXECUTE_WRITECOPY;
+        else if (has_write) type = PAGE_EXECUTE_READWRITE;
+        else if (has_read) type = PAGE_EXECUTE_READ;
+        else type = PAGE_EXECUTE;
+        protect = (protect & ~0xff) | type;
+    }
+
     switch(protect & 0xff)
     {
     case PAGE_READONLY:
@@ -4734,15 +4758,38 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, 
         }
         else ret = grow_thread_stack( data, page, &stack_info );
     }
+    else if ((err == EXCEPTION_EXECUTE_FAULT || err == EXCEPTION_READ_FAULT) && (vprot & VPROT_EXEC_SUSPENDED))
+    {
+        /* a write was granted to this page earlier, which had to remove host
+         * execution permission; restore it and re-arm the write watch */
+        set_page_vprot_bits( page, host_page_size, VPROT_WRITEWATCH, VPROT_EXEC_SUSPENDED );
+        mprotect_range( page, host_page_size, 0, 0 );
+        ret = STATUS_SUCCESS;
+    }
     else if (err == EXCEPTION_WRITE_FAULT)
     {
         if (vprot & VPROT_WRITEWATCH)
         {
             if (enable_write_exceptions && is_vprot_exec_write( vprot ) && !data->allow_writes)
             {
-                rec->NumberParameters = 3;
-                rec->ExceptionInformation[2] = STATUS_EXECUTABLE_MEMORY_WRITE;
-                ret = STATUS_IN_PAGE_ERROR;
+                struct file_view *view = find_view( page, 0 );
+
+                /* on windows a write to a private read/write/execute allocation never
+                 * faults, so it must not be reported to the process. when the host
+                 * refuses writable executable mappings, grant the write by suspending
+                 * execution of that page; it is restored on the next execute fault. */
+                if (view && !(view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | SEC_COMMIT)))
+                {
+                    set_page_vprot_bits( page, host_page_size, VPROT_EXEC_SUSPENDED, VPROT_WRITEWATCH );
+                    mprotect_range( page, host_page_size, 0, 0 );
+                    ret = STATUS_SUCCESS;
+                }
+                else
+                {
+                    rec->NumberParameters = 3;
+                    rec->ExceptionInformation[2] = STATUS_EXECUTABLE_MEMORY_WRITE;
+                    ret = STATUS_IN_PAGE_ERROR;
+                }
             }
             else
             {

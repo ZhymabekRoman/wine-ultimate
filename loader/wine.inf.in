@@ -78,7 +78,8 @@ AddReg=\
     WineuwpActivation,
     ShellWinRTActivation,\
     ProbeClassesActivation,
-    DataTransferActivation
+    DataTransferActivation,\
+    RegisteredKindActivation
 
 [DefaultInstall]
 Needs=BaseInstall
@@ -811,6 +812,9 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.Pus
 ; through the plain ActivatableClassId lookup too, in the exact
 ; [ShellWinRTActivation] format.
 [DataTransferActivation]
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager,"ThreadingModel",0x10001,2
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackage,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackage,"DllPath",2,"%12%\windows.applicationmodel.dataexchange.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DataTransfer.DataPackage,"ThreadingModel",0x10001,2
@@ -865,6 +869,29 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Input.
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,"DllPath",2,"%12%\windows.system.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,"ThreadingModel",0x10001,2
+
+; The remaining classes combase routes to builtin modules that carry their
+; DllGetActivationFactory, seeded in the registry kind so apps and tooling that
+; enumerate ActivatableClassId (the packaged-app discovery path) see them too:
+; Microsoft.ui.xaml.dll activates the Microsoft.UI.Composition pair through the
+; registry on WinAppSDK self-contained layouts, and Windows.Storage.ApplicationData
+; plus Windows.System.Threading.ThreadPoolTimer are the in-proc classes of their
+; own-name modules.  Exact classes only, matching the combase routes in
+; dlls/combase/roapi.c; ThreadingModel 2 (Both), the probes arrive on UI and
+; worker threads alike.
+[RegisteredKindActivation]
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,"DllPath",2,"%12%\dcompi.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.Compositor,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.CompositionEasingFunction,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.CompositionEasingFunction,"DllPath",2,"%12%\dcompi.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Microsoft.UI.Composition.CompositionEasingFunction,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Storage.ApplicationData,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Storage.ApplicationData,"DllPath",2,"%12%\windows.storage.applicationdata.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Storage.ApplicationData,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Threading.ThreadPoolTimer,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Threading.ThreadPoolTimer,"DllPath",2,"%12%\windows.system.threading.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Threading.ThreadPoolTimer,"ThreadingModel",0x10001,2
 
 [Printing]
 HKLM,%Control%\Print\Monitors\Local Port,"Driver",2,"localspl.dll"

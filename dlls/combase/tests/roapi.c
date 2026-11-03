@@ -868,6 +868,341 @@ static void test_resources_core_activation_route(void)
 }
 
 /*
+ * Activation kind: in-process registered activation factories.
+ *
+ * RoRegisterActivationFactories is the registration kind of WinRT activation: a
+ * server module (vccorlib140.dll, statically imported by msedgewebview2.exe and every
+ * C++/CX component, imports RoRegisterActivationFactories + RoRevokeActivationFactories
+ * from api-ms-win-core-winrt-l1-1-0) registers its classes' factory callbacks in-process,
+ * after which RoGetActivationFactory must resolve them.  combase's FIXME stub returned
+ * S_OK while discarding the registration, so the registrations never resolve: the
+ * gate traces show the WebView2 core-server classes answering REGDB_E_CLASSNOTREG
+ * right after their registration succeeded ("{daa52b27} never registers").
+ */
+static const GUID guid_registered_marker = {0xf2b7a531, 0x33c4, 0x4d6e, {0x9a, 0x2f, 0x1c, 0x0d, 0x7e, 0x5a, 0xb3, 0x69}};
+static const WCHAR registered_class_name[] = L"Wine.Test.Registered";
+
+struct test_registered_factory
+{
+    IActivationFactory IActivationFactory_iface;
+    LONG ref;
+};
+
+static struct test_registered_factory test_registered_factory_obj = {{NULL}, 1};
+
+static HRESULT WINAPI test_reg_factory_QueryInterface(IActivationFactory *iface, REFIID riid, void **ppv)
+{
+    if (IsEqualGUID(riid, &IID_IUnknown) || IsEqualGUID(riid, &IID_IInspectable)
+        || IsEqualGUID(riid, &IID_IActivationFactory))
+    {
+        *ppv = &test_registered_factory_obj;
+        IActivationFactory_AddRef(iface);
+        return S_OK;
+    }
+    if (IsEqualGUID(riid, &guid_registered_marker))
+    {
+        *ppv = &test_registered_factory_obj;
+        IActivationFactory_AddRef(iface);
+        return S_OK;
+    }
+    *ppv = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI test_reg_factory_AddRef(IActivationFactory *iface)
+{
+    return InterlockedIncrement(&test_registered_factory_obj.ref);
+}
+
+static ULONG WINAPI test_reg_factory_Release(IActivationFactory *iface)
+{
+    return InterlockedDecrement(&test_registered_factory_obj.ref);
+}
+
+static HRESULT WINAPI test_reg_factory_GetIids(IActivationFactory *iface, ULONG *count, IID **ids)
+{
+    *count = 0;
+    *ids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI test_reg_factory_GetRuntimeClassName(IActivationFactory *iface, HSTRING *name)
+{
+    return WindowsCreateString(registered_class_name, ARRAY_SIZE(registered_class_name) - 1, name);
+}
+
+static HRESULT WINAPI test_reg_factory_GetTrustLevel(IActivationFactory *iface, enum TrustLevel *level)
+{
+    *level = FullTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI test_reg_factory_ActivateInstance(IActivationFactory *iface, IInspectable **instance)
+{
+    /* Hand back the factory as the instance: the test identifies it through
+     * guid_registered_marker, no activation of its own is needed. */
+    IActivationFactory_AddRef(iface);
+    *instance = (IInspectable *)&test_registered_factory_obj.IActivationFactory_iface;
+    return S_OK;
+}
+
+static const IActivationFactoryVtbl test_reg_factory_vtbl =
+{
+    test_reg_factory_QueryInterface,
+    test_reg_factory_AddRef,
+    test_reg_factory_Release,
+    test_reg_factory_GetIids,
+    test_reg_factory_GetRuntimeClassName,
+    test_reg_factory_GetTrustLevel,
+    test_reg_factory_ActivateInstance,
+};
+
+static HRESULT WINAPI test_registered_pfn(HSTRING classid, IActivationFactory **factory)
+{
+    return test_reg_factory_QueryInterface(&test_registered_factory_obj.IActivationFactory_iface,
+            &IID_IActivationFactory, (void **)factory) == S_OK ? S_OK : E_FAIL;
+}
+
+/* RoRevokeActivationFactories is an @stub line in combase.spec: the export exists at
+ * runtime (E_NOTIMPL) but the stub generates no import symbol, so resolve it
+ * dynamically like the two absent exports below. */
+typedef HRESULT (WINAPI *pRoRevokeActivationFactories)(RO_REGISTRATION_COOKIE);
+
+static void test_registered_activation_factories(void)
+{
+    static const WCHAR compositor_name[] = L"Windows.UI.Composition.Compositor";
+    pRoRevokeActivationFactories revoke;
+    RO_REGISTRATION_COOKIE cookie = NULL, cookie2 = NULL;
+    IActivationFactory *factory = NULL;
+    IInspectable *instance = NULL;
+    PFNGETACTIVATIONFACTORY callbacks[1];
+    HSTRING classes[1], str;
+    void *marker = NULL;
+    HRESULT hr;
+
+    revoke = (void *)GetProcAddress(GetModuleHandleW(L"combase.dll"), "RoRevokeActivationFactories");
+    ok(!!revoke, "combase has no RoRevokeActivationFactories export.\n");
+
+    test_registered_factory_obj.IActivationFactory_iface.lpVtbl = &test_reg_factory_vtbl;
+    callbacks[0] = test_registered_pfn;
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr);
+
+    hr = WindowsCreateString(registered_class_name, ARRAY_SIZE(registered_class_name) - 1, &str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    classes[0] = str;
+
+    /* Pre-state: the class resolves to nothing before registration. */
+    marker = NULL;
+    hr = RoGetActivationFactory(str, &IID_IActivationFactory, &marker);
+    ok(hr == REGDB_E_CLASSNOTREG, "pre-registration RoGetActivationFactory returned %#lx.\n", hr);
+    ok(!marker, "got factory %p.\n", marker);
+
+    /* Argument conformance. */
+    hr = RoRegisterActivationFactories(NULL, NULL, 1, &cookie);
+    ok(hr == E_INVALIDARG, "NULL arrays returned %#lx.\n", hr);
+    hr = RoRegisterActivationFactories(classes, callbacks, 0, &cookie);
+    ok(hr == E_INVALIDARG, "zero count returned %#lx.\n", hr);
+    hr = RoRegisterActivationFactories(classes, callbacks, 1, NULL);
+    ok(hr == E_INVALIDARG, "NULL cookie returned %#lx.\n", hr);
+
+    hr = RoRegisterActivationFactories(classes, callbacks, 1, &cookie);
+    ok(hr == S_OK, "RoRegisterActivationFactories returned %#lx.\n", hr);
+    ok(!!cookie, "got cookie %p.\n", cookie);
+
+    /* The registration has to resolve through RoGetActivationFactory. */
+    factory = NULL;
+    hr = RoGetActivationFactory(str, &IID_IActivationFactory, (void **)&factory);
+    ok(hr == S_OK, "registered RoGetActivationFactory returned %#lx.\n", hr);
+    ok(factory == &test_registered_factory_obj.IActivationFactory_iface, "got factory %p.\n", factory);
+    if (factory) IActivationFactory_Release(factory);
+
+    /* RoActivateInstance rides the same path. */
+    instance = NULL;
+    hr = RoActivateInstance(str, &instance);
+    ok(hr == S_OK, "RoActivateInstance returned %#lx.\n", hr);
+    ok(instance == (IInspectable *)&test_registered_factory_obj.IActivationFactory_iface,
+       "got instance %p.\n", instance);
+    if (instance) IInspectable_Release(instance);
+
+    /* The registration wins over the routes/registry: re-register the name of a
+     * routed class and the registered factory has to answer, not the builtin. */
+    hr = WindowsCreateString(compositor_name, ARRAY_SIZE(compositor_name) - 1, &classes[0]);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    hr = RoRegisterActivationFactories(classes, callbacks, 1, &cookie2);
+    ok(hr == S_OK, "compositor registration returned %#lx.\n", hr);
+    marker = NULL;
+    hr = RoGetActivationFactory(classes[0], &guid_registered_marker, &marker);
+    ok(hr == S_OK, "registered compositor marker QI returned %#lx.\n", hr);
+    ok(marker == &test_registered_factory_obj.IActivationFactory_iface, "got marker %p.\n", marker);
+    if (marker) IUnknown_Release((IUnknown *)marker);
+
+    hr = revoke ? revoke(NULL) : E_NOTIMPL;
+    ok(hr == E_INVALIDARG, "NULL cookie revoke returned %#lx.\n", hr);
+
+    hr = revoke ? revoke(cookie2) : E_NOTIMPL;
+    ok(hr == S_OK, "revoke returned %#lx.\n", hr);
+
+    /* After revocation the builtin route answers again and the marker is gone. */
+    marker = NULL;
+    hr = RoGetActivationFactory(classes[0], &guid_registered_marker, &marker);
+    ok(hr == E_NOINTERFACE, "post-revoke marker QI returned %#lx.\n", hr);
+    ok(!marker, "got marker %p.\n", marker);
+    factory = NULL;
+    hr = RoGetActivationFactory(classes[0], &IID_IActivationFactory, (void **)&factory);
+    ok(hr == S_OK, "post-revoke routed activation returned %#lx.\n", hr);
+    if (factory) IActivationFactory_Release(factory);
+    WindowsDeleteString(classes[0]);
+
+    hr = revoke ? revoke(cookie) : E_NOTIMPL;
+    ok(hr == S_OK, "revoke returned %#lx.\n", hr);
+
+    /* After revocation the class resolves to nothing again. */
+    marker = NULL;
+    hr = RoGetActivationFactory(str, &IID_IActivationFactory, &marker);
+    ok(hr == REGDB_E_CLASSNOTREG, "post-revoke RoGetActivationFactory returned %#lx.\n", hr);
+    ok(!marker, "got factory %p.\n", marker);
+
+    WindowsDeleteString(str);
+    RoUninitialize();
+}
+
+/*
+ * Activation kind: RoGetActivationFactoryForHost, the host-scoped factory of the
+ * same resolution: SDK roapi.h declares
+ *   RoGetActivationFactoryForHost(HSTRING hostId, HSTRING activatableClassId,
+ *                                 REFIID interfaceId, void **factory)
+ * and Windows resolves the class in the process hosting it; the empty hostId is
+ * the in-proc host.  The export is absent from combase entirely (not even a stub
+ * line in the spec): a PE that binds it by name fails to load, and the
+ * Windows.Data.Json/Microsoft.Windows.AppLifecycle projections probe for it at
+ * runtime.  Resolved dynamically so a missing export reports here and not as a
+ * load-time failure of the whole test exe.
+ */
+typedef HRESULT (WINAPI *pRoGetActivationFactoryForHost)(HSTRING, HSTRING, REFIID, void **);
+
+static void test_activation_for_host(void)
+{
+    static const WCHAR compositor_name[] = L"Windows.UI.Composition.Compositor";
+    pRoGetActivationFactoryForHost pfn;
+    IActivationFactory *factory = NULL;
+    HSTRING host, class_str;
+    HRESULT hr;
+
+    pfn = (void *)GetProcAddress(GetModuleHandleW(L"combase.dll"), "RoGetActivationFactoryForHost");
+    ok(!!pfn, "combase has no RoGetActivationFactoryForHost export.\n");
+    if (!pfn) return;
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr);
+
+    hr = WindowsCreateString(L"", 0, &host);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    hr = WindowsCreateString(compositor_name, ARRAY_SIZE(compositor_name) - 1, &class_str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+
+    /* The in-proc host resolves the built-in classes. */
+    factory = NULL;
+    hr = pfn(host, class_str, &IID_IActivationFactory, (void **)&factory);
+    ok(hr == S_OK, "RoGetActivationFactoryForHost returned %#lx.\n", hr);
+    ok(!!factory, "got factory %p.\n", factory);
+    if (factory) IActivationFactory_Release(factory);
+
+    /* The empty hostId is the NULL HSTRING and names the current process. */
+    factory = NULL;
+    hr = pfn(NULL, class_str, &IID_IActivationFactory, (void **)&factory);
+    ok(hr == S_OK, "NULL (empty) hostId returned %#lx.\n", hr);
+    ok(!!factory, "got factory %p.\n", factory);
+    if (factory) IActivationFactory_Release(factory);
+
+    /* Argument conformance. */
+    hr = pfn(host, NULL, &IID_IActivationFactory, (void **)&factory);
+    ok(hr == E_INVALIDARG, "NULL classId returned %#lx.\n", hr);
+    hr = pfn(host, class_str, NULL, (void **)&factory);
+    ok(hr == E_INVALIDARG, "NULL iid returned %#lx.\n", hr);
+    hr = pfn(host, class_str, &IID_IActivationFactory, NULL);
+    ok(hr == E_INVALIDARG, "NULL factory returned %#lx.\n", hr);
+
+    /* An unknown class keeps the not-registered answer. */
+    hr = WindowsCreateString(L"Does.Not.Exist", ARRAY_SIZE(L"Does.Not.Exist") - 1, &class_str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    factory = NULL;
+    hr = pfn(host, class_str, &IID_IActivationFactory, (void **)&factory);
+    ok(hr == REGDB_E_CLASSNOTREG, "unknown class returned %#lx.\n", hr);
+    ok(!factory, "got factory %p.\n", factory);
+
+    WindowsDeleteString(class_str);
+    WindowsDeleteString(host);
+    RoUninitialize();
+}
+
+/*
+ * Activation kind: class versioning.  The SDK declares
+ *   RoGetClassNameAndVersion(HSTRING activatableClassId, HSTRING *className,
+ *                            HSTRING_HEADER *classNameHeader, UINT32 *version)
+ * which splits a versioned type reference ("Ns.Class, Version=MAJOR.MINOR") into
+ * the bare class name (returned through the caller's HSTRING_HEADER fast-alloc
+ * buffer) and the class version packed major<<16|minor; unversioned names answer
+ * the name itself with version 0.  AppLifecycle/Redirection and the XAML host
+ * projections call it.  The export is absent from combase entirely; resolved
+ * dynamically as above.
+ */
+typedef HRESULT (WINAPI *pRoGetClassNameAndVersion)(HSTRING, HSTRING *, HSTRING_HEADER *, UINT32 *);
+
+static void test_class_name_version(void)
+{
+    static const WCHAR plain_name[] = L"Wine.Test.Class";
+    static const WCHAR versioned_name[] = L"Wine.Test.Class, Version=2.5";
+    pRoGetClassNameAndVersion pfn;
+    HSTRING_HEADER header;
+    HSTRING str, out;
+    UINT32 version = 0xdeadbeef;
+    HRESULT hr;
+
+    pfn = (void *)GetProcAddress(GetModuleHandleW(L"combase.dll"), "RoGetClassNameAndVersion");
+    ok(!!pfn, "combase has no RoGetClassNameAndVersion export.\n");
+    if (!pfn) return;
+
+    hr = WindowsCreateString(plain_name, ARRAY_SIZE(plain_name) - 1, &str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    out = NULL;
+    version = 0xdeadbeef;
+    hr = pfn(str, &out, &header, &version);
+    ok(hr == S_OK, "RoGetClassNameAndVersion returned %#lx.\n", hr);
+    ok(out && !wcscmp(WindowsGetStringRawBuffer(out, NULL), plain_name),
+       "unversioned name round-trip mismatch, out %s.\n", debugstr_w(out ? WindowsGetStringRawBuffer(out, NULL) : NULL));
+    ok(version == 0, "unversioned class got %#x.\n", version);
+    WindowsDeleteString(out);
+    WindowsDeleteString(str);
+
+    hr = WindowsCreateString(versioned_name, ARRAY_SIZE(versioned_name) - 1, &str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    out = NULL;
+    version = 0xdeadbeef;
+    hr = pfn(str, &out, &header, &version);
+    ok(hr == S_OK, "versioned RoGetClassNameAndVersion returned %#lx.\n", hr);
+    ok(out && !wcscmp(WindowsGetStringRawBuffer(out, NULL), plain_name),
+       "versioned name split mismatch, out %s.\n", debugstr_w(out ? WindowsGetStringRawBuffer(out, NULL) : NULL));
+    ok(version == 0x00020005, "versioned class got %#x.\n", version);
+    WindowsDeleteString(out);
+    WindowsDeleteString(str);
+
+    /* Argument conformance. */
+    hr = WindowsCreateString(plain_name, ARRAY_SIZE(plain_name) - 1, &str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    hr = pfn(NULL, &out, &header, &version);
+    ok(hr == E_INVALIDARG, "NULL name returned %#lx.\n", hr);
+    hr = pfn(str, NULL, &header, &version);
+    ok(hr == E_INVALIDARG, "NULL out returned %#lx.\n", hr);
+    hr = pfn(str, &out, NULL, &version);
+    ok(hr == E_INVALIDARG, "NULL header returned %#lx.\n", hr);
+    hr = pfn(str, &out, &header, NULL);
+    ok(hr == E_INVALIDARG, "NULL version returned %#lx.\n", hr);
+    WindowsDeleteString(str);
+}
+
+/*
  * RoGetParameterizedTypeInstanceIID conformance: Windows derives the IID as a
  * UUIDv5-style SHA-1 hash (namespace 11f47ad5-7b73-42c0-abae-878b1e16adee) over the
  * UTF-8 "pinterface({piid};arg;...)" signature string of the instantiation
@@ -986,6 +1321,9 @@ START_TEST(roapi)
     test_ActivationFactories();
     test_composition_activation_route();
     test_resources_core_activation_route();
+    test_registered_activation_factories();
+    test_activation_for_host();
+    test_class_name_version();
     test_RoGetParameterizedTypeInstanceIID();
     test_RoGetAgileReference();
     test_RoGetErrorReportingFlags();

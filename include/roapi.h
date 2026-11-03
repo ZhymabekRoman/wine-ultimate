@@ -22,6 +22,7 @@
 
 #include <windef.h>
 #include <activation.h>
+#include <winstring.h>
 
 typedef enum
 {
@@ -44,6 +45,12 @@ extern "C" {
 
 HRESULT WINAPI RoActivateInstance(HSTRING classid, IInspectable **instance);
 HRESULT WINAPI RoGetActivationFactory(HSTRING classid, REFIID iid, void **class_factory);
+HRESULT WINAPI RoGetActivationFactoryForHost(HSTRING host_id, HSTRING class_id, REFIID iid, void **class_factory);
+HRESULT WINAPI RoGetClassNameAndVersion(HSTRING activatable_class_id, HSTRING *class_name,
+                                        HSTRING_HEADER *class_header, UINT32 *version);
+HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONFACTORY *callbacks,
+                                             UINT32 count, RO_REGISTRATION_COOKIE *cookie);
+HRESULT WINAPI RoRevokeActivationFactories(RO_REGISTRATION_COOKIE cookie);
 HRESULT WINAPI RoInitialize(RO_INIT_TYPE type);
 void WINAPI RoUninitialize(void);
 
