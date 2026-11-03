@@ -45,6 +45,7 @@
 #include "winreg.h"
 #include "initguid.h"
 #include "activation.h"
+#include "wine/exception.h"
 #include "wine/debug.h"
 
 #include "pri.h"
@@ -453,6 +454,188 @@ static HRESULT map_lookup_ctx( struct res_map *map, const WCHAR *key, const pri_
 static const void *res_context2_vtbl[];
 static const void *res_map2_vtbl[];
 
+/* ------------------------------------------------------------------ */
+/* map/qualifier key decode: HSTRING payload, else managed-string CCW   */
+/* ------------------------------------------------------------------ */
+
+/*
+ * The key parameters of IMapView<HSTRING,HSTRING>::Get/::HasKey,
+ * IResourceMap::GetValue/::GetValueForContext, IResourceCandidate::
+ * GetQualifierValue and IResourceContext2::SetQualifierValue are declared
+ * HSTRING, and .NET Native's loose-binding RCW hands over a COM Callable
+ * Wrapper of a managed System.String instead (McgMarshal.ObjectToComInterface
+ * marshals the argument as an IInspectable, see the ELEM_CLASS_STRING note
+ * above): an 8-byte-aligned IUnknown pointer, whose low 3 tag bits are 0 --
+ * i.e. the plain-handle tag.  The pointer was never produced by a combase
+ * string API, so hstring_decode()'s tag-0 branch *succeeds* and hands back
+ * whatever the object happens to hold at +0x10, which is the str field of
+ * combase's payload header (dlls/combase/string.c struct hstring_header, read
+ * by hstring_get_data()).  The module then compares that wild buffer, answers
+ * ELEMENT_NOT_FOUND, the app re-creates the context five times and
+ * RaiseFailFastException(c0000602) ends the process (gate sr12: c0000602 x4,
+ * AV 0; site SharedLibrary 0x6ffffff9f262).
+ *
+ * A key is therefore accepted as a winrtstring only when its payload is
+ * plausibly one -- readable and NUL-terminated exactly at the reported length,
+ * which combase guarantees for allocated, reference and virtualized strings.
+ * Anything else is offered the CCW surface CoreCLR exposes for a String:
+ *
+ *   1. IStringable, whose identity this tree states twice, independently:
+ *        include/windows.foundation.idl:270   uuid(96369f54-8eb6-48f0-abce-c1b211e627c3)
+ *        include/windows.foundation.idl:272   interface IStringable : IInspectable
+ *                                             { HRESULT ToString([out,retval] HSTRING *value) }
+ *        dlls/combase/roapi.c iid_names[]     "Windows.Foundation.IStringable"
+ *                                             -> {96369f54-8eb6-48f0-abce-c1b211e627c3}
+ *      widl emits it as IID___x_ABI_CWindows_CFoundation_CIStringable
+ *      (generated include/windows.foundation.h:2283, alias IID_IStringable at
+ *      :2384) with the vtable (generated :2304ff)
+ *        [0 QI][1 AddRef][2 Release][3 GetIids][4 GetRuntimeClassName]
+ *        [5 GetTrustLevel][6 ToString]
+ *
+ *   2. the IReference`1<Windows.Foundation.String> pinterface (boxed string),
+ *      whose get_Value shares slot 6 and the HSTRING* signature.  This is a
+ *      parameterized interface: this tree carries no static IID for it, so the
+ *      identity is computed per call with the tree's own
+ *      RoGetParameterizedTypeInstanceIID (dlls/combase/roapi.c:870; the handle
+ *      it returns is INVALID_HANDLE_VALUE, so nothing needs closing) --
+ *      measured on this build: {fd416dfb-2a07-52eb-aae3-dfce14116c05}.
+ *
+ * GetRuntimeClassName (IInspectable slot 5) is deliberately NOT tried: it
+ * answers the class name ('System.String'), never the string's value.
+ *
+ * A key pointer that is not a COM object at all must not kill the process, so
+ * the whole probe runs under __TRY/__EXCEPT_ALL (pattern:
+ * dlls/combase/string.c decode_virtualized_hstring).  Nothing is cached and
+ * the probe runs once per call.
+ */
+static const GUID IID_IStringable_g = {0x96369f54, 0x8eb6, 0x48f0, {0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3}};
+#define ELEM_IREFERENCE L"Windows.Foundation.IReference"
+
+typedef HRESULT (STDMETHODCALLTYPE *ccw_qi_t)( void *iface, REFIID iid, void **out );
+typedef HRESULT (STDMETHODCALLTYPE *ccw_release_t)( void *iface );
+typedef HRESULT (STDMETHODCALLTYPE *ccw_out_hstring_t)( void *iface, HSTRING *out );
+
+/* a CCW's vtable is the pointer in the object's first slot; its entries are
+ * the entries of that table (two dereferences, not one) */
+static inline const void **ccw_vtable( const void *obj ) { return (const void **)((const void **)obj)[0]; }
+
+#define CCW_SLOT0( o )  ((ccw_qi_t)ccw_vtable( o )[0])          /* IUnknown::QueryInterface */
+#define CCW_SLOT2( o )  ((ccw_release_t)ccw_vtable( o )[2])     /* IUnknown::Release */
+#define CCW_SLOT6( o )  ((ccw_out_hstring_t)ccw_vtable( o )[6]) /* IStringable::ToString /
+                                                                  IReference`1<T>::get_Value */
+
+/* A winrtstring payload ends with a NUL at [length]; a wild buffer taken from
+ * a non-string object does not (or is not readable at all: it faults here and
+ * reports invalid, it never faults the caller). */
+static BOOL probe_wstr( const WCHAR *buf, UINT32 len )
+{
+    BOOL ok = FALSE;
+
+    if (!buf || len >= 0x10000) return FALSE;
+    __TRY
+    {
+        ok = !buf[len];
+    }
+    __EXCEPT_ALL
+    {
+        ok = FALSE;
+    }
+    __ENDTRY
+    return ok;
+}
+
+static BOOL ireference_string_iid( GUID *iid )
+{
+    static const WCHAR *elems[] = { ELEM_IREFERENCE L"`1", ELEM_STRING };
+    ROPARAMIIDHANDLE handle;
+
+    return SUCCEEDED( RoGetParameterizedTypeInstanceIID( 2, elems, NULL, iid, &handle ) );
+}
+
+/* QI the key for a String-CCW surface and read the string out of it.  TRUE on
+ * success with *out the HSTRING the CCW returned (the caller owns it when it is
+ * a plain tag-0 handle, see key_decode). */
+static BOOL ccw_key_decode( HSTRING key, HSTRING *out )
+{
+    void *obj = (void *)key;
+    void *iface = NULL;
+    HSTRING str = NULL;
+    GUID iid;
+    HRESULT hr;
+    BOOL ok = FALSE;
+
+    *out = NULL;
+    if (!key) return FALSE;
+
+    __TRY
+    {
+        hr = CCW_SLOT0( obj )( obj, &IID_IStringable_g, &iface );
+        if (SUCCEEDED( hr ) && iface)
+        {
+            hr = CCW_SLOT6( iface )( iface, &str );
+            if (SUCCEEDED( hr ) && str) ok = TRUE;
+            CCW_SLOT2( iface )( iface );
+        }
+        iface = NULL;
+        if (!ok && ireference_string_iid( &iid ) && SUCCEEDED( CCW_SLOT0( obj )( obj, &iid, &iface )) && iface)
+        {
+            if (SUCCEEDED( CCW_SLOT6( iface )( iface, &str )) && str) ok = TRUE;
+            CCW_SLOT2( iface )( iface );
+        }
+    }
+    __EXCEPT_ALL
+    {
+        ok = FALSE; /* not a COM pointer: report it, never fabricate a key */
+    }
+    __ENDTRY
+
+    if (!ok)
+    {
+        if (str) WindowsDeleteString( str );
+        *out = NULL;
+        return FALSE;
+    }
+    *out = str;
+    return TRUE;
+}
+
+/* Key decode for every map/qualifier-key site.  Returns TRUE with *raw set to
+ * the key text.  When the key came from the CCW surface and the HSTRING the
+ * CCW produced is a plain (tag 0) handle, the callee owns it: *owned is then
+ * TRUE and the caller must WindowsDeleteString( *tmp ) once the lookup is
+ * done.  Failure means "no key": the caller must not fabricate a match. */
+static BOOL key_decode( HSTRING key, const WCHAR **raw, HSTRING *tmp, BOOL *owned )
+{
+    const WCHAR *buf = NULL;
+    UINT32 len = 0;
+
+    *raw = NULL;
+    *tmp = NULL;
+    *owned = FALSE;
+
+    if (hstring_decode( key, &buf, &len ) && probe_wstr( buf, len ))
+    {
+        *raw = buf;
+        return TRUE;
+    }
+    if (ccw_key_decode( key, tmp ) && hstring_decode( *tmp, &buf, &len ) && probe_wstr( buf, len ))
+    {
+        if (!((UINT_PTR)*tmp & 7)) *owned = TRUE; /* tag 0: allocated by the CCW, ours to free */
+        *raw = buf;
+        TRACE( "CCW key %p decoded to %s\n", key, debugstr_w( buf ) );
+        return TRUE;
+    }
+    if (*owned) WindowsDeleteString( *tmp );
+    *tmp = NULL;
+    *owned = FALSE;
+    return FALSE;
+}
+
+static void key_release( HSTRING tmp, BOOL owned )
+{
+    if (owned) WindowsDeleteString( tmp );
+}
+
 
 /* ------------------------------------------------------------------ */
 /* IVectorView<HSTRING> (Languages) / IVectorView<T*> generic          */
@@ -634,28 +817,39 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
 {
     struct map_view *impl = mv_from( iface );
     const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
+    HRESULT hr = ELEMENT_NOT_FOUND_E;
     UINT32 i;
 
-    if (!hstring_decode( key, &raw, NULL )) raw = NULL; /* atom: no match, no fabrication */
+    /* key_decode: HSTRING payload, else the managed-string CCW surface */
+    if (!key_decode( key, &raw, &tmp, &owned )) raw = NULL; /* no key: no match, no fabrication */
     TRACE( "Lookup %s\n", debugstr_w( raw ) );
     for (i = 0; raw && i < impl->count; i++)
     {
         if (!lstrcmpiW( raw, impl->pairs[i].key ))
-            return WindowsCreateString( impl->pairs[i].value, (UINT32)lstrlenW( impl->pairs[i].value ), value );
+        {
+            hr = WindowsCreateString( impl->pairs[i].value, (UINT32)lstrlenW( impl->pairs[i].value ), value );
+            break;
+        }
     }
-    TRACE( "Lookup %s -> ELEMENT_NOT_FOUND\n", debugstr_w( raw ) );
-    return ELEMENT_NOT_FOUND_E; /* ELEMENT_NOT_FOUND */
+    if (FAILED( hr )) TRACE( "Lookup %s -> ELEMENT_NOT_FOUND\n", debugstr_w( raw ) );
+    key_release( tmp, owned );
+    return hr; /* ELEMENT_NOT_FOUND */
 }
 static HRESULT WINAPI mv_HasKey( void *iface, HSTRING key, INT32 *has )
 {
     struct map_view *impl = mv_from( iface );
     const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
     UINT32 i;
     if (!has) return E_POINTER;
     *has = FALSE;
-    if (!hstring_decode( key, &raw, NULL )) return S_OK;
-    for (i = 0; i < impl->count; i++)
+    if (!key_decode( key, &raw, &tmp, &owned )) return S_OK;
+    for (i = 0; raw && i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->pairs[i].key )) { *has = TRUE; break; }
+    key_release( tmp, owned );
     return S_OK;
 }
 static HRESULT WINAPI mv_Size( void *iface, UINT32 *size )
@@ -717,25 +911,32 @@ static HRESULT WINAPI rmv_Get( void *iface, HSTRING key, void **map )
 
     if (!map) return E_POINTER;    struct rm_map_view *impl = rmv_from( iface );
     const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
     UINT32 i;
-    if (!hstring_decode( key, &raw, NULL )) return ELEMENT_NOT_FOUND_E;
-    for (i = 0; i < impl->count; i++)
+    if (!key_decode( key, &raw, &tmp, &owned )) return ELEMENT_NOT_FOUND_E;
+    for (i = 0; raw && i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->entries[i].key ))
         {
             *map = impl->entries[i].map;
+            key_release( tmp, owned );
             return S_OK;
         }
+    key_release( tmp, owned );
     return ELEMENT_NOT_FOUND_E;
 }
 static HRESULT WINAPI rmv_HasKey( void *iface, HSTRING key, INT32 *has )
 {
     struct rm_map_view *impl = rmv_from( iface );
     const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
     UINT32 i;
     *has = FALSE;
-    if (!hstring_decode( key, &raw, NULL )) return S_OK;
-    for (i = 0; i < impl->count; i++)
+    if (!key_decode( key, &raw, &tmp, &owned )) return S_OK;
+    for (i = 0; raw && i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->entries[i].key )) { *has = TRUE; break; }
+    key_release( tmp, owned );
     return S_OK;
 }
 static HRESULT WINAPI rmv_Size( void *iface, UINT32 *size )
@@ -1234,12 +1435,22 @@ static HRESULT WINAPI cand_GetQualifierValue( void *iface, HSTRING name, HSTRING
 {
     struct res_candidate *impl = cand_from( iface );
     const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
+    HRESULT hr = ELEMENT_NOT_FOUND_E;
     UINT32 i;
-    if (!hstring_decode( name, &raw, NULL )) return ELEMENT_NOT_FOUND_E;
+
+    if (!key_decode( name, &raw, &tmp, &owned )) return ELEMENT_NOT_FOUND_E;
     for (i = 0; raw && i < impl->qcount; i++)
+    {
         if (!lstrcmpiW( raw, impl->qpairs[i].key ))
-            return WindowsCreateString( impl->qpairs[i].value, (UINT32)lstrlenW( impl->qpairs[i].value ), value );
-    return ELEMENT_NOT_FOUND_E;
+        {
+            hr = WindowsCreateString( impl->qpairs[i].value, (UINT32)lstrlenW( impl->qpairs[i].value ), value );
+            break;
+        }
+    }
+    key_release( tmp, owned );
+    return hr;
 }
 static const void *res_candidate_vtbl[] =
 {
@@ -1458,11 +1669,13 @@ static HRESULT WINAPI map_GetValue( void *iface, HSTRING key, void **out )
     if (!out) return E_POINTER;    struct res_map *impl = map_from( iface );
     struct res_candidate *cand;
     const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
     HRESULT hr;
 
     /* debugstr_hstring(key) below would read the combase header of a
      * virtualized (tagged) app handle: decode first, trace the decoded key. */
-    if (!hstring_decode( key, &raw, NULL ))
+    if (!key_decode( key, &raw, &tmp, &owned ))
     {
         TRACE( "key (undecodable hstring %p) -> ELEMENT_NOT_FOUND\n", key );
         *out = NULL;
@@ -1472,6 +1685,7 @@ static HRESULT WINAPI map_GetValue( void *iface, HSTRING key, void **out )
     TRACE( "key %s hr=%08x\n", debugstr_w( raw ), hr );
     if (SUCCEEDED( hr )) *out = &cand->vt_cand;
     else *out = NULL;
+    key_release( tmp, owned );
     return hr;
 }
 /* defined after struct res_context (needs its qualifier storage layout) */
@@ -1715,7 +1929,9 @@ static HRESULT WINAPI map_GetValueForContext( void *iface, HSTRING key, void *co
 
     {
         const WCHAR *raw;
-        if (!hstring_decode( key, &raw, NULL ))
+        HSTRING tmp;
+        BOOL owned;
+        if (!key_decode( key, &raw, &tmp, &owned ))
         {
             TRACE( "key (undecodable hstring %p) ctx %p -> ELEMENT_NOT_FOUND\n", key, context );
             *out = NULL;
@@ -1725,6 +1941,7 @@ static HRESULT WINAPI map_GetValueForContext( void *iface, HSTRING key, void *co
             hr = map_lookup_ctx( impl, raw, (const pri_qual *)ctx->qpairs, ctx->qcount, &cand );
         else hr = map_lookup( impl, raw, &cand );
         TRACE( "key %s ctx %p hr=%08x\n", debugstr_w( raw ), context, hr );
+        key_release( tmp, owned );
     }
     if (SUCCEEDED( hr )) *out = &cand->vt_cand;
     else *out = NULL;
@@ -1961,11 +2178,25 @@ static HRESULT WINAPI ctx2_SetQualifierValue( void *iface, HSTRING value, HSTRIN
 {
     struct res_context *impl = ctx2_from( iface );
     const WCHAR *v, *n;
-    if (!hstring_decode( value, &v, NULL )) v = NULL;
-    if (!hstring_decode( name, &n, NULL )) n = NULL;
+    HSTRING vtmp, ntmp;
+    BOOL vown, nown;
+    HRESULT hr;
+
+    /* both sides arrive through the same loose-binding marshaling as the keys:
+     * HSTRING payload, else the managed-string CCW surface */
+    if (!key_decode( value, &v, &vtmp, &vown )) v = NULL;
+    if (!key_decode( name, &n, &ntmp, &nown )) n = NULL;
     TRACE( "%s = %s\n", debugstr_w( n ), debugstr_w( v ) );
-    if (!n || !v) return E_INVALIDARG;
-    return context_set_qualifier( impl, n, v );
+    if (!n || !v)
+    {
+        key_release( vtmp, vown );
+        key_release( ntmp, nown );
+        return E_INVALIDARG;
+    }
+    hr = context_set_qualifier( impl, n, v );  /* dups both strings */
+    key_release( vtmp, vown );
+    key_release( ntmp, nown );
+    return hr;
 }
 static HRESULT WINAPI ctx2_TrySetName( void *iface, HSTRING name, INT32 *ok )
 {

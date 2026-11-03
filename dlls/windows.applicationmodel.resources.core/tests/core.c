@@ -54,6 +54,7 @@
 #include "initguid.h"
 #include <stdarg.h>
 #include <stddef.h>
+#include <string.h>
 
 #include "windef.h"
 #include "winbase.h"
@@ -1371,6 +1372,409 @@ done_factory:
     CALL(factory, 2, (ULONG *)&hr);
 }
 
+/*
+ * CCW (COM Callable Wrapper) string keys.
+ *
+ * IMapView<HSTRING,HSTRING>::Get/::HasKey, IResourceMap::GetValue/
+ * GetValueForContext and IResourceContext2::SetQualifierValue all take an
+ * HSTRING key.  .NET Native's loose-binding RCW (mrt100_app/SharedLibrary,
+ * Internal.NativeFormat + McgMarshal.ObjectToComInterface) hands over a CCW of
+ * a managed System.String instead: an 8-byte-aligned IUnknown pointer whose
+ * low 3 tag bits are 0, i.e. tag 0, the plain-handle tag.  The pointer was
+ * never produced by any combase string API, so combase reads it as an
+ * hstring_private (dlls/combase/string.c hstring_get_data returns
+ * priv->header.str, the qword at +0x20) and hands back that wild buffer; the
+ * module compares garbage, answers ELEMENT_NOT_FOUND (0x490) and the app
+ * failfasts c0000602 at SharedLibrary 0x6ffffff9f262 (gate sr12: c0000602 x4,
+ * AV 0).
+ *
+ * The documented CoreCLR String CCW surface is IStringable, declared in this
+ * tree:
+ *   include/windows.foundation.idl:270  uuid(96369f54-8eb6-48f0-abce-c1b211e627c3)
+ *   include/windows.foundation.idl:272  interface IStringable : IInspectable
+ *                                       { HRESULT ToString([out,retval] HSTRING *value) }
+ * widl emits the identity as IID___x_ABI_CWindows_CFoundation_CIStringable
+ * (generated include/windows.foundation.h:2283, alias IID_IStringable at :2384)
+ * and the vtable (generated :2304ff) as
+ *   [0 QI][1 AddRef][2 Release][3 GetIids][4 GetRuntimeClassName]
+ *   [5 GetTrustLevel][6 ToString]
+ *
+ * IReference`1<Windows.Foundation.String> is a parameterized interface: this
+ * tree carries no static IID for it (no DEFINE_GUID for FIReference_1_HSTRING
+ * in the generated headers), so the test computes it with the tree's own
+ * RoGetParameterizedTypeInstanceIID (dlls/combase/roparameterizediid.c,
+ * combase.spec:301) and pins the value that algorithm produces; get_Value
+ * shares IStringable::ToString's slot (6) and HSTRING* signature because both
+ * interfaces declare exactly one method after the IInspectable quintet.
+ */
+static const IID IID_IStringable_loc = {0x96369f54, 0x8eb6, 0x48f0, {0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3}};
+
+/* implemented in dlls/combase/roparameterizediid.c, exported by combase; not
+ * declared by the generated rparameterizediid.h (module-side prototype in
+ * dlls/windows.applicationmodel.resources.core/main.c) */
+#include "roparameterizediid.h"
+HRESULT WINAPI RoGetParameterizedTypeInstanceIID( UINT32 name_element_count, const WCHAR **name_elements,
+                                                  const IRoMetaDataLocator *locator, GUID *iid,
+                                                  ROPARAMIIDHANDLE *handle );
+
+enum ccw_flavor { CCW_ISTRINGABLE, CCW_IREFERENCE, CCW_NONE };
+
+/* A mini CCW: plain vtable object (no combase, no aggregation) standing in for
+ * the managed String wrapper the .NET Native RCW hands over.
+ *
+ * The layout is chosen so that reading the object as a combase winrtstring is
+ * *provably* not a string.  combase's payload header is
+ *   dlls/combase/string.c:32 struct hstring_header { UINT32 flags, length,
+ *   padding1, padding2; const WCHAR *str; }   ->  length at +0x04, str at +0x10
+ * and hstring_get_data() returns priv->header.str for any handle whose low 3
+ * bits are 0.  So:
+ *   +0x04 = the high half of the vtable pointer (an arbitrary "length")
+ *   +0x10 = raw_slot, a CoreCLR-CCW-shaped slot: NOT a WCHAR*, pointing at a
+ *           64-unit buffer of non-NUL code units (no qualifier key can match
+ *           its first character, and no index 1..63 is NUL, so the
+ *           "is this a winrtstring payload" probe cannot accept it)
+ * The string's real value lives at +0x18 and is reachable only through the CCW
+ * surface (IStringable::ToString / IReference<String>::get_Value, slot 6). */
+struct mini_ccw
+{
+    const void *vtbl;        /* +0x00 */
+    LONG ref;                /* +0x08 */
+    const WCHAR *raw_slot;   /* +0x10 = what combase reads as header.str */
+    const WCHAR *text;       /* +0x18 the managed string's value */
+    enum ccw_flavor flavor;  /* which key surface this CCW answers */
+    GUID iref_iid;           /* +0x28 IReference`1<String> pinterface to answer */
+};
+C_ASSERT( offsetof( struct mini_ccw, ref ) == 0x08 );
+C_ASSERT( offsetof( struct mini_ccw, raw_slot ) == 0x10 );
+C_ASSERT( offsetof( struct mini_ccw, text ) == 0x18 );
+
+/* 64 non-NUL code units: a wild 'str' slot stays readable (the RED-phase
+ * module compares it with lstrcmpiW and must not fault) while never being a
+ * plausibly NUL-terminated winrtstring payload */
+static const WCHAR ccw_raw_slot[64] =
+{
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,
+    1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1, 1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1
+};
+static LONG ccw_qi_stringable, ccw_qi_ireference, ccw_tostring_calls;
+
+static HRESULT WINAPI ccw_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct mini_ccw *impl = (struct mini_ccw *)iface;
+
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable_loc ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (impl->flavor == CCW_ISTRINGABLE && IsEqualGUID( iid, &IID_IStringable_loc ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        InterlockedIncrement( &ccw_qi_stringable );
+        return S_OK;
+    }
+    if (impl->flavor == CCW_IREFERENCE && IsEqualGUID( iid, &impl->iref_iid ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        InterlockedIncrement( &ccw_qi_ireference );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ccw_AddRef( void *iface ) { return InterlockedIncrement( &((struct mini_ccw *)iface)->ref ); }
+static ULONG WINAPI ccw_Release( void *iface ) { return InterlockedDecrement( &((struct mini_ccw *)iface)->ref ); }
+static HRESULT WINAPI ccw_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI ccw_GetRuntimeClassName( void *iface, HSTRING *n ) { return WindowsCreateString( L"System.String", 12, n ); }
+static HRESULT WINAPI ccw_GetTrustLevel( void *iface, INT32 *t ) { if (t) *t = 2; return S_OK; }
+/* IStringable::ToString (slot 6) == IReference<String>::get_Value (slot 6) */
+static HRESULT WINAPI ccw_ToString( void *iface, HSTRING *v )
+{
+    struct mini_ccw *impl = (struct mini_ccw *)iface;
+
+    InterlockedIncrement( &ccw_tostring_calls );
+    if (!v) return E_POINTER;
+    return WindowsCreateString( impl->text, (UINT32)lstrlenW( impl->text ), v );
+}
+static const void *ccw_vtbl[] =
+{
+    ccw_QueryInterface, ccw_AddRef, ccw_Release, ccw_GetIids, ccw_GetRuntimeClassName,
+    ccw_GetTrustLevel, ccw_ToString,
+};
+
+/* a pointer that is not a COM object at all: its "vtable" jumps to address 1 */
+static const void *junk_vtbl[4] = { (const void *)0x1, (const void *)0x1, (const void *)0x1, (const void *)0x1 };
+
+static void mini_ccw_init( struct mini_ccw *o, const WCHAR *text, enum ccw_flavor flavor )
+{
+    o->vtbl = ccw_vtbl;
+    o->ref = 1;
+    o->raw_slot = ccw_raw_slot;
+    o->text = text;
+    o->flavor = flavor;
+    memset( &o->iref_iid, 0, sizeof(o->iref_iid) );
+}
+
+static BOOL hstring_eq( HSTRING a, const WCHAR *b )
+{
+    const WCHAR *raw = WindowsGetStringRawBuffer( a, NULL );
+    return raw && !wcscmp( raw, b );
+}
+
+/* QualifierValues + MainResourceMap for the CCW drives: same object chain the
+ * app walks (ResourceContext factory -> ActivateInstance -> IResourceContext ->
+ * get_QualifierValues). */
+static void test_ccw_string_key( void )
+{
+    void *factory = NULL, *ctx2 = NULL, *ctx = NULL, *mv = NULL;
+    void *rmfactory = NULL, *rms = NULL, *rm2 = NULL, *map = NULL;
+    void *own_ctx = NULL, *own_mv = NULL, *c2 = NULL;
+    DECLSPEC_ALIGN(8) struct mini_ccw ccw_lang, ccw_absent, ccw_iref, ccw_plain, ccw_junk;
+    DECLSPEC_ALIGN(8) struct mini_ccw ccw_qname, ccw_qvalue, ccw_reskey;
+    HSTRING hexpect = NULL, hval = NULL, hkey = NULL, hback = NULL;
+    GUID iref_iid;
+    INT32 has = -1;
+    HRESULT hr;
+
+    /* the pinterface identity comes from the tree's own algorithm */
+    {
+        static const WCHAR *elems[] = { L"Windows.Foundation.IReference`1", L"Windows.Foundation.String" };
+        ROPARAMIIDHANDLE handle = NULL;
+
+        iref_iid = IID_IUnknown;
+        hr = RoGetParameterizedTypeInstanceIID( 2, elems, NULL, &iref_iid, &handle );
+        ok( SUCCEEDED( hr ), "ccw-key: RoGetParameterizedTypeInstanceIID(IReference`1<String>) hr=%08x\n", hr );
+        trace( "ccw-key: IReference`1<String> pinterface = %s\n", wine_dbgstr_guid( &iref_iid ) );
+    }
+
+    /* the IStringable identity the module QIs for is the tree's own metadata
+     * answer (dlls/combase/roapi.c iid_names[]) -- runtime evidence, and it
+     * rules out the {f01beeae-1d32-47b8-82dd-700ea3508562} that a
+     * windows-rs-shaped guess would suggest */
+    {
+        static const WCHAR *elem[] = { L"Windows.Foundation.IStringable" };
+        ROPARAMIIDHANDLE handle = NULL;
+        GUID g;
+
+        g = IID_IUnknown;
+        hr = RoGetParameterizedTypeInstanceIID( 1, elem, NULL, &g, &handle );
+        ok( SUCCEEDED( hr ) && IsEqualGUID( &g, &IID_IStringable_loc ),
+            "ccw-key: tree metadata IID of Windows.Foundation.IStringable is %s (expect %s) hr=%08x\n",
+            wine_dbgstr_guid( &g ), wine_dbgstr_guid( &IID_IStringable_loc ), hr );
+    }
+
+    mini_ccw_init( &ccw_lang, L"Language", CCW_ISTRINGABLE );
+    mini_ccw_init( &ccw_absent, L"NoSuchQualifier", CCW_ISTRINGABLE );
+    mini_ccw_init( &ccw_plain, L"Language", CCW_NONE );
+    mini_ccw_init( &ccw_iref, L"Language", CCW_IREFERENCE );
+    ccw_iref.iref_iid = iref_iid;
+    mini_ccw_init( &ccw_qname, L"TestCcwQualifier", CCW_ISTRINGABLE );
+    mini_ccw_init( &ccw_qvalue, L"ccw-value", CCW_ISTRINGABLE );
+    mini_ccw_init( &ccw_reskey, L"Resources\\CalculatorModeText", CCW_ISTRINGABLE );
+    ccw_junk = ccw_lang;
+    ccw_junk.vtbl = junk_vtbl;
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "ccw-key: RoGetActivationFactory(ResourceContext) hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = CALL( factory, 6, &ctx2 );  /* ActivateInstance */
+    ok( SUCCEEDED( hr ) && ctx2, "ccw-key: ActivateInstance hr=%08x\n", hr );
+    if (FAILED( hr ) || !ctx2) goto done_factory;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( ctx2, 0 ))( ctx2, &IID_IResourceContext_loc, &ctx );
+    ok( hr == S_OK && ctx, "ccw-key: QI IResourceContext hr=%08x\n", hr );
+    if (FAILED( hr ) || !ctx) goto done_factory;
+    hr = CALL( ctx, 6, &mv );  /* get_QualifierValues: IMapView<HSTRING,HSTRING> */
+    ok( hr == S_OK && mv, "ccw-key: get_QualifierValues hr=%08x\n", hr );
+    if (FAILED( hr ) || !mv) goto done_factory;
+
+    /* baseline: a real HSTRING key resolves Language, and pins the value the
+     * CCW key must resolve to (locale-independent assertion) */
+    {
+        HSTRING_HEADER hdr;
+        WindowsCreateStringReference( L"Language", 8, &hdr, &hkey );
+        hr = CALL( mv, 6, hkey, &hexpect );
+        ok( SUCCEEDED( hr ) && hexpect, "ccw-key: baseline Get(Language) hr=%08x\n", hr );
+    }
+
+    /* the app's shape: IMapView::Get with a String CCW key */
+    ccw_qi_stringable = ccw_tostring_calls = 0;
+    hval = NULL;
+    hr = CALL( mv, 6, (HSTRING)&ccw_lang, &hval );
+    ok( SUCCEEDED( hr ) && hval, "ccw-key: QualifierValues Get(CCW \"Language\") hr=%08x\n", hr );
+    if (SUCCEEDED( hr ) && hval)
+    {
+        ok( !hexpect || hstring_eq( hval, WindowsGetStringRawBuffer( hexpect, NULL ) ),
+            "ccw-key: CCW Language value != baseline value\n" );
+        WindowsDeleteString( hval );
+    }
+    ok( ccw_qi_stringable > 0, "ccw-key: CCW path did not QI IStringable (%ld)\n", ccw_qi_stringable );
+    ok( ccw_tostring_calls > 0, "ccw-key: CCW path did not call ToString (%ld)\n", ccw_tostring_calls );
+
+    /* HasKey sees the same key */
+    has = -1;
+    hr = CALL( mv, 7, (HSTRING)&ccw_lang, &has );
+    ok( hr == S_OK && has, "ccw-key: QualifierValues HasKey(CCW \"Language\") hr=%08x has=%d\n", hr, has );
+
+    /* a CCW naming an absent qualifier must not manufacture a hit */
+    hval = NULL;
+    hr = CALL( mv, 6, (HSTRING)&ccw_absent, &hval );
+    ok( hr == ELEMENT_NOT_FOUND_HR, "ccw-key: Get(CCW \"NoSuchQualifier\") hr=%08x (expect ELEMENT_NOT_FOUND)\n", hr );
+    if (hval) WindowsDeleteString( hval );
+    has = -1;
+    hr = CALL( mv, 7, (HSTRING)&ccw_absent, &has );
+    ok( hr == S_OK && !has, "ccw-key: HasKey(CCW \"NoSuchQualifier\") hr=%08x has=%d\n", hr, has );
+
+    /* the IReference`1<String> pinterface surface (get_Value, slot 6) */
+    if (!IsEqualGUID( &iref_iid, &IID_IUnknown ))
+    {
+        ccw_qi_ireference = 0;
+        hval = NULL;
+        hr = CALL( mv, 6, (HSTRING)&ccw_iref, &hval );
+        ok( SUCCEEDED( hr ) && hval, "ccw-key: Get(IReference<String> CCW \"Language\") hr=%08x\n", hr );
+        if (SUCCEEDED( hr ) && hval) WindowsDeleteString( hval );
+        ok( ccw_qi_ireference > 0, "ccw-key: IReference path did not QI the pinterface (%ld)\n", ccw_qi_ireference );
+    }
+
+    /* a COM object that answers no key surface: no hit, no crash */
+    hval = NULL;
+    hr = CALL( mv, 6, (HSTRING)&ccw_plain, &hval );
+    ok( hr == ELEMENT_NOT_FOUND_HR, "ccw-key: Get(plain CCW) hr=%08x (expect ELEMENT_NOT_FOUND)\n", hr );
+    if (hval) WindowsDeleteString( hval );
+    has = -1;
+    hr = CALL( mv, 7, (HSTRING)&ccw_plain, &has );
+    ok( hr == S_OK && !has, "ccw-key: HasKey(plain CCW) hr=%08x has=%d\n", hr, has );
+
+    /* not a COM pointer at all: the QI must be SEH-guarded, the process must
+     * survive and the answer stay ELEMENT_NOT_FOUND */
+    hval = NULL;
+    hr = CALL( mv, 6, (HSTRING)&ccw_junk, &hval );
+    ok( hr == ELEMENT_NOT_FOUND_HR, "ccw-key: Get(non-Ccw pointer) hr=%08x (expect ELEMENT_NOT_FOUND)\n", hr );
+    if (hval) WindowsDeleteString( hval );
+    has = -1;
+    hr = CALL( mv, 7, (HSTRING)&ccw_junk, &has );
+    ok( hr == S_OK && !has, "ccw-key: HasKey(non-Ccw pointer) hr=%08x has=%d\n", hr, has );
+    hr = CALL( mv, 8, &has );  /* the map is still intact after the AV probes */
+    ok( SUCCEEDED( hr ) && has > 0, "ccw-key: QualifierValues Size after AV probes hr=%08x size=%d\n", hr, has );
+
+    /* IResourceMap::GetValue takes the same key shape (MainResourceMap) */
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceManager", &rmfactory );
+    if (SUCCEEDED( hr ))
+    {
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( rmfactory, 0 ))( rmfactory, &IID_IResourceManagerStatics_loc, &rms );
+        if (SUCCEEDED( hr ))
+        {
+            void *rm = NULL;
+            hr = CALL( rms, 6, &rm );  /* IResourceManagerStatics::Current */
+            if (SUCCEEDED( hr ) && rm)
+            {
+                hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( rm, 0 ))( rm, &IID_IResourceManager_loc, &rm2 );
+                if (SUCCEEDED( hr ) && rm2)
+                {
+                    hr = CALL( rm2, 6, &map );  /* get_MainResourceMap */
+                    if (SUCCEEDED( hr ) && map)
+                    {
+                        /* the map answers any key (key-as-value stub tier when
+                         * the pri lookup misses), so the CCW key is judged by
+                         * the *resource it resolves*, not by S_OK alone */
+                        WCHAR base[64], got[64];
+                        void *cand = NULL, *defctx = NULL;
+                        HSTRING_HEADER hdr;
+                        HSTRING hres = NULL;
+
+                        base[0] = got[0] = 0;
+                        WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &hdr, &hres );
+                        hr = CALL( map, 7, hres, &cand );  /* real-HSTRING baseline */
+                        if (SUCCEEDED( hr ) && cand)
+                        {
+                            cand_get_value( cand, base, ARRAYSIZE( base ) );
+                            CALL( cand, 2, (ULONG *)&hr );
+                        }
+                        ok( !wcscmp( base, L"Calculator" ), "ccw-key: baseline pri value is '%s'\n", wine_dbgstr_w( base ) );
+
+                        cand = NULL;
+                        hr = CALL( map, 7, (HSTRING)&ccw_reskey, &cand );  /* IResourceMap::GetValue */
+                        ok( SUCCEEDED( hr ) && cand, "ccw-key: MainResourceMap::GetValue(CCW pri key) hr=%08x\n", hr );
+                        if (cand)
+                        {
+                            cand_get_value( cand, got, ARRAYSIZE( got ) );
+                            ok( !wcscmp( got, base ), "ccw-key: GetValue(CCW) -> '%s', baseline '%s'\n",
+                                wine_dbgstr_w( got ), wine_dbgstr_w( base ) );
+                            CALL( cand, 2, (ULONG *)&hr );
+                        }
+
+                        cand = NULL;
+                        hr = CALL( rm2, 8, &defctx );  /* get_DefaultContext */
+                        if (SUCCEEDED( hr ) && defctx)
+                        {
+                            got[0] = 0;
+                            hr = CALL( map, 8, (HSTRING)&ccw_reskey, defctx, &cand );  /* GetValueForContext */
+                            ok( SUCCEEDED( hr ) && cand, "ccw-key: GetValueForContext(CCW pri key) hr=%08x\n", hr );
+                            if (cand)
+                            {
+                                cand_get_value( cand, got, ARRAYSIZE( got ) );
+                                ok( !wcscmp( got, base ), "ccw-key: GetValueForContext(CCW) -> '%s', baseline '%s'\n",
+                                    wine_dbgstr_w( got ), wine_dbgstr_w( base ) );
+                                CALL( cand, 2, (ULONG *)&hr );
+                            }
+                            CALL( defctx, 2, (ULONG *)&hr );
+                        }
+                        WindowsDeleteString( hres );
+                    }
+                    CALL( rm2, 2, (ULONG *)&hr );
+                }
+                CALL( rm, 2, (ULONG *)&hr );
+            }
+            CALL( rms, 2, (ULONG *)&hr );
+        }
+        CALL( rmfactory, 2, (ULONG *)&hr );
+    }
+
+    /* IResourceContext2::SetQualifierValue(value, name) with both sides CCWs:
+     * the value must land in that context's QualifierValues under the CCW name */
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    if (SUCCEEDED( hr ))
+    {
+        hr = CALL( factory, 6, &own_ctx );  /* own instance, not the shared current context */
+        if (SUCCEEDED( hr ) && own_ctx)
+        {
+            hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( own_ctx, 0 ))( own_ctx, &IID_IResourceContext2_loc, &c2 );
+            ok( hr == S_OK && c2, "ccw-key: QI IResourceContext2 hr=%08x\n", hr );
+            if (SUCCEEDED( hr ) && c2)
+            {
+                hr = CALL( c2, 6, (HSTRING)&ccw_qvalue, (HSTRING)&ccw_qname );  /* SetQualifierValue(value, name) */
+                ok( hr == S_OK, "ccw-key: SetQualifierValue(CCW value, CCW name) hr=%08x\n", hr );
+                CALL( c2, 2, (ULONG *)&hr );
+            }
+            hr = CALL( own_ctx, 6, &own_mv );  /* get_QualifierValues */
+            if (SUCCEEDED( hr ) && own_mv)
+            {
+                HSTRING_HEADER hdr;
+                WindowsCreateStringReference( L"TestCcwQualifier", 16, &hdr, &hback );
+                hval = NULL;
+                hr = CALL( own_mv, 6, hback, &hval );
+                ok( SUCCEEDED( hr ) && hval && hstring_eq( hval, L"ccw-value" ),
+                    "ccw-key: SetQualifierValue stored under the CCW name hr=%08x\n", hr );
+                if (hval) WindowsDeleteString( hval );
+                WindowsDeleteString( hback );
+                CALL( own_mv, 2, (ULONG *)&hr );
+            }
+            CALL( own_ctx, 2, (ULONG *)&hr );
+        }
+        CALL( factory, 2, (ULONG *)&hr );
+    }
+
+    if (hkey) WindowsDeleteString( hkey );
+    if (hexpect) WindowsDeleteString( hexpect );
+    CALL( mv, 2, (ULONG *)&hr );
+done_factory:
+    if (ctx) CALL( ctx, 2, (ULONG *)&hr );
+    if (ctx2) CALL( ctx2, 2, (ULONG *)&hr );
+    CALL( factory, 2, (ULONG *)&hr );
+}
+
 START_TEST(core)
 {
     HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
@@ -1381,6 +1785,7 @@ START_TEST(core)
     test_resourcemanager_lookup();
     test_real_pri_lookup();
     test_virtualized_hstring();
+    test_ccw_string_key();
     test_iagile();
     test_getiids_nullargs();
     test_qualifier_set();
