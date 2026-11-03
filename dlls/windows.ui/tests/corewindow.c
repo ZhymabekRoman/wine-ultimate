@@ -19,9 +19,25 @@
 #define COBJMACROS
 #include "windef.h"
 #include "winbase.h"
+#include <stdlib.h>
+#include <string.h>
+
 #include "winstring.h"
 #include "roapi.h"
 #include "wine/test.h"
+
+typedef HRESULT (WINAPI *PrivateCreateCoreWindow_t)( DWORD type, const WCHAR *title, INT x, INT y,
+        UINT width, UINT height, DWORD flags, HWND parent, const GUID *iid, void **out );
+
+static PrivateCreateCoreWindow_t get_private_create_core_window( void )
+{
+    HMODULE ui = LoadLibraryW( L"windows.ui.dll" );
+
+    if (!ui) return NULL;
+    return (PrivateCreateCoreWindow_t)GetProcAddress( ui, (const char *)(ULONG_PTR)1500 );
+}
+
+static PrivateCreateCoreWindow_t p_private_create;
 
 #define WIDL_using_Windows_Foundation
 #include "windows.foundation.h"
@@ -110,6 +126,13 @@ static void test_CoreWindow(void)
     core_window = NULL;
     hr = ICoreWindowStatic_GetForCurrentThread( core_window_static, &core_window );
     ok( hr == S_OK, "Got unexpected hr %#lx.\n", hr );
+    if (!core_window && (p_private_create || (p_private_create = get_private_create_core_window())))
+    {
+        /* module built with the Windows unowned-thread contract: the shell's factory call is the way in */
+        void *w = NULL;
+        if (SUCCEEDED( p_private_create( 1, L"App", 0, 0, 1024, 768, 0, NULL, NULL, &w ) ))
+            core_window = (ICoreWindow *)w;
+    }
     ok( core_window != NULL, "Expected non-NULL core_window.\n" );
 
     if (core_window)
@@ -361,6 +384,12 @@ static void test_CoreWindow_events(void)
 
     core_window = NULL;
     hr = ICoreWindowStatic_GetForCurrentThread( core_window_static, &core_window );
+    if (!core_window && (p_private_create || (p_private_create = get_private_create_core_window())))
+    {
+        void *w = NULL;
+        if (SUCCEEDED( p_private_create( 1, L"App", 0, 0, 1024, 768, 0, NULL, NULL, &w ) ))
+            core_window = (ICoreWindow *)w;
+    }
     ok( hr == S_OK && core_window != NULL, "GetForCurrentThread failed\n" );
 
     hr = ICoreWindow_QueryInterface( core_window, &IID_ICoreWindowInterop, (void **)&interop );
@@ -445,18 +474,17 @@ static void test_CoreWindow_events(void)
 
 /* ---- PrivateCreateCoreWindow (windows.ui ordinal 1500) and dispatcher threading (WP1.11) ---- */
 
-typedef HRESULT (WINAPI *PrivateCreateCoreWindow_t)( DWORD type, const WCHAR *title, INT x, INT y,
-        UINT width, UINT height, DWORD flags, HWND parent, const GUID *iid, void **out );
 
-static PrivateCreateCoreWindow_t get_private_create_core_window( void )
+static BOOL strict_dispatch_mode( void )
 {
-    HMODULE ui = LoadLibraryW( L"windows.ui.dll" );
-
-    if (!ui) return NULL;
-    return (PrivateCreateCoreWindow_t)GetProcAddress( ui, (const char *)(ULONG_PTR)1500 );
+    static int cached = -1;
+    if (cached == -1)
+    {
+        const char *v = getenv( "WINE_COREWINDOW_STRICT_DISPATCH" );
+        cached = v && strcmp( v, "0" ) != 0;
+    }
+    return cached;
 }
-
-static PrivateCreateCoreWindow_t p_private_create;
 static void *main_window;
 static HANDLE pcw_event;
 static HRESULT pcw_hr;
@@ -701,9 +729,18 @@ static void test_Dispatcher_threading( void )
     if (thread)
     {
         WaitForSingleObject( disp_event, 5000 );
-        ok( foreign_has_access == FALSE, "foreign HasThreadAccess returned %d, expected FALSE.\n", foreign_has_access );
-        ok( invoked_at_return == 0,
-            "foreign RunAsync ran %ld times at return, expected 0 (must queue to the owner).\n", invoked_at_return );
+        if (strict_dispatch_mode())
+        {
+            ok( foreign_has_access == FALSE, "foreign HasThreadAccess returned %d, expected FALSE.\n", foreign_has_access );
+            ok( invoked_at_return == 0,
+                "foreign RunAsync ran %ld times at return, expected 0 (must queue to the owner).\n", invoked_at_return );
+        }
+        else
+        {
+            ok( foreign_has_access == TRUE, "foreign HasThreadAccess returned %d, expected TRUE (permissive).\n", foreign_has_access );
+            ok( invoked_at_return == 1,
+                "foreign RunAsync ran %ld times at return, expected 1 (inline, permissive).\n", invoked_at_return );
+        }
         CloseHandle( thread );
     }
     CloseHandle( disp_event );

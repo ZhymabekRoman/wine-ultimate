@@ -19,6 +19,9 @@
 
 #include "private.h"
 
+#include <stdlib.h>
+#include <string.h>
+
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
@@ -212,15 +215,38 @@ static struct core_window *create_core_window( const WCHAR *title, INT x, INT y,
 
 DEFINE_IINSPECTABLE( corewindow_static, ICoreWindowStatic, struct corewindow_statics, IActivationFactory_iface )
 
+static BOOL ondemand_corewindow_enabled( void )
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        const char *v = getenv( "WINE_COREWINDOW_ONDEMAND" );
+        cached = v && strcmp( v, "0" ) != 0;
+    }
+    return cached;
+}
+
 static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWindowStatic *iface, ICoreWindow **windows )
 {
     TRACE( "iface %p, windows %p.\n", iface, windows );
     if (!windows) return E_POINTER;
 
-    /* A CoreWindow is the thread's window, and asking for it is how the thread gets one: the
-     * window is created on demand, on the calling (owning) thread, as Windows' factory does. */
-    if (!thread_core_window && !create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, FALSE ))
-        return E_OUTOFMEMORY;
+    /* Windows answers NULL on a thread that has no CoreWindow (the thread's window is created by
+     * the activation machinery, not by asking).  Live bisect (gate57/58, WhatsApp Desktop):
+     * on-demand creation here spawned a phantom CoreWindow + dispatcher for EVERY asking thread
+     * (.NET TP workers among them) and the client blocked in early managed init.  Default is
+     * therefore the Windows contract: NULL when unowned.  WINE_COREWINDOW_ONDEMAND=1 restores
+     * create-on-ask for threads that need the UWP-suite shape. */
+    if (!thread_core_window)
+    {
+        if (!ondemand_corewindow_enabled())
+        {
+            *windows = NULL;
+            return S_OK;
+        }
+        if (!create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, FALSE ))
+            return E_OUTOFMEMORY;
+    }
 
     *windows = &thread_core_window->ICoreWindow_iface;
     ICoreWindow_AddRef( *windows );
@@ -518,11 +544,26 @@ static IAsyncAction *dispatcher_async_action_create(void)
 /* Owner-thread call: run inline. Foreign call: hand the callback to the owner thread's queue via
  * its window; it runs when the owner pumps (ProcessEvents, and the Run/ProcessUntilQuit loops).
  * With no window or a dead queue to post to, inline is the only way the callback is not lost. */
+static BOOL strict_dispatch_enabled( void )
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        const char *v = getenv( "WINE_COREWINDOW_STRICT_DISPATCH" );
+        cached = v && strcmp( v, "0" ) != 0;
+    }
+    return cached;
+}
+
 static void dispatcher_run_or_post( struct core_dispatcher *impl, void *agileCallback, BOOL idle )
 {
     HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)agileCallback)[3];
 
-    if (GetCurrentThreadId() == impl->owner_tid)
+    /* Live bisect (WhatsApp Desktop p53 wave, gate57/58): queue-routed foreign RunAsync was the
+     * 1.10-vs-1.11 behavior delta that blocked the unpackaged WinUI3 client's managed init; the
+     * 1.10 baseline runs every callback inline on the caller.  The window-queue route is opt-in
+     * via WINE_COREWINDOW_STRICT_DISPATCH; the owner_tid recording stays live in both modes. */
+    if (!strict_dispatch_enabled() || GetCurrentThreadId() == impl->owner_tid)
     {
         invoke( agileCallback );
         return;
@@ -581,7 +622,7 @@ static HRESULT WINAPI core_dispatcher_HasThreadAccess( ICoreDispatcher *iface, b
 
     TRACE( "iface %p, owner tid %lu, current tid %lu.\n", iface, impl->owner_tid, GetCurrentThreadId() );
     if (!value) return E_POINTER;
-    *value = (GetCurrentThreadId() == impl->owner_tid);
+    *value = !strict_dispatch_enabled() || GetCurrentThreadId() == impl->owner_tid;  /* 1.10 stub shape (TRUE) when not strict */
     return S_OK;
 }
 static HRESULT WINAPI core_dispatcher_get_CurrentPriority( ICoreDispatcher *iface, CoreDispatcherPriority *value )
