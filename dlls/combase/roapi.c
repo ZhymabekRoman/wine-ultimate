@@ -17,6 +17,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 #define COBJMACROS
+#include "ntstatus.h"
 #include "objbase.h"
 #include "initguid.h"
 #include "roapi.h"
@@ -24,6 +25,7 @@
 #include "roerrorapi.h"
 #include "winstring.h"
 #include "errhandlingapi.h"
+#include "winternl.h"
 
 #include "combase_private.h"
 
@@ -478,32 +480,47 @@ void WINAPI RoUninitialize(void)
     CoUninitialize();
 }
 
-/***********************************************************************
- *      RoGetActivationFactory (combase.@)
+/*
+ * Activation resolution shared by RoGetActivationFactory and
+ * RoGetActivatableClassRegistration, so that a class lookup costs exactly one
+ * provider call: the process's own RoRegisterActivationFactories table first (a
+ * process's registration of its classes outranks the static configuration, the
+ * WebView2 core-server contract), then the activation-context section, the builtin
+ * namespace routes and the ActivatableClassId\DllPath registry that
+ * get_library_for_classid answers, and in that library the class's
+ * DllGetActivationFactory.  The factory comes back with the single owning reference
+ * its provider gave it; when the provider was a loaded library, *module is that
+ * module, so a caller whose next step (a QueryInterface, say) fails can unload it.
  */
-HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID iid, void **class_factory)
+static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **factory, HMODULE *module)
 {
     PFNGETACTIVATIONFACTORY pDllGetActivationFactory;
-    IActivationFactory *factory;
+    PFNGETACTIVATIONFACTORY registered_callback;
+    const WCHAR *raw = WindowsGetStringRawBuffer(classid, NULL);
+    IActivationFactory *result;
     WCHAR *library;
-    HMODULE module;
     HRESULT hr;
 
-    FIXME("(%s, %s, %p): semi-stub\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
+    *factory = NULL;
+    *module = NULL;
 
-    if (!iid || !class_factory)
-        return E_INVALIDARG;
-
-    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"Windows.ApplicationModel.Resources.ResourceLoader"))
+    if (!wcscmp(raw, L"Windows.ApplicationModel.Resources.ResourceLoader"))
     {
         HMODULE hMod = LoadLibraryW(L"twinapi.appcore.dll");
         if (hMod)
         {
             PFNGETACTIVATIONFACTORY pfn = (void *)GetProcAddress(hMod, "DllGetActivationFactory");
-            if (pfn && SUCCEEDED(pfn(classid, &factory)))
+            if (pfn && SUCCEEDED(pfn(classid, &result)))
             {
-                hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
-                IActivationFactory_Release(factory);
+                /* twinapi.appcore.dll stays loaded, as it did in RoGetActivationFactory:
+                 * the factory's code lives in it. */
+                hr = IActivationFactory_QueryInterface(result, &IID_IActivationFactory, (void **)&result);
+                IActivationFactory_Release(result);
+                if (SUCCEEDED(hr))
+                {
+                    *factory = result;
+                    return S_OK;
+                }
                 return hr;
             }
         }
@@ -512,72 +529,116 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     if (FAILED(hr = ensure_mta()))
         return hr;
 
-    if (!wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"Windows.System.UserProfile.DiagnosticsSettings") ||
-        !wcscmp(WindowsGetStringRawBuffer(classid, NULL), L"Windows.System.Profile.PlatformDiagnosticsAndUsageDataSettings"))
+    if (!wcscmp(raw, L"Windows.System.UserProfile.DiagnosticsSettings") ||
+        !wcscmp(raw, L"Windows.System.Profile.PlatformDiagnosticsAndUsageDataSettings"))
     {
         TRACE("No activation factory for %s\n", debugstr_hstring(classid));
         return REGDB_E_CLASSNOTREG;
     }
 
+    if (find_registered_factory(raw, &registered_callback))
     {
-        PFNGETACTIVATIONFACTORY registered_callback;
-        if (find_registered_factory(WindowsGetStringRawBuffer(classid, NULL), &registered_callback))
-        {
-            /* The process registered this class itself (RoRegisterActivationFactories):
-             * that registration outranks the routes and the ActivatableClassId registry,
-             * it is the process's own statement about its classes. */
-            hr = registered_callback(classid, &factory);
-            if (SUCCEEDED(hr))
-            {
-                hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
-                IActivationFactory_Release(factory);
-            }
-            return hr;
-        }
+        /* The process registered this class itself (RoRegisterActivationFactories):
+         * that registration outranks the routes and the ActivatableClassId registry,
+         * it is the process's own statement about its classes. */
+        return registered_callback(classid, factory);
     }
 
-    hr = get_library_for_classid(WindowsGetStringRawBuffer(classid, NULL), &library);
+    hr = get_library_for_classid(raw, &library);
     if (FAILED(hr))
     {
         ERR("Failed to find library for %s\n", debugstr_hstring(classid));
         return hr;
     }
 
-    if (!(module = LoadLibraryW(library)))
+    if (!(*module = LoadLibraryW(library)))
     {
         ERR("Failed to load module %s\n", debugstr_w(library));
         hr = HRESULT_FROM_WIN32(GetLastError());
-        goto done;
+        free(library);
+        return hr;
     }
 
-    if (!(pDllGetActivationFactory = (void *)GetProcAddress(module, "DllGetActivationFactory")))
+    if (!(pDllGetActivationFactory = (void *)GetProcAddress(*module, "DllGetActivationFactory")))
     {
         ERR("Module %s does not implement DllGetActivationFactory\n", debugstr_w(library));
-        hr = E_FAIL;
-        goto done;
+        free(library);
+        return E_FAIL;
     }
 
     TRACE("Found library %s for class %s\n", debugstr_w(library), debugstr_hstring(classid));
 
-    hr = pDllGetActivationFactory(classid, &factory);
+    hr = pDllGetActivationFactory(classid, factory);
+    if (FAILED(hr))
+        ERR("Class %s not found in %s, hr %#lx.\n", wine_dbgstr_hstring(classid), debugstr_w(library), hr);
+    free(library);
+    return hr;
+}
+
+/***********************************************************************
+ *      RoGetActivationFactory (combase.@)
+ */
+HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID iid, void **class_factory)
+{
+    IActivationFactory *factory;
+    HMODULE module = NULL;
+    HRESULT hr;
+
+    FIXME("(%s, %s, %p): semi-stub\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
+
+    if (!iid || !class_factory)
+        return E_INVALIDARG;
+
+    *class_factory = NULL;
+
+    hr = resolve_activation_factory(classid, &factory, &module);
     if (SUCCEEDED(hr))
     {
         hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
         if (SUCCEEDED(hr))
         {
             TRACE("Created interface %p\n", *class_factory);
-            module = NULL;
+            module = NULL; /* the provider module has to stay loaded: the factory's code lives in it */
         }
         IActivationFactory_Release(factory);
     }
-    else
-    {
-        ERR("Class %s not found in %s, hr %#lx.\n", wine_dbgstr_hstring(classid), debugstr_w(library), hr);
-    }
 
-done:
-    free(library);
     if (module) FreeLibrary(module);
+    return hr;
+}
+
+/***********************************************************************
+ *      RoGetActivatableClassRegistration (combase.@)
+ *
+ * The per-class registration lookup of roregistrationapi.h, the WinRT registration
+ * api-set (API-MS-Win-Core-WinRT-registration-l1-1-0) that forwards to combase.dll.
+ * Windows answers its internal registration record; the part of it a caller can act
+ * on is the class's factory, so Wine answers the class's IActivationFactory through
+ * the one resolution path RoGetActivationFactory uses, handed over directly instead
+ * of a second factory lookup behind a QueryInterface.
+ *
+ * The unregistered answer is REGDB_E_CLASSNOTREG: the code of the COM registration
+ * family, "Class not registered" (0x80040154), and the answer RoGetActivationFactory
+ * already gives for the very same class.  The roadmap's name for it,
+ * CLASS_E_CLASSNOTREG, is not in any public header (the SDK winerror.h CLASS_E_ group
+ * is 0x80040110-0x80040112 and its registration group 0x80040150-0x8004015f), so no
+ * value is invented here.
+ *
+ * The export was an @stub line: it exists, so PE imports bind it, and calling it
+ * raised the unimplemented-function exception, aborting the calling process.
+ */
+HRESULT WINAPI RoGetActivatableClassRegistration(HSTRING activatable_class_id, IActivationFactory **factory)
+{
+    HMODULE module = NULL;
+    HRESULT hr;
+
+    TRACE("(%s, %p)\n", debugstr_hstring(activatable_class_id), factory);
+
+    if (!factory)
+        return E_POINTER;
+
+    hr = resolve_activation_factory(activatable_class_id, factory, &module);
+    if (FAILED(hr) && module) FreeLibrary(module);
     return hr;
 }
 
@@ -1390,15 +1451,248 @@ HRESULT WINAPI RoRegisterForApartmentShutdown(IApartmentShutdown *callback,
     return S_OK;
 }
 
+/*
+ * RoGetServerActivatableClasses (roregistrationapi.h): the activatable classes a
+ * server executable is registered to serve.  Windows answers it from the
+ * apprepository database of a packaged server's registrations; Wine's activation
+ * configuration is the ActivatableClassId registry, where every class key carries the
+ * module that implements it in its DllPath value - loader/wine.inf seeds the machine
+ * view and per-user registrations follow the per-user hive that ole32 class
+ * registration reads.  That is the same fact in the layout Wine does have, so both
+ * hives are enumerated and their classes' DllPath matched against the server name.
+ *
+ * Enumeration goes through the native registry API: NtOpenKey on the class root,
+ * NtEnumerateKey over its children, NtQueryValueKey for each DllPath.  The documented
+ * caller contract is kept: a CoTaskMem-allocated array of HSTRINGs the caller releases
+ * with WindowsDeleteString, the buffer with CoTaskMemFree.  The documented failures are
+ * kept too - an empty server name and a server with no registered class answer
+ * REGDB_E_CLASSNOTREG - and a NULL out parameter is E_POINTER.
+ */
+struct class_id_list
+{
+    HSTRING *ids;
+    ULONG count, alloc;
+    BOOL failed;
+};
+
+static void free_class_id_list( struct class_id_list *list )
+{
+    ULONG i;
+
+    for (i = 0; i < list->count; i++)
+        WindowsDeleteString( list->ids[i] );
+    CoTaskMemFree( list->ids );
+    list->ids = NULL;
+    list->count = list->alloc = 0;
+}
+
+static BOOL class_id_list_add( struct class_id_list *list, const WCHAR *name, ULONG len )
+{
+    HSTRING str;
+    ULONG i;
+
+    /* HKLM and HKCU can name the same class; a class is listed once. */
+    for (i = 0; i < list->count; i++)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( list->ids[i], NULL );
+        if (raw && !lstrcmpiW( raw, name )) return TRUE;
+    }
+
+    if (WindowsCreateString( name, len, &str ) != S_OK)
+    {
+        list->failed = TRUE;
+        return FALSE;
+    }
+
+    if (list->count == list->alloc)
+    {
+        HSTRING *bigger = CoTaskMemRealloc( list->ids, (list->alloc + 32) * sizeof(*list->ids) );
+        if (!bigger)
+        {
+            WindowsDeleteString( str );
+            list->failed = TRUE;
+            return FALSE;
+        }
+        list->ids = bigger;
+        list->alloc += 32;
+    }
+    list->ids[list->count++] = str;
+    return TRUE;
+}
+
+static const WCHAR *basenameW( const WCHAR *path )
+{
+    const WCHAR *base = wcsrchr( path, L'\\' );
+    return base ? base + 1 : path;
+}
+
+/* The DllPath value of a class key names the module the class lives in; the server
+ * name of this API is how the server is invoked, so they are compared
+ * case-insensitively, on the whole path and on the file name - the module load of the
+ * activation path resolves the same pair. */
+static BOOL key_dllpath_matches_server( HANDLE key, const WCHAR *server )
+{
+    static const WCHAR dllpath_name[] = L"DllPath";
+    KEY_VALUE_PARTIAL_INFORMATION *info;
+    UNICODE_STRING value_str;
+    ULONG size, len, chars;
+    WCHAR *data, *path = NULL;
+    BOOL matched = FALSE;
+    NTSTATUS status;
+
+    RtlInitUnicodeString( &value_str, dllpath_name );
+    size = sizeof(*info) + MAX_PATH * sizeof(WCHAR);
+    if (!(info = HeapAlloc( GetProcessHeap(), 0, size ))) return FALSE;
+
+    status = NtQueryValueKey( key, &value_str, KeyValuePartialInformation, info, size, &len );
+    if (status == STATUS_BUFFER_OVERFLOW)
+    {
+        HeapFree( GetProcessHeap(), 0, info );
+        if (!(info = HeapAlloc( GetProcessHeap(), 0, len ))) return FALSE;
+        status = NtQueryValueKey( key, &value_str, KeyValuePartialInformation, info, len, &len );
+    }
+    if (status || (info->Type != REG_SZ && info->Type != REG_EXPAND_SZ) || info->DataLength < sizeof(WCHAR))
+        goto done;
+
+    chars = info->DataLength / sizeof(WCHAR);
+    data = (WCHAR *)info->Data;
+    if (!(path = HeapAlloc( GetProcessHeap(), 0, (chars + 1) * sizeof(WCHAR) ))) goto done;
+    memcpy( path, data, chars * sizeof(WCHAR) );
+    path[chars] = 0;
+
+    if (info->Type == REG_EXPAND_SZ)
+    {
+        WCHAR *expanded;
+        DWORD out = ExpandEnvironmentStringsW( path, NULL, 0 );
+        if (!out) goto done;
+        if (!(expanded = HeapAlloc( GetProcessHeap(), 0, out * sizeof(WCHAR) ))) goto done;
+        ExpandEnvironmentStringsW( path, expanded, out );
+        HeapFree( GetProcessHeap(), 0, path );
+        path = expanded;
+    }
+
+    matched = !lstrcmpiW( path, server ) || !lstrcmpiW( basenameW( path ), basenameW( server ) );
+
+done:
+    HeapFree( GetProcessHeap(), 0, path );
+    HeapFree( GetProcessHeap(), 0, info );
+    return matched;
+}
+
+static void enumerate_server_classes_key( HKEY root, const WCHAR *path, const WCHAR *server,
+                                          struct class_id_list *list )
+{
+    static const ULONG name_size = MAX_PATH * sizeof(WCHAR);
+    KEY_BASIC_INFORMATION *info;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING name_str;
+    NTSTATUS status;
+    HKEY base;
+    ULONG index;
+
+    /* An HKEY_* root is a pseudo-handle, not a server handle, so the configured root
+     * key is opened through the registry API and the enumeration below runs relative
+     * to the handle that comes back (this dll's open_user_classes_key() pattern).
+     * A hive without the key simply has no classes to list. */
+    if (RegOpenKeyExW( root, path, 0, KEY_READ | KEY_ENUMERATE_SUB_KEYS, &base )) return;
+
+    if (!(info = HeapAlloc( GetProcessHeap(), 0, sizeof(*info) + name_size )))
+    {
+        list->failed = TRUE;
+        RegCloseKey( base );
+        return;
+    }
+
+    for (index = 0; !list->failed; index++)
+    {
+        WCHAR *name = NULL;
+        ULONG len;
+        HANDLE sub;
+
+        status = NtEnumerateKey( (HANDLE)base, index, KeyBasicInformation, info, sizeof(*info) + name_size, &len );
+        if (status == STATUS_NO_MORE_ENTRIES || status) break;   /* end, or unreadable: keep what we have */
+        if (!info->NameLength || info->NameLength % sizeof(WCHAR) || info->NameLength > name_size) continue;
+
+        len = info->NameLength / sizeof(WCHAR);
+        if (!(name = HeapAlloc( GetProcessHeap(), 0, info->NameLength + sizeof(WCHAR) )))
+        {
+            list->failed = TRUE;
+            break;
+        }
+        memcpy( name, info->Name, info->NameLength );
+        name[len] = 0;
+
+        RtlInitUnicodeString( &name_str, name );
+        attr.Length = sizeof(attr);
+        attr.RootDirectory = base;
+        attr.ObjectName = &name_str;
+        attr.Attributes = OBJ_CASE_INSENSITIVE;
+        attr.SecurityDescriptor = NULL;
+        attr.SecurityQualityOfService = NULL;
+
+        if (!NtOpenKey( &sub, KEY_READ, &attr ))
+        {
+            if (key_dllpath_matches_server( sub, server ))
+                class_id_list_add( list, name, len );
+            NtClose( sub );
+        }
+        HeapFree( GetProcessHeap(), 0, name );
+    }
+
+    HeapFree( GetProcessHeap(), 0, info );
+    RegCloseKey( base );
+}
+
 /***********************************************************************
  *      RoGetServerActivatableClasses (combase.@)
  */
-HRESULT WINAPI RoGetServerActivatableClasses(HSTRING name, HSTRING **classes, DWORD *count)
+HRESULT WINAPI RoGetServerActivatableClasses(HSTRING server_name, HSTRING **activatable_class_ids, DWORD *count)
 {
-    FIXME("(%p, %p, %p): stub\n", name, classes, count);
+    static const WCHAR classes_path[] = L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId";
+    struct class_id_list list = { NULL, 0, 0, FALSE };
+    const WCHAR *server;
+    HSTRING *ids;
+    ULONG i;
 
-    if (count)
-        *count = 0;
+    TRACE("(%s, %p, %p)\n", debugstr_hstring(server_name), activatable_class_ids, count);
+
+    if (!activatable_class_ids || !count)
+        return E_POINTER;
+
+    *activatable_class_ids = NULL;
+    *count = 0;
+
+    server = WindowsGetStringRawBuffer( server_name, NULL );
+    if (!server || !server[0])
+        return REGDB_E_CLASSNOTREG;
+
+    enumerate_server_classes_key( HKEY_LOCAL_MACHINE, classes_path, server, &list );
+    enumerate_server_classes_key( HKEY_CURRENT_USER, classes_path, server, &list );
+
+    if (list.failed)
+    {
+        free_class_id_list( &list );
+        return E_OUTOFMEMORY;
+    }
+    if (!list.count)
+    {
+        free_class_id_list( &list );
+        return REGDB_E_CLASSNOTREG;
+    }
+
+    if (!(ids = CoTaskMemAlloc( list.count * sizeof(*ids) )))
+    {
+        free_class_id_list( &list );
+        return E_OUTOFMEMORY;
+    }
+
+    /* The HSTRINGs move to the caller's array; only the temporary index goes free. */
+    for (i = 0; i < list.count; i++)
+        ids[i] = list.ids[i];
+    CoTaskMemFree( list.ids );
+
+    *activatable_class_ids = ids;
+    *count = list.count;
     return S_OK;
 }
 

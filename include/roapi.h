@@ -46,6 +46,8 @@ extern "C" {
 HRESULT WINAPI RoActivateInstance(HSTRING classid, IInspectable **instance);
 HRESULT WINAPI RoGetActivationFactory(HSTRING classid, REFIID iid, void **class_factory);
 HRESULT WINAPI RoGetActivationFactoryForHost(HSTRING host_id, HSTRING class_id, REFIID iid, void **class_factory);
+HRESULT WINAPI RoGetActivatableClassRegistration(HSTRING activatable_class_id, IActivationFactory **factory);
+HRESULT WINAPI RoGetServerActivatableClasses(HSTRING server_name, HSTRING **activatable_class_ids, DWORD *count);
 HRESULT WINAPI RoGetClassNameAndVersion(HSTRING activatable_class_id, HSTRING *class_name,
                                         HSTRING_HEADER *class_header, UINT32 *version);
 HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONFACTORY *callbacks,

@@ -29,6 +29,9 @@
 #include "roparameterizediid.h"
 #include "roerrorapi.h"
 
+#include "winreg.h"
+#include "objbase.h"
+
 #include "wine/test.h"
 
 #define EXPECT_REF(obj,ref) _expect_ref((IUnknown*)obj, ref, __LINE__)
@@ -1203,6 +1206,257 @@ static void test_class_name_version(void)
 }
 
 /*
+ * Store roadmap P0-7: the roregistrationapi.h registration entry points that combase
+ * exports (API-MS-Win-Core-WinRT-registration-l1-1-0 forwards to combase.dll):
+ * RoGetActivatableClassRegistration, the registration lookup of a single activatable
+ * class, and RoGetServerActivatableClasses, the activatable classes a server
+ * executable is registered to serve.
+ *
+ * RoGetActivatableClassRegistration is an @stub line in combase.spec: the export
+ * exists so PE imports of it bind, and calling it raises the unimplemented-function
+ * exception, i.e. aborts the calling process (the same live hazard class
+ * RoRevokeActivationFactories carried before it was implemented).
+ * RoGetServerActivatableClasses is a FIXME stub that answers S_OK with count 0 for
+ * every input.  Both are resolved dynamically so that a missing export reports here
+ * instead of failing the load of the whole test exe.
+ */
+typedef HRESULT (WINAPI *pRoGetActivatableClassRegistration)(HSTRING, IActivationFactory **);
+typedef HRESULT (WINAPI *pRoGetServerActivatableClasses)(HSTRING, HSTRING **, DWORD *);
+
+static const WCHAR server_class_hklm[] = L"Wine.Test.ServerClass";
+static const WCHAR server_class_hkcu[] = L"Wine.Test.ServerClassUser";
+static const WCHAR server_name[] = L"wine.combase.test.server.exe";
+static const WCHAR server_name_absent[] = L"wine.combase.test.absent.exe";
+static const WCHAR runtime_key[] = L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId";
+
+/* Seed a server-hosted activatable class the way loader/wine.inf seeds the shipped
+ * ones: an ActivatableClassId key with the server module in its DllPath value. */
+static void seed_server_class(HKEY root, const WCHAR *name, const WCHAR *dllpath)
+{
+    WCHAR path[MAX_PATH];
+    HKEY sub;
+    LONG ret;
+
+    lstrcpyW(path, runtime_key);
+    lstrcatW(path, L"\\");
+    lstrcatW(path, name);
+
+    ret = RegCreateKeyExW(root, path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &sub, NULL);
+    ok(ret == ERROR_SUCCESS, "RegCreateKeyExW(%s) returned %ld.\n", debugstr_w(path), ret);
+    if (ret) return;
+    ret = RegSetValueExW(sub, L"DllPath", 0, REG_SZ, (const BYTE *)dllpath, (lstrlenW(dllpath) + 1) * sizeof(WCHAR));
+    ok(ret == ERROR_SUCCESS, "DllPath seed of %s returned %ld.\n", debugstr_w(name), ret);
+    RegSetValueExW(sub, L"ThreadingModel", 0, REG_SZ, (const BYTE *)L"Both", 5 * sizeof(WCHAR));
+    RegCloseKey(sub);
+}
+
+static void unseed_server_class(HKEY root, const WCHAR *name)
+{
+    WCHAR path[MAX_PATH];
+
+    lstrcpyW(path, runtime_key);
+    lstrcatW(path, L"\\");
+    lstrcatW(path, name);
+    RegDeleteKeyW(root, path);
+}
+
+static void free_class_ids(HSTRING *ids, DWORD count)
+{
+    DWORD i;
+
+    for (i = 0; i < count; i++)
+        WindowsDeleteString(ids[i]);
+    CoTaskMemFree(ids);
+}
+
+static LONG find_class_id(HSTRING *ids, DWORD count, const WCHAR *name)
+{
+    DWORD i;
+
+    for (i = 0; i < count; i++)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer(ids[i], NULL);
+        if (raw && !wcscmp(raw, name)) return i;
+    }
+    return -1;
+}
+
+static void test_server_activatable_classes(void)
+{
+    pRoGetServerActivatableClasses pfn;
+    HSTRING server, absent;
+    HSTRING *array = NULL;
+    DWORD count = 0, i;
+    HRESULT hr;
+
+    pfn = (void *)GetProcAddress(GetModuleHandleW(L"combase.dll"), "RoGetServerActivatableClasses");
+    ok(!!pfn, "combase has no RoGetServerActivatableClasses export.\n");
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr);
+
+    seed_server_class(HKEY_LOCAL_MACHINE, server_class_hklm, server_name);
+    seed_server_class(HKEY_CURRENT_USER, server_class_hkcu, server_name);
+
+    hr = WindowsCreateString(server_name, ARRAY_SIZE(server_name) - 1, &server);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    hr = WindowsCreateString(server_name_absent, ARRAY_SIZE(server_name_absent) - 1, &absent);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+
+    /* NULL out params are pointer errors, not a success and not a crash. */
+    count = 0;
+    array = NULL;
+    hr = pfn(server, NULL, &count);
+    ok(hr == E_POINTER, "NULL class array returned %#lx.\n", hr);
+    hr = pfn(server, &array, NULL);
+    ok(hr == E_POINTER, "NULL count returned %#lx.\n", hr);
+
+    /* Documented contract: an empty server name is REGDB_E_CLASSNOTREG, and so is a
+     * server that has no registered classes. */
+    count = 0xdead;
+    array = (void *)0xdead;
+    hr = pfn(NULL, &array, &count);
+    ok(hr == REGDB_E_CLASSNOTREG, "empty server name returned %#lx.\n", hr);
+    ok(!array, "got array %p.\n", array);
+    ok(count == 0, "got count %lu.\n", count);
+
+    count = 1;
+    array = (void *)0xdead;
+    hr = pfn(absent, &array, &count);
+    ok(hr == REGDB_E_CLASSNOTREG, "unregistered server returned %#lx.\n", hr);
+    ok(!array, "got array %p.\n", array);
+    ok(count == 0, "got count %lu.\n", count);
+
+    /* The registered server answers its class list.  Both the machine configuration
+     * (loader/wine.inf's ActivatableClassId keys) and the per-user hive feed it. */
+    array = NULL;
+    count = 0;
+    hr = pfn(server, &array, &count);
+    ok(hr == S_OK, "registered server returned %#lx.\n", hr);
+    ok(!!array, "got array %p.\n", array);
+    ok(count >= 2, "got count %lu.\n", count);
+    if (array)
+    {
+        ok(find_class_id(array, count, server_class_hklm) != -1, "HKLM class missing from the %lu entries.\n", count);
+        ok(find_class_id(array, count, server_class_hkcu) != -1, "HKCU class missing from the %lu entries.\n", count);
+        /* The documented caller contract: the elements are HSTRINGs (WindowsDeleteString
+         * per element) and the buffer is CoTaskMem-allocated. */
+        for (i = 0; i < count; i++)
+            ok(!!array[i], "entry %lu is not an HSTRING.\n", i);
+        free_class_ids(array, count);
+    }
+
+    unseed_server_class(HKEY_LOCAL_MACHINE, server_class_hklm);
+    unseed_server_class(HKEY_CURRENT_USER, server_class_hkcu);
+
+    /* With the registrations gone the server has no classes again. */
+    array = (void *)0xdead;
+    count = 0xdead;
+    hr = pfn(server, &array, &count);
+    ok(hr == REGDB_E_CLASSNOTREG, "post-cleanup server returned %#lx.\n", hr);
+    ok(!array, "got array %p.\n", array);
+    ok(count == 0, "got count %lu.\n", count);
+
+    WindowsDeleteString(server);
+    WindowsDeleteString(absent);
+    RoUninitialize();
+}
+
+static ULONG test_reg_callback_calls;
+
+static HRESULT WINAPI test_registered_pfn_counted(HSTRING classid, IActivationFactory **factory)
+{
+    test_reg_callback_calls++;
+    return test_registered_pfn(classid, factory);
+}
+
+static void test_activatable_class_registration(void)
+{
+    static const WCHAR compositor_name[] = L"Windows.UI.Composition.Compositor";
+    static const WCHAR unknown_name[] = L"Wine.Test.NotRegistered";
+    pRoGetActivatableClassRegistration pfn;
+    pRoRevokeActivationFactories revoke;
+    PFNGETACTIVATIONFACTORY callbacks[1];
+    RO_REGISTRATION_COOKIE cookie = NULL;
+    IActivationFactory *factory = NULL;
+    HSTRING classes[1], str;
+    HRESULT hr;
+
+    pfn = (void *)GetProcAddress(GetModuleHandleW(L"combase.dll"), "RoGetActivatableClassRegistration");
+    ok(!!pfn, "combase has no RoGetActivatableClassRegistration export.\n");
+    revoke = (void *)GetProcAddress(GetModuleHandleW(L"combase.dll"), "RoRevokeActivationFactories");
+    ok(!!revoke, "combase has no RoRevokeActivationFactories export.\n");
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr);
+
+    hr = WindowsCreateString(registered_class_name, ARRAY_SIZE(registered_class_name) - 1, &str);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+
+    /* A NULL out param is a pointer error: the export must neither crash nor report
+     * success, and the process must survive (an @stub line aborts it). */
+    hr = pfn(str, NULL);
+    ok(hr == E_POINTER, "NULL factory returned %#lx.\n", hr);
+
+    /* An unregistered class answers the class-not-registered code with no factory. */
+    factory = NULL;
+    hr = WindowsCreateString(unknown_name, ARRAY_SIZE(unknown_name) - 1, &classes[0]);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    hr = pfn(classes[0], &factory);
+    ok(hr == REGDB_E_CLASSNOTREG, "unregistered class returned %#lx.\n", hr);
+    ok(!factory, "got factory %p.\n", factory);
+    WindowsDeleteString(classes[0]);
+
+    /* A class the process registered resolves through the registration table, and the
+     * registered factory callback runs exactly once per lookup: the registration API
+     * shares RoGetActivationFactory's resolution path instead of stacking a second
+     * factory lookup on top of it. */
+    test_registered_factory_obj.IActivationFactory_iface.lpVtbl = &test_reg_factory_vtbl;
+    callbacks[0] = test_registered_pfn_counted;
+    classes[0] = str;
+    hr = RoRegisterActivationFactories(classes, callbacks, 1, &cookie);
+    ok(hr == S_OK, "RoRegisterActivationFactories returned %#lx.\n", hr);
+
+    test_reg_callback_calls = 0;
+    factory = NULL;
+    hr = pfn(str, &factory);
+    ok(hr == S_OK, "registered class returned %#lx.\n", hr);
+    ok(factory == &test_registered_factory_obj.IActivationFactory_iface, "got factory %p.\n", factory);
+    ok(test_reg_callback_calls == 1, "the factory callback ran %lu times.\n", test_reg_callback_calls);
+    if (factory)
+    {
+        void *marker = NULL;
+        hr = IActivationFactory_QueryInterface(factory, &guid_registered_marker, &marker);
+        ok(hr == S_OK, "QI of the handed-back factory returned %#lx.\n", hr);
+        if (marker) IUnknown_Release((IUnknown *)marker);
+        IActivationFactory_Release(factory);
+    }
+
+    /* A registry-seeded class resolves through the same call: the ActivatableClassId
+     * DllPath leg, not only the in-process registration table. */
+    factory = NULL;
+    hr = WindowsCreateString(compositor_name, ARRAY_SIZE(compositor_name) - 1, &classes[0]);
+    ok(hr == S_OK, "WindowsCreateString returned %#lx.\n", hr);
+    hr = pfn(classes[0], &factory);
+    ok(hr == S_OK, "registry-seeded class returned %#lx.\n", hr);
+    ok(!!factory, "got factory %p.\n", factory);
+    if (factory) IActivationFactory_Release(factory);
+    WindowsDeleteString(classes[0]);
+
+    hr = revoke ? revoke(cookie) : E_NOTIMPL;
+    ok(hr == S_OK, "revoke returned %#lx.\n", hr);
+
+    /* After revocation the class is not registered again. */
+    factory = NULL;
+    hr = pfn(str, &factory);
+    ok(hr == REGDB_E_CLASSNOTREG, "post-revoke registered class returned %#lx.\n", hr);
+    ok(!factory, "got factory %p.\n", factory);
+
+    WindowsDeleteString(str);
+    RoUninitialize();
+}
+
+/*
  * RoGetParameterizedTypeInstanceIID conformance: Windows derives the IID as a
  * UUIDv5-style SHA-1 hash (namespace 11f47ad5-7b73-42c0-abae-878b1e16adee) over the
  * UTF-8 "pinterface({piid};arg;...)" signature string of the instantiation
@@ -1324,6 +1578,8 @@ START_TEST(roapi)
     test_registered_activation_factories();
     test_activation_for_host();
     test_class_name_version();
+    test_server_activatable_classes();
+    test_activatable_class_registration();
     test_RoGetParameterizedTypeInstanceIID();
     test_RoGetAgileReference();
     test_RoGetErrorReportingFlags();

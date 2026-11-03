@@ -292,7 +292,7 @@
 @ stub RoClearError
 @ stdcall RoFailFastWithErrorContext(long)
 @ stub RoFreeParameterizedTypeExtra
-@ stub RoGetActivatableClassRegistration
+@ stdcall RoGetActivatableClassRegistration(ptr ptr)
 @ stdcall RoGetActivationFactory(ptr ptr ptr)
 @ stdcall RoGetActivationFactoryForHost(ptr ptr ptr ptr)
 @ stdcall RoGetAgileReference(long ptr ptr ptr)
