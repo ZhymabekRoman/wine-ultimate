@@ -1955,6 +1955,207 @@ done_factory:
     CALL( factory, 2, (ULONG *)&hr );
 }
 
+/* -------------------------------------------------------------------- */
+/* MapChangedEventHandler`2<System.String,System.String> event          */
+/* registration on the QualifierValues map (sr15 gate evidence).        */
+/*                                                                      */
+/* The sr15 QI census on the map is IUnknown x5,                        */
+/* {94ea2b94-e9cc-49e0-c0ff-ee64ca8f5b90} x1, IReferenceTracker         */
+/* {11d3b13a-...} x1, IMapView PIID {1e036276-...} x1.  The literal the */
+/* brief tags "the delegate PIID" is IAgileObject in this tree:         */
+/* include/objidlbase.idl:91 uuid(94ea2b94-e9cc-49e0-c0ff-ee64ca8f5b90) */
+/* and dlls/combase/roapi.c:710 iid_names[]                            */
+/* "Windows.Foundation.IAgileObject".  It cannot be the output of      */
+/* RoGetParameterizedTypeInstanceIID at all: dlls/combase/roapi.c:993-  */
+/* 994 stamps Data3 with version 5 (leading nibble 5) and Data4[0] with */
+/* the RFC-4122 variant ((h & 0x3f) | 0x80, range 0x80..0xbf), while    */
+/* the observed literal carries Data3 0x49e0 and Data4[0] 0xc0.  The    */
+/* map already answers it S_OK through mv_QueryInterface's IAgileObject  */
+/* branch, so the app's observed probe is satisfied today.              */
+/*                                                                      */
+/* The delegate's own PIID is derived at runtime from the tree's own    */
+/* metadata: RoGetParameterizedTypeInstanceIID over                    */
+/* "pinterface({179517f3-94ee-41f8-bddc-768a895544f3};string;string)",  */
+/* the base uuid coming from dlls/combase/roapi.c:686                   */
+/* pinterface_names[] "Windows.Foundation.Collections.MapChanged-       */
+/* EventHandler`2", which agrees with                                    */
+/* include/windows.foundation.collections.idl:179.  No instantiation    */
+/* IID for that delegate is published anywhere in this tree, so the     */
+/* test does NOT pin a literal for it: it computes the value, reports   */
+/* it, and anchors the computation on the two published instances the   */
+/* same call reproduces -- IMapView<string,string>                      */
+/* 1e036276-2f60-55f6-b7f3-f86079e6900b and IObservableMap<...>         */
+/* ac7f26f2-feb7-5b2a-8ac4-345bc62caede (dlls/combase/tests/roapi.c:904, */
+/* :917).  The QI is then driven with the computed value.               */
+/* -------------------------------------------------------------------- */
+
+static LONG ev_addrefs;
+
+struct ev_delegate
+{
+    const void *vtbl;
+    LONG ref;
+};
+static HRESULT WINAPI ev_delegate_QI( void *iface, const IID *iid, void **out )
+{
+    if (out) *out = NULL;
+    return E_NOINTERFACE;  /* the projection's delegate answers no QI on this path */
+}
+static ULONG WINAPI ev_delegate_AddRef( void *iface )
+{
+    InterlockedIncrement( &ev_addrefs );
+    return InterlockedIncrement( &((struct ev_delegate *)iface)->ref );
+}
+static ULONG WINAPI ev_delegate_Release( void *iface )
+{
+    return InterlockedDecrement( &((struct ev_delegate *)iface)->ref );
+}
+static HRESULT WINAPI ev_delegate_Invoke( void *iface, void *sender, void *args ) { return S_OK; }
+static const void *ev_delegate_vtbl[] =
+{
+    ev_delegate_QI, ev_delegate_AddRef, ev_delegate_Release,
+    ev_delegate_Invoke, ev_delegate_Invoke, ev_delegate_Invoke, ev_delegate_Invoke,
+};
+static struct ev_delegate ev_delegate = { ev_delegate_vtbl, 1 };
+
+static void test_delegate_event_registration( void )
+{
+    static const WCHAR *elems_mce[] = { L"Windows.Foundation.Collections.MapChangedEventHandler`2",
+                                        L"Windows.Foundation.String", L"Windows.Foundation.String" };
+    static const WCHAR name_mce_ss[] = L"Windows.Foundation.Collections.MapChangedEventHandler`2<System.String,System.String>";
+    static const WCHAR suffix_mce_ss[] = L"MapChangedEventHandler`2<System.String,System.String>";
+    /* the observed sr15 QI literal, verbatim from the census */
+    static const GUID observed_qi = {0x94ea2b94, 0xe9cc, 0x49e0, {0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90}};
+    /* published instances the derivation must reproduce, verbatim from
+     * dlls/combase/tests/roapi.c:904 and :917 (no published
+     * MapChangedEventHandler`2<string,string> instance exists in this tree,
+     * so nothing is pinned for the delegate itself) */
+    static const GUID iid_mapview_ss   = {0x1e036276, 0x2f60, 0x55f6, {0xb7, 0xf3, 0xf8, 0x60, 0x79, 0xe6, 0x90, 0x0b}};
+    static const GUID iid_obsmap_ss    = {0xac7f26f2, 0xfeb7, 0x5b2a, {0x8a, 0xc4, 0x34, 0x5b, 0xc6, 0x2c, 0xae, 0xde}};
+    void *factory = NULL, *statics = NULL, *ctx = NULL, *mv = NULL, *ev = NULL, *ev2 = NULL, *insp = NULL;
+    INT64 token = 0, token2 = 0;
+    GUID iid_mce, iid_probe;
+    ULONG count = 0xdead;
+    IID *iids = (void *)0x1;
+    HSTRING name = NULL;
+    const WCHAR *raw;
+    const WCHAR *tail;
+    HRESULT hr;
+
+    /* 1. the derivation: base uuid from the tree metadata table, 'string' args */
+    hr = RoGetParameterizedTypeInstanceIID( 3, elems_mce, NULL, &iid_mce, NULL );
+    ok( hr == S_OK, "evreg: RoGetParameterizedTypeInstanceIID(MapChangedEventHandler`2<string,string>) hr=%08x\n", hr );
+    if (FAILED( hr )) return;
+    ok( IsEqualGUID( &iid_mce, &iid_mce_expected ),
+        "evreg: derived delegate PIID %s, want %s\n", wine_dbgstr_guid( &iid_mce ), wine_dbgstr_guid( &iid_mce_expected ) );
+
+    /* 2. the observed literal pinned as what it is: IAgileObject, and provably
+     *    not a derived pinterface IID (version/variant stamps, roapi.c:993-994) */
+    ok( IsEqualGUID( &observed_qi, &IID_IAgileObject_loc ),
+        "evreg: observed QI %s is IAgileObject %s (objidlbase.idl:91)\n",
+        wine_dbgstr_guid( &observed_qi ), wine_dbgstr_guid( &IID_IAgileObject_loc ) );
+    ok( (observed_qi.Data3 & 0xf000) != 0x5000, "evreg: observed Data3 %04x carries no UUIDv5 version stamp\n", observed_qi.Data3 );
+    ok( observed_qi.Data4[0] > 0xbf, "evreg: observed Data4[0] %02x is outside the RFC-4122 variant stamp range\n",
+        observed_qi.Data4[0] );
+    ok( !IsEqualGUID( &iid_mce, &observed_qi ), "evreg: derived delegate PIID %s != observed literal %s\n",
+        wine_dbgstr_guid( &iid_mce ), wine_dbgstr_guid( &observed_qi ) );
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "evreg: factory hr=%08x\n", hr );
+    if (hr != S_OK) return;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(factory, 0))(factory, &IID_IResourceContextStatics2_loc, &statics);
+    if (FAILED( hr )) goto done_factory;
+    hr = CALL( statics, 6, &ctx );  /* IResourceContextStatics2::GetForCurrentView */
+    if (FAILED( hr ) || !ctx) goto done_factory;
+    hr = CALL( ctx, 6, &mv );  /* IResourceContext::get_QualifierValues */
+    ok( hr == S_OK && mv, "evreg: get_QualifierValues hr=%08x\n", hr );
+    if (FAILED( hr ) || !mv) goto done_factory;
+
+    /* 3. the QI the gate needs: the delegate PIID answers on the map object */
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(mv, 0))(mv, &iid_mce, &ev);
+    ok( hr == S_OK && ev, "evreg: QI(MapChangedEventHandler<string,string>) hr=%08x obj=%p\n", hr, ev );
+    if (!ev) goto done_factory;
+
+    /* 4. COM identity: the delegate face is the same object as the map */
+    insp = NULL;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(ev, 0))(ev, &IID_IInspectable_loc, &insp);
+    ok( hr == S_OK && insp == mv, "evreg: QI(IInspectable) from the delegate face hr=%08x obj=%p mv=%p\n", hr, insp, mv );
+    if (insp) CALL( insp, 2, (ULONG *)&hr );
+    insp = NULL;
+    ev2 = NULL;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(ev, 0))(ev, &iid_mce, &ev2);
+    ok( hr == S_OK && ev2 == ev, "evreg: QI identity on the delegate face hr=%08x obj=%p ev=%p\n", hr, ev2, ev );
+    if (ev2) CALL( ev2, 2, (ULONG *)&hr );
+
+    /* 5. event add (slot 6): handler stored opaque, token is the registration */
+    ev_addrefs = 0;
+    token = 0;
+    hr = CALL( ev, 6, &ev_delegate, &token );  /* add_MapChanged */
+    ok( hr == S_OK, "evreg: add_MapChanged hr=%08x\n", hr );
+    ok( token != 0, "evreg: add_MapChanged token=%I64d (must be nonzero)\n", token );
+    ok( ev_addrefs == 1, "evreg: add_MapChanged AddRef count %u, want 1\n", ev_addrefs );
+
+    token2 = 0;
+    hr = CALL( ev, 6, &ev_delegate, &token2 );  /* a second registration */
+    ok( hr == S_OK && token2 != 0 && token2 != token, "evreg: second add hr=%08x token=%I64d first=%I64d\n",
+        hr, token2, token );
+
+    /* 6. event remove (slot 7): the token is found and dropped, idempotent */
+    hr = CALL( ev, 7, token );
+    ok( hr == S_OK, "evreg: remove_MapChanged(%I64d) hr=%08x\n", token, hr );
+    hr = CALL( ev, 7, token );
+    ok( hr == S_OK, "evreg: remove_MapChanged(%I64d) twice hr=%08x\n", token, hr );
+    hr = CALL( ev, 7, token2 );
+    ok( hr == S_OK, "evreg: remove_MapChanged(%I64d) hr=%08x\n", token2, hr );
+    hr = CALL( ev, 7, 0 );
+    ok( hr == S_OK, "evreg: remove_MapChanged(0) hr=%08x\n", hr );
+
+    /* 7. the remaining slots are safe: GetIids E_NOTIMPL, Invoke S_OK */
+    hr = CALL( ev, 3, &count, &iids );  /* IInspectable::GetIids */
+    ok( hr == E_NOTIMPL, "evreg: delegate face GetIids hr=%08x (expect E_NOTIMPL)\n", hr );
+    hr = CALL( ev, 8, NULL, NULL );  /* the delegate's own Invoke: never reached on this object */
+    ok( hr == S_OK, "evreg: delegate face Invoke hr=%08x\n", hr );
+
+    /* 8. GetRuntimeClassName names the delegate type (the RCW parses it) */
+    hr = CALL( ev, 4, &name );  /* IInspectable::GetRuntimeClassName */
+    ok( hr == S_OK && name, "evreg: GetRuntimeClassName hr=%08x name=%p\n", hr, name );
+    if (SUCCEEDED( hr ) && name)
+    {
+        raw = WindowsGetStringRawBuffer( name, NULL );
+        tail = raw + (lstrlenW( raw ) - lstrlenW( suffix_mce_ss ));
+        ok( raw && tail >= raw && !lstrcmpW( tail, suffix_mce_ss ),
+            "evreg: class name %s ends with %s\n", wine_dbgstr_w( raw ), wine_dbgstr_w( suffix_mce_ss ) );
+        ok( raw && !lstrcmpW( raw, name_mce_ss ), "evreg: class name %s, want %s\n",
+            wine_dbgstr_w( raw ), wine_dbgstr_w( name_mce_ss ) );
+        WindowsDeleteString( name );
+    }
+
+    /* 9. existing answers of mv_QueryInterface are unchanged: the observed
+     *    IAgileObject probe, the IMapView PIID the app drives, and an
+     *    unimplemented pinterface all keep their behaviour. */
+    ev2 = NULL;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(mv, 0))(mv, &observed_qi, &ev2);
+    ok( hr == S_OK && ev2 == mv, "evreg: QI(observed IAgileObject) hr=%08x obj=%p mv=%p\n", hr, ev2, mv );
+    if (ev2) CALL( ev2, 2, (ULONG *)&hr );
+    iid_probe = iid_mapview_ss;
+    ev2 = NULL;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(mv, 0))(mv, &iid_probe, &ev2);
+    ok( hr == S_OK && ev2, "evreg: QI(IMapView<string,string>) hr=%08x obj=%p\n", hr, ev2 );
+    if (ev2) CALL( ev2, 2, (ULONG *)&hr );
+    iid_probe = IID_IResourceContext_loc;
+    ev2 = NULL;
+    hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(mv, 0))(mv, &iid_probe, &ev2);
+    ok( hr == E_NOINTERFACE && !ev2, "evreg: QI(IResourceContext) from the map hr=%08x obj=%p (expect E_NOINTERFACE)\n",
+        hr, ev2 );
+
+done_factory:
+    if (ev) CALL( ev, 2, (ULONG *)&hr );
+    if (mv) CALL( mv, 2, (ULONG *)&hr );
+    if (ctx) CALL( ctx, 2, (ULONG *)&hr );
+    if (statics) CALL( statics, 2, (ULONG *)&hr );
+    CALL( factory, 2, (ULONG *)&hr );
+}
+
 START_TEST(core)
 {
     HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
