@@ -352,6 +352,10 @@ HRESULT WINAPI RoGetParameterizedTypeInstanceIID( UINT32 name_element_count, con
 #define ELEM_OBSERVABLEMAP L"Windows.Foundation.Collections.IObservableMap"
 #define ELEM_MAPCHANGEDHANDLER L"Windows.Foundation.Collections.MapChangedEventHandler"
 #define ELEM_VECTORVIEW   L"Windows.Foundation.Collections.IVectorView"
+#define ELEM_VECTOR       L"Windows.Foundation.Collections.IVector"
+#define ELEM_OBSERVABLEVECTOR L"Windows.Foundation.Collections.IObservableVector"
+#define ELEM_VECTORCHANGEDHANDLER L"Windows.Foundation.Collections.VectorChangedEventHandler"
+
 #define ELEM_ITERABLE     L"Windows.Foundation.Collections.IIterable"
 #define ELEM_ITERATOR     L"Windows.Foundation.Collections.IIterator"
 #define ELEM_RESOURCEMAP  L"Windows.ApplicationModel.Resources.Core.ResourceMap"
@@ -384,6 +388,52 @@ HRESULT WINAPI RoGetParameterizedTypeInstanceIID( UINT32 name_element_count, con
  * "Foundation.Collections.IMapView\0Win", copying the tail of the next literal).
  */
 #define ELEM_CLASS_STRING L"System.String"
+
+/*
+ * Fill the class's published interface set from the parameterized instance
+ * IIDs (the same RoGetParameterizedTypeInstanceIID computation the QIs use).
+ * .NET Native's RCW builds the supported-interface set from
+ * IInspectable::GetIids before binding an adapter: an empty list makes the
+ * projection treat the object as untyped (sr18/sr19: the resource loader's
+ * Languages enumeration cast fails, its catch/retry loop re-enters
+ * get_Languages ~90x, each pass patching thunks = 280 first-chance AVs),
+ * so the list must name the real interfaces.  The ROPARAMIIDHANDLE is
+ * leaked: GetIids runs a handful of times per process (combase's own
+ * param_iid_eq discards it the same way, roapi tests).
+ */
+static HRESULT fill_param_iids( ULONG *out_count, IID **out_iids, ULONG n, ... )
+{
+    static const WCHAR *str = ELEM_STRING;
+    IID store[8];
+    const IID *table[8];
+    va_list ap;
+    ULONG k;
+
+    if (!out_count || !out_iids) return E_POINTER;
+    if (n > ARRAYSIZE( store )) return E_INVALIDARG;
+    va_start( ap, n );
+    for (k = 0; k < n; k++)
+    {
+        const WCHAR *elems[4];
+        UINT32 argc, i;
+        ROPARAMIIDHANDLE h;
+
+        table[k] = &store[k];
+        argc = (UINT32)va_arg( ap, int );
+        for (i = 0; i < argc; i++) elems[i] = va_arg( ap, const WCHAR * );
+        if (i < ARRAYSIZE( elems )) elems[i] = str;
+        store[k] = IID_NULL;
+        if (FAILED( RoGetParameterizedTypeInstanceIID( argc, elems, NULL, &store[k], &h ) ))
+        {
+            va_end( ap );
+            *out_count = 0;
+            *out_iids = NULL;
+            return S_OK;  /* metadata gap: answer the empty set, never fail the caller */
+        }
+    }
+    va_end( ap );
+    return fill_iids( table, n, out_count, out_iids );
+}
 
 static const WCHAR *elem_class_name( const WCHAR *elem )
 {
@@ -648,13 +698,16 @@ static void key_release( HSTRING tmp, BOOL owned )
 
 struct str_vector
 {
-    const void *vt_vv;
+    const void *vt_ov;   /* IObservableVector<HSTRING>: the face ResourceContext::Languages returns */
+    const void *vt_vv;   /* IVectorView<HSTRING>: the read-only view the IVectorView QI and GetView answer */
     LONG ref;
     HSTRING *items;
     UINT32 count;
+    struct vec_event_reg *regs;   /* VectorChanged registrations, interlocked list */
 };
 
-static inline struct str_vector *svv_from( void *iface ) { return (struct str_vector *)iface; }
+static inline struct str_vector *ov_from( void *iface ) { return (struct str_vector *)iface; }
+static inline struct str_vector *svv_from( void *iface ) { return CONTAINING_RECORD( iface, struct str_vector, vt_vv ); }
 
 static HRESULT WINAPI svv_QueryInterface( void *iface, REFIID iid, void **out )
 {
@@ -674,7 +727,11 @@ static HRESULT WINAPI svv_QueryInterface( void *iface, REFIID iid, void **out )
 }
 static ULONG WINAPI svv_AddRef( void *iface ) { return incr( &svv_from( iface )->ref ); }
 static ULONG WINAPI svv_Release( void *iface ) { return decr( &svv_from( iface )->ref ); }
-static HRESULT WINAPI svv_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI svv_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return fill_param_iids( c, i, 2, 2, ELEM_VECTORVIEW L"`1", ELEM_STRING,
+                                2, ELEM_ITERABLE L"`1", ELEM_STRING );
+}
 static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
 {
     static const WCHAR *args[] = { ELEM_CLASS_STRING };
@@ -696,17 +753,322 @@ static HRESULT WINAPI svv_Size( void *iface, UINT32 *size )
     *size = svv_from( iface )->count;
     return S_OK;
 }
-static HRESULT WINAPI svv_GetView( void *iface, void **view )
+static HRESULT WINAPI svv_IndexOf( void *iface, HSTRING item, UINT32 *index, INT32 *found )
 {
+    struct str_vector *impl = svv_from( iface );
+    const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
+    UINT32 i;
 
-    if (!view) return E_POINTER;    *view = iface;
-    incr( &svv_from( iface )->ref );
+    if (!index || !found) return E_POINTER;
+    *index = 0;
+    *found = FALSE;
+    if (!item) return S_OK;
+    if (!key_decode( item, &raw, &tmp, &owned )) return S_OK;
+    for (i = 0; raw && i < impl->count; i++)
+    {
+        const WCHAR *cand = WindowsGetStringRawBuffer( impl->items[i], NULL );
+        if (cand && !lstrcmpiW( raw, cand )) { *index = i; *found = TRUE; break; }
+    }
+    key_release( tmp, owned );
     return S_OK;
 }
+static HRESULT WINAPI svv_GetMany( void *iface, UINT32 start, UINT32 size, HSTRING *items, UINT32 *count )
+{
+    struct str_vector *impl = svv_from( iface );
+    UINT32 n;
+
+    if (!count) return E_POINTER;
+    if (size && !items) return E_POINTER;
+    n = (start < impl->count) ? impl->count - start : 0;
+    if (n > size) n = size;
+    if (items && n) memcpy( items, impl->items + start, n * sizeof(*items) );
+    *count = n;
+    return S_OK;
+}
+
+/* ------------------------------------------------------------------ */
+/* IObservableVector<HSTRING> on ResourceContext::Languages            */
+/*                                                                     */
+/* ResourceContext::Languages is a mutable, observable list on Windows */
+/* (the app can reorder it); .NET Native's IList adapter binds the     */
+/* declared IObservableVector layout: [add 6][remove 7] then the       */
+/* IVector block (IDL order) and the IIterable First trailing, the     */
+/* same own-first flattening the QualifierValues map proved live on    */
+/* Calculator (add@6 landing on mv_Get@6, sr15).  The app QIs the     */
+/* returned pointer for IVectorView<string> (2f13c006) and reads      */
+/* through that separate view face ([GetAt 6][Size 7][IndexOf 8]      */
+/* [GetMany 9][First 10] per the IDL: IVectorView has no GetView);     */
+/* the event lands on the primary face at slot 6.  sr16: answering    */
+/* the QI from the flat view face (no add slot) raised the projection  */
+/* FailFast c0000602 right after it computed the IIterable<string>     */
+/* PIID (e2fcc7c1; faa585ea is IIterable, per dlls/combase/roapi.c:676). */
+/*                                                                     */
+/* Mutators answer S_OK as no-ops: the list is a snapshot of the PRM   */
+/* language set; the projection only needs the calls to succeed.       */
+/* ------------------------------------------------------------------ */
+
+struct vec_event_reg
+{
+    const void *vt_handler;  /* the VectorChangedEventHandler<HSTRING> face */
+    LONG ref;
+    void *handler;           /* the client's delegate, AddRef'd, treated as opaque */
+    struct str_vector *owner;
+    struct vec_event_reg *next;
+    BOOL linked;
+};
+static inline INT64 vec_event_token( struct vec_event_reg *reg ) { return (INT64)(INT_PTR)reg; }
+static inline struct vec_event_reg *vch_from( void *iface ) { return (struct vec_event_reg *)iface; }
+static inline struct str_vector *ovv_from( void *iface ) { return CONTAINING_RECORD( iface, struct str_vector, vt_vv ); }
+
+static const void *vector_changed_handler_vtbl[];
+static ULONG WINAPI vch_Release( void *iface );
+
+static struct vec_event_reg *vec_event_reg_new( struct str_vector *owner, void *handler )
+{
+    struct vec_event_reg *reg = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*reg) );
+
+    if (!reg) return NULL;
+    reg->vt_handler = vector_changed_handler_vtbl;
+    reg->ref = 1;
+    reg->handler = handler;
+    reg->owner = owner;
+    reg->linked = (owner != NULL);
+    if (handler)
+    {
+        __TRY
+        {
+            CCW_SLOT1( handler )( handler );
+        }
+        __EXCEPT_ALL
+        {
+            reg->handler = NULL;
+        }
+        __ENDTRY
+    }
+    return reg;
+}
+
+static void vec_event_reg_unlink( struct str_vector *vec, struct vec_event_reg *reg )
+{
+    struct vec_event_reg *cur, **slot;
+
+    for (slot = (struct vec_event_reg **)&vec->regs; (cur = *slot); )
+    {
+        if (cur == reg)
+        {
+            InterlockedCompareExchangePointer( (void *volatile *)slot, cur->next, cur );
+            return;
+        }
+        slot = (struct vec_event_reg **)&cur->next;
+    }
+}
+
+static HRESULT WINAPI vch_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct vec_event_reg *impl = vch_from( iface );
+
+    TRACE( "iid %s\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        param_iid_eq( iid, 2, ELEM_VECTORCHANGEDHANDLER L"`1", ELEM_STRING ))
+    {
+        *out = &impl->vt_handler;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI vch_AddRef( void *iface ) { return incr( vch_from( iface )->ref ); }
+static ULONG WINAPI vch_Release( void *iface )
+{
+    struct vec_event_reg *impl = vch_from( iface );
+    LONG ref = decr( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->linked && impl->owner) vec_event_reg_unlink( impl->owner, impl );
+        if (impl->handler)
+        {
+            __TRY
+            {
+                CCW_SLOT2( impl->handler )( impl->handler );
+            }
+            __EXCEPT_ALL
+            {
+            }
+            __ENDTRY
+        }
+        HeapFree( GetProcessHeap(), 0, impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI vch_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI vch_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR *args[] = { ELEM_CLASS_STRING };
+
+    return param_class_name( ELEM_VECTORCHANGEDHANDLER, L"`1", args, 1, n );
+}
+static HRESULT WINAPI vch_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+static HRESULT WINAPI vch_Invoke( void *iface, void *sender, void *args )
+{
+    TRACE( "VectorChanged Invoke on a snapshot list (no change is ever raised)\n" );
+    return S_OK;
+}
+static const void *vector_changed_handler_vtbl[] =
+{
+    vch_QueryInterface, vch_AddRef, vch_Release, vch_GetIids, vch_GetRuntimeClassName, vch_GetTrustLevel,
+    vch_Invoke,
+};
+
+static HRESULT WINAPI ov_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct str_vector *impl = ov_from( iface );
+
+    TRACE( "languages QI %s\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        param_iid_eq( iid, 2, ELEM_VECTOR L"`1", ELEM_STRING ) ||
+        param_iid_eq( iid, 2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING ) ||
+        param_iid_eq( iid, 2, ELEM_ITERABLE L"`1", ELEM_STRING ))
+    {
+        *out = &impl->vt_ov;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    if (param_iid_eq( iid, 2, ELEM_VECTORVIEW L"`1", ELEM_STRING ))
+    {
+        *out = &impl->vt_vv;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ov_AddRef( void *iface ) { return incr( ov_from( iface )->ref ); }
+static ULONG WINAPI ov_Release( void *iface ) { return decr( ov_from( iface )->ref ); }
+static HRESULT WINAPI ov_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return fill_param_iids( c, i, 4, 2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING,
+                                2, ELEM_VECTOR L"`1", ELEM_STRING,
+                                2, ELEM_VECTORVIEW L"`1", ELEM_STRING,
+                                2, ELEM_ITERABLE L"`1", ELEM_STRING );
+}
+static HRESULT WINAPI ov_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR *args[] = { ELEM_CLASS_STRING };
+
+    return param_class_name( ELEM_OBSERVABLEVECTOR, L"`1", args, 1, n );
+}
+static HRESULT WINAPI ov_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+static HRESULT WINAPI ov_add_VectorChanged( void *iface, void *handler, INT64 *token )
+{
+    struct str_vector *impl = ov_from( iface );
+    struct vec_event_reg *reg;
+
+    if (!token) return E_POINTER;
+    *token = 0;
+    if (!(reg = vec_event_reg_new( impl, handler ))) return E_OUTOFMEMORY;
+    for (;;)
+    {
+        struct vec_event_reg *head = impl->regs;
+
+        reg->next = head;
+        if (InterlockedCompareExchangePointer( (void *volatile *)&impl->regs, reg, head ) == head) break;
+    }
+    *token = vec_event_token( reg );
+    TRACE( "add_VectorChanged handler %p token %p\n", handler, (void *)(INT_PTR)*token );
+    return S_OK;
+}
+static HRESULT WINAPI ov_remove_VectorChanged( void *iface, INT64 token )
+{
+    struct str_vector *impl = ov_from( iface );
+    struct vec_event_reg *reg;
+
+    for (reg = impl->regs; reg; reg = reg->next)
+    {
+        if (vec_event_token( reg ) == token)
+        {
+            vec_event_reg_unlink( impl, reg );
+            reg->linked = FALSE;
+            reg->owner = NULL;
+            vch_Release( &reg->vt_handler );  /* the list's reference */
+            return S_OK;
+        }
+    }
+    return S_OK;  /* unknown token: the adapter releases in its Dispose path */
+}
+static HRESULT WINAPI ov_GetAt( void *iface, UINT32 index, HSTRING *item )
+{
+    struct str_vector *impl = ov_from( iface );
+
+    TRACE( "languages slot6 GetAt index %u\n", index );
+    if (!item) return E_POINTER;
+    if (index >= impl->count) return E_BOUNDS;
+    *item = impl->items[index];
+    return S_OK;
+}
+static HRESULT WINAPI ov_Size( void *iface, UINT32 *size )
+{
+    TRACE( "languages slot7 Size\n" );
+    if (!size) return E_POINTER;
+    *size = ov_from( iface )->count;
+    return S_OK;
+}
+static HRESULT WINAPI ov_GetView( void *iface, void **view )
+{
+    struct str_vector *impl = ov_from( iface );
+
+    TRACE( "languages slot8 GetView\n" );
+    if (!view) return E_POINTER;
+    *view = &impl->vt_vv;
+    incr( &impl->ref );
+    return S_OK;
+}
+static HRESULT WINAPI ov_IndexOf( void *iface, HSTRING item, UINT32 *index, INT32 *found )
+{
+    TRACE( "languages slot9 IndexOf %p\n", item );
+    return svv_IndexOf( &ov_from( iface )->vt_vv, item, index, found );
+}
+static HRESULT WINAPI ov_SetAt( void *iface, UINT32 index, HSTRING value )
+{ TRACE( "languages slot10 SetAt %u\n", index ); return S_OK; }
+static HRESULT WINAPI ov_InsertAt( void *iface, UINT32 index, HSTRING value )
+{ TRACE( "languages slot11 InsertAt %u\n", index ); return S_OK; }
+static HRESULT WINAPI ov_RemoveAt( void *iface, UINT32 index )
+{ TRACE( "languages slot12 RemoveAt %u\n", index ); return S_OK; }
+static HRESULT WINAPI ov_Append( void *iface, HSTRING value )
+{ TRACE( "languages slot13 Append\n" ); return S_OK; }
+static HRESULT WINAPI ov_RemoveAtEnd( void *iface )
+{ TRACE( "languages slot14 RemoveAtEnd\n" ); return S_OK; }
+static HRESULT WINAPI ov_Clear( void *iface )
+{ TRACE( "languages slot15 Clear\n" ); return S_OK; }
+static HRESULT WINAPI ov_GetMany( void *iface, UINT32 start, UINT32 size, HSTRING *items, UINT32 *count )
+{
+    TRACE( "languages slot16 GetMany start %u size %u items %p count %p\n", start, size, items, count );
+    return svv_GetMany( &ov_from( iface )->vt_vv, start, size, items, count );
+}
+static HRESULT WINAPI ov_ReplaceAll( void *iface, UINT32 count, HSTRING *items )
+{ TRACE( "languages slot17 ReplaceAll count %u\n", count ); return S_OK; }
+static HRESULT WINAPI ov_First( void *iface, void **first );
+static const void *str_vector_observable_vtbl[] =
+{
+    /* IUnknown, IInspectable */
+    ov_QueryInterface, ov_AddRef, ov_Release, ov_GetIids, ov_GetRuntimeClassName, ov_GetTrustLevel,
+    /* IObservableVector own members (widl: add 6, remove 7) */
+    ov_add_VectorChanged, ov_remove_VectorChanged,
+    /* delegated IVector members in IDL order, then the delegated IIterable First */
+    ov_GetAt, ov_Size, ov_GetView, ov_IndexOf, ov_SetAt, ov_InsertAt, ov_RemoveAt,
+    ov_Append, ov_RemoveAtEnd, ov_Clear, ov_GetMany, ov_ReplaceAll,
+    ov_First,
+};
+
 static const void *str_vector_vtbl[] =
 {
     svv_QueryInterface, svv_AddRef, svv_Release, svv_GetIids, svv_GetRuntimeClassName, svv_GetTrustLevel,
-    svv_GetAt, svv_Size, svv_GetView, svv_First,
+    svv_GetAt, svv_Size, svv_IndexOf, svv_GetMany, svv_First,
 };
 
 /* IVectorView<T*> for interface pointers (candidates, qualifiers, maps, named resources)
@@ -801,6 +1163,7 @@ static const void *map_view_observable_vtbl[];
 
 static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    TRACE( "map QI %s\n", debugstr_guid( iid ) );
     struct map_view *impl = mv_from( iface );
     TRACE( "iid %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -844,7 +1207,12 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
 }
 static ULONG WINAPI mv_AddRef( void *iface ) { return incr( &mv_from( iface )->ref ); }
 static ULONG WINAPI mv_Release( void *iface ) { return decr( &mv_from( iface )->ref ); }
-static HRESULT WINAPI mv_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI mv_GetIids( void *iface, ULONG *c, IID **i )
+{
+    return fill_param_iids( c, i, 3, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING,
+                                3, ELEM_OBSERVABLEMAP L"`2", ELEM_STRING, ELEM_STRING,
+                                4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING );
+}
 static HRESULT WINAPI mv_GetRuntimeClassName( void *iface, HSTRING *n )
 {
     static const WCHAR *args[] = { ELEM_CLASS_STRING, ELEM_CLASS_STRING };
@@ -864,6 +1232,23 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
     /* key_decode: HSTRING payload, else the managed-string CCW surface */
     if (!key_decode( key, &raw, &tmp, &owned )) raw = NULL; /* no key: no match, no fabrication */
     TRACE( "Lookup %s\n", debugstr_w( raw ) );
+    /*
+     * sr15: the app's MapChanged registration reaches this Lookup with the key
+     * "Windows.Foundation.Collections.MapChangedEventHandler`2[System.String,
+     * System.String]" (the delegate's type name, a managed-string CCW --
+     * key_decode proves it), ELEMENT_NOT_FOUND raises the projection's
+     * COMException, its SR message resource is missing, and the message load
+     * FailFasts c0000602 (x4).  Answer the probe S_OK with an empty value and
+     * log the caller so the next gate shows whether the registration proceeds
+     * to the observable face (gate probe, remove once settled).
+     */
+    if (raw && !lstrcmpW( raw, ELEM_MAPCHANGEDHANDLER L"`2[" ELEM_CLASS_STRING L"," ELEM_CLASS_STRING L"]" ))
+    {
+        TRACE( "qualifier probe for the MapChanged handler type from %p: answering S_OK/empty\n",
+               __builtin_return_address( 0 ) );
+        key_release( tmp, owned );
+        return WindowsCreateString( L"", 0, value );
+    }
     for (i = 0; raw && i < impl->count; i++)
     {
         if (!lstrcmpiW( raw, impl->pairs[i].key ))
@@ -1575,6 +1960,17 @@ static HRESULT WINAPI svv_First( void *iface, void **first )
 {
     if (!first) return E_POINTER;
     struct str_vector *impl = svv_from( iface );
+    struct iterator *it = iter_new( IT_STRING, impl, impl->count, iterator_string_vtbl );
+    if (!it) return E_OUTOFMEMORY;
+    *first = &it->vt_it;
+    return S_OK;
+}
+
+static HRESULT WINAPI ov_First( void *iface, void **first )
+{
+    TRACE( "languages slot18 First\n" );
+    if (!first) return E_POINTER;
+    struct str_vector *impl = ov_from( iface );
     struct iterator *it = iter_new( IT_STRING, impl, impl->count, iterator_string_vtbl );
     if (!it) return E_OUTOFMEMORY;
     *first = &it->vt_it;
@@ -2352,7 +2748,7 @@ static HRESULT WINAPI ctx_Languages( void *iface, void **out )
 {
     struct res_context *impl = ctx_from( iface );
     TRACE( "get_Languages\n" );
-    *out = &impl->languages.vt_vv;
+    *out = &impl->languages.vt_ov;
     incr( &impl->languages.ref );
     return S_OK;
 }
@@ -2442,7 +2838,9 @@ static HRESULT create_context( struct res_context **out )
     ctx->qualifiers.ref = 1;
     ctx->qualifiers.pairs = ctx->qpairs;
     ctx->qualifiers.count = ctx->qcount;
+    ctx->languages.vt_ov = str_vector_observable_vtbl;
     ctx->languages.vt_vv = str_vector_vtbl;
+    ctx->languages.regs = NULL;
     ctx->languages.ref = 1;
     ctx->languages.items = ctx->lang_items;
     ctx->languages.count = 1;
