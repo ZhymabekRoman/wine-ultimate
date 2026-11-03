@@ -1619,6 +1619,8 @@ WORD WINAPI NtUserSetWindowWord( HWND hwnd, INT offset, WORD newval )
  */
 LONG WINAPI NtUserSetWindowLong( HWND hwnd, INT offset, LONG newval, BOOL ansi )
 {
+    if (offset == GWL_STYLE || offset == GWL_EXSTYLE)
+        ERR( "win: NtUserSetWindowLong hwnd %p idx %d style %08x\n", hwnd, offset, newval );
     return set_window_long( hwnd, offset, sizeof(LONG), newval, ansi );
 }
 
@@ -1627,6 +1629,8 @@ LONG WINAPI NtUserSetWindowLong( HWND hwnd, INT offset, LONG newval, BOOL ansi )
  */
 LONG_PTR WINAPI NtUserSetWindowLongPtr( HWND hwnd, INT offset, LONG_PTR newval, BOOL ansi )
 {
+    if (offset == GWL_STYLE || offset == GWL_EXSTYLE)
+        ERR( "win: NtUserSetWindowLongPtr hwnd %p idx %d style %08x\n", hwnd, offset, (UINT)newval );
     return set_window_long( hwnd, offset, sizeof(LONG_PTR), newval, ansi );
 }
 
@@ -5034,6 +5038,8 @@ BOOL WINAPI NtUserShowWindow( HWND hwnd, INT cmd )
 {
     HWND full_handle;
 
+    ERR( "win: NtUserShowWindow hwnd %p cmd %d\n", hwnd, cmd );
+
     if (is_broadcast(hwnd))
     {
         RtlSetLastWin32Error( ERROR_INVALID_PARAMETER );
@@ -6025,7 +6031,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     if (!(get_window_long( hwnd, GWL_STYLE ) & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ))
         call_hooks( WH_SHELL, HSHELL_WINDOWCREATED, (WPARAM)hwnd, 0, 0 );
 
-    ERR( "created window %p class %s name %s\n", hwnd, debugstr_us(class_name), debugstr_us(window_name) );
+    ERR( "created window %p class %s name %s style %08x exstyle %08x\n", hwnd, debugstr_us(class_name), debugstr_us(window_name), cs.style, cs.dwExStyle );
     set_thread_dpi_awareness_context( context );
 
     toplevel = NtUserGetAncestor( hwnd, GA_ROOT );
