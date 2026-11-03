@@ -820,7 +820,6 @@ struct vec_event_reg
 };
 static inline INT64 vec_event_token( struct vec_event_reg *reg ) { return (INT64)(INT_PTR)reg; }
 static inline struct vec_event_reg *vch_from( void *iface ) { return (struct vec_event_reg *)iface; }
-static inline struct str_vector *ovv_from( void *iface ) { return CONTAINING_RECORD( iface, struct str_vector, vt_vv ); }
 
 static const void *vector_changed_handler_vtbl[];
 static ULONG WINAPI vch_Release( void *iface );
@@ -881,7 +880,7 @@ static HRESULT WINAPI vch_QueryInterface( void *iface, REFIID iid, void **out )
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI vch_AddRef( void *iface ) { return incr( vch_from( iface )->ref ); }
+static ULONG WINAPI vch_AddRef( void *iface ) { return incr( &vch_from( iface )->ref ); }
 static ULONG WINAPI vch_Release( void *iface )
 {
     struct vec_event_reg *impl = vch_from( iface );
@@ -948,8 +947,8 @@ static HRESULT WINAPI ov_QueryInterface( void *iface, REFIID iid, void **out )
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI ov_AddRef( void *iface ) { return incr( ov_from( iface )->ref ); }
-static ULONG WINAPI ov_Release( void *iface ) { return decr( ov_from( iface )->ref ); }
+static ULONG WINAPI ov_AddRef( void *iface ) { return incr( &ov_from( iface )->ref ); }
+static ULONG WINAPI ov_Release( void *iface ) { return decr( &ov_from( iface )->ref ); }
 static HRESULT WINAPI ov_GetIids( void *iface, ULONG *c, IID **i )
 {
     return fill_param_iids( c, i, 4, 2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING,
@@ -1005,7 +1004,6 @@ static HRESULT WINAPI ov_GetAt( void *iface, UINT32 index, HSTRING *item )
 {
     struct str_vector *impl = ov_from( iface );
 
-    TRACE( "languages slot6 GetAt index %u\n", index );
     if (!item) return E_POINTER;
     if (index >= impl->count) return E_BOUNDS;
     *item = impl->items[index];
@@ -1013,7 +1011,6 @@ static HRESULT WINAPI ov_GetAt( void *iface, UINT32 index, HSTRING *item )
 }
 static HRESULT WINAPI ov_Size( void *iface, UINT32 *size )
 {
-    TRACE( "languages slot7 Size\n" );
     if (!size) return E_POINTER;
     *size = ov_from( iface )->count;
     return S_OK;
@@ -1022,7 +1019,6 @@ static HRESULT WINAPI ov_GetView( void *iface, void **view )
 {
     struct str_vector *impl = ov_from( iface );
 
-    TRACE( "languages slot8 GetView\n" );
     if (!view) return E_POINTER;
     *view = &impl->vt_vv;
     incr( &impl->ref );
@@ -1030,28 +1026,19 @@ static HRESULT WINAPI ov_GetView( void *iface, void **view )
 }
 static HRESULT WINAPI ov_IndexOf( void *iface, HSTRING item, UINT32 *index, INT32 *found )
 {
-    TRACE( "languages slot9 IndexOf %p\n", item );
     return svv_IndexOf( &ov_from( iface )->vt_vv, item, index, found );
 }
-static HRESULT WINAPI ov_SetAt( void *iface, UINT32 index, HSTRING value )
-{ TRACE( "languages slot10 SetAt %u\n", index ); return S_OK; }
-static HRESULT WINAPI ov_InsertAt( void *iface, UINT32 index, HSTRING value )
-{ TRACE( "languages slot11 InsertAt %u\n", index ); return S_OK; }
-static HRESULT WINAPI ov_RemoveAt( void *iface, UINT32 index )
-{ TRACE( "languages slot12 RemoveAt %u\n", index ); return S_OK; }
-static HRESULT WINAPI ov_Append( void *iface, HSTRING value )
-{ TRACE( "languages slot13 Append\n" ); return S_OK; }
-static HRESULT WINAPI ov_RemoveAtEnd( void *iface )
-{ TRACE( "languages slot14 RemoveAtEnd\n" ); return S_OK; }
-static HRESULT WINAPI ov_Clear( void *iface )
-{ TRACE( "languages slot15 Clear\n" ); return S_OK; }
+static HRESULT WINAPI ov_SetAt( void *iface, UINT32 index, HSTRING value ) { return S_OK; }
+static HRESULT WINAPI ov_InsertAt( void *iface, UINT32 index, HSTRING value ) { return S_OK; }
+static HRESULT WINAPI ov_RemoveAt( void *iface, UINT32 index ) { return S_OK; }
+static HRESULT WINAPI ov_Append( void *iface, HSTRING value ) { return S_OK; }
+static HRESULT WINAPI ov_RemoveAtEnd( void *iface ) { return S_OK; }
+static HRESULT WINAPI ov_Clear( void *iface ) { return S_OK; }
 static HRESULT WINAPI ov_GetMany( void *iface, UINT32 start, UINT32 size, HSTRING *items, UINT32 *count )
 {
-    TRACE( "languages slot16 GetMany start %u size %u items %p count %p\n", start, size, items, count );
     return svv_GetMany( &ov_from( iface )->vt_vv, start, size, items, count );
 }
-static HRESULT WINAPI ov_ReplaceAll( void *iface, UINT32 count, HSTRING *items )
-{ TRACE( "languages slot17 ReplaceAll count %u\n", count ); return S_OK; }
+static HRESULT WINAPI ov_ReplaceAll( void *iface, UINT32 count, HSTRING *items ) { return S_OK; }
 static HRESULT WINAPI ov_First( void *iface, void **first );
 static const void *str_vector_observable_vtbl[] =
 {
@@ -1165,7 +1152,6 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
 {
     TRACE( "map QI %s\n", debugstr_guid( iid ) );
     struct map_view *impl = mv_from( iface );
-    TRACE( "iid %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         param_iid_eq( iid, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING ))
@@ -1232,20 +1218,14 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
     /* key_decode: HSTRING payload, else the managed-string CCW surface */
     if (!key_decode( key, &raw, &tmp, &owned )) raw = NULL; /* no key: no match, no fabrication */
     TRACE( "Lookup %s\n", debugstr_w( raw ) );
-    /*
-     * sr15: the app's MapChanged registration reaches this Lookup with the key
-     * "Windows.Foundation.Collections.MapChangedEventHandler`2[System.String,
-     * System.String]" (the delegate's type name, a managed-string CCW --
-     * key_decode proves it), ELEMENT_NOT_FOUND raises the projection's
-     * COMException, its SR message resource is missing, and the message load
-     * FailFasts c0000602 (x4).  Answer the probe S_OK with an empty value and
-     * log the caller so the next gate shows whether the registration proceeds
-     * to the observable face (gate probe, remove once settled).
-     */
+    /* The app's MapChanged registration reaches this Lookup with the delegate
+     * type-name key "MapChangedEventHandler`2[System.String,System.String]" (a
+     * managed-string CCW); the miss raised the projection's COMException and its
+     * missing SR resource FailFasted c0000602.  S_OK + empty is the registration
+     * mechanism: the event pair itself runs on the observable face. */
     if (raw && !lstrcmpW( raw, ELEM_MAPCHANGEDHANDLER L"`2[" ELEM_CLASS_STRING L"," ELEM_CLASS_STRING L"]" ))
     {
-        TRACE( "qualifier probe for the MapChanged handler type from %p: answering S_OK/empty\n",
-               __builtin_return_address( 0 ) );
+        TRACE( "qualifier probe %s: answering S_OK/empty\n", debugstr_w( raw ) );
         key_release( tmp, owned );
         return WindowsCreateString( L"", 0, value );
     }
@@ -1968,7 +1948,6 @@ static HRESULT WINAPI svv_First( void *iface, void **first )
 
 static HRESULT WINAPI ov_First( void *iface, void **first )
 {
-    TRACE( "languages slot18 First\n" );
     if (!first) return E_POINTER;
     struct str_vector *impl = ov_from( iface );
     struct iterator *it = iter_new( IT_STRING, impl, impl->count, iterator_string_vtbl );
