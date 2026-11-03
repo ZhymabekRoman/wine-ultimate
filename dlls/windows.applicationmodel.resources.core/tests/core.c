@@ -2601,6 +2601,143 @@ done_factory:
     CALL( factory, 2, (ULONG *)&hr );
 }
 
+/*
+ * Languages shape (vtslot wave): the mrt100_app CoreRT __HCODEC adapter QIs
+ * the ResourceContext::Languages pointer for IObservableVector<string>
+ * ({11d3b13a-...}) and IVectorView<string> ({2f13c006-...}) back to back and
+ * then drives the read slots; a failfast c0000602 follows the {2f13c006} QI
+ * on the deployed build.  This test pins the shape it consumes: exactly one
+ * element L"en-US", IDL slot order on both faces
+ * (view: [GetAt 6][Size 7][IndexOf 8][GetMany 9][First 10], idl:252-255;
+ *  observable: [add 6][remove 7][GetAt 8][Size 9][GetView 10]..., idl:265-276,
+ *  286-288), E_BOUNDS past the end, and GetMany filling exactly one.
+ */
+static void test_languages_shape(void)
+{
+    static const WCHAR *elems_observablev_s[] = { L"Windows.Foundation.Collections.IObservableVector`1",
+                                                  L"Windows.Foundation.String" };
+    static const WCHAR lang_enus[] = L"en-US";
+    void *factory = NULL, *statics = NULL, *ctx = NULL, *langs = NULL, *vv = NULL, *view = NULL;
+    HSTRING hitem = NULL, hprobe = NULL, hbuf[2];
+    GUID iid_ov = {0}, iid_vv = {0};
+    UINT32 size = 0, got = 0;
+    INT32 found = -1;
+    HRESULT hr;
+
+    hr = get_factory( L"Windows.ApplicationModel.Resources.Core.ResourceContext", &factory );
+    ok( hr == S_OK, "shape: ResourceContext factory hr=%08x\n", hr );
+    if (FAILED( hr )) return;
+    hr = QI_SLOT( factory, &IID_IResourceContextStatics2_loc, &statics );
+    if (SUCCEEDED( hr )) hr = CALL( statics, 6, &ctx );        /* GetForCurrentView */
+    else hr = CALL( factory, 6, &ctx );                        /* ActivateInstance */
+    ok( SUCCEEDED( hr ) && ctx, "shape: context hr=%08x ctx=%p\n", hr, ctx );
+    if (FAILED( hr ) || !ctx) goto done;
+
+    hr = CALL( ctx, 11, &langs );                              /* IResourceContext::get_Languages */
+    ok( hr == S_OK && langs, "shape: get_Languages@11 hr=%08x\n", hr );
+    if (FAILED( hr ) || !langs) goto done;
+
+    /* ---- IObservableVector<string> face ({11d3b13a}) ---- */
+    hr = RoGetParameterizedTypeInstanceIID( 2, elems_observablev_s, NULL, &iid_ov, NULL );
+    ok( hr == S_OK, "shape: PIID(IObservableVector<string>) hr=%08x\n", hr );
+    if (SUCCEEDED( hr ))
+    {
+        void *ov = NULL;
+        hr = QI_SLOT( langs, &iid_ov, &ov );
+        ok( hr == S_OK && ov, "shape: QI(IObservableVector<string> %s) hr=%08x obj=%p\n",
+            wine_dbgstr_guid( &iid_ov ), hr, ov );
+        if (SUCCEEDED( hr ) && ov)
+        {
+            size = 0;
+            hr = CALL( ov, 9, &size );                         /* Size, slot 9 */
+            ok( hr == S_OK && size == 1, "shape: observable Size@9 hr=%08x size=%u want 1\n", hr, size );
+
+            hitem = NULL;
+            hr = CALL( ov, 8, 0, &hitem );                     /* GetAt, slot 8 */
+            ok( hr == S_OK && hitem, "shape: observable GetAt@8(0) hr=%08x\n", hr );
+            if (SUCCEEDED( hr ) && hitem)
+                ok( !lstrcmpW( WindowsGetStringRawBuffer( hitem, NULL ), lang_enus ),
+                    "shape: observable GetAt@8(0) is %s want en-US\n",
+                    wine_dbgstr_w( WindowsGetStringRawBuffer( hitem, NULL ) ) );
+
+            hbuf[0] = hbuf[1] = NULL; got = 0xdead;
+            hr = CALL( ov, 18, 0, 1, hbuf, &got );             /* GetMany, slot 18 */
+            ok( hr == S_OK && got == 1 && hbuf[0], "shape: observable GetMany@18(0,1) hr=%08x got=%u\n", hr, got );
+
+            view = NULL;
+            hr = CALL( ov, 10, &view );                        /* GetView, slot 10 */
+            ok( hr == S_OK && view, "shape: observable GetView@10 hr=%08x\n", hr );
+            if (SUCCEEDED( hr ) && view)
+            {
+                size = 0;
+                hr = CALL( view, 7, &size );                   /* view Size, slot 7 */
+                ok( hr == S_OK && size == 1, "shape: GetView face Size@7 hr=%08x size=%u want 1\n", hr, size );
+                CALL( view, 2, (ULONG *)&hr );
+                view = NULL;
+            }
+            CALL( ov, 2, (ULONG *)&hr );
+        }
+    }
+
+    /* ---- IVectorView<string> face ({2f13c006}) ---- */
+    hr = RoGetParameterizedTypeInstanceIID( 2, elems_vectorview_s, NULL, &iid_vv, NULL );
+    ok( hr == S_OK, "shape: PIID(IVectorView<string>) hr=%08x\n", hr );
+    if (FAILED( hr )) goto done;
+    hr = QI_SLOT( langs, &iid_vv, &vv );
+    ok( hr == S_OK && vv, "shape: QI(IVectorView<string> %s) hr=%08x obj=%p\n",
+        wine_dbgstr_guid( &iid_vv ), hr, vv );
+    if (FAILED( hr ) || !vv) goto done;
+
+    size = 0;
+    hr = CALL( vv, 7, &size );                                 /* Size, slot 7 */
+    ok( hr == S_OK && size == 1, "shape: view Size@7 hr=%08x size=%u want 1\n", hr, size );
+
+    hitem = NULL;
+    hr = CALL( vv, 6, 0, &hitem );                             /* GetAt, slot 6 */
+    ok( hr == S_OK && hitem, "shape: view GetAt@6(0) hr=%08x\n", hr );
+    if (SUCCEEDED( hr ) && hitem)
+        ok( !lstrcmpW( WindowsGetStringRawBuffer( hitem, NULL ), lang_enus ),
+            "shape: view GetAt@6(0) is %s want en-US\n",
+            wine_dbgstr_w( WindowsGetStringRawBuffer( hitem, NULL ) ) );
+
+    hprobe = NULL;
+    if (SUCCEEDED( WindowsCreateString( L"en-US", 5, &hprobe ) ))
+    {
+        UINT32 idx = 0xdead;
+        found = -1;
+        hr = CALL( vv, 8, hprobe, &idx, &found );              /* IndexOf, slot 8 */
+        ok( hr == S_OK && found && idx == 0, "shape: IndexOf@8(en-US) hr=%08x idx=%u found=%d\n", hr, idx, found );
+    }
+    WindowsDeleteString( hprobe );
+    hprobe = NULL;
+    if (SUCCEEDED( WindowsCreateString( L"fr-FR", 5, &hprobe ) ))
+    {
+        UINT32 idx = 0xdead;
+        found = -1;
+        hr = CALL( vv, 8, hprobe, &idx, &found );              /* IndexOf, slot 8 */
+        ok( hr == S_OK && !found, "shape: IndexOf@8(fr-FR) hr=%08x found=%d want miss\n", hr, found );
+    }
+    WindowsDeleteString( hprobe );
+
+    hr = CALL( vv, 6, 1, &hprobe );                            /* GetAt past the end */
+    ok( hr == E_BOUNDS, "shape: view GetAt@6(1) hr=%08x want E_BOUNDS\n", hr );
+
+    hbuf[0] = hbuf[1] = NULL; got = 0xdead;
+    hr = CALL( vv, 9, 0, 1, hbuf, &got );                      /* GetMany, slot 9 */
+    ok( hr == S_OK && got == 1 && hbuf[0], "shape: view GetMany@9(0,1) hr=%08x got=%u want 1\n", hr, got );
+
+    hbuf[0] = hbuf[1] = NULL; got = 0xdead;
+    hr = CALL( vv, 9, 0, 2, hbuf, &got );                      /* GetMany oversized buffer */
+    ok( hr == S_OK && got == 1, "shape: view GetMany@9(0,2) hr=%08x got=%u want 1\n", hr, got );
+
+done:
+    if (vv) CALL( vv, 2, (ULONG *)&hr );
+    if (langs) CALL( langs, 2, (ULONG *)&hr );
+    if (ctx) CALL( ctx, 2, (ULONG *)&hr );
+    if (statics) CALL( statics, 2, (ULONG *)&hr );
+    if (factory) CALL( factory, 2, (ULONG *)&hr );
+}
+
 START_TEST(core)
 {
     HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
@@ -2622,6 +2759,7 @@ START_TEST(core)
     test_observable_map();
     test_delegate_event_registration();
     test_collections_abi_slots();
+    test_languages_shape();
 
     RoUninitialize();
 }
