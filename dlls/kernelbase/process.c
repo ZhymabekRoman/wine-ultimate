@@ -993,8 +993,8 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetProcessId( HANDLE process )
 #define MITIGATION_POLICY_ASG_FEATURE_CONTROL     13
 #define MITIGATION_POLICY_COUNT                   24
 
-/* policies whose buffer is a single DWORD on Windows 11 */
-#define MITIGATION_POLICY_IS_DWORD(p)  ((p) == 8 || (p) == 11 || (p) == 12)
+/* policies whose buffer is a single DWORD on Windows 11 (all policies except 5/OptionsMask) */
+#define MITIGATION_POLICY_IS_DWORD(p)  ((p) != 5)
 
 static CRITICAL_SECTION mitigation_cs;
 static INIT_ONCE mitigation_init_once = INIT_ONCE_STATIC_INIT;

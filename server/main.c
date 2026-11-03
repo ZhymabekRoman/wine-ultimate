@@ -28,8 +28,12 @@
 #include <stdlib.h>
 #include <sys/time.h>
 #include <unistd.h>
+#include <errno.h>
 #ifdef HAVE_SYS_RESOURCE_H
 # include <sys/resource.h>
+#endif
+#ifdef linux
+# include <sched.h>
 #endif
 #ifdef HAVE_SYS_SYSCTL_H
 # include <sys/sysctl.h>
@@ -241,6 +245,68 @@ static void init_limits(void)
 #endif
 }
 
+/*
+ * P5: opt-in CPU scheduling knobs for the server. Nothing is touched unless the
+ * matching environment variable is set in the environment that starts wineserver:
+ *
+ *   WINE_SERVER_NICE=<int>      setpriority(PRIO_PROCESS, 0, n) on self. The
+ *                               non-root floor is -RLIMIT_NICE (ulimit -e).
+ *   WINE_SERVER_AFFINITY=<hex>  sched_setaffinity(0, mask) on self; no privilege needed.
+ *   WINE_SERVER_RT=<1..99>      sched_setscheduler( SCHED_FIFO ) on self; requires
+ *                               CAP_SYS_NICE / RLIMIT_RTPRIO. On EPERM log a fixme and
+ *                               fall back to setpriority(-19). Never applied when unset.
+ *
+ * Rationale: the server is single-threaded; under CPU load (parallel builds) the
+ * scheduler starves it and every wine client startup stalls behind the hogs. RT is
+ * deliberately opt-in and per-process (it affects only this wineserver, which blocks
+ * between requests); the system-wide safety net for RT tasks is the RT bandwidth
+ * cap in /proc/sys/kernel/sched_rt_runtime_us.
+ */
+static void set_scheduling_nice( int n )
+{
+#ifdef HAVE_SYS_RESOURCE_H
+    if (setpriority( PRIO_PROCESS, 0, n ) == -1)
+        fprintf( stderr, "wine: setpriority(%d) failed, error %d (check RLIMIT_NICE, ulimit -e)\n", n, errno );
+#else
+    (void)n;
+#endif
+}
+
+static void set_scheduling_priority(void)
+{
+    const char *str;
+
+    if ((str = getenv( "WINE_SERVER_NICE" )))
+        set_scheduling_nice( atoi( str ) );
+#ifdef linux
+    if ((str = getenv( "WINE_SERVER_AFFINITY" )))
+    {
+        cpu_set_t set;
+        unsigned long mask = strtoul( str, NULL, 16 ), bit;
+
+        CPU_ZERO( &set );
+        for (bit = 0; mask; bit++, mask >>= 1)
+            if (mask & 1) CPU_SET( bit, &set );
+        if (sched_setaffinity( 0, sizeof(set), &set ) == -1)
+            fprintf( stderr, "wine: WINE_SERVER_AFFINITY=%s: sched_setaffinity failed, error %d\n", str, errno );
+    }
+
+    if ((str = getenv( "WINE_SERVER_RT" )))
+    {
+        struct sched_param param;
+        param.sched_priority = atoi( str );
+        if (param.sched_priority < 1 || param.sched_priority > 99)
+            fprintf( stderr, "wine: WINE_SERVER_RT=%s: invalid priority, must be 1..99, ignored\n", str );
+        else if (sched_setscheduler( 0, SCHED_FIFO, &param ) == -1)
+        {
+            fprintf( stderr, "fixme: WINE_SERVER_RT=%d: SCHED_FIFO denied, error %d, falling back to nice -19\n",
+                     param.sched_priority, errno );
+            set_scheduling_nice( -19 );  /* may fail too without privileges */
+        }
+    }
+#endif
+}
+
 int main( int argc, char *argv[] )
 {
     setvbuf( stderr, NULL, _IOLBF, 0 );
@@ -255,6 +321,7 @@ int main( int argc, char *argv[] )
     signal( SIGTERM, sigterm_handler );
     signal( SIGABRT, sigterm_handler );
     init_limits();
+    set_scheduling_priority();
 
     sock_init();
     open_master_socket();

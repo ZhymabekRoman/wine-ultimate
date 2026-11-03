@@ -591,6 +591,11 @@ NTSTATUS WINAPI NtAlpcAcceptConnectPort( HANDLE *communication_port, HANDLE conn
 
     msg_id = connection_request->MessageId;
     if (!msg_id) msg_id = *(const unsigned int *)((const char *)connection_request + 24);
+    fprintf( stderr, "NTDLL NtAlpcAcceptConnectPort: conn_port=%p, msg_id=%u (off32=%u, off24=%u, accept=%d)\n",
+             connection_port, msg_id,
+             *(const unsigned int *)((const char *)connection_request + 32),
+             *(const unsigned int *)((const char *)connection_request + 24),
+             accept_connection );
 
     SERVER_START_REQ( accept_alpc_connection )
     {
@@ -1199,6 +1204,8 @@ NTSTATUS WINAPI NtAlpcSendWaitReceivePort( HANDLE port_handle, DWORD flags,
                 *(client_ptr_t *)((char *)recv_msg + 1 * sizeof(void *)) = hdr.client_pid;
                 *(client_ptr_t *)((char *)recv_msg + 2 * sizeof(void *)) = hdr.client_tid;
                 *(unsigned int *)((char *)recv_msg + 24) = hdr.msg_id;
+                fprintf( stderr, "NTDLL recv LPC_CONNECTION_REQUEST: hdr.msg_id=%u, client_pid=%x, client_tid=%x\n",
+                         hdr.msg_id, hdr.client_pid, hdr.client_tid );
             }
             else
             {

@@ -799,6 +799,20 @@ static struct builtin_module *get_builtin_module( void *module )
     return NULL;
 }
 
+const char *virtual_get_module_name( const void *addr, void **base_out )
+{
+    struct builtin_module *builtin;
+    LIST_FOR_EACH_ENTRY( builtin, &builtin_modules, struct builtin_module, entry )
+    {
+        if (builtin->module <= addr && (const char *)addr < (const char *)builtin->module + 0x2000000)
+        {
+            if (base_out) *base_out = builtin->module;
+            return builtin->unix_path;
+        }
+    }
+    return NULL;
+}
+
 
 /***********************************************************************
  *           release_builtin_module

@@ -413,7 +413,7 @@ static DWORD ffp_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
         DWORD src_location, const RECT *src_rect, struct wined3d_texture *dst_texture,
         unsigned int dst_sub_resource_idx, DWORD dst_location, const RECT *dst_rect,
         const struct wined3d_color_key *colour_key, enum wined3d_texture_filter_type filter,
-        const struct wined3d_format *resolve_format)
+        const struct wined3d_format *resolve_format, const struct wined3d_blt_fx *fx)
 {
     struct wined3d_blitter *next;
 
@@ -425,7 +425,7 @@ static DWORD ffp_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
 
     return next->ops->blitter_blit(next, op, context, src_texture, src_sub_resource_idx, src_location,
             src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, colour_key, filter,
-            resolve_format);
+            resolve_format, fx);
 }
 
 static const struct wined3d_blitter_ops ffp_blitter_ops =
@@ -528,7 +528,7 @@ static DWORD raw_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
         DWORD src_location, const RECT *src_rect, struct wined3d_texture *dst_texture,
         unsigned int dst_sub_resource_idx, DWORD dst_location, const RECT *dst_rect,
         const struct wined3d_color_key *colour_key, enum wined3d_texture_filter_type filter,
-        const struct wined3d_format *resolve_format)
+        const struct wined3d_format *resolve_format, const struct wined3d_blt_fx *fx)
 {
     struct wined3d_texture_gl *src_texture_gl = wined3d_texture_gl(src_texture);
     struct wined3d_texture_gl *dst_texture_gl = wined3d_texture_gl(dst_texture);
@@ -550,7 +550,7 @@ static DWORD raw_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
         TRACE("Forwarding to blitter %p.\n", next);
         return next->ops->blitter_blit(next, op, context, src_texture, src_sub_resource_idx, src_location,
                 src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, colour_key, filter,
-                resolve_format);
+                resolve_format, fx);
     }
 
     TRACE("Blit using ARB_copy_image.\n");
@@ -800,7 +800,7 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
             device->blitter->ops->blitter_blit(device->blitter, WINED3D_BLIT_OP_RAW_BLIT, context,
                     src_texture, src_sub_resource_idx, src_location, src_rect,
                     src_staging_texture, 0, src_location, src_rect,
-                    NULL, WINED3D_TEXF_NONE, NULL);
+                    NULL, WINED3D_TEXF_NONE, NULL, NULL);
 
             src_texture = src_staging_texture;
             src_sub_resource_idx = 0;
@@ -928,7 +928,7 @@ static void texture2d_blt_fbo(struct wined3d_device *device, struct wined3d_cont
         device->blitter->ops->blitter_blit(device->blitter, WINED3D_BLIT_OP_RAW_BLIT, context,
                 dst_texture, 0, dst_location, dst_rect,
                 dst_save_texture, dst_save_sub_resource_idx, dst_location, dst_rect,
-                NULL, WINED3D_TEXF_NONE, NULL);
+                NULL, WINED3D_TEXF_NONE, NULL, NULL);
     }
 
 done:
@@ -1046,7 +1046,7 @@ static DWORD fbo_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
         DWORD src_location, const RECT *src_rect, struct wined3d_texture *dst_texture,
         unsigned int dst_sub_resource_idx, DWORD dst_location, const RECT *dst_rect,
         const struct wined3d_color_key *colour_key, enum wined3d_texture_filter_type filter,
-        const struct wined3d_format *resolve_format)
+        const struct wined3d_format *resolve_format, const struct wined3d_blt_fx *fx)
 {
     struct wined3d_context_gl *context_gl = wined3d_context_gl(context);
     struct wined3d_resource *src_resource, *dst_resource;
@@ -1086,7 +1086,7 @@ static DWORD fbo_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_blit
         TRACE("Forwarding to blitter %p.\n", next);
         return next->ops->blitter_blit(next, op, context, src_texture, src_sub_resource_idx, src_location,
                 src_rect, dst_texture, dst_sub_resource_idx, dst_location, dst_rect, colour_key, filter,
-                resolve_format);
+                resolve_format, fx);
     }
 
     if (blit_op == WINED3D_BLIT_OP_COLOR_BLIT || blit_op == WINED3D_BLIT_OP_RAW_BLIT)
@@ -2085,7 +2085,7 @@ static BOOL wined3d_texture_load_drawable(struct wined3d_texture *texture,
     device->blitter->ops->blitter_blit(device->blitter, WINED3D_BLIT_OP_COLOR_BLIT, context,
             texture, sub_resource_idx, WINED3D_LOCATION_TEXTURE_RGB, &r,
             texture, sub_resource_idx, WINED3D_LOCATION_DRAWABLE, &r,
-            NULL, WINED3D_TEXF_POINT, NULL);
+            NULL, WINED3D_TEXF_POINT, NULL, NULL);
 
     return TRUE;
 }

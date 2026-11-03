@@ -1305,13 +1305,7 @@ HRESULT ensure_mta(void)
     if ((apt = data->apt) && (data->implicit_mta_cookie || apt->multi_threaded))
         return S_OK;
 
-    EnterCriticalSection(&apt_cs);
-    if (apt || mta)
-        hr = apartment_increment_mta_usage(&data->implicit_mta_cookie);
-    else
-        hr = CO_E_NOTINITIALIZED;
-    LeaveCriticalSection(&apt_cs);
-
+    hr = apartment_increment_mta_usage(&data->implicit_mta_cookie);
     if (FAILED(hr))
     {
         ERR("Failed, hr %#lx.\n", hr);

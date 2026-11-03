@@ -51,6 +51,7 @@ struct handle_table
     int                  count;       /* number of allocated entries */
     int                  last;        /* last used entry */
     int                  free;        /* first entry that may be free */
+    int                  hint;        /* highest entry known to be free (allocation scans down from here) */
     struct handle_entry *entries;     /* handle entries */
 };
 
@@ -209,6 +210,7 @@ struct handle_table *alloc_handle_table( struct process *process, int count )
     table->count   = count;
     table->last    = -1;
     table->free    = 0;
+    table->hint    = -1;
     if ((table->entries = mem_alloc( count * sizeof(*table->entries) ))) return table;
     release_object( table );
     return NULL;
@@ -231,21 +233,39 @@ static int grow_handle_table( struct handle_table *table )
     return 1;
 }
 
-/* allocate the first free entry in the handle table */
+/* allocate the highest free entry in the handle table.
+ *
+ * NT's RtlAllocateHandle takes the highest free slot, so a just-closed index is
+ * recycled only once every higher slot is taken.  Programs rely on that order:
+ * the DuplicateHandle( GetCurrentProcess(), h, GetCurrentProcess(), &h2, 0,
+ * FALSE, DUPLICATE_CLOSE_SOURCE ) move idiom (Chromium base::Process::Duplicate)
+ * leaves the closed value in a sibling thread's bookkeeping, and on Windows the
+ * next duplicate of that stale value fails with ERROR_INVALID_HANDLE.  A
+ * lowest-free-first scan re-occupies the freed index with the very next
+ * allocation, so the stale value aliases the new object instead: the caller
+ * receives a handle to an event/file where it expects a process object, and
+ * GetProcessId() on it answers 0 + ERROR_INVALID_HANDLE (measured in gate49:
+ * the WebView2 browser process dies on exactly that check, msedge.dll+0x2d2e44c).
+ *
+ * Scanning down from the top reproduces the NT order.  table->hint caches the
+ * highest index known to be free, which keeps the scan O(1) amortized: every
+ * slot the scan walks over is consumed by the allocation that stops at it, and
+ * close_handle() re-raises the hint.
+ */
 static obj_handle_t alloc_entry( struct handle_table *table, void *obj, unsigned int access )
 {
-    struct handle_entry *entry = table->entries + table->free;
+    struct handle_entry *entry;
     int i;
 
-    for (i = table->free; i <= table->last; i++, entry++) if (!entry->ptr) goto found;
-    if (i >= table->count)
+    for (i = min( table->hint, table->last ); i >= 0; i--) if (!table->entries[i].ptr) break;
+    if (i < 0)  /* nothing free at or below the hint: extend the table */
     {
-        if (!grow_handle_table( table )) return 0;
-        entry = table->entries + i;  /* the entries may have moved */
+        if ((i = table->last + 1) >= table->count && !grow_handle_table( table )) return 0;
+        table->last = i;
     }
-    table->last = i;
- found:
-    table->free = i + 1;
+    table->hint = i - 1;
+    if (i < table->free) table->free = i;
+    entry = table->entries + i;
     entry->ptr    = grab_object_for_handle( obj );
     entry->access = access;
     return index_to_handle(i);
@@ -349,6 +369,7 @@ static void shrink_handle_table( struct handle_table *table )
         table->last--;
         entry--;
     }
+    if (table->hint > table->last) table->hint = table->last;  /* allocation scans down from last */
     if (table->last >= count / 4) return;  /* no need to shrink */
     if (count < MIN_HANDLE_ENTRIES * 2) return;  /* too small to shrink */
     count /= 2;
@@ -439,6 +460,7 @@ unsigned int close_handle( struct process *process, obj_handle_t handle )
     table = handle_is_global(handle) ? global_table : process->handles;
     table->entries[index].ptr = NULL;
     if (index < table->free) table->free = index;
+    if (index > table->hint) table->hint = index;  /* next allocation takes the highest free slot */
     if (index == table->last) shrink_handle_table( table );
     release_object_from_handle( obj );
     return STATUS_SUCCESS;
@@ -704,6 +726,10 @@ DECL_HANDLER(dup_handle)
         {
             reply->handle = duplicate_handle( src, req->src_handle, dst,
                                               req->access, req->attributes, req->options );
+            if (getenv( "WA_PIPEX_DUMP" ))
+                fprintf( stderr, "WA_DUPX: caller=%04x src=%04x shandle=%04x dst=%04x access=%08x opts=%08x -> %04x\n",
+                         current->process->id, src->id, req->src_handle, dst->id,
+                         req->access, req->options, reply->handle );
             release_object( dst );
         }
         /* close the handle no matter what happened */

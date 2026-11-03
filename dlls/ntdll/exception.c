@@ -273,7 +273,20 @@ EXCEPTION_DISPOSITION WINAPI user_callback_handler( EXCEPTION_RECORD *record, vo
 {
     if (!(record->ExceptionFlags & (EXCEPTION_UNWINDING | EXCEPTION_EXIT_UNWIND)))
     {
-        ERR( "ignoring exception %lx\n", record->ExceptionCode );
+        ERR( "ignoring exception %lx at addr %p (param0=%lx, param1=%lx)\n",
+             record->ExceptionCode, record->ExceptionAddress,
+             record->NumberParameters > 0 ? (ULONG_PTR)record->ExceptionInformation[0] : 0,
+             record->NumberParameters > 1 ? (ULONG_PTR)record->ExceptionInformation[1] : 0 );
+        if (record->ExceptionCode == 0xc0000005 && context)
+        {
+            ULONG_PTR *sp = (ULONG_PTR *)context->Rsp;
+            int s_i;
+            ERR( "c0000005 stack dump (rip=%p rsp=%p):\n", (void *)context->Rip, (void *)context->Rsp );
+            for (s_i = 0; s_i < 16; s_i++)
+            {
+                ERR( "  sp[%02d] = %p\n", s_i, (void *)sp[s_i] );
+            }
+        }
         if (record->ExceptionCode == 0xc06d007f)
         {
             ERR( "c06d007f params %u, info %p\n", (unsigned int)record->NumberParameters, record->NumberParameters ? (void *)record->ExceptionInformation[0] : NULL );

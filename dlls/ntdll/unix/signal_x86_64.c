@@ -1490,7 +1490,26 @@ static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcont
     }
 
     /* fix up instruction pointer in context for EXCEPTION_BREAKPOINT */
-    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT) context->Rip--;
+    if (rec->ExceptionCode == EXCEPTION_BREAKPOINT)
+    {
+        void *mod_base = NULL;
+        const char *mod_name = virtual_get_module_name( (void *)context->Rip, &mod_base );
+        ERR("BREAKPOINT hit! rip=%p (mod=%s +%lx) addr=%p pid=%04x tid=%04x\n",
+            (void *)context->Rip, mod_name ? mod_name : "unknown",
+            mod_base ? (ULONG_PTR)((const char *)context->Rip - (const char *)mod_base) : 0,
+            rec->ExceptionAddress,
+            GetCurrentProcessId(), GetCurrentThreadId());
+        for (int s_off = 0; s_off < 0x200; s_off += 8)
+        {
+            char *candidate = (char *)(context->Rsp + s_off);
+            if (candidate[0] >= 32 && candidate[0] <= 126 && candidate[1] >= 32 && candidate[1] <= 126 && candidate[2] >= 32 && candidate[2] <= 126)
+            {
+                ERR("BREAKPOINT stack text at +%x: %.120s\n", s_off, candidate);
+                break;
+            }
+        }
+        context->Rip--;
+    }
 
     rsp = is_16bit(sigcontext) ? get_wow_teb(data->teb)->SystemReserved1[0] : RSP_sig(sigcontext);
     rsp &= ~(ULONG_PTR)15;

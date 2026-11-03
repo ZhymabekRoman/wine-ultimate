@@ -1145,6 +1145,10 @@ static void alpc_fd_write( struct fd *fd, struct async *async, file_pos_t pos )
                             size - ALPC_USER_HDR_SIZE );
                     target->conn_reply_size = size - ALPC_USER_HDR_SIZE;
                 }
+                fprintf( stderr, "alpc_send_msg LPC connect dance: target=%p msg_id=%u sender=%04x:%04x utype=%u reply_id=%u size=%u\n",
+                         target, target->msg_id, sender_pid, sender_tid, utype, reply_id, size );
+                for (int d_i = 0; d_i < (size < 48 ? size : 48); d_i++) fprintf(stderr, "%02x ", ((const unsigned char *)data)[d_i]);
+                fprintf(stderr, "\n");
                 list_remove( &target->entry );
                 if (complete_alpc_connection( port, target, attr.msg_context, 0 ))
                 {
@@ -1811,7 +1815,7 @@ DECL_HANDLER(connect_alpc_port)
      * counter instead; the delivered connect notification and the connect
      * reply echo this id, and NtAlpcAcceptConnectPort / the REPLY-flag connect
      * commit correlate by it. */
-    pc->msg_id       = ++server_port->connect_id;
+    pc->msg_id       = 0x80000000 | ++server_port->connect_id;
     pc->client_port  = (struct alpc_port *)grab_object( client_port );
     pc->client_async = NULL;
     pc->conn_data    = NULL;
@@ -1851,6 +1855,7 @@ DECL_HANDLER(connect_alpc_port)
     list_add_tail( &server_port->pending_conns, &pc->entry );
     if (!queue_connect_notification( server_port, pc ))
     {
+        fprintf( stderr, "CONNECT_ALPC_PORT queue_connect_notification FAILED for pc=%p msg_id=%u!\n", pc, pc->msg_id );
         list_remove( &pc->entry );
         close_handle( current->process, reply->handle );
         reply->handle = 0;
@@ -1876,6 +1881,7 @@ DECL_HANDLER(connect_alpc_port)
         else
         {
             /* Allocation failure: clean up */
+            fprintf( stderr, "CONNECT_ALPC_PORT async FAILED for pc=%p msg_id=%u!\n", pc, pc->msg_id );
             list_remove( &pc->entry );
             /* connect notification already queued; remove from server msg queue */
             {
@@ -1897,8 +1903,8 @@ DECL_HANDLER(connect_alpc_port)
         }
     }
 
-    fprintf( stderr, "CONNECT_ALPC_PORT: pid=%04x tid=%04x handle=%x client=%p server=%p\n",
-             current->process->id, current->id, reply->handle, client_port, server_port );
+    fprintf( stderr, "CONNECT_ALPC_PORT: pid=%04x tid=%04x handle=%x client=%p server=%p pc=%p msg_id=%u\n",
+             current->process->id, current->id, reply->handle, client_port, server_port, pc, pc->msg_id );
     release_object( client_port );
     release_object( server_port );
 }
@@ -2039,8 +2045,11 @@ DECL_HANDLER(accept_alpc_connection)
     }
 
     /* Find pending connection by msg_id */
+    fprintf( stderr, "SERVER accept_alpc_connection: req->server_port=%x req->msg_id=%u server_port=%p\n",
+             req->server_port, req->msg_id, server_port );
     LIST_FOR_EACH_ENTRY( pc, &server_port->pending_conns, struct alpc_pending_conn, entry )
     {
+        fprintf( stderr, "   server_port %p pending pc->msg_id=%u\n", server_port, pc->msg_id );
         if (pc->msg_id == req->msg_id)
         {
             found = pc;
@@ -2050,6 +2059,7 @@ DECL_HANDLER(accept_alpc_connection)
 
     if (!found)
     {
+        fprintf( stderr, "SERVER accept_alpc_connection NOT FOUND! req->msg_id=%u\n", req->msg_id );
         release_object( server_port );
         set_error( STATUS_NOT_FOUND );
         return;

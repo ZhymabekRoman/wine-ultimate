@@ -298,6 +298,7 @@ extern void *anon_mmap_alloc( size_t size, int prot );
 extern void virtual_init(void);
 extern ULONG_PTR get_system_affinity_mask(void);
 extern UINT_PTR get_host_page_size(void);
+extern const char *virtual_get_module_name( const void *addr, void **base_out );
 extern void virtual_get_system_info( SYSTEM_BASIC_INFORMATION *info, BOOL wow64 );
 extern NTSTATUS virtual_map_builtin_module( HANDLE mapping, void **module, SIZE_T *size,
                                             SECTION_IMAGE_INFORMATION *info, ULONG_PTR limit_low,
