@@ -1457,6 +1457,107 @@ static void test_activatable_class_registration(void)
 }
 
 /*
+ * Activation-factory apartment semantics: the class's ThreadingModel REG_SZ under
+ * ActivatableClassId\<class> decides whether the factory RoGetActivationFactory hands
+ * out is agile.  A "Both"/"MTA" class's factory answers IAgileObject (calls cross
+ * apartments without marshaling); an "Apartment"/"STA" class's factory does not; a class
+ * with no recorded model falls back to the agile activation default ("Both").  This is
+ * the same ThreadingModel value ole32's CoCreateInstance apartment logic reads, and the
+ * value .NET Native (Calculator) and WinAppSDK (WhatsApp) read to decide marshaling.
+ * Wine.Test.Class is seeded by loader/wine.inf with DllPath = the test module, so it
+ * resolves to the test factory (which itself answers only IUnknown/IActivationFactory).
+ */
+static const WCHAR agile_class_name[] = L"Wine.Test.Class";
+
+static void seed_class_threading_model( const WCHAR *model )
+{
+    WCHAR path[MAX_PATH];
+    HKEY sub;
+    LONG ret;
+
+    lstrcpyW( path, runtime_key );
+    lstrcatW( path, L"\\" );
+    lstrcatW( path, agile_class_name );
+    ret = RegCreateKeyExW( HKEY_CURRENT_USER, path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &sub, NULL );
+    ok( ret == ERROR_SUCCESS, "RegCreateKeyExW returned %ld.\n", ret );
+    if (ret) return;
+    if (model)
+        RegSetValueExW( sub, L"ThreadingModel", 0, REG_SZ, (const BYTE *)model,
+                        (lstrlenW( model ) + 1) * sizeof(WCHAR) );
+    RegCloseKey( sub );
+}
+
+static void test_activation_factory_threading_model(void)
+{
+    static const WCHAR model_both[] = L"Both";
+    static const WCHAR model_mta[] = L"MTA";
+    static const WCHAR model_apartment[] = L"Apartment";
+    static const WCHAR model_sta[] = L"STA";
+    IActivationFactory *factory = NULL;
+    IAgileObject *agile;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr );
+
+    hr = WindowsCreateString( agile_class_name, ARRAY_SIZE( agile_class_name ) - 1, &str );
+    ok( hr == S_OK, "WindowsCreateString returned %#lx.\n", hr );
+
+    /* A "Both" class: the factory is agile, directly and via QI on the factory. */
+    seed_class_threading_model( model_both );
+    agile = NULL;
+    hr = RoGetActivationFactory( str, &IID_IAgileObject, (void **)&agile );
+    ok( hr == S_OK && agile, "RoGetActivationFactory(IAgileObject) for Both returned %#lx, %p.\n", hr, agile );
+    if (agile) IAgileObject_Release( agile );
+    factory = NULL;
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK && factory, "RoGetActivationFactory(IActivationFactory) returned %#lx.\n", hr );
+    if (factory)
+    {
+        agile = NULL;
+        hr = IActivationFactory_QueryInterface( factory, &IID_IAgileObject, (void **)&agile );
+        ok( hr == S_OK && agile, "factory QI(IAgileObject) for Both returned %#lx, %p.\n", hr, agile );
+        if (agile) IAgileObject_Release( agile );
+        IActivationFactory_Release( factory );
+    }
+
+    /* "MTA" is agile too. */
+    seed_class_threading_model( model_mta );
+    agile = NULL;
+    hr = RoGetActivationFactory( str, &IID_IAgileObject, (void **)&agile );
+    ok( hr == S_OK && agile, "RoGetActivationFactory(IAgileObject) for MTA returned %#lx, %p.\n", hr, agile );
+    if (agile) IAgileObject_Release( agile );
+
+    /* "STA" and "Apartment" are not agile (a per-user ThreadingModel override). */
+    seed_class_threading_model( model_sta );
+    agile = (void *)0xdead;
+    hr = RoGetActivationFactory( str, &IID_IAgileObject, (void **)&agile );
+    todo_wine
+    ok( hr == E_NOINTERFACE, "RoGetActivationFactory(IAgileObject) for STA returned %#lx.\n", hr );
+    todo_wine
+    ok( !agile, "got agile %p.\n", agile );
+
+    seed_class_threading_model( model_apartment );
+    agile = (void *)0xdead;
+    hr = RoGetActivationFactory( str, &IID_IAgileObject, (void **)&agile );
+    todo_wine
+    ok( hr == E_NOINTERFACE, "RoGetActivationFactory(IAgileObject) for Apartment returned %#lx.\n", hr );
+    todo_wine
+    ok( !agile, "got agile %p.\n", agile );
+
+    /* No recorded model: the agile activation default ("Both"). */
+    seed_class_threading_model( NULL );
+    agile = NULL;
+    hr = RoGetActivationFactory( str, &IID_IAgileObject, (void **)&agile );
+    ok( hr == S_OK && agile, "RoGetActivationFactory(IAgileObject) for the default returned %#lx, %p.\n", hr, agile );
+    if (agile) IAgileObject_Release( agile );
+
+    WindowsDeleteString( str );
+    RoUninitialize();
+}
+
+/*
  * RoGetParameterizedTypeInstanceIID conformance: Windows derives the IID as a
  * UUIDv5-style SHA-1 hash (namespace 11f47ad5-7b73-42c0-abae-878b1e16adee) over the
  * UTF-8 "pinterface({piid};arg;...)" signature string of the instantiation
@@ -1580,6 +1681,7 @@ START_TEST(roapi)
     test_class_name_version();
     test_server_activatable_classes();
     test_activatable_class_registration();
+    test_activation_factory_threading_model();
     test_RoGetParameterizedTypeInstanceIID();
     test_RoGetAgileReference();
     test_RoGetErrorReportingFlags();

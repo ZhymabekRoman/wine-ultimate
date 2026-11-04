@@ -65,6 +65,14 @@ static BOOL dataexchange_enabled( void )
     return cached;
 }
 
+/*
+ * get_library_for_classid answers the module an activatable class's factory lives
+ * in.  An out-of-proc (Server) class answers *out == NULL with S_OK: its key carries a
+ * Server subkey (whose LocalServer32 registration launches the server exe through the
+ * rpcss /PROCESSID chain, and whose own DllPath names the provider module inside the
+ * server process), so the class resolves through CoCreateInstance, not an in-proc
+ * DllGetActivationFactory.  resolve_activation_factory takes that signal.
+ */
 static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
 {
     ACTCTX_SECTION_KEYED_DATA data;
@@ -435,6 +443,19 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
     }
     RegCloseKey(hkey_root);
 
+    /* An out-of-proc class carries a Server subkey; signal server activation to the
+     * caller (*out stays NULL) and leave the DllPath in-proc path to the classes that
+     * are configured for it. */
+    {
+        HKEY hserver;
+        if (!RegOpenKeyExW(hkey_class, L"Server", 0, KEY_READ, &hserver))
+        {
+            RegCloseKey(hserver);
+            RegCloseKey(hkey_class);
+            return S_OK;
+        }
+    }
+
     /* load (and expand) DllPath registry value */
     if (RegQueryValueExW(hkey_class, L"DllPath", NULL, &type, NULL, &size))
     {
@@ -481,6 +502,133 @@ done:
 
 
 static BOOL find_registered_factory(const WCHAR *classid, PFNGETACTIVATIONFACTORY *callback);
+
+/*
+ * WinRT activatable-class apartment model.  A class's ThreadingModel REG_SZ under
+ * ActivatableClassId\<class> selects whether the activation factory is agile: a
+ * "Both"/"MTA" class's factory is agile - IAgileObject answers it and calls cross
+ * apartments without marshaling - while an "Apartment"/"STA" class's factory is not.
+ * Wine's loader/wine.inf seeds "Both"/"Apartment", the Windows activation-context
+ * ThreadingModel string section carries "Both"/"STA"/"MTA", and a class with no
+ * recorded model defaults to the agile activation default ("Both"), so the fallback
+ * is agile.  This is the same ThreadingModel value ole32's CoCreateInstance apartment
+ * logic reads (apartment.c get_threading_model); RoGetActivationFactory answers the
+ * factory's IAgileObject from it.
+ */
+/* Reads a class's ThreadingModel REG_SZ from one ActivatableClassId hive, answering
+ * TRUE (found) and writing the agility into *agile when the hive carries a value. */
+static BOOL read_class_threading_model( HKEY root, const WCHAR *classid, BOOL *agile )
+{
+    static const WCHAR threading_model_name[] = L"ThreadingModel";
+    HKEY hkey_root, hkey_class;
+    WCHAR model[16];
+    DWORD type, size;
+
+    if (RegOpenKeyExW( root, L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId", 0, KEY_READ, &hkey_root ))
+        return FALSE;
+    if (RegOpenKeyExW( hkey_root, classid, 0, KEY_READ, &hkey_class ))
+    {
+        RegCloseKey( hkey_root );
+        return FALSE;
+    }
+    RegCloseKey( hkey_root );
+
+    size = sizeof( model );
+    if (!RegQueryValueExW( hkey_class, threading_model_name, NULL, &type, (BYTE *)model, &size )
+        && (type == REG_SZ || type == REG_EXPAND_SZ))
+    {
+        /* "Both"/"MTA" are agile; "Apartment"/"STA" (and any other recorded value) are not. */
+        *agile = !wcsicmp( model, L"Both" ) || !wcsicmp( model, L"MTA" );
+        RegCloseKey( hkey_class );
+        return TRUE;
+    }
+    RegCloseKey( hkey_class );
+    return FALSE;
+}
+
+static BOOL class_is_agile( const WCHAR *classid )
+{
+    BOOL agile = TRUE;  /* fallback "Both" */
+
+    /* Per-user registration overrides the machine view (the same dual-hive read
+     * RoGetServerActivatableClasses does); a class with no recorded model in either
+     * hive defaults to the agile activation default. */
+    if (read_class_threading_model( HKEY_CURRENT_USER, classid, &agile )) return agile;
+    if (read_class_threading_model( HKEY_LOCAL_MACHINE, classid, &agile )) return agile;
+    return agile;
+}
+
+/*
+ * The agile activation factory: the object RoGetActivationFactory answers, forwarding
+ * every interface to the provider factory (the module's DllGetActivationFactory result,
+ * the RoRegisterActivationFactories callback, ...) and answering IAgileObject itself
+ * when the class's ThreadingModel is agile.  Real Windows returns the provider factory
+ * as its own IAgileObject; here the provider factories do not all implement IAgileObject,
+ * so this thin forwarder carries the apartment answer.  It holds the single owning
+ * reference the provider gave and its reference count is the provider factory's, so the
+ * caller's AddRef/Release land on the factory as they did unwrapped.
+ */
+struct agile_factory
+{
+    IActivationFactory IActivationFactory_iface;
+    IActivationFactory *inner;
+};
+
+static inline struct agile_factory *impl_from_IActivationFactory( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct agile_factory, IActivationFactory_iface );
+}
+
+static HRESULT WINAPI agile_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct agile_factory *impl = impl_from_IActivationFactory( iface );
+
+    /* The factory interfaces are the provider factory's, answered transparently (the
+     * caller sees the factory it would see unwrapped); only the apartment answer is
+     * the wrapper's, on the agile marker. */
+    if (IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = iface;
+        IActivationFactory_AddRef( impl->inner );
+        return S_OK;
+    }
+    return IActivationFactory_QueryInterface( impl->inner, iid, out );
+}
+
+static ULONG WINAPI agile_factory_AddRef( IActivationFactory *iface )
+{
+    struct agile_factory *impl = impl_from_IActivationFactory( iface );
+    return IActivationFactory_AddRef( impl->inner );
+}
+
+static ULONG WINAPI agile_factory_Release( IActivationFactory *iface )
+{
+    struct agile_factory *impl = impl_from_IActivationFactory( iface );
+    ULONG ref = IActivationFactory_Release( impl->inner );
+
+    if (!ref) free( impl );
+    return ref;
+}
+
+static const IActivationFactoryVtbl agile_factory_vtbl =
+{
+    agile_factory_QueryInterface,
+    agile_factory_AddRef,
+    agile_factory_Release,
+};
+
+/* Wrap a freshly resolved factory for an agile class; a non-agile class (and an
+ * out-of-memory wrap) keeps the provider factory as it was. */
+static IActivationFactory *agile_wrap_factory( IActivationFactory *factory, const WCHAR *classid )
+{
+    struct agile_factory *impl;
+
+    if (!factory || !class_is_agile( classid )) return factory;
+    if (!(impl = malloc( sizeof(*impl) ))) return factory;
+    impl->IActivationFactory_iface.lpVtbl = &agile_factory_vtbl;
+    impl->inner = factory;
+    return (IActivationFactory *)impl;
+}
 
 /***********************************************************************
  *      RoInitialize (combase.@)
@@ -576,6 +724,15 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
         return hr;
     }
 
+    if (!library)
+    {
+        /* Server (out-of-proc) class: the class name is the CLSID; CoCreateInstance
+         * reaches the server through its LocalServer32 / rpcss /PROCESSID registration
+         * and the server's class object answers the class's IActivationFactory. */
+        hr = CoCreateInstance( (REFCLSID)raw, NULL, CLSCTX_LOCAL_SERVER, &IID_IActivationFactory, (void **)factory );
+        return hr;
+    }
+
     if (!(*module = LoadLibraryW(library)))
     {
         ERR("Failed to load module %s\n", debugstr_w(library));
@@ -619,13 +776,18 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     hr = resolve_activation_factory(classid, &factory, &module);
     if (SUCCEEDED(hr))
     {
-        hr = IActivationFactory_QueryInterface(factory, iid, class_factory);
+        /* The apartment answer is RoGetActivationFactory's: wrap an agile class's
+         * factory so the returned object answers IAgileObject, then hand out the
+         * requested interface (transparently the provider factory's, except the
+         * agile marker). */
+        IActivationFactory *agile = agile_wrap_factory( factory, WindowsGetStringRawBuffer( classid, NULL ) );
+        hr = IActivationFactory_QueryInterface( agile, iid, class_factory );
         if (SUCCEEDED(hr))
         {
             TRACE("Created interface %p\n", *class_factory);
             module = NULL; /* the provider module has to stay loaded: the factory's code lives in it */
         }
-        IActivationFactory_Release(factory);
+        IActivationFactory_Release( agile );
     }
 
     if (module) FreeLibrary(module);
