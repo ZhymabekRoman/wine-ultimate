@@ -741,10 +741,18 @@ static HRESULT WINAPI svv_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct str_vector *impl = svv_from( iface );
     TRACE( "iid %s\n", debugstr_guid( iid ) );
+    /* E7b: the Dictionary<string,string> construction in the ResourceManager
+     * startup chain casts its enumerable operand to
+     * IIterable<IKeyValuePair<string,string>>; the mrt100 cast-cache miss
+     * (RhTypeCast_CheckCastInterface -> CanCastComObject miss ->
+     * InvalidCastException -> failfast) is lifted by answering that
+     * pinterface on the view face.  MCG probes past IIterable<string>, so
+     * the extra IID rides the same S_OK path (cheap, additive). */
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         param_iid_eq( iid, 2, ELEM_VECTORVIEW L"`1", ELEM_STRING ) ||
-        param_iid_eq( iid, 2, ELEM_ITERABLE L"`1", ELEM_STRING ))
+        param_iid_eq( iid, 2, ELEM_ITERABLE L"`1", ELEM_STRING ) ||
+        param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_vv;
         incr( &impl->ref );
@@ -969,11 +977,15 @@ static HRESULT WINAPI ov_QueryInterface( void *iface, REFIID iid, void **out )
     struct str_vector *impl = ov_from( iface );
 
     TRACE( "languages QI %s\n", debugstr_guid( iid ) );
+    /* E7b: see svv_QueryInterface -- the observable face is the pointer the
+     * app holds from get_Languages, so it answers the same extra
+     * IIterable<IKeyValuePair<string,string>> pinterface with itself. */
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         param_iid_eq( iid, 2, ELEM_VECTOR L"`1", ELEM_STRING ) ||
         param_iid_eq( iid, 2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING ) ||
-        param_iid_eq( iid, 2, ELEM_ITERABLE L"`1", ELEM_STRING ))
+        param_iid_eq( iid, 2, ELEM_ITERABLE L"`1", ELEM_STRING ) ||
+        param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_ov;
         incr( &impl->ref );
@@ -1261,9 +1273,17 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
 {
     TRACE( "map QI %s\n", debugstr_guid( iid ) );
     struct map_view *impl = mv_from( iface );
+    /* E7b': cast #14 (probe33) casts the RCW seeded from this face's COM
+     * pointer to IIterable<IKeyValuePair<string,string>> (TypeManager handle
+     * 0x1806800000) in the Dictionary<string,string> ctor; the CoreRT cast
+     * cache (m_cachedInterfaces, frozen shared) misses and the fallback QI
+     * runs against a NULL m_baseIUnknown (no-op) -> InvalidCast -> failfast.
+     * Seed the cache by answering the enumerable contract the GetIids list
+     * already publishes. */
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        param_iid_eq( iid, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING ))
+        param_iid_eq( iid, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING ) ||
+        param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_mv;
         incr( &impl->ref );
@@ -2828,8 +2848,12 @@ static HRESULT WINAPI ctx_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct res_context *impl = ctx_from( iface );
     TRACE( "iid %s\n", debugstr_guid( iid ) );
+    /* E7b': see mv_QueryInterface -- the context is the object MCG wraps in
+     * the GetForViewIndependentUse chain that feeds the
+     * Dictionary<string,string> ctor; answer IIterable<KVP<string,string>>. */
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IResourceContext_g ))
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IResourceContext_g ) ||
+        param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_ctx;
         incr( &impl->ref );
@@ -3147,8 +3171,13 @@ static HRESULT WINAPI rcf_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct rc_factory *impl = rcf_from( iface );
     TRACE( "iid %s\n", debugstr_guid( iid ) );
+    /* E7b': probe33 cast #14 -- the ComObject seeded from this factory face
+     * (rc_statics2_vtbl, GetForViewIndependentUse) is castclass'd to
+     * IIterable<IKeyValuePair<string,string>>; answer the enumerable
+     * contract from the primary face. */
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory_g_ ))
+        IsEqualGUID( iid, &IID_IActivationFactory_g_ ) ||
+        param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_primary;
         return S_OK;
