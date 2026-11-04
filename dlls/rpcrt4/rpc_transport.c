@@ -98,6 +98,7 @@ static RPC_STATUS rpcrt4_conn_create_pipe(RpcConnection *conn)
                                         PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE,
                                         PIPE_UNLIMITED_INSTANCES,
                                         RPC_MAX_PACKET_SIZE, RPC_MAX_PACKET_SIZE, 5000, NULL);
+    TRACE("WA_DUPX create conn %p ep %s pipe %p\n", conn, debugstr_a(conn->Endpoint), connection->pipe);
     if (connection->pipe == INVALID_HANDLE_VALUE)
     {
         WARN("CreateNamedPipe failed with error %ld\n", GetLastError());
@@ -298,6 +299,8 @@ static void rpcrt4_conn_np_handoff(RpcConnection_np *old_npc, RpcConnection_np *
     /* because of the way named pipes work, we'll transfer the connected pipe
      * to the child, then reopen the server binding to continue listening */
 
+    TRACE("WA_DUPX handoff old %p new %p pipe %p ep %s\n", old_npc, new_npc, old_npc->pipe,
+          debugstr_a(old_npc->common.Endpoint));
     new_npc->pipe = old_npc->pipe;
     old_npc->pipe = 0;
     assert(!old_npc->listen_event);

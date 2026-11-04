@@ -239,6 +239,60 @@ static void wapipex_dump( const char *kind, struct pipe_end *end, process_id_t p
 static int relay_on = -1;
 static int relay_no_close;
 
+/* WA_DUPX_DUMP=1 (gate env): instance-lifecycle census for the self-apartment
+ * LRPC duplex pipes (name contains "OLE_").  Logs who creates an instance, who
+ * listens, and which listener a client binds to at open, so the pairing of the
+ * client handle against the instance the server services is observable. */
+static int dupx_on = -1;
+
+static int dupx_wanted( struct named_pipe *pipe )
+{
+    const WCHAR *hay, *p;
+    unsigned int nchars;
+    static const WCHAR oW[] = {'O','L','E','_'};
+
+    if (dupx_on < 0) dupx_on = !!getenv( "WA_DUPX_DUMP" );
+    if (!dupx_on || !pipe || !pipe->obj.name) return 0;
+    hay = pipe->obj.name->name;
+    nchars = pipe->obj.name->len / sizeof(WCHAR);
+    if (nchars < 4) return 0;
+    for (p = hay; p + 4 <= hay + nchars; p++)
+        if (!memcmp( p, oW, 4 * sizeof(WCHAR) )) return 1;
+    return 0;
+}
+
+static void dupx_dump( const char *ev, struct named_pipe *pipe, struct pipe_end *server,
+                       struct pipe_end *client )
+{
+    struct list *e;
+    char tailname[24] = "";
+    const WCHAR *nm;
+    unsigned int nchars;
+
+    if (!dupx_wanted( pipe )) return;
+    nm = pipe->obj.name->name;
+    nchars = pipe->obj.name->len / sizeof(WCHAR);
+    for (unsigned int i = 0; i < 12 && nchars > i; i++)
+        tailname[i] = (char)(nm[nchars - 1 - i] < 128 ? nm[nchars - 1 - i] : '?');
+    fprintf( stderr, "WA_DUPX: %s pipe=%p name..%s\n", ev, pipe, tailname );
+    for (e = pipe->listeners.next; e != &pipe->listeners; e = e->next)
+    {
+        struct pipe_server *s = LIST_ENTRY( e, struct pipe_server, entry );
+        fprintf( stderr, "WA_DUPX:   listener pe=%p fd=%p state=%u conn=%p\n",
+                 &s->pipe_end, s->pipe_end.fd, s->pipe_end.state, s->pipe_end.connection );
+    }
+    if (server)
+        fprintf( stderr, "WA_DUPX:   %s srv_pe=%p srv_fd=%p srv_conn=%p cli_pe=%p cli_fd=%p cli_conn=%p\n",
+                 ev, server, server->fd, server->connection, client, client->fd, client->connection );
+}
+
+static void dupx_io( const char *dir, struct pipe_end *end, data_size_t len )
+{
+    if (!dupx_wanted( end->pipe )) return;
+    fprintf( stderr, "WA_DUPX: %s fd=%p peer=%p len=%u\n", dir, end->fd,
+             end->connection ? end->connection->fd : NULL, len );
+}
+
 static int relay_wanted( struct pipe_end *pipe_end )
 {
     static const WCHAR prefixW[] = {'L','O','C','A','L','\\','m','o','j','o','.'};
@@ -1515,6 +1569,7 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
         out_size = min( iosb->out_size, avail );
     }
 
+    dupx_io( "R", pipe_end, out_size );
     message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
     if (!message->read_pos && message->iosb->in_size == iosb->out_size) /* fast path */
     {
@@ -1704,6 +1759,7 @@ static void pipe_end_write( struct fd *fd, struct async *async, file_pos_t pos )
     if (!pipe_end->pipe->message_mode && !get_req_data_size()) return;
 
     wapipex_dump( "W", pipe_end, current->process->id, get_req_data(), get_req_data_size() );
+    dupx_io( "W", pipe_end, get_req_data_size() );
 
     iosb = async_get_iosb( async );
     message = queue_message( pipe_end->connection, iosb );
@@ -1938,6 +1994,7 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
         case FILE_PIPE_DISCONNECTED_STATE:
             server->pipe_end.state = FILE_PIPE_LISTENING_STATE;
             list_add_tail( &server->pipe_end.pipe->listeners, &server->entry );
+            dupx_dump( "LISTEN", server->pipe_end.pipe, &server->pipe_end, NULL );
             break;
         case FILE_PIPE_CONNECTED_STATE:
             set_error( STATUS_PIPE_CONNECTED );
@@ -2061,6 +2118,7 @@ static struct pipe_server *create_pipe_server( struct named_pipe *pipe, unsigned
     init_async_queue( &server->listen_q );
 
     list_add_tail( &pipe->listeners, &server->entry );
+    dupx_dump( "CREATE", pipe, &server->pipe_end, NULL );
     if (!(server->pipe_end.fd = alloc_pseudo_fd( &pipe_server_fd_ops, &server->pipe_end.obj, options )))
     {
         release_object( server );
@@ -2129,7 +2187,13 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         set_error( STATUS_PIPE_NOT_AVAILABLE );
         return NULL;
     }
-    server = LIST_ENTRY( list_head( &pipe->listeners ), struct pipe_server, entry );
+    /* Pair the client with the listener instance the server side is about to
+     * service.  New instances are appended at the tail (create_pipe_server) and a
+     * disconnect+listen reuse is re-appended at the tail; the server's io thread
+     * (rpcrt4 spawn/handoff) services the most recently queued listener, so binding
+     * to the head (the oldest, possibly long-disconnected instance whose peer has
+     * moved on) strands the reply on a pair the server no longer polls.  Bind tail. */
+    server = LIST_ENTRY( list_tail( &pipe->listeners ), struct pipe_server, entry );
 
     pipe_sharing = pipe->sharing;
     if (((access & GENERIC_READ) && !(pipe_sharing & FILE_SHARE_READ)) ||
@@ -2155,6 +2219,7 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         server->pipe_end.conn_info = CONN_INFO_VALID;
         client->conn_info = CONN_INFO_VALID;
         list_remove( &server->entry );
+        dupx_dump( "OPEN", pipe, &server->pipe_end, client );
     }
     return &client->obj;
 }
