@@ -606,6 +606,7 @@ static LRESULT WINAPI dispatcher_queue_wndproc( HWND hwnd, UINT msg, WPARAM wpar
     switch (msg)
     {
     case DQMSG_RUN:
+        TRACE( "run tid %04x\n", GetCurrentThreadId() );
         dispatcher_queue_run_next( queue );
         EnterCriticalSection( &queue->cs );
         {
@@ -677,6 +678,7 @@ static HRESULT dispatcher_queue_bind_thread( struct dispatcher_queue *queue )
     queue->hwnd = CreateWindowExW( 0, class_name, NULL, 0, 0, 0, 0, 0, HWND_MESSAGE, NULL, inst, NULL );
     if (!queue->hwnd) return E_FAIL;
     SetWindowLongPtrW( queue->hwnd, GWLP_USERDATA, (LPARAM)queue );
+    TRACE( "bind tid %04x hwnd %p\n", GetCurrentThreadId(), queue->hwnd );
 
     InitOnceExecuteOnce( &dispatcher_queue_init_once, dispatcher_queue_init_once_cb, NULL, NULL );
     EnterCriticalSection( &dispatcher_queue_list_lock );
@@ -804,6 +806,7 @@ static HRESULT dispatcher_queue_try_enqueue( struct dispatcher_queue *queue, Dis
     list_add_tail( &queue->items[dq_priority_index( priority )], &item->entry );
     LeaveCriticalSection( &queue->cs );
 
+    TRACE( "enqueue tid %04x hwnd %p prio %u\n", GetCurrentThreadId(), queue->hwnd, priority );
     if (!queue->hwnd || !PostMessageW( queue->hwnd, DQMSG_RUN, 0, 0 ))
     {
         /* queue window gone: run inline to keep the callback contract */

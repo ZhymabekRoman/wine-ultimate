@@ -1739,6 +1739,11 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
 static HRESULT STDMETHODCALLTYPE device_WaitForCommitCompletion(IDCompositionDevice *iface)
 {
     TRACE("iface %p\n", iface);
+    /* gate100 force-present-wake test: pulse the commit-completion event on every
+     * wait so the CoreMessagingXP composition-input threads (Composition Token /
+     * Lifted DMIT / DWM Master Input) that parked on the DirectComposition commit
+     * completion advance and issue LRPC request 7 on the composition plane. */
+    if (g_commit_completion_event) SetEvent( g_commit_completion_event );
     return S_OK;
 }
 
