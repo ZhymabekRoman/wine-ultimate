@@ -35,6 +35,7 @@
 #include "windef.h"
 #include "winternl.h"
 #include "winioctl.h"
+#include "wine/debug.h"
 
 #include "file.h"
 #include "handle.h"
@@ -69,6 +70,8 @@ struct relay_box
     struct process      *reader;     /* process dst belongs to, NULL while not duplicated */
     unsigned short       type;       /* relay_ops message type (relay_free keeps the source open
                                       * for the buffer types both brokers keep using) */
+    struct pipe_end     *end;        /* writer end this box was scanned on (gate95: ring census
+                                      * keys the S/T/D snapshots by pipe-end identity) */
 };
 
 /* An instance caches, for both of the pipe ends it connected, the peer ids that
@@ -110,6 +113,10 @@ struct pipe_end
                                       * edges drain the remainder without a new peer
                                       * write edge */
     int                  blk_fd;     /* WA_MOJO_RELAY: dup'd unix fd of the latest AddBlockBuffer (ipcz id 14) block mapping, -1 = none */
+    int                  ring_fd;    /* gate95: dup'd unix fd of *this end's* NodeLinkMemory buffer relayed in the
+                                      * type-7 ConnectFromBrokerToBroker (the writer's ring block; the peer maps the
+                                      * same memory through the relayed dup).  Snapshotted on every relayed frame
+                                      * as WA_RELAY: R to census ring head/tail growth. -1 = none */
 };
 
 struct pipe_server
@@ -342,7 +349,7 @@ static const struct relay_op
     short slot1, slot2;
 } relay_ops[] =
 {
-    {  7, 72, -1 },  /* ConnectFromBrokerToBroker { buffer: driver_object } — the bidirectional
+    {  7, 72, 104 },  /* ConnectFromBrokerToBroker { buffer: driver_object } — the bidirectional
                       * NodeLink handshake on every mojo pipe (184/200-byte frames, gate69i
                       * seq=3/4 both directions).  The driver_object is an embedded serialized
                       * DriverTransport::Message: {u32 num_bytes=0x48, u32 version} at body+40,
@@ -436,6 +443,50 @@ static void relay_dump_blk( struct pipe_end *end, struct object *obj,
     fprintf( stderr, " WD%s", hex );
 }
 
+/* gate95: snapshot the first 64 bytes of a relayed NodeLinkMemory buffer.
+ * The m136 ipcz NodeLinkMemory::Global starts with two fixed-size rings:
+ * Ring primary_to_sidecar {U32 size; Atomic<U32> head; Atomic<U32> tail;} at +0 and
+ * Ring sidecar_to_primary {size; head; tail;} at +12, then 4 bytes of padding and the
+ * box counters (node_link_memory.h; kInitializationBufferSize ring size 0x1a00).  The
+ * writer of a direction pushes fragments into the ring of *its* block, so watching
+ * (size, head, tail) per buffer per direction over time shows which side's buffer the
+ * parcels actually ride on: adoption (client buffer words advance as the browser
+ * pushes) vs. re-creation (client buffer static, browser buffer advancing).
+ * tag=S: writer-side snapshot at scan (handshake).  tag=D: at delivery into the
+ * reader (relay_patch).  tag=T: census on every relayed frame on this pipe end.
+ * sha = first 8 bytes in hex (ring size+head fingerprint identifies a buffer). */
+static void relay_ring_dump( int ufd, const char *tag, const void *ep,
+                             unsigned int wpid, unsigned int rpid,
+                             unsigned int op, unsigned long long h )
+{
+    static const char hexd[] = "0123456789abcdef";
+    unsigned char b[64];
+    const unsigned int *w = (const unsigned int *)b;
+    struct timespec ts;
+    unsigned int i;
+    void *base;
+
+    if (ufd == -1) return;
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    if ((base = mmap( NULL, 64, PROT_READ, MAP_PRIVATE, ufd, 0 )) == MAP_FAILED)
+    {
+        fprintf( stderr, "WA_RELAY: R tag=%s t=%u.%03u ep=%p mmap_fail\n",
+                 tag, (unsigned int)ts.tv_sec, (unsigned int)(ts.tv_nsec / 1000000), ep );
+        return;
+    }
+    memcpy( b, base, 64 );
+    munmap( base, 64 );
+    fprintf( stderr, "WA_RELAY: R tag=%s t=%u.%03u ep=%p pid=%04x", tag,
+             (unsigned int)ts.tv_sec, (unsigned int)(ts.tv_nsec / 1000000), ep, wpid );
+    if (rpid) fprintf( stderr, " -> pid=%04x", rpid );
+    fprintf( stderr, " op=%u h=%016llx sha=", op, h );
+    for (i = 0; i < 8; i++) fputc( hexd[b[i] & 0x0f], stderr ), fputc( hexd[b[i] >> 4], stderr );
+    /* w0..w2 = primary_to_sidecar {size, head, tail}, w3..w5 = sidecar_to_primary,
+     * w6..w7 = the box/sequence counters past the padding */
+    fprintf( stderr, " ring=%u,%u,%u,%u,%u,%u w6=%u w7=%u\n",
+             w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7] );
+}
+
 static void relay_scan( struct pipe_end *writer_end, struct pipe_message *message,
                         const void *data, data_size_t len )
 {
@@ -518,8 +569,10 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                 box->dst    = 0;
                 box->reader = NULL;
                 box->type   = type;
+                box->end    = writer_end;
                 list_add_tail( message->relay, &box->entry );
-                if ((type == 14 || type == 7) && box->obj->ops->type == &mapping_type)
+                if ((type == 14 || type == 7) &&
+                    (box->obj->ops->type == &mapping_type || box->obj->ops->get_fd))
                 {
                     /* latest block buffer wins (AddBlockBuffer id>0, or the ConnectFromBrokerToBroker
                      * primary BufferId-0 mapping relayed on the handshake): keep our own dup of its
@@ -538,12 +591,34 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                             writer_end->blk_fd = d;
                             fprintf( stderr, "WA_RELAY: M pid=%04x op=%u blkfd=%d\n",
                                      current->process->id, type, d );
+                            if (type == 7)  /* gate95: the handshake buffer is the NodeLinkMemory
+                                             * ring block (BufferId 0); keep a dedicated fd for it —
+                                             * blk_fd is later replaced by AddBlockBuffer blocks */
+                            {
+                                int rd = dup( d );
+                                if (rd != -1)
+                                {
+                                    if (writer_end->ring_fd != -1) close( writer_end->ring_fd );
+                                    writer_end->ring_fd = rd;
+                                }
+                                relay_ring_dump( writer_end->ring_fd, "S", writer_end,
+                                                 current->process->id, 0, type, box->src );
+                            }
                         }
                     }
                 }
                 s_line = 1;
-                fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u src=%016llx access=%08x",
-                         current->process->id, type, so, box->src, box->access );
+                {
+                    /* gate95: name of the resolved object type (the server has no
+                     * __wine_dbg_strdup; the type names are ascii) */
+                    char tname[16];
+                    unsigned int nl = obj->ops->type->name.len / sizeof(WCHAR);
+                    if (nl > 12) nl = 12;
+                    for (k = 0; k < (int)nl; k++) tname[k] = (char)obj->ops->type->name.str[k];
+                    tname[nl] = 0;
+                    fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u src=%016llx access=%08x obj=%s",
+                             current->process->id, type, so, box->src, box->access, tname );
+                }
                 if (type == 20) relay_dump_blk( writer_end, box->obj, b, off, fnum, len );
                 fputc( '\n', stderr );
             }
@@ -554,6 +629,13 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
             relay_dump_blk( writer_end, NULL, b, off, fnum, len );
             fputc( '\n', stderr );
         }
+        if (writer_end->ring_fd != -1)  /* gate95: ring census on every relayed frame of this pipe */
+            relay_ring_dump( writer_end->ring_fd, "T", writer_end, current->process->id, 0, type, 0 );
+        if (writer_end->connection && writer_end->connection->ring_fd != -1)
+            /* the peer end's buffer is the one this writer's NodeLink pushes *into* on
+             * adoption; sample it on every frame the writer sends (peer-side census) */
+            relay_ring_dump( writer_end->connection->ring_fd, "P", writer_end->connection,
+                             current->process->id, 0, type, 0 );
         off += fnum;
     }
 }
@@ -567,6 +649,15 @@ static void relay_patch( struct pipe_message *message, struct process *reader,
     data_size_t msg_end = msg_start + len;
 
     if (!message->relay) return;
+
+    /* gate95: time-series census — the writer end's NodeLink block (type-7 buffer),
+     * sampled on every relayed delivery of this message; renderer-pipe traffic spreads
+     * these over the run window, giving the handshake -> +5s -> gate-end trajectory */
+    {
+        struct relay_box *first = LIST_ENTRY( list_head( message->relay ), struct relay_box, entry );
+        if (first->end && first->end->ring_fd != -1)
+            relay_ring_dump( first->end->ring_fd, "Q", first->end, first->writer->id, reader->id, 0, 0 );
+    }
 
     LIST_FOR_EACH_ENTRY( box, message->relay, struct relay_box, entry )
     {
@@ -586,6 +677,18 @@ static void relay_patch( struct pipe_message *message, struct process *reader,
             }
             fprintf( stderr, "WA_RELAY: D pid=%04x src=%016llx -> pid=%04x dst=%04x off=%u\n",
                      box->writer->id, box->src, reader->id, dst, box->offset );
+            if (box->type == 7 && box->obj->ops->type == &mapping_type)
+            {
+                /* gate95: the reader adopts this very mapping — snapshot it at delivery
+                 * (and at every later read that re-patches the handshake message) */
+                struct fd *fd = box->obj->ops->get_fd( box->obj );
+                if (fd)
+                {
+                    relay_ring_dump( get_unix_fd( fd ), "D", box->end, box->writer->id,
+                                     reader->id, box->type, box->src );
+                    release_object( fd );
+                }
+            }
             if (box->reader) release_object( box->reader );  /* old value leaks in the old reader */
             box->dst    = dst;
             box->reader = (struct process *)grab_object( reader );
@@ -1081,6 +1184,7 @@ static void pipe_end_destroy( struct object *obj )
     free_async_queue( &pipe_end->write_q );
     if (pipe_end->fd) release_object( pipe_end->fd );
     if (pipe_end->blk_fd != -1) close( pipe_end->blk_fd );
+    if (pipe_end->ring_fd != -1) close( pipe_end->ring_fd );
     if (pipe_end->pipe) release_object( pipe_end->pipe );
     if (pipe_end->client_proc) release_object( pipe_end->client_proc );
 }
@@ -2209,6 +2313,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->conn_info = CONN_INFO_NONE;
     pipe_end->buffer_size = buffer_size;
     pipe_end->blk_fd = -1;
+    pipe_end->ring_fd = -1;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
     list_init( &pipe_end->message_queue );
