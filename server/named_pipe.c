@@ -331,13 +331,16 @@ static const struct relay_op
     short slot1, slot2;
 } relay_ops[] =
 {
-    {  7, 72, 40 },  /* ConnectFromBrokerToBroker { buffer: driver_object } — the bidirectional
+    {  7, 72, -1 },  /* ConnectFromBrokerToBroker { buffer: driver_object } — the bidirectional
                       * NodeLink handshake on every mojo pipe (184/200-byte frames, gate69i
                       * seq=3/4 both directions).  The driver_object is an embedded serialized
                       * DriverTransport::Message: {u32 num_bytes=0x48, u32 version} at body+40,
                       * its payload, then the HANDLE at body+72 (frame 112, value 0x68 in every
                       * gate69i/gate71 capture = the writer's NodeLinkMemory primary block
-                      * buffer FILE_MAP).  Relay the handle word; leave the header word alone. */
+                      * buffer FILE_MAP).  Relay the handle word; leave the header word alone.
+                      * gate73: relaying the header word too ({7,72,40}) changes nothing (same
+                      * 4 handshake lines / 105 op=20) — one handle per type-7 v0, proven by
+                      * node_messages_generator.h (IPCZ_MSG_PARAM_DRIVER_OBJECT(buffer) x1). */
     { 13,  8, -1 },  /* RequestIndirectIntroduction (legacy name OpenChannelRequest) */
     { 14, 16,  8 },  /* AddBlockBuffer { id, block_size, buffer: driver_object } (NodeLink block; captures relay the handle at off=56/48) */
     { 20, 24, -1 },  /* AcceptParcel (legacy name DuplicateBufferResponse) { ... driver_objects[] } */
@@ -1740,6 +1743,17 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
         fd_reselect_async( pipe_end->fd, &pipe_end->read_q );
         if (pipe_end->connection)
             fd_reselect_async( pipe_end->connection->fd, &pipe_end->connection->read_q );
+        /* With a read queued and no message to drain into it, arm this end's
+         * poll entry: the pipe end rides a pseudo fd (unix_fd == -1), so the
+         * poll fd is the inproc-sync mirror's read side (fd.c fd_poll_fd) —
+         * the same kernel pipe the peer's set_fd_signaled writes a byte into.
+         * That byte is the data-arrived edge for the queued read: the poll
+         * wakes default_poll_event, which ALERTS the read queue and the
+         * drained message rides out on the async's reply.  Without this the
+         * read queue was only ever re-checked when the next REQ_write arrived
+         * on the *writing* side, and the 7th LRPC request stranded both ends
+         * PENDING with the client's request socketpair full. */
+        set_fd_events( pipe_end->fd, default_fd_get_poll_events( pipe_end->fd ) );
     }
     set_error( STATUS_PENDING );
 }
