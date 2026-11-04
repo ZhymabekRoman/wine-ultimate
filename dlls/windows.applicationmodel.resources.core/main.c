@@ -3268,10 +3268,36 @@ static HRESULT WINAPI rcf_QueryInterface( void *iface, REFIID iid, void **out )
      * IIterable<IKeyValuePair<string,string>>; answer the enumerable
      * contract from the primary face. */
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory_g_ ) ||
-        param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
+        IsEqualGUID( iid, &IID_IActivationFactory_g_ ))
     {
         *out = &impl->vt_primary;
+        return S_OK;
+    }
+    /* E17b': cast #14 (probe33) QIs the statics2 COM pointer (GetForViewIn-
+     * dependentUse's wrapper, the face seeded by rc2_GetIids) with the
+     * IIterable<IKeyValuePair<string,string>> pinterface {9828e927-...} that
+     * rc2_GetIids publishes.  The Mcg wrapper caches the impl handed out at
+     * startup (tid 0x3000200000 -> impl) and casts *that* pointer at #14;
+     * answering from vt_primary (no First() slot -- slot 6 is ActivateInstance)
+     * let the temporary die between the arms, so the #14 QI E_NOINTERFACE'd ->
+     * InvalidCast -> c0000602.  Answer with a STABLE singleton face: the
+     * process-lifetime current ResourceContext's QualifierValues map-view
+     * (IMapView<KVP<string,string>> is-a IIterable<KVP<string,string>>, same
+     * pointer, First() -> working IIterator<KVP> over the qualifiers).  The
+     * context is pinned by the_current_context for the life of the process,
+     * so every hand-out is the identical re-entrant pointer; each QI AddRefs
+     * the view (standard COM), and the context's own ref is returned right
+     * away (the static keeps it alive, the view's pairs ride the context). */
+    if (param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
+    {
+        void *ctx = NULL;
+        HRESULT hr = get_current_context( &ctx );
+        struct res_context *impl_ctx = ctx_from( ctx );
+        if (FAILED( hr )) return hr;
+        *out = &impl_ctx->qualifiers.vt_mv;
+        TRACE( "statics2 QI IIterable<KVP<string,string>> -> stable QualifierValues view %p\n", *out );
+        incr( &impl_ctx->qualifiers.ref );
+        decr( &impl_ctx->ref );
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IAgileObject ))
