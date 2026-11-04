@@ -1085,9 +1085,19 @@ static void test_parameterized_class_names(void)
 {
     static const WCHAR name_mapview_ss[] = L"Windows.Foundation.Collections.IMapView`2<System.String,System.String>";
     static const WCHAR name_mapview_sm[] = L"Windows.Foundation.Collections.IMapView`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>";
-    static const WCHAR name_vector_s[]   = L"Windows.Foundation.Collections.IVectorView`1<System.String>";
+    /* The Languages GetView face names itself with the SharedLibrary Mcg
+     * name-pool key (short type-display spelling) that resolves, via
+     * StringMap::FindString -> McgClassData, to the __Impl whose frozen
+     * m_cachedInterfaces triple carries IIterable<IKeyValuePair<string,string>>
+     * (interface RID 0x1806800000, cast #14).  The fully-qualified
+     * `Windows.Foundation.Collections.IVectorView`1<System.String>` spelling
+     * misses that exact key and falls back to a target-less closest class. */
+    static const WCHAR name_vector_s[]   = L"IIterable`1<IKeyValuePair`2<String,String>>";
     static const WCHAR name_vector_observable_s[] = L"Windows.Foundation.Collections.IObservableVector`1<System.String>";
-    static const WCHAR name_vector_rq[]  = L"Windows.Foundation.Collections.IVectorView`1<Windows.ApplicationModel.Resources.Core.ResourceQualifier>";
+    /* The str_vector view impl (svv_QueryInterface vt_vv) is shared by the
+     * Languages GetView and the Qualifiers faces; both name themselves with the
+     * same SharedLibrary Mcg name-pool key so cast #14 resolves the triple. */
+    static const WCHAR name_vector_rq[]  = L"IIterable`1<IKeyValuePair`2<String,String>>";
     static const WCHAR name_kvp_ss[]     = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,System.String>";
     static const WCHAR name_kvp_sm[]     = L"Windows.Foundation.Collections.IKeyValuePair`2<System.String,Windows.ApplicationModel.Resources.Core.ResourceMap>";
     static const WCHAR name_iter_s[]     = L"Windows.Foundation.Collections.IIterator`1<System.String>";

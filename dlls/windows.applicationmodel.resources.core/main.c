@@ -3403,7 +3403,21 @@ static HRESULT WINAPI rc2_GetIids( void *iface, ULONG *c, IID **i )
  * IEnumerable<KVP<string,string>>}).  Lookup order mrt100 -> app -> SharedLibrary
  * misses on the first two, so the SharedLibrary template is the one created. */
 #define ELEM_ITER_KVP_SS L"Windows.Foundation.Collections.IIterator`1<" ELEM_KEYVALUEPAIR L"`2<" ELEM_STRING L"," ELEM_STRING ">>"
-static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( ELEM_ITER_KVP_SS, n ); }
+/* E14-d: probe33 places cast #14's ComInterfaceToComObject on the *statics2*
+ * face pointer (GetForViewIndependentUse's wrapper), so this SCL alone picks
+ * the Mcg RCW for the cast.  The SharedLibrary name-pool key that resolves
+ * (StringMap::FindString, EXACT match) to the __Impl whose frozen triple
+ * carries target handle 0x1806800000 is the short type-display name
+ * `IIterable`1<IKeyValuePair`2<String,String>>` (heap RVA 0x511); the E10-C
+ * fully-qualified spelling lands on a target-less template.  The IIterator
+ * short key (0x541) left the tail unchanged as well -- both faces need the
+ * same target, the lookup is no longer the blocker. */
+static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR *args[] = { L"IKeyValuePair`2<String,String>" };
+
+    return param_class_name( L"IIterable", L"`1", args, 1, n );
+}
 static HRESULT WINAPI rc2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc2_GetForCurrentView( void *iface, void **out )
 {
