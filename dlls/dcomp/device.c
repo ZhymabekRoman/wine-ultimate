@@ -88,6 +88,33 @@ HRESULT WINAPI DCompositionCreateSharedVisualHandle(HANDLE *handle);
 
 static HANDLE g_commit_completion_event = NULL;
 
+/*
+ * Emulated compositor present clock. The composite thread (composite_thread_proc)
+ * is the process's vertical-blank cadence: under the X11 backend a Direct3D present
+ * produces no D3DKMT vertical-blank event (winex11 has no vblank signalling), so the
+ * per-frame Sleep() in that loop is the frame tick. It broadcasts this manual-reset
+ * event once per present so the compositor-clock waiters (DCompositionWaitForCompositorClock
+ * callers: the CoreMessaging Composition Token / Lifted DMIT / DWM Master Input workers)
+ * advance in lockstep with the present cadence, not a blind sleep. Created lazily when
+ * the composite thread is first started (first device creation), so the idle cost before
+ * any device exists is zero.
+ */
+static HANDLE g_compositor_clock_event = NULL;
+
+/*
+ * Compositor-clock waiter registry. A caller of DCompositionWaitForCompositorClock
+ * passes the handles it parks on (the CoreMessaging lifted-input workers register the
+ * handle the present clock is expected to signal per frame). The composite thread
+ * SetEvents each registered handle on its present tick, which is the in-process
+ * equivalent of the DWM raising the per-frame clock: it wakes the compositor-clock
+ * waiters on the present cadence so their continuation runs. Append-mostly, bounded;
+ * handles are stable for the process lifetime, so a benign registration race can only
+ * drop/overwrite a slot, never corrupt.
+ */
+#define COMPOSITOR_CLOCK_MAX_HANDLES 16
+static HANDLE g_compositor_clock_handles[COMPOSITOR_CLOCK_MAX_HANDLES];
+static volatile LONG g_compositor_clock_handle_count;
+
 static const D2D_RECT_F g_default_dcomp_rect = { 0.0f, 0.0f, 1016.0f, 734.0f };
 
 static HRESULT WINAPI dcomp_6b556968_QueryInterface( void *iface, REFIID iid, void **out )
@@ -1637,7 +1664,27 @@ static DWORD WINAPI composite_thread_proc(void *iface)
 
     while (!device->exit_thread)
     {
+        /* Present/vblank cadence. Reset the manual-reset compositor clock, do the
+         * frame, then broadcast it, so a caller that arrived for this frame is
+         * released when the frame lands (a caller arriving between frames returns
+         * immediately, at most one frame early). A real compositor raises the
+         * commit-completion alongside each presented frame, so pulse it from the
+         * same tick: the CoreMessaging lifted-input workers that parked on the
+         * commit-completion event then advance on the present cadence instead of
+         * only when the app calls into device_Commit / WaitForCommitCompletion. */
+        if (g_compositor_clock_event)
+            ResetEvent(g_compositor_clock_event);
         composite_device(device);
+        if (g_compositor_clock_event)
+            SetEvent(g_compositor_clock_event);
+        {
+            LONG n = g_compositor_clock_handle_count, k;
+            for (k = 0; k < n && k < COMPOSITOR_CLOCK_MAX_HANDLES; k++)
+                if (g_compositor_clock_handles[k])
+                    SetEvent(g_compositor_clock_handles[k]);
+        }
+        if (g_commit_completion_event)
+            SetEvent(g_commit_completion_event);
         Sleep(refresh_period);
     }
 
@@ -1683,6 +1730,13 @@ void ensure_composite_thread(struct composition_device *device)
 
     if (start)
     {
+        /* The present clock exists for the lifetime of the process once the first
+         * device starts compositing; DCompositionWaitForCompositorClock paces on it
+         * when it is present. Manual-reset so a frame tick is broadcast to every
+         * compositor-clock waiter, not just one. */
+        if (!g_compositor_clock_event)
+            g_compositor_clock_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+
         /* Starting a thread reaches the PE loader: ntdll logs the thread creation
          * event under the loader lock. A thread that is inside DllMain owns that
          * lock and reaches this code (the DirectComposition device of the
@@ -3875,11 +3929,26 @@ DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handle
 {
     LARGE_INTEGER counter, freq;
     DWORD sleep_ms = 16;
+    UINT i;
 
     TRACE("(%u, %p, %lu)\n", count, handles, timeout);
     if (count && handles)
     {
-        DWORD ret = WaitForMultipleObjects(count, handles, FALSE, timeout < 16 ? timeout : 16);
+        DWORD ret;
+        /* Register the caller's park handles so the composite thread's present tick
+         * wakes them (the per-frame clock signal these workers wait for). */
+        for (i = 0; i < count; i++)
+        {
+            LONG n = g_compositor_clock_handle_count, k;
+            for (k = 0; k < n; k++)
+                if (g_compositor_clock_handles[k] == handles[i]) break;
+            if (k == n && n < COMPOSITOR_CLOCK_MAX_HANDLES)
+            {
+                g_compositor_clock_handles[n] = handles[i];
+                InterlockedCompareExchange(&g_compositor_clock_handle_count, n + 1, n);
+            }
+        }
+        ret = WaitForMultipleObjects(count, handles, FALSE, timeout < 16 ? timeout : 16);
         if (ret != WAIT_TIMEOUT) return ret;
     }
     if (g_commit_completion_event)
@@ -3897,7 +3966,16 @@ DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handle
         }
     }
 
-    Sleep(timeout < sleep_ms ? timeout : sleep_ms);
+    sleep_ms = timeout < sleep_ms ? timeout : sleep_ms;
+    if (g_compositor_clock_event)
+    {
+        /* Advance on the present cadence: release as soon as the composite thread
+         * lands a frame, bounded by the frame period so the caller is still paced
+         * before the first device starts compositing (event not yet signalled). */
+        WaitForSingleObject( g_compositor_clock_event, sleep_ms );
+    }
+    else
+        Sleep( sleep_ms );
     return WAIT_OBJECT_0;
 }
 
