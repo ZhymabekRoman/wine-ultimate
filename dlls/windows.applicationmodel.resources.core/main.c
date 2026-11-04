@@ -3323,7 +3323,30 @@ static HRESULT WINAPI rc2_GetIids( void *iface, ULONG *c, IID **i )
     TRACE( "seed statics2(GetForViewIndependentUse) GetIids n=%u\n", c ? *c : 0 );
     return hr;
 }
-static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
+/* E10: the MCG RCW for this pointer is picked by McgComHelpers.ComInterfaceToComObject
+ * (SharedLibrary +0x866220 -> ..._NoCache) from IInspectable::GetRuntimeClassName:
+ * McgModuleManager::TryGetClassTypeFromName(SCL) scans the Mcg modules and the
+ * framework (mrt100_app) module answers "Windows.ApplicationModel.Resources.Core.
+ * ResourceContext" first, with a generated __Impl whose m_cachedInterfaces is a
+ * frozen single-triple template {IResourceContextStatics2} (mrt100_app RVA
+ * 0x20fa8) -- the IIterable<IKeyValuePair<string,string>> enumerable the app
+ * castclass's (cast #14, target TypeManager handle 0x1806800000, app Mcg module
+ * RID 0x6800000) is absent, the wrapped pointer's tracker is (Free, NULL), and
+ * the cast dies InvalidCast -> InvalidOperation -> c0000602.
+ *
+ * A parameterized interface SCL misses the class tables, classTypeToCreateRCW
+ * falls back to the class from the signature (the app-module ResourceContext),
+ * whose __Impl template carries the dictionary enumerable contract; the cast
+ * resolves against the frozen list and First() reaches QI {9828e927} (E7b'). */
+/* E10-B: E10-A (parameterized IMapView SCL) left the cast #14 tail unchanged
+ * (the signature-class fallback picks a template without the enumerable), so
+ * answer an SCL that hits the app Mcg module's class table directly:
+ * Windows.Foundation.Diagnostics.LoggingChannel is registered there (its
+ * __Impl dispatch maps in CalculatorApp.dll carry IIterable<IKeyValuePair
+ * <string,string>>, RID 0x6800000 == target handle 0x1806800000) and is absent
+ * from the framework Mcg table, so the app template wins the lookup. */
+#define ELEM_LOGGINGCHANNEL L"Windows.Foundation.Diagnostics.LoggingChannel"
+static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( ELEM_LOGGINGCHANNEL, n ); }
 static HRESULT WINAPI rc2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc2_GetForCurrentView( void *iface, void **out )
 {
