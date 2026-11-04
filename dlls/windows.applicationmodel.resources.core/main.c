@@ -833,9 +833,26 @@ static HRESULT WINAPI svv_GetIids( void *iface, ULONG *c, IID **i )
 }
 static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    static const WCHAR *args[] = { ELEM_CLASS_STRING };
+    /* E9: the ResourceManager startup chain casts the Languages view operand
+     * to IIterable<IKeyValuePair<string,string>> (cast #14, mrt100
+     * RhTypeCast_CheckCastInterface target RID 0x1806800000).  The Mcg
+     * ModuleManager resolves our GetRuntimeClassName answer through
+     * StringMap::FindString, an EXACT key match over the SharedLibrary Mcg
+     * name heap.  The heap keys are short type-display names, not the
+     * fully-qualified WinRT projection names: the enumerable-contract key
+     * for this operand is `IIterable`1<IKeyValuePair`2<String,String>>`
+     * (heap RVA 0x511; symbol-verified carrier
+     * $23_Windows::Foundation::Collections::IIterator_A__scg_KeyValuePair_
+     * A_string_j_string_V__V___Impl, whose frozen m_cachedInterfaces triple
+     * names 0x1806800000).  The previous fully-qualified
+     * `Windows.Foundation.Collections.IVectorView`1<System.String>` answer
+     * missed that exact key, so ComputeClosestClassForClassIndex returned a
+     * closest (IIterable<string>) class whose triple omits 0x1806800000, and
+     * cast #14 stayed an InvalidCast.  Answer the exact key so the
+     * instantiated __Impl carries the target in its triple. */
+    static const WCHAR *args[] = { L"IKeyValuePair`2<String,String>" };
 
-    return param_class_name( ELEM_VECTORVIEW, L"`1", args, 1, n );
+    return param_class_name( L"IIterable", L"`1", args, 1, n );
 }
 static HRESULT WINAPI svv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
