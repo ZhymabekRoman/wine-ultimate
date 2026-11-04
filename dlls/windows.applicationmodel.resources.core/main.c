@@ -795,6 +795,27 @@ static HRESULT WINAPI svv_QueryInterface( void *iface, REFIID iid, void **out )
         incr( &impl->ref );
         return S_OK;
     }
+    /* E8: on Windows ResourceContext::Languages is a single object that
+     * implements IObservableVector<string> and hands out IVectorView<string>
+     * through GetView/QI, so the view pointer the app keeps from
+     * Languages->GetView() also answers IVector<string>
+     * (98b9acc1-4b56-532e-ac73-03d5291cca90) and IObservableVector<string>
+     * (37500595-dcf0-5d27-b8c4-cf388e374de8).  Calculator computes both
+     * pinterface IIDs in the same block it reads Languages[0] (the gate log
+     * shows the RoGetParameterizedTypeInstanceIID calls for {913337e9;string}
+     * and {5917eb53;string} interleaved with the Languages QI), then casts the
+     * view pointer it holds; our E_NOINTERFACE became the
+     * RhTypeCast_CheckCastInterface -> CanCastComObject miss ->
+     * InvalidCastException -> RaiseFailFastException c0000602 that ends the
+     * chain at svv_GetAt 0.  Answer the writable/observable contract with the
+     * observable face, which is the face that owns the mutator slots. */
+    if (param_iid_eq( iid, 2, ELEM_VECTOR L"`1", ELEM_STRING ) ||
+        param_iid_eq( iid, 2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING ))
+    {
+        *out = &impl->vt_ov;
+        incr( &impl->ref );
+        return S_OK;
+    }
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -802,8 +823,13 @@ static ULONG WINAPI svv_AddRef( void *iface ) { return incr( &svv_from( iface )-
 static ULONG WINAPI svv_Release( void *iface ) { return decr( &svv_from( iface )->ref ); }
 static HRESULT WINAPI svv_GetIids( void *iface, ULONG *c, IID **i )
 {
-    return fill_param_iids( c, i, 2, 2, ELEM_VECTORVIEW L"`1", ELEM_STRING,
-                                2, ELEM_ITERABLE L"`1", ELEM_STRING );
+    /* Seed the CoreRT cast cache with the whole face set the object answers
+     * (see svv_QueryInterface E8): a miss there is what turns a QI-free
+     * castclass into an InvalidCastException. */
+    return fill_param_iids( c, i, 4, 2, ELEM_VECTORVIEW L"`1", ELEM_STRING,
+                                2, ELEM_ITERABLE L"`1", ELEM_STRING,
+                                2, ELEM_VECTOR L"`1", ELEM_STRING,
+                                2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING );
 }
 static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
 {
