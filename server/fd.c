@@ -157,6 +157,9 @@ struct fd
     unsigned int         no_fd_status;/* status to return when unix_fd is -1 */
     unsigned int         cacheable :1;/* can the fd be cached on the client side? */
     unsigned int         fs_locks :1; /* can we use filesystem locks for this fd? */
+    unsigned int         mirror_poll :1; /* poll the inproc-sync mirror for this
+                                          * pseudo fd (duplex named-pipe ends);
+                                          * other pseudo fds keep polling on -1 */
     int                  poll_index;  /* index of fd in poll array */
     struct async_queue   read_q;      /* async readers of this fd */
     struct async_queue   write_q;     /* async writers of this fd */
@@ -542,6 +545,31 @@ static inline void init_epoll(void)
     epoll_fd = epoll_create( 128 );
 }
 
+/* unix fd to poll for this fd: a pseudo fd (unix_fd == -1) that has been
+ * handed out an in-process sync mirror polls the mirror's read side, so an
+ * async queue on a pseudo-fd user (e.g. a duplex named-pipe end) wakes on the
+ * peer's signal edge written by set_fd_signaled into sync_pipe[1]; without a
+ * mirror these ends poll on fd -1 and nothing drains them. */
+static inline int fd_poll_fd( const struct fd *fd )
+{
+    if (fd->unix_fd != -1) return fd->unix_fd;
+    return fd->mirror_poll ? fd->sync_pipe[0] : -1;
+}
+
+static int add_poll_user( struct fd *fd );  /* forward: poll slot allocator */
+
+/* opt a pseudo fd into polling its inproc-sync mirror (see fd_poll_fd) */
+void fd_set_mirror_poll( struct fd *fd )
+{
+    if (fd->unix_fd == -1 && !fd->mirror_poll)
+    {
+        fd->mirror_poll = 1;
+        if (fd->poll_index == -1 && (fd->poll_index = add_poll_user( fd )) == -1) return;
+        if (pollfd[fd->poll_index].fd == -1)
+            set_fd_events( fd, fd->fd_ops->get_poll_events( fd ) );
+    }
+}
+
 /* set the events that epoll waits for on this fd; helper for set_fd_events */
 static inline void set_fd_epoll_events( struct fd *fd, int user, int events )
 {
@@ -549,6 +577,7 @@ static inline void set_fd_epoll_events( struct fd *fd, int user, int events )
     int ctl;
 
     if (epoll_fd == -1) return;
+    if (events != -1 && fd_poll_fd( fd ) == -1) return;  /* nothing pollable yet */
 
     if (events == -1)  /* stop waiting on this fd completely */
     {
@@ -569,7 +598,7 @@ static inline void set_fd_epoll_events( struct fd *fd, int user, int events )
     memset(&ev.data, 0, sizeof(ev.data));
     ev.data.u32 = user;
 
-    if (epoll_ctl( epoll_fd, ctl, fd->unix_fd, &ev ) == -1)
+    if (epoll_ctl( epoll_fd, ctl, fd_poll_fd( fd ), &ev ) == -1)
     {
         if (errno == ENOMEM)  /* not enough memory, give up on epoll */
         {
@@ -587,7 +616,7 @@ static inline void remove_epoll_user( struct fd *fd, int user )
     if (pollfd[user].fd != -1)
     {
         struct epoll_event dummy;
-        epoll_ctl( epoll_fd, EPOLL_CTL_DEL, fd->unix_fd, &dummy );
+        epoll_ctl( epoll_fd, EPOLL_CTL_DEL, fd_poll_fd( fd ), &dummy );
     }
 }
 
@@ -1724,7 +1753,7 @@ void set_fd_events( struct fd *fd, int events )
     }
     else
     {
-        pollfd[user].fd = fd->unix_fd;
+        pollfd[user].fd = fd_poll_fd( fd );
         pollfd[user].events = events;
     }
 }
@@ -1772,6 +1801,7 @@ static struct fd *alloc_fd_object(void)
     fd->nt_name    = NULL;
     fd->nt_namelen = 0;
     fd->cacheable  = 0;
+    fd->mirror_poll = 0;
     fd->fs_locks   = 1;
     fd->sync_pipe[0] = -1;
     fd->sync_pipe[1] = -1;
@@ -1816,6 +1846,7 @@ struct fd *alloc_pseudo_fd( const struct fd_ops *fd_user_ops, struct object *use
     fd->nt_namelen = 0;
     fd->unix_fd    = -1;
     fd->cacheable  = 0;
+    fd->mirror_poll = 0;
     fd->fs_locks   = 0;
     fd->sync_pipe[0] = -1;
     fd->sync_pipe[1] = -1;
@@ -1847,6 +1878,7 @@ struct fd *dup_fd_object( struct fd *orig, unsigned int access, unsigned int sha
 
     fd->options    = options;
     fd->cacheable  = orig->cacheable;
+    fd->mirror_poll = orig->mirror_poll;
 
     if (orig->unix_name)
     {
@@ -2250,6 +2282,17 @@ void set_fd_signaled( struct fd *fd, int signaled )
     }
 }
 
+/* consume the mirror's signal byte (turn the level back to unsignaled on the
+ * kernel-fd side; the logical signaled state lives in the internal sync object) */
+void fd_mirror_reset( struct fd *fd )
+{
+    if (fd->unix_fd == -1 && fd->sync_pipe[0] != -1)
+    {
+        char c;
+        (void)!read( fd->sync_pipe[0], &c, 1 );
+    }
+}
+
 /* return a pollable fd whose readability mirrors the fd's signaled state, created
  * on the first call; the read side is the one handed to the client so that the
  * in-process fast path can wait on a fd-backed object (e.g. a named pipe) without
@@ -2325,7 +2368,21 @@ int default_fd_get_poll_events( struct fd *fd )
 /* default handler for poll() events */
 void default_poll_event( struct fd *fd, int event )
 {
-    if (event & (POLLIN | POLLERR | POLLHUP)) async_wake_up( &fd->read_q, STATUS_ALERTED );
+    if (event & (POLLIN | POLLERR | POLLHUP))
+    {
+        async_wake_up( &fd->read_q, STATUS_ALERTED );
+        /* Edge-trigger the inproc-sync mirror: consume the signal byte that
+         * made it readable (it mirrors the fd's signaled state; the state
+         * itself lives in the internal sync object). Without the drain the
+         * poll level stays high, read_q is ALERTED once per poll iteration,
+         * and wineserver busy-loops between the mirror write side and the
+         * client get_async_result round trip — the app crawls. */
+        if (fd->unix_fd == -1 && fd->sync_pipe[0] != -1 && (event & POLLIN))
+        {
+            char c;
+            (void)!read( fd->sync_pipe[0], &c, 1 );
+        }
+    }
     if (event & (POLLOUT | POLLERR | POLLHUP)) async_wake_up( &fd->write_q, STATUS_ALERTED );
 
     /* if an error occurred, stop polling this fd to avoid busy-looping */

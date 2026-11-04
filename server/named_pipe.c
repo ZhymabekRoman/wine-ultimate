@@ -668,6 +668,7 @@ static int pipe_end_set_sd( struct object *obj, const struct security_descriptor
                             unsigned int set_info );
 static WCHAR *pipe_end_get_full_name( struct object *obj, data_size_t max, data_size_t *len );
 static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos );
+static void pipe_end_poll_event( struct fd *fd, int event );
 static void pipe_end_write( struct fd *fd, struct async *async_data, file_pos_t pos );
 static void pipe_end_flush( struct fd *fd, struct async *async );
 static void pipe_end_get_volume_info( struct fd *fd, struct async *async, unsigned int info_class );
@@ -711,7 +712,7 @@ static const struct object_ops pipe_server_ops =
 static const struct fd_ops pipe_server_fd_ops =
 {
     default_fd_get_poll_events,   /* get_poll_events */
-    default_poll_event,           /* poll_event */
+    pipe_end_poll_event,          /* poll_event */
     pipe_end_get_fd_type,         /* get_fd_type */
     pipe_end_read,                /* read */
     pipe_end_write,               /* write */
@@ -756,7 +757,7 @@ static const struct object_ops pipe_client_ops =
 static const struct fd_ops pipe_client_fd_ops =
 {
     default_fd_get_poll_events,   /* get_poll_events */
-    default_poll_event,           /* poll_event */
+    pipe_end_poll_event,          /* poll_event */
     pipe_end_get_fd_type,         /* get_fd_type */
     pipe_end_read,                /* read */
     pipe_end_write,               /* write */
@@ -1668,6 +1669,27 @@ static void reselect_read_queue( struct pipe_end *pipe_end, int reselect_write )
     }
 }
 
+/* poll event for a pipe end's (pseudo) fd: the pollable fd is the inproc-sync
+ * mirror (fd.c fd_poll_fd), whose byte is the peer's "data arrived" edge.  The
+ * default wake (ALERTED) makes the client re-read the pseudo fd's unix fd (-1):
+ * that read returns garbage on duplex ends and cost the pipe suite 614 failures.
+ * Relay the edge in-server instead: drain the mirror byte, then run the
+ * message-queue drain against the queued reads. */
+static void pipe_end_poll_event( struct fd *fd, int event )
+{
+    struct pipe_end *pipe_end = get_fd_user( fd );
+
+    if (event & (POLLIN | POLLERR | POLLHUP))
+    {
+        fd_mirror_reset( fd );
+        ignore_reselect = 1;
+        reselect_read_queue( pipe_end, 1 );
+        ignore_reselect = 0;
+    }
+
+    set_fd_events( fd, default_fd_get_poll_events( fd ) );
+}
+
 static void reselect_write_queue( struct pipe_end *pipe_end )
 {
     struct pipe_message *message, *next;
@@ -1753,6 +1775,7 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
          * read queue was only ever re-checked when the next REQ_write arrived
          * on the *writing* side, and the 7th LRPC request stranded both ends
          * PENDING with the client's request socketpair full. */
+        fd_set_mirror_poll( pipe_end->fd );
         set_fd_events( pipe_end->fd, default_fd_get_poll_events( pipe_end->fd ) );
     }
     set_error( STATUS_PENDING );
