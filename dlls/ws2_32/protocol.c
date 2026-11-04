@@ -2089,14 +2089,270 @@ int WINAPI WSAGetServiceClassNameByClassIdW( GUID *class, WCHAR *service, DWORD 
 }
 
 
+/* opaque enumeration handle returned by WSALookupServiceBegin; mirrors the
+ * Windows catalog handle: a snapshot taken at Begin time, walked one entry
+ * per WSALookupServiceNext call, freed by WSALookupServiceEnd. */
+struct lookup_service
+{
+    DWORD name_space;                       /* filter class from the query */
+    DWORD flags;                            /* Begin-time LUP_* flags */
+    IP_ADAPTER_ADDRESSES *adapters;         /* snapshot, owned by this handle */
+    const IP_ADAPTER_ADDRESSES *current;    /* next entry to return */
+};
+
+/* the service class GUID that Windows reports for NLA namespace entries */
+static const GUID nla_service_class = { 0x00000005, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xaa, 0x00, 0xb6, 0x7e, 0xe6 } };
+
+/* NLA blob records laid out the compact way Windows writes them (the
+ * in-header union in NLA_BLOB is sized by the NLA_ICS member) */
+struct nla_connectivity_record
+{
+    struct { NLA_BLOB_DATA_TYPE type; DWORD dwSize; DWORD next_offset; } header;
+    NLA_CONNECTIVITY_TYPE connectivity_type;
+    NLA_INTERNET internet;
+};
+
+struct nla_interface_record
+{
+    struct { NLA_BLOB_DATA_TYPE type; DWORD dwSize; DWORD next_offset; } header;
+    DWORD type;
+    DWORD speed;
+    WCHAR name[1];                          /* variable length, ANSI in the blob */
+};
+
+#define LOOKUP_ALIGN(size) (((size) + 7) & ~7)
+
+static const IP_ADAPTER_ADDRESSES *next_connected_adapter( const IP_ADAPTER_ADDRESSES *aa )
+{
+    for (; aa; aa = aa->Next)
+        if (aa->IfType != IF_TYPE_SOFTWARE_LOOPBACK) return aa;
+    return NULL;
+}
+
+static const WCHAR *adapter_display_name( const IP_ADAPTER_ADDRESSES *aa )
+{
+    if (aa->FriendlyName && aa->FriendlyName[0]) return aa->FriendlyName;
+    return aa->Description;
+}
+
+/* fill one results buffer with a WSAQUERYSET{A,W} describing aa; the strings,
+ * blob and csaddr payload are appended to the struct inside the caller buffer,
+ * as on Windows. If the buffer is too small, set *len to the minimum required
+ * size and return with WSAEFAULT. */
+static int fill_service_entry( const IP_ADAPTER_ADDRESSES *aa, DWORD flags, DWORD *len,
+                               WSAQUERYSETW *results, BOOL unicode )
+{
+    static const WCHAR commentW[] = {0};
+    BOOL want_addr = flags & (LUP_RETURN_ALL | LUP_RETURN_ADDR);
+    BOOL want_blob = flags & (LUP_RETURN_ALL | LUP_RETURN_BLOB);
+    const IP_ADAPTER_UNICAST_ADDRESS *unicast;
+    struct nla_connectivity_record *conn;
+    struct nla_interface_record *iface;
+    DWORD avail = *len, needed, name_chars, ctx_chars;
+    char adapterA[MAX_ADAPTER_DESCRIPTION_LENGTH + 4];
+    CSADDR_INFO *csaddr;
+    const WCHAR *nameW;
+    struct sockaddr_in *ip, *mask;
+    char nameA[MAX_ADAPTER_DESCRIPTION_LENGTH + 4];
+    char *base = (char *)results, *p;
+    BLOB *blob;
+    ULONG prefix;
+
+    nameW = adapter_display_name( aa );
+    name_chars = wcslen( nameW ) + 1;
+    ctx_chars = MultiByteToWideChar( CP_ACP, 0, aa->AdapterName, -1, NULL, 0 );
+    if (!ctx_chars) ctx_chars = 1;
+    adapterA[0] = 0;
+    WideCharToMultiByte( CP_ACP, 0, aa->Description, -1, adapterA, sizeof(adapterA), NULL, NULL );
+
+    if (!unicode)
+    {
+        name_chars = WideCharToMultiByte( CP_ACP, 0, nameW, -1, nameA, sizeof(nameA), NULL, NULL );
+        if (!name_chars) nameA[0] = 0, name_chars = 1;
+    }
+
+    needed = LOOKUP_ALIGN( sizeof(WSAQUERYSETW) );
+    if (want_addr) needed += LOOKUP_ALIGN( sizeof(CSADDR_INFO) ) + 2 * LOOKUP_ALIGN( sizeof(*ip) );
+    if (want_blob)
+    {
+        DWORD lenA = strlen( adapterA ) + 1;
+        needed += LOOKUP_ALIGN( sizeof(BLOB) ) + LOOKUP_ALIGN( sizeof(*conn) );
+        needed += LOOKUP_ALIGN( FIELD_OFFSET( struct nla_interface_record, name ) + lenA );
+    }
+    needed += LOOKUP_ALIGN( unicode ? name_chars * sizeof(WCHAR) : name_chars );
+    needed += LOOKUP_ALIGN( unicode ? ctx_chars * sizeof(WCHAR) : (aa->AdapterName ? (DWORD)strlen( aa->AdapterName ) + 1 : 1) );
+    needed += LOOKUP_ALIGN( unicode ? sizeof(commentW) : sizeof(char) );
+
+    if (avail < needed)
+    {
+        *len = needed;
+        WSASetLastError( WSAEFAULT );
+        return -1;
+    }
+
+    memset( results, 0, sizeof(*results) );
+    results->dwSize = unicode ? sizeof(WSAQUERYSETW) : sizeof(WSAQUERYSETA);
+    results->dwNameSpace = NS_NLA;
+    results->lpServiceClassId = (LPGUID)&nla_service_class;
+
+    p = base + LOOKUP_ALIGN( sizeof(*results) );
+    if (want_addr)
+    {
+        ip = (struct sockaddr_in *)p;
+        p += LOOKUP_ALIGN( sizeof(*ip) );
+        mask = (struct sockaddr_in *)p;
+        p += LOOKUP_ALIGN( sizeof(*mask) );
+        csaddr = (CSADDR_INFO *)p;
+        p += LOOKUP_ALIGN( sizeof(*csaddr) );
+
+        ip->sin_family = AF_INET;
+        ip->sin_addr.s_addr = 0;
+        mask->sin_family = AF_INET;
+        mask->sin_addr.s_addr = 0;
+        prefix = 0;
+        for (unicast = aa->FirstUnicastAddress; unicast; unicast = unicast->Next)
+        {
+            if (unicast->Address.lpSockaddr && unicast->Address.lpSockaddr->sa_family == AF_INET)
+            {
+                ip->sin_addr = ((struct sockaddr_in *)unicast->Address.lpSockaddr)->sin_addr;
+                prefix = unicast->OnLinkPrefixLength;
+                break;
+            }
+        }
+        mask->sin_addr.s_addr = prefix ? ~0u << (32 - prefix) : 0;
+
+        memset( csaddr, 0, sizeof(*csaddr) );
+        csaddr->LocalAddr.lpSockaddr = (SOCKADDR *)ip;
+        csaddr->LocalAddr.iSockaddrLength = sizeof(*ip);
+        csaddr->RemoteAddr.lpSockaddr = (SOCKADDR *)mask;
+        csaddr->RemoteAddr.iSockaddrLength = sizeof(*mask);
+        csaddr->iSocketType = SOCK_STREAM;
+        csaddr->iProtocol = IPPROTO_TCP;
+        results->dwNumberOfCsAddrs = 1;
+        results->lpcsaBuffer = csaddr;
+    }
+    if (want_blob)
+    {
+        DWORD header_len = FIELD_OFFSET( struct nla_interface_record, name );
+        DWORD lenA = strlen( adapterA ) + 1;
+
+        blob = (BLOB *)p;
+        p += LOOKUP_ALIGN( sizeof(BLOB) );
+        conn = (struct nla_connectivity_record *)p;
+        p += LOOKUP_ALIGN( sizeof(*conn) );
+        iface = (struct nla_interface_record *)p;
+        p += LOOKUP_ALIGN( header_len + lenA );
+
+        conn->header.type = NLA_CONNECTIVITY;
+        conn->header.dwSize = sizeof(*conn);
+        conn->header.next_offset = sizeof(*conn);
+        conn->connectivity_type = NLA_NETWORK_UNMANAGED;
+        conn->internet = NLA_INTERNET_YES;
+
+        iface->header.type = NLA_INTERFACE;
+        iface->header.dwSize = header_len + lenA;
+        iface->header.next_offset = 0;
+        iface->type = aa->IfType;
+        iface->speed = (DWORD)aa->TransmitLinkSpeed;
+        memcpy( iface->name, adapterA, lenA );
+
+        blob->cbSize = FIELD_OFFSET( struct nla_interface_record, name ) + lenA + sizeof(*conn);
+        blob->pBlobData = (BYTE *)conn;
+        results->lpBlob = blob;
+    }
+    if (unicode)
+    {
+        WCHAR *dst = (WCHAR *)p;
+        lstrcpyW( dst, nameW );
+        results->lpszServiceInstanceName = dst;
+        p += LOOKUP_ALIGN( name_chars * sizeof(WCHAR) );
+        dst = (WCHAR *)p;
+        dst[0] = 0;
+        if (aa->AdapterName) MultiByteToWideChar( CP_ACP, 0, aa->AdapterName, -1, dst, ctx_chars );
+        results->lpszContext = dst;
+        p += LOOKUP_ALIGN( ctx_chars * sizeof(WCHAR) );
+        dst = (WCHAR *)p;
+        dst[0] = 0;
+        results->lpszComment = dst;
+    }
+    else
+    {
+        WSAQUERYSETA *resultsA = (WSAQUERYSETA *)results;
+
+        lstrcpyA( p, nameA );
+        resultsA->lpszServiceInstanceName = p;
+        p += LOOKUP_ALIGN( name_chars );
+        p[0] = 0;
+        if (aa->AdapterName) lstrcpyA( p, aa->AdapterName );
+        resultsA->lpszContext = p;
+        p += LOOKUP_ALIGN( strlen(p) + 1 );
+        *p = 0;
+        resultsA->lpszComment = p;
+    }
+
+    *len = needed;
+    return 0;
+}
+
+static int lookup_service_begin( DWORD name_space, DWORD flags, HANDLE *lookup )
+{
+    IP_ADAPTER_ADDRESSES *adapters = NULL;
+    struct lookup_service *service;
+    ULONG size = 0, err;
+
+    if (!(service = calloc( 1, sizeof(*service) )))
+    {
+        SetLastError( WSA_NOT_ENOUGH_MEMORY );
+        return SOCKET_ERROR;
+    }
+    /* a snapshot miss is not fatal: Windows enumerates an empty catalog then */
+    err = GetAdaptersAddresses( AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST
+                                | GAA_FLAG_SKIP_DNS_SERVER, NULL, NULL, &size );
+    if (err && err != ERROR_BUFFER_OVERFLOW && err != ERROR_NO_DATA)
+        TRACE( "adapter probe failed, error %lu, size %lu\n", err, size );
+    if (size)
+    {
+        if (!(adapters = malloc( size )))
+        {
+            free( service );
+            SetLastError( WSA_NOT_ENOUGH_MEMORY );
+            return SOCKET_ERROR;
+        }
+        err = GetAdaptersAddresses( AF_UNSPEC, GAA_FLAG_SKIP_ANYCAST | GAA_FLAG_SKIP_MULTICAST
+                                    | GAA_FLAG_SKIP_DNS_SERVER, NULL, adapters, &size );
+        if (err)
+        {
+            free( adapters );
+            adapters = NULL;
+        }
+    }
+
+    service->name_space = name_space;
+    service->flags = flags;
+    service->adapters = adapters;
+    service->current = next_connected_adapter( adapters );
+    *lookup = service;
+    return 0;
+}
+
 /***********************************************************************
  *      WSALookupServiceBeginA   (ws2_32.@)
  */
 int WINAPI WSALookupServiceBeginA( WSAQUERYSETA *query, DWORD flags, HANDLE *lookup )
 {
-    FIXME( "(%p %#lx %p) Stub!\n", query, flags, lookup );
-    SetLastError( WSA_NOT_ENOUGH_MEMORY );
-    return -1;
+    TRACE( "%p, %#lx, %p\n", query, flags, lookup );
+
+    if (!query || !lookup)
+    {
+        WSASetLastError( WSAEFAULT );
+        return SOCKET_ERROR;
+    }
+    if (query->dwSize != sizeof(*query))
+    {
+        WSASetLastError( WSAEINVAL );
+        return SOCKET_ERROR;
+    }
+    return lookup_service_begin( query->dwNameSpace, flags, lookup );
 }
 
 
@@ -2105,9 +2361,19 @@ int WINAPI WSALookupServiceBeginA( WSAQUERYSETA *query, DWORD flags, HANDLE *loo
  */
 int WINAPI WSALookupServiceBeginW( WSAQUERYSETW *query, DWORD flags, HANDLE *lookup )
 {
-    FIXME( "(%p %#lx %p) Stub!\n", query, flags, lookup );
-    SetLastError( WSA_NOT_ENOUGH_MEMORY );
-    return -1;
+    TRACE( "%p, %#lx, %p\n", query, flags, lookup );
+
+    if (!query || !lookup)
+    {
+        WSASetLastError( WSAEFAULT );
+        return SOCKET_ERROR;
+    }
+    if (query->dwSize != sizeof(*query))
+    {
+        WSASetLastError( WSAEINVAL );
+        return SOCKET_ERROR;
+    }
+    return lookup_service_begin( query->dwNameSpace, flags, lookup );
 }
 
 
@@ -2116,7 +2382,17 @@ int WINAPI WSALookupServiceBeginW( WSAQUERYSETW *query, DWORD flags, HANDLE *loo
  */
 int WINAPI WSALookupServiceEnd( HANDLE lookup )
 {
-    FIXME("(%p) Stub!\n", lookup );
+    struct lookup_service *service = lookup;
+
+    TRACE( "%p\n", lookup );
+
+    if (!service)
+    {
+        WSASetLastError( ERROR_INVALID_HANDLE );
+        return SOCKET_ERROR;
+    }
+    free( service->adapters );
+    free( service );
     return 0;
 }
 
@@ -2126,9 +2402,24 @@ int WINAPI WSALookupServiceEnd( HANDLE lookup )
  */
 int WINAPI WSALookupServiceNextA( HANDLE lookup, DWORD flags, DWORD *len, WSAQUERYSETA *results )
 {
-    FIXME( "(%p %#lx %p %p) Stub!\n", lookup, flags, len, results );
-    SetLastError( WSA_E_NO_MORE );
-    return -1;
+    struct lookup_service *service = lookup;
+    int ret;
+
+    TRACE( "%p, %#lx, %p, %p\n", lookup, flags, len, results );
+
+    if (!service || !len || !results)
+    {
+        WSASetLastError( WSAEFAULT );
+        return SOCKET_ERROR;
+    }
+    if (!service->current)
+    {
+        WSASetLastError( WSA_E_NO_MORE );
+        return SOCKET_ERROR;
+    }
+    ret = fill_service_entry( service->current, flags, len, (WSAQUERYSETW *)results, FALSE );
+    if (ret != -1 || WSAGetLastError() != WSAEFAULT) service->current = next_connected_adapter( service->current->Next );
+    return ret;
 }
 
 
@@ -2137,9 +2428,24 @@ int WINAPI WSALookupServiceNextA( HANDLE lookup, DWORD flags, DWORD *len, WSAQUE
  */
 int WINAPI WSALookupServiceNextW( HANDLE lookup, DWORD flags, DWORD *len, WSAQUERYSETW *results )
 {
-    FIXME( "(%p %#lx %p %p) Stub!\n", lookup, flags, len, results );
-    SetLastError( WSA_E_NO_MORE );
-    return -1;
+    struct lookup_service *service = lookup;
+    int ret;
+
+    TRACE( "%p, %#lx, %p, %p\n", lookup, flags, len, results );
+
+    if (!service || !len || !results)
+    {
+        WSASetLastError( WSAEFAULT );
+        return SOCKET_ERROR;
+    }
+    if (!service->current)
+    {
+        WSASetLastError( WSA_E_NO_MORE );
+        return SOCKET_ERROR;
+    }
+    ret = fill_service_entry( service->current, flags, len, results, TRUE );
+    if (ret != -1 || WSAGetLastError() != WSAEFAULT) service->current = next_connected_adapter( service->current->Next );
+    return ret;
 }
 
 
