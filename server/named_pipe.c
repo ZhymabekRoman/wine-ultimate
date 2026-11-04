@@ -283,7 +283,8 @@ static void dupx_dump( const char *ev, struct named_pipe *pipe, struct pipe_end 
     }
     if (server)
         fprintf( stderr, "WA_DUPX:   %s srv_pe=%p srv_fd=%p srv_conn=%p cli_pe=%p cli_fd=%p cli_conn=%p\n",
-                 ev, server, server->fd, server->connection, client, client->fd, client->connection );
+                 ev, server, server->fd, server->connection, client,
+                 client ? client->fd : NULL, client ? client->connection : NULL );
 }
 
 static void dupx_io( const char *dir, struct pipe_end *end, data_size_t len )
@@ -1730,9 +1731,16 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
     /* A duplex pipe whose peer wrote before this read was queued, with the
      * queued async list drained at write time, has its data in the kernel
      * pipe already; re-check the fd poll state so the async completes on the
-     * readability edge the kernel pipe has been holding. */
+     * readability edge the kernel pipe has been holding.  A duplex instance
+     * shares one kernel pipe pair between its two ends: a read queued on this
+     * end can also be waiting for data that the peer end's queued read has
+     * already made readable, so re-arm the paired end's read queue too. */
     if (pipe_end->pipe && pipe_end->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE))
+    {
         fd_reselect_async( pipe_end->fd, &pipe_end->read_q );
+        if (pipe_end->connection)
+            fd_reselect_async( pipe_end->connection->fd, &pipe_end->connection->read_q );
+    }
     set_error( STATUS_PENDING );
 }
 
@@ -1771,6 +1779,14 @@ static void pipe_end_write( struct fd *fd, struct async *async, file_pos_t pos )
     message->async = (struct async *)grab_object( async );
     queue_async( &pipe_end->write_q, async );
     reselect_read_queue( pipe_end->connection, 1 );
+    /* Duplex (self-apartment LRPC) pipes: the reader parks on the inproc-sync
+     * mirror fd (read( fd, 16 )) with no wineserver-side event; a queued
+     * message that no queued read consumed leaves the reader asleep and the
+     * writer's next write blocks the kernel pair.  Nudge the reader's sync
+     * mirror so it wakes and picks the message up. */
+    if (pipe_end->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE) &&
+        !list_empty( &pipe_end->connection->message_queue ))
+        set_fd_signaled( pipe_end->connection->fd, 1 );
     set_error( STATUS_PENDING );
 }
 
