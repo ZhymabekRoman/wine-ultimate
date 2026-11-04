@@ -3344,9 +3344,23 @@ static HRESULT WINAPI rc2_GetIids( void *iface, ULONG *c, IID **i )
  * Windows.Foundation.Diagnostics.LoggingChannel is registered there (its
  * __Impl dispatch maps in CalculatorApp.dll carry IIterable<IKeyValuePair
  * <string,string>>, RID 0x6800000 == target handle 0x1806800000) and is absent
- * from the framework Mcg table, so the app template wins the lookup. */
-#define ELEM_LOGGINGCHANNEL L"Windows.Foundation.Diagnostics.LoggingChannel"
-static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( ELEM_LOGGINGCHANNEL, n ); }
+ * from the framework Mcg table, so the app template wins the lookup.
+ *
+ * E10-C: the LoggingChannel template carries no IIterable entry at all, so the
+ * scan of every Mcg module table (mrt100_app framework, CalculatorApp,
+ * SharedLibrary) for the target handle 0x1806800000 lands on the SharedLibrary
+ * module alone: its McgInterfaceData dispatch maps list 0x1806800000 for the
+ * collection-interface __Impl templates (iterator/observable-map families);
+ * mrt100_app and CalculatorApp.exe carry zero.  Arm the IIterable-carrying
+ * __Impl whose semantics match the QualifierValues enumerable contract:
+ * Windows.Foundation.Collections.IIterator`1<Windows.Foundation.Collections
+ * .IKeyValuePair`2<System.String,System.String>> (SharedLibrary
+ * IIterator_A__scg_KeyValuePair_A_string_j_string_V__V___Impl, frozen triple
+ * {IIterator<KVP<string,string>>, IIterable<KVP<string,string>>,
+ * IEnumerable<KVP<string,string>>}).  Lookup order mrt100 -> app -> SharedLibrary
+ * misses on the first two, so the SharedLibrary template is the one created. */
+#define ELEM_ITER_KVP_SS L"Windows.Foundation.Collections.IIterator`1<" ELEM_KEYVALUEPAIR L"`2<" ELEM_STRING L"," ELEM_STRING ">>"
+static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( ELEM_ITER_KVP_SS, n ); }
 static HRESULT WINAPI rc2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc2_GetForCurrentView( void *iface, void **out )
 {
