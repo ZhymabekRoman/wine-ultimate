@@ -397,6 +397,8 @@ static int rpcrt4_conn_np_read(RpcConnection *conn, void *buffer, unsigned int c
         status = connection->io_status.Status;
     }
     release_np_event(connection, event);
+    TRACE("conn %p ep %s read -> %u bytes\n", conn, debugstr_a(conn->Endpoint),
+          status && status != STATUS_BUFFER_OVERFLOW ? (unsigned)-1 : connection->io_status.Information);
     return status && status != STATUS_BUFFER_OVERFLOW ? -1 : connection->io_status.Information;
 }
 
@@ -418,6 +420,7 @@ static int rpcrt4_conn_np_write(RpcConnection *conn, const void *buffer, unsigne
         status = io_status.Status;
     }
     release_np_event(connection, event);
+    TRACE("conn %p ep %s wrote %u\n", conn, debugstr_a(conn->Endpoint), count);
     if (status)
         return -1;
 

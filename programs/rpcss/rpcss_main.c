@@ -57,6 +57,8 @@ HRESULT __cdecl irpcss_server_register(handle_t h, const GUID *clsid, unsigned i
     struct registered_class *entry;
     static LONG next_cookie;
 
+    TRACE("clsid %s flags %#x cnt %u\n", debugstr_guid(clsid), flags, object->ulCntData);
+
     if (!(entry = calloc(1, sizeof(*entry))))
         return E_OUTOFMEMORY;
 
@@ -110,6 +112,7 @@ HRESULT __cdecl irpcss_get_class_object(handle_t h, const GUID *clsid,
 {
     struct registered_class *cur;
 
+    TRACE("clsid %s\n", debugstr_guid(clsid));
     *object = NULL;
 
     EnterCriticalSection(&registered_classes_cs);
@@ -134,6 +137,7 @@ HRESULT __cdecl irpcss_get_class_object(handle_t h, const GUID *clsid,
 
     LeaveCriticalSection(&registered_classes_cs);
 
+    TRACE("-> %s\n", *object ? "S_OK" : "E_NOINTERFACE");
     return *object ? S_OK : E_NOINTERFACE;
 }
 

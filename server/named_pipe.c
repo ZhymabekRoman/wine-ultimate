@@ -260,9 +260,14 @@ static int relay_wanted( struct pipe_end *pipe_end )
  * (third_party/ipcz/src/ipcz/node_messages_generator.h, flat copies in /tmp/webres):
  * ids 13/14/20/21/22/32/33/34/35/36 are NodeMessages; the slot offsets were verified
  * against the g35/g38 WA_PIPEX captures of the app<->browser bootstrap and the
- * gate69i capture (type 7 v0 params = StructHeader+NodeName+proto+portals + a
- * 16-byte DriverTransport::Message {type,handle} at body+32, i.e. the handle u64 at
- * body+40; type 14 driver object at body+16; AcceptParcel driver_objects arrays
+ * gate69i capture (type 7 v0 params = StructHeader+NodeName+proto+portals + an
+ * embedded serialized DriverTransport::Message at body+40: u32 num_bytes (=0x48,
+ * coincidentally a live handle in the writer table — gate71 relayed *this* word and
+ * clobbered {num_bytes,version} with the dup'd dst, so the reader deserialized a
+ * 1380-byte driver message out of a 184-byte frame and the NodeLink tore down) +
+ * u32 version + payload + the handle u64 at body+72 (frame 112 = 0x68 = the
+ * writer's NodeLinkMemory primary block-buffer FILE_MAP, identical word in both
+ * directions in the 184-byte gate69i/gate71 frames; type 14 driver object at body+16; AcceptParcel driver_objects arrays
  * relayed at frame off=48/56).  m136 NodeMessages has no id 38; the legacy name is
  * kept there for the observed wire traffic. */
 static const struct relay_op
@@ -271,11 +276,13 @@ static const struct relay_op
     short slot1, slot2;
 } relay_ops[] =
 {
-    {  7, 40, -1 },  /* ConnectFromBrokerToBroker { buffer: driver_object } — the bidirectional
+    {  7, 72, 40 },  /* ConnectFromBrokerToBroker { buffer: driver_object } — the bidirectional
                       * NodeLink handshake on every mojo pipe (184/200-byte frames, gate69i
-                      * seq=3/4 both directions, in-band handle 0x48 = the NodeLinkMemory
-                      * primary block buffer); was not relayed, so the primary block buffer
-                      * crossed as a writer-local handle on every pipe */
+                      * seq=3/4 both directions).  The driver_object is an embedded serialized
+                      * DriverTransport::Message: {u32 num_bytes=0x48, u32 version} at body+40,
+                      * its payload, then the HANDLE at body+72 (frame 112, value 0x68 in every
+                      * gate69i/gate71 capture = the writer's NodeLinkMemory primary block
+                      * buffer FILE_MAP).  Relay the handle word; leave the header word alone. */
     { 13,  8, -1 },  /* RequestIndirectIntroduction (legacy name OpenChannelRequest) */
     { 14, 16,  8 },  /* AddBlockBuffer { id, block_size, buffer: driver_object } (NodeLink block; captures relay the handle at off=56/48) */
     { 20, 24, -1 },  /* AcceptParcel (legacy name DuplicateBufferResponse) { ... driver_objects[] } */
@@ -1665,6 +1672,12 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
 
     queue_async( &pipe_end->read_q, async );
     reselect_read_queue( pipe_end, 0 );
+    /* A duplex pipe whose peer wrote before this read was queued, with the
+     * queued async list drained at write time, has its data in the kernel
+     * pipe already; re-check the fd poll state so the async completes on the
+     * readability edge the kernel pipe has been holding. */
+    if (pipe_end->pipe && pipe_end->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE))
+        fd_reselect_async( pipe_end->fd, &pipe_end->read_q );
     set_error( STATUS_PENDING );
 }
 
