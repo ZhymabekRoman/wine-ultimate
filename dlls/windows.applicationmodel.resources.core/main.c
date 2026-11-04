@@ -850,9 +850,24 @@ static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
      * closest (IIterable<string>) class whose triple omits 0x1806800000, and
      * cast #14 stayed an InvalidCast.  Answer the exact key so the
      * instantiated __Impl carries the target in its triple. */
-    static const WCHAR *args[] = { L"IKeyValuePair`2<String,String>" };
+    /* Cast-#14 predicate (decompiled, SharedLibrary 0x180a2e900 +
+     * 0x18082d8d0): CheckCastInterface miss -> CanCastComObject ->
+     * __ComObject::IsInstanceOfInterface -> SimpleComInterfaceCacheItem::
+     * TryReadCachedNativeInterface: entry.typeHandle == target typeID
+     * (handle equality), else RhTypeCast_AreTypesEquivalent (canonical-form +
+     * definition identity, not GUID).  The IIterable<KVP> key above froze the
+     * wrapper triple at the *framework* handle 0x3000200000, so the cast to
+     * the SharedLibrary handle 0x1806800000 missed; the QI fallback only fires
+     * when the wrapper class's EEType has HasRemoteInterfaces (flag 0x40).
+     * Arm the Mcg toolbox-signature class (s_classData index 72, EEType
+     * SharedLibrary+0x805e8, flags 0x60): its cast miss goes through
+     * CanCastComObject -> QueryInterface_NoAddRef_Slow with the target
+     * interface IID {9828e927-...}, which the statics2 (rc2) face answers
+     * with the stable enumerable (430d26b9). */
+    static const WCHAR mcg_key72[] =
+        L"ApiInformation,Windows.UI.Xaml.MarshalingBehaviorAttribute,Windows.UI.Xaml.MarshalingType,Windows.UI.Xaml.StaticAttribute,Windows.Foundation.Metadata.UserDataPaths,Windows.Foundation.Metadata.AppDataPaths,Windows.Foundation.Metadata.SystemDataPaths,Windows.Foundation.Metadata.Application";
 
-    return param_class_name( L"IIterable", L"`1", args, 1, n );
+    return className( mcg_key72, n );
 }
 static HRESULT WINAPI svv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
