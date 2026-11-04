@@ -435,6 +435,43 @@ static HRESULT fill_param_iids( ULONG *out_count, IID **out_iids, ULONG n, ... )
     return fill_iids( table, n, out_count, out_iids );
 }
 
+/* Static class interface set + one parameterized contract (E8).  mrt100_app's
+ * RCW seeding freezes the wrapped face's IInspectable::GetIids list into the
+ * wrapper's m_cachedInterfaces, and RhTypeCast_CheckCastInterface consults
+ * that frozen list before falling back to QI (the fallback never fires for
+ * the GetForViewIndependentUse chain: m_baseIUnknown is (Free, NULL)).  The
+ * class's published set must therefore name IIterable<IKeyValuePair<string,
+ * string>> -- the Dictionary<string,string> enumerable contract the app
+ * castclass's the chain's ComObject to -- so the cast resolves at seeding. */
+static HRESULT fill_iids_plus_param( const IID *const *table, ULONG count,
+                                     ULONG *out_count, IID **out_iids, UINT32 argc, ... )
+{
+    const WCHAR *elems[4];
+    IID param;
+    ROPARAMIIDHANDLE h;
+    va_list ap;
+    UINT32 i;
+
+    if (!out_count || !out_iids) return E_POINTER;
+    if (argc > ARRAYSIZE( elems )) return E_INVALIDARG;
+    va_start( ap, argc );
+    for (i = 0; i < argc; i++) elems[i] = va_arg( ap, const WCHAR * );
+    va_end( ap );
+    if (FAILED( RoGetParameterizedTypeInstanceIID( argc, elems, NULL, &param, &h ) ))
+        return fill_iids( table, count, out_count, out_iids );  /* metadata gap: static set only */
+    {
+        IID *array;
+        ULONG k;
+
+        if (!(array = HeapAlloc( GetProcessHeap(), 0, (count + 1) * sizeof(*array) ))) return E_OUTOFMEMORY;
+        for (k = 0; k < count; k++) array[k] = *table[k];
+        array[k] = param;
+        *out_count = count + 1;
+        *out_iids = array;
+        return S_OK;
+    }
+}
+
 static const WCHAR *elem_class_name( const WCHAR *elem )
 {
     if (!elem) return L"IInspectable";
@@ -1004,10 +1041,13 @@ static ULONG WINAPI ov_AddRef( void *iface ) { return incr( &ov_from( iface )->r
 static ULONG WINAPI ov_Release( void *iface ) { return decr( &ov_from( iface )->ref ); }
 static HRESULT WINAPI ov_GetIids( void *iface, ULONG *c, IID **i )
 {
-    return fill_param_iids( c, i, 4, 2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING,
-                                2, ELEM_VECTOR L"`1", ELEM_STRING,
-                                2, ELEM_VECTORVIEW L"`1", ELEM_STRING,
-                                2, ELEM_ITERABLE L"`1", ELEM_STRING );
+    HRESULT hr = fill_param_iids( c, i, 5, 2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING,
+                                  2, ELEM_VECTOR L"`1", ELEM_STRING,
+                                  2, ELEM_VECTORVIEW L"`1", ELEM_STRING,
+                                  2, ELEM_ITERABLE L"`1", ELEM_STRING,
+                                  4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING );
+    TRACE( "seed ov(Languages) GetIids n=%u\n", c ? *c : 0 );  /* mrt100 probes with NULL out-params */
+    return hr;
 }
 static HRESULT WINAPI ov_GetRuntimeClassName( void *iface, HSTRING *n )
 {
@@ -2906,7 +2946,16 @@ static ULONG WINAPI ctx_Release( void *iface )
     }
     return ref;
 }
-static HRESULT WINAPI ctx_GetIids( void *iface, ULONG *c, IID **i ) { return fill_iids( ctx_class_iids, ARRAYSIZE( ctx_class_iids ), c, i ); }
+static HRESULT WINAPI ctx_GetIids( void *iface, ULONG *c, IID **i )
+{
+    /* E8: the ResourceContext is what GetForViewIndependentUse returns and
+     * what the MCG wraps into the Dictionary<string,string> ctor chain; its
+     * published set must name the enumerable contract the app castclass's. */
+    HRESULT hr = fill_iids_plus_param( ctx_class_iids, ARRAYSIZE( ctx_class_iids ), c, i,
+                                       4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING );
+    TRACE( "seed ctx(ResourceContext) GetIids n=%u\n", c ? *c : 0 );
+    return hr;
+}
 static HRESULT WINAPI ctx_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI ctx_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI ctx_QualifierValues( void *iface, void **out )
@@ -3218,7 +3267,12 @@ static HRESULT WINAPI rcf_QueryInterface( void *iface, REFIID iid, void **out )
 }
 static ULONG WINAPI rcf_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI rcf_Release( void *iface ) { return 1; }
-static HRESULT WINAPI rcf_GetIids( void *iface, ULONG *c, IID **i ) { return fill_iids( rc_class_iids, ARRAYSIZE( rc_class_iids ), c, i ); }
+static HRESULT WINAPI rcf_GetIids( void *iface, ULONG *c, IID **i )
+{
+    HRESULT hr = fill_iids( rc_class_iids, ARRAYSIZE( rc_class_iids ), c, i );
+    TRACE( "seed rcf(ActivationFactory) GetIids n=%u\n", c ? *c : 0 );
+    return hr;
+}
 static HRESULT WINAPI rcf_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI rcf_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rcf_ActivateInstance( void *iface, void **instance )
@@ -3257,7 +3311,18 @@ static const void *rc_statics_vtbl[] =
 static HRESULT WINAPI rc2_QueryInterface( void *iface, REFIID iid, void **out ) { return rcf_QueryInterface( rcf_from_s( iface, offsetof(struct rc_factory, vt_statics2) ), iid, out ); }
 static ULONG WINAPI rc2_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI rc2_Release( void *iface ) { return 1; }
-static HRESULT WINAPI rc2_GetIids( void *iface, ULONG *c, IID **i ) { return fill_iids( rc_class_iids, ARRAYSIZE( rc_class_iids ), c, i ); }
+static HRESULT WINAPI rc2_GetIids( void *iface, ULONG *c, IID **i )
+{
+    /* E8: this is the face whose pointer the app wraps (GetForViewIndependentUse
+     * is slot 10 of rc_statics2_vtbl); mrt100_app seeds the wrapper's
+     * m_cachedInterfaces from this GetIids exactly once, before the QI chain,
+     * so the IIterable<IKeyValuePair<string,string>> target of cast #14 must
+     * be in the published set. */
+    HRESULT hr = fill_iids_plus_param( rc_class_iids, ARRAYSIZE( rc_class_iids ), c, i,
+                                       4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING );
+    TRACE( "seed statics2(GetForViewIndependentUse) GetIids n=%u\n", c ? *c : 0 );
+    return hr;
+}
 static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECONTEXT, n ); }
 static HRESULT WINAPI rc2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc2_GetForCurrentView( void *iface, void **out )
