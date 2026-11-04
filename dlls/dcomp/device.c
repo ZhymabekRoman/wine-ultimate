@@ -1646,7 +1646,7 @@ static void composite_device(struct composition_device *device)
 static DWORD WINAPI composite_thread_proc(void *iface)
 {
     struct composition_device *device = impl_from_IDCompositionDevice(iface);
-    unsigned int frequency, refresh_period;
+    unsigned int frequency, refresh_period, tick = 0;
     HDC hdc;
 
     /* TODO: Implement and use D3DKMTWaitForVerticalBlankEvent() */
@@ -1677,14 +1677,21 @@ static DWORD WINAPI composite_thread_proc(void *iface)
         composite_device(device);
         if (g_compositor_clock_event)
             SetEvent(g_compositor_clock_event);
+        /* Throttle the completion-side pulses to ~30Hz (every 2nd present tick).
+         * A full-60Hz commit-completion pulse drives the composition churn so hard
+         * the WebView2 browser tears down early (ShowWindow climbs, LRPC drain is
+         * truncated). Every 2nd tick keeps the lifted-input workers advancing on the
+         * present cadence while leaving the browser enough lifetime to issue further
+         * LRPC requests on the composition plane. */
+        if (!(++tick % 2))
         {
             LONG n = g_compositor_clock_handle_count, k;
             for (k = 0; k < n && k < COMPOSITOR_CLOCK_MAX_HANDLES; k++)
                 if (g_compositor_clock_handles[k])
                     SetEvent(g_compositor_clock_handles[k]);
+            if (g_commit_completion_event)
+                SetEvent(g_commit_completion_event);
         }
-        if (g_commit_completion_event)
-            SetEvent(g_commit_completion_event);
         Sleep(refresh_period);
     }
 
