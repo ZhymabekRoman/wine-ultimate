@@ -117,6 +117,12 @@ struct pipe_end
                                       * type-7 ConnectFromBrokerToBroker (the writer's ring block; the peer maps the
                                       * same memory through the relayed dup).  Snapshotted on every relayed frame
                                       * as WA_RELAY: R to census ring head/tail growth. -1 = none */
+    struct timeout_user *hb_timeout; /* gate104 lever (b): duplex mirror heartbeat (see mirror_heartbeat) */
+    struct object       *ev_obj;     /* gate102: the DriverTransport notification Event this end adopted in its own
+                                      * type-7 ConnectFromBrokerToBroker (slot 1 = the event the *peer* signals after
+                                      * pushing fragments into its ring; slot 2 = the NodeLinkMemory Section).  The
+                                      * relay keeps a ref here so that a W-plane delivery into this end can pulse it
+                                      * (WA_RELAY: N) — the "ring has data" edge.  NULL = no type-7 adopted here yet */
 };
 
 struct pipe_server
@@ -607,6 +613,25 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                         }
                     }
                 }
+                if (type == 7 && box->obj->ops->type == &event_type)
+                {
+                    /* gate102: type-7 (ConnectFromBrokerToBroker) v0 carries TWO driver objects:
+                     * slot1 @body+72 = the DriverTransport notification Event, slot2 @body+104 = the
+                     * NodeLinkMemory Section (gate100 S-lines: obj=Event + obj=Section/Event both
+                     * ways).  ipcz/mojo ChannelWin semantics: the writer pushes fragments into the
+                     * ring in *its* Section and then SetEvent()s the event the *reader* passed in
+                     * its own handshake; the reader's channel wakes, drains the ring, and (Windows)
+                     * the pipe frame is the header plane.  Keep our own ref on the event this end
+                     * adopted so W-plane deliveries into the peer of this end can pulse it: the
+                     * writer's SetEvent edge only exists if the writer writes, and the bootstrap
+                     * type-7 itself never signals anything (the 12 initial fragments predate the
+                     * peer event handle adoption => the circularity gate102 probes).  relay_free
+                     * keeps the type-7 source handle (K line); this is an extra ref, not a leak. */
+                    if (writer_end->ev_obj) release_object( writer_end->ev_obj );
+                    writer_end->ev_obj = grab_object( box->obj );
+                    fprintf( stderr, "WA_RELAY: E pid=%04x op=7 ev=%016llx\n",
+                             current->process->id, box->src );
+                }
                 s_line = 1;
                 {
                     /* gate95: name of the resolved object type (the server has no
@@ -659,6 +684,32 @@ static void relay_patch( struct pipe_message *message, struct process *reader,
             relay_ring_dump( first->end->ring_fd, "Q", first->end, first->writer->id, reader->id, 0, 0 );
     }
 
+    /* gate102 probe (the prescription): a W-plane delivery into a reader that has adopted a
+     * type-7 link is the "ring has data" edge for the *reader's* notification Event — the event
+     * this reader passed in its own ConnectFromBrokerToBroker (stored on its pipe_end as ev_obj
+     * at relay_scan, WA_RELAY: E line).  On Windows the writer signals it after pushing fragments;
+     * the bootstrap fragments (the browser's 12 initial pushes into its ring, ring=...,tail=12,
+     * head=0 static) predate the peer event adoption, and the client's MojoThread sits in
+     * read(fd,16) on the pipe plane => nobody ever wakes the reader.  Pulse it once per delivery. */
+    {
+        struct relay_box *first = LIST_ENTRY( list_head( message->relay ), struct relay_box, entry );
+        struct pipe_end *rd = first->end ? first->end->connection : NULL;
+        if (rd && rd->ev_obj)
+        {
+            struct object *sync = rd->ev_obj->ops->get_sync( rd->ev_obj );
+            struct timespec ts;
+            clock_gettime( CLOCK_MONOTONIC, &ts );
+            if (sync)
+            {
+                signal_sync( sync );  /* manual: wake all, auto: wake one (completion.c pattern) */
+                release_object( sync );
+            }
+            fprintf( stderr, "WA_RELAY: N t=%u.%03u pid=%04x -> pid=%04x (reader event pulsed)\n",
+                     (unsigned int)ts.tv_sec, (unsigned int)(ts.tv_nsec / 1000000),
+                     first->writer->id, reader->id );
+        }
+    }
+
     LIST_FOR_EACH_ENTRY( box, message->relay, struct relay_box, entry )
     {
         unsigned char bytes[8];
@@ -672,11 +723,19 @@ static void relay_patch( struct pipe_message *message, struct process *reader,
             obj_handle_t dst = alloc_handle( reader, box->obj, box->access, 0 );
             if (!dst)
             {
+                /* gate102: the reader keeps the writer's raw handle word.  The gate100 run showed the
+                 * browser's Section (src=056c access=00000007) vanishing silently here: the client's
+                 * read of the type-7 got the raw 0x56c (no D line, K line 'source kept'), so its
+                 * ChannelWin shm plane maps the peer's ring with a foreign handle.  Log the NTSTATUS
+                 * (alloc_handle fails in map_access->0 => STATUS_ACCESS_DENIED, or the SD check). */
+                unsigned int err = get_error();
                 clear_error();
+                fprintf( stderr, "WA_RELAY: DF pid=%04x src=%016llx -> pid=%04x off=%u op=%u access=%08x err=%08x\n",
+                         box->writer->id, box->src, reader->id, box->offset, box->type, box->access, err );
                 continue;  /* keep the raw value; the reader sees what Windows would report */
             }
-            fprintf( stderr, "WA_RELAY: D pid=%04x src=%016llx -> pid=%04x dst=%04x off=%u\n",
-                     box->writer->id, box->src, reader->id, dst, box->offset );
+            fprintf( stderr, "WA_RELAY: D pid=%04x src=%016llx -> pid=%04x dst=%04x off=%u op=%u\n",
+                     box->writer->id, box->src, reader->id, dst, box->offset, box->type );
             if (box->type == 7 && box->obj->ops->type == &mapping_type)
             {
                 /* gate95: the reader adopts this very mapping — snapshot it at delivery
@@ -697,6 +756,36 @@ static void relay_patch( struct pipe_message *message, struct process *reader,
         s = max( box->offset, msg_start ) - msg_start;
         e = min( box->offset + 8, msg_end ) - msg_start;
         memcpy( (char *)out + s, bytes + (s - (box->offset - msg_start)), e - s );
+    }
+
+    /* gate104 lever (a): relayed-reply mirror pulse.  A relayed reply (AcceptParcel
+     * with in-band handles, op=20 — the op=7 handshake rides the same path) consumed
+     * by the reader on a duplex (self-apartment LRPC, "OLE_") pipe completes the
+     * message: message_queue_read pops it, the read queue empties, and the reader's
+     * inproc-sync mirror falls disarmed (reselect_read_queue clears cont_armed on the
+     * empty queue).  The UI thread that consumed request 6's reply then parks in the
+     * LRPC idle receive with no queued message and no edge — OLE_pipe_reads froze at 0
+     * since gate103 (ShowWindow 12, cadence wave) — so rpcrt4 never re-arms its read
+     * and request 7 (composition-input adapter) is never issued.  Windows pairs the
+     * parcel reply with a fresh "you are the server now" pump beat for the consuming
+     * thread.  Pulse this end's mirror once per relayed reply, unconditionally (a
+     * spurious wake is legal: pipe_end_poll_event drains the byte, runs the drain
+     * against the read queue, and the client's read( fd, 16 ) returns empty → rpcrt4
+     * re-arms, app pump gets its beat).  gate102's N pulse covers only the type-7
+     * ev_obj (mojo plane, browser peer); the duplex mirror plane never pulsed.  */
+    {
+        struct relay_box *first = LIST_ENTRY( list_head( message->relay ), struct relay_box, entry );
+        struct pipe_end *rd = first->end ? first->end->connection : NULL;
+        if (rd && rd->fd && first->end->pipe &&
+            first->end->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE))
+        {
+            struct timespec ts;
+            clock_gettime( CLOCK_MONOTONIC, &ts );
+            set_fd_signaled( rd->fd, 1 );
+            fprintf( stderr, "WA_RELAY: X t=%u.%03u pid=%04x -> pid=%04x (reply mirror pulsed)\n",
+                     (unsigned int)ts.tv_sec, (unsigned int)(ts.tv_nsec / 1000000),
+                     first->writer->id, reader->id );
+        }
     }
 }
 
@@ -1185,6 +1274,8 @@ static void pipe_end_destroy( struct object *obj )
     if (pipe_end->fd) release_object( pipe_end->fd );
     if (pipe_end->blk_fd != -1) close( pipe_end->blk_fd );
     if (pipe_end->ring_fd != -1) close( pipe_end->ring_fd );
+    if (pipe_end->hb_timeout) remove_timeout_user( pipe_end->hb_timeout );  /* gate104: mirror heartbeat */
+    if (pipe_end->ev_obj) release_object( pipe_end->ev_obj );  /* gate102: our ref on the type-7 event */
     if (pipe_end->pipe) release_object( pipe_end->pipe );
     if (pipe_end->client_proc) release_object( pipe_end->client_proc );
 }
@@ -1675,6 +1766,35 @@ static void pipe_end_get_volume_info( struct fd *fd, struct async *async, unsign
  * are never replayed, the remainder drains one chunk per fresh peer write edge,
  * and the 7th LRPC request (composition-input adapter) strands on its body.
  * Keep the mirror armed while a partially consumed message is pending. */
+/* gate104 lever (b): duplex mirror heartbeat.  The self-apartment LRPC model
+ * parks the UI thread in rpcrt4's idle receive — a read( mirror fd, 16 ) whose
+ * wineserver async sits on pipe_end->read_q — and the pump beat that issues the
+ * 7th LRPC request (composition-input adapter) needs an edge with no queued
+ * message behind it: after request 6's reply is consumed the read queue empties,
+ * the mirror falls disarmed, and OLE_pipe_reads froze at 0 (gate103, ShowWindow
+ * 12, cadence wave) — the lifted-input continuation never runs.  Windows pairs
+ * each duplex read completion with the connection's own 10 ms read-loop tick.
+ * Arm a self-re-arming 10 ms timer per duplex end once a duplex read completes
+ * with no queued read; every tick re-creates the "data arrived" mirror byte
+ * (the same edge pipe_end_write rings at the peer), wakes default_poll_event →
+ * pipe_end_poll_event → reselect_read_queue, and the parked read completes
+ * empty → rpcrt4 re-arms → the app pump gets a beat.  Created lazily on the
+ * first completion, lives for the pipe's lifetime (a handful of OLE_ duplex
+ * instances per run; the drain work per tick is a list_empty check). */
+static void mirror_heartbeat( void *private )
+{
+    struct pipe_end *pipe_end = private;
+
+    set_fd_signaled( pipe_end->fd, 1 );
+    pipe_end->hb_timeout = add_timeout_user( -10000000 /* 10 ms, monotonic ns */, mirror_heartbeat, pipe_end );
+}
+
+static void arm_mirror_heartbeat( struct pipe_end *pipe_end )
+{
+    if (pipe_end->hb_timeout) return;
+    pipe_end->hb_timeout = add_timeout_user( -10000000, mirror_heartbeat, pipe_end );
+}
+
 static void arm_mirror_continuation( struct pipe_end *pipe_end )
 {
     if (!pipe_end->pipe || pipe_end->pipe->sharing != (FILE_SHARE_READ | FILE_SHARE_WRITE)) return;
@@ -1784,6 +1904,13 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
      * continuation armed, any relayed edge (and the queued read's arrival) drains
      * the remaining bytes immediately, without needing a new peer write edge. */
     arm_mirror_continuation( pipe_end );
+
+    /* gate104 lever (b): duplex read completed with no queued reader behind it —
+     * start the 10 ms mirror heartbeat so the parked LRPC idle receive wakes on a
+     * beat and rpcrt4 re-arms (request 7 issues). */
+    if (pipe_end->pipe && pipe_end->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE) &&
+        list_empty( &pipe_end->read_q.queue ))
+        arm_mirror_heartbeat( pipe_end );
 
     release_object( iosb );
 }
@@ -2314,6 +2441,7 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->buffer_size = buffer_size;
     pipe_end->blk_fd = -1;
     pipe_end->ring_fd = -1;
+    pipe_end->ev_obj = NULL;
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
     list_init( &pipe_end->message_queue );
