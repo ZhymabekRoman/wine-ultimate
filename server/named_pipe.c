@@ -102,6 +102,13 @@ struct pipe_end
     struct list          message_queue;
     struct async_queue   read_q;     /* read queue */
     struct async_queue   write_q;    /* write queue */
+    int                  cont_armed; /* duplex: a message-mode read completed short,
+                                      * the head message is not fully consumed and the
+                                      * continuation read (next REQ_read from this
+                                      * client) is pending; keeps the mirror fd's POLLIN
+                                      * armed across the header/body split so relayed
+                                      * edges drain the remainder without a new peer
+                                      * write edge */
     int                  blk_fd;     /* WA_MOJO_RELAY: dup'd unix fd of the latest AddBlockBuffer (ipcz id 14) block mapping, -1 = none */
 };
 
@@ -250,6 +257,7 @@ static int dupx_wanted( struct named_pipe *pipe )
     const WCHAR *hay, *p;
     unsigned int nchars;
     static const WCHAR oW[] = {'O','L','E','_'};
+    static const WCHAR lW[] = {'l','r','p','c'};
 
     if (dupx_on < 0) dupx_on = !!getenv( "WA_DUPX_DUMP" );
     if (!dupx_on || !pipe || !pipe->obj.name) return 0;
@@ -257,7 +265,10 @@ static int dupx_wanted( struct named_pipe *pipe )
     nchars = pipe->obj.name->len / sizeof(WCHAR);
     if (nchars < 4) return 0;
     for (p = hay; p + 4 <= hay + nchars; p++)
+    {
         if (!memcmp( p, oW, 4 * sizeof(WCHAR) )) return 1;
+        if (!memcmp( p, lW, 4 * sizeof(WCHAR) )) return 1;  /* pipe\lrpc\* connections */
+    }
     return 0;
 }
 
@@ -669,6 +680,7 @@ static int pipe_end_set_sd( struct object *obj, const struct security_descriptor
 static WCHAR *pipe_end_get_full_name( struct object *obj, data_size_t max, data_size_t *len );
 static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos );
 static void pipe_end_poll_event( struct fd *fd, int event );
+static int pipe_end_get_poll_events( struct fd *fd );
 static void pipe_end_write( struct fd *fd, struct async *async_data, file_pos_t pos );
 static void pipe_end_flush( struct fd *fd, struct async *async );
 static void pipe_end_get_volume_info( struct fd *fd, struct async *async, unsigned int info_class );
@@ -711,7 +723,7 @@ static const struct object_ops pipe_server_ops =
 
 static const struct fd_ops pipe_server_fd_ops =
 {
-    default_fd_get_poll_events,   /* get_poll_events */
+    pipe_end_get_poll_events,     /* get_poll_events */
     pipe_end_poll_event,          /* poll_event */
     pipe_end_get_fd_type,         /* get_fd_type */
     pipe_end_read,                /* read */
@@ -756,7 +768,7 @@ static const struct object_ops pipe_client_ops =
 
 static const struct fd_ops pipe_client_fd_ops =
 {
-    default_fd_get_poll_events,   /* get_poll_events */
+    pipe_end_get_poll_events,     /* get_poll_events */
     pipe_end_poll_event,          /* poll_event */
     pipe_end_get_fd_type,         /* get_fd_type */
     pipe_end_read,                /* read */
@@ -1548,6 +1560,25 @@ static void pipe_end_get_volume_info( struct fd *fd, struct async *async, unsign
     }
 }
 
+/* Duplex (self-apartment LRPC) ends ride the inproc-sync mirror (fd.c
+ * fd_poll_fd): a byte written by the peer's set_fd_signaled is the data-arrived
+ * edge that wakes the drain (pipe_end_poll_event → reselect_read_queue).  A
+ * message-mode read that completes short (rpcrt4 transceives a received packet
+ * as 16-byte header, then the body: the first read lands on
+ * STATUS_BUFFER_OVERFLOW and the message stays queued with read_pos advanced)
+ * leaves the fd with no waiting async, so default_fd_get_poll_events() drops
+ * the mirror's POLLIN: the relayed edges queued across the header/body split
+ * are never replayed, the remainder drains one chunk per fresh peer write edge,
+ * and the 7th LRPC request (composition-input adapter) strands on its body.
+ * Keep the mirror armed while a partially consumed message is pending. */
+static void arm_mirror_continuation( struct pipe_end *pipe_end )
+{
+    if (!pipe_end->pipe || pipe_end->pipe->sharing != (FILE_SHARE_READ | FILE_SHARE_WRITE)) return;
+    if (!(pipe_end->cont_armed = !list_empty( &pipe_end->message_queue ))) return;
+    fd_set_mirror_poll( pipe_end->fd );
+    set_fd_events( pipe_end->fd, pipe_end_get_poll_events( pipe_end->fd ) );
+}
+
 static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
 {
     struct iosb *iosb = async_get_iosb( async );
@@ -1638,6 +1669,18 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
         async_request_complete( async, status, out_size, out_size, buf );
     }
 
+    /* A duplex message-mode read that stopped mid-message (STATUS_BUFFER_OVERFLOW
+     * stream read, or a byte-size buffer filled inside one message) leaves the head
+     * message queued with read_pos advanced: the client's next REQ_read delivers the
+     * remainder.  Keep this end's inproc-sync mirror armed for that continuation:
+     * the fd has just lost its waiting async, so default_fd_get_poll_events() would
+     * disarm the mirror (mask 0) and the queued remainder would only drain on the
+     * next REQ_read's own reselect — one chunk per wake — stranding the 7th LRPC
+     * request (composition-input adapter) on its header/body split.  With the
+     * continuation armed, any relayed edge (and the queued read's arrival) drains
+     * the remaining bytes immediately, without needing a new peer write edge. */
+    arm_mirror_continuation( pipe_end );
+
     release_object( iosb );
 }
 
@@ -1660,10 +1703,16 @@ static void reselect_read_queue( struct pipe_end *pipe_end, int reselect_write )
     }
     ignore_reselect = 0;
 
+    if (!list_empty( &pipe_end->message_queue ))
+        arm_mirror_continuation( pipe_end );  /* continuation still pending: keep waking */
+
     if (pipe_end->connection)
     {
         if (list_empty( &pipe_end->message_queue ))
+        {
+            pipe_end->cont_armed = 0;
             fd_async_wake_up( pipe_end->connection->fd, ASYNC_TYPE_WAIT, STATUS_SUCCESS );
+        }
         else if (reselect_write)
             reselect_write_queue( pipe_end->connection );
     }
@@ -1687,7 +1736,18 @@ static void pipe_end_poll_event( struct fd *fd, int event )
         ignore_reselect = 0;
     }
 
-    set_fd_events( fd, default_fd_get_poll_events( fd ) );
+    set_fd_events( fd, pipe_end_get_poll_events( fd ) );
+}
+
+static int pipe_end_get_poll_events( struct fd *fd )
+{
+    struct pipe_end *pipe_end = get_fd_user( fd );
+    int events = default_fd_get_poll_events( fd );
+
+    /* a message-mode read parked mid-message (see arm_mirror_continuation) must
+     * keep the mirror's POLLIN armed across the header/body split */
+    if (pipe_end->cont_armed) events |= POLLIN;
+    return events;
 }
 
 static void reselect_write_queue( struct pipe_end *pipe_end )
