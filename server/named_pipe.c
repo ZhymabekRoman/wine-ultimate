@@ -59,12 +59,16 @@ struct relay_box
 {
     struct list          entry;      /* entry in the message relay list */
     data_size_t          offset;     /* position of the in-band u64 handle slot in the message */
-    obj_handle_t         src;        /* handle value as written, in the writer process */
+    unsigned long long   src;        /* handle value as written, in the writer process (full u64:
+                                      * Windows handles are 64-bit, and the ipcz slots of the types
+                                      * carrying ProxyIds/RouterIds (22/34/36) are 64-bit keys) */
     unsigned int         access;     /* access on the source handle (DUPLICATE_SAME_ACCESS) */
     struct process      *writer;     /* writer process (grabbed) */
     struct object       *obj;        /* source object (grabbed), resolved at write time */
     obj_handle_t         dst;        /* handle duplicated into the reader, 0 = not yet */
     struct process      *reader;     /* process dst belongs to, NULL while not duplicated */
+    unsigned short       type;       /* relay_ops message type (relay_free keeps the source open
+                                      * for the buffer types both brokers keep using) */
 };
 
 /* An instance caches, for both of the pipe ends it connected, the peer ids that
@@ -251,30 +255,51 @@ static int relay_wanted( struct pipe_end *pipe_end )
     return !memicmp_strW( pipe_end->pipe->obj.name->name, prefixW, sizeof(prefixW) );
 }
 
-/* in-band handle slots per mojo message type (body-relative offsets, -1 = none);
- * verified against the g35/g38 WA_PIPEX captures of the app<->browser bootstrap:
- * GetBufferResponse words [0x18][handle][result], EstablishGroupChannelRequest
- * [0x30][handle][handle][..], PassProxyOnChannelRequest [0x10][handle],
- * EstablishBrokerChannelRequest [0x20][handle][..], DuplicateBufferResponse
- * [id][id][version][handle] (+8/+16 are shared-buffer ids, not handles). */
+/* In-band handle slots per ipcz message type (body-relative offsets, -1 = none);
+ * canonical names/ids from the pinned Chromium 136.0.7103.0 reference
+ * (third_party/ipcz/src/ipcz/node_messages_generator.h, flat copies in /tmp/webres):
+ * ids 13/14/20/21/22/32/33/34/35/36 are NodeMessages; the slot offsets were verified
+ * against the g35/g38 WA_PIPEX captures of the app<->browser bootstrap and the
+ * gate69i capture (type 7 v0 params = StructHeader+NodeName+proto+portals + a
+ * 16-byte DriverTransport::Message {type,handle} at body+32, i.e. the handle u64 at
+ * body+40; type 14 driver object at body+16; AcceptParcel driver_objects arrays
+ * relayed at frame off=48/56).  m136 NodeMessages has no id 38; the legacy name is
+ * kept there for the observed wire traffic. */
 static const struct relay_op
 {
     unsigned short type;
     short slot1, slot2;
 } relay_ops[] =
 {
-    { 13,  8, -1 },  /* OpenChannelRequest { channel: handle<channel_endpoint> } */
-    { 14, 16,  8 },  /* AddBlockBuffer { block: handle<driver_object> } (NodeLink block; captures relay the handle at off=56/48) */
-    { 20, 24, -1 },  /* DuplicateBufferResponse { buffer } */
-    { 21,  8, -1 },  /* GetBufferRequest { buffer: handle<pending_buffer> } */
-    { 22,  8, -1 },  /* GetBufferResponse { buffer: handle<shared_buffer> } */
-    { 32,  8, -1 },  /* EstablishBrokerChannelRequest { broker: handle<bootstrap> } */
-    { 33,  8, -1 },  /* EstablishBrokerChannelResponse { broker } */
-    { 34,  8, 16 },  /* EstablishGroupChannelRequest { group, channel } */
-    { 35,  8, -1 },  /* EstablishGroupChannelResponse { broker } */
-    { 36,  8, -1 },  /* PassProxyOnChannelRequest { interface_endpoint } */
-    { 38,  8, -1 },  /* PassInterfaceEndpointRequest { interface_endpoint } */
+    {  7, 40, -1 },  /* ConnectFromBrokerToBroker { buffer: driver_object } — the bidirectional
+                      * NodeLink handshake on every mojo pipe (184/200-byte frames, gate69i
+                      * seq=3/4 both directions, in-band handle 0x48 = the NodeLinkMemory
+                      * primary block buffer); was not relayed, so the primary block buffer
+                      * crossed as a writer-local handle on every pipe */
+    { 13,  8, -1 },  /* RequestIndirectIntroduction (legacy name OpenChannelRequest) */
+    { 14, 16,  8 },  /* AddBlockBuffer { id, block_size, buffer: driver_object } (NodeLink block; captures relay the handle at off=56/48) */
+    { 20, 24, -1 },  /* AcceptParcel (legacy name DuplicateBufferResponse) { ... driver_objects[] } */
+    { 21,  8, -1 },  /* AcceptParcelDriverObjects (legacy name GetBufferRequest) { driver_objects[] } */
+    { 22,  8, -1 },  /* RouteClosed { sublink, sequence_length } (legacy name GetBufferResponse) — u64 id slot, see relay_slot_is_id() */
+    { 32,  8, -1 },  /* StopProxying (legacy name EstablishBrokerChannelRequest) */
+    { 33,  8, -1 },  /* ProxyWillStop (legacy name EstablishBrokerChannelResponse) */
+    { 34,  8, 16 },  /* BypassPeerWithLink { referral_header: link name u64, sublink, link: driver_object } (legacy name EstablishGroupChannelRequest) */
+    { 35,  8, -1 },  /* StopProxyingToLocalPeer (legacy name EstablishGroupChannelResponse) */
+    { 36,  8, -1 },  /* FlushRouter { router: RouterId (u64 ProxyId, e.g. 0x1_00000000) } (legacy name PassProxyOnChannelRequest) — u64 id slot */
+    { 38,  8, -1 },  /* (no m136 NodeMessages id 38) legacy name PassInterfaceEndpointRequest { interface_endpoint } */
 };
+
+/* Types whose in-band slot is a 64-bit ipcz id (RouterId/ProxyId on 36, the
+ * ReferralHeader link name + sublink on 34, sublink+sequence_length on 22) rather
+ * than a driver-object handle.  Their keys are stored as full u64: a value with the
+ * high 32 bits set (0x1_00000000) is a valid slot, not "not a 32-bit handle".  When
+ * the low 32 bits do resolve to a handle in the writer the object is relayed as
+ * usual (the old 32-bit-slot convention); when they don't, the full u64 id is
+ * logged so the decode pass sees the handshake token. */
+static int relay_slot_is_id( unsigned short type )
+{
+    return type == 22 || type == 34 || type == 36;
+}
 
 /* WA_MOJO_RELAY: on AcceptParcel (ipcz message_id 20, the relay's "op=20") the
  * payload rides in the NodeLink shared-memory block and the in-band params carry
@@ -378,13 +403,21 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                 so = body + slots[s];
                 if (so + 8 > off + fnum || so + 8 > len) continue;  /* slot lands in a later fragment */
                 for (k = 7; k >= 0; k--) v = (v << 8) | b[so+k];
-                if (v >> 32) continue;        /* not a 32-bit handle value (e.g. -1 = empty) */
+                if (v == ~0ull) continue;     /* -1 = serialized empty slot */
                 h = (obj_handle_t)v;
-                if (h < 0x10) continue;       /* serialized empty handle */
-                if (!(obj = get_handle_obj( current->process, h, 0, NULL )))
+                obj = (h >= 0x10) ? get_handle_obj( current->process, h, 0, NULL ) : NULL;
+                if (!obj)
                 {
-                    clear_error();
-                    continue;                 /* not a handle in the writer: leave bytes untouched */
+                    clear_error();            /* low-32 is not a handle in the writer */
+                    if (!relay_slot_is_id( type )) continue;  /* leave the bytes untouched */
+                    /* 64-bit ipcz id slot (RouterId/ProxyId/ReferralHeader/sublink): the key
+                     * is the full u64 (0x1_00000000-style ProxyIds included); ids are
+                     * link-global, so the reader consumes the writer's value unmodified */
+                    fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u id=%016llx",
+                             current->process->id, type, so, v );
+                    fputc( '\n', stderr );
+                    s_line = 1;
+                    continue;
                 }
                 if (!(box = mem_alloc( sizeof(*box) )))
                 {
@@ -402,18 +435,21 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                     list_init( message->relay );
                 }
                 box->offset = so;
-                box->src    = h;
+                box->src    = v;
                 box->access = get_handle_access( current->process, h );
                 box->writer = (struct process *)grab_object( current->process );
                 box->obj    = obj;
                 box->dst    = 0;
                 box->reader = NULL;
+                box->type   = type;
                 list_add_tail( message->relay, &box->entry );
-                if (type == 14 && box->obj->ops->type == &mapping_type)
+                if ((type == 14 || type == 7) && box->obj->ops->type == &mapping_type)
                 {
-                    /* latest AddBlockBuffer wins: keep our own dup of its unix file (a struct fd
-                     * is not refcounted: close_fd frees it under a grab, gate69h SIGSEGV) so the
-                     * block bytes behind every later AcceptParcel blk= can be mapped here */
+                    /* latest block buffer wins (AddBlockBuffer id>0, or the ConnectFromBrokerToBroker
+                     * primary BufferId-0 mapping relayed on the handshake): keep our own dup of its
+                     * unix file (a struct fd is not refcounted: close_fd frees it under a grab,
+                     * gate69h SIGSEGV) so the block bytes behind every later AcceptParcel blk= can
+                     * be mapped here */
                     struct fd *bfd = box->obj->ops->get_fd( box->obj );
                     if (bfd)
                     {
@@ -424,14 +460,14 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                         {
                             if (writer_end->blk_fd != -1) close( writer_end->blk_fd );
                             writer_end->blk_fd = d;
-                            fprintf( stderr, "WA_RELAY: M pid=%04x op=14 blkfd=%d\n",
-                                     current->process->id, d );
+                            fprintf( stderr, "WA_RELAY: M pid=%04x op=%u blkfd=%d\n",
+                                     current->process->id, type, d );
                         }
                     }
                 }
                 s_line = 1;
-                fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u src=%04x access=%08x",
-                         current->process->id, type, so, h, box->access );
+                fprintf( stderr, "WA_RELAY: S pid=%04x op=%u off=%u src=%016llx access=%08x",
+                         current->process->id, type, so, box->src, box->access );
                 if (type == 20) relay_dump_blk( writer_end, box->obj, b, off, fnum, len );
                 fputc( '\n', stderr );
             }
@@ -472,7 +508,7 @@ static void relay_patch( struct pipe_message *message, struct process *reader,
                 clear_error();
                 continue;  /* keep the raw value; the reader sees what Windows would report */
             }
-            fprintf( stderr, "WA_RELAY: D pid=%04x src=%04x -> pid=%04x dst=%04x off=%u\n",
+            fprintf( stderr, "WA_RELAY: D pid=%04x src=%016llx -> pid=%04x dst=%04x off=%u\n",
                      box->writer->id, box->src, reader->id, dst, box->offset );
             if (box->reader) release_object( box->reader );  /* old value leaks in the old reader */
             box->dst    = dst;
@@ -503,14 +539,19 @@ static void relay_free( struct pipe_message *message, int close_src )
          * Never close a process object on this path; other in-band objects (shared buffers,
          * endpoints, events) keep the opts=3 close to avoid leaking table slots.
          */
-        if (close_src && box->obj->ops->type != &process_type)
+        /* gate71: the ConnectFromBrokerToBroker (ipcz id 7) buffer is the NodeLinkMemory
+         * primary block buffer (BufferId 0): both brokers keep allocating in it after the
+         * handshake, so its writer-side source handle survives delivery (with opts=3 close
+         * the relayed run regressed to S=153/D=9, browser dead at t100, 0 msedge windows;
+         * the un-relayed gate69i baseline was S=628/D=34, 9 windows). */
+        if (close_src && box->obj->ops->type != &process_type && box->type != 7)
         {
-            close_handle( box->writer, box->src );  /* mojo consumed the in-band handle (opts=3) */
-            fprintf( stderr, "WA_RELAY: C pid=%04x src=%04x off=%u\n", box->writer->id, box->src, box->offset );
+            close_handle( box->writer, (obj_handle_t)box->src );  /* mojo consumed the in-band handle (opts=3) */
+            fprintf( stderr, "WA_RELAY: C pid=%04x src=%016llx off=%u\n", box->writer->id, box->src, box->offset );
         }
         else if (close_src)
-            fprintf( stderr, "WA_RELAY: K pid=%04x src=%04x off=%u (process handle kept)\n",
-                     box->writer->id, box->src, box->offset );
+            fprintf( stderr, "WA_RELAY: K pid=%04x src=%016llx off=%u op=%u (source kept)\n",
+                     box->writer->id, box->src, box->offset, box->type );
         release_object( box->writer );
         if (box->reader) release_object( box->reader );
         release_object( box->obj );
