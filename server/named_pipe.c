@@ -366,7 +366,17 @@ static const struct relay_op
                       * 4 handshake lines / 105 op=20) — one handle per type-7 v0, proven by
                       * node_messages_generator.h (IPCZ_MSG_PARAM_DRIVER_OBJECT(buffer) x1). */
     { 13,  8, -1 },  /* RequestIndirectIntroduction (legacy name OpenChannelRequest) */
-    { 14, 16,  8 },  /* AddBlockBuffer { id, block_size, buffer: driver_object } (NodeLink block; captures relay the handle at off=56/48) */
+    { 14, 16, -1 },  /* AddBlockBuffer (m136 v0 params, node_messages.h AddBlockBuffer_Params::V0 +
+                      * AddBlockBuffer_Versions::V0 kParams): StructHeader {u32 num_bytes,u32 version}
+                      * at body+0, then {BufferId id:u32 @body+8, u32 block_size @body+12,
+                      * DriverObject buffer @body+16}.  The Windows DriverObject serializes in place
+                      * as its u64 HANDLE (same encoding as the type-7 handle at body+72), so slot1=16
+                      * is the Section.  id=0 is the NodeLinkMemory primary block, id>0 the sidecar
+                      * block insurance for >128 KiB bursts.  Op 14 is COLD (0 occurrences in the
+                      * gate69i/71/95/102/108b pipex captures), so the slot comes from the sources;
+                      * relay_scan logs a WA_RELAY: B14 id/size census per frame and falls back to
+                      * the last 8-aligned resolvable u64 in the body region.  (Legacy slot2=8 read
+                      * the {id,block_size} u32 pair as a handle word — inert, id < 0x10.) */
     { 20, 24, -1 },  /* AcceptParcel (legacy name DuplicateBufferResponse) { ... driver_objects[] } */
     { 21,  8, -1 },  /* AcceptParcelDriverObjects (legacy name GetBufferRequest) { driver_objects[] } */
     { 22,  8, -1 },  /* RouteClosed { sublink, sequence_length } (legacy name GetBufferResponse) — u64 id slot, see relay_slot_is_id() */
@@ -507,7 +517,7 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
         unsigned int magic = b[off] | (b[off+1] << 8) | (b[off+2] << 16) | ((unsigned int)b[off+3] << 24);
         data_size_t fnum, body;
         unsigned short type, hdr;
-        int i, s, k, s_line = 0;
+        int i, s, k, s_line = 0, t14_box = 0;
 
         if (magic != 0x10) break;  /* frames must start at a message boundary */
         fnum = b[off+4] | (b[off+5] << 8) | (b[off+6] << 16) | ((unsigned int)b[off+7] << 24);
@@ -523,6 +533,21 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
         if (i < ARRAY_SIZE(relay_ops))
         {
             const short slots[2] = { relay_ops[i].slot1, relay_ops[i].slot2 };
+
+            if (type == 14 && body + 16 <= off + fnum && body + 16 <= len)
+            {
+                /* WA_RELAY: B14 — AddBlockBuffer census: record the block id/size of every
+                 * sidecar section the NodeLink shares (BufferId 0 = primary ring block,
+                 * id>0 = block insurance for >128 KiB parcel bursts), so a future sidecar
+                 * burst is visible in the trace even when the driver-object slot does not
+                 * resolve and the frame is forwarded unpatched.  Wire: {id:u32 @body+8,
+                 * block_size:u32 @body+12} (node_messages.h V0); size widened to u64 for
+                 * the log. */
+                unsigned int id = b[body+8] | (b[body+9] << 8) | (b[body+10] << 16) | ((unsigned int)b[body+11] << 24);
+                unsigned long long size = b[body+12] | (b[body+13] << 8) | (b[body+14] << 16) |
+                                          ((unsigned long long)b[body+15] << 24);
+                fprintf( stderr, "WA_RELAY: B14 pid=%04x size=%llu id=%08x\n", current->process->id, size, id );
+            }
 
             for (s = 0; s < 2; s++)
             {
@@ -577,6 +602,7 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                 box->type   = type;
                 box->end    = writer_end;
                 list_add_tail( message->relay, &box->entry );
+                if (type == 14) t14_box = 1;
                 if ((type == 14 || type == 7) &&
                     (box->obj->ops->type == &mapping_type || box->obj->ops->get_fd))
                 {
@@ -646,6 +672,90 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                 }
                 if (type == 20) relay_dump_blk( writer_end, box->obj, b, off, fnum, len );
                 fputc( '\n', stderr );
+            }
+            if (type == 14 && !t14_box)
+            {
+                /* Defensive generic slot resolution for the COLD op-14 (0 occurrences in all
+                 * pipex captures, so slot1=16 is source-derived, never capture-verified): if the
+                 * source-derived slot did not resolve to a handle in the writer, scan the body
+                 * region from the tail and relay the LAST 8-aligned u64 that does — the serialized
+                 * DriverObject rides at the tail of the v0 params (in-place u64 HANDLE, same
+                 * encoding as the type-7 handle at body+72) — so the Section still reaches the
+                 * reader (relay_patch dups it with the gate108c SD-exempt mapping dup, like type 7)
+                 * and its block bytes stay dumpable via the adopted blk_fd.  If nothing resolves,
+                 * forward unpatched (the historical behavior). */
+                data_size_t so;
+
+                for (so = off + fnum - 8; so >= body + 8 && so + 8 <= len; so -= 8)
+                {
+                    unsigned long long v = 0;
+                    obj_handle_t h;
+                    struct object *obj;
+                    struct relay_box *box;
+
+                    for (k = 7; k >= 0; k--) v = (v << 8) | b[so+k];
+                    if (v == ~0ull) continue;
+                    h = (obj_handle_t)v;
+                    obj = (h >= 0x10) ? get_handle_obj( current->process, h, 0, NULL ) : NULL;
+                    if (!obj)
+                    {
+                        clear_error();
+                        continue;
+                    }
+                    if (!(box = mem_alloc( sizeof(*box) )))
+                    {
+                        release_object( obj );
+                        return;
+                    }
+                    if (!message->relay)
+                    {
+                        if (!(message->relay = malloc( sizeof(*message->relay) )))
+                        {
+                            free( box );
+                            release_object( obj );
+                            return;
+                        }
+                        list_init( message->relay );
+                    }
+                    box->offset = so;
+                    box->src    = v;
+                    box->access = get_handle_access( current->process, h );
+                    box->writer = (struct process *)grab_object( current->process );
+                    box->obj    = obj;
+                    box->dst    = 0;
+                    box->reader = NULL;
+                    box->type   = type;
+                    box->end    = writer_end;
+                    list_add_tail( message->relay, &box->entry );
+                    if (box->obj->ops->type == &mapping_type || box->obj->ops->get_fd)
+                    {
+                        struct fd *bfd = box->obj->ops->get_fd( box->obj );
+                        if (bfd)
+                        {
+                            int ufd = get_unix_fd( bfd ), d = -1;
+                            if (ufd != -1) d = dup( ufd );
+                            release_object( bfd );
+                            if (d != -1)
+                            {
+                                if (writer_end->blk_fd != -1) close( writer_end->blk_fd );
+                                writer_end->blk_fd = d;
+                                fprintf( stderr, "WA_RELAY: M pid=%04x op=14 blkfd=%d\n",
+                                         current->process->id, d );
+                            }
+                        }
+                    }
+                    {
+                        char tname[16];
+                        unsigned int nl = obj->ops->type->name.len / sizeof(WCHAR);
+                        if (nl > 12) nl = 12;
+                        for (k = 0; k < (int)nl; k++) tname[k] = (char)obj->ops->type->name.str[k];
+                        tname[nl] = 0;
+                        fprintf( stderr, "WA_RELAY: S pid=%04x op=14 off=%u src=%016llx access=%08x obj=%s slot=tailscan",
+                                 current->process->id, so, box->src, box->access, tname );
+                    }
+                    fputc( '\n', stderr );
+                    break;
+                }
             }
         }
         if (type == 20 && !s_line)  /* AcceptParcel with no resolved in-band handle: log the fragment ref alone */
@@ -720,7 +830,24 @@ static void relay_patch( struct pipe_message *message, struct process *reader,
 
         if (!box->dst || box->reader != reader)
         {
-            obj_handle_t dst = alloc_handle( reader, box->obj, box->access, 0 );
+            /* gate108b: the browser's NodeLinkMemory Section (op=7 slot2, wire access
+             * 0x7 = SECTION_QUERY|MAP_WRITE|MAP_READ from CreateFileMappingW
+             * PAGE_READWRITE) failed the reader dup with STATUS_ACCESS_DENIED: the
+             * reader maps the relayed ring with SECTION_MAP_READ|WRITE bits the
+             * writer-side handle mask (and the type mapping) does not guarantee;
+             * dup with the reader-safe union mask (mapping prot follows the section,
+             * PAGE_READWRITE both ends).
+             * gate108c: the DT line localizes the failure past map_access
+             * (mapped=00000007) to the SD check — the browser's section object carries
+             * an explicit SD whose ACE mask (generic-read class) intersects 0x7 in
+             * QUERY|READ only, so MAP_WRITE denies (granted=0).  Windows
+             * DuplicateHandle(DUPLICATE_SAME_ACCESS) never rechecks the SD beyond the
+             * source handle's own granted mask; alloc_handle_no_access_check stores
+             * box->access verbatim = the true relay dup. */
+            obj_handle_t dst;
+            if (box->obj->ops->type == &mapping_type)
+                dst = alloc_handle_no_access_check( reader, box->obj, box->access, 0 );
+            else dst = alloc_handle( reader, box->obj, box->access, 0 );
             if (!dst)
             {
                 /* gate102: the reader keeps the writer's raw handle word.  The gate100 run showed the
@@ -732,6 +859,22 @@ static void relay_patch( struct pipe_message *message, struct process *reader,
                 clear_error();
                 fprintf( stderr, "WA_RELAY: DF pid=%04x src=%016llx -> pid=%04x off=%u op=%u access=%08x err=%08x\n",
                          box->writer->id, box->src, reader->id, box->offset, box->type, box->access, err );
+                /* gate108 localize: alloc_handle (server/handle.c:303) fails in exactly two
+                 * places — map_access( type generic mapping ) => 0 (handle.c:307,
+                 * STATUS_ACCESS_DENIED) or check_object_access => token_access_check over
+                 * the object's SD (handle.c:312).  Print the mapped mask, the SD pointer and
+                 * the SD verdict to pick the reader-side dup fix (mask union vs SD-check skip);
+                 * requested mask = access= above (writer handle access, CreateFileMappingW
+                 * PAGE_READWRITE => SECTION_QUERY|MAP_WRITE|MAP_READ = 0x7). */
+                {
+                    unsigned int mapped = box->obj->ops->map_access( box->obj, box->access );
+                    unsigned int granted = mapped;
+                    int pass = mapped ? check_object_access( NULL, box->obj, &granted ) : 0;
+                    fprintf( stderr, "WA_RELAY: DT pid=%04x src=%016llx -> pid=%04x off=%u op=%u access=%08x mapped=%08x sd=%p granted=%08x pass=%d\n",
+                             box->writer->id, box->src, reader->id, box->offset, box->type,
+                             box->access, mapped, box->obj->sd, granted, pass );
+                    if (!pass) clear_error();
+                }
                 continue;  /* keep the raw value; the reader sees what Windows would report */
             }
             fprintf( stderr, "WA_RELAY: D pid=%04x src=%016llx -> pid=%04x dst=%04x off=%u op=%u\n",
@@ -2442,6 +2585,10 @@ static void init_pipe_end( struct pipe_end *pipe_end, struct named_pipe *pipe,
     pipe_end->blk_fd = -1;
     pipe_end->ring_fd = -1;
     pipe_end->ev_obj = NULL;
+    pipe_end->hb_timeout = NULL;  /* gate108: gate104 added the heartbeat timer without
+                                   * initializing it here — pipe_end_destroy's
+                                   * remove_timeout_user ate a garbage pointer on every
+                                   * server teardown (startup segfault, gate108) */
     init_async_queue( &pipe_end->read_q );
     init_async_queue( &pipe_end->write_q );
     list_init( &pipe_end->message_queue );
