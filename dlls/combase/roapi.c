@@ -65,6 +65,63 @@ static BOOL dataexchange_enabled( void )
     return cached;
 }
 
+/* Reads one hive's ActivatableClassId\<class>\DllPath seed (the packaged prefix's own
+ * answer: an absolute path, REG_SZ / REG_EXPAND_SZ, to the module that exports the
+ * class's DllGetActivationFactory).  Answers S_OK with a heap copy of the expanded
+ * path, S_FALSE when the hive names no module for the class. */
+static HRESULT read_seed_dllpath( HKEY root, const WCHAR *classid, WCHAR **out )
+{
+    static const WCHAR runtime_key[] = L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId";
+    HKEY hkey_root, hkey_class;
+    WCHAR *buf;
+    DWORD type, size;
+    HRESULT hr = S_FALSE;
+
+    if (RegOpenKeyExW( root, runtime_key, 0, KEY_READ, &hkey_root )) return S_FALSE;
+    if (RegOpenKeyExW( hkey_root, classid, 0, KEY_READ, &hkey_class ))
+    {
+        RegCloseKey( hkey_root );
+        return S_FALSE;
+    }
+    RegCloseKey( hkey_root );
+    if (RegQueryValueExW( hkey_class, L"DllPath", NULL, &type, NULL, &size )
+            || (type != REG_SZ && type != REG_EXPAND_SZ) || size <= sizeof( WCHAR )
+            || !(buf = malloc( size )))
+    {
+        RegCloseKey( hkey_class );
+        return S_FALSE;
+    }
+    if (RegQueryValueExW( hkey_class, L"DllPath", NULL, NULL, (BYTE *)buf, &size ))
+    {
+        RegCloseKey( hkey_class );
+        free( buf );
+        return S_FALSE;
+    }
+    RegCloseKey( hkey_class );
+
+    if (type == REG_EXPAND_SZ)
+    {
+        DWORD len = ExpandEnvironmentStringsW( buf, NULL, 0 );
+        WCHAR *expanded = len ? malloc( len * sizeof( WCHAR )) : NULL;
+        if (expanded && ExpandEnvironmentStringsW( buf, expanded, len ))
+        {
+            free( buf );
+            buf = expanded;
+        }
+        else free( expanded );
+    }
+    *out = buf;
+    return S_OK;
+}
+
+/* The prefix's own module for an activatable class, per-user hive over machine hive
+ * (the dual-hive view class_is_agile and server_clsid_from_classid use). */
+static HRESULT seed_dllpath_from_classid( const WCHAR *classid, WCHAR **out )
+{
+    if (SUCCEEDED( read_seed_dllpath( HKEY_CURRENT_USER, classid, out ))) return S_OK;
+    return read_seed_dllpath( HKEY_LOCAL_MACHINE, classid, out );
+}
+
 /*
  * get_library_for_classid answers the module an activatable class's factory lives
  * in.  An out-of-proc (Server) class answers *out == NULL with S_OK: its key carries a
@@ -417,8 +474,20 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
      * AppInstance route above to the rest of the namespace (AppActivationArguments,
      * ActivationRegistrationManager: the redirection surface twinapi.appcore's dummy
      * factory answers wholesale). */
+    /* The MRT Core namespace answers from the module the prefix seed names, with the
+     * builtin as fallback.  A WinUI 3 app ships MRT Core side by side
+     * (Microsoft.Windows.ApplicationModel.Resources.dll + its MRM.dll dependency), and
+     * that provider answers the shape Microsoft.ui.xaml.dll's
+     * ModernResourceProvider::Create(pCore, ppResourceProvider) QueryInterfaces for
+     * (IResourceProvider); the builtin answers the UWP ResourceLoader/ResourceManager
+     * shape and the create fails E_NOINTERFACE (0x80000002), leaving the XAML root with
+     * no resource provider, so the page body, its Loaded handler and the
+     * CoreWebView2Environment creation behind it never run.  Seed first keeps the app's
+     * own provider in charge (the pre-route answer for these classes), and the builtin
+     * still serves a prefix whose seed names a module the loader cannot find. */
     if (!wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.Resources.", 45 ))
     {
+        if (SUCCEEDED( seed_dllpath_from_classid( classid, out ))) return S_OK;
         *out = wcsdup(L"windows.applicationmodel.resources.core.dll");
         return S_OK;
     }
