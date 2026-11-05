@@ -2434,12 +2434,22 @@ static HRESULT WINAPI cand_Qualifiers( void *iface, void **out )
     *out = &vec->vt_vv;
     return S_OK;
 }
-static HRESULT WINAPI cand_IsMatch( void *iface, INT32 *v ) { *v = TRUE; return S_OK; }
-static HRESULT WINAPI cand_IsMatchAsDefault( void *iface, INT32 *v ) { *v = TRUE; return S_OK; }
-static HRESULT WINAPI cand_IsDefault( void *iface, INT32 *v ) { *v = FALSE; return S_OK; }
+static HRESULT WINAPI cand_IsMatch( void *iface, INT32 *v ) { TRACE( "cand get_IsMatch\n" ); *v = TRUE; return S_OK; }
+static HRESULT WINAPI cand_IsMatchAsDefault( void *iface, INT32 *v ) { TRACE( "cand get_IsMatchAsDefault\n" ); *v = TRUE; return S_OK; }
+/* IResourceCandidate::get_Value [9] (HSTRING) — the candidate's text value */
+static HRESULT WINAPI cand_Value( void *iface, HSTRING *v )
+{
+    struct res_candidate *impl = cand_from( iface );
+    TRACE( "cand get_Value\n" );
+    if (!v) return E_POINTER;
+    return WindowsCreateString( impl->value, (UINT32)lstrlenW( impl->value ), v );
+}
+/* IResourceCandidate2::get_IsDefault [7] */
+static HRESULT WINAPI cand_IsDefault( void *iface, INT32 *v ) { TRACE( "cand2 get_IsDefault\n" ); *v = FALSE; return S_OK; }
 static HRESULT WINAPI cand_ValueAsString( void *iface, HSTRING *v )
 {
     struct res_candidate *impl = cand_from( iface );
+    TRACE( "cand get_ValueAsString\n" );
     return WindowsCreateString( impl->value, (UINT32)lstrlenW( impl->value ), v );
 }
 static HRESULT WINAPI cand_GetValueAsFileAsync( void *iface, void **op )
@@ -2470,10 +2480,12 @@ static HRESULT WINAPI cand_GetQualifierValue( void *iface, HSTRING name, HSTRING
     key_release( tmp, owned );
     return hr;
 }
+/* IResourceCandidate: [II 5][Qualifiers 6][IsMatch 7][IsMatchAsDefault 8][Value 9]
+ *                     [GetValueAsString 10][GetValueAsFileAsync 11][GetQualifierValue 12] */
 static const void *res_candidate_vtbl[] =
 {
     cand_QueryInterface, cand_AddRef, cand_Release, cand_GetIids, cand_GetRuntimeClassName, cand_GetTrustLevel,
-    cand_Qualifiers, cand_IsMatch, cand_IsMatchAsDefault, cand_IsDefault,
+    cand_Qualifiers, cand_IsMatch, cand_IsMatchAsDefault, cand_Value,
     cand_ValueAsString, cand_GetValueAsFileAsync, cand_GetQualifierValue,
 };
 static HRESULT WINAPI cand2_QueryInterface( void *iface, REFIID iid, void **out ) { return cand_QueryInterface( cand2_from( iface ), iid, out ); }
@@ -2486,7 +2498,7 @@ static HRESULT WINAPI cand2_GetValueAsStreamAsync( void *iface, void **op ) { FI
 static const void *res_candidate2_vtbl[] =
 {
     cand2_QueryInterface, cand2_AddRef, cand2_Release, cand2_GetIids, cand2_GetRuntimeClassName, cand2_GetTrustLevel,
-    cand2_GetValueAsStreamAsync,
+    cand2_GetValueAsStreamAsync, cand_IsDefault,
 };
 static HRESULT WINAPI cand3_QueryInterface( void *iface, REFIID iid, void **out ) { return cand_QueryInterface( cand3_from( iface ), iid, out ); }
 static ULONG WINAPI cand3_AddRef( void *iface ) { return incr( &cand3_from( iface )->ref ); }
@@ -2673,13 +2685,46 @@ static ULONG WINAPI map_Release( void *iface ) { return decr( &map_from( iface )
 static HRESULT WINAPI map_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI map_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCEMAP, n ); }
 static HRESULT WINAPI map_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+/* IResourceMap::get_TopLevelResourceKey [6]: main resource map name ("Resources"
+ * for the package's resources.pri); subtrees report their prefix.  mrt100_app
+ * caches this as MainResourceMapName and composes ms-appx URIs from it. */
 static HRESULT WINAPI map_Uri( void *iface, HSTRING *uri )
 {
 
     if (!uri) return E_POINTER;    WCHAR buf[2200];
-    lstrcpyW( buf, L"ms-appx:///" );
+    TRACE( "map get_TopLevelResourceKey\n" );
+    lstrcpyW( buf, L"Resources" );
     if (map_from( iface )->prefix) lstrcatW( buf, map_from( iface )->prefix );
     return WindowsCreateString( buf, (UINT32)lstrlenW( buf ), uri );
+}
+/* forward: default-context accessors live in the ResourceContext section */
+static HRESULT get_current_context( void **out );
+
+/* implemented after struct res_context (needs its qualifier view layout) */
+static HRESULT WINAPI map_QualifierValues( void *iface, void **out );
+/* IResourceMap::get_Language [8]: primary-language qualifier of the map. */
+static HRESULT WINAPI map_Language( void *iface, HSTRING *language )
+{
+    const WCHAR *lang = L"en-US";
+    UINT32 i;
+
+    if (!language) return E_POINTER;
+    for (i = 0; i < ARRAYSIZE( default_qualifiers ); i++)
+        if (!lstrcmpW( default_qualifiers[i].key, L"Language" )) { lang = default_qualifiers[i].value; break; }
+    return WindowsCreateString( lang, (UINT32)lstrlenW( lang ), language );
+}
+/* IResourceMap::get_ResourceCount [9]: named-resource count of this map. */
+static HRESULT WINAPI map_ResourceCount( void *iface, UINT32 *count )
+{
+    struct res_map *impl = map_from( iface );
+
+    TRACE( "map get_ResourceCount\n" );
+    init_pri();
+    if (!count) return E_POINTER;
+    *count = the_index ? pri_map_count( the_index, impl->prefix ) : 0;
+    if (!*count) *count = 1;
+    TRACE( "map get_ResourceCount -> %u\n", *count );
+    return S_OK;
 }
 static HRESULT WINAPI map_GetValue( void *iface, HSTRING key, void **out )
 {
@@ -2761,10 +2806,13 @@ static HRESULT WINAPI map_GetSubtree( void *iface, HSTRING name, void **out )
     *out = NULL;
     return E_FAIL;
 }
+/* IResourceMap: [II 5][TopLevelResourceKey 6][QualifierValues 7][Language 8]
+ *               [ResourceCount 9][GetValue 10][GetValueForContext 11][GetSubtree 12] */
 static const void *res_map_vtbl[] =
 {
     map_QueryInterface, map_AddRef, map_Release, map_GetIids, map_GetRuntimeClassName, map_GetTrustLevel,
-    map_Uri, map_GetValue, map_GetValueForContext, map_GetSubtree,
+    map_Uri, map_QualifierValues, map_Language, map_ResourceCount,
+    map_GetValue, map_GetValueForContext, map_GetSubtree,
 };
 
 /* IResourceMap2: [II 5][GetByIndex 6][GetCount 7][GetFullCount 8][FullGetByIndex 9] */
@@ -2779,7 +2827,7 @@ static HRESULT WINAPI map2_GetRuntimeClassName( void *iface, HSTRING *n ) { retu
 static HRESULT WINAPI map2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI map2_GetByIndex( void *iface, UINT32 index, void **out )
 {
-
+    TRACE( "map2 GetByIndex %u\n", index );
     if (!out) return E_POINTER;    struct res_map *impl = map2_from( iface );
     WCHAR namebuf[2048];
     WCHAR *value = NULL;
@@ -2804,6 +2852,7 @@ static HRESULT WINAPI map2_GetByIndex( void *iface, UINT32 index, void **out )
 static HRESULT WINAPI map2_GetCount( void *iface, UINT32 *count )
 {
     struct res_map *impl = map2_from( iface );
+    TRACE( "map2 GetCount\n" );
     init_pri();
     if (!count) return E_POINTER;  /* mrt100_app probes with NULL */
     *count = the_index ? pri_map_count( the_index, impl->prefix ) : 0;
@@ -2932,7 +2981,7 @@ struct res_context
     UINT32 qcount;
     struct map_view qualifiers;
     struct str_vector languages;
-    HSTRING lang_items[1];
+    HSTRING lang_items[2];
 };
 static inline struct res_context *ctx_from( void *iface ) { return (struct res_context *)iface; }
 static inline struct res_context *ctx_named_from( void *iface ) { return (struct res_context *)((BYTE *)iface - sizeof(void *)); }
@@ -3048,6 +3097,21 @@ static HRESULT WINAPI ctx_QualifierValues( void *iface, void **out )
     incr( &impl->qualifiers.ref );
     return S_OK;
 }
+static HRESULT WINAPI map_QualifierValues( void *iface, void **out )
+{
+    struct res_context *ctx;
+    HRESULT hr;
+
+    TRACE( "map get_QualifierValues\n" );
+    if ((hr = get_current_context( (void **)&ctx ))) return hr;
+    /* the current context is the process-pinned default; the embedded
+     * qualifiers view rides its lifetime, so hand out the view and drop the
+     * context ref immediately (the view carries its own ref) */
+    *out = &ctx->qualifiers.vt_mv;
+    incr( &ctx->qualifiers.ref );
+    decr( &ctx->ref );
+    return S_OK;
+}
 static HRESULT WINAPI ctx_Reset( void *iface ) { TRACE( "stub\n" ); return S_OK; }
 static HRESULT WINAPI ctx_ResetQualifierValues( void *iface, void *names ) { TRACE( "stub\n" ); return S_OK; }
 static HRESULT WINAPI ctx_OverrideToMatch( void *iface, void *qualifiers ) { TRACE( "stub\n" ); return S_OK; }
@@ -3151,15 +3215,20 @@ static HRESULT create_context( struct res_context **out )
     ctx->languages.regs = NULL;
     ctx->languages.ref = 1;
     ctx->languages.items = ctx->lang_items;
-    ctx->languages.count = 1;
+    ctx->languages.count = 2;
     /* arm D: store the Languages element as a WindowsDuplicateString of the
      * reference (combase duplicate-of-reference -> WindowsCreateString, i.e.
      * the allocated/heap-flag hstring_private), isolating the stored element
-     * representation from the reference handle GetAt hands out. */
+     * representation from the reference handle GetAt hands out.  Windows
+     * reports the primary language plus its neutral parent (en-US, en). */
     {
+        static const WCHAR lang_en[] = { 'e', 'n', 0 };
+        static HSTRING_HEADER lang_header2;
         HSTRING ref;
         WindowsCreateStringReference( lang_enUS, 5, &lang_header, &ref );
         WindowsDuplicateString( ref, &ctx->lang_items[0] );
+        WindowsCreateStringReference( lang_en, 2, &lang_header2, &ref );
+        WindowsDuplicateString( ref, &ctx->lang_items[1] );
     }
     *out = ctx;
     return S_OK;
@@ -3779,6 +3848,7 @@ static HRESULT WINAPI rm_GetRuntimeClassName( void *iface, HSTRING *n ) { return
 static HRESULT WINAPI rm_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rm_MainResourceMap( void *iface, void **out )
 {
+    TRACE( "rm get_MainResourceMap\n" );
     *out = &main_map.vt_map;
     incr( &main_map.ref );
     return S_OK;
