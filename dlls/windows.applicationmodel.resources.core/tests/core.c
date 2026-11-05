@@ -37,9 +37,9 @@
  *     slots on factory after ActivateInstance: Current, IsResourceReference
  *   IResourceManager          {f744d97b-9988-44fb-abd6-5378844cfa8b}
  *     slots: MainResourceMap, AllResourceMaps, DefaultContext,
- *            LoadPriFiles, UnloadPriFiles
+ *            DefaultContext, LoadPriFiles, UnloadPriFiles
  *   IResourceMap              {72284824-db8c-42f8-b08c-53ff357dad82}
- *     slots: Uri, GetValue, GetValueForContext, GetSubtree
+ *     slots: TopLevelResourceKey, QualifierValues, Language, ResourceCount, GetValue, GetValueForContext, GetSubtree
  *   IResourceCandidate        {af5207d9-c433-4764-b3fd-8fa6bfbcbadc}
  *     slots: Qualifiers, IsMatch, IsMatchAsDefault, IsDefault,
  *            ValueAsString, GetValueAsFileAsync, GetQualifierValue
@@ -210,13 +210,13 @@ static void test_resourcemanager_lookup(void)
     ok(SUCCEEDED(hr) && rm, "IResourceManagerStatics::Current hr=%08x\n", hr);
     if (FAILED(hr) || !rm) goto done_factory;
 
-    /* ResourceManager QI IResourceManager, slot 6 MainResourceMap */
+    /* ResourceManager QI IResourceManager, slot 8 MainResourceMap */
     {
         void *rm2 = NULL;
         hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
         ok(hr == S_OK && rm2, "QI IResourceManager hr=%08x\n", hr);
         if (hr != S_OK) goto done_rm;
-        hr = CALL(rm2, 6, &map);
+        hr = CALL(rm2, 8, &map);
         ok(SUCCEEDED(hr) && map, "get_MainResourceMap hr=%08x\n", hr);
         CALL(rm2, 2, (ULONG*)&hr);
     }
@@ -224,7 +224,7 @@ static void test_resourcemanager_lookup(void)
 
     /* IResourceMap slot 7: GetValue(key) -> IResourceCandidate */
     WindowsCreateStringReference(L"Calculator", 10, &khdr, &hkey);
-    hr = CALL(map, 7, hkey, &cand);
+    hr = CALL(map, 10, hkey, &cand);
     ok(SUCCEEDED(hr) && cand, "MainResourceMap::GetValue(\"Calculator\") hr=%08x\n", hr);
     if (SUCCEEDED(hr) && cand)
     {
@@ -338,7 +338,7 @@ static void test_real_pri_lookup( void )
         void *rm2 = NULL;
         hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
         if (FAILED( hr )) goto done;
-        hr = CALL( rm2, 6, &map );  /* get_MainResourceMap */
+        hr = CALL( rm2, 8, &map );  /* get_MainResourceMap */
         CALL( rm2, 2, (ULONG*)&hr );
     }
     ok( SUCCEEDED( hr ) && map, "fixture: get_MainResourceMap hr=%08x\n", hr );
@@ -373,7 +373,7 @@ static void test_real_pri_lookup( void )
         HSTRING_HEADER hdr;
         WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &hdr, &hkey );
         cand = NULL;
-        hr = CALL( map, 7, hkey, &cand );  /* GetValue */
+        hr = CALL( map, 10, hkey, &cand );  /* GetValue */
         ok( SUCCEEDED( hr ) && cand, "fixture: GetValue(Resources\\CalculatorModeText) hr=%08x\n", hr );
         WindowsDeleteString( hkey );
         if (SUCCEEDED( hr ) && cand)
@@ -393,7 +393,7 @@ static void test_real_pri_lookup( void )
         HSTRING_HEADER hdr;
         void *sub2 = NULL;
         WindowsCreateStringReference( L"Resources", 9, &hdr, &hname );
-        hr = CALL( map, 9, hname, &sub );  /* GetSubtree */
+        hr = CALL( map, 12, hname, &sub );  /* GetSubtree */
         WindowsDeleteString( hname );
         ok( SUCCEEDED( hr ) && sub, "fixture: GetSubtree(Resources) hr=%08x\n", hr );
         if (SUCCEEDED( hr ) && sub)
@@ -412,7 +412,7 @@ static void test_real_pri_lookup( void )
                 HSTRING_HEADER khdr;
                 WindowsCreateStringReference( L"CalculatorModeText", 18, &khdr, &hkey );
                 cand = NULL;
-                hr = CALL( sub, 7, hkey, &cand );
+                hr = CALL( sub, 10, hkey, &cand );
                 WindowsDeleteString( hkey );
                 ok( SUCCEEDED( hr ) && cand, "fixture: subtree GetValue(CalculatorModeText) hr=%08x\n", hr );
                 if (SUCCEEDED( hr ) && cand)
@@ -457,7 +457,7 @@ static void test_real_pri_lookup( void )
                 HSTRING_HEADER khdr;
                 WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &khdr, &hkey );
                 cand = NULL;
-                hr = CALL( map, 8, hkey, ctx, &cand );  /* GetValueForContext */
+                hr = CALL( map, 11, hkey, ctx, &cand );  /* GetValueForContext */
                 WindowsDeleteString( hkey );
                 ok( SUCCEEDED( hr ) && cand, "fixture: GetValueForContext(en-GB) hr=%08x\n", hr );
                 if (SUCCEEDED( hr ) && cand)
@@ -508,7 +508,7 @@ static void test_real_pri_lookup( void )
                     static const WCHAR key[] = L"Files\\Assets\\CalculatorAppList.png";
                     WindowsCreateStringReference( key, (UINT32)(sizeof(key)/sizeof(WCHAR) - 1), &khdr, &hkey );
                     cand = NULL;
-                    hr = CALL( map, 8, hkey, ctx3, &cand );
+                    hr = CALL( map, 11, hkey, ctx3, &cand );
                     WindowsDeleteString( hkey );
                     ok( SUCCEEDED( hr ) && cand, "fixture: GetValueForContext(Files item) hr=%08x\n", hr );
                     if (SUCCEEDED( hr ) && cand)
@@ -629,7 +629,7 @@ static void test_getiids_nullargs( void )
             {
                 void *rm2 = NULL;
                 hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
-                if (SUCCEEDED( hr )) CALL( rm2, 6, &map );  /* get_MainResourceMap */
+                if (SUCCEEDED( hr )) CALL( rm2, 8, &map );  /* get_MainResourceMap */
                 CALL( rm2, 2, (ULONG*)&hr );
             }
             if (map)
@@ -1196,7 +1196,7 @@ static void test_parameterized_class_names(void)
     ok( hr == S_OK && rm2, "class names: QI IResourceManager hr=%08x\n", hr );
     if (hr == S_OK)
     {
-        hr = CALL( rm2, 7, &rmap );  /* IResourceManager::get_AllResourceMaps */
+        hr = CALL( rm2, 9, &rmap );  /* IResourceManager::get_AllResourceMaps */
         ok( hr == S_OK && rmap, "class names: get_AllResourceMaps hr=%08x\n", hr );
         if (rmap)
         {
@@ -1221,12 +1221,12 @@ static void test_parameterized_class_names(void)
             CALL( rmap, 2, &hr );
         }
         /* MainResourceMap -> a candidate -> its Qualifiers vector */
-        hr = CALL( rm2, 6, &map );
+        hr = CALL( rm2, 8, &map );
         ok( hr == S_OK && map, "class names: get_MainResourceMap hr=%08x\n", hr );
         if (SUCCEEDED( hr ) && map)
         {
             WindowsCreateStringReference( L"Calculator", 10, &khdr, &hkey );
-            hr = CALL( map, 7, hkey, &cand );  /* IResourceMap::GetValue */
+            hr = CALL( map, 10, hkey, &cand );  /* IResourceMap::GetValue */
             ok( SUCCEEDED( hr ) && cand, "class names: GetValue hr=%08x\n", hr );
             if (SUCCEEDED( hr ) && cand)
             {
@@ -1397,12 +1397,12 @@ static void test_virtualized_hstring(void)
                 hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT(rm, 0))(rm, &IID_IResourceManager_loc, &rm2);
                 if (SUCCEEDED(hr) && rm2)
                 {
-                    hr = CALL(rm2, 6, &map);  /* get_MainResourceMap */
+                    hr = CALL(rm2, 8, &map);  /* get_MainResourceMap */
                     if (SUCCEEDED(hr) && map)
                     {
                         s10calc.mt = NULL; s10calc.cch = 10; s10calc.pad = 0; lstrcpyW(s10calc.chars, L"Calculator");
                         hcalc = (HSTRING)((char *)&s10calc + 7);
-                        hr = CALL(map, 7, hcalc, &cand);  /* IResourceMap::GetValue */
+                        hr = CALL(map, 10, hcalc, &cand);  /* IResourceMap::GetValue */
                         ok(SUCCEEDED(hr) && cand, "virt-hstring tag7: MainResourceMap::GetValue(Calculator) hr=%08x\n", hr);
                         if (cand) CALL(cand, 2, (ULONG *)&hr);
                     }
@@ -1736,7 +1736,7 @@ static void test_ccw_string_key( void )
                 hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, const IID *, void **))VT( rm, 0 ))( rm, &IID_IResourceManager_loc, &rm2 );
                 if (SUCCEEDED( hr ) && rm2)
                 {
-                    hr = CALL( rm2, 6, &map );  /* get_MainResourceMap */
+                    hr = CALL( rm2, 8, &map );  /* get_MainResourceMap */
                     if (SUCCEEDED( hr ) && map)
                     {
                         /* the map answers any key (key-as-value stub tier when
@@ -1749,7 +1749,7 @@ static void test_ccw_string_key( void )
 
                         base[0] = got[0] = 0;
                         WindowsCreateStringReference( L"Resources\\CalculatorModeText", 28, &hdr, &hres );
-                        hr = CALL( map, 7, hres, &cand );  /* real-HSTRING baseline */
+                        hr = CALL( map, 10, hres, &cand );  /* real-HSTRING baseline */
                         if (SUCCEEDED( hr ) && cand)
                         {
                             cand_get_value( cand, base, ARRAYSIZE( base ) );
@@ -1758,7 +1758,7 @@ static void test_ccw_string_key( void )
                         ok( !wcscmp( base, L"Calculator" ), "ccw-key: baseline pri value is '%s'\n", wine_dbgstr_w( base ) );
 
                         cand = NULL;
-                        hr = CALL( map, 7, (HSTRING)&ccw_reskey, &cand );  /* IResourceMap::GetValue */
+                        hr = CALL( map, 10, (HSTRING)&ccw_reskey, &cand );  /* IResourceMap::GetValue */
                         ok( SUCCEEDED( hr ) && cand, "ccw-key: MainResourceMap::GetValue(CCW pri key) hr=%08x\n", hr );
                         if (cand)
                         {
@@ -1769,11 +1769,11 @@ static void test_ccw_string_key( void )
                         }
 
                         cand = NULL;
-                        hr = CALL( rm2, 8, &defctx );  /* get_DefaultContext */
+                        hr = CALL( rm2, 10, &defctx );  /* get_DefaultContext */
                         if (SUCCEEDED( hr ) && defctx)
                         {
                             got[0] = 0;
-                            hr = CALL( map, 8, (HSTRING)&ccw_reskey, defctx, &cand );  /* GetValueForContext */
+                            hr = CALL( map, 11, (HSTRING)&ccw_reskey, defctx, &cand );  /* GetValueForContext */
                             ok( SUCCEEDED( hr ) && cand, "ccw-key: GetValueForContext(CCW pri key) hr=%08x\n", hr );
                             if (cand)
                             {
@@ -2125,7 +2125,7 @@ static void test_collections_abi_slots( void )
     hr = QI_SLOT( rm, &IID_IResourceManager_loc, &rm2 );
     if (FAILED( hr ) || !rm2) goto done;
 
-    hr = CALL( rm2, 7, &rmaps );                    /* get_AllResourceMaps */
+    hr = CALL( rm2, 9, &rmaps );                    /* get_AllResourceMaps */
     ok( hr == S_OK && rmaps, "abi: get_AllResourceMaps hr=%08x\n", hr );
     if (SUCCEEDED( hr ) && rmaps)
     {
@@ -2167,12 +2167,12 @@ static void test_collections_abi_slots( void )
         rmaps = NULL;
     }
 
-    hr = CALL( rm2, 6, &map );                      /* get_MainResourceMap */
+    hr = CALL( rm2, 8, &map );                      /* get_MainResourceMap */
     if (SUCCEEDED( hr ) && map)
     {
         WindowsCreateStringReference( L"Calculator", 10, &hdr3, &hres );
         cand = NULL;
-        hr = CALL( map, 7, hres, &cand );           /* IResourceMap::GetValue */
+        hr = CALL( map, 10, hres, &cand );           /* IResourceMap::GetValue */
         ok( SUCCEEDED( hr ) && cand, "abi: GetValue(Calculator) hr=%08x\n", hr );
         if (SUCCEEDED( hr ) && cand)
         {

@@ -70,6 +70,8 @@ static const GUID IID_IResourceCandidate_g        = {0xaf5207d9, 0xc433, 0x4764,
 static const GUID IID_IResourceCandidate2_g       = {0x69e5b468, 0xf6fc, 0x4013, {0xaa, 0xa2, 0xd5, 0x3f, 0x17, 0x57, 0xd3, 0xb5}};
 static const GUID IID_IResourceCandidate3_g       = {0x08ae97f8, 0x517a, 0x4674, {0x95, 0x8c, 0x4a, 0x3c, 0x7c, 0xd2, 0xcc, 0x6b}};
 static const GUID IID_INamedResource_g            = {0x1c98c219, 0x0b13, 0x4240, {0x89, 0xa5, 0xd4, 0x95, 0xdc, 0x18, 0x9a, 0x00}};
+static const GUID IID_IResourceLoader_g           = {0x59ed1f35, 0x0942, 0x4b61, {0x9a, 0xef, 0x20, 0xd8, 0x94, 0x8f, 0x46, 0x28}}; /* (unverified) */
+static const GUID IID_IResourceLoader2_g          = {0xe29bbb9e, 0xbb14, 0x47d2, {0x9a, 0x2e, 0xf1, 0xa7, 0x4a, 0x58, 0x38, 0x7f}}; /* (unverified, 8.1 metadata) */
 static const GUID IID_IResourceQualifier_g        = {0x785da5b2, 0x4afd, 0x4376, {0xa8, 0x88, 0xc5, 0xf9, 0xa6, 0xb7, 0xa0, 0x5c}};
 static const GUID IID_IActivationFactory_g_       = {0x00000035, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
 /* Parameterized collection IIDs (IMapView<,>/IVectorView<>) are computed at runtime
@@ -2191,10 +2193,10 @@ static HRESULT WINAPI iter_GetCurrent_String( void *iface, HSTRING *v )
     return WindowsCreateString( impl->src.sv->items[impl->idx],
                                 WindowsGetStringLen( impl->src.sv->items[impl->idx] ), v );
 }
-static HRESULT WINAPI iter_GetCurrent_Pair( void *iface, void **v )
+/* materialize the pair/iface element at impl->idx (shared by GetCurrent and
+ * GetMany) */
+static HRESULT iter_pair_at( struct iterator *impl, void **v )
 {
-    struct iterator *impl = iter_from( iface );
-    if (!impl->begun || impl->idx >= impl->count) return E_ILLEGAL_METHOD_CALL;
     if (impl->kind == IT_KVPAIR)
     {
         struct kv_pair_obj *p = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*p) );
@@ -2226,17 +2228,76 @@ static HRESULT WINAPI iter_GetCurrent_Pair( void *iface, void **v )
                (item, &IID_IInspectable, v);
     }
 }
-/* two iterator vtables: string-current and pair-current (GetCurrent slot type differs only
- * in the out-parameter kind) */
+static HRESULT WINAPI iter_GetCurrent_Pair( void *iface, void **v )
+{
+    struct iterator *impl = iter_from( iface );
+    if (!impl->begun || impl->idx >= impl->count) return E_ILLEGAL_METHOD_CALL;
+    return iter_pair_at( impl, v );
+}
+/* IIterator<T> (idl:258-263): [II 5][MoveNext 6][GetCurrent 7][get_HasCurrent 8]
+ * [GetMany 9].  GetMany fills the caller's buffer starting at the current
+ * element (the standard projection advances the iterator as it copies) and
+ * reports the number written. */
+static HRESULT WINAPI iter_GetMany_String( void *iface, UINT32 size, HSTRING *items, UINT32 *count )
+{
+    struct iterator *impl = iter_from( iface );
+    UINT32 n, i;
+
+    TRACE( "iter_GetMany kind %u idx %u/%u size %u\n", impl->kind, impl->idx, impl->count, size );
+    if (!count) return E_POINTER;
+    if (size && !items) return E_POINTER;
+    if (!impl->begun && impl->count)
+    {
+        impl->begun = 1;
+        impl->idx = 0;
+    }
+    n = (impl->idx < impl->count) ? impl->count - impl->idx : 0;
+    if (n > size) n = size;
+    for (i = 0; i < n; i++)
+        WindowsDuplicateString( impl->src.sv->items[impl->idx + i], items + i );
+    impl->idx += n;
+    *count = n;
+    return S_OK;
+}
+static HRESULT iter_pair_at( struct iterator *impl, void **v );
+static HRESULT WINAPI iter_GetMany_Pair( void *iface, UINT32 size, void **items, UINT32 *count )
+{
+    struct iterator *impl = iter_from( iface );
+    UINT32 n, i;
+
+    TRACE( "iter_GetMany kind %u idx %u/%u size %u\n", impl->kind, impl->idx, impl->count, size );
+    if (!count) return E_POINTER;
+    if (size && !items) return E_POINTER;
+    if (!impl->begun && impl->count)
+    {
+        impl->begun = 1;
+        impl->idx = 0;
+    }
+    n = (impl->idx < impl->count) ? impl->count - impl->idx : 0;
+    if (n > size) n = size;
+    for (i = 0; i < n; i++)
+    {
+        if (FAILED( iter_pair_at( impl, items + i )))
+        {
+            *count = i;
+            return S_OK;
+        }
+        impl->idx++;
+    }
+    *count = n;
+    return S_OK;
+}
+/* two iterator vtables: string-current and pair-current (GetCurrent/GetMany
+ * slot type differs only in the out-parameter kind) */
 static const void *iterator_string_vtbl[] =
 {
     iter_QueryInterface, iter_AddRef, iter_Release, iter_GetIids, iter_GetRuntimeClassName, iter_GetTrustLevel,
-    iter_MoveNext, iter_GetCurrent_String, iter_HasCurrent,
+    iter_MoveNext, iter_GetCurrent_String, iter_HasCurrent, iter_GetMany_String,
 };
 static const void *iterator_pair_vtbl[] =
 {
     iter_QueryInterface, iter_AddRef, iter_Release, iter_GetIids, iter_GetRuntimeClassName, iter_GetTrustLevel,
-    iter_MoveNext, iter_GetCurrent_Pair, iter_HasCurrent,
+    iter_MoveNext, iter_GetCurrent_Pair, iter_HasCurrent, iter_GetMany_Pair,
 };
 static struct iterator *iter_new( UINT8 kind, void *src, UINT32 count, const void *vtbl )
 {
@@ -2436,16 +2497,14 @@ static HRESULT WINAPI cand_Qualifiers( void *iface, void **out )
 }
 static HRESULT WINAPI cand_IsMatch( void *iface, INT32 *v ) { TRACE( "cand get_IsMatch\n" ); *v = TRUE; return S_OK; }
 static HRESULT WINAPI cand_IsMatchAsDefault( void *iface, INT32 *v ) { TRACE( "cand get_IsMatchAsDefault\n" ); *v = TRUE; return S_OK; }
-/* IResourceCandidate::get_Value [9] (HSTRING) — the candidate's text value */
-static HRESULT WINAPI cand_Value( void *iface, HSTRING *v )
-{
-    struct res_candidate *impl = cand_from( iface );
-    TRACE( "cand get_Value\n" );
-    if (!v) return E_POINTER;
-    return WindowsCreateString( impl->value, (UINT32)lstrlenW( impl->value ), v );
-}
-/* IResourceCandidate2::get_IsDefault [7] */
-static HRESULT WINAPI cand_IsDefault( void *iface, INT32 *v ) { TRACE( "cand2 get_IsDefault\n" ); *v = FALSE; return S_OK; }
+/* The candidate's text value: get_ValueAsString, slot 10 (the IDL has no
+ * plain get_Value on IResourceCandidate; slot 9 is get_IsDefault) */
+static HRESULT WINAPI cand_ValueAsString( void *iface, HSTRING *v );
+/* IResourceCandidate::get_IsDefault [9] (IDL order: Qualifiers, IsMatch,
+ * IsMatchAsDefault, IsDefault, ValueAsString, GetValueAsFileAsync,
+ * GetQualifierValue).  The default context resolves the single en-US/100/
+ * standard candidate set, so the answer is the matching default: TRUE. */
+static HRESULT WINAPI cand_IsDefault( void *iface, INT32 *v ) { TRACE( "cand get_IsDefault\n" ); *v = TRUE; return S_OK; }
 static HRESULT WINAPI cand_ValueAsString( void *iface, HSTRING *v )
 {
     struct res_candidate *impl = cand_from( iface );
@@ -2480,12 +2539,16 @@ static HRESULT WINAPI cand_GetQualifierValue( void *iface, HSTRING name, HSTRING
     key_release( tmp, owned );
     return hr;
 }
-/* IResourceCandidate: [II 5][Qualifiers 6][IsMatch 7][IsMatchAsDefault 8][Value 9]
- *                     [GetValueAsString 10][GetValueAsFileAsync 11][GetQualifierValue 12] */
+/* IResourceCandidate: [II 5][Qualifiers 6][IsMatch 7][IsMatchAsDefault 8][IsDefault 9]
+ *                     [ValueAsString 10][GetValueAsFileAsync 11][GetQualifierValue 12]
+ * Slot 9 is get_IsDefault (INT32*), not get_Value: the IDL spells the
+ * candidate's text property ValueAsString (slot 10, answered by cand_Value);
+ * slot 9 carrying the HSTRING getter handed the ResourceManager.Current
+ * getter's IsDefault read a wide string handle where it wrote a BOOLEAN. */
 static const void *res_candidate_vtbl[] =
 {
     cand_QueryInterface, cand_AddRef, cand_Release, cand_GetIids, cand_GetRuntimeClassName, cand_GetTrustLevel,
-    cand_Qualifiers, cand_IsMatch, cand_IsMatchAsDefault, cand_Value,
+    cand_Qualifiers, cand_IsMatch, cand_IsMatchAsDefault, cand_IsDefault,
     cand_ValueAsString, cand_GetValueAsFileAsync, cand_GetQualifierValue,
 };
 static HRESULT WINAPI cand2_QueryInterface( void *iface, REFIID iid, void **out ) { return cand_QueryInterface( cand2_from( iface ), iid, out ); }
@@ -3818,6 +3881,25 @@ struct res_manager
 static inline struct res_manager *rm_from( void *iface ) { return (struct res_manager *)iface; }
 static inline struct res_manager *rm2_from( void *iface ) { return (struct res_manager *)((BYTE *)iface - sizeof(void *)); }
 
+/* ResourceLoader: the app-facing facade over the main resource map.  Its
+ * activation answers the ResourceManager factory (the MRT Core tier documents
+ * ResourceLoader as the manager's facade); the loader IIDs QI off the same
+ * manager object onto this singleton face pair.
+ * IResourceLoader (Win8):   [II 5][GetString 6][GetStringForUri 7][MainResourceMap 8]
+ * IResourceLoader2 (Win8.1):[II 5][Languages 6][put_Languages 7][InsertResourceFile 8]
+ *                           [InsertResourceStream 9] */
+struct res_loader
+{
+    const void *vt_loader;
+    const void *vt_loader2;
+    LONG ref;
+};
+static const void *res_loader_vtbl[];
+static const void *res_loader2_vtbl[];
+static struct res_loader res_loader_inst = { res_loader_vtbl, res_loader2_vtbl, 1 };
+static inline struct res_loader *loader_from( void *iface ) { return (struct res_loader *)iface; }
+static inline struct res_loader *loader2_from( void *iface ) { return (struct res_loader *)((BYTE *)iface - sizeof(void *)); }
+
 static struct res_map main_map = { NULL, NULL, 1, NULL };
 
 static HRESULT WINAPI rm_QueryInterface( void *iface, REFIID iid, void **out )
@@ -3837,6 +3919,21 @@ static HRESULT WINAPI rm_QueryInterface( void *iface, REFIID iid, void **out )
         incr( &impl->ref );
         return S_OK;
     }
+    /* ResourceLoader is the manager's facade: the loader faces answer from the
+     * same object (Microsoft.Windows.ApplicationModel.Resources.ResourceLoader
+     * activation lands on this factory). */
+    if (IsEqualGUID( iid, &IID_IResourceLoader_g ))
+    {
+        *out = &res_loader_inst.vt_loader;
+        incr( &res_loader_inst.ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceLoader2_g ))
+    {
+        *out = &res_loader_inst.vt_loader2;
+        incr( &res_loader_inst.ref );
+        return S_OK;
+    }
     FIXME( "%s not implemented\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -3846,6 +3943,31 @@ static ULONG WINAPI rm_Release( void *iface ) { return decr( &rm_from( iface )->
 static HRESULT WINAPI rm_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI rm_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCEMANAGER, n ); }
 static HRESULT WINAPI rm_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+/* IResourceManager::get_CurrentCulture [6] (Windows 8, deprecated with
+ * CandidateLanguages): the map's primary language, the same en-US the
+ * Language qualifier reports.  The ResourceManager.Current getter reads this
+ * slot first (the gate tail's NLS GetLocaleInfoEx(en-US)+(en) culture walk),
+ * puts it back through put_CurrentCulture [7], then reads
+ * IResourceManager2::get_CandidateLanguages: with the pair missing the
+ * getter took MainResourceMap for the culture string and the walk threw. */
+static HRESULT WINAPI rm_CurrentCulture( void *iface, HSTRING *culture )
+{
+    const WCHAR *lang = L"en-US";
+    UINT32 i;
+
+    TRACE( "rm get_CurrentCulture\n" );
+    if (!culture) return E_POINTER;
+    for (i = 0; i < ARRAYSIZE( default_qualifiers ); i++)
+        if (!lstrcmpW( default_qualifiers[i].key, L"Language" )) { lang = default_qualifiers[i].value; break; }
+    return WindowsCreateString( lang, (UINT32)lstrlenW( lang ), culture );
+}
+/* IResourceManager::put_CurrentCulture [7]: accepted, the culture set is the
+ * PRM snapshot (same no-op tier as ctx_SetLanguages). */
+static HRESULT WINAPI rm_put_CurrentCulture( void *iface, HSTRING culture )
+{
+    TRACE( "rm put_CurrentCulture (stub)\n" );
+    return S_OK;
+}
 static HRESULT WINAPI rm_MainResourceMap( void *iface, void **out )
 {
     TRACE( "rm get_MainResourceMap\n" );
@@ -3883,9 +4005,13 @@ static HRESULT WINAPI rm_UnloadPriFiles( void *iface, void *files )
     TRACE( "stub\n" );
     return S_OK;
 }
+/* IResourceManager (IDL order): [II 5][CurrentCulture 6][put_CurrentCulture 7]
+ *   [MainResourceMap 8][AllResourceMaps 9][DefaultContext 10]
+ *   [LoadPriFiles 11][UnloadPriFiles 12] */
 static const void *res_manager_vtbl[] =
 {
     rm_QueryInterface, rm_AddRef, rm_Release, rm_GetIids, rm_GetRuntimeClassName, rm_GetTrustLevel,
+    rm_CurrentCulture, rm_put_CurrentCulture,
     rm_MainResourceMap, rm_AllResourceMaps, rm_DefaultContext, rm_LoadPriFiles, rm_UnloadPriFiles,
 };
 static HRESULT WINAPI rm2_QueryInterface( void *iface, REFIID iid, void **out ) { return rm_QueryInterface( rm2_from( iface ), iid, out ); }
@@ -3894,6 +4020,41 @@ static ULONG WINAPI rm2_Release( void *iface ) { return decr( &rm2_from( iface )
 static HRESULT WINAPI rm2_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI rm2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCEMANAGER, n ); }
 static HRESULT WINAPI rm2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+/* IResourceManager2::get_CandidateLanguages [6]: the languages of the default
+ * context (en-US + its neutral parent), handed out on the same
+ * IObservableVector<HSTRING> face ResourceContext::Languages uses — the
+ * ResourceManager.Current getter enumerates this right after the
+ * CurrentCulture walk. */
+static HRESULT WINAPI rm2_CandidateLanguages( void *iface, void **out )
+{
+    struct res_context *ctx;
+    HRESULT hr;
+
+    TRACE( "rm2 get_CandidateLanguages\n" );
+    if ((hr = get_current_context( (void **)&ctx ))) return hr;
+    /* the languages vector is embedded in the process-pinned default context;
+     * hand out the face with its own ref and drop the context ref (the same
+     * pattern as map_QualifierValues) */
+    *out = &ctx->languages.vt_ov;
+    incr( &ctx->languages.ref );
+    decr( &ctx->ref );
+    return S_OK;
+}
+/* IResourceManager2::InsertResourceFile [7] / InsertResourceStream [8]:
+ * accepted, the pri snapshot is the resource source (same tier as
+ * rm_LoadPriFiles). */
+static HRESULT WINAPI rm2_InsertResourceFile( void *iface, HSTRING filename )
+{
+    TRACE( "stub\n" );
+    return S_OK;
+}
+static HRESULT WINAPI rm2_InsertResourceStream( void *iface, HSTRING stream, INT32 filetype )
+{
+    TRACE( "stub\n" );
+    return S_OK;
+}
+/* IResourceManager3 (1703) pair, reachable at trailing slots 9/10 until the
+ * face gets its own IID/QI entry. */
 static HRESULT WINAPI rm2_GetAllNamedResourcesForPackage( void *iface, HSTRING pkgname, INT32 info, void **out )
 {
     struct iface_vector *vec = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*vec) );
@@ -3909,12 +4070,115 @@ static HRESULT WINAPI rm2_GetAllSubtreesForPackage( void *iface, HSTRING pkgname
 {
     return rm2_GetAllNamedResourcesForPackage( iface, pkgname, info, out );
 }
+/* IResourceManager2 (IDL order): [II 5][CandidateLanguages 6]
+ *   [InsertResourceFile 7][InsertResourceStream 8] (+ trailing 3rd-gen pair) */
 static const void *res_manager2_vtbl[] =
 {
     rm2_QueryInterface, rm2_AddRef, rm2_Release, rm2_GetIids, rm2_GetRuntimeClassName, rm2_GetTrustLevel,
+    rm2_CandidateLanguages, rm2_InsertResourceFile, rm2_InsertResourceStream,
     rm2_GetAllNamedResourcesForPackage, rm2_GetAllSubtreesForPackage,
 };
 static struct res_manager res_manager_inst = { res_manager_vtbl, res_manager2_vtbl, 1 };
+
+/* ---- ResourceLoader faces (see the struct res_loader note) ---- */
+static HRESULT WINAPI loader_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IResourceLoader_g ))
+    {
+        *out = &res_loader_inst.vt_loader;
+        incr( &res_loader_inst.ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceLoader2_g ))
+    {
+        *out = &res_loader_inst.vt_loader2;
+        incr( &res_loader_inst.ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI loader_AddRef( void *iface ) { return incr( &loader_from( iface )->ref ); }
+static ULONG WINAPI loader_Release( void *iface ) { return decr( &loader_from( iface )->ref ); }
+static HRESULT WINAPI loader_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI loader_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( L"Microsoft.Windows.ApplicationModel.Resources.ResourceLoader", n ); }
+static HRESULT WINAPI loader_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+/* IResourceLoader::GetString [6]: the main resource map lookup, value as string
+ * (the same pri walk ResourceManager.Current feeds through the manager face). */
+static HRESULT WINAPI loader_GetString( void *iface, HSTRING resource, HSTRING *value )
+{
+    struct res_candidate *cand;
+    const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
+    HRESULT hr;
+
+    TRACE( "loader GetString\n" );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!key_decode( resource, &raw, &tmp, &owned )) return ELEMENT_NOT_FOUND_E;
+    hr = map_lookup( &main_map, raw, &cand );
+    if (SUCCEEDED( hr ))
+    {
+        hr = WindowsCreateString( cand->value, (UINT32)lstrlenW( cand->value ), value );
+        decr( &cand->ref );
+    }
+    key_release( tmp, owned );
+    return hr;
+}
+/* IResourceLoader::GetStringForUri [7]: the Uri object surface is not walked
+ * (the pri key is the path tail); documented stub tier. */
+static HRESULT WINAPI loader_GetStringForUri( void *iface, void *uri, HSTRING *value )
+{
+    FIXME( "stub\n" );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return E_NOTIMPL;
+}
+/* IResourceLoader::get_MainResourceMap [8] */
+static HRESULT WINAPI loader_MainResourceMap( void *iface, void **out )
+{
+    TRACE( "loader get_MainResourceMap\n" );
+    if (!out) return E_POINTER;
+    *out = &main_map.vt_map;
+    incr( &main_map.ref );
+    return S_OK;
+}
+static const void *res_loader_vtbl[] =
+{
+    loader_QueryInterface, loader_AddRef, loader_Release, loader_GetIids, loader_GetRuntimeClassName, loader_GetTrustLevel,
+    loader_GetString, loader_GetStringForUri, loader_MainResourceMap,
+};
+static HRESULT WINAPI loader2_QueryInterface( void *iface, REFIID iid, void **out ) { return loader_QueryInterface( loader2_from( iface ), iid, out ); }
+static ULONG WINAPI loader2_AddRef( void *iface ) { return incr( &loader2_from( iface )->ref ); }
+static ULONG WINAPI loader2_Release( void *iface ) { return decr( &loader2_from( iface )->ref ); }
+static HRESULT WINAPI loader2_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI loader2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( L"Microsoft.Windows.ApplicationModel.Resources.ResourceLoader", n ); }
+static HRESULT WINAPI loader2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+/* IResourceLoader2::get_Languages [6]: the default context's language list,
+ * the same observable face ResourceContext::Languages hands out. */
+static HRESULT WINAPI loader2_Languages( void *iface, void **out )
+{
+    struct res_context *ctx;
+    HRESULT hr;
+
+    TRACE( "loader2 get_Languages\n" );
+    if (!out) return E_POINTER;
+    if ((hr = get_current_context( (void **)&ctx ))) return hr;
+    *out = &ctx->languages.vt_ov;
+    incr( &ctx->languages.ref );
+    decr( &ctx->ref );
+    return S_OK;
+}
+static HRESULT WINAPI loader2_put_Languages( void *iface, void *languages ) { TRACE( "stub\n" ); return S_OK; }
+static HRESULT WINAPI loader2_InsertResourceFile( void *iface, HSTRING filename ) { TRACE( "stub\n" ); return S_OK; }
+static HRESULT WINAPI loader2_InsertResourceStream( void *iface, HSTRING stream, INT32 filetype ) { TRACE( "stub\n" ); return S_OK; }
+static const void *res_loader2_vtbl[] =
+{
+    loader2_QueryInterface, loader2_AddRef, loader2_Release, loader2_GetIids, loader2_GetRuntimeClassName, loader2_GetTrustLevel,
+    loader2_Languages, loader2_put_Languages, loader2_InsertResourceFile, loader2_InsertResourceStream,
+};
 
 struct rm_factory
 {
