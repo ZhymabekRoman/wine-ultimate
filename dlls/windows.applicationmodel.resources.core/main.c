@@ -151,7 +151,8 @@ static BOOL hstring_decode( HSTRING h, const WCHAR **buf, UINT32 *len )
     if (tag == 2)
     {
         cch = *(const UINT32 *)addr;
-        if (cch && cch < 0x10000)
+        if (cch < 0x10000)  /* cch 0 (the short-key virtualized empty string) is
+                             * decodable too: the NUL probe at c[cch] proves it */
         {
             const WCHAR *c = (const WCHAR *)(addr + 4);
             if (!c[cch])
@@ -168,7 +169,7 @@ static BOOL hstring_decode( HSTRING h, const WCHAR **buf, UINT32 *len )
     if (tag == 7)
     {
         cch = *(const UINT32 *)(addr + 8);
-        if (cch && cch < 0x10000)
+        if (cch < 0x10000)  /* cch 0 decodable (see the tag 2 note) */
         {
             for (i = 0; i < ARRAYSIZE( char7_offsets ); i++)
             {
@@ -704,8 +705,10 @@ static BOOL key_decode( HSTRING key, const WCHAR **raw, HSTRING *tmp, BOOL *owne
     *tmp = NULL;
     *owned = FALSE;
 
+    TRACE( "key_decode ENTER %p tag %u\n", key, (UINT32)((UINT_PTR)key & 7) );
     if (hstring_decode( key, &buf, &len ) && probe_wstr( buf, len ))
     {
+        TRACE( "key_decode direct %s\n", debugstr_w( buf ) );
         *raw = buf;
         return TRUE;
     }
@@ -889,6 +892,7 @@ static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
     TRACE( "svv_GetAt %u\n", index );
     if (!item) return E_POINTER;    struct str_vector *impl = svv_from( iface );
     if (index >= impl->count) return E_BOUNDS;
+    TRACE( "svv_GetAt %u -> %s\n", index, debugstr_w( WindowsGetStringRawBuffer( impl->items[index], NULL ) ) );
     return lang_ref_of( impl->items[index], item );
 }
 static HRESULT WINAPI svv_Size( void *iface, UINT32 *size )
@@ -1459,6 +1463,7 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
     *value = NULL;
 
     /* key_decode: HSTRING payload, else the managed-string CCW surface */
+    TRACE( "Lookup ENTER key %p tag %u\n", key, (UINT32)((UINT_PTR)key & 7) );
     if (!key_decode( key, &raw, &tmp, &owned )) raw = NULL; /* no key: no match, no fabrication */
     TRACE( "Lookup %s\n", debugstr_w( raw ) );
     /* The app's MapChanged registration reaches this Lookup with the delegate
@@ -1504,7 +1509,9 @@ static HRESULT WINAPI mv_HasKey( void *iface, HSTRING key, INT32 *has )
     UINT32 i;
     if (!has) return E_POINTER;
     *has = FALSE;
+    TRACE( "HasKey ENTER key %p tag %u\n", key, (UINT32)((UINT_PTR)key & 7) );
     if (!key_decode( key, &raw, &tmp, &owned )) return S_OK;
+    TRACE( "HasKey %s -> %d\n", debugstr_w( raw ), *has );
     for (i = 0; raw && i < impl->count; i++)
         if (!lstrcmpiW( raw, impl->pairs[i].key )) { *has = TRUE; break; }
     key_release( tmp, owned );
@@ -1521,6 +1528,7 @@ static HRESULT WINAPI mv_Size( void *iface, UINT32 *size )
  * the view it returns is this same snapshot. */
 static HRESULT WINAPI mv_GetView( void *iface, void **view )
 {
+    TRACE( "GetView\n" );
     if (!view) return E_POINTER;
     *view = iface;
     incr( &mv_from( iface )->ref );
@@ -2011,6 +2019,7 @@ static HRESULT WINAPI pair_GetTrustLevel( void *iface, INT32 *t ) { return get_t
 static HRESULT WINAPI pair_Key( void *iface, HSTRING *v )
 {
     struct kv_pair_obj *impl = pair_from( iface );
+    TRACE( "kvpair_Key %s\n", debugstr_w( impl->key ) );
     return WindowsCreateString( impl->key, (UINT32)lstrlenW( impl->key ), v );
 }
 static HRESULT WINAPI pair_Value( void *iface, HSTRING *v )
@@ -2160,6 +2169,7 @@ static HRESULT WINAPI iter_MoveNext( void *iface, INT32 *result )
 {
     struct iterator *impl = iter_from( iface );
     UINT32 next;
+    TRACE( "iter_MoveNext kind %u idx %u/%u\n", impl->kind, impl->idx, impl->count );
     if (!result) return E_POINTER;
     next = impl->begun ? impl->idx + 1 : 0;
     impl->begun = 1;
@@ -2193,6 +2203,7 @@ static HRESULT WINAPI iter_GetCurrent_Pair( void *iface, void **v )
         p->ref = 1;
         p->key = impl->src.mv->pairs[impl->idx].key;
         p->value = impl->src.mv->pairs[impl->idx].value;
+        TRACE( "iter_GetCurrent_Pair kvpair idx %u key %s\n", impl->idx, debugstr_w( p->key ) );
         *v = &p->vt_pair;
         return S_OK;
     }
@@ -4006,39 +4017,71 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+/* Windows App SDK ships the MRT Core WinRT classes from its own
+ * Microsoft.Windows.ApplicationModel.Resources.dll: the class tail names are the
+ * Core provider's (ResourceContext is ResourceContext, ResourceManager is
+ * ResourceManager, …), the namespace is the app-facing one — ResourceLoader and
+ * KnownResourceQualifierName exist only there.  The ActivatableClassId seeds of a
+ * packaged prefix name that module as the host, and combase routes the namespace to
+ * this builtin for the unpackaged ones; accept the tail name under both namespaces
+ * so one provider answers the packaged and the unpackaged activation alike. */
+static const WCHAR *mrtcore_tail( const WCHAR *name )
+{
+    static const WCHAR prefix[] = L"Microsoft.Windows.ApplicationModel.Resources.";
+    size_t len = ARRAYSIZE( prefix ) - 1;
+
+    return !wcsncmp( name, prefix, len ) ? name + len : NULL;
+}
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
+    const WCHAR *mrt = mrtcore_tail( buffer );
 
     TRACE("class %s, factory %p.\n", debugstr_hstring(classid), factory);
 
     if (!factory) return E_POINTER;
     *factory = NULL;
 
-    if (!wcscmp( buffer, RTCLASS_RESOURCECONTEXT ))
+    if (!wcscmp( buffer, RTCLASS_RESOURCECONTEXT ) || (mrt && !wcscmp( mrt, L"ResourceContext" )))
     {
         main_map.vt_map = res_map_vtbl;
         main_map.vt_map2 = res_map2_vtbl;
         *factory = (void *)&rc_factory_inst.vt_primary;
         return S_OK;
     }
-    if (!wcscmp( buffer, RTCLASS_RESOURCEMANAGER ))
+    if (!wcscmp( buffer, RTCLASS_RESOURCEMANAGER ) || (mrt && !wcscmp( mrt, L"ResourceManager" )))
     {
         main_map.vt_map = res_map_vtbl;
         main_map.vt_map2 = res_map2_vtbl;
         *factory = (void *)&rm_factory_inst.vt_primary;
         return S_OK;
     }
-    if (!wcscmp( buffer, RTCLASS_RESOURCEMAP ))
+    if (!wcscmp( buffer, RTCLASS_RESOURCEMAP ) || (mrt && !wcscmp( mrt, L"ResourceMap" )))
     {
         main_map.vt_map = res_map_vtbl;
         main_map.vt_map2 = res_map2_vtbl;
         *factory = (void *)&map_factory_inst.vt_primary;
         return S_OK;
     }
-    if (!wcscmp( buffer, RTCLASS_RESOURCECANDIDATE ))
+    if (!wcscmp( buffer, RTCLASS_RESOURCECANDIDATE ) || (mrt && !wcscmp( mrt, L"ResourceCandidate" )))
     {
         *factory = (void *)&cand_factory_inst.vt_primary;
+        return S_OK;
+    }
+    if (mrt && !wcscmp( mrt, L"ResourceLoader" ))
+    {
+        /* MRT Core's ResourceLoader is the ResourceManager facade (GetString walks
+         * the main resource map); the manager's provider answers it from its own
+         * pri default map. */
+        main_map.vt_map = res_map_vtbl;
+        main_map.vt_map2 = res_map2_vtbl;
+        *factory = (void *)&rm_factory_inst.vt_primary;
+        return S_OK;
+    }
+    if (mrt && !wcscmp( mrt, L"KnownResourceQualifierName" ))
+    {
+        *factory = (void *)&qual_factory_inst.vt_primary;
         return S_OK;
     }
     if (!wcscmp( buffer, RTCLASS_NAMEDRESOURCE ))
