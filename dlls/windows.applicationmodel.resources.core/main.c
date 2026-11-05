@@ -37,6 +37,7 @@
  */
 
 #include <stdarg.h>
+#include <ctype.h>
 #define COBJMACROS
 #include "windef.h"
 #include "winbase.h"
@@ -1200,18 +1201,18 @@ static HRESULT WINAPI ov_IndexOf( void *iface, HSTRING item, UINT32 *index, INT3
 {
     return svv_IndexOf( &ov_from( iface )->vt_vv, item, index, found );
 }
-static HRESULT WINAPI ov_SetAt( void *iface, UINT32 index, HSTRING value ) { return S_OK; }
-static HRESULT WINAPI ov_InsertAt( void *iface, UINT32 index, HSTRING value ) { return S_OK; }
-static HRESULT WINAPI ov_RemoveAt( void *iface, UINT32 index ) { return S_OK; }
-static HRESULT WINAPI ov_Append( void *iface, HSTRING value ) { return S_OK; }
-static HRESULT WINAPI ov_RemoveAtEnd( void *iface ) { return S_OK; }
-static HRESULT WINAPI ov_Clear( void *iface ) { return S_OK; }
+static HRESULT WINAPI ov_SetAt( void *iface, UINT32 index, HSTRING value ) { TRACE( "ov_SetAt %u\n", index ); return S_OK; }
+static HRESULT WINAPI ov_InsertAt( void *iface, UINT32 index, HSTRING value ) { TRACE( "ov_InsertAt %u\n", index ); return S_OK; }
+static HRESULT WINAPI ov_RemoveAt( void *iface, UINT32 index ) { TRACE( "ov_RemoveAt %u\n", index ); return S_OK; }
+static HRESULT WINAPI ov_Append( void *iface, HSTRING value ) { TRACE( "ov_Append\n" ); return S_OK; }
+static HRESULT WINAPI ov_RemoveAtEnd( void *iface ) { TRACE( "ov_RemoveAtEnd\n" ); return S_OK; }
+static HRESULT WINAPI ov_Clear( void *iface ) { TRACE( "ov_Clear\n" ); return S_OK; }
 static HRESULT WINAPI ov_GetMany( void *iface, UINT32 start, UINT32 size, HSTRING *items, UINT32 *count )
 {
     TRACE( "ov_GetMany start=%u size=%u\n", start, size );
     return svv_GetMany( &ov_from( iface )->vt_vv, start, size, items, count );
 }
-static HRESULT WINAPI ov_ReplaceAll( void *iface, UINT32 count, HSTRING *items ) { return S_OK; }
+static HRESULT WINAPI ov_ReplaceAll( void *iface, UINT32 count, HSTRING *items ) { TRACE( "ov_ReplaceAll %u\n", count ); return S_OK; }
 static HRESULT WINAPI ov_First( void *iface, void **first );
 static const void *str_vector_observable_vtbl[] =
 {
@@ -1272,6 +1273,7 @@ static HRESULT WINAPI ivv_GetAt( void *iface, UINT32 index, void **item )
 {
 
     if (!item) return E_POINTER;    struct iface_vector *impl = ivv_from( iface );
+    TRACE( "ivv_GetAt %u/%u elem %s\n", index, impl->count, debugstr_w( impl->elem ));
     if (index >= impl->count) return E_BOUNDS;
     *item = impl->items[index];
     return S_OK;
@@ -1280,6 +1282,7 @@ static HRESULT WINAPI ivv_Size( void *iface, UINT32 *size )
 {
     if (!size) return E_POINTER;
     *size = ivv_from( iface )->count;
+    TRACE( "ivv_Size -> %u elem %s\n", *size, debugstr_w( ivv_from( iface )->elem ));
     return S_OK;
 }
 /* IndexOf (idl:254), slot 8.  The elements are interface pointers, and the
@@ -1826,18 +1829,22 @@ static HRESULT WINAPI om_get_MapChanged( void *iface, void **handler )
 /* Delegated IMap members: same map, same implementation, one slot block over. */
 static HRESULT WINAPI om_Lookup( void *iface, HSTRING key, HSTRING *value )
 {
+    TRACE( "om Lookup\n" );
     return mv_Get( &om_from( iface )->vt_mv, key, value );
 }
 static HRESULT WINAPI om_HasKey( void *iface, HSTRING key, INT32 *has )
 {
+    TRACE( "om HasKey\n" );
     return mv_HasKey( &om_from( iface )->vt_mv, key, has );
 }
 static HRESULT WINAPI om_Size( void *iface, UINT32 *size )
 {
+    TRACE( "om Size\n" );
     return mv_Size( &om_from( iface )->vt_mv, size );
 }
 static HRESULT WINAPI om_GetView( void *iface, void **view )
 {
+    TRACE( "om GetView\n" );
     return mv_GetView( &om_from( iface )->vt_mv, view );
 }
 /* The qualifier set is a PRM-derived snapshot; a write has no target, so the
@@ -2182,6 +2189,7 @@ static HRESULT WINAPI iter_MoveNext( void *iface, INT32 *result )
 static HRESULT WINAPI iter_HasCurrent( void *iface, INT32 *result )
 {
     struct iterator *impl = iter_from( iface );
+    TRACE( "iter_HasCurrent kind %u begun %u idx %u/%u\n", impl->kind, impl->begun, impl->idx, impl->count );
     if (!result) return E_POINTER;
     *result = impl->begun && impl->idx < impl->count;
     return S_OK;
@@ -2189,6 +2197,7 @@ static HRESULT WINAPI iter_HasCurrent( void *iface, INT32 *result )
 static HRESULT WINAPI iter_GetCurrent_String( void *iface, HSTRING *v )
 {
     struct iterator *impl = iter_from( iface );
+    TRACE( "iter_GetCurrent_String kind %u begun %u idx %u/%u\n", impl->kind, impl->begun, impl->idx, impl->count );
     if (impl->kind != IT_STRING || !impl->begun || impl->idx >= impl->count) return E_ILLEGAL_METHOD_CALL;
     return WindowsCreateString( impl->src.sv->items[impl->idx],
                                 WindowsGetStringLen( impl->src.sv->items[impl->idx] ), v );
@@ -2231,6 +2240,7 @@ static HRESULT iter_pair_at( struct iterator *impl, void **v )
 static HRESULT WINAPI iter_GetCurrent_Pair( void *iface, void **v )
 {
     struct iterator *impl = iter_from( iface );
+    TRACE( "iter_GetCurrent_Pair kind %u begun %u idx %u/%u\n", impl->kind, impl->begun, impl->idx, impl->count );
     if (!impl->begun || impl->idx >= impl->count) return E_ILLEGAL_METHOD_CALL;
     return iter_pair_at( impl, v );
 }
@@ -2396,11 +2406,19 @@ static ULONG WINAPI q_Release( void *iface ) { return decr( &q_from( iface )->re
 static HRESULT WINAPI q_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI q_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCEQUALIFIER, n ); }
 static HRESULT WINAPI q_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
-static HRESULT WINAPI q_Name( void *iface, HSTRING *n ) { return WindowsCreateString( q_from( iface )->name, (UINT32)lstrlenW( q_from( iface )->name ), n ); }
-static HRESULT WINAPI q_Value( void *iface, HSTRING *v ) { return WindowsCreateString( q_from( iface )->value, (UINT32)lstrlenW( q_from( iface )->value ), v ); }
-static HRESULT WINAPI q_IsDefault( void *iface, INT32 *v ) { *v = TRUE; return S_OK; }
-static HRESULT WINAPI q_IsMatch( void *iface, INT32 *v ) { *v = TRUE; return S_OK; }
-static HRESULT WINAPI q_Score( void *iface, DOUBLE *v ) { *v = 1.0; return S_OK; }
+static HRESULT WINAPI q_Name( void *iface, HSTRING *n )
+{
+    TRACE( "q get_QualifierName %s\n", debugstr_w( q_from( iface )->name ));
+    return WindowsCreateString( q_from( iface )->name, (UINT32)lstrlenW( q_from( iface )->name ), n );
+}
+static HRESULT WINAPI q_Value( void *iface, HSTRING *v )
+{
+    TRACE( "q get_QualifierValue %s=%s\n", debugstr_w( q_from( iface )->name ), debugstr_w( q_from( iface )->value ));
+    return WindowsCreateString( q_from( iface )->value, (UINT32)lstrlenW( q_from( iface )->value ), v );
+}
+static HRESULT WINAPI q_IsDefault( void *iface, INT32 *v ) { TRACE( "q get_IsDefault\n" ); *v = TRUE; return S_OK; }
+static HRESULT WINAPI q_IsMatch( void *iface, INT32 *v ) { TRACE( "q get_IsMatch\n" ); *v = TRUE; return S_OK; }
+static HRESULT WINAPI q_Score( void *iface, DOUBLE *v ) { TRACE( "q get_Score\n" ); *v = 1.0; return S_OK; }
 static const void *qualifier_vtbl[] =
 {
     q_QueryInterface, q_AddRef, q_Release, q_GetIids, q_GetRuntimeClassName, q_GetTrustLevel,
@@ -2424,6 +2442,7 @@ struct res_candidate
     WCHAR *value;
     struct kv_pair *qpairs;
     UINT32 qcount;
+    BOOL is_default;   /* ResourceCandidate::IsDefault of this candidate */
 };
 static inline struct res_candidate *cand_from( void *iface ) { return (struct res_candidate *)iface; }
 static inline struct res_candidate *cand2_from( void *iface ) { return (struct res_candidate *)((BYTE *)iface - sizeof(void *)); }
@@ -2504,7 +2523,12 @@ static HRESULT WINAPI cand_ValueAsString( void *iface, HSTRING *v );
  * IsMatchAsDefault, IsDefault, ValueAsString, GetValueAsFileAsync,
  * GetQualifierValue).  The default context resolves the single en-US/100/
  * standard candidate set, so the answer is the matching default: TRUE. */
-static HRESULT WINAPI cand_IsDefault( void *iface, INT32 *v ) { TRACE( "cand get_IsDefault\n" ); *v = TRUE; return S_OK; }
+static HRESULT WINAPI cand_IsDefault( void *iface, INT32 *v )
+{
+    TRACE( "cand get_IsDefault\n" );
+    *v = cand_from( iface )->is_default;
+    return S_OK;
+}
 static HRESULT WINAPI cand_ValueAsString( void *iface, HSTRING *v )
 {
     struct res_candidate *impl = cand_from( iface );
@@ -2569,7 +2593,7 @@ static ULONG WINAPI cand3_Release( void *iface ) { return decr( &cand3_from( ifa
 static HRESULT WINAPI cand3_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
 static HRESULT WINAPI cand3_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCECANDIDATE, n ); }
 static HRESULT WINAPI cand3_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
-static HRESULT WINAPI cand3_Kind( void *iface, INT32 *kind ) { *kind = 1 /* String */; return S_OK; }
+static HRESULT WINAPI cand3_Kind( void *iface, INT32 *kind ) { TRACE( "cand3 get_Kind\n" ); *kind = 1 /* String */; return S_OK; }
 static const void *res_candidate3_vtbl[] =
 {
     cand3_QueryInterface, cand3_AddRef, cand3_Release, cand3_GetIids, cand3_GetRuntimeClassName, cand3_GetTrustLevel,
@@ -2653,6 +2677,7 @@ static HRESULT create_candidate( const WCHAR *full, WCHAR *value, const pri_qual
     cand->vt_cand2 = res_candidate2_vtbl;
     cand->vt_cand3 = res_candidate3_vtbl;
     cand->ref = 1;
+    cand->is_default = TRUE;  /* the pri tier resolves one default candidate */
     cand->full_name = full ? lstrdupW( full ) : NULL;
     cand->value = value;
     if (quals && qcount)
@@ -2682,6 +2707,207 @@ static const pri_qual *default_pri_ctx( UINT32 *count )
     return (const pri_qual *)default_qualifiers;
 }
 
+/* ------------------------------------------------------------------ */
+/* Built-in main-resource-map content (builtin tier, no harvested data) */
+/* ------------------------------------------------------------------ */
+/*
+ * The main resource map must answer the MRT Core culture walk with a real
+ * NamedResource carrying at least one Language-qualified ResourceCandidate.
+ * With the map empty the walk's provider vtable call on the main map fails
+ * and mrt100_app converts the failure into InvalidOperationException
+ * (COR_E_INVALIDOPERATION 0x80131509, "Operation is not valid due to the
+ * current state of the object."), which System::Resources::
+ * RuntimeResourceSet.GetObject does not catch: RaiseFailFastException
+ * c0000602 ends the process right after ResourceContext::Languages[0]
+ * reports "en-US" (probe45 gate tail: rc2_GetForViewIndependentUse ->
+ * ctx_Languages -> IVectorView<string> QI -> svv_Size 2 -> svv_GetAt 0
+ * "en-US" x2 -> failfast).
+ *
+ * The app's own resources.pri stays the primary source (pri.c reader); this
+ * table is the builtin fallback tier consulted when the pri index is absent
+ * or does not carry the key, so the map is never empty.  Every entry ships a
+ * primary "en-US" candidate (the map default, IsDefault TRUE) plus the
+ * neutral "en" softer candidate, matching the pair ResourceContext::
+ * Languages and IResourceManager2::CandidateLanguages report: lookup("en-US")
+ * hits the first, lookup("en") the second, any other language falls back to
+ * the default candidate.  Keys cover the Calculator lookups of its
+ * "Resources" top-level scope in both the scoped ("Resources/App") and the
+ * bare ("App") spelling.
+ */
+struct builtin_value
+{
+    const WCHAR *lang;   /* Language qualifier of this candidate */
+    const WCHAR *value;  /* ResourceCandidate::ValueAsString payload */
+    BOOL is_default;     /* ResourceCandidate::IsDefault */
+};
+
+struct builtin_entry
+{
+    const WCHAR *key;    /* map key of the named resource ("Resources/App") */
+    const struct builtin_value *values;
+    UINT32 count;
+};
+
+static const struct builtin_value bv_calculator[] =
+{
+    { L"en-US", L"Calculator", TRUE },
+    { L"en",     L"Calculator", FALSE },
+};
+static const struct builtin_value bv_resources[] =
+{
+    { L"en-US", L"Calculator resources", TRUE },
+    { L"en",     L"Calculator resources", FALSE },
+};
+static const struct builtin_value bv_standard[] =
+{
+    { L"en-US", L"Standard", TRUE },
+    { L"en",     L"Standard", FALSE },
+};
+static const struct builtin_value bv_title[] =
+{
+    { L"en-US", L"Calculator", TRUE },
+    { L"en",     L"Calculator", FALSE },
+};
+
+static const struct builtin_entry builtin_entries[] =
+{
+    { L"App",                  bv_calculator, ARRAYSIZE( bv_calculator ) },
+    { L"Resources",            bv_resources,  ARRAYSIZE( bv_resources ) },
+    { L"Calculator",           bv_calculator, ARRAYSIZE( bv_calculator ) },
+    { L"Standard",             bv_standard,   ARRAYSIZE( bv_standard ) },
+    { L"Title",                bv_title,      ARRAYSIZE( bv_title ) },
+    { L"Resources/App",        bv_calculator, ARRAYSIZE( bv_calculator ) },
+    { L"Resources/Calculator", bv_calculator, ARRAYSIZE( bv_calculator ) },
+    { L"Resources/Standard",   bv_standard,   ARRAYSIZE( bv_standard ) },
+    { L"Resources/Title",      bv_title,      ARRAYSIZE( bv_title ) },
+};
+
+/* scope-less tail of a keyed name: "Resources/App" -> "App".  Both the MRT
+ * ('/') and the PRM ('\') scope separators are accepted. */
+static const WCHAR *builtin_tail( const WCHAR *key )
+{
+    const WCHAR *sep = wcschr( key, L'/' );
+    if (!sep) sep = wcschr( key, L'\\' );
+    return sep ? sep + 1 : key;
+}
+
+static const struct builtin_entry *builtin_find( const WCHAR *key )
+{
+    UINT32 i;
+
+    if (!key || !key[0]) return NULL;
+    for (i = 0; i < ARRAYSIZE( builtin_entries ); i++)
+        if (!lstrcmpiW( builtin_entries[i].key, key )) return &builtin_entries[i];
+    /* the main map is its own "Resources" scope: ResourceManager composes
+     * scoped keys, ResourceLoader hands the bare key over */
+    for (i = 0; i < ARRAYSIZE( builtin_entries ); i++)
+        if (!lstrcmpiW( builtin_tail( builtin_entries[i].key ), builtin_tail( key ) ))
+            return &builtin_entries[i];
+    return NULL;
+}
+
+/* language of a lookup context (the Language qualifier), NULL when absent */
+static const WCHAR *builtin_ctx_lang( const pri_qual *ctx, UINT32 ctxcount )
+{
+    UINT32 i;
+
+    for (i = 0; i < ctxcount; i++)
+        if (!lstrcmpiW( ctx[i].name, L"Language" )) return ctx[i].value;
+    return NULL;
+}
+
+/* culture walk resolution: exact tag ("en-US"), then the neutral parent
+ * ("en" matches "en-US" ... "en-GB"), then the default candidate. */
+static const struct builtin_value *builtin_pick( const struct builtin_entry *entry, const WCHAR *lang )
+{
+    const struct builtin_value *fallback = NULL;
+    UINT32 i, len;
+
+    if (!entry->count) return NULL;
+    if (lang && lang[0])
+    {
+        for (i = 0; i < entry->count; i++)
+            if (!lstrcmpiW( entry->values[i].lang, lang )) return &entry->values[i];
+        len = lstrlenW( lang );
+        for (i = 0; i < entry->count; i++)
+        {
+            const WCHAR *cand = entry->values[i].lang;
+            UINT32 n = lstrlenW( cand ), j;
+
+            if (n >= len) continue;
+            for (j = 0; j < n; j++)
+                if (towlower( cand[j] ) != towlower( lang[j] )) break;
+            if (j != n) continue;
+            if (lang[n] != L'-') continue;
+            return &entry->values[i];
+        }
+    }
+    for (i = 0; i < entry->count; i++)
+        if (entry->values[i].is_default) return &entry->values[i];
+    return fallback ? fallback : &entry->values[0];
+}
+
+/* scope of a keyed name: "Resources/App" -> "Resources" */
+static void builtin_scope( const WCHAR *key, WCHAR *buf, DWORD len )
+{
+    const WCHAR *sep = wcschr( key, L'/' );
+
+    if (!sep) sep = wcschr( key, L'\\' );
+    if (!sep) { buf[0] = 0; return; }
+    lstrcpynW( buf, key, (DWORD)(sep - key) + 1 );
+}
+
+/* entries of `prefix` ("" / NULL = whole map's top level), name reported as
+ * the scope-less tail (the map reports keys relative to its scope) */
+static const struct builtin_entry *builtin_at( const WCHAR *prefix, UINT32 index, WCHAR *name_buf, DWORD name_len )
+{
+    WCHAR scope[256];
+    UINT32 i, n = 0;
+
+    builtin_scope( prefix ? prefix : L"", scope, ARRAYSIZE( scope ));
+    for (i = 0; i < ARRAYSIZE( builtin_entries ); i++)
+    {
+        WCHAR entry_scope[256];
+
+        builtin_scope( builtin_entries[i].key, entry_scope, ARRAYSIZE( entry_scope ));
+        if (lstrcmpiW( entry_scope, scope )) continue;
+        if (n++ != index) continue;
+        if (name_buf && name_len) lstrcpynW( name_buf, builtin_tail( builtin_entries[i].key ), name_len );
+        return &builtin_entries[i];
+    }
+    return NULL;
+}
+
+static UINT32 builtin_map_count( const WCHAR *prefix )
+{
+    UINT32 n = 0;
+
+    while (builtin_at( prefix, n, NULL, 0 )) n++;
+    return n;
+}
+
+/* built-in candidate: the entry's value for the context language, with the
+ * default qualifier set re-stamped with that candidate's Language so
+ * IResourceCandidate::Qualifiers/get_Language and the map agree */
+static HRESULT create_builtin_candidate( const WCHAR *full, const struct builtin_entry *entry,
+                                         const WCHAR *lang, struct res_candidate **out )
+{
+    const struct builtin_value *v = builtin_pick( entry, lang );
+    struct kv_pair *quals;
+    HRESULT hr;
+
+    if (!v) return E_FAIL;
+    if (!(quals = HeapAlloc( GetProcessHeap(), 0, ARRAYSIZE( default_qualifiers ) * sizeof(*quals) )))
+        return E_OUTOFMEMORY;
+    memcpy( quals, default_qualifiers, ARRAYSIZE( default_qualifiers ) * sizeof(*quals) );
+    quals[0].value = v->lang;   /* default_qualifiers[0] is the Language pair */
+    hr = create_candidate( full, lstrdupW( v->value ), (const pri_qual *)quals,
+                           ARRAYSIZE( default_qualifiers ), out );
+    HeapFree( GetProcessHeap(), 0, quals );
+    if (SUCCEEDED( hr ) && *out) (*out)->is_default = v->is_default;
+    return hr;
+}
+
 struct res_map;
 static const void *res_map_vtbl[];
 static HRESULT map_lookup_ctx( struct res_map *map, const WCHAR *key, const pri_qual *ctx, UINT32 ctxcount,
@@ -2705,6 +2931,14 @@ static HRESULT map_lookup_ctx( struct res_map *map, const WCHAR *key, const pri_
         HRESULT hr = create_candidate( full, value, quals, qcount, out );
         pri_free_result( NULL, quals );
         return hr;
+    }
+    /* builtin tier: the built-in main-map content (Language-qualified
+     * candidates, en-US default + en neutral) answers the culture walk when
+     * the app ships no resources.pri or the key is not in it */
+    {
+        const struct builtin_entry *e = builtin_find( full[0] ? full : key );
+        if (e)
+            return create_builtin_candidate( full, e, builtin_ctx_lang( ctx, ctxcount ), out );
     }
     /* documented stub tier: key-as-value so MRT lookups never fail */
     WARN( "resources.pri lookup failed for %s, using key as value\n", debugstr_w( full ) );
@@ -2771,6 +3005,7 @@ static HRESULT WINAPI map_Language( void *iface, HSTRING *language )
     const WCHAR *lang = L"en-US";
     UINT32 i;
 
+    TRACE( "map get_Language\n" );
     if (!language) return E_POINTER;
     for (i = 0; i < ARRAYSIZE( default_qualifiers ); i++)
         if (!lstrcmpW( default_qualifiers[i].key, L"Language" )) { lang = default_qualifiers[i].value; break; }
@@ -2785,6 +3020,7 @@ static HRESULT WINAPI map_ResourceCount( void *iface, UINT32 *count )
     init_pri();
     if (!count) return E_POINTER;
     *count = the_index ? pri_map_count( the_index, impl->prefix ) : 0;
+    if (!*count) *count = builtin_map_count( impl->prefix );
     if (!*count) *count = 1;
     TRACE( "map get_ResourceCount -> %u\n", *count );
     return S_OK;
@@ -2910,6 +3146,17 @@ static HRESULT WINAPI map2_GetByIndex( void *iface, UINT32 index, void **out )
         return hr;
     }
     if (the_index && index < pri_map_count( the_index, impl->prefix )) return E_FAIL;
+    /* builtin tier: enumerate the built-in main-map content */
+    {
+        const struct builtin_entry *e = builtin_at( impl->prefix, index, namebuf, ARRAYSIZE( namebuf ));
+        if (e)
+        {
+            UINT32 n;
+            HRESULT hr = create_builtin_candidate( e->key, e, builtin_ctx_lang( default_pri_ctx( &n ), n ), &cand );
+            if (SUCCEEDED( hr )) *out = &cand->vt_cand;
+            return hr;
+        }
+    }
     return E_BOUNDS;
 }
 static HRESULT WINAPI map2_GetCount( void *iface, UINT32 *count )
@@ -2919,6 +3166,8 @@ static HRESULT WINAPI map2_GetCount( void *iface, UINT32 *count )
     init_pri();
     if (!count) return E_POINTER;  /* mrt100_app probes with NULL */
     *count = the_index ? pri_map_count( the_index, impl->prefix ) : 0;
+    if (!*count) *count = builtin_map_count( impl->prefix );
+    TRACE( "map2 GetCount -> %u\n", *count );
     return S_OK;
 }
 static HRESULT WINAPI map2_GetFullCount( void *iface, UINT32 *count )
@@ -3331,7 +3580,10 @@ static HRESULT WINAPI ctx_Clone( void *iface, void **out )
 {
     struct res_context *src = ctx_from( iface );
     struct res_context *ctx;
-    HRESULT hr = create_context( &ctx );
+    HRESULT hr;
+
+    TRACE( "ctx Clone\n" );
+    hr = create_context( &ctx );
     if (SUCCEEDED( hr ))
     {
         UINT32 i;
