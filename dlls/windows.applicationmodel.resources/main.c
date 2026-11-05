@@ -66,16 +66,25 @@ static const GUID provider_service_provider_sid = { 0x6d5140c1, 0x110b, 0x11ce, 
 
 static HRESULT WINAPI provider_QueryInterface(void *iface, REFIID iid, void **out)
 {
+    HRESULT hr;
+
+    TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) ||
         IsEqualGUID(iid, &provider_service_provider_sid) || IsEqualGUID(iid, &IID_IRuntimeProvider))
     {
         *out = iface;
         InterlockedIncrement(&provider_from(iface)->ref);
-        return S_OK;
+        hr = S_OK;
     }
-    WARN("provider QI miss, iid %s.\n", debugstr_guid(iid));
-    *out = NULL;
-    return E_NOINTERFACE;
+    else
+    {
+        WARN("provider QI miss, iid %s.\n", debugstr_guid(iid));
+        *out = NULL;
+        hr = E_NOINTERFACE;
+    }
+    TRACE("-> hr 0x%08x.\n", (unsigned)hr);
+    return hr;
 }
 
 static ULONG WINAPI provider_AddRef(void *iface)
@@ -87,6 +96,7 @@ static ULONG WINAPI provider_Release(void *iface)
 {
     ULONG ref = InterlockedDecrement(&provider_from(iface)->ref);
 
+    TRACE("iface %p -> ref %u.\n", iface, ref);
     if (!ref)
     {
         InterlockedDecrement(&object_count);
@@ -106,17 +116,22 @@ static HRESULT WINAPI provider_GetIids(void *iface, ULONG *count, GUID **iids)
     *count = ARRAY_SIZE(iids_arr);
     if (!(*iids = malloc(sizeof(iids_arr)))) return E_OUTOFMEMORY;
     memcpy(*iids, iids_arr, sizeof(iids_arr));
+    TRACE("iface %p -> %u iids, hr 0x%08x.\n", iface, *count, (unsigned)S_OK);
     return S_OK;
 }
 
 static HRESULT WINAPI provider_GetRuntimeClassName(void *iface, HSTRING *name)
 {
     static const WCHAR cls[] = L"Microsoft.Windows.ApplicationModel.Resources.RuntimeProvider";
-    return WindowsCreateString(cls, ARRAYSIZE(cls) - 1, name);
+    HRESULT hr = WindowsCreateString(cls, ARRAYSIZE(cls) - 1, name);
+
+    TRACE("iface %p -> %s, hr 0x%08x.\n", iface, debugstr_hstring(*name), (unsigned)hr);
+    return hr;
 }
 
 static HRESULT WINAPI provider_GetTrustLevel(void *iface, INT32 *level)
 {
+    TRACE("iface %p -> FullTrust, hr 0x%08x.\n", iface, (unsigned)S_OK);
     *level = FullTrust;
     return S_OK;
 }
@@ -125,13 +140,18 @@ static HRESULT WINAPI provider_GetTrustLevel(void *iface, INT32 *level)
  * SID_MRT_CoreIndependent and receives the IRuntimeProvider surface. */
 static HRESULT WINAPI provider_QueryService(void *iface, REFGUID sid, REFIID iid, void **service)
 {
-    TRACE("sid %s, iid %s.\n", debugstr_guid(sid), debugstr_guid(iid));
+    HRESULT hr;
+
+    TRACE("iface %p, sid %s, iid %p(%s).\n", iface, debugstr_guid(sid), iid, debugstr_guid(iid));
 
     *service = NULL;
     if (IsEqualGUID(sid, &SID_MRT_CoreIndependent))
-        return provider_QueryInterface(iface, iid, service);
+        hr = provider_QueryInterface(iface, iid, service);
+    else
+        hr = E_NOINTERFACE;
 
-    return E_NOINTERFACE;
+    TRACE("-> service %p, hr 0x%08x.\n", *service, (unsigned)hr);
+    return hr;
 }
 
 /* MRM's liveness probe class name test (see provider_CreateInstance). */
@@ -173,16 +193,25 @@ static const void *probe_vtbl[] =
 
 static HRESULT WINAPI probe_QueryInterface(void *iface, REFIID iid, void **out)
 {
+    HRESULT hr;
+
+    TRACE("probe iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) ||
         IsEqualGUID(iid, &IID_IActivationFactory))
     {
         *out = iface;
         InterlockedIncrement(&((struct probe_stub *)iface)->ref);
-        return S_OK;
+        hr = S_OK;
     }
-    WARN("stub QI miss, iid %s.\n", debugstr_guid(iid));
-    *out = NULL;
-    return E_NOINTERFACE;
+    else
+    {
+        WARN("stub QI miss, iid %s.\n", debugstr_guid(iid));
+        *out = NULL;
+        hr = E_NOINTERFACE;
+    }
+    TRACE("-> hr 0x%08x.\n", (unsigned)hr);
+    return hr;
 }
 
 static ULONG WINAPI probe_AddRef(void *iface)
@@ -204,6 +233,7 @@ static ULONG WINAPI probe_Release(void *iface)
 
 static HRESULT WINAPI probe_GetIids(void *iface, ULONG *count, GUID **iids)
 {
+    TRACE("probe iface %p -> 0 iids, hr 0x%08x.\n", iface, (unsigned)S_OK);
     *count = 0;
     *iids = NULL;
     return S_OK;
@@ -212,11 +242,15 @@ static HRESULT WINAPI probe_GetIids(void *iface, ULONG *count, GUID **iids)
 static HRESULT WINAPI probe_GetRuntimeClassName(void *iface, HSTRING *name)
 {
     static const WCHAR cls[] = L"FakeClass.ClassName";
-    return WindowsCreateString(cls, ARRAYSIZE(cls) - 1, name);
+    HRESULT hr = WindowsCreateString(cls, ARRAYSIZE(cls) - 1, name);
+
+    TRACE("probe iface %p -> FakeClass.ClassName, hr 0x%08x.\n", iface, (unsigned)hr);
+    return hr;
 }
 
 static HRESULT WINAPI probe_GetTrustLevel(void *iface, INT32 *level)
 {
+    TRACE("probe iface %p -> FullTrust, hr 0x%08x.\n", iface, (unsigned)S_OK);
     *level = FullTrust;
     return S_OK;
 }
@@ -225,11 +259,14 @@ static HRESULT WINAPI probe_ActivateInstance(void *iface, void **instance)
 {
     struct probe_stub *stub;
 
+    TRACE("probe iface %p, instance %p.\n", iface, instance);
+
     if (!(stub = malloc(sizeof(*stub)))) return E_OUTOFMEMORY;
     stub->vtbl = probe_vtbl;
     stub->ref = 1;
     InterlockedIncrement(&object_count);
     *instance = (void *)stub;
+    TRACE("-> instance %p, hr 0x%08x.\n", *instance, (unsigned)S_OK);
     return S_OK;
 }
 
@@ -251,15 +288,24 @@ static HRESULT probe_stub_create(void **out)
  * windows.applicationmodel.resources.core faces. */
 static HRESULT WINAPI provider_GetActivationFactory(void *iface, HSTRING classid, void **factory)
 {
-    TRACE("class %s, factory %p.\n", debugstr_hstring(classid), factory);
+    HRESULT hr;
+
+    TRACE("iface %p, class %s, factory %p.\n", iface, debugstr_hstring(classid), factory);
 
     if (!classid || !factory) return E_POINTER;
     *factory = NULL;
 
     /* MRM probes both faces of the runtime provider with the dummy class. */
-    if (is_probe_class(classid)) return probe_stub_create(factory);
+    if (is_probe_class(classid))
+    {
+        hr = probe_stub_create(factory);
+        TRACE("-> probe stub %p, hr 0x%08x.\n", *factory, (unsigned)hr);
+        return hr;
+    }
 
-    return RoGetActivationFactory(classid, &IID_IInspectable, factory);
+    hr = RoGetActivationFactory(classid, &IID_IInspectable, factory);
+    TRACE("-> factory %p, hr 0x%08x.\n", *factory, (unsigned)hr);
+    return hr;
 }
 
 /* IRuntimeProvider::CreateInstance - same, activating the class.  MRM's
@@ -269,14 +315,23 @@ static HRESULT WINAPI provider_GetActivationFactory(void *iface, HSTRING classid
  * probe must not go through the WinRT activation table. */
 static HRESULT WINAPI provider_CreateInstance(void *iface, HSTRING classid, void **instance)
 {
-    TRACE("class %s, instance %p.\n", debugstr_hstring(classid), instance);
+    HRESULT hr;
+
+    TRACE("iface %p, class %s, instance %p.\n", iface, debugstr_hstring(classid), instance);
 
     if (!classid || !instance) return E_POINTER;
     *instance = NULL;
 
-    if (is_probe_class(classid)) return probe_stub_create(instance);
+    if (is_probe_class(classid))
+    {
+        hr = probe_stub_create(instance);
+        TRACE("-> probe stub instance %p, hr 0x%08x.\n", *instance, (unsigned)hr);
+        return hr;
+    }
 
-    return RoActivateInstance(classid, (IInspectable **)instance);
+    hr = RoActivateInstance(classid, (IInspectable **)instance);
+    TRACE("-> instance %p, hr 0x%08x.\n", *instance, (unsigned)hr);
+    return hr;
 }
 
 /* IRuntimeProvider::ResourceMap[propget] - the app-wide PRI resource map; the
@@ -292,6 +347,7 @@ static HRESULT WINAPI provider_get_ResourceMap(void *iface, IInspectable **map)
     if ((hr = WindowsCreateString(cls, ARRAYSIZE(cls) - 1, &hstr))) return hr;
     hr = RoActivateInstance(hstr, map);
     WindowsDeleteString(hstr);
+    TRACE("-> map %p, hr 0x%08x.\n", *map, (unsigned)hr);
     return hr;
 }
 
@@ -320,6 +376,8 @@ static inline struct provider_factory *factory_from(void *iface)
 
 static HRESULT WINAPI factory_QueryInterface(void *iface, REFIID iid, void **out)
 {
+    TRACE("factory iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
+
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IClassFactory))
     {
         *out = iface;
@@ -367,6 +425,7 @@ static HRESULT WINAPI factory_CreateInstance(void *iface, IUnknown *outer, REFII
 
 static HRESULT WINAPI factory_LockServer(void *iface, BOOL lock)
 {
+    TRACE("lock %d.\n", lock);
     return S_OK;
 }
 
@@ -401,12 +460,23 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
  * them without going through the COM provider. */
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
 {
+    HRESULT hr;
+
+    TRACE("class %s, factory %p.\n", debugstr_hstring(classid), factory);
+
     if (!factory) return E_POINTER;
     *factory = NULL;
 
     /* combase's namespace route sends the MRM probe class here (roapi.c);
      * answer directly, before the activation table (no self-recursion). */
-    if (is_probe_class(classid)) return probe_stub_create(factory);
+    if (is_probe_class(classid))
+    {
+        hr = probe_stub_create(factory);
+        TRACE("-> probe stub %p, hr 0x%08x.\n", *factory, (unsigned)hr);
+        return hr;
+    }
 
-    return RoGetActivationFactory(classid, &IID_IInspectable, factory);
+    hr = RoGetActivationFactory(classid, &IID_IInspectable, factory);
+    TRACE("-> factory %p, hr 0x%08x.\n", *factory, (unsigned)hr);
+    return hr;
 }
