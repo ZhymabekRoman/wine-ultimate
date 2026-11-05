@@ -864,8 +864,21 @@ static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
      * CanCastComObject -> QueryInterface_NoAddRef_Slow with the target
      * interface IID {9828e927-...}, which the statics2 (rc2) face answers
      * with the stable enumerable (430d26b9). */
-    static const WCHAR mcg_key72[] =
-        L"ApiInformation,Windows.UI.Xaml.MarshalingBehaviorAttribute,Windows.UI.Xaml.MarshalingType,Windows.UI.Xaml.StaticAttribute,Windows.Foundation.Metadata.UserDataPaths,Windows.Foundation.Metadata.AppDataPaths,Windows.Foundation.Metadata.SystemDataPaths,Windows.Foundation.Metadata.Application";
+    /* Mcg name-pool decode (SharedLibrary s_dictionary namespaces, heap RVA
+     * 0x5b9260): the s_classData_NameIndices StringMap16 (99) maps name pool
+     * key 0x1c33 = ns8 "Windows.Storage." + "UserDataPaths" -> s_classData
+     * index 78, EEType flags 0x60 (HasRemoteInterfaces 0x40 set) and EEType
+     * RID 0x68 -> typeID 0x1806800000, the exact class RID listed in the
+     * IIterable<KVP<string,string>> QI map (interface RID 0x20 block,
+     * SharedLibrary+0xe070: entry {0x1806800000, slot 0/2}).  UserDataPaths
+     * is the IMapView<string,string> implementer of the flag-0x40 set
+     * {71 HResult(no 0x40), 77 StaticAttribute, 78 UserDataPaths, 79
+     * AppDataPaths, 80 SystemDataPaths, 81 ApplicationData}.  The previous
+     * packed multi-name key carried the *wrong namespaces* (Metadata.
+     * UserDataPaths), so FindString never hit and the wrapper EEType stayed
+     * flag 0x100.  Answer the exact key so the instantiated Mcg class has
+     * 0x40, the cast miss fires the QI fallback and rc2 answers {9828e927}. */
+    static const WCHAR mcg_key72[] = L"Windows.Storage.UserDataPaths";
 
     return className( mcg_key72, n );
 }
@@ -3455,9 +3468,15 @@ static HRESULT WINAPI rc2_GetIids( void *iface, ULONG *c, IID **i )
  * same target, the lookup is no longer the blocker. */
 static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n )
 {
-    static const WCHAR *args[] = { L"IKeyValuePair`2<String,String>" };
+    /* Cast-#14 winner (live-dumped McgClassData, SharedLibrary classData[78]):
+     * EEType flag 0x60 (IsGeneric|HasRemoteInterfaces) so the CheckCastInterface
+     * miss on typeID 0x1806800000 goes CanCastComObject -> QI {9828e927-...} ->
+     * our IIterable<KVP> answer -> triple insert with tid 0x1806800000 -> pass.
+     * Key = name-pool 0xc6 toolbox signature (IObservableMap`1<KVP ss> family). */
+    static const WCHAR mcg_key_c6[] =
+        L"Windows.Foundation.Collections.IObservableMap`1<System.Collections.Generic.IKeyValuePair`2<System.Collections.Generic.String,System.Collections.Generic.String>,System.Collections.Generic.IEnumerable`1<System.Collections.Generic.IKeyValuePair`2<Windows.UI.Xaml.Interop.String,System.Collections.Generic.String>>,System.Collections.Generic.IReadOnlyDictionary`2<Windows.Foundation.Diagnostics.ILoggingField,Spectro.Toml.TomlValue>,Spectro.UI.Controls.MediaDisplayInformation,Windows.ApplicationModel.Chat.ChatMessageResourceMap,Windows.ApplicationModel.Resources.Core.ResourceMap,Windows.ApplicationModel.Resources.Core.ResourceQualifierValues,Windows.Data.Text.WordSegmentResourceMap,Windows.Foundation.Diagnostics.LoggingChannelAttribute,Windows.Storage.Provider.IPropertyStore,Windows.UI.Xaml.Interop.IBindableIterable,Windows.UI.Xaml.Interop.IBindableIterator,Windows.UI.Xaml.Interop.IBindableVector,Windows.UI.Xaml.Interop.IBindableVectorView,Windows.Foundation.Diagnostics.ILoggingPropertyKeyValueInterface,Windows.UI.Xaml.Interop.IPropertyStorePropertyIterator,Windows.Foundation.Collections.IObservableVector`1<Windows.Globalization.JapanesePhonemeReading>";
 
-    return param_class_name( L"IIterable", L"`1", args, 1, n );
+    return className( mcg_key_c6, n );
 }
 static HRESULT WINAPI rc2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI rc2_GetForCurrentView( void *iface, void **out )

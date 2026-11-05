@@ -1092,7 +1092,7 @@ static void test_parameterized_class_names(void)
      * (interface RID 0x1806800000, cast #14).  The fully-qualified
      * `Windows.Foundation.Collections.IVectorView`1<System.String>` spelling
      * misses that exact key and falls back to a target-less closest class. */
-    static const WCHAR name_vector_s[]   = L"ApiInformation,MarshalingBehaviorAttribute,MarshalingType,StaticAttribute,UserDataPaths,AppDataPaths,SystemDataPaths,Application";
+    static const WCHAR name_vector_s[]   = L"Windows.Storage.UserDataPaths";
     static const WCHAR name_vector_observable_s[] = L"Windows.Foundation.Collections.IObservableVector`1<System.String>";
     /* The str_vector view impl (svv_QueryInterface vt_vv) is shared by the
      * Languages GetView and the Qualifiers faces; both name themselves with the
@@ -1942,7 +1942,7 @@ static const WCHAR *elems_obsm_abi[] = { L"Windows.Foundation.Collections.IObser
 
 static void test_collections_abi_slots( void )
 {
-    static const WCHAR name_vv_s[] = L"ApiInformation,MarshalingBehaviorAttribute,MarshalingType,StaticAttribute,UserDataPaths,AppDataPaths,SystemDataPaths,Application";
+    static const WCHAR name_vv_s[] = L"Windows.Storage.UserDataPaths";
     /* published instance IID of IVectorView<string>: the literal the Calculator
      * MRT engine QIs on the Languages object (observed in the +resources trace:
      * ov_QueryInterface languages QI {2f13c006-a03a-5f69-b090-75a43e33423e}) */
