@@ -6,4 +6,5 @@ SOURCES = \
 	roapi.c \
 	string.c \
 	wine.combase.test.c \
-	wine.combase.test.spec
+	wine.combase.test.spec \
+	combase_server.c

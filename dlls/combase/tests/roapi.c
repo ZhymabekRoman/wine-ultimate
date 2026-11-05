@@ -971,6 +971,83 @@ static HRESULT WINAPI test_registered_pfn(HSTRING classid, IActivationFactory **
  * dynamically like the two absent exports below. */
 typedef HRESULT (WINAPI *pRoRevokeActivationFactories)(RO_REGISTRATION_COOKIE);
 
+/*
+ * The Windows App SDK namespaces a packaged WA/WinUI3 app activates at startup
+ * (AppLifecycle redirection, MRT Core Resources, the WinAppSDK ApplicationData mirror,
+ * the DynamicDependency/WindowsAppRuntime bootstrap) answer from builtin providers on
+ * the combase route and from the same modules through the packaged prefix's
+ * ActivatableClassId\DllPath seeds.  Pin the factory shape for one class per namespace;
+ * the windows.applicationmodel-hosted statics also round-trip their class name through
+ * ActivateInstance + GetRuntimeClassName, the check the .NET projection performs.
+ */
+static void test_winappsdk_activation_route(void)
+{
+    static const struct
+    {
+        const WCHAR *class;
+        BOOL roundtrip;   /* ActivateInstance answers GetRuntimeClassName = class */
+    }
+    classes[] =
+    {
+        { L"Microsoft.Windows.AppLifecycle.AppInstance", FALSE },
+        { L"Microsoft.Windows.ApplicationModel.Resources.ResourceContext", FALSE },
+        { L"Microsoft.Windows.ApplicationModel.Resources.ResourceLoader", FALSE },
+        { L"Microsoft.Windows.Storage.ApplicationData", FALSE },
+        { L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentManager", TRUE },
+        { L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency", TRUE },
+        { L"Microsoft.Windows.ApplicationModel.DynamicDependency.AddPackageDependencyOptions", TRUE },
+    };
+    SIZE i;
+    HRESULT hr;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr );
+
+    for (i = 0; i < ARRAYSIZE( classes ); i++)
+    {
+        IActivationFactory *factory = NULL;
+        IInspectable *instance = NULL;
+        HSTRING str, name = NULL;
+        const WCHAR *raw;
+
+        hr = WindowsCreateString( classes[i].class, lstrlenW( classes[i].class ), &str );
+        ok( hr == S_OK, "WindowsCreateString(%s) returned %#lx.\n", debugstr_w( classes[i].class ), hr );
+
+        factory = NULL;
+        hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+        ok( hr == S_OK && factory, "RoGetActivationFactory(%s) returned %#lx, factory %p.\n",
+            debugstr_w( classes[i].class ), hr, factory );
+        if (!factory)
+        {
+            WindowsDeleteString( str );
+            continue;
+        }
+
+        if (classes[i].roundtrip)
+        {
+            instance = NULL;
+            hr = IActivationFactory_ActivateInstance( factory, &instance );
+            ok( hr == S_OK && instance, "%s ActivateInstance returned %#lx, instance %p.\n",
+                debugstr_w( classes[i].class ), hr, instance );
+            if (instance)
+            {
+                name = NULL;
+                hr = IInspectable_GetRuntimeClassName( instance, &name );
+                ok( hr == S_OK, "%s GetRuntimeClassName returned %#lx.\n", debugstr_w( classes[i].class ), hr );
+                raw = WindowsGetStringRawBuffer( name, NULL );
+                ok( raw && !wcscmp( raw, classes[i].class ), "got class name %s.\n", debugstr_w( raw ) );
+                WindowsDeleteString( name );
+                IInspectable_Release( instance );
+            }
+        }
+
+        IActivationFactory_Release( factory );
+        WindowsDeleteString( str );
+    }
+
+    RoUninitialize();
+}
+
 static void test_registered_activation_factories(void)
 {
     static const WCHAR compositor_name[] = L"Windows.UI.Composition.Compositor";
@@ -1558,6 +1635,118 @@ static void test_activation_factory_threading_model(void)
 }
 
 /*
+ * Out-of-proc (Server) activation conformance.  An ActivatableClassId\<class> key that
+ * carries a Server subkey is an out-of-proc class: its factory lives in a server process,
+ * and RoGetActivationFactory resolves it through CoCreateInstance(CLSCTX_LOCAL_SERVER) on
+ * the CLSID recorded in the Server subkey's default value.  CoCreateInstance starts the
+ * server (the CLSID's LocalServer32, with the -Embedding /PROCESSID:{GUID} --clsid={GUID}
+ * switches combase's create_server appends) and polls rpcss for the class object the
+ * server registers.  This is the shape of {daa52b27-773a-44a3-9895-b138c3e0b2c0}
+ * Microsoft.Web.WebView2.Core.CoreWebView2CompositionController server activation, and the
+ * Store/packaged activation path apprepository reaches later.
+ *
+ * The class is seeded at run time (HKCU, over the machine hive) so the test is
+ * self-contained; combase_server.exe (built beside this test) registers the class object.
+ */
+static const GUID test_server_clsid =
+    {0x6c1f3a2d, 0x9b4e, 0x4f70, {0xa2, 0x1c, 0x7e, 0x5d, 0x3b, 0x0a, 0x9f, 0x64}};
+static const WCHAR server_activation_class[] = L"Wine.Test.ServerClass";
+static const WCHAR server_activation_clsidx[] = L"{6c1f3a2d-9b4e-4f70-a21c-7e5d3b0a9f64}";
+
+static void seed_server_activation_class( const WCHAR *server_exe )
+{
+    WCHAR path[MAX_PATH];
+    HKEY sub;
+
+    lstrcpyW( path, runtime_key );
+    lstrcatW( path, L"\\" );
+    lstrcatW( path, server_activation_class );
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &sub, NULL ))
+        return;
+    RegSetValueExW( sub, L"ThreadingModel", 0, REG_SZ, (const BYTE *)L"Both", 5 * sizeof(WCHAR) );
+    RegCloseKey( sub );
+
+    lstrcatW( path, L"\\Server" );
+    if (!RegCreateKeyExW( HKEY_CURRENT_USER, path, 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &sub, NULL ))
+    {
+        RegSetValueExW( sub, NULL, 0, REG_SZ, (const BYTE *)server_activation_clsidx,
+                        (lstrlenW( server_activation_clsidx ) + 1) * sizeof(WCHAR) );
+        RegCloseKey( sub );
+    }
+
+    lstrcpyW( path, L"CLSID\\" );
+    StringFromGUID2( &test_server_clsid, path + 6, 39 );
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, path, 0, NULL, REG_OPTION_NON_VOLATILE,
+                         KEY_WRITE | KEY_CREATE_SUB_KEY, NULL, &sub, NULL ))
+        return;
+    if (!RegCreateKeyExW( sub, L"LocalServer32", 0, NULL, REG_OPTION_NON_VOLATILE, KEY_WRITE, NULL, &sub, NULL ))
+    {
+        RegSetValueExW( sub, NULL, 0, REG_SZ, (const BYTE *)server_exe, (lstrlenW( server_exe ) + 1) * sizeof(WCHAR) );
+        RegCloseKey( sub );
+    }
+    RegCloseKey( sub );
+}
+
+static void unseed_server_activation_class( void )
+{
+    WCHAR path[MAX_PATH];
+
+    lstrcpyW( path, runtime_key );
+    lstrcatW( path, L"\\" );
+    lstrcatW( path, server_activation_class );
+    lstrcatW( path, L"\\Server" );
+    RegDeleteKeyW( HKEY_CURRENT_USER, path );
+    path[lstrlenW( path ) - 7] = 0;
+    RegDeleteKeyW( HKEY_CURRENT_USER, path );
+
+    lstrcpyW( path, L"CLSID\\" );
+    StringFromGUID2( &test_server_clsid, path + 6, 39 );
+    lstrcatW( path, L"\\LocalServer32" );
+    RegDeleteKeyW( HKEY_CURRENT_USER, path );
+    path[lstrlenW( path ) - 14] = 0;
+    RegDeleteKeyW( HKEY_CURRENT_USER, path );
+}
+
+static void test_server_class_activation( void )
+{
+    WCHAR exe[MAX_PATH + 32];
+    IActivationFactory *factory;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr );
+
+    /* The server helper exe sits beside this test exe (combase_test.exe -> combase_server.exe). */
+    /* LocalServer32 runs this very exe as the combase_server unit (-server). */
+    GetModuleFileNameW( NULL, exe, ARRAY_SIZE( exe ) );
+    lstrcatW( exe, L" combase_server -server" );
+
+    seed_server_activation_class( exe );
+
+    hr = WindowsCreateString( server_activation_class, ARRAY_SIZE( server_activation_class ) - 1, &str );
+    ok( hr == S_OK, "WindowsCreateString returned %#lx.\n", hr );
+
+    /* CoCreateInstance(CLSCTX_LOCAL_SERVER) starts the server, which registers the class
+     * object; the factory comes back as the server's IActivationFactory. */
+    factory = NULL;
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK && factory, "RoGetActivationFactory(ServerClass) returned %#lx, factory %p.\n", hr, factory );
+    if (factory)
+    {
+        IAgileObject *agile = NULL;
+        hr = IActivationFactory_QueryInterface( factory, &IID_IAgileObject, (void **)&agile );
+        ok( hr == S_OK && agile, "server factory QI(IAgileObject) returned %#lx, %p.\n", hr, agile );
+        if (agile) IAgileObject_Release( agile );
+        IActivationFactory_Release( factory );
+    }
+
+    WindowsDeleteString( str );
+    unseed_server_activation_class();
+    RoUninitialize();
+}
+
+/*
  * RoGetParameterizedTypeInstanceIID conformance: Windows derives the IID as a
  * UUIDv5-style SHA-1 hash (namespace 11f47ad5-7b73-42c0-abae-878b1e16adee) over the
  * UTF-8 "pinterface({piid};arg;...)" signature string of the instantiation
@@ -1676,12 +1865,14 @@ START_TEST(roapi)
     test_ActivationFactories();
     test_composition_activation_route();
     test_resources_core_activation_route();
+    test_winappsdk_activation_route();
     test_registered_activation_factories();
     test_activation_for_host();
     test_class_name_version();
     test_server_activatable_classes();
     test_activatable_class_registration();
     test_activation_factory_threading_model();
+    test_server_class_activation();
     test_RoGetParameterizedTypeInstanceIID();
     test_RoGetAgileReference();
     test_RoGetErrorReportingFlags();

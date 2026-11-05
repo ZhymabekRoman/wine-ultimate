@@ -405,6 +405,65 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Windows App SDK namespaces.  A packaged WindowsAppSDK app (WhatsApp, the
+     * WinUI3 set) activates its runtime classes from Microsoft.WindowsAppRuntime.dll
+     * and its MRT Core provider from Microsoft.Windows.ApplicationModel.Resources.dll;
+     * neither module ships as a builtin, so a prefix seed that names it leaves
+     * RoGetActivationFactory at "Failed to load module".  The classes' own surfaces
+     * mirror UWP namespaces that builtins do implement, so route each namespace to
+     * the builtin provider of its shape — the packaged ActivatableClassId\DllPath
+     * seeds of the same prefix are set to the same modules, and the two answers
+     * agree by construction.  Microsoft.Windows.AppLifecycle.* extends the exact-match
+     * AppInstance route above to the rest of the namespace (AppActivationArguments,
+     * ActivationRegistrationManager: the redirection surface twinapi.appcore's dummy
+     * factory answers wholesale). */
+    if (!wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.Resources.", 45 ))
+    {
+        *out = wcsdup(L"windows.applicationmodel.resources.core.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.Globalization.", 32 ))
+    {
+        *out = wcsdup(L"windows.globalization.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.AppLifecycle.", 31 ))
+    {
+        *out = wcsdup(L"twinapi.appcore.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.Storage.ApplicationData", 41 ))
+    {
+        *out = wcsdup(L"windows.storage.applicationdata.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.", 55 ) ||
+        !wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.DynamicDependency.", 54 ))
+    {
+        *out = wcsdup(L"windows.applicationmodel.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.Management.Deployment.", 40))
+    {
+        *out = wcsdup(L"appxdeploymentclient.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.PushNotifications.", 36))
+    {
+        *out = wcsdup(L"windows.networking.pushnotifications.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.System.EnvironmentManager", 43 ))
+    {
+        *out = wcsdup(L"windows.system.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.Security.AccessControl.", 41 ))
+    {
+        *out = wcsdup(L"cryptowinrt.dll");
+        return S_OK;
+    }
+
     /* load class registry key */
     if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId",
                       0, KEY_READ, &hkey_root))
@@ -556,6 +615,50 @@ static BOOL class_is_agile( const WCHAR *classid )
     if (read_class_threading_model( HKEY_CURRENT_USER, classid, &agile )) return agile;
     if (read_class_threading_model( HKEY_LOCAL_MACHINE, classid, &agile )) return agile;
     return agile;
+}
+
+/* Reads one hive's out-of-proc class server CLSID from its ActivatableClassId\<class>
+ * \Server subkey default value (a "{GUID}" REG_SZ).  Windows records the server's CLSID
+ * there, the same CLSID its LocalServer32 / rpcss registration is filed under (e.g.
+ * {daa52b27-773a-44a3-9895-b138c3e0b2c0} for Microsoft.Web.WebView2.Core.
+ * CoreWebView2CompositionController).  Answers S_OK and writes *clsid when the hive
+ * carries a parseable CLSID, S_FALSE when it does not. */
+static HRESULT read_server_clsid( HKEY root, const WCHAR *classid, CLSID *clsid )
+{
+    static const WCHAR runtime_key[] = L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId";
+    WCHAR buf[CHARS_IN_GUID];
+    HKEY hkey_root, hkey_class, hkey_server;
+    DWORD type, size;
+    HRESULT hr = S_FALSE;
+
+    if (RegOpenKeyExW( root, runtime_key, 0, KEY_READ, &hkey_root )) return S_FALSE;
+    if (RegOpenKeyExW( hkey_root, classid, 0, KEY_READ, &hkey_class ))
+    {
+        RegCloseKey( hkey_root );
+        return S_FALSE;
+    }
+    RegCloseKey( hkey_root );
+    if (RegOpenKeyExW( hkey_class, L"Server", 0, KEY_READ, &hkey_server ))
+    {
+        RegCloseKey( hkey_class );
+        return S_FALSE;
+    }
+    RegCloseKey( hkey_class );
+
+    size = sizeof( buf );
+    if (!RegQueryValueExW( hkey_server, NULL, NULL, &type, (BYTE *)buf, &size )
+        && (type == REG_SZ || type == REG_EXPAND_SZ))
+        hr = CLSIDFromString( buf, clsid );
+    RegCloseKey( hkey_server );
+    return hr;
+}
+
+/* The server CLSID of an out-of-proc activatable class, per-user hive over machine
+ * hive (the same dual-hive view class_is_agile and RoGetServerActivatableClasses read). */
+static HRESULT server_clsid_from_classid( const WCHAR *classid, CLSID *clsid )
+{
+    if (SUCCEEDED( read_server_clsid( HKEY_CURRENT_USER, classid, clsid ))) return S_OK;
+    return read_server_clsid( HKEY_LOCAL_MACHINE, classid, clsid );
 }
 
 /*
@@ -726,10 +829,18 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
 
     if (!library)
     {
-        /* Server (out-of-proc) class: the class name is the CLSID; CoCreateInstance
-         * reaches the server through its LocalServer32 / rpcss /PROCESSID registration
-         * and the server's class object answers the class's IActivationFactory. */
-        hr = CoCreateInstance( (REFCLSID)raw, NULL, CLSCTX_LOCAL_SERVER, &IID_IActivationFactory, (void **)factory );
+        /* Server (out-of-proc) class: the ActivatableClassId\<class>\Server subkey names
+         * the server's CLSID in its default value (e.g. {daa52b27-773a-44a3-9895-
+         * b138c3e0b2c0} for Microsoft.Web.WebView2.Core.CoreWebView2CompositionController).
+         * CoCreateInstance reaches the server through that CLSID's LocalServer32 / rpcss
+         * /PROCESSID registration and the server's class object answers the class's
+         * IActivationFactory.  A class whose Server subkey records no CLSID keeps the Wine
+         * convention of activating the class-name string as the CLSID. */
+        CLSID clsid;
+        if (SUCCEEDED( server_clsid_from_classid( raw, &clsid )))
+            hr = CoCreateInstance( &clsid, NULL, CLSCTX_LOCAL_SERVER, &IID_IActivationFactory, (void **)factory );
+        else
+            hr = CoCreateInstance( (REFCLSID)raw, NULL, CLSCTX_LOCAL_SERVER, &IID_IActivationFactory, (void **)factory );
         return hr;
     }
 

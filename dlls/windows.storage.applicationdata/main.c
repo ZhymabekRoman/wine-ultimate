@@ -38,7 +38,13 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     *factory = NULL;
 
-    if (!wcscmp( buffer, RuntimeClass_Windows_Storage_ApplicationData ))
+    /* Microsoft.Windows.Storage.ApplicationData* is the Windows App SDK mirror of
+     * this class (the same Current/LocalSettings surface, hosted by
+     * Microsoft.WindowsAppRuntime.dll on Windows); combase routes the namespace here
+     * and the packaged prefix's ActivatableClassId seed names this module for it.
+     * The mirror's interface layouts extend the UWP ones, so the provider answers. */
+    if (!wcscmp( buffer, RuntimeClass_Windows_Storage_ApplicationData ) ||
+        !wcscmp( buffer, L"Microsoft.Windows.Storage.ApplicationData" ))
         IActivationFactory_QueryInterface( application_data_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;

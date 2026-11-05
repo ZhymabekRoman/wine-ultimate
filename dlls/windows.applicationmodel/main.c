@@ -199,6 +199,139 @@ HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+/* WindowsAppSDK static-class surface ------------------------------------------
+ * Microsoft.Windows.ApplicationModel.WindowsAppRuntime.* (DeploymentManager,
+ * DeploymentInitializeOptions, DeploymentResult) and Microsoft.Windows.ApplicationModel.
+ * DynamicDependency.* (PackageDependency, its context and options classes) are the
+ * Windows App SDK bootstrap and framework-package classes; Windows hosts them in
+ * Microsoft.WindowsAppRuntime.dll, which has no builtin.  combase routes both
+ * namespaces here (roapi.c) and the packaged prefix's ActivatableClassId seeds carry
+ * this module as their DllPath, so the apprepository answer and the code route agree.
+ * Each class is a static: its factory hands out one QI-everything singleton that
+ * reports its own class name; every method slot past IInspectable answers S_OK with a
+ * zeroed out-param, the same tolerated shape as the StartupTask object above (the
+ * .NET projection reads the defaults and continues; E_NOTIMPL slots are what turn
+ * into RaiseFailFastException pairs). */
+struct winappsdk_class
+{
+    const void *vtbl;
+    const WCHAR *name;
+    LONG ref;
+};
+
+static HRESULT WINAPI winappsdk_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI winappsdk_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI winappsdk_Release( void *iface ) { return 1; }
+static HRESULT WINAPI winappsdk_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI winappsdk_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    struct winappsdk_class *cls = iface;
+    return WindowsCreateString( cls->name, lstrlenW( cls->name ), n );
+}
+static HRESULT WINAPI winappsdk_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI winappsdk_zero_out( void *iface, void *out )
+{
+    if (out) *(void **)out = NULL;
+    return S_OK;
+}
+
+static const void *winappsdk_class_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    winappsdk_zero_out,      /* ActivateInstance / the class's own first method slot */
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+};
+
+struct winappsdk_factory
+{
+    const void *vtbl;
+    struct winappsdk_class *obj;
+    LONG ref;
+};
+
+static HRESULT WINAPI winappsdk_factory_ActivateInstance( void *iface, IInspectable **instance )
+{
+    struct winappsdk_factory *f = iface;
+    *instance = (IInspectable *)f->obj;
+    return S_OK;
+}
+static HRESULT WINAPI winappsdk_factory_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    struct winappsdk_factory *f = iface;
+    return WindowsCreateString( f->obj->name, lstrlenW( f->obj->name ), n );
+}
+
+static const void *winappsdk_factory_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_factory_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    winappsdk_factory_ActivateInstance,
+};
+
+#define WINAPPSDK_CLASS( ident, classname ) \
+    static struct winappsdk_class ident##_obj = { winappsdk_class_vtbl, L##classname, 1 }; \
+    static struct winappsdk_factory ident##_factory = { winappsdk_factory_vtbl, &ident##_obj, 1 }
+
+WINAPPSDK_CLASS( deployment_manager, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentManager" );
+WINAPPSDK_CLASS( deployment_init_options, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentInitializeOptions" );
+WINAPPSDK_CLASS( deployment_result, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentResult" );
+WINAPPSDK_CLASS( package_dependency, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency" );
+WINAPPSDK_CLASS( package_dependency_context, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyContext" );
+WINAPPSDK_CLASS( add_package_dependency_options, "Microsoft.Windows.ApplicationModel.DynamicDependency.AddPackageDependencyOptions" );
+WINAPPSDK_CLASS( create_package_dependency_options, "Microsoft.Windows.ApplicationModel.DynamicDependency.CreatePackageDependencyOptions" );
+WINAPPSDK_CLASS( package_dependency_rank, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyRank" );
+WINAPPSDK_CLASS( environment_manager, "Microsoft.Windows.System.EnvironmentManager" );
+
+static const struct
+{
+    const WCHAR *name;
+    IActivationFactory *factory;
+}
+winappsdk_classes[] =
+{
+    { L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentManager",
+      (IActivationFactory *)&deployment_manager_factory },
+    { L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentInitializeOptions",
+      (IActivationFactory *)&deployment_init_options_factory },
+    { L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentResult",
+      (IActivationFactory *)&deployment_result_factory },
+    { L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency",
+      (IActivationFactory *)&package_dependency_factory },
+    { L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyContext",
+      (IActivationFactory *)&package_dependency_context_factory },
+    { L"Microsoft.Windows.ApplicationModel.DynamicDependency.AddPackageDependencyOptions",
+      (IActivationFactory *)&add_package_dependency_options_factory },
+    { L"Microsoft.Windows.ApplicationModel.DynamicDependency.CreatePackageDependencyOptions",
+      (IActivationFactory *)&create_package_dependency_options_factory },
+    { L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyRank",
+      (IActivationFactory *)&package_dependency_rank_factory },
+    { L"Microsoft.Windows.System.EnvironmentManager",
+      (IActivationFactory *)&environment_manager_factory },
+};
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
@@ -223,6 +356,17 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
             HRESULT (WINAPI *pfn)(HSTRING, void **) = (void *)GetProcAddress( mod, "DllGetActivationFactory" );
             if (pfn) return pfn( classid, (void **)factory );
         }
+    }
+    else
+    {
+        SIZE i;
+        for (i = 0; i < ARRAYSIZE( winappsdk_classes ); i++)
+            if (!wcscmp( buffer, winappsdk_classes[i].name ))
+            {
+                IActivationFactory_QueryInterface( winappsdk_classes[i].factory,
+                                                   &IID_IActivationFactory, (void **)factory );
+                break;
+            }
     }
 
     if (*factory) return S_OK;
