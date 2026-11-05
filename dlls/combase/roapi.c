@@ -293,6 +293,16 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* MRM's ModernResourceProvider::Create liveness probe activates the dummy
+     * class L"FakeClass.ClassName" straight through RoActivateInstance (not
+     * via the IRuntimeProvider faces); the MWR provider module answers it with
+     * an empty activation. */
+    if (!wcscmp(classid, L"FakeClass.ClassName"))
+    {
+        *out = wcsdup(L"windows.applicationmodel.resources.dll");
+        return S_OK;
+    }
+
     /* Classes consumed during XAML control construction: they fall through to the
      * ActivatableClassId registry lookup (absent in this unpackaged prefix) and return
      * REGDB_E_CLASSNOTREG, stalling the UI thread before the WebView2 environment is

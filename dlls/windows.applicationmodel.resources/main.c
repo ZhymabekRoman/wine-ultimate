@@ -23,6 +23,7 @@
  */
 
 #include <stdarg.h>
+#include <string.h>
 #include "initguid.h"
 
 #define COBJMACROS
@@ -32,6 +33,7 @@
 #include "winstring.h"
 #include "hstring.h"
 #include "wine/debug.h"
+#include "activation.h"
 #include "inspectable.h"
 #include "roapi.h"
 #include "unknwn.h"
@@ -53,6 +55,8 @@ struct provider
     LONG ref;
 };
 
+static const void *provider_vtbl[];
+
 static inline struct provider *provider_from(void *iface)
 {
     return (struct provider *)iface;
@@ -69,7 +73,7 @@ static HRESULT WINAPI provider_QueryInterface(void *iface, REFIID iid, void **ou
         InterlockedIncrement(&provider_from(iface)->ref);
         return S_OK;
     }
-    TRACE("interface %s not implemented\n", debugstr_guid(iid));
+    WARN("provider QI miss, iid %s.\n", debugstr_guid(iid));
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -130,6 +134,117 @@ static HRESULT WINAPI provider_QueryService(void *iface, REFGUID sid, REFIID iid
     return E_NOINTERFACE;
 }
 
+/* MRM's liveness probe class name test (see provider_CreateInstance). */
+static BOOL is_probe_class(HSTRING classid)
+{
+    static const WCHAR probeW[] = L"FakeClass.ClassName";
+    UINT32 len = 0;
+    LPCWSTR buf = WindowsGetStringRawBuffer(classid, &len);
+
+    if (buf && len == ARRAYSIZE(probeW) - 1 && !wcscmp(buf, probeW)) return TRUE;
+    WARN("probe miss, class %s.\n", debugstr_hstring(classid));
+    return FALSE;
+}
+
+/* The answer for the probe class: a merged IInspectable + IActivationFactory
+ * object, so it serves MRM's direct face probes (factory/instance), and the
+ * combase RoActivateInstance route (factory -> ActivateInstance).  MRT Core
+ * answers the probe the same way, with an empty activation. */
+struct probe_stub
+{
+    const void **vtbl;
+    LONG ref;
+};
+
+static HRESULT WINAPI probe_QueryInterface(void *iface, REFIID iid, void **out);
+static ULONG WINAPI probe_AddRef(void *iface);
+static ULONG WINAPI probe_Release(void *iface);
+static HRESULT WINAPI probe_GetIids(void *iface, ULONG *count, GUID **iids);
+static HRESULT WINAPI probe_GetRuntimeClassName(void *iface, HSTRING *name);
+static HRESULT WINAPI probe_GetTrustLevel(void *iface, INT32 *level);
+static HRESULT WINAPI probe_ActivateInstance(void *iface, void **instance);
+
+static const void *probe_vtbl[] =
+{
+    probe_QueryInterface, probe_AddRef, probe_Release,
+    probe_GetIids, probe_GetRuntimeClassName, probe_GetTrustLevel,
+    probe_ActivateInstance,
+};
+
+static HRESULT WINAPI probe_QueryInterface(void *iface, REFIID iid, void **out)
+{
+    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IActivationFactory))
+    {
+        *out = iface;
+        InterlockedIncrement(&((struct probe_stub *)iface)->ref);
+        return S_OK;
+    }
+    WARN("stub QI miss, iid %s.\n", debugstr_guid(iid));
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI probe_AddRef(void *iface)
+{
+    return InterlockedIncrement(&((struct probe_stub *)iface)->ref);
+}
+
+static ULONG WINAPI probe_Release(void *iface)
+{
+    ULONG ref = InterlockedDecrement(&((struct probe_stub *)iface)->ref);
+
+    if (!ref)
+    {
+        InterlockedDecrement(&object_count);
+        free(iface);
+    }
+    return ref;
+}
+
+static HRESULT WINAPI probe_GetIids(void *iface, ULONG *count, GUID **iids)
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI probe_GetRuntimeClassName(void *iface, HSTRING *name)
+{
+    static const WCHAR cls[] = L"FakeClass.ClassName";
+    return WindowsCreateString(cls, ARRAYSIZE(cls) - 1, name);
+}
+
+static HRESULT WINAPI probe_GetTrustLevel(void *iface, INT32 *level)
+{
+    *level = FullTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI probe_ActivateInstance(void *iface, void **instance)
+{
+    struct probe_stub *stub;
+
+    if (!(stub = malloc(sizeof(*stub)))) return E_OUTOFMEMORY;
+    stub->vtbl = probe_vtbl;
+    stub->ref = 1;
+    InterlockedIncrement(&object_count);
+    *instance = (void *)stub;
+    return S_OK;
+}
+
+static HRESULT probe_stub_create(void **out)
+{
+    struct probe_stub *stub;
+
+    if (!(stub = malloc(sizeof(*stub)))) return E_OUTOFMEMORY;
+    stub->vtbl = probe_vtbl;
+    stub->ref = 1;
+    InterlockedIncrement(&object_count);
+    *out = (void *)stub;
+    return S_OK;
+}
+
 /* IRuntimeProvider::GetActivationFactory - delegate to the Windows Runtime
  * activation route of this prefix (combase: ActivatableClassId seeds and the
  * builtin namespace routes), so the classes land on the builtin
@@ -140,16 +255,27 @@ static HRESULT WINAPI provider_GetActivationFactory(void *iface, HSTRING classid
 
     if (!classid || !factory) return E_POINTER;
     *factory = NULL;
+
+    /* MRM probes both faces of the runtime provider with the dummy class. */
+    if (is_probe_class(classid)) return probe_stub_create(factory);
+
     return RoGetActivationFactory(classid, &IID_IInspectable, factory);
 }
 
-/* IRuntimeProvider::CreateInstance - same, activating the class. */
+/* IRuntimeProvider::CreateInstance - same, activating the class.  MRM's
+ * ModernResourceProvider::Create probes the provider by activating
+ * L"FakeClass.ClassName" and inspects only the return code (the name is a
+ * deliberate non-class); MRT Core answers with a bare stub instance, so the
+ * probe must not go through the WinRT activation table. */
 static HRESULT WINAPI provider_CreateInstance(void *iface, HSTRING classid, void **instance)
 {
     TRACE("class %s, instance %p.\n", debugstr_hstring(classid), instance);
 
     if (!classid || !instance) return E_POINTER;
     *instance = NULL;
+
+    if (is_probe_class(classid)) return probe_stub_create(instance);
+
     return RoActivateInstance(classid, (IInspectable **)instance);
 }
 
@@ -275,5 +401,12 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
  * them without going through the COM provider. */
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
 {
+    if (!factory) return E_POINTER;
+    *factory = NULL;
+
+    /* combase's namespace route sends the MRM probe class here (roapi.c);
+     * answer directly, before the activation table (no self-recursion). */
+    if (is_probe_class(classid)) return probe_stub_create(factory);
+
     return RoGetActivationFactory(classid, &IID_IInspectable, factory);
 }
