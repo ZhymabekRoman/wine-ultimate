@@ -2680,13 +2680,14 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         set_error( STATUS_PIPE_NOT_AVAILABLE );
         return NULL;
     }
-    /* Pair the client with the listener instance the server side is about to
-     * service.  New instances are appended at the tail (create_pipe_server) and a
-     * disconnect+listen reuse is re-appended at the tail; the server's io thread
-     * (rpcrt4 spawn/handoff) services the most recently queued listener, so binding
-     * to the head (the oldest, possibly long-disconnected instance whose peer has
-     * moved on) strands the reply on a pair the server no longer polls.  Bind tail. */
-    server = LIST_ENTRY( list_tail( &pipe->listeners ), struct pipe_server, entry );
+    /* Pair the client with the oldest queued listener (FIFO), matching the
+     * Windows named-pipe instance order that kernel32:pipe asserts: new
+     * instances are appended at the tail (create_pipe_server) and a
+     * disconnect+listen reuse is re-appended at the tail, so the head is the
+     * instance the next client open must connect (ConnectNamedPipe on it then
+     * completes with ERROR_PIPE_CONNECTED).  Binding the tail made pairing
+     * LIFO and shifted every duplex multi-instance ordering check by one. */
+    server = LIST_ENTRY( list_head( &pipe->listeners ), struct pipe_server, entry );
 
     pipe_sharing = pipe->sharing;
     if (((access & GENERIC_READ) && !(pipe_sharing & FILE_SHARE_READ)) ||
