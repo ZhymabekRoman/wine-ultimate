@@ -1,0 +1,5 @@
+MODULE  = windows.applicationmodel.resources.dll
+IMPORTS = combase uuid kernelbase
+
+SOURCES = \
+	main.c

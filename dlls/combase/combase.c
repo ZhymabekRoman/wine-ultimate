@@ -1856,6 +1856,28 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
             apartment_release(apt);
             return hr;
         }
+
+        /* MRT Core (MRM.dll) CoCreateInstances a class id from the
+         * {fe28e430-7fff-*} family whose tail is generated at runtime and
+         * varies between runs, so it cannot be pinned in the registry: route
+         * the whole family to the builtin MWR provider, whose class object
+         * answers IServiceProvider::QueryService(SID_MRT_CoreIndependent)
+         * with an IRuntimeProvider over the builtin Resources.Core faces. */
+        if (FAILED(hr) && rclsid->Data1 == 0xfe28e430 && rclsid->Data2 == 0x7fff)
+        {
+            static const WCHAR mwr_dllW[] = L"windows.applicationmodel.resources.dll";
+            struct class_reg_data mrm_reg = {0};
+
+            mrm_reg.origin = CLASS_REG_ACTCTX;
+            mrm_reg.u.actctx.module_name = mwr_dllW;
+            mrm_reg.u.actctx.hactctx = 0;
+            mrm_reg.u.actctx.threading_model = 4; /* ThreadingModel_Both */
+            if (SUCCEEDED(apartment_get_inproc_class_object(apt, &mrm_reg, rclsid, riid, clscontext, obj)))
+            {
+                apartment_release(apt);
+                return S_OK;
+            }
+        }
     }
 
     /* Next try in-process handler */
