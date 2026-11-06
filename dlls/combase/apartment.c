@@ -84,13 +84,37 @@ struct opendll
     struct list entry;
 };
 
+struct apartment_cached_class_obj
+{
+    struct list entry;
+    CLSID clsid;
+    IUnknown *obj;
+};
+
 struct apartment_loaded_dll
 {
     struct list entry;
     struct opendll *dll;
+    struct list classobjs;  /* cached class objects (Windows keeps the class
+                               factory of an in-proc server alive for the
+                               lifetime of the server, pinning the module,
+                               its TLS singletons and its internal factory
+                               state for the app session) */
     DWORD unload_time;
     BOOL multi_threaded;
 };
+
+static void apartment_free_classobjs(struct apartment_loaded_dll *entry)
+{
+    struct apartment_cached_class_obj *cached, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( cached, next, &entry->classobjs, struct apartment_cached_class_obj, entry )
+    {
+        IUnknown_Release( cached->obj );
+        list_remove( &cached->entry );
+        free( cached );
+    }
+}
 
 static struct opendll *apartment_get_dll(const WCHAR *library_name)
 {
@@ -426,6 +450,7 @@ void apartment_freeunusedlibraries(struct apartment *apt, DWORD delay)
             if (!real_delay || (entry->unload_time && ((int)(GetTickCount() - entry->unload_time) > 0)))
             {
                 list_remove(&entry->entry);
+                apartment_free_classobjs(entry);
                 apartment_release_dll(entry->dll, TRUE);
                 free(entry);
             }
@@ -532,6 +557,7 @@ void apartment_release(struct apartment *apt)
         while ((cursor = list_head(&apt->loaded_dlls)))
         {
             struct apartment_loaded_dll *apartment_loaded_dll = LIST_ENTRY(cursor, struct apartment_loaded_dll, entry);
+            apartment_free_classobjs(apartment_loaded_dll);
             apartment_release_dll(apartment_loaded_dll->dll, FALSE);
             list_remove(cursor);
             free(apartment_loaded_dll);
@@ -806,6 +832,7 @@ static HRESULT apartment_getclassobject(struct apartment *apt, LPCWSTR dllpath,
         {
             apartment_loaded_dll->unload_time = 0;
             apartment_loaded_dll->multi_threaded = FALSE;
+            list_init(&apartment_loaded_dll->classobjs);
             hr = apartment_add_dll(dllpath, &apartment_loaded_dll->dll);
             if (FAILED(hr))
                 free(apartment_loaded_dll);
@@ -821,10 +848,24 @@ static HRESULT apartment_getclassobject(struct apartment *apt, LPCWSTR dllpath,
 
     if (SUCCEEDED(hr))
     {
+        struct apartment_cached_class_obj *cached;
+
         /* one component being multi-threaded overrides any number of
          * apartment-threaded components */
         if (!apartment_threaded)
             apartment_loaded_dll->multi_threaded = TRUE;
+
+        EnterCriticalSection(&apt->cs);
+        LIST_FOR_EACH_ENTRY( cached, &apartment_loaded_dll->classobjs,
+                             struct apartment_cached_class_obj, entry )
+            if (IsEqualCLSID( rclsid, &cached->clsid ))
+            {
+                IUnknown *obj = cached->obj;
+                LeaveCriticalSection(&apt->cs);
+                TRACE("returning cached class object %p for %s\n", obj, debugstr_guid(rclsid));
+                return IUnknown_QueryInterface( obj, riid, ppv );
+            }
+        LeaveCriticalSection(&apt->cs);
 
         TRACE("calling DllGetClassObject %p\n", apartment_loaded_dll->dll->DllGetClassObject);
         /* OK: get the ClassObject */
@@ -832,6 +873,15 @@ static HRESULT apartment_getclassobject(struct apartment *apt, LPCWSTR dllpath,
 
         if (hr != S_OK)
             ERR("DllGetClassObject returned error %#lx for dll %s\n", hr, debugstr_w(dllpath));
+        else if (*ppv && (cached = malloc(sizeof(*cached))))
+        {
+            cached->clsid = *rclsid;
+            cached->obj = *ppv;
+            IUnknown_AddRef( cached->obj );
+            EnterCriticalSection(&apt->cs);
+            list_add_tail(&apartment_loaded_dll->classobjs, &cached->entry);
+            LeaveCriticalSection(&apt->cs);
+        }
     }
 
     return hr;
