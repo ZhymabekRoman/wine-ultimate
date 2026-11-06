@@ -530,3 +530,23 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
     TRACE("-> factory %p, hr 0x%08x.\n", *factory, (unsigned)hr);
     return hr;
 }
+
+/* Microsoft.Windows.ApplicationModel.Resources.dll SxS C entry: the
+ * Redhawk/MCG binder binds this name on the sxs module for the MWR
+ * activatable classes; hand back the class factory QI-ed to the asked IID
+ * (IResourceManager2 {7ec10160-...} for ResourceManager). */
+HRESULT WINAPI GetActivationFactory(HSTRING classid, REFIID iid, void **factory)
+{
+    IInspectable *f;
+    HRESULT hr;
+
+    TRACE("class %s iid %s.\n", debugstr_hstring(classid), debugstr_guid(iid));
+    if (!factory) return E_POINTER;
+    *factory = NULL;
+    hr = DllGetActivationFactory(classid, (void **)&f);
+    if (FAILED(hr)) return hr;
+    hr = IInspectable_QueryInterface(f, iid, factory);
+    IInspectable_Release(f);
+    TRACE("-> %p hr 0x%08x.\n", *factory, (unsigned)hr);
+    return hr;
+}

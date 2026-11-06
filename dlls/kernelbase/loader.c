@@ -73,11 +73,20 @@ FARPROC WINAPI get_proc_address( HMODULE module, LPCSTR function )
     if ((ULONG_PTR)function >> 16)
     {
         RtlInitAnsiString( &str, function );
-        if (!set_ntstatus( LdrGetProcedureAddress( module, &str, 0, (void**)&proc ))) return NULL;
+        if (!set_ntstatus( LdrGetProcedureAddress( module, &str, 0, (void**)&proc )))
+        {
+            TRACE( "%p %s -> NULL\n", module, debugstr_a( function ));
+            return NULL;
+        }
     }
     else if (!set_ntstatus( LdrGetProcedureAddress( module, NULL, LOWORD(function), (void**)&proc )))
+    {
+        TRACE( "%p ordinal %u -> NULL\n", module, (unsigned)LOWORD( function ));
         return NULL;
+    }
 
+    TRACE( "%p %s -> %p\n", module,
+           (ULONG_PTR)function >> 16 ? debugstr_a( function ) : (LPCSTR)"", proc );
     return proc;
 }
 
@@ -500,7 +509,10 @@ __ASM_GLOBAL_FUNC( GetProcAddress,
 
 FARPROC WINAPI DECLSPEC_HOTPATCH GetProcAddress( HMODULE module, LPCSTR function )
 {
-    return get_proc_address( module, function );
+    FARPROC ret = get_proc_address( module, function );
+    TRACE( "%p %s -> %p\n", module,
+           (ULONG_PTR)function >> 16 ? debugstr_a( function ) : (LPCSTR)"ordinal", ret );
+    return ret;
 }
 
 #endif /* __x86_64__ */
