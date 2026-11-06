@@ -527,8 +527,8 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         *out = wcsdup(L"windows.storage.applicationdata.dll");
         return S_OK;
     }
-    if (!wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.", 55 ) ||
-        !wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.DynamicDependency.", 54 ))
+    if (!wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.", 53 ) ||
+        !wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.DynamicDependency.", 53 ))
     {
         *out = wcsdup(L"windows.applicationmodel.dll");
         return S_OK;

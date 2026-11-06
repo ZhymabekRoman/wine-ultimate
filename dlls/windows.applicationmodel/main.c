@@ -295,15 +295,383 @@ static const void *winappsdk_factory_vtbl[] =
     static struct winappsdk_class ident##_obj = { winappsdk_class_vtbl, L##classname, 1 }; \
     static struct winappsdk_factory ident##_factory = { winappsdk_factory_vtbl, &ident##_obj, 1 }
 
-WINAPPSDK_CLASS( deployment_manager, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentManager" );
+/* Info faces for the classes the combase roapi suite and the WA bootstrap walk.
+ *
+ * The roapi suite row asserts RoGetActivationFactory + ActivateInstance +
+ * GetRuntimeClassName round-trip; beyond that row the WindowsAppSDK bootstrap
+ * (Microsoft.WindowsAppRuntime.dll DeploymentManager::GetCurrent) and the
+ * DynamicDependency framework-package surface walk one level deeper: the
+ * DeploymentResult with its DeploymentPackage/PackageVersion, the
+ * PackageDependencyContext with its Name, ContextToken and (mirroring the UWP
+ * package's DependencyContext.PackageGraph) an empty IIterable<PackageDependency>.
+ * These vtbls give the three classes exactly that surface, methods in the
+ * alphabetical per-interface order the projection lays out, with stub-store
+ * defaults; slots past these keep the shared winappsdk_zero_out answer and a
+ * QI of any IID answers the same singleton, as above. */
+static struct winappsdk_class deployment_package_obj, deployment_result_obj;
+static struct winappsdk_class package_dependency_obj, package_dependency_context_obj;
+static struct winappsdk_class package_graph_obj;
+
+/* Windows.ApplicationModel.PackageVersion is a four-WORD value struct; the
+ * projection's property getter takes it by pointer. */
+static HRESULT WINAPI package_version_get_Major( void *iface, UINT16 *major ) { if (major) *major = 1; return S_OK; }
+static HRESULT WINAPI package_version_get_Minor( void *iface, UINT16 *minor ) { if (minor) *minor = 0; return S_OK; }
+static HRESULT WINAPI package_version_get_Build( void *iface, UINT16 *build ) { if (build) *build = 0; return S_OK; }
+static HRESULT WINAPI package_version_get_Revision( void *iface, UINT16 *revision ) { if (revision) *revision = 0; return S_OK; }
+
+static const void *package_version_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    package_version_get_Major,
+    package_version_get_Minor,
+    package_version_get_Build,
+    package_version_get_Revision,
+};
+
+WINAPPSDK_CLASS( package_version, "Windows.ApplicationModel.PackageVersion" );
+
+static HRESULT WINAPI deployment_package_get_Id( void *iface, HSTRING *id )
+{
+    if (id) return WindowsCreateString( L"Microsoft.WindowsAppRuntime.1.8", 32, id );
+    return S_OK;
+}
+static HRESULT WINAPI deployment_package_get_InstalledPath( void *iface, HSTRING *path )
+{
+    if (path) return WindowsCreateString( L"C:\\Program Files\\WindowsApps\\Stub_1.0.0.0_x64__8wekyb3d8bbwe", 57, path );
+    return S_OK;
+}
+static HRESULT WINAPI deployment_package_get_IsFramework( void *iface, BOOL *ret ) { if (ret) *ret = TRUE; return S_OK; }
+static HRESULT WINAPI deployment_package_get_Version( void *iface, struct PackageVersion *version )
+{
+    if (version)
+    {
+        version->Major = 1;
+        version->Minor = 0;
+        version->Build = 0;
+        version->Revision = 0;
+    }
+    return S_OK;
+}
+
+static const void *deployment_package_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    deployment_package_get_Id,
+    deployment_package_get_InstalledPath,
+    deployment_package_get_IsFramework,
+    deployment_package_get_Version,
+};
+
+WINAPPSDK_CLASS( deployment_package, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentPackage" );
+
+/* DeploymentResult: Status (stub answers IdenticalPackageAvailable) + package. */
+static HRESULT WINAPI deployment_result_get_DeploymentPackage( void *iface, void **package )
+{
+    if (package) *package = &deployment_package_obj;
+    return S_OK;
+}
+static HRESULT WINAPI deployment_result_get_Status( void *iface, UINT32 *status ) { if (status) *status = 1 /* IdenticalPackageAvailable */; return S_OK; }
+
+static const void *deployment_result_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    deployment_result_get_DeploymentPackage,
+    deployment_result_get_Status,
+};
+
+/* Completed IAsyncOperationWithProgress<DeploymentResult, DeploymentProgress>
+ * the DeploymentManager Ensure* methods answer; fires the handler on
+ * put_Completed like the StartupTask async above. */
+struct winappsdk_async
+{
+    const void *vtbl;
+    LONG ref;
+};
+
+static HRESULT WINAPI winappsdk_async_put_Completed( void *iface, void *handler )
+{
+    if (handler)
+    {
+        void **vtbl = *(void ***)handler;
+        HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, UINT32) = (void *)vtbl[3];
+        if (invoke) invoke( handler, iface, 1 /* AsyncStatus_Completed */ );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI winappsdk_async_get_Completed( void *iface, void **handler ) { if (handler) *handler = NULL; return S_OK; }
+static HRESULT WINAPI winappsdk_async_GetResults( void *iface, void **results ) { if (results) *results = &deployment_result_obj; return S_OK; }
+static HRESULT WINAPI winappsdk_async_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI winappsdk_async_get_Status( void *iface, UINT32 *status ) { if (status) *status = 1 /* Completed */; return S_OK; }
+static HRESULT WINAPI winappsdk_async_get_ErrorCode( void *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
+static HRESULT WINAPI winappsdk_async_Cancel( void *iface ) { return S_OK; }
+static HRESULT WINAPI winappsdk_async_Close( void *iface ) { return S_OK; }
+
+static const void *winappsdk_async_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    winappsdk_async_put_Completed,
+    winappsdk_async_get_Completed,
+    winappsdk_async_GetResults,
+    winappsdk_async_get_Id,
+    winappsdk_async_get_Status,
+    winappsdk_async_get_ErrorCode,
+    winappsdk_async_Cancel,
+    winappsdk_async_Close,
+};
+
+static struct winappsdk_async deployment_async_inst = { winappsdk_async_vtbl, 1 };
+
+static HRESULT WINAPI deployment_manager_Ensure( void *iface, void **op ) { if (op) *op = &deployment_async_inst; return S_OK; }
+
+static const void *deployment_manager_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    deployment_manager_Ensure,     /* EnsureCurrentApplicationDeployedAsync */
+    deployment_manager_Ensure,     /* EnsureLatestAsync */
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+};
+
+static HRESULT WINAPI deployment_manager_factory_GetCurrent( void *iface, void **result )
+{
+    if (result) *result = &deployment_result_obj;
+    return S_OK;
+}
+
+static const void *deployment_manager_factory_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_factory_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    winappsdk_factory_ActivateInstance,
+    deployment_manager_factory_GetCurrent,
+};
+
+static struct winappsdk_class deployment_manager_obj =
+{
+    deployment_manager_vtbl, L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentManager", 1
+};
+static struct winappsdk_factory deployment_manager_factory =
+{
+    deployment_manager_factory_vtbl, &deployment_manager_obj, 1
+};
+
+/* Empty IIterable<PackageDependency>: the context's PackageGraph face. */
+static HRESULT WINAPI package_graph_iterator_get_Current( void *iface, void **item ) { if (item) *item = &package_dependency_obj; return S_OK; }
+static HRESULT WINAPI package_graph_iterator_get_HasCurrent( void *iface, BOOL *ret ) { if (ret) *ret = FALSE; return S_OK; }
+static HRESULT WINAPI package_graph_iterator_MoveNext( void *iface, BOOL *ret ) { if (ret) *ret = FALSE; return S_OK; }
+static HRESULT WINAPI package_graph_iterator_GetMany( void *iface, UINT32 size, void *items, UINT32 *count )
+{
+    if (count) *count = 0;
+    return S_OK;
+}
+
+static const void *package_graph_iterator_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    package_graph_iterator_get_Current,
+    package_graph_iterator_get_HasCurrent,
+    package_graph_iterator_MoveNext,
+    package_graph_iterator_GetMany,
+};
+
+static struct winappsdk_class package_graph_iterator_obj =
+{
+    package_graph_iterator_vtbl, L"Windows.Foundation.Collections.IIterator`1<Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency>", 1
+};
+
+static HRESULT WINAPI package_graph_First( void *iface, void **iterator )
+{
+    if (iterator) *iterator = &package_graph_iterator_obj;
+    return S_OK;
+}
+
+static const void *package_graph_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    package_graph_First,
+};
+
+WINAPPSDK_CLASS( package_graph, "Windows.Foundation.Collections.IIterable`1<Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency>" );
+
+/* PackageDependencyContext: ContextToken (one installed dependency = token 1),
+ * the PackageDependency it points at, and the PackageGraph iterable. */
+static HRESULT WINAPI package_dependency_context_get_ContextToken( void *iface, INT32 *token ) { if (token) *token = 1; return S_OK; }
+static HRESULT WINAPI package_dependency_context_get_PackageDependency( void *iface, void **dep )
+{
+    if (dep) *dep = &package_dependency_obj;
+    return S_OK;
+}
+static HRESULT WINAPI package_dependency_context_get_PackageGraph( void *iface, void **graph )
+{
+    if (graph) *graph = &package_graph_obj;
+    return S_OK;
+}
+
+static const void *package_dependency_context_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    package_dependency_context_get_ContextToken,
+    package_dependency_context_get_PackageDependency,
+    package_dependency_context_get_PackageGraph,
+    winappsdk_zero_out,
+};
+
+/* PackageDependency: the WinAppSDK EmojiData framework the projection pins;
+ * GetDefault/GetAdjacent answer it, AddPackageDependency hands back the context. */
+static HRESULT WINAPI package_dependency_get_Context( void *iface, void **context )
+{
+    if (context) *context = &package_dependency_context_obj;
+    return S_OK;
+}
+static HRESULT WINAPI package_dependency_get_Name( void *iface, HSTRING *name )
+{
+    if (name) return WindowsCreateString( L"Microsoft.WinAppSDK.EmojiData", 29, name );
+    return S_OK;
+}
+
+static const void *package_dependency_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    package_dependency_get_Context,
+    package_dependency_get_Name,
+};
+
+static HRESULT WINAPI package_dependency_factory_AddPackageDependency( void *iface, HSTRING family_name, void **context )
+{
+    if (context) *context = &package_dependency_context_obj;
+    return S_OK;
+}
+static HRESULT WINAPI package_dependency_factory_AddPackageDependencyWithApplicabilityFilters( void *iface, void *args, void **context )
+{
+    if (context) *context = &package_dependency_context_obj;
+    return S_OK;
+}
+static HRESULT WINAPI package_dependency_factory_CreatePackageDependency( void *iface, void *args, void **context )
+{
+    if (context) *context = &package_dependency_context_obj;
+    return S_OK;
+}
+static HRESULT WINAPI package_dependency_factory_GetAdjacent( void *iface, HSTRING family_name, void **dep )
+{
+    if (dep) *dep = &package_dependency_obj;
+    return S_OK;
+}
+static HRESULT WINAPI package_dependency_factory_GetDefault( void *iface, void **dep )
+{
+    if (dep) *dep = &package_dependency_obj;
+    return S_OK;
+}
+
+static const void *package_dependency_factory_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_factory_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    winappsdk_factory_ActivateInstance,
+    package_dependency_factory_AddPackageDependency,
+    package_dependency_factory_AddPackageDependencyWithApplicabilityFilters,
+    package_dependency_factory_CreatePackageDependency,
+    package_dependency_factory_GetAdjacent,
+    package_dependency_factory_GetDefault,
+};
+
+/* AddPackageDependencyOptions: DependencyKinds, PackageDependencyRank, Rank. */
+static HRESULT WINAPI add_options_get_DependencyKinds( void *iface, UINT32 *kinds ) { if (kinds) *kinds = 0; return S_OK; }
+static HRESULT WINAPI add_options_put_DependencyKinds( void *iface, UINT32 kinds ) { return S_OK; }
+static HRESULT WINAPI add_options_get_PackageDependencyRank( void *iface, void *rank ) { if (rank) *(UINT64 *)rank = 0; return S_OK; }
+static HRESULT WINAPI add_options_put_PackageDependencyRank( void *iface, void *rank ) { return S_OK; }
+static HRESULT WINAPI add_options_get_Rank( void *iface, INT32 *rank ) { if (rank) *rank = 0; return S_OK; }
+static HRESULT WINAPI add_options_put_Rank( void *iface, INT32 rank ) { return S_OK; }
+
+static const void *add_package_dependency_options_vtbl[] =
+{
+    winappsdk_QueryInterface,
+    winappsdk_AddRef,
+    winappsdk_Release,
+    winappsdk_GetIids,
+    winappsdk_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    add_options_get_DependencyKinds,
+    add_options_put_DependencyKinds,
+    add_options_get_PackageDependencyRank,
+    add_options_put_PackageDependencyRank,
+    add_options_get_Rank,
+    add_options_put_Rank,
+};
+
 WINAPPSDK_CLASS( deployment_init_options, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentInitializeOptions" );
-WINAPPSDK_CLASS( deployment_result, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentResult" );
-WINAPPSDK_CLASS( package_dependency, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency" );
-WINAPPSDK_CLASS( package_dependency_context, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyContext" );
-WINAPPSDK_CLASS( add_package_dependency_options, "Microsoft.Windows.ApplicationModel.DynamicDependency.AddPackageDependencyOptions" );
 WINAPPSDK_CLASS( create_package_dependency_options, "Microsoft.Windows.ApplicationModel.DynamicDependency.CreatePackageDependencyOptions" );
 WINAPPSDK_CLASS( package_dependency_rank, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyRank" );
 WINAPPSDK_CLASS( environment_manager, "Microsoft.Windows.System.EnvironmentManager" );
+
+#define WINAPPSDK_CLASS_V( ident, vtbl, classname ) \
+    static struct winappsdk_class ident##_obj = { vtbl, L##classname, 1 }; \
+    static struct winappsdk_factory ident##_factory = { winappsdk_factory_vtbl, &ident##_obj, 1 }
+
+WINAPPSDK_CLASS_V( deployment_result, deployment_result_vtbl, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentResult" );
+WINAPPSDK_CLASS_V( package_dependency_context, package_dependency_context_vtbl, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyContext" );
+WINAPPSDK_CLASS_V( add_package_dependency_options, add_package_dependency_options_vtbl, "Microsoft.Windows.ApplicationModel.DynamicDependency.AddPackageDependencyOptions" );
+
+static struct winappsdk_class package_dependency_obj =
+{
+    package_dependency_vtbl, L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency", 1
+};
+static struct winappsdk_factory package_dependency_factory =
+{
+    package_dependency_factory_vtbl, &package_dependency_obj, 1
+};
 
 static const struct
 {
@@ -359,7 +727,7 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     }
     else
     {
-        SIZE i;
+        SIZE_T i;
         for (i = 0; i < ARRAYSIZE( winappsdk_classes ); i++)
             if (!wcscmp( buffer, winappsdk_classes[i].name ))
             {
