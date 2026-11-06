@@ -24,6 +24,18 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(combase);
 
+/* The C++/WinRT projections of Windows.Foundation.Collections interfaces reach
+ * our map objects through the *Windows* parameterized interface ids, not the
+ * ids Wine's idl generates for its own IMap<HSTRING, IInspectable*>
+ * instantiation ({1b0d3570-0877-5ec2-8a2c-3b953b953950} et al).  A consumer
+ * that got an IPropertySet (e.g. a WinAppSDK AppInstance's activation
+ * arguments) QIs it for IMap<Platform.String, Windows.Foundation.IInspectable>
+ * and for the IPropertySet iid it knows, and both QIs must land on the map.  */
+static const GUID IID_IMap_String_IInspectable =
+{ 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
+static const GUID IID_IMapView_String_IInspectable =
+{ 0xe8cc1dcf, 0xaa1b, 0x51e7, {0x90, 0xa7, 0x6b, 0x7d, 0x99, 0xbd, 0x99, 0xa0} };
+
 struct map_entry
 {
     HSTRING key;
@@ -595,7 +607,7 @@ static HRESULT WINAPI map_inner_QueryInterface( IInspectable *iface, REFIID iid,
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, impl->iids.map ))
+    if (IsEqualGUID( iid, impl->iids.map ) || IsEqualGUID( iid, &IID_IMap_String_IInspectable ))
     {
         IInspectable_AddRef( (*out = &impl->IMap_HSTRING_IInspectable_iface) );
         return S_OK;
@@ -606,6 +618,9 @@ static HRESULT WINAPI map_inner_QueryInterface( IInspectable *iface, REFIID iid,
         IInspectable_AddRef( (*out = &impl->IIterable_IKeyValuePair_HSTRING_IInspectable_iface) );
         return S_OK;
     }
+
+    if (IsEqualGUID( iid, &IID_IPropertySet ) && impl->IInspectable_outer)
+        return IInspectable_QueryInterface( impl->IInspectable_outer, iid, out );
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -881,11 +896,14 @@ static HRESULT WINAPI locked_map_inner_QueryInterface( IInspectable *iface, REFI
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, impl->iids.map ))
+    if (IsEqualGUID( iid, impl->iids.map ) || IsEqualGUID( iid, &IID_IMap_String_IInspectable ))
     {
         IInspectable_AddRef( (*out = &impl->IMap_HSTRING_IInspectable_iface) );
         return S_OK;
     }
+
+    if (IsEqualGUID( iid, &IID_IPropertySet ) && impl->IInspectable_outer)
+        return IInspectable_QueryInterface( impl->IInspectable_outer, iid, out );
 
     if (SUCCEEDED(IInspectable_QueryInterface( impl->inner, iid, out ))) return S_OK;
 
