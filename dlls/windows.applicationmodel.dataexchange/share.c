@@ -1241,11 +1241,13 @@ static const void *clipboard_content_options_vtbl[] =
  *
  * Everything below is the shape include/windows.applicationmodel.datatransfer.
  * dragdrop.core.idl and include/dragdropinterop.idl declare.  The contract
- * has no "GetForCoreWindow" method and no CoreDragDropTarget interface (the
- * window entry point is IDragDropManagerInterop::GetForWindow, which takes
- * the HWND; CoreDragDropTarget is not in this tree's metadata and is not
- * referenced by the app), so the manager records the window it was created
- * for and stops there.  ICoreDropOperationTarget, its event args,
+ * The statics answer GetForCurrentView and GetForCoreWindow (the WinUI
+ * desktop route; the CoreWindow parameter is not recorded, the manager
+ * answers for the window it was created for) and the manager hands out one
+ * CoreDragDropTarget, an ICoreDropOperationTarget whose session methods
+ * complete synchronously with DataPackageOperation_Copy.  The window entry
+ * point IDragDropManagerInterop::GetForWindow takes the HWND.
+ * ICoreDropOperationTarget, its event args,
  * CoreDragInfo and CoreDragUIOverride stay E_NOINTERFACE on the manager, as
  * Windows answers them: those objects only take part in a live drag session,
  * which has no orchestrator in a prefix, and in the TargetRequested flow the
@@ -1260,6 +1262,9 @@ static LONG next_core_ddm_token = 1;   /* InterlockedIncrement: first token 2, n
 
 #define CORE_DDM_MAX_HANDLERS 8
 
+struct core_dd_target;
+static ULONG WINAPI cddt_Release( const void *iface );
+
 struct core_ddm_registration
 {
     IUnknown *handler;                 /* owned; NULL = free slot */
@@ -1273,6 +1278,7 @@ struct core_ddm
     HWND hwnd;                  /* the window GetForWindow created this manager for */
     BOOLEAN concurrent;         /* AreConcurrentOperationsEnabled, TRUE as on Windows */
     struct core_ddm_registration handlers[CORE_DDM_MAX_HANDLERS];
+    struct core_dd_target *target;      /* the CoreDragDropTarget get_Target hands out, owned */
 };
 
 /* IInspectable::GetIids answers a CoTaskMemAlloc-allocated array; every
@@ -1358,7 +1364,11 @@ static ULONG WINAPI cddm_Release( const void *iface )
 {
     struct core_ddm *impl = impl_from_core_ddm( iface );
     LONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        if (impl->target) cddt_Release( (const void *)impl->target );
+        free( impl );
+    }
     return ref;
 }
 
@@ -1415,6 +1425,305 @@ static HRESULT WINAPI cddm_put_AreConcurrentOperationsEnabled( const void *iface
     return S_OK;
 }
 
+#ifndef AsyncStatus_Completed
+#define AsyncStatus_Completed Completed   /* widl emits unprefixed enum values */
+#endif
+
+/*
+ * The completed-async pair (IAsyncOperation<DataPackageOperation> and
+ * IAsyncAction) that the CoreDragDropTarget session methods hand back.  A
+ * prefix has no drag orchestrator, so every session call is already over
+ * when it returns: the operation reports AsyncStatus_Completed,
+ * GetResults answers DataPackageOperation_Copy, and put_Completed invokes
+ * the handler synchronously, as Windows does for completed operations.
+ * One object answers both groups; IAsyncAction sits at offset 1 pointer.
+ */
+
+struct cdd_async
+{
+    const void *op_vtbl;        /* IAsyncOperation<DataPackageOperation> at offset 0 */
+    const void *action_vtbl;    /* IAsyncAction at offset 1 pointer */
+    LONG ref;
+};
+
+static inline struct cdd_async *impl_from_cdd_async( const void *iface ) { return (struct cdd_async *)iface; }
+
+static HRESULT WINAPI cdda_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    struct cdd_async *impl = impl_from_cdd_async( iface );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IAsyncInfo ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperation_DataPackageOperation ))
+    {
+        *out = (void *)impl;
+    }
+    else if (IsEqualGUID( iid, &IID_IAsyncAction ))
+    {
+        *out = (void **)(void *)impl + 1;
+    }
+    else return E_NOINTERFACE;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
+}
+
+static ULONG WINAPI cdda_AddRef( const void *iface ) { return InterlockedIncrement( &impl_from_cdd_async( iface )->ref ); }
+static ULONG WINAPI cdda_Release( const void *iface )
+{
+    struct cdd_async *impl = impl_from_cdd_async( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI cdda_GetIids( const void *iface, ULONG *count, IID **iids )
+{
+    static const IID *const list[] = { &IID_IAsyncOperation_DataPackageOperation, &IID_IAsyncAction };
+    return fill_iids( list, ARRAY_SIZE( list ), count, iids );
+}
+
+static HRESULT WINAPI cdda_GetRuntimeClassName( const void *iface, HSTRING *name )
+{
+    static const WCHAR class[] = L"Windows.Foundation.IAsyncOperation`1<Windows.ApplicationModel.DataTransfer.DataPackageOperation>";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( class, ARRAY_SIZE( class ) - 1, name );
+}
+
+static HRESULT WINAPI cdda_GetTrustLevel( const void *iface, TrustLevel *trust )
+{
+    if (!trust) return E_POINTER;
+    *trust = 0; /* TrustLevel_Base */
+    return S_OK;
+}
+
+static HRESULT WINAPI cdda_get_Id( const void *iface, UINT32 *id )
+{
+    if (!id) return E_POINTER;
+    *id = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI cdda_get_Status( const void *iface, AsyncStatus *status )
+{
+    if (!status) return E_POINTER;
+    *status = AsyncStatus_Completed;
+    return S_OK;
+}
+
+static HRESULT WINAPI cdda_Cancel( const void *iface ) { return S_OK; }
+static HRESULT WINAPI cdda_Close( const void *iface ) { return S_OK; }
+
+static HRESULT WINAPI cdda_op_put_Completed( const void *iface, IAsyncOperationCompletedHandler_DataPackageOperation *handler )
+{
+    if (handler)
+    {
+        IAsyncOperationCompletedHandler_DataPackageOperation_Invoke( (IAsyncOperationCompletedHandler_DataPackageOperation *)handler,
+                                                                     (IAsyncOperation_DataPackageOperation *)iface, S_OK );
+        IAsyncOperationCompletedHandler_DataPackageOperation_Release( handler );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI cdda_op_get_Completed( const void *iface, IAsyncOperationCompletedHandler_DataPackageOperation **handler )
+{
+    if (!handler) return E_POINTER;
+    *handler = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI cdda_op_GetResults( const void *iface, DataPackageOperation *result )
+{
+    if (!result) return E_POINTER;
+    *result = DataPackageOperation_Copy;
+    return S_OK;
+}
+
+static HRESULT WINAPI cdda_action_put_Completed( const void *iface, IAsyncActionCompletedHandler *handler )
+{
+    if (handler)
+    {
+        IAsyncActionCompletedHandler_Invoke( handler, (IAsyncAction *)iface, S_OK );
+        IAsyncActionCompletedHandler_Release( handler );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI cdda_action_GetResults( const void *iface ) { return S_OK; }
+
+static const void *cdd_async_op_vtbl[] =
+{
+    cdda_QueryInterface,
+    cdda_AddRef,
+    cdda_Release,
+    cdda_GetIids,
+    cdda_GetRuntimeClassName,
+    cdda_GetTrustLevel,
+    cdda_get_Id,
+    cdda_get_Status,
+    cdda_Cancel,
+    cdda_Close,
+    cdda_op_put_Completed,
+    cdda_op_get_Completed,
+    cdda_op_GetResults,
+};
+
+static const void *cdd_async_action_vtbl[] =
+{
+    cdda_QueryInterface,
+    cdda_AddRef,
+    cdda_Release,
+    cdda_GetIids,
+    cdda_GetRuntimeClassName,
+    cdda_GetTrustLevel,
+    cdda_get_Id,
+    cdda_get_Status,
+    cdda_Cancel,
+    cdda_Close,
+    cdda_action_put_Completed,
+    cdda_action_GetResults,
+};
+
+static struct cdd_async *create_cdd_async( void )
+{
+    struct cdd_async *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->op_vtbl = cdd_async_op_vtbl;
+    impl->action_vtbl = cdd_async_action_vtbl;
+    impl->ref = 1;
+    return impl;
+}
+
+/*
+ * CoreDragDropTarget, the ICoreDropOperationTarget the manager's Target
+ * property hands out.  A prefix has no drag session, so each method returns
+ * a completed operation reporting DataPackageOperation_Copy.
+ */
+
+struct core_dd_target
+{
+    const void *target_vtbl;    /* ICoreDropOperationTarget at offset 0 */
+    LONG ref;
+};
+
+static inline struct core_dd_target *impl_from_core_dd_target( const void *iface ) { return (struct core_dd_target *)iface; }
+
+static HRESULT WINAPI cddt_QueryInterface( const void *iface, REFIID iid, void **out )
+{
+    struct core_dd_target *impl = impl_from_core_dd_target( iface );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ICoreDropOperationTarget ))
+    {
+        *out = (void *)impl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI cddt_AddRef( const void *iface ) { return InterlockedIncrement( &impl_from_core_dd_target( iface )->ref ); }
+static ULONG WINAPI cddt_Release( const void *iface )
+{
+    struct core_dd_target *impl = impl_from_core_dd_target( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI cddt_GetIids( const void *iface, ULONG *count, IID **iids )
+{
+    static const IID *const list[] = { &IID_ICoreDropOperationTarget };
+    return fill_iids( list, ARRAY_SIZE( list ), count, iids );
+}
+
+static HRESULT WINAPI cddt_GetRuntimeClassName( const void *iface, HSTRING *name )
+{
+    static const WCHAR class[] = L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropTarget";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( class, ARRAY_SIZE( class ) - 1, name );
+}
+
+static HRESULT WINAPI cddt_GetTrustLevel( const void *iface, TrustLevel *trust )
+{
+    if (!trust) return E_POINTER;
+    *trust = 0; /* TrustLevel_Base */
+    return S_OK;
+}
+
+static HRESULT WINAPI cddt_EnterAsync( const void *iface, void *info, void *override,
+                                       IAsyncOperation_DataPackageOperation **value )
+{
+    struct cdd_async *impl;
+    TRACE( "iface %p, info %p, override %p, value %p.\n", iface, info, override, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!(impl = create_cdd_async())) return E_OUTOFMEMORY;
+    *value = (IAsyncOperation_DataPackageOperation *)impl;
+    return S_OK;
+}
+
+static HRESULT WINAPI cddt_OverAsync( const void *iface, void *info, void *override,
+                                      IAsyncOperation_DataPackageOperation **value )
+{
+    return cddt_EnterAsync( iface, info, override, value );
+}
+
+static HRESULT WINAPI cddt_LeaveAsync( const void *iface, void *info, IAsyncAction **value )
+{
+    struct cdd_async *impl;
+    TRACE( "iface %p, info %p, value %p.\n", iface, info, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!(impl = create_cdd_async())) return E_OUTOFMEMORY;
+    *value = (IAsyncAction *)(void **)(void *)impl + 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI cddt_DropAsync( const void *iface, void *info, IAsyncOperation_DataPackageOperation **value )
+{
+    return cddt_EnterAsync( iface, info, NULL, value );
+}
+
+static const void *core_dd_target_vtbl[] =
+{
+    cddt_QueryInterface,
+    cddt_AddRef,
+    cddt_Release,
+    cddt_GetIids,
+    cddt_GetRuntimeClassName,
+    cddt_GetTrustLevel,
+    cddt_EnterAsync,
+    cddt_OverAsync,
+    cddt_LeaveAsync,
+    cddt_DropAsync,
+};
+
+static struct core_dd_target *create_core_dd_target( void )
+{
+    struct core_dd_target *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->target_vtbl = core_dd_target_vtbl;
+    impl->ref = 1;
+    return impl;
+}
+
+static HRESULT WINAPI cddm_get_Target( const void *iface, ICoreDropOperationTarget **value )
+{
+    struct core_ddm *impl = impl_from_core_ddm( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!impl->target && !(impl->target = create_core_dd_target())) return E_OUTOFMEMORY;
+    *value = (ICoreDropOperationTarget *)impl->target;
+    InterlockedIncrement( &impl->target->ref );
+    return S_OK;
+}
+
 static const void *core_ddm_vtbl[] =
 {
     cddm_QueryInterface,
@@ -1427,6 +1736,7 @@ static const void *core_ddm_vtbl[] =
     cddm_remove_TargetRequested,
     cddm_get_AreConcurrentOperationsEnabled,
     cddm_put_AreConcurrentOperationsEnabled,
+    cddm_get_Target,
 };
 
 static struct core_ddm *create_core_ddm( HWND hwnd )
@@ -1596,6 +1906,22 @@ static HRESULT WINAPI cddfs_GetForCurrentView( const void *iface, ICoreDragDropM
     return S_OK;
 }
 
+/* WinUI desktop (Microsoft.ui.xaml.dll) activates the class through the
+ * statics' GetForCoreWindow; the CoreWindow is not recorded, the manager
+ * answers for the window the session runs on. */
+static HRESULT WINAPI cddfs_GetForCoreWindow( const void *iface, void *window, ICoreDragDropManager **value )
+{
+    struct core_ddm *impl;
+
+    TRACE( "iface %p, window %p, value %p.\n", iface, window, value );
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    if (!(impl = create_core_ddm( 0 ))) return E_OUTOFMEMORY;
+    *value = (ICoreDragDropManager *)impl;   /* the manager group sits at offset 0 */
+    return S_OK;
+}
+
 static const void *core_ddm_statics_vtbl[] =
 {
     cddfs_QueryInterface,
@@ -1605,6 +1931,7 @@ static const void *core_ddm_statics_vtbl[] =
     cddf_GetRuntimeClassName,
     cddf_GetTrustLevel,
     cddfs_GetForCurrentView,
+    cddfs_GetForCoreWindow,
 };
 
 static HRESULT WINAPI cddfi_QueryInterface( const void *iface, REFIID iid, void **out )

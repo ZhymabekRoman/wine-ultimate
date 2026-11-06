@@ -28,6 +28,7 @@ import "windows.foundation.idl";
 import "windows.applicationmodel.datatransfer.idl";
 import "windows.applicationmodel.datatransfer.dragdrop.idl";
 import "windows.graphics.imaging.idl";
+import "windows.ui.core.idl";
 
 namespace Windows.ApplicationModel.DataTransfer.DragDrop.Core {
     interface ICoreDragDropManager;
@@ -58,6 +59,7 @@ namespace Windows.ApplicationModel.DataTransfer.DragDrop.Core {
         [eventremove] HRESULT TargetRequested([in] EventRegistrationToken value);
         [propget] HRESULT AreConcurrentOperationsEnabled([out, retval] boolean *value);
         [propput] HRESULT AreConcurrentOperationsEnabled([in] boolean value);
+        [propget] HRESULT Target([out, retval] Windows.ApplicationModel.DataTransfer.DragDrop.Core.ICoreDropOperationTarget **value);
     }
 
     [
@@ -68,6 +70,7 @@ namespace Windows.ApplicationModel.DataTransfer.DragDrop.Core {
     interface ICoreDragDropManagerStatics : IInspectable
     {
         HRESULT GetForCurrentView([out, retval] Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager **value);
+        HRESULT GetForCoreWindow([in] Windows.UI.Core.CoreWindow *value, [out, retval] Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager **result);
     }
 
     [
