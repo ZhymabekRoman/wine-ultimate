@@ -512,12 +512,6 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
      * through the prefix probe only, and every sibling class of the namespace
      * (AppNotification, AppNotificationManagerStatics, AppNotificationActivationInfo)
      * falls to the registry and answers REGDB_E_CLASSNOTREG. */
-    if (!wcsncmp( classid, L"Microsoft.Windows.AppNotifications.", 34 ))
-    {
-        if (SUCCEEDED( seed_dllpath_from_classid( classid, out ))) return S_OK;
-        *out = wcsdup(L"Microsoft.WindowsAppRuntime.dll");
-        return S_OK;
-    }
     if (!wcsncmp( classid, L"Microsoft.Windows.Globalization.", 32 ))
     {
         *out = wcsdup(L"windows.globalization.dll");
