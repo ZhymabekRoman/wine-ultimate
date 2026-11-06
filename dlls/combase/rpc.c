@@ -1948,8 +1948,11 @@ HRESULT rpc_create_clientchannel(const OXID *oxid, const IPID *ipid,
      * strong reference on the stub for as long as this channel (the proxy) is
      * alive so there is no release window. */
     This->stub = NULL;
-    if (dest_context == MSHCTX_INPROC)
+    if (dest_context == MSHCTX_INPROC || dest_context == MSHCTX_CROSSCTX
+        || dest_context == MSHCTX_DIFFERENTMACHINE)
     {
+        /* ipid_get_dispatch_params only resolves for a stub living in this
+         * process, so this is a no-op for genuinely remote channels. */
         struct apartment *stub_apt = NULL;
         IRpcChannelBuffer *stub_chan = NULL;
         IID stub_iid;
