@@ -32,6 +32,8 @@ struct handle_wrapper
     HGLOBAL hglobal;
     ULONG size;
     BOOL delete_on_release;
+    CRITICAL_SECTION cs;
+    BYTE *locked;
 };
 
 static void handle_addref(struct handle_wrapper *handle)
@@ -46,6 +48,7 @@ static void handle_release(struct handle_wrapper *handle)
     if (!ref)
     {
         if (handle->delete_on_release) GlobalFree(handle->hglobal);
+        DeleteCriticalSection( &handle->cs );
         free(handle);
     }
 }
@@ -68,6 +71,8 @@ static struct handle_wrapper *handle_create(HGLOBAL hglobal, BOOL delete_on_rele
     handle->hglobal = hglobal;
     handle->size = GlobalSize(hglobal);
     handle->delete_on_release = delete_on_release;
+    handle->locked = NULL;
+    InitializeCriticalSection( &handle->cs );
 
     return handle;
 }
@@ -203,9 +208,11 @@ static HRESULT WINAPI stream_Write(IStream *iface, const void *pv, ULONG cb, ULO
         }
     }
 
-    buffer = GlobalLock(stream->handle->hglobal);
+    EnterCriticalSection( &stream->handle->cs );
+    buffer = stream->handle->locked ? stream->handle->locked : (BYTE *)GlobalLock(stream->handle->hglobal);
     if (!buffer)
     {
+        LeaveCriticalSection( &stream->handle->cs );
         WARN("write to invalid hglobal %p\n", stream->handle->hglobal);
         return S_OK;
     }
@@ -213,7 +220,8 @@ static HRESULT WINAPI stream_Write(IStream *iface, const void *pv, ULONG cb, ULO
     memcpy(buffer + stream->position.LowPart, pv, cb);
     stream->position.LowPart += cb;
 
-    GlobalUnlock(stream->handle->hglobal);
+    if (!stream->handle->locked) GlobalUnlock(stream->handle->hglobal);
+    LeaveCriticalSection( &stream->handle->cs );
 
 out:
     *written = cb;
@@ -273,12 +281,31 @@ static HRESULT WINAPI stream_SetSize(IStream *iface, ULARGE_INTEGER size)
     if (stream->handle->size == size.LowPart)
         return S_OK;
 
-    hglobal = GlobalReAlloc(stream->handle->hglobal, size.LowPart, GMEM_MOVEABLE);
-    if (!hglobal)
-        return E_OUTOFMEMORY;
+    EnterCriticalSection( &stream->handle->cs );
+    if (stream->handle->locked)
+    {
+        /* The IBufferByteAccess face hands out a raw pointer into the hglobal and
+         * pins it with GlobalLock; an in-place GlobalReAlloc keeps that pointer valid. */
+        hglobal = GlobalReAlloc(stream->handle->hglobal, size.LowPart, GMEM_MOVEABLE | GMEM_MODIFY);
+        if (!hglobal)
+        {
+            LeaveCriticalSection( &stream->handle->cs );
+            return E_OUTOFMEMORY;
+        }
+    }
+    else
+    {
+        hglobal = GlobalReAlloc(stream->handle->hglobal, size.LowPart, GMEM_MOVEABLE);
+        if (!hglobal)
+        {
+            LeaveCriticalSection( &stream->handle->cs );
+            return E_OUTOFMEMORY;
+        }
+    }
 
     stream->handle->hglobal = hglobal;
     stream->handle->size = size.LowPart;
+    LeaveCriticalSection( &stream->handle->cs );
 
     return S_OK;
 }

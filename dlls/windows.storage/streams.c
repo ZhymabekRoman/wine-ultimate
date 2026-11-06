@@ -133,6 +133,7 @@ static HRESULT WINAPI buffer_get_Capacity( IBuffer *iface, UINT32 *value )
 {
     struct buffer *impl = impl_from_IBuffer( iface );
     if (!value) return E_POINTER;
+    TRACE( "iface %p, capacity %u\n", iface, impl->capacity );
     *value = impl->capacity;
     return S_OK;
 }
@@ -141,6 +142,7 @@ static HRESULT WINAPI buffer_get_Length( IBuffer *iface, UINT32 *value )
 {
     struct buffer *impl = impl_from_IBuffer( iface );
     if (!value) return E_POINTER;
+    TRACE( "iface %p, length %u\n", iface, impl->length );
     *value = impl->length;
     return S_OK;
 }
@@ -149,6 +151,8 @@ static HRESULT WINAPI buffer_put_Length( IBuffer *iface, UINT32 value )
 {
     struct buffer *impl = impl_from_IBuffer( iface );
     if (value > impl->capacity) return E_INVALIDARG;
+
+    TRACE( "iface %p, value %u (capacity %u)\n", iface, value, impl->capacity );
     impl->length = value;
     return S_OK;
 }
@@ -188,6 +192,7 @@ static HRESULT WINAPI buffer_byte_access_Buffer( IBufferByteAccess *iface, byte 
 {
     struct buffer *impl = impl_from_IBufferByteAccess( iface );
     if (!value) return E_POINTER;
+    TRACE( "iface %p, data %p (length %u, capacity %u)\n", iface, impl->data, impl->length, impl->capacity );
     *value = impl->data;
     return S_OK;
 }
@@ -226,6 +231,7 @@ HRESULT buffer_create( UINT32 capacity, IBuffer **out )
     }
 
     *out = &impl->IBuffer_iface;
+    TRACE( "created IBuffer %p (impl %p, data %p, capacity %u).\n", *out, impl, impl->data, capacity );
     return S_OK;
 }
 
@@ -645,6 +651,9 @@ static HRESULT WINAPI in_memory_stream_CloneStream( IRandomAccessStream *iface, 
 
     clone = impl_from_IRandomAccessStream( *stream );
     EnterCriticalSection( &impl->cs );
+    /* Windows semantics: the clone is an independent snapshot of the source content,
+     * positioned at the start (the source keeps its own position and keeps growing). */
+    clone->position = 0;
     if (impl->size)
     {
         clone->buffer = malloc( impl->size );
@@ -654,7 +663,6 @@ static HRESULT WINAPI in_memory_stream_CloneStream( IRandomAccessStream *iface, 
             clone->size = clone->capacity = impl->size;
         }
     }
-    clone->position = impl->position;
     LeaveCriticalSection( &impl->cs );
     return S_OK;
 }

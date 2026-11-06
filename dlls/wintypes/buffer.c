@@ -241,7 +241,7 @@ static HRESULT WINAPI buffer_get_Capacity( IBuffer *iface, UINT32 *value )
 {
     struct buffer *impl = impl_from_IBuffer( iface );
 
-    TRACE( "iface %p, value %p\n", iface, value );
+    TRACE( "iface %p, capacity %u\n", iface, impl->capacity );
 
     *value = impl->capacity;
     return S_OK;
@@ -251,7 +251,7 @@ static HRESULT WINAPI buffer_get_Length( IBuffer *iface, UINT32 *value )
 {
     struct buffer *impl = impl_from_IBuffer( iface );
 
-    TRACE( "iface %p, value %p\n", iface, value );
+    TRACE( "iface %p, length %u\n", iface, impl->length );
 
     *value = impl->length;
     return S_OK;
@@ -261,7 +261,7 @@ static HRESULT WINAPI buffer_put_Length( IBuffer *iface, UINT32 value )
 {
     struct buffer *impl = impl_from_IBuffer( iface );
 
-    TRACE( "iface %p, value %u\n", iface, value );
+    TRACE( "iface %p, value %u (capacity %u)\n", iface, value, impl->capacity );
 
     if (value > impl->capacity) return E_INVALIDARG;
 
@@ -311,7 +311,7 @@ static HRESULT WINAPI buffer_byte_access_Buffer( IBufferByteAccess *iface, byte 
 {
     struct buffer *impl = impl_from_IBufferByteAccess( iface );
 
-    TRACE( "iface %p, value %p\n", iface, value );
+    TRACE( "iface %p, data %p (length %u, capacity %u)\n", iface, impl->data, impl->length, impl->capacity );
 
     *value = impl->data;
     return S_OK;
@@ -345,7 +345,7 @@ static HRESULT WINAPI buffer_factory_statics_Create( IBufferFactory *iface, UINT
     impl->length = 0;
 
     *value = &impl->IBuffer_iface;
-    TRACE( "created IBuffer %p.\n", *value );
+    TRACE( "created IBuffer %p (impl %p, data %p, capacity %u).\n", *value, impl, impl->data, capacity );
     return S_OK;
 }
 
