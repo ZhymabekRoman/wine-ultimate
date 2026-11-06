@@ -291,15 +291,19 @@ static HRESULT WINAPI container_get_Locality( IApplicationDataContainer *iface, 
 static HRESULT WINAPI container_get_Values( IApplicationDataContainer *iface, IPropertySet **value )
 {
     struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
+    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
+    HSTRING class_id;
+
     if (!value) return E_POINTER;
-    if (!impl->values)
-    {
-        static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
-        HSTRING class_id;
-        WindowsCreateString( name, wcslen(name), &class_id );
-        RoActivateInstance( class_id, (IInspectable **)&impl->values );
-        WindowsDeleteString( class_id );
-    }
+
+    /* Values is a live view; hand out a fresh PropertySet per call so that
+     * the CLR RCW cache (keyed by ABI pointer) cannot alias a collected
+     * wrapper onto a new marshal.  The container keeps one ref on the last
+     * instance it handed out, mirroring the cached-map shape callers expect. */
+    WindowsCreateString( name, wcslen(name), &class_id );
+    RoActivateInstance( class_id, (IInspectable **)&impl->values );
+    WindowsDeleteString( class_id );
+
     *value = impl->values;
     if (impl->values) IPropertySet_AddRef( impl->values );
     return *value ? S_OK : E_FAIL;
