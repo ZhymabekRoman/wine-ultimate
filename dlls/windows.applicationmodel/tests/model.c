@@ -622,6 +622,163 @@ static void test_DesignMode(void)
     ok( ref == 1, "got ref %ld.\n", ref );
 }
 
+/* The WindowsAppSDK classes are singletons whose every interface face is one
+ * vtbl (the projection QIs any IID and gets the object), so the faces below are
+ * walked by slot. */
+static HRESULT vtbl_get_hstring( void *obj, UINT slot, HSTRING *out )
+{
+    HRESULT (WINAPI *fn)( void *, HSTRING * ) = (void *)(*(void ***)obj)[slot];
+    return fn( obj, out );
+}
+static HRESULT vtbl_get_iface( void *obj, UINT slot, void **out )
+{
+    HRESULT (WINAPI *fn)( void *, void ** ) = (void *)(*(void ***)obj)[slot];
+    return fn( obj, out );
+}
+static HRESULT vtbl_get_bool( void *obj, UINT slot, BOOL *out )
+{
+    HRESULT (WINAPI *fn)( void *, BOOL * ) = (void *)(*(void ***)obj)[slot];
+    return fn( obj, out );
+}
+
+/* Activate a WindowsAppSDK runtime class and return its singleton instance. */
+static HRESULT activate_winappsdk( const WCHAR *class_name, void **obj )
+{
+    IActivationFactory *factory;
+    HRESULT (WINAPI *activate)( void *, void ** ) ;
+    HSTRING str;
+    HRESULT hr;
+
+    *obj = NULL;
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    if (hr != S_OK) return hr;
+    hr = RoGetActivationFactory( str, &IID_IInspectable, (void **)&factory );
+    WindowsDeleteString( str );
+    if (FAILED( hr )) return hr;
+    activate = (void *)(*(void ***)factory)[6]; /* IActivationFactory::ActivateInstance */
+    hr = activate( factory, obj );
+    IActivationFactory_Release( factory );
+    return hr;
+}
+
+/* DependencyGraph <-> package identity consistency. The PackageDependencyContext
+ * graph enumerates the framework packages of the AppModel registration (the same
+ * plane kernelbase answers package identity from), and the DeploymentManager's
+ * DeploymentPackage is one of them: its Id is that package's full name, its
+ * version the full name's version. */
+#define REG_APPMODEL L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel"
+#define FW_RUNTIME_NAME  L"Microsoft.WindowsAppRuntime.1.6"
+#define FW_RUNTIME_FULL  L"Microsoft.WindowsAppRuntime.1.6_6000.318.2304.0_x64__8wekyb3d8bbwe"
+#define FW_RUNTIME_FAMILY L"Microsoft.WindowsAppRuntime.1.6_8wekyb3d8bbwe"
+#define FW_VCLIBS_FULL   L"Microsoft.VCLibs.140.00_14.0.33519.0_x64__8wekyb3d8bbwe"
+#define FW_VCLIBS_FAMILY L"Microsoft.VCLibs.140.00_8wekyb3d8bbwe"
+
+static void seed_framework( const WCHAR *full, const WCHAR *path )
+{
+    WCHAR subkey[512];
+    DWORD framework = 1;
+    HKEY hkey;
+
+    lstrcpyW( subkey, REG_APPMODEL L"\\Packages\\" );
+    lstrcatW( subkey, full );
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ) != ERROR_SUCCESS)
+    {
+        win_skip( "cannot seed %s\n", debugstr_w( full ) );
+        return;
+    }
+    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)path, (lstrlenW( path ) + 1) * sizeof(WCHAR) );
+    RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&framework, sizeof(framework) );
+    RegCloseKey( hkey );
+}
+
+static void test_winappsdk_dependency_graph( void )
+{
+    static const WCHAR ctx_class[] = L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyContext";
+    static const WCHAR mgr_class[] = L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentManager";
+    WCHAR seen[2][128] = { L"", L"" };
+    struct { UINT16 Major, Minor, Build, Revision; } version;
+    void *context, *graph, *iterator, *manager, *result, *package;
+    HRESULT (WINAPI *get_version)( void *, void ** );
+    const WCHAR *text;
+    UINT32 i, found = 0;
+    HSTRING name;
+    BOOL more;
+    HRESULT hr;
+
+    seed_framework( FW_RUNTIME_FULL, L"C:\\packages\\winappruntime" );
+    seed_framework( FW_VCLIBS_FULL, L"C:\\packages\\vclibs" );
+
+    hr = activate_winappsdk( ctx_class, &context );
+    ok( hr == S_OK && context, "activate %s hr %#lx obj %p\n", debugstr_w( ctx_class ), hr, context );
+    if (FAILED( hr ) || !context) return;
+
+    /* PackageDependencyContext.PackageGraph (slot 8) -> First (slot 6) */
+    hr = vtbl_get_iface( context, 8, &graph );
+    ok( hr == S_OK && graph, "PackageGraph hr %#lx graph %p\n", hr, graph );
+    hr = vtbl_get_iface( graph, 6, &iterator );
+    ok( hr == S_OK && iterator, "First hr %#lx iterator %p\n", hr, iterator );
+
+    /* walk the graph; each PackageDependency (Name at slot 7) is a family */
+    for (i = 0; i < 8; i++)
+    {
+        hr = vtbl_get_bool( iterator, 7, &more ); /* HasCurrent */
+        if (hr != S_OK || !more) break;
+        hr = vtbl_get_iface( iterator, 6, &package ); /* Current */
+        if (hr == S_OK && package)
+        {
+            if (vtbl_get_hstring( package, 7, &name ) == S_OK)
+            {
+                const WCHAR *text = WindowsGetStringRawBuffer( name, NULL );
+                if (i < 2) lstrcpynW( seen[i], text, ARRAY_SIZE(seen[i]) );
+                if (!wcscmp( text, FW_RUNTIME_FAMILY )) found |= 1;
+                if (!wcscmp( text, FW_VCLIBS_FAMILY )) found |= 2;
+                WindowsDeleteString( name );
+            }
+        }
+        if (vtbl_get_bool( iterator, 8, &more ) != S_OK || !more) break; /* MoveNext */
+    }
+    ok( found == 3, "graph enumerated the seeded frameworks, mask %#x (seen %s, %s)\n",
+        found, debugstr_w( seen[0] ), debugstr_w( seen[1] ) );
+
+    /* DeploymentManager.GetCurrent -> DeploymentResult.DeploymentPackage -> Id */
+    hr = activate_winappsdk( mgr_class, &manager );
+    ok( hr == S_OK && manager, "activate %s hr %#lx\n", debugstr_w( mgr_class ), hr );
+    if (SUCCEEDED( hr ) && manager)
+    {
+        hr = vtbl_get_iface( manager, 7, &result ); /* DeploymentManagerStatics::GetCurrent */
+        ok( hr == S_OK && result, "GetCurrent hr %#lx result %p\n", hr, result );
+        hr = vtbl_get_iface( result, 6, &package ); /* DeploymentResult.DeploymentPackage */
+        ok( hr == S_OK && package, "DeploymentPackage hr %#lx package %p\n", hr, package );
+        if (SUCCEEDED( hr ) && package)
+        {
+            name = NULL;
+            hr = vtbl_get_hstring( package, 6, &name ); /* Id */
+            text = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
+            ok( hr == S_OK && text && !wcscmp( text, FW_RUNTIME_FULL ),
+                "DeploymentPackage.Id hr %#lx id %s\n", hr, debugstr_w( text ) );
+            if (name) WindowsDeleteString( name );
+
+            /* the installed path is the registered PackagePath */
+            name = NULL;
+            hr = vtbl_get_hstring( package, 7, &name ); /* InstalledPath */
+            text = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
+            ok( hr == S_OK && text && !wcscmp( text, L"C:\\packages\\winappruntime" ),
+                "InstalledPath hr %#lx path %s\n", hr, debugstr_w( text ) );
+            if (name) WindowsDeleteString( name );
+
+            /* the version is the full name's version, and the Id names a package
+             * the graph enumerated: one deployment view */
+            memset( &version, 0, sizeof(version) );
+            get_version = (void *)(*(void ***)package)[9];
+            hr = get_version( package, (void **)&version );
+            ok( hr == S_OK && version.Major == 6000 && version.Minor == 318 && version.Build == 2304,
+                "DeploymentPackage.Version hr %#lx %u.%u.%u.%u\n", hr, version.Major, version.Minor,
+                version.Build, version.Revision );
+            ok( found & 1, "the DeploymentPackage family is not in the graph\n" );
+        }
+    }
+}
+
 START_TEST(model)
 {
     HRESULT hr;
@@ -632,6 +789,7 @@ START_TEST(model)
     test_PackageManager();
     test_PackageStatics();
     test_DesignMode();
+    test_winappsdk_dependency_graph();
 
     RoUninitialize();
 }

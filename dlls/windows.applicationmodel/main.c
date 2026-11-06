@@ -21,6 +21,7 @@
 #include <string.h>
 
 #include "private.h"
+#include "winreg.h"
 #include "objbase.h"
 
 #include "wine/debug.h"
@@ -295,6 +296,9 @@ static const void *winappsdk_factory_vtbl[] =
     static struct winappsdk_class ident##_obj = { winappsdk_class_vtbl, L##classname, 1 }; \
     static struct winappsdk_factory ident##_factory = { winappsdk_factory_vtbl, &ident##_obj, 1 }
 
+#define WINAPPSDK_CLASS_V( ident, vtbl, classname ) \
+    static struct winappsdk_class ident##_obj = { vtbl, L##classname, 1 }; \
+    static struct winappsdk_factory ident##_factory = { winappsdk_factory_vtbl, &ident##_obj, 1 }
 /* Info faces for the classes the combase roapi suite and the WA bootstrap walk.
  *
  * The roapi suite row asserts RoGetActivationFactory + ActivateInstance +
@@ -308,9 +312,92 @@ static const void *winappsdk_factory_vtbl[] =
  * alphabetical per-interface order the projection lays out, with stub-store
  * defaults; slots past these keep the shared winappsdk_zero_out answer and a
  * QI of any IID answers the same singleton, as above. */
-static struct winappsdk_class deployment_package_obj, deployment_result_obj;
-static struct winappsdk_class package_dependency_obj, package_dependency_context_obj;
-static struct winappsdk_class package_graph_obj;
+static struct winappsdk_class deployment_result_obj;
+static struct winappsdk_class package_dependency_context_obj;
+
+#define PACKAGE_DEPENDENCY_CLASS L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency"
+
+/* A PackageDependency is a winappsdk class plus the framework family it names;
+ * the graph hands out one per registered framework package, the class singletons
+ * (GetDefault, GetAdjacent, the context's own dependency) are statics of it. */
+struct package_dependency
+{
+    struct winappsdk_class cls;
+    WCHAR family[128];
+};
+
+static const void *package_dependency_vtbl[];
+static struct package_dependency package_dependency_obj;
+
+/* The AppModel registration plane kernelbase answers package identity from
+ * (dlls/kernelbase/version.c): HKCU over HKLM, Packages\<FullName> with a
+ * PackagePath and Framework=1 for a framework package. The WindowsAppSDK
+ * DependencyManager face below reads the same plane, so the DeploymentPackage
+ * and the PackageDependencyContext.PackageGraph name packages the identity APIs
+ * also know -- one deployment view, not two. */
+#define APPMODEL_REG_PATH L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages"
+#define MAX_FRAMEWORKS 8
+
+struct framework_entry
+{
+    WCHAR full_name[256];
+    WCHAR path[MAX_PATH];
+};
+
+static UINT32 enum_framework_packages( struct framework_entry *entries, UINT32 max )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR key[600], name[256];
+    SIZE_T r, j;
+    UINT32 n = 0, i;
+
+    for (r = 0; r < ARRAY_SIZE( roots ); r++)
+    {
+        HKEY hkey;
+
+        if (RegOpenKeyExW( roots[r], APPMODEL_REG_PATH, 0, KEY_READ, &hkey )) continue;
+        for (i = 0; n < max; i++)
+        {
+            DWORD len = ARRAY_SIZE( name ), framework = 0, size = sizeof(framework), type = 0;
+            HKEY pkg;
+
+            if (RegEnumKeyExW( hkey, i, name, &len, NULL, NULL, NULL, NULL )) break;
+            lstrcpyW( key, APPMODEL_REG_PATH );
+            lstrcatW( key, L"\\" );
+            lstrcatW( key, name );
+            if (RegOpenKeyExW( roots[r], key, 0, KEY_READ, &pkg ) != ERROR_SUCCESS) continue;
+            RegQueryValueExW( pkg, L"Framework", NULL, &type, (BYTE *)&framework, &size );
+            size = sizeof( entries[n].path );
+            type = 0;
+            entries[n].path[0] = 0;
+            RegQueryValueExW( pkg, L"PackagePath", NULL, &type, (BYTE *)entries[n].path, &size );
+            RegCloseKey( pkg );
+            if (framework != 1) continue;
+            for (j = 0; j < n; j++)
+                if (!wcsicmp( entries[j].full_name, name )) break;
+            if (j < n) continue;  /* HKCU wins over HKLM for the same package */
+            lstrcpyW( entries[n].full_name, name );
+            n++;
+        }
+        RegCloseKey( hkey );
+    }
+    return n;
+}
+
+/* The family name (Name_PublisherId) of a package full name. */
+static void family_from_full_name( const WCHAR *full, WCHAR *family, DWORD cch )
+{
+    const WCHAR *version, *publisher;
+
+    if (!(version = wcschr( full, L'_' )) || !(publisher = wcsrchr( version, L'_' )) || publisher == version)
+    {
+        lstrcpynW( family, full, cch );
+        return;
+    }
+    lstrcpynW( family, full, (version - full) + 1 );
+    lstrcatW( family, L"_" );
+    lstrcatW( family, publisher + 1 );
+}
 
 /* Windows.ApplicationModel.PackageVersion is a four-WORD value struct; the
  * projection's property getter takes it by pointer. */
@@ -335,25 +422,63 @@ static const void *package_version_vtbl[] =
 
 WINAPPSDK_CLASS( package_version, "Windows.ApplicationModel.PackageVersion" );
 
+/* The registered framework the app pins: the WindowsAppRuntime framework of the
+ * AppModel registration, the first framework registered if there is no
+ * WindowsAppRuntime package, and nothing when the plane is empty. The
+ * DeploymentPackage and the PackageGraph enumerate the same entry, so
+ * DeploymentPackage.Id is a name the graph also reports. */
+static const WCHAR winappsdk_family_prefix[] = L"Microsoft.WindowsAppRuntime.";
+
+static BOOL winappsdk_framework( struct framework_entry *out )
+{
+    struct framework_entry entries[MAX_FRAMEWORKS];
+    UINT32 n = enum_framework_packages( entries, MAX_FRAMEWORKS ), i;
+
+    if (!n) return FALSE;
+    for (i = 0; i < n; i++)
+        if (!wcsncmp( entries[i].full_name, winappsdk_family_prefix, lstrlenW( winappsdk_family_prefix ) )) break;
+    *out = entries[i < n ? i : 0];
+    return TRUE;
+}
+
+/* DeploymentPackage.Id is the framework's package full name as registered. */
 static HRESULT WINAPI deployment_package_get_Id( void *iface, HSTRING *id )
 {
-    if (id) return WindowsCreateString( L"Microsoft.WindowsAppRuntime.1.8", 32, id );
-    return S_OK;
+    struct framework_entry fw;
+
+    if (!id) return S_OK;
+    if (winappsdk_framework( &fw ))
+        return WindowsCreateString( fw.full_name, lstrlenW( fw.full_name ), id );
+    return WindowsCreateString( L"Microsoft.WindowsAppRuntime.1.6", 31, id );
 }
 static HRESULT WINAPI deployment_package_get_InstalledPath( void *iface, HSTRING *path )
 {
-    if (path) return WindowsCreateString( L"C:\\Program Files\\WindowsApps\\Stub_1.0.0.0_x64__8wekyb3d8bbwe", 57, path );
-    return S_OK;
+    struct framework_entry fw;
+
+    if (!path) return S_OK;
+    if (winappsdk_framework( &fw ) && fw.path[0])
+        return WindowsCreateString( fw.path, lstrlenW( fw.path ), path );
+    return WindowsCreateString( L"C:\\Program Files\\WindowsApps\\Stub_1.0.0.0_x64__8wekyb3d8bbwe", 57, path );
 }
 static HRESULT WINAPI deployment_package_get_IsFramework( void *iface, BOOL *ret ) { if (ret) *ret = TRUE; return S_OK; }
 static HRESULT WINAPI deployment_package_get_Version( void *iface, struct PackageVersion *version )
 {
-    if (version)
+    const UINT16 *fields[4] = { &version->Major, &version->Minor, &version->Build, &version->Revision };
+    struct framework_entry fw;
+    SIZE_T i;
+    WCHAR *end;
+    const WCHAR *v;
+
+    if (!version) return S_OK;
+    version->Major = 1, version->Minor = 0, version->Build = 0, version->Revision = 0;
+    if (!winappsdk_framework( &fw )) return S_OK;
+    if (!(v = wcschr( fw.full_name, L'_' ))) return S_OK;
+    v++;
+    for (i = 0; i < 4; i++)
     {
-        version->Major = 1;
-        version->Minor = 0;
-        version->Build = 0;
-        version->Revision = 0;
+        *(UINT16 *)fields[i] = (UINT16)wcstol( v, &end, 10 );
+        if (*end != L'.') break;
+        v = end + 1;
     }
     return S_OK;
 }
@@ -372,7 +497,7 @@ static const void *deployment_package_vtbl[] =
     deployment_package_get_Version,
 };
 
-WINAPPSDK_CLASS( deployment_package, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentPackage" );
+WINAPPSDK_CLASS_V( deployment_package, deployment_package_vtbl, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentPackage" );
 
 /* DeploymentResult: Status (stub answers IdenticalPackageAvailable) + package. */
 static HRESULT WINAPI deployment_result_get_DeploymentPackage( void *iface, void **package )
@@ -484,21 +609,97 @@ static struct winappsdk_factory deployment_manager_factory =
     deployment_manager_factory_vtbl, &deployment_manager_obj, 1
 };
 
-/* Empty IIterable<PackageDependency>: the context's PackageGraph face. */
-static HRESULT WINAPI package_graph_iterator_get_Current( void *iface, void **item ) { if (item) *item = &package_dependency_obj; return S_OK; }
-static HRESULT WINAPI package_graph_iterator_get_HasCurrent( void *iface, BOOL *ret ) { if (ret) *ret = FALSE; return S_OK; }
-static HRESULT WINAPI package_graph_iterator_MoveNext( void *iface, BOOL *ret ) { if (ret) *ret = FALSE; return S_OK; }
+/* The context's PackageGraph face: IIterable<PackageDependency> over the
+ * registered framework packages (the AppModel plane above), so the dependency
+ * graph enumerates the same packages the identity APIs answer -- the
+ * DeploymentPackage.Id is one of the names it reports. First() takes a fresh
+ * snapshot; the iterator owns one PackageDependency element per framework. */
+struct package_graph_iterator
+{
+    struct winappsdk_class cls;
+    struct package_dependency **items;
+    UINT32 count, index;
+};
+
+static const WCHAR package_graph_iterator_class[] =
+    L"Windows.Foundation.Collections.IIterator`1<Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency>";
+
+static HRESULT WINAPI package_graph_iterator_get_Current( void *iface, void **item )
+{
+    struct package_graph_iterator *iter = iface;
+
+    struct package_dependency *dep;
+
+    if (!item) return E_INVALIDARG;
+    dep = iter->index < iter->count ? iter->items[iter->index] : NULL;
+    if (dep) InterlockedIncrement( &dep->cls.ref );
+    *item = dep;
+    return S_OK;
+}
+static HRESULT WINAPI package_graph_iterator_get_HasCurrent( void *iface, BOOL *ret )
+{
+    struct package_graph_iterator *iter = iface;
+
+    if (ret) *ret = iter->index < iter->count;
+    return S_OK;
+}
+static HRESULT WINAPI package_graph_iterator_MoveNext( void *iface, BOOL *ret )
+{
+    struct package_graph_iterator *iter = iface;
+
+    if (iter->index < iter->count) iter->index++;
+    if (ret) *ret = iter->index < iter->count;
+    return S_OK;
+}
 static HRESULT WINAPI package_graph_iterator_GetMany( void *iface, UINT32 size, void *items, UINT32 *count )
 {
-    if (count) *count = 0;
+    struct package_graph_iterator *iter = iface;
+    UINT32 n = 0;
+
+    if (!count) return E_INVALIDARG;
+    while (n < size && iter->index < iter->count)
+    {
+        if (items)
+        {
+            struct package_dependency **out = items;
+            out[n] = iter->items[iter->index];
+            InterlockedIncrement( &out[n]->cls.ref );
+        }
+        n++, iter->index++;
+    }
+    *count = n;
     return S_OK;
+}
+
+static ULONG WINAPI package_graph_iterator_AddRef( void *iface )
+{
+    struct package_graph_iterator *iter = iface;
+
+    return InterlockedIncrement( &iter->cls.ref );
+}
+static ULONG WINAPI package_graph_iterator_Release( void *iface )
+{
+    struct package_graph_iterator *iter = iface;
+    LONG ref = InterlockedDecrement( &iter->cls.ref );
+
+    if (!ref)
+    {
+        UINT32 i;
+        for (i = 0; i < iter->count; i++)
+        {
+            if (!InterlockedDecrement( &iter->items[i]->cls.ref )) HeapFree( GetProcessHeap(), 0, iter->items[i] );
+        }
+        HeapFree( GetProcessHeap(), 0, iter->items );
+        HeapFree( GetProcessHeap(), 0, iter );
+    }
+    return ref;
 }
 
 static const void *package_graph_iterator_vtbl[] =
 {
     winappsdk_QueryInterface,
-    winappsdk_AddRef,
-    winappsdk_Release,
+    package_graph_iterator_AddRef,
+    package_graph_iterator_Release,
     winappsdk_GetIids,
     winappsdk_GetRuntimeClassName,
     winappsdk_GetTrustLevel,
@@ -508,14 +709,43 @@ static const void *package_graph_iterator_vtbl[] =
     package_graph_iterator_GetMany,
 };
 
-static struct winappsdk_class package_graph_iterator_obj =
-{
-    package_graph_iterator_vtbl, L"Windows.Foundation.Collections.IIterator`1<Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency>", 1
-};
-
 static HRESULT WINAPI package_graph_First( void *iface, void **iterator )
 {
-    if (iterator) *iterator = &package_graph_iterator_obj;
+    struct framework_entry entries[MAX_FRAMEWORKS];
+    struct package_graph_iterator *iter;
+    UINT32 n, i;
+
+    if (!iterator) return E_INVALIDARG;
+    *iterator = NULL;
+    if (!(iter = HeapAlloc( GetProcessHeap(), 0, sizeof(*iter) ))) return E_OUTOFMEMORY;
+    iter->cls.vtbl = package_graph_iterator_vtbl;
+    iter->cls.name = package_graph_iterator_class;
+    iter->cls.ref = 1;
+    iter->items = NULL;
+    iter->count = iter->index = 0;
+
+    n = enum_framework_packages( entries, MAX_FRAMEWORKS );
+    if (n && !(iter->items = HeapAlloc( GetProcessHeap(), 0, n * sizeof(*iter->items) )))
+    {
+        HeapFree( GetProcessHeap(), 0, iter );
+        return E_OUTOFMEMORY;
+    }
+    for (i = 0; i < n; i++)
+    {
+        struct package_dependency *dep = HeapAlloc( GetProcessHeap(), 0, sizeof(*dep) );
+
+        if (!dep)
+        {
+            package_graph_iterator_Release( iter );
+            return E_OUTOFMEMORY;
+        }
+        dep->cls.vtbl = package_dependency_vtbl;
+        dep->cls.name = PACKAGE_DEPENDENCY_CLASS;
+        dep->cls.ref = 1;  /* the iterator's reference; the face hands out its own */
+        family_from_full_name( entries[i].full_name, dep->family, ARRAY_SIZE(dep->family) );
+        iter->items[iter->count++] = dep;
+    }
+    *iterator = iter;
     return S_OK;
 }
 
@@ -530,7 +760,7 @@ static const void *package_graph_vtbl[] =
     package_graph_First,
 };
 
-WINAPPSDK_CLASS( package_graph, "Windows.Foundation.Collections.IIterable`1<Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency>" );
+WINAPPSDK_CLASS_V( package_graph, package_graph_vtbl, "Windows.Foundation.Collections.IIterable`1<Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency>" );
 
 /* PackageDependencyContext: ContextToken (one installed dependency = token 1),
  * the PackageDependency it points at, and the PackageGraph iterable. */
@@ -560,8 +790,33 @@ static const void *package_dependency_context_vtbl[] =
     winappsdk_zero_out,
 };
 
-/* PackageDependency: the WinAppSDK EmojiData framework the projection pins;
- * GetDefault/GetAdjacent answer it, AddPackageDependency hands back the context. */
+/* PackageDependency: the framework family it names. GetDefault/GetAdjacent
+ * answer the WinAppSDK EmojiData framework the projection pins (the static
+ * singleton below); the PackageGraph hands out one of these per registered
+ * framework package, its Name that package's family. The singleton is static,
+ * the graph's elements are heap blocks the last reference releases. */
+static HRESULT WINAPI package_dependency_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct package_dependency *dep = iface;
+
+    *out = iface;
+    InterlockedIncrement( &dep->cls.ref );
+    return S_OK;
+}
+static ULONG WINAPI package_dependency_AddRef( void *iface )
+{
+    struct package_dependency *dep = iface;
+
+    return InterlockedIncrement( &dep->cls.ref );
+}
+static ULONG WINAPI package_dependency_Release( void *iface )
+{
+    struct package_dependency *dep = iface;
+    LONG ref = InterlockedDecrement( &dep->cls.ref );
+
+    if (!ref && dep != &package_dependency_obj) HeapFree( GetProcessHeap(), 0, dep );
+    return ref;
+}
 static HRESULT WINAPI package_dependency_get_Context( void *iface, void **context )
 {
     if (context) *context = &package_dependency_context_obj;
@@ -569,15 +824,17 @@ static HRESULT WINAPI package_dependency_get_Context( void *iface, void **contex
 }
 static HRESULT WINAPI package_dependency_get_Name( void *iface, HSTRING *name )
 {
-    if (name) return WindowsCreateString( L"Microsoft.WinAppSDK.EmojiData", 29, name );
+    const struct package_dependency *dep = iface;
+
+    if (name) return WindowsCreateString( dep->family, lstrlenW( dep->family ), name );
     return S_OK;
 }
 
 static const void *package_dependency_vtbl[] =
 {
-    winappsdk_QueryInterface,
-    winappsdk_AddRef,
-    winappsdk_Release,
+    package_dependency_QueryInterface,
+    package_dependency_AddRef,
+    package_dependency_Release,
     winappsdk_GetIids,
     winappsdk_GetRuntimeClassName,
     winappsdk_GetTrustLevel,
@@ -656,21 +913,17 @@ WINAPPSDK_CLASS( create_package_dependency_options, "Microsoft.Windows.Applicati
 WINAPPSDK_CLASS( package_dependency_rank, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyRank" );
 WINAPPSDK_CLASS( environment_manager, "Microsoft.Windows.System.EnvironmentManager" );
 
-#define WINAPPSDK_CLASS_V( ident, vtbl, classname ) \
-    static struct winappsdk_class ident##_obj = { vtbl, L##classname, 1 }; \
-    static struct winappsdk_factory ident##_factory = { winappsdk_factory_vtbl, &ident##_obj, 1 }
-
 WINAPPSDK_CLASS_V( deployment_result, deployment_result_vtbl, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentResult" );
 WINAPPSDK_CLASS_V( package_dependency_context, package_dependency_context_vtbl, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyContext" );
 WINAPPSDK_CLASS_V( add_package_dependency_options, add_package_dependency_options_vtbl, "Microsoft.Windows.ApplicationModel.DynamicDependency.AddPackageDependencyOptions" );
 
-static struct winappsdk_class package_dependency_obj =
+static struct package_dependency package_dependency_obj =
 {
-    package_dependency_vtbl, L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency", 1
+    { package_dependency_vtbl, PACKAGE_DEPENDENCY_CLASS, 1 }, L"Microsoft.WinAppSDK.EmojiData"
 };
 static struct winappsdk_factory package_dependency_factory =
 {
-    package_dependency_factory_vtbl, &package_dependency_obj, 1
+    package_dependency_factory_vtbl, &package_dependency_obj.cls, 1
 };
 
 static const struct
