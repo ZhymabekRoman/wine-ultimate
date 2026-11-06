@@ -216,6 +216,7 @@ struct map
     UINT32 size;
     UINT32 capacity;
     struct map_entry *entries;
+    CRITICAL_SECTION cs;
 };
 
 struct map_view
@@ -311,7 +312,7 @@ static HRESULT WINAPI iterator_GetTrustLevel( IIterator_IKeyValuePair_HSTRING_II
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI iterator_get_Current( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, IKeyValuePair_HSTRING_IInspectable **value )
+static HRESULT WINAPI iterator_get_Current_impl( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, IKeyValuePair_HSTRING_IInspectable **value )
 {
     struct iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_IInspectable( iface );
     HRESULT hr;
@@ -323,7 +324,7 @@ static HRESULT WINAPI iterator_get_Current( IIterator_IKeyValuePair_HSTRING_IIns
     return pair_create( impl->view->map->iids.pair, impl->view->entries + impl->index, value );
 }
 
-static HRESULT WINAPI iterator_get_HasCurrent( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, boolean *value )
+static HRESULT WINAPI iterator_get_HasCurrent_impl( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, boolean *value )
 {
     struct iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_IInspectable( iface );
 
@@ -333,7 +334,7 @@ static HRESULT WINAPI iterator_get_HasCurrent( IIterator_IKeyValuePair_HSTRING_I
     return S_OK;
 }
 
-static HRESULT WINAPI iterator_MoveNext( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, boolean *value )
+static HRESULT WINAPI iterator_MoveNext_impl( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, boolean *value )
 {
     struct iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_IInspectable( iface );
     HRESULT hr;
@@ -345,7 +346,7 @@ static HRESULT WINAPI iterator_MoveNext( IIterator_IKeyValuePair_HSTRING_IInspec
     return IIterator_IKeyValuePair_HSTRING_IInspectable_get_HasCurrent( iface, value );
 }
 
-static HRESULT WINAPI iterator_GetMany( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, UINT32 items_size,
+static HRESULT WINAPI iterator_GetMany_impl( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, UINT32 items_size,
                                         IKeyValuePair_HSTRING_IInspectable **items, UINT *count )
 {
     struct iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_IInspectable( iface );
@@ -367,6 +368,52 @@ static HRESULT WINAPI iterator_GetMany( IIterator_IKeyValuePair_HSTRING_IInspect
     }
     *count = len;
     return S_OK;
+}
+
+
+static HRESULT WINAPI iterator_get_Current( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, IKeyValuePair_HSTRING_IInspectable **value )
+{
+    struct iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->view->map->cs );
+    hr = iterator_get_Current_impl( iface, value );
+    LeaveCriticalSection( &impl->view->map->cs );
+    return hr;
+}
+
+static HRESULT WINAPI iterator_get_HasCurrent( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, boolean *value )
+{
+    struct iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->view->map->cs );
+    hr = iterator_get_HasCurrent_impl( iface, value );
+    LeaveCriticalSection( &impl->view->map->cs );
+    return hr;
+}
+
+static HRESULT WINAPI iterator_MoveNext( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, boolean *value )
+{
+    struct iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->view->map->cs );
+    hr = iterator_MoveNext_impl( iface, value );
+    LeaveCriticalSection( &impl->view->map->cs );
+    return hr;
+}
+
+static HRESULT WINAPI iterator_GetMany( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, UINT32 items_size,
+                                        IKeyValuePair_HSTRING_IInspectable **items, UINT32 *count )
+{
+    struct iterator *impl = impl_from_IIterator_IKeyValuePair_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->view->map->cs );
+    hr = iterator_GetMany_impl( iface, items_size, items, count );
+    LeaveCriticalSection( &impl->view->map->cs );
+    return hr;
 }
 
 static const IIterator_IKeyValuePair_HSTRING_IInspectableVtbl iterator_vtbl =
@@ -457,7 +504,7 @@ static HRESULT WINAPI map_view_GetTrustLevel( IMapView_HSTRING_IInspectable *ifa
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI map_view_Lookup( IMapView_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
+static HRESULT WINAPI map_view_Lookup_impl( IMapView_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
 {
     struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
     struct map_entry *entry;
@@ -472,7 +519,7 @@ static HRESULT WINAPI map_view_Lookup( IMapView_HSTRING_IInspectable *iface, HST
     return S_OK;
 }
 
-static HRESULT WINAPI map_view_get_Size( IMapView_HSTRING_IInspectable *iface, UINT32 *value )
+static HRESULT WINAPI map_view_get_Size_impl( IMapView_HSTRING_IInspectable *iface, UINT32 *value )
 {
     struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
     HRESULT hr;
@@ -484,7 +531,7 @@ static HRESULT WINAPI map_view_get_Size( IMapView_HSTRING_IInspectable *iface, U
     return S_OK;
 }
 
-static HRESULT WINAPI map_view_HasKey( IMapView_HSTRING_IInspectable *iface, HSTRING key, boolean *found )
+static HRESULT WINAPI map_view_HasKey_impl( IMapView_HSTRING_IInspectable *iface, HSTRING key, boolean *found )
 {
     struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
     HRESULT hr;
@@ -500,7 +547,7 @@ static HRESULT WINAPI map_view_HasKey( IMapView_HSTRING_IInspectable *iface, HST
 
 static HRESULT map_view_create( struct map *map, UINT first, UINT count, IMapView_HSTRING_IInspectable **out );
 
-static HRESULT WINAPI map_view_Split( IMapView_HSTRING_IInspectable *iface, IMapView_HSTRING_IInspectable **first,
+static HRESULT WINAPI map_view_Split_impl( IMapView_HSTRING_IInspectable *iface, IMapView_HSTRING_IInspectable **first,
                                       IMapView_HSTRING_IInspectable **second )
 {
     struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
@@ -513,6 +560,52 @@ static HRESULT WINAPI map_view_Split( IMapView_HSTRING_IInspectable *iface, IMap
     if (FAILED(hr = map_view_create( impl->map, impl->size / 2, impl->size - impl->size / 2, second )))
         IMapView_HSTRING_IInspectable_Release( *first );
 
+    return hr;
+}
+
+
+static HRESULT WINAPI map_view_Lookup( IMapView_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
+{
+    struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->map->cs );
+    hr = map_view_Lookup_impl( iface, key, value );
+    LeaveCriticalSection( &impl->map->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_view_get_Size( IMapView_HSTRING_IInspectable *iface, UINT32 *value )
+{
+    struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->map->cs );
+    hr = map_view_get_Size_impl( iface, value );
+    LeaveCriticalSection( &impl->map->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_view_HasKey( IMapView_HSTRING_IInspectable *iface, HSTRING key, boolean *found )
+{
+    struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->map->cs );
+    hr = map_view_HasKey_impl( iface, key, found );
+    LeaveCriticalSection( &impl->map->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_view_Split( IMapView_HSTRING_IInspectable *iface, IMapView_HSTRING_IInspectable **first,
+                                      IMapView_HSTRING_IInspectable **second )
+{
+    struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->map->cs );
+    hr = map_view_Split_impl( iface, first, second );
+    LeaveCriticalSection( &impl->map->cs );
     return hr;
 }
 
@@ -535,7 +628,7 @@ static const struct IMapView_HSTRING_IInspectableVtbl map_view_vtbl =
 DEFINE_IINSPECTABLE_( iterable_view, IIterable_IKeyValuePair_HSTRING_IInspectable, struct map_view, view_impl_from_IIterable_IKeyValuePair_HSTRING_IInspectable,
                       IIterable_IKeyValuePair_HSTRING_IInspectable_iface, &impl->IMapView_HSTRING_IInspectable_iface )
 
-static HRESULT WINAPI iterable_view_First( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, IIterator_IKeyValuePair_HSTRING_IInspectable **value )
+static HRESULT WINAPI iterable_view_First_impl( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, IIterator_IKeyValuePair_HSTRING_IInspectable **value )
 {
     struct map_view *impl = view_impl_from_IIterable_IKeyValuePair_HSTRING_IInspectable( iface );
     struct iterator *iter;
@@ -554,6 +647,18 @@ static HRESULT WINAPI iterable_view_First( IIterable_IKeyValuePair_HSTRING_IInsp
 
     *value = &iter->IIterator_IKeyValuePair_HSTRING_IInspectable_iface;
     return S_OK;
+}
+
+
+static HRESULT WINAPI iterable_view_First( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, IIterator_IKeyValuePair_HSTRING_IInspectable **value )
+{
+    struct map_view *impl = view_impl_from_IIterable_IKeyValuePair_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->map->cs );
+    hr = iterable_view_First_impl( iface, value );
+    LeaveCriticalSection( &impl->map->cs );
+    return hr;
 }
 
 static const struct IIterable_IKeyValuePair_HSTRING_IInspectableVtbl iterable_view_vtbl =
@@ -645,6 +750,7 @@ static ULONG WINAPI map_inner_Release( IInspectable *iface )
     if (!ref)
     {
         IMap_HSTRING_IInspectable_Clear( &impl->IMap_HSTRING_IInspectable_iface );
+        DeleteCriticalSection( &impl->cs );
         free( impl );
     }
 
@@ -683,7 +789,7 @@ static const IInspectableVtbl map_inner_vtbl =
 
 DEFINE_IINSPECTABLE_OUTER( map, IMap_HSTRING_IInspectable, struct map, IInspectable_outer )
 
-static HRESULT WINAPI map_Lookup( IMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
+static HRESULT WINAPI map_Lookup_impl( IMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
 {
     struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
     struct map_entry *entry;
@@ -696,7 +802,7 @@ static HRESULT WINAPI map_Lookup( IMap_HSTRING_IInspectable *iface, HSTRING key,
     return S_OK;
 }
 
-static HRESULT WINAPI map_get_Size( IMap_HSTRING_IInspectable *iface, UINT32 *size )
+static HRESULT WINAPI map_get_Size_impl( IMap_HSTRING_IInspectable *iface, UINT32 *size )
 {
     struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
     TRACE( "iface %p, size %p\n", iface, size );
@@ -704,7 +810,7 @@ static HRESULT WINAPI map_get_Size( IMap_HSTRING_IInspectable *iface, UINT32 *si
     return S_OK;
 }
 
-static HRESULT WINAPI map_HasKey( IMap_HSTRING_IInspectable *iface, HSTRING key, boolean *exists )
+static HRESULT WINAPI map_HasKey_impl( IMap_HSTRING_IInspectable *iface, HSTRING key, boolean *exists )
 {
     struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
     int order;
@@ -716,7 +822,7 @@ static HRESULT WINAPI map_HasKey( IMap_HSTRING_IInspectable *iface, HSTRING key,
     return S_OK;
 }
 
-static HRESULT WINAPI map_GetView( IMap_HSTRING_IInspectable *iface, IMapView_HSTRING_IInspectable **value )
+static HRESULT WINAPI map_GetView_impl( IMap_HSTRING_IInspectable *iface, IMapView_HSTRING_IInspectable **value )
 {
     struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
 
@@ -725,7 +831,7 @@ static HRESULT WINAPI map_GetView( IMap_HSTRING_IInspectable *iface, IMapView_HS
     return map_view_create( impl, 0, impl->size, value );
 }
 
-static HRESULT WINAPI map_Insert( IMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable *value, boolean *replaced )
+static HRESULT WINAPI map_Insert_impl( IMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable *value, boolean *replaced )
 {
     struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
     struct map_entry *tmp = impl->entries, *entry, copy;
@@ -755,7 +861,7 @@ static HRESULT WINAPI map_Insert( IMap_HSTRING_IInspectable *iface, HSTRING key,
     return S_OK;
 }
 
-static HRESULT WINAPI map_Remove( IMap_HSTRING_IInspectable *iface, HSTRING key )
+static HRESULT WINAPI map_Remove_impl( IMap_HSTRING_IInspectable *iface, HSTRING key )
 {
     struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
     struct map_entry *entry;
@@ -771,7 +877,7 @@ static HRESULT WINAPI map_Remove( IMap_HSTRING_IInspectable *iface, HSTRING key 
     return S_OK;
 }
 
-static HRESULT WINAPI map_Clear( IMap_HSTRING_IInspectable *iface )
+static HRESULT WINAPI map_Clear_impl( IMap_HSTRING_IInspectable *iface )
 {
     struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
     struct map_entry *entries = impl->entries;
@@ -788,6 +894,87 @@ static HRESULT WINAPI map_Clear( IMap_HSTRING_IInspectable *iface )
 
     InterlockedIncrement64( &impl->serial );
     return S_OK;
+}
+
+
+/* CoreCLR's WinRT marshalers (DeflateStream-backed value adapters) touch the
+ * same boxed values from the UI thread and threadpool workers; serialize the
+ * map face so snapshotting and value consumption cannot interleave. */
+static HRESULT WINAPI map_Lookup( IMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
+{
+    struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->cs );
+    hr = map_Lookup_impl( iface, key, value );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_get_Size( IMap_HSTRING_IInspectable *iface, UINT32 *size )
+{
+    struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->cs );
+    hr = map_get_Size_impl( iface, size );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_HasKey( IMap_HSTRING_IInspectable *iface, HSTRING key, boolean *exists )
+{
+    struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->cs );
+    hr = map_HasKey_impl( iface, key, exists );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_GetView( IMap_HSTRING_IInspectable *iface, IMapView_HSTRING_IInspectable **value )
+{
+    struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->cs );
+    hr = map_GetView_impl( iface, value );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_Insert( IMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable *value, boolean *replaced )
+{
+    struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->cs );
+    hr = map_Insert_impl( iface, key, value, replaced );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_Remove( IMap_HSTRING_IInspectable *iface, HSTRING key )
+{
+    struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->cs );
+    hr = map_Remove_impl( iface, key );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
+}
+
+static HRESULT WINAPI map_Clear( IMap_HSTRING_IInspectable *iface )
+{
+    struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
+    HRESULT hr;
+
+    EnterCriticalSection( &impl->cs );
+    hr = map_Clear_impl( iface );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
 }
 
 static const IMap_HSTRING_IInspectableVtbl map_vtbl =
@@ -858,6 +1045,7 @@ HRESULT single_threaded_map_create( const struct map_iids *iids, IInspectable *o
     impl->IInspectable_outer = outer ? outer : (IInspectable *)&impl->IInspectable_iface;
     impl->iids = *iids;
     impl->ref = 1;
+    InitializeCriticalSection( &impl->cs );
 
     *out = &impl->IInspectable_iface;
     TRACE( "created %p\n", *out );
