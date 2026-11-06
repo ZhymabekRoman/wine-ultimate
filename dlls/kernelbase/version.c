@@ -31,6 +31,7 @@
 #include "ntstatus.h"
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "winver.h"
 #include "winuser.h"
 #include "winnls.h"
@@ -1547,15 +1548,239 @@ BOOL WINAPI GetVersionExW( OSVERSIONINFOW *info )
 }
 
 static LONG package_str_from_env( const WCHAR *var, UINT32 *length, WCHAR *name );
+static LONG package_fill_str( const WCHAR *src, UINT32 *length, WCHAR *out );
+static BOOL get_current_package_full_name( WCHAR *buf, UINT32 cch );
 LONG WINAPI GetCurrentPackagePath( UINT32 *length, WCHAR *path );
 LONG WINAPI GetPackagePathByFullName( const WCHAR *name, UINT32 *len, WCHAR *path );
+LONG WINAPI PackageFamilyNameFromFullName( const WCHAR *full_name, UINT32 *length, WCHAR *family_name );
+LONG WINAPI PackageIdFromFullName( const WCHAR *full_name, UINT32 flags, UINT32 *buffer_length, BYTE *buffer );
+
+/*
+ * Package identity, two layers.
+ *
+ *  1. Env vars (WINE_PACKAGE_FULL_NAME / WINE_PACKAGE_FAMILY_NAME / WINE_PACKAGE_PATH /
+ *     WINE_PACKAGE_AUMID / WINE_FRAMEWORK_PACKAGE_*) pin an identity per run; a gate
+ *     sets them to override everything.
+ *  2. Below the env vars sits the package registration -- the facts the Windows
+ *     apprepository service keeps in its StateRepository, in the registry, seeded
+ *     per prefix (the layout Wine's apprepository consumers read):
+ *
+ *       <root>\Software\Microsoft\Windows NT\CurrentVersion\AppModel\
+ *         Exes\<exe base name>   PackageFullName, PackagePath, ApplicationUserModelId
+ *         Identity               same values; the fallback for unregistered images
+ *         Packages\<FullName>    PackagePath, Framework (REG_DWORD 1 = framework pkg)
+ *
+ *     Lookups go HKCU first, then HKLM, mirroring the per-user package view over
+ *     the machine registration. This is what makes GetCurrentPackageFullName,
+ *     GetCurrentApplicationUserModelId, the path APIs and the family enumeration
+ *     answer the package the app was deployed as (WhatsApp.Root.exe ->
+ *     5319275A.WhatsAppDesktop_..., CalculatorApp.exe -> Microsoft.WindowsCalculator_...)
+ *     with no per-launch environment.
+ */
+static const WCHAR appmodel_reg_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
+
+/* Copy src into the caller's length-prefixed string buffer, Windows style. */
+static LONG package_fill_str( const WCHAR *src, UINT32 *length, WCHAR *out )
+{
+    UINT32 len = wcslen( src ) + 1; /* NUL is counted in the contract */
+
+    if (!length) return ERROR_INVALID_PARAMETER;
+    if (!out || *length < len)
+    {
+        *length = len;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+    memcpy( out, src, len * sizeof(WCHAR) );
+    *length = len;
+    return ERROR_SUCCESS;
+}
+
+static BOOL get_current_exe_name( WCHAR *buf, DWORD cch )
+{
+    WCHAR path[MAX_PATH];
+    DWORD len = GetModuleFileNameW( 0, path, ARRAY_SIZE(path) );
+    WCHAR *p;
+
+    if (!len || len >= ARRAY_SIZE(path)) return FALSE;
+    if ((p = wcsrchr( path, L'\\' ))) len -= (DWORD)(p + 1 - path), memmove( path, p + 1, (len + 1) * sizeof(WCHAR) );
+    if (len >= cch) return FALSE;
+    memcpy( buf, path, (len + 1) * sizeof(WCHAR) );
+    return TRUE;
+}
+
+/* Read a REG_SZ from <root>\<appmodel path>\<subkey> (subkey may be NULL). */
+static BOOL appmodel_read_str( HKEY root, const WCHAR *subkey, const WCHAR *value, WCHAR *buf, DWORD cch )
+{
+    WCHAR path[600];
+    HKEY hkey;
+    DWORD type = 0, size;
+    LONG ret;
+
+    lstrcpyW( path, appmodel_reg_path );
+    if (subkey && subkey[0]) { lstrcatW( path, L"\\" ); lstrcatW( path, subkey ); }
+    if (RegOpenKeyExW( root, path, 0, KEY_READ, &hkey )) return FALSE;
+    buf[0] = 0;
+    size = cch * sizeof(WCHAR);
+    ret = RegQueryValueExW( hkey, value, NULL, &type, (BYTE *)buf, &size );
+    RegCloseKey( hkey );
+    return ret == ERROR_SUCCESS && type == REG_SZ;
+}
+
+/* Registration string for this process: Exes\<image> wins, Identity is the
+ * fallback; HKCU wins over HKLM at each step. */
+static BOOL appmodel_get_str( const WCHAR *value, WCHAR *buf, DWORD cch )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR subkey[576], exe[288];
+    SIZE_T i;
+
+    if (get_current_exe_name( exe, ARRAY_SIZE(exe) ))
+    {
+        lstrcpyW( subkey, L"Exes\\" );
+        lstrcatW( subkey, exe );
+        for (i = 0; i < ARRAY_SIZE(roots); i++)
+            if (appmodel_read_str( roots[i], subkey, value, buf, cch )) return TRUE;
+    }
+    for (i = 0; i < ARRAY_SIZE(roots); i++)
+        if (appmodel_read_str( roots[i], L"Identity", value, buf, cch )) return TRUE;
+    return FALSE;
+}
+
+static LONG package_str_from_registry( const WCHAR *value, UINT32 *length, WCHAR *out )
+{
+    WCHAR buf[512];
+
+    if (!appmodel_get_str( value, buf, ARRAY_SIZE(buf) )) return APPMODEL_ERROR_NO_PACKAGE;
+    return package_fill_str( buf, length, out );
+}
+
+/* Env var first (per-run override), registration second. */
+static LONG package_str( const WCHAR *env_var, const WCHAR *reg_value, UINT32 *length, WCHAR *out )
+{
+    LONG ret = package_str_from_env( env_var, length, out );
+
+    if (ret != APPMODEL_ERROR_NO_PACKAGE) return ret;
+    return package_str_from_registry( reg_value, length, out );
+}
+
+/* Path of a registered package: the env paths describe the running package and
+ * its env framework; the registration covers every deployed package. */
+static BOOL package_path_for( const WCHAR *full_name, WCHAR *buf, DWORD cch )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR cur[512] = L"", fw[512] = L"", subkey[576];
+    SIZE_T i;
+
+    get_current_package_full_name( cur, ARRAY_SIZE(cur) );
+    if (cur[0] && !wcsicmp( cur, full_name ) &&
+        GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", buf, cch )) return TRUE;
+    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ) &&
+        !wcsicmp( fw, full_name ) &&
+        GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_PATH", buf, cch )) return TRUE;
+    if (cur[0] && !wcsicmp( cur, full_name ) &&
+        appmodel_get_str( L"PackagePath", buf, cch )) return TRUE;
+    lstrcpyW( subkey, L"Packages\\" );
+    lstrcatW( subkey, full_name );
+    for (i = 0; i < ARRAY_SIZE(roots); i++)
+        if (appmodel_read_str( roots[i], subkey, L"PackagePath", buf, cch )) return TRUE;
+    return FALSE;
+}
+
+/* The registered package set: the running package, the env framework (when
+ * pinned), and every entry of the Packages registration. A family filter
+ * narrows the result; a NULL filter collects all. Entries fill full/path/fam. */
+#define MAX_PKG_ENTRIES 16
+
+struct pkg_entry
+{
+    WCHAR full[512];
+    WCHAR path[512];
+    WCHAR fam[256];
+    BOOL framework;
+};
+
+static BOOL pkg_entry_add( struct pkg_entry *entries, UINT32 *n, const WCHAR *full, BOOL framework )
+{
+    struct pkg_entry *e;
+    UINT32 i, len = ARRAY_SIZE(e->path);
+
+    for (i = 0; i < *n; i++)
+        if (!wcsicmp( entries[i].full, full )) return FALSE;
+    if (*n == MAX_PKG_ENTRIES) return FALSE;
+
+    e = &entries[*n];
+    lstrcpyW( e->full, full );
+    e->framework = framework;
+    if (!package_path_for( full, e->path, ARRAY_SIZE(e->path) )) e->path[0] = 0;
+    len = ARRAY_SIZE(e->fam);
+    if (PackageFamilyNameFromFullName( full, &len, e->fam )) e->fam[0] = 0;
+    (*n)++;
+    return TRUE;
+}
+
+static void appmodel_enum_packages( struct pkg_entry *entries, UINT32 *n )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR path[600], name[512], subkey[576];
+    SIZE_T r;
+    DWORD i, framework;
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        HKEY hkey;
+
+        lstrcpyW( path, appmodel_reg_path );
+        lstrcatW( path, L"\\Packages" );
+        if (RegOpenKeyExW( roots[r], path, 0, KEY_READ, &hkey )) continue;
+        for (i = 0; *n < MAX_PKG_ENTRIES; i++)
+        {
+            DWORD len = ARRAY_SIZE(name);
+            HKEY pkg;
+
+            if (RegEnumKeyExW( hkey, i, name, &len, NULL, NULL, NULL, NULL )) break;
+            lstrcpyW( subkey, path );
+            lstrcatW( subkey, L"\\" );
+            lstrcatW( subkey, name );
+            framework = 0;
+            if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &pkg ) == ERROR_SUCCESS)
+            {
+                DWORD size = sizeof(framework), type = 0;
+                RegQueryValueExW( pkg, L"Framework", NULL, &type, (BYTE *)&framework, &size );
+                RegCloseKey( pkg );
+            }
+            pkg_entry_add( entries, n, name, framework == 1 );
+        }
+        RegCloseKey( hkey );
+    }
+}
+
+/* The registered package set, narrowed to one family when family is non-NULL:
+ * the running package first, then the env framework, then the registration. */
+static UINT32 collect_packages( struct pkg_entry *entries, const WCHAR *family )
+{
+    WCHAR full[512], fw[512];
+    UINT32 n = 0, i, j;
+
+    if (get_current_package_full_name( full, ARRAY_SIZE(full) )) pkg_entry_add( entries, &n, full, FALSE );
+    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ))
+        pkg_entry_add( entries, &n, fw, TRUE );
+    appmodel_enum_packages( entries, &n );
+
+    if (!family) return n;
+    for (i = 0, j = 0; i < n; i++)
+    {
+        if (entries[i].fam[0] && !wcsicmp( entries[i].fam, family ))
+            entries[j++] = entries[i];
+    }
+    return j;
+}
 
 /***********************************************************************
  *         GetCurrentApplicationUserModelId   (kernelbase.@)
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentApplicationUserModelId( UINT32 *length, WCHAR *id )
 {
-    LONG ret = package_str_from_env( L"WINE_PACKAGE_AUMID", length, id );
+    LONG ret = package_str( L"WINE_PACKAGE_AUMID", L"ApplicationUserModelId", length, id );
     if (ret == APPMODEL_ERROR_NO_PACKAGE)
     {
         FIXME( "(%p %p): stub\n", length, id );
@@ -1572,16 +1797,8 @@ static LONG package_str_from_env( const WCHAR *var, UINT32 *length, WCHAR *name 
     WCHAR buf[512];
     DWORD len = GetEnvironmentVariableW( var, buf, ARRAY_SIZE(buf) );
     if (!len || len >= ARRAY_SIZE(buf)) return APPMODEL_ERROR_NO_PACKAGE;
-    len += 1; /* include NUL in the reported/required length */
     if (!length) return ERROR_INVALID_PARAMETER;
-    if (!name || *length < len)
-    {
-        *length = len;
-        return ERROR_INSUFFICIENT_BUFFER;
-    }
-    memcpy( name, buf, len * sizeof(WCHAR) );
-    *length = len;
-    return ERROR_SUCCESS;
+    return package_fill_str( buf, length, name );
 }
 
 /***********************************************************************
@@ -1589,8 +1806,16 @@ static LONG package_str_from_env( const WCHAR *var, UINT32 *length, WCHAR *name 
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length, WCHAR *name )
 {
-    LONG ret = package_str_from_env( L"WINE_PACKAGE_FAMILY_NAME", length, name );
-    if (ret == APPMODEL_ERROR_NO_PACKAGE) FIXME( "(%p %p): stub\n", length, name );
+    WCHAR full[512], fam[256];
+    UINT32 len = ARRAY_SIZE(fam);
+    LONG ret = package_str( L"WINE_PACKAGE_FAMILY_NAME", L"PackageFamilyName", length, name );
+
+    if (ret != APPMODEL_ERROR_NO_PACKAGE) return ret;
+    /* a package with an identity has a family: derive it from the full name */
+    if (get_current_package_full_name( full, ARRAY_SIZE(full) ) &&
+        !PackageFamilyNameFromFullName( full, &len, fam ))
+        return package_fill_str( fam, length, name );
+    FIXME( "(%p %p): no package\n", length, name );
     return ret;
 }
 
@@ -1600,13 +1825,13 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFamilyName( UINT32 *length,
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageFullName( UINT32 *length, WCHAR *name )
 {
-    LONG ret = package_str_from_env( L"WINE_PACKAGE_FULL_NAME", length, name );
-    if (ret == APPMODEL_ERROR_NO_PACKAGE) FIXME( "(%p %p): stub\n", length, name );
+    LONG ret = package_str( L"WINE_PACKAGE_FULL_NAME", L"PackageFullName", length, name );
+    if (ret == APPMODEL_ERROR_NO_PACKAGE) FIXME( "(%p %p): no package\n", length, name );
     return ret;
 }
 
 
-/* get the current package full name from env into a stack buffer */
+/* get the current package full name (env var, then registration) into a stack buffer */
 static BOOL get_current_package_full_name( WCHAR *buf, UINT32 cch )
 {
     UINT32 len = cch;
@@ -1631,75 +1856,48 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackageId( UINT32 *len, BYTE *buff
 /***********************************************************************
  *         GetCurrentPackageInfo   (kernelbase.@)
  *
- * Build a single PACKAGE_INFO from the current package identity + path. The app
- * uses this to discover its own package layout; one entry (the package itself).
+ * Build the PACKAGE_INFO array for the registered package set -- the running
+ * package first, then its frameworks. The app uses this to discover its own
+ * package layout; entries carry the identity fields, path, family, and the
+ * framework flag.
  */
 LONG WINAPI PackageFamilyNameFromFullName(const WCHAR *full_name, UINT32 *length, WCHAR *family_name);
 
 LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
 {
-    WCHAR full_name[512], path[MAX_PATH], fam_name[256];
-    WCHAR fw_full_name[512], fw_path[MAX_PATH], fw_fam_name[256];
-    UINT32 path_len = ARRAY_SIZE(path);
-    UINT32 fam_len = ARRAY_SIZE(fam_name);
-    BYTE id_buf[512], fw_id_buf[512];
-    UINT32 id_len = sizeof(id_buf), fw_id_len = sizeof(fw_id_buf);
-    PACKAGE_ID *id = (PACKAGE_ID *)id_buf, *fw_id = (PACKAGE_ID *)fw_id_buf;
+    struct pkg_entry entries[MAX_PKG_ENTRIES];
+    BYTE id_buf[512];
     PACKAGE_INFO *info;
-    SIZE_T need, name_bytes, path_bytes, fam_bytes, str_off;
-    SIZE_T fw_name_bytes = 0, fw_path_bytes = 0, fw_fam_bytes = 0;
-    BOOL has_fw = FALSE;
-    UINT32 pkg_count = 1;
+    SIZE_T need = 0, str_off;
+    UINT32 n, i, id_len;
     LONG ret;
 
     if (!buffer_size) return ERROR_INVALID_PARAMETER;
 
-    if (!get_current_package_full_name( full_name, ARRAY_SIZE(full_name) ))
+    n = collect_packages( entries, NULL );
+    if (!n)
     {
         FIXME( "(%#x %p %p %p): no package\n", flags, buffer_size, buffer, count );
         return APPMODEL_ERROR_NO_PACKAGE;
     }
-    if ((ret = PackageIdFromFullName( full_name, 0, &id_len, id_buf ))) return ret;
-    if (GetCurrentPackagePath( &path_len, path )) path[0] = 0;
-    fam_bytes = 0;
-    if (!PackageFamilyNameFromFullName( full_name, &fam_len, fam_name ))
-        fam_bytes = (wcslen( fam_name ) + 1) * sizeof(WCHAR);
 
-    name_bytes = (wcslen( full_name ) + 1) * sizeof(WCHAR);
-    path_bytes = (wcslen( path ) + 1) * sizeof(WCHAR);
-
-    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw_full_name, ARRAY_SIZE(fw_full_name) ) &&
-        GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_PATH", fw_path, ARRAY_SIZE(fw_path) ))
+    str_off = n * sizeof(PACKAGE_INFO);
+    need = str_off;
+    for (i = 0; i < n; i++)
     {
-        UINT32 fw_fam_len = ARRAY_SIZE(fw_fam_name);
-        if (!PackageIdFromFullName( fw_full_name, 0, &fw_id_len, fw_id_buf ))
-        {
-            has_fw = TRUE;
-            pkg_count = 2;
-            fw_name_bytes = (wcslen( fw_full_name ) + 1) * sizeof(WCHAR);
-            fw_path_bytes = (wcslen( fw_path ) + 1) * sizeof(WCHAR);
-            if (!PackageFamilyNameFromFullName( fw_full_name, &fw_fam_len, fw_fam_name ))
-                fw_fam_bytes = (wcslen( fw_fam_name ) + 1) * sizeof(WCHAR);
-        }
+        PACKAGE_ID *id = (PACKAGE_ID *)id_buf;
+        id_len = sizeof(id_buf);
+        if ((ret = PackageIdFromFullName( entries[i].full, 0, &id_len, id_buf ))) return ret;
+        need += (wcslen( entries[i].full ) + 1) * sizeof(WCHAR);
+        need += (wcslen( entries[i].path ) + 1) * sizeof(WCHAR);
+        if (entries[i].fam[0]) need += (wcslen( entries[i].fam ) + 1) * sizeof(WCHAR);
+        need += (id->name ? (wcslen(id->name)+1)*sizeof(WCHAR) : 0);
+        need += (id->publisher ? (wcslen(id->publisher)+1)*sizeof(WCHAR) : 0);
+        need += (id->resourceId ? (wcslen(id->resourceId)+1)*sizeof(WCHAR) : 0);
+        need += (id->publisherId ? (wcslen(id->publisherId)+1)*sizeof(WCHAR) : 0);
     }
 
-    str_off = pkg_count * sizeof(PACKAGE_INFO);
-    need = str_off + name_bytes + path_bytes + fam_bytes
-         + (id->name ? (wcslen(id->name)+1)*sizeof(WCHAR) : 0)
-         + (id->publisher ? (wcslen(id->publisher)+1)*sizeof(WCHAR) : 0)
-         + (id->resourceId ? (wcslen(id->resourceId)+1)*sizeof(WCHAR) : 0)
-         + (id->publisherId ? (wcslen(id->publisherId)+1)*sizeof(WCHAR) : 0);
-
-    if (has_fw)
-    {
-        need += fw_name_bytes + fw_path_bytes + fw_fam_bytes
-              + (fw_id->name ? (wcslen(fw_id->name)+1)*sizeof(WCHAR) : 0)
-              + (fw_id->publisher ? (wcslen(fw_id->publisher)+1)*sizeof(WCHAR) : 0)
-              + (fw_id->resourceId ? (wcslen(fw_id->resourceId)+1)*sizeof(WCHAR) : 0)
-              + (fw_id->publisherId ? (wcslen(fw_id->publisherId)+1)*sizeof(WCHAR) : 0);
-    }
-
-    if (count) *count = pkg_count;
+    if (count) *count = n;
     if (*buffer_size < need || !buffer)
     {
         *buffer_size = need;
@@ -1707,37 +1905,33 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
     }
 
     info = (PACKAGE_INFO *)buffer;
-    memset( info, 0, pkg_count * sizeof(PACKAGE_INFO) );
+    memset( info, 0, n * sizeof(PACKAGE_INFO) );
     {
         BYTE *p = buffer + str_off;
-        info[0].path = (WCHAR *)p; memcpy( p, path, path_bytes ); p += path_bytes;
-        info[0].packageFullName = (WCHAR *)p; memcpy( p, full_name, name_bytes ); p += name_bytes;
-        if (fam_bytes)
+        for (i = 0; i < n; i++)
         {
-            info[0].packageFamilyName = (WCHAR *)p; memcpy( p, fam_name, fam_bytes ); p += fam_bytes;
-        }
-        else info[0].packageFamilyName = NULL;
-        info[0].packageId = *id;
-#define COPYSTR(dst, src, field) do { if ((src)->field) { (dst)->packageId.field = (WCHAR *)p; \
-        SIZE_T b=(wcslen((src)->field)+1)*sizeof(WCHAR); memcpy(p,(src)->field,b); p+=b; } } while(0)
-        COPYSTR(&info[0], id, name); COPYSTR(&info[0], id, publisher);
-        COPYSTR(&info[0], id, resourceId); COPYSTR(&info[0], id, publisherId);
+            PACKAGE_ID *id = (PACKAGE_ID *)id_buf;
+            SIZE_T b;
 
-        if (has_fw)
-        {
-            info[1].flags = 0x00000001; /* PACKAGE_INFORMATION_FRAMEWORK */
-            info[1].path = (WCHAR *)p; memcpy( p, fw_path, fw_path_bytes ); p += fw_path_bytes;
-            info[1].packageFullName = (WCHAR *)p; memcpy( p, fw_full_name, fw_name_bytes ); p += fw_name_bytes;
-            if (fw_fam_bytes)
+            id_len = sizeof(id_buf);
+            if (PackageIdFromFullName( entries[i].full, 0, &id_len, id_buf )) continue;
+
+            info[i].flags = entries[i].framework ? 0x00000001 /* PACKAGE_INFORMATION_FRAMEWORK */ : 0;
+            b = (wcslen( entries[i].path ) + 1) * sizeof(WCHAR);
+            info[i].path = (WCHAR *)p; memcpy( p, entries[i].path, b ); p += b;
+            b = (wcslen( entries[i].full ) + 1) * sizeof(WCHAR);
+            info[i].packageFullName = (WCHAR *)p; memcpy( p, entries[i].full, b ); p += b;
+            if (entries[i].fam[0])
             {
-                info[1].packageFamilyName = (WCHAR *)p; memcpy( p, fw_fam_name, fw_fam_bytes ); p += fw_fam_bytes;
+                b = (wcslen( entries[i].fam ) + 1) * sizeof(WCHAR);
+                info[i].packageFamilyName = (WCHAR *)p; memcpy( p, entries[i].fam, b ); p += b;
             }
-            else info[1].packageFamilyName = NULL;
-            info[1].packageId = *fw_id;
-            COPYSTR(&info[1], fw_id, name); COPYSTR(&info[1], fw_id, publisher);
-            COPYSTR(&info[1], fw_id, resourceId); COPYSTR(&info[1], fw_id, publisherId);
-        }
+            info[i].packageId = *id;
+#define COPYSTR(field) do { if (id->field) { SIZE_T bb = (wcslen(id->field)+1)*sizeof(WCHAR); \
+            info[i].packageId.field = (WCHAR *)p; memcpy( p, id->field, bb ); p += bb; } } while(0)
+            COPYSTR(name); COPYSTR(publisher); COPYSTR(resourceId); COPYSTR(publisherId);
 #undef COPYSTR
+        }
     }
     *buffer_size = need;
     return ERROR_SUCCESS;
@@ -1761,10 +1955,29 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetCurrentPackagePath( UINT32 *length, WCHAR
 
 /***********************************************************************
  *         GetPackageFullName   (kernelbase.@)
+ *
+ * The current process answers from its own identity; any other process is
+ * matched by its image name against the Exes registration.
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFullName( HANDLE process, UINT32 *length, WCHAR *name )
 {
-    FIXME( "(%p %p %p): stub\n", process, length, name );
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR exe[MAX_PATH], subkey[576], full[512];
+    SIZE_T i;
+    DWORD len = ARRAY_SIZE(exe);
+
+    if (!process || process == GetCurrentProcess()) return GetCurrentPackageFullName( length, name );
+
+    if (QueryFullProcessImageNameW( process, 0, exe, &len ))
+    {
+        WCHAR *p = wcsrchr( exe, L'\\' );
+        lstrcpyW( subkey, L"Exes\\" );
+        lstrcatW( subkey, p ? p + 1 : exe );
+        for (i = 0; i < ARRAY_SIZE(roots); i++)
+            if (appmodel_read_str( roots[i], subkey, L"PackageFullName", full, ARRAY_SIZE(full) ))
+                return package_fill_str( full, length, name );
+    }
+    FIXME( "(%p %p %p): no package\n", process, length, name );
     return APPMODEL_ERROR_NO_PACKAGE;
 }
 
@@ -1774,23 +1987,59 @@ LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFullName( HANDLE process, UINT32 *
  */
 LONG WINAPI /* DECLSPEC_HOTPATCH */ GetPackageFamilyName( HANDLE process, UINT32 *length, WCHAR *name )
 {
-    FIXME( "(%p %p %p): stub\n", process, length, name );
-    return APPMODEL_ERROR_NO_PACKAGE;
+    WCHAR full[512], fam[256];
+    UINT32 len;
+    LONG ret;
+
+    if (!process || process == GetCurrentProcess()) return GetCurrentPackageFamilyName( length, name );
+
+    len = ARRAY_SIZE(full);
+    if ((ret = GetPackageFullName( process, &len, full ))) return ret;
+    len = ARRAY_SIZE(fam);
+    if (PackageFamilyNameFromFullName( full, &len, fam )) return APPMODEL_ERROR_NO_PACKAGE;
+    return package_fill_str( fam, length, name );
 }
 
 /***********************************************************************
  *         GetPackagesByPackageFamily   (kernelbase.@)
+ *
+ * Enumerates the packages registered for the family: the deployment view is
+ * the Packages registration plus the env-pinned running package and framework.
+ * The names come back as consecutive NUL-terminated strings in full_names.
  */
 LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily(const WCHAR *family_name, UINT32 *count,
                                                          WCHAR *full_names, UINT32 *buffer_len, WCHAR *buffer)
 {
-    FIXME( "(%s %p %p %p %p): stub\n", debugstr_w(family_name), count, full_names, buffer_len, buffer );
+    struct pkg_entry entries[MAX_PKG_ENTRIES];
+    UINT32 n, i, total = 0;
 
-    if (!count || !buffer_len)
-        return ERROR_INVALID_PARAMETER;
+    TRACE( "(%s %p %p %p %p)\n", debugstr_w(family_name), count, full_names, buffer_len, buffer );
 
-    *count = 0;
-    *buffer_len = 0;
+    if (!count || !buffer_len) return ERROR_INVALID_PARAMETER;
+    if (!family_name) return ERROR_INVALID_PARAMETER;
+
+    n = collect_packages( entries, family_name );
+    for (i = 0; i < n; i++) total += wcslen( entries[i].full ) + 1;
+
+    if (full_names && *count >= n && *buffer_len >= total)
+    {
+        WCHAR *p = full_names;
+        for (i = 0; i < n; i++)
+        {
+            SIZE_T chars = wcslen( entries[i].full ) + 1;
+            memcpy( p, entries[i].full, chars * sizeof(WCHAR) );
+            p += chars;
+        }
+    }
+    else if (n)
+    {
+        *count = n;
+        *buffer_len = total;
+        return ERROR_INSUFFICIENT_BUFFER;
+    }
+
+    *count = n;
+    *buffer_len = total;
     return ERROR_SUCCESS;
 }
 
@@ -1799,21 +2048,14 @@ LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily(const WCHAR *family_nam
  */
 LONG WINAPI GetPackagePathByFullName(const WCHAR *name, UINT32 *len, WCHAR *path)
 {
-    WCHAR env[MAX_PATH];
-    UINT32 need;
+    WCHAR buf[MAX_PATH];
 
     if (!len || !name)
         return ERROR_INVALID_PARAMETER;
 
-    /* package install path supplied at launch via WINE_PACKAGE_PATH */
-    if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", env, ARRAY_SIZE(env) ))
-    {
-        need = wcslen( env ) + 1;
-        if (!path || *len < need) { *len = need; return ERROR_INSUFFICIENT_BUFFER; }
-        memcpy( path, env, need * sizeof(WCHAR) );
-        *len = need;
-        return ERROR_SUCCESS;
-    }
+    /* env layer (WINE_PACKAGE_PATH, WINE_FRAMEWORK_PACKAGE_PATH) first, then
+     * the PackagePath of the registered deployment */
+    if (package_path_for( name, buf, ARRAY_SIZE(buf) )) return package_fill_str( buf, len, path );
 
     FIXME( "(%s %p %p): no package path\n", debugstr_w(name), len, path );
     return APPMODEL_ERROR_NO_PACKAGE;
@@ -1958,7 +2200,7 @@ static LONG package_context_from_env( const UINT32 flags, UINT32 *length, WCHAR 
 {
     static int once;
     if (!once++) FIXME( "package contexts are opaque on Windows; returning the package full name.\n" );
-    return package_str_from_env( L"WINE_PACKAGE_FULL_NAME", length, buffer );
+    return package_str( L"WINE_PACKAGE_FULL_NAME", L"PackageFullName", length, buffer );
 }
 
 /***********************************************************************
@@ -2049,55 +2291,47 @@ static void fill_package_info_entry( PACKAGE_INFO *info, const WCHAR *full_name,
 /***********************************************************************
  *         FindPackagesByPackageFamily   (kernelbase.@)
  *
- * Answers for the packages the env layer knows about: the running package and
- * its framework. A family that matches neither resolves to nothing, which is
- * what an uninstalled family does on Windows.
+ * Answers for the packages registered under the queried family: the running
+ * package, the env framework, and the Packages registration. A family that
+ * matches nothing resolves to nothing, which is what an uninstalled family
+ * does on Windows.
  */
 LONG WINAPI FindPackagesByPackageFamily( const WCHAR *family, UINT32 count, WCHAR *full_names,
                                          UINT32 *full_names_len, PACKAGE_INFO *package_info,
                                          UINT32 *package_info_count, void *filter )
 {
     static int once;
-    const WCHAR *names[2] = { NULL, NULL }, *paths[2] = { NULL, NULL };
-    BOOL framework[2] = { FALSE, FALSE };
-    WCHAR full[512] = L"", fam_cur[256], path[512] = L"";
-    WCHAR fw_full[512] = L"", fw_path[512] = L"";
-    UINT32 n = 0, total = 0, i, fam_len;
+    struct pkg_entry entries[MAX_PKG_ENTRIES];
+    const WCHAR **names = NULL, **paths = NULL;
+    UINT32 n = 0, total = 0, i;
 
     if (!family || !full_names_len) return ERROR_INVALID_PARAMETER;
-    if (!once++) FIXME( "(%s %u %p %p %p %p %p): answering from the env-var identity\n",
+    if (!once++) FIXME( "(%s %u %p %p %p %p %p): answering from the registered package set\n",
                         debugstr_w( family ), count, full_names, full_names_len, package_info,
                         package_info_count, filter );
 
-    fam_len = ARRAY_SIZE( fam_cur );
-    if (get_current_package_full_name( full, ARRAY_SIZE( full) ) &&
-        !PackageFamilyNameFromFullName( full, &fam_len, fam_cur ) && !wcsicmp( fam_cur, family ))
+    n = collect_packages( entries, family );
+    if (!(names = HeapAlloc( GetProcessHeap(), 0, n * sizeof(*names) )) ||
+        !(paths = HeapAlloc( GetProcessHeap(), 0, n * sizeof(*paths) )))
     {
-        names[n] = full;
-        if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", path, ARRAY_SIZE( path ) )) paths[n] = path;
-        n++;
+        HeapFree( GetProcessHeap(), 0, names );
+        HeapFree( GetProcessHeap(), 0, paths );
+        return ERROR_OUTOFMEMORY;
     }
-    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw_full, ARRAY_SIZE( fw_full ) ))
+    for (i = 0; i < n; i++)
     {
-        WCHAR fam_fw[256];
-        UINT32 len = ARRAY_SIZE( fam_fw );
-        if (!PackageFamilyNameFromFullName( fw_full, &len, fam_fw ) && !wcsicmp( fam_fw, family ))
-        {
-            names[n] = fw_full;
-            if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_PATH", fw_path, ARRAY_SIZE( fw_path ) ))
-                paths[n] = fw_path;
-            framework[n] = TRUE;
-            n++;
-        }
+        names[i] = entries[i].full;
+        paths[i] = entries[i].path[0] ? entries[i].path : NULL;
+        total += lstrlenW( names[i] ) + 1;
     }
-
-    for (i = 0; i < n; i++) total += lstrlenW( names[i] ) + 1;
     if (n > 1) total += n - 1;
 
     if (!count)  /* query: report the sizes, write nothing */
     {
         *full_names_len = total;
         if (package_info_count) *package_info_count = n;
+        HeapFree( GetProcessHeap(), 0, names );
+        HeapFree( GetProcessHeap(), 0, paths );
         return ERROR_SUCCESS;
     }
 
@@ -2116,6 +2350,8 @@ LONG WINAPI FindPackagesByPackageFamily( const WCHAR *family, UINT32 count, WCHA
     {
         if (full_names && total) full_names[0] = 0;
         *full_names_len = total;
+        HeapFree( GetProcessHeap(), 0, names );
+        HeapFree( GetProcessHeap(), 0, paths );
         return ERROR_INSUFFICIENT_BUFFER;
     }
 
@@ -2127,13 +2363,17 @@ LONG WINAPI FindPackagesByPackageFamily( const WCHAR *family, UINT32 count, WCHA
             if (requested < n)
             {
                 *package_info_count = n;
+                HeapFree( GetProcessHeap(), 0, names );
+                HeapFree( GetProcessHeap(), 0, paths );
                 return ERROR_INSUFFICIENT_BUFFER;
             }
             for (i = 0; i < n; i++)
-                fill_package_info_entry( &package_info[i], names[i], paths[i], framework[i] );
+                fill_package_info_entry( &package_info[i], names[i], paths[i], entries[i].framework );
         }
         *package_info_count = n;
     }
+    HeapFree( GetProcessHeap(), 0, names );
+    HeapFree( GetProcessHeap(), 0, paths );
     return ERROR_SUCCESS;
 }
 /*
@@ -2234,23 +2474,13 @@ static HRESULT package_info_block_from_name( const WCHAR *full_name, const WCHAR
     return S_OK;
 }
 
-/* Path of an env-layer package: the package itself uses WINE_PACKAGE_PATH, its
- * framework WINE_FRAMEWORK_PACKAGE_PATH. NULL when the variable is not set. */
-static const WCHAR *env_package_path( BOOL framework, WCHAR *buffer, UINT32 cch )
-{
-    buffer[0] = 0;
-    if (GetEnvironmentVariableW( framework ? L"WINE_FRAMEWORK_PACKAGE_PATH" : L"WINE_PACKAGE_PATH", buffer, cch ))
-        return buffer;
-    return NULL;
-}
-
 /***********************************************************************
  *         OpenPackageInfoByFullName   (kernelbase.@)
  *
- * The identity this process has is env-var driven (see GetCurrentPackageFullName),
- * so exactly one package can be opened: the one WINE_PACKAGE_FULL_NAME names. The
- * PACKAGE_INFO handed back carries the fields GetCurrentPackageInfo builds, path
- * included, and ClosePackageInfo releases it.
+ * Opens a package of the registered set (see GetCurrentPackageFullName): the
+ * running package, the env framework, and every entry of the Packages
+ * registration. The PACKAGE_INFO handed back carries the fields
+ * GetCurrentPackageInfo builds, path included, and ClosePackageInfo releases it.
  *
  * A name that does not parse as a package full name reports the appmodel
  * identity-corrupt code, a well-formed name of any other package the appmodel
@@ -2261,7 +2491,6 @@ LONG WINAPI OpenPackageInfoByFullName( const WCHAR *full_name, UINT32 reserved, 
 {
     WCHAR current[512], path[512];
     struct package_info_block *block;
-    const WCHAR *pkg_path;
     UINT32 id_len = 0;
     HRESULT hr;
 
@@ -2275,11 +2504,14 @@ LONG WINAPI OpenPackageInfoByFullName( const WCHAR *full_name, UINT32 reserved, 
     if (PackageIdFromFullName( full_name, 0, &id_len, NULL ) != ERROR_INSUFFICIENT_BUFFER)
         return HRESULT_FROM_WIN32( APPMODEL_ERROR_PACKAGE_IDENTITY_CORRUPT );
 
-    if (!get_current_package_full_name( current, ARRAY_SIZE( current ) ) || wcsicmp( current, full_name ))
-        return HRESULT_FROM_WIN32( APPMODEL_ERROR_NO_PACKAGE );
-
-    pkg_path = env_package_path( FALSE, path, ARRAY_SIZE( path ) );
-    if ((hr = package_info_block_from_name( full_name, pkg_path, &block )) != S_OK) return hr;
+    if (!package_path_for( full_name, path, ARRAY_SIZE( path ) ))
+    {
+        /* the running package opens even with no install path recorded */
+        if (!get_current_package_full_name( current, ARRAY_SIZE( current ) ) || wcsicmp( current, full_name ))
+            return HRESULT_FROM_WIN32( APPMODEL_ERROR_NO_PACKAGE );
+        path[0] = 0;
+    }
+    if ((hr = package_info_block_from_name( full_name, path[0] ? path : NULL, &block )) != S_OK) return hr;
     *info = &block->info;
     return S_OK;
 }
@@ -2312,55 +2544,38 @@ LONG WINAPI ClosePackageInfo( PACKAGE_INFO *info )
 /***********************************************************************
  *         GetPackageApplicationIds   (kernelbase.@)
  *
- * Answers from the env-var identity, the only identity there is: the packages in
- * the queried family are the running package and, when WINE_FRAMEWORK_PACKAGE_FULL_NAME
- * names one, its framework -- the same set FindPackagesByPackageFamily reports.
- * The enumeration type GUID is not discriminated. Passing no array is the count
- * query. Each HPKG is a package-info block ClosePackageInfo releases; the array
- * itself Windows frees with FreePackageEnum, which is not implemented here.
+ * Answers with the packages registered under the queried family -- the running
+ * package, the env framework, and the Packages registration; the same set
+ * FindPackagesByPackageFamily reports. The enumeration type GUID is not
+ * discriminated. Passing no array is the count query. Each HPKG is a
+ * package-info block ClosePackageInfo releases; the array itself Windows frees
+ * with FreePackageEnum, which is not implemented here.
  */
 LONG WINAPI GetPackageApplicationIds( const WCHAR *family_name, GUID package_enumeration_type,
                                       UINT32 *count, HPKG *packages )
 {
     static int once;
-    const WCHAR *names[2] = { NULL, NULL };
-    BOOL framework[2] = { FALSE, FALSE };
-    WCHAR full[512] = L"", fam_cur[256], path[512], fw_full[512] = L"", fw_path[512];
-    UINT32 n = 0, i, j, fam_len = ARRAY_SIZE( fam_cur );
+    struct pkg_entry entries[MAX_PKG_ENTRIES];
+    UINT32 n, i, j;
     HPKG *handles = NULL;
 
     TRACE( "(%s %s %p %p)\n", debugstr_w( family_name ), debugstr_guid( &package_enumeration_type ), count, packages );
 
     if (!family_name || !count) return E_INVALIDARG;
     if (packages) *packages = NULL;
-    if (!once++) FIXME( "(%s %s %p %p): answering from the env-var identity, the enumeration type is not discriminated.\n",
+    if (!once++) FIXME( "(%s %s %p %p): the enumeration type is not discriminated.\n",
                         debugstr_w( family_name ), debugstr_guid( &package_enumeration_type ), count, packages );
 
-    if (get_current_package_full_name( full, ARRAY_SIZE( full ) ) &&
-        !PackageFamilyNameFromFullName( full, &fam_len, fam_cur ) && !wcsicmp( fam_cur, family_name ))
-        names[n++] = full;
-
-    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw_full, ARRAY_SIZE( fw_full ) ))
-    {
-        WCHAR fam_fw[256];
-        UINT32 len = ARRAY_SIZE( fam_fw );
-        if (!PackageFamilyNameFromFullName( fw_full, &len, fam_fw ) && !wcsicmp( fam_fw, family_name ))
-        {
-            framework[n] = TRUE;
-            names[n++] = fw_full;
-        }
-    }
-
+    n = collect_packages( entries, family_name );
     *count = n;
     if (!packages || !n) return ERROR_SUCCESS;
 
     if (!(handles = HeapAlloc( GetProcessHeap(), 0, n * sizeof(*handles) ))) return E_OUTOFMEMORY;
     for (i = 0; i < n; i++)
     {
-        const WCHAR *pkg_path = env_package_path( framework[i], framework[i] ? fw_path : path,
-                                                  ARRAY_SIZE( path ) );
         struct package_info_block *block;
-        HRESULT hr = package_info_block_from_name( names[i], pkg_path, &block );
+        HRESULT hr = package_info_block_from_name( entries[i].full,
+                                                   entries[i].path[0] ? entries[i].path : NULL, &block );
 
         if (hr != S_OK)
         {

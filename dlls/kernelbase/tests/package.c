@@ -24,6 +24,7 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "winreg.h"
 #include "winerror.h"
 
 #include "appmodel.h"
@@ -325,6 +326,162 @@ static void test_open_package_info_by_full_name( void )
     if (close) ok( close( NULL ) == E_INVALIDARG, "close of null not rejected\n" );
 }
 
+/*
+ * Registry layer: below the env vars sits the package registration seeded in
+ * <root>\Software\Microsoft\Windows NT\CurrentVersion\AppModel -- Exes\<image>
+ * names the package an image runs as, Identity is the fallback, Packages\
+ * <FullName> is the deployment view. The env vars stay the per-run override.
+ */
+#define REG_APPMODEL L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel"
+#define REG_PKG_PATH PKG_PATH L"\\reg"
+#define REG_FW_NAME  L"WineWpTest_9.9.9.9_x64__8wekyb3d8bbwe"
+#define REG_FW_PATH  PKG_PATH L"\\fw"
+
+typedef LONG (WINAPI *family_from_full_fn)( const WCHAR *full, UINT32 *len, WCHAR *family );
+typedef LONG (WINAPI *get_by_family_fn)( const WCHAR *family, UINT32 *count, WCHAR *full_names,
+                                         UINT32 *buffer_len, WCHAR *buffer );
+typedef LONG (WINAPI *pkg_full_name_fn)( HANDLE process, UINT32 *len, WCHAR *name );
+typedef LONG (WINAPI *aumid_fn)( UINT32 *len, WCHAR *id );
+
+static void set_test_registry( void )
+{
+    WCHAR exe[256], subkey[512], value[512];
+    HKEY hkey;
+    DWORD len;
+
+    len = GetModuleFileNameW( 0, exe, ARRAY_SIZE(exe) );
+    ok( len && len < ARRAY_SIZE(exe), "module name len %lu\n", len );
+    if (!len || len >= ARRAY_SIZE(exe)) return;
+
+    lstrcpyW( subkey, REG_APPMODEL L"\\Exes\\" );
+    /* keep only the image base name */
+    {
+        WCHAR *p = wcsrchr( exe, L'\\' );
+        lstrcatW( subkey, p ? p + 1 : exe );
+    }
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
+    {
+        win_skip( "cannot create the AppModel Exes key\n" );
+        return;
+    }
+    lstrcpyW( value, FULL_NAME );
+    RegSetValueExW( hkey, L"PackageFullName", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
+    lstrcpyW( value, REG_PKG_PATH );
+    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
+    lstrcpyW( value, FAMILY_NAME L"!App" );
+    RegSetValueExW( hkey, L"ApplicationUserModelId", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
+    RegCloseKey( hkey );
+
+    /* a registered framework package of the test family */
+    lstrcpyW( subkey, REG_APPMODEL L"\\Packages\\" REG_FW_NAME );
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ) == ERROR_SUCCESS)
+    {
+        DWORD framework = 1;
+        lstrcpyW( value, REG_FW_PATH );
+        RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
+        RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&framework, sizeof(framework) );
+        RegCloseKey( hkey );
+    }
+}
+
+static void clear_test_registry( void )
+{
+    RegDeleteTreeW( HKEY_CURRENT_USER, REG_APPMODEL );
+}
+
+static void check_from_registry( const char *name, const WCHAR *pkg_path )
+{
+    family_from_full_fn family_from_full = (void *)kb_export( "PackageFamilyNameFromFullName" );
+    pkg_full_name_fn get_full_name = (void *)kb_export( "GetPackageFullName" );
+    get_by_family_fn get_by_family = (void *)kb_export( "GetPackagesByPackageFamily" );
+    aumid_fn get_aumid = (void *)kb_export( "GetCurrentApplicationUserModelId" );
+    WCHAR buf[256], fam[256], names[512];
+    UINT32 len, count, buffer_len;
+    LONG ret;
+
+    /* full name: from the Exes registration, not a stub default */
+    len = 0;
+    ret = GetCurrentPackageFullName( &len, NULL );
+    ok( ret == ERROR_INSUFFICIENT_BUFFER && len == lstrlenW( FULL_NAME ) + 1,
+        "%s full-name query ret %ld len %u\n", name, ret, len );
+    len = ARRAY_SIZE(buf);
+    ret = GetCurrentPackageFullName( &len, buf );
+    ok( ret == ERROR_SUCCESS && !wcscmp( buf, FULL_NAME ), "%s full-name fill ret %ld name %s\n",
+        name, ret, debugstr_w( buf ) );
+
+    /* family: not seeded, derived from the full name */
+    len = ARRAY_SIZE(buf);
+    ret = GetCurrentPackageFamilyName( &len, buf );
+    ok( ret == ERROR_SUCCESS && !wcscmp( buf, FAMILY_NAME ), "%s family ret %ld name %s\n",
+        name, ret, debugstr_w( buf ) );
+    if (family_from_full)
+    {
+        len = ARRAY_SIZE(fam);
+        ret = family_from_full( FULL_NAME, &len, fam );
+        ok( ret == ERROR_SUCCESS && !wcscmp( fam, FAMILY_NAME ), "%s derive ret %ld fam %s\n",
+            name, ret, debugstr_w( fam ) );
+    }
+
+    /* path: the registered PackagePath */
+    len = ARRAY_SIZE(buf);
+    ret = GetCurrentPackagePath( &len, buf );
+    ok( ret == ERROR_SUCCESS && !wcscmp( buf, pkg_path ), "%s path ret %ld path %s\n",
+        name, ret, debugstr_w( buf ) );
+
+    /* AUMID: seeded value */
+    if (get_aumid)
+    {
+        len = ARRAY_SIZE(buf);
+        ret = get_aumid( &len, buf );
+        ok( ret == ERROR_SUCCESS && !wcscmp( buf, FAMILY_NAME L"!App" ), "%s aumid ret %ld id %s\n",
+            name, ret, debugstr_w( buf ) );
+    }
+
+    /* GetPackageFullName for this very process answers the identity */
+    if (get_full_name)
+    {
+        len = ARRAY_SIZE(buf);
+        ret = get_full_name( GetCurrentProcess(), &len, buf );
+        ok( ret == ERROR_SUCCESS && !wcscmp( buf, FULL_NAME ), "%s self ret %ld name %s\n",
+            name, ret, debugstr_w( buf ) );
+    }
+
+    /* the family enumeration covers the registered framework, not only the
+     * running package: two entries in FAMILY_NAME */
+    if (get_by_family)
+    {
+        count = 0;
+        buffer_len = ARRAY_SIZE(names);
+        ret = get_by_family( FAMILY_NAME, &count, NULL, &buffer_len, NULL );
+        ok( ret == ERROR_INSUFFICIENT_BUFFER && count == 2,
+            "%s enum query ret %ld count %u len %u\n", name, ret, count, buffer_len );
+        count = 2;
+        buffer_len = ARRAY_SIZE(names);
+        ret = get_by_family( FAMILY_NAME, &count, names, &buffer_len, NULL );
+        ok( ret == ERROR_SUCCESS && count == 2, "%s enum fill ret %ld count %u\n", name, ret, count, buffer_len );
+        ok( !wcsncmp( names, FULL_NAME, lstrlenW( FULL_NAME ) ), "%s enum names %s\n", name, debugstr_w( names ) );
+        count = 0;
+        buffer_len = 0;
+        ret = get_by_family( L"NotExist_8wekyb3d8bbwe", &count, NULL, &buffer_len, NULL );
+        ok( ret == ERROR_SUCCESS && count == 0, "%s absent family ret %ld count %u\n", name, ret, count, buffer_len );
+    }
+}
+
+static void test_package_registry( void )
+{
+    set_test_registry();
+
+    /* no env: the registration is the identity */
+    clear_test_env();
+    check_from_registry( "registry", REG_PKG_PATH );
+
+    /* env wins over the registration */
+    set_test_env();
+    check_from_registry( "env-over-registry", PKG_PATH );
+
+    clear_test_registry();
+}
+
 static void test_get_package_application_ids( void )
 {
     app_ids_fn f = (void *)kb_export( "GetPackageApplicationIds" );
@@ -372,4 +529,5 @@ START_TEST( package )
     test_open_package_info_by_full_name();
     test_get_package_application_ids();
     clear_test_env();
+    test_package_registry();
 }
