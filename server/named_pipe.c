@@ -503,14 +503,90 @@ static void relay_ring_dump( int ufd, const char *tag, const void *ep,
              w[0], w[1], w[2], w[3], w[4], w[5], w[6], w[7] );
 }
 
-static void relay_scan( struct pipe_end *writer_end, struct pipe_message *message,
-                        const void *data, data_size_t len )
+/* gate112: flush-on-arrival doorbell.  gate111 census: S=151 D=9 C=5 K=4 — all 9 boxes
+ * (the S lines with obj=) get their D at delivery; S≫D is the census counting the
+ * 105 box-less AcceptParcel scans and 37 id-slot lines.  The stall: the pulses ride
+ * relay_patch only, so they fire for boxed messages alone (N=2, X=6, all in the
+ * handshake window t=1142572.94..1142573.177).  The browser's 105 AcceptParcels and
+ * the closing FlushRouter (op=36, id slot 0x5b -> no box) queue into the app's mojo
+ * end with no wake: the app's channel thread sits in the duplex mirror read(fd,16),
+ * the ring head never advances (ring=1,0,12,0,0,0 all run: 12 pushed, 0 popped, w4=0),
+ * and the composition-controller reply rides the ring forever.  Ring data has no W-plane
+ * bytes of its own: the AcceptParcel frame is the doorbell, and the box-less frames
+ * never ring it.  Pulse the reader end's adopted event (type-7 ev_obj, the ipcz
+ * DriverTransport doorbell) plus the duplex mirror on every relayed write that queues a
+ * frame, and on read arrival for messages already in the pipe (reader-arrival flush). */
+static void relay_doorbell( struct pipe_end *reader, const char *tag )
+{
+    if (!reader) return;
+    if (reader->ev_obj)
+    {
+        struct object *sync = reader->ev_obj->ops->get_sync( reader->ev_obj );
+        struct timespec ts;
+        clock_gettime( CLOCK_MONOTONIC, &ts );
+        if (sync)
+        {
+            signal_sync( sync );  /* manual: wake all, auto: wake one (relay_patch N pattern) */
+            release_object( sync );
+        }
+        fprintf( stderr, "WA_RELAY: N t=%u.%03u ep=%p (doorbell %s: reader event pulsed)\n",
+                 (unsigned int)ts.tv_sec, (unsigned int)(ts.tv_nsec / 1000000), reader, tag );
+    }
+    if (reader->fd && reader->pipe &&
+        reader->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE))
+        set_fd_signaled( reader->fd, 1 );  /* duplex inproc-sync mirror: wake the parked read(fd,16) */
+}
+
+/* gate112: queued-box depth census.  Counts the boxes sitting on messages already
+ * queued on 'reader' (delivered = D'd at the next relay_patch, freed at relay_free)
+ * and prints the per-op breakdown: WA_RELAY: Q tag=W (after a relayed write queued a
+ * frame) / tag=R (on read arrival, queue non-empty).  depth>0 surviving to the next
+ * event of the same plane proves queued-box backlog; depth 0 with S lines streaming
+ * proves the S lines are the box-less AcceptParcel/id-slot census. */
+static void relay_queue_census( struct pipe_end *reader, const char *tag )
+{
+    struct pipe_message *message;
+    struct relay_box *box;
+    unsigned short ops[16];
+    unsigned int cnts[16];
+    int nops = 0, depth = 0;
+    struct timespec ts;
+
+    LIST_FOR_EACH_ENTRY( message, &reader->message_queue, struct pipe_message, entry )
+    {
+        if (!message->relay) continue;
+        LIST_FOR_EACH_ENTRY( box, message->relay, struct relay_box, entry )
+        {
+            int i;
+            for (i = 0; i < nops; i++)
+                if (ops[i] == box->type) { cnts[i]++; break; }
+            if (i == nops && nops < (int)ARRAY_SIZE(ops))
+            {
+                ops[nops] = box->type;
+                cnts[nops] = 1;
+                nops++;
+            }
+            depth++;
+        }
+    }
+    if (!depth) return;
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    fprintf( stderr, "WA_RELAY: Q tag=%s t=%u.%03u ep=%p depth=%d", tag,
+             (unsigned int)ts.tv_sec, (unsigned int)(ts.tv_nsec / 1000000), reader, depth );
+    for (nops = 0; nops < (int)ARRAY_SIZE(ops) && cnts[nops]; nops++)
+        fprintf( stderr, " op%u:%u", ops[nops], cnts[nops] );
+    fputc( '\n', stderr );
+}
+
+static int relay_scan( struct pipe_end *writer_end, struct pipe_message *message,
+                       const void *data, data_size_t len )
 {
     static const unsigned int relay_max_frame = 1 << 20;
     const unsigned char *b = data;
     data_size_t off = 0;
+    int scanned = 0;
 
-    if (!relay_wanted( writer_end ) || len < 48) return;
+    if (!relay_wanted( writer_end ) || len < 48) return 0;
 
     while (off + 48 <= len)
     {
@@ -533,6 +609,8 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
         if (i < ARRAY_SIZE(relay_ops))
         {
             const short slots[2] = { relay_ops[i].slot1, relay_ops[i].slot2 };
+
+            scanned++;  /* gate112: a relayed frame rode this write — doorbell the reader */
 
             if (type == 14 && body + 16 <= off + fnum && body + 16 <= len)
             {
@@ -580,7 +658,7 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                 if (!(box = mem_alloc( sizeof(*box) )))
                 {
                     release_object( obj );
-                    return;
+                    return scanned;
                 }
                 if (!message->relay)
                 {
@@ -588,7 +666,7 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                     {
                         free( box );
                         release_object( obj );
-                        return;
+                        return scanned;
                     }
                     list_init( message->relay );
                 }
@@ -705,7 +783,7 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                     if (!(box = mem_alloc( sizeof(*box) )))
                     {
                         release_object( obj );
-                        return;
+                        return scanned;
                     }
                     if (!message->relay)
                     {
@@ -713,7 +791,7 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                         {
                             free( box );
                             release_object( obj );
-                            return;
+                            return scanned;
                         }
                         list_init( message->relay );
                     }
@@ -773,6 +851,7 @@ static void relay_scan( struct pipe_end *writer_end, struct pipe_message *messag
                              current->process->id, 0, type, 0 );
         off += fnum;
     }
+    return scanned;
 }
 
 /* duplicate the in-band objects into 'reader' and patch the delivered copy of
@@ -2187,6 +2266,13 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
 
     queue_async( &pipe_end->read_q, async );
     reselect_read_queue( pipe_end, 0 );
+    /* gate112: reader-arrival census.  reselect_read_queue above already drained the
+     * messages queued on this end (message_queue_read → relay_patch flushes every box
+     * whose slot lands in the delivered window), so the depth printed here is the
+     * backlog that arrived *after* the last delivery — the proof for the S≫D census:
+     * if it stays 0, the S lines are the box-less AcceptParcel/id-slot scans, not
+     * un-flushed boxes. */
+    if (relay_wanted( pipe_end )) relay_queue_census( pipe_end, "R" );
     /* A duplex pipe whose peer wrote before this read was queued, with the
      * queued async list drained at write time, has its data in the kernel
      * pipe already; re-check the fd poll state so the async completes on the
@@ -2245,7 +2331,17 @@ static void pipe_end_write( struct fd *fd, struct async *async, file_pos_t pos )
     release_object( iosb );
     if (!message) return;
 
-    relay_scan( pipe_end, message, get_req_data(), get_req_data_size() );
+    /* gate112: flush-on-write doorbell.  A relayed frame (AcceptParcel included — the
+     * box-less op=20 is the ring data doorbell itself) riding this write must ring the
+     * reader's wake edge now; gate111 deferred every pulse to the next *boxed* message
+     * delivery (N=2/X=6, all in the handshake window), leaving the browser's 105
+     * AcceptParcels + the closing op=36 FlushRouter queued with nobody woken
+     * (ring head static at 0 of 12, w4=0). */
+    if (relay_scan( pipe_end, message, get_req_data(), get_req_data_size() ))
+    {
+        relay_queue_census( pipe_end->connection, "W" );
+        relay_doorbell( pipe_end->connection, "W" );
+    }
 
     message->async = (struct async *)grab_object( async );
     queue_async( &pipe_end->write_q, async );
@@ -2379,7 +2475,11 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     {
         return;
     }
-    relay_scan( pipe_end, message, message->iosb->in_data, message->iosb->in_size );
+    if (relay_scan( pipe_end, message, message->iosb->in_data, message->iosb->in_size ))
+    {
+        relay_queue_census( pipe_end->connection, "W" );  /* gate112: transceive write plane too */
+        relay_doorbell( pipe_end->connection, "W" );
+    }
     reselect_read_queue( pipe_end->connection, 0 );
 
     queue_async( &pipe_end->read_q, async );

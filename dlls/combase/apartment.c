@@ -503,12 +503,17 @@ void apartment_release(struct apartment *apt)
         LIST_FOR_EACH_SAFE(cursor, cursor2, &apt->stubmgrs)
         {
             struct stub_manager *stubmgr = LIST_ENTRY(cursor, struct stub_manager, entry);
+            BOOL pinned = stubmgr->remunk_pinned;
             /* release the implicit reference given by the fact that the
              * stub has external references (it must do since it is in the
              * stub manager list in the apartment and all non-apartment users
              * must have a ref on the apartment and so it cannot be destroyed).
              */
             stub_manager_int_release(stubmgr);
+            /* release the extra reference taken by start_apartment_remote_unknown()
+             * to pin the IRundown stub manager to the apartment lifetime. */
+            if (pinned)
+                stub_manager_int_release(stubmgr);
         }
 
         /* if this assert fires, then another thread took a reference to a

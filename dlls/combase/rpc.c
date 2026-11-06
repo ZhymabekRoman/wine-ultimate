@@ -1281,7 +1281,11 @@ static ULONG WINAPI ClientRpcChannelBuffer_Release(LPRPCCHANNELBUFFER iface)
         return ref;
 
     if (This->event) CloseHandle(This->event);
-    if (This->stub) IRpcStubBuffer_Release(This->stub);
+    if (This->stub)
+    {
+        TRACE( "CLIENT-CHAN-RELEASE stub %p iid %s\n", This->stub, debugstr_guid( &This->iid ) );
+        IRpcStubBuffer_Release(This->stub);
+    }
     RpcBindingFree(&This->bind);
     free(This);
     return 0;
@@ -1491,6 +1495,9 @@ static HRESULT WINAPI ClientRpcChannelBuffer_GetBuffer(LPRPCCHANNELBUFFER iface,
         }
     }
     if (apt) apartment_release(apt);
+    TRACE( "CLIENT-GETBUFFER ipid %s stub %p bypass %d hr %#lx\n",
+           debugstr_guid( &ipid ), message_state->params.stub,
+           message_state->params.bypass_rpcrt, hr );
     message_state->params.handle = ClientRpcChannelBuffer_GetEventHandle(This);
     /* Note: message_state->params.msg is initialised in
      * ClientRpcChannelBuffer_SendReceive */
@@ -2272,6 +2279,7 @@ static void __RPC_STUB dispatch_rpc(RPC_MESSAGE *msg)
     RpcBindingInqObject(msg->Handle, &ipid);
 
     TRACE("ipid = %s, iMethod = %d\n", debugstr_guid(&ipid), msg->ProcNum);
+    TRACE( "DISPATCH_RPC enter ipid %s iMethod %d\n", debugstr_guid( &ipid ), msg->ProcNum );
 
     params = malloc(sizeof(*params));
     if (!params)

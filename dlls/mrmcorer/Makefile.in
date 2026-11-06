@@ -1,0 +1,6 @@
+MODULE  = mrmcorer.dll
+IMPORTS = combase uuid kernelbase
+
+SOURCES = \
+	main.c \
+	pri.c

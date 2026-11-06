@@ -289,6 +289,7 @@ HRESULT WINAPI CStdStubBuffer_Invoke(LPRPCSTUBBUFFER iface,
   HRESULT hr = S_OK;
 
   TRACE("(%p)->Invoke(%p,%p)\n",This,pMsg,pChannel);
+  TRACE( "STUB-INVOKE stub %p serverobj %p iMethod %d\n", This, This->pvServerObject, pMsg->iMethod );
 
   __TRY
   {

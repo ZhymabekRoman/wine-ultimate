@@ -252,6 +252,8 @@ struct stub_manager
 
     ULONG             norm_refs;  /* refcount of normal marshals (CS lock) */
     BOOL              disconnected; /* CoDisconnectObject has been called (CS lock) */
+    BOOL              remunk_pinned; /* stub manager pins the apartment IRundown/IRemUnknown
+                                      * for the apartment lifetime (extra internal ref) */
 };
 
 ULONG stub_manager_int_release(struct stub_manager *stub_manager);

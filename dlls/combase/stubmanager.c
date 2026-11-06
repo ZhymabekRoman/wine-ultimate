@@ -110,6 +110,10 @@ struct ifstub * stub_manager_new_ifstub(struct stub_manager *m, IRpcStubBuffer *
     else
         generate_ipid(m, &stub->ipid);
 
+    TRACE( "STUBMGR-MINT ifstub %p iid %s ipid %s stub %p oid %s\n",
+           stub, debugstr_guid( iid ), debugstr_guid( &stub->ipid ), sb,
+           wine_dbgstr_longlong( m->oid ) );
+
     EnterCriticalSection(&m->lock);
     list_add_head(&m->ifstubs, &stub->entry);
     /* every normal marshal is counted so we don't allow more than we should */
@@ -124,6 +128,8 @@ struct ifstub * stub_manager_new_ifstub(struct stub_manager *m, IRpcStubBuffer *
 static void stub_manager_delete_ifstub(struct stub_manager *m, struct ifstub *ifstub)
 {
     TRACE("m=%p, m->oid=%s, ipid=%s\n", m, wine_dbgstr_longlong(m->oid), debugstr_guid(&ifstub->ipid));
+    TRACE( "STUBMGR-DELETE ifstub %p iid %s ipid %s stub %p\n",
+           ifstub, debugstr_guid( &ifstub->iid ), debugstr_guid( &ifstub->ipid ), ifstub->stubbuffer );
 
     list_remove(&ifstub->entry);
 
@@ -539,8 +545,14 @@ HRESULT ipid_get_dispatch_params(const IPID *ipid, struct apartment **stub_apt,
     HRESULT hr;
 
     hr = ipid_to_ifstub(ipid, &apt, &stubmgr, &ifstub);
-    if (hr != S_OK) return RPC_E_DISCONNECTED;
+    if (hr != S_OK)
+    {
+        TRACE( "DISPATCH-LOOKUP-FAIL ipid %s hr %#lx\n", debugstr_guid( ipid ), hr );
+        return RPC_E_DISCONNECTED;
+    }
 
+    TRACE( "DISPATCH-LOOKUP ipid %s stub %p iface %p iid %s\n",
+           debugstr_guid( ipid ), ifstub->stubbuffer, ifstub->iface, debugstr_guid( &ifstub->iid ) );
     *stub = ifstub->stubbuffer;
     IRpcStubBuffer_AddRef(*stub);
     *chan = ifstub->chan;
@@ -967,7 +979,27 @@ HRESULT start_apartment_remote_unknown(struct apartment *apt)
             /* release our reference to the object as the stub manager will manage the life cycle for us */
             IRundown_Release(pRundown);
             if (hr == S_OK)
+            {
+                struct stub_manager *m = get_stub_manager_from_object(apt, (IUnknown *)pRundown, FALSE);
+                if (m)
+                {
+                    /* Pin the IRundown stub manager to the apartment's lifetime.
+                     * Every proxy manager that unmarshals this apartment's
+                     * IRundown/IRemUnknown proxy holds an external reference on
+                     * the stub manager; when the last such transient proxy is
+                     * released the extrefs drop to zero and the stub manager (and
+                     * with it the IRundown ifstub / IPID registration) is torn
+                     * down. A proxy that is still handed out then dispatches on a
+                     * missing IPID and the IRpcStubBuffer_Invoke path yields
+                     * RPC_X_NULL_PROXY. Take an internal reference so the IRundown
+                     * ifstub survives apartment churn; it is released together
+                     * with the apartment in release_apartment(). */
+                    stub_manager_int_addref( m );
+                    stub_manager_int_release( m );
+                    m->remunk_pinned = TRUE;
+                }
                 apt->remunk_exported = TRUE;
+            }
         }
     }
     LeaveCriticalSection(&apt->cs);

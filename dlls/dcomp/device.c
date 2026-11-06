@@ -1691,6 +1691,19 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                     SetEvent(g_compositor_clock_handles[k]);
             if (g_commit_completion_event)
                 SetEvent(g_commit_completion_event);
+            /* gate104 lever (c): hand the UI thread one pump beat per
+             * commit-completion pulse.  With the cadence wave the app reaches the
+             * window-setup states (ShowWindow 12) and stops issuing LRPC reads:
+             * the lifted-input continuation wants a message-loop beat to re-enter
+             * the idle receive (request 7 = composition-input adapter).  The XAML
+             * host window class in WinUI3 is L"Window"; posting WM_NULL is the
+             * minimal real message: it wakes GetMessage and lets rpcrt4's
+             * completion queue drain on the app's own pump. */
+            {
+                static HWND bridge;
+                if (!bridge) bridge = FindWindowW( L"Window", NULL );
+                if (bridge) PostMessageW( bridge, WM_NULL, 0, 0 );
+            }
         }
         Sleep(refresh_period);
     }
