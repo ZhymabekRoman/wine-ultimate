@@ -122,16 +122,17 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_factory_GetIids(IActiva
         IID_IActivationFactory,
         IID_IApiInformationStatics,
     };
-    IID *array = CoTaskMemAlloc(sizeof(factory_iids));
-
     TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
 
-    if (!array)
-        return E_OUTOFMEMORY;
-
-    memcpy(array, factory_iids, sizeof(factory_iids));
-    *iid_count = ARRAY_SIZE(factory_iids);
-    *iids = array;
+    if (iid_count) *iid_count = ARRAY_SIZE(factory_iids);
+    if (iids)
+    {
+        IID *array = CoTaskMemAlloc(sizeof(factory_iids));
+        if (!array)
+            return E_OUTOFMEMORY;
+        memcpy(array, factory_iids, sizeof(factory_iids));
+        *iids = array;
+    }
     return S_OK;
 }
 
@@ -399,16 +400,17 @@ static HRESULT STDMETHODCALLTYPE property_value_statics_factory_GetIids(IActivat
         IID_IActivationFactory,
         IID_IPropertyValueStatics,
     };
-    IID *array = CoTaskMemAlloc(sizeof(factory_iids));
-
     TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
 
-    if (!array)
-        return E_OUTOFMEMORY;
-
-    memcpy(array, factory_iids, sizeof(factory_iids));
-    *iid_count = ARRAY_SIZE(factory_iids);
-    *iids = array;
+    if (iid_count) *iid_count = ARRAY_SIZE(factory_iids);
+    if (iids)
+    {
+        IID *array = CoTaskMemAlloc(sizeof(factory_iids));
+        if (!array)
+            return E_OUTOFMEMORY;
+        memcpy(array, factory_iids, sizeof(factory_iids));
+        *iids = array;
+    }
     return S_OK;
 }
 
@@ -704,12 +706,12 @@ static ULONG STDMETHODCALLTYPE property_value_Release(IPropertyValue *iface)
 static HRESULT STDMETHODCALLTYPE property_value_GetIids(IPropertyValue *iface, ULONG *iid_count, IID **iids)
 {
     IID *array;
-    if (!iid_count || !iids) return E_INVALIDARG;
+    if (iid_count) *iid_count = 2;
+    if (!iids) return S_OK;
     array = CoTaskMemAlloc(sizeof(IID) * 2);
     if (!array) return E_OUTOFMEMORY;
     array[0] = IID_IInspectable;
     array[1] = IID_IPropertyValue;
-    *iid_count = 2;
     *iids = array;
     return S_OK;
 }

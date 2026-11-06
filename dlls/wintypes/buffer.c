@@ -98,14 +98,16 @@ static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_cou
         IID_IBufferFactory,
         IID_IBuffer,
     };
-    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
-
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, factory_iids, sizeof(factory_iids) );
-    *iid_count = ARRAY_SIZE(factory_iids);
-    *iids = array;
+    if (iid_count) *iid_count = ARRAY_SIZE(factory_iids);
+    if (iids)
+    {
+        IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, factory_iids, sizeof(factory_iids) );
+        *iids = array;
+    }
     return S_OK;
 }
 
@@ -213,14 +215,16 @@ static HRESULT WINAPI buffer_GetIids( IBuffer *iface, ULONG *iid_count, IID **ii
         IID_IBuffer,
         IID_IBufferByteAccess,
     };
-    IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
-
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, instance_iids, sizeof(instance_iids) );
-    *iid_count = ARRAY_SIZE(instance_iids);
-    *iids = array;
+    if (iid_count) *iid_count = ARRAY_SIZE(instance_iids);
+    if (iids)
+    {
+        IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, instance_iids, sizeof(instance_iids) );
+        *iids = array;
+    }
     return S_OK;
 }
 

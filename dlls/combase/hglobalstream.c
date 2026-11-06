@@ -73,6 +73,7 @@ static struct handle_wrapper *handle_create(HGLOBAL hglobal, BOOL delete_on_rele
     handle->delete_on_release = delete_on_release;
     handle->locked = NULL;
     InitializeCriticalSection( &handle->cs );
+    TRACE("created handle %p hglobal %p size %lu\n", handle, handle->hglobal, handle->size);
 
     return handle;
 }
@@ -93,14 +94,50 @@ static inline struct hglobal_stream *impl_from_IStream(IStream *iface)
 
 static const IStreamVtbl hglobalstreamvtbl;
 
+/* Rotating slab: CoreCLR's ComWrappers RCW cache is keyed by the stream interface
+ * pointer. When the settings-value loop frees a stream and immediately allocates the
+ * next one, the plain heap hands back the same address, so ComWrappers hands back a
+ * stale managed adapter whose DeflateStream native zstream was released by the previous
+ * value -> deflate() on freed state. A small rotating ring breaks that immediate alias. */
+#define HGLOBAL_STREAM_SLAB 8
+static struct hglobal_stream stream_slab[HGLOBAL_STREAM_SLAB];
+static unsigned int stream_slab_next;
+static CRITICAL_SECTION stream_slab_cs;
+static INIT_ONCE stream_slab_init = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK stream_slab_init_cb( INIT_ONCE *once, void *param, void **context )
+{
+    InitializeCriticalSection( &stream_slab_cs );
+    return TRUE;
+}
+
 static struct hglobal_stream *hglobalstream_construct(void)
 {
-    struct hglobal_stream *object = calloc(1, sizeof(*object));
+    struct hglobal_stream *object = NULL;
+
+    InitOnceExecuteOnce( &stream_slab_init, stream_slab_init_cb, NULL, NULL );
+
+    EnterCriticalSection( &stream_slab_cs );
+    for (unsigned int i = 0; i < HGLOBAL_STREAM_SLAB; i++)
+    {
+        struct hglobal_stream *cand = &stream_slab[stream_slab_next];
+        stream_slab_next = (stream_slab_next + 1) % HGLOBAL_STREAM_SLAB;
+        if (!cand->ref)
+        {
+            object = cand;
+            break;
+        }
+    }
+    LeaveCriticalSection( &stream_slab_cs );
+
+    if (object) memset( object, 0, sizeof(*object) );
+    else object = calloc( 1, sizeof(*object) );
 
     if (object)
     {
         object->IStream_iface.lpVtbl = &hglobalstreamvtbl;
         object->ref = 1;
+        TRACE("constructed stream %p\n", object);
     }
     return object;
 }
@@ -134,10 +171,15 @@ static ULONG WINAPI stream_Release(IStream *iface)
     struct hglobal_stream *stream = impl_from_IStream(iface);
     ULONG ref = InterlockedDecrement(&stream->ref);
 
+    TRACE("release %p -> %lu\n", stream, ref);
     if (!ref)
     {
+        TRACE("  free %p handle %p hglobal %p\n", stream, stream->handle, stream->handle->hglobal);
         handle_release(stream->handle);
-        free(stream);
+        if (stream >= stream_slab && stream < stream_slab + HGLOBAL_STREAM_SLAB)
+            stream->handle = NULL; /* return slot to the rotating pool (ref already 0) */
+        else
+            free(stream);
     }
 
     return ref;

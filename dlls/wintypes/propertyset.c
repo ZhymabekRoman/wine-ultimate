@@ -109,14 +109,16 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
         IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
         IID_IObservableMap_HSTRING_IInspectable,
     };
-    IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
-
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, instance_iids, sizeof(instance_iids) );
-    *iid_count = ARRAY_SIZE(instance_iids);
-    *iids = array;
+    if (iid_count) *iid_count = ARRAY_SIZE(instance_iids);
+    if (iids)
+    {
+        IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, instance_iids, sizeof(instance_iids) );
+        *iids = array;
+    }
     return S_OK;
 }
 
@@ -247,14 +249,16 @@ static HRESULT STDMETHODCALLTYPE factory_GetIids( IActivationFactory *iface, ULO
         IID_IPropertySet,
         IID_IObservableMap_HSTRING_IInspectable,
     };
-    IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
-
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
-    if (!array) return E_OUTOFMEMORY;
-    memcpy( array, factory_iids, sizeof(factory_iids) );
-    *iid_count = ARRAY_SIZE(factory_iids);
-    *iids = array;
+    if (iid_count) *iid_count = ARRAY_SIZE(factory_iids);
+    if (iids)
+    {
+        IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, factory_iids, sizeof(factory_iids) );
+        *iids = array;
+    }
     return S_OK;
 }
 
