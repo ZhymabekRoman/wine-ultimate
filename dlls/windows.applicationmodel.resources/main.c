@@ -71,6 +71,7 @@ static HRESULT WINAPI provider_QueryInterface(void *iface, REFIID iid, void **ou
     TRACE("iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IAgileObject) ||
         IsEqualGUID(iid, &provider_service_provider_sid) || IsEqualGUID(iid, &IID_IRuntimeProvider))
     {
         *out = iface;
@@ -198,6 +199,7 @@ static HRESULT WINAPI probe_QueryInterface(void *iface, REFIID iid, void **out)
     TRACE("probe iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
     if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IInspectable) ||
+        IsEqualGUID(iid, &IID_IAgileObject) ||
         IsEqualGUID(iid, &IID_IActivationFactory))
     {
         *out = iface;
@@ -378,7 +380,8 @@ static HRESULT WINAPI factory_QueryInterface(void *iface, REFIID iid, void **out
 {
     TRACE("factory iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
-    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IClassFactory))
+    if (IsEqualGUID(iid, &IID_IUnknown) || IsEqualGUID(iid, &IID_IClassFactory) ||
+        IsEqualGUID(iid, &IID_IAgileObject))
     {
         *out = iface;
         InterlockedIncrement(&factory_from(iface)->ref);
