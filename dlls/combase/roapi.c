@@ -501,6 +501,23 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         *out = wcsdup(L"windows.applicationmodel.resources.core.dll");
         return S_OK;
     }
+    /* Microsoft.Windows.AppNotifications.* is the WinAppSDK notification namespace
+     * WhatsApp's startup activates AppNotificationManager::Current from.  The
+     * provider ships side by side with the app in Microsoft.WindowsAppRuntime.dll
+     * (the ActivatableClassId prefix seed names it; the prefix probe above finds
+     * it only as long as the app ships the matching Microsoft.Windows.
+     * AppNotifications.dll shim), so answer from the seed with the packaged
+     * runtime DLL as the fallback - the same seed-first shape as the MRT Core
+     * route above.  Without the route the Current() statics factory resolves
+     * through the prefix probe only, and every sibling class of the namespace
+     * (AppNotification, AppNotificationManagerStatics, AppNotificationActivationInfo)
+     * falls to the registry and answers REGDB_E_CLASSNOTREG. */
+    if (!wcsncmp( classid, L"Microsoft.Windows.AppNotifications.", 34 ))
+    {
+        if (SUCCEEDED( seed_dllpath_from_classid( classid, out ))) return S_OK;
+        *out = wcsdup(L"Microsoft.WindowsAppRuntime.dll");
+        return S_OK;
+    }
     if (!wcsncmp( classid, L"Microsoft.Windows.Globalization.", 32 ))
     {
         *out = wcsdup(L"windows.globalization.dll");

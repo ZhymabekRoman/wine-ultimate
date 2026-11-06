@@ -184,12 +184,33 @@ static HRESULT WINAPI probe_GetIids(void *iface, ULONG *count, GUID **iids);
 static HRESULT WINAPI probe_GetRuntimeClassName(void *iface, HSTRING *name);
 static HRESULT WINAPI probe_GetTrustLevel(void *iface, INT32 *level);
 static HRESULT WINAPI probe_ActivateInstance(void *iface, void **instance);
+static HRESULT WINAPI probe_stub_method(void *iface, void **out);
 
+/* Beyond IInspectable + IActivationFactory the probe object is handed to the
+ * consuming projection as the class instance itself: WinAppSDK's
+ * AppNotificationManager::Current (running inside the app's native
+ * Microsoft.WindowsAppRuntime.dll) probes with L"FakeClass.ClassName", wraps the
+ * answer as the composable AppNotificationManager, caches it in the
+ * Windows.Foundation.Collections ValueSet under "StoredAppNotificationManagerKey"
+ * and returns it; the app then calls the class surface (Show, ShowWithId,
+ * GetAllAsync, GetSettingsAsync, the settings/notification properties - vtable
+ * slots 6..18 of each consumed interface) straight through this vtable.  A probe
+ * vtable cut at slot 6 makes every one of those calls read past the array, and
+ * the garbage "return code" (observed E_FAIL) fails the app's check_hresult with
+ * an empty RoOriginateErrorW message, e06d7363 and a c0000602 failfast before
+ * the first window is shown.  Extend the stub with generic single-out-param
+ * slots (each answers a fresh stub, S_OK, mirroring ActivateInstance) deep enough
+ * for the AppNotifications surface; calls past the end keep reading the padding,
+ * which is exactly the pre-fix behaviour for the interfaces nobody consumes. */
 static const void *probe_vtbl[] =
 {
     probe_QueryInterface, probe_AddRef, probe_Release,
     probe_GetIids, probe_GetRuntimeClassName, probe_GetTrustLevel,
     probe_ActivateInstance,
+    probe_stub_method, probe_stub_method, probe_stub_method, probe_stub_method, probe_stub_method,
+    probe_stub_method, probe_stub_method, probe_stub_method, probe_stub_method, probe_stub_method,
+    probe_stub_method, probe_stub_method, probe_stub_method, probe_stub_method, probe_stub_method,
+    probe_stub_method, probe_stub_method, probe_stub_method,
 };
 
 static HRESULT WINAPI probe_QueryInterface(void *iface, REFIID iid, void **out)
@@ -269,6 +290,24 @@ static HRESULT WINAPI probe_ActivateInstance(void *iface, void **instance)
     InterlockedIncrement(&object_count);
     *instance = (void *)stub;
     TRACE("-> instance %p, hr 0x%08x.\n", *instance, (unsigned)S_OK);
+    return S_OK;
+}
+
+/* Generic slot of the probe vtable: serves the class-surface methods the
+ * consuming projection calls on the probe answer (see probe_vtbl) as a
+ * single-out-parameter no-op, mirroring ActivateInstance's fresh-stub answer. */
+static HRESULT WINAPI probe_stub_method(void *iface, void **out)
+{
+    struct probe_stub *stub;
+
+    TRACE("probe iface %p, out %p.\n", iface, out);
+
+    if (!(stub = malloc(sizeof(*stub)))) return E_OUTOFMEMORY;
+    stub->vtbl = probe_vtbl;
+    stub->ref = 1;
+    InterlockedIncrement(&object_count);
+    if (out) *out = (void *)stub;
+    TRACE("-> value %p, hr 0x%08x.\n", *out, (unsigned)S_OK);
     return S_OK;
 }
 
