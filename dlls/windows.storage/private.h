@@ -106,4 +106,8 @@ HRESULT async_operation_progress_uint32_create( UINT32 result, IAsyncOperationWi
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
 
+/* catalog.c - Windows.Storage.Provider.WindowsStorageCatalog */
+BOOL is_windows_storage_catalog_clsid( REFCLSID clsid );
+HRESULT windows_storage_catalog_get_class_object( REFCLSID clsid, REFIID riid, void **out );
+
 #endif

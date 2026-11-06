@@ -24,6 +24,8 @@ WINE_DEFAULT_DEBUG_CHANNEL(storage);
 
 HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
 {
+    if (is_windows_storage_catalog_clsid( clsid ))
+        return windows_storage_catalog_get_class_object( clsid, riid, out );
     FIXME( "clsid %s, riid %s, out %p stub!\n", debugstr_guid( clsid ), debugstr_guid( riid ), out );
     return CLASS_E_CLASSNOTAVAILABLE;
 }

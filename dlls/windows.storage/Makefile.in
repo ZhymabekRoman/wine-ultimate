@@ -3,6 +3,7 @@ IMPORTS = shell32 combase
 
 SOURCES = \
 	async.c \
+	catalog.c \
 	classes.idl \
 	main.c \
 	storage.c \
