@@ -149,7 +149,7 @@ static HRESULT WINAPI stream_Read(IStream *iface, void *pv, ULONG cb, ULONG *rea
     ULONG dummy, len;
     char *buffer;
 
-    TRACE("%p, %p, %ld, %p\n", iface, pv, cb, read_len);
+    TRACE("%p, pos %s, cb %ld -> %p\n", iface, wine_dbgstr_longlong(stream->position.QuadPart), cb, read_len);
 
     if (!read_len)
         read_len = &dummy;
@@ -170,6 +170,7 @@ static HRESULT WINAPI stream_Read(IStream *iface, void *pv, ULONG cb, ULONG *rea
     memcpy(pv, buffer + stream->position.LowPart, len);
     stream->position.LowPart += len;
 
+    TRACE("  -> size %lu, read %lu bytes\n", stream->handle->size, len);
     *read_len = len;
 
     GlobalUnlock(stream->handle->hglobal);

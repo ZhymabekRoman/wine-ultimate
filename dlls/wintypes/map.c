@@ -656,6 +656,7 @@ static HRESULT WINAPI iterable_view_First( IIterable_IKeyValuePair_HSTRING_IInsp
     HRESULT hr;
 
     EnterCriticalSection( &impl->map->cs );
+    TRACE( "iface %p, map size %u\n", iface, impl->map->size );
     hr = iterable_view_First_impl( iface, value );
     LeaveCriticalSection( &impl->map->cs );
     return hr;
