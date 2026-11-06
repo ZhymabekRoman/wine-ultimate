@@ -280,17 +280,25 @@ static HRESULT WINAPI probe_GetTrustLevel(void *iface, INT32 *level)
 
 static HRESULT WINAPI probe_ActivateInstance(void *iface, void **instance)
 {
-    struct probe_stub *stub;
-
     TRACE("probe iface %p, instance %p.\n", iface, instance);
 
-    if (!(stub = malloc(sizeof(*stub)))) return E_OUTOFMEMORY;
-    stub->vtbl = probe_vtbl;
-    stub->ref = 1;
-    InterlockedIncrement(&object_count);
-    *instance = (void *)stub;
-    TRACE("-> instance %p, hr 0x%08x.\n", *instance, (unsigned)S_OK);
-    return S_OK;
+    /* WinAppSDK's AppNotificationManager/PushNotificationManager::Default() (and
+     * StartupNotificationsLongRunningPlatform) run a one-shot activation-cache flush,
+     * Microsoft::RoApi::ClearRoActivateInstanceCache (Microsoft.RoApi.h:23-24), before
+     * constructing the real in-proc manager:
+     *     hr = RoActivateInstance(L"FakeClass.ClassName", &ptr);
+     *     THROW_HR_IF_MSG(E_FAIL, hr == S_OK, "Cache fix failed: Found class name ...");
+     *     if (hr != REGDB_E_CLASSNOTREG) throw hr;
+     * It inspects only the HRESULT, never the returned object (the probe object's class
+     * name/vtable/identity are irrelevant; the "Found class name" text is WIL's static
+     * message).  Answer the probe class the way an unregistered class does on Windows -
+     * REGDB_E_CLASSNOTREG - so the cache fix is a clean no-op and Default() proceeds to
+     * winrt::make the real AppNotificationManager (the probe stub only backs the factory
+     * face reached through combase RoActivateInstance; the MRM provider probe goes
+     * through provider_CreateInstance/GetActivationFactory, which keep the S_OK stub). */
+    if (instance) *instance = NULL;
+    TRACE("-> hr 0x%08x (REGDB_E_CLASSNOTREG, ClearRoActivateInstanceCache no-op).\n", (unsigned)REGDB_E_CLASSNOTREG);
+    return REGDB_E_CLASSNOTREG;
 }
 
 /* Generic slot of the probe vtable: serves the class-surface methods the
