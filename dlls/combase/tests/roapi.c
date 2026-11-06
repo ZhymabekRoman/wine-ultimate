@@ -997,7 +997,7 @@ static void test_winappsdk_activation_route(void)
         { L"Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependency", TRUE },
         { L"Microsoft.Windows.ApplicationModel.DynamicDependency.AddPackageDependencyOptions", TRUE },
     };
-    SIZE i;
+    DWORD i;
     HRESULT hr;
 
     hr = RoInitialize( RO_INIT_MULTITHREADED );
