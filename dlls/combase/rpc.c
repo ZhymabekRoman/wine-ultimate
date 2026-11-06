@@ -100,6 +100,7 @@ typedef struct
     DWORD                  server_pid; /* id of server process */
     HANDLE                 event; /* cached event handle */
     IID                    iid; /* IID of the proxy this belongs to */
+    IRpcStubBuffer        *stub; /* strong ref pinning the in-proc (PSOA) stub for the proxy lifetime */
 } ClientRpcChannelBuffer;
 
 struct dispatch_params
@@ -1280,6 +1281,7 @@ static ULONG WINAPI ClientRpcChannelBuffer_Release(LPRPCCHANNELBUFFER iface)
         return ref;
 
     if (This->event) CloseHandle(This->event);
+    if (This->stub) IRpcStubBuffer_Release(This->stub);
     RpcBindingFree(&This->bind);
     free(This);
     return 0;
@@ -1937,6 +1939,31 @@ HRESULT rpc_create_clientchannel(const OXID *oxid, const IPID *ipid,
     This->server_pid = oxid_info->dwPid;
     This->event = NULL;
     This->iid = *iid;
+
+    /* For in-proc (free-threaded / PSOA) objects the stub lives in this same
+     * process and is reached by IPID lookup on every proxy call. Nothing else
+     * keeps a strong reference on that IRpcStubBuffer for the lifetime of the
+     * proxy, so apartment churn can release it in-proc while the proxy is
+     * still handed out, making the next Invoke return RPC_X_NULL_PROXY. Pin a
+     * strong reference on the stub for as long as this channel (the proxy) is
+     * alive so there is no release window. */
+    This->stub = NULL;
+    if (dest_context == MSHCTX_INPROC)
+    {
+        struct apartment *stub_apt = NULL;
+        IRpcChannelBuffer *stub_chan = NULL;
+        IID stub_iid;
+        IUnknown *stub_iface = NULL;
+        IRpcStubBuffer *stub = NULL;
+
+        if (ipid_get_dispatch_params(ipid, &stub_apt, NULL, &stub, &stub_chan,
+                                     &stub_iid, &stub_iface) == S_OK)
+        {
+            This->stub = stub; /* ipid_get_dispatch_params returns it +1 */
+            if (stub_chan) IRpcChannelBuffer_Release(stub_chan);
+            if (stub_apt) apartment_release(stub_apt);
+        }
+    }
 
     *chan = &This->super.IRpcChannelBuffer_iface;
 
