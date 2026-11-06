@@ -709,6 +709,8 @@ static HRESULT WINAPI in_memory_stream_input_ReadAsync( IInputStream *iface, IBu
 
     if (!buffer || !operation) return E_POINTER;
 
+    TRACE( "PUMPTID input_ReadAsync impl %p count %u.\n", impl, count );
+
     EnterCriticalSection( &impl->cs );
     if (impl->position < impl->size)
     {
@@ -751,6 +753,8 @@ static HRESULT WINAPI in_memory_stream_output_WriteAsync( IOutputStream *iface, 
     HRESULT hr;
 
     if (!buffer || !operation) return E_POINTER;
+
+    TRACE( "PUMPTID output_WriteAsync impl %p len %u.\n", impl, len );
 
     IBuffer_get_Length( buffer, &len );
     if (FAILED(hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access )))

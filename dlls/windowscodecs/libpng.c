@@ -542,6 +542,8 @@ static void user_write_data(png_structp png_ptr, png_bytep data, png_size_t leng
     HRESULT hr;
     ULONG byteswritten;
 
+    TRACE("PNGPUMP user_write_data This %p stream %p len %lu\n", This, This->stream, (unsigned long)length);
+
     hr = stream_write(This->stream, data, length, &byteswritten);
     if (FAILED(hr) || byteswritten != length)
     {
@@ -557,7 +559,7 @@ static HRESULT CDECL png_encoder_initialize(struct encoder *encoder, IStream *st
 {
     struct png_encoder *This = impl_from_encoder(encoder);
 
-    TRACE("(%p,%p)\n", encoder, stream);
+    TRACE("PNGPUMP initialize %p stream %p\n", encoder, stream);
 
     /* initialize libpng */
     This->png_ptr = png_create_write_struct(PNG_LIBPNG_VER_STRING, NULL, NULL, NULL);
@@ -617,6 +619,9 @@ static HRESULT CDECL png_encoder_create_frame(struct encoder *encoder, const str
 {
     struct png_encoder *This = impl_from_encoder(encoder);
     int i;
+
+    TRACE("PNGPUMP create_frame This %p png_ptr %p size %ux%u interlace %u\n",
+        This, This->png_ptr, encoder_frame->width, encoder_frame->height, encoder_frame->interlace);
 
     for (i=0; formats[i].guid; i++)
     {
@@ -736,6 +741,9 @@ static HRESULT CDECL png_encoder_write_lines(struct encoder* encoder, BYTE *data
     png_byte **row_pointers=NULL;
     UINT i;
 
+    TRACE("PNGPUMP write_lines This %p png_ptr %p lines %u done %u\n",
+        This, This->png_ptr, line_count, This->lines_written);
+
     if (This->encoder_frame.interlace)
     {
         /* Just store the data so we can write it in multiple passes in Commit. */
@@ -785,6 +793,8 @@ static HRESULT CDECL png_encoder_commit_frame(struct encoder *encoder)
     struct png_encoder *This = impl_from_encoder(encoder);
     png_byte **row_pointers=NULL;
 
+    TRACE("PNGPUMP commit_frame This %p png_ptr %p\n", This, This->png_ptr);
+
     EnterCriticalSection(&This->lock);
 
     /* set up setjmp/longjmp error handling */
@@ -829,6 +839,7 @@ static HRESULT CDECL png_encoder_commit_file(struct encoder *encoder)
 static void CDECL png_encoder_destroy(struct encoder *encoder)
 {
     struct png_encoder *This = impl_from_encoder(encoder);
+    TRACE("PNGPUMP destroy This %p png_ptr %p\n", This, This->png_ptr);
     EnterCriticalSection(&This->lock);
     if (This->png_ptr)
         png_destroy_write_struct(&This->png_ptr, &This->info_ptr);
@@ -861,6 +872,7 @@ HRESULT CDECL png_encoder_create(struct encoder_info *info, struct encoder **res
         return E_OUTOFMEMORY;
     }
 
+    TRACE("PNGPUMP encoder_create This %p\n", This);
     InitializeCriticalSection(&This->lock);
     This->encoder.vtable = &png_encoder_vtable;
     This->png_ptr = NULL;
