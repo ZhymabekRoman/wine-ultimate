@@ -126,26 +126,34 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetRuntimeClassName( IPropertySet *
 {
     static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
 
+    TRACE( "(%p, %p)\n", iface, class_name );
+
+    if (!class_name) return E_POINTER;
     return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetTrustLevel( IPropertySet *iface, TrustLevel *trust_level )
 {
-    *trust_level = FullTrust;
+    TRACE( "(%p, %p)\n", iface, trust_level );
+
+    if (trust_level) *trust_level = FullTrust;
     return S_OK;
 }
 
-static const IPropertySetVtbl propertyset_vtbl =
+static const struct { IPropertySetVtbl vtbl; void *pad[4]; } propertyset_vtbl_full =
 {
-    /* IUnknown */
+    { /* IUnknown */
     propertyset_QueryInterface,
     propertyset_AddRef,
     propertyset_Release,
     /* IInspectable */
     propertyset_GetIids,
     propertyset_GetRuntimeClassName,
-    propertyset_GetTrustLevel,
+    propertyset_GetTrustLevel, },
+    { 0, 0, 0, 0 }
 };
+#define propertyset_vtbl propertyset_vtbl_full.vtbl
+
 
 DEFINE_IINSPECTABLE( propertyset_IObservableMap, IObservableMap_HSTRING_IInspectable, struct propertyset, IPropertySet_iface );
 
@@ -163,9 +171,9 @@ static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_remove_MapChanged( I
     return E_NOTIMPL;
 }
 
-const static IObservableMap_HSTRING_IInspectableVtbl propertyset_IObservableMap_vtbl =
+const static struct { IObservableMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } propertyset_IObservableMap_vtbl_full =
 {
-    /* IUnknown */
+    { /* IUnknown */
     propertyset_IObservableMap_QueryInterface,
     propertyset_IObservableMap_AddRef,
     propertyset_IObservableMap_Release,
@@ -175,8 +183,11 @@ const static IObservableMap_HSTRING_IInspectableVtbl propertyset_IObservableMap_
     propertyset_IObservableMap_GetTrustLevel,
     /* IObservableMap<HSTRING, IInspectable*> */
     propertyset_IObservableMap_add_MapChanged,
-    propertyset_IObservableMap_remove_MapChanged,
+    propertyset_IObservableMap_remove_MapChanged, },
+    { 0, 0, 0, 0 }
 };
+#define propertyset_IObservableMap_vtbl propertyset_IObservableMap_vtbl_full.vtbl
+
 
 struct propertyset_factory
 {

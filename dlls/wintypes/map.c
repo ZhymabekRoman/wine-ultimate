@@ -35,6 +35,11 @@ static const GUID IID_IMap_String_IInspectable =
 { 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
 static const GUID IID_IMapView_String_IInspectable =
 { 0xe8cc1dcf, 0xaa1b, 0x51e7, {0x90, 0xa7, 0x6b, 0x7d, 0x99, 0xbd, 0x99, 0xa0} };
+/* The .NET/CsWinRT projection of IPropertySet QIs the live map for
+ * IMapView<Platform.String, Windows.Foundation.IInspectable> under the
+ * projection-specific parameterized id. */
+static const GUID IID_IMapView_StringObject_IInspectable =
+{ 0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0} };
 
 struct map_entry
 {
@@ -296,20 +301,40 @@ static ULONG WINAPI iterator_Release( IIterator_IKeyValuePair_HSTRING_IInspectab
 
 static HRESULT WINAPI iterator_GetIids( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    IID instance_iids[] =
+    {
+        IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
+    };
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (iid_count) *iid_count = ARRAY_SIZE( instance_iids );
+    if (iids)
+    {
+        IID *array = CoTaskMemAlloc( sizeof( instance_iids ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, instance_iids, sizeof( instance_iids ) );
+        *iids = array;
+    }
+    return S_OK;
 }
 
 static HRESULT WINAPI iterator_GetRuntimeClassName( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IIterator`2<String, Object>";
+
+    TRACE( "iface %p, class_name %p.\n", iface, class_name );
+
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
 }
 
 static HRESULT WINAPI iterator_GetTrustLevel( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    TRACE( "iface %p, trust_level %p.\n", iface, trust_level );
+
+    if (trust_level) *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI iterator_get_Current_impl( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, IKeyValuePair_HSTRING_IInspectable **value )
@@ -416,9 +441,9 @@ static HRESULT WINAPI iterator_GetMany( IIterator_IKeyValuePair_HSTRING_IInspect
     return hr;
 }
 
-static const IIterator_IKeyValuePair_HSTRING_IInspectableVtbl iterator_vtbl =
+static const struct { IIterator_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } iterator_vtbl_full =
 {
-    iterator_QueryInterface,
+    { iterator_QueryInterface,
     iterator_AddRef,
     iterator_Release,
     /* IInspectable methods */
@@ -429,8 +454,11 @@ static const IIterator_IKeyValuePair_HSTRING_IInspectableVtbl iterator_vtbl =
     iterator_get_Current,
     iterator_get_HasCurrent,
     iterator_MoveNext,
-    iterator_GetMany,
+    iterator_GetMany, },
+    { 0, 0, 0, 0 }
 };
+#define iterator_vtbl iterator_vtbl_full.vtbl
+
 
 static struct map_view *impl_from_IMapView_HSTRING_IInspectable( IMapView_HSTRING_IInspectable *iface )
 {
@@ -488,20 +516,41 @@ static ULONG WINAPI map_view_Release( IMapView_HSTRING_IInspectable *iface )
 
 static HRESULT WINAPI map_view_GetIids( IMapView_HSTRING_IInspectable *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    IID instance_iids[] =
+    {
+        IID_IMapView_HSTRING_IInspectable,
+        IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
+    };
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (iid_count) *iid_count = ARRAY_SIZE( instance_iids );
+    if (iids)
+    {
+        IID *array = CoTaskMemAlloc( sizeof( instance_iids ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, instance_iids, sizeof( instance_iids ) );
+        *iids = array;
+    }
+    return S_OK;
 }
 
 static HRESULT WINAPI map_view_GetRuntimeClassName( IMapView_HSTRING_IInspectable *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IMapView`2<String, Object>";
+
+    TRACE( "iface %p, class_name %p.\n", iface, class_name );
+
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
 }
 
 static HRESULT WINAPI map_view_GetTrustLevel( IMapView_HSTRING_IInspectable *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    TRACE( "iface %p, trust_level %p.\n", iface, trust_level );
+
+    if (trust_level) *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI map_view_Lookup_impl( IMapView_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
@@ -527,7 +576,7 @@ static HRESULT WINAPI map_view_get_Size_impl( IMapView_HSTRING_IInspectable *ifa
     TRACE( "iface %p, value %p\n", iface, value );
 
     if (FAILED(hr = map_view_check_serial( impl ))) return hr;
-    *value = impl->size;
+    if (value) *value = impl->size;
     return S_OK;
 }
 
@@ -541,7 +590,7 @@ static HRESULT WINAPI map_view_HasKey_impl( IMapView_HSTRING_IInspectable *iface
 
     if (FAILED(hr = map_view_check_serial( impl ))) return hr;
     map_entries_lower_bound( impl->entries, impl->size, key, &order );
-    *found = !order;
+    if (found) *found = !order;
     return S_OK;
 }
 
@@ -609,9 +658,9 @@ static HRESULT WINAPI map_view_Split( IMapView_HSTRING_IInspectable *iface, IMap
     return hr;
 }
 
-static const struct IMapView_HSTRING_IInspectableVtbl map_view_vtbl =
+static const struct { IMapView_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } map_view_vtbl_full =
 {
-    map_view_QueryInterface,
+    { map_view_QueryInterface,
     map_view_AddRef,
     map_view_Release,
     /* IInspectable methods */
@@ -622,8 +671,11 @@ static const struct IMapView_HSTRING_IInspectableVtbl map_view_vtbl =
     map_view_Lookup,
     map_view_get_Size,
     map_view_HasKey,
-    map_view_Split,
+    map_view_Split, },
+    { 0, 0, 0, 0 }
 };
+#define map_view_vtbl map_view_vtbl_full.vtbl
+
 
 DEFINE_IINSPECTABLE_( iterable_view, IIterable_IKeyValuePair_HSTRING_IInspectable, struct map_view, view_impl_from_IIterable_IKeyValuePair_HSTRING_IInspectable,
                       IIterable_IKeyValuePair_HSTRING_IInspectable_iface, &impl->IMapView_HSTRING_IInspectable_iface )
@@ -662,9 +714,9 @@ static HRESULT WINAPI iterable_view_First( IIterable_IKeyValuePair_HSTRING_IInsp
     return hr;
 }
 
-static const struct IIterable_IKeyValuePair_HSTRING_IInspectableVtbl iterable_view_vtbl =
+static const struct { IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } iterable_view_vtbl_full =
 {
-    iterable_view_QueryInterface,
+    { iterable_view_QueryInterface,
     iterable_view_AddRef,
     iterable_view_Release,
     /* IInspectable methods */
@@ -672,8 +724,11 @@ static const struct IIterable_IKeyValuePair_HSTRING_IInspectableVtbl iterable_vi
     iterable_view_GetRuntimeClassName,
     iterable_view_GetTrustLevel,
     /* IIterable<T> methods */
-    iterable_view_First,
+    iterable_view_First, },
+    { 0, 0, 0, 0 }
 };
+#define iterable_view_vtbl iterable_view_vtbl_full.vtbl
+
 
 static HRESULT map_view_create( struct map *map, UINT first, UINT count, IMapView_HSTRING_IInspectable **out )
 {
@@ -725,6 +780,16 @@ static HRESULT WINAPI map_inner_QueryInterface( IInspectable *iface, REFIID iid,
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, impl->iids.view ) || IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ))
+    {
+        IMapView_HSTRING_IInspectable *view;
+        HRESULT hr;
+
+        if (SUCCEEDED(hr = map_view_create( impl, 0, impl->size, &view ))) *out = view;
+        return hr;
+    }
+
     if (IsEqualGUID( iid, &IID_IPropertySet ) && impl->IInspectable_outer)
         return IInspectable_QueryInterface( impl->IInspectable_outer, iid, out );
 
@@ -760,33 +825,67 @@ static ULONG WINAPI map_inner_Release( IInspectable *iface )
 
 static HRESULT WINAPI map_inner_GetIids( IInspectable *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    struct map *impl = impl_from_IInspectable( iface );
+    IID static_iids[] =
+    {
+        IID_IMap_HSTRING_IInspectable,
+        IID_IMapView_HSTRING_IInspectable,
+        IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
+        IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
+        IID_IKeyValuePair_HSTRING_IInspectable,
+    };
+    ULONG count = ARRAY_SIZE( static_iids );
+    IID *array;
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (iid_count) *iid_count = count;
+    if (iids)
+    {
+        if (!(array = CoTaskMemAlloc( count * sizeof(*array) ))) return E_OUTOFMEMORY;
+        memcpy( array, static_iids, sizeof( static_iids ) );
+        array[0] = *impl->iids.map;
+        array[1] = *impl->iids.view;
+        array[2] = *impl->iids.iterable;
+        array[3] = *impl->iids.iterator;
+        array[4] = *impl->iids.pair;
+        *iids = array;
+    }
+    return S_OK;
 }
 
 static HRESULT WINAPI map_inner_GetRuntimeClassName( IInspectable *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IMap`2<String, Object>";
+
+    TRACE( "iface %p, class_name %p.\n", iface, class_name );
+
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
 }
 
 static HRESULT WINAPI map_inner_GetTrustLevel( IInspectable *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    TRACE( "iface %p, trust_level %p.\n", iface, trust_level );
+
+    if (trust_level) *trust_level = FullTrust;
+    return S_OK;
 }
 
-static const IInspectableVtbl map_inner_vtbl =
+static const struct { IInspectableVtbl vtbl; void *pad[4]; } map_inner_vtbl_full =
 {
-    /* IUnknown */
+    { /* IUnknown */
     map_inner_QueryInterface,
     map_inner_AddRef,
     map_inner_Release,
     /* IInspectable */
     map_inner_GetIids,
     map_inner_GetRuntimeClassName,
-    map_inner_GetTrustLevel,
+    map_inner_GetTrustLevel, },
+    { 0, 0, 0, 0 }
 };
+#define map_inner_vtbl map_inner_vtbl_full.vtbl
+
 
 DEFINE_IINSPECTABLE_OUTER( map, IMap_HSTRING_IInspectable, struct map, IInspectable_outer )
 
@@ -807,7 +906,7 @@ static HRESULT WINAPI map_get_Size_impl( IMap_HSTRING_IInspectable *iface, UINT3
 {
     struct map *impl = impl_from_IMap_HSTRING_IInspectable( iface );
     TRACE( "iface %p, size %p\n", iface, size );
-    *size = impl->size;
+    if (size) *size = impl->size;
     return S_OK;
 }
 
@@ -819,7 +918,7 @@ static HRESULT WINAPI map_HasKey_impl( IMap_HSTRING_IInspectable *iface, HSTRING
     TRACE( "iface %p, key %s, exists %p\n", iface, debugstr_hstring( key ), exists );
 
     map_entries_lower_bound( impl->entries, impl->size, key, &order );
-    *exists = !order;
+    if (exists) *exists = !order;
     return S_OK;
 }
 
@@ -978,9 +1077,9 @@ static HRESULT WINAPI map_Clear( IMap_HSTRING_IInspectable *iface )
     return hr;
 }
 
-static const IMap_HSTRING_IInspectableVtbl map_vtbl =
+static const struct { IMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } map_vtbl_full =
 {
-    /* IUnknown */
+    { /* IUnknown */
     map_QueryInterface,
     map_AddRef,
     map_Release,
@@ -995,8 +1094,11 @@ static const IMap_HSTRING_IInspectableVtbl map_vtbl =
     map_GetView,
     map_Insert,
     map_Remove,
-    map_Clear,
+    map_Clear, },
+    { 0, 0, 0, 0 }
 };
+#define map_vtbl map_vtbl_full.vtbl
+
 
 DEFINE_IINSPECTABLE_OUTER( iterable, IIterable_IKeyValuePair_HSTRING_IInspectable, struct map, IInspectable_outer )
 
@@ -1020,9 +1122,9 @@ static HRESULT WINAPI iterable_First( IIterable_IKeyValuePair_HSTRING_IInspectab
     return hr;
 }
 
-static const struct IIterable_IKeyValuePair_HSTRING_IInspectableVtbl iterable_vtbl =
+static const struct { IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } iterable_vtbl_full =
 {
-    iterable_QueryInterface,
+    { iterable_QueryInterface,
     iterable_AddRef,
     iterable_Release,
     /* IInspectable methods */
@@ -1030,8 +1132,11 @@ static const struct IIterable_IKeyValuePair_HSTRING_IInspectableVtbl iterable_vt
     iterable_GetRuntimeClassName,
     iterable_GetTrustLevel,
     /* IIterable<T> methods */
-    iterable_First,
+    iterable_First, },
+    { 0, 0, 0, 0 }
 };
+#define iterable_vtbl iterable_vtbl_full.vtbl
+
 
 HRESULT single_threaded_map_create( const struct map_iids *iids, IInspectable *outer, IInspectable **out )
 {
@@ -1127,33 +1232,46 @@ static ULONG WINAPI locked_map_inner_Release( IInspectable *iface )
 
 static HRESULT WINAPI locked_map_inner_GetIids( IInspectable *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    struct locked_map *impl = locked_map_from_IInspectable( iface );
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    return IInspectable_GetIids( impl->inner, iid_count, iids );
 }
 
 static HRESULT WINAPI locked_map_inner_GetRuntimeClassName( IInspectable *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    struct locked_map *impl = locked_map_from_IInspectable( iface );
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IMap`2<String, Object>";
+
+    TRACE( "iface %p, class_name %p.\n", iface, class_name );
+
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
 }
 
 static HRESULT WINAPI locked_map_inner_GetTrustLevel( IInspectable *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    TRACE( "iface %p, trust_level %p.\n", iface, trust_level );
+
+    if (trust_level) *trust_level = FullTrust;
+    return S_OK;
 }
 
-static const IInspectableVtbl locked_map_inner_vtbl =
+static const struct { IInspectableVtbl vtbl; void *pad[4]; } locked_map_inner_vtbl_full =
 {
-    /* IUnknown */
+    { /* IUnknown */
     locked_map_inner_QueryInterface,
     locked_map_inner_AddRef,
     locked_map_inner_Release,
     /* IInspectable */
     locked_map_inner_GetIids,
     locked_map_inner_GetRuntimeClassName,
-    locked_map_inner_GetTrustLevel,
+    locked_map_inner_GetTrustLevel, },
+    { 0, 0, 0, 0 }
 };
+#define locked_map_inner_vtbl locked_map_inner_vtbl_full.vtbl
+
 
 DEFINE_IINSPECTABLE_( locked_map, IMap_HSTRING_IInspectable, struct locked_map, locked_map_from_IMap_HSTRING_IInspectable,
                       IMap_HSTRING_IInspectable_iface, impl->IInspectable_outer );
@@ -1162,6 +1280,8 @@ static HRESULT WINAPI locked_map_Lookup( IMap_HSTRING_IInspectable *iface, HSTRI
 {
     struct locked_map *impl = locked_map_from_IMap_HSTRING_IInspectable( iface );
     HRESULT hr;
+
+    TRACE( "iface %p, key %s, value %p.\n", iface, debugstr_hstring( key ), value );
 
     AcquireSRWLockExclusive( &impl->lock );
     hr = IMap_HSTRING_IInspectable_Lookup( impl->inner_map, key, value );
@@ -1175,6 +1295,8 @@ static HRESULT WINAPI locked_map_get_Size( IMap_HSTRING_IInspectable *iface, UIN
     struct locked_map *impl = locked_map_from_IMap_HSTRING_IInspectable( iface );
     HRESULT hr;
 
+    TRACE( "iface %p, size %p.\n", iface, size );
+
     AcquireSRWLockExclusive( &impl->lock );
     hr = IMap_HSTRING_IInspectable_get_Size( impl->inner_map, size );
     ReleaseSRWLockExclusive( &impl->lock );
@@ -1186,6 +1308,8 @@ static HRESULT WINAPI locked_map_HasKey( IMap_HSTRING_IInspectable *iface, HSTRI
 {
     struct locked_map *impl = locked_map_from_IMap_HSTRING_IInspectable( iface );
     HRESULT hr;
+
+    TRACE( "iface %p, key %s, exists %p.\n", iface, debugstr_hstring( key ), exists );
 
     AcquireSRWLockExclusive( &impl->lock );
     hr = IMap_HSTRING_IInspectable_HasKey( impl->inner_map, key, exists );
@@ -1199,6 +1323,8 @@ static HRESULT WINAPI locked_map_GetView( IMap_HSTRING_IInspectable *iface, IMap
     struct locked_map *impl = locked_map_from_IMap_HSTRING_IInspectable( iface );
     HRESULT hr;
 
+    TRACE( "iface %p, value %p.\n", iface, value );
+
     AcquireSRWLockExclusive( &impl->lock );
     hr = IMap_HSTRING_IInspectable_GetView( impl->inner_map, value );
     ReleaseSRWLockExclusive( &impl->lock );
@@ -1210,6 +1336,8 @@ static HRESULT WINAPI locked_map_Insert( IMap_HSTRING_IInspectable *iface, HSTRI
 {
     struct locked_map *impl = locked_map_from_IMap_HSTRING_IInspectable( iface );
     HRESULT hr;
+
+    TRACE( "iface %p, key %s, value %p, replaced %p.\n", iface, debugstr_hstring( key ), value, replaced );
 
     AcquireSRWLockExclusive( &impl->lock );
     hr = IMap_HSTRING_IInspectable_Insert( impl->inner_map, key, value, replaced );
@@ -1223,6 +1351,8 @@ static HRESULT WINAPI locked_map_Remove( IMap_HSTRING_IInspectable *iface, HSTRI
     struct locked_map *impl = locked_map_from_IMap_HSTRING_IInspectable( iface );
     HRESULT hr;
 
+    TRACE( "iface %p, key %s.\n", iface, debugstr_hstring( key ) );
+
     AcquireSRWLockExclusive( &impl->lock );
     hr = IMap_HSTRING_IInspectable_Remove( impl->inner_map, key );
     ReleaseSRWLockExclusive( &impl->lock );
@@ -1235,6 +1365,8 @@ static HRESULT WINAPI locked_map_Clear( IMap_HSTRING_IInspectable *iface )
     struct locked_map *impl = locked_map_from_IMap_HSTRING_IInspectable( iface );
     HRESULT hr;
 
+    TRACE( "iface %p.\n", iface );
+
     AcquireSRWLockExclusive( &impl->lock );
     hr = IMap_HSTRING_IInspectable_Clear( impl->inner_map );
     ReleaseSRWLockExclusive( &impl->lock );
@@ -1242,9 +1374,9 @@ static HRESULT WINAPI locked_map_Clear( IMap_HSTRING_IInspectable *iface )
     return hr;
 }
 
-static const IMap_HSTRING_IInspectableVtbl locked_map_vtbl =
+static const struct { IMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } locked_map_vtbl_full =
 {
-    /* IUnknown */
+    { /* IUnknown */
     locked_map_QueryInterface,
     locked_map_AddRef,
     locked_map_Release,
@@ -1259,8 +1391,11 @@ static const IMap_HSTRING_IInspectableVtbl locked_map_vtbl =
     locked_map_GetView,
     locked_map_Insert,
     locked_map_Remove,
-    locked_map_Clear,
+    locked_map_Clear, },
+    { 0, 0, 0, 0 }
 };
+#define locked_map_vtbl locked_map_vtbl_full.vtbl
+
 
 HRESULT multi_threaded_map_create( const struct map_iids *iids, IInspectable *outer, IInspectable **out )
 {
