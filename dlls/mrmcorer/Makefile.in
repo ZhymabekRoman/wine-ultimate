@@ -1,4 +1,5 @@
 MODULE  = mrmcorer.dll
+EXTRADEFS = -Wno-incompatible-pointer-types
 IMPORTS = combase uuid kernelbase
 
 SOURCES = \

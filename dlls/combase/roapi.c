@@ -907,6 +907,7 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
         /* The process registered this class itself (RoRegisterActivationFactories):
          * that registration outranks the routes and the ActivatableClassId registry,
          * it is the process's own statement about its classes. */
+        TRACE("registered factory answers %s\n", debugstr_hstring(classid));
         return registered_callback(classid, factory);
     }
 

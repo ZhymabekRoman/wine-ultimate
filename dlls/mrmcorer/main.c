@@ -1719,15 +1719,70 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING class, IActivationFactory **fact
     return S_OK;
 }
 
+/* IClassFactory face: CoCreateInstance(name CLSID "Microsoft.Windows.ApplicationModel.Resources.ResourceManager")
+ * reaches LocalServer32 = mrmcorer.dll; ole32 asks DllGetClassObject for
+ * IID_IClassFactory, then CreateInstance(riid) for the manager face
+ * (QI-able to IResourceManager2 {7ec10160-...} by the McgMarshal shim). */
+struct mrm_class_factory
+{
+    IClassFactory IClassFactory_iface;
+    LONG ref;
+};
+
+static struct mrm_class_factory *the_class_factory;
+
+static HRESULT WINAPI cfactory_QueryInterface( IClassFactory *iface, REFIID iid, void **obj )
+{
+    *obj = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IClassFactory ))
+        *obj = iface;
+    else
+        return E_NOINTERFACE;
+    incr( &((struct mrm_class_factory *)iface)->ref );
+    return S_OK;
+}
+static ULONG WINAPI cfactory_AddRef( IClassFactory *iface ) { return incr( &((struct mrm_class_factory *)iface)->ref ); }
+static ULONG WINAPI cfactory_Release( IClassFactory *iface )
+{
+    struct mrm_class_factory *cf = (struct mrm_class_factory *)iface;
+    LONG ref = decr( &cf->ref );
+    if (!ref) HeapFree( GetProcessHeap(), 0, cf );
+    return ref;
+}
+static HRESULT WINAPI cfactory_CreateInstance( IClassFactory *iface, IUnknown *outer, REFIID iid, void **obj )
+{
+    struct mwr_manager *m = manager_create();
+    TRACE( "cfactory_CreateInstance %s\n", debugstr_guid( iid ) );
+    if (!obj) return E_POINTER;
+    if (!m) return E_OUTOFMEMORY;
+    *obj = NULL;
+    return IResourceManager_QueryInterface( (IResourceManager *)&m->IResourceManager_iface, iid, obj );
+}
+static HRESULT WINAPI cfactory_LockServer( IClassFactory *iface, BOOL lock ) { return S_OK; }
+
+static const struct IClassFactoryVtbl cfactory_vtbl =
+{
+    cfactory_QueryInterface,
+    cfactory_AddRef,
+    cfactory_Release,
+    cfactory_CreateInstance,
+    cfactory_LockServer,
+};
+
 HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID iid, void **obj )
 {
-    struct mrm_factory *f = mrm_factory_get();
-    TRACE( "DllGetClassObject %s\n", debugstr_guid( iid ) );
+    TRACE( "DllGetClassObject %s %s\n", debugstr_guid( clsid ), debugstr_guid( iid ) );
     if (!obj) return E_POINTER;
-    if (!f) return E_OUTOFMEMORY;
-    *obj = &f->IActivationFactory_iface;
-    IActivationFactory_AddRef( (IActivationFactory *)*obj );
-    return S_OK;
+    if (!the_class_factory)
+    {
+        struct mrm_class_factory *cf = HeapAlloc( GetProcessHeap(), 0, sizeof(*cf) );
+        if (!cf) return E_OUTOFMEMORY;
+        cf->IClassFactory_iface.lpVtbl = &cfactory_vtbl;
+        cf->ref = 1;
+        the_class_factory = cf;
+    }
+    *obj = NULL;
+    return IClassFactory_QueryInterface( &the_class_factory->IClassFactory_iface, iid, obj );
 }
 
 BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
