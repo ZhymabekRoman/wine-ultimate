@@ -519,6 +519,7 @@ static const struct png_pixelformat formats[] = {
 struct png_encoder
 {
     struct encoder encoder;
+    CRITICAL_SECTION lock; /* serializes libpng (and its shared zlib deflate stream) calls */
     IStream *stream;
     png_structp png_ptr;
     png_infop info_ptr;
@@ -573,18 +574,22 @@ static HRESULT CDECL png_encoder_initialize(struct encoder *encoder, IStream *st
 
     This->stream = stream;
 
+    EnterCriticalSection(&This->lock);
+
     /* set up setjmp/longjmp error handling */
     if (setjmp(png_jmpbuf(This->png_ptr)))
     {
         png_destroy_write_struct(&This->png_ptr, &This->info_ptr);
         This->png_ptr = NULL;
         This->stream = NULL;
+        LeaveCriticalSection(&This->lock);
         return E_FAIL;
     }
 
     /* set up custom i/o handling */
     png_set_write_fn(This->png_ptr, This, user_write_data, user_flush);
 
+    LeaveCriticalSection(&This->lock);
     return S_OK;
 }
 
@@ -628,9 +633,14 @@ static HRESULT CDECL png_encoder_create_frame(struct encoder *encoder, const str
         return E_FAIL;
     }
 
+    EnterCriticalSection(&This->lock);
+
     /* set up setjmp/longjmp error handling */
     if (setjmp(png_jmpbuf(This->png_ptr)))
+    {
+        LeaveCriticalSection(&This->lock);
         return E_FAIL;
+    }
 
     This->encoder_frame = *encoder_frame;
     This->lines_written = 0;
@@ -639,9 +649,13 @@ static HRESULT CDECL png_encoder_create_frame(struct encoder *encoder, const str
     {
         /* libpng requires us to write all data multiple times in this case. */
         This->stride = (This->format->bpp * encoder_frame->width + 7)/8;
+        free(This->data);
         This->data = malloc(encoder_frame->height * This->stride);
         if (!This->data)
+        {
+            LeaveCriticalSection(&This->lock);
             return E_OUTOFMEMORY;
+        }
     }
 
     png_set_IHDR(This->png_ptr, This->info_ptr, encoder_frame->width, encoder_frame->height,
@@ -712,6 +726,7 @@ static HRESULT CDECL png_encoder_create_frame(struct encoder *encoder, const str
         png_set_filter(This->png_ptr, 0, png_filter_map[encoder_frame->filter]);
     }
 
+    LeaveCriticalSection(&This->lock);
     return S_OK;
 }
 
@@ -724,6 +739,7 @@ static HRESULT CDECL png_encoder_write_lines(struct encoder* encoder, BYTE *data
     if (This->encoder_frame.interlace)
     {
         /* Just store the data so we can write it in multiple passes in Commit. */
+        EnterCriticalSection(&This->lock);
         for (i=0; i<line_count; i++)
             memcpy(This->data + This->stride * (This->lines_written + i),
                    data + stride * i,
@@ -731,19 +747,26 @@ static HRESULT CDECL png_encoder_write_lines(struct encoder* encoder, BYTE *data
 
         This->lines_written += line_count;
 
+        LeaveCriticalSection(&This->lock);
         return S_OK;
     }
+
+    EnterCriticalSection(&This->lock);
 
     /* set up setjmp/longjmp error handling */
     if (setjmp(png_jmpbuf(This->png_ptr)))
     {
         free(row_pointers);
+        LeaveCriticalSection(&This->lock);
         return E_FAIL;
     }
 
     row_pointers = malloc(line_count * sizeof(png_byte*));
     if (!row_pointers)
+    {
+        LeaveCriticalSection(&This->lock);
         return E_OUTOFMEMORY;
+    }
 
     for (i=0; i<line_count; i++)
         row_pointers[i] = data + stride * i;
@@ -753,6 +776,7 @@ static HRESULT CDECL png_encoder_write_lines(struct encoder* encoder, BYTE *data
 
     free(row_pointers);
 
+    LeaveCriticalSection(&This->lock);
     return S_OK;
 }
 
@@ -761,10 +785,13 @@ static HRESULT CDECL png_encoder_commit_frame(struct encoder *encoder)
     struct png_encoder *This = impl_from_encoder(encoder);
     png_byte **row_pointers=NULL;
 
+    EnterCriticalSection(&This->lock);
+
     /* set up setjmp/longjmp error handling */
     if (setjmp(png_jmpbuf(This->png_ptr)))
     {
         free(row_pointers);
+        LeaveCriticalSection(&This->lock);
         return E_FAIL;
     }
 
@@ -774,7 +801,10 @@ static HRESULT CDECL png_encoder_commit_frame(struct encoder *encoder)
 
         row_pointers = malloc(This->encoder_frame.height * sizeof(png_byte*));
         if (!row_pointers)
+        {
+            LeaveCriticalSection(&This->lock);
             return E_OUTOFMEMORY;
+        }
 
         for (i=0; i<This->encoder_frame.height; i++)
             row_pointers[i] = This->data + This->stride * i;
@@ -787,6 +817,7 @@ static HRESULT CDECL png_encoder_commit_frame(struct encoder *encoder)
 
     free(row_pointers);
 
+    LeaveCriticalSection(&This->lock);
     return S_OK;
 }
 
@@ -798,9 +829,14 @@ static HRESULT CDECL png_encoder_commit_file(struct encoder *encoder)
 static void CDECL png_encoder_destroy(struct encoder *encoder)
 {
     struct png_encoder *This = impl_from_encoder(encoder);
+    EnterCriticalSection(&This->lock);
     if (This->png_ptr)
         png_destroy_write_struct(&This->png_ptr, &This->info_ptr);
+    This->png_ptr = NULL;
+    This->info_ptr = NULL;
+    LeaveCriticalSection(&This->lock);
     free(This->data);
+    DeleteCriticalSection(&This->lock);
     free(This);
 }
 
@@ -825,10 +861,13 @@ HRESULT CDECL png_encoder_create(struct encoder_info *info, struct encoder **res
         return E_OUTOFMEMORY;
     }
 
+    InitializeCriticalSection(&This->lock);
     This->encoder.vtable = &png_encoder_vtable;
     This->png_ptr = NULL;
     This->info_ptr = NULL;
     This->data = NULL;
+    This->stream = NULL;
+    This->stride = This->passes = This->lines_written = 0;
     *result = &This->encoder;
 
     info->flags = ENCODER_FLAGS_SUPPORTS_METADATA;
