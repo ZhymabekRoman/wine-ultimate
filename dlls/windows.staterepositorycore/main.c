@@ -30,6 +30,7 @@
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
+#include "objbase.h"
 
 #include "wine/debug.h"
 
@@ -37,13 +38,83 @@ WINE_DEFAULT_DEBUG_CHANNEL(srcache);
 
 #define SR_E_UNAVAILABLE HRESULT_FROM_WIN32( ERROR_SERVICE_NOT_ACTIVE )
 
+/*
+ * The cache is the client side of the StateRepository service's database. The
+ * service is not here; the package registration kernelbase answers identity from
+ * (the AppModel key in the registry, see dlls/kernelbase/version.c) describes the
+ * same set of installed packages, so a cache opens against it. Of the context's
+ * fields the Store-app consumers probe, the registration records two: Roaming
+ * (the package's state follows the user, and the registration plane is the
+ * per-user view over the machine) and InstanceId (the instance of the context,
+ * stable for the package the context was opened for). Fields the registration
+ * does not record answer zero, which is what an empty cache answers.
+ */
+#define SRCACHE_CONTEXT_TAG 0x57696e5352436163ULL /* "WinSRcac" */
+
+/* Context field ids as the SRPC consumers index them: 2 = Roaming, 3 =
+ * InstanceId (its text form answers through GetField_String). */
+#define CXT_ROAMING   2
+#define CXT_INSTANCE  3
+
+struct srcache_context
+{
+    UINT64 tag;
+    WCHAR *name;
+    GUID instance_id;
+};
+
+HRESULT WINAPI SRCache_DuplicateString( const WCHAR *str, WCHAR **copy );
+
+/* The instance id is derived from the context name, so the same context opened
+ * twice for the same package reports the same id. */
+static GUID context_instance_id( const WCHAR *name )
+{
+    static const WCHAR base[] = L"Windows.Internal.StateRepository.Cache";
+    UINT64 h1 = 0xcbf29ce484222325ULL, h2 = 0xcbf29ce484222325ULL;
+    GUID guid;
+    const WCHAR *s;
+
+    for (s = base; *s; s++) h1 = (h1 ^ *s) * 0x100000001b3ULL;
+    for (s = name; name && *s; s++) h2 = (h2 ^ *s) * 0x100000001b3ULL;
+
+    guid.Data1 = (DWORD)(h1 >> 32);
+    guid.Data2 = (WORD)(h1 >> 16);
+    guid.Data3 = (WORD)h1;
+    guid.Data4[0] = (UCHAR)(h2 >> 56);
+    guid.Data4[1] = (UCHAR)(h2 >> 48);
+    guid.Data4[2] = (UCHAR)(h2 >> 40);
+    guid.Data4[3] = (UCHAR)(h2 >> 32);
+    guid.Data4[4] = (UCHAR)(h2 >> 24);
+    guid.Data4[5] = (UCHAR)(h2 >> 16);
+    guid.Data4[6] = (UCHAR)(h2 >> 8);
+    guid.Data4[7] = (UCHAR)h2;
+    return guid;
+}
+
+static HRESULT context_open( const WCHAR *name, struct srcache_context **ret )
+{
+    struct srcache_context *ctx;
+
+    if (!(ctx = HeapAlloc( GetProcessHeap(), 0, sizeof(*ctx) ))) return E_OUTOFMEMORY;
+    ctx->tag = SRCACHE_CONTEXT_TAG;
+    ctx->instance_id = context_instance_id( name );
+    if (name && !SUCCEEDED( SRCache_DuplicateString( name, &ctx->name ) ))
+    {
+        HeapFree( GetProcessHeap(), 0, ctx );
+        return E_OUTOFMEMORY;
+    }
+    ctx->name = name ? ctx->name : NULL;
+    *ret = ctx;
+    return S_OK;
+}
+
 HRESULT WINAPI SRCacheManager_Open( void *params, void **manager )
 {
     static int once;
 
-    if (!once++) FIXME( "%p %p: no state repository\n", params, manager );
-    if (manager) *manager = NULL;
-    return SR_E_UNAVAILABLE;
+    if (!once++) FIXME( "%p %p: answering from the package registration\n", params, manager );
+    if (manager) *manager = (void *)SRCACHE_CONTEXT_TAG;  /* the registration needs no handle state */
+    return S_OK;
 }
 
 void WINAPI SRCacheManager_Close( void *manager )
@@ -72,21 +143,54 @@ HRESULT WINAPI SRCacheManager_SetProperty_UInt64( void *manager, ULONG property,
 
 HRESULT WINAPI SRCacheContext_Open( void *manager, const WCHAR *name, void **context )
 {
+    struct srcache_context *ctx;
+    HRESULT hr;
+
     TRACE( "%p %s %p\n", manager, debugstr_w(name), context );
-    if (context) *context = NULL;
-    return SR_E_UNAVAILABLE;
+    if (!context) return E_INVALIDARG;
+    *context = NULL;
+    if ((hr = context_open( name, &ctx )) != S_OK) return hr;
+    *context = ctx;
+    return S_OK;
 }
 
 HRESULT WINAPI SRCacheContext_OpenSubContext( void *context, const WCHAR *name, void **sub_context )
 {
+    struct srcache_context *parent = context, *ctx;
+    WCHAR *path;
+    HRESULT hr;
+
     TRACE( "%p %s %p\n", context, debugstr_w(name), sub_context );
-    if (sub_context) *sub_context = NULL;
-    return SR_E_UNAVAILABLE;
+    if (!sub_context) return E_INVALIDARG;
+    *sub_context = NULL;
+    if ((hr = context_open( name, &ctx )) != S_OK) return hr;
+    if (parent && parent->tag == SRCACHE_CONTEXT_TAG && parent->name && name)
+    {
+        SIZE_T len = lstrlenW( parent->name ) + lstrlenW( name ) + 2;
+        if ((path = HeapAlloc( GetProcessHeap(), 0, len * sizeof(WCHAR) )))
+        {
+            lstrcpyW( path, parent->name );
+            lstrcatW( path, L"\\" );
+            lstrcatW( path, name );
+            HeapFree( GetProcessHeap(), 0, parent->name );
+            ctx->name = path;
+            ctx->instance_id = context_instance_id( path );
+        }
+    }
+    *sub_context = ctx;
+    return S_OK;
 }
 
 void WINAPI SRCacheContext_Close( void *context )
 {
+    struct srcache_context *ctx = context;
+
     TRACE( "%p\n", context );
+    if (ctx && ctx->tag == SRCACHE_CONTEXT_TAG)
+    {
+        HeapFree( GetProcessHeap(), 0, ctx->name );
+        HeapFree( GetProcessHeap(), 0, ctx );
+    }
 }
 
 HRESULT WINAPI SRCacheContext_IsEmpty( void *context, BOOL *empty )
@@ -111,8 +215,8 @@ HRESULT WINAPI SRCacheContext_AddToCache( void *context, void *data )
 HRESULT WINAPI SRCacheContext_GetField_UInt32( void *context, ULONG field, ULONG *value )
 {
     TRACE( "%p %lu %p\n", context, field, value );
-    if (value) *value = 0;
-    return SR_E_UNAVAILABLE;
+    if (value) *value = (field == CXT_ROAMING);
+    return S_OK;
 }
 
 HRESULT WINAPI SRCacheContext_GetField_UInt64( void *context, ULONG field, ULONG64 *value )
@@ -124,9 +228,20 @@ HRESULT WINAPI SRCacheContext_GetField_UInt64( void *context, ULONG field, ULONG
 
 HRESULT WINAPI SRCacheContext_GetField_String( void *context, ULONG field, WCHAR **value )
 {
+    struct srcache_context *ctx = context;
+    HRESULT hr = S_OK;
+
     TRACE( "%p %lu %p\n", context, field, value );
-    if (value) *value = NULL;
-    return SR_E_UNAVAILABLE;
+    if (!value) return E_INVALIDARG;
+    *value = NULL;
+    if (field == CXT_INSTANCE && ctx && ctx->tag == SRCACHE_CONTEXT_TAG)
+    {
+        WCHAR text[40];
+
+        if (!StringFromGUID2( &ctx->instance_id, text, ARRAY_SIZE(text) )) return SR_E_UNAVAILABLE;
+        return SRCache_DuplicateString( text, value );
+    }
+    return hr;
 }
 
 HRESULT WINAPI SRCacheContext_GetField_MultiString( void *context, ULONG field, WCHAR **value )
@@ -146,9 +261,13 @@ HRESULT WINAPI SRCacheContext_GetField_Binary( void *context, ULONG field, void 
 
 HRESULT WINAPI SRCacheContext_GetField_Guid( void *context, ULONG field, GUID *value )
 {
+    struct srcache_context *ctx = context;
+
     TRACE( "%p %lu %p\n", context, field, value );
-    if (value) memset( value, 0, sizeof(*value) );
-    return SR_E_UNAVAILABLE;
+    if (!value) return E_INVALIDARG;
+    if (field == CXT_INSTANCE && ctx && ctx->tag == SRCACHE_CONTEXT_TAG) *value = ctx->instance_id;
+    else memset( value, 0, sizeof(*value) );
+    return S_OK;
 }
 
 HRESULT WINAPI SRCache_AllocStringBuffer( ULONG len, WCHAR **buffer )
