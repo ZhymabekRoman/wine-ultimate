@@ -397,8 +397,6 @@ static HRESULT WINAPI stream_Stat(IStream *iface, STATSTG *pstatstg, DWORD flags
 static HRESULT WINAPI stream_Clone(IStream *iface, IStream **ppstm)
 {
     struct hglobal_stream *stream = impl_from_IStream(iface), *clone;
-    ULARGE_INTEGER dummy;
-    LARGE_INTEGER offset;
 
     TRACE("%p, %p\n", iface, ppstm);
 
@@ -408,11 +406,12 @@ static HRESULT WINAPI stream_Clone(IStream *iface, IStream **ppstm)
     if (!clone) return E_OUTOFMEMORY;
 
     *ppstm = &clone->IStream_iface;
+    /* Windows CreateStreamOnHGlobal Clone() semantics: the clone references the same
+     * HGLOBAL bytes as the source (writes through either face are visible to both) but
+     * carries its own independent seek pointer, starting at the beginning of the stream. */
     handle_addref(stream->handle);
     clone->handle = stream->handle;
-
-    offset.QuadPart = (LONGLONG)stream->position.QuadPart;
-    IStream_Seek(*ppstm, offset, STREAM_SEEK_SET, &dummy);
+    clone->position.QuadPart = 0;
     return S_OK;
 }
 
