@@ -161,6 +161,21 @@ typedef struct PACKAGE_INFO3
 }
 PACKAGE_INFO3;
 
+typedef enum _PACKAGE_TYPE
+{
+    PACKAGE   = 0x1,
+    FRAMEWORK = 0x2
+}
+PACKAGE_TYPE;
+
+typedef enum _PACKAGE_PATH_TYPE
+{
+    APPLICATION_PACKAGE_PATH = 0,
+    PACKAGE_PATH             = 1,
+    PACKAGE_DATA_PATH        = 2
+}
+PACKAGE_PATH_TYPE;
+
 #define PACKAGE_FILTER_HEAD                 0x00000010
 #define PACKAGE_FILTER_DIRECT               0x00000020
 #define PACKAGE_FILTER_RESOURCE             0x00000040
@@ -199,6 +214,13 @@ LONG WINAPI OpenPackageInfoByFullName(const WCHAR *full_name, UINT32 reserved, P
 LONG WINAPI ClosePackageInfo(PACKAGE_INFO *info);
 LONG WINAPI GetPackageApplicationIds(const WCHAR *family_name, GUID package_enumeration_type,
                                      UINT32 *count, HPKG *packages);
+LONG WINAPI GetPackagesForUser(const WCHAR *user, const WCHAR *family_name,
+                               UINT32 *count, WCHAR **buffer);
+LONG WINAPI GetPackagesForUserWithPackageTypes(const WCHAR *user, const WCHAR *family_name,
+                                               UINT32 path_type, UINT32 package_types,
+                                               UINT32 *count, WCHAR **buffer, UINT32 *buffer_len);
+LONG WINAPI GetPackageFamilyNameForUser(const WCHAR *user, HANDLE process,
+                                        UINT32 *length, WCHAR *family_name);
 
 #if defined(__cplusplus)
 }

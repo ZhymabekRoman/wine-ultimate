@@ -640,6 +640,7 @@
 # @ stub GetPackageContext
 @ stdcall GetPackageFamilyName(long ptr ptr)
 # @ stub GetPackageFamilyNameFromToken
+@ stdcall GetPackageFamilyNameForUser(wstr long ptr ptr)
 @ stdcall GetPackageFullName(long ptr ptr)
 # @ stub GetPackageFullNameFromToken
 # @ stub GetPackageId
@@ -662,6 +663,8 @@
 # @ stub GetPackageTargetPlatformProperty
 # @ stub GetPackageVolumeSisPath
 @ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr)
+@ stdcall GetPackagesForUser(wstr wstr ptr ptr)
+@ stdcall GetPackagesForUserWithPackageTypes(wstr wstr long long ptr ptr ptr)
 @ stdcall GetPerformanceInfo(ptr long)
 @ stdcall GetPhysicallyInstalledSystemMemory(ptr)
 # @ stub GetPreviousFgPolicyRefreshInfoInternal

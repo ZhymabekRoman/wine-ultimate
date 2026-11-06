@@ -342,6 +342,10 @@ typedef LONG (WINAPI *get_by_family_fn)( const WCHAR *family, UINT32 *count, WCH
                                          UINT32 *buffer_len, WCHAR *buffer );
 typedef LONG (WINAPI *pkg_full_name_fn)( HANDLE process, UINT32 *len, WCHAR *name );
 typedef LONG (WINAPI *aumid_fn)( UINT32 *len, WCHAR *id );
+typedef LONG (WINAPI *packages_for_user_fn)( const WCHAR *user, const WCHAR *family, UINT32 *count, WCHAR **buffer );
+typedef LONG (WINAPI *packages_for_user_types_fn)( const WCHAR *user, const WCHAR *family, UINT32 path_type,
+                                                   UINT32 types, UINT32 *count, WCHAR **buffer, UINT32 *buffer_len );
+typedef LONG (WINAPI *family_for_user_fn)( const WCHAR *user, HANDLE process, UINT32 *len, WCHAR *family );
 
 static void set_test_registry( void )
 {
@@ -388,6 +392,8 @@ static void clear_test_registry( void )
 {
     RegDeleteTreeW( HKEY_CURRENT_USER, REG_APPMODEL );
 }
+
+static void check_for_user( const char *name );
 
 static void check_from_registry( const char *name, const WCHAR *pkg_path )
 {
@@ -465,6 +471,94 @@ static void check_from_registry( const char *name, const WCHAR *pkg_path )
         ret = get_by_family( L"NotExist_8wekyb3d8bbwe", &count, NULL, &buffer_len, NULL );
         ok( ret == ERROR_SUCCESS && count == 0, "%s absent family ret %ld count %u\n", name, ret, count, buffer_len );
     }
+
+    check_for_user( name );
+}
+
+/* The per-user deployment view: the same registration, seen as the packages of
+ * the prefix's one user. The block GetPackagesForUser hands back is one
+ * LocalAlloc'd run of consecutive NUL-terminated names, released with LocalFree. */
+static void check_for_user( const char *name )
+{
+    packages_for_user_fn get_for_user = (void *)kb_export( "GetPackagesForUser" );
+    packages_for_user_types_fn get_with_types = (void *)kb_export( "GetPackagesForUserWithPackageTypes" );
+    family_for_user_fn get_family = (void *)kb_export( "GetPackageFamilyNameForUser" );
+    WCHAR buf[256], *block = (WCHAR *)0x1;
+    UINT32 count, len;
+    LONG ret;
+
+    if (!get_for_user)
+    {
+        ok( 0, "GetPackagesForUser not exported\n" );
+        return;
+    }
+
+    /* the family of this process, for the prefix's user */
+    if (get_family)
+    {
+        len = ARRAY_SIZE( buf );
+        ret = get_family( L"S-1-5-21-0", GetCurrentProcess(), &len, buf );
+        ok( ret == ERROR_SUCCESS && !wcscmp( buf, FAMILY_NAME ), "%s family-for-user ret %ld name %s\n",
+            name, ret, debugstr_w( buf ) );
+    }
+
+    /* the family's packages: the running package + the registered framework */
+    count = 0;
+    block = NULL;
+    ret = get_for_user( NULL, FAMILY_NAME, &count, &block );
+    ok( ret == ERROR_SUCCESS && count == 2, "%s for-user ret %ld count %u\n", name, ret, count );
+    ok( block != NULL, "%s for-user block %p\n", name, block );
+    if (ret == ERROR_SUCCESS && count == 2 && block)
+    {
+        ok( !wcscmp( block, FULL_NAME ), "%s for-user [0] %s\n", name, debugstr_w( block ) );
+        ok( !wcscmp( block + wcslen( block ) + 1, REG_FW_NAME ), "%s for-user [1] %s\n",
+            name, debugstr_w( block + wcslen( block ) + 1 ) );
+    }
+    LocalFree( block );
+
+    if (!get_with_types)
+    {
+        ok( 0, "GetPackagesForUserWithPackageTypes not exported\n" );
+        return;
+    }
+
+    /* framework packages only */
+    count = 0;
+    block = NULL;
+    len = 0;
+    ret = get_with_types( NULL, FAMILY_NAME, 0 /* APPLICATION_PACKAGE_PATH */, 2 /* FRAMEWORK */,
+                          &count, &block, &len );
+    ok( ret == ERROR_SUCCESS && count == 1, "%s framework-only ret %ld count %u\n", name, ret, count );
+    ok( block && !wcscmp( block, REG_FW_NAME ), "%s framework-only name %s\n", name, debugstr_w( block ) );
+    ok( len == lstrlenW( REG_FW_NAME ) + 1, "%s framework-only len %u\n", name, len );
+    LocalFree( block );
+
+    /* app packages only */
+    count = 0;
+    block = NULL;
+    len = 0;
+    ret = get_with_types( NULL, FAMILY_NAME, 0, 1 /* PACKAGE */, &count, &block, &len );
+    ok( ret == ERROR_SUCCESS && count == 1, "%s app-only ret %ld count %u\n", name, ret, count );
+    ok( block && !wcscmp( block, FULL_NAME ), "%s app-only name %s\n", name, debugstr_w( block ) );
+    LocalFree( block );
+
+    /* both types (0) is the unfiltered set */
+    count = 0;
+    block = NULL;
+    ret = get_with_types( NULL, FAMILY_NAME, 0, 0, &count, &block, &len );
+    ok( ret == ERROR_SUCCESS && count == 2 && len == (lstrlenW( FULL_NAME ) + 1 + lstrlenW( REG_FW_NAME ) + 1),
+        "%s both ret %ld count %u len %u\n", name, ret, count, len );
+    LocalFree( block );
+
+    /* a family that is not deployed resolves to nothing, not an error */
+    count = 0xdead;
+    block = (WCHAR *)0x1;
+    ret = get_for_user( NULL, L"NotExist_8wekyb3d8bbwe", &count, &block );
+    ok( ret == ERROR_SUCCESS && count == 0 && !block, "%s absent family ret %ld count %u block %p\n",
+        name, ret, count, block );
+
+    ok( get_for_user( NULL, FAMILY_NAME, NULL, &block ) == ERROR_INVALID_PARAMETER,
+        "%s null count not rejected\n", name );
 }
 
 static void test_package_registry( void )

@@ -2043,6 +2043,101 @@ LONG WINAPI DECLSPEC_HOTPATCH GetPackagesByPackageFamily(const WCHAR *family_nam
     return ERROR_SUCCESS;
 }
 
+/* The per-user deployment view shared by the GetPackagesForUser family. The
+ * prefix has one user, so `user` selects nothing; `types` is the PACKAGE_TYPE
+ * bitmask (0 = both) and `path_type` picks which path the registration knows
+ * (it records one PackagePath, so all three answer it). The names come back as
+ * one LocalAlloc'd block of consecutive NUL-terminated strings, which the
+ * caller releases with LocalFree, as on Windows; buffer_len (when given) is the
+ * block length in characters. */
+static LONG packages_for_user( const WCHAR *user, const WCHAR *family_name, UINT32 path_type,
+                               UINT32 types, UINT32 *count, WCHAR **buffer, UINT32 *buffer_len )
+{
+    static int once_user, once_path;
+    struct pkg_entry entries[MAX_PKG_ENTRIES];
+    UINT32 n, i, j, total = 0;
+    WCHAR *block, *p;
+
+    if (user && !once_user++) FIXME( "%s: the prefix has one user, the whole registration is theirs.\n", debugstr_w( user ) );
+    if (path_type && !once_path++) FIXME( "path type %u answers the registered package path.\n", path_type );
+    if (!count) return ERROR_INVALID_PARAMETER;
+    if (buffer) *buffer = NULL;
+    if (buffer_len) *buffer_len = 0;
+
+    n = collect_packages( entries, family_name );
+    for (i = 0, j = 0; i < n; i++)
+    {
+        UINT32 type = entries[i].framework ? FRAMEWORK : PACKAGE;
+        if (!types || (types & type)) entries[j++] = entries[i];
+    }
+    n = j;
+
+    for (i = 0; i < n; i++) total += wcslen( entries[i].full ) + 1;
+    *count = n;
+    if (buffer_len) *buffer_len = total;
+    if (!buffer || !n) return ERROR_SUCCESS;
+
+    if (!(block = LocalAlloc( 0, total * sizeof(WCHAR) ))) return ERROR_NOT_ENOUGH_MEMORY;
+    p = block;
+    for (i = 0; i < n; i++)
+    {
+        SIZE_T chars = wcslen( entries[i].full ) + 1;
+        memcpy( p, entries[i].full, chars * sizeof(WCHAR) );
+        p += chars;
+    }
+    *buffer = block;
+    return ERROR_SUCCESS;
+}
+
+/***********************************************************************
+ *         GetPackagesForUser   (kernelbase.@)
+ *
+ * The packages registered for a user (see GetPackagesByPackageFamily for the
+ * registration): a family narrows the set, NULL family name collects all of
+ * it. Both package types answer; the caller frees the block with LocalFree.
+ */
+LONG WINAPI GetPackagesForUser( const WCHAR *user, const WCHAR *family_name,
+                                UINT32 *count, WCHAR **buffer )
+{
+    TRACE( "(%s %s %p %p)\n", debugstr_w( user ), debugstr_w( family_name ), count, buffer );
+
+    return packages_for_user( user, family_name, APPLICATION_PACKAGE_PATH, 0, count, buffer, NULL );
+}
+
+/***********************************************************************
+ *         GetPackagesForUserWithPackageTypes   (kernelbase.@)
+ *
+ * GetPackagesForUser with the PACKAGE_TYPE bitmask filter and the path type;
+ * the registration records one path per package, so every path type answers
+ * that PackagePath, and the block carries the full names.
+ */
+LONG WINAPI GetPackagesForUserWithPackageTypes( const WCHAR *user, const WCHAR *family_name,
+                                                UINT32 path_type, UINT32 package_types,
+                                                UINT32 *count, WCHAR **buffer, UINT32 *buffer_len )
+{
+    TRACE( "(%s %s %u %#x %p %p %p)\n", debugstr_w( user ), debugstr_w( family_name ),
+           path_type, package_types, count, buffer, buffer_len );
+
+    return packages_for_user( user, family_name, path_type, package_types, count, buffer, buffer_len );
+}
+
+/***********************************************************************
+ *         GetPackageFamilyNameForUser   (kernelbase.@)
+ *
+ * The family of a process's package, for a user the prefix only has one of:
+ * the same answer GetPackageFamilyName gives.
+ */
+LONG WINAPI GetPackageFamilyNameForUser( const WCHAR *user, HANDLE process,
+                                         UINT32 *length, WCHAR *family_name )
+{
+    static int once;
+
+    TRACE( "(%s %p %p %p)\n", debugstr_w( user ), process, length, family_name );
+
+    if (!once++ && user) FIXME( "%s: the prefix has one user.\n", debugstr_w( user ) );
+    return GetPackageFamilyName( process, length, family_name );
+}
+
 /***********************************************************************
  *         GetPackagePathByFullName   (kernelbase.@)
  */

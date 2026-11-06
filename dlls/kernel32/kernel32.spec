@@ -785,8 +785,11 @@
 @ stdcall -import GetUserPreferredUILanguages(long ptr ptr ptr)
 @ stdcall GetPackageApplicationIds(wstr int128 ptr ptr) kernelbase.GetPackageApplicationIds
 @ stdcall GetPackageFamilyName(long ptr ptr) kernelbase.GetPackageFamilyName
+@ stdcall GetPackageFamilyNameForUser(wstr long ptr ptr) kernelbase.GetPackageFamilyNameForUser
 @ stdcall GetPackageFullName(long ptr ptr) kernelbase.GetPackageFullName
 @ stdcall GetPackagesByPackageFamily(wstr ptr ptr ptr ptr) kernelbase.GetPackagesByPackageFamily
+@ stdcall GetPackagesForUser(wstr wstr ptr ptr) kernelbase.GetPackagesForUser
+@ stdcall GetPackagesForUserWithPackageTypes(wstr wstr long long ptr ptr ptr) kernelbase.GetPackagesForUserWithPackageTypes
 @ stdcall GetPackagePathByFullName(wstr ptr wstr) kernelbase.GetPackagePathByFullName
 @ stdcall -import GetPhysicallyInstalledSystemMemory(ptr)
 @ stdcall -import GetPriorityClass(long)
