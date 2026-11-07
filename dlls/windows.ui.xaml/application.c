@@ -442,10 +442,22 @@ static inline struct application *impl_from_inner_IInspectable( IInspectable *if
 #define IID_IMap_HSTRING_IInspectable IID___FIMap_2_HSTRING_IInspectable
 #define IID_IMapView_HSTRING_IInspectable IID___FIMapView_2_HSTRING_IInspectable
 
+/* The runtime (pinterface) IIDs the app's CoreRT binder QIs are
+ * IMap`2<String,Object> {11d3b13a-...} and IMapView`2<String,Object>
+ * {2f13c006-...}. The MIDL projection constants in windows.foundation.h name
+ * the C projection of the same shapes with different IIDs
+ * (IID___FIMap_2_HSTRING_IInspectable = {1b0d3570-...}), so match both pairs. */
+static const IID IID_pinterface_IMap_HSTRING_IInspectable =
+    { 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
+static const IID IID_pinterface_IMapView_HSTRING_IInspectable =
+    { 0x2f13c006, 0xa03a, 0x5f69, {0xb0, 0x90, 0x75, 0xa4, 0x3e, 0x33, 0x42, 0x3e} };
+
 static HRESULT resources_propget( struct application *impl, REFIID iid, void **out )
 {
     static const WCHAR propertyset_name[] = L"Windows.Foundation.Collections.PropertySet";
+    static HSTRING_HEADER propertyset_header;
     IInspectable *face = NULL;
+    HSTRING hstr = NULL;
     HRESULT hr;
 
     if (impl->resources)
@@ -454,7 +466,15 @@ static HRESULT resources_propget( struct application *impl, REFIID iid, void **o
         if (SUCCEEDED( hr )) return S_OK;
     }
 
-    hr = RoGetActivationFactory( (HSTRING)propertyset_name, &IID_IInspectable, (void **)&face );
+    if (FAILED( hr = WindowsCreateStringReference( propertyset_name,
+            sizeof(propertyset_name) / sizeof(WCHAR) - 1, &propertyset_header, &hstr )))
+    {
+        WARN( "PropertySet HSTRING create failed, hr %#lx.\n", hr );
+        *out = NULL;
+        return hr;
+    }
+
+    hr = RoGetActivationFactory( hstr, &IID_IInspectable, (void **)&face );
     if (FAILED( hr ))
     {
         WARN( "PropertySet class create failed, hr %#lx.\n", hr );
@@ -490,7 +510,9 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
 
     if (IsEqualGUID( iid, &IID_IPropertySet ) ||
         IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ))
+        IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_pinterface_IMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_pinterface_IMapView_HSTRING_IInspectable ))
         return resources_propget( impl, iid, out );
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
