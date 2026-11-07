@@ -270,8 +270,39 @@ static ULONG WINAPI container_Release( IApplicationDataContainer *iface )
     return ref;
 }
 
+/* CoreCLR's ComWrappers shader reads IInspectable::GetIids output as an array of
+ * ComInterfaceEntry pairs (vtable-first layout, matching the runtime's
+ * sequential struct { void** Vtable; Guid* IID; }). With E_NOTIMPL the shader
+ * falls back to a single-entry IInspectable vtable and the
+ * IApplicationDataContainer projection reads its method slots (get_Values = 8)
+ * off the wrong ComVirtualMethodData, AVing the Values RCW chain. */
+struct com_interface_entry
+{
+    void **vtable;
+    IID   *iid;
+};
+
+static const struct IApplicationDataContainerVtbl container_vtbl;
+static const struct __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainerVtbl empty_map_view_vtbl;
+
 static HRESULT WINAPI container_GetIids( IApplicationDataContainer *iface, ULONG *count, IID **iids )
-{ FIXME( "stub\n" ); return E_NOTIMPL; }
+{
+    struct com_interface_entry entries[] =
+    {
+        { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
+    };
+    TRACE( "iface %p, count %p, iids %p.\n", iface, count, iids );
+
+    if (count) *count = ARRAY_SIZE( entries );
+    if (iids)
+    {
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
+    }
+    return S_OK;
+}
 static HRESULT WINAPI container_GetRuntimeClassName( IApplicationDataContainer *iface, HSTRING *name )
 { return WindowsCreateString( L"Windows.Storage.ApplicationDataContainer", 39, name ); }
 static HRESULT WINAPI container_GetTrustLevel( IApplicationDataContainer *iface, TrustLevel *level )
@@ -323,7 +354,23 @@ static HRESULT WINAPI empty_map_view_QueryInterface( IMapView_HSTRING_Applicatio
 }
 static ULONG WINAPI empty_map_view_AddRef( IMapView_HSTRING_ApplicationDataContainer *iface ) { return 2; }
 static ULONG WINAPI empty_map_view_Release( IMapView_HSTRING_ApplicationDataContainer *iface ) { return 1; }
-static HRESULT WINAPI empty_map_view_GetIids( IMapView_HSTRING_ApplicationDataContainer *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI empty_map_view_GetIids( IMapView_HSTRING_ApplicationDataContainer *iface, ULONG *c, IID **i )
+{
+    struct com_interface_entry entries[] =
+    {
+        { (void **)&empty_map_view_vtbl, (IID *)&IID_IMapView_HSTRING_ApplicationDataContainer },
+    };
+
+    if (c) *c = ARRAY_SIZE( entries );
+    if (i)
+    {
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        *i = (IID *)array;
+    }
+    return S_OK;
+}
 static HRESULT WINAPI empty_map_view_GetRuntimeClassName( IMapView_HSTRING_ApplicationDataContainer *iface, HSTRING *n )
 {
     return WindowsCreateString( L"Windows.Foundation.Collections.IMapView`2", 40, n );
