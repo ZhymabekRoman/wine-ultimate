@@ -489,52 +489,70 @@ static HRESULT STDMETHODCALLTYPE factory_GetTrustLevel( IActivationFactory *ifac
     return S_OK;
 }
 
+/* Identity-stable allocation: CoreCLR's ComWrappers RCW cache is keyed by the
+ * raw ABI pointer. Heap-allocated instances that the app releases let the RCW
+ * entry alias a wine-heap block that gets reused (e.g. by a managed UTF-16
+ * string); the vtable shader then executes mov 0x38(%rax),%rax against the
+ * string header and faults (VTableIndirection chunk-handle mis-decode). Serve
+ * the class from a static slab ring: RING_SIZE slots are allocated once, are
+ * never freed (self-referencing ref count), keep their inner map/iterator
+ * cache faces for the lifetime of the slot, and cycle round-robin so any
+ * RCW cache depth sees a live, generation-stable identity. Windows itself
+ * hands out Values as a live per-container view; a ring of 8 satisfies the
+ * "fresh per call" shape while pinning the identities. */
+#define PROPERTYSET_RING_SIZE 8
+
+static struct propertyset propertyset_ring[PROPERTYSET_RING_SIZE];
+static INIT_ONCE propertyset_ring_once = INIT_ONCE_STATIC_INIT;
+static LONG propertyset_ring_next;
+
+static const struct map_iids propertyset_map_iids =
+{
+    .map = &IID_IMap_HSTRING_IInspectable,
+    .view = &IID_IMapView_HSTRING_IInspectable,
+    .iterable = &IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
+    .iterator = &IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
+    .pair = &IID_IKeyValuePair_HSTRING_IInspectable,
+};
+
+static BOOL CALLBACK propertyset_ring_init( INIT_ONCE *once, void *param, void **context )
+{
+    ULONG i;
+
+    for (i = 0; i < PROPERTYSET_RING_SIZE; i++)
+    {
+        struct propertyset *impl = &propertyset_ring[i];
+
+        impl->IPropertySet_iface.lpVtbl = &propertyset_vtbl;
+        impl->IMapView_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IMapView_vtbl;
+        impl->IIterable_IKeyValuePair_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IIterable_vtbl;
+        impl->IObservableMap_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IObservableMap_vtbl;
+        impl->ref = 1; /* self-reference: ring slots are never freed */
+
+        if (FAILED(multi_threaded_map_create( &propertyset_map_iids,
+                                              (IInspectable *)&impl->IPropertySet_iface,
+                                              &impl->map_inner )))
+            continue;
+        IInspectable_QueryInterface( impl->map_inner, &IID_IMap_HSTRING_IInspectable,
+                                     (void **)&impl->inner_map );
+        IInspectable_QueryInterface( impl->map_inner, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
+                                     (void **)&impl->inner_iterable );
+    }
+    return TRUE;
+}
+
 static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
-    static const struct map_iids iids =
-    {
-        .map = &IID_IMap_HSTRING_IInspectable,
-        .view = &IID_IMapView_HSTRING_IInspectable,
-        .iterable = &IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
-        .iterator = &IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
-        .pair = &IID_IKeyValuePair_HSTRING_IInspectable,
-    };
-
     struct propertyset *impl;
-    HRESULT hr;
 
     TRACE( "(%p, %p)\n", iface, instance );
 
-    impl = calloc( 1, sizeof( *impl ) );
-    if (!impl)
+    InitOnceExecuteOnce( &propertyset_ring_once, propertyset_ring_init, NULL, NULL );
+
+    impl = &propertyset_ring[InterlockedIncrement( &propertyset_ring_next ) & (PROPERTYSET_RING_SIZE - 1)];
+    if (!impl->map_inner)
         return E_OUTOFMEMORY;
-
-    impl->IPropertySet_iface.lpVtbl = &propertyset_vtbl;
-    impl->IMapView_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IMapView_vtbl;
-    impl->IIterable_IKeyValuePair_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IIterable_vtbl;
-    impl->IObservableMap_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IObservableMap_vtbl;
-    impl->ref = 1;
-
-    if (FAILED(hr = multi_threaded_map_create( &iids, (IInspectable *)&impl->IPropertySet_iface, &impl->map_inner )))
-    {
-        free( impl );
-        return hr;
-    }
-    if (FAILED(hr = IInspectable_QueryInterface( impl->map_inner, &IID_IMap_HSTRING_IInspectable,
-                                                 (void **)&impl->inner_map )))
-    {
-        IInspectable_Release( impl->map_inner );
-        free( impl );
-        return hr;
-    }
-    if (FAILED(hr = IInspectable_QueryInterface( impl->map_inner, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
-                                                 (void **)&impl->inner_iterable )))
-    {
-        IMap_HSTRING_IInspectable_Release( impl->inner_map );
-        IInspectable_Release( impl->map_inner );
-        free( impl );
-        return hr;
-    }
+    InterlockedIncrement( &impl->ref );
 
     *instance = (IInspectable *)&impl->IPropertySet_iface;
     return S_OK;
