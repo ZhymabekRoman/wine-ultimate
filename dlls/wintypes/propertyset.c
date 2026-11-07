@@ -38,6 +38,29 @@ static const GUID IID_IMapView_String_IInspectable =
 static const GUID IID_IMapView_StringObject_IInspectable =
 { 0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0} };
 
+/* CoreCLR's ComWrappers shader reads the IInspectable::GetIids output of a
+ * WinRT object as an array of ComInterfaceEntry pairs, not a bare IID array:
+ *
+ *   struct ComInterfaceEntry { void **Vtable; GUID *IID; };
+ *
+ * The shader (InvokeableVtable generation) walks count entries, and for each
+ * pair stores entry->Vtable as the source vtable it thunks into slot N, using
+ * entry->IID to key the interface. With a bare IID array the shader read entry
+ * i's "Vtable" half as the (i+1)-th IID's raw bytes, so a generated thunk's
+ * call target became IID data (observed rax=0x47264f325c13e51c =
+ * IID_IMapView<String,Object> executed as a call target after
+ * mov 0x38(%rax),%rax). Hand back a real pair array: a stable IID pointer
+ * (the static IID globals) plus the real per-interface vtable, allocated
+ * per-call with CoTaskMemAlloc (CoreCLR frees it with CoTaskMemFree). */
+struct com_interface_entry;
+
+/* Forward accessors: the merged-face vtables are defined below GetIids; the
+ * shader hands these out as the entry Vtable pointers. */
+static void **propertyset_vtbl_ptr( void );
+static void **propertyset_imapview_vtbl_ptr( void );
+static void **propertyset_iterable_vtbl_ptr( void );
+static void **propertyset_iobservablemap_vtbl_ptr( void );
+
 /* Windows hands out a single object for the whole PropertySet interface set:
  * QI for IPropertySet, IMap, IMapView, IIterable and IObservableMap all return
  * the same pointer at offset 0, whose vtable is the prefix-deduplicated union
@@ -140,22 +163,24 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
      * arms on the merged face, so the list stays narrow; an over-wide list
      * makes the CoreCLR ComWrappers shader probe IIterable/IIterator
      * adapters whose CreateObject walks past the entries it can satisfy. */
-    IID instance_iids[] =
+    struct com_interface_entry entries[] =
     {
-        IID_IPropertySet,
-        IID_IMap_HSTRING_IInspectable,
-        IID_IMapView_HSTRING_IInspectable,
-        IID_IObservableMap_HSTRING_IInspectable,
+        { (IID *)&IID_IMap_String_IInspectable, propertyset_vtbl_ptr() },
+        { (IID *)&IID_IMapView_StringObject_IInspectable, propertyset_imapview_vtbl_ptr() },
+        { (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable, propertyset_iterable_vtbl_ptr() },
+        { (IID *)&IID_IObservableMap_HSTRING_IInspectable, propertyset_iobservablemap_vtbl_ptr() },
     };
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = ARRAY_SIZE(instance_iids);
+    if (iid_count) *iid_count = ARRAY_SIZE(entries);
     if (iids)
     {
-        IID *array = CoTaskMemAlloc( sizeof(instance_iids) );
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof(entries) );
         if (!array) return E_OUTOFMEMORY;
-        memcpy( array, instance_iids, sizeof(instance_iids) );
-        *iids = array;
+        memcpy( array, entries, sizeof(entries) );
+        *iids = (IID *)array;
+        TRACE( "returning %u ComInterfaceEntry pairs: v0=%p iid0=%p\n",
+               ARRAY_SIZE(entries), (void *)array[0].vtable, (void *)array[0].iid );
     }
     return S_OK;
 }
@@ -390,6 +415,13 @@ static const struct { IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; voi
     { 0, 0, 0, 0 }
 };
 #define propertyset_IIterable_vtbl propertyset_IIterable_vtbl_full.vtbl
+
+
+/* vtable accessors used by propertyset_GetIids' ComInterfaceEntry table. */
+static void **propertyset_vtbl_ptr( void ) { return (void **)&propertyset_vtbl; }
+static void **propertyset_imapview_vtbl_ptr( void ) { return (void **)&propertyset_IMapView_vtbl; }
+static void **propertyset_iterable_vtbl_ptr( void ) { return (void **)&propertyset_IIterable_vtbl; }
+static void **propertyset_iobservablemap_vtbl_ptr( void ) { return (void **)&propertyset_IObservableMap_vtbl; }
 
 
 struct propertyset_factory

@@ -24,6 +24,15 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(combase);
 
+/* vtable accessors handed out by the GetIids ComInterfaceEntry tables below;
+ * defined next to their vtables, forward-declared here. */
+static void **map_pair_vtbl_ptr( void );
+static void **map_iterator_vtbl_ptr( void );
+static void **map_map_view_vtbl_ptr( void );
+static void **map_iterable_view_vtbl_ptr( void );
+static void **map_map_vtbl_ptr( void );
+static void **map_iterable_vtbl_ptr( void );
+
 /* The C++/WinRT projections of Windows.Foundation.Collections interfaces reach
  * our map objects through the *Windows* parameterized interface ids, not the
  * ids Wine's idl generates for its own IMap<HSTRING, IInspectable*>
@@ -149,8 +158,22 @@ static ULONG WINAPI pair_Release( IKeyValuePair_HSTRING_IInspectable *iface )
 
 static HRESULT WINAPI pair_GetIids( IKeyValuePair_HSTRING_IInspectable *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    struct com_interface_entry entries[] =
+    {
+        { (IID *)&IID_IKeyValuePair_HSTRING_IInspectable, map_pair_vtbl_ptr() },
+    };
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (iid_count) *iid_count = ARRAY_SIZE( entries );
+    if (iids)
+    {
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
+    }
+    return S_OK;
 }
 
 static HRESULT WINAPI pair_GetRuntimeClassName( IKeyValuePair_HSTRING_IInspectable *iface, HSTRING *class_name )
@@ -193,6 +216,8 @@ static const IKeyValuePair_HSTRING_IInspectableVtbl pair_vtbl =
     pair_get_Key,
     pair_get_Value,
 };
+
+static void **map_pair_vtbl_ptr( void ) { return (void **)&pair_vtbl; }
 
 static HRESULT pair_create( const GUID *iid, struct map_entry *entry, IKeyValuePair_HSTRING_IInspectable **out )
 {
@@ -301,20 +326,20 @@ static ULONG WINAPI iterator_Release( IIterator_IKeyValuePair_HSTRING_IInspectab
 
 static HRESULT WINAPI iterator_GetIids( IIterator_IKeyValuePair_HSTRING_IInspectable *iface, ULONG *iid_count, IID **iids )
 {
-    IID instance_iids[] =
+    struct com_interface_entry entries[] =
     {
-        IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
+        { (IID *)&IID_IIterator_IKeyValuePair_HSTRING_IInspectable, map_iterator_vtbl_ptr() },
     };
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = ARRAY_SIZE( instance_iids );
+    if (iid_count) *iid_count = ARRAY_SIZE( entries );
     if (iids)
     {
-        IID *array = CoTaskMemAlloc( sizeof( instance_iids ) );
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
-        memcpy( array, instance_iids, sizeof( instance_iids ) );
-        *iids = array;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
     }
     return S_OK;
 }
@@ -459,6 +484,8 @@ static const struct { IIterator_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; voi
 };
 #define iterator_vtbl iterator_vtbl_full.vtbl
 
+static void **map_iterator_vtbl_ptr( void ) { return (void **)&iterator_vtbl; }
+
 
 static struct map_view *impl_from_IMapView_HSTRING_IInspectable( IMapView_HSTRING_IInspectable *iface )
 {
@@ -516,21 +543,21 @@ static ULONG WINAPI map_view_Release( IMapView_HSTRING_IInspectable *iface )
 
 static HRESULT WINAPI map_view_GetIids( IMapView_HSTRING_IInspectable *iface, ULONG *iid_count, IID **iids )
 {
-    IID instance_iids[] =
+    struct com_interface_entry entries[] =
     {
-        IID_IMapView_HSTRING_IInspectable,
-        IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
+        { (IID *)&IID_IMapView_HSTRING_IInspectable, map_map_view_vtbl_ptr() },
+        { (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable, map_iterable_view_vtbl_ptr() },
     };
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = ARRAY_SIZE( instance_iids );
+    if (iid_count) *iid_count = ARRAY_SIZE( entries );
     if (iids)
     {
-        IID *array = CoTaskMemAlloc( sizeof( instance_iids ) );
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
-        memcpy( array, instance_iids, sizeof( instance_iids ) );
-        *iids = array;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
     }
     return S_OK;
 }
@@ -676,6 +703,8 @@ static const struct { IMapView_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } ma
 };
 #define map_view_vtbl map_view_vtbl_full.vtbl
 
+static void **map_map_view_vtbl_ptr( void ) { return (void **)&map_view_vtbl; }
+
 
 DEFINE_IINSPECTABLE_( iterable_view, IIterable_IKeyValuePair_HSTRING_IInspectable, struct map_view, view_impl_from_IIterable_IKeyValuePair_HSTRING_IInspectable,
                       IIterable_IKeyValuePair_HSTRING_IInspectable_iface, &impl->IMapView_HSTRING_IInspectable_iface )
@@ -728,6 +757,8 @@ static const struct { IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; voi
     { 0, 0, 0, 0 }
 };
 #define iterable_view_vtbl iterable_view_vtbl_full.vtbl
+
+static void **map_iterable_view_vtbl_ptr( void ) { return (void **)&iterable_view_vtbl; }
 
 
 static HRESULT map_view_create( struct map *map, UINT first, UINT count, IMapView_HSTRING_IInspectable **out )
@@ -826,30 +857,25 @@ static ULONG WINAPI map_inner_Release( IInspectable *iface )
 static HRESULT WINAPI map_inner_GetIids( IInspectable *iface, ULONG *iid_count, IID **iids )
 {
     struct map *impl = impl_from_IInspectable( iface );
-    IID static_iids[] =
+    struct com_interface_entry entries[] =
     {
-        IID_IMap_HSTRING_IInspectable,
-        IID_IMapView_HSTRING_IInspectable,
-        IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
-        IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
-        IID_IKeyValuePair_HSTRING_IInspectable,
+        { (IID *)impl->iids.map, map_map_vtbl_ptr() },
+        { (IID *)impl->iids.view, map_map_view_vtbl_ptr() },
+        { (IID *)impl->iids.iterable, map_iterable_vtbl_ptr() },
+        { (IID *)impl->iids.iterator, map_iterator_vtbl_ptr() },
+        { (IID *)impl->iids.pair, map_pair_vtbl_ptr() },
     };
-    ULONG count = ARRAY_SIZE( static_iids );
-    IID *array;
+    ULONG count = ARRAY_SIZE( entries );
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
     if (iid_count) *iid_count = count;
     if (iids)
     {
+        struct com_interface_entry *array;
         if (!(array = CoTaskMemAlloc( count * sizeof(*array) ))) return E_OUTOFMEMORY;
-        memcpy( array, static_iids, sizeof( static_iids ) );
-        array[0] = *impl->iids.map;
-        array[1] = *impl->iids.view;
-        array[2] = *impl->iids.iterable;
-        array[3] = *impl->iids.iterator;
-        array[4] = *impl->iids.pair;
-        *iids = array;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
     }
     return S_OK;
 }
@@ -1099,6 +1125,8 @@ static const struct { IMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } map_vt
 };
 #define map_vtbl map_vtbl_full.vtbl
 
+static void **map_map_vtbl_ptr( void ) { return (void **)&map_vtbl; }
+
 
 DEFINE_IINSPECTABLE_OUTER( iterable, IIterable_IKeyValuePair_HSTRING_IInspectable, struct map, IInspectable_outer )
 
@@ -1136,6 +1164,8 @@ static const struct { IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; voi
     { 0, 0, 0, 0 }
 };
 #define iterable_vtbl iterable_vtbl_full.vtbl
+
+static void **map_iterable_vtbl_ptr( void ) { return (void **)&iterable_vtbl; }
 
 
 HRESULT single_threaded_map_create( const struct map_iids *iids, IInspectable *outer, IInspectable **out )
