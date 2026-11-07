@@ -5134,6 +5134,69 @@ static void mrm_prearm_pinbuffer(void)
     TRACE("prearm pinbuffer slot %p = %p\n", slot, (void *)*slot);
 }
 
+/* Extended-service vtable swap (nest-collapse wave, 2026-11-08).
+ *
+ * mrt100_app PalSetWerDataBuffer (RVA 0x80808) is the net10-shape
+ * SetWerDataBuffer(buffer, out old-buffer): it calls vtable+24 on the
+ * {2f4bac61-3ab9-46a0-8d62-1f3ff88090fa} face (QI'd from the mrt100.dll
+ * service object in PalInit, mrt100_app RVA 0x80682) and returns the
+ * out-parameter as the "first registration" answer of the WER publish
+ * (pinbuffer pre-arm, 2a3f9875).  The 2.2-generation mrt100.dll answers
+ * slot+24 with SetHardwareExceptionHandler (RVA 0x2210, measured live; the
+ * base face keeps the 0x1ea0 twin): it stores the buffer pointer into
+ * g_pfnHardwareExceptionHandler (RVA 0xa098, evicting the Redhawk filter
+ * published at startup) and never writes the out-parameter.  Every AV after that single publish then dispatches
+ * HardwareVectoredExceptionHandler (RVA 0x1450) into the buffer-as-code
+ * stub (write to [0]), whose resume faults again: 284 nested write-AVs at
+ * 0xE40 stack each, killed by the stack stack-overflow at
+ * application_QueryInterface {06499997}.
+ *
+ * The net10-shape responder already exists in this mrt100.dll:
+ * Wer_SetWerDataBuffer (RVA 0x1470, "*out = old buffer; store; S_OK"),
+ * published at vtable+48.  Swap slot+24 onto it from the first activation:
+ * the publish writes its out-parameter, g_pfnHardwareExceptionHandler keeps
+ * the Redhawk filter, and the AV storm nests one deep.  The vtable lives in
+ * the zero-characteristics .rdata of this MinGW build, which Wine maps
+ * writable, so the swap is a single store into the loaded image.
+ */
+static void mrm_prearm_werfacade(void)
+{
+    static HMODULE hmod;
+    unsigned char *base;
+    void **instance, **vtable;
+    DWORD old;
+    int i;
+
+    if (!hmod && !(hmod = GetModuleHandleA("mrt100.dll")))
+    {
+        TRACE("prearm welfacade: mrt100.dll not loaded\n");
+        return;
+    }
+    base = (unsigned char *)hmod;
+
+    instance = (void **)(base + 0x4020);        /* g_ExtendedServicesInstance */
+    vtable = instance ? (void **)*instance : NULL;
+    if (!vtable) return;
+    if (vtable[3] == base + 0x1470) return;     /* already swapped (idempotent) */
+    if (vtable[3] != base + 0x1ea0 && vtable[3] != base + 0x2210)
+    {
+        TRACE("prearm welfacade: base %p vtable %p slot24 %p\n", base, vtable, vtable[3]);
+        return;
+    }
+    for (i = 4; i < 16; i++)                    /* locate the SetWerDataBuffer responder */
+        if (vtable[i] == base + 0x1470) break;
+    if (i == 16)
+    {
+        TRACE("prearm welfacade: base %p vtable %p slot24 %p, responder not in [4..15]\n",
+              base, vtable, vtable[3]);
+        return;
+    }
+    VirtualProtect( &vtable[3], sizeof(*vtable), PAGE_READWRITE, &old );
+    vtable[3] = vtable[i];                      /* publish answers with the old buffer */
+    VirtualProtect( &vtable[3], sizeof(*vtable), old, &old );
+    TRACE("prearm extended face: vtable+24 -> SetWerDataBuffer slot %d\n", i);
+}
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
@@ -5142,6 +5205,7 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
     TRACE("class %s, factory %p.\n", debugstr_hstring(classid), factory);
 
     mrm_prearm_pinbuffer();
+    mrm_prearm_werfacade();
 
     if (!factory) return E_POINTER;
     *factory = NULL;
