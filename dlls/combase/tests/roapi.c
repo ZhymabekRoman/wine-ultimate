@@ -1048,6 +1048,210 @@ static void test_winappsdk_activation_route(void)
     RoUninitialize();
 }
 
+/*
+ * DeploymentManager.Current (1.4) and the instance's CurrentPackages (1.7) are
+ * the WindowsAppSDK deployment enumeration; the rows are the framework packages
+ * registered on the AppModel plane (the same AppModel\Packages keys kernelbase
+ * answers package identity from), so a framework seeded into the registry must
+ * enumerate as a PackageDependencyPackageInfo whose Package.Id.FullName — and
+ * DependencyPackageInfo.PackageId — name exactly that package.
+ */
+static HRESULT call_out( void *iface, unsigned int slot, void **out )
+{
+    HRESULT (STDMETHODCALLTYPE *fn)( void *, void ** ) = (void *)(*(void ***)iface)[slot];
+    return fn( iface, out );
+}
+
+static HRESULT call_u32_out( void *iface, unsigned int slot, UINT32 *out )
+{
+    HRESULT (STDMETHODCALLTYPE *fn)( void *, UINT32 * ) = (void *)(*(void ***)iface)[slot];
+    return fn( iface, out );
+}
+
+static HRESULT call_in_u32_out( void *iface, unsigned int slot, UINT32 index, void **out )
+{
+    HRESULT (STDMETHODCALLTYPE *fn)( void *, UINT32, void ** ) = (void *)(*(void ***)iface)[slot];
+    return fn( iface, index, out );
+}
+
+static void unref( void *iface )
+{
+    ULONG (STDMETHODCALLTYPE *fn)( void * ) = (void *)(*(void ***)iface)[2];
+    fn( iface );
+}
+
+static void test_deployment_manager_current_packages(void)
+{
+    static const WCHAR manager_class[] = L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentManager";
+    static const WCHAR fw_name[] = L"WineWpDeploy_7.7.7.7_x64__8wekyb3d8bbwe";
+    static const WCHAR fw_path[] = L"C:\\deployfw";
+    static const WCHAR fw_key[] =
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineWpDeploy_7.7.7.7_x64__8wekyb3d8bbwe";
+    struct test_version { WORD Major, Minor, Build, Revision; } version;
+    HRESULT (STDMETHODCALLTYPE *get_version)( void *, struct test_version * );
+    HRESULT hr;
+    HSTRING str = NULL, name = NULL;
+    IActivationFactory *factory = NULL;
+    HKEY hkey;
+    DWORD framework = 1;
+    UINT32 count = 0, i;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr );
+
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, fw_key, 0, NULL, REG_OPTION_NON_VOLATILE,
+                         KEY_WRITE, NULL, &hkey, NULL ))
+    {
+        win_skip( "cannot create the AppModel Packages key\n" );
+        RoUninitialize();
+        return;
+    }
+    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)fw_path, (lstrlenW( fw_path ) + 1) * sizeof(WCHAR) );
+    RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&framework, sizeof(framework) );
+    RegCloseKey( hkey );
+
+    hr = WindowsCreateString( manager_class, lstrlenW( manager_class ), &str );
+    ok( hr == S_OK, "WindowsCreateString returned %#lx.\n", hr );
+
+    factory = NULL;
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    ok( hr == S_OK && factory, "RoGetActivationFactory returned %#lx, factory %p.\n", hr, factory );
+    if (FAILED( hr ) || !factory) goto done;
+
+    /* DeploymentManager.Current: the statics get_Current (merged factory slot 8)
+     * answers the DeploymentManager instance face. */
+    {
+        void *manager = NULL, *async = NULL, *view = NULL;
+        BOOL found = FALSE;
+
+        hr = call_out( factory, 8, &manager );
+        ok( hr == S_OK && manager, "get_Current returned %#lx, manager %p.\n", hr, manager );
+        if (FAILED( hr ) || !manager) goto done;
+
+        name = NULL;
+        hr = IInspectable_GetRuntimeClassName( (IInspectable *)manager, &name );
+        ok( hr == S_OK && name && !wcscmp( WindowsGetStringRawBuffer( name, NULL ), manager_class ),
+            "Current GetRuntimeClassName returned %#lx, name %s.\n", hr,
+            debugstr_w( WindowsGetStringRawBuffer( name, NULL ) ) );
+        WindowsDeleteString( name );
+
+        /* CurrentPackages: born-completed async (instance slot 8) -> GetResults (slot 8)
+         * -> IVectorView over the registered frameworks. */
+        hr = call_out( manager, 8, &async );
+        ok( hr == S_OK && async, "get_CurrentPackages returned %#lx, async %p.\n", hr, async );
+        if (FAILED( hr ) || !async) goto done;
+
+        hr = call_out( async, 8, &view );
+        ok( hr == S_OK && view, "GetResults returned %#lx, view %p.\n", hr, view );
+        if (FAILED( hr ) || !view) goto done;
+
+        hr = call_u32_out( view, 7, &count );  /* IVectorView::get_Size */
+        ok( hr == S_OK && count >= 1, "get_Size returned %#lx, size %u.\n", hr, count );
+
+        for (i = 0; i < count && !found; i++)
+        {
+            void *row = NULL, *info = NULL, *package = NULL, *id = NULL;
+            const WCHAR *raw;
+
+            row = NULL;
+            hr = call_in_u32_out( view, 6, i, &row );  /* IVectorView::GetAt */
+            if (FAILED( hr ) || !row) break;
+
+            hr = call_out( row, 7, &package );  /* IPackageDependencyPackageInfo::get_Package */
+            if (SUCCEEDED( hr ) && package)
+            {
+                hr = call_out( package, 6, &id );  /* IPackage::get_Id */
+                if (SUCCEEDED( hr ) && id)
+                {
+                    name = NULL;
+                    hr = call_out( id, 6, (void **)&name );  /* IPackageId::get_FullName */
+                    raw = WindowsGetStringRawBuffer( name, NULL );
+                    found = SUCCEEDED( hr ) && raw && !wcscmp( raw, fw_name );
+                    WindowsDeleteString( name );
+                    name = NULL;
+                    hr = call_out( id, 7, (void **)&name );  /* IPackageId::get_FamilyName */
+                    raw = WindowsGetStringRawBuffer( name, NULL );
+                    ok( !found || (SUCCEEDED( hr ) && raw && !wcscmp( raw, L"WineWpDeploy_8wekyb3d8bbwe" )),
+                        "PackageId.FamilyName is %s.\n", debugstr_w( raw ) );
+                    WindowsDeleteString( name );
+
+                    if (found)
+                    {
+                        /* The same row's graph face names the package identically,
+                         * down to the path and the version parsed out of the name. */
+                        hr = call_out( row, 6, &info );  /* get_DependencyPackageInfo */
+                        if (SUCCEEDED( hr ) && info)
+                        {
+                            name = NULL;
+                            hr = call_out( info, 7, (void **)&name );  /* get_PackageId */
+                            raw = WindowsGetStringRawBuffer( name, NULL );
+                            ok( SUCCEEDED( hr ) && raw && !wcscmp( raw, fw_name ),
+                                "DependencyPackageInfo.PackageId is %s.\n", debugstr_w( raw ) );
+                            WindowsDeleteString( name );
+                            name = NULL;
+                            hr = call_out( info, 8, (void **)&name );  /* get_PackagePath */
+                            raw = WindowsGetStringRawBuffer( name, NULL );
+                            ok( SUCCEEDED( hr ) && raw && !wcscmp( raw, fw_path ),
+                                "DependencyPackageInfo.PackagePath is %s.\n", debugstr_w( raw ) );
+                            WindowsDeleteString( name );
+
+                            get_version = (void *)(*(void ***)info)[9];  /* get_Version */
+                            version.Major = version.Minor = version.Build = version.Revision = 0;
+                            hr = get_version( info, &version );
+                            ok( hr == S_OK && version.Major == 7 && version.Minor == 7
+                                && version.Build == 7 && version.Revision == 7,
+                                "get_Version returned %#lx, %u.%u.%u.%u.\n", hr,
+                                version.Major, version.Minor, version.Build, version.Revision );
+
+                            name = NULL;
+                            hr = call_out( info, 6, (void **)&name );  /* get_Dependency (shape check only) */
+                            ok( SUCCEEDED( hr ) && name, "DependencyPackageInfo.Dependency returned %#lx, %p.\n", hr, name );
+                            if (name)
+                            {
+                                void *dep_name = NULL;
+                                hr = call_out( name, 7, (void **)&dep_name );  /* PackageDependency::get_Name */
+                                raw = WindowsGetStringRawBuffer( dep_name, NULL );
+                                ok( SUCCEEDED( hr ) && raw && !wcscmp( raw, L"WineWpDeploy_8wekyb3d8bbwe" ),
+                                    "Dependency.Name is %s.\n", debugstr_w( raw ) );
+                                WindowsDeleteString( dep_name );
+                                unref( name );
+                            }
+                            unref( info );
+                        }
+
+                        name = NULL;
+                        hr = call_out( package, 7, (void **)&name );  /* IPackage::get_InstalledLocation */
+                        ok( SUCCEEDED( hr ) && name, "InstalledLocation returned %#lx, %p.\n", hr, name );
+                        if (name)
+                        {
+                            void *uri = NULL;
+                            hr = call_out( name, 6, (void **)&uri );  /* Uri::get_AbsoluteUri */
+                            raw = WindowsGetStringRawBuffer( uri, NULL );
+                            ok( SUCCEEDED( hr ) && raw && !wcscmp( raw, L"file:///C:\\deployfw" ),
+                                "InstalledLocation.AbsoluteUri is %s.\n", debugstr_w( raw ) );
+                            WindowsDeleteString( uri );
+                            unref( name );
+                        }
+                    }
+                    unref( id );
+                }
+                unref( package );
+            }
+            unref( row );
+        }
+        ok( found, "the seeded framework %s did not enumerate in CurrentPackages.\n", debugstr_w( fw_name ) );
+        unref( view );
+        unref( async );
+        unref( manager );
+    }
+
+done:
+    RegDeleteTreeW( HKEY_CURRENT_USER, fw_key );
+    WindowsDeleteString( str );
+    IActivationFactory_Release( factory );
+    RoUninitialize();
+}
+
 static void test_registered_activation_factories(void)
 {
     static const WCHAR compositor_name[] = L"Windows.UI.Composition.Compositor";
@@ -1866,6 +2070,7 @@ START_TEST(roapi)
     test_composition_activation_route();
     test_resources_core_activation_route();
     test_winappsdk_activation_route();
+    test_deployment_manager_current_packages();
     test_registered_activation_factories();
     test_activation_for_host();
     test_class_name_version();

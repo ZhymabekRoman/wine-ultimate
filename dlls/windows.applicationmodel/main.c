@@ -461,18 +461,16 @@ static HRESULT WINAPI deployment_package_get_InstalledPath( void *iface, HSTRING
     return WindowsCreateString( L"C:\\Program Files\\WindowsApps\\Stub_1.0.0.0_x64__8wekyb3d8bbwe", 57, path );
 }
 static HRESULT WINAPI deployment_package_get_IsFramework( void *iface, BOOL *ret ) { if (ret) *ret = TRUE; return S_OK; }
-static HRESULT WINAPI deployment_package_get_Version( void *iface, struct PackageVersion *version )
+/* The version field of a registered package full name (Name_V.V.V.V_arch_pub). */
+static void fill_package_version( const WCHAR *full_name, struct PackageVersion *version )
 {
     const UINT16 *fields[4] = { &version->Major, &version->Minor, &version->Build, &version->Revision };
-    struct framework_entry fw;
     SIZE_T i;
     WCHAR *end;
     const WCHAR *v;
 
-    if (!version) return S_OK;
     version->Major = 1, version->Minor = 0, version->Build = 0, version->Revision = 0;
-    if (!winappsdk_framework( &fw )) return S_OK;
-    if (!(v = wcschr( fw.full_name, L'_' ))) return S_OK;
+    if (!(v = wcschr( full_name, L'_' ))) return;
     v++;
     for (i = 0; i < 4; i++)
     {
@@ -480,6 +478,15 @@ static HRESULT WINAPI deployment_package_get_Version( void *iface, struct Packag
         if (*end != L'.') break;
         v = end + 1;
     }
+}
+
+static HRESULT WINAPI deployment_package_get_Version( void *iface, struct PackageVersion *version )
+{
+    struct framework_entry fw;
+
+    if (!version) return S_OK;
+    version->Major = 1, version->Minor = 0, version->Build = 0, version->Revision = 0;
+    if (winappsdk_framework( &fw )) fill_package_version( fw.full_name, version );
     return S_OK;
 }
 
@@ -567,6 +574,8 @@ static const void *winappsdk_async_vtbl[] =
 static struct winappsdk_async deployment_async_inst = { winappsdk_async_vtbl, 1 };
 
 static HRESULT WINAPI deployment_manager_Ensure( void *iface, void **op ) { if (op) *op = &deployment_async_inst; return S_OK; }
+static HRESULT WINAPI deployment_manager_get_CurrentPackages( void *iface, void **op );
+static HRESULT WINAPI deployment_manager_factory_get_Current( void *iface, void **manager );
 
 static const void *deployment_manager_vtbl[] =
 {
@@ -578,7 +587,7 @@ static const void *deployment_manager_vtbl[] =
     winappsdk_GetTrustLevel,
     deployment_manager_Ensure,     /* EnsureCurrentApplicationDeployedAsync */
     deployment_manager_Ensure,     /* EnsureLatestAsync */
-    winappsdk_zero_out,
+    deployment_manager_get_CurrentPackages, /* CurrentPackages (1.7) */
     winappsdk_zero_out,
 };
 
@@ -598,6 +607,7 @@ static const void *deployment_manager_factory_vtbl[] =
     winappsdk_GetTrustLevel,
     winappsdk_factory_ActivateInstance,
     deployment_manager_factory_GetCurrent,
+    deployment_manager_factory_get_Current,  /* IDeploymentManagerStatics2::get_Current (1.4) */
 };
 
 static struct winappsdk_class deployment_manager_obj =
@@ -608,6 +618,472 @@ static struct winappsdk_factory deployment_manager_factory =
 {
     deployment_manager_factory_vtbl, &deployment_manager_obj, 1
 };
+
+/* DeploymentManager.Current / CurrentPackages --------------------------------
+ *
+ * Current is the 1.4 statics property the projection reaches first; the instance's
+ * CurrentPackages (1.7) is a born-completed IAsyncOperation over an
+ * IVectorView<PackageDependencyPackageInfo>, one row per registered framework
+ * package on the AppModel plane above -- the same enumeration the PackageGraph
+ * iterable and DeploymentPackage.Id answer, so Package.Current dependents read one
+ * deployment view, not two. A row is a PackageDependencyPackageInfo: its
+ * DependencyPackageInfo names the family (Dependency), the package full name
+ * (PackageId) and path straight from the registry; its Package is a
+ * Windows.ApplicationModel.Package face carrying the same identity -- Id.FullName,
+ * Id.Version parsed from it, InstalledLocation as a file:/// URI, IsFramework.
+ *
+ * The rows are per-snapshot heap objects (unlike the class singletons above): the
+ * enumeration is a picture of the registry taken at the call, and the last
+ * reference to a row frees it. Slots follow the WinAppSDK metadata order:
+ * IPackageDependencyPackageInfo { DependencyPackageInfo, Package },
+ * IDependencyPackageInfo { Dependency, PackageId, PackagePath, Version },
+ * IPackage { Id, InstalledLocation, IsFramework, IsResourcePackage, ... },
+ * IPackageId { FullName, FamilyName, PublisherId, Version, Architecture, ... },
+ * IVectorView { GetAt, Size, IndexOf, GetMany }. */
+
+struct fw_face
+{
+    const void *vtbl;
+    const WCHAR *name;
+    LONG ref;
+    struct framework_entry fw;
+};
+
+static const void *package_dependency_package_info_vtbl[];
+static const void *dependency_package_info_vtbl[];
+static const void *fw_package_vtbl[];
+static const void *fw_package_id_vtbl[];
+static const void *fw_uri_vtbl[];
+static const void *packages_async_vtbl[];
+
+static const WCHAR package_dependency_package_info_class[] =
+    L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.PackageDependencyPackageInfo";
+static const WCHAR dependency_package_info_class[] =
+    L"Microsoft.Windows.ApplicationModel.PackageGraph.DependencyPackageInfo";
+static const WCHAR fw_package_class[] = L"Windows.ApplicationModel.Package";
+static const WCHAR fw_package_id_class[] = L"Windows.ApplicationModel.PackageId";
+static const WCHAR fw_uri_class[] = L"Windows.Foundation.Uri";
+static const WCHAR packages_view_class[] =
+    L"Windows.Foundation.Collections.IVectorView`1<Microsoft.Windows.ApplicationModel.WindowsAppRuntime.PackageDependencyPackageInfo>";
+static const WCHAR packages_async_class[] =
+    L"Windows.Foundation.IAsyncOperation`1<Windows.Foundation.Collections.IVectorView`1<"
+    L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.PackageDependencyPackageInfo>>";
+
+static HRESULT WINAPI fw_face_QueryInterface( struct fw_face *iface, REFIID iid, void **out )
+{
+    *out = iface;
+    InterlockedIncrement( &iface->ref );
+    return S_OK;
+}
+static ULONG WINAPI fw_face_AddRef( struct fw_face *iface ) { return InterlockedIncrement( &iface->ref ); }
+static ULONG WINAPI fw_face_Release( struct fw_face *iface )
+{
+    LONG ref = InterlockedDecrement( &iface->ref );
+    if (!ref) HeapFree( GetProcessHeap(), 0, iface );
+    return ref;
+}
+static HRESULT WINAPI fw_face_GetRuntimeClassName( struct fw_face *iface, HSTRING *name )
+{
+    return WindowsCreateString( iface->name, lstrlenW( iface->name ), name );
+}
+
+static struct fw_face *fw_face_create( const void *vtbl, const WCHAR *name, const struct framework_entry *fw )
+{
+    struct fw_face *face = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*face) );
+
+    if (!face) return NULL;
+    face->vtbl = vtbl;
+    face->name = name;
+    face->ref = 1;
+    if (fw) face->fw = *fw;
+    return face;
+}
+
+static HRESULT WINAPI fw_hstring( const WCHAR *value, HSTRING *out )
+{
+    if (!out) return S_OK;
+    *out = NULL;
+    if (!value[0]) return S_OK;
+    return WindowsCreateString( value, lstrlenW( value ), out );
+}
+
+/* IDependencyPackageInfo (Microsoft.Windows.ApplicationModel.PackageGraph). */
+static HRESULT WINAPI dep_package_info_get_Dependency( struct fw_face *iface, void **dep )
+{
+    struct package_dependency *d;
+
+    if (!dep) return S_OK;
+    *dep = NULL;
+    if (!(d = HeapAlloc( GetProcessHeap(), 0, sizeof(*d) ))) return E_OUTOFMEMORY;
+    d->cls.vtbl = package_dependency_vtbl;
+    d->cls.name = PACKAGE_DEPENDENCY_CLASS;
+    d->cls.ref = 1;  /* the caller's reference; the row owns none */
+    family_from_full_name( iface->fw.full_name, d->family, ARRAY_SIZE(d->family) );
+    *dep = d;
+    return S_OK;
+}
+static HRESULT WINAPI dep_package_info_get_PackageId( struct fw_face *iface, HSTRING *id )
+{
+    return fw_hstring( iface->fw.full_name, id );
+}
+static HRESULT WINAPI dep_package_info_get_PackagePath( struct fw_face *iface, HSTRING *path )
+{
+    return fw_hstring( iface->fw.path, path );
+}
+static HRESULT WINAPI dep_package_info_get_Version( struct fw_face *iface, struct PackageVersion *version )
+{
+    if (version) fill_package_version( iface->fw.full_name, version );
+    return S_OK;
+}
+
+/* IPackageId: the registry identity, Name_PublisherId split out of the full name. */
+static HRESULT WINAPI fw_package_id_get_FullName( struct fw_face *iface, HSTRING *value )
+{
+    return fw_hstring( iface->fw.full_name, value );
+}
+static HRESULT WINAPI fw_package_id_get_FamilyName( struct fw_face *iface, HSTRING *value )
+{
+    WCHAR family[128];
+
+    family_from_full_name( iface->fw.full_name, family, ARRAY_SIZE(family) );
+    return fw_hstring( family, value );
+}
+static HRESULT WINAPI fw_package_id_get_PublisherId( struct fw_face *iface, HSTRING *value )
+{
+    const WCHAR *publisher = wcsrchr( iface->fw.full_name, L'_' );
+
+    return fw_hstring( publisher ? publisher + 1 : L"", value );
+}
+static HRESULT WINAPI fw_package_id_get_Version( struct fw_face *iface, struct PackageVersion *version )
+{
+    if (version) fill_package_version( iface->fw.full_name, version );
+    return S_OK;
+}
+static HRESULT WINAPI fw_package_id_get_Architecture( struct fw_face *iface, UINT32 *value )
+{
+    if (value) *value = 5; /* PackageArchitecture_X64: the prefix is x64 */
+    return S_OK;
+}
+
+/* Windows.Foundation.Uri face for InstalledLocation: file:///<PackagePath>. */
+static HRESULT WINAPI fw_uri_get_AbsoluteUri( struct fw_face *iface, HSTRING *value )
+{
+    WCHAR uri[MAX_PATH + 16];
+
+    if (!value) return S_OK;
+    *value = NULL;
+    if (!iface->fw.path[0]) return S_OK;
+    lstrcpyW( uri, L"file:///" );
+    lstrcatW( uri, iface->fw.path );
+    return WindowsCreateString( uri, lstrlenW( uri ), value );
+}
+
+/* IPackage: the framework package as Package.Current dependents see it. */
+static HRESULT WINAPI fw_package_get_Id( struct fw_face *iface, void **id )
+{
+    struct fw_face *face;
+
+    if (!id) return S_OK;
+    *id = NULL;
+    if (!(face = fw_face_create( fw_package_id_vtbl, fw_package_id_class, &iface->fw ))) return E_OUTOFMEMORY;
+    *id = face;
+    return S_OK;
+}
+static HRESULT WINAPI fw_package_get_InstalledLocation( struct fw_face *iface, void **uri )
+{
+    struct fw_face *face;
+
+    if (!uri) return S_OK;
+    *uri = NULL;
+    if (!(face = fw_face_create( fw_uri_vtbl, fw_uri_class, &iface->fw ))) return E_OUTOFMEMORY;
+    *uri = face;
+    return S_OK;
+}
+static HRESULT WINAPI fw_package_get_IsFramework( struct fw_face *iface, BOOL *ret ) { if (ret) *ret = TRUE; return S_OK; }
+
+/* IPackageDependencyPackageInfo: the graph row + the deployment row. */
+static HRESULT WINAPI package_info_get_DependencyPackageInfo( struct fw_face *iface, void **info )
+{
+    struct fw_face *face;
+
+    if (!info) return S_OK;
+    *info = NULL;
+    if (!(face = fw_face_create( dependency_package_info_vtbl, dependency_package_info_class, &iface->fw )))
+        return E_OUTOFMEMORY;
+    *info = face;
+    return S_OK;
+}
+static HRESULT WINAPI package_info_get_Package( struct fw_face *iface, void **package )
+{
+    struct fw_face *face;
+
+    if (!package) return S_OK;
+    *package = NULL;
+    if (!(face = fw_face_create( fw_package_vtbl, fw_package_class, &iface->fw ))) return E_OUTOFMEMORY;
+    *package = face;
+    return S_OK;
+}
+
+/* IVectorView<PackageDependencyPackageInfo>: the snapshot. */
+struct packages_view
+{
+    const void *vtbl;
+    LONG ref;
+    struct fw_face **items;
+    UINT32 count;
+};
+
+static HRESULT packages_view_create( void **out );
+
+/* The async face is born completed; the view is the snapshot taken at GetResults. */
+static HRESULT WINAPI packages_async_put_Completed( struct fw_face *iface, void *handler )
+{
+    if (handler)
+    {
+        void **vtbl = *(void ***)handler;
+        HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, UINT32) = (void *)vtbl[3];
+        if (invoke) invoke( handler, iface, 1 /* AsyncStatus_Completed */ );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI packages_async_get_Completed( struct fw_face *iface, void **handler ) { if (handler) *handler = NULL; return S_OK; }
+static HRESULT WINAPI packages_async_GetResults( struct fw_face *iface, void **results )
+{
+    if (!results) return E_INVALIDARG;
+    *results = NULL;
+    return packages_view_create( results );
+}
+static HRESULT WINAPI packages_async_get_Id( struct fw_face *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI packages_async_get_Status( struct fw_face *iface, UINT32 *status ) { if (status) *status = 1; return S_OK; }
+static HRESULT WINAPI packages_async_get_ErrorCode( struct fw_face *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
+
+static HRESULT WINAPI packages_view_GetAt( struct packages_view *iface, UINT32 index, void **item )
+{
+    if (!item) return E_INVALIDARG;
+    if (index >= iface->count) return E_BOUNDS;
+    *item = iface->items[index];
+    InterlockedIncrement( &((struct fw_face *)*item)->ref );
+    return S_OK;
+}
+static HRESULT WINAPI packages_view_get_Size( struct packages_view *iface, UINT32 *size )
+{
+    if (size) *size = iface->count;
+    return S_OK;
+}
+static HRESULT WINAPI packages_view_IndexOf( struct packages_view *iface, void *item, UINT32 *index, BOOL *found )
+{
+    UINT32 i;
+
+    if (index) *index = 0;
+    if (!found) return S_OK;
+    *found = FALSE;
+    for (i = 0; i < iface->count; i++)
+        if (iface->items[i] == item) { *index = i; *found = TRUE; break; }
+    return S_OK;
+}
+static HRESULT WINAPI packages_view_GetMany( struct packages_view *iface, UINT32 start, UINT32 capacity, void **items,
+                                             UINT32 *written )
+{
+    UINT32 n = 0;
+
+    if (!written) return E_INVALIDARG;
+    *written = 0;
+    while (start + n < iface->count && n < capacity)
+    {
+        if (items)
+        {
+            items[n] = iface->items[start + n];
+            InterlockedIncrement( &((struct fw_face *)items[n])->ref );
+        }
+        n++;
+    }
+    *written = n;
+    return S_OK;
+}
+static ULONG WINAPI packages_view_AddRef( struct packages_view *iface ) { return InterlockedIncrement( &iface->ref ); }
+static ULONG WINAPI packages_view_Release( struct packages_view *iface )
+{
+    LONG ref = InterlockedDecrement( &iface->ref );
+
+    if (!ref)
+    {
+        UINT32 i;
+        for (i = 0; i < iface->count; i++) fw_face_Release( iface->items[i] );
+        HeapFree( GetProcessHeap(), 0, iface->items );
+        HeapFree( GetProcessHeap(), 0, iface );
+    }
+    return ref;
+}
+static HRESULT WINAPI packages_view_QueryInterface( struct packages_view *iface, REFIID iid, void **out )
+{
+    *out = iface;
+    InterlockedIncrement( &iface->ref );
+    return S_OK;
+}
+static HRESULT WINAPI packages_view_GetRuntimeClassName( struct packages_view *iface, HSTRING *name )
+{
+    return WindowsCreateString( packages_view_class, lstrlenW( packages_view_class ), name );
+}
+
+static const void *packages_view_vtbl[] =
+{
+    packages_view_QueryInterface,
+    packages_view_AddRef,
+    packages_view_Release,
+    winappsdk_GetIids,
+    packages_view_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    packages_view_GetAt,
+    packages_view_get_Size,
+    packages_view_IndexOf,
+    packages_view_GetMany,
+};
+
+static HRESULT packages_view_create( void **out )
+{
+    struct framework_entry entries[MAX_FRAMEWORKS];
+    struct packages_view *view;
+    UINT32 n, i;
+
+    if (!(view = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*view) ))) return E_OUTOFMEMORY;
+    view->vtbl = packages_view_vtbl;
+    view->ref = 1;
+
+    n = enum_framework_packages( entries, MAX_FRAMEWORKS );
+    if (n && !(view->items = HeapAlloc( GetProcessHeap(), 0, n * sizeof(*view->items) )))
+    {
+        HeapFree( GetProcessHeap(), 0, view );
+        return E_OUTOFMEMORY;
+    }
+    for (i = 0; i < n; i++)
+    {
+        if (!(view->items[i] = fw_face_create( package_dependency_package_info_vtbl,
+                                               package_dependency_package_info_class, &entries[i] )))
+        {
+            packages_view_Release( view );
+            return E_OUTOFMEMORY;
+        }
+        view->count++;
+    }
+    *out = view;
+    return S_OK;
+}
+
+static HRESULT deployment_manager_get_CurrentPackages_impl( void **op );
+
+static const void *dependency_package_info_vtbl[] =
+{
+    fw_face_QueryInterface,
+    fw_face_AddRef,
+    fw_face_Release,
+    winappsdk_GetIids,
+    fw_face_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    dep_package_info_get_Dependency,
+    dep_package_info_get_PackageId,
+    dep_package_info_get_PackagePath,
+    dep_package_info_get_Version,
+};
+
+static const void *fw_package_vtbl[] =
+{
+    fw_face_QueryInterface,
+    fw_face_AddRef,
+    fw_face_Release,
+    winappsdk_GetIids,
+    fw_face_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    fw_package_get_Id,
+    fw_package_get_InstalledLocation,
+    fw_package_get_IsFramework,
+    winappsdk_zero_out,          /* IsResourcePackage */
+};
+
+static const void *fw_package_id_vtbl[] =
+{
+    fw_face_QueryInterface,
+    fw_face_AddRef,
+    fw_face_Release,
+    winappsdk_GetIids,
+    fw_face_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    fw_package_id_get_FullName,
+    fw_package_id_get_FamilyName,
+    fw_package_id_get_PublisherId,
+    fw_package_id_get_Version,
+    fw_package_id_get_Architecture,
+    winappsdk_zero_out,          /* ResourceId */
+    winappsdk_zero_out,          /* RelativeId */
+};
+
+static const void *fw_uri_vtbl[] =
+{
+    fw_face_QueryInterface,
+    fw_face_AddRef,
+    fw_face_Release,
+    winappsdk_GetIids,
+    fw_face_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    fw_uri_get_AbsoluteUri,
+    winappsdk_zero_out,          /* RelativeUri */
+    winappsdk_zero_out,          /* AbsoluteCanonicalUri */
+    winappsdk_zero_out,          /* DisplayUri */
+    winappsdk_zero_out,          /* DisplaySpecifiedUri */
+};
+
+static const void *package_dependency_package_info_vtbl[] =
+{
+    fw_face_QueryInterface,
+    fw_face_AddRef,
+    fw_face_Release,
+    winappsdk_GetIids,
+    fw_face_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    package_info_get_DependencyPackageInfo,
+    package_info_get_Package,
+};
+
+/* IAsyncOperation<IVectorView<PackageDependencyPackageInfo>>: born completed;
+ * one per CurrentPackages call, GetResults takes a fresh snapshot. */
+static const void *packages_async_vtbl[] =
+{
+    fw_face_QueryInterface,
+    fw_face_AddRef,
+    fw_face_Release,
+    winappsdk_GetIids,
+    fw_face_GetRuntimeClassName,
+    winappsdk_GetTrustLevel,
+    packages_async_put_Completed,
+    packages_async_get_Completed,
+    packages_async_GetResults,
+    packages_async_get_Id,
+    packages_async_get_Status,
+    packages_async_get_ErrorCode,
+    winappsdk_zero_out,          /* Cancel (one-arg shape answers fine) */
+    winappsdk_zero_out,          /* Close */
+};
+
+static HRESULT deployment_manager_get_CurrentPackages_impl( void **op )
+{
+    struct fw_face *face;
+
+    if (!(face = fw_face_create( packages_async_vtbl, packages_async_class, NULL ))) return E_OUTOFMEMORY;
+    *op = face;
+    return S_OK;
+}
+
+static HRESULT WINAPI deployment_manager_get_CurrentPackages( void *iface, void **op )
+{
+    if (!op) return E_INVALIDARG;
+    *op = NULL;
+    return deployment_manager_get_CurrentPackages_impl( op );
+}
+
+static HRESULT WINAPI deployment_manager_factory_get_Current( void *iface, void **manager )
+{
+    if (manager) *manager = &deployment_manager_obj;
+    return S_OK;
+}
 
 /* The context's PackageGraph face: IIterable<PackageDependency> over the
  * registered framework packages (the AppModel plane above), so the dependency
