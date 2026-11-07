@@ -50,14 +50,21 @@ struct map_iids
 extern HRESULT single_threaded_map_create( const struct map_iids *iids, IInspectable *outer, IInspectable **out );
 extern HRESULT multi_threaded_map_create( const struct map_iids *iids, IInspectable *outer, IInspectable **out );
 
-/* Mirrors CoreCLR's ComInterfaceEntry: IInspectable::GetIids output is read by
- * the ComWrappers shader as an array of these pairs, where vtable is the real
- * per-interface vtable it thunks, and iid is a stable pointer to the interface
- * GUID. Allocated per-call; CoreCLR frees it with CoTaskMemFree. */
+/* Mirrors CoreCLR's ComInterfaceEntry (System.Runtime.InteropServices,
+ * sequential layout, Vtable first):
+ *
+ *   internal struct ComInterfaceEntry { internal void** Vtable; internal Guid* IID; }
+ *
+ * IInspectable::GetIids output is read by the ComWrappers shader as an array of
+ * these pairs: Vtable is the real per-interface vtable whose slots the shader
+ * copies into the generated ComVirtualMethodData, IID is the stable pointer it
+ * QueryInterfaces for the interfaceCache entry. With the fields swapped the
+ * shader QIs (vtable-as-GUID) on every entry and the RCW method slots call IID
+ * bytes. Allocated per-call; CoreCLR frees it with CoTaskMemFree. */
 struct com_interface_entry
 {
-    IID   *iid;
     void **vtable;
+    IID   *iid;
 };
 
 extern IActivationFactory *data_writer_activation_factory;

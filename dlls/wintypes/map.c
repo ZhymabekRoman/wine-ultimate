@@ -160,7 +160,7 @@ static HRESULT WINAPI pair_GetIids( IKeyValuePair_HSTRING_IInspectable *iface, U
 {
     struct com_interface_entry entries[] =
     {
-        { (IID *)&IID_IKeyValuePair_HSTRING_IInspectable, map_pair_vtbl_ptr() },
+        { map_pair_vtbl_ptr(), (IID *)&IID_IKeyValuePair_HSTRING_IInspectable },
     };
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
@@ -328,7 +328,7 @@ static HRESULT WINAPI iterator_GetIids( IIterator_IKeyValuePair_HSTRING_IInspect
 {
     struct com_interface_entry entries[] =
     {
-        { (IID *)&IID_IIterator_IKeyValuePair_HSTRING_IInspectable, map_iterator_vtbl_ptr() },
+        { map_iterator_vtbl_ptr(), (IID *)&IID_IIterator_IKeyValuePair_HSTRING_IInspectable },
     };
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
@@ -545,8 +545,8 @@ static HRESULT WINAPI map_view_GetIids( IMapView_HSTRING_IInspectable *iface, UL
 {
     struct com_interface_entry entries[] =
     {
-        { (IID *)&IID_IMapView_HSTRING_IInspectable, map_map_view_vtbl_ptr() },
-        { (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable, map_iterable_view_vtbl_ptr() },
+        { map_map_view_vtbl_ptr(), (IID *)&IID_IMapView_HSTRING_IInspectable },
+        { map_iterable_view_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
     };
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
@@ -859,11 +859,11 @@ static HRESULT WINAPI map_inner_GetIids( IInspectable *iface, ULONG *iid_count, 
     struct map *impl = impl_from_IInspectable( iface );
     struct com_interface_entry entries[] =
     {
-        { (IID *)impl->iids.map, map_map_vtbl_ptr() },
-        { (IID *)impl->iids.view, map_map_view_vtbl_ptr() },
-        { (IID *)impl->iids.iterable, map_iterable_vtbl_ptr() },
-        { (IID *)impl->iids.iterator, map_iterator_vtbl_ptr() },
-        { (IID *)impl->iids.pair, map_pair_vtbl_ptr() },
+        { map_map_vtbl_ptr(), (IID *)impl->iids.map },
+        { map_map_view_vtbl_ptr(), (IID *)impl->iids.view },
+        { map_iterable_vtbl_ptr(), (IID *)impl->iids.iterable },
+        { map_iterator_vtbl_ptr(), (IID *)impl->iids.iterator },
+        { map_pair_vtbl_ptr(), (IID *)impl->iids.pair },
     };
     ULONG count = ARRAY_SIZE( entries );
 

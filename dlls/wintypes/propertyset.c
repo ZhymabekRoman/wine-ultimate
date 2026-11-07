@@ -166,10 +166,10 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
      * adapters whose CreateObject walks past the entries it can satisfy. */
     struct com_interface_entry entries[] =
     {
-        { (IID *)&IID_IMap_String_IInspectable, propertyset_vtbl_ptr() },
-        { (IID *)&IID_IMapView_StringObject_IInspectable, propertyset_imapview_vtbl_ptr() },
-        { (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable, propertyset_iterable_vtbl_ptr() },
-        { (IID *)&IID_IObservableMap_HSTRING_IInspectable, propertyset_iobservablemap_vtbl_ptr() },
+        { propertyset_vtbl_ptr(), (IID *)&IID_IMap_String_IInspectable },
+        { propertyset_imapview_vtbl_ptr(), (IID *)&IID_IMapView_StringObject_IInspectable },
+        { propertyset_iterable_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
+        { propertyset_iobservablemap_vtbl_ptr(), (IID *)&IID_IObservableMap_HSTRING_IInspectable },
     };
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
@@ -299,6 +299,9 @@ static const struct
                                                  EventRegistrationToken *token );
     HRESULT (STDMETHODCALLTYPE *remove_MapChanged)( IObservableMap_HSTRING_IInspectable *iface,
                                                     EventRegistrationToken token );
+    void *null_term; /* NULL terminator: the shader's InvokeableVtable mode counts
+                      * method slots by walking to the first NULL entry; without it
+                      * the count strolls into the next global. */
 } propertyset_vtbl_full =
 {
     { /* IUnknown */
@@ -319,11 +322,61 @@ static const struct
     propertyset_Clear, },
     (HRESULT (STDMETHODCALLTYPE *)( IObservableMap_HSTRING_IInspectable *, IMapChangedEventHandler_HSTRING_IInspectable *, EventRegistrationToken * ))propertyset_add_MapChanged,
     (HRESULT (STDMETHODCALLTYPE *)( IObservableMap_HSTRING_IInspectable *, EventRegistrationToken ))propertyset_remove_MapChanged,
+    0,
 };
 #define propertyset_vtbl propertyset_vtbl_full.vtbl
 
 
 DEFINE_IINSPECTABLE( propertyset_IObservableMap, IObservableMap_HSTRING_IInspectable, struct propertyset, IPropertySet_iface );
+
+/* The canonical IObservableMap<HSTRING, IInspectable*> face is the 15-slot
+ * flattening of IMap (windows.foundation.collections.idl: IObservableMap
+ * requires IMap): Lookup, Size, HasKey, GetView, Insert, Remove, Clear, then
+ * add/remove_MapChanged. The CoreCLR shader hands this exact vtable to the
+ * IObservableMap entry of GetIids, and the CsWinRT projection calls slots by
+ * that ordinal; a truncated face (add/remove at 6/7) faults the consumer. */
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_Lookup( IObservableMap_HSTRING_IInspectable *iface,
+                                                                    HSTRING key, IInspectable **value )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_Lookup( impl->inner_map, key, value );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_get_Size( IObservableMap_HSTRING_IInspectable *iface, UINT32 *size )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_get_Size( impl->inner_map, size );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_HasKey( IObservableMap_HSTRING_IInspectable *iface, HSTRING key, boolean *found )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_HasKey( impl->inner_map, key, found );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_GetView( IObservableMap_HSTRING_IInspectable *iface, IMapView_HSTRING_IInspectable **view )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_GetView( impl->inner_map, view );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_Insert( IObservableMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable *value, boolean *replaced )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_Insert( impl->inner_map, key, value, replaced );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_Remove( IObservableMap_HSTRING_IInspectable *iface, HSTRING key )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_Remove( impl->inner_map, key );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_Clear( IObservableMap_HSTRING_IInspectable *iface )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_Clear( impl->inner_map );
+}
 
 static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_add_MapChanged( IObservableMap_HSTRING_IInspectable *iface,
                                                                             IMapChangedEventHandler_HSTRING_IInspectable *handler,
@@ -349,6 +402,14 @@ const static struct { IObservableMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]
     propertyset_IObservableMap_GetIids,
     propertyset_IObservableMap_GetRuntimeClassName,
     propertyset_IObservableMap_GetTrustLevel,
+    /* IMap<HSTRING, IInspectable*> (IObservableMap requires IMap) */
+    propertyset_IObservableMap_Lookup,
+    propertyset_IObservableMap_get_Size,
+    propertyset_IObservableMap_HasKey,
+    propertyset_IObservableMap_GetView,
+    propertyset_IObservableMap_Insert,
+    propertyset_IObservableMap_Remove,
+    propertyset_IObservableMap_Clear,
     /* IObservableMap<HSTRING, IInspectable*> */
     propertyset_IObservableMap_add_MapChanged,
     propertyset_IObservableMap_remove_MapChanged, },
