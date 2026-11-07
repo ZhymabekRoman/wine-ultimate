@@ -29,13 +29,44 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL( wintypes );
 
+/* Parameterized interface ids used by the C++/WinRT and .NET/CsWinRT
+ * projections of IPropertySet; both land on the single merged object. */
+static const GUID IID_IMap_String_IInspectable =
+{ 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
+static const GUID IID_IMapView_String_IInspectable =
+{ 0xe8cc1dcf, 0xaa1b, 0x51e7, {0x90, 0xa7, 0x6b, 0x7d, 0x99, 0xbd, 0x99, 0xa0} };
+static const GUID IID_IMapView_StringObject_IInspectable =
+{ 0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0} };
+
+/* Windows hands out a single object for the whole PropertySet interface set:
+ * QI for IPropertySet, IMap, IMapView, IIterable and IObservableMap all return
+ * the same pointer at offset 0, whose vtable is the prefix-deduplicated union
+ * of the interface layouts (windows.foundation.collections.idl):
+ *
+ *   0-2   IUnknown QI / AddRef / Release
+ *   3-5   IInspectable GetIids / GetRuntimeClassName / GetTrustLevel
+ *   6     Lookup (IIterable consumers call this slot as First)
+ *   7     get_Size
+ *   8     HasKey
+ *   9     GetView (IMapView consumers call this slot as Split)
+ *   10-12 Insert / Remove / Clear
+ *   13    IObservableMap add_MapChanged
+ *   14    IObservableMap remove_MapChanged
+ *
+ * Keeping one face lets the CoreCLR ComWrappers shader walk each QI'd
+ * interface's vtable as a clean, contiguous, NULL-terminated entry array
+ * instead of strolling into the vtable padding of separate faces. */
 struct propertyset
 {
     IPropertySet IPropertySet_iface;
+    IMapView_HSTRING_IInspectable IMapView_HSTRING_IInspectable_iface;
+    IIterable_IKeyValuePair_HSTRING_IInspectable IIterable_IKeyValuePair_HSTRING_IInspectable_iface;
     IObservableMap_HSTRING_IInspectable IObservableMap_HSTRING_IInspectable_iface;
     LONG ref;
 
     IInspectable *map_inner;
+    IMap_HSTRING_IInspectable *inner_map;
+    IIterable_IKeyValuePair_HSTRING_IInspectable *inner_iterable;
 };
 
 static inline struct propertyset *impl_from_IPropertySet( IPropertySet *iface )
@@ -53,15 +84,16 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IPropertySet ))
+        IsEqualGUID( iid, &IID_IPropertySet ) ||
+        IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMap_String_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ))
     {
         *out = iface;
-        IUnknown_AddRef( (IUnknown *)*out );
-        return S_OK;
-    }
-    else if (IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ))
-    {
-        *out = &impl->IObservableMap_HSTRING_IInspectable_iface;
         IUnknown_AddRef( (IUnknown *)*out );
         return S_OK;
     }
@@ -91,6 +123,8 @@ static ULONG STDMETHODCALLTYPE propertyset_Release( IPropertySet *iface )
     {
         /* guard against re-entry if inner releases an outer iface */
         InterlockedIncrement( &impl->ref );
+        if (impl->inner_map) IMap_HSTRING_IInspectable_Release( impl->inner_map );
+        if (impl->inner_iterable) IIterable_IKeyValuePair_HSTRING_IInspectable_Release( impl->inner_iterable );
         IInspectable_Release( impl->map_inner );
         free( impl );
     }
@@ -100,13 +134,17 @@ static ULONG STDMETHODCALLTYPE propertyset_Release( IPropertySet *iface )
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG *iid_count, IID **iids )
 {
+    /* Windows reports the PropertySet runtime class interface list (winmd):
+     * IPropertySet (default, = IMap<String, IInspectable>) + IObservableMap.
+     * The C++/WinRT and CsWinRT projections find IMap/IMapView via the QI
+     * arms on the merged face, so the list stays narrow; an over-wide list
+     * makes the CoreCLR ComWrappers shader probe IIterable/IIterator
+     * adapters whose CreateObject walks past the entries it can satisfy. */
     IID instance_iids[] =
     {
         IID_IPropertySet,
         IID_IMap_HSTRING_IInspectable,
         IID_IMapView_HSTRING_IInspectable,
-        IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
-        IID_IIterator_IKeyValuePair_HSTRING_IInspectable,
         IID_IObservableMap_HSTRING_IInspectable,
     };
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
@@ -140,7 +178,89 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetTrustLevel( IPropertySet *iface,
     return S_OK;
 }
 
-static const struct { IPropertySetVtbl vtbl; void *pad[4]; } propertyset_vtbl_full =
+/* Slot 6: IMap::Lookup / IIterable::First (First passes the iterator pointer
+ * in the key slot and nothing in the value slot). */
+static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, void *key, void *value )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+
+    if (!value)
+        return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable,
+                                                                   (IIterator_IKeyValuePair_HSTRING_IInspectable **)key );
+    return IMap_HSTRING_IInspectable_Lookup( impl->inner_map, (HSTRING)key, (IInspectable **)value );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_get_Size( IPropertySet *iface, UINT32 *size )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    return IMap_HSTRING_IInspectable_get_Size( impl->inner_map, size );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_HasKey( IPropertySet *iface, HSTRING key, boolean *found )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    return IMap_HSTRING_IInspectable_HasKey( impl->inner_map, key, found );
+}
+
+/* Slot 9: IMap::GetView / IMapView::Split (Split passes both view outs). */
+static HRESULT STDMETHODCALLTYPE propertyset_GetView( IPropertySet *iface, void *first, void *second )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    IMapView_HSTRING_IInspectable *view;
+    HRESULT hr;
+
+    if (FAILED(hr = IMap_HSTRING_IInspectable_GetView( impl->inner_map, &view ))) return hr;
+    if (second)
+    {
+        hr = IMapView_HSTRING_IInspectable_Split( view, (IMapView_HSTRING_IInspectable **)first,
+                                                  (IMapView_HSTRING_IInspectable **)second );
+        IMapView_HSTRING_IInspectable_Release( view );
+    }
+    else *(IMapView_HSTRING_IInspectable **)first = view;
+    return hr;
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_Insert( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    return IMap_HSTRING_IInspectable_Insert( impl->inner_map, key, value, replaced );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_Remove( IPropertySet *iface, HSTRING key )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    return IMap_HSTRING_IInspectable_Remove( impl->inner_map, key );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_Clear( IPropertySet *iface )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    return IMap_HSTRING_IInspectable_Clear( impl->inner_map );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_add_MapChanged( IPropertySet *iface,
+                                                            IMapChangedEventHandler_HSTRING_IInspectable *handler,
+                                                            EventRegistrationToken *token )
+{
+    FIXME( "(%p, %p, %p) stub!\n", iface, handler, token );
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_remove_MapChanged( IPropertySet *iface, EventRegistrationToken token )
+{
+    FIXME( "(%p, %I64d) stub!\n", iface, token.value );
+    return E_NOTIMPL;
+}
+
+static const struct
+{
+    IPropertySetVtbl vtbl;
+    HRESULT (STDMETHODCALLTYPE *add_MapChanged)( IObservableMap_HSTRING_IInspectable *iface,
+                                                 IMapChangedEventHandler_HSTRING_IInspectable *handler,
+                                                 EventRegistrationToken *token );
+    HRESULT (STDMETHODCALLTYPE *remove_MapChanged)( IObservableMap_HSTRING_IInspectable *iface,
+                                                    EventRegistrationToken token );
+} propertyset_vtbl_full =
 {
     { /* IUnknown */
     propertyset_QueryInterface,
@@ -149,8 +269,17 @@ static const struct { IPropertySetVtbl vtbl; void *pad[4]; } propertyset_vtbl_fu
     /* IInspectable */
     propertyset_GetIids,
     propertyset_GetRuntimeClassName,
-    propertyset_GetTrustLevel, },
-    { 0, 0, 0, 0 }
+    propertyset_GetTrustLevel,
+    /* IMap<HSTRING, IInspectable *> / IMapView / IIterable merged slots */
+    (HRESULT (STDMETHODCALLTYPE *)( IPropertySet *, HSTRING, IInspectable ** ))propertyset_Lookup,
+    propertyset_get_Size,
+    propertyset_HasKey,
+    (HRESULT (STDMETHODCALLTYPE *)( IPropertySet *, IMapView_HSTRING_IInspectable ** ))propertyset_GetView,
+    propertyset_Insert,
+    propertyset_Remove,
+    propertyset_Clear, },
+    (HRESULT (STDMETHODCALLTYPE *)( IObservableMap_HSTRING_IInspectable *, IMapChangedEventHandler_HSTRING_IInspectable *, EventRegistrationToken * ))propertyset_add_MapChanged,
+    (HRESULT (STDMETHODCALLTYPE *)( IObservableMap_HSTRING_IInspectable *, EventRegistrationToken ))propertyset_remove_MapChanged,
 };
 #define propertyset_vtbl propertyset_vtbl_full.vtbl
 
@@ -161,14 +290,14 @@ static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_add_MapChanged( IObs
                                                                             IMapChangedEventHandler_HSTRING_IInspectable *handler,
                                                                             EventRegistrationToken *token )
 {
-    FIXME( "(%p, %p, %p) stub!\n", iface, handler, token );
-    return E_NOTIMPL;
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return propertyset_add_MapChanged( &impl->IPropertySet_iface, handler, token );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_remove_MapChanged( IObservableMap_HSTRING_IInspectable *iface, EventRegistrationToken token )
 {
-    FIXME( "(%p, %I64d) stub!\n", iface, token.value );
-    return E_NOTIMPL;
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return propertyset_remove_MapChanged( &impl->IPropertySet_iface, token );
 }
 
 const static struct { IObservableMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } propertyset_IObservableMap_vtbl_full =
@@ -187,6 +316,80 @@ const static struct { IObservableMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]
     { 0, 0, 0, 0 }
 };
 #define propertyset_IObservableMap_vtbl propertyset_IObservableMap_vtbl_full.vtbl
+
+
+/* The per-interface faces below remain addressable for consumers that cached
+ * them before the merge; every method forwards to the merged object. */
+DEFINE_IINSPECTABLE( propertyset_IMapView, IMapView_HSTRING_IInspectable, struct propertyset, IPropertySet_iface );
+
+static HRESULT STDMETHODCALLTYPE propertyset_IMapView_Lookup( IMapView_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IMapView_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_Lookup( (IMap_HSTRING_IInspectable *)&impl->IPropertySet_iface, key, value );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IMapView_get_Size( IMapView_HSTRING_IInspectable *iface, UINT32 *size )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IMapView_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_get_Size( (IMap_HSTRING_IInspectable *)&impl->IPropertySet_iface, size );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IMapView_HasKey( IMapView_HSTRING_IInspectable *iface, HSTRING key, boolean *found )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IMapView_HSTRING_IInspectable_iface );
+    return IMap_HSTRING_IInspectable_HasKey( (IMap_HSTRING_IInspectable *)&impl->IPropertySet_iface, key, found );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IMapView_Split( IMapView_HSTRING_IInspectable *iface,
+                                                            IMapView_HSTRING_IInspectable **first,
+                                                            IMapView_HSTRING_IInspectable **second )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IMapView_HSTRING_IInspectable_iface );
+    return propertyset_GetView( &impl->IPropertySet_iface, first, second );
+}
+
+static const struct { IMapView_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } propertyset_IMapView_vtbl_full =
+{
+    { propertyset_IMapView_QueryInterface,
+    propertyset_IMapView_AddRef,
+    propertyset_IMapView_Release,
+    /* IInspectable */
+    propertyset_IMapView_GetIids,
+    propertyset_IMapView_GetRuntimeClassName,
+    propertyset_IMapView_GetTrustLevel,
+    /* IMapView<HSTRING, IInspectable*> */
+    propertyset_IMapView_Lookup,
+    propertyset_IMapView_get_Size,
+    propertyset_IMapView_HasKey,
+    propertyset_IMapView_Split, },
+    { 0, 0, 0, 0 }
+};
+#define propertyset_IMapView_vtbl propertyset_IMapView_vtbl_full.vtbl
+
+
+DEFINE_IINSPECTABLE( propertyset_IIterable, IIterable_IKeyValuePair_HSTRING_IInspectable, struct propertyset, IPropertySet_iface );
+
+static HRESULT STDMETHODCALLTYPE propertyset_IIterable_First( IIterable_IKeyValuePair_HSTRING_IInspectable *iface,
+                                                             IIterator_IKeyValuePair_HSTRING_IInspectable **value )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IIterable_IKeyValuePair_HSTRING_IInspectable_iface );
+    return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable, value );
+}
+
+static const struct { IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } propertyset_IIterable_vtbl_full =
+{
+    { propertyset_IIterable_QueryInterface,
+    propertyset_IIterable_AddRef,
+    propertyset_IIterable_Release,
+    /* IInspectable */
+    propertyset_IIterable_GetIids,
+    propertyset_IIterable_GetRuntimeClassName,
+    propertyset_IIterable_GetTrustLevel,
+    /* IIterable<IKeyValuePair<HSTRING, IInspectable*>> */
+    propertyset_IIterable_First, },
+    { 0, 0, 0, 0 }
+};
+#define propertyset_IIterable_vtbl propertyset_IIterable_vtbl_full.vtbl
 
 
 struct propertyset_factory
@@ -307,11 +510,28 @@ static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *i
         return E_OUTOFMEMORY;
 
     impl->IPropertySet_iface.lpVtbl = &propertyset_vtbl;
+    impl->IMapView_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IMapView_vtbl;
+    impl->IIterable_IKeyValuePair_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IIterable_vtbl;
     impl->IObservableMap_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IObservableMap_vtbl;
     impl->ref = 1;
 
     if (FAILED(hr = multi_threaded_map_create( &iids, (IInspectable *)&impl->IPropertySet_iface, &impl->map_inner )))
     {
+        free( impl );
+        return hr;
+    }
+    if (FAILED(hr = IInspectable_QueryInterface( impl->map_inner, &IID_IMap_HSTRING_IInspectable,
+                                                 (void **)&impl->inner_map )))
+    {
+        IInspectable_Release( impl->map_inner );
+        free( impl );
+        return hr;
+    }
+    if (FAILED(hr = IInspectable_QueryInterface( impl->map_inner, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
+                                                 (void **)&impl->inner_iterable )))
+    {
+        IMap_HSTRING_IInspectable_Release( impl->inner_map );
+        IInspectable_Release( impl->map_inner );
         free( impl );
         return hr;
     }
