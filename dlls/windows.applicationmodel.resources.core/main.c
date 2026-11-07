@@ -5081,29 +5081,16 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
     }
     if (!wcscmp( buffer, RTCLASS_MEMORYMANAGER ))
     {
-        /* Measured on Calculator (wbappgate run): .NET Native mrt100_app.dll
-         * DllMain queries Windows.System.MemoryManager with
-         * {6eee351f-6d62-423f-9479-b01f9c9f7669}; when the class resolves to
-         * any factory other than "not registered" (e.g. a stub answering
-         * E_NOINTERFACE), mrt100's managed fallback path is skipped and
-         * DllMain throws -> STATUS_DLL_INIT_FAILED (c0000142) aborts process
-         * startup.  Answer the first (DllMain) activation with the tolerated
-         * REGDB_E_CLASSNOTREG code; the later managed call path (probe94:
-         * McgMarshal.GetActivationFactory -> FactoryCache -> pinvoke
-         * RoGetActivationFactory after the Languages reads) gets the real
-         * factory, whose statics faces answer IMemoryManagerStatics[2/3] and
-         * IMemoryAppReport.  The no-op stub object stays available through
-         * ActivateInstance for callers that activate the class explicitly. */
-        static BOOL mm_dllmain_done;
-
-        if (!mm_dllmain_done)
-        {
-            mm_dllmain_done = TRUE;
-            FIXME( "MemoryManager first (DllMain) activation answered REGDB_E_CLASSNOTREG\n" );
-            *factory = NULL;
-            return REGDB_E_CLASSNOTREG;
-        }
-        TRACE( "MemoryManager second-stage activation -> factory %p\n", &mm_factory.vt_primary );
+        /* Measured on Calculator (wbappgate runs): mrt100_app.dll DllMain and
+         * the managed McgMarshal.GetActivationFactory -> FactoryCache path
+         * share ONE RoGetActivationFactory call whose factory the runtime
+         * caches.  The early no-op stub (statics QI E_NOINTERFACE) made
+         * DllMain take the managed fallback -> c0000142, which is why the
+         * REGDB_E_CLASSNOTREG answer survived; with the statics faces
+         * answering below, a plain factory answer serves both the DllMain QI
+         * of {6eee351f-...} and the cached managed consumer after the
+         * Languages reads (IMemoryManagerStatics[2/3], IMemoryAppReport). */
+        TRACE( "MemoryManager activation -> factory %p\n", &mm_factory.vt_primary );
         *factory = (void *)&mm_factory.vt_primary;
         return S_OK;
     }
