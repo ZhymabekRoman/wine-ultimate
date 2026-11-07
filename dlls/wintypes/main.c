@@ -57,11 +57,19 @@ static BOOLEAN is_api_contract_present( const HSTRING hname, unsigned int versio
     return FALSE;
 }
 
+/* Defined further below; referenced by the cached GetIids pair arrays. */
+static const struct IActivationFactoryVtbl api_information_statics_factory_vtbl;
+static const struct IApiInformationStaticsVtbl api_information_statics_vtbl;
+static const struct IActivationFactoryVtbl property_value_statics_factory_vtbl;
+static const struct IPropertyValueStaticsVtbl property_value_statics_vtbl;
+
 struct api_information_statics
 {
     IActivationFactory IActivationFactory_iface;
     IApiInformationStatics IApiInformationStatics_iface;
     LONG ref;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
+    ULONG iids_count;
 };
 
 static inline struct api_information_statics *impl_ais_from_IActivationFactory(IActivationFactory *iface)
@@ -117,22 +125,31 @@ static ULONG STDMETHODCALLTYPE api_information_statics_factory_Release(IActivati
 static HRESULT STDMETHODCALLTYPE api_information_statics_factory_GetIids(IActivationFactory *iface, ULONG *iid_count,
         IID **iids)
 {
-    IID factory_iids[] =
-    {
-        IID_IActivationFactory,
-        IID_IApiInformationStatics,
-    };
+    /* CoreCLR's ComWrappers shader consumes this as a ComInterfaceEntry pair
+     * array (vtable-first). The activation factory face is the first RCW built
+     * in the process; a bare IID array here seeds the shader's per-IID-set
+     * cache with the wrong layout, flowing into later get_Values slot decodes.
+     * One stable pair array per singleton (this object never dies). */
+    struct api_information_statics *impl = impl_ais_from_IActivationFactory(iface);
     TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
 
-    if (iid_count) *iid_count = ARRAY_SIZE(factory_iids);
-    if (iids)
+    if (!impl->iids_cache)
     {
-        IID *array = CoTaskMemAlloc(sizeof(factory_iids));
+        struct com_interface_entry entries[] =
+        {
+            { (void **)&api_information_statics_factory_vtbl, (IID *)&IID_IActivationFactory },
+            { (void **)&api_information_statics_vtbl, (IID *)&IID_IApiInformationStatics },
+        };
+        struct com_interface_entry *array = CoTaskMemAlloc(sizeof(entries));
         if (!array)
             return E_OUTOFMEMORY;
-        memcpy(array, factory_iids, sizeof(factory_iids));
-        *iids = array;
+        memcpy(array, entries, sizeof(entries));
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE(entries);
     }
+
+    if (iid_count) *iid_count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 
@@ -340,6 +357,8 @@ struct property_value_statics
     IActivationFactory IActivationFactory_iface;
     IPropertyValueStatics IPropertyValueStatics_iface;
     LONG ref;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
+    ULONG iids_count;
 };
 
 static inline struct property_value_statics *impl_pvs_from_IActivationFactory(IActivationFactory *iface)
@@ -395,22 +414,28 @@ static ULONG STDMETHODCALLTYPE property_value_statics_factory_Release(IActivatio
 static HRESULT STDMETHODCALLTYPE property_value_statics_factory_GetIids(IActivationFactory *iface, ULONG *iid_count,
         IID **iids)
 {
-    IID factory_iids[] =
-    {
-        IID_IActivationFactory,
-        IID_IPropertyValueStatics,
-    };
+    /* Pair-array contract, cached per singleton; see
+     * api_information_statics_factory_GetIids. */
+    struct property_value_statics *impl = impl_pvs_from_IActivationFactory(iface);
     TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
 
-    if (iid_count) *iid_count = ARRAY_SIZE(factory_iids);
-    if (iids)
+    if (!impl->iids_cache)
     {
-        IID *array = CoTaskMemAlloc(sizeof(factory_iids));
+        struct com_interface_entry entries[] =
+        {
+            { (void **)&property_value_statics_factory_vtbl, (IID *)&IID_IActivationFactory },
+            { (void **)&property_value_statics_vtbl, (IID *)&IID_IPropertyValueStatics },
+        };
+        struct com_interface_entry *array = CoTaskMemAlloc(sizeof(entries));
         if (!array)
             return E_OUTOFMEMORY;
-        memcpy(array, factory_iids, sizeof(factory_iids));
-        *iids = array;
+        memcpy(array, entries, sizeof(entries));
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE(entries);
     }
+
+    if (iid_count) *iid_count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 

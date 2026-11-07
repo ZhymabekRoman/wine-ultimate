@@ -421,15 +421,9 @@ const static struct { IObservableMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]
     propertyset_IObservableMap_GetIids,
     propertyset_IObservableMap_GetRuntimeClassName,
     propertyset_IObservableMap_GetTrustLevel,
-    /* IMap<HSTRING, IInspectable*> (IObservableMap requires IMap) */
-    propertyset_IObservableMap_Lookup,
-    propertyset_IObservableMap_get_Size,
-    propertyset_IObservableMap_HasKey,
-    propertyset_IObservableMap_GetView,
-    propertyset_IObservableMap_Insert,
-    propertyset_IObservableMap_Remove,
-    propertyset_IObservableMap_Clear,
-    /* IObservableMap<HSTRING, IInspectable*> */
+    /* IObservableMap<HSTRING, IInspectable*> own slots; wine's
+     * __FIObservableMap_2_HSTRING_IInspectableVtbl carries only these two —
+     * the IMap<HSTRING,IInspectable*> slots live on the merged face. */
     propertyset_IObservableMap_add_MapChanged,
     propertyset_IObservableMap_remove_MapChanged, },
     { 0, 0, 0, 0 }

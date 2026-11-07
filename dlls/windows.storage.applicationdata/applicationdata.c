@@ -22,11 +22,22 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(data);
 
+/* CoreCLR's ComWrappers shader reads IInspectable::GetIids output as an array of
+ * ComInterfaceEntry pairs (vtable-first layout, matching the runtime's
+ * sequential struct { void** Vtable; Guid* IID; }). */
+struct com_interface_entry
+{
+    void **vtable;
+    IID   *iid;
+};
+
 struct application_data_statics
 {
     IActivationFactory IActivationFactory_iface;
     IApplicationDataStatics IApplicationDataStatics_iface;
     LONG ref;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
+    ULONG iids_count;
 };
 
 static inline struct application_data_statics *impl_from_IActivationFactory( IActivationFactory *iface )
@@ -78,10 +89,37 @@ static ULONG WINAPI factory_Release( IActivationFactory *iface )
     return ref;
 }
 
+static const struct IActivationFactoryVtbl factory_vtbl;
+static const struct IApplicationDataStaticsVtbl application_data_statics_vtbl;
+
 static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    /* CoreCLR's ComWrappers shader reads the output as ComInterfaceEntry pairs
+     * (vtable-first); with E_NOTIMPL it falls back and the first RCW built in
+     * the process (this activation factory face) seeds the shader's per-IID-set
+     * cache with a bare layout, flowing into get_Values slot decode. Hand back
+     * one stable pair array per singleton: {factory vtbl, IActivationFactory} +
+     * {statics vtbl, IApplicationDataStatics}. */
+    struct application_data_statics *impl = impl_from_IActivationFactory( iface );
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (!impl->iids_cache)
+    {
+        struct com_interface_entry entries[] =
+        {
+            { (void **)&factory_vtbl, (IID *)&IID_IActivationFactory },
+            { (void **)&application_data_statics_vtbl, (IID *)&IID_IApplicationDataStatics },
+        };
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE( entries );
+    }
+
+    if (iid_count) *iid_count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
+    return S_OK;
 }
 
 static HRESULT WINAPI factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
@@ -270,18 +308,11 @@ static ULONG WINAPI container_Release( IApplicationDataContainer *iface )
     return ref;
 }
 
-/* CoreCLR's ComWrappers shader reads IInspectable::GetIids output as an array of
- * ComInterfaceEntry pairs (vtable-first layout, matching the runtime's
- * sequential struct { void** Vtable; Guid* IID; }). With E_NOTIMPL the shader
- * falls back to a single-entry IInspectable vtable and the
- * IApplicationDataContainer projection reads its method slots (get_Values = 8)
- * off the wrong ComVirtualMethodData, AVing the Values RCW chain. */
-struct com_interface_entry
-{
-    void **vtable;
-    IID   *iid;
-};
-
+/* Shader pair-array contract: see struct com_interface_entry at the top.
+ * With E_NOTIMPL the shader falls back to a single-entry IInspectable vtable
+ * and the IApplicationDataContainer projection reads its method slots
+ * (get_Values = 8) off the wrong ComVirtualMethodData, AVing the Values RCW
+ * chain. */
 static const struct IApplicationDataContainerVtbl container_vtbl;
 static const struct __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainerVtbl empty_map_view_vtbl;
 

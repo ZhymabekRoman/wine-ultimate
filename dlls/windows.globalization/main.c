@@ -393,11 +393,26 @@ static const struct IIterable_HSTRINGVtbl iterable_view_hstring_vtbl =
     iterable_view_hstring_First,
 };
 
+/* CoreCLR's ComWrappers shader reads IInspectable::GetIids output as an array
+ * of ComInterfaceEntry pairs (vtable-first layout: struct { void** Vtable;
+ * Guid* IID; }). */
+struct com_interface_entry
+{
+    void **vtable;
+    IID   *iid;
+};
+
+/* Defined further below; referenced by the cached GetIids pair array. */
+static const struct IActivationFactoryVtbl application_languages_activation_factory_vtbl;
+static const struct IApplicationLanguagesStaticsVtbl application_languages_statics_vtbl;
+
 struct application_languages
 {
     IActivationFactory IActivationFactory_iface;
     IApplicationLanguagesStatics IApplicationLanguagesStatics_iface;
     LONG ref;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
+    ULONG iids_count;
 };
 
 struct windows_globalization
@@ -1036,8 +1051,32 @@ static ULONG STDMETHODCALLTYPE application_languages_activation_factory_Release(
 static HRESULT STDMETHODCALLTYPE application_languages_activation_factory_GetIids(
         IActivationFactory *iface, ULONG *iid_count, IID **iids)
 {
-    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
-    return E_NOTIMPL;
+    /* CoreCLR's ComWrappers shader reads the output as a ComInterfaceEntry
+     * pair array; E_NOTIMPL makes it fall back to a single-entry IInspectable
+     * vtable and the IApplicationLanguagesStatics (get_Current) RCW decodes
+     * its slots off the wrong ComVirtualMethodData. One stable pair array per
+     * singleton: {factory vtbl, IActivationFactory} + {statics vtbl,
+     * IApplicationLanguagesStatics}. */
+    struct application_languages *impl = impl_application_languages_from_IActivationFactory(iface);
+    TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
+
+    if (!impl->iids_cache)
+    {
+        struct com_interface_entry entries[] =
+        {
+            { (void **)&application_languages_activation_factory_vtbl, (IID *)&IID_IActivationFactory },
+            { (void **)&application_languages_statics_vtbl, (IID *)&IID_IApplicationLanguagesStatics },
+        };
+        struct com_interface_entry *array = CoTaskMemAlloc(sizeof(entries));
+        if (!array) return E_OUTOFMEMORY;
+        memcpy(array, entries, sizeof(entries));
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE(entries);
+    }
+
+    if (iid_count) *iid_count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE application_languages_activation_factory_GetRuntimeClassName(

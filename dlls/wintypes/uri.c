@@ -526,6 +526,14 @@ static const IStringableVtbl uri_stringable_vtbl =
     uri_stringable_ToString,
 };
 
+/* Defined further below; referenced by the cached GetIids pair array. */
+static const IActivationFactoryVtbl uri_statics_vtbl;
+static const IUriRuntimeClassFactoryVtbl uri_factory_vtbl;
+static const IUriEscapeStaticsVtbl uri_escape_vtbl;
+static const IUriRuntimeClassVtbl uri_statics_def_vtbl;
+static const IUriRuntimeClassWithAbsoluteCanonicalUriVtbl uri_statics_acu_vtbl;
+static const IStringableVtbl uri_statics_stringable_vtbl;
+
 struct uri_statics
 {
     IActivationFactory IActivationFactory_iface;
@@ -535,6 +543,8 @@ struct uri_statics
     IUriRuntimeClassWithAbsoluteCanonicalUri IUriRuntimeClassWithAbsoluteCanonicalUri_iface;
     IStringable IStringable_iface;
     LONG ref;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see uri_statics_GetIids */
+    ULONG iids_count;
 };
 
 static inline struct uri_statics *impl_from_IActivationFactory( IActivationFactory *iface )
@@ -613,25 +623,34 @@ static ULONG WINAPI uri_statics_Release( IActivationFactory *iface )
 
 static HRESULT WINAPI uri_statics_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    IID factory_iids[] =
-    {
-        IID_IActivationFactory,
-        IID_IUriRuntimeClassFactory,
-        IID_IUriEscapeStatics,
-        IID_IUriRuntimeClass,
-        IID_IUriRuntimeClassWithAbsoluteCanonicalUri,
-        IID_IStringable,
-    };
+    /* CoreCLR's ComWrappers shader consumes this as a ComInterfaceEntry pair
+     * array (vtable-first, {real per-interface vtable; stable IID pointer});
+     * RoGetActivationFactory("Windows.Foundation.Uri") builds the first RCW
+     * faces in the process, so this list seeds its per-IID-set cache. One
+     * stable pair array per singleton. */
+    struct uri_statics *impl = impl_from_IActivationFactory( iface );
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = ARRAY_SIZE(factory_iids);
-    if (iids)
+    if (!impl->iids_cache)
     {
-        IID *array = CoTaskMemAlloc( sizeof(factory_iids) );
+        struct com_interface_entry entries[] =
+        {
+            { (void **)&uri_statics_vtbl, (IID *)&IID_IActivationFactory },
+            { (void **)&uri_factory_vtbl, (IID *)&IID_IUriRuntimeClassFactory },
+            { (void **)&uri_escape_vtbl, (IID *)&IID_IUriEscapeStatics },
+            { (void **)&uri_statics_def_vtbl, (IID *)&IID_IUriRuntimeClass },
+            { (void **)&uri_statics_acu_vtbl, (IID *)&IID_IUriRuntimeClassWithAbsoluteCanonicalUri },
+            { (void **)&uri_statics_stringable_vtbl, (IID *)&IID_IStringable },
+        };
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof(entries) );
         if (!array) return E_OUTOFMEMORY;
-        memcpy( array, factory_iids, sizeof(factory_iids) );
-        *iids = array;
+        memcpy( array, entries, sizeof(entries) );
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE(entries);
     }
+
+    if (iid_count) *iid_count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 
