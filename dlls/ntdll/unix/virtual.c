@@ -2129,6 +2129,12 @@ static NTSTATUS set_protection( struct file_view *view, void *base, SIZE_T size,
     if (is_view_valloc( view ))
     {
         if (vprot & VPROT_WRITECOPY) return STATUS_INVALID_PAGE_PROTECTION;
+        /* CoreRT/CoreCLR's interop stub heap is a plain PAGE_READWRITE
+         * VirtualAlloc region that the runtime both writes (stub emission) and
+         * executes from; on Windows committed pages of a VirtualAlloc region
+         * carry execute. Map committed writable pages of a valloc view executable
+         * so the stubs run directly instead of faulting on every invocation. */
+        if (vprot & VPROT_WRITE) vprot |= VPROT_EXEC;
     }
     else
     {
