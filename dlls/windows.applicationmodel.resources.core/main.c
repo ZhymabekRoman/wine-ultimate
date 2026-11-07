@@ -1139,9 +1139,18 @@ static HRESULT WINAPI ov_GetRuntimeClassName( void *iface, HSTRING *n )
 {
     TRACE( "ov_GetRuntimeClassName enter\n" );
 
-    static const WCHAR *args[] = { ELEM_CLASS_STRING };
+    /* The face MCG interrogates in the last step before the Languages-plane
+     * failfast (mrm15 tail: ov_GetRuntimeClassName -> QI triple -> svv_Size
+     * -> svv_GetAt "en-US" x2 -> c0000602).  Publish the MWR ResourceManager
+     * class key here so McgModuleManager::TryGetClassTypeFromName resolves
+     * the Microsoft.Windows.ApplicationModel.Resources.ResourceManager type
+     * and routes the activation through combase (the route the first three
+     * activations use, answered by the builtin's GetActivationFactory export
+     * with IResourceManager2 {7ec10160}) instead of the mrt100_app
+     * RegisteredComponents thunk that lands on the empty slot (-512). */
+    static const WCHAR mcg_key_rmwr[] = L"Microsoft.Windows.ApplicationModel.Resources.ResourceManager";
 
-    return param_class_name( ELEM_OBSERVABLEVECTOR, L"`1", args, 1, n );
+    return className( mcg_key_rmwr, n );
 }
 static HRESULT WINAPI ov_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI ov_add_VectorChanged( void *iface, void *handler, INT64 *token )
@@ -4373,7 +4382,25 @@ static HRESULT WINAPI rm2_QueryInterface( void *iface, REFIID iid, void **out ) 
 static ULONG WINAPI rm2_AddRef( void *iface ) { return incr( &rm2_from( iface )->ref ); }
 static ULONG WINAPI rm2_Release( void *iface ) { return decr( &rm2_from( iface )->ref ); }
 static HRESULT WINAPI rm2_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
-static HRESULT WINAPI rm2_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_RESOURCEMANAGER, n ); }
+/* RegisteredComponents decode (CalculatorApp.dll .rdata map, file offsets
+ * 0x270248-0x2a4600: entries [module ptr RVA 0x28c50][u32 char-count][UTF-16
+ * class string]): the app map carries Windows.ApplicationModel.Resources.
+ * Core.ResourceManager (0x2a4410) and .Core.ResourceContext (0x2a4388) ->
+ * CalculatorApp.dll, but NO Microsoft.Windows.ApplicationModel.Resources.
+ * ResourceManager entry in any app image (absent UTF-16 and UTF-8 in
+ * CalculatorApp.dll, SharedLibrary.dll, CalculatorApp.exe, mrt100_app.dll,
+ * mrt100.dll) -> the mrt100_app MCG thunk lands on the empty slot (-512).
+ * Publish the MWR class key on the IResourceManager2 face (the face the
+ * activation hands out): the Mcg toolbox lookup then resolves the MWR
+ * ResourceManager TYPE and routes it through the combase
+ * RoGetActivationFactory path that answers IResourceManager2 {7ec10160},
+ * the route the first three activations use. */
+static HRESULT WINAPI rm2_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR mcg_key_rmwr[] = L"Microsoft.Windows.ApplicationModel.Resources.ResourceManager";
+
+    return className( mcg_key_rmwr, n );
+}
 static HRESULT WINAPI rm2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 /* IResourceManager2::get_CandidateLanguages [6]: the languages of the default
  * context (en-US + its neutral parent), handed out on the same

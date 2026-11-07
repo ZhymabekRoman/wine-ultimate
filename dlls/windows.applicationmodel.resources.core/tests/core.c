@@ -1093,7 +1093,7 @@ static void test_parameterized_class_names(void)
      * `Windows.Foundation.Collections.IVectorView`1<System.String>` spelling
      * misses that exact key and falls back to a target-less closest class. */
     static const WCHAR name_vector_s[]   = L"Windows.Storage.UserDataPaths";
-    static const WCHAR name_vector_observable_s[] = L"Windows.Foundation.Collections.IObservableVector`1<System.String>";
+    static const WCHAR name_vector_observable_s[] = L"Microsoft.Windows.ApplicationModel.Resources.ResourceManager";
     /* The str_vector view impl (svv_QueryInterface vt_vv) is shared by the
      * Languages GetView and the Qualifiers faces; both name themselves with the
      * same SharedLibrary Mcg name-pool key so cast #14 resolves the triple. */
