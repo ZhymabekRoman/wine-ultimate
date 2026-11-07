@@ -527,9 +527,32 @@ static const IStringableVtbl uri_stringable_vtbl =
 };
 
 /* Defined further below; referenced by the cached GetIids pair array. */
-static const IActivationFactoryVtbl uri_statics_vtbl;
-static const IUriRuntimeClassFactoryVtbl uri_factory_vtbl;
 static const IUriEscapeStaticsVtbl uri_escape_vtbl;
+static const IUriRuntimeClassVtbl uri_statics_def_vtbl;
+static const IUriRuntimeClassWithAbsoluteCanonicalUriVtbl uri_statics_acu_vtbl;
+static const IStringableVtbl uri_statics_stringable_vtbl;
+
+/* p205: publish the Uri factory face as one 64-byte-aligned static blob —
+ * both vtable blocks and the ComInterfaceEntry pair array live in a single
+ * allocation, so the ComWrappers shader's ComVirtualMethodData refetch
+ * (coreclr+0x388c3e slot-7 deref, rax = arena base + entry-count tag) reads
+ * built slots adjacent to the pair array instead of a half-built arena
+ * block.  uri_statics_vtbl / uri_factory_vtbl alias into the blob. */
+struct uri_factory_face
+{
+    IActivationFactoryVtbl actv;
+    IUriRuntimeClassFactoryVtbl facv;
+    struct com_interface_entry pairs[2];
+};
+static struct uri_factory_face uri_factory_face;
+#define uri_statics_vtbl uri_factory_face.actv
+#define uri_factory_vtbl uri_factory_face.facv
+
+static HRESULT WINAPI uri_factory_CreateUri( IUriRuntimeClassFactory *iface, HSTRING uri,
+                                             IUriRuntimeClass **instance );
+static HRESULT WINAPI uri_factory_CreateWithRelativeUri( IUriRuntimeClassFactory *iface,
+                                                         HSTRING base_uri, HSTRING relative_uri,
+                                                         IUriRuntimeClass **instance );
 static const IUriRuntimeClassVtbl uri_statics_def_vtbl;
 static const IUriRuntimeClassWithAbsoluteCanonicalUriVtbl uri_statics_acu_vtbl;
 static const IStringableVtbl uri_statics_stringable_vtbl;
@@ -639,16 +662,13 @@ static HRESULT WINAPI uri_statics_GetIids( IActivationFactory *iface, ULONG *iid
     if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
-        /* Static pair array (canonical Uri factory set): the shader caches
-         * (count, array) for the process lifetime; CoTaskMem arrays lived in
-         * the wine shared heap (0x6fff00000000) and got recycled mid-shader. */
-        static const struct com_interface_entry shared[] =
-        {
-            { (void **)&uri_statics_vtbl, (IID *)&IID_IActivationFactory },
-            { (void **)&uri_factory_vtbl, (IID *)&IID_IUriRuntimeClassFactory },
-        };
-        impl->iids_count = ARRAY_SIZE(shared);
-        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, (void *)shared, NULL );
+        /* Pairs inside the single static face blob (canonical Uri factory
+         * set): the shader caches (count, array) for the process lifetime;
+         * CoTaskMem arrays lived in the wine shared heap (0x6fff00000000) and
+         * got recycled mid-shader.  p205: vtable blocks sit in the same
+         * 64-byte-aligned allocation as these pairs. */
+        impl->iids_count = ARRAY_SIZE(uri_factory_face.pairs);
+        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, uri_factory_face.pairs, NULL );
     }
 
     if (iid_count) *iid_count = impl->iids_count;
@@ -674,16 +694,7 @@ static HRESULT WINAPI uri_statics_ActivateInstance( IActivationFactory *iface, I
     return E_FAIL;
 }
 
-static const IActivationFactoryVtbl uri_statics_vtbl =
-{
-    uri_statics_QueryInterface,
-    uri_statics_AddRef,
-    uri_statics_Release,
-    uri_statics_GetIids,
-    uri_statics_GetRuntimeClassName,
-    uri_statics_GetTrustLevel,
-    uri_statics_ActivateInstance,
-};
+/* uri_statics_vtbl is the actv field of the face blob below (p205). */
 
 DEFINE_IINSPECTABLE_( uri_factory, IUriRuntimeClassFactory, struct uri_statics, impl_from_IUriRuntimeClassFactory,
                      IUriRuntimeClassFactory_iface, &impl->IActivationFactory_iface )
@@ -726,16 +737,35 @@ static HRESULT WINAPI uri_factory_CreateWithRelativeUri( IUriRuntimeClassFactory
     return hr;
 }
 
-static const IUriRuntimeClassFactoryVtbl uri_factory_vtbl =
+/* p205: one 64-byte-aligned face blob — vtable blocks + ComInterfaceEntry
+ * pair array in a single static allocation, so the ComWrappers shader's
+ * ComVirtualMethodData refetch at pair+vtable offsets lands on built slots
+ * (see uri_statics_GetIids tag-decode note). */
+static struct uri_factory_face uri_factory_face __attribute__((aligned(64))) =
 {
-    uri_factory_QueryInterface,
-    uri_factory_AddRef,
-    uri_factory_Release,
-    uri_factory_GetIids,
-    uri_factory_GetRuntimeClassName,
-    uri_factory_GetTrustLevel,
-    uri_factory_CreateUri,
-    uri_factory_CreateWithRelativeUri,
+    {
+        uri_statics_QueryInterface,
+        uri_statics_AddRef,
+        uri_statics_Release,
+        uri_statics_GetIids,
+        uri_statics_GetRuntimeClassName,
+        uri_statics_GetTrustLevel,
+        uri_statics_ActivateInstance,
+    },
+    {
+        uri_factory_QueryInterface,
+        uri_factory_AddRef,
+        uri_factory_Release,
+        uri_factory_GetIids,
+        uri_factory_GetRuntimeClassName,
+        uri_factory_GetTrustLevel,
+        uri_factory_CreateUri,
+        uri_factory_CreateWithRelativeUri,
+    },
+    {
+        { (void **)&uri_factory_face.actv, (IID *)&IID_IActivationFactory },
+        { (void **)&uri_factory_face.facv, (IID *)&IID_IUriRuntimeClassFactory },
+    },
 };
 
 DEFINE_IINSPECTABLE_( uri_escape, IUriEscapeStatics, struct uri_statics, impl_from_IUriEscapeStatics,
