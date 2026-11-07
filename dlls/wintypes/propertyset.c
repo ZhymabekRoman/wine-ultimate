@@ -175,6 +175,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
     struct propertyset *impl = impl_from_IPropertySet( iface );
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
+    if (iid_count) *iid_count = 6; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =
@@ -669,7 +670,16 @@ static BOOL CALLBACK propertyset_ring_init( INIT_ONCE *once, void *param, void *
 
 static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
-    struct propertyset *impl;
+    static struct propertyset *pin[2]; /* depth-2 pin: the CoreCLR shader's
+                                        * CreateObject runs AddRef/Release pairs
+                                        * around GetIids, and a ring slot reused
+                                        * by the next get_Values call can hand
+                                        * the shader a face whose vtable slot
+                                        * has been republished (observed
+                                        * *rbx = 0x6fff00000006 = base+count
+                                        * tag) mid-shader. Keep the last two
+                                        * activated slots pinned. */
+    struct propertyset *impl, *old;
 
     TRACE( "(%p, %p)\n", iface, instance );
 
@@ -678,7 +688,12 @@ static HRESULT STDMETHODCALLTYPE factory_ActivateInstance( IActivationFactory *i
     impl = &propertyset_ring[InterlockedIncrement( &propertyset_ring_next ) & (PROPERTYSET_RING_SIZE - 1)];
     if (!impl->map_inner)
         return E_OUTOFMEMORY;
-    InterlockedIncrement( &impl->ref );
+    InterlockedIncrement( &impl->ref );  /* handoff ref (released by caller) */
+    InterlockedIncrement( &impl->ref );  /* depth-2 pin */
+    old = pin[1];
+    pin[1] = pin[0];
+    pin[0] = impl;
+    if (old) InterlockedDecrement( &old->ref );
 
     *instance = (IInspectable *)&impl->IPropertySet_iface;
     return S_OK;

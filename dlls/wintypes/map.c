@@ -550,6 +550,7 @@ static HRESULT WINAPI map_view_GetIids( IMapView_HSTRING_IInspectable *iface, UL
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
+    if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =
@@ -864,6 +865,7 @@ static HRESULT WINAPI map_inner_GetIids( IInspectable *iface, ULONG *iid_count, 
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
+    if (iid_count) *iid_count = 5; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =

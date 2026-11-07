@@ -1060,6 +1060,7 @@ static HRESULT STDMETHODCALLTYPE application_languages_activation_factory_GetIid
     struct application_languages *impl = impl_application_languages_from_IActivationFactory(iface);
     TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
 
+    if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =

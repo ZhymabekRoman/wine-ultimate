@@ -133,6 +133,7 @@ static HRESULT STDMETHODCALLTYPE api_information_statics_factory_GetIids(IActiva
     struct api_information_statics *impl = impl_ais_from_IActivationFactory(iface);
     TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
 
+    if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =
@@ -419,6 +420,7 @@ static HRESULT STDMETHODCALLTYPE property_value_statics_factory_GetIids(IActivat
     struct property_value_statics *impl = impl_pvs_from_IActivationFactory(iface);
     TRACE("iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids);
 
+    if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =

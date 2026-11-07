@@ -103,6 +103,7 @@ static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_cou
     struct application_data_statics *impl = impl_from_IActivationFactory( iface );
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
+    if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =
@@ -368,6 +369,11 @@ static HRESULT WINAPI container_get_Values( IApplicationDataContainer *iface, IP
 
     *value = impl->values;
     if (impl->values) IPropertySet_AddRef( impl->values );
+    /* Tag hypothesis probe: log the ring slot handed to the shader and the
+     * first qword (expected: the merged propertyset vtable, not a tagged
+     * base+count value like 0x6fff00000006). */
+    TRACE( "get_Values: ring iface %p first_qword %p\n", impl->values,
+           impl->values ? *(void **)impl->values : NULL );
     return *value ? S_OK : E_FAIL;
 }
 

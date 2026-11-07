@@ -631,6 +631,7 @@ static HRESULT WINAPI uri_statics_GetIids( IActivationFactory *iface, ULONG *iid
     struct uri_statics *impl = impl_from_IActivationFactory( iface );
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
+    if (iid_count) *iid_count = 6; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =
