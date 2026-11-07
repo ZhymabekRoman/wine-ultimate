@@ -118,6 +118,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
     {
         *out = iface;
         IUnknown_AddRef( (IUnknown *)*out );
+        TRACE( "handing out face %p, vtbl %p\n", *out, *(void **)*out );
         return S_OK;
     }
 
@@ -179,8 +180,11 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
         if (!array) return E_OUTOFMEMORY;
         memcpy( array, entries, sizeof(entries) );
         *iids = (IID *)array;
-        TRACE( "returning %u ComInterfaceEntry pairs: v0=%p iid0=%p\n",
-               ARRAY_SIZE(entries), (void *)array[0].vtable, (void *)array[0].iid );
+        for (ULONG i = 0; i < ARRAY_SIZE(entries); i++)
+            TRACE( "pair[%u] at %p: iid %s (%p) vtable %p\n", i, array + i,
+                   debugstr_guid( array[i].iid ), (void *)array[i].iid, (void *)array[i].vtable );
+        TRACE( "returning %u ComInterfaceEntry pairs at %p (slot0 vtable %p, slot0 iid %p)\n",
+               ARRAY_SIZE(entries), array, (void *)array[0].vtable, (void *)array[0].iid );
     }
     return S_OK;
 }
@@ -209,6 +213,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, void *
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
 
+    TRACE( "iface %p (vtbl %p), key %s, value %p\n", iface, *(void **)iface, debugstr_hstring( key ), value );
     if (!value)
         return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable,
                                                                    (IIterator_IKeyValuePair_HSTRING_IInspectable **)key );
@@ -218,12 +223,16 @@ static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, void *
 static HRESULT STDMETHODCALLTYPE propertyset_get_Size( IPropertySet *iface, UINT32 *size )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
-    return IMap_HSTRING_IInspectable_get_Size( impl->inner_map, size );
+    HRESULT hr = IMap_HSTRING_IInspectable_get_Size( impl->inner_map, size );
+    TRACE( "iface %p (vtbl %p), size %p -> %u, hr %08lx\n", iface, *(void **)iface, size,
+           size ? *size : 0, hr );
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_HasKey( IPropertySet *iface, HSTRING key, boolean *found )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "iface %p, key %s, found %p\n", iface, debugstr_hstring( key ), found );
     return IMap_HSTRING_IInspectable_HasKey( impl->inner_map, key, found );
 }
 
@@ -233,6 +242,8 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetView( IPropertySet *iface, void 
     struct propertyset *impl = impl_from_IPropertySet( iface );
     IMapView_HSTRING_IInspectable *view;
     HRESULT hr;
+
+    TRACE( "iface %p (vtbl %p), first %p, second %p\n", iface, *(void **)iface, first, second );
 
     if (FAILED(hr = IMap_HSTRING_IInspectable_GetView( impl->inner_map, &view ))) return hr;
     if (second)
@@ -248,18 +259,21 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetView( IPropertySet *iface, void 
 static HRESULT STDMETHODCALLTYPE propertyset_Insert( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "iface %p, key %s, value %p, replaced %p\n", iface, debugstr_hstring( key ), value, replaced );
     return IMap_HSTRING_IInspectable_Insert( impl->inner_map, key, value, replaced );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_Remove( IPropertySet *iface, HSTRING key )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "iface %p, key %s\n", iface, debugstr_hstring( key ) );
     return IMap_HSTRING_IInspectable_Remove( impl->inner_map, key );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_Clear( IPropertySet *iface )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "iface %p\n", iface );
     return IMap_HSTRING_IInspectable_Clear( impl->inner_map );
 }
 
@@ -350,6 +364,7 @@ DEFINE_IINSPECTABLE( propertyset_IMapView, IMapView_HSTRING_IInspectable, struct
 static HRESULT STDMETHODCALLTYPE propertyset_IMapView_Lookup( IMapView_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
 {
     struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IMapView_HSTRING_IInspectable_iface );
+    TRACE( "viewface %p, key %s, value %p\n", iface, debugstr_hstring( key ), value );
     return IMap_HSTRING_IInspectable_Lookup( (IMap_HSTRING_IInspectable *)&impl->IPropertySet_iface, key, value );
 }
 
@@ -370,6 +385,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_IMapView_Split( IMapView_HSTRING_II
                                                             IMapView_HSTRING_IInspectable **second )
 {
     struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IMapView_HSTRING_IInspectable_iface );
+    TRACE( "viewface %p, first %p, second %p\n", iface, first, second );
     return propertyset_GetView( &impl->IPropertySet_iface, first, second );
 }
 
@@ -398,6 +414,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_IIterable_First( IIterable_IKeyValu
                                                              IIterator_IKeyValuePair_HSTRING_IInspectable **value )
 {
     struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IIterable_IKeyValuePair_HSTRING_IInspectable_iface );
+    TRACE( "iterableface %p, value %p\n", iface, value );
     return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable, value );
 }
 
@@ -560,6 +577,9 @@ static BOOL CALLBACK propertyset_ring_init( INIT_ONCE *once, void *param, void *
         impl->IIterable_IKeyValuePair_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IIterable_vtbl;
         impl->IObservableMap_HSTRING_IInspectable_iface.lpVtbl = &propertyset_IObservableMap_vtbl;
         impl->ref = 1; /* self-reference: ring slots are never freed */
+        TRACE( "ring[%u] iface %p merged_vtbl %p view_vtbl %p iter_vtbl %p obs_vtbl %p\n", i,
+               &impl->IPropertySet_iface, (void *)&propertyset_vtbl, (void *)&propertyset_IMapView_vtbl,
+               (void *)&propertyset_IIterable_vtbl, (void *)&propertyset_IObservableMap_vtbl );
 
         if (FAILED(multi_threaded_map_create( &propertyset_map_iids,
                                               (IInspectable *)&impl->IPropertySet_iface,
