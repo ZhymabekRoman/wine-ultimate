@@ -128,6 +128,146 @@ static void test_cache_unavailable( void )
     FreeLibrary( mod );
 }
 
+/*
+ * The QueryState plane answers from the package registration (the AppModel key
+ * kernelbase reads): seed a deployment record and the context fields report the
+ * package's state repository and DataPackage paths; an unregistered name is the
+ * empty cache. The record is seeded for the test process only, HKCU.
+ */
+static void test_cache_registry( void )
+{
+    static const WCHAR full_name[] = L"WineTest.Package_1.2.3.4_x64__abcd1234abcd";
+    static const WCHAR foreign_name[] = L"WineTest.Absent_9.9.9.9_x64__zzzzzzzzzzzz";
+    static const WCHAR pkg_path[] = L"C:\\WineTestPkg";
+    static const WCHAR sr_path[] = L"C:\\WineTestSR";
+    static const WCHAR appmodel_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineTest.Package_1.2.3.4_x64__abcd1234abcd";
+    HRESULT (WINAPI *p_ManagerOpen)( const void *, void ** );
+    HRESULT (WINAPI *p_ContextOpen)( void *, const WCHAR *, void ** );
+    HRESULT (WINAPI *p_IsEmpty)( void *, BOOL * );
+    HRESULT (WINAPI *p_GetField_UInt32)( void *, ULONG, ULONG * );
+    HRESULT (WINAPI *p_GetField_String)( void *, ULONG, WCHAR ** );
+    HRESULT (WINAPI *p_GetDefaultAccountSid)( WCHAR ** );
+    HRESULT (WINAPI *p_Free)( void * );
+    HMODULE mod;
+    HRESULT hr;
+    void *manager, *context;
+    BOOL empty;
+    ULONG roaming;
+    WCHAR *str;
+    HKEY hkey;
+
+    mod = LoadLibraryA( "ext-ms-onecore-appmodel-staterepository-cache-l1-1-0.dll" );
+    if (!mod)
+    {
+        skip( "cache apiset does not load (err %lu)\n", GetLastError() );
+        return;
+    }
+
+    p_ManagerOpen = (void *)GetProcAddress( mod, "SRCacheManager_Open" );
+    p_ContextOpen = (void *)GetProcAddress( mod, "SRCacheContext_Open" );
+    p_IsEmpty = (void *)GetProcAddress( mod, "SRCacheContext_IsEmpty" );
+    p_GetField_UInt32 = (void *)GetProcAddress( mod, "SRCacheContext_GetField_UInt32" );
+    p_GetField_String = (void *)GetProcAddress( mod, "SRCacheContext_GetField_String" );
+    p_GetDefaultAccountSid = (void *)GetProcAddress( mod, "SRCache_GetDefaultAccountSid" );
+    p_Free = (void *)GetProcAddress( mod, "SRCache_Free" );
+    if (!p_ManagerOpen || !p_ContextOpen || !p_IsEmpty || !p_GetField_UInt32 || !p_GetField_String ||
+        !p_GetDefaultAccountSid || !p_Free)
+    {
+        skip( "cache exports missing\n" );
+        FreeLibrary( mod );
+        return;
+    }
+
+    /* the manager is an open handle to the repository, not to the cache;
+     * contexts open on the handle the manager hands out (here: none) */
+    manager = (void *)0xdead;
+    hr = p_ManagerOpen( NULL, &manager );
+    ok( hr == SR_E_UNAVAILABLE && !manager, "manager open hr %#lx manager %p\n", hr, manager );
+    manager = NULL;
+
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, appmodel_key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
+    {
+        skip( "cannot seed the package registration\n" );
+        FreeLibrary( mod );
+        return;
+    }
+    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)pkg_path, sizeof(pkg_path) );
+    RegCloseKey( hkey );
+
+    hr = p_ContextOpen( manager, full_name, &context );
+    ok( hr == S_OK && context, "context open hr %#lx context %p\n", hr, context );
+    if (SUCCEEDED( hr ) && context)
+    {
+        empty = TRUE;
+        hr = p_IsEmpty( context, &empty );
+        ok( hr == S_OK && !empty, "registered package: empty %d hr %#lx\n", empty, hr );
+
+        roaming = 0;
+        hr = p_GetField_UInt32( context, 2, &roaming );
+        ok( hr == S_OK && roaming == 1, "Roaming %lu hr %#lx\n", roaming, hr );
+
+        str = (void *)0xdead;
+        hr = p_GetField_String( context, 7, &str ); /* DataPackagePath */
+        ok( hr == S_OK && str && !wcscmp( str, L"C:\\WineTestPkg\\AppData\\Local" ),
+            "DataPackagePath hr %#lx str %s\n", hr, debugstr_w( str ) );
+        p_Free( str );
+
+        str = (void *)0xdead;
+        hr = p_GetField_String( context, 1, &str ); /* Path: convention AppData root */
+        ok( hr == S_OK && str && !wcscmp( str, L"C:\\WineTestPkg\\AppData" ),
+            "Path hr %#lx str %s\n", hr, debugstr_w( str ) );
+        p_Free( str );
+
+        /* the recorded StateRepositoryPath wins over the convention */
+        if (!RegOpenKeyExW( HKEY_CURRENT_USER, appmodel_key, 0, KEY_WRITE, &hkey ))
+        {
+            RegSetValueExW( hkey, L"StateRepositoryPath", 0, REG_SZ, (const BYTE *)sr_path, sizeof(sr_path) );
+            RegCloseKey( hkey );
+        }
+        str = (void *)0xdead;
+        hr = p_GetField_String( context, 1, &str );
+        ok( hr == S_OK && str && !wcscmp( str, sr_path ),
+            "recorded StateRepositoryPath hr %#lx str %s\n", hr, debugstr_w( str ) );
+        p_Free( str );
+    }
+
+    /* the running package answers under its own identity too: the empty name
+     * is the root context (a no-op outside a package) */
+    {
+        void *root = NULL;
+        hr = p_ContextOpen( manager, NULL, &root );
+        ok( hr == S_OK, "root context open hr %#lx\n", hr );
+        if (SUCCEEDED( hr ) && root)
+        {
+            str = NULL;
+            hr = p_GetField_String( root, 3, &str ); /* InstanceId is always there */
+            ok( hr == S_OK && str && str[0], "InstanceId hr %#lx str %s\n", hr, debugstr_w( str ) );
+            p_Free( str );
+        }
+    }
+
+    /* an unregistered name is the empty cache: S_OK, no string, empty */
+    hr = p_ContextOpen( manager, foreign_name, &context );
+    if (SUCCEEDED( hr ) && context)
+    {
+        empty = FALSE;
+        hr = p_IsEmpty( context, &empty );
+        ok( hr == S_OK && empty, "unregistered package: empty %d hr %#lx\n", empty, hr );
+        str = (void *)0xdead;
+        hr = p_GetField_String( context, 1, &str );
+        ok( hr == S_OK && !str, "unregistered Path hr %#lx str %s\n", hr, debugstr_w( str ) );
+        p_Free( str );
+    }
+
+    str = (void *)0xdead;
+    hr = p_GetDefaultAccountSid( &str );
+    ok( hr == S_OK && str && str[0] == L'S', "default account sid hr %#lx sid %s\n", hr, debugstr_w( str ) );
+    p_Free( str );
+
+    RegDeleteTreeW( HKEY_CURRENT_USER, appmodel_key );
+    FreeLibrary( mod );
+}
+
 static void test_activation( void )
 {
     static const WCHAR user_class[] = L"Windows.Internal.StateRepository.User";
@@ -175,5 +315,6 @@ START_TEST( staterepository )
 {
     test_apiset_exports();
     test_cache_unavailable();
+    test_cache_registry();
     test_activation();
 }

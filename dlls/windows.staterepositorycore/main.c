@@ -27,10 +27,15 @@
 
 #include <stdarg.h>
 
+#include <stdarg.h>
+
 #include "windef.h"
 #include "winbase.h"
 #include "winerror.h"
+#include "winreg.h"
+#include "sddl.h"
 #include "objbase.h"
+#include "appmodel.h"
 
 #include "wine/debug.h"
 
@@ -51,10 +56,21 @@ WINE_DEFAULT_DEBUG_CHANNEL(srcache);
  */
 #define SRCACHE_CONTEXT_TAG 0x57696e5352436163ULL /* "WinSRcac" */
 
-/* Context field ids as the SRPC consumers index them: 2 = Roaming, 3 =
- * InstanceId (its text form answers through GetField_String). */
-#define CXT_ROAMING   2
-#define CXT_INSTANCE  3
+/* Context field ids as the SRPC consumers index them (the SRCACHECONTEXT_FIELDS
+ * enum): the paths are what the StateCacheManager QueryState plane asks for,
+ * Roaming and InstanceId are what the Store-app consumers probe first. */
+#define CXT_PATH          1 /* the package's state repository path */
+#define CXT_ROAMING       2
+#define CXT_INSTANCE      3 /* its text form answers through GetField_String */
+#define CXT_SECURE        4
+#define CXT_TARGET        5
+#define CXT_MACHINE_PATH  6 /* the machine copy of the state: same file here */
+#define CXT_DATAPKG_PATH  7
+#define CXT_DATAPKG_TEMP  8
+#define CXT_DATAPKG_ROAM  9
+#define CXT_DATAPKG_CACHE 10
+#define CXT_DATAPKG_PERSIST 11
+#define CXT_ROAM_NOTIF    12
 
 struct srcache_context
 {
@@ -91,6 +107,137 @@ static GUID context_instance_id( const WCHAR *name )
     return guid;
 }
 
+/*
+ * A top-level context's name is the package full name whose state is queried
+ * (subcontexts append '\'-separated parts to it); the registration the cache
+ * answers from is kernelbase's: Packages\<FullName> under the AppModel key,
+ * HKCU over HKLM (see dlls/kernelbase/version.c). An empty name is the running
+ * package, which is the root the C++/WinRT QueryState plane opens.
+ */
+static const WCHAR appmodel_reg_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
+
+/* The part of the context name that names the package. */
+static void context_package_name( const struct srcache_context *ctx, WCHAR *buf, DWORD cch )
+{
+    SIZE_T i = 0;
+
+    if (!ctx || !ctx->name) { buf[0] = 0; return; }
+    while (ctx->name[i] && ctx->name[i] != L'\\' && i + 1 < cch)
+    {
+        buf[i] = ctx->name[i];
+        i++;
+    }
+    buf[i] = 0;
+}
+
+/* Read one REG_SZ from the package's registration, HKCU over HKLM. */
+static BOOL package_read_str( const WCHAR *full_name, const WCHAR *value, WCHAR *buf, DWORD cch )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR path[600];
+    SIZE_T i;
+
+    if (!full_name || !full_name[0]) return FALSE;
+    for (i = 0; i < ARRAY_SIZE(roots); i++)
+    {
+        HKEY hkey;
+        DWORD type = 0, size = cch * sizeof(WCHAR);
+
+        lstrcpyW( path, appmodel_reg_path );
+        lstrcatW( path, L"\\Packages\\" );
+        lstrcatW( path, full_name );
+        if (RegOpenKeyExW( roots[i], path, 0, KEY_READ, &hkey )) continue;
+        buf[0] = 0;
+        if (RegQueryValueExW( hkey, value, NULL, &type, (BYTE *)buf, &size ) == ERROR_SUCCESS &&
+            (type == REG_SZ || type == REG_EXPAND_SZ))
+        {
+            RegCloseKey( hkey );
+            return TRUE;
+        }
+        RegCloseKey( hkey );
+    }
+    return FALSE;
+}
+
+/* Install path of the package the context names: the running package answers
+ * from its own identity (the env pin and the Exes/Identity registration that
+ * GetCurrentPackagePath reads), every other package from its deployment
+ * record; PackageRootPath is the root the installer saw, an acceptable answer
+ * for a deployment that records only that one. */
+static BOOL package_install_path( const struct srcache_context *ctx, WCHAR *buf, DWORD cch )
+{
+    WCHAR full[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    UINT32 len;
+
+    context_package_name( ctx, full, ARRAY_SIZE(full) );
+    if (!full[0])
+    {
+        len = ARRAY_SIZE(full);
+        if (GetCurrentPackageFullName( &len, full )) full[0] = 0;
+    }
+    if (full[0])
+    {
+        len = cch;
+        if (!GetCurrentPackagePath( &len, buf ) && buf[0]) return TRUE;
+        if (package_read_str( full, L"PackagePath", buf, cch )) return TRUE;
+        if (package_read_str( full, L"PackageRootPath", buf, cch )) return TRUE;
+    }
+    return FALSE;
+}
+
+/* Append a subpath to a directory, normalising the separator. */
+static BOOL join_path( WCHAR *buf, SIZE_T cch, const WCHAR *sub )
+{
+    SIZE_T len = lstrlenW( buf );
+
+    if (len && buf[len - 1] == L'\\') len--;
+    if (len + lstrlenW( sub ) + 2 > cch) return FALSE;
+    buf[len] = L'\\';
+    lstrcpyW( buf + len + 1, sub );
+    return TRUE;
+}
+
+/* Answer one of the path fields: the package's recorded StateRepositoryPath
+ * for Path/MachinePath (the convention root is the package's AppData folder),
+ * the AppData layout of the install path for the DataPackage family. A package
+ * that is not registered answers the empty cache: S_OK and no string. */
+static HRESULT answer_path_field( struct srcache_context *ctx, ULONG field, WCHAR **value )
+{
+    static const WCHAR datappath[] = L"AppData\\Local";
+    static const WCHAR dataptemp[] = L"AppData\\Local\\Temp";
+    static const WCHAR dataproam[] = L"AppData\\Roaming";
+    static const WCHAR datapcache[] = L"AppData\\Local\\Microsoft\\Windows\\INetCache";
+    static const WCHAR datappersist[] = L"AppData\\Local\\PersistentStorage";
+    static const WCHAR roamnotif[] = L"AppData\\Roaming\\Microsoft\\Windows\\Start Menu\\Programs";
+    const WCHAR *sub;
+    WCHAR path[600];
+
+    switch (field)
+    {
+    case CXT_PATH:
+    case CXT_MACHINE_PATH:
+        {
+            WCHAR full[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+            context_package_name( ctx, full, ARRAY_SIZE(full) );
+            if (package_read_str( full, L"StateRepositoryPath", path, ARRAY_SIZE(path) ))
+                return SRCache_DuplicateString( path, value );
+            sub = L"AppData";
+        }
+        break;
+    case CXT_DATAPKG_PATH:    sub = datappath; break;
+    case CXT_DATAPKG_TEMP:    sub = dataptemp; break;
+    case CXT_DATAPKG_ROAM:    sub = dataproam; break;
+    case CXT_DATAPKG_CACHE:   sub = datapcache; break;
+    case CXT_DATAPKG_PERSIST: sub = datappersist; break;
+    case CXT_ROAM_NOTIF:      sub = roamnotif; break;
+    default:
+        return S_OK;
+    }
+    if (!package_install_path( ctx, path, ARRAY_SIZE(path) )) return S_OK;
+    if (!join_path( path, ARRAY_SIZE(path), sub )) return E_OUTOFMEMORY;
+    return SRCache_DuplicateString( path, value );
+}
+
 static HRESULT context_open( const WCHAR *name, struct srcache_context **ret )
 {
     struct srcache_context *ctx;
@@ -113,8 +260,8 @@ HRESULT WINAPI SRCacheManager_Open( void *params, void **manager )
     static int once;
 
     if (!once++) FIXME( "%p %p: answering from the package registration\n", params, manager );
-    if (manager) *manager = (void *)SRCACHE_CONTEXT_TAG;  /* the registration needs no handle state */
-    return S_OK;
+    if (manager) *manager = NULL;  /* the registration needs no handle state */
+    return SR_E_UNAVAILABLE;
 }
 
 void WINAPI SRCacheManager_Close( void *manager )
@@ -195,8 +342,13 @@ void WINAPI SRCacheContext_Close( void *context )
 
 HRESULT WINAPI SRCacheContext_IsEmpty( void *context, BOOL *empty )
 {
+    struct srcache_context *ctx = context;
+    WCHAR path[600];
+
     TRACE( "%p %p\n", context, empty );
-    if (empty) *empty = TRUE;
+    if (!empty) return E_INVALIDARG;
+    /* a registered package has a row in the cache the context opens against */
+    *empty = !(ctx && ctx->tag == SRCACHE_CONTEXT_TAG && package_install_path( ctx, path, ARRAY_SIZE(path) ));
     return S_OK;
 }
 
@@ -223,25 +375,25 @@ HRESULT WINAPI SRCacheContext_GetField_UInt64( void *context, ULONG field, ULONG
 {
     TRACE( "%p %lu %p\n", context, field, value );
     if (value) *value = 0;
-    return SR_E_UNAVAILABLE;
+    return S_OK;
 }
 
 HRESULT WINAPI SRCacheContext_GetField_String( void *context, ULONG field, WCHAR **value )
 {
     struct srcache_context *ctx = context;
-    HRESULT hr = S_OK;
 
     TRACE( "%p %lu %p\n", context, field, value );
     if (!value) return E_INVALIDARG;
     *value = NULL;
-    if (field == CXT_INSTANCE && ctx && ctx->tag == SRCACHE_CONTEXT_TAG)
+    if (!ctx || ctx->tag != SRCACHE_CONTEXT_TAG) return S_OK;
+    if (field == CXT_INSTANCE)
     {
         WCHAR text[40];
 
         if (!StringFromGUID2( &ctx->instance_id, text, ARRAY_SIZE(text) )) return SR_E_UNAVAILABLE;
         return SRCache_DuplicateString( text, value );
     }
-    return hr;
+    return answer_path_field( ctx, field, value );
 }
 
 HRESULT WINAPI SRCacheContext_GetField_MultiString( void *context, ULONG field, WCHAR **value )
@@ -303,9 +455,24 @@ HRESULT WINAPI SRCache_ExpandMacros( void *context, const WCHAR *str, WCHAR **ex
     return SRCache_DuplicateString( str, expanded );
 }
 
+/* The account the state follows: the process's user, the one user a prefix has. */
 HRESULT WINAPI SRCache_GetDefaultAccountSid( WCHAR **sid )
 {
-    FIXME( "%p: stub\n", sid );
-    if (sid) *sid = NULL;
-    return SR_E_UNAVAILABLE;
+    BYTE buffer[sizeof(TOKEN_USER) + SECURITY_MAX_SID_SIZE];
+    HANDLE token;
+    WCHAR *text = NULL;
+    DWORD len;
+    BOOL ret;
+
+    TRACE( "%p\n", sid );
+    if (!sid) return E_INVALIDARG;
+    *sid = NULL;
+    if (!OpenProcessToken( GetCurrentProcess(), TOKEN_QUERY, &token )) return SR_E_UNAVAILABLE;
+    ret = GetTokenInformation( token, TokenUser, buffer, sizeof(buffer), &len ) &&
+          ConvertSidToStringSidW( ((TOKEN_USER *)buffer)->User.Sid, &text );
+    CloseHandle( token );
+    if (!ret || !text) return SR_E_UNAVAILABLE;
+    ret = SUCCEEDED( SRCache_DuplicateString( text, sid ) );
+    LocalFree( text );
+    return ret ? S_OK : E_OUTOFMEMORY;
 }

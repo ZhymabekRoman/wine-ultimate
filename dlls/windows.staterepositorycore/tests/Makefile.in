@@ -1,5 +1,5 @@
 TESTDLL = windows.staterepositorycore.dll
-IMPORTS = combase
+IMPORTS = combase advapi32
 
 SOURCES = \
 	staterepository.c
