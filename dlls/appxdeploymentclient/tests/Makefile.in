@@ -1,0 +1,5 @@
+TESTDLL = appxdeploymentclient.dll
+IMPORTS = combase advapi32 uuid ole32
+
+SOURCES = \
+	deployment.c

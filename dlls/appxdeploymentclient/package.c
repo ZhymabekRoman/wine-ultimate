@@ -20,7 +20,453 @@
 #include "private.h"
 #include "wine/debug.h"
 
+#include "winreg.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(appx);
+
+/*
+ * RegisterPackageAsync's deployment, minimal ladder.
+ *
+ * Windows copies a staged package into the per-user package root and records
+ * the deployment in the StateRepository; here the staged directory is the
+ * install directory (no copy), and the record is kernelbase's registration:
+ * Packages\<FullName> under the AppModel key, HKCU (the per-user deployment,
+ * see dlls/kernelbase/version.c). The FullName of a staged package is the
+ * staged directory's name; the family name is that name without the publisher
+ * token, which is how the registration is indexed by the identity APIs.
+ *
+ * The operation is born completed: the deployment happened synchronously, and
+ * a completed IAsyncOperationWithProgress answers GetResults from birth.
+ */
+
+struct deployment_result
+{
+    IDeploymentResult IDeploymentResult_iface;
+    LONG ref;
+};
+
+static inline struct deployment_result *impl_from_IDeploymentResult( IDeploymentResult *iface )
+{
+    return CONTAINING_RECORD( iface, struct deployment_result, IDeploymentResult_iface );
+}
+
+static HRESULT WINAPI deployment_result_QueryInterface( IDeploymentResult *iface, REFIID iid, void **out )
+{
+    struct deployment_result *impl = impl_from_IDeploymentResult( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IDeploymentResult ))
+    {
+        *out = &impl->IDeploymentResult_iface;
+        IDeploymentResult_AddRef( *out );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI deployment_result_AddRef( IDeploymentResult *iface )
+{
+    struct deployment_result *impl = impl_from_IDeploymentResult( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI deployment_result_Release( IDeploymentResult *iface )
+{
+    struct deployment_result *impl = impl_from_IDeploymentResult( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI deployment_result_GetIids( IDeploymentResult *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI deployment_result_GetRuntimeClassName( IDeploymentResult *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Management.Deployment.DeploymentResult";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI deployment_result_GetTrustLevel( IDeploymentResult *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI deployment_result_get_ErrorText( IDeploymentResult *iface, HSTRING *text )
+{
+    *text = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI deployment_result_get_ActivityId( IDeploymentResult *iface, GUID *activity )
+{
+    memset( activity, 0, sizeof(*activity) );
+    return S_OK;
+}
+
+static HRESULT WINAPI deployment_result_get_ExtendedErrorCode( IDeploymentResult *iface, HRESULT *hr )
+{
+    *hr = S_OK;
+    return S_OK;
+}
+
+static const struct IDeploymentResultVtbl deployment_result_vtbl =
+{
+    deployment_result_QueryInterface,
+    deployment_result_AddRef,
+    deployment_result_Release,
+    deployment_result_GetIids,
+    deployment_result_GetRuntimeClassName,
+    deployment_result_GetTrustLevel,
+    deployment_result_get_ErrorText,
+    deployment_result_get_ActivityId,
+    deployment_result_get_ExtendedErrorCode,
+};
+
+struct register_async_op
+{
+    IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress iface;
+    IAsyncInfo IAsyncInfo_iface;
+    struct deployment_result *result;
+    IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress *completed;
+    IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress *progress;
+    LONG ref;
+    ULONG id;
+};
+
+static inline struct register_async_op *impl_from_IAsyncOperationWithProgress(
+        IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface )
+{
+    return CONTAINING_RECORD( iface, struct register_async_op, iface );
+}
+
+static inline struct register_async_op *impl_from_IAsyncInfo( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct register_async_op, IAsyncInfo_iface );
+}
+
+static HRESULT WINAPI async_op_QueryInterface( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        REFIID iid, void **out )
+{
+    struct register_async_op *impl = impl_from_IAsyncOperationWithProgress( iface );
+
+    TRACE( "iid %s, out %p.\n", debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress ))
+    {
+        *out = &impl->iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &impl->IAsyncInfo_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI async_op_AddRef( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface )
+{
+    struct register_async_op *impl = impl_from_IAsyncOperationWithProgress( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI async_op_Release( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface )
+{
+    struct register_async_op *impl = impl_from_IAsyncOperationWithProgress( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->completed)
+            IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Release( impl->completed );
+        if (impl->progress)
+            IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_Release( impl->progress );
+        IDeploymentResult_Release( &impl->result->IDeploymentResult_iface );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI async_op_GetIids( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI async_op_GetRuntimeClassName( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncOperationWithProgress`2<Windows.Management.Deployment.DeploymentResult, Windows.Management.Deployment.DeploymentProgress>";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI async_op_GetTrustLevel( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI async_op_put_Progress( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress *handler )
+{
+    struct register_async_op *impl = impl_from_IAsyncOperationWithProgress( iface );
+
+    if (impl->progress)
+        IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_Release( impl->progress );
+    impl->progress = handler;
+    if (handler) IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_AddRef( handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_op_get_Progress( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress **handler )
+{
+    struct register_async_op *impl = impl_from_IAsyncOperationWithProgress( iface );
+
+    if ((*handler = impl->progress))
+        IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_AddRef( *handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_op_put_Completed( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress *handler )
+{
+    struct register_async_op *impl = impl_from_IAsyncOperationWithProgress( iface );
+
+    if (impl->completed)
+        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Release( impl->completed );
+    impl->completed = handler;
+    if (handler)
+    {
+        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_AddRef( handler );
+        /* born completed: the handler of a completed operation fires at once */
+        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Invoke( handler, iface,
+                Completed );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI async_op_get_Completed( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress **handler )
+{
+    struct register_async_op *impl = impl_from_IAsyncOperationWithProgress( iface );
+
+    if ((*handler = impl->completed))
+        IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_AddRef( *handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_op_GetResults( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *iface,
+        IDeploymentResult **results )
+{
+    struct register_async_op *impl = impl_from_IAsyncOperationWithProgress( iface );
+
+    if (!results) return E_INVALIDARG;
+    *results = &impl->result->IDeploymentResult_iface;
+    IDeploymentResult_AddRef( *results );
+    return S_OK;
+}
+
+static const struct IAsyncOperationWithProgress_DeploymentResult_DeploymentProgressVtbl async_op_vtbl =
+{
+    async_op_QueryInterface,
+    async_op_AddRef,
+    async_op_Release,
+    async_op_GetIids,
+    async_op_GetRuntimeClassName,
+    async_op_GetTrustLevel,
+    async_op_put_Progress,
+    async_op_get_Progress,
+    async_op_put_Completed,
+    async_op_get_Completed,
+    async_op_GetResults,
+};
+
+static HRESULT WINAPI asyncinfo_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
+{
+    struct register_async_op *impl = impl_from_IAsyncInfo( iface );
+
+    return IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress_QueryInterface( &impl->iface, iid, out );
+}
+
+static ULONG WINAPI asyncinfo_AddRef( IAsyncInfo *iface )
+{
+    struct register_async_op *impl = impl_from_IAsyncInfo( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI asyncinfo_Release( IAsyncInfo *iface )
+{
+    struct register_async_op *impl = impl_from_IAsyncInfo( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->completed)
+            IAsyncOperationWithProgressCompletedHandler_DeploymentResult_DeploymentProgress_Release( impl->completed );
+        if (impl->progress)
+            IAsyncOperationProgressHandler_DeploymentResult_DeploymentProgress_Release( impl->progress );
+        IDeploymentResult_Release( &impl->result->IDeploymentResult_iface );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI asyncinfo_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI asyncinfo_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
+{
+    return async_op_GetRuntimeClassName( (IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress *)iface, name );
+}
+
+static HRESULT WINAPI asyncinfo_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI asyncinfo_get_Id( IAsyncInfo *iface, UINT32 *id )
+{
+    struct register_async_op *impl = impl_from_IAsyncInfo( iface );
+
+    *id = impl->id;
+    return S_OK;
+}
+
+static HRESULT WINAPI asyncinfo_get_Status( IAsyncInfo *iface, AsyncStatus *status )
+{
+    *status = Completed;
+    return S_OK;
+}
+
+static HRESULT WINAPI asyncinfo_get_ErrorCode( IAsyncInfo *iface, HRESULT *hr )
+{
+    *hr = S_OK;
+    return S_OK;
+}
+
+static HRESULT WINAPI asyncinfo_Cancel( IAsyncInfo *iface )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI asyncinfo_Close( IAsyncInfo *iface )
+{
+    return S_OK;
+}
+
+static const struct IAsyncInfoVtbl asyncinfo_vtbl =
+{
+    asyncinfo_QueryInterface,
+    asyncinfo_AddRef,
+    asyncinfo_Release,
+    /* IInspectable methods */
+    asyncinfo_GetIids,
+    asyncinfo_GetRuntimeClassName,
+    asyncinfo_GetTrustLevel,
+    /* IAsyncInfo methods */
+    asyncinfo_get_Id,
+    asyncinfo_get_Status,
+    asyncinfo_get_ErrorCode,
+    asyncinfo_Cancel,
+    asyncinfo_Close,
+};
+
+static HRESULT register_async_op_create( IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **out )
+{
+    static LONG next_id;
+    struct register_async_op *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->iface.lpVtbl = &async_op_vtbl;
+    impl->IAsyncInfo_iface.lpVtbl = &asyncinfo_vtbl;
+    impl->ref = 1;
+    impl->id = InterlockedIncrement( &next_id );
+    if (!(impl->result = calloc( 1, sizeof(*impl->result) )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+    impl->result->IDeploymentResult_iface.lpVtbl = &deployment_result_vtbl;
+    impl->result->ref = 1;
+    *out = &impl->iface;
+    return S_OK;
+}
+
+/* Record the deployment: Packages\<FullName> = the staged directory. */
+static HRESULT register_staged_package( const WCHAR *path, const WCHAR *full_name )
+{
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\";
+    WCHAR key[600];
+    DWORD framework = 0;
+    LONG ret;
+    HKEY hkey;
+
+    lstrcpyW( key, appmodel_path );
+    lstrcatW( key, full_name );
+    ret = RegCreateKeyExW( HKEY_CURRENT_USER, key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL );
+    if (ret) return HRESULT_FROM_WIN32( ret );
+    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)path, (lstrlenW( path ) + 1) * sizeof(WCHAR) );
+    RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&framework, sizeof(framework) );
+    RegCloseKey( hkey );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *iface, IUriRuntimeClass *uri,
+    IIterable_Uri *dependencies, DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
+{
+    WCHAR path[512], *name;
+    HSTRING str = NULL;
+    const WCHAR *buffer;
+    SIZE_T len;
+    HRESULT hr;
+
+    TRACE( "iface %p, uri %p, dependencies %p, options %d, operation %p.\n", iface, uri, dependencies, options, operation );
+
+    if (!uri || !operation) return E_INVALIDARG;
+    *operation = NULL;
+
+    /* the staged directory arrives as a file: URI; Path is its local path
+     * (this tree's IUriRuntimeClass; see wintypes/uri.c) */
+    if (FAILED( (hr = IUriRuntimeClass_get_Path( uri, &str ) ) )) return hr;
+    if (!(buffer = WindowsGetStringRawBuffer( str, NULL )))
+    {
+        WindowsDeleteString( str );
+        return E_INVALIDARG;
+    }
+    lstrcpynW( path, buffer, ARRAY_SIZE(path) );
+    WindowsDeleteString( str );
+    len = lstrlenW( path );
+    while (len && path[len - 1] == L'\\') path[--len] = 0;  /* tolerate a trailing separator */
+    name = wcsrchr( path, L'\\' );
+    name = name ? name + 1 : path;
+    if (!name[0]) return E_INVALIDARG;
+
+    if (FAILED( (hr = register_staged_package( path, name ) ) )) return hr;
+    TRACE( "registered staged package %s from %s\n", debugstr_w(name), debugstr_w(path) );
+    return register_async_op_create( operation );
+}
 
 struct package_manager
 {
@@ -124,13 +570,6 @@ static HRESULT WINAPI package_manager_StagePackageAsync( IPackageManager *iface,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
     FIXME( "iface %p, uri %p, dependencies %p, operation %p stub!\n", iface, uri, dependencies, operation );
-    return E_NOTIMPL;
-}
-
-static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
-    DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
-{
-    FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
     return E_NOTIMPL;
 }
 
