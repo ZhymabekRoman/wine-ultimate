@@ -5018,12 +5018,60 @@ static const WCHAR *mrtcore_tail( const WCHAR *name )
     return !wcsncmp( name, prefix, len ) ? name + len : NULL;
 }
 
+/* GCHandle pin-buffer pre-arm (re-arm wave, 2026-11-07).
+ *
+ * This SharedLibrary.dll build (net10-shape CoreLib on the 2.2-generation
+ * mrt100 app-locals) arms RuntimeExceptionHelpers.s_ExceptionInfoBufferPinningHandle
+ * (static slot SL+0x55de30) only when the native _RhSetErrorInfoBuffer reports
+ * "not first registration".  mrt100_app PalSetWerDataBuffer (SL_app+0x80808)
+ * calls the Extended-service vtable slot with an out-parameter the 2.2
+ * mrt100.dll SetHardwareExceptionHandler never writes, so the call returns the
+ * stack residue -- "true" every time.  Pass 1 of the culture walk therefore
+ * throws InvalidOperationException from GCHandle.get_Target (the catch at
+ * SL+0x98b94d swallows it and skips the arming store), and the c0000602
+ * second pass (mrt100_app RhpFailFastForPInvokeExceptionPreemp, SL_app+0x3eb81)
+ * re-throws from the same empty handle and exits.
+ *
+ * Pre-arm the slot with a wine-heap PinnedObjectHandle-shaped cell whose
+ * target is a fake System.Byte[] living in a zero-init .bss hole (no xrefs,
+ * outside the scanned static block: SL+0x55df60), so get_Target answers a
+ * non-empty pinned handle on both passes: the settled e0434352/c0000602 pair
+ * completes and the culture walk re-enters toward the Map plane.
+ */
+static void mrm_prearm_pinbuffer(void)
+{
+    static HMODULE hmod;
+    static UINT_PTR cell_store[2];
+    static void *cell;
+    unsigned char *base;
+    UINT_PTR *slot, *fake;
+
+    if (cell) return;
+    if (!hmod && !(hmod = GetModuleHandleA("SharedLibrary.dll"))) return;
+    base = (unsigned char *)hmod;
+
+    slot = (UINT_PTR *)(base + 0x55de30);   /* s_ExceptionInfoBufferPinningHandle */
+    fake = (UINT_PTR *)(base + 0x55df60);   /* unused .bss hole */
+    if (*slot)                              /* arm once, when slot is empty */
+        return;
+
+    fake[0] = (UINT_PTR)(base + 0xe0f80);   /* EEType_System::Byte[] */
+    fake[1] = 1;                            /* Length: nonzero, GC-scan safe */
+    cell_store[0] = (UINT_PTR)fake;         /* PinnedObjectHandle::m_object */
+    cell_store[1] = 0;
+    cell = cell_store;
+    *slot = (UINT_PTR)cell_store | 1;       /* GCHandle pinned tag */
+    TRACE("prearm pinbuffer slot %p = %p\n", slot, (void *)*slot);
+}
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
     const WCHAR *mrt = mrtcore_tail( buffer );
 
     TRACE("class %s, factory %p.\n", debugstr_hstring(classid), factory);
+
+    mrm_prearm_pinbuffer();
 
     if (!factory) return E_POINTER;
     *factory = NULL;

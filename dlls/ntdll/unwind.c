@@ -1696,17 +1696,6 @@ struct UNWIND_INFO
     /* followed by handler_data */
 };
 
-/* .NET Native (Redhawk) AOT binaries pack the method's GC-info mode in
- * the top two bits (30-31) of RUNTIME_FUNCTION::UnwindData; the OS
- * unwinder masks them off to locate the UNWIND_INFO.  Without the mask
- * a packed entry (.pdata of mrt100_app/SharedLibrary/CalculatorApp)
- * resolves UNWIND_INFO at base+ud+0x40000000 (garbage), the .NET
- * first/second pass dispatch of a raised exception (e.g. the
- * RaiseFailFastException(0,0,STACK_RESET) = 0xc0000602 second-pass
- * kickoff that follows a managed EH filter) walks off the table and the
- * process dies of the failfast instead of running its catch handler. */
-#define UNWIND_DATA(f) ((f)->UnwindData & 0x3FFFFFFF)
-
 #define UWOP_PUSH_NONVOL     0
 #define UWOP_ALLOC_LARGE     1
 #define UWOP_ALLOC_SMALL     2
@@ -1731,16 +1720,16 @@ static void dump_unwind_info( ULONG64 base, RUNTIME_FUNCTION *function )
     TRACE( "**** func %lx-%lx\n", function->BeginAddress, function->EndAddress );
     for (;;)
     {
-        if (UNWIND_DATA(function) & 1)
+        if (function->UnwindData & 1)
         {
-            RUNTIME_FUNCTION *next = (RUNTIME_FUNCTION *)((char *)base + (UNWIND_DATA(function) & ~1));
+            RUNTIME_FUNCTION *next = (RUNTIME_FUNCTION *)((char *)base + (function->UnwindData & ~1));
             TRACE( "unwind info for function %p-%p chained to function %p-%p\n",
                    (char *)base + function->BeginAddress, (char *)base + function->EndAddress,
                    (char *)base + next->BeginAddress, (char *)base + next->EndAddress );
             function = next;
             continue;
         }
-        info = (struct UNWIND_INFO *)((char *)base + UNWIND_DATA(function));
+        info = (struct UNWIND_INFO *)((char *)base + function->UnwindData);
 
         TRACE( "unwind info at %p flags %x prolog 0x%x bytes function %p-%p\n",
                info, info->flags, info->prolog,
@@ -1878,9 +1867,9 @@ static void *get_main_function_start( const RUNTIME_FUNCTION *f, ULONG_PTR base 
     const struct UNWIND_INFO *info;
     const union handler_data *data;
 
-    while (UNWIND_DATA(f))
+    while (f->UnwindData)
     {
-        info = (const struct UNWIND_INFO *)((char *)base + UNWIND_DATA(f));
+        info = (const struct UNWIND_INFO *)((char *)base + f->UnwindData);
         if (!(info->flags & UNW_FLAG_CHAININFO)) break;
 
         data = (union handler_data *)&info->opcodes[(info->count + 1) & ~1];
@@ -2052,8 +2041,8 @@ static RUNTIME_FUNCTION *find_function_info( ULONG_PTR pc, ULONG_PTR base,
         else
         {
             func += pos;
-            while (UNWIND_DATA(func) & 1)  /* follow chained entry */
-                func = (RUNTIME_FUNCTION *)(base + (UNWIND_DATA(func) & ~1));
+            while (func->UnwindData & 1)  /* follow chained entry */
+                func = (RUNTIME_FUNCTION *)(base + (func->UnwindData & ~1));
             return func;
         }
     }
@@ -2112,7 +2101,7 @@ NTSTATUS WINAPI RtlVirtualUnwind2( ULONG type, ULONG_PTR base, ULONG_PTR pc,
 
     for (;;)
     {
-        info = (struct UNWIND_INFO *)((char *)base + UNWIND_DATA(function));
+        info = (struct UNWIND_INFO *)((char *)base + function->UnwindData);
         handler_data = (union handler_data *)&info->opcodes[(info->count + 1) & ~1];
 
         if (info->version != 1 && info->version != 2)
