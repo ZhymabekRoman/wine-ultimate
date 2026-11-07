@@ -414,6 +414,7 @@ struct application
     IInspectable inner_iface;
     LONG ref;
     IInspectable *outer;
+    IInspectable *resources;   /* lazy Windows.Foundation.Collections.PropertySet for the Resources QI set */
 };
 
 static inline struct application *impl_from_IApplication( IApplication *iface )
@@ -424,6 +425,47 @@ static inline struct application *impl_from_IApplication( IApplication *iface )
 static inline struct application *impl_from_inner_IInspectable( IInspectable *iface )
 {
     return CONTAINING_RECORD( iface, struct application, inner_iface );
+}
+
+/* The Resources property shape.
+ *
+ * The app's WinUI3 binder probes the activated Application instance for its
+ * Resources-property type set: IPropertySet {f9d8e8a9-...} and its projections
+ * IMap`2<String,Object> {11d3b13a-180e-4789-a8be-7712882893e6} and
+ * IMapView`2 {2f13c006-a03a-5f69-b090-75a43e33423e}. All of them answered
+ * E_NOINTERFACE off the bare six-slot face and the app stalled before mapping
+ * its window. Real Windows backs Application.Resources with a live
+ * Windows.Foundation.Collections.PropertySet whose merged face (wintypes)
+ * answers the whole set with one object, so create one lazily
+ * (RoGetActivationFactory) per application instance and delegate. */
+#define IID_IPropertySet IID___x_ABI_CWindows_CFoundation_CCollections_CIPropertySet
+#define IID_IMap_HSTRING_IInspectable IID___FIMap_2_HSTRING_IInspectable
+#define IID_IMapView_HSTRING_IInspectable IID___FIMapView_2_HSTRING_IInspectable
+
+static HRESULT resources_propget( struct application *impl, REFIID iid, void **out )
+{
+    static const WCHAR propertyset_name[] = L"Windows.Foundation.Collections.PropertySet";
+    IInspectable *face = NULL;
+    HRESULT hr;
+
+    if (impl->resources)
+    {
+        hr = IInspectable_QueryInterface( impl->resources, iid, out );
+        if (SUCCEEDED( hr )) return S_OK;
+    }
+
+    hr = RoGetActivationFactory( (HSTRING)propertyset_name, &IID_IInspectable, (void **)&face );
+    if (FAILED( hr ))
+    {
+        WARN( "PropertySet class create failed, hr %#lx.\n", hr );
+        *out = NULL;
+        return hr;
+    }
+
+    if (!impl->resources) impl->resources = face;
+    hr = IInspectable_QueryInterface( face, iid, out );
+    IInspectable_Release( face );
+    return SUCCEEDED( hr ) ? S_OK : E_NOINTERFACE;
 }
 
 static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID iid, void **out )
@@ -445,6 +487,11 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
+
+    if (IsEqualGUID( iid, &IID_IPropertySet ) ||
+        IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ))
+        return resources_propget( impl, iid, out );
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
