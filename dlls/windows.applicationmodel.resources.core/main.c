@@ -1140,18 +1140,18 @@ static HRESULT WINAPI ov_GetRuntimeClassName( void *iface, HSTRING *n )
 {
     TRACE( "ov_GetRuntimeClassName enter\n" );
 
-    /* The face MCG interrogates in the last step before the Languages-plane
-     * failfast (mrm15 tail: ov_GetRuntimeClassName -> QI triple -> svv_Size
-     * -> svv_GetAt "en-US" x2 -> c0000602).  Publish the MWR ResourceManager
-     * class key here so McgModuleManager::TryGetClassTypeFromName resolves
-     * the Microsoft.Windows.ApplicationModel.Resources.ResourceManager type
-     * and routes the activation through combase (the route the first three
-     * activations use, answered by the builtin's GetActivationFactory export
-     * with IResourceManager2 {7ec10160}) instead of the mrt100_app
-     * RegisteredComponents thunk that lands on the empty slot (-512). */
-    static const WCHAR mcg_key_rmwr[] = L"Microsoft.Windows.ApplicationModel.Resources.ResourceManager";
+    /* F1 (second-pass-silence wave): the face MCG interrogates in the last step
+     * before the Languages-plane failfast (mrm15 tail: ov_GetRuntimeClassName ->
+     * QI triple -> svv_Size -> svv_GetAt "en-US" x2 -> c0000602).  The MWR
+     * ResourceManager class-key answer produced a silent second pass (79 s, no
+     * Map-plane traces).  Answer the canonical parameterized-interface name of
+     * the face the app actually holds from get_Languages: the adapter/MCG
+     * type-cache insert (wave-5 region, McgModuleManager loose binding)
+     * consults GetRuntimeClassName to learn the interface arity/args; the
+     * .NET-spelling canonical form is what its NativeParser round-trips. */
+    static const WCHAR *args[] = { ELEM_CLASS_STRING };
 
-    return className( mcg_key_rmwr, n );
+    return param_class_name( ELEM_OBSERVABLEVECTOR, L"`1", args, 1, n );
 }
 static HRESULT WINAPI ov_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI ov_add_VectorChanged( void *iface, void *handler, INT64 *token )

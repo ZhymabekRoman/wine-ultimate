@@ -1093,7 +1093,11 @@ static void test_parameterized_class_names(void)
      * `Windows.Foundation.Collections.IVectorView`1<System.String>` spelling
      * misses that exact key and falls back to a target-less closest class. */
     static const WCHAR name_vector_s[]   = L"Windows.Storage.UserDataPaths";
-    static const WCHAR name_vector_observable_s[] = L"Microsoft.Windows.ApplicationModel.Resources.ResourceManager";
+    /* F1 (second-pass-silence wave): the Languages observable face answers its
+     * canonical parameterized-interface name -- the form the loose-binding RCW
+     * parses (arity + argument list, element spelled System.String).  The MWR
+     * ResourceManager class-key answer produced a silent second pass. */
+    static const WCHAR name_vector_observable_s[] = L"Windows.Foundation.Collections.IObservableVector`1<System.String>";
     /* The str_vector view impl (svv_QueryInterface vt_vv) is shared by the
      * Languages GetView and the Qualifiers faces; both name themselves with the
      * same SharedLibrary Mcg name-pool key so cast #14 resolves the triple. */
