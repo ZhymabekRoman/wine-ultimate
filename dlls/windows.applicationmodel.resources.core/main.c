@@ -355,6 +355,7 @@ HRESULT WINAPI RoGetParameterizedTypeInstanceIID( UINT32 name_element_count, con
 #define ELEM_STRING       L"Windows.Foundation.String"
 #define ELEM_KEYVALUEPAIR L"Windows.Foundation.Collections.IKeyValuePair"
 #define ELEM_MAPVIEW      L"Windows.Foundation.Collections.IMapView"
+#define ELEM_MAP          L"Windows.Foundation.Collections.IMap"
 #define ELEM_OBSERVABLEMAP L"Windows.Foundation.Collections.IObservableMap"
 #define ELEM_MAPCHANGEDHANDLER L"Windows.Foundation.Collections.MapChangedEventHandler"
 #define ELEM_VECTORVIEW   L"Windows.Foundation.Collections.IVectorView"
@@ -1411,6 +1412,10 @@ struct map_view
     const void *vt_om;   /* IObservableMap<HSTRING,HSTRING>: the same object,
                           * the event surface .NET Native's IDictionary
                           * adapter QIs (see the observable block below) */
+    const void *vt_map;  /* IMap<HSTRING,HSTRING>: per-IID face (p192 matrix),
+                          * merged IMap shape -- Lookup 6 ... Clear 12 */
+    const void *vt_iter; /* IIterable<IKeyValuePair<HSTRING,HSTRING>>: own face,
+                          * First at slot 6 (the enumerable adapter's read) */
     LONG ref;
     const struct kv_pair *pairs;
     UINT32 count;
@@ -1418,6 +1423,8 @@ struct map_view
 };
 static inline struct map_view *mv_from( void *iface ) { return (struct map_view *)iface; }
 static const void *map_view_observable_vtbl[];
+static const void *map_iface_vtbl[];
+static const void *map_iterable_vtbl[];
 
 static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
 {
@@ -1432,10 +1439,27 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
      * already publishes. */
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        param_iid_eq( iid, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING ) ||
-        param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
+        param_iid_eq( iid, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_mv;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    /* p192 per-IID face matrix: CoreRT's adapters bind each projected
+     * interface's slots in that interface's own IDL order, so the enumerable
+     * adapter reads First at slot 6 of the face it QIs -- sharing one vtable
+     * made that call mv_Get (the Lookup<->First slot collision), and the
+     * IDictionary adapter's GetView collided with Split the same way.  Each
+     * IID now answers a vtable of its exact shape. */
+    if (param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
+    {
+        *out = &impl->vt_iter;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    if (param_iid_eq( iid, 3, ELEM_MAP L"`2", ELEM_STRING, ELEM_STRING ))
+    {
+        *out = &impl->vt_map;
         incr( &impl->ref );
         return S_OK;
     }
@@ -1588,12 +1612,25 @@ static HRESULT WINAPI mv_Split( void *iface, void **first, void **second )
     if (second) *second = NULL;
     return E_NOTIMPL;
 }
+/* Snapshot mutation members: the qualifier set is PRM-derived, a write has
+ * no target (the observable face's copies delegate here). */
+static HRESULT WINAPI mv_Insert( void *iface, HSTRING key, HSTRING value, INT32 *replaced )
+{
+    (void)iface; (void)key; (void)value;
+    if (replaced) *replaced = FALSE;
+    TRACE( "Insert on a snapshot view: accepted, nothing stored\n" );
+    return S_OK;
+}
+static HRESULT WINAPI mv_Remove( void *iface, HSTRING key ) { (void)iface; (void)key; TRACE( "Remove on a snapshot view: no-op\n" ); return S_OK; }
+static HRESULT WINAPI mv_Clear( void *iface ) { (void)iface; TRACE( "Clear on a snapshot view: no-op\n" ); return S_OK; }
+
 static const void *map_view_vtbl[] =
 {
     mv_QueryInterface, mv_AddRef, mv_Release, mv_GetIids, mv_GetRuntimeClassName, mv_GetTrustLevel,
-    /* idl:201-205 order, then the delegated IIterable member of the requires
-     * clause; 11 slots, no GetView (see the block comment above) */
-    mv_Get, mv_Size, mv_HasKey, mv_Split, mv_First,
+    /* idl:201-205 order; the view-shaped face is 0-9 (Get 6, Size 7, HasKey 8,
+     * Split 9), no GetView, no shared First -- IIterable answers its own face
+     * with First at 6 (p192 matrix) */
+    mv_Get, mv_Size, mv_HasKey, mv_Split,
 };
 
 /* ------------------------------------------------------------------ */
@@ -1895,12 +1932,10 @@ static HRESULT WINAPI om_GetView( void *iface, void **view )
  * mutation members are accepted and do nothing (and MapChanged is not raised). */
 static HRESULT WINAPI om_Insert( void *iface, HSTRING key, HSTRING value, INT32 *replaced )
 {
-    if (replaced) *replaced = FALSE;
-    TRACE( "Insert on a snapshot view: accepted, nothing stored\n" );
-    return S_OK;
+    return mv_Insert( &om_from( iface )->vt_mv, key, value, replaced );
 }
-static HRESULT WINAPI om_Remove( void *iface, HSTRING key ) { TRACE( "Remove on a snapshot view: no-op\n" ); return S_OK; }
-static HRESULT WINAPI om_Clear( void *iface ) { TRACE( "Clear on a snapshot view: no-op\n" ); return S_OK; }
+static HRESULT WINAPI om_Remove( void *iface, HSTRING key ) { return mv_Remove( &om_from( iface )->vt_mv, key ); }
+static HRESULT WINAPI om_Clear( void *iface ) { return mv_Clear( &om_from( iface )->vt_mv ); }
 static HRESULT WINAPI om_First( void *iface, void **first ) { return mv_First( &om_from( iface )->vt_mv, first ); }
 
 static const void *map_view_observable_vtbl[] =
@@ -1916,6 +1951,58 @@ static const void *map_view_observable_vtbl[] =
     /* past the ABI (the real vtable ends at 15): our own accessor for the
      * per-registration handler face, see the layout note */
     om_get_MapChanged,
+};
+
+/* ------------------------------------------------------------------ */
+/* p192 per-IID face matrix for the QualifierValues map.               */
+/* CoreRT's IDictionary/IIterable adapters QI each projected interface */
+/* separately and bind each face's slots in that interface's own IDL   */
+/* order; the shared 11-slot view made the enumerable adapter call     */
+/* mv_Get for First (slot 6) and the dictionary adapter read Split on  */
+/* GetView.  Each IID answers a vtable of its exact shape:  IMapView   */
+/* 0-9 (Get Size HasKey Split), IIterable<KVP> 0-6 (First@6), IMap     */
+/* 0-12 (merged Lookup..Clear), IObservableMap unchanged (add 6,       */
+/* remove 7, IMap 8-14, get_MapChanged behind the ABI end).            */
+/* ------------------------------------------------------------------ */
+static inline struct map_view *mapi_from( void *iface ) { return CONTAINING_RECORD( iface, struct map_view, vt_map ); }
+static inline struct map_view *mit_from( void *iface ) { return CONTAINING_RECORD( iface, struct map_view, vt_iter ); }
+
+static HRESULT WINAPI mapi_QueryInterface( void *iface, REFIID iid, void **out )
+{ return mv_QueryInterface( &mapi_from( iface )->vt_mv, iid, out ); }
+static ULONG WINAPI mapi_AddRef( void *iface ) { return mv_AddRef( &mapi_from( iface )->vt_mv ); }
+static ULONG WINAPI mapi_Release( void *iface ) { return mv_Release( &mapi_from( iface )->vt_mv ); }
+static HRESULT WINAPI mapi_GetIids( void *iface, ULONG *c, IID **i ) { return mv_GetIids( &mapi_from( iface )->vt_mv, c, i ); }
+static HRESULT WINAPI mapi_GetRuntimeClassName( void *iface, HSTRING *n ) { return mv_GetRuntimeClassName( &mapi_from( iface )->vt_mv, n ); }
+static HRESULT WINAPI mapi_GetTrustLevel( void *iface, INT32 *t ) { return mv_GetTrustLevel( &mapi_from( iface )->vt_mv, t ); }
+/* delegated IMap<HSTRING,HSTRING> members in idl:215-221 order, own slots 6-12 */
+static HRESULT WINAPI mapi_Lookup( void *iface, HSTRING key, HSTRING *value ) { return mv_Get( &mapi_from( iface )->vt_mv, key, value ); }
+static HRESULT WINAPI mapi_Size( void *iface, UINT32 *size ) { return mv_Size( &mapi_from( iface )->vt_mv, size ); }
+static HRESULT WINAPI mapi_HasKey( void *iface, HSTRING key, INT32 *has ) { return mv_HasKey( &mapi_from( iface )->vt_mv, key, has ); }
+static HRESULT WINAPI mapi_GetView( void *iface, void **view ) { return mv_GetView( &mapi_from( iface )->vt_mv, view ); }
+static HRESULT WINAPI mapi_Insert( void *iface, HSTRING key, HSTRING value, INT32 *replaced ) { return mv_Insert( &mapi_from( iface )->vt_mv, key, value, replaced ); }
+static HRESULT WINAPI mapi_Remove( void *iface, HSTRING key ) { return mv_Remove( &mapi_from( iface )->vt_mv, key ); }
+static HRESULT WINAPI mapi_Clear( void *iface ) { return mv_Clear( &mapi_from( iface )->vt_mv ); }
+
+static const void *map_iface_vtbl[] =  /* IMap<HSTRING,HSTRING>: 13 slots (0-12) */
+{
+    mapi_QueryInterface, mapi_AddRef, mapi_Release, mapi_GetIids, mapi_GetRuntimeClassName, mapi_GetTrustLevel,
+    mapi_Lookup, mapi_Size, mapi_HasKey, mapi_GetView, mapi_Insert, mapi_Remove, mapi_Clear,
+};
+
+/* IIterable<IKeyValuePair<HSTRING,HSTRING>>: own face, First at slot 6. */
+static HRESULT WINAPI mit_QueryInterface( void *iface, REFIID iid, void **out )
+{ return mv_QueryInterface( &mit_from( iface )->vt_mv, iid, out ); }
+static ULONG WINAPI mit_AddRef( void *iface ) { return mv_AddRef( &mit_from( iface )->vt_mv ); }
+static ULONG WINAPI mit_Release( void *iface ) { return mv_Release( &mit_from( iface )->vt_mv ); }
+static HRESULT WINAPI mit_GetIids( void *iface, ULONG *c, IID **i ) { return mv_GetIids( &mit_from( iface )->vt_mv, c, i ); }
+static HRESULT WINAPI mit_GetRuntimeClassName( void *iface, HSTRING *n ) { return mv_GetRuntimeClassName( &mit_from( iface )->vt_mv, n ); }
+static HRESULT WINAPI mit_GetTrustLevel( void *iface, INT32 *t ) { return mv_GetTrustLevel( &mit_from( iface )->vt_mv, t ); }
+static HRESULT WINAPI mit_First( void *iface, void **first ) { return mv_First( &mit_from( iface )->vt_mv, first ); }
+
+static const void *map_iterable_vtbl[] =  /* IIterable<KVP<string,string>>: 7 slots (0-6) */
+{
+    mit_QueryInterface, mit_AddRef, mit_Release, mit_GetIids, mit_GetRuntimeClassName, mit_GetTrustLevel,
+    mit_First,
 };
 
 /* IMapView<HSTRING, IResourceMap*> for AllResourceMaps: same slots, Get
@@ -2267,7 +2354,7 @@ static HRESULT WINAPI iter_GetCurrent_String( void *iface, HSTRING *v )
     struct iterator *impl = iter_from( iface );
     TRACE( "iter_GetCurrent_String kind %u begun %u idx %u/%u\n", impl->kind, impl->begun, impl->idx, impl->count );
     if (impl->kind != IT_STRING || !impl->begun || impl->idx >= impl->count) return E_ILLEGAL_METHOD_CALL;
-    return WindowsCreateString( impl->src.sv->items[impl->idx],
+    return WindowsCreateString( WindowsGetStringRawBuffer( impl->src.sv->items[impl->idx], NULL ),
                                 WindowsGetStringLen( impl->src.sv->items[impl->idx] ), v );
 }
 /* materialize the pair/iface element at impl->idx (shared by GetCurrent and
@@ -3607,6 +3694,8 @@ static HRESULT create_context( struct res_context **out )
     }
     ctx->qualifiers.vt_mv = map_view_vtbl;
     ctx->qualifiers.vt_om = map_view_observable_vtbl;  /* the same object's IObservableMap face */
+    ctx->qualifiers.vt_map = map_iface_vtbl;           /* IMap face (p192 matrix) */
+    ctx->qualifiers.vt_iter = map_iterable_vtbl;       /* IIterable<KVP> face, First@6 */
     ctx->qualifiers.ref = 1;
     ctx->qualifiers.pairs = ctx->qpairs;
     ctx->qualifiers.count = ctx->qcount;
@@ -4681,7 +4770,18 @@ static struct simple_factory cand_factory_inst  = { simple_factory_vtbl, RTCLASS
 static struct simple_factory named_factory_inst = { simple_factory_vtbl, RTCLASS_NAMEDRESOURCE };
 static struct simple_factory qual_factory_inst  = { simple_factory_vtbl, RTCLASS_RESOURCEQUALIFIER };
 
-/* Windows.System.MemoryManager: no-op activation stub */
+/* Windows.System.MemoryManager: stub instance + two-stage responder.
+ * The statics IIDs are stable since Windows 8; {6eee351f-...} is confirmed
+ * by the app trace (mrt100_app DllMain QIs it on the factory).  The
+ * Statics2/Statics3/AppReport/AppEntry IIDs carry the metadata values
+ * (single-source, treat as unverified until the app QIs them live). */
+static const GUID IID_IMemoryManagerStatics_g   = {0x6eee351f, 0x6d62, 0x423f, {0x94, 0x79, 0xb0, 0x1f, 0x9c, 0x9f, 0x76, 0x69}};
+static const GUID IID_IMemoryManagerStatics2_g  = {0x13dc79ba, 0x55e3, 0x5951, {0xa1, 0xb8, 0xdd, 0x0a, 0xbd, 0xd3, 0x01, 0x60}};
+static const GUID IID_IMemoryManagerStatics3_g  = {0xecb7a292, 0xfd03, 0x5492, {0xb4, 0xd8, 0xd9, 0xd5, 0x17, 0xd7, 0x9e, 0x5c}}; /* (unverified) */
+static const GUID IID_IMemoryAppReport_g        = {0x267f7f6a, 0x5743, 0x4acf, {0xb2, 0x04, 0xe5, 0xc4, 0xd0, 0x86, 0x4a, 0x0a}}; /* (unverified) */
+static const GUID IID_IMemoryAppEntry_g         = {0x0a5bd48c, 0x7a98, 0x4db9, {0x9f, 0xca, 0x03, 0x40, 0x6c, 0xdf, 0x3c, 0xbf}}; /* (unverified) */
+#define ELEM_MEMAPPENTRY L"Windows.System.MemoryManager.MemoryAppEntry"
+
 struct memory_manager
 {
     const void *vt_obj;
@@ -4713,14 +4813,166 @@ static const void *memory_manager_vtbl[] =
 };
 static struct memory_manager memory_manager_inst = { memory_manager_vtbl, 1 };
 
-/* factory ActivateInstance for MemoryManager returns the stub object */
-static HRESULT WINAPI mmf_ActivateInstance( void *iface, void **instance );
-static const void *mm_factory_vtbl2[] =
+/* IMemoryAppReport {267f7f6a-...}: [Current 6][Peak 7][Default 8]
+ * [GetAppEntries 9].  One process-wide report; the entries view is a fresh
+ * empty IIterable<MemoryAppEntry*> (the app surfaces enumerate it). */
+struct mm_app_report
 {
-    sf_QueryInterface, sf_AddRef, sf_Release, sf_GetIids, sf_GetRuntimeClassName, sf_GetTrustLevel,
-    mmf_ActivateInstance,
+    const void *vt_rep;
+    LONG ref;
 };
-static struct simple_factory mm_factory = { mm_factory_vtbl2, RTCLASS_MEMORYMANAGER };
+static inline struct mm_app_report *rep_from( void *iface ) { return (struct mm_app_report *)iface; }
+static HRESULT WINAPI rep_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct mm_app_report *impl = rep_from( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IMemoryAppReport_g ))
+    {
+        *out = &impl->vt_rep;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "MemoryAppReport interface %s not implemented\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI rep_AddRef( void *iface ) { return incr( &rep_from( iface )->ref ); }
+static ULONG WINAPI rep_Release( void *iface ) { return decr( &rep_from( iface )->ref ); }
+static HRESULT WINAPI rep_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI rep_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( L"Windows.System.MemoryManager.MemoryAppReport", n ); }
+static HRESULT WINAPI rep_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+static HRESULT WINAPI rep_Current( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x02000000; return S_OK; }
+static HRESULT WINAPI rep_Peak( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x03000000; return S_OK; }
+static HRESULT WINAPI rep_Default( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x60000000; return S_OK; }
+static HRESULT WINAPI rep_GetAppEntries( void *iface, void **out )
+{
+    struct iface_vector *vec;
+
+    TRACE( "enter\n" );
+    if (!out) return E_POINTER;
+    vec = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*vec) );
+    if (!vec) return E_OUTOFMEMORY;
+    vec->vt_vv = iface_vector_vtbl;
+    vec->ref = 1;
+    vec->count = 0;
+    vec->elem = ELEM_MEMAPPENTRY;
+    *out = &vec->vt_vv;
+    return S_OK;
+}
+static const void *mm_app_report_vtbl[] =
+{
+    rep_QueryInterface, rep_AddRef, rep_Release, rep_GetIids, rep_GetRuntimeClassName, rep_GetTrustLevel,
+    rep_Current, rep_Peak, rep_Default, rep_GetAppEntries,
+};
+static struct mm_app_report mm_app_report_inst = { mm_app_report_vtbl, 1 };
+
+/* The activation factory: primary IActivationFactory face plus the three
+ * statics faces; the process-lifetime singleton answers with fixed numbers
+ * (32 MB app usage, 1/2 GB available, 4 GB total). */
+struct mm_factory
+{
+    const void *vt_primary;  /* IActivationFactory */
+    const void *vt_statics;  /* IMemoryManagerStatics */
+    const void *vt_statics2; /* IMemoryManagerStatics2 */
+    const void *vt_statics3; /* IMemoryManagerStatics3 */
+};
+static struct mm_factory *mmf_from_s( void *iface, size_t off ) { return (struct mm_factory *)((BYTE *)iface - off); }
+
+static HRESULT WINAPI msm_AppMemoryUsage( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x02000000; return S_OK; }
+static HRESULT WINAPI msm_AvailableMemoryUsage( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x40000000; return S_OK; }
+static HRESULT WINAPI msm_TotalAvailableMemory( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x80000000; return S_OK; }
+static HRESULT WINAPI msm_GetCurrentAppMemoryReport( void *iface, void **out )
+{
+    TRACE( "enter\n" );
+    if (!out) return E_POINTER;
+    *out = &mm_app_report_inst.vt_rep;
+    incr( &mm_app_report_inst.ref );
+    return S_OK;
+}
+static HRESULT WINAPI msmf_QueryInterface( struct mm_factory *impl, REFIID iid, void **out );
+static HRESULT WINAPI msm_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return msmf_QueryInterface( mmf_from_s( iface, offsetof( struct mm_factory, vt_statics )), iid, out );
+}
+static ULONG WINAPI msm_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI msm_Release( void *iface ) { return 1; }
+static HRESULT WINAPI msm_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI msm_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_MEMORYMANAGER, n ); }
+static HRESULT WINAPI msm_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+static const void *mm_statics_vtbl[] =
+{
+    msm_QueryInterface, msm_AddRef, msm_Release, msm_GetIids, msm_GetRuntimeClassName, msm_GetTrustLevel,
+    msm_AppMemoryUsage, msm_AvailableMemoryUsage, msm_TotalAvailableMemory, msm_GetCurrentAppMemoryReport,
+};
+/* IMemoryManagerStatics2: [GetForPackageFamily 6] -> the same report face */
+static HRESULT WINAPI msm2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return msmf_QueryInterface( mmf_from_s( iface, offsetof( struct mm_factory, vt_statics2 )), iid, out );
+}
+static HRESULT WINAPI msm2_GetForPackageFamily( void *iface, HSTRING family, void **out )
+{
+    TRACE( "enter\n" );
+    if (!out) return E_POINTER;
+    *out = &mm_app_report_inst.vt_rep;
+    incr( &mm_app_report_inst.ref );
+    return S_OK;
+}
+static const void *mm_statics2_vtbl[] =
+{
+    msm2_QueryInterface, msm_AddRef, msm_Release, msm_GetIids, msm_GetRuntimeClassName, msm_GetTrustLevel,
+    msm2_GetForPackageFamily,
+};
+/* IMemoryManagerStatics3: [AppMemoryUsageLimit 6 get][7 put][IsDiagnosticEnabled 8 get][9 put] */
+static HRESULT WINAPI msm3_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return msmf_QueryInterface( mmf_from_s( iface, offsetof( struct mm_factory, vt_statics3 )), iid, out );
+}
+static HRESULT WINAPI msm3_get_UsageLimit( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x10000000; return S_OK; }
+static HRESULT WINAPI msm3_put_UsageLimit( void *iface, UINT64 v ) { TRACE( "stub\n" ); return S_OK; }
+static HRESULT WINAPI msm3_get_DiagnosticEnabled( void *iface, INT32 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = FALSE; return S_OK; }
+static HRESULT WINAPI msm3_put_DiagnosticEnabled( void *iface, INT32 v ) { TRACE( "stub\n" ); return S_OK; }
+static const void *mm_statics3_vtbl[] =
+{
+    msm3_QueryInterface, msm_AddRef, msm_Release, msm_GetIids, msm_GetRuntimeClassName, msm_GetTrustLevel,
+    msm3_get_UsageLimit, msm3_put_UsageLimit, msm3_get_DiagnosticEnabled, msm3_put_DiagnosticEnabled,
+};
+static HRESULT WINAPI mmf_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return msmf_QueryInterface( (struct mm_factory *)iface, iid, out );
+}
+static HRESULT WINAPI msmf_QueryInterface( struct mm_factory *impl, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory_g_ ) || IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = &impl->vt_primary;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IMemoryManagerStatics_g ))
+    {
+        *out = &impl->vt_statics;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IMemoryManagerStatics2_g ))
+    {
+        *out = &impl->vt_statics2;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IMemoryManagerStatics3_g ))
+    {
+        *out = &impl->vt_statics3;
+        return S_OK;
+    }
+    FIXME( "MemoryManager factory interface %s not implemented\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI mmf_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI mmf_Release( void *iface ) { return 1; }
+static HRESULT WINAPI mmf_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI mmf_GetRuntimeClassName( void *iface, HSTRING *n ) { return className( RTCLASS_MEMORYMANAGER, n ); }
+static HRESULT WINAPI mmf_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+/* factory ActivateInstance for MemoryManager returns the stub object */
 static HRESULT WINAPI mmf_ActivateInstance( void *iface, void **instance )
 {
     TRACE( "MemoryManager::ActivateInstance stub\n" );
@@ -4728,6 +4980,12 @@ static HRESULT WINAPI mmf_ActivateInstance( void *iface, void **instance )
     incr( &memory_manager_inst.ref );
     return S_OK;
 }
+static const void *mm_factory_vtbl[] =
+{
+    mmf_QueryInterface, mmf_AddRef, mmf_Release, mmf_GetIids, mmf_GetRuntimeClassName, mmf_GetTrustLevel,
+    mmf_ActivateInstance,
+};
+static struct mm_factory mm_factory = { mm_factory_vtbl, mm_statics_vtbl, mm_statics2_vtbl, mm_statics3_vtbl };
 
 /* ------------------------------------------------------------------ */
 /* exports                                                             */
@@ -4829,13 +5087,25 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
          * any factory other than "not registered" (e.g. a stub answering
          * E_NOINTERFACE), mrt100's managed fallback path is skipped and
          * DllMain throws -> STATUS_DLL_INIT_FAILED (c0000142) aborts process
-         * startup.  Keep the tolerated REGDB_E_CLASSNOTREG code (the
-         * one-shot "Failed to find library" warning) to let the app
-         * initialize; the no-op stub objects below stay available for callers
-         * that activate the class explicitly. */
-        FIXME( "MemoryManager activation left as REGDB_E_CLASSNOTREG: mrt100_app DllMain requires the not-registered failure code\n" );
-        *factory = NULL;
-        return REGDB_E_CLASSNOTREG;
+         * startup.  Answer the first (DllMain) activation with the tolerated
+         * REGDB_E_CLASSNOTREG code; the later managed call path (probe94:
+         * McgMarshal.GetActivationFactory -> FactoryCache -> pinvoke
+         * RoGetActivationFactory after the Languages reads) gets the real
+         * factory, whose statics faces answer IMemoryManagerStatics[2/3] and
+         * IMemoryAppReport.  The no-op stub object stays available through
+         * ActivateInstance for callers that activate the class explicitly. */
+        static BOOL mm_dllmain_done;
+
+        if (!mm_dllmain_done)
+        {
+            mm_dllmain_done = TRUE;
+            FIXME( "MemoryManager first (DllMain) activation answered REGDB_E_CLASSNOTREG\n" );
+            *factory = NULL;
+            return REGDB_E_CLASSNOTREG;
+        }
+        TRACE( "MemoryManager second-stage activation -> factory %p\n", &mm_factory.vt_primary );
+        *factory = (void *)&mm_factory.vt_primary;
+        return S_OK;
     }
 
     FIXME("class %s not supported\n", debugstr_hstring(classid));
