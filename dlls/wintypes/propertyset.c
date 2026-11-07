@@ -53,6 +53,12 @@ static const GUID IID_IMapView_StringObject_IInspectable =
  * (the static IID globals) plus the real per-interface vtable, allocated
  * per-call with CoTaskMemAlloc (CoreCLR frees it with CoTaskMemFree). */
 struct com_interface_entry;
+struct propertyset_reg;
+
+static const GUID IID_INotifyCollectionChanged_g =
+    { 0x350ffb1a, 0xdf08, 0x56fd, { 0x98, 0xd1, 0x37, 0x4d, 0x77, 0x72, 0x34, 0x9f }};
+static const GUID IID_INotifyPropertyChanged_g =
+    { 0xe8a31095, 0x6789, 0x587b, { 0xb8, 0xe5, 0xcc, 0x7a, 0x1b, 0xdd, 0x8e, 0x37 }};
 
 /* Forward accessors: the merged-face vtables are defined below GetIids; the
  * shader hands these out as the entry Vtable pointers. */
@@ -91,6 +97,10 @@ struct propertyset
     IMap_HSTRING_IInspectable *inner_map;
     IIterable_IKeyValuePair_HSTRING_IInspectable *inner_iterable;
 
+    /* add_MapChanged/CollectionChanged/PropertyChanged registrations
+     * (interlocked push list, see propertyset_reg_add). */
+    struct propertyset_reg *regs;
+
     /* Single-call-contract pair array: allocated on the first GetIids (the
      * shader's (NULL, NULL) count probe allocates and caches it too) and
      * returned by pointer on every subsequent call, so a shader that probes
@@ -122,7 +132,9 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
         IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ) ||
         IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ))
+        IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_INotifyCollectionChanged_g ) ||
+        IsEqualGUID( iid, &IID_INotifyPropertyChanged_g ))
     {
         *out = iface;
         IUnknown_AddRef( (IUnknown *)*out );
@@ -175,17 +187,19 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
     struct propertyset *impl = impl_from_IPropertySet( iface );
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = 6; /* filled on the (NULL, NULL) probe itself */
+    if (iid_count) *iid_count = 3; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
+        /* p206: canonical AE face — IPropertySet (default) +
+         * IMapView<HSTRING,IInspectable> + IIterable<IKeyValuePair>.
+         * Trimmed 6→3 to test the face-count→arena-tag link: the p204d/p205
+         * invariant coreclr+0x388c3e AV derefs vtable slot 7 with
+         * rax = shared-heap base + tag 6, and 6 is this pair count. */
         struct com_interface_entry entries[] =
         {
-            { propertyset_vtbl_ptr(), (IID *)&IID_IMap_String_IInspectable },
             { propertyset_vtbl_ptr(), (IID *)&IID_IPropertySet },
-            { propertyset_imapview_vtbl_ptr(), (IID *)&IID_IMapView_String_IInspectable },
-            { propertyset_imapview_vtbl_ptr(), (IID *)&IID_IMapView_StringObject_IInspectable },
+            { propertyset_imapview_vtbl_ptr(), (IID *)&IID_IMapView_HSTRING_IInspectable },
             { propertyset_iterable_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
-            { propertyset_iobservablemap_vtbl_ptr(), (IID *)&IID_IObservableMap_HSTRING_IInspectable },
         };
         /* The shader caches (count, array) per IID set for the process
          * lifetime; the CoTaskMem arrays sat in the wine shared heap
@@ -301,31 +315,162 @@ static HRESULT STDMETHODCALLTYPE propertyset_Clear( IPropertySet *iface )
     return IMap_HSTRING_IInspectable_Clear( impl->inner_map );
 }
 
+/* IIterable member of IMap's own requires clause: the MCG ObservableMap
+ * adapter keeps it in its own slot (13), separate from the Lookup/First
+ * shared slot the shader-facing merged layout uses. */
+static HRESULT STDMETHODCALLTYPE propertyset_First( IPropertySet *iface,
+                                                    IIterator_IKeyValuePair_HSTRING_IInspectable **iter )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "iface %p, iter %p\n", iface, iter );
+    return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable, iter );
+}
+
+/* Registration list for the event accessors of this face (MapChanged on the
+ * merged/observable faces, and the INCC/INPC continuation the MCG
+ * ObservableMap adapter drives at slots 17-22).  Handlers are opaque
+ * delegates: stored AddRef'd, never invoked (the face never mutates, so no
+ * event is ever raised); the token is the registration's own address, so a
+ * remove is self-validating.  Interlocked push, per the observable-map lists
+ * in windows.applicationmodel.resources.core. */
+struct propertyset_reg
+{
+    LONG ref;
+    IUnknown *handler;
+    struct propertyset_reg *next;
+};
+
+static HRESULT propertyset_reg_add( struct propertyset *impl, IUnknown *handler, EventRegistrationToken *token )
+{
+    struct propertyset_reg *reg;
+
+    if (!token) return E_POINTER;
+    if (!(reg = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*reg) ))) return E_OUTOFMEMORY;
+    reg->ref = 1;
+    reg->handler = handler;
+    if (handler) IUnknown_AddRef( handler );
+    for (;;)
+    {
+        struct propertyset_reg *head = impl->regs;
+
+        reg->next = head;
+        if (InterlockedCompareExchangePointer( (void *volatile *)&impl->regs, reg, head ) == head) break;
+    }
+    token->value = (INT64)(INT_PTR)reg;
+    return S_OK;
+}
+
+static HRESULT propertyset_reg_remove( struct propertyset *impl, EventRegistrationToken token )
+{
+    struct propertyset_reg *cur, **slot = (struct propertyset_reg **)&impl->regs;
+
+    while ((cur = *slot))
+    {
+        if ((INT64)(INT_PTR)cur == token.value)
+        {
+            if (InterlockedCompareExchangePointer( (void *volatile *)slot, cur->next, cur ) == cur)
+            {
+                if (cur->handler) IUnknown_Release( cur->handler );
+                HeapFree( GetProcessHeap(), 0, cur );
+            }
+            return S_OK;
+        }
+        slot = &cur->next;
+    }
+    return S_OK; /* remove of an unknown token: the adapter's Dispose removes twice */
+}
+
 static HRESULT STDMETHODCALLTYPE propertyset_add_MapChanged( IPropertySet *iface,
                                                             IMapChangedEventHandler_HSTRING_IInspectable *handler,
                                                             EventRegistrationToken *token )
 {
-    FIXME( "(%p, %p, %p) stub!\n", iface, handler, token );
-    return E_NOTIMPL;
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "(%p, %p, %p)\n", iface, handler, token );
+    return propertyset_reg_add( impl, (IUnknown *)handler, token );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_remove_MapChanged( IPropertySet *iface, EventRegistrationToken token )
 {
-    FIXME( "(%p, %I64d) stub!\n", iface, token.value );
-    return E_NOTIMPL;
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "(%p, %I64d)\n", iface, token.value );
+    return propertyset_reg_remove( impl, token );
 }
 
+/* get_MapChanged: the MCG ObservableMap class vtable puts this accessor at
+ * slot 16 (event = add/remove/get triple); the property is the last handler
+ * registered, and S_OK with NULL for none. */
+static HRESULT STDMETHODCALLTYPE propertyset_get_MapChanged( IPropertySet *iface,
+                                                            IMapChangedEventHandler_HSTRING_IInspectable **handler )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "(%p, %p)\n", iface, handler );
+    if (!handler) return E_POINTER;
+    *handler = (IMapChangedEventHandler_HSTRING_IInspectable *)impl->regs ?
+                   (IMapChangedEventHandler_HSTRING_IInspectable *)impl->regs->handler : NULL;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
+/* INotifyCollectionChanged / INotifyPropertyChanged: the MCG ObservableMap
+ * adapter is one class over the IObservableMap pointer — slots 17-19 are the
+ * CollectionChanged add/remove/get pair (17 is the one the CoreRT interop
+ * stub calls through [iface+0x88] and writes the EventRegistrationToken
+ * out-param), slots 20-22 the PropertyChanged triple.  The delegates are
+ * opaque; one registration list serves all six. */
+static HRESULT STDMETHODCALLTYPE propertyset_add_CollectionChanged( IPropertySet *iface, void *handler,
+                                                                    EventRegistrationToken *token )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "(%p, %p, %p)\n", iface, handler, token );
+    return propertyset_reg_add( impl, (IUnknown *)handler, token );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_remove_CollectionChanged( IPropertySet *iface, EventRegistrationToken token )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "(%p, %I64d)\n", iface, token.value );
+    return propertyset_reg_remove( impl, token );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_get_CollectionChanged( IPropertySet *iface, void **handler )
+{
+    struct propertyset *impl = impl_from_IPropertySet( iface );
+    TRACE( "(%p, %p)\n", iface, handler );
+    if (!handler) return E_POINTER;
+    *handler = impl->regs ? (void *)impl->regs->handler : NULL;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
+/* MCG ObservableMap<HSTRING,IInspectable*> adapter layout (SharedLibrary
+ * McgMarshal casts the QI'd pointer to this class vtable):
+ *
+ *   6-12  Lookup, get_Size, HasKey, GetView, Insert, Remove, Clear
+ *   13    First (IIterable member of IMap's requires clause)
+ *   14-16 add / remove / get_MapChanged
+ *   17-19 add / remove / get_CollectionChanged (INotifyCollectionChanged)
+ *   20-22 add / remove / get_PropertyChanged (INotifyPropertyChanged)
+ *   23    NULL terminator (the shader's InvokeableVtable mode counts method
+ *         slots by walking to the first NULL entry)
+ *
+ * Slots 17+ are the interop-call target of the CoreRT stub (call [rax+0x88]);
+ * before they existed the stub ran the data behind the vtable and every
+ * fault nested the mrt100 VEH one context frame deeper. */
 static const struct
 {
     IPropertySetVtbl vtbl;
-    HRESULT (STDMETHODCALLTYPE *add_MapChanged)( IObservableMap_HSTRING_IInspectable *iface,
-                                                 IMapChangedEventHandler_HSTRING_IInspectable *handler,
-                                                 EventRegistrationToken *token );
-    HRESULT (STDMETHODCALLTYPE *remove_MapChanged)( IObservableMap_HSTRING_IInspectable *iface,
-                                                    EventRegistrationToken token );
-    void *null_term; /* NULL terminator: the shader's InvokeableVtable mode counts
-                      * method slots by walking to the first NULL entry; without it
-                      * the count strolls into the next global. */
+    void *map_slots[7];                /* 6-12 */
+    void *First;                       /* 13 */
+    void *add_MapChanged;              /* 14 */
+    void *remove_MapChanged;           /* 15 */
+    void *get_MapChanged;              /* 16 */
+    void *add_CollectionChanged;       /* 17 */
+    void *remove_CollectionChanged;    /* 18 */
+    void *get_CollectionChanged;       /* 19 */
+    void *add_PropertyChanged;         /* 20 */
+    void *remove_PropertyChanged;      /* 21 */
+    void *get_PropertyChanged;         /* 22 */
+    void *null_term;                   /* 23 */
 } propertyset_vtbl_full =
 {
     { /* IUnknown */
@@ -335,17 +480,25 @@ static const struct
     /* IInspectable */
     propertyset_GetIids,
     propertyset_GetRuntimeClassName,
-    propertyset_GetTrustLevel,
-    /* IMap<HSTRING, IInspectable *> / IMapView / IIterable merged slots */
-    (HRESULT (STDMETHODCALLTYPE *)( IPropertySet *, HSTRING, IInspectable ** ))propertyset_Lookup,
-    propertyset_get_Size,
-    propertyset_HasKey,
-    (HRESULT (STDMETHODCALLTYPE *)( IPropertySet *, IMapView_HSTRING_IInspectable ** ))propertyset_GetView,
-    propertyset_Insert,
-    propertyset_Remove,
-    propertyset_Clear, },
-    (HRESULT (STDMETHODCALLTYPE *)( IObservableMap_HSTRING_IInspectable *, IMapChangedEventHandler_HSTRING_IInspectable *, EventRegistrationToken * ))propertyset_add_MapChanged,
-    (HRESULT (STDMETHODCALLTYPE *)( IObservableMap_HSTRING_IInspectable *, EventRegistrationToken ))propertyset_remove_MapChanged,
+    propertyset_GetTrustLevel },
+    { (void *)propertyset_Lookup,
+      (void *)propertyset_get_Size,
+      (void *)propertyset_HasKey,
+      (void *)propertyset_GetView,
+      (void *)propertyset_Insert,
+      (void *)propertyset_Remove,
+      (void *)propertyset_Clear },
+    (void *)propertyset_First,
+    (void *)propertyset_add_MapChanged,
+    (void *)propertyset_remove_MapChanged,
+    (void *)propertyset_get_MapChanged,
+    (void *)propertyset_add_CollectionChanged,
+    (void *)propertyset_remove_CollectionChanged,
+    (void *)propertyset_get_CollectionChanged,
+    (void *)propertyset_add_CollectionChanged,   /* PropertyChanged reuses the
+                                                  * opaque registration pair */
+    (void *)propertyset_remove_CollectionChanged,
+    (void *)propertyset_get_CollectionChanged,
     0,
 };
 #define propertyset_vtbl propertyset_vtbl_full.vtbl
@@ -416,7 +569,64 @@ static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_remove_MapChanged( I
     return propertyset_remove_MapChanged( &impl->IPropertySet_iface, token );
 }
 
-const static struct { IObservableMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } propertyset_IObservableMap_vtbl_full =
+/* First + the event accessors past the wine vtbl, in MCG ObservableMap order
+ * (Lookup..First delegated at 8-15, get at 16, INCC 17-19, INPC 20-22). */
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_First( IObservableMap_HSTRING_IInspectable *iface,
+                                                                   IIterator_IKeyValuePair_HSTRING_IInspectable **iter )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable, iter );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_get_MapChanged( IObservableMap_HSTRING_IInspectable *iface,
+                                                                            IMapChangedEventHandler_HSTRING_IInspectable **handler )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return propertyset_get_MapChanged( &impl->IPropertySet_iface, handler );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_add_CollectionChanged( IObservableMap_HSTRING_IInspectable *iface,
+                                                                                   void *handler, EventRegistrationToken *token )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return propertyset_add_CollectionChanged( &impl->IPropertySet_iface, handler, token );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_remove_CollectionChanged( IObservableMap_HSTRING_IInspectable *iface,
+                                                                                      EventRegistrationToken token )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return propertyset_remove_CollectionChanged( &impl->IPropertySet_iface, token );
+}
+
+static HRESULT STDMETHODCALLTYPE propertyset_IObservableMap_get_CollectionChanged( IObservableMap_HSTRING_IInspectable *iface,
+                                                                                   void **handler )
+{
+    struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IObservableMap_HSTRING_IInspectable_iface );
+    return propertyset_get_CollectionChanged( &impl->IPropertySet_iface, handler );
+}
+
+/* MCG ObservableMap<HSTRING,IInspectable*> class vtable: 0-5 IU+IInspectable,
+ * 6 add / 7 remove_MapChanged (widl order), delegated IMap 8-14, First 15,
+ * get_MapChanged 16, INCC add/remove/get 17-19, INPC add/remove/get 20-22.
+ * The CoreRT interop stub calls [iface+0x88] = slot 17 and writes the
+ * EventRegistrationToken out-param; slots past the wine vtbl used to be the
+ * zero pad, so the callee jumped into data and the fault re-entered the mrt100
+ * hardware VEH (284 nesting write faults).  23 = NULL terminator. */
+const static struct
+{
+    IObservableMap_HSTRING_IInspectableVtbl vtbl;  /* 0-7 */
+    void *map_slots[7];                            /* 8-14 Lookup..Clear */
+    void *First;                                   /* 15 */
+    void *get_MapChanged;                          /* 16 */
+    void *add_CollectionChanged;                   /* 17 */
+    void *remove_CollectionChanged;                /* 18 */
+    void *get_CollectionChanged;                   /* 19 */
+    void *add_PropertyChanged;                     /* 20 */
+    void *remove_PropertyChanged;                  /* 21 */
+    void *get_PropertyChanged;                     /* 22 */
+    void *null_term;                               /* 23 */
+} propertyset_IObservableMap_vtbl_full =
 {
     { /* IUnknown */
     propertyset_IObservableMap_QueryInterface,
@@ -428,10 +638,25 @@ const static struct { IObservableMap_HSTRING_IInspectableVtbl vtbl; void *pad[4]
     propertyset_IObservableMap_GetTrustLevel,
     /* IObservableMap<HSTRING, IInspectable*> own slots; wine's
      * __FIObservableMap_2_HSTRING_IInspectableVtbl carries only these two —
-     * the IMap<HSTRING,IInspectable*> slots live on the merged face. */
+     * the IMap<HSTRING,IInspectable*> slots follow in the MCG flattening. */
     propertyset_IObservableMap_add_MapChanged,
     propertyset_IObservableMap_remove_MapChanged, },
-    { 0, 0, 0, 0 }
+    { (void *)propertyset_IObservableMap_Lookup,
+      (void *)propertyset_IObservableMap_get_Size,
+      (void *)propertyset_IObservableMap_HasKey,
+      (void *)propertyset_IObservableMap_GetView,
+      (void *)propertyset_IObservableMap_Insert,
+      (void *)propertyset_IObservableMap_Remove,
+      (void *)propertyset_IObservableMap_Clear },
+    (void *)propertyset_IObservableMap_First,
+    (void *)propertyset_IObservableMap_get_MapChanged,
+    (void *)propertyset_IObservableMap_add_CollectionChanged,
+    (void *)propertyset_IObservableMap_remove_CollectionChanged,
+    (void *)propertyset_IObservableMap_get_CollectionChanged,
+    (void *)propertyset_IObservableMap_add_CollectionChanged,
+    (void *)propertyset_IObservableMap_remove_CollectionChanged,
+    (void *)propertyset_IObservableMap_get_CollectionChanged,
+    0,
 };
 #define propertyset_IObservableMap_vtbl propertyset_IObservableMap_vtbl_full.vtbl
 
