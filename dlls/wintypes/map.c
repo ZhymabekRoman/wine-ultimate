@@ -240,6 +240,7 @@ struct map
     IIterable_IKeyValuePair_HSTRING_IInspectable IIterable_IKeyValuePair_HSTRING_IInspectable_iface;
     IInspectable *IInspectable_outer;
     struct map_iids iids;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see map_inner_GetIids */
     LONG ref;
 
     LONG64 serial;
@@ -253,6 +254,7 @@ struct map_view
 {
     IMapView_HSTRING_IInspectable IMapView_HSTRING_IInspectable_iface;
     IIterable_IKeyValuePair_HSTRING_IInspectable IIterable_IKeyValuePair_HSTRING_IInspectable_iface;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see map_view_GetIids */
     LONG ref;
 
     struct map *map;
@@ -535,6 +537,7 @@ static ULONG WINAPI map_view_Release( IMapView_HSTRING_IInspectable *iface )
 
     if (!ref)
     {
+        CoTaskMemFree( impl->iids_cache );
         IMap_HSTRING_IInspectable_Release( &impl->map->IMap_HSTRING_IInspectable_iface );
         free( impl );
     }
@@ -543,22 +546,22 @@ static ULONG WINAPI map_view_Release( IMapView_HSTRING_IInspectable *iface )
 
 static HRESULT WINAPI map_view_GetIids( IMapView_HSTRING_IInspectable *iface, ULONG *iid_count, IID **iids )
 {
-    struct com_interface_entry entries[] =
-    {
-        { map_map_view_vtbl_ptr(), (IID *)&IID_IMapView_HSTRING_IInspectable },
-        { map_iterable_view_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
-    };
+    struct map_view *impl = impl_from_IMapView_HSTRING_IInspectable( iface );
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = ARRAY_SIZE( entries );
-    if (iids)
+    if (!impl->iids_cache)
     {
-        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
-        if (!array) return E_OUTOFMEMORY;
-        memcpy( array, entries, sizeof( entries ) );
-        *iids = (IID *)array;
+        struct com_interface_entry entries[] =
+        {
+            { map_map_view_vtbl_ptr(), (IID *)&IID_IMapView_HSTRING_IInspectable },
+            { map_iterable_view_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
+        };
+        if (!(impl->iids_cache = CoTaskMemAlloc( sizeof( entries ) ))) return E_OUTOFMEMORY;
+        memcpy( impl->iids_cache, entries, sizeof( entries ) );
     }
+    if (iid_count) *iid_count = 2;
+    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 
@@ -846,6 +849,7 @@ static ULONG WINAPI map_inner_Release( IInspectable *iface )
 
     if (!ref)
     {
+        CoTaskMemFree( impl->iids_cache );
         IMap_HSTRING_IInspectable_Clear( &impl->IMap_HSTRING_IInspectable_iface );
         DeleteCriticalSection( &impl->cs );
         free( impl );
@@ -857,26 +861,24 @@ static ULONG WINAPI map_inner_Release( IInspectable *iface )
 static HRESULT WINAPI map_inner_GetIids( IInspectable *iface, ULONG *iid_count, IID **iids )
 {
     struct map *impl = impl_from_IInspectable( iface );
-    struct com_interface_entry entries[] =
-    {
-        { map_map_vtbl_ptr(), (IID *)impl->iids.map },
-        { map_map_view_vtbl_ptr(), (IID *)impl->iids.view },
-        { map_iterable_vtbl_ptr(), (IID *)impl->iids.iterable },
-        { map_iterator_vtbl_ptr(), (IID *)impl->iids.iterator },
-        { map_pair_vtbl_ptr(), (IID *)impl->iids.pair },
-    };
-    ULONG count = ARRAY_SIZE( entries );
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = count;
-    if (iids)
+    if (!impl->iids_cache)
     {
-        struct com_interface_entry *array;
-        if (!(array = CoTaskMemAlloc( count * sizeof(*array) ))) return E_OUTOFMEMORY;
-        memcpy( array, entries, sizeof( entries ) );
-        *iids = (IID *)array;
+        struct com_interface_entry entries[] =
+        {
+            { map_map_vtbl_ptr(), (IID *)impl->iids.map },
+            { map_map_view_vtbl_ptr(), (IID *)impl->iids.view },
+            { map_iterable_vtbl_ptr(), (IID *)impl->iids.iterable },
+            { map_iterator_vtbl_ptr(), (IID *)impl->iids.iterator },
+            { map_pair_vtbl_ptr(), (IID *)impl->iids.pair },
+        };
+        if (!(impl->iids_cache = CoTaskMemAlloc( sizeof( entries ) ))) return E_OUTOFMEMORY;
+        memcpy( impl->iids_cache, entries, sizeof( entries ) );
     }
+    if (iid_count) *iid_count = 5;
+    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 

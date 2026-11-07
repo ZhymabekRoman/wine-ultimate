@@ -90,6 +90,14 @@ struct propertyset
     IInspectable *map_inner;
     IMap_HSTRING_IInspectable *inner_map;
     IIterable_IKeyValuePair_HSTRING_IInspectable *inner_iterable;
+
+    /* Single-call-contract pair array: allocated on the first GetIids (the
+     * shader's (NULL, NULL) count probe allocates and caches it too) and
+     * returned by pointer on every subsequent call, so a shader that probes
+     * the count and then consumes a cached/assumed array pointer sees one
+     * stable, live ComInterfaceEntry block per object identity. */
+    struct com_interface_entry *iids_cache;
+    ULONG iids_count;
 };
 
 static inline struct propertyset *impl_from_IPropertySet( IPropertySet *iface )
@@ -164,27 +172,38 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
      * arms on the merged face, so the list stays narrow; an over-wide list
      * makes the CoreCLR ComWrappers shader probe IIterable/IIterator
      * adapters whose CreateObject walks past the entries it can satisfy. */
-    struct com_interface_entry entries[] =
-    {
-        { propertyset_vtbl_ptr(), (IID *)&IID_IMap_String_IInspectable },
-        { propertyset_imapview_vtbl_ptr(), (IID *)&IID_IMapView_StringObject_IInspectable },
-        { propertyset_iterable_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
-        { propertyset_iobservablemap_vtbl_ptr(), (IID *)&IID_IObservableMap_HSTRING_IInspectable },
-    };
+    struct propertyset *impl = impl_from_IPropertySet( iface );
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = ARRAY_SIZE(entries);
-    if (iids)
+    if (!impl->iids_cache)
     {
+        struct com_interface_entry entries[] =
+        {
+            { propertyset_vtbl_ptr(), (IID *)&IID_IMap_String_IInspectable },
+            { propertyset_vtbl_ptr(), (IID *)&IID_IPropertySet },
+            { propertyset_imapview_vtbl_ptr(), (IID *)&IID_IMapView_String_IInspectable },
+            { propertyset_imapview_vtbl_ptr(), (IID *)&IID_IMapView_StringObject_IInspectable },
+            { propertyset_iterable_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
+            { propertyset_iobservablemap_vtbl_ptr(), (IID *)&IID_IObservableMap_HSTRING_IInspectable },
+        };
         struct com_interface_entry *array = CoTaskMemAlloc( sizeof(entries) );
         if (!array) return E_OUTOFMEMORY;
         memcpy( array, entries, sizeof(entries) );
-        *iids = (IID *)array;
-        for (ULONG i = 0; i < ARRAY_SIZE(entries); i++)
-            TRACE( "pair[%u] at %p: iid %s (%p) vtable %p\n", i, array + i,
-                   debugstr_guid( array[i].iid ), (void *)array[i].iid, (void *)array[i].vtable );
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE(entries);
+    }
+
+    if (iid_count) *iid_count = impl->iids_count;
+    if (iids)
+    {
+        *iids = (IID *)impl->iids_cache;
+        for (ULONG i = 0; i < impl->iids_count; i++)
+            TRACE( "pair[%u] at %p: iid %s (%p) vtable %p\n", i, impl->iids_cache + i,
+                   debugstr_guid( impl->iids_cache[i].iid ), (void *)impl->iids_cache[i].iid,
+                   (void *)impl->iids_cache[i].vtable );
         TRACE( "returning %u ComInterfaceEntry pairs at %p (slot0 vtable %p, slot0 iid %p)\n",
-               ARRAY_SIZE(entries), array, (void *)array[0].vtable, (void *)array[0].iid );
+               impl->iids_count, impl->iids_cache, (void *)impl->iids_cache[0].vtable,
+               (void *)impl->iids_cache[0].iid );
     }
     return S_OK;
 }
