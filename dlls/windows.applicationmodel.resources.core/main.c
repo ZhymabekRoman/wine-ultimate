@@ -1406,6 +1406,11 @@ struct kv_pair
 
 struct map_event_reg;
 
+static const GUID IID_INotifyCollectionChanged_g =
+    { 0x350ffb1a, 0xdf08, 0x56fd, { 0x98, 0xd1, 0x37, 0x4d, 0x77, 0x72, 0x34, 0x9f }};
+static const GUID IID_INotifyPropertyChanged_g =
+    { 0xe8a31095, 0x6789, 0x587b, { 0xb8, 0xe5, 0xcc, 0x7a, 0x1b, 0xdd, 0x8e, 0x37 }};
+
 struct map_view
 {
     const void *vt_mv;   /* IMapView<HSTRING,HSTRING> (the set the app reads) */
@@ -1486,6 +1491,17 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
      * only the latter pairing reproduces the published instance IIDs and the
      * IMapView QI the app already drives successfully against this map. */
     if (param_iid_eq( iid, 3, ELEM_OBSERVABLEMAP L"`2", ELEM_STRING, ELEM_STRING ))
+    {
+        *out = &impl->vt_om;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    /* The MCG ObservableMap adapter is one class: on Windows the same object
+     * answers INCC/INPC (it sits at slots 17-22 of the very vtable the
+     * adapter casts the IObservableMap pointer to).  Hand out the observable
+     * face: slots 17-22 above carry the add/remove/get pairs. */
+    if (IsEqualGUID( iid, &IID_INotifyCollectionChanged_g ) ||
+        IsEqualGUID( iid, &IID_INotifyPropertyChanged_g ))
     {
         *out = &impl->vt_om;
         incr( &impl->ref );
@@ -1907,6 +1923,55 @@ static HRESULT WINAPI om_get_MapChanged( void *iface, void **handler )
     return S_OK;
 }
 
+/* ------------------------------------------------------------------ */
+/* INotifyCollectionChanged / INotifyPropertyChanged on the observable */
+/* face.  The MCG ObservableMap<string,string> adapter (SharedLibrary  */
+/* McgMarshal) wraps the IObservableMap pointer with its own class     */
+/* vtable: slots 0-16 are the flattened IObservableMap (add 6,         */
+/* remove 7, IMap 8-15, get_MapChanged 16) and slots 17-22 are the     */
+/* INCC add/remove/get + INPC add/remove/get pairs.  The adapter       */
+/* subscribes through slot 17 (add_CollectionChanged) and writes the   */
+/* EventRegistrationToken out-param it hands back; with no slots after */
+/* 16 the call ran the data behind the vtable (the debug-channel       */
+/* descriptor string in the stub heap) and every fault re-entered the   */
+/* mrt100 hardware VEH, nesting a ~1 KB context frame per refault.     */
+/* Handlers are opaque delegates, stored on the same registration list */
+/* as MapChanged: the snapshot view never raises, so Invoke is never   */
+/* reached and one list serves all six accessors.                      */
+/* ------------------------------------------------------------------ */
+
+
+static HRESULT WINAPI om_add_CollectionChanged( void *iface, void *handler, INT64 *token )
+{
+    TRACE( "add_CollectionChanged\n" );
+    return om_add_MapChanged( iface, handler, token );
+}
+static HRESULT WINAPI om_remove_CollectionChanged( void *iface, INT64 token )
+{
+    TRACE( "remove_CollectionChanged token %I64d\n", token );
+    return om_remove_MapChanged( iface, token );
+}
+static HRESULT WINAPI om_get_CollectionChanged( void *iface, void **handler )
+{
+    TRACE( "get_CollectionChanged\n" );
+    return om_get_MapChanged( iface, handler );
+}
+static HRESULT WINAPI om_add_PropertyChanged( void *iface, void *handler, INT64 *token )
+{
+    TRACE( "add_PropertyChanged\n" );
+    return om_add_MapChanged( iface, handler, token );
+}
+static HRESULT WINAPI om_remove_PropertyChanged( void *iface, INT64 token )
+{
+    TRACE( "remove_PropertyChanged token %I64d\n", token );
+    return om_remove_MapChanged( iface, token );
+}
+static HRESULT WINAPI om_get_PropertyChanged( void *iface, void **handler )
+{
+    TRACE( "get_PropertyChanged\n" );
+    return om_get_MapChanged( iface, handler );
+}
+
 /* Delegated IMap members: same map, same implementation, one slot block over. */
 static HRESULT WINAPI om_Lookup( void *iface, HSTRING key, HSTRING *value )
 {
@@ -1951,6 +2016,11 @@ static const void *map_view_observable_vtbl[] =
     /* past the ABI (the real vtable ends at 15): our own accessor for the
      * per-registration handler face, see the layout note */
     om_get_MapChanged,
+    /* MCG ObservableMap adapter continuation (17-22): the INCC and INPC
+     * add/remove/get pairs; the adapter's slot-17 subscribe writes the token
+     * out-param, see the note above map_event_reg. */
+    om_add_CollectionChanged, om_remove_CollectionChanged, om_get_CollectionChanged,
+    om_add_PropertyChanged, om_remove_PropertyChanged, om_get_PropertyChanged,
 };
 
 /* ------------------------------------------------------------------ */
