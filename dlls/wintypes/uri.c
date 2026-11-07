@@ -631,23 +631,24 @@ static HRESULT WINAPI uri_statics_GetIids( IActivationFactory *iface, ULONG *iid
     struct uri_statics *impl = impl_from_IActivationFactory( iface );
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = 6; /* filled on the (NULL, NULL) probe itself */
+    /* Tag-decode note (p203): the shader AVs at coreclr+0x388c3e with
+     * rax = 0x6fff00000006 = vtable-arena base 0x6fff00000000 + tag, low bits
+     * = ComVirtualMethodData entry count (.NET 8 ComWrappers shader). p204
+     * discriminator: 6 -> 2 pairs here; if the AV tag follows 6 -> 2, this
+     * Uri factory face is the seeding face. */
+    if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
-        struct com_interface_entry entries[] =
+        /* Static pair array (canonical Uri factory set): the shader caches
+         * (count, array) for the process lifetime; CoTaskMem arrays lived in
+         * the wine shared heap (0x6fff00000000) and got recycled mid-shader. */
+        static const struct com_interface_entry shared[] =
         {
             { (void **)&uri_statics_vtbl, (IID *)&IID_IActivationFactory },
             { (void **)&uri_factory_vtbl, (IID *)&IID_IUriRuntimeClassFactory },
-            { (void **)&uri_escape_vtbl, (IID *)&IID_IUriEscapeStatics },
-            { (void **)&uri_statics_def_vtbl, (IID *)&IID_IUriRuntimeClass },
-            { (void **)&uri_statics_acu_vtbl, (IID *)&IID_IUriRuntimeClassWithAbsoluteCanonicalUri },
-            { (void **)&uri_statics_stringable_vtbl, (IID *)&IID_IStringable },
         };
-        struct com_interface_entry *array = CoTaskMemAlloc( sizeof(entries) );
-        if (!array) return E_OUTOFMEMORY;
-        memcpy( array, entries, sizeof(entries) );
-        impl->iids_cache = array;
-        impl->iids_count = ARRAY_SIZE(entries);
+        impl->iids_count = ARRAY_SIZE(shared);
+        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, (void *)shared, NULL );
     }
 
     if (iid_count) *iid_count = impl->iids_count;

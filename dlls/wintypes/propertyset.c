@@ -187,11 +187,15 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
             { propertyset_iterable_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
             { propertyset_iobservablemap_vtbl_ptr(), (IID *)&IID_IObservableMap_HSTRING_IInspectable },
         };
-        struct com_interface_entry *array = CoTaskMemAlloc( sizeof(entries) );
-        if (!array) return E_OUTOFMEMORY;
-        memcpy( array, entries, sizeof(entries) );
-        impl->iids_cache = array;
+        /* The shader caches (count, array) per IID set for the process
+         * lifetime; the CoTaskMem arrays sat in the wine shared heap
+         * (0x6fff00000000 region) and were recycled while the shader was
+         * mid-CreateObject (p202 AV *rbx = heap base + count, p204 AV entry
+         * read). One static array per face type outlives every consumer. */
+        static struct com_interface_entry shared[ARRAY_SIZE( entries )];
+        if (!shared[0].vtable) memcpy( shared, entries, sizeof(entries) );
         impl->iids_count = ARRAY_SIZE(entries);
+        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, shared, NULL );
     }
 
     if (iid_count) *iid_count = impl->iids_count;

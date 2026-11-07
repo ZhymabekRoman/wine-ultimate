@@ -537,7 +537,7 @@ static ULONG WINAPI map_view_Release( IMapView_HSTRING_IInspectable *iface )
 
     if (!ref)
     {
-        CoTaskMemFree( impl->iids_cache );
+        /* iids_cache points into a static shared array (see map_view_GetIids). */
         IMap_HSTRING_IInspectable_Release( &impl->map->IMap_HSTRING_IInspectable_iface );
         free( impl );
     }
@@ -558,8 +558,12 @@ static HRESULT WINAPI map_view_GetIids( IMapView_HSTRING_IInspectable *iface, UL
             { map_map_view_vtbl_ptr(), (IID *)&IID_IMapView_HSTRING_IInspectable },
             { map_iterable_view_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
         };
-        if (!(impl->iids_cache = CoTaskMemAlloc( sizeof( entries ) ))) return E_OUTOFMEMORY;
-        memcpy( impl->iids_cache, entries, sizeof( entries ) );
+        /* Static array: the shader caches (count, array) for the process
+         * lifetime, outliving this view (p202/p204 AVs = recycled shared-heap
+         * pair arrays). Identical entries per face type → one shared array. */
+        static struct com_interface_entry shared[ARRAY_SIZE( entries )];
+        if (!shared[0].vtable) memcpy( shared, entries, sizeof( entries ) );
+        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, shared, NULL );
     }
     if (iid_count) *iid_count = 2;
     if (iids) *iids = (IID *)impl->iids_cache;
@@ -850,7 +854,7 @@ static ULONG WINAPI map_inner_Release( IInspectable *iface )
 
     if (!ref)
     {
-        CoTaskMemFree( impl->iids_cache );
+        /* iids_cache points into a static shared array (see map_inner_GetIids). */
         IMap_HSTRING_IInspectable_Clear( &impl->IMap_HSTRING_IInspectable_iface );
         DeleteCriticalSection( &impl->cs );
         free( impl );
@@ -876,8 +880,11 @@ static HRESULT WINAPI map_inner_GetIids( IInspectable *iface, ULONG *iid_count, 
             { map_iterator_vtbl_ptr(), (IID *)impl->iids.iterator },
             { map_pair_vtbl_ptr(), (IID *)impl->iids.pair },
         };
-        if (!(impl->iids_cache = CoTaskMemAlloc( sizeof( entries ) ))) return E_OUTOFMEMORY;
-        memcpy( impl->iids_cache, entries, sizeof( entries ) );
+        /* Static shared array (IID pointers are process-lifetime globals);
+         * shader caches (count, array) beyond the map's death. */
+        static struct com_interface_entry shared[ARRAY_SIZE( entries )];
+        if (!shared[0].vtable) memcpy( shared, entries, sizeof( entries ) );
+        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, shared, NULL );
     }
     if (iid_count) *iid_count = 5;
     if (iids) *iids = (IID *)impl->iids_cache;
