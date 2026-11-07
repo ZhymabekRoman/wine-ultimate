@@ -1682,7 +1682,13 @@ static BOOL package_path_for( const WCHAR *full_name, WCHAR *buf, DWORD cch )
     lstrcpyW( subkey, L"Packages\\" );
     lstrcatW( subkey, full_name );
     for (i = 0; i < ARRAY_SIZE(roots); i++)
+    {
+        /* the deployment records the install path; PackageRootPath is the
+         * root the installer saw, an acceptable answer for a package that
+         * only records that one */
         if (appmodel_read_str( roots[i], subkey, L"PackagePath", buf, cch )) return TRUE;
+        if (appmodel_read_str( roots[i], subkey, L"PackageRootPath", buf, cch )) return TRUE;
+    }
     return FALSE;
 }
 
@@ -2609,6 +2615,25 @@ LONG WINAPI OpenPackageInfoByFullName( const WCHAR *full_name, UINT32 reserved, 
     if ((hr = package_info_block_from_name( full_name, path[0] ? path : NULL, &block )) != S_OK) return hr;
     *info = &block->info;
     return S_OK;
+}
+
+
+/***********************************************************************
+ *         OpenPackageInfoByFullNameForUser   (kernelbase.@)
+ *
+ * Opens a package of a user's registration; the prefix has one user, so the
+ * whole registration is theirs and the name-only entry answers: the same
+ * package-info block, the same shape, released by ClosePackageInfo.
+ */
+LONG WINAPI OpenPackageInfoByFullNameForUser( const WCHAR *full_name, const WCHAR *user,
+                                              UINT32 reserved, PACKAGE_INFO **info )
+{
+    static int once;
+
+    TRACE( "(%s %s %#x %p)\n", debugstr_w( full_name ), debugstr_w( user ), reserved, info );
+
+    if (!once++ && user) FIXME( "%s: the prefix has one user.\n", debugstr_w( user ) );
+    return OpenPackageInfoByFullName( full_name, reserved, info );
 }
 
 

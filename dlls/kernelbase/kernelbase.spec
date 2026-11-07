@@ -1048,7 +1048,7 @@
 @ stdcall OpenGlobalizationUserSettingsKey(long long ptr)
 @ stdcall OpenMutexW(long long wstr)
 @ stdcall OpenPackageInfoByFullName(wstr long ptr)
-# @ stub OpenPackageInfoByFullNameForUser
+@ stdcall OpenPackageInfoByFullNameForUser(wstr wstr long ptr)
 # @ stub OpenPrivateNamespaceW
 @ stdcall OpenProcess(long long long)
 @ stdcall OpenProcessToken(long long ptr)

@@ -42,6 +42,8 @@ typedef LONG (WINAPI *find_fn)( const WCHAR *family, UINT32 count, WCHAR *full_n
 typedef LONG (WINAPI *close_state_fn)( void *state );
 typedef void *(WINAPI *fls_get2_fn)( DWORD index );
 typedef LONG (WINAPI *open_info_fn)( const WCHAR *full_name, UINT32 reserved, PACKAGE_INFO **info );
+typedef LONG (WINAPI *open_info_for_user_fn)( const WCHAR *full_name, const WCHAR *user, UINT32 reserved,
+                                              PACKAGE_INFO **info );
 typedef LONG (WINAPI *close_info_fn)( PACKAGE_INFO *info );
 /* GetPackageApplicationIds takes the package enumeration type (a GUID) by value. */
 typedef LONG (WINAPI *app_ids_fn)( const WCHAR *family, GUID type, UINT32 *count, HANDLE *packages );
@@ -326,6 +328,41 @@ static void test_open_package_info_by_full_name( void )
     if (close) ok( close( NULL ) == E_INVALIDARG, "close of null not rejected\n" );
 }
 
+/* The per-user entry opens the same registration for the prefix's one user:
+ * the block it hands back is the one OpenPackageInfoByFullName builds. */
+static void test_open_package_info_for_user( void )
+{
+    open_info_for_user_fn open = (void *)kb_export( "OpenPackageInfoByFullNameForUser" );
+    close_info_fn close = (void *)kb_export( "ClosePackageInfo" );
+    PACKAGE_INFO *info = (PACKAGE_INFO *)0x1;
+    LONG ret;
+
+    ok( open != NULL, "OpenPackageInfoByFullNameForUser not exported\n" );
+    if (!open) return;
+
+    info = NULL;
+    ret = open( FULL_NAME, L"S-1-5-21-0", 0, &info );
+    ok( ret == S_OK && info, "open for user ret %#lx info %p\n", ret, info );
+    if (ret == S_OK && info)
+    {
+        check_info_against_current( "open-for-user", info );
+        if (close) ok( close( info ) == S_OK, "close for user returned an error\n" );
+    }
+
+    info = NULL;
+    ret = open( L"garbage", L"S-1-5-21-0", 0, &info );
+    ok( ret == HR_CORRUPT_NAME && !info, "for-user bogus name ret %#lx info %p\n", ret, info );
+
+    info = NULL;
+    ret = open( L"NotExist_1.2.3.4_x64__8wekyb3d8bbwe", L"S-1-5-21-0", 0, &info );
+    ok( ret == HR_NO_PACKAGE && !info, "for-user absent package ret %#lx info %p\n", ret, info );
+
+    info = NULL;
+    ret = open( NULL, NULL, 0, &info );
+    ok( ret == E_INVALIDARG && !info, "null name ret %#lx info %p\n", ret, info );
+    ok( open( FULL_NAME, NULL, 0, NULL ) == E_INVALIDARG, "null out not rejected\n" );
+}
+
 /*
  * Registry layer: below the env vars sits the package registration seeded in
  * <root>\Software\Microsoft\Windows NT\CurrentVersion\AppModel -- Exes\<image>
@@ -336,6 +373,9 @@ static void test_open_package_info_by_full_name( void )
 #define REG_PKG_PATH PKG_PATH L"\\reg"
 #define REG_FW_NAME  L"WineWpTest_9.9.9.9_x64__8wekyb3d8bbwe"
 #define REG_FW_PATH  PKG_PATH L"\\fw"
+/* a deployment that records only the installer's root, no PackagePath */
+#define REG_ROOT_NAME L"WineWpTestRoot_5.5.5.5_x64__8wekyb3d8bbwe"
+#define REG_ROOT_PATH PKG_PATH L"\\root"
 
 typedef LONG (WINAPI *family_from_full_fn)( const WCHAR *full, UINT32 *len, WCHAR *family );
 typedef LONG (WINAPI *get_by_family_fn)( const WCHAR *family, UINT32 *count, WCHAR *full_names,
@@ -384,6 +424,15 @@ static void set_test_registry( void )
         lstrcpyW( value, REG_FW_PATH );
         RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
         RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&framework, sizeof(framework) );
+        RegCloseKey( hkey );
+    }
+
+    /* a deployed package whose only recorded path is the install root */
+    lstrcpyW( subkey, REG_APPMODEL L"\\Packages\\" REG_ROOT_NAME );
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ) == ERROR_SUCCESS)
+    {
+        lstrcpyW( value, REG_ROOT_PATH );
+        RegSetValueExW( hkey, L"PackageRootPath", 0, REG_SZ, (const BYTE *)value, (lstrlenW( value ) + 1) * sizeof(WCHAR) );
         RegCloseKey( hkey );
     }
 }
@@ -470,6 +519,50 @@ static void check_from_registry( const char *name, const WCHAR *pkg_path )
         buffer_len = 0;
         ret = get_by_family( L"NotExist_8wekyb3d8bbwe", &count, NULL, &buffer_len, NULL );
         ok( ret == ERROR_SUCCESS && count == 0, "%s absent family ret %ld count %u\n", name, ret, count, buffer_len );
+    }
+
+    /* OpenPackageInfoByFullName opens the registered set by name: every entry's
+     * identity and path come from the deployment, PackageRootPath standing in
+     * for a package that records no PackagePath */
+    {
+        open_info_fn open = (void *)kb_export( "OpenPackageInfoByFullName" );
+        close_info_fn close = (void *)kb_export( "ClosePackageInfo" );
+        PACKAGE_INFO *info = NULL;
+
+        if (!open) ok( 0, "%s: OpenPackageInfoByFullName not exported\n", name );
+        else
+        {
+            ret = open( FULL_NAME, 0, &info );
+            ok( ret == S_OK && info, "%s open running ret %#lx info %p\n", name, ret, info );
+            if (ret == S_OK && info)
+            {
+                ok( info->path && !wcscmp( info->path, pkg_path ), "%s open running path %s\n",
+                    name, debugstr_w( info->path ) );
+                if (close) ok( close( info ) == S_OK, "%s open running close\n", name );
+            }
+            info = NULL;
+            ret = open( REG_FW_NAME, 0, &info );
+            ok( ret == S_OK && info, "%s open framework ret %#lx info %p\n", name, ret, info );
+            if (ret == S_OK && info)
+            {
+                ok( info->packageFullName && !wcscmp( info->packageFullName, REG_FW_NAME ),
+                    "%s open framework name %s\n", name, debugstr_w( info->packageFullName ) );
+                ok( info->path && !wcscmp( info->path, REG_FW_PATH ), "%s open framework path %s\n",
+                    name, debugstr_w( info->path ) );
+                ok( info->packageFamilyName && !wcscmp( info->packageFamilyName, FAMILY_NAME ),
+                    "%s open framework family %s\n", name, debugstr_w( info->packageFamilyName ) );
+                if (close) ok( close( info ) == S_OK, "%s open framework close\n", name );
+            }
+            info = NULL;
+            ret = open( REG_ROOT_NAME, 0, &info );
+            ok( ret == S_OK && info, "%s open root-only ret %#lx info %p\n", name, ret, info );
+            if (ret == S_OK && info)
+            {
+                ok( info->path && !wcscmp( info->path, REG_ROOT_PATH ), "%s open root path %s\n",
+                    name, debugstr_w( info->path ) );
+                if (close) ok( close( info ) == S_OK, "%s open root close\n", name );
+            }
+        }
     }
 
     check_for_user( name );
@@ -559,6 +652,29 @@ static void check_for_user( const char *name )
 
     ok( get_for_user( NULL, FAMILY_NAME, NULL, &block ) == ERROR_INVALID_PARAMETER,
         "%s null count not rejected\n", name );
+
+    /* the per-user open answers the same registration: the framework's block
+     * with its recorded path, for the prefix's one user */
+    {
+        open_info_for_user_fn open_for_user = (void *)kb_export( "OpenPackageInfoByFullNameForUser" );
+        close_info_fn close = (void *)kb_export( "ClosePackageInfo" );
+        PACKAGE_INFO *info = (PACKAGE_INFO *)0x1;
+
+        if (!open_for_user) ok( 0, "%s: OpenPackageInfoByFullNameForUser not exported\n", name );
+        else
+        {
+            ret = open_for_user( REG_FW_NAME, L"S-1-5-21-0", 0, &info );
+            ok( ret == S_OK && info, "%s open-for-user ret %#lx info %p\n", name, ret, info );
+            if (ret == S_OK && info)
+            {
+                ok( info->packageFullName && !wcscmp( info->packageFullName, REG_FW_NAME ),
+                    "%s open-for-user name %s\n", name, debugstr_w( info->packageFullName ) );
+                ok( info->path && !wcscmp( info->path, REG_FW_PATH ), "%s open-for-user path %s\n",
+                    name, debugstr_w( info->path ) );
+                if (close) ok( close( info ) == S_OK, "%s open-for-user close\n", name );
+            }
+        }
+    }
 }
 
 static void test_package_registry( void )
@@ -621,6 +737,7 @@ START_TEST( package )
     test_close_state();
     test_fls_get_value2();
     test_open_package_info_by_full_name();
+    test_open_package_info_for_user();
     test_get_package_application_ids();
     clear_test_env();
     test_package_registry();

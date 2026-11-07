@@ -211,6 +211,8 @@ LONG WINAPI GetPackagePathByFullName(const WCHAR *full_name, UINT32 *length, WCH
 DECLARE_HANDLE(HPKG);
 
 LONG WINAPI OpenPackageInfoByFullName(const WCHAR *full_name, UINT32 reserved, PACKAGE_INFO **info);
+LONG WINAPI OpenPackageInfoByFullNameForUser(const WCHAR *full_name, const WCHAR *user,
+                                             UINT32 reserved, PACKAGE_INFO **info);
 LONG WINAPI ClosePackageInfo(PACKAGE_INFO *info);
 LONG WINAPI GetPackageApplicationIds(const WCHAR *family_name, GUID package_enumeration_type,
                                      UINT32 *count, HPKG *packages);

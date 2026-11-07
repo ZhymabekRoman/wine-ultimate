@@ -1168,6 +1168,7 @@
 @ stdcall -import OpenProcess(long long long)
 @ stdcall -import OpenProcessToken(long long ptr)
 @ stdcall OpenPackageInfoByFullName(wstr long ptr) kernelbase.OpenPackageInfoByFullName
+@ stdcall OpenPackageInfoByFullNameForUser(wstr wstr long ptr) kernelbase.OpenPackageInfoByFullNameForUser
 @ stdcall OpenProfileUserMapping()
 @ stdcall OpenSemaphoreA(long long str)
 @ stdcall -import OpenSemaphoreW(long long wstr)
