@@ -34,7 +34,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( color_helper_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.SwapChainPanel" ))
         IActivationFactory_QueryInterface( swapchain_panel_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Application" ))
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Application" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Application" ))
         IActivationFactory_QueryInterface( application_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;

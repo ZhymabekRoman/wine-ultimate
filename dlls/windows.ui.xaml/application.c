@@ -24,6 +24,13 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
+/* The class activation interface IID of Windows.UI.Xaml.Application (the
+ * Windows.UI.Xaml.Application "activatable" interface; the WinUI3 projection
+ * Microsoft.UI.Xaml.Application shares it).  Not in the generated header; the
+ * app's Mcg binder passes it to RoGetActivationFactory. */
+static const IID IID_Windows_UI_Xaml_Application =
+    { 0x06499997, 0xf7b4, 0x45fe, {0xb7, 0x63, 0x75, 0x77, 0xd1, 0xd3, 0xcb, 0x4a} };
+
 /* CoreApplicationViewSource and View implementation
  *
  * View lifecycle invariants (WP1.11). The shell's contract, enforced by the XAML framework view on
@@ -431,7 +438,8 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IApplication ))
+        IsEqualGUID( iid, &IID_IApplication ) ||
+        IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
     {
         *out = &impl->IApplication_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -603,6 +611,17 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         IInspectable_AddRef( *out );
         return S_OK;
     }
+
+    /* The class's activation interfaces: RoGetActivationFactory answers
+     * (Windows.UI.Xaml.Application, {06499997-f7b4-45fe-b763-7577d1d3cb4a}) — the
+     * class activation interface IID — and IID_IApplication {c1b89ae4-...}, the
+     * projected interface the WinUI3 Mcg binder uses for the
+     * Microsoft.UI.Xaml.Application base of the app's Application subclass.
+     * Windows answers both off the factory object with the IApplication vtable;
+     * hand out the Application instance the same ActivateInstance creates, so the
+     * caller's Resources/Run slots dispatch on the right vtable. */
+    if (IsEqualGUID( iid, &IID_IApplication ) || IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
+        return IActivationFactory_ActivateInstance( &impl->IActivationFactory_iface, (IInspectable **)out );
 
     if (IsEqualGUID( iid, &IID_IApplicationStatics ))
     {

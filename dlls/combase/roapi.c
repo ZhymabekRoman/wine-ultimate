@@ -140,6 +140,8 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
 
     *out = NULL;
 
+    TRACE( "lookup %s\n", debugstr_w( classid ) );
+
     /* search activation context first */
     data.cbSize = sizeof(data);
     if (FindActCtxSectionStringW(FIND_ACTCTX_SECTION_KEY_RETURN_HACTCTX, NULL,
@@ -310,6 +312,24 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
     if (!wcsncmp(classid, L"Windows.UI.Xaml.", 16) ||
         !wcscmp(classid, L"Windows.UI.Xaml") ||
         !wcscmp(classid, L"Windows.UI.ColorHelper"))
+    {
+        *out = wcsdup(L"windows.ui.xaml.dll");
+        return S_OK;
+    }
+
+    /* Microsoft.UI.Xaml.* is the WinUI3 (Windows App SDK) projection of the same
+     * namespace: the app's Mcg binder activates its Application class's BASE,
+     * Microsoft.UI.Xaml.Application, as the fourth startup activation, and the
+     * XAML page tree activates the Microsoft.UI.Xaml.Controls.* classes off the
+     * same binder.  The prefix seeds point at the packaged Microsoft.ui.xaml.dll,
+     * which this gate's process never loads; the fork builtin windows.ui.xaml.dll
+     * (the Microsoft.UI.Xaml.dll internal port) answers the core types'
+     * DllGetActivationFactory, so route the namespace there exactly like the
+     * Windows.UI.Xaml.* route above.  The WinUI3 projection shares the ABI
+     * interfaces (IApplication {c1b89ae4}, IFrameworkViewSource, the statics), so
+     * the same factory answers both class strings. */
+    if (!wcsncmp(classid, L"Microsoft.UI.Xaml.", 18) ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml"))
     {
         *out = wcsdup(L"windows.ui.xaml.dll");
         return S_OK;
@@ -640,6 +660,7 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         buf = expanded;
     }
 
+    TRACE( "registry seed answers %s with %s\n", debugstr_w( classid ), debugstr_w( buf ) );
     *out = buf;
     return S_OK;
 
