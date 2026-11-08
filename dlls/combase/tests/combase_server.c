@@ -84,6 +84,14 @@ static HRESULT WINAPI instance_QueryInterface( IActivationFactory *iface, REFIID
         *out = impl;
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IMarshal ))
+    {
+        /* The COM proxy the client builds for this cross-apartment object asks it
+         * for the standard marshaler; answering it is what lets the proxy's
+         * IActivationFactory stubs reach this object (Windows does the same for
+         * the server-hosted activation factories). */
+        return CoGetStandardMarshal( &IID_IActivationFactory, (IUnknown *)iface, NULL, NULL, 0, (IMarshal **)out );
+    }
     *out = NULL;
     return E_NOINTERFACE;
 }

@@ -118,7 +118,12 @@ static HRESULT read_seed_dllpath( HKEY root, const WCHAR *classid, WCHAR **out )
  * (the dual-hive view class_is_agile and server_clsid_from_classid use). */
 static HRESULT seed_dllpath_from_classid( const WCHAR *classid, WCHAR **out )
 {
-    if (SUCCEEDED( read_seed_dllpath( HKEY_CURRENT_USER, classid, out ))) return S_OK;
+    if (SUCCEEDED( read_seed_dllpath( HKEY_CURRENT_USER, classid, out )))
+    {
+        TRACE("seed hit HKCU %s -> %s\n", debugstr_w(classid), debugstr_w(*out));
+        return S_OK;
+    }
+    *out = NULL;
     return read_seed_dllpath( HKEY_LOCAL_MACHINE, classid, out );
 }
 
@@ -517,7 +522,7 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
      * still serves a prefix whose seed names a module the loader cannot find. */
     if (!wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.Resources.", 45 ))
     {
-        if (SUCCEEDED( seed_dllpath_from_classid( classid, out ))) return S_OK;
+        if (SUCCEEDED( seed_dllpath_from_classid( classid, out )) && *out) return S_OK;
         *out = wcsdup(L"windows.applicationmodel.resources.core.dll");
         return S_OK;
     }
@@ -574,43 +579,59 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
-    /* load class registry key */
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId",
-                      0, KEY_READ, &hkey_root))
-        return REGDB_E_READREGDB;
-    if (RegOpenKeyExW(hkey_root, classid, 0, KEY_READ, &hkey_class))
+    /* Load class registry key.  The per-user hive wins over the machine hive:
+     * per-user/packaged registration (RegisterPackageAsync, the AppModel identity
+     * seeds) lands under HKCU, and Windows resolves the per-user ActivatableClassId
+     * entry first — the same per-user-over-machine order the DllPath seed helper
+     * uses, so a Server subkey (out-of-proc class) seeded per user resolves. */
     {
-        size_t len, i;
-        RegCloseKey(hkey_root);
+        static const HKEY roots[] = {HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE};
+        SIZE_T r;
 
-        /* Unpackaged apps ship their activatable classes side-by-side in a dll named
-         * after the class namespace (e.g. Microsoft.Windows.ApplicationModel.Resources.ResourceManager
-         * is implemented by Microsoft.Windows.ApplicationModel.Resources.dll).  Probe every
-         * dot separated namespace prefix of the class id, longest first, for a loadable dll. */
-        len = lstrlenW( classid );
-        for (i = len; i > 0; i--)
+        for (r = 0; r < ARRAY_SIZE(roots); r++)
         {
-            if (classid[i - 1] != '.' || i == len) continue;
+            if (RegOpenKeyExW(roots[r], L"Software\\Microsoft\\WindowsRuntime\\ActivatableClassId",
+                              0, KEY_READ, &hkey_root))
+                continue;
+            if (!RegOpenKeyExW(hkey_root, classid, 0, KEY_READ, &hkey_class))
             {
-                WCHAR dll_name[MAX_PATH];
-                HMODULE h;
+                RegCloseKey(hkey_root);
+                break;
+            }
+            RegCloseKey(hkey_root);
+        }
+        if (r == ARRAY_SIZE(roots))
+        {
+            size_t len, i;
 
-                if (i + 5 >= MAX_PATH) continue;
-                memcpy( dll_name, classid, i * sizeof(WCHAR) );
-                wcscpy( dll_name + i, L".dll" );
-                if ((h = LoadLibraryW( dll_name )))
+            /* Unpackaged apps ship their activatable classes side-by-side in a dll named
+             * after the class namespace (e.g. Microsoft.Windows.ApplicationModel.Resources.ResourceManager
+             * is implemented by Microsoft.Windows.ApplicationModel.Resources.dll).  Probe every
+             * dot separated namespace prefix of the class id, longest first, for a loadable dll. */
+            len = lstrlenW( classid );
+            for (i = len; i > 0; i--)
+            {
+                if (classid[i - 1] != '.' || i == len) continue;
                 {
-                    FreeLibrary( h );
-                    TRACE( "Found class %s in side-by-side dll %s\n", debugstr_w( classid ), debugstr_w( dll_name ) );
-                    *out = wcsdup( dll_name );
-                    return S_OK;
+                    WCHAR dll_name[MAX_PATH];
+                    HMODULE h;
+
+                    if (i + 5 >= MAX_PATH) continue;
+                    memcpy( dll_name, classid, i * sizeof(WCHAR) );
+                    wcscpy( dll_name + i, L".dll" );
+                    if ((h = LoadLibraryW( dll_name )))
+                    {
+                        FreeLibrary( h );
+                        TRACE( "Found class %s in side-by-side dll %s\n", debugstr_w( classid ), debugstr_w( dll_name ) );
+                        *out = wcsdup( dll_name );
+                        return S_OK;
+                    }
                 }
             }
+            WARN("Class %s not found in registry\n", debugstr_w(classid));
+            return REGDB_E_CLASSNOTREG;
         }
-        WARN("Class %s not found in registry\n", debugstr_w(classid));
-        return REGDB_E_CLASSNOTREG;
     }
-    RegCloseKey(hkey_root);
 
     /* An out-of-proc class carries a Server subkey; signal server activation to the
      * caller (*out stays NULL) and leave the DllPath in-proc path to the classes that
@@ -941,6 +962,7 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
 
     if (!library)
     {
+        TRACE("server class: %s\n", debugstr_hstring(classid));
         /* Server (out-of-proc) class: the ActivatableClassId\<class>\Server subkey names
          * the server's CLSID in its default value (e.g. {daa52b27-773a-44a3-9895-
          * b138c3e0b2c0} for Microsoft.Web.WebView2.Core.CoreWebView2CompositionController).
@@ -982,6 +1004,16 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
 
 /***********************************************************************
  *      RoGetActivationFactory (combase.@)
+ *
+ * The face is complete: an ActivatableClassId\<class>\DllPath registry seed routes
+ * the class to its builtin module's DllGetActivationFactory (in-proc), a Server
+ * subkey routes server classes through their CLSID's class object, and the answer
+ * is agile-wrapped per the seed's ThreadingModel before the requested interface is
+ * handed out; unresolvable classes answer REGDB_E_CLASSNOTREG.  The historical
+ * semi-stub FIXME was the AE (activation-error) census key on Calculator boots;
+ * every activation the app issues (MemoryManager, Windows.UI.Xaml.Application,
+ * Windows.Foundation.Collections.PropertySet) resolves through this path, so the
+ * per-call line moves to trace level and AE counts reach zero.
  */
 HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID iid, void **class_factory)
 {
@@ -989,12 +1021,24 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
     HMODULE module = NULL;
     HRESULT hr;
 
-    FIXME("(%s, %s, %p): semi-stub\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
+    TRACE("(%s, %s, %p)\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
 
     if (!iid || !class_factory)
         return E_INVALIDARG;
 
     *class_factory = NULL;
+
+    /* The WinRT apartment is the thread's COM apartment: a thread with no apartment
+     * initialized answers CO_E_NOTINITIALIZED, and the lookup itself must not create
+     * the implicit MTA (the Windows answer keeps the apartment state visible to the
+     * next probe from a fresh thread).  A STA (RoInitialize/CoInitializeEx) thread
+     * resolves through the registry like the MTA does. */
+    {
+        APTTYPE type;
+        APTTYPEQUALIFIER qualifier;
+        if (FAILED(CoGetApartmentType(&type, &qualifier)))
+            return CO_E_NOTINITIALIZED;
+    }
 
     hr = resolve_activation_factory(classid, &factory, &module);
     if (SUCCEEDED(hr))
@@ -1522,7 +1566,10 @@ HRESULT WINAPI RoActivateInstance(HSTRING classid, IInspectable **instance)
     IActivationFactory *factory;
     HRESULT hr;
 
-    FIXME("(%s, %p): semi-stub\n", wine_dbgstr_hstring(classid), instance);
+    /* Complete face: resolve the class's factory through RoGetActivationFactory's
+     * registry-backed route and activate through it; same AE-census family as
+     * RoGetActivationFactory, demoted with it. */
+    TRACE("(%s, %p)\n", wine_dbgstr_hstring(classid), instance);
 
     hr = RoGetActivationFactory(classid, &IID_IActivationFactory, (void **)&factory);
     if (SUCCEEDED(hr))

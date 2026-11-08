@@ -100,7 +100,7 @@ static void test_ActivationFactories(void)
     ok(hr == REGDB_E_CLASSNOTREG, "Unexpected hr %#lx.\n", hr);
 
     hr = RoGetActivationFactory(str, &IID_IActivationFactory, (void **)&factory);
-    todo_wine ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
     if(factory)
         IActivationFactory_Release(factory);
 
@@ -108,7 +108,7 @@ static void test_ActivationFactories(void)
     ok(hr == REGDB_E_CLASSNOTREG, "Unexpected hr %#lx.\n", hr);
 
     hr = RoActivateInstance(str, &inspect);
-    todo_wine ok(hr == S_OK, "UNexpected hr %#lx.\n", hr);
+    ok(hr == S_OK, "UNexpected hr %#lx.\n", hr);
     if(inspect)
         IInspectable_Release(inspect);
 
@@ -1550,6 +1550,87 @@ static void free_class_ids(HSTRING *ids, DWORD count)
     CoTaskMemFree(ids);
 }
 
+/*
+ * The Calculator (.NET Native UWP) boot's AE (activation-error) census: exactly the
+ * RoGetActivationFactory calls the app issues, each requesting the *class interface*
+ * IID directly (the .NET projection shape), each resolving through the
+ * ActivatableClassId DllPath seed to a builtin provider that answers that IID.
+ * Live-captured pairs (forensics_gate.log, thread 0024):
+ *
+ *   Windows.System.MemoryManager                {6eee351f-6d62-423f-9479-b01f9c9f7669}
+ *     -> windows.applicationmodel.resources.core.dll (co-hosted no-op stub factory)
+ *   Windows.UI.Xaml.Application                 {06499997-f7b4-45fe-b763-7577d1d3cb4a}
+ *     -> windows.ui.xaml.dll
+ *   Windows.Foundation.Collections.PropertySet  {af86e2e0-b12d-4c6a-9c5a-d7aa65101e90}
+ *     -> wintypes.dll (merged IObservableMap/PropertySet family)
+ *
+ * The gate prefix ships all three seeds; the test prefix seeds them here, so the
+ * registry-backed DllPath leg plus each provider's class-interface answer is pinned
+ * on every suite run. MemoryManager is deliberately unseeded in wine.inf for the
+ * mrt100_app DllMain fallback, so seed/unseed around the probe.
+ */
+static const GUID guid_imemorymanager_statics = {0x6eee351f, 0x6d62, 0x423f, {0x94, 0x79, 0xb0, 0x1f, 0x9c, 0x9f, 0x76, 0x69}};
+static const GUID guid_iapplication = {0x06499997, 0xf7b4, 0x45fe, {0xb7, 0x63, 0x75, 0x77, 0xd1, 0xd3, 0xcb, 0x4a}};
+static const GUID guid_ipropertyset = {0xaf86e2e0, 0xb12d, 0x4c6a, {0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90}};
+
+struct ae_face
+{
+    const WCHAR *class_name;
+    const WCHAR *dllpath;
+    const GUID *iid;
+};
+
+static const struct ae_face ae_faces[] =
+{
+    { L"Windows.System.MemoryManager", L"windows.applicationmodel.resources.core.dll", &guid_imemorymanager_statics },
+    { L"Windows.UI.Xaml.Application", L"windows.ui.xaml.dll", &guid_iapplication },
+    { L"Windows.Foundation.Collections.PropertySet", L"wintypes.dll", &guid_ipropertyset },
+};
+
+static void test_dotnet_native_ae_faces(void)
+{
+    DWORD i;
+    HRESULT hr;
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(hr == S_OK || hr == S_FALSE, "RoInitialize returned %#lx.\n", hr);
+
+    for (i = 0; i < ARRAY_SIZE(ae_faces); i++)
+    {
+        const struct ae_face *face = &ae_faces[i];
+        IInspectable *inspectable = NULL;
+        HSTRING str = NULL;
+        void *obj = NULL;
+
+        seed_server_class(HKEY_LOCAL_MACHINE, face->class_name, face->dllpath);
+
+        hr = WindowsCreateString(face->class_name, lstrlenW(face->class_name), &str);
+        ok(hr == S_OK, "WindowsCreateString(%s) returned %#lx.\n", debugstr_w(face->class_name), hr);
+
+        obj = NULL;
+        hr = RoGetActivationFactory(str, face->iid, &obj);
+        ok(hr == S_OK, "RoGetActivationFactory(%s, %s) returned %#lx.\n",
+           debugstr_w(face->class_name), debugstr_guid(face->iid), hr);
+        ok(!!obj, "%s: got object %p.\n", debugstr_w(face->class_name), obj);
+        if (obj)
+        {
+            /* Every class interface inherits IInspectable: the handed-out object
+             * answers it, proving the provider face (not just a pointer). */
+            inspectable = NULL;
+            hr = IInspectable_QueryInterface((IInspectable *)obj, &IID_IInspectable, (void **)&inspectable);
+            ok(hr == S_OK && inspectable, "%s: QI(IInspectable) returned %#lx, %p.\n",
+               debugstr_w(face->class_name), hr, inspectable);
+            if (inspectable) IInspectable_Release(inspectable);
+        }
+        release_activation_result(obj);
+
+        WindowsDeleteString(str);
+        unseed_server_class(HKEY_LOCAL_MACHINE, face->class_name);
+    }
+
+    RoUninitialize();
+}
+
 static LONG find_class_id(HSTRING *ids, DWORD count, const WCHAR *name)
 {
     DWORD i;
@@ -1878,8 +1959,8 @@ static void seed_server_activation_class( const WCHAR *server_exe )
         RegCloseKey( sub );
     }
 
-    lstrcpyW( path, L"CLSID\\" );
-    StringFromGUID2( &test_server_clsid, path + 6, 39 );
+    lstrcpyW( path, L"Software\\Classes\\CLSID\\" );
+    StringFromGUID2( &test_server_clsid, path + 23, 39 );
     if (RegCreateKeyExW( HKEY_CURRENT_USER, path, 0, NULL, REG_OPTION_NON_VOLATILE,
                          KEY_WRITE | KEY_CREATE_SUB_KEY, NULL, &sub, NULL ))
         return;
@@ -1903,8 +1984,8 @@ static void unseed_server_activation_class( void )
     path[lstrlenW( path ) - 7] = 0;
     RegDeleteKeyW( HKEY_CURRENT_USER, path );
 
-    lstrcpyW( path, L"CLSID\\" );
-    StringFromGUID2( &test_server_clsid, path + 6, 39 );
+    lstrcpyW( path, L"Software\\Classes\\CLSID\\" );
+    StringFromGUID2( &test_server_clsid, path + 23, 39 );
     lstrcatW( path, L"\\LocalServer32" );
     RegDeleteKeyW( HKEY_CURRENT_USER, path );
     path[lstrlenW( path ) - 14] = 0;
@@ -2078,6 +2159,7 @@ START_TEST(roapi)
     test_activatable_class_registration();
     test_activation_factory_threading_model();
     test_server_class_activation();
+    test_dotnet_native_ae_faces();
     test_RoGetParameterizedTypeInstanceIID();
     test_RoGetAgileReference();
     test_RoGetErrorReportingFlags();
