@@ -2843,7 +2843,10 @@ static void *get_host_addr_space_limit(void)
         else if (errno == EEXIST) break;
         addr >>= 1;
     }
-    return (void *)((addr << 1) - (granularity_mask + 1));
+    addr = (addr << 1) - (granularity_mask + 1);
+    if (addr > 0xf00000000000) addr = 0xf00000000000;  /* keep Redhawk card tables
+                                                          (base + base/128) under the kernel window */
+    return (void *)addr;
 }
 
 #endif /* _WIN64 */
