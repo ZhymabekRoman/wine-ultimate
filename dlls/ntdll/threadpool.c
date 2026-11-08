@@ -34,14 +34,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(threadpool);
 
-#ifdef __unix__
-#  define POOLDBG_OUT(...) fprintf( stderr, __VA_ARGS__ )
-static int pooldbg_on( void ) { static int v = -1; if (v < 0) v = getenv( "TPDBG" ) ? 1 : 0; return v; }
-#else
-#  define POOLDBG_OUT(...) do {} while (0)
-static int pooldbg_on( void ) { return 1; }
-#endif
-#define POOLDBG(...) do { if (pooldbg_on()) POOLDBG_OUT( __VA_ARGS__ ); } while (0)
+#define POOLDBG(...) TRACE( __VA_ARGS__ )
 
 /*
  * Old thread pooling API
