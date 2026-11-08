@@ -22,6 +22,23 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(data);
 
+/* Arm-3 probe 8 (s239): shared head-block writer probe. Dumps the composite
+ * tracker fields at the pinned heap-head base; called per-QI (probe 7, n<=8),
+ * at the n=50 cascade end, and from IReferenceTracker slot 8
+ * (ReleaseFromTrackerSource, the tracker cycle's per-wrapper tail call).
+ * Writer-runs (fields nonzero at relfs/n50) vs write-faults (zero at fatal)
+ * bisects in one census. */
+static void wrdump( const char *tag )
+{
+    static const char *const head = (const char *)0x6fff00000000;
+    fprintf( stderr, "WRDUMP tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n", tag,
+             (unsigned long)*(const ULONGLONG *)(head + 0x30),
+             (unsigned long)*(const ULONGLONG *)(head + 0x38),
+             (unsigned long)*(const ULONGLONG *)(head + 0x40),
+             (unsigned long)*(const ULONGLONG *)(head + 0x48) );
+    fflush( stderr );
+}
+
 /* Arm-3 probe 2 (s229): real XAML IReferenceTracker face on the
  * ApplicationData/ApplicationDataContainer objects, mirroring the singleton
  * in dlls/wintypes/propertyset.c. The 0x80131506
@@ -117,6 +134,7 @@ static HRESULT WINAPI tracker_AddRefFromTrackerSource( struct appdata_tracker *i
 
 static HRESULT WINAPI tracker_ReleaseFromTrackerSource( struct appdata_tracker *iface )
 {
+    wrdump( "relfs" );
     InterlockedDecrement( &iface->ref );
     return S_OK;
 }
@@ -180,6 +198,8 @@ static void qi_log_record( REFIID iid, HRESULT hr, const char *obj )
                  (unsigned long)*(const ULONGLONG *)(head + 0x48) );
         fflush( stderr );
     }
+    if (n == 50)
+        wrdump( "n50" );
 }
 
 /* Arm-3 probe 5 (s233): Windows.Storage.IApplicationDataGetForApplication
@@ -445,6 +465,7 @@ static HRESULT WINAPI application_data_GetIids( IApplicationData *iface, ULONG *
     struct com_interface_entry entries[] =
     {
         { (void **)&application_data_vtbl, (IID *)&IID_IApplicationData },
+        { (void **)&application_data2_vtbl, (IID *)&IID_IApplicationData2 },
         { (void **)&application_data_methods_vtbl, (IID *)&IID_IApplicationDataMethods },
         { (void **)&application_data_getforapp_vtbl, (IID *)&IID_IApplicationDataGetForApplication },
         { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
