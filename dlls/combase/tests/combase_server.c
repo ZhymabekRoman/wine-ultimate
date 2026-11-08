@@ -90,7 +90,7 @@ static HRESULT WINAPI instance_QueryInterface( IActivationFactory *iface, REFIID
          * for the standard marshaler; answering it is what lets the proxy's
          * IActivationFactory stubs reach this object (Windows does the same for
          * the server-hosted activation factories). */
-        return CoGetStandardMarshal( &IID_IActivationFactory, (IUnknown *)iface, NULL, NULL, 0, (IMarshal **)out );
+        return CoGetStandardMarshal( &IID_IActivationFactory, (IUnknown *)iface, 0, NULL, 0, (IMarshal **)out );
     }
     *out = NULL;
     return E_NOINTERFACE;
