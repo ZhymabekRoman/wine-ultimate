@@ -641,10 +641,387 @@ static HRESULT WINAPI package_manager_FindPackagesByUserSecurityIdNamePublisher(
                           WindowsGetStringRawBuffer( publisher, NULL ), 0, packages );
 }
 
+
+/*
+ * FindUsers: the prefix registers packages per user under the AppModel key;
+ * every registered package's UserSecurityId value names a user that has it.
+ * Enumerate that hive, dedupe by family filter, answer with
+ * PackageUserInformation faces (security id + Installed) behind an
+ * IIterable<PackageUserInformation> with a single-pass iterator.
+ */
+
+struct pui_entry
+{
+    struct package_user_info *info;
+    WCHAR sid[128];
+};
+
+struct pui_list
+{
+    IIterable_PackageUserInformation IIterable_PackageUserInformation_iface;
+    LONG ref;
+    struct pui_entry entries[8];
+    UINT32 count;
+};
+
+struct package_user_info
+{
+    IPackageUserInformation IPackageUserInformation_iface;
+    struct pui_list *list;
+    UINT32 index;
+    LONG ref;
+};
+
+struct pui_iterator
+{
+    IIterator_PackageUserInformation IIterator_PackageUserInformation_iface;
+    struct pui_list *list;
+    LONG pos;
+    LONG ref;
+};
+
+static inline struct package_user_info *pui_from_iface( IPackageUserInformation *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_user_info, IPackageUserInformation_iface );
+}
+
+static void pui_list_release( struct pui_list *list );
+
+static HRESULT WINAPI package_user_info_QueryInterface( IPackageUserInformation *iface, REFIID iid, void **out )
+{
+    struct package_user_info *This = pui_from_iface( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPackageUserInformation ))
+        *out = &This->IPackageUserInformation_iface;
+    else
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static ULONG WINAPI package_user_info_AddRef( IPackageUserInformation *iface )
+{
+    struct package_user_info *This = pui_from_iface( iface );
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG WINAPI package_user_info_Release( IPackageUserInformation *iface )
+{
+    struct package_user_info *This = pui_from_iface( iface );
+    ULONG ref = InterlockedDecrement( &This->ref );
+
+    if (!ref)
+    {
+        pui_list_release( This->list );
+        free( This );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI package_user_info_GetIids( IPackageUserInformation *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_user_info_GetRuntimeClassName( IPackageUserInformation *iface, HSTRING *name )
+{
+    static const WCHAR class_w[] = L"Windows.Management.Deployment.PackageUserInformation";
+    return WindowsCreateString( class_w, ARRAY_SIZE(class_w) - 1, name );
+}
+
+static HRESULT WINAPI package_user_info_GetTrustLevel( IPackageUserInformation *iface, TrustLevel *trust )
+{
+    *trust = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_user_info_get_UserSecurityId( IPackageUserInformation *iface, HSTRING *value )
+{
+    struct package_user_info *This = pui_from_iface( iface );
+    const WCHAR *sid = This->list->entries[This->index].sid[0] ? This->list->entries[This->index].sid : L"S-1-5-21-0";
+    return WindowsCreateString( sid, lstrlenW( sid ), value );
+}
+
+static HRESULT WINAPI package_user_info_get_InstallState( IPackageUserInformation *iface, PackageInstallState *state )
+{
+    *state = PackageInstallState_Installed;
+    return S_OK;
+}
+
+static const struct IPackageUserInformationVtbl package_user_info_vtbl =
+{
+    package_user_info_QueryInterface,
+    package_user_info_AddRef,
+    package_user_info_Release,
+    package_user_info_GetIids,
+    package_user_info_GetRuntimeClassName,
+    package_user_info_GetTrustLevel,
+    package_user_info_get_UserSecurityId,
+    package_user_info_get_InstallState,
+};
+
+static inline struct pui_iterator *pui_iter_from_iface( IIterator_PackageUserInformation *iface )
+{
+    return CONTAINING_RECORD( iface, struct pui_iterator, IIterator_PackageUserInformation_iface );
+}
+
+static HRESULT WINAPI pui_iterator_QueryInterface( IIterator_PackageUserInformation *iface, REFIID iid, void **out )
+{
+    struct pui_iterator *This = pui_iter_from_iface( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_PackageUserInformation ))
+        *out = &This->IIterator_PackageUserInformation_iface;
+    else
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static ULONG WINAPI pui_iterator_AddRef( IIterator_PackageUserInformation *iface )
+{
+    struct pui_iterator *This = pui_iter_from_iface( iface );
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG WINAPI pui_iterator_Release( IIterator_PackageUserInformation *iface )
+{
+    struct pui_iterator *This = pui_iter_from_iface( iface );
+    ULONG ref = InterlockedDecrement( &This->ref );
+
+    if (!ref)
+    {
+        pui_list_release( This->list );
+        free( This );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI pui_iterator_GetIids( IIterator_PackageUserInformation *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI pui_iterator_GetRuntimeClassName( IIterator_PackageUserInformation *iface, HSTRING *name )
+{
+    static const WCHAR class_w[] = L"Windows.Foundation.Collections.IIterator";
+    return WindowsCreateString( class_w, ARRAY_SIZE(class_w) - 1, name );
+}
+
+static HRESULT WINAPI pui_iterator_GetTrustLevel( IIterator_PackageUserInformation *iface, TrustLevel *trust )
+{
+    *trust = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI pui_iterator_get_Current( IIterator_PackageUserInformation *iface, IPackageUserInformation **item )
+{
+    struct pui_iterator *This = pui_iter_from_iface( iface );
+
+    if (This->pos < 0 || This->pos >= (LONG)This->list->count) return E_FAIL;
+    *item = &This->list->entries[This->pos].info->IPackageUserInformation_iface;
+    IPackageUserInformation_AddRef( *item );
+    return S_OK;
+}
+
+static HRESULT WINAPI pui_iterator_get_HasCurrent( IIterator_PackageUserInformation *iface, boolean *value )
+{
+    struct pui_iterator *This = pui_iter_from_iface( iface );
+    *value = (This->pos >= 0 && This->pos < (LONG)This->list->count);
+    return S_OK;
+}
+
+static HRESULT WINAPI pui_iterator_MoveNext( IIterator_PackageUserInformation *iface, boolean *value )
+{
+    struct pui_iterator *This = pui_iter_from_iface( iface );
+
+    This->pos++;
+    *value = (This->pos < (LONG)This->list->count);
+    return S_OK;
+}
+
+static HRESULT WINAPI pui_iterator_Reset( IIterator_PackageUserInformation *iface )
+{
+    struct pui_iterator *This = pui_iter_from_iface( iface );
+    This->pos = 0;
+    return S_OK;
+}
+
+static const struct IIterator_PackageUserInformationVtbl pui_iterator_vtbl =
+{
+    pui_iterator_QueryInterface,
+    pui_iterator_AddRef,
+    pui_iterator_Release,
+    pui_iterator_GetIids,
+    pui_iterator_GetRuntimeClassName,
+    pui_iterator_GetTrustLevel,
+    pui_iterator_get_Current,
+    pui_iterator_get_HasCurrent,
+    pui_iterator_MoveNext,
+    pui_iterator_Reset,
+};
+
+static inline struct pui_list *pui_list_from_iface( IIterable_PackageUserInformation *iface )
+{
+    return CONTAINING_RECORD( iface, struct pui_list, IIterable_PackageUserInformation_iface );
+}
+
+static HRESULT WINAPI pui_list_Release( IIterable_PackageUserInformation *iface )
+{
+    struct pui_list *This = pui_list_from_iface( iface );
+    ULONG ref = InterlockedDecrement( &This->ref );
+
+    if (!ref)
+    {
+        UINT32 i;
+        for (i = 0; i < This->count; i++) free( This->entries[i].info );
+        free( This );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI pui_list_GetIids( IIterable_PackageUserInformation *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI pui_list_GetRuntimeClassName( IIterable_PackageUserInformation *iface, HSTRING *name )
+{
+    static const WCHAR class_w[] = L"Windows.Foundation.Collections.IIterable";
+    return WindowsCreateString( class_w, ARRAY_SIZE(class_w) - 1, name );
+}
+
+static HRESULT WINAPI pui_list_GetTrustLevel( IIterable_PackageUserInformation *iface, TrustLevel *trust )
+{
+    *trust = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI pui_list_QueryInterface( IIterable_PackageUserInformation *iface, REFIID iid, void **out )
+{
+    struct pui_list *This = pui_list_from_iface( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterable_PackageUserInformation ))
+        *out = &This->IIterable_PackageUserInformation_iface;
+    else
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static ULONG WINAPI pui_list_AddRef( IIterable_PackageUserInformation *iface )
+{
+    struct pui_list *This = pui_list_from_iface( iface );
+    return InterlockedIncrement( &This->ref );
+}
+
+static void pui_list_release( struct pui_list *This )
+{
+    ULONG ref = InterlockedDecrement( &This->ref );
+    UINT32 i;
+
+    if (!ref)
+    {
+        for (i = 0; i < This->count; i++) free( This->entries[i].info );
+        free( This );
+    }
+}
+
+static HRESULT WINAPI pui_list_First( IIterable_PackageUserInformation *iface,
+        IIterator_PackageUserInformation **iterator )
+{
+    struct pui_list *This = pui_list_from_iface( iface );
+    struct pui_iterator *iter;
+
+    if (!(iter = calloc( 1, sizeof(*iter) ))) return E_OUTOFMEMORY;
+    iter->IIterator_PackageUserInformation_iface.lpVtbl = &pui_iterator_vtbl;
+    iter->list = This;
+    iter->pos = 0;
+    iter->ref = 1;
+    InterlockedIncrement( &This->ref );
+    *iterator = &iter->IIterator_PackageUserInformation_iface;
+    return S_OK;
+}
+
+static const struct IIterable_PackageUserInformationVtbl pui_list_vtbl =
+{
+    pui_list_QueryInterface,
+    pui_list_AddRef,
+    pui_list_Release,
+    pui_list_GetIids,
+    pui_list_GetRuntimeClassName,
+    pui_list_GetTrustLevel,
+    pui_list_First,
+};
+
 static HRESULT WINAPI package_manager_FindUsers( IPackageManager *iface, HSTRING name, IIterable_PackageUserInformation **users )
 {
-    FIXME( "iface %p, name %s, users %p stub!\n", iface, debugstr_hstring(name), users );
-    return E_NOTIMPL;
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    const WCHAR *family = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
+    WCHAR keyname[512], value[128];
+    DWORD type, size;
+    HKEY hkey, hsub;
+    struct pui_list *list;
+    LONG rc;
+    DWORD i = 0;
+
+    TRACE( "iface %p, name %s, users %p.\n", iface, debugstr_hstring(name), users );
+
+    if (!users) return E_INVALIDARG;
+    if (!(list = calloc( 1, sizeof(*list) ))) return E_OUTOFMEMORY;
+    list->IIterable_PackageUserInformation_iface.lpVtbl = &pui_list_vtbl;
+    list->ref = 1;
+
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, appmodel_path, 0, KEY_READ, &hkey ))
+    {
+        free( list );
+        return E_NOT_FOUND;
+    }
+    while (list->count < ARRAY_SIZE(list->entries))
+    {
+        DWORD chars = ARRAY_SIZE(keyname);
+        struct package_user_info *info;
+
+        if (RegEnumKeyW( hkey, i++, keyname, &chars )) break;
+        if (family && wcsncmp( keyname, family, lstrlenW(family) )) continue;
+        lstrcpyW( value, L"S-1-5-21-0" );
+        if (!RegOpenKeyExW( hkey, keyname, 0, KEY_READ, &hsub ))
+        {
+            type = REG_SZ;
+            size = sizeof(value);
+            RegQueryValueExW( hsub, L"UserSecurityId", NULL, &type, (BYTE *)value, &size );
+            RegCloseKey( hsub );
+        }
+        if (!(info = calloc( 1, sizeof(*info) ))) continue;
+        info->IPackageUserInformation_iface.lpVtbl = &package_user_info_vtbl;
+        info->list = list;
+        info->index = list->count;
+        info->ref = 1;
+        lstrcpyW( list->entries[list->count].sid, value );
+        list->entries[list->count].info = info;
+        list->count++;
+    }
+    RegCloseKey( hkey );
+
+    *users = &list->IIterable_PackageUserInformation_iface;
+    return S_OK;
 }
 
 static HRESULT WINAPI package_manager_SetPackageState( IPackageManager *iface, HSTRING name, PackageState state )
