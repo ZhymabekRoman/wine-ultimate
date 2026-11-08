@@ -54,6 +54,8 @@ static void wrdump( const char *tag )
  * windows.ui.xaml.hosting.referencetracker.h: 0-2 IUnknown, 3 Connect,
  * 4 Disconnect, 5 FindTrackerTargets, 6 GetReferenceTrackerManager,
  * 7 AddRefFromTrackerSource, 8 ReleaseFromTrackerSource, 9 Peg. */
+static const GUID IID_IReferenceTracker =
+{ 0x00000035, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46} };
 static const GUID IID_IReferenceTracker_g =
 { 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
 
@@ -276,6 +278,18 @@ static HRESULT WINAPI factory_qi_impl( IActivationFactory *iface, REFIID iid, vo
         return S_OK;
     }
 
+    /* The CoreCLR ComWrappers shader QIs IReferenceTracker ({00000035-...-0046}
+     * canonical, {11d3b13a-...} as observed in-app) on the factory face before
+     * building the composite; answering it with the factory iface exposes the
+     * IActivationFactory slots as tracker slots. Hand out the dedicated
+     * no-op tracker face, as the application_data object already does. */
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = (void *)&appdata_tracker;
+        InterlockedIncrement( &appdata_tracker.ref );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -311,13 +325,14 @@ static HRESULT WINAPI factory_GetIids( IActivationFactory *iface, ULONG *iid_cou
     struct application_data_statics *impl = impl_from_IActivationFactory( iface );
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
+    if (iid_count) *iid_count = 3; /* filled on the (NULL, NULL) probe itself */
     if (!impl->iids_cache)
     {
         struct com_interface_entry entries[] =
         {
             { (void **)&factory_vtbl, (IID *)&IID_IActivationFactory },
             { (void **)&application_data_statics_vtbl, (IID *)&IID_IApplicationDataStatics },
+            { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
         };
         struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
@@ -1361,7 +1376,9 @@ IActivationFactory *application_data_factory = &application_data_statics.IActiva
  * so GetForApp returns the same application_data object. */
 static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out )
 {
-    HRESULT hr = application_data_qi_impl( iface, iid, out );
+    HRESULT hr;
+    head_populate_appdata();
+    hr = application_data_qi_impl( iface, iid, out );
     qi_log_record( iid, hr, "appdata" );
     return hr;
 }
@@ -1388,14 +1405,37 @@ static void head_populate( void )
 
     if (done) return;
     done = TRUE;
-    head[0] = (void **)&application_data_vtbl;                  /* 0x00 composite slot0 */
-    head[1] = (void *)&IID_IApplicationData;                    /* 0x08 */
-    head[2] = (void **)&application_data_methods_vtbl;          /* 0x10 */
-    head[3] = (void *)&IID_IApplicationDataMethods;             /* 0x18 */
-    head[4] = (void **)&application_data_getforapp_vtbl;        /* 0x20 */
-    head[5] = (void *)&IID_IApplicationDataGetForApplication;   /* 0x28 */
-    head[6] = (void **)&appdata_tracker_vtbl;                   /* 0x30 */
-    head[7] = (void *)&IID_IReferenceTracker_g;                 /* 0x38 slot-7 refetch word */
+    /* s245 (MSUIXaml lane 9778373e): the fault fires during composite
+     * construction of the FACTORY object, and the factory QI is the first
+     * COM traffic (s238 WRDUMP n=1..3), so the head block is consumed by
+     * the factory composite: seed its 3-pair layout {factory,
+     * IActivationFactory},{statics,IApplicationDataStatics},
+     * {tracker,IReferenceTracker} (matching the factory GetIids count 3).
+     * The appdata 4-pair array is seeded at block+0x40 on the first
+     * appdata QI (head_populate_appdata). */
+    head[0] = (void **)&factory_vtbl;                           /* 0x00 composite slot0 */
+    head[1] = (void *)&IID_IActivationFactory;                  /* 0x08 */
+    head[2] = (void **)&application_data_statics_vtbl;          /* 0x10 */
+    head[3] = (void *)&IID_IApplicationDataStatics;             /* 0x18 */
+    head[4] = (void **)&appdata_tracker_vtbl;                   /* 0x20 */
+    head[5] = (void *)&IID_IReferenceTracker_g;                 /* 0x28 slot-7 refetch word */
+}
+
+static void head_populate_appdata( void )
+{
+    static BOOL done;
+    void **head = (void **)0x6fff00000040;
+
+    if (done) return;
+    done = TRUE;
+    head[0] = (void **)&application_data_vtbl;                  /* 0x40 composite slot0 */
+    head[1] = (void *)&IID_IApplicationData;                    /* 0x48 */
+    head[2] = (void **)&application_data_methods_vtbl;          /* 0x50 */
+    head[3] = (void *)&IID_IApplicationDataMethods;             /* 0x58 */
+    head[4] = (void **)&application_data_getforapp_vtbl;        /* 0x60 */
+    head[5] = (void *)&IID_IApplicationDataGetForApplication;   /* 0x68 */
+    head[6] = (void **)&appdata_tracker_vtbl;                   /* 0x70 */
+    head[7] = (void *)&IID_IReferenceTracker_g;                 /* 0x78 slot-7 refetch word */
 }
 
 static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
