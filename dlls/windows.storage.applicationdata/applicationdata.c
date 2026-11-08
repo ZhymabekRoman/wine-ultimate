@@ -158,6 +158,7 @@ struct application_data
 {
     IApplicationData IApplicationData_iface;
     IApplicationData2 IApplicationData2_iface;
+    IApplicationDataMethods IApplicationDataMethods_iface;
     LONG ref;
 };
 
@@ -170,6 +171,14 @@ static inline struct application_data *impl_from_IApplicationData2( IApplication
 {
     return CONTAINING_RECORD( iface, struct application_data, IApplicationData2_iface );
 }
+
+static inline struct application_data *impl_from_IApplicationDataMethods( IApplicationDataMethods *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_data, IApplicationDataMethods_iface );
+}
+
+static const struct IApplicationDataVtbl application_data_vtbl;
+static const struct IApplicationDataMethodsVtbl application_data_methods_vtbl;
 
 static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out )
 {
@@ -190,6 +199,13 @@ static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, 
     if (IsEqualGUID( iid, &IID_IApplicationData2 ))
     {
         *out = &impl->IApplicationData2_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IApplicationDataMethods ))
+    {
+        *out = &impl->IApplicationDataMethods_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -220,20 +236,38 @@ static ULONG WINAPI application_data_Release( IApplicationData *iface )
 
 static HRESULT WINAPI application_data_GetIids( IApplicationData *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    /* Shader pair-array contract, see container_GetIids: with E_NOTIMPL the
+     * CoreCLR ComWrappers shader decodes get_LocalSettings off the property
+     * face ComVirtualMethodData and the ApplicationDataContainer RCW chain
+     * from LocalSettings faults (0x80131506 failfast). */
+    struct com_interface_entry entries[] =
+    {
+        { (void **)&application_data_vtbl, (IID *)&IID_IApplicationData },
+        { (void **)&application_data_methods_vtbl, (IID *)&IID_IApplicationDataMethods },
+    };
+
+    TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
+
+    if (iid_count) *iid_count = ARRAY_SIZE( entries );
+    if (iids)
+    {
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
+    }
+    return S_OK;
 }
 
 static HRESULT WINAPI application_data_GetRuntimeClassName( IApplicationData *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    return WindowsCreateString( L"Windows.Storage.ApplicationData", 31, class_name );
 }
 
 static HRESULT WINAPI application_data_GetTrustLevel( IApplicationData *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI application_data_get_Version( IApplicationData *iface, UINT32 *value )
@@ -631,6 +665,73 @@ static HRESULT WINAPI application_data_get_RoamingSettings( IApplicationData *if
     return *value ? S_OK : E_FAIL;
 }
 
+static HRESULT WINAPI application_data_methods_QueryInterface( IApplicationDataMethods *iface, REFIID iid, void **out )
+{
+    struct application_data *impl = impl_from_IApplicationDataMethods( iface );
+    return IApplicationData_QueryInterface( &impl->IApplicationData_iface, iid, out );
+}
+
+static ULONG WINAPI application_data_methods_AddRef( IApplicationDataMethods *iface )
+{
+    struct application_data *impl = impl_from_IApplicationDataMethods( iface );
+    return IApplicationData_AddRef( &impl->IApplicationData_iface );
+}
+
+static ULONG WINAPI application_data_methods_Release( IApplicationDataMethods *iface )
+{
+    struct application_data *impl = impl_from_IApplicationDataMethods( iface );
+    return IApplicationData_Release( &impl->IApplicationData_iface );
+}
+
+static HRESULT WINAPI application_data_methods_GetIids( IApplicationDataMethods *iface, ULONG *count, IID **iids )
+{
+    struct application_data *impl = impl_from_IApplicationDataMethods( iface );
+    return application_data_GetIids( &impl->IApplicationData_iface, count, iids );
+}
+
+static HRESULT WINAPI application_data_methods_GetRuntimeClassName( IApplicationDataMethods *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Storage.ApplicationData", 31, name );
+}
+
+static HRESULT WINAPI application_data_methods_GetTrustLevel( IApplicationDataMethods *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_data_methods_get_LocalSettings( IApplicationDataMethods *iface, IApplicationDataContainer **value )
+{
+    struct application_data *impl = impl_from_IApplicationDataMethods( iface );
+    return application_data_get_LocalSettings( &impl->IApplicationData_iface, value );
+}
+
+static HRESULT WINAPI application_data_methods_get_RoamingSettings( IApplicationDataMethods *iface, IApplicationDataContainer **value )
+{
+    struct application_data *impl = impl_from_IApplicationDataMethods( iface );
+    return application_data_get_RoamingSettings( &impl->IApplicationData_iface, value );
+}
+
+static HRESULT WINAPI application_data_methods_CreateCompositeStream( IApplicationDataMethods *iface,
+                                                                      IInspectable *stream,
+                                                                      struct __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream **composite_stream )
+{
+    return E_NOTIMPL;
+}
+
+static const struct IApplicationDataMethodsVtbl application_data_methods_vtbl =
+{
+    application_data_methods_QueryInterface,
+    application_data_methods_AddRef,
+    application_data_methods_Release,
+    application_data_methods_GetIids,
+    application_data_methods_GetRuntimeClassName,
+    application_data_methods_GetTrustLevel,
+    application_data_methods_get_LocalSettings,
+    application_data_methods_get_RoamingSettings,
+    application_data_methods_CreateCompositeStream,
+};
+
 struct storage_folder
 {
     IStorageFolder IStorageFolder_iface;
@@ -965,6 +1066,7 @@ static HRESULT WINAPI application_data_statics_get_Current( IApplicationDataStat
 
     impl->IApplicationData_iface.lpVtbl = &application_data_vtbl;
     impl->IApplicationData2_iface.lpVtbl = &application_data2_vtbl;
+    impl->IApplicationDataMethods_iface.lpVtbl = &application_data_methods_vtbl;
     impl->ref = 1;
 
     *value = &impl->IApplicationData_iface;

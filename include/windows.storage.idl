@@ -367,6 +367,21 @@ namespace Windows.Storage {
 
     [
         contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Storage.ApplicationData),
+        uuid(33d7d339-4271-42a8-971f-891402f8b555)
+    ]
+    interface IApplicationDataMethods : IInspectable
+    {
+        [propget] HRESULT LocalSettings([out, retval] Windows.Storage.ApplicationDataContainer **value);
+        [propget] HRESULT RoamingSettings([out, retval] Windows.Storage.ApplicationDataContainer **value);
+        HRESULT CreateCompositeStream(
+            [in] IInspectable *stream,
+            [out, retval] Windows.Storage.Streams.IRandomAccessStream **compositeStream
+        );
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
         exclusiveto(Windows.Storage.ApplicationDataContainer),
         uuid(c5aefd1e-f467-40ba-8566-ab640a441e1d)
     ]
