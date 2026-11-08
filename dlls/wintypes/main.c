@@ -2039,6 +2039,17 @@ static void heap_prewarm( void )
      * the 1MB-grow block whose first page faults (CompositeVtableData chunk
      * load [header+0x38], 0x6fff0000003b). */
     HeapCreate( 0, 0x100000, 0x800000 );
+
+    /* Load-order arm (p215): pull the XAML runtime chain in ahead of the
+     * first ApplicationDataContainer.get_Values RCW cycle. With
+     * Microsoft.UI.Xaml.dll resident before CoreCLR wraps the values
+     * container, its ComWrappers provider registers the XAML-aware tracker
+     * path and the shader composite scan that drives the 6.7M-iteration
+     * first-chance AV loop (35 fatal cycles per gate) runs against live
+     * runtime data instead of a half-initialized heap. */
+    LoadLibraryW( L"CoreMessagingXP.dll" );
+    LoadLibraryW( L"Microsoft.UI.Xaml.dll" );
+    LoadLibraryW( L"Microsoft.Web.WebView2.Core.dll" );
 }
 
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
