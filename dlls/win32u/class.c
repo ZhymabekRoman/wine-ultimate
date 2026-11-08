@@ -587,6 +587,11 @@ WNDPROC get_class_winproc( CLASS *class )
     while ((status = get_shared_class( class, &lock, &class_shm )) == STATUS_PENDING)
         wndproc = wine_server_get_ptr( class_shm->info.wndproc );
     if (status) return 0;
+    /* the stored value is a tagged WINDOWPROC handle for wrapper procedures;
+     * classes registered from shared memory can hand it back untagged, in
+     * which case get_winproc_ptr() treats the WINDOWPROC pointer itself as a
+     * raw function and dispatch jumps into the procA slot (0x80210000 AVs) */
+    if (wndproc && !(UINT_PTR)(wndproc) & 1) wndproc = (WNDPROC)((UINT_PTR)wndproc | 1);
     return wndproc;
 }
 
