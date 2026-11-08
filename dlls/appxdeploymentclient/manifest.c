@@ -400,3 +400,76 @@ HRESULT WINAPI AppxPackageRepositoryRecoverStagedPackages( HANDLE *event_handle 
     TRACE( "event_handle %p.\n", event_handle );
     return S_OK;
 }
+
+/* shared local folders, install probes: the per-user layout under the prefix */
+
+static void shared_local_path( const WCHAR *leaf, WCHAR *out, DWORD cch )
+{
+    lstrcpyW( out, L"C:\\Users\\User\\AppData\\Local\\Packages\\" );
+    lstrcatW( out, leaf );
+    lstrcatW( out, L"\\SharedLocalCache" );
+}
+
+HRESULT WINAPI AppxCreateSharedLocalFolder( const WCHAR *full_name, const WCHAR *install_path )
+{
+    WCHAR path[MAX_PATH];
+
+    TRACE( "full_name %s, install_path %s.\n", debugstr_w( full_name ), debugstr_w( install_path ) );
+
+    if (!full_name) return E_INVALIDARG;
+    shared_local_path( full_name, path, ARRAY_SIZE( path ) );
+    CreateDirectoryW( path, NULL );
+    return S_OK;
+}
+
+HRESULT WINAPI AppxCreateSharedLocalFolderForFamilyName( const WCHAR *family_name, const WCHAR *install_path )
+{
+    return AppxCreateSharedLocalFolder( family_name, install_path );
+}
+
+HRESULT WINAPI AppxDoesSharedLocalFolderExistForFamilyName( const WCHAR *family_name, BOOL *exists )
+{
+    WCHAR path[MAX_PATH];
+
+    TRACE( "family_name %s, exists %p.\n", debugstr_w( family_name ), exists );
+
+    if (!family_name || !exists) return E_INVALIDARG;
+    shared_local_path( family_name, path, ARRAY_SIZE( path ) );
+    *exists = GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES;
+    return S_OK;
+}
+
+HRESULT WINAPI AppxRequestRemovePackageForUser( const WCHAR *sid, const WCHAR *full_name )
+{
+    TRACE( "sid %s, full_name %s.\n", debugstr_w( sid ), debugstr_w( full_name ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return package_reg_delete( full_name );
+}
+
+HRESULT WINAPI AppxPackageRepositoryRecoverUserInstalls( HANDLE *event_handle )
+{
+    TRACE( "event_handle %p.\n", event_handle );
+    return S_OK;
+}
+
+HRESULT WINAPI IsPackageInstalled( const WCHAR *full_name, BOOL *installed )
+{
+    WCHAR path[MAX_PATH];
+
+    TRACE( "full_name %s, installed %p.\n", debugstr_w( full_name ), installed );
+
+    if (!full_name || !installed) return E_INVALIDARG;
+    *installed = SUCCEEDED( package_reg_value( full_name, L"PackagePath", path, ARRAY_SIZE( path ) ) );
+    return S_OK;
+}
+
+HRESULT WINAPI AppxIsStagedPackageStoreSigned( const WCHAR *staged_path, BOOL *is_store_signed )
+{
+    TRACE( "staged_path %s, is_store_signed %p.\n", debugstr_w( staged_path ), is_store_signed );
+
+    /* packages staged into the prefix are store-signed by construction */
+    if (!is_store_signed) return E_INVALIDARG;
+    *is_store_signed = TRUE;
+    return S_OK;
+}

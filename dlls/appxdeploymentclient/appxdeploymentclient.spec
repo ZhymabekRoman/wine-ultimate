@@ -5,13 +5,13 @@
 @ stdcall AppxOpenAppxPackageContents(wstr ptr)
 @ stub GetApplicability
 @ stdcall AppxCloseAppxPackageContents(long)
-@ stub AppxCreateSharedLocalFolder
+@ stdcall AppxCreateSharedLocalFolder(wstr wstr)
 @ stdcall AppxPackageRepositoryRecoverStagedPackages(ptr)
-@ stub AppxPackageRepositoryRecoverUserInstalls
+@ stdcall AppxPackageRepositoryRecoverUserInstalls(ptr)
 @ stub AppxRecoverUserInstallsForUpgrade
 @ stub AppxDeletePackageFiles
-@ stub AppxRequestRemovePackageForUser
-@ stub IsPackageInstalled
+@ stdcall AppxRequestRemovePackageForUser(wstr wstr)
+@ stdcall IsPackageInstalled(wstr ptr)
 @ stub RDSRecoverRequests
 @ stub AppxPreStageCleanupRunTask
 @ stdcall AppxPreRegisterPackage(wstr wstr wstr ptr)
@@ -24,7 +24,7 @@
 @ stdcall AppxDestagePackage(wstr)
 @ stub GetApplicability2
 @ stdcall AppxGetStagedPackageFullNameFromFamilyName(wstr ptr)
-@ stub AppxIsStagedPackageStoreSigned
+@ stdcall AppxIsStagedPackageStoreSigned(wstr ptr)
 @ stub RegisterNotification
 @ stub UnregisterNotification
 @ stub GetNotificationPayload
@@ -78,8 +78,8 @@
 @ stub HasPackageFamilyBeenRegisteredForUser
 @ stub CleanupProfileForUser
 @ stub AppxRemoveAllPackagesForUserSid
-@ stub AppxCreateSharedLocalFolderForFamilyName
-@ stub AppxDoesSharedLocalFolderExistForFamilyName
+@ stdcall AppxCreateSharedLocalFolderForFamilyName(wstr wstr)
+@ stdcall AppxDoesSharedLocalFolderExistForFamilyName(wstr ptr)
 @ stub AppxValidatePackages
 @ stub CheckForUpdatesAndWaitForInstallerIfNeeded
 @ stdcall -private DllCanUnloadNow()
