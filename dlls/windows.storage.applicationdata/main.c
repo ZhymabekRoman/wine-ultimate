@@ -36,6 +36,10 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     TRACE( "class %s, factory %p.\n", debugstr_hstring( classid ), factory );
 
+    /* Probe 11 (s249): seed all provider head blocks ahead of the first QI
+     * cascade (first-touch entry point of this provider). */
+    application_data_preseed();
+
     *factory = NULL;
 
     /* Microsoft.Windows.Storage.ApplicationData* is the Windows App SDK mirror of

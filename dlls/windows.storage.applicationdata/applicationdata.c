@@ -228,7 +228,6 @@ struct IApplicationDataGetForApplication
     const struct IApplicationDataGetForApplicationVtbl *lpVtbl;
 };
 
-static void head_populate_appdata( void );
 static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out );
 static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface, REFIID iid, void **out );
 static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out );
@@ -496,8 +495,6 @@ static HRESULT WINAPI application_data_GetIids( IApplicationData *iface, ULONG *
             { (void **)&application_data_vtbl, (IID *)&IID_IApplicationData },
             { (void **)&application_data2_vtbl, (IID *)&IID_IApplicationData2 },
             { (void **)&application_data_methods_vtbl, (IID *)&IID_IApplicationDataMethods },
-            { (void **)&application_data_getforapp_vtbl, (IID *)&IID_IApplicationDataGetForApplication },
-            { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
         };
         struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
@@ -1382,7 +1379,7 @@ IActivationFactory *application_data_factory = &application_data_statics.IActiva
 static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out )
 {
     HRESULT hr;
-    head_populate_appdata();
+    application_data_preseed();
     hr = application_data_qi_impl( iface, iid, out );
     qi_log_record( iid, hr, "appdata" );
     return hr;
@@ -1395,58 +1392,46 @@ static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface
     return hr;
 }
 
-/* Arm-3 probe 9 (s240): pre-populate the pinned heap-head block with the
- * ComInterfaceEntry pair-array the CoreCLR composite build copies (same
- * pairs, same order, as application_data_GetIids exposes). s239 leans
- * write-faults: the composite build faults on its first chunk access with
- * [0x30..0x48] zeroed and never reaches the ReleaseFromTrackerSource leg.
- * If the build finds live vtables at the head, the 33-cycle chunk fetch
- * should collapse. Runs on the statics factory QI, i.e. the first COM
- * traffic before the appdata QI cascade (s238 WRDUMP n=1..3). */
-static void head_populate( void )
+/* Arm-3 probe 9/11 (s240/s249): pre-populate the pinned heap-head composite
+ * blocks ahead of any QI cascade. CoreCLR builds one composite per provider
+ * object in heap-head order; each build consumes the pair array its provider
+ * GetIids returns and faults on the slot-7 fetch of a not-yet-written field.
+ * Seed every provider block up front, at 64-byte stride:
+ *   +0x00 factory:   {factory, IActivationFactory},{statics, IApplicationDataStatics},{tracker, IReferenceTracker}
+ *   +0x40 appdata:   the 5-pair application_data_GetIids array
+ *   +0x80 container: the 2-pair container_GetIids array
+ * (propertyset's block lands at +0xc0, seeded by wintypes heap_prewarm.)
+ * Runs at DllGetActivationFactory entry, ahead of the (NULL,NULL) count
+ * probe, so no composite build ever reads an unseeded block. */
+void application_data_preseed( void )
 {
     static BOOL done;
-    void **head = (void **)0x6fff00000000;
+    void **base = (void **)0x6fff00000000;
 
     if (done) return;
     done = TRUE;
-    /* s245 (MSUIXaml lane 9778373e): the fault fires during composite
-     * construction of the FACTORY object, and the factory QI is the first
-     * COM traffic (s238 WRDUMP n=1..3), so the head block is consumed by
-     * the factory composite: seed its 3-pair layout {factory,
-     * IActivationFactory},{statics,IApplicationDataStatics},
-     * {tracker,IReferenceTracker} (matching the factory GetIids count 3).
-     * The appdata 4-pair array is seeded at block+0x40 on the first
-     * appdata QI (head_populate_appdata). */
-    head[0] = (void **)&factory_vtbl;                           /* 0x00 composite slot0 */
-    head[1] = (void *)&IID_IActivationFactory;                  /* 0x08 */
-    head[2] = (void **)&application_data_statics_vtbl;          /* 0x10 */
-    head[3] = (void *)&IID_IApplicationDataStatics;             /* 0x18 */
-    head[4] = (void **)&appdata_tracker_vtbl;                   /* 0x20 */
-    head[5] = (void *)&IID_IReferenceTracker_g;                 /* 0x28 slot-7 refetch word */
-}
-
-static void head_populate_appdata( void )
-{
-    static BOOL done;
-    void **head = (void **)0x6fff00000040;
-
-    if (done) return;
-    done = TRUE;
-    head[0] = (void **)&application_data_vtbl;                  /* 0x40 composite slot0 */
-    head[1] = (void *)&IID_IApplicationData;                    /* 0x48 */
-    head[2] = (void **)&application_data_methods_vtbl;          /* 0x50 */
-    head[3] = (void *)&IID_IApplicationDataMethods;             /* 0x58 */
-    head[4] = (void **)&application_data_getforapp_vtbl;        /* 0x60 */
-    head[5] = (void *)&IID_IApplicationDataGetForApplication;   /* 0x68 */
-    head[6] = (void **)&appdata_tracker_vtbl;                   /* 0x70 */
-    head[7] = (void *)&IID_IReferenceTracker_g;                 /* 0x78 slot-7 refetch word */
+    base[0] = (void **)&factory_vtbl;
+    base[1] = (void *)&IID_IActivationFactory;
+    base[2] = (void **)&application_data_statics_vtbl;
+    base[3] = (void *)&IID_IApplicationDataStatics;
+    base[4] = (void **)&appdata_tracker_vtbl;
+    base[5] = (void *)&IID_IReferenceTracker_g;
+    base[8] = (void **)&application_data_vtbl;
+    base[9] = (void *)&IID_IApplicationData;
+    base[10] = (void **)&application_data2_vtbl;
+    base[11] = (void *)&IID_IApplicationData2;
+    base[12] = (void **)&application_data_methods_vtbl;
+    base[13] = (void *)&IID_IApplicationDataMethods;
+    base[24] = (void **)&container_vtbl;
+    base[25] = (void *)&IID_IApplicationDataContainer;
+    base[26] = (void **)&container_methods_vtbl;
+    base[27] = (void *)&IID_IApplicationDataContainerMethods;
 }
 
 static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
     HRESULT hr;
-    head_populate();
+    application_data_preseed();
     hr = factory_qi_impl( iface, iid, out );
     qi_log_record( iid, hr, "factory" );
     return hr;
