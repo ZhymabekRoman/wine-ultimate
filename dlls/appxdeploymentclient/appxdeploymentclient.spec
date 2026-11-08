@@ -1,5 +1,10 @@
 1 stub @
+@ stdcall AppxFreeString(ptr)
+@ stdcall AppxGetManifestPackageProperties(long long ptr)
+@ stdcall AppxGetPackageId(long ptr)
+@ stdcall AppxOpenAppxPackageContents(wstr ptr)
 @ stub GetApplicability
+@ stdcall AppxCloseAppxPackageContents(long)
 @ stub AppxCreateSharedLocalFolder
 @ stub AppxPackageRepositoryRecoverStagedPackages
 @ stub AppxPackageRepositoryRecoverUserInstalls
@@ -15,10 +20,10 @@
 @ stub GetPackageApplicabilityForUserLogon
 16 stub @
 @ stub AppxStagePackage
-@ stub AppxGetPackageInstalledLocation
+@ stdcall AppxGetPackageInstalledLocation(wstr ptr)
 @ stub AppxDestagePackage
 @ stub GetApplicability2
-@ stub AppxGetStagedPackageFullNameFromFamilyName
+@ stdcall AppxGetStagedPackageFullNameFromFamilyName(wstr ptr)
 @ stub AppxIsStagedPackageStoreSigned
 @ stub RegisterNotification
 @ stub UnregisterNotification

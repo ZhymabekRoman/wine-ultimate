@@ -4,4 +4,5 @@ IMPORTS = combase advapi32 kernel32 kernelbase
 SOURCES = \
 	classes.idl \
 	main.c \
+	manifest.c \
 	package.c
