@@ -2413,6 +2413,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
                 static unsigned int thawed_count;
                 MEMORY_BASIC_INFORMATION info;
                 SIZE_T old_size;
+                ULONG old_prot;
                 ULONG i, new_prot;
 
                 for (i = 0; i < thawed_count && i < ARRAYSIZE( thawed ); i++)
@@ -2429,7 +2430,7 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
                                                     PAGE_NOACCESS);
                         if (!(new_prot & PAGE_EXECUTE)) new_prot |= PAGE_EXECUTE_READWRITE;
                         if (!NtProtectVirtualMemory( GetCurrentProcess(), &info.BaseAddress,
-                                                     &info.RegionSize, new_prot, &old_size ))
+                                                     &info.RegionSize, new_prot, &old_prot ))
                         {
                             thawed[thawed_count++] = siginfo->si_addr;
                             TRACE_(seh)( "DEP-off thaw: %p -> %08x (%u pages)\n",
