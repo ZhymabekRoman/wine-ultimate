@@ -1,0 +1,21 @@
+/*
+ * Typelib hosting the IActivationFactory / IInspectable type information for
+ * the typelib-driven PSFactoryBuffer on the WinRT out-of-proc activation leg
+ * (oleaut32's standard proxy consults Interface\{iid}\Typelib for the
+ * marshaling layout; the seed in loader/wine.inf.in maps both interface IIDs
+ * to this typelib, 1.0, 0\win64 = combase.dll, matching Windows).
+ */
+
+#pragma makedep regtypelib
+
+#include "activation.idl"
+
+[
+    uuid(7186c910-f5ad-4e0a-b4bf-b6f661103f65),
+    version(1.0)
+]
+library combase
+{
+    interface IInspectable;
+    interface IActivationFactory;
+}

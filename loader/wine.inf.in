@@ -75,6 +75,7 @@ AddReg=\
     ThemeManager,\
     WinRTActivatableClasses,\
     AppModelActivation,\
+    WinRTProxies,\
     WineuwpActivation,
     ShellWinRTActivation,\
     ProbeClassesActivation,
@@ -630,6 +631,29 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationMod
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DesignMode,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DesignMode,"DllPath",2,"%12%\windows.applicationmodel.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DesignMode,"ThreadingModel",0x10001,2
+
+; The WinRT activation-factory proxy/stub pair.  IActivationFactory (and its base
+; IInspectable) marshal over the out-of-proc activation leg through the combase.dll
+; PSFactoryBuffer {00020424-0000-0000-C000-000000000046}, the same table Windows
+; ships (widl-generated NDR stubs, dlls/combase/combase_{activation,inspectable}.idl).
+; The server's standard marshaler creates the stub from it, the client's standard
+; unmarshaler the proxy; without the seed CoGetPSClsid reports REGDB_E_IIDNOTREG and
+; the marshaled factory comes back E_NOINTERFACE (roapi ServerClass).
+[WinRTProxies]
+HKLM,Software\Classes\Interface\{af86e2e0-b12d-4c6a-9c5a-d7aa65101e90}\ProxyStubClsid32,,2,"{00020424-0000-0000-C000-000000000046}"
+HKLM,Software\Classes\Interface\{af86e2e0-b12d-4c6a-9c5a-d7aa65101e90}\NumMethods,,2,"7"
+HKLM,Software\Classes\Interface\{00000035-0000-0000-C000-000000000046}\ProxyStubClsid32,,2,"{00020424-0000-0000-C000-000000000046}"
+HKLM,Software\Classes\Interface\{00000035-0000-0000-C000-000000000046}\NumMethods,,2,"7"
+HKLM,Software\Classes\Interface\{94ea2b94-e9cc-49e0-c0ff-ee64ca8f5b90}\ProxyStubClsid32,,2,"{00020424-0000-0000-C000-000000000046}"
+HKLM,Software\Classes\Interface\{94ea2b94-e9cc-49e0-c0ff-ee64ca8f5b90}\NumMethods,,2,"3"
+HKLM,Software\Classes\Interface\{00000035-0000-0000-C000-000000000046}\Typelib,,2,"{7186c910-f5ad-4e0a-b4bf-b6f661103f65}"
+HKLM,Software\Classes\Interface\{00000035-0000-0000-C000-000000000046}\Typelib,"Version",2,"1.0"
+HKLM,Software\Classes\Interface\{af86e2e0-b12d-4c6a-9c5a-d7aa65101e90}\Typelib,,2,"{7186c910-f5ad-4e0a-b4bf-b6f661103f65}"
+HKLM,Software\Classes\Interface\{af86e2e0-b12d-4c6a-9c5a-d7aa65101e90}\Typelib,"Version",2,"1.0"
+HKLM,Software\Classes\Typelib\{7186c910-f5ad-4e0a-b4bf-b6f661103f65}\1.0\0\win64,,2,"combase.dll"
+HKLM,Software\Classes\CLSID\{00020424-0000-0000-C000-000000000046},,2,"PSFactoryBuffer"
+HKLM,Software\Classes\CLSID\{00020424-0000-0000-C000-000000000046}\InprocServer32,,2,"combase.dll"
+HKLM,Software\Classes\CLSID\{00020424-0000-0000-C000-000000000046}\InprocServer32,"ThreadingModel",2,"Both"
 
 [Misc]
 HKLM,Software\Borland\Database Engine\Settings\SYSTEM\INIT,SHAREDMEMLOCATION,,9000

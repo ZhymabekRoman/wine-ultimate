@@ -7,6 +7,10 @@ DELAYIMPORTS = oleaut32
 SOURCES = \
 	apartment.c \
 	combase.c \
+	combase_activation.idl \
+	combase_agileobject.idl \
+	combase_inspectable.idl \
+	combase_tlb.idl \
 	dcom.idl \
 	errorinfo.c \
 	hglobalstream.c \
@@ -19,3 +23,6 @@ SOURCES = \
 	stubmanager.c \
 	stubserver.c \
 	usrmarshal.c
+
+dlldata_EXTRADEFS = -DENTRY_PREFIX=COMBASE_ -DPROXY_DELEGATION \
+	-DPROXY_CLSID_IS="{ 0x00020424, 0x0000, 0x0000, { 0xC0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } }"
