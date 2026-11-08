@@ -285,6 +285,10 @@ struct cache_statics_vtbl
     HRESULT (WINAPI *GetTrustLevel)( void *, int * );
     HRESULT (WINAPI *QueryState)( void *, HSTRING, void ** );
     HRESULT (WINAPI *CreateStateCacheManager)( void *, void ** );
+    HRESULT (WINAPI *Open)( void *, void *, void ** );
+    HRESULT (WINAPI *GetProperty_UInt32)( void *, ULONG, ULONG * );
+    HRESULT (WINAPI *SetProperty_UInt32)( void *, ULONG, ULONG );
+    HRESULT (WINAPI *SetProperty_UInt64)( void *, ULONG, ULONG64 );
 };
 
 struct cache_context_vtbl
@@ -352,6 +356,23 @@ static void test_cache_statecache( void )
     manager = NULL;
     hr = statics->CreateStateCacheManager( factory, &manager );
     ok( hr == S_OK && manager, "CreateStateCacheManager hr %#lx manager %p\n", hr, manager );
+
+    /* manager slots 8..11: the C plane's SRCacheManager surface */
+    {
+        struct cache_manager_vtbl *m = (void *)manager;
+        void *opened = NULL;
+        ULONG value = 0xffffffff;
+
+        hr = m->Open( manager, NULL, &opened );
+        ok( hr == S_OK && opened, "Open hr %#lx opened %p\n", hr, opened );
+        if (opened) m->Release( opened );
+        hr = m->GetProperty_UInt32( manager, 1, &value );
+        ok( hr == S_OK && value == 0, "GetProperty_UInt32 hr %#lx value %u\n", hr, value );
+        hr = m->SetProperty_UInt32( manager, 1, 2 );
+        ok( hr == S_OK, "SetProperty_UInt32 hr %#lx\n", hr );
+        hr = m->SetProperty_UInt64( manager, 1, 3 );
+        ok( hr == S_OK, "SetProperty_UInt64 hr %#lx\n", hr );
+    }
 
     /* seed a deployment record; the context answers its fields from it */
     if (RegCreateKeyExW( HKEY_CURRENT_USER, appmodel_key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))

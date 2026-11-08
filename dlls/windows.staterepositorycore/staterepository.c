@@ -675,6 +675,8 @@ HRESULT WINAPI SRCacheContext_GetField_Binary( void *context, ULONG field, void 
 HRESULT WINAPI SRCacheContext_GetField_Guid( void *context, ULONG field, GUID *value );
 void WINAPI SRCache_Free( void *ptr );
 
+HRESULT WINAPI SRCacheManager_Open( void *params, void **manager );
+
 static const WCHAR cache_manager_class[] = L"Windows.Internal.StateRepository.Cache.StateCacheManager";
 
 struct cache_context
@@ -909,6 +911,38 @@ static HRESULT WINAPI cache_manager_Create( struct cache_manager *impl, struct c
     return S_OK;
 }
 
+static HRESULT WINAPI cache_manager_Open( struct cache_manager *impl, void *params, void **manager )
+{
+    void *handle = NULL;
+    HRESULT hr;
+
+    TRACE( "impl %p, params %p, manager %p.\n", impl, params, manager );
+    if (!manager) return E_INVALIDARG;
+    if (FAILED( (hr = SRCacheManager_Open( params, &handle ) ) )) return hr;
+    /* the C plane's manager handle is stateless like the row; hand out a row */
+    return cache_manager_Create( impl, (struct cache_manager **)manager );
+}
+
+static HRESULT WINAPI cache_manager_GetProperty_UInt32( struct cache_manager *impl, ULONG property, ULONG *value )
+{
+    TRACE( "impl %p, property %u, value %p.\n", impl, property, value );
+    if (!value) return E_INVALIDARG;
+    *value = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI cache_manager_SetProperty_UInt32( struct cache_manager *impl, ULONG property, ULONG value )
+{
+    TRACE( "impl %p, property %u, value %u.\n", impl, property, value );
+    return S_OK;
+}
+
+static HRESULT WINAPI cache_manager_SetProperty_UInt64( struct cache_manager *impl, ULONG property, ULONG64 value )
+{
+    TRACE( "impl %p, property %u, value %s.\n", impl, property, wine_dbgstr_longlong( value ) );
+    return S_OK;
+}
+
 static const void *cache_manager_vtbl[] =
 {
     cache_manager_QueryInterface,
@@ -921,6 +955,11 @@ static const void *cache_manager_vtbl[] =
     /* IStateCacheManager: the one method; statics add the factory */
     cache_manager_QueryState,
     cache_manager_Create,
+    /* manager slots 8..11: the C plane's SRCacheManager surface, one-for-one */
+    cache_manager_Open,
+    cache_manager_GetProperty_UInt32,
+    cache_manager_SetProperty_UInt32,
+    cache_manager_SetProperty_UInt64,
 };
 
 static HRESULT cache_manager_create( BOOL row, void **out )
