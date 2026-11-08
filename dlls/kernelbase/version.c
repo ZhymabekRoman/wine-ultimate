@@ -1872,6 +1872,7 @@ LONG WINAPI PackageFamilyNameFromFullName(const WCHAR *full_name, UINT32 *length
 LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE *buffer, UINT32 *count )
 {
     struct pkg_entry entries[MAX_PKG_ENTRIES];
+    WCHAR full[512], fw[512];
     BYTE id_buf[512];
     PACKAGE_INFO *info;
     SIZE_T need = 0, str_off;
@@ -1880,7 +1881,10 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
 
     if (!buffer_size) return ERROR_INVALID_PARAMETER;
 
-    n = collect_packages( entries, NULL );
+    n = 0;
+    if (get_current_package_full_name( full, ARRAY_SIZE(full) )) pkg_entry_add( entries, &n, full, FALSE );
+    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ))
+        pkg_entry_add( entries, &n, fw, TRUE );
     if (!n)
     {
         FIXME( "(%#x %p %p %p): no package\n", flags, buffer_size, buffer, count );
