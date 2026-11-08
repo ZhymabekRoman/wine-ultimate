@@ -4535,3 +4535,30 @@ Navigate=0 ff=33 DIED. Trace census blind spot persists: `ole+trace,combase+trac
 data+trace,wintypes+trace,xaml+trace` print NOTHING from the app lane while
 `loaddll` (kernel32) prints fine - next cycle probe `-all,trace+ole,...`
 level-first syntax.
+
+## Session 2026-11-09(c) - MSUIXaml wave 4: factory IReferenceTracker face + 3-pair factory array; composite-build fault persists at ApplicationData.Current
+
+Probe gate settled the WINEDEBUG syntax: level-first (`trace+ole,trace+combase,
+trace+data,trace+wintypes`) - channel-first (`ole+trace`) prints nothing from
+the app lane. The level-first trace pins the shader sequence around the fault:
+DllGetActivationFactory -> factory QI {00000035-...0046} (IReferenceTracker,
+was answered with the factory iface = tracker slots aliased to IActivationFactory
+slots) -> QI 5612147b (IActivationFactory) -> QI 94ea2b94 (statics) ->
+statics get_Current -> shader QIs IUnknown x2 + 11d3b13a + 5c13e51c
+(GetForApp) on the Current object, ConnectFromTrackerSource, then
+application_data_GetIids (NULL,NULL) count probe -> fatal fires during
+composite construction (TryGetOrCreateObjectForComInstanceInternal slot fetch,
+rip coreclr+0x255429).
+
+Wine fixes this cycle (tree tips `a7b0d11e` + shader-agent `79cd746b` "Seed
+factory 3-pair layout in head block"): factory QI answers both tracker IIDs
+(00000035 canonical, 11d3b13a in-app) with the dedicated appdata_tracker face;
+factory GetIids pair array = {factory,IActivationFactory},{statics,
+IApplicationDataStatics},{appdata_tracker,IReferenceTracker}, count probe 2->3;
+wintypes head_populate seeds the factory head block. Deployed 9778373e ->
+gate xamlwave9 150 s: census unchanged (createdwins=0 xamlwin=0 MSUIXaml LOAD=0
+mrmcorer=0 bcp47mrm=0 Navigate=0 ff=33 DIED), fatal stays on the
+ApplicationData.Current decode - composite construction is the wall:
+shape is right (chain advanced 3 layers across waves), the remaining fault is
+in the shader's entry-consumption (writer side, wintypes head blocks), next
+cycle owner = shader agent per coordination.
