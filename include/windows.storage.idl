@@ -56,6 +56,7 @@ namespace Windows.Storage {
     interface IApplicationData2;
     interface IApplicationData3;
     interface IApplicationDataContainer;
+    interface IApplicationDataContainerMethods;
     interface IApplicationDataStatics;
     interface IApplicationDataStatics2;
     interface IKnownFoldersCameraRollStatics;
@@ -373,6 +374,23 @@ namespace Windows.Storage {
     {
         [propget] HRESULT Name([out, retval] HSTRING *value);
         [propget] HRESULT Locality([out, retval] Windows.Storage.ApplicationDataLocality *value);
+        [propget] HRESULT Values([out, retval] Windows.Foundation.Collections.IPropertySet **value);
+        [propget] HRESULT Containers([out, retval] Windows.Foundation.Collections.IMapView<HSTRING, Windows.Storage.ApplicationDataContainer *> **value);
+        HRESULT CreateContainer(
+            [in] HSTRING name,
+            [in] Windows.Storage.ApplicationDataCreateDisposition disposition,
+            [out, retval] Windows.Storage.ApplicationDataContainer **container
+        );
+        HRESULT DeleteContainer([in] HSTRING name);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Storage.ApplicationDataContainer),
+        uuid(11d3b13a-180e-4789-a8be-7712882893e6)
+    ]
+    interface IApplicationDataContainerMethods : IInspectable
+    {
         [propget] HRESULT Values([out, retval] Windows.Foundation.Collections.IPropertySet **value);
         [propget] HRESULT Containers([out, retval] Windows.Foundation.Collections.IMapView<HSTRING, Windows.Storage.ApplicationDataContainer *> **value);
         HRESULT CreateContainer(
@@ -942,6 +960,7 @@ namespace Windows.Storage {
     runtimeclass ApplicationDataContainer
     {
         [default] interface Windows.Storage.IApplicationDataContainer;
+        interface Windows.Storage.IApplicationDataContainerMethods;
         [contract(Windows.Foundation.UniversalApiContract, 12.0)] interface Windows.Foundation.IClosable;
     }
 

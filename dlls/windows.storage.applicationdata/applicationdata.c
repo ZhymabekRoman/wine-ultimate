@@ -264,6 +264,7 @@ static HRESULT WINAPI application_data_ClearAsync( IApplicationData *iface, Appl
 struct application_data_container
 {
     IApplicationDataContainer IApplicationDataContainer_iface;
+    IApplicationDataContainerMethods IApplicationDataContainerMethods_iface;
     LONG ref;
     ApplicationDataLocality locality;
     IPropertySet *values;
@@ -272,6 +273,11 @@ struct application_data_container
 static inline struct application_data_container *impl_from_IApplicationDataContainer( IApplicationDataContainer *iface )
 {
     return CONTAINING_RECORD( iface, struct application_data_container, IApplicationDataContainer_iface );
+}
+
+static inline struct application_data_container *impl_from_IApplicationDataContainerMethods( IApplicationDataContainerMethods *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_data_container, IApplicationDataContainerMethods_iface );
 }
 
 static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface, REFIID iid, void **out )
@@ -283,6 +289,12 @@ static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface
         IsEqualGUID( iid, &IID_IApplicationDataContainer ))
     {
         *out = &impl->IApplicationDataContainer_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
+    {
+        *out = &impl->IApplicationDataContainerMethods_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -315,6 +327,7 @@ static ULONG WINAPI container_Release( IApplicationDataContainer *iface )
  * (get_Values = 8) off the wrong ComVirtualMethodData, AVing the Values RCW
  * chain. */
 static const struct IApplicationDataContainerVtbl container_vtbl;
+static const struct IApplicationDataContainerMethodsVtbl container_methods_vtbl;
 static const struct __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataContainerVtbl empty_map_view_vtbl;
 
 static HRESULT WINAPI container_GetIids( IApplicationDataContainer *iface, ULONG *count, IID **iids )
@@ -322,6 +335,7 @@ static HRESULT WINAPI container_GetIids( IApplicationDataContainer *iface, ULONG
     struct com_interface_entry entries[] =
     {
         { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
+        { (void **)&container_methods_vtbl, (IID *)&IID_IApplicationDataContainerMethods },
     };
     TRACE( "iface %p, count %p, iids %p.\n", iface, count, iids );
 
@@ -494,11 +508,103 @@ static const struct IApplicationDataContainerVtbl container_vtbl =
     container_DeleteContainer,
 };
 
+/* CsWinRT projection face: the .NET ApplicationDataContainer wrapper dispatches
+ * Values/Containers through IApplicationDataContainerMethods (11d3b13a-...);
+ * without it the shader decodes get_Values off the property-face ComVirtualMethodData
+ * and the Values RCW chain AV-storms (s220-s223, 33M first-chance lines). */
+static HRESULT WINAPI container_methods_QueryInterface( IApplicationDataContainerMethods *iface, REFIID iid, void **out )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    return IApplicationDataContainer_QueryInterface( &impl->IApplicationDataContainer_iface, iid, out );
+}
+
+static ULONG WINAPI container_methods_AddRef( IApplicationDataContainerMethods *iface )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    return IApplicationDataContainer_AddRef( &impl->IApplicationDataContainer_iface );
+}
+
+static ULONG WINAPI container_methods_Release( IApplicationDataContainerMethods *iface )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    return IApplicationDataContainer_Release( &impl->IApplicationDataContainer_iface );
+}
+
+static HRESULT WINAPI container_methods_GetIids( IApplicationDataContainerMethods *iface, ULONG *count, IID **iids )
+{
+    struct com_interface_entry entries[] =
+    {
+        { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
+        { (void **)&container_methods_vtbl, (IID *)&IID_IApplicationDataContainerMethods },
+    };
+
+    if (count) *count = ARRAY_SIZE( entries );
+    if (iids)
+    {
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI container_methods_GetRuntimeClassName( IApplicationDataContainerMethods *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Storage.ApplicationDataContainer", 39, name );
+}
+
+static HRESULT WINAPI container_methods_GetTrustLevel( IApplicationDataContainerMethods *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI container_methods_get_Values( IApplicationDataContainerMethods *iface, IPropertySet **value )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    return container_get_Values( &impl->IApplicationDataContainer_iface, value );
+}
+
+static HRESULT WINAPI container_methods_get_Containers( IApplicationDataContainerMethods *iface, IMapView_HSTRING_ApplicationDataContainer **value )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    return container_get_Containers( &impl->IApplicationDataContainer_iface, value );
+}
+
+static HRESULT WINAPI container_methods_CreateContainer( IApplicationDataContainerMethods *iface, HSTRING name,
+                                                        ApplicationDataCreateDisposition disposition, IApplicationDataContainer **container )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    return container_CreateContainer( &impl->IApplicationDataContainer_iface, name, disposition, container );
+}
+
+static HRESULT WINAPI container_methods_DeleteContainer( IApplicationDataContainerMethods *iface, HSTRING name )
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    return container_DeleteContainer( &impl->IApplicationDataContainer_iface, name );
+}
+
+static const struct IApplicationDataContainerMethodsVtbl container_methods_vtbl =
+{
+    container_methods_QueryInterface,
+    container_methods_AddRef,
+    container_methods_Release,
+    container_methods_GetIids,
+    container_methods_GetRuntimeClassName,
+    container_methods_GetTrustLevel,
+    container_methods_get_Values,
+    container_methods_get_Containers,
+    container_methods_CreateContainer,
+    container_methods_DeleteContainer,
+};
+
 static HRESULT container_create( ApplicationDataLocality locality, IApplicationDataContainer **out )
 {
     struct application_data_container *impl;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IApplicationDataContainer_iface.lpVtbl = &container_vtbl;
+    impl->IApplicationDataContainerMethods_iface.lpVtbl = &container_methods_vtbl;
     impl->ref = 1;
     impl->locality = locality;
     *out = &impl->IApplicationDataContainer_iface;
