@@ -488,6 +488,15 @@ static HRESULT resources_propget( struct application *impl, REFIID iid, void **o
     return SUCCEEDED( hr ) ? S_OK : E_NOINTERFACE;
 }
 
+/* Class-activatable face (see definition below the Application vtable). */
+struct application_class_face
+{
+    IApplication IApplication_iface;
+    LONG ref;
+    struct application *impl;
+};
+static const struct IApplicationVtbl application_class_vtbl;
+
 static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID iid, void **out )
 {
     struct application *impl = impl_from_IApplication( iface );
@@ -497,11 +506,21 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
     if (impl->outer)
         return IInspectable_QueryInterface( impl->outer, iid, out );
 
+    if (IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
+    {
+        struct application_class_face *face = calloc( 1, sizeof(*face) );
+        if (!face) return E_OUTOFMEMORY;
+        face->IApplication_iface.lpVtbl = &application_class_vtbl;
+        face->ref = 1;
+        face->impl = impl;
+        *out = &face->IApplication_iface;
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IApplication ) ||
-        IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
+        IsEqualGUID( iid, &IID_IApplication ))
     {
         *out = &impl->IApplication_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -567,6 +586,77 @@ static const struct IApplicationVtbl application_vtbl =
     application_QueryInterface,
     application_AddRef,
     application_Release,
+    application_GetIids,
+    application_GetRuntimeClassName,
+    application_GetTrustLevel,
+};
+
+/* Class-activatable face {06499997-f7b4-45fe-b763-7577d1d3cb4a}
+ *
+ * The WinUI3 Mcg binder QIs the Application instance for the class IID and
+ * wraps the returned face in a C++/WinRT handle of its own: it owns a
+ * refcount for the class face that is accounted SEPARATELY from the
+ * instance's IApplication handle (the app layer adds its own AddRefs and the
+ * wrappers Release independently — 3 Releases against one Application in the
+ * app trace). Answering that QI with the shared IApplication face over-
+ * decrements impl->ref, the binder later walks the semi-freed Application,
+ * and the Redhawk GC card-writer faults (mrt100_app+0x522c3) on the stale
+ * handle. Mirror Windows' separate class-face object: hand out a distinct
+ * face with its own vtable cell and refcount forwarding IInspectable slots
+ * to the instance.
+ */
+struct application_class_face
+{
+    IApplication IApplication_iface;
+    LONG ref;
+    struct application *impl;
+};
+
+static inline struct application_class_face *impl_from_class_face( IApplication *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_class_face, IApplication_iface );
+}
+
+static HRESULT WINAPI class_face_QueryInterface( IApplication *iface, REFIID iid, void **out )
+{
+    struct application_class_face *face = impl_from_class_face( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IApplication ) ||
+        IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
+    {
+        *out = &face->IApplication_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    return IApplication_QueryInterface( &face->impl->IApplication_iface, iid, out );
+}
+
+static ULONG WINAPI class_face_AddRef( IApplication *iface )
+{
+    struct application_class_face *face = impl_from_class_face( iface );
+    return InterlockedIncrement( &face->ref );
+}
+
+static ULONG WINAPI class_face_Release( IApplication *iface )
+{
+    struct application_class_face *face = impl_from_class_face( iface );
+    ULONG ref = InterlockedDecrement( &face->ref );
+    TRACE( "iface %p decreasing class-face refcount to %lu.\n", iface, ref );
+    if (!ref) free( face );
+    return ref;
+}
+
+static const struct IApplicationVtbl application_class_vtbl =
+{
+    class_face_QueryInterface,
+    class_face_AddRef,
+    class_face_Release,
     application_GetIids,
     application_GetRuntimeClassName,
     application_GetTrustLevel,
