@@ -4517,3 +4517,21 @@ windows.ui.xaml on `xaml`, combase mostly on `ole` (only roapi on `combase`);
 `-all,err+seh,loaddll,winproc,ole+trace,combase+trace,xaml+trace,data+trace,wintypes+trace`
 (gate_xamlwave7.sh, xamlwave7 census pending: statics get_Current QI/pair-array shape for
 the IApplicationData the factory singleton returns).
+
+## Session 2026-11-09(b) - MSUIXaml wave 3: ApplicationData.Current singleton + IApplicationData2 pair entry; fork is the statics-face fetch itself
+
+Wine fix (absorbed into tree tip `3128fe1f` by the shared-tree push queue):
+`IApplicationDataStatics::get_Current` now returns a create-on-ask process
+singleton (was fresh `calloc` per call, so every Current hop handed the CoreCLR
+ComWrappers shader a new object identity) and the ApplicationData `GetIids`
+pair array gained `{application_data2_vtbl, IID_IApplicationData2}`. Deployed
+`328ac2bf` (install + prefix, md5-verified) and gated (xamlwave8, 150 s):
+the fatal moves one hop later - `Program.Main -> ApplicationData.get_Current ->
+IApplicationDataStaticsMethods.get_Current (x2 frame) -> ApplicationData.FromAbi`
+- i.e. the fetch now survives one decode and re-fetches: the statics face's own
+shader composite is the wall, not the ApplicationData object's pair array.
+Census xamlwave8: createdwins=0 xamlwin=0 MSUIXaml LOAD=0 mrmcorer=0 bcp47mrm=0
+Navigate=0 ff=33 DIED. Trace census blind spot persists: `ole+trace,combase+trace,
+data+trace,wintypes+trace,xaml+trace` print NOTHING from the app lane while
+`loaddll` (kernel32) prints fine - next cycle probe `-all,trace+ole,...`
+level-first syntax.
