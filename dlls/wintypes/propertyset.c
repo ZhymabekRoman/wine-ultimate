@@ -354,6 +354,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
      * adapters whose CreateObject walks past the entries it can satisfy. */
     struct propertyset *impl = impl_from_IPropertySet( iface );
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
+    TRACE( "SHADERPROBE: getiids impl %p count %u cache %p\n", impl, impl->iids_count, impl->iids_cache );
 
     if (iid_count) *iid_count = 4; /* filled on the (NULL, NULL) probe itself */
     {
