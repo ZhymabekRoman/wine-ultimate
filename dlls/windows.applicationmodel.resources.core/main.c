@@ -5244,11 +5244,38 @@ static void mrm_prearm_arena(void)
  * the zero-characteristics .rdata of this MinGW build, which Wine maps
  * writable, so the swap is a single store into the loaded image.
  */
+/* p214: second-pass barrier target.  Wer_SetWerDataBuffer answers the first
+ * publish with *out = NULL (its g_pWerDataBuffer is zero); the app stores that
+ * into the WER pin-handle, and the fifth publish's second pass reads it back
+ * as GCHandle -1: the card helper (mrt100_app+0x522c3) faults reading the card
+ * of -1 with no handler left and the process dies (fatal capture p212:
+ * PalSetWerDataBuffer+0x3b <- SharedLibrary+0x7e33b3).  Wrap the native
+ * responder: on the first call (native out == NULL) hand the app a stable
+ * PinnedObjectHandle cell tagged like a real pinned GCHandle (the pinbuffer
+ * shape: cell -> fake System.Byte[] over SharedLibrary's EEType) so the
+ * pass-2 barrier target is committed and never -1. */
+static UINT_PTR mrm_wer_fake[2];
+static UINT_PTR mrm_wer_cell[2];
+static void (WINAPI *mrm_wer_native)(void *, void *, void **);
+
+static HRESULT WINAPI mrm_wer_set_buffer( void *iface, void *buffer, void **out )
+{
+    if (mrm_wer_native)
+    {
+        HRESULT (WINAPI *fn)( void *, void *, void ** ) = (void *)mrm_wer_native;
+        fn( iface, buffer, out );             /* store buffer, out = old g */
+    }
+    if (out && !*out && mrm_wer_cell[0])
+        *out = (void *)((UINT_PTR)mrm_wer_cell | 1);  /* first publish: stable handle, never -1 */
+    return 0;                                 /* S_OK */
+}
+
 static void mrm_prearm_werfacade(void)
 {
     static HMODULE hmod;
     unsigned char *base;
     void **instance, **vtable;
+    HMODULE sl;
     DWORD old;
     int i;
 
@@ -5262,12 +5289,7 @@ static void mrm_prearm_werfacade(void)
     instance = (void **)(base + 0x4020);        /* g_ExtendedServicesInstance */
     vtable = instance ? (void **)*instance : NULL;
     if (!vtable) return;
-    if (vtable[3] == base + 0x1470) return;     /* already swapped (idempotent) */
-    if (vtable[3] != base + 0x1ea0 && vtable[3] != base + 0x2210)
-    {
-        TRACE("prearm welfacade: base %p vtable %p slot24 %p\n", base, vtable, vtable[3]);
-        return;
-    }
+    if (vtable[3] == (void *)mrm_wer_set_buffer) return;   /* already swapped (idempotent) */
     for (i = 4; i < 16; i++)                    /* locate the SetWerDataBuffer responder */
         if (vtable[i] == base + 0x1470) break;
     if (i == 16)
@@ -5276,10 +5298,18 @@ static void mrm_prearm_werfacade(void)
               base, vtable, vtable[3]);
         return;
     }
+    mrm_wer_native = (void *)vtable[i];
+    if (!mrm_wer_cell[0] && (sl = GetModuleHandleA("SharedLibrary.dll")))
+    {
+        mrm_wer_fake[0] = (UINT_PTR)((unsigned char *)sl + 0xe0f80);  /* EEType_System::Byte[] */
+        mrm_wer_fake[1] = 1;                    /* Length: GC-scan safe */
+        mrm_wer_cell[0] = (UINT_PTR)mrm_wer_fake;  /* PinnedObjectHandle::m_object */
+        mrm_wer_cell[1] = 0;
+    }
     VirtualProtect( &vtable[3], sizeof(*vtable), PAGE_READWRITE, &old );
-    vtable[3] = vtable[i];                      /* publish answers with the old buffer */
+    vtable[3] = (void *)mrm_wer_set_buffer;     /* native store + stable pass-2 handle */
     VirtualProtect( &vtable[3], sizeof(*vtable), old, &old );
-    TRACE("prearm extended face: vtable+24 -> SetWerDataBuffer slot %d\n", i);
+    TRACE("prearm extended face: vtable+24 -> wrapped SetWerDataBuffer slot %d\n", i);
 }
 
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
