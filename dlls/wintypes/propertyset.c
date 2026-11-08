@@ -72,6 +72,12 @@ struct propertyset_reg;
 static const GUID IID_IReferenceTracker_g =
 { 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
 
+/* WindowsAppSDK (1.x) extension face probed by the Windows App Runtime 1.6
+ * XAML wrapper alongside the classic tracker: same 10 slots plus
+ * GetIsWinRTObject / SetIsWinRTObject. Offered on the same singleton. */
+static const GUID IID_IReferenceTracker2_g =
+{ 0x689fab0b, 0xb359, 0x5a94, {0xbe, 0x9f, 0x24, 0xf6, 0x3e, 0x4b, 0x9a, 0x6d} };
+
 struct propertyset_reference_tracker;
 
 static HRESULT STDMETHODCALLTYPE tracker_QueryInterface( struct propertyset_reference_tracker *iface,
