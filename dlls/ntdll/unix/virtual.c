@@ -3749,8 +3749,14 @@ void virtual_init(void)
      * [0x1801000000 + 0x1801000000/128, 0x1807900000 + 0x1807900000/128)
      * = [0x1804002000, 0x180A90F200), so one reservation
      * [0x1801000000, +0x9A00000) covers arena + cards (up to 0x180AA00000). */
-    void *p;
     anon_mmap_fixed( (void *)0xffffffffffff0000ULL, 0x10000, PROT_READ | PROT_WRITE, 0 );
+    /* p215: card mirror for host-image objects.  The wrapped WER responder
+     * (p214) hands the app a pinned handle over an object inside the
+     * SharedLibrary image (~0x6ffffc9xxxxx); the write-barrier card formula
+     * obj + obj/128 lands around 0x70DFF_exxxxx, a hole the pass-2 barrier
+     * faults on.  A 16GB window covers every image-base the loader picks
+     * (cards for [B, B+32MB) land in [B+B/128, B+B/128+256KB)). */
+    anon_mmap_fixed( (void *)0x700d00000000ULL, 0x400000000, PROT_READ | PROT_WRITE, 0 );
     if ((p = anon_mmap_fixed( (void *)0x1801000000ULL, 0x9A00000, PROT_READ | PROT_WRITE, 0 )))
     {
         /* Zero pages make the MSZip decompress of the WER data buffer emit an

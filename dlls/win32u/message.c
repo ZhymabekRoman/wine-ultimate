@@ -459,6 +459,7 @@ static BOOL init_window_call_params( struct win_proc_params *params, HWND hwnd, 
     params->mapping = mapping;
     params->dpi_context = get_window_dpi_awareness_context( params->hwnd );
     get_winproc_params( params, !is_dialog );
+    fprintf( stderr, "WINCALL msg=%x hwnd=%p winproc=%p func=%p\n", msg, hwnd, win->winproc, params->func );
     return TRUE;
 }
 
@@ -4177,6 +4178,7 @@ LRESULT WINAPI NtUserDispatchMessage( const MSG *msg )
     if (msg->lParam && msg->message == WM_TIMER)
     {
         params.func = (WNDPROC)msg->lParam;
+        fprintf( stderr, "DISPATCH-timer msg=%x hwnd=%p func=%p\n", msg->message, msg->hwnd, params.func );
         if (!init_win_proc_params( &params, msg->hwnd, msg->message,
                                    msg->wParam, NtGetTickCount(), FALSE ))
             return 0;
@@ -4202,7 +4204,10 @@ LRESULT WINAPI NtUserDispatchMessage( const MSG *msg )
 
     if (init_window_call_params( &params, msg->hwnd, msg->message, msg->wParam, msg->lParam,
                                  FALSE, WMCHAR_MAP_DISPATCHMESSAGE ))
+    {
+        fprintf( stderr, "DISPATCH msg=%x hwnd=%p func=%p\n", msg->message, msg->hwnd, params.func );
         retval = dispatch_win_proc_params( &params, sizeof(params), NULL, NULL );
+    }
     else if (!is_window( msg->hwnd )) RtlSetLastWin32Error( ERROR_INVALID_WINDOW_HANDLE );
     else RtlSetLastWin32Error( ERROR_MESSAGE_SYNC_ONLY );
 

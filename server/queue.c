@@ -748,6 +748,18 @@ static inline int get_queue_msgs( struct msg_queue *queue )
     return queue_shm->wake_bits || queue_shm->changed_bits || queue_shm->internal_bits;
 }
 
+/* like get_queue_msgs() but matching MsgWaitForMultipleObjects semantics:
+ * sent messages (QS_SENDMESSAGE) are dispatched by the message pump itself,
+ * so they must not keep a MsgWait wake event signaled; doing so starves
+ * timer/paint/posted wakes behind a perpetual wake that PeekMessage(0,0)
+ * can never drain */
+static inline int get_queue_wait_msgs( struct msg_queue *queue )
+{
+    const queue_shm_t *queue_shm = queue->shared;
+    return (queue_shm->wake_bits & (QS_ALLINPUT & ~QS_SENDMESSAGE)) ||
+           queue_shm->changed_bits || queue_shm->internal_bits;
+}
+
 /* set some queue bits */
 static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
 {
@@ -1576,6 +1588,7 @@ static void set_next_timer( struct msg_queue *queue )
     if ((ptr = list_head( &queue->pending_timers )))
     {
         struct timer *timer = LIST_ENTRY( ptr, struct timer, entry );
+        fprintf( stderr, "SNT arm when=%lld now=%lld\n", (long long)timer->when, (long long)monotonic_time );
         queue->timeout = add_timeout_user( abstime_to_timeout(timer->when), timer_callback, queue );
     }
     /* set/clear QS_TIMER bit */
@@ -1606,6 +1619,7 @@ static void timer_callback( void *private )
     struct msg_queue *queue = private;
     struct list *ptr;
 
+    fprintf( stderr, "TCB fire now=%lld\n", (long long)monotonic_time );
     queue->timeout = NULL;
     /* move on to the next timer */
     ptr = list_head( &queue->pending_timers );
@@ -1651,6 +1665,8 @@ static struct timer *find_expired_timer( struct msg_queue *queue, user_handle_t 
 {
     struct timer *timer;
 
+    fprintf( stderr, "FET probe win=%p first=%x last=%x exp=%d\n", (void *)(ULONG_PTR)win,
+             get_first, get_last, !list_empty( &queue->expired_timers ) );
     LIST_FOR_EACH_ENTRY( timer, &queue->expired_timers, struct timer, entry )
     {
         if (win && timer->win != win) continue;
@@ -3158,7 +3174,7 @@ DECL_HANDLER(set_queue_mask)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_msgs( queue ))
+    if (!get_queue_wait_msgs( queue ))
     {
         const char *tag = "setmask->rst";
         QSTATE;
@@ -3342,6 +3358,7 @@ DECL_HANDLER(get_message)
     struct list *ptr;
     struct msg_queue *queue = get_current_queue();
     user_handle_t get_win = get_user_full_handle( req->get_win );
+    fprintf( stderr, "GMQ enter filter=%x\n", (unsigned int)(req->flags >> 16) );
     queue_shm_t *queue_shm;
     unsigned int filter;
 
@@ -3447,6 +3464,9 @@ DECL_HANDLER(get_message)
         reply->wparam = timer->id;
         reply->lparam = timer->lparam;
         get_message_defaults( queue, &reply->x, &reply->y, &reply->time );
+        if (1) QSYNC( "getmsg->timer win %p msg %x id %llx lp %llx",
+                                  (void *)(ULONG_PTR)reply->win, reply->msg,
+                                  (unsigned long long)reply->wparam, (unsigned long long)reply->lparam );
         return;
     }
 
@@ -3541,6 +3561,7 @@ DECL_HANDLER(get_message_reply)
 /* set a window timer */
 DECL_HANDLER(set_win_timer)
 {
+    fprintf( stderr, "STQ enter\n" );
     struct timer *timer;
     struct msg_queue *queue;
     struct thread *thread = NULL;
@@ -3600,6 +3621,9 @@ DECL_HANDLER(set_win_timer)
         timer->id     = id;
         timer->lparam = req->lparam;
         reply->id     = id;
+        if (1) QSYNC( "set_timer win %p msg %x id %llx lp %llx",
+                                  (void *)(ULONG_PTR)timer->win, timer->msg,
+                                  (unsigned long long)timer->id, (unsigned long long)timer->lparam );
     }
     if (thread) release_object( thread );
 }
