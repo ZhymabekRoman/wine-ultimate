@@ -1754,6 +1754,15 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
     {
         ERR_(seh)("Unhandled exception code %x flags %x addr %p\n",
                   rec->ExceptionCode, rec->ExceptionFlags, rec->ExceptionAddress );
+        if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION && rec->NumberParameters >= 2 && context)
+        {
+            ULONG64 *fsp = (ULONG64 *)context->Rsp;
+            int j;
+            ERR_(seh)("  fatal_av fa=%p rip=%p\n",
+                      (void *)rec->ExceptionInformation[1], (void *)context->Rip);
+            for (j = 0; j < 24; j++)
+                ERR_(seh)("  fatal_stack[%02d] (%p) = %016llx\n", j, fsp + j, fsp[j]);
+        }
         if ((rec->ExceptionCode == 0xe0464645 || rec->ExceptionCode == 0xc0000602) && context)
         {
             ULONG64 *sp = (ULONG64 *)context->Rsp;

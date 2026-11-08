@@ -3659,6 +3659,9 @@ void virtual_init(void)
     size_t size;
     int i;
     pthread_mutexattr_t attr;
+#ifdef _WIN64
+    void *p;
+#endif
 
     pthread_mutexattr_init( &attr );
     pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
@@ -3738,8 +3741,31 @@ void virtual_init(void)
      * With both pre-committed the WER publish costs ~0 AVs and the culture
      * walk reaches the Map plane.  Keep ntdll/unix/thread.c NtRaiseException
      * commits as backstop for addresses outside these ranges. */
+    /* Arena [0x1801000000, +0x6800000) = SharedLibrary TypeManager space, and
+     * the interleaved Redhawk card mirror: the card helper computes
+     * card = (obj & ~0xFFFF) + ((obj - 0x1000) >> 7), i.e. each 64K heap region
+     * carries its 512-byte card array at region_base + region_base/128.  For
+     * heap objects up to 0x1807900000 the card span is
+     * [0x1801000000 + 0x1801000000/128, 0x1807900000 + 0x1807900000/128)
+     * = [0x1804002000, 0x180A90F200), so one reservation
+     * [0x1801000000, +0x9A00000) covers arena + cards (up to 0x180AA00000). */
+    void *p;
     anon_mmap_fixed( (void *)0xffffffffffff0000ULL, 0x10000, PROT_READ | PROT_WRITE, 0 );
-    anon_mmap_fixed( (void *)0x1801000000ULL, 0x6900000, PROT_READ | PROT_WRITE, 0 );
+    if ((p = anon_mmap_fixed( (void *)0x1801000000ULL, 0x9A00000, PROT_READ | PROT_WRITE, 0 )))
+    {
+        /* Zero pages make the MSZip decompress of the WER data buffer emit an
+         * empty/garbage string; the app catches, re-raises on the second pass
+         * and dies at the card helper (measured p210-p212).  Frozen refs land
+         * at region+...0001 offsets, so lay a complete zlib "en-US" stream
+         * (78 9c 0b c9 4c 2f 4d 55 28 c8 49 2d 06 00) at +1 mod 16: every
+         * frozen next_in reads a valid header, inflate retires Z_STREAM_END
+         * with "en-US", the WER publish completes on the first pass. */
+        static const char pattern[] = { 0x78, (char)0x9c, 0x0b, (char)0xc9, 0x4c, 0x2f, 0x4d, 0x55,
+                                        0x28, (char)0xc8, 0x49, 0x2d, 0x06, 0x00 };
+        size_t i, size = 0x9A00000;
+        for (i = 1; i + sizeof(pattern) <= size; i += 16)
+            memcpy( (char *)p + i, pattern, sizeof(pattern) );
+    }
 #endif
 }
 
