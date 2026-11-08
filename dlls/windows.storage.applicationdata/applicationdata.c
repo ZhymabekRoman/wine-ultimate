@@ -385,6 +385,8 @@ struct application_data
     IApplicationDataMethods IApplicationDataMethods_iface;
     struct IApplicationDataGetForApplication IApplicationDataGetForApplication_iface;
     LONG ref;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
+    ULONG iids_count;
 };
 
 static inline struct application_data *impl_from_IApplicationData( IApplicationData *iface )
@@ -479,25 +481,32 @@ static HRESULT WINAPI application_data_GetIids( IApplicationData *iface, ULONG *
      * CoreCLR ComWrappers shader decodes get_LocalSettings off the property
      * face ComVirtualMethodData and the ApplicationDataContainer RCW chain
      * from LocalSettings faults (0x80131506 failfast). */
-    struct com_interface_entry entries[] =
-    {
-        { (void **)&application_data_vtbl, (IID *)&IID_IApplicationData },
-        { (void **)&application_data2_vtbl, (IID *)&IID_IApplicationData2 },
-        { (void **)&application_data_methods_vtbl, (IID *)&IID_IApplicationDataMethods },
-        { (void **)&application_data_getforapp_vtbl, (IID *)&IID_IApplicationDataGetForApplication },
-        { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
-    };
+    struct application_data *impl = impl_from_IApplicationData( iface );
 
+    /* xamlwave9 contract: CoreCLR probes the count with (NULL, NULL), frees
+     * that array, then consumes the array returned by the following call -
+     * so every call must hand back ONE stable block (factory iids_cache /
+     * propertyset precedent), allocated on the count probe. */
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = ARRAY_SIZE( entries );
-    if (iids)
+    if (!impl->iids_cache)
     {
+        static const struct com_interface_entry entries[] =
+        {
+            { (void **)&application_data_vtbl, (IID *)&IID_IApplicationData },
+            { (void **)&application_data2_vtbl, (IID *)&IID_IApplicationData2 },
+            { (void **)&application_data_methods_vtbl, (IID *)&IID_IApplicationDataMethods },
+            { (void **)&application_data_getforapp_vtbl, (IID *)&IID_IApplicationDataGetForApplication },
+            { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
+        };
         struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
         memcpy( array, entries, sizeof( entries ) );
-        *iids = (IID *)array;
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE( entries );
     }
+    if (iid_count) *iid_count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 
@@ -543,6 +552,8 @@ struct application_data_container
     IApplicationDataContainerMethods IApplicationDataContainerMethods_iface;
     LONG ref;
     ApplicationDataLocality locality;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
+    ULONG iids_count;
     IPropertySet *values;
 };
 
@@ -608,21 +619,26 @@ static const struct __FIMapView_2_HSTRING_Windows__CStorage__CApplicationDataCon
 
 static HRESULT WINAPI container_GetIids( IApplicationDataContainer *iface, ULONG *count, IID **iids )
 {
-    struct com_interface_entry entries[] =
-    {
-        { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
-        { (void **)&container_methods_vtbl, (IID *)&IID_IApplicationDataContainerMethods },
-    };
+    struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
+
+    /* Stable per-object pair block, see application_data_GetIids (xamlwave9). */
     TRACE( "iface %p, count %p, iids %p.\n", iface, count, iids );
 
-    if (count) *count = ARRAY_SIZE( entries );
-    if (iids)
+    if (!impl->iids_cache)
     {
+        static const struct com_interface_entry entries[] =
+        {
+            { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
+            { (void **)&container_methods_vtbl, (IID *)&IID_IApplicationDataContainerMethods },
+        };
         struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
         memcpy( array, entries, sizeof( entries ) );
-        *iids = (IID *)array;
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE( entries );
     }
+    if (count) *count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 static HRESULT WINAPI container_GetRuntimeClassName( IApplicationDataContainer *iface, HSTRING *name )
@@ -821,21 +837,8 @@ static ULONG WINAPI container_methods_Release( IApplicationDataContainerMethods 
 
 static HRESULT WINAPI container_methods_GetIids( IApplicationDataContainerMethods *iface, ULONG *count, IID **iids )
 {
-    struct com_interface_entry entries[] =
-    {
-        { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
-        { (void **)&container_methods_vtbl, (IID *)&IID_IApplicationDataContainerMethods },
-    };
-
-    if (count) *count = ARRAY_SIZE( entries );
-    if (iids)
-    {
-        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
-        if (!array) return E_OUTOFMEMORY;
-        memcpy( array, entries, sizeof( entries ) );
-        *iids = (IID *)array;
-    }
-    return S_OK;
+    struct application_data_container *impl = impl_from_IApplicationDataContainerMethods( iface );
+    return IApplicationDataContainer_GetIids( &impl->IApplicationDataContainer_iface, count, iids );
 }
 
 static HRESULT WINAPI container_methods_GetRuntimeClassName( IApplicationDataContainerMethods *iface, HSTRING *name )
@@ -1270,7 +1273,8 @@ static ULONG WINAPI application_data2_Release( IApplicationData2 *iface )
 }
 static HRESULT WINAPI application_data2_GetIids( IApplicationData2 *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "stub\n" ); return E_NOTIMPL;
+    struct application_data *impl = impl_from_IApplicationData2( iface );
+    return application_data_GetIids( &impl->IApplicationData_iface, iid_count, iids );
 }
 static HRESULT WINAPI application_data2_GetRuntimeClassName( IApplicationData2 *iface, HSTRING *class_name )
 {
