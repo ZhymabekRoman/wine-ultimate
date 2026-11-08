@@ -2050,7 +2050,33 @@ static void heap_prewarm( void )
      * ComWrappers allocating the RCW vtable chunks in this private heap; a
      * 4x reserve lets the whole chunk family land inside the pre-mapped
      * region instead of crossing into 1MB-grow blocks. */
+    /* Arm-3 probe 10 (s241): drop the s228 HeapCreate reserve; cover the
+     * whole observed chunk family with one fixed window instead: 128 MB at
+     * 0x6ffffc000000 spans [0x6ffffc000000, 0x700004000000), containing the
+     * heap base 0x6ffffdc00000 with growth slack and the fault-spread top
+     * 0x6ffffe0a948f (sized per lane constraint: 64 MB topped out ~0xa948f
+     * short). Coreclr's heap block lands inside fully-mapped pages; if the
+     * census shows the base moved outside, relocate the window to cover it.
+     *
+     * s242: the s241 census (BORN 95->never when HeapCreate was dropped)
+     * shows the reserve contributes layout beyond mapping, so run both:
+     * the 32 MB HeapCreate reserve AND the 128 MB window. */
     HeapCreate( 0, 0x100000, 0x2000000 );
+    /* s243: the s241/s242 census falsifies coverage-as-driver - the 128 MB
+     * window at 0x6ffffc000000 regresses BORN 95->never in both
+     * configurations, while the 32 MB window at 0x6ffffd000000 (s240) is
+     * the favorable placement. Restore it as the active second window;
+     * the 128 MB block stays as the census-tested alternative. */
+    if ((p = VirtualAlloc( (char *)0x6ffffd000000, 0x2000000,
+                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE )))
+    {
+        for (j = 0; j < 0x2000000; j += 0x1000) p[j] = 1;
+    }
+    if ((p = VirtualAlloc( (char *)0x6ffffc000000, 0x8000000,
+                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE )))
+    {
+        for (j = 0; j < 0x8000000; j += 0x1000) p[j] = 1;
+    }
 
     /* Arm-3 probe 3 (s230): the three face arms (s224 projection face, s228
      * reserve grow, s229 IReferenceTracker face) leave the 0x80131506
@@ -2067,12 +2093,9 @@ static void heap_prewarm( void )
         for (j = 0; j < 0x2000000; j += 0x1000) p[j] = 1;
     }
 
-    /* Arm-3 probe 3b (s231): the s230 fault family sits ~4 GB above the
-     * base window (private-heap block r10 = 0x6ffffddd0000, wrapper deref
-     * fault 0x6ffffdf5948f, vtable-chunk rip 0x6ffffe025429). Pin a second
-     * fixed window sized from that observed spread: 32 MB at
-     * 0x6ffffd000000 covers [0x6ffffd000000, 0x6fffff000000). Keep the
-     * HeapCreate for the s228 liveness. */
+    /* Arm-3 probe 3b (s231, subsumed by probe 10): the 32 MB window at
+     * 0x6ffffd000000 sits inside the 128 MB probe-10 window now; kept for
+     * the census record - a failed fixed overlap is a silent no-op. */
     if ((p = VirtualAlloc( (char *)0x6ffffd000000, 0x2000000,
                            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE )))
     {
