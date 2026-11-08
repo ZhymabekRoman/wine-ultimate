@@ -292,6 +292,7 @@ namespace Windows.UI.Xaml {
     interface IApplicationStatics : IInspectable
     {
         HRESULT Start([in] Windows.UI.Xaml.ApplicationInitializationCallback *callback);
+        [propget] HRESULT Current([out, retval] Windows.UI.Xaml.Application **current);
     }
 
     [
