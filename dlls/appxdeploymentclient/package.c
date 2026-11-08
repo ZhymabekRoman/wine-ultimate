@@ -568,8 +568,12 @@ static HRESULT WINAPI package_manager_GetTrustLevel( IPackageManager *iface, Tru
 static HRESULT WINAPI package_manager_AddPackageAsync( IPackageManager *iface, IUriRuntimeClass *uri,
     IIterable_Uri *dependencies, DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    TRACE( "iface %p, uri %p, dependencies %p, options %d, operation %p.\n", iface, uri, dependencies, options, operation );
+
+    /* the staged package deploys like RegisterPackageAsync: the registration
+     * is Packages\<directory name> in the AppModel key, the operation is born
+     * completed with a DeploymentResult. */
+    return package_manager_RegisterPackageAsync( iface, uri, dependencies, options, operation );
 }
 
 static HRESULT WINAPI package_manager_UpdatePackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
@@ -582,8 +586,21 @@ static HRESULT WINAPI package_manager_UpdatePackageAsync( IPackageManager *iface
 static HRESULT WINAPI package_manager_RemovePackageAsync( IPackageManager *iface, HSTRING name,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring(name), operation );
-    return E_NOTIMPL;
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\";
+    WCHAR key[600];
+    const WCHAR *full;
+
+    TRACE( "iface %p, name %s, operation %p.\n", iface, debugstr_hstring(name), operation );
+
+    /* undeploy = drop the registration written by Register/AddPackageAsync;
+     * a completed DeploymentResult answers from birth. */
+    if (!name || !operation) return E_INVALIDARG;
+    *operation = NULL;
+    if (!(full = WindowsGetStringRawBuffer( name, NULL ))) return E_INVALIDARG;
+    lstrcpyW( key, appmodel_path );
+    lstrcatW( key, full );
+    RegDeleteTreeW( HKEY_CURRENT_USER, key );
+    return register_async_op_create( operation );
 }
 
 static HRESULT WINAPI package_manager_StagePackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
