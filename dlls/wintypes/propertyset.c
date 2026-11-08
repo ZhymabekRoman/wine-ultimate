@@ -253,7 +253,18 @@ static HRESULT STDMETHODCALLTYPE tracker_PegFromTrackerSource( struct propertyse
 
 static const struct propertyset_reference_tracker_vtbl propertyset_tracker_vtbl =
 {
-    tracker_QueryInterface,
+    /* Producer-side ComVirtualMethodData layout: slot 0 is the packed header
+     * word (self | ComVirtualMethodDataTag=4), not a QI function pointer.
+     * The shader copies the entry vtable words into the composite; the
+     * consumer (TrackerObjectManager::AfterWrapperCreated) reads composite
+     * slot 0 as the header, masks the tag and dereferences chunk+0x18/+0x38
+     * for slots 3/7 (ConnectFromTrackerSource / AddRefFromTrackerSource).
+     * Pointing the header at the vtable itself makes that walk land on this
+     * image-resident chunk's direct stub pointers, so the shader heap-chunk
+     * refetch (base 0x6fff00000000, unmapped first page) is never taken.
+     * CoreCLR invokes QI through the header's interface data, not by
+     * calling slot 0, so the QI path is unchanged. */
+    (void *)((uintptr_t)&propertyset_tracker_vtbl + 4),
     tracker_AddRef,
     tracker_Release,
     tracker_ConnectFromTrackerSource,
