@@ -2052,6 +2052,21 @@ static void heap_prewarm( void )
      * region instead of crossing into 1MB-grow blocks. */
     HeapCreate( 0, 0x100000, 0x2000000 );
 
+    /* Arm-3 probe 3 (s230): the three face arms (s224 projection face, s228
+     * reserve grow, s229 IReferenceTracker face) leave the 0x80131506
+     * TryGetOrCreateObjectForComInstanceInternal fatal invariant, so the
+     * composite-vtable chunk fetch at the observed shader heap base
+     * 0x6fff00000000 is independent of which face QI answers. Pin the region
+     * base itself: fixed-address 32 MB reserve+commit at the observed base
+     * with one qword touched per page, so the head page (the
+     * [header+0x38]/0x6fff0000003b load site) is committed before coreclr
+     * and the XAML shader walk it. */
+    if ((p = VirtualAlloc( (char *)0x6fff00000000, 0x2000000,
+                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE )))
+    {
+        for (j = 0; j < 0x2000000; j += 0x1000) p[j] = 1;
+    }
+
     /* Load-order arm (p215): pull the XAML runtime chain in ahead of the
      * first ApplicationDataContainer.get_Values RCW cycle. With
      * Microsoft.UI.Xaml.dll resident before CoreCLR wraps the values
