@@ -989,8 +989,17 @@ static void *allocate_region( struct heap *heap, ULONG flags, SIZE_T *region_siz
      * vtable slot 0 is the chunk base tagged with the component count, and
      * TrackerObjectManager::AfterWrapperCreated loads chunk+0x38) fault on
      * every access while the head sits in the reserved-but-uncommitted
-     * window; observed as the 0x6fff0000003b first-chance AV storm. */
-    *commit_size = min( max( *commit_size, HEAP_INITIAL_GROW_SIZE ), *region_size );
+     * window; observed as the 0x6fff0000003b first-chance AV storm.
+     *
+     * s220: commit the full region, not just the grow head. Gate census
+     * with head-commit: ff=35 with av_commit st=0 at fa=0x6fff0000003c —
+     * page 0 re-commits every cycle, so the shader heap region
+     * (0x6fff00000000, 64K, CoreCLR ComVirtualMethodData heap) is
+     * decommitted/freed and re-reserved per composite-wrapper cycle and
+     * the header walk re-faults. Full-region commit makes the region
+     * durable across the 35 fail-fast cycles: the consumer's chunk
+     * slots 3/7 (+0x18/+0x38) stay mapped, breaking the refetch loop. */
+    *commit_size = *region_size;
 
     /* allocate the memory block */
     if ((status = NtAllocateVirtualMemory( NtCurrentProcess(), &addr, 0, region_size, MEM_RESERVE,
