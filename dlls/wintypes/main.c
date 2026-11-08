@@ -20,6 +20,7 @@
 
 #include "initguid.h"
 #include "private.h"
+#include "winternl.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wintypes);
 
@@ -2006,12 +2007,40 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+/* The Microsoft.UI.Xaml shader creates its heap (first block landing at the
+ * head of the shared-heap region, observed base 0x6fff00000000) during XAML
+ * startup, i.e. after this DLL is already loaded. CoreCLR's ComWrappers
+ * tracker walks the shader composite wrapper vtable that the shader builds in
+ * the head block, and every tracker cycle faults on the first-chance
+ * 0x6fff0000003b load. Pre-grow the process heap head with a few committed,
+ * touched blocks so the shader's first allocation lands in a fully committed
+ * region behind them. Activation-factory calls happen on the startup thread
+ * before XAML boots, so the one-shot guard needs no locking. */
+static void *heap_prewarm_blocks[8];
+
+static void heap_prewarm( void )
+{
+    static BOOL done;
+    unsigned int i;
+
+    if (done) return;
+    done = TRUE;
+    for (i = 0; i < ARRAYSIZE(heap_prewarm_blocks); i++)
+    {
+        if (!(heap_prewarm_blocks[i] = RtlAllocateHeap( GetProcessHeap(), 0, 0x20000 )))
+            continue;
+        ((char *)heap_prewarm_blocks[i])[0] = 1;
+        ((char *)heap_prewarm_blocks[i])[0x1fff0] = 2;
+    }
+}
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer(classid, NULL);
 
     TRACE("classid %s, factory %p.\n", debugstr_hstring(classid), factory);
 
+    heap_prewarm();
     *factory = NULL;
 
     if (!wcscmp(buffer, L"Windows.Foundation.Metadata.ApiInformation"))

@@ -55,6 +55,64 @@ static const GUID IID_IMapView_StringObject_IInspectable =
 struct com_interface_entry;
 struct propertyset_reg;
 
+/* Classic XAML IReferenceTracker (windows.ui.xaml.hosting.referencetracker.h).
+ * CoreCLR's ComWrappers builds a composite wrapper for each RCW it creates and
+ * the managed TrackerObjectManager::AfterWrapperCreated walks the composite's
+ * slot 0 (packed ComVirtualMethodData header, tag 3), fetching the header slot
+ * +0x38 = slot 7 AddRefFromTrackerSource from the shader's heap chunk. That
+ * chunk (first block of the runtime heap region, observed base
+ * 0x6fff00000000) lands on an unmapped first page under wine, so every
+ * get_Values RCW creation re-faults 0x6fff0000003b (6.7M first-chance AVs,
+ * 35 fatal cycles per 150s gate). Hand CoreCLR a real tracker face: its QI
+ * (IID_IReferenceTracker) then lands on our image-resident vtable and the
+ * heap-chunk composite is never dereferenced. Slot order per the header:
+ * 0-2 IUnknown, 3 Connect, 4 Disconnect, 5 FindTrackerTargets,
+ * 6 GetReferenceTrackerManager, 7 AddRefFromTrackerSource,
+ * 8 ReleaseFromTrackerSource, 9 PegFromTrackerSource. */
+static const GUID IID_IReferenceTracker_g =
+{ 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
+
+struct propertyset_reference_tracker;
+
+static HRESULT STDMETHODCALLTYPE tracker_QueryInterface( struct propertyset_reference_tracker *iface,
+                                                         REFIID iid, void **out );
+static ULONG STDMETHODCALLTYPE tracker_AddRef( struct propertyset_reference_tracker *iface );
+static ULONG STDMETHODCALLTYPE tracker_Release( struct propertyset_reference_tracker *iface );
+static HRESULT STDMETHODCALLTYPE tracker_ConnectFromTrackerSource( struct propertyset_reference_tracker *iface );
+static HRESULT STDMETHODCALLTYPE tracker_DisconnectFromTrackerSource( struct propertyset_reference_tracker *iface,
+                                                                      int disconnect_type );
+static HRESULT STDMETHODCALLTYPE tracker_FindTrackerTargets( struct propertyset_reference_tracker *iface,
+                                                             void *callback );
+static HRESULT STDMETHODCALLTYPE tracker_GetReferenceTrackerManager( struct propertyset_reference_tracker *iface,
+                                                                     void **manager );
+static HRESULT STDMETHODCALLTYPE tracker_AddRefFromTrackerSource( struct propertyset_reference_tracker *iface );
+static HRESULT STDMETHODCALLTYPE tracker_ReleaseFromTrackerSource( struct propertyset_reference_tracker *iface );
+static HRESULT STDMETHODCALLTYPE tracker_PegFromTrackerSource( struct propertyset_reference_tracker *iface );
+
+struct propertyset_reference_tracker_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( struct propertyset_reference_tracker *iface,
+                                                 REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( struct propertyset_reference_tracker *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( struct propertyset_reference_tracker *iface );
+    HRESULT (STDMETHODCALLTYPE *ConnectFromTrackerSource)( struct propertyset_reference_tracker *iface );
+    HRESULT (STDMETHODCALLTYPE *DisconnectFromTrackerSource)( struct propertyset_reference_tracker *iface,
+                                                             int disconnect_type );
+    HRESULT (STDMETHODCALLTYPE *FindTrackerTargets)( struct propertyset_reference_tracker *iface,
+                                                     void *callback );
+    HRESULT (STDMETHODCALLTYPE *GetReferenceTrackerManager)( struct propertyset_reference_tracker *iface,
+                                                             void **manager );
+    HRESULT (STDMETHODCALLTYPE *AddRefFromTrackerSource)( struct propertyset_reference_tracker *iface );
+    HRESULT (STDMETHODCALLTYPE *ReleaseFromTrackerSource)( struct propertyset_reference_tracker *iface );
+    HRESULT (STDMETHODCALLTYPE *PegFromTrackerSource)( struct propertyset_reference_tracker *iface );
+};
+
+struct propertyset_reference_tracker
+{
+    const struct propertyset_reference_tracker_vtbl *vtbl;
+    LONG ref;
+};
+
 static const GUID IID_INotifyCollectionChanged_g =
     { 0x350ffb1a, 0xdf08, 0x56fd, { 0x98, 0xd1, 0x37, 0x4d, 0x77, 0x72, 0x34, 0x9f }};
 static const GUID IID_INotifyPropertyChanged_g =
@@ -118,6 +176,97 @@ static inline struct propertyset *impl_from_IPropertySet( IPropertySet *iface )
     return CONTAINING_RECORD( iface, struct propertyset, IPropertySet_iface );
 }
 
+static HRESULT STDMETHODCALLTYPE tracker_QueryInterface( struct propertyset_reference_tracker *iface,
+                                                         REFIID iid, void **out )
+{
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = iface;
+        InterlockedIncrement( &iface->ref );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE tracker_AddRef( struct propertyset_reference_tracker *iface )
+{
+    return InterlockedIncrement( &iface->ref );
+}
+
+static ULONG STDMETHODCALLTYPE tracker_Release( struct propertyset_reference_tracker *iface )
+{
+    return InterlockedDecrement( &iface->ref );
+}
+
+static HRESULT STDMETHODCALLTYPE tracker_ConnectFromTrackerSource( struct propertyset_reference_tracker *iface )
+{
+    TRACE( "tracker %p connect\n", iface );
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE tracker_DisconnectFromTrackerSource( struct propertyset_reference_tracker *iface,
+                                                                     int disconnect_type )
+{
+    TRACE( "tracker %p disconnect type %d\n", iface, disconnect_type );
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE tracker_FindTrackerTargets( struct propertyset_reference_tracker *iface,
+                                                             void *callback )
+{
+    TRACE( "tracker %p find targets callback %p\n", iface, callback );
+    return S_OK; /* no tracked targets from a builtin property set */
+}
+
+static HRESULT STDMETHODCALLTYPE tracker_GetReferenceTrackerManager( struct propertyset_reference_tracker *iface,
+                                                                     void **manager )
+{
+    TRACE( "tracker %p get manager %p\n", iface, manager );
+    if (manager) *manager = NULL;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE tracker_AddRefFromTrackerSource( struct propertyset_reference_tracker *iface )
+{
+    InterlockedIncrement( &iface->ref );
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE tracker_ReleaseFromTrackerSource( struct propertyset_reference_tracker *iface )
+{
+    InterlockedDecrement( &iface->ref );
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE tracker_PegFromTrackerSource( struct propertyset_reference_tracker *iface )
+{
+    TRACE( "tracker %p peg\n", iface );
+    return S_OK;
+}
+
+static const struct propertyset_reference_tracker_vtbl propertyset_tracker_vtbl =
+{
+    tracker_QueryInterface,
+    tracker_AddRef,
+    tracker_Release,
+    tracker_ConnectFromTrackerSource,
+    tracker_DisconnectFromTrackerSource,
+    tracker_FindTrackerTargets,
+    tracker_GetReferenceTrackerManager,
+    tracker_AddRefFromTrackerSource,
+    tracker_ReleaseFromTrackerSource,
+    tracker_PegFromTrackerSource,
+};
+
+/* Process-wide singleton tracker face (per-propertyset state is not needed:
+ * the XAML tracker contract for a builtin data object is satisfied by no-op
+ * connect/disconnect/refcount hooks). */
+static struct propertyset_reference_tracker propertyset_tracker =
+{
+    &propertyset_tracker_vtbl, 1
+};
+
 static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface, REFIID iid, void **out )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
@@ -142,6 +291,16 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
         *out = iface;
         IUnknown_AddRef( (IUnknown *)*out );
         TRACE( "handing out face %p, vtbl %p\n", *out, *(void **)*out );
+        return S_OK;
+    }
+
+    /* CoreCLR ComWrappers tracker probe: hand out the real image-resident
+     * IReferenceTracker face (see IID_IReferenceTracker_g above). */
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = &propertyset_tracker;
+        tracker_AddRef( &propertyset_tracker );
+        TRACE( "handing out tracker face %p, vtbl %p\n", *out, *(void **)*out );
         return S_OK;
     }
 
@@ -190,7 +349,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
     struct propertyset *impl = impl_from_IPropertySet( iface );
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = 3; /* filled on the (NULL, NULL) probe itself */
+    if (iid_count) *iid_count = 4; /* filled on the (NULL, NULL) probe itself */
     {
         /* p209: canonical AE face — IPropertySet (default) +
          * IMapView<HSTRING,IInspectable> + IIterable<IKeyValuePair>.
@@ -211,11 +370,12 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
          * first-chance AV loop. Compile-time init + single store publish
          * removes the window. One static array per face type outlives
          * every consumer (p202 lesson: the shader caches the pointer). */
-        static struct com_interface_entry shared[3] =
+        static struct com_interface_entry shared[4] =
         {
             { (void *)&propertyset_vtbl_full,/* .vtbl @ offset 0 */ (IID *)&IID_IPropertySet },
             { (void *)&propertyset_IMapView_vtbl_full, (IID *)&IID_IMapView_HSTRING_IInspectable },
             { (void *)&propertyset_IIterable_vtbl_full, (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
+            { (void *)&propertyset_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
         };
         if (!impl->iids_cache)
         {
