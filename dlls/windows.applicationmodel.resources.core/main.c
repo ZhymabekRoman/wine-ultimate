@@ -5132,6 +5132,31 @@ static void mrm_prearm_pinbuffer(void)
     cell = cell_store;
     *slot = (UINT_PTR)cell_store | 1;       /* GCHandle pinned tag */
     TRACE("prearm pinbuffer slot %p = %p\n", slot, (void *)*slot);
+
+    /* p216: the WER pass-2 reader (fatal capture p212: PalSetWerDataBuffer
+     * +0x3b <- SharedLibrary+0x7e33b3) consults the pin-handle static beside
+     * the pinbuffer slot, not the SetWerDataBuffer out-param (p214 proved the
+     * out-param cell is consumed by pass 1).  Arm the adjacent zero
+     * GCHandle statics with the same fake-System.Byte[] cell shape, one
+     * dedicated fake per slot from the .bss holes. */
+    {
+        static UINT_PTR cell_wer1[2], cell_wer2[2];
+        UINT_PTR *fakes[2] = { (UINT_PTR *)(base + 0x55df78),
+                               (UINT_PTR *)(base + 0x55df90) };
+        UINT_PTR *cells[2] = { cell_wer1, cell_wer2 };
+        int n;
+        for (n = 0; n < 2; n++)
+        {
+            UINT_PTR *ws = (UINT_PTR *)(base + 0x55de38) + n * 2;
+            if (*ws) continue;
+            fakes[n][0] = (UINT_PTR)(base + 0xe0f80);
+            fakes[n][1] = 1;
+            cells[n][0] = (UINT_PTR)fakes[n];
+            cells[n][1] = 0;
+            *ws = (UINT_PTR)cells[n] | 1;
+            TRACE("prearm pinbuffer wer-slot %p armed\n", ws);
+        }
+    }
 }
 
 /* WER-buffer GCHandle pre-arm (inflate-plateau wave, 2026-11-08).
