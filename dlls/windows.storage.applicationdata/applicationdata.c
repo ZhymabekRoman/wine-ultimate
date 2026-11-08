@@ -22,6 +22,46 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(data);
 
+/* Arm-3 probe 4 (s232): bounded per-cycle QI(iid) census on the appdata
+ * chain (first 50, object-tagged). s232: the single E_NOINTERFACE was
+ * {5c13e51c-4f32-4726-a3fd-f3edd63da3a0} = IApplicationDataGetForApplication
+ * (GetForApp) on the appdata object; probe 5 answers it. */
+static LONG qi_log_count;
+
+static void qi_log_record( REFIID iid, HRESULT hr, const char *obj )
+{
+    if (InterlockedIncrement( &qi_log_count ) <= 50)
+        fprintf( stderr, "QILOG obj=%s iid=%s hr=%08lx\n", obj, wine_dbgstr_guid( iid ), (unsigned long)hr );
+}
+
+/* Arm-3 probe 5 (s233): Windows.Storage.IApplicationDataGetForApplication
+ * (GetForApp) face. No SDK header in-tree defines the IID; projection
+ * contract = IUnknown 3 + IInspectable 3 + GetForApp. */
+static const GUID IID_IApplicationDataGetForApplication =
+{ 0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0} };
+
+struct IApplicationDataGetForApplication;
+
+struct IApplicationDataGetForApplicationVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct IApplicationDataGetForApplication *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( struct IApplicationDataGetForApplication *iface );
+    ULONG (WINAPI *Release)( struct IApplicationDataGetForApplication *iface );
+    HRESULT (WINAPI *GetIids)( struct IApplicationDataGetForApplication *iface, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( struct IApplicationDataGetForApplication *iface, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( struct IApplicationDataGetForApplication *iface, TrustLevel *level );
+    HRESULT (WINAPI *GetForApp)( struct IApplicationDataGetForApplication *iface, HSTRING app_name, struct IApplicationData **value );
+};
+
+struct IApplicationDataGetForApplication
+{
+    const struct IApplicationDataGetForApplicationVtbl *lpVtbl;
+};
+
+static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out );
+static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface, REFIID iid, void **out );
+static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out );
+
 /* CoreCLR's ComWrappers shader reads IInspectable::GetIids output as an array of
  * ComInterfaceEntry pairs (vtable-first layout, matching the runtime's
  * sequential struct { void** Vtable; Guid* IID; }). */
@@ -30,135 +70,6 @@ struct com_interface_entry
     void **vtable;
     IID   *iid;
 };
-
-/* Arm-3 probe 2 (s229): real XAML IReferenceTracker face on the
- * ApplicationData/ApplicationDataContainer objects, mirroring the singleton
- * in dlls/wintypes/propertyset.c. The 0x80131506
- * TryGetOrCreateObjectForComInstanceInternal fatal survives the projection
- * face (s227d) and the heap-reserve grow (s228): CoreCLR's
- * TrackerObjectManager::AfterWrapperCreated reads the composite slot 0 as a
- * packed ComVirtualMethodData header and refetches chunk+0x38 (slot 7
- * AddRefFromTrackerSource) from the shader heap region (base
- * 0x6fff00000000, first page unmapped under wine: FIRST_CHANCE_AV
- * rax=0x6fff00000002, rip load 0x6fff0000003b, 35 fatal cycles per gate).
- * With a real face the QI lands on this image-resident vtable and the
- * heap-chunk refetch is never taken. Slot order per
- * windows.ui.xaml.hosting.referencetracker.h: 0-2 IUnknown, 3 Connect,
- * 4 Disconnect, 5 FindTrackerTargets, 6 GetReferenceTrackerManager,
- * 7 AddRefFromTrackerSource, 8 ReleaseFromTrackerSource, 9 Peg. */
-static const GUID IID_IReferenceTracker_g =
-{ 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
-
-struct appdata_tracker;
-
-struct appdata_tracker_vtbl
-{
-    HRESULT (WINAPI *QueryInterface)( struct appdata_tracker *iface, REFIID iid, void **out );
-    ULONG (WINAPI *AddRef)( struct appdata_tracker *iface );
-    ULONG (WINAPI *Release)( struct appdata_tracker *iface );
-    HRESULT (WINAPI *ConnectFromTrackerSource)( struct appdata_tracker *iface );
-    HRESULT (WINAPI *DisconnectFromTrackerSource)( struct appdata_tracker *iface, int disconnect_type );
-    HRESULT (WINAPI *FindTrackerTargets)( struct appdata_tracker *iface, void *callback );
-    HRESULT (WINAPI *GetReferenceTrackerManager)( struct appdata_tracker *iface, void **manager );
-    HRESULT (WINAPI *AddRefFromTrackerSource)( struct appdata_tracker *iface );
-    HRESULT (WINAPI *ReleaseFromTrackerSource)( struct appdata_tracker *iface );
-    HRESULT (WINAPI *PegFromTrackerSource)( struct appdata_tracker *iface );
-};
-
-struct appdata_tracker
-{
-    const struct appdata_tracker_vtbl *vtbl;
-    LONG ref;
-};
-
-static HRESULT WINAPI tracker_QueryInterface( struct appdata_tracker *iface, REFIID iid, void **out )
-{
-    *out = NULL;
-    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
-    {
-        *out = iface;
-        InterlockedIncrement( &iface->ref );
-        return S_OK;
-    }
-    return E_NOINTERFACE;
-}
-
-static ULONG WINAPI tracker_AddRef( struct appdata_tracker *iface )
-{
-    return InterlockedIncrement( &iface->ref );
-}
-
-static ULONG WINAPI tracker_Release( struct appdata_tracker *iface )
-{
-    return InterlockedDecrement( &iface->ref );
-}
-
-static HRESULT WINAPI tracker_ConnectFromTrackerSource( struct appdata_tracker *iface )
-{
-    TRACE( "tracker %p connect\n", iface );
-    return S_OK;
-}
-
-static HRESULT WINAPI tracker_DisconnectFromTrackerSource( struct appdata_tracker *iface, int disconnect_type )
-{
-    TRACE( "tracker %p disconnect type %d\n", iface, disconnect_type );
-    return S_OK;
-}
-
-static HRESULT WINAPI tracker_FindTrackerTargets( struct appdata_tracker *iface, void *callback )
-{
-    TRACE( "tracker %p find targets\n", iface );
-    return S_OK; /* no tracked targets from a builtin data object */
-}
-
-static HRESULT WINAPI tracker_GetReferenceTrackerManager( struct appdata_tracker *iface, void **manager )
-{
-    TRACE( "tracker %p get manager\n", iface );
-    if (manager) *manager = NULL;
-    return S_OK;
-}
-
-static HRESULT WINAPI tracker_AddRefFromTrackerSource( struct appdata_tracker *iface )
-{
-    InterlockedIncrement( &iface->ref );
-    return S_OK;
-}
-
-static HRESULT WINAPI tracker_ReleaseFromTrackerSource( struct appdata_tracker *iface )
-{
-    InterlockedDecrement( &iface->ref );
-    return S_OK;
-}
-
-static HRESULT WINAPI tracker_PegFromTrackerSource( struct appdata_tracker *iface )
-{
-    TRACE( "tracker %p peg\n", iface );
-    return S_OK;
-}
-
-static const struct appdata_tracker_vtbl appdata_tracker_vtbl =
-{
-    /* Producer-side ComVirtualMethodData layout: slot 0 is the packed header
-     * word (self | tag 4), not a QI pointer; the consumer masks the tag and
-     * dereferences chunk+0x18/+0x38 as slots 3/7, landing on these direct
-     * stubs (see propertyset.c for the observed p204-p208 AV form). */
-    (void *)((UINT_PTR)&appdata_tracker_vtbl + 4),
-    tracker_AddRef,
-    tracker_Release,
-    tracker_ConnectFromTrackerSource,
-    tracker_DisconnectFromTrackerSource,
-    tracker_FindTrackerTargets,
-    tracker_GetReferenceTrackerManager,
-    tracker_AddRefFromTrackerSource,
-    tracker_ReleaseFromTrackerSource,
-    tracker_PegFromTrackerSource,
-};
-
-/* Process-wide singleton: the XAML tracker contract for builtin data objects
- * is satisfied by no-op connect/disconnect/refcount hooks, per-object state
- * is not needed. Shared by the ApplicationData and ApplicationDataContainer
- * faces (propertyset precedent). */
-static struct appdata_tracker appdata_tracker = { &appdata_tracker_vtbl, 1 };
 
 struct application_data_statics
 {
@@ -174,7 +85,7 @@ static inline struct application_data_statics *impl_from_IActivationFactory( IAc
     return CONTAINING_RECORD( iface, struct application_data_statics, IActivationFactory_iface );
 }
 
-static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+static HRESULT WINAPI factory_qi_impl( IActivationFactory *iface, REFIID iid, void **out )
 {
     struct application_data_statics *impl = impl_from_IActivationFactory( iface );
 
@@ -288,6 +199,7 @@ struct application_data
     IApplicationData IApplicationData_iface;
     IApplicationData2 IApplicationData2_iface;
     IApplicationDataMethods IApplicationDataMethods_iface;
+    struct IApplicationDataGetForApplication IApplicationDataGetForApplication_iface;
     LONG ref;
 };
 
@@ -308,8 +220,9 @@ static inline struct application_data *impl_from_IApplicationDataMethods( IAppli
 
 static const struct IApplicationDataVtbl application_data_vtbl;
 static const struct IApplicationDataMethodsVtbl application_data_methods_vtbl;
+static const struct IApplicationDataGetForApplicationVtbl application_data_getforapp_vtbl;
 
-static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out )
+static HRESULT WINAPI application_data_qi_impl( IApplicationData *iface, REFIID iid, void **out )
 {
     struct application_data *impl = impl_from_IApplicationData( iface );
 
@@ -338,10 +251,10 @@ static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, 
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    if (IsEqualGUID( iid, &IID_IApplicationDataGetForApplication ))
     {
-        *out = &appdata_tracker;
-        tracker_AddRef( &appdata_tracker );
+        *out = &impl->IApplicationDataGetForApplication_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
 
@@ -379,7 +292,7 @@ static HRESULT WINAPI application_data_GetIids( IApplicationData *iface, ULONG *
     {
         { (void **)&application_data_vtbl, (IID *)&IID_IApplicationData },
         { (void **)&application_data_methods_vtbl, (IID *)&IID_IApplicationDataMethods },
-        { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
+        { (void **)&application_data_getforapp_vtbl, (IID *)&IID_IApplicationDataGetForApplication },
     };
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
@@ -450,7 +363,7 @@ static inline struct application_data_container *impl_from_IApplicationDataConta
     return CONTAINING_RECORD( iface, struct application_data_container, IApplicationDataContainerMethods_iface );
 }
 
-static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface, REFIID iid, void **out )
+static HRESULT WINAPI container_qi_impl( IApplicationDataContainer *iface, REFIID iid, void **out )
 {
     struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
@@ -466,12 +379,6 @@ static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface
     {
         *out = &impl->IApplicationDataContainerMethods_iface;
         InterlockedIncrement( &impl->ref );
-        return S_OK;
-    }
-    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
-    {
-        *out = &appdata_tracker;
-        tracker_AddRef( &appdata_tracker );
         return S_OK;
     }
     FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
@@ -512,7 +419,6 @@ static HRESULT WINAPI container_GetIids( IApplicationDataContainer *iface, ULONG
     {
         { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
         { (void **)&container_methods_vtbl, (IID *)&IID_IApplicationDataContainerMethods },
-        { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
     };
     TRACE( "iface %p, count %p, iids %p.\n", iface, count, iids );
 
@@ -713,7 +619,6 @@ static HRESULT WINAPI container_methods_GetIids( IApplicationDataContainerMethod
     {
         { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
         { (void **)&container_methods_vtbl, (IID *)&IID_IApplicationDataContainerMethods },
-        { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
     };
 
     if (count) *count = ARRAY_SIZE( entries );
@@ -1211,6 +1116,7 @@ static HRESULT WINAPI application_data_statics_get_Current( IApplicationDataStat
     impl->IApplicationData_iface.lpVtbl = &application_data_vtbl;
     impl->IApplicationData2_iface.lpVtbl = &application_data2_vtbl;
     impl->IApplicationDataMethods_iface.lpVtbl = &application_data_methods_vtbl;
+    impl->IApplicationDataGetForApplication_iface.lpVtbl = &application_data_getforapp_vtbl;
     impl->ref = 1;
 
     *value = &impl->IApplicationData_iface;
@@ -1239,3 +1145,100 @@ static struct application_data_statics application_data_statics =
 };
 
 IActivationFactory *application_data_factory = &application_data_statics.IActivationFactory_iface;
+
+/* Probe 4/5 wrappers: log iid + result on every QI (bounded, see
+ * qi_log_record); IApplicationDataGetForApplication face, see the IID
+ * comment - for the in-app activation the requested app instance is self,
+ * so GetForApp returns the same application_data object. */
+static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out )
+{
+    HRESULT hr = application_data_qi_impl( iface, iid, out );
+    qi_log_record( iid, hr, "appdata" );
+    return hr;
+}
+
+static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface, REFIID iid, void **out )
+{
+    HRESULT hr = container_qi_impl( iface, iid, out );
+    qi_log_record( iid, hr, "container" );
+    return hr;
+}
+
+static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    HRESULT hr = factory_qi_impl( iface, iid, out );
+    qi_log_record( iid, hr, "factory" );
+    return hr;
+}
+
+static inline struct application_data *impl_from_IApplicationDataGetForApplication(
+        struct IApplicationDataGetForApplication *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_data, IApplicationDataGetForApplication_iface );
+}
+
+static HRESULT WINAPI application_data_getforapp_QueryInterface(
+        struct IApplicationDataGetForApplication *iface, REFIID iid, void **out )
+{
+    struct application_data *impl = impl_from_IApplicationDataGetForApplication( iface );
+    return IApplicationData_QueryInterface( &impl->IApplicationData_iface, iid, out );
+}
+
+static ULONG WINAPI application_data_getforapp_AddRef( struct IApplicationDataGetForApplication *iface )
+{
+    struct application_data *impl = impl_from_IApplicationDataGetForApplication( iface );
+    return IApplicationData_AddRef( &impl->IApplicationData_iface );
+}
+
+static ULONG WINAPI application_data_getforapp_Release( struct IApplicationDataGetForApplication *iface )
+{
+    struct application_data *impl = impl_from_IApplicationDataGetForApplication( iface );
+    return IApplicationData_Release( &impl->IApplicationData_iface );
+}
+
+static HRESULT WINAPI application_data_getforapp_GetIids(
+        struct IApplicationDataGetForApplication *iface, ULONG *count, IID **iids )
+{
+    struct application_data *impl = impl_from_IApplicationDataGetForApplication( iface );
+    return application_data_GetIids( &impl->IApplicationData_iface, count, iids );
+}
+
+static HRESULT WINAPI application_data_getforapp_GetRuntimeClassName(
+        struct IApplicationDataGetForApplication *iface, HSTRING *name )
+{
+    struct application_data *impl = impl_from_IApplicationDataGetForApplication( iface );
+    return application_data_GetRuntimeClassName( &impl->IApplicationData_iface, name );
+}
+
+static HRESULT WINAPI application_data_getforapp_GetTrustLevel(
+        struct IApplicationDataGetForApplication *iface, TrustLevel *level )
+{
+    struct application_data *impl = impl_from_IApplicationDataGetForApplication( iface );
+    return application_data_GetTrustLevel( &impl->IApplicationData_iface, level );
+}
+
+static HRESULT WINAPI application_data_getforapp_GetForApp(
+        struct IApplicationDataGetForApplication *iface, HSTRING app_name, IApplicationData **value )
+{
+    struct application_data *impl = impl_from_IApplicationDataGetForApplication( iface );
+
+    TRACE( "iface %p, app_name %s, value %p.\n", iface, debugstr_hstring( app_name ), value );
+
+    if (!value) return E_POINTER;
+    *value = &impl->IApplicationData_iface;
+    IApplicationData_AddRef( *value );
+    return S_OK;
+}
+
+static const struct IApplicationDataGetForApplicationVtbl application_data_getforapp_vtbl =
+{
+    application_data_getforapp_QueryInterface,
+    application_data_getforapp_AddRef,
+    application_data_getforapp_Release,
+    /* IInspectable methods */
+    application_data_getforapp_GetIids,
+    application_data_getforapp_GetRuntimeClassName,
+    application_data_getforapp_GetTrustLevel,
+    /* IApplicationDataGetForApplication methods */
+    application_data_getforapp_GetForApp,
+};
