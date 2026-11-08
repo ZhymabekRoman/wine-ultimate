@@ -22,6 +22,136 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(data);
 
+/* Arm-3 probe 2 (s229): real XAML IReferenceTracker face on the
+ * ApplicationData/ApplicationDataContainer objects, mirroring the singleton
+ * in dlls/wintypes/propertyset.c. The 0x80131506
+ * TryGetOrCreateObjectForComInstanceInternal fatal survives the projection
+ * face (s227d) and the heap-reserve grow (s228): CoreCLR's
+ * TrackerObjectManager::AfterWrapperCreated reads the composite slot 0 as a
+ * packed ComVirtualMethodData header and refetches chunk+0x38 (slot 7
+ * AddRefFromTrackerSource) from the shader heap region (base
+ * 0x6fff00000000, first page unmapped under wine: FIRST_CHANCE_AV
+ * rax=0x6fff00000002, rip load 0x6fff0000003b, 35 fatal cycles per gate).
+ * With a real face the QI lands on this image-resident vtable and the
+ * heap-chunk refetch is never taken. Slot order per
+ * windows.ui.xaml.hosting.referencetracker.h: 0-2 IUnknown, 3 Connect,
+ * 4 Disconnect, 5 FindTrackerTargets, 6 GetReferenceTrackerManager,
+ * 7 AddRefFromTrackerSource, 8 ReleaseFromTrackerSource, 9 Peg. */
+static const GUID IID_IReferenceTracker_g =
+{ 0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6} };
+
+struct appdata_tracker;
+
+struct appdata_tracker_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct appdata_tracker *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( struct appdata_tracker *iface );
+    ULONG (WINAPI *Release)( struct appdata_tracker *iface );
+    HRESULT (WINAPI *ConnectFromTrackerSource)( struct appdata_tracker *iface );
+    HRESULT (WINAPI *DisconnectFromTrackerSource)( struct appdata_tracker *iface, int disconnect_type );
+    HRESULT (WINAPI *FindTrackerTargets)( struct appdata_tracker *iface, void *callback );
+    HRESULT (WINAPI *GetReferenceTrackerManager)( struct appdata_tracker *iface, void **manager );
+    HRESULT (WINAPI *AddRefFromTrackerSource)( struct appdata_tracker *iface );
+    HRESULT (WINAPI *ReleaseFromTrackerSource)( struct appdata_tracker *iface );
+    HRESULT (WINAPI *PegFromTrackerSource)( struct appdata_tracker *iface );
+};
+
+struct appdata_tracker
+{
+    const struct appdata_tracker_vtbl *vtbl;
+    LONG ref;
+};
+
+static HRESULT WINAPI tracker_QueryInterface( struct appdata_tracker *iface, REFIID iid, void **out )
+{
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = iface;
+        InterlockedIncrement( &iface->ref );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI tracker_AddRef( struct appdata_tracker *iface )
+{
+    return InterlockedIncrement( &iface->ref );
+}
+
+static ULONG WINAPI tracker_Release( struct appdata_tracker *iface )
+{
+    return InterlockedDecrement( &iface->ref );
+}
+
+static HRESULT WINAPI tracker_ConnectFromTrackerSource( struct appdata_tracker *iface )
+{
+    TRACE( "tracker %p connect\n", iface );
+    return S_OK;
+}
+
+static HRESULT WINAPI tracker_DisconnectFromTrackerSource( struct appdata_tracker *iface, int disconnect_type )
+{
+    TRACE( "tracker %p disconnect type %d\n", iface, disconnect_type );
+    return S_OK;
+}
+
+static HRESULT WINAPI tracker_FindTrackerTargets( struct appdata_tracker *iface, void *callback )
+{
+    TRACE( "tracker %p find targets\n", iface );
+    return S_OK; /* no tracked targets from a builtin data object */
+}
+
+static HRESULT WINAPI tracker_GetReferenceTrackerManager( struct appdata_tracker *iface, void **manager )
+{
+    TRACE( "tracker %p get manager\n", iface );
+    if (manager) *manager = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI tracker_AddRefFromTrackerSource( struct appdata_tracker *iface )
+{
+    InterlockedIncrement( &iface->ref );
+    return S_OK;
+}
+
+static HRESULT WINAPI tracker_ReleaseFromTrackerSource( struct appdata_tracker *iface )
+{
+    InterlockedDecrement( &iface->ref );
+    return S_OK;
+}
+
+static HRESULT WINAPI tracker_PegFromTrackerSource( struct appdata_tracker *iface )
+{
+    TRACE( "tracker %p peg\n", iface );
+    return S_OK;
+}
+
+static const struct appdata_tracker_vtbl appdata_tracker_vtbl =
+{
+    /* Producer-side ComVirtualMethodData layout: slot 0 is the packed header
+     * word (self | tag 4), not a QI pointer; the consumer masks the tag and
+     * dereferences chunk+0x18/+0x38 as slots 3/7, landing on these direct
+     * stubs (see propertyset.c for the observed p204-p208 AV form). */
+    (void *)((UINT_PTR)&appdata_tracker_vtbl + 4),
+    tracker_AddRef,
+    tracker_Release,
+    tracker_ConnectFromTrackerSource,
+    tracker_DisconnectFromTrackerSource,
+    tracker_FindTrackerTargets,
+    tracker_GetReferenceTrackerManager,
+    tracker_AddRefFromTrackerSource,
+    tracker_ReleaseFromTrackerSource,
+    tracker_PegFromTrackerSource,
+};
+
+/* Process-wide singleton: the XAML tracker contract for builtin data objects
+ * is satisfied by no-op connect/disconnect/refcount hooks, per-object state
+ * is not needed. Shared by the ApplicationData and ApplicationDataContainer
+ * faces (propertyset precedent). */
+static struct appdata_tracker appdata_tracker = { &appdata_tracker_vtbl, 1 };
+
+
 /* Arm-3 probe 4 (s232): bounded per-cycle QI(iid) census on the appdata
  * chain (first 50, object-tagged). s232: the single E_NOINTERFACE was
  * {5c13e51c-4f32-4726-a3fd-f3edd63da3a0} = IApplicationDataGetForApplication
@@ -30,8 +160,26 @@ static LONG qi_log_count;
 
 static void qi_log_record( REFIID iid, HRESULT hr, const char *obj )
 {
-    if (InterlockedIncrement( &qi_log_count ) <= 50)
+    LONG n = InterlockedIncrement( &qi_log_count );
+
+    if (n <= 50)
         fprintf( stderr, "QILOG obj=%s iid=%s hr=%08lx\n", obj, wine_dbgstr_guid( iid ), (unsigned long)hr );
+
+    /* Arm-3 probe 7 (s237): writer trace of the composite wrapper block at
+     * the pinned heap-head base. Dump base+0x30..0x48 on the first 8 QIs,
+     * tagged by the obj stage (entry/post-face/pre-AV). Census separates:
+     * (a) all-zero never-written, (b) 0x6fff.. head-page pointers,
+     * (c) value changes across tags = written-then-raced. */
+    if (n <= 8)
+    {
+        static const char *const head = (const char *)0x6fff00000000;
+        fprintf( stderr, "WRDUMP n=%ld tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n",
+                 n, obj, (unsigned long)*(const ULONGLONG *)(head + 0x30),
+                 (unsigned long)*(const ULONGLONG *)(head + 0x38),
+                 (unsigned long)*(const ULONGLONG *)(head + 0x40),
+                 (unsigned long)*(const ULONGLONG *)(head + 0x48) );
+        fflush( stderr );
+    }
 }
 
 /* Arm-3 probe 5 (s233): Windows.Storage.IApplicationDataGetForApplication
@@ -257,6 +405,12 @@ static HRESULT WINAPI application_data_qi_impl( IApplicationData *iface, REFIID 
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = &appdata_tracker;
+        tracker_AddRef( &appdata_tracker );
+        return S_OK;
+    }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -293,6 +447,7 @@ static HRESULT WINAPI application_data_GetIids( IApplicationData *iface, ULONG *
         { (void **)&application_data_vtbl, (IID *)&IID_IApplicationData },
         { (void **)&application_data_methods_vtbl, (IID *)&IID_IApplicationDataMethods },
         { (void **)&application_data_getforapp_vtbl, (IID *)&IID_IApplicationDataGetForApplication },
+        { (void **)&appdata_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
     };
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
@@ -481,6 +636,19 @@ static HRESULT WINAPI empty_map_view_QueryInterface( IMapView_HSTRING_Applicatio
         IsEqualGUID( iid, &IID_IMapView_HSTRING_ApplicationDataContainer ))
     {
         *out = iface;
+        return S_OK;
+    }
+    /* CoreCLR's TrackerObjectManager walks the ComWrappers v1 chunk of every
+     * QI'd face of the LocalSettings decode, calling slot7
+     * (AddRefFromTrackerSource) per interface; without a face here the walk
+     * dispatches into the windowscodecs iid-pair pool (DllRegisterServer
+     * region, NULL-BSTR write) and feeds the 35-cycle AV storm.  Answer with
+     * the shared 10-slot appdata tracker face, as on the container and the
+     * wintypes propertyset singleton. */
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = &appdata_tracker;
+        tracker_AddRef( &appdata_tracker );
         return S_OK;
     }
     *out = NULL;
