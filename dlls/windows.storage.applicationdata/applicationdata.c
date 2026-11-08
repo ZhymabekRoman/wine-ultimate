@@ -387,6 +387,7 @@ static inline struct application_data *impl_from_IApplicationDataMethods( IAppli
 }
 
 static const struct IApplicationDataVtbl application_data_vtbl;
+static const struct IApplicationData2Vtbl application_data2_vtbl;
 static const struct IApplicationDataMethodsVtbl application_data_methods_vtbl;
 static const struct IApplicationDataGetForApplicationVtbl application_data_getforapp_vtbl;
 
@@ -1293,6 +1294,30 @@ static const struct IApplicationData2Vtbl application_data2_vtbl =
 
 DEFINE_IINSPECTABLE( application_data_statics, IApplicationDataStatics, struct application_data_statics, IActivationFactory_iface )
 
+/* IApplicationData.Current is a process-wide singleton on Windows: the CLR RCW
+ * cache is keyed by ABI pointer, and per-call fresh objects hand the shader a
+ * new identity per decode (one ComVirtualMethodData composite + heap chunk
+ * each), so the Current chain re-fetches on every property hop. Create-on-ask
+ * once, AddRef per call; never freed. */
+static struct application_data *application_data_current( void )
+{
+    static struct application_data *singleton;
+    struct application_data *impl;
+
+    if (!singleton)
+    {
+        if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+        impl->IApplicationData_iface.lpVtbl = &application_data_vtbl;
+        impl->IApplicationData2_iface.lpVtbl = &application_data2_vtbl;
+        impl->IApplicationDataMethods_iface.lpVtbl = &application_data_methods_vtbl;
+        impl->IApplicationDataGetForApplication_iface.lpVtbl = &application_data_getforapp_vtbl;
+        impl->ref = 1;
+        if (InterlockedCompareExchangePointer( (void **)&singleton, impl, NULL )) free( impl );
+    }
+    impl = singleton;
+    return impl;
+}
+
 static HRESULT WINAPI application_data_statics_get_Current( IApplicationDataStatics *iface, IApplicationData **value )
 {
     struct application_data *impl;
@@ -1300,16 +1325,11 @@ static HRESULT WINAPI application_data_statics_get_Current( IApplicationDataStat
     TRACE( "iface %p, value %p\n", iface, value );
 
     if (!value) return E_INVALIDARG;
-    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
-
-    impl->IApplicationData_iface.lpVtbl = &application_data_vtbl;
-    impl->IApplicationData2_iface.lpVtbl = &application_data2_vtbl;
-    impl->IApplicationDataMethods_iface.lpVtbl = &application_data_methods_vtbl;
-    impl->IApplicationDataGetForApplication_iface.lpVtbl = &application_data_getforapp_vtbl;
-    impl->ref = 1;
+    if (!(impl = application_data_current() )) return E_OUTOFMEMORY;
 
     *value = &impl->IApplicationData_iface;
-    TRACE( "created IApplicationData %p.\n", *value );
+    IApplicationData_AddRef( *value );
+    TRACE( "returning singleton IApplicationData %p.\n", *value );
     return S_OK;
 }
 
@@ -1353,9 +1373,36 @@ static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface
     return hr;
 }
 
+/* Arm-3 probe 9 (s240): pre-populate the pinned heap-head block with the
+ * ComInterfaceEntry pair-array the CoreCLR composite build copies (same
+ * pairs, same order, as application_data_GetIids exposes). s239 leans
+ * write-faults: the composite build faults on its first chunk access with
+ * [0x30..0x48] zeroed and never reaches the ReleaseFromTrackerSource leg.
+ * If the build finds live vtables at the head, the 33-cycle chunk fetch
+ * should collapse. Runs on the statics factory QI, i.e. the first COM
+ * traffic before the appdata QI cascade (s238 WRDUMP n=1..3). */
+static void head_populate( void )
+{
+    static BOOL done;
+    void **head = (void **)0x6fff00000000;
+
+    if (done) return;
+    done = TRUE;
+    head[0] = (void **)&application_data_vtbl;                  /* 0x00 composite slot0 */
+    head[1] = (void *)&IID_IApplicationData;                    /* 0x08 */
+    head[2] = (void **)&application_data_methods_vtbl;          /* 0x10 */
+    head[3] = (void *)&IID_IApplicationDataMethods;             /* 0x18 */
+    head[4] = (void **)&application_data_getforapp_vtbl;        /* 0x20 */
+    head[5] = (void *)&IID_IApplicationDataGetForApplication;   /* 0x28 */
+    head[6] = (void **)&appdata_tracker_vtbl;                   /* 0x30 */
+    head[7] = (void *)&IID_IReferenceTracker_g;                 /* 0x38 slot-7 refetch word */
+}
+
 static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
-    HRESULT hr = factory_qi_impl( iface, iid, out );
+    HRESULT hr;
+    head_populate();
+    hr = factory_qi_impl( iface, iid, out );
     qi_log_record( iid, hr, "factory" );
     return hr;
 }
