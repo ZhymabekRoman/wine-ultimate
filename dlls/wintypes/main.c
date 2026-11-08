@@ -2102,6 +2102,10 @@ static void heap_prewarm( void )
         for (j = 0; j < 0x2000000; j += 0x1000) p[j] = 1;
     }
 
+    /* Probe 11 (s252): seed the propertyset (values) composite block at
+     * head+0xc0 with the same 4-pair array propertyset_GetIids hands back. */
+    propertyset_pair_array_seed( (void *)0x6fff000000c0 );
+
     /* Load-order arm (p215): pull the XAML runtime chain in ahead of the
      * first ApplicationDataContainer.get_Values RCW cycle. With
      * Microsoft.UI.Xaml.dll resident before CoreCLR wraps the values

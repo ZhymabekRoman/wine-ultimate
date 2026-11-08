@@ -1426,6 +1426,9 @@ void application_data_preseed( void )
     base[25] = (void *)&IID_IApplicationDataContainer;
     base[26] = (void **)&container_methods_vtbl;
     base[27] = (void *)&IID_IApplicationDataContainerMethods;
+    /* propertyset (values) provider block at +0xc0: seeded by wintypes
+     * heap_prewarm via propertyset_pair_array_seed (same-DLL symbols; the
+     * cross-DLL import was not worth a spec export). */
 }
 
 static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )

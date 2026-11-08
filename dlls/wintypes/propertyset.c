@@ -131,6 +131,9 @@ struct propertyset_vtbl_full_s;
 struct propertyset_imapview_vtbl_full_s;
 struct propertyset_iterable_vtbl_full_s;
 static const struct propertyset_vtbl_full_s propertyset_vtbl_full;
+
+
+
 static const struct propertyset_imapview_vtbl_full_s propertyset_IMapView_vtbl_full;
 static const struct propertyset_iterable_vtbl_full_s propertyset_IIterable_vtbl_full;
 
@@ -353,6 +356,24 @@ static ULONG STDMETHODCALLTYPE propertyset_Release( IPropertySet *iface )
     }
 
     return ref;
+}
+
+const struct com_interface_entry propertyset_shared_pairs[4] =
+{
+    { (void *)&propertyset_vtbl_full, (IID *)&IID_IPropertySet },
+    { (void *)&propertyset_IMapView_vtbl_full, (IID *)&IID_IMapView_HSTRING_IInspectable },
+    { (void *)&propertyset_IIterable_vtbl_full, (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
+    { (void *)&propertyset_tracker_vtbl, (IID *)&IID_IReferenceTracker_g },
+};
+
+/* Probe 11 mirror: expose the static 4-pair array (the same content
+ * propertyset_GetIids hands back, see the p209 comment) so the appdata
+ * provider can pre-seed the propertyset composite block at head+0xc0.
+ * Copy-only: CoreCLR copies these words into its chunk; no calls. */
+void propertyset_pair_array_seed( void **dst )
+{
+    extern const struct com_interface_entry propertyset_shared_pairs[4];
+    memcpy( dst, propertyset_shared_pairs, sizeof( propertyset_shared_pairs ) );
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG *iid_count, IID **iids )
