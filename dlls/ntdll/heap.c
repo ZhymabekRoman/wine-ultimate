@@ -983,6 +983,15 @@ static void *allocate_region( struct heap *heap, ULONG flags, SIZE_T *region_siz
     *region_size = ROUND_SIZE( *region_size, align - 1 );
     *commit_size = ROUND_SIZE( *commit_size, align - 1 );
 
+    /* Commit at least the initial grow size at the region head. Consumers
+     * that place hot vtable-like data in the first bytes of a fresh block
+     * (e.g. CoreCLR's ComVirtualMethodData chunk: the shader composite
+     * vtable slot 0 is the chunk base tagged with the component count, and
+     * TrackerObjectManager::AfterWrapperCreated loads chunk+0x38) fault on
+     * every access while the head sits in the reserved-but-uncommitted
+     * window; observed as the 0x6fff0000003b first-chance AV storm. */
+    *commit_size = min( max( *commit_size, HEAP_INITIAL_GROW_SIZE ), *region_size );
+
     /* allocate the memory block */
     if ((status = NtAllocateVirtualMemory( NtCurrentProcess(), &addr, 0, region_size, MEM_RESERVE,
                                            get_protection_type( flags ) )))
