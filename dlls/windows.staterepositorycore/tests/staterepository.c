@@ -268,6 +268,170 @@ static void test_cache_registry( void )
     FreeLibrary( mod );
 }
 
+/*
+ * Cache.StateCacheManager: the WinRT face of the C plane. The classes are
+ * private (no metadata header), so the test drives the vtables directly: the
+ * statics' slot 6 QueryState opens a context against the registration, and the
+ * context projects the C plane's GetField_String as an HSTRING.
+ */
+
+struct cache_statics_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *, const void *, void ** );
+    ULONG (WINAPI *AddRef)( void * );
+    ULONG (WINAPI *Release)( void * );
+    HRESULT (WINAPI *GetIids)( void *, ULONG *, void ** );
+    HRESULT (WINAPI *GetRuntimeClassName)( void *, HSTRING * );
+    HRESULT (WINAPI *GetTrustLevel)( void *, int * );
+    HRESULT (WINAPI *QueryState)( void *, HSTRING, void ** );
+    HRESULT (WINAPI *CreateStateCacheManager)( void *, void ** );
+};
+
+struct cache_context_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *, const void *, void ** );
+    ULONG (WINAPI *AddRef)( void * );
+    ULONG (WINAPI *Release)( void * );
+    HRESULT (WINAPI *GetIids)( void *, ULONG *, void ** );
+    HRESULT (WINAPI *GetRuntimeClassName)( void *, HSTRING * );
+    HRESULT (WINAPI *GetTrustLevel)( void *, int * );
+    HRESULT (WINAPI *OpenSubContext)( void *, HSTRING, void ** );
+    HRESULT (WINAPI *Close)( void * );
+    HRESULT (WINAPI *IsEmpty)( void *, int * );
+    HRESULT (WINAPI *EnumerateData)( void *, void * );
+    HRESULT (WINAPI *AddToCache)( void *, void * );
+    HRESULT (WINAPI *GetField_UInt32)( void *, ULONG, ULONG * );
+    HRESULT (WINAPI *GetField_UInt64)( void *, ULONG, ULONG64 * );
+    HRESULT (WINAPI *GetField_String)( void *, ULONG, HSTRING * );
+    HRESULT (WINAPI *GetField_MultiString)( void *, ULONG, ULONG *, HSTRING ** );
+    HRESULT (WINAPI *GetField_Binary)( void *, ULONG, ULONG *, void ** );
+    HRESULT (WINAPI *GetField_Guid)( void *, ULONG, GUID * );
+};
+
+static void test_cache_statecache( void )
+{
+    static const WCHAR manager_class[] = L"Windows.Internal.StateRepository.Cache.StateCacheManager";
+    static const WCHAR full_name[] = L"WineTest.CacheState_7.7.7.7_x64__qq11qq11qq11";
+    static const WCHAR pkg_path[] = L"C:\\WineTestCacheState";
+    static const WCHAR appmodel_key[] =
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\WineTest.CacheState_7.7.7.7_x64__qq11qq11qq11";
+    HRESULT (WINAPI *p_DllGetActivationFactory)( HSTRING, void ** );
+    const struct cache_statics_vtbl *statics;
+    const struct cache_context_vtbl *vtbl;
+    HMODULE mod = LoadLibraryA( "windows.staterepositorycore.dll" );
+    void *factory, *manager, *context, *sub;
+    HSTRING str, hstr;
+    HRESULT hr;
+    int empty;
+    ULONG roaming;
+    HKEY hkey;
+
+    ok( mod != NULL, "failed to load windows.staterepositorycore.dll, err %lu\n", GetLastError() );
+    if (!mod) return;
+    p_DllGetActivationFactory = (void *)GetProcAddress( mod, "DllGetActivationFactory" );
+    if (!p_DllGetActivationFactory)
+    {
+        skip( "DllGetActivationFactory not exported\n" );
+        FreeLibrary( mod );
+        return;
+    }
+
+    WindowsCreateString( manager_class, ARRAY_SIZE(manager_class) - 1, &str );
+    factory = NULL;
+    hr = p_DllGetActivationFactory( str, &factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && factory, "StateCacheManager factory hr %#lx factory %p\n", hr, factory );
+    if (hr != S_OK || !factory)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+    statics = *(const struct cache_statics_vtbl **)factory;
+
+    /* CreateStateCacheManager hands out the manager row */
+    manager = NULL;
+    hr = statics->CreateStateCacheManager( factory, &manager );
+    ok( hr == S_OK && manager, "CreateStateCacheManager hr %#lx manager %p\n", hr, manager );
+
+    /* seed a deployment record; the context answers its fields from it */
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, appmodel_key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
+    {
+        skip( "cannot seed the package registration\n" );
+        FreeLibrary( mod );
+        return;
+    }
+    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)pkg_path, sizeof(pkg_path) );
+    RegCloseKey( hkey );
+
+    WindowsCreateString( full_name, ARRAY_SIZE(full_name) - 1, &str );
+    context = NULL;
+    hr = statics->QueryState( factory, str, &context );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && context, "QueryState hr %#lx context %p\n", hr, context );
+    if (hr == S_OK && context)
+    {
+        vtbl = *(const struct cache_context_vtbl **)context;
+
+        empty = TRUE;
+        hr = vtbl->IsEmpty( context, &empty );
+        ok( hr == S_OK && !empty, "registered package: empty %d hr %#lx\n", empty, hr );
+
+        roaming = 0;
+        hr = vtbl->GetField_UInt32( context, 2, &roaming ); /* Roaming */
+        ok( hr == S_OK && roaming == 1, "Roaming %lu hr %#lx\n", roaming, hr );
+
+        hstr = NULL;
+        hr = vtbl->GetField_String( context, 7, &hstr ); /* DataPackagePath */
+        ok( hr == S_OK && hstr && !wcscmp( WindowsGetStringRawBuffer( hstr, NULL ), L"C:\\WineTestCacheState\\AppData\\Local" ),
+                "DataPackagePath hr %#lx str %s\n", hr, debugstr_hstring( hstr ) );
+        WindowsDeleteString( hstr );
+
+        hstr = NULL;
+        hr = vtbl->GetField_String( context, 3, &hstr ); /* InstanceId */
+        ok( hr == S_OK && hstr && WindowsGetStringLen(hstr), "InstanceId hr %#lx str %s\n", hr, debugstr_hstring( hstr ) );
+        WindowsDeleteString( hstr );
+
+        /* the subcontext projects OpenSubContext: the name grows, the answers stay */
+        {
+            static const WCHAR sub_name[] = L"Sub";
+            WindowsCreateString( sub_name, ARRAY_SIZE(sub_name) - 1, &str );
+            sub = NULL;
+            hr = vtbl->OpenSubContext( context, str, &sub );
+            WindowsDeleteString( str );
+            ok( hr == S_OK && sub, "OpenSubContext hr %#lx sub %p\n", hr, sub );
+            if (hr == S_OK && sub)
+            {
+                const struct cache_context_vtbl *svtbl = *(const struct cache_context_vtbl **)sub;
+                hstr = NULL;
+                hr = svtbl->GetField_String( sub, 3, &hstr );
+                ok( hr == S_OK && hstr && WindowsGetStringLen(hstr), "sub InstanceId hr %#lx str %s\n", hr, debugstr_hstring( hstr ) );
+                WindowsDeleteString( hstr );
+                svtbl->Release( sub );
+            }
+        }
+        vtbl->Release( context );
+    }
+
+    /* the row answers QueryState at its own slot 6 */
+    if (manager)
+    {
+        const struct cache_statics_vtbl *mvtbl = *(const struct cache_statics_vtbl **)manager;
+        context = NULL;
+        hr = mvtbl->QueryState( manager, NULL, &context );
+        ok( hr == S_OK && context, "manager row QueryState hr %#lx context %p\n", hr, context );
+        if (hr == S_OK && context)
+        {
+            vtbl = *(const struct cache_context_vtbl **)context;
+            vtbl->Release( context );
+        }
+        mvtbl->Release( manager );
+    }
+
+    (*(const struct cache_statics_vtbl **)factory)->Release( factory );
+    RegDeleteTreeW( HKEY_CURRENT_USER, appmodel_key );
+    FreeLibrary( mod );
+}
+
 static void test_activation( void )
 {
     static const WCHAR user_class[] = L"Windows.Internal.StateRepository.User";
@@ -316,5 +480,6 @@ START_TEST( staterepository )
     test_apiset_exports();
     test_cache_unavailable();
     test_cache_registry();
+    test_cache_statecache();
     test_activation();
 }

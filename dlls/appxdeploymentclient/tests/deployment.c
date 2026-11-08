@@ -32,12 +32,21 @@
 
 #include "wine/test.h"
 
+#ifndef E_NOT_FOUND
+#define E_NOT_FOUND MAKE_HRESULT( SEVERITY_ERROR, 0x87, 0x490 ) /* 0x80070490 */
+#endif
+
 #define COBJMACROS
 #define WIDL_using_Windows_Foundation
+#define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
+#include "windows.foundation.collections.h"
+#define WIDL_using_Windows_System
+#define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Management_Deployment
 #define WIDL_using_Windows_ApplicationModel
 #include "windows.management.deployment.h"
+#include "windows.storage.h"
 
 static const WCHAR full_name[] = L"WineTest.Deploy_4.5.6.7_x64__t7q2w3e4r5y6";
 static const WCHAR staged_path[] = L"C:\\WineTestStage\\WineTest.Deploy_4.5.6.7_x64__t7q2w3e4r5y6";
@@ -49,6 +58,8 @@ static const IID IID_iinspectable = {0xaf86e2e0, 0xb12d, 0x4c6a, {0x9c, 0x5a, 0x
 static const IID IID_iuri = {0x9e92e132, 0x23be, 0x4f41, {0xba, 0x42, 0x32, 0xe3, 0x94, 0x6f, 0x7b, 0x4f}};
 static const IID IID_iasyncinfo = {0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
 static const IID IID_ipm = {0x9a7d4b65, 0x5e8f, 0x4fc7, {0xa2, 0xe5, 0x7f, 0x69, 0x25, 0xcb, 0x8b, 0x53}};
+static const IID IID_ipm2 = {0xf7aad08d, 0x0840, 0x46f2, {0xb5, 0xd8, 0xca, 0xd4, 0x76, 0x93, 0xa0, 0x95}};
+static const IID IID_istorageitem = {0x4207a996, 0xca2f, 0x42f7, {0xbd, 0xe8, 0x8b, 0x10, 0x45, 0x7a, 0x7f, 0x30}};
 
 /* the URI the deployment is asked for: only Path is read (the staged directory) */
 
@@ -250,6 +261,214 @@ static const struct IAsyncOperationWithProgressCompletedHandler_DeploymentResult
 
 static struct completed_handler test_handler = { { &handler_vtbl }, 1 };
 
+/* the registration the deployment left behind must come back through the
+ * collection faces: FindPackages walks every record, the family lookup finds
+ * exactly this one, the full-name lookup answers its identity and path, and
+ * an unregistered name is E_NOT_FOUND */
+static void test_find_packages( IPackageManager *pm )
+{
+    static const WCHAR family[] = L"WineTest.Deploy_t7q2w3e4r5y6";
+    static const WCHAR absent[] = L"WineTest.Absent_9.9.9.9_x64__zzzzzzzzzzzz";
+    IIterable_Package *iterable;
+    IIterator_Package *iter;
+    IPackageManager2 *pm2;
+    IPackage *pkg, *found;
+    IPackage *items[4];
+    IPackageId *id;
+    HSTRING str;
+    HRESULT hr;
+    boolean has, framework = TRUE;
+    ULONG total = 0;
+
+    str = NULL;
+    WindowsCreateString( full_name, ARRAY_SIZE(full_name) - 1, &str );
+    iterable = NULL;
+    hr = IPackageManager_FindPackages( pm, &iterable );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && iterable, "FindPackages hr %#lx iterable %p\n", hr, iterable );
+    if (!iterable) return;
+
+    /* the collection contains the registered package, and its id reads back */
+    found = NULL;
+    if (SUCCEEDED( (hr = IIterable_Package_First( iterable, &iter ) ) ))
+    {
+        has = TRUE;
+        IIterator_Package_get_HasCurrent( iter, &has );
+        while (has)
+        {
+            total++;
+            pkg = NULL;
+            if (SUCCEEDED( IIterator_Package_get_Current( iter, &pkg ) ) && pkg)
+            {
+                HSTRING name = NULL;
+                if (SUCCEEDED( IPackage_get_Id( pkg, &id ) ) )
+                {
+                    IPackageId_get_FullName( id, &name );
+                    IPackageId_Release( id );
+                }
+                if (name && !wcscmp( WindowsGetStringRawBuffer( name, NULL ),
+                                     WindowsGetStringRawBuffer( str, NULL ) ))
+                {
+                    found = pkg;
+                    WindowsDeleteString( name );
+                    break;
+                }
+                WindowsDeleteString( name );
+            }
+            IIterator_Package_MoveNext( iter, &has );
+        }
+        IIterator_Package_Release( iter );
+    }
+    ok( !!found, "FindPackages did not enumerate %s (total %lu)\n", debugstr_w( full_name ), total );
+    if (found)
+    {
+        HSTRING fam = NULL;
+        IStorageFolder *folder;
+        IStorageItem *item;
+        HSTRING path = NULL;
+
+        if (SUCCEEDED( IPackage_get_Id( found, &id ) ) )
+        {
+            IPackageId_get_FamilyName( id, &fam );
+            IPackageId_Release( id );
+        }
+        WindowsCreateString( family, ARRAY_SIZE(family) - 1, &str );
+        ok( fam && !wcscmp( WindowsGetStringRawBuffer( fam, NULL ), WindowsGetStringRawBuffer( str, NULL ) ),
+                "FamilyName %s, expected %s\n", debugstr_hstring( fam ), debugstr_w( family ) );
+        WindowsDeleteString( str );
+        WindowsDeleteString( fam );
+
+        IPackage_get_IsFramework( found, &framework );
+        ok( !framework, "IsFramework %d\n", framework );
+
+        /* InstalledLocation is the registered path */
+        if (SUCCEEDED( IPackage_get_InstalledLocation( found, &folder ) ) )
+        {
+            if (SUCCEEDED( IStorageFolder_QueryInterface( folder, (void *)&IID_istorageitem, (void **)&item ) ) )
+            {
+                IStorageItem_get_Path( item, &path );
+                IStorageItem_Release( item );
+            }
+            IStorageFolder_Release( folder );
+        }
+        ok( path && !wcscmp( WindowsGetStringRawBuffer( path, NULL ), staged_path ),
+                "InstalledLocation path %s, expected %s\n", debugstr_hstring( path ), debugstr_w( staged_path ) );
+        WindowsDeleteString( path );
+    }
+    IIterable_Package_Release( iterable );
+
+    /* the family filter answers exactly this deployment */
+    WindowsCreateString( family, ARRAY_SIZE(family) - 1, &str );
+    iterable = NULL;
+    hr = IPackageManager_FindPackagesByPackageFamilyName( pm, str, &iterable );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && iterable, "FindPackagesByPackageFamilyName hr %#lx\n", hr );
+    if (iterable)
+    {
+        ULONG written = 0;
+        if (SUCCEEDED( IIterable_Package_First( iterable, &iter ) ) )
+        {
+            hr = IIterator_Package_GetMany( iter, ARRAY_SIZE(items), items, &written );
+            ok( hr == S_OK && written == 1, "family collection size %lu hr %#lx\n", written, hr );
+            for (ULONG i = 0; i < written; i++) IPackage_Release( items[i] );
+            IIterator_Package_Release( iter );
+        }
+        IIterable_Package_Release( iterable );
+    }
+
+    /* full-name lookup: registered answers, absent is E_NOT_FOUND */
+    pkg = NULL;
+    WindowsCreateString( full_name, ARRAY_SIZE(full_name) - 1, &str );
+    hr = IPackageManager_FindPackageByPackageFullName( pm, str, &pkg );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && pkg, "FindPackageByPackageFullName hr %#lx pkg %p\n", hr, pkg );
+    if (pkg) IPackage_Release( pkg );
+
+    pkg = (void *)0xdead;
+    WindowsCreateString( absent, ARRAY_SIZE(absent) - 1, &str );
+    hr = IPackageManager_FindPackageByPackageFullName( pm, str, &pkg );
+    WindowsDeleteString( str );
+    ok( hr == E_NOT_FOUND, "absent package hr %#lx, expected E_NOT_FOUND\n", hr );
+
+    /* the same face through the WithPackageTypes overload (App|Framework) */
+    if (SUCCEEDED( (hr = IPackageManager_QueryInterface( pm, (void *)&IID_ipm2, (void **)&pm2 ) ) ) )
+    {
+        iterable = NULL;
+        WindowsCreateString( family, ARRAY_SIZE(family) - 1, &str );
+        hr = IPackageManager2_FindPackagesByPackageFamilyNameWithPackageTypes( pm2,
+                str, PackageTypes_All, &iterable );
+        WindowsDeleteString( str );
+        ok( hr == S_OK && iterable, "WithPackageTypes hr %#lx iterable %p\n", hr, iterable );
+        if (iterable) IIterable_Package_Release( iterable );
+        IPackageManager2_Release( pm2 );
+    }
+    else skip( "IPackageManager2 QI hr %#lx\n", hr );
+}
+
+/* CoCreateInstance(CLSID_PackageManager) reaches the same object the
+ * activation factory activates */
+static void test_class_factory( void )
+{
+    static const IID clsid_pm = {0x4df1538a, 0x1819, 0x4822, {0x81, 0xa4, 0x4d, 0xf6, 0x79, 0x5e, 0xa7, 0x89}};
+    static const IID clsid_other = {0x11111111, 0x2222, 0x3333, {0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb}};
+    static const IID iid_icf = {0x00000001, 0x0000, 0x0000, {0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46}};
+    HRESULT (WINAPI *p_DllGetClassObject)( const IID *, const IID *, void ** );
+    IClassFactory *cf;
+    IPackageManager *pm;
+    IIterable_Package *iterable;
+    HMODULE mod;
+    void *obj;
+    HRESULT hr;
+
+    mod = LoadLibraryA( "appxdeploymentclient.dll" );
+    if (!mod) return;
+    p_DllGetClassObject = (void *)GetProcAddress( mod, "DllGetClassObject" );
+    ok( p_DllGetClassObject != NULL, "DllGetClassObject not exported\n" );
+    if (!p_DllGetClassObject)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+
+    obj = NULL;
+    hr = p_DllGetClassObject( &clsid_pm, &iid_icf, &obj );
+    ok( hr == S_OK && obj, "class object hr %#lx cf %p\n", hr, obj );
+    if (hr != S_OK || !obj)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+    cf = (IClassFactory *)obj;
+
+    pm = NULL;
+    hr = IClassFactory_CreateInstance( cf, NULL, (void *)&IID_ipm, (void **)&pm );
+    ok( hr == S_OK && pm, "CreateInstance hr %#lx pm %p\n", hr, pm );
+    if (pm)
+    {
+        iterable = NULL;
+        hr = IPackageManager_FindPackages( pm, &iterable );
+        ok( hr == S_OK && iterable, "FindPackages through class factory hr %#lx\n", hr );
+        if (iterable) IIterable_Package_Release( iterable );
+        IPackageManager_Release( pm );
+    }
+
+    /* the default (IPackageManager) interface answers too */
+    obj = NULL;
+    hr = IClassFactory_CreateInstance( cf, NULL, (void *)&IID_ipm, &obj );
+    ok( hr == S_OK && obj, "CreateInstance(IPackageManager) hr %#lx\n", hr );
+    if (obj) IPackageManager_Release( (IPackageManager *)obj );
+
+    hr = IClassFactory_LockServer( cf, TRUE );
+    ok( hr == S_OK, "LockServer hr %#lx\n", hr );
+    IClassFactory_Release( cf );
+
+    obj = (void *)0xdead;
+    hr = p_DllGetClassObject( &clsid_other, &iid_icf, &obj );
+    ok( hr == CLASS_E_CLASSNOTAVAILABLE && !obj, "foreign clsid hr %#lx obj %p\n", hr, obj );
+
+    FreeLibrary( mod );
+}
+
 static void test_register_package( void )
 {
     static const WCHAR class_name[] = L"Windows.Management.Deployment.PackageManager";
@@ -363,6 +582,9 @@ static void test_register_package( void )
     }
     else ok( FALSE, "no Packages\\%s registration\n", debugstr_w( full_name ) );
 
+    /* the deployment is visible through the Find faces before it is cleaned up */
+    test_find_packages( pm );
+
     RegDeleteTreeW( HKEY_CURRENT_USER, appmodel_key );
 
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress_Release( op );
@@ -373,4 +595,5 @@ static void test_register_package( void )
 START_TEST( deployment )
 {
     test_register_package();
+    test_class_factory();
 }

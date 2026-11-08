@@ -33,11 +33,16 @@
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
 #include "asyncinfo.h"
+#define WIDL_using_Windows_System
+#define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Management_Deployment
 #define WIDL_using_Windows_ApplicationModel
 #include "windows.management.deployment.h"
+#include "windows.storage.h"
 
 extern IActivationFactory *package_manager_factory;
+
+HRESULT package_manager_create( IPackageManager **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

@@ -640,6 +640,301 @@ static HRESULT generic_create( const WCHAR *cls, BOOL row, void **out )
     return S_OK;
 }
 
+/*
+ * Windows.Internal.StateRepository.Cache: the WinRT face over the SRCache C
+ * plane of main.c. The classes are the documented projection of the C exports
+ * (there is no RTM metadata for them in this tree, so the method order mirrors
+ * the C surface one-for-one and the rest stays on the generic slot table):
+ *
+ *   StateCacheManager  statics slot 6  QueryState(context) -> SRCacheContext
+ *                    statics slot 7  CreateStateCacheManager() -> StateCacheManager
+ *                      (the row answers QueryState at its slot 6: the manager
+ *                      is stateless, the C plane's manager handle is NULL)
+ *   SRCacheContext     slots 6..16    OpenSubContext, Close, IsEmpty, EnumerateData,
+ *                      AddToCache, GetField_UInt32/UInt64/String/MultiString/
+ *                      Binary/Guid -- each a call into the C plane with the
+ *                      context handle this row carries, WCHAR* answers becoming
+ *                      HSTRINGs and the SRCache allocator releasing them.
+ *
+ * One slot each for QueryState and CreateStateCacheManager is what the C# and
+ * C++/WinRT projections of the class use; the C plane answers for every
+ * registered package (the AppModel registration, HKCU over HKLM).
+ */
+
+HRESULT WINAPI SRCacheContext_Open( void *manager, const WCHAR *name, void **context );
+HRESULT WINAPI SRCacheContext_OpenSubContext( void *context, const WCHAR *name, void **sub_context );
+void WINAPI SRCacheContext_Close( void *context );
+HRESULT WINAPI SRCacheContext_IsEmpty( void *context, BOOL *empty );
+HRESULT WINAPI SRCacheContext_EnumerateData( void *context, void *callback, void *param );
+HRESULT WINAPI SRCacheContext_AddToCache( void *context, void *data );
+HRESULT WINAPI SRCacheContext_GetField_UInt32( void *context, ULONG field, ULONG *value );
+HRESULT WINAPI SRCacheContext_GetField_UInt64( void *context, ULONG field, ULONG64 *value );
+HRESULT WINAPI SRCacheContext_GetField_String( void *context, ULONG field, WCHAR **value );
+HRESULT WINAPI SRCacheContext_GetField_MultiString( void *context, ULONG field, WCHAR **value );
+HRESULT WINAPI SRCacheContext_GetField_Binary( void *context, ULONG field, void **value, ULONG *size );
+HRESULT WINAPI SRCacheContext_GetField_Guid( void *context, ULONG field, GUID *value );
+void WINAPI SRCache_Free( void *ptr );
+
+static const WCHAR cache_manager_class[] = L"Windows.Internal.StateRepository.Cache.StateCacheManager";
+
+struct cache_context
+{
+    const void **vtbl;
+    LONG ref;
+    void *c_ctx;      /* the C plane's SRCacheContext handle */
+};
+
+static HRESULT cache_context_create( void *c_ctx, void **out );
+
+static HRESULT WINAPI cache_context_QueryInterface( struct cache_context *impl, REFIID iid, void **out )
+{
+    InterlockedIncrement( &impl->ref );
+    *out = impl;
+    return S_OK;
+}
+
+static ULONG WINAPI cache_context_AddRef( struct cache_context *impl )
+{
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI cache_context_Release( struct cache_context *impl )
+{
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->c_ctx) SRCacheContext_Close( impl->c_ctx );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI cache_context_GetRuntimeClassName( struct cache_context *impl, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Internal.StateRepository.Cache.SRCacheContext";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI cache_context_OpenSubContext( struct cache_context *impl, HSTRING name,
+        struct cache_context **out )
+{
+    const WCHAR *buffer = WindowsGetStringRawBuffer( name, NULL );
+    void *sub = NULL;
+    HRESULT hr;
+
+    TRACE( "impl %p, name %s, out %p.\n", impl, debugstr_hstring( name ), out );
+    if (!out) return E_INVALIDARG;
+    if (FAILED( (hr = SRCacheContext_OpenSubContext( impl->c_ctx, buffer, &sub ) ) )) return hr;
+    return cache_context_create( sub, (void **)out );
+}
+
+static HRESULT WINAPI cache_context_Close( struct cache_context *impl )
+{
+    if (impl->c_ctx)
+    {
+        SRCacheContext_Close( impl->c_ctx );
+        impl->c_ctx = NULL;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI cache_context_IsEmpty( struct cache_context *impl, boolean *value )
+{
+    BOOL empty;
+    HRESULT hr;
+
+    if (FAILED( (hr = SRCacheContext_IsEmpty( impl->c_ctx, &empty ) ) )) return hr;
+    *value = empty;
+    return S_OK;
+}
+
+static HRESULT WINAPI cache_context_EnumerateData( struct cache_context *impl, void *callback )
+{
+    return SRCacheContext_EnumerateData( impl->c_ctx, callback, NULL );
+}
+
+static HRESULT WINAPI cache_context_AddToCache( struct cache_context *impl, void *data )
+{
+    return SRCacheContext_AddToCache( impl->c_ctx, data );
+}
+
+static HRESULT WINAPI cache_context_GetField_UInt32( struct cache_context *impl, ULONG field, ULONG *value )
+{
+    return SRCacheContext_GetField_UInt32( impl->c_ctx, field, value );
+}
+
+static HRESULT WINAPI cache_context_GetField_UInt64( struct cache_context *impl, ULONG field, ULONG64 *value )
+{
+    return SRCacheContext_GetField_UInt64( impl->c_ctx, field, value );
+}
+
+static HRESULT WINAPI cache_context_GetField_String( struct cache_context *impl, ULONG field, HSTRING *value )
+{
+    WCHAR *str = NULL;
+    HRESULT hr;
+
+    if (FAILED( (hr = SRCacheContext_GetField_String( impl->c_ctx, field, &str ) ) )) return hr;
+    if (!str)
+    {
+        *value = NULL;
+        return S_OK;
+    }
+    hr = WindowsCreateString( str, lstrlenW( str ), value );
+    SRCache_Free( str );
+    return hr;
+}
+
+static HRESULT WINAPI cache_context_GetField_MultiString( struct cache_context *impl, ULONG field,
+        ULONG *size, HSTRING **value )
+{
+    WCHAR *str = NULL;
+    HRESULT hr;
+
+    /* the C plane hands back the whole multi-string block; the projection
+     * reports it as one string until a caller needs the split */
+    if (size) *size = 0;
+    if (value) *value = NULL;
+    if (FAILED( (hr = SRCacheContext_GetField_MultiString( impl->c_ctx, field, &str ) ) )) return hr;
+    return S_OK;
+}
+
+static HRESULT WINAPI cache_context_GetField_Binary( struct cache_context *impl, ULONG field,
+        ULONG *size, void **value )
+{
+    return SRCacheContext_GetField_Binary( impl->c_ctx, field, value, size );
+}
+
+static HRESULT WINAPI cache_context_GetField_Guid( struct cache_context *impl, ULONG field, GUID *value )
+{
+    return SRCacheContext_GetField_Guid( impl->c_ctx, field, value );
+}
+
+static const void *cache_context_vtbl[] =
+{
+    cache_context_QueryInterface,
+    cache_context_AddRef,
+    cache_context_Release,
+    /* IInspectable methods */
+    get_iids,
+    cache_context_GetRuntimeClassName,
+    get_trust_level,
+    /* the C surface, in export order */
+    cache_context_OpenSubContext,
+    cache_context_Close,
+    cache_context_IsEmpty,
+    cache_context_EnumerateData,
+    cache_context_AddToCache,
+    cache_context_GetField_UInt32,
+    cache_context_GetField_UInt64,
+    cache_context_GetField_String,
+    cache_context_GetField_MultiString,
+    cache_context_GetField_Binary,
+    cache_context_GetField_Guid,
+};
+
+static HRESULT cache_context_create( void *c_ctx, void **out )
+{
+    struct cache_context *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = cache_context_vtbl;
+    impl->ref = 1;
+    impl->c_ctx = c_ctx;
+    *out = impl;
+    return S_OK;
+}
+
+/* StateCacheManager: statics and row share the table; QueryState answers at
+ * slot 6 for both, CreateStateCacheManager at slot 7 hands out the row. */
+
+struct cache_manager
+{
+    const void **vtbl;
+    LONG ref;
+    BOOL row;
+};
+
+static const void *cache_manager_vtbl[];
+
+static HRESULT WINAPI cache_manager_QueryInterface( struct cache_manager *impl, REFIID iid, void **out )
+{
+    TRACE( "%s.\n", debugstr_guid( iid ) );
+    InterlockedIncrement( &impl->ref );
+    *out = impl;
+    return S_OK;
+}
+
+static ULONG WINAPI cache_manager_AddRef( struct cache_manager *impl )
+{
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI cache_manager_Release( struct cache_manager *impl )
+{
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI cache_manager_GetRuntimeClassName( struct cache_manager *impl, HSTRING *name )
+{
+    return WindowsCreateString( cache_manager_class, ARRAY_SIZE(cache_manager_class) - 1, name );
+}
+
+static HRESULT WINAPI cache_manager_QueryState( struct cache_manager *impl, HSTRING context,
+        struct cache_context **out )
+{
+    const WCHAR *name = context ? WindowsGetStringRawBuffer( context, NULL ) : NULL;
+    void *c_ctx = NULL;
+    HRESULT hr;
+
+    TRACE( "impl %p, context %s, out %p.\n", impl, debugstr_hstring( context ), out );
+    if (!out) return E_INVALIDARG;
+    if (FAILED( (hr = SRCacheContext_Open( NULL, name, &c_ctx ) ) )) return hr;
+    return cache_context_create( c_ctx, (void **)out );
+}
+
+static HRESULT WINAPI cache_manager_Create( struct cache_manager *impl, struct cache_manager **out )
+{
+    struct cache_manager *row;
+
+    TRACE( "impl %p, out %p.\n", impl, out );
+    if (!out) return E_INVALIDARG;
+    if (!(row = calloc( 1, sizeof(*row) ))) return E_OUTOFMEMORY;
+    row->vtbl = cache_manager_vtbl;
+    row->ref = 1;
+    row->row = TRUE;
+    *out = row;
+    return S_OK;
+}
+
+static const void *cache_manager_vtbl[] =
+{
+    cache_manager_QueryInterface,
+    cache_manager_AddRef,
+    cache_manager_Release,
+    /* IInspectable methods */
+    get_iids,
+    cache_manager_GetRuntimeClassName,
+    get_trust_level,
+    /* IStateCacheManager: the one method; statics add the factory */
+    cache_manager_QueryState,
+    cache_manager_Create,
+};
+
+static HRESULT cache_manager_create( BOOL row, void **out )
+{
+    struct cache_manager *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl = cache_manager_vtbl;
+    impl->ref = 1;
+    impl->row = row;
+    *out = impl;
+    return S_OK;
+}
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     static const WCHAR prefix[] = L"Windows.Internal.StateRepository.";
@@ -649,6 +944,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     *factory = NULL;
     if (wcsncmp( name, prefix, ARRAY_SIZE(prefix) - 1 )) return CLASS_E_CLASSNOTAVAILABLE;
+    if (!wcscmp( name, cache_manager_class ))
+        return cache_manager_create( FALSE, (void **)factory );
     if (wcscmp( name, user_class )) return generic_create( name, FALSE, (void **)factory );
 
     user_statics.vtbl = statics_vtbl;

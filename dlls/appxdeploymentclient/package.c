@@ -20,9 +20,19 @@
 #include "private.h"
 #include "wine/debug.h"
 
+#include <stdio.h>
+
 #include "winreg.h"
+#include "objbase.h"
+#include "appmodel.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(appx);
+
+#ifndef E_NOT_FOUND
+#define E_NOT_FOUND MAKE_HRESULT( SEVERITY_ERROR, 0x87, 0x490 ) /* 0x80070490 */
+#endif
+
+LONG WINAPI PackageFamilyNameFromFullName( const WCHAR *full_name, UINT32 *length, WCHAR *family_name );
 
 /*
  * RegisterPackageAsync's deployment, minimal ladder.
@@ -468,6 +478,10 @@ static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *ifa
     return register_async_op_create( operation );
 }
 
+static HRESULT find_packages( const WCHAR *family, const WCHAR *name, const WCHAR *publisher,
+                              PackageTypes types, IIterable_Package **packages );
+static HRESULT find_package_by_full_name( const WCHAR *full_name, IPackage **package );
+
 struct package_manager
 {
     IPackageManager IPackageManager_iface;
@@ -529,20 +543,26 @@ static ULONG WINAPI package_manager_Release( IPackageManager *iface )
 
 static HRESULT WINAPI package_manager_GetIids( IPackageManager *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID *const iids_pm[] = { &IID_IPackageManager, &IID_IPackageManager2 };
+
+    FIXME( "iface %p, iid_count %p, iids %p semi-stub!\n", iface, iid_count, iids );
+    if (!iid_count || !iids) return E_INVALIDARG;
+    *iid_count = ARRAY_SIZE(iids_pm);
+    if (!(*iids = CoTaskMemAlloc( *iid_count * sizeof(IID) ))) return E_OUTOFMEMORY;
+    for (ULONG i = 0; i < *iid_count; i++) *(*iids + i) = *iids_pm[i];
+    return S_OK;
 }
 
 static HRESULT WINAPI package_manager_GetRuntimeClassName( IPackageManager *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR class_w[] = L"Windows.Management.Deployment.PackageManager";
+    return WindowsCreateString( class_w, ARRAY_SIZE(class_w) - 1, class_name );
 }
 
 static HRESULT WINAPI package_manager_GetTrustLevel( IPackageManager *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI package_manager_AddPackageAsync( IPackageManager *iface, IUriRuntimeClass *uri,
@@ -575,29 +595,33 @@ static HRESULT WINAPI package_manager_StagePackageAsync( IPackageManager *iface,
 
 static HRESULT WINAPI package_manager_FindPackages( IPackageManager *iface, IIterable_Package **packages )
 {
-    FIXME( "iface %p, packages %p stub!\n", iface, packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, packages %p.\n", iface, packages );
+    return find_packages( NULL, NULL, NULL, 0, packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackagesByUserSecurityId( IPackageManager *iface, HSTRING sid, IIterable_Package **packages )
 {
-    FIXME( "iface %p, sid %s, packages %p stub!\n", iface, debugstr_hstring(sid), packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, sid %s, packages %p.\n", iface, debugstr_hstring(sid), packages );
+    return find_packages( NULL, NULL, NULL, 0, packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackagesByNamePublisher( IPackageManager *iface, HSTRING name, HSTRING publisher, IIterable_Package **packages )
 {
-    FIXME( "iface %p, name %s, publisher %s, packages %p stub!\n", iface, debugstr_hstring(name), debugstr_hstring(publisher), packages );
+    TRACE( "iface %p, name %s, publisher %s, packages %p.\n", iface, debugstr_hstring(name), debugstr_hstring(publisher), packages );
 
     if (!name || !publisher) return E_INVALIDARG;
-    return E_NOTIMPL;
+    return find_packages( NULL, WindowsGetStringRawBuffer( name, NULL ),
+                          WindowsGetStringRawBuffer( publisher, NULL ), 0, packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackagesByUserSecurityIdNamePublisher( IPackageManager *iface, HSTRING sid,
     HSTRING name, HSTRING publisher, IIterable_Package **packages )
 {
-    FIXME( "iface %p, sid %s, name %s, publisher %s, packages %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(name), debugstr_hstring(publisher), packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, sid %s, name %s, publisher %s, packages %p.\n", iface, debugstr_hstring(sid), debugstr_hstring(name), debugstr_hstring(publisher), packages );
+
+    if (!name || !publisher) return E_INVALIDARG;
+    return find_packages( NULL, WindowsGetStringRawBuffer( name, NULL ),
+                          WindowsGetStringRawBuffer( publisher, NULL ), 0, packages );
 }
 
 static HRESULT WINAPI package_manager_FindUsers( IPackageManager *iface, HSTRING name, IIterable_PackageUserInformation **users )
@@ -614,8 +638,10 @@ static HRESULT WINAPI package_manager_SetPackageState( IPackageManager *iface, H
 
 static HRESULT WINAPI package_manager_FindPackageByPackageFullName( IPackageManager *iface, HSTRING name, IPackage **package )
 {
-    FIXME( "iface %p, name %s, package %p stub!\n", iface, debugstr_hstring(name), package );
-    return E_NOTIMPL;
+    TRACE( "iface %p, name %s, package %p.\n", iface, debugstr_hstring(name), package );
+
+    if (!name || !package) return E_INVALIDARG;
+    return find_package_by_full_name( WindowsGetStringRawBuffer( name, NULL ), package );
 }
 
 static HRESULT WINAPI package_manager_CleanupPackageForUserAsync( IPackageManager *iface, HSTRING name, HSTRING sid,
@@ -628,21 +654,27 @@ static HRESULT WINAPI package_manager_CleanupPackageForUserAsync( IPackageManage
 static HRESULT WINAPI package_manager_FindPackagesByPackageFamilyName( IPackageManager *iface, HSTRING family_name,
     IIterable_Package **packages )
 {
-    FIXME( "iface %p, family_name %s, packages %p stub!\n", iface, debugstr_hstring(family_name), packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, family_name %s, packages %p.\n", iface, debugstr_hstring(family_name), packages );
+
+    if (!family_name) return E_INVALIDARG;
+    return find_packages( WindowsGetStringRawBuffer( family_name, NULL ), NULL, NULL, 0, packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackagesByUserSecurityIdPackageFamilyName( IPackageManager *iface, HSTRING sid,
     HSTRING family_name, IIterable_Package **packages )
 {
-    FIXME( "iface %p, sid %s, family_name %s, packages %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(family_name), packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, sid %s, family_name %s, packages %p.\n", iface, debugstr_hstring(sid), debugstr_hstring(family_name), packages );
+
+    if (!family_name) return E_INVALIDARG;
+    return find_packages( WindowsGetStringRawBuffer( family_name, NULL ), NULL, NULL, 0, packages );
 }
 
 static HRESULT WINAPI package_manager_FindPackageByUserSecurityIdPackageFullName( IPackageManager *iface, HSTRING sid, HSTRING name, IPackage **package )
 {
-    FIXME( "iface %p, sid %s, name %s, package %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(name), package );
-    return E_NOTIMPL;
+    TRACE( "iface %p, sid %s, name %s, package %p.\n", iface, debugstr_hstring(sid), debugstr_hstring(name), package );
+
+    if (!name || !package) return E_INVALIDARG;
+    return find_package_by_full_name( WindowsGetStringRawBuffer( name, NULL ), package );
 }
 
 static const struct IPackageManagerVtbl package_manager_vtbl =
@@ -696,45 +728,58 @@ static HRESULT WINAPI package_manager2_RegisterPackageByFullNameAsync( IPackageM
     return E_NOTIMPL;
 }
 
+/* The WithPackageTypes family answers the plain one with the Framework flag
+ * of the registration deciding which side of the filter each record is on. */
+
 static HRESULT WINAPI package_manager2_FindPackagesWithPackageTypes( IPackageManager2 *iface, PackageTypes types, IIterable_Package **packages )
 {
-    FIXME( "iface %p, types %d, packages %p stub!\n", iface, types, packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, types %d, packages %p.\n", iface, types, packages );
+    return find_packages( NULL, NULL, NULL, types, packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdWithPackageTypes( IPackageManager2 *iface, HSTRING sid,
     PackageTypes types, IIterable_Package **packages )
 {
-    FIXME( "iface %p, sid %s, types %d, packages %p stub!\n", iface, debugstr_hstring(sid), types, packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, sid %s, types %d, packages %p.\n", iface, debugstr_hstring(sid), types, packages );
+    return find_packages( NULL, NULL, NULL, types, packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByNamePublisherWithPackageTypes( IPackageManager2 *iface, HSTRING name, HSTRING publisher,
     PackageTypes types, IIterable_Package **packages )
 {
-    FIXME( "iface %p, name %s, publisher %s, types %d, packages %p stub!\n", iface, debugstr_hstring(name), debugstr_hstring(publisher), types, packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, name %s, publisher %s, types %d, packages %p.\n", iface, debugstr_hstring(name), debugstr_hstring(publisher), types, packages );
+
+    if (!name || !publisher) return E_INVALIDARG;
+    return find_packages( NULL, WindowsGetStringRawBuffer( name, NULL ),
+                          WindowsGetStringRawBuffer( publisher, NULL ), types, packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdNamePublisherWithPackageTypes( IPackageManager2 *iface, HSTRING sid, HSTRING name,
     HSTRING publisher, PackageTypes types, IIterable_Package **packages )
 {
-    FIXME( "iface %p, sid %s, name %s, publisher %s, types %d, packages %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(name), debugstr_hstring(publisher), types, packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, sid %s, name %s, publisher %s, types %d, packages %p.\n", iface, debugstr_hstring(sid), debugstr_hstring(name), debugstr_hstring(publisher), types, packages );
+
+    if (!name || !publisher) return E_INVALIDARG;
+    return find_packages( NULL, WindowsGetStringRawBuffer( name, NULL ),
+                          WindowsGetStringRawBuffer( publisher, NULL ), types, packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByPackageFamilyNameWithPackageTypes( IPackageManager2 *iface, HSTRING family_name, PackageTypes types,
    IIterable_Package **packages )
 {
-    FIXME( "iface %p, family_name %s, types %d, packages %p stub!\n", iface, debugstr_hstring(family_name), types, packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, family_name %s, types %d, packages %p.\n", iface, debugstr_hstring(family_name), types, packages );
+
+    if (!family_name) return E_INVALIDARG;
+    return find_packages( WindowsGetStringRawBuffer( family_name, NULL ), NULL, NULL, types, packages );
 }
 
 static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdPackageFamilyNameWithPackageTypes( IPackageManager2 *iface, HSTRING sid, HSTRING family_name,
     PackageTypes types, IIterable_Package **packages )
 {
-    FIXME( "iface %p, sid %s, family_name %s, types %d, packages %p stub!\n", iface, debugstr_hstring(sid), debugstr_hstring(family_name), types, packages );
-    return E_NOTIMPL;
+    TRACE( "iface %p, sid %s, family_name %s, types %d, packages %p.\n", iface, debugstr_hstring(sid), debugstr_hstring(family_name), types, packages );
+
+    if (!family_name) return E_INVALIDARG;
+    return find_packages( WindowsGetStringRawBuffer( family_name, NULL ), NULL, NULL, types, packages );
 }
 
 static HRESULT WINAPI package_manager2_StageUserDataAsync( IPackageManager2 *iface, HSTRING name,
@@ -765,6 +810,1065 @@ static const struct IPackageManager2Vtbl package_manager2_vtbl =
     package_manager2_FindPackagesByUserSecurityIdPackageFamilyNameWithPackageTypes,
     package_manager2_StageUserDataAsync,
 };
+
+/*
+ * The registered package, read from the deployment registration (kernelbase's
+ * plane: Packages\<FullName> under the AppModel key, HKCU over HKLM, plus the
+ * env-pinned running package and framework the identity APIs answer from). A
+ * FindPackages call hands back these records as IPackage rows: the identity
+ * fields parse out of the full name (Name_Version_Arch_Publisher grammar),
+ * the path is the registration's, and the framework flag its Framework value.
+ */
+
+struct package_record
+{
+    WCHAR full_name[PACKAGE_FULL_NAME_MAX_LENGTH + 1];
+    WCHAR family_name[256];
+    WCHAR path[512];
+    BOOL framework;
+};
+
+/* Parse the full name's identity parts; missing parts answer neutral/zero. */
+static void split_full_name( const WCHAR *full, WCHAR *name, DWORD cch_name,
+                             PackageVersion *version, ProcessorArchitecture *arch,
+                             WCHAR *publisher, DWORD cch_publisher )
+{
+    WCHAR ver[32];
+    const WCHAR *p = full, *end;
+    SIZE_T i = 0;
+
+    if (name) name[0] = 0;
+    if (publisher) publisher[0] = 0;
+    if (version) version->Major = version->Minor = version->Build = version->Revision = 0;
+    if (arch) *arch = ProcessorArchitecture_Neutral;
+    if (!full || !full[0]) return;
+
+    end = wcschr( p, L'_' );
+    if (!end) end = p + lstrlenW( p );
+    if (name)
+    {
+        for (i = 0; p + i < end && i + 1 < cch_name; i++) name[i] = p[i];
+        name[i] = 0;
+    }
+    if (!*end) return;
+    p = end + 1;
+
+    /* version: four decimal fields; a short one is a short version, not an error */
+    end = wcschr( p, L'_' );
+    i = end ? (SIZE_T)(end - p) : lstrlenW( p );
+    if (i < ARRAY_SIZE(ver))
+    {
+        memcpy( ver, p, i * sizeof(WCHAR) );
+        ver[i] = 0;
+        if (version) swscanf( ver, L"%hu.%hu.%hu.%hu",
+                &version->Major, &version->Minor, &version->Build, &version->Revision );
+    }
+    if (!end) return;
+    p = end + 1;
+
+    end = wcschr( p, L'_' );
+    if (end)
+    {
+        if (!wcsncmp( p, L"x86", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_X86;
+        else if (!wcsncmp( p, L"x64", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_X64;
+        else if (!wcsncmp( p, L"arm64", 5 ) && (end - p == 5 )) *arch = ProcessorArchitecture_Arm64;
+        else if (!wcsncmp( p, L"arm", 3 ) && (end - p == 3 )) *arch = ProcessorArchitecture_Arm;
+        else if (!wcsncmp( p, L"neutral", 7 ) && (end - p == 7 )) *arch = ProcessorArchitecture_Neutral;
+        if (!*end) return;
+        p = end + 1;  /* the neutral arch token is empty: 'Name_Version__Publisher' */
+        if (!*p)
+        {
+            end = wcschr( p, L'_' );
+            if (!end) return;
+            p = end + 1;
+        }
+    }
+    if (publisher) lstrcpynW( publisher, p, cch_publisher );
+}
+
+struct package
+{
+    IPackage IPackage_iface;
+    IPackageId IPackageId_iface;
+    IStorageFolder IStorageFolder_iface;
+    IStorageItem IStorageItem_iface;
+    LONG ref;
+    struct package_record rec;
+};
+
+static inline struct package *impl_from_IPackage( IPackage *iface )
+{
+    return CONTAINING_RECORD( iface, struct package, IPackage_iface );
+}
+
+static inline struct package *impl_from_IPackageId( IPackageId *iface )
+{
+    return CONTAINING_RECORD( iface, struct package, IPackageId_iface );
+}
+
+static HRESULT package_create( const struct package_record *rec, struct package **ret );
+
+static HRESULT WINAPI package_QueryInterface( IPackage *iface, REFIID iid, void **out )
+{
+    struct package *impl = impl_from_IPackage( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPackage ))
+    {
+        *out = &impl->IPackage_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IPackageId ))
+    {
+        *out = &impl->IPackageId_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IStorageFolder ))
+    {
+        *out = &impl->IStorageFolder_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IStorageItem ))
+    {
+        *out = &impl->IStorageItem_iface;
+    }
+    else
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static ULONG WINAPI package_AddRef( IPackage *iface )
+{
+    struct package *impl = impl_from_IPackage( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI package_Release( IPackage *iface )
+{
+    struct package *impl = impl_from_IPackage( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI package_GetIids( IPackage *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_GetRuntimeClassName( IPackage *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.ApplicationModel.Package";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI package_GetTrustLevel( IPackage *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_get_Id( IPackage *iface, IPackageId **value )
+{
+    struct package *impl = impl_from_IPackage( iface );
+
+    *value = &impl->IPackageId_iface;
+    IInspectable_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_get_InstalledLocation( IPackage *iface, IStorageFolder **value )
+{
+    struct package *impl = impl_from_IPackage( iface );
+
+    *value = &impl->IStorageFolder_iface;
+    IInspectable_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_get_IsFramework( IPackage *iface, boolean *value )
+{
+    struct package *impl = impl_from_IPackage( iface );
+
+    *value = impl->rec.framework;
+    return S_OK;
+}
+
+static HRESULT create_empty_vectorview( IVectorView_Package **value );
+
+static HRESULT WINAPI package_get_Dependencies( IPackage *iface, IVectorView_Package **value )
+{
+    /* the registration records no dependency graph: the empty view is the truth */
+    return create_empty_vectorview( value );
+}
+
+static const struct IPackageVtbl package_vtbl =
+{
+    package_QueryInterface,
+    package_AddRef,
+    package_Release,
+    /* IInspectable methods */
+    package_GetIids,
+    package_GetRuntimeClassName,
+    package_GetTrustLevel,
+    /* IPackage methods */
+    package_get_Id,
+    package_get_InstalledLocation,
+    package_get_IsFramework,
+    package_get_Dependencies,
+};
+
+/* IPackageId: every field is a read of the record the row was created from. */
+
+static HRESULT WINAPI packageid_QueryInterface( IPackageId *iface, REFIID iid, void **out )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+
+    return IPackage_QueryInterface( &impl->IPackage_iface, iid, out );
+}
+
+static ULONG WINAPI packageid_AddRef( IPackageId *iface )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI packageid_Release( IPackageId *iface )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI packageid_GetIids( IPackageId *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI packageid_GetRuntimeClassName( IPackageId *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.ApplicationModel.PackageId";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI packageid_GetTrustLevel( IPackageId *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT packageid_str( struct package *impl, const WCHAR *value, HSTRING *str )
+{
+    if (!value || !value[0])
+    {
+        *str = NULL;
+        return S_OK;
+    }
+    return WindowsCreateString( value, lstrlenW( value ), str );
+}
+
+static HRESULT WINAPI packageid_get_Name( IPackageId *iface, HSTRING *value )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+    WCHAR name[256];
+
+    split_full_name( impl->rec.full_name, name, ARRAY_SIZE(name), NULL, NULL, NULL, 0 );
+    return packageid_str( impl, name, value );
+}
+
+static HRESULT WINAPI packageid_get_Version( IPackageId *iface, PackageVersion *value )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+
+    split_full_name( impl->rec.full_name, NULL, 0, value, NULL, NULL, 0 );
+    return S_OK;
+}
+
+static HRESULT WINAPI packageid_get_Architecture( IPackageId *iface, ProcessorArchitecture *value )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+
+    split_full_name( impl->rec.full_name, NULL, 0, NULL, value, NULL, 0 );
+    return S_OK;
+}
+
+static HRESULT WINAPI packageid_get_ResourceId( IPackageId *iface, HSTRING *value )
+{
+    *value = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI packageid_get_Publisher( IPackageId *iface, HSTRING *value )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+    WCHAR publisher[256];
+
+    split_full_name( impl->rec.full_name, NULL, 0, NULL, NULL, publisher, ARRAY_SIZE(publisher) );
+    return packageid_str( impl, publisher, value );
+}
+
+static HRESULT WINAPI packageid_get_PublisherId( IPackageId *iface, HSTRING *value )
+{
+    /* the registration plane knows the full name's publisher token, which is
+     * what PublisherId reports for these packages */
+    return packageid_get_Publisher( iface, value );
+}
+
+static HRESULT WINAPI packageid_get_FullName( IPackageId *iface, HSTRING *value )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+
+    return packageid_str( impl, impl->rec.full_name, value );
+}
+
+static HRESULT WINAPI packageid_get_FamilyName( IPackageId *iface, HSTRING *value )
+{
+    struct package *impl = impl_from_IPackageId( iface );
+
+    return packageid_str( impl, impl->rec.family_name, value );
+}
+
+static const struct IPackageIdVtbl packageid_vtbl =
+{
+    packageid_QueryInterface,
+    packageid_AddRef,
+    packageid_Release,
+    /* IInspectable methods */
+    packageid_GetIids,
+    packageid_GetRuntimeClassName,
+    packageid_GetTrustLevel,
+    /* IPackageId methods */
+    packageid_get_Name,
+    packageid_get_Version,
+    packageid_get_Architecture,
+    packageid_get_ResourceId,
+    packageid_get_Publisher,
+    packageid_get_PublisherId,
+    packageid_get_FullName,
+    packageid_get_FamilyName,
+};
+
+/* InstalledLocation's folder: the item face carries the path, the folder face
+ * is the handle a caller digs into with the async methods (unimplemented). */
+
+#define DEFINE_PACKAGE_QI( name, iface_type, member )                                                 \
+    static HRESULT WINAPI name##_QueryInterface( iface_type *iface, REFIID iid, void **out )          \
+    {                                                                                                 \
+        struct package *impl = CONTAINING_RECORD( iface, struct package, member );                    \
+        return package_QueryInterface( &impl->IPackage_iface, iid, out );                             \
+    }                                                                                                 \
+    static ULONG WINAPI name##_AddRef( iface_type *iface )                                            \
+    {                                                                                                 \
+        struct package *impl = CONTAINING_RECORD( iface, struct package, member );                    \
+        return InterlockedIncrement( &impl->ref );                                                    \
+    }                                                                                                 \
+    static ULONG WINAPI name##_Release( iface_type *iface )                                           \
+    {                                                                                                 \
+        struct package *impl = CONTAINING_RECORD( iface, struct package, member );                    \
+        ULONG ref = InterlockedDecrement( &impl->ref );                                               \
+        if (!ref) free( impl );                                                                       \
+        return ref;                                                                                   \
+    }
+
+DEFINE_PACKAGE_QI( package_folder, IStorageFolder, IStorageFolder_iface )
+DEFINE_PACKAGE_QI( package_item, IStorageItem, IStorageItem_iface )
+
+static HRESULT WINAPI package_folder_GetIids( IStorageFolder *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_folder_GetRuntimeClassName( IStorageFolder *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Storage.StorageFolder";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI package_folder_GetTrustLevel( IStorageFolder *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+#define FOLDER_METHODS( pfx ) \
+    static HRESULT WINAPI pfx##_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name, \
+            IStorageFile **file ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_CreateFileAsync( IStorageFolder *iface, HSTRING name, \
+            CreationCollisionOption option, IStorageFile **file ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_CreateFolderAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name, \
+            IStorageFolder **folder ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_CreateFolderAsync( IStorageFolder *iface, HSTRING name, \
+            CreationCollisionOption option, IStorageFolder **folder ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_GetFileAsync( IStorageFolder *iface, HSTRING name, \
+            IAsyncOperation_StorageFile *operation ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_GetFolderAsync( IStorageFolder *iface, HSTRING name, \
+            IAsyncOperation_StorageFolder *operation ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_GetItemAsync( IStorageFolder *iface, HSTRING name, \
+            IAsyncOperation_IStorageItem *operation ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_GetFilesAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface, \
+            IAsyncOperation_IVectorView_StorageFile *operation ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_GetFoldersAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface, \
+            IAsyncOperation_IVectorView_StorageFolder *operation ) { return E_NOTIMPL; } \
+    static HRESULT WINAPI pfx##_GetItemsAsyncOverloadDefaultStartAndCount( IStorageFolder *iface, \
+            IAsyncOperation_IVectorView_IStorageItem *operation ) { return E_NOTIMPL; }
+
+FOLDER_METHODS( package_folder )
+
+static const struct IStorageFolderVtbl package_folder_vtbl =
+{
+    package_folder_QueryInterface,
+    package_folder_AddRef,
+    package_folder_Release,
+    package_folder_GetIids,
+    package_folder_GetRuntimeClassName,
+    package_folder_GetTrustLevel,
+    package_folder_CreateFileAsyncOverloadDefaultOptions,
+    package_folder_CreateFileAsync,
+    package_folder_CreateFolderAsyncOverloadDefaultOptions,
+    package_folder_CreateFolderAsync,
+    package_folder_GetFileAsync,
+    package_folder_GetFolderAsync,
+    package_folder_GetItemAsync,
+    package_folder_GetFilesAsyncOverloadDefaultOptionsStartAndCount,
+    package_folder_GetFoldersAsyncOverloadDefaultOptionsStartAndCount,
+    package_folder_GetItemsAsyncOverloadDefaultStartAndCount,
+};
+
+static HRESULT WINAPI package_item_GetIids( IStorageItem *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_item_GetRuntimeClassName( IStorageItem *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Storage.StorageFolder";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI package_item_GetTrustLevel( IStorageItem *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_item_RenameAsyncOverloadDefaultOptions( IStorageItem *iface, HSTRING name,
+        IAsyncAction **operation ) { return E_NOTIMPL; }
+static HRESULT WINAPI package_item_RenameAsync( IStorageItem *iface, HSTRING name, NameCollisionOption option,
+        IAsyncAction **operation ) { return E_NOTIMPL; }
+static HRESULT WINAPI package_item_DeleteAsyncOverloadDefaultOptions( IStorageItem *iface,
+        IAsyncAction **operation ) { return E_NOTIMPL; }
+static HRESULT WINAPI package_item_DeleteAsync( IStorageItem *iface, StorageDeleteOption option,
+        IAsyncAction **operation ) { return E_NOTIMPL; }
+static HRESULT WINAPI package_item_GetBasicPropertiesAsync( IStorageItem *iface,
+        IAsyncOperation_BasicProperties **operation ) { return E_NOTIMPL; }
+
+static HRESULT WINAPI package_item_get_Name( IStorageItem *iface, HSTRING *value )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IStorageItem_iface );
+    WCHAR name[256];
+
+    split_full_name( impl->rec.full_name, name, ARRAY_SIZE(name), NULL, NULL, NULL, 0 );
+    return WindowsCreateString( name, lstrlenW( name ), value );
+}
+
+static HRESULT WINAPI package_item_get_Path( IStorageItem *iface, HSTRING *value )
+{
+    struct package *impl = CONTAINING_RECORD( iface, struct package, IStorageItem_iface );
+
+    if (!impl->rec.path[0])
+    {
+        *value = NULL;
+        return S_OK;
+    }
+    return WindowsCreateString( impl->rec.path, lstrlenW( impl->rec.path ), value );
+}
+
+static HRESULT WINAPI package_item_get_Attributes( IStorageItem *iface, FileAttributes *value )
+{
+    *value = FileAttributes_Normal;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_item_get_DateCreated( IStorageItem *iface, DateTime *value )
+{
+    memset( value, 0, sizeof(*value) );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_item_IsOfType( IStorageItem *iface, StorageItemTypes type, boolean *value )
+{
+    *value = type == StorageItemTypes_Folder;
+    return S_OK;
+}
+
+static const struct IStorageItemVtbl package_item_vtbl =
+{
+    package_item_QueryInterface,
+    package_item_AddRef,
+    package_item_Release,
+    package_item_GetIids,
+    package_item_GetRuntimeClassName,
+    package_item_GetTrustLevel,
+    package_item_RenameAsyncOverloadDefaultOptions,
+    package_item_RenameAsync,
+    package_item_DeleteAsyncOverloadDefaultOptions,
+    package_item_DeleteAsync,
+    package_item_GetBasicPropertiesAsync,
+    package_item_get_Name,
+    package_item_get_Path,
+    package_item_get_Attributes,
+    package_item_get_DateCreated,
+    package_item_IsOfType,
+};
+
+static HRESULT package_create( const struct package_record *rec, struct package **ret )
+{
+    struct package *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IPackage_iface.lpVtbl = &package_vtbl;
+    impl->IPackageId_iface.lpVtbl = &packageid_vtbl;
+    impl->IStorageFolder_iface.lpVtbl = &package_folder_vtbl;
+    impl->IStorageItem_iface.lpVtbl = &package_item_vtbl;
+    impl->ref = 1;
+    impl->rec = *rec;
+    *ret = impl;
+    return S_OK;
+}
+
+/*
+ * The package collection: an IIterable built once per Find call, its rows the
+ * records the registration held at that moment. The iterator walks the rows;
+ * a caller holding the iterable after its iterator dies sees a stable set.
+ */
+
+struct package_collection
+{
+    IIterable_Package IIterable_Package_iface;
+    LONG ref;
+    ULONG count;
+    struct package *items[1];
+};
+
+static inline struct package_collection *impl_from_IIterable_Package( IIterable_Package *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_collection, IIterable_Package_iface );
+}
+
+struct package_iterator
+{
+    IIterator_Package IIterator_Package_iface;
+    LONG ref;
+    struct package_collection *coll;
+    ULONG pos;
+};
+
+static inline struct package_iterator *impl_from_IIterator_Package( IIterator_Package *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_iterator, IIterator_Package_iface );
+}
+
+static HRESULT WINAPI package_iterator_QueryInterface( IIterator_Package *iface, REFIID iid, void **out )
+{
+    struct package_iterator *impl = impl_from_IIterator_Package( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_Package ))
+    {
+        *out = &impl->IIterator_Package_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_iterator_AddRef( IIterator_Package *iface )
+{
+    struct package_iterator *impl = impl_from_IIterator_Package( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI package_iterator_Release( IIterator_Package *iface )
+{
+    struct package_iterator *impl = impl_from_IIterator_Package( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        IIterable_Package_Release( &impl->coll->IIterable_Package_iface );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI package_iterator_GetIids( IIterator_Package *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_iterator_GetRuntimeClassName( IIterator_Package *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.Collections.IIterator`1<Windows.ApplicationModel.Package>";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI package_iterator_GetTrustLevel( IIterator_Package *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_iterator_get_HasCurrent( IIterator_Package *iface, boolean *value )
+{
+    struct package_iterator *impl = impl_from_IIterator_Package( iface );
+
+    *value = impl->pos < impl->coll->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_iterator_get_Current( IIterator_Package *iface, IPackage **item )
+{
+    struct package_iterator *impl = impl_from_IIterator_Package( iface );
+
+    if (impl->pos >= impl->coll->count) return E_BOUNDS;
+    *item = &impl->coll->items[impl->pos]->IPackage_iface;
+    IPackage_AddRef( *item );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_iterator_MoveNext( IIterator_Package *iface, boolean *value )
+{
+    struct package_iterator *impl = impl_from_IIterator_Package( iface );
+
+    if (impl->pos < impl->coll->count) impl->pos++;
+    *value = impl->pos < impl->coll->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_iterator_GetMany( IIterator_Package *iface, UINT32 capacity,
+        IPackage **items, UINT32 *written )
+{
+    struct package_iterator *impl = impl_from_IIterator_Package( iface );
+    ULONG n;
+
+    if (!items || !written) return E_INVALIDARG;
+    n = min( capacity, impl->coll->count - impl->pos );
+    for (ULONG i = 0; i < n; i++)
+    {
+        items[i] = &impl->coll->items[impl->pos + i]->IPackage_iface;
+        IPackage_AddRef( items[i] );
+    }
+    *written = n;
+    return S_OK;
+}
+
+static const struct IIterator_PackageVtbl package_iterator_vtbl =
+{
+    package_iterator_QueryInterface,
+    package_iterator_AddRef,
+    package_iterator_Release,
+    package_iterator_GetIids,
+    package_iterator_GetRuntimeClassName,
+    package_iterator_GetTrustLevel,
+    package_iterator_get_HasCurrent,
+    package_iterator_get_Current,
+    package_iterator_MoveNext,
+    package_iterator_GetMany,
+};
+
+static HRESULT WINAPI package_collection_QueryInterface( IIterable_Package *iface, REFIID iid, void **out )
+{
+    struct package_collection *impl = impl_from_IIterable_Package( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterable_Package ))
+    {
+        *out = &impl->IIterable_Package_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_collection_AddRef( IIterable_Package *iface )
+{
+    struct package_collection *impl = impl_from_IIterable_Package( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI package_collection_Release( IIterable_Package *iface )
+{
+    struct package_collection *impl = impl_from_IIterable_Package( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        for (ULONG i = 0; i < impl->count; i++) IPackage_Release( &impl->items[i]->IPackage_iface );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI package_collection_GetIids( IIterable_Package *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_collection_GetRuntimeClassName( IIterable_Package *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.Collections.IIterable`1<Windows.ApplicationModel.Package>";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI package_collection_GetTrustLevel( IIterable_Package *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_collection_First( IIterable_Package *iface, IIterator_Package **iterator )
+{
+    struct package_collection *impl = impl_from_IIterable_Package( iface );
+    struct package_iterator *it;
+
+    if (!iterator) return E_INVALIDARG;
+    if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
+    it->IIterator_Package_iface.lpVtbl = &package_iterator_vtbl;
+    it->ref = 1;
+    it->coll = impl;
+    IIterable_Package_AddRef( iface );
+    *iterator = &it->IIterator_Package_iface;
+    return S_OK;
+}
+
+static const struct IIterable_PackageVtbl package_collection_vtbl =
+{
+    package_collection_QueryInterface,
+    package_collection_AddRef,
+    package_collection_Release,
+    package_collection_GetIids,
+    package_collection_GetRuntimeClassName,
+    package_collection_GetTrustLevel,
+    package_collection_First,
+};
+
+static HRESULT package_collection_create( struct package **items, ULONG count, IIterable_Package **ret )
+{
+    struct package_collection *impl;
+    SIZE_T size = offsetof( struct package_collection, items[count ? count : 1] );
+
+    if (!(impl = calloc( 1, size ))) return E_OUTOFMEMORY;
+    impl->IIterable_Package_iface.lpVtbl = &package_collection_vtbl;
+    impl->ref = 1;
+    impl->count = count;
+    for (ULONG i = 0; i < count; i++)
+    {
+        impl->items[i] = items[i];
+        IPackage_AddRef( &items[i]->IPackage_iface );
+    }
+    *ret = &impl->IIterable_Package_iface;
+    return S_OK;
+}
+
+/* IPackage's Dependencies: the registration records no graph; the empty view. */
+
+struct package_vectorview
+{
+    IVectorView_Package IVectorView_Package_iface;
+    LONG ref;
+};
+
+static inline struct package_vectorview *impl_from_IVectorView_Package( IVectorView_Package *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_vectorview, IVectorView_Package_iface );
+}
+
+static HRESULT WINAPI package_vectorview_QueryInterface( IVectorView_Package *iface, REFIID iid, void **out )
+{
+    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IVectorView_Package ))
+    {
+        *out = &impl->IVectorView_Package_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_vectorview_AddRef( IVectorView_Package *iface )
+{
+    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI package_vectorview_Release( IVectorView_Package *iface )
+{
+    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI package_vectorview_GetIids( IVectorView_Package *iface, ULONG *count, IID **iids )
+{
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_vectorview_GetRuntimeClassName( IVectorView_Package *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.Collections.IVectorView`1<Windows.ApplicationModel.Package>";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI package_vectorview_GetTrustLevel( IVectorView_Package *iface, TrustLevel *level )
+{
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_vectorview_GetAt( IVectorView_Package *iface, UINT32 index, IPackage **item )
+{
+    return E_BOUNDS;
+}
+
+static HRESULT WINAPI package_vectorview_get_Size( IVectorView_Package *iface, UINT32 *size )
+{
+    *size = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_vectorview_IndexOf( IVectorView_Package *iface, IPackage *item, UINT32 *index,
+        boolean *found )
+{
+    *index = 0;
+    *found = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_vectorview_GetMany( IVectorView_Package *iface, UINT32 start, UINT32 capacity,
+        IPackage **items, UINT32 *written )
+{
+    *written = 0;
+    return S_OK;
+}
+
+static const struct IVectorView_PackageVtbl package_vectorview_vtbl =
+{
+    package_vectorview_QueryInterface,
+    package_vectorview_AddRef,
+    package_vectorview_Release,
+    package_vectorview_GetIids,
+    package_vectorview_GetRuntimeClassName,
+    package_vectorview_GetTrustLevel,
+    package_vectorview_GetAt,
+    package_vectorview_get_Size,
+    package_vectorview_IndexOf,
+    package_vectorview_GetMany,
+};
+
+static HRESULT create_empty_vectorview( IVectorView_Package **value )
+{
+    struct package_vectorview *impl;
+
+    if (!value) return E_INVALIDARG;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IVectorView_Package_iface.lpVtbl = &package_vectorview_vtbl;
+    impl->ref = 1;
+    *value = &impl->IVectorView_Package_iface;
+    return S_OK;
+}
+
+/*
+ * The registration read: the running package, the env framework, then every
+ * Packages\<FullName> key HKCU over HKLM (a user deployment shadows the
+ * machine one, kernelbase's merge order). Family/name/publisher filters narrow
+ * the set; the package APIs answer the family and path for each record. This
+ * is the same graph kernelbase's GetCurrentPackageInfo builds.
+ */
+#define MAX_RECORDS 64
+
+struct registration
+{
+    struct package_record records[MAX_RECORDS];
+    ULONG count;
+};
+
+static BOOL registration_add( struct registration *reg, const WCHAR *full_name, BOOL framework )
+{
+    struct package_record *rec;
+    UINT32 len;
+    SIZE_T i;
+
+    for (i = 0; i < reg->count; i++)
+        if (!wcsicmp( reg->records[i].full_name, full_name )) return FALSE;
+    if (reg->count == MAX_RECORDS) return FALSE;
+
+    rec = &reg->records[reg->count];
+    lstrcpynW( rec->full_name, full_name, ARRAY_SIZE(rec->full_name) );
+    rec->framework = framework;
+    rec->family_name[0] = 0;
+    len = ARRAY_SIZE(rec->family_name);
+    PackageFamilyNameFromFullName( full_name, &len, rec->family_name );
+    rec->path[0] = 0;
+    len = ARRAY_SIZE(rec->path);
+    GetPackagePathByFullName( full_name, &len, rec->path );
+    reg->count++;
+    return TRUE;
+}
+
+static void registration_read( struct registration *reg, const WCHAR *family, const WCHAR *name,
+                               const WCHAR *publisher )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    WCHAR full[PACKAGE_FULL_NAME_MAX_LENGTH + 1], key[600], subkey[620], fw[512];
+    SIZE_T r, i;
+
+    reg->count = 0;
+
+    /* the running package and the env framework: the identity APIs' graph */
+    {
+        UINT32 len = ARRAY_SIZE(full);
+        if (!GetCurrentPackageFullName( &len, full )) registration_add( reg, full, FALSE );
+    }
+    if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ))
+        registration_add( reg, fw, TRUE );
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        HKEY hkey;
+        DWORD i = 0;
+
+        if (RegOpenKeyExW( roots[r], appmodel_path, 0, KEY_READ, &hkey )) continue;
+        for (;; i++)
+        {
+            DWORD len = ARRAY_SIZE(key), type;
+            HKEY pkg;
+
+            if (RegEnumKeyExW( hkey, i, key, &len, NULL, NULL, NULL, NULL )) break;
+            lstrcpyW( subkey, appmodel_path );
+            lstrcatW( subkey, L"\\" );
+            lstrcatW( subkey, key );
+            type = 0;
+            len = sizeof(type);
+            if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &pkg ) == ERROR_SUCCESS)
+            {
+                RegQueryValueExW( pkg, L"Framework", NULL, &type, (BYTE *)&type, &len );
+                RegCloseKey( pkg );
+            }
+            else type = 0;
+            registration_add( reg, key, type == 1 );
+        }
+        RegCloseKey( hkey );
+    }
+
+    /* the filters narrow the set; every record keeps its own family/path reads */
+    for (i = 0; i < reg->count; i++)
+    {
+        struct package_record *rec = &reg->records[i];
+        BOOL keep = TRUE;
+
+        if (family && wcsicmp( rec->family_name, family )) keep = FALSE;
+        if (keep && (name || publisher))
+        {
+            WCHAR part[256];
+            if (name)
+            {
+                split_full_name( rec->full_name, part, ARRAY_SIZE(part), NULL, NULL, NULL, 0 );
+                if (wcsicmp( part, name )) keep = FALSE;
+            }
+            if (keep && publisher)
+            {
+                split_full_name( rec->full_name, NULL, 0, NULL, NULL, part, ARRAY_SIZE(part) );
+                if (wcsicmp( part, publisher )) keep = FALSE;
+            }
+        }
+        if (!keep) reg->records[i--] = reg->records[--reg->count];
+    }
+}
+
+/* Hand the registration (filtered) back as the collection the caller asked
+ * for. The SID is the single user a prefix has, so the ByUserSecurityId
+ * methods answer the same set the plain ones do; types selects frameworks,
+ * apps, or both (0 answers both). */
+static HRESULT find_packages( const WCHAR *family, const WCHAR *name, const WCHAR *publisher,
+                              PackageTypes types, IIterable_Package **packages )
+{
+    struct registration reg;
+    struct package **items = NULL;
+    IIterable_Package *iterable = NULL;
+    HRESULT hr;
+    ULONG i, n = 0;
+
+    if (!packages) return E_INVALIDARG;
+    registration_read( &reg, family, name, publisher );
+
+    if (!(items = calloc( max( reg.count, 1 ), sizeof(*items) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < reg.count; i++)
+    {
+        BOOL keep = !types || (types == PackageTypes_All)
+                    || (reg.records[i].framework ? (types & PackageTypes_Framework)
+                                                 : (types & PackageTypes_Main));
+        if (!keep) continue;
+        if (FAILED( (hr = package_create( &reg.records[i], &items[n] ) ) )) goto done;
+        n++;
+    }
+    if (FAILED( (hr = package_collection_create( items, n, &iterable ) ) )) goto done;
+    *packages = iterable;
+    hr = S_OK;
+done:
+    for (i = 0; i < n; i++) IPackage_Release( &items[i]->IPackage_iface );
+    free( items );
+    return hr;
+}
+
+/* One registered package by full name: the registration's path is the proof
+ * the name is deployed; an unregistered name is E_NOT_FOUND, what Windows
+ * hands the caller of FindPackageByPackageFullName. */
+static HRESULT find_package_by_full_name( const WCHAR *full_name, IPackage **package )
+{
+    struct package_record rec;
+    struct package *impl;
+    UINT32 len;
+    HRESULT hr;
+
+    if (!full_name || !full_name[0]) return E_INVALIDARG;
+    memset( &rec, 0, sizeof(rec) );
+    len = ARRAY_SIZE(rec.path);
+    if (GetPackagePathByFullName( full_name, &len, rec.path )) return E_NOT_FOUND;
+
+    lstrcpynW( rec.full_name, full_name, ARRAY_SIZE(rec.full_name) );
+    len = ARRAY_SIZE(rec.family_name);
+    PackageFamilyNameFromFullName( full_name, &len, rec.family_name );
+
+    if (FAILED( (hr = package_create( &rec, &impl ) ) )) return hr;
+    *package = &impl->IPackage_iface;
+    return S_OK;
+}
 
 struct package_manager_statics
 {
@@ -834,21 +1938,32 @@ static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLev
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
-    struct package_manager *impl;
+    IPackageManager *pm;
+    HRESULT hr;
 
     TRACE( "iface %p, instance %p.\n", iface, instance );
 
-    if (!(impl = calloc( 1, sizeof(*impl) )))
+    if (FAILED( (hr = package_manager_create( &pm ) ) ))
     {
         *instance = NULL;
-        return E_OUTOFMEMORY;
+        return hr;
     }
+    *instance = (IInspectable *)pm;
+    return S_OK;
+}
+
+/* One PackageManager instance: stateless, every call reads the registration. */
+HRESULT package_manager_create( IPackageManager **out )
+{
+    struct package_manager *impl;
+
+    if (!out) return E_INVALIDARG;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 
     impl->IPackageManager_iface.lpVtbl = &package_manager_vtbl;
     impl->IPackageManager2_iface.lpVtbl = &package_manager2_vtbl;
     impl->ref = 1;
-
-    *instance = (IInspectable *)&impl->IPackageManager_iface;
+    *out = &impl->IPackageManager_iface;
     return S_OK;
 }
 
