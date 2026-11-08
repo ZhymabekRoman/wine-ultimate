@@ -228,6 +228,7 @@ struct IApplicationDataGetForApplication
     const struct IApplicationDataGetForApplicationVtbl *lpVtbl;
 };
 
+static void head_populate_appdata( void );
 static HRESULT WINAPI application_data_QueryInterface( IApplicationData *iface, REFIID iid, void **out );
 static HRESULT WINAPI container_QueryInterface( IApplicationDataContainer *iface, REFIID iid, void **out );
 static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out );
