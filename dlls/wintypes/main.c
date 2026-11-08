@@ -2016,21 +2016,26 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
  * touched blocks so the shader's first allocation lands in a fully committed
  * region behind them. Activation-factory calls happen on the startup thread
  * before XAML boots, so the one-shot guard needs no locking. */
-static void *heap_prewarm_blocks[8];
+static void *heap_prewarm_blocks[4];
 
+/* Arm-2 (p210 SIGBUS: arm-1 blocks straddled the shared-heap ceiling, entries
+ * past ~3072 spilled into unbacked pages and the tracker's tail reads faulted):
+ * 4 blocks of 16 MB each, MEM_RESERVE | MEM_COMMIT up front and one qword
+ * touched per 4096-byte page, so every block lands fully backed. */
 static void heap_prewarm( void )
 {
     static BOOL done;
-    unsigned int i;
+    unsigned int i, j;
+    char *p;
 
     if (done) return;
     done = TRUE;
     for (i = 0; i < ARRAYSIZE(heap_prewarm_blocks); i++)
     {
-        if (!(heap_prewarm_blocks[i] = RtlAllocateHeap( GetProcessHeap(), 0, 0x20000 )))
+        if (!(p = VirtualAlloc( NULL, 0x1000000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE )))
             continue;
-        ((char *)heap_prewarm_blocks[i])[0] = 1;
-        ((char *)heap_prewarm_blocks[i])[0x1fff0] = 2;
+        for (j = 0; j < 0x1000000; j += 0x1000) p[j] = 1;
+        heap_prewarm_blocks[i] = p;
     }
     /* Reserve a privately committed heap ahead of the coreclr/shader
      * allocation phase: its 8MB initial commit is one contiguous mapping, so
