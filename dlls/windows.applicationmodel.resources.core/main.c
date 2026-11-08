@@ -5134,6 +5134,91 @@ static void mrm_prearm_pinbuffer(void)
     TRACE("prearm pinbuffer slot %p = %p\n", slot, (void *)*slot);
 }
 
+/* WER-buffer GCHandle pre-arm (inflate-plateau wave, 2026-11-08).
+ *
+ * The WER publish reads its data-buffer pinning handle right after
+ * PalSetWerDataBuffer; when that GCHandle static is null, .NET GCHandle
+ * .value = IntPtr(-1) and the Redhawk write-barrier card helper
+ * (mrt100_app+0x522c3) computes the card address from rcx = -1 and faults
+ * reading 0xffffffffffffffff.  The SEH/VEH chain replays the buffer-as-code
+ * stub into the MSZip inflate (z_stream.next_in = frozen ref 0x1801020001):
+ * 18.9k identical AV pairs (plateau).  Null GCHandle statics live in the
+ * SharedLibrary .bss beside s_ExceptionInfoBufferPinningHandle
+ * (base+0x55de30, armed by mrm_prearm_pinbuffer): arm every qword == -1 in
+ * the neighborhood with a wine-heap PinnedObjectHandle cell over a fake
+ * System.Byte[], the same shape proven for the pinbuffer.
+ */
+static void mrm_prearm_werhandle(void)
+{
+    static HMODULE hmod;
+    static UINT_PTR cell_wer[2];
+    static UINT_PTR cell_arena[2];
+    unsigned char *base;
+    UINT_PTR *p;
+    int armed = 0;
+
+    if (!hmod && !(hmod = GetModuleHandleA("SharedLibrary.dll"))) return;
+    base = (unsigned char *)hmod;
+
+    for (p = (UINT_PTR *)(base + 0x55de00); p < (UINT_PTR *)(base + 0x55de80); p++)
+    {
+        if (*p != (UINT_PTR)-1) continue;
+        if (armed == 0)
+        {
+            p[1] = (UINT_PTR)(base + 0xe0f80);   /* EEType_System::Byte[] */
+            p[2] = 1;                            /* Length */
+            cell_wer[0] = (UINT_PTR)(p + 1);     /* m_object = the fake inline */
+            cell_wer[1] = 0;
+            *p = (UINT_PTR)cell_wer | 1;
+        }
+        else if (armed == 1)
+        {
+            p[1] = (UINT_PTR)(base + 0xe0f80);
+            p[2] = 1;
+            cell_arena[0] = (UINT_PTR)(p + 1);
+            cell_arena[1] = 0;
+            *p = (UINT_PTR)cell_arena | 1;
+        }
+        else return;
+        TRACE("prearm werhandle slot %p armed\n", p);
+        armed++;
+    }
+}
+
+/* Frozen-reference arena commit (inflate-plateau wave, 2026-11-08).
+ *
+ * mrt100_app R2R data bakes tagged GC references into the runtime heap at
+ * its link-time layout: heap snapshot objects read as 0x1801020001-style
+ * absolute refs (TypeManager space base 0x1801000000, app Mcg module-0).
+ * The runtime heap is a 384MB (nil)-hinted MEM_RESERVE|MEM_COMMIT block
+ * (measured: `NtAllocateVirtualMemory (nil) 18000000 202000 1`), which the
+ * Wine loader lands at a host-flavored VA (observed 0x7fc2bd3e0000) — the
+ * 0x1801xxxxxx slots the frozen refs name stay address holes.  Every WER
+ * publish of the culture walk re-reads one such ref: the MSZip decompress
+ * of the WER data buffer loads z_stream.next_in=0x1801020001, the inflate
+ * faults on *next_in, the app SEH/VEH pair runs the buffer-as-code stub
+ * chain, resume, retry: 18.9k identical AV pairs at ~210/s (plateau).
+ *
+ * Commit the first 16MB of that arena as zero pages from the first
+ * activation: the frozen "MSZip header" reads 24 zero bytes, inflate
+ * retires with a consumed-stored-block result, the WER publish completes
+ * and the culture walk proceeds toward the Map plane.
+ */
+static void mrm_prearm_arena(void)
+{
+    static void *committed;
+    void *p;
+
+    if (committed) return;
+    p = VirtualAlloc((void *)0xffffffffffff0000ULL, 0x10000, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+    TRACE("prearm arena-minus1 %p\n", p);
+    p = VirtualAlloc((void *)0x1801020000, 0x200000, MEM_COMMIT, PAGE_READWRITE);
+    TRACE("prearm arena %p\n", p);
+    if (!p) p = VirtualAlloc((void *)0x1801000000, 0x1000000, MEM_COMMIT, PAGE_READWRITE);
+    TRACE("prearm arena2 %p\n", p);
+    if (p) committed = p;
+}
+
 /* Extended-service vtable swap (nest-collapse wave, 2026-11-08).
  *
  * mrt100_app PalSetWerDataBuffer (RVA 0x80808) is the net10-shape
@@ -5206,6 +5291,7 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
 
     mrm_prearm_pinbuffer();
     mrm_prearm_werfacade();
+    mrm_prearm_arena();
 
     if (!factory) return E_POINTER;
     *factory = NULL;
