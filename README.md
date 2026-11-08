@@ -4493,3 +4493,27 @@ shader's first vtable read faults - suspect the container/factory object vtbl pa
 aggregation indirection; (2) resources short-circuit: mrmcorer/bcp47mrm loads gated behind the
 LocalSettings success. Tooling: `/var/tmp/wt-builds/gate_xamlwave2.sh` (loaddll+combase+xaml
 trace variant), logs `/tmp/wa/appgate/xamlwave{1,2,3}_*`.
+
+## Session 2026-11-09(a) - MSUIXaml wave 2: shader pair-array layout confirmed as the RCW decoder; fork chain LocalSettings -> get_Values -> ApplicationData.Current
+
+Deployed the tip shader-shape set (applicationdata 2825ff73 - GetIids `ComInterfaceEntry` pair
+arrays {vtbl,IID} vtable-first + `appdata_tracker_vtbl` IReferenceTracker face +
+IApplicationDataGetForApplication; wintypes 7862f43f - merged-face PropertySet with packed
+slot-0 CVD header `self|4`; windows.ui.xaml 765ab87b - Application.Current statics) to wbappgate
+install + prefix system32 (md5-verified, `.bak-xamlwave`). Gates xamlwave4-6 (150 s,
+`/var/tmp/wt-builds/gate_xamlwave2.sh`): the pair-array layout decodes
+`ApplicationData.LocalSettings` (wave-1 wall) and then `ApplicationDataContainer.get_Values` -
+one layer per landed face, as predicted. Current fork (xamlwave6 fatal, app alive past Start):
+`MemoryMappedFileSadRecordPersistentStorage..ctor -> ApplicationData.get_Current ->
+ABI IApplicationDataStaticsMethods.get_Current -> ApplicationData.FromAbi ->
+ComWrappers.TryGetOrCreateObjectForComInstanceInternal AV` (same shader slot-fetch site,
+`rip=coreclr+0x255429`, read `coreclr+0x18948f`, rdx=0x10). AV count 10 -> 33 per run:
+first-chance shader fetches are recoverable retries; the fatal records only the deepest
+reach - the census marker to watch is the fatal stack, not ff count.
+Census xamlwave6: createdwins=0 xamlwin=0 MSUIXaml LOAD=0 mrmcorer=0 bcp47mrm=0 Navigate=0.
+Tooling lesson: wine channel names != dll names - applicationdata.c logs on `data`,
+windows.ui.xaml on `xaml`, combase mostly on `ole` (only roapi on `combase`);
+`WINEDEBUG=...,applicationdata+trace` prints nothing. Correct set:
+`-all,err+seh,loaddll,winproc,ole+trace,combase+trace,xaml+trace,data+trace,wintypes+trace`
+(gate_xamlwave7.sh, xamlwave7 census pending: statics get_Current QI/pair-array shape for
+the IApplicationData the factory singleton returns).
