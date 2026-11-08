@@ -5126,7 +5126,16 @@ static void mrm_prearm_pinbuffer(void)
         return;
 
     fake[0] = (UINT_PTR)(base + 0xe0f80);   /* EEType_System::Byte[] */
-    fake[1] = 1;                            /* Length: nonzero, GC-scan safe */
+    fake[1] = 0x800;                        /* Length: 2KB payload window */
+    /* p218: the culture-walk consumer reads the pinned payload as the PRM
+     * qualifier window (mrt100_app+0x522c3 card-walk over the pinbuffer).
+     * Seed the head with the UTF-16 Language qualifier so the walk finds
+     * "en-US" at payload+0 instead of a 1-byte stub. */
+    {
+        static const WCHAR enus[] = { 'e','n','-','U','S' };
+        unsigned char *payload = (unsigned char *)(fake + 2);
+        memcpy( payload, enus, sizeof(enus) );
+    }
     cell_store[0] = (UINT_PTR)fake;         /* PinnedObjectHandle::m_object */
     cell_store[1] = 0;
     cell = cell_store;
