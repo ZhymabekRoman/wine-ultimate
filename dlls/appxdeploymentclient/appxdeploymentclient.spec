@@ -6,7 +6,7 @@
 @ stub GetApplicability
 @ stdcall AppxCloseAppxPackageContents(long)
 @ stub AppxCreateSharedLocalFolder
-@ stub AppxPackageRepositoryRecoverStagedPackages
+@ stdcall AppxPackageRepositoryRecoverStagedPackages(ptr)
 @ stub AppxPackageRepositoryRecoverUserInstalls
 @ stub AppxRecoverUserInstallsForUpgrade
 @ stub AppxDeletePackageFiles
@@ -14,14 +14,14 @@
 @ stub IsPackageInstalled
 @ stub RDSRecoverRequests
 @ stub AppxPreStageCleanupRunTask
-@ stub AppxPreRegisterPackage
+@ stdcall AppxPreRegisterPackage(wstr wstr wstr ptr)
 @ stub ReArmAppxPreStageCleanupTask
 @ stub AppxAddPackageToAllUserStoreForPbr
 @ stub GetPackageApplicabilityForUserLogon
 16 stub @
-@ stub AppxStagePackage
+@ stdcall AppxStagePackage(wstr wstr wstr ptr wstr ptr)
 @ stdcall AppxGetPackageInstalledLocation(wstr ptr)
-@ stub AppxDestagePackage
+@ stdcall AppxDestagePackage(wstr)
 @ stub GetApplicability2
 @ stdcall AppxGetStagedPackageFullNameFromFamilyName(wstr ptr)
 @ stub AppxIsStagedPackageStoreSigned
@@ -39,7 +39,7 @@
 @ stub GeneratePreInstalledPriFiles
 @ stub PopulateProtocolAndFTA
 @ stub FixJunctionsForAppsIfNecessary
-@ stub AppxRemovePackageForUserSid
+@ stdcall AppxRemovePackageForUserSid(wstr wstr)
 @ stub CreateCanonicalPriFile
 @ stub RegisterNotificationForUser
 @ stub UnregisterNotificationForUser
@@ -65,7 +65,7 @@
 @ stub AppInstallerUpdateAllTask
 @ stub CheckAppInstallerUpdateAvailability
 @ stub UpdateAgentFreeDownloadRanges
-@ stub AppxRegisterPackage
+@ stdcall AppxRegisterPackage(wstr wstr wstr)
 @ stub IsPackageMetadataUnderSystemMetadata
 @ stub GetMetadataRootForPackage
 @ stub ClientGetAllPackagesToBeInstalledForUser

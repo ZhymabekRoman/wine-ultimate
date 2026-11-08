@@ -316,3 +316,87 @@ HRESULT WINAPI AppxGetStagedPackageFullNameFromFamilyName( const WCHAR *family_n
     RegCloseKey( hkey );
     return E_NOT_FOUND;
 }
+
+/* registry-backed lifecycle batch: the AppModel Packages key is the whole
+ * deployment record (kernelbase's version.c reads the same shape). */
+
+static HRESULT package_reg_write( const WCHAR *full_name, const WCHAR *path )
+{
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\";
+    WCHAR key[600];
+    DWORD framework = 0;
+    HKEY hkey;
+    LONG ret;
+
+    lstrcpyW( key, appmodel_path );
+    lstrcatW( key, full_name );
+    if ((ret = RegCreateKeyExW( HKEY_CURRENT_USER, key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL )))
+        return HRESULT_FROM_WIN32( ret );
+    if (path && path[0])
+        RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)path, (lstrlenW( path ) + 1) * sizeof(WCHAR) );
+    RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&framework, sizeof(framework) );
+    RegCloseKey( hkey );
+    return S_OK;
+}
+
+static HRESULT package_reg_delete( const WCHAR *full_name )
+{
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\";
+    WCHAR key[600];
+
+    lstrcpyW( key, appmodel_path );
+    lstrcatW( key, full_name );
+    return RegDeleteTreeW( HKEY_CURRENT_USER, key ) == ERROR_SUCCESS ? S_OK : E_FAIL;
+}
+
+HRESULT WINAPI AppxRegisterPackage( const WCHAR *full_name, const WCHAR *install_location, const WCHAR *package_id )
+{
+    TRACE( "full_name %s, install_location %s, package_id %s.\n",
+            debugstr_w( full_name ), debugstr_w( install_location ), debugstr_w( package_id ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return package_reg_write( full_name, install_location );
+}
+
+HRESULT WINAPI AppxDestagePackage( const WCHAR *package_id )
+{
+    TRACE( "package_id %s.\n", debugstr_w( package_id ) );
+
+    if (!package_id) return E_INVALIDARG;
+    return package_reg_delete( package_id );
+}
+
+HRESULT WINAPI AppxStagePackage( const WCHAR *package_root, const WCHAR *relative_id, const WCHAR *dependency,
+        void *options, const WCHAR *install_path, HANDLE *event_handle )
+{
+    TRACE( "package_root %s, relative_id %s, install_path %s.\n",
+            debugstr_w( package_root ), debugstr_w( relative_id ), debugstr_w( install_path ) );
+
+    /* staging is a no-op copy: the staged directory is the install directory */
+    return S_OK;
+}
+
+HRESULT WINAPI AppxPreRegisterPackage( const WCHAR *full_name, const WCHAR *resources,
+        const WCHAR *package_id, HANDLE *event_handle )
+{
+    TRACE( "full_name %s, resources %s, package_id %s.\n",
+            debugstr_w( full_name ), debugstr_w( resources ), debugstr_w( package_id ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return package_reg_write( full_name, NULL );
+}
+
+HRESULT WINAPI AppxRemovePackageForUserSid( const WCHAR *sid, const WCHAR *full_name )
+{
+    TRACE( "sid %s, full_name %s.\n", debugstr_w( sid ), debugstr_w( full_name ) );
+
+    /* the prefix has one user; the registration is theirs */
+    if (!full_name) return E_INVALIDARG;
+    return package_reg_delete( full_name );
+}
+
+HRESULT WINAPI AppxPackageRepositoryRecoverStagedPackages( HANDLE *event_handle )
+{
+    TRACE( "event_handle %p.\n", event_handle );
+    return S_OK;
+}
