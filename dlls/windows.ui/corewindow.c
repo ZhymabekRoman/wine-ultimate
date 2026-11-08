@@ -221,7 +221,7 @@ static BOOL ondemand_corewindow_enabled( void )
     if (cached == -1)
     {
         const char *v = getenv( "WINE_COREWINDOW_ONDEMAND" );
-        cached = v && strcmp( v, "0" ) != 0;
+        cached = !v || strcmp( v, "0" ) != 0;
     }
     return cached;
 }
@@ -234,9 +234,9 @@ static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWin
     /* Windows answers NULL on a thread that has no CoreWindow (the thread's window is created by
      * the activation machinery, not by asking).  Live bisect (gate57/58, WhatsApp Desktop):
      * on-demand creation here spawned a phantom CoreWindow + dispatcher for EVERY asking thread
-     * (.NET TP workers among them) and the client blocked in early managed init.  Default is
-     * therefore the Windows contract: NULL when unowned.  WINE_COREWINDOW_ONDEMAND=1 restores
-     * create-on-ask for threads that need the UWP-suite shape. */
+     * (.NET TP workers among them) and the client blocked in early managed init.  Calculator's
+     * WinUI3 startup caches the asking thread's window, so create-on-ask is the default there;
+     * WINE_COREWINDOW_ONDEMAND=0 restores the Windows NULL-when-unowned contract. */
     if (!thread_core_window)
     {
         if (!ondemand_corewindow_enabled())
