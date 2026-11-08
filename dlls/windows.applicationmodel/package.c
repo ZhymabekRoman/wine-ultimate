@@ -298,10 +298,13 @@ static HRESULT WINAPI storage_folder_CreateFolderAsync( IStorageFolder *iface, H
     return E_NOTIMPL;
 }
 
+static HRESULT create_async_result( struct storage_folder *folder, int kind, IInspectable **ret );
+
 static HRESULT WINAPI storage_folder_GetFileAsync( IStorageFolder *iface, HSTRING name, IAsyncOperation_StorageFile **operation )
 {
-    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring(name), operation );
-    return E_NOTIMPL;
+    struct storage_folder *impl = impl_from_IStorageFolder( iface );
+
+    return create_async_result( impl, 0, (IInspectable **)operation );
 }
 
 static HRESULT WINAPI storage_folder_GetFolderAsync( IStorageFolder *iface, HSTRING name, IAsyncOperation_StorageFolder **operation )
@@ -312,15 +315,17 @@ static HRESULT WINAPI storage_folder_GetFolderAsync( IStorageFolder *iface, HSTR
 
 static HRESULT WINAPI storage_folder_GetItemAsync( IStorageFolder *iface, HSTRING name, IAsyncOperation_IStorageItem **operation )
 {
-    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring(name), operation );
-    return E_NOTIMPL;
+    struct storage_folder *impl = impl_from_IStorageFolder( iface );
+
+    return create_async_result( impl, 1, (IInspectable **)operation );
 }
 
 static HRESULT WINAPI storage_folder_GetFilesAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface,
                                                                                        IAsyncOperation_IVectorView_StorageFile **operation )
 {
-    FIXME( "iface %p, operation %p stub!\n", iface, operation );
-    return E_NOTIMPL;
+    struct storage_folder *impl = impl_from_IStorageFolder( iface );
+
+    return create_async_result( impl, 2, (IInspectable **)operation );
 }
 
 static HRESULT WINAPI storage_folder_GetFoldersAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface,
@@ -434,6 +439,7 @@ static HRESULT WINAPI storage_item_IsOfType( IStorageItem *iface, StorageItemTyp
     return E_NOTIMPL;
 }
 
+
 static const struct IStorageItemVtbl storage_item_vtbl =
 {
     storage_item_QueryInterface,
@@ -455,6 +461,573 @@ static const struct IStorageItemVtbl storage_item_vtbl =
     storage_item_get_DateCreated,
     storage_item_IsOfType,
 };
+
+struct storageFile
+{
+    IStorageFile IStorageFile_iface;
+    IStorageItem IStorageItem_iface;
+    LONG ref;
+    WCHAR path[MAX_PATH];
+};
+
+static inline struct storageFile *impl_from_IStorageFile( IStorageFile *iface )
+{
+    return CONTAINING_RECORD( iface, struct storageFile, IStorageFile_iface );
+}
+
+static HRESULT WINAPI storageFile_QueryInterface( IStorageFile *iface, REFIID iid, void **out )
+{
+    struct storageFile *This = impl_from_IStorageFile( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IStringable ) || IsEqualGUID( iid, &IID_IStorageFile ))
+        *out = &This->IStorageFile_iface;
+    else if (IsEqualGUID( iid, &IID_IStorageItem ))
+        *out = &This->IStorageItem_iface;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static ULONG WINAPI storageFile_AddRef( IStorageFile *iface )
+{
+    struct storageFile *This = impl_from_IStorageFile( iface );
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG WINAPI storageFile_Release( IStorageFile *iface )
+{
+    struct storageFile *This = impl_from_IStorageFile( iface );
+    ULONG ref = InterlockedDecrement( &This->ref );
+
+    if (!ref) free( This );
+    return ref;
+}
+
+static HRESULT WINAPI storageFile_GetIids( IStorageFile *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_IStringable, IID_IStorageFile, IID_IStorageItem };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI storageFile_GetRuntimeClassName( IStorageFile *iface, HSTRING *name )
+{
+    static const WCHAR class[] = L"Windows.Storage.StorageFile";
+    return WindowsCreateString( class, ARRAY_SIZE(class) - 1, name );
+}
+
+static HRESULT WINAPI storageFile_GetTrustLevel( IStorageFile *iface, TrustLevel *level )
+{
+    *level = FullTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI storageFile_get_FileType( IStorageFile *iface, HSTRING *value )
+{
+    struct storageFile *This = impl_from_IStorageFile( iface );
+    const WCHAR *dot = wcsrchr( This->path, '.' );
+    WCHAR ext[16] = L"";
+
+    if (dot) lstrcpyW( ext, dot );
+    return WindowsCreateString( ext, lstrlenW( ext ), value );
+}
+
+static HRESULT WINAPI storageFile_get_ContentType( IStorageFile *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"*/*", 3, value );
+}
+
+static HRESULT WINAPI storageFile_OpenAsync( IStorageFile *iface, enum FileAccessMode mode,
+        IAsyncOperation_IRandomAccessStream **operation )
+{
+    FIXME( "iface %p, mode %d, operation %p stub!\n", iface, mode, operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_OpenTransactedWriteAsync( IStorageFile *iface,
+        IAsyncOperation_StorageStreamTransaction **operation )
+{
+    FIXME( "iface %p, operation %p stub!\n", iface, operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_CopyOverloadDefaultNameAndOptions( IStorageFile *iface, IStorageFolder *folder,
+        IAsyncOperation_StorageFile **operation )
+{
+    FIXME( "iface %p, folder %p, operation %p stub!\n", iface, folder, operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_CopyOverloadDefaultOptions( IStorageFile *iface, IStorageFolder *folder,
+        HSTRING name, IAsyncOperation_StorageFile **operation )
+{
+    FIXME( "iface %p, folder %p, name %s, operation %p stub!\n", iface, folder, debugstr_hstring( name ), operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_CopyOverload( IStorageFile *iface, IStorageFolder *folder, HSTRING name,
+        enum NameCollisionOption option, IAsyncOperation_StorageFile **operation )
+{
+    FIXME( "iface %p, folder %p, name %s, option %d, operation %p stub!\n",
+            iface, folder, debugstr_hstring( name ), option, operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_CopyAndReplaceAsync( IStorageFile *iface, IStorageFile *file,
+        IAsyncAction **operation )
+{
+    FIXME( "iface %p, file %p, operation %p stub!\n", iface, file, operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_MoveOverloadDefaultNameAndOptions( IStorageFile *iface, IStorageFolder *folder,
+        IAsyncAction **operation )
+{
+    FIXME( "iface %p, folder %p, operation %p stub!\n", iface, folder, operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_MoveOverloadDefaultOptions( IStorageFile *iface, IStorageFolder *folder,
+        HSTRING name, IAsyncAction **operation )
+{
+    FIXME( "iface %p, folder %p, name %s, operation %p stub!\n", iface, folder, debugstr_hstring( name ), operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_MoveOverload( IStorageFile *iface, IStorageFolder *folder, HSTRING name,
+        enum NameCollisionOption option, IAsyncAction **operation )
+{
+    FIXME( "iface %p, folder %p, name %s, option %d, operation %p stub!\n",
+            iface, folder, debugstr_hstring( name ), option, operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI storageFile_MoveAndReplaceAsync( IStorageFile *iface, IStorageFile *file,
+        IAsyncAction **operation )
+{
+    FIXME( "iface %p, file %p, operation %p stub!\n", iface, file, operation );
+    *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static const struct IStorageFileVtbl storage_file_vtbl =
+{
+    storageFile_QueryInterface,
+    storageFile_AddRef,
+    storageFile_Release,
+    storageFile_GetIids,
+    storageFile_GetRuntimeClassName,
+    storageFile_GetTrustLevel,
+    storageFile_get_FileType,
+    storageFile_get_ContentType,
+    storageFile_OpenAsync,
+    storageFile_OpenTransactedWriteAsync,
+    storageFile_CopyOverloadDefaultNameAndOptions,
+    storageFile_CopyOverloadDefaultOptions,
+    storageFile_CopyOverload,
+    storageFile_CopyAndReplaceAsync,
+    storageFile_MoveOverloadDefaultNameAndOptions,
+    storageFile_MoveOverloadDefaultOptions,
+    storageFile_MoveOverload,
+    storageFile_MoveAndReplaceAsync,
+};
+
+static struct storageFile *create_storage_file( const WCHAR *path )
+{
+    struct storageFile *file = calloc( 1, sizeof(*file) );
+
+    if (!file) return NULL;
+    file->IStorageFile_iface.lpVtbl = &storage_file_vtbl;
+    file->IStorageItem_iface.lpVtbl = &storage_item_vtbl;
+    file->ref = 1;
+    lstrcpyW( file->path, path );
+    return file;
+}
+
+/* ---- completed eager async operations (GetFileAsync/GetItemAsync/GetFilesAsync) ---- */
+
+struct async_result
+{
+    IAsyncOperation_StorageFile op_file;
+    IAsyncOperation_IStorageItem op_item;
+    IAsyncOperation_IVectorView_StorageFile op_vec;
+    IAsyncInfo info;
+    IVectorView_StorageFile view;
+    LONG ref;
+    int kind;
+    struct storageFile *file;
+    IUnknown *handler;
+};
+
+static inline struct async_result *async_from_op( IAsyncOperation_StorageFile *iface )
+{
+    return CONTAINING_RECORD( iface, struct async_result, op_file );
+}
+
+static inline struct async_result *async_from_op_item( IAsyncOperation_IStorageItem *iface )
+{
+    return CONTAINING_RECORD( iface, struct async_result, op_item );
+}
+
+static inline struct async_result *async_from_op_vec( IAsyncOperation_IVectorView_StorageFile *iface )
+{
+    return CONTAINING_RECORD( iface, struct async_result, op_vec );
+}
+
+static inline struct async_result *async_from_info( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct async_result, info );
+}
+
+static inline struct async_result *async_from_view( IVectorView_StorageFile *iface )
+{
+    return CONTAINING_RECORD( iface, struct async_result, view );
+}
+
+static void async_invoke_handler( struct async_result *This )
+{
+    if (!This->handler) return;
+    switch (This->kind)
+    {
+    case 0:
+        {
+            __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStorageFile *h = (void *)This->handler;
+            h->lpVtbl->Invoke( h, (IAsyncOperation_StorageFile *)&This->op_file, 1 /* AsyncStatus_Completed */ );
+            break;
+        }
+    case 1:
+        {
+            __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CIStorageItem *h = (void *)This->handler;
+            h->lpVtbl->Invoke( h, (IAsyncOperation_IStorageItem *)&This->op_item, 1 /* AsyncStatus_Completed */ );
+            break;
+        }
+    default:
+        {
+            __FIAsyncOperationCompletedHandler_1___FIVectorView_1_Windows__CStorage__CStorageFile *h = (void *)This->handler;
+            h->lpVtbl->Invoke( h, (IAsyncOperation_IVectorView_StorageFile *)&This->op_vec, 1 /* AsyncStatus_Completed */ );
+            break;
+        }
+    }
+}
+
+static HRESULT async_query( struct async_result *This, REFIID iid, void **out )
+{
+    TRACE( "iid %s out %p.\n", debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ))
+        *out = &This->op_file;
+    else if (IsEqualGUID( iid, &IID_IAsyncOperation_StorageFile ))
+        *out = &This->op_file;
+    else if (IsEqualGUID( iid, &IID_IAsyncOperation_IStorageItem ))
+        *out = &This->op_item;
+    else if (IsEqualGUID( iid, &IID_IAsyncOperation_IVectorView_StorageFile ))
+        *out = &This->op_vec;
+    else if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+        *out = &This->info;
+    else if (IsEqualGUID( iid, &IID_IAsyncOperationCompletedHandler_StorageFile ))
+        *out = &This->op_file;
+    else if (IsEqualGUID( iid, &IID_IAsyncOperationCompletedHandler_IStorageItem ))
+        *out = &This->op_item;
+    else if (IsEqualGUID( iid, &IID_IAsyncOperationCompletedHandler_IVectorView_StorageFile ))
+        *out = &This->op_vec;
+    else if (IsEqualGUID( iid, &IID_IVectorView_StorageFile ))
+        *out = &This->view;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static ULONG async_addref( struct async_result *This )
+{
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG async_release( struct async_result *This )
+{
+    ULONG ref = InterlockedDecrement( &This->ref );
+
+    if (!ref)
+    {
+        if (This->handler) IUnknown_Release( This->handler );
+        if (This->file) IStorageFile_Release( &This->file->IStorageFile_iface );
+        free( This );
+    }
+    return ref;
+}
+
+#define ASYNC_FWD(name, type, from) \
+static HRESULT WINAPI name( type *iface, REFIID iid, void **out ) { return async_query( from( iface ), iid, out ); } \
+static ULONG WINAPI name##_addref( type *iface ) { return async_addref( from( iface ) ); } \
+static ULONG WINAPI name##_release( type *iface ) { return async_release( from( iface ) ); } \
+static HRESULT WINAPI name##_GetIids( type *iface, ULONG *count, IID **iids ) { *count = 0; *iids = NULL; return S_OK; } \
+static HRESULT WINAPI name##_GetRuntimeClassName( type *iface, HSTRING *name ) { return WindowsCreateString( L"Windows.Foundation.IAsyncOperation", 34, name ); } \
+static HRESULT WINAPI name##_GetTrustLevel( type *iface, TrustLevel *level ) { *level = FullTrust; return S_OK; } \
+
+ASYNC_FWD(async_file, IAsyncOperation_StorageFile, async_from_op)
+ASYNC_FWD(async_item, IAsyncOperation_IStorageItem, async_from_op_item)
+ASYNC_FWD(async_vec, IAsyncOperation_IVectorView_StorageFile, async_from_op_vec)
+ASYNC_FWD(async_info, IAsyncInfo, async_from_info)
+ASYNC_FWD(async_view, IVectorView_StorageFile, async_from_view)
+static HRESULT WINAPI async_file_put_Completed( IAsyncOperation_StorageFile *iface,
+        __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStorageFile *handler )
+{
+    struct async_result *This = async_from_op( iface );
+
+    if (This->handler) IUnknown_Release( This->handler );
+    This->handler = (IUnknown *)handler;
+    if (handler) IUnknown_AddRef( This->handler );
+    async_invoke_handler( This );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_file_get_Completed( IAsyncOperation_StorageFile *iface,
+        IAsyncOperationCompletedHandler_StorageFile **handler )
+{
+    struct async_result *This = async_from_op( iface );
+
+    *handler = (__FIAsyncOperationCompletedHandler_1_Windows__CStorage__CStorageFile *)This->handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_file_GetResults( IAsyncOperation_StorageFile *iface, IStorageFile **results )
+{
+    struct async_result *This = async_from_op( iface );
+
+    *results = &This->file->IStorageFile_iface;
+    IStorageFile_AddRef( *results );
+    return S_OK;
+}
+
+static const struct __FIAsyncOperation_1_Windows__CStorage__CStorageFileVtbl async_file_vtbl =
+{
+    async_file_QueryInterface, async_file_addref, async_file_release,
+    async_file_GetIids, async_file_GetRuntimeClassName, async_file_GetTrustLevel,
+    async_file_put_Completed, async_file_get_Completed, async_file_GetResults,
+};
+
+static HRESULT WINAPI async_item_put_Completed( IAsyncOperation_IStorageItem *iface,
+        __FIAsyncOperationCompletedHandler_1_Windows__CStorage__CIStorageItem *handler )
+{
+    struct async_result *This = async_from_op_item( iface );
+
+    if (This->handler) IUnknown_Release( This->handler );
+    This->handler = (IUnknown *)handler;
+    if (handler) IUnknown_AddRef( This->handler );
+    async_invoke_handler( This );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_item_get_Completed( IAsyncOperation_IStorageItem *iface,
+        IAsyncOperationCompletedHandler_IStorageItem **handler )
+{
+    struct async_result *This = async_from_op_item( iface );
+
+    *handler = (__FIAsyncOperationCompletedHandler_1_Windows__CStorage__CIStorageItem *)This->handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_item_GetResults( IAsyncOperation_IStorageItem *iface, IStorageItem **results )
+{
+    struct async_result *This = async_from_op_item( iface );
+
+    *results = &This->file->IStorageItem_iface;
+    IStorageFile_AddRef( &This->file->IStorageFile_iface );
+    return S_OK;
+}
+
+static const struct __FIAsyncOperation_1_Windows__CStorage__CIStorageItemVtbl async_item_vtbl =
+{
+    async_item_QueryInterface, async_item_addref, async_item_release,
+    async_item_GetIids, async_item_GetRuntimeClassName, async_item_GetTrustLevel,
+    async_item_put_Completed, async_item_get_Completed, async_item_GetResults,
+};
+
+static HRESULT WINAPI async_vec_put_Completed( IAsyncOperation_IVectorView_StorageFile *iface,
+        __FIAsyncOperationCompletedHandler_1___FIVectorView_1_Windows__CStorage__CStorageFile *handler )
+{
+    struct async_result *This = async_from_op_vec( iface );
+
+    if (This->handler) IUnknown_Release( This->handler );
+    This->handler = (IUnknown *)handler;
+    if (handler) IUnknown_AddRef( This->handler );
+    async_invoke_handler( This );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_vec_get_Completed( IAsyncOperation_IVectorView_StorageFile *iface,
+        IAsyncOperationCompletedHandler_IVectorView_StorageFile **handler )
+{
+    struct async_result *This = async_from_op_vec( iface );
+
+    *handler = (__FIAsyncOperationCompletedHandler_1___FIVectorView_1_Windows__CStorage__CStorageFile *)This->handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_vec_GetResults( IAsyncOperation_IVectorView_StorageFile *iface,
+        IVectorView_StorageFile **results )
+{
+    struct async_result *This = async_from_op_vec( iface );
+
+    *results = &This->view;
+    IInspectable_AddRef( (IInspectable *)*results );
+    return S_OK;
+}
+
+static const struct __FIAsyncOperation_1___FIVectorView_1_Windows__CStorage__CStorageFileVtbl async_vec_vtbl =
+{
+    async_vec_QueryInterface, async_vec_addref, async_vec_release,
+    async_vec_GetIids, async_vec_GetRuntimeClassName, async_vec_GetTrustLevel,
+    async_vec_put_Completed, async_vec_get_Completed, async_vec_GetResults,
+};
+
+static HRESULT WINAPI async_info_get_Id( IAsyncInfo *iface, UINT32 *id )
+{
+    *id = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI async_info_get_Status( IAsyncInfo *iface, enum AsyncStatus *status )
+{
+    *status = AsyncStatus_Completed;
+    return S_OK;
+}
+
+static HRESULT WINAPI async_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *code )
+{
+    *code = S_OK;
+    return S_OK;
+}
+
+static HRESULT WINAPI async_info_Cancel( IAsyncInfo *iface )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI async_info_Close( IAsyncInfo *iface )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI async_info_GetResults( IAsyncInfo *iface, HRESULT *code )
+{
+    *code = S_OK;
+    return S_OK;
+}
+
+static const struct IAsyncInfoVtbl async_info_vtbl =
+{
+    async_info_QueryInterface, async_info_addref, async_info_release,
+    async_info_GetIids, async_info_GetRuntimeClassName, async_info_GetTrustLevel,
+    async_info_get_Id, async_info_get_Status, async_info_get_ErrorCode,
+    async_info_Cancel, async_info_Close, async_info_GetResults,
+};
+
+static HRESULT WINAPI async_view_GetAt( IVectorView_StorageFile *iface, UINT32 index,
+        IStorageFile **item )
+{
+    struct async_result *This = async_from_view( iface );
+
+    if (index) return E_INVALIDARG;
+    *item = &This->file->IStorageFile_iface;
+    IStorageFile_AddRef( *item );
+    return S_OK;
+}
+
+static HRESULT WINAPI async_view_get_Size( IVectorView_StorageFile *iface, UINT32 *size )
+{
+    *size = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI async_view_IndexOf( IVectorView_StorageFile *iface, IStorageFile *item,
+        UINT32 *index, boolean *found )
+{
+    struct async_result *This = async_from_view( iface );
+
+    if (item == &This->file->IStorageFile_iface)
+    {
+        *index = 0;
+        *found = true;
+    }
+    else
+    {
+        *index = 0;
+        *found = false;
+    }
+    return S_OK;
+}
+
+static const struct __FIVectorView_1_Windows__CStorage__CStorageFileVtbl async_view_vtbl =
+{
+    async_view_QueryInterface, async_view_addref, async_view_release,
+    async_view_GetIids, async_view_GetRuntimeClassName, async_view_GetTrustLevel,
+    async_view_GetAt, async_view_get_Size, async_view_IndexOf,
+};
+
+static HRESULT create_async_result( struct storage_folder *folder, int kind,
+        IInspectable **ret )
+{
+    struct async_result *async = calloc( 1, sizeof(*async) );
+    WCHAR path[MAX_PATH];
+    HRESULT hr;
+
+    if (!async) return E_OUTOFMEMORY;
+    if (!folder->path[0]) package_root_path( folder->path, ARRAY_SIZE(folder->path) );
+    lstrcpyW( path, folder->path );
+    lstrcatW( path, L"\\AppXManifest.xml" );
+
+    if (!(async->file = create_storage_file( path )))
+    {
+        free( async );
+        return E_OUTOFMEMORY;
+    }
+    async->ref = 1;
+    async->kind = kind;
+    async->op_file.lpVtbl = &async_file_vtbl;
+    async->op_item.lpVtbl = &async_item_vtbl;
+    async->op_vec.lpVtbl = &async_vec_vtbl;
+    async->info.lpVtbl = &async_info_vtbl;
+    async->view.lpVtbl = &async_view_vtbl;
+    switch (kind)
+    {
+    case 0: *ret = (IInspectable *)&async->op_file; break;
+    case 1: *ret = (IInspectable *)&async->op_item; break;
+    default: *ret = (IInspectable *)&async->op_vec; break;
+    }
+    IInspectable_AddRef( *ret );
+    return S_OK;
+}
+
 
 struct package
 {

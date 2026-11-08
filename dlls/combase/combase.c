@@ -3704,6 +3704,15 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD reason, LPVOID reserved)
     return TRUE;
 }
 
+/* Generated from combase_activation.idl + combase_inspectable.idl (widl
+ * dlldata, PROXY_CLSID {00020424-0000-0000-C000-000000000046}): the
+ * PSFactoryBuffer hosting the NDR proxy/stub pair for IActivationFactory
+ * (and its base IInspectable), the combase-hosted proxy DLL of the WinRT
+ * out-of-proc activation leg (Interface\{iid}\ProxyStubClsid32 seed in
+ * loader/wine.inf.in).  The server's standard marshaler creates the stub
+ * from it, the client's standard unmarshaler the proxy. */
+HRESULT WINAPI COMBASE_DllGetClassObject(REFCLSID rclsid, REFIID riid, void **obj);
+
 HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **obj)
 {
     TRACE("%s, %s, %p.\n", debugstr_guid(rclsid), debugstr_guid(riid), obj);
@@ -3713,5 +3722,5 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **obj)
     if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
         return IClassFactory_QueryInterface(&global_options_factory, riid, obj);
 
-    return CLASS_E_CLASSNOTAVAILABLE;
+    return COMBASE_DllGetClassObject(rclsid, riid, obj);
 }

@@ -376,6 +376,14 @@ ATOM WINAPI RegisterClassExW( const WNDCLASSEXW* wc )
     init_class_name( &name, wc->lpszClassName );
     get_class_version( &name, &version, FALSE );
 
+    if (!IS_INTRESOURCE(wc->lpszClassName) && wc->lpszClassName)
+    {
+        /* s221 probe: XAML root window class registration chain */
+        if (wcsstr( wc->lpszClassName, L"Xaml" ) || wcsstr( wc->lpszClassName, L"WinUI" ) ||
+            wcsstr( wc->lpszClassName, L"Windows.UI" ))
+            ERR( "register class %s inst %p\n", debugstr_w(wc->lpszClassName), wc->hInstance );
+    }
+
     if (wc->lpszMenuName && !(menu_name = alloc_menu_nameW( wc->lpszMenuName ))) return 0;
 
     atom = NtUserRegisterClassExWOW( wc, &name, &version, menu_name, 0, 0, NULL );

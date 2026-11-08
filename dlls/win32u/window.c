@@ -6033,7 +6033,7 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     if (!(get_window_long( hwnd, GWL_STYLE ) & WS_CHILD) && !get_window_relative( hwnd, GW_OWNER ))
         call_hooks( WH_SHELL, HSHELL_WINDOWCREATED, (WPARAM)hwnd, 0, 0 );
 
-    ERR( "created window %p class %s name %s style %08x exstyle %08x\n", hwnd, debugstr_us(class_name), debugstr_us(window_name), cs.style, cs.dwExStyle );
+    ERR( "created window %p class %s name %s style %08x exstyle %08x parent %p\n", hwnd, debugstr_us(class_name), debugstr_us(window_name), cs.style, cs.dwExStyle, cs.hwndParent );
     set_thread_dpi_awareness_context( context );
 
     toplevel = NtUserGetAncestor( hwnd, GA_ROOT );

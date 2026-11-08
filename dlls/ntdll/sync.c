@@ -741,9 +741,21 @@ void WINAPI RtlInitializeConditionVariable( RTL_CONDITION_VARIABLE *variable )
  *  The calling thread does not have to own any lock in order to call
  *  this function.
  */
+#ifdef __unix__
+#  define TPDBG_OUT(...) fprintf( stderr, __VA_ARGS__ )
+static int tpdbg_on(void) { static int v = -1; if (v < 0) v = getenv( "TPDBG" ) ? 1 : 0; return v; }
+#else
+#  define TPDBG_OUT(...) do {} while (0)
+static int tpdbg_on(void) { return 1; }
+#endif
+
 void WINAPI RtlWakeConditionVariable( RTL_CONDITION_VARIABLE *variable )
 {
+    static int dbg = -1;
+    LONG v = (LONG)(ULONG_PTR)variable->Ptr;
     InterlockedIncrement( (LONG *)&variable->Ptr );
+    if (dbg < 0) dbg = tpdbg_on();
+    if (dbg) TPDBG_OUT( "CVWAKE %p v=%ld tid=%lx\n", variable, v + 1, GetCurrentThreadId() );
     RtlWakeAddressSingle( variable );
 }
 
@@ -778,9 +790,13 @@ NTSTATUS WINAPI RtlSleepConditionVariableCS( RTL_CONDITION_VARIABLE *variable, R
 {
     int value = *(int *)&variable->Ptr;
     NTSTATUS status;
+    static int dbg = -1;
 
+    if (dbg < 0) dbg = tpdbg_on();
+    if (dbg) TPDBG_OUT( "CVPARK tid=%lx v=%d\n", GetCurrentThreadId(), value );
     RtlLeaveCriticalSection( crit );
     status = RtlWaitOnAddress( &variable->Ptr, &value, sizeof(value), timeout );
+    if (dbg) TPDBG_OUT( "CVWOKEN tid=%lx st=%x\n", GetCurrentThreadId(), status );
     RtlEnterCriticalSection( crit );
     return status;
 }
