@@ -2067,6 +2067,18 @@ static void heap_prewarm( void )
         for (j = 0; j < 0x2000000; j += 0x1000) p[j] = 1;
     }
 
+    /* Arm-3 probe 3b (s231): the s230 fault family sits ~4 GB above the
+     * base window (private-heap block r10 = 0x6ffffddd0000, wrapper deref
+     * fault 0x6ffffdf5948f, vtable-chunk rip 0x6ffffe025429). Pin a second
+     * fixed window sized from that observed spread: 32 MB at
+     * 0x6ffffd000000 covers [0x6ffffd000000, 0x6fffff000000). Keep the
+     * HeapCreate for the s228 liveness. */
+    if ((p = VirtualAlloc( (char *)0x6ffffd000000, 0x2000000,
+                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE )))
+    {
+        for (j = 0; j < 0x2000000; j += 0x1000) p[j] = 1;
+    }
+
     /* Load-order arm (p215): pull the XAML runtime chain in ahead of the
      * first ApplicationDataContainer.get_Values RCW cycle. With
      * Microsoft.UI.Xaml.dll resident before CoreCLR wraps the values
