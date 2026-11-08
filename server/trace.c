@@ -32,7 +32,7 @@
 #ifdef HAVE_NETINET_TCP_H
 #include <netinet/tcp.h>
 #endif
-#ifdef HAVE_ARPA_INET_H
+#if defined(HAVE_ARPA_INET_H) || defined(__MINGW32__)
 #include <arpa/inet.h>
 #endif
 

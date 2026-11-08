@@ -727,6 +727,27 @@ static inline int get_queue_status( struct msg_queue *queue )
             queue_shm->internal_bits;
 }
 
+static int qsnp = -1;
+static inline int qsync_debug( void )
+{
+    if (qsnp < 0) qsnp = getenv( "QSYNC_DEBUG" ) ? 1 : 0;
+    return qsnp;
+}
+#define QSYNC(fmt, ...) do { if (qsync_debug()) fprintf( stderr, "QSYNC t=%u " fmt "\n", (current ? get_thread_id(current) : 0), __VA_ARGS__ ); } while (0)
+#define QSTATE QSYNC("%s q=%p wb=%08x cb=%08x wm=%08x cm=%08x", tag, queue, \
+    queue_shm->wake_bits, queue_shm->changed_bits, queue_shm->wake_mask, queue_shm->changed_mask)
+
+/* check if the queue has any pending wake condition, ignoring the
+ * per-caller masks: the wake event must track "queue has work" so that
+ * a consumed wake-up is re-armed while any source (timer, paint,
+ * driver, posted) is still pending, not only sources matching the
+ * mask installed by the last visitor */
+static inline int get_queue_msgs( struct msg_queue *queue )
+{
+    const queue_shm_t *queue_shm = queue->shared;
+    return queue_shm->wake_bits || queue_shm->changed_bits || queue_shm->internal_bits;
+}
+
 /* set some queue bits */
 static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
 {
@@ -749,7 +770,12 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
     }
     SHARED_WRITE_END;
 
-    if (get_queue_status( queue )) signal_sync( queue->sync );
+    if (get_queue_msgs( queue ))
+    {
+        const char *tag = "setbits->sig";
+        QSTATE;
+        signal_sync( queue->sync );
+    }
 }
 
 /* clear some queue bits */
@@ -774,7 +800,12 @@ static inline void clear_queue_bits( struct msg_queue *queue, unsigned int bits 
         if (queue->keystate_lock) unlock_input_keystate( queue->input );
         queue->keystate_lock = 0;
     }
-    if (!get_queue_status( queue )) reset_sync( queue->sync );
+    if (!get_queue_msgs( queue ))
+    {
+        const char *tag = "clrbits->rst";
+        QSTATE;
+        reset_sync( queue->sync );
+    }
 }
 
 /* check if message is matched by the filter */
@@ -3127,8 +3158,18 @@ DECL_HANDLER(set_queue_mask)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_status( queue )) reset_sync( queue->sync );
-    else signal_sync( queue->sync );
+    if (!get_queue_msgs( queue ))
+    {
+        const char *tag = "setmask->rst";
+        QSTATE;
+        reset_sync( queue->sync );
+    }
+    else
+    {
+        const char *tag = "setmask->sig";
+        QSTATE;
+        signal_sync( queue->sync );
+    }
 }
 
 
@@ -3149,7 +3190,12 @@ DECL_HANDLER(get_queue_status)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_status( queue )) reset_sync( queue->sync );
+    if (!get_queue_msgs( queue ))
+    {
+        const char *tag = "getstat->rst";
+        QSTATE;
+        reset_sync( queue->sync );
+    }
 }
 
 
@@ -3349,7 +3395,12 @@ DECL_HANDLER(get_message)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_status( queue )) reset_sync( queue->sync );
+    if (!get_queue_msgs( queue ))
+    {
+        const char *tag = "getmsg->rst";
+        QSTATE;
+        reset_sync( queue->sync );
+    }
 
     /* then check for posted messages */
     if ((filter & QS_POSTMESSAGE) &&
@@ -3406,8 +3457,18 @@ DECL_HANDLER(get_message)
     }
     SHARED_WRITE_END;
 
-    if (!get_queue_status( queue )) reset_sync( queue->sync );
-    else signal_sync( queue->sync );
+    if (!get_queue_msgs( queue ))
+    {
+        const char *tag = "pend->rst";
+        QSTATE;
+        reset_sync( queue->sync );
+    }
+    else
+    {
+        const char *tag = "pend->sig";
+        QSTATE;
+        signal_sync( queue->sync );
+    }
     set_error( STATUS_PENDING );  /* FIXME */
 }
 

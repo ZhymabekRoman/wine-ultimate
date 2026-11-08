@@ -3465,9 +3465,11 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     process_driver_events( QS_ALLINPUT, wake_mask, changed_mask );
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
 
+    TRACE( "enter count=%u timeout=%u wm=%x cm=%x qis=%u\n", count, timeout, wake_mask, changed_mask, queue_in_set );
     do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
     while (queue_in_set && ret == count - 1 && check_internal_bits( QS_DRIVER ) &&
            !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
+    TRACE( "ret=%Ix\n", (DWORD_PTR)ret );
 
     if (HIWORD(ret)) /* is it an error code? */
     {

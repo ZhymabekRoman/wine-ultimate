@@ -99,12 +99,21 @@ int get_inproc_sync_fd( struct inproc_sync *sync )
 
 struct inproc_sync *create_inproc_internal_sync( int manual, int signaled )
 {
-    struct ntsync_event_args args = {.signaled = signaled, .manual = manual};
     struct inproc_sync *event;
 
     if (!(event = alloc_object( &inproc_sync_ops ))) return NULL;
     event->type = INPROC_SYNC_INTERNAL;
+#ifdef NTSYNC_IOC_CREATE_QUEUE
+    /* A counted queue object: every wake source that finds the queue non-empty pushes
+     * a wake credit, and each client NtWaitForMultipleObjects() on the queue handle
+     * pops one. Unlike a manual-reset event, pushes don't coalesce, so a wake sent
+     * while the consumer is draining (between two waits) is never lost. */
+    struct ntsync_queue_args args = {.count = signaled ? 1 : 0, .max = ~0u};
+    event->fd   = ioctl( get_inproc_device_fd(), NTSYNC_IOC_CREATE_QUEUE, &args );
+#else
+    struct ntsync_event_args args = {.signaled = signaled, .manual = manual};
     event->fd   = ioctl( get_inproc_device_fd(), NTSYNC_IOC_CREATE_EVENT, &args );
+#endif
     list_init( &event->entry );
 
     if (event->fd == -1)
@@ -182,22 +191,48 @@ static void inproc_sync_dump( struct object *obj, int verbose )
 
 void signal_inproc_sync( struct inproc_sync *sync )
 {
-    __u32 count;
+    __u32 count = 1;
     if (debug_level) fprintf( stderr, "set_inproc_event %d\n", sync->fd );
+#ifdef NTSYNC_IOC_CREATE_QUEUE
+    if (sync->type == INPROC_SYNC_INTERNAL)
+    {
+        ioctl( sync->fd, NTSYNC_IOC_QUEUE_PUSH, &count );
+        return;
+    }
+#endif
     ioctl( sync->fd, NTSYNC_IOC_EVENT_SET, &count );
 }
 
 void reset_inproc_sync( struct inproc_sync *sync )
 {
-    __u32 count;
+    __u32 count = ~0u;
     if (debug_level) fprintf( stderr, "reset_inproc_event %d\n", sync->fd );
+#ifdef NTSYNC_IOC_CREATE_QUEUE
+    if (sync->type == INPROC_SYNC_INTERNAL)
+    {
+        ioctl( sync->fd, NTSYNC_IOC_QUEUE_POP, &count );
+        return;
+    }
+#endif
     ioctl( sync->fd, NTSYNC_IOC_EVENT_RESET, &count );
 }
 
 static int inproc_sync_signaled( struct object *obj, struct wait_queue_entry *entry )
 {
     struct inproc_sync *sync = (struct inproc_sync *)obj;
-    if (sync->type == INPROC_SYNC_EVENT || sync->type == INPROC_SYNC_INTERNAL)
+    if (sync->type == INPROC_SYNC_INTERNAL)
+    {
+#ifdef NTSYNC_IOC_CREATE_QUEUE
+        __u32 count = 0;
+        if (!ioctl( sync->fd, NTSYNC_IOC_QUEUE_READ, &count ))
+            return count != 0;
+#else
+        struct ntsync_event_args args = { 0 };
+        if (!ioctl( sync->fd, NTSYNC_IOC_EVENT_READ, &args ))
+            return args.signaled;
+#endif
+    }
+    else if (sync->type == INPROC_SYNC_EVENT)
     {
         struct ntsync_event_args args = { 0 };
         if (!ioctl( sync->fd, NTSYNC_IOC_EVENT_READ, &args ))

@@ -3256,6 +3256,80 @@ static void test_MsgWakeViaPostMessage( void )
     UnregisterClassW( clsname, wc.hInstance );
 }
 
+/*
+ * Periodic queue wake: the first wake of GetMessage() may come from a posted message,
+ * and every following park on the queue wake event has to be woken again, both by
+ * messages posted from another thread and by timer messages that the server generates
+ * when the timer expires (there is no post behind a WM_TIMER, so the wake event must be
+ * re-armed by the timer expiry itself). A wake event that is consumed by the first
+ * GetMessage() and not re-posted stalls the loop after a single message.
+ */
+struct wake_poster_args
+{
+    HWND hwnd;
+    unsigned int count;
+    unsigned int ms;
+};
+
+static void wake_poster( void *arg )
+{
+    struct wake_poster_args *args = arg;
+    unsigned int i;
+
+    for (i = 0; i < args->count; i++)
+    {
+        PostMessageA( args->hwnd, WM_APP + 1, 0, 0 );
+        Sleep( args->ms );
+    }
+}
+
+static void test_queue_periodic_wake( void )
+{
+    static const WCHAR clsname[] = L"wine_test_queue_wake";
+    WNDCLASSW wc = { .lpfnWndProc = DefWindowProcW, .hInstance = GetModuleHandleA( 0 ), .lpszClassName = clsname };
+    struct wake_poster_args args;
+    HANDLE thread;
+    HWND hwnd;
+    MSG msg;
+    DWORD t;
+    ULONG timers = 0, posts = 0;
+
+    ok( RegisterClassW( &wc ), "RegisterClassW error %lu\n", GetLastError() );
+    hwnd = CreateWindowExW( 0, clsname, L"queuewake", 0, 0, 0, 8, 8, HWND_MESSAGE, NULL, wc.hInstance, NULL );
+    ok( hwnd != NULL, "CreateWindowExW error %lu\n", GetLastError() );
+    if (!hwnd) return;
+
+    args.hwnd = hwnd;
+    args.count = 30;
+    args.ms = 50;
+    thread = CreateThread( NULL, 0, (LPTHREAD_START_ROUTINE)wake_poster, &args, 0, NULL );
+    ok( thread != NULL, "CreateThread error %lu\n", GetLastError() );
+
+    ok( SetTimer( hwnd, 1, 50, NULL ) != 0, "SetTimer error %lu\n", GetLastError() );
+
+    t = GetTickCount();
+    while (GetTickCount() - t < 1000)
+    {
+        if (!GetMessageW( &msg, NULL, 0, 0 )) break;
+        TranslateMessage( &msg );
+        DispatchMessageW( &msg );
+        if (msg.message == WM_TIMER) timers++;
+        else if (msg.message == WM_APP + 1) posts++;
+    }
+
+    /* a 50 ms timer over 1 s has to deliver several times: with a wake event that is
+     * consumed by the first GetMessage() and not re-posted for timer expiries, both
+     * counters stall at 1 */
+    ok( timers >= 3, "got %u timer messages in 1 s, expected periodic wakes\n", timers );
+    ok( posts >= 3, "got %u posted messages in 1 s, expected periodic wakes\n", posts );
+
+    KillTimer( hwnd, 1 );
+    WaitForSingleObject( thread, 5000 );
+    CloseHandle( thread );
+    DestroyWindow( hwnd );
+    UnregisterClassW( clsname, wc.hInstance );
+}
+
 START_TEST(win32u)
 {
     char **argv;
@@ -3306,6 +3380,7 @@ START_TEST(win32u)
     test_message_filter();
     test_timer();
     test_MsgWakeViaPostMessage();
+    test_queue_periodic_wake();
     test_inter_process_messages( argv[0] );
     test_pixel_format( argv );
     test_wndproc_hook();
