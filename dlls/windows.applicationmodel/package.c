@@ -783,7 +783,7 @@ static ULONG async_release( struct async_result *This )
 }
 
 #define ASYNC_FWD(name, type, from) \
-static HRESULT WINAPI name( type *iface, REFIID iid, void **out ) { return async_query( from( iface ), iid, out ); } \
+static HRESULT WINAPI name##_QueryInterface( type *iface, REFIID iid, void **out ) { return async_query( from( iface ), iid, out ); } \
 static ULONG WINAPI name##_addref( type *iface ) { return async_addref( from( iface ) ); } \
 static ULONG WINAPI name##_release( type *iface ) { return async_release( from( iface ) ); } \
 static HRESULT WINAPI name##_GetIids( type *iface, ULONG *count, IID **iids ) { *count = 0; *iids = NULL; return S_OK; } \
@@ -918,7 +918,7 @@ static HRESULT WINAPI async_info_get_Id( IAsyncInfo *iface, UINT32 *id )
 
 static HRESULT WINAPI async_info_get_Status( IAsyncInfo *iface, enum AsyncStatus *status )
 {
-    *status = AsyncStatus_Completed;
+    *status = 1 /* AsyncStatus_Completed */;
     return S_OK;
 }
 
