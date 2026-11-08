@@ -60,14 +60,17 @@ static const GUID IID_INotifyCollectionChanged_g =
 static const GUID IID_INotifyPropertyChanged_g =
     { 0xe8a31095, 0x6789, 0x587b, { 0xb8, 0xe5, 0xcc, 0x7a, 0x1b, 0xdd, 0x8e, 0x37 }};
 
-/* Forward accessors: the merged-face vtables are defined below GetIids; the
- * shader hands these out as the entry Vtable pointers. */
-static void **propertyset_vtbl_ptr( void );
-static void **propertyset_imapview_vtbl_ptr( void );
-static void **propertyset_iterable_vtbl_ptr( void );
-static void **propertyset_iobservablemap_vtbl_ptr( void );
+/* Merged-face vtable blobs are defined below GetIids; forward-declare them
+ * (tagged) so propertyset_GetIids' compile-time pair array can reference
+ * their addresses directly — no runtime accessors, no lazy memcpy publish. */
+struct propertyset_vtbl_full_s;
+struct propertyset_imapview_vtbl_full_s;
+struct propertyset_iterable_vtbl_full_s;
+static const struct propertyset_vtbl_full_s propertyset_vtbl_full;
+static const struct propertyset_imapview_vtbl_full_s propertyset_IMapView_vtbl_full;
+static const struct propertyset_iterable_vtbl_full_s propertyset_IIterable_vtbl_full;
 
-/* Windows hands out a single object for the whole PropertySet interface set:
+/* Forward accessors: the merged-face vtables are defined below GetIids; the
  * QI for IPropertySet, IMap, IMapView, IIterable and IObservableMap all return
  * the same pointer at offset 0, whose vtable is the prefix-deduplicated union
  * of the interface layouts (windows.foundation.collections.idl):
@@ -188,28 +191,37 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
 
     if (iid_count) *iid_count = 3; /* filled on the (NULL, NULL) probe itself */
-    if (!impl->iids_cache)
     {
-        /* p206: canonical AE face — IPropertySet (default) +
+        /* p209: canonical AE face — IPropertySet (default) +
          * IMapView<HSTRING,IInspectable> + IIterable<IKeyValuePair>.
-         * Trimmed 6→3 to test the face-count→arena-tag link: the p204d/p205
-         * invariant coreclr+0x388c3e AV derefs vtable slot 7 with
-         * rax = shared-heap base + tag 6, and 6 is this pair count. */
-        struct com_interface_entry entries[] =
+         *
+         * The pair array is fully built at load time (image relocations),
+         * not lazily memcpy'd into .bss on the first GetIids: CoreCLR's
+         * ComWrappers shader caches the (count, array) pair for the process
+         * lifetime and copies the ComInterfaceEntry slots into its heap
+         * ComVirtualMethodData chunk (header word stored packed as
+         * chunk|ComVirtualMethodDataTag, observed vtable slot 0 =
+         * 0x6fff00000000|3 in the p204-p208 AV runs; the consumer in
+         * TrackerObjectManager::AfterWrapperCreated reads header slots
+         * +0x18/+0x38 = IReferenceTracker ConnectFromTrackerSource /
+         * AddRefFromTrackerSource). A shader racing the first-GetIids
+         * memcpy published half-written pairs: the copied entry's Vtable
+         * slot read back as heap base + tag with the IID slot still zero,
+         * and the slot-7 refetch dereferenced 0x6fff0000003b → the 6.7M
+         * first-chance AV loop. Compile-time init + single store publish
+         * removes the window. One static array per face type outlives
+         * every consumer (p202 lesson: the shader caches the pointer). */
+        static struct com_interface_entry shared[3] =
         {
-            { propertyset_vtbl_ptr(), (IID *)&IID_IPropertySet },
-            { propertyset_imapview_vtbl_ptr(), (IID *)&IID_IMapView_HSTRING_IInspectable },
-            { propertyset_iterable_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
+            { (void *)&propertyset_vtbl_full,/* .vtbl @ offset 0 */ (IID *)&IID_IPropertySet },
+            { (void *)&propertyset_IMapView_vtbl_full, (IID *)&IID_IMapView_HSTRING_IInspectable },
+            { (void *)&propertyset_IIterable_vtbl_full, (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
         };
-        /* The shader caches (count, array) per IID set for the process
-         * lifetime; the CoTaskMem arrays sat in the wine shared heap
-         * (0x6fff00000000 region) and were recycled while the shader was
-         * mid-CreateObject (p202 AV *rbx = heap base + count, p204 AV entry
-         * read). One static array per face type outlives every consumer. */
-        static struct com_interface_entry shared[ARRAY_SIZE( entries )];
-        if (!shared[0].vtable) memcpy( shared, entries, sizeof(entries) );
-        impl->iids_count = ARRAY_SIZE(entries);
-        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, shared, NULL );
+        if (!impl->iids_cache)
+        {
+            impl->iids_count = ARRAY_SIZE( shared );
+            InterlockedCompareExchangePointer( (void **)&impl->iids_cache, shared, NULL );
+        }
     }
 
     if (iid_count) *iid_count = impl->iids_count;
@@ -456,7 +468,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_get_CollectionChanged( IPropertySet
  * Slots 17+ are the interop-call target of the CoreRT stub (call [rax+0x88]);
  * before they existed the stub ran the data behind the vtable and every
  * fault nested the mrt100 VEH one context frame deeper. */
-static const struct
+static const struct propertyset_vtbl_full_s
 {
     IPropertySetVtbl vtbl;
     void *map_slots[7];                /* 6-12 */
@@ -693,7 +705,8 @@ static HRESULT STDMETHODCALLTYPE propertyset_IMapView_Split( IMapView_HSTRING_II
     return propertyset_GetView( &impl->IPropertySet_iface, first, second );
 }
 
-static const struct { IMapView_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } propertyset_IMapView_vtbl_full =
+static const struct propertyset_imapview_vtbl_full_s
+{ IMapView_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } propertyset_IMapView_vtbl_full =
 {
     { propertyset_IMapView_QueryInterface,
     propertyset_IMapView_AddRef,
@@ -722,7 +735,12 @@ static HRESULT STDMETHODCALLTYPE propertyset_IIterable_First( IIterable_IKeyValu
     return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable, value );
 }
 
-static const struct { IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; void *pad[4]; } propertyset_IIterable_vtbl_full =
+static const struct propertyset_iterable_vtbl_full_s
+{
+    IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl;
+    void *add_ref_from_tracker_source;  /* 7 */
+    void *pad[3];
+} propertyset_IIterable_vtbl_full =
 {
     { propertyset_IIterable_QueryInterface,
     propertyset_IIterable_AddRef,
@@ -733,16 +751,22 @@ static const struct { IIterable_IKeyValuePair_HSTRING_IInspectableVtbl vtbl; voi
     propertyset_IIterable_GetTrustLevel,
     /* IIterable<IKeyValuePair<HSTRING, IInspectable*>> */
     propertyset_IIterable_First, },
-    { 0, 0, 0, 0 }
+    /* 7: the CoreCLR ComWrappers shader hands this vtable to the shader
+     * chunk for the IIterable entry of GetIids and calls slot 7 as
+     * IReferenceTracker::AddRefFromTrackerSource() (coreclr
+     * TrackerObjectManager::AfterWrapperCreated, mov 0x38(%rax),%rax);
+     * with pad[0] = NULL the shader's slot-7 refetch returned a heap
+     * blob address and faulted on the code fetch. A refcount bump answers
+     * the tracker contract. */
+    (void *)propertyset_IIterable_AddRef,
+    { 0, 0, 0 }
 };
 #define propertyset_IIterable_vtbl propertyset_IIterable_vtbl_full.vtbl
 
 
-/* vtable accessors used by propertyset_GetIids' ComInterfaceEntry table. */
-static void **propertyset_vtbl_ptr( void ) { return (void **)&propertyset_vtbl; }
-static void **propertyset_imapview_vtbl_ptr( void ) { return (void **)&propertyset_IMapView_vtbl; }
-static void **propertyset_iterable_vtbl_ptr( void ) { return (void **)&propertyset_IIterable_vtbl; }
-static void **propertyset_iobservablemap_vtbl_ptr( void ) { return (void **)&propertyset_IObservableMap_vtbl; }
+/* The merged-face ComInterfaceEntry pairs are compile-time initialized with
+ * direct &vtbl_full.vtbl references (see propertyset_GetIids); the former
+ * runtime accessors are gone. */
 
 
 struct propertyset_factory
