@@ -2254,7 +2254,13 @@ DECL_HANDLER(create_window)
 
     if (!atom) atom = find_atom( table, &cls_name );
 
-    if (!(win = create_window( parent, owner, atom, req->class_instance, req->instance ))) return;
+    fprintf( stderr, "CWQ atom=%x cls_len=%u parent=%p -> handle_pre=%p\n",
+             atom, (unsigned int)cls_name.len, (void *)(ULONG_PTR)req->parent, (void *)(ULONG_PTR)reply->handle );
+    if (!(win = create_window( parent, owner, atom, req->class_instance, req->instance )))
+    {
+        fprintf( stderr, "CWQ create_window FAILED atom=%x\n", atom );
+        return;
+    }
 
     if (parent && !is_desktop_window( parent ))
         dpi_context = parent->shared->dpi_context;
@@ -2277,6 +2283,7 @@ DECL_HANDLER(create_window)
     reply->owner       = win->owner;
     reply->extra       = win->nb_extra_bytes;
     reply->class_ptr   = get_class_client_ptr( win->class );
+    fprintf( stderr, "CWQ ok handle=%p class_ptr=%p\n", (void *)(ULONG_PTR)win->handle, reply->class_ptr );
 }
 
 

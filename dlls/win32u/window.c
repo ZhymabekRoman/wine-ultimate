@@ -5742,6 +5742,8 @@ HWND WINAPI NtUserCreateWindowEx( DWORD ex_style, UNICODE_STRING *class_name,
     RECT surface_rect;
     WND *win;
 
+    fprintf( stderr, "CWE enter cls=%.*S style=%lx parent=%p\n",
+             (int)(class_name->Length / sizeof(WCHAR)), class_name->Buffer, style, parent );
     cs.lpCreateParams = params;
     cs.hInstance  = instance ? instance : class_instance;
     cs.hMenu      = menu;
