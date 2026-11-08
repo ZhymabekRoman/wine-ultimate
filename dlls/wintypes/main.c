@@ -2032,6 +2032,13 @@ static void heap_prewarm( void )
         ((char *)heap_prewarm_blocks[i])[0] = 1;
         ((char *)heap_prewarm_blocks[i])[0x1fff0] = 2;
     }
+    /* Reserve a privately committed heap ahead of the coreclr/shader
+     * allocation phase: its 8MB initial commit is one contiguous mapping, so
+     * the virtual free area serves the next region (coreclr's heap blocks,
+     * base observed 0x6fff00000000) with a fully mapped head page instead of
+     * the 1MB-grow block whose first page faults (CompositeVtableData chunk
+     * load [header+0x38], 0x6fff0000003b). */
+    HeapCreate( 0, 0x100000, 0x800000 );
 }
 
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
