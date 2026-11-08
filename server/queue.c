@@ -1622,7 +1622,7 @@ static void timer_callback( void *private )
     fprintf( stderr, "TCB fire now=%lld\n", (long long)monotonic_time );
     queue->timeout = NULL;
     /* move on to the next timer */
-    ptr = list_head( &queue->pending_timers );
+    if (!(ptr = list_head( &queue->pending_timers ))) return;  /* guard the sentinel */
     list_remove( ptr );
     list_add_tail( &queue->expired_timers, ptr );
     set_next_timer( queue );
@@ -1665,10 +1665,12 @@ static struct timer *find_expired_timer( struct msg_queue *queue, user_handle_t 
 {
     struct timer *timer;
 
-    fprintf( stderr, "FET probe win=%p first=%x last=%x exp=%d\n", (void *)(ULONG_PTR)win,
+    fprintf( stderr, "FET probe q=%p win=%p first=%x last=%x exp=%d\n", queue, (void *)(ULONG_PTR)win,
              get_first, get_last, !list_empty( &queue->expired_timers ) );
     LIST_FOR_EACH_ENTRY( timer, &queue->expired_timers, struct timer, entry )
     {
+        fprintf( stderr, "FET entry win=%p msg=%x id=%llx\n", (void *)(ULONG_PTR)timer->win,
+                 timer->msg, (unsigned long long)timer->id );
         if (win && timer->win != win) continue;
         if (check_msg_filter( timer->msg, get_first, get_last ))
         {
@@ -3561,7 +3563,8 @@ DECL_HANDLER(get_message_reply)
 /* set a window timer */
 DECL_HANDLER(set_win_timer)
 {
-    fprintf( stderr, "STQ enter\n" );
+    fprintf( stderr, "STQ enter win=%p id=%llx rate=%u\n",
+             (void *)(ULONG_PTR)req->win, (unsigned long long)req->id, req->rate );
     struct timer *timer;
     struct msg_queue *queue;
     struct thread *thread = NULL;
@@ -3621,8 +3624,8 @@ DECL_HANDLER(set_win_timer)
         timer->id     = id;
         timer->lparam = req->lparam;
         reply->id     = id;
-        if (1) QSYNC( "set_timer win %p msg %x id %llx lp %llx",
-                                  (void *)(ULONG_PTR)timer->win, timer->msg,
+        if (1) QSYNC( "set_timer q=%p win %p msg %x id %llx lp %llx",
+                                  queue, (void *)(ULONG_PTR)timer->win, timer->msg,
                                   (unsigned long long)timer->id, (unsigned long long)timer->lparam );
     }
     if (thread) release_object( thread );
