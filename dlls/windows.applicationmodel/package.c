@@ -141,11 +141,54 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+/* Install directory of the running package: env override first (per-run),
+ * then the AppModel registration (PackagePath, then the installer-recorded
+ * PackageRootPath), then the executable directory as the last resort. Same
+ * resolution order as the kernel32 package identity helpers. */
+static void package_root_path( WCHAR *buf, DWORD cch )
+{
+    static const WCHAR appmodel_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR subkey[576], name[MAX_PATH];
+    SIZE_T i;
+
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", buf, cch )) return;
+
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", name, ARRAY_SIZE(name) ))
+        wcscpy( name, L"5319275A.WhatsAppDesktop_2.2620.102.0_x64__cv1g1gvanyjgm" );
+    wcscpy( subkey, appmodel_key );
+    lstrcatW( subkey, L"\\Packages\\" );
+    lstrcatW( subkey, name );
+
+    for (i = 0; i < ARRAY_SIZE(roots); i++)
+    {
+        static const WCHAR *const values[] = { L"PackagePath", L"PackageRootPath" };
+        HKEY key;
+        SIZE_T j;
+
+        if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key )) continue;
+        for (j = 0; j < ARRAY_SIZE(values); j++)
+        {
+            DWORD type, size = cch * sizeof(WCHAR);
+            if (!RegQueryValueExW( key, values[j], 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
+            {
+                RegCloseKey( key );
+                return;
+            }
+        }
+        RegCloseKey( key );
+    }
+
+    if (!GetModuleFileNameW( NULL, buf, cch )) buf[0] = 0;
+    else PathCchRemoveFileSpec( buf, cch );
+}
+
 struct storage_folder
 {
     IStorageFolder IStorageFolder_iface;
     IStorageItem IStorageItem_iface;
     LONG ref;
+    WCHAR path[MAX_PATH];
 };
 
 static inline struct storage_folder *impl_from_IStorageFolder( IStorageFolder *iface )
@@ -350,21 +393,27 @@ static HRESULT WINAPI storage_item_GetBasicPropertiesAsync( IStorageItem *iface,
 
 static HRESULT WINAPI storage_item_get_Name( IStorageItem *iface, HSTRING *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct storage_folder *impl = impl_from_IStorageItem( iface );
+    WCHAR name[MAX_PATH];
+    const WCHAR *base;
+
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    if (!impl->path[0]) package_root_path( impl->path, ARRAY_SIZE(impl->path) );
+    if (!(base = wcsrchr( impl->path, L'\\' ))) base = impl->path;
+    else base = base[1] ? base + 1 : base;
+    lstrcpyW( name, base );
+    return WindowsCreateString( name, wcslen(name), value );
 }
 
 static HRESULT WINAPI storage_item_get_Path( IStorageItem *iface, HSTRING *value )
 {
-    WCHAR buffer[MAX_PATH];
-    HRESULT hr;
+    struct storage_folder *impl = impl_from_IStorageItem( iface );
 
     TRACE( "iface %p, value %p\n", iface, value );
 
-    if (!GetModuleFileNameW( NULL, buffer, MAX_PATH )) return HRESULT_FROM_WIN32( GetLastError() );
-    if (FAILED( hr = PathCchRemoveFileSpec( buffer, ARRAY_SIZE(buffer) ) )) return hr;
-
-    return WindowsCreateString( buffer, wcslen(buffer), value );
+    if (!impl->path[0]) package_root_path( impl->path, ARRAY_SIZE(impl->path) );
+    return WindowsCreateString( impl->path, wcslen(impl->path), value );
 }
 
 static HRESULT WINAPI storage_item_get_Attributes( IStorageItem *iface, FileAttributes *value )

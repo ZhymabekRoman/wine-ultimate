@@ -486,7 +486,6 @@ static void test_PackageManager(void)
     hr = IPackageManager_FindPackagesByNamePublisher( manager, NULL, str2, &packages );
     ok( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
     hr = IPackageManager_FindPackagesByNamePublisher( manager, str, str2, &packages );
-    todo_wine
     ok( hr == S_OK || broken(hr == E_ACCESSDENIED) /* Requires admin privileges */, "got hr %#lx.\n", hr );
     if (hr == S_OK) IIterable_Package_Release( packages );
     WindowsDeleteString( str );
@@ -496,7 +495,6 @@ static void test_PackageManager(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
 
     hr = IPackageManager2_FindPackagesWithPackageTypes( manager2, 1, &packages );
-    todo_wine
     ok( hr == S_OK || broken(hr == E_ACCESSDENIED) /* Requires admin privileges */, "got hr %#lx.\n", hr );
     if (hr == S_OK) IIterable_Package_Release( packages );
 
@@ -504,7 +502,6 @@ static void test_PackageManager(void)
     ok( ref == 2, "got ref %ld.\n", ref );
 
     hr = IPackageManager_FindPackages( manager, &packages );
-    todo_wine
     ok( hr == S_OK || broken(hr == E_ACCESSDENIED) /* w8adm */, "got hr %#lx.\n", hr );
     if (hr != S_OK)
     {
