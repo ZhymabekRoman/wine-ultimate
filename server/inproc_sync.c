@@ -196,6 +196,14 @@ void signal_inproc_sync( struct inproc_sync *sync )
 #ifdef NTSYNC_IOC_CREATE_QUEUE
     if (sync->type == INPROC_SYNC_INTERNAL)
     {
+        /* Coalesce: every queue-notify source (post message, timer expiry, set_queue_mask
+         * reinstall) calls this while the queue carries work. Without coalescing the
+         * credits pile up ahead of the consumer's pops, so a get_message round trip can
+         * run a beat ahead of the reply it waits for and read a half-filled reply struct
+         * (e.g. WM_TIMER carrying a stale lparam that is then dispatched as a window
+         * proc). One outstanding credit per wake-up is all the consumer needs. */
+        __u32 avail = 0;
+        if (!ioctl( sync->fd, NTSYNC_IOC_QUEUE_READ, &avail ) && avail) return;
         ioctl( sync->fd, NTSYNC_IOC_QUEUE_PUSH, &count );
         return;
     }
