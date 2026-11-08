@@ -1651,6 +1651,41 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
     {
         ULONG64 *sp = (ULONG64 *)context->Rsp;
         int i;
+        static ULONG64 nre_calls;
+        if (++nre_calls == 1)
+            ERR_(seh)("  v3sentinel np=%u fa=%p\n", (unsigned int)rec->NumberParameters,
+                      rec->NumberParameters >= 2 ? (void *)rec->ExceptionInformation[1] : (void *)0);
+
+        /* Inflate-plateau wave (2026-11-08): the app's frozen R2R references bake
+         * absolute guest pointers into the runtime heap at link-time layout
+         * (TypeManager arena 0x1801000000, refs like 0x1801020001).  Wine lands the
+         * 384MB heap reservation at a host-flavored VA, so those refs name address
+         * holes; the culture walk's WER publish re-reads one per string through the
+         * MSZip decompress (z_stream.next_in=0x1801020001 → inflate faults on
+         * *next_in) and SEH-retries: 18.9k identical AV pairs.  Commit a 64K block
+         * at the faulting page so the first read lands on zero pages and the
+         * decompress retires; the walk proceeds toward the Map plane. */
+        if (rec->NumberParameters >= 2)
+        {
+            static ULONG64 seen[4];
+            ULONG64 fa = rec->ExceptionInformation[1];
+            if (fa == (ULONG64)-1 || fa < 0x7FFFFFFF0000ULL)
+            {
+                int k;
+                for (k = 0; k < 4 && seen[k] && seen[k] != fa; k++);
+                if (k == 4 || !seen[k])
+                {
+                    void *base = fa == (ULONG64)-1 ? (void *)0x7fffffc000000ULL
+                                                   : (void *)(fa & ~0xffffULL);
+                    SIZE_T len = fa == (ULONG64)-1 ? 0x4000000 : 0x10000;
+                    NTSTATUS st = NtAllocateVirtualMemory( GetCurrentProcess(), &base, 0, &len,
+                                                           MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
+                    ERR_(seh)("  av_commit fa=%p base=%p len=%lx st=%x\n",
+                              (void *)fa, base, len, (unsigned int)st);
+                    if (k < 4) seen[k] = fa;
+                }
+            }
+        }
         ERR_(seh)("FIRST_CHANCE_AV addr %p rip=%p rsp=%p rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx rsi=%016llx rdi=%016llx r8=%016llx r9=%016llx\n",
                   rec->ExceptionAddress, (void *)context->Rip, (void *)context->Rsp,
                   (unsigned long long)context->Rax, (unsigned long long)context->Rbx,
