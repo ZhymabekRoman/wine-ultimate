@@ -2042,8 +2042,15 @@ static void heap_prewarm( void )
      * the virtual free area serves the next region (coreclr's heap blocks,
      * base observed 0x6fff00000000) with a fully mapped head page instead of
      * the 1MB-grow block whose first page faults (CompositeVtableData chunk
-     * load [header+0x38], 0x6fff0000003b). */
-    HeapCreate( 0, 0x100000, 0x800000 );
+     * load [header+0x38], 0x6fff0000003b).
+     *
+     * Arm-3 first probe (s228): grow the reserve 8 MB -> 32 MB. The residual
+     * 0x80131506 TryGetOrCreateObjectForComInstanceInternal fatal (survives
+     * the IApplicationDataMethods projection face in s227d) is CoreCLR
+     * ComWrappers allocating the RCW vtable chunks in this private heap; a
+     * 4x reserve lets the whole chunk family land inside the pre-mapped
+     * region instead of crossing into 1MB-grow blocks. */
+    HeapCreate( 0, 0x100000, 0x2000000 );
 
     /* Load-order arm (p215): pull the XAML runtime chain in ahead of the
      * first ApplicationDataContainer.get_Values RCW cycle. With
