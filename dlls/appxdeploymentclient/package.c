@@ -1176,6 +1176,26 @@ static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdPackageFamily
     return find_packages( WindowsGetStringRawBuffer( family_name, NULL ), NULL, NULL, types, packages );
 }
 
+static HRESULT find_users_async( const WCHAR *family, IAsyncOperation_IVectorView_User **operation );
+
+static HRESULT WINAPI package_manager2_FindUsersAsync( IPackageManager2 *iface,
+        IIterable_Package *packages, IAsyncOperation_IVectorView_User **operation )
+{
+    TRACE( "iface %p, packages %p, operation %p.\n", iface, packages, operation );
+
+    return find_users_async( NULL, operation );
+}
+
+static HRESULT WINAPI package_manager2_FindUsersForPackageFamilyAsync( IPackageManager2 *iface,
+        HSTRING family_name, IAsyncOperation_IVectorView_User **operation )
+{
+    const WCHAR *family = family_name ? WindowsGetStringRawBuffer( family_name, NULL ) : NULL;
+
+    TRACE( "iface %p, family_name %s, operation %p.\n", iface, debugstr_hstring( family_name ), operation );
+
+    return find_users_async( family, operation );
+}
+
 static HRESULT WINAPI package_manager2_StageUserDataAsync( IPackageManager2 *iface, HSTRING name,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
@@ -1203,6 +1223,8 @@ static const struct IPackageManager2Vtbl package_manager2_vtbl =
     package_manager2_FindPackagesByPackageFamilyNameWithPackageTypes,
     package_manager2_FindPackagesByUserSecurityIdPackageFamilyNameWithPackageTypes,
     package_manager2_StageUserDataAsync,
+    package_manager2_FindUsersAsync,
+    package_manager2_FindUsersForPackageFamilyAsync,
 };
 
 /*
