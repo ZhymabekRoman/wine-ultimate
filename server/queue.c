@@ -756,7 +756,12 @@ static inline int get_queue_msgs( struct msg_queue *queue )
 static inline int get_queue_wait_msgs( struct msg_queue *queue )
 {
     const queue_shm_t *queue_shm = queue->shared;
-    return (queue_shm->wake_bits & (QS_ALLINPUT & ~QS_SENDMESSAGE)) ||
+    /* QS_TIMER aggregates WM_TIMER and WM_SYSTIMER; the periodic system
+     * timers (caret, tray) re-arm the MsgWait wake event every second, so
+     * exclude QS_TIMER from the wake mask and let the MsgWait timeout be
+     * the pump driver for them (Windows: MsgWait wakes on user input,
+     * paint, posted, timer - systray caret is not a wake source) */
+    return (queue_shm->wake_bits & (QS_ALLINPUT & ~(QS_SENDMESSAGE | QS_TIMER))) ||
            queue_shm->changed_bits || queue_shm->internal_bits;
 }
 
