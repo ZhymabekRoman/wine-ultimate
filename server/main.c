@@ -310,6 +310,8 @@ static void set_scheduling_priority(void)
 int main( int argc, char *argv[] )
 {
     setvbuf( stderr, NULL, _IOLBF, 0 );
+    extern void init_image_ranges( void );
+    init_image_ranges();
     server_argv0 = argv[0];
     parse_options( argc, argv, "d::fhk::p::vw", long_options, option_callback );
 

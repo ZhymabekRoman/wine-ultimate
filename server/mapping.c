@@ -1403,6 +1403,13 @@ static void release_claimed_base( client_ptr_t base )
     }
 }
 
+void init_image_ranges( void )
+{
+    ranges64.base = 0x1000000000;  /* keep image bases under ~15 TB so Redhawk card
+                                      tables (base + base/128) fit the kernel mmap window */
+    ranges64.end = 0xf00000000000;
+}
+
 /* assign a mapping address to a PE image mapping */
 static client_ptr_t assign_map_address( struct mapping *mapping )
 {
@@ -1506,7 +1513,10 @@ void set_session_mapping( struct mapping *mapping )
         static char *next_base = (char *)0x1000000000;  /* keep sections under ~15 TB so Redhawk
                                                           card tables (base + base/128) stay inside
                                                           the kernel mmap window */
-        tmp = mmap( next_base, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, unix_fd, 0 );
+        static const size_t session_span = 12ull << 40;  /* under the kernel mmap window for
+                                                           Redhawk card tables (base + base/128) */
+        size_t map_size = size < session_span ? size : session_span;
+        tmp = mmap( next_base, map_size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, unix_fd, 0 );
         if (tmp != MAP_FAILED) next_base = (char *)tmp + ROUND_SIZE( 0, size, page_size_mask ) + 0x10000;
         else tmp = mmap( NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, unix_fd, 0 );
     }

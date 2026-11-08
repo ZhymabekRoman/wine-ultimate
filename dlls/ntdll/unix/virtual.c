@@ -3776,7 +3776,8 @@ void virtual_init(void)
     wine_rb_init( &views_tree, compare_view );
 
     free_ranges[0].base = (void *)0;
-    free_ranges[0].end = (void *)~0;
+    free_ranges[0].end = (void *)0xf00000000000;  /* under 16 TB: Redhawk card tables (base + base/128)
+                                                    fit the kernel mmap window */
     free_ranges_end = free_ranges + 1;
 
     /* make the DOS area accessible (except the low 64K) to hide bugs in broken apps like Excel 2003 */
