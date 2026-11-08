@@ -22,6 +22,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <limits.h>
+#include <stdio.h>
 
 #include "ntstatus.h"
 #include "winternl.h"
@@ -32,6 +33,15 @@
 #include "ntdll_misc.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(threadpool);
+
+#ifdef __unix__
+#  define POOLDBG_OUT(...) fprintf( stderr, __VA_ARGS__ )
+static int pooldbg_on( void ) { static int v = -1; if (v < 0) v = getenv( "TPDBG" ) ? 1 : 0; return v; }
+#else
+#  define POOLDBG_OUT(...) do {} while (0)
+static int pooldbg_on( void ) { return 1; }
+#endif
+#define POOLDBG(...) do { if (pooldbg_on()) POOLDBG_OUT( __VA_ARGS__ ); } while (0)
 
 /*
  * Old thread pooling API
@@ -95,7 +105,7 @@ struct timer_queue
  * Object-oriented thread pooling API
  */
 
-#define THREADPOOL_WORKER_TIMEOUT 5000
+#define THREADPOOL_WORKER_TIMEOUT 60000
 #define MAXIMUM_WAITQUEUE_OBJECTS (MAXIMUM_WAIT_OBJECTS - 1)
 
 /* internal threadpool representation */
@@ -1218,6 +1228,7 @@ static NTSTATUS tp_new_worker_thread( struct threadpool *pool )
         InterlockedIncrement( &pool->refcount );
         pool->num_workers++;
         NtClose( thread );
+        POOLDBG( "POOLNEW tid=%lx pool=%p nw=%d\n", GetCurrentThreadId(), pool, pool->num_workers );
     }
     return status;
 }
@@ -2089,6 +2100,10 @@ static void tp_object_submit( struct threadpool_object *object, BOOL signaled )
         pool->num_workers < pool->max_workers)
         status = tp_new_worker_thread( pool );
 
+    POOLDBG( "POOLSUB tid=%lx pool=%p type=%u busy=%d nw=%d min=%d max=%d prio=%u newthr=%x\n",
+             GetCurrentThreadId(), pool, object->type, pool->num_busy_workers, pool->num_workers,
+             pool->min_workers, pool->max_workers, object->priority, status );
+
     /* Queue work item and increment refcount. */
     InterlockedIncrement( &object->refcount );
     if (!object->num_pending_callbacks++)
@@ -2452,6 +2467,10 @@ static void CALLBACK threadpool_worker_proc( void *param )
             struct threadpool_object *object = LIST_ENTRY( ptr, struct threadpool_object, pool_entry );
             assert( object->num_pending_callbacks > 0 );
 
+            POOLDBG( "POOLPOP tid=%lx pool=%p obj=%p type=%u prio=%u pending=%ld busy=%d nw=%d\n",
+                     GetCurrentThreadId(), pool, object, object->type, object->priority,
+                     object->num_pending_callbacks, pool->num_busy_workers, pool->num_workers );
+
             /* If further pending callbacks are queued, move the work item to
              * the end of the pool list. Otherwise remove it from the pool. */
             list_remove( &object->pool_entry );
@@ -2469,6 +2488,9 @@ static void CALLBACK threadpool_worker_proc( void *param )
         /* Shutdown worker thread if requested. */
         if (pool->shutdown)
             break;
+
+        POOLDBG( "POOLPARK tid=%lx pool=%p busy=%d nw=%d objcount=%ld\n",
+                 GetCurrentThreadId(), pool, pool->num_busy_workers, pool->num_workers, pool->objcount );
 
         /* Wait for new tasks or until the timeout expires. A thread only terminates
          * when no new tasks are available, and the number of threads can be
