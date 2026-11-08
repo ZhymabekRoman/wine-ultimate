@@ -1196,6 +1196,7 @@ static HRESULT WINAPI package_manager2_FindUsersForPackageFamilyAsync( IPackageM
     return find_users_async( family, operation );
 }
 
+
 static HRESULT WINAPI package_manager2_StageUserDataAsync( IPackageManager2 *iface, HSTRING name,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
@@ -2231,6 +2232,309 @@ static void registration_read( struct registration *reg, const WCHAR *family, co
  * for. The SID is the single user a prefix has, so the ByUserSecurityId
  * methods answer the same set the plain ones do; types selects frameworks,
  * apps, or both (0 answers both). */
+
+/* ---- born-completed IAsyncOperation<IVectorView<User>> over the FindUsers
+ * face: Windows.System.User over the registration's UserSecurityId ---- */
+
+struct user_list;
+
+struct user_item
+{
+    IUser IUser_iface;
+    struct user_list *list;
+    UINT32 index;
+    LONG ref;
+};
+
+struct user_list
+{
+    IAsyncOperation_IVectorView_User op;
+    IVectorView_User view;
+    IAsyncInfo info;
+    LONG ref;
+    IUnknown *handler;
+    WCHAR sid[8][128];
+    UINT32 count;
+};
+
+static inline struct user_list *user_from_op( IAsyncOperation_IVectorView_User *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_list, op );
+}
+
+static inline struct user_list *user_from_view( IVectorView_User *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_list, view );
+}
+
+static inline struct user_list *user_from_info( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_list, info );
+}
+
+static inline struct user_item *user_from_iface( IUser *iface )
+{
+    return CONTAINING_RECORD( iface, struct user_item, IUser_iface );
+}
+
+static void user_list_release( struct user_list *This );
+
+static HRESULT WINAPI user_item_QueryInterface( IUser *iface, REFIID iid, void **out )
+{
+    struct user_item *This = user_from_iface( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IUser ))
+        *out = &This->IUser_iface;
+    else
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+static ULONG WINAPI user_item_AddRef( IUser *iface )
+{
+    struct user_item *This = user_from_iface( iface );
+    return InterlockedIncrement( &This->ref );
+}
+
+static ULONG WINAPI user_item_Release( IUser *iface )
+{
+    struct user_item *This = user_from_iface( iface );
+    ULONG ref = InterlockedDecrement( &This->ref );
+
+    if (!ref)
+    {
+        user_list_release( This->list );
+        free( This );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI user_item_GetIids( IUser *iface, ULONG *count, IID **iids )
+{
+    *count = 0; *iids = NULL; return S_OK;
+}
+
+static HRESULT WINAPI user_item_GetRuntimeClassName( IUser *iface, HSTRING *name )
+{
+    static const WCHAR class_w[] = L"Windows.System.User";
+    return WindowsCreateString( class_w, ARRAY_SIZE(class_w) - 1, name );
+}
+
+static HRESULT WINAPI user_item_GetTrustLevel( IUser *iface, TrustLevel *trust )
+{
+    *trust = BaseTrust; return S_OK;
+}
+
+static HRESULT WINAPI user_item_get_DomainAccountName( IUser *iface, HSTRING *value )
+{
+    struct user_item *This = user_from_iface( iface );
+    WCHAR name[192], user[64];
+    DWORD chars = ARRAY_SIZE(user);
+
+    GetUserNameW( user, &chars );
+    lstrcpyW( name, user );
+    lstrcatW( name, L"\\" );
+    lstrcatW( name, This->list->sid[This->index] );
+    return WindowsCreateString( name, lstrlenW( name ), value );
+}
+
+static const struct IUserVtbl user_item_vtbl =
+{
+    user_item_QueryInterface, user_item_AddRef, user_item_Release,
+    user_item_GetIids, user_item_GetRuntimeClassName, user_item_GetTrustLevel,
+    user_item_get_DomainAccountName,
+};
+
+static HRESULT user_list_query( struct user_list *This, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) || IsEqualGUID( iid, &IID_IAgileObject ))
+        *out = &This->op;
+    else if (IsEqualGUID( iid, &IID_IAsyncOperation_IVectorView_User ))
+        *out = &This->op;
+    else if (IsEqualGUID( iid, &IID_IAsyncOperationCompletedHandler_IVectorView_User ))
+        *out = &This->op;
+    else if (IsEqualGUID( iid, &IID_IVectorView_User ))
+        *out = &This->view;
+    else if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+        *out = &This->info;
+    else
+    {
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IInspectable_AddRef( *out );
+    return S_OK;
+}
+
+#define USER_FWD(name, type, from) \
+static HRESULT WINAPI name##_QueryInterface( type *iface, REFIID iid, void **out ) { return user_list_query( from( iface ), iid, out ); } \
+static ULONG WINAPI name##_addref( type *iface ) { struct user_list *This = from( iface ); return InterlockedIncrement( &This->ref ); } \
+static ULONG WINAPI name##_release( type *iface ) { struct user_list *This = from( iface ); ULONG ref = InterlockedDecrement( &This->ref ); \
+    if (!ref) user_list_release( This ); return ref; } \
+static HRESULT WINAPI name##_GetIids( type *iface, ULONG *count, IID **iids ) { *count = 0; *iids = NULL; return S_OK; } \
+static HRESULT WINAPI name##_GetRuntimeClassName( type *iface, HSTRING *name ) { return WindowsCreateString( L"Windows.Foundation.IAsyncOperation", 34, name ); } \
+static HRESULT WINAPI name##_GetTrustLevel( type *iface, TrustLevel *level ) { *level = BaseTrust; return S_OK; }
+USER_FWD(user_op, IAsyncOperation_IVectorView_User, user_from_op)
+USER_FWD(user_view, IVectorView_User, user_from_view)
+USER_FWD(user_info, IAsyncInfo, user_from_info)
+static HRESULT WINAPI user_op_put_Completed( IAsyncOperation_IVectorView_User *iface,
+        IAsyncOperationCompletedHandler_IVectorView_User *handler )
+{
+    struct user_list *This = user_from_op( iface );
+
+    if (This->handler) IUnknown_Release( This->handler );
+    This->handler = (IUnknown *)handler;
+    if (handler)
+    {
+        IUnknown_AddRef( This->handler );
+        IAsyncOperationCompletedHandler_IVectorView_User_Invoke( handler, iface, 1 /* AsyncStatus_Completed */ );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI user_op_get_Completed( IAsyncOperation_IVectorView_User *iface,
+        IAsyncOperationCompletedHandler_IVectorView_User **handler )
+{
+    struct user_list *This = user_from_op( iface );
+
+    *handler = (IAsyncOperationCompletedHandler_IVectorView_User *)This->handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI user_op_GetResults( IAsyncOperation_IVectorView_User *iface, IVectorView_User **results )
+{
+    struct user_list *This = user_from_op( iface );
+
+    *results = &This->view;
+    IInspectable_AddRef( (IInspectable *)*results );
+    return S_OK;
+}
+
+static const struct __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUserVtbl user_op_vtbl =
+{
+    user_op_QueryInterface, user_op_addref, user_op_release,
+    user_op_GetIids, user_op_GetRuntimeClassName, user_op_GetTrustLevel,
+    user_op_put_Completed, user_op_get_Completed, user_op_GetResults,
+};
+
+static HRESULT WINAPI user_view_GetAt( IVectorView_User *iface, UINT32 index, IUser **item )
+{
+    struct user_list *This = user_from_view( iface );
+    struct user_item *item_impl;
+
+    if (index >= This->count) return E_INVALIDARG;
+    if (!(item_impl = calloc( 1, sizeof(*item_impl) ))) return E_OUTOFMEMORY;
+    item_impl->IUser_iface.lpVtbl = &user_item_vtbl;
+    item_impl->list = This;
+    item_impl->index = index;
+    item_impl->ref = 1;
+    InterlockedIncrement( &This->ref );
+    *item = &item_impl->IUser_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI user_view_get_Size( IVectorView_User *iface, UINT32 *size )
+{
+    struct user_list *This = user_from_view( iface );
+    *size = This->count;
+    return S_OK;
+}
+
+static HRESULT WINAPI user_view_IndexOf( IVectorView_User *iface, IUser *item, UINT32 *index, boolean *found )
+{
+    *index = 0;
+    *found = false;
+    return S_OK;
+}
+
+static const struct __FIVectorView_1_Windows__CSystem__CUserVtbl user_view_vtbl =
+{
+    user_view_QueryInterface, user_view_addref, user_view_release,
+    user_view_GetIids, user_view_GetRuntimeClassName, user_view_GetTrustLevel,
+    user_view_GetAt, user_view_get_Size, user_view_IndexOf,
+};
+
+static HRESULT WINAPI user_info_get_Id( IAsyncInfo *iface, UINT32 *id ) { *id = 1; return S_OK; }
+static HRESULT WINAPI user_info_get_Status( IAsyncInfo *iface, enum AsyncStatus *status ) { *status = (enum AsyncStatus)1; /* Completed */ return S_OK; }
+static HRESULT WINAPI user_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *code ) { *code = S_OK; return S_OK; }
+static HRESULT WINAPI user_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
+static HRESULT WINAPI user_info_Close( IAsyncInfo *iface ) { return S_OK; }
+static HRESULT WINAPI user_info_GetResults( IAsyncInfo *iface, HRESULT *code ) { *code = S_OK; return S_OK; }
+
+static const struct IAsyncInfoVtbl user_info_vtbl =
+{
+    user_info_QueryInterface, user_info_addref, user_info_release,
+    user_info_GetIids, user_info_GetRuntimeClassName, user_info_GetTrustLevel,
+    user_info_get_Id, user_info_get_Status, user_info_get_ErrorCode,
+    user_info_Cancel, user_info_Close, user_info_GetResults,
+};
+
+static void user_list_release( struct user_list *This )
+{
+    if (This->handler) IUnknown_Release( This->handler );
+    free( This );
+}
+
+/* enumerate the AppModel registration, filter by family, answer with a
+ * born-completed async operation over a single Windows.System.User */
+static HRESULT find_users_async( const WCHAR *family, IAsyncOperation_IVectorView_User **operation )
+{
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    WCHAR keyname[512], value[128], fam[512];
+    struct user_list *list;
+    HKEY hkey, hsub;
+    DWORD i = 0, chars;
+
+    if (!operation) return E_INVALIDARG;
+    if (!(list = calloc( 1, sizeof(*list) ))) return E_OUTOFMEMORY;
+    list->op.lpVtbl = &user_op_vtbl;
+    list->view.lpVtbl = &user_view_vtbl;
+    list->info.lpVtbl = &user_info_vtbl;
+    list->ref = 1;
+
+    if (!RegOpenKeyExW( HKEY_CURRENT_USER, appmodel_path, 0, KEY_READ, &hkey ))
+    {
+        while (list->count < ARRAY_SIZE(list->sid))
+        {
+            chars = ARRAY_SIZE(keyname);
+            if (RegEnumKeyW( hkey, i++, keyname, &chars )) break;
+            if (family)
+            {
+                DWORD chars2 = ARRAY_SIZE(fam);
+                lstrcpyW( fam, keyname );
+                if (!PackageFamilyNameFromFullName( fam, &chars2, fam ) && lstrcmpiW( fam, family ))
+                    continue;
+            }
+            lstrcpyW( value, L"S-1-5-21-0" );
+            if (!RegOpenKeyExW( hkey, keyname, 0, KEY_READ, &hsub ))
+            {
+                DWORD type = REG_SZ, size = sizeof(value);
+                RegQueryValueExW( hsub, L"UserSecurityId", NULL, &type, (BYTE *)value, &size );
+                RegCloseKey( hsub );
+            }
+            lstrcpyW( list->sid[list->count], value );
+            list->count++;
+        }
+        RegCloseKey( hkey );
+    }
+    if (!list->count)
+    {
+        lstrcpyW( list->sid[0], L"S-1-5-21-0" );
+        list->count = 1;
+    }
+
+    *operation = &list->op;
+    IInspectable_AddRef( (IInspectable *)*operation );
+    return S_OK;
+}
+
 static HRESULT find_packages( const WCHAR *family, const WCHAR *name, const WCHAR *publisher,
                               PackageTypes types, IIterable_Package **packages )
 {

@@ -38,7 +38,20 @@
 #define WIDL_using_Windows_Management_Deployment
 #define WIDL_using_Windows_ApplicationModel
 #include "windows.management.deployment.h"
-#include "windows.storage.h"
+
+/* winapigen emits the IAsyncOperation<IVectorView<User>> alias macros only in
+ * the C++ tail of windows.system.h; this file's C consumers alias them by hand. */
+#ifndef IAsyncOperation_IVectorView_User
+#define IAsyncOperation_IVectorView_User __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser
+#define IAsyncOperation_IVectorView_UserVtbl __FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUserVtbl
+#define IID_IAsyncOperation_IVectorView_User IID___FIAsyncOperation_1___FIVectorView_1_Windows__CSystem__CUser
+#define IAsyncOperationCompletedHandler_IVectorView_User __FIAsyncOperationCompletedHandler_1___FIVectorView_1_Windows__CSystem__CUser
+#define IAsyncOperationCompletedHandler_IVectorView_User_Invoke(h,s,st) ((h)->lpVtbl->Invoke(h,s,st))
+#define IID_IAsyncOperationCompletedHandler_IVectorView_User IID___FIAsyncOperationCompletedHandler_1___FIVectorView_1_Windows__CSystem__CUser
+#define IVectorView_User __FIVectorView_1_Windows__CSystem__CUser
+#define IVectorView_UserVtbl __FIVectorView_1_Windows__CSystem__CUserVtbl
+#define IID_IVectorView_User IID___FIVectorView_1_Windows__CSystem__CUser
+#endif
 
 extern IActivationFactory *package_manager_factory;
 
