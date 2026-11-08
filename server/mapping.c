@@ -1502,7 +1502,15 @@ void set_session_mapping( struct mapping *mapping )
     void *tmp;
 
     if (!(block = mem_alloc( sizeof(*block) ))) return;
-    if ((tmp = mmap( NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, unix_fd, 0 )) == MAP_FAILED)
+    {
+        static char *next_base = (char *)0x1000000000;  /* keep sections under ~15 TB so Redhawk
+                                                          card tables (base + base/128) stay inside
+                                                          the kernel mmap window */
+        tmp = mmap( next_base, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, unix_fd, 0 );
+        if (tmp != MAP_FAILED) next_base = (char *)tmp + ROUND_SIZE( 0, size, page_size_mask ) + 0x10000;
+        else tmp = mmap( NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, unix_fd, 0 );
+    }
+    if (tmp == MAP_FAILED)
     {
         free( block );
         return;

@@ -188,8 +188,13 @@ static void *address_space_start = (void *)0x110000; /* keep DOS area clear */
 static void *address_space_start = (void *)0x10000;
 #endif
 #ifdef _WIN64
-static void *address_space_limit = (void *)0x7fffffff0000;  /* top of the total available address space */
-static void *user_space_limit    = (void *)0x7fffffff0000;  /* top of the user address space */
+static void *address_space_limit = (void *)0xf00000000000;  /* top of the total available address space;
+                                                              kept under 16 TB so Redhawk compressed card
+                                                              tables (base + base/128 + size/128) land
+                                                              inside the kernel mmap window */
+static void *user_space_limit    = (void *)0xf00000000000;  /* top of the user address space; under
+                                                                16 TB so Redhawk card tables (base+base/128)
+                                                                fit the kernel mmap window */
 static void *working_set_limit   = (void *)0x7fffffff0000;  /* top of the current working set */
 #else
 static void *address_space_limit = (void *)0xc0000000;
@@ -2242,6 +2247,57 @@ failed:
  * Create a view and mmap the corresponding memory area.
  * virtual_mutex must be held by caller.
  */
+static void seed_card_shadow( void *base, size_t size, int unix_prot )
+{
+    /* Redhawk (mrt100_app) compressed card-table seed: the GC card scan
+     * loads a byte at (obj & ~0xffff) + ((obj - 0x1000) >> 7), i.e. roughly
+     * heap_base + (heap_base >> 7) — about 32 GB above the base for heaps
+     * and images mapped in the 40-bit window.  Windows keeps that table
+     * inside the process's reserved range; grow one contiguous card shadow
+     * (one VMA) so the card loads fault free. */
+    static char *card_lo, *card_hi;
+    char *lo, *hi;
+    UINT64 b = (UINT64)(UINT_PTR)base;
+
+    if (b >> 44 >= 0x100) return;
+    lo = (char *)((UINT_PTR)(b + (b >> 7) - host_page_mask - 1) & ~(UINT_PTR)host_page_mask);
+    hi = (char *)(UINT_PTR)(b + (b >> 7) + (size >> 7) + 2 * host_page_mask + 1);
+    hi = (char *)(((UINT_PTR)hi + host_page_mask) & ~(UINT_PTR)host_page_mask);
+    if (card_lo && card_hi && lo >= card_lo && hi <= card_hi) return;
+    if (card_lo && card_hi)
+    {
+        if (lo < card_lo)
+        {
+            if (mmap( lo, card_lo - lo, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0 ) == MAP_FAILED)
+            {
+                TRACE( "card-table seed lo %p size %p skipped, errno %d\n", lo, (void *)(card_lo - lo), errno );
+                return;
+            }
+            card_lo = lo;
+        }
+        if (hi > card_hi)
+        {
+            if (mmap( card_hi, hi - card_hi, PROT_READ | PROT_WRITE,
+                      MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0 ) == MAP_FAILED)
+            {
+                TRACE( "card-table seed hi %p size %p skipped, errno %d\n", card_hi, (void *)(hi - card_hi), errno );
+                return;
+            }
+            card_hi = hi;
+        }
+        return;
+    }
+    if (mmap( lo, hi - lo, PROT_READ | PROT_WRITE,
+              MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED_NOREPLACE, -1, 0 ) == MAP_FAILED)
+    {
+        TRACE( "card-table seed at %p size %p skipped, errno %d\n", lo, (void *)(hi - lo), errno );
+        return;
+    }
+    card_lo = lo;
+    card_hi = hi;
+}
+
 static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
                           unsigned int alloc_type, unsigned int vprot,
                           ULONG_PTR limit_low, ULONG_PTR limit_high, size_t align_mask )
@@ -2271,6 +2327,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
             kernel_writewatch_register_range( view, base, size );
             reset_write_watches( base, size );
         }
+        seed_card_shadow( base, size, unix_prot );
         *view_ret = view;
         return STATUS_SUCCESS;
     }
@@ -2334,6 +2391,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
         ptr = unmap_extra_space( ptr, view_size, host_size, align_mask );
     }
 done:
+    seed_card_shadow( ptr, size, unix_prot );
     status = create_view( view_ret, ptr, size, vprot );
     if (status != STATUS_SUCCESS) unmap_area( ptr, size );
     return status;
