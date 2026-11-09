@@ -1400,12 +1400,18 @@ static HRESULT WINAPI package_id_get_ResourceId( IPackageId *iface, HSTRING *val
 
 static HRESULT WINAPI package_id_get_Publisher( IPackageId *iface, HSTRING *value )
 {
-    return WindowsCreateString( L"CN=WhatsApp", 11, value );
+    WCHAR buf[MAX_PATH];
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PUBLISHER", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"CN=WhatsApp" );
+    return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_PublisherId( IPackageId *iface, HSTRING *value )
 {
-    return WindowsCreateString( L"cv1g1gvanyjgm", 13, value );
+    WCHAR buf[MAX_PATH];
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PUBLISHER_ID", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"cv1g1gvanyjgm" );
+    return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_FullName( IPackageId *iface, HSTRING *value )
