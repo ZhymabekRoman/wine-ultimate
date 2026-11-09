@@ -12148,6 +12148,8 @@ struct glsl_blitter_args
      * hard-coded BT.601 studio-range coefficients. It is part of the program
      * cache key, so every colour space gets its own program. */
     unsigned int yuv_matrix;
+    /* Planar (Direct3D 10/11) Y'CbCr source: two samplers (luma + chroma). */
+    unsigned int planar;
     unsigned short use_colour_key;
 };
 
@@ -12411,10 +12413,28 @@ static void gen_yv12_read(struct wined3d_string_buffer *buffer,
 }
 
 static void gen_nv12_read(struct wined3d_string_buffer *buffer,
-        const struct wined3d_gl_info *gl_info, const char *tex_type)
+        const struct wined3d_gl_info *gl_info, const struct glsl_blitter_args *args,
+        const char *tex_type)
 {
     char component = gl_info->supported[WINED3D_GL_LEGACY_CONTEXT] ? 'w' : 'x';
     const char *tex = needs_legacy_glsl_syntax(gl_info) ? tex_type : "";
+
+    if (args->planar)
+    {
+        /* Planar NV12 (Direct3D 10/11): the luminance plane is the main
+         * texture (sampler) and the half-resolution chroma plane is a second
+         * R8G8 texture (sampler_chroma). Sample the chroma texel centers
+         * explicitly so filtering cannot mix the 2x2 block texels, matching
+         * the nearest-neighbour sampling of the packed path and of
+         * wined3d_nv12_sample(). The uniform size is the *luma* size. */
+        shader_addline(buffer, "    texcoord.xy = out_texcoord.xy;\n");
+        shader_addline(buffer, "    texcoord.x = (floor(texcoord.x * size.x * 0.5) + 0.5) * 2.0 / size.x;\n");
+        shader_addline(buffer, "    texcoord.y = (floor(texcoord.y * size.y * 0.5) + 0.5) * 2.0 / size.y;\n");
+        shader_addline(buffer, "    chroma.x = texture%s(sampler_chroma, texcoord.xy).y;\n", tex);
+        shader_addline(buffer, "    chroma.y = texture%s(sampler_chroma, texcoord.xy).x;\n", tex);
+        shader_addline(buffer, "    luminance = texture%s(sampler, out_texcoord.xy).x;\n", tex);
+        return;
+    }
 
     /* NV12 surfaces contain a WxH sized luminance plane, followed by a
      * (W/2)x(H/2) sized plane where each component is an UV pair. So the
@@ -12528,7 +12548,7 @@ static void glsl_blitter_generate_yuv_shader(struct wined3d_string_buffer *buffe
             break;
 
         case COMPLEX_FIXUP_NV12:
-            gen_nv12_read(buffer, gl_info, tex_type);
+            gen_nv12_read(buffer, gl_info, args, tex_type);
             break;
 
         case COMPLEX_FIXUP_YUV:
@@ -12654,6 +12674,8 @@ static GLuint glsl_blitter_generate_program(struct wined3d_glsl_blitter *blitter
     string_buffer_clear(buffer);
     shader_glsl_add_version_declaration(buffer, gl_info);
     shader_addline(buffer, "uniform sampler%s sampler;\n", tex_type);
+    if (args->planar)
+        shader_addline(buffer, "uniform sampler2D sampler_chroma;\n");
     if (args->use_colour_key)
     {
         shader_addline(buffer, "uniform struct\n{\n");
@@ -12709,6 +12731,11 @@ static GLuint glsl_blitter_generate_program(struct wined3d_glsl_blitter *blitter
     GL_EXTCALL(glUseProgram(program));
     loc = GL_EXTCALL(glGetUniformLocation(program, "sampler"));
     GL_EXTCALL(glUniform1i(loc, 0));
+    if (args->planar)
+    {
+        loc = GL_EXTCALL(glGetUniformLocation(program, "sampler_chroma"));
+        GL_EXTCALL(glUniform1i(loc, 1));
+    }
     if (complex_fixup == COMPLEX_FIXUP_P8)
     {
         loc = GL_EXTCALL(glGetUniformLocation(program, "sampler_palette"));
@@ -12771,6 +12798,12 @@ static struct glsl_blitter_program *glsl_blitter_get_program(struct wined3d_glsl
     args.fixup = texture_gl->t.resource.format->color_fixup;
     args.yuv_matrix = yuv_matrix;
     args.use_colour_key = use_colour_key;
+    if (texture_gl->t.resource.format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+    {
+        /* Sample the decomposed luma + chroma textures with the NV12 shader. */
+        args.planar = 1;
+        args.fixup = create_complex_fixup_desc(COMPLEX_FIXUP_NV12);
+    }
 
     if ((entry = wine_rb_get(&blitter->programs, &args)))
         return WINE_RB_ENTRY_VALUE(entry, struct glsl_blitter_program, entry);
@@ -12841,15 +12874,13 @@ static BOOL glsl_blitter_supported(enum wined3d_blit_op blit_op, const struct wi
             return FALSE;
         }
 
-        if (src_format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+        if (src_format->attrs & WINED3D_FORMAT_ATTR_PLANAR
+                && !wined3d_context_gl(context)->gl_info->supported[ARB_TEXTURE_RG])
         {
-            /* The planar (Direct3D 10/11) NV12 texture has no OpenGL storage: a
-             * planar resource is two GL textures (an R8 luma plane and a half
-             * resolution R8G8 chroma plane), and wined3d's OpenGL backend does
-             * not create planar texture views yet (see the FIXME in
-             * create_texture_view). Sample-from-planar is therefore not
-             * available; the conversion runs on the CPU blitter. */
-            TRACE("Planar Y'CbCr source is not texturable on OpenGL, deferring.\n");
+            /* The planar (Direct3D 10/11) NV12 texture decomposes into an R8
+             * luma texture and a half-resolution R8G8 chroma texture, which
+             * require ARB_texture_rg storage. */
+            TRACE("Planar Y'CbCr source requires ARB_texture_rg, deferring.\n");
             return FALSE;
         }
     }
@@ -13054,7 +13085,30 @@ static DWORD glsl_blitter_blit(struct wined3d_blitter *blitter, enum wined3d_bli
         location = GL_EXTCALL(glGetUniformLocation(program->id, "colour_key.high"));
         GL_EXTCALL(glUniform4fv(location, 1, &float_key[1].r));
     }
+    if (op == WINED3D_BLIT_OP_COLOR_BLIT_YUV
+            && (src_texture->resource.format->attrs & WINED3D_FORMAT_ATTR_PLANAR))
+    {
+        GLint gl_filter = filter == WINED3D_TEXF_POINT ? GL_NEAREST : GL_LINEAR;
+
+        wined3d_texture_gl_chroma_prepare(src_texture_gl, context_gl);
+        wined3d_context_gl_active_texture(context_gl, gl_info, 1);
+        gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_2D, src_texture_gl->chroma_name);
+        gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, gl_filter);
+        gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, gl_filter);
+        gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+        gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+        checkGLcall("bind planar chroma sampler");
+    }
+
     wined3d_context_gl_draw_shaded_quad(context_gl, src_texture_gl, src_sub_resource_idx, src_rect, dst_rect, filter);
+
+    if (op == WINED3D_BLIT_OP_COLOR_BLIT_YUV
+            && (src_texture->resource.format->attrs & WINED3D_FORMAT_ATTR_PLANAR))
+    {
+        wined3d_context_gl_active_texture(context_gl, gl_info, 1);
+        gl_info->gl_ops.gl.p_glBindTexture(GL_TEXTURE_2D, 0);
+        wined3d_context_gl_active_texture(context_gl, gl_info, 0);
+    }
     GL_EXTCALL(glUseProgram(0));
 
     if (dst_texture->swapchain && (dst_texture->swapchain->front_buffer == dst_texture))

@@ -202,9 +202,10 @@ static void create_texture_view(struct wined3d_gl_view *view, GLenum view_target
     view_format_gl = wined3d_format_gl(view_format);
     view->target = view_target;
 
-    if (texture_gl->t.resource.format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+    if ((texture_gl->t.resource.format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+            && view_target != GL_TEXTURE_2D)
     {
-        FIXME("Planar views are not implemented for OpenGL.\n");
+        FIXME("Planar 3D views are not implemented for OpenGL.\n");
         return;
     }
 
@@ -221,6 +222,24 @@ static void create_texture_view(struct wined3d_gl_view *view, GLenum view_target
 
     wined3d_texture_gl_prepare_texture(texture_gl, context_gl, false);
     texture_name = wined3d_texture_gl_get_texture_name(texture_gl, context, FALSE);
+
+    if (texture_gl->t.resource.format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+    {
+        /* The plane format identifies the plane; plane 1 is the second GL
+         * texture (half-resolution chroma), plane 0 is the main texture. */
+        unsigned int plane_idx;
+
+        if (!find_format_plane_idx(texture_gl->t.resource.format, view_format, &plane_idx))
+        {
+            context_release(context);
+            return;
+        }
+        if (plane_idx)
+        {
+            wined3d_texture_gl_chroma_prepare(texture_gl, context_gl);
+            texture_name = texture_gl->chroma_name;
+        }
+    }
 
     level_idx = desc->u.texture.level_idx;
     layer_idx = desc->u.texture.layer_idx;
@@ -1101,6 +1120,7 @@ static void wined3d_shader_resource_view_gl_cs_init(void *object)
     {
         struct wined3d_texture_gl *texture_gl = wined3d_texture_gl(texture_from_resource(resource));
         GLenum resource_class, view_class;
+        unsigned int plane_idx;
 
         resource_class = wined3d_format_gl(resource->format)->view_class;
         view_class = wined3d_format_gl(view_format)->view_class;
@@ -1116,6 +1136,11 @@ static void wined3d_shader_resource_view_gl_cs_init(void *object)
         else if (texture_gl->t.swapchain && texture_gl->t.swapchain->state.desc.backbuffer_count > 1)
         {
             FIXME("Swapchain shader resource views not supported.\n");
+        }
+        else if ((resource->format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+                && find_format_plane_idx(resource->format, view_format, &plane_idx))
+        {
+            create_texture_view(&view_gl->gl_view, view_target, desc, texture_gl, view_format);
         }
         else if (resource->format->typeless_id == view_format->typeless_id
                 && resource_class == view_class)

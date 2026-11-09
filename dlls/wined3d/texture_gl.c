@@ -1254,6 +1254,71 @@ static void gltexture_delete(struct wined3d_device *device, const struct wined3d
     tex->name = 0;
 }
 
+/* Context activation is done by the caller. Allocate storage for the chroma
+ * plane of a planar Y'CbCr texture. The luma plane is the main texture; the
+ * chroma plane is a half-resolution R8G8 texture in its own GL object, fed
+ * from the second half of the planar sub-resource buffer. */
+void wined3d_texture_gl_chroma_prepare(struct wined3d_texture_gl *texture_gl,
+        struct wined3d_context_gl *context_gl)
+{
+    const struct wined3d_texture *texture = &texture_gl->t;
+    const struct wined3d_format *format = texture->resource.format;
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    unsigned int level, level_count = texture->level_count;
+    GLsizei width, height;
+
+    if (texture_gl->chroma_allocated)
+        return;
+
+    if (!texture_gl->chroma_name)
+        gl_info->gl_ops.gl.p_glGenTextures(1, &texture_gl->chroma_name);
+    wined3d_context_gl_bind_texture(context_gl, GL_TEXTURE_2D, texture_gl->chroma_name);
+
+    for (level = 0; level < level_count; ++level)
+    {
+        width = (wined3d_texture_get_level_width(texture, level) + format->uv_width - 1)
+                / format->uv_width;
+        height = (wined3d_texture_get_level_height(texture, level) + format->uv_height - 1)
+                / format->uv_height;
+        gl_info->gl_ops.gl.p_glTexImage2D(GL_TEXTURE_2D, level, GL_RG8UI, width, height, 0,
+                GL_RG_INTEGER, GL_UNSIGNED_BYTE, NULL);
+        checkGLcall("allocate chroma plane storage");
+    }
+
+    gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR);
+    gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR);
+    gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE);
+    gl_info->gl_ops.gl.p_glTexParameteri(GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE);
+    checkGLcall("initialize chroma plane texture");
+
+    texture_gl->chroma_allocated = true;
+}
+
+/* Context activation is done by the caller; the GL_PIXEL_UNPACK_BUFFER binding
+ * of the main upload (a client pointer for sysmem, the sub-resource buffer
+ * object for a bo load) is inherited for the chroma upload. */
+static void wined3d_texture_gl_upload_chroma_bo(struct wined3d_texture_gl *texture_gl,
+        unsigned int level, const BYTE *addr, unsigned int row_pitch, unsigned int height,
+        struct wined3d_context_gl *context_gl)
+{
+    const struct wined3d_texture *texture = &texture_gl->t;
+    const struct wined3d_format *format = texture->resource.format;
+    const struct wined3d_gl_info *gl_info = context_gl->gl_info;
+    GLsizei width = (wined3d_texture_get_level_width(texture, level) + format->uv_width - 1)
+            / format->uv_width;
+    GLsizei chroma_height = (height + format->uv_height - 1) / format->uv_height;
+    const BYTE *chroma = addr + (size_t)row_pitch * height;
+
+    wined3d_texture_gl_chroma_prepare(texture_gl, context_gl);
+
+    wined3d_context_gl_bind_texture(context_gl, GL_TEXTURE_2D, texture_gl->chroma_name);
+    gl_info->gl_ops.gl.p_glPixelStorei(GL_UNPACK_ROW_LENGTH, row_pitch * 2 / format->uv_width / 2);
+    gl_info->gl_ops.gl.p_glTexSubImage2D(GL_TEXTURE_2D, level, 0, 0, width, chroma_height,
+            GL_RG_INTEGER, GL_UNSIGNED_BYTE, chroma);
+    gl_info->gl_ops.gl.p_glPixelStorei(GL_UNPACK_ROW_LENGTH, 0);
+    checkGLcall("upload chroma plane");
+}
+
 /* The caller is responsible for binding the correct texture. */
 static void wined3d_texture_gl_allocate_mutable_storage(struct wined3d_texture_gl *texture_gl,
         GLenum gl_internal_format, const struct wined3d_format_gl *format,
@@ -1719,6 +1784,10 @@ static void wined3d_texture_gl_upload_data(struct wined3d_context *context,
 
         wined3d_texture_gl_upload_bo(src_format, target, level, src_row_pitch, src_slice_pitch, dst_x,
                 dst_y, dst_z, update_w, update_h, update_d, offset, srgb, dst_texture, gl_info);
+
+        if (src_format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+            wined3d_texture_gl_upload_chroma_bo(wined3d_texture_gl(dst_texture), level,
+                    offset, src_row_pitch, update_h, context_gl);
 
         if (bo.buffer_object)
         {
@@ -2303,6 +2372,9 @@ void wined3d_texture_gl_prepare_texture(struct wined3d_texture_gl *texture_gl,
     else
         wined3d_texture_gl_allocate_mutable_storage(texture_gl, internal, format_gl, gl_info);
     texture_gl->t.flags |= alloc_flag;
+
+    if (format->attrs & WINED3D_FORMAT_ATTR_PLANAR)
+        wined3d_texture_gl_chroma_prepare(texture_gl, context_gl);
 }
 
 static void wined3d_texture_gl_prepare_rb(struct wined3d_texture_gl *texture_gl,
@@ -2566,6 +2638,12 @@ static void wined3d_texture_gl_unload_location(struct wined3d_texture *texture,
         case WINED3D_LOCATION_TEXTURE_RGB:
             if (texture_gl->texture_rgb.name)
                 gltexture_delete(texture_gl->t.resource.device, context_gl->gl_info, &texture_gl->texture_rgb);
+            if (texture_gl->chroma_name)
+            {
+                context_gl_resource_released(texture_gl->t.resource.device, texture_gl->chroma_name, FALSE);
+                context_gl->gl_info->gl_ops.gl.p_glDeleteTextures(1, &texture_gl->chroma_name);
+                texture_gl->chroma_allocated = false;
+            }
             break;
 
         case WINED3D_LOCATION_TEXTURE_SRGB:

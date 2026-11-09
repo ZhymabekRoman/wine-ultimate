@@ -960,6 +960,11 @@ struct wined3d_texture_gl
 
     struct gl_texture texture_rgb, texture_srgb;
 
+    /* Planar Y'CbCr textures store the luma plane in the main texture and the
+     * half-resolution chroma plane in a second R8G8 texture. */
+    GLuint chroma_name;
+    bool chroma_allocated;
+
     GLenum target;
 
     GLuint rb_multisample;
@@ -1023,6 +1028,8 @@ struct wined3d_blt_info
 
 void texture2d_get_blt_info(const struct wined3d_texture_gl *texture_gl, unsigned int sub_resource_idx,
         const RECT *rect, struct wined3d_blt_info *info);
+void wined3d_texture_gl_chroma_prepare(struct wined3d_texture_gl *texture_gl,
+        struct wined3d_context_gl *context_gl);
 void texture2d_read_from_framebuffer(struct wined3d_texture *texture, unsigned int sub_resource_idx,
         struct wined3d_context *context, DWORD src_location, DWORD dst_location);
 

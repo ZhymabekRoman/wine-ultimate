@@ -1285,6 +1285,13 @@ static const struct wined3d_format_texture_info format_texture_info[] =
             GL_ALPHA,                   GL_UNSIGNED_BYTE,                 0,
             WINED3D_FORMAT_CAP_FILTERING,
             WINED3D_GL_LEGACY_CONTEXT,  NULL},
+    /* The planar (Direct3D 10/11) NV12 texture stores its luma plane in an R8
+     * texture; the chroma plane is a second, half-resolution R8G8 texture
+     * allocated by the GL texture code (see texture_gl.c). */
+    {WINED3DFMT_NV12_PLANAR,            GL_R8UI,                          GL_R8UI,                                0,
+            GL_RED_INTEGER,             GL_UNSIGNED_BYTE,                 0,
+            WINED3D_FORMAT_CAP_TEXTURE | WINED3D_FORMAT_CAP_FILTERING,
+            ARB_TEXTURE_RG,             NULL},
     {WINED3DFMT_DXT1,                   GL_COMPRESSED_RGBA_S3TC_DXT1_EXT, GL_COMPRESSED_SRGB_ALPHA_S3TC_DXT1_EXT, 0,
             GL_RGBA,                    GL_UNSIGNED_BYTE,                 0,
             WINED3D_FORMAT_CAP_TEXTURE | WINED3D_FORMAT_CAP_POSTPIXELSHADER_BLENDING | WINED3D_FORMAT_CAP_FILTERING
