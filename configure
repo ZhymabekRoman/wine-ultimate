@@ -1521,6 +1521,7 @@ enable_wbemprox
 enable_wdscore
 enable_webservices
 enable_websocket
+enable_webview2loader
 enable_wer
 enable_wevtapi
 enable_wevtsvc
@@ -12348,7 +12349,7 @@ printf '%s\n' "$ac_cv_cflags__Wl__no_huge" >&6; }
 if test "x$ac_cv_cflags__Wl__no_huge" = xyes
 then :
   wine_use_preloader=no
-            WINELOADER_LDFLAGS="$WINELOADER_LDFLAGS -Wl,-no_pie,-image_base,0x200000000,-no_huge,-no_fixup_chains,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000,-segaddr,WINE_TOP_DOWN,0x7ff000000000"
+            WINELOADER_LDFLAGS="$WINELOADER_LDFLAGS -Wl,-no_pie,-image_base,0x200000000,-no_huge,-no_fixup_chains,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000,-segaddr,WINE_TOP_DOWN,0x800000000"
 else case e in #(
   e) wine_use_preloader=yes ;;
 esac
@@ -23052,6 +23053,7 @@ wine_fn_config_makefile dlls/dispex/tests enable_tests
 wine_fn_config_makefile dlls/display.drv16 enable_win16
 wine_fn_config_makefile dlls/dmband enable_dmband
 wine_fn_config_makefile dlls/dmband/tests enable_tests
+wine_fn_config_makefile dlls/dmprocessxmlfiltered enable_dmprocessxmlfiltered
 wine_fn_config_makefile dlls/dmcompos enable_dmcompos
 wine_fn_config_makefile dlls/dmcompos/tests enable_tests
 wine_fn_config_makefile dlls/dmime enable_dmime
@@ -23670,6 +23672,7 @@ wine_fn_config_makefile dlls/wdscore enable_wdscore
 wine_fn_config_makefile dlls/webservices enable_webservices
 wine_fn_config_makefile dlls/webservices/tests enable_tests
 wine_fn_config_makefile dlls/websocket enable_websocket
+wine_fn_config_makefile dlls/webview2loader enable_webview2loader
 wine_fn_config_makefile dlls/wer enable_wer
 wine_fn_config_makefile dlls/wer/tests enable_tests
 wine_fn_config_makefile dlls/wevtapi enable_wevtapi
