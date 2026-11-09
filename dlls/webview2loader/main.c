@@ -46,6 +46,79 @@ struct controller
     RECT bounds;
 };
 
+static LPWSTR dup_wstr( LPCWSTR s );
+
+/* ICoreWebView2 face handed out by the controller's get_CoreWebView2
+ * (vtbl slot 7); Navigate is vtbl slot 3 of this object. */
+struct webview
+{
+    const void **vtbl;
+    LONG ref;
+    struct controller *controller;
+    LPWSTR source;
+};
+
+static HRESULT WINAPI webview_QueryInterface( void *t, REFIID riid, void **obj )
+{
+    *obj = t;
+    return S_OK;
+}
+static ULONG WINAPI webview_AddRef( void *t ) { return 2; }
+static ULONG WINAPI webview_Release( void *t ) { return 1; }
+
+static HRESULT WINAPI webview_Navigate( void *t, LPCWSTR uri, void *handler )
+{
+    struct webview *w = t;
+    void **vt = *(void ***)handler;
+    HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
+
+    WARN( "NAVIGATE %s\n", debugstr_w( uri ) );
+    CoTaskMemFree( w->source );
+    w->source = dup_wstr( uri );
+    if (handler) invoke( handler, S_OK, NULL );
+    return S_OK;
+}
+
+static HRESULT WINAPI webview_get_Source( void *t, LPWSTR *v )
+{
+    struct webview *w = t;
+    *v = dup_wstr( w->source );
+    return *v ? S_OK : E_OUTOFMEMORY;
+}
+
+static struct webview *create_webview( struct controller *c )
+{
+    struct webview *w = HeapAlloc( GetProcessHeap(), 0, sizeof(*w) );
+    const void **vt;
+    if (!w) return NULL;
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 5 * sizeof(*vt) )))
+    {
+        HeapFree( GetProcessHeap(), 0, w );
+        return NULL;
+    }
+    vt[0] = webview_QueryInterface;
+    vt[1] = webview_AddRef;
+    vt[2] = webview_Release;
+    vt[3] = webview_Navigate;
+    vt[4] = webview_get_Source;
+    w->vtbl = vt;
+    w->ref = 1;
+    w->controller = c;
+    w->source = dup_wstr( L"" );
+    return w;
+}
+
+static HRESULT WINAPI controller_get_CoreWebView2( void *t, void **value )
+{
+    struct controller *c = t;
+    struct webview *w;
+
+    WARN( "GET_COREWEBVIEW2 controller %p\n", c );
+    if (!(w = create_webview( c ))) return E_OUTOFMEMORY;
+    *value = w;
+    return S_OK;
+}
+
 struct environment_options
 {
     const void **vtbl;
@@ -111,7 +184,7 @@ static struct controller *create_controller( HWND parent )
     struct controller *c = HeapAlloc( GetProcessHeap(), 0, sizeof(*c) );
     const void **vt;
     if (!c) return NULL;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 7 * sizeof(*vt) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 8 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, c );
         return NULL;
@@ -123,6 +196,7 @@ static struct controller *create_controller( HWND parent )
     vt[4] = controller_put_IsVisible;
     vt[5] = controller_get_IsVisible;   /* get_Bounds placeholder */
     vt[6] = controller_put_IsVisible;   /* put_Bounds placeholder */
+    vt[7] = controller_get_CoreWebView2;
     c->vtbl = vt;
     c->ref = 1;
     c->parent = parent;
