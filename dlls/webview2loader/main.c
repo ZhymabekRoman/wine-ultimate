@@ -71,9 +71,11 @@ static LPWSTR dup_wstr( LPCWSTR s )
 /* completion plumbing: post the result to the calling thread's queue  */
 /* ------------------------------------------------------------------ */
 
-static HRESULT post_completion( void *handler, void *object )
+/* the env handler is a struct whose first field points at the vtable;
+ * the controller handler is passed as the raw vtable itself */
+static HRESULT post_completion( void *handler, void *object, int deref )
 {
-    void **vt = *(void ***)handler;
+    void **vt = deref ? *(void ***)handler : handler;
     HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
 
     return invoke( handler, S_OK, object );
@@ -104,28 +106,23 @@ static HRESULT WINAPI controller_put_IsVisible( void *t, BOOL v )
     return S_OK;
 }
 
-static const void *controller_vtbl[7] =
-{
-    controller_QueryInterface,
-    controller_AddRef,
-    controller_Release,
-    controller_get_IsVisible,
-    controller_put_IsVisible,
-    controller_get_IsVisible,   /* get_Bounds placeholder */
-    controller_put_IsVisible,   /* put_Bounds placeholder */
-};
-
 static struct controller *create_controller( HWND parent )
 {
     struct controller *c = HeapAlloc( GetProcessHeap(), 0, sizeof(*c) );
     const void **vt;
     if (!c) return NULL;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, sizeof(controller_vtbl) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 7 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, c );
         return NULL;
     }
-    memcpy( vt, controller_vtbl, sizeof(controller_vtbl) );
+    vt[0] = controller_QueryInterface;
+    vt[1] = controller_AddRef;
+    vt[2] = controller_Release;
+    vt[3] = controller_get_IsVisible;
+    vt[4] = controller_put_IsVisible;
+    vt[5] = controller_get_IsVisible;   /* get_Bounds placeholder */
+    vt[6] = controller_put_IsVisible;   /* put_Bounds placeholder */
     c->vtbl = vt;
     c->ref = 1;
     c->parent = parent;
@@ -162,10 +159,11 @@ static HRESULT WINAPI environment_CreateCoreWebView2Controller( void *t, HWND pa
     struct environment *e = t;
     struct controller *c;
 
-    TRACE( "env %p parent %p handler %p\n", e, parent, handler );
+    TRACE( "env %p parent %p handler %p self-slot %p\n", e, parent, handler,
+           ((const void **)e->vtbl)[3] );
 
     if (!(c = create_controller( parent ))) return E_OUTOFMEMORY;
-    return post_completion( handler, c );
+    return post_completion( handler, c, 0 );
 }
 
 static HRESULT WINAPI environment_get_BrowserVersion( void *t, LPWSTR *v )
@@ -177,23 +175,28 @@ static HRESULT WINAPI environment_get_BrowserVersion( void *t, LPWSTR *v )
 
 static struct environment *create_environment( LPCWSTR browser_version )
 {
-    static const void *environment_vtbl[5] =
-    {
-        environment_QueryInterface,
-        environment_AddRef,
-        environment_Release,
-        environment_CreateCoreWebView2Controller,
-        environment_get_BrowserVersion,
-    };
     struct environment *e = HeapAlloc( GetProcessHeap(), 0, sizeof(*e) );
     const void **vt;
     if (!e) return NULL;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, sizeof(environment_vtbl) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 5 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, e );
         return NULL;
     }
-    memcpy( vt, environment_vtbl, sizeof(environment_vtbl) );
+    /* per-slot stores: RIP-relative immediates, immune to the loader
+     * relocating .rdata pages once (shared pages) for another image base */
+    vt[0] = environment_QueryInterface;
+    vt[1] = environment_AddRef;
+    vt[2] = environment_Release;
+    vt[3] = environment_CreateCoreWebView2Controller;
+    vt[4] = environment_get_BrowserVersion;
+    /* census + repair: slot 3 has been observed overwritten with a heap
+     * value between fill and the controller call on ccThread */
+    if (vt[3] != (void *)environment_CreateCoreWebView2Controller)
+    {
+        WARN("vt[3] corrupted at fill: got %p\n", vt[3]);
+        vt[3] = environment_CreateCoreWebView2Controller;
+    }
     e->vtbl = vt;
     e->ref = 1;
     e->version = dup_wstr( browser_version && *browser_version ? browser_version : L"157.0.4341.42" );
@@ -271,20 +274,6 @@ static HRESULT WINAPI options_put_AllowSingleSignOnUsingOSPrimaryAccount( void *
     return S_OK;
 }
 
-static const void *options_vtbl[11] =
-{
-    options_QueryInterface,
-    options_AddRef,
-    options_Release,
-    options_get_AdditionalBrowserArguments,
-    options_put_AdditionalBrowserArguments,
-    options_get_Language,
-    options_put_Language,
-    options_get_TargetCompatibleBrowserVersion,
-    options_put_TargetCompatibleBrowserVersion,
-    options_get_AllowSingleSignOnUsingOSPrimaryAccount,
-    options_put_AllowSingleSignOnUsingOSPrimaryAccount,
-};
 
 /* ------------------------------------------------------------------ */
 /* exported functions                                                  */
@@ -318,8 +307,8 @@ HRESULT WINAPI CreateCoreWebView2EnvironmentWithOptions( LPCWSTR browser_version
     TRACE( "%s %s %p %p\n", debugstr_w( browser_version ), debugstr_w( user_data_folder ), options, handler );
 
     if (!(e = create_environment( browser_version ))) return E_OUTOFMEMORY;
-    hr = post_completion( handler, e );
-    FIXME( "post_completion -> 0x%08x\n", hr );
+    hr = post_completion( handler, e, 1 );
+    TRACE( "post_completion -> 0x%08x\n", hr );
     return hr;
 }
 
@@ -333,12 +322,22 @@ HRESULT WINAPI CreateCoreWebView2EnvironmentOptions( void **options )
     struct environment_options *o = HeapAlloc( GetProcessHeap(), 0, sizeof(*o) );
     const void **vt;
     if (!o) return E_OUTOFMEMORY;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, sizeof(options_vtbl) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 11 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, o );
         return E_OUTOFMEMORY;
     }
-    memcpy( vt, options_vtbl, sizeof(options_vtbl) );
+    vt[0] = options_QueryInterface;
+    vt[1] = options_AddRef;
+    vt[2] = options_Release;
+    vt[3] = options_get_AdditionalBrowserArguments;
+    vt[4] = options_put_AdditionalBrowserArguments;
+    vt[5] = options_get_Language;
+    vt[6] = options_put_Language;
+    vt[7] = options_get_TargetCompatibleBrowserVersion;
+    vt[8] = options_put_TargetCompatibleBrowserVersion;
+    vt[9] = options_get_AllowSingleSignOnUsingOSPrimaryAccount;
+    vt[10] = options_put_AllowSingleSignOnUsingOSPrimaryAccount;
     o->vtbl = vt;
     o->ref = 1;
     o->additional_args = dup_wstr( L"" );
