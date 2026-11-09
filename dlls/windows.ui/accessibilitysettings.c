@@ -189,16 +189,6 @@ static HRESULT WINAPI factory_QueryInterface(IActivationFactory *iface, REFIID i
     }
 
     *out = NULL;
-    /* Windows aggregates the class default interface (IAccessibilitySettings) on the factory object
-     * (CsWinRT probes the factory for the class interfaces). The factory is not an
-     * instance; instance method calls fail. */
-    if (IsEqualGUID( iid, &IID_IAccessibilitySettings ))
-    {
-        *out = &impl->IAccessibilitySettings_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
     return E_NOINTERFACE;
 }
