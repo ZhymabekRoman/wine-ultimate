@@ -256,8 +256,65 @@ static void test_ICoreDragDropManager(void)
     RoUninitialize();
 }
 
+static void test_core_dragdrop_target(void)
+{
+    static const WCHAR *class_name = L"Windows.ApplicationModel.DataTransfer.DragDrop.Core.CoreDragDropManager";
+    __FIAsyncOperation_1_DataPackageOperation *operation = NULL;
+    ICoreDragDropManagerStatics *statics = NULL;
+    ICoreDropOperationTarget *target = NULL;
+    IActivationFactory *factory = NULL;
+    DataPackageOperation op;
+    HSTRING str;
+    HRESULT hr;
+
+    hr = RoInitialize(RO_INIT_MULTITHREADED);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = WindowsCreateString(class_name, wcslen(class_name), &str);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = RoGetActivationFactory(str, &IID_IActivationFactory, (void **)&factory);
+    WindowsDeleteString(str);
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip("%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w(class_name));
+        RoUninitialize();
+        return;
+    }
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* The manager's Target property yields a CoreDragDropTarget. */
+    hr = IActivationFactory_QueryInterface(factory, &IID_ICoreDragDropManagerStatics, (void **)&statics);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = ICoreDragDropManagerStatics_GetForCurrentView(statics, NULL);
+    ok(hr == E_POINTER, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IActivationFactory_ActivateInstance(factory, (IInspectable **)&target);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!!target, "Got unexpected pointer.\n");
+
+    hr = ICoreDropOperationTarget_EnterAsync(target, NULL, NULL, &operation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!!operation, "Got unexpected pointer.\n");
+
+    op = DataPackageOperation_Move;
+    hr = __FIAsyncOperation_1_DataPackageOperation_GetResults(operation, &op);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(op == DataPackageOperation_Copy, "Got unexpected operation %#lx.\n", op);
+    __FIAsyncOperation_1_DataPackageOperation_Release(operation);
+
+    hr = ICoreDropOperationTarget_DropAsync(target, NULL, &operation);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    __FIAsyncOperation_1_DataPackageOperation_Release(operation);
+
+    ICoreDropOperationTarget_Release(target);
+    IActivationFactory_Release(factory);
+    RoUninitialize();
+}
+
 START_TEST(dataexchange)
 {
     test_ICoreDragDropManagerStatics();
     test_ICoreDragDropManager();
+    test_core_dragdrop_target();
 }

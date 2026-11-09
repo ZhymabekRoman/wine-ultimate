@@ -34,8 +34,12 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Networking_Connectivity
 #include "windows.networking.connectivity.h"
+#define WIDL_using_Windows_ApplicationModel_DataTransfer
+#include "windows.applicationmodel.datatransfer.h"
 #define WIDL_using_Windows_ApplicationModel_DataTransfer_DragDrop_Core
 #include "windows.applicationmodel.datatransfer.dragdrop.core.h"
+#define WIDL_using_Windows_UI_Core
+#include "windows.ui.core.h"
 
 #define DEFINE_IINSPECTABLE_(pfx, iface_type, impl_type, impl_from, iface_mem, expr)        \
     static inline impl_type *impl_from(iface_type *iface)                                   \
