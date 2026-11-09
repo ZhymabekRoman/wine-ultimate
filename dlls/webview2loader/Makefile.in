@@ -1,0 +1,5 @@
+MODULE    = webview2loader.dll
+IMPORTS   = uuid ole32 user32
+
+SOURCES = \
+	main.c

@@ -1,0 +1,7 @@
+@ stdcall CompareBrowserVersions(wstr wstr ptr)
+@ stdcall CreateCoreWebView2Controller(ptr ptr)
+@ stdcall CreateCoreWebView2Environment(wstr ptr)
+@ stdcall CreateCoreWebView2EnvironmentOptions(ptr)
+@ stdcall CreateCoreWebView2EnvironmentWithOptions(wstr wstr ptr ptr)
+@ stdcall GetAvailableCoreWebView2BrowserVersionString(wstr ptr)
+@ stdcall GetAvailableCoreWebView2BrowserVersionStringWithOptions(wstr ptr ptr)
