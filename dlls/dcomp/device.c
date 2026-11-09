@@ -36,9 +36,14 @@
 #include "d3d11_4.h"
 #include "d3dcompiler.h"
 #include "wine/server.h"
+#include "wine/wined3d.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
+
+/* Exported by dxgi (dxgi.spec): the wined3d swapchain behind a DXGI
+ * swapchain, for direct-to-display composition. */
+struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain);
 
 /* Guards device->rendering_device and device->surface_factory, both of which
  * are created by calls into Direct3D. Locking order is dcomp_device_cs before
@@ -1508,6 +1513,7 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame)
 
 static void render_composite_frame(struct composite_frame *frame)
 {
+    IDXGISwapChain *swapchain = NULL;
     IDXGISurface *dxgi_surface;
 
     if (frame->is_fallback)
@@ -1536,6 +1542,25 @@ static void render_composite_frame(struct composite_frame *frame)
     if ((frame->frame_interop = frame->interop))
         ID2D1GdiInteropRenderTarget_AddRef(frame->frame_interop);
 
+    /* Direct present: a composition swapchain's back buffer is presented
+     * through wined3d, which blits it into the window's GL drawable on the
+     * command stream thread. This replaces the GetBuffer(0) + Direct2D GDI
+     * interop + BitBlt copy for swapchain content; the drawable lease is
+     * honored by wined3d_swapchain_present itself. */
+    if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain)))
+    {
+        struct wined3d_swapchain *wined3d_swapchain = dxgi_get_wined3d_swapchain(swapchain);
+
+        if (wined3d_swapchain)
+        {
+            wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, NULL, 0, 0);
+            frame->rendered = TRUE;
+        }
+        IDXGISwapChain_Release(swapchain);
+        if (frame->rendered)
+            goto done;
+    }
+
     if ((dxgi_surface = frame_get_surface(frame)))
     {
         /* Change/commit driven: only re-blit when the visual content changed. The
@@ -1549,6 +1574,7 @@ static void render_composite_frame(struct composite_frame *frame)
         frame->rendered = TRUE;
     }
 
+done:
     if (frame->frame_interop)
         ID2D1GdiInteropRenderTarget_Release(frame->frame_interop);
     if (frame->frame_context)

@@ -5,4 +5,5 @@
 @ stdcall DXGID3D10RegisterLayers(ptr long)
 @ stdcall DXGIGetDebugInterface1(long ptr ptr)
 @ stdcall DXGIDisableVBlankVirtualization()
+@ stdcall dxgi_get_wined3d_swapchain(ptr)
 @ stdcall DXGIEnableVBlankVirtualization()

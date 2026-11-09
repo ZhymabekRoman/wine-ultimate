@@ -1,6 +1,6 @@
 MODULE   = dcomp.dll
 IMPORTLIB = dcomp
-IMPORTS  = d2d1 dwmapi user32 gdi32 d3dcompiler
+IMPORTS  = d2d1 dwmapi user32 gdi32 d3dcompiler dxgi wined3d
 
 VER_PRODUCTVERSION = 10,0,14393,0
 

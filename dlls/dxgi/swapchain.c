@@ -185,6 +185,21 @@ static inline struct d3d11_swapchain *d3d11_swapchain_from_IDXGISwapChain4(IDXGI
     return CONTAINING_RECORD(iface, struct d3d11_swapchain, IDXGISwapChain4_iface);
 }
 
+/* Accessor for composing DLLs (DirectComposition): the wined3d swapchain
+ * behind a DXGI swapchain, so the compositor can present it directly to the
+ * window drawable instead of copying through GDI. */
+struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain)
+{
+    struct d3d11_swapchain *impl;
+    IDXGISwapChain4 *iface4;
+
+    if (FAILED(IDXGISwapChain_QueryInterface(swapchain, &IID_IDXGISwapChain4, (void **)&iface4)))
+        return NULL;
+    impl = d3d11_swapchain_from_IDXGISwapChain4(iface4);
+    IDXGISwapChain4_Release(iface4);
+    return impl->wined3d_swapchain;
+}
+
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetBuffer(IDXGISwapChain4 *iface,
         UINT buffer_idx, REFIID riid, void **surface);
 
