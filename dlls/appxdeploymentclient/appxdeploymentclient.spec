@@ -12,10 +12,10 @@
 @ stub AppxDeletePackageFiles
 @ stdcall AppxRequestRemovePackageForUser(wstr wstr)
 @ stdcall IsPackageInstalled(wstr ptr)
-@ stub RDSRecoverRequests
-@ stub AppxPreStageCleanupRunTask
+@ stdcall RDSRecoverRequests()
+@ stdcall AppxPreStageCleanupRunTask()
 @ stdcall AppxPreRegisterPackage(wstr wstr wstr ptr)
-@ stub ReArmAppxPreStageCleanupTask
+@ stdcall ReArmAppxPreStageCleanupTask()
 @ stub AppxAddPackageToAllUserStoreForPbr
 @ stub GetPackageApplicabilityForUserLogon
 16 stub @
@@ -25,13 +25,13 @@
 @ stub GetApplicability2
 @ stdcall AppxGetStagedPackageFullNameFromFamilyName(wstr ptr)
 @ stdcall AppxIsStagedPackageStoreSigned(wstr ptr)
-@ stub RegisterNotification
-@ stub UnregisterNotification
-@ stub GetNotificationPayload
-@ stub NotifyPackageStatusChanged
-@ stub VerifyPackage
-@ stub AppxPreRegisterAllInboxPackages
-@ stub AppxValidatePackagesWithOptions
+@ stdcall RegisterNotification(wstr long)
+@ stdcall UnregisterNotification(wstr)
+@ stdcall GetNotificationPayload(wstr ptr)
+@ stdcall NotifyPackageStatusChanged(wstr long)
+@ stdcall VerifyPackage(wstr wstr)
+@ stdcall AppxPreRegisterAllInboxPackages()
+@ stdcall AppxValidatePackagesWithOptions(wstr wstr long)
 @ stub AppxRemovePackageForAllUsers
 @ stub RequestContentGroups
 @ stub GetApplicability4
@@ -41,29 +41,29 @@
 @ stub FixJunctionsForAppsIfNecessary
 @ stdcall AppxRemovePackageForUserSid(wstr wstr)
 @ stub CreateCanonicalPriFile
-@ stub RegisterNotificationForUser
-@ stub UnregisterNotificationForUser
-@ stub GetNotificationPayloadForUser
-@ stub AppxCleanupWCIReparsePoints
-@ stub RepairPackageFileAcls
-@ stub EnsurePackageFamilyIsRegisteredBeforeActivation
-@ stub AppxCleanupSystemAppsMigratedToFOD
-@ stub AppxCleanupOrphanPackages
+@ stdcall RegisterNotificationForUser(wstr wstr long)
+@ stdcall UnregisterNotificationForUser(wstr wstr)
+@ stdcall GetNotificationPayloadForUser(wstr wstr ptr)
+@ stdcall AppxCleanupWCIReparsePoints()
+@ stdcall RepairPackageFileAcls()
+@ stdcall EnsurePackageFamilyIsRegisteredBeforeActivation(wstr wstr ptr)
+@ stdcall AppxCleanupSystemAppsMigratedToFOD()
+@ stdcall AppxCleanupOrphanPackages()
 @ stub CheckComCallerHasCapabilities
 @ stub GetBundleApplicablePackages
 @ stub GetApplicability5
 @ stub DeleteApplicabilityInfoArray
 @ stub UpdateAgentCreateDownload
 @ stub UpdateAgentGetDownloadRanges
-@ stub UpdateAgentCancelAllDownloads
+@ stdcall UpdateAgentCancelAllDownloads()
 @ stub UpdateDataSourceRegister
 @ stub UpdateDataSourceAddRange
 @ stub UpdateDataSourceRun
 @ stub UpdateDataSourceCancelRun
 @ stub GetPackageRegistrationStatusForUser
 @ stub IsSharedAppsEnabled
-@ stub AppInstallerUpdateAllTask
-@ stub CheckAppInstallerUpdateAvailability
+@ stdcall AppInstallerUpdateAllTask()
+@ stdcall CheckAppInstallerUpdateAvailability(ptr)
 @ stub UpdateAgentFreeDownloadRanges
 @ stdcall AppxRegisterPackage(wstr wstr wstr)
 @ stub IsPackageMetadataUnderSystemMetadata
@@ -80,8 +80,8 @@
 @ stub AppxRemoveAllPackagesForUserSid
 @ stdcall AppxCreateSharedLocalFolderForFamilyName(wstr wstr)
 @ stdcall AppxDoesSharedLocalFolderExistForFamilyName(wstr ptr)
-@ stub AppxValidatePackages
-@ stub CheckForUpdatesAndWaitForInstallerIfNeeded
+@ stdcall AppxValidatePackages(wstr wstr)
+@ stdcall CheckForUpdatesAndWaitForInstallerIfNeeded(long)
 @ stdcall -private DllCanUnloadNow()
 @ stdcall -private DllGetActivationFactory(ptr ptr)
 @ stdcall -private DllGetClassObject(ptr ptr ptr)

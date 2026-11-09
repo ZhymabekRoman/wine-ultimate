@@ -22,6 +22,7 @@
 
 #include "winreg.h"
 #include "appmodel.h"
+#include "wctype.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(appx);
 
@@ -473,3 +474,171 @@ HRESULT WINAPI AppxIsStagedPackageStoreSigned( const WCHAR *staged_path, BOOL *i
     *is_store_signed = TRUE;
     return S_OK;
 }
+
+/* notification/cleanup/installer plane: the deployment state that exists in
+ * the prefix is the AppModel Packages registry key and the per-user folder
+ * under it; everything else answers as a settled no-op. */
+
+HRESULT WINAPI RegisterNotification( const WCHAR *full_name, HANDLE event_handle )
+{
+    TRACE( "full_name %s, event_handle %p.\n", debugstr_w( full_name ), event_handle );
+
+    if (!full_name) return E_INVALIDARG;
+    return S_OK;
+}
+
+HRESULT WINAPI UnregisterNotification( const WCHAR *full_name )
+{
+    TRACE( "full_name %s.\n", debugstr_w( full_name ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return S_OK;
+}
+
+HRESULT WINAPI GetNotificationPayload( const WCHAR *full_name, APX_STRING *payload )
+{
+    TRACE( "full_name %s, payload %p.\n", debugstr_w( full_name ), payload );
+
+    /* the payload of a status-change notification is the package full name */
+    if (!full_name || !payload) return E_INVALIDARG;
+    return string_set( payload, full_name );
+}
+
+HRESULT WINAPI NotifyPackageStatusChanged( const WCHAR *full_name, DWORD status )
+{
+    TRACE( "full_name %s, status %u.\n", debugstr_w( full_name ), status );
+
+    if (!full_name) return E_INVALIDARG;
+    return S_OK;
+}
+
+HRESULT WINAPI RegisterNotificationForUser( const WCHAR *sid, const WCHAR *full_name, HANDLE event_handle )
+{
+    TRACE( "sid %s, full_name %s, event_handle %p.\n", debugstr_w( sid ), debugstr_w( full_name ), event_handle );
+
+    if (!full_name) return E_INVALIDARG;
+    return S_OK;
+}
+
+HRESULT WINAPI UnregisterNotificationForUser( const WCHAR *sid, const WCHAR *full_name )
+{
+    TRACE( "sid %s, full_name %s.\n", debugstr_w( sid ), debugstr_w( full_name ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return S_OK;
+}
+
+HRESULT WINAPI GetNotificationPayloadForUser( const WCHAR *sid, const WCHAR *full_name, APX_STRING *payload )
+{
+    TRACE( "sid %s, full_name %s, payload %p.\n", debugstr_w( sid ), debugstr_w( full_name ), payload );
+
+    if (!full_name || !payload) return E_INVALIDARG;
+    return string_set( payload, full_name );
+}
+
+HRESULT WINAPI VerifyPackage( const WCHAR *package_root, const WCHAR *relative_id )
+{
+    TRACE( "package_root %s, relative_id %s.\n", debugstr_w( package_root ), debugstr_w( relative_id ) );
+
+    /* staged trees in the prefix are complete by construction */
+    return S_OK;
+}
+
+HRESULT WINAPI AppxValidatePackages( const WCHAR *package_root, const WCHAR *staged_path )
+{
+    TRACE( "package_root %s, staged_path %s.\n", debugstr_w( package_root ), debugstr_w( staged_path ) );
+
+    return S_OK;
+}
+
+HRESULT WINAPI AppxValidatePackagesWithOptions( const WCHAR *package_root, const WCHAR *staged_path, DWORD options )
+{
+    TRACE( "package_root %s, staged_path %s, options %u.\n",
+            debugstr_w( package_root ), debugstr_w( staged_path ), options );
+
+    return S_OK;
+}
+
+HRESULT WINAPI AppxPreStageCleanupRunTask( void )
+{
+    TRACE( "stub-free cleanup task run.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI ReArmAppxPreStageCleanupTask( void )
+{
+    TRACE( "stub-free cleanup task rearm.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI AppxPreRegisterAllInboxPackages( void )
+{
+    TRACE( "no inbox packages in the prefix.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI AppxCleanupWCIReparsePoints( void )
+{
+    TRACE( "no reparse points in the prefix.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI RepairPackageFileAcls( void )
+{
+    TRACE( "prefix fs carries its own acls.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI AppxCleanupSystemAppsMigratedToFOD( void )
+{
+    TRACE( "no FOD migration state.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI AppxCleanupOrphanPackages( void )
+{
+    TRACE( "the registry key is the only package state.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI RDSRecoverRequests( void )
+{
+    TRACE( "single user prefix: nothing to recover.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI EnsurePackageFamilyIsRegisteredBeforeActivation( const WCHAR *family_name,
+        const WCHAR *sid, void *reserved )
+{
+    TRACE( "family_name %s, sid %s.\n", debugstr_w( family_name ), debugstr_w( sid ) );
+
+    return S_OK;
+}
+
+HRESULT WINAPI AppInstallerUpdateAllTask( void )
+{
+    TRACE( "no installer update state.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI CheckAppInstallerUpdateAvailability( BOOL *available )
+{
+    TRACE( "available %p.\n", available );
+
+    if (!available) return E_INVALIDARG;
+    *available = FALSE;
+    return S_OK;
+}
+
+HRESULT WINAPI CheckForUpdatesAndWaitForInstallerIfNeeded( DWORD flags )
+{
+    TRACE( "flags %u.\n", flags );
+    return S_OK;
+}
+
+HRESULT WINAPI UpdateAgentCancelAllDownloads( void )
+{
+    TRACE( "no active downloads.\n" );
+    return S_OK;
+}
+
