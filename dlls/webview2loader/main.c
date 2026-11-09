@@ -133,6 +133,110 @@ static struct controller *create_controller( HWND parent )
 }
 
 /* ------------------------------------------------------------------ */
+/* browser spawn + mojo pipe census                                    */
+/* ------------------------------------------------------------------ */
+
+static struct mojo_ep
+{
+    HANDLE pipe;
+    WCHAR name[128];      /* \\.\pipe\LOCAL\mojo... for CreateNamedPipeW */
+    WCHAR flag[128];      /* LOCAL\mojo... for --mojo-named-platform-channel-pipe */
+} g_mojo;
+
+static DWORD WINAPI mojo_watchdog( LPVOID arg )
+{
+    HANDLE pipe = g_mojo.pipe;
+    BYTE buf[4096];
+    DWORD got = 0;
+
+    if (!ConnectNamedPipe( pipe, NULL ))
+    {
+        if (GetLastError() != ERROR_PIPE_CONNECTED)
+        {
+            WARN( "mojo connect failed gle=%u\n", GetLastError());
+            return 0;
+        }
+    }
+    TRACE( "mojo client connected\n" );
+
+    /* first transceive: read whatever the browser writes first (ipcz handshake) */
+    if (ReadFile( pipe, buf, sizeof(buf), &got, NULL ))
+        WARN( "TRANSCEIVE pipe=%s first-read %lu bytes ok\n", debugstr_w( g_mojo.flag ), got );
+    else
+        WARN( "TRANSCEIVE pipe=%s first-read gle=%u\n", debugstr_w( g_mojo.flag ), GetLastError());
+
+    /* echo a 4-byte ACK to close the first exchange */
+    WriteFile( pipe, "ACK!", 4, &got, NULL );
+    TRACE( "mojo wrote ACK\n" );
+    return 0;
+}
+
+static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
+{
+    WCHAR exe[MAX_PATH], args[1024], root[MAX_PATH];
+    STARTUPINFOW si = { sizeof(si) };
+    PROCESS_INFORMATION pi;
+    DWORD pid = GetCurrentProcessId(), tid = GetCurrentThreadId();
+    LARGE_INTEGER ctr;
+    WCHAR pipe_tail[64];
+
+    QueryPerformanceCounter( &ctr );
+    if (!g_mojo.pipe)
+    {
+        DWORD n = GetEnvironmentVariableW( L"WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGING", NULL, 0 );
+        swprintf( g_mojo.flag, sizeof(g_mojo.flag) / sizeof(WCHAR),
+                  L"LOCAL\\mojo.%u.%u.%012llx", pid, tid, ctr.QuadPart );
+        swprintf( g_mojo.name, sizeof(g_mojo.name) / sizeof(WCHAR),
+                  L"\\\\.\\pipe\\%s", g_mojo.flag );
+        if (n) TRACE( "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGING set (%u chars)\n", n );
+
+        GetCurrentDirectoryW( MAX_PATH, root );
+        lstrcpyW( exe, root );
+        lstrcatW( exe, L"\\msedgewebview2.exe" );
+
+        g_mojo.pipe = CreateNamedPipeW( g_mojo.name,
+                PIPE_ACCESS_DUPLEX,
+                PIPE_TYPE_MESSAGE | PIPE_READMODE_MESSAGE | PIPE_WAIT,
+                1, 4096, 4096, 0, NULL );
+        if (g_mojo.pipe == INVALID_HANDLE_VALUE)
+        {
+            WARN( "create-pipe %s gle=%u\n", debugstr_w( g_mojo.name ), GetLastError());
+            return;
+        }
+
+        /* user_data_dir = EBWebView (relative to cwd, where the probe was started) */
+        const WCHAR *udd = user_data_dir && *user_data_dir ? user_data_dir : L"EBWebView\\x64";
+        lstrcpyW( args, L"msedgewebview2 --embedded-browser-webview=1");
+        lstrcatW( args, L" --webview-exe-name=WhatsApp.Root.exe");
+        lstrcatW( args, L" --webview-exe-version=1.0.0");
+        lstrcatW( args, L" --user-data-dir=");
+        lstrcatW( args, udd );
+        lstrcatW( args, L" --mojo-named-platform-channel-pipe=");
+        lstrcatW( args, g_mojo.flag );
+        if (extra_args && *extra_args)
+        {
+            lstrcatW( args, L" " );
+            lstrcatW( args, extra_args );
+        }
+        else
+            lstrcatW( args, L" --no-sandbox" );
+        TRACE( "spawning %s\n", debugstr_w(args));
+
+        if (!CreateProcessW( exe, args, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+        {
+            WARN( "spawn %s gle=%u\n", debugstr_w( exe ), GetLastError());
+            CloseHandle( g_mojo.pipe );
+            g_mojo.pipe = INVALID_HANDLE_VALUE;
+            return;
+        }
+        CloseHandle( pi.hThread );
+        TRACE( "spawned pid=%u\n", pi.dwProcessId );
+        HANDLE th = CreateThread( NULL, 0, mojo_watchdog, NULL, 0, NULL );
+        CloseHandle( th );
+    }
+}
+
+/* ------------------------------------------------------------------ */
 /* environment stub                                                    */
 /* ------------------------------------------------------------------ */
 
@@ -307,6 +411,20 @@ HRESULT WINAPI CreateCoreWebView2EnvironmentWithOptions( LPCWSTR browser_version
     TRACE( "%s %s %p %p\n", debugstr_w( browser_version ), debugstr_w( user_data_folder ), options, handler );
 
     if (!(e = create_environment( browser_version ))) return E_OUTOFMEMORY;
+    {
+        LPCWSTR extra = NULL;
+        if (options)
+        {
+            /* our own options object: read the field, no vtable round-trip */
+            struct environment_options *o = options;
+            if (o->additional_args && *o->additional_args)
+            {
+                extra = o->additional_args;
+                TRACE( "options args %s\n", debugstr_w( o->additional_args ) );
+            }
+        }
+        launch_browser( user_data_folder, extra );
+    }
     hr = post_completion( handler, e, 1 );
     TRACE( "post_completion -> 0x%08x\n", hr );
     return hr;
@@ -338,6 +456,11 @@ HRESULT WINAPI CreateCoreWebView2EnvironmentOptions( void **options )
     vt[8] = options_put_TargetCompatibleBrowserVersion;
     vt[9] = options_get_AllowSingleSignOnUsingOSPrimaryAccount;
     vt[10] = options_put_AllowSingleSignOnUsingOSPrimaryAccount;
+    if (vt[3] != (void *)options_get_AdditionalBrowserArguments)
+    {
+        WARN("opts vt[3] corrupted at fill: got %p\n", vt[3]);
+        vt[3] = options_get_AdditionalBrowserArguments;
+    }
     o->vtbl = vt;
     o->ref = 1;
     o->additional_args = dup_wstr( L"" );
