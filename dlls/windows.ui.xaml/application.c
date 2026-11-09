@@ -267,7 +267,16 @@ static HRESULT WINAPI view_Run( IFrameworkView *iface )
         hr = ICoreWindow_get_Dispatcher( impl->window, &dispatcher );
         if (SUCCEEDED(hr) && dispatcher)
         {
-            hr = ICoreDispatcher_ProcessEvents( dispatcher, CoreProcessEventsOption_ProcessUntilQuit );
+            /* Windows keeps Run alive for the lifetime of the view: each ProcessUntilQuit
+             * pass drains the queue (WM_QUIT messages are consumed by nested loops), and
+             * the view only exits when the CoreWindow closes. One pass returned Run early
+             * and the process exited ~16 s after startup. */
+            for (;;)
+            {
+                hr = ICoreDispatcher_ProcessEvents( dispatcher, CoreProcessEventsOption_ProcessUntilQuit );
+                if (FAILED(hr)) break;
+                if (!impl->window) break;
+            }
             ICoreDispatcher_Release( dispatcher );
             return hr;
         }
