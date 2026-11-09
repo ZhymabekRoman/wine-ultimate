@@ -1914,6 +1914,17 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     add_registry_environment( &env, &env_pos, &env_size );
     env[env_pos++] = 0;
 
+    /* the start.exe /exec relaunch passes the app path quoted (command line
+     * built for CreateProcessW); strip surrounding quotes before resolving */
+    {
+        char *arg = main_argv[1];
+        size_t len = strlen( arg );
+        if (len >= 2 && arg[0] == '"' && arg[len - 1] == '"')
+        {
+            arg[len - 1] = 0;
+            memmove( arg, arg + 1, len - 1 );
+        }
+    }
     get_full_path( main_argv[1], curdir, &nt_name );
     status = load_main_exe( &nt_name, 0, module );
     /* fail only if the file contained an explicit path */
