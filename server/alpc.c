@@ -25,6 +25,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -36,6 +37,39 @@
 #include "process.h"
 #include "thread.h"
 #include "file.h"
+
+/* wv2io: one WINEDEBUG channel for the WebView2 transceive wall.  Arm with
+ * WINEDEBUG=+wv2io in the wineserver environment.  ncalrpc/MSRPC legs (Root <->
+ * msedgewebview2 composition broker, SxS activation ports) print one compact
+ * line per event; tags match server/named_pipe.c (see its wv2io comment):
+ *   WA_WV2: t=<sec>.<ms> P pid=<src> ->=<dst> seq=<n> len=<n> r=<0|1>  send queued
+ *   WA_WV2: t=... A pid=<accepting> conn=<peer>                         connection accepted
+ * Disabled cost: one cached getenv per server process. */
+static int wv2io_on( void )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *dbg = getenv( "WINEDEBUG" );
+        on = (dbg && strstr( dbg, "wv2io" )) ? 1 : 0;
+    }
+    return on;
+}
+
+static void wv2io_print( const char *fmt, ... )
+{
+    struct timespec ts;
+    va_list args;
+
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    fprintf( stderr, "WA_WV2: t=%u.%03u ", (unsigned int)ts.tv_sec,
+             (unsigned int)(ts.tv_nsec / 1000000) );
+    va_start( args, fmt );
+    vfprintf( stderr, fmt, args );
+    va_end( args );
+}
+
+#define WV2IO(...) do { if (wv2io_on()) wv2io_print( __VA_ARGS__ ); } while (0)
 
 /* ---- Structures ---- */
 
@@ -966,6 +1000,9 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
                  (msg_type == ALPC_LPC_REPLY || reply_stamped), hex );
     }
 #endif
+    WV2IO( "P pid=%04x ->=%04x seq=%u len=%u r=%d\n", sender_pid,
+           peer->process ? peer->process->id : 0, peer->sequence_no + 1, user_size,
+           (msg_type == ALPC_LPC_REPLY || reply_stamped) ? 1 : 0 );
     peer->sequence_no++;
     list_add_tail( &peer->msg_queue, &msg->entry );
     wake_up( &peer->obj, 0 );
@@ -2108,6 +2145,9 @@ DECL_HANDLER(accept_alpc_connection)
                                       GENERIC_READ | GENERIC_WRITE | SYNCHRONIZE, 0 );
         fprintf( stderr, "ACCEPT_ALPC_CONN: pid=%04x tid=%04x handle=%x server_conn=%p peer=%p context=%lx\n",
                  current->process->id, current->id, reply->handle, server_conn_port, server_conn_port->peer, (unsigned long)req->port_context );
+        WV2IO( "A pid=%04x conn=%04x ctx=%lx\n", current->process->id,
+               server_conn_port->peer && server_conn_port->peer->process ?
+                   server_conn_port->peer->process->id : 0, (unsigned long)req->port_context );
         release_object( server_conn_port );
     }
     release_object( server_port );

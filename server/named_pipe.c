@@ -318,6 +318,81 @@ static void dupx_io( const char *dir, struct pipe_end *end, data_size_t len )
              end->connection ? end->connection->fd : NULL, len );
 }
 
+/* wv2io: one WINEDEBUG channel for the WebView2 transceive wall (pre-instrument for
+ * the BORN epoch).  Arm with WINEDEBUG=+wv2io in the wineserver environment; every
+ * traced leg prints one compact line, tag-first:
+ *   WA_WV2: t=<sec>.<ms> S pid=<winpid> ep=<ptr> st=<L|I|C|G|D>      pipe state edge
+ *   WA_WV2: t=... X srv=<pid> cli=<pid> ep=<ptr>                     accept pairing (AcceptEx)
+ *   WA_WV2: t=... T pid=<pid> ep=<ptr> len=<n>                       Transceive armed
+ *   WA_WV2: t=... G pid=<pid> ckey=<hex> ov=<ptr> st=<ntst> inf=<n>  GetQueuedCompletionStatus
+ *   WA_WV2: t=... P pid=<pid> ->=<pid> seq=<n> len=<n> r=<0|1>       ALPC send queued (PostSend)
+ *   WA_WV2: t=... A pid=<pid> conn=<pid>                             ALPC accept
+ * Pipe legs fire for LOCAL\mojo.* pipes only (the ipcz legs Root<->msedgewebview2),
+ * matching the relay_wanted filter.  Disabled cost: one cached getenv per process. */
+static int wv2io_on( void )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *dbg = getenv( "WINEDEBUG" );
+        on = (dbg && strstr( dbg, "wv2io" )) ? 1 : 0;
+    }
+    return on;
+}
+
+static void wv2io_print( const char *fmt, ... )
+{
+    struct timespec ts;
+    va_list args;
+
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    fprintf( stderr, "WA_WV2: t=%u.%03u ", (unsigned int)ts.tv_sec,
+             (unsigned int)(ts.tv_nsec / 1000000) );
+    va_start( args, fmt );
+    vfprintf( stderr, fmt, args );
+    va_end( args );
+}
+
+static void wv2io_tail( struct named_pipe *pipe, char *buf, unsigned int size )
+{
+    const WCHAR *nm;
+    unsigned int nchars, i;
+
+    buf[0] = '\0';
+    if (!pipe || !pipe->obj.name) return;
+    nm = pipe->obj.name->name;
+    nchars = pipe->obj.name->len / sizeof(WCHAR);
+    for (i = 0; i < size - 1 && i < nchars; i++)
+        buf[i] = (char)(nm[nchars - 1 - i] < 128 ? nm[nchars - 1 - i] : '?');
+    buf[i] = '\0';
+}
+
+#define WV2IO(...) do { if (wv2io_on()) wv2io_print( __VA_ARGS__ ); } while (0)
+
+static int wv2io_wanted( struct pipe_end *pipe_end )
+{
+    static const WCHAR prefixW[] = {'L','O','C','A','L','\\','m','o','j','o','.'};
+
+    if (!wv2io_on()) return 0;
+    if (!pipe_end || !pipe_end->pipe || !pipe_end->pipe->obj.name) return 0;
+    if (pipe_end->pipe->obj.name->len < sizeof(prefixW)) return 0;
+    return !memicmp_strW( pipe_end->pipe->obj.name->name, prefixW, sizeof(prefixW) );
+}
+
+/* map FILE_PIPE_*_STATE to one char: L istening, I nconnecting, C onnected,
+ * G (closin)G, D isconnected */
+static char wv2io_state_ch( unsigned int state )
+{
+    switch (state)
+    {
+    case FILE_PIPE_LISTENING_STATE:    return 'L';
+    case 1 /* FILE_PIPE_CONNECTING_STATE */: return 'I';
+    case FILE_PIPE_CONNECTED_STATE:    return 'C';
+    case FILE_PIPE_CLOSING_STATE:      return 'G';
+    default:                           return 'D';
+    }
+}
+
 static int relay_wanted( struct pipe_end *pipe_end )
 {
     static const WCHAR prefixW[] = {'L','O','C','A','L','\\','m','o','j','o','.'};
@@ -1455,6 +1530,10 @@ static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status 
 
     pipe_end->state = status == STATUS_PIPE_DISCONNECTED
         ? FILE_PIPE_DISCONNECTED_STATE : FILE_PIPE_CLOSING_STATE;
+    if (wv2io_wanted( pipe_end ))
+        WV2IO( "S pid=%04x ep=%p st=%c (teardown %x)\n",
+               current ? current->process->id : 0, pipe_end,
+               wv2io_state_ch( pipe_end->state ), status );
     fd_async_wake_up( pipe_end->fd, ASYNC_TYPE_WAIT, status );
     async_wake_up( &pipe_end->read_q, status );
     LIST_FOR_EACH_ENTRY_SAFE( message, next, &pipe_end->message_queue, struct pipe_message, entry )
@@ -2444,16 +2523,24 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     const WCHAR *pname;
     data_size_t plen;
 
+    if (wv2io_wanted( pipe_end ))
+        WV2IO( "T pid=%04x ep=%p (transceive armed)\n", current->process->id, pipe_end );
 
     if (!pipe_end->connection)
     {
         set_error( pipe_end->pipe ? STATUS_INVALID_PIPE_STATE : STATUS_PIPE_DISCONNECTED );
+        if (wv2io_wanted( pipe_end ))
+            WV2IO( "T pid=%04x ep=%p st=%x (no connection)\n", current->process->id, pipe_end,
+                   pipe_end->pipe ? STATUS_INVALID_PIPE_STATE : STATUS_PIPE_DISCONNECTED );
         return;
     }
 
     if (!(pipe_end->flags & NAMED_PIPE_MESSAGE_STREAM_READ))
     {
         set_error( STATUS_INVALID_READ_MODE );
+        if (wv2io_wanted( pipe_end ))
+            WV2IO( "T pid=%04x ep=%p st=%x (read mode)\n", current->process->id, pipe_end,
+                   (unsigned int)STATUS_INVALID_READ_MODE );
         return;
     }
 
@@ -2461,6 +2548,9 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
     if (!list_empty( &pipe_end->message_queue ))
     {
         set_error( STATUS_PIPE_BUSY );
+        if (wv2io_wanted( pipe_end ))
+            WV2IO( "T pid=%04x ep=%p st=%x (busy)\n", current->process->id, pipe_end,
+                   (unsigned int)STATUS_PIPE_BUSY );
         return;
     }
 
@@ -2582,6 +2672,8 @@ static void pipe_server_ioctl( struct fd *fd, ioctl_code_t code, struct async *a
             server->pipe_end.state = FILE_PIPE_LISTENING_STATE;
             list_add_tail( &server->pipe_end.pipe->listeners, &server->entry );
             dupx_dump( "LISTEN", server->pipe_end.pipe, &server->pipe_end, NULL );
+            if (wv2io_wanted( &server->pipe_end ))
+                WV2IO( "S pid=%04x ep=%p st=L (relisten)\n", current->process->id, &server->pipe_end );
             break;
         case FILE_PIPE_CONNECTED_STATE:
             set_error( STATUS_PIPE_CONNECTED );
@@ -2814,6 +2906,13 @@ static struct object *named_pipe_open_file( struct object *obj, unsigned int acc
         client->conn_info = CONN_INFO_VALID;
         list_remove( &server->entry );
         dupx_dump( "OPEN", pipe, &server->pipe_end, client );
+        if (wv2io_wanted( client ))
+        {
+            char tail[24];
+            wv2io_tail( pipe, tail, sizeof(tail) );
+            WV2IO( "X srv=%04x cli=%04x ep=%p tail=%s\n",
+                   server->pipe_end.server_pid, client->client_pid, client, tail );
+        }
     }
     return &client->obj;
 }

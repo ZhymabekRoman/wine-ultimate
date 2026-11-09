@@ -25,6 +25,8 @@
 
 #include <stdarg.h>
 #include <stdio.h>
+#include <string.h>
+#include <time.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -33,8 +35,41 @@
 #include "object.h"
 #include "file.h"
 #include "handle.h"
+#include "process.h"
 #include "request.h"
 #include "thread.h"
+
+/* wv2io: one WINEDEBUG channel for the WebView2 transceive wall (see the
+ * wv2io comment in server/named_pipe.c for the line format).  GetQueued-
+ * CompletionStatus outcomes on the IOCP legs (the mojo/DriverTransport
+ * completion packets exchanged between Root and msedgewebview2):
+ *   WA_WV2: t=<sec>.<ms> G pid=<winpid> ckey=<16hex> ov=<ptr> st=<ntst> inf=<n>
+ */
+static int wv2io_on( void )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *dbg = getenv( "WINEDEBUG" );
+        on = (dbg && strstr( dbg, "wv2io" )) ? 1 : 0;
+    }
+    return on;
+}
+
+static void wv2io_print( const char *fmt, ... )
+{
+    struct timespec ts;
+    va_list args;
+
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    fprintf( stderr, "WA_WV2: t=%u.%03u ", (unsigned int)ts.tv_sec,
+             (unsigned int)(ts.tv_nsec / 1000000) );
+    va_start( args, fmt );
+    vfprintf( stderr, fmt, args );
+    va_end( args );
+}
+
+#define WV2IO(...) do { if (wv2io_on()) wv2io_print( __VA_ARGS__ ); } while (0)
 
 
 static const WCHAR completion_name[] = {'I','o','C','o','m','p','l','e','t','i','o','n'};
@@ -525,6 +560,9 @@ DECL_HANDLER(remove_completion)
         reply->cvalue = msg->cvalue;
         reply->status = msg->status;
         reply->information = msg->information;
+        WV2IO( "G pid=%04x ckey=%08x%08x ov=%p st=%x inf=%u\n", current->process->id,
+               (unsigned int)(msg->ckey >> 32), (unsigned int)msg->ckey,
+               (void *)(client_ptr_t)msg->cvalue, msg->status, msg->information );
         free( msg );
         reply->wait_handle = 0;
         if (list_empty( &completion->queue )) reset_sync( completion->sync );
