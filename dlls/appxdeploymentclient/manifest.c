@@ -642,3 +642,209 @@ HRESULT WINAPI UpdateAgentCancelAllDownloads( void )
     return S_OK;
 }
 
+/* registry-backed applicability/content tasks with settled answers */
+
+HRESULT WINAPI RequestContentGroups( DWORD reserved, void *callback )
+{
+    TRACE( "reserved %u, callback %p.\n", reserved, callback );
+    return S_OK;
+}
+
+HRESULT WINAPI RequestContentGroupsForFullTrust( DWORD reserved, void *callback )
+{
+    TRACE( "reserved %u, callback %p.\n", reserved, callback );
+    return S_OK;
+}
+
+HRESULT WINAPI CheckComCallerHasCapabilities( DWORD reserved, void *callback )
+{
+    TRACE( "reserved %u, callback %p.\n", reserved, callback );
+    return S_OK;
+}
+
+HRESULT WINAPI GeneratePreInstalledPriFiles( void )
+{
+    TRACE( "no preinstalled packages in the prefix.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI PopulateProtocolAndFTA( void )
+{
+    TRACE( "protocol/FTA state is registry-side.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI FixJunctionsForAppsIfNecessary( void )
+{
+    TRACE( "the prefix has plain folders, no junctions.\n" );
+    return S_OK;
+}
+
+HRESULT WINAPI CreateCanonicalPriFile( const WCHAR *full_name, const WCHAR *install_path )
+{
+    TRACE( "full_name %s, install_path %s.\n", debugstr_w( full_name ), debugstr_w( install_path ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return S_OK;
+}
+
+/* registration-state family: the AppModel Packages key answers directly */
+
+static BOOL package_key_exists( const WCHAR *full_name )
+{
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\";
+    WCHAR key[600];
+    HKEY hkey;
+
+    lstrcpyW( key, appmodel_path );
+    lstrcatW( key, full_name );
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, key, 0, KEY_READ, &hkey )) return FALSE;
+    RegCloseKey( hkey );
+    return TRUE;
+}
+
+static BOOL family_prefix( const WCHAR *key, const WCHAR *family )
+{
+    for (; *family; family++, key++)
+        if (towlower( *family ) != towlower( *key )) return FALSE;
+    return !*key || *key == L'_';
+}
+
+static BOOL family_key_exists( const WCHAR *family_name )
+{
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    WCHAR keyname[512];
+    HKEY hkey;
+    DWORD i = 0, chars;
+    BOOL found = FALSE;
+
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, appmodel_path, 0, KEY_READ, &hkey )) return FALSE;
+    for (;;)
+    {
+        chars = ARRAY_SIZE( keyname );
+        if (RegEnumKeyW( hkey, i++, keyname, (LPDWORD)&chars )) break;
+        if (family_prefix( keyname, family_name ))
+        {
+            found = TRUE;
+            break;
+        }
+    }
+    RegCloseKey( hkey );
+    return found;
+}
+
+HRESULT WINAPI GetPackageRegistrationStatusForUser( const WCHAR *sid, const WCHAR *full_name, DWORD *status )
+{
+    TRACE( "sid %s, full_name %s, status %p.\n", debugstr_w( sid ), debugstr_w( full_name ), status );
+
+    /* RegistrationStatus: 0 = NotRegistered, 1 = Registered */
+    if (!full_name || !status) return E_INVALIDARG;
+    *status = package_key_exists( full_name ) ? 1 : 0;
+    return S_OK;
+}
+
+HRESULT WINAPI GetPackageRegistrationStatusForUserAndDefaultAccount( const WCHAR *full_name, DWORD *status )
+{
+    TRACE( "full_name %s, status %p.\n", debugstr_w( full_name ), status );
+
+    if (!full_name || !status) return E_INVALIDARG;
+    *status = package_key_exists( full_name ) ? 1 : 0;
+    return S_OK;
+}
+
+HRESULT WINAPI HasPackageFamilyBeenRegisteredForUser( const WCHAR *sid, const WCHAR *family_name, BOOL *registered )
+{
+    TRACE( "sid %s, family_name %s, registered %p.\n", debugstr_w( sid ), debugstr_w( family_name ), registered );
+
+    if (!family_name || !registered) return E_INVALIDARG;
+    *registered = family_key_exists( family_name );
+    return S_OK;
+}
+
+HRESULT WINAPI IsSharedAppsEnabled( BOOL *enabled )
+{
+    TRACE( "enabled %p.\n", enabled );
+
+    if (!enabled) return E_INVALIDARG;
+    *enabled = TRUE;
+    return S_OK;
+}
+
+HRESULT WINAPI GetMetadataRootForPackage( const WCHAR *full_name, APX_STRING *metadata_root )
+{
+    WCHAR path[MAX_PATH];
+
+    TRACE( "full_name %s, metadata_root %p.\n", debugstr_w( full_name ), metadata_root );
+
+    /* the per-user metadata root is the folder the deployment creates under
+     * Local\\Packages; AppxCreateSharedLocalFolder builds the same shape */
+    if (!full_name || !metadata_root) return E_INVALIDARG;
+    lstrcpyW( path, L"C:\\Users\\User\\AppData\\Local\\Packages\\" );
+    lstrcatW( path, full_name );
+    CreateDirectoryW( path, NULL );
+    return string_set( metadata_root, path );
+}
+
+HRESULT WINAPI IsPackageMetadataUnderSystemMetadata( const WCHAR *full_name, BOOL *under_system )
+{
+    TRACE( "full_name %s, under_system %p.\n", debugstr_w( full_name ), under_system );
+
+    /* the prefix carries per-user metadata only */
+    if (!full_name || !under_system) return E_INVALIDARG;
+    *under_system = FALSE;
+    return S_OK;
+}
+
+HRESULT WINAPI AppxDeletePackageFiles( const WCHAR *full_name )
+{
+    TRACE( "full_name %s.\n", debugstr_w( full_name ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return package_reg_delete( full_name );
+}
+
+HRESULT WINAPI AppxAddPackageToAllUserStoreForPbr( const WCHAR *full_name )
+{
+    TRACE( "full_name %s.\n", debugstr_w( full_name ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return package_reg_write( full_name, NULL );
+}
+
+HRESULT WINAPI AppxRemovePackageForAllUsers( const WCHAR *full_name )
+{
+    TRACE( "full_name %s.\n", debugstr_w( full_name ) );
+
+    /* the prefix has one user; removing for all users is removing theirs */
+    if (!full_name) return E_INVALIDARG;
+    return package_reg_delete( full_name );
+}
+
+HRESULT WINAPI AppxRemoveAllPackagesForUserSid( const WCHAR *sid )
+{
+    TRACE( "sid %s.\n", debugstr_w( sid ) );
+
+    return S_OK;
+}
+
+HRESULT WINAPI CleanupProfileForUser( const WCHAR *sid )
+{
+    TRACE( "sid %s.\n", debugstr_w( sid ) );
+
+    return S_OK;
+}
+
+HRESULT WINAPI AppxRecoverUserInstallsForUpgrade( DWORD reserved, HANDLE *event_handle )
+{
+    TRACE( "reserved %u, event_handle %p.\n", reserved, event_handle );
+
+    return S_OK;
+}
+
+HRESULT WINAPI RemovePackageFromContainer( const WCHAR *full_name, const WCHAR *container_id )
+{
+    TRACE( "full_name %s, container_id %s.\n", debugstr_w( full_name ), debugstr_w( container_id ) );
+
+    if (!full_name) return E_INVALIDARG;
+    return package_reg_delete( full_name );
+}
