@@ -27,6 +27,7 @@ struct completion_ctx
 {
     void *handler;   /* completion handler; Invoke is vtbl slot 3 */
     void *object;    /* object to hand to the handler */
+    int deref;
 };
 
 struct environment
@@ -144,14 +145,83 @@ static LPWSTR dup_wstr( LPCWSTR s )
 /* completion plumbing: post the result to the calling thread's queue  */
 /* ------------------------------------------------------------------ */
 
+static LRESULT CALLBACK completion_window_proc( HWND hwnd, UINT msg, WPARAM wp, LPARAM lp )
+{
+    if (msg == WM_APP_COMPLETION)
+    {
+        struct completion_ctx *ctx = (struct completion_ctx *)lp;
+        if (ctx)
+        {
+            void **vt = ctx->deref ? *(void ***)ctx->handler : ctx->handler;
+            HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
+            TRACE( "completion_window_proc: invoking handler %p object %p\n", ctx->handler, ctx->object );
+            invoke( ctx->handler, S_OK, ctx->object );
+            HeapFree( GetProcessHeap(), 0, ctx );
+        }
+        DestroyWindow( hwnd );
+        return 0;
+    }
+    return DefWindowProcW( hwnd, msg, wp, lp );
+}
+
+static void register_completion_class(void)
+{
+    static BOOL registered = FALSE;
+    if (!registered)
+    {
+        WNDCLASSEXW wc = { sizeof(wc) };
+        wc.lpfnWndProc = completion_window_proc;
+        wc.hInstance = GetModuleHandleW( NULL );
+        wc.lpszClassName = L"WebView2CompletionWindow";
+        RegisterClassExW( &wc );
+        registered = TRUE;
+    }
+}
+
 /* the env handler is a struct whose first field points at the vtable;
  * the controller handler is passed as the raw vtable itself */
 static HRESULT post_completion( void *handler, void *object, int deref )
 {
-    void **vt = deref ? *(void ***)handler : handler;
-    HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
+    struct completion_ctx *ctx;
+    HWND hwnd;
 
-    return invoke( handler, S_OK, object );
+    if (!handler) return E_POINTER;
+
+    register_completion_class();
+    hwnd = CreateWindowExW( 0, L"WebView2CompletionWindow", NULL, 0, 0, 0, 0, 0,
+                            HWND_MESSAGE, NULL, GetModuleHandleW( NULL ), NULL );
+    if (!hwnd)
+    {
+        void **vt = deref ? *(void ***)handler : handler;
+        HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
+        WARN( "failed to create completion window, falling back to sync invoke\n" );
+        return invoke( handler, S_OK, object );
+    }
+
+    ctx = HeapAlloc( GetProcessHeap(), 0, sizeof(*ctx) );
+    if (!ctx)
+    {
+        DestroyWindow( hwnd );
+        return E_OUTOFMEMORY;
+    }
+    ctx->handler = handler;
+    ctx->object = object;
+    ctx->deref = deref;
+
+    TRACE( "posting WM_APP_COMPLETION to hwnd %p (handler %p, object %p, deref %d)\n",
+           hwnd, handler, object, deref );
+    if (!PostMessageW( hwnd, WM_APP_COMPLETION, 0, (LPARAM)ctx ))
+    {
+        WARN( "PostMessage failed gle=%lu, falling back to sync invoke\n", GetLastError() );
+        HeapFree( GetProcessHeap(), 0, ctx );
+        DestroyWindow( hwnd );
+        {
+            void **vt = deref ? *(void ***)handler : handler;
+            HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
+            return invoke( handler, S_OK, object );
+        }
+    }
+    return S_OK;
 }
 
 /* ------------------------------------------------------------------ */
