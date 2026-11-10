@@ -543,6 +543,34 @@ static void test_hstring_struct(void)
     ok(prv2->header.str == input_string, "Expected str to point at input_string, instead pointing at %p.\n", prv2->header.str);
 
     ok(WindowsDeleteString(str) == S_OK, "Failed to delete string ref.\n");
+
+    /* Test inline buffer string (24 WCHARs) */
+    {
+        static const WCHAR str24[] = L"012345678901234567891234";
+        ok(WindowsCreateString(str24, 24, &str) == S_OK, "Failed to create 24-char string.\n");
+        prv = CONTAINING_RECORD(str, struct hstring_private, header);
+        ok(prv->header.flags == 0, "Expected 0 flags, got %#x.\n", prv->header.flags);
+        ok(prv->header.length == 24, "Expected length 24, got %u.\n", prv->header.length);
+        ok(prv->header.str == prv->buffer, "Expected str to point at buffer, got %p.\n", prv->header.str);
+        ok(prv->refcount == 1, "Expected refcount 1, got %lu.\n", prv->refcount);
+        ok(wcscmp(str24, prv->buffer) == 0, "Expected strings to match.\n");
+        ok(prv->buffer[24] == '\0', "Expected null termination.\n");
+        ok(WindowsDeleteString(str) == S_OK, "Failed to delete string.\n");
+    }
+
+    /* Test string beyond inline limit (40 WCHARs) */
+    {
+        static const WCHAR str40[] = L"0123456789012345678901234567890123456789";
+        ok(WindowsCreateString(str40, 40, &str) == S_OK, "Failed to create 40-char string.\n");
+        prv = CONTAINING_RECORD(str, struct hstring_private, header);
+        ok(prv->header.flags == 0, "Expected 0 flags, got %#x.\n", prv->header.flags);
+        ok(prv->header.length == 40, "Expected length 40, got %u.\n", prv->header.length);
+        ok(prv->header.str == prv->buffer, "Expected str to point at buffer, got %p.\n", prv->header.str);
+        ok(prv->refcount == 1, "Expected refcount 1, got %lu.\n", prv->refcount);
+        ok(wcscmp(str40, prv->buffer) == 0, "Expected strings to match.\n");
+        ok(prv->buffer[40] == '\0', "Expected null termination.\n");
+        ok(WindowsDeleteString(str) == S_OK, "Failed to delete string.\n");
+    }
 }
 
 static void * WINAPI user_allocate(SIZE_T size)
