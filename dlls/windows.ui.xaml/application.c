@@ -21,8 +21,69 @@
 #include <string.h>
 
 #include "private.h"
+#include "windows.applicationmodel.activation.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
+
+struct application
+{
+    IApplication IApplication_iface;
+    IInspectable inner_iface;
+    LONG ref;
+    IInspectable *outer;
+    IInspectable *resources;   /* lazy Windows.Foundation.Collections.PropertySet for the Resources QI set */
+};
+static struct application *current_application;
+
+static HRESULT WINAPI app_view_activated_QueryInterface(
+    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *iface,
+    REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI app_view_activated_AddRef(
+    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *iface )
+{ return 2; }
+static ULONG WINAPI app_view_activated_Release(
+    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *iface )
+{ return 1; }
+
+static HRESULT WINAPI app_view_activated_Invoke(
+    __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *iface,
+    ICoreApplicationView *sender,
+    __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args )
+{
+    TRACE( "sender %p, args %p, current_application %p\n", sender, args, current_application );
+    if (current_application && current_application->outer)
+    {
+        void **vtbl = *(void ***)current_application->outer;
+        HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)vtbl[7];
+        TRACE( "invoking App OnLaunched %p (outer %p, args %p)\n",
+               on_launched, current_application->outer, args );
+        if (on_launched) on_launched( current_application->outer, args );
+    }
+    return S_OK;
+}
+
+static const struct __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgsVtbl
+app_view_activated_vtbl =
+{
+    app_view_activated_QueryInterface,
+    app_view_activated_AddRef,
+    app_view_activated_Release,
+    app_view_activated_Invoke,
+};
+
+static __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs
+app_view_activated_handler = { &app_view_activated_vtbl };
 
 /* The class activation interface IID of Windows.UI.Xaml.Application (the
  * Windows.UI.Xaml.Application "activatable" interface; the WinUI3 projection
@@ -162,11 +223,17 @@ static HRESULT WINAPI view_GetTrustLevel( IFrameworkView *iface, TrustLevel *tru
 static HRESULT WINAPI view_Initialize( IFrameworkView *iface, ICoreApplicationView *application_view )
 {
     struct framework_view *impl = impl_from_IFrameworkView( iface );
+    EventRegistrationToken token;
 
     TRACE( "iface %p, application_view %p.\n", iface, application_view );
 
     impl->owner_tid = GetCurrentThreadId();
     impl->state = VIEW_STATE_INITIALIZED;
+
+    if (application_view)
+    {
+        ICoreApplicationView_add_Activated( application_view, &app_view_activated_handler, &token );
+    }
     return S_OK;
 }
 
@@ -417,15 +484,6 @@ static const struct IFrameworkViewSourceVtbl view_source_vtbl =
 };
 
 /* Application instance implementation */
-struct application
-{
-    IApplication IApplication_iface;
-    IInspectable inner_iface;
-    LONG ref;
-    IInspectable *outer;
-    IInspectable *resources;   /* lazy Windows.Foundation.Collections.PropertySet for the Resources QI set */
-};
-
 static inline struct application *impl_from_IApplication( IApplication *iface )
 {
     return CONTAINING_RECORD( iface, struct application, IApplication_iface );
@@ -918,8 +976,6 @@ static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
  * way the runtime's static Current field binds it; the managed startup caches the
  * answer into a GC handle slot — a NULL here becomes a -1 sentinel the Redhawk GC card
  * scan later dereferences (mrt100_app+0x522c3 pair). */
-static struct application *current_application;   /* strong ref, process singleton */
-
 static HRESULT WINAPI application_statics_get_Current( IApplicationStatics *iface,
         IApplication **current )
 {
