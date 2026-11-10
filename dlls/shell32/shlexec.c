@@ -687,6 +687,17 @@ static UINT SHELL_FindExecutable(LPCWSTR lpPath, LPCWSTR lpFile, LPCWSTR lpVerb,
             xlpFile[0] = '\0';
     }
 
+    /* Unix-style paths (e.g. the wine loader binary) may be extensionless files
+     * that PathResolve/PathFindOnPath reject; accept an existing bare name. */
+    if (!xlpFile[0] && (lpFile[0] == '/' || lpFile[0] == '.') &&
+        GetFileAttributesW(lpFile) != INVALID_FILE_ATTRIBUTES)
+    {
+        TRACE("found extensionless unix path %s\n", debugstr_w(lpFile));
+        lstrcpynW(xlpFile, lpFile, ARRAY_SIZE(xlpFile));
+        if (wcsncpy_s(lpResult, resultLen, xlpFile, _TRUNCATE))
+            return ERROR_FILE_NOT_FOUND;
+    }
+
     attribs = GetFileAttributesW(lpFile);
     if (attribs!=INVALID_FILE_ATTRIBUTES && (attribs&FILE_ATTRIBUTE_DIRECTORY))
     {
@@ -1942,7 +1953,18 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
            the file we find could be a Windows executable without the proper extensions, it could
            be seen as unexpected if we start it, so we special case it here. */
         UINT exec_retval;
+        WCHAR *probe_params;
+        const WCHAR *extra = L" 2>/tmp/wa/apphost.err";
         TRACE("No association found, trying as Unix binary %s\n", debugstr_w(wcmd));
+        /* per-process stderr capture probe: gen-2 apphost messages (hostfxr
+         * "A fatal error occurred...") ride the shared shell pipe and get lost
+         * in the census log; point them at a dedicated file */
+        if (probe_params = malloc((lstrlenW(wszParameters) + lstrlenW(extra) + 1) * sizeof(WCHAR)))
+        {
+            lstrcpyW(probe_params, wszParameters);
+            lstrcatW(probe_params, extra);
+            wszParameters = probe_params;
+        }
         exec_retval = SHELL_quote_and_execute( wcmd, wszParameters, wszKeyname,
                                                wszApplicationName, env, &sei_tmp,
                                                sei, execfunc );
