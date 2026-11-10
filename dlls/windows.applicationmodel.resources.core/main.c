@@ -5108,10 +5108,37 @@ static const WCHAR *mrtcore_tail( const WCHAR *name )
  * non-empty pinned handle on both passes: the settled e0434352/c0000602 pair
  * completes and the culture walk re-enters toward the Map plane.
  */
+/* Redhawk GC handle cell allocator:
+ * In Redhawk, GCHandle slots are evaluated by the write barrier RhpAssignRef
+ * (mrt100_app+0x52288) using the 64KB card formula:
+ *   rsi = (rcx & ~0xffff) + ((movzwl(cx) - 0x1000) >> 7)
+ * If the cell address has (rcx & 0xffff) < 0x1000 (such as static variables in .bss),
+ * the subtraction underflows 64-bit to 0xffffffffffff... and computes an address
+ * at 32 TB (0x0200000000000000 + base), causing an instant access violation at 0x522c3.
+ * We allocate cells from a 64KB VirtualAlloc block at or above offset 0x1000, with
+ * the first 4KB (0x0000..0x0fff) serving as the clean card table.
+ */
+static UINT_PTR *alloc_gchandle_cell(void)
+{
+    static char *cell_pool;
+    static size_t cell_offset = 0x1000;
+    UINT_PTR *cell;
+
+    if (!cell_pool)
+    {
+        cell_pool = VirtualAlloc( NULL, 0x10000, MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE );
+        if (!cell_pool) return NULL;
+    }
+    if (cell_offset + 16 > 0x10000) return NULL;
+    cell = (UINT_PTR *)(cell_pool + cell_offset);
+    cell_offset += 16;
+    return cell;
+}
+
 static void mrm_prearm_pinbuffer(void)
 {
     static HMODULE hmod;
-    static UINT_PTR cell_store[2];
+    static UINT_PTR *cell_store;
     static void *cell;
     unsigned char *base;
     UINT_PTR *slot, *fake;
@@ -5136,6 +5163,8 @@ static void mrm_prearm_pinbuffer(void)
         unsigned char *payload = (unsigned char *)(fake + 2);
         memcpy( payload, enus, sizeof(enus) );
     }
+    cell_store = alloc_gchandle_cell();
+    if (!cell_store) return;
     cell_store[0] = (UINT_PTR)fake;         /* PinnedObjectHandle::m_object */
     cell_store[1] = 0;
     cell = cell_store;
@@ -5149,44 +5178,29 @@ static void mrm_prearm_pinbuffer(void)
      * GCHandle statics with the same fake-System.Byte[] cell shape, one
      * dedicated fake per slot from the .bss holes. */
     {
-        static UINT_PTR cell_wer1[2], cell_wer2[2];
         UINT_PTR *fakes[2] = { (UINT_PTR *)(base + 0x55df78),
                                (UINT_PTR *)(base + 0x55df90) };
-        UINT_PTR *cells[2] = { cell_wer1, cell_wer2 };
         int n;
         for (n = 0; n < 2; n++)
         {
             UINT_PTR *ws = (UINT_PTR *)(base + 0x55de38) + n * 2;
+            UINT_PTR *c;
             if (*ws) continue;
+            c = alloc_gchandle_cell();
+            if (!c) continue;
             fakes[n][0] = (UINT_PTR)(base + 0xe0f80);
             fakes[n][1] = 1;
-            cells[n][0] = (UINT_PTR)fakes[n];
-            cells[n][1] = 0;
-            *ws = (UINT_PTR)cells[n] | 1;
+            c[0] = (UINT_PTR)fakes[n];
+            c[1] = 0;
+            *ws = (UINT_PTR)c | 1;
             TRACE("prearm pinbuffer wer-slot %p armed\n", ws);
         }
     }
 }
 
-/* WER-buffer GCHandle pre-arm (inflate-plateau wave, 2026-11-08).
- *
- * The WER publish reads its data-buffer pinning handle right after
- * PalSetWerDataBuffer; when that GCHandle static is null, .NET GCHandle
- * .value = IntPtr(-1) and the Redhawk write-barrier card helper
- * (mrt100_app+0x522c3) computes the card address from rcx = -1 and faults
- * reading 0xffffffffffffffff.  The SEH/VEH chain replays the buffer-as-code
- * stub into the MSZip inflate (z_stream.next_in = frozen ref 0x1801020001):
- * 18.9k identical AV pairs (plateau).  Null GCHandle statics live in the
- * SharedLibrary .bss beside s_ExceptionInfoBufferPinningHandle
- * (base+0x55de30, armed by mrm_prearm_pinbuffer): arm every qword == -1 in
- * the neighborhood with a wine-heap PinnedObjectHandle cell over a fake
- * System.Byte[], the same shape proven for the pinbuffer.
- */
 static void mrm_prearm_werhandle(void)
 {
     static HMODULE hmod;
-    static UINT_PTR cell_wer[2];
-    static UINT_PTR cell_arena[2];
     unsigned char *base;
     UINT_PTR *p;
     int armed = 0;
@@ -5196,24 +5210,16 @@ static void mrm_prearm_werhandle(void)
 
     for (p = (UINT_PTR *)(base + 0x55de00); p < (UINT_PTR *)(base + 0x55de80); p++)
     {
+        UINT_PTR *c;
         if (*p != (UINT_PTR)-1) continue;
-        if (armed == 0)
-        {
-            p[1] = (UINT_PTR)(base + 0xe0f80);   /* EEType_System::Byte[] */
-            p[2] = 1;                            /* Length */
-            cell_wer[0] = (UINT_PTR)(p + 1);     /* m_object = the fake inline */
-            cell_wer[1] = 0;
-            *p = (UINT_PTR)cell_wer | 1;
-        }
-        else if (armed == 1)
-        {
-            p[1] = (UINT_PTR)(base + 0xe0f80);
-            p[2] = 1;
-            cell_arena[0] = (UINT_PTR)(p + 1);
-            cell_arena[1] = 0;
-            *p = (UINT_PTR)cell_arena | 1;
-        }
-        else return;
+        if (armed >= 2) return;
+        c = alloc_gchandle_cell();
+        if (!c) return;
+        p[1] = (UINT_PTR)(base + 0xe0f80);   /* EEType_System::Byte[] */
+        p[2] = 1;                            /* Length */
+        c[0] = (UINT_PTR)(p + 1);            /* m_object = the fake inline */
+        c[1] = 0;
+        *p = (UINT_PTR)c | 1;
         TRACE("prearm werhandle slot %p armed\n", p);
         armed++;
     }
@@ -5289,7 +5295,7 @@ static void mrm_prearm_arena(void)
  * shape: cell -> fake System.Byte[] over SharedLibrary's EEType) so the
  * pass-2 barrier target is committed and never -1. */
 static UINT_PTR mrm_wer_fake[2];
-static UINT_PTR mrm_wer_cell[2];
+static UINT_PTR *mrm_wer_cell;
 static void (WINAPI *mrm_wer_native)(void *, void *, void **);
 
 static HRESULT WINAPI mrm_wer_set_buffer( void *iface, void *buffer, void **out )
@@ -5299,7 +5305,7 @@ static HRESULT WINAPI mrm_wer_set_buffer( void *iface, void *buffer, void **out 
         HRESULT (WINAPI *fn)( void *, void *, void ** ) = (void *)mrm_wer_native;
         fn( iface, buffer, out );             /* store buffer, out = old g */
     }
-    if (out && !*out && mrm_wer_cell[0])
+    if (out && !*out && mrm_wer_cell && mrm_wer_cell[0])
         *out = (void *)((UINT_PTR)mrm_wer_cell | 1);  /* first publish: stable handle, never -1 */
     return 0;                                 /* S_OK */
 }
@@ -5333,12 +5339,16 @@ static void mrm_prearm_werfacade(void)
         return;
     }
     mrm_wer_native = (void *)vtable[i];
-    if (!mrm_wer_cell[0] && (sl = GetModuleHandleA("SharedLibrary.dll")))
+    if (!mrm_wer_cell && (sl = GetModuleHandleA("SharedLibrary.dll")))
     {
         mrm_wer_fake[0] = (UINT_PTR)((unsigned char *)sl + 0xe0f80);  /* EEType_System::Byte[] */
         mrm_wer_fake[1] = 1;                    /* Length: GC-scan safe */
-        mrm_wer_cell[0] = (UINT_PTR)mrm_wer_fake;  /* PinnedObjectHandle::m_object */
-        mrm_wer_cell[1] = 0;
+        mrm_wer_cell = alloc_gchandle_cell();
+        if (mrm_wer_cell)
+        {
+            mrm_wer_cell[0] = (UINT_PTR)mrm_wer_fake;  /* PinnedObjectHandle::m_object */
+            mrm_wer_cell[1] = 0;
+        }
     }
     VirtualProtect( &vtable[3], sizeof(*vtable), PAGE_READWRITE, &old );
     vtable[3] = (void *)mrm_wer_set_buffer;     /* native store + stable pass-2 handle */

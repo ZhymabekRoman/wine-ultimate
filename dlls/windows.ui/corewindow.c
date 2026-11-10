@@ -903,6 +903,10 @@ static HRESULT WINAPI core_window_Activate( ICoreWindow *iface )
         ShowWindow( impl->hwnd, SW_SHOW );
         SetForegroundWindow( impl->hwnd );
         UpdateWindow( impl->hwnd );
+        /* If window was already active, win32u set_active_window early-outs
+         * (previous == hwnd) without sending WM_ACTIVATE. Queue a synthetic
+         * WM_ACTIVATE so the CoreWindow Activated event reaches the app. */
+        PostMessageW( impl->hwnd, WM_ACTIVATE, MAKEWPARAM( WA_ACTIVE, 0 ), 0 );
     }
     return S_OK;
 }
@@ -1119,13 +1123,20 @@ static __x_ABI_CWindows_CUI_CCore_CIWindowSizeChangedEventArgs *window_size_chan
 struct window_activated_args
 {
     __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs IWindowActivatedEventArgs_iface;
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ICoreWindowEventArgs_iface;
     LONG ref;
     CoreWindowActivationState state;
+    boolean handled;
 };
 
 static inline struct window_activated_args *impl_from_IWindowActivatedEventArgs( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface )
 {
     return CONTAINING_RECORD( iface, struct window_activated_args, IWindowActivatedEventArgs_iface );
+}
+
+static inline struct window_activated_args *impl_from_ICoreWindowEventArgs( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct window_activated_args, ICoreWindowEventArgs_iface );
 }
 
 static HRESULT WINAPI window_activated_args_QueryInterface( __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *iface, REFIID iid, void **out )
@@ -1138,6 +1149,12 @@ static HRESULT WINAPI window_activated_args_QueryInterface( __x_ABI_CWindows_CUI
     {
         InterlockedIncrement( &impl->ref );
         *out = &impl->IWindowActivatedEventArgs_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICoreWindowEventArgs_iface;
         return S_OK;
     }
     *out = NULL;
@@ -1185,13 +1202,69 @@ static const struct __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgsVtbl wi
     window_activated_args_get_WindowActivationState,
 };
 
+static HRESULT WINAPI window_activated_args_core_QueryInterface( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, REFIID iid, void **out )
+{
+    struct window_activated_args *impl = impl_from_ICoreWindowEventArgs( iface );
+    return window_activated_args_QueryInterface( &impl->IWindowActivatedEventArgs_iface, iid, out );
+}
+
+static ULONG WINAPI window_activated_args_core_AddRef( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    struct window_activated_args *impl = impl_from_ICoreWindowEventArgs( iface );
+    return window_activated_args_AddRef( &impl->IWindowActivatedEventArgs_iface );
+}
+
+static ULONG WINAPI window_activated_args_core_Release( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    struct window_activated_args *impl = impl_from_ICoreWindowEventArgs( iface );
+    return window_activated_args_Release( &impl->IWindowActivatedEventArgs_iface );
+}
+
+static HRESULT WINAPI window_activated_args_core_GetIids( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, ULONG *count, IID **iids )
+{ return E_NOTIMPL; }
+
+static HRESULT WINAPI window_activated_args_core_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.WindowActivatedEventArgs", 39, name ); }
+
+static HRESULT WINAPI window_activated_args_core_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI window_activated_args_core_get_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean *value )
+{
+    struct window_activated_args *impl = impl_from_ICoreWindowEventArgs( iface );
+    if (!value) return E_POINTER;
+    *value = impl->handled;
+    return S_OK;
+}
+
+static HRESULT WINAPI window_activated_args_core_put_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean value )
+{
+    struct window_activated_args *impl = impl_from_ICoreWindowEventArgs( iface );
+    impl->handled = value;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgsVtbl window_activated_args_core_vtbl =
+{
+    window_activated_args_core_QueryInterface,
+    window_activated_args_core_AddRef,
+    window_activated_args_core_Release,
+    window_activated_args_core_GetIids,
+    window_activated_args_core_GetRuntimeClassName,
+    window_activated_args_core_GetTrustLevel,
+    window_activated_args_core_get_Handled,
+    window_activated_args_core_put_Handled,
+};
+
 static __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *window_activated_args_create( CoreWindowActivationState state )
 {
     struct window_activated_args *impl;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->IWindowActivatedEventArgs_iface.lpVtbl = &window_activated_args_vtbl;
+    impl->ICoreWindowEventArgs_iface.lpVtbl = &window_activated_args_core_vtbl;
     impl->ref = 1;
     impl->state = state;
+    impl->handled = FALSE;
     return &impl->IWindowActivatedEventArgs_iface;
 }
 
@@ -1205,6 +1278,16 @@ static HRESULT WINAPI core_window_add_Activated( ICoreWindow *iface,
     {
         __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_AddRef( handler );
         impl->activated_handler = handler;
+
+        /* If the window is already created and active/visible, the initial Win32 WM_ACTIVATE
+         * happened before the handler was registered. WinUI 3 / XAML apps wait for this
+         * activation event to proceed past early initialization. Queue a synthetic WM_ACTIVATE
+         * so the dispatcher pumps it to the newly registered handler. */
+        if (impl->hwnd && IsWindow( impl->hwnd ) && (GetActiveWindow() == impl->hwnd || IsWindowVisible( impl->hwnd )))
+        {
+            TRACE( "window %p already active/visible, posting synthetic WM_ACTIVATE.\n", impl->hwnd );
+            PostMessageW( impl->hwnd, WM_ACTIVATE, MAKEWPARAM( WA_ACTIVE, 0 ), 0 );
+        }
     }
     return S_OK;
 }
@@ -1399,6 +1482,7 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
 
     case WM_ACTIVATE:
     {
+        TRACE( "WM_ACTIVATE on tid %lu, handler %p, wparam %#lx.\n", GetCurrentThreadId(), impl ? impl->activated_handler : NULL, (long)wparam );
         if (LOWORD( wparam ) != WA_INACTIVE && impl && impl->activated_handler)
         {
             CoreWindowActivationState state = (LOWORD( wparam ) == WA_CLICKACTIVE) ?
@@ -1407,6 +1491,7 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
                 window_activated_args_create( state );
             if (args)
             {
+                TRACE( "invoking activated_handler %p with state %d\n", impl->activated_handler, state );
                 __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Invoke(
                     impl->activated_handler, &impl->ICoreWindow_iface, args );
                 __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs_Release( args );
@@ -1424,6 +1509,7 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
         /* A foreign-thread RunAsync/RunIdleAsync rides the window queue; this runs on the owner
          * thread, drained by its ProcessEvents pump. */
         struct dispatcher_post *post = (struct dispatcher_post *)lparam;
+        TRACE( "dispatcher post drained on tid %lu (post %p).\n", GetCurrentThreadId(), post );
         if (post)
         {
             void *handler = post->handler;
