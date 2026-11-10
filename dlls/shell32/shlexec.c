@@ -1970,7 +1970,7 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
                 const WCHAR *q = wcschr( p + 1, '"' );
                 len = q ? (size_t)(q + 1 - p) : lstrlenW(p);
             }
-            else len = strcspn( p, " " );
+            else len = wcscspn( p, L" " );
             memcpy( norm_params, p, len * sizeof(WCHAR) );
             norm_params[len] = 0;
             wszParameters = norm_params;

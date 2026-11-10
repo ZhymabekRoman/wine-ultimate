@@ -950,9 +950,18 @@ static BOOL load_desktop_driver( HWND hwnd )
 
     asciiz_to_unicode( driver_load_error, "The explorer process failed to start." );  /* default error */
     /* wait for graphics driver to be ready */
-    send_message( hwnd, WM_NULL, 0, 0 );
-
-    guid_atom = HandleToULong( NtUserGetProp( hwnd, prop_nameW ));
+    {
+        int retry;
+        for (retry = 0; retry < 50; retry++)
+        {
+            send_message( hwnd, WM_NULL, 0, 0 );
+            if ((guid_atom = HandleToULong( NtUserGetProp( hwnd, prop_nameW ) ))) break;
+            {
+                LARGE_INTEGER timeout = {.QuadPart = -1000000}; /* 100ms */
+                NtDelayExecution( FALSE, &timeout );
+            }
+        }
+    }
     memcpy( key, guid_key_prefixW, sizeof(guid_key_prefixW) );
     ptr = key + ARRAYSIZE(guid_key_prefixW);
     if (NtQueryInformationAtom( guid_atom, AtomBasicInformation, buf, sizeof(buf), NULL ))
