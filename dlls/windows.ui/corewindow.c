@@ -893,6 +893,7 @@ static HRESULT WINAPI core_window_get_Visible( ICoreWindow *iface, boolean *valu
     return S_OK;
 }
 static __x_ABI_CWindows_CUI_CCore_CIVisibilityChangedEventArgs *visibility_changed_args_create( boolean visible );
+static void core_window_deliver_activation( struct core_window *impl, CoreWindowActivationState state );
 
 static HRESULT WINAPI core_window_Activate( ICoreWindow *iface )
 {
@@ -905,8 +906,10 @@ static HRESULT WINAPI core_window_Activate( ICoreWindow *iface )
         UpdateWindow( impl->hwnd );
         /* If window was already active, win32u set_active_window early-outs
          * (previous == hwnd) without sending WM_ACTIVATE. Queue a synthetic
-         * WM_ACTIVATE so the CoreWindow Activated event reaches the app. */
+         * WM_ACTIVATE and deliver the activation event to the subscriber. */
         PostMessageW( impl->hwnd, WM_ACTIVATE, MAKEWPARAM( WA_ACTIVE, 0 ), 0 );
+        if (impl->activated_handler)
+            core_window_deliver_activation( impl, CoreWindowActivationState_CodeActivated );
     }
     return S_OK;
 }
@@ -1268,6 +1271,19 @@ static __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *window_activated_a
     return &impl->IWindowActivatedEventArgs_iface;
 }
 
+static void core_window_deliver_activation( struct core_window *impl, CoreWindowActivationState state )
+{
+    __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *args;
+
+    if (!impl || !impl->activated_handler) return;
+    if (!(args = window_activated_args_create( state ))) return;
+
+    TRACE( "invoking activated_handler %p with state %d\n", impl->activated_handler, state );
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Invoke(
+        impl->activated_handler, &impl->ICoreWindow_iface, args );
+    __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs_Release( args );
+}
+
 static HRESULT WINAPI core_window_add_Activated( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs *handler, EventRegistrationToken *cookie )
 {
@@ -1279,13 +1295,16 @@ static HRESULT WINAPI core_window_add_Activated( ICoreWindow *iface,
         __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_AddRef( handler );
         impl->activated_handler = handler;
 
-        /* If the window is already created and active/visible, the initial Win32 WM_ACTIVATE
+        /* If the window is already created and active/foreground, the initial Win32 WM_ACTIVATE
          * happened before the handler was registered. WinUI 3 / XAML apps wait for this
-         * activation event to proceed past early initialization. Queue a synthetic WM_ACTIVATE
-         * so the dispatcher pumps it to the newly registered handler. */
-        if (impl->hwnd && IsWindow( impl->hwnd ) && (GetActiveWindow() == impl->hwnd || IsWindowVisible( impl->hwnd )))
+         * activation event to proceed past early initialization. Deliver synthetic activation
+         * immediately so the subscriber receives the event without waiting for a message. */
+        if (impl->hwnd && IsWindow( impl->hwnd ) &&
+            (GetActiveWindow() == impl->hwnd || GetForegroundWindow() == impl->hwnd || IsWindowVisible( impl->hwnd )))
         {
-            TRACE( "window %p already active/visible, posting synthetic WM_ACTIVATE.\n", impl->hwnd );
+            TRACE( "window %p already active/foreground (%p/%p), delivering synthetic activation.\n",
+                   impl->hwnd, GetActiveWindow(), GetForegroundWindow() );
+            core_window_deliver_activation( impl, CoreWindowActivationState_CodeActivated );
             PostMessageW( impl->hwnd, WM_ACTIVATE, MAKEWPARAM( WA_ACTIVE, 0 ), 0 );
         }
     }
@@ -1487,15 +1506,7 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
         {
             CoreWindowActivationState state = (LOWORD( wparam ) == WA_CLICKACTIVE) ?
                 CoreWindowActivationState_PointerActivated : CoreWindowActivationState_CodeActivated;
-            __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs *args =
-                window_activated_args_create( state );
-            if (args)
-            {
-                TRACE( "invoking activated_handler %p with state %d\n", impl->activated_handler, state );
-                __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Invoke(
-                    impl->activated_handler, &impl->ICoreWindow_iface, args );
-                __x_ABI_CWindows_CUI_CCore_CIWindowActivatedEventArgs_Release( args );
-            }
+            core_window_deliver_activation( impl, state );
         }
         return DefWindowProcW( hwnd, msg, wparam, lparam );
     }
