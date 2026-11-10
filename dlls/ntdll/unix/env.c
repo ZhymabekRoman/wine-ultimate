@@ -1980,7 +1980,6 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
                 for (i = 0; i < (int)len; i++) buf[i + 1] = (char)dos[i];
                 buf[len + 1] = '"';
                 buf[len + 2] = 0;
-                free( main_argv[1] );
                 main_argv[1] = buf;
                 if (main_argc > 2)  /* drop loader-path copies, app is the last argv entry */
                 {
