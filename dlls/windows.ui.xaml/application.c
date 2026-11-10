@@ -736,6 +736,431 @@ static inline struct application_factory *impl_from_IApplicationFactory( IApplic
     return CONTAINING_RECORD( iface, struct application_factory, IApplicationFactory_iface );
 }
 
+/* Windows.UI.Xaml.Window implementation */
+static const GUID IID_IWindowStatics =
+    { 0x93bbe361, 0xbe5a, 0x4ee3, { 0xb4, 0xa3, 0x95, 0x11, 0x8d, 0xc9, 0x7a, 0x89 } };
+static const GUID IID_IWindow =
+    { 0x3962666a, 0x3605, 0x49be, { 0x88, 0x54, 0x44, 0x2a, 0x8b, 0x8c, 0xcd, 0xec } };
+
+struct xaml_window
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    IInspectable *content;
+    ICoreWindow *core_window;
+};
+
+static ICoreWindow *get_current_core_window(void)
+{
+    IActivationFactory *cwf = NULL;
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic *cws = NULL;
+    __x_ABI_CWindows_CUI_CCore_CICoreWindow *cw = NULL;
+    HSTRING class_id = NULL;
+
+    WindowsCreateString( RuntimeClass_Windows_UI_Core_CoreWindow,
+                         wcslen( RuntimeClass_Windows_UI_Core_CoreWindow ), &class_id );
+    if (SUCCEEDED(RoGetActivationFactory( class_id, &IID_IActivationFactory, (void **)&cwf )) && cwf)
+    {
+        IActivationFactory_QueryInterface( cwf, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowStatic,
+                                           (void **)&cws );
+        if (cws)
+        {
+            __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_GetForCurrentThread( cws, &cw );
+            __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic_Release( cws );
+        }
+        IActivationFactory_Release( cwf );
+    }
+    WindowsDeleteString( class_id );
+    return cw;
+}
+
+static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IWindow ))
+    {
+        *out = &impl->IInspectable_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    /* Mcg projection queries interfaces on Window instance; return IInspectable face */
+    *out = &impl->IInspectable_iface;
+    IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+
+static ULONG WINAPI xaml_window_AddRef( IInspectable *iface )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
+    return ref;
+}
+
+static ULONG WINAPI xaml_window_Release( IInspectable *iface )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    TRACE( "iface %p, ref %lu.\n", iface, ref );
+    return ref;
+}
+
+static HRESULT WINAPI xaml_window_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Window", 21, name );
+}
+
+static HRESULT WINAPI xaml_window_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_get_Bounds( IInspectable *iface, void *a2, void *a3 )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    Rect *value = (Rect *)a2;
+    ICoreWindow *cw = NULL;
+
+    if (!value) value = (Rect *)a3;
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    cw = impl->core_window;
+    if (cw && value) return ICoreWindow_get_Bounds( cw, value );
+    if (value)
+    {
+        value->X = 0; value->Y = 0;
+        value->Width = 1024; value->Height = 768;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_get_Visible( IInspectable *iface, void *a2, void *a3 )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    boolean *value = (boolean *)a2;
+    ICoreWindow *cw = NULL;
+
+    if (!value) value = (boolean *)a3;
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    cw = impl->core_window;
+    if (cw && value) return ICoreWindow_get_Visible( cw, value );
+    if (value) *value = TRUE;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_get_Content( IInspectable *iface, void *a2, void *a3 )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    IInspectable **value = (IInspectable **)a2;
+
+    if (!value) value = (IInspectable **)a3;
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (value)
+    {
+        *value = impl->content;
+        if (*value) IInspectable_AddRef( *value );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_put_Content( IInspectable *iface, void *a2, void *a3 )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    IInspectable *content = (IInspectable *)a2;
+
+    if (!content) content = (IInspectable *)a3;
+    TRACE( "iface %p, content %p\n", iface, content );
+    if (impl->content) IInspectable_Release( impl->content );
+    impl->content = content;
+    if (impl->content) IInspectable_AddRef( impl->content );
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_get_CoreWindow( IInspectable *iface, void *a2, void *a3 )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    ICoreWindow **value = (ICoreWindow **)a2;
+
+    if (!value) value = (ICoreWindow **)a3;
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    if (value)
+    {
+        *value = impl->core_window;
+        if (*value) ICoreWindow_AddRef( *value );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_get_Dispatcher( IInspectable *iface, void *a2, void *a3 )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    ICoreDispatcher **value = (ICoreDispatcher **)a2;
+    ICoreWindow *cw = NULL;
+    HRESULT hr = S_OK;
+
+    if (!value) value = (ICoreDispatcher **)a3;
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    cw = impl->core_window;
+    if (cw && value)
+    {
+        hr = ICoreWindow_get_Dispatcher( cw, value );
+    }
+    else if (value) *value = NULL;
+    return hr;
+}
+
+static HRESULT WINAPI xaml_window_add_Activated( IInspectable *iface, void *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p\n", iface, handler );
+    if (token) token->value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_remove_Activated( IInspectable *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_add_Closed( IInspectable *iface, void *handler, EventRegistrationToken *token )
+{
+    if (token) token->value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_remove_Closed( IInspectable *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_add_SizeChanged( IInspectable *iface, void *handler, EventRegistrationToken *token )
+{
+    if (token) token->value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_remove_SizeChanged( IInspectable *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_add_VisibilityChanged( IInspectable *iface, void *handler, EventRegistrationToken *token )
+{
+    if (token) token->value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_remove_VisibilityChanged( IInspectable *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    ICoreWindow *cw = NULL;
+    TRACE( "iface %p\n", iface );
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    cw = impl->core_window;
+    if (cw) ICoreWindow_Activate( cw );
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_Close( IInspectable *iface )
+{
+    struct xaml_window *impl = (struct xaml_window *)iface;
+    ICoreWindow *cw = NULL;
+    TRACE( "iface %p\n", iface );
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    cw = impl->core_window;
+    if (cw) ICoreWindow_Close( cw );
+    return S_OK;
+}
+
+struct xaml_window_vtbl_type
+{
+    /* 0..5: IInspectable */
+    HRESULT (WINAPI *QueryInterface)(IInspectable *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(IInspectable *);
+    ULONG (WINAPI *Release)(IInspectable *);
+    HRESULT (WINAPI *GetIids)(IInspectable *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(IInspectable *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(IInspectable *, TrustLevel *);
+    /* 6..21: IWindow */
+    HRESULT (WINAPI *get_Bounds)(IInspectable *, void *, void *);
+    HRESULT (WINAPI *get_Visible)(IInspectable *, void *, void *);
+    HRESULT (WINAPI *get_Content)(IInspectable *, void *, void *);
+    HRESULT (WINAPI *put_Content)(IInspectable *, void *, void *);
+    HRESULT (WINAPI *get_CoreWindow)(IInspectable *, void *, void *);
+    HRESULT (WINAPI *get_Dispatcher)(IInspectable *, void *, void *);
+    HRESULT (WINAPI *add_Activated)(IInspectable *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_Activated)(IInspectable *, EventRegistrationToken);
+    HRESULT (WINAPI *add_Closed)(IInspectable *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_Closed)(IInspectable *, EventRegistrationToken);
+    HRESULT (WINAPI *add_SizeChanged)(IInspectable *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_SizeChanged)(IInspectable *, EventRegistrationToken);
+    HRESULT (WINAPI *add_VisibilityChanged)(IInspectable *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_VisibilityChanged)(IInspectable *, EventRegistrationToken);
+    HRESULT (WINAPI *Activate)(IInspectable *);
+    HRESULT (WINAPI *Close)(IInspectable *);
+    void *pad[10];
+};
+
+static const struct xaml_window_vtbl_type xaml_window_vtbl =
+{
+    xaml_window_QueryInterface,
+    xaml_window_AddRef,
+    xaml_window_Release,
+    xaml_window_GetIids,
+    xaml_window_GetRuntimeClassName,
+    xaml_window_GetTrustLevel,
+    xaml_window_get_Bounds,
+    xaml_window_get_Visible,
+    xaml_window_get_Content,
+    xaml_window_put_Content,
+    xaml_window_get_CoreWindow,
+    xaml_window_get_Dispatcher,
+    xaml_window_add_Activated,
+    xaml_window_remove_Activated,
+    xaml_window_add_Closed,
+    xaml_window_remove_Closed,
+    xaml_window_add_SizeChanged,
+    xaml_window_remove_SizeChanged,
+    xaml_window_add_VisibilityChanged,
+    xaml_window_remove_VisibilityChanged,
+    xaml_window_Activate,
+    xaml_window_Close,
+};
+
+static struct xaml_window global_xaml_window =
+{
+    {(const struct IInspectableVtbl *)&xaml_window_vtbl},
+    1,
+    NULL,
+    NULL,
+};
+
+/* IWindowStatics implementation */
+struct window_statics
+{
+    IActivationFactory IActivationFactory_iface;
+    LONG ref;
+};
+
+static HRESULT WINAPI window_statics_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IWindowStatics ))
+    {
+        *out = iface;
+        IActivationFactory_AddRef( iface );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI window_statics_AddRef( IActivationFactory *iface )
+{
+    struct window_statics *impl = CONTAINING_RECORD( iface, struct window_statics, IActivationFactory_iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI window_statics_Release( IActivationFactory *iface )
+{
+    struct window_statics *impl = CONTAINING_RECORD( iface, struct window_statics, IActivationFactory_iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI window_statics_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI window_statics_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Xaml.Window", 21, name ); }
+static HRESULT WINAPI window_statics_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI window_statics_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = (IInspectable *)&global_xaml_window.IInspectable_iface;
+    IInspectable_AddRef( *instance );
+    return S_OK;
+}
+
+static HRESULT WINAPI window_statics_get_Current( void *iface, void *a2, void *a3 )
+{
+    void **value = (void **)a2;
+    TRACE( "iface %p, a2 %p, a3 %p.\n", iface, a2, a3 );
+    if (!value) value = (void **)a3;
+    if (value)
+    {
+        *value = (void *)&global_xaml_window.IInspectable_iface;
+        IInspectable_AddRef( (IInspectable *)*value );
+    }
+    return S_OK;
+}
+
+struct window_statics_extended_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IActivationFactory *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(IActivationFactory *);
+    ULONG (WINAPI *Release)(IActivationFactory *);
+    HRESULT (WINAPI *GetIids)(IActivationFactory *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(IActivationFactory *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(IActivationFactory *, TrustLevel *);
+    HRESULT (WINAPI *get_Current)(void *, void *, void *);
+    HRESULT (WINAPI *ActivateInstance)(IActivationFactory *, IInspectable **);
+    void *pad[8];
+};
+
+static const struct window_statics_extended_vtbl window_statics_vtbl =
+{
+    window_statics_QueryInterface,
+    window_statics_AddRef,
+    window_statics_Release,
+    window_statics_GetIids,
+    window_statics_GetRuntimeClassName,
+    window_statics_GetTrustLevel,
+    window_statics_get_Current,
+    window_statics_ActivateInstance,
+};
+
+static struct window_statics window_statics_obj =
+{
+    {(const struct IActivationFactoryVtbl *)&window_statics_vtbl},
+    1,
+};
+
+IActivationFactory *window_factory = &window_statics_obj.IActivationFactory_iface;
+
 static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
     struct application_factory *impl = impl_from_IActivationFactory( iface );
@@ -774,6 +1199,13 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     {
         *out = &impl->IApplicationFactory_iface;
         IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWindowStatics ))
+    {
+        *out = window_factory;
+        IActivationFactory_AddRef( (IActivationFactory *)*out );
         return S_OK;
     }
 

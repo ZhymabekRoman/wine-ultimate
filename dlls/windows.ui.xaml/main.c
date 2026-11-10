@@ -37,6 +37,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Application" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Application" ))
         IActivationFactory_QueryInterface( application_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Window" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Window" ))
+        IActivationFactory_QueryInterface( window_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;
