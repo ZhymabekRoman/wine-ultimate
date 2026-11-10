@@ -164,6 +164,10 @@ static HRESULT create_channel_op( IAsyncOperation_PushNotificationChannel **oper
     return S_OK;
 }
 
+/*
+ * PushNotificationChannelManager::CreatePushNotificationChannelForApplicationAsync:
+ * Yields completed IAsyncOperation with mock IPushNotificationChannel.
+ */
 static HRESULT WINAPI statics_CreatePushNotificationChannelForApplicationAsync(
         IPushNotificationChannelManagerStatics *iface, IAsyncOperation_PushNotificationChannel **operation )
 {

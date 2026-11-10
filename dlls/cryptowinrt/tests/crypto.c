@@ -1220,7 +1220,7 @@ static void test_DataProtectionProvider(void)
     buffer_statics = get_cryptobuffer_statics();
     buffer = create_buffer( buffer_statics, payload, sizeof(payload) );
 
-    /* ProtectAsync is a passthrough for the local security descriptor */
+    /* ProtectAsync protects the buffer with DPAPI */
     protected_buf = NULL;
     hr = IDataProtectionProvider_ProtectAsync( provider, buffer, &async );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
@@ -1237,7 +1237,7 @@ static void test_DataProtectionProvider(void)
     hr = IAsyncOperation_IBuffer_GetResults( async, &protected_buf );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     ok( protected_buf != NULL, "got buffer %p.\n", protected_buf );
-    compare_buffers( buffer_statics, buffer, protected_buf, TRUE );
+    compare_buffers( buffer_statics, buffer, protected_buf, FALSE );
     IAsyncOperation_IBuffer_Release( async );
 
     /* Completed handler is invoked for completed operations */

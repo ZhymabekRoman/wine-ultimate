@@ -1,6 +1,10 @@
 #include "private.h"
 #include "wine/debug.h"
 
+#include "roapi.h"
+#include "wincrypt.h"
+#include "robuffer.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(crypto);
 
 static const GUID IID_IDataProtectionProvider = {0x09639948, 0xed22, 0x4270, {0xbd, 0x1c, 0x6d, 0x72, 0xc0, 0x0f, 0x87, 0x87}};
@@ -420,6 +424,7 @@ struct data_protection_provider
 {
     IInspectable IInspectable_iface;
     LONG ref;
+    HSTRING descriptor;
 };
 
 static inline struct data_protection_provider *impl_from_provider( void *iface )
@@ -462,7 +467,11 @@ static ULONG WINAPI provider_Release( void *iface )
 {
     struct data_protection_provider *impl = impl_from_provider( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        WindowsDeleteString( impl->descriptor );
+        free( impl );
+    }
     return ref;
 }
 
@@ -485,20 +494,137 @@ static HRESULT WINAPI provider_GetTrustLevel( void *iface, TrustLevel *level )
     return S_OK;
 }
 
+static HRESULT create_buffer_from_bytes( const BYTE *data, UINT32 length, IBuffer **out )
+{
+    static const WCHAR *buffer_class_name = L"Windows.Storage.Streams.Buffer";
+    IBufferFactory *factory = NULL;
+    IBufferByteAccess *access = NULL;
+    IBuffer *buffer = NULL;
+    HSTRING str = NULL;
+    BYTE *dst = NULL;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    hr = WindowsCreateString( buffer_class_name, wcslen( buffer_class_name ), &str );
+    if (SUCCEEDED(hr))
+    {
+        hr = RoGetActivationFactory( str, &IID_IBufferFactory, (void **)&factory );
+        WindowsDeleteString( str );
+    }
+    if (SUCCEEDED(hr))
+    {
+        hr = IBufferFactory_Create( factory, length, &buffer );
+        IBufferFactory_Release( factory );
+    }
+    if (FAILED(hr))
+    {
+        /* Fallback to internal buffer implementation if RoGetActivationFactory fails */
+        return create_crypt_buffer( length, length, data, out );
+    }
+
+    hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access );
+    if (SUCCEEDED(hr))
+    {
+        hr = IBufferByteAccess_Buffer( access, &dst );
+        IBufferByteAccess_Release( access );
+    }
+    if (SUCCEEDED(hr))
+    {
+        if (data && length && dst) memcpy( dst, data, length );
+        hr = IBuffer_put_Length( buffer, length );
+    }
+
+    if (FAILED(hr))
+    {
+        IBuffer_Release( buffer );
+        return hr;
+    }
+
+    *out = buffer;
+    return S_OK;
+}
+
 static HRESULT WINAPI provider_ProtectAsync( void *iface, void *data, void **value )
 {
+    struct data_protection_provider *impl = impl_from_provider( iface );
+    IBuffer *src_buffer = data;
+    IBuffer *dst_buffer = NULL;
+    DATA_BLOB in, out;
+    BYTE *in_data = NULL;
+    UINT32 in_len = 0;
+    const WCHAR *desc = NULL;
+    HRESULT hr;
+
     TRACE( "iface %p, data %p, value %p\n", iface, data, value );
+
     if (!value) return E_POINTER;
-    if (!data) return E_INVALIDARG;
-    return create_async_buffer( (IInspectable *)data, value );
+    *value = NULL;
+    if (!src_buffer) return E_INVALIDARG;
+
+    if (FAILED(hr = get_buffer_data( src_buffer, &in_data, &in_len )))
+        return hr;
+
+    in.cbData = in_len;
+    in.pbData = in_len ? in_data : (BYTE *)"";
+    out.cbData = 0;
+    out.pbData = NULL;
+
+    if (impl->descriptor)
+        desc = WindowsGetStringRawBuffer( impl->descriptor, NULL );
+
+    if (!CryptProtectData( &in, desc, NULL, NULL, NULL, 0, &out ))
+    {
+        WARN( "CryptProtectData failed, error %lu\n", GetLastError() );
+        return HRESULT_FROM_WIN32( GetLastError() );
+    }
+
+    hr = create_buffer_from_bytes( out.pbData, out.cbData, &dst_buffer );
+    LocalFree( out.pbData );
+    if (FAILED(hr)) return hr;
+
+    hr = create_async_buffer( (IInspectable *)dst_buffer, value );
+    IBuffer_Release( dst_buffer );
+    return hr;
 }
 
 static HRESULT WINAPI provider_UnprotectAsync( void *iface, void *data, void **value )
 {
+    IBuffer *src_buffer = data;
+    IBuffer *dst_buffer = NULL;
+    DATA_BLOB in, out;
+    BYTE *in_data = NULL;
+    UINT32 in_len = 0;
+    HRESULT hr;
+
     TRACE( "iface %p, data %p, value %p\n", iface, data, value );
+
     if (!value) return E_POINTER;
-    if (!data) return E_INVALIDARG;
-    return create_async_buffer( (IInspectable *)data, value );
+    *value = NULL;
+    if (!src_buffer) return E_INVALIDARG;
+
+    if (FAILED(hr = get_buffer_data( src_buffer, &in_data, &in_len )))
+        return hr;
+
+    in.cbData = in_len;
+    in.pbData = in_len ? in_data : (BYTE *)"";
+    out.cbData = 0;
+    out.pbData = NULL;
+
+    if (!CryptUnprotectData( &in, NULL, NULL, NULL, NULL, 0, &out ))
+    {
+        WARN( "CryptUnprotectData failed, error %lu\n", GetLastError() );
+        return HRESULT_FROM_WIN32( GetLastError() );
+    }
+
+    hr = create_buffer_from_bytes( out.pbData, out.cbData, &dst_buffer );
+    LocalFree( out.pbData );
+    if (FAILED(hr)) return hr;
+
+    hr = create_async_buffer( (IInspectable *)dst_buffer, value );
+    IBuffer_Release( dst_buffer );
+    return hr;
 }
 
 static HRESULT WINAPI provider_ProtectStreamAsync( void *iface, void *src, void *dest, void **value )
@@ -529,12 +655,24 @@ static const void *provider_vtbl[] =
     provider_UnprotectStreamAsync,
 };
 
-static HRESULT create_provider( void **out )
+static HRESULT create_provider( HSTRING descriptor, void **out )
 {
     struct data_protection_provider *impl;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IInspectable_iface.lpVtbl = (void *)provider_vtbl;
     impl->ref = 1;
+    if (descriptor)
+    {
+        if (FAILED(hr = WindowsDuplicateString( descriptor, &impl->descriptor )))
+        {
+            free( impl );
+            return hr;
+        }
+    }
     *out = &impl->IInspectable_iface;
     return S_OK;
 }
@@ -600,7 +738,7 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
 {
     HRESULT hr;
     if (!instance) return E_POINTER;
-    hr = create_provider( (void **)instance );
+    hr = create_provider( NULL, (void **)instance );
     return hr;
 }
 
@@ -608,7 +746,7 @@ static HRESULT WINAPI factory_CreateOverloadExplicit( void *iface, HSTRING descr
 {
     HRESULT hr;
     if (!value) return E_POINTER;
-    hr = create_provider( value );
+    hr = create_provider( descriptor, value );
     return hr;
 }
 
