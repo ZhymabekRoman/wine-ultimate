@@ -64,19 +64,38 @@ static HRESULT WINAPI webview_QueryInterface( void *t, REFIID riid, void **obj )
     *obj = t;
     return S_OK;
 }
-static ULONG WINAPI webview_AddRef( void *t ) { return 2; }
-static ULONG WINAPI webview_Release( void *t ) { return 1; }
+static ULONG WINAPI webview_AddRef( void *t )
+{
+    struct webview *w = t;
+    return InterlockedIncrement( &w->ref );
+}
+
+static ULONG WINAPI webview_Release( void *t )
+{
+    struct webview *w = t;
+    ULONG ref = InterlockedDecrement( &w->ref );
+    if (!ref)
+    {
+        CoTaskMemFree( w->source );
+        HeapFree( GetProcessHeap(), 0, (void *)w->vtbl );
+        HeapFree( GetProcessHeap(), 0, w );
+    }
+    return ref;
+}
 
 static HRESULT WINAPI webview_Navigate( void *t, LPCWSTR uri, void *handler )
 {
     struct webview *w = t;
-    void **vt = *(void ***)handler;
-    HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
 
     WARN( "NAVIGATE %s\n", debugstr_w( uri ) );
     CoTaskMemFree( w->source );
     w->source = dup_wstr( uri );
-    if (handler) invoke( handler, S_OK, NULL );
+    if (handler)
+    {
+        void **vt = *(void ***)handler;
+        HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
+        invoke( handler, S_OK, NULL );
+    }
     return S_OK;
 }
 
@@ -317,13 +336,15 @@ static DWORD WINAPI mojo_watchdog( LPVOID arg )
 
 static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
 {
-    WCHAR exe[MAX_PATH], args[1024], root[MAX_PATH];
+    WCHAR exe[MAX_PATH], args[1024], root[MAX_PATH], module_path[MAX_PATH];
+    const WCHAR *exe_name = L"app.exe", *udd;
     static WCHAR envbuf[8192];
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     DWORD pid = GetCurrentProcessId(), tid = GetCurrentThreadId();
     LARGE_INTEGER ctr;
-    WCHAR pipe_tail[64];
+    HANDLE th;
+    WCHAR *slash;
 
     QueryPerformanceCounter( &ctr );
     if (!g_mojo.pipe)
@@ -349,10 +370,17 @@ static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
             return;
         }
 
-        /* user_data_dir = EBWebView (relative to cwd, where the probe was started) */
-        const WCHAR *udd = user_data_dir && *user_data_dir ? user_data_dir : L"EBWebView\\x64";
+        udd = user_data_dir && *user_data_dir ? user_data_dir : L"EBWebView\\x64";
+        if (GetModuleFileNameW( NULL, module_path, MAX_PATH ))
+        {
+            slash = wcsrchr( module_path, '\\' );
+            if (slash) exe_name = slash + 1;
+            else exe_name = module_path;
+        }
+
         lstrcpyW( args, L"msedgewebview2 --embedded-browser-webview=1");
-        lstrcatW( args, L" --webview-exe-name=WhatsApp.Root.exe");
+        lstrcatW( args, L" --webview-exe-name=");
+        lstrcatW( args, exe_name );
         lstrcatW( args, L" --webview-exe-version=1.0.0");
         lstrcatW( args, L" --user-data-dir=");
         lstrcatW( args, udd );
@@ -413,28 +441,10 @@ static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
             return;
         }
         CloseHandle( pi.hThread );
+        CloseHandle( pi.hProcess );
         TRACE( "spawned pid=%u\n", pi.dwProcessId );
 
-        /* control census: console child shares env + std handles */
-        {
-            STARTUPINFOW si2 = { sizeof(si2) };
-            PROCESS_INFORMATION pi2;
-            SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
-            HANDLE hf = CreateFileW( L"\\\\?\\Z:\\tmp\\wv2child_env.log",
-                    GENERIC_WRITE, 0, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
-            si2.dwFlags = STARTF_USESTDHANDLES;
-            si2.hStdError = si2.hStdOutput = hf;
-            si2.hStdInput = GetStdHandle( STD_INPUT_HANDLE );
-            if (CreateProcessW( NULL, (LPWSTR)L"cmd /c set", NULL, NULL, TRUE, 0,
-                                envbuf, NULL, &si2, &pi2 ))
-            {
-                WaitForSingleObject( pi2.hProcess, 10000 );
-                CloseHandle( pi2.hProcess );
-                CloseHandle( pi2.hThread );
-            }
-            CloseHandle( hf );
-        }
-        HANDLE th = CreateThread( NULL, 0, mojo_watchdog, NULL, 0, NULL );
+        th = CreateThread( NULL, 0, mojo_watchdog, NULL, 0, NULL );
         CloseHandle( th );
     }
 }
