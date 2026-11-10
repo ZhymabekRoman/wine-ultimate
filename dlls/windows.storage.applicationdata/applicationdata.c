@@ -437,13 +437,15 @@ static HRESULT WINAPI application_data_qi_impl( IApplicationData *iface, REFIID 
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
+    /* CoreCLR ComWrappers uses 5c13e51c-4f32-4726-a3fd-f3edd63da3a0 (IID_TaggedImpl)
+     * to test whether an incoming IUnknown is an already-wrapped managed CCW.
+     * Native COM/WinRT objects must return E_NOINTERFACE so CoreCLR creates an RCW. */
     if (IsEqualGUID( iid, &IID_IApplicationDataGetForApplication ))
     {
-        *out = &impl->IApplicationDataGetForApplication_iface;
-        IInspectable_AddRef( (IInspectable *)*out );
-        return S_OK;
+        *out = NULL;
+        return E_NOINTERFACE;
     }
-    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
     {
         *out = &appdata_tracker;
         tracker_AddRef( &appdata_tracker );
@@ -580,6 +582,12 @@ static HRESULT WINAPI container_qi_impl( IApplicationDataContainer *iface, REFII
     {
         *out = &impl->IApplicationDataContainerMethods_iface;
         InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ))
+    {
+        *out = &appdata_tracker;
+        tracker_AddRef( &appdata_tracker );
         return S_OK;
     }
     FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
