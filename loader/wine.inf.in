@@ -77,11 +77,12 @@ AddReg=\
     WinRTActivatableClasses,\
     AppModelActivation,\
     WinRTProxies,\
-    WineuwpActivation,
+    WineuwpActivation,\
     ShellWinRTActivation,\
-    ProbeClassesActivation,
+    ProbeClassesActivation,\
     DataTransferActivation,\
-    RegisteredKindActivation
+    RegisteredKindActivation,\
+    PackageIdentityTail
 
 [DefaultInstall]
 Needs=BaseInstall
@@ -668,6 +669,11 @@ HKCU,Software\Microsoft\Windows NT\CurrentVersion\AppModel\Exes\WinStore.App.exe
 HKCU,Software\Microsoft\Windows NT\CurrentVersion\AppModel\Exes\WinStore.App.exe,"PackageFullName",2,"Microsoft.WindowsStore_22401.1400.6.0_x64__8wekyb3d8bbwe"
 HKCU,Software\Microsoft\Windows NT\CurrentVersion\AppModel\Exes\WinStore.App.exe,"PackagePath",2,"Z:\home\olge\WhatsappDecompile\AppxPackages\Program Files\WindowsApps\Microsoft.WindowsStore_22401.1400.6.0_x64__8wekyb3d8bbwe"
 HKCU,Software\Microsoft\Windows NT\CurrentVersion\AppModel\Exes\WinStore.App.exe,"ApplicationUserModelId",2,"Microsoft.WindowsStore_8wekyb3d8bbwe!App"
+
+
+[PackageIdentityTail]
+HKLM,Software\Microsoft\Windows NT\CurrentVersion\AppModel\Exes\TailProbe.exe,,16
+HKLM,Software\Microsoft\Windows NT\CurrentVersion\AppModel\Exes\TailProbe.exe,"PackageFullName",2,"Microsoft.WindowsStore_22401.1400.6.0_x64__8wekyb3d8bbwe"
 
 
 ; The WinRT activation-factory proxy/stub pair.  IActivationFactory (and its base
