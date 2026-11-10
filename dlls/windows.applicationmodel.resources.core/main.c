@@ -772,11 +772,22 @@ struct str_vector
 static const WCHAR lang_enUS[] = L"en-US";
 static HSTRING_HEADER lang_header;
 
+static BOOL is_store_app(void)
+{
+    WCHAR path[MAX_PATH];
+    GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
+    return (wcsstr( path, L"WinStore" ) != NULL);
+}
+
 static inline HRESULT lang_ref_of( HSTRING item, HSTRING *out )
 {
     UINT32 len = 0;
-    const WCHAR *raw = WindowsGetStringRawBuffer( item, &len );
+    const WCHAR *raw;
 
+    if (is_store_app())
+        return WindowsDuplicateString( item, out );
+
+    raw = WindowsGetStringRawBuffer( item, &len );
     return WindowsCreateStringReference( raw, len, &lang_header, out );
 }
 
@@ -893,14 +904,17 @@ static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
      * 0x40, the cast miss fires the QI fallback and rc2 answers {9828e927}. */
     static const WCHAR mcg_key72[] = L"Windows.Storage.UserDataPaths";
 
+    if (is_store_app())
+        return className( L"Windows.Foundation.Collections.IVectorView`1<System.String>", n );
     return className( mcg_key72, n );
 }
 static HRESULT WINAPI svv_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
 static HRESULT WINAPI svv_GetAt( void *iface, UINT32 index, HSTRING *item )
 {
+    struct str_vector *impl = svv_from( iface );
 
     TRACE( "svv_GetAt %u\n", index );
-    if (!item) return E_POINTER;    struct str_vector *impl = svv_from( iface );
+    if (!item) return E_POINTER;
     if (index >= impl->count) return E_BOUNDS;
     TRACE( "svv_GetAt %u -> %s\n", index, debugstr_w( WindowsGetStringRawBuffer( impl->items[index], NULL ) ) );
     return lang_ref_of( impl->items[index], item );
@@ -3677,7 +3691,10 @@ static HRESULT WINAPI ctx_Languages( void *iface, void **out )
 {
     struct res_context *impl = ctx_from( iface );
     TRACE( "get_Languages\n" );
-    *out = &impl->languages.vt_ov;
+    if (is_store_app())
+        *out = &impl->languages.vt_vv;
+    else
+        *out = &impl->languages.vt_ov;
     incr( &impl->languages.ref );
     return S_OK;
 }
@@ -4121,6 +4138,8 @@ static HRESULT WINAPI rc2_GetRuntimeClassName( void *iface, HSTRING *n )
     static const WCHAR mcg_key_c6[] =
         L"Windows.Foundation.Collections.IObservableMap`1<System.Collections.Generic.IKeyValuePair`2<System.Collections.Generic.String,System.Collections.Generic.String>,System.Collections.Generic.IEnumerable`1<System.Collections.Generic.IKeyValuePair`2<Windows.UI.Xaml.Interop.String,System.Collections.Generic.String>>,System.Collections.Generic.IReadOnlyDictionary`2<Windows.Foundation.Diagnostics.ILoggingField,Spectro.Toml.TomlValue>,Spectro.UI.Controls.MediaDisplayInformation,Windows.ApplicationModel.Chat.ChatMessageResourceMap,Windows.ApplicationModel.Resources.Core.ResourceMap,Windows.ApplicationModel.Resources.Core.ResourceQualifierValues,Windows.Data.Text.WordSegmentResourceMap,Windows.Foundation.Diagnostics.LoggingChannelAttribute,Windows.Storage.Provider.IPropertyStore,Windows.UI.Xaml.Interop.IBindableIterable,Windows.UI.Xaml.Interop.IBindableIterator,Windows.UI.Xaml.Interop.IBindableVector,Windows.UI.Xaml.Interop.IBindableVectorView,Windows.Foundation.Diagnostics.ILoggingPropertyKeyValueInterface,Windows.UI.Xaml.Interop.IPropertyStorePropertyIterator,Windows.Foundation.Collections.IObservableVector`1<Windows.Globalization.JapanesePhonemeReading>";
 
+    if (is_store_app())
+        return className( L"Windows.ApplicationModel.Resources.Core.ResourceContext", n );
     return className( mcg_key_c6, n );
 }
 static HRESULT WINAPI rc2_GetTrustLevel( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }

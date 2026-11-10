@@ -65,10 +65,10 @@ static HRESULT WINAPI app_view_activated_Invoke(
     if (current_application && current_application->outer)
     {
         void **vtbl = *(void ***)current_application->outer;
-        HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)vtbl[7];
-        TRACE( "invoking App OnLaunched %p (outer %p, args %p)\n",
-               on_launched, current_application->outer, args );
-        if (on_launched) on_launched( current_application->outer, args );
+        HRESULT (WINAPI *on_launched)( void *, void *, void * ) = (void *)vtbl[7];
+        TRACE( "invoking App OnLaunched %p (outer %p, sender %p, args %p)\n",
+               on_launched, current_application->outer, sender, args );
+        if (on_launched) on_launched( current_application->outer, sender, args );
     }
     return S_OK;
 }
@@ -1117,13 +1117,17 @@ static HRESULT WINAPI window_statics_ActivateInstance( IActivationFactory *iface
 
 static HRESULT WINAPI window_statics_get_Current( void *iface, void *a2, void *a3 )
 {
-    void **value = (void **)a2;
     TRACE( "iface %p, a2 %p, a3 %p.\n", iface, a2, a3 );
-    if (!value) value = (void **)a3;
-    if (value)
+    /* a2 is managed in-object/context; a3 is out-pointer on stack */
+    if (a3)
     {
-        *value = (void *)&global_xaml_window.IInspectable_iface;
-        IInspectable_AddRef( (IInspectable *)*value );
+        *(void **)a3 = (void *)&global_xaml_window.IInspectable_iface;
+        IInspectable_AddRef( (IInspectable *)&global_xaml_window.IInspectable_iface );
+    }
+    else if (a2)
+    {
+        *(void **)a2 = (void *)&global_xaml_window.IInspectable_iface;
+        IInspectable_AddRef( (IInspectable *)&global_xaml_window.IInspectable_iface );
     }
     return S_OK;
 }
