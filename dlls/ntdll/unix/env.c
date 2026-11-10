@@ -1951,45 +1951,9 @@ static RTL_USER_PROCESS_PARAMETERS *build_initial_params( void **module )
     if (status)  /* try launching it through start.exe */
     {
         static const char *args[] = { "start.exe", "/exec" };
-        WCHAR *dos = NULL;  /* NT form of the app path */
-
-        if (main_argc > 2)  /* wine(1) passes loader copies; app is the last argv entry */
-        {
-            UNICODE_STRING app_name;
-            get_full_path( main_argv[main_argc - 1], curdir, &app_name );
-            dos = app_name.Buffer;
-            free( nt_name.Buffer );
-        }
-        else
-        {
-            dos = nt_name.Buffer;
-            nt_name.Buffer = NULL;
-        }
+        free( nt_name.Buffer );
         if (*module) NtUnmapViewOfSection( GetCurrentProcess(), *module );
         load_start_exe( &nt_name, module );
-        if (dos)  /* pass the app path to start.exe in quoted DOS form */
-        {
-            size_t len;
-            char *buf;
-            int i;
-            get_dos_path( dos );
-            len = wcslen( dos );
-            if ((buf = malloc( len + 3 )))
-            {
-                buf[0] = '"';
-                for (i = 0; i < (int)len; i++) buf[i + 1] = (char)dos[i];
-                buf[len + 1] = '"';
-                buf[len + 2] = 0;
-                main_argv[1] = buf;
-                if (main_argc > 2)  /* drop loader-path copies, app is the last argv entry */
-                {
-                    main_argv[2] = main_argv[main_argc - 1];
-                    main_argv[3] = NULL;
-                    main_argc = 3;
-                }
-            }
-            free( dos );
-        }
         prepend_argv( args, 2 );
     }
     else

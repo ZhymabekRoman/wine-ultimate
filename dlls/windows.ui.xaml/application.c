@@ -94,6 +94,7 @@ struct xaml_window
     ICoreWindow *core_window;
 };
 static struct xaml_window global_xaml_window;
+static BOOL lifecycle_started = FALSE;
 
 /* The class activation interface IID of Windows.UI.Xaml.Application (the
  * Windows.UI.Xaml.Application "activatable" interface; the WinUI3 projection
@@ -101,9 +102,9 @@ static struct xaml_window global_xaml_window;
  * app's Mcg binder passes it to RoGetActivationFactory. */
 static const IID IID_Windows_UI_Xaml_Application =
     { 0x06499997, 0xf7b4, 0x45fe, {0xb7, 0x63, 0x75, 0x77, 0xd1, 0xd3, 0xcb, 0x4a} };
-static const GUID IID_IApplicationFactory_WinUI =
-    { 0x93bbe361, 0xbe5a, 0x4ee3, { 0xb4, 0xa3, 0x95, 0x11, 0x8d, 0xc9, 0x7a, 0x89 } };
 static const GUID IID_IApplication_WinUI =
+    { 0x74b861a1, 0x7487, 0x46a9, { 0x9a, 0x6e, 0xc7, 0x8b, 0x51, 0x27, 0x26, 0xc5 } };
+static const GUID IID_IWindow2 =
     { 0x74b861a1, 0x7487, 0x46a9, { 0x9a, 0x6e, 0xc7, 0x8b, 0x51, 0x27, 0x26, 0xc5 } };
 static const GUID IID_IApplication_751b =
     { 0x751b792e, 0x5772, 0x4488, { 0x8b, 0x87, 0xf5, 0x47, 0xfa, 0xa6, 0x44, 0x74 } };
@@ -722,7 +723,6 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
     }
 
     if (IsEqualGUID( iid, &IID_IApplicationFactory ) ||
-        IsEqualGUID( iid, &IID_IApplicationFactory_WinUI ) ||
         IsEqualGUID( iid, &IID_IApplicationStatics ))
         return IActivationFactory_QueryInterface( application_factory, iid, out );
 
@@ -932,6 +932,8 @@ static inline struct application_factory *impl_from_IApplicationFactory( IApplic
 
 /* Windows.UI.Xaml.Window implementation */
 static const GUID IID_IWindowStatics =
+    { 0x93bbe361, 0xbe5a, 0x4ee3, { 0xb4, 0xa3, 0x95, 0x11, 0x8d, 0xc9, 0x7a, 0x89 } };
+static const GUID IID_IWindowStatics2 =
     { 0x93328409, 0x4ea1, 0x4afa, { 0x83, 0xdc, 0x0c, 0x4e, 0x73, 0xe8, 0x8b, 0xb1 } };
 static const GUID IID_IWindow =
     { 0x3276167d, 0xc9f6, 0x462d, { 0x9d, 0xe2, 0xae, 0x4c, 0x1f, 0xd8, 0xc2, 0xe5 } };
@@ -983,6 +985,14 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         IsEqualGUID( iid, &IID_IWindow_96061c05 ))
     {
         *out = &impl->IInspectable_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWindow2 ) ||
+        IsEqualGUID( iid, &IID_IApplication_WinUI ))
+    {
+        *out = &impl->IWindow2_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -1358,7 +1368,8 @@ static HRESULT WINAPI window_statics_QueryInterface( IActivationFactory *iface, 
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IWindowStatics ))
+        IsEqualGUID( iid, &IID_IWindowStatics ) ||
+        IsEqualGUID( iid, &IID_IWindowStatics2 ))
     {
         *out = iface;
         IActivationFactory_AddRef( iface );
@@ -1487,15 +1498,15 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IApplicationFactory ) ||
-        IsEqualGUID( iid, &IID_IApplicationFactory_WinUI ))
+    if (IsEqualGUID( iid, &IID_IApplicationFactory ))
     {
         *out = &impl->IApplicationFactory_iface;
         IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IWindowStatics ))
+    if (IsEqualGUID( iid, &IID_IWindowStatics ) ||
+        IsEqualGUID( iid, &IID_IWindowStatics2 ))
     {
         *out = window_factory;
         IActivationFactory_AddRef( (IActivationFactory *)*out );
@@ -1647,6 +1658,7 @@ static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
 
     if (callback)
     {
+        lifecycle_started = TRUE;
         hr = IApplicationInitializationCallback_Invoke( callback, NULL );
         TRACE( "callback->Invoke returned %#lx\n", hr );
     }
@@ -1771,8 +1783,6 @@ static HRESULT WINAPI app_factory_GetTrustLevel( IApplicationFactory *iface, Tru
     return factory_GetTrustLevel( &impl->IActivationFactory_iface, trust_level );
 }
 
-static BOOL lifecycle_started = FALSE;
-
 static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *iface,
         IInspectable *outer, IInspectable **inner, IApplication **instance )
 {
@@ -1878,7 +1888,6 @@ struct application_factory_extended_vtbl
     HRESULT (WINAPI *GetRuntimeClassName)(IApplicationFactory *, HSTRING *);
     HRESULT (WINAPI *GetTrustLevel)(IApplicationFactory *, TrustLevel *);
     HRESULT (WINAPI *CreateInstance)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
-    HRESULT (WINAPI *CreateInstance2)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
     HRESULT (WINAPI *Start)(IApplicationStatics *, IApplicationInitializationCallback *);
     HRESULT (WINAPI *get_Current)(IApplicationStatics *, IApplication **);
     void *pad[16];
@@ -1892,7 +1901,6 @@ static const struct application_factory_extended_vtbl application_factory_vtbl =
     app_factory_GetIids,
     app_factory_GetRuntimeClassName,
     app_factory_GetTrustLevel,
-    application_factory_CreateInstance,
     application_factory_CreateInstance,
     application_statics_Start,
     application_statics_get_Current,
