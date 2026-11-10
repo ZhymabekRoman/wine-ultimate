@@ -295,6 +295,7 @@ static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
         }
         else
             lstrcatW( args, L" --no-sandbox" );
+        lstrcatW( args, L" --use-angle=opengl --disable-gpu" );
         TRACE( "spawning %s\n", debugstr_w(args));
 
         /* child boot census: WINEDEBUG env into a stderr file we own */
