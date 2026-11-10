@@ -126,6 +126,7 @@ static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
 
         composition_visual->is_root = TRUE;
         IDCompositionVisual_AddRef(visual);
+        visual_tree_mark_dirty(composition_visual);
     }
 
     old_root = target->root;
@@ -170,13 +171,17 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     const WCHAR *prop;
     DWORD pid = 0;
 
+    if (!new_target)
+        return E_INVALIDARG;
+    *new_target = NULL;
+
     if (!hwnd) hwnd = FindWindowW(L"Windows.UI.Core.CoreWindow", NULL);
     if (!hwnd) hwnd = GetActiveWindow();
     if (!hwnd) hwnd = GetForegroundWindow();
     TRACE("DCOMP: create_target device %p, hwnd %p, topmost %d, new_target %p, caller %p\n",
         device, hwnd, topmost, new_target, __builtin_return_address(0));
 
-    if (!hwnd || hwnd == GetDesktopWindow() || !new_target)
+    if (!hwnd || hwnd == GetDesktopWindow())
         return E_INVALIDARG;
 
     GetWindowThreadProcessId(hwnd, &pid);
