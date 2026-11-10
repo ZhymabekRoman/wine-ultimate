@@ -72,6 +72,12 @@ static LPWSTR   (__cdecl *pwcsncpy)(LPCWSTR,LPCWSTR,int);
 
 static LPWSTR   (__cdecl *pwcschr)(LPCWSTR, WCHAR);
 static LPWSTR   (__cdecl *pwcsrchr)(LPCWSTR, WCHAR);
+static size_t   (__cdecl *pwcslen)(LPCWSTR);
+static size_t   (__cdecl *pwcsnlen)(const WCHAR *, size_t);
+static int      (__cdecl *pwcscmp)(LPCWSTR, LPCWSTR);
+static int      (__cdecl *pwcsncmp)(LPCWSTR, LPCWSTR, size_t);
+static LPWSTR   (__cdecl *pwcscpy)(LPWSTR, LPCWSTR);
+static LPWSTR   (__cdecl *pwcscat)(LPWSTR, LPCWSTR);
 static void*    (__cdecl *pmemchr)(const void*, int, size_t);
 
 static void     (__cdecl *pqsort)(void *,size_t,size_t, int(__cdecl *compar)(const void *, const void *) );
@@ -143,6 +149,12 @@ static void InitFunctionPtrs(void)
     X(wcsncpy);
     X(wcschr);
     X(wcsrchr);
+    X(wcslen);
+    X(wcsnlen);
+    X(wcscmp);
+    X(wcsncmp);
+    X(wcscpy);
+    X(wcscat);
     X(memchr);
     X(qsort);
     X(bsearch);
@@ -2251,6 +2263,122 @@ static void test_wcsncpy(void)
     ok(dst[5] == 0xbbbb , "expected 0xbbbb unexpected wchar_t %x\n", dst[5]);
 }
 
+static void test_simd_wcstring(void)
+{
+    WCHAR buf1[256], buf2[256], dst[256];
+    size_t align, len, i, j;
+    static const size_t test_lens[] = { 0, 1, 2, 3, 5, 7, 8, 9, 15, 16, 17, 24, 31, 32, 33, 48, 63, 64, 75, 127 };
+
+    if (!pwcslen || !pwcsnlen || !pwcscmp || !pwcsncmp || !pwcscpy || !pwcscat || !pwcschr || !pwcsrchr)
+    {
+        win_skip("Wide string functions not available\n");
+        return;
+    }
+
+    for (i = 0; i < 256; i++)
+    {
+        buf1[i] = 0xAA;
+        buf2[i] = 0xBB;
+        dst[i] = 0xCC;
+    }
+
+    for (align = 0; align < 32; align++)
+    {
+        WCHAR *s = buf1 + align;
+        for (j = 0; j < ARRAY_SIZE(test_lens); j++)
+        {
+            len = test_lens[j];
+            if (align + len + 1 >= 256) continue;
+
+            for (i = 0; i < len; i++)
+                s[i] = (WCHAR)('A' + (i % 26));
+            s[len] = 0;
+
+            ok(pwcslen(s) == len, "wcslen failed: align %lu, expected %lu, got %lu\n",
+               (ULONG)align, (ULONG)len, (ULONG)pwcslen(s));
+
+            ok(pwcsnlen(s, len) == len, "wcsnlen(s, len) failed: align %lu, expected %lu, got %lu\n",
+               (ULONG)align, (ULONG)len, (ULONG)pwcsnlen(s, len));
+            ok(pwcsnlen(s, len + 5) == len, "wcsnlen(s, len+5) failed: align %lu, expected %lu, got %lu\n",
+               (ULONG)align, (ULONG)len, (ULONG)pwcsnlen(s, len + 5));
+            if (len > 0)
+            {
+                ok(pwcsnlen(s, len - 1) == len - 1, "wcsnlen(s, len-1) failed: align %lu, expected %lu, got %lu\n",
+                   (ULONG)align, (ULONG)(len - 1), (ULONG)pwcsnlen(s, len - 1));
+            }
+            ok(pwcsnlen(s, 0) == 0, "wcsnlen(s, 0) failed: align %lu\n", (ULONG)align);
+
+            ok(pwcschr(s, 0) == s + len, "wcschr(s, 0) failed: align %lu\n", (ULONG)align);
+            ok(pwcsrchr(s, 0) == s + len, "wcsrchr(s, 0) failed: align %lu\n", (ULONG)align);
+
+            if (len > 0)
+            {
+                WCHAR first_ch = s[0];
+                WCHAR last_ch = s[len - 1];
+                WCHAR mid_ch = s[len / 2];
+
+                ok(pwcschr(s, first_ch) == s, "wcschr first_ch failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcsrchr(s, last_ch) == s + len - 1, "wcsrchr last_ch failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcschr(s, mid_ch) != NULL, "wcschr mid_ch not found: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcsrchr(s, mid_ch) != NULL, "wcsrchr mid_ch not found: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+            }
+            ok(pwcschr(s, 0x1234) == NULL, "wcschr not-found failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+            ok(pwcsrchr(s, 0x1234) == NULL, "wcsrchr not-found failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+
+            memset(dst, 0xCC, sizeof(dst));
+            ok(pwcscpy(dst + align, s) == dst + align, "wcscpy ret failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+            ok(pwcslen(dst + align) == len, "wcscpy len failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+            ok(memcmp(dst + align, s, (len + 1) * sizeof(WCHAR)) == 0, "wcscpy content failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+            if (align + len + 1 < 256)
+                ok(dst[align + len + 1] == 0xCCCC, "wcscpy overflowed buffer: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+        }
+    }
+
+    for (align = 0; align < 16; align++)
+    {
+        WCHAR *s1 = buf1 + align;
+        WCHAR *s2 = buf2 + ((align + 5) % 16);
+
+        for (j = 0; j < ARRAY_SIZE(test_lens); j++)
+        {
+            len = test_lens[j];
+            if (align + len + 1 >= 256 || ((align + 5) % 16) + len + 1 >= 256) continue;
+
+            for (i = 0; i < len; i++)
+                s1[i] = s2[i] = (WCHAR)('A' + (i % 26));
+            s1[len] = s2[len] = 0;
+
+            ok(pwcscmp(s1, s2) == 0, "wcscmp equal failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+            ok(pwcsncmp(s1, s2, len) == 0, "wcsncmp equal failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+            ok(pwcsncmp(s1, s2, len + 10) == 0, "wcsncmp equal (n>len) failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+
+            if (len > 0)
+            {
+                s2[len - 1] = s1[len - 1] + 1;
+                ok(pwcscmp(s1, s2) < 0, "wcscmp mismatch < failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcscmp(s2, s1) > 0, "wcscmp mismatch > failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcsncmp(s1, s2, len) < 0, "wcsncmp mismatch < failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcsncmp(s2, s1, len) > 0, "wcsncmp mismatch > failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcsncmp(s1, s2, len - 1) == 0, "wcsncmp before mismatch failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                s2[len - 1] = s1[len - 1];
+
+                s2[0] = s1[0] + 2;
+                ok(pwcscmp(s1, s2) < 0, "wcscmp mismatch-0 < failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcscmp(s2, s1) > 0, "wcscmp mismatch-0 > failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcsncmp(s1, s2, 1) < 0, "wcsncmp mismatch-0 < failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                ok(pwcsncmp(s1, s2, 0) == 0, "wcsncmp n=0 failed: align %lu, len %lu\n", (ULONG)align, (ULONG)len);
+                s2[0] = s1[0];
+            }
+        }
+    }
+
+    dst[0] = 0;
+    ok(pwcscat(dst, L"Hello ") == dst, "wcscat ret failed\n");
+    ok(pwcscmp(dst, L"Hello ") == 0, "wcscat content 1 failed\n");
+    ok(pwcscat(dst, L"World!") == dst, "wcscat ret 2 failed\n");
+    ok(pwcscmp(dst, L"Hello World!") == 0, "wcscat content 2 failed\n");
+}
+
 START_TEST(string)
 {
     InitFunctionPtrs();
@@ -2285,4 +2413,5 @@ START_TEST(string)
     test_ctype();
     test_memchr();
     test_wcsncpy();
+    test_simd_wcstring();
 }

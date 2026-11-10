@@ -34,6 +34,688 @@
 #include "winternl.h"
 #include "ntdll_misc.h"
 
+#ifdef __x86_64__
+#include <immintrin.h>
+
+static inline int has_avx2(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        unsigned int eax, ebx, ecx, edx;
+        __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
+        if ((ecx & (1 << 27)) && (ecx & (1 << 28))) /* OSXSAVE and AVX */
+        {
+            unsigned int xcr0_low, xcr0_high;
+            __asm__ volatile ("xgetbv" : "=a"(xcr0_low), "=d"(xcr0_high) : "c"(0));
+            if ((xcr0_low & 6) == 6) /* XMM (bit 1) and YMM (bit 2) state enabled by OS */
+            {
+                __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0), "c"(0));
+                if (eax >= 7)
+                {
+                    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
+                    cached = (ebx & (1 << 5)) != 0;
+                    return cached;
+                }
+            }
+        }
+        cached = 0;
+    }
+    return cached;
+}
+
+__attribute__((target("avx2")))
+static inline size_t avx2_wcslen( LPCWSTR str )
+{
+    const WCHAR *s = str;
+    __m256i zero;
+
+    if (((ULONG_PTR)s & 1) != 0)
+    {
+        while (*s) s++;
+        return s - str;
+    }
+
+    zero = _mm256_setzero_si256();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xfe0)
+    {
+        __m256i v = _mm256_loadu_si256( (const __m256i *)s );
+        int mask = _mm256_movemask_epi8( _mm256_cmpeq_epi16( v, zero ) );
+        if (mask)
+            return (size_t)__builtin_ctz( (unsigned int)mask ) >> 1;
+        s += 16;
+    }
+
+    while ((ULONG_PTR)s & 31)
+    {
+        if (!*s) return s - str;
+        s++;
+    }
+
+    for (;;)
+    {
+        __m256i v = _mm256_load_si256( (const __m256i *)s );
+        int mask = _mm256_movemask_epi8( _mm256_cmpeq_epi16( v, zero ) );
+        if (mask)
+            return (s - str) + ((size_t)__builtin_ctz( (unsigned int)mask ) >> 1);
+        s += 16;
+    }
+}
+
+static inline size_t sse2_wcslen( LPCWSTR str )
+{
+    const WCHAR *s = str;
+    __m128i zero;
+
+    if (((ULONG_PTR)s & 1) != 0)
+    {
+        while (*s) s++;
+        return s - str;
+    }
+
+    zero = _mm_setzero_si128();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xff0)
+    {
+        __m128i v = _mm_loadu_si128( (const __m128i *)s );
+        int mask = _mm_movemask_epi8( _mm_cmpeq_epi16( v, zero ) );
+        if (mask)
+            return (size_t)__builtin_ctz( (unsigned int)mask ) >> 1;
+        s += 8;
+    }
+
+    while ((ULONG_PTR)s & 15)
+    {
+        if (!*s) return s - str;
+        s++;
+    }
+
+    for (;;)
+    {
+        __m128i v = _mm_load_si128( (const __m128i *)s );
+        int mask = _mm_movemask_epi8( _mm_cmpeq_epi16( v, zero ) );
+        if (mask)
+            return (s - str) + ((size_t)__builtin_ctz( (unsigned int)mask ) >> 1);
+        s += 8;
+    }
+}
+
+__attribute__((target("avx2")))
+static inline size_t avx2_wcsnlen( const WCHAR *str, size_t len )
+{
+    const WCHAR *s = str;
+    __m256i zero;
+
+    if (((ULONG_PTR)s & 1) != 0 || len < 16)
+    {
+        while (len && *s) { s++; len--; }
+        return s - str;
+    }
+
+    zero = _mm256_setzero_si256();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xfe0)
+    {
+        __m256i v = _mm256_loadu_si256( (const __m256i *)s );
+        int mask = _mm256_movemask_epi8( _mm256_cmpeq_epi16( v, zero ) );
+        if (mask)
+        {
+            size_t idx = (size_t)__builtin_ctz( (unsigned int)mask ) >> 1;
+            return idx < len ? idx : len;
+        }
+        s += 16;
+        len -= 16;
+    }
+
+    while (((ULONG_PTR)s & 31) && len)
+    {
+        if (!*s) return s - str;
+        s++;
+        len--;
+    }
+
+    while (len >= 16)
+    {
+        __m256i v = _mm256_load_si256( (const __m256i *)s );
+        int mask = _mm256_movemask_epi8( _mm256_cmpeq_epi16( v, zero ) );
+        if (mask)
+        {
+            size_t idx = (size_t)__builtin_ctz( (unsigned int)mask ) >> 1;
+            return (s - str) + idx;
+        }
+        s += 16;
+        len -= 16;
+    }
+
+    while (len && *s) { s++; len--; }
+    return s - str;
+}
+
+static inline size_t sse2_wcsnlen( const WCHAR *str, size_t len )
+{
+    const WCHAR *s = str;
+    __m128i zero;
+
+    if (((ULONG_PTR)s & 1) != 0 || len < 8)
+    {
+        while (len && *s) { s++; len--; }
+        return s - str;
+    }
+
+    zero = _mm_setzero_si128();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xff0)
+    {
+        __m128i v = _mm_loadu_si128( (const __m128i *)s );
+        int mask = _mm_movemask_epi8( _mm_cmpeq_epi16( v, zero ) );
+        if (mask)
+        {
+            size_t idx = (size_t)__builtin_ctz( (unsigned int)mask ) >> 1;
+            return idx < len ? idx : len;
+        }
+        s += 8;
+        len -= 8;
+    }
+
+    while (((ULONG_PTR)s & 15) && len)
+    {
+        if (!*s) return s - str;
+        s++;
+        len--;
+    }
+
+    while (len >= 8)
+    {
+        __m128i v = _mm_load_si128( (const __m128i *)s );
+        int mask = _mm_movemask_epi8( _mm_cmpeq_epi16( v, zero ) );
+        if (mask)
+        {
+            size_t idx = (size_t)__builtin_ctz( (unsigned int)mask ) >> 1;
+            return (s - str) + idx;
+        }
+        s += 8;
+        len -= 8;
+    }
+
+    while (len && *s) { s++; len--; }
+    return s - str;
+}
+
+__attribute__((target("avx2")))
+static inline LPWSTR avx2_wcschr( LPCWSTR str, WCHAR ch )
+{
+    const WCHAR *s = str;
+    __m256i target;
+    __m256i zero;
+
+    if (!ch) return (WCHAR *)str + avx2_wcslen( str );
+
+    if (((ULONG_PTR)s & 1) != 0)
+    {
+        do { if (*s == ch) return (WCHAR *)(ULONG_PTR)s; } while (*s++);
+        return NULL;
+    }
+
+    target = _mm256_set1_epi16( ch );
+    zero = _mm256_setzero_si256();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xfe0)
+    {
+        __m256i v = _mm256_loadu_si256( (const __m256i *)s );
+        __m256i eq_ch = _mm256_cmpeq_epi16( v, target );
+        __m256i eq_zero = _mm256_cmpeq_epi16( v, zero );
+        int mask = _mm256_movemask_epi8( _mm256_or_si256( eq_ch, eq_zero ) );
+        if (mask)
+        {
+            int mask_ch = _mm256_movemask_epi8( eq_ch );
+            int mask_zero = _mm256_movemask_epi8( eq_zero );
+            if (mask_ch && (!mask_zero || __builtin_ctz((unsigned int)mask_ch) < __builtin_ctz((unsigned int)mask_zero)))
+                return (WCHAR *)s + ((size_t)__builtin_ctz((unsigned int)mask_ch) >> 1);
+            return NULL;
+        }
+        s += 16;
+    }
+
+    while ((ULONG_PTR)s & 31)
+    {
+        if (*s == ch) return (WCHAR *)s;
+        if (!*s) return NULL;
+        s++;
+    }
+
+    for (;;)
+    {
+        __m256i v = _mm256_load_si256( (const __m256i *)s );
+        __m256i eq_ch = _mm256_cmpeq_epi16( v, target );
+        __m256i eq_zero = _mm256_cmpeq_epi16( v, zero );
+        int mask = _mm256_movemask_epi8( _mm256_or_si256( eq_ch, eq_zero ) );
+        if (mask)
+        {
+            int mask_ch = _mm256_movemask_epi8( eq_ch );
+            int mask_zero = _mm256_movemask_epi8( eq_zero );
+            if (mask_ch && (!mask_zero || __builtin_ctz((unsigned int)mask_ch) < __builtin_ctz((unsigned int)mask_zero)))
+                return (WCHAR *)s + ((size_t)__builtin_ctz((unsigned int)mask_ch) >> 1);
+            return NULL;
+        }
+        s += 16;
+    }
+}
+
+static inline LPWSTR sse2_wcschr( LPCWSTR str, WCHAR ch )
+{
+    const WCHAR *s = str;
+    __m128i target;
+    __m128i zero;
+
+    if (!ch) return (WCHAR *)str + sse2_wcslen( str );
+
+    if (((ULONG_PTR)s & 1) != 0)
+    {
+        do { if (*s == ch) return (WCHAR *)(ULONG_PTR)s; } while (*s++);
+        return NULL;
+    }
+
+    target = _mm_set1_epi16( ch );
+    zero = _mm_setzero_si128();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xff0)
+    {
+        __m128i v = _mm_loadu_si128( (const __m128i *)s );
+        __m128i eq_ch = _mm_cmpeq_epi16( v, target );
+        __m128i eq_zero = _mm_cmpeq_epi16( v, zero );
+        int mask = _mm_movemask_epi8( _mm_or_si128( eq_ch, eq_zero ) );
+        if (mask)
+        {
+            int mask_ch = _mm_movemask_epi8( eq_ch );
+            int mask_zero = _mm_movemask_epi8( eq_zero );
+            if (mask_ch && (!mask_zero || __builtin_ctz((unsigned int)mask_ch) < __builtin_ctz((unsigned int)mask_zero)))
+                return (WCHAR *)s + ((size_t)__builtin_ctz((unsigned int)mask_ch) >> 1);
+            return NULL;
+        }
+        s += 8;
+    }
+
+    while ((ULONG_PTR)s & 15)
+    {
+        if (*s == ch) return (WCHAR *)s;
+        if (!*s) return NULL;
+        s++;
+    }
+
+    for (;;)
+    {
+        __m128i v = _mm_load_si128( (const __m128i *)s );
+        __m128i eq_ch = _mm_cmpeq_epi16( v, target );
+        __m128i eq_zero = _mm_cmpeq_epi16( v, zero );
+        int mask = _mm_movemask_epi8( _mm_or_si128( eq_ch, eq_zero ) );
+        if (mask)
+        {
+            int mask_ch = _mm_movemask_epi8( eq_ch );
+            int mask_zero = _mm_movemask_epi8( eq_zero );
+            if (mask_ch && (!mask_zero || __builtin_ctz((unsigned int)mask_ch) < __builtin_ctz((unsigned int)mask_zero)))
+                return (WCHAR *)s + ((size_t)__builtin_ctz((unsigned int)mask_ch) >> 1);
+            return NULL;
+        }
+        s += 8;
+    }
+}
+
+__attribute__((target("avx2")))
+static inline LPWSTR avx2_wcsrchr( LPCWSTR str, WCHAR ch )
+{
+    size_t len;
+    const WCHAR *p;
+    __m256i target;
+
+    if (((ULONG_PTR)str & 1) != 0)
+    {
+        WCHAR *ret = NULL;
+        do { if (*str == ch) ret = (WCHAR *)(ULONG_PTR)str; } while (*str++);
+        return ret;
+    }
+
+    len = avx2_wcslen( str );
+    if (!ch) return (WCHAR *)str + len;
+    if (!len) return NULL;
+
+    p = str + len;
+    target = _mm256_set1_epi16( ch );
+
+    while (p >= str + 16)
+    {
+        __m256i v;
+        int mask;
+        p -= 16;
+        v = _mm256_loadu_si256( (const __m256i *)p );
+        mask = _mm256_movemask_epi8( _mm256_cmpeq_epi16( v, target ) );
+        if (mask)
+            return (WCHAR *)p + ((size_t)(31 - __builtin_clz( (unsigned int)mask )) >> 1);
+    }
+
+    while (p > str)
+    {
+        p--;
+        if (*p == ch) return (WCHAR *)p;
+    }
+    return NULL;
+}
+
+static inline LPWSTR sse2_wcsrchr( LPCWSTR str, WCHAR ch )
+{
+    size_t len;
+    const WCHAR *p;
+    __m128i target;
+
+    if (((ULONG_PTR)str & 1) != 0)
+    {
+        WCHAR *ret = NULL;
+        do { if (*str == ch) ret = (WCHAR *)(ULONG_PTR)str; } while (*str++);
+        return ret;
+    }
+
+    len = sse2_wcslen( str );
+    if (!ch) return (WCHAR *)str + len;
+    if (!len) return NULL;
+
+    p = str + len;
+    target = _mm_set1_epi16( ch );
+
+    while (p >= str + 8)
+    {
+        __m128i v;
+        int mask;
+        p -= 8;
+        v = _mm_loadu_si128( (const __m128i *)p );
+        mask = _mm_movemask_epi8( _mm_cmpeq_epi16( v, target ) );
+        if (mask)
+            return (WCHAR *)p + ((size_t)(31 - __builtin_clz( (unsigned int)mask )) >> 1);
+    }
+
+    while (p > str)
+    {
+        p--;
+        if (*p == ch) return (WCHAR *)p;
+    }
+    return NULL;
+}
+
+__attribute__((target("avx2")))
+static inline int avx2_wcscmp( LPCWSTR str1, LPCWSTR str2 )
+{
+    __m256i zero;
+
+    if (str1 == str2) return 0;
+
+    if ((((ULONG_PTR)str1 | (ULONG_PTR)str2) & 1) != 0)
+    {
+        while (*str1 && *str1 == *str2) { str1++; str2++; }
+        return (int)*str1 - (int)*str2;
+    }
+
+    zero = _mm256_setzero_si256();
+
+    for (;;)
+    {
+        if (((ULONG_PTR)str1 & 0xfff) <= 0xfe0 && ((ULONG_PTR)str2 & 0xfff) <= 0xfe0)
+        {
+            __m256i v1 = _mm256_loadu_si256( (const __m256i *)str1 );
+            __m256i v2 = _mm256_loadu_si256( (const __m256i *)str2 );
+            __m256i eq = _mm256_cmpeq_epi16( v1, v2 );
+            __m256i z = _mm256_cmpeq_epi16( v1, zero );
+            int eq_mask = _mm256_movemask_epi8( eq );
+            int z_mask = _mm256_movemask_epi8( z );
+
+            if (eq_mask == (int)0xffffffff && z_mask == 0)
+            {
+                str1 += 16;
+                str2 += 16;
+                continue;
+            }
+            break;
+        }
+
+        if (*str1 != *str2 || !*str1)
+            return (int)*str1 - (int)*str2;
+        str1++;
+        str2++;
+    }
+
+    while (*str1 && *str1 == *str2) { str1++; str2++; }
+    return (int)*str1 - (int)*str2;
+}
+
+static inline int sse2_wcscmp( LPCWSTR str1, LPCWSTR str2 )
+{
+    __m128i zero;
+
+    if (str1 == str2) return 0;
+
+    if ((((ULONG_PTR)str1 | (ULONG_PTR)str2) & 1) != 0)
+    {
+        while (*str1 && *str1 == *str2) { str1++; str2++; }
+        return (int)*str1 - (int)*str2;
+    }
+
+    zero = _mm_setzero_si128();
+
+    for (;;)
+    {
+        if (((ULONG_PTR)str1 & 0xfff) <= 0xff0 && ((ULONG_PTR)str2 & 0xfff) <= 0xff0)
+        {
+            __m128i v1 = _mm_loadu_si128( (const __m128i *)str1 );
+            __m128i v2 = _mm_loadu_si128( (const __m128i *)str2 );
+            __m128i eq = _mm_cmpeq_epi16( v1, v2 );
+            __m128i z = _mm_cmpeq_epi16( v1, zero );
+            int eq_mask = _mm_movemask_epi8( eq );
+            int z_mask = _mm_movemask_epi8( z );
+
+            if (eq_mask == 0xffff && z_mask == 0)
+            {
+                str1 += 8;
+                str2 += 8;
+                continue;
+            }
+            break;
+        }
+
+        if (*str1 != *str2 || !*str1)
+            return (int)*str1 - (int)*str2;
+        str1++;
+        str2++;
+    }
+
+    while (*str1 && *str1 == *str2) { str1++; str2++; }
+    return (int)*str1 - (int)*str2;
+}
+
+__attribute__((target("avx2")))
+static inline int avx2_wcsncmp( LPCWSTR str1, LPCWSTR str2, size_t n )
+{
+    __m256i zero;
+
+    if (!n || str1 == str2) return 0;
+
+    if ((((ULONG_PTR)str1 | (ULONG_PTR)str2) & 1) != 0)
+    {
+        while (n > 0)
+        {
+            if (--n == 0 || *str1 != *str2 || !*str1)
+                return (int)*str1 - (int)*str2;
+            str1++;
+            str2++;
+        }
+        return 0;
+    }
+
+    zero = _mm256_setzero_si256();
+
+    while (n >= 16)
+    {
+        if (((ULONG_PTR)str1 & 0xfff) <= 0xfe0 && ((ULONG_PTR)str2 & 0xfff) <= 0xfe0)
+        {
+            __m256i v1 = _mm256_loadu_si256( (const __m256i *)str1 );
+            __m256i v2 = _mm256_loadu_si256( (const __m256i *)str2 );
+            __m256i eq = _mm256_cmpeq_epi16( v1, v2 );
+            __m256i z = _mm256_cmpeq_epi16( v1, zero );
+            int eq_mask = _mm256_movemask_epi8( eq );
+            int z_mask = _mm256_movemask_epi8( z );
+
+            if (eq_mask == (int)0xffffffff && z_mask == 0)
+            {
+                str1 += 16;
+                str2 += 16;
+                n -= 16;
+                continue;
+            }
+            break;
+        }
+
+        if (*str1 != *str2 || !*str1 || --n == 0)
+            return (int)*str1 - (int)*str2;
+        str1++;
+        str2++;
+    }
+
+    while (n > 0)
+    {
+        if (--n == 0 || *str1 != *str2 || !*str1)
+            return (int)*str1 - (int)*str2;
+        str1++;
+        str2++;
+    }
+    return 0;
+}
+
+static inline int sse2_wcsncmp( LPCWSTR str1, LPCWSTR str2, size_t n )
+{
+    __m128i zero;
+
+    if (!n || str1 == str2) return 0;
+
+    if ((((ULONG_PTR)str1 | (ULONG_PTR)str2) & 1) != 0)
+    {
+        while (n > 0)
+        {
+            if (--n == 0 || *str1 != *str2 || !*str1)
+                return (int)*str1 - (int)*str2;
+            str1++;
+            str2++;
+        }
+        return 0;
+    }
+
+    zero = _mm_setzero_si128();
+
+    while (n >= 8)
+    {
+        if (((ULONG_PTR)str1 & 0xfff) <= 0xff0 && ((ULONG_PTR)str2 & 0xfff) <= 0xff0)
+        {
+            __m128i v1 = _mm_loadu_si128( (const __m128i *)str1 );
+            __m128i v2 = _mm_loadu_si128( (const __m128i *)str2 );
+            __m128i eq = _mm_cmpeq_epi16( v1, v2 );
+            __m128i z = _mm_cmpeq_epi16( v1, zero );
+            int eq_mask = _mm_movemask_epi8( eq );
+            int z_mask = _mm_movemask_epi8( z );
+
+            if (eq_mask == 0xffff && z_mask == 0)
+            {
+                str1 += 8;
+                str2 += 8;
+                n -= 8;
+                continue;
+            }
+            break;
+        }
+
+        if (*str1 != *str2 || !*str1 || --n == 0)
+            return (int)*str1 - (int)*str2;
+        str1++;
+        str2++;
+    }
+
+    while (n > 0)
+    {
+        if (--n == 0 || *str1 != *str2 || !*str1)
+            return (int)*str1 - (int)*str2;
+        str1++;
+        str2++;
+    }
+    return 0;
+}
+
+__attribute__((target("avx2")))
+static inline LPWSTR avx2_wcscpy( LPWSTR dst, LPCWSTR src )
+{
+    LPWSTR ret = dst;
+    const __m256i zero = _mm256_setzero_si256();
+
+    if ((((ULONG_PTR)src | (ULONG_PTR)dst) & 1) != 0)
+    {
+        WCHAR *p = dst;
+        while ((*p++ = *src++));
+        return ret;
+    }
+
+    while ((ULONG_PTR)src & 31)
+    {
+        if (!(*dst++ = *src++)) return ret;
+    }
+
+    for (;;)
+    {
+        __m256i chunk = _mm256_load_si256( (const __m256i *)src );
+        int mask = _mm256_movemask_epi8( _mm256_cmpeq_epi16( chunk, zero ) );
+        if (mask)
+        {
+            size_t idx, i;
+            idx = (size_t)__builtin_ctz( (unsigned int)mask ) >> 1;
+            for (i = 0; i <= idx; i++)
+                dst[i] = src[i];
+            return ret;
+        }
+        _mm256_storeu_si256( (__m256i *)dst, chunk );
+        src += 16;
+        dst += 16;
+    }
+}
+
+static inline LPWSTR sse2_wcscpy( LPWSTR dst, LPCWSTR src )
+{
+    LPWSTR ret = dst;
+    const __m128i zero = _mm_setzero_si128();
+
+    if ((((ULONG_PTR)src | (ULONG_PTR)dst) & 1) != 0)
+    {
+        WCHAR *p = dst;
+        while ((*p++ = *src++));
+        return ret;
+    }
+
+    while ((ULONG_PTR)src & 15)
+    {
+        if (!(*dst++ = *src++)) return ret;
+    }
+
+    for (;;)
+    {
+        __m128i chunk = _mm_load_si128( (const __m128i *)src );
+        int mask = _mm_movemask_epi8( _mm_cmpeq_epi16( chunk, zero ) );
+        if (mask)
+        {
+            size_t idx, i;
+            idx = (size_t)__builtin_ctz( (unsigned int)mask ) >> 1;
+            for (i = 0; i <= idx; i++)
+                dst[i] = src[i];
+            return ret;
+        }
+        _mm_storeu_si128( (__m128i *)dst, chunk );
+        src += 8;
+        dst += 8;
+    }
+}
+#endif
+
 static const unsigned short wctypes[256] =
 {
     /* 00 */
@@ -183,9 +865,15 @@ errno_t __cdecl _wcsupr_s( wchar_t *str, size_t len )
  */
 LPWSTR __cdecl wcscpy( LPWSTR dst, LPCWSTR src )
 {
+#ifdef __x86_64__
+    if (has_avx2())
+        return avx2_wcscpy( dst, src );
+    return sse2_wcscpy( dst, src );
+#else
     WCHAR *p = dst;
     while ((*p++ = *src++));
     return dst;
+#endif
 }
 
 
@@ -214,9 +902,15 @@ errno_t __cdecl wcscpy_s( wchar_t *dst, size_t len, const wchar_t *src )
  */
 size_t __cdecl wcslen( LPCWSTR str )
 {
+#ifdef __x86_64__
+    if (has_avx2())
+        return avx2_wcslen( str );
+    return sse2_wcslen( str );
+#else
     const WCHAR *s = str;
     while (*s) s++;
     return s - str;
+#endif
 }
 
 
@@ -255,8 +949,14 @@ errno_t __cdecl wcscat_s( wchar_t *dst, size_t len, const wchar_t *src )
  */
 LPWSTR __cdecl wcschr( LPCWSTR str, WCHAR ch )
 {
+#ifdef __x86_64__
+    if (has_avx2())
+        return avx2_wcschr( str, ch );
+    return sse2_wcschr( str, ch );
+#else
     do { if (*str == ch) return (WCHAR *)(ULONG_PTR)str; } while (*str++);
     return NULL;
+#endif
 }
 
 
@@ -265,8 +965,14 @@ LPWSTR __cdecl wcschr( LPCWSTR str, WCHAR ch )
  */
 int __cdecl wcscmp( LPCWSTR str1, LPCWSTR str2 )
 {
+#ifdef __x86_64__
+    if (has_avx2())
+        return avx2_wcscmp( str1, str2 );
+    return sse2_wcscmp( str1, str2 );
+#else
     while (*str1 && (*str1 == *str2)) { str1++; str2++; }
     return *str1 - *str2;
+#endif
 }
 
 
@@ -340,9 +1046,15 @@ errno_t __cdecl wcsncat_s( wchar_t *dst, size_t len, const wchar_t *src, size_t 
  */
 int __cdecl wcsncmp( LPCWSTR str1, LPCWSTR str2, size_t n )
 {
+#ifdef __x86_64__
+    if (has_avx2())
+        return avx2_wcsncmp( str1, str2, n );
+    return sse2_wcsncmp( str1, str2, n );
+#else
     if (n <= 0) return 0;
     while ((--n > 0) && *str1 && (*str1 == *str2)) { str1++; str2++; }
     return *str1 - *str2;
+#endif
 }
 
 
@@ -407,9 +1119,15 @@ errno_t __cdecl wcsncpy_s( wchar_t *dst, size_t len, const wchar_t *src, size_t 
  */
 size_t __cdecl wcsnlen( const WCHAR *str, size_t len )
 {
+#ifdef __x86_64__
+    if (has_avx2())
+        return avx2_wcsnlen( str, len );
+    return sse2_wcsnlen( str, len );
+#else
     const WCHAR *s;
     for (s = str; len && *s; s++, len--) ;
     return s - str;
+#endif
 }
 
 
@@ -428,9 +1146,15 @@ LPWSTR __cdecl wcspbrk( LPCWSTR str, LPCWSTR accept )
  */
 LPWSTR __cdecl wcsrchr( LPCWSTR str, WCHAR ch )
 {
+#ifdef __x86_64__
+    if (has_avx2())
+        return avx2_wcsrchr( str, ch );
+    return sse2_wcsrchr( str, ch );
+#else
     WCHAR *ret = NULL;
     do { if (*str == ch) ret = (WCHAR *)(ULONG_PTR)str; } while (*str++);
     return ret;
+#endif
 }
 
 
