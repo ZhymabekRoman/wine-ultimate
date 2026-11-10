@@ -115,7 +115,7 @@ static struct wine_preload_info preload_info[] =
     { (void *)0x000000010000, 0x00100000 },  /* DOS area */
     { (void *)0x000000110000, 0x67ef0000 },  /* low memory area */
     { (void *)0x00007f000000, 0x00ff0000 },  /* 32-bit top-down allocations + shared user data */
-    { (void *)0x000100000000, 0x00f0000000 },  /* low top-down window: views whose Redhawk card
+    { (void *)0x001000000000, 0x000f00000000 },  /* low top-down window: views whose Redhawk card
                                                 tables (base + base/128) fit the kernel mmap window */
     { (void *)0x7ffffe000000, 0x01ff0000 },  /* top-down allocations + virtual heap */
 #endif
