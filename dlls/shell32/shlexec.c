@@ -1954,7 +1954,7 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
            be seen as unexpected if we start it, so we special case it here. */
         UINT exec_retval;
         WCHAR *probe_params;
-        const WCHAR *extra = L" 2>/tmp/wa/apphost.err";
+        const WCHAR *extra = L" 2>apphost.err";
         TRACE("No association found, trying as Unix binary %s\n", debugstr_w(wcmd));
         /* per-process stderr capture probe: gen-2 apphost messages (hostfxr
          * "A fatal error occurred...") ride the shared shell pipe and get lost
