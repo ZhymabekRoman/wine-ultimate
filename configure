@@ -1134,6 +1134,7 @@ enable_dinput8
 enable_directmanipulation
 enable_dispex
 enable_dmband
+enable_dmprocessxmlfiltered
 enable_dmcompos
 enable_dmime
 enable_dmloader
@@ -1815,6 +1816,7 @@ enable_view
 enable_wevtutil
 enable_where
 enable_whoami
+enable_wineappx
 enable_wineboot
 enable_winebrowser
 enable_winecfg
@@ -24064,6 +24066,7 @@ wine_fn_config_makefile programs/view enable_view
 wine_fn_config_makefile programs/wevtutil enable_wevtutil
 wine_fn_config_makefile programs/where enable_where
 wine_fn_config_makefile programs/whoami enable_whoami
+wine_fn_config_makefile programs/wineappx enable_wineappx
 wine_fn_config_makefile programs/wineboot enable_wineboot
 wine_fn_config_makefile programs/winebrowser enable_winebrowser
 wine_fn_config_makefile programs/winecfg enable_winecfg
