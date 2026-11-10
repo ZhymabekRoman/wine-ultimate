@@ -141,42 +141,120 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+static const WCHAR appmodel_reg_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
+
+static BOOL package_get_reg_str( const WCHAR *prop_name, WCHAR *buf, DWORD cch )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR subkey[576], name[MAX_PATH], exe[MAX_PATH];
+    SIZE_T i;
+
+    if (GetModuleFileNameW( NULL, exe, ARRAY_SIZE(exe) ))
+    {
+        WCHAR *p = wcsrchr( exe, '\\' );
+        const WCHAR *exe_name = p ? p + 1 : exe;
+        lstrcpyW( subkey, appmodel_reg_key );
+        lstrcatW( subkey, L"\\Exes\\" );
+        lstrcatW( subkey, exe_name );
+        for (i = 0; i < ARRAY_SIZE(roots); i++)
+        {
+            HKEY key;
+            DWORD type, size = cch * sizeof(WCHAR);
+            if (!RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key ))
+            {
+                if (!RegQueryValueExW( key, prop_name, 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
+                {
+                    RegCloseKey( key );
+                    return TRUE;
+                }
+                size = sizeof(name);
+                if (!RegQueryValueExW( key, L"PackageFullName", 0, &type, (BYTE *)name, &size ) && type == REG_SZ && size)
+                {
+                    HKEY pkg_key;
+                    WCHAR pkg_subkey[576];
+                    lstrcpyW( pkg_subkey, appmodel_reg_key );
+                    lstrcatW( pkg_subkey, L"\\Packages\\" );
+                    lstrcatW( pkg_subkey, name );
+                    if (!RegOpenKeyExW( roots[i], pkg_subkey, 0, KEY_READ, &pkg_key ))
+                    {
+                        DWORD psize = cch * sizeof(WCHAR);
+                        if (!RegQueryValueExW( pkg_key, prop_name, 0, &type, (BYTE *)buf, &psize ) && type == REG_SZ && psize)
+                        {
+                            RegCloseKey( pkg_key );
+                            RegCloseKey( key );
+                            return TRUE;
+                        }
+                        RegCloseKey( pkg_key );
+                    }
+                }
+                RegCloseKey( key );
+            }
+        }
+    }
+
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", name, ARRAY_SIZE(name) ))
+    {
+        lstrcpyW( subkey, appmodel_reg_key );
+        lstrcatW( subkey, L"\\Packages\\" );
+        lstrcatW( subkey, name );
+        for (i = 0; i < ARRAY_SIZE(roots); i++)
+        {
+            HKEY key;
+            DWORD type, size = cch * sizeof(WCHAR);
+            if (!RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key ))
+            {
+                if (!RegQueryValueExW( key, prop_name, 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
+                {
+                    RegCloseKey( key );
+                    return TRUE;
+                }
+                RegCloseKey( key );
+            }
+        }
+    }
+    return FALSE;
+}
+
 /* Install directory of the running package: env override first (per-run),
  * then the AppModel registration (PackagePath, then the installer-recorded
  * PackageRootPath), then the executable directory as the last resort. Same
  * resolution order as the kernel32 package identity helpers. */
 static void package_root_path( WCHAR *buf, DWORD cch )
 {
-    static const WCHAR appmodel_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     WCHAR subkey[576], name[MAX_PATH];
     SIZE_T i;
 
     if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", buf, cch )) return;
 
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", name, ARRAY_SIZE(name) ))
-        wcscpy( name, L"5319275A.WhatsAppDesktop_2.2620.102.0_x64__cv1g1gvanyjgm" );
-    wcscpy( subkey, appmodel_key );
-    lstrcatW( subkey, L"\\Packages\\" );
-    lstrcatW( subkey, name );
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", name, ARRAY_SIZE(name) ) &&
+        !package_get_reg_str( L"PackageFullName", name, ARRAY_SIZE(name) ))
+        name[0] = 0;
 
-    for (i = 0; i < ARRAY_SIZE(roots); i++)
+    if (name[0])
     {
-        static const WCHAR *const values[] = { L"PackagePath", L"PackageRootPath" };
-        HKEY key;
-        SIZE_T j;
+        wcscpy( subkey, appmodel_reg_key );
+        lstrcatW( subkey, L"\\Packages\\" );
+        lstrcatW( subkey, name );
 
-        if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key )) continue;
-        for (j = 0; j < ARRAY_SIZE(values); j++)
+        for (i = 0; i < ARRAY_SIZE(roots); i++)
         {
-            DWORD type, size = cch * sizeof(WCHAR);
-            if (!RegQueryValueExW( key, values[j], 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
+            static const WCHAR *const values[] = { L"PackagePath", L"PackageRootPath" };
+            HKEY key;
+            SIZE_T j;
+
+            if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key )) continue;
+            for (j = 0; j < ARRAY_SIZE(values); j++)
             {
-                RegCloseKey( key );
-                return;
+                DWORD type, size = cch * sizeof(WCHAR);
+                if (!RegQueryValueExW( key, values[j], 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
+                {
+                    RegCloseKey( key );
+                    return;
+                }
             }
+            RegCloseKey( key );
         }
-        RegCloseKey( key );
     }
 
     if (!GetModuleFileNameW( NULL, buf, cch )) buf[0] = 0;
@@ -1013,12 +1091,12 @@ static HRESULT WINAPI async_viewf_IndexOf( IVectorView_StorageFolder *iface, ISt
         if (&This->folders[i]->IStorageFolder_iface == item)
         {
             *index = i;
-            *found = true;
+            *found = TRUE;
             return S_OK;
         }
     }
     *index = 0;
-    *found = false;
+    *found = FALSE;
     return S_OK;
 }
 
@@ -1101,12 +1179,12 @@ static HRESULT WINAPI async_view_IndexOf( IVectorView_StorageFile *iface, IStora
         if (&This->files[i]->IStorageFile_iface == item)
         {
             *index = i;
-            *found = true;
+            *found = TRUE;
             return S_OK;
         }
     }
     *index = 0;
-    *found = false;
+    *found = FALSE;
     return S_OK;
 }
 
@@ -1401,32 +1479,36 @@ static HRESULT WINAPI package_id_get_ResourceId( IPackageId *iface, HSTRING *val
 static HRESULT WINAPI package_id_get_Publisher( IPackageId *iface, HSTRING *value )
 {
     WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PUBLISHER", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"CN=WhatsApp" );
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PUBLISHER", buf, ARRAY_SIZE(buf) ) &&
+        !package_get_reg_str( L"PackagePublisher", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"CN=Unknown" );
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_PublisherId( IPackageId *iface, HSTRING *value )
 {
     WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PUBLISHER_ID", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"cv1g1gvanyjgm" );
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PUBLISHER_ID", buf, ARRAY_SIZE(buf) ) &&
+        !package_get_reg_str( L"PackagePublisherId", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"0000000000000" );
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_FullName( IPackageId *iface, HSTRING *value )
 {
     WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"5319275A.WhatsAppDesktop_2.2620.102.0_x64__cv1g1gvanyjgm" );
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", buf, ARRAY_SIZE(buf) ) &&
+        !package_get_reg_str( L"PackageFullName", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"UnknownPackage_1.0.0.0_neutral__0000000000000" );
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
 static HRESULT WINAPI package_id_get_FamilyName( IPackageId *iface, HSTRING *value )
 {
     WCHAR buf[MAX_PATH];
-    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ))
-        wcscpy( buf, L"5319275A.WhatsAppDesktop_cv1g1gvanyjgm" );
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, ARRAY_SIZE(buf) ) &&
+        !package_get_reg_str( L"PackageFamilyName", buf, ARRAY_SIZE(buf) ))
+        wcscpy( buf, L"UnknownPackage_0000000000000" );
     return WindowsCreateString( buf, wcslen(buf), value );
 }
 
