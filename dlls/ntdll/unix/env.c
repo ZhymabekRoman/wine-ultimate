@@ -1345,6 +1345,9 @@ static void get_initial_console( RTL_USER_PROCESS_PARAMETERS *params )
     wine_server_fd_to_handle( 1, GENERIC_WRITE|SYNCHRONIZE, OBJ_INHERIT, &params->hStdOutput );
     wine_server_fd_to_handle( 2, GENERIC_WRITE|SYNCHRONIZE, OBJ_INHERIT, &params->hStdError );
 
+    if (params->hStdInput || params->hStdOutput || params->hStdError)
+        params->dwFlags |= STARTF_USESTDHANDLES;
+
     if (main_image_info.SubSystemType != IMAGE_SUBSYSTEM_WINDOWS_CUI)
         return;
 

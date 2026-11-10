@@ -889,6 +889,26 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
         }
     }
 
+    if (status == STATUS_INVALID_HANDLE && (!wcsicmp( filename, L"CONOUT$" ) || !wcsicmp( filename, L"CONIN$" )))
+    {
+        if (alloc_console( TRUE ))
+        {
+            status = NtCreateFile( &ret, access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, &attr, &io,
+                                   NULL, attributes & FILE_ATTRIBUTE_VALID_FLAGS, sharing,
+                                   nt_disposition[creation - CREATE_NEW],
+                                   get_nt_file_options( attributes, creation ), NULL, 0 );
+        }
+        if (status)
+        {
+            HANDLE std_h = !wcsicmp( filename, L"CONOUT$" ) ? GetStdHandle( STD_OUTPUT_HANDLE ) : GetStdHandle( STD_INPUT_HANDLE );
+            if (std_h && std_h != INVALID_HANDLE_VALUE &&
+                DuplicateHandle( GetCurrentProcess(), std_h, GetCurrentProcess(), &ret, access, sa && sa->bInheritHandle, 0 ))
+            {
+                status = STATUS_SUCCESS;
+            }
+        }
+    }
+
     if (status)
     {
         if (vxd_name && vxd_name[0])

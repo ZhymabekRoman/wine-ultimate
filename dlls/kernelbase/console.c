@@ -90,7 +90,7 @@ static BOOL console_ioctl( HANDLE handle, DWORD code, void *in_buff, DWORD in_co
     if (handle == CONSOLE_HANDLE_SHELL_NO_WINDOW)
     {
         WARN("Incorrect access to Shell-no-window console (ioctl=%lx)\n", code);
-        SetLastError( ERROR_INVALID_ACCESS );
+        SetLastError( ERROR_INVALID_HANDLE );
         return FALSE;
     }
     status = NtDeviceIoControlFile( handle, NULL, NULL, NULL, &io, code, in_buff, in_count,
@@ -401,7 +401,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH AttachConsole( DWORD pid )
 }
 
 
-static BOOL alloc_console( BOOL headless )
+BOOL alloc_console( BOOL headless )
 {
     SECURITY_ATTRIBUTES inheritable_attr = { sizeof(inheritable_attr), NULL, TRUE };
     STARTUPINFOEXW console_si;
@@ -411,7 +411,7 @@ static BOOL alloc_console( BOOL headless )
     PROCESS_INFORMATION pi;
     SIZE_T size;
     void *redir;
-    BOOL ret;
+    BOOL ret, override_all;
 
     TRACE("()\n");
 
@@ -477,7 +477,10 @@ static BOOL alloc_console( BOOL headless )
     Wow64RevertWow64FsRedirection( redir );
 
     if (!ret || !create_console_connection( console)) goto error;
-    if (!init_console_std_handles( !(app_si.dwFlags & STARTF_USESTDHANDLES) )) goto error;
+    override_all = !(app_si.dwFlags & STARTF_USESTDHANDLES);
+    if (headless && (GetStdHandle(STD_OUTPUT_HANDLE) || GetStdHandle(STD_ERROR_HANDLE)))
+        override_all = FALSE;
+    if (!init_console_std_handles( override_all )) goto error;
 
     RtlGetCurrentPeb()->ProcessParameters->ConsoleHandle = console;
     TRACE( "Started conhost pid=%08lx tid=%08lx\n", pi.dwProcessId, pi.dwThreadId );
@@ -836,7 +839,7 @@ UINT WINAPI DECLSPEC_HOTPATCH GetConsoleCP(void)
 
     if (!console_ioctl( RtlGetCurrentPeb()->ProcessParameters->ConsoleHandle,
                          IOCTL_CONDRV_GET_INPUT_INFO, NULL, 0, &info, sizeof(info), NULL ))
-        return 0;
+        return GetACP();
     return info.input_cp;
 }
 
@@ -931,7 +934,17 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetConsoleInputExeNameW( DWORD len, LPWSTR buffer 
  */
 BOOL WINAPI DECLSPEC_HOTPATCH GetConsoleMode( HANDLE handle, DWORD *mode )
 {
-    return console_ioctl( handle, IOCTL_CONDRV_GET_MODE, NULL, 0, mode, sizeof(*mode), NULL );
+    if (!console_ioctl( handle, IOCTL_CONDRV_GET_MODE, NULL, 0, mode, sizeof(*mode), NULL ))
+    {
+        if (mode && (handle == GetStdHandle(STD_OUTPUT_HANDLE) || handle == GetStdHandle(STD_INPUT_HANDLE) || handle == GetStdHandle(STD_ERROR_HANDLE)))
+        {
+            *mode = 0x7;
+            SetLastError( ERROR_SUCCESS );
+            return TRUE;
+        }
+        return FALSE;
+    }
+    return TRUE;
 }
 
 
@@ -972,7 +985,7 @@ UINT WINAPI DECLSPEC_HOTPATCH GetConsoleOutputCP(void)
 
     if (!console_ioctl( RtlGetCurrentPeb()->ProcessParameters->ConsoleHandle,
                          IOCTL_CONDRV_GET_INPUT_INFO, NULL, 0, &info, sizeof(info), NULL ))
-        return 0;
+        return GetOEMCP();
     return info.output_cp;
 }
 
@@ -1022,7 +1035,25 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetConsoleScreenBufferInfo( HANDLE handle, CONSOLE
 
     if (!console_ioctl( handle , IOCTL_CONDRV_GET_OUTPUT_INFO, NULL, 0,
                         &condrv_info, sizeof(condrv_info), NULL ))
+    {
+        if (info && (handle == GetStdHandle(STD_OUTPUT_HANDLE) || handle == GetStdHandle(STD_ERROR_HANDLE)))
+        {
+            info->dwSize.X              = 120;
+            info->dwSize.Y              = 30;
+            info->dwCursorPosition.X    = 0;
+            info->dwCursorPosition.Y    = 0;
+            info->wAttributes           = 0x07;
+            info->srWindow.Left         = 0;
+            info->srWindow.Top          = 0;
+            info->srWindow.Right        = 119;
+            info->srWindow.Bottom       = 29;
+            info->dwMaximumWindowSize.X = 120;
+            info->dwMaximumWindowSize.Y = 30;
+            SetLastError( ERROR_SUCCESS );
+            return TRUE;
+        }
         return FALSE;
+    }
 
     info->dwSize.X              = condrv_info.width;
     info->dwSize.Y              = condrv_info.height;
@@ -1633,7 +1664,16 @@ BOOL WINAPI DECLSPEC_HOTPATCH SetConsoleInputExeNameW( LPCWSTR name )
 BOOL WINAPI DECLSPEC_HOTPATCH SetConsoleMode( HANDLE handle, DWORD mode )
 {
     TRACE( "(%p,%lx)\n", handle, mode );
-    return console_ioctl( handle, IOCTL_CONDRV_SET_MODE, &mode, sizeof(mode), NULL, 0, NULL );
+    if (!console_ioctl( handle, IOCTL_CONDRV_SET_MODE, &mode, sizeof(mode), NULL, 0, NULL ))
+    {
+        if (handle == GetStdHandle(STD_OUTPUT_HANDLE) || handle == GetStdHandle(STD_INPUT_HANDLE) || handle == GetStdHandle(STD_ERROR_HANDLE))
+        {
+            SetLastError( ERROR_SUCCESS );
+            return TRUE;
+        }
+        return FALSE;
+    }
+    return TRUE;
 }
 
 
@@ -2389,9 +2429,10 @@ void init_console( void )
         }
     }
     else if (params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
-             params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW)
+             params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
+             params->ConsoleHandle == CONSOLE_HANDLE_SHELL_NO_WINDOW)
     {
-        BOOL no_window = params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW;
+        BOOL no_window = params->ConsoleHandle != CONSOLE_HANDLE_ALLOC;
         HMODULE mod = GetModuleHandleW( NULL );
         params->ConsoleHandle = NULL;
         if (RtlImageNtHeader( mod )->OptionalHeader.Subsystem == IMAGE_SUBSYSTEM_WINDOWS_CUI)
