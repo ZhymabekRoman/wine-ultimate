@@ -1468,7 +1468,7 @@ static void test_visual_SetBackFaceVisibility(void)
 static void test_visual_SetClipObject(void)
 {
     IDCompositionDesktopDevice *dcomp_device;
-    IDCompositionVisual *visual;
+    IDCompositionVisual2 *visual;
     IDCompositionRectangleClip *clip;
     IDXGISwapChain *swapchain;
     IDXGIDevice *dxgi_device;
@@ -1491,27 +1491,27 @@ static void test_visual_SetClipObject(void)
 
     /* Chromium's DCLayerTree::VisualTree::BuildTree COM_CHECKs SetClipObject; a NULL
      * clip removes the clip and must succeed. */
-    hr = IDCompositionVisual_SetClipObject(visual, NULL);
+    hr = IDCompositionVisual_SetClipObject((IDCompositionVisual *)visual, NULL);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     hr = IDCompositionDesktopDevice_CreateRectangleClip(dcomp_device, &clip);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
-    hr = IDCompositionVisual_SetClipObject(visual, (IDCompositionClip *)clip);
+    hr = IDCompositionVisual_SetClipObject((IDCompositionVisual *)visual, (IDCompositionClip *)clip);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     /* Setting a rectangle clip clears the clip object and succeeds. */
-    hr = IDCompositionVisual_SetClip(visual, &(const D2D_RECT_F){0.0f, 0.0f, 50.0f, 60.0f});
+    hr = IDCompositionVisual_SetClip((IDCompositionVisual *)visual, &(const D2D_RECT_F){0.0f, 0.0f, 50.0f, 60.0f});
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     /* Clear both. */
-    hr = IDCompositionVisual_SetClipObject(visual, NULL);
+    hr = IDCompositionVisual_SetClipObject((IDCompositionVisual *)visual, NULL);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
 
     refcount = IDCompositionRectangleClip_Release(clip);
     ok(!refcount, "Clip has %lu references left.\n", refcount);
 
-    IDCompositionVisual_Release(visual);
+    IDCompositionVisual2_Release(visual);
     refcount = IDCompositionDesktopDevice_Release(dcomp_device);
     ok(!refcount, "Device has %lu references left.\n", refcount);
     IDXGISwapChain_Release(swapchain);

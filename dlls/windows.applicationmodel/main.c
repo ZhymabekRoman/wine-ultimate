@@ -222,12 +222,28 @@ struct winappsdk_class
 
 static HRESULT WINAPI winappsdk_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    static const GUID IID_IReferenceTracker =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    static const GUID IID_IReferenceTrackerManager =
+        { 0x3cf184b4, 0x7ccb, 0x4dda, { 0x84, 0x55, 0x7e, 0x39, 0x35, 0xe2, 0x37, 0xf3 } };
+
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
     *out = iface;
     return S_OK;
 }
 static ULONG WINAPI winappsdk_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI winappsdk_Release( void *iface ) { return 1; }
-static HRESULT WINAPI winappsdk_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI winappsdk_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI winappsdk_GetRuntimeClassName( void *iface, HSTRING *n )
 {
     struct winappsdk_class *cls = iface;
@@ -253,6 +269,24 @@ static const void *winappsdk_class_vtbl[] =
     winappsdk_GetRuntimeClassName,
     winappsdk_GetTrustLevel,
     winappsdk_zero_out,      /* ActivateInstance / the class's own first method slot */
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
     winappsdk_zero_out,
     winappsdk_zero_out,
     winappsdk_zero_out,
@@ -290,6 +324,31 @@ static const void *winappsdk_factory_vtbl[] =
     winappsdk_factory_GetRuntimeClassName,
     winappsdk_GetTrustLevel,
     winappsdk_factory_ActivateInstance,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
+    winappsdk_zero_out,
 };
 
 #define WINAPPSDK_CLASS( ident, classname ) \

@@ -85,12 +85,36 @@ app_view_activated_vtbl =
 static __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs
 app_view_activated_handler = { &app_view_activated_vtbl };
 
+struct xaml_window
+{
+    IInspectable IInspectable_iface;
+    IInspectable IWindow2_iface;
+    LONG ref;
+    IInspectable *content;
+    ICoreWindow *core_window;
+};
+static struct xaml_window global_xaml_window;
+
 /* The class activation interface IID of Windows.UI.Xaml.Application (the
  * Windows.UI.Xaml.Application "activatable" interface; the WinUI3 projection
  * Microsoft.UI.Xaml.Application shares it).  Not in the generated header; the
  * app's Mcg binder passes it to RoGetActivationFactory. */
 static const IID IID_Windows_UI_Xaml_Application =
     { 0x06499997, 0xf7b4, 0x45fe, {0xb7, 0x63, 0x75, 0x77, 0xd1, 0xd3, 0xcb, 0x4a} };
+static const GUID IID_IApplicationFactory_WinUI =
+    { 0x93bbe361, 0xbe5a, 0x4ee3, { 0xb4, 0xa3, 0x95, 0x11, 0x8d, 0xc9, 0x7a, 0x89 } };
+static const GUID IID_IApplication_WinUI =
+    { 0x74b861a1, 0x7487, 0x46a9, { 0x9a, 0x6e, 0xc7, 0x8b, 0x51, 0x27, 0x26, 0xc5 } };
+static const GUID IID_IApplication_751b =
+    { 0x751b792e, 0x5772, 0x4488, { 0x8b, 0x87, 0xf5, 0x47, 0xfa, 0xa6, 0x44, 0x74 } };
+static const GUID IID_IApplication_0191 =
+    { 0x019104be, 0x522a, 0x5904, { 0xf5, 0x2f, 0xde, 0x72, 0x01, 0x04, 0x29, 0xe0 } };
+static const GUID IID_IWindow_Mcg =
+    { 0xb775ad7c, 0x18b8, 0x45ca, { 0xa1, 0xb0, 0xdc, 0x48, 0x3e, 0x4b, 0x10, 0x28 } };
+static const GUID IID_IWindow_f722dcc2 =
+    { 0xf722dcc2, 0x9827, 0x403d, { 0xaa, 0xed, 0xec, 0xca, 0x9a, 0xc1, 0x73, 0x98 } };
+static const GUID IID_IWindow_96061c05 =
+    { 0x96061c05, 0x2dba, 0x4d08, { 0xb0, 0xbd, 0x2b, 0x30, 0xa1, 0x31, 0xc6, 0xaa } };
 
 /* CoreApplicationViewSource and View implementation
  *
@@ -285,6 +309,11 @@ static HRESULT WINAPI view_SetWindow( IFrameworkView *iface, ICoreWindow *window
     impl->window = window;
     if (window) ICoreWindow_AddRef( window );
     if (window) impl->state = VIEW_STATE_WINDOW_SET;
+    if (window && !global_xaml_window.core_window)
+    {
+        global_xaml_window.core_window = window;
+        ICoreWindow_AddRef( window );
+    }
     return S_OK;
 }
 
@@ -555,19 +584,136 @@ static HRESULT resources_propget( struct application *impl, REFIID iid, void **o
     return SUCCEEDED( hr ) ? S_OK : E_NOINTERFACE;
 }
 
+struct application_extended_vtbl
+{
+    /* IInspectable */
+    HRESULT (WINAPI *QueryInterface)(void *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(void *);
+    ULONG (WINAPI *Release)(void *);
+    HRESULT (WINAPI *GetIids)(void *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(void *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(void *, TrustLevel *);
+    /* IApplication methods */
+    HRESULT (WINAPI *get_Resources)(void *, void **);
+    HRESULT (WINAPI *put_Resources)(void *, void *);
+    HRESULT (WINAPI *add_UnhandledException)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_UnhandledException)(void *, EventRegistrationToken);
+    HRESULT (WINAPI *add_Suspending)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_Suspending)(void *, EventRegistrationToken);
+    HRESULT (WINAPI *add_Resuming)(void *, void *, EventRegistrationToken *);
+    HRESULT (WINAPI *remove_Resuming)(void *, EventRegistrationToken);
+    HRESULT (WINAPI *Exit)(void *);
+    HRESULT (WINAPI *pad_slot15)(void *);
+    void *pad[32];
+};
+
+static const struct application_extended_vtbl application_vtbl;
+static const struct application_extended_vtbl application_inner_vtbl;
+
+static HRESULT WINAPI application_stub_zero( void *iface, void *out )
+{
+    if (out) *(void **)out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI application_stub_ok( void *iface )
+{
+    return S_OK;
+}
+
+static struct application *app_from_iface( void *iface )
+{
+    struct application *impl = (struct application *)iface;
+    if (impl->IApplication_iface.lpVtbl == (const struct IApplicationVtbl *)&application_vtbl)
+        return impl;
+    return impl_from_inner_IInspectable( (IInspectable *)iface );
+}
+
+static HRESULT WINAPI application_get_Resources( void *iface, void **value )
+{
+    struct application *impl = app_from_iface( iface );
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return resources_propget( impl, &IID_IPropertySet, value );
+}
+
+static HRESULT WINAPI application_put_Resources( void *iface, void *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    return S_OK;
+}
+
+static HRESULT WINAPI application_add_UnhandledException( void *iface, void *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    if (token) token->value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_remove_UnhandledException( void *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %llu\n", iface, (unsigned long long)token.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI application_add_Suspending( void *iface, void *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    if (token) token->value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_remove_Suspending( void *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %llu\n", iface, (unsigned long long)token.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI application_add_Resuming( void *iface, void *handler, EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    if (token) token->value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_remove_Resuming( void *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %llu\n", iface, (unsigned long long)token.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI application_Exit( void *iface )
+{
+    TRACE( "iface %p\n", iface );
+    return S_OK;
+}
+
 static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID iid, void **out )
 {
     struct application *impl = impl_from_IApplication( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
-    if (impl->outer)
+    if (impl->outer &&
+        !IsEqualGUID( iid, &IID_IApplication ) &&
+        !IsEqualGUID( iid, &IID_IApplication_WinUI ) &&
+        !IsEqualGUID( iid, &IID_IApplication_751b ) &&
+        !IsEqualGUID( iid, &IID_IApplication_0191 ) &&
+        !IsEqualGUID( iid, &IID_IWindow_Mcg ) &&
+        !IsEqualGUID( iid, &IID_IWindow_f722dcc2 ) &&
+        !IsEqualGUID( iid, &IID_IWindow_96061c05 ) &&
+        !IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
         return IInspectable_QueryInterface( impl->outer, iid, out );
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IApplication ) ||
+        IsEqualGUID( iid, &IID_IApplication_WinUI ) ||
+        IsEqualGUID( iid, &IID_IApplication_751b ) ||
+        IsEqualGUID( iid, &IID_IApplication_0191 ) ||
+        IsEqualGUID( iid, &IID_IWindow_Mcg ) ||
+        IsEqualGUID( iid, &IID_IWindow_f722dcc2 ) ||
+        IsEqualGUID( iid, &IID_IWindow_96061c05 ) ||
         IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
     {
         *out = &impl->IApplication_iface;
@@ -576,6 +722,7 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
     }
 
     if (IsEqualGUID( iid, &IID_IApplicationFactory ) ||
+        IsEqualGUID( iid, &IID_IApplicationFactory_WinUI ) ||
         IsEqualGUID( iid, &IID_IApplicationStatics ))
         return IActivationFactory_QueryInterface( application_factory, iid, out );
 
@@ -633,14 +780,34 @@ static HRESULT WINAPI application_GetTrustLevel( IApplication *iface, TrustLevel
     return S_OK;
 }
 
-static const struct IApplicationVtbl application_vtbl =
+static const struct application_extended_vtbl application_vtbl =
 {
-    application_QueryInterface,
-    application_AddRef,
-    application_Release,
-    application_GetIids,
-    application_GetRuntimeClassName,
-    application_GetTrustLevel,
+    (void *)application_QueryInterface,
+    (void *)application_AddRef,
+    (void *)application_Release,
+    (void *)application_GetIids,
+    (void *)application_GetRuntimeClassName,
+    (void *)application_GetTrustLevel,
+    application_get_Resources,
+    application_put_Resources,
+    application_add_UnhandledException,
+    application_remove_UnhandledException,
+    application_add_Suspending,
+    application_remove_Suspending,
+    application_add_Resuming,
+    application_remove_Resuming,
+    application_Exit,
+    (void *)application_stub_ok,
+    {
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+    }
 };
 
 static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REFIID iid, void **out )
@@ -652,7 +819,14 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IApplication ))
+        IsEqualGUID( iid, &IID_IApplication ) ||
+        IsEqualGUID( iid, &IID_IApplication_WinUI ) ||
+        IsEqualGUID( iid, &IID_IApplication_751b ) ||
+        IsEqualGUID( iid, &IID_IApplication_0191 ) ||
+        IsEqualGUID( iid, &IID_IWindow_Mcg ) ||
+        IsEqualGUID( iid, &IID_IWindow_f722dcc2 ) ||
+        IsEqualGUID( iid, &IID_IWindow_96061c05 ) ||
+        IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
     {
         *out = &impl->inner_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -701,14 +875,34 @@ static HRESULT WINAPI application_inner_GetTrustLevel( IInspectable *iface, Trus
     return S_OK;
 }
 
-static const struct IInspectableVtbl application_inner_vtbl =
+static const struct application_extended_vtbl application_inner_vtbl =
 {
-    application_inner_QueryInterface,
-    application_inner_AddRef,
-    application_inner_Release,
-    application_inner_GetIids,
-    application_inner_GetRuntimeClassName,
-    application_inner_GetTrustLevel,
+    (void *)application_inner_QueryInterface,
+    (void *)application_inner_AddRef,
+    (void *)application_inner_Release,
+    (void *)application_inner_GetIids,
+    (void *)application_inner_GetRuntimeClassName,
+    (void *)application_inner_GetTrustLevel,
+    application_get_Resources,
+    application_put_Resources,
+    application_add_UnhandledException,
+    application_remove_UnhandledException,
+    application_add_Suspending,
+    application_remove_Suspending,
+    application_add_Resuming,
+    application_remove_Resuming,
+    application_Exit,
+    (void *)application_stub_ok,
+    {
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+    }
 };
 
 /* Application factory and statics */
@@ -738,17 +932,16 @@ static inline struct application_factory *impl_from_IApplicationFactory( IApplic
 
 /* Windows.UI.Xaml.Window implementation */
 static const GUID IID_IWindowStatics =
-    { 0x93bbe361, 0xbe5a, 0x4ee3, { 0xb4, 0xa3, 0x95, 0x11, 0x8d, 0xc9, 0x7a, 0x89 } };
+    { 0x93328409, 0x4ea1, 0x4afa, { 0x83, 0xdc, 0x0c, 0x4e, 0x73, 0xe8, 0x8b, 0xb1 } };
 static const GUID IID_IWindow =
+    { 0x3276167d, 0xc9f6, 0x462d, { 0x9d, 0xe2, 0xae, 0x4c, 0x1f, 0xd8, 0xc2, 0xe5 } };
+static const GUID IID_IWindow_Alt =
     { 0x3962666a, 0x3605, 0x49be, { 0x88, 0x54, 0x44, 0x2a, 0x8b, 0x8c, 0xcd, 0xec } };
 
-struct xaml_window
+static inline struct xaml_window *impl_from_IWindow2( void *iface )
 {
-    IInspectable IInspectable_iface;
-    LONG ref;
-    IInspectable *content;
-    ICoreWindow *core_window;
-};
+    return CONTAINING_RECORD( iface, struct xaml_window, IWindow2_iface );
+}
 
 static ICoreWindow *get_current_core_window(void)
 {
@@ -783,7 +976,11 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IWindow ))
+        IsEqualGUID( iid, &IID_IWindow ) ||
+        IsEqualGUID( iid, &IID_IWindow_Alt ) ||
+        IsEqualGUID( iid, &IID_IWindow_Mcg ) ||
+        IsEqualGUID( iid, &IID_IWindow_f722dcc2 ) ||
+        IsEqualGUID( iid, &IID_IWindow_96061c05 ))
     {
         *out = &impl->IInspectable_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -1022,6 +1219,8 @@ struct xaml_window_vtbl_type
     void *pad[10];
 };
 
+static HRESULT WINAPI xaml_window_zero_out( void *iface, void *a2, void *a3 );
+
 static const struct xaml_window_vtbl_type xaml_window_vtbl =
 {
     xaml_window_QueryInterface,
@@ -1046,11 +1245,99 @@ static const struct xaml_window_vtbl_type xaml_window_vtbl =
     xaml_window_remove_VisibilityChanged,
     xaml_window_Activate,
     xaml_window_Close,
+    {
+        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out,
+        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out,
+        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out,
+        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out,
+        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out
+    }
+};
+
+static HRESULT WINAPI xaml_window2_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct xaml_window *impl = impl_from_IWindow2( iface );
+    return xaml_window_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI xaml_window2_AddRef( IInspectable *iface )
+{
+    struct xaml_window *impl = impl_from_IWindow2( iface );
+    return xaml_window_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI xaml_window2_Release( IInspectable *iface )
+{
+    struct xaml_window *impl = impl_from_IWindow2( iface );
+    return xaml_window_Release( &impl->IInspectable_iface );
+}
+static HRESULT WINAPI xaml_window2_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    if (!count || !iids) return E_POINTER;
+    *count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_window2_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Window", 21, name );
+}
+static HRESULT WINAPI xaml_window2_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_window2_get_Compositor( void *iface, void **value )
+{
+    static const WCHAR name[] = L"Windows.UI.Composition.Compositor";
+    HSTRING hstr;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    hr = WindowsCreateString( name, ARRAY_SIZE(name) - 1, &hstr );
+    if (FAILED(hr)) return hr;
+    hr = RoActivateInstance( hstr, (IInspectable **)value );
+    WindowsDeleteString( hstr );
+    return hr;
+}
+static HRESULT WINAPI xaml_window_zero_out( void *iface, void *a2, void *a3 )
+{
+    TRACE( "iface %p, a2 %p, a3 %p\n", iface, a2, a3 );
+    if (a3) *(void **)a3 = NULL;
+    else if (a2) *(void **)a2 = NULL;
+    return S_OK;
+}
+
+static const void *xaml_window2_vtbl[] =
+{
+    xaml_window2_QueryInterface,     /* 0 */
+    xaml_window2_AddRef,             /* 1 */
+    xaml_window2_Release,            /* 2 */
+    xaml_window2_GetIids,            /* 3 */
+    xaml_window2_GetRuntimeClassName,/* 4 */
+    xaml_window2_GetTrustLevel,      /* 5 */
+    xaml_window2_get_Compositor,     /* 6 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 7..10 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 11..14 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 15..18 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 19..22 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 23..26 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 27..30 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 31..34 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 35..38 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 39..42 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 43..46 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 47..50 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 51..54 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 55..58 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 59..62 */
+    xaml_window_zero_out                                                                    /* 63 */
 };
 
 static struct xaml_window global_xaml_window =
 {
     {(const struct IInspectableVtbl *)&xaml_window_vtbl},
+    {(const struct IInspectableVtbl *)xaml_window2_vtbl},
     1,
     NULL,
     NULL,
@@ -1188,7 +1475,9 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
      * object with the IApplication vtable; hand out the Application instance
      * the same ActivateInstance creates, so the caller's Resources/Run slots
      * dispatch on the right vtable. */
-    if (IsEqualGUID( iid, &IID_IApplication ))
+    if (IsEqualGUID( iid, &IID_IApplication ) ||
+        IsEqualGUID( iid, &IID_IApplication_WinUI ) ||
+        IsEqualGUID( iid, &IID_IApplication_751b ))
         return IActivationFactory_ActivateInstance( &impl->IActivationFactory_iface, (IInspectable **)out );
 
     if (IsEqualGUID( iid, &IID_IApplicationStatics ))
@@ -1198,7 +1487,8 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IApplicationFactory ))
+    if (IsEqualGUID( iid, &IID_IApplicationFactory ) ||
+        IsEqualGUID( iid, &IID_IApplicationFactory_WinUI ))
     {
         *out = &impl->IApplicationFactory_iface;
         IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
@@ -1481,6 +1771,8 @@ static HRESULT WINAPI app_factory_GetTrustLevel( IApplicationFactory *iface, Tru
     return factory_GetTrustLevel( &impl->IActivationFactory_iface, trust_level );
 }
 
+static BOOL lifecycle_started = FALSE;
+
 static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *iface,
         IInspectable *outer, IInspectable **inner, IApplication **instance )
 {
@@ -1491,8 +1783,8 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
     impl = calloc( 1, sizeof(*impl) );
     if (!impl) return E_OUTOFMEMORY;
 
-    impl->IApplication_iface.lpVtbl = &application_vtbl;
-    impl->inner_iface.lpVtbl = &application_inner_vtbl;
+    impl->IApplication_iface.lpVtbl = (const struct IApplicationVtbl *)&application_vtbl;
+    impl->inner_iface.lpVtbl = (const struct IInspectableVtbl *)&application_inner_vtbl;
     impl->ref = 1;
     impl->outer = outer;
 
@@ -1513,13 +1805,19 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
             IInspectable_AddRef( *inner );
         }
         if (instance && (void *)instance != (void *)outer)
-            *instance = NULL;
+        {
+            *instance = &impl->IApplication_iface;
+            IApplication_AddRef( *instance );
+        }
 
         /* If this is the main application instance registration (called from Main/App..ctor),
          * drive the view lifecycle and message pump. In WinRT, Application.Start / base..ctor
          * blocks for the lifetime of the application view. */
+        if (!lifecycle_started)
         {
-            struct view_source *source = calloc( 1, sizeof(*source) );
+            struct view_source *source;
+            lifecycle_started = TRUE;
+            source = calloc( 1, sizeof(*source) );
             if (source)
             {
                 ICoreApplication *core_app = NULL;
@@ -1561,7 +1859,11 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
     else
     {
         if (inner) *inner = NULL;
-        if (instance) *instance = &impl->IApplication_iface;
+        if (instance)
+        {
+            *instance = &impl->IApplication_iface;
+            IApplication_AddRef( *instance );
+        }
     }
 
     return S_OK;
@@ -1579,6 +1881,7 @@ struct application_factory_extended_vtbl
     HRESULT (WINAPI *CreateInstance2)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
     HRESULT (WINAPI *Start)(IApplicationStatics *, IApplicationInitializationCallback *);
     HRESULT (WINAPI *get_Current)(IApplicationStatics *, IApplication **);
+    void *pad[16];
 };
 
 static const struct application_factory_extended_vtbl application_factory_vtbl =
@@ -1593,6 +1896,12 @@ static const struct application_factory_extended_vtbl application_factory_vtbl =
     application_factory_CreateInstance,
     application_statics_Start,
     application_statics_get_Current,
+    {
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+        application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+    }
 };
 
 static struct application_factory application_factory_obj =

@@ -173,9 +173,7 @@ static HRESULT WINAPI geographic_region_get_CurrenciesInUse( IGeographicRegion *
         lstrcpyW( currency, L"USD" );
 
     if (FAILED( hr = WindowsCreateString( currency, wcslen( currency ), &str ) )) return hr;
-    hr = hstring_vector_create( &str, 1, value );
-    WindowsDeleteString( str );
-    return hr;
+    return hstring_vector_create( &str, 1, value );
 }
 
 static const struct IGeographicRegionVtbl geographic_region_vtbl =

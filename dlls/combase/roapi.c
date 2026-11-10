@@ -347,6 +347,24 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    if (!wcsncmp(classid, L"CalculatorApp.ViewModel.", 24))
+    {
+        *out = wcsdup(L"CalcViewModel.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"GraphControl.", 13))
+    {
+        *out = wcsdup(L"GraphControl.dll");
+        return S_OK;
+    }
+
+    if (!wcsncmp(classid, L"TraceLogging.", 13))
+    {
+        *out = wcsdup(L"TraceLogging.dll");
+        return S_OK;
+    }
+
     /* Windows.UI.Composition.Compositor is the class the XAML/Composition root of an
      * unpackaged WinUI 3 app activates on its UI thread (WhatsApp Desktop startup).  Such
      * an app registers its activatable classes through its framework package, so an
@@ -628,9 +646,9 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
                     WCHAR dll_name[MAX_PATH];
                     HMODULE h;
 
-                    if (i + 5 >= MAX_PATH) continue;
-                    memcpy( dll_name, classid, i * sizeof(WCHAR) );
-                    wcscpy( dll_name + i, L".dll" );
+                    if (i + 4 >= MAX_PATH) continue;
+                    memcpy( dll_name, classid, (i - 1) * sizeof(WCHAR) );
+                    wcscpy( dll_name + (i - 1), L".dll" );
                     if ((h = LoadLibraryW( dll_name )))
                     {
                         FreeLibrary( h );

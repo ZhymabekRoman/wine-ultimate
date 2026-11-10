@@ -46,7 +46,7 @@
 
 static HRESULT (WINAPI *pDCompositionCreateDevice2)( IUnknown *rendering_device, REFIID iid, void **device );
 
-static unsigned int notified_loads;
+static LONG notified_loads;
 static WCHAR loaded_names[16][MAX_PATH];
 
 static void WINAPI dll_load_notification( ULONG reason, LDR_DLL_NOTIFICATION_DATA *data, void *context )

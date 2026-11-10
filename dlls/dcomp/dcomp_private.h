@@ -24,6 +24,8 @@
 #include <d3d11.h>
 #include "wine/list.h"
 
+struct wined3d_swapchain;
+
 struct composition_device
 {
     IDCompositionDevice IDCompositionDevice_iface;
@@ -139,6 +141,7 @@ struct composition_visual
     ID2D1DeviceContext *device_context;
     IUnknown *content;
     GUID content_iid;
+    struct wined3d_swapchain *wined3d_swapchain;
     enum DCOMPOSITION_BITMAP_INTERPOLATION_MODE interpolation_mode;
     enum DCOMPOSITION_BORDER_MODE border_mode;
     enum DCOMPOSITION_BACKFACE_VISIBILITY visibility;
@@ -158,6 +161,7 @@ struct composition_visual
     int version;
     unsigned int content_version;   /* bumped whenever the visual content is (re)set: change counter */
     unsigned int composited_version;/* content_version as of the last blit to the window */
+    HWND composited_hwnd;           /* window last composited into */
     LONG ref;
 };
 
@@ -225,6 +229,9 @@ HRESULT create_visual(int version, REFIID iid, void **visual);
 HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, void **new_visual);
 HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXGISurface *dxgi_surface, IUnknown **out_surface);
 void ensure_composite_thread(struct composition_device *device);
+BOOL dcomp_has_active_composite_thread(void);
+void visual_tree_mark_dirty(struct composition_visual *visual);
+struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain);
 extern struct list dcomp_devices;
 
 

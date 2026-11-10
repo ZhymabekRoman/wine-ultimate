@@ -67,6 +67,15 @@ static CRITICAL_SECTION_DEBUG dcomp_debug =
 };
 static CRITICAL_SECTION dcomp_cs = { &dcomp_debug, -1, 0, 0, 0, 0 };
 
+static CRITICAL_SECTION composite_render_cs;
+static CRITICAL_SECTION_DEBUG composite_render_debug =
+{
+    0, 0, &composite_render_cs,
+    { &composite_render_debug.ProcessLocksList, &composite_render_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": composite_render_cs") }
+};
+static CRITICAL_SECTION composite_render_cs = { &composite_render_debug, -1, 0, 0, 0, 0 };
+
 void dcomp_lock(void)
 {
     EnterCriticalSection(&dcomp_cs);
@@ -1104,10 +1113,38 @@ struct dcomp_reclaim_entry
     struct list entry;
 };
 
+BOOL dcomp_has_active_composite_thread(void)
+{
+    struct composition_device *dev;
+    BOOL active = FALSE;
+
+    dcomp_lock();
+    LIST_FOR_EACH_ENTRY(dev, &dcomp_devices, struct composition_device, dev_entry)
+    {
+        if (dev->thread && !dev->thread_exited)
+        {
+            active = TRUE;
+            break;
+        }
+    }
+    dcomp_unlock();
+    return active;
+}
+
 void dcomp_reclaim_push(IUnknown *object)
 {
-    struct dcomp_reclaim_entry *entry = malloc(sizeof(*entry));
+    struct dcomp_reclaim_entry *entry;
 
+    if (!object)
+        return;
+
+    if (!dcomp_has_active_composite_thread())
+    {
+        IUnknown_Release(object);
+        return;
+    }
+
+    entry = malloc(sizeof(*entry));
     if (!entry)
     {
         /* Out of memory: releasing here is safe on the caller's side, which is
@@ -1246,7 +1283,7 @@ static void collect_visual_frames(struct composition_target *target, struct comp
         }
     }
 
-    if (visual->content && visual->content_version != visual->composited_version)
+    if (visual->content && (visual->content_version != visual->composited_version || visual->composited_hwnd != target_hwnd))
     {
         if ((frame = malloc(sizeof(*frame))))
         {
@@ -1547,13 +1584,25 @@ static void render_composite_frame(struct composite_frame *frame)
      * command stream thread. This replaces the GetBuffer(0) + Direct2D GDI
      * interop + BitBlt copy for swapchain content; the drawable lease is
      * honored by wined3d_swapchain_present itself. */
-    if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain)))
+    if (frame->visual && frame->visual->wined3d_swapchain)
+    {
+        struct wined3d_swapchain *wined3d_swapchain = frame->visual->wined3d_swapchain;
+
+        if (frame->target_hwnd && IsWindow(frame->target_hwnd))
+            wined3d_swapchain_set_window(wined3d_swapchain, frame->target_hwnd);
+        wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, frame->target_hwnd, 0, 0);
+        frame->rendered = TRUE;
+        goto done;
+    }
+    else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain)))
     {
         struct wined3d_swapchain *wined3d_swapchain = dxgi_get_wined3d_swapchain(swapchain);
 
         if (wined3d_swapchain)
         {
-            wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, NULL, 0, 0);
+            if (frame->target_hwnd && IsWindow(frame->target_hwnd))
+                wined3d_swapchain_set_window(wined3d_swapchain, frame->target_hwnd);
+            wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, frame->target_hwnd, 0, 0);
             frame->rendered = TRUE;
         }
         IDXGISwapChain_Release(swapchain);
@@ -1645,7 +1694,10 @@ static void composite_device(struct composition_device *device)
         if (frame->is_fallback)
             frame->target->composited_surface = frame->surface;
         else
+        {
             frame->visual->composited_version = frame->version;
+            frame->visual->composited_hwnd = frame->target_hwnd;
+        }
     }
     dcomp_unlock();
 
@@ -1698,11 +1750,15 @@ static DWORD WINAPI composite_thread_proc(void *iface)
          * same tick: the CoreMessaging lifted-input workers that parked on the
          * commit-completion event then advance on the present cadence instead of
          * only when the app calls into device_Commit / WaitForCommitCompletion. */
-        if (g_compositor_clock_event)
-            ResetEvent(g_compositor_clock_event);
-        composite_device(device);
-        if (g_compositor_clock_event)
-            SetEvent(g_compositor_clock_event);
+        if (TryEnterCriticalSection(&composite_render_cs))
+        {
+            if (g_compositor_clock_event)
+                ResetEvent(g_compositor_clock_event);
+            composite_device(device);
+            if (g_compositor_clock_event)
+                SetEvent(g_compositor_clock_event);
+            LeaveCriticalSection(&composite_render_cs);
+        }
         /* Throttle the completion-side pulses to ~30Hz (every 2nd present tick).
          * A full-60Hz commit-completion pulse drives the composition churn so hard
          * the WebView2 browser tears down early (ShowWindow climbs, LRPC drain is
@@ -1833,6 +1889,14 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
 
     ensure_composite_thread(device);
 
+    EnterCriticalSection(&composite_render_cs);
+    composite_device(device);
+    if (g_compositor_clock_event)
+        SetEvent(g_compositor_clock_event);
+    if (g_commit_completion_event)
+        SetEvent(g_commit_completion_event);
+    LeaveCriticalSection(&composite_render_cs);
+
     return hr;
 }
 
@@ -1863,13 +1927,27 @@ static HRESULT STDMETHODCALLTYPE device_CreateTargetForHwnd(IDCompositionDevice 
 
     TRACE("DCOMP: device_CreateTargetForHwnd iface %p, hwnd %p, topmost %d, target %p\n", iface, hwnd, topmost, target);
 
+    if (!target)
+        return E_INVALIDARG;
+    *target = NULL;
+    if (!hwnd || hwnd == GetDesktopWindow())
+        return E_INVALIDARG;
+
     return create_target(device, hwnd, topmost, target);
 }
 
 static HRESULT STDMETHODCALLTYPE device_CreateVisual(IDCompositionDevice *iface,
         IDCompositionVisual **visual)
 {
-    HRESULT hr = create_visual(1, &IID_IDCompositionVisual, (void **)visual);
+    HRESULT hr;
+
+    TRACE("iface %p, visual %p\n", iface, visual);
+
+    if (!visual)
+        return E_INVALIDARG;
+    *visual = NULL;
+
+    hr = create_visual(1, &IID_IDCompositionVisual, (void **)visual);
     TRACE("DCOMP: device_CreateVisual iface %p, out_visual %p, hr %#lx\n", iface, *visual, hr);
     return hr;
 }
@@ -2547,7 +2625,15 @@ static HRESULT STDMETHODCALLTYPE desktop_device_GetFrameStatistics(IDComposition
 static HRESULT STDMETHODCALLTYPE desktop_device_CreateVisual(IDCompositionDeviceUnknown *iface,
         IDCompositionVisual2 **visual)
 {
-    HRESULT hr = create_visual(2, &IID_IDCompositionVisual2, (void **)visual);
+    HRESULT hr;
+
+    TRACE("iface %p, visual %p\n", iface, visual);
+
+    if (!visual)
+        return E_INVALIDARG;
+    *visual = NULL;
+
+    hr = create_visual(2, &IID_IDCompositionVisual2, (void **)visual);
     TRACE("DCOMP: desktop_device_CreateVisual iface %p, out_visual %p, hr %#lx\n", iface, *visual, hr);
     return hr;
 }

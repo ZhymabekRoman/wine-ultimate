@@ -500,7 +500,7 @@ static void test_desktop_device_partner(IDXGIDevice *dxgi_device)
     hr = IDCompositionVisual_QueryInterface(visual, &IID_IDCompositionVisual, (void **)&unknown);
     ok(hr == S_OK, "resource QI IDCompositionVisual hr %#lx, expected S_OK.\n", hr);
     if (SUCCEEDED(hr))
-        IDCompositionVisual_Release(unknown);
+        IDCompositionVisual_Release((IDCompositionVisual *)unknown);
     hr = IDCompositionVisual_SetOffsetX(visual, 0.0f);
     ok(hr == S_OK, "SetOffsetX hr %#lx, expected S_OK.\n", hr);
 
@@ -533,7 +533,7 @@ static void test_desktop_device_partner(IDXGIDevice *dxgi_device)
         if (SUCCEEDED(hr))
         {
             out = NULL;
-            hr = pCreateFromSharedVisualHandle(receiver_partner, handle, &IID_IDCompositionVisual, &out);
+            hr = pCreateFromSharedVisualHandle(receiver_partner, handle, &IID_IDCompositionVisual, (void **)&out);
             ok(hr == S_OK, "CreateFromSharedVisualHandle hr %#lx, expected S_OK.\n", hr);
             ok(out != NULL, "CreateFromSharedVisualHandle returned no object.\n");
             if (SUCCEEDED(hr) && out)
@@ -542,7 +542,7 @@ static void test_desktop_device_partner(IDXGIDevice *dxgi_device)
                 hr = IUnknown_QueryInterface(out, &IID_IDCompositionVisual, (void **)&unknown);
                 ok(hr == S_OK, "round-trip object QI IDCompositionVisual hr %#lx, expected S_OK.\n", hr);
                 if (SUCCEEDED(hr))
-                    IDCompositionVisual_Release(unknown);
+                    IDCompositionVisual_Release((IDCompositionVisual *)unknown);
                 IUnknown_Release(out);
             }
             IUnknown_Release(receiver_partner);
@@ -551,7 +551,7 @@ static void test_desktop_device_partner(IDXGIDevice *dxgi_device)
         /* A bogus handle must fail cleanly. */
         out = NULL;
         hr = pCreateFromSharedVisualHandle(receiver_partner ? receiver_partner : partner,
-                (HANDLE)(UINT_PTR)0x1234, &IID_IDCompositionVisual, &out);
+                (HANDLE)(UINT_PTR)0x1234, &IID_IDCompositionVisual, (void **)&out);
         ok(FAILED(hr), "CreateFromSharedVisualHandle(bogus handle) hr %#lx, expected failure.\n", hr);
         if (SUCCEEDED(hr) && out)
             IUnknown_Release(out);

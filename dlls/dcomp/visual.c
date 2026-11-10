@@ -77,6 +77,7 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
         visual->device_context = NULL;
         visual->clip = NULL;
         visual->content = NULL;
+        visual->wined3d_swapchain = NULL;
 
         dcomp_lock();
         if (visual->is_child)
@@ -123,7 +124,10 @@ static HRESULT STDMETHODCALLTYPE visual_SetOffsetX(IDCompositionVisualUnknown *i
 
     TRACE("iface %p, offset_x %f.\n", iface, offset_x);
 
+    dcomp_lock();
     visual->offset_x = offset_x;
+    visual->content_version++;
+    dcomp_unlock();
     return S_OK;
 }
 
@@ -140,7 +144,10 @@ static HRESULT STDMETHODCALLTYPE visual_SetOffsetY(IDCompositionVisualUnknown *i
 
     TRACE("iface %p, offset_y %f.\n", iface, offset_y);
 
+    dcomp_lock();
     visual->offset_y = offset_y;
+    visual->content_version++;
+    dcomp_unlock();
     return S_OK;
 }
 
@@ -155,8 +162,11 @@ static HRESULT STDMETHODCALLTYPE visual_SetTransformObject(IDCompositionVisualUn
     /* The transform is applied by the compositor at draw time; Wine keeps the
      * object so that later queries and the visual's teardown can use it. */
     if (transform) IDCompositionTransform_AddRef(transform);
+    dcomp_lock();
     old = visual->transform;
     visual->transform = transform;
+    visual->content_version++;
+    dcomp_unlock();
     if (old) IDCompositionTransform_Release(old);
 
     return S_OK;
@@ -233,6 +243,7 @@ static HRESULT STDMETHODCALLTYPE visual_SetClipObject(IDCompositionVisualUnknown
         IDCompositionClip_AddRef(clip);
     visual->clip = clip;
     visual->has_rect_clip = FALSE;
+    visual->content_version++;
     dcomp_unlock();
 
     if (old)
@@ -247,6 +258,9 @@ static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *ifac
 
     TRACE("DCOMP: visual_SetClip iface %p, rect %p.\n", iface, rect);
 
+    if (!rect)
+        return E_INVALIDARG;
+
     /* Store the rectangle clip and succeed; the compositor does not apply it.  The
      * rect is by-value (a reference in the C++ signature), so it is always valid. */
     dcomp_lock();
@@ -257,6 +271,7 @@ static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *ifac
         IDCompositionClip_Release(visual->clip);
         visual->clip = NULL;
     }
+    visual->content_version++;
     dcomp_unlock();
 
     return S_OK;
@@ -265,9 +280,10 @@ static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *ifac
 static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *iface, IUnknown *content)
 {
     struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+    struct wined3d_swapchain *wined3d_swapchain = NULL;
     ID2D1GdiInteropRenderTarget *interop = NULL;
     ID2D1DeviceContext *device_context = NULL;
-    IDXGISwapChain1 *dxgi_swapchain = NULL;
+    IDXGISwapChain *dxgi_swapchain = NULL;
     IDCompositionSurface *suface = NULL;
     IDXGISurface *dxgi_surface = NULL;
     ID3D11Texture2D *texture = NULL;
@@ -286,18 +302,24 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
      * swap is done under it. */
     if (content)
     {
-        if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain1,
+        if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain,
+                (void **)&dxgi_swapchain)) ||
+            SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain1,
                 (void **)&dxgi_swapchain)))
         {
-            iid = &IID_IDXGISwapChain1;
-
-            hr = IDXGISwapChain1_GetDevice(dxgi_swapchain, &IID_IDXGIDevice, (void **)&dxgi_device);
-            IDXGISwapChain1_Release(dxgi_swapchain);
-            if (FAILED(hr))
+            iid = &IID_IDXGISwapChain;
+            wined3d_swapchain = dxgi_get_wined3d_swapchain(dxgi_swapchain);
+            if (!wined3d_swapchain)
             {
-                ERR("Failed to get the swapchain device, hr %#lx.\n", hr);
-                return hr;
+                hr = IDXGISwapChain_GetDevice(dxgi_swapchain, &IID_IDXGIDevice, (void **)&dxgi_device);
+                if (FAILED(hr))
+                {
+                    IDXGISwapChain_Release(dxgi_swapchain);
+                    ERR("Failed to get the swapchain device, hr %#lx.\n", hr);
+                    return hr;
+                }
             }
+            IDXGISwapChain_Release(dxgi_swapchain);
         }
         else if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDCompositionSurface, (void **)&suface)))
         {
@@ -358,33 +380,36 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
         }
         else
         {
-            FIXME("Only IDXGISwapChain1, IDCompositionSurface, or IDXGISurface are currently supported.\n");
+            FIXME("Only IDXGISwapChain, IDCompositionSurface, or IDXGISurface are currently supported.\n");
             return E_INVALIDARG;
         }
 
-        hr = D2D1CreateDevice(dxgi_device, NULL, &d2d_device);
-        IDXGIDevice_Release(dxgi_device);
-        if (FAILED(hr))
+        if (dxgi_device)
         {
-            ERR("Failed to create a D2D device, hr %#lx.\n", hr);
-            return hr;
-        }
+            hr = D2D1CreateDevice(dxgi_device, NULL, &d2d_device);
+            IDXGIDevice_Release(dxgi_device);
+            if (FAILED(hr))
+            {
+                ERR("Failed to create a D2D device, hr %#lx.\n", hr);
+                return hr;
+            }
 
-        hr = ID2D1Device_CreateDeviceContext(d2d_device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
-                &device_context);
-        ID2D1Device_Release(d2d_device);
-        if (FAILED(hr))
-        {
-            ERR("Failed to create a D2D device context, hr %#lx.\n", hr);
-            return hr;
-        }
+            hr = ID2D1Device_CreateDeviceContext(d2d_device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE,
+                    &device_context);
+            ID2D1Device_Release(d2d_device);
+            if (FAILED(hr))
+            {
+                ERR("Failed to create a D2D device context, hr %#lx.\n", hr);
+                return hr;
+            }
 
-        if (FAILED(hr = ID2D1DeviceContext_QueryInterface(device_context,
-                &IID_ID2D1GdiInteropRenderTarget, (void **)&interop)))
-        {
-            ERR("Failed to get a ID2D1GdiInteropRenderTarget, hr %#lx.\n", hr);
-            ID2D1DeviceContext_Release(device_context);
-            return hr;
+            if (FAILED(hr = ID2D1DeviceContext_QueryInterface(device_context,
+                    &IID_ID2D1GdiInteropRenderTarget, (void **)&interop)))
+            {
+                ERR("Failed to get a ID2D1GdiInteropRenderTarget, hr %#lx.\n", hr);
+                ID2D1DeviceContext_Release(device_context);
+                return hr;
+            }
         }
     }
 
@@ -396,12 +421,14 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
     visual->interop = NULL;
     visual->device_context = NULL;
     visual->content = NULL;
+    visual->wined3d_swapchain = NULL;
 
     if (content)
     {
         IUnknown_AddRef(content);
         visual->content = content;
         visual->content_iid = *iid;
+        visual->wined3d_swapchain = wined3d_swapchain;
         visual->device_context = device_context;
         visual->interop = interop;
     }
@@ -412,17 +439,41 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
 
     dcomp_unlock();
 
-    /* Releasing the replaced objects enters Direct3D and GDI, and a composite
-     * snapshot may still hold their pointers: defer them to the reclaim list,
-     * which the composite thread drops once no frame is in flight. */
-    if (old_interop)
-        dcomp_reclaim_push((IUnknown *)old_interop);
-    if (old_context)
-        dcomp_reclaim_push((IUnknown *)old_context);
-    if (old_content)
-        dcomp_reclaim_push(old_content);
+    /* Releasing the replaced objects enters Direct3D and GDI. If a composite thread
+     * is active and this visual is part of a visual tree, defer them to the reclaim list;
+     * otherwise release immediately. */
+    if (dcomp_has_active_composite_thread() && (visual->is_root || visual->is_child || visual->parent))
+    {
+        if (old_interop)
+            dcomp_reclaim_push((IUnknown *)old_interop);
+        if (old_context)
+            dcomp_reclaim_push((IUnknown *)old_context);
+        if (old_content)
+            dcomp_reclaim_push(old_content);
+    }
+    else
+    {
+        if (old_interop)
+            ID2D1GdiInteropRenderTarget_Release(old_interop);
+        if (old_context)
+            ID2D1DeviceContext_Release(old_context);
+        if (old_content)
+            IUnknown_Release(old_content);
+    }
 
     return S_OK;
+}
+
+void visual_tree_mark_dirty(struct composition_visual *visual)
+{
+    struct composition_visual *child;
+
+    if (!visual)
+        return;
+    if (visual->content)
+        visual->content_version++;
+    LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
+        visual_tree_mark_dirty(child);
 }
 
 static HRESULT STDMETHODCALLTYPE visual_AddVisual(IDCompositionVisualUnknown *iface,
@@ -466,6 +517,8 @@ static HRESULT STDMETHODCALLTYPE visual_AddVisual(IDCompositionVisualUnknown *if
 
     child_visual_impl->is_child = TRUE;
     child_visual_impl->parent = parent_visual_impl;
+    parent_visual_impl->content_version++;
+    visual_tree_mark_dirty(child_visual_impl);
     dcomp_unlock();
     return S_OK;
 }
@@ -476,7 +529,7 @@ static HRESULT STDMETHODCALLTYPE visual_RemoveVisual(IDCompositionVisualUnknown 
     struct composition_visual *parent_visual_impl = impl_from_IDCompositionVisualUnknown(iface);
     struct composition_visual *child_visual_impl;
 
-    FIXME("iface %p, visual %p.\n", iface, visual);
+    TRACE("iface %p, visual %p.\n", iface, visual);
 
     if (!visual)
         return E_INVALIDARG;
@@ -492,6 +545,8 @@ static HRESULT STDMETHODCALLTYPE visual_RemoveVisual(IDCompositionVisualUnknown 
     list_remove(&child_visual_impl->entry);
     child_visual_impl->is_child = FALSE;
     child_visual_impl->parent = NULL;
+    parent_visual_impl->content_version++;
+    visual_tree_mark_dirty(child_visual_impl);
     dcomp_unlock();
     return S_OK;
 }
@@ -501,7 +556,7 @@ static HRESULT STDMETHODCALLTYPE visual_RemoveAllVisuals(IDCompositionVisualUnkn
     struct composition_visual *parent_visual_impl = impl_from_IDCompositionVisualUnknown(iface);
     struct composition_visual *child_visual_impl;
 
-    FIXME("iface %p.\n", iface);
+    TRACE("iface %p.\n", iface);
 
     dcomp_lock();
     LIST_FOR_EACH_ENTRY(child_visual_impl, &parent_visual_impl->child_visuals, struct composition_visual, entry)
@@ -509,7 +564,9 @@ static HRESULT STDMETHODCALLTYPE visual_RemoveAllVisuals(IDCompositionVisualUnkn
         list_remove(&child_visual_impl->entry);
         child_visual_impl->is_child = FALSE;
         child_visual_impl->parent = NULL;
+        visual_tree_mark_dirty(child_visual_impl);
     }
+    parent_visual_impl->content_version++;
     dcomp_unlock();
     return S_OK;
 }
@@ -1287,6 +1344,7 @@ HRESULT create_visual(int version, REFIID iid, void **new_visual)
 
     if (!new_visual)
         return E_INVALIDARG;
+    *new_visual = NULL;
 
     visual = calloc(1, sizeof(*visual));
     if (!visual)
