@@ -249,6 +249,14 @@ NTSTATUS WINAPI dispatch_exception( EXCEPTION_RECORD *rec, CONTEXT *context )
     for (i = 0; i < min( EXCEPTION_MAXIMUM_PARAMETERS, rec->NumberParameters ); i++)
         TRACE( " info[%ld]=%p\n", i, (void *)rec->ExceptionInformation[i] );
     TRACE_CONTEXT( context );
+#ifdef _WIN64
+    if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION && context->Rsp)
+    {
+        ULONG_PTR *stack = (ULONG_PTR *)context->Rsp;
+        TRACE( "  stack[0]=%p stack[1]=%p stack[2]=%p stack[3]=%p stack[4]=%p stack[5]=%p\n",
+               (void*)stack[0], (void*)stack[1], (void*)stack[2], (void*)stack[3], (void*)stack[4], (void*)stack[5] );
+    }
+#endif
 
     if (call_vectored_handlers( rec, context ) == EXCEPTION_CONTINUE_EXECUTION)
         NtContinue( context, FALSE );

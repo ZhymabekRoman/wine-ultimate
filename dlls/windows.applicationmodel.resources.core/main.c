@@ -2541,12 +2541,12 @@ static HRESULT WINAPI iter_GetMany_Pair( void *iface, UINT32 size, void **items,
 static const void *iterator_string_vtbl[] =
 {
     iter_QueryInterface, iter_AddRef, iter_Release, iter_GetIids, iter_GetRuntimeClassName, iter_GetTrustLevel,
-    iter_MoveNext, iter_GetCurrent_String, iter_HasCurrent, iter_GetMany_String,
+    iter_GetCurrent_String, iter_HasCurrent, iter_MoveNext, iter_GetMany_String,
 };
 static const void *iterator_pair_vtbl[] =
 {
     iter_QueryInterface, iter_AddRef, iter_Release, iter_GetIids, iter_GetRuntimeClassName, iter_GetTrustLevel,
-    iter_MoveNext, iter_GetCurrent_Pair, iter_HasCurrent, iter_GetMany_Pair,
+    iter_GetCurrent_Pair, iter_HasCurrent, iter_MoveNext, iter_GetMany_Pair,
 };
 static struct iterator *iter_new( UINT8 kind, void *src, UINT32 count, const void *vtbl )
 {
@@ -4416,6 +4416,7 @@ struct res_manager
     const void *vt_rm;
     const void *vt_rm2;
     LONG ref;
+    struct ref_tracker rt;
 };
 static inline struct res_manager *rm_from( void *iface ) { return (struct res_manager *)iface; }
 static inline struct res_manager *rm2_from( void *iface ) { return (struct res_manager *)((BYTE *)iface - sizeof(void *)); }
@@ -4450,6 +4451,11 @@ static HRESULT WINAPI rm_QueryInterface( void *iface, REFIID iid, void **out )
     {
         *out = &impl->vt_rm;
         incr( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = &impl->rt;
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IResourceManager2_g ))
@@ -4556,6 +4562,11 @@ static const void *res_manager_vtbl[] =
     rm_CurrentCulture, rm_put_CurrentCulture,
     rm_MainResourceMap, rm_AllResourceMaps, rm_DefaultContext, rm_LoadPriFiles, rm_UnloadPriFiles,
 };
+static const void *res_manager_store_vtbl[] =
+{
+    rm_QueryInterface, rm_AddRef, rm_Release, rm_GetIids, rm_GetRuntimeClassName, rm_GetTrustLevel,
+    rm_MainResourceMap, rm_AllResourceMaps, rm_DefaultContext, rm_LoadPriFiles, rm_UnloadPriFiles,
+};
 static HRESULT WINAPI rm2_QueryInterface( void *iface, REFIID iid, void **out ) { return rm_QueryInterface( rm2_from( iface ), iid, out ); }
 static ULONG WINAPI rm2_AddRef( void *iface ) { return incr( &rm2_from( iface )->ref ); }
 static ULONG WINAPI rm2_Release( void *iface ) { return decr( &rm2_from( iface )->ref ); }
@@ -4641,7 +4652,8 @@ static const void *res_manager2_vtbl[] =
     rm2_CandidateLanguages, rm2_InsertResourceFile, rm2_InsertResourceStream,
     rm2_GetAllNamedResourcesForPackage, rm2_GetAllSubtreesForPackage,
 };
-static struct res_manager res_manager_inst = { res_manager_vtbl, res_manager2_vtbl, 1 };
+static struct res_manager res_manager_inst = { res_manager_vtbl, res_manager2_vtbl, 1,
+    { rc_tracker_vtbl, offsetof( struct res_manager, rt ), 0, 0, 0 } };
 
 /* ---- ResourceLoader faces (see the struct res_loader note) ---- */
 static HRESULT WINAPI loader_QueryInterface( void *iface, REFIID iid, void **out )
@@ -4749,6 +4761,7 @@ struct rm_factory
 {
     const void *vt_primary;
     const void *vt_statics;
+    struct ref_tracker rt;
 };
 static struct rm_factory *rmf_from( void *iface ) { return (struct rm_factory *)iface; }
 static struct rm_factory *rmf_from_s( void *iface, size_t off ) { return (struct rm_factory *)((BYTE *)iface - off); }
@@ -4767,6 +4780,11 @@ static HRESULT WINAPI rmf_QueryInterface( void *iface, REFIID iid, void **out )
         *out = &impl->vt_statics;
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = &impl->rt;
+        return S_OK;
+    }
     FIXME( "%s not implemented\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -4780,6 +4798,8 @@ static HRESULT WINAPI rmf_ActivateInstance( void *iface, void **instance )
 {
     TRACE( "rmf_ActivateInstance enter\n" );
 
+    if (is_store_app())
+        res_manager_inst.vt_rm = res_manager_store_vtbl;
     *instance = &res_manager_inst.vt_rm;
     incr( &res_manager_inst.ref );
     return S_OK;
@@ -4798,6 +4818,8 @@ static HRESULT WINAPI rms_GetTrustLevel( void *iface, INT32 *t ) { return get_tr
 static HRESULT WINAPI rms_Current( void *iface, void **out )
 {
     TRACE( "ResourceManager::Current\n" );
+    if (is_store_app())
+        res_manager_inst.vt_rm = res_manager_store_vtbl;
     *out = &res_manager_inst.vt_rm;
     incr( &res_manager_inst.ref );
     return S_OK;
@@ -4816,7 +4838,8 @@ static const void *rm_statics_vtbl[] =
     rms_QueryInterface, rms_AddRef, rms_Release, rms_GetIids, rms_GetRuntimeClassName, rms_GetTrustLevel,
     rms_Current, rms_IsResourceReference,
 };
-static struct rm_factory rm_factory_inst = { rm_factory_vtbl, rm_statics_vtbl };
+static struct rm_factory rm_factory_inst = { rm_factory_vtbl, rm_statics_vtbl,
+    { rc_tracker_vtbl, offsetof( struct rm_factory, rt ), 0, 0, 0 } };
 
 /* passive factories for non-activatable classes */
 struct simple_factory

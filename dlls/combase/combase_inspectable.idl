@@ -1,0 +1,8 @@
+#pragma makedep proxy
+
+#include "inspectable.idl"
+
+[
+    threading(both),
+]
+coclass PSFactoryBuffer { interface IPSFactoryBuffer; }

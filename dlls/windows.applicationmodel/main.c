@@ -1388,6 +1388,14 @@ WINAPPSDK_CLASS( deployment_init_options, "Microsoft.Windows.ApplicationModel.Wi
 WINAPPSDK_CLASS( create_package_dependency_options, "Microsoft.Windows.ApplicationModel.DynamicDependency.CreatePackageDependencyOptions" );
 WINAPPSDK_CLASS( package_dependency_rank, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyRank" );
 WINAPPSDK_CLASS( environment_manager, "Microsoft.Windows.System.EnvironmentManager" );
+WINAPPSDK_CLASS( app_install_manager, "Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallManager" );
+WINAPPSDK_CLASS( app_install_options, "Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallOptions" );
+WINAPPSDK_CLASS( app_update_options, "Windows.ApplicationModel.Store.Preview.InstallControl.AppUpdateOptions" );
+WINAPPSDK_CLASS( store_configuration, "Windows.ApplicationModel.Store.Preview.StoreConfiguration" );
+WINAPPSDK_CLASS( store_system_feature, "Windows.ApplicationModel.Store.Preview.StoreSystemFeature" );
+WINAPPSDK_CLASS( web_auth_core_helper, "Windows.ApplicationModel.Store.Preview.WebAuthenticationCoreManagerHelper" );
+WINAPPSDK_CLASS( license_manager, "Windows.ApplicationModel.Store.LicenseManagement.LicenseManager" );
+WINAPPSDK_CLASS( store_context, "Windows.Services.Store.StoreContext" );
 
 WINAPPSDK_CLASS_V( deployment_result, deployment_result_vtbl, "Microsoft.Windows.ApplicationModel.WindowsAppRuntime.DeploymentResult" );
 WINAPPSDK_CLASS_V( package_dependency_context, package_dependency_context_vtbl, "Microsoft.Windows.ApplicationModel.DynamicDependency.PackageDependencyContext" );
@@ -1427,6 +1435,22 @@ winappsdk_classes[] =
       (IActivationFactory *)&package_dependency_rank_factory },
     { L"Microsoft.Windows.System.EnvironmentManager",
       (IActivationFactory *)&environment_manager_factory },
+    { L"Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallManager",
+      (IActivationFactory *)&app_install_manager_factory },
+    { L"Windows.ApplicationModel.Store.Preview.InstallControl.AppInstallOptions",
+      (IActivationFactory *)&app_install_options_factory },
+    { L"Windows.ApplicationModel.Store.Preview.InstallControl.AppUpdateOptions",
+      (IActivationFactory *)&app_update_options_factory },
+    { L"Windows.ApplicationModel.Store.Preview.StoreConfiguration",
+      (IActivationFactory *)&store_configuration_factory },
+    { L"Windows.ApplicationModel.Store.Preview.StoreSystemFeature",
+      (IActivationFactory *)&store_system_feature_factory },
+    { L"Windows.ApplicationModel.Store.Preview.WebAuthenticationCoreManagerHelper",
+      (IActivationFactory *)&web_auth_core_helper_factory },
+    { L"Windows.ApplicationModel.Store.LicenseManagement.LicenseManager",
+      (IActivationFactory *)&license_manager_factory },
+    { L"Windows.Services.Store.StoreContext",
+      (IActivationFactory *)&store_context_factory },
 };
 
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
@@ -1464,6 +1488,12 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
                                                    &IID_IActivationFactory, (void **)factory );
                 break;
             }
+        if (!*factory && (!wcsncmp( buffer, L"Windows.ApplicationModel.Store.", 31 ) ||
+                          !wcsncmp( buffer, L"Windows.Services.Store.", 23 )))
+        {
+            IActivationFactory_QueryInterface( (IActivationFactory *)&app_install_manager_factory,
+                                               &IID_IActivationFactory, (void **)factory );
+        }
     }
 
     if (*factory) return S_OK;

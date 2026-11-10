@@ -65,10 +65,10 @@ static HRESULT WINAPI app_view_activated_Invoke(
     if (current_application && current_application->outer)
     {
         void **vtbl = *(void ***)current_application->outer;
-        HRESULT (WINAPI *on_launched)( void *, void *, void * ) = (void *)vtbl[7];
-        TRACE( "invoking App OnLaunched %p (outer %p, sender %p, args %p)\n",
-               on_launched, current_application->outer, sender, args );
-        if (on_launched) on_launched( current_application->outer, sender, args );
+        HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)vtbl[7];
+        TRACE( "invoking App OnLaunched %p (outer %p, args %p)\n",
+               on_launched, current_application->outer, args );
+        if (on_launched) on_launched( current_application->outer, args );
     }
     return S_OK;
 }
@@ -790,10 +790,9 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         return S_OK;
     }
 
-    /* Mcg projection queries interfaces on Window instance; return IInspectable face */
-    *out = &impl->IInspectable_iface;
-    IInspectable_AddRef( (IInspectable *)*out );
-    return S_OK;
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 
 static ULONG WINAPI xaml_window_AddRef( IInspectable *iface )

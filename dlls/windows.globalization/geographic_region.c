@@ -101,50 +101,81 @@ static HRESULT WINAPI geographic_region_GetTrustLevel( IGeographicRegion *iface,
     return E_NOTIMPL;
 }
 
-static HRESULT WINAPI geographic_region_get_Code( IGeographicRegion *iface, HSTRING *value )
-{
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
-}
-
 static HRESULT WINAPI geographic_region_get_CodeTwoLetter( IGeographicRegion *iface, HSTRING *value )
 {
     WCHAR buffer[LOCALE_NAME_MAX_LENGTH];
 
-    FIXME( "iface %p semi-stub!\n", iface );
+    TRACE( "iface %p, value %p\n", iface, value );
 
-    if (!GetLocaleInfoEx( LOCALE_NAME_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, buffer, ARRAY_SIZE(buffer) )) return E_INVALIDARG;
+    if (!GetLocaleInfoEx( LOCALE_NAME_USER_DEFAULT, LOCALE_SISO3166CTRYNAME, buffer, ARRAY_SIZE(buffer) ))
+        lstrcpyW( buffer, L"US" );
     return WindowsCreateString( buffer, wcslen( buffer ), value );
+}
+
+static HRESULT WINAPI geographic_region_get_Code( IGeographicRegion *iface, HSTRING *value )
+{
+    return geographic_region_get_CodeTwoLetter( iface, value );
 }
 
 static HRESULT WINAPI geographic_region_get_CodeThreeLetter( IGeographicRegion *iface, HSTRING *value )
 {
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
+    WCHAR buffer[LOCALE_NAME_MAX_LENGTH];
+
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    if (!GetLocaleInfoEx( LOCALE_NAME_USER_DEFAULT, LOCALE_SISO3166CTRYNAME2, buffer, ARRAY_SIZE(buffer) ))
+        lstrcpyW( buffer, L"USA" );
+    return WindowsCreateString( buffer, wcslen( buffer ), value );
 }
 
 static HRESULT WINAPI geographic_region_get_CodeThreeDigit( IGeographicRegion *iface, HSTRING *value )
 {
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
+    WCHAR buffer[LOCALE_NAME_MAX_LENGTH];
+
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    lstrcpyW( buffer, L"840" );
+    return WindowsCreateString( buffer, wcslen( buffer ), value );
 }
 
 static HRESULT WINAPI geographic_region_get_DisplayName( IGeographicRegion *iface, HSTRING *value )
 {
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
+    WCHAR buffer[LOCALE_NAME_MAX_LENGTH];
+
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    if (!GetLocaleInfoEx( LOCALE_NAME_USER_DEFAULT, LOCALE_SENGLISHCOUNTRYNAME, buffer, ARRAY_SIZE(buffer) ))
+        lstrcpyW( buffer, L"United States" );
+    return WindowsCreateString( buffer, wcslen( buffer ), value );
 }
 
 static HRESULT WINAPI geographic_region_get_NativeName( IGeographicRegion *iface, HSTRING *value )
 {
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
+    WCHAR buffer[LOCALE_NAME_MAX_LENGTH];
+
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    if (!GetLocaleInfoEx( LOCALE_NAME_USER_DEFAULT, LOCALE_SNATIVECTRYNAME, buffer, ARRAY_SIZE(buffer) ))
+        lstrcpyW( buffer, L"United States" );
+    return WindowsCreateString( buffer, wcslen( buffer ), value );
 }
 
 static HRESULT WINAPI geographic_region_get_CurrenciesInUse( IGeographicRegion *iface, IVectorView_HSTRING **value )
 {
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
+    WCHAR currency[LOCALE_NAME_MAX_LENGTH];
+    HSTRING str;
+    HRESULT hr;
+
+    TRACE( "iface %p, value %p\n", iface, value );
+
+    if (!value) return E_POINTER;
+    if (!GetLocaleInfoEx( LOCALE_NAME_USER_DEFAULT, LOCALE_SINTLSYMBOL, currency, ARRAY_SIZE(currency) ))
+        lstrcpyW( currency, L"USD" );
+
+    if (FAILED( hr = WindowsCreateString( currency, wcslen( currency ), &str ) )) return hr;
+    hr = hstring_vector_create( &str, 1, value );
+    WindowsDeleteString( str );
+    return hr;
 }
 
 static const struct IGeographicRegionVtbl geographic_region_vtbl =

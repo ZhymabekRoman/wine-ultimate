@@ -287,6 +287,27 @@ static struct propertyset_reference_tracker propertyset_tracker =
     &propertyset_tracker_vtbl, 1
 };
 
+static const struct propertyset_reference_tracker_vtbl propertyset_tracker_store_vtbl =
+{
+    tracker_QueryInterface,
+    tracker_AddRef,
+    tracker_Release,
+    tracker_ConnectFromTrackerSource,
+    tracker_DisconnectFromTrackerSource,
+    tracker_FindTrackerTargets,
+    tracker_GetReferenceTrackerManager,
+    tracker_AddRefFromTrackerSource,
+    tracker_ReleaseFromTrackerSource,
+    tracker_PegFromTrackerSource,
+};
+
+static BOOL is_store_app(void)
+{
+    WCHAR path[MAX_PATH];
+    GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
+    return (wcsstr( path, L"WinStore" ) != NULL);
+}
+
 static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface, REFIID iid, void **out )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
@@ -294,6 +315,14 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
     TRACE( "(%p, %s, %p)\n", iface, debugstr_guid( iid ), out );
 
     *out = NULL;
+    if (is_store_app() && IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = &propertyset_tracker;
+        propertyset_tracker.vtbl = &propertyset_tracker_store_vtbl;
+        tracker_AddRef( &propertyset_tracker );
+        TRACE( "handing out tracker face %p, vtbl %p\n", *out, *(void **)*out );
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -387,6 +416,25 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
     struct propertyset *impl = impl_from_IPropertySet( iface );
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
     TRACE( "SHADERPROBE: getiids impl %p count %u cache %p\n", impl, impl->iids_count, impl->iids_cache );
+
+    if (is_store_app())
+    {
+        static const IID store_iids[] =
+        {
+            { 0x8a43ed9f, 0xf4e6, 0x4421, {0xac, 0xf9, 0x1d, 0xab, 0x52, 0x86, 0x4f, 0x42} }, /* IPropertySet */
+            { 0x1b0d3570, 0x0877, 0x5ec2, {0x8a, 0x2c, 0x3b, 0x95, 0x39, 0x50, 0x6a, 0xca} }, /* IMap<HSTRING, IInspectable> */
+            { 0x24f981e5, 0x4f81, 0x5fb2, {0xac, 0xc2, 0x49, 0x2a, 0x64, 0xbd, 0x37, 0x08} }, /* IObservableMap<HSTRING, IInspectable> */
+        };
+        if (iid_count) *iid_count = ARRAY_SIZE( store_iids );
+        if (iids)
+        {
+            IID *array = CoTaskMemAlloc( sizeof( store_iids ) );
+            if (!array) return E_OUTOFMEMORY;
+            memcpy( array, store_iids, sizeof( store_iids ) );
+            *iids = array;
+        }
+        return S_OK;
+    }
 
     if (iid_count) *iid_count = 4; /* filled on the (NULL, NULL) probe itself */
     {

@@ -498,6 +498,15 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    if (!wcscmp(classid, L"Windows.System.DispatcherQueue") ||
+        !wcscmp(classid, L"Windows.System.DispatcherQueueController") ||
+        !wcscmp(classid, L"Microsoft.UI.Dispatching.DispatcherQueue") ||
+        !wcscmp(classid, L"Microsoft.UI.Dispatching.DispatcherQueueController"))
+    {
+        *out = wcsdup(L"coremessaging.dll");
+        return S_OK;
+    }
+
     /* Windows App SDK namespaces.  A packaged WindowsAppSDK app (WhatsApp, the
      * WinUI3 set) activates its runtime classes from Microsoft.WindowsAppRuntime.dll
      * and its MRT Core provider from Microsoft.Windows.ApplicationModel.Resources.dll;
@@ -554,7 +563,9 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
     if (!wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.WindowsAppRuntime.", 53 ) ||
-        !wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.DynamicDependency.", 53 ))
+        !wcsncmp( classid, L"Microsoft.Windows.ApplicationModel.DynamicDependency.", 53 ) ||
+        !wcsncmp( classid, L"Windows.ApplicationModel.Store.", 31 ) ||
+        !wcsncmp( classid, L"Windows.Services.Store.", 23 ))
     {
         *out = wcsdup(L"windows.applicationmodel.dll");
         return S_OK;
@@ -2549,8 +2560,13 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
 {
     IRestrictedErrorInfo *info;
     BOOL ret = FALSE;
+    void *bt[32];
+    USHORT n = RtlCaptureStackBackTrace( 0, 32, bt, NULL );
+    USHORT i;
 
     TRACE( "error %#lx, message %s, exception %p\n", error, debugstr_hstring( message ), language_exception );
+    for (i = 0; i < n; i++)
+        TRACE( "  originate_bt[%u] = %p\n", i, bt[i] );
 
     if (!language_exception) return FALSE;
 

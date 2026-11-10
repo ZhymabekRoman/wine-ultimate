@@ -1217,7 +1217,11 @@ static HRESULT WINAPI dispatcher_queue_statics_GetForCurrentThread( void *iface,
     struct dispatcher_queue *queue = dispatcher_queue_from_thread( GetCurrentThreadId() );
 
     if (!result) return E_POINTER;
-    if (!queue) return E_FAIL;
+    if (!queue)
+    {
+        HRESULT hr = dispatcher_queue_create_current( &queue );
+        if (FAILED(hr)) return hr;
+    }
     *result = &queue->IDispatcherQueue_iface;
     IDispatcherQueue_AddRef( *result );
     return S_OK;

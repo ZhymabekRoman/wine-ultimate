@@ -28,9 +28,18 @@ WINE_DEFAULT_DEBUG_CHANNEL(data);
  * (ReleaseFromTrackerSource, the tracker cycle's per-wrapper tail call).
  * Writer-runs (fields nonzero at relfs/n50) vs write-faults (zero at fatal)
  * bisects in one census. */
+static inline BOOL is_readable_ptr( const void *p, size_t size )
+{
+    MEMORY_BASIC_INFORMATION mbi;
+    if (VirtualQuery( p, &mbi, sizeof(mbi) ) != sizeof(mbi)) return FALSE;
+    if (mbi.State != MEM_COMMIT || (mbi.Protect & PAGE_NOACCESS)) return FALSE;
+    return TRUE;
+}
+
 static void wrdump( const char *tag )
 {
     static const char *const head = (const char *)0x6fff00000000;
+    if (!is_readable_ptr( head, 0x50 )) return;
     fprintf( stderr, "WRDUMP tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n", tag,
              (unsigned long)*(const ULONGLONG *)(head + 0x30),
              (unsigned long)*(const ULONGLONG *)(head + 0x38),
@@ -193,12 +202,15 @@ static void qi_log_record( REFIID iid, HRESULT hr, const char *obj )
     if (n <= 8)
     {
         static const char *const head = (const char *)0x6fff00000000;
-        fprintf( stderr, "WRDUMP n=%ld tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n",
-                 n, obj, (unsigned long)*(const ULONGLONG *)(head + 0x30),
-                 (unsigned long)*(const ULONGLONG *)(head + 0x38),
-                 (unsigned long)*(const ULONGLONG *)(head + 0x40),
-                 (unsigned long)*(const ULONGLONG *)(head + 0x48) );
-        fflush( stderr );
+        if (is_readable_ptr( head, 0x50 ))
+        {
+            fprintf( stderr, "WRDUMP n=%ld tag=%s w30=%016lx w38=%016lx w40=%016lx w48=%016lx\n",
+                     n, obj, (unsigned long)*(const ULONGLONG *)(head + 0x30),
+                     (unsigned long)*(const ULONGLONG *)(head + 0x38),
+                     (unsigned long)*(const ULONGLONG *)(head + 0x40),
+                     (unsigned long)*(const ULONGLONG *)(head + 0x48) );
+            fflush( stderr );
+        }
     }
     if (n == 50)
         wrdump( "n50" );
@@ -578,16 +590,16 @@ static HRESULT WINAPI container_qi_impl( IApplicationDataContainer *iface, REFII
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+    {
+        *out = &appdata_tracker;
+        tracker_AddRef( &appdata_tracker );
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
     {
         *out = &impl->IApplicationDataContainerMethods_iface;
         InterlockedIncrement( &impl->ref );
-        return S_OK;
-    }
-    if (IsEqualGUID( iid, &IID_IReferenceTracker ))
-    {
-        *out = &appdata_tracker;
-        tracker_AddRef( &appdata_tracker );
         return S_OK;
     }
     FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
@@ -1415,9 +1427,13 @@ void application_data_preseed( void )
 {
     static BOOL done;
     void **base = (void **)0x6fff00000000;
+    MEMORY_BASIC_INFORMATION mbi;
 
     if (done) return;
     done = TRUE;
+    if (VirtualQuery( (void *)base, &mbi, sizeof(mbi) ) != sizeof(mbi) ||
+        mbi.State != MEM_COMMIT || (mbi.Protect & (PAGE_NOACCESS | PAGE_READONLY)))
+        return;
     base[0] = (void **)&factory_vtbl;
     base[1] = (void *)&IID_IActivationFactory;
     base[2] = (void **)&application_data_statics_vtbl;
