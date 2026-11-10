@@ -795,10 +795,10 @@ struct application_activation_factory_vtbl
     HRESULT (WINAPI *GetIids)(IActivationFactory *, ULONG *, IID **);
     HRESULT (WINAPI *GetRuntimeClassName)(IActivationFactory *, HSTRING *);
     HRESULT (WINAPI *GetTrustLevel)(IActivationFactory *, TrustLevel *);
-    HRESULT (WINAPI *ActivateInstance)(IActivationFactory *, IInspectable **);
-    HRESULT (WINAPI *CreateInstance)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
     HRESULT (WINAPI *Start)(IApplicationStatics *, IApplicationInitializationCallback *);
+    HRESULT (WINAPI *CreateInstance)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
     HRESULT (WINAPI *get_Current)(IApplicationStatics *, IApplication **);
+    HRESULT (WINAPI *ActivateInstance)(IActivationFactory *, IInspectable **);
 };
 
 static const struct application_activation_factory_vtbl factory_vtbl =
@@ -809,10 +809,10 @@ static const struct application_activation_factory_vtbl factory_vtbl =
     factory_GetIids,
     factory_GetRuntimeClassName,
     factory_GetTrustLevel,
-    factory_ActivateInstance,
-    application_factory_CreateInstance,
     application_statics_Start,
+    application_factory_CreateInstance,
     application_statics_get_Current,
+    factory_ActivateInstance,
 };
 
 /* IApplicationStatics implementation */
@@ -884,12 +884,28 @@ static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
 
     if (SUCCEEDED(hr) && core_app)
     {
+        TRACE( "running CoreApplication with view source %p\n", source );
         hr = ICoreApplication_Run( core_app, &source->IFrameworkViewSource_iface );
         ICoreApplication_Release( core_app );
     }
     else
     {
-        WARN( "Failed to get CoreApplication factory, hr %#lx\n", hr );
+        IFrameworkView *view = NULL;
+        WARN( "Failed to get CoreApplication factory (hr %#lx), running view directly.\n", hr );
+        if (SUCCEEDED(IFrameworkViewSource_CreateView( &source->IFrameworkViewSource_iface, &view )) && view)
+        {
+            hr = IFrameworkView_Run( view );
+            IFrameworkView_Release( view );
+        }
+        else
+        {
+            MSG msg;
+            while (GetMessageW( &msg, NULL, 0, 0 ))
+            {
+                TranslateMessage( &msg );
+                DispatchMessageW( &msg );
+            }
+        }
     }
 
     IFrameworkViewSource_Release( &source->IFrameworkViewSource_iface );
@@ -1006,7 +1022,50 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
             IInspectable_AddRef( *inner );
         }
         if (instance && (void *)instance != (void *)outer)
-            *instance = &impl->IApplication_iface;
+            *instance = NULL;
+
+        /* If this is the main application instance registration (called from Main/App..ctor),
+         * drive the view lifecycle and message pump. In WinRT, Application.Start / base..ctor
+         * blocks for the lifetime of the application view. */
+        {
+            struct view_source *source = calloc( 1, sizeof(*source) );
+            if (source)
+            {
+                ICoreApplication *core_app = NULL;
+                HSTRING class_name;
+                HRESULT hr;
+
+                source->IFrameworkViewSource_iface.lpVtbl = &view_source_vtbl;
+                source->ref = 1;
+
+                hr = WindowsCreateString( L"Windows.ApplicationModel.Core.CoreApplication",
+                                          wcslen( L"Windows.ApplicationModel.Core.CoreApplication" ),
+                                          &class_name );
+                if (SUCCEEDED(hr))
+                {
+                    hr = RoGetActivationFactory( class_name, &IID_ICoreApplication, (void **)&core_app );
+                    WindowsDeleteString( class_name );
+                }
+
+                if (SUCCEEDED(hr) && core_app)
+                {
+                    TRACE( "driving CoreApplication view lifecycle with source %p\n", source );
+                    hr = ICoreApplication_Run( core_app, &source->IFrameworkViewSource_iface );
+                    ICoreApplication_Release( core_app );
+                }
+                else
+                {
+                    IFrameworkView *view = NULL;
+                    WARN( "CoreApplication factory unavailable (hr %#lx), driving view directly\n", hr );
+                    if (SUCCEEDED(IFrameworkViewSource_CreateView( &source->IFrameworkViewSource_iface, &view )) && view)
+                    {
+                        hr = IFrameworkView_Run( view );
+                        IFrameworkView_Release( view );
+                    }
+                }
+                IFrameworkViewSource_Release( &source->IFrameworkViewSource_iface );
+            }
+        }
     }
     else
     {

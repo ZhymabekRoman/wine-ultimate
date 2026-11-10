@@ -2101,6 +2101,11 @@ static void check_command_line( int argc, char *argv[] )
  */
 DECLSPEC_EXPORT void __wine_main( int argc, char *argv[] )
 {
+    if (argc > 1 && strstr( argv[0], "preloader" ))
+    {
+        argc--;
+        argv++;
+    }
     main_argc = argc;
     main_argv = argv;
 

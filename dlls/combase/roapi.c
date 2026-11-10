@@ -340,7 +340,8 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
-    if (!wcsncmp(classid, L"Windows.UI.ViewManagement.", 26))
+    if (!wcsncmp(classid, L"Windows.UI.ViewManagement.", 26) ||
+        !wcsncmp(classid, L"Windows.UI.Core.", 16))
     {
         *out = wcsdup(L"windows.ui.dll");
         return S_OK;
