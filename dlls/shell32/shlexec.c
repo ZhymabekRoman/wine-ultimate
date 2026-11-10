@@ -1953,17 +1953,27 @@ static BOOL SHELL_execute( LPSHELLEXECUTEINFOW sei, SHELL_ExecuteW32 execfunc )
            the file we find could be a Windows executable without the proper extensions, it could
            be seen as unexpected if we start it, so we special case it here. */
         UINT exec_retval;
-        WCHAR *probe_params;
-        const WCHAR *extra = L" 2>apphost.err";
+        WCHAR *norm_params;
         TRACE("No association found, trying as Unix binary %s\n", debugstr_w(wcmd));
-        /* per-process stderr capture probe: gen-2 apphost messages (hostfxr
-         * "A fatal error occurred...") ride the shared shell pipe and get lost
-         * in the census log; point them at a dedicated file */
-        if (probe_params = malloc((lstrlenW(wszParameters) + lstrlenW(extra) + 1) * sizeof(WCHAR)))
+        /* Normalize the gen-2 launch argv: the unix binary (the tree's wine
+         * launcher) must receive exactly the target exe, no trailing parameter
+         * tokens — the apphost parses its argv into managed launch args and
+         * extra tokens mangle the relaunch leg. Keep the first token only
+         * (quoted path inclusive of quotes). */
+        if ((norm_params = malloc((lstrlenW(wszParameters) + 1) * sizeof(WCHAR))))
         {
-            lstrcpyW(probe_params, wszParameters);
-            lstrcatW(probe_params, extra);
-            wszParameters = probe_params;
+            const WCHAR *p = wszParameters;
+            size_t len = 0;
+            while (*p == ' ') p++;
+            if (*p == '"')
+            {
+                const WCHAR *q = wcschr( p + 1, '"' );
+                len = q ? (size_t)(q + 1 - p) : lstrlenW(p);
+            }
+            else len = strcspn( p, " " );
+            memcpy( norm_params, p, len * sizeof(WCHAR) );
+            norm_params[len] = 0;
+            wszParameters = norm_params;
         }
         exec_retval = SHELL_quote_and_execute( wcmd, wszParameters, wszKeyname,
                                                wszApplicationName, env, &sei_tmp,
