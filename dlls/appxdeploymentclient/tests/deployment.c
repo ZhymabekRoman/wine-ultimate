@@ -365,12 +365,12 @@ static void test_find_packages( IPackageManager *pm )
     ok( hr == S_OK && iterable, "FindPackagesByPackageFamilyName hr %#lx\n", hr );
     if (iterable)
     {
-        ULONG written = 0;
+        UINT32 written = 0;
         if (SUCCEEDED( IIterable_Package_First( iterable, &iter ) ) )
         {
             hr = IIterator_Package_GetMany( iter, ARRAY_SIZE(items), items, &written );
-            ok( hr == S_OK && written == 1, "family collection size %lu hr %#lx\n", written, hr );
-            for (ULONG i = 0; i < written; i++) IPackage_Release( items[i] );
+            ok( hr == S_OK && written == 1, "family collection size %u hr %#lx\n", (unsigned int)written, hr );
+            for (UINT32 i = 0; i < written; i++) IPackage_Release( items[i] );
             IIterator_Package_Release( iter );
         }
         IIterable_Package_Release( iterable );

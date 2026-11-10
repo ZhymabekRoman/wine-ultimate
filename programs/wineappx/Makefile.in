@@ -1,5 +1,5 @@
 MODULE    = wineappx.exe
-IMPORTS   = xmllite ole32 advapi32 shlwapi user32 crypt32
+IMPORTS   = appxdeploymentclient advapi32
 
 EXTRADLLFLAGS = -mconsole -municode
 

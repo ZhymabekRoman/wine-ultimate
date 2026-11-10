@@ -56,6 +56,8 @@
 extern IActivationFactory *package_manager_factory;
 
 HRESULT package_manager_create( IPackageManager **out );
+HRESULT WINAPI AppxRegisterPackageManifest( const WCHAR *manifest_path );
+HRESULT WINAPI AppxUnregisterPackageByName( const WCHAR *package_full_name );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

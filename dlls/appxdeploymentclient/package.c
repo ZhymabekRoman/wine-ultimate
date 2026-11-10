@@ -424,29 +424,16 @@ static HRESULT register_async_op_create( IAsyncOperationWithProgress_DeploymentR
     return S_OK;
 }
 
-/* Record the deployment: Packages\<FullName> = the staged directory. */
-static HRESULT register_staged_package( const WCHAR *path, const WCHAR *full_name )
+/* Register package by parsing manifest and populating AppModel and WinRT registries */
+static HRESULT register_staged_package( const WCHAR *path )
 {
-    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\";
-    WCHAR key[600];
-    DWORD framework = 0;
-    LONG ret;
-    HKEY hkey;
-
-    lstrcpyW( key, appmodel_path );
-    lstrcatW( key, full_name );
-    ret = RegCreateKeyExW( HKEY_CURRENT_USER, key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL );
-    if (ret) return HRESULT_FROM_WIN32( ret );
-    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)path, (lstrlenW( path ) + 1) * sizeof(WCHAR) );
-    RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&framework, sizeof(framework) );
-    RegCloseKey( hkey );
-    return S_OK;
+    return AppxRegisterPackageManifest( path );
 }
 
 static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *iface, IUriRuntimeClass *uri,
     IIterable_Uri *dependencies, DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    WCHAR path[512], *name;
+    WCHAR path[512];
     HSTRING str = NULL;
     const WCHAR *buffer;
     SIZE_T len;
@@ -468,13 +455,11 @@ static HRESULT WINAPI package_manager_RegisterPackageAsync( IPackageManager *ifa
     lstrcpynW( path, buffer, ARRAY_SIZE(path) );
     WindowsDeleteString( str );
     len = lstrlenW( path );
-    while (len && path[len - 1] == L'\\') path[--len] = 0;  /* tolerate a trailing separator */
-    name = wcsrchr( path, L'\\' );
-    name = name ? name + 1 : path;
-    if (!name[0]) return E_INVALIDARG;
+    while (len && (path[len - 1] == L'\\' || path[len - 1] == L'/')) path[--len] = 0;  /* tolerate a trailing separator */
+    if (!path[0]) return E_INVALIDARG;
 
-    if (FAILED( (hr = register_staged_package( path, name ) ) )) return hr;
-    TRACE( "registered staged package %s from %s\n", debugstr_w(name), debugstr_w(path) );
+    if (FAILED( (hr = register_staged_package( path ) ) )) return hr;
+    TRACE( "registered package from %s\n", debugstr_w(path) );
     return register_async_op_create( operation );
 }
 
@@ -586,9 +571,8 @@ static HRESULT WINAPI package_manager_UpdatePackageAsync( IPackageManager *iface
 static HRESULT WINAPI package_manager_RemovePackageAsync( IPackageManager *iface, HSTRING name,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\";
-    WCHAR key[600];
     const WCHAR *full;
+    HRESULT hr;
 
     TRACE( "iface %p, name %s, operation %p.\n", iface, debugstr_hstring(name), operation );
 
@@ -597,9 +581,7 @@ static HRESULT WINAPI package_manager_RemovePackageAsync( IPackageManager *iface
     if (!name || !operation) return E_INVALIDARG;
     *operation = NULL;
     if (!(full = WindowsGetStringRawBuffer( name, NULL ))) return E_INVALIDARG;
-    lstrcpyW( key, appmodel_path );
-    lstrcatW( key, full );
-    RegDeleteTreeW( HKEY_CURRENT_USER, key );
+    if (FAILED( (hr = AppxUnregisterPackageByName( full ) ) )) return hr;
     return register_async_op_create( operation );
 }
 
@@ -851,11 +833,11 @@ static HRESULT WINAPI pui_iterator_MoveNext( IIterator_PackageUserInformation *i
     return S_OK;
 }
 
-static HRESULT WINAPI pui_iterator_Reset( IIterator_PackageUserInformation *iface )
+static HRESULT WINAPI pui_iterator_GetMany( IIterator_PackageUserInformation *iface, UINT32 count,
+        IPackageUserInformation **items, UINT32 *actual )
 {
-    struct pui_iterator *This = pui_iter_from_iface( iface );
-    This->pos = 0;
-    return S_OK;
+    FIXME( "iface %p, count %u, items %p, actual %p stub!\n", iface, count, items, actual );
+    return E_NOTIMPL;
 }
 
 static const struct IIterator_PackageUserInformationVtbl pui_iterator_vtbl =
@@ -869,7 +851,7 @@ static const struct IIterator_PackageUserInformationVtbl pui_iterator_vtbl =
     pui_iterator_get_Current,
     pui_iterator_get_HasCurrent,
     pui_iterator_MoveNext,
-    pui_iterator_Reset,
+    pui_iterator_GetMany,
 };
 
 static inline struct pui_list *pui_list_from_iface( IIterable_PackageUserInformation *iface )
@@ -877,7 +859,7 @@ static inline struct pui_list *pui_list_from_iface( IIterable_PackageUserInforma
     return CONTAINING_RECORD( iface, struct pui_list, IIterable_PackageUserInformation_iface );
 }
 
-static HRESULT WINAPI pui_list_Release( IIterable_PackageUserInformation *iface )
+static ULONG WINAPI pui_list_Release( IIterable_PackageUserInformation *iface )
 {
     struct pui_list *This = pui_list_from_iface( iface );
     ULONG ref = InterlockedDecrement( &This->ref );
@@ -979,7 +961,6 @@ static HRESULT WINAPI package_manager_FindUsers( IPackageManager *iface, HSTRING
     DWORD type, size;
     HKEY hkey, hsub;
     struct pui_list *list;
-    LONG rc;
     DWORD i = 0;
 
     TRACE( "iface %p, name %s, users %p.\n", iface, debugstr_hstring(name), users );
@@ -996,10 +977,9 @@ static HRESULT WINAPI package_manager_FindUsers( IPackageManager *iface, HSTRING
     }
     while (list->count < ARRAY_SIZE(list->entries))
     {
-        DWORD chars = ARRAY_SIZE(keyname);
         struct package_user_info *info;
 
-        if (RegEnumKeyW( hkey, i++, keyname, &chars )) break;
+        if (RegEnumKeyW( hkey, i++, keyname, ARRAY_SIZE(keyname) )) break;
         if (family && wcsncmp( keyname, family, lstrlenW(family) )) continue;
         lstrcpyW( value, L"S-1-5-21-0" );
         if (!RegOpenKeyExW( hkey, keyname, 0, KEY_READ, &hsub ))
@@ -1178,7 +1158,7 @@ static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdPackageFamily
 
 static HRESULT find_users_async( const WCHAR *family, IAsyncOperation_IVectorView_User **operation );
 
-static HRESULT WINAPI package_manager2_FindUsersAsync( IPackageManager2 *iface,
+static HRESULT WINAPI __attribute__((unused)) package_manager2_FindUsersAsync( IPackageManager2 *iface,
         IIterable_Package *packages, IAsyncOperation_IVectorView_User **operation )
 {
     TRACE( "iface %p, packages %p, operation %p.\n", iface, packages, operation );
@@ -1186,7 +1166,7 @@ static HRESULT WINAPI package_manager2_FindUsersAsync( IPackageManager2 *iface,
     return find_users_async( NULL, operation );
 }
 
-static HRESULT WINAPI package_manager2_FindUsersForPackageFamilyAsync( IPackageManager2 *iface,
+static HRESULT WINAPI __attribute__((unused)) package_manager2_FindUsersForPackageFamilyAsync( IPackageManager2 *iface,
         HSTRING family_name, IAsyncOperation_IVectorView_User **operation )
 {
     const WCHAR *family = family_name ? WindowsGetStringRawBuffer( family_name, NULL ) : NULL;
@@ -1224,8 +1204,6 @@ static const struct IPackageManager2Vtbl package_manager2_vtbl =
     package_manager2_FindPackagesByPackageFamilyNameWithPackageTypes,
     package_manager2_FindPackagesByUserSecurityIdPackageFamilyNameWithPackageTypes,
     package_manager2_StageUserDataAsync,
-    package_manager2_FindUsersAsync,
-    package_manager2_FindUsersForPackageFamilyAsync,
 };
 
 /*
@@ -1394,7 +1372,7 @@ static HRESULT WINAPI package_get_Id( IPackage *iface, IPackageId **value )
     struct package *impl = impl_from_IPackage( iface );
 
     *value = &impl->IPackageId_iface;
-    IInspectable_AddRef( *value );
+    IPackageId_AddRef( *value );
     return S_OK;
 }
 
@@ -1403,7 +1381,7 @@ static HRESULT WINAPI package_get_InstalledLocation( IPackage *iface, IStorageFo
     struct package *impl = impl_from_IPackage( iface );
 
     *value = &impl->IStorageFolder_iface;
-    IInspectable_AddRef( *value );
+    IStorageFolder_AddRef( *value );
     return S_OK;
 }
 
@@ -1619,25 +1597,25 @@ static HRESULT WINAPI package_folder_GetTrustLevel( IStorageFolder *iface, Trust
 
 #define FOLDER_METHODS( pfx ) \
     static HRESULT WINAPI pfx##_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name, \
-            IStorageFile **file ) { return E_NOTIMPL; } \
+            IAsyncOperation_StorageFile **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFileAsync( IStorageFolder *iface, HSTRING name, \
-            CreationCollisionOption option, IStorageFile **file ) { return E_NOTIMPL; } \
+            CreationCollisionOption option, IAsyncOperation_StorageFile **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFolderAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name, \
-            IStorageFolder **folder ) { return E_NOTIMPL; } \
+            IAsyncOperation_StorageFolder **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_CreateFolderAsync( IStorageFolder *iface, HSTRING name, \
-            CreationCollisionOption option, IStorageFolder **folder ) { return E_NOTIMPL; } \
+            CreationCollisionOption option, IAsyncOperation_StorageFolder **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_GetFileAsync( IStorageFolder *iface, HSTRING name, \
-            IAsyncOperation_StorageFile *operation ) { return E_NOTIMPL; } \
+            IAsyncOperation_StorageFile **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_GetFolderAsync( IStorageFolder *iface, HSTRING name, \
-            IAsyncOperation_StorageFolder *operation ) { return E_NOTIMPL; } \
+            IAsyncOperation_StorageFolder **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_GetItemAsync( IStorageFolder *iface, HSTRING name, \
-            IAsyncOperation_IStorageItem *operation ) { return E_NOTIMPL; } \
+            IAsyncOperation_IStorageItem **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_GetFilesAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface, \
-            IAsyncOperation_IVectorView_StorageFile *operation ) { return E_NOTIMPL; } \
+            IAsyncOperation_IVectorView_StorageFile **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_GetFoldersAsyncOverloadDefaultOptionsStartAndCount( IStorageFolder *iface, \
-            IAsyncOperation_IVectorView_StorageFolder *operation ) { return E_NOTIMPL; } \
+            IAsyncOperation_IVectorView_StorageFolder **operation ) { return E_NOTIMPL; } \
     static HRESULT WINAPI pfx##_GetItemsAsyncOverloadDefaultStartAndCount( IStorageFolder *iface, \
-            IAsyncOperation_IVectorView_IStorageItem *operation ) { return E_NOTIMPL; }
+            IAsyncOperation_IVectorView_IStorageItem **operation ) { return E_NOTIMPL; }
 
 FOLDER_METHODS( package_folder )
 
@@ -1902,8 +1880,8 @@ static const struct IIterator_PackageVtbl package_iterator_vtbl =
     package_iterator_GetIids,
     package_iterator_GetRuntimeClassName,
     package_iterator_GetTrustLevel,
-    package_iterator_get_HasCurrent,
     package_iterator_get_Current,
+    package_iterator_get_HasCurrent,
     package_iterator_MoveNext,
     package_iterator_GetMany,
 };
@@ -2466,14 +2444,13 @@ static HRESULT WINAPI user_info_get_Status( IAsyncInfo *iface, enum AsyncStatus 
 static HRESULT WINAPI user_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *code ) { *code = S_OK; return S_OK; }
 static HRESULT WINAPI user_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
 static HRESULT WINAPI user_info_Close( IAsyncInfo *iface ) { return S_OK; }
-static HRESULT WINAPI user_info_GetResults( IAsyncInfo *iface, HRESULT *code ) { *code = S_OK; return S_OK; }
 
 static const struct IAsyncInfoVtbl user_info_vtbl =
 {
     user_info_QueryInterface, user_info_addref, user_info_release,
     user_info_GetIids, user_info_GetRuntimeClassName, user_info_GetTrustLevel,
     user_info_get_Id, user_info_get_Status, user_info_get_ErrorCode,
-    user_info_Cancel, user_info_Close, user_info_GetResults,
+    user_info_Cancel, user_info_Close,
 };
 
 static void user_list_release( struct user_list *This )
@@ -2490,7 +2467,7 @@ static HRESULT find_users_async( const WCHAR *family, IAsyncOperation_IVectorVie
     WCHAR keyname[512], value[128], fam[512];
     struct user_list *list;
     HKEY hkey, hsub;
-    DWORD i = 0, chars;
+    DWORD i = 0;
 
     if (!operation) return E_INVALIDARG;
     if (!(list = calloc( 1, sizeof(*list) ))) return E_OUTOFMEMORY;
@@ -2503,11 +2480,10 @@ static HRESULT find_users_async( const WCHAR *family, IAsyncOperation_IVectorVie
     {
         while (list->count < ARRAY_SIZE(list->sid))
         {
-            chars = ARRAY_SIZE(keyname);
-            if (RegEnumKeyW( hkey, i++, keyname, &chars )) break;
+            if (RegEnumKeyW( hkey, i++, keyname, ARRAY_SIZE(keyname) )) break;
             if (family)
             {
-                DWORD chars2 = ARRAY_SIZE(fam);
+                UINT32 chars2 = ARRAY_SIZE(fam);
                 lstrcpyW( fam, keyname );
                 if (!PackageFamilyNameFromFullName( fam, &chars2, fam ) && lstrcmpiW( fam, family ))
                     continue;

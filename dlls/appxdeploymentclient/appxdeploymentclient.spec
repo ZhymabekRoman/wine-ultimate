@@ -82,6 +82,8 @@
 @ stdcall AppxDoesSharedLocalFolderExistForFamilyName(wstr ptr)
 @ stdcall AppxValidatePackages(wstr wstr)
 @ stdcall CheckForUpdatesAndWaitForInstallerIfNeeded(long)
+@ stdcall AppxRegisterPackageManifest(wstr)
+@ stdcall AppxUnregisterPackageByName(wstr)
 @ stdcall -private DllCanUnloadNow()
 @ stdcall -private DllGetActivationFactory(ptr ptr)
 @ stdcall -private DllGetClassObject(ptr ptr ptr)

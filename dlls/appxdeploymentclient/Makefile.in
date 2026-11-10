@@ -1,5 +1,6 @@
 MODULE  = appxdeploymentclient.dll
-IMPORTS = combase advapi32 kernel32 kernelbase
+IMPORTLIB = appxdeploymentclient
+IMPORTS = combase advapi32 kernel32 kernelbase xmllite ole32 crypt32 user32
 
 SOURCES = \
 	classes.idl \
