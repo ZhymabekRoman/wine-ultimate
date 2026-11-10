@@ -1013,6 +1013,14 @@ static HRESULT STDMETHODCALLTYPE factory_QueryInterface( IActivationFactory *ifa
         return S_OK;
     }
 
+    if (IsEqualGUID( &IID_IReferenceTracker_g, iid ))
+    {
+        *out = &propertyset_tracker;
+        tracker_AddRef( &propertyset_tracker );
+        TRACE( "handing out tracker face %p, vtbl %p\n", *out, *(void **)*out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, return E_NOINTERFACE.\n", debugstr_guid( iid ) );
     return E_NOINTERFACE;
 }

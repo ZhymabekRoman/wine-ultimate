@@ -517,6 +517,10 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IApplicationFactory ) ||
+        IsEqualGUID( iid, &IID_IApplicationStatics ))
+        return IActivationFactory_QueryInterface( application_factory, iid, out );
+
     if (IsEqualGUID( iid, &IID_IPropertySet ) ||
         IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
@@ -683,7 +687,8 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory ))
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
     {
         *out = &impl->IActivationFactory_iface;
         IInspectable_AddRef( *out );
@@ -691,14 +696,13 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     }
 
     /* The class's activation interfaces: RoGetActivationFactory answers
-     * (Windows.UI.Xaml.Application, {06499997-f7b4-45fe-b763-7577d1d3cb4a}) — the
-     * class activation interface IID — and IID_IApplication {c1b89ae4-...}, the
-     * projected interface the WinUI3 Mcg binder uses for the
-     * Microsoft.UI.Xaml.Application base of the app's Application subclass.
-     * Windows answers both off the factory object with the IApplication vtable;
-     * hand out the Application instance the same ActivateInstance creates, so the
-     * caller's Resources/Run slots dispatch on the right vtable. */
-    if (IsEqualGUID( iid, &IID_IApplication ) || IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
+     * IID_IApplication {c1b89ae4-...}, the projected interface the WinUI3
+     * Mcg binder uses for the Microsoft.UI.Xaml.Application base of the
+     * app's Application subclass. Windows answers both off the factory
+     * object with the IApplication vtable; hand out the Application instance
+     * the same ActivateInstance creates, so the caller's Resources/Run slots
+     * dispatch on the right vtable. */
+    if (IsEqualGUID( iid, &IID_IApplication ))
         return IActivationFactory_ActivateInstance( &impl->IActivationFactory_iface, (IInspectable **)out );
 
     if (IsEqualGUID( iid, &IID_IApplicationStatics ))
@@ -767,6 +771,10 @@ static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLev
 
 static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *iface,
         IInspectable *outer, IInspectable **inner, IApplication **instance );
+static HRESULT WINAPI application_statics_Start( IApplicationStatics *iface,
+        IApplicationInitializationCallback *callback );
+static HRESULT WINAPI application_statics_get_Current( IApplicationStatics *iface,
+        IApplication **current );
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
@@ -774,7 +782,26 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
     return application_factory_CreateInstance( &impl->IApplicationFactory_iface, NULL, NULL, (IApplication **)instance );
 }
 
-static const struct IActivationFactoryVtbl factory_vtbl =
+/* Composable factory vtable with Mcg / .NET Native layout extensions:
+ * When Mcg projects Windows.UI.Xaml.Application's class activation interface
+ * {06499997-f7b4-45fe-b763-7577d1d3cb4a}, it places CreateInstance at slot 7
+ * (following ActivateInstance at slot 6). Extend the vtable so calls to
+ * vtable[7] dispatch to CreateInstance instead of hitting NULL. */
+struct application_activation_factory_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IActivationFactory *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(IActivationFactory *);
+    ULONG (WINAPI *Release)(IActivationFactory *);
+    HRESULT (WINAPI *GetIids)(IActivationFactory *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(IActivationFactory *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(IActivationFactory *, TrustLevel *);
+    HRESULT (WINAPI *ActivateInstance)(IActivationFactory *, IInspectable **);
+    HRESULT (WINAPI *CreateInstance)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
+    HRESULT (WINAPI *Start)(IApplicationStatics *, IApplicationInitializationCallback *);
+    HRESULT (WINAPI *get_Current)(IApplicationStatics *, IApplication **);
+};
+
+static const struct application_activation_factory_vtbl factory_vtbl =
 {
     factory_QueryInterface,
     factory_AddRef,
@@ -783,6 +810,9 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_GetRuntimeClassName,
     factory_GetTrustLevel,
     factory_ActivateInstance,
+    application_factory_CreateInstance,
+    application_statics_Start,
+    application_statics_get_Current,
 };
 
 /* IApplicationStatics implementation */
@@ -951,8 +981,6 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
 
     TRACE( "iface %p, outer %p, inner %p, instance %p.\n", iface, outer, inner, instance );
 
-    if (!instance) return E_POINTER;
-
     impl = calloc( 1, sizeof(*impl) );
     if (!impl) return E_OUTOFMEMORY;
 
@@ -969,23 +997,41 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
 
     if (outer)
     {
-        if (inner)
+        /* In Mcg / .NET Native composable constructors, the generated caller passes only
+         * (this, outer); unpassed registers hold caller-saved garbage (e.g. instance == outer).
+         * Only write to inner/instance if valid distinct pointers were provided. */
+        if (inner && (void *)inner != (void *)outer)
         {
             *inner = &impl->inner_iface;
             IInspectable_AddRef( *inner );
         }
-        *instance = &impl->IApplication_iface;
+        if (instance && (void *)instance != (void *)outer)
+            *instance = &impl->IApplication_iface;
     }
     else
     {
         if (inner) *inner = NULL;
-        *instance = &impl->IApplication_iface;
+        if (instance) *instance = &impl->IApplication_iface;
     }
 
     return S_OK;
 }
 
-static const struct IApplicationFactoryVtbl application_factory_vtbl =
+struct application_factory_extended_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IApplicationFactory *, REFIID, void **);
+    ULONG (WINAPI *AddRef)(IApplicationFactory *);
+    ULONG (WINAPI *Release)(IApplicationFactory *);
+    HRESULT (WINAPI *GetIids)(IApplicationFactory *, ULONG *, IID **);
+    HRESULT (WINAPI *GetRuntimeClassName)(IApplicationFactory *, HSTRING *);
+    HRESULT (WINAPI *GetTrustLevel)(IApplicationFactory *, TrustLevel *);
+    HRESULT (WINAPI *CreateInstance)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
+    HRESULT (WINAPI *CreateInstance2)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
+    HRESULT (WINAPI *Start)(IApplicationStatics *, IApplicationInitializationCallback *);
+    HRESULT (WINAPI *get_Current)(IApplicationStatics *, IApplication **);
+};
+
+static const struct application_factory_extended_vtbl application_factory_vtbl =
 {
     app_factory_QueryInterface,
     app_factory_AddRef,
@@ -994,13 +1040,16 @@ static const struct IApplicationFactoryVtbl application_factory_vtbl =
     app_factory_GetRuntimeClassName,
     app_factory_GetTrustLevel,
     application_factory_CreateInstance,
+    application_factory_CreateInstance,
+    application_statics_Start,
+    application_statics_get_Current,
 };
 
 static struct application_factory application_factory_obj =
 {
-    {&factory_vtbl},
+    {(const struct IActivationFactoryVtbl *)&factory_vtbl},
     {&application_statics_vtbl},
-    {&application_factory_vtbl},
+    {(const struct IApplicationFactoryVtbl *)&application_factory_vtbl},
     {&view_source_vtbl},
     1,
 };
