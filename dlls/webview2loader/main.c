@@ -248,6 +248,7 @@ static DWORD WINAPI mojo_watchdog( LPVOID arg )
 static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
 {
     WCHAR exe[MAX_PATH], args[1024], root[MAX_PATH];
+    static WCHAR envbuf[8192];
     STARTUPINFOW si = { sizeof(si) };
     PROCESS_INFORMATION pi;
     DWORD pid = GetCurrentProcessId(), tid = GetCurrentThreadId();
@@ -296,7 +297,44 @@ static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
             lstrcatW( args, L" --no-sandbox" );
         TRACE( "spawning %s\n", debugstr_w(args));
 
-        if (!CreateProcessW( exe, args, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi ))
+        /* child boot census: WINEDEBUG env into a stderr file we own */
+        {
+            WCHAR *e = GetEnvironmentStringsW(), *p = envbuf;
+            BOOL dbg_done = FALSE;
+            if (e)
+            {
+                WCHAR *src;
+                for (src = e; *src; src += lstrlenW( src ) + 1)
+                {
+                    if (!_wcsnicmp( src, L"WINEDEBUG=", 10 )) continue;  /* census override */
+                    lstrcpyW( p, src );
+                    p += lstrlenW( src ) + 1;
+                }
+                FreeEnvironmentStringsW( e );
+            }
+            if (!dbg_done)
+            {
+                lstrcpyW( p, L"WINEDEBUG=-all,+loaddll,+file" );
+                p += lstrlenW( p ) + 1;
+            }
+            *p = 0;
+
+            si.dwFlags = STARTF_USESTDHANDLES;
+            {
+                SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+                si.hStdError = CreateFileW( L"\\\\?\\Z:\\tmp\\wv2browser_dbg.log",
+                        GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, &sa,
+                        OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+            }
+            if (si.hStdError != INVALID_HANDLE_VALUE)
+            {
+                SetFilePointer( si.hStdError, 0, NULL, FILE_END );
+                si.hStdOutput = si.hStdError;
+                si.hStdInput = GetStdHandle( STD_INPUT_HANDLE );
+            }
+        }
+
+        if (!CreateProcessW( exe, args, NULL, NULL, TRUE, 0, envbuf, NULL, &si, &pi ))
         {
             WARN( "spawn %s gle=%u\n", debugstr_w( exe ), GetLastError());
             CloseHandle( g_mojo.pipe );
@@ -305,6 +343,26 @@ static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
         }
         CloseHandle( pi.hThread );
         TRACE( "spawned pid=%u\n", pi.dwProcessId );
+
+        /* control census: console child shares env + std handles */
+        {
+            STARTUPINFOW si2 = { sizeof(si2) };
+            PROCESS_INFORMATION pi2;
+            SECURITY_ATTRIBUTES sa = { sizeof(sa), NULL, TRUE };
+            HANDLE hf = CreateFileW( L"\\\\?\\Z:\\tmp\\wv2child_env.log",
+                    GENERIC_WRITE, 0, &sa, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+            si2.dwFlags = STARTF_USESTDHANDLES;
+            si2.hStdError = si2.hStdOutput = hf;
+            si2.hStdInput = GetStdHandle( STD_INPUT_HANDLE );
+            if (CreateProcessW( NULL, (LPWSTR)L"cmd /c set", NULL, NULL, TRUE, 0,
+                                envbuf, NULL, &si2, &pi2 ))
+            {
+                WaitForSingleObject( pi2.hProcess, 10000 );
+                CloseHandle( pi2.hProcess );
+                CloseHandle( pi2.hThread );
+            }
+            CloseHandle( hf );
+        }
         HANDLE th = CreateThread( NULL, 0, mojo_watchdog, NULL, 0, NULL );
         CloseHandle( th );
     }
