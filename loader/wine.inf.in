@@ -1064,6 +1064,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 11,wbem,wmic.exe
 11,wbem,wmiutils.dll
 11,WindowsPowerShell\v1.0,powershell.exe
+11,WindowsPowerShell\v1.0,winepowershell.exe
 10,syswow64,stdole2.tlb
 11,,iexplore.exe
 11,,winetest.exe,-
@@ -1160,6 +1161,7 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 11,wbem,wmic.exe
 11,wbem,wmiutils.dll
 11,WindowsPowerShell\v1.0,powershell.exe
+11,WindowsPowerShell\v1.0,winepowershell.exe
 ; empty folders to make sure the parent dirs are not removed
 16410,Microsoft,
 16412,Microsoft,

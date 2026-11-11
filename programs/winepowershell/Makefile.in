@@ -1,0 +1,7 @@
+MODULE    = winepowershell.exe
+IMPORTS   = appxdeploymentclient
+
+EXTRADLLFLAGS = -mconsole -municode
+
+SOURCES = \
+	main.c

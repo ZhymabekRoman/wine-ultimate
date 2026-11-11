@@ -1,5 +1,4 @@
 /*
- * Copyright 2017 Jactry Zeng for CodeWeavers
  * Copyright 2026 Zhymabek Roman
  *
  * This library is free software; you can redistribute it and/or
@@ -19,217 +18,116 @@
 
 #include <windows.h>
 #include <stdio.h>
-#include <ctype.h>
 #include <wchar.h>
 
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(powershell);
 
-HRESULT WINAPI AppxRegisterPackageManifest(const WCHAR *manifest_path);
-
-static BOOL handle_add_appx_package(int argc, WCHAR *argv[])
+static BOOL file_exists(const WCHAR *path)
 {
-    int i, j;
-    BOOL found_cmd = FALSE;
-    WCHAR path[MAX_PATH] = {0};
+    DWORD attr = GetFileAttributesW(path);
+    return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+}
 
-    for (i = 1; i < argc; i++)
+static const WCHAR *get_command_arguments(const WCHAR *cmdline)
+{
+    BOOL in_quotes = FALSE;
+    const WCHAR *p = cmdline;
+
+    if (!p) return L"";
+
+    while (*p && (*p == L' ' || *p == L'\t')) p++;
+
+    while (*p)
     {
-        if (!argv[i]) continue;
-        if (wcsstr(argv[i], L"Add-AppxPackage") || wcsstr(argv[i], L"add-appxpackage") ||
-            wcsstr(argv[i], L"ADD-APPXPACKAGE"))
+        if (*p == L'"')
+            in_quotes = !in_quotes;
+        else if (!in_quotes && (*p == L' ' || *p == L'\t'))
         {
-            found_cmd = TRUE;
-            break;
+            while (*p == L' ' || *p == L'\t') p++;
+            return p;
         }
+        p++;
     }
-    if (!found_cmd) return FALSE;
-
-    /* Check 1: single quotes '...' inside a single argument or spanning arguments */
-    for (i = 1; i < argc; i++)
-    {
-        const WCHAR *str = argv[i];
-        const WCHAR *q1 = wcschr(str, L'\'');
-        if (q1)
-        {
-            const WCHAR *q2 = wcschr(q1 + 1, L'\'');
-            if (q2)
-            {
-                size_t n = q2 - q1 - 1;
-                if (n < MAX_PATH)
-                {
-                    memcpy(path, q1 + 1, n * sizeof(WCHAR));
-                    path[n] = 0;
-                    break;
-                }
-            }
-            else
-            {
-                lstrcpynW(path, q1 + 1, MAX_PATH);
-                for (j = i + 1; j < argc; j++)
-                {
-                    const WCHAR *end_q = wcschr(argv[j], L'\'');
-                    lstrcatW(path, L" ");
-                    if (end_q)
-                    {
-                        size_t cur_len = lstrlenW(path);
-                        size_t part_len = end_q - argv[j];
-                        if (cur_len + part_len < MAX_PATH)
-                        {
-                            memcpy(path + cur_len, argv[j], part_len * sizeof(WCHAR));
-                            path[cur_len + part_len] = 0;
-                        }
-                        break;
-                    }
-                    else
-                    {
-                        lstrcatW(path, argv[j]);
-                    }
-                }
-                if (path[0]) break;
-            }
-        }
-
-        /* Double quotes "..." */
-        q1 = wcschr(str, L'"');
-        if (q1)
-        {
-            const WCHAR *q2 = wcschr(q1 + 1, L'"');
-            if (q2)
-            {
-                size_t n = q2 - q1 - 1;
-                if (n < MAX_PATH)
-                {
-                    memcpy(path, q1 + 1, n * sizeof(WCHAR));
-                    path[n] = 0;
-                    break;
-                }
-            }
-            else
-            {
-                lstrcpynW(path, q1 + 1, MAX_PATH);
-                for (j = i + 1; j < argc; j++)
-                {
-                    const WCHAR *end_q = wcschr(argv[j], L'"');
-                    lstrcatW(path, L" ");
-                    if (end_q)
-                    {
-                        size_t cur_len = lstrlenW(path);
-                        size_t part_len = end_q - argv[j];
-                        if (cur_len + part_len < MAX_PATH)
-                        {
-                            memcpy(path + cur_len, argv[j], part_len * sizeof(WCHAR));
-                            path[cur_len + part_len] = 0;
-                        }
-                        break;
-                    }
-                    else
-                    {
-                        lstrcatW(path, argv[j]);
-                    }
-                }
-                if (path[0]) break;
-            }
-        }
-    }
-
-    /* Check 2: if no quoted string found, look for tokens following -Register or -Path */
-    if (!path[0])
-    {
-        for (i = 1; i < argc; i++)
-        {
-            const WCHAR *arg = argv[i];
-            if (!wcsicmp(arg, L"-Register") || !wcsicmp(arg, L"/Register") ||
-                !wcsicmp(arg, L"-register") || !wcsicmp(arg, L"--register") ||
-                !wcsicmp(arg, L"-Path") || !wcsicmp(arg, L"/Path") ||
-                !wcsicmp(arg, L"-path"))
-            {
-                if (i + 1 < argc && argv[i + 1][0] != L'-' && argv[i + 1][0] != L'/')
-                {
-                    lstrcpynW(path, argv[i + 1], MAX_PATH);
-                    for (j = i + 2; j < argc; j++)
-                    {
-                        if (argv[j][0] == L'-' || argv[j][0] == L'/') break;
-                        lstrcatW(path, L" ");
-                        lstrcatW(path, argv[j]);
-                    }
-                    break;
-                }
-            }
-        }
-    }
-
-    /* Check 3: search for tokens containing path separators or .xml */
-    if (!path[0])
-    {
-        for (i = 1; i < argc; i++)
-        {
-            const WCHAR *arg = argv[i];
-            if (!wcsicmp(arg, L"-command") || !wcsicmp(arg, L"/command")) continue;
-            if (!wcsicmp(arg, L"Add-AppxPackage")) continue;
-            if (arg[0] == L'-' || arg[0] == L'/') continue;
-
-            if (wcschr(arg, L'\\') || wcschr(arg, L'/') || wcsstr(arg, L".xml") || wcsstr(arg, L".XML"))
-            {
-                lstrcpynW(path, arg, MAX_PATH);
-                for (j = i + 1; j < argc; j++)
-                {
-                    if (argv[j][0] == L'-' || argv[j][0] == L'/') break;
-                    lstrcatW(path, L" ");
-                    lstrcatW(path, argv[j]);
-                }
-                break;
-            }
-        }
-    }
-
-    /* Strip any leading or trailing quotes/spaces */
-    while (path[0] == L' ' || path[0] == L'\'' || path[0] == L'"')
-        memmove(path, path + 1, (lstrlenW(path)) * sizeof(WCHAR));
-    while (path[0] && (path[lstrlenW(path) - 1] == L' ' ||
-                       path[lstrlenW(path) - 1] == L'\'' ||
-                       path[lstrlenW(path) - 1] == L'"'))
-        path[lstrlenW(path) - 1] = 0;
-
-    if (path[0])
-    {
-        HRESULT hr;
-        WINE_TRACE("Add-AppxPackage intercepted, registering manifest: %s\n", wine_dbgstr_w(path));
-        hr = AppxRegisterPackageManifest(path);
-        WINE_TRACE("AppxRegisterPackageManifest returned hr=0x%08lx\n", hr);
-        return TRUE;
-    }
-
-    return FALSE;
+    return p;
 }
 
 int __cdecl wmain(int argc, WCHAR *argv[])
 {
-    int i;
+    WCHAR target[MAX_PATH] = {0};
+    WCHAR pf_path[MAX_PATH];
+    WCHAR winepwsh[MAX_PATH];
+    const WCHAR *args;
+    WCHAR *child_cmd;
+    size_t cmd_len;
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD exit_code = 1;
+    BOOL is_pwsh = FALSE;
 
-    if (handle_add_appx_package(argc, argv))
-        return 0;
-
-    WINE_FIXME("stub.\n");
-    for (i = 0; i < argc; i++)
+    /* Check if pwsh is disabled via environment for testing */
+    if (!GetEnvironmentVariableW(L"WINE_NO_PWSH", NULL, 0) &&
+        !GetEnvironmentVariableW(L"WINE_DISABLE_PWSH", NULL, 0))
     {
-        WINE_FIXME("argv[%d] %s\n", i, wine_dbgstr_w(argv[i]));
-        if (!wcsicmp(argv[i], L"-command") && i < argc - 1 && !wcscmp(argv[i + 1], L"-"))
+        if (ExpandEnvironmentStringsW(L"%ProgramFiles%\\PowerShell\\7\\pwsh.exe", pf_path, MAX_PATH) &&
+            file_exists(pf_path))
         {
-            char command[4096], *p;
-
-            ++i;
-            while (fgets(command, sizeof(command), stdin))
-            {
-                WINE_FIXME("command %s.\n", debugstr_a(command));
-                p = command;
-                while (*p && !isspace(*p)) ++p;
-                *p = 0;
-                if (!stricmp(command, "exit"))
-                    break;
-            }
+            lstrcpyW(target, pf_path);
+            is_pwsh = TRUE;
+        }
+        else if (!GetEnvironmentVariableW(L"WINE_NO_Z_PWSH", NULL, 0) &&
+                 file_exists(L"Z:\\var\\tmp\\pwsh-win-x64\\pwsh.exe"))
+        {
+            lstrcpyW(target, L"Z:\\var\\tmp\\pwsh-win-x64\\pwsh.exe");
+            is_pwsh = TRUE;
         }
     }
-    return 0;
+
+    if (!is_pwsh)
+    {
+        if (!SearchPathW(NULL, L"winepowershell.exe", NULL, MAX_PATH, winepwsh, NULL))
+        {
+            ExpandEnvironmentStringsW(L"%SystemRoot%\\system32\\winepowershell.exe", winepwsh, MAX_PATH);
+        }
+        lstrcpyW(target, winepwsh);
+    }
+
+    args = get_command_arguments(GetCommandLineW());
+    cmd_len = lstrlenW(target) + lstrlenW(args) + 16;
+    child_cmd = malloc(cmd_len * sizeof(WCHAR));
+    if (!child_cmd) return 1;
+
+    if (args && *args)
+        swprintf(child_cmd, cmd_len, L"\"%s\" %s", target, args);
+    else
+        swprintf(child_cmd, cmd_len, L"\"%s\"", target);
+
+    WINE_TRACE("forwarding command line to %s: %s\n", wine_dbgstr_w(target), wine_dbgstr_w(child_cmd));
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+
+    if (CreateProcessW(is_pwsh ? target : NULL, is_pwsh ? child_cmd : (args && *args ? child_cmd : target),
+                       NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi) ||
+        CreateProcessW(target, child_cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi) ||
+        CreateProcessW(NULL, child_cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+    {
+        WaitForSingleObject(pi.hProcess, INFINITE);
+        GetExitCodeProcess(pi.hProcess, &exit_code);
+        CloseHandle(pi.hThread);
+        CloseHandle(pi.hProcess);
+    }
+    else
+    {
+        WINE_ERR("failed to spawn %s (cmd: %s), err %lu\n",
+                 wine_dbgstr_w(target), wine_dbgstr_w(child_cmd), GetLastError());
+    }
+
+    free(child_cmd);
+    return exit_code;
 }
