@@ -1,0 +1,8 @@
+MODULE    = OptionalFeatures.exe
+IMPORTS   = dismapi comctl32 user32 advapi32
+
+EXTRADLLFLAGS = -mwindows -municode
+
+SOURCES = \
+	main.c \
+	OptionalFeatures.rc

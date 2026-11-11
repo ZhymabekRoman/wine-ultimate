@@ -1,5 +1,5 @@
 MODULE    = dism.exe
-IMPORTS   = advapi32
+IMPORTS   = dismapi advapi32
 
 EXTRADLLFLAGS = -mconsole -municode
 

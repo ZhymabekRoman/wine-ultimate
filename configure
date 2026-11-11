@@ -1132,6 +1132,7 @@ enable_difxapi
 enable_dinput
 enable_dinput8
 enable_directmanipulation
+enable_dismapi
 enable_dispex
 enable_dmband
 enable_dmprocessxmlfiltered
@@ -1773,6 +1774,7 @@ enable_netsh
 enable_netstat
 enable_ngen
 enable_notepad
+enable_OptionalFeatures
 enable_odbcad32
 enable_oleview
 enable_ping
@@ -23050,6 +23052,7 @@ wine_fn_config_makefile dlls/dinput/tests enable_tests
 wine_fn_config_makefile dlls/dinput8 enable_dinput8
 wine_fn_config_makefile dlls/directmanipulation enable_directmanipulation
 wine_fn_config_makefile dlls/directmanipulation/tests enable_tests
+wine_fn_config_makefile dlls/dismapi enable_dismapi
 wine_fn_config_makefile dlls/dispdib.dll16 enable_win16
 wine_fn_config_makefile dlls/dispex enable_dispex
 wine_fn_config_makefile dlls/dispex/tests enable_tests
@@ -24016,6 +24019,7 @@ wine_fn_config_makefile programs/netsh enable_netsh
 wine_fn_config_makefile programs/netstat enable_netstat
 wine_fn_config_makefile programs/ngen enable_ngen
 wine_fn_config_makefile programs/notepad enable_notepad
+wine_fn_config_makefile programs/OptionalFeatures enable_OptionalFeatures
 wine_fn_config_makefile programs/odbcad32 enable_odbcad32
 wine_fn_config_makefile programs/oleview enable_oleview
 wine_fn_config_makefile programs/ping enable_ping

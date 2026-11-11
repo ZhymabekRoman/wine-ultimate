@@ -1,0 +1,8 @@
+MODULE    = dismapi.dll
+IMPORTLIB = dismapi
+IMPORTS   = advapi32 user32
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	main.c

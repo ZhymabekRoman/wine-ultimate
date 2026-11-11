@@ -22,13 +22,10 @@
 #include <stdlib.h>
 #include <wchar.h>
 
+#include "dismapi.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dism);
-
-#define FEATURE_PWSH L"Microsoft-PowerShell-Core"
-#define FEATURE_MONO L"NetFx4-WineMono"
-#define FEATURE_NETFX4 L"NetFx4"
 
 static void output_write(const WCHAR *str)
 {
@@ -64,506 +61,57 @@ static void print_header(void)
                  L"Image Version: 10.0.18362.900\r\n\r\n");
 }
 
-static BOOL is_pwsh_enabled(void)
+static void CALLBACK dism_cli_progress(UINT current, UINT total, PVOID userData)
 {
-    WCHAR path[MAX_PATH];
-    if (ExpandEnvironmentStringsW(L"%ProgramFiles%\\PowerShell\\7\\pwsh.exe", path, MAX_PATH))
+    if (total > 0 && current == total)
     {
-        DWORD attr = GetFileAttributesW(path);
-        return (attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY));
+        output_write(L"[==========================100.0%==========================]\r\n");
     }
-    return FALSE;
-}
-
-static BOOL is_mono_enabled(void)
-{
-    WCHAR path[MAX_PATH];
-    HKEY hkey;
-    REGSAM sam_flags[2] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY };
-    int s;
-
-    ExpandEnvironmentStringsW(L"%SystemRoot%\\mono", path, MAX_PATH);
-    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
-        return TRUE;
-
-    for (s = 0; s < 2; s++)
-    {
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                          L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full",
-                          0, KEY_READ | sam_flags[s], &hkey) == ERROR_SUCCESS)
-        {
-            DWORD install = 0, size = sizeof(install);
-            if (RegQueryValueExW(hkey, L"Install", NULL, NULL, (BYTE *)&install, &size) == ERROR_SUCCESS)
-            {
-                RegCloseKey(hkey);
-                if (install == 1) return TRUE;
-            }
-            else
-            {
-                RegCloseKey(hkey);
-                return TRUE;
-            }
-        }
-
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                          L"SOFTWARE\\Microsoft\\.NETFramework",
-                          0, KEY_READ | sam_flags[s], &hkey) == ERROR_SUCCESS)
-        {
-            DWORD install = 0, size = sizeof(install);
-            if (RegQueryValueExW(hkey, L"Install", NULL, NULL, (BYTE *)&install, &size) == ERROR_SUCCESS)
-            {
-                RegCloseKey(hkey);
-                if (install == 1) return TRUE;
-            }
-            else
-            {
-                RegCloseKey(hkey);
-                return TRUE;
-            }
-        }
-    }
-
-    return FALSE;
-}
-
-static BOOL write_dotnet4_registry_keys(void)
-{
-    HKEY hkey;
-    DWORD install_val = 1;
-    DWORD release_val = 528040;
-    const WCHAR version_str[] = L"4.8.0";
-    const WCHAR target_version_str[] = L"4.0.0";
-    WCHAR windir[MAX_PATH];
-    WCHAR install_root[MAX_PATH];
-    REGSAM sam_flags[2] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY };
-    int s;
-
-    GetWindowsDirectoryW(windir, MAX_PATH);
-    swprintf(install_root, MAX_PATH, L"%s\\Microsoft.NET\\Framework64\\", windir);
-
-    for (s = 0; s < 2; s++)
-    {
-        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE,
-                            L"SOFTWARE\\Microsoft\\.NETFramework",
-                            0, NULL, 0, KEY_SET_VALUE | sam_flags[s], NULL, &hkey, NULL) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(hkey, L"Install", 0, REG_DWORD, (const BYTE *)&install_val, sizeof(install_val));
-            RegSetValueExW(hkey, L"Version", 0, REG_SZ, (const BYTE *)version_str, sizeof(version_str));
-            RegSetValueExW(hkey, L"InstallRoot", 0, REG_SZ, (const BYTE *)install_root, (lstrlenW(install_root) + 1) * sizeof(WCHAR));
-            RegCloseKey(hkey);
-        }
-
-        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE,
-                            L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full",
-                            0, NULL, 0, KEY_SET_VALUE | sam_flags[s], NULL, &hkey, NULL) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(hkey, L"Install", 0, REG_DWORD, (const BYTE *)&install_val, sizeof(install_val));
-            RegSetValueExW(hkey, L"Version", 0, REG_SZ, (const BYTE *)version_str, sizeof(version_str));
-            RegSetValueExW(hkey, L"TargetVersion", 0, REG_SZ, (const BYTE *)target_version_str, sizeof(target_version_str));
-            RegSetValueExW(hkey, L"Release", 0, REG_DWORD, (const BYTE *)&release_val, sizeof(release_val));
-            RegCloseKey(hkey);
-        }
-
-        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE,
-                            L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Client",
-                            0, NULL, 0, KEY_SET_VALUE | sam_flags[s], NULL, &hkey, NULL) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(hkey, L"Install", 0, REG_DWORD, (const BYTE *)&install_val, sizeof(install_val));
-            RegSetValueExW(hkey, L"Version", 0, REG_SZ, (const BYTE *)version_str, sizeof(version_str));
-            RegSetValueExW(hkey, L"TargetVersion", 0, REG_SZ, (const BYTE *)target_version_str, sizeof(target_version_str));
-            RegSetValueExW(hkey, L"Release", 0, REG_DWORD, (const BYTE *)&release_val, sizeof(release_val));
-            RegCloseKey(hkey);
-        }
-    }
-    return TRUE;
-}
-
-static void clean_dotnet4_registry_keys(void)
-{
-    REGSAM sam_flags[2] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY };
-    int s;
-
-    for (s = 0; s < 2; s++)
-    {
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
-                        L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full",
-                        sam_flags[s], 0);
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
-                        L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Client",
-                        sam_flags[s], 0);
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
-                        L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4",
-                        sam_flags[s], 0);
-        RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
-                        L"SOFTWARE\\Microsoft\\.NETFramework",
-                        sam_flags[s], 0);
-    }
-}
-
-static BOOL copy_or_hardlink_tree(const WCHAR *src, const WCHAR *dst)
-{
-    WIN32_FIND_DATAW fd;
-    WCHAR src_search[MAX_PATH];
-    WCHAR src_child[MAX_PATH];
-    WCHAR dst_child[MAX_PATH];
-    HANDLE hFind;
-
-    CreateDirectoryW(dst, NULL);
-
-    swprintf(src_search, MAX_PATH, L"%s\\*", src);
-    hFind = FindFirstFileW(src_search, &fd);
-    if (hFind == INVALID_HANDLE_VALUE) return FALSE;
-
-    do {
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
-            continue;
-
-        swprintf(src_child, MAX_PATH, L"%s\\%s", src, fd.cFileName);
-        swprintf(dst_child, MAX_PATH, L"%s\\%s", dst, fd.cFileName);
-
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-        {
-            copy_or_hardlink_tree(src_child, dst_child);
-        }
-        else
-        {
-            if (!CreateHardLinkW(dst_child, src_child, NULL))
-                CopyFileW(src_child, dst_child, FALSE);
-        }
-    } while (FindNextFileW(hFind, &fd));
-
-    FindClose(hFind);
-    return TRUE;
-}
-
-static BOOL remove_directory_tree(const WCHAR *dir)
-{
-    WIN32_FIND_DATAW fd;
-    WCHAR search[MAX_PATH];
-    WCHAR child[MAX_PATH];
-    HANDLE hFind;
-
-    swprintf(search, MAX_PATH, L"%s\\*", dir);
-    hFind = FindFirstFileW(search, &fd);
-    if (hFind == INVALID_HANDLE_VALUE) return FALSE;
-
-    do {
-        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
-            continue;
-
-        swprintf(child, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
-        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
-            remove_directory_tree(child);
-        else
-        {
-            SetFileAttributesW(child, FILE_ATTRIBUTE_NORMAL);
-            DeleteFileW(child);
-        }
-    } while (FindNextFileW(hFind, &fd));
-
-    FindClose(hFind);
-    return RemoveDirectoryW(dir);
-}
-
-static void append_to_user_path(const WCHAR *dir)
-{
-    HKEY hkey;
-    WCHAR path[4096] = {0};
-    DWORD type = REG_EXPAND_SZ, size = sizeof(path);
-
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, L"Environment", 0, NULL, 0,
-                        KEY_READ | KEY_WRITE, NULL, &hkey, NULL) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(hkey, L"Path", NULL, &type, (BYTE *)path, &size) == ERROR_SUCCESS)
-        {
-            if (!wcsstr(path, dir))
-            {
-                if (path[0] && path[lstrlenW(path) - 1] != L';')
-                    lstrcatW(path, L";");
-                lstrcatW(path, dir);
-                RegSetValueExW(hkey, L"Path", 0, type, (BYTE *)path, (lstrlenW(path) + 1) * sizeof(WCHAR));
-            }
-        }
-        else
-        {
-            lstrcpyW(path, dir);
-            RegSetValueExW(hkey, L"Path", 0, REG_EXPAND_SZ, (BYTE *)path, (lstrlenW(path) + 1) * sizeof(WCHAR));
-        }
-        RegCloseKey(hkey);
-    }
-}
-
-static void remove_from_user_path(const WCHAR *dir)
-{
-    HKEY hkey;
-    WCHAR path[4096] = {0};
-    WCHAR new_path[4096] = {0};
-    DWORD type = REG_EXPAND_SZ, size = sizeof(path);
-
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Environment", 0, KEY_READ | KEY_WRITE, &hkey) == ERROR_SUCCESS)
-    {
-        if (RegQueryValueExW(hkey, L"Path", NULL, &type, (BYTE *)path, &size) == ERROR_SUCCESS)
-        {
-            WCHAR *tok, *context;
-            WCHAR *p = path;
-            BOOL first = TRUE;
-
-            while ((tok = wcstok_s(p, L";", &context)))
-            {
-                p = NULL;
-                if (wcsicmp(tok, dir) != 0)
-                {
-                    if (!first) lstrcatW(new_path, L";");
-                    lstrcatW(new_path, tok);
-                    first = FALSE;
-                }
-            }
-            RegSetValueExW(hkey, L"Path", 0, type, (BYTE *)new_path, (lstrlenW(new_path) + 1) * sizeof(WCHAR));
-        }
-        RegCloseKey(hkey);
-    }
-}
-
-static BOOL search_dir_for_msi(const WCHAR *dir, WCHAR *msi_path, DWORD max_len)
-{
-    WIN32_FIND_DATAW fd;
-    WCHAR search_path[MAX_PATH];
-    HANDLE hFind;
-
-    if (!dir || !*dir) return FALSE;
-    if (GetFileAttributesW(dir) == INVALID_FILE_ATTRIBUTES) return FALSE;
-
-    /* 1. Look for *mono*.msi */
-    swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", dir);
-    hFind = FindFirstFileW(search_path, &fd);
-    if (hFind != INVALID_HANDLE_VALUE)
-    {
-        swprintf(msi_path, max_len, L"%s\\%s", dir, fd.cFileName);
-        FindClose(hFind);
-        return TRUE;
-    }
-
-    /* 2. Look for any *.msi if directory name contains mono */
-    if (wcsstr(dir, L"mono") || wcsstr(dir, L"Mono"))
-    {
-        swprintf(search_path, MAX_PATH, L"%s\\*.msi", dir);
-        hFind = FindFirstFileW(search_path, &fd);
-        if (hFind != INVALID_HANDLE_VALUE)
-        {
-            swprintf(msi_path, max_len, L"%s\\%s", dir, fd.cFileName);
-            FindClose(hFind);
-            return TRUE;
-        }
-    }
-
-    /* 3. Check immediate subdirectories (e.g. wine-mono-11.3.0 or support) */
-    swprintf(search_path, MAX_PATH, L"%s\\*", dir);
-    hFind = FindFirstFileW(search_path, &fd);
-    if (hFind != INVALID_HANDLE_VALUE)
-    {
-        do {
-            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
-                wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0)
-            {
-                WCHAR subdir[MAX_PATH];
-                WCHAR support_dir[MAX_PATH];
-                WIN32_FIND_DATAW sub_fd;
-                HANDLE sub_find;
-
-                swprintf(subdir, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
-
-                swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", subdir);
-                sub_find = FindFirstFileW(search_path, &sub_fd);
-                if (sub_find != INVALID_HANDLE_VALUE)
-                {
-                    swprintf(msi_path, max_len, L"%s\\%s", subdir, sub_fd.cFileName);
-                    FindClose(sub_find);
-                    FindClose(hFind);
-                    return TRUE;
-                }
-
-                swprintf(support_dir, MAX_PATH, L"%s\\support", subdir);
-                if (GetFileAttributesW(support_dir) != INVALID_FILE_ATTRIBUTES)
-                {
-                    swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", support_dir);
-                    sub_find = FindFirstFileW(search_path, &sub_fd);
-                    if (sub_find != INVALID_HANDLE_VALUE)
-                    {
-                        swprintf(msi_path, max_len, L"%s\\%s", support_dir, sub_fd.cFileName);
-                        FindClose(sub_find);
-                        FindClose(hFind);
-                        return TRUE;
-                    }
-
-                    swprintf(search_path, MAX_PATH, L"%s\\*.msi", support_dir);
-                    sub_find = FindFirstFileW(search_path, &sub_fd);
-                    if (sub_find != INVALID_HANDLE_VALUE)
-                    {
-                        swprintf(msi_path, max_len, L"%s\\%s", support_dir, sub_fd.cFileName);
-                        FindClose(sub_find);
-                        FindClose(hFind);
-                        return TRUE;
-                    }
-                }
-            }
-        } while (FindNextFileW(hFind, &fd));
-        FindClose(hFind);
-    }
-
-    return FALSE;
-}
-
-static BOOL find_mono_msi(WCHAR *msi_path, DWORD max_len)
-{
-    static const WCHAR *standard_dirs[] = {
-        L"Z:\\usr\\share\\wine\\mono",
-        L"\\\\?\\unix\\usr\\share\\wine\\mono",
-        L"Z:\\usr\\local\\share\\wine\\mono",
-        L"\\\\?\\unix\\usr\\local\\share\\wine\\mono",
-        L"Z:\\opt\\wine\\mono",
-        L"\\\\?\\unix\\opt\\wine\\mono",
-    };
-    WCHAR candidate[MAX_PATH];
-    WCHAR env_buf[MAX_PATH];
-    HKEY hkey;
-    int i;
-
-    /* 1. Check standard system Mono directories */
-    for (i = 0; i < ARRAY_SIZE(standard_dirs); i++)
-    {
-        if (search_dir_for_msi(standard_dirs[i], msi_path, max_len))
-            return TRUE;
-    }
-
-    /* 2. Check WINEHOMEDIR */
-    if (GetEnvironmentVariableW(L"WINEHOMEDIR", env_buf, MAX_PATH) && env_buf[0])
-    {
-        WCHAR *h = env_buf;
-        if (!wcsncmp(h, L"\\??\\", 4)) h += 4;
-
-        swprintf(candidate, MAX_PATH, L"%s\\.cache\\wine", h);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-
-        swprintf(candidate, MAX_PATH, L"%s\\.cache\\wine\\mono", h);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-
-        swprintf(candidate, MAX_PATH, L"%s\\mono", h);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-    }
-
-    /* 3. Check USERNAME */
-    if (GetEnvironmentVariableW(L"USERNAME", env_buf, MAX_PATH) && env_buf[0])
-    {
-        swprintf(candidate, MAX_PATH, L"Z:\\home\\%s\\.cache\\wine", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-
-        swprintf(candidate, MAX_PATH, L"Z:\\home\\%s\\.cache\\wine\\mono", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-
-        swprintf(candidate, MAX_PATH, L"Z:\\home\\%s\\mono", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-    }
-
-    /* 4. Check HOME */
-    if (GetEnvironmentVariableW(L"HOME", env_buf, MAX_PATH) && env_buf[0])
-    {
-        swprintf(candidate, MAX_PATH, L"Z:%s\\.cache\\wine", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-
-        swprintf(candidate, MAX_PATH, L"Z:%s\\.cache\\wine\\mono", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-
-        swprintf(candidate, MAX_PATH, L"\\\\?\\unix%s/.cache/wine", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-
-        swprintf(candidate, MAX_PATH, L"\\\\?\\unix%s/.cache/wine/mono", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-    }
-
-    /* 5. Check WINE_HOST_XDG_CACHE_HOME */
-    if (GetEnvironmentVariableW(L"WINE_HOST_XDG_CACHE_HOME", env_buf, MAX_PATH) && env_buf[0])
-    {
-        swprintf(candidate, MAX_PATH, L"\\\\?\\unix%s/wine", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-
-        swprintf(candidate, MAX_PATH, L"\\\\?\\unix%s/wine/mono", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-    }
-
-    /* 6. Check WINEDATADIR */
-    if (GetEnvironmentVariableW(L"WINEDATADIR", env_buf, MAX_PATH) && env_buf[0])
-    {
-        swprintf(candidate, MAX_PATH, L"%s\\mono", env_buf);
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-    }
-
-    /* 7. Check %SystemRoot%\mono */
-    if (ExpandEnvironmentStringsW(L"%SystemRoot%\\mono", candidate, MAX_PATH))
-    {
-        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-    }
-
-    /* 8. Check registry HKCU\Software\Wine\Dotnet\MonoCabDir */
-    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Wine\\Dotnet", 0, KEY_READ, &hkey) == ERROR_SUCCESS)
-    {
-        DWORD type, size = sizeof(candidate);
-        if (RegQueryValueExW(hkey, L"MonoCabDir", NULL, &type, (BYTE *)candidate, &size) == ERROR_SUCCESS &&
-            type == REG_SZ)
-        {
-            RegCloseKey(hkey);
-            if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
-        }
-        else
-        {
-            RegCloseKey(hkey);
-        }
-    }
-
-    return FALSE;
-}
-
-static int execute_msiexec(const WCHAR *cmdline)
-{
-    STARTUPINFOW si;
-    PROCESS_INFORMATION pi;
-    DWORD exit_code = 1;
-    WCHAR cmd[MAX_PATH * 2 + 64];
-
-    lstrcpynW(cmd, cmdline, ARRAY_SIZE(cmd));
-
-    memset(&si, 0, sizeof(si));
-    si.cb = sizeof(si);
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
-    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-
-    output_printf(L"Executing: %s\r\n", cmd);
-
-    if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
-    {
-        output_write(L"Error: Failed to launch msiexec.exe.\r\n");
-        return 1;
-    }
-
-    WaitForSingleObject(pi.hProcess, INFINITE);
-    GetExitCodeProcess(pi.hProcess, &exit_code);
-    CloseHandle(pi.hThread);
-    CloseHandle(pi.hProcess);
-
-    return (int)exit_code;
 }
 
 static int do_get_features(void)
 {
+    DismSession session;
+    DismFeature *features = NULL;
+    UINT count = 0, i;
+    HRESULT hr;
+
     print_header();
+
+    hr = DismInitialize(DismLogErrorsWarningsInfo, NULL, NULL);
+    if (FAILED(hr) && hr != DISMAPI_E_DISMAPI_ALREADY_INITIALIZED)
+    {
+        output_printf(L"Error initializing DISM API: 0x%08lx\r\n", hr);
+        return 1;
+    }
+
+    hr = DismOpenSession(DISM_ONLINE_IMAGE, NULL, NULL, &session);
+    if (FAILED(hr))
+    {
+        output_printf(L"Error opening DISM session: 0x%08lx\r\n", hr);
+        DismShutdown();
+        return 1;
+    }
+
     output_write(L"Features listing for image :\r\n\r\n"
                  L"------------------------------------------- | --------\r\n"
                  L"Feature Name                                | State\r\n"
                  L"------------------------------------------- | --------\r\n");
 
-    output_printf(L"%-43s | %s\r\n", FEATURE_PWSH, is_pwsh_enabled() ? L"Enabled" : L"Disabled");
-    output_printf(L"%-43s | %s\r\n", FEATURE_MONO, is_mono_enabled() ? L"Enabled" : L"Disabled");
+    hr = DismGetFeatures(session, NULL, DismPackageNone, &features, &count);
+    if (SUCCEEDED(hr) && features)
+    {
+        for (i = 0; i < count; i++)
+        {
+            output_printf(L"%-43s | %s\r\n",
+                          features[i].FeatureName,
+                          features[i].State == DismStateInstalled ? L"Enabled" : L"Disabled");
+        }
+        DismDelete(features);
+    }
+
+    DismCloseSession(session);
+    DismShutdown();
 
     output_write(L"\r\nThe operation completed successfully.\r\n");
     return 0;
@@ -571,6 +119,10 @@ static int do_get_features(void)
 
 static int do_get_feature_info(const WCHAR *feature_name)
 {
+    DismSession session;
+    DismFeatureInfo *info = NULL;
+    HRESULT hr;
+
     if (!feature_name || !*feature_name)
     {
         output_write(L"Error: A feature name must be specified.\r\n");
@@ -579,30 +131,44 @@ static int do_get_feature_info(const WCHAR *feature_name)
 
     print_header();
 
-    if (!wcsicmp(feature_name, FEATURE_PWSH))
+    hr = DismInitialize(DismLogErrorsWarningsInfo, NULL, NULL);
+    if (FAILED(hr) && hr != DISMAPI_E_DISMAPI_ALREADY_INITIALIZED)
+    {
+        output_printf(L"Error initializing DISM API: 0x%08lx\r\n", hr);
+        return 1;
+    }
+
+    hr = DismOpenSession(DISM_ONLINE_IMAGE, NULL, NULL, &session);
+    if (FAILED(hr))
+    {
+        output_printf(L"Error opening DISM session: 0x%08lx\r\n", hr);
+        DismShutdown();
+        return 1;
+    }
+
+    hr = DismGetFeatureInfo(session, feature_name, NULL, DismPackageNone, &info);
+    if (SUCCEEDED(hr) && info)
     {
         output_printf(L"Feature Information:\r\n\r\n"
                       L"Feature Name : %s\r\n"
-                      L"Display Name : Microsoft PowerShell Core\r\n"
-                      L"Description : PowerShell Core 7 cross-platform automation and configuration tool\r\n"
-                      L"Restart Required : No\r\n"
+                      L"Display Name : %s\r\n"
+                      L"Description : %s\r\n"
+                      L"Restart Required : %s\r\n"
                       L"State : %s\r\n\r\n"
                       L"The operation completed successfully.\r\n",
-                      FEATURE_PWSH, is_pwsh_enabled() ? L"Enabled" : L"Disabled");
+                      info->FeatureName,
+                      info->DisplayName,
+                      info->Description,
+                      info->RestartRequired == DismRestartRequired ? L"Yes" : L"No",
+                      info->FeatureState == DismStateInstalled ? L"Enabled" : L"Disabled");
+        DismDelete(info);
+        DismCloseSession(session);
+        DismShutdown();
         return 0;
     }
-    else if (!wcsicmp(feature_name, FEATURE_MONO) || !wcsicmp(feature_name, FEATURE_NETFX4))
-    {
-        output_printf(L"Feature Information:\r\n\r\n"
-                      L"Feature Name : %s\r\n"
-                      L"Display Name : Wine Mono .NET Runtime\r\n"
-                      L"Description : Wine Mono .NET Framework 4.x runtime and support assemblies\r\n"
-                      L"Restart Required : No\r\n"
-                      L"State : %s\r\n\r\n"
-                      L"The operation completed successfully.\r\n",
-                      feature_name, is_mono_enabled() ? L"Enabled" : L"Disabled");
-        return 0;
-    }
+
+    DismCloseSession(session);
+    DismShutdown();
 
     output_printf(L"Feature name %s is unknown.\r\n"
                   L"A Windows feature name was not recognized.\r\n",
@@ -612,6 +178,9 @@ static int do_get_feature_info(const WCHAR *feature_name)
 
 static int do_enable_feature(const WCHAR *feature_name)
 {
+    DismSession session;
+    HRESULT hr;
+
     if (!feature_name || !*feature_name)
     {
         output_write(L"Error: A feature name must be specified.\r\n");
@@ -619,83 +188,47 @@ static int do_enable_feature(const WCHAR *feature_name)
     }
 
     print_header();
+    output_write(L"Enabling feature(s)\r\n");
 
-    if (!wcsicmp(feature_name, FEATURE_PWSH))
+    hr = DismInitialize(DismLogErrorsWarningsInfo, NULL, NULL);
+    if (FAILED(hr) && hr != DISMAPI_E_DISMAPI_ALREADY_INITIALIZED)
     {
-        WCHAR dst[MAX_PATH];
-        WCHAR src[] = L"Z:\\var\\tmp\\pwsh-win-x64";
-        HKEY hkey;
-
-        output_write(L"Enabling feature(s)\r\n");
-
-        ExpandEnvironmentStringsW(L"%ProgramFiles%", dst, MAX_PATH);
-        CreateDirectoryW(dst, NULL);
-        lstrcatW(dst, L"\\PowerShell");
-        CreateDirectoryW(dst, NULL);
-        lstrcatW(dst, L"\\7");
-        CreateDirectoryW(dst, NULL);
-
-        if (!copy_or_hardlink_tree(src, dst))
-        {
-            output_write(L"An error occurred while copying PowerShell Core files.\r\n");
-            return 1;
-        }
-
-        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE,
-                            L"SOFTWARE\\Microsoft\\PowerShell\\3\\PowerShellEngine",
-                            0, NULL, 0, KEY_SET_VALUE, NULL, &hkey, NULL) == ERROR_SUCCESS)
-        {
-            RegSetValueExW(hkey, L"ApplicationBase", 0, REG_SZ,
-                           (const BYTE *)dst, (lstrlenW(dst) + 1) * sizeof(WCHAR));
-            RegCloseKey(hkey);
-        }
-
-        append_to_user_path(dst);
-
-        output_write(L"[==========================100.0%==========================]\r\n"
-                     L"The operation completed successfully.\r\n");
-        return 0;
+        output_printf(L"Error initializing DISM API: 0x%08lx\r\n", hr);
+        return 1;
     }
-    else if (!wcsicmp(feature_name, FEATURE_MONO) || !wcsicmp(feature_name, FEATURE_NETFX4))
+
+    hr = DismOpenSession(DISM_ONLINE_IMAGE, NULL, NULL, &session);
+    if (FAILED(hr))
     {
-        WCHAR msi[MAX_PATH];
-        WCHAR cmd[MAX_PATH * 2 + 64];
-        int ret;
+        output_printf(L"Error opening DISM session: 0x%08lx\r\n", hr);
+        DismShutdown();
+        return 1;
+    }
 
-        output_write(L"Enabling feature(s)\r\n");
+    hr = DismEnableFeature(session, feature_name, NULL, DismPackageNone,
+                           FALSE, NULL, 0, TRUE, NULL, dism_cli_progress, NULL);
 
-        if (!find_mono_msi(msi, ARRAY_SIZE(msi)))
-        {
-            output_write(L"Error: wine-mono MSI could not be found.\r\n");
-            return 1;
-        }
+    DismCloseSession(session);
+    DismShutdown();
 
-        output_printf(L"Found Wine Mono MSI: %s\r\n", msi);
-
-        swprintf(cmd, ARRAY_SIZE(cmd), L"msiexec.exe /i \"%s\" /qn", msi);
-        ret = execute_msiexec(cmd);
-        if (ret != 0)
-        {
-            output_printf(L"Error: msiexec failed with exit code %d.\r\n", ret);
-            return ret;
-        }
-
-        if (!write_dotnet4_registry_keys())
-        {
-            output_write(L"Warning: Failed to write .NET 4.0 registry keys.\r\n");
-        }
-
-        output_write(L"[==========================100.0%==========================]\r\n"
-                     L"The operation completed successfully.\r\n");
+    if (SUCCEEDED(hr))
+    {
+        output_write(L"The operation completed successfully.\r\n");
         return 0;
     }
 
-    output_printf(L"Feature name %s is unknown.\r\n", feature_name);
+    if (hr == DISMAPI_E_UNKNOWN_FEATURE)
+        output_printf(L"Feature name %s is unknown.\r\n", feature_name);
+    else
+        output_printf(L"Error enabling feature: 0x%08lx\r\n", hr);
     return 1;
 }
 
 static int do_disable_feature(const WCHAR *feature_name)
 {
+    DismSession session;
+    HRESULT hr;
+
     if (!feature_name || !*feature_name)
     {
         output_write(L"Error: A feature name must be specified.\r\n");
@@ -703,87 +236,38 @@ static int do_disable_feature(const WCHAR *feature_name)
     }
 
     print_header();
+    output_write(L"Disabling feature(s)\r\n");
 
-    if (!wcsicmp(feature_name, FEATURE_PWSH))
+    hr = DismInitialize(DismLogErrorsWarningsInfo, NULL, NULL);
+    if (FAILED(hr) && hr != DISMAPI_E_DISMAPI_ALREADY_INITIALIZED)
     {
-        WCHAR dst[MAX_PATH];
-
-        output_write(L"Disabling feature(s)\r\n");
-
-        ExpandEnvironmentStringsW(L"%ProgramFiles%\\PowerShell\\7", dst, MAX_PATH);
-        remove_directory_tree(dst);
-
-        RegDeleteKeyW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\PowerShell\\3\\PowerShellEngine");
-        RegDeleteKeyW(HKEY_LOCAL_MACHINE, L"SOFTWARE\\Microsoft\\PowerShell\\3");
-
-        remove_from_user_path(dst);
-
-        output_write(L"[==========================100.0%==========================]\r\n"
-                     L"The operation completed successfully.\r\n");
-        return 0;
+        output_printf(L"Error initializing DISM API: 0x%08lx\r\n", hr);
+        return 1;
     }
-    else if (!wcsicmp(feature_name, FEATURE_MONO) || !wcsicmp(feature_name, FEATURE_NETFX4))
+
+    hr = DismOpenSession(DISM_ONLINE_IMAGE, NULL, NULL, &session);
+    if (FAILED(hr))
     {
-        WCHAR msi[MAX_PATH];
-        HKEY hkey_uninst;
-        WCHAR mono_dir[MAX_PATH];
+        output_printf(L"Error opening DISM session: 0x%08lx\r\n", hr);
+        DismShutdown();
+        return 1;
+    }
 
-        output_write(L"Disabling feature(s)\r\n");
+    hr = DismDisableFeature(session, feature_name, NULL, FALSE, NULL, dism_cli_progress, NULL);
 
-        if (find_mono_msi(msi, ARRAY_SIZE(msi)))
-        {
-            WCHAR cmd[MAX_PATH * 2 + 64];
-            swprintf(cmd, ARRAY_SIZE(cmd), L"msiexec.exe /x \"%s\" /qn", msi);
-            execute_msiexec(cmd);
-        }
+    DismCloseSession(session);
+    DismShutdown();
 
-        /* Check uninstall registry for installed mono GUIDs */
-        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                          L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall",
-                          0, KEY_READ, &hkey_uninst) == ERROR_SUCCESS)
-        {
-            DWORD idx = 0;
-            WCHAR subkey_name[256];
-            DWORD name_len = ARRAY_SIZE(subkey_name);
-
-            while (RegEnumKeyExW(hkey_uninst, idx++, subkey_name, &name_len, NULL, NULL, NULL, NULL) == ERROR_SUCCESS)
-            {
-                HKEY hsub;
-                if (RegOpenKeyExW(hkey_uninst, subkey_name, 0, KEY_READ, &hsub) == ERROR_SUCCESS)
-                {
-                    WCHAR disp[256] = {0};
-                    DWORD disp_size = sizeof(disp);
-                    if (RegQueryValueExW(hsub, L"DisplayName", NULL, NULL, (BYTE *)disp, &disp_size) == ERROR_SUCCESS)
-                    {
-                        if (wcsstr(disp, L"Wine Mono") || wcsstr(disp, L"wine mono"))
-                        {
-                            WCHAR cmd[512];
-                            swprintf(cmd, ARRAY_SIZE(cmd), L"msiexec.exe /x %s /qn", subkey_name);
-                            execute_msiexec(cmd);
-                        }
-                    }
-                    RegCloseKey(hsub);
-                }
-                name_len = ARRAY_SIZE(subkey_name);
-            }
-            RegCloseKey(hkey_uninst);
-        }
-
-        /* Clean .NET 4.0 registry keys */
-        clean_dotnet4_registry_keys();
-
-        /* Remove %SystemRoot%\mono if leftover */
-        if (ExpandEnvironmentStringsW(L"%SystemRoot%\\mono", mono_dir, MAX_PATH))
-        {
-            remove_directory_tree(mono_dir);
-        }
-
-        output_write(L"[==========================100.0%==========================]\r\n"
-                     L"The operation completed successfully.\r\n");
+    if (SUCCEEDED(hr))
+    {
+        output_write(L"The operation completed successfully.\r\n");
         return 0;
     }
 
-    output_printf(L"Feature name %s is unknown.\r\n", feature_name);
+    if (hr == DISMAPI_E_UNKNOWN_FEATURE)
+        output_printf(L"Feature name %s is unknown.\r\n", feature_name);
+    else
+        output_printf(L"Error disabling feature: 0x%08lx\r\n", hr);
     return 1;
 }
 
