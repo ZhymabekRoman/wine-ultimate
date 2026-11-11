@@ -221,6 +221,8 @@ extern timeout_t server_start_time;
 extern sigset_t server_block_set;
 extern pthread_mutex_t fd_cache_mutex;
 extern struct _KUSER_SHARED_DATA *user_shared_data;
+extern struct _KUSER_SHARED_DATA *user_shared_data_rw;
+extern int user_shared_data_fd;
 extern ULONG process_cookie;
 
 extern void init_environment(void);

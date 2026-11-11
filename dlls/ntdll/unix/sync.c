@@ -104,6 +104,10 @@ static inline ULONGLONG monotonic_counter(void)
     if (!clock_gettime( CLOCK_BOOTTIME, &ts ))
         return ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
 #endif
+#ifdef CLOCK_MONOTONIC_RAW
+    if (!clock_gettime( CLOCK_MONOTONIC_RAW, &ts ))
+        return ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
+#endif
     if (!clock_gettime( CLOCK_MONOTONIC, &ts ))
         return ts.tv_sec * (ULONGLONG)TICKSPERSEC + ts.tv_nsec / 100;
 #endif
@@ -2614,10 +2618,75 @@ NTSTATUS WINAPI NtQueryPerformanceCounter( LARGE_INTEGER *counter, LARGE_INTEGER
         if (frequency) frequency->QuadPart = user_shared_data->QpcFrequency;
         return STATUS_SUCCESS;
     }
+#elif defined(__aarch64__)
+    if (user_shared_data && (user_shared_data->QpcBypassEnabled & SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED))
+    {
+        UINT64 cnt;
+        __asm__ volatile( "mrs %[Res], CNTVCT_EL0" : [Res] "=r" (cnt) );
+        counter->QuadPart = (cnt + user_shared_data->QpcBias) >> user_shared_data->QpcShift;
+        if (frequency) frequency->QuadPart = user_shared_data->QpcFrequency;
+        return STATUS_SUCCESS;
+    }
 #endif
     counter->QuadPart = monotonic_counter();
     if (frequency) frequency->QuadPart = TICKSPERSEC;
     return STATUS_SUCCESS;
+}
+
+
+static inline void update_user_shared_data_time(void)
+{
+    LARGE_INTEGER system_time, interrupt_time;
+    ULONGLONG lock;
+    LONGLONG now_mono, elapsed, current_time;
+    timeout_t tick_count;
+
+    if (!user_shared_data_rw) return;
+
+    now_mono = monotonic_counter();
+
+    lock = __atomic_load_n( &user_shared_data_rw->TimeUpdateLock, __ATOMIC_RELAXED );
+    if (lock & 1) return;
+
+    if (!__atomic_compare_exchange_n( &user_shared_data_rw->TimeUpdateLock, &lock, lock + 1,
+                                      FALSE, __ATOMIC_ACQUIRE, __ATOMIC_RELAXED ))
+        return;
+
+    do {
+        system_time.HighPart = user_shared_data->SystemTime.High1Time;
+        system_time.LowPart  = user_shared_data->SystemTime.LowPart;
+    } while (system_time.HighPart != user_shared_data->SystemTime.High2Time);
+
+    do {
+        interrupt_time.HighPart = user_shared_data->InterruptTime.High1Time;
+        interrupt_time.LowPart  = user_shared_data->InterruptTime.LowPart;
+    } while (interrupt_time.HighPart != user_shared_data->InterruptTime.High2Time);
+
+    elapsed = now_mono - interrupt_time.QuadPart;
+    if (elapsed > 0)
+    {
+        current_time = system_time.QuadPart + elapsed;
+        tick_count = (timeout_t)now_mono / 10000;
+
+        user_shared_data_rw->SystemTime.High2Time = current_time >> 32;
+        user_shared_data_rw->SystemTime.LowPart   = current_time;
+        __atomic_store_n( (volatile LONG *)&user_shared_data_rw->SystemTime.High1Time, current_time >> 32, __ATOMIC_RELEASE );
+
+        user_shared_data_rw->InterruptTime.High2Time = now_mono >> 32;
+        user_shared_data_rw->InterruptTime.LowPart   = now_mono;
+        __atomic_store_n( (volatile LONG *)&user_shared_data_rw->InterruptTime.High1Time, now_mono >> 32, __ATOMIC_RELEASE );
+
+        user_shared_data_rw->TickCount.High2Time = tick_count >> 32;
+#if defined(__x86_64__) || defined(__aarch64__)
+        __atomic_store_n( (volatile ULONG64 *)&user_shared_data_rw->TickCountQuad, tick_count, __ATOMIC_RELEASE );
+#else
+        user_shared_data_rw->TickCount.LowPart   = tick_count;
+        __atomic_store_n( (volatile LONG *)&user_shared_data_rw->TickCount.High1Time, tick_count >> 32, __ATOMIC_RELEASE );
+#endif
+        user_shared_data_rw->TickCountLowDeprecated = tick_count;
+    }
+
+    __atomic_store_n( &user_shared_data_rw->TimeUpdateLock, lock + 2, __ATOMIC_RELEASE );
 }
 
 
@@ -2633,43 +2702,29 @@ NTSTATUS WINAPI NtQuerySystemTime( LARGE_INTEGER *time )
 
     if (user_shared_data)
     {
-        LARGE_INTEGER system_time, interrupt_time;
+        LARGE_INTEGER system_time;
+        LONGLONG elapsed = 0;
+
+        update_user_shared_data_time();
 
         do {
             system_time.HighPart = user_shared_data->SystemTime.High1Time;
             system_time.LowPart  = user_shared_data->SystemTime.LowPart;
         } while (system_time.HighPart != user_shared_data->SystemTime.High2Time);
 
-        /* The server writes SystemTime and InterruptTime (the monotonic clock read
-         * next to it) in one burst, and it only wakes to refresh them every 16 ms
-         * (server/fd.c user_shared_data_timeout), so the raw page value is a clock
-         * with a 16 ms quantum that can be a full quantum stale. Apps build absolute
-         * deadlines out of it, and the universal one is a message pump's "now + 16 ms"
-         * (MsgWaitForMultipleObjectsEx): a deadline taken from a quantum-stale clock
-         * is already in the past when the wait runs, so the wait reports a timeout
-         * immediately, the pump loops, and every iteration costs a fresh round trip.
-         * That is tens of thousands of waits a second, which starves the server and
-         * with it every timer, socket timeout and watchdog in the process.
-         *
-         * InterruptTime is the server's monotonic reading (CLOCK_BOOTTIME) at the
-         * moment SystemTime was sampled, so adding the monotonic time elapsed since
-         * that sample gives a system clock that advances continuously between server
-         * wakeups. */
-        do {
-            interrupt_time.HighPart = user_shared_data->InterruptTime.High1Time;
-            interrupt_time.LowPart  = user_shared_data->InterruptTime.LowPart;
-        } while (interrupt_time.HighPart != user_shared_data->InterruptTime.High2Time);
-
+        if (!user_shared_data_rw)
         {
-            /* monotonic_counter() is the same clock the server sampled InterruptTime
-             * from (CLOCK_BOOTTIME, falling back to CLOCK_MONOTONIC), so the two are
-             * directly comparable; the elapsed part is never negative on a running
-             * system, and clamping covers a clock stepped backwards. */
-            LONGLONG elapsed = (LONGLONG)monotonic_counter() - interrupt_time.QuadPart;
-            time->QuadPart = system_time.QuadPart + (elapsed > 0 ? elapsed : 0);
-            return STATUS_SUCCESS;
+            LARGE_INTEGER interrupt_time;
+            do {
+                interrupt_time.HighPart = user_shared_data->InterruptTime.High1Time;
+                interrupt_time.LowPart  = user_shared_data->InterruptTime.LowPart;
+            } while (interrupt_time.HighPart != user_shared_data->InterruptTime.High2Time);
+
+            elapsed = (LONGLONG)monotonic_counter() - interrupt_time.QuadPart;
+            if (elapsed < 0) elapsed = 0;
         }
-        time->QuadPart = system_time.QuadPart;
+
+        time->QuadPart = system_time.QuadPart + elapsed;
         return STATUS_SUCCESS;
     }
 
@@ -2776,6 +2831,7 @@ NTSTATUS WINAPI NtSetIntervalProfile( ULONG interval, KPROFILE_SOURCE source )
 ULONG WINAPI NtGetTickCount(void)
 {
     /* note: we ignore TickCountMultiplier */
+    if (!user_shared_data) return monotonic_counter() / 10000;
     return user_shared_data->TickCount.LowPart;
 }
 

@@ -96,13 +96,7 @@ __ASM_GLOBAL_FUNC( fast_GetTickCount,
 extern ULONGLONG WINAPI fast_GetTickCount64(void);
 __ASM_GLOBAL_FUNC( fast_GetTickCount64,
                    ".p2align 4, 0x90\n\t"
-                   "1:\n\t"
-                   "movl 0x7ffe0324,%edx\n\t"
-                   "movl 0x7ffe0320,%eax\n\t"
-                   "cmpl 0x7ffe0328,%edx\n\t"
-                   "jne 1b\n\t"
-                   "shlq $32,%rdx\n\t"
-                   "orq %rdx,%rax\n\t"
+                   "movq 0x7ffe0320,%rax\n\t"
                    "ret" )
 
 extern void WINAPI fast_GetSystemTimeAsFileTime(void *time);
@@ -235,6 +229,39 @@ __ASM_GLOBAL_FUNC( fast_IsProcessorFeaturePresent,
                    "jae 1f\n\t"
                    "movzbl 0x7ffe0274(%rcx),%eax\n\t"
                    "ret\n\t"
+                   "1:\n\t"
+                   "xorl %eax,%eax\n\t"
+                   "ret" )
+
+extern BOOL WINAPI fast_QueryPerformanceCounter( LARGE_INTEGER *counter );
+__ASM_GLOBAL_FUNC( fast_QueryPerformanceCounter,
+                   ".p2align 4, 0x90\n\t"
+                   "testq %rcx,%rcx\n\t"
+                   "jz 1f\n\t"
+                   "testb $1,0x7ffe03c6\n\t"
+                   "jz 2f\n\t"
+                   "movq %rcx,%r8\n\t"
+                   "testb $2,0x7ffe03c6\n\t"
+                   "jz 3f\n\t"
+                   "rdtscp\n\t"
+                   "jmp 4f\n\t"
+                   "3:\n\t"
+                   "testb $4,0x7ffe03c6\n\t"
+                   "jz 5f\n\t"
+                   "lfence\n\t"
+                   "5:\n\t"
+                   "rdtsc\n\t"
+                   "4:\n\t"
+                   "shlq $32,%rdx\n\t"
+                   "orq %rdx,%rax\n\t"
+                   "addq 0x7ffe03b8,%rax\n\t"
+                   "movzbl 0x7ffe03c7,%ecx\n\t"
+                   "shrq %cl,%rax\n\t"
+                   "movq %rax,(%r8)\n\t"
+                   "movl $1,%eax\n\t"
+                   "ret\n\t"
+                   "2:\n\t"
+                   "jmp RtlQueryPerformanceCounter\n\t"
                    "1:\n\t"
                    "xorl %eax,%eax\n\t"
                    "ret" )
@@ -510,13 +537,10 @@ ULONG_PTR get_fast_iat_trampoline( const char *func_name )
     case 0x86fe8652u: if (!strcmp(func_name, "GetProcessHeap")) return (ULONG_PTR)fast_GetProcessHeap; break;
     case 0x0f4d8b55u: if (!strcmp(func_name, "GetTickCount")) return (ULONG_PTR)fast_GetTickCount; break;
     case 0x18017917u: if (!strcmp(func_name, "GetTickCount64")) return (ULONG_PTR)fast_GetTickCount64; break;
-    /* GetSystemTimeAsFileTime / GetSystemTimePreciseAsFileTime are deliberately not
-     * trampolined: the trampoline is a bare read of KUSER_SHARED_DATA->SystemTime,
-     * which is the server's 16 ms snapshot, while NtQuerySystemTime interpolates that
-     * snapshot with the monotonic clock. Patched modules would then build absolute
-     * deadlines ("now + 16 ms") out of the coarse copy and the wait would expire
-     * instantly, spinning the message pump, and the two clock readings visible in one
-     * process would disagree by up to a quantum. Keep the real entry point. */
+    case 0xee9d4374u: if (!strcmp(func_name, "GetSystemTimeAsFileTime")) return (ULONG_PTR)fast_GetSystemTimeAsFileTime; break;
+    case 0x65c1bfcbu: if (!strcmp(func_name, "GetSystemTimePreciseAsFileTime")) return (ULONG_PTR)fast_GetSystemTimePreciseAsFileTime; break;
+    case 0x27c5f681u: if (!strcmp(func_name, "QueryPerformanceCounter")) return (ULONG_PTR)fast_QueryPerformanceCounter; break;
+    case 0x4c61e9b9u: if (!strcmp(func_name, "RtlQueryPerformanceCounter")) return (ULONG_PTR)fast_QueryPerformanceCounter; break;
     case 0xccd84087u: if (!strcmp(func_name, "TlsGetValue")) return (ULONG_PTR)fast_TlsGetValue; break;
     case 0x7e0db2f3u: if (!strcmp(func_name, "TlsSetValue")) return (ULONG_PTR)fast_TlsSetValue; break;
     case 0x21ddcd8bu: if (!strcmp(func_name, "SetLastError")) return (ULONG_PTR)fast_SetLastError; break;

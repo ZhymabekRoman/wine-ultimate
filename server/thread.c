@@ -1793,6 +1793,12 @@ DECL_HANDLER(init_first_thread)
         reply->inproc_device = get_process_id( process ) | 1;
         send_client_fd( process, fd, reply->inproc_device );
     }
+
+    if ((fd = get_user_data_mapping_fd()) >= 0)
+    {
+        reply->shared_data = (get_process_id( process ) | 1) + 2;
+        send_client_fd( process, fd, reply->shared_data );
+    }
 }
 
 /* initialize a new thread */

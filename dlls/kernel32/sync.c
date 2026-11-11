@@ -83,6 +83,9 @@ static BOOL get_open_object_attributes( OBJECT_ATTRIBUTES *attr, UNICODE_STRING 
  */
 ULONGLONG WINAPI DECLSPEC_HOTPATCH GetTickCount64(void)
 {
+#ifdef _WIN64
+    return *(volatile ULONG64 *)&user_shared_data->TickCountQuad;
+#else
     ULONG high, low;
 
     do
@@ -93,6 +96,7 @@ ULONGLONG WINAPI DECLSPEC_HOTPATCH GetTickCount64(void)
     while (high != user_shared_data->TickCount.High2Time);
     /* note: we ignore TickCountMultiplier */
     return (ULONGLONG)high << 32 | low;
+#endif
 }
 
 /***********************************************************************

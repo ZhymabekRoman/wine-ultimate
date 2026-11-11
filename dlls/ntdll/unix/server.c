@@ -98,6 +98,7 @@ USHORT native_machine = 0;
 BOOL process_exiting = FALSE;
 
 timeout_t server_start_time = 0;  /* time of server startup */
+int user_shared_data_fd = -1;
 
 sigset_t server_block_set;  /* signals to block during server calls */
 static int fd_socket = -1;  /* socket to exchange file descriptors with the server */
@@ -1733,6 +1734,11 @@ size_t server_init_process(void)
             {
                 inproc_device_fd = wine_server_receive_fd( &handle );
                 assert( handle == reply->inproc_device );
+            }
+            if (reply->shared_data)
+            {
+                user_shared_data_fd = wine_server_receive_fd( &handle );
+                assert( handle == reply->shared_data );
             }
         }
     }

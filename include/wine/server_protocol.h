@@ -1197,9 +1197,9 @@ struct init_first_thread_reply
     timeout_t    server_start;
     unsigned int session_id;
     obj_handle_t inproc_device;
+    obj_handle_t shared_data;
     data_size_t  info_size;
     /* VARARG(machines,ushorts); */
-    char __pad_36[4];
 };
 
 
@@ -7495,6 +7495,6 @@ union generic_reply
     struct get_swap_interval_reply get_swap_interval_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 970
+#define SERVER_PROTOCOL_VERSION 971
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

@@ -541,6 +541,43 @@ void init_shared_data_cpuinfo( KUSER_SHARED_DATA *data )
 
     if (features[PF_XSAVE_ENABLED])
         init_xstate_features( &data->XState );
+
+    if (!data->QpcBypassEnabled && (regs[0] >= 0x80000007))
+    {
+        unsigned int inv_regs[4];
+        do_cpuid( 0x80000007, 0, inv_regs );
+        if (inv_regs[3] & (1 << 8))  /* invariant TSC */
+        {
+            struct timespec ts0, ts1;
+            UINT64 tsc0, tsc1, freq;
+            LONGLONG elapsed_ns;
+
+            clock_gettime( CLOCK_MONOTONIC_RAW, &ts0 );
+            __asm__ volatile( "rdtsc" : "=a" (regs[0]), "=d" (regs[1]) );
+            tsc0 = ((UINT64)regs[1] << 32) | regs[0];
+            usleep( 1000 );
+            clock_gettime( CLOCK_MONOTONIC_RAW, &ts1 );
+            __asm__ volatile( "rdtsc" : "=a" (regs[0]), "=d" (regs[1]) );
+            tsc1 = ((UINT64)regs[1] << 32) | regs[0];
+
+            elapsed_ns = (ts1.tv_sec - ts0.tv_sec) * 1000000000ULL + (ts1.tv_nsec - ts0.tv_nsec);
+            if (elapsed_ns > 0)
+            {
+                freq = (tsc1 - tsc0) * 1000000000ULL / elapsed_ns;
+                if (freq)
+                {
+                    data->QpcShift = 10;
+                    data->QpcFrequency = freq >> 10;
+                    data->QpcBias = 0;
+                    data->QpcBypassEnabled = SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED;
+                    if (features[PF_RDTSCP_INSTRUCTION_AVAILABLE])
+                        data->QpcBypassEnabled |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_RDTSCP;
+                    else
+                        data->QpcBypassEnabled |= SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_LFENCE;
+                }
+            }
+        }
+    }
 }
 
 #elif defined(__arm__) || defined(__aarch64__)

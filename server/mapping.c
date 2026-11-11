@@ -1663,6 +1663,8 @@ struct obj_locator get_shared_object_locator( volatile void *object_shm )
     return locator;
 }
 
+static struct mapping *user_data_mapping;
+
 struct object *create_user_data_mapping( struct object *root, const struct unicode_str *name,
                                         unsigned int attr, const struct security_descriptor *sd )
 {
@@ -1672,8 +1674,17 @@ struct object *create_user_data_mapping( struct object *root, const struct unico
     if (!(mapping = create_mapping( root, name, attr, sizeof(KUSER_SHARED_DATA),
                                     SEC_COMMIT, 0, FILE_READ_DATA | FILE_WRITE_DATA, sd ))) return NULL;
     ptr = mmap( NULL, mapping->size, PROT_WRITE, MAP_SHARED, get_unix_fd( mapping->fd ), 0 );
-    if (ptr != MAP_FAILED) user_shared_data = ptr;
+    if (ptr != MAP_FAILED)
+    {
+        user_shared_data = ptr;
+        user_data_mapping = (struct mapping *)grab_object( mapping );
+    }
     return &mapping->obj;
+}
+
+int get_user_data_mapping_fd(void)
+{
+    return user_data_mapping ? get_unix_fd( user_data_mapping->fd ) : -1;
 }
 
 /* create a file mapping */

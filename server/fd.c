@@ -384,7 +384,7 @@ static void atomic_store_long(volatile LONG *ptr, LONG value)
 
 static void set_user_shared_data_time(void)
 {
-    timeout_t tick_count = monotonic_time / 10000;
+    timeout_t lock, tick_count = monotonic_time / 10000;
     static timeout_t last_timezone_update, last_timezone_bias = 65535, adjusted_timezone_bias;
     static int current_year = -1;
     timeout_t timezone_bias;
@@ -419,6 +419,9 @@ static void set_user_shared_data_time(void)
         last_timezone_update = monotonic_time;
     }
 
+    lock = user_shared_data->TimeUpdateLock;
+    __atomic_store_n( &user_shared_data->TimeUpdateLock, lock + 1, __ATOMIC_RELEASE );
+
     atomic_store_long(&user_shared_data->SystemTime.High2Time, current_time >> 32);
     atomic_store_ulong(&user_shared_data->SystemTime.LowPart, current_time);
     atomic_store_long(&user_shared_data->SystemTime.High1Time, current_time >> 32);
@@ -428,17 +431,31 @@ static void set_user_shared_data_time(void)
     atomic_store_long(&user_shared_data->InterruptTime.High1Time, monotonic_time >> 32);
 
     atomic_store_long(&user_shared_data->TickCount.High2Time, tick_count >> 32);
+#if defined(__x86_64__) || defined(__aarch64__)
+    __atomic_store_n((volatile ULONG64 *)&user_shared_data->TickCountQuad, tick_count, __ATOMIC_RELEASE);
+#else
     atomic_store_ulong(&user_shared_data->TickCount.LowPart, tick_count);
     atomic_store_long(&user_shared_data->TickCount.High1Time, tick_count >> 32);
+#endif
     atomic_store_ulong(&user_shared_data->TickCountLowDeprecated, tick_count);
+
+    __atomic_store_n( &user_shared_data->TimeUpdateLock, lock + 2, __ATOMIC_RELEASE );
 }
 
 void set_current_time(void)
 {
     static const timeout_t ticks_1601_to_1970 = (timeout_t)86400 * (369 * 365 + 89) * TICKS_PER_SEC;
-    struct timeval now;
-    gettimeofday( &now, NULL );
-    current_time = (timeout_t)now.tv_sec * TICKS_PER_SEC + now.tv_usec * 10 + ticks_1601_to_1970;
+#ifdef HAVE_CLOCK_GETTIME
+    struct timespec ts;
+    if (!clock_gettime( CLOCK_REALTIME, &ts ))
+        current_time = (timeout_t)ts.tv_sec * TICKS_PER_SEC + (ts.tv_nsec + 50) / 100 + ticks_1601_to_1970;
+    else
+#endif
+    {
+        struct timeval now;
+        gettimeofday( &now, NULL );
+        current_time = (timeout_t)now.tv_sec * TICKS_PER_SEC + now.tv_usec * 10 + ticks_1601_to_1970;
+    }
     monotonic_time = monotonic_counter();
     if (user_shared_data) set_user_shared_data_time();
 }

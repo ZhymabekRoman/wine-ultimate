@@ -541,6 +541,10 @@ timeout_t monotonic_counter(void)
     if (!clock_gettime( CLOCK_BOOTTIME, &ts ))
         return (timeout_t)ts.tv_sec * TICKS_PER_SEC + ts.tv_nsec / 100;
 #endif
+#ifdef CLOCK_MONOTONIC_RAW
+    if (!clock_gettime( CLOCK_MONOTONIC_RAW, &ts ))
+        return (timeout_t)ts.tv_sec * TICKS_PER_SEC + ts.tv_nsec / 100;
+#endif
     if (!clock_gettime( CLOCK_MONOTONIC, &ts ))
         return (timeout_t)ts.tv_sec * TICKS_PER_SEC + ts.tv_nsec / 100;
 #endif

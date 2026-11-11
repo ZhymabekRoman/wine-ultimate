@@ -208,6 +208,7 @@ static struct file_view *arm64ec_view;
 
 ULONG_PTR user_space_wow_limit = 0;
 struct _KUSER_SHARED_DATA *user_shared_data = (void *)0x7ffe0000;
+struct _KUSER_SHARED_DATA *user_shared_data_rw = NULL;
 
 /* TEB allocation blocks */
 static void *teb_block;
@@ -4568,21 +4569,37 @@ void virtual_map_user_shared_data(void)
     OBJECT_ATTRIBUTES attr = { sizeof(attr), 0, &name_str };
     unsigned int status;
     HANDLE section;
-    int res, fd, needs_close;
+    int res, fd, needs_close = 0;
 
-    if ((status = NtOpenSection( &section, SECTION_ALL_ACCESS, &attr )))
+    if (user_shared_data_fd != -1)
     {
-        ERR( "failed to open the USD section: %08x\n", status );
+        fd = user_shared_data_fd;
+        user_shared_data_fd = -1;
+        needs_close = 1;
+    }
+    else
+    {
+        if ((status = NtOpenSection( &section, SECTION_ALL_ACCESS, &attr )))
+        {
+            ERR( "failed to open the USD section: %08x\n", status );
+            exit(1);
+        }
+        if ((res = server_get_unix_fd( section, FILE_READ_DATA | FILE_WRITE_DATA, &fd, &needs_close, NULL, NULL )))
+        {
+            ERR( "failed to remap the process USD: %d\n", res );
+            exit(1);
+        }
+        NtClose( section );
+    }
+
+    if (user_shared_data != mmap( user_shared_data, page_size, PROT_READ, MAP_SHARED|MAP_FIXED, fd, 0 ))
+    {
+        ERR( "failed to remap the process USD: %p\n", user_shared_data );
         exit(1);
     }
-    if ((res = server_get_unix_fd( section, 0, &fd, &needs_close, NULL, NULL )) ||
-        (user_shared_data != mmap( user_shared_data, page_size, PROT_READ, MAP_SHARED|MAP_FIXED, fd, 0 )))
-    {
-        ERR( "failed to remap the process USD: %d\n", res );
-        exit(1);
-    }
+    user_shared_data_rw = mmap( NULL, page_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    if (user_shared_data_rw == MAP_FAILED) user_shared_data_rw = NULL;
     if (needs_close) close( fd );
-    NtClose( section );
 }
 
 
@@ -4593,27 +4610,35 @@ void virtual_map_user_shared_data(void)
  */
 void virtual_init_user_shared_data(void)
 {
-    UNICODE_STRING name_str = RTL_CONSTANT_STRING( shared_data_nameW );
-    OBJECT_ATTRIBUTES attr = { sizeof(attr), 0, &name_str };
     SYSTEM_BASIC_INFORMATION info;
     KUSER_SHARED_DATA *data;
-    unsigned int status;
-    HANDLE section;
-    int res, fd, needs_close;
 
-    if ((status = NtOpenSection( &section, SECTION_ALL_ACCESS, &attr )))
+    if (user_shared_data_rw)
     {
-        ERR( "failed to open the USD section: %08x\n", status );
-        exit(1);
+        data = user_shared_data_rw;
     }
-    if ((res = server_get_unix_fd( section, 0, &fd, &needs_close, NULL, NULL )) ||
-        (data = mmap( NULL, sizeof(*data), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 )) == MAP_FAILED)
+    else
     {
-        ERR( "failed to remap the process USD: %d\n", res );
-        exit(1);
+        UNICODE_STRING name_str = RTL_CONSTANT_STRING( shared_data_nameW );
+        OBJECT_ATTRIBUTES attr = { sizeof(attr), 0, &name_str };
+        unsigned int status;
+        HANDLE section;
+        int res, fd, needs_close;
+
+        if ((status = NtOpenSection( &section, SECTION_ALL_ACCESS, &attr )))
+        {
+            ERR( "failed to open the USD section: %08x\n", status );
+            exit(1);
+        }
+        if ((res = server_get_unix_fd( section, 0, &fd, &needs_close, NULL, NULL )) ||
+            (data = mmap( NULL, sizeof(*data), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 )) == MAP_FAILED)
+        {
+            ERR( "failed to remap the process USD: %d\n", res );
+            exit(1);
+        }
+        if (needs_close) close( fd );
+        NtClose( section );
     }
-    if (needs_close) close( fd );
-    NtClose( section );
 
     virtual_get_system_info( &info, FALSE );
 
@@ -4634,7 +4659,7 @@ void virtual_init_user_shared_data(void)
     }
 
     init_shared_data_cpuinfo( data );
-    munmap( data, sizeof(*data) );
+    if (data != user_shared_data_rw) munmap( data, sizeof(*data) );
 }
 
 

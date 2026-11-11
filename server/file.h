@@ -194,6 +194,7 @@ extern struct mapping *create_fd_mapping( struct object *root, const struct unic
                                           unsigned int attr, const struct security_descriptor *sd );
 extern struct object *create_user_data_mapping( struct object *root, const struct unicode_str *name,
                                                 unsigned int attr, const struct security_descriptor *sd );
+extern int get_user_data_mapping_fd(void);
 extern struct mapping *create_session_mapping( struct object *root, const struct unicode_str *name,
                                                unsigned int attr, const struct security_descriptor *sd );
 extern void set_session_mapping( struct mapping *mapping );
