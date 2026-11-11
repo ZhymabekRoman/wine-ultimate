@@ -1799,9 +1799,15 @@ static inline void unmount_fd( struct fd *fd )
 /* allocate an fd object, without setting the unix fd yet */
 static struct fd *alloc_fd_object(void)
 {
+    static int disable_fs_locks = -1;
     struct fd *fd = alloc_object( &fd_ops );
 
     if (!fd) return NULL;
+    if (disable_fs_locks < 0)
+    {
+        const char *env = getenv( "WINE_DISABLE_FS_LOCKS" );
+        disable_fs_locks = (env && strcmp( env, "0" )) ? 1 : 0;
+    }
 
     fd->fd_ops     = NULL;
     fd->sync       = NULL;
@@ -1819,7 +1825,7 @@ static struct fd *alloc_fd_object(void)
     fd->nt_namelen = 0;
     fd->cacheable  = 0;
     fd->mirror_poll = 0;
-    fd->fs_locks   = 1;
+    fd->fs_locks   = !disable_fs_locks;
     fd->sync_pipe[0] = -1;
     fd->sync_pipe[1] = -1;
     fd->poll_index = -1;

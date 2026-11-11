@@ -356,9 +356,27 @@ static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
                   L"\\\\.\\pipe\\%s", g_mojo.flag );
         if (n) TRACE( "WEBVIEW2_PIPE_FOR_SCRIPT_DEBUGGING set (%u chars)\n", n );
 
-        GetCurrentDirectoryW( MAX_PATH, root );
-        lstrcpyW( exe, root );
-        lstrcatW( exe, L"\\msedgewebview2.exe" );
+        udd = user_data_dir && *user_data_dir ? user_data_dir : L"EBWebView\\x64";
+        exe[0] = 0;
+        if (GetModuleFileNameW( NULL, module_path, MAX_PATH ))
+        {
+            slash = wcsrchr( module_path, '\\' );
+            if (slash)
+            {
+                *slash = 0;
+                lstrcpyW( exe, module_path );
+                lstrcatW( exe, L"\\msedgewebview2.exe" );
+                *slash = '\\';
+                exe_name = slash + 1;
+            }
+            else exe_name = module_path;
+        }
+        if (!exe[0] || GetFileAttributesW( exe ) == INVALID_FILE_ATTRIBUTES)
+        {
+            GetCurrentDirectoryW( MAX_PATH, root );
+            lstrcpyW( exe, root );
+            lstrcatW( exe, L"\\msedgewebview2.exe" );
+        }
 
         g_mojo.pipe = CreateNamedPipeW( g_mojo.name,
                 PIPE_ACCESS_DUPLEX,
@@ -368,14 +386,6 @@ static void launch_browser( LPCWSTR user_data_dir, LPCWSTR extra_args )
         {
             WARN( "create-pipe %s gle=%u\n", debugstr_w( g_mojo.name ), GetLastError());
             return;
-        }
-
-        udd = user_data_dir && *user_data_dir ? user_data_dir : L"EBWebView\\x64";
-        if (GetModuleFileNameW( NULL, module_path, MAX_PATH ))
-        {
-            slash = wcsrchr( module_path, '\\' );
-            if (slash) exe_name = slash + 1;
-            else exe_name = module_path;
         }
 
         lstrcpyW( args, L"msedgewebview2 --embedded-browser-webview=1");
