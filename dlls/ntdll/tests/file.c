@@ -68,6 +68,8 @@ static NTSTATUS (WINAPI *pNtWriteFile)(HANDLE hFile, HANDLE hEvent,
                                        const void* buffer, ULONG length,
                                        PLARGE_INTEGER offset, PULONG key);
 static NTSTATUS (WINAPI *pNtClose)( PHANDLE );
+static NTSTATUS (WINAPI *pNtLockFile)(HANDLE,HANDLE,PIO_APC_ROUTINE,void*,PIO_STATUS_BLOCK,PLARGE_INTEGER,PLARGE_INTEGER,ULONG*,BOOLEAN,BOOLEAN);
+static NTSTATUS (WINAPI *pNtUnlockFile)(HANDLE,PIO_STATUS_BLOCK,PLARGE_INTEGER,PLARGE_INTEGER,ULONG*);
 static NTSTATUS (WINAPI *pNtFsControlFile) (HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, PVOID apc_context, PIO_STATUS_BLOCK io, ULONG code, PVOID in_buffer, ULONG in_size, PVOID out_buffer, ULONG out_size);
 
 static NTSTATUS (WINAPI *pNtCreateIoCompletion)(PHANDLE, ACCESS_MASK, POBJECT_ATTRIBUTES, ULONG);
@@ -7581,8 +7583,128 @@ static void test_file_map_large_size(void)
     DeleteFileA(source);
 }
 
+static void test_file_locking(void)
+{
+    HANDLE handle1, handle2, dup_handle;
+    char path[MAX_PATH], filename[MAX_PATH];
+    LARGE_INTEGER offset, count;
+    IO_STATUS_BLOCK io;
+    NTSTATUS status;
+
+    if (!pNtLockFile || !pNtUnlockFile)
+    {
+        win_skip( "NtLockFile or NtUnlockFile not available\n" );
+        return;
+    }
+
+    GetTempPathA( MAX_PATH, path );
+    GetTempFileNameA( path, "lck", 0, filename );
+    handle1 = CreateFileA( filename, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           CREATE_ALWAYS, 0, 0 );
+    ok( handle1 != INVALID_HANDLE_VALUE, "CreateFileA handle1 failed %lu\n", GetLastError() );
+
+    handle2 = CreateFileA( filename, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, 0, 0 );
+    ok( handle2 != INVALID_HANDLE_VALUE, "CreateFileA handle2 failed %lu\n", GetLastError() );
+
+    /* 1. Basic exclusive lock on handle1 */
+    offset.QuadPart = 0;
+    count.QuadPart = 100;
+    status = pNtLockFile( handle1, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, TRUE );
+    ok( !status, "pNtLockFile exclusive 0..100 failed %lx\n", status );
+
+    /* 2. Overlapping lock on handle2 in same process must fail with STATUS_FILE_LOCK_CONFLICT */
+    offset.QuadPart = 50;
+    count.QuadPart = 100;
+    status = pNtLockFile( handle2, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, TRUE );
+    ok( status == STATUS_FILE_LOCK_CONFLICT, "expected STATUS_FILE_LOCK_CONFLICT, got %lx\n", status );
+
+    /* 3. Non-overlapping lock on handle2 must succeed */
+    offset.QuadPart = 200;
+    count.QuadPart = 50;
+    status = pNtLockFile( handle2, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, TRUE );
+    ok( !status, "pNtLockFile non-overlapping 200..250 failed %lx\n", status );
+
+    /* 4. Closing handle2 must NOT drop handle1's lock (OFD lock semantic) */
+    CloseHandle( handle2 );
+
+    handle2 = CreateFileA( filename, GENERIC_READ | GENERIC_WRITE,
+                           FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                           OPEN_EXISTING, 0, 0 );
+    ok( handle2 != INVALID_HANDLE_VALUE, "reopen handle2 failed %lu\n", GetLastError() );
+
+    /* handle1's lock on 0..100 must still be active */
+    offset.QuadPart = 10;
+    count.QuadPart = 20;
+    status = pNtLockFile( handle2, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, TRUE );
+    ok( status == STATUS_FILE_LOCK_CONFLICT, "expected lock on handle1 to persist after handle2 closed, got %lx\n", status );
+
+    /* Unlock handle1 */
+    offset.QuadPart = 0;
+    count.QuadPart = 100;
+    status = pNtUnlockFile( handle1, &io, &offset, &count, NULL );
+    ok( !status, "pNtUnlockFile handle1 failed %lx\n", status );
+
+    /* Now handle2 can lock 0..100 */
+    offset.QuadPart = 0;
+    count.QuadPart = 100;
+    status = pNtLockFile( handle2, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, TRUE );
+    ok( !status, "pNtLockFile handle2 0..100 failed %lx\n", status );
+
+    offset.QuadPart = 0;
+    count.QuadPart = 100;
+    status = pNtUnlockFile( handle2, &io, &offset, &count, NULL );
+    ok( !status, "pNtUnlockFile handle2 failed %lx\n", status );
+
+    /* 5. 64-bit high-offset locking and clamping (SQLite WAL lock: 0x40000000 with count = ~0ULL) */
+    offset.QuadPart = 0x40000000ULL;
+    count.QuadPart = ~0ULL;
+    status = pNtLockFile( handle1, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, TRUE );
+    ok( !status, "pNtLockFile high offset with ~0ULL count failed %lx\n", status );
+
+    /* Handle2 cannot lock in the clamped range 0x40000050..0x40000060 */
+    offset.QuadPart = 0x40000050ULL;
+    count.QuadPart = 10;
+    status = pNtLockFile( handle2, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, TRUE );
+    ok( status == STATUS_FILE_LOCK_CONFLICT, "expected conflict in high offset range, got %lx\n", status );
+
+    /* Unlock the clamped high offset lock */
+    offset.QuadPart = 0x40000000ULL;
+    count.QuadPart = ~0ULL;
+    status = pNtUnlockFile( handle1, &io, &offset, &count, NULL );
+    ok( !status, "pNtUnlockFile high offset with ~0ULL count failed %lx\n", status );
+
+    /* 6. Duplicate handle shares locks */
+    DuplicateHandle( GetCurrentProcess(), handle1, GetCurrentProcess(), &dup_handle,
+                     0, FALSE, DUPLICATE_SAME_ACCESS );
+    ok( dup_handle != INVALID_HANDLE_VALUE, "DuplicateHandle failed\n" );
+
+    offset.QuadPart = 500;
+    count.QuadPart = 50;
+    status = pNtLockFile( handle1, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, FALSE ); /* shared */
+    ok( !status, "shared lock failed %lx\n", status );
+
+    /* dup_handle can also get shared lock */
+    status = pNtLockFile( dup_handle, NULL, NULL, NULL, &io, &offset, &count, NULL, TRUE, FALSE );
+    ok( !status, "shared lock on dup_handle failed %lx\n", status );
+
+    status = pNtUnlockFile( handle1, &io, &offset, &count, NULL );
+    ok( !status, "unlock shared lock on handle1 failed %lx\n", status );
+    status = pNtUnlockFile( dup_handle, &io, &offset, &count, NULL );
+    ok( !status, "unlock shared lock on dup_handle failed %lx\n", status );
+
+    CloseHandle( dup_handle );
+    CloseHandle( handle2 );
+    CloseHandle( handle1 );
+    DeleteFileA( filename );
+}
+
 START_TEST(file)
 {
+    int argc;
+    char **argv;
     HMODULE hkernel32 = GetModuleHandleA("kernel32.dll");
     HMODULE hntdll = GetModuleHandleA("ntdll.dll");
     if (!hntdll)
@@ -7606,6 +7728,8 @@ START_TEST(file)
     pNtReadFile             = (void *)GetProcAddress(hntdll, "NtReadFile");
     pNtWriteFile            = (void *)GetProcAddress(hntdll, "NtWriteFile");
     pNtClose                = (void *)GetProcAddress(hntdll, "NtClose");
+    pNtLockFile             = (void *)GetProcAddress(hntdll, "NtLockFile");
+    pNtUnlockFile           = (void *)GetProcAddress(hntdll, "NtUnlockFile");
     pNtFsControlFile        = (void *)GetProcAddress(hntdll, "NtFsControlFile");
     pNtCreateIoCompletion   = (void *)GetProcAddress(hntdll, "NtCreateIoCompletion");
     pNtQueryIoCompletion    = (void *)GetProcAddress(hntdll, "NtQueryIoCompletion");
@@ -7621,6 +7745,13 @@ START_TEST(file)
     pNtQueryFullAttributesFile = (void *)GetProcAddress(hntdll, "NtQueryFullAttributesFile");
     pNtFlushBuffersFile = (void *)GetProcAddress(hntdll, "NtFlushBuffersFile");
     pNtQueryEaFile          = (void *)GetProcAddress(hntdll, "NtQueryEaFile");
+
+    argc = winetest_get_mainargs( &argv );
+    if (argc > 2 && (!strcmp( argv[2], "locking" ) || !strcmp( argv[2], "lock" )))
+    {
+        test_file_locking();
+        return;
+    }
 
     test_read_write();
     test_NtCreateFile();
@@ -7664,4 +7795,5 @@ START_TEST(file)
     test_mailslot_name();
     test_reparse_points();
     test_file_map_large_size();
+    test_file_locking();
 }

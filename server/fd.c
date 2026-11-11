@@ -330,6 +330,19 @@ static const struct object_ops file_lock_ops =
 #define OFF_T_MAX       (~((file_pos_t)1 << (8*sizeof(off_t)-1)))
 #define FILE_POS_T_MAX  (~(file_pos_t)0)
 
+#ifndef F_OFD_GETLK
+#define F_OFD_GETLK 36
+#endif
+#ifndef F_OFD_SETLK
+#define F_OFD_SETLK 37
+#endif
+#ifndef F_OFD_SETLKW
+#define F_OFD_SETLKW 38
+#endif
+
+static int ofd_setlk_cmd = F_OFD_SETLK;
+static int ofd_getlk_cmd = F_OFD_GETLK;
+
 static file_pos_t max_unix_offset = OFF_T_MAX;
 
 #define DUMP_LONG_LONG(val) do { \
@@ -1369,18 +1382,20 @@ static int set_unix_lock( struct fd *fd, file_pos_t start, file_pos_t end, int t
     {
         if (start == end) return 1;  /* can't set zero-byte lock */
         if (start > max_unix_offset) return 1;  /* ignore it */
+        memset( &fl, 0, sizeof(fl) );
         fl.l_type   = type;
         fl.l_whence = SEEK_SET;
         fl.l_start  = start;
+        fl.l_pid    = 0;
         if (!end || end > max_unix_offset) fl.l_len = 0;
         else fl.l_len = end - start;
-        if (fcntl( fd->unix_fd, F_SETLK, &fl ) != -1) return 1;
+        if (fcntl( fd->unix_fd, ofd_setlk_cmd, &fl ) != -1) return 1;
 
         switch(errno)
         {
         case EACCES:
             /* check whether locks work at all on this file system */
-            if (fcntl( fd->unix_fd, F_GETLK, &fl ) != -1)
+            if (fcntl( fd->unix_fd, ofd_getlk_cmd, &fl ) != -1)
             {
                 set_error( STATUS_FILE_LOCK_CONFLICT );
                 return 0;
@@ -1409,6 +1424,13 @@ static int set_unix_lock( struct fd *fd, file_pos_t start, file_pos_t end, int t
         case EOVERFLOW:
 #endif
         case EINVAL:
+            /* if kernel does not support OFD locks, fall back to standard POSIX F_SETLK */
+            if (ofd_setlk_cmd == F_OFD_SETLK)
+            {
+                ofd_setlk_cmd = F_SETLK;
+                ofd_getlk_cmd = F_GETLK;
+                break; /* retry with standard POSIX locks */
+            }
             /* this can happen if off_t is 64-bit but the kernel only supports 32-bit */
             /* in that case we shrink the limit and retry */
             if (max_unix_offset > INT_MAX)
@@ -1444,6 +1466,8 @@ static void remove_unix_locks( struct fd *fd, file_pos_t start, file_pos_t end )
     } *first, *cur, *next, *buffer;
 
     struct file_lock *lock;
+    struct list *locks_list;
+    struct list *ptr;
     int count = 0;
 
     if (!fd->inode) return;
@@ -1451,10 +1475,17 @@ static void remove_unix_locks( struct fd *fd, file_pos_t start, file_pos_t end )
     if (start == end || start > max_unix_offset) return;
     if (!end || end > max_unix_offset) end = max_unix_offset + 1;
 
+    /* For OFD locks, locks belong to this fd description, not the whole inode/process.
+     * In fallback POSIX F_SETLK mode, locks belong to the process and are per-inode. */
+    locks_list = (ofd_setlk_cmd == F_OFD_SETLK) ? &fd->locks : &fd->inode->locks;
+
     /* count the number of locks overlapping the specified area */
 
-    LIST_FOR_EACH_ENTRY( lock, &fd->inode->locks, struct file_lock, inode_entry )
+    LIST_FOR_EACH( ptr, locks_list )
     {
+        lock = (ofd_setlk_cmd == F_OFD_SETLK)
+            ? LIST_ENTRY( ptr, struct file_lock, fd_entry )
+            : LIST_ENTRY( ptr, struct file_lock, inode_entry );
         if (lock->start == lock->end) continue;
         if (lock_overlaps( lock, start, end )) count++;
     }
@@ -1478,8 +1509,11 @@ static void remove_unix_locks( struct fd *fd, file_pos_t start, file_pos_t end )
 
     /* build a sorted list of unlocked holes in the specified area */
 
-    LIST_FOR_EACH_ENTRY( lock, &fd->inode->locks, struct file_lock, inode_entry )
+    LIST_FOR_EACH( ptr, locks_list )
     {
+        lock = (ofd_setlk_cmd == F_OFD_SETLK)
+            ? LIST_ENTRY( ptr, struct file_lock, fd_entry )
+            : LIST_ENTRY( ptr, struct file_lock, inode_entry );
         if (lock->start == lock->end) continue;
         if (!lock_overlaps( lock, start, end )) continue;
 
@@ -1604,13 +1638,16 @@ static void remove_fd_locks( struct fd *fd )
 obj_handle_t lock_fd( struct fd *fd, file_pos_t start, file_pos_t count, int shared, int wait )
 {
     struct file_lock *lock;
-    file_pos_t end = start + count;
+    file_pos_t end;
 
     if (!fd->inode)  /* not a regular file */
     {
         set_error( STATUS_INVALID_DEVICE_REQUEST );
         return 0;
     }
+
+    if (count == ~0ULL && start) count = 0 - start;
+    end = start + count;
 
     /* don't allow wrapping locks */
     if (end && end < start)
@@ -1648,7 +1685,10 @@ obj_handle_t lock_fd( struct fd *fd, file_pos_t start, file_pos_t count, int sha
 void unlock_fd( struct fd *fd, file_pos_t start, file_pos_t count )
 {
     struct file_lock *lock;
-    file_pos_t end = start + count;
+    file_pos_t end;
+
+    if (count == ~0ULL && start) count = 0 - start;
+    end = start + count;
 
     /* find an existing lock with the exact same parameters */
     LIST_FOR_EACH_ENTRY( lock, &fd->locks, struct file_lock, fd_entry )
@@ -1799,15 +1839,9 @@ static inline void unmount_fd( struct fd *fd )
 /* allocate an fd object, without setting the unix fd yet */
 static struct fd *alloc_fd_object(void)
 {
-    static int disable_fs_locks = -1;
     struct fd *fd = alloc_object( &fd_ops );
 
     if (!fd) return NULL;
-    if (disable_fs_locks < 0)
-    {
-        const char *env = getenv( "WINE_DISABLE_FS_LOCKS" );
-        disable_fs_locks = (env && strcmp( env, "0" )) ? 1 : 0;
-    }
 
     fd->fd_ops     = NULL;
     fd->sync       = NULL;
@@ -1825,7 +1859,7 @@ static struct fd *alloc_fd_object(void)
     fd->nt_namelen = 0;
     fd->cacheable  = 0;
     fd->mirror_poll = 0;
-    fd->fs_locks   = !disable_fs_locks;
+    fd->fs_locks   = 1;
     fd->sync_pipe[0] = -1;
     fd->sync_pipe[1] = -1;
     fd->poll_index = -1;

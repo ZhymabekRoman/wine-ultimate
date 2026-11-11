@@ -23,6 +23,16 @@
 
 #include <sys/types.h>
 
+#ifndef F_OFD_GETLK
+#define F_OFD_GETLK 36
+#endif
+#ifndef F_OFD_SETLK
+#define F_OFD_SETLK 37
+#endif
+#ifndef F_OFD_SETLKW
+#define F_OFD_SETLKW 38
+#endif
+
 #include "object.h"
 
 struct fd;

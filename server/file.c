@@ -695,10 +695,13 @@ DECL_HANDLER(alloc_file_handle)
 DECL_HANDLER(lock_file)
 {
     struct file *file;
+    file_pos_t count = req->count;
+
+    if (count == ~0ULL && req->offset) count = 0 - req->offset;
 
     if ((file = get_file_obj( current->process, req->handle, 0 )))
     {
-        reply->handle = lock_fd( file->fd, req->offset, req->count, req->shared, req->wait );
+        reply->handle = lock_fd( file->fd, req->offset, count, req->shared, req->wait );
         reply->overlapped = is_fd_overlapped( file->fd );
         release_object( file );
     }
@@ -708,10 +711,13 @@ DECL_HANDLER(lock_file)
 DECL_HANDLER(unlock_file)
 {
     struct file *file;
+    file_pos_t count = req->count;
+
+    if (count == ~0ULL && req->offset) count = 0 - req->offset;
 
     if ((file = get_file_obj( current->process, req->handle, 0 )))
     {
-        unlock_fd( file->fd, req->offset, req->count );
+        unlock_fd( file->fd, req->offset, count );
         release_object( file );
     }
 }
