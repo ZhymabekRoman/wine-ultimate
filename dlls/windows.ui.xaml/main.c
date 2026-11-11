@@ -927,6 +927,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.PropertyPath" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.PropertyPath" ))
         IActivationFactory_QueryInterface( property_path_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.SizeHelper" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.SizeHelper" ))
+        IActivationFactory_QueryInterface( size_helper_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

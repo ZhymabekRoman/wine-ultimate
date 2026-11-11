@@ -2001,6 +2001,11 @@ static struct property_value_statics property_value_statics =
     1
 };
 
+HRESULT create_double_property_value( double val, IInspectable **out )
+{
+    return property_value_statics_CreateDouble( &property_value_statics.IPropertyValueStatics_iface, val, out );
+}
+
 HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
 {
     FIXME("clsid %s, riid %s, out %p stub!\n", debugstr_guid(clsid), debugstr_guid(riid), out);

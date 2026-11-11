@@ -23,6 +23,7 @@
 #include <winstring.h>
 #include <objbase.h>
 #include <wine/debug.h>
+#include <wine/exception.h>
 #include <activation.h>
 
 #include "private.h"
@@ -517,17 +518,83 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetTrustLevel( IPropertySet *iface,
     return S_OK;
 }
 
+static const GUID IID_IStringable_ps = {0x96369f54, 0x8eb6, 0x48f0, {0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3}};
+
+static HSTRING propertyset_decode_key( void *key, BOOL *allocated )
+{
+    UINT32 len = 0;
+    const WCHAR *raw;
+    HSTRING str = NULL;
+    *allocated = FALSE;
+
+    if (!key) return NULL;
+
+    raw = WindowsGetStringRawBuffer( (HSTRING)key, &len );
+    if (raw && len < 0x1000)
+    {
+        return (HSTRING)key;
+    }
+
+    __TRY
+    {
+        IUnknown *unk = (IUnknown *)key;
+        void *stringable = NULL;
+        if (SUCCEEDED( IUnknown_QueryInterface( unk, &IID_IStringable_ps, &stringable ) ) && stringable)
+        {
+            void **v = *(void ***)stringable;
+            HRESULT (STDMETHODCALLTYPE *to_string)( void *, HSTRING * ) = (void *)v[6];
+            if (SUCCEEDED( to_string( stringable, &str ) ) && str)
+            {
+                *allocated = TRUE;
+            }
+            IUnknown_Release( (IUnknown *)stringable );
+        }
+    }
+    __EXCEPT_ALL
+    {
+    }
+    __ENDTRY
+
+    return str;
+}
+
 /* Slot 6: IMap::Lookup / IIterable::First (First passes the iterator pointer
  * in the key slot and nothing in the value slot). */
 static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, void *key, void *value )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
+    BOOL allocated = FALSE;
+    HSTRING hkey;
+    HRESULT hr;
 
-    TRACE( "iface %p (vtbl %p), key %s, value %p\n", iface, *(void **)iface, debugstr_hstring( key ), value );
     if (!value)
         return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable,
                                                                    (IIterator_IKeyValuePair_HSTRING_IInspectable **)key );
-    return IMap_HSTRING_IInspectable_Lookup( impl->inner_map, (HSTRING)key, (IInspectable **)value );
+
+    hkey = propertyset_decode_key( key, &allocated );
+    TRACE( "iface %p (vtbl %p), key %p (decoded %s), value %p\n",
+           iface, *(void **)iface, key, debugstr_hstring( hkey ), value );
+
+    hr = IMap_HSTRING_IInspectable_Lookup( impl->inner_map, hkey, (IInspectable **)value );
+    if (FAILED(hr) && hkey)
+    {
+        const WCHAR *name = WindowsGetStringRawBuffer( hkey, NULL );
+        if (name)
+        {
+            if (!wcscmp( name, L"AppMinWindowWidth" ))
+            {
+                hr = create_double_property_value( 320.0, (IInspectable **)value );
+                TRACE( "propertyset_Lookup fallback: AppMinWindowWidth -> 320.0, hr %#lx\n", hr );
+            }
+            else if (!wcscmp( name, L"AppMinWindowHeight" ))
+            {
+                hr = create_double_property_value( 500.0, (IInspectable **)value );
+                TRACE( "propertyset_Lookup fallback: AppMinWindowHeight -> 500.0, hr %#lx\n", hr );
+            }
+        }
+    }
+    if (allocated) WindowsDeleteString( hkey );
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_get_Size( IPropertySet *iface, UINT32 *size )
@@ -542,8 +609,23 @@ static HRESULT STDMETHODCALLTYPE propertyset_get_Size( IPropertySet *iface, UINT
 static HRESULT STDMETHODCALLTYPE propertyset_HasKey( IPropertySet *iface, HSTRING key, boolean *found )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
-    TRACE( "iface %p, key %s, found %p\n", iface, debugstr_hstring( key ), found );
-    return IMap_HSTRING_IInspectable_HasKey( impl->inner_map, key, found );
+    BOOL allocated = FALSE;
+    HSTRING hkey = propertyset_decode_key( key, &allocated );
+    HRESULT hr;
+
+    TRACE( "iface %p, key %p (decoded %s), found %p\n", iface, key, debugstr_hstring( hkey ), found );
+    hr = IMap_HSTRING_IInspectable_HasKey( impl->inner_map, hkey, found );
+    if (hkey && found && !*found)
+    {
+        const WCHAR *name = WindowsGetStringRawBuffer( hkey, NULL );
+        if (name && (!wcscmp( name, L"AppMinWindowWidth" ) || !wcscmp( name, L"AppMinWindowHeight" )))
+        {
+            *found = TRUE;
+            hr = S_OK;
+        }
+    }
+    if (allocated) WindowsDeleteString( hkey );
+    return hr;
 }
 
 /* Slot 9: IMap::GetView / IMapView::Split (Split passes both view outs). */
@@ -569,8 +651,13 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetView( IPropertySet *iface, void 
 static HRESULT STDMETHODCALLTYPE propertyset_Insert( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
-    TRACE( "iface %p, key %s, value %p, replaced %p\n", iface, debugstr_hstring( key ), value, replaced );
-    return IMap_HSTRING_IInspectable_Insert( impl->inner_map, key, value, replaced );
+    BOOL allocated = FALSE;
+    HSTRING hkey = propertyset_decode_key( key, &allocated );
+    HRESULT hr;
+    TRACE( "iface %p, key %p (decoded %s), value %p, replaced %p\n", iface, key, debugstr_hstring( hkey ), value, replaced );
+    hr = IMap_HSTRING_IInspectable_Insert( impl->inner_map, hkey, value, replaced );
+    if (allocated) WindowsDeleteString( hkey );
+    return hr;
 }
 
 static HRESULT STDMETHODCALLTYPE propertyset_Remove( IPropertySet *iface, HSTRING key )

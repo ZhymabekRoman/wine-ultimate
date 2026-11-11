@@ -154,3 +154,209 @@ static struct color_helper_statics color_helper_statics =
 };
 
 IActivationFactory *color_helper_factory = &color_helper_statics.IActivationFactory_iface;
+
+/* Windows.UI.Xaml.SizeHelper */
+static const GUID IID_ISizeHelperStatics =
+    { 0x6286c5b2, 0xcf78, 0x4915, { 0xaa, 0x40, 0x76, 0x00, 0x4a, 0x16, 0x5f, 0x5e } };
+
+typedef struct ISizeHelperStatics ISizeHelperStatics;
+
+typedef struct ISizeHelperStaticsVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ISizeHelperStatics *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( ISizeHelperStatics *iface );
+    ULONG (WINAPI *Release)( ISizeHelperStatics *iface );
+    HRESULT (WINAPI *GetIids)( ISizeHelperStatics *iface, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( ISizeHelperStatics *iface, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( ISizeHelperStatics *iface, TrustLevel *level );
+    HRESULT (WINAPI *get_Empty)( ISizeHelperStatics *iface, Size *value );
+    HRESULT (WINAPI *FromDimensions)( ISizeHelperStatics *iface, FLOAT width, FLOAT height, Size *value );
+    HRESULT (WINAPI *GetIsEmpty)( ISizeHelperStatics *iface, Size target, boolean *value );
+    HRESULT (WINAPI *Equals)( ISizeHelperStatics *iface, Size value1, Size value2, boolean *value );
+} ISizeHelperStaticsVtbl;
+
+struct ISizeHelperStatics
+{
+    const struct ISizeHelperStaticsVtbl *lpVtbl;
+};
+
+struct size_helper_statics
+{
+    IActivationFactory IActivationFactory_iface;
+    ISizeHelperStatics ISizeHelperStatics_iface;
+    LONG ref;
+};
+
+static inline struct size_helper_statics *impl_from_size_IActivationFactory( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct size_helper_statics, IActivationFactory_iface );
+}
+
+static HRESULT WINAPI size_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct size_helper_statics *impl = impl_from_size_IActivationFactory( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &impl->IActivationFactory_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_ISizeHelperStatics ))
+    {
+        *out = &impl->ISizeHelperStatics_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI size_factory_AddRef( IActivationFactory *iface )
+{
+    struct size_helper_statics *impl = impl_from_size_IActivationFactory( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI size_factory_Release( IActivationFactory *iface )
+{
+    struct size_helper_statics *impl = impl_from_size_IActivationFactory( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI size_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI size_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.SizeHelper", 25, name );
+}
+
+static HRESULT WINAPI size_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI size_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    return E_NOTIMPL;
+}
+
+static const struct IActivationFactoryVtbl size_factory_vtbl =
+{
+    size_factory_QueryInterface,
+    size_factory_AddRef,
+    size_factory_Release,
+    size_factory_GetIids,
+    size_factory_GetRuntimeClassName,
+    size_factory_GetTrustLevel,
+    size_factory_ActivateInstance,
+};
+
+static inline struct size_helper_statics *impl_from_ISizeHelperStatics( ISizeHelperStatics *iface )
+{
+    return CONTAINING_RECORD( iface, struct size_helper_statics, ISizeHelperStatics_iface );
+}
+
+static HRESULT WINAPI size_helper_QueryInterface( ISizeHelperStatics *iface, REFIID iid, void **out )
+{
+    struct size_helper_statics *impl = impl_from_ISizeHelperStatics( iface );
+    return IActivationFactory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+
+static ULONG WINAPI size_helper_AddRef( ISizeHelperStatics *iface )
+{
+    struct size_helper_statics *impl = impl_from_ISizeHelperStatics( iface );
+    return IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+}
+
+static ULONG WINAPI size_helper_Release( ISizeHelperStatics *iface )
+{
+    struct size_helper_statics *impl = impl_from_ISizeHelperStatics( iface );
+    return IActivationFactory_Release( &impl->IActivationFactory_iface );
+}
+
+static HRESULT WINAPI size_helper_GetIids( ISizeHelperStatics *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI size_helper_GetRuntimeClassName( ISizeHelperStatics *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.SizeHelper", 25, name );
+}
+
+static HRESULT WINAPI size_helper_GetTrustLevel( ISizeHelperStatics *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI size_helper_get_Empty( ISizeHelperStatics *iface, Size *value )
+{
+    if (!value) return E_POINTER;
+    value->Width = 0.0f;
+    value->Height = 0.0f;
+    return S_OK;
+}
+
+static HRESULT WINAPI size_helper_FromDimensions( ISizeHelperStatics *iface, FLOAT width, FLOAT height, Size *value )
+{
+    TRACE( "iface %p, width %f, height %f, value %p\n", iface, width, height, value );
+    if (!value) return E_POINTER;
+    value->Width = width;
+    value->Height = height;
+    return S_OK;
+}
+
+static HRESULT WINAPI size_helper_GetIsEmpty( ISizeHelperStatics *iface, Size target, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = (target.Width == 0.0f && target.Height == 0.0f);
+    return S_OK;
+}
+
+static HRESULT WINAPI size_helper_Equals( ISizeHelperStatics *iface, Size value1, Size value2, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = (value1.Width == value2.Width && value1.Height == value2.Height);
+    return S_OK;
+}
+
+static const struct ISizeHelperStaticsVtbl size_helper_statics_vtbl =
+{
+    size_helper_QueryInterface,
+    size_helper_AddRef,
+    size_helper_Release,
+    size_helper_GetIids,
+    size_helper_GetRuntimeClassName,
+    size_helper_GetTrustLevel,
+    size_helper_get_Empty,
+    size_helper_FromDimensions,
+    size_helper_GetIsEmpty,
+    size_helper_Equals,
+};
+
+static struct size_helper_statics size_helper_statics =
+{
+    {&size_factory_vtbl},
+    {&size_helper_statics_vtbl},
+    1,
+};
+
+IActivationFactory *size_helper_factory = &size_helper_statics.IActivationFactory_iface;

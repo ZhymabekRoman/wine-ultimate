@@ -71,6 +71,7 @@ extern IActivationFactory *data_writer_activation_factory;
 extern IActivationFactory *buffer_activation_factory;
 extern IActivationFactory *property_set_factory;
 extern IActivationFactory *uri_activation_factory;
+extern HRESULT create_double_property_value( double val, IInspectable **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

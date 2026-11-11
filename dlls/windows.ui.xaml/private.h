@@ -52,6 +52,7 @@
 #include "windows.ui.xaml.media.dxinterop.h"
 
 extern IActivationFactory *color_helper_factory;
+extern IActivationFactory *size_helper_factory;
 extern IActivationFactory *swapchain_panel_factory;
 extern IActivationFactory *application_factory;
 extern IActivationFactory *window_factory;
