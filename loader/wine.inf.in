@@ -81,7 +81,8 @@ AddReg=\
     ShellWinRTActivation,\
     ProbeClassesActivation,\
     DataTransferActivation,\
-    RegisteredKindActivation
+    RegisteredKindActivation,\
+    DotnetActivation
 
 [DefaultInstall]
 Needs=BaseInstall
@@ -955,6 +956,36 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Threadi
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Threading.ThreadPoolTimer,"DllPath",2,"%12%\windows.system.threading.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.Threading.ThreadPoolTimer,"ThreadingModel",0x10001,2
 
+; CLR metadata and host classes for mscoree.dll. Registered statically so headless
+; boots do not invoke mscoree's DllRegisterServer (which prompts for interactive Mono
+; download). Wine Mono can be installed unattended on demand via DISM.
+[DotnetActivation]
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB01},,2,"Microsoft Common Language Runtime Host V2"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB01}\InprocServer32,,2,"%11%\mscoree.dll"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB01}\InprocServer32,"ThreadingModel",2,"Both"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB01}\ProgID,,2,"CLRMetaData.CLRRuntimeHost.1"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB01}\VersionIndependentProgID,,2,"CLRMetaData.CLRRuntimeHost"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB02},,2,"Microsoft Common Language Runtime Host V2"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB02}\InprocServer32,,2,"%11%\mscoree.dll"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB02}\InprocServer32,"ThreadingModel",2,"Both"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB02}\ProgID,,2,"CLRMetaData.CLRRuntimeHost.2"
+HKCR,CLSID\{90F1A06E-7712-4762-86B5-7A5EBA6BDB02}\VersionIndependentProgID,,2,"CLRMetaData.CLRRuntimeHost"
+HKCR,CLSID\{E5CB7A31-7512-11D2-89CE-0080C792E5D8},,2,"Microsoft Common Language Runtime Meta Data"
+HKCR,CLSID\{E5CB7A31-7512-11D2-89CE-0080C792E5D8}\InprocServer32,,2,"%11%\mscoree.dll"
+HKCR,CLSID\{E5CB7A31-7512-11D2-89CE-0080C792E5D8}\InprocServer32,"ThreadingModel",2,"Both"
+HKCR,CLSID\{E5CB7A31-7512-11D2-89CE-0080C792E5D8}\ProgID,,2,"CLRMetaData.CorMetaDataDispenser.2"
+HKCR,CLSID\{E5CB7A31-7512-11D2-89CE-0080C792E5D8}\VersionIndependentProgID,,2,"CLRMetaData.CorMetaDataDispenser"
+HKCR,CLSID\{1EC2DE53-75CC-11D2-9775-00A0C9B4D50C},,2,"Microsoft Common Language Runtime Meta Data"
+HKCR,CLSID\{1EC2DE53-75CC-11D2-9775-00A0C9B4D50C}\InprocServer32,,2,"%11%\mscoree.dll"
+HKCR,CLSID\{1EC2DE53-75CC-11D2-9775-00A0C9B4D50C}\InprocServer32,"ThreadingModel",2,"Both"
+HKCR,CLSID\{1EC2DE53-75CC-11D2-9775-00A0C9B4D50C}\ProgID,,2,"CLRMetaData.CorMetaDataDispenserRuntime.2"
+HKCR,CLSID\{1EC2DE53-75CC-11D2-9775-00A0C9B4D50C}\VersionIndependentProgID,,2,"CLRMetaData.CorMetaDataDispenserRuntime"
+HKCR,CLSID\{CB2F6723-AB3A-11D2-9C40-00C04FA30A3E},,2,"Microsoft Common Language Runtime Host"
+HKCR,CLSID\{CB2F6723-AB3A-11D2-9C40-00C04FA30A3E}\InprocServer32,,2,"%11%\mscoree.dll"
+HKCR,CLSID\{CB2F6723-AB3A-11D2-9C40-00C04FA30A3E}\InprocServer32,"ThreadingModel",2,"Both"
+HKCR,CLSID\{CB2F6723-AB3A-11D2-9C40-00C04FA30A3E}\ProgID,,2,"CLRMetaData.CorRuntimeHost.2"
+HKCR,CLSID\{CB2F6723-AB3A-11D2-9C40-00C04FA30A3E}\VersionIndependentProgID,,2,"CLRMetaData.CorRuntimeHost"
+
 [Printing]
 HKLM,%Control%\Print\Monitors\Local Port,"Driver",2,"localspl.dll"
 HKLM,%Control%\Print\Printers,"DefaultSpoolDirectory",2,"%11%\spool\printers"
@@ -1006,7 +1037,9 @@ HKLM,SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x86,"Version",2,"14.42.344
 11,,mfmp4srcsnk.dll,1
 11,,mp3dmod.dll,1
 11,,msauddecmft.dll,1
-11,,mscoree.dll,1
+; mscoree.dll registration omitted to prevent interactive GUI Mono download prompts during headless boots;
+; Wine Mono is installed unattended on-demand via dism /Online /Enable-Feature /FeatureName:NetFx4-WineMono
+; 11,,mscoree.dll,1
 11,,mshtml.dll,1
 11,,msisip.dll,1
 11,,msmpeg2vdec.dll,1

@@ -28,6 +28,7 @@ WINE_DEFAULT_DEBUG_CHANNEL(dism);
 
 #define FEATURE_PWSH L"Microsoft-PowerShell-Core"
 #define FEATURE_MONO L"NetFx4-WineMono"
+#define FEATURE_NETFX4 L"NetFx4"
 
 static void output_write(const WCHAR *str)
 {
@@ -78,19 +79,125 @@ static BOOL is_mono_enabled(void)
 {
     WCHAR path[MAX_PATH];
     HKEY hkey;
+    REGSAM sam_flags[2] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY };
+    int s;
 
     ExpandEnvironmentStringsW(L"%SystemRoot%\\mono", path, MAX_PATH);
     if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
         return TRUE;
 
-    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
-                      L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full",
-                      0, KEY_READ, &hkey) == ERROR_SUCCESS)
+    for (s = 0; s < 2; s++)
     {
-        RegCloseKey(hkey);
-        return TRUE;
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full",
+                          0, KEY_READ | sam_flags[s], &hkey) == ERROR_SUCCESS)
+        {
+            DWORD install = 0, size = sizeof(install);
+            if (RegQueryValueExW(hkey, L"Install", NULL, NULL, (BYTE *)&install, &size) == ERROR_SUCCESS)
+            {
+                RegCloseKey(hkey);
+                if (install == 1) return TRUE;
+            }
+            else
+            {
+                RegCloseKey(hkey);
+                return TRUE;
+            }
+        }
+
+        if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+                          L"SOFTWARE\\Microsoft\\.NETFramework",
+                          0, KEY_READ | sam_flags[s], &hkey) == ERROR_SUCCESS)
+        {
+            DWORD install = 0, size = sizeof(install);
+            if (RegQueryValueExW(hkey, L"Install", NULL, NULL, (BYTE *)&install, &size) == ERROR_SUCCESS)
+            {
+                RegCloseKey(hkey);
+                if (install == 1) return TRUE;
+            }
+            else
+            {
+                RegCloseKey(hkey);
+                return TRUE;
+            }
+        }
     }
+
     return FALSE;
+}
+
+static BOOL write_dotnet4_registry_keys(void)
+{
+    HKEY hkey;
+    DWORD install_val = 1;
+    DWORD release_val = 528040;
+    const WCHAR version_str[] = L"4.8.0";
+    const WCHAR target_version_str[] = L"4.0.0";
+    WCHAR windir[MAX_PATH];
+    WCHAR install_root[MAX_PATH];
+    REGSAM sam_flags[2] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY };
+    int s;
+
+    GetWindowsDirectoryW(windir, MAX_PATH);
+    swprintf(install_root, MAX_PATH, L"%s\\Microsoft.NET\\Framework64\\", windir);
+
+    for (s = 0; s < 2; s++)
+    {
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Microsoft\\.NETFramework",
+                            0, NULL, 0, KEY_SET_VALUE | sam_flags[s], NULL, &hkey, NULL) == ERROR_SUCCESS)
+        {
+            RegSetValueExW(hkey, L"Install", 0, REG_DWORD, (const BYTE *)&install_val, sizeof(install_val));
+            RegSetValueExW(hkey, L"Version", 0, REG_SZ, (const BYTE *)version_str, sizeof(version_str));
+            RegSetValueExW(hkey, L"InstallRoot", 0, REG_SZ, (const BYTE *)install_root, (lstrlenW(install_root) + 1) * sizeof(WCHAR));
+            RegCloseKey(hkey);
+        }
+
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full",
+                            0, NULL, 0, KEY_SET_VALUE | sam_flags[s], NULL, &hkey, NULL) == ERROR_SUCCESS)
+        {
+            RegSetValueExW(hkey, L"Install", 0, REG_DWORD, (const BYTE *)&install_val, sizeof(install_val));
+            RegSetValueExW(hkey, L"Version", 0, REG_SZ, (const BYTE *)version_str, sizeof(version_str));
+            RegSetValueExW(hkey, L"TargetVersion", 0, REG_SZ, (const BYTE *)target_version_str, sizeof(target_version_str));
+            RegSetValueExW(hkey, L"Release", 0, REG_DWORD, (const BYTE *)&release_val, sizeof(release_val));
+            RegCloseKey(hkey);
+        }
+
+        if (RegCreateKeyExW(HKEY_LOCAL_MACHINE,
+                            L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Client",
+                            0, NULL, 0, KEY_SET_VALUE | sam_flags[s], NULL, &hkey, NULL) == ERROR_SUCCESS)
+        {
+            RegSetValueExW(hkey, L"Install", 0, REG_DWORD, (const BYTE *)&install_val, sizeof(install_val));
+            RegSetValueExW(hkey, L"Version", 0, REG_SZ, (const BYTE *)version_str, sizeof(version_str));
+            RegSetValueExW(hkey, L"TargetVersion", 0, REG_SZ, (const BYTE *)target_version_str, sizeof(target_version_str));
+            RegSetValueExW(hkey, L"Release", 0, REG_DWORD, (const BYTE *)&release_val, sizeof(release_val));
+            RegCloseKey(hkey);
+        }
+    }
+    return TRUE;
+}
+
+static void clean_dotnet4_registry_keys(void)
+{
+    REGSAM sam_flags[2] = { KEY_WOW64_64KEY, KEY_WOW64_32KEY };
+    int s;
+
+    for (s = 0; s < 2; s++)
+    {
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
+                        L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Full",
+                        sam_flags[s], 0);
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
+                        L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4\\Client",
+                        sam_flags[s], 0);
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
+                        L"SOFTWARE\\Microsoft\\NET Framework Setup\\NDP\\v4",
+                        sam_flags[s], 0);
+        RegDeleteKeyExW(HKEY_LOCAL_MACHINE,
+                        L"SOFTWARE\\Microsoft\\.NETFramework",
+                        sam_flags[s], 0);
+    }
 }
 
 static BOOL copy_or_hardlink_tree(const WCHAR *src, const WCHAR *dst)
@@ -217,85 +324,234 @@ static void remove_from_user_path(const WCHAR *dir)
     }
 }
 
+static BOOL search_dir_for_msi(const WCHAR *dir, WCHAR *msi_path, DWORD max_len)
+{
+    WIN32_FIND_DATAW fd;
+    WCHAR search_path[MAX_PATH];
+    HANDLE hFind;
+
+    if (!dir || !*dir) return FALSE;
+    if (GetFileAttributesW(dir) == INVALID_FILE_ATTRIBUTES) return FALSE;
+
+    /* 1. Look for *mono*.msi */
+    swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", dir);
+    hFind = FindFirstFileW(search_path, &fd);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        swprintf(msi_path, max_len, L"%s\\%s", dir, fd.cFileName);
+        FindClose(hFind);
+        return TRUE;
+    }
+
+    /* 2. Look for any *.msi if directory name contains mono */
+    if (wcsstr(dir, L"mono") || wcsstr(dir, L"Mono"))
+    {
+        swprintf(search_path, MAX_PATH, L"%s\\*.msi", dir);
+        hFind = FindFirstFileW(search_path, &fd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            swprintf(msi_path, max_len, L"%s\\%s", dir, fd.cFileName);
+            FindClose(hFind);
+            return TRUE;
+        }
+    }
+
+    /* 3. Check immediate subdirectories (e.g. wine-mono-11.3.0 or support) */
+    swprintf(search_path, MAX_PATH, L"%s\\*", dir);
+    hFind = FindFirstFileW(search_path, &fd);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do {
+            if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+                wcscmp(fd.cFileName, L".") != 0 && wcscmp(fd.cFileName, L"..") != 0)
+            {
+                WCHAR subdir[MAX_PATH];
+                WCHAR support_dir[MAX_PATH];
+                WIN32_FIND_DATAW sub_fd;
+                HANDLE sub_find;
+
+                swprintf(subdir, MAX_PATH, L"%s\\%s", dir, fd.cFileName);
+
+                swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", subdir);
+                sub_find = FindFirstFileW(search_path, &sub_fd);
+                if (sub_find != INVALID_HANDLE_VALUE)
+                {
+                    swprintf(msi_path, max_len, L"%s\\%s", subdir, sub_fd.cFileName);
+                    FindClose(sub_find);
+                    FindClose(hFind);
+                    return TRUE;
+                }
+
+                swprintf(support_dir, MAX_PATH, L"%s\\support", subdir);
+                if (GetFileAttributesW(support_dir) != INVALID_FILE_ATTRIBUTES)
+                {
+                    swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", support_dir);
+                    sub_find = FindFirstFileW(search_path, &sub_fd);
+                    if (sub_find != INVALID_HANDLE_VALUE)
+                    {
+                        swprintf(msi_path, max_len, L"%s\\%s", support_dir, sub_fd.cFileName);
+                        FindClose(sub_find);
+                        FindClose(hFind);
+                        return TRUE;
+                    }
+
+                    swprintf(search_path, MAX_PATH, L"%s\\*.msi", support_dir);
+                    sub_find = FindFirstFileW(search_path, &sub_fd);
+                    if (sub_find != INVALID_HANDLE_VALUE)
+                    {
+                        swprintf(msi_path, max_len, L"%s\\%s", support_dir, sub_fd.cFileName);
+                        FindClose(sub_find);
+                        FindClose(hFind);
+                        return TRUE;
+                    }
+                }
+            }
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+    }
+
+    return FALSE;
+}
+
 static BOOL find_mono_msi(WCHAR *msi_path, DWORD max_len)
 {
-    static const WCHAR *candidates[] = {
+    static const WCHAR *standard_dirs[] = {
         L"Z:\\usr\\share\\wine\\mono",
-        L"Z:\\usr\\share\\wine\\mono\\wine-mono-11.3.0\\support",
-        L"Z:\\usr\\share\\wine\\mono\\wine-mono-11.1.0\\support",
-        L"Z:\\usr\\share\\wine\\mono\\wine-mono-10.4.0\\support",
+        L"\\\\?\\unix\\usr\\share\\wine\\mono",
+        L"Z:\\usr\\local\\share\\wine\\mono",
+        L"\\\\?\\unix\\usr\\local\\share\\wine\\mono",
+        L"Z:\\opt\\wine\\mono",
+        L"\\\\?\\unix\\opt\\wine\\mono",
     };
-    WCHAR search_path[MAX_PATH];
-    WCHAR home_cache[MAX_PATH];
-    WCHAR username[64];
-    DWORD ulen = ARRAY_SIZE(username);
-    WIN32_FIND_DATAW fd;
-    HANDLE hFind;
+    WCHAR candidate[MAX_PATH];
+    WCHAR env_buf[MAX_PATH];
+    HKEY hkey;
     int i;
 
-    /* Check static candidates */
-    for (i = 0; i < ARRAY_SIZE(candidates); i++)
+    /* 1. Check standard system Mono directories */
+    for (i = 0; i < ARRAY_SIZE(standard_dirs); i++)
     {
-        swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", candidates[i]);
-        hFind = FindFirstFileW(search_path, &fd);
-        if (hFind != INVALID_HANDLE_VALUE)
-        {
-            swprintf(msi_path, max_len, L"%s\\%s", candidates[i], fd.cFileName);
-            FindClose(hFind);
+        if (search_dir_for_msi(standard_dirs[i], msi_path, max_len))
             return TRUE;
-        }
     }
 
-    /* Check ~/.cache/wine/mono via username */
-    if (GetEnvironmentVariableW(L"USERNAME", username, ulen) && username[0])
+    /* 2. Check WINEHOMEDIR */
+    if (GetEnvironmentVariableW(L"WINEHOMEDIR", env_buf, MAX_PATH) && env_buf[0])
     {
-        swprintf(home_cache, MAX_PATH, L"Z:\\home\\%s\\.cache\\wine\\mono", username);
-        swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", home_cache);
-        hFind = FindFirstFileW(search_path, &fd);
-        if (hFind != INVALID_HANDLE_VALUE)
-        {
-            swprintf(msi_path, max_len, L"%s\\%s", home_cache, fd.cFileName);
-            FindClose(hFind);
-            return TRUE;
-        }
-
-        /* Check ~/mono */
-        swprintf(home_cache, MAX_PATH, L"Z:\\home\\%s\\mono", username);
-        swprintf(search_path, MAX_PATH, L"%s\\*mono*.msi", home_cache);
-        hFind = FindFirstFileW(search_path, &fd);
-        if (hFind != INVALID_HANDLE_VALUE)
-        {
-            swprintf(msi_path, max_len, L"%s\\%s", home_cache, fd.cFileName);
-            FindClose(hFind);
-            return TRUE;
-        }
-    }
-
-    /* Check WINEHOMEDIR */
-    if (GetEnvironmentVariableW(L"WINEHOMEDIR", home_cache, MAX_PATH))
-    {
-        WCHAR *h = home_cache;
+        WCHAR *h = env_buf;
         if (!wcsncmp(h, L"\\??\\", 4)) h += 4;
-        swprintf(search_path, MAX_PATH, L"%s\\.cache\\wine\\mono\\*mono*.msi", h);
-        hFind = FindFirstFileW(search_path, &fd);
-        if (hFind != INVALID_HANDLE_VALUE)
-        {
-            swprintf(msi_path, max_len, L"%s\\.cache\\wine\\mono\\%s", h, fd.cFileName);
-            FindClose(hFind);
-            return TRUE;
-        }
 
-        swprintf(search_path, MAX_PATH, L"%s\\mono\\*mono*.msi", h);
-        hFind = FindFirstFileW(search_path, &fd);
-        if (hFind != INVALID_HANDLE_VALUE)
+        swprintf(candidate, MAX_PATH, L"%s\\.cache\\wine", h);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+
+        swprintf(candidate, MAX_PATH, L"%s\\.cache\\wine\\mono", h);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+
+        swprintf(candidate, MAX_PATH, L"%s\\mono", h);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+    }
+
+    /* 3. Check USERNAME */
+    if (GetEnvironmentVariableW(L"USERNAME", env_buf, MAX_PATH) && env_buf[0])
+    {
+        swprintf(candidate, MAX_PATH, L"Z:\\home\\%s\\.cache\\wine", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+
+        swprintf(candidate, MAX_PATH, L"Z:\\home\\%s\\.cache\\wine\\mono", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+
+        swprintf(candidate, MAX_PATH, L"Z:\\home\\%s\\mono", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+    }
+
+    /* 4. Check HOME */
+    if (GetEnvironmentVariableW(L"HOME", env_buf, MAX_PATH) && env_buf[0])
+    {
+        swprintf(candidate, MAX_PATH, L"Z:%s\\.cache\\wine", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+
+        swprintf(candidate, MAX_PATH, L"Z:%s\\.cache\\wine\\mono", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+
+        swprintf(candidate, MAX_PATH, L"\\\\?\\unix%s/.cache/wine", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+
+        swprintf(candidate, MAX_PATH, L"\\\\?\\unix%s/.cache/wine/mono", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+    }
+
+    /* 5. Check WINE_HOST_XDG_CACHE_HOME */
+    if (GetEnvironmentVariableW(L"WINE_HOST_XDG_CACHE_HOME", env_buf, MAX_PATH) && env_buf[0])
+    {
+        swprintf(candidate, MAX_PATH, L"\\\\?\\unix%s/wine", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+
+        swprintf(candidate, MAX_PATH, L"\\\\?\\unix%s/wine/mono", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+    }
+
+    /* 6. Check WINEDATADIR */
+    if (GetEnvironmentVariableW(L"WINEDATADIR", env_buf, MAX_PATH) && env_buf[0])
+    {
+        swprintf(candidate, MAX_PATH, L"%s\\mono", env_buf);
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+    }
+
+    /* 7. Check %SystemRoot%\mono */
+    if (ExpandEnvironmentStringsW(L"%SystemRoot%\\mono", candidate, MAX_PATH))
+    {
+        if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+    }
+
+    /* 8. Check registry HKCU\Software\Wine\Dotnet\MonoCabDir */
+    if (RegOpenKeyExW(HKEY_CURRENT_USER, L"Software\\Wine\\Dotnet", 0, KEY_READ, &hkey) == ERROR_SUCCESS)
+    {
+        DWORD type, size = sizeof(candidate);
+        if (RegQueryValueExW(hkey, L"MonoCabDir", NULL, &type, (BYTE *)candidate, &size) == ERROR_SUCCESS &&
+            type == REG_SZ)
         {
-            swprintf(msi_path, max_len, L"%s\\mono\\%s", h, fd.cFileName);
-            FindClose(hFind);
-            return TRUE;
+            RegCloseKey(hkey);
+            if (search_dir_for_msi(candidate, msi_path, max_len)) return TRUE;
+        }
+        else
+        {
+            RegCloseKey(hkey);
         }
     }
 
     return FALSE;
+}
+
+static int execute_msiexec(const WCHAR *cmdline)
+{
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD exit_code = 1;
+    WCHAR cmd[MAX_PATH * 2 + 64];
+
+    lstrcpynW(cmd, cmdline, ARRAY_SIZE(cmd));
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+    si.dwFlags = STARTF_USESTDHANDLES;
+    si.hStdInput = GetStdHandle(STD_INPUT_HANDLE);
+    si.hStdOutput = GetStdHandle(STD_OUTPUT_HANDLE);
+    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
+
+    output_printf(L"Executing: %s\r\n", cmd);
+
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+    {
+        output_write(L"Error: Failed to launch msiexec.exe.\r\n");
+        return 1;
+    }
+
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    return (int)exit_code;
 }
 
 static int do_get_features(void)
@@ -335,7 +591,7 @@ static int do_get_feature_info(const WCHAR *feature_name)
                       FEATURE_PWSH, is_pwsh_enabled() ? L"Enabled" : L"Disabled");
         return 0;
     }
-    else if (!wcsicmp(feature_name, FEATURE_MONO))
+    else if (!wcsicmp(feature_name, FEATURE_MONO) || !wcsicmp(feature_name, FEATURE_NETFX4))
     {
         output_printf(L"Feature Information:\r\n\r\n"
                       L"Feature Name : %s\r\n"
@@ -344,7 +600,7 @@ static int do_get_feature_info(const WCHAR *feature_name)
                       L"Restart Required : No\r\n"
                       L"State : %s\r\n\r\n"
                       L"The operation completed successfully.\r\n",
-                      FEATURE_MONO, is_mono_enabled() ? L"Enabled" : L"Disabled");
+                      feature_name, is_mono_enabled() ? L"Enabled" : L"Disabled");
         return 0;
     }
 
@@ -400,12 +656,11 @@ static int do_enable_feature(const WCHAR *feature_name)
                      L"The operation completed successfully.\r\n");
         return 0;
     }
-    else if (!wcsicmp(feature_name, FEATURE_MONO))
+    else if (!wcsicmp(feature_name, FEATURE_MONO) || !wcsicmp(feature_name, FEATURE_NETFX4))
     {
         WCHAR msi[MAX_PATH];
-        WCHAR cmd[MAX_PATH * 2];
-        STARTUPINFOW si = { sizeof(si) };
-        PROCESS_INFORMATION pi;
+        WCHAR cmd[MAX_PATH * 2 + 64];
+        int ret;
 
         output_write(L"Enabling feature(s)\r\n");
 
@@ -415,17 +670,19 @@ static int do_enable_feature(const WCHAR *feature_name)
             return 1;
         }
 
+        output_printf(L"Found Wine Mono MSI: %s\r\n", msi);
+
         swprintf(cmd, ARRAY_SIZE(cmd), L"msiexec.exe /i \"%s\" /qn", msi);
-        if (CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
+        ret = execute_msiexec(cmd);
+        if (ret != 0)
         {
-            WaitForSingleObject(pi.hProcess, INFINITE);
-            CloseHandle(pi.hThread);
-            CloseHandle(pi.hProcess);
+            output_printf(L"Error: msiexec failed with exit code %d.\r\n", ret);
+            return ret;
         }
-        else
+
+        if (!write_dotnet4_registry_keys())
         {
-            output_write(L"Error: Failed to launch msiexec.exe.\r\n");
-            return 1;
+            output_write(L"Warning: Failed to write .NET 4.0 registry keys.\r\n");
         }
 
         output_write(L"[==========================100.0%==========================]\r\n"
@@ -465,25 +722,19 @@ static int do_disable_feature(const WCHAR *feature_name)
                      L"The operation completed successfully.\r\n");
         return 0;
     }
-    else if (!wcsicmp(feature_name, FEATURE_MONO))
+    else if (!wcsicmp(feature_name, FEATURE_MONO) || !wcsicmp(feature_name, FEATURE_NETFX4))
     {
         WCHAR msi[MAX_PATH];
         HKEY hkey_uninst;
+        WCHAR mono_dir[MAX_PATH];
 
         output_write(L"Disabling feature(s)\r\n");
 
         if (find_mono_msi(msi, ARRAY_SIZE(msi)))
         {
-            WCHAR cmd[MAX_PATH * 2];
-            STARTUPINFOW si = { sizeof(si) };
-            PROCESS_INFORMATION pi;
+            WCHAR cmd[MAX_PATH * 2 + 64];
             swprintf(cmd, ARRAY_SIZE(cmd), L"msiexec.exe /x \"%s\" /qn", msi);
-            if (CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
-            {
-                WaitForSingleObject(pi.hProcess, INFINITE);
-                CloseHandle(pi.hThread);
-                CloseHandle(pi.hProcess);
-            }
+            execute_msiexec(cmd);
         }
 
         /* Check uninstall registry for installed mono GUIDs */
@@ -507,15 +758,8 @@ static int do_disable_feature(const WCHAR *feature_name)
                         if (wcsstr(disp, L"Wine Mono") || wcsstr(disp, L"wine mono"))
                         {
                             WCHAR cmd[512];
-                            STARTUPINFOW si = { sizeof(si) };
-                            PROCESS_INFORMATION pi;
                             swprintf(cmd, ARRAY_SIZE(cmd), L"msiexec.exe /x %s /qn", subkey_name);
-                            if (CreateProcessW(NULL, cmd, NULL, NULL, TRUE, 0, NULL, NULL, &si, &pi))
-                            {
-                                WaitForSingleObject(pi.hProcess, INFINITE);
-                                CloseHandle(pi.hThread);
-                                CloseHandle(pi.hProcess);
-                            }
+                            execute_msiexec(cmd);
                         }
                     }
                     RegCloseKey(hsub);
@@ -523,6 +767,15 @@ static int do_disable_feature(const WCHAR *feature_name)
                 name_len = ARRAY_SIZE(subkey_name);
             }
             RegCloseKey(hkey_uninst);
+        }
+
+        /* Clean .NET 4.0 registry keys */
+        clean_dotnet4_registry_keys();
+
+        /* Remove %SystemRoot%\mono if leftover */
+        if (ExpandEnvironmentStringsW(L"%SystemRoot%\\mono", mono_dir, MAX_PATH))
+        {
+            remove_directory_tree(mono_dir);
         }
 
         output_write(L"[==========================100.0%==========================]\r\n"
