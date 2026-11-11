@@ -29,6 +29,8 @@ struct application
 {
     IApplication IApplication_iface;
     IInspectable inner_iface;
+    IInspectable ms_IApplication_iface;
+    IInspectable overrides_uwp_iface;
     LONG ref;
     IInspectable *outer;
     IInspectable *resources;   /* lazy Windows.Foundation.Collections.PropertySet for the Resources QI set */
@@ -56,6 +58,24 @@ static ULONG WINAPI app_view_activated_Release(
     __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *iface )
 { return 1; }
 
+/* WinUI 3 (Microsoft.UI.Xaml) interface GUIDs */
+static const GUID IID_IApplicationStatics_WinUI =
+    { 0x4e0d09f5, 0x4358, 0x512c, { 0xa9, 0x87, 0x50, 0x3b, 0x52, 0x84, 0x8e, 0x95 } };
+static const GUID IID_IApplicationFactory_WinUI3 =
+    { 0x9fd96657, 0x5294, 0x5a65, { 0xa1, 0xdb, 0x4f, 0xea, 0x14, 0x35, 0x97, 0xda } };
+static const GUID IID_IApplication_WinUI3 =
+    { 0x06a8f4e7, 0x1146, 0x55af, { 0x82, 0x0d, 0xeb, 0xd5, 0x56, 0x43, 0xb0, 0x21 } };
+static const GUID IID_IApplicationOverrides_WinUI =
+    { 0xa33e81ef, 0xc665, 0x503b, { 0x88, 0x27, 0xd2, 0x7e, 0xf1, 0x72, 0x0a, 0x06 } };
+static const GUID IID_IApplicationOverrides_UWP =
+    { 0x25f99ff7, 0x9347, 0x459a, { 0x9f, 0xac, 0xb2, 0xd0, 0xe1, 0x1c, 0x1a, 0x0f } };
+static const GUID IID_IWindowStatics_WinUI =
+    { 0x8cc985e3, 0xa41a, 0x5df4, { 0xb5, 0x31, 0xd3, 0xa1, 0x78, 0x8d, 0x86, 0xc5 } };
+static const GUID IID_IWindowFactory_WinUI =
+    { 0xf0441536, 0xafef, 0x5222, { 0x91, 0x8f, 0x32, 0x4a, 0x9b, 0x2d, 0xec, 0x75 } };
+static const GUID IID_IWindow_WinUI =
+    { 0x61f0ec79, 0x5d52, 0x56b5, { 0x86, 0xfb, 0x40, 0xfa, 0x4a, 0xf2, 0x88, 0xb0 } };
+
 static HRESULT WINAPI app_view_activated_Invoke(
     __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *iface,
     ICoreApplicationView *sender,
@@ -64,11 +84,42 @@ static HRESULT WINAPI app_view_activated_Invoke(
     TRACE( "sender %p, args %p, current_application %p\n", sender, args, current_application );
     if (current_application && current_application->outer)
     {
-        void **vtbl = *(void ***)current_application->outer;
-        HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)vtbl[7];
-        TRACE( "invoking App OnLaunched %p (outer %p, args %p)\n",
-               on_launched, current_application->outer, args );
-        if (on_launched) on_launched( current_application->outer, args );
+        IInspectable *overrides = NULL;
+        HRESULT hr_uwp, hr_winui;
+
+        hr_uwp = IInspectable_QueryInterface( current_application->outer, &IID_IApplicationOverrides_UWP, (void **)&overrides );
+        TRACE( "QI IApplicationOverrides_UWP returned hr %#lx, overrides %p\n", hr_uwp, overrides );
+        if (SUCCEEDED(hr_uwp) && overrides)
+        {
+            void **ov_vtbl = *(void ***)overrides;
+            HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[8];
+            TRACE( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
+                   on_launched, overrides, args );
+            if (on_launched) on_launched( overrides, args );
+            IInspectable_Release( overrides );
+        }
+        else
+        {
+            hr_winui = IInspectable_QueryInterface( current_application->outer, &IID_IApplicationOverrides_WinUI, (void **)&overrides );
+            TRACE( "QI IApplicationOverrides_WinUI returned hr %#lx, overrides %p\n", hr_winui, overrides );
+            if (SUCCEEDED(hr_winui) && overrides)
+            {
+                void **ov_vtbl = *(void ***)overrides;
+                HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[6];
+                TRACE( "invoking WinUI3 App OnLaunched %p (overrides %p, args %p)\n",
+                       on_launched, overrides, args );
+                if (on_launched) on_launched( overrides, args );
+                IInspectable_Release( overrides );
+            }
+            else
+            {
+                void **vtbl = *(void ***)current_application->outer;
+                HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)vtbl[6];
+                TRACE( "invoking App OnLaunched fallback vtbl[6] %p (outer %p, args %p)\n",
+                       on_launched, current_application->outer, args );
+                if (on_launched) on_launched( current_application->outer, args );
+            }
+        }
     }
     return S_OK;
 }
@@ -89,6 +140,7 @@ struct xaml_window
 {
     IInspectable IInspectable_iface;
     IInspectable IWindow2_iface;
+    IInspectable ms_IWindow_iface;
     LONG ref;
     IInspectable *content;
     ICoreWindow *core_window;
@@ -102,6 +154,8 @@ static BOOL lifecycle_started = FALSE;
  * app's Mcg binder passes it to RoGetActivationFactory. */
 static const IID IID_Windows_UI_Xaml_Application =
     { 0x06499997, 0xf7b4, 0x45fe, {0xb7, 0x63, 0x75, 0x77, 0xd1, 0xd3, 0xcb, 0x4a} };
+static const GUID IID_IApplicationFactory_WinUI =
+    { 0x93bbe361, 0xbe5a, 0x4ee3, { 0xb4, 0xa3, 0x95, 0x11, 0x8d, 0xc9, 0x7a, 0x89 } };
 static const GUID IID_IApplication_WinUI =
     { 0x74b861a1, 0x7487, 0x46a9, { 0x9a, 0x6e, 0xc7, 0x8b, 0x51, 0x27, 0x26, 0xc5 } };
 static const GUID IID_IWindow2 =
@@ -610,6 +664,7 @@ struct application_extended_vtbl
 
 static const struct application_extended_vtbl application_vtbl;
 static const struct application_extended_vtbl application_inner_vtbl;
+static const void *ms_application_vtbl[];
 
 static HRESULT WINAPI application_stub_zero( void *iface, void *out )
 {
@@ -626,6 +681,8 @@ static struct application *app_from_iface( void *iface )
     struct application *impl = (struct application *)iface;
     if (impl->IApplication_iface.lpVtbl == (const struct IApplicationVtbl *)&application_vtbl)
         return impl;
+    if (impl->ms_IApplication_iface.lpVtbl == (const struct IInspectableVtbl *)ms_application_vtbl)
+        return CONTAINING_RECORD( iface, struct application, ms_IApplication_iface );
     return impl_from_inner_IInspectable( (IInspectable *)iface );
 }
 
@@ -697,6 +754,7 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
     if (impl->outer &&
         !IsEqualGUID( iid, &IID_IApplication ) &&
         !IsEqualGUID( iid, &IID_IApplication_WinUI ) &&
+        !IsEqualGUID( iid, &IID_IApplication_WinUI3 ) &&
         !IsEqualGUID( iid, &IID_IApplication_751b ) &&
         !IsEqualGUID( iid, &IID_IApplication_0191 ) &&
         !IsEqualGUID( iid, &IID_IWindow_Mcg ) &&
@@ -704,6 +762,20 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
         !IsEqualGUID( iid, &IID_IWindow_96061c05 ) &&
         !IsEqualGUID( iid, &IID_Windows_UI_Xaml_Application ))
         return IInspectable_QueryInterface( impl->outer, iid, out );
+
+    if (IsEqualGUID( iid, &IID_IApplication_WinUI3 ))
+    {
+        *out = &impl->ms_IApplication_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IApplicationOverrides_UWP ))
+    {
+        *out = &impl->overrides_uwp_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -723,6 +795,7 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
     }
 
     if (IsEqualGUID( iid, &IID_IApplicationFactory ) ||
+        IsEqualGUID( iid, &IID_IApplicationFactory_WinUI ) ||
         IsEqualGUID( iid, &IID_IApplicationStatics ))
         return IActivationFactory_QueryInterface( application_factory, iid, out );
 
@@ -816,6 +889,20 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
+    if (IsEqualGUID( iid, &IID_IApplication_WinUI3 ))
+    {
+        *out = &impl->ms_IApplication_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IApplicationOverrides_UWP ))
+    {
+        *out = &impl->overrides_uwp_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -905,11 +992,108 @@ static const struct application_extended_vtbl application_inner_vtbl =
     }
 };
 
+static inline struct application *impl_from_ms_IApplication( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct application, ms_IApplication_iface );
+}
+
+static HRESULT WINAPI application_ms_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct application *impl = impl_from_ms_IApplication( iface );
+    return application_QueryInterface( &impl->IApplication_iface, iid, out );
+}
+
+static ULONG WINAPI application_ms_AddRef( void *iface )
+{
+    struct application *impl = impl_from_ms_IApplication( iface );
+    return application_AddRef( &impl->IApplication_iface );
+}
+
+static ULONG WINAPI application_ms_Release( void *iface )
+{
+    struct application *impl = impl_from_ms_IApplication( iface );
+    return application_Release( &impl->IApplication_iface );
+}
+
+static const void *ms_application_vtbl[] =
+{
+    application_ms_QueryInterface,        /* 0: QI */
+    application_ms_AddRef,                /* 1: AddRef */
+    application_ms_Release,               /* 2: Release */
+    application_GetIids,                  /* 3: GetIids */
+    application_GetRuntimeClassName,      /* 4: GetRuntimeClassName */
+    application_GetTrustLevel,            /* 5: GetTrustLevel */
+    application_get_Resources,            /* 6: get_Resources */
+    application_put_Resources,            /* 7: set_Resources */
+    application_stub_zero,                /* 8: get_DebugSettings */
+    application_stub_zero,                /* 9: get_RequestedTheme */
+    application_stub_ok,                  /* 10: set_RequestedTheme */
+    application_stub_zero,                /* 11: get_FocusVisualKind */
+    application_stub_ok,                  /* 12: set_FocusVisualKind */
+    application_stub_zero,                /* 13: get_HighContrastAdjustment */
+    application_stub_ok,                  /* 14: set_HighContrastAdjustment */
+    application_add_UnhandledException,   /* 15: add_UnhandledException */
+    application_remove_UnhandledException,/* 16: remove_UnhandledException */
+    application_Exit,                     /* 17: Exit */
+    application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+    application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+    application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+    application_stub_zero, application_stub_zero,
+};
+
+static inline struct application *impl_from_overrides_uwp( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct application, overrides_uwp_iface );
+}
+
+static HRESULT WINAPI application_overrides_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct application *impl = impl_from_overrides_uwp( iface );
+    return application_inner_QueryInterface( &impl->inner_iface, iid, out );
+}
+
+static ULONG WINAPI application_overrides_AddRef( void *iface )
+{
+    struct application *impl = impl_from_overrides_uwp( iface );
+    return application_inner_AddRef( &impl->inner_iface );
+}
+
+static ULONG WINAPI application_overrides_Release( void *iface )
+{
+    struct application *impl = impl_from_overrides_uwp( iface );
+    return application_inner_Release( &impl->inner_iface );
+}
+
+static const void *application_overrides_uwp_vtbl[] =
+{
+    application_overrides_QueryInterface,   /* 0: QI */
+    application_overrides_AddRef,           /* 1: AddRef */
+    application_overrides_Release,          /* 2: Release */
+    application_GetIids,                    /* 3: GetIids */
+    application_GetRuntimeClassName,        /* 4: GetRuntimeClassName */
+    application_GetTrustLevel,              /* 5: GetTrustLevel */
+    application_stub_ok,                    /* 6: OnInitialize */
+    application_stub_ok,                    /* 7: OnActivated */
+    application_stub_ok,                    /* 8: OnLaunched */
+    application_stub_ok,                    /* 9: OnFileActivated */
+    application_stub_ok,                    /* 10: OnSearchActivated */
+    application_stub_ok,                    /* 11: OnShareTargetActivated */
+    application_stub_ok,                    /* 12: OnFileOpenPickerActivated */
+    application_stub_ok,                    /* 13: OnFileSavePickerActivated */
+    application_stub_ok,                    /* 14: OnCachedFileUpdaterActivated */
+    application_stub_ok,                    /* 15: OnWindowCreated */
+    application_stub_ok, application_stub_ok, application_stub_ok, application_stub_ok,
+    application_stub_ok, application_stub_ok, application_stub_ok, application_stub_ok,
+    application_stub_ok, application_stub_ok, application_stub_ok, application_stub_ok,
+    application_stub_ok, application_stub_ok, application_stub_ok, application_stub_ok,
+};
+
 /* Application factory and statics */
 struct application_factory
 {
     IActivationFactory IActivationFactory_iface;
     IApplicationStatics IApplicationStatics_iface;
+    IApplicationStatics ms_IApplicationStatics_iface;
     IApplicationFactory IApplicationFactory_iface;
     IFrameworkViewSource IFrameworkViewSource_iface;
     LONG ref;
@@ -923,6 +1107,11 @@ static inline struct application_factory *impl_from_IActivationFactory( IActivat
 static inline struct application_factory *impl_from_IApplicationStatics( IApplicationStatics *iface )
 {
     return CONTAINING_RECORD( iface, struct application_factory, IApplicationStatics_iface );
+}
+
+static inline struct application_factory *impl_from_ms_IApplicationStatics( IApplicationStatics *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_factory, ms_IApplicationStatics_iface );
 }
 
 static inline struct application_factory *impl_from_IApplicationFactory( IApplicationFactory *iface )
@@ -989,10 +1178,16 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IWindow2 ) ||
-        IsEqualGUID( iid, &IID_IApplication_WinUI ))
+    if (IsEqualGUID( iid, &IID_IWindow2 ))
     {
         *out = &impl->IWindow2_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWindow_WinUI ))
+    {
+        *out = &impl->ms_IWindow_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -1344,10 +1539,65 @@ static const void *xaml_window2_vtbl[] =
     xaml_window_zero_out                                                                    /* 63 */
 };
 
+static inline struct xaml_window *impl_from_ms_IWindow( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_window, ms_IWindow_iface );
+}
+static HRESULT WINAPI ms_xaml_window_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct xaml_window *impl = impl_from_ms_IWindow( iface );
+    return xaml_window_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI ms_xaml_window_AddRef( IInspectable *iface )
+{
+    struct xaml_window *impl = impl_from_ms_IWindow( iface );
+    return xaml_window_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI ms_xaml_window_Release( IInspectable *iface )
+{
+    struct xaml_window *impl = impl_from_ms_IWindow( iface );
+    return xaml_window_Release( &impl->IInspectable_iface );
+}
+
+static const void *ms_xaml_window_vtbl[] =
+{
+    ms_xaml_window_QueryInterface,        /* 0: QI */
+    ms_xaml_window_AddRef,                /* 1: AddRef */
+    ms_xaml_window_Release,               /* 2: Release */
+    xaml_window2_GetIids,                 /* 3: GetIids */
+    xaml_window2_GetRuntimeClassName,     /* 4: GetRuntimeClassName */
+    xaml_window2_GetTrustLevel,           /* 5: GetTrustLevel */
+    xaml_window_get_Bounds,               /* 6: get_Bounds */
+    xaml_window_get_Visible,              /* 7: get_Visible */
+    xaml_window_get_Content,              /* 8: get_Content */
+    xaml_window_put_Content,              /* 9: set_Content */
+    xaml_window_get_CoreWindow,           /* 10: get_CoreWindow */
+    xaml_window2_get_Compositor,          /* 11: get_Compositor */
+    xaml_window_get_Dispatcher,           /* 12: get_Dispatcher */
+    xaml_window_zero_out,                 /* 13: get_DispatcherQueue */
+    xaml_window_zero_out,                 /* 14: get_Title */
+    xaml_window_zero_out,                 /* 15: set_Title */
+    xaml_window_zero_out,                 /* 16: get_ExtendsContentIntoTitleBar */
+    xaml_window_zero_out,                 /* 17: set_ExtendsContentIntoTitleBar */
+    xaml_window_add_Activated,            /* 18: add_Activated */
+    xaml_window_remove_Activated,         /* 19: remove_Activated */
+    xaml_window_add_Closed,               /* 20: add_Closed */
+    xaml_window_remove_Closed,            /* 21: remove_Closed */
+    xaml_window_add_SizeChanged,          /* 22: add_SizeChanged */
+    xaml_window_remove_SizeChanged,       /* 23: remove_SizeChanged */
+    xaml_window_add_VisibilityChanged,    /* 24: add_VisibilityChanged */
+    xaml_window_remove_VisibilityChanged, /* 25: remove_VisibilityChanged */
+    xaml_window_Activate,                 /* 26: Activate */
+    xaml_window_Close,                    /* 27: Close */
+    xaml_window_zero_out,                 /* 28: SetTitleBar */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out,
+};
+
 static struct xaml_window global_xaml_window =
 {
     {(const struct IInspectableVtbl *)&xaml_window_vtbl},
     {(const struct IInspectableVtbl *)xaml_window2_vtbl},
+    {(const struct IInspectableVtbl *)ms_xaml_window_vtbl},
     1,
     NULL,
     NULL,
@@ -1359,6 +1609,43 @@ struct window_statics
     IActivationFactory IActivationFactory_iface;
     LONG ref;
 };
+static struct window_statics window_statics_obj;
+
+static HRESULT WINAPI window_statics_CreateInstance( void *iface, void *outer, void **inner, void **instance )
+{
+    TRACE( "iface %p, outer %p, inner %p, instance %p\n", iface, outer, inner, instance );
+    if (inner && (void *)inner != (void *)outer) *inner = NULL;
+    if (instance && (void *)instance != (void *)outer)
+    {
+        *instance = (void *)&global_xaml_window.ms_IWindow_iface;
+        IInspectable_AddRef( (IInspectable *)*instance );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI window_statics_QueryInterface( IActivationFactory *iface, REFIID iid, void **out );
+static HRESULT WINAPI win_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    return window_statics_QueryInterface( &window_statics_obj.IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI win_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI win_factory_Release( IActivationFactory *iface ) { return 1; }
+
+static HRESULT WINAPI window_statics_GetIids( IActivationFactory *iface, ULONG *count, IID **iids );
+static HRESULT WINAPI window_statics_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name );
+static HRESULT WINAPI window_statics_GetTrustLevel( IActivationFactory *iface, TrustLevel *level );
+
+static const void *win_factory_vtbl[] =
+{
+    win_factory_QueryInterface,
+    win_factory_AddRef,
+    win_factory_Release,
+    window_statics_GetIids,
+    window_statics_GetRuntimeClassName,
+    window_statics_GetTrustLevel,
+    window_statics_CreateInstance, /* slot 6: CreateInstance */
+};
+static struct window_statics win_factory_instance = { {(const struct IActivationFactoryVtbl *)win_factory_vtbl}, 1 };
 
 static HRESULT WINAPI window_statics_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
@@ -1369,10 +1656,18 @@ static HRESULT WINAPI window_statics_QueryInterface( IActivationFactory *iface, 
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
         IsEqualGUID( iid, &IID_IWindowStatics ) ||
-        IsEqualGUID( iid, &IID_IWindowStatics2 ))
+        IsEqualGUID( iid, &IID_IWindowStatics2 ) ||
+        IsEqualGUID( iid, &IID_IWindowStatics_WinUI ))
     {
         *out = iface;
         IActivationFactory_AddRef( iface );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWindowFactory_WinUI ))
+    {
+        *out = &win_factory_instance.IActivationFactory_iface;
+        IActivationFactory_AddRef( (IActivationFactory *)*out );
         return S_OK;
     }
 
@@ -1498,7 +1793,16 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IApplicationFactory ))
+    if (IsEqualGUID( iid, &IID_IApplicationStatics_WinUI ))
+    {
+        *out = &impl->ms_IApplicationStatics_iface;
+        IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IApplicationFactory ) ||
+        IsEqualGUID( iid, &IID_IApplicationFactory_WinUI ) ||
+        IsEqualGUID( iid, &IID_IApplicationFactory_WinUI3 ))
     {
         *out = &impl->IApplicationFactory_iface;
         IInspectable_AddRef( (IInspectable *)&impl->IActivationFactory_iface );
@@ -1506,9 +1810,17 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
     }
 
     if (IsEqualGUID( iid, &IID_IWindowStatics ) ||
-        IsEqualGUID( iid, &IID_IWindowStatics2 ))
+        IsEqualGUID( iid, &IID_IWindowStatics2 ) ||
+        IsEqualGUID( iid, &IID_IWindowStatics_WinUI ))
     {
         *out = window_factory;
+        IActivationFactory_AddRef( (IActivationFactory *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWindowFactory_WinUI ))
+    {
+        *out = &win_factory_instance.IActivationFactory_iface;
         IActivationFactory_AddRef( (IActivationFactory *)*out );
         return S_OK;
     }
@@ -1578,21 +1890,24 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
 
 /* Composable factory vtable with Mcg / .NET Native layout extensions:
  * When Mcg projects Windows.UI.Xaml.Application's class activation interface
- * {06499997-f7b4-45fe-b763-7577d1d3cb4a}, it places CreateInstance at slot 7
- * (following ActivateInstance at slot 6). Extend the vtable so calls to
- * vtable[7] dispatch to CreateInstance instead of hitting NULL. */
+ * {06499997-f7b4-45fe-b763-7577d1d3cb4a}:
+ *   slot 6: get_Current
+ *   slot 7: Start(callback)
+ *   slot 8: ActivateInstance / LoadComponent
+ *   slot 9: CreateInstance(outer, inner, instance) */
 struct application_activation_factory_vtbl
 {
-    HRESULT (WINAPI *QueryInterface)(IActivationFactory *, REFIID, void **);
-    ULONG (WINAPI *AddRef)(IActivationFactory *);
-    ULONG (WINAPI *Release)(IActivationFactory *);
-    HRESULT (WINAPI *GetIids)(IActivationFactory *, ULONG *, IID **);
-    HRESULT (WINAPI *GetRuntimeClassName)(IActivationFactory *, HSTRING *);
-    HRESULT (WINAPI *GetTrustLevel)(IActivationFactory *, TrustLevel *);
-    HRESULT (WINAPI *Start)(IApplicationStatics *, IApplicationInitializationCallback *);
-    HRESULT (WINAPI *CreateInstance)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **);
-    HRESULT (WINAPI *get_Current)(IApplicationStatics *, IApplication **);
-    HRESULT (WINAPI *ActivateInstance)(IActivationFactory *, IInspectable **);
+    HRESULT (WINAPI *QueryInterface)(IActivationFactory *, REFIID, void **);            /* 0 */
+    ULONG (WINAPI *AddRef)(IActivationFactory *);                                       /* 1 */
+    ULONG (WINAPI *Release)(IActivationFactory *);                                      /* 2 */
+    HRESULT (WINAPI *GetIids)(IActivationFactory *, ULONG *, IID **);                   /* 3 */
+    HRESULT (WINAPI *GetRuntimeClassName)(IActivationFactory *, HSTRING *);             /* 4 */
+    HRESULT (WINAPI *GetTrustLevel)(IActivationFactory *, TrustLevel *);                /* 5 */
+    HRESULT (WINAPI *get_Current)(IApplicationStatics *, IApplication **);              /* 6 */
+    HRESULT (WINAPI *Start)(IApplicationStatics *, IApplicationInitializationCallback *);/* 7 */
+    HRESULT (WINAPI *ActivateInstance)(IActivationFactory *, IInspectable **);          /* 8 */
+    HRESULT (WINAPI *CreateInstance)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **); /* 9 */
+    HRESULT (WINAPI *CreateInstance2)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **); /* 10 */
 };
 
 static const struct application_activation_factory_vtbl factory_vtbl =
@@ -1603,10 +1918,11 @@ static const struct application_activation_factory_vtbl factory_vtbl =
     factory_GetIids,
     factory_GetRuntimeClassName,
     factory_GetTrustLevel,
-    application_statics_Start,
-    application_factory_CreateInstance,
     application_statics_get_Current,
+    application_statics_Start,
     factory_ActivateInstance,
+    application_factory_CreateInstance,
+    application_factory_CreateInstance,
 };
 
 /* IApplicationStatics implementation */
@@ -1795,6 +2111,8 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
 
     impl->IApplication_iface.lpVtbl = (const struct IApplicationVtbl *)&application_vtbl;
     impl->inner_iface.lpVtbl = (const struct IInspectableVtbl *)&application_inner_vtbl;
+    impl->ms_IApplication_iface.lpVtbl = (const struct IInspectableVtbl *)ms_application_vtbl;
+    impl->overrides_uwp_iface.lpVtbl = (const struct IInspectableVtbl *)application_overrides_uwp_vtbl;
     impl->ref = 1;
     impl->outer = outer;
 
@@ -1912,10 +2230,42 @@ static const struct application_factory_extended_vtbl application_factory_vtbl =
     }
 };
 
+static HRESULT WINAPI ms_statics_QueryInterface( IApplicationStatics *iface, REFIID iid, void **out )
+{
+    struct application_factory *impl = impl_from_ms_IApplicationStatics( iface );
+    return factory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI ms_statics_AddRef( IApplicationStatics *iface )
+{
+    struct application_factory *impl = impl_from_ms_IApplicationStatics( iface );
+    return factory_AddRef( &impl->IActivationFactory_iface );
+}
+static ULONG WINAPI ms_statics_Release( IApplicationStatics *iface )
+{
+    struct application_factory *impl = impl_from_ms_IApplicationStatics( iface );
+    return factory_Release( &impl->IActivationFactory_iface );
+}
+
+static const void *ms_application_statics_vtbl[] =
+{
+    ms_statics_QueryInterface,           /* 0: QI */
+    ms_statics_AddRef,                   /* 1: AddRef */
+    ms_statics_Release,                  /* 2: Release */
+    statics_GetIids,                     /* 3: GetIids */
+    statics_GetRuntimeClassName,         /* 4: GetRuntimeClassName */
+    statics_GetTrustLevel,               /* 5: GetTrustLevel */
+    application_statics_get_Current,     /* 6: get_Current */
+    application_statics_Start,           /* 7: Start */
+    application_stub_ok,                 /* 8: LoadComponent */
+    application_stub_ok,                 /* 9: LoadComponent */
+    application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
+};
+
 static struct application_factory application_factory_obj =
 {
     {(const struct IActivationFactoryVtbl *)&factory_vtbl},
     {&application_statics_vtbl},
+    {(const struct IApplicationStaticsVtbl *)ms_application_statics_vtbl},
     {(const struct IApplicationFactoryVtbl *)&application_factory_vtbl},
     {&view_source_vtbl},
     1,

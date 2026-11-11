@@ -320,6 +320,7 @@ static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView
     return hr;
 }
 static const GUID IID_ILaunchActivatedEventArgs = {0xfbc93e26, 0xa14a, 0x4b4f, {0x82, 0xb0, 0x33, 0xbe, 0xd9, 0x20, 0xaf, 0x52}};
+static const GUID IID_ILaunchActivatedEventArgs_WinUI = {0xd505cea9, 0x1bcb, 0x5b29, {0xa8, 0xbe, 0x94, 0x4e, 0x00, 0xf0, 0x6f, 0x78}};
 
 struct activated_event_args
 {
@@ -351,7 +352,8 @@ static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApp
         *out = &impl->IActivatedEventArgs_iface;
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_ILaunchActivatedEventArgs ))
+    if (IsEqualGUID( iid, &IID_ILaunchActivatedEventArgs ) ||
+        IsEqualGUID( iid, &IID_ILaunchActivatedEventArgs_WinUI ))
     {
         InterlockedIncrement( &impl->ref );
         *out = &impl->ILaunchActivatedEventArgs_vtbl;

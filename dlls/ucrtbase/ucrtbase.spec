@@ -428,7 +428,7 @@
 @ cdecl _initterm_e(ptr ptr)
 @ cdecl _invalid_parameter_noinfo()
 @ cdecl _invalid_parameter_noinfo_noreturn()
-@ stub _invoke_watson
+@ cdecl _invoke_watson(wstr wstr wstr long long) _invalid_parameter
 @ stub _is_exception_typeof
 @ cdecl _isalnum_l(long ptr)
 @ cdecl _isalpha_l(long ptr)

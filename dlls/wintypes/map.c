@@ -49,6 +49,12 @@ static const GUID IID_IMapView_String_IInspectable =
  * projection-specific parameterized id. */
 static const GUID IID_IMapView_StringObject_IInspectable =
 { 0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0} };
+static const GUID IID_IMap_String_Object =
+{ 0x8114f3e9, 0xf118, 0x3c7b, { 0x91, 0x94, 0x00, 0xa3, 0xa2, 0x4d, 0x96, 0x7d } };
+static const GUID IID_IMapView_String_Object =
+{ 0x7c054694, 0x4acd, 0x3716, { 0xa1, 0x7a, 0xd5, 0x83, 0xc5, 0xb3, 0xde, 0x8b } };
+static const GUID IID_IObservableMap_String_Object =
+{ 0x65df2bf5, 0xbf39, 0x41b5, { 0xae, 0xbc, 0x5a, 0x9d, 0x86, 0x5e, 0x47, 0x2b } };
 
 struct map_entry
 {
@@ -807,7 +813,8 @@ static HRESULT WINAPI map_inner_QueryInterface( IInspectable *iface, REFIID iid,
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, impl->iids.map ) || IsEqualGUID( iid, &IID_IMap_String_IInspectable ))
+    if (IsEqualGUID( iid, impl->iids.map ) ||
+        IsEqualGUID( iid, &IID_IMap_String_Object ))
     {
         IInspectable_AddRef( (*out = &impl->IMap_HSTRING_IInspectable_iface) );
         return S_OK;
@@ -819,8 +826,9 @@ static HRESULT WINAPI map_inner_QueryInterface( IInspectable *iface, REFIID iid,
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, impl->iids.view ) || IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ))
+    if (IsEqualGUID( iid, impl->iids.view ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_Object ))
     {
         IMapView_HSTRING_IInspectable *view;
         HRESULT hr;
@@ -1231,7 +1239,8 @@ static HRESULT WINAPI locked_map_inner_QueryInterface( IInspectable *iface, REFI
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, impl->iids.map ) || IsEqualGUID( iid, &IID_IMap_String_IInspectable ))
+    if (IsEqualGUID( iid, impl->iids.map ) ||
+        IsEqualGUID( iid, &IID_IMap_String_Object ))
     {
         IInspectable_AddRef( (*out = &impl->IMap_HSTRING_IInspectable_iface) );
         return S_OK;

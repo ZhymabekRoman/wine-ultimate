@@ -134,7 +134,7 @@ static HRESULT WINAPI tracker_GetReferenceTrackerManager( struct appdata_tracker
 {
     TRACE( "tracker %p get manager\n", iface );
     if (manager) *manager = NULL;
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 static HRESULT WINAPI tracker_AddRefFromTrackerSource( struct appdata_tracker *iface )
@@ -158,11 +158,7 @@ static HRESULT WINAPI tracker_PegFromTrackerSource( struct appdata_tracker *ifac
 
 static const struct appdata_tracker_vtbl appdata_tracker_vtbl =
 {
-    /* Producer-side ComVirtualMethodData layout: slot 0 is the packed header
-     * word (self | tag 4), not a QI pointer; the consumer masks the tag and
-     * dereferences chunk+0x18/+0x38 as slots 3/7, landing on these direct
-     * stubs (see propertyset.c for the observed p204-p208 AV form). */
-    (void *)((UINT_PTR)&appdata_tracker_vtbl + 4),
+    tracker_QueryInterface,
     tracker_AddRef,
     tracker_Release,
     tracker_ConnectFromTrackerSource,
@@ -297,9 +293,8 @@ static HRESULT WINAPI factory_qi_impl( IActivationFactory *iface, REFIID iid, vo
      * no-op tracker face, as the application_data object already does. */
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
     {
-        *out = (void *)&appdata_tracker;
-        InterlockedIncrement( &appdata_tracker.ref );
-        return S_OK;
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -459,9 +454,8 @@ static HRESULT WINAPI application_data_qi_impl( IApplicationData *iface, REFIID 
     }
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
     {
-        *out = &appdata_tracker;
-        tracker_AddRef( &appdata_tracker );
-        return S_OK;
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -592,15 +586,8 @@ static HRESULT WINAPI container_qi_impl( IApplicationDataContainer *iface, REFII
     }
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) || IsEqualGUID( iid, &IID_IReferenceTracker_g ))
     {
-        *out = &appdata_tracker;
-        tracker_AddRef( &appdata_tracker );
-        return S_OK;
-    }
-    if (IsEqualGUID( iid, &IID_IApplicationDataContainerMethods ))
-    {
-        *out = &impl->IApplicationDataContainerMethods_iface;
-        InterlockedIncrement( &impl->ref );
-        return S_OK;
+        *out = NULL;
+        return E_NOINTERFACE;
     }
     FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -646,7 +633,6 @@ static HRESULT WINAPI container_GetIids( IApplicationDataContainer *iface, ULONG
         static const struct com_interface_entry entries[] =
         {
             { (void **)&container_vtbl, (IID *)&IID_IApplicationDataContainer },
-            { (void **)&container_methods_vtbl, (IID *)&IID_IApplicationDataContainerMethods },
         };
         struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
         if (!array) return E_OUTOFMEMORY;
@@ -718,9 +704,8 @@ static HRESULT WINAPI empty_map_view_QueryInterface( IMapView_HSTRING_Applicatio
      * wintypes propertyset singleton. */
     if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
     {
-        *out = &appdata_tracker;
-        tracker_AddRef( &appdata_tracker );
-        return S_OK;
+        *out = NULL;
+        return E_NOINTERFACE;
     }
     *out = NULL;
     return E_NOINTERFACE;
@@ -1448,8 +1433,6 @@ void application_data_preseed( void )
     base[13] = (void *)&IID_IApplicationDataMethods;
     base[24] = (void **)&container_vtbl;
     base[25] = (void *)&IID_IApplicationDataContainer;
-    base[26] = (void **)&container_methods_vtbl;
-    base[27] = (void *)&IID_IApplicationDataContainerMethods;
     /* propertyset (values) provider block at +0xc0: seeded by wintypes
      * heap_prewarm via propertyset_pair_array_seed (same-DLL symbols; the
      * cross-DLL import was not worth a spec export). */

@@ -589,6 +589,314 @@ static struct dependency_property_factory dependency_property_factory_obj =
 };
 IActivationFactory *dependency_property_factory = &dependency_property_factory_obj.IActivationFactory_iface;
 
+/* Microsoft.UI.Xaml.Data.CollectionViewSource / Windows.UI.Xaml.Data.CollectionViewSource */
+static const GUID IID_ICollectionViewSource =
+    { 0xa45e3b3a, 0xf31e, 0x5bbb, { 0x8a, 0x7c, 0x70, 0xcf, 0x5c, 0x64, 0xbc, 0x3f } };
+static const GUID IID_ICollectionViewSourceStatics =
+    { 0xe282f10f, 0xd4b1, 0x5769, { 0x8a, 0x11, 0x30, 0xf7, 0x39, 0xe6, 0x11, 0x3b } };
+static const GUID IID_IDependencyObject_WinUI =
+    { 0xe7beaee7, 0x160e, 0x50f7, { 0x87, 0x89, 0xd6, 0x34, 0x63, 0xf9, 0x79, 0xfa } };
+
+struct collection_view_source
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    IInspectable *source;
+};
+
+static HRESULT WINAPI cvs_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct collection_view_source *impl = (struct collection_view_source *)iface;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ICollectionViewSource ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "%s not implemented\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cvs_AddRef( IInspectable *iface )
+{
+    struct collection_view_source *impl = (struct collection_view_source *)iface;
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI cvs_Release( IInspectable *iface )
+{
+    struct collection_view_source *impl = (struct collection_view_source *)iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->source) IInspectable_Release( impl->source );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI cvs_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI cvs_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Microsoft.UI.Xaml.Data.CollectionViewSource", 42, name );
+}
+static HRESULT WINAPI cvs_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI cvs_get_Source( void *iface, void **value )
+{
+    struct collection_view_source *impl = (struct collection_view_source *)iface;
+    if (!value) return E_POINTER;
+    *value = impl->source;
+    if (impl->source) IInspectable_AddRef( impl->source );
+    return S_OK;
+}
+static HRESULT WINAPI cvs_set_Source( void *iface, void *value )
+{
+    struct collection_view_source *impl = (struct collection_view_source *)iface;
+    if (impl->source) IInspectable_Release( impl->source );
+    impl->source = (IInspectable *)value;
+    if (impl->source) IInspectable_AddRef( impl->source );
+    return S_OK;
+}
+static HRESULT WINAPI cvs_stub_zero( void *iface, void *a2, void *a3 )
+{
+    if (a3) *(void **)a3 = NULL;
+    else if (a2) *(void **)a2 = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI cvs_stub_ok( void *iface )
+{
+    return S_OK;
+}
+
+static const void *cvs_vtbl[] =
+{
+    cvs_QueryInterface,           /* 0 */
+    cvs_AddRef,                   /* 1 */
+    cvs_Release,                  /* 2 */
+    cvs_GetIids,                  /* 3 */
+    cvs_GetRuntimeClassName,      /* 4 */
+    cvs_GetTrustLevel,            /* 5 */
+    cvs_get_Source,               /* 6: get_Source */
+    cvs_set_Source,               /* 7: set_Source */
+    cvs_stub_zero,                /* 8: get_View */
+    cvs_stub_zero,                /* 9: get_IsSourceGrouped */
+    cvs_stub_ok,                  /* 10: set_IsSourceGrouped */
+    cvs_stub_zero,                /* 11: get_ItemsPath */
+    cvs_stub_ok,                  /* 12: set_ItemsPath */
+    cvs_stub_zero, cvs_stub_zero, cvs_stub_zero, cvs_stub_zero, /* 13..16 */
+    cvs_stub_zero, cvs_stub_zero, cvs_stub_zero, cvs_stub_zero, /* 17..20 */
+};
+
+/* CollectionViewSource factory */
+struct cvs_factory_s
+{
+    IActivationFactory factory_iface;
+    IActivationFactory statics_iface;
+};
+static struct cvs_factory_s cvs_factory_obj;
+
+static HRESULT WINAPI cvs_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &cvs_factory_obj.factory_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICollectionViewSourceStatics ))
+    {
+        *out = &cvs_factory_obj.statics_iface;
+        return S_OK;
+    }
+    FIXME( "%s not implemented\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cvs_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI cvs_factory_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI cvs_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    struct collection_view_source *obj;
+    if (!instance) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cvs_vtbl;
+    obj->ref = 1;
+    *instance = &obj->IInspectable_iface;
+    return S_OK;
+}
+
+static const struct IActivationFactoryVtbl cvs_factory_vtbl =
+{
+    cvs_factory_QueryInterface,
+    cvs_factory_AddRef,
+    cvs_factory_Release,
+    (void *)cvs_GetIids,
+    (void *)cvs_GetRuntimeClassName,
+    (void *)cvs_GetTrustLevel,
+    cvs_factory_ActivateInstance,
+};
+
+static const void *cvs_statics_vtbl[] =
+{
+    cvs_factory_QueryInterface,
+    cvs_factory_AddRef,
+    cvs_factory_Release,
+    cvs_GetIids,
+    cvs_GetRuntimeClassName,
+    cvs_GetTrustLevel,
+    cvs_stub_zero, /* 6: get_SourceProperty */
+    cvs_stub_zero, /* 7: get_ViewProperty */
+    cvs_stub_zero, /* 8: get_IsSourceGroupedProperty */
+    cvs_stub_zero, /* 9: get_ItemsPathProperty */
+};
+
+static struct cvs_factory_s cvs_factory_obj =
+{
+    {&cvs_factory_vtbl},
+    {(const struct IActivationFactoryVtbl *)cvs_statics_vtbl},
+};
+IActivationFactory *collection_view_source_factory = &cvs_factory_obj.factory_iface;
+
+/* Microsoft.UI.Xaml.PropertyPath / Windows.UI.Xaml.PropertyPath */
+static const GUID IID_IPropertyPath =
+    { 0x8b0712f6, 0x9e57, 0x53b0, { 0x80, 0xb1, 0x96, 0x6a, 0x79, 0xf6, 0x0b, 0x96 } };
+static const GUID IID_IPropertyPathFactory =
+    { 0x08a8ccab, 0x7ff8, 0x5cec, { 0xbd, 0x3c, 0x72, 0xc9, 0x88, 0x04, 0xd9, 0x89 } };
+
+struct property_path
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    HSTRING path;
+};
+
+static HRESULT WINAPI pp_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct property_path *impl = (struct property_path *)iface;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPropertyPath ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "%s not implemented\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI pp_AddRef( IInspectable *iface )
+{
+    struct property_path *impl = (struct property_path *)iface;
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI pp_Release( IInspectable *iface )
+{
+    struct property_path *impl = (struct property_path *)iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->path) WindowsDeleteString( impl->path );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI pp_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI pp_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Microsoft.UI.Xaml.PropertyPath", 30, name );
+}
+static HRESULT WINAPI pp_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI pp_get_Path( void *iface, HSTRING *value )
+{
+    struct property_path *impl = (struct property_path *)iface;
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->path, value );
+}
+
+static const void *pp_vtbl[] =
+{
+    pp_QueryInterface,           /* 0 */
+    pp_AddRef,                   /* 1 */
+    pp_Release,                  /* 2 */
+    pp_GetIids,                  /* 3 */
+    pp_GetRuntimeClassName,      /* 4 */
+    pp_GetTrustLevel,            /* 5 */
+    pp_get_Path,                 /* 6: get_Path */
+    cvs_stub_zero, cvs_stub_zero, cvs_stub_zero, cvs_stub_zero, /* 7..10 */
+    cvs_stub_zero, cvs_stub_zero, cvs_stub_zero, cvs_stub_zero, /* 11..14 */
+};
+
+/* PropertyPath factory */
+static HRESULT WINAPI pp_factory_CreateInstance( void *iface, HSTRING path, void **instance )
+{
+    struct property_path *obj;
+    if (!instance) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)pp_vtbl;
+    obj->ref = 1;
+    if (path) WindowsDuplicateString( path, &obj->path );
+    *instance = &obj->IInspectable_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI pp_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IPropertyPathFactory ))
+    {
+        *out = iface;
+        IActivationFactory_AddRef( iface );
+        return S_OK;
+    }
+    FIXME( "%s not implemented\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI pp_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI pp_factory_Release( IActivationFactory *iface ) { return 1; }
+
+static const void *pp_factory_vtbl[] =
+{
+    pp_factory_QueryInterface,
+    pp_factory_AddRef,
+    pp_factory_Release,
+    pp_GetIids,
+    pp_GetRuntimeClassName,
+    pp_GetTrustLevel,
+    pp_factory_CreateInstance, /* slot 6: CreateInstance */
+};
+
+static struct { IActivationFactory iface; } pp_factory_obj = { {(const struct IActivationFactoryVtbl *)pp_factory_vtbl} };
+IActivationFactory *property_path_factory = &pp_factory_obj.iface;
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
@@ -613,6 +921,12 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.DependencyProperty" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.DependencyProperty" ))
         IActivationFactory_QueryInterface( dependency_property_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Data.CollectionViewSource" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Data.CollectionViewSource" ))
+        IActivationFactory_QueryInterface( collection_view_source_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.PropertyPath" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.PropertyPath" ))
+        IActivationFactory_QueryInterface( property_path_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

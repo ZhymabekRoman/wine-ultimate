@@ -37,6 +37,12 @@ static const GUID IID_IMapView_String_IInspectable =
 { 0xe8cc1dcf, 0xaa1b, 0x51e7, {0x90, 0xa7, 0x6b, 0x7d, 0x99, 0xbd, 0x99, 0xa0} };
 static const GUID IID_IMapView_StringObject_IInspectable =
 { 0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0} };
+static const GUID IID_IMap_String_Object =
+{ 0x8114f3e9, 0xf118, 0x3c7b, { 0x91, 0x94, 0x00, 0xa3, 0xa2, 0x4d, 0x96, 0x7d } };
+static const GUID IID_IMapView_String_Object =
+{ 0x7c054694, 0x4acd, 0x3716, { 0xa1, 0x7a, 0xd5, 0x83, 0xc5, 0xb3, 0xde, 0x8b } };
+static const GUID IID_IObservableMap_String_Object =
+{ 0x65df2bf5, 0xbf39, 0x41b5, { 0xae, 0xbc, 0x5a, 0x9d, 0x86, 0x5e, 0x47, 0x2b } };
 
 /* CoreCLR's ComWrappers shader reads the IInspectable::GetIids output of a
  * WinRT object as an array of ComInterfaceEntry pairs, not a bare IID array:
@@ -233,7 +239,7 @@ static HRESULT STDMETHODCALLTYPE tracker_GetReferenceTrackerManager( struct prop
 {
     TRACE( "tracker %p get manager %p\n", iface, manager );
     if (manager) *manager = NULL;
-    return S_OK;
+    return E_NOTIMPL;
 }
 
 static HRESULT STDMETHODCALLTYPE tracker_AddRefFromTrackerSource( struct propertyset_reference_tracker *iface )
@@ -315,25 +321,18 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
     TRACE( "(%p, %s, %p)\n", iface, debugstr_guid( iid ), out );
 
     *out = NULL;
-    if (is_store_app() && IsEqualGUID( iid, &IID_IReferenceTracker_g ))
-    {
-        *out = &propertyset_tracker;
-        propertyset_tracker.vtbl = &propertyset_tracker_store_vtbl;
-        tracker_AddRef( &propertyset_tracker );
-        TRACE( "handing out tracker face %p, vtbl %p\n", *out, *(void **)*out );
-        return S_OK;
-    }
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IPropertySet ) ||
         IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMap_String_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ) ||
         IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMap_String_Object ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_Object ) ||
+        IsEqualGUID( iid, &IID_IObservableMap_String_Object ) ||
         IsEqualGUID( iid, &IID_INotifyCollectionChanged_g ) ||
         IsEqualGUID( iid, &IID_INotifyPropertyChanged_g ))
     {
@@ -343,14 +342,10 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
         return S_OK;
     }
 
-    /* CoreCLR ComWrappers tracker probe: hand out the real image-resident
-     * IReferenceTracker face (see IID_IReferenceTracker_g above). */
     if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
     {
-        *out = &propertyset_tracker;
-        tracker_AddRef( &propertyset_tracker );
-        TRACE( "handing out tracker face %p, vtbl %p\n", *out, *(void **)*out );
-        return S_OK;
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     if (SUCCEEDED(IInspectable_QueryInterface( impl->map_inner, iid, out ))) return S_OK;
@@ -417,11 +412,17 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
     TRACE( "(%p, %p, %p)\n", iface, iid_count, iids );
     TRACE( "SHADERPROBE: getiids impl %p count %u cache %p\n", impl, impl->iids_count, impl->iids_cache );
 
-    if (is_store_app())
+    /* Standard WinRT PropertySet runtime class interface list (winmd):
+     * IPropertySet (default) + IMap<HSTRING, IInspectable> + IObservableMap<HSTRING, IInspectable>.
+     * CsWinRT and .NET runtime consume this as a standard CoTaskMemAlloc'd IID array. */
+    if (1)
     {
         static const IID store_iids[] =
         {
-            { 0x8a43ed9f, 0xf4e6, 0x4421, {0xac, 0xf9, 0x1d, 0xab, 0x52, 0x86, 0x4f, 0x42} }, /* IPropertySet */
+            { 0x8a43ed9f, 0xf4e6, 0x4421, {0xac, 0xf9, 0x1d, 0xab, 0x29, 0x86, 0x82, 0x0c} }, /* IPropertySet */
+            { 0x8114f3e9, 0xf118, 0x3c7b, {0x91, 0x94, 0x00, 0xa3, 0xa2, 0x4d, 0x96, 0x7d} }, /* IMap<String, object> */
+            { 0x65df2bf5, 0xbf39, 0x41b5, {0xae, 0xbc, 0x5a, 0x9d, 0x86, 0x5e, 0x47, 0x2b} }, /* IObservableMap<String, object> */
+            { 0x7c054694, 0x4acd, 0x3716, {0xa1, 0x7a, 0xd5, 0x83, 0xc5, 0xb3, 0xde, 0x8b} }, /* IMapView<String, object> */
             { 0x1b0d3570, 0x0877, 0x5ec2, {0x8a, 0x2c, 0x3b, 0x95, 0x39, 0x50, 0x6a, 0xca} }, /* IMap<HSTRING, IInspectable> */
             { 0x24f981e5, 0x4f81, 0x5fb2, {0xac, 0xc2, 0x49, 0x2a, 0x64, 0xbd, 0x37, 0x08} }, /* IObservableMap<HSTRING, IInspectable> */
         };
@@ -1063,10 +1064,8 @@ static HRESULT STDMETHODCALLTYPE factory_QueryInterface( IActivationFactory *ifa
 
     if (IsEqualGUID( &IID_IReferenceTracker_g, iid ))
     {
-        *out = &propertyset_tracker;
-        tracker_AddRef( &propertyset_tracker );
-        TRACE( "handing out tracker face %p, vtbl %p\n", *out, *(void **)*out );
-        return S_OK;
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     FIXME( "%s not implemented, return E_NOINTERFACE.\n", debugstr_guid( iid ) );
