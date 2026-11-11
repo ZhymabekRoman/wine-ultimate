@@ -4181,6 +4181,247 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
 }
 
 
+#define PATH_CACHE_SIZE 2048
+#define PATH_CACHE_PROBE_MAX 8
+
+struct path_cache_entry {
+    uint32_t seq;                 /* seqlock: odd = write in progress, even = valid, 0 = empty */
+    uint32_t hash;                /* 32-bit case-insensitive hash */
+    uint32_t generation;          /* global invalidation counter */
+    uint16_t name_len;            /* length of ObjectName in WCHARs */
+    uint8_t  open_reparse;        /* open_reparse flag */
+    uint8_t  reserved;
+    NTSTATUS status;              /* cached NT status */
+    HANDLE   root_dir;            /* attr->RootDirectory */
+    uint64_t timestamp;           /* monotonic timestamp */
+    WCHAR    nt_name[MAX_PATH];   /* original ObjectName buffer for exact match */
+    char     unix_path[MAX_PATH]; /* resolved Unix path */
+};
+
+static struct path_cache_entry path_cache[PATH_CACHE_SIZE];
+static uint32_t path_cache_generation = 1;
+static pthread_mutex_t path_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline uint64_t path_cache_timestamp_ns(void)
+{
+    struct timespec ts;
+#ifdef CLOCK_MONOTONIC_COARSE
+    if (clock_gettime( CLOCK_MONOTONIC_COARSE, &ts ) == 0)
+        return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+#endif
+    if (clock_gettime( CLOCK_MONOTONIC, &ts ) == 0)
+        return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
+    return 0;
+}
+
+static inline uint32_t path_cache_hash( const WCHAR *str, unsigned int len, HANDLE root_dir, BOOL open_reparse )
+{
+    uint32_t h = 0x811c9dc5; /* FNV-1a 32-bit offset */
+    unsigned int remaining = len;
+
+    while (remaining-- > 0)
+    {
+        WCHAR c = RtlDowncaseUnicodeChar( *str++ );
+        h ^= (uint32_t)(c & 0xff);
+        h *= 0x01000193;
+        h ^= (uint32_t)(c >> 8);
+        h *= 0x01000193;
+    }
+    h ^= (uint32_t)len;
+    h *= 0x01000193;
+    h ^= (uint32_t)(uintptr_t)root_dir;
+    h *= 0x01000193;
+    if (open_reparse)
+    {
+        h ^= 0x5a5a5a5a;
+        h *= 0x01000193;
+    }
+    return h;
+}
+
+static BOOL path_cache_lookup( const OBJECT_ATTRIBUTES *attr, char **unix_name_ret,
+                               UINT disposition, BOOL open_reparse )
+{
+    const UNICODE_STRING *obj_name;
+    const WCHAR *name;
+    unsigned int lenW, hash, probe;
+    uint32_t cur_gen;
+    struct stat st;
+    int stat_flag;
+
+    if (vfs_cache_disabled == -1) vfs_cache_disabled = getenv( "WINE_DISABLE_VFS_CACHE" ) != NULL;
+    if (vfs_cache_disabled) return FALSE;
+
+    if (!attr || !(obj_name = attr->ObjectName) || !(name = obj_name->Buffer)) return FALSE;
+    lenW = obj_name->Length / sizeof(WCHAR);
+    if (!lenW || lenW >= MAX_PATH) return FALSE;
+
+    cur_gen = __atomic_load_n( &path_cache_generation, __ATOMIC_ACQUIRE );
+    hash = path_cache_hash( name, lenW, attr->RootDirectory, open_reparse );
+    stat_flag = open_reparse ? AT_SYMLINK_NOFOLLOW : 0;
+
+    for (probe = 0; probe < PATH_CACHE_PROBE_MAX; probe++)
+    {
+        unsigned int slot = (hash + probe) & (PATH_CACHE_SIZE - 1);
+        struct path_cache_entry *entry = &path_cache[slot];
+        uint32_t seq1, seq2, entry_gen;
+        char cached_path[MAX_PATH];
+        NTSTATUS cached_status;
+        int dir_fd = AT_FDCWD;
+        int needs_close = 0;
+        int stat_res;
+
+        seq1 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+        if (!seq1 || (seq1 & 1)) continue;
+
+        if (entry->hash != hash || entry->name_len != lenW ||
+            entry->root_dir != attr->RootDirectory || entry->open_reparse != (uint8_t)open_reparse)
+            continue;
+
+        entry_gen = __atomic_load_n( &entry->generation, __ATOMIC_RELAXED );
+        if (entry_gen != cur_gen) continue;
+
+        if (wcsnicmp( entry->nt_name, name, lenW )) continue;
+
+        memcpy( cached_path, (const char *)entry->unix_path, sizeof(cached_path) );
+        cached_status = entry->status;
+
+        seq2 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+        if (seq1 != seq2) continue;
+
+        if (cached_status != STATUS_SUCCESS) continue;
+
+        if (attr->RootDirectory)
+        {
+            enum server_fd_type type;
+            if (server_get_unix_fd( attr->RootDirectory, 0, &dir_fd, &needs_close, &type, NULL ))
+                continue;
+            if (type != FD_TYPE_DIR)
+            {
+                if (needs_close) close( dir_fd );
+                continue;
+            }
+        }
+
+        stat_res = fstatat( dir_fd, cached_path, &st, stat_flag );
+        if (needs_close) close( dir_fd );
+
+        if (stat_res == 0)
+        {
+            if (disposition == FILE_CREATE) return FALSE;
+
+            *unix_name_ret = strdup( cached_path );
+            if (!*unix_name_ret) return FALSE;
+            return TRUE;
+        }
+
+        __atomic_store_n( &entry->seq, 0, __ATOMIC_RELEASE );
+    }
+
+    return FALSE;
+}
+
+static void path_cache_insert( const OBJECT_ATTRIBUTES *attr, const char *unix_path, BOOL open_reparse )
+{
+    const UNICODE_STRING *obj_name;
+    const WCHAR *name;
+    unsigned int lenW, hash, probe, target_slot;
+    uint32_t cur_gen, seq;
+    size_t ulen;
+    struct path_cache_entry *entry;
+
+    if (vfs_cache_disabled == -1) vfs_cache_disabled = getenv( "WINE_DISABLE_VFS_CACHE" ) != NULL;
+    if (vfs_cache_disabled) return;
+
+    if (!attr || !(obj_name = attr->ObjectName) || !(name = obj_name->Buffer)) return;
+    lenW = obj_name->Length / sizeof(WCHAR);
+    if (!lenW || lenW >= MAX_PATH) return;
+
+    if (!unix_path) return;
+    ulen = strlen( unix_path );
+    if (!ulen || ulen >= MAX_PATH) return;
+
+    cur_gen = __atomic_load_n( &path_cache_generation, __ATOMIC_ACQUIRE );
+    hash = path_cache_hash( name, lenW, attr->RootDirectory, open_reparse );
+
+    pthread_mutex_lock( &path_cache_mutex );
+
+    target_slot = hash & (PATH_CACHE_SIZE - 1);
+    for (probe = 0; probe < PATH_CACHE_PROBE_MAX; probe++)
+    {
+        unsigned int slot = (hash + probe) & (PATH_CACHE_SIZE - 1);
+        struct path_cache_entry *e = &path_cache[slot];
+        uint32_t s = e->seq;
+
+        if (!s || e->generation != cur_gen)
+        {
+            target_slot = slot;
+            break;
+        }
+        if (e->hash == hash && e->name_len == lenW && e->root_dir == attr->RootDirectory
+            && e->open_reparse == (uint8_t)open_reparse && !wcsnicmp( e->nt_name, name, lenW ))
+        {
+            target_slot = slot;
+            break;
+        }
+    }
+
+    entry = &path_cache[target_slot];
+    seq = entry->seq;
+    if (seq & 1) seq++;
+    __atomic_store_n( &entry->seq, seq + 1, __ATOMIC_RELEASE );
+
+    entry->hash = hash;
+    entry->name_len = lenW;
+    entry->open_reparse = (uint8_t)open_reparse;
+    entry->reserved = 0;
+    entry->root_dir = attr->RootDirectory;
+    entry->status = STATUS_SUCCESS;
+    entry->generation = cur_gen;
+    entry->timestamp = path_cache_timestamp_ns();
+    memcpy( entry->nt_name, name, lenW * sizeof(WCHAR) );
+    entry->nt_name[lenW] = 0;
+    memcpy( entry->unix_path, unix_path, ulen + 1 );
+
+    __atomic_store_n( &entry->seq, seq + 2, __ATOMIC_RELEASE );
+
+    pthread_mutex_unlock( &path_cache_mutex );
+}
+
+static void path_cache_invalidate( const OBJECT_ATTRIBUTES *attr )
+{
+    const UNICODE_STRING *obj_name;
+    const WCHAR *name;
+    unsigned int lenW, hash, probe;
+
+    if (!attr || !(obj_name = attr->ObjectName) || !(name = obj_name->Buffer)) return;
+    lenW = obj_name->Length / sizeof(WCHAR);
+    if (!lenW || lenW >= MAX_PATH) return;
+
+    hash = path_cache_hash( name, lenW, attr->RootDirectory, FALSE );
+
+    pthread_mutex_lock( &path_cache_mutex );
+    for (probe = 0; probe < PATH_CACHE_PROBE_MAX; probe++)
+    {
+        unsigned int slot = (hash + probe) & (PATH_CACHE_SIZE - 1);
+        struct path_cache_entry *entry = &path_cache[slot];
+
+        if (entry->name_len == lenW && entry->root_dir == attr->RootDirectory
+            && !wcsnicmp( entry->nt_name, name, lenW ))
+        {
+            __atomic_store_n( &entry->seq, 0, __ATOMIC_RELEASE );
+            entry->hash = 0;
+        }
+    }
+    pthread_mutex_unlock( &path_cache_mutex );
+}
+
+static inline void path_cache_invalidate_all(void)
+{
+    __atomic_fetch_add( &path_cache_generation, 1, __ATOMIC_RELEASE );
+}
+
+
 /******************************************************************************
  *           nt_to_unix_file_name
  *
@@ -4200,8 +4441,19 @@ static NTSTATUS nt_to_unix_file_name( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
     int name_len, unix_len;
     NTSTATUS status;
 
+    if (disposition != FILE_CREATE && path_cache_lookup( attr, name_ret, disposition, open_reparse ))
+    {
+        TRACE( "%s -> cached %s\n", debugstr_us(attr->ObjectName), debugstr_a(*name_ret) );
+        return STATUS_SUCCESS;
+    }
+
     if (!attr->RootDirectory)  /* without root dir fall back to normal lookup */
-        return nt_to_unix_file_name_no_root( attr, nt_name, name_ret, disposition, open_reparse, 0 );
+    {
+        status = nt_to_unix_file_name_no_root( attr, nt_name, name_ret, disposition, open_reparse, 0 );
+        if (status == STATUS_SUCCESS && (!nt_name || !nt_name->Buffer) && *name_ret)
+            path_cache_insert( attr, *name_ret, open_reparse );
+        return status;
+    }
 
     name     = attr->ObjectName->Buffer;
     name_len = attr->ObjectName->Length / sizeof(WCHAR);
@@ -4232,6 +4484,8 @@ static NTSTATUS nt_to_unix_file_name( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
     {
         TRACE( "%s -> %s\n", debugstr_us(attr->ObjectName), debugstr_a(unix_name) );
         *name_ret = unix_name;
+        if (status == STATUS_SUCCESS && (!nt_name || !nt_name->Buffer))
+            path_cache_insert( attr, *name_ret, open_reparse );
     }
     else
     {
@@ -5213,7 +5467,12 @@ NTSTATUS WINAPI NtDeleteFile( OBJECT_ATTRIBUTES *attr )
         if (!(status = open_unix_file( &handle, unix_name, GENERIC_READ | GENERIC_WRITE | DELETE, &new_attr,
                                        0, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, FILE_OPEN,
                                        FILE_DELETE_ON_CLOSE, NULL, 0 )))
+        {
             NtClose( handle );
+            path_cache_invalidate( &new_attr );
+            path_cache_invalidate( attr );
+            path_cache_invalidate_all();
+        }
     }
     free( unix_name );
     free( nt_name.Buffer );
@@ -5745,6 +6004,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                 status = wine_server_call( req );
             }
             SERVER_END_REQ;
+            if (!status && info->DoDeleteFile) path_cache_invalidate_all();
         }
         else status = STATUS_INVALID_PARAMETER_3;
         break;
@@ -5764,6 +6024,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                 status = wine_server_call( req );
             }
             SERVER_END_REQ;
+            if (!status && (info->Flags & FILE_DISPOSITION_DELETE)) path_cache_invalidate_all();
         }
         else status = STATUS_INVALID_PARAMETER_3;
         break;
@@ -5805,7 +6066,11 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                     status = wine_server_call( req );
                 }
                 SERVER_END_REQ;
-
+                if (!status)
+                {
+                    path_cache_invalidate( &attr );
+                    path_cache_invalidate_all();
+                }
             }
             free( unix_name );
             free( nt_name.Buffer );
