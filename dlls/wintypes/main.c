@@ -2118,6 +2118,104 @@ static void heap_prewarm( void )
     LoadLibraryW( L"Microsoft.Web.WebView2.Core.dll" );
 }
 
+/* Windows.Foundation.Diagnostics.LoggingFields */
+static const GUID IID_ILoggingFields = {0xd7f6b7af, 0x762d, 0x4579, {0x83, 0xbd, 0x52, 0xc2, 0x3b, 0xc3, 0x33, 0xbc}};
+
+struct logging_fields
+{
+    const void **vtbl;
+    LONG ref;
+};
+
+static HRESULT WINAPI logging_fields_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct logging_fields *impl = CONTAINING_RECORD( iface, struct logging_fields, vtbl );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ILoggingFields ))
+    {
+        *out = &impl->vtbl;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI logging_fields_AddRef( void *iface )
+{
+    struct logging_fields *impl = CONTAINING_RECORD( iface, struct logging_fields, vtbl );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI logging_fields_Release( void *iface )
+{
+    struct logging_fields *impl = CONTAINING_RECORD( iface, struct logging_fields, vtbl );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI logging_fields_GetIids( void *iface, ULONG *count, IID **iids ) { *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI logging_fields_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Diagnostics.LoggingFields", 43, name );
+}
+static HRESULT WINAPI logging_fields_GetTrustLevel( void *iface, TrustLevel *level ) { *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI logging_fields_stub( void *iface, ... ) { return S_OK; }
+
+static void *logging_fields_vtbl[150] =
+{
+    logging_fields_QueryInterface, logging_fields_AddRef, logging_fields_Release,
+    logging_fields_GetIids, logging_fields_GetRuntimeClassName, logging_fields_GetTrustLevel,
+};
+
+static HRESULT WINAPI logging_fields_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    static BOOL initialized = FALSE;
+    struct logging_fields *obj;
+    int i;
+    if (!initialized)
+    {
+        for (i = 6; i < ARRAY_SIZE(logging_fields_vtbl); i++)
+            logging_fields_vtbl[i] = (void *)logging_fields_stub;
+        initialized = TRUE;
+    }
+    if (!instance) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->vtbl = (const void **)logging_fields_vtbl;
+    obj->ref = 1;
+    *instance = (IInspectable *)&obj->vtbl;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_fields_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI logging_fields_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI logging_fields_factory_Release( IActivationFactory *iface ) { return 1; }
+
+static const struct IActivationFactoryVtbl logging_fields_factory_vtbl =
+{
+    logging_fields_factory_QueryInterface,
+    logging_fields_factory_AddRef,
+    logging_fields_factory_Release,
+    (void *)logging_fields_GetIids,
+    (void *)logging_fields_GetRuntimeClassName,
+    (void *)logging_fields_GetTrustLevel,
+    logging_fields_factory_ActivateInstance,
+};
+static struct { IActivationFactory iface; } logging_fields_factory_obj = { {&logging_fields_factory_vtbl} };
+static IActivationFactory *logging_fields_activation_factory = &logging_fields_factory_obj.iface;
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer(classid, NULL);
@@ -2139,6 +2237,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_AddRef((*factory = data_writer_activation_factory));
     if (!wcscmp(buffer, L"Windows.Foundation.Uri"))
         IActivationFactory_AddRef((*factory = uri_activation_factory));
+    if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.LoggingFields"))
+        IActivationFactory_AddRef((*factory = logging_fields_activation_factory));
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

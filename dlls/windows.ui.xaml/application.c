@@ -92,7 +92,7 @@ static HRESULT WINAPI app_view_activated_Invoke(
         if (SUCCEEDED(hr_uwp) && overrides)
         {
             void **ov_vtbl = *(void ***)overrides;
-            HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[8];
+            HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
             TRACE( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
                    on_launched, overrides, args );
             if (on_launched) on_launched( overrides, args );
@@ -625,18 +625,16 @@ static HRESULT resources_propget( struct application *impl, REFIID iid, void **o
         return hr;
     }
 
-    hr = RoGetActivationFactory( hstr, &IID_IInspectable, (void **)&face );
+    hr = RoActivateInstance( hstr, (IInspectable **)&face );
     if (FAILED( hr ))
     {
-        WARN( "PropertySet class create failed, hr %#lx.\n", hr );
+        WARN( "PropertySet instance create failed, hr %#lx.\n", hr );
         *out = NULL;
         return hr;
     }
 
-    if (!impl->resources) impl->resources = face;
-    hr = IInspectable_QueryInterface( face, iid, out );
-    IInspectable_Release( face );
-    return SUCCEEDED( hr ) ? S_OK : E_NOINTERFACE;
+    impl->resources = face;
+    return IInspectable_QueryInterface( face, iid, out );
 }
 
 struct application_extended_vtbl
@@ -1072,16 +1070,15 @@ static const void *application_overrides_uwp_vtbl[] =
     application_GetIids,                    /* 3: GetIids */
     application_GetRuntimeClassName,        /* 4: GetRuntimeClassName */
     application_GetTrustLevel,              /* 5: GetTrustLevel */
-    application_stub_ok,                    /* 6: OnInitialize */
-    application_stub_ok,                    /* 7: OnActivated */
-    application_stub_ok,                    /* 8: OnLaunched */
-    application_stub_ok,                    /* 9: OnFileActivated */
-    application_stub_ok,                    /* 10: OnSearchActivated */
-    application_stub_ok,                    /* 11: OnShareTargetActivated */
-    application_stub_ok,                    /* 12: OnFileOpenPickerActivated */
-    application_stub_ok,                    /* 13: OnFileSavePickerActivated */
-    application_stub_ok,                    /* 14: OnCachedFileUpdaterActivated */
-    application_stub_ok,                    /* 15: OnWindowCreated */
+    application_stub_ok,                    /* 6: OnActivated */
+    application_stub_ok,                    /* 7: OnLaunched */
+    application_stub_ok,                    /* 8: OnFileActivated */
+    application_stub_ok,                    /* 9: OnSearchActivated */
+    application_stub_ok,                    /* 10: OnShareTargetActivated */
+    application_stub_ok,                    /* 11: OnFileOpenPickerActivated */
+    application_stub_ok,                    /* 12: OnFileSavePickerActivated */
+    application_stub_ok,                    /* 13: OnCachedFileUpdaterActivated */
+    application_stub_ok,                    /* 14: OnWindowCreated */
     application_stub_ok, application_stub_ok, application_stub_ok, application_stub_ok,
     application_stub_ok, application_stub_ok, application_stub_ok, application_stub_ok,
     application_stub_ok, application_stub_ok, application_stub_ok, application_stub_ok,

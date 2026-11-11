@@ -43,6 +43,14 @@ static const GUID IID_IMapView_String_Object =
 { 0x7c054694, 0x4acd, 0x3716, { 0xa1, 0x7a, 0xd5, 0x83, 0xc5, 0xb3, 0xde, 0x8b } };
 static const GUID IID_IObservableMap_String_Object =
 { 0x65df2bf5, 0xbf39, 0x41b5, { 0xae, 0xbc, 0x5a, 0x9d, 0x86, 0x5e, 0x47, 0x2b } };
+static const GUID IID_IMap_Object_Object =
+{ 0xf5f69427, 0x55ed, 0x5512, { 0x84, 0x29, 0xd4, 0xf6, 0x62, 0x6d, 0xfc, 0xdd } };
+static const GUID IID_IMapView_Object_Object =
+{ 0x59e7ae0c, 0xc29d, 0x5ad6, { 0xbe, 0xf5, 0xde, 0xdb, 0x52, 0xa1, 0x98, 0xe1 } };
+static const GUID IID_IIterable_KeyValuePair_Object_Object =
+{ 0x33ac68f0, 0x1084, 0x529a, { 0x8a, 0x17, 0x4e, 0x7c, 0x8a, 0xdb, 0x7a, 0x0c } };
+static const GUID IID_IResourceDictionary =
+{ 0xc1ea4f24, 0xd6de, 0x4191, { 0x8e, 0x3a, 0xf4, 0x86, 0x01, 0xf7, 0x48, 0x9c } };
 
 /* CoreCLR's ComWrappers shader reads the IInspectable::GetIids output of a
  * WinRT object as an array of ComInterfaceEntry pairs, not a bare IID array:
@@ -333,6 +341,10 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
         IsEqualGUID( iid, &IID_IMap_String_Object ) ||
         IsEqualGUID( iid, &IID_IMapView_String_Object ) ||
         IsEqualGUID( iid, &IID_IObservableMap_String_Object ) ||
+        IsEqualGUID( iid, &IID_IMap_Object_Object ) ||
+        IsEqualGUID( iid, &IID_IMapView_Object_Object ) ||
+        IsEqualGUID( iid, &IID_IIterable_KeyValuePair_Object_Object ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionary ) ||
         IsEqualGUID( iid, &IID_INotifyCollectionChanged_g ) ||
         IsEqualGUID( iid, &IID_INotifyPropertyChanged_g ))
     {

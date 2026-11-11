@@ -321,11 +321,24 @@ static HRESULT WINAPI core_application_view_get_CoreWindow( ICoreApplicationView
 }
 static const GUID IID_ILaunchActivatedEventArgs = {0xfbc93e26, 0xa14a, 0x4b4f, {0x82, 0xb0, 0x33, 0xbe, 0xd9, 0x20, 0xaf, 0x52}};
 static const GUID IID_ILaunchActivatedEventArgs_WinUI = {0xd505cea9, 0x1bcb, 0x5b29, {0xa8, 0xbe, 0x94, 0x4e, 0x00, 0xf0, 0x6f, 0x78}};
+static const GUID IID_IActivatedEventArgsWithUser = {0x1cf09b9e, 0x9962, 0x4936, {0x80, 0xff, 0xaf, 0xc8, 0xe8, 0xae, 0x5c, 0x8c}};
+static const GUID IID_ILaunchActivatedEventArgs2 = {0x0fd37ebc, 0x9dc9, 0x46b5, {0x9a, 0xce, 0xbd, 0x95, 0xd4, 0x56, 0x53, 0x45}};
+static const GUID IID_IPrelaunchActivatedEventArgs = {0x0c44717b, 0x19f7, 0x48d6, {0xb0, 0x46, 0xcf, 0x22, 0x82, 0x6e, 0xaa, 0x74}};
+static const GUID IID_IApplicationViewActivatedEventArgs = {0x930cef4b, 0xb829, 0x40fc, {0x88, 0xf4, 0x85, 0x13, 0xe8, 0xa6, 0x47, 0x38}};
+static const GUID IID_IViewSwitcherProvider = {0x33f288a6, 0x5c2c, 0x4d27, {0xba, 0xc7, 0x75, 0x36, 0x08, 0x8f, 0x12, 0x19}};
+static const GUID IID_IUserStandIn = {0xdf9a26c6, 0xe746, 0x4bcd, {0xb5, 0xd4, 0x12, 0x01, 0x03, 0xc4, 0x20, 0x9b}};
+static const GUID IID_ISplashScreen = {0xca4d975c, 0xd4d6, 0x43f0, {0x97, 0xc0, 0x08, 0x33, 0xc6, 0x39, 0x1c, 0x24}};
 
 struct activated_event_args
 {
     __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs IActivatedEventArgs_iface;
     const void *ILaunchActivatedEventArgs_vtbl;
+    const void *ILaunchActivatedEventArgs2_vtbl;
+    const void *IPrelaunchActivatedEventArgs_vtbl;
+    const void *IActivatedEventArgsWithUser_vtbl;
+    const void *IApplicationViewActivatedEventArgs_vtbl;
+    const void *IViewSwitcherProvider_vtbl;
+    void *splash;
     LONG ref;
     __x_ABI_CWindows_CApplicationModel_CActivation_CActivationKind kind;
 };
@@ -339,6 +352,34 @@ static inline struct activated_event_args *impl_from_ILaunchActivatedEventArgs( 
 {
     return CONTAINING_RECORD( iface, struct activated_event_args, ILaunchActivatedEventArgs_vtbl );
 }
+
+static inline struct activated_event_args *impl_from_ILaunchActivatedEventArgs2( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct activated_event_args, ILaunchActivatedEventArgs2_vtbl );
+}
+
+static inline struct activated_event_args *impl_from_IPrelaunchActivatedEventArgs( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct activated_event_args, IPrelaunchActivatedEventArgs_vtbl );
+}
+
+static inline struct activated_event_args *impl_from_IActivatedEventArgsWithUser( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct activated_event_args, IActivatedEventArgsWithUser_vtbl );
+}
+
+static inline struct activated_event_args *impl_from_IApplicationViewActivatedEventArgs( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct activated_event_args, IApplicationViewActivatedEventArgs_vtbl );
+}
+
+static inline struct activated_event_args *impl_from_IViewSwitcherProvider( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct activated_event_args, IViewSwitcherProvider_vtbl );
+}
+
+static ULONG WINAPI splash_AddRef( void *iface );
+static ULONG WINAPI splash_Release( void *iface );
 
 static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, REFIID iid, void **out )
 {
@@ -359,6 +400,45 @@ static HRESULT WINAPI activated_event_args_QueryInterface( __x_ABI_CWindows_CApp
         *out = &impl->ILaunchActivatedEventArgs_vtbl;
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IActivatedEventArgsWithUser ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IActivatedEventArgsWithUser_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IPrelaunchActivatedEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IPrelaunchActivatedEventArgs_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ILaunchActivatedEventArgs2 ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ILaunchActivatedEventArgs2_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IApplicationViewActivatedEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IApplicationViewActivatedEventArgs_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IViewSwitcherProvider ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IViewSwitcherProvider_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ISplashScreen ))
+    {
+        if (impl->splash)
+        {
+            splash_AddRef( impl->splash );
+            *out = impl->splash;
+            return S_OK;
+        }
+    }
     ERR( "activated_event_args: %s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -372,7 +452,11 @@ static ULONG WINAPI activated_event_args_Release( __x_ABI_CWindows_CApplicationM
 {
     struct activated_event_args *impl = impl_from_IActivatedEventArgs( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        if (impl->splash) splash_Release( impl->splash );
+        free( impl );
+    }
     return ref;
 }
 static HRESULT WINAPI activated_event_args_GetIids( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface, ULONG *count, IID **iids )
@@ -402,11 +486,143 @@ static HRESULT WINAPI activated_event_args_get_PreviousExecutionState( __x_ABI_C
     *value = 0; /* NotRunning */
     return S_OK;
 }
+struct splash_handler_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( void *, REFIID, void ** );
+    ULONG (WINAPI *AddRef)( void * );
+    ULONG (WINAPI *Release)( void * );
+    HRESULT (WINAPI *Invoke)( void *, void *sender, void *args );
+};
+struct splash_handler { const struct splash_handler_vtbl *lpVtbl; };
+
+struct splash_screen
+{
+    const void **vtbl;
+    LONG refcount;
+    struct splash_handler *dismissed;
+    LONG fired;
+};
+
+static ULONG WINAPI splash_AddRef( void *iface );
+static ULONG WINAPI splash_Release( void *iface );
+
+static HRESULT WINAPI splash_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct splash_screen *splash = CONTAINING_RECORD( iface, struct splash_screen, vtbl );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ISplashScreen ))
+    {
+        *out = &splash->vtbl;
+        InterlockedIncrement( &splash->refcount );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI splash_AddRef( void *iface )
+{
+    struct splash_screen *splash = CONTAINING_RECORD( iface, struct splash_screen, vtbl );
+    return InterlockedIncrement( &splash->refcount );
+}
+static ULONG WINAPI splash_Release( void *iface )
+{
+    struct splash_screen *splash = CONTAINING_RECORD( iface, struct splash_screen, vtbl );
+    ULONG ref = InterlockedDecrement( &splash->refcount );
+    if (!ref)
+    {
+        if (splash->dismissed) splash->dismissed->lpVtbl->Release( splash->dismissed );
+        free( splash );
+    }
+    return ref;
+}
+static HRESULT WINAPI splash_GetIids( void *iface, ULONG *count, IID **iids ) { *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI splash_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.ApplicationModel.Activation.SplashScreen", 47, name );
+}
+static HRESULT WINAPI splash_GetTrustLevel( void *iface, TrustLevel *level ) { *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI splash_get_ImageLocation( void *iface, Rect *rect )
+{
+    if (!rect) return E_POINTER;
+    rect->X = rect->Y = 0.0f;
+    rect->Width = 1024.0f;
+    rect->Height = 768.0f;
+    return S_OK;
+}
+static DWORD WINAPI splash_dismiss_thread( void *arg )
+{
+    struct splash_screen *splash = arg;
+    struct splash_handler *handler;
+
+    Sleep( 100 );
+    handler = splash->dismissed;
+    if (handler && !InterlockedExchange( &splash->fired, 1 ))
+    {
+        HRESULT hr;
+        TRACE( "raising SplashScreen.Dismissed\n" );
+        hr = handler->lpVtbl->Invoke( handler, &splash->vtbl, NULL );
+        if (FAILED( hr )) WARN( "Dismissed handler returned %#lx\n", hr );
+    }
+    splash_Release( &splash->vtbl );
+    return 0;
+}
+static HRESULT WINAPI splash_add_Dismissed( void *iface, void *handler, UINT64 *token )
+{
+    struct splash_screen *splash = CONTAINING_RECORD( iface, struct splash_screen, vtbl );
+    HANDLE thread;
+
+    TRACE( "splash %p, handler %p\n", splash, handler );
+
+    if (splash->dismissed) splash->dismissed->lpVtbl->Release( splash->dismissed );
+    if ((splash->dismissed = handler)) splash->dismissed->lpVtbl->AddRef( splash->dismissed );
+
+    if (splash->dismissed)
+    {
+        InterlockedIncrement( &splash->refcount );
+        if ((thread = CreateThread( NULL, 0, splash_dismiss_thread, splash, 0, NULL )))
+            CloseHandle( thread );
+        else
+            splash_Release( &splash->vtbl );
+    }
+    if (token) *token = 1;
+    return S_OK;
+}
+static HRESULT WINAPI splash_remove_Dismissed( void *iface, UINT64 token )
+{
+    struct splash_screen *splash = CONTAINING_RECORD( iface, struct splash_screen, vtbl );
+    if (splash->dismissed) splash->dismissed->lpVtbl->Release( splash->dismissed );
+    splash->dismissed = NULL;
+    return S_OK;
+}
+static const void *splash_vtbl[] =
+{
+    splash_QueryInterface, splash_AddRef, splash_Release,
+    splash_GetIids, splash_GetRuntimeClassName, splash_GetTrustLevel,
+    splash_get_ImageLocation, splash_add_Dismissed, splash_remove_Dismissed,
+};
+static void *create_splash_screen( void )
+{
+    struct splash_screen *splash;
+    if (!(splash = calloc( 1, sizeof(*splash) ))) return NULL;
+    splash->vtbl = splash_vtbl;
+    splash->refcount = 1;
+    return &splash->vtbl;
+}
+
 static HRESULT WINAPI activated_event_args_get_SplashScreen( __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *iface,
         __x_ABI_CWindows_CApplicationModel_CActivation_CISplashScreen **value )
 {
+    struct activated_event_args *impl = impl_from_IActivatedEventArgs( iface );
     if (!value) return E_POINTER;
-    *value = NULL;
+    if (impl->splash)
+    {
+        splash_AddRef( impl->splash );
+        *value = (__x_ABI_CWindows_CApplicationModel_CActivation_CISplashScreen *)impl->splash;
+    }
+    else
+        *value = NULL;
     return S_OK;
 }
 
@@ -448,6 +664,182 @@ static const void *launch_activated_event_args_vtbl_array[] =
     launch_activated_event_args_get_TileId,
 };
 
+static HRESULT WINAPI user_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IUserStandIn ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI user_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI user_Release( void *iface ) { return 1; }
+static HRESULT WINAPI user_GetIids( void *iface, ULONG *count, IID **iids ) { *count = 0; *iids = NULL; return S_OK; }
+static HRESULT WINAPI user_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.System.User", 19, name );
+}
+static HRESULT WINAPI user_GetTrustLevel( void *iface, TrustLevel *level ) { *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI user_get_NonRoamableId( void *iface, HSTRING *value )
+{
+    return WindowsCreateString( L"wine-uwp-local-user", 19, value );
+}
+static HRESULT WINAPI user_get_AuthenticationStatus( void *iface, INT32 *value ) { *value = 1; return S_OK; }
+static HRESULT WINAPI user_get_Type( void *iface, INT32 *value ) { *value = 0; return S_OK; }
+static HRESULT WINAPI user_stub( void *iface ) { return S_OK; }
+
+static const void *user_vtbl_array[] =
+{
+    user_QueryInterface, user_AddRef, user_Release,
+    user_GetIids, user_GetRuntimeClassName, user_GetTrustLevel,
+    user_get_NonRoamableId, user_get_AuthenticationStatus, user_get_Type,
+    user_stub, user_stub, user_stub,
+};
+static const void *user_instance = user_vtbl_array;
+
+static HRESULT WINAPI withuser_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct activated_event_args *impl = impl_from_IActivatedEventArgsWithUser( iface );
+    return activated_event_args_QueryInterface( &impl->IActivatedEventArgs_iface, iid, out );
+}
+static ULONG WINAPI withuser_AddRef( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IActivatedEventArgsWithUser( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI withuser_Release( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IActivatedEventArgsWithUser( iface );
+    return activated_event_args_Release( &impl->IActivatedEventArgs_iface );
+}
+static HRESULT WINAPI withuser_get_User( void *iface, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = (void *)&user_instance;
+    return S_OK;
+}
+static const void *withuser_vtbl_array[] =
+{
+    withuser_QueryInterface, withuser_AddRef, withuser_Release,
+    activated_event_args_GetIids, activated_event_args_GetRuntimeClassName, activated_event_args_GetTrustLevel,
+    withuser_get_User,
+};
+
+static HRESULT WINAPI prelaunch_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct activated_event_args *impl = impl_from_IPrelaunchActivatedEventArgs( iface );
+    return activated_event_args_QueryInterface( &impl->IActivatedEventArgs_iface, iid, out );
+}
+static ULONG WINAPI prelaunch_AddRef( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IPrelaunchActivatedEventArgs( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI prelaunch_Release( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IPrelaunchActivatedEventArgs( iface );
+    return activated_event_args_Release( &impl->IActivatedEventArgs_iface );
+}
+static HRESULT WINAPI prelaunch_get_PrelaunchActivated( void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static const void *prelaunch_vtbl_array[] =
+{
+    prelaunch_QueryInterface, prelaunch_AddRef, prelaunch_Release,
+    activated_event_args_GetIids, activated_event_args_GetRuntimeClassName, activated_event_args_GetTrustLevel,
+    prelaunch_get_PrelaunchActivated,
+};
+
+static HRESULT WINAPI launch2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct activated_event_args *impl = impl_from_ILaunchActivatedEventArgs2( iface );
+    return activated_event_args_QueryInterface( &impl->IActivatedEventArgs_iface, iid, out );
+}
+static ULONG WINAPI launch2_AddRef( void *iface )
+{
+    struct activated_event_args *impl = impl_from_ILaunchActivatedEventArgs2( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI launch2_Release( void *iface )
+{
+    struct activated_event_args *impl = impl_from_ILaunchActivatedEventArgs2( iface );
+    return activated_event_args_Release( &impl->IActivatedEventArgs_iface );
+}
+static HRESULT WINAPI launch2_get_TileActivatedInfo( void *iface, void **info )
+{
+    if (!info) return E_POINTER;
+    *info = NULL;
+    return S_OK;
+}
+static const void *launch2_vtbl_array[] =
+{
+    launch2_QueryInterface, launch2_AddRef, launch2_Release,
+    activated_event_args_GetIids, activated_event_args_GetRuntimeClassName, activated_event_args_GetTrustLevel,
+    launch2_get_TileActivatedInfo,
+};
+
+static HRESULT WINAPI appview_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct activated_event_args *impl = impl_from_IApplicationViewActivatedEventArgs( iface );
+    return activated_event_args_QueryInterface( &impl->IActivatedEventArgs_iface, iid, out );
+}
+static ULONG WINAPI appview_AddRef( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IApplicationViewActivatedEventArgs( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI appview_Release( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IApplicationViewActivatedEventArgs( iface );
+    return activated_event_args_Release( &impl->IActivatedEventArgs_iface );
+}
+static HRESULT WINAPI appview_get_CurrentlyShownApplicationViewId( void *iface, INT32 *id )
+{
+    if (!id) return E_POINTER;
+    *id = 0;
+    return S_OK;
+}
+static const void *appview_vtbl_array[] =
+{
+    appview_QueryInterface, appview_AddRef, appview_Release,
+    activated_event_args_GetIids, activated_event_args_GetRuntimeClassName, activated_event_args_GetTrustLevel,
+    appview_get_CurrentlyShownApplicationViewId,
+};
+
+static HRESULT WINAPI viewswitch_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct activated_event_args *impl = impl_from_IViewSwitcherProvider( iface );
+    return activated_event_args_QueryInterface( &impl->IActivatedEventArgs_iface, iid, out );
+}
+static ULONG WINAPI viewswitch_AddRef( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IViewSwitcherProvider( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI viewswitch_Release( void *iface )
+{
+    struct activated_event_args *impl = impl_from_IViewSwitcherProvider( iface );
+    return activated_event_args_Release( &impl->IActivatedEventArgs_iface );
+}
+static HRESULT WINAPI viewswitch_get_ViewSwitcher( void *iface, void **switcher )
+{
+    if (!switcher) return E_POINTER;
+    *switcher = NULL;
+    return S_OK;
+}
+static const void *viewswitch_vtbl_array[] =
+{
+    viewswitch_QueryInterface, viewswitch_AddRef, viewswitch_Release,
+    activated_event_args_GetIids, activated_event_args_GetRuntimeClassName, activated_event_args_GetTrustLevel,
+    viewswitch_get_ViewSwitcher,
+};
+
 static const struct __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgsVtbl activated_event_args_vtbl =
 {
     activated_event_args_QueryInterface,
@@ -467,6 +859,12 @@ static __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *acti
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->IActivatedEventArgs_iface.lpVtbl = &activated_event_args_vtbl;
     impl->ILaunchActivatedEventArgs_vtbl = launch_activated_event_args_vtbl_array;
+    impl->ILaunchActivatedEventArgs2_vtbl = launch2_vtbl_array;
+    impl->IPrelaunchActivatedEventArgs_vtbl = prelaunch_vtbl_array;
+    impl->IActivatedEventArgsWithUser_vtbl = withuser_vtbl_array;
+    impl->IApplicationViewActivatedEventArgs_vtbl = appview_vtbl_array;
+    impl->IViewSwitcherProvider_vtbl = viewswitch_vtbl_array;
+    impl->splash = create_splash_screen();
     impl->ref = 1;
     impl->kind = kind;
     return &impl->IActivatedEventArgs_iface;
