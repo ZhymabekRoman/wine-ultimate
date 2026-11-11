@@ -53,11 +53,14 @@
 
 extern IActivationFactory *color_helper_factory;
 extern IActivationFactory *size_helper_factory;
+extern IActivationFactory *frame_factory;
+extern IActivationFactory *page_factory;
 extern IActivationFactory *swapchain_panel_factory;
 extern IActivationFactory *application_factory;
 extern IActivationFactory *window_factory;
 extern IActivationFactory *property_metadata_factory;
 extern IActivationFactory *dependency_property_factory;
+HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

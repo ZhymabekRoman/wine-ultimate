@@ -2949,6 +2949,83 @@ winappsdk_classes[] =
       (IActivationFactory *)&store_context_custom_factory },
 };
 
+/* Windows.ApplicationModel.UserActivities.UserActivityRequestManager */
+static HRESULT WINAPI user_activity_manager_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IReferenceTracker =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI user_activity_manager_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI user_activity_manager_Release( void *iface ) { return 1; }
+static HRESULT WINAPI user_activity_manager_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; return S_OK; }
+static HRESULT WINAPI user_activity_manager_GetRuntimeClassName( void *iface, HSTRING *n )
+{ return WindowsCreateString( L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager", 65, n ); }
+static HRESULT WINAPI user_activity_manager_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI user_activity_manager_add_Requested( void *iface, void *h, EventRegistrationToken *t )
+{ if (t) t->value = 1; return S_OK; }
+static HRESULT WINAPI user_activity_manager_remove_Requested( void *iface, EventRegistrationToken t ) { return S_OK; }
+
+static const void *user_activity_manager_vtbl[] =
+{
+    user_activity_manager_QueryInterface,
+    user_activity_manager_AddRef,
+    user_activity_manager_Release,
+    user_activity_manager_GetIids,
+    user_activity_manager_GetRuntimeClassName,
+    user_activity_manager_GetTrustLevel,
+    user_activity_manager_add_Requested,    /* slot 6 */
+    user_activity_manager_remove_Requested, /* slot 7 */
+    user_activity_manager_add_Requested,
+    user_activity_manager_remove_Requested,
+};
+static struct { const void **vtbl; } user_activity_manager_obj = { user_activity_manager_vtbl };
+
+static HRESULT WINAPI user_activity_statics_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IReferenceTracker =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI user_activity_statics_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI user_activity_statics_Release( void *iface ) { return 1; }
+static HRESULT WINAPI user_activity_statics_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; return S_OK; }
+static HRESULT WINAPI user_activity_statics_GetRuntimeClassName( void *iface, HSTRING *n )
+{ return WindowsCreateString( L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager", 65, n ); }
+static HRESULT WINAPI user_activity_statics_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI user_activity_statics_GetForCurrentView( void *iface, void **out )
+{
+    TRACE( "iface %p, out %p\n", iface, out );
+    if (!out) return E_POINTER;
+    *out = &user_activity_manager_obj;
+    return S_OK;
+}
+
+static const void *user_activity_statics_vtbl[] =
+{
+    user_activity_statics_QueryInterface,
+    user_activity_statics_AddRef,
+    user_activity_statics_Release,
+    user_activity_statics_GetIids,
+    user_activity_statics_GetRuntimeClassName,
+    user_activity_statics_GetTrustLevel,
+    user_activity_statics_GetForCurrentView, /* slot 6 */
+};
+static struct { const void **vtbl; } user_activity_statics_obj = { user_activity_statics_vtbl };
+static IActivationFactory *user_activity_factory = (IActivationFactory *)&user_activity_statics_obj;
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
@@ -2965,6 +3042,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( design_mode_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.StartupTask" ))
         *factory = (IActivationFactory *)&startup_task_factory;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.UserActivities.UserActivityRequestManager" ))
+        *factory = user_activity_factory;
     else if (!wcsncmp( buffer, L"Windows.ApplicationModel.Calls.", 31 ))
     {
         HMODULE mod = LoadLibraryW( L"windows.applicationmodel.calls.dll" );

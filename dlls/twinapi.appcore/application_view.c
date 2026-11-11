@@ -27,6 +27,8 @@ static const GUID IID_IApplicationView3_alt =
     {0x907f6222, 0xdf3d, 0x4794, {0x98, 0x76, 0x1f, 0x42, 0xe5, 0x87, 0xb2, 0xe1}};
 static const GUID IID_IApplicationViewTitleBar_alt =
     {0x00924509, 0x5480, 0x4cf8, {0xac, 0x71, 0x71, 0x22, 0xdd, 0x51, 0x8c, 0x77}};
+static const GUID IID_IApplicationViewStatics2_alt =
+    {0xc446fb5d, 0x4793, 0x4896, {0xa8, 0xe2, 0xbe, 0x57, 0xa8, 0xbb, 0x0f, 0x50}};
 
 struct application_view_title_bar
 {
@@ -637,6 +639,7 @@ struct factory
     IActivationFactory IActivationFactory_iface;
     IApplicationViewStatics IApplicationViewStatics_iface;
     IApplicationViewStatics2 IApplicationViewStatics2_iface;
+    const void *IApplicationViewInteropStatics_iface;
     LONG ref;
 };
 
@@ -671,6 +674,12 @@ static HRESULT WINAPI activation_factory_QueryInterface(IActivationFactory *ifac
     {
         IApplicationViewStatics2_AddRef(&impl->IApplicationViewStatics2_iface);
         *out = &impl->IApplicationViewStatics2_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID(iid, &IID_IApplicationViewStatics2_alt))
+    {
+        *out = (void *)&impl->IApplicationViewInteropStatics_iface;
+        IActivationFactory_AddRef(&impl->IActivationFactory_iface);
         return S_OK;
     }
 
@@ -810,11 +819,60 @@ static const struct IApplicationViewStatics2Vtbl statics2_vtbl =
     statics2_put_TerminateAppOnFinalViewClose
 };
 
+static HRESULT WINAPI interop_statics_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct factory *impl = CONTAINING_RECORD( iface, struct factory, IApplicationViewInteropStatics_iface );
+    return activation_factory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI interop_statics_AddRef( void *iface )
+{
+    struct factory *impl = CONTAINING_RECORD( iface, struct factory, IApplicationViewInteropStatics_iface );
+    return activation_factory_AddRef( &impl->IActivationFactory_iface );
+}
+static ULONG WINAPI interop_statics_Release( void *iface )
+{
+    struct factory *impl = CONTAINING_RECORD( iface, struct factory, IApplicationViewInteropStatics_iface );
+    return activation_factory_Release( &impl->IActivationFactory_iface );
+}
+static HRESULT WINAPI interop_statics_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI interop_statics_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.ViewManagement.ApplicationView", 41, name );
+}
+static HRESULT WINAPI interop_statics_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI interop_statics_GetApplicationViewIdForWindow( void *iface, void *window, INT32 *id )
+{
+    TRACE( "iface %p, window %p, id %p\n", iface, window, id );
+    if (!id) return E_POINTER;
+    *id = 1;
+    return S_OK;
+}
+static const void *interop_statics_vtbl[] =
+{
+    interop_statics_QueryInterface,
+    interop_statics_AddRef,
+    interop_statics_Release,
+    interop_statics_GetIids,
+    interop_statics_GetRuntimeClassName,
+    interop_statics_GetTrustLevel,
+    interop_statics_GetApplicationViewIdForWindow, /* slot 6 */
+};
+
 static struct factory factory =
 {
     {&activation_factory_vtbl},
     {&statics_vtbl},
     {&statics2_vtbl},
+    interop_statics_vtbl,
     1,
 };
 

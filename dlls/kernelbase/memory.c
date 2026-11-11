@@ -249,6 +249,18 @@ void WINAPI DECLSPEC_HOTPATCH GetSystemInfo( SYSTEM_INFO *si )
 
 
 /***********************************************************************
+ *          GetIntegratedDisplaySize   (kernelbase.@)
+ */
+HRESULT WINAPI DECLSPEC_HOTPATCH GetIntegratedDisplaySize( double *size_in_inches )
+{
+    TRACE( "size_in_inches %p\n", size_in_inches );
+    if (!size_in_inches) return E_POINTER;
+    *size_in_inches = 0.0;
+    return HRESULT_FROM_WIN32( ERROR_NOT_SUPPORTED );
+}
+
+
+/***********************************************************************
  *          GetSystemFileCacheSize   (kernelbase.@)
  */
 BOOL WINAPI DECLSPEC_HOTPATCH GetSystemFileCacheSize( SIZE_T *mincache, SIZE_T *maxcache, DWORD *flags )

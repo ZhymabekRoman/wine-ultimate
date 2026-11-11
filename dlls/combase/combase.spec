@@ -317,8 +317,8 @@
 @ stub RoResolveRestrictedErrorInfoReference
 @ stdcall RoRevokeActivationFactories(ptr)
 @ stdcall RoSetErrorReportingFlags(long)
-@ stub RoTransformError
-@ stub RoTransformErrorW
+@ stdcall RoTransformError(long long ptr)
+@ stdcall RoTransformErrorW(long long long ptr)
 @ stdcall RoUninitialize()
 @ stub RoUnregisterForApartmentShutdown
 @ stub SetCleanupFlag

@@ -1361,8 +1361,17 @@ static HRESULT WINAPI resource_loader_GetRuntimeClassName( void *iface, HSTRING 
 
 static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, HSTRING *value )
 {
+    const WCHAR *str = WindowsGetStringRawBuffer( resource, NULL );
     ERR( "TWINAPI: resource_loader_GetString resource %s\n", debugstr_hstring(resource) );
     if (!value) return E_POINTER;
+    if (str && !wcscmp( str, L"LocalizedFontFamilyOverride" ))
+        return WindowsCreateString( L"RESERVED_FOR_FONTLOC", 20, value );
+    if (str && !wcscmp( str, L"LocalizedFontWeightOverride" ))
+        return WindowsCreateString( L"normal", 6, value );
+    if (str && !wcscmp( str, L"LocalizedUICaptionFontSizeFactorOverride" ))
+        return WindowsCreateString( L"1.0", 3, value );
+    if (str && !wcscmp( str, L"LocalizedUITextFontSizeFactorOverride" ))
+        return WindowsCreateString( L"1.0", 3, value );
     return WindowsDuplicateString( resource, value );
 }
 

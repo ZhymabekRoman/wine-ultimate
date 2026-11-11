@@ -5,5 +5,6 @@ SOURCES = \
 	application.c \
 	classes.idl \
 	color_helper.c \
+	frame.c \
 	main.c \
 	swapchain_panel.c

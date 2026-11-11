@@ -87,26 +87,26 @@ static HRESULT WINAPI app_view_activated_Invoke(
         IInspectable *overrides = NULL;
         HRESULT hr_uwp, hr_winui;
 
-        hr_uwp = IInspectable_QueryInterface( current_application->outer, &IID_IApplicationOverrides_UWP, (void **)&overrides );
-        TRACE( "QI IApplicationOverrides_UWP returned hr %#lx, overrides %p\n", hr_uwp, overrides );
-        if (SUCCEEDED(hr_uwp) && overrides)
+        hr_winui = IInspectable_QueryInterface( current_application->outer, &IID_IApplicationOverrides_WinUI, (void **)&overrides );
+        TRACE( "QI IApplicationOverrides_WinUI returned hr %#lx, overrides %p\n", hr_winui, overrides );
+        if (SUCCEEDED(hr_winui) && overrides)
         {
             void **ov_vtbl = *(void ***)overrides;
-            HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
-            TRACE( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
+            HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[6];
+            TRACE( "invoking WinUI3 App OnLaunched %p (overrides %p, args %p)\n",
                    on_launched, overrides, args );
             if (on_launched) on_launched( overrides, args );
             IInspectable_Release( overrides );
         }
         else
         {
-            hr_winui = IInspectable_QueryInterface( current_application->outer, &IID_IApplicationOverrides_WinUI, (void **)&overrides );
-            TRACE( "QI IApplicationOverrides_WinUI returned hr %#lx, overrides %p\n", hr_winui, overrides );
-            if (SUCCEEDED(hr_winui) && overrides)
+            hr_uwp = IInspectable_QueryInterface( current_application->outer, &IID_IApplicationOverrides_UWP, (void **)&overrides );
+            TRACE( "QI IApplicationOverrides_UWP returned hr %#lx, overrides %p\n", hr_uwp, overrides );
+            if (SUCCEEDED(hr_uwp) && overrides)
             {
                 void **ov_vtbl = *(void ***)overrides;
-                HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[6];
-                TRACE( "invoking WinUI3 App OnLaunched %p (overrides %p, args %p)\n",
+                HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
+                TRACE( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
                        on_launched, overrides, args );
                 if (on_launched) on_launched( overrides, args );
                 IInspectable_Release( overrides );
@@ -1374,10 +1374,17 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
 {
     struct xaml_window *impl = (struct xaml_window *)iface;
     ICoreWindow *cw = NULL;
+    HWND hwnd = NULL;
     TRACE( "iface %p\n", iface );
     if (!impl->core_window) impl->core_window = get_current_core_window();
     cw = impl->core_window;
-    if (cw) ICoreWindow_Activate( cw );
+    if (cw)
+    {
+        ICoreWindow_Activate( cw );
+        hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+        if (!hwnd) hwnd = GetActiveWindow();
+        if (hwnd) InvalidateRect( hwnd, NULL, TRUE );
+    }
     return S_OK;
 }
 
@@ -1611,7 +1618,11 @@ static struct window_statics window_statics_obj;
 static HRESULT WINAPI window_statics_CreateInstance( void *iface, void *outer, void **inner, void **instance )
 {
     TRACE( "iface %p, outer %p, inner %p, instance %p\n", iface, outer, inner, instance );
-    if (inner && (void *)inner != (void *)outer) *inner = NULL;
+    if (inner && (void *)inner != (void *)outer)
+    {
+        *inner = (void *)&global_xaml_window.IInspectable_iface;
+        IInspectable_AddRef( (IInspectable *)*inner );
+    }
     if (instance && (void *)instance != (void *)outer)
     {
         *instance = (void *)&global_xaml_window.ms_IWindow_iface;
@@ -1706,16 +1717,11 @@ static HRESULT WINAPI window_statics_ActivateInstance( IActivationFactory *iface
 
 static HRESULT WINAPI window_statics_get_Current( void *iface, void *a2, void *a3 )
 {
-    TRACE( "iface %p, a2 %p, a3 %p.\n", iface, a2, a3 );
-    /* a2 is managed in-object/context; a3 is out-pointer on stack */
-    if (a3)
+    void **out = a2 ? (void **)a2 : (void **)a3;
+    TRACE( "iface %p, a2 %p, a3 %p -> out %p\n", iface, a2, a3, out );
+    if (out)
     {
-        *(void **)a3 = (void *)&global_xaml_window.IInspectable_iface;
-        IInspectable_AddRef( (IInspectable *)&global_xaml_window.IInspectable_iface );
-    }
-    else if (a2)
-    {
-        *(void **)a2 = (void *)&global_xaml_window.IInspectable_iface;
+        *out = (void *)&global_xaml_window.IInspectable_iface;
         IInspectable_AddRef( (IInspectable *)&global_xaml_window.IInspectable_iface );
     }
     return S_OK;
@@ -1885,29 +1891,19 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
     return application_factory_CreateInstance( &impl->IApplicationFactory_iface, NULL, NULL, (IApplication **)instance );
 }
 
-/* Composable factory vtable with Mcg / .NET Native layout extensions:
- * When Mcg projects Windows.UI.Xaml.Application's class activation interface
- * {06499997-f7b4-45fe-b763-7577d1d3cb4a}:
- *   slot 6: get_Current
- *   slot 7: Start(callback)
- *   slot 8: ActivateInstance / LoadComponent
- *   slot 9: CreateInstance(outer, inner, instance) */
-struct application_activation_factory_vtbl
+static HRESULT WINAPI application_LoadComponent( void *iface, void *component, void *resourceLocator )
 {
-    HRESULT (WINAPI *QueryInterface)(IActivationFactory *, REFIID, void **);            /* 0 */
-    ULONG (WINAPI *AddRef)(IActivationFactory *);                                       /* 1 */
-    ULONG (WINAPI *Release)(IActivationFactory *);                                      /* 2 */
-    HRESULT (WINAPI *GetIids)(IActivationFactory *, ULONG *, IID **);                   /* 3 */
-    HRESULT (WINAPI *GetRuntimeClassName)(IActivationFactory *, HSTRING *);             /* 4 */
-    HRESULT (WINAPI *GetTrustLevel)(IActivationFactory *, TrustLevel *);                /* 5 */
-    HRESULT (WINAPI *get_Current)(IApplicationStatics *, IApplication **);              /* 6 */
-    HRESULT (WINAPI *Start)(IApplicationStatics *, IApplicationInitializationCallback *);/* 7 */
-    HRESULT (WINAPI *ActivateInstance)(IActivationFactory *, IInspectable **);          /* 8 */
-    HRESULT (WINAPI *CreateInstance)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **); /* 9 */
-    HRESULT (WINAPI *CreateInstance2)(IApplicationFactory *, IInspectable *, IInspectable **, IApplication **); /* 10 */
-};
+    TRACE( "iface %p, component %p, resourceLocator %p\n", iface, component, resourceLocator );
+    return S_OK;
+}
 
-static const struct application_activation_factory_vtbl factory_vtbl =
+static HRESULT WINAPI application_LoadComponentWithLocation( void *iface, void *component, void *resourceLocator, int location )
+{
+    TRACE( "iface %p, component %p, resourceLocator %p, location %d\n", iface, component, resourceLocator, location );
+    return S_OK;
+}
+
+static const void *factory_vtbl[] =
 {
     factory_QueryInterface,
     factory_AddRef,
@@ -1917,8 +1913,8 @@ static const struct application_activation_factory_vtbl factory_vtbl =
     factory_GetTrustLevel,
     application_statics_get_Current,
     application_statics_Start,
-    factory_ActivateInstance,
-    application_factory_CreateInstance,
+    application_LoadComponent,
+    application_LoadComponentWithLocation,
     application_factory_CreateInstance,
 };
 
@@ -2047,7 +2043,7 @@ static HRESULT WINAPI application_statics_get_Current( IApplicationStatics *ifac
     return hr;
 }
 
-static const struct IApplicationStaticsVtbl application_statics_vtbl =
+static const void *application_statics_vtbl[] =
 {
     statics_QueryInterface,
     statics_AddRef,
@@ -2055,8 +2051,10 @@ static const struct IApplicationStaticsVtbl application_statics_vtbl =
     statics_GetIids,
     statics_GetRuntimeClassName,
     statics_GetTrustLevel,
-    application_statics_Start,
     application_statics_get_Current,
+    application_statics_Start,
+    application_LoadComponent,
+    application_LoadComponentWithLocation,
 };
 
 /* IApplicationFactory implementation */
@@ -2261,7 +2259,7 @@ static const void *ms_application_statics_vtbl[] =
 static struct application_factory application_factory_obj =
 {
     {(const struct IActivationFactoryVtbl *)&factory_vtbl},
-    {&application_statics_vtbl},
+    {(const struct IApplicationStaticsVtbl *)application_statics_vtbl},
     {(const struct IApplicationStaticsVtbl *)ms_application_statics_vtbl},
     {(const struct IApplicationFactoryVtbl *)&application_factory_vtbl},
     {&view_source_vtbl},
@@ -2269,3 +2267,67 @@ static struct application_factory application_factory_obj =
 };
 
 IActivationFactory *application_factory = &application_factory_obj.IActivationFactory_iface;
+
+HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
+{
+    static const GUID IID_IXamlMetadataProvider =
+        { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
+    TypeName *type = (TypeName *)type_name_ptr;
+    void *provider = NULL;
+    void *xaml_type = NULL;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    if (current_application && current_application->outer)
+    {
+        hr = IInspectable_QueryInterface( current_application->outer,
+                                          &IID_IXamlMetadataProvider, &provider );
+        TRACE( "QI IXamlMetadataProvider on outer %p returned hr %#lx, provider %p\n",
+               current_application->outer, hr, provider );
+        if (SUCCEEDED(hr) && provider)
+        {
+            void **vtbl = *(void ***)provider;
+            /* Slot 6: GetXamlType(TypeName, IXamlType**) */
+            HRESULT (WINAPI *get_xaml_type)(void *, TypeName, void **) = (void *)vtbl[6];
+            /* Slot 7: GetXamlTypeByFullName(HSTRING, IXamlType**) */
+            HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)vtbl[7];
+
+            hr = E_FAIL;
+            if (get_by_name && type && type->Name)
+            {
+                hr = get_by_name( provider, type->Name, &xaml_type );
+                TRACE( "GetXamlTypeByFullName(%s) returned hr %#lx, xaml_type %p\n",
+                       debugstr_hstring( type->Name ), hr, xaml_type );
+            }
+            if (FAILED(hr) || !xaml_type)
+            {
+                if (get_xaml_type && type)
+                {
+                    hr = get_xaml_type( provider, *type, &xaml_type );
+                    TRACE( "GetXamlType returned hr %#lx, xaml_type %p\n", hr, xaml_type );
+                }
+            }
+            if (SUCCEEDED(hr) && xaml_type)
+            {
+                void **type_vtbl = *(void ***)xaml_type;
+                /* Slot 18: ActivateInstance(IInspectable**) */
+                HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[18];
+                TRACE( "calling IXamlType::ActivateInstance (%p)\n", activate );
+                if (activate)
+                {
+                    hr = activate( xaml_type, (void **)out );
+                    TRACE( "IXamlType::ActivateInstance returned hr %#lx, instance %p\n", hr, *out );
+                }
+                IInspectable_Release( (IInspectable *)xaml_type );
+            }
+            IInspectable_Release( (IInspectable *)provider );
+            if (SUCCEEDED(hr) && *out) return hr;
+        }
+    }
+
+    if (type && type->Name)
+        return RoActivateInstance( type->Name, out );
+    return E_FAIL;
+}

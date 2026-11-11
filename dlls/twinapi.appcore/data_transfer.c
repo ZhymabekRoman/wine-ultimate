@@ -278,6 +278,15 @@ static struct data_transfer_manager_statics data_transfer_manager_statics =
 IActivationFactory *data_transfer_manager_statics_factory = &data_transfer_manager_statics.IActivationFactory_iface;
 
 /* Clipboard statics */
+static HRESULT WINAPI clipboard_stub_bool( void *iface, void *a2, boolean *result )
+{
+    if (result) *result = FALSE;
+    else if (a2) *(boolean *)a2 = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI clipboard_stub_ok( void *iface, ... ) { return S_OK; }
+static HRESULT WINAPI clipboard_stub_zero( void *iface, void *out ) { if (out) *(void **)out = NULL; return S_OK; }
+
 static HRESULT WINAPI clipboard_statics_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
@@ -298,17 +307,34 @@ static HRESULT WINAPI dummy_factory_GetRuntimeClassName( IActivationFactory *ifa
 static HRESULT WINAPI dummy_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 static HRESULT WINAPI dummy_factory_ActivateInstance( IActivationFactory *iface, IInspectable **inst ) { if (inst) *inst = (IInspectable *)iface; return S_OK; }
 
-static const struct IActivationFactoryVtbl clipboard_statics_factory_vtbl =
+static const void *clipboard_statics_factory_vtbl[] =
 {
-    clipboard_statics_QueryInterface,
-    dummy_factory_AddRef,
-    dummy_factory_Release,
-    dummy_factory_GetIids,
-    dummy_factory_GetRuntimeClassName,
-    dummy_factory_GetTrustLevel,
-    dummy_factory_ActivateInstance,
+    clipboard_statics_QueryInterface,     /* 0: QI */
+    dummy_factory_AddRef,                 /* 1: AddRef */
+    dummy_factory_Release,                /* 2: Release */
+    dummy_factory_GetIids,                /* 3: GetIids */
+    dummy_factory_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
+    dummy_factory_GetTrustLevel,          /* 5: GetTrustLevel */
+    dummy_factory_ActivateInstance,       /* 6: ActivateInstance */
+    clipboard_stub_zero,                  /* 7: GetContent */
+    clipboard_stub_ok,                    /* 8: SetContent */
+    clipboard_stub_ok,                    /* 9: Flush */
+    clipboard_stub_ok,                    /* 10: Clear */
+    clipboard_stub_ok,                    /* 11: add_ContentChanged */
+    clipboard_stub_bool,                  /* 12: IsHistoryEnabled */
+    clipboard_stub_bool,                  /* 13: IsRoamingEnabled */
+    clipboard_stub_bool,                  /* 14: SetContentWithOptions */
+    clipboard_stub_ok,                    /* 15: add_HistoryChanged */
+    clipboard_stub_ok,                    /* 16: remove_HistoryChanged */
+    clipboard_stub_ok,                    /* 17: remove_ContentChanged */
+    clipboard_stub_zero,                  /* 18: GetHistoryItemsAsync */
+    clipboard_stub_bool,                  /* 19: ClearHistory */
+    clipboard_stub_bool,                  /* 20: DeleteItemFromHistory */
+    clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero,
+    clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero,
+    clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero,
 };
-static struct { const struct IActivationFactoryVtbl *vtbl; } dummy_clipboard_statics_obj = { &clipboard_statics_factory_vtbl };
+static struct { const void **vtbl; } dummy_clipboard_statics_obj = { clipboard_statics_factory_vtbl };
 IActivationFactory *clipboard_statics_factory = (IActivationFactory *)&dummy_clipboard_statics_obj;
 
 /* DataPackage factory */

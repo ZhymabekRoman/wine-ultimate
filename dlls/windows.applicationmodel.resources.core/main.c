@@ -776,7 +776,7 @@ static BOOL is_store_app(void)
 {
     WCHAR path[MAX_PATH];
     GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
-    return (wcsstr( path, L"WinStore" ) != NULL);
+    return (wcsstr( path, L"WinStore" ) != NULL || wcsstr( path, L"Calculator" ) != NULL);
 }
 
 static inline HRESULT lang_ref_of( HSTRING item, HSTRING *out )
@@ -1456,8 +1456,18 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
      * runs against a NULL m_baseIUnknown (no-op) -> InvalidCast -> failfast.
      * Seed the cache by answering the enumerable contract the GetIids list
      * already publishes. */
+    static const GUID IID_IMap_String_String_g =
+        { 0xf6d1f700, 0x49c2, 0x52ae, { 0x81, 0x54, 0x82, 0x6f, 0x99, 0x08, 0x77, 0x3c } };
+    static const GUID IID_IMapView_String_String_g =
+        { 0x1e036276, 0x2f60, 0x55f6, { 0xb7, 0xf3, 0xf8, 0x60, 0x79, 0xe6, 0x90, 0x0b } };
+    static const GUID IID_IIterable_KVP_String_String_g =
+        { 0xe9bdaaf0, 0xcbf6, 0x5c72, { 0xbe, 0x90, 0x29, 0xcb, 0xf3, 0xa1, 0x31, 0x9b } };
+    static const GUID IID_IObservableMap_String_String_g =
+        { 0xac7f26f2, 0xfeb7, 0x5b2a, { 0x8a, 0xc4, 0x34, 0x5b, 0xc6, 0x2c, 0xae, 0xde } };
+
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_String_g ) ||
         param_iid_eq( iid, 3, ELEM_MAPVIEW L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_mv;
@@ -1470,41 +1480,22 @@ static HRESULT WINAPI mv_QueryInterface( void *iface, REFIID iid, void **out )
      * made that call mv_Get (the Lookup<->First slot collision), and the
      * IDictionary adapter's GetView collided with Split the same way.  Each
      * IID now answers a vtable of its exact shape. */
-    if (param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
+    if (IsEqualGUID( iid, &IID_IIterable_KVP_String_String_g ) ||
+        param_iid_eq( iid, 4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_iter;
         incr( &impl->ref );
         return S_OK;
     }
-    if (param_iid_eq( iid, 3, ELEM_MAP L"`2", ELEM_STRING, ELEM_STRING ))
+    if (IsEqualGUID( iid, &IID_IMap_String_String_g ) ||
+        param_iid_eq( iid, 3, ELEM_MAP L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_map;
         incr( &impl->ref );
         return S_OK;
     }
-    /* .NET Native's IDictionary<string,string> adapter QIs the map it gets
-     * from ResourceContext::QualifierValues for the
-     * IObservableMap`2<System.String,System.String> pinterface IID: the
-     * adapter subscribes to MapChanged to keep the managed dictionary coherent.
-     * E_NOINTERFACE raises the projection's COMException, and that exception's
-     * SR message resource
-     * "Windows.Foundation.Collections.MapChangedEventHandler`2[System.String,System.String]"
-     * is not in the PRI, so loading the message FailFasts c0000602 (sr13: the
-     * key arrives decoded at mv_Get and answers ELEMENT_NOT_FOUND x5).
-     *
-     * The IID is computed from the base interface name plus the 'string'
-     * arguments by RoGetParameterizedTypeInstanceIID, like the IMapView branch
-     * above, and it is a different IID: IMapView<string,string> is
-     * 1e036276-2f60-55f6-b7f3-f86079e6900b (dlls/combase/tests/roapi.c:904),
-     * IObservableMap<string,string> is ac7f26f2-feb7-5b2a-8ac4-345bc62caede
-     * (dlls/combase/tests/roapi.c:917).  Deriving both through the shared
-     * computation matters: include/windows.foundation.collections.idl spells
-     * the two base uuid()s the other way round (IDL:196 gives IMapView
-     * e480ce40-... and IDL:226 gives IObservableMap 65df2bf5-...) from the
-     * metadata table the computation uses (dlls/combase/roapi.c:644,647), and
-     * only the latter pairing reproduces the published instance IIDs and the
-     * IMapView QI the app already drives successfully against this map. */
-    if (param_iid_eq( iid, 3, ELEM_OBSERVABLEMAP L"`2", ELEM_STRING, ELEM_STRING ))
+    if (IsEqualGUID( iid, &IID_IObservableMap_String_String_g ) ||
+        param_iid_eq( iid, 3, ELEM_OBSERVABLEMAP L"`2", ELEM_STRING, ELEM_STRING ))
     {
         *out = &impl->vt_om;
         incr( &impl->ref );
@@ -1571,9 +1562,11 @@ static HRESULT WINAPI mv_Get( void *iface, HSTRING key, HSTRING *value )
     }
     for (i = 0; raw && i < impl->count; i++)
     {
+        TRACE( "pair[%u] key %s value %s\n", i, debugstr_w( impl->pairs[i].key ), debugstr_w( impl->pairs[i].value ) );
         if (!lstrcmpiW( raw, impl->pairs[i].key ))
         {
             hr = WindowsCreateString( impl->pairs[i].value, (UINT32)lstrlenW( impl->pairs[i].value ), value );
+            TRACE( "found %s -> %s, hr %#lx\n", debugstr_w( raw ), debugstr_w( impl->pairs[i].value ), hr );
             break;
         }
     }
@@ -2877,7 +2870,7 @@ static struct kv_pair default_qualifiers[] =
     { L"HomeRegion", L"001" },
     { L"TargetSize", L"unscaled" },
     { L"DXLanguage", L"full" },
-    { L"LayoutDirection", L"ltr" },
+    { L"LayoutDirection", L"LTR" },
     { L"AltForm", L"uninstalled" },
     /* UWP-era keys of the documented QualifierValues set (mrt100_app
      * context pipeline).  Language/locale keys are overwritten from the

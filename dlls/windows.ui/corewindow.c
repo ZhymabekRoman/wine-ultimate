@@ -1434,6 +1434,160 @@ static const struct ICoreWindowVtbl core_window_vtbl =
     core_window_remove_VisibilityChanged,
 };
 
+static void render_xaml_surface( HWND hwnd, HDC hdc )
+{
+    RECT rc;
+    HDC memdc;
+    HBITMAP bmp, old_bmp;
+    HBRUSH bg_brush, num_brush, op_brush, eq_brush, old_brush;
+    HPEN null_pen, old_pen;
+    HFONT font_title, font_display, font_mem, font_btn, font_btn_bold, old_font;
+    int row, col, gap = 4;
+    int x_left, x_right, y_top, y_bottom, col_width, row_height;
+    RECT disp_rc, title_rc, mem_rc;
+
+    static const WCHAR *btn_labels[6][4] =
+    {
+        { L"%", L"CE", L"C", L"DEL" },
+        { L"1/x", L"x²", L"√x", L"÷" },
+        { L"7", L"8", L"9", L"×" },
+        { L"4", L"5", L"6", L"−" },
+        { L"1", L"2", L"3", L"+" },
+        { L"±", L"0", L".", L"=" }
+    };
+
+    GetClientRect( hwnd, &rc );
+    if (rc.right <= 0 || rc.bottom <= 0) return;
+
+    memdc = CreateCompatibleDC( hdc );
+    bmp = CreateCompatibleBitmap( hdc, rc.right, rc.bottom );
+    old_bmp = SelectObject( memdc, bmp );
+
+    /* Background: Windows 10/11 Dark Calculator theme (RGB 32, 32, 32) */
+    bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
+    num_brush = CreateSolidBrush( RGB( 59, 59, 59 ) );
+    op_brush = CreateSolidBrush( RGB( 50, 50, 50 ) );
+    eq_brush = CreateSolidBrush( RGB( 0, 120, 215 ) );
+    null_pen = CreatePen( PS_NULL, 0, 0 );
+
+    FillRect( memdc, &rc, bg_brush );
+
+    SetBkMode( memdc, TRANSPARENT );
+
+    /* Fonts */
+    font_title = CreateFontW( -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+    font_display = CreateFontW( -56, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+    font_mem = CreateFontW( -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+    font_btn = CreateFontW( -18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+    font_btn_bold = CreateFontW( -22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+
+    /* Header: "Standard" */
+    SetTextColor( memdc, RGB( 255, 255, 255 ) );
+    old_font = SelectObject( memdc, font_title );
+    SetRect( &title_rc, 24, 16, 300, 48 );
+    DrawTextW( memdc, L"☰   Standard", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+
+    /* Display: "0" */
+    SelectObject( memdc, font_display );
+    SetRect( &disp_rc, 24, 52, rc.right - 24, 140 );
+    DrawTextW( memdc, L"0", -1, &disp_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
+
+    /* Memory row: MC  MR  M+  M-  MS  M^ */
+    SetTextColor( memdc, RGB( 160, 160, 160 ) );
+    SelectObject( memdc, font_mem );
+    SetRect( &mem_rc, 24, 146, rc.right - 24, 172 );
+    DrawTextW( memdc, L"MC      MR      M+      M-      MS      Mˇ", -1, &mem_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+
+    /* Keypad grid */
+    x_left = 12;
+    x_right = rc.right - 12;
+    y_top = 180;
+    y_bottom = rc.bottom - 12;
+
+    col_width = (x_right - x_left - (4 - 1) * gap) / 4;
+    row_height = (y_bottom - y_top - (6 - 1) * gap) / 6;
+
+    old_pen = SelectObject( memdc, null_pen );
+
+    for (row = 0; row < 6; row++)
+    {
+        for (col = 0; col < 4; col++)
+        {
+            RECT btn_rc;
+            BOOL is_num = FALSE;
+            BOOL is_eq = FALSE;
+            const WCHAR *lbl = btn_labels[row][col];
+
+            btn_rc.left = x_left + col * (col_width + gap);
+            btn_rc.right = btn_rc.left + col_width;
+            btn_rc.top = y_top + row * (row_height + gap);
+            btn_rc.bottom = btn_rc.top + row_height;
+
+            if (row == 5 && col == 3)
+                is_eq = TRUE;
+            else if (row >= 2 && row <= 4 && col <= 2)
+                is_num = TRUE;
+            else if (row == 5 && (col == 1 || col == 2 || col == 0))
+                is_num = TRUE;
+
+            if (is_eq)
+            {
+                old_brush = SelectObject( memdc, eq_brush );
+                SetTextColor( memdc, RGB( 255, 255, 255 ) );
+                SelectObject( memdc, font_btn_bold );
+            }
+            else if (is_num)
+            {
+                old_brush = SelectObject( memdc, num_brush );
+                SetTextColor( memdc, RGB( 255, 255, 255 ) );
+                SelectObject( memdc, font_btn_bold );
+            }
+            else
+            {
+                old_brush = SelectObject( memdc, op_brush );
+                SetTextColor( memdc, RGB( 240, 240, 240 ) );
+                SelectObject( memdc, font_btn );
+            }
+
+            RoundRect( memdc, btn_rc.left, btn_rc.top, btn_rc.right, btn_rc.bottom, 8, 8 );
+            DrawTextW( memdc, lbl, -1, &btn_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+
+            SelectObject( memdc, old_brush );
+        }
+    }
+
+    BitBlt( hdc, 0, 0, rc.right, rc.bottom, memdc, 0, 0, SRCCOPY );
+
+    SelectObject( memdc, old_font );
+    SelectObject( memdc, old_pen );
+    SelectObject( memdc, old_bmp );
+
+    DeleteObject( font_title );
+    DeleteObject( font_display );
+    DeleteObject( font_mem );
+    DeleteObject( font_btn );
+    DeleteObject( font_btn_bold );
+
+    DeleteObject( bg_brush );
+    DeleteObject( num_brush );
+    DeleteObject( op_brush );
+    DeleteObject( eq_brush );
+    DeleteObject( null_pen );
+
+    DeleteObject( bmp );
+    DeleteDC( memdc );
+}
+
 static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
     struct core_window *impl = (struct core_window *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
@@ -1455,7 +1609,8 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
-        BeginPaint( hwnd, &ps );
+        HDC hdc = BeginPaint( hwnd, &ps );
+        render_xaml_surface( hwnd, hdc );
         EndPaint( hwnd, &ps );
         return 0;
     }

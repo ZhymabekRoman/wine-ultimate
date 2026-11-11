@@ -1204,6 +1204,154 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+/* LanguageFont implementation */
+static HRESULT WINAPI language_font_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI language_font_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI language_font_Release( void *iface ) { return 1; }
+static HRESULT WINAPI language_font_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI language_font_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Globalization.Fonts.LanguageFont", 40, n );
+}
+static HRESULT WINAPI language_font_GetTrustLevel( void *iface, TrustLevel *t )
+{
+    if (t) *t = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI language_font_get_FontFamily( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"Segoe UI", 8, value );
+}
+static HRESULT WINAPI language_font_get_FontWeight( void *iface, void *weight )
+{
+    if (!weight) return E_POINTER;
+    *(UINT16 *)weight = 400;
+    return S_OK;
+}
+static HRESULT WINAPI language_font_get_FontStretch( void *iface, INT32 *stretch )
+{
+    if (!stretch) return E_POINTER;
+    *stretch = 5;
+    return S_OK;
+}
+static HRESULT WINAPI language_font_get_FontStyle( void *iface, INT32 *style )
+{
+    if (!style) return E_POINTER;
+    *style = 0;
+    return S_OK;
+}
+static HRESULT WINAPI language_font_get_ScaleFactor( void *iface, double *factor )
+{
+    if (!factor) return E_POINTER;
+    *factor = 100.0;
+    return S_OK;
+}
+
+static const void *language_font_vtbl[] =
+{
+    language_font_QueryInterface,
+    language_font_AddRef,
+    language_font_Release,
+    language_font_GetIids,
+    language_font_GetRuntimeClassName,
+    language_font_GetTrustLevel,
+    language_font_get_FontFamily,
+    language_font_get_FontWeight,
+    language_font_get_FontStretch,
+    language_font_get_FontStyle,
+    language_font_get_ScaleFactor,
+};
+static struct { const void **vtbl; } language_font_obj = { language_font_vtbl };
+
+/* LanguageFontGroup implementation */
+static HRESULT WINAPI language_font_group_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI language_font_group_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI language_font_group_Release( void *iface ) { return 1; }
+static HRESULT WINAPI language_font_group_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI language_font_group_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Globalization.Fonts.LanguageFontGroup", 45, n );
+}
+static HRESULT WINAPI language_font_group_GetTrustLevel( void *iface, TrustLevel *t )
+{
+    if (t) *t = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI language_font_group_get_Font( void *iface, void **value )
+{
+    if (!value) return E_POINTER;
+    *value = &language_font_obj;
+    return S_OK;
+}
+
+static const void *language_font_group_vtbl[] =
+{
+    language_font_group_QueryInterface,
+    language_font_group_AddRef,
+    language_font_group_Release,
+    language_font_group_GetIids,
+    language_font_group_GetRuntimeClassName,
+    language_font_group_GetTrustLevel,
+    language_font_group_get_Font, /* 6: UITextFont */
+    language_font_group_get_Font, /* 7: UIHeadingFont */
+    language_font_group_get_Font, /* 8: UITitleFont */
+    language_font_group_get_Font, /* 9: UICaptionFont */
+    language_font_group_get_Font, /* 10: UINotificationHeadingFont */
+    language_font_group_get_Font, /* 11: TraditionalDocumentFont */
+    language_font_group_get_Font, /* 12: ModernDocumentFont */
+    language_font_group_get_Font, /* 13: DocumentHeadingFont */
+    language_font_group_get_Font, /* 14: FixedWidthTextFont */
+    language_font_group_get_Font, /* 15: DocumentAlternate1Font */
+    language_font_group_get_Font, /* 16: DocumentAlternate2Font */
+};
+static struct { const void **vtbl; } language_font_group_obj = { language_font_group_vtbl };
+
+/* LanguageFontGroupFactory implementation */
+static HRESULT WINAPI font_group_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI font_group_factory_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI font_group_factory_Release( void *iface ) { return 1; }
+static HRESULT WINAPI font_group_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI font_group_factory_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Globalization.Fonts.LanguageFontGroup", 45, n );
+}
+static HRESULT WINAPI font_group_factory_GetTrustLevel( void *iface, TrustLevel *t )
+{
+    if (t) *t = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI font_group_factory_CreateLanguageFontGroup( void *iface, HSTRING languageTag, void **value )
+{
+    TRACE( "iface %p, languageTag %s, value %p\n", iface, debugstr_hstring(languageTag), value );
+    if (!value) return E_POINTER;
+    *value = &language_font_group_obj;
+    return S_OK;
+}
+static const void *font_group_factory_vtbl[] =
+{
+    font_group_factory_QueryInterface,
+    font_group_factory_AddRef,
+    font_group_factory_Release,
+    font_group_factory_GetIids,
+    font_group_factory_GetRuntimeClassName,
+    font_group_factory_GetTrustLevel,
+    font_group_factory_CreateLanguageFontGroup, /* slot 6 */
+};
+static struct { const void **vtbl; } font_group_factory_obj = { font_group_factory_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
     const WCHAR *name = WindowsGetStringRawBuffer(classid, NULL);
@@ -1230,6 +1378,11 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     else if (!wcscmp(name, RuntimeClass_Windows_Globalization_ApplicationLanguages))
     {
         *factory = &application_languages.IActivationFactory_iface;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.Fonts.LanguageFontGroup"))
+    {
+        *factory = (IActivationFactory *)&font_group_factory_obj;
         IUnknown_AddRef(*factory);
     }
 

@@ -380,7 +380,7 @@ BOOL locale_to_sname(const char *locale, unsigned short *codepage, BOOL *sname_m
         }
 
 #if _MSVCR_VER >= 110
-        if(!cp && !region)
+        if(!region)
         {
             search.allow_sname = TRUE;
         }

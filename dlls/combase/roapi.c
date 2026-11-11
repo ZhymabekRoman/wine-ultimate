@@ -2645,6 +2645,26 @@ BOOL WINAPI RoOriginateErrorW(HRESULT error, UINT max_len, const WCHAR *message)
 }
 
 /***********************************************************************
+ *      RoTransformError (combase.@)
+ */
+BOOL WINAPI RoTransformError(HRESULT old_error, HRESULT new_error, HSTRING message)
+{
+    TRACE( "old %#lx, new %#lx, message %s\n", old_error, new_error, debugstr_hstring( message ) );
+    if (old_error == new_error) return FALSE;
+    return RoOriginateError( new_error, message );
+}
+
+/***********************************************************************
+ *      RoTransformErrorW (combase.@)
+ */
+BOOL WINAPI RoTransformErrorW(HRESULT old_error, HRESULT new_error, UINT max_len, const WCHAR *message)
+{
+    TRACE( "old %#lx, new %#lx, max_len %u, message %s\n", old_error, new_error, max_len, wine_dbgstr_wn( message, max_len ) );
+    if (old_error == new_error) return FALSE;
+    return RoOriginateErrorW( new_error, max_len, message );
+}
+
+/***********************************************************************
  *      RoReportUnhandledError (combase.@)
  */
 HRESULT WINAPI RoReportUnhandledError(IRestrictedErrorInfo *info)
