@@ -3727,28 +3727,102 @@ static HRESULT WINAPI store_ctx_GetStoreProductForCurrentAppAsync( void *iface, 
     if (prod) store_product_Release( &prod->vtbl );
     return store_async_create( res, FALSE, FALSE, S_OK, op );
 }
-struct catalog_mock_item
+static void get_app_store_products( const WCHAR *req_id, HSTRING *keys, IInspectable **vals, UINT32 max_count, UINT32 *actual_count )
 {
-    const WCHAR *id;
-    const WCHAR *title;
-    const WCHAR *desc;
-    const WCHAR *kind;
-};
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR subkey[512], name[MAX_PATH], family[MAX_PATH], title[MAX_PATH];
+    HKEY pkgs_key, key;
+    DWORD index = 0, name_len, type, size, framework;
+    UINT32 count = 0;
+    SIZE_T r;
 
-static const struct catalog_mock_item default_catalog[] =
-{
-    { L"9WZDNCRFHVN5", L"Calculator", L"A simple yet powerful calculator that includes standard, scientific, and programmer modes.", L"Application" },
-    { L"9WZDNCRFJBMP", L"Microsoft Store", L"Discover, download, and manage apps and games for Windows.", L"Application" },
-    { L"9WZDNCRFJ3P6", L"Microsoft Photos", L"View, organize, and edit your photos and videos.", L"Application" },
-    { L"9NBLGGH4NNS1", L"Windows Terminal", L"The modern, fast, and powerful terminal for command-line users.", L"Application" },
-};
+    if (req_id)
+    {
+        struct store_product *prod = store_product_create( req_id, req_id, req_id, L"Application" );
+        if (prod && count < max_count)
+        {
+            WindowsCreateString( req_id, wcslen(req_id), &keys[count] );
+            vals[count] = (IInspectable *)&prod->vtbl;
+            count++;
+        }
+        *actual_count = count;
+        return;
+    }
+
+    for (r = 0; r < ARRAY_SIZE(roots) && count < max_count; r++)
+    {
+        lstrcpyW( subkey, appmodel_reg_key );
+        lstrcatW( subkey, L"\\Packages" );
+        if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &pkgs_key )) continue;
+
+        index = 0;
+        name_len = ARRAY_SIZE(name);
+        while (!RegEnumKeyExW( pkgs_key, index++, name, &name_len, NULL, NULL, NULL, NULL ) && count < max_count)
+        {
+            if (!RegOpenKeyExW( pkgs_key, name, 0, KEY_READ, &key ))
+            {
+                framework = 0;
+                size = sizeof(framework);
+                RegQueryValueExW( key, L"Framework", 0, &type, (BYTE *)&framework, &size );
+
+                if (!framework)
+                {
+                    WCHAR *underscore;
+                    const WCHAR *p = name;
+                    family[0] = 0;
+                    size = sizeof(family);
+                    RegQueryValueExW( key, L"PackageFamilyName", 0, &type, (BYTE *)family, &size );
+
+                    if (!wcsncmp( p, L"Microsoft.", 10 )) p += 10;
+                    lstrcpynW( title, p, ARRAY_SIZE(title) );
+                    underscore = wcschr( title, '_' );
+                    if (underscore) *underscore = 0;
+
+                    if (wcslen(title) > 0)
+                    {
+                        const WCHAR *id_str = family[0] ? family : name;
+                        struct store_product *prod = store_product_create( id_str, title, title, L"Application" );
+                        if (prod)
+                        {
+                            WindowsCreateString( id_str, wcslen(id_str), &keys[count] );
+                            vals[count] = (IInspectable *)&prod->vtbl;
+                            count++;
+                        }
+                    }
+                }
+                RegCloseKey( key );
+            }
+            name_len = ARRAY_SIZE(name);
+        }
+        RegCloseKey( pkgs_key );
+    }
+
+    if (!count)
+    {
+        WCHAR buf[MAX_PATH];
+        const WCHAR *pkg_id = L"Microsoft.WindowsStore_8wekyb3d8bbwe";
+        struct store_product *prod;
+        if (GetEnvironmentVariableW( L"WINE_PACKAGE_NAME", buf, ARRAY_SIZE(buf) ) ||
+            package_get_reg_str( L"PackageName", buf, ARRAY_SIZE(buf) ))
+            pkg_id = buf;
+        prod = store_product_create( pkg_id, L"Microsoft Store", L"Microsoft Store", L"Application" );
+        if (prod)
+        {
+            WindowsCreateString( pkg_id, wcslen(pkg_id), &keys[count] );
+            vals[count] = (IInspectable *)&prod->vtbl;
+            count++;
+        }
+    }
+
+    *actual_count = count;
+}
 
 static HRESULT WINAPI store_ctx_GetStoreProductsAsync( void *iface, void *pk, void *si, void **op )
 {
     struct winrt_map_view *map;
     struct store_product_query_result *res;
-    HSTRING keys[8];
-    IInspectable *vals[8];
+    HSTRING keys[16];
+    IInspectable *vals[16];
     UINT32 count = 0;
 
     if (si)
@@ -3773,29 +3847,9 @@ static HRESULT WINAPI store_ctx_GetStoreProductsAsync( void *iface, void *pk, vo
                     if (SUCCEEDED(pCurrent( iter_unk, &cur_id )) && cur_id)
                     {
                         const WCHAR *raw_id = WindowsGetStringRawBuffer( cur_id, NULL );
-                        const WCHAR *title = raw_id;
-                        const WCHAR *desc = L"Application";
-                        const WCHAR *kind = L"Application";
-                        struct store_product *prod;
-
-                        for (UINT32 j = 0; j < ARRAY_SIZE(default_catalog); j++)
-                        {
-                            if (raw_id && !wcscmp( raw_id, default_catalog[j].id ))
-                            {
-                                title = default_catalog[j].title;
-                                desc = default_catalog[j].desc;
-                                kind = default_catalog[j].kind;
-                                break;
-                            }
-                        }
-
-                        prod = store_product_create( raw_id, title, desc, kind );
-                        if (prod)
-                        {
-                            keys[count] = cur_id;
-                            vals[count] = (IInspectable *)&prod->vtbl;
-                            count++;
-                        }
+                        UINT32 added = 0;
+                        get_app_store_products( raw_id, &keys[count], &vals[count], 1, &added );
+                        count += added;
                     }
                     if (FAILED(pMoveNext( iter_unk, &has ))) break;
                 }
@@ -3806,17 +3860,7 @@ static HRESULT WINAPI store_ctx_GetStoreProductsAsync( void *iface, void *pk, vo
 
     if (!count)
     {
-        for (UINT32 i = 0; i < ARRAY_SIZE(default_catalog) && count < ARRAY_SIZE(keys); i++)
-        {
-            struct store_product *prod = store_product_create( default_catalog[i].id, default_catalog[i].title,
-                                                               default_catalog[i].desc, default_catalog[i].kind );
-            if (prod)
-            {
-                WindowsCreateString( default_catalog[i].id, wcslen(default_catalog[i].id), &keys[count] );
-                vals[count] = (IInspectable *)&prod->vtbl;
-                count++;
-            }
-        }
+        get_app_store_products( NULL, keys, vals, ARRAY_SIZE(keys), &count );
     }
 
     map = store_create_map_view( keys, vals, count, &IID_IMapView_StoreProduct, &IID_IIterable_StoreProductKeyValuePair, &IID_IKeyValuePair_StoreProduct );
@@ -3838,21 +3882,11 @@ static HRESULT WINAPI store_ctx_GetAssociatedStoreProductsWithPagingAsync( void 
 {
     struct winrt_map_view *map;
     struct store_product_paged_query_result *res;
-    HSTRING keys[ARRAY_SIZE(default_catalog)];
-    IInspectable *vals[ARRAY_SIZE(default_catalog)];
+    HSTRING keys[16];
+    IInspectable *vals[16];
     UINT32 count = 0;
 
-    for (UINT32 i = 0; i < ARRAY_SIZE(default_catalog); i++)
-    {
-        struct store_product *prod = store_product_create( default_catalog[i].id, default_catalog[i].title,
-                                                           default_catalog[i].desc, default_catalog[i].kind );
-        if (prod)
-        {
-            WindowsCreateString( default_catalog[i].id, wcslen(default_catalog[i].id), &keys[count] );
-            vals[count] = (IInspectable *)&prod->vtbl;
-            count++;
-        }
-    }
+    get_app_store_products( NULL, keys, vals, ARRAY_SIZE(keys), &count );
 
     map = store_create_map_view( keys, vals, count, &IID_IMapView_StoreProduct, &IID_IIterable_StoreProductKeyValuePair, &IID_IKeyValuePair_StoreProduct );
     for (UINT32 i = 0; i < count; i++)

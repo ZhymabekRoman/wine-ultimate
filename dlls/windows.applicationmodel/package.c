@@ -1146,7 +1146,7 @@ static const struct IAsyncInfoVtbl async_info_vtbl =
     async_info_QueryInterface, async_info_addref, async_info_release,
     async_info_GetIids, async_info_GetRuntimeClassName, async_info_GetTrustLevel,
     async_info_get_Id, async_info_get_Status, async_info_get_ErrorCode,
-    async_info_Cancel, async_info_Close, async_info_GetResults,
+    async_info_Cancel, async_info_Close,
 };
 
 static HRESULT WINAPI async_view_GetAt( IVectorView_StorageFile *iface, UINT32 index,

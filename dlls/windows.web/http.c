@@ -1428,19 +1428,46 @@ static HRESULT create_http_client( void **out )
 /* --- Activation Factories --- */
 
 /* HttpClient factory */
+struct http_client_factory_impl
+{
+    const void *vtbl_activation;
+    const void *vtbl_factory;
+    LONG ref;
+};
+
+static inline struct http_client_factory_impl *impl_from_client_act_factory( void *iface )
+{
+    return (struct http_client_factory_impl *)iface;
+}
+static inline struct http_client_factory_impl *impl_from_client_factory( void *iface )
+{
+    return (struct http_client_factory_impl *)((char *)iface - sizeof(void *));
+}
+
 static HRESULT WINAPI http_client_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    struct http_client_factory_impl *impl = impl_from_client_act_factory( iface );
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IHttpClientFactory ))
+        IsEqualGUID( iid, &IID_IActivationFactory ))
     {
-        *out = iface;
+        *out = &impl->vtbl_activation;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IHttpClientFactory ))
+    {
+        *out = &impl->vtbl_factory;
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
+}
+static HRESULT WINAPI http_client_factory_iface_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct http_client_factory_impl *impl = impl_from_client_factory( iface );
+    return http_client_factory_QueryInterface( &impl->vtbl_activation, iid, out );
 }
 static ULONG WINAPI http_client_factory_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI http_client_factory_Release( void *iface ) { return 1; }
@@ -1457,10 +1484,11 @@ static HRESULT WINAPI http_client_factory_ActivateInstance( void *iface, IInspec
 }
 static HRESULT WINAPI http_client_factory_Create( void *iface, void *filter, void **instance )
 {
+    TRACE( "iface %p, filter %p, instance %p\n", iface, filter, instance );
     return create_http_client( instance );
 }
 
-static const void *http_client_factory_vtbl[] =
+static const void *http_client_activation_vtbl[] =
 {
     http_client_factory_QueryInterface,
     http_client_factory_AddRef,
@@ -1469,9 +1497,25 @@ static const void *http_client_factory_vtbl[] =
     http_client_factory_GetRuntimeClassName,
     http_client_factory_GetTrustLevel,
     http_client_factory_ActivateInstance,
+};
+
+static const void *http_client_factory_vtbl[] =
+{
+    http_client_factory_iface_QueryInterface,
+    http_client_factory_AddRef,
+    http_client_factory_Release,
+    http_client_factory_GetIids,
+    http_client_factory_GetRuntimeClassName,
+    http_client_factory_GetTrustLevel,
     http_client_factory_Create,
 };
-static const void *http_client_factory_obj = http_client_factory_vtbl;
+
+static const struct http_client_factory_impl http_client_factory_obj =
+{
+    http_client_activation_vtbl,
+    http_client_factory_vtbl,
+    1,
+};
 IActivationFactory *http_client_factory = (IActivationFactory *)&http_client_factory_obj;
 
 /* HttpRequestMessage factory */
@@ -1700,9 +1744,15 @@ IActivationFactory *http_method_factory = (IActivationFactory *)&http_method_fac
 
 /* HttpBaseProtocolFilter implementation */
 static const GUID IID_IHttpBaseProtocolFilter =
-    { 0x71c8937c, 0x9666, 0x4527, { 0x90, 0xaf, 0x22, 0x46, 0x49, 0x73, 0x64, 0x24 } };
+    { 0x71c89b09, 0xe131, 0x4b54, { 0xa5, 0x3c, 0xeb, 0x43, 0xff, 0x37, 0xe9, 0xbb } };
 static const GUID IID_IHttpFilter =
-    { 0xa4cb92d2, 0x1bb9, 0x45b1, { 0xb5, 0x49, 0xbf, 0xdd, 0x8c, 0x25, 0x71, 0x81 } };
+    { 0xa4cb6dd5, 0x0902, 0x439e, { 0xbf, 0xd7, 0xe1, 0x25, 0x52, 0xb1, 0x65, 0xce } };
+static const GUID IID_IHttpBaseProtocolFilter2 =
+    { 0x2ec30013, 0x9427, 0x4900, { 0xa0, 0x17, 0xfa, 0x7d, 0xa3, 0xb5, 0xc9, 0xae } };
+static const GUID IID_IHttpBaseProtocolFilter3 =
+    { 0xd43f4d4c, 0xbd42, 0x43ae, { 0x87, 0x17, 0xad, 0x2c, 0x8f, 0x4b, 0x29, 0x37 } };
+static const GUID IID_IHttpBaseProtocolFilter4 =
+    { 0x9fe36ccf, 0x2983, 0x4893, { 0x94, 0x1f, 0xeb, 0x51, 0x8c, 0xa8, 0xce, 0xf9 } };
 
 struct http_base_protocol_filter
 {
@@ -1724,6 +1774,7 @@ static inline struct http_base_protocol_filter *impl_from_filter_base( void *ifa
 static HRESULT WINAPI base_filter_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct http_base_protocol_filter *impl = impl_from_filter_base( iface );
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
@@ -1734,7 +1785,10 @@ static HRESULT WINAPI base_filter_QueryInterface( void *iface, REFIID iid, void 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IHttpBaseProtocolFilter ))
+        IsEqualGUID( iid, &IID_IHttpBaseProtocolFilter ) ||
+        IsEqualGUID( iid, &IID_IHttpBaseProtocolFilter2 ) ||
+        IsEqualGUID( iid, &IID_IHttpBaseProtocolFilter3 ) ||
+        IsEqualGUID( iid, &IID_IHttpBaseProtocolFilter4 ))
     {
         *out = &impl->vtbl_base;
         InterlockedIncrement( &impl->ref );
@@ -1744,14 +1798,17 @@ static HRESULT WINAPI base_filter_QueryInterface( void *iface, REFIID iid, void 
     {
         *out = &impl->vtbl_filter;
         InterlockedIncrement( &impl->ref );
+        TRACE( "QI IHttpFilter returning *out = %p\n", *out );
         return S_OK;
     }
     if (IsEqualGUID( iid, &IID_IClosable ))
     {
         *out = &impl->vtbl_closable;
         InterlockedIncrement( &impl->ref );
+        TRACE( "QI IClosable returning *out = %p\n", *out );
         return S_OK;
     }
+    FIXME( "unimplemented iid %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1836,16 +1893,19 @@ static const void *http_base_protocol_filter_vtbl[] =
 static HRESULT WINAPI filter_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - sizeof(void *));
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
     return base_filter_QueryInterface( &impl->vtbl_base, iid, out );
 }
 static ULONG WINAPI filter_AddRef( void *iface )
 {
     struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - sizeof(void *));
+    TRACE( "iface %p\n", iface );
     return base_filter_AddRef( &impl->vtbl_base );
 }
 static ULONG WINAPI filter_Release( void *iface )
 {
     struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - sizeof(void *));
+    TRACE( "iface %p\n", iface );
     return base_filter_Release( &impl->vtbl_base );
 }
 static HRESULT WINAPI filter_SendRequestAsync( void *iface, void *request, void **op )
@@ -1912,6 +1972,7 @@ static HRESULT create_http_base_protocol_filter( void **out )
 /* HttpBaseProtocolFilter Factory */
 static HRESULT WINAPI filter_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -1920,6 +1981,7 @@ static HRESULT WINAPI filter_factory_QueryInterface( void *iface, REFIID iid, vo
         *out = iface;
         return S_OK;
     }
+    FIXME( "unimplemented iid %s\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -1934,6 +1996,7 @@ static HRESULT WINAPI filter_factory_GetRuntimeClassName( void *iface, HSTRING *
 static HRESULT WINAPI filter_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
 static HRESULT WINAPI filter_factory_ActivateInstance( void *iface, IInspectable **instance )
 {
+    TRACE( "iface %p, instance %p\n", iface, instance );
     return create_http_base_protocol_filter( (void **)instance );
 }
 

@@ -44,6 +44,18 @@ static const GUID IID_IContentControl =
     { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } };
 static const GUID IID_IControl_g =
     { 0xedf04eb1, 0x37d1, 0x471f, { 0x85, 0x70, 0x38, 0x29, 0xee, 0x5b, 0x2b, 0xc6 } };
+static const GUID IID_IGrid =
+    { 0xc4496219, 0x9014, 0x58a1, { 0xb4, 0xad, 0xc5, 0x04, 0x49, 0x13, 0xa5, 0xbb } };
+static const GUID IID_IPanel =
+    { 0x27a1b418, 0x56f3, 0x525e, { 0xb8, 0x83, 0xce, 0xfe, 0xd9, 0x05, 0xee, 0xd3 } };
+static const GUID IID_IRowDefinition =
+    { 0xfe870f2f, 0x89ef, 0x5dac, { 0x9f, 0x33, 0x96, 0x8d, 0x0d, 0xc5, 0x77, 0xc3 } };
+static const GUID IID_IRowDefinitionStatics =
+    { 0x7317c7c5, 0xfd6f, 0x58d9, { 0x9b, 0x53, 0x49, 0x78, 0xdb, 0xac, 0xde, 0x23 } };
+static const GUID IID_IColumnDefinition =
+    { 0x454cea14, 0x87ec, 0x5890, { 0xbb, 0x62, 0xf1, 0xd8, 0x2a, 0x94, 0x75, 0x8e } };
+static const GUID IID_IColumnDefinitionStatics =
+    { 0xaba4b755, 0xca63, 0x5ed7, { 0xae, 0x31, 0x45, 0xf9, 0xf9, 0x19, 0x20, 0xb0 } };
 static const GUID IID_IReferenceTracker =
     { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
 
@@ -76,7 +88,11 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
         IsEqualGUID( iid, &IID_IUIElement_g ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement ) ||
         IsEqualGUID( iid, &IID_IContentControl ) ||
-        IsEqualGUID( iid, &IID_IControl_g ))
+        IsEqualGUID( iid, &IID_IControl_g ) ||
+        IsEqualGUID( iid, &IID_IGrid ) ||
+        IsEqualGUID( iid, &IID_IPanel ) ||
+        IsEqualGUID( iid, &IID_IRowDefinition ) ||
+        IsEqualGUID( iid, &IID_IColumnDefinition ))
     {
         *out = &impl->IInspectable_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -317,6 +333,7 @@ static HRESULT frame_create( IInspectable *outer, IInspectable **inner, void **i
 struct frame_factory
 {
     IActivationFactory IActivationFactory_iface;
+    IInspectable IComposableFactory_iface;
     LONG ref;
 };
 
@@ -325,23 +342,58 @@ static inline struct frame_factory *impl_from_IActivationFactory( IActivationFac
     return CONTAINING_RECORD( iface, struct frame_factory, IActivationFactory_iface );
 }
 
+static HRESULT WINAPI frame_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out );
+static ULONG WINAPI frame_factory_AddRef( IActivationFactory *iface );
+static ULONG WINAPI frame_factory_Release( IActivationFactory *iface );
+
+static inline struct frame_factory *impl_from_IComposableFactory( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct frame_factory, IComposableFactory_iface );
+}
+
+static HRESULT WINAPI composable_factory_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct frame_factory *impl = impl_from_IComposableFactory( iface );
+    return frame_factory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI composable_factory_AddRef( IInspectable *iface )
+{
+    struct frame_factory *impl = impl_from_IComposableFactory( iface );
+    return frame_factory_AddRef( &impl->IActivationFactory_iface );
+}
+static ULONG WINAPI composable_factory_Release( IInspectable *iface )
+{
+    struct frame_factory *impl = impl_from_IComposableFactory( iface );
+    return frame_factory_Release( &impl->IActivationFactory_iface );
+}
+
 static HRESULT WINAPI frame_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
     struct frame_factory *impl = impl_from_IActivationFactory( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
+    if (!out) return E_POINTER;
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IFrameFactory ) ||
-        IsEqualGUID( iid, &IID_IPageFactory ) ||
-        IsEqualGUID( iid, &IID_IGridFactory ) ||
-        IsEqualGUID( iid, &IID_IGridStatics ))
+        IsEqualGUID( iid, &IID_IGridStatics ) ||
+        IsEqualGUID( iid, &IID_IRowDefinitionStatics ) ||
+        IsEqualGUID( iid, &IID_IColumnDefinitionStatics ))
     {
         *out = &impl->IActivationFactory_iface;
         IActivationFactory_AddRef( iface );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IFrameFactory ) ||
+        IsEqualGUID( iid, &IID_IPageFactory ) ||
+        IsEqualGUID( iid, &IID_IGridFactory ))
+    {
+        *out = &impl->IComposableFactory_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
 
@@ -391,7 +443,7 @@ static HRESULT WINAPI frame_factory_CreateInstance( void *iface, void *outer, vo
     return frame_create( (IInspectable *)outer, (IInspectable **)inner, instance );
 }
 
-static const void *frame_factory_vtbl[] =
+static const struct IActivationFactoryVtbl frame_factory_vtbl =
 {
     frame_factory_QueryInterface,
     frame_factory_AddRef,
@@ -399,16 +451,27 @@ static const void *frame_factory_vtbl[] =
     frame_factory_GetIids,
     frame_factory_GetRuntimeClassName,
     frame_factory_GetTrustLevel,
-    frame_factory_CreateInstance,    /* slot 6: CreateInstance */
-    frame_factory_CreateInstance,    /* slot 7 */
-    frame_factory_ActivateInstance,  /* slot 8: ActivateInstance */
-    frame_factory_CreateInstance,    /* slot 9 */
-    frame_factory_CreateInstance,    /* slot 10 */
+    frame_factory_ActivateInstance,  /* slot 6: ActivateInstance */
+};
+
+static const void *composable_factory_vtbl[] =
+{
+    composable_factory_QueryInterface,     /* 0: QI */
+    composable_factory_AddRef,             /* 1: AddRef */
+    composable_factory_Release,            /* 2: Release */
+    frame_factory_GetIids,                 /* 3: GetIids */
+    frame_factory_GetRuntimeClassName,     /* 4: GetRuntimeClassName */
+    frame_factory_GetTrustLevel,           /* 5: GetTrustLevel */
+    frame_factory_CreateInstance,          /* 6: CreateInstance(outer, inner, instance) */
+    frame_factory_CreateInstance,          /* 7 */
+    frame_factory_CreateInstance,          /* 8 */
+    frame_factory_CreateInstance,          /* 9 */
 };
 
 static struct frame_factory frame_factory_obj =
 {
-    {(const struct IActivationFactoryVtbl *)frame_factory_vtbl},
+    {&frame_factory_vtbl},
+    {(const struct IInspectableVtbl *)composable_factory_vtbl},
     1,
 };
 
@@ -416,7 +479,8 @@ IActivationFactory *frame_factory = &frame_factory_obj.IActivationFactory_iface;
 
 static struct frame_factory grid_factory_obj =
 {
-    {(const struct IActivationFactoryVtbl *)frame_factory_vtbl},
+    {&frame_factory_vtbl},
+    {(const struct IInspectableVtbl *)composable_factory_vtbl},
     1,
 };
 IActivationFactory *grid_factory = &grid_factory_obj.IActivationFactory_iface;

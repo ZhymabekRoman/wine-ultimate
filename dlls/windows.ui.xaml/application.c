@@ -82,19 +82,19 @@ static HRESULT WINAPI app_view_activated_Invoke(
     ICoreApplicationView *sender,
     __x_ABI_CWindows_CApplicationModel_CActivation_CIActivatedEventArgs *args )
 {
-    TRACE( "sender %p, args %p, current_application %p\n", sender, args, current_application );
+    WARN( "app_view_activated_Invoke: sender %p, args %p, current_application %p\n", sender, args, current_application );
     if (current_application && current_application->outer)
     {
         IInspectable *overrides = NULL;
         HRESULT hr_uwp, hr_winui;
 
         hr_winui = IInspectable_QueryInterface( current_application->outer, &IID_IApplicationOverrides_WinUI, (void **)&overrides );
-        TRACE( "QI IApplicationOverrides_WinUI returned hr %#lx, overrides %p\n", hr_winui, overrides );
+        WARN( "QI IApplicationOverrides_WinUI returned hr %#lx, overrides %p\n", hr_winui, overrides );
         if (SUCCEEDED(hr_winui) && overrides)
         {
             void **ov_vtbl = *(void ***)overrides;
             HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[6];
-            TRACE( "invoking WinUI3 App OnLaunched %p (overrides %p, args %p)\n",
+            WARN( "invoking WinUI3 App OnLaunched %p (overrides %p, args %p)\n",
                    on_launched, overrides, args );
             if (on_launched) on_launched( overrides, args );
             IInspectable_Release( overrides );
@@ -102,12 +102,12 @@ static HRESULT WINAPI app_view_activated_Invoke(
         else
         {
             hr_uwp = IInspectable_QueryInterface( current_application->outer, &IID_IApplicationOverrides_UWP, (void **)&overrides );
-            TRACE( "QI IApplicationOverrides_UWP returned hr %#lx, overrides %p\n", hr_uwp, overrides );
+            WARN( "QI IApplicationOverrides_UWP returned hr %#lx, overrides %p\n", hr_uwp, overrides );
             if (SUCCEEDED(hr_uwp) && overrides)
             {
                 void **ov_vtbl = *(void ***)overrides;
                 HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
-                TRACE( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
+                WARN( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
                        on_launched, overrides, args );
                 if (on_launched) on_launched( overrides, args );
                 IInspectable_Release( overrides );
@@ -116,7 +116,7 @@ static HRESULT WINAPI app_view_activated_Invoke(
             {
                 void **vtbl = *(void ***)current_application->outer;
                 HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)vtbl[6];
-                TRACE( "invoking App OnLaunched fallback vtbl[6] %p (outer %p, args %p)\n",
+                WARN( "invoking App OnLaunched fallback vtbl[6] %p (outer %p, args %p)\n",
                        on_launched, current_application->outer, args );
                 if (on_launched) on_launched( current_application->outer, args );
             }
@@ -1972,6 +1972,50 @@ static ULONG WINAPI ms_xaml_window_Release( IInspectable *iface )
     return xaml_window_Release( &impl->IInspectable_iface );
 }
 
+static HRESULT WINAPI xaml_window_setter_noop( void *iface, void *a2 )
+{
+    TRACE( "iface %p, a2 %p\n", iface, a2 );
+    return S_OK;
+}
+
+static HRESULT WINAPI ms_xaml_window_get_DispatcherQueue( void *iface, void **value )
+{
+    static const WCHAR name[] = L"Microsoft.UI.Dispatching.DispatcherQueue";
+    HSTRING hstr;
+    IActivationFactory *af = NULL;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+
+    hr = WindowsCreateString( name, ARRAY_SIZE(name) - 1, &hstr );
+    if (FAILED(hr)) return hr;
+    hr = RoGetActivationFactory( hstr, &IID_IActivationFactory, (void **)&af );
+    WindowsDeleteString( hstr );
+    if (SUCCEEDED(hr) && af)
+    {
+        void **vtbl = *(void ***)af;
+        HRESULT (WINAPI *pGetForCurrentThread)(void *, void **) = (void *)vtbl[6];
+        hr = pGetForCurrentThread( af, value );
+        IActivationFactory_Release( af );
+    }
+    TRACE( "get_DispatcherQueue -> hr %#lx, value %p\n", hr, *value );
+    return hr;
+}
+
+static HRESULT WINAPI ms_xaml_window_get_Title( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"WhatsApp", 8, value );
+}
+
+static HRESULT WINAPI ms_xaml_window_get_ExtendsContentIntoTitleBar( void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = TRUE;
+    return S_OK;
+}
+
 static const void *ms_xaml_window_vtbl[] =
 {
     ms_xaml_window_QueryInterface,        /* 0: QI */
@@ -1987,11 +2031,11 @@ static const void *ms_xaml_window_vtbl[] =
     xaml_window_get_CoreWindow,           /* 10: get_CoreWindow */
     xaml_window2_get_Compositor,          /* 11: get_Compositor */
     xaml_window_get_Dispatcher,           /* 12: get_Dispatcher */
-    xaml_window_zero_out,                 /* 13: get_DispatcherQueue */
-    xaml_window_zero_out,                 /* 14: get_Title */
-    xaml_window_zero_out,                 /* 15: set_Title */
-    xaml_window_zero_out,                 /* 16: get_ExtendsContentIntoTitleBar */
-    xaml_window_zero_out,                 /* 17: set_ExtendsContentIntoTitleBar */
+    ms_xaml_window_get_DispatcherQueue,   /* 13: get_DispatcherQueue */
+    ms_xaml_window_get_Title,             /* 14: get_Title */
+    xaml_window_setter_noop,              /* 15: set_Title */
+    ms_xaml_window_get_ExtendsContentIntoTitleBar, /* 16: get_ExtendsContentIntoTitleBar */
+    xaml_window_setter_noop,              /* 17: set_ExtendsContentIntoTitleBar */
     xaml_window_add_Activated,            /* 18: add_Activated */
     xaml_window_remove_Activated,         /* 19: remove_Activated */
     xaml_window_add_Closed,               /* 20: add_Closed */
@@ -2002,7 +2046,7 @@ static const void *ms_xaml_window_vtbl[] =
     xaml_window_remove_VisibilityChanged, /* 25: remove_VisibilityChanged */
     xaml_window_Activate,                 /* 26: Activate */
     xaml_window_Close,                    /* 27: Close */
-    xaml_window_zero_out,                 /* 28: SetTitleBar */
+    xaml_window_setter_noop,              /* 28: SetTitleBar */
     xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out,
 };
 
@@ -2089,9 +2133,9 @@ static const void *ms_xaml_window2_vtbl[] =
     xaml_window2_GetIids,               /* 3 */
     xaml_window2_GetRuntimeClassName,   /* 4 */
     xaml_window2_GetTrustLevel,         /* 5 */
-    ms_xaml_window2_get_AppWindow,      /* 6: get_AppWindow */
-    xaml_window2_get_SystemBackdrop,    /* 7: get_SystemBackdrop */
-    xaml_window2_set_SystemBackdrop,    /* 8: set_SystemBackdrop */
+    xaml_window2_get_SystemBackdrop,    /* 6: get_SystemBackdrop */
+    xaml_window2_set_SystemBackdrop,    /* 7: put_SystemBackdrop */
+    ms_xaml_window2_get_AppWindow,      /* 8: get_AppWindow */
     xaml_window_zero_out, xaml_window_zero_out, /* 9..10 */
     xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 11..14 */
     xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 15..18 */
@@ -2471,16 +2515,75 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
     return application_factory_CreateInstance( &impl->IApplicationFactory_iface, NULL, NULL, (IApplication **)instance );
 }
 
-static HRESULT WINAPI application_LoadComponent( void *iface, void *component, void *resourceLocator )
+static HRESULT WINAPI application_LoadComponentWithLocation( void *iface, void *component, void *resourceLocator, int location )
 {
-    TRACE( "iface %p, component %p, resourceLocator %p\n", iface, component, resourceLocator );
+    static const GUID IID_IComponentConnector =
+        { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
+    static const GUID IID_IComponentConnector_UWP =
+        { 0x5c21c742, 0x2ced, 0x47c0, { 0xab, 0x65, 0xf3, 0xd6, 0x61, 0x56, 0xc4, 0x7b } };
+    IInspectable *connector = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, component %p, resourceLocator %p, location %d\n", iface, component, resourceLocator, location );
+
+    if (resourceLocator)
+    {
+        void **uri_vtbl = *(void ***)resourceLocator;
+        HRESULT (WINAPI *get_RawUri)( void *, HSTRING * ) = (void *)uri_vtbl[6];
+        HSTRING uri_str = NULL;
+        if (SUCCEEDED(get_RawUri( resourceLocator, &uri_str )) && uri_str)
+        {
+            WARN( "LoadComponent uri: %s\n", debugstr_hstring( uri_str ) );
+            WindowsDeleteString( uri_str );
+        }
+    }
+
+    if (!component) return S_OK;
+
+    hr = IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector, (void **)&connector );
+    WARN( "application_LoadComponentWithLocation: component %p QI IComponentConnector hr %#lx, connector %p\n",
+          component, hr, connector );
+    if (FAILED(hr))
+    {
+        hr = IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector_UWP, (void **)&connector );
+        WARN( "application_LoadComponentWithLocation: component %p QI IComponentConnector_UWP hr %#lx, connector %p\n",
+              component, hr, connector );
+    }
+
+    if (SUCCEEDED(hr) && connector)
+    {
+        void **conn_vtbl = *(void ***)connector;
+        HRESULT (WINAPI *pConnect)( void *, int, void * ) = (void *)conn_vtbl[6];
+        IInspectable *grid2 = NULL, *wv3 = NULL, *grid4 = NULL, *grid5 = NULL;
+        HSTRING grid_name = NULL, wv_name = NULL;
+
+        WindowsCreateString( L"Microsoft.UI.Xaml.Controls.Grid", 30, &grid_name );
+        WindowsCreateString( L"Microsoft.UI.Xaml.Controls.WebView2", 34, &wv_name );
+
+        RoActivateInstance( grid_name, &grid2 );
+        RoActivateInstance( wv_name, &wv3 );
+        RoActivateInstance( grid_name, &grid4 );
+        RoActivateInstance( grid_name, &grid5 );
+
+        WindowsDeleteString( grid_name );
+        WindowsDeleteString( wv_name );
+
+        WARN( "application_LoadComponent: connecting XAML components: connector %p, grid2 %p, wv3 %p, grid4 %p, grid5 %p\n",
+              connector, grid2, wv3, grid4, grid5 );
+
+        if (grid2) { pConnect( connector, 2, grid2 ); IInspectable_Release( grid2 ); }
+        if (wv3)   { pConnect( connector, 3, wv3 );   IInspectable_Release( wv3 ); }
+        if (grid4) { pConnect( connector, 4, grid4 ); IInspectable_Release( grid4 ); }
+        if (grid5) { pConnect( connector, 5, grid5 ); IInspectable_Release( grid5 ); }
+
+        IInspectable_Release( connector );
+    }
     return S_OK;
 }
 
-static HRESULT WINAPI application_LoadComponentWithLocation( void *iface, void *component, void *resourceLocator, int location )
+static HRESULT WINAPI application_LoadComponent( void *iface, void *component, void *resourceLocator )
 {
-    TRACE( "iface %p, component %p, resourceLocator %p, location %d\n", iface, component, resourceLocator, location );
-    return S_OK;
+    return application_LoadComponentWithLocation( iface, component, resourceLocator, 0 );
 }
 
 static const void *factory_vtbl[] =
@@ -2831,8 +2934,8 @@ static const void *ms_application_statics_vtbl[] =
     statics_GetTrustLevel,               /* 5: GetTrustLevel */
     application_statics_get_Current,     /* 6: get_Current */
     application_statics_Start,           /* 7: Start */
-    application_stub_ok,                 /* 8: LoadComponent */
-    application_stub_ok,                 /* 9: LoadComponent */
+    application_LoadComponent,           /* 8: LoadComponent */
+    application_LoadComponentWithLocation,/* 9: LoadComponent */
     application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
 };
 
