@@ -27,8 +27,20 @@
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/time.h>
+#ifdef __linux__
+#include <sys/syscall.h>
+#include <sys/prctl.h>
+#ifdef __NR_landlock_create_ruleset
+#include <linux/landlock.h>
+#define HAVE_LANDLOCK 1
+#endif
+#ifndef O_PATH
+#define O_PATH 010000000
+#endif
+#endif
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -38,12 +50,81 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(ntdll);
 
+static const SID_IDENTIFIER_AUTHORITY mandatory_label_authority = SECURITY_MANDATORY_LABEL_AUTHORITY;
+
+static inline size_t token_sid_size( const SID *sid )
+{
+    return offsetof( SID, SubAuthority[sid->SubAuthorityCount] );
+}
+
 static BOOL is_equal_sid( const SID *sid1, const SID *sid2 )
 {
     size_t size1 = offsetof( SID, SubAuthority[sid1->SubAuthorityCount] );
     size_t size2 = offsetof( SID, SubAuthority[sid2->SubAuthorityCount] );
     return size1 == size2 && !memcmp( sid1, sid2, size1 );
 }
+
+#ifdef HAVE_LANDLOCK
+
+static BOOL landlock_applied = FALSE;
+
+/* Restrict filesystem writes with Landlock for low integrity / appcontainer tokens.
+ * Best effort: kernels without Landlock keep the default unrestricted behaviour. */
+static void apply_landlock_sandbox( void )
+{
+    static const char *const writable_dirs[] = { "WINEPREFIX", "TMPDIR", "HOME" };
+    static const char *const fallback_dirs[] = { "/tmp" };
+    struct landlock_ruleset_attr ruleset_attr;
+    struct landlock_path_beneath_attr path_attr;
+    unsigned int i;
+    const char *path;
+    int fd;
+
+    if (landlock_applied) return;
+    landlock_applied = TRUE;
+
+    if (syscall( __NR_landlock_create_ruleset, NULL, 0, LANDLOCK_CREATE_RULESET_VERSION ) < 0)
+        return;
+
+    ruleset_attr.handled_access_fs = LANDLOCK_ACCESS_FS_WRITE_FILE | LANDLOCK_ACCESS_FS_REMOVE_FILE |
+                                     LANDLOCK_ACCESS_FS_REMOVE_DIR | LANDLOCK_ACCESS_FS_MAKE_CHAR |
+                                     LANDLOCK_ACCESS_FS_MAKE_DIR | LANDLOCK_ACCESS_FS_MAKE_REG;
+
+    if ((fd = syscall( __NR_landlock_create_ruleset, &ruleset_attr, sizeof(ruleset_attr), 0 )) < 0)
+        return;
+
+    for (i = 0; i < ARRAY_SIZE( writable_dirs ); i++)
+    {
+        if (!(path = getenv( writable_dirs[i] ))) continue;
+        path_attr.allowed_access = ruleset_attr.handled_access_fs;
+        if ((path_attr.parent_fd = open( path, O_PATH | O_CLOEXEC )) != -1)
+        {
+            syscall( __NR_landlock_add_rule, fd, LANDLOCK_RULE_PATH_BENEATH, &path_attr, 0 );
+            close( path_attr.parent_fd );
+        }
+    }
+
+    for (i = 0; i < ARRAY_SIZE( fallback_dirs ); i++)
+    {
+        path_attr.allowed_access = ruleset_attr.handled_access_fs;
+        if ((path_attr.parent_fd = open( fallback_dirs[i], O_PATH | O_CLOEXEC )) != -1)
+        {
+            syscall( __NR_landlock_add_rule, fd, LANDLOCK_RULE_PATH_BENEATH, &path_attr, 0 );
+            close( path_attr.parent_fd );
+        }
+    }
+
+    /* landlock_restrict_self() requires no_new_privs to be set first */
+    prctl( PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0 );
+    syscall( __NR_landlock_restrict_self, fd, 0 );
+    close( fd );
+}
+
+#else
+
+static void apply_landlock_sandbox( void ) {}
+
+#endif
 
 /***********************************************************************
  *             NtCreateToken  (NTDLL.@)
@@ -360,7 +441,7 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
         sizeof(DWORD), /* TokenIsAppContainer */
         0,    /* TokenCapabilities */
         sizeof(TOKEN_APPCONTAINER_INFORMATION) + sizeof(SID), /* TokenAppContainerSid */
-        0,    /* TokenAppContainerNumber */
+        sizeof(DWORD), /* TokenAppContainerNumber */
         sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenUserClaimAttributes */
         sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenDeviceClaimAttributes */
         sizeof(TOKEN_SECURITY_ATTRIBUTES_INFORMATION), /* TokenRestrictedUserClaimAttributes */
@@ -613,16 +694,25 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
 
     case TokenIntegrityLevel:
         {
-            /* report always "S-1-16-12288" (high mandatory level) for now */
-            static const SID high_level = {SID_REVISION, 1, {SECURITY_MANDATORY_LABEL_AUTHORITY},
-                                                            {SECURITY_MANDATORY_HIGH_RID}};
-
             TOKEN_MANDATORY_LABEL *tml = info;
-            PSID psid = tml + 1;
+            SID *psid = (SID *)(tml + 1);
 
             tml->Label.Sid = psid;
             tml->Label.Attributes = SE_GROUP_INTEGRITY | SE_GROUP_INTEGRITY_ENABLED;
-            memcpy( psid, &high_level, sizeof(SID) );
+
+            SERVER_START_REQ( get_token_info )
+            {
+                req->handle = wine_server_obj_handle( token );
+                status = wine_server_call( req );
+                if (!status)
+                {
+                    psid->Revision = SID_REVISION;
+                    psid->SubAuthorityCount = 1;
+                    psid->IdentifierAuthority = mandatory_label_authority;
+                    psid->SubAuthority[0] = reply->integrity_rid;
+                }
+            }
+            SERVER_END_REQ;
         }
         break;
 
@@ -634,17 +724,98 @@ NTSTATUS WINAPI NtQueryInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS c
     case TokenAppContainerSid:
         {
             TOKEN_APPCONTAINER_INFORMATION *container = info;
-            FIXME("QueryInformationToken( ..., TokenAppContainerSid, ...) semi-stub\n");
+            PSID psid = container + 1;
+            ULONG sid_space = length - sizeof(*container);
+
             container->TokenAppContainer = NULL;
+            SERVER_START_REQ( get_token_info )
+            {
+                req->handle = wine_server_obj_handle( token );
+                wine_server_set_reply( req, psid, sid_space );
+                status = wine_server_call( req );
+                if (!status)
+                {
+                    if (reply->appcontainer_sid_len > sid_space) status = STATUS_BUFFER_TOO_SMALL;
+                    else if (reply->appcontainer_sid_len)
+                    {
+                        container->TokenAppContainer = psid;
+                        if (retlen) *retlen = sizeof(*container) + reply->appcontainer_sid_len;
+                    }
+                }
+            }
+            SERVER_END_REQ;
         }
         break;
 
     case TokenIsAppContainer:
+        SERVER_START_REQ( get_token_info )
         {
-            TRACE("TokenIsAppContainer semi-stub\n");
-            *(DWORD *)info = 0;
-            break;
+            req->handle = wine_server_obj_handle( token );
+            status = wine_server_call( req );
+            if (!status) *(DWORD *)info = reply->is_appcontainer;
         }
+        SERVER_END_REQ;
+        break;
+
+    case TokenAppContainerNumber:
+        {
+            BYTE sid_buf[32];
+
+            SERVER_START_REQ( get_token_info )
+            {
+                /* the appcontainer number (LC number) is the last subauthority of the appcontainer sid */
+                SID *sid = (SID *)sid_buf;
+
+                req->handle = wine_server_obj_handle( token );
+                wine_server_set_reply( req, sid_buf, sizeof(sid_buf) );
+                status = wine_server_call( req );
+                if (!status)
+                    *(DWORD *)info = sid->SubAuthorityCount ?
+                        sid->SubAuthority[sid->SubAuthorityCount - 1] : 0;
+            }
+            SERVER_END_REQ;
+        }
+        break;
+
+    case TokenCapabilities:
+    {
+        /* reply buffer is always shorter than output one */
+        void *buffer = malloc( length );
+        TOKEN_GROUPS *caps = info;
+        ULONG count = 0, needed_size = sizeof(TOKEN_GROUPS);
+
+        SERVER_START_REQ( get_token_capabilities )
+        {
+            req->handle = wine_server_obj_handle( token );
+            wine_server_set_reply( req, buffer, length );
+            status = wine_server_call( req );
+
+            count = reply->attr_len / sizeof(unsigned int);
+            needed_size = offsetof( TOKEN_GROUPS, Groups[count] ) + reply->sid_len;
+            if (status == STATUS_SUCCESS && needed_size > length) status = STATUS_BUFFER_TOO_SMALL;
+
+            if (status == STATUS_SUCCESS && caps)
+            {
+                unsigned int *attr = buffer;
+                SID *sids = (SID *)&caps->Groups[count];
+
+                caps->GroupCount = count;
+                memcpy( sids, attr + count, reply->sid_len );
+                for (count = 0; count < caps->GroupCount; count++)
+                {
+                    caps->Groups[count].Attributes = attr[count];
+                    caps->Groups[count].Sid = sids;
+                    sids = (SID *)((char *)sids + offsetof( SID, SubAuthority[sids->SubAuthorityCount] ));
+                }
+            }
+            else if (status != STATUS_BUFFER_TOO_SMALL) needed_size = sizeof(TOKEN_GROUPS);
+        }
+        SERVER_END_REQ;
+
+        free( buffer );
+        if (retlen) *retlen = needed_size;
+        break;
+    }
 
     case TokenLinkedToken:
         SERVER_START_REQ( create_linked_token )
@@ -814,8 +985,34 @@ NTSTATUS WINAPI NtSetInformationToken( HANDLE token, TOKEN_INFORMATION_CLASS cla
         break;
 
     case TokenIntegrityLevel:
-        FIXME( "TokenIntegrityLevel stub!\n" );
-        ret = STATUS_SUCCESS;
+        if (length < sizeof(TOKEN_MANDATORY_LABEL))
+        {
+            ret = STATUS_INFO_LENGTH_MISMATCH;
+            break;
+        }
+        if (!info)
+        {
+            ret = STATUS_ACCESS_VIOLATION;
+            break;
+        }
+        {
+            const SID *label = ((const TOKEN_MANDATORY_LABEL *)info)->Label.Sid;
+
+            if (!label)
+            {
+                ret = STATUS_INVALID_PARAMETER;
+                break;
+            }
+            SERVER_START_REQ( set_token_integrity )
+            {
+                req->handle = wine_server_obj_handle( token );
+                req->integrity_rid = label->SubAuthority[0];
+                ret = wine_server_call( req );
+                if (!ret && label->SubAuthority[0] <= SECURITY_MANDATORY_LOW_RID)
+                    apply_landlock_sandbox();
+            }
+            SERVER_END_REQ;
+        }
         break;
 
     default:
@@ -833,12 +1030,71 @@ NTSTATUS WINAPI NtCreateLowBoxToken( HANDLE *token_handle, HANDLE token, ACCESS_
                                      OBJECT_ATTRIBUTES *attr, SID *sid, ULONG count,
                                      SID_AND_ATTRIBUTES *capabilities, ULONG handle_count, HANDLE *handle )
 {
-    FIXME("(%p, %p, %x, %p, %p, %u, %p, %u, %p): stub\n",
+    data_size_t objattr_size, size, caps_size = 0;
+    struct object_attributes *objattr;
+    NTSTATUS status;
+    unsigned int i;
+    BYTE *data, *p;
+
+    TRACE("(%p, %p, %x, %p, %p, %u, %p, %u, %p)\n",
           token_handle, token, access, attr, sid, count, capabilities, handle_count, handle );
 
     /* we need to return a NULL handle since later it will be passed to NtClose and that must not fail */
     *token_handle = NULL;
-    return STATUS_SUCCESS;
+
+    if (!sid || (count && !capabilities)) return STATUS_INVALID_PARAMETER;
+    for (i = 0; i < count; i++) if (!capabilities[i].Sid) return STATUS_INVALID_PARAMETER;
+
+    if ((status = alloc_object_attributes( attr, &objattr, &objattr_size ))) return status;
+    if (!objattr_size) objattr_size = sizeof(*objattr);  /* send an empty object attributes structure */
+
+    for (i = 0; i < count; i++) caps_size += token_sid_size( capabilities[i].Sid );
+
+    /* request data layout: object attributes, appcontainer sid, capability attrs, capability sids */
+    size = objattr_size + token_sid_size( sid ) + count * sizeof(DWORD) + caps_size;
+    if (!(data = malloc( size )))
+    {
+        free( objattr );
+        return STATUS_NO_MEMORY;
+    }
+
+    p = data;
+    if (objattr) memcpy( p, objattr, objattr_size );
+    else memset( p, 0, objattr_size );  /* empty object attributes */
+    p += objattr_size;
+    free( objattr );
+    memcpy( p, sid, token_sid_size( sid ));
+    p += token_sid_size( sid );
+    for (i = 0; i < count; i++)
+    {
+        *(DWORD *)p = capabilities[i].Attributes;
+        p += sizeof(DWORD);
+    }
+    for (i = 0; i < count; i++)
+    {
+        size_t sid_size = token_sid_size( capabilities[i].Sid );
+        memcpy( p, capabilities[i].Sid, sid_size );
+        p += sid_size;
+    }
+
+    SERVER_START_REQ( create_lowbox_token )
+    {
+        req->handle = wine_server_obj_handle( token );
+        req->access = access;
+        req->appcontainer_num = sid->SubAuthorityCount ? sid->SubAuthority[sid->SubAuthorityCount - 1] : 0;
+        req->cap_count = count;
+        wine_server_add_data( req, data, size );
+        status = wine_server_call( req );
+        if (!status)
+        {
+            *token_handle = wine_server_ptr_handle( reply->token );
+            apply_landlock_sandbox();
+        }
+    }
+    SERVER_END_REQ;
+
+    free( data );
+    return status;
 }
 
 

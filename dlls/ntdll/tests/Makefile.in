@@ -22,6 +22,7 @@ SOURCES = \
 	rtl.c \
 	rtlbitmap.c \
 	rtlstr.c \
+	security.c \
 	string.c \
 	sync.c \
 	testdll.c \

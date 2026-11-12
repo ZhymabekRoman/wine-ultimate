@@ -272,6 +272,9 @@ DECL_HANDLER(make_process_system);
 DECL_HANDLER(grant_process_admin_token);
 DECL_HANDLER(get_token_info);
 DECL_HANDLER(create_linked_token);
+DECL_HANDLER(set_token_integrity);
+DECL_HANDLER(create_lowbox_token);
+DECL_HANDLER(get_token_capabilities);
 DECL_HANDLER(create_completion);
 DECL_HANDLER(open_completion);
 DECL_HANDLER(add_completion);
@@ -602,6 +605,9 @@ static const req_handler req_handlers[REQ_NB_REQUESTS] =
     (req_handler)req_grant_process_admin_token,
     (req_handler)req_get_token_info,
     (req_handler)req_create_linked_token,
+    (req_handler)req_set_token_integrity,
+    (req_handler)req_create_lowbox_token,
+    (req_handler)req_get_token_capabilities,
     (req_handler)req_create_completion,
     (req_handler)req_open_completion,
     (req_handler)req_add_completion,
@@ -2199,11 +2205,29 @@ C_ASSERT( offsetof(struct get_token_info_reply, elevation_type) == 36 );
 C_ASSERT( offsetof(struct get_token_info_reply, is_elevated) == 40 );
 C_ASSERT( offsetof(struct get_token_info_reply, group_count) == 44 );
 C_ASSERT( offsetof(struct get_token_info_reply, privilege_count) == 48 );
-C_ASSERT( sizeof(struct get_token_info_reply) == 56 );
+C_ASSERT( offsetof(struct get_token_info_reply, integrity_rid) == 52 );
+C_ASSERT( offsetof(struct get_token_info_reply, is_appcontainer) == 56 );
+C_ASSERT( offsetof(struct get_token_info_reply, appcontainer_sid_len) == 60 );
+C_ASSERT( sizeof(struct get_token_info_reply) == 64 );
 C_ASSERT( offsetof(struct create_linked_token_request, handle) == 12 );
 C_ASSERT( sizeof(struct create_linked_token_request) == 16 );
 C_ASSERT( offsetof(struct create_linked_token_reply, linked) == 8 );
 C_ASSERT( sizeof(struct create_linked_token_reply) == 16 );
+C_ASSERT( offsetof(struct set_token_integrity_request, handle) == 12 );
+C_ASSERT( offsetof(struct set_token_integrity_request, integrity_rid) == 16 );
+C_ASSERT( sizeof(struct set_token_integrity_request) == 24 );
+C_ASSERT( offsetof(struct create_lowbox_token_request, handle) == 12 );
+C_ASSERT( offsetof(struct create_lowbox_token_request, access) == 16 );
+C_ASSERT( offsetof(struct create_lowbox_token_request, appcontainer_num) == 20 );
+C_ASSERT( offsetof(struct create_lowbox_token_request, cap_count) == 24 );
+C_ASSERT( sizeof(struct create_lowbox_token_request) == 32 );
+C_ASSERT( offsetof(struct create_lowbox_token_reply, token) == 8 );
+C_ASSERT( sizeof(struct create_lowbox_token_reply) == 16 );
+C_ASSERT( offsetof(struct get_token_capabilities_request, handle) == 12 );
+C_ASSERT( sizeof(struct get_token_capabilities_request) == 16 );
+C_ASSERT( offsetof(struct get_token_capabilities_reply, attr_len) == 8 );
+C_ASSERT( offsetof(struct get_token_capabilities_reply, sid_len) == 12 );
+C_ASSERT( sizeof(struct get_token_capabilities_reply) == 16 );
 C_ASSERT( offsetof(struct create_completion_request, access) == 12 );
 C_ASSERT( offsetof(struct create_completion_request, concurrent) == 16 );
 C_ASSERT( sizeof(struct create_completion_request) == 24 );

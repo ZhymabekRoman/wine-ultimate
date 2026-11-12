@@ -5492,7 +5492,10 @@ struct get_token_info_reply
     int            is_elevated;
     int            group_count;
     int            privilege_count;
-    char __pad_52[4];
+    unsigned int   integrity_rid;
+    int            is_appcontainer;
+    data_size_t    appcontainer_sid_len;
+    /* VARARG(appcontainer_sid,sid,appcontainer_sid_len); */
 };
 
 
@@ -5507,6 +5510,57 @@ struct create_linked_token_reply
     struct reply_header __header;
     obj_handle_t   linked;
     char __pad_12[4];
+};
+
+
+
+struct set_token_integrity_request
+{
+    struct request_header __header;
+    obj_handle_t   handle;
+    unsigned int   integrity_rid;
+    char __pad_20[4];
+};
+struct set_token_integrity_reply
+{
+    struct reply_header __header;
+};
+
+
+
+struct create_lowbox_token_request
+{
+    struct request_header __header;
+    obj_handle_t   handle;
+    unsigned int   access;
+    unsigned int   appcontainer_num;
+    int            cap_count;
+
+
+
+    char __pad_28[4];
+};
+struct create_lowbox_token_reply
+{
+    struct reply_header __header;
+    obj_handle_t   token;
+    char __pad_12[4];
+};
+
+
+
+struct get_token_capabilities_request
+{
+    struct request_header __header;
+    obj_handle_t   handle;
+};
+struct get_token_capabilities_reply
+{
+    struct reply_header __header;
+    data_size_t    attr_len;
+    data_size_t    sid_len;
+    /* VARARG(attrs,uints,attr_len); */
+    /* VARARG(sids,sids); */
 };
 
 
@@ -6768,6 +6822,9 @@ enum request
     REQ_grant_process_admin_token,
     REQ_get_token_info,
     REQ_create_linked_token,
+    REQ_set_token_integrity,
+    REQ_create_lowbox_token,
+    REQ_get_token_capabilities,
     REQ_create_completion,
     REQ_open_completion,
     REQ_add_completion,
@@ -7101,6 +7158,9 @@ union generic_request
     struct grant_process_admin_token_request grant_process_admin_token_request;
     struct get_token_info_request get_token_info_request;
     struct create_linked_token_request create_linked_token_request;
+    struct set_token_integrity_request set_token_integrity_request;
+    struct create_lowbox_token_request create_lowbox_token_request;
+    struct get_token_capabilities_request get_token_capabilities_request;
     struct create_completion_request create_completion_request;
     struct open_completion_request open_completion_request;
     struct add_completion_request add_completion_request;
@@ -7432,6 +7492,9 @@ union generic_reply
     struct grant_process_admin_token_reply grant_process_admin_token_reply;
     struct get_token_info_reply get_token_info_reply;
     struct create_linked_token_reply create_linked_token_reply;
+    struct set_token_integrity_reply set_token_integrity_reply;
+    struct create_lowbox_token_reply create_lowbox_token_reply;
+    struct get_token_capabilities_reply get_token_capabilities_reply;
     struct create_completion_reply create_completion_reply;
     struct open_completion_reply open_completion_reply;
     struct add_completion_reply add_completion_reply;
@@ -7495,6 +7558,6 @@ union generic_reply
     struct get_swap_interval_reply get_swap_interval_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 971
+#define SERVER_PROTOCOL_VERSION 972
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

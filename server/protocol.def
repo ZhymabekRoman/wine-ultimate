@@ -3877,6 +3877,10 @@ struct handle_info
     int            is_elevated;   /* is the token elevated as per GetTokenInformation(TokenElevation) */
     int            group_count;   /* the number of groups the token is a member of */
     int            privilege_count; /* the number of privileges the token has */
+    unsigned int   integrity_rid; /* integrity level (SECURITY_MANDATORY_*_RID) */
+    int            is_appcontainer; /* is the token an appcontainer token? */
+    data_size_t    appcontainer_sid_len; /* length of the appcontainer sid, 0 if none */
+    VARARG(appcontainer_sid,sid,appcontainer_sid_len); /* appcontainer sid */
 @END
 
 
@@ -3885,6 +3889,38 @@ struct handle_info
     obj_handle_t   handle;        /* handle to the token */
 @REPLY
     obj_handle_t   linked;        /* handle to the linked token */
+@END
+
+
+/* Set the integrity level of a token */
+@REQ(set_token_integrity)
+    obj_handle_t   handle;        /* handle to the token */
+    unsigned int   integrity_rid; /* integrity level (SECURITY_MANDATORY_*_RID) */
+@END
+
+
+/* Create an appcontainer (lowbox) token from a base token */
+@REQ(create_lowbox_token)
+    obj_handle_t   handle;        /* handle to the base token */
+    unsigned int   access;        /* access rights to the new token */
+    unsigned int   appcontainer_num; /* appcontainer number */
+    int            cap_count;     /* number of capability sids */
+    /* VARARG(objattr,object_attributes);  object attributes of the new token */
+    /* VARARG(appcontainer,sid);           appcontainer sid */
+    /* VARARG(capabilities,sid);           array of capability sids */
+@REPLY
+    obj_handle_t   token;         /* handle to the new token */
+@END
+
+
+/* Retrieves the set of appcontainer capabilities held by a token */
+@REQ(get_token_capabilities)
+    obj_handle_t   handle;        /* handle to the token */
+@REPLY
+    data_size_t    attr_len;      /* length needed to store attrs */
+    data_size_t    sid_len;       /* length needed to store sids */
+    VARARG(attrs,uints,attr_len); /* capability attributes */
+    VARARG(sids,sids);            /* capability sids */
 @END
 
 

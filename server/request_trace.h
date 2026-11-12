@@ -3081,6 +3081,10 @@ static void dump_get_token_info_reply( const struct get_token_info_reply *req )
     fprintf( stderr, ", is_elevated=%d", req->is_elevated );
     fprintf( stderr, ", group_count=%d", req->group_count );
     fprintf( stderr, ", privilege_count=%d", req->privilege_count );
+    fprintf( stderr, ", integrity_rid=%08x", req->integrity_rid );
+    fprintf( stderr, ", is_appcontainer=%d", req->is_appcontainer );
+    fprintf( stderr, ", appcontainer_sid_len=%u", req->appcontainer_sid_len );
+    dump_varargs_sid( ", appcontainer_sid=", min( cur_size, req->appcontainer_sid_len ));
 }
 
 static void dump_create_linked_token_request( const struct create_linked_token_request *req )
@@ -3091,6 +3095,38 @@ static void dump_create_linked_token_request( const struct create_linked_token_r
 static void dump_create_linked_token_reply( const struct create_linked_token_reply *req )
 {
     fprintf( stderr, " linked=%04x", req->linked );
+}
+
+static void dump_set_token_integrity_request( const struct set_token_integrity_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", integrity_rid=%08x", req->integrity_rid );
+}
+
+static void dump_create_lowbox_token_request( const struct create_lowbox_token_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+    fprintf( stderr, ", access=%08x", req->access );
+    fprintf( stderr, ", appcontainer_num=%08x", req->appcontainer_num );
+    fprintf( stderr, ", cap_count=%d", req->cap_count );
+}
+
+static void dump_create_lowbox_token_reply( const struct create_lowbox_token_reply *req )
+{
+    fprintf( stderr, " token=%04x", req->token );
+}
+
+static void dump_get_token_capabilities_request( const struct get_token_capabilities_request *req )
+{
+    fprintf( stderr, " handle=%04x", req->handle );
+}
+
+static void dump_get_token_capabilities_reply( const struct get_token_capabilities_reply *req )
+{
+    fprintf( stderr, " attr_len=%u", req->attr_len );
+    fprintf( stderr, ", sid_len=%u", req->sid_len );
+    dump_varargs_uints( ", attrs=", min( cur_size, req->attr_len ));
+    dump_varargs_sids( ", sids=", cur_size );
 }
 
 static void dump_create_completion_request( const struct create_completion_request *req )
@@ -3988,6 +4024,9 @@ static const dump_func req_dumpers[REQ_NB_REQUESTS] =
     (dump_func)dump_grant_process_admin_token_request,
     (dump_func)dump_get_token_info_request,
     (dump_func)dump_create_linked_token_request,
+    (dump_func)dump_set_token_integrity_request,
+    (dump_func)dump_create_lowbox_token_request,
+    (dump_func)dump_get_token_capabilities_request,
     (dump_func)dump_create_completion_request,
     (dump_func)dump_open_completion_request,
     (dump_func)dump_add_completion_request,
@@ -4318,6 +4357,9 @@ static const dump_func reply_dumpers[REQ_NB_REQUESTS] =
     NULL,
     (dump_func)dump_get_token_info_reply,
     (dump_func)dump_create_linked_token_reply,
+    NULL,
+    (dump_func)dump_create_lowbox_token_reply,
+    (dump_func)dump_get_token_capabilities_reply,
     (dump_func)dump_create_completion_reply,
     (dump_func)dump_open_completion_reply,
     NULL,
@@ -4648,6 +4690,9 @@ static const char * const req_names[REQ_NB_REQUESTS] =
     "grant_process_admin_token",
     "get_token_info",
     "create_linked_token",
+    "set_token_integrity",
+    "create_lowbox_token",
+    "get_token_capabilities",
     "create_completion",
     "open_completion",
     "add_completion",

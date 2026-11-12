@@ -114,6 +114,10 @@ struct token
     struct acl    *default_dacl;    /* the default DACL to assign to objects created by this user */
     int            impersonation_level; /* impersonation level this token is capable of if non-primary token */
     int            elevation;       /* elevation type */
+    unsigned int   integrity_rid;   /* integrity level (SECURITY_MANDATORY_*_RID) */
+    struct sid    *appcontainer_sid; /* appcontainer sid, NULL for a non-appcontainer token */
+    unsigned int   appcontainer_num; /* appcontainer number */
+    struct list    capabilities;    /* appcontainer capabilities (struct capability) */
 };
 
 struct privilege
@@ -125,6 +129,13 @@ struct privilege
 };
 
 struct group
+{
+    struct list    entry;
+    unsigned int   attrs;
+    struct sid     sid;
+};
+
+struct capability
 {
     struct list    entry;
     unsigned int   attrs;
@@ -431,6 +442,30 @@ static inline void privilege_remove( struct privilege *privilege )
     free( privilege );
 }
 
+static struct capability *capability_add( struct token *token, const struct sid *sid, unsigned int attrs )
+{
+    size_t size = offsetof( struct capability, sid.sub_auth[sid->sub_count] );
+    struct capability *capability = mem_alloc( size );
+
+    if (capability)
+    {
+        capability->attrs = attrs;
+        copy_sid( &capability->sid, sid );
+        list_add_tail( &token->capabilities, &capability->entry );
+    }
+    return capability;
+}
+
+/* Set the token integrity level, updating both the cached rid and the security label */
+static int token_set_integrity( struct token *token, unsigned int rid )
+{
+    struct sid label = high_label_sid;
+
+    label.sub_auth[0] = rid;
+    token->integrity_rid = rid;
+    return token_assign_label( token, &label );
+}
+
 static void token_destroy( struct object *obj )
 {
     struct token* token;
@@ -454,6 +489,14 @@ static void token_destroy( struct object *obj )
         free( group );
     }
 
+    LIST_FOR_EACH_SAFE( cursor, cursor_next, &token->capabilities )
+    {
+        struct capability *capability = LIST_ENTRY( cursor, struct capability, entry );
+        list_remove( &capability->entry );
+        free( capability );
+    }
+
+    free( token->appcontainer_sid );
     free( token->default_dacl );
 }
 
@@ -483,6 +526,10 @@ static struct token *create_token( unsigned int primary, unsigned int session_id
             allocate_luid( &token->modified_id );
         list_init( &token->privileges );
         list_init( &token->groups );
+        list_init( &token->capabilities );
+        token->integrity_rid = SECURITY_MANDATORY_HIGH_RID;
+        token->appcontainer_sid = NULL;
+        token->appcontainer_num = 0;
         token->primary = primary;
         token->session_id = session_id;
         /* primary tokens don't have impersonation levels */
@@ -584,6 +631,7 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
     struct token *token = NULL;
     struct privilege *privilege;
     struct group *group;
+    struct capability *capability;
 
     if (!primary &&
         (impersonation_level < SecurityAnonymous ||
@@ -624,6 +672,27 @@ struct token *token_duplicate( struct token *src_token, unsigned primary,
         }
     }
     assert( token->primary_group );
+
+    /* copy integrity level and appcontainer information */
+    token->integrity_rid = src_token->integrity_rid;
+    token->appcontainer_num = src_token->appcontainer_num;
+    if (src_token->appcontainer_sid &&
+        !(token->appcontainer_sid = memdup( src_token->appcontainer_sid,
+                                            sid_len( src_token->appcontainer_sid ))))
+    {
+        release_object( token );
+        return NULL;
+    }
+
+    /* copy appcontainer capabilities */
+    LIST_FOR_EACH_ENTRY( capability, &src_token->capabilities, struct capability, entry )
+    {
+        if (!capability_add( token, &capability->sid, capability->attrs ))
+        {
+            release_object( token );
+            return NULL;
+        }
+    }
 
     /* copy privileges */
     LIST_FOR_EACH_ENTRY( privilege, &src_token->privileges, struct privilege, entry )
@@ -1556,6 +1625,23 @@ DECL_HANDLER(get_token_info)
             reply->is_elevated = token->elevation == TokenElevationTypeFull;
         reply->group_count = list_count( &token->groups );
         reply->privilege_count = list_count( &token->privileges );
+        reply->integrity_rid = token->integrity_rid;
+        reply->is_appcontainer = !!token->appcontainer_sid;
+        reply->appcontainer_sid_len = token->appcontainer_sid ? sid_len( token->appcontainer_sid ) : 0;
+
+        if (reply->appcontainer_sid_len && get_reply_max_size())
+        {
+            if (reply->appcontainer_sid_len <= get_reply_max_size())
+            {
+                struct sid *sid = set_reply_data_size( reply->appcontainer_sid_len );
+                if (sid) copy_sid( sid, token->appcontainer_sid );
+            }
+            else
+            {
+                reply->appcontainer_sid_len = 0;
+                set_error( STATUS_BUFFER_TOO_SMALL );
+            }
+        }
         release_object( token );
     }
 }
@@ -1632,6 +1718,127 @@ DECL_HANDLER(create_linked_token)
             reply->linked = alloc_handle( current->process, linked, TOKEN_ALL_ACCESS, 0 );
             release_object( linked );
         }
+        release_object( token );
+    }
+}
+
+DECL_HANDLER(set_token_integrity)
+{
+    struct token *token;
+
+    if ((token = (struct token *)get_handle_obj( current->process, req->handle,
+                                                 TOKEN_ADJUST_DEFAULT, &token_ops )))
+    {
+        token_set_integrity( token, req->integrity_rid );
+        release_object( token );
+    }
+}
+
+DECL_HANDLER(create_lowbox_token)
+{
+    const struct object_attributes *objattr;
+    const struct sid *appcontainer, *sid;
+    const unsigned int *attrs;
+    struct token *token, *new_token;
+    unsigned int i, cap_count;
+    data_size_t data_size;
+
+    if (!(objattr = get_req_object_attributes( NULL, NULL, NULL ))) return;
+
+    if (!(token = (struct token *)get_handle_obj( current->process, req->handle,
+                                                  TOKEN_DUPLICATE, &token_ops )))
+        return;
+
+    /* request data layout: appcontainer sid, capability attrs, capability sids */
+    appcontainer = (const struct sid *)get_req_data_after_objattr( objattr, &data_size );
+    if (!appcontainer || !sid_valid_size( appcontainer, data_size ))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        release_object( token );
+        return;
+    }
+
+    data_size -= sid_len( appcontainer );
+    cap_count = max( req->cap_count, 0 );
+
+    if (data_size < cap_count * sizeof(*attrs))
+    {
+        set_error( STATUS_INVALID_PARAMETER );
+        release_object( token );
+        return;
+    }
+
+    attrs = (const unsigned int *)((const char *)appcontainer + sid_len( appcontainer ));
+    sid = (const struct sid *)(attrs + cap_count);
+    data_size -= cap_count * sizeof(*attrs);
+
+    for (i = 0; i < cap_count; i++)
+    {
+        if (!sid_valid_size( sid, data_size ))
+        {
+            set_error( STATUS_INVALID_PARAMETER );
+            release_object( token );
+            return;
+        }
+        data_size -= sid_len( sid );
+        sid = (const struct sid *)((const char *)sid + sid_len( sid ));
+    }
+
+    sid = (const struct sid *)(attrs + cap_count); /* reset to the first capability */
+
+    if ((new_token = token_duplicate( token, TRUE, SecurityAnonymous, NULL, NULL, 0, NULL, 0, 0 )))
+    {
+        token_set_integrity( new_token, SECURITY_MANDATORY_LOW_RID );
+        free( new_token->appcontainer_sid );
+        new_token->appcontainer_sid = memdup( appcontainer, sid_len( appcontainer ));
+        new_token->appcontainer_num = req->appcontainer_num;
+
+        if (new_token->appcontainer_sid)
+        {
+            for (i = 0; i < cap_count; i++)
+            {
+                capability_add( new_token, sid, attrs[i] );
+                sid = (const struct sid *)((const char *)sid + sid_len( sid ));
+            }
+            reply->token = alloc_handle( current->process, new_token, req->access, objattr->attributes );
+        }
+        release_object( new_token );
+    }
+    release_object( token );
+}
+
+DECL_HANDLER(get_token_capabilities)
+{
+    struct token *token;
+
+    if ((token = (struct token *)get_handle_obj( current->process, req->handle, TOKEN_QUERY, &token_ops )))
+    {
+        unsigned int cap_count = 0;
+        const struct capability *capability;
+
+        LIST_FOR_EACH_ENTRY( capability, &token->capabilities, const struct capability, entry )
+        {
+            cap_count++;
+            reply->sid_len += sid_len( &capability->sid );
+        }
+        reply->attr_len = sizeof(unsigned int) * cap_count;
+
+        if (reply->attr_len + reply->sid_len <= get_reply_max_size())
+        {
+            unsigned int *attr_ptr = set_reply_data_size( reply->attr_len + reply->sid_len );
+            struct sid *sid = (struct sid *)(attr_ptr + cap_count);
+
+            if (attr_ptr)
+            {
+                LIST_FOR_EACH_ENTRY( capability, &token->capabilities, const struct capability, entry )
+                {
+                    sid = copy_sid( sid, &capability->sid );
+                    *attr_ptr++ = capability->attrs;
+                }
+            }
+        }
+        else set_error( STATUS_BUFFER_TOO_SMALL );
+
         release_object( token );
     }
 }
