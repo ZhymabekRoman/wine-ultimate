@@ -18,6 +18,7 @@
  */
 
 #include "initguid.h"
+#include <math.h>
 #include "private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(locale);
@@ -426,6 +427,7 @@ struct language_factory
 {
     IActivationFactory IActivationFactory_iface;
     ILanguageFactory ILanguageFactory_iface;
+    ILanguageStatics ILanguageStatics_iface;
     LONG ref;
 };
 
@@ -460,6 +462,11 @@ static inline struct windows_globalization *impl_from_IGlobalizationPreferencesS
 static inline struct language_factory *impl_from_ILanguageFactory(ILanguageFactory *iface)
 {
     return CONTAINING_RECORD(iface, struct language_factory, ILanguageFactory_iface);
+}
+
+static inline struct language_factory *impl_from_ILanguageStatics(ILanguageStatics *iface)
+{
+    return CONTAINING_RECORD(iface, struct language_factory, ILanguageStatics_iface);
 }
 
 static inline struct language *impl_from_ILanguage(ILanguage *iface)
@@ -881,6 +888,13 @@ static HRESULT STDMETHODCALLTYPE windows_globalization_language_factory_QueryInt
         return S_OK;
     }
 
+    if (IsEqualGUID(iid, &IID_ILanguageStatics))
+    {
+        IUnknown_AddRef(iface);
+        *out = &factory->ILanguageStatics_iface;
+        return S_OK;
+    }
+
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
     *out = NULL;
     return E_NOINTERFACE;
@@ -997,10 +1011,82 @@ static const struct ILanguageFactoryVtbl language_factory_vtbl =
     language_factory_CreateLanguage,
 };
 
+static HRESULT STDMETHODCALLTYPE language_statics_QueryInterface(
+        ILanguageStatics *iface, REFIID iid, void **object)
+{
+    struct language_factory *factory = impl_from_ILanguageStatics(iface);
+    return IActivationFactory_QueryInterface(&factory->IActivationFactory_iface, iid, object);
+}
+
+static ULONG STDMETHODCALLTYPE language_statics_AddRef(ILanguageStatics *iface)
+{
+    struct language_factory *factory = impl_from_ILanguageStatics(iface);
+    return IActivationFactory_AddRef(&factory->IActivationFactory_iface);
+}
+
+static ULONG STDMETHODCALLTYPE language_statics_Release(ILanguageStatics *iface)
+{
+    struct language_factory *factory = impl_from_ILanguageStatics(iface);
+    return IActivationFactory_Release(&factory->IActivationFactory_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE language_statics_GetIids(
+        ILanguageStatics *iface, ULONG *iid_count, IID **iids)
+{
+    FIXME("iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids);
+    return E_NOTIMPL;
+}
+
+static HRESULT STDMETHODCALLTYPE language_statics_GetRuntimeClassName(
+        ILanguageStatics *iface, HSTRING *class_name)
+{
+    return WindowsCreateString(L"Windows.Globalization.Language", 30, class_name);
+}
+
+static HRESULT STDMETHODCALLTYPE language_statics_GetTrustLevel(
+        ILanguageStatics *iface, TrustLevel *trust_level)
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE language_statics_IsWellFormed(
+        ILanguageStatics *iface, HSTRING tag, BOOLEAN *result)
+{
+    TRACE("iface %p, tag %s, result %p.\n", iface, debugstr_hstring(tag), result);
+    if (!result) return E_POINTER;
+    *result = TRUE;
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE language_statics_get_CurrentInputMethodLanguageTag(
+        ILanguageStatics *iface, HSTRING *value)
+{
+    WCHAR locale[LOCALE_NAME_MAX_LENGTH];
+    TRACE("iface %p, value %p.\n", iface, value);
+    if (!value) return E_POINTER;
+    if (!GetUserDefaultLocaleName(locale, LOCALE_NAME_MAX_LENGTH))
+        wcscpy(locale, L"en-US");
+    return WindowsCreateString(locale, wcslen(locale), value);
+}
+
+static const struct ILanguageStaticsVtbl language_statics_vtbl =
+{
+    language_statics_QueryInterface,
+    language_statics_AddRef,
+    language_statics_Release,
+    language_statics_GetIids,
+    language_statics_GetRuntimeClassName,
+    language_statics_GetTrustLevel,
+    language_statics_IsWellFormed,
+    language_statics_get_CurrentInputMethodLanguageTag,
+};
+
 static struct language_factory language_factory =
 {
     {&activation_factory_language_vtbl},
     {&language_factory_vtbl},
+    {&language_statics_vtbl},
     0
 };
 
@@ -1352,6 +1438,321 @@ static const void *font_group_factory_vtbl[] =
 };
 static struct { const void **vtbl; } font_group_factory_obj = { font_group_factory_vtbl };
 
+/* =========================================================================
+ * Windows.Globalization.NumberFormatting.DecimalFormatter
+ * ========================================================================= */
+static const GUID IID_IDecimalFormatterFactory =
+    { 0x0d018c9a, 0xe393, 0x46b8, { 0xb8, 0x30, 0x7a, 0x69, 0xc8, 0xf8, 0x9f, 0xbb } };
+static const GUID IID_INumberFormatter =
+    { 0xa5007c49, 0x7676, 0x4db7, { 0x86, 0x31, 0x1b, 0x6f, 0xf2, 0x65, 0xca, 0xa9 } };
+static const GUID IID_INumberFormatter2 =
+    { 0xd4a8c1f0, 0x80d0, 0x4b0d, { 0xa8, 0x9e, 0x88, 0x2c, 0x1e, 0x8f, 0x83, 0x10 } };
+static const GUID IID_INumberFormatterOptions =
+    { 0x80332d21, 0xaee1, 0x4a39, { 0xba, 0xa2, 0x07, 0xed, 0x8c, 0x96, 0xda, 0xf6 } };
+static const GUID IID_INumberParser =
+    { 0xe6659412, 0x4a13, 0x4a53, { 0x83, 0xa1, 0x39, 0x2f, 0xbe, 0x4c, 0xff, 0x9f } };
+
+struct decimal_formatter
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    INT32 fraction_digits;
+    INT32 integer_digits;
+    BOOLEAN is_grouping_enabled;
+};
+
+static inline struct decimal_formatter *impl_from_decimal_formatter( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct decimal_formatter, IInspectable_iface );
+}
+
+static HRESULT WINAPI decimal_formatter_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_INumberFormatter ) ||
+        IsEqualGUID( iid, &IID_INumberFormatter2 ) ||
+        IsEqualGUID( iid, &IID_INumberFormatterOptions ) ||
+        IsEqualGUID( iid, &IID_INumberParser ))
+    {
+        *out = &impl->IInspectable_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI decimal_formatter_AddRef( IInspectable *iface )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI decimal_formatter_Release( IInspectable *iface )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI decimal_formatter_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI decimal_formatter_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Globalization.NumberFormatting.DecimalFormatter", 55, name );
+}
+
+static HRESULT WINAPI decimal_formatter_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI decimal_formatter_FormatInt( void *iface, INT64 value, HSTRING *result )
+{
+    WCHAR buf[64];
+    if (!result) return E_POINTER;
+    swprintf( buf, ARRAY_SIZE(buf), L"%lld", (long long)value );
+    return WindowsCreateString( buf, wcslen(buf), result );
+}
+
+static HRESULT WINAPI decimal_formatter_FormatUInt( void *iface, UINT64 value, HSTRING *result )
+{
+    WCHAR buf[64];
+    if (!result) return E_POINTER;
+    swprintf( buf, ARRAY_SIZE(buf), L"%llu", (unsigned long long)value );
+    return WindowsCreateString( buf, wcslen(buf), result );
+}
+
+static HRESULT WINAPI decimal_formatter_FormatDouble( void *iface, double value, HSTRING *result )
+{
+    WCHAR buf[64];
+    if (!result) return E_POINTER;
+    if (value == floor( value ) && fabs( value ) < 1e14)
+        swprintf( buf, ARRAY_SIZE(buf), L"%.0f", value );
+    else
+        swprintf( buf, ARRAY_SIZE(buf), L"%.10g", value );
+    return WindowsCreateString( buf, wcslen(buf), result );
+}
+
+static HRESULT WINAPI decimal_formatter_get_Languages( void *iface, void **value )
+{
+    WCHAR locale[LOCALE_NAME_MAX_LENGTH];
+    HSTRING hs;
+    if (!value) return E_POINTER;
+    if (!GetUserDefaultLocaleName( locale, LOCALE_NAME_MAX_LENGTH ))
+        wcscpy( locale, L"en-US" );
+    WindowsCreateString( locale, wcslen(locale), &hs );
+    return hstring_vector_create( &hs, 1, (IVectorView_HSTRING **)value );
+}
+
+static HRESULT WINAPI decimal_formatter_get_GeographicRegion( void *iface, HSTRING *value )
+{
+    WCHAR country[16];
+    if (!value) return E_POINTER;
+    if (!GetUserDefaultGeoName( country, 16 ))
+        wcscpy( country, L"US" );
+    return WindowsCreateString( country, wcslen(country), value );
+}
+
+static HRESULT WINAPI decimal_formatter_get_IntegerDigits( void *iface, INT32 *value )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    if (!value) return E_POINTER;
+    *value = impl->integer_digits;
+    return S_OK;
+}
+static HRESULT WINAPI decimal_formatter_put_IntegerDigits( void *iface, INT32 value )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    impl->integer_digits = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI decimal_formatter_get_FractionDigits( void *iface, INT32 *value )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    if (!value) return E_POINTER;
+    *value = impl->fraction_digits;
+    return S_OK;
+}
+static HRESULT WINAPI decimal_formatter_put_FractionDigits( void *iface, INT32 value )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    impl->fraction_digits = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI decimal_formatter_get_IsGroupingEnabled( void *iface, BOOLEAN *value )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    if (!value) return E_POINTER;
+    *value = impl->is_grouping_enabled;
+    return S_OK;
+}
+static HRESULT WINAPI decimal_formatter_put_IsGroupingEnabled( void *iface, BOOLEAN value )
+{
+    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    impl->is_grouping_enabled = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI decimal_formatter_get_IsDecimalPointAlwaysDisplayed( void *iface, BOOLEAN *value )
+{
+    if (value) *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI decimal_formatter_put_IsDecimalPointAlwaysDisplayed( void *iface, BOOLEAN value )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI decimal_formatter_get_NumeralSystem( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"Latn", 4, value );
+}
+static HRESULT WINAPI decimal_formatter_put_NumeralSystem( void *iface, HSTRING value )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI decimal_formatter_get_ResolvedLanguage( void *iface, HSTRING *value )
+{
+    return decimal_formatter_get_GeographicRegion( iface, value );
+}
+static HRESULT WINAPI decimal_formatter_get_ResolvedGeographicRegion( void *iface, HSTRING *value )
+{
+    return decimal_formatter_get_GeographicRegion( iface, value );
+}
+
+static HRESULT WINAPI decimal_formatter_stub_ok( void *iface, ... )
+{
+    return S_OK;
+}
+
+static const void *decimal_formatter_vtbl[] =
+{
+    decimal_formatter_QueryInterface,
+    decimal_formatter_AddRef,
+    decimal_formatter_Release,
+    decimal_formatter_GetIids,
+    decimal_formatter_GetRuntimeClassName,
+    decimal_formatter_GetTrustLevel,
+    /* INumberFormatter */
+    decimal_formatter_FormatInt,
+    decimal_formatter_FormatUInt,
+    decimal_formatter_FormatDouble,
+    /* INumberFormatterOptions */
+    decimal_formatter_get_Languages,
+    decimal_formatter_get_GeographicRegion,
+    decimal_formatter_get_IntegerDigits,
+    decimal_formatter_put_IntegerDigits,
+    decimal_formatter_get_FractionDigits,
+    decimal_formatter_put_FractionDigits,
+    decimal_formatter_get_IsGroupingEnabled,
+    decimal_formatter_put_IsGroupingEnabled,
+    decimal_formatter_get_IsDecimalPointAlwaysDisplayed,
+    decimal_formatter_put_IsDecimalPointAlwaysDisplayed,
+    decimal_formatter_get_NumeralSystem,
+    decimal_formatter_put_NumeralSystem,
+    decimal_formatter_get_ResolvedLanguage,
+    decimal_formatter_get_ResolvedGeographicRegion,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+};
+
+static HRESULT decimal_formatter_create( void **instance )
+{
+    struct decimal_formatter *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return E_OUTOFMEMORY;
+    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)decimal_formatter_vtbl;
+    impl->ref = 1;
+    impl->integer_digits = 1;
+    impl->fraction_digits = 0;
+    impl->is_grouping_enabled = FALSE;
+    *instance = &impl->IInspectable_iface;
+    return S_OK;
+}
+
+/* DecimalFormatter factory */
+static HRESULT WINAPI decimal_formatter_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IDecimalFormatterFactory ))
+    {
+        *out = iface;
+        IUnknown_AddRef( iface );
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI decimal_formatter_factory_AddRef( IActivationFactory *iface )
+{
+    return 2;
+}
+static ULONG WINAPI decimal_formatter_factory_Release( IActivationFactory *iface )
+{
+    return 1;
+}
+static HRESULT WINAPI decimal_formatter_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI decimal_formatter_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Globalization.NumberFormatting.DecimalFormatter", 55, name );
+}
+static HRESULT WINAPI decimal_formatter_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI decimal_formatter_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    return decimal_formatter_create( (void **)instance );
+}
+static HRESULT WINAPI decimal_formatter_factory_CreateDecimalFormatter( void *iface, void *languages, HSTRING geographicregion, void **result )
+{
+    return decimal_formatter_create( result );
+}
+
+static const void *decimal_formatter_factory_vtbl[] =
+{
+    decimal_formatter_factory_QueryInterface,
+    decimal_formatter_factory_AddRef,
+    decimal_formatter_factory_Release,
+    decimal_formatter_factory_GetIids,
+    decimal_formatter_factory_GetRuntimeClassName,
+    decimal_formatter_factory_GetTrustLevel,
+    decimal_formatter_factory_ActivateInstance,
+    decimal_formatter_factory_CreateDecimalFormatter,
+};
+
+static struct { const void **vtbl; } decimal_formatter_factory_obj = { decimal_formatter_factory_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
     const WCHAR *name = WindowsGetStringRawBuffer(classid, NULL);
@@ -1383,6 +1784,13 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
     else if (!wcscmp(name, L"Windows.Globalization.Fonts.LanguageFontGroup"))
     {
         *factory = (IActivationFactory *)&font_group_factory_obj;
+        IUnknown_AddRef(*factory);
+    }
+    else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.DecimalFormatter") ||
+             !wcscmp(name, L"Windows.Globalization.NumberFormatting.CurrencyFormatter") ||
+             !wcscmp(name, L"Windows.Globalization.NumberFormatting.PercentFormatter"))
+    {
+        *factory = (IActivationFactory *)&decimal_formatter_factory_obj;
         IUnknown_AddRef(*factory);
     }
 

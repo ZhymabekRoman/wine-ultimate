@@ -143,19 +143,101 @@ static BOOL strict_mode( void )
     return cached;
 }
 
+static const GUID IID_IWindowNative = {0xeecdbf0e, 0xbae9, 0x4cb6, {0xa6, 0x8e, 0x95, 0x98, 0xe1, 0xcb, 0x57, 0xbb}};
+static const GUID IID_ICoreWindowInterop = {0x45d64a29, 0xa63e, 0x4cb6, {0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f}};
+
+typedef struct ICoreWindowInterop ICoreWindowInterop;
+typedef struct ICoreWindowInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWindowInterop *This, REFIID riid, void **out );
+    ULONG (WINAPI *AddRef)( ICoreWindowInterop *This );
+    ULONG (WINAPI *Release)( ICoreWindowInterop *This );
+    HRESULT (WINAPI *GetWindowHandle)( ICoreWindowInterop *This, HWND *hwnd );
+    HRESULT (WINAPI *SetMessageHandled)( ICoreWindowInterop *This, boolean value );
+} ICoreWindowInteropVtbl;
+struct ICoreWindowInterop { const ICoreWindowInteropVtbl *lpVtbl; };
+
+typedef struct IWindowNative IWindowNative;
+typedef struct IWindowNativeVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IWindowNative *This, REFIID riid, void **out );
+    ULONG (WINAPI *AddRef)( IWindowNative *This );
+    ULONG (WINAPI *Release)( IWindowNative *This );
+    HRESULT (WINAPI *GetWindowHandle)( IWindowNative *This, HWND *hwnd );
+} IWindowNativeVtbl;
+struct IWindowNative { const IWindowNativeVtbl *lpVtbl; };
+
 struct fake_window
 {
     ICoreWindow ICoreWindow_iface;
     LONG ref;
+    HWND hwnd;
 };
+
+struct fake_window_interop
+{
+    ICoreWindowInterop ICoreWindowInterop_iface;
+    struct fake_window *window;
+};
+
+static struct fake_window_interop fake_interop;
 
 static inline struct fake_window *impl_from_fake( ICoreWindow *iface )
 {
     return CONTAINING_RECORD( iface, struct fake_window, ICoreWindow_iface );
 }
 
+static HRESULT WINAPI fake_interop_QueryInterface( ICoreWindowInterop *iface, REFIID iid, void **out )
+{
+    struct fake_window_interop *interop = CONTAINING_RECORD( iface, struct fake_window_interop, ICoreWindowInterop_iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) || IsEqualGUID( iid, &IID_ICoreWindowInterop ))
+    {
+        *out = iface;
+        InterlockedIncrement( &interop->window->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI fake_interop_AddRef( ICoreWindowInterop *iface )
+{
+    struct fake_window_interop *interop = CONTAINING_RECORD( iface, struct fake_window_interop, ICoreWindowInterop_iface );
+    return InterlockedIncrement( &interop->window->ref );
+}
+static ULONG WINAPI fake_interop_Release( ICoreWindowInterop *iface )
+{
+    struct fake_window_interop *interop = CONTAINING_RECORD( iface, struct fake_window_interop, ICoreWindowInterop_iface );
+    return InterlockedDecrement( &interop->window->ref );
+}
+static HRESULT WINAPI fake_interop_GetWindowHandle( ICoreWindowInterop *iface, HWND *hwnd )
+{
+    struct fake_window_interop *interop = CONTAINING_RECORD( iface, struct fake_window_interop, ICoreWindowInterop_iface );
+    if (!hwnd) return E_POINTER;
+    *hwnd = interop->window->hwnd;
+    return S_OK;
+}
+static HRESULT WINAPI fake_interop_SetMessageHandled( ICoreWindowInterop *iface, boolean value ) { return S_OK; }
+static const ICoreWindowInteropVtbl fake_interop_vtbl =
+{
+    fake_interop_QueryInterface, fake_interop_AddRef, fake_interop_Release,
+    fake_interop_GetWindowHandle, fake_interop_SetMessageHandled,
+};
+
 static HRESULT WINAPI fake_QueryInterface( ICoreWindow *iface, REFIID iid, void **out )
 {
+    struct fake_window *window = impl_from_fake( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) || IsEqualGUID( iid, &IID_ICoreWindow ))
+    {
+        *out = iface;
+        InterlockedIncrement( &window->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICoreWindowInterop ))
+    {
+        *out = &fake_interop.ICoreWindowInterop_iface;
+        InterlockedIncrement( &window->ref );
+        return S_OK;
+    }
     *out = NULL;
     return E_NOINTERFACE;
 }
@@ -179,6 +261,9 @@ static void fake_window_init( struct fake_window *w )
 {
     w->ICoreWindow_iface.lpVtbl = &fake_window_vtbl;
     w->ref = 1;
+    w->hwnd = (HWND)0x1234;
+    fake_interop.ICoreWindowInterop_iface.lpVtbl = &fake_interop_vtbl;
+    fake_interop.window = w;
 }
 
 static IFrameworkViewSource *get_view_source( void )
@@ -381,9 +466,58 @@ done:
     winetest_pop_context();
 }
 
+static void test_WindowNative( void )
+{
+    static const WCHAR class_name[] = L"Microsoft.UI.Xaml.Window";
+    IFrameworkViewSource *source = get_view_source();
+    IFrameworkView *view;
+    struct fake_window window;
+    IInspectable *xaml_window = NULL;
+    IWindowNative *window_native = NULL;
+    HSTRING class_id;
+    HWND hwnd = NULL;
+    HRESULT hr;
+
+    if (!source) return;
+    fake_window_init( &window );
+    view = create_view( source );
+    if (!view) goto done;
+    hr = IFrameworkView_Initialize( view, NULL );
+    ok( hr == S_OK, "Initialize got hr %#lx.\n", hr );
+    hr = IFrameworkView_SetWindow( view, &window.ICoreWindow_iface );
+    ok( hr == S_OK, "SetWindow got hr %#lx.\n", hr );
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &class_id );
+    ok( hr == S_OK, "WindowsCreateString got hr %#lx.\n", hr );
+    if (SUCCEEDED(hr))
+    {
+        hr = RoActivateInstance( class_id, &xaml_window );
+        WindowsDeleteString( class_id );
+        ok( hr == S_OK, "RoActivateInstance got hr %#lx.\n", hr );
+    }
+    if (SUCCEEDED(hr) && xaml_window)
+    {
+        hr = IInspectable_QueryInterface( xaml_window, &IID_IWindowNative, (void **)&window_native );
+        ok( hr == S_OK, "QI IWindowNative got hr %#lx.\n", hr );
+        if (SUCCEEDED(hr))
+        {
+            hr = window_native->lpVtbl->GetWindowHandle( window_native, &hwnd );
+            ok( hr == S_OK, "GetWindowHandle got hr %#lx.\n", hr );
+            ok( hwnd == window.hwnd, "got hwnd %p, expected %p.\n", hwnd, window.hwnd );
+            window_native->lpVtbl->Release( window_native );
+        }
+        IInspectable_Release( xaml_window );
+    }
+    IFrameworkView_Release( view );
+done:
+    IFrameworkViewSource_Release( source );
+}
+
 static void test_View_lifecycle( void )
 {
     IFrameworkViewSource *source = get_view_source();
+
+    test_WindowNative();
 
     if (!source)
     {

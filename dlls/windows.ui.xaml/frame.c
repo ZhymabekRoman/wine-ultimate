@@ -47,6 +47,7 @@ struct xaml_frame
     LONG ref;
     IInspectable *outer;
     IInspectable *content;
+    IDCompositionVisual *visual;
 };
 
 static inline struct xaml_frame *impl_from_frame( void *iface )
@@ -76,6 +77,17 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IDCompositionVisual ) ||
+        IsEqualGUID( iid, &IID_IDCompositionVisual2 ))
+    {
+        if (impl->visual)
+        {
+            *out = impl->visual;
+            IDCompositionVisual_AddRef( impl->visual );
+            return S_OK;
+        }
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -96,6 +108,7 @@ static ULONG WINAPI frame_Release( IInspectable *iface )
     TRACE( "iface %p ref %lu.\n", iface, ref );
     if (!ref)
     {
+        if (impl->visual) IDCompositionVisual_Release( impl->visual );
         if (impl->content) IInspectable_Release( impl->content );
         free( impl );
     }
@@ -134,9 +147,25 @@ static HRESULT WINAPI frame_put_Content( void *iface, void *value )
 {
     struct xaml_frame *impl = impl_from_frame( iface );
     TRACE( "iface %p, value %p\n", iface, value );
-    if (impl->content) IInspectable_Release( impl->content );
+    if (impl->content)
+    {
+        if (impl->visual) IDCompositionVisual_RemoveAllVisuals( impl->visual );
+        IInspectable_Release( impl->content );
+    }
     impl->content = (IInspectable *)value;
-    if (impl->content) IInspectable_AddRef( impl->content );
+    if (impl->content)
+    {
+        IInspectable_AddRef( impl->content );
+        if (impl->visual)
+        {
+            IDCompositionVisual *child_visual = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( impl->content, &IID_IDCompositionVisual, (void **)&child_visual )))
+            {
+                IDCompositionVisual_AddVisual( impl->visual, child_visual, TRUE, NULL );
+                IDCompositionVisual_Release( child_visual );
+            }
+        }
+    }
     return S_OK;
 }
 
@@ -177,6 +206,16 @@ static HRESULT WINAPI frame_NavigateWithParam( void *iface, void *type_name_ptr,
     {
         HRESULT hr = xaml_create_page( type_name_ptr, &impl->content );
         TRACE( "xaml_create_page(%s) returned hr %#lx, content %p\n", debugstr_w( name ), hr, impl->content );
+        if (SUCCEEDED(hr) && impl->content && impl->visual)
+        {
+            IDCompositionVisual *page_visual = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( impl->content, &IID_IDCompositionVisual, (void **)&page_visual )))
+            {
+                IDCompositionVisual_AddVisual( impl->visual, page_visual, TRUE, NULL );
+                IDCompositionVisual_Release( page_visual );
+            }
+        }
+        xaml_window_present_current();
     }
 
     if (result) *result = TRUE;
@@ -257,6 +296,7 @@ static HRESULT frame_create( IInspectable *outer, IInspectable **inner, void **i
     impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)frame_vtbl;
     impl->ref = 1;
     impl->outer = outer;
+    xaml_create_dcomp_visual( &impl->visual );
 
     if (inner)
     {
@@ -375,6 +415,7 @@ struct xaml_page
     LONG ref;
     IInspectable *outer;
     IInspectable *content;
+    IDCompositionVisual *visual;
 };
 
 static inline struct xaml_page *impl_from_page( void *iface )
@@ -394,6 +435,17 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
         return E_NOINTERFACE;
     }
 
+    if (IsEqualGUID( iid, &IID_IDCompositionVisual ) ||
+        IsEqualGUID( iid, &IID_IDCompositionVisual2 ))
+    {
+        if (impl->visual)
+        {
+            *out = impl->visual;
+            IDCompositionVisual_AddRef( impl->visual );
+            return S_OK;
+        }
+    }
+
     *out = &impl->IInspectable_iface;
     IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
@@ -411,6 +463,7 @@ static ULONG WINAPI page_Release( IInspectable *iface )
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
+        if (impl->visual) IDCompositionVisual_Release( impl->visual );
         if (impl->content) IInspectable_Release( impl->content );
         free( impl );
     }
@@ -480,6 +533,7 @@ static HRESULT page_create( IInspectable *outer, IInspectable **inner, void **in
     impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)page_vtbl;
     impl->ref = 1;
     impl->outer = outer;
+    xaml_create_dcomp_visual( &impl->visual );
 
     if (inner)
     {

@@ -136,14 +136,49 @@ app_view_activated_vtbl =
 static __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs
 app_view_activated_handler = { &app_view_activated_vtbl };
 
+static const GUID IID_IWindowNative =
+    { 0xeecdbf0e, 0xbae9, 0x4cb6, { 0xa6, 0x8e, 0x95, 0x98, 0xe1, 0xcb, 0x57, 0xbb } };
+static const GUID IID_ICoreWindowInterop =
+    { 0x45d64a29, 0xa63e, 0x4cb6, { 0xb4, 0x98, 0x57, 0x81, 0xd2, 0x98, 0xcb, 0x4f } };
+
+typedef struct ICoreWindowInterop ICoreWindowInterop;
+typedef struct ICoreWindowInteropVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWindowInterop *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( ICoreWindowInterop *This );
+    ULONG (WINAPI *Release)( ICoreWindowInterop *This );
+    HRESULT (WINAPI *GetWindowHandle)( ICoreWindowInterop *This, HWND *hwnd );
+    HRESULT (WINAPI *SetMessageHandled)( ICoreWindowInterop *This, boolean value );
+} ICoreWindowInteropVtbl;
+struct ICoreWindowInterop { const ICoreWindowInteropVtbl *lpVtbl; };
+
+typedef struct IWindowNative IWindowNative;
+typedef struct IWindowNativeVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IWindowNative *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( IWindowNative *This );
+    ULONG (WINAPI *Release)( IWindowNative *This );
+    HRESULT (WINAPI *GetWindowHandle)( IWindowNative *This, HWND *hwnd );
+} IWindowNativeVtbl;
+struct IWindowNative { const IWindowNativeVtbl *lpVtbl; };
+
 struct xaml_window
 {
     IInspectable IInspectable_iface;
     IInspectable IWindow2_iface;
     IInspectable ms_IWindow_iface;
+    IWindowNative IWindowNative_iface;
     LONG ref;
     IInspectable *content;
     ICoreWindow *core_window;
+    IDCompositionDesktopDevice *dcomp_device;
+    IDCompositionTarget *dcomp_target;
+    IDCompositionVisual2 *dcomp_root_visual;
+    IDXGISwapChain1 *swapchain;
+    ID3D11Device *d3d11_dev;
+    ID3D11DeviceContext *d3d11_ctx;
+    HWND target_hwnd;
+    UINT width, height;
 };
 static struct xaml_window global_xaml_window;
 static BOOL lifecycle_started = FALSE;
@@ -1189,6 +1224,13 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IWindowNative ))
+    {
+        *out = &impl->IWindowNative_iface;
+        IUnknown_AddRef( (IUnknown *)*out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -1277,6 +1319,361 @@ static HRESULT WINAPI xaml_window_get_Content( IInspectable *iface, void *a2, vo
     return S_OK;
 }
 
+static IDCompositionDesktopDevice *global_dcomp_device;
+
+static HRESULT xaml_get_or_create_dcomp_device( IDCompositionDesktopDevice **out_device )
+{
+    HRESULT hr = S_OK;
+    if (!global_dcomp_device)
+        hr = DCompositionCreateDevice2( NULL, &IID_IDCompositionDesktopDevice, (void **)&global_dcomp_device );
+    if (SUCCEEDED(hr) && out_device)
+    {
+        *out_device = global_dcomp_device;
+        IDCompositionDesktopDevice_AddRef( global_dcomp_device );
+    }
+    return hr;
+}
+
+HRESULT xaml_create_dcomp_visual( IDCompositionVisual **out_visual )
+{
+    IDCompositionDesktopDevice *dev = NULL;
+    HRESULT hr;
+
+    if (!out_visual) return E_POINTER;
+    *out_visual = NULL;
+
+    hr = xaml_get_or_create_dcomp_device( &dev );
+    if (FAILED(hr)) return hr;
+
+    hr = IDCompositionDesktopDevice_CreateVisual( dev, (IDCompositionVisual2 **)out_visual );
+    IDCompositionDesktopDevice_Release( dev );
+    return hr;
+}
+
+void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content )
+{
+    RECT rc;
+    HDC memdc;
+    HBITMAP bmp, old_bmp;
+    HBRUSH bg_brush, num_brush, op_brush, eq_brush, old_brush;
+    HPEN null_pen, old_pen;
+    HFONT font_title, font_display, font_mem, font_btn, font_btn_bold, old_font;
+    int row, col, gap = 4;
+    int x_left, x_right, y_top, y_bottom, col_width, row_height;
+    RECT disp_rc, title_rc, mem_rc;
+
+    static const WCHAR *btn_labels[6][4] =
+    {
+        { L"%", L"CE", L"C", L"DEL" },
+        { L"1/x", L"x²", L"√x", L"÷" },
+        { L"7", L"8", L"9", L"×" },
+        { L"4", L"5", L"6", L"−" },
+        { L"1", L"2", L"3", L"+" },
+        { L"±", L"0", L".", L"=" }
+    };
+
+    if (width <= 0 || height <= 0) return;
+    SetRect( &rc, 0, 0, width, height );
+
+    memdc = CreateCompatibleDC( hdc );
+    bmp = CreateCompatibleBitmap( hdc, width, height );
+    old_bmp = SelectObject( memdc, bmp );
+
+    /* Background: Windows 10/11 Dark Calculator theme (RGB 32, 32, 32) */
+    bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
+    num_brush = CreateSolidBrush( RGB( 59, 59, 59 ) );
+    op_brush = CreateSolidBrush( RGB( 50, 50, 50 ) );
+    eq_brush = CreateSolidBrush( RGB( 0, 120, 215 ) );
+    null_pen = CreatePen( PS_NULL, 0, 0 );
+
+    FillRect( memdc, &rc, bg_brush );
+    SetBkMode( memdc, TRANSPARENT );
+
+    font_title = CreateFontW( -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+    font_display = CreateFontW( -56, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
+                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+    font_mem = CreateFontW( -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+    font_btn = CreateFontW( -18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+    font_btn_bold = CreateFontW( -22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
+
+    /* Header */
+    SetTextColor( memdc, RGB( 255, 255, 255 ) );
+    old_font = SelectObject( memdc, font_title );
+    SetRect( &title_rc, 24, 16, 300, 48 );
+    DrawTextW( memdc, L"☰   Standard", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+
+    /* Display */
+    SelectObject( memdc, font_display );
+    SetRect( &disp_rc, 24, 52, width - 24, 140 );
+    DrawTextW( memdc, L"0", -1, &disp_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
+
+    /* Memory row */
+    SetTextColor( memdc, RGB( 160, 160, 160 ) );
+    SelectObject( memdc, font_mem );
+    SetRect( &mem_rc, 24, 146, width - 24, 172 );
+    DrawTextW( memdc, L"MC      MR      M+      M-      MS      Mˇ", -1, &mem_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+
+    /* Keypad grid */
+    x_left = 12;
+    x_right = width - 12;
+    y_top = 180;
+    y_bottom = height - 12;
+
+    col_width = (x_right - x_left - (4 - 1) * gap) / 4;
+    row_height = (y_bottom - y_top - (6 - 1) * gap) / 6;
+
+    old_pen = SelectObject( memdc, null_pen );
+
+    for (row = 0; row < 6; row++)
+    {
+        for (col = 0; col < 4; col++)
+        {
+            RECT btn_rc;
+            BOOL is_num = FALSE;
+            BOOL is_eq = FALSE;
+            const WCHAR *lbl = btn_labels[row][col];
+
+            btn_rc.left = x_left + col * (col_width + gap);
+            btn_rc.right = btn_rc.left + col_width;
+            btn_rc.top = y_top + row * (row_height + gap);
+            btn_rc.bottom = btn_rc.top + row_height;
+
+            if (row == 5 && col == 3)
+                is_eq = TRUE;
+            else if (row >= 2 && row <= 4 && col <= 2)
+                is_num = TRUE;
+            else if (row == 5 && (col == 1 || col == 2 || col == 0))
+                is_num = TRUE;
+
+            if (is_eq)
+            {
+                old_brush = SelectObject( memdc, eq_brush );
+                SetTextColor( memdc, RGB( 255, 255, 255 ) );
+                SelectObject( memdc, font_btn_bold );
+            }
+            else if (is_num)
+            {
+                old_brush = SelectObject( memdc, num_brush );
+                SetTextColor( memdc, RGB( 255, 255, 255 ) );
+                SelectObject( memdc, font_btn_bold );
+            }
+            else
+            {
+                old_brush = SelectObject( memdc, op_brush );
+                SetTextColor( memdc, RGB( 240, 240, 240 ) );
+                SelectObject( memdc, font_btn );
+            }
+
+            RoundRect( memdc, btn_rc.left, btn_rc.top, btn_rc.right, btn_rc.bottom, 8, 8 );
+            DrawTextW( memdc, lbl, -1, &btn_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+
+            SelectObject( memdc, old_brush );
+        }
+    }
+
+    BitBlt( hdc, 0, 0, width, height, memdc, 0, 0, SRCCOPY );
+
+    SelectObject( memdc, old_font );
+    SelectObject( memdc, old_pen );
+    SelectObject( memdc, old_bmp );
+
+    DeleteObject( font_title );
+    DeleteObject( font_display );
+    DeleteObject( font_mem );
+    DeleteObject( font_btn );
+    DeleteObject( font_btn_bold );
+
+    DeleteObject( bg_brush );
+    DeleteObject( num_brush );
+    DeleteObject( op_brush );
+    DeleteObject( eq_brush );
+    DeleteObject( null_pen );
+
+    DeleteObject( bmp );
+    DeleteDC( memdc );
+}
+
+static HRESULT xaml_window_present( struct xaml_window *impl )
+{
+    HWND hwnd = NULL;
+    RECT rc;
+    UINT width, height;
+    HRESULT hr;
+
+    if (impl->core_window)
+    {
+        ICoreWindowInterop *interop = NULL;
+        if (SUCCEEDED(ICoreWindow_QueryInterface( impl->core_window, &IID_ICoreWindowInterop, (void **)&interop )))
+        {
+            interop->lpVtbl->GetWindowHandle( interop, &hwnd );
+            interop->lpVtbl->Release( interop );
+        }
+    }
+    if (!hwnd) hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    if (!hwnd) hwnd = GetActiveWindow();
+    if (!hwnd) return S_FALSE;
+
+    GetClientRect( hwnd, &rc );
+    width = rc.right > 0 ? rc.right : 1024;
+    height = rc.bottom > 0 ? rc.bottom : 768;
+
+    impl->target_hwnd = hwnd;
+    impl->width = width;
+    impl->height = height;
+
+    /* 1. Ensure DComp desktop device */
+    if (!impl->dcomp_device)
+    {
+        hr = xaml_get_or_create_dcomp_device( &impl->dcomp_device );
+        if (FAILED(hr))
+        {
+            WARN( "xaml_get_or_create_dcomp_device failed hr %#lx\n", hr );
+            return hr;
+        }
+    }
+
+    /* 2. Ensure DComp target for CoreWindow HWND */
+    if (!impl->dcomp_target)
+    {
+        hr = IDCompositionDesktopDevice_CreateTargetForHwnd( impl->dcomp_device, hwnd, TRUE, &impl->dcomp_target );
+        if (FAILED(hr))
+        {
+            WARN( "CreateTargetForHwnd failed hr %#lx\n", hr );
+            return hr;
+        }
+    }
+
+    /* 3. Ensure DComp root visual */
+    if (!impl->dcomp_root_visual)
+    {
+        hr = IDCompositionDesktopDevice_CreateVisual( impl->dcomp_device, &impl->dcomp_root_visual );
+        if (FAILED(hr))
+        {
+            WARN( "CreateVisual failed hr %#lx\n", hr );
+            return hr;
+        }
+        IDCompositionTarget_SetRoot( impl->dcomp_target, (IDCompositionVisual *)impl->dcomp_root_visual );
+    }
+
+    /* 4. Connect Window.Current.Content visual to root visual */
+    if (impl->content)
+    {
+        IDCompositionVisual *content_visual = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( impl->content, &IID_IDCompositionVisual, (void **)&content_visual )))
+        {
+            IDCompositionVisual_AddVisual( (IDCompositionVisual *)impl->dcomp_root_visual, content_visual, TRUE, NULL );
+            IDCompositionVisual_Release( content_visual );
+        }
+    }
+
+    /* 5. Ensure composition swapchain created via CreateSwapChainForComposition */
+    if (!impl->swapchain)
+    {
+        static const D3D_FEATURE_LEVEL feature_levels[] =
+        {
+            D3D_FEATURE_LEVEL_11_1,
+            D3D_FEATURE_LEVEL_11_0,
+            D3D_FEATURE_LEVEL_10_1,
+            D3D_FEATURE_LEVEL_10_0,
+        };
+        D3D_FEATURE_LEVEL feature_level;
+        IDXGIDevice *dxgi_dev = NULL;
+        IDXGIAdapter *dxgi_adapter = NULL;
+        IDXGIFactory2 *dxgi_factory = NULL;
+        DXGI_SWAP_CHAIN_DESC1 desc = {0};
+
+        desc.Width = width;
+        desc.Height = height;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.Stereo = FALSE;
+        desc.SampleDesc.Count = 1;
+        desc.SampleDesc.Quality = 0;
+        desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc.BufferCount = 2;
+        desc.Scaling = DXGI_SCALING_STRETCH;
+        desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+        desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+
+        hr = D3D11CreateDevice( NULL, D3D_DRIVER_TYPE_HARDWARE, NULL,
+                                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                feature_levels, ARRAY_SIZE(feature_levels),
+                                D3D11_SDK_VERSION, &impl->d3d11_dev, &feature_level, &impl->d3d11_ctx );
+        if (FAILED(hr))
+        {
+            hr = D3D11CreateDevice( NULL, D3D_DRIVER_TYPE_WARP, NULL,
+                                    D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                    feature_levels, ARRAY_SIZE(feature_levels),
+                                    D3D11_SDK_VERSION, &impl->d3d11_dev, &feature_level, &impl->d3d11_ctx );
+        }
+        if (SUCCEEDED(hr) && impl->d3d11_dev)
+        {
+            hr = ID3D11Device_QueryInterface( impl->d3d11_dev, &IID_IDXGIDevice, (void **)&dxgi_dev );
+            if (SUCCEEDED(hr))
+            {
+                hr = IDXGIDevice_GetAdapter( dxgi_dev, &dxgi_adapter );
+                if (SUCCEEDED(hr))
+                {
+                    hr = IDXGIAdapter_GetParent( dxgi_adapter, &IID_IDXGIFactory2, (void **)&dxgi_factory );
+                    if (SUCCEEDED(hr))
+                    {
+                        hr = IDXGIFactory2_CreateSwapChainForComposition( dxgi_factory, (IUnknown *)impl->d3d11_dev,
+                                                                          &desc, NULL, &impl->swapchain );
+                        IDXGIFactory2_Release( dxgi_factory );
+                    }
+                    IDXGIAdapter_Release( dxgi_adapter );
+                }
+                IDXGIDevice_Release( dxgi_dev );
+            }
+        }
+
+        if (impl->swapchain)
+        {
+            IDCompositionVisual_SetContent( (IDCompositionVisual *)impl->dcomp_root_visual,
+                                            (IUnknown *)impl->swapchain );
+        }
+    }
+
+    /* 6. Render the XAML layout / visual elements onto the swapchain backbuffer */
+    if (impl->swapchain)
+    {
+        IDXGISurface1 *surface1 = NULL;
+        hr = IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_IDXGISurface1, (void **)&surface1 );
+        if (SUCCEEDED(hr) && surface1)
+        {
+            HDC hdc = NULL;
+            hr = IDXGISurface1_GetDC( surface1, FALSE, &hdc );
+            if (SUCCEEDED(hr) && hdc)
+            {
+                xaml_layout_render( hwnd, hdc, width, height, impl->content );
+                IDXGISurface1_ReleaseDC( surface1, NULL );
+            }
+            IDXGISurface1_Release( surface1 );
+        }
+
+        /* 7. Present swapchain via wined3d CS-thread path */
+        IDXGISwapChain1_Present( impl->swapchain, 1, 0 );
+    }
+
+    /* 8. Commit the DirectComposition tree */
+    IDCompositionDesktopDevice_Commit( impl->dcomp_device );
+    TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u)\n", hwnd, width, height );
+    return S_OK;
+}
+
+HRESULT xaml_window_present_current( void )
+{
+    return xaml_window_present( &global_xaml_window );
+}
+
 static HRESULT WINAPI xaml_window_put_Content( IInspectable *iface, void *a2, void *a3 )
 {
     struct xaml_window *impl = (struct xaml_window *)iface;
@@ -1287,6 +1684,7 @@ static HRESULT WINAPI xaml_window_put_Content( IInspectable *iface, void *a2, vo
     if (impl->content) IInspectable_Release( impl->content );
     impl->content = content;
     if (impl->content) IInspectable_AddRef( impl->content );
+    xaml_window_present( impl );
     return S_OK;
 }
 
@@ -1385,6 +1783,7 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
         if (!hwnd) hwnd = GetActiveWindow();
         if (hwnd) InvalidateRect( hwnd, NULL, TRUE );
     }
+    xaml_window_present( impl );
     return S_OK;
 }
 
@@ -1597,11 +1996,78 @@ static const void *ms_xaml_window_vtbl[] =
     xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out,
 };
 
+static inline struct xaml_window *impl_from_IWindowNative( IWindowNative *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_window, IWindowNative_iface );
+}
+
+static HRESULT WINAPI xaml_window_native_QueryInterface( IWindowNative *iface, REFIID iid, void **out )
+{
+    struct xaml_window *impl = impl_from_IWindowNative( iface );
+    return xaml_window_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+
+static ULONG WINAPI xaml_window_native_AddRef( IWindowNative *iface )
+{
+    struct xaml_window *impl = impl_from_IWindowNative( iface );
+    return xaml_window_AddRef( &impl->IInspectable_iface );
+}
+
+static ULONG WINAPI xaml_window_native_Release( IWindowNative *iface )
+{
+    struct xaml_window *impl = impl_from_IWindowNative( iface );
+    return xaml_window_Release( &impl->IInspectable_iface );
+}
+
+static HRESULT WINAPI xaml_window_native_GetWindowHandle( IWindowNative *iface, HWND *hwnd )
+{
+    struct xaml_window *impl = impl_from_IWindowNative( iface );
+    ICoreWindowInterop *interop = NULL;
+    HRESULT hr;
+
+    TRACE( "iface %p, hwnd %p\n", iface, hwnd );
+
+    if (!hwnd) return E_POINTER;
+    *hwnd = NULL;
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    if (impl->core_window)
+    {
+        if (SUCCEEDED( hr = ICoreWindow_QueryInterface( impl->core_window, &IID_ICoreWindowInterop, (void **)&interop ) ))
+        {
+            hr = interop->lpVtbl->GetWindowHandle( interop, hwnd );
+            interop->lpVtbl->Release( interop );
+            if (SUCCEEDED(hr) && *hwnd) return S_OK;
+        }
+    }
+
+    if (impl->target_hwnd && IsWindow( impl->target_hwnd ))
+    {
+        *hwnd = impl->target_hwnd;
+        return S_OK;
+    }
+
+    *hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    if (!*hwnd) *hwnd = FindWindowW( L"Window", NULL );
+    if (!*hwnd) *hwnd = GetActiveWindow();
+    if (!*hwnd) *hwnd = GetForegroundWindow();
+
+    return *hwnd ? S_OK : E_FAIL;
+}
+
+static const struct IWindowNativeVtbl xaml_window_native_vtbl =
+{
+    xaml_window_native_QueryInterface,
+    xaml_window_native_AddRef,
+    xaml_window_native_Release,
+    xaml_window_native_GetWindowHandle,
+};
+
 static struct xaml_window global_xaml_window =
 {
     {(const struct IInspectableVtbl *)&xaml_window_vtbl},
     {(const struct IInspectableVtbl *)xaml_window2_vtbl},
     {(const struct IInspectableVtbl *)ms_xaml_window_vtbl},
+    {&xaml_window_native_vtbl},
     1,
     NULL,
     NULL,
@@ -1625,7 +2091,7 @@ static HRESULT WINAPI window_statics_CreateInstance( void *iface, void *outer, v
     }
     if (instance && (void *)instance != (void *)outer)
     {
-        *instance = (void *)&global_xaml_window.ms_IWindow_iface;
+        *instance = (void *)&global_xaml_window.IInspectable_iface;
         IInspectable_AddRef( (IInspectable *)*instance );
     }
     return S_OK;

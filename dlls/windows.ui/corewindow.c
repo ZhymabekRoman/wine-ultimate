@@ -19,6 +19,7 @@
 
 #include "private.h"
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -206,6 +207,11 @@ struct core_window
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs *visibility_changed_handler;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *size_changed_handler;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs *activated_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *character_received_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *keydown_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *keyup_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *pointer_pressed_handler;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *pointer_released_handler;
 };
 
 static __thread struct core_window *thread_core_window;
@@ -831,6 +837,16 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs_Release( impl->size_changed_handler );
         if (impl->activated_handler)
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs_Release( impl->activated_handler );
+        if (impl->character_received_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( impl->character_received_handler );
+        if (impl->keydown_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keydown_handler );
+        if (impl->keyup_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keyup_handler );
+        if (impl->pointer_pressed_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Release( impl->pointer_pressed_handler );
+        if (impl->pointer_released_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Release( impl->pointer_released_handler );
         free( impl );
     }
     return ref;
@@ -940,16 +956,84 @@ static HRESULT WINAPI core_window_SetPointerCapture( ICoreWindow *iface )
 
 CORE_WINDOW_EVENT_ADD( AutomationProviderRequested, Windows__CUI__CCore__CAutomationProviderRequestedEventArgs )
 CORE_WINDOW_EVENT_REMOVE( AutomationProviderRequested )
-CORE_WINDOW_EVENT_ADD( CharacterReceived, Windows__CUI__CCore__CCharacterReceivedEventArgs )
-CORE_WINDOW_EVENT_REMOVE( CharacterReceived )
+
+static HRESULT WINAPI core_window_add_CharacterReceived( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *handler, EventRegistrationToken *cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p, handler %p\n", iface, handler );
+    if (cookie) cookie->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_AddRef( handler );
+        impl->character_received_handler = handler;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI core_window_remove_CharacterReceived( ICoreWindow *iface, EventRegistrationToken cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    if (impl->character_received_handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( impl->character_received_handler );
+        impl->character_received_handler = NULL;
+    }
+    return S_OK;
+}
+
 CORE_WINDOW_EVENT_ADD( Closed, Windows__CUI__CCore__CCoreWindowEventArgs )
 CORE_WINDOW_EVENT_REMOVE( Closed )
 CORE_WINDOW_EVENT_ADD( InputEnabled, Windows__CUI__CCore__CInputEnabledEventArgs )
 CORE_WINDOW_EVENT_REMOVE( InputEnabled )
-CORE_WINDOW_EVENT_ADD( KeyDown, Windows__CUI__CCore__CKeyEventArgs )
-CORE_WINDOW_EVENT_REMOVE( KeyDown )
-CORE_WINDOW_EVENT_ADD( KeyUp, Windows__CUI__CCore__CKeyEventArgs )
-CORE_WINDOW_EVENT_REMOVE( KeyUp )
+
+static HRESULT WINAPI core_window_add_KeyDown( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *handler, EventRegistrationToken *cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p, handler %p\n", iface, handler );
+    if (cookie) cookie->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( handler );
+        impl->keydown_handler = handler;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI core_window_remove_KeyDown( ICoreWindow *iface, EventRegistrationToken cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    if (impl->keydown_handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keydown_handler );
+        impl->keydown_handler = NULL;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI core_window_add_KeyUp( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *handler, EventRegistrationToken *cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p, handler %p\n", iface, handler );
+    if (cookie) cookie->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( handler );
+        impl->keyup_handler = handler;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI core_window_remove_KeyUp( ICoreWindow *iface, EventRegistrationToken cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    if (impl->keyup_handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keyup_handler );
+        impl->keyup_handler = NULL;
+    }
+    return S_OK;
+}
+
 CORE_WINDOW_EVENT_ADD( PointerCaptureLost, Windows__CUI__CCore__CPointerEventArgs )
 CORE_WINDOW_EVENT_REMOVE( PointerCaptureLost )
 CORE_WINDOW_EVENT_ADD( PointerEntered, Windows__CUI__CCore__CPointerEventArgs )
@@ -958,10 +1042,54 @@ CORE_WINDOW_EVENT_ADD( PointerExited, Windows__CUI__CCore__CPointerEventArgs )
 CORE_WINDOW_EVENT_REMOVE( PointerExited )
 CORE_WINDOW_EVENT_ADD( PointerMoved, Windows__CUI__CCore__CPointerEventArgs )
 CORE_WINDOW_EVENT_REMOVE( PointerMoved )
-CORE_WINDOW_EVENT_ADD( PointerPressed, Windows__CUI__CCore__CPointerEventArgs )
-CORE_WINDOW_EVENT_REMOVE( PointerPressed )
-CORE_WINDOW_EVENT_ADD( PointerReleased, Windows__CUI__CCore__CPointerEventArgs )
-CORE_WINDOW_EVENT_REMOVE( PointerReleased )
+
+static HRESULT WINAPI core_window_add_PointerPressed( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p, handler %p\n", iface, handler );
+    if (cookie) cookie->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_AddRef( handler );
+        impl->pointer_pressed_handler = handler;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI core_window_remove_PointerPressed( ICoreWindow *iface, EventRegistrationToken cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    if (impl->pointer_pressed_handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Release( impl->pointer_pressed_handler );
+        impl->pointer_pressed_handler = NULL;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI core_window_add_PointerReleased( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *handler, EventRegistrationToken *cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    TRACE( "iface %p, handler %p\n", iface, handler );
+    if (cookie) cookie->value = 1;
+    if (handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_AddRef( handler );
+        impl->pointer_released_handler = handler;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI core_window_remove_PointerReleased( ICoreWindow *iface, EventRegistrationToken cookie )
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+    if (impl->pointer_released_handler)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Release( impl->pointer_released_handler );
+        impl->pointer_released_handler = NULL;
+    }
+    return S_OK;
+}
 CORE_WINDOW_EVENT_ADD( TouchHitTesting, Windows__CUI__CCore__CTouchHitTestingEventArgs )
 CORE_WINDOW_EVENT_REMOVE( TouchHitTesting )
 CORE_WINDOW_EVENT_ADD( PointerWheelChanged, Windows__CUI__CCore__CPointerEventArgs )
@@ -1434,159 +1562,464 @@ static const struct ICoreWindowVtbl core_window_vtbl =
     core_window_remove_VisibilityChanged,
 };
 
-static void render_xaml_surface( HWND hwnd, HDC hdc )
+/* KeyEventArgs */
+struct key_event_args
 {
-    RECT rc;
-    HDC memdc;
-    HBITMAP bmp, old_bmp;
-    HBRUSH bg_brush, num_brush, op_brush, eq_brush, old_brush;
-    HPEN null_pen, old_pen;
-    HFONT font_title, font_display, font_mem, font_btn, font_btn_bold, old_font;
-    int row, col, gap = 4;
-    int x_left, x_right, y_top, y_bottom, col_width, row_height;
-    RECT disp_rc, title_rc, mem_rc;
+    __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs IKeyEventArgs_iface;
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ICoreWindowEventArgs_iface;
+    LONG ref;
+    __x_ABI_CWindows_CSystem_CVirtualKey key;
+    __x_ABI_CWindows_CUI_CCore_CCorePhysicalKeyStatus status;
+    boolean handled;
+};
 
-    static const WCHAR *btn_labels[6][4] =
-    {
-        { L"%", L"CE", L"C", L"DEL" },
-        { L"1/x", L"x²", L"√x", L"÷" },
-        { L"7", L"8", L"9", L"×" },
-        { L"4", L"5", L"6", L"−" },
-        { L"1", L"2", L"3", L"+" },
-        { L"±", L"0", L".", L"=" }
-    };
-
-    GetClientRect( hwnd, &rc );
-    if (rc.right <= 0 || rc.bottom <= 0) return;
-
-    memdc = CreateCompatibleDC( hdc );
-    bmp = CreateCompatibleBitmap( hdc, rc.right, rc.bottom );
-    old_bmp = SelectObject( memdc, bmp );
-
-    /* Background: Windows 10/11 Dark Calculator theme (RGB 32, 32, 32) */
-    bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
-    num_brush = CreateSolidBrush( RGB( 59, 59, 59 ) );
-    op_brush = CreateSolidBrush( RGB( 50, 50, 50 ) );
-    eq_brush = CreateSolidBrush( RGB( 0, 120, 215 ) );
-    null_pen = CreatePen( PS_NULL, 0, 0 );
-
-    FillRect( memdc, &rc, bg_brush );
-
-    SetBkMode( memdc, TRANSPARENT );
-
-    /* Fonts */
-    font_title = CreateFontW( -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-    font_display = CreateFontW( -56, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-    font_mem = CreateFontW( -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-    font_btn = CreateFontW( -18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-    font_btn_bold = CreateFontW( -22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-
-    /* Header: "Standard" */
-    SetTextColor( memdc, RGB( 255, 255, 255 ) );
-    old_font = SelectObject( memdc, font_title );
-    SetRect( &title_rc, 24, 16, 300, 48 );
-    DrawTextW( memdc, L"☰   Standard", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
-
-    /* Display: "0" */
-    SelectObject( memdc, font_display );
-    SetRect( &disp_rc, 24, 52, rc.right - 24, 140 );
-    DrawTextW( memdc, L"0", -1, &disp_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
-
-    /* Memory row: MC  MR  M+  M-  MS  M^ */
-    SetTextColor( memdc, RGB( 160, 160, 160 ) );
-    SelectObject( memdc, font_mem );
-    SetRect( &mem_rc, 24, 146, rc.right - 24, 172 );
-    DrawTextW( memdc, L"MC      MR      M+      M-      MS      Mˇ", -1, &mem_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
-
-    /* Keypad grid */
-    x_left = 12;
-    x_right = rc.right - 12;
-    y_top = 180;
-    y_bottom = rc.bottom - 12;
-
-    col_width = (x_right - x_left - (4 - 1) * gap) / 4;
-    row_height = (y_bottom - y_top - (6 - 1) * gap) / 6;
-
-    old_pen = SelectObject( memdc, null_pen );
-
-    for (row = 0; row < 6; row++)
-    {
-        for (col = 0; col < 4; col++)
-        {
-            RECT btn_rc;
-            BOOL is_num = FALSE;
-            BOOL is_eq = FALSE;
-            const WCHAR *lbl = btn_labels[row][col];
-
-            btn_rc.left = x_left + col * (col_width + gap);
-            btn_rc.right = btn_rc.left + col_width;
-            btn_rc.top = y_top + row * (row_height + gap);
-            btn_rc.bottom = btn_rc.top + row_height;
-
-            if (row == 5 && col == 3)
-                is_eq = TRUE;
-            else if (row >= 2 && row <= 4 && col <= 2)
-                is_num = TRUE;
-            else if (row == 5 && (col == 1 || col == 2 || col == 0))
-                is_num = TRUE;
-
-            if (is_eq)
-            {
-                old_brush = SelectObject( memdc, eq_brush );
-                SetTextColor( memdc, RGB( 255, 255, 255 ) );
-                SelectObject( memdc, font_btn_bold );
-            }
-            else if (is_num)
-            {
-                old_brush = SelectObject( memdc, num_brush );
-                SetTextColor( memdc, RGB( 255, 255, 255 ) );
-                SelectObject( memdc, font_btn_bold );
-            }
-            else
-            {
-                old_brush = SelectObject( memdc, op_brush );
-                SetTextColor( memdc, RGB( 240, 240, 240 ) );
-                SelectObject( memdc, font_btn );
-            }
-
-            RoundRect( memdc, btn_rc.left, btn_rc.top, btn_rc.right, btn_rc.bottom, 8, 8 );
-            DrawTextW( memdc, lbl, -1, &btn_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
-
-            SelectObject( memdc, old_brush );
-        }
-    }
-
-    BitBlt( hdc, 0, 0, rc.right, rc.bottom, memdc, 0, 0, SRCCOPY );
-
-    SelectObject( memdc, old_font );
-    SelectObject( memdc, old_pen );
-    SelectObject( memdc, old_bmp );
-
-    DeleteObject( font_title );
-    DeleteObject( font_display );
-    DeleteObject( font_mem );
-    DeleteObject( font_btn );
-    DeleteObject( font_btn_bold );
-
-    DeleteObject( bg_brush );
-    DeleteObject( num_brush );
-    DeleteObject( op_brush );
-    DeleteObject( eq_brush );
-    DeleteObject( null_pen );
-
-    DeleteObject( bmp );
-    DeleteDC( memdc );
+static inline struct key_event_args *impl_from_IKeyEventArgs( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct key_event_args, IKeyEventArgs_iface );
 }
+static inline struct key_event_args *impl_from_ICoreWindowEventArgs_key( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct key_event_args, ICoreWindowEventArgs_iface );
+}
+
+static HRESULT WINAPI key_event_args_QueryInterface( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface, REFIID iid, void **out )
+{
+    struct key_event_args *impl = impl_from_IKeyEventArgs( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CIKeyEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IKeyEventArgs_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICoreWindowEventArgs_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI key_event_args_AddRef( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface )
+{
+    return InterlockedIncrement( &impl_from_IKeyEventArgs( iface )->ref );
+}
+static ULONG WINAPI key_event_args_Release( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface )
+{
+    struct key_event_args *impl = impl_from_IKeyEventArgs( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI key_event_args_GetIids( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI key_event_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.KeyEventArgs", 28, name ); }
+static HRESULT WINAPI key_event_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI key_event_args_get_VirtualKey( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface, __x_ABI_CWindows_CSystem_CVirtualKey *value )
+{
+    struct key_event_args *impl = impl_from_IKeyEventArgs( iface );
+    if (!value) return E_POINTER;
+    *value = impl->key;
+    return S_OK;
+}
+static HRESULT WINAPI key_event_args_get_KeyStatus( __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *iface, __x_ABI_CWindows_CUI_CCore_CCorePhysicalKeyStatus *value )
+{
+    struct key_event_args *impl = impl_from_IKeyEventArgs( iface );
+    if (!value) return E_POINTER;
+    *value = impl->status;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CIKeyEventArgsVtbl key_event_args_vtbl =
+{
+    key_event_args_QueryInterface,
+    key_event_args_AddRef,
+    key_event_args_Release,
+    key_event_args_GetIids,
+    key_event_args_GetRuntimeClassName,
+    key_event_args_GetTrustLevel,
+    key_event_args_get_VirtualKey,
+    key_event_args_get_KeyStatus,
+};
+
+static HRESULT WINAPI key_event_args_core_QueryInterface( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, REFIID iid, void **out )
+{
+    return key_event_args_QueryInterface( &impl_from_ICoreWindowEventArgs_key( iface )->IKeyEventArgs_iface, iid, out );
+}
+static ULONG WINAPI key_event_args_core_AddRef( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return key_event_args_AddRef( &impl_from_ICoreWindowEventArgs_key( iface )->IKeyEventArgs_iface );
+}
+static ULONG WINAPI key_event_args_core_Release( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return key_event_args_Release( &impl_from_ICoreWindowEventArgs_key( iface )->IKeyEventArgs_iface );
+}
+static HRESULT WINAPI key_event_args_core_GetIids( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI key_event_args_core_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.KeyEventArgs", 28, name ); }
+static HRESULT WINAPI key_event_args_core_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI key_event_args_core_get_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = impl_from_ICoreWindowEventArgs_key( iface )->handled;
+    return S_OK;
+}
+static HRESULT WINAPI key_event_args_core_put_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean value )
+{
+    impl_from_ICoreWindowEventArgs_key( iface )->handled = value;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgsVtbl key_event_args_core_vtbl =
+{
+    key_event_args_core_QueryInterface,
+    key_event_args_core_AddRef,
+    key_event_args_core_Release,
+    key_event_args_core_GetIids,
+    key_event_args_core_GetRuntimeClassName,
+    key_event_args_core_GetTrustLevel,
+    key_event_args_core_get_Handled,
+    key_event_args_core_put_Handled,
+};
+
+static __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *key_event_args_create( __x_ABI_CWindows_CSystem_CVirtualKey key )
+{
+    struct key_event_args *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->IKeyEventArgs_iface.lpVtbl = &key_event_args_vtbl;
+    impl->ICoreWindowEventArgs_iface.lpVtbl = &key_event_args_core_vtbl;
+    impl->ref = 1;
+    impl->key = key;
+    return &impl->IKeyEventArgs_iface;
+}
+
+static void core_window_deliver_keydown( struct core_window *impl, __x_ABI_CWindows_CSystem_CVirtualKey key )
+{
+    __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *args;
+    if (!impl || !impl->keydown_handler) return;
+    if (!(args = key_event_args_create( key ))) return;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
+        impl->keydown_handler, &impl->ICoreWindow_iface, args );
+    __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs_Release( args );
+}
+
+static void core_window_deliver_keyup( struct core_window *impl, __x_ABI_CWindows_CSystem_CVirtualKey key )
+{
+    __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *args;
+    if (!impl || !impl->keyup_handler) return;
+    if (!(args = key_event_args_create( key ))) return;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
+        impl->keyup_handler, &impl->ICoreWindow_iface, args );
+    __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs_Release( args );
+}
+
+/* CharacterReceivedEventArgs */
+struct character_received_args
+{
+    __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs ICharacterReceivedEventArgs_iface;
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ICoreWindowEventArgs_iface;
+    LONG ref;
+    UINT32 key_code;
+    __x_ABI_CWindows_CUI_CCore_CCorePhysicalKeyStatus status;
+    boolean handled;
+};
+
+static inline struct character_received_args *impl_from_ICharacterReceivedEventArgs( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct character_received_args, ICharacterReceivedEventArgs_iface );
+}
+static inline struct character_received_args *impl_from_ICoreWindowEventArgs_char( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct character_received_args, ICoreWindowEventArgs_iface );
+}
+
+static HRESULT WINAPI character_received_args_QueryInterface( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface, REFIID iid, void **out )
+{
+    struct character_received_args *impl = impl_from_ICharacterReceivedEventArgs( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICharacterReceivedEventArgs_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICoreWindowEventArgs_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI character_received_args_AddRef( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface )
+{
+    return InterlockedIncrement( &impl_from_ICharacterReceivedEventArgs( iface )->ref );
+}
+static ULONG WINAPI character_received_args_Release( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface )
+{
+    struct character_received_args *impl = impl_from_ICharacterReceivedEventArgs( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI character_received_args_GetIids( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI character_received_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.CharacterReceivedEventArgs", 42, name ); }
+static HRESULT WINAPI character_received_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI character_received_args_get_KeyCode( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface, UINT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = impl_from_ICharacterReceivedEventArgs( iface )->key_code;
+    return S_OK;
+}
+static HRESULT WINAPI character_received_args_get_KeyStatus( __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *iface, __x_ABI_CWindows_CUI_CCore_CCorePhysicalKeyStatus *value )
+{
+    if (!value) return E_POINTER;
+    *value = impl_from_ICharacterReceivedEventArgs( iface )->status;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgsVtbl character_received_args_vtbl =
+{
+    character_received_args_QueryInterface,
+    character_received_args_AddRef,
+    character_received_args_Release,
+    character_received_args_GetIids,
+    character_received_args_GetRuntimeClassName,
+    character_received_args_GetTrustLevel,
+    character_received_args_get_KeyCode,
+    character_received_args_get_KeyStatus,
+};
+
+static HRESULT WINAPI character_received_args_core_QueryInterface( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, REFIID iid, void **out )
+{
+    return character_received_args_QueryInterface( &impl_from_ICoreWindowEventArgs_char( iface )->ICharacterReceivedEventArgs_iface, iid, out );
+}
+static ULONG WINAPI character_received_args_core_AddRef( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return character_received_args_AddRef( &impl_from_ICoreWindowEventArgs_char( iface )->ICharacterReceivedEventArgs_iface );
+}
+static ULONG WINAPI character_received_args_core_Release( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return character_received_args_Release( &impl_from_ICoreWindowEventArgs_char( iface )->ICharacterReceivedEventArgs_iface );
+}
+static HRESULT WINAPI character_received_args_core_GetIids( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI character_received_args_core_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.CharacterReceivedEventArgs", 42, name ); }
+static HRESULT WINAPI character_received_args_core_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI character_received_args_core_get_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = impl_from_ICoreWindowEventArgs_char( iface )->handled;
+    return S_OK;
+}
+static HRESULT WINAPI character_received_args_core_put_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean value )
+{
+    impl_from_ICoreWindowEventArgs_char( iface )->handled = value;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgsVtbl character_received_args_core_vtbl =
+{
+    character_received_args_core_QueryInterface,
+    character_received_args_core_AddRef,
+    character_received_args_core_Release,
+    character_received_args_core_GetIids,
+    character_received_args_core_GetRuntimeClassName,
+    character_received_args_core_GetTrustLevel,
+    character_received_args_core_get_Handled,
+    character_received_args_core_put_Handled,
+};
+
+static __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *character_received_args_create( UINT32 key_code )
+{
+    struct character_received_args *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->ICharacterReceivedEventArgs_iface.lpVtbl = &character_received_args_vtbl;
+    impl->ICoreWindowEventArgs_iface.lpVtbl = &character_received_args_core_vtbl;
+    impl->ref = 1;
+    impl->key_code = key_code;
+    return &impl->ICharacterReceivedEventArgs_iface;
+}
+
+static void core_window_deliver_character_received( struct core_window *impl, UINT32 key_code )
+{
+    __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *args;
+    if (!impl || !impl->character_received_handler) return;
+    if (!(args = character_received_args_create( key_code ))) return;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Invoke(
+        impl->character_received_handler, &impl->ICoreWindow_iface, args );
+    __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs_Release( args );
+}
+
+/* PointerEventArgs */
+struct pointer_event_args
+{
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs IPointerEventArgs_iface;
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ICoreWindowEventArgs_iface;
+    LONG ref;
+    boolean handled;
+};
+
+static inline struct pointer_event_args *impl_from_IPointerEventArgs( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct pointer_event_args, IPointerEventArgs_iface );
+}
+static inline struct pointer_event_args *impl_from_ICoreWindowEventArgs_pointer( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct pointer_event_args, ICoreWindowEventArgs_iface );
+}
+
+static HRESULT WINAPI pointer_event_args_QueryInterface( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, REFIID iid, void **out )
+{
+    struct pointer_event_args *impl = impl_from_IPointerEventArgs( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CIPointerEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IPointerEventArgs_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICoreWindowEventArgs_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI pointer_event_args_AddRef( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface )
+{
+    return InterlockedIncrement( &impl_from_IPointerEventArgs( iface )->ref );
+}
+static ULONG WINAPI pointer_event_args_Release( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface )
+{
+    struct pointer_event_args *impl = impl_from_IPointerEventArgs( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI pointer_event_args_GetIids( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI pointer_event_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.PointerEventArgs", 31, name ); }
+static HRESULT WINAPI pointer_event_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI pointer_event_args_get_CurrentPoint( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, __x_ABI_CWindows_CUI_CInput_CIPointerPoint **value )
+{ if (value) *value = NULL; return S_OK; }
+static HRESULT WINAPI pointer_event_args_get_KeyModifiers( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, UINT32 *value )
+{ if (value) *value = 0; return S_OK; }
+static HRESULT WINAPI pointer_event_args_GetIntermediatePoints( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, __FIVector_1_Windows__CUI__CInput__CPointerPoint **value )
+{ if (value) *value = NULL; return S_OK; }
+
+static const struct __x_ABI_CWindows_CUI_CCore_CIPointerEventArgsVtbl pointer_event_args_vtbl =
+{
+    pointer_event_args_QueryInterface,
+    pointer_event_args_AddRef,
+    pointer_event_args_Release,
+    pointer_event_args_GetIids,
+    pointer_event_args_GetRuntimeClassName,
+    pointer_event_args_GetTrustLevel,
+    pointer_event_args_get_CurrentPoint,
+    pointer_event_args_get_KeyModifiers,
+    pointer_event_args_GetIntermediatePoints,
+};
+
+static HRESULT WINAPI pointer_event_args_core_QueryInterface( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, REFIID iid, void **out )
+{
+    return pointer_event_args_QueryInterface( &impl_from_ICoreWindowEventArgs_pointer( iface )->IPointerEventArgs_iface, iid, out );
+}
+static ULONG WINAPI pointer_event_args_core_AddRef( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return pointer_event_args_AddRef( &impl_from_ICoreWindowEventArgs_pointer( iface )->IPointerEventArgs_iface );
+}
+static ULONG WINAPI pointer_event_args_core_Release( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return pointer_event_args_Release( &impl_from_ICoreWindowEventArgs_pointer( iface )->IPointerEventArgs_iface );
+}
+static HRESULT WINAPI pointer_event_args_core_GetIids( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI pointer_event_args_core_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.PointerEventArgs", 31, name ); }
+static HRESULT WINAPI pointer_event_args_core_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI pointer_event_args_core_get_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = impl_from_ICoreWindowEventArgs_pointer( iface )->handled;
+    return S_OK;
+}
+static HRESULT WINAPI pointer_event_args_core_put_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean value )
+{
+    impl_from_ICoreWindowEventArgs_pointer( iface )->handled = value;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgsVtbl pointer_event_args_core_vtbl =
+{
+    pointer_event_args_core_QueryInterface,
+    pointer_event_args_core_AddRef,
+    pointer_event_args_core_Release,
+    pointer_event_args_core_GetIids,
+    pointer_event_args_core_GetRuntimeClassName,
+    pointer_event_args_core_GetTrustLevel,
+    pointer_event_args_core_get_Handled,
+    pointer_event_args_core_put_Handled,
+};
+
+static __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *pointer_event_args_create( void )
+{
+    struct pointer_event_args *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->IPointerEventArgs_iface.lpVtbl = &pointer_event_args_vtbl;
+    impl->ICoreWindowEventArgs_iface.lpVtbl = &pointer_event_args_core_vtbl;
+    impl->ref = 1;
+    return &impl->IPointerEventArgs_iface;
+}
+
+static void core_window_deliver_pointer_pressed( struct core_window *impl, int x, int y )
+{
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args;
+    if (!impl || !impl->pointer_pressed_handler) return;
+    if (!(args = pointer_event_args_create())) return;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Invoke(
+        impl->pointer_pressed_handler, &impl->ICoreWindow_iface, args );
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs_Release( args );
+}
+
+static void core_window_deliver_pointer_released( struct core_window *impl, int x, int y )
+{
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args;
+    if (!impl || !impl->pointer_released_handler) return;
+    if (!(args = pointer_event_args_create())) return;
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Invoke(
+        impl->pointer_released_handler, &impl->ICoreWindow_iface, args );
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs_Release( args );
+}
+
+#ifndef WM_POINTERDOWN
+#define WM_POINTERDOWN 0x0246
+#endif
+#ifndef WM_POINTERUP
+#define WM_POINTERUP 0x0247
+#endif
 
 static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
@@ -1609,9 +2042,49 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
     case WM_PAINT:
     {
         PAINTSTRUCT ps;
-        HDC hdc = BeginPaint( hwnd, &ps );
-        render_xaml_surface( hwnd, hdc );
+        BeginPaint( hwnd, &ps );
         EndPaint( hwnd, &ps );
+        return 0;
+    }
+
+    case WM_LBUTTONDOWN:
+    case WM_POINTERDOWN:
+    {
+        int x = LOWORD( lparam );
+        int y = HIWORD( lparam );
+        if (impl && impl->pointer_pressed_handler)
+            core_window_deliver_pointer_pressed( impl, x, y );
+        return 0;
+    }
+
+    case WM_LBUTTONUP:
+    case WM_POINTERUP:
+    {
+        int x = LOWORD( lparam );
+        int y = HIWORD( lparam );
+        if (impl && impl->pointer_released_handler)
+            core_window_deliver_pointer_released( impl, x, y );
+        return 0;
+    }
+
+    case WM_CHAR:
+    {
+        if (impl && impl->character_received_handler)
+            core_window_deliver_character_received( impl, (UINT32)wparam );
+        return 0;
+    }
+
+    case WM_KEYDOWN:
+    {
+        if (impl && impl->keydown_handler)
+            core_window_deliver_keydown( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
+        return 0;
+    }
+
+    case WM_KEYUP:
+    {
+        if (impl && impl->keyup_handler)
+            core_window_deliver_keyup( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
         return 0;
     }
 

@@ -49,6 +49,10 @@
 #include "windows.ui.xaml.h"
 
 #include "dxgi.h"
+#include <dxgi1_2.h>
+#include <d3d11.h>
+#include <d2d1_1.h>
+#include <dcomp.h>
 #include "windows.ui.xaml.media.dxinterop.h"
 
 extern IActivationFactory *color_helper_factory;
@@ -61,6 +65,9 @@ extern IActivationFactory *window_factory;
 extern IActivationFactory *property_metadata_factory;
 extern IActivationFactory *dependency_property_factory;
 HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out );
+HRESULT xaml_create_dcomp_visual( IDCompositionVisual **out_visual );
+void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content );
+HRESULT xaml_window_present_current( void );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

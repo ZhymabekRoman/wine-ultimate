@@ -1784,6 +1784,7 @@ static DWORD WINAPI composite_thread_proc(void *iface)
             {
                 static HWND bridge;
                 if (!bridge) bridge = FindWindowW( L"Window", NULL );
+                if (!bridge) bridge = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
                 if (bridge) PostMessageW( bridge, WM_NULL, 0, 0 );
             }
         }
