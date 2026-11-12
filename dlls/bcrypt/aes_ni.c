@@ -37,6 +37,8 @@ static BOOL aesni_supported(void)
 
     if (cached == -1)
     {
+        const char *env = getenv( "WINE_BCRYPT_AESNI" );
+        if (env && !strcmp( env, "0" )) { cached = FALSE; return cached; }
 #if defined(__x86_64__) || defined(__i386__)
         unsigned int eax = 1, ebx = 0, ecx = 0, edx = 0;
         __asm__( "cpuid" : "=a" (eax), "=b" (ebx), "=c" (ecx), "=d" (edx) : "a" (eax), "c" (0) );
