@@ -2426,11 +2426,39 @@ static NTSTATUS get_mountmgr_fs_info( HANDLE handle, int fd, struct mountmgr_uni
     unsigned int status;
     int letter = -1;
 
-    if (!server_get_unix_name( handle, &unix_name ))
+    if (fd != -1)
+    {
+#if defined(linux)
+        char proc_path[64], target[PATH_MAX];
+        ssize_t len;
+        sprintf( proc_path, "/proc/self/fd/%d", fd );
+        if ((len = readlink( proc_path, target, sizeof(target) - 1 )) > 0)
+        {
+            target[len] = 0;
+            letter = find_dos_device( target );
+        }
+#endif
+    }
+    if (letter == -1 && !server_get_unix_name( handle, &unix_name ))
     {
         letter = find_dos_device( unix_name );
         free( unix_name );
     }
+
+    if (letter >= 0 && letter < 26 && (user_shared_data->ValidDrivesMask & (1 << letter)))
+    {
+        memset( drive, 0, min( size, sizeof(*drive) ) );
+        drive->letter = 'a' + letter;
+        drive->fs_type = (user_shared_data->DriveFsAttributes[letter] >> 28) & 0x0f;
+        drive->serial = 0x53460000 | ('A' + letter);
+        if (size >= sizeof(*drive) + sizeof(WCHAR))
+        {
+            drive->label_offset = sizeof(*drive);
+            *(WCHAR *)((char *)drive + drive->label_offset) = 0;
+        }
+        return STATUS_SUCCESS;
+    }
+
     memset( drive, 0, sizeof(*drive) );
     if (letter == -1)
     {
@@ -3171,6 +3199,53 @@ static inline int openat_cached( int dirfd, const char *pathname, int flags )
     return openat( dirfd, pathname, flags );
 }
 
+static int get_drive_index( int root_fd, const char *unix_name )
+{
+    const char *p;
+
+    if (unix_name)
+    {
+        if ((p = strstr( unix_name, "/dosdevices/" )))
+        {
+            char ch = p[12];
+            if (p[13] == ':')
+            {
+                if (ch >= 'a' && ch <= 'z') return ch - 'a';
+                if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+            }
+        }
+        else if (!strncmp( unix_name, "dosdevices/", 11 ))
+        {
+            char ch = unix_name[11];
+            if (unix_name[12] == ':')
+            {
+                if (ch >= 'a' && ch <= 'z') return ch - 'a';
+                if (ch >= 'A' && ch <= 'Z') return ch - 'A';
+            }
+        }
+    }
+
+    if (root_fd != AT_FDCWD && root_fd >= 0)
+    {
+#if defined(linux)
+        char proc_path[64], target[PATH_MAX];
+        ssize_t len;
+        sprintf( proc_path, "/proc/self/fd/%d", root_fd );
+        if ((len = readlink( proc_path, target, sizeof(target) - 1 )) > 0)
+        {
+            target[len] = 0;
+            return find_dos_device( target );
+        }
+#endif
+    }
+    else if (unix_name && unix_name[0] == '/')
+    {
+        return find_dos_device( unix_name );
+    }
+
+    return -1;
+}
+
 /***********************************************************************
  *           find_file_in_dir
  *
@@ -3198,6 +3273,15 @@ static NTSTATUS find_file_in_dir( int root_fd, char *unix_name, int pos, const W
         if (!fstatat( root_fd, unix_name, &st, 0 )) return STATUS_SUCCESS;
     }
     if (check_case) goto not_found;  /* we want an exact match */
+
+    {
+        int drive = get_drive_index( root_fd, unix_name );
+        if (drive >= 0 && drive < 26 && (user_shared_data->ValidDrivesMask & (1 << drive)))
+        {
+            if (!(user_shared_data->CaseSensitiveDrivesMask & (1 << drive)))
+                goto not_found;
+        }
+    }
 
     if (pos > 1) unix_name[pos - 1] = 0;
     else unix_name[1] = 0;  /* keep the initial slash */
@@ -8441,11 +8525,21 @@ NTSTATUS WINAPI NtQueryVolumeInformationFile( HANDLE handle, IO_STATUS_BLOCK *io
             break;
         default:
             info->FileSystemAttributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS |
-                                         FILE_SUPPORTS_OPEN_BY_FILE_ID;
+                                         FILE_SUPPORTS_REPARSE_POINTS | FILE_SUPPORTS_OPEN_BY_FILE_ID;
             info->MaximumComponentNameLength = 255;
             info->FileSystemNameLength = min( sizeof(ntfsW), length - offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) );
             memcpy(info->FileSystemName, ntfsW, info->FileSystemNameLength);
             break;
+        }
+
+        if (drive.letter >= 'a' && drive.letter <= 'z')
+        {
+            int d = drive.letter - 'a';
+            if (user_shared_data->ValidDrivesMask & (1 << d))
+            {
+                ULONG attrs = user_shared_data->DriveFsAttributes[d] & 0x0fffffff;
+                if (attrs) info->FileSystemAttributes = attrs;
+            }
         }
 
         io->Information = offsetof( FILE_FS_ATTRIBUTE_INFORMATION, FileSystemName ) + info->FileSystemNameLength;

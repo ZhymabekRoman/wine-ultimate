@@ -98,6 +98,8 @@ struct dos_drive
 static struct list drives_list = LIST_INIT(drives_list);
 static struct list volumes_list = LIST_INIT(volumes_list);
 
+static void update_drive_table_and_user_shared_data(void);
+
 static DRIVER_OBJECT *harddisk_driver;
 static DRIVER_OBJECT *serial_driver;
 static DRIVER_OBJECT *parallel_driver;
@@ -1103,6 +1105,7 @@ static void create_drive_devices(void)
         if (volume) release_volume( volume );
     }
     RegCloseKey( drives_key );
+    update_drive_table_and_user_shared_data();
 }
 
 /* fill in the "Logical Unit" key for a given SCSI address */
@@ -1329,6 +1332,7 @@ found:
 
     if (udi) notify = drive->drive;
     if (scsi_info) create_scsi_entry( volume, scsi_info );
+    update_drive_table_and_user_shared_data();
 
 done:
     if (volume) release_volume( volume );
@@ -1374,6 +1378,7 @@ NTSTATUS remove_dos_device( int letter, const char *udi )
         if (udi && drive->volume->device->unix_mount) notify = drive->drive;
 
         delete_dos_device( drive );
+        update_drive_table_and_user_shared_data();
         status = STATUS_SUCCESS;
         break;
     }
@@ -1392,6 +1397,140 @@ static enum mountmgr_fs_type get_mountmgr_fs_type(enum fs_type fs_type)
     case FS_FAT32:   return MOUNTMGR_FS_TYPE_FAT32;
     default:         return MOUNTMGR_FS_TYPE_NTFS;
     }
+}
+
+static struct mountmgr_drive_table drive_table;
+
+static void update_user_shared_data_drives( ULONG case_sensitive_mask, ULONG valid_mask, const ULONG *fs_attrs )
+{
+    struct _KUSER_SHARED_DATA *usd = (void *)0x7ffe0000;
+    DWORD old_prot;
+
+    if (VirtualProtect( usd, sizeof(*usd), PAGE_READWRITE, &old_prot ))
+    {
+        usd->CaseSensitiveDrivesMask = case_sensitive_mask;
+        usd->ValidDrivesMask = valid_mask;
+        if (fs_attrs) memcpy( usd->DriveFsAttributes, fs_attrs, sizeof(usd->DriveFsAttributes) );
+        VirtualProtect( usd, sizeof(*usd), old_prot, &old_prot );
+    }
+    else
+    {
+        OBJECT_ATTRIBUTES attr = {sizeof(attr)};
+        UNICODE_STRING name = RTL_CONSTANT_STRING( L"\\KernelObjects\\__wine_user_shared_data" );
+        HANDLE handle;
+
+        InitializeObjectAttributes( &attr, &name, OBJ_OPENIF, NULL, NULL );
+        if (!NtOpenSection( &handle, SECTION_ALL_ACCESS, &attr ))
+        {
+            struct _KUSER_SHARED_DATA *data = MapViewOfFile( handle, FILE_MAP_WRITE, 0, 0, sizeof(*data) );
+            CloseHandle( handle );
+            if (data)
+            {
+                data->CaseSensitiveDrivesMask = case_sensitive_mask;
+                data->ValidDrivesMask = valid_mask;
+                if (fs_attrs) memcpy( data->DriveFsAttributes, fs_attrs, sizeof(data->DriveFsAttributes) );
+                UnmapViewOfFile( data );
+            }
+        }
+    }
+}
+
+static void update_drive_table_and_user_shared_data(void)
+{
+    struct dos_drive *drive;
+    ULONG valid_mask = 0;
+    ULONG case_sensitive_mask = 0;
+    ULONG drive_fs_attrs[MAX_DOS_DRIVES] = {0};
+
+    memset( &drive_table, 0, sizeof(drive_table) );
+    drive_table.size = sizeof(drive_table);
+
+    LIST_FOR_EACH_ENTRY( drive, &drives_list, struct dos_drive, entry )
+    {
+        int idx = drive->drive;
+        struct detect_drive_capabilities_params params;
+
+        if (idx < 0 || idx >= MAX_DOS_DRIVES) continue;
+
+        params.unix_mount = drive->volume && drive->volume->device ? drive->volume->device->unix_mount : NULL;
+        params.case_sensitive = 1;
+        params.fs_type = MOUNTMGR_FS_TYPE_NTFS;
+        params.fs_attributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS |
+                               FILE_SUPPORTS_REPARSE_POINTS | FILE_SUPPORTS_OPEN_BY_FILE_ID;
+
+        MOUNTMGR_CALL( detect_drive_capabilities, &params );
+
+        if (drive->volume && drive->volume->fs_type != FS_UNKNOWN)
+        {
+            enum mountmgr_fs_type mm_fs = get_mountmgr_fs_type( drive->volume->fs_type );
+            if (mm_fs != MOUNTMGR_FS_TYPE_NTFS)
+            {
+                params.fs_type = mm_fs;
+                if (mm_fs == MOUNTMGR_FS_TYPE_FAT || mm_fs == MOUNTMGR_FS_TYPE_FAT32)
+                {
+                    params.case_sensitive = 0;
+                    params.fs_attributes = FILE_CASE_PRESERVED_NAMES;
+                }
+                else if (mm_fs == MOUNTMGR_FS_TYPE_ISO9660)
+                {
+                    params.case_sensitive = 0;
+                    params.fs_attributes = FILE_READ_ONLY_VOLUME;
+                }
+                else if (mm_fs == MOUNTMGR_FS_TYPE_UDF)
+                {
+                    params.case_sensitive = 1;
+                    params.fs_attributes = FILE_READ_ONLY_VOLUME | FILE_UNICODE_ON_DISK | FILE_CASE_SENSITIVE_SEARCH;
+                }
+            }
+        }
+
+        valid_mask |= (1 << idx);
+        if (params.case_sensitive)
+            case_sensitive_mask |= (1 << idx);
+
+        drive_fs_attrs[idx] = ((params.fs_type & 0x0f) << 28) | (params.fs_attributes & 0x0fffffff);
+
+        drive_table.entries[idx].letter = 'A' + idx;
+        drive_table.entries[idx].drive_type = drive->volume && drive->volume->device ? drive->volume->device->type : DEVICE_UNKNOWN;
+        drive_table.entries[idx].fs_type = params.fs_type;
+        drive_table.entries[idx].fs_attributes = params.fs_attributes;
+        drive_table.entries[idx].case_sensitive = params.case_sensitive;
+        drive_table.count++;
+    }
+
+    drive_table.valid_drives_mask = valid_mask;
+    drive_table.case_sensitive_mask = case_sensitive_mask;
+    memcpy( drive_table.drive_fs_attributes, drive_fs_attrs, sizeof(drive_fs_attrs) );
+
+    update_user_shared_data_drives( case_sensitive_mask, valid_mask, drive_fs_attrs );
+}
+
+NTSTATUS query_drive_table( void *buff, SIZE_T insize, SIZE_T outsize, IO_STATUS_BLOCK *iosb )
+{
+    NTSTATUS status = STATUS_SUCCESS;
+    DWORD size = sizeof(drive_table);
+
+    EnterCriticalSection( &device_section );
+    drive_table.size = size;
+    if (outsize < sizeof(drive_table.size))
+    {
+        status = STATUS_BUFFER_TOO_SMALL;
+        iosb->Information = 0;
+    }
+    else if (outsize < size)
+    {
+        memcpy( buff, &drive_table, outsize );
+        iosb->Information = outsize;
+        status = STATUS_BUFFER_OVERFLOW;
+    }
+    else
+    {
+        memcpy( buff, &drive_table, size );
+        iosb->Information = size;
+        status = STATUS_SUCCESS;
+    }
+    LeaveCriticalSection( &device_section );
+    return status;
 }
 
 /* query information about an existing dos drive, by letter or udi */

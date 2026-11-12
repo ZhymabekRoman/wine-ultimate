@@ -151,6 +151,14 @@ struct ioctl_params
     ULONG *info;
 };
 
+struct detect_drive_capabilities_params
+{
+    const char *unix_mount;
+    ULONG       case_sensitive;
+    ULONG       fs_type;
+    ULONG       fs_attributes;
+};
+
 enum mountmgr_funcs
 {
     unix_run_loop,
@@ -173,6 +181,7 @@ enum mountmgr_funcs
     unix_write_credential,
     unix_delete_credential,
     unix_enumerate_credentials,
+    unix_detect_drive_capabilities,
     unix_funcs_count
 };
 

@@ -42,6 +42,19 @@
 #endif
 #include <unistd.h>
 
+#ifdef linux
+#include <sys/ioctl.h>
+#ifndef EXT2_IOC_GETFLAGS
+#define EXT2_IOC_GETFLAGS _IOR('f', 1, long)
+#endif
+#ifndef EXT4_CASEFOLD_FL
+#define EXT4_CASEFOLD_FL 0x40000000
+#endif
+#ifndef AT_NO_AUTOMOUNT
+#define AT_NO_AUTOMOUNT 0x800
+#endif
+#endif
+
 #include "unixlib.h"
 #include "wine/debug.h"
 
@@ -610,6 +623,125 @@ static NTSTATUS get_shell_folder( void *args )
     return status;
 }
 
+static NTSTATUS detect_drive_capabilities( void *args )
+{
+    struct detect_drive_capabilities_params *params = args;
+    const char *unix_mount = params->unix_mount;
+    int fd = -1;
+
+    params->case_sensitive = 1;
+    params->fs_type = MOUNTMGR_FS_TYPE_NTFS;
+    params->fs_attributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS |
+                            FILE_SUPPORTS_REPARSE_POINTS | FILE_SUPPORTS_OPEN_BY_FILE_ID;
+
+    if (!unix_mount) return STATUS_SUCCESS;
+
+    if (unix_mount[0] != '/')
+    {
+        char *path = get_dosdevices_path( unix_mount );
+        if (path) fd = open( path, O_RDONLY | O_NONBLOCK );
+        free( path );
+    }
+    else fd = open( unix_mount, O_RDONLY | O_NONBLOCK );
+
+    if (fd != -1)
+    {
+#if !defined(linux) || !defined(HAVE_FSTATFS)
+        struct statvfs stfs;
+        int res = fstatvfs( fd, &stfs );
+#else
+        struct statfs stfs;
+        int res = fstatfs( fd, &stfs );
+#endif
+
+#if defined(linux) && defined(HAVE_FSTATFS)
+        if (!res)
+        {
+            switch (stfs.f_type)
+            {
+            case 0x9660: /* ISOFS_SUPER_MAGIC */
+                params->fs_type = MOUNTMGR_FS_TYPE_ISO9660;
+                params->fs_attributes = FILE_READ_ONLY_VOLUME;
+                params->case_sensitive = 0;
+                break;
+            case 0x15013346: /* UDF_SUPER_MAGIC */
+                params->fs_type = MOUNTMGR_FS_TYPE_UDF;
+                params->fs_attributes = FILE_READ_ONLY_VOLUME | FILE_UNICODE_ON_DISK | FILE_CASE_SENSITIVE_SEARCH;
+                params->case_sensitive = 1;
+                break;
+            case 0x4006:     /* FAT_SUPER_MAGIC */
+            case 0x4d44:     /* MSDOS_SUPER_MAGIC */
+            case 0x2011BAB0: /* EXFAT_SUPER_MAGIC */
+                params->fs_type = MOUNTMGR_FS_TYPE_FAT32;
+                params->fs_attributes = FILE_CASE_PRESERVED_NAMES;
+                params->case_sensitive = 0;
+                break;
+            case 0x5346544e: /* NTFS_SB_MAGIC */
+                params->fs_type = MOUNTMGR_FS_TYPE_NTFS;
+                params->fs_attributes = FILE_CASE_PRESERVED_NAMES | FILE_PERSISTENT_ACLS |
+                                        FILE_SUPPORTS_REPARSE_POINTS | FILE_SUPPORTS_OPEN_BY_FILE_ID;
+                params->case_sensitive = 0;
+                break;
+            case 0x65735546: /* FUSE_SUPER_MAGIC */
+                {
+                    struct stat st;
+                    if (fstatat( fd, ".ciopfs", &st, AT_NO_AUTOMOUNT ) == 0)
+                        params->case_sensitive = 0;
+                }
+                break;
+            }
+        }
+
+        if (params->case_sensitive)
+        {
+            int flags;
+            if (ioctl( fd, EXT2_IOC_GETFLAGS, &flags ) != -1 && (flags & EXT4_CASEFOLD_FL))
+                params->case_sensitive = 0;
+        }
+#elif defined(__FreeBSD__) || defined(__FreeBSD_kernel__) || defined(__OpenBSD__) || defined(__DragonFly__) || defined(__APPLE__)
+        if (!res)
+        {
+            if (!strcmp( stfs.f_fstypename, "cd9660" ))
+            {
+                params->fs_type = MOUNTMGR_FS_TYPE_ISO9660;
+                params->fs_attributes = FILE_READ_ONLY_VOLUME;
+                params->case_sensitive = 0;
+            }
+            else if (!strcmp( stfs.f_fstypename, "udf" ))
+            {
+                params->fs_type = MOUNTMGR_FS_TYPE_UDF;
+                params->fs_attributes = FILE_READ_ONLY_VOLUME | FILE_UNICODE_ON_DISK | FILE_CASE_SENSITIVE_SEARCH;
+                params->case_sensitive = 1;
+            }
+            else if (!strcmp( stfs.f_fstypename, "msdos" ) || !strcmp( stfs.f_fstypename, "msdosfs" ))
+            {
+                params->fs_type = MOUNTMGR_FS_TYPE_FAT32;
+                params->fs_attributes = FILE_CASE_PRESERVED_NAMES;
+                params->case_sensitive = 0;
+            }
+            else if (!strcmp( stfs.f_fstypename, "fusefs" ) && !strncmp( stfs.f_mntfromname, "ciopfs", 5 ))
+            {
+                params->case_sensitive = 0;
+            }
+            else if (!strcmp( stfs.f_fstypename, "ntfs" ))
+            {
+                params->fs_type = MOUNTMGR_FS_TYPE_NTFS;
+                params->case_sensitive = 0;
+            }
+#ifdef __APPLE__
+            else if (!strcmp( stfs.f_fstypename, "hfs" ))
+            {
+                params->case_sensitive = 0;
+            }
+#endif
+        }
+#endif
+        close( fd );
+    }
+
+    return STATUS_SUCCESS;
+}
+
 const unixlib_entry_t __wine_unix_call_funcs[] =
 {
     run_loop,
@@ -632,6 +764,7 @@ const unixlib_entry_t __wine_unix_call_funcs[] =
     write_credential,
     delete_credential,
     enumerate_credentials,
+    detect_drive_capabilities,
 };
 
 C_ASSERT( ARRAYSIZE(__wine_unix_call_funcs) == unix_funcs_count );

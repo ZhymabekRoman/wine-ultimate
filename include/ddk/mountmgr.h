@@ -55,6 +55,26 @@ static const WCHAR MOUNTMGR_DOS_DEVICE_NAME[] = {'\\','\\','.','\\','M','o','u',
 #define IOCTL_MOUNTMGR_QUERY_UNIX_DRIVE    CTL_CODE(MOUNTMGRCONTROLTYPE, 33, METHOD_BUFFERED, FILE_READ_ACCESS)
 #define IOCTL_MOUNTMGR_DEFINE_SHELL_FOLDER CTL_CODE(MOUNTMGRCONTROLTYPE, 34, METHOD_BUFFERED, FILE_READ_ACCESS | FILE_WRITE_ACCESS)
 #define IOCTL_MOUNTMGR_QUERY_SHELL_FOLDER  CTL_CODE(MOUNTMGRCONTROLTYPE, 35, METHOD_BUFFERED, FILE_READ_ACCESS)
+#define IOCTL_MOUNTMGR_QUERY_DRIVE_TABLE   CTL_CODE(MOUNTMGRCONTROLTYPE, 36, METHOD_BUFFERED, FILE_READ_ACCESS)
+
+struct mountmgr_drive_entry
+{
+    WCHAR letter;
+    UCHAR drive_type;
+    UCHAR fs_type;
+    ULONG fs_attributes;
+    ULONG case_sensitive;
+};
+
+struct mountmgr_drive_table
+{
+    ULONG size;
+    ULONG count;
+    ULONG valid_drives_mask;
+    ULONG case_sensitive_mask;
+    ULONG drive_fs_attributes[26];
+    struct mountmgr_drive_entry entries[26];
+};
 
 enum mountmgr_fs_type
 {

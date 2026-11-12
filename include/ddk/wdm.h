@@ -1354,9 +1354,16 @@ typedef struct _KUSER_SHARED_DATA {
     KSYSTEM_TIME FeatureConfigurationChangeStamp;          /* 0x720 */
     ULONG Spare;
     ULONG64 UserPointerAuthMask;                           /* 0x730 */
+    ULONG64 Reserved_0x738;                                /* 0x738 */
+    ULONG CaseSensitiveDrivesMask; /* bit 0..25 for drives A..Z: 1 = sensitive, 0 = casefold/insensitive */ /* 0x740 */
+    ULONG ValidDrivesMask;         /* bit 0..25 */         /* 0x744 */
+    ULONG DriveFsAttributes[26];   /* 104 bytes: precomputed FILE_CASE_PRESERVED_NAMES, etc. */ /* 0x748 */
 } KUSER_SHARED_DATA, *PKUSER_SHARED_DATA;
 
-C_ASSERT( sizeof(KUSER_SHARED_DATA) == 0x738 );
+C_ASSERT( FIELD_OFFSET(KUSER_SHARED_DATA, CaseSensitiveDrivesMask) == 0x740 );
+C_ASSERT( FIELD_OFFSET(KUSER_SHARED_DATA, ValidDrivesMask) == 0x744 );
+C_ASSERT( FIELD_OFFSET(KUSER_SHARED_DATA, DriveFsAttributes) == 0x748 );
+C_ASSERT( sizeof(KUSER_SHARED_DATA) == 0x7b0 );
 
 #define SHARED_GLOBAL_FLAGS_QPC_BYPASS_ENABLED 0x01
 #define SHARED_GLOBAL_FLAGS_QPC_BYPASS_USE_HV_PAGE 0x02

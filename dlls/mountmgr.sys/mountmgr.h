@@ -97,6 +97,8 @@ extern NTSTATUS add_dos_device( int letter, const char *udi, const char *device,
 extern NTSTATUS remove_dos_device( int letter, const char *udi );
 extern NTSTATUS query_unix_drive( void *buff, SIZE_T insize, SIZE_T outsize,
                                   IO_STATUS_BLOCK *iosb );
+extern NTSTATUS query_drive_table( void *buff, SIZE_T insize, SIZE_T outsize,
+                                   IO_STATUS_BLOCK *iosb );
 
 /* mount point functions */
 

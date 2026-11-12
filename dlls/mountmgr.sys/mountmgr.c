@@ -452,6 +452,12 @@ static NTSTATUS WINAPI mountmgr_ioctl( DEVICE_OBJECT *device, IRP *irp )
                                    irpsp->Parameters.DeviceIoControl.OutputBufferLength,
                                    &irp->IoStatus );
         break;
+    case IOCTL_MOUNTMGR_QUERY_DRIVE_TABLE:
+        status = query_drive_table( irp->AssociatedIrp.SystemBuffer,
+                                    irpsp->Parameters.DeviceIoControl.InputBufferLength,
+                                    irpsp->Parameters.DeviceIoControl.OutputBufferLength,
+                                    &irp->IoStatus );
+        break;
     case IOCTL_MOUNTMGR_DEFINE_SHELL_FOLDER:
         if (irpsp->Parameters.DeviceIoControl.InputBufferLength < sizeof(struct mountmgr_shell_folder))
         {
