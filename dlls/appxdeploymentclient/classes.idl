@@ -26,3 +26,7 @@ import "windows.management.deployment.idl";
 namespace Windows.Management.Deployment {
     runtimeclass PackageManager;
 }
+
+namespace Windows.ApplicationModel {
+    runtimeclass PackageCatalog;
+}

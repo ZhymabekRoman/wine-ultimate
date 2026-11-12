@@ -2683,3 +2683,445 @@ static struct package_manager_statics package_manager_statics =
 };
 
 IActivationFactory *package_manager_factory = &package_manager_statics.IActivationFactory_iface;
+
+struct package_catalog
+{
+    IPackageCatalog IPackageCatalog_iface;
+    IPackageCatalog2 IPackageCatalog2_iface;
+    IPackageCatalog3 IPackageCatalog3_iface;
+    LONG ref;
+    IPackage *package;
+};
+
+static inline struct package_catalog *impl_from_IPackageCatalog( IPackageCatalog *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_catalog, IPackageCatalog_iface );
+}
+
+static HRESULT WINAPI package_catalog_QueryInterface( IPackageCatalog *iface, REFIID iid, void **out )
+{
+    struct package_catalog *impl = impl_from_IPackageCatalog( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPackageCatalog ))
+    {
+        *out = &impl->IPackageCatalog_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IPackageCatalog2 ))
+    {
+        *out = &impl->IPackageCatalog2_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IPackageCatalog3 ))
+    {
+        *out = &impl->IPackageCatalog3_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_catalog_AddRef( IPackageCatalog *iface )
+{
+    struct package_catalog *impl = impl_from_IPackageCatalog( iface );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
+    return ref;
+}
+
+static ULONG WINAPI package_catalog_Release( IPackageCatalog *iface )
+{
+    struct package_catalog *impl = impl_from_IPackageCatalog( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
+    if (!ref)
+    {
+        if (impl->package) IPackage_Release( impl->package );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI package_catalog_GetIids( IPackageCatalog *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI package_catalog_GetRuntimeClassName( IPackageCatalog *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_ApplicationModel_PackageCatalog,
+                                wcslen( RuntimeClass_Windows_ApplicationModel_PackageCatalog ),
+                                class_name );
+}
+
+static HRESULT WINAPI package_catalog_GetTrustLevel( IPackageCatalog *iface, TrustLevel *trust_level )
+{
+    *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static LONG64 package_catalog_event_token = 1;
+
+static inline HRESULT package_catalog_add_event( void *handler, EventRegistrationToken *token )
+{
+    if (!token) return E_INVALIDARG;
+    token->value = InterlockedIncrement64( &package_catalog_event_token );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_catalog_add_PackageStaging( IPackageCatalog *iface, void *handler,
+                                                          EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return package_catalog_add_event( handler, token );
+}
+
+static HRESULT WINAPI package_catalog_remove_PackageStaging( IPackageCatalog *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_catalog_add_PackageInstalling( IPackageCatalog *iface, void *handler,
+                                                             EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return package_catalog_add_event( handler, token );
+}
+
+static HRESULT WINAPI package_catalog_remove_PackageInstalling( IPackageCatalog *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_catalog_add_PackageUpdating( IPackageCatalog *iface, void *handler,
+                                                           EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return package_catalog_add_event( handler, token );
+}
+
+static HRESULT WINAPI package_catalog_remove_PackageUpdating( IPackageCatalog *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_catalog_add_PackageUninstalling( IPackageCatalog *iface, void *handler,
+                                                               EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return package_catalog_add_event( handler, token );
+}
+
+static HRESULT WINAPI package_catalog_remove_PackageUninstalling( IPackageCatalog *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_catalog_add_PackageStatusChanged( IPackageCatalog *iface, void *handler,
+                                                                EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return package_catalog_add_event( handler, token );
+}
+
+static HRESULT WINAPI package_catalog_remove_PackageStatusChanged( IPackageCatalog *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+    return S_OK;
+}
+
+static const struct IPackageCatalogVtbl package_catalog_vtbl =
+{
+    package_catalog_QueryInterface,
+    package_catalog_AddRef,
+    package_catalog_Release,
+    /* IInspectable methods */
+    package_catalog_GetIids,
+    package_catalog_GetRuntimeClassName,
+    package_catalog_GetTrustLevel,
+    /* IPackageCatalog methods */
+    package_catalog_add_PackageStaging,
+    package_catalog_remove_PackageStaging,
+    package_catalog_add_PackageInstalling,
+    package_catalog_remove_PackageInstalling,
+    package_catalog_add_PackageUpdating,
+    package_catalog_remove_PackageUpdating,
+    package_catalog_add_PackageUninstalling,
+    package_catalog_remove_PackageUninstalling,
+    package_catalog_add_PackageStatusChanged,
+    package_catalog_remove_PackageStatusChanged,
+};
+
+DEFINE_IINSPECTABLE( package_catalog2, IPackageCatalog2, struct package_catalog, IPackageCatalog_iface );
+
+static HRESULT WINAPI package_catalog2_add_PackageContentGroupStaging( IPackageCatalog2 *iface, void *handler,
+                                                                       EventRegistrationToken *token )
+{
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return package_catalog_add_event( handler, token );
+}
+
+static HRESULT WINAPI package_catalog2_remove_PackageContentGroupStaging( IPackageCatalog2 *iface, EventRegistrationToken token )
+{
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_catalog2_AddOptionalPackageAsync( IPackageCatalog2 *iface, HSTRING name, void **operation )
+{
+    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring(name), operation );
+    if (operation) *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static const struct IPackageCatalog2Vtbl package_catalog2_vtbl =
+{
+    package_catalog2_QueryInterface,
+    package_catalog2_AddRef,
+    package_catalog2_Release,
+    /* IInspectable methods */
+    package_catalog2_GetIids,
+    package_catalog2_GetRuntimeClassName,
+    package_catalog2_GetTrustLevel,
+    /* IPackageCatalog2 methods */
+    package_catalog2_add_PackageContentGroupStaging,
+    package_catalog2_remove_PackageContentGroupStaging,
+    package_catalog2_AddOptionalPackageAsync,
+};
+
+DEFINE_IINSPECTABLE( package_catalog3, IPackageCatalog3, struct package_catalog, IPackageCatalog_iface );
+
+static HRESULT WINAPI package_catalog3_RemoveOptionalPackagesAsync( IPackageCatalog3 *iface, void *names, void **operation )
+{
+    FIXME( "iface %p, names %p, operation %p stub!\n", iface, names, operation );
+    if (operation) *operation = NULL;
+    return E_NOTIMPL;
+}
+
+static const struct IPackageCatalog3Vtbl package_catalog3_vtbl =
+{
+    package_catalog3_QueryInterface,
+    package_catalog3_AddRef,
+    package_catalog3_Release,
+    /* IInspectable methods */
+    package_catalog3_GetIids,
+    package_catalog3_GetRuntimeClassName,
+    package_catalog3_GetTrustLevel,
+    /* IPackageCatalog3 methods */
+    package_catalog3_RemoveOptionalPackagesAsync,
+};
+
+static HRESULT package_catalog_create( IPackage *package, IPackageCatalog **out )
+{
+    struct package_catalog *impl;
+
+    if (!out) return E_INVALIDARG;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+
+    impl->IPackageCatalog_iface.lpVtbl = &package_catalog_vtbl;
+    impl->IPackageCatalog2_iface.lpVtbl = &package_catalog2_vtbl;
+    impl->IPackageCatalog3_iface.lpVtbl = &package_catalog3_vtbl;
+    impl->ref = 1;
+    if (package)
+    {
+        impl->package = package;
+        IPackage_AddRef( package );
+    }
+
+    *out = &impl->IPackageCatalog_iface;
+    return S_OK;
+}
+
+struct package_catalog_statics
+{
+    IActivationFactory IActivationFactory_iface;
+    IPackageCatalogStatics IPackageCatalogStatics_iface;
+    IPackageCatalogStatics2 IPackageCatalogStatics2_iface;
+    LONG ref;
+};
+
+static inline struct package_catalog_statics *impl_catalog_from_IActivationFactory( IActivationFactory *iface )
+{
+    return CONTAINING_RECORD( iface, struct package_catalog_statics, IActivationFactory_iface );
+}
+
+static HRESULT WINAPI package_catalog_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    struct package_catalog_statics *impl = impl_catalog_from_IActivationFactory( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &impl->IActivationFactory_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IPackageCatalogStatics ))
+    {
+        *out = &impl->IPackageCatalogStatics_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IPackageCatalogStatics2 ))
+    {
+        *out = &impl->IPackageCatalogStatics2_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_catalog_factory_AddRef( IActivationFactory *iface )
+{
+    struct package_catalog_statics *impl = impl_catalog_from_IActivationFactory( iface );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
+    return ref;
+}
+
+static ULONG WINAPI package_catalog_factory_Release( IActivationFactory *iface )
+{
+    struct package_catalog_statics *impl = impl_catalog_from_IActivationFactory( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
+    return ref;
+}
+
+static HRESULT WINAPI package_catalog_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
+{
+    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI package_catalog_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
+{
+    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI package_catalog_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
+{
+    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI package_catalog_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    IPackageCatalog *catalog;
+    HRESULT hr;
+
+    TRACE( "iface %p, instance %p.\n", iface, instance );
+
+    if (FAILED( (hr = package_catalog_create( NULL, &catalog )) ))
+    {
+        *instance = NULL;
+        return hr;
+    }
+    *instance = (IInspectable *)catalog;
+    return S_OK;
+}
+
+static const struct IActivationFactoryVtbl package_catalog_factory_vtbl =
+{
+    package_catalog_factory_QueryInterface,
+    package_catalog_factory_AddRef,
+    package_catalog_factory_Release,
+    /* IInspectable methods */
+    package_catalog_factory_GetIids,
+    package_catalog_factory_GetRuntimeClassName,
+    package_catalog_factory_GetTrustLevel,
+    /* IActivationFactory methods */
+    package_catalog_factory_ActivateInstance,
+};
+
+DEFINE_IINSPECTABLE( package_catalog_statics, IPackageCatalogStatics, struct package_catalog_statics, IActivationFactory_iface );
+
+static HRESULT WINAPI package_catalog_statics_OpenForCurrentPackage( IPackageCatalogStatics *iface, IPackageCatalog **catalog )
+{
+    TRACE( "iface %p, catalog %p.\n", iface, catalog );
+    return package_catalog_create( NULL, catalog );
+}
+
+static HRESULT WINAPI package_catalog_statics_OpenForCurrentUser( IPackageCatalogStatics *iface, IPackageCatalog **catalog )
+{
+    TRACE( "iface %p, catalog %p.\n", iface, catalog );
+    return package_catalog_create( NULL, catalog );
+}
+
+static HRESULT WINAPI package_catalog_statics_OpenForPackage( IPackageCatalogStatics *iface, IPackage *package, IPackageCatalog **catalog )
+{
+    TRACE( "iface %p, package %p, catalog %p.\n", iface, package, catalog );
+    return package_catalog_create( package, catalog );
+}
+
+static const struct IPackageCatalogStaticsVtbl package_catalog_statics_vtbl =
+{
+    package_catalog_statics_QueryInterface,
+    package_catalog_statics_AddRef,
+    package_catalog_statics_Release,
+    /* IInspectable methods */
+    package_catalog_statics_GetIids,
+    package_catalog_statics_GetRuntimeClassName,
+    package_catalog_statics_GetTrustLevel,
+    /* IPackageCatalogStatics methods */
+    package_catalog_statics_OpenForCurrentPackage,
+    package_catalog_statics_OpenForCurrentUser,
+    package_catalog_statics_OpenForPackage,
+};
+
+DEFINE_IINSPECTABLE( package_catalog_statics2, IPackageCatalogStatics2, struct package_catalog_statics, IActivationFactory_iface );
+
+static HRESULT WINAPI package_catalog_statics2_OpenForPackage( IPackageCatalogStatics2 *iface, IPackage *package, IPackageCatalog **catalog )
+{
+    TRACE( "iface %p, package %p, catalog %p.\n", iface, package, catalog );
+    return package_catalog_create( package, catalog );
+}
+
+static const struct IPackageCatalogStatics2Vtbl package_catalog_statics2_vtbl =
+{
+    package_catalog_statics2_QueryInterface,
+    package_catalog_statics2_AddRef,
+    package_catalog_statics2_Release,
+    /* IInspectable methods */
+    package_catalog_statics2_GetIids,
+    package_catalog_statics2_GetRuntimeClassName,
+    package_catalog_statics2_GetTrustLevel,
+    /* IPackageCatalogStatics2 methods */
+    package_catalog_statics2_OpenForPackage,
+};
+
+static struct package_catalog_statics package_catalog_statics =
+{
+    {&package_catalog_factory_vtbl},
+    {&package_catalog_statics_vtbl},
+    {&package_catalog_statics2_vtbl},
+    1,
+};
+
+IActivationFactory *package_catalog_factory = &package_catalog_statics.IActivationFactory_iface;

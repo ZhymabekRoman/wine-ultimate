@@ -61,6 +61,106 @@ static const IID IID_ipm = {0x9a7d4b65, 0x5e8f, 0x4fc7, {0xa2, 0xe5, 0x7f, 0x69,
 static const IID IID_ipm2 = {0xf7aad08d, 0x0840, 0x46f2, {0xb5, 0xd8, 0xca, 0xd4, 0x76, 0x93, 0xa0, 0x95}};
 static const IID IID_istorageitem = {0x4207a996, 0xca2f, 0x42f7, {0xbd, 0xe8, 0x8b, 0x10, 0x45, 0x7a, 0x7f, 0x30}};
 
+typedef interface IPackageCatalog IPackageCatalog;
+typedef interface IPackageCatalog2 IPackageCatalog2;
+typedef interface IPackageCatalog3 IPackageCatalog3;
+typedef interface IPackageCatalogStatics IPackageCatalogStatics;
+typedef interface IPackageCatalogStatics2 IPackageCatalogStatics2;
+
+static const IID IID_ipackagecatalog = {0x230a3751, 0x9de3, 0x4445, {0xbe, 0x74, 0x91, 0xfb, 0x32, 0x5a, 0xbe, 0xfe}};
+static const IID IID_ipackagecatalog2 = {0x96a60c36, 0x8ff7, 0x4344, {0xb6, 0xbf, 0xee, 0x64, 0xc2, 0x20, 0x7e, 0xd2}};
+static const IID IID_ipackagecatalog3 = {0x96dd5c88, 0x8837, 0x43f9, {0x90, 0x15, 0x03, 0x34, 0x34, 0xba, 0x14, 0xf3}};
+static const IID IID_ipackagecatalogstatics = {0xa18c9696, 0xe65b, 0x4634, {0xba, 0x21, 0x5e, 0x63, 0xeb, 0x72, 0x44, 0xa7}};
+static const IID IID_ipackagecatalogstatics2 = {0x4c11b159, 0x9a28, 0x598c, {0xb1, 0x85, 0x55, 0xe1, 0x89, 0x9b, 0x2b, 0xe4}};
+
+struct IPackageCatalogStaticsVtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IPackageCatalogStatics *This, REFIID riid, void **ppvObject);
+    ULONG (WINAPI *AddRef)(IPackageCatalogStatics *This);
+    ULONG (WINAPI *Release)(IPackageCatalogStatics *This);
+    HRESULT (WINAPI *GetIids)(IPackageCatalogStatics *This, ULONG *iidCount, IID **iids);
+    HRESULT (WINAPI *GetRuntimeClassName)(IPackageCatalogStatics *This, HSTRING *className);
+    HRESULT (WINAPI *GetTrustLevel)(IPackageCatalogStatics *This, TrustLevel *trustLevel);
+    HRESULT (WINAPI *OpenForCurrentPackage)(IPackageCatalogStatics *This, IPackageCatalog **catalog);
+    HRESULT (WINAPI *OpenForCurrentUser)(IPackageCatalogStatics *This, IPackageCatalog **catalog);
+    HRESULT (WINAPI *OpenForPackage)(IPackageCatalogStatics *This, IPackage *package, IPackageCatalog **catalog);
+};
+struct IPackageCatalogStatics
+{
+    const struct IPackageCatalogStaticsVtbl *lpVtbl;
+};
+
+struct IPackageCatalogStatics2Vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IPackageCatalogStatics2 *This, REFIID riid, void **ppvObject);
+    ULONG (WINAPI *AddRef)(IPackageCatalogStatics2 *This);
+    ULONG (WINAPI *Release)(IPackageCatalogStatics2 *This);
+    HRESULT (WINAPI *GetIids)(IPackageCatalogStatics2 *This, ULONG *iidCount, IID **iids);
+    HRESULT (WINAPI *GetRuntimeClassName)(IPackageCatalogStatics2 *This, HSTRING *className);
+    HRESULT (WINAPI *GetTrustLevel)(IPackageCatalogStatics2 *This, TrustLevel *trustLevel);
+    HRESULT (WINAPI *OpenForPackage)(IPackageCatalogStatics2 *This, IPackage *package, IPackageCatalog **catalog);
+};
+struct IPackageCatalogStatics2
+{
+    const struct IPackageCatalogStatics2Vtbl *lpVtbl;
+};
+
+struct IPackageCatalogVtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IPackageCatalog *This, REFIID riid, void **ppvObject);
+    ULONG (WINAPI *AddRef)(IPackageCatalog *This);
+    ULONG (WINAPI *Release)(IPackageCatalog *This);
+    HRESULT (WINAPI *GetIids)(IPackageCatalog *This, ULONG *iidCount, IID **iids);
+    HRESULT (WINAPI *GetRuntimeClassName)(IPackageCatalog *This, HSTRING *className);
+    HRESULT (WINAPI *GetTrustLevel)(IPackageCatalog *This, TrustLevel *trustLevel);
+    HRESULT (WINAPI *add_PackageStaging)(IPackageCatalog *This, void *handler, EventRegistrationToken *token);
+    HRESULT (WINAPI *remove_PackageStaging)(IPackageCatalog *This, EventRegistrationToken token);
+    HRESULT (WINAPI *add_PackageInstalling)(IPackageCatalog *This, void *handler, EventRegistrationToken *token);
+    HRESULT (WINAPI *remove_PackageInstalling)(IPackageCatalog *This, EventRegistrationToken token);
+    HRESULT (WINAPI *add_PackageUpdating)(IPackageCatalog *This, void *handler, EventRegistrationToken *token);
+    HRESULT (WINAPI *remove_PackageUpdating)(IPackageCatalog *This, EventRegistrationToken token);
+    HRESULT (WINAPI *add_PackageUninstalling)(IPackageCatalog *This, void *handler, EventRegistrationToken *token);
+    HRESULT (WINAPI *remove_PackageUninstalling)(IPackageCatalog *This, EventRegistrationToken token);
+    HRESULT (WINAPI *add_PackageStatusChanged)(IPackageCatalog *This, void *handler, EventRegistrationToken *token);
+    HRESULT (WINAPI *remove_PackageStatusChanged)(IPackageCatalog *This, EventRegistrationToken token);
+};
+struct IPackageCatalog
+{
+    const struct IPackageCatalogVtbl *lpVtbl;
+};
+
+struct IPackageCatalog2Vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IPackageCatalog2 *This, REFIID riid, void **ppvObject);
+    ULONG (WINAPI *AddRef)(IPackageCatalog2 *This);
+    ULONG (WINAPI *Release)(IPackageCatalog2 *This);
+    HRESULT (WINAPI *GetIids)(IPackageCatalog2 *This, ULONG *iidCount, IID **iids);
+    HRESULT (WINAPI *GetRuntimeClassName)(IPackageCatalog2 *This, HSTRING *className);
+    HRESULT (WINAPI *GetTrustLevel)(IPackageCatalog2 *This, TrustLevel *trustLevel);
+    HRESULT (WINAPI *add_PackageContentGroupStaging)(IPackageCatalog2 *This, void *handler, EventRegistrationToken *token);
+    HRESULT (WINAPI *remove_PackageContentGroupStaging)(IPackageCatalog2 *This, EventRegistrationToken token);
+    HRESULT (WINAPI *AddOptionalPackageAsync)(IPackageCatalog2 *This, HSTRING name, void **operation);
+};
+struct IPackageCatalog2
+{
+    const struct IPackageCatalog2Vtbl *lpVtbl;
+};
+
+struct IPackageCatalog3Vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(IPackageCatalog3 *This, REFIID riid, void **ppvObject);
+    ULONG (WINAPI *AddRef)(IPackageCatalog3 *This);
+    ULONG (WINAPI *Release)(IPackageCatalog3 *This);
+    HRESULT (WINAPI *GetIids)(IPackageCatalog3 *This, ULONG *iidCount, IID **iids);
+    HRESULT (WINAPI *GetRuntimeClassName)(IPackageCatalog3 *This, HSTRING *className);
+    HRESULT (WINAPI *GetTrustLevel)(IPackageCatalog3 *This, TrustLevel *trustLevel);
+    HRESULT (WINAPI *RemoveOptionalPackagesAsync)(IPackageCatalog3 *This, void *names, void **operation);
+};
+struct IPackageCatalog3
+{
+    const struct IPackageCatalog3Vtbl *lpVtbl;
+};
+
 /* the URI the deployment is asked for: only Path is read (the staged directory) */
 
 struct uri
@@ -592,8 +692,176 @@ static void test_register_package( void )
     FreeLibrary( mod );
 }
 
+static void test_package_catalog( void )
+{
+    static const WCHAR class_name[] = L"Windows.ApplicationModel.PackageCatalog";
+    HRESULT (WINAPI *p_DllGetActivationFactory)( HSTRING, IActivationFactory ** );
+    HMODULE mod;
+    HSTRING str;
+    IActivationFactory *factory = NULL;
+    IInspectable *inspectable = NULL;
+    IPackageCatalogStatics *statics = NULL;
+    IPackageCatalogStatics2 *statics2 = NULL;
+    IPackageCatalog *catalog = NULL;
+    IPackageCatalog *catalog2 = NULL;
+    IPackageCatalog2 *cat2 = NULL;
+    IPackageCatalog3 *cat3 = NULL;
+    EventRegistrationToken token;
+    HRESULT hr;
+
+    mod = LoadLibraryA( "appxdeploymentclient.dll" );
+    ok( mod != NULL, "failed to load appxdeploymentclient.dll\n" );
+    if (!mod) return;
+
+    p_DllGetActivationFactory = (void *)GetProcAddress( mod, "DllGetActivationFactory" );
+    ok( p_DllGetActivationFactory != NULL, "DllGetActivationFactory not exported\n" );
+    if (!p_DllGetActivationFactory)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+
+    hr = WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &str );
+    ok( hr == S_OK, "WindowsCreateString hr %#lx\n", hr );
+
+    hr = p_DllGetActivationFactory( str, &factory );
+    ok( hr == S_OK && factory != NULL, "DllGetActivationFactory hr %#lx factory %p\n", hr, factory );
+    WindowsDeleteString( str );
+    if (FAILED( hr ) || !factory)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+
+    /* 1. Test IActivationFactory::ActivateInstance */
+    hr = IActivationFactory_ActivateInstance( factory, &inspectable );
+    ok( hr == S_OK && inspectable != NULL, "ActivateInstance hr %#lx inspectable %p\n", hr, inspectable );
+    if (SUCCEEDED( hr ) && inspectable)
+    {
+        catalog = NULL;
+        hr = IInspectable_QueryInterface( inspectable, &IID_ipackagecatalog, (void **)&catalog );
+        ok( hr == S_OK && catalog != NULL, "QueryInterface(IPackageCatalog) hr %#lx\n", hr );
+        if (catalog) catalog->lpVtbl->Release( catalog );
+        IInspectable_Release( inspectable );
+    }
+
+    /* 2. Test IPackageCatalogStatics */
+    hr = IActivationFactory_QueryInterface( factory, &IID_ipackagecatalogstatics, (void **)&statics );
+    ok( hr == S_OK && statics != NULL, "QI(IPackageCatalogStatics) hr %#lx\n", hr );
+    if (SUCCEEDED( hr ) && statics)
+    {
+        /* OpenForCurrentUser */
+        catalog = NULL;
+        hr = statics->lpVtbl->OpenForCurrentUser( statics, &catalog );
+        ok( hr == S_OK && catalog != NULL, "OpenForCurrentUser hr %#lx catalog %p\n", hr, catalog );
+
+        /* OpenForCurrentPackage */
+        catalog2 = NULL;
+        hr = statics->lpVtbl->OpenForCurrentPackage( statics, &catalog2 );
+        ok( hr == S_OK && catalog2 != NULL, "OpenForCurrentPackage hr %#lx catalog2 %p\n", hr, catalog2 );
+        if (catalog2) catalog2->lpVtbl->Release( catalog2 );
+
+        /* OpenForPackage on statics */
+        catalog2 = NULL;
+        hr = statics->lpVtbl->OpenForPackage( statics, NULL, &catalog2 );
+        ok( hr == S_OK && catalog2 != NULL, "OpenForPackage hr %#lx catalog2 %p\n", hr, catalog2 );
+        if (catalog2) catalog2->lpVtbl->Release( catalog2 );
+
+        statics->lpVtbl->Release( statics );
+    }
+
+    /* 3. Test IPackageCatalogStatics2 */
+    hr = IActivationFactory_QueryInterface( factory, &IID_ipackagecatalogstatics2, (void **)&statics2 );
+    ok( hr == S_OK && statics2 != NULL, "QI(IPackageCatalogStatics2) hr %#lx\n", hr );
+    if (SUCCEEDED( hr ) && statics2)
+    {
+        catalog2 = NULL;
+        hr = statics2->lpVtbl->OpenForPackage( statics2, NULL, &catalog2 );
+        ok( hr == S_OK && catalog2 != NULL, "statics2 OpenForPackage hr %#lx\n", hr );
+        if (catalog2) catalog2->lpVtbl->Release( catalog2 );
+
+        statics2->lpVtbl->Release( statics2 );
+    }
+
+    /* 4. Test IPackageCatalog event add/remove methods */
+    ok( catalog != NULL, "catalog should be valid\n" );
+    if (catalog)
+    {
+        /* PackageInstalling */
+        token.value = 0;
+        hr = catalog->lpVtbl->add_PackageInstalling( catalog, (void *)0xdead, &token );
+        ok( hr == S_OK && token.value != 0, "add_PackageInstalling hr %#lx token %I64d\n", hr, token.value );
+        hr = catalog->lpVtbl->remove_PackageInstalling( catalog, token );
+        ok( hr == S_OK, "remove_PackageInstalling hr %#lx\n", hr );
+
+        /* PackageUpdating */
+        token.value = 0;
+        hr = catalog->lpVtbl->add_PackageUpdating( catalog, (void *)0xdead, &token );
+        ok( hr == S_OK && token.value != 0, "add_PackageUpdating hr %#lx token %I64d\n", hr, token.value );
+        hr = catalog->lpVtbl->remove_PackageUpdating( catalog, token );
+        ok( hr == S_OK, "remove_PackageUpdating hr %#lx\n", hr );
+
+        /* PackageUninstalling */
+        token.value = 0;
+        hr = catalog->lpVtbl->add_PackageUninstalling( catalog, (void *)0xdead, &token );
+        ok( hr == S_OK && token.value != 0, "add_PackageUninstalling hr %#lx token %I64d\n", hr, token.value );
+        hr = catalog->lpVtbl->remove_PackageUninstalling( catalog, token );
+        ok( hr == S_OK, "remove_PackageUninstalling hr %#lx\n", hr );
+
+        /* PackageStatusChanged */
+        token.value = 0;
+        hr = catalog->lpVtbl->add_PackageStatusChanged( catalog, (void *)0xdead, &token );
+        ok( hr == S_OK && token.value != 0, "add_PackageStatusChanged hr %#lx token %I64d\n", hr, token.value );
+        hr = catalog->lpVtbl->remove_PackageStatusChanged( catalog, token );
+        ok( hr == S_OK, "remove_PackageStatusChanged hr %#lx\n", hr );
+
+        /* PackageStaging */
+        token.value = 0;
+        hr = catalog->lpVtbl->add_PackageStaging( catalog, (void *)0xdead, &token );
+        ok( hr == S_OK && token.value != 0, "add_PackageStaging hr %#lx token %I64d\n", hr, token.value );
+        hr = catalog->lpVtbl->remove_PackageStaging( catalog, token );
+        ok( hr == S_OK, "remove_PackageStaging hr %#lx\n", hr );
+
+        /* 5. Test IPackageCatalog2 stub */
+        cat2 = NULL;
+        hr = catalog->lpVtbl->QueryInterface( catalog, &IID_ipackagecatalog2, (void **)&cat2 );
+        ok( hr == S_OK && cat2 != NULL, "QI(IPackageCatalog2) hr %#lx\n", hr );
+        if (SUCCEEDED( hr ) && cat2)
+        {
+            token.value = 0;
+            hr = cat2->lpVtbl->add_PackageContentGroupStaging( cat2, (void *)0xdead, &token );
+            ok( hr == S_OK && token.value != 0, "add_PackageContentGroupStaging hr %#lx\n", hr );
+            hr = cat2->lpVtbl->remove_PackageContentGroupStaging( cat2, token );
+            ok( hr == S_OK, "remove_PackageContentGroupStaging hr %#lx\n", hr );
+
+            hr = cat2->lpVtbl->AddOptionalPackageAsync( cat2, NULL, NULL );
+            ok( hr == E_NOTIMPL, "AddOptionalPackageAsync hr %#lx\n", hr );
+
+            cat2->lpVtbl->Release( cat2 );
+        }
+
+        /* 6. Test IPackageCatalog3 stub */
+        cat3 = NULL;
+        hr = catalog->lpVtbl->QueryInterface( catalog, &IID_ipackagecatalog3, (void **)&cat3 );
+        ok( hr == S_OK && cat3 != NULL, "QI(IPackageCatalog3) hr %#lx\n", hr );
+        if (SUCCEEDED( hr ) && cat3)
+        {
+            hr = cat3->lpVtbl->RemoveOptionalPackagesAsync( cat3, NULL, NULL );
+            ok( hr == E_NOTIMPL, "RemoveOptionalPackagesAsync hr %#lx\n", hr );
+
+            cat3->lpVtbl->Release( cat3 );
+        }
+
+        catalog->lpVtbl->Release( catalog );
+    }
+
+    IActivationFactory_Release( factory );
+    FreeLibrary( mod );
+}
+
 START_TEST( deployment )
 {
     test_register_package();
     test_class_factory();
+    test_package_catalog();
 }
