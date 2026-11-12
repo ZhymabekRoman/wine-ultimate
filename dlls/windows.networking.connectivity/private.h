@@ -79,4 +79,127 @@ extern IActivationFactory *network_information_factory;
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
 
+extern const GUID IID_IConnectionProfile3;
+extern const GUID IID_IConnectionProfile4;
+
+#ifndef ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionProfile3_INTERFACE_DEFINED__
+#define ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionProfile3_INTERFACE_DEFINED__
+
+typedef interface IConnectionProfile3 IConnectionProfile3;
+
+typedef struct IConnectionProfile3Vtbl
+{
+    BEGIN_INTERFACE
+
+    /*** IUnknown methods ***/
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(
+        IConnectionProfile3 *This,
+        REFIID riid,
+        void **ppvObject);
+
+    ULONG (STDMETHODCALLTYPE *AddRef)(
+        IConnectionProfile3 *This);
+
+    ULONG (STDMETHODCALLTYPE *Release)(
+        IConnectionProfile3 *This);
+
+    /*** IInspectable methods ***/
+    HRESULT (STDMETHODCALLTYPE *GetIids)(
+        IConnectionProfile3 *This,
+        ULONG *iidCount,
+        IID **iids);
+
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(
+        IConnectionProfile3 *This,
+        HSTRING *className);
+
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(
+        IConnectionProfile3 *This,
+        TrustLevel *trustLevel);
+
+    /*** IConnectionProfile3 methods ***/
+    HRESULT (STDMETHODCALLTYPE *GetSignalBars)(
+        IConnectionProfile3 *This,
+        BYTE *value);
+
+    END_INTERFACE
+} IConnectionProfile3Vtbl;
+
+interface IConnectionProfile3
+{
+    CONST_VTBL struct IConnectionProfile3Vtbl *lpVtbl;
+};
+
+#ifdef COBJMACROS
+#define IConnectionProfile3_QueryInterface(This,riid,ppvObject) (This)->lpVtbl->QueryInterface(This,riid,ppvObject)
+#define IConnectionProfile3_AddRef(This) (This)->lpVtbl->AddRef(This)
+#define IConnectionProfile3_Release(This) (This)->lpVtbl->Release(This)
+#define IConnectionProfile3_GetIids(This,iidCount,iids) (This)->lpVtbl->GetIids(This,iidCount,iids)
+#define IConnectionProfile3_GetRuntimeClassName(This,className) (This)->lpVtbl->GetRuntimeClassName(This,className)
+#define IConnectionProfile3_GetTrustLevel(This,trustLevel) (This)->lpVtbl->GetTrustLevel(This,trustLevel)
+#define IConnectionProfile3_GetSignalBars(This,value) (This)->lpVtbl->GetSignalBars(This,value)
+#endif
+
+#endif /* ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionProfile3_INTERFACE_DEFINED__ */
+
+#ifndef ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionProfile4_INTERFACE_DEFINED__
+#define ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionProfile4_INTERFACE_DEFINED__
+
+typedef interface IConnectionProfile4 IConnectionProfile4;
+
+typedef struct IConnectionProfile4Vtbl
+{
+    BEGIN_INTERFACE
+
+    /*** IUnknown methods ***/
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(
+        IConnectionProfile4 *This,
+        REFIID riid,
+        void **ppvObject);
+
+    ULONG (STDMETHODCALLTYPE *AddRef)(
+        IConnectionProfile4 *This);
+
+    ULONG (STDMETHODCALLTYPE *Release)(
+        IConnectionProfile4 *This);
+
+    /*** IInspectable methods ***/
+    HRESULT (STDMETHODCALLTYPE *GetIids)(
+        IConnectionProfile4 *This,
+        ULONG *iidCount,
+        IID **iids);
+
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(
+        IConnectionProfile4 *This,
+        HSTRING *className);
+
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(
+        IConnectionProfile4 *This,
+        TrustLevel *trustLevel);
+
+    /*** IConnectionProfile4 methods ***/
+    HRESULT (STDMETHODCALLTYPE *get_NetworkSecuritySettings)(
+        IConnectionProfile4 *This,
+        INetworkSecuritySettings **value);
+
+    END_INTERFACE
+} IConnectionProfile4Vtbl;
+
+interface IConnectionProfile4
+{
+    CONST_VTBL struct IConnectionProfile4Vtbl *lpVtbl;
+};
+
+#ifdef COBJMACROS
+#define IConnectionProfile4_QueryInterface(This,riid,ppvObject) (This)->lpVtbl->QueryInterface(This,riid,ppvObject)
+#define IConnectionProfile4_AddRef(This) (This)->lpVtbl->AddRef(This)
+#define IConnectionProfile4_Release(This) (This)->lpVtbl->Release(This)
+#define IConnectionProfile4_GetIids(This,iidCount,iids) (This)->lpVtbl->GetIids(This,iidCount,iids)
+#define IConnectionProfile4_GetRuntimeClassName(This,className) (This)->lpVtbl->GetRuntimeClassName(This,className)
+#define IConnectionProfile4_GetTrustLevel(This,trustLevel) (This)->lpVtbl->GetTrustLevel(This,trustLevel)
+#define IConnectionProfile4_get_NetworkSecuritySettings(This,value) (This)->lpVtbl->get_NetworkSecuritySettings(This,value)
+#endif
+
+#endif /* ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionProfile4_INTERFACE_DEFINED__ */
+
 #endif

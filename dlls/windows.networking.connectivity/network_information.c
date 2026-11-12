@@ -26,6 +26,9 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(connectivity);
 
+DEFINE_GUID( IID_IConnectionProfile3, 0x57da83ad, 0xb584, 0x4252, 0x82, 0xab, 0x26, 0xe7, 0x65, 0x80, 0x75, 0xd6 );
+DEFINE_GUID( IID_IConnectionProfile4, 0x7a2d42cd, 0x81e0, 0x4ae3, 0xab, 0x32, 0xef, 0xf4, 0xb3, 0x9e, 0x32, 0x24 );
+
 static EventRegistrationToken dummy_cookie = {.value = 0xdeadbeef};
 static const GUID dummy_adapter_id = {0x11111111, 0x2222, 0x3333, {0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb}};
 
@@ -1079,10 +1082,128 @@ static const struct IVectorView_LanIdentifierVtbl empty_lan_identifiers_vtbl =
 };
 static struct empty_lan_identifiers_view empty_lan_identifiers_obj = { { &empty_lan_identifiers_vtbl } };
 
+struct network_security_settings
+{
+    INetworkSecuritySettings INetworkSecuritySettings_iface;
+    LONG ref;
+};
+
+static inline struct network_security_settings *impl_from_INetworkSecuritySettings( INetworkSecuritySettings *iface )
+{
+    return CONTAINING_RECORD( iface, struct network_security_settings, INetworkSecuritySettings_iface );
+}
+
+static HRESULT WINAPI network_security_settings_QueryInterface( INetworkSecuritySettings *iface, REFIID iid, void **out )
+{
+    struct network_security_settings *impl = impl_from_INetworkSecuritySettings( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_INetworkSecuritySettings ))
+    {
+        *out = &impl->INetworkSecuritySettings_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI network_security_settings_AddRef( INetworkSecuritySettings *iface )
+{
+    struct network_security_settings *impl = impl_from_INetworkSecuritySettings( iface );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
+    return ref;
+}
+
+static ULONG WINAPI network_security_settings_Release( INetworkSecuritySettings *iface )
+{
+    struct network_security_settings *impl = impl_from_INetworkSecuritySettings( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI network_security_settings_GetIids( INetworkSecuritySettings *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] =
+    {
+        IID_INetworkSecuritySettings,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_security_settings_GetRuntimeClassName( INetworkSecuritySettings *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Networking_Connectivity_NetworkSecuritySettings,
+                                wcslen( RuntimeClass_Windows_Networking_Connectivity_NetworkSecuritySettings ),
+                                class_name );
+}
+
+static HRESULT WINAPI network_security_settings_GetTrustLevel( INetworkSecuritySettings *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_security_settings_get_NetworkAuthenticationType( INetworkSecuritySettings *iface, NetworkAuthenticationType *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NetworkAuthenticationType_None;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_security_settings_get_NetworkEncryptionType( INetworkSecuritySettings *iface, NetworkEncryptionType *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NetworkEncryptionType_None;
+    return S_OK;
+}
+
+static const struct INetworkSecuritySettingsVtbl network_security_settings_vtbl =
+{
+    network_security_settings_QueryInterface,
+    network_security_settings_AddRef,
+    network_security_settings_Release,
+    network_security_settings_GetIids,
+    network_security_settings_GetRuntimeClassName,
+    network_security_settings_GetTrustLevel,
+    network_security_settings_get_NetworkAuthenticationType,
+    network_security_settings_get_NetworkEncryptionType,
+};
+
+static HRESULT network_security_settings_create( INetworkSecuritySettings **settings )
+{
+    struct network_security_settings *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->INetworkSecuritySettings_iface.lpVtbl = &network_security_settings_vtbl;
+    impl->ref = 1;
+    *settings = &impl->INetworkSecuritySettings_iface;
+    return S_OK;
+}
+
 struct connection_profile
 {
     IConnectionProfile IConnectionProfile_iface;
     IConnectionProfile2 IConnectionProfile2_iface;
+    IConnectionProfile3 IConnectionProfile3_iface;
+    IConnectionProfile4 IConnectionProfile4_iface;
     LONG ref;
 
     INetworkListManager *network_list_manager;
@@ -1115,6 +1236,21 @@ static HRESULT WINAPI connection_profile_QueryInterface( IConnectionProfile *ifa
         IInspectable_AddRef( *out );
         return S_OK;
     }
+
+    if (IsEqualGUID( iid, &IID_IConnectionProfile3 ))
+    {
+        *out = &impl->IConnectionProfile3_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IConnectionProfile4 ))
+    {
+        *out = &impl->IConnectionProfile4_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -1150,6 +1286,8 @@ static HRESULT WINAPI connection_profile_GetIids( IConnectionProfile *iface, ULO
     {
         IID_IConnectionProfile,
         IID_IConnectionProfile2,
+        IID_IConnectionProfile3,
+        IID_IConnectionProfile4,
     };
     IID *array = CoTaskMemAlloc( sizeof(iid_array) );
 
@@ -1255,8 +1393,7 @@ static HRESULT WINAPI connection_profile_get_NetworkSecuritySettings( IConnectio
 {
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = NULL;
-    return S_OK;
+    return network_security_settings_create( value );
 }
 
 static const struct IConnectionProfileVtbl connection_profile_vtbl =
@@ -1309,6 +1446,8 @@ static HRESULT WINAPI connection_profile2_GetIids( IConnectionProfile2 *iface, U
     {
         IID_IConnectionProfile,
         IID_IConnectionProfile2,
+        IID_IConnectionProfile3,
+        IID_IConnectionProfile4,
     };
     IID *array = CoTaskMemAlloc( sizeof(iid_array) );
 
@@ -1428,6 +1567,155 @@ static const struct IConnectionProfile2Vtbl connection_profile2_vtbl =
     connection_profile2_GetConnectivityIntervalsAsync,
 };
 
+static inline struct connection_profile *impl_from_IConnectionProfile3( IConnectionProfile3 *iface )
+{
+    return CONTAINING_RECORD( iface, struct connection_profile, IConnectionProfile3_iface );
+}
+
+static HRESULT WINAPI connection_profile3_QueryInterface( IConnectionProfile3 *iface, REFIID iid, void **out )
+{
+    struct connection_profile *impl = impl_from_IConnectionProfile3( iface );
+    return IConnectionProfile_QueryInterface( &impl->IConnectionProfile_iface, iid, out );
+}
+
+static ULONG WINAPI connection_profile3_AddRef( IConnectionProfile3 *iface )
+{
+    struct connection_profile *impl = impl_from_IConnectionProfile3( iface );
+    return IConnectionProfile_AddRef( &impl->IConnectionProfile_iface );
+}
+
+static ULONG WINAPI connection_profile3_Release( IConnectionProfile3 *iface )
+{
+    struct connection_profile *impl = impl_from_IConnectionProfile3( iface );
+    return IConnectionProfile_Release( &impl->IConnectionProfile_iface );
+}
+
+static HRESULT WINAPI connection_profile3_GetIids( IConnectionProfile3 *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] =
+    {
+        IID_IConnectionProfile,
+        IID_IConnectionProfile2,
+        IID_IConnectionProfile3,
+        IID_IConnectionProfile4,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI connection_profile3_GetRuntimeClassName( IConnectionProfile3 *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Networking_Connectivity_ConnectionProfile,
+                                wcslen( RuntimeClass_Windows_Networking_Connectivity_ConnectionProfile ),
+                                class_name );
+}
+
+static HRESULT WINAPI connection_profile3_GetTrustLevel( IConnectionProfile3 *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI connection_profile3_GetSignalBars( IConnectionProfile3 *iface, BYTE *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = 5;
+    return S_OK;
+}
+
+static const struct IConnectionProfile3Vtbl connection_profile3_vtbl =
+{
+    connection_profile3_QueryInterface,
+    connection_profile3_AddRef,
+    connection_profile3_Release,
+    /* IInspectable methods */
+    connection_profile3_GetIids,
+    connection_profile3_GetRuntimeClassName,
+    connection_profile3_GetTrustLevel,
+    /* IConnectionProfile3 methods */
+    connection_profile3_GetSignalBars,
+};
+
+static inline struct connection_profile *impl_from_IConnectionProfile4( IConnectionProfile4 *iface )
+{
+    return CONTAINING_RECORD( iface, struct connection_profile, IConnectionProfile4_iface );
+}
+
+static HRESULT WINAPI connection_profile4_QueryInterface( IConnectionProfile4 *iface, REFIID iid, void **out )
+{
+    struct connection_profile *impl = impl_from_IConnectionProfile4( iface );
+    return IConnectionProfile_QueryInterface( &impl->IConnectionProfile_iface, iid, out );
+}
+
+static ULONG WINAPI connection_profile4_AddRef( IConnectionProfile4 *iface )
+{
+    struct connection_profile *impl = impl_from_IConnectionProfile4( iface );
+    return IConnectionProfile_AddRef( &impl->IConnectionProfile_iface );
+}
+
+static ULONG WINAPI connection_profile4_Release( IConnectionProfile4 *iface )
+{
+    struct connection_profile *impl = impl_from_IConnectionProfile4( iface );
+    return IConnectionProfile_Release( &impl->IConnectionProfile_iface );
+}
+
+static HRESULT WINAPI connection_profile4_GetIids( IConnectionProfile4 *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] =
+    {
+        IID_IConnectionProfile,
+        IID_IConnectionProfile2,
+        IID_IConnectionProfile3,
+        IID_IConnectionProfile4,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI connection_profile4_GetRuntimeClassName( IConnectionProfile4 *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Networking_Connectivity_ConnectionProfile,
+                                wcslen( RuntimeClass_Windows_Networking_Connectivity_ConnectionProfile ),
+                                class_name );
+}
+
+static HRESULT WINAPI connection_profile4_GetTrustLevel( IConnectionProfile4 *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI connection_profile4_get_NetworkSecuritySettings( IConnectionProfile4 *iface, INetworkSecuritySettings **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return network_security_settings_create( value );
+}
+
+static const struct IConnectionProfile4Vtbl connection_profile4_vtbl =
+{
+    connection_profile4_QueryInterface,
+    connection_profile4_AddRef,
+    connection_profile4_Release,
+    /* IInspectable methods */
+    connection_profile4_GetIids,
+    connection_profile4_GetRuntimeClassName,
+    connection_profile4_GetTrustLevel,
+    /* IConnectionProfile4 methods */
+    connection_profile4_get_NetworkSecuritySettings,
+};
+
 static HRESULT connection_profile_create( INetworkListManager *network_list_manager, IConnectionProfile **profile )
 {
     struct connection_profile *impl;
@@ -1435,6 +1723,8 @@ static HRESULT connection_profile_create( INetworkListManager *network_list_mana
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IConnectionProfile_iface.lpVtbl = &connection_profile_vtbl;
     impl->IConnectionProfile2_iface.lpVtbl = &connection_profile2_vtbl;
+    impl->IConnectionProfile3_iface.lpVtbl = &connection_profile3_vtbl;
+    impl->IConnectionProfile4_iface.lpVtbl = &connection_profile4_vtbl;
     impl->ref = 1;
     impl->network_list_manager = network_list_manager;
     if (impl->network_list_manager)
