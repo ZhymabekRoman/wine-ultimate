@@ -2221,6 +2221,88 @@ static const struct IActivationFactoryVtbl logging_fields_factory_vtbl =
 static struct { IActivationFactory iface; } logging_fields_factory_obj = { {&logging_fields_factory_vtbl} };
 static IActivationFactory *logging_fields_activation_factory = &logging_fields_factory_obj.iface;
 
+/* Windows.Foundation.Diagnostics.AsyncCausalityTracer */
+static const GUID IID_IAsyncCausalityTracerStatics =
+    { 0x50850b26, 0x267e, 0x451b, { 0xa8, 0x90, 0xab, 0x6a, 0x37, 0x02, 0x45, 0xee } };
+
+static HRESULT WINAPI async_causality_tracer_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_IAsyncCausalityTracerStatics ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI async_causality_tracer_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI async_causality_tracer_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI async_causality_tracer_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI async_causality_tracer_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.Foundation.Diagnostics.AsyncCausalityTracer", 50, name ); }
+static HRESULT WINAPI async_causality_tracer_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI async_causality_tracer_stub_ok( void *iface, ... ) { return S_OK; }
+
+static const void *async_causality_tracer_factory_vtbl[] =
+{
+    async_causality_tracer_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    async_causality_tracer_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    async_causality_tracer_stub_ok, /* ActivateInstance */
+    async_causality_tracer_stub_ok, /* TraceOperationCreation */
+    async_causality_tracer_stub_ok, /* TraceOperationCompletion */
+    async_causality_tracer_stub_ok, /* TraceOperationRelation */
+    async_causality_tracer_stub_ok, /* TraceSynchronousWorkStart */
+    async_causality_tracer_stub_ok, /* TraceSynchronousWorkCompletion */
+    async_causality_tracer_stub_ok, /* add_TracingStatusChanged */
+    async_causality_tracer_stub_ok, /* remove_TracingStatusChanged */
+    async_causality_tracer_stub_ok, async_causality_tracer_stub_ok,
+    async_causality_tracer_stub_ok, async_causality_tracer_stub_ok,
+};
+static struct { const void **vtbl; } async_causality_tracer_factory_obj = { async_causality_tracer_factory_vtbl };
+
+/* Windows.Foundation.Diagnostics.LoggingChannelOptions */
+static HRESULT WINAPI logging_channel_options_stub_ok( void *iface, ... ) { return S_OK; }
+static const void *logging_channel_options_vtbl[] =
+{
+    async_causality_tracer_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    async_causality_tracer_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    logging_channel_options_stub_ok, logging_channel_options_stub_ok,
+    logging_channel_options_stub_ok, logging_channel_options_stub_ok,
+};
+static struct { const void **vtbl; } logging_channel_options_obj = { logging_channel_options_vtbl };
+
+static HRESULT WINAPI logging_channel_options_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    if (instance) *instance = (IInspectable *)&logging_channel_options_obj;
+    return S_OK;
+}
+static const void *logging_channel_options_factory_vtbl[] =
+{
+    async_causality_tracer_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    async_causality_tracer_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    logging_channel_options_factory_ActivateInstance,
+    logging_channel_options_factory_ActivateInstance,
+};
+static struct { const void **vtbl; } logging_channel_options_factory_obj = { logging_channel_options_factory_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer(classid, NULL);
@@ -2244,6 +2326,10 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         IActivationFactory_AddRef((*factory = uri_activation_factory));
     if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.LoggingFields"))
         IActivationFactory_AddRef((*factory = logging_fields_activation_factory));
+    if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.AsyncCausalityTracer"))
+        *factory = (IActivationFactory *)&async_causality_tracer_factory_obj;
+    if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.LoggingChannelOptions"))
+        *factory = (IActivationFactory *)&logging_channel_options_factory_obj;
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

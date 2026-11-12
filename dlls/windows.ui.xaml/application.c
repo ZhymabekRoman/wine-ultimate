@@ -17,6 +17,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -167,6 +168,7 @@ struct xaml_window
     IInspectable IInspectable_iface;
     IInspectable IWindow2_iface;
     IInspectable ms_IWindow_iface;
+    IInspectable ms_IWindow2_iface;
     IWindowNative IWindowNative_iface;
     LONG ref;
     IInspectable *content;
@@ -179,6 +181,7 @@ struct xaml_window
     ID3D11DeviceContext *d3d11_ctx;
     HWND target_hwnd;
     UINT width, height;
+    BOOL core_window_subscribed;
 };
 static struct xaml_window global_xaml_window;
 static BOOL lifecycle_started = FALSE;
@@ -195,6 +198,8 @@ static const GUID IID_IApplication_WinUI =
     { 0x74b861a1, 0x7487, 0x46a9, { 0x9a, 0x6e, 0xc7, 0x8b, 0x51, 0x27, 0x26, 0xc5 } };
 static const GUID IID_IWindow2 =
     { 0x74b861a1, 0x7487, 0x46a9, { 0x9a, 0x6e, 0xc7, 0x8b, 0x51, 0x27, 0x26, 0xc5 } };
+static const GUID IID_IWindow2_WinUI =
+    { 0x42febaa5, 0x1c32, 0x522a, { 0xa5, 0x91, 0x57, 0x61, 0x8c, 0x6f, 0x66, 0x5d } };
 static const GUID IID_IApplication_751b =
     { 0x751b792e, 0x5772, 0x4488, { 0x8b, 0x87, 0xf5, 0x47, 0xfa, 0xa6, 0x44, 0x74 } };
 static const GUID IID_IApplication_0191 =
@@ -1224,6 +1229,13 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IWindow2_WinUI ))
+    {
+        *out = &impl->ms_IWindow2_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IWindowNative ))
     {
         *out = &impl->IWindowNative_iface;
@@ -1350,27 +1362,119 @@ HRESULT xaml_create_dcomp_visual( IDCompositionVisual **out_visual )
     return hr;
 }
 
+static HRESULT xaml_window_present( struct xaml_window *impl );
+
+static HRESULT WINAPI xaml_handler_QI( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI xaml_handler_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI xaml_handler_Release( void *iface ) { return 1; }
+
+static HRESULT WINAPI xaml_pointer_pressed_Invoke(
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *iface,
+    ICoreWindow *sender, __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    TRACE( "xaml pointer pressed on hwnd %p\n", impl->target_hwnd );
+    xaml_window_present( impl );
+    return S_OK;
+}
+
+static const void *xaml_pointer_pressed_vtbl[] =
+{
+    xaml_handler_QI,
+    xaml_handler_AddRef,
+    xaml_handler_Release,
+    xaml_pointer_pressed_Invoke,
+};
+static struct { const void **vtbl; } xaml_pointer_pressed_handler_obj = { xaml_pointer_pressed_vtbl };
+
+static HRESULT WINAPI xaml_pointer_released_Invoke(
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *iface,
+    ICoreWindow *sender, __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    TRACE( "xaml pointer released on hwnd %p\n", impl->target_hwnd );
+    xaml_window_present( impl );
+    return S_OK;
+}
+
+static const void *xaml_pointer_released_vtbl[] =
+{
+    xaml_handler_QI,
+    xaml_handler_AddRef,
+    xaml_handler_Release,
+    xaml_pointer_released_Invoke,
+};
+static struct { const void **vtbl; } xaml_pointer_released_handler_obj = { xaml_pointer_released_vtbl };
+
+static HRESULT WINAPI xaml_char_received_Invoke(
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *iface,
+    ICoreWindow *sender, __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *args )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    UINT32 key_code = 0;
+    if (args) args->lpVtbl->get_KeyCode( args, &key_code );
+    TRACE( "xaml char received: %u (%c)\n", key_code, (char)key_code );
+    xaml_window_present( impl );
+    return S_OK;
+}
+
+static const void *xaml_char_received_vtbl[] =
+{
+    xaml_handler_QI,
+    xaml_handler_AddRef,
+    xaml_handler_Release,
+    xaml_char_received_Invoke,
+};
+static struct { const void **vtbl; } xaml_char_received_handler_obj = { xaml_char_received_vtbl };
+
+static HRESULT WINAPI xaml_key_down_Invoke(
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *iface,
+    ICoreWindow *sender, __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *args )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    __x_ABI_CWindows_CSystem_CVirtualKey vk = 0;
+    if (args) args->lpVtbl->get_VirtualKey( args, &vk );
+    TRACE( "xaml key down: %u\n", vk );
+    xaml_window_present( impl );
+    return S_OK;
+}
+
+static const void *xaml_key_down_vtbl[] =
+{
+    xaml_handler_QI,
+    xaml_handler_AddRef,
+    xaml_handler_Release,
+    xaml_key_down_Invoke,
+};
+static struct { const void **vtbl; } xaml_key_down_handler_obj = { xaml_key_down_vtbl };
+
+static void xaml_window_subscribe_core_window( struct xaml_window *impl )
+{
+    EventRegistrationToken tok;
+    if (!impl->core_window || impl->core_window_subscribed) return;
+    impl->core_window_subscribed = TRUE;
+    ICoreWindow_add_PointerPressed( impl->core_window, (void *)&xaml_pointer_pressed_handler_obj, &tok );
+    ICoreWindow_add_PointerReleased( impl->core_window, (void *)&xaml_pointer_released_handler_obj, &tok );
+    ICoreWindow_add_CharacterReceived( impl->core_window, (void *)&xaml_char_received_handler_obj, &tok );
+    ICoreWindow_add_KeyDown( impl->core_window, (void *)&xaml_key_down_handler_obj, &tok );
+    TRACE( "subscribed xaml_window to core_window %p\n", impl->core_window );
+}
+
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content )
 {
     RECT rc;
     HDC memdc;
     HBITMAP bmp, old_bmp;
-    HBRUSH bg_brush, num_brush, op_brush, eq_brush, old_brush;
-    HPEN null_pen, old_pen;
-    HFONT font_title, font_display, font_mem, font_btn, font_btn_bold, old_font;
-    int row, col, gap = 4;
-    int x_left, x_right, y_top, y_bottom, col_width, row_height;
-    RECT disp_rc, title_rc, mem_rc;
-
-    static const WCHAR *btn_labels[6][4] =
-    {
-        { L"%", L"CE", L"C", L"DEL" },
-        { L"1/x", L"x²", L"√x", L"÷" },
-        { L"7", L"8", L"9", L"×" },
-        { L"4", L"5", L"6", L"−" },
-        { L"1", L"2", L"3", L"+" },
-        { L"±", L"0", L".", L"=" }
-    };
+    HBRUSH bg_brush;
 
     if (width <= 0 || height <= 0) return;
     SetRect( &rc, 0, 0, width, height );
@@ -1379,125 +1483,14 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     bmp = CreateCompatibleBitmap( hdc, width, height );
     old_bmp = SelectObject( memdc, bmp );
 
-    /* Background: Windows 10/11 Dark Calculator theme (RGB 32, 32, 32) */
+    /* Background: Windows 10/11 Dark Application theme (RGB 32, 32, 32) */
     bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
-    num_brush = CreateSolidBrush( RGB( 59, 59, 59 ) );
-    op_brush = CreateSolidBrush( RGB( 50, 50, 50 ) );
-    eq_brush = CreateSolidBrush( RGB( 0, 120, 215 ) );
-    null_pen = CreatePen( PS_NULL, 0, 0 );
-
     FillRect( memdc, &rc, bg_brush );
-    SetBkMode( memdc, TRANSPARENT );
-
-    font_title = CreateFontW( -18, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                              CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-    font_display = CreateFontW( -56, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-    font_mem = CreateFontW( -12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-    font_btn = CreateFontW( -18, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                            DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                            CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-    font_btn_bold = CreateFontW( -22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
-                                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI" );
-
-    /* Header */
-    SetTextColor( memdc, RGB( 255, 255, 255 ) );
-    old_font = SelectObject( memdc, font_title );
-    SetRect( &title_rc, 24, 16, 300, 48 );
-    DrawTextW( memdc, L"☰   Standard", -1, &title_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
-
-    /* Display */
-    SelectObject( memdc, font_display );
-    SetRect( &disp_rc, 24, 52, width - 24, 140 );
-    DrawTextW( memdc, L"0", -1, &disp_rc, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
-
-    /* Memory row */
-    SetTextColor( memdc, RGB( 160, 160, 160 ) );
-    SelectObject( memdc, font_mem );
-    SetRect( &mem_rc, 24, 146, width - 24, 172 );
-    DrawTextW( memdc, L"MC      MR      M+      M-      MS      Mˇ", -1, &mem_rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
-
-    /* Keypad grid */
-    x_left = 12;
-    x_right = width - 12;
-    y_top = 180;
-    y_bottom = height - 12;
-
-    col_width = (x_right - x_left - (4 - 1) * gap) / 4;
-    row_height = (y_bottom - y_top - (6 - 1) * gap) / 6;
-
-    old_pen = SelectObject( memdc, null_pen );
-
-    for (row = 0; row < 6; row++)
-    {
-        for (col = 0; col < 4; col++)
-        {
-            RECT btn_rc;
-            BOOL is_num = FALSE;
-            BOOL is_eq = FALSE;
-            const WCHAR *lbl = btn_labels[row][col];
-
-            btn_rc.left = x_left + col * (col_width + gap);
-            btn_rc.right = btn_rc.left + col_width;
-            btn_rc.top = y_top + row * (row_height + gap);
-            btn_rc.bottom = btn_rc.top + row_height;
-
-            if (row == 5 && col == 3)
-                is_eq = TRUE;
-            else if (row >= 2 && row <= 4 && col <= 2)
-                is_num = TRUE;
-            else if (row == 5 && (col == 1 || col == 2 || col == 0))
-                is_num = TRUE;
-
-            if (is_eq)
-            {
-                old_brush = SelectObject( memdc, eq_brush );
-                SetTextColor( memdc, RGB( 255, 255, 255 ) );
-                SelectObject( memdc, font_btn_bold );
-            }
-            else if (is_num)
-            {
-                old_brush = SelectObject( memdc, num_brush );
-                SetTextColor( memdc, RGB( 255, 255, 255 ) );
-                SelectObject( memdc, font_btn_bold );
-            }
-            else
-            {
-                old_brush = SelectObject( memdc, op_brush );
-                SetTextColor( memdc, RGB( 240, 240, 240 ) );
-                SelectObject( memdc, font_btn );
-            }
-
-            RoundRect( memdc, btn_rc.left, btn_rc.top, btn_rc.right, btn_rc.bottom, 8, 8 );
-            DrawTextW( memdc, lbl, -1, &btn_rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
-
-            SelectObject( memdc, old_brush );
-        }
-    }
 
     BitBlt( hdc, 0, 0, width, height, memdc, 0, 0, SRCCOPY );
 
-    SelectObject( memdc, old_font );
-    SelectObject( memdc, old_pen );
     SelectObject( memdc, old_bmp );
-
-    DeleteObject( font_title );
-    DeleteObject( font_display );
-    DeleteObject( font_mem );
-    DeleteObject( font_btn );
-    DeleteObject( font_btn_bold );
-
     DeleteObject( bg_brush );
-    DeleteObject( num_brush );
-    DeleteObject( op_brush );
-    DeleteObject( eq_brush );
-    DeleteObject( null_pen );
-
     DeleteObject( bmp );
     DeleteDC( memdc );
 }
@@ -1521,6 +1514,9 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     if (!hwnd) hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
     if (!hwnd) hwnd = GetActiveWindow();
     if (!hwnd) return S_FALSE;
+
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    if (impl->core_window) xaml_window_subscribe_core_window( impl );
 
     GetClientRect( hwnd, &rc );
     width = rc.right > 0 ? rc.right : 1024;
@@ -1916,6 +1912,20 @@ static HRESULT WINAPI xaml_window_zero_out( void *iface, void *a2, void *a3 )
     return S_OK;
 }
 
+static HRESULT WINAPI xaml_window2_get_SystemBackdrop( void *iface, void **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window2_set_SystemBackdrop( void *iface, void *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    return S_OK;
+}
+
 static const void *xaml_window2_vtbl[] =
 {
     xaml_window2_QueryInterface,     /* 0 */
@@ -1996,6 +2006,109 @@ static const void *ms_xaml_window_vtbl[] =
     xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out,
 };
 
+static inline struct xaml_window *impl_from_ms_IWindow2( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_window, ms_IWindow2_iface );
+}
+static HRESULT WINAPI ms_xaml_window2_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct xaml_window *impl = impl_from_ms_IWindow2( iface );
+    return xaml_window_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI ms_xaml_window2_AddRef( IInspectable *iface )
+{
+    struct xaml_window *impl = impl_from_ms_IWindow2( iface );
+    return xaml_window_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI ms_xaml_window2_Release( IInspectable *iface )
+{
+    struct xaml_window *impl = impl_from_ms_IWindow2( iface );
+    return xaml_window_Release( &impl->IInspectable_iface );
+}
+
+static HRESULT WINAPI ms_xaml_window2_get_AppWindow( void *iface, void **value )
+{
+    struct xaml_window *impl = impl_from_ms_IWindow2( iface );
+    HWND hwnd = NULL;
+    HSTRING class_name = NULL;
+    IActivationFactory *af = NULL;
+    void *statics = NULL;
+    static const GUID IID_IAppWindowStatics =
+        { 0x3c315c24, 0xd540, 0x5d72, { 0xb5, 0x18, 0xb2, 0x26, 0xb8, 0x36, 0x27, 0xcb } };
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    if (impl->core_window)
+    {
+        ICoreWindowInterop *interop = NULL;
+        if (SUCCEEDED(ICoreWindow_QueryInterface( impl->core_window, &IID_ICoreWindowInterop, (void **)&interop )))
+        {
+            interop->lpVtbl->GetWindowHandle( interop, &hwnd );
+            interop->lpVtbl->Release( interop );
+        }
+    }
+
+    if (!hwnd && impl->target_hwnd && IsWindow( impl->target_hwnd )) hwnd = impl->target_hwnd;
+    if (!hwnd) hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    if (!hwnd) hwnd = FindWindowW( L"Window", NULL );
+    if (!hwnd) hwnd = GetActiveWindow();
+    if (!hwnd) hwnd = GetForegroundWindow();
+    if (!hwnd) return E_FAIL;
+
+    hr = WindowsCreateString( L"Microsoft.UI.Windowing.AppWindow", 32, &class_name );
+    if (FAILED(hr)) return hr;
+
+    hr = RoGetActivationFactory( class_name, &IID_IActivationFactory, (void **)&af );
+    WindowsDeleteString( class_name );
+    if (FAILED(hr) || !af) return hr;
+
+    hr = IActivationFactory_QueryInterface( af, &IID_IAppWindowStatics, (void **)&statics );
+    IActivationFactory_Release( af );
+    if (FAILED(hr) || !statics) return hr;
+
+    /* GetFromWindowId is slot 9 on IAppWindowStatics */
+    {
+        void **vtbl = *(void ***)statics;
+        HRESULT (WINAPI *pGetFromWindowId)(void *, UINT64, void **) = (void *)vtbl[9];
+        hr = pGetFromWindowId( statics, (UINT64)hwnd, value );
+        IUnknown_Release( (IUnknown *)statics );
+    }
+
+    TRACE( "get_AppWindow hwnd %p -> hr %#lx, value %p\n", hwnd, hr, *value );
+    return hr;
+}
+
+static const void *ms_xaml_window2_vtbl[] =
+{
+    ms_xaml_window2_QueryInterface,     /* 0 */
+    ms_xaml_window2_AddRef,             /* 1 */
+    ms_xaml_window2_Release,            /* 2 */
+    xaml_window2_GetIids,               /* 3 */
+    xaml_window2_GetRuntimeClassName,   /* 4 */
+    xaml_window2_GetTrustLevel,         /* 5 */
+    ms_xaml_window2_get_AppWindow,      /* 6: get_AppWindow */
+    xaml_window2_get_SystemBackdrop,    /* 7: get_SystemBackdrop */
+    xaml_window2_set_SystemBackdrop,    /* 8: set_SystemBackdrop */
+    xaml_window_zero_out, xaml_window_zero_out, /* 9..10 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 11..14 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 15..18 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 19..22 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 23..26 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 27..30 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 31..34 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 35..38 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 39..42 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 43..46 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 47..50 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 51..54 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 55..58 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 59..62 */
+    xaml_window_zero_out                                                                    /* 63 */
+};
+
 static inline struct xaml_window *impl_from_IWindowNative( IWindowNative *iface )
 {
     return CONTAINING_RECORD( iface, struct xaml_window, IWindowNative_iface );
@@ -2067,6 +2180,7 @@ static struct xaml_window global_xaml_window =
     {(const struct IInspectableVtbl *)&xaml_window_vtbl},
     {(const struct IInspectableVtbl *)xaml_window2_vtbl},
     {(const struct IInspectableVtbl *)ms_xaml_window_vtbl},
+    {(const struct IInspectableVtbl *)ms_xaml_window2_vtbl},
     {&xaml_window_native_vtbl},
     1,
     NULL,

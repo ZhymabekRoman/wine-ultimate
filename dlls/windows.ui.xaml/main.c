@@ -936,6 +936,15 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.Page" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Page" ))
         IActivationFactory_QueryInterface( page_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.Grid" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Grid" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Canvas" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Canvas" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.StackPanel" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.StackPanel" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Border" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Border" ))
+        IActivationFactory_QueryInterface( grid_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

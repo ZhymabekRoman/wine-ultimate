@@ -59,6 +59,7 @@ extern IActivationFactory *color_helper_factory;
 extern IActivationFactory *size_helper_factory;
 extern IActivationFactory *frame_factory;
 extern IActivationFactory *page_factory;
+extern IActivationFactory *grid_factory;
 extern IActivationFactory *swapchain_panel_factory;
 extern IActivationFactory *application_factory;
 extern IActivationFactory *window_factory;

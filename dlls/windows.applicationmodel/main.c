@@ -266,256 +266,772 @@ static HRESULT WINAPI winappsdk_zero_out( void *iface, void *out )
     return S_OK;
 }
 
-struct empty_collection
+/* WinRT generic collection implementation conforming to ABI:
+ * IVectorView<T>, IMapView<K, V>, IIterable<T>, IIterator<T>, IKeyValuePair<K, V> */
+
+static const GUID IID_IReferenceTracker =
+    { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+static const GUID IID_IReferenceTrackerManager =
+    { 0x3cf184b4, 0x7ccb, 0x4dda, { 0x84, 0x55, 0x7e, 0x39, 0x35, 0xe2, 0x37, 0xf3 } };
+static const GUID IID_IReferenceTrackerTarget =
+    { 0x5c13e51c, 0x4f32, 0x4726, { 0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0 } };
+
+/* Generic IIDs */
+static const GUID IID_IVectorView_Object =
+    { 0xa6487363, 0xb074, 0x5c60, { 0xab, 0x16, 0x86, 0x6d, 0xce, 0x4e, 0xe5, 0x4d } };
+static const GUID IID_IIterable_Object =
+    { 0x092b849b, 0x60b1, 0x52be, { 0xa4, 0x4a, 0x6f, 0xe8, 0xe9, 0x33, 0xcb, 0xe4 } };
+static const GUID IID_IIterator_Object =
+    { 0x44a94f2d, 0x04f8, 0x5091, { 0xb3, 0x36, 0xbe, 0x78, 0x92, 0xdd, 0x10, 0xbe } };
+static const GUID IID_IMapView_Object =
+    { 0x236aac9d, 0xfb12, 0x5c4d, { 0xa4, 0x1c, 0x9e, 0x44, 0x5f, 0xb4, 0xd7, 0xec } };
+static const GUID IID_IKeyValuePair_Object =
+    { 0x09335560, 0x6c6b, 0x5a26, { 0x93, 0x48, 0x97, 0xb7, 0x81, 0x13, 0x2b, 0x20 } };
+static const GUID IID_IIterable_KeyValuePair_Object =
+    { 0xcf2c8067, 0xa319, 0x570b, { 0xa2, 0x40, 0xd9, 0x30, 0x22, 0x05, 0xec, 0x92 } };
+static const GUID IID_IIterator_KeyValuePair_Object =
+    { 0xf3c2dc13, 0x6484, 0x5da6, { 0x9e, 0x3c, 0xdc, 0x03, 0x37, 0x4b, 0x0b, 0x36 } };
+
+/* Instantiated IIDs for Store types */
+static const GUID IID_IVectorView_StoreImage =
+    { 0x7e1ceace, 0x82bd, 0x5db3, { 0x8f, 0x35, 0x9b, 0xf0, 0xc8, 0x8e, 0xf8, 0x39 } };
+static const GUID IID_IIterable_StoreImage =
+    { 0xb2da6de8, 0xad55, 0x56ce, { 0x87, 0x54, 0x2c, 0x96, 0xf4, 0xfe, 0x1c, 0x2e } };
+static const GUID IID_IIterator_StoreImage =
+    { 0xfbe076f6, 0xc3d2, 0x5df7, { 0x83, 0x9f, 0x01, 0x2a, 0xc0, 0xf9, 0x51, 0xc5 } };
+
+static const GUID IID_IMapView_StoreProduct =
+    { 0x3074efe6, 0x0cd8, 0x5fb7, { 0xae, 0xe3, 0x60, 0xbd, 0xa3, 0xc2, 0xf6, 0x7e } };
+static const GUID IID_IIterable_StoreProductKeyValuePair =
+    { 0xb9663fb7, 0x1c5f, 0x59a4, { 0x90, 0xc7, 0x36, 0x34, 0xfd, 0xd3, 0xf2, 0xf4 } };
+static const GUID IID_IKeyValuePair_StoreProduct =
+    { 0x0e89a311, 0x437a, 0x5957, { 0x95, 0x93, 0x8e, 0xd6, 0x45, 0x11, 0x54, 0x5b } };
+static const GUID IID_IIterator_StoreProductKeyValuePair =
+    { 0xaf049501, 0x6d88, 0x5887, { 0x81, 0xa1, 0xed, 0xd4, 0xad, 0xc4, 0xc0, 0x63 } };
+
+struct winrt_vector_view
 {
     const void *vtbl_vector;
     const void *vtbl_iterable;
     LONG ref;
+    GUID vector_iid;
+    GUID iterable_iid;
+    GUID iterator_iid;
+    UINT32 count;
+    IInspectable **items;
 };
 
-static HRESULT WINAPI empty_iterator_QueryInterface( void *iface, REFIID iid, void **out )
+struct winrt_vector_iterator
 {
-    *out = iface;
-    return S_OK;
-}
-static ULONG WINAPI empty_iterator_AddRef( void *iface ) { return 2; }
-static ULONG WINAPI empty_iterator_Release( void *iface ) { return 1; }
-static HRESULT WINAPI empty_iterator_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
-static HRESULT WINAPI empty_iterator_GetRuntimeClassName( void *iface, HSTRING *n )
-{
-    return WindowsCreateString( L"Windows.Foundation.Collections.IIterator`1", 42, n );
-}
-static HRESULT WINAPI empty_iterator_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
-static HRESULT WINAPI empty_iterator_get_Current( void *iface, void **current )
-{
-    if (current) *current = NULL;
-    return E_BOUNDS;
-}
-static HRESULT WINAPI empty_iterator_get_HasCurrent( void *iface, BOOL *has_current )
-{
-    if (has_current) *has_current = FALSE;
-    return S_OK;
-}
-static HRESULT WINAPI empty_iterator_MoveNext( void *iface, BOOL *has_current )
-{
-    if (has_current) *has_current = FALSE;
-    return S_OK;
-}
-static HRESULT WINAPI empty_iterator_GetMany( void *iface, UINT32 count, void **items, UINT32 *actual )
-{
-    if (actual) *actual = 0;
-    return S_OK;
-}
-static const void *empty_iterator_vtbl[] =
-{
-    empty_iterator_QueryInterface,
-    empty_iterator_AddRef,
-    empty_iterator_Release,
-    empty_iterator_GetIids,
-    empty_iterator_GetRuntimeClassName,
-    empty_iterator_GetTrustLevel,
-    empty_iterator_get_Current,
-    empty_iterator_get_HasCurrent,
-    empty_iterator_MoveNext,
-    empty_iterator_GetMany,
-};
-static struct winappsdk_class empty_iterator_obj =
-{
-    empty_iterator_vtbl, L"Windows.Foundation.Collections.IIterator`1", 1
+    const void *vtbl_iterator;
+    LONG ref;
+    struct winrt_vector_view *vector;
+    UINT32 index;
 };
 
-static HRESULT WINAPI empty_vector_QueryInterface( void *iface, REFIID iid, void **out );
-static HRESULT WINAPI empty_iterable_QueryInterface( void *iface, REFIID iid, void **out );
-static ULONG WINAPI empty_collection_AddRef( void *iface )
+struct winrt_map_view
 {
-    struct empty_collection *col = iface;
-    return InterlockedIncrement( &col->ref );
-}
-static ULONG WINAPI empty_collection_Release( void *iface )
-{
-    struct empty_collection *col = iface;
-    LONG ref = InterlockedDecrement( &col->ref );
-    if (!ref) HeapFree( GetProcessHeap(), 0, col );
-    return ref;
-}
-static ULONG WINAPI empty_iterable_AddRef( void *iface )
-{
-    struct empty_collection *col = (struct empty_collection *)((char *)iface - sizeof(void *));
-    return empty_collection_AddRef( col );
-}
-static ULONG WINAPI empty_iterable_Release( void *iface )
-{
-    struct empty_collection *col = (struct empty_collection *)((char *)iface - sizeof(void *));
-    return empty_collection_Release( col );
-}
-static HRESULT WINAPI empty_collection_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
-static HRESULT WINAPI empty_collection_GetRuntimeClassName( void *iface, HSTRING *n )
-{
-    return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1", 44, n );
-}
-static HRESULT WINAPI empty_collection_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
-
-static HRESULT WINAPI empty_vector_GetAt( void *iface, UINT32 index, void **item )
-{
-    if (item) *item = NULL;
-    return E_BOUNDS;
-}
-static HRESULT WINAPI empty_vector_get_Size( void *iface, UINT32 *size )
-{
-    if (size) *size = 0;
-    return S_OK;
-}
-static HRESULT WINAPI empty_vector_IndexOf( void *iface, void *item, UINT32 *index, BOOL *found )
-{
-    if (index) *index = 0;
-    if (found) *found = FALSE;
-    return S_OK;
-}
-static HRESULT WINAPI empty_vector_GetMany( void *iface, UINT32 start, UINT32 cap, void **items, UINT32 *actual )
-{
-    if (actual) *actual = 0;
-    return S_OK;
-}
-static HRESULT WINAPI empty_iterable_First( void *iface, void **iter )
-{
-    if (iter) *iter = &empty_iterator_obj;
-    return S_OK;
-}
-
-static const void *empty_vector_vtbl[] =
-{
-    empty_vector_QueryInterface,
-    empty_collection_AddRef,
-    empty_collection_Release,
-    empty_collection_GetIids,
-    empty_collection_GetRuntimeClassName,
-    empty_collection_GetTrustLevel,
-    empty_vector_GetAt,
-    empty_vector_get_Size,
-    empty_vector_IndexOf,
-    empty_vector_GetMany,
+    const void *vtbl_map;
+    const void *vtbl_iterable;
+    LONG ref;
+    GUID map_iid;
+    GUID iterable_iid;
+    GUID kv_iid;
+    GUID iterator_iid;
+    UINT32 count;
+    HSTRING *keys;
+    IInspectable **values;
 };
 
-static const void *empty_iterable_vtbl[] =
+struct winrt_map_iterator
 {
-    empty_iterable_QueryInterface,
-    empty_iterable_AddRef,
-    empty_iterable_Release,
-    empty_collection_GetIids,
-    empty_collection_GetRuntimeClassName,
-    empty_collection_GetTrustLevel,
-    empty_iterable_First,
+    const void *vtbl_iterator;
+    LONG ref;
+    struct winrt_map_view *map;
+    UINT32 index;
 };
 
-static HRESULT WINAPI empty_vector_QueryInterface( void *iface, REFIID iid, void **out )
+struct winrt_key_value_pair
 {
-    static const GUID IID_IReferenceTracker =
-        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
-    static const GUID IID_IReferenceTrackerManager =
-        { 0x3cf184b4, 0x7ccb, 0x4dda, { 0x84, 0x55, 0x7e, 0x39, 0x35, 0xe2, 0x37, 0xf3 } };
-    struct empty_collection *col = iface;
-    if (!out) return E_INVALIDARG;
+    const void *vtbl_kv;
+    LONG ref;
+    HSTRING key;
+    IInspectable *value;
+    GUID kv_iid;
+};
+
+static inline struct winrt_key_value_pair *impl_from_kv( void *iface )
+{
+    return (struct winrt_key_value_pair *)iface;
+}
+static HRESULT WINAPI kv_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct winrt_key_value_pair *impl = impl_from_kv( iface );
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerManager ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
     {
         *out = NULL;
         return E_NOINTERFACE;
     }
-    if (iid->Data1 == 0xfaa585ea)
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &impl->kv_iid ) ||
+        IsEqualGUID( iid, &IID_IKeyValuePair_Object ))
     {
-        *out = (void *)&col->vtbl_iterable;
-        InterlockedIncrement( &col->ref );
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    *out = iface;
-    InterlockedIncrement( &col->ref );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI kv_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_kv( iface )->ref );
+}
+static ULONG WINAPI kv_Release( void *iface )
+{
+    struct winrt_key_value_pair *impl = impl_from_kv( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        WindowsDeleteString( impl->key );
+        if (impl->value) IInspectable_Release( impl->value );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI kv_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0; if (iids) *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI kv_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.Collections.IKeyValuePair`2";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI kv_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI kv_get_Key( void *iface, HSTRING *key )
+{
+    struct winrt_key_value_pair *impl = impl_from_kv( iface );
+    if (!key) return E_POINTER;
+    return WindowsDuplicateString( impl->key, key );
+}
+static HRESULT WINAPI kv_get_Value( void *iface, IInspectable **value )
+{
+    struct winrt_key_value_pair *impl = impl_from_kv( iface );
+    if (!value) return E_POINTER;
+    *value = impl->value;
+    if (*value) IInspectable_AddRef( *value );
+    return S_OK;
+}
+static const void *winrt_kv_vtbl[] =
+{
+    kv_QueryInterface,
+    kv_AddRef,
+    kv_Release,
+    kv_GetIids,
+    kv_GetRuntimeClassName,
+    kv_GetTrustLevel,
+    kv_get_Key,
+    kv_get_Value,
+};
+
+static IInspectable *create_key_value_pair( HSTRING key, IInspectable *value, const GUID *kv_iid )
+{
+    struct winrt_key_value_pair *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->vtbl_kv = winrt_kv_vtbl;
+    impl->ref = 1;
+    WindowsDuplicateString( key, &impl->key );
+    impl->value = value;
+    if (impl->value) IInspectable_AddRef( impl->value );
+    if (kv_iid) impl->kv_iid = *kv_iid;
+    return (IInspectable *)&impl->vtbl_kv;
+}
+
+static inline struct winrt_vector_view *impl_from_vector( void *iface )
+{
+    return (struct winrt_vector_view *)iface;
+}
+static inline struct winrt_vector_view *impl_from_vector_iterable( void *iface )
+{
+    return (struct winrt_vector_view *)((char *)iface - sizeof(void *));
+}
+static inline struct winrt_vector_iterator *impl_from_vector_iter( void *iface )
+{
+    return (struct winrt_vector_iterator *)iface;
+}
+
+static HRESULT WINAPI vector_view_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct winrt_vector_view *impl = impl_from_vector( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &impl->vector_iid ) ||
+        IsEqualGUID( iid, &IID_IVectorView_Object ))
+    {
+        *out = &impl->vtbl_vector;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &impl->iterable_iid ) ||
+        IsEqualGUID( iid, &IID_IIterable_Object ))
+    {
+        *out = &impl->vtbl_iterable;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI vector_view_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_vector( iface )->ref );
+}
+static ULONG WINAPI vector_view_Release( void *iface )
+{
+    struct winrt_vector_view *impl = impl_from_vector( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        for (UINT32 i = 0; i < impl->count; i++)
+        {
+            if (impl->items[i]) IInspectable_Release( impl->items[i] );
+        }
+        free( impl->items );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI vector_view_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0; if (iids) *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI vector_view_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.Collections.IVectorView`1";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI vector_view_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI vector_view_GetAt( void *iface, UINT32 index, IInspectable **item )
+{
+    struct winrt_vector_view *impl = impl_from_vector( iface );
+    if (!item) return E_POINTER;
+    if (index >= impl->count) { *item = NULL; return E_BOUNDS; }
+    *item = impl->items[index];
+    if (*item) IInspectable_AddRef( *item );
+    return S_OK;
+}
+static HRESULT WINAPI vector_view_get_Size( void *iface, UINT32 *size )
+{
+    struct winrt_vector_view *impl = impl_from_vector( iface );
+    if (!size) return E_POINTER;
+    *size = impl->count;
+    return S_OK;
+}
+static HRESULT WINAPI vector_view_IndexOf( void *iface, IInspectable *item, UINT32 *index, boolean *found )
+{
+    struct winrt_vector_view *impl = impl_from_vector( iface );
+    if (!index || !found) return E_POINTER;
+    for (UINT32 i = 0; i < impl->count; i++)
+    {
+        if (impl->items[i] == item)
+        {
+            *index = i;
+            *found = TRUE;
+            return S_OK;
+        }
+    }
+    *index = 0;
+    *found = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI vector_view_GetMany( void *iface, UINT32 start_index, UINT32 count, IInspectable **items, UINT32 *actual )
+{
+    struct winrt_vector_view *impl = impl_from_vector( iface );
+    UINT32 i, num;
+    if (!actual) return E_POINTER;
+    if (start_index >= impl->count) { *actual = 0; return S_OK; }
+    num = min( count, impl->count - start_index );
+    for (i = 0; i < num; i++)
+    {
+        items[i] = impl->items[start_index + i];
+        if (items[i]) IInspectable_AddRef( items[i] );
+    }
+    *actual = num;
     return S_OK;
 }
 
-static HRESULT WINAPI empty_iterable_QueryInterface( void *iface, REFIID iid, void **out )
+static HRESULT WINAPI vector_iter_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    struct empty_collection *col = (struct empty_collection *)((char *)iface - sizeof(void *));
-    return empty_vector_QueryInterface( (void *)&col->vtbl_vector, iid, out );
+    struct winrt_vector_iterator *impl = impl_from_vector_iter( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &impl->vector->iterator_iid ) ||
+        IsEqualGUID( iid, &IID_IIterator_Object ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI vector_iter_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_vector_iter( iface )->ref );
+}
+static ULONG WINAPI vector_iter_Release( void *iface )
+{
+    struct winrt_vector_iterator *impl = impl_from_vector_iter( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        vector_view_Release( &impl->vector->vtbl_vector );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI vector_iter_get_Current( void *iface, IInspectable **item )
+{
+    struct winrt_vector_iterator *impl = impl_from_vector_iter( iface );
+    if (!item) return E_POINTER;
+    if (impl->index >= impl->vector->count) { *item = NULL; return E_BOUNDS; }
+    *item = impl->vector->items[impl->index];
+    if (*item) IInspectable_AddRef( *item );
+    return S_OK;
+}
+static HRESULT WINAPI vector_iter_get_HasCurrent( void *iface, boolean *has )
+{
+    struct winrt_vector_iterator *impl = impl_from_vector_iter( iface );
+    if (!has) return E_POINTER;
+    *has = (impl->index < impl->vector->count);
+    return S_OK;
+}
+static HRESULT WINAPI vector_iter_MoveNext( void *iface, boolean *has )
+{
+    struct winrt_vector_iterator *impl = impl_from_vector_iter( iface );
+    if (!has) return E_POINTER;
+    if (impl->index < impl->vector->count) impl->index++;
+    *has = (impl->index < impl->vector->count);
+    return S_OK;
+}
+static HRESULT WINAPI vector_iter_GetMany( void *iface, UINT32 count, IInspectable **items, UINT32 *actual )
+{
+    struct winrt_vector_iterator *impl = impl_from_vector_iter( iface );
+    HRESULT hr = vector_view_GetMany( &impl->vector->vtbl_vector, impl->index, count, items, actual );
+    if (SUCCEEDED(hr)) impl->index += *actual;
+    return hr;
+}
+static const void *winrt_vector_iter_vtbl[] =
+{
+    vector_iter_QueryInterface,
+    vector_iter_AddRef,
+    vector_iter_Release,
+    vector_view_GetIids,
+    vector_view_GetRuntimeClassName,
+    vector_view_GetTrustLevel,
+    vector_iter_get_Current,
+    vector_iter_get_HasCurrent,
+    vector_iter_MoveNext,
+    vector_iter_GetMany,
+};
+
+static HRESULT WINAPI vector_iterable_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct winrt_vector_view *impl = impl_from_vector_iterable( iface );
+    return vector_view_QueryInterface( &impl->vtbl_vector, iid, out );
+}
+static ULONG WINAPI vector_iterable_AddRef( void *iface )
+{
+    return vector_view_AddRef( &impl_from_vector_iterable( iface )->vtbl_vector );
+}
+static ULONG WINAPI vector_iterable_Release( void *iface )
+{
+    return vector_view_Release( &impl_from_vector_iterable( iface )->vtbl_vector );
+}
+static HRESULT WINAPI vector_iterable_First( void *iface, void **iter )
+{
+    struct winrt_vector_view *impl = impl_from_vector_iterable( iface );
+    struct winrt_vector_iterator *it;
+    if (!iter) return E_POINTER;
+    if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
+    it->vtbl_iterator = winrt_vector_iter_vtbl;
+    it->ref = 1;
+    it->vector = impl;
+    vector_view_AddRef( &impl->vtbl_vector );
+    it->index = 0;
+    *iter = &it->vtbl_iterator;
+    return S_OK;
+}
+static const void *winrt_vector_iterable_vtbl[] =
+{
+    vector_iterable_QueryInterface,
+    vector_iterable_AddRef,
+    vector_iterable_Release,
+    vector_view_GetIids,
+    vector_view_GetRuntimeClassName,
+    vector_view_GetTrustLevel,
+    vector_iterable_First,
+};
+
+static const void *winrt_vector_view_vtbl[] =
+{
+    vector_view_QueryInterface,
+    vector_view_AddRef,
+    vector_view_Release,
+    vector_view_GetIids,
+    vector_view_GetRuntimeClassName,
+    vector_view_GetTrustLevel,
+    vector_view_GetAt,
+    vector_view_get_Size,
+    vector_view_IndexOf,
+    vector_view_GetMany,
+};
+
+static struct winrt_vector_view *store_create_vector_view( IInspectable **items, UINT32 count,
+                                                          const GUID *vec_iid, const GUID *iter_iid )
+{
+    struct winrt_vector_view *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->vtbl_vector = winrt_vector_view_vtbl;
+    impl->vtbl_iterable = winrt_vector_iterable_vtbl;
+    impl->ref = 1;
+    if (vec_iid) impl->vector_iid = *vec_iid;
+    if (iter_iid) impl->iterable_iid = *iter_iid;
+    impl->count = count;
+    if (count)
+    {
+        impl->items = calloc( count, sizeof(IInspectable *) );
+        for (UINT32 i = 0; i < count; i++)
+        {
+            impl->items[i] = items[i];
+            if (impl->items[i]) IInspectable_AddRef( impl->items[i] );
+        }
+    }
+    return impl;
 }
 
-static void *store_create_empty_vector_view( void )
+static inline struct winrt_map_view *impl_from_map( void *iface )
 {
-    struct empty_collection *col = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*col) );
-    if (!col) return NULL;
-    col->vtbl_vector = empty_vector_vtbl;
-    col->vtbl_iterable = empty_iterable_vtbl;
-    col->ref = 1;
-    return col;
+    return (struct winrt_map_view *)iface;
+}
+static inline struct winrt_map_view *impl_from_map_iterable( void *iface )
+{
+    return (struct winrt_map_view *)((char *)iface - sizeof(void *));
+}
+static inline struct winrt_map_iterator *impl_from_map_iter( void *iface )
+{
+    return (struct winrt_map_iterator *)iface;
 }
 
-static HRESULT WINAPI empty_map_QueryInterface( void *iface, REFIID iid, void **out );
-static HRESULT WINAPI empty_map_Lookup( void *iface, HSTRING key, void **value )
+static HRESULT WINAPI map_view_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    if (value) *value = NULL;
+    struct winrt_map_view *impl = impl_from_map( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &impl->map_iid ) ||
+        IsEqualGUID( iid, &IID_IMapView_Object ))
+    {
+        *out = &impl->vtbl_map;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &impl->iterable_iid ) ||
+        IsEqualGUID( iid, &IID_IIterable_KeyValuePair_Object ))
+    {
+        *out = &impl->vtbl_iterable;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI map_view_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_map( iface )->ref );
+}
+static ULONG WINAPI map_view_Release( void *iface )
+{
+    struct winrt_map_view *impl = impl_from_map( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        for (UINT32 i = 0; i < impl->count; i++)
+        {
+            WindowsDeleteString( impl->keys[i] );
+            if (impl->values[i]) IInspectable_Release( impl->values[i] );
+        }
+        free( impl->keys );
+        free( impl->values );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI map_view_Lookup( void *iface, HSTRING key, IInspectable **value )
+{
+    struct winrt_map_view *impl = impl_from_map( iface );
+    const WCHAR *raw_key = WindowsGetStringRawBuffer( key, NULL );
+    if (!value) return E_POINTER;
+    if (!raw_key) { *value = NULL; return E_BOUNDS; }
+    for (UINT32 i = 0; i < impl->count; i++)
+    {
+        const WCHAR *k = WindowsGetStringRawBuffer( impl->keys[i], NULL );
+        if (k && !wcscmp( k, raw_key ))
+        {
+            *value = impl->values[i];
+            if (*value) IInspectable_AddRef( *value );
+            return S_OK;
+        }
+    }
+    *value = NULL;
     return E_BOUNDS;
 }
-static HRESULT WINAPI empty_map_get_Size( void *iface, UINT32 *size )
+static HRESULT WINAPI map_view_get_Size( void *iface, UINT32 *size )
 {
-    if (size) *size = 0;
+    struct winrt_map_view *impl = impl_from_map( iface );
+    if (!size) return E_POINTER;
+    *size = impl->count;
     return S_OK;
 }
-static HRESULT WINAPI empty_map_HasKey( void *iface, HSTRING key, BOOL *found )
+static HRESULT WINAPI map_view_HasKey( void *iface, HSTRING key, boolean *found )
 {
-    if (found) *found = FALSE;
+    struct winrt_map_view *impl = impl_from_map( iface );
+    const WCHAR *raw_key = WindowsGetStringRawBuffer( key, NULL );
+    if (!found) return E_POINTER;
+    if (!raw_key) { *found = FALSE; return S_OK; }
+    for (UINT32 i = 0; i < impl->count; i++)
+    {
+        const WCHAR *k = WindowsGetStringRawBuffer( impl->keys[i], NULL );
+        if (k && !wcscmp( k, raw_key ))
+        {
+            *found = TRUE;
+            return S_OK;
+        }
+    }
+    *found = FALSE;
     return S_OK;
 }
-static HRESULT WINAPI empty_map_Split( void *iface, void **first, void **second )
+static HRESULT WINAPI map_view_Split( void *iface, void **first, void **second )
 {
     if (first) *first = NULL;
     if (second) *second = NULL;
     return S_OK;
 }
-static const void *empty_map_vtbl[] =
+static const void *winrt_map_view_vtbl[] =
 {
-    empty_map_QueryInterface,
-    empty_collection_AddRef,
-    empty_collection_Release,
-    empty_collection_GetIids,
-    empty_collection_GetRuntimeClassName,
-    empty_collection_GetTrustLevel,
-    empty_map_Lookup,
-    empty_map_get_Size,
-    empty_map_HasKey,
-    empty_map_Split,
+    map_view_QueryInterface,
+    map_view_AddRef,
+    map_view_Release,
+    vector_view_GetIids,
+    vector_view_GetRuntimeClassName,
+    vector_view_GetTrustLevel,
+    map_view_Lookup,
+    map_view_get_Size,
+    map_view_HasKey,
+    map_view_Split,
 };
-static HRESULT WINAPI empty_map_QueryInterface( void *iface, REFIID iid, void **out )
-{
-    static const GUID IID_IReferenceTracker =
-        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
-    static const GUID IID_IReferenceTrackerManager =
-        { 0x3cf184b4, 0x7ccb, 0x4dda, { 0x84, 0x55, 0x7e, 0x39, 0x35, 0xe2, 0x37, 0xf3 } };
-    struct empty_collection *col = iface;
 
-    if (!out) return E_INVALIDARG;
+static HRESULT WINAPI map_iter_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct winrt_map_iterator *impl = impl_from_map_iter( iface );
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerManager ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
     {
         *out = NULL;
         return E_NOINTERFACE;
     }
-    if (iid->Data1 == 0xfaa585ea)
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &impl->map->iterator_iid ) ||
+        IsEqualGUID( iid, &IID_IIterator_KeyValuePair_Object ))
     {
-        *out = (void *)&col->vtbl_iterable;
-        InterlockedIncrement( &col->ref );
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
         return S_OK;
     }
-    *out = iface;
-    InterlockedIncrement( &col->ref );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI map_iter_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_map_iter( iface )->ref );
+}
+static ULONG WINAPI map_iter_Release( void *iface )
+{
+    struct winrt_map_iterator *impl = impl_from_map_iter( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        map_view_Release( &impl->map->vtbl_map );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI map_iter_get_Current( void *iface, IInspectable **item )
+{
+    struct winrt_map_iterator *impl = impl_from_map_iter( iface );
+    if (!item) return E_POINTER;
+    if (impl->index >= impl->map->count) { *item = NULL; return E_BOUNDS; }
+    *item = create_key_value_pair( impl->map->keys[impl->index], impl->map->values[impl->index], &impl->map->kv_iid );
+    return *item ? S_OK : E_OUTOFMEMORY;
+}
+static HRESULT WINAPI map_iter_get_HasCurrent( void *iface, boolean *has )
+{
+    struct winrt_map_iterator *impl = impl_from_map_iter( iface );
+    if (!has) return E_POINTER;
+    *has = (impl->index < impl->map->count);
     return S_OK;
 }
+static HRESULT WINAPI map_iter_MoveNext( void *iface, boolean *has )
+{
+    struct winrt_map_iterator *impl = impl_from_map_iter( iface );
+    if (!has) return E_POINTER;
+    if (impl->index < impl->map->count) impl->index++;
+    *has = (impl->index < impl->map->count);
+    return S_OK;
+}
+static HRESULT WINAPI map_iter_GetMany( void *iface, UINT32 count, IInspectable **items, UINT32 *actual )
+{
+    struct winrt_map_iterator *impl = impl_from_map_iter( iface );
+    UINT32 i, num;
+    if (!actual) return E_POINTER;
+    if (impl->index >= impl->map->count) { *actual = 0; return S_OK; }
+    num = min( count, impl->map->count - impl->index );
+    for (i = 0; i < num; i++)
+    {
+        items[i] = create_key_value_pair( impl->map->keys[impl->index + i], impl->map->values[impl->index + i], &impl->map->kv_iid );
+    }
+    impl->index += num;
+    *actual = num;
+    return S_OK;
+}
+static const void *winrt_map_iter_vtbl[] =
+{
+    map_iter_QueryInterface,
+    map_iter_AddRef,
+    map_iter_Release,
+    vector_view_GetIids,
+    vector_view_GetRuntimeClassName,
+    vector_view_GetTrustLevel,
+    map_iter_get_Current,
+    map_iter_get_HasCurrent,
+    map_iter_MoveNext,
+    map_iter_GetMany,
+};
+
+static HRESULT WINAPI map_iterable_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct winrt_map_view *impl = impl_from_map_iterable( iface );
+    return map_view_QueryInterface( &impl->vtbl_map, iid, out );
+}
+static ULONG WINAPI map_iterable_AddRef( void *iface )
+{
+    return map_view_AddRef( &impl_from_map_iterable( iface )->vtbl_map );
+}
+static ULONG WINAPI map_iterable_Release( void *iface )
+{
+    return map_view_Release( &impl_from_map_iterable( iface )->vtbl_map );
+}
+static HRESULT WINAPI map_iterable_First( void *iface, void **iter )
+{
+    struct winrt_map_view *impl = impl_from_map_iterable( iface );
+    struct winrt_map_iterator *it;
+    if (!iter) return E_POINTER;
+    if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
+    it->vtbl_iterator = winrt_map_iter_vtbl;
+    it->ref = 1;
+    it->map = impl;
+    map_view_AddRef( &impl->vtbl_map );
+    it->index = 0;
+    *iter = &it->vtbl_iterator;
+    return S_OK;
+}
+static const void *winrt_map_iterable_vtbl[] =
+{
+    map_iterable_QueryInterface,
+    map_iterable_AddRef,
+    map_iterable_Release,
+    vector_view_GetIids,
+    vector_view_GetRuntimeClassName,
+    vector_view_GetTrustLevel,
+    map_iterable_First,
+};
+
+static struct winrt_map_view *store_create_map_view( HSTRING *keys, IInspectable **values, UINT32 count,
+                                                      const GUID *map_iid, const GUID *iter_iid, const GUID *kv_iid )
+{
+    struct winrt_map_view *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->vtbl_map = winrt_map_view_vtbl;
+    impl->vtbl_iterable = winrt_map_iterable_vtbl;
+    impl->ref = 1;
+    if (map_iid) impl->map_iid = *map_iid;
+    if (iter_iid) impl->iterable_iid = *iter_iid;
+    if (kv_iid) impl->kv_iid = *kv_iid;
+    impl->count = count;
+    if (count)
+    {
+        impl->keys = calloc( count, sizeof(HSTRING) );
+        impl->values = calloc( count, sizeof(IInspectable *) );
+        for (UINT32 i = 0; i < count; i++)
+        {
+            WindowsDuplicateString( keys[i], &impl->keys[i] );
+            impl->values[i] = values[i];
+            if (impl->values[i]) IInspectable_AddRef( impl->values[i] );
+        }
+    }
+    return impl;
+}
+
+static void *store_create_empty_vector_view( void )
+{
+    return store_create_vector_view( NULL, 0, &IID_IVectorView_Object, &IID_IIterable_Object );
+}
+
 static void *store_create_empty_map_view( void )
 {
-    struct empty_collection *col = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*col) );
-    if (!col) return NULL;
-    col->vtbl_vector = empty_map_vtbl;
-    col->vtbl_iterable = empty_iterable_vtbl;
-    col->ref = 1;
-    return col;
+    return store_create_map_view( NULL, NULL, 0, &IID_IMapView_Object, &IID_IIterable_KeyValuePair_Object, &IID_IKeyValuePair_Object );
 }
 
 struct store_async_op
@@ -556,7 +1072,11 @@ static ULONG WINAPI store_async_Release( void *iface )
 {
     struct store_async_op *op = iface;
     LONG ref = InterlockedDecrement( &op->ref );
-    if (!ref) HeapFree( GetProcessHeap(), 0, op );
+    if (!ref)
+    {
+        if (op->result && !op->is_bool) IUnknown_Release( (IUnknown *)op->result );
+        HeapFree( GetProcessHeap(), 0, op );
+    }
     return ref;
 }
 static HRESULT WINAPI store_async_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
@@ -584,7 +1104,10 @@ static HRESULT WINAPI store_async_GetResults( void *iface, void *results )
     if (op->is_bool)
         *(BOOL *)results = op->bool_result;
     else
+    {
         *(void **)results = op->result;
+        if (op->result) IUnknown_AddRef( (IUnknown *)op->result );
+    }
     return op->error_code;
 }
 static HRESULT WINAPI store_async_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
@@ -625,6 +1148,7 @@ static HRESULT store_async_create( void *result, BOOL is_bool, BOOL bool_result,
     op->vtbl = store_async_vtbl;
     op->ref = 1;
     op->result = result;
+    if (result && !is_bool) IUnknown_AddRef( (IUnknown *)result );
     op->is_bool = is_bool;
     op->bool_result = bool_result;
     op->error_code = error_code;
@@ -1873,45 +2397,168 @@ static const GUID IID_IStoreConfigurationStatics3 =
 static const GUID IID_IStoreConfigurationStatics4 =
     { 0x20ff56d2, 0x4ee3, 0x4cf0, { 0x9b, 0x12, 0x55, 0x2c, 0x03, 0x31, 0x0f, 0x75 } };
 
-/* --- StorePrice & StoreProduct --- */
+/* --- Genuine WinRT Store Data Models --- */
+static const GUID IID_IStorePrice =
+    { 0x55ba94c4, 0x15f1, 0x407c, { 0x8f, 0x06, 0x00, 0x63, 0x80, 0xf4, 0xdf, 0x0b } };
+static const GUID IID_IStoreImage =
+    { 0x081fd248, 0xadb4, 0x4b64, { 0xa9, 0x93, 0x78, 0x47, 0x89, 0x92, 0x6e, 0xd5 } };
+static const GUID IID_IStoreProduct =
+    { 0x320e2c52, 0xd760, 0x450a, { 0xa4, 0x2b, 0x67, 0xd1, 0xe9, 0x01, 0xac, 0x90 } };
+static const GUID IID_IStoreProductQueryResult =
+    { 0xd805e6c5, 0xd456, 0x4ff6, { 0x80, 0x49, 0x90, 0x76, 0xd5, 0x16, 0x5f, 0x73 } };
+static const GUID IID_IStoreProductPagedQueryResult =
+    { 0xc92718c5, 0x4dd5, 0x4869, { 0xa4, 0x62, 0xec, 0xc6, 0x87, 0x2e, 0x43, 0xc5 } };
+static const GUID IID_IStoreProductResult =
+    { 0xb7674f73, 0x3c87, 0x4ee1, { 0x82, 0x01, 0xf4, 0x28, 0x35, 0x9b, 0xd3, 0xaf } };
+
+static IInspectable *create_uri( const WCHAR *uri_str )
+{
+    IActivationFactory *af = NULL;
+    IUriRuntimeClassFactory *factory = NULL;
+    IUriRuntimeClass *uri = NULL;
+    HSTRING class_name = NULL, uri_hstr = NULL;
+    HRESULT hr;
+
+    if (!uri_str) return NULL;
+    if (FAILED( WindowsCreateString( L"Windows.Foundation.Uri", 22, &class_name ) )) return NULL;
+    if (FAILED( WindowsCreateString( uri_str, wcslen(uri_str), &uri_hstr ) ))
+    {
+        WindowsDeleteString( class_name );
+        return NULL;
+    }
+
+    hr = RoGetActivationFactory( class_name, &IID_IActivationFactory, (void **)&af );
+    if (SUCCEEDED(hr) && af)
+    {
+        hr = IActivationFactory_QueryInterface( af, &IID_IUriRuntimeClassFactory, (void **)&factory );
+        if (SUCCEEDED(hr) && factory)
+        {
+            IUriRuntimeClassFactory_CreateUri( factory, uri_hstr, &uri );
+            IUriRuntimeClassFactory_Release( factory );
+        }
+        IActivationFactory_Release( af );
+    }
+    WindowsDeleteString( uri_hstr );
+    WindowsDeleteString( class_name );
+    return (IInspectable *)uri;
+}
+
+struct store_price
+{
+    const void *vtbl;
+    LONG ref;
+    HSTRING base_price;
+    HSTRING price;
+    boolean is_on_sale;
+    INT64 sale_end_date;
+    HSTRING currency;
+    HSTRING recurrence;
+};
+
+static inline struct store_price *impl_from_store_price( void *iface )
+{
+    return (struct store_price *)iface;
+}
+static HRESULT WINAPI store_price_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct store_price *impl = impl_from_store_price( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStorePrice ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI store_price_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_store_price( iface )->ref );
+}
+static ULONG WINAPI store_price_Release( void *iface )
+{
+    struct store_price *impl = impl_from_store_price( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        WindowsDeleteString( impl->base_price );
+        WindowsDeleteString( impl->price );
+        WindowsDeleteString( impl->currency );
+        WindowsDeleteString( impl->recurrence );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI store_price_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0; if (iids) *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI store_price_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Services.Store.StorePrice";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI store_price_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
 static HRESULT WINAPI store_price_get_FormattedBasePrice( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"Free", 4, value );
-    return S_OK;
+    struct store_price *impl = impl_from_store_price( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->base_price, value );
 }
 static HRESULT WINAPI store_price_get_FormattedPrice( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"Free", 4, value );
-    return S_OK;
+    struct store_price *impl = impl_from_store_price( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->price, value );
 }
-static HRESULT WINAPI store_price_get_IsOnSale( void *iface, BOOL *value )
+static HRESULT WINAPI store_price_get_IsOnSale( void *iface, boolean *value )
 {
-    if (value) *value = FALSE;
+    struct store_price *impl = impl_from_store_price( iface );
+    if (!value) return E_POINTER;
+    *value = impl->is_on_sale;
     return S_OK;
 }
 static HRESULT WINAPI store_price_get_SaleEndDate( void *iface, void *value )
 {
-    if (value) memset( value, 0, 8 );
+    struct store_price *impl = impl_from_store_price( iface );
+    if (!value) return E_POINTER;
+    memcpy( value, &impl->sale_end_date, sizeof(INT64) );
     return S_OK;
 }
 static HRESULT WINAPI store_price_get_CurrencyCode( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"USD", 3, value );
-    return S_OK;
+    struct store_price *impl = impl_from_store_price( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->currency, value );
 }
 static HRESULT WINAPI store_price_get_FormattedRecurrencePrice( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"", 0, value );
-    return S_OK;
+    struct store_price *impl = impl_from_store_price( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->recurrence, value );
 }
 static const void *store_price_vtbl[] =
 {
-    winappsdk_class_QueryInterface,
-    winappsdk_AddRef,
-    winappsdk_Release,
-    winappsdk_GetIids,
-    winappsdk_GetRuntimeClassName,
-    winappsdk_GetTrustLevel,
+    store_price_QueryInterface,
+    store_price_AddRef,
+    store_price_Release,
+    store_price_GetIids,
+    store_price_GetRuntimeClassName,
+    store_price_GetTrustLevel,
     store_price_get_FormattedBasePrice,
     store_price_get_FormattedPrice,
     store_price_get_IsOnSale,
@@ -1919,79 +2566,335 @@ static const void *store_price_vtbl[] =
     store_price_get_CurrencyCode,
     store_price_get_FormattedRecurrencePrice,
 };
-static struct winappsdk_class store_price_obj =
+
+static struct store_price *store_price_create( const WCHAR *base, const WCHAR *price, const WCHAR *currency )
 {
-    store_price_vtbl, L"Windows.Services.Store.StorePrice", 1
+    struct store_price *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->vtbl = store_price_vtbl;
+    impl->ref = 1;
+    if (base) WindowsCreateString( base, wcslen(base), &impl->base_price );
+    if (price) WindowsCreateString( price, wcslen(price), &impl->price );
+    if (currency) WindowsCreateString( currency, wcslen(currency), &impl->currency );
+    WindowsCreateString( L"", 0, &impl->recurrence );
+    return impl;
+}
+
+struct store_image
+{
+    const void *vtbl;
+    LONG ref;
+    IInspectable *uri;
+    HSTRING tag;
+    UINT32 width;
+    UINT32 height;
+    HSTRING caption;
 };
 
+static inline struct store_image *impl_from_store_image( void *iface )
+{
+    return (struct store_image *)iface;
+}
+static HRESULT WINAPI store_image_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct store_image *impl = impl_from_store_image( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStoreImage ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI store_image_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_store_image( iface )->ref );
+}
+static ULONG WINAPI store_image_Release( void *iface )
+{
+    struct store_image *impl = impl_from_store_image( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->uri) IInspectable_Release( impl->uri );
+        WindowsDeleteString( impl->tag );
+        WindowsDeleteString( impl->caption );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI store_image_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0; if (iids) *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI store_image_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Services.Store.StoreImage";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI store_image_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI store_image_get_Uri( void *iface, void **value )
+{
+    struct store_image *impl = impl_from_store_image( iface );
+    if (!value) return E_POINTER;
+    *value = impl->uri;
+    if (*value) IInspectable_AddRef( impl->uri );
+    return S_OK;
+}
+static HRESULT WINAPI store_image_get_ImagePurposeTag( void *iface, HSTRING *value )
+{
+    struct store_image *impl = impl_from_store_image( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->tag, value );
+}
+static HRESULT WINAPI store_image_get_Width( void *iface, UINT32 *value )
+{
+    struct store_image *impl = impl_from_store_image( iface );
+    if (!value) return E_POINTER;
+    *value = impl->width;
+    return S_OK;
+}
+static HRESULT WINAPI store_image_get_Height( void *iface, UINT32 *value )
+{
+    struct store_image *impl = impl_from_store_image( iface );
+    if (!value) return E_POINTER;
+    *value = impl->height;
+    return S_OK;
+}
+static HRESULT WINAPI store_image_get_Caption( void *iface, HSTRING *value )
+{
+    struct store_image *impl = impl_from_store_image( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->caption, value );
+}
+static const void *store_image_vtbl[] =
+{
+    store_image_QueryInterface,
+    store_image_AddRef,
+    store_image_Release,
+    store_image_GetIids,
+    store_image_GetRuntimeClassName,
+    store_image_GetTrustLevel,
+    store_image_get_Uri,
+    store_image_get_ImagePurposeTag,
+    store_image_get_Width,
+    store_image_get_Height,
+    store_image_get_Caption,
+};
+
+static struct store_image *store_image_create( const WCHAR *uri_str, const WCHAR *tag, UINT32 w, UINT32 h, const WCHAR *caption )
+{
+    struct store_image *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->vtbl = store_image_vtbl;
+    impl->ref = 1;
+    if (uri_str) impl->uri = create_uri( uri_str );
+    if (tag) WindowsCreateString( tag, wcslen(tag), &impl->tag );
+    impl->width = w;
+    impl->height = h;
+    if (caption) WindowsCreateString( caption, wcslen(caption), &impl->caption );
+    return impl;
+}
+
+struct store_product
+{
+    const void *vtbl;
+    LONG ref;
+    HSTRING store_id;
+    HSTRING language;
+    HSTRING title;
+    HSTRING description;
+    HSTRING product_kind;
+    boolean has_digital_download;
+    boolean is_in_user_collection;
+    struct store_price *price;
+    HSTRING extended_json_data;
+    HSTRING in_app_offer_token;
+    IInspectable *images;
+    IInspectable *keywords;
+    IInspectable *skus;
+    IInspectable *videos;
+    IInspectable *link_uri;
+};
+
+static inline struct store_product *impl_from_store_product( void *iface )
+{
+    return (struct store_product *)iface;
+}
+static HRESULT WINAPI store_product_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStoreProduct ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI store_product_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_store_product( iface )->ref );
+}
+static ULONG WINAPI store_product_Release( void *iface )
+{
+    struct store_product *impl = impl_from_store_product( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        WindowsDeleteString( impl->store_id );
+        WindowsDeleteString( impl->language );
+        WindowsDeleteString( impl->title );
+        WindowsDeleteString( impl->description );
+        WindowsDeleteString( impl->product_kind );
+        WindowsDeleteString( impl->extended_json_data );
+        WindowsDeleteString( impl->in_app_offer_token );
+        if (impl->price) store_price_Release( &impl->price->vtbl );
+        if (impl->images) IInspectable_Release( impl->images );
+        if (impl->keywords) IInspectable_Release( impl->keywords );
+        if (impl->skus) IInspectable_Release( impl->skus );
+        if (impl->videos) IInspectable_Release( impl->videos );
+        if (impl->link_uri) IInspectable_Release( impl->link_uri );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI store_product_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0; if (iids) *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI store_product_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Services.Store.StoreProduct";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI store_product_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
 static HRESULT WINAPI store_product_get_StoreId( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"9NBLGGH4NNS1", 12, value );
-    return S_OK;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->store_id, value );
 }
 static HRESULT WINAPI store_product_get_Language( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"en-us", 5, value );
-    return S_OK;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->language, value );
 }
 static HRESULT WINAPI store_product_get_Title( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"Microsoft Store", 15, value );
-    return S_OK;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->title, value );
 }
 static HRESULT WINAPI store_product_get_Description( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"Microsoft Store Catalog", 23, value );
-    return S_OK;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->description, value );
 }
 static HRESULT WINAPI store_product_get_ProductKind( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"Application", 11, value );
-    return S_OK;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->product_kind, value );
 }
-static HRESULT WINAPI store_product_get_HasDigitalDownload( void *iface, BOOL *value )
+static HRESULT WINAPI store_product_get_HasDigitalDownload( void *iface, boolean *value )
 {
-    if (value) *value = TRUE;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    *value = impl->has_digital_download;
     return S_OK;
 }
 static HRESULT WINAPI store_product_get_Keywords( void *iface, void **value )
 {
-    if (value) *value = store_create_empty_vector_view();
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    *value = impl->keywords;
+    if (*value) IInspectable_AddRef( impl->keywords );
     return S_OK;
 }
 static HRESULT WINAPI store_product_get_Images( void *iface, void **value )
 {
-    if (value) *value = store_create_empty_vector_view();
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    *value = impl->images;
+    if (*value) IInspectable_AddRef( impl->images );
     return S_OK;
 }
 static HRESULT WINAPI store_product_get_Videos( void *iface, void **value )
 {
-    if (value) *value = store_create_empty_vector_view();
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    *value = impl->videos;
+    if (*value) IInspectable_AddRef( impl->videos );
     return S_OK;
 }
 static HRESULT WINAPI store_product_get_Skus( void *iface, void **value )
 {
-    if (value) *value = store_create_empty_vector_view();
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    *value = impl->skus;
+    if (*value) IInspectable_AddRef( impl->skus );
     return S_OK;
 }
-static HRESULT WINAPI store_product_get_IsInUserCollection( void *iface, BOOL *value )
+static HRESULT WINAPI store_product_get_IsInUserCollection( void *iface, boolean *value )
 {
-    if (value) *value = TRUE;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    *value = impl->is_in_user_collection;
     return S_OK;
 }
 static HRESULT WINAPI store_product_get_Price( void *iface, void **value )
 {
-    if (value) *value = &store_price_obj;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    *value = impl->price;
+    if (*value) store_price_AddRef( &impl->price->vtbl );
     return S_OK;
 }
 static HRESULT WINAPI store_product_get_ExtendedJsonData( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"{}", 2, value );
-    return S_OK;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->extended_json_data, value );
 }
 static HRESULT WINAPI store_product_get_LinkUri( void *iface, void **value )
 {
-    if (value) *value = NULL;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    *value = impl->link_uri;
+    if (*value) IInspectable_AddRef( impl->link_uri );
     return S_OK;
 }
 static HRESULT WINAPI store_product_GetIsAnySkuInstalledAsync( void *iface, void **op )
@@ -2008,18 +2911,18 @@ static HRESULT WINAPI store_product_RequestPurchaseWithPropertiesAsync( void *if
 }
 static HRESULT WINAPI store_product_get_InAppOfferToken( void *iface, HSTRING *value )
 {
-    if (value) return WindowsCreateString( L"", 0, value );
-    return S_OK;
+    struct store_product *impl = impl_from_store_product( iface );
+    if (!value) return E_POINTER;
+    return WindowsDuplicateString( impl->in_app_offer_token, value );
 }
-
 static const void *store_product_vtbl[] =
 {
-    winappsdk_class_QueryInterface,
-    winappsdk_AddRef,
-    winappsdk_Release,
-    winappsdk_GetIids,
-    winappsdk_GetRuntimeClassName,
-    winappsdk_GetTrustLevel,
+    store_product_QueryInterface,
+    store_product_AddRef,
+    store_product_Release,
+    store_product_GetIids,
+    store_product_GetRuntimeClassName,
+    store_product_GetTrustLevel,
     store_product_get_StoreId,
     store_product_get_Language,
     store_product_get_Title,
@@ -2039,89 +2942,343 @@ static const void *store_product_vtbl[] =
     store_product_RequestPurchaseWithPropertiesAsync,
     store_product_get_InAppOfferToken,
 };
-static struct winappsdk_class store_product_obj =
-{
-    store_product_vtbl, L"Windows.Services.Store.StoreProduct", 1
-};
 
-static HRESULT WINAPI store_product_result_get_Product( void *iface, void **value )
+static struct store_product *store_product_create( const WCHAR *id, const WCHAR *title, const WCHAR *desc, const WCHAR *kind )
 {
-    if (value) *value = &store_product_obj;
-    return S_OK;
-}
-static HRESULT WINAPI store_product_result_get_ExtendedError( void *iface, HRESULT *value )
-{
-    if (value) *value = S_OK;
-    return S_OK;
-}
-static const void *store_product_result_vtbl[] =
-{
-    winappsdk_class_QueryInterface,
-    winappsdk_AddRef,
-    winappsdk_Release,
-    winappsdk_GetIids,
-    winappsdk_GetRuntimeClassName,
-    winappsdk_GetTrustLevel,
-    store_product_result_get_Product,
-    store_product_result_get_ExtendedError,
-};
-static struct winappsdk_class store_product_result_obj =
-{
-    store_product_result_vtbl, L"Windows.Services.Store.StoreProductResult", 1
-};
+    struct store_product *impl = calloc( 1, sizeof(*impl) );
+    struct store_image *img;
+    IInspectable *images_arr[3];
+    struct winrt_vector_view *vv;
+    UINT32 img_count = 0;
 
-static HRESULT WINAPI store_product_query_result_get_Products( void *iface, void **value )
+    if (!impl) return NULL;
+    impl->vtbl = store_product_vtbl;
+    impl->ref = 1;
+
+    if (id) WindowsCreateString( id, wcslen(id), &impl->store_id );
+    WindowsCreateString( L"en-us", 5, &impl->language );
+    if (title) WindowsCreateString( title, wcslen(title), &impl->title );
+    if (desc) WindowsCreateString( desc, wcslen(desc), &impl->description );
+    if (kind) WindowsCreateString( kind, wcslen(kind), &impl->product_kind );
+    WindowsCreateString( L"{}", 2, &impl->extended_json_data );
+    WindowsCreateString( L"", 0, &impl->in_app_offer_token );
+
+    impl->has_digital_download = TRUE;
+    impl->is_in_user_collection = TRUE;
+    impl->price = store_price_create( L"Free", L"Free", L"USD" );
+    impl->link_uri = create_uri( L"https://apps.microsoft.com" );
+
+    img = store_image_create( L"ms-appx:///Assets/StoreLogo.png", L"Logo", 150, 150, L"Logo" );
+    if (img) images_arr[img_count++] = (IInspectable *)&img->vtbl;
+    img = store_image_create( L"ms-appx:///Assets/Square150x150Logo.png", L"Poster", 300, 300, L"Poster" );
+    if (img) images_arr[img_count++] = (IInspectable *)&img->vtbl;
+    img = store_image_create( L"ms-appx:///Assets/Square44x44Logo.png", L"Icon", 44, 44, L"Icon" );
+    if (img) images_arr[img_count++] = (IInspectable *)&img->vtbl;
+
+    vv = store_create_vector_view( images_arr, img_count, &IID_IVectorView_StoreImage, &IID_IIterable_StoreImage );
+    impl->images = vv ? (IInspectable *)&vv->vtbl_vector : NULL;
+    for (UINT32 i = 0; i < img_count; i++) store_image_Release( images_arr[i] );
+
+    vv = store_create_vector_view( NULL, 0, &IID_IVectorView_HSTRING, &IID_IIterable_HSTRING );
+    impl->keywords = vv ? (IInspectable *)&vv->vtbl_vector : NULL;
+    vv = store_create_vector_view( NULL, 0, &IID_IVectorView_Object, &IID_IIterable_Object );
+    impl->skus = vv ? (IInspectable *)&vv->vtbl_vector : NULL;
+    vv = store_create_vector_view( NULL, 0, &IID_IVectorView_Object, &IID_IIterable_Object );
+    impl->videos = vv ? (IInspectable *)&vv->vtbl_vector : NULL;
+
+    return impl;
+}
+
+struct store_product_query_result
 {
-    if (value) *value = store_create_empty_map_view();
+    const void *vtbl;
+    LONG ref;
+    IInspectable *products;
+    HRESULT error_code;
+};
+static inline struct store_product_query_result *impl_from_product_query_result( void *iface )
+{
+    return (struct store_product_query_result *)iface;
+}
+static HRESULT WINAPI product_query_result_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct store_product_query_result *impl = impl_from_product_query_result( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStoreProductQueryResult ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI product_query_result_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_product_query_result( iface )->ref );
+}
+static ULONG WINAPI product_query_result_Release( void *iface )
+{
+    struct store_product_query_result *impl = impl_from_product_query_result( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->products) IInspectable_Release( impl->products );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI product_query_result_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0; if (iids) *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI product_query_result_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Services.Store.StoreProductQueryResult";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI product_query_result_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI product_query_result_get_Products( void *iface, void **value )
+{
+    struct store_product_query_result *impl = impl_from_product_query_result( iface );
+    if (!value) return E_POINTER;
+    *value = impl->products;
+    if (*value) IInspectable_AddRef( impl->products );
     return S_OK;
 }
-static HRESULT WINAPI store_product_query_result_get_ExtendedError( void *iface, HRESULT *value )
+static HRESULT WINAPI product_query_result_get_ExtendedError( void *iface, HRESULT *value )
 {
-    if (value) *value = S_OK;
+    struct store_product_query_result *impl = impl_from_product_query_result( iface );
+    if (!value) return E_POINTER;
+    *value = impl->error_code;
     return S_OK;
 }
 static const void *store_product_query_result_vtbl[] =
 {
-    winappsdk_class_QueryInterface,
-    winappsdk_AddRef,
-    winappsdk_Release,
-    winappsdk_GetIids,
-    winappsdk_GetRuntimeClassName,
-    winappsdk_GetTrustLevel,
-    store_product_query_result_get_Products,
-    store_product_query_result_get_ExtendedError,
-};
-static struct winappsdk_class store_product_query_result_obj =
-{
-    store_product_query_result_vtbl, L"Windows.Services.Store.StoreProductQueryResult", 1
+    product_query_result_QueryInterface,
+    product_query_result_AddRef,
+    product_query_result_Release,
+    product_query_result_GetIids,
+    product_query_result_GetRuntimeClassName,
+    product_query_result_GetTrustLevel,
+    product_query_result_get_Products,
+    product_query_result_get_ExtendedError,
 };
 
-static HRESULT WINAPI store_product_paged_query_result_get_HasMoreResults( void *iface, BOOL *value )
+static struct store_product_query_result *store_product_query_result_create( void *map )
 {
-    if (value) *value = FALSE;
-    return S_OK;
+    struct store_product_query_result *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->vtbl = store_product_query_result_vtbl;
+    impl->ref = 1;
+    impl->products = map;
+    if (impl->products) IInspectable_AddRef( impl->products );
+    impl->error_code = S_OK;
+    return impl;
 }
-static HRESULT WINAPI store_product_paged_query_result_GetNextAsync( void *iface, void **op )
+
+struct store_product_paged_query_result
 {
-    return store_async_create( &store_product_query_result_obj, FALSE, FALSE, S_OK, op );
+    const void *vtbl;
+    LONG ref;
+    IInspectable *products;
+    boolean has_more_results;
+    HRESULT error_code;
+};
+static inline struct store_product_paged_query_result *impl_from_product_paged_query_result( void *iface )
+{
+    return (struct store_product_paged_query_result *)iface;
+}
+static HRESULT WINAPI product_paged_query_result_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct store_product_paged_query_result *impl = impl_from_product_paged_query_result( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStoreProductPagedQueryResult ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI product_paged_query_result_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_product_paged_query_result( iface )->ref );
+}
+static ULONG WINAPI product_paged_query_result_Release( void *iface )
+{
+    struct store_product_paged_query_result *impl = impl_from_product_paged_query_result( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->products) IInspectable_Release( impl->products );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI product_paged_query_result_GetNextAsync( void *iface, void **op )
+{
+    struct store_product_paged_query_result *impl = impl_from_product_paged_query_result( iface );
+    return store_async_create( impl, FALSE, FALSE, S_OK, op );
+}
+static HRESULT WINAPI product_paged_query_result_get_HasMoreResults( void *iface, boolean *val )
+{
+    struct store_product_paged_query_result *impl = impl_from_product_paged_query_result( iface );
+    if (!val) return E_POINTER;
+    *val = impl->has_more_results;
+    return S_OK;
 }
 static const void *store_product_paged_query_result_vtbl[] =
 {
-    winappsdk_class_QueryInterface,
-    winappsdk_AddRef,
-    winappsdk_Release,
-    winappsdk_GetIids,
-    winappsdk_GetRuntimeClassName,
-    winappsdk_GetTrustLevel,
-    store_product_query_result_get_Products,
-    store_product_paged_query_result_get_HasMoreResults,
-    store_product_query_result_get_ExtendedError,
-    store_product_paged_query_result_GetNextAsync,
+    product_paged_query_result_QueryInterface,
+    product_paged_query_result_AddRef,
+    product_paged_query_result_Release,
+    product_query_result_GetIids,
+    product_query_result_GetRuntimeClassName,
+    product_query_result_GetTrustLevel,
+    product_query_result_get_Products,
+    product_paged_query_result_get_HasMoreResults,
+    product_query_result_get_ExtendedError,
+    product_paged_query_result_GetNextAsync,
 };
-static struct winappsdk_class store_product_paged_query_result_obj =
+
+static struct store_product_paged_query_result *store_product_paged_query_result_create( void *map )
 {
-    store_product_paged_query_result_vtbl, L"Windows.Services.Store.StoreProductPagedQueryResult", 1
+    struct store_product_paged_query_result *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->vtbl = store_product_paged_query_result_vtbl;
+    impl->ref = 1;
+    impl->products = map;
+    if (impl->products) IInspectable_AddRef( impl->products );
+    impl->has_more_results = FALSE;
+    impl->error_code = S_OK;
+    return impl;
+}
+
+struct store_product_result
+{
+    const void *vtbl;
+    LONG ref;
+    struct store_product *product;
+    HRESULT error_code;
 };
+static inline struct store_product_result *impl_from_product_result( void *iface )
+{
+    return (struct store_product_result *)iface;
+}
+static HRESULT WINAPI product_result_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct store_product_result *impl = impl_from_product_result( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStoreProductResult ))
+    {
+        *out = iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI product_result_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_product_result( iface )->ref );
+}
+static ULONG WINAPI product_result_Release( void *iface )
+{
+    struct store_product_result *impl = impl_from_product_result( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->product) store_product_Release( &impl->product->vtbl );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI product_result_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0; if (iids) *iids = NULL; return S_OK;
+}
+static HRESULT WINAPI product_result_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Services.Store.StoreProductResult";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI product_result_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI product_result_get_Product( void *iface, void **value )
+{
+    struct store_product_result *impl = impl_from_product_result( iface );
+    if (!value) return E_POINTER;
+    *value = impl->product;
+    if (*value) store_product_AddRef( &impl->product->vtbl );
+    return S_OK;
+}
+static HRESULT WINAPI product_result_get_ExtendedError( void *iface, HRESULT *value )
+{
+    struct store_product_result *impl = impl_from_product_result( iface );
+    if (!value) return E_POINTER;
+    *value = impl->error_code;
+    return S_OK;
+}
+static const void *store_product_result_vtbl[] =
+{
+    product_result_QueryInterface,
+    product_result_AddRef,
+    product_result_Release,
+    product_result_GetIids,
+    product_result_GetRuntimeClassName,
+    product_result_GetTrustLevel,
+    product_result_get_Product,
+    product_result_get_ExtendedError,
+};
+
+static struct store_product_result *store_product_result_create( struct store_product *prod )
+{
+    struct store_product_result *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->vtbl = store_product_result_vtbl;
+    impl->ref = 1;
+    impl->product = prod;
+    if (impl->product) store_product_AddRef( &impl->product->vtbl );
+    impl->error_code = S_OK;
+    return impl;
+}
 
 /* --- StoreAppLicense --- */
 static HRESULT WINAPI store_app_license_get_IsActive( void *iface, BOOL *value )
@@ -2512,19 +3669,23 @@ static HRESULT WINAPI store_context_QueryInterface( void *iface, REFIID iid, voi
 
     if (!out) return E_INVALIDARG;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerManager ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
     {
         *out = NULL;
         return E_NOINTERFACE;
     }
-    if (IsEqualGUID( iid, &IID_IStoreContext ) ||
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IStoreContext ) ||
         IsEqualGUID( iid, &IID_IStoreContext2 ))
     {
         *out = iface;
         return S_OK;
     }
-    *out = iface;
-    return S_OK;
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 
 static HRESULT WINAPI store_ctx_get_User( void *iface, void **value )
@@ -2552,27 +3713,165 @@ static HRESULT WINAPI store_ctx_GetAppLicenseAsync( void *iface, void **op )
 }
 static HRESULT WINAPI store_ctx_GetStoreProductForCurrentAppAsync( void *iface, void **op )
 {
-    return store_async_create( &store_product_result_obj, FALSE, FALSE, S_OK, op );
+    WCHAR buf[MAX_PATH];
+    const WCHAR *pkg_id = L"9WZDNCRFJBMP";
+    struct store_product *prod;
+    struct store_product_result *res;
+
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_NAME", buf, ARRAY_SIZE(buf) ) ||
+        package_get_reg_str( L"PackageName", buf, ARRAY_SIZE(buf) ))
+        pkg_id = buf;
+
+    prod = store_product_create( pkg_id, L"Microsoft Store", L"Microsoft Store", L"Application" );
+    res = store_product_result_create( prod );
+    if (prod) store_product_Release( &prod->vtbl );
+    return store_async_create( res, FALSE, FALSE, S_OK, op );
 }
+struct catalog_mock_item
+{
+    const WCHAR *id;
+    const WCHAR *title;
+    const WCHAR *desc;
+    const WCHAR *kind;
+};
+
+static const struct catalog_mock_item default_catalog[] =
+{
+    { L"9WZDNCRFHVN5", L"Calculator", L"A simple yet powerful calculator that includes standard, scientific, and programmer modes.", L"Application" },
+    { L"9WZDNCRFJBMP", L"Microsoft Store", L"Discover, download, and manage apps and games for Windows.", L"Application" },
+    { L"9WZDNCRFJ3P6", L"Microsoft Photos", L"View, organize, and edit your photos and videos.", L"Application" },
+    { L"9NBLGGH4NNS1", L"Windows Terminal", L"The modern, fast, and powerful terminal for command-line users.", L"Application" },
+};
+
 static HRESULT WINAPI store_ctx_GetStoreProductsAsync( void *iface, void *pk, void *si, void **op )
 {
-    return store_async_create( &store_product_query_result_obj, FALSE, FALSE, S_OK, op );
+    struct winrt_map_view *map;
+    struct store_product_query_result *res;
+    HSTRING keys[8];
+    IInspectable *vals[8];
+    UINT32 count = 0;
+
+    if (si)
+    {
+        void *iter_unk = NULL;
+        void **vtbl = *(void ***)si;
+        HRESULT (WINAPI *pFirst)(void *, void **) = (void *)vtbl[6];
+        if (SUCCEEDED(pFirst( si, &iter_unk )) && iter_unk)
+        {
+            void **iter_vtbl = *(void ***)iter_unk;
+            HRESULT (WINAPI *pHasCurrent)(void *, boolean *) = (void *)iter_vtbl[7];
+            HRESULT (WINAPI *pCurrent)(void *, HSTRING *) = (void *)iter_vtbl[6];
+            HRESULT (WINAPI *pMoveNext)(void *, boolean *) = (void *)iter_vtbl[8];
+            ULONG (WINAPI *pRelease)(void *) = (void *)iter_vtbl[2];
+            boolean has = FALSE;
+
+            if (SUCCEEDED(pHasCurrent( iter_unk, &has )))
+            {
+                while (has && count < ARRAY_SIZE(keys))
+                {
+                    HSTRING cur_id = NULL;
+                    if (SUCCEEDED(pCurrent( iter_unk, &cur_id )) && cur_id)
+                    {
+                        const WCHAR *raw_id = WindowsGetStringRawBuffer( cur_id, NULL );
+                        const WCHAR *title = raw_id;
+                        const WCHAR *desc = L"Application";
+                        const WCHAR *kind = L"Application";
+                        struct store_product *prod;
+
+                        for (UINT32 j = 0; j < ARRAY_SIZE(default_catalog); j++)
+                        {
+                            if (raw_id && !wcscmp( raw_id, default_catalog[j].id ))
+                            {
+                                title = default_catalog[j].title;
+                                desc = default_catalog[j].desc;
+                                kind = default_catalog[j].kind;
+                                break;
+                            }
+                        }
+
+                        prod = store_product_create( raw_id, title, desc, kind );
+                        if (prod)
+                        {
+                            keys[count] = cur_id;
+                            vals[count] = (IInspectable *)&prod->vtbl;
+                            count++;
+                        }
+                    }
+                    if (FAILED(pMoveNext( iter_unk, &has ))) break;
+                }
+            }
+            pRelease( iter_unk );
+        }
+    }
+
+    if (!count)
+    {
+        for (UINT32 i = 0; i < ARRAY_SIZE(default_catalog) && count < ARRAY_SIZE(keys); i++)
+        {
+            struct store_product *prod = store_product_create( default_catalog[i].id, default_catalog[i].title,
+                                                               default_catalog[i].desc, default_catalog[i].kind );
+            if (prod)
+            {
+                WindowsCreateString( default_catalog[i].id, wcslen(default_catalog[i].id), &keys[count] );
+                vals[count] = (IInspectable *)&prod->vtbl;
+                count++;
+            }
+        }
+    }
+
+    map = store_create_map_view( keys, vals, count, &IID_IMapView_StoreProduct, &IID_IIterable_StoreProductKeyValuePair, &IID_IKeyValuePair_StoreProduct );
+    for (UINT32 i = 0; i < count; i++)
+    {
+        WindowsDeleteString( keys[i] );
+        IInspectable_Release( vals[i] );
+    }
+
+    res = store_product_query_result_create( (void *)map );
+    if (map) map_view_Release( &map->vtbl_map );
+    return store_async_create( res, FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI store_ctx_GetAssociatedStoreProductsAsync( void *iface, void *pk, void **op )
 {
-    return store_async_create( &store_product_query_result_obj, FALSE, FALSE, S_OK, op );
+    return store_ctx_GetStoreProductsAsync( iface, pk, NULL, op );
 }
 static HRESULT WINAPI store_ctx_GetAssociatedStoreProductsWithPagingAsync( void *iface, void *pk, UINT32 m, void **op )
 {
-    return store_async_create( &store_product_paged_query_result_obj, FALSE, FALSE, S_OK, op );
+    struct winrt_map_view *map;
+    struct store_product_paged_query_result *res;
+    HSTRING keys[ARRAY_SIZE(default_catalog)];
+    IInspectable *vals[ARRAY_SIZE(default_catalog)];
+    UINT32 count = 0;
+
+    for (UINT32 i = 0; i < ARRAY_SIZE(default_catalog); i++)
+    {
+        struct store_product *prod = store_product_create( default_catalog[i].id, default_catalog[i].title,
+                                                           default_catalog[i].desc, default_catalog[i].kind );
+        if (prod)
+        {
+            WindowsCreateString( default_catalog[i].id, wcslen(default_catalog[i].id), &keys[count] );
+            vals[count] = (IInspectable *)&prod->vtbl;
+            count++;
+        }
+    }
+
+    map = store_create_map_view( keys, vals, count, &IID_IMapView_StoreProduct, &IID_IIterable_StoreProductKeyValuePair, &IID_IKeyValuePair_StoreProduct );
+    for (UINT32 i = 0; i < count; i++)
+    {
+        WindowsDeleteString( keys[i] );
+        IInspectable_Release( vals[i] );
+    }
+
+    res = store_product_paged_query_result_create( (void *)map );
+    if (map) map_view_Release( &map->vtbl_map );
+    return store_async_create( res, FALSE, FALSE, S_OK, op );
 }
 static HRESULT WINAPI store_ctx_GetUserCollectionAsync( void *iface, void *pk, void **op )
 {
-    return store_async_create( &store_product_query_result_obj, FALSE, FALSE, S_OK, op );
+    return store_ctx_GetStoreProductsAsync( iface, pk, NULL, op );
 }
 static HRESULT WINAPI store_ctx_GetUserCollectionWithPagingAsync( void *iface, void *pk, UINT32 m, void **op )
 {
-    return store_async_create( &store_product_paged_query_result_obj, FALSE, FALSE, S_OK, op );
+    return store_ctx_GetAssociatedStoreProductsWithPagingAsync( iface, pk, m, op );
 }
 static HRESULT WINAPI store_ctx_ReportConsumableFulfillmentAsync( void *iface, HSTRING id, UINT32 q, GUID t, void **op )
 {
@@ -2612,7 +3911,7 @@ static HRESULT WINAPI store_ctx_RequestDownloadAndInstallStorePackagesAsync( voi
 }
 static HRESULT WINAPI store_ctx_FindStoreProductForPackageAsync( void *iface, void *pk, void *pkg, void **op )
 {
-    return store_async_create( &store_product_result_obj, FALSE, FALSE, S_OK, op );
+    return store_ctx_GetStoreProductForCurrentAppAsync( iface, op );
 }
 
 static const void *store_context_custom_vtbl[] =

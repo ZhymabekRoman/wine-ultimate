@@ -1697,3 +1697,255 @@ static const void *http_method_factory_vtbl[] =
 };
 static const void *http_method_factory_obj = http_method_factory_vtbl;
 IActivationFactory *http_method_factory = (IActivationFactory *)&http_method_factory_obj;
+
+/* HttpBaseProtocolFilter implementation */
+static const GUID IID_IHttpBaseProtocolFilter =
+    { 0x71c8937c, 0x9666, 0x4527, { 0x90, 0xaf, 0x22, 0x46, 0x49, 0x73, 0x64, 0x24 } };
+static const GUID IID_IHttpFilter =
+    { 0xa4cb92d2, 0x1bb9, 0x45b1, { 0xb5, 0x49, 0xbf, 0xdd, 0x8c, 0x25, 0x71, 0x81 } };
+
+struct http_base_protocol_filter
+{
+    const void *vtbl_base;
+    const void *vtbl_filter;
+    const void *vtbl_closable;
+    LONG ref;
+    boolean allow_auto_redirect;
+    boolean allow_ui;
+    boolean auto_decompression;
+    UINT32 max_connections_per_server;
+    boolean use_proxy;
+};
+
+static inline struct http_base_protocol_filter *impl_from_filter_base( void *iface )
+{
+    return (struct http_base_protocol_filter *)iface;
+}
+static HRESULT WINAPI base_filter_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct http_base_protocol_filter *impl = impl_from_filter_base( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IHttpBaseProtocolFilter ))
+    {
+        *out = &impl->vtbl_base;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IHttpFilter ))
+    {
+        *out = &impl->vtbl_filter;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IClosable ))
+    {
+        *out = &impl->vtbl_closable;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI base_filter_AddRef( void *iface )
+{
+    struct http_base_protocol_filter *impl = impl_from_filter_base( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI base_filter_Release( void *iface )
+{
+    struct http_base_protocol_filter *impl = impl_from_filter_base( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI base_filter_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI base_filter_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Web.Http.Filters.HttpBaseProtocolFilter";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI base_filter_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI base_filter_get_AllowAutoRedirect( void *iface, boolean *val ) { if (val) *val = TRUE; return S_OK; }
+static HRESULT WINAPI base_filter_put_AllowAutoRedirect( void *iface, boolean val ) { return S_OK; }
+static HRESULT WINAPI base_filter_get_AllowUI( void *iface, boolean *val ) { if (val) *val = TRUE; return S_OK; }
+static HRESULT WINAPI base_filter_put_AllowUI( void *iface, boolean val ) { return S_OK; }
+static HRESULT WINAPI base_filter_get_AutomaticDecompression( void *iface, boolean *val ) { if (val) *val = TRUE; return S_OK; }
+static HRESULT WINAPI base_filter_put_AutomaticDecompression( void *iface, boolean val ) { return S_OK; }
+static HRESULT WINAPI base_filter_get_CacheControl( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI base_filter_get_CookieManager( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI base_filter_get_ClientCertificate( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI base_filter_put_ClientCertificate( void *iface, void *val ) { return S_OK; }
+static HRESULT WINAPI base_filter_get_IgnorableServerCertificateErrors( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI base_filter_get_MaxConnectionsPerServer( void *iface, UINT32 *val ) { if (val) *val = 6; return S_OK; }
+static HRESULT WINAPI base_filter_put_MaxConnectionsPerServer( void *iface, UINT32 val ) { return S_OK; }
+static HRESULT WINAPI base_filter_get_ProxyCredential( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI base_filter_put_ProxyCredential( void *iface, void *val ) { return S_OK; }
+static HRESULT WINAPI base_filter_get_ServerCredential( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI base_filter_put_ServerCredential( void *iface, void *val ) { return S_OK; }
+static HRESULT WINAPI base_filter_get_UseProxy( void *iface, boolean *val ) { if (val) *val = TRUE; return S_OK; }
+static HRESULT WINAPI base_filter_put_UseProxy( void *iface, boolean val ) { return S_OK; }
+
+static const void *http_base_protocol_filter_vtbl[] =
+{
+    base_filter_QueryInterface,
+    base_filter_AddRef,
+    base_filter_Release,
+    base_filter_GetIids,
+    base_filter_GetRuntimeClassName,
+    base_filter_GetTrustLevel,
+    base_filter_get_AllowAutoRedirect,
+    base_filter_put_AllowAutoRedirect,
+    base_filter_get_AllowUI,
+    base_filter_put_AllowUI,
+    base_filter_get_AutomaticDecompression,
+    base_filter_put_AutomaticDecompression,
+    base_filter_get_CacheControl,
+    base_filter_get_CookieManager,
+    base_filter_get_ClientCertificate,
+    base_filter_put_ClientCertificate,
+    base_filter_get_IgnorableServerCertificateErrors,
+    base_filter_get_MaxConnectionsPerServer,
+    base_filter_put_MaxConnectionsPerServer,
+    base_filter_get_ProxyCredential,
+    base_filter_put_ProxyCredential,
+    base_filter_get_ServerCredential,
+    base_filter_put_ServerCredential,
+    base_filter_get_UseProxy,
+    base_filter_put_UseProxy,
+};
+
+static HRESULT WINAPI filter_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - sizeof(void *));
+    return base_filter_QueryInterface( &impl->vtbl_base, iid, out );
+}
+static ULONG WINAPI filter_AddRef( void *iface )
+{
+    struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - sizeof(void *));
+    return base_filter_AddRef( &impl->vtbl_base );
+}
+static ULONG WINAPI filter_Release( void *iface )
+{
+    struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - sizeof(void *));
+    return base_filter_Release( &impl->vtbl_base );
+}
+static HRESULT WINAPI filter_SendRequestAsync( void *iface, void *request, void **op )
+{
+    return client_SendRequestAsync( NULL, request, op );
+}
+
+static const void *http_filter_vtbl[] =
+{
+    filter_QueryInterface,
+    filter_AddRef,
+    filter_Release,
+    base_filter_GetIids,
+    base_filter_GetRuntimeClassName,
+    base_filter_GetTrustLevel,
+    filter_SendRequestAsync,
+};
+
+static HRESULT WINAPI filter_closable_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - 2 * sizeof(void *));
+    return base_filter_QueryInterface( &impl->vtbl_base, iid, out );
+}
+static ULONG WINAPI filter_closable_AddRef( void *iface )
+{
+    struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - 2 * sizeof(void *));
+    return base_filter_AddRef( &impl->vtbl_base );
+}
+static ULONG WINAPI filter_closable_Release( void *iface )
+{
+    struct http_base_protocol_filter *impl = (struct http_base_protocol_filter *)((char *)iface - 2 * sizeof(void *));
+    return base_filter_Release( &impl->vtbl_base );
+}
+static HRESULT WINAPI filter_closable_Close( void *iface ) { return S_OK; }
+
+static const void *http_filter_closable_vtbl[] =
+{
+    filter_closable_QueryInterface,
+    filter_closable_AddRef,
+    filter_closable_Release,
+    base_filter_GetIids,
+    base_filter_GetRuntimeClassName,
+    base_filter_GetTrustLevel,
+    filter_closable_Close,
+};
+
+static HRESULT create_http_base_protocol_filter( void **out )
+{
+    struct http_base_protocol_filter *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return E_OUTOFMEMORY;
+    impl->vtbl_base = http_base_protocol_filter_vtbl;
+    impl->vtbl_filter = http_filter_vtbl;
+    impl->vtbl_closable = http_filter_closable_vtbl;
+    impl->ref = 1;
+    impl->allow_auto_redirect = TRUE;
+    impl->allow_ui = TRUE;
+    impl->auto_decompression = TRUE;
+    impl->max_connections_per_server = 6;
+    impl->use_proxy = TRUE;
+    *out = &impl->vtbl_base;
+    return S_OK;
+}
+
+/* HttpBaseProtocolFilter Factory */
+static HRESULT WINAPI filter_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI filter_factory_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI filter_factory_Release( void *iface ) { return 1; }
+static HRESULT WINAPI filter_factory_GetIids( void *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
+static HRESULT WINAPI filter_factory_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    static const WCHAR class_name[] = L"Windows.Web.Http.Filters.HttpBaseProtocolFilter";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, n );
+}
+static HRESULT WINAPI filter_factory_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI filter_factory_ActivateInstance( void *iface, IInspectable **instance )
+{
+    return create_http_base_protocol_filter( (void **)instance );
+}
+
+static const void *http_base_protocol_filter_factory_vtbl[] =
+{
+    filter_factory_QueryInterface,
+    filter_factory_AddRef,
+    filter_factory_Release,
+    filter_factory_GetIids,
+    filter_factory_GetRuntimeClassName,
+    filter_factory_GetTrustLevel,
+    filter_factory_ActivateInstance,
+};
+static const void *http_base_protocol_filter_factory_obj = http_base_protocol_filter_factory_vtbl;
+IActivationFactory *http_base_protocol_filter_factory = (IActivationFactory *)&http_base_protocol_filter_factory_obj;

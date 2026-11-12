@@ -24,8 +24,14 @@ WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 /* Windows.UI.Xaml.Controls.Frame interface GUIDs */
 static const GUID IID_IFrameFactory =
     { 0x02ee93d4, 0x448e, 0x469e, { 0x97, 0x99, 0x0a, 0x8a, 0x1f, 0x70, 0xf1, 0x71 } };
+static const GUID IID_IPageFactory =
+    { 0xdfa149ac, 0x1849, 0x445e, { 0x93, 0x7c, 0x40, 0xa9, 0x59, 0x0c, 0xc0, 0x76 } };
 static const GUID IID_IFrame =
     { 0x68ea500b, 0x3fe9, 0x4735, { 0xb6, 0xa0, 0xe7, 0x60, 0x19, 0x33, 0xb0, 0x89 } };
+static const GUID IID_IGridFactory =
+    { 0xb16bf561, 0xfc6c, 0x57c6, { 0x8e, 0xbc, 0x0b, 0x06, 0xce, 0x45, 0x13, 0xaa } };
+static const GUID IID_IGridStatics =
+    { 0xef9cf81d, 0xa431, 0x50f4, { 0xab, 0xf5, 0x30, 0x23, 0xfe, 0x44, 0x77, 0x04 } };
 static const GUID IID_INavigate =
     { 0xe7337f7a, 0x5e13, 0x4d32, { 0xb5, 0x72, 0x89, 0x35, 0x6e, 0x98, 0x1d, 0x96 } };
 static const GUID IID_IDependencyObject_g =
@@ -329,7 +335,10 @@ static HRESULT WINAPI frame_factory_QueryInterface( IActivationFactory *iface, R
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IFrameFactory ))
+        IsEqualGUID( iid, &IID_IFrameFactory ) ||
+        IsEqualGUID( iid, &IID_IPageFactory ) ||
+        IsEqualGUID( iid, &IID_IGridFactory ) ||
+        IsEqualGUID( iid, &IID_IGridStatics ))
     {
         *out = &impl->IActivationFactory_iface;
         IActivationFactory_AddRef( iface );
@@ -405,10 +414,14 @@ static struct frame_factory frame_factory_obj =
 
 IActivationFactory *frame_factory = &frame_factory_obj.IActivationFactory_iface;
 
-/* Windows.UI.Xaml.Controls.Page */
-static const GUID IID_IPageFactory =
-    { 0xdfa149ac, 0x1849, 0x445e, { 0x93, 0x7c, 0x40, 0xa9, 0x59, 0x0c, 0xc0, 0x76 } };
+static struct frame_factory grid_factory_obj =
+{
+    {(const struct IActivationFactoryVtbl *)frame_factory_vtbl},
+    1,
+};
+IActivationFactory *grid_factory = &grid_factory_obj.IActivationFactory_iface;
 
+/* Windows.UI.Xaml.Controls.Page */
 struct xaml_page
 {
     IInspectable IInspectable_iface;

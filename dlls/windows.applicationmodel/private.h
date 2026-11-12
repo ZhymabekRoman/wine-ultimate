@@ -44,6 +44,7 @@ extern IActivationFactory *design_mode_factory;
 extern IActivationFactory *appinfo_factory;
 
 HRESULT create_package_instance( IPackage **out );
+BOOL package_get_reg_str( const WCHAR *prop_name, WCHAR *buf, DWORD cch );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

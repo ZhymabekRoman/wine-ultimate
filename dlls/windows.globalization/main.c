@@ -1451,77 +1451,112 @@ static const GUID IID_INumberFormatterOptions =
     { 0x80332d21, 0xaee1, 0x4a39, { 0xba, 0xa2, 0x07, 0xed, 0x8c, 0x96, 0xda, 0xf6 } };
 static const GUID IID_INumberParser =
     { 0xe6659412, 0x4a13, 0x4a53, { 0x83, 0xa1, 0x39, 0x2f, 0xbe, 0x4c, 0xff, 0x9f } };
+static const GUID IID_ISignificantDigitsOption =
+    { 0x1d4dfcdd, 0x2d43, 0x4ee8, { 0xbb, 0xf1, 0xc1, 0xb2, 0x6a, 0x71, 0x1a, 0x58 } };
+static const GUID IID_INumberRounderOption =
+    { 0x3b088433, 0x646f, 0x4efe, { 0x8d, 0x48, 0x66, 0xeb, 0x2e, 0x49, 0xe7, 0x36 } };
 
 struct decimal_formatter
 {
-    IInspectable IInspectable_iface;
+    const void *vtbl_formatter;  /* 0: INumberFormatter & INumberFormatter2 */
+    const void *vtbl_options;    /* +8: INumberFormatterOptions */
+    const void *vtbl_parser;     /* +16: INumberParser */
+    const void *vtbl_sigdigits;  /* +24: ISignificantDigitsOption */
     LONG ref;
     INT32 fraction_digits;
     INT32 integer_digits;
+    INT32 significant_digits;
     BOOLEAN is_grouping_enabled;
 };
 
-static inline struct decimal_formatter *impl_from_decimal_formatter( void *iface )
+static inline struct decimal_formatter *impl_from_formatter( void *iface )
 {
-    return CONTAINING_RECORD( iface, struct decimal_formatter, IInspectable_iface );
+    return CONTAINING_RECORD( iface, struct decimal_formatter, vtbl_formatter );
+}
+static inline struct decimal_formatter *impl_from_options( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct decimal_formatter, vtbl_options );
+}
+static inline struct decimal_formatter *impl_from_parser( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct decimal_formatter, vtbl_parser );
+}
+static inline struct decimal_formatter *impl_from_sigdigits( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct decimal_formatter, vtbl_sigdigits );
 }
 
-static HRESULT WINAPI decimal_formatter_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+static HRESULT WINAPI decimal_formatter_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_formatter( iface );
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_INVALIDARG;
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_INumberFormatter ) ||
-        IsEqualGUID( iid, &IID_INumberFormatter2 ) ||
-        IsEqualGUID( iid, &IID_INumberFormatterOptions ) ||
-        IsEqualGUID( iid, &IID_INumberParser ))
+        IsEqualGUID( iid, &IID_INumberFormatter2 ))
     {
-        *out = &impl->IInspectable_iface;
-        InterlockedIncrement( &impl->ref );
-        return S_OK;
+        *out = (void *)&impl->vtbl_formatter;
+    }
+    else if (IsEqualGUID( iid, &IID_INumberFormatterOptions ) ||
+             IsEqualGUID( iid, &IID_INumberRounderOption ))
+    {
+        *out = (void *)&impl->vtbl_options;
+    }
+    else if (IsEqualGUID( iid, &IID_INumberParser ))
+    {
+        *out = (void *)&impl->vtbl_parser;
+    }
+    else if (IsEqualGUID( iid, &IID_ISignificantDigitsOption ))
+    {
+        *out = (void *)&impl->vtbl_sigdigits;
+    }
+    else
+    {
+        *out = (void *)&impl->vtbl_formatter;
     }
 
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
-    *out = NULL;
-    return E_NOINTERFACE;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
 }
 
-static ULONG WINAPI decimal_formatter_AddRef( IInspectable *iface )
+static ULONG WINAPI decimal_formatter_AddRef( void *iface )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_formatter( iface );
     return InterlockedIncrement( &impl->ref );
 }
 
-static ULONG WINAPI decimal_formatter_Release( IInspectable *iface )
+static ULONG WINAPI decimal_formatter_Release( void *iface )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_formatter( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref) free( impl );
     return ref;
 }
 
-static HRESULT WINAPI decimal_formatter_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+static HRESULT WINAPI decimal_formatter_GetIids( void *iface, ULONG *count, IID **iids )
 {
     if (count) *count = 0;
     if (iids) *iids = NULL;
     return S_OK;
 }
 
-static HRESULT WINAPI decimal_formatter_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+static HRESULT WINAPI decimal_formatter_GetRuntimeClassName( void *iface, HSTRING *name )
 {
     return WindowsCreateString( L"Windows.Globalization.NumberFormatting.DecimalFormatter", 55, name );
 }
 
-static HRESULT WINAPI decimal_formatter_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+static HRESULT WINAPI decimal_formatter_GetTrustLevel( void *iface, TrustLevel *level )
 {
     if (level) *level = BaseTrust;
     return S_OK;
 }
 
+/* Face 1: INumberFormatter / INumberFormatter2 */
 static HRESULT WINAPI decimal_formatter_FormatInt( void *iface, INT64 value, HSTRING *result )
 {
     WCHAR buf[64];
@@ -1549,6 +1584,21 @@ static HRESULT WINAPI decimal_formatter_FormatDouble( void *iface, double value,
     return WindowsCreateString( buf, wcslen(buf), result );
 }
 
+/* Face 2: INumberFormatterOptions */
+static HRESULT WINAPI options_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct decimal_formatter *impl = impl_from_options( iface );
+    return decimal_formatter_QueryInterface( (void *)&impl->vtbl_formatter, iid, out );
+}
+static ULONG WINAPI options_AddRef( void *iface )
+{
+    return decimal_formatter_AddRef( (void *)&impl_from_options( iface )->vtbl_formatter );
+}
+static ULONG WINAPI options_Release( void *iface )
+{
+    return decimal_formatter_Release( (void *)&impl_from_options( iface )->vtbl_formatter );
+}
+
 static HRESULT WINAPI decimal_formatter_get_Languages( void *iface, void **value )
 {
     WCHAR locale[LOCALE_NAME_MAX_LENGTH];
@@ -1571,42 +1621,42 @@ static HRESULT WINAPI decimal_formatter_get_GeographicRegion( void *iface, HSTRI
 
 static HRESULT WINAPI decimal_formatter_get_IntegerDigits( void *iface, INT32 *value )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_options( iface );
     if (!value) return E_POINTER;
     *value = impl->integer_digits;
     return S_OK;
 }
 static HRESULT WINAPI decimal_formatter_put_IntegerDigits( void *iface, INT32 value )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_options( iface );
     impl->integer_digits = value;
     return S_OK;
 }
 
 static HRESULT WINAPI decimal_formatter_get_FractionDigits( void *iface, INT32 *value )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_options( iface );
     if (!value) return E_POINTER;
     *value = impl->fraction_digits;
     return S_OK;
 }
 static HRESULT WINAPI decimal_formatter_put_FractionDigits( void *iface, INT32 value )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_options( iface );
     impl->fraction_digits = value;
     return S_OK;
 }
 
 static HRESULT WINAPI decimal_formatter_get_IsGroupingEnabled( void *iface, BOOLEAN *value )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_options( iface );
     if (!value) return E_POINTER;
     *value = impl->is_grouping_enabled;
     return S_OK;
 }
 static HRESULT WINAPI decimal_formatter_put_IsGroupingEnabled( void *iface, BOOLEAN value )
 {
-    struct decimal_formatter *impl = impl_from_decimal_formatter( iface );
+    struct decimal_formatter *impl = impl_from_options( iface );
     impl->is_grouping_enabled = value;
     return S_OK;
 }
@@ -1640,6 +1690,61 @@ static HRESULT WINAPI decimal_formatter_get_ResolvedGeographicRegion( void *ifac
     return decimal_formatter_get_GeographicRegion( iface, value );
 }
 
+/* Face 3: INumberParser */
+static HRESULT WINAPI parser_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct decimal_formatter *impl = impl_from_parser( iface );
+    return decimal_formatter_QueryInterface( (void *)&impl->vtbl_formatter, iid, out );
+}
+static ULONG WINAPI parser_AddRef( void *iface )
+{
+    return decimal_formatter_AddRef( (void *)&impl_from_parser( iface )->vtbl_formatter );
+}
+static ULONG WINAPI parser_Release( void *iface )
+{
+    return decimal_formatter_Release( (void *)&impl_from_parser( iface )->vtbl_formatter );
+}
+
+static HRESULT WINAPI decimal_formatter_stub_zero( void *iface, ... )
+{
+    va_list args;
+    void **out;
+    va_start( args, iface );
+    va_arg( args, void * );
+    out = va_arg( args, void ** );
+    va_end( args );
+    if (out) *out = NULL;
+    return S_OK;
+}
+
+/* Face 4: ISignificantDigitsOption */
+static HRESULT WINAPI sigdigits_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct decimal_formatter *impl = impl_from_sigdigits( iface );
+    return decimal_formatter_QueryInterface( (void *)&impl->vtbl_formatter, iid, out );
+}
+static ULONG WINAPI sigdigits_AddRef( void *iface )
+{
+    return decimal_formatter_AddRef( (void *)&impl_from_sigdigits( iface )->vtbl_formatter );
+}
+static ULONG WINAPI sigdigits_Release( void *iface )
+{
+    return decimal_formatter_Release( (void *)&impl_from_sigdigits( iface )->vtbl_formatter );
+}
+static HRESULT WINAPI decimal_formatter_get_SignificantDigits( void *iface, INT32 *value )
+{
+    struct decimal_formatter *impl = impl_from_sigdigits( iface );
+    if (!value) return E_POINTER;
+    *value = impl->significant_digits;
+    return S_OK;
+}
+static HRESULT WINAPI decimal_formatter_put_SignificantDigits( void *iface, INT32 value )
+{
+    struct decimal_formatter *impl = impl_from_sigdigits( iface );
+    impl->significant_digits = value;
+    return S_OK;
+}
+
 static HRESULT WINAPI decimal_formatter_stub_ok( void *iface, ... )
 {
     return S_OK;
@@ -1653,10 +1758,27 @@ static const void *decimal_formatter_vtbl[] =
     decimal_formatter_GetIids,
     decimal_formatter_GetRuntimeClassName,
     decimal_formatter_GetTrustLevel,
-    /* INumberFormatter */
+    /* INumberFormatter / INumberFormatter2 */
     decimal_formatter_FormatInt,
     decimal_formatter_FormatUInt,
     decimal_formatter_FormatDouble,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+};
+
+static const void *options_vtbl[] =
+{
+    options_QueryInterface,
+    options_AddRef,
+    options_Release,
+    decimal_formatter_GetIids,
+    decimal_formatter_GetRuntimeClassName,
+    decimal_formatter_GetTrustLevel,
     /* INumberFormatterOptions */
     decimal_formatter_get_Languages,
     decimal_formatter_get_GeographicRegion,
@@ -1675,18 +1797,59 @@ static const void *decimal_formatter_vtbl[] =
     decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
     decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
     decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+};
+
+static const void *parser_vtbl[] =
+{
+    parser_QueryInterface,
+    parser_AddRef,
+    parser_Release,
+    decimal_formatter_GetIids,
+    decimal_formatter_GetRuntimeClassName,
+    decimal_formatter_GetTrustLevel,
+    /* INumberParser */
+    decimal_formatter_stub_zero,
+    decimal_formatter_stub_zero,
+    decimal_formatter_stub_zero,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+};
+
+static const void *sigdigits_vtbl[] =
+{
+    sigdigits_QueryInterface,
+    sigdigits_AddRef,
+    sigdigits_Release,
+    decimal_formatter_GetIids,
+    decimal_formatter_GetRuntimeClassName,
+    decimal_formatter_GetTrustLevel,
+    /* ISignificantDigitsOption */
+    decimal_formatter_get_SignificantDigits,
+    decimal_formatter_put_SignificantDigits,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
+    decimal_formatter_stub_ok, decimal_formatter_stub_ok, decimal_formatter_stub_ok,
 };
 
 static HRESULT decimal_formatter_create( void **instance )
 {
     struct decimal_formatter *impl = calloc( 1, sizeof(*impl) );
     if (!impl) return E_OUTOFMEMORY;
-    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)decimal_formatter_vtbl;
+    impl->vtbl_formatter = decimal_formatter_vtbl;
+    impl->vtbl_options = options_vtbl;
+    impl->vtbl_parser = parser_vtbl;
+    impl->vtbl_sigdigits = sigdigits_vtbl;
     impl->ref = 1;
     impl->integer_digits = 1;
     impl->fraction_digits = 0;
+    impl->significant_digits = 0;
     impl->is_grouping_enabled = FALSE;
-    *instance = &impl->IInspectable_iface;
+    *instance = (void *)&impl->vtbl_formatter;
     return S_OK;
 }
 

@@ -46,6 +46,7 @@ extern IActivationFactory *http_request_factory;
 extern IActivationFactory *http_response_factory;
 extern IActivationFactory *http_string_content_factory;
 extern IActivationFactory *http_method_factory;
+extern IActivationFactory *http_base_protocol_filter_factory;
 
 HRESULT json_array_push( IJsonArray *iface, IJsonValue *value );
 

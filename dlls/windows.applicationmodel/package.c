@@ -141,9 +141,9 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
-static const WCHAR appmodel_reg_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
+const WCHAR appmodel_reg_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
 
-static BOOL package_get_reg_str( const WCHAR *prop_name, WCHAR *buf, DWORD cch )
+BOOL package_get_reg_str( const WCHAR *prop_name, WCHAR *buf, DWORD cch )
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     WCHAR subkey[576], name[MAX_PATH], exe[MAX_PATH];
