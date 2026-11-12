@@ -81,6 +81,7 @@ AddReg=\
     ShellWinRTActivation,\
     ProbeClassesActivation,\
     DataTransferActivation,\
+    GeolocationActivation,\
     RegisteredKindActivation,\
     DotnetActivation
 
@@ -932,6 +933,23 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Input.
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,"DllPath",2,"%12%\windows.system.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.System.User,"ThreadingModel",0x10001,2
+
+; The Windows.Devices.Geolocation classes, served by the own-name builtin module
+; windows.devices.geolocation.dll (the module Windows hosts the namespace in).  The
+; combase route answers the namespace first; the seeds keep Geolocator resolvable
+; through the plain ActivatableClassId lookup too, in the [ProbeClassesActivation]
+; format.  ThreadingModel 2 (Both): the location probe arrives on the app's UI
+; thread and on its background threads alike.
+[GeolocationActivation]
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geolocator,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geolocator,"DllPath",2,"%12%\windows.devices.geolocation.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geolocator,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geoposition,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geoposition,"DllPath",2,"%12%\windows.devices.geolocation.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geoposition,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geocoordinate,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geocoordinate,"DllPath",2,"%12%\windows.devices.geolocation.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Devices.Geolocation.Geocoordinate,"ThreadingModel",0x10001,2
 
 ; The remaining classes combase routes to builtin modules that carry their
 ; DllGetActivationFactory, seeded in the registry kind so apps and tooling that

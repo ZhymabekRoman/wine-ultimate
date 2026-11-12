@@ -1,0 +1,10 @@
+#pragma makedep register
+#pragma winrt ns_prefix
+
+import "windows.devices.geolocation.idl";
+
+namespace Windows.Devices.Geolocation {
+    runtimeclass Geolocator;
+    runtimeclass Geoposition;
+    runtimeclass Geocoordinate;
+}

@@ -1,0 +1,14 @@
+MODULE = windows.devices.geolocation.dll
+IMPORTS = combase uuid
+
+UNIXLIB = windows.devices.geolocation.so
+UNIX_CFLAGS = $(DBUS_CFLAGS)
+UNIX_LIBS = $(DBUS_LIBS)
+
+SOURCES = \
+	classes.idl \
+	main.c \
+	weakref.c
+
+UNIX_SOURCES = \
+	unixlib.c

@@ -549,6 +549,17 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Windows.Devices.Geolocation.* (Geolocator, Geoposition, Geocoordinate) is the
+     * location surface WhatsApp-style WinUI apps probe at startup: the Geolocator
+     * probe retry-loops on the REGDB_E_CLASSNOTREG answer.  Route the whole
+     * namespace to the own-name builtin module that implements the classes'
+     * DllGetActivationFactory, in the exact style of the routes above. */
+    if (!wcsncmp(classid, L"Windows.Devices.Geolocation.", 28))
+    {
+        *out = wcsdup(L"windows.devices.geolocation.dll");
+        return S_OK;
+    }
+
     if (!wcscmp(classid, L"Windows.System.User"))
     {
         *out = wcsdup(L"windows.system.dll");
