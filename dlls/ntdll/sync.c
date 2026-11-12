@@ -501,6 +501,9 @@ struct srw_lock
 };
 C_ASSERT( sizeof(struct srw_lock) == 4 );
 
+/* Adaptive spin iterations (hardware pause) before sleeping on RtlWaitOnAddress */
+#define SRW_SPIN_COUNT 256
+
 /***********************************************************************
  *              RtlInitializeSRWLock (NTDLL.@)
  *
@@ -555,6 +558,27 @@ void WINAPI RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
         } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
 
         if (!wait) return;
+
+        if (NtCurrentTeb()->Peb->NumberOfProcessors > 1)
+        {
+            union { struct srw_lock s; LONG l; } spin_old, spin_new;
+
+            for (int spin = 0; spin < SRW_SPIN_COUNT; spin++)
+            {
+                YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
+                if (u.s->owners) continue;
+
+                spin_old.s = *u.s;
+                if (spin_old.s.owners) continue;
+
+                spin_new.s = spin_old.s;
+                spin_new.s.owners = 1;
+                spin_new.s.exclusive_waiters -= 2;
+                spin_new.s.exclusive_waiters |= 1;
+                if (InterlockedCompareExchange( u.l, spin_new.l, spin_old.l ) == spin_old.l)
+                    return;
+            }
+        }
         RtlWaitOnAddress( &u.s->owners, &new.s.owners, sizeof(short), NULL );
     }
 }
@@ -594,6 +618,25 @@ void WINAPI RtlAcquireSRWLockShared( RTL_SRWLOCK *lock )
         } while (InterlockedCompareExchange( u.l, new.l, old.l ) != old.l);
 
         if (!wait) return;
+
+        if (NtCurrentTeb()->Peb->NumberOfProcessors > 1)
+        {
+            union { struct srw_lock s; LONG l; } spin_old, spin_new;
+
+            for (int spin = 0; spin < SRW_SPIN_COUNT; spin++)
+            {
+                YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
+                if (u.s->exclusive_waiters || u.s->owners == 0xffff) continue;
+
+                spin_old.s = *u.s;
+                if (spin_old.s.exclusive_waiters || spin_old.s.owners == 0xffff) continue;
+
+                spin_new.s = spin_old.s;
+                ++spin_new.s.owners;
+                if (InterlockedCompareExchange( u.l, spin_new.l, spin_old.l ) == spin_old.l)
+                    return;
+            }
+        }
         RtlWaitOnAddress( u.s, &new.s, sizeof(struct srw_lock), NULL );
     }
 }
