@@ -109,6 +109,12 @@ struct algorithm
     enum ecc_curve_id curve_id;
 };
 
+#if (defined(__x86_64__) || defined(__i386__)) && defined(__GNUC__)
+#include <immintrin.h>
+#define BCRYPT_HAVE_AESNI 1
+#define AESNI_MAX_KEYS 15
+#endif
+
 struct key_symmetric
 {
     enum chain_mode  mode;
@@ -118,6 +124,11 @@ struct key_symmetric
     UCHAR           *secret;
     unsigned         secret_len;
     CRITICAL_SECTION cs;
+#ifdef BCRYPT_HAVE_AESNI
+    __m128i          round_keys_enc[AESNI_MAX_KEYS];  /* AES-NI encryption round keys */
+    __m128i          round_keys_dec[AESNI_MAX_KEYS];  /* AES-NI decryption round keys */
+    unsigned char    aesni_rounds;                   /* 0 => GnuTLS fallback, else AES round count */
+#endif
 };
 
 #define KEY_FLAG_LEGACY_DSA_V2  0x00000001
@@ -143,6 +154,12 @@ struct key
         struct key_asymmetric a;
     } u;
 };
+
+#ifdef BCRYPT_HAVE_AESNI
+void aesni_prepare_key( struct key *key );
+void aesni_encrypt_block( const struct key *key, const UCHAR *input, UCHAR *output, UCHAR *chain );
+void aesni_decrypt_block( const struct key *key, const UCHAR *input, UCHAR *output, UCHAR *chain );
+#endif
 
 struct secret
 {

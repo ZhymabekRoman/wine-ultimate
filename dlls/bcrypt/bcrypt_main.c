@@ -1229,7 +1229,27 @@ static struct key *key_symmetric_create( enum alg_id alg, enum chain_mode mode, 
     memcpy( ret->u.s.secret, secret, secret_len );
     ret->u.s.secret_len = secret_len;
 
+#ifdef BCRYPT_HAVE_AESNI
+    aesni_prepare_key( ret );
+#endif
+
     return ret;
+}
+
+static inline BOOL key_use_aesni( struct key *key )
+{
+#ifdef BCRYPT_HAVE_AESNI
+    if (!key->u.s.aesni_rounds) aesni_prepare_key( key );  /* key duplicated via key_duplicate() */
+    return !!key->u.s.aesni_rounds;
+#else
+    return FALSE;
+#endif
+}
+
+static inline void aesni_init_chain( const struct key *key, UCHAR *chain )
+{
+    memset( chain, 0, key->u.s.block_size );
+    if (key->u.s.vector) memcpy( chain, key->u.s.vector, min( key->u.s.block_size, key->u.s.vector_len ) );
 }
 
 static void key_destroy( struct key *key )
@@ -1306,6 +1326,8 @@ static NTSTATUS key_symmetric_decrypt( struct key *key, UCHAR *input, ULONG inpu
     struct key_symmetric_decrypt_params decrypt_params;
     struct key_symmetric_get_tag_params tag_params;
     ULONG bytes_left = input_len;
+    BOOL hw;
+    UCHAR chain[16];
     NTSTATUS status;
 
     if (key->u.s.mode == CHAIN_MODE_GCM)
@@ -1367,10 +1389,13 @@ static NTSTATUS key_symmetric_decrypt( struct key *key, UCHAR *input, ULONG inpu
     decrypt_params.input_len = key->u.s.block_size;
     decrypt_params.output = output;
     decrypt_params.output_len = key->u.s.block_size;
+    hw = key_use_aesni( key );
+    if (hw) aesni_init_chain( key, chain );
     while (bytes_left >= key->u.s.block_size)
     {
-        if ((status = UNIX_CALL( key_symmetric_decrypt, &decrypt_params ))) return status;
-        if (key->u.s.mode == CHAIN_MODE_ECB && (status = key_symmetric_set_vector( key, NULL, 0, TRUE )))
+        if (hw) aesni_decrypt_block( key, decrypt_params.input, decrypt_params.output, chain );
+        else if ((status = UNIX_CALL( key_symmetric_decrypt, &decrypt_params ))) return status;
+        if (!hw && key->u.s.mode == CHAIN_MODE_ECB && (status = key_symmetric_set_vector( key, NULL, 0, TRUE )))
             return status;
         bytes_left -= key->u.s.block_size;
         decrypt_params.input += key->u.s.block_size;
@@ -1382,7 +1407,8 @@ static NTSTATUS key_symmetric_decrypt( struct key *key, UCHAR *input, ULONG inpu
         UCHAR *buf, *dst = decrypt_params.output;
         if (!(buf = malloc( key->u.s.block_size ))) return STATUS_NO_MEMORY;
         decrypt_params.output = buf;
-        status = UNIX_CALL( key_symmetric_decrypt, &decrypt_params );
+        if (hw) aesni_decrypt_block( key, decrypt_params.input, buf, chain );
+        else status = UNIX_CALL( key_symmetric_decrypt, &decrypt_params );
         if (!status && buf[ key->u.s.block_size - 1 ] <= key->u.s.block_size)
         {
             *ret_len -= buf[ key->u.s.block_size - 1 ];
@@ -1510,6 +1536,8 @@ static NTSTATUS key_symmetric_encrypt( struct key *key,  UCHAR *input, ULONG inp
     struct key_symmetric_get_tag_params tag_params;
     ULONG bytes_left = input_len;
     UCHAR *buf;
+    BOOL hw;
+    UCHAR chain[16];
     NTSTATUS status;
 
     if (key->u.s.mode == CHAIN_MODE_GCM)
@@ -1566,11 +1594,14 @@ static NTSTATUS key_symmetric_encrypt( struct key *key,  UCHAR *input, ULONG inp
     encrypt_params.input_len = key->u.s.block_size;
     encrypt_params.output = output;
     encrypt_params.output_len = key->u.s.block_size;
+    hw = key_use_aesni( key );
+    if (hw) aesni_init_chain( key, chain );
     while (bytes_left >= key->u.s.block_size)
     {
-        if ((status = UNIX_CALL( key_symmetric_encrypt, &encrypt_params )))
+        if (hw) aesni_encrypt_block( key, encrypt_params.input, encrypt_params.output, chain );
+        else if ((status = UNIX_CALL( key_symmetric_encrypt, &encrypt_params )))
             return status;
-        if (key->u.s.mode == CHAIN_MODE_ECB && (status = key_symmetric_set_vector( key, NULL, 0, TRUE )))
+        if (!hw && key->u.s.mode == CHAIN_MODE_ECB && (status = key_symmetric_set_vector( key, NULL, 0, TRUE )))
             return status;
         bytes_left -= key->u.s.block_size;
         encrypt_params.input += key->u.s.block_size;
@@ -1583,7 +1614,8 @@ static NTSTATUS key_symmetric_encrypt( struct key *key,  UCHAR *input, ULONG inp
         memcpy( buf, encrypt_params.input, bytes_left );
         memset( buf + bytes_left, key->u.s.block_size - bytes_left, key->u.s.block_size - bytes_left );
         encrypt_params.input = buf;
-        status = UNIX_CALL( key_symmetric_encrypt, &encrypt_params );
+        if (hw) aesni_encrypt_block( key, buf, encrypt_params.output, chain );
+        else status = UNIX_CALL( key_symmetric_encrypt, &encrypt_params );
         free( buf );
     }
 
