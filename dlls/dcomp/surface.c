@@ -238,7 +238,7 @@ static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *
         texture_desc.SampleDesc.Count = 1;
         texture_desc.SampleDesc.Quality = 0;
         texture_desc.Usage = D3D11_USAGE_DEFAULT;
-        texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
+        texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
         texture_desc.CPUAccessFlags = 0;
         texture_desc.MiscFlags = D3D11_RESOURCE_MISC_GUARDED;
         if (surface->pixel_format == DXGI_FORMAT_B8G8R8A8_UNORM)

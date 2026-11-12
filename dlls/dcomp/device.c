@@ -19,6 +19,7 @@
 #include <assert.h>
 #include <stdarg.h>
 #include <stdlib.h>
+#include <string.h>
 #include <assert.h>
 
 #include "ntstatus.h"
@@ -298,288 +299,6 @@ static ULONG STDMETHODCALLTYPE device_Release(IDCompositionDevice *iface)
     return ref;
 }
 
-/* TODO: Optimize this. There is plenty of room */
-static HRESULT create_bgra_surface_from_rgba(IDXGISurface *rgba_surface, IDXGISurface **bgra_surface)
-{
-    static const D3D11_INPUT_ELEMENT_DESC layout_desc[] =
-    {
-        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
-        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
-    };
-
-    static const char vs_code[] =
-        "void main(in float4 in_position : POSITION,\n"
-        "          in float2 in_texcoord : TEXCOORD,\n"
-        "          out float4 position : SV_Position,\n"
-        "          out float2 texcoord : TEXCOORD)\n"
-        "{\n"
-        "     position = in_position;\n"
-        "     texcoord = in_texcoord;\n"
-        "}";
-
-    static const char ps_code[] =
-        "Texture2D src_texture : register(t0);\n"
-        "SamplerState sam_linear : register(s0);\n"
-        "float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET"
-        "{\n"
-        "    return src_texture.Sample(sam_linear, uv);\n"
-        "}";
-
-    struct vec2
-    {
-        float x, y;
-    };
-
-    static const struct
-    {
-        struct vec2 position;
-        struct vec2 texcoord;
-    } quad[] =
-    {
-        {{-1.0f, 1.0f}, {0.0f, 0.0f}},   /* Top-Left */
-        {{1.0f, 1.0f}, {1.0f, 0.0f}},    /* Top-Right */
-        {{-1.0f, -1.0f}, {0.0f, 1.0f}},  /* Bottom-Left */
-        {{1.0f, -1.0f}, {1.0f, 1.0f}},   /* Bottom-Right */
-    };
-
-    ID3D11Texture2D *src_texture = NULL, *dst_texture = NULL;
-    ID3DDeviceContextState *state = NULL, *old_state = NULL;
-    ID3D11DeviceContext1 *d3d11_device_context1 = NULL;
-    ID3D11DeviceContext *d3d11_device_context = NULL;
-    static ID3D10Blob *vs_blob = NULL, *ps_blob = NULL;
-    ID3D11InputLayout *input_layout = NULL;
-    D3D11_SAMPLER_DESC sampler_desc = {0};
-    D3D11_SUBRESOURCE_DATA resource_data;
-    ID3D11ShaderResourceView *srv = NULL;
-    ID3D11Device1 *d3d11_device = NULL;
-    ID3D11RenderTargetView *rtv = NULL;
-    ID3D11SamplerState *sampler = NULL;
-    D3D11_TEXTURE2D_DESC texture_desc;
-    DXGI_SURFACE_DESC surface_desc;
-    D3D11_BUFFER_DESC buffer_desc;
-    ID3D11VertexShader *vs = NULL;
-    ID3D11PixelShader *ps = NULL;
-    unsigned int stride, offset;
-    ID3D11Buffer *vb = NULL;
-    D3D11_VIEWPORT vp;
-    HRESULT hr;
-
-    static const D3D_FEATURE_LEVEL feature_levels[] =
-    {
-        D3D_FEATURE_LEVEL_11_1,
-        D3D_FEATURE_LEVEL_11_0,
-        D3D_FEATURE_LEVEL_10_1,
-        D3D_FEATURE_LEVEL_10_0,
-    };
-
-    hr = IDXGISurface_QueryInterface(rgba_surface, &IID_ID3D11Texture2D, (void **)&src_texture);
-    if (FAILED(hr))
-    {
-        ERR("Failed to get a ID3D11Texture2D, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    hr = IDXGISurface_GetDevice(rgba_surface, &IID_ID3D11Device1, (void **)&d3d11_device);
-    if (FAILED(hr))
-    {
-        ERR("Failed to get device, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    hr = IDXGISurface_GetDesc(rgba_surface, &surface_desc);
-    if (FAILED(hr))
-    {
-        ERR("Failed to get the dxgi surface description, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    texture_desc.Width = surface_desc.Width;
-    texture_desc.Height = surface_desc.Height;
-    texture_desc.MipLevels = 1;
-    texture_desc.ArraySize = 1;
-    texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    texture_desc.SampleDesc.Count = 1;
-    texture_desc.SampleDesc.Quality = 0;
-    texture_desc.Usage = D3D11_USAGE_DEFAULT;
-    texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
-    texture_desc.CPUAccessFlags = 0;
-    texture_desc.MiscFlags = D3D11_RESOURCE_MISC_GUARDED | D3D11_RESOURCE_MISC_GDI_COMPATIBLE;
-    hr = ID3D11Device1_CreateTexture2D(d3d11_device, &texture_desc, NULL, &dst_texture);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create a ID3D11Texture2D, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    hr = ID3D11Device1_CreateShaderResourceView(d3d11_device, (ID3D11Resource *)src_texture, NULL, &srv);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create a SRV, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    hr = ID3D11Device1_CreateRenderTargetView(d3d11_device, (ID3D11Resource *)dst_texture, NULL, &rtv);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create a RTV, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    ID3D11Device1_GetImmediateContext(d3d11_device, &d3d11_device_context);
-    if (FAILED(hr = ID3D11DeviceContext_QueryInterface(d3d11_device_context, &IID_ID3D11DeviceContext1,
-                                                       (void **)&d3d11_device_context1)))
-    {
-        ERR("Failed to query ID3D11DeviceContext1, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    if (FAILED(hr = ID3D11Device1_CreateDeviceContextState(d3d11_device, 0, feature_levels,
-                                                           ARRAY_SIZE(feature_levels), D3D11_SDK_VERSION,
-                                                           &IID_ID3D11Device1, NULL, &state)))
-    {
-        ERR("Failed to create device context state, hr %#lx.\n", hr);
-        goto done;
-    }
-    ID3D11DeviceContext1_SwapDeviceContextState(d3d11_device_context1, state, &old_state);
-
-    ID3D11DeviceContext1_OMSetRenderTargets(d3d11_device_context1, 1, &rtv, NULL);
-    ID3D11DeviceContext1_PSSetShaderResources(d3d11_device_context1, 0, 1, &srv);
-
-    /* Move this to dcomp device instance ? */
-    if (vs_blob == NULL)
-    {
-        hr = D3DCompile(vs_code, sizeof(vs_code) - 1, "vs", NULL, NULL, "main", "vs_4_0", 0, 0, &vs_blob, NULL);
-        if (FAILED(hr))
-        {
-            ERR("Failed to compile vertex shader, hr %#lx.\n", hr);
-            goto done;
-        }
-
-        hr = D3DCompile(ps_code, sizeof(ps_code) - 1, "ps", NULL, NULL, "main", "ps_4_0", 0, 0, &ps_blob, NULL);
-        if (FAILED(hr))
-        {
-            ERR("Failed to compile pixel shader, hr %#lx.\n", hr);
-            goto done;
-        }
-    }
-
-    hr = ID3D11Device1_CreateVertexShader(d3d11_device, ID3D10Blob_GetBufferPointer(vs_blob),
-                                          ID3D10Blob_GetBufferSize(vs_blob), NULL, &vs);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create vertex shader, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    hr = ID3D11Device1_CreatePixelShader(d3d11_device, ID3D10Blob_GetBufferPointer(ps_blob),
-                                         ID3D10Blob_GetBufferSize(ps_blob), NULL, &ps);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create pixel shader, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    hr = ID3D11Device1_CreateInputLayout(d3d11_device, layout_desc, ARRAY_SIZE(layout_desc),
-                                         ID3D10Blob_GetBufferPointer(vs_blob),
-                                         ID3D10Blob_GetBufferSize(vs_blob), &input_layout);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create input layout, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    buffer_desc.ByteWidth = sizeof(quad);
-    buffer_desc.Usage = D3D11_USAGE_DEFAULT;
-    buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-    buffer_desc.CPUAccessFlags = 0;
-    buffer_desc.MiscFlags = 0;
-    buffer_desc.StructureByteStride = 0;
-    resource_data.pSysMem = quad;
-    resource_data.SysMemPitch = 0;
-    resource_data.SysMemSlicePitch = 0;
-    hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &vb);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create vertex buffer, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-    sampler_desc.MinLOD = 0;
-    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-
-    hr = ID3D11Device1_CreateSamplerState(d3d11_device, &sampler_desc, &sampler);
-    if (FAILED(hr))
-    {
-        ERR("Failed to create sampler state, hr %#lx.\n", hr);
-        goto done;
-    }
-    ID3D11DeviceContext1_PSSetSamplers(d3d11_device_context1, 0, 1, &sampler);
-
-    ID3D11DeviceContext1_IASetInputLayout(d3d11_device_context1, input_layout);
-    ID3D11DeviceContext1_IASetPrimitiveTopology(d3d11_device_context1, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-
-    stride = sizeof(quad[0]);
-    offset = 0;
-    ID3D11DeviceContext1_IASetVertexBuffers(d3d11_device_context1, 0, 1, &vb, &stride, &offset);
-    ID3D11DeviceContext1_VSSetShader(d3d11_device_context1, vs, NULL, 0);
-    ID3D11DeviceContext1_PSSetShader(d3d11_device_context1, ps, NULL, 0);
-
-    vp.TopLeftX = 0;
-    vp.TopLeftY = 0;
-    vp.Width = surface_desc.Width;
-    vp.Height = surface_desc.Height;
-    vp.MinDepth = 0;
-    vp.MaxDepth = 1;
-    ID3D11DeviceContext1_RSSetViewports(d3d11_device_context1, 1, &vp);
-    ID3D11DeviceContext1_Draw(d3d11_device_context1, 4, 0);
-
-    hr = ID3D11Texture2D_QueryInterface(dst_texture, &IID_IDXGISurface, (void **)bgra_surface);
-    if (FAILED(hr))
-    {
-        ERR("Failed to get bgra surface, hr %#lx.\n", hr);
-        goto done;
-    }
-
-done:
-    if (old_state)
-    {
-        ID3D11DeviceContext1_SwapDeviceContextState(d3d11_device_context1, old_state, NULL);
-        ID3DDeviceContextState_Release(old_state);
-    }
-    if (state)
-        ID3DDeviceContextState_Release(state);
-    if (vb)
-        ID3D11Buffer_Release(vb);
-    if (sampler)
-        ID3D11SamplerState_Release(sampler);
-    if (input_layout)
-        ID3D11InputLayout_Release(input_layout);
-    if (ps)
-        ID3D11PixelShader_Release(ps);
-    if (vs)
-        ID3D11VertexShader_Release(vs);
-    if (d3d11_device_context1)
-        ID3D11DeviceContext1_Release(d3d11_device_context1);
-    if (d3d11_device_context)
-        ID3D11DeviceContext_Release(d3d11_device_context);
-    if (rtv)
-        ID3D11RenderTargetView_Release(rtv);
-    if (srv)
-        ID3D11ShaderResourceView_Release(srv);
-    if (dst_texture)
-        ID3D11Texture2D_Release(dst_texture);
-    if (d3d11_device)
-        ID3D11Device1_Release(d3d11_device);
-    if (src_texture)
-        ID3D11Texture2D_Release(src_texture);
-    return hr;
-}
-
 static BOOL CALLBACK find_top_level_window_proc(HWND hwnd, LPARAM lparam)
 {
     HWND *out_hwnd = (HWND *)lparam;
@@ -620,35 +339,336 @@ static HWND find_root_top_level_window(void)
     return hwnd;
 }
 
-/* Renders one frame into the window of 'target'. Must be called with dcomp_cs
- * released: it enters Direct3D, Direct2D, GDI and the window manager. The
- * Direct2D context and interop target are the ones captured for the frame and
- * are not owned here; 'pt' is the already accumulated visual offset chain. */
-static void do_composite_dxgi_surface(const struct composition_target *target,
+/*
+ * Constant buffer for the composite blit pixel shader: premultiplied-alpha
+ * opacity applied to the sampled pixel, and the visual's rectangle clip in
+ * device-pixel coordinates (pixels whose centre falls outside are discarded).
+ */
+struct composite_blit_data
+{
+    FLOAT opacity;
+    FLOAT pad[3];
+    FLOAT clip_rect[4];         /* left, top, right, bottom */
+};
+
+static const char composite_vs_code[] =
+    "void main(in float4 in_position : POSITION,\n"
+    "          in float2 in_texcoord : TEXCOORD,\n"
+    "          out float4 position : SV_Position,\n"
+    "          out float2 texcoord : TEXCOORD)\n"
+    "{\n"
+    "     position = in_position;\n"
+    "     texcoord = in_texcoord;\n"
+    "}";
+
+static const char composite_ps_code[] =
+    "Texture2D src_texture : register(t0);\n"
+    "SamplerState sam_linear : register(s0);\n"
+    "cbuffer blit_data : register(b0)\n"
+    "{\n"
+    "    float opacity;\n"
+    "    float4 clip_rect; /* left, top, right, bottom in device pixels */\n"
+    "};\n"
+    "float4 main(float4 pos : SV_POSITION, float2 uv : TEXCOORD) : SV_TARGET\n"
+    "{\n"
+    "    float2 px = pos.xy - float2(0.5, 0.5);\n"
+    "    if (px.x < clip_rect.x || px.y < clip_rect.y || px.x > clip_rect.z || px.y > clip_rect.w)\n"
+    "        discard;\n"
+    "    float4 c = src_texture.Sample(sam_linear, uv);\n"
+    "    return float4(c.rgb * opacity, c.a * opacity);\n"
+    "}";
+
+/*
+ * Per-target zero-copy presentation swapchain. Its back buffer is the wined3d
+ * texture that owns the target window's drawable; content is sampled into it
+ * on the GPU and wined3d_swapchain_present() blits the drawable to the window
+ * on the command stream thread, with no CPU staging readback. Recreated when
+ * the producing device or the content size changes.
+ */
+static HRESULT ensure_composite_swapchain(struct composition_target *target,
+        ID3D11Device *device, UINT width, UINT height)
+{
+    static IDXGIFactory2 *factory;
+    DXGI_SWAP_CHAIN_DESC1 desc;
+    HRESULT hr;
+
+    if (width < 1)
+        width = 1;
+    if (height < 1)
+        height = 1;
+
+    if (target->composite_swapchain && target->composite_device == device
+            && target->composite_width == width && target->composite_height == height)
+        return S_OK;
+
+    if (target->composite_rtv)
+    {
+        ID3D11RenderTargetView_Release(target->composite_rtv);
+        target->composite_rtv = NULL;
+    }
+    if (target->composite_swapchain)
+    {
+        IDXGISwapChain1_Release(target->composite_swapchain);
+        target->composite_swapchain = NULL;
+        ID3D11Device_Release(target->composite_device);
+        target->composite_device = NULL;
+    }
+
+    if (!factory && FAILED(hr = CreateDXGIFactory1(&IID_IDXGIFactory2, (void **)&factory)))
+    {
+        ERR("Failed to create DXGI factory, hr %#lx.\n", hr);
+        return hr;
+    }
+
+    memset(&desc, 0, sizeof(desc));
+    desc.Width = width;
+    desc.Height = height;
+    desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    desc.SampleDesc.Count = 1;
+    desc.BufferCount = 2;
+    desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+    desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
+    desc.Flags = 0;
+    hr = IDXGIFactory2_CreateSwapChainForHwnd(factory, (IUnknown *)device, target->hwnd,
+            &desc, NULL, NULL, &target->composite_swapchain);
+    if (FAILED(hr))
+    {
+        ERR("Failed to create composite swapchain, hr %#lx.\n", hr);
+        return hr;
+    }
+
+    ID3D11Device_AddRef(device);
+    target->composite_device = device;
+    target->composite_width = width;
+    target->composite_height = height;
+    return S_OK;
+}
+
+/*
+ * One GPU pass: sample 'src_texture' (any 32-bit format; the output merger
+ * converts to the back buffer's B8G8R8A8) into the composite swapchain back
+ * buffer, multiplying by the visual opacity and discarding pixels outside the
+ * visual's rectangle clip. Falls back to a plain GPU CopySubresourceRegion
+ * when the source cannot be sampled (no shader-resource bind flag).
+ */
+static HRESULT composite_surface_to_backbuffer(struct composition_target *target,
+        ID3D11Device1 *d3d11_device, ID3D11DeviceContext *d3d11_device_context,
+        ID3D11Texture2D *src_texture, UINT width, UINT height,
+        float opacity, const D2D_RECT_F *clip_rect)
+{
+    static ID3D10Blob *vs_blob = NULL, *ps_blob = NULL;
+    static const struct
+    {
+        struct { float x, y; } position;
+        struct { float x, y; } texcoord;
+    }
+    quad[] =
+    {
+        {{-1.0f,  1.0f}, {0.0f, 0.0f}},   /* Top-Left */
+        {{ 1.0f,  1.0f}, {1.0f, 0.0f}},   /* Top-Right */
+        {{-1.0f, -1.0f}, {0.0f, 1.0f}},   /* Bottom-Left */
+        {{ 1.0f, -1.0f}, {1.0f, 1.0f}},   /* Bottom-Right */
+    };
+    static const D3D11_INPUT_ELEMENT_DESC layout_desc[] =
+    {
+        {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
+        {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
+    };
+    struct composite_blit_data blit_data;
+    D3D11_SUBRESOURCE_DATA resource_data;
+    ID3D11ShaderResourceView *srv = NULL;
+    D3D11_BUFFER_DESC buffer_desc;
+    ID3D11InputLayout *input_layout = NULL;
+    ID3D11DeviceContext1 *context1 = NULL;
+    ID3D11RenderTargetView *rtv = NULL;
+    ID3D11VertexShader *vs = NULL;
+    ID3D11PixelShader *ps = NULL;
+    ID3D11SamplerState *sampler = NULL;
+    D3D11_SAMPLER_DESC sampler_desc;
+    ID3D11Buffer *cb = NULL, *vb = NULL;
+    ID3D11Texture2D *backbuffer = NULL;
+    D3D11_VIEWPORT viewport;
+    unsigned int stride, offset;
+    IDXGISwapChain1 *swapchain;
+    HRESULT hr;
+
+    swapchain = target->composite_swapchain;
+    if (!swapchain)
+        return E_FAIL;
+
+    if (target->composite_rtv)
+    {
+        rtv = target->composite_rtv;
+        ID3D11RenderTargetView_AddRef(rtv);
+    }
+    else
+    {
+        if (FAILED(hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&backbuffer)))
+        {
+            ERR("Failed to get composite back buffer, hr %#lx.\n", hr);
+            return hr;
+        }
+        hr = ID3D11Device1_CreateRenderTargetView(d3d11_device, (ID3D11Resource *)backbuffer, NULL, &rtv);
+        ID3D11Texture2D_Release(backbuffer);
+        if (FAILED(hr))
+        {
+            ERR("Failed to create composite render target view, hr %#lx.\n", hr);
+            return hr;
+        }
+        target->composite_rtv = rtv;
+        ID3D11RenderTargetView_AddRef(rtv);
+    }
+
+    if (SUCCEEDED(hr = ID3D11Device1_CreateShaderResourceView(d3d11_device, (ID3D11Resource *)src_texture,
+            NULL, &srv)))
+    {
+        if (!vs_blob)
+        {
+            hr = D3DCompile(composite_vs_code, sizeof(composite_vs_code) - 1, "vs", NULL, NULL, "main",
+                            "vs_4_0", 0, 0, &vs_blob, NULL);
+            if (FAILED(hr))
+            {
+                ERR("Failed to compile vertex shader, hr %#lx.\n", hr);
+                goto done;
+            }
+            hr = D3DCompile(composite_ps_code, sizeof(composite_ps_code) - 1, "ps", NULL, NULL, "main",
+                            "ps_4_0", 0, 0, &ps_blob, NULL);
+            if (FAILED(hr))
+            {
+                ERR("Failed to compile pixel shader, hr %#lx.\n", hr);
+                goto done;
+            }
+        }
+
+        hr = ID3D11Device1_CreateVertexShader(d3d11_device, ID3D10Blob_GetBufferPointer(vs_blob),
+                ID3D10Blob_GetBufferSize(vs_blob), NULL, &vs);
+        if (FAILED(hr))
+            goto done;
+        hr = ID3D11Device1_CreatePixelShader(d3d11_device, ID3D10Blob_GetBufferPointer(ps_blob),
+                ID3D10Blob_GetBufferSize(ps_blob), NULL, &ps);
+        if (FAILED(hr))
+            goto done;
+        hr = ID3D11Device1_CreateInputLayout(d3d11_device, layout_desc, ARRAY_SIZE(layout_desc),
+                ID3D10Blob_GetBufferPointer(vs_blob), ID3D10Blob_GetBufferSize(vs_blob), &input_layout);
+        if (FAILED(hr))
+            goto done;
+
+        buffer_desc.ByteWidth = sizeof(blit_data);
+        buffer_desc.Usage = D3D11_USAGE_DEFAULT;
+        buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+        buffer_desc.CPUAccessFlags = 0;
+        buffer_desc.MiscFlags = 0;
+        buffer_desc.StructureByteStride = 0;
+        blit_data.opacity = opacity;
+        blit_data.pad[0] = blit_data.pad[1] = blit_data.pad[2] = 0;
+        blit_data.clip_rect[0] = clip_rect ? clip_rect->left : 0.0f;
+        blit_data.clip_rect[1] = clip_rect ? clip_rect->top : 0.0f;
+        blit_data.clip_rect[2] = clip_rect ? clip_rect->right : (FLOAT)width;
+        blit_data.clip_rect[3] = clip_rect ? clip_rect->bottom : (FLOAT)height;
+        resource_data.pSysMem = &blit_data;
+        resource_data.SysMemPitch = 0;
+        resource_data.SysMemSlicePitch = 0;
+        hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &cb);
+        if (FAILED(hr))
+            goto done;
+
+        buffer_desc.ByteWidth = sizeof(quad);
+        buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+        resource_data.pSysMem = quad;
+        hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &vb);
+        if (FAILED(hr))
+            goto done;
+
+        memset(&sampler_desc, 0, sizeof(sampler_desc));
+        sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+        sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+        sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+        sampler_desc.MinLOD = 0;
+        sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+        hr = ID3D11Device1_CreateSamplerState(d3d11_device, &sampler_desc, &sampler);
+        if (FAILED(hr))
+            goto done;
+
+        ID3D11DeviceContext_OMSetRenderTargets(d3d11_device_context, 1, &rtv, NULL);
+        ID3D11DeviceContext_PSSetShaderResources(d3d11_device_context, 0, 1, &srv);
+        ID3D11DeviceContext_PSSetSamplers(d3d11_device_context, 0, 1, &sampler);
+        ID3D11DeviceContext_PSSetConstantBuffers(d3d11_device_context, 0, 1, &cb);
+        ID3D11DeviceContext_IASetInputLayout(d3d11_device_context, input_layout);
+        ID3D11DeviceContext_IASetPrimitiveTopology(d3d11_device_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
+        stride = sizeof(quad[0]);
+        offset = 0;
+        ID3D11DeviceContext_IASetVertexBuffers(d3d11_device_context, 0, 1, &vb, &stride, &offset);
+        ID3D11DeviceContext_VSSetShader(d3d11_device_context, vs, NULL, 0);
+        ID3D11DeviceContext_PSSetShader(d3d11_device_context, ps, NULL, 0);
+        viewport.TopLeftX = 0;
+        viewport.TopLeftY = 0;
+        viewport.Width = width;
+        viewport.Height = height;
+        viewport.MinDepth = 0;
+        viewport.MaxDepth = 1;
+        ID3D11DeviceContext_RSSetViewports(d3d11_device_context, 1, &viewport);
+        ID3D11DeviceContext_Draw(d3d11_device_context, 4, 0);
+        goto done;
+    }
+
+    /* Source not sampleable: one GPU copy, opacity not applied. */
+    hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&backbuffer);
+    if (FAILED(hr))
+    {
+        ERR("Failed to get composite back buffer, hr %#lx.\n", hr);
+        goto done;
+    }
+    ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context, (ID3D11Resource *)backbuffer,
+            0, 0, 0, 0, (ID3D11Resource *)src_texture, 0, NULL);
+    hr = S_OK;
+
+done:
+    if (context1)
+        ID3D11DeviceContext1_Release(context1);
+    if (input_layout)
+        ID3D11InputLayout_Release(input_layout);
+    if (cb)
+        ID3D11Buffer_Release(cb);
+    if (vb)
+        ID3D11Buffer_Release(vb);
+    if (sampler)
+        ID3D11SamplerState_Release(sampler);
+    if (ps)
+        ID3D11PixelShader_Release(ps);
+    if (vs)
+        ID3D11VertexShader_Release(vs);
+    if (srv)
+        ID3D11ShaderResourceView_Release(srv);
+    if (rtv)
+        ID3D11RenderTargetView_Release(rtv);
+    return hr;
+}
+
+/*
+ * Renders one frame into the window of 'target'. Must be called with dcomp_cs
+ * released: it enters Direct3D and the window manager. The visual's opacity
+ * (from its effect group) and rectangle clip are applied by the composite
+ * pixel shader; 'pt' is the already accumulated visual offset chain, so each
+ * visual of a composition tree updates only its own region of the window
+ * instead of clobbering the whole drawable.
+ */
+static void do_composite_dxgi_surface(struct composition_target *target,
                                       HWND target_hwnd, POINT pt,
-                                      ID2D1DeviceContext *d2d_context_in,
-                                      ID2D1GdiInteropRenderTarget *interop_in,
-                                      IDXGISurface *dxgi_surface)
+                                      IDXGISurface *dxgi_surface,
+                                      float opacity, const D2D_RECT_F *clip_rect)
 {
     ID3DDeviceContextState *state = NULL, *old_state = NULL;
     ID3D11DeviceContext1 *d3d11_device_context1 = NULL;
     ID3D11DeviceContext *d3d11_device_context = NULL;
     ID3D11Multithread *multithread = NULL;
     IDXGIKeyedMutex *keyed_mutex = NULL;
-    D2D1_BITMAP_PROPERTIES1 bitmap_desc;
-    ID2D1Bitmap1 *target_bitmap = NULL;
-    ID3D11Device1 *d3d11_device = NULL;
-    IDXGISurface *bgra_surface = NULL;
+    struct wined3d_swapchain *wined3d_swapchain;
     DXGI_SURFACE_DESC surface_desc;
-    ID2D1Bitmap *src_bitmap = NULL;
-    ID2D1Image *old_target = NULL;
-    ID2D1DeviceContext *d2d_context = NULL, *temp_context = NULL;
-    ID2D1GdiInteropRenderTarget *interop = NULL, *temp_interop = NULL;
-    ID2D1Device *d2d_device = NULL;
-    IDXGIDevice *dxgi_dev = NULL;
+    ID3D11Device1 *d3d11_device = NULL;
+    ID3D11Texture2D *texture = NULL;
     HWND root_hwnd = NULL;
-    HDC dst_dc, src_dc;
-    D2D1_SIZE_U size;
     HRESULT hr;
 
     static const D3D_FEATURE_LEVEL feature_levels[] =
@@ -714,93 +734,7 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
         goto done;
     }
 
-    /* Convert DXGI_FORMAT_R8G8B8A8_UNORM to DXGI_FORMAT_B8G8R8A8_UNORM */
-    if (surface_desc.Format == DXGI_FORMAT_R8G8B8A8_UNORM)
-    {
-        hr = create_bgra_surface_from_rgba(dxgi_surface, &bgra_surface);
-        if (FAILED(hr))
-        {
-            ERR("Failed to convert DXGI_FORMAT_R8G8B8A8_UNORM surface to DXGI_FORMAT_B8G8R8A8_UNORM, hr %#lx.\n", hr);
-            goto done;
-        }
-        dxgi_surface = bgra_surface;
-    }
-    else if (surface_desc.Format == DXGI_FORMAT_R16G16B16A16_FLOAT)
-    {
-        ERR("DXGI_FORMAT_R16G16B16A16_FLOAT surface is currently unsupported.\n");
-        goto done;
-    }
-
-    size.width = surface_desc.Width;
-    size.height = surface_desc.Height;
-    bitmap_desc.pixelFormat.format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    bitmap_desc.pixelFormat.alphaMode = D2D1_ALPHA_MODE_PREMULTIPLIED;
-    bitmap_desc.dpiX = 0;
-    bitmap_desc.dpiY = 0;
-    bitmap_desc.bitmapOptions = D2D1_BITMAP_OPTIONS_TARGET | D2D1_BITMAP_OPTIONS_GDI_COMPATIBLE;
-    bitmap_desc.colorContext = NULL;
-
-    d2d_context = d2d_context_in;
-    interop = interop_in;
-
-    if (!d2d_context || !interop)
-    {
-        if (SUCCEEDED(IDXGISurface_GetDevice(dxgi_surface, &IID_IDXGIDevice, (void **)&dxgi_dev)))
-        {
-            if (SUCCEEDED(D2D1CreateDevice(dxgi_dev, NULL, &d2d_device)))
-            {
-                if (SUCCEEDED(ID2D1Device_CreateDeviceContext(d2d_device, D2D1_DEVICE_CONTEXT_OPTIONS_NONE, &temp_context)))
-                {
-                    if (SUCCEEDED(ID2D1DeviceContext_QueryInterface(temp_context, &IID_ID2D1GdiInteropRenderTarget, (void **)&temp_interop)))
-                    {
-                        d2d_context = temp_context;
-                        interop = temp_interop;
-                    }
-                }
-                ID2D1Device_Release(d2d_device);
-            }
-            IDXGIDevice_Release(dxgi_dev);
-        }
-    }
-
-    if (!d2d_context || !interop)
-    {
-        ERR("Failed to get D2D device context or interop for composite\n");
-        goto done;
-    }
-
-    if (FAILED(hr = ID2D1DeviceContext_CreateBitmap(d2d_context, size, NULL, 0,
-            &bitmap_desc, &target_bitmap)))
-    {
-        ERR("Failed to create a bitmap, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    if (FAILED(hr = ID2D1DeviceContext_CreateSharedBitmap(d2d_context, &IID_IDXGISurface,
-            dxgi_surface, NULL, &src_bitmap)))
-    {
-        ERR("Failed to create a bitmap from dxgi surface, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    if (FAILED(hr = ID2D1Bitmap1_CopyFromBitmap(target_bitmap, NULL, src_bitmap, NULL)))
-    {
-        ERR("Failed to copy bitmap, hr %#lx.\n", hr);
-        goto done;
-    }
-
-    ID2D1DeviceContext_GetTarget(d2d_context, &old_target);
-    ID2D1DeviceContext_SetTarget(d2d_context, (ID2D1Image *)target_bitmap);
-    if (FAILED(hr = ID2D1GdiInteropRenderTarget_GetDC(interop, D2D1_DC_INITIALIZE_MODE_COPY,
-            &src_dc)))
-    {
-        ERR("GetDC failed, hr %#lx.\n", hr);
-        ID2D1DeviceContext_SetTarget(d2d_context, old_target);
-        if (old_target)
-            ID2D1Image_Release(old_target);
-        goto done;
-    }
-
+    /* Resolve the window (and the point inside it) this visual occupies. */
     if (target_hwnd && IsWindow(target_hwnd) && IsWindowVisible(target_hwnd))
     {
         WCHAR class_name[64];
@@ -819,38 +753,55 @@ static void do_composite_dxgi_surface(const struct composition_target *target,
     if (!root_hwnd || !IsWindow(root_hwnd))
         root_hwnd = find_root_top_level_window();
 
-    if (root_hwnd)
+    if (!root_hwnd)
     {
-        dst_dc = GetDC(root_hwnd);
-        if (dst_dc)
-        {
-            BitBlt(dst_dc, pt.x, pt.y, size.width, size.height, src_dc, 0, 0, SRCCOPY);
-            TRACE("DCOMP: blitted frame %ux%u to root_hwnd %p (target hwnd %p at %ld,%ld)\n",
-                (unsigned int)size.width, (unsigned int)size.height, root_hwnd, target_hwnd, pt.x, pt.y);
-            ReleaseDC(root_hwnd, dst_dc);
-        }
-        else
-        {
-            ERR("Failed to get DC for root_hwnd %p\n", root_hwnd);
-        }
+        ERR("Failed to find a window to composite into\n");
+        goto done;
     }
 
-    ID2D1GdiInteropRenderTarget_ReleaseDC(interop, NULL);
-    ID2D1DeviceContext_SetTarget(d2d_context, old_target);
-    if (old_target)
-        ID2D1Image_Release(old_target);
+    hr = IDXGISurface_QueryInterface(dxgi_surface, &IID_ID3D11Texture2D, (void **)&texture);
+    if (FAILED(hr))
+    {
+        ERR("Failed to get a ID3D11Texture2D, hr %#lx.\n", hr);
+        goto done;
+    }
+
+    if (FAILED(hr = ensure_composite_swapchain(target, (ID3D11Device *)d3d11_device,
+            surface_desc.Width, surface_desc.Height)))
+    {
+        ERR("Failed to ensure composite swapchain, hr %#lx.\n", hr);
+        goto done;
+    }
+
+    if (FAILED(hr = composite_surface_to_backbuffer(target, d3d11_device, d3d11_device_context,
+            texture, surface_desc.Width, surface_desc.Height, opacity, clip_rect)))
+    {
+        ERR("Failed to blit surface to back buffer, hr %#lx.\n", hr);
+        goto done;
+    }
+
+    ID3D11DeviceContext_Flush(d3d11_device_context);
+
+    /* Present the back buffer region onto the window's drawable: the wined3d
+     * command stream thread blits it on the GPU. dst_rect is this visual's
+     * accumulated region so child visuals do not clobber each other. */
+    if ((wined3d_swapchain = dxgi_get_wined3d_swapchain((struct IDXGISwapChain *)target->composite_swapchain)))
+    {
+        RECT dst_rect;
+
+        SetRect(&dst_rect, pt.x, pt.y, pt.x + (LONG)surface_desc.Width, pt.y + (LONG)surface_desc.Height);
+        wined3d_swapchain_present(wined3d_swapchain, NULL, &dst_rect, root_hwnd, 0, 0);
+        TRACE("DCOMP: presented frame %ux%u to root_hwnd %p (target hwnd %p at %ld,%ld)\n",
+                surface_desc.Width, surface_desc.Height, root_hwnd, target_hwnd, pt.x, pt.y);
+    }
+    else
+    {
+        ERR("Failed to get wined3d swapchain for composite swapchain\n");
+    }
 
 done:
-    if (temp_interop)
-        ID2D1GdiInteropRenderTarget_Release(temp_interop);
-    if (temp_context)
-        ID2D1DeviceContext_Release(temp_context);
-    if (bgra_surface)
-        IDXGISurface_Release(bgra_surface);
-    if (src_bitmap)
-        ID2D1Bitmap_Release(src_bitmap);
-    if (target_bitmap)
-        ID2D1Bitmap1_Release(target_bitmap);
+    if (texture)
+        ID3D11Texture2D_Release(texture);
     if (d3d11_device_context1 && old_state)
     {
         ID3D11DeviceContext1_SwapDeviceContextState(d3d11_device_context1, old_state, NULL);
@@ -1483,6 +1434,68 @@ static void collect_device_frames(struct composition_device *device, struct list
     dcomp_unlock();
 }
 
+/* Visual opacity: an effect group (IDCompositionEffectGroup, set via
+ * SetEffectGroup / IDCompositionVisual2::SetOpacity) carries it; a visual
+ * without one is fully opaque. Pure memory, dcomp_cs-protected fields. */
+static inline struct dcomp_transform *impl_from_effect_group(IDCompositionEffectGroup *iface)
+{
+    return CONTAINING_RECORD(iface, struct dcomp_transform, IDCompositionEffectGroup_iface);
+}
+
+static inline struct dcomp_transform *impl_from_rectangle_clip(IDCompositionRectangleClip *iface)
+{
+    return CONTAINING_RECORD(iface, struct dcomp_transform, IDCompositionRectangleClip_iface);
+}
+
+static float visual_get_opacity(const struct composition_visual *visual)
+{
+    IDCompositionEffectGroup *effect_group;
+    struct dcomp_transform *transform;
+    float opacity = 1.0f;
+
+    if (!visual->transform)
+        return 1.0f;
+
+    if (SUCCEEDED(IDCompositionTransform_QueryInterface(visual->transform,
+            &IID_IDCompositionEffectGroup, (void **)&effect_group)))
+    {
+        transform = impl_from_effect_group(effect_group);
+        opacity = transform->opacity;
+        IDCompositionEffectGroup_Release(effect_group);
+        return opacity;
+    }
+    return 1.0f;
+}
+
+/* Visual clip rectangle in content coordinates: a rectangle clip object set
+ * via SetClipObject overrides the rectangle set via SetClip. Returns FALSE
+ * when the visual has no effective clip. */
+static BOOL visual_get_clip_rect(const struct composition_visual *visual, D2D_RECT_F *rect)
+{
+    IDCompositionRectangleClip *rectangle_clip;
+    struct dcomp_transform *transform;
+
+    if (visual->clip && SUCCEEDED(IDCompositionClip_QueryInterface(visual->clip,
+            &IID_IDCompositionRectangleClip, (void **)&rectangle_clip)))
+    {
+        transform = impl_from_rectangle_clip(rectangle_clip);
+        rect->left = transform->clip_left;
+        rect->top = transform->clip_top;
+        rect->right = transform->clip_right;
+        rect->bottom = transform->clip_bottom;
+        IDCompositionRectangleClip_Release(rectangle_clip);
+        return rect->right > rect->left && rect->bottom > rect->top;
+    }
+
+    if (visual->has_rect_clip && visual->rect_clip.right > visual->rect_clip.left
+            && visual->rect_clip.bottom > visual->rect_clip.top)
+    {
+        *rect = visual->rect_clip;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 static IDXGISurface *frame_get_surface(struct composite_frame *frame)
 {
     ID3D11Texture2D *texture = NULL;
@@ -1548,10 +1561,33 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame)
     return dxgi_surface;
 }
 
+/* Region of the window that this visual occupies: its accumulated offset
+ * chain position ('pt') and the size of the content being composited. */
+static RECT composite_dst_rect(const struct composite_frame *frame, UINT width, UINT height)
+{
+    RECT rect;
+
+    SetRect(&rect, frame->pt.x, frame->pt.y,
+            frame->pt.x + (LONG)width, frame->pt.y + (LONG)height);
+    return rect;
+}
+
 static void render_composite_frame(struct composite_frame *frame)
 {
     IDXGISwapChain *swapchain = NULL;
+    struct wined3d_swapchain_desc sc_desc;
+    struct composition_visual *visual;
+    D2D_RECT_F clip_rect, *clip = NULL;
     IDXGISurface *dxgi_surface;
+    RECT dst_rect;
+    float opacity;
+
+    /* The frame holds a reference to the visual, so reading its effect-group
+     * opacity and clip rectangle here is pure memory. */
+    visual = frame->visual;
+    opacity = visual ? visual_get_opacity(visual) : 1.0f;
+    if (visual && visual_get_clip_rect(visual, &clip_rect))
+        clip = &clip_rect;
 
     if (frame->is_fallback)
     {
@@ -1560,7 +1596,7 @@ static void render_composite_frame(struct composite_frame *frame)
                 &IID_IDXGISurface, (void **)&dxgi_surface)))
         {
             do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
-                    NULL, NULL, dxgi_surface);
+                    dxgi_surface, 1.0f, NULL);
             IDXGISurface_Release(dxgi_surface);
             frame->rendered = TRUE;
         }
@@ -1583,26 +1619,42 @@ static void render_composite_frame(struct composite_frame *frame)
      * through wined3d, which blits it into the window's GL drawable on the
      * command stream thread. This replaces the GetBuffer(0) + Direct2D GDI
      * interop + BitBlt copy for swapchain content; the drawable lease is
-     * honored by wined3d_swapchain_present itself. */
+     * honored by wined3d_swapchain_present itself. dst_rect is the visual's
+     * accumulated region so that each visual of a composition tree updates
+     * only its own part of the window. */
     if (frame->visual && frame->visual->wined3d_swapchain)
     {
         struct wined3d_swapchain *wined3d_swapchain = frame->visual->wined3d_swapchain;
+        RECT *dst_rect_ptr = NULL;
 
         if (frame->target_hwnd && IsWindow(frame->target_hwnd))
             wined3d_swapchain_set_window(wined3d_swapchain, frame->target_hwnd);
-        wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, frame->target_hwnd, 0, 0);
+        wined3d_swapchain_get_desc(wined3d_swapchain, &sc_desc);
+        if (sc_desc.backbuffer_width && sc_desc.backbuffer_height)
+        {
+            dst_rect = composite_dst_rect(frame, sc_desc.backbuffer_width, sc_desc.backbuffer_height);
+            dst_rect_ptr = &dst_rect;
+        }
+        wined3d_swapchain_present(wined3d_swapchain, NULL, dst_rect_ptr, frame->target_hwnd, 0, 0);
         frame->rendered = TRUE;
         goto done;
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain)))
     {
         struct wined3d_swapchain *wined3d_swapchain = dxgi_get_wined3d_swapchain(swapchain);
+        RECT *dst_rect_ptr = NULL;
 
         if (wined3d_swapchain)
         {
             if (frame->target_hwnd && IsWindow(frame->target_hwnd))
                 wined3d_swapchain_set_window(wined3d_swapchain, frame->target_hwnd);
-            wined3d_swapchain_present(wined3d_swapchain, NULL, NULL, frame->target_hwnd, 0, 0);
+            wined3d_swapchain_get_desc(wined3d_swapchain, &sc_desc);
+            if (sc_desc.backbuffer_width && sc_desc.backbuffer_height)
+            {
+                dst_rect = composite_dst_rect(frame, sc_desc.backbuffer_width, sc_desc.backbuffer_height);
+                dst_rect_ptr = &dst_rect;
+            }
+            wined3d_swapchain_present(wined3d_swapchain, NULL, dst_rect_ptr, frame->target_hwnd, 0, 0);
             frame->rendered = TRUE;
         }
         IDXGISwapChain_Release(swapchain);
@@ -1610,6 +1662,11 @@ static void render_composite_frame(struct composite_frame *frame)
             goto done;
     }
 
+    /* Surface content: frame_get_surface() extracts the underlying
+     * ID3D11Texture2D (wined3d texture) of the IDCompositionSurface /
+     * IDXGISurface directly; the blit samples it on the GPU into the target's
+     * presentation swapchain, applying the visual opacity and clip, and
+     * presents the visual's region of the window. No CPU staging readback. */
     if ((dxgi_surface = frame_get_surface(frame)))
     {
         /* Change/commit driven: only re-blit when the visual content changed. The
@@ -1618,7 +1675,7 @@ static void render_composite_frame(struct composite_frame *frame)
          * thrashes the Direct2D and Direct3D resources. The compositor paints on
          * change, the swapchain Present path owns the window drawable in between. */
         do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
-                frame->frame_context, frame->frame_interop, dxgi_surface);
+                dxgi_surface, opacity, clip);
         IDXGISurface_Release(dxgi_surface);
         frame->rendered = TRUE;
     }

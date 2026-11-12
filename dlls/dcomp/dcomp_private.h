@@ -22,6 +22,7 @@
 #include "dcomp_private_iface.h"
 #include "d2d1_3.h"
 #include <d3d11.h>
+#include "dxgi1_2.h"
 #include "wine/list.h"
 
 struct wined3d_swapchain;
@@ -131,6 +132,17 @@ struct composition_target
     HANDLE shared_visual_handle;
     struct list entry;
     struct composition_surface *composited_surface; /* last fallback surface blitted to the window */
+    /* Zero-copy GPU presentation: a swapchain created on the content's D3D11
+     * device whose back buffer owns the target window's drawable. Content is
+     * sampled into it on the GPU (opacity and clip applied by the pixel
+     * shader) and wined3d_swapchain_present() copies the drawable region for
+     * the visual's accumulated offset to the window. Recreated when the
+     * producing device or the content size changes. */
+    ID3D11Device *composite_device;         /* device composite_swapchain was created on */
+    IDXGISwapChain1 *composite_swapchain;   /* presents to the target window */
+    ID3D11RenderTargetView *composite_rtv;  /* render target view of the back buffer */
+    UINT composite_width;
+    UINT composite_height;
     LONG ref;
 };
 

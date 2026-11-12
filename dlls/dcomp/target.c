@@ -82,6 +82,12 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
         }
         if (target->shared_visual_handle)
             CloseHandle(target->shared_visual_handle);
+        if (target->composite_rtv)
+            ID3D11RenderTargetView_Release(target->composite_rtv);
+        if (target->composite_swapchain)
+            IDXGISwapChain1_Release(target->composite_swapchain);
+        if (target->composite_device)
+            ID3D11Device_Release(target->composite_device);
         free(target);
     }
 
