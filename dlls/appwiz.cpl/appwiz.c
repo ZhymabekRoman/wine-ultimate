@@ -816,6 +816,16 @@ static INT_PTR CALLBACK MainDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
                             break;
                     }
                     break;
+
+                case IDC_TURN_FEATURES_ON_OFF:
+                    switch (nmh->code)
+                    {
+                        case NM_CLICK:
+                        case NM_RETURN:
+                            ShellExecuteW( NULL, NULL, L"OptionalFeatures.exe", NULL, NULL, SW_SHOWNORMAL );
+                            break;
+                    }
+                    break;
             }
 
             return TRUE;
@@ -823,6 +833,10 @@ static INT_PTR CALLBACK MainDlgProc(HWND hWnd, UINT msg, WPARAM wParam, LPARAM l
         case WM_COMMAND:
             switch (LOWORD(wParam))
             {
+                case IDC_TURN_FEATURES_ON_OFF:
+                    ShellExecuteW( NULL, NULL, L"OptionalFeatures.exe", NULL, NULL, SW_SHOWNORMAL );
+                    break;
+
                 case IDC_INSTALL:
                     InstallProgram(hWnd);
                     break;
@@ -910,9 +924,14 @@ static int CALLBACK propsheet_callback( HWND hwnd, UINT msg, LPARAM lparam )
  */
 static void StartApplet(HWND hWnd)
 {
+    INITCOMMONCONTROLSEX iccEx;
     PROPSHEETPAGEW psp;
     PROPSHEETHEADERW psh;
     WCHAR tab_title[MAX_STRING_LEN], app_title[MAX_STRING_LEN];
+
+    iccEx.dwSize = sizeof(iccEx);
+    iccEx.dwICC = ICC_LISTVIEW_CLASSES | ICC_TAB_CLASSES | ICC_LINK_CLASS;
+    InitCommonControlsEx(&iccEx);
 
     /* Load the strings we will use */
     LoadStringW(hInst, IDS_TAB1_TITLE, tab_title, ARRAY_SIZE(tab_title));

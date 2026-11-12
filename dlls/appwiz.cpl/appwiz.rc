@@ -61,6 +61,7 @@ FONT 8, "MS Shell Dlg"
 {
  CONTROL "To install a new program from a floppy disk, CD-ROM drive, or your hard drive, click Install.", 1000, "STATIC", SS_LEFT | WS_CHILD | WS_VISIBLE | WS_GROUP, 40, 7, 270, 20
  CONTROL "&Install...", IDC_INSTALL, "BUTTON", BS_PUSHBUTTON | WS_CHILD | WS_VISIBLE | WS_TABSTOP, 246, 26, 64, 14
+ CONTROL "<a>Turn Windows features on or off</a>", IDC_TURN_FEATURES_ON_OFF, "SysLink", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 40, 28, 190, 14
  CONTROL "", -1, "STATIC", SS_LEFT | SS_SUNKEN | WS_CHILD | WS_VISIBLE, 7, 46, 303, 1
  CONTROL 2, 1001, "STATIC", SS_ICON | WS_CHILD | WS_VISIBLE, 7, 7, 21, 20
  CONTROL "The following software can be automatically removed. To remove a program or to modify its installed components, select it from the list and click Modify/Remove.", 1002, "STATIC", SS_LEFT | WS_CHILD | WS_VISIBLE | WS_GROUP, 40, 54, 275, 34
