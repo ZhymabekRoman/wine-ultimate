@@ -866,12 +866,161 @@ struct futex_queue
 
 static struct futex_queue futex_queues[256];
 
-static struct futex_queue *get_futex_queue( const void *addr )
+/* Lock-free waiters-presence counters, one per futex_queues[] bucket.
+ * RtlWakeAddress*() can bail out with zero syscalls and zero lock
+ * acquisitions when the bucket for an address has no registered waiters.
+ * A positive value is a count of waiters; buckets collide on the hash,
+ * so a nonzero value may be a benign false positive. */
+static LONG addr_waiters[ARRAY_SIZE(futex_queues)];
+
+static inline ULONG get_futex_hash( const void *addr )
 {
     ULONG_PTR val = (ULONG_PTR)addr;
 
-    return &futex_queues[(val >> 4) % ARRAY_SIZE(futex_queues)];
+    return (val >> 4) & (ARRAY_SIZE(futex_queues) - 1);
 }
+
+static inline struct futex_queue *get_futex_queue( const void *addr )
+{
+    return &futex_queues[get_futex_hash( addr )];
+}
+
+#ifdef __linux__
+
+#include <errno.h>
+#include <unistd.h>
+#include <sys/syscall.h>
+#include <linux/futex.h>
+
+#define NT_TICKSPERSEC 10000000
+#define FUTEX_TIMEOUT_INFINITE ((LONGLONG)0x7fffffff7fffffff)
+#define FUTEX_WAKE_ALL 0x7fffffff
+
+#ifndef __NR_futex_waitv
+#define __NR_futex_waitv 449
+#endif
+#ifndef FUTEX_32
+#define FUTEX_32 2
+#endif
+
+/* defined in unix/sync.c, per-thread alert futex word */
+extern LONG *get_thread_alert_futex( void );
+
+struct local_futex_waitv
+{
+    __u32 val;
+    __u64 uaddr;
+    __u32 flags;
+    __u32 __reserved;
+};
+
+static inline int local_futex_wait( const LONG *addr, int val, const struct timespec *timeout )
+{
+    return syscall( __NR_futex, (void *)addr, FUTEX_WAIT_PRIVATE, val, (void *)timeout, 0, 0 );
+}
+
+static inline int local_futex_wake( const LONG *addr, int count )
+{
+    return syscall( __NR_futex, (void *)addr, FUTEX_WAKE_PRIVATE, count, NULL, 0, 0 );
+}
+
+static inline int local_futex_waitv( const struct local_futex_waitv *wv, unsigned int count,
+                                     const struct timespec *timeout )
+{
+    return syscall( __NR_futex_waitv, (void *)wv, count, 0, (void *)timeout );
+}
+
+/* futex_waitv() is available since Linux 5.16; probe once, a NULL timeout
+ * makes it poll the addresses and return without sleeping */
+static BOOL has_futex_waitv( void )
+{
+    static int cached = -1;
+
+    if (cached == -1)
+    {
+        struct local_futex_waitv wv = { 1, 0, FUTEX_32 | FUTEX_PRIVATE_FLAG, 0 };
+        local_futex_waitv( &wv, 1, NULL );
+        cached = (errno == ENOSYS) ? 0 : 1;
+    }
+    return cached;
+}
+
+/* Fast path for 4-byte aligned, size 4 waits (backing SRWLOCK,
+ * CRITICAL_SECTION, CONDITION_VARIABLE, SYNCHRONIZATION_BARRIER):
+ * sleep on a kernel futex on the address itself, so RtlWakeAddress*()
+ * resolves a waiter with a single FUTEX_WAKE on the address instead of
+ * walking a hash bucket under a spinlock and alerting threads by id.
+ * The wait is combined with the per-thread alert futex through
+ * futex_waitv() (Linux 5.16+) to preserve NtAlertThreadByThreadId()
+ * wakeup semantics; kernels without it fall back to plain futex. */
+static NTSTATUS futex_wait_on_address( const ULONG *addr, ULONG cmp, const LARGE_INTEGER *timeout )
+{
+    ULONGLONG end = 0;
+    LONG *alert;
+
+    if (timeout)
+    {
+        if (timeout->QuadPart == FUTEX_TIMEOUT_INFINITE) timeout = NULL;
+        else
+        {
+            LARGE_INTEGER now;
+            NtQuerySystemTime( &now );
+            end = timeout->QuadPart >= 0 ? (ULONGLONG)timeout->QuadPart
+                                         : (ULONGLONG)(now.QuadPart - timeout->QuadPart);
+        }
+    }
+
+    alert = get_thread_alert_futex();
+
+    for (;;)
+    {
+        ULONG val = *addr;
+        struct timespec ts, *pts = NULL;
+
+        if (val != cmp) return STATUS_SUCCESS;
+
+        /* a pending thread alert wakes the wait, like it does on Windows */
+        if (alert && InterlockedExchange( alert, 0 )) return STATUS_SUCCESS;
+
+        if (timeout)
+        {
+            LARGE_INTEGER now;
+            LONGLONG timeleft;
+
+            NtQuerySystemTime( &now );
+            timeleft = (LONGLONG)(end - (ULONGLONG)now.QuadPart);
+            if (timeleft <= 0) return STATUS_TIMEOUT;
+            ts.tv_sec = timeleft / NT_TICKSPERSEC;
+            ts.tv_nsec = (timeleft % NT_TICKSPERSEC) * 100;
+            pts = &ts;
+        }
+
+        if (alert && has_futex_waitv())
+        {
+            struct local_futex_waitv wv[2];
+            int ret;
+
+            wv[0].val = val;
+            wv[0].uaddr = (ULONG64)(ULONG_PTR)addr;
+            wv[0].flags = FUTEX_32 | FUTEX_PRIVATE_FLAG;
+            wv[0].__reserved = 0;
+            wv[1].val = 0;
+            wv[1].uaddr = (ULONG64)(ULONG_PTR)alert;
+            wv[1].flags = FUTEX_32 | FUTEX_PRIVATE_FLAG;
+            wv[1].__reserved = 0;
+
+            ret = local_futex_waitv( wv, 2, pts );
+            if (ret == 1) return STATUS_SUCCESS; /* thread alert */
+            if (ret == -1 && errno == ETIMEDOUT) return STATUS_TIMEOUT;
+        }
+        else
+        {
+            if (local_futex_wait( (const LONG *)addr, val, pts ) == -1 && errno == ETIMEDOUT)
+                return STATUS_TIMEOUT;
+        }
+    }
+}
+#endif /* __linux__ */
 
 static void spin_lock( LONG *lock )
 {
@@ -907,7 +1056,8 @@ static BOOL compare_addr( const void *addr, const void *cmp, SIZE_T size )
 NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size,
                                   const LARGE_INTEGER *timeout )
 {
-    struct futex_queue *queue = get_futex_queue( addr );
+    ULONG hash = get_futex_hash( addr );
+    struct futex_queue *queue = &futex_queues[hash];
     struct futex_entry entry;
     NTSTATUS ret;
 
@@ -916,9 +1066,21 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
     if (size != 1 && size != 2 && size != 4 && size != 8)
         return STATUS_INVALID_PARAMETER;
 
+#ifdef __linux__
+    if (size == 4 && !(((ULONG_PTR)addr) & 3))
+    {
+        InterlockedIncrement( &addr_waiters[hash] );
+        ret = futex_wait_on_address( addr, *(const ULONG *)cmp, timeout );
+        InterlockedDecrement( &addr_waiters[hash] );
+        TRACE("returning %#lx\n", ret);
+        return ret;
+    }
+#endif
+
     entry.addr = addr;
     entry.tid = GetCurrentThreadId();
 
+    InterlockedIncrement( &addr_waiters[hash] );
     spin_lock( &queue->lock );
 
     /* Do the comparison inside of the spinlock, to reduce spurious wakeups. */
@@ -926,6 +1088,7 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
     if (!compare_addr( addr, cmp, size ))
     {
         spin_unlock( &queue->lock );
+        InterlockedDecrement( &addr_waiters[hash] );
         return STATUS_SUCCESS;
     }
 
@@ -946,6 +1109,8 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
         spin_unlock( &queue->lock );
     }
 
+    InterlockedDecrement( &addr_waiters[hash] );
+
     TRACE("returning %#lx\n", ret);
 
     if (ret == STATUS_ALERTED) ret = STATUS_SUCCESS;
@@ -957,7 +1122,8 @@ NTSTATUS WINAPI RtlWaitOnAddress( const void *addr, const void *cmp, SIZE_T size
  */
 void WINAPI RtlWakeAddressAll( const void *addr )
 {
-    struct futex_queue *queue = get_futex_queue( addr );
+    ULONG hash = get_futex_hash( addr );
+    struct futex_queue *queue = &futex_queues[hash];
     struct futex_entry *entry, *next;
     unsigned int count = 0;
     HANDLE tids[256];
@@ -965,6 +1131,12 @@ void WINAPI RtlWakeAddressAll( const void *addr )
     TRACE("%p\n", addr);
 
     if (!addr) return;
+    if (!InterlockedCompareExchange( &addr_waiters[hash], 0, 0 )) return; /* no waiters, zero syscalls */
+
+#ifdef __linux__
+    /* wake every fast-path waiter parked on this exact address in one syscall */
+    if (!(((ULONG_PTR)addr) & 3)) local_futex_wake( addr, FUTEX_WAKE_ALL );
+#endif
 
     spin_lock( &queue->lock );
 
@@ -998,13 +1170,21 @@ void WINAPI RtlWakeAddressAll( const void *addr )
  */
 void WINAPI RtlWakeAddressSingle( const void *addr )
 {
-    struct futex_queue *queue = get_futex_queue( addr );
+    ULONG hash = get_futex_hash( addr );
+    struct futex_queue *queue = &futex_queues[hash];
     struct futex_entry *entry;
     DWORD tid = 0;
 
     TRACE("%p\n", addr);
 
     if (!addr) return;
+    if (!InterlockedCompareExchange( &addr_waiters[hash], 0, 0 )) return; /* no waiters, zero syscalls */
+
+#ifdef __linux__
+    /* wake one fast-path waiter parked on this exact address in one syscall,
+     * the kernel wakes them in FIFO order, keeping the queue fair */
+    if (!(((ULONG_PTR)addr) & 3)) local_futex_wake( addr, 1 );
+#endif
 
     spin_lock( &queue->lock );
 

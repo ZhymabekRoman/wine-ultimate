@@ -3831,6 +3831,17 @@ static union tid_alert_entry *get_tid_alert_entry( HANDLE tid )
 }
 
 
+#ifdef USE_FUTEX
+/* Returns the per-thread alert futex word used by NtAlertThreadByThreadId,
+ * so that the RtlWaitOnAddress() fast path can wait on it directly. */
+LONG *get_thread_alert_futex( void )
+{
+    union tid_alert_entry *entry = get_tid_alert_entry( ULongToHandle(get_thread_data()->tid) );
+    return entry ? &entry->futex : NULL;
+}
+#endif
+
+
 /***********************************************************************
  *             NtAlertMultipleThreadByThreadId (NTDLL.@)
  */
