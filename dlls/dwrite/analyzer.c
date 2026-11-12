@@ -381,6 +381,39 @@ system_fallback_config[] =
     { "FF00-FFEF",              L"Noto Sans CJK JP" },
 
     { "1F800-1F8FF",            L"Noto Sans Symbols2, Noto Sans Symbols 2" },
+
+    /* Miscellaneous Symbols and Pictographs - 1F300-1F5FF
+       Emoticons                           - 1F600-1F64F
+       Transport and Map Symbols           - 1F680-1F6FF
+       Supplemental Symbols and Pictographs- 1F900-1F9FF
+       Symbols and Pictographs Extended-A  - 1FA70-1FAFF */
+
+    { "1F300-1F5FF, 1F600-1F64F, "
+      "1F680-1F6FF, 1F900-1F9FF, "
+      "1FA70-1FAFF",            L"Segoe UI Emoji, Noto Color Emoji, Apple Color Emoji, Noto Emoji" },
+
+    /* Mahjong Tiles, Dominoes, Playing Cards - 1F000-1F02F, 1F0A0-1F0FF
+       Enclosed Alphanumerics                - 1F100-1F2FF */
+
+    { "1F000-1F02F, 1F0A0-1F0FF, "
+      "1F100-1F2FF",            L"Segoe UI Symbol, Noto Sans Symbols, Noto Sans Symbols2" },
+
+    /* CJK Unified Ideographs Extension B - 20000-2A6DF
+       CJK Unified Ideographs Extension C  - 2A700-2B73F
+       CJK Unified Ideographs Extension D  - 2B740-2B81F
+       CJK Unified Ideographs Extension E  - 2B820-2CEAF
+       CJK Unified Ideographs Extension F  - 2CEB0-2EBEF */
+
+    { "20000-2A6DF, 2A700-2B73F, "
+      "2B740-2B81F, 2B820-2CEAF, "
+      "2CEB0-2EBEF",            L"Noto Sans CJK SC, Noto Sans CJK TC, Noto Sans CJK JP, Noto Sans CJK KR, Microsoft YaHei" },
+
+    /* Geometric Shapes Extended   - 1F780-1F7FF
+       Miscellaneous Symbols       - 2600-26FF
+       Dingbats                    - 2700-27BF */
+
+    { "1F780-1F7FF, 2600-26FF, "
+      "2700-27BF",              L"Segoe UI Symbol, Noto Sans Symbols" },
 };
 
 struct text_source_context
@@ -2472,15 +2505,20 @@ static ULONG WINAPI fontfallback_Release(IDWriteFontFallback1 *iface)
     return IDWriteFactory7_Release(fallback->factory);
 }
 
-static inline BOOL fallback_is_uvs(const struct text_source_context *context)
+static inline BOOL fallback_ch_is_uvs(UINT32 ch)
 {
     /* MONGOLIAN FREE VARIATION SELECTOR ONE..THREE */
-    if (context->ch >= 0x180b && context->ch <= 0x180d) return TRUE;
+    if (ch >= 0x180b && ch <= 0x180d) return TRUE;
     /* VARIATION SELECTOR-1..16 */
-    if (context->ch >= 0xfe00 && context->ch <= 0xfe0f) return TRUE;
+    if (ch >= 0xfe00 && ch <= 0xfe0f) return TRUE;
     /* VARIATION SELECTOR-17..256 */
-    if (context->ch >= 0xe0100 && context->ch <= 0xe01ef) return TRUE;
+    if (ch >= 0xe0100 && ch <= 0xe01ef) return TRUE;
     return FALSE;
+}
+
+static inline BOOL fallback_is_uvs(const struct text_source_context *context)
+{
+    return fallback_ch_is_uvs(context->ch);
 }
 
 static UINT32 fallback_font_get_supported_length(IDWriteFont3 *font, IDWriteTextAnalysisSource *source,
@@ -2503,6 +2541,80 @@ static UINT32 fallback_font_get_supported_length(IDWriteFont3 *font, IDWriteText
     return mapped;
 }
 
+static HRESULT create_matching_font_by_index(IDWriteFontCollection *collection, UINT32 index,
+        DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch, REFIID riid, void **obj)
+{
+    IDWriteFontFamily *family;
+    IDWriteFont *font;
+    HRESULT hr;
+
+    *obj = NULL;
+
+    if (FAILED(hr = IDWriteFontCollection_GetFontFamily(collection, index, &family)))
+        return hr;
+
+    hr = IDWriteFontFamily_GetFirstMatchingFont(family, weight, stretch, style, &font);
+    IDWriteFontFamily_Release(family);
+    if (FAILED(hr))
+        return hr;
+
+    hr = IDWriteFont_QueryInterface(font, riid, obj);
+    IDWriteFont_Release(font);
+
+    return hr;
+}
+
+static const WCHAR *const system_default_families[] = { L"Segoe UI", L"Tahoma" };
+
+/* Last resort mapping used when the fallback data has no range covering the input, or the mapped
+   families are not installed. Try the UI font families first, then the system collection in order,
+   so that callers reliably get a font instance instead of NULL. */
+static void fallback_map_default_font(const struct dwrite_fontfallback *fallback, IDWriteTextAnalysisSource *source,
+        UINT32 position, UINT32 length, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style,
+        DWRITE_FONT_STRETCH stretch, IDWriteFont **ret_font, UINT32 *ret_length)
+{
+    const UINT32 named_count = ARRAY_SIZE(system_default_families);
+    IDWriteFontCollection *collection = fallback->systemcollection;
+    IDWriteFont3 *first = NULL, *font;
+    UINT32 i, count = 0, mapped;
+
+    if (!collection || !length)
+        return;
+
+    count = IDWriteFontCollection_GetFontFamilyCount(collection);
+
+    for (i = 0; i < named_count + count; ++i)
+    {
+        if (i < named_count)
+        {
+            if (FAILED(create_matching_font(collection, system_default_families[i], weight, style, stretch,
+                    &IID_IDWriteFont3, (void **)&font)))
+                continue;
+        }
+        else if (FAILED(create_matching_font_by_index(collection, i - named_count, weight, style, stretch,
+                &IID_IDWriteFont3, (void **)&font)))
+            continue;
+
+        if ((mapped = fallback_font_get_supported_length(font, source, position, length)))
+        {
+            IDWriteFont3_Release(first);
+            *ret_font = (IDWriteFont *)font;
+            *ret_length = mapped;
+            return;
+        }
+
+        /* Remember a usable font to return in case none of them supports the input. */
+        if (first) IDWriteFont3_Release(font);
+        else first = font;
+    }
+
+    if (first)
+    {
+        *ret_font = (IDWriteFont *)first;
+        *ret_length = length;
+    }
+}
+
 static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallback, IDWriteTextAnalysisSource *source,
         UINT32 position, UINT32 text_length, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style,
         DWRITE_FONT_STRETCH stretch, IDWriteFont **ret_font, UINT32 *ret_length, float *scale)
@@ -2512,7 +2624,7 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
     const struct fallback_data *data;
     const WCHAR *locale_name = NULL;
     struct fallback_locale *locale;
-    UINT32 i, length = 0, mapped;
+    UINT32 i, length = 0, mapped, first_ch = 0;
     IDWriteFont3 *font;
     HRESULT hr;
 
@@ -2534,6 +2646,7 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
 
     /* Find a mapping for given locale. */
     text_source_get_next_u32_char(&context);
+    first_ch = context.ch;
     mapping = find_fallback_mapping(data, locale, context.ch);
     mapped = text_source_get_char_length(&context);
     while (!text_source_get_next_u32_char(&context))
@@ -2546,6 +2659,11 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
     {
         *ret_font = NULL;
         *ret_length = mapped;
+
+        /* Variation selectors are rendered with the font of the preceding character, a span
+           consisting only of them has no font of its own. */
+        if (!fallback_ch_is_uvs(first_ch))
+            fallback_map_default_font(fallback, source, position, mapped, weight, style, stretch, ret_font, ret_length);
 
         return S_OK;
     }
@@ -2569,9 +2687,11 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
         }
     }
 
-    /* Mapping was found, but either font couldn't be created or there's no font that supports given input. */
+    /* Mapping was found, but either font couldn't be created or there's no font that supports given input.
+       Fall back to the default UI font, so that the input still gets rendered by something. */
     *ret_font = NULL;
     *ret_length = length;
+    fallback_map_default_font(fallback, source, position, length, weight, style, stretch, ret_font, ret_length);
 
     return S_OK;
 }
@@ -2657,10 +2777,65 @@ static HRESULT WINAPI fontfallback1_MapCharacters(IDWriteFontFallback1 *iface, I
     DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 values_count, UINT32 *mapped_length, FLOAT *scale,
     IDWriteFontFace5 **ret_fontface)
 {
-    FIXME("%p, %p, %u, %u, %p, %s, %p, %u, %p, %p, %p.\n", iface, source, position, length, basecollection,
+    DWRITE_FONT_WEIGHT weight = DWRITE_FONT_WEIGHT_NORMAL;
+    DWRITE_FONT_STRETCH stretch = DWRITE_FONT_STRETCH_NORMAL;
+    DWRITE_FONT_STYLE style = DWRITE_FONT_STYLE_NORMAL;
+    IDWriteFont3 *font3;
+    IDWriteFontFace3 *face;
+    IDWriteFont *font;
+    HRESULT hr;
+    UINT32 i;
+
+    TRACE("%p, %p, %u, %u, %p, %s, %p, %u, %p, %p, %p.\n", iface, source, position, length, basecollection,
             debugstr_w(basefamily), axis_values, values_count, mapped_length, scale, ret_fontface);
 
-    return E_NOTIMPL;
+    *mapped_length = 0;
+    *scale = 1.0f;
+    *ret_fontface = NULL;
+
+    /* The fallback data is keyed by GDI style values, map the design axes that it understands. */
+    for (i = 0; i < values_count && axis_values; ++i)
+    {
+        const DWRITE_FONT_AXIS_VALUE *axis = &axis_values[i];
+        if (axis->value != axis->value) continue; /* NaN */
+
+        switch (axis->axisTag)
+        {
+            case DWRITE_FONT_AXIS_TAG_WEIGHT:
+                weight = (DWRITE_FONT_WEIGHT)(int)(axis->value + 0.5f);
+                break;
+            case DWRITE_FONT_AXIS_TAG_WIDTH:
+                stretch = (DWRITE_FONT_STRETCH)(int)(axis->value + 0.5f);
+                break;
+            case DWRITE_FONT_AXIS_TAG_ITALIC:
+                style = axis->value >= 0.5f ? DWRITE_FONT_STYLE_ITALIC : DWRITE_FONT_STYLE_NORMAL;
+                break;
+            default:
+                break;
+        }
+    }
+
+    if (FAILED(hr = fontfallback_MapCharacters(iface, source, position, length, basecollection, basefamily, weight,
+            style, stretch, mapped_length, &font, scale)))
+        return hr;
+
+    if (!font)
+        return S_OK;
+
+    hr = IDWriteFont_QueryInterface(font, &IID_IDWriteFont3, (void **)&font3);
+    IDWriteFont_Release(font);
+    if (FAILED(hr))
+        return hr;
+
+    hr = IDWriteFont3_CreateFontFace(font3, &face);
+    IDWriteFont3_Release(font3);
+    if (FAILED(hr))
+        return hr;
+
+    hr = IDWriteFontFace3_QueryInterface(face, &IID_IDWriteFontFace5, (void **)ret_fontface);
+    IDWriteFontFace3_Release(face);
+
+    return hr;
 }
 
 static const IDWriteFontFallback1Vtbl fontfallbackvtbl =
@@ -3089,7 +3264,7 @@ static BOOL WINAPI dwrite_system_fallback_initonce(INIT_ONCE *once, void *param,
     unsigned int range_count, families_count;
     IDWriteFactory7 *factory = param;
     DWRITE_UNICODE_RANGE ranges[16];
-    WCHAR *families[4], *str;
+    WCHAR *families[8], *str;
     HRESULT hr;
     size_t i;
 
