@@ -4152,6 +4152,11 @@ static NTSTATUS lookup_unix_name( int root_fd, OBJECT_ATTRIBUTES *attr, UNICODE_
 }
 
 
+struct path_cache_entry;
+
+static void path_cache_insert( const OBJECT_ATTRIBUTES *attr, const char *unix_path,
+                               BOOL open_reparse, NTSTATUS status );
+
 /******************************************************************************
  *           nt_to_unix_file_name_no_root
  */
@@ -4259,6 +4264,9 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
     }
     else
     {
+        if ((status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
+            && (!nt_name || !nt_name->Buffer))
+            path_cache_insert( attr, unix_name, open_reparse, status );
         free( unix_name );
     }
     return status;
@@ -4268,16 +4276,24 @@ static NTSTATUS nt_to_unix_file_name_no_root( OBJECT_ATTRIBUTES *attr, UNICODE_S
 #define PATH_CACHE_SIZE 2048
 #define PATH_CACHE_PROBE_MAX 8
 
+/* Lease window during which a cached entry (positive or negative) is trusted
+ * without any validation syscall. The caller's own openat2/statx on the
+ * returned path performs the actual validation, so a stale entry within the
+ * lease window can only cost one failed open, never a wrong result. */
+#define PATH_CACHE_LEASE_NS 50000000ULL                 /* 50 ms, in nanoseconds */
+#define PATH_CACHE_LEASE_TICKS (PATH_CACHE_LEASE_NS / 100) /* same, in 100ns ticks */
+
 struct path_cache_entry {
     uint32_t seq;                 /* seqlock: odd = write in progress, even = valid, 0 = empty */
     uint32_t hash;                /* 32-bit case-insensitive hash */
     uint32_t generation;          /* global invalidation counter */
     uint16_t name_len;            /* length of ObjectName in WCHARs */
     uint8_t  open_reparse;        /* open_reparse flag */
-    uint8_t  reserved;
+    uint8_t  is_negative;         /* 1 = cached negative lookup (name does not exist) */
     NTSTATUS status;              /* cached NT status */
     HANDLE   root_dir;            /* attr->RootDirectory */
     uint64_t timestamp;           /* monotonic timestamp */
+    uint64_t verified_ts;         /* 100ns ticks at which this entry was last validated */
     WCHAR    nt_name[MAX_PATH];   /* original ObjectName buffer for exact match */
     char     unix_path[MAX_PATH]; /* resolved Unix path */
 };
@@ -4296,6 +4312,61 @@ static inline uint64_t path_cache_timestamp_ns(void)
     if (clock_gettime( CLOCK_MONOTONIC, &ts ) == 0)
         return (uint64_t)ts.tv_sec * 1000000000ull + ts.tv_nsec;
     return 0;
+}
+
+/* Monotonic timestamp in 100ns ticks taken from the shared user data page.
+ * The page is refreshed by the wineserver poll loop, so reading it is a plain
+ * user-space memory read: zero syscalls, unlike clock_gettime. */
+static inline uint64_t path_cache_now_ticks(void)
+{
+    LARGE_INTEGER t;
+
+    do
+    {
+        t.HighPart = user_shared_data->InterruptTime.High1Time;
+        t.LowPart  = user_shared_data->InterruptTime.LowPart;
+    } while (t.HighPart != user_shared_data->InterruptTime.High2Time);
+
+    if (t.QuadPart) return t.QuadPart;
+    return path_cache_timestamp_ns() / 100;
+}
+
+/* Entry is trusted without any validation syscall while its lease is live. */
+static inline BOOL path_cache_lease_valid( uint64_t verified_ts )
+{
+    uint64_t now = path_cache_now_ticks();
+    return (now - verified_ts) < PATH_CACHE_LEASE_TICKS;
+}
+
+static uint64_t path_cache_stat_lookups;        /* total lookups */
+static uint64_t path_cache_stat_lease_hits;     /* positive hits served with 0 syscalls */
+static uint64_t path_cache_stat_negative_hits;  /* negative hits served with 0 syscalls */
+static uint64_t path_cache_stat_validated_hits; /* hits validated with fstatat */
+static uint64_t path_cache_stat_misses;         /* full namespace lookups */
+static uint64_t path_cache_stat_negative_inserts;
+
+static void path_cache_dump_stats(void)
+{
+    uint64_t lookups = __atomic_load_n( &path_cache_stat_lookups, __ATOMIC_RELAXED );
+    uint64_t lease = __atomic_load_n( &path_cache_stat_lease_hits, __ATOMIC_RELAXED );
+    uint64_t neg = __atomic_load_n( &path_cache_stat_negative_hits, __ATOMIC_RELAXED );
+    uint64_t validated = __atomic_load_n( &path_cache_stat_validated_hits, __ATOMIC_RELAXED );
+    uint64_t misses = __atomic_load_n( &path_cache_stat_misses, __ATOMIC_RELAXED );
+
+    if (!lookups) return;
+    fprintf( stderr, "PATH_CACHE stats: lookups=%llu lease_hits=%llu negative_hits=%llu "
+             "zero_syscall=%llu (%u%%) validated_hits=%llu misses=%llu negative_inserts=%llu\n",
+             (unsigned long long)lookups, (unsigned long long)lease, (unsigned long long)neg,
+             (unsigned long long)(lease + neg),
+             (unsigned int)(((lease + neg) * 100) / lookups),
+             (unsigned long long)validated, (unsigned long long)misses,
+             (unsigned long long)__atomic_load_n( &path_cache_stat_negative_inserts, __ATOMIC_RELAXED ) );
+}
+
+__attribute__((destructor)) static void path_cache_stats_dtor(void)
+{
+    static BOOL done;
+    if (!done && getenv( "WINE_PATH_CACHE_STATS" )) { done = TRUE; path_cache_dump_stats(); }
 }
 
 static inline uint32_t path_cache_hash( const WCHAR *str, unsigned int len, HANDLE root_dir, BOOL open_reparse )
@@ -4324,7 +4395,7 @@ static inline uint32_t path_cache_hash( const WCHAR *str, unsigned int len, HAND
 }
 
 static BOOL path_cache_lookup( const OBJECT_ATTRIBUTES *attr, char **unix_name_ret,
-                               UINT disposition, BOOL open_reparse )
+                               UINT disposition, BOOL open_reparse, NTSTATUS *status_ret )
 {
     const UNICODE_STRING *obj_name;
     const WCHAR *name;
@@ -4340,6 +4411,8 @@ static BOOL path_cache_lookup( const OBJECT_ATTRIBUTES *attr, char **unix_name_r
     lenW = obj_name->Length / sizeof(WCHAR);
     if (!lenW || lenW >= MAX_PATH) return FALSE;
 
+    __atomic_fetch_add( &path_cache_stat_lookups, 1, __ATOMIC_RELAXED );
+
     cur_gen = __atomic_load_n( &path_cache_generation, __ATOMIC_ACQUIRE );
     hash = path_cache_hash( name, lenW, attr->RootDirectory, open_reparse );
     stat_flag = open_reparse ? AT_SYMLINK_NOFOLLOW : 0;
@@ -4351,6 +4424,8 @@ static BOOL path_cache_lookup( const OBJECT_ATTRIBUTES *attr, char **unix_name_r
         uint32_t seq1, seq2, entry_gen;
         char cached_path[MAX_PATH];
         NTSTATUS cached_status;
+        uint64_t verified_ts;
+        BOOL negative;
         int dir_fd = AT_FDCWD;
         int needs_close = 0;
         int stat_res;
@@ -4369,11 +4444,38 @@ static BOOL path_cache_lookup( const OBJECT_ATTRIBUTES *attr, char **unix_name_r
 
         memcpy( cached_path, (const char *)entry->unix_path, sizeof(cached_path) );
         cached_status = entry->status;
+        verified_ts = entry->verified_ts;
+        negative = entry->is_negative;
 
         seq2 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
         if (seq1 != seq2) continue;
 
+        if (negative)
+        {
+            /* Cached negative lookup: the name did not exist as of verified_ts.
+             * Inside the lease window the answer needs no syscall at all, we skip
+             * lookup_unix_name()/find_file_in_dir() entirely. */
+            if (!path_cache_lease_valid( verified_ts )) continue;
+            __atomic_fetch_add( &path_cache_stat_negative_hits, 1, __ATOMIC_RELAXED );
+            *unix_name_ret = strdup( cached_path );
+            if (!*unix_name_ret) return FALSE;
+            *status_ret = cached_status;
+            return TRUE;
+        }
+
         if (cached_status != STATUS_SUCCESS) continue;
+        if (disposition == FILE_CREATE) return FALSE;
+
+        /* Positive lease hit: trust the cached path without validating it, the
+         * caller's own openat2()/statx() on the returned path does that for free. */
+        if (path_cache_lease_valid( verified_ts ))
+        {
+            __atomic_fetch_add( &path_cache_stat_lease_hits, 1, __ATOMIC_RELAXED );
+            *unix_name_ret = strdup( cached_path );
+            if (!*unix_name_ret) return FALSE;
+            *status_ret = STATUS_SUCCESS;
+            return TRUE;
+        }
 
         if (attr->RootDirectory)
         {
@@ -4392,20 +4494,23 @@ static BOOL path_cache_lookup( const OBJECT_ATTRIBUTES *attr, char **unix_name_r
 
         if (stat_res == 0)
         {
-            if (disposition == FILE_CREATE) return FALSE;
-
+            __atomic_fetch_add( &path_cache_stat_validated_hits, 1, __ATOMIC_RELAXED );
+            __atomic_store_n( &entry->verified_ts, path_cache_now_ticks(), __ATOMIC_RELEASE ); /* renew lease */
             *unix_name_ret = strdup( cached_path );
             if (!*unix_name_ret) return FALSE;
+            *status_ret = STATUS_SUCCESS;
             return TRUE;
         }
 
         __atomic_store_n( &entry->seq, 0, __ATOMIC_RELEASE );
     }
 
+    __atomic_fetch_add( &path_cache_stat_misses, 1, __ATOMIC_RELAXED );
     return FALSE;
 }
 
-static void path_cache_insert( const OBJECT_ATTRIBUTES *attr, const char *unix_path, BOOL open_reparse )
+static void path_cache_insert( const OBJECT_ATTRIBUTES *attr, const char *unix_path,
+                               BOOL open_reparse, NTSTATUS status )
 {
     const UNICODE_STRING *obj_name;
     const WCHAR *name;
@@ -4458,11 +4563,13 @@ static void path_cache_insert( const OBJECT_ATTRIBUTES *attr, const char *unix_p
     entry->hash = hash;
     entry->name_len = lenW;
     entry->open_reparse = (uint8_t)open_reparse;
-    entry->reserved = 0;
+    entry->is_negative = (status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_NO_SUCH_FILE);
     entry->root_dir = attr->RootDirectory;
-    entry->status = STATUS_SUCCESS;
+    entry->status = status;
     entry->generation = cur_gen;
     entry->timestamp = path_cache_timestamp_ns();
+    entry->verified_ts = path_cache_now_ticks();
+    if (entry->is_negative) __atomic_fetch_add( &path_cache_stat_negative_inserts, 1, __ATOMIC_RELAXED );
     memcpy( entry->nt_name, name, lenW * sizeof(WCHAR) );
     entry->nt_name[lenW] = 0;
     memcpy( entry->unix_path, unix_path, ulen + 1 );
@@ -4477,25 +4584,29 @@ static void path_cache_invalidate( const OBJECT_ATTRIBUTES *attr )
     const UNICODE_STRING *obj_name;
     const WCHAR *name;
     unsigned int lenW, hash, probe;
+    BOOL open_reparse;
 
     if (!attr || !(obj_name = attr->ObjectName) || !(name = obj_name->Buffer)) return;
     lenW = obj_name->Length / sizeof(WCHAR);
     if (!lenW || lenW >= MAX_PATH) return;
 
-    hash = path_cache_hash( name, lenW, attr->RootDirectory, FALSE );
-
     pthread_mutex_lock( &path_cache_mutex );
-    for (probe = 0; probe < PATH_CACHE_PROBE_MAX; probe++)
+    for (open_reparse = FALSE;; open_reparse = TRUE)  /* invalidate both reparse variants */
     {
-        unsigned int slot = (hash + probe) & (PATH_CACHE_SIZE - 1);
-        struct path_cache_entry *entry = &path_cache[slot];
-
-        if (entry->name_len == lenW && entry->root_dir == attr->RootDirectory
-            && !wcsnicmp( entry->nt_name, name, lenW ))
+        hash = path_cache_hash( name, lenW, attr->RootDirectory, open_reparse );
+        for (probe = 0; probe < PATH_CACHE_PROBE_MAX; probe++)
         {
-            __atomic_store_n( &entry->seq, 0, __ATOMIC_RELEASE );
-            entry->hash = 0;
+            unsigned int slot = (hash + probe) & (PATH_CACHE_SIZE - 1);
+            struct path_cache_entry *entry = &path_cache[slot];
+
+            if (entry->name_len == lenW && entry->root_dir == attr->RootDirectory
+                && !wcsnicmp( entry->nt_name, name, lenW ))
+            {
+                __atomic_store_n( &entry->seq, 0, __ATOMIC_RELEASE );
+                entry->hash = 0;
+            }
         }
+        if (open_reparse) break;
     }
     pthread_mutex_unlock( &path_cache_mutex );
 }
@@ -4524,18 +4635,20 @@ static NTSTATUS nt_to_unix_file_name( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
     char *unix_name;
     int name_len, unix_len;
     NTSTATUS status;
+    NTSTATUS cache_status = STATUS_SUCCESS;
 
-    if (disposition != FILE_CREATE && path_cache_lookup( attr, name_ret, disposition, open_reparse ))
+    if (disposition != FILE_CREATE
+        && path_cache_lookup( attr, name_ret, disposition, open_reparse, &cache_status ))
     {
-        TRACE( "%s -> cached %s\n", debugstr_us(attr->ObjectName), debugstr_a(*name_ret) );
-        return STATUS_SUCCESS;
+        TRACE( "%s -> cached %s (%x)\n", debugstr_us(attr->ObjectName), debugstr_a(*name_ret), cache_status );
+        return cache_status;
     }
 
     if (!attr->RootDirectory)  /* without root dir fall back to normal lookup */
     {
         status = nt_to_unix_file_name_no_root( attr, nt_name, name_ret, disposition, open_reparse, 0 );
         if (status == STATUS_SUCCESS && (!nt_name || !nt_name->Buffer) && *name_ret)
-            path_cache_insert( attr, *name_ret, open_reparse );
+            path_cache_insert( attr, *name_ret, open_reparse, STATUS_SUCCESS );
         return status;
     }
 
@@ -4569,11 +4682,14 @@ static NTSTATUS nt_to_unix_file_name( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
         TRACE( "%s -> %s\n", debugstr_us(attr->ObjectName), debugstr_a(unix_name) );
         *name_ret = unix_name;
         if (status == STATUS_SUCCESS && (!nt_name || !nt_name->Buffer))
-            path_cache_insert( attr, *name_ret, open_reparse );
+            path_cache_insert( attr, *name_ret, open_reparse, STATUS_SUCCESS );
     }
     else
     {
         TRACE( "%s not found in %s\n", debugstr_wn(name, name_len), unix_name );
+        if ((status == STATUS_OBJECT_NAME_NOT_FOUND || status == STATUS_NO_SUCH_FILE)
+            && (!nt_name || !nt_name->Buffer))
+            path_cache_insert( attr, unix_name, open_reparse, status );
         free( unix_name );
     }
     return status;
@@ -5406,6 +5522,13 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
         case FILE_OVERWRITE_IF:
             io->Information = FILE_OVERWRITTEN;
             break;
+        }
+
+        if (io->Information == FILE_CREATED)
+        {
+            /* the name now exists, drop any cached lookup (negative or stale positive) */
+            path_cache_invalidate( &new_attr );
+            path_cache_invalidate( attr );
         }
 
         if (io->Information == FILE_CREATED &&
