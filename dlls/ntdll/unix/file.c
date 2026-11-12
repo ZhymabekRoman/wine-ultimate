@@ -82,6 +82,9 @@
 #ifdef HAVE_LINUX_IOCTL_H
 #include <linux/ioctl.h>
 #endif
+#ifdef HAVE_LINUX_FS_H
+#include <linux/fs.h>
+#endif
 #ifdef HAVE_LINUX_MAJOR_H
 # include <linux/major.h>
 #endif
@@ -7616,6 +7619,117 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
             size = sizeof(*info);
         }
         else status = STATUS_BUFFER_TOO_SMALL;
+        break;
+    }
+
+    case FSCTL_SET_ZERO_DATA:
+    {
+        struct file_zero_data_information
+        {
+            LARGE_INTEGER FileOffset;
+            LARGE_INTEGER BeyondFinalZero;
+        } *info = in_buffer;
+        int unix_fd, needs_close;
+
+        if (in_size < sizeof(*info) || !in_buffer)
+        {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+        if (info->BeyondFinalZero.QuadPart <= info->FileOffset.QuadPart)
+        {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        status = server_get_unix_fd( handle, FILE_WRITE_DATA, &unix_fd, &needs_close, NULL, NULL );
+        if (status) break;
+
+#ifdef FALLOC_FL_PUNCH_HOLE
+        if (!fallocate( unix_fd, FALLOC_FL_PUNCH_HOLE | FALLOC_FL_KEEP_SIZE,
+                        info->FileOffset.QuadPart,
+                        info->BeyondFinalZero.QuadPart - info->FileOffset.QuadPart ))
+            status = STATUS_SUCCESS;
+        else if (errno == EOPNOTSUPP || errno == ENOSYS)
+            status = STATUS_NOT_SUPPORTED;
+        else status = errno_to_status( errno );
+#else
+        status = STATUS_NOT_SUPPORTED;
+#endif
+        if (needs_close) close( unix_fd );
+        break;
+    }
+
+    case FSCTL_SET_COMPRESSION:
+    {
+        USHORT format = *(const USHORT *)in_buffer;
+        int unix_fd, needs_close;
+
+        if (in_size < sizeof(USHORT) || !in_buffer)
+        {
+            status = STATUS_INVALID_PARAMETER;
+            break;
+        }
+
+        status = server_get_unix_fd( handle, FILE_WRITE_DATA, &unix_fd, &needs_close, NULL, NULL );
+        if (status) break;
+
+#ifdef FS_IOC_SETFLAGS
+        {
+            unsigned long flags = 0;
+
+            if (ioctl( unix_fd, FS_IOC_GETFLAGS, &flags ))
+                status = errno_to_status( errno );
+            else
+            {
+                if (format == COMPRESSION_FORMAT_DEFAULT || format == COMPRESSION_FORMAT_LZNT1)
+                    flags |= FS_COMPR_FL;
+                else if (format == COMPRESSION_FORMAT_NONE)
+                    flags &= ~FS_COMPR_FL;
+
+                if (ioctl( unix_fd, FS_IOC_SETFLAGS, &flags ))
+                    status = errno_to_status( errno );
+                else status = STATUS_SUCCESS;
+            }
+        }
+#else
+        status = STATUS_NOT_SUPPORTED;
+#endif
+        if (needs_close) close( unix_fd );
+        break;
+    }
+
+    case FSCTL_GET_COMPRESSION:
+    {
+        USHORT *format = out_buffer;
+        int unix_fd, needs_close;
+
+        if (out_size < sizeof(USHORT) || !out_buffer)
+        {
+            status = STATUS_BUFFER_TOO_SMALL;
+            break;
+        }
+
+        status = server_get_unix_fd( handle, FILE_WRITE_DATA, &unix_fd, &needs_close, NULL, NULL );
+        if (status) break;
+
+#ifdef FS_IOC_GETFLAGS
+        {
+            unsigned long flags = 0;
+
+            if (ioctl( unix_fd, FS_IOC_GETFLAGS, &flags ))
+                status = errno_to_status( errno );
+            else
+            {
+                *format = (flags & FS_COMPR_FL) ? COMPRESSION_FORMAT_DEFAULT : COMPRESSION_FORMAT_NONE;
+                status = STATUS_SUCCESS;
+                size = sizeof(USHORT);
+            }
+        }
+#else
+        status = STATUS_NOT_SUPPORTED;
+#endif
+        if (needs_close) close( unix_fd );
         break;
     }
 
