@@ -19,7 +19,18 @@
 #include "initguid.h"
 #include "private.h"
 
+#include "unixlib.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
+
+BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        __wine_init_unix_call();
+    }
+    return TRUE;
+}
 
 /***********************************************************************
  *           RegisterAppConstrainedChangeNotification (twinapi.appcore.@)
@@ -1616,6 +1627,12 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( toast_notification_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_UI_Notifications_ToastNotification ))
         IActivationFactory_QueryInterface( toast_notification_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Microsoft.Windows.AppNotifications.AppNotificationManager" ))
+        IActivationFactory_QueryInterface( app_notification_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Microsoft.Windows.AppNotifications.AppNotification" ))
+        IActivationFactory_QueryInterface( app_notification_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs" ))
+        IActivationFactory_QueryInterface( app_notification_activated_args_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_DataTransferManager ))
         IActivationFactory_QueryInterface( data_transfer_manager_statics_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard ))

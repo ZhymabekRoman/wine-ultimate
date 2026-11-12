@@ -21,11 +21,13 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "ntstatus.h"
 
 #define COBJMACROS
 #include "winstring.h"
 #include "appnotify.h"
 #include "activation.h"
+#include "roapi.h"
 #include "shlobj.h"
 
 #define WIDL_using_Windows_Foundation
@@ -40,6 +42,7 @@
 #define WIDL_using_Windows_ApplicationModel_DataTransfer
 #define WIDL_using_Windows_Storage
 #define WIDL_using_Windows_Storage_Streams
+#define WIDL_using_Windows_Data_Xml_Dom
 
 #include "windows.foundation.h"
 #include "windows.security.exchangeactivesyncprovisioning.h"
@@ -52,6 +55,7 @@
 #include "windows.applicationmodel.datatransfer.h"
 #include "windows.storage.h"
 #include "windows.storage.streams.h"
+#include "windows.data.xml.dom.h"
 #include "robuffer.h"
 
 #include "wine/debug.h"
@@ -111,3 +115,24 @@ extern IActivationFactory *toast_notification_factory;
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
 
 extern HRESULT static_lifetime_map_create( __FIMap_2_HSTRING_IInspectable **out );
+
+/* Shared toast/badge payload helpers, implemented in toast_notification_manager.c
+ * on top of the FreeDesktop Notifications unix bridge. */
+struct toast_payload
+{
+    HSTRING summary;   /* first <text> node (title), empty string when absent */
+    HSTRING body;      /* remaining <text> nodes joined, empty string when absent */
+    HSTRING launch;    /* toast/@launch activation arguments, empty string when absent */
+    HSTRING image;     /* first image/@src, empty string when absent */
+};
+
+void toast_payload_free( struct toast_payload *payload );
+HRESULT toast_create_xml_document( const WCHAR *xml, __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument **out );
+HRESULT toast_xml_first_attribute( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *doc,
+        const WCHAR *tag, const WCHAR *name, HSTRING *value );
+HRESULT toast_extract_payload( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *doc,
+        struct toast_payload *payload );
+
+extern IActivationFactory *app_notification_manager_statics_factory;
+extern IActivationFactory *app_notification_factory;
+extern IActivationFactory *app_notification_activated_args_factory;

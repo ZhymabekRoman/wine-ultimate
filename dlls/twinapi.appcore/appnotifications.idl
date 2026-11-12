@@ -1,0 +1,201 @@
+/*
+ * Microsoft.Windows.AppNotifications (WinUI 3 / Windows App SDK) interfaces
+ *
+ * Copyright (c) 2026 Wine project
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ */
+
+#pragma makedep register
+#pragma winrt ns_prefix
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.foundation.collections.idl";
+
+namespace Microsoft.Windows.AppNotifications
+{
+    typedef enum AppNotificationPriority
+    {
+        AppNotificationPriority_Default = 0,
+        AppNotificationPriority_High = 1,
+        AppNotificationPriority_Medium = 2,
+        AppNotificationPriority_Low = 3
+    } AppNotificationPriority;
+
+    typedef enum AppNotificationSetting
+    {
+        AppNotificationSetting_Enabled = 0,
+        AppNotificationSetting_EnabledWithSoundAndReminder = 1,
+        AppNotificationSetting_EnabledWithSound = 2,
+        AppNotificationSetting_EnabledWithReminder = 3,
+        AppNotificationSetting_NotEnabled = 4,
+        AppNotificationSetting_OnlyFirstNotificationEnabledWithSound = 5,
+        AppNotificationSetting_OnlyFirstNotificationEnabledWithSoundAndReminder = 6,
+        AppNotificationSetting_OnlyFirstNotificationEnabledWithReminder = 7
+    } AppNotificationSetting;
+
+    typedef enum AppNotificationProgressResult
+    {
+        AppNotificationProgressResult_UserDismissed = 0,
+        AppNotificationProgressResult_ButtonClicked = 1
+    } AppNotificationProgressResult;
+
+    runtimeclass AppNotificationProgressData;
+    runtimeclass AppNotification;
+    runtimeclass AppNotificationActivatedEventArgs;
+    runtimeclass AppNotificationManager;
+
+    declare {
+        interface Windows.Foundation.Collections.IMapView<HSTRING, IInspectable *>;
+        interface Windows.Foundation.Collections.IMapView<HSTRING, HSTRING>;
+        interface Windows.Foundation.IAsyncOperation<Microsoft.Windows.AppNotifications.AppNotificationProgressResult>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<Microsoft.Windows.AppNotifications.AppNotificationProgressResult>;
+        interface Windows.Foundation.TypedEventHandler<Microsoft.Windows.AppNotifications.AppNotificationManager *,
+                Microsoft.Windows.AppNotifications.AppNotificationActivatedEventArgs *>;
+    }
+
+    [uuid(ec5e57bd-8bac-3acb-8f41-1b213fbba9a7)]
+    interface IAppNotification : IInspectable
+    {
+        [propget] HRESULT Tag([out, retval] HSTRING* value);
+        [propput] HRESULT Tag([in] HSTRING value);
+        [propget] HRESULT Group([out, retval] HSTRING* value);
+        [propput] HRESULT Group([in] HSTRING value);
+        [propget] HRESULT Id([out, retval] UINT32* value);
+        [propget] HRESULT Payload([out, retval] HSTRING* value);
+        [propget] HRESULT Progress([out, retval] Windows.Foundation.IInspectable** value);
+        [propput] HRESULT Progress([in] Windows.Foundation.IInspectable* value);
+        [propget] HRESULT Expiration([out, retval] Windows.Foundation.DateTime* value);
+        [propput] HRESULT Expiration([in] Windows.Foundation.DateTime value);
+        [propget] HRESULT ExpiresOnReboot([out, retval] boolean* value);
+        [propput] HRESULT ExpiresOnReboot([in] boolean value);
+        [propget] HRESULT Priority([out, retval] AppNotificationPriority* value);
+        [propput] HRESULT Priority([in] AppNotificationPriority value);
+        [propget] HRESULT SuppressDisplay([out, retval] boolean* value);
+        [propput] HRESULT SuppressDisplay([in] boolean value);
+    }
+
+    [uuid(8f12add2-df58-ab70-6a84-1c4d6194eff8)]
+    interface IAppNotificationActivatedEventArgs : IInspectable
+    {
+        [propget] HRESULT Argument([out, retval] HSTRING* value);
+        [propget] HRESULT UserInput([out, retval]
+            Windows.Foundation.Collections.IMapView<HSTRING, Windows.Foundation.IInspectable*>** value);
+    }
+
+    [uuid(804824ff-e589-6349-259c-786e0234caab)]
+    interface IAppNotificationActivatedEventArgs2 : IInspectable
+    {
+        HRESULT GetArguments([out, retval] Windows.Foundation.Collections.IMapView<HSTRING, HSTRING>** value);
+    }
+
+    [uuid(a3f2c5d1-4b6e-4a1f-8c2d-9e0f1a2b3c4d)]
+    interface IAppNotificationProgressData : IInspectable
+    {
+        [propget] HRESULT Progress([out, retval] UINT32* value);
+        [propput] HRESULT Progress([in] UINT32 value);
+        [propget] HRESULT ProgressOverride([out, retval] HSTRING* value);
+        [propput] HRESULT ProgressOverride([in] HSTRING value);
+    }
+
+    [uuid(4e29a725-a269-5b43-ef9c-3ba760be24d0)]
+    interface IAppNotificationFactory : IInspectable
+    {
+        HRESULT CreateInstance([in] HSTRING payload, [out, retval] AppNotification** value);
+    }
+
+    [uuid(8491c06f-b880-c211-7bfc-40348573065a)]
+    interface IAppNotificationManager : IInspectable
+    {
+        HRESULT Register();
+        HRESULT Unregister();
+        HRESULT UnregisterAll();
+        [eventadd] HRESULT NotificationInvoked(
+            [in] Windows.Foundation.TypedEventHandler<AppNotificationManager*,
+                 AppNotificationActivatedEventArgs*>* handler,
+            [out, retval] Windows.Foundation.EventRegistrationToken* token);
+        [eventremove] HRESULT NotificationInvoked(
+            [in] Windows.Foundation.EventRegistrationToken token);
+        HRESULT Show([in] AppNotification* notification);
+        HRESULT ShowWithId([in] UINT32 id, [in] AppNotification* notification);
+        HRESULT RemoveByIdAsync([in] UINT32 notification_id,
+            [out, retval] Windows.Foundation.IAsyncAction** value);
+        [propget] HRESULT Setting([out, retval] AppNotificationSetting* value);
+        HRESULT RemoveByTagAsync([in] HSTRING tag,
+            [out, retval] Windows.Foundation.IAsyncAction** value);
+        HRESULT RemoveByTagAndGroupAsync([in] HSTRING tag, [in] HSTRING group,
+            [out, retval] Windows.Foundation.IAsyncAction** value);
+        HRESULT RemoveAllAsync([out, retval] Windows.Foundation.IAsyncAction** value);
+        HRESULT UpdateAsync([in] AppNotificationProgressData* progress_data,
+            [in] HSTRING tag, [in] HSTRING group,
+            [out, retval] Windows.Foundation.IAsyncOperation<AppNotificationProgressResult>** value);
+        HRESULT Register2([in] HSTRING display_name,
+            [in] Windows.Foundation.Uri* icon_uri);
+        HRESULT Unregister2([in] HSTRING tag);
+    }
+
+    [uuid(f90c357c-1266-0d53-e03d-f11c7203a4d4)]
+    interface IAppNotificationManagerStatics : IInspectable
+    {
+        [propget] HRESULT Default([out, retval] AppNotificationManager** value);
+    }
+
+    [uuid(fca74de0-ebf0-71a8-92da-f44aeac318cd)]
+    interface IAppNotificationManagerStatics2 : IInspectable
+    {
+        HRESULT IsSupported([out, retval] boolean* value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass AppNotificationProgressData
+    {
+        [default] interface IAppNotificationProgressData;
+    }
+
+    [
+        activatable(Microsoft.Windows.AppNotifications.IAppNotificationFactory,
+                    Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass AppNotification
+    {
+        [default] interface IAppNotification;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass AppNotificationActivatedEventArgs
+    {
+        [default] interface IAppNotificationActivatedEventArgs;
+        interface IAppNotificationActivatedEventArgs2;
+    }
+
+    [
+        activatable(Windows.Foundation.UniversalApiContract, 1.0),
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        threading(both),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass AppNotificationManager
+    {
+        [default] interface IAppNotificationManager;
+        interface IAppNotificationManagerStatics;
+        interface IAppNotificationManagerStatics2;
+    }
+}

@@ -333,7 +333,30 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
      * Windows.UI.Xaml.* route above.  The WinUI3 projection shares the ABI
      * interfaces (IApplication {c1b89ae4}, IFrameworkViewSource, the statics), so
      * the same factory answers both class strings. */
-    if (!wcsncmp(classid, L"Microsoft.UI.Xaml.", 18) ||
+    if (!wcscmp(classid, L"Microsoft.UI.Xaml.Application") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Window") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.PropertyMetadata") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.DependencyProperty") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Data.CollectionViewSource") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.PropertyPath") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.SizeHelper") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Frame") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Page") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Grid") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Canvas") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.StackPanel") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Border") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.RowDefinition") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.ColumnDefinition") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.RowDefinitionCollection") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.ColumnDefinitionCollection") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.ContentControl") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Image") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.SwapChainPanel") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.WebView2") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.UserControl") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Viewbox") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Shapes.Rectangle") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml"))
     {
         *out = wcsdup(L"windows.ui.xaml.dll");
@@ -571,6 +594,11 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
     if (!wcsncmp( classid, L"Microsoft.Windows.AppLifecycle.", 31 ))
+    {
+        *out = wcsdup(L"twinapi.appcore.dll");
+        return S_OK;
+    }
+    if (!wcsncmp( classid, L"Microsoft.Windows.AppNotifications.", 35 ))
     {
         *out = wcsdup(L"twinapi.appcore.dll");
         return S_OK;
@@ -1027,7 +1055,31 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
 
     hr = pDllGetActivationFactory(classid, factory);
     if (FAILED(hr))
+    {
+        WCHAR *seed_lib = NULL;
+        if (SUCCEEDED(read_seed_dllpath(HKEY_LOCAL_MACHINE, raw, &seed_lib)) && seed_lib)
+        {
+            if (wcsicmp(library, seed_lib) != 0)
+            {
+                HMODULE seed_mod = LoadLibraryW(seed_lib);
+                if (seed_mod)
+                {
+                    PFNGETACTIVATIONFACTORY seed_pfn = (void *)GetProcAddress(seed_mod, "DllGetActivationFactory");
+                    if (seed_pfn && SUCCEEDED(seed_pfn(classid, factory)))
+                    {
+                        TRACE("Class %s found in fallback seed %s\n", wine_dbgstr_hstring(classid), debugstr_w(seed_lib));
+                        free(seed_lib);
+                        free(library);
+                        *module = seed_mod;
+                        return S_OK;
+                    }
+                    FreeLibrary(seed_mod);
+                }
+            }
+            free(seed_lib);
+        }
         ERR("Class %s not found in %s, hr %#lx.\n", wine_dbgstr_hstring(classid), debugstr_w(library), hr);
+    }
     free(library);
     return hr;
 }
@@ -2582,9 +2634,57 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
     USHORT n = RtlCaptureStackBackTrace( 0, 32, bt, NULL );
     USHORT i;
 
-    TRACE( "error %#lx, message %s, exception %p\n", error, debugstr_hstring( message ), language_exception );
+    ERR( "RoOriginateLanguageException error %#lx, message %s, exception %p\n", error, debugstr_hstring( message ), language_exception );
     for (i = 0; i < n; i++)
         TRACE( "  originate_bt[%u] = %p\n", i, bt[i] );
+
+    if (language_exception)
+    {
+        IInspectable *insp = NULL;
+        IRestrictedErrorInfo *re = NULL;
+        static const GUID IID_IRestrictedErrorInfo_local =
+            { 0x82ba7092, 0x4c88, 0x427d, { 0xa7, 0xbc, 0x16, 0xdd, 0x93, 0xfe, 0xb6, 0x7e } };
+
+        if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IInspectable, (void **)&insp )))
+        {
+            HSTRING rname = NULL;
+            insp->lpVtbl->GetRuntimeClassName( insp, &rname );
+            ERR( "language_exception runtime class: %s\n", debugstr_hstring( rname ) );
+            WindowsDeleteString( rname );
+            insp->lpVtbl->Release( insp );
+        }
+
+        {
+            static const GUID IID_IStringable =
+                { 0x96369f54, 0x8eb6, 0x48f0, { 0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3 } };
+            IInspectable *stringable = NULL;
+            if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IStringable, (void **)&stringable )))
+            {
+                void **s_vtbl = *(void ***)stringable;
+                HRESULT (WINAPI *pToString)( void *, HSTRING * ) = (void *)s_vtbl[6];
+                HSTRING str = NULL;
+                if (SUCCEEDED(pToString( stringable, &str )) && str)
+                {
+                    ERR( "language_exception IStringable::ToString:\n%s\n", debugstr_hstring( str ) );
+                    WindowsDeleteString( str );
+                }
+                IInspectable_Release( stringable );
+            }
+        }
+
+        if (SUCCEEDED(IUnknown_QueryInterface( language_exception, &IID_IRestrictedErrorInfo_local, (void **)&re )))
+        {
+            BSTR desc = NULL, rest = NULL, sid = NULL;
+            HRESULT err = 0;
+            re->lpVtbl->GetErrorDetails( re, &desc, &err, &rest, &sid );
+            ERR( "language_exception IRestrictedErrorInfo: desc=%s, rest=%s, err=%#lx\n",
+                 debugstr_w( desc ), debugstr_w( rest ), err );
+            SysFreeString( desc );
+            SysFreeString( rest );
+            SysFreeString( sid );
+            re->lpVtbl->Release( re );
+        }
+    }
 
     if (!language_exception) return FALSE;
 
@@ -2669,7 +2769,20 @@ BOOL WINAPI RoTransformErrorW(HRESULT old_error, HRESULT new_error, UINT max_len
  */
 HRESULT WINAPI RoReportUnhandledError(IRestrictedErrorInfo *info)
 {
-    TRACE( "(%p)\n", info );
+    BSTR desc = NULL, rest = NULL, sid = NULL;
+    HRESULT err = 0;
+    if (info && SUCCEEDED(info->lpVtbl->GetErrorDetails( info, &desc, &err, &rest, &sid )))
+    {
+        ERR( "RoReportUnhandledError: err %#lx, desc %s, restricted %s\n",
+             err, debugstr_w( desc ), debugstr_w( rest ) );
+        SysFreeString( desc );
+        SysFreeString( rest );
+        SysFreeString( sid );
+    }
+    else
+    {
+        ERR( "RoReportUnhandledError: info %p\n", info );
+    }
     return S_OK;
 }
 

@@ -16,7 +16,12 @@
 
 #include "wine/debug.h"
 
+#include "unixlib.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
+
+/* The daemon id of the badge-carrying notification, replaced on each Update. */
+static UINT32 badge_fd_id;
 
 struct badge_updater
 {
@@ -85,15 +90,60 @@ static HRESULT WINAPI badge_updater_GetTrustLevel( IBadgeUpdater *iface, TrustLe
     return S_OK;
 }
 
+/*
+ * Update pushes the badge number onto the app's FreeDesktop notification: the
+ * badge document's <badge value="N"> becomes the "badge-count" hint of a
+ * Notify() that replaces the previous badge notification.
+ */
 static HRESULT WINAPI badge_updater_Update( IBadgeUpdater *iface, __x_ABI_CWindows_CUI_CNotifications_CIBadgeNotification *notification )
 {
-    FIXME( "iface %p, notification %p stub!\n", iface, notification );
+    __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *doc = NULL;
+    struct fd_notify_params params;
+    HSTRING value = NULL;
+    INT32 count = 0;
+
+    TRACE( "iface %p, notification %p.\n", iface, notification );
+
+    if (badge_fd_id)
+    {
+        struct fd_close_params close_params = { badge_fd_id };
+        TWINAPI_CALL( fd_close, &close_params );
+        badge_fd_id = 0;
+    }
+
+    if (notification)
+    {
+        if (SUCCEEDED( __x_ABI_CWindows_CUI_CNotifications_CIBadgeNotification_get_Content( notification,
+                (__x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument **)&doc ) ) && doc)
+        {
+            if (SUCCEEDED( toast_xml_first_attribute( doc, L"badge", L"value", &value ) ) && value)
+                count = (INT32)wcstol( WindowsGetStringRawBuffer( value, NULL ), NULL, 10 );
+        }
+        if (doc) IInspectable_Release( (IInspectable *)doc );
+        WindowsDeleteString( value );
+    }
+
+    params.app_name = L"Wine Application";
+    params.icon = NULL;
+    params.summary = NULL;
+    params.body = NULL;
+    params.badge_count = count;
+    params.replaces_id = 0;
+    if (TWINAPI_CALL( fd_notify, &params ) == STATUS_SUCCESS)
+        badge_fd_id = params.id;
     return S_OK;
 }
 
 static HRESULT WINAPI badge_updater_Clear( IBadgeUpdater *iface )
 {
-    FIXME( "iface %p stub!\n", iface );
+    TRACE( "iface %p stub!\n", iface );
+
+    if (badge_fd_id)
+    {
+        struct fd_close_params close_params = { badge_fd_id };
+        TWINAPI_CALL( fd_close, &close_params );
+        badge_fd_id = 0;
+    }
     return S_OK;
 }
 
@@ -272,8 +322,13 @@ static HRESULT WINAPI badge_update_manager_statics_GetTemplateContent(
         IBadgeUpdateManagerStatics *iface, __x_ABI_CWindows_CUI_CNotifications_CBadgeTemplateType type,
         __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument **result )
 {
-    FIXME( "iface %p, type %d, result %p stub!\n", iface, type, result );
-    return E_NOTIMPL;
+    static const WCHAR badge_templateW[] = L"<badge value=\"\"/>";
+
+    TRACE( "iface %p, type %d, result %p.\n", iface, type, result );
+
+    if (!result) return E_POINTER;
+    if (type > BadgeTemplateType_BadgeNumber) return E_INVALIDARG;
+    return toast_create_xml_document( badge_templateW, result );
 }
 
 static const struct IBadgeUpdateManagerStaticsVtbl badge_update_manager_statics_vtbl =

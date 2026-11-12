@@ -1,10 +1,15 @@
 EXTRADEFS = -D_CONTRACT_GEN
 MODULE    = twinapi.appcore.dll
+UNIXLIB   = twinapi.appcore.so
 IMPORTS   = combase advapi32 user32
+UNIX_LIBS   = $(DBUS_LIBS)
+UNIX_CFLAGS = $(DBUS_CFLAGS)
 
 SOURCES = \
 	advertising_manager.c \
 	analytics_info.c \
+	appnotifications.c \
+	appnotifications.idl \
 	badge_update_manager.c \
 	application_view.c \
 	classes.idl \
@@ -14,4 +19,5 @@ SOURCES = \
 	main.c \
 	power_manager.c \
 	static_lifetime_map.c \
-	toast_notification_manager.c
+	toast_notification_manager.c \
+	unixlib.c
