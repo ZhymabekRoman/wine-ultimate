@@ -1055,6 +1055,7 @@ SOURCES = \
 	windows.graphics.holographic.idl \
 	windows.graphics.idl \
 	windows.graphics.imaging.idl \
+	windows.graphics.printing.idl \
 	windows.h \
 	windows.management.deployment.idl \
 	windows.media.capture.idl \

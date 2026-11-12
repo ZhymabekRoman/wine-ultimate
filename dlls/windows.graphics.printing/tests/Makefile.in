@@ -1,0 +1,5 @@
+TESTDLL = windows.graphics.printing.dll
+IMPORTS = combase ole32 uuid
+
+SOURCES = \
+	printing.c

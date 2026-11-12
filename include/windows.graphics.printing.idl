@@ -1,0 +1,244 @@
+/*
+ * WinRT Windows.Graphics.Printing implementation
+ *
+ * Copyright 2026 Wine Developers
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
+#ifdef __WIDL__
+#pragma winrt ns_prefix
+#endif
+
+import "inspectable.idl";
+import "asyncinfo.idl";
+import "eventtoken.idl";
+import "windowscontracts.idl";
+import "windows.foundation.idl";
+import "windows.foundation.collections.idl";
+
+namespace Windows.Graphics.Printing {
+    interface IPrintDocumentSource;
+    interface IPrintManager;
+    interface IPrintManagerStatics;
+    interface IPrintManagerStatics2;
+    interface IPrintTask;
+    interface IPrintTaskRequest;
+    interface IPrintTaskRequestedDeferral;
+    interface IPrintTaskRequestedEventArgs;
+    interface IPrintTaskSourceRequestedArgs;
+    interface IPrintTaskSourceRequestedDeferral;
+
+    runtimeclass PrintManager;
+    runtimeclass PrintTask;
+    runtimeclass PrintTaskRequest;
+    runtimeclass PrintTaskRequestedDeferral;
+    runtimeclass PrintTaskRequestedEventArgs;
+    runtimeclass PrintTaskSourceRequestedArgs;
+    runtimeclass PrintTaskSourceRequestedDeferral;
+
+    declare {
+        interface Windows.Foundation.TypedEventHandler<Windows.Graphics.Printing.PrintManager *,
+                                                       Windows.Graphics.Printing.PrintTaskRequestedEventArgs *>;
+        interface Windows.Foundation.IAsyncOperation<boolean>;
+        interface Windows.Foundation.AsyncOperationCompletedHandler<boolean>;
+    }
+
+    /* The delegate the app hands to PrintTaskRequest.CreatePrintTask(); the print
+     * system calls it to be handed the IPrintDocumentSource to print. */
+    [uuid(6c2ca228-5cd6-4b3a-8663-f3b02dc9b4b4)]
+    delegate HRESULT PrintTaskSourceRequestedHandler([in] PrintTaskSourceRequestedArgs *args);
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(dedc0c30-f1eb-47df-aae6-ed2427511f01)
+    ]
+    interface IPrintDocumentSource : IInspectable
+    {
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Graphics.Printing.PrintManager),
+        uuid(642f46af-d7dc-4270-bc67-12cd3bf924c5)
+    ]
+    interface IPrintManager : IInspectable
+    {
+        [eventadd] HRESULT PrintTaskRequested(
+            [in] Windows.Foundation.TypedEventHandler<Windows.Graphics.Printing.PrintManager *,
+                                                       Windows.Graphics.Printing.PrintTaskRequestedEventArgs *> *handler,
+            [out, retval] Windows.Foundation.EventRegistrationToken *token
+        );
+        [eventremove] HRESULT PrintTaskRequested([in] Windows.Foundation.EventRegistrationToken token);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Graphics.Printing.PrintManager),
+        uuid(ff42a666-ae1a-4690-94f7-41480b5e28ef)
+    ]
+    interface IPrintManagerStatics : IInspectable
+    {
+        HRESULT GetForCurrentView([out, retval] Windows.Graphics.Printing.PrintManager **value);
+        HRESULT ShowPrintUIAsync([out, retval] Windows.Foundation.IAsyncOperation<boolean> **operation);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 8.0),
+        exclusiveto(Windows.Graphics.Printing.PrintManager),
+        uuid(35a99955-e6ab-4139-9ccb-b86a904e6799)
+    ]
+    interface IPrintManagerStatics2 : IInspectable
+    {
+        [propget] HRESULT IsSupported([out, retval] boolean *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Graphics.Printing.PrintTask),
+        uuid(61d80247-6cf6-4fad-84e2-a5e82e2d4ceb)
+    ]
+    interface IPrintTask : IInspectable
+    {
+        [propget] HRESULT Id([out, retval] HSTRING *value);
+        [propput] HRESULT Title([in] HSTRING value);
+        [propget] HRESULT Title([out, retval] HSTRING *value);
+        [propput] HRESULT Source([in] IPrintDocumentSource *value);
+        [propget] HRESULT Source([out, retval] IPrintDocumentSource **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Graphics.Printing.PrintTaskRequest),
+        uuid(6ff61e2e-2722-4240-a67c-f364849a17f3)
+    ]
+    interface IPrintTaskRequest : IInspectable
+    {
+        HRESULT CreatePrintTask(
+            [in] HSTRING title,
+            [in] PrintTaskSourceRequestedHandler *handler,
+            [out, retval] Windows.Graphics.Printing.PrintTask **value
+        );
+        [propget] HRESULT Deadline([out, retval] Windows.Foundation.DateTime *value);
+        HRESULT GetDeferral([out, retval] Windows.Graphics.Printing.PrintTaskRequestedDeferral **deferral);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Graphics.Printing.PrintTaskRequestedDeferral),
+        uuid(cfefb3f0-ce3e-42c7-9496-64800c622c44)
+    ]
+    interface IPrintTaskRequestedDeferral : IInspectable
+    {
+        HRESULT Complete();
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Graphics.Printing.PrintTaskRequestedEventArgs),
+        uuid(d0aff924-a31b-454c-a7b6-5d0cc522fc16)
+    ]
+    interface IPrintTaskRequestedEventArgs : IInspectable
+    {
+        [propget] HRESULT Request([out, retval] Windows.Graphics.Printing.PrintTaskRequest **value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        exclusiveto(Windows.Graphics.Printing.PrintTaskSourceRequestedArgs),
+        uuid(f9f067be-f456-41f0-9c98-5ce73e851410)
+    ]
+    interface IPrintTaskSourceRequestedArgs : IInspectable
+    {
+        [propget] HRESULT Deadline([out, retval] Windows.Foundation.DateTime *value);
+        HRESULT SetSource([in] IPrintDocumentSource *value);
+        HRESULT GetDeferral([out, retval] Windows.Graphics.Printing.PrintTaskSourceRequestedDeferral **deferral);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(b830629e-0f13-4b09-b269-a4846724e337)
+    ]
+    interface IPrintTaskSourceRequestedDeferral : IInspectable
+    {
+        HRESULT Complete();
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile),
+        threading(both),
+        static(Windows.Graphics.Printing.IPrintManagerStatics, Windows.Foundation.UniversalApiContract, 1.0),
+        static(Windows.Graphics.Printing.IPrintManagerStatics2, Windows.Foundation.UniversalApiContract, 8.0)
+    ]
+    runtimeclass PrintManager
+    {
+        [default] interface Windows.Graphics.Printing.IPrintManager;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass PrintTask
+    {
+        [default] interface Windows.Graphics.Printing.IPrintTask;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass PrintTaskRequest
+    {
+        [default] interface Windows.Graphics.Printing.IPrintTaskRequest;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass PrintTaskRequestedDeferral
+    {
+        [default] interface Windows.Graphics.Printing.IPrintTaskRequestedDeferral;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass PrintTaskRequestedEventArgs
+    {
+        [default] interface Windows.Graphics.Printing.IPrintTaskRequestedEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass PrintTaskSourceRequestedArgs
+    {
+        [default] interface Windows.Graphics.Printing.IPrintTaskSourceRequestedArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(agile)
+    ]
+    runtimeclass PrintTaskSourceRequestedDeferral
+    {
+        [default] interface Windows.Graphics.Printing.IPrintTaskSourceRequestedDeferral;
+    }
+}

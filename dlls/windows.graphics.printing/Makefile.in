@@ -1,0 +1,7 @@
+MODULE  = windows.graphics.printing.dll
+IMPORTS = combase winspool uuid user32
+
+SOURCES = \
+	classes.idl \
+	main.c \
+	print_task.c

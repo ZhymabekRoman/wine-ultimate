@@ -230,6 +230,18 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Windows.Graphics.Printing.* is the modern print surface (PrintManager,
+     * PrintTask/PrintTaskRequest + the source-requested args): Windows hosts
+     * the namespace in windows.graphics.printing.dll, so route it to the
+     * own-name builtin implementing the classes' DllGetActivationFactory
+     * (PrintManager statics, PrintTaskRequested event, winspool/CUPS
+     * destination behind ShowPrintUIAsync), per the own-name module rule. */
+    if (!wcsncmp(classid, L"Windows.Graphics.Printing.", 26))
+    {
+        *out = wcsdup(L"windows.graphics.printing.dll");
+        return S_OK;
+    }
+
     /* Windows.Security.Authentication.Web.Core.* is the MSA web-auth surface
      * (WebAuthenticationCoreManager, WebTokenRequest/Result/Response,
      * WebProviderError + the Windows.Security.Credentials WebAccount/WebAccount-
@@ -355,8 +367,12 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.SwapChainPanel") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.WebView2") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.UserControl") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Button") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.TextBlock") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Controls.Viewbox") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml.Shapes.Rectangle") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.Style") ||
+        !wcscmp(classid, L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider") ||
         !wcscmp(classid, L"Microsoft.UI.Xaml"))
     {
         *out = wcsdup(L"windows.ui.xaml.dll");
@@ -969,6 +985,8 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
 
     *factory = NULL;
     *module = NULL;
+
+    ERR("resolve_activation_factory: %s\n", debugstr_w(raw));
 
     if (!wcscmp(raw, L"Windows.ApplicationModel.Resources.ResourceLoader"))
     {
