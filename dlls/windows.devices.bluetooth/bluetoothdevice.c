@@ -166,6 +166,7 @@ static const IBluetoothDeviceStaticsVtbl bluetoothdevice_statics_vtbl =
 struct ble_device
 {
     IBluetoothLEDevice IBluetoothLEDevice_iface;
+    IBluetoothLEDevice3 IBluetoothLEDevice3_iface;
     HSTRING id;
     UINT64 addr;
     HANDLE device;
@@ -189,6 +190,12 @@ static HRESULT WINAPI ble_device_QueryInterface( IBluetoothLEDevice *iface, REFI
         IsEqualGUID( iid, &IID_IBluetoothLEDevice ))
     {
         IBluetoothLEDevice_AddRef( (*out = &impl->IBluetoothLEDevice_iface) );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IBluetoothLEDevice3 ))
+    {
+        IBluetoothLEDevice3_AddRef( (*out = &impl->IBluetoothLEDevice3_iface) );
         return S_OK;
     }
 
@@ -289,7 +296,7 @@ static HRESULT WINAPI ble_device_get_GattServices( IBluetoothLEDevice *iface, IV
     {
         IGattDeviceService *service;
 
-        if (FAILED(hr = gatt_service_create( &buf[i], &service ))) goto done;
+        if (FAILED(hr = gatt_service_create( &buf[i], impl->device, &service ))) goto done;
         hr = IVector_IInspectable_Append( vector, (IInspectable *)service );
         IGattDeviceService_Release( service );
         if (FAILED( hr )) goto done;
@@ -389,6 +396,120 @@ static const IBluetoothLEDeviceVtbl ble_device_vtbl = {
     ble_device_remove_ConnectionStatusChanged,
 };
 
+DEFINE_IINSPECTABLE( bluetoothledevice3, IBluetoothLEDevice3, struct ble_device, IBluetoothLEDevice_iface );
+
+static HRESULT ble_gatt_services_async( IUnknown *invoker, IUnknown *param, PROPVARIANT *result, BOOL called_async )
+{
+    struct ble_device *impl = impl_from_IBluetoothLEDevice( (IBluetoothLEDevice *)invoker );
+    BTH_LE_GATT_SERVICE *buf = NULL;
+    IGattDeviceServicesResult *services_result;
+    const GUID *filter = NULL;
+    USHORT actual = 0;
+    HRESULT hr;
+
+    if (!called_async) return STATUS_PENDING;
+    if (param)
+    {
+        GUID uuid;
+
+        if (FAILED(hr = IPropertyValue_GetGuid( (IPropertyValue *)param, &uuid ))) return hr;
+        filter = &uuid;
+    }
+
+    hr = BluetoothGATTGetServices( impl->device, 0, NULL, &actual, 0 );
+    if (SUCCEEDED( hr ) || hr != HRESULT_FROM_WIN32( ERROR_MORE_DATA )) goto done;
+
+    for (;;)
+    {
+        UINT32 size = actual;
+        void *tmp;
+
+        if (!(tmp = realloc( buf, sizeof( *buf ) * size )))
+        {
+            hr = E_OUTOFMEMORY;
+            goto done;
+        }
+        buf = tmp;
+        if (SUCCEEDED(hr = BluetoothGATTGetServices( impl->device, size, buf, &actual, 0 ))) break;
+        if (hr != HRESULT_FROM_WIN32( ERROR_INVALID_USER_BUFFER )) goto done;
+    }
+    hr = gatt_services_result_create( actual, buf, impl->device, filter, &services_result );
+
+done:
+    free( buf );
+    if (FAILED( hr )) return hr;
+
+    result->vt = VT_UNKNOWN;
+    result->punkVal = (IUnknown *)services_result;
+    return S_OK;
+}
+
+static HRESULT WINAPI bluetoothledevice3_GetGattServicesAsync( IBluetoothLEDevice3 *iface,
+                                                               IAsyncOperation_GattDeviceServicesResult **async )
+{
+    TRACE( "(%p, %p)\n", iface, async );
+    return async_operation_inspectable_create( &IID_IAsyncOperation_GattDeviceServicesResult, (IUnknown *)iface, NULL,
+                                               ble_gatt_services_async, (IAsyncOperation_IInspectable **)async );
+}
+
+static HRESULT WINAPI bluetoothledevice3_GetGattServicesWithCacheModeAsync( IBluetoothLEDevice3 *iface,
+                                                                            BluetoothCacheMode mode,
+                                                                            IAsyncOperation_GattDeviceServicesResult **async )
+{
+    TRACE( "(%p, %u, %p)\n", iface, mode, async );
+    return bluetoothledevice3_GetGattServicesAsync( iface, async );
+}
+
+static HRESULT WINAPI bluetoothledevice3_GetGattServicesForUuidAsync( IBluetoothLEDevice3 *iface, GUID uuid,
+                                                                      IAsyncOperation_GattDeviceServicesResult **async )
+{
+    static const WCHAR *property_value_class = RuntimeClass_Windows_Foundation_PropertyValue;
+    IPropertyValueStatics *statics;
+    IPropertyValue *val;
+    HSTRING_HEADER hdr;
+    HSTRING str;
+    HRESULT hr;
+
+    TRACE( "(%p, %s, %p)\n", iface, debugstr_guid( &uuid ), async );
+
+    if (FAILED(hr = WindowsCreateStringReference( property_value_class, wcslen( property_value_class ), &hdr, &str )))
+        return hr;
+    if (FAILED(hr = RoGetActivationFactory( str, &IID_IPropertyValueStatics, (void **)&statics ))) return hr;
+    hr = IPropertyValueStatics_CreateGuid( statics, uuid, (IInspectable **)&val );
+    IPropertyValueStatics_Release( statics );
+    if (FAILED( hr )) return hr;
+
+    hr = async_operation_inspectable_create( &IID_IAsyncOperation_GattDeviceServicesResult, (IUnknown *)iface,
+                                             (IUnknown *)val, ble_gatt_services_async,
+                                             (IAsyncOperation_IInspectable **)async );
+    IPropertyValue_Release( val );
+    return hr;
+}
+
+static HRESULT WINAPI bluetoothledevice3_GetGattServicesForUuidWithCacheModeAsync( IBluetoothLEDevice3 *iface,
+                                                                                   GUID uuid, BluetoothCacheMode mode,
+                                                                                   IAsyncOperation_GattDeviceServicesResult **async )
+{
+    TRACE( "(%p, %s, %u, %p)\n", iface, debugstr_guid( &uuid ), mode, async );
+    return bluetoothledevice3_GetGattServicesForUuidAsync( iface, uuid, async );
+}
+
+static const IBluetoothLEDevice3Vtbl bluetoothledevice3_vtbl = {
+    /* IUnknown */
+    bluetoothledevice3_QueryInterface,
+    bluetoothledevice3_AddRef,
+    bluetoothledevice3_Release,
+    /* IInspectable */
+    bluetoothledevice3_GetIids,
+    bluetoothledevice3_GetRuntimeClassName,
+    bluetoothledevice3_GetTrustLevel,
+    /* IBluetoothLEDevice3 */
+    bluetoothledevice3_GetGattServicesAsync,
+    bluetoothledevice3_GetGattServicesWithCacheModeAsync,
+    bluetoothledevice3_GetGattServicesForUuidAsync,
+    bluetoothledevice3_GetGattServicesForUuidWithCacheModeAsync,
+};
+
 static HRESULT ble_device_create( IBluetoothLEDevice **device, const WCHAR *id, UINT64 addr )
 {
     struct ble_device *impl;
@@ -413,6 +534,7 @@ static HRESULT ble_device_create( IBluetoothLEDevice **device, const WCHAR *id, 
     impl->ref = 1;
     impl->addr = addr;
     impl->IBluetoothLEDevice_iface.lpVtbl = &ble_device_vtbl;
+    impl->IBluetoothLEDevice3_iface.lpVtbl = &bluetoothledevice3_vtbl;
     *device = &impl->IBluetoothLEDevice_iface;
     return S_OK;
 }

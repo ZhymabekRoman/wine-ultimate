@@ -36,11 +36,16 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
+#define WIDL_using_Windows_Storage_Streams
+#include "windows.storage.streams.h"
+#include "robuffer.h"
 #define WIDL_using_Windows_Networking
 #include "windows.networking.connectivity.h"
 #include "windows.networking.h"
 #define WIDL_using_Windows_Devices_Radios
 #include "windows.devices.radios.h"
+#define WIDL_using_Windows_Devices_Enumeration
+#include "windows.devices.enumeration.h"
 #define WIDL_using_Windows_Devices_Bluetooth
 #define WIDL_using_Windows_Devices_Bluetooth_GenericAttributeProfile
 #include "windows.devices.bluetooth.genericattributeprofile.h"
@@ -68,7 +73,12 @@ struct vector_iids
 };
 HRESULT vector_create( const struct vector_iids *iids, void **out );
 
-HRESULT gatt_service_create( const BTH_LE_GATT_SERVICE *svc, IGattDeviceService **service );
+HRESULT gatt_service_create( const BTH_LE_GATT_SERVICE *svc, HANDLE device, IGattDeviceService **service );
+HRESULT gatt_services_result_create( USHORT count, const BTH_LE_GATT_SERVICE *svcs, HANDLE device,
+                                     const GUID *filter, IGattDeviceServicesResult **result );
+HRESULT gatt_characteristics_result_create( USHORT count, const BTH_LE_GATT_CHARACTERISTIC *chars, HANDLE device,
+                                            const GUID *filter, IGattCharacteristicsResult **result );
+void gatt_uuid_from_le_uuid( const BTH_LE_UUID *le_uuid, GUID *guid );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

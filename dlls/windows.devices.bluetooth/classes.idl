@@ -42,3 +42,7 @@ namespace Windows.Devices.Bluetooth {
 namespace Windows.Devices.Bluetooth.Advertisement {
     runtimeclass BluetoothLEAdvertisementWatcher;
 }
+namespace Windows.Devices.Bluetooth.GenericAttributeProfile {
+    runtimeclass GattDeviceServicesResult;
+    runtimeclass GattCharacteristicsResult;
+}

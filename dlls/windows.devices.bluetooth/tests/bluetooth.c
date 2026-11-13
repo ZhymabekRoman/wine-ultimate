@@ -36,15 +36,19 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
 #include "windows.foundation.h"
+#define WIDL_using_Windows_Storage_Streams
 #define WIDL_using_Windows_Networking
 #include "windows.networking.connectivity.h"
 #include "windows.networking.h"
+#define WIDL_using_Windows_Storage_Streams
 #define WIDL_using_Windows_Devices_Bluetooth_Advertisement
 #define WIDL_using_Windows_Devices_Bluetooth
 #define WIDL_using_Windows_Devices_Bluetooth_GenericAttributeProfile
 #include "windows.devices.bluetooth.advertisement.h"
 #include "windows.devices.bluetooth.rfcomm.h"
 #include "windows.devices.bluetooth.h"
+#include "windows.storage.streams.h"
+#include "robuffer.h"
 
 #include "wine/test.h"
 
@@ -529,8 +533,385 @@ static void test_BluetoothDeviceStatics( void )
     IBluetoothDeviceStatics_Release( statics );
 }
 
+static void test_IGattDeviceService( int line, IGattDeviceService *service );
+
+static void await_gatt_services_result( int line, IAsyncOperation_GattDeviceServicesResult *async )
+{
+    IAsyncOperationCompletedHandler_IInspectable *handler;
+    HANDLE event;
+    HRESULT hr;
+    DWORD ret;
+
+    event = CreateEventW( NULL, FALSE, FALSE, NULL );
+    ok_(__FILE__, line)( !!event, "CreateEventW failed, error %lu\n", GetLastError() );
+
+    handler = inspectable_async_handler_create( event, &IID_IAsyncOperationCompletedHandler_GattDeviceServicesResult );
+    ok_( __FILE__, line )( !!handler, "inspectable_async_handler_create failed\n" );
+    hr = IAsyncOperation_GattDeviceServicesResult_put_Completed( async,
+            (IAsyncOperationCompletedHandler_GattDeviceServicesResult *)handler );
+    ok_(__FILE__, line)( hr == S_OK, "put_Completed returned %#lx\n", hr );
+    IAsyncOperationCompletedHandler_IInspectable_Release( handler );
+
+    ret = WaitForSingleObject( event, 5000 );
+    ok_(__FILE__, line)( !ret, "WaitForSingleObject returned %#lx\n", ret );
+    ret = CloseHandle( event );
+    ok_(__FILE__, line)( ret, "CloseHandle failed, error %lu\n", GetLastError() );
+}
+
+static void await_gatt_characteristics_result( int line, IAsyncOperation_GattCharacteristicsResult *async )
+{
+    IAsyncOperationCompletedHandler_IInspectable *handler;
+    HANDLE event;
+    HRESULT hr;
+    DWORD ret;
+
+    event = CreateEventW( NULL, FALSE, FALSE, NULL );
+    ok_(__FILE__, line)( !!event, "CreateEventW failed, error %lu\n", GetLastError() );
+
+    handler = inspectable_async_handler_create( event, &IID_IAsyncOperationCompletedHandler_GattCharacteristicsResult );
+    ok_( __FILE__, line )( !!handler, "inspectable_async_handler_create failed\n" );
+    hr = IAsyncOperation_GattCharacteristicsResult_put_Completed( async,
+            (IAsyncOperationCompletedHandler_GattCharacteristicsResult *)handler );
+    ok_(__FILE__, line)( hr == S_OK, "put_Completed returned %#lx\n", hr );
+    IAsyncOperationCompletedHandler_IInspectable_Release( handler );
+
+    ret = WaitForSingleObject( event, 5000 );
+    ok_(__FILE__, line)( !ret, "WaitForSingleObject returned %#lx\n", ret );
+    ret = CloseHandle( event );
+    ok_(__FILE__, line)( ret, "CloseHandle failed, error %lu\n", GetLastError() );
+}
+
+static void await_gatt_read_result( int line, IAsyncOperation_GattReadResult *async )
+{
+    IAsyncOperationCompletedHandler_IInspectable *handler;
+    HANDLE event;
+    HRESULT hr;
+    DWORD ret;
+
+    event = CreateEventW( NULL, FALSE, FALSE, NULL );
+    ok_(__FILE__, line)( !!event, "CreateEventW failed, error %lu\n", GetLastError() );
+
+    handler = inspectable_async_handler_create( event, &IID_IAsyncOperationCompletedHandler_GattReadResult );
+    ok_( __FILE__, line )( !!handler, "inspectable_async_handler_create failed\n" );
+    hr = IAsyncOperation_GattReadResult_put_Completed( async,
+            (IAsyncOperationCompletedHandler_GattReadResult *)handler );
+    ok_(__FILE__, line)( hr == S_OK, "put_Completed returned %#lx\n", hr );
+    IAsyncOperationCompletedHandler_IInspectable_Release( handler );
+
+    ret = WaitForSingleObject( event, 5000 );
+    ok_(__FILE__, line)( !ret, "WaitForSingleObject returned %#lx\n", ret );
+    ret = CloseHandle( event );
+    ok_(__FILE__, line)( ret, "CloseHandle failed, error %lu\n", GetLastError() );
+}
+
+static void await_gatt_communication_status( int line, IAsyncOperation_GattCommunicationStatus *async )
+{
+    IAsyncOperationCompletedHandler_IInspectable *handler;
+    HANDLE event;
+    HRESULT hr;
+    DWORD ret;
+
+    event = CreateEventW( NULL, FALSE, FALSE, NULL );
+    ok_(__FILE__, line)( !!event, "CreateEventW failed, error %lu\n", GetLastError() );
+
+    handler = inspectable_async_handler_create( event, &IID_IAsyncOperationCompletedHandler_GattCommunicationStatus );
+    ok_( __FILE__, line )( !!handler, "inspectable_async_handler_create failed\n" );
+    hr = IAsyncOperation_GattCommunicationStatus_put_Completed( async,
+            (IAsyncOperationCompletedHandler_GattCommunicationStatus *)handler );
+    ok_(__FILE__, line)( hr == S_OK, "put_Completed returned %#lx\n", hr );
+    IAsyncOperationCompletedHandler_IInspectable_Release( handler );
+
+    ret = WaitForSingleObject( event, 5000 );
+    ok_(__FILE__, line)( !ret, "WaitForSingleObject returned %#lx\n", ret );
+    ret = CloseHandle( event );
+    ok_(__FILE__, line)( ret, "CloseHandle failed, error %lu\n", GetLastError() );
+}
+
+static void value_changed_handler( IInspectable *sender, IInspectable *args, void *data )
+{
+    LONG *invoked = data;
+    InterlockedIncrement( invoked );
+}
+
+static void test_IGattCharacteristic( int line, IGattCharacteristic *characteristic )
+{
+    static const WCHAR *buffer_class = RuntimeClass_Windows_Storage_Streams_Buffer;
+    IAsyncOperation_GattReadResult *read_async;
+    IAsyncOperation_GattCommunicationStatus *status_async;
+    ITypedEventHandler_GattCharacteristic_GattValueChangedEventArgs *handler;
+    GattCharacteristicProperties props;
+    IGattReadResult *read_result;
+    IBufferByteAccess *byte_access;
+    GattCommunicationStatus status;
+    EventRegistrationToken token;
+    ITypedEventHandler_IInspectable_IInspectable *base_handler;
+    IBuffer *buffer = NULL;
+    LONG invoked = 0;
+    HRESULT hr;
+    GUID uuid;
+    UINT16 handle;
+
+    hr = IGattCharacteristic_get_Uuid( characteristic, &uuid );
+    ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    trace( "UUID: %s\n", debugstr_guid( &uuid ) );
+
+    handle = 0xbeef;
+    hr = IGattCharacteristic_get_AttributeHandle( characteristic, &handle );
+    ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    trace( "Attribute handle: %#x\n", handle );
+
+    props = 0;
+    hr = IGattCharacteristic_get_CharacteristicProperties( characteristic, &props );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    trace( "Properties: %#x\n", props );
+
+    hr = IGattCharacteristic_ReadValueAsync( characteristic, &read_async );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED( hr ))
+    {
+        await_gatt_read_result( __LINE__, read_async );
+        read_result = NULL;
+        hr = IAsyncOperation_GattReadResult_GetResults( read_async, &read_result );
+        todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        if (read_result)
+        {
+            IBuffer *value = NULL;
+            UINT32 len = 0xdeadbeef;
+
+            status = 0xdeadbeef;
+            hr = IGattReadResult_get_Status( read_result, &status );
+            ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+            todo_wine ok_( __FILE__, line )( status == GattCommunicationStatus_Success, "got status %#x.\n", status );
+
+            hr = IGattReadResult_get_Value( read_result, &value );
+            todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+            if (value)
+            {
+                hr = IBuffer_get_Length( value, &len );
+                ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+                trace( "Value length: %u\n", len );
+                IBuffer_Release( value );
+            }
+            IGattReadResult_Release( read_result );
+        }
+        IAsyncOperation_GattReadResult_Release( read_async );
+    }
+
+    {
+        IBufferFactory *factory;
+        HSTRING str;
+
+        hr = WindowsCreateStringReference( buffer_class, wcslen( buffer_class ), NULL, &str );
+        if (SUCCEEDED( hr )) hr = RoGetActivationFactory( str, &IID_IBufferFactory, (void **)&factory );
+        if (SUCCEEDED( hr ))
+        {
+            hr = IBufferFactory_Create( factory, 4, &buffer );
+            IBufferFactory_Release( factory );
+        }
+        WindowsDeleteString( str );
+        if (SUCCEEDED( hr ) && buffer)
+        {
+            BYTE *data = NULL;
+
+            hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&byte_access );
+            if (SUCCEEDED( hr ))
+            {
+                hr = IBufferByteAccess_Buffer( byte_access, &data );
+                IBufferByteAccess_Release( byte_access );
+                if (SUCCEEDED( hr ) && data) data[0] = 0x42;
+            }
+        }
+    }
+
+    if (buffer)
+    {
+        status = 0xdeadbeef;
+        hr = IGattCharacteristic_WriteValueAsync( characteristic, buffer, &status_async );
+        todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr ))
+        {
+            GattCommunicationStatus write_status;
+
+            await_gatt_communication_status( __LINE__, status_async );
+            write_status = 0xdeadbeef;
+            hr = IAsyncOperation_GattCommunicationStatus_GetResults( status_async, &write_status );
+            todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+            trace( "Write status: %#x\n", write_status );
+            IAsyncOperation_GattCommunicationStatus_Release( status_async );
+        }
+        IBuffer_Release( buffer );
+    }
+
+    base_handler = inspectable_event_handler_create( &IID_ITypedEventHandler_GattCharacteristic_GattValueChangedEventArgs,
+                                                     value_changed_handler, &invoked );
+    ok_( __FILE__, line )( !!base_handler, "inspectable_event_handler_create failed\n" );
+    if (base_handler)
+    {
+        handler = (ITypedEventHandler_GattCharacteristic_GattValueChangedEventArgs *)base_handler;
+
+        token.value = 0;
+        hr = IGattCharacteristic_add_ValueChanged( characteristic, handler, &token );
+        todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        if (hr == S_OK)
+        {
+            hr = IGattCharacteristic_remove_ValueChanged( characteristic, token );
+            todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        }
+
+        token.value = 12345;
+        hr = IGattCharacteristic_remove_ValueChanged( characteristic, token );
+        todo_wine ok_( __FILE__, line )( hr == E_INVALIDARG, "got hr %#lx.\n", hr );
+
+        ITypedEventHandler_IInspectable_IInspectable_Release( base_handler );
+    }
+}
+
+static void check_gatt_services_result( int line, IGattDeviceServicesResult *result )
+{
+    IReference_BYTE *protocol_error = (void *)0xdeadbeef;
+    IVectorView_GattDeviceService *services;
+    GattCommunicationStatus status;
+    UINT32 size = 0xdeadbeef, i;
+    HRESULT hr;
+
+    status = 0xdeadbeef;
+    hr = IGattDeviceServicesResult_get_Status( result, &status );
+    ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    todo_wine ok_( __FILE__, line )( status == GattCommunicationStatus_Success, "got status %#x.\n", status );
+
+    protocol_error = (void *)0xdeadbeef;
+    hr = IGattDeviceServicesResult_get_ProtocolError( result, &protocol_error );
+    ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    ok_( __FILE__, line )( !protocol_error, "got protocol_error %p.\n", protocol_error );
+
+    services = NULL;
+    hr = IGattDeviceServicesResult_get_Services( result, &services );
+    ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (!services) return;
+
+    size = 0xdeadbeef;
+    hr = IVectorView_GattDeviceService_get_Size( services, &size );
+    ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    trace( "services size: %u\n", size );
+
+    for (i = 0; i < size; i++)
+    {
+        IGattDeviceService *service;
+
+        winetest_push_context( "GATT service %u", i );
+        hr = IVectorView_GattDeviceService_GetAt( services, i, &service );
+        ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr )) test_IGattDeviceService( __LINE__, service );
+        winetest_pop_context();
+        if (SUCCEEDED( hr )) IGattDeviceService_Release( service );
+    }
+    IVectorView_GattDeviceService_Release( services );
+}
+
+static void test_IBluetoothLEDevice3( int line, IBluetoothLEDevice *device )
+{
+    IAsyncOperation_GattDeviceServicesResult *async;
+    IGattDeviceServicesResult *result;
+    IBluetoothLEDevice3 *device3;
+    IGattDeviceService *service;
+    IGattDeviceServicesResult *filtered;
+    HRESULT hr;
+    GUID uuid = {0};
+
+    device3 = NULL;
+    hr = IBluetoothLEDevice_QueryInterface( device, &IID_IBluetoothLEDevice3, (void **)&device3 );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED( hr ) || !device3) return;
+
+    check_interface( device3, &IID_IUnknown );
+    check_interface( device3, &IID_IInspectable );
+    check_interface( device3, &IID_IAgileObject );
+    check_interface( device3, &IID_IBluetoothLEDevice );
+    check_interface( device3, &IID_IBluetoothLEDevice3 );
+
+    /* Baseline: enumerate all services. */
+    hr = IBluetoothLEDevice3_GetGattServicesAsync( device3, &async );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (FAILED( hr )) goto done;
+    await_gatt_services_result( __LINE__, async );
+    result = NULL;
+    hr = IAsyncOperation_GattDeviceServicesResult_GetResults( async, &result );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED( hr ) && result)
+    {
+        IVectorView_GattDeviceService *services = NULL;
+        UINT32 size = 0;
+
+        check_gatt_services_result( __LINE__, result );
+
+        /* Remember the first service UUID for the filtered query below. */
+        if (SUCCEEDED( IGattDeviceServicesResult_get_Services( result, &services )) && services)
+        {
+            IVectorView_GattDeviceService_get_Size( services, &size );
+            if (size && SUCCEEDED( IVectorView_GattDeviceService_GetAt( services, 0, &service ) ))
+            {
+                IGattDeviceService_get_Uuid( service, &uuid );
+                IGattDeviceService_Release( service );
+            }
+            IVectorView_GattDeviceService_Release( services );
+        }
+        IGattDeviceServicesResult_Release( result );
+    }
+    IAsyncOperation_GattDeviceServicesResult_Release( async );
+
+    /* Cache mode variant. */
+    hr = IBluetoothLEDevice3_GetGattServicesWithCacheModeAsync( device3, BluetoothCacheMode_Cached, &async );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED( hr ))
+    {
+        await_gatt_services_result( __LINE__, async );
+        result = NULL;
+        hr = IAsyncOperation_GattDeviceServicesResult_GetResults( async, &result );
+        todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr ) && result) IGattDeviceServicesResult_Release( result );
+        IAsyncOperation_GattDeviceServicesResult_Release( async );
+    }
+
+    /* Filter by UUID. */
+    hr = IBluetoothLEDevice3_GetGattServicesForUuidAsync( device3, uuid, &async );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED( hr ))
+    {
+        await_gatt_services_result( __LINE__, async );
+        filtered = NULL;
+        hr = IAsyncOperation_GattDeviceServicesResult_GetResults( async, &filtered );
+        todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr ) && filtered)
+        {
+            IVectorView_GattDeviceService *services = NULL;
+            GattCommunicationStatus status;
+            UINT32 size = 0xdeadbeef;
+
+            status = 0xdeadbeef;
+            hr = IGattDeviceServicesResult_get_Status( filtered, &status );
+            ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+            if (SUCCEEDED( IGattDeviceServicesResult_get_Services( filtered, &services )) && services)
+            {
+                IVectorView_GattDeviceService_get_Size( services, &size );
+                IVectorView_GattDeviceService_Release( services );
+            }
+            trace( "filtered services size: %u\n", size );
+            IGattDeviceServicesResult_Release( filtered );
+        }
+        IAsyncOperation_GattDeviceServicesResult_Release( async );
+    }
+
+    hr = IBluetoothLEDevice3_GetGattServicesForUuidWithCacheModeAsync( device3, uuid, BluetoothCacheMode_Cached, &async );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED( hr )) IAsyncOperation_GattDeviceServicesResult_Release( async );
+
+done:
+    IBluetoothLEDevice3_Release( device3 );
+}
+
 static void test_IGattDeviceService( int line, IGattDeviceService *service )
 {
+    IGattDeviceService3 *service3;
     HSTRING str = NULL;
     UINT16 handle;
     HRESULT hr;
@@ -550,6 +931,77 @@ static void test_IGattDeviceService( int line, IGattDeviceService *service )
     hr = IGattDeviceService_get_AttributeHandle( service, &handle );
     ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
     trace( "Attribute handle: %#x\n", handle );
+
+    service3 = NULL;
+    hr = IGattDeviceService_QueryInterface( service, &IID_IGattDeviceService3, (void **)&service3 );
+    todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+    if (SUCCEEDED( hr ) && service3)
+    {
+        IAsyncOperation_GattCharacteristicsResult *async;
+        IGattCharacteristicsResult *chars_result;
+        IVectorView_GattCharacteristic *characteristics = NULL;
+        UINT32 size = 0, i;
+
+        hr = IGattDeviceService3_GetCharacteristicsAsync( service3, &async );
+        todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr ))
+        {
+            await_gatt_characteristics_result( __LINE__, async );
+            chars_result = NULL;
+            hr = IAsyncOperation_GattCharacteristicsResult_GetResults( async, &chars_result );
+            todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+            if (SUCCEEDED( hr ) && chars_result)
+            {
+                GattCommunicationStatus status;
+
+                status = 0xdeadbeef;
+                hr = IGattCharacteristicsResult_get_Status( chars_result, &status );
+                ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+                todo_wine ok_( __FILE__, line )( status == GattCommunicationStatus_Success, "got status %#x.\n", status );
+
+                characteristics = NULL;
+                hr = IGattCharacteristicsResult_get_Characteristics( chars_result, &characteristics );
+                ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+                IGattCharacteristicsResult_Release( chars_result );
+                if (characteristics)
+                {
+                    size = 0xdeadbeef;
+                    hr = IVectorView_GattCharacteristic_get_Size( characteristics, &size );
+                    ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+                    trace( "characteristics size: %u\n", size );
+
+                    for (i = 0; i < size; i++)
+                    {
+                        IGattCharacteristic *characteristic;
+
+                        winetest_push_context( "GATT characteristic %u", i );
+                        if (SUCCEEDED( IVectorView_GattCharacteristic_GetAt( characteristics, i, &characteristic ) ))
+                        {
+                            test_IGattCharacteristic( __LINE__, characteristic );
+                            IGattCharacteristic_Release( characteristic );
+                        }
+                        winetest_pop_context();
+                    }
+                    IVectorView_GattCharacteristic_Release( characteristics );
+                }
+            }
+            IAsyncOperation_GattCharacteristicsResult_Release( async );
+        }
+
+        hr = IGattDeviceService3_GetCharacteristicsForUuidAsync( service3, uuid, &async );
+        todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+        if (SUCCEEDED( hr ))
+        {
+            await_gatt_characteristics_result( __LINE__, async );
+            chars_result = NULL;
+            hr = IAsyncOperation_GattCharacteristicsResult_GetResults( async, &chars_result );
+            todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
+            if (SUCCEEDED( hr ) && chars_result) IGattCharacteristicsResult_Release( chars_result );
+            IAsyncOperation_GattCharacteristicsResult_Release( async );
+        }
+
+        IGattDeviceService3_Release( service3 );
+    }
 }
 
 static void test_IBluetoothLEDevice( int line, IBluetoothLEDevice *device, UINT64 addr )
@@ -579,6 +1031,8 @@ static void test_IBluetoothLEDevice( int line, IBluetoothLEDevice *device, UINT6
     todo_wine ok_( __FILE__, line )( hr == S_OK, "got hr %#lx.\n", hr );
     if (hr == S_OK)
         trace( "ConnectionStatus: %d\n", status );
+
+    test_IBluetoothLEDevice3( __LINE__, device );
 }
 
 static void test_BluetoothLEDeviceStatics( void )
