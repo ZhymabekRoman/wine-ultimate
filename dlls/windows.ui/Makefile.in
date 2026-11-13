@@ -6,6 +6,7 @@ SOURCES = \
 	classes.idl \
 	corewindow.c \
 	fontweights.c \
+	gesturerecognizer.c \
 	inputpane.c \
 	main.c \
 	uisettings.c \

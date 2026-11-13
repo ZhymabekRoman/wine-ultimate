@@ -168,6 +168,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (!wcscmp( buffer, L"Windows.UI.Colors" ))
         IActivationFactory_QueryInterface( colors_factory, &IID_IActivationFactory, (void **)factory );
 
+    if (!wcscmp( buffer, RuntimeClass_Windows_UI_Input_GestureRecognizer ))
+        IActivationFactory_QueryInterface( gesturerecognizer_factory, &IID_IActivationFactory, (void **)factory );
+
     if (*factory) return S_OK;
     /* This module is reached through the ext-ms-win-windowing-internal-l1-1-0 apiset as
      * Windowing_DllGetActivationFactory, and the Windows App SDK chains that probe to its own

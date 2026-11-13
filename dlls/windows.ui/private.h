@@ -30,15 +30,17 @@
 #include "activation.h"
 
 #define WIDL_using_Windows_Foundation
-#include "windows.foundation.h"
+#define WIDL_using_Windows_Foundation_Collections
 #define WIDL_using_Windows_UI
-#include "windows.ui.h"
 #define WIDL_using_Windows_UI_Core
-#include "windows.ui.core.h"
+#define WIDL_using_Windows_UI_Input
 #define WIDL_using_Windows_UI_ViewManagement
-#include "windows.ui.viewmanagement.h"
 #define WIDL_using_Windows_UI_Text
 #define WIDL_using_Microsoft_UI_Text
+#define WINDOWS_FOUNDATION_UNIVERSALAPICONTRACT_VERSION 0xc0000
+#include "windows.ui.input.h"
+#include "windows.ui.h"
+#include "windows.ui.viewmanagement.h"
 #include "windows.ui_private.h"
 
 extern IActivationFactory *fontweights_factory;
@@ -49,6 +51,7 @@ extern IActivationFactory *uiviewsettings_factory;
 extern IActivationFactory *inputpane_factory;
 extern IActivationFactory *corewindow_factory;
 extern IActivationFactory *core_cursor_factory;
+extern IActivationFactory *gesturerecognizer_factory;
 extern __x_ABI_CWindows_CUI_CCore_CICoreWindow *core_window_create(void);
 extern HRESULT PrivateCreateCoreWindow( DWORD window_type, const WCHAR *title, INT x, INT y,
                                         UINT width, UINT height, DWORD flags, HWND parent,

@@ -583,6 +583,9 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor,"DllPath",2,"%12%\windows.ui.composition.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Composition.Compositor,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Input.GestureRecognizer,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Input.GestureRecognizer,"DllPath",2,"%12%\windows.ui.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Input.GestureRecognizer,"ThreadingModel",0x10001,2
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,"DllPath",2,"%12%\twinapi.appcore.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.UI.Notifications.ToastNotificationManager,"ThreadingModel",0x10001,2

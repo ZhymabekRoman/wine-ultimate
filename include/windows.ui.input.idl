@@ -38,12 +38,38 @@ namespace Windows.UI.Input {
     interface IPointerPointStatics;
     interface IPointerPointTransform;
 
+    typedef enum GestureSettings GestureSettings;
+    typedef struct ManipulationDelta ManipulationDelta;
+    typedef struct ManipulationVelocities ManipulationVelocities;
+
+    interface IGestureRecognizer;
+    interface ITappedEventArgs;
+    interface IHoldingEventArgs;
+    interface IManipulationStartedEventArgs;
+    interface IManipulationUpdatedEventArgs;
+    interface IManipulationInertiaStartingEventArgs;
+    interface IManipulationCompletedEventArgs;
+
+    runtimeclass GestureRecognizer;
+    runtimeclass TappedEventArgs;
+    runtimeclass HoldingEventArgs;
+    runtimeclass ManipulationStartedEventArgs;
+    runtimeclass ManipulationUpdatedEventArgs;
+    runtimeclass ManipulationInertiaStartingEventArgs;
+    runtimeclass ManipulationCompletedEventArgs;
+
     runtimeclass PointerPoint;
     runtimeclass PointerPointProperties;
 
     declare {
         interface Windows.Foundation.Collections.IVectorView<Windows.UI.Input.PointerPoint *>;
         interface Windows.Foundation.Collections.IVector<Windows.UI.Input.PointerPoint *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.TappedEventArgs *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.HoldingEventArgs *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.ManipulationStartedEventArgs *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.ManipulationUpdatedEventArgs *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.ManipulationInertiaStartingEventArgs *>;
+        interface Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.ManipulationCompletedEventArgs *>;
     }
 
     [
@@ -166,5 +192,193 @@ namespace Windows.UI.Input {
     {
         [default] interface Windows.UI.Input.IPointerPointProperties;
         [contract(Windows.Foundation.UniversalApiContract, 1.0)] interface Windows.UI.Input.IPointerPointProperties2;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0)
+    ]
+    enum GestureSettings
+    {
+        None                          = 0,
+        Tap                           = 1,
+        DoubleTap                     = 2,
+        RightTap                      = 4,
+        Drag                          = 8,
+        ManipulationTranslateX        = 0x10,
+        ManipulationTranslateY        = 0x20,
+        ManipulationTranslateInertia  = 0x40,
+        ManipulationRotate            = 0x80,
+        ManipulationRotateInertia     = 0x100,
+        ManipulationScale             = 0x200,
+        ManipulationScaleInertia      = 0x400
+    };
+
+    struct ManipulationDelta
+    {
+        Windows.Foundation.Point Translation;
+        FLOAT Scale;
+        FLOAT Rotation;
+        FLOAT Expansion;
+    };
+
+    struct ManipulationVelocities
+    {
+        Windows.Foundation.Point Linear;
+        FLOAT Angular;
+        FLOAT Expansions;
+        FLOAT Scale;
+    };
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(baee7808-0bf4-4537-8321-70bfba91e84a)
+    ]
+    interface ITappedEventArgs : IInspectable
+    {
+        [propget] HRESULT Position([out, retval] Windows.Foundation.Point *value);
+        [propget] HRESULT TapCount([out, retval] UINT32 *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(0041f883-26ac-49b3-a924-3389ae972866)
+    ]
+    interface IHoldingEventArgs : IInspectable
+    {
+        [propget] HRESULT Position([out, retval] Windows.Foundation.Point *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(a164e6bb-8ff8-4ff4-b258-f2b7cb1be326)
+    ]
+    interface IManipulationStartedEventArgs : IInspectable
+    {
+        [propget] HRESULT Position([out, retval] Windows.Foundation.Point *value);
+        [propget] HRESULT Cumulative([out, retval] Windows.UI.Input.ManipulationDelta *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(518f8d68-0d05-4c07-b649-8e50b1d0339d)
+    ]
+    interface IManipulationUpdatedEventArgs : IInspectable
+    {
+        [propget] HRESULT Position([out, retval] Windows.Foundation.Point *value);
+        [propget] HRESULT Cumulative([out, retval] Windows.UI.Input.ManipulationDelta *value);
+        [propget] HRESULT Delta([out, retval] Windows.UI.Input.ManipulationDelta *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(617a7d10-7968-4cbf-ad65-4120a36da7e7)
+    ]
+    interface IManipulationInertiaStartingEventArgs : IInspectable
+    {
+        [propget] HRESULT Cumulative([out, retval] Windows.UI.Input.ManipulationDelta *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(b0b46039-38fe-4a55-8db8-17a4c7e6c3f3)
+    ]
+    interface IManipulationCompletedEventArgs : IInspectable
+    {
+        [propget] HRESULT Position([out, retval] Windows.Foundation.Point *value);
+        [propget] HRESULT Cumulative([out, retval] Windows.UI.Input.ManipulationDelta *value);
+        [propget] HRESULT Velocities([out, retval] Windows.UI.Input.ManipulationVelocities *value);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        uuid(434a9190-880c-4ec7-a9a3-524673722a4b)
+    ]
+    interface IGestureRecognizer : IInspectable
+    {
+        [propget] HRESULT GestureSettings([out, retval] Windows.UI.Input.GestureSettings *value);
+        [propput] HRESULT GestureSettings([in] Windows.UI.Input.GestureSettings value);
+        [propget] HRESULT IsActive([out, retval] boolean *value);
+        [propget] HRESULT IsInertial([out, retval] boolean *value);
+        HRESULT ProcessDownEvent([in] Windows.UI.Input.PointerPoint *value);
+        HRESULT ProcessMoveEvents([in] Windows.Foundation.Collections.IVector<Windows.UI.Input.PointerPoint *> *value);
+        HRESULT ProcessUpEvent([in] Windows.UI.Input.PointerPoint *value);
+        HRESULT CompleteGesture();
+        [eventadd] HRESULT Tapped([in] Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.TappedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT Tapped([in] EventRegistrationToken token);
+        [eventadd] HRESULT RightTapped([in] Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.TappedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT RightTapped([in] EventRegistrationToken token);
+        [eventadd] HRESULT Holding([in] Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.HoldingEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT Holding([in] EventRegistrationToken token);
+        [eventadd] HRESULT ManipulationStarted([in] Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.ManipulationStartedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT ManipulationStarted([in] EventRegistrationToken token);
+        [eventadd] HRESULT ManipulationUpdated([in] Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.ManipulationUpdatedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT ManipulationUpdated([in] EventRegistrationToken token);
+        [eventadd] HRESULT ManipulationInertiaStarting([in] Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.ManipulationInertiaStartingEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT ManipulationInertiaStarting([in] EventRegistrationToken token);
+        [eventadd] HRESULT ManipulationCompleted([in] Windows.Foundation.TypedEventHandler<Windows.UI.Input.GestureRecognizer *, Windows.UI.Input.ManipulationCompletedEventArgs *> *handler, [out, retval] EventRegistrationToken *token);
+        [eventremove] HRESULT ManipulationCompleted([in] EventRegistrationToken token);
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass GestureRecognizer
+    {
+        [default] interface Windows.UI.Input.IGestureRecognizer;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass TappedEventArgs
+    {
+        [default] interface Windows.UI.Input.ITappedEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass HoldingEventArgs
+    {
+        [default] interface Windows.UI.Input.IHoldingEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass ManipulationStartedEventArgs
+    {
+        [default] interface Windows.UI.Input.IManipulationStartedEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass ManipulationUpdatedEventArgs
+    {
+        [default] interface Windows.UI.Input.IManipulationUpdatedEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass ManipulationInertiaStartingEventArgs
+    {
+        [default] interface Windows.UI.Input.IManipulationInertiaStartingEventArgs;
+    }
+
+    [
+        contract(Windows.Foundation.UniversalApiContract, 1.0),
+        marshaling_behavior(none)
+    ]
+    runtimeclass ManipulationCompletedEventArgs
+    {
+        [default] interface Windows.UI.Input.IManipulationCompletedEventArgs;
     }
 }

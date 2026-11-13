@@ -46,3 +46,13 @@ namespace Windows.UI.ViewManagement {
     runtimeclass UIViewSettings;
     runtimeclass InputPane;
 }
+
+namespace Windows.UI.Input {
+    runtimeclass GestureRecognizer;
+    runtimeclass TappedEventArgs;
+    runtimeclass HoldingEventArgs;
+    runtimeclass ManipulationStartedEventArgs;
+    runtimeclass ManipulationUpdatedEventArgs;
+    runtimeclass ManipulationInertiaStartingEventArgs;
+    runtimeclass ManipulationCompletedEventArgs;
+}
