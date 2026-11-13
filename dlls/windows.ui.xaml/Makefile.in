@@ -7,4 +7,5 @@ SOURCES = \
 	color_helper.c \
 	frame.c \
 	main.c \
-	swapchain_panel.c
+	swapchain_panel.c \
+	uwp_xaml.c

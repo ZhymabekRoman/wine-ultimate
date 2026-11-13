@@ -1214,6 +1214,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     *factory = NULL;
 
+    if (SUCCEEDED(uwp_get_activation_factory( classid, factory )) && *factory)
+        return S_OK;
+
     if (!wcscmp( buffer, RuntimeClass_Windows_UI_ColorHelper ))
         IActivationFactory_QueryInterface( color_helper_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.SwapChainPanel" ))
@@ -1302,7 +1305,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
              !wcscmp( buffer, L"Windows.UI.Xaml.DataTemplate" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.DataTemplate" ) ||
              !wcscmp( buffer, L"Windows.UI.Xaml.FrameworkTemplate" ) ||
-             !wcscmp( buffer, L"Microsoft.UI.Xaml.FrameworkTemplate" ))
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.FrameworkTemplate" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.ProgressRing" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.ProgressRing" ))
         IActivationFactory_QueryInterface( element_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;

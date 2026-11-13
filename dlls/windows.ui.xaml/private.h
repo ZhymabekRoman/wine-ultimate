@@ -82,6 +82,18 @@ HRESULT element_create_typed( const WCHAR *class_name, void **instance );
 HRESULT xaml_create_webview2( void **out );
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content );
 HRESULT xaml_window_present_current( void );
+void xaml_fire_all_loaded( void );
+void xaml_register_loaded( void *handler, IInspectable *sender );
+BOOL is_calculator_app( void );
+void *uwp_get_app_outer( void );
+HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out );
+HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
+HRESULT xaml_resource_dictionary_create_for_uwp( void **out );
+HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val );
+BOOL uwp_rd_haskey( void *rd_key, void *key_obj );
+BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *app_outer );
+BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content );
+HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

@@ -17,6 +17,8 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <stdarg.h>
+
 #include "private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
@@ -345,6 +347,11 @@ static HRESULT WINAPI frame_NavigateWithParam( void *iface, void *type_name_ptr,
     return S_OK;
 }
 
+static HRESULT WINAPI frame_Navigate( void *iface, void *type_name_ptr, boolean *result )
+{
+    return frame_NavigateWithParam( iface, type_name_ptr, NULL, result );
+}
+
 static HRESULT WINAPI frame_generic_slot( void *iface, ... )
 {
     TRACE( "frame generic slot called on %p\n", iface );
@@ -376,7 +383,7 @@ static const void *frame_vtbl[] =
     frame_stub_zero,              /* 20: get_SourcePageType */
     frame_stub_ok,                /* 21: put_SourcePageType */
     frame_stub_zero,              /* 22: get_CurrentSourcePageType */
-    frame_stub_ok,                /* 23: Navigate */
+    frame_Navigate,               /* 23: Navigate */
     frame_NavigateWithParam,      /* 24: NavigateWithParam */
     frame_stub_ok,                /* 25: GoBack */
     frame_stub_ok,                /* 26: GoForward */
@@ -959,7 +966,7 @@ static ULONG WINAPI collection_AddRef( IInspectable *iface )
 {
     struct xaml_collection *impl = impl_from_collection( iface );
     ULONG ref = InterlockedIncrement( &impl->ref );
-    ERR( "collection_AddRef iface %p ref %u\n", iface, ref );
+    ERR( "collection_AddRef iface %p ref %lu\n", iface, ref );
     return ref;
 }
 
@@ -1385,6 +1392,7 @@ struct xaml_element
     IInspectable *content;
     IInspectable *core_webview2;
     IInspectable *init_handler;
+    void *loaded_fn;    /* ABI RoutedEventHandler Invoke fn (vtbl[3]) */
     BOOL init_triggered;
     BOOL browser_started;
     void *loader_core;
@@ -1692,7 +1700,7 @@ static ULONG WINAPI element_AddRef( IInspectable *iface )
 {
     struct xaml_element *impl = impl_from_element( iface );
     ULONG ref = InterlockedIncrement( &impl->ref );
-    ERR( "element_AddRef iface %p ref %u\n", iface, ref );
+    ERR( "element_AddRef iface %p ref %lu\n", iface, ref );
     return ref;
 }
 
@@ -1754,6 +1762,12 @@ static HRESULT WINAPI element_GetTrustLevel( IInspectable *iface, TrustLevel *le
 static HRESULT WINAPI element_generic_slot( void *iface, ... )
 {
     ERR( "element_generic_slot iface %p\n", iface );
+    return S_OK;
+}
+
+static HRESULT WINAPI element_get_double( void *iface, double *val )
+{
+    if (val) *val = 960.0;  /* plausible width/height/size for numeric getters */
     return S_OK;
 }
 
@@ -1890,11 +1904,48 @@ static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
     return S_OK;
 }
 
+static IInspectable *loaded_target;
+
 static HRESULT WINAPI element_add_Loaded( void *iface, void *handler, EventRegistrationToken *token )
 {
-    TRACE( "element_add_Loaded iface %p, handler %p, token %p\n", iface, handler, token );
+    struct xaml_element *impl = impl_from_element( (IInspectable *)iface );
+    ERR( "element_add_Loaded iface %p, handler %p, token %p\n", iface, handler, token );
     if (token) token->value = 1;
+    impl->loaded_fn = handler;
+    xaml_register_loaded( handler, (IInspectable *)iface );
     return S_OK;
+}
+
+struct loaded_reg { void *handler; IInspectable *sender; };
+static struct loaded_reg loaded_regs[8];
+static int loaded_count;
+
+void xaml_register_loaded( void *handler, IInspectable *sender );
+void xaml_register_loaded( void *handler, IInspectable *sender )
+{
+    int i;
+    for (i = 0; i < loaded_count; i++)
+        if (loaded_regs[i].sender == sender) { loaded_regs[i].handler = handler; return; }
+    if (loaded_count < (int)(sizeof(loaded_regs)/sizeof(loaded_regs[0])))
+    {
+        loaded_regs[loaded_count].handler = handler;
+        loaded_regs[loaded_count].sender = sender;
+        loaded_count++;
+    }
+}
+
+void xaml_fire_all_loaded( void );
+void xaml_fire_all_loaded( void )
+{
+    int i;
+    for (i = 0; i < loaded_count; i++)
+    {
+        HRESULT (WINAPI *fn)( void *, void *, void * );
+        if (!loaded_regs[i].handler) continue;
+        fn = (void *)((void **)((void **)loaded_regs[i].handler)[0])[3];
+        ERR( "firing Loaded on %p handler %p\n", (void *)loaded_regs[i].sender, loaded_regs[i].handler );
+        fn( loaded_regs[i].handler, (void *)loaded_regs[i].sender, NULL );
+    }
 }
 
 static HRESULT WINAPI element_remove_Loaded( void *iface, EventRegistrationToken token )
@@ -1924,8 +1975,8 @@ static HRESULT WINAPI element_put_Content( void *iface, void *val )
 
 static HRESULT WINAPI element_grid_get_RowDefinitions( void *iface, void **out )
 {
-    ERR( "TRACEROWS element_grid_get_RowDefinitions iface %p out %p\n", iface, out );
     struct xaml_element *impl = impl_from_element( iface );
+    ERR( "TRACEROWS element_grid_get_RowDefinitions iface %p out %p\n", iface, out );
     TRACE( "element_grid_get_RowDefinitions iface %p, out %p\n", iface, out );
     if (!out) return E_POINTER;
     {
@@ -2077,6 +2128,7 @@ static const void *element_vtbl[256] =
     [8] = xaml_ReleaseFromTrackerSource,
     [9] = element_get_Content,
     [10] = element_put_Content,
+    [11 ... 20] = element_get_double,      /* Width/MinWidth/MaxWidth/Height/Min/Max/Margin numerics */
     [75] = element_add_Loaded,
     [76] = element_remove_Loaded,
     [130] = element_get_Content,

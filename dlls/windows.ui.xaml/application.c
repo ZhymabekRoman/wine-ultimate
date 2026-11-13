@@ -123,6 +123,7 @@ static HRESULT WINAPI app_view_activated_Invoke(
             }
         }
     }
+    xaml_fire_all_loaded();
     return S_OK;
 }
 
@@ -792,7 +793,10 @@ static HRESULT WINAPI rd_get_ThemeDictionaries( void *iface, void **value )
 
 static HRESULT WINAPI rd_map_Lookup( void *iface, void *key, void **value )
 {
+    struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
     TRACE( "rd_map_Lookup iface %p, key %p, value %p\n", iface, key, value );
+    if (is_calculator_app())
+        return uwp_rd_lookup( &impl->IInspectable_iface, key, value );
     if (value) *value = NULL;
     return 0x8000000b; /* E_BOUNDS */
 }
@@ -803,6 +807,12 @@ static HRESULT WINAPI rd_map_get_Size( void *iface, UINT32 *size )
 }
 static HRESULT WINAPI rd_map_HasKey( void *iface, void *key, boolean *found )
 {
+    struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
+    if (is_calculator_app())
+    {
+        if (found) *found = uwp_rd_haskey( &impl->IInspectable_iface, key );
+        return S_OK;
+    }
     if (found) *found = FALSE;
     return S_OK;
 }
@@ -852,6 +862,11 @@ static HRESULT xaml_resource_dictionary_create( void **out )
     impl->ref = 1;
     *out = &impl->IInspectable_iface;
     return S_OK;
+}
+
+HRESULT xaml_resource_dictionary_create_for_uwp( void **out )
+{
+    return xaml_resource_dictionary_create( out );
 }
 
 /* ResourceDictionary Factory */
@@ -1288,8 +1303,9 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
-        IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP ))
+    if (!is_calculator_app() &&
+        (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
+         IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP )))
     {
         *out = &app_meta_provider_obj;
         return S_OK;
@@ -1858,7 +1874,7 @@ static void xaml_window_subscribe_core_window( struct xaml_window *impl )
     TRACE( "subscribed xaml_window to core_window %p\n", impl->core_window );
 }
 
-static BOOL is_calculator_app( void )
+BOOL is_calculator_app( void )
 {
     static int cached = -1;
     if (cached == -1)
@@ -1868,6 +1884,11 @@ static BOOL is_calculator_app( void )
         cached = (wcsstr( path, L"Calculator" ) || wcsstr( path, L"calc" )) ? 1 : 0;
     }
     return cached;
+}
+
+void *uwp_get_app_outer( void )
+{
+    return current_application ? current_application->outer : NULL;
 }
 
 static BOOL is_whatsapp_app( void )
@@ -1880,277 +1901,6 @@ static BOOL is_whatsapp_app( void )
         cached = (wcsstr( path, L"WhatsApp" ) || wcsstr( path, L"whatsapp" )) ? 1 : 0;
     }
     return cached;
-}
-
-/* Calculator keypad stand-in. The row labels, the grid geometry helper and the
- * display value are shared between xaml_layout_render (paint) and the mouse
- * hit-test in xaml_corewindow_wndproc (input), so a click lands on the button
- * the user sees. */
-static const WCHAR *xaml_calc_row0[] = { L"MC", L"MR", L"M+", L"M-", L"MS" };
-static const WCHAR *xaml_calc_row1[] = { L"%", L"CE", L"C", L"DEL" };
-static const WCHAR *xaml_calc_row2[] = { L"1/x", L"x²", L"√", L"/" };
-static const WCHAR *xaml_calc_row3[] = { L"7", L"8", L"9", L"*" };
-static const WCHAR *xaml_calc_row4[] = { L"4", L"5", L"6", L"-" };
-static const WCHAR *xaml_calc_row5[] = { L"1", L"2", L"3", L"+" };
-static const WCHAR *xaml_calc_row6[] = { L"+/-", L"0", L".", L"=" };
-static const WCHAR **xaml_calc_rows[] = { xaml_calc_row0, xaml_calc_row1, xaml_calc_row2,
-                                          xaml_calc_row3, xaml_calc_row4, xaml_calc_row5,
-                                          xaml_calc_row6 };
-static const int xaml_calc_row_cols[] = { 5, 4, 4, 4, 4, 4, 4 };
-#define XAML_CALC_N_ROWS ((int)(sizeof(xaml_calc_rows) / sizeof(xaml_calc_rows[0])))
-
-struct xaml_calc_layout
-{
-    int display_h;   /* bottom of the display band */
-    int keypad_top;  /* top of the keypad grid */
-    int row_h;       /* height of one keypad row */
-};
-
-static void xaml_calc_geometry( int width, int height, struct xaml_calc_layout *L )
-{
-    (void)width;
-    L->display_h = height / 3;
-    if (L->display_h < 1) L->display_h = height;
-    L->keypad_top = L->display_h + 4;
-    L->row_h = (height - L->keypad_top) / XAML_CALC_N_ROWS;
-}
-
-/* Calculator display + evaluate-one-pending-op engine (single pending operator,
- * standard non-scientific behaviour). Display is a NUL-terminated string; the
- * engine rewrites it and xaml_layout_render paints it verbatim. */
-static WCHAR xaml_calc_display[32] = L"0";
-static double xaml_calc_accum;
-static WCHAR xaml_calc_op;         /* 0, L'+', L'-', L'*', L'/' */
-static BOOL xaml_calc_fresh = TRUE; /* next digit starts a new entry */
-
-static void xaml_calc_format( double v )
-{
-    if (v == (double)(long long)v && v > -1e15 && v < 1e15)
-        wsprintfW( xaml_calc_display, L"%lld", (long long)v );
-    else
-        wsprintfW( xaml_calc_display, L"%g", v );
-}
-
-static double xaml_calc_eval( double a, double b, WCHAR op )
-{
-    switch (op)
-    {
-    case L'+': return a + b;
-    case L'-': return a - b;
-    case L'*': return a * b;
-    case L'/': return b ? a / b : 0;
-    }
-    return b;
-}
-
-static void xaml_calc_digit( WCHAR ch )
-{
-    size_t n = wcslen( xaml_calc_display );
-    if (xaml_calc_fresh)
-    {
-        if (ch == L'.') { xaml_calc_display[0] = L'0'; xaml_calc_display[1] = L'.'; xaml_calc_display[2] = 0; }
-        else { xaml_calc_display[0] = ch; xaml_calc_display[1] = 0; }
-        xaml_calc_fresh = FALSE;
-        return;
-    }
-    if (n < sizeof(xaml_calc_display) / sizeof(WCHAR) - 1)
-    { xaml_calc_display[n] = ch; xaml_calc_display[n + 1] = 0; }
-}
-
-static void xaml_calc_operator( WCHAR op )
-{
-    double cur = wcstod( xaml_calc_display, NULL );
-    if (xaml_calc_op && !xaml_calc_fresh)
-    { xaml_calc_accum = xaml_calc_eval( xaml_calc_accum, cur, xaml_calc_op );
-      xaml_calc_format( xaml_calc_accum ); }
-    else xaml_calc_accum = cur;
-    xaml_calc_op = op;
-    xaml_calc_fresh = TRUE;
-}
-
-static void xaml_calc_equals( void )
-{
-    double cur = wcstod( xaml_calc_display, NULL );
-    if (xaml_calc_op)
-    { xaml_calc_accum = xaml_calc_eval( xaml_calc_accum, cur, xaml_calc_op );
-      xaml_calc_format( xaml_calc_accum ); xaml_calc_op = 0; xaml_calc_fresh = TRUE; }
-}
-
-static void xaml_calc_negate( void )
-{
-    size_t n = wcslen( xaml_calc_display );
-    if (xaml_calc_display[0] == L'-')
-    {
-        size_t i;
-        for (i = 0; i + 1 < sizeof(xaml_calc_display) / sizeof(WCHAR) && xaml_calc_display[i + 1]; i++)
-            xaml_calc_display[i] = xaml_calc_display[i + 1];
-        xaml_calc_display[i] = 0;
-    }
-    else if (n + 1 < sizeof(xaml_calc_display) / sizeof(WCHAR))
-    {
-        size_t i;
-        for (i = n; i >= 1; i--) xaml_calc_display[i] = xaml_calc_display[i - 1];
-        xaml_calc_display[0] = L'-';
-    }
-}
-
-/* Map a pressed keypad label onto the engine. Memory (MC/MR/M+/M-/MS), %,
- * 1/x, x² and √ are painted but inert here. */
-static void xaml_calc_press( const WCHAR *label )
-{
-    if (!label) return;
-    if (!label[1] && ((label[0] >= L'0' && label[0] <= L'9') || label[0] == L'.'))
-        xaml_calc_digit( label[0] );
-    else if (!label[1] && (label[0] == L'+' || label[0] == L'-' || label[0] == L'*' || label[0] == L'/'))
-        xaml_calc_operator( label[0] );
-    else if (label[0] == L'=' && !label[1])
-        xaml_calc_equals();
-    else if (!wcscmp( label, L"C" ))
-    { xaml_calc_display[0] = L'0'; xaml_calc_display[1] = 0; xaml_calc_accum = 0; xaml_calc_op = 0; xaml_calc_fresh = TRUE; }
-    else if (!wcscmp( label, L"CE" ))
-    { xaml_calc_display[0] = L'0'; xaml_calc_display[1] = 0; xaml_calc_fresh = TRUE; }
-    else if (!wcscmp( label, L"DEL" ))
-    {
-        size_t n = wcslen( xaml_calc_display );
-        if (n > 1) xaml_calc_display[n - 1] = 0;
-        else { xaml_calc_display[0] = L'0'; xaml_calc_display[1] = 0; }
-        xaml_calc_fresh = FALSE;
-    }
-    else if (!wcscmp( label, L"+/-" ))
-        xaml_calc_negate();
-}
-
-/* Reverse of the paint geometry: which label, if any, covers client pixel (x, y). */
-static const WCHAR *xaml_calc_hit( int x, int y, int width, int height )
-{
-    struct xaml_calc_layout L;
-    int r, c, cols, cw;
-
-    xaml_calc_geometry( width, height, &L );
-    if (L.row_h <= 0 || y < L.keypad_top) return NULL;
-    r = (y - L.keypad_top) / L.row_h;
-    if (r < 0 || r >= XAML_CALC_N_ROWS) return NULL;
-    cols = xaml_calc_row_cols[r];
-    if (cols <= 0) return NULL;
-    cw = width / cols;
-    if (cw <= 0) return NULL;
-    c = x / cw;
-    if (c < 0 || c >= cols) return NULL;
-    return xaml_calc_rows[r][c];
-}
-
-/* Digit and '.' use the lighter number-button colour; the rest of the keypad
- * (functions + operators) use the darker operator colour; '=' takes the accent. */
-static BOOL xaml_calc_is_number( const WCHAR *label )
-{
-    if (!label[0]) return FALSE;
-    if (label[1]) return FALSE;
-    return (label[0] >= L'0' && label[0] <= L'9') || label[0] == L'.';
-}
-
-/* Rounded, filled, labelled button cell for the Calculator keypad stand-in.
- * RoundRect fills with the selected brush and outlines with the selected pen,
- * so a matching pen hides the 1px seam between adjacent cells. */
-static void xaml_calc_draw_button( HDC hdc, RECT *rc, const WCHAR *label,
-                                   COLORREF bg, HFONT font )
-{
-    HBRUSH brush = CreateSolidBrush( bg );
-    HPEN pen = CreatePen( PS_SOLID, 1, bg );
-    HGDIOBJ old_brush, old_pen, old_font;
-
-    old_brush = SelectObject( hdc, brush );
-    old_pen = SelectObject( hdc, pen );
-    old_font = SelectObject( hdc, font );
-    RoundRect( hdc, rc->left, rc->top, rc->right, rc->bottom, 6, 6 );
-    SetTextColor( hdc, RGB( 255, 255, 255 ) );
-    SetBkMode( hdc, TRANSPARENT );
-    DrawTextW( hdc, label, -1, rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
-    SelectObject( hdc, old_font );
-    SelectObject( hdc, old_pen );
-    SelectObject( hdc, old_brush );
-    DeleteObject( pen );
-    DeleteObject( brush );
-}
-
-void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content )
-{
-    struct xaml_calc_layout L;
-    RECT rc, cell;
-    HBRUSH bg_brush;
-    HFONT disp_font, button_font;
-    int r, c;
-
-    if (width <= 0 || height <= 0) return;
-    SetRect( &rc, 0, 0, width, height );
-
-    /* Clean background */
-    bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
-    FillRect( hdc, &rc, bg_brush );
-    DeleteObject( bg_brush );
-
-    /* Only paint calculator keypad for Calculator app! Never for WhatsApp or other apps! */
-    if (!is_calculator_app()) return;
-
-    xaml_calc_geometry( width, height, &L );
-
-    /* Display band: dark grey panel with the right-aligned current value. */
-    cell.left = 4;
-    cell.top = 4;
-    cell.right = width - 4;
-    cell.bottom = L.display_h;
-    bg_brush = CreateSolidBrush( RGB( 40, 40, 40 ) );
-    FillRect( hdc, &cell, bg_brush );
-    DeleteObject( bg_brush );
-
-    disp_font = CreateFontW( L.display_h / 2, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                             CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-    /* Button font height ~40% of a keypad row cell, resolved through the device
-     * font mapper so Segoe UI scales to the window DPI. */
-    button_font = CreateFontW( -(height - height / 3) * 40 / 100 / XAML_CALC_N_ROWS, 0, 0, 0,
-                               FW_NORMAL, FALSE, FALSE, FALSE,
-                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                               CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
-
-    SetTextColor( hdc, RGB( 255, 255, 255 ) );
-    SetBkMode( hdc, TRANSPARENT );
-    {
-        HGDIOBJ old = SelectObject( hdc, disp_font );
-        DrawTextW( hdc, xaml_calc_display, -1, &cell, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
-        SelectObject( hdc, old );
-    }
-
-    /* Keypad grid: seven rows filling the space below the display. */
-    if (height > L.keypad_top && L.row_h > 0)
-    {
-        HGDIOBJ old_font = SelectObject( hdc, button_font );
-        for (r = 0; r < XAML_CALC_N_ROWS; r++)
-        {
-            int cols = xaml_calc_row_cols[r];
-            int cw = width / cols;
-            int y0 = L.keypad_top + r * L.row_h;
-            int y1 = (r == XAML_CALC_N_ROWS - 1) ? height : (L.keypad_top + (r + 1) * L.row_h);
-
-            for (c = 0; c < cols; c++)
-            {
-                const WCHAR *label = xaml_calc_rows[r][c];
-                COLORREF bg;
-                cell.left = c * cw + 2;
-                cell.top = y0 + 2;
-                cell.right = (c == cols - 1) ? (width - 2) : ((c + 1) * cw - 2);
-                cell.bottom = y1 - 2;
-                if (label[0] == L'=' && !label[1]) bg = RGB( 0, 120, 215 );
-                else if (xaml_calc_is_number( label )) bg = RGB( 59, 59, 59 );
-                else bg = RGB( 50, 50, 50 );
-                xaml_calc_draw_button( hdc, &cell, label, bg, button_font );
-            }
-        }
-        SelectObject( hdc, old_font );
-    }
-
-    DeleteObject( disp_font );
-    DeleteObject( button_font );
-    TRACE( "xaml layout render %p %ux%u probe=%06lx\n", hdc, width, height, GetPixel( hdc, 5, 5 ) );
 }
 
 static WNDPROC xaml_corewindow_prev_proc;
@@ -2239,31 +1989,20 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         PostQuitMessage( 0 );
         return 0;
     }
-    if (msg == WM_LBUTTONDOWN && is_calculator_app())
+    if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) && global_xaml_window.content)
     {
-        /* The visible surface is the root ancestor's client area, and
-         * xaml_layout_render paints into that same rect, so hit-test against the
-         * root client geometry, not the CoreWindow child's. */
         HWND top = GetAncestor( hwnd, GA_ROOT );
         RECT rc;
         int x = (short)LOWORD( lparam ), y = (short)HIWORD( lparam );
         GetClientRect( top, &rc );
-        if (rc.right > 0 && rc.bottom > 0)
+        if (rc.right > 0 && rc.bottom > 0 &&
+            uwp_handle_mouse_input( top, msg, x, y, rc.right, rc.bottom, global_xaml_window.content ))
         {
-            const WCHAR *label = xaml_calc_hit( x, y, rc.right, rc.bottom );
-            if (label)
-            {
-                TRACE( "xaml click %s @ %d,%d\n", debugstr_w( label ), x, y );
-                xaml_calc_press( label );
-                InvalidateRect( top, NULL, FALSE );
-                UpdateWindow( top );
-                InvalidateRect( hwnd, NULL, FALSE );
-                UpdateWindow( hwnd );
-            }
+            UpdateWindow( top );
+            UpdateWindow( hwnd );
+            return 0;
         }
-        return 0;
     }
-    if (msg == WM_LBUTTONUP && is_calculator_app()) return 0;
     TRACE( "xaml corewindow msg %x\n", msg );
     return CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
 }
@@ -2709,10 +2448,23 @@ struct xaml_window_vtbl_type
     HRESULT (WINAPI *remove_VisibilityChanged)(IInspectable *, EventRegistrationToken);
     HRESULT (WINAPI *Activate)(IInspectable *);
     HRESULT (WINAPI *Close)(IInspectable *);
-    void *pad[10];
+    void *pad[234];    /* full WinUI Window projection: Loaded = 130/131, extended props beyond */
 };
 
 static HRESULT WINAPI xaml_window_zero_out( void *iface, void *a2, void *a3 );
+
+static HRESULT WINAPI xaml_window_add_Loaded( void *iface, void *handler, EventRegistrationToken *token )
+{
+    ERR( "xaml_window_add_Loaded iface %p handler %p\n", iface, handler );
+    if (token) token->value = 1;
+    xaml_register_loaded( handler, (IInspectable *)iface );
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_window_remove_Loaded( void *iface, EventRegistrationToken token )
+{
+    return S_OK;
+}
 
 static const struct xaml_window_vtbl_type xaml_window_vtbl =
 {
@@ -2739,11 +2491,11 @@ static const struct xaml_window_vtbl_type xaml_window_vtbl =
     xaml_window_Activate,
     xaml_window_Close,
     {
-        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out,
-        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out,
-        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out,
-        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out,
-        (void *)xaml_window_zero_out, (void *)xaml_window_zero_out
+        [0 ... 233] = (void *)xaml_window_zero_out,
+        [75 - 32] = (void *)xaml_window_add_Loaded,
+        [76 - 32] = (void *)xaml_window_remove_Loaded,
+        [130 - 32] = (void *)xaml_window_add_Loaded,
+        [131 - 32] = (void *)xaml_window_remove_Loaded,
     }
 };
 
@@ -3413,15 +3165,27 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
     void *xaml_type = NULL;
     HSTRING hname = NULL;
     HRESULT hr = E_FAIL;
+    BOOL is_uwp = FALSE;
 
     if (!out) return E_POINTER;
     *out = NULL;
 
     if (current_application && current_application->outer)
     {
-        hr = IInspectable_QueryInterface( current_application->outer, &IID_IXamlMetadataProvider_WinUI, &provider );
-        if (FAILED(hr) || !provider)
+        if (is_calculator_app())
+        {
             hr = IInspectable_QueryInterface( current_application->outer, &IID_IXamlMetadataProvider_UWP, &provider );
+            if (SUCCEEDED(hr) && provider) is_uwp = TRUE;
+        }
+        else
+        {
+            hr = IInspectable_QueryInterface( current_application->outer, &IID_IXamlMetadataProvider_WinUI, &provider );
+            if (FAILED(hr) || !provider)
+            {
+                hr = IInspectable_QueryInterface( current_application->outer, &IID_IXamlMetadataProvider_UWP, &provider );
+                if (SUCCEEDED(hr) && provider) is_uwp = TRUE;
+            }
+        }
         if (SUCCEEDED(hr) && provider)
         {
             void **vtbl = *(void ***)provider;
@@ -3434,8 +3198,8 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
                 if (SUCCEEDED(hr) && xaml_type)
                 {
                     void **type_vtbl = *(void ***)xaml_type;
-                    /* In WinUI 3: Slot 19 is ActivateInstance (Do_Abi_ActivateInstance_13) */
-                    HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[19];
+                    /* UWP IXamlType: slot 18 is ActivateInstance; WinUI 3 IXamlType: slot 19 is ActivateInstance */
+                    HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[is_uwp ? 18 : 19];
                     if (activate)
                     {
                         hr = activate( xaml_type, out );
@@ -3449,6 +3213,11 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
     }
     ERR( "xaml_create_instance_from_provider(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
     return hr;
+}
+
+HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out )
+{
+    return xaml_create_instance_from_provider( full_name, out );
 }
 
 struct comp_connector_vtbl
@@ -3477,6 +3246,9 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
     HANDLE hFile;
     void *binding = NULL;
     IInspectable *target_conn = (IInspectable *)component;
+
+    if (is_calculator_app() && uwp_try_load_xbf_component( component, resourceLocator, uwp_get_app_outer() ))
+        return;
 
     if (load_depth > 4)
     {
@@ -3518,8 +3290,9 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
 
     TRACE( "comp_name: %s\n", debugstr_w(comp_name) );
 
-    if (!comp_name[0])
+    if (!comp_name[0] || wcsstr(comp_name, L"ResourceDictionary") || wcsstr(comp_name, L"Dictionary"))
     {
+        TRACE( "skipping element synthesis for %s\n", debugstr_w(comp_name) );
         connector->lpVtbl->Release(connector);
         load_depth--;
         return;
@@ -3641,28 +3414,30 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                      * the raw conn_id is per-component and says nothing about the
                                                      * type, so it only feeds the Connect() call below. Unknown
                                                      * names fall back to Grid, which hosts any content. */
-                                                    if (wcsstr(elem_name, L"WebView") || wcsstr(elem_name, L"webview"))
+                                                    if (wcsstr(elem_name, L"ProgressRing") || wcsstr(elem_name, L"Ring"))
+                                                        continue;
+                                                    else if (wcsstr(elem_name, L"WebView") || wcsstr(elem_name, L"webview"))
                                                         class_name = L"Microsoft.UI.Xaml.Controls.WebView2";
                                                     else if (wcsstr(elem_name, L"Image") || wcsstr(elem_name, L"image"))
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.Image";
+                                                        class_name = L"Windows.UI.Xaml.Controls.Image";
                                                     else if (wcsstr(elem_name, L"Canvas") || wcsstr(elem_name, L"canvas"))
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.Canvas";
+                                                        class_name = L"Windows.UI.Xaml.Controls.Canvas";
                                                     else if (wcsstr(elem_name, L"ErrorScreen"))
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.Grid";
+                                                        class_name = L"Windows.UI.Xaml.Controls.Grid";
                                                     else if (wcsstr(elem_name, L"Backdrop") || wcsstr(elem_name, L"Rectangle"))
-                                                        class_name = L"Microsoft.UI.Xaml.Shapes.Rectangle";
+                                                        class_name = L"Windows.UI.Xaml.Shapes.Rectangle";
                                                     else if (wcsstr(elem_name, L"Cactus") || wcsstr(elem_name, L"Viewbox") || wcsstr(elem_name, L"viewbox"))
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.Viewbox";
+                                                        class_name = L"Windows.UI.Xaml.Controls.Viewbox";
                                                     else if (wcsstr(elem_name, L"Title") || wcsstr(elem_name, L"Message") || wcsstr(elem_name, L"Text"))
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.TextBlock";
+                                                        class_name = L"Windows.UI.Xaml.Controls.TextBlock";
                                                     else if (wcsstr(elem_name, L"Border"))
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.Border";
-                                                    else if (wcsstr(elem_name, L"Panel") || wcsstr(elem_name, L"Stack"))
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.StackPanel";
+                                                        class_name = L"Windows.UI.Xaml.Controls.Border";
                                                     else if (wcsstr(elem_name, L"Template") || wcsstr(elem_name, L"Layout"))
-                                                        class_name = L"Microsoft.UI.Xaml.DataTemplate";
+                                                        class_name = L"Windows.UI.Xaml.DataTemplate";
+                                                    else if (wcsstr(elem_name, L"Panel") || wcsstr(elem_name, L"Stack"))
+                                                        class_name = L"Windows.UI.Xaml.Controls.StackPanel";
                                                     else
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.Grid";
+                                                        class_name = L"Windows.UI.Xaml.Controls.Grid";
                                                     TRACE("XBF connect conn_id %lu, elem_name %s, class_name %s\n",
                                                           (unsigned long)conn_id, debugstr_w(elem_name), debugstr_w(class_name));
                                                     if (FAILED(xaml_create_instance_from_provider(class_name, &target)) || !target)
@@ -4164,9 +3939,10 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
             if (SUCCEEDED(hr) && xaml_type)
             {
                 void **type_vtbl = *(void ***)xaml_type;
-                /* Slot 19: ActivateInstance(IInspectable**) (Do_Abi_ActivateInstance_13) */
-                HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[19];
-                TRACE( "calling IXamlType::ActivateInstance (%p)\n", activate );
+                /* UWP IXamlType has ActivateInstance at slot 18; WinUI 3 has it at slot 19 */
+                int act_slot = is_calculator_app() ? 18 : 19;
+                HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[act_slot];
+                TRACE( "calling IXamlType::ActivateInstance slot %d (%p)\n", act_slot, activate );
                 if (activate)
                 {
                     hr = activate( xaml_type, (void **)out );
