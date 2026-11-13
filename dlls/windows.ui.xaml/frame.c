@@ -21,6 +21,11 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
+static const GUID IID_WinRT_IInspectable =
+    { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+static const GUID IID_IReferenceTracker =
+    { 0xae927363, 0x74e4, 0x47e7, { 0xab, 0x5e, 0x6e, 0x97, 0xd6, 0xc2, 0x88, 0x5b } };
+
 /* Windows.UI.Xaml.Controls.Frame interface GUIDs */
 static const GUID IID_IFrameFactory =
     { 0x02ee93d4, 0x448e, 0x469e, { 0x97, 0x99, 0x0a, 0x8a, 0x1f, 0x70, 0xf1, 0x71 } };
@@ -58,8 +63,6 @@ static const GUID IID_IColumnDefinition =
     { 0x454cea14, 0x87ec, 0x5890, { 0xbb, 0x62, 0xf1, 0xd8, 0x2a, 0x94, 0x75, 0x8e } };
 static const GUID IID_IColumnDefinitionStatics =
     { 0xaba4b755, 0xca63, 0x5ed7, { 0xae, 0x31, 0x45, 0xf9, 0xf9, 0x19, 0x20, 0xb0 } };
-static const GUID IID_IReferenceTracker =
-    { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
 static const GUID IID_IReferenceTrackerTarget =
     { 0x5c13e51c, 0x4f32, 0x4726, { 0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0 } };
 static const GUID IID_IWeakReferenceSource =
@@ -126,6 +129,8 @@ static const GUID IID_IComponentConnector_x =
     { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
 static const GUID IID_IDataTemplate =
     { 0x9910aec7, 0x8ab5, 0x4118, { 0x9b, 0xc6, 0x09, 0xf4, 0x5a, 0x35, 0x07, 0x3d } };
+static const GUID IID_IDataTemplate_WinUI =
+    { 0xaf86e2e0, 0xb12d, 0x4c6a, { 0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90 } };
 
 struct xaml_frame
 {
@@ -149,6 +154,7 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IFrame ) ||
         IsEqualGUID( iid, &IID_INavigate ) ||
@@ -173,6 +179,7 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
         IsEqualGUID( iid, &IID_IRowDefinition ) ||
         IsEqualGUID( iid, &IID_IColumnDefinition ) ||
         IsEqualGUID( iid, &IID_IDataTemplate ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
@@ -457,6 +464,7 @@ static HRESULT WINAPI frame_factory_QueryInterface( IActivationFactory *iface, R
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
         IsEqualGUID( iid, &IID_IGridStatics ) ||
@@ -623,6 +631,7 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IFrame ) ||
         IsEqualGUID( iid, &IID_INavigate ) ||
@@ -647,6 +656,7 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
         IsEqualGUID( iid, &IID_IRowDefinition ) ||
         IsEqualGUID( iid, &IID_IColumnDefinition ) ||
         IsEqualGUID( iid, &IID_IDataTemplate ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
@@ -788,6 +798,7 @@ static HRESULT WINAPI page_factory_QueryInterface( IActivationFactory *iface, RE
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
         IsEqualGUID( iid, &IID_IPageFactory ))
@@ -1260,6 +1271,7 @@ struct xaml_element
     IInspectable *init_handler;
     BOOL init_triggered;
     BOOL browser_started;
+    void *loader_core;
     BOOL is_webview;
     unsigned int qi_count;
     const WCHAR *class_name;
@@ -1498,6 +1510,7 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         IsEqualGUID( iid, &IID_IColumnDefinition ) ||
         IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
         IsEqualGUID( iid, &IID_IControl_WinUI ) ||
@@ -1515,6 +1528,7 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         IsEqualGUID( iid, &IID_IShape ) ||
         IsEqualGUID( iid, &IID_IViewbox ) ||
         IsEqualGUID( iid, &IID_IDataTemplate ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
@@ -1543,6 +1557,11 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
          * even at 16 MB). Answer the first 128 connector requests per element;
          * past that report E_NOINTERFACE so the binder treats the element as
          * a leaf and unwinds. */
+        if (impl->qi_count > 16)
+        {
+            *out = NULL;
+            return E_NOINTERFACE;
+        }
         impl->qi_count++;
         return IInspectable_QueryInterface( impl->outer, iid, out );
     }
@@ -1781,6 +1800,7 @@ static HRESULT WINAPI xaml_async_action_QueryInterface( IAsyncAction *iface, REF
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IAsyncAction ))
     {
@@ -1918,10 +1938,14 @@ struct core_webview2
     IInspectable ICoreWebView2_2_iface;
     LONG ref;
     HSTRING source_uri;
+    void *loader_core;
+    void *tracker_source;      /* webview2loader webview object (vtbl[6] = Navigate) */
 };
 
 static const GUID IID_ICoreWebView2 =
     { 0x3a3f559a, 0xe5e9, 0x5338, { 0xbb, 0x67, 0x4e, 0xb0, 0x50, 0x4a, 0x4f, 0x14 } };
+static const GUID IID_ICoreWebView2Profile =
+    { 0xb87fd0bc, 0x8e64, 0x56a0, { 0x94, 0x87, 0x4b, 0x13, 0x98, 0x1f, 0xd2, 0x9e } };
 static const GUID IID_ICoreWebView2_2 =
     { 0x578cb133, 0x2873, 0x5408, { 0xbd, 0x9e, 0x38, 0x9b, 0xbe, 0x9f, 0xa7, 0xfa } };
 static const GUID IID_ICoreWebView2_3 =
@@ -1980,6 +2004,7 @@ static HRESULT WINAPI cwv2_settings_QueryInterface( IInspectable *iface, REFIID 
 {
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_ICoreWebView2Settings ) ||
         IsEqualGUID( iid, &IID_ICoreWebView2Settings2 ) ||
@@ -2013,7 +2038,14 @@ static ULONG WINAPI cwv2_settings_Release( IInspectable *iface )
     return ref;
 }
 static HRESULT WINAPI cwv2_settings_GetIids( IInspectable *iface, ULONG *count, IID **iids )
-{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+{
+    IID *arr;
+    if (!(arr = CoTaskMemAlloc( sizeof(IID) ))) return E_OUTOFMEMORY;
+    *arr = IID_ICoreWebView2Settings;
+    if (count) *count = 1;
+    if (iids) *iids = arr; else CoTaskMemFree( arr );
+    return S_OK;
+}
 static HRESULT WINAPI cwv2_settings_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 { return WindowsCreateString( L"Microsoft.Web.WebView2.Core.CoreWebView2Settings", 47, name ); }
 static HRESULT WINAPI cwv2_settings_GetTrustLevel( IInspectable *iface, TrustLevel *level )
@@ -2092,8 +2124,11 @@ static inline struct core_webview2 *impl_from_cwv2_2( void *iface )
 static HRESULT WINAPI cwv2_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct core_webview2 *impl = impl_from_cwv2( iface );
+    TRACE( "cwv2_QI %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_ICoreWebView2 ))
     {
@@ -2139,9 +2174,17 @@ static ULONG WINAPI cwv2_Release( IInspectable *iface )
     return ref;
 }
 static HRESULT WINAPI cwv2_GetIids( IInspectable *iface, ULONG *count, IID **iids )
-{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+{
+    IID *arr;
+    ERR( "cwv2_GetIids iface %p\n", iface );
+    if (!(arr = CoTaskMemAlloc( sizeof(IID) ))) return E_OUTOFMEMORY;
+    *arr = IID_ICoreWebView2;
+    if (count) *count = 1;
+    if (iids) *iids = arr; else CoTaskMemFree( arr );
+    return S_OK;
+}
 static HRESULT WINAPI cwv2_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
-{ return WindowsCreateString( L"Microsoft.Web.WebView2.Core.CoreWebView2", 39, name ); }
+{ ERR( "cwv2_GetRuntimeClassName\n" ); return WindowsCreateString( L"Microsoft.Web.WebView2.Core.CoreWebView2", 39, name ); }
 static HRESULT WINAPI cwv2_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 { if (level) *level = BaseTrust; return S_OK; }
 
@@ -2169,6 +2212,7 @@ static HRESULT WINAPI cwv2_get_Settings( void *iface, void **settings )
     s->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_settings_vtbl;
     s->ref = 1;
     *settings = &s->IInspectable_iface;
+    ERR( "cwv2_get_Settings -> %p\n", *settings );
     return S_OK;
 }
 
@@ -2178,6 +2222,28 @@ static HRESULT WINAPI cwv2_Navigate( void *iface, HSTRING uri )
     ERR( "=== CoreWebView2::Navigate: %s ===\n", debugstr_hstring( uri ) );
     if (impl->source_uri) WindowsDeleteString( impl->source_uri );
     WindowsDuplicateString( uri, &impl->source_uri );
+    if (impl->loader_core)
+    {
+        /* Forward to the webview2loader webview object (Edge IDL layout: Navigate = vtbl[8]). */
+        HRESULT (WINAPI *p_navigate)( void *, LPCWSTR, void * ) =
+            (void *)(*(void ***)impl->loader_core)[8];
+        const WCHAR *s = WindowsGetStringRawBuffer( uri, NULL );
+        HRESULT hr2 = p_navigate( impl->loader_core, s, NULL );
+        ERR( "cwv2_Navigate: loader forward hr %#lx\n", hr2 );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI cwv2_NavigateToString( void *iface, LPCWSTR html )
+{
+    struct core_webview2 *impl = impl_from_cwv2( iface );
+    ERR( "=== CoreWebView2::NavigateToString (%u chars) ===\n", html ? (unsigned)lstrlenW( html ) : 0u );
+    if (impl->loader_core)
+    {
+        HRESULT (WINAPI *p_navigate)( void *, LPCWSTR, void * ) =
+            (void *)(*(void ***)impl->loader_core)[8];
+        HRESULT hr2 = p_navigate( impl->loader_core, L"data:text/html,", NULL );
+        ERR( "cwv2_NavigateToString: loader forward hr %#lx\n", hr2 );
+    }
     return S_OK;
 }
 static HRESULT WINAPI cwv2_get_Source( void *iface, HSTRING *uri )
@@ -2199,6 +2265,441 @@ static HRESULT WINAPI cwv2_2_get_Environment( void *iface, void **env )
     return S_OK;
 }
 
+/* s540: per-slot logging stubs — the shared generic slot cannot know its slot index, */
+static HRESULT WINAPI cwv2_g( void *iface, int slot, void *a1, void *a2 );
+static HRESULT WINAPI cwv2_g6( void *iface, ... );
+static HRESULT WINAPI cwv2_g7( void *iface, ... );
+static HRESULT WINAPI cwv2_g8( void *iface, ... );
+static HRESULT WINAPI cwv2_g9( void *iface, ... );
+static HRESULT WINAPI cwv2_g10( void *iface, ... );
+static HRESULT WINAPI cwv2_g11( void *iface, ... );
+static HRESULT WINAPI cwv2_g12( void *iface, ... );
+static HRESULT WINAPI cwv2_g13( void *iface, ... );
+static HRESULT WINAPI cwv2_g14( void *iface, ... );
+static HRESULT WINAPI cwv2_g15( void *iface, ... );
+static HRESULT WINAPI cwv2_g16( void *iface, ... );
+static HRESULT WINAPI cwv2_g17( void *iface, ... );
+static HRESULT WINAPI cwv2_g18( void *iface, ... );
+static HRESULT WINAPI cwv2_g19( void *iface, ... );
+static HRESULT WINAPI cwv2_g20( void *iface, ... );
+static HRESULT WINAPI cwv2_g21( void *iface, ... );
+static HRESULT WINAPI cwv2_g22( void *iface, ... );
+static HRESULT WINAPI cwv2_g23( void *iface, ... );
+static HRESULT WINAPI cwv2_g24( void *iface, ... );
+static HRESULT WINAPI cwv2_g25( void *iface, ... );
+static HRESULT WINAPI cwv2_g26( void *iface, ... );
+static HRESULT WINAPI cwv2_g27( void *iface, ... );
+static HRESULT WINAPI cwv2_g28( void *iface, ... );
+static HRESULT WINAPI cwv2_g29( void *iface, ... );
+static HRESULT WINAPI cwv2_g30( void *iface, ... );
+static HRESULT WINAPI cwv2_g31( void *iface, ... );
+static HRESULT WINAPI cwv2_g32( void *iface, ... );
+static HRESULT WINAPI cwv2_g33( void *iface, ... );
+static HRESULT WINAPI cwv2_g34( void *iface, ... );
+static HRESULT WINAPI cwv2_g35( void *iface, ... );
+static HRESULT WINAPI cwv2_g36( void *iface, ... );
+static HRESULT WINAPI cwv2_g37( void *iface, ... );
+static HRESULT WINAPI cwv2_g38( void *iface, ... );
+static HRESULT WINAPI cwv2_g39( void *iface, ... );
+static HRESULT WINAPI cwv2_g40( void *iface, ... );
+static HRESULT WINAPI cwv2_g41( void *iface, ... );
+static HRESULT WINAPI cwv2_g42( void *iface, ... );
+static HRESULT WINAPI cwv2_g43( void *iface, ... );
+static HRESULT WINAPI cwv2_g44( void *iface, ... );
+static HRESULT WINAPI cwv2_g45( void *iface, ... );
+static HRESULT WINAPI cwv2_g46( void *iface, ... );
+static HRESULT WINAPI cwv2_g47( void *iface, ... );
+static HRESULT WINAPI cwv2_g48( void *iface, ... );
+static HRESULT WINAPI cwv2_g49( void *iface, ... );
+static HRESULT WINAPI cwv2_g50( void *iface, ... );
+static HRESULT WINAPI cwv2_g51( void *iface, ... );
+static HRESULT WINAPI cwv2_g52( void *iface, ... );
+static HRESULT WINAPI cwv2_g53( void *iface, ... );
+static HRESULT WINAPI cwv2_g54( void *iface, ... );
+static HRESULT WINAPI cwv2_g55( void *iface, ... );
+static HRESULT WINAPI cwv2_g56( void *iface, ... );
+static HRESULT WINAPI cwv2_g57( void *iface, ... );
+static HRESULT WINAPI cwv2_g58( void *iface, ... );
+static HRESULT WINAPI cwv2_g59( void *iface, ... );
+static HRESULT WINAPI cwv2_g60( void *iface, ... );
+static HRESULT WINAPI cwv2_g61( void *iface, ... );
+static HRESULT WINAPI cwv2_g62( void *iface, ... );
+static HRESULT WINAPI cwv2_g63( void *iface, ... );
+static HRESULT WINAPI cwv2_g64( void *iface, ... );
+static HRESULT WINAPI cwv2_g65( void *iface, ... );
+static HRESULT WINAPI cwv2_g66( void *iface, ... );
+static HRESULT WINAPI cwv2_g67( void *iface, ... );
+static HRESULT WINAPI cwv2_g68( void *iface, ... );
+static HRESULT WINAPI cwv2_g69( void *iface, ... );
+static HRESULT WINAPI cwv2_g70( void *iface, ... );
+static HRESULT WINAPI cwv2_g71( void *iface, ... );
+static HRESULT WINAPI cwv2_g72( void *iface, ... );
+static HRESULT WINAPI cwv2_g73( void *iface, ... );
+static HRESULT WINAPI cwv2_g74( void *iface, ... );
+static HRESULT WINAPI cwv2_g75( void *iface, ... );
+static HRESULT WINAPI cwv2_g76( void *iface, ... );
+static HRESULT WINAPI cwv2_g77( void *iface, ... );
+static HRESULT WINAPI cwv2_g78( void *iface, ... );
+static HRESULT WINAPI cwv2_g79( void *iface, ... );
+static HRESULT WINAPI cwv2_g80( void *iface, ... );
+static HRESULT WINAPI cwv2_g( void *iface, int slot, void *a1, void *a2 )
+{
+    const WCHAR *s = a1 ? WindowsGetStringRawBuffer( *(HSTRING *)a1, NULL ) : NULL;
+    ERR( "cwv2_slot %d iface %p a1 %p a2 %p s %s\n", slot, iface, a1, a2, debugstr_w( s ) );
+    switch (slot)
+    {
+    case 13: case 15: case 17: case 19: case 21: case 23: case 25: case 27:
+    case 29: case 31: case 40: case 50: case 52: case 58: case 61: case 65:
+        /* add_*(handler, EventRegistrationToken*) — hand out a stable token. */
+        if (a2) *(INT64 *)a2 = (INT64)(slot * 4 + 1);
+        break;
+    case 33: /* AddScriptToExecuteOnDocumentCreated(js, handler) */
+    case 35: /* ExecuteScript(js, handler) */
+        if (a2) ((HRESULT (WINAPI *)(void *, HRESULT, LPCWSTR))(*(void ***)a2)[3])( a2, S_OK, L"" );
+        break;
+    case 43: if (a1) *(UINT32 *)a1 = GetCurrentProcessId(); break; /* get_BrowserProcessId */
+    case 44: case 45: case 60: if (a1) *(BOOL *)a1 = FALSE; break; /* CanGoBack/Forward, ContainsFullScreen */
+    default: break;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI cwv2_g6( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 6, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g7( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 7, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g8( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 8, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g9( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 9, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g10( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 10, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g11( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 11, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g12( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 12, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g13( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 13, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g14( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 14, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g15( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 15, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g16( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 16, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g17( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 17, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g18( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 18, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g19( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 19, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g20( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 20, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g21( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 21, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g22( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 22, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g23( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 23, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g24( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 24, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g25( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 25, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g26( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 26, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g27( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 27, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g28( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 28, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g29( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 29, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g30( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 30, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g31( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 31, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g32( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 32, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g33( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 33, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g34( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 34, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g35( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 35, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g36( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 36, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g37( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 37, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g38( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 38, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g39( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 39, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g40( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 40, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g41( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 41, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g42( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 42, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g43( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 43, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g44( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 44, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g45( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 45, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g46( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 46, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g47( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 47, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g48( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 48, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g49( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 49, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g50( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 50, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g51( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 51, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g52( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 52, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g53( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 53, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g54( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 54, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g55( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 55, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g56( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 56, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g57( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 57, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g58( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 58, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g59( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 59, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g60( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 60, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g61( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 61, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g62( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 62, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g63( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 63, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g64( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 64, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g65( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 65, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g66( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 66, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g67( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 67, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g68( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 68, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g69( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 69, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g70( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 70, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g71( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 71, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g72( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 72, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g73( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 73, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g74( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 74, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g75( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 75, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g76( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 76, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g77( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 77, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g78( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 78, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g79( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 79, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+static HRESULT WINAPI cwv2_g80( void *iface, ... ) { va_list a; va_start( a, iface ); HRESULT hr = cwv2_g( iface, 80, va_arg( a, void * ), va_arg( a, void * ) ); va_end( a ); return hr; }
+
+/* s480: minimal completed IAsyncOperation<HSTRING>. The app's init handler
+ * awaits CallDevToolsProtocolMethod (and friends); a generic slot leaves the
+ * IAsyncOperation out-param NULL and the await never resumes. This shell
+ * stores the projection's completion handler in put_Completed and fires it
+ * right away (status = Completed, GetResults returns the stored string), so
+ * every await in OnCoreWebView2Initialized completes inline. */
+struct cwv2_asyncop
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+    HSTRING result;
+    void *handler;          /* AsyncOperationCompletedHandler<HSTRING> */
+};
+
+static inline struct cwv2_asyncop *impl_from_asyncop( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct cwv2_asyncop, IInspectable_iface );
+}
+
+static HRESULT WINAPI asyncop_QueryInterface( void *iface, REFIID iid, void **obj )
+{
+    struct cwv2_asyncop *impl = impl_from_asyncop( iface );
+    *obj = NULL;
+    if (!iid) return E_POINTER;
+    if (!memcmp( iid, &IID_IInspectable, sizeof(GUID) ) ||
+        !memcmp( iid, &IID_IAsyncInfo, sizeof(GUID) ) ||
+        !memcmp( iid, &IID_IAsyncOperation_HSTRING, sizeof(GUID) ))
+    {
+        *obj = impl;
+        IInspectable_AddRef( *obj );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI asyncop_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_asyncop( iface )->ref );
+}
+static ULONG WINAPI asyncop_Release( void *iface )
+{
+    struct cwv2_asyncop *impl = impl_from_asyncop( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->result) WindowsDeleteString( impl->result );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI asyncop_GetResults( void *iface, HSTRING *s )
+{
+    struct cwv2_asyncop *impl = impl_from_asyncop( iface );
+    if (!s) return E_POINTER;
+    if (impl->result) return WindowsDuplicateString( impl->result, s );
+    return WindowsCreateString( L"{}", 2, s );
+}
+static HRESULT WINAPI asyncop_put_Completed( void *iface, void *handler );
+static HRESULT WINAPI asyncop_get_Completed( void *iface, void **handler )
+{
+    struct cwv2_asyncop *impl = impl_from_asyncop( iface );
+    if (!handler) return E_POINTER;
+    *handler = impl->handler;
+    if (*handler) ((IInspectable *)*handler)->lpVtbl->AddRef( *handler );
+    return S_OK;
+}
+static HRESULT WINAPI asyncop_GetId( void *iface, UINT32 *id )
+{
+    if (id) *id = 1;
+    return S_OK;
+}
+static HRESULT WINAPI asyncop_Cancel( void *iface ) { return S_OK; }
+static HRESULT WINAPI asyncop_GetStatus( void *iface, AsyncStatus *status )
+{
+    if (status) *status = Completed;
+    return S_OK;
+}
+static HRESULT WINAPI asyncop_put_Completed( void *iface, void *handler )
+{
+    struct cwv2_asyncop *impl = impl_from_asyncop( iface );
+    typedef HRESULT (WINAPI *p_Invoke)( void *, void *, AsyncStatus );
+    if (impl->handler) ((IInspectable *)impl->handler)->lpVtbl->Release( impl->handler );
+    impl->handler = handler;
+    if (handler)
+    {
+        ((IInspectable *)handler)->lpVtbl->AddRef( handler );
+        /* Completed already: fire the projection's continuation inline. */
+        ((p_Invoke)(*(void ***)handler)[3])( handler, iface, Completed );
+    }
+    return S_OK;
+}
+static const void *cwv2_asyncop_vtbl[9] =
+{
+    [0] = asyncop_QueryInterface,
+    [1] = asyncop_AddRef,
+    [2] = asyncop_Release,
+    [3] = cwv2_GetIids,             /* IInspectable: GetIids/GetRuntimeClassName/GetTrustLevel */
+    [4] = cwv2_GetRuntimeClassName,
+    [5] = cwv2_GetTrustLevel,
+    [6] = asyncop_GetResults,
+    [7] = asyncop_put_Completed,
+    [8] = asyncop_get_Completed,
+};
+
+/* Create a completed async-op carrying `result` (may be NULL → "{}"). */
+static HRESULT cwv2_asyncop_create( HSTRING result, void **out )
+{
+    struct cwv2_asyncop *op = calloc( 1, sizeof(*op) );
+    if (!op) return E_OUTOFMEMORY;
+    op->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_asyncop_vtbl;
+    op->ref = 1;
+    op->result = result;
+    if (result) WindowsDuplicateString( result, &op->result );
+    *out = &op->IInspectable_iface;
+    return S_OK;
+}
+
+/* s480: CoreWebView2Profile shell. The app awaits
+ * CoreWebView2.Profile.AddBrowserExtensionAsync(path); slot 8 is get_Profile
+ * and the profile's AddBrowserExtension slot returns a completed
+ * IAsyncOperation<CoreWebView2BrowserExtension> (asyncop shell). */
+struct cwv2_profile
+{
+    IInspectable IInspectable_iface;
+    LONG ref;
+};
+
+static inline struct cwv2_profile *impl_from_profile( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct cwv2_profile, IInspectable_iface );
+}
+
+static HRESULT WINAPI profile_QueryInterface( void *iface, REFIID iid, void **obj )
+{
+    struct cwv2_profile *impl = impl_from_profile( iface );
+    *obj = NULL;
+    (void)iid;
+    /* Answer every IID with self: the app QIs Profile_2 for AddBrowserExtension. */
+    *obj = &impl->IInspectable_iface;
+    IInspectable_AddRef( *obj );
+    return S_OK;
+}
+static ULONG WINAPI profile_AddRef( void *iface )
+{
+    return InterlockedIncrement( &impl_from_profile( iface )->ref );
+}
+static ULONG WINAPI profile_Release( void *iface )
+{
+    struct cwv2_profile *impl = impl_from_profile( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+/* AddBrowserExtension(folderPath, ICoreWebView2ProfileAddBrowserExtensionCompletedHandler*)
+ * .NET SDK uses the completed-handler pattern: fire the handler synchronously
+ * with a shell extension object (the asyncop shell answers get_Id/get_Name). */
+static HRESULT WINAPI profile_AddBrowserExtension( void *iface, HSTRING path, void *handler )
+{
+    typedef HRESULT (WINAPI *p_Invoke)( void *, HRESULT, void * );
+    void *ext = NULL;
+    (void)iface;
+    ERR( "profile_AddBrowserExtension %s handler %p\n", debugstr_hstring( path ), handler );
+    cwv2_asyncop_create( NULL, &ext );
+    if (handler) ((p_Invoke)(*(void ***)handler)[3])( handler, S_OK, ext );
+    return S_OK;
+}
+/* the returned extension object answers .Id with the Zoom extension id */
+static HRESULT WINAPI profile_generic_slot( void *iface, ... )
+{
+    const void **vt = *(const void ***)iface;
+    int slot = 0;
+    while (slot < 256 && vt[slot] != (const void *)profile_generic_slot) slot++;
+    ERR( "profile_slot %d iface %p\n", slot, iface );
+    return S_OK;
+}
+
+static const void *cwv2_profile_vtbl[256] =
+{
+    [0] = profile_QueryInterface,
+    [1] = profile_AddRef,
+    [2] = profile_Release,
+    [3] = cwv2_GetIids,
+    [4] = cwv2_GetRuntimeClassName,
+    [5] = cwv2_GetTrustLevel,
+    [6 ... 255] = profile_generic_slot,
+    [8] = profile_AddBrowserExtension,   /* WinRT class: 6 BrowserExtensions, 7 DefaultBackgroundColor, 8 AddBrowserExtension */
+};
+
+/* ICoreWebView2_2::CallDevToolsProtocolMethod (slot 33). The app's last await
+ * in OnCoreWebView2Initialized is CallDevToolsProtocolMethodAsync
+ * ("Browser.setPermission"); its Task completes only when the completion
+ * handler fires, so invoke the handler synchronously with a CDP-shaped reply. */
+static HRESULT WINAPI cwv2_CallDevToolsProtocolMethod( void *iface, LPCWSTR method, LPCWSTR params, void *handler )
+{
+    typedef HRESULT (WINAPI *p_Invoke)( void *, HRESULT, LPCWSTR );
+    (void)iface;
+    ERR( "cwv2_CallDevToolsProtocolMethod %s %s handler %p\n",
+         debugstr_w(method), debugstr_w(params), handler );
+    if (handler)
+        ((p_Invoke)(*(void ***)handler)[3])( handler, S_OK, L"{}" );
+    return S_OK;
+}
+
+static HRESULT WINAPI cwv2_get_Profile( void *iface, void **out )
+{
+    struct cwv2_profile *p;
+    (void)iface;
+    ERR( "cwv2_get_Profile\n" );
+    if (!out) return E_POINTER;
+    if (!(p = calloc( 1, sizeof(*p) ))) return E_OUTOFMEMORY;
+    p->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_profile_vtbl;
+    p->ref = 1;
+    *out = &p->IInspectable_iface;
+    return S_OK;
+}
+
+/* s470: breadcrumb generic slot for the core shell — the app's
+ * OnCoreWebView2Initialized stalls mid-handler and we need to know which
+ * vtbl slot (property/method) it stalls on. Logs slot, iface and arg1. */
+static HRESULT WINAPI cwv2_generic_slot( void *iface, ... )
+{
+    const void **vt = *(const void ***)iface;
+    int slot = 0;
+    va_list arg;
+    while (slot < 256 && vt[slot] != (const void *)cwv2_generic_slot) slot++;
+    va_start( arg, iface );
+    {
+        void *a1 = va_arg( arg, void * );
+        void *a2 = va_arg( arg, void * );
+        const WCHAR *s = a1 ? WindowsGetStringRawBuffer( *(HSTRING *)a1, NULL ) : NULL;
+        ERR( "cwv2_slot %d iface %p a1 %p a2 %p s %s\n", slot, iface, a1, a2, debugstr_w( s ) );
+    }
+    va_end( arg );
+    return S_OK;
+}
+
+static HRESULT WINAPI cwv2_ConnectFromTrackerSource( void *iface, void *source )
+{
+    struct core_webview2 *impl = impl_from_cwv2( (IInspectable *)iface );
+    if (source)
+    {
+        if (impl->tracker_source)
+            ((IUnknown *)impl->tracker_source)->lpVtbl->Release( (IUnknown *)impl->tracker_source );
+        impl->tracker_source = source;
+        ((IUnknown *)source)->lpVtbl->AddRef( (IUnknown *)source );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI cwv2_AddRefFromTrackerSource( void *iface )
+{
+    struct core_webview2 *impl = impl_from_cwv2( (IInspectable *)iface );
+    if (impl->tracker_source)
+        ((IUnknown *)impl->tracker_source)->lpVtbl->AddRef( (IUnknown *)impl->tracker_source );
+    return S_OK;
+}
+static HRESULT WINAPI cwv2_ReleaseFromTrackerSource( void *iface )
+{
+    struct core_webview2 *impl = impl_from_cwv2( (IInspectable *)iface );
+    if (impl->tracker_source)
+        ((IUnknown *)impl->tracker_source)->lpVtbl->Release( (IUnknown *)impl->tracker_source );
+    return S_OK;
+}
 static const void *cwv2_vtbl[256] =
 {
     [0] = cwv2_QueryInterface,         /* 0: QI */
@@ -2207,10 +2708,16 @@ static const void *cwv2_vtbl[256] =
     [3] = cwv2_GetIids,                /* 3: GetIids */
     [4] = cwv2_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = cwv2_GetTrustLevel,          /* 5: GetTrustLevel */
-    [6 ... 255] = element_generic_slot,
-    [6] = cwv2_get_Settings,           /* 6: get_Settings */
-    [7] = cwv2_get_Source,             /* 7: get_Source */
-    [45] = cwv2_Navigate,              /* 45: Navigate */
+    [6] = cwv2_ConnectFromTrackerSource, /* 6-8: IReferenceTracker (tracked WinRT class) */
+    [7] = cwv2_AddRefFromTrackerSource,
+    [8] = cwv2_ReleaseFromTrackerSource,
+    [6] = cwv2_g6, [7] = cwv2_g7, [8] = cwv2_g8, [9] = cwv2_g9, [10] = cwv2_g10, [11] = cwv2_g11, [12] = cwv2_g12, [13] = cwv2_g13, [14] = cwv2_g14, [15] = cwv2_g15, [16] = cwv2_g16, [17] = cwv2_g17, [18] = cwv2_g18, [19] = cwv2_g19, [20] = cwv2_g20, [21] = cwv2_g21, [22] = cwv2_g22, [23] = cwv2_g23, [24] = cwv2_g24, [25] = cwv2_g25, [26] = cwv2_g26, [27] = cwv2_g27, [28] = cwv2_g28, [29] = cwv2_g29, [30] = cwv2_g30, [31] = cwv2_g31, [32] = cwv2_g32, [33] = cwv2_g33, [34] = cwv2_g34, [35] = cwv2_g35, [36] = cwv2_g36, [37] = cwv2_g37, [38] = cwv2_g38, [39] = cwv2_g39, [40] = cwv2_g40, [41] = cwv2_g41, [42] = cwv2_g42, [43] = cwv2_g43, [44] = cwv2_g44, [45] = cwv2_g45, [46] = cwv2_g46, [47] = cwv2_g47, [48] = cwv2_g48, [49] = cwv2_g49, [50] = cwv2_g50, [51] = cwv2_g51, [52] = cwv2_g52, [53] = cwv2_g53, [54] = cwv2_g54, [55] = cwv2_g55, [56] = cwv2_g56, [57] = cwv2_g57, [58] = cwv2_g58, [59] = cwv2_g59, [60] = cwv2_g60, [61] = cwv2_g61, [62] = cwv2_g62, [63] = cwv2_g63, [64] = cwv2_g64, [65] = cwv2_g65, [66] = cwv2_g66, [67] = cwv2_g67, [68] = cwv2_g68, [69] = cwv2_g69, [70] = cwv2_g70, [71] = cwv2_g71, [72] = cwv2_g72, [73] = cwv2_g73, [74] = cwv2_g74, [75] = cwv2_g75, [76] = cwv2_g76, [77] = cwv2_g77, [78] = cwv2_g78, [79] = cwv2_g79, [80] = cwv2_g80,
+    [9] = cwv2_get_Settings,           /* 9: get_Settings (tracked layout = C + 6) */
+    [10] = cwv2_get_Source,            /* 10: get_Source */
+    [11] = cwv2_Navigate,              /* 11: Navigate */
+    [12] = cwv2_NavigateToString,      /* 12: NavigateToString(LPCWSTR) */
+    [37] = cwv2_get_Profile,           /* 37: get_Profile (C 31 + 6) */
+    [42] = cwv2_CallDevToolsProtocolMethod, /* 42: CallDevToolsProtocolMethod (C 36 + 6) */
 };
 
 static const void *cwv2_2_vtbl[256] =
@@ -2221,8 +2728,9 @@ static const void *cwv2_2_vtbl[256] =
     [3] = cwv2_GetIids,                /* 3: GetIids */
     [4] = cwv2_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = cwv2_GetTrustLevel,          /* 5: GetTrustLevel */
-    [6 ... 255] = element_generic_slot,
-    [7] = cwv2_2_get_Environment,      /* 7: get_Environment */
+    [6 ... 255] = cwv2_generic_slot,
+    [9] = cwv2_2_get_Environment,      /* 9: get_Environment (tracked layout = C + 6) */
+    [37] = cwv2_get_Profile,           /* _3 slot wired on _2 shell: app QIs _2/_3 loosely */
 };
 
 static const GUID IID_ICoreWebView2InitializedEventArgs =
@@ -2364,6 +2872,7 @@ static void trigger_core_webview2_initialized( struct xaml_element *impl, void *
             cwv->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_vtbl;
             cwv->ICoreWebView2_2_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_2_vtbl;
             cwv->ref = 1;
+            cwv->loader_core = impl->loader_core;
             impl->core_webview2 = &cwv->IInspectable_iface;
         }
     }
@@ -2431,17 +2940,42 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
     if (SUCCEEDED( hr ) && controller)
     {
         get_core = (void *)(*(void ***)controller)[7];  /* ICoreWebView2Controller::get_CoreWebView2 */
-        if (SUCCEEDED( get_core( controller, &core ) ) && core && !h->impl->core_webview2)
+        if ((ULONG_PTR)get_core >= (ULONG_PTR)0x7ffc00000000)  /* stale shared-page slot, see s380 */
         {
-            h->impl->core_webview2 = (IInspectable *)core;
+            HMODULE loader = GetModuleHandleW( L"webview2loader.dll" );
+            get_core = (void *)GetProcAddress( loader, "GetCoreWebView2FromController" );
+            ERR( "wv2_ctrl_handler_Invoke: stale slot7, using export %p\n", get_core );
+            if (!get_core) return E_NOINTERFACE;
+        }
+        if (SUCCEEDED( get_core( controller, &core ) ) && core && !h->impl->loader_core)
+        {
+            /* Keep the loader object as the forward target; trigger creates the
+             * cwv2 shell (static vtbl) as the RCW the app sees (r46 lesson: the
+             * loader heap-vtbl object crashes ComWrappers with 0x80131506). */
+            h->impl->loader_core = core;
             trigger_core_webview2_initialized( h->impl, &h->impl->IWebView2_iface );
         }
     }
     return S_OK;
 }
 
-static const void *wv2_ctrl_handler_vtbl[] = { wv2h_QueryInterface, wv2h_AddRef, wv2h_Release,
-                                               wv2_ctrl_handler_Invoke };
+/* Heap vtbls (per-slot code stores): static .rdata vtbl arrays live in shared
+ * builtin pages that get relocated per-page by whichever process maps them
+ * first (app vs msedgewebview2 child), so their entries read back as child
+ * image-base VAs in the app (r39: ctrl handler dispatch jumped to a stale
+ * child VA -> privileged instruction). */
+static const void **wv2_ctrl_handler_vtbl_fill( void )
+{
+    const void **vt = HeapAlloc( GetProcessHeap(), 0, 4 * sizeof(*vt) );
+    if (vt)
+    {
+        vt[0] = wv2h_QueryInterface;
+        vt[1] = wv2h_AddRef;
+        vt[2] = wv2h_Release;
+        vt[3] = wv2_ctrl_handler_Invoke;
+    }
+    return vt;
+}
 
 static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
 {
@@ -2452,15 +2986,58 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
     ERR( "wv2_env_handler_Invoke hr %#lx env %p\n", hr, env );
     if (FAILED( hr ) || !env) return hr;
     if (!(ch = calloc( 1, sizeof(*ch ) ))) return E_OUTOFMEMORY;
-    ch->vtbl = wv2_ctrl_handler_vtbl;
+    ch->vtbl = wv2_ctrl_handler_vtbl_fill();
     ch->ref = 1;
     ch->impl = h->impl;
+    ERR( "wv2_env_handler_Invoke: ch %p vt %p vt3 %p\n", ch, ch->vtbl,
+         ((void **)ch->vtbl)[3] );
+    {   /* s430: prefer the synchronous loader export: one call, no handler vtbl hops */
+        HMODULE loader = GetModuleHandleW( L"webview2loader.dll" );
+        void *(WINAPI *p_sync)( HWND, HRESULT * ) = (void *)GetProcAddress( loader, "CreateCoreWebView2ControllerSync" );
+        if (p_sync)
+        {
+            HRESULT hr2 = S_OK;
+            void *core = p_sync( GetActiveWindow(), &hr2 );
+            ERR( "wv2_env_handler_Invoke: sync core %p hr %#lx\n", core, hr2 );
+            if (SUCCEEDED( hr2 ) && core && !h->impl->core_webview2)
+            {
+                /* s460: the app's CoreCLR RCW chokes (0x80131506) on the loader
+                 * webview object; hand it the builtin cwv2 shell (known-good RCW
+                 * layout) and keep the loader object for Navigate forwarding. */
+                h->impl->loader_core = core;
+                trigger_core_webview2_initialized( h->impl, &h->impl->IWebView2_iface );
+            }
+            return hr2;
+        }
+    }
     create_ctrl = (void *)(*(void ***)env)[3];  /* ICoreWebView2Environment::CreateCoreWebView2Controller */
+    ERR( "wv2_env_handler_Invoke: env vtbl %p slot3 %p\n", *(void **)env, create_ctrl );
+    /* Shared builtin pages get relocated once (app vs msedgewebview2 child
+     * image base): vtbl slots read back as high-VA (>= 0x7ffc00000000) are
+     * child-mapped pointers, unmapped in this process. Fall back to the
+     * loader's CreateCoreWebView2Controller export, which skips the vtbl. */
+    if ((ULONG_PTR)create_ctrl >= (ULONG_PTR)0x7ffc00000000)
+    {
+        HMODULE loader = GetModuleHandleW( L"webview2loader.dll" );
+        HRESULT (WINAPI *p_export)( HWND, void * ) = (void *)GetProcAddress( loader, "CreateCoreWebView2Controller" );
+        ERR( "wv2_env_handler_Invoke: stale slot3, using export %p\n", p_export );
+        if (p_export) return p_export( GetActiveWindow(), ch );
+    }
     return create_ctrl( env, GetActiveWindow(), ch );
 }
 
-static const void *wv2_env_handler_vtbl[] = { wv2h_QueryInterface, wv2h_AddRef, wv2h_Release,
-                                              wv2_env_handler_Invoke };
+static const void **wv2_env_handler_vtbl_fill( void )
+{
+    const void **vt = HeapAlloc( GetProcessHeap(), 0, 4 * sizeof(*vt) );
+    if (vt)
+    {
+        vt[0] = wv2h_QueryInterface;
+        vt[1] = wv2h_AddRef;
+        vt[2] = wv2h_Release;
+        vt[3] = wv2_env_handler_Invoke;
+    }
+    return vt;
+}
 
 static void wv2_start_browser( struct xaml_element *impl )
 {
@@ -2469,6 +3046,10 @@ static void wv2_start_browser( struct xaml_element *impl )
     HMODULE module;
 
     /* browser_started is set by wv2_defer_start_browser (the single caller). */
+    /* Datafile load = private section mapping: builtin .text/.rdata pages are
+     * normally shared and relocated once (app vs msedgewebview2 child, which
+     * also loads this chain), so vtbl entries and function VAs read back as
+     * child image-base addresses and fault (r35-r41 execute faults). */
     if (!(module = LoadLibraryW( L"webview2loader.dll" )))
     {
         ERR( "wv2_start_browser: no webview2loader.dll\n" );
@@ -2480,7 +3061,7 @@ static void wv2_start_browser( struct xaml_element *impl )
         return;
     }
     if (!(eh = calloc( 1, sizeof(*eh) ))) return;
-    eh->vtbl = wv2_env_handler_vtbl;
+    eh->vtbl = wv2_env_handler_vtbl_fill();
     eh->ref = 1;
     eh->impl = impl;
     ERR( "wv2_start_browser: creating environment\n" );
