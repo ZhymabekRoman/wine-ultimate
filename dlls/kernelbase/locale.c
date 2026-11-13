@@ -34,6 +34,7 @@
 #include "winnls.h"
 #include "winuser.h"
 #include "winternl.h"
+#include "ddk/wdm.h"
 #include "kernelbase.h"
 #include "wine/debug.h"
 
@@ -313,6 +314,11 @@ static const NLS_LOCALE_HEADER *locale_table;
 static const WCHAR *locale_strings;
 static const NLS_LOCALE_DATA *system_locale;
 static const NLS_LOCALE_DATA *user_locale;
+
+/* Process-local snapshot of the default locale name, resolved from the registry /
+ * environment on first use so that repeated formatting calls avoid re-resolving it. */
+static WCHAR cached_locale_name[LOCALE_NAME_MAX_LENGTH];
+static volatile LONG cached_locale_name_len;
 
 static CPTABLEINFO codepages[128];
 static unsigned int nb_codepages;
@@ -5735,6 +5741,30 @@ static struct {
     WCHAR daylight_name[32];
 } cached_tzname;
 
+static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
+
+/* Lock-free snapshot of the last fully resolved timezone. It is valid as long as
+ * the shared user data timezone bias stamp is unchanged, so that repeated queries
+ * need neither a system call nor a registry lookup. */
+static DYNAMIC_TIME_ZONE_INFORMATION cached_tz;
+static volatile ULONG cached_stamp;
+static volatile ULONG cached_tz_id;
+
+/* read the current bias, in minutes, from the shared user data page (no system call) */
+static inline LONG get_usd_bias(void)
+{
+    ULONG high, low;
+
+    do
+    {
+        high = user_shared_data->TimeZoneBias.High1Time;
+        low = user_shared_data->TimeZoneBias.LowPart;
+    }
+    while (high != user_shared_data->TimeZoneBias.High2Time);
+
+    return (LONG)(((((LONGLONG)high) << 32) | low) / (60 * 10000000));
+}
+
 /***********************************************************************
  *	GetDynamicTimeZoneInformation   (kernelbase.@)
  */
@@ -5742,6 +5772,18 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetDynamicTimeZoneInformation( DYNAMIC_TIME_ZONE_
 {
     HKEY key;
     LARGE_INTEGER now;
+    ULONG stamp;
+    DWORD ret;
+
+    for (;;)
+    {
+        stamp = *(volatile ULONG *)&user_shared_data->TimeZoneBiasStamp;
+        if (!stamp || cached_stamp != stamp || !cached_tz.TimeZoneKeyName[0]) break;
+        *info = cached_tz;  /* snapshot copy in user space, no system call */
+        if (*(volatile ULONG *)&user_shared_data->TimeZoneBiasStamp != stamp) continue;  /* torn read, retry */
+        info->Bias = get_usd_bias();
+        return cached_tz_id;
+    }
 
     if (!set_ntstatus( RtlQueryDynamicTimeZoneInformation( (RTL_DYNAMIC_TIME_ZONE_INFORMATION *)info )))
         return TIME_ZONE_ID_INVALID;
@@ -5776,7 +5818,13 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetDynamicTimeZoneInformation( DYNAMIC_TIME_ZONE_
     }
 
     NtQuerySystemTime( &now );
-    return get_timezone_id( (TIME_ZONE_INFORMATION *)info, now, FALSE );
+    ret = get_timezone_id( (TIME_ZONE_INFORMATION *)info, now, FALSE );
+
+    /* publish the snapshot, the stamp write goes last so that readers never see a torn entry */
+    cached_tz = *info;
+    cached_tz_id = ret;
+    InterlockedExchange( &cached_stamp, stamp ? stamp : 1 );
+    return ret;
 }
 
 
@@ -6477,7 +6525,21 @@ LANGID WINAPI DECLSPEC_HOTPATCH GetUserDefaultLangID(void)
  */
 INT WINAPI DECLSPEC_HOTPATCH GetUserDefaultLocaleName( LPWSTR name, INT len )
 {
-    return get_locale_info( user_locale, user_lcid, LOCALE_SNAME, name, len );
+    LONG datalen = *(volatile LONG *)&cached_locale_name_len;
+
+    if (!datalen)
+    {
+        WCHAR buffer[LOCALE_NAME_MAX_LENGTH];
+        INT ret = get_locale_info( user_locale, user_lcid, LOCALE_SNAME, buffer, ARRAY_SIZE(buffer) );
+
+        if (ret <= 0) return get_locale_info( user_locale, user_lcid, LOCALE_SNAME, name, len );
+
+        /* resolve the default locale once: store the string first, its length last */
+        wcscpy( cached_locale_name, buffer );
+        InterlockedExchange( &cached_locale_name_len, ret );
+        datalen = ret;
+    }
+    return locale_return_data( cached_locale_name, datalen, 0, name, len );
 }
 
 

@@ -76,6 +76,7 @@
 #include "ntstatus.h"
 #include "windef.h"
 #include "winternl.h"
+#include "timezoneapi.h"
 #include "ddk/wdm.h"
 #include "wine/asm.h"
 #include "unix_private.h"
@@ -3032,6 +3033,24 @@ static LONG64 get_current_tz_bias(void)
     return ((LONG64)high << 32) | low;
 }
 
+/* Publish a time zone change in the shared data page: the bias stamp is bumped
+ * monotonically so that consumers caching time zone snapshots can invalidate them
+ * with a single read, and the current time zone id is stored next to it. */
+static void publish_timezone_stamp( const RTL_DYNAMIC_TIME_ZONE_INFORMATION *tzi, LONG bias )
+{
+    struct _KUSER_SHARED_DATA *data = user_shared_data_rw;
+    ULONG id;
+
+    if (!data) return;
+
+    if (!tzi->DaylightDate.wMonth) id = TIME_ZONE_ID_UNKNOWN;
+    else if (bias == tzi->Bias + tzi->DaylightBias) id = TIME_ZONE_ID_DAYLIGHT;
+    else id = TIME_ZONE_ID_STANDARD;
+
+    data->TimeZoneId = id;
+    __atomic_fetch_add( (volatile ULONG *)&data->TimeZoneBiasStamp, 1, __ATOMIC_RELEASE );
+}
+
 static void get_timezone_info( RTL_DYNAMIC_TIME_ZONE_INFORMATION *tzi )
 {
     static RTL_DYNAMIC_TIME_ZONE_INFORMATION cached_tzi;
@@ -3152,6 +3171,7 @@ static void get_timezone_info( RTL_DYNAMIC_TIME_ZONE_INFORMATION *tzi )
         if (match_tz_info( tzi, &reg_tzi ))
         {
             cached_tzi = *tzi = reg_tzi;
+            publish_timezone_stamp( tzi, bias );
             mutex_unlock( &timezone_mutex );
             return;
         }
@@ -3159,6 +3179,7 @@ static void get_timezone_info( RTL_DYNAMIC_TIME_ZONE_INFORMATION *tzi )
     }
     find_reg_tz_info(tzi, current_year + 1900);
     cached_tzi = *tzi;
+    publish_timezone_stamp( tzi, bias );
     mutex_unlock( &timezone_mutex );
 }
 
