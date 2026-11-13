@@ -264,6 +264,16 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* Windows.Security.Credentials.* (the rest: PasswordCredential, Password-
+     * Vault and the KeyCredential surface) lives in the own-name module,
+     * checked after the Web* route above so those classes keep answering from
+     * windows.security.authentication.web.core.dll. */
+    if (!wcsncmp(classid, L"Windows.Security.Credentials.", 29))
+    {
+        *out = wcsdup(L"windows.security.credentials.dll");
+        return S_OK;
+    }
+
     /* Windows.UI.Notifications.* is the toast/badge surface: the app's tray and
      * notification path activates Windows.UI.Notifications.ToastNotification-
      * Manager (Microsoft.Toolkit ToastNotificationManagerCompat.CreateToast-
@@ -1083,6 +1093,7 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
     TRACE("Found library %s for class %s\n", debugstr_w(library), debugstr_hstring(classid));
 
     hr = pDllGetActivationFactory(classid, factory);
+    ERR( "pDllGetActivationFactory(%s) in %s -> hr %#lx, factory %p\n", debugstr_w(raw), debugstr_w(library), hr, *factory );
     if (FAILED(hr))
     {
         WCHAR *seed_lib = NULL;
@@ -2305,11 +2316,30 @@ static BOOL find_registered_factory(const WCHAR *classid, PFNGETACTIVATIONFACTOR
     RtlAcquireSRWLockShared(&registered_factories_lock);
     for (entry = registered_factories; entry; entry = entry->next)
     {
-        if (!wcscmp(WindowsGetStringRawBuffer(entry->class, NULL), classid))
+        const WCHAR *reg_name = WindowsGetStringRawBuffer(entry->class, NULL);
+        if (!wcscmp(reg_name, classid))
         {
             *callback = entry->callback;
             found = TRUE;
             break;
+        }
+        /* Match C++/WinRT __...ActivationFactory naming:
+         * e.g. "WhatsAppNative.__MiscCppActivationFactory" for "WhatsAppNative.MiscCpp" */
+        {
+            const WCHAR *dot = wcsrchr(classid, '.');
+            if (dot)
+            {
+                WCHAR synthesized[256];
+                int prefix_len = dot - classid + 1;
+                swprintf(synthesized, ARRAY_SIZE(synthesized), L"%.*ls__%lsActivationFactory",
+                         prefix_len, classid, dot + 1);
+                if (!wcscmp(reg_name, synthesized))
+                {
+                    *callback = entry->callback;
+                    found = TRUE;
+                    break;
+                }
+            }
         }
     }
     RtlReleaseSRWLockShared(&registered_factories_lock);
@@ -2694,7 +2724,15 @@ BOOL WINAPI RoOriginateLanguageException(HRESULT error, HSTRING message, IUnknow
                 HSTRING str = NULL;
                 if (SUCCEEDED(pToString( stringable, &str )) && str)
                 {
-                    ERR( "language_exception IStringable::ToString:\n%s\n", debugstr_hstring( str ) );
+                    UINT32 len = 0;
+                    const WCHAR *wstr = WindowsGetStringRawBuffer( str, &len );
+                    char utf8[4096];
+                    int n = WideCharToMultiByte( CP_UTF8, 0, wstr, len, utf8, sizeof(utf8) - 1, NULL, NULL );
+                    if (n > 0)
+                    {
+                        utf8[n] = '\0';
+                        ERR( "language_exception IStringable::ToString:\n%s\n", utf8 );
+                    }
                     WindowsDeleteString( str );
                 }
                 IInspectable_Release( stringable );

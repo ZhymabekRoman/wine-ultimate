@@ -1059,7 +1059,7 @@ BOOL WINAPI CredEnumerateW(LPCWSTR Filter, DWORD Flags, DWORD *Count, PCREDENTIA
     if (ret == ERROR_SUCCESS)
     {
         ret = host_enumerate_credentials(Filter, NULL, NULL, &len, Count);
-        if (ret == ERROR_NOT_SUPPORTED) ret = ERROR_SUCCESS;
+        if (ret == ERROR_NOT_SUPPORTED || ret == ERROR_FILE_NOT_FOUND || ret == ERROR_PATH_NOT_FOUND) ret = ERROR_SUCCESS;
     }
     if (ret == ERROR_SUCCESS && *Count == 0)
         ret = ERROR_NOT_FOUND;
@@ -1085,7 +1085,7 @@ BOOL WINAPI CredEnumerateW(LPCWSTR Filter, DWORD Flags, DWORD *Count, PCREDENTIA
             if (ret == ERROR_SUCCESS)
             {
                 ret = host_enumerate_credentials(Filter, *Credentials, buffer, &len, Count);
-                if (ret == ERROR_NOT_SUPPORTED) ret = ERROR_SUCCESS;
+                if (ret == ERROR_NOT_SUPPORTED || ret == ERROR_FILE_NOT_FOUND || ret == ERROR_PATH_NOT_FOUND) ret = ERROR_SUCCESS;
             }
         }
         else ret = ERROR_OUTOFMEMORY;

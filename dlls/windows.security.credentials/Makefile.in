@@ -1,0 +1,11 @@
+MODULE  = windows.security.credentials.dll
+ENABLE_ARCHS = x86_64
+IMPORTS = combase advapi32 uuid
+
+EXTRADLLFLAGS = -Wb,--prefer-native
+
+SOURCES = \
+	classes.idl \
+	credential.c \
+	main.c \
+	vault.c

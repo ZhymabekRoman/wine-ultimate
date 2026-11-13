@@ -862,6 +862,12 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Crede
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccount,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccount,"DllPath",2,"%12%\windows.security.authentication.web.core.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.WebAccount,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.PasswordVault,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.PasswordVault,"DllPath",2,"%12%\windows.security.credentials.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.PasswordVault,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.PasswordCredential,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.PasswordCredential,"DllPath",2,"%12%\windows.security.credentials.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Security.Credentials.PasswordCredential,"ThreadingModel",0x10001,2
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannel,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannel,"DllPath",2,"%12%\windows.networking.pushnotifications.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Networking.PushNotifications.PushNotificationChannel,"ThreadingModel",0x10001,2
