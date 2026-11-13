@@ -1633,7 +1633,12 @@ static void window_set_wm_state( struct x11drv_win_data *data, UINT new_state, B
     case MAKELONG(WithdrawnState, NormalState):
     case MAKELONG(IconicState, NormalState):
         if (data->embedded) set_xembed_flags( data, XEMBED_MAPPED );
-        else XMapWindow( data->display, data->whole_window );
+        else
+        {
+            XMapWindow( data->display, data->whole_window );
+            fprintf(stderr, "XWID map hwnd=%p whole=%08lx client=%08lx\n",
+                    data->hwnd, data->whole_window, data->client_window );
+        }
         break;
     case MAKELONG(NormalState, WithdrawnState):
     case MAKELONG(IconicState, WithdrawnState):
@@ -2387,6 +2392,8 @@ Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *vis
     if (data->client_window)
     {
         XMapWindow( gdi_display, data->client_window );
+        fprintf(stderr, "XWID create hwnd=%p whole=%08lx client=%08lx\n",
+                data->hwnd, data->whole_window, data->client_window );
         if (data->whole_window)
         {
             XFlush( gdi_display ); /* make sure client_window is created for XSelectInput */

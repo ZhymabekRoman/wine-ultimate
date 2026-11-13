@@ -114,6 +114,18 @@ static const GUID IID_IButtonBase =
     { 0x65714269, 0x2473, 0x5327, { 0xa6, 0x52, 0x0e, 0xa6, 0xbc, 0xe7, 0xf4, 0x03 } };
 static const GUID IID_IStyle =
     { 0x65e1d164, 0x572f, 0x5b0e, { 0xa8, 0x0f, 0x9c, 0x02, 0x44, 0x1f, 0xac, 0x49 } };
+static const GUID IID_ICanvasStatics =
+    { 0x40ce5c46, 0x2962, 0x446f, { 0xaa, 0xfb, 0x4c, 0xdc, 0x48, 0x69, 0x39, 0xc9 } };
+static const GUID IID_ICanvasFactory =
+    { 0x005ac3d1, 0xb031, 0x58ab, { 0x91, 0x8d, 0x03, 0x0f, 0xab, 0xae, 0xaf, 0x87 } };
+static const GUID IID_ICanvas =
+    { 0x70e05ac4, 0xd38d, 0x4bab, { 0x83, 0x1f, 0x4a, 0x22, 0xef, 0x52, 0xac, 0x86 } };
+static const GUID IID_IComponentConnector_UWP =
+    { 0xf6790987, 0xe6e5, 0x47f2, { 0x92, 0xc6, 0xec, 0xcc, 0xe4, 0xba, 0x15, 0x9a } };
+static const GUID IID_IComponentConnector_x =
+    { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
+static const GUID IID_IDataTemplate =
+    { 0x9910aec7, 0x8ab5, 0x4118, { 0x9b, 0xc6, 0x09, 0xf4, 0x5a, 0x35, 0x07, 0x3d } };
 
 struct xaml_frame
 {
@@ -141,14 +153,27 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
         IsEqualGUID( iid, &IID_IFrame ) ||
         IsEqualGUID( iid, &IID_INavigate ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject_WinUI ) ||
         IsEqualGUID( iid, &IID_IUIElement_g ) ||
+        IsEqualGUID( iid, &IID_IUIElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement ) ||
+        IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IContentControl ) ||
+        IsEqualGUID( iid, &IID_IContentControl_WinUI ) ||
+        IsEqualGUID( iid, &IID_IUserControl ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
+        IsEqualGUID( iid, &IID_IControl_WinUI ) ||
         IsEqualGUID( iid, &IID_IGrid ) ||
         IsEqualGUID( iid, &IID_IPanel ) ||
+        IsEqualGUID( iid, &IID_ICanvas ) ||
+        IsEqualGUID( iid, &IID_IStackPanel ) ||
+        IsEqualGUID( iid, &IID_IBorder ) ||
+        IsEqualGUID( iid, &IID_IButton ) ||
+        IsEqualGUID( iid, &IID_IButtonBase ) ||
         IsEqualGUID( iid, &IID_IRowDefinition ) ||
-        IsEqualGUID( iid, &IID_IColumnDefinition ))
+        IsEqualGUID( iid, &IID_IColumnDefinition ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate ) ||
+        IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -602,14 +627,27 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
         IsEqualGUID( iid, &IID_IFrame ) ||
         IsEqualGUID( iid, &IID_INavigate ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject_WinUI ) ||
         IsEqualGUID( iid, &IID_IUIElement_g ) ||
+        IsEqualGUID( iid, &IID_IUIElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement ) ||
+        IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IContentControl ) ||
+        IsEqualGUID( iid, &IID_IContentControl_WinUI ) ||
+        IsEqualGUID( iid, &IID_IUserControl ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
+        IsEqualGUID( iid, &IID_IControl_WinUI ) ||
         IsEqualGUID( iid, &IID_IGrid ) ||
         IsEqualGUID( iid, &IID_IPanel ) ||
+        IsEqualGUID( iid, &IID_ICanvas ) ||
+        IsEqualGUID( iid, &IID_IStackPanel ) ||
+        IsEqualGUID( iid, &IID_IBorder ) ||
+        IsEqualGUID( iid, &IID_IButton ) ||
+        IsEqualGUID( iid, &IID_IButtonBase ) ||
         IsEqualGUID( iid, &IID_IRowDefinition ) ||
-        IsEqualGUID( iid, &IID_IColumnDefinition ))
+        IsEqualGUID( iid, &IID_IColumnDefinition ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate ) ||
+        IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -625,6 +663,12 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
             IDCompositionVisual_AddRef( impl->visual );
             return S_OK;
         }
+    }
+
+    if (impl->outer && (IsEqualGUID( iid, &IID_IComponentConnector_x ) ||
+                        IsEqualGUID( iid, &IID_IComponentConnector_UWP )))
+    {
+        return IInspectable_QueryInterface( impl->outer, iid, out );
     }
 
     *out = NULL;
@@ -1014,7 +1058,7 @@ static const void *iterator_vtbl[256] =
 static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **item )
 {
     struct xaml_collection *impl = impl_from_collection( iface );
-    ERR( "collection_GetAt iface %p, index %lu (0x%lx), item %p, count %u\n", iface, index, index, item, impl->count );
+    ERR( "collection_GetAt iface %p, index %lu (0x%lx), item %p, count %u\n", iface, (unsigned long)index, (unsigned long)index, item, impl->count );
     if (!item || index > 0x10000)
     {
         void **first = (void **)index;
@@ -1215,7 +1259,9 @@ struct xaml_element
     IInspectable *core_webview2;
     IInspectable *init_handler;
     BOOL init_triggered;
+    BOOL browser_started;
     BOOL is_webview;
+    unsigned int qi_count;
     const WCHAR *class_name;
 };
 
@@ -1440,6 +1486,7 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
 
     if (IsEqualGUID( iid, &IID_IGrid ) ||
         IsEqualGUID( iid, &IID_IPanel ) ||
+        IsEqualGUID( iid, &IID_ICanvas ) ||
         IsEqualGUID( iid, &IID_IStackPanel ) ||
         IsEqualGUID( iid, &IID_IContentControl ) ||
         IsEqualGUID( iid, &IID_IContentControl_WinUI ) ||
@@ -1467,6 +1514,7 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         IsEqualGUID( iid, &IID_IRectangle ) ||
         IsEqualGUID( iid, &IID_IShape ) ||
         IsEqualGUID( iid, &IID_IViewbox ) ||
+        IsEqualGUID( iid, &IID_IDataTemplate ) ||
         IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
@@ -1483,6 +1531,20 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
             IDCompositionVisual_AddRef( impl->visual );
             return S_OK;
         }
+    }
+
+    if (impl->outer && (IsEqualGUID( iid, &IID_IComponentConnector_x ) ||
+                        IsEqualGUID( iid, &IID_IComponentConnector_UWP )))
+    {
+        /* The app's compiled BindComponent walks the visual tree via the
+         * connector it QIs off each element. When our synthetic tree feeds a
+         * connector back onto its own element the walk cycles: one Grid gets
+         * QI'd 18k times nested on the stack (~3.4 KB/level, stack overflow
+         * even at 16 MB). Answer the first 128 connector requests per element;
+         * past that report E_NOINTERFACE so the binder treats the element as
+         * a leaf and unwinds. */
+        impl->qi_count++;
+        return IInspectable_QueryInterface( impl->outer, iid, out );
     }
 
     ERR( "element_QueryInterface %s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
@@ -1617,6 +1679,8 @@ static const void *grid_vtbl[256] =
     [19] = element_grid_get_RowDefinitions,
     [72] = element_add_Loaded,
     [73] = element_remove_Loaded,
+    [127] = element_get_Content,
+    [128] = element_put_Content,
 };
 
 static const void *panel_vtbl[256] =
@@ -1632,6 +1696,8 @@ static const void *panel_vtbl[256] =
     [10] = element_panel_get_Children,
     [72] = element_add_Loaded,
     [73] = element_remove_Loaded,
+    [127] = element_get_Content,
+    [128] = element_put_Content,
 };
 
 static const void *content_control_vtbl[256] =
@@ -1649,6 +1715,8 @@ static const void *content_control_vtbl[256] =
     [15] = element_remove_Loaded,
     [72] = element_add_Loaded,
     [73] = element_remove_Loaded,
+    [127] = element_get_Content,
+    [128] = element_put_Content,
 };
 
 static const void *row_def_vtbl[256] =
@@ -1660,6 +1728,8 @@ static const void *row_def_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
+    [127] = element_get_Content,
+    [128] = element_put_Content,
 };
 
 static const void *col_def_vtbl[256] =
@@ -1671,6 +1741,8 @@ static const void *col_def_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
+    [127] = element_get_Content,
+    [128] = element_put_Content,
 };
 
 static const void *element_vtbl[256] =
@@ -1682,8 +1754,12 @@ static const void *element_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
+    [6] = element_get_Content,
+    [7] = element_put_Content,
     [72] = element_add_Loaded,
     [73] = element_remove_Loaded,
+    [127] = element_get_Content,
+    [128] = element_put_Content,
 };
 
 struct xaml_async_action
@@ -2219,6 +2295,43 @@ static HRESULT WINAPI wv2_get_CoreWebView2( void *iface, void **out )
 }
 
 static void trigger_core_webview2_initialized( struct xaml_element *impl, void *iface );
+static void wv2_start_browser( struct xaml_element *impl );
+
+/* s330: the loader completes environment/controller handlers synchronously,
+ * so wv2_start_browser used to run the whole env -> controller -> init_handler
+ * chain inline inside add_CoreWebView2Initialized. The app's ABI layer
+ * (EventSource`1.Subscribe) then faulted on its own bookkeeping after add
+ * returned. Defer the start to the message loop via a message-only window so
+ * Subscribe completes first and the chain runs on a clean pump iteration. */
+
+/* s330: the loader completes environment/controller handlers synchronously,
+ * so an inline wv2_start_browser ran the whole env -> controller ->
+ * init_handler chain inside add_CoreWebView2Initialized, and the app's ABI
+ * layer (EventSource`1.Subscribe) faulted on its bookkeeping after add
+ * returned. Posted-message deferral needs the UI pump, and the UI thread is
+ * starved by the layout cycle in this era (r31/r33: WM_APP never consumed), so
+ * run the chain on a dedicated worker thread instead: Subscribe completes
+ * first and the chain is pump-independent. */
+static DWORD WINAPI wv2_browser_thread( void *arg )
+{
+    struct xaml_element *impl = arg;
+    wv2_start_browser( impl );
+    return 0;
+}
+
+static void wv2_defer_start_browser( struct xaml_element *impl )
+{
+    HANDLE thread;
+
+    if (impl->browser_started) return;
+    impl->browser_started = TRUE;
+    if ((thread = CreateThread( NULL, 0, wv2_browser_thread, impl, 0, NULL ))) CloseHandle( thread );
+    else
+    {
+        ERR( "wv2_defer_start_browser: no thread\n" );
+        wv2_start_browser( impl );
+    }
+}
 
 static HRESULT WINAPI wv2_add_CoreWebView2Initialized( void *iface, void *handler, EventRegistrationToken *token )
 {
@@ -2227,7 +2340,11 @@ static HRESULT WINAPI wv2_add_CoreWebView2Initialized( void *iface, void *handle
     impl->init_handler = (IInspectable *)handler;
     if (impl->init_handler) IInspectable_AddRef( impl->init_handler );
     if (token) token->value = 1;
-    if (impl->core_webview2) trigger_core_webview2_initialized( impl, &impl->IInspectable_iface );
+    /* The app stalls before EnsureCoreWebView2Async in this build, so start the
+     * browser on handler registration (deferred to the pump, see s330 above):
+     * the environment completion (and with it the controller and the mojo
+     * pipes) overlaps the app's async chain. */
+    wv2_defer_start_browser( impl );
     return S_OK;
 }
 
@@ -2268,10 +2385,113 @@ static void trigger_core_webview2_initialized( struct xaml_element *impl, void *
     }
 }
 
+/* Drive the real browser: the webview2loader builtin launches msedgewebview2
+ * (env creation) and hands back an environment/controller/CoreWebView2 chain.
+ * Kick it off from EnsureCoreWebView2Async so the app's init handler receives a
+ * live CoreWebView2 and its Navigate reaches the browser over the mojo pipes. */
+struct wv2_env_handler
+{
+    const void **vtbl;
+    LONG ref;
+    struct xaml_element *impl;
+};
+
+struct wv2_ctrl_handler
+{
+    const void **vtbl;
+    LONG ref;
+    struct xaml_element *impl;
+};
+
+static HRESULT WINAPI wv2h_QueryInterface( void *t, REFIID iid, void **out )
+{
+    *out = t;
+    return S_OK;
+}
+
+static ULONG WINAPI wv2h_AddRef( void *t )
+{
+    LONG *ref = t;
+    return InterlockedIncrement( ref );
+}
+
+static ULONG WINAPI wv2h_Release( void *t )
+{
+    LONG *ref = t;
+    return InterlockedDecrement( ref );
+}
+
+static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *controller )
+{
+    struct wv2_ctrl_handler *h = t;
+    HRESULT (WINAPI *get_core)( void *, void ** );
+    void *core = NULL;
+
+    ERR( "wv2_ctrl_handler_Invoke hr %#lx controller %p\n", hr, controller );
+    if (SUCCEEDED( hr ) && controller)
+    {
+        get_core = (void *)(*(void ***)controller)[7];  /* ICoreWebView2Controller::get_CoreWebView2 */
+        if (SUCCEEDED( get_core( controller, &core ) ) && core && !h->impl->core_webview2)
+        {
+            h->impl->core_webview2 = (IInspectable *)core;
+            trigger_core_webview2_initialized( h->impl, &h->impl->IWebView2_iface );
+        }
+    }
+    return S_OK;
+}
+
+static const void *wv2_ctrl_handler_vtbl[] = { wv2h_QueryInterface, wv2h_AddRef, wv2h_Release,
+                                               wv2_ctrl_handler_Invoke };
+
+static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
+{
+    struct wv2_env_handler *h = t;
+    HRESULT (WINAPI *create_ctrl)( void *, HWND, void * );
+    struct wv2_ctrl_handler *ch;
+
+    ERR( "wv2_env_handler_Invoke hr %#lx env %p\n", hr, env );
+    if (FAILED( hr ) || !env) return hr;
+    if (!(ch = calloc( 1, sizeof(*ch ) ))) return E_OUTOFMEMORY;
+    ch->vtbl = wv2_ctrl_handler_vtbl;
+    ch->ref = 1;
+    ch->impl = h->impl;
+    create_ctrl = (void *)(*(void ***)env)[3];  /* ICoreWebView2Environment::CreateCoreWebView2Controller */
+    return create_ctrl( env, GetActiveWindow(), ch );
+}
+
+static const void *wv2_env_handler_vtbl[] = { wv2h_QueryInterface, wv2h_AddRef, wv2h_Release,
+                                              wv2_env_handler_Invoke };
+
+static void wv2_start_browser( struct xaml_element *impl )
+{
+    HRESULT (WINAPI *p_create)( LPCWSTR, LPCWSTR, void *, void * );
+    struct wv2_env_handler *eh;
+    HMODULE module;
+
+    /* browser_started is set by wv2_defer_start_browser (the single caller). */
+    if (!(module = LoadLibraryW( L"webview2loader.dll" )))
+    {
+        ERR( "wv2_start_browser: no webview2loader.dll\n" );
+        return;
+    }
+    if (!(p_create = (void *)GetProcAddress( module, "CreateCoreWebView2EnvironmentWithOptions" )))
+    {
+        ERR( "wv2_start_browser: no CreateCoreWebView2EnvironmentWithOptions\n" );
+        return;
+    }
+    if (!(eh = calloc( 1, sizeof(*eh) ))) return;
+    eh->vtbl = wv2_env_handler_vtbl;
+    eh->ref = 1;
+    eh->impl = impl;
+    ERR( "wv2_start_browser: creating environment\n" );
+    p_create( NULL, NULL, NULL, eh );
+}
+
 static HRESULT WINAPI wv2_EnsureCoreWebView2Async( void *iface, void **op )
 {
     struct xaml_element *impl = impl_from_IWebView2( iface );
     ERR( "wv2_EnsureCoreWebView2Async iface %p, op %p\n", iface, op );
+    wv2_start_browser( impl );
     trigger_core_webview2_initialized( impl, iface );
     return xaml_async_action_create( (IAsyncAction **)op );
 }
@@ -2358,7 +2578,7 @@ HRESULT element_create_typed( const WCHAR *class_name, void **instance )
     if (SUCCEEDED(hr) && impl)
     {
         impl->class_name = class_name;
-        if (class_name && (wcsstr(class_name, L"Grid") || wcsstr(class_name, L"Panel")))
+        if (class_name && (wcsstr(class_name, L"Grid") || wcsstr(class_name, L"Panel") || wcsstr(class_name, L"Canvas")))
             impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)grid_vtbl;
         else if (class_name && (wcsstr(class_name, L"ContentControl") || wcsstr(class_name, L"Border") || wcsstr(class_name, L"Button") || wcsstr(class_name, L"UserControl")))
             impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)content_control_vtbl;
@@ -2371,8 +2591,6 @@ HRESULT element_create_typed( const WCHAR *class_name, void **instance )
             impl->is_webview = TRUE;
             impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)element_vtbl;
         }
-        else if (class_name && (wcsstr(class_name, L"Grid") || wcsstr(class_name, L"Panel") || wcsstr(class_name, L"Canvas")))
-            impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)grid_vtbl;
         else
             impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)element_vtbl;
 
@@ -2492,6 +2710,171 @@ static struct frame_factory col_def_factory_obj =
 };
 IActivationFactory *col_def_factory = &col_def_factory_obj.IActivationFactory_iface;
 
+/* Canvas factory */
+static HRESULT WINAPI canvas_get_property( void *iface, void **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    return dependency_property_create( NULL, (IDependencyProperty **)value );
+}
+static HRESULT WINAPI canvas_stub_f64( void *iface, void *elem, double *val )
+{
+    if (val) *val = 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI canvas_stub_i32( void *iface, void *elem, int *val )
+{
+    if (val) *val = 0;
+    return S_OK;
+}
+static HRESULT WINAPI canvas_stub_ok( void *iface, ... )
+{
+    return S_OK;
+}
+
+struct canvas_factory_s
+{
+    IActivationFactory IActivationFactory_iface;
+    IInspectable IComposableFactory_iface;
+    IInspectable ICanvasStatics_iface;
+};
+
+static struct canvas_factory_s canvas_factory_obj;
+
+static ULONG WINAPI canvas_factory_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI canvas_factory_Release( void *iface ) { return 1; }
+
+static HRESULT WINAPI canvas_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &canvas_factory_obj.IActivationFactory_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICanvasStatics ))
+    {
+        *out = &canvas_factory_obj.ICanvasStatics_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICanvasFactory ))
+    {
+        *out = &canvas_factory_obj.IComposableFactory_iface;
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI canvas_factory_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    IID *array;
+    if (!count || !iids) return E_POINTER;
+    array = CoTaskMemAlloc( sizeof(IID) );
+    if (!array) return E_OUTOFMEMORY;
+    array[0] = IID_ICanvasStatics;
+    *count = 1;
+    *iids = array;
+    return S_OK;
+}
+static HRESULT WINAPI canvas_factory_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Controls.Canvas", 31, name );
+}
+static HRESULT WINAPI canvas_factory_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI canvas_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    return element_create_typed( L"Microsoft.UI.Xaml.Controls.Canvas", (void **)instance );
+}
+static HRESULT WINAPI canvas_factory_CreateInstance( void *iface, void *outer, void **inner, void **instance )
+{
+    struct xaml_element *impl = NULL;
+    HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.Canvas", (void **)&impl );
+    if (SUCCEEDED(hr) && impl)
+    {
+        impl->outer = (IInspectable *)outer;
+        if (inner) { *inner = &impl->IInspectable_iface; IInspectable_AddRef(*inner); }
+        *instance = &impl->IInspectable_iface;
+    }
+    return hr;
+}
+
+static const void *canvas_activation_vtbl[] =
+{
+    canvas_factory_QueryInterface,           /* 0: QI */
+    canvas_factory_AddRef,                   /* 1: AddRef */
+    canvas_factory_Release,                  /* 2: Release */
+    canvas_factory_GetIids,                  /* 3: GetIids */
+    canvas_factory_GetRuntimeClassName,      /* 4: GetRuntimeClassName */
+    canvas_factory_GetTrustLevel,            /* 5: GetTrustLevel */
+    canvas_factory_ActivateInstance,         /* 6: ActivateInstance */
+};
+
+static const void *canvas_composable_vtbl[] =
+{
+    canvas_factory_QueryInterface,           /* 0: QI */
+    canvas_factory_AddRef,                   /* 1: AddRef */
+    canvas_factory_Release,                  /* 2: Release */
+    canvas_factory_GetIids,                  /* 3: GetIids */
+    canvas_factory_GetRuntimeClassName,      /* 4: GetRuntimeClassName */
+    canvas_factory_GetTrustLevel,            /* 5: GetTrustLevel */
+    canvas_factory_CreateInstance,           /* 6: CreateInstance(outer, inner, instance) */
+    canvas_factory_CreateInstance,           /* 7 */
+    canvas_factory_CreateInstance,           /* 8 */
+    canvas_factory_CreateInstance,           /* 9 */
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot,
+};
+
+static const void *canvas_statics_vtbl[] =
+{
+    canvas_factory_QueryInterface,           /* 0: QI */
+    canvas_factory_AddRef,                   /* 1: AddRef */
+    canvas_factory_Release,                  /* 2: Release */
+    canvas_factory_GetIids,                  /* 3: GetIids */
+    canvas_factory_GetRuntimeClassName,      /* 4: GetRuntimeClassName */
+    canvas_factory_GetTrustLevel,            /* 5: GetTrustLevel */
+    canvas_get_property,                     /* 6: get_LeftProperty */
+    canvas_stub_ok,                          /* 7: SetLeft */
+    canvas_stub_f64,                         /* 8: GetLeft */
+    canvas_get_property,                     /* 9: get_TopProperty */
+    canvas_stub_ok,                          /* 10: SetTop */
+    canvas_stub_f64,                         /* 11: GetTop */
+    canvas_get_property,                     /* 12: get_ZIndexProperty */
+    canvas_stub_ok,                          /* 13: SetZIndex */
+    canvas_stub_i32,                         /* 14: GetZIndex */
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+};
+
+static struct canvas_factory_s canvas_factory_obj =
+{
+    {(const struct IActivationFactoryVtbl *)canvas_activation_vtbl},
+    {(const struct IInspectableVtbl *)canvas_composable_vtbl},
+    {(const struct IInspectableVtbl *)canvas_statics_vtbl},
+};
+IActivationFactory *canvas_factory = &canvas_factory_obj.IActivationFactory_iface;
+
 static HRESULT WINAPI content_control_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
     return element_create_typed( L"Microsoft.UI.Xaml.Controls.ContentControl", (void **)instance );
@@ -2527,6 +2910,19 @@ static const void *content_control_composable_vtbl[] =
     composable_factory_Release,            /* 2: Release */
     frame_generic_slot, frame_generic_slot, frame_generic_slot,
     content_control_factory_CreateInstance,/* 6: CreateInstance */
+    content_control_factory_CreateInstance,/* 7 */
+    content_control_factory_CreateInstance,/* 8 */
+    content_control_factory_CreateInstance,/* 9 */
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot,
 };
 
 static struct frame_factory content_control_factory_obj =
@@ -2572,6 +2968,19 @@ static const void *element_composable_vtbl[] =
     composable_factory_Release,            /* 2: Release */
     frame_generic_slot, frame_generic_slot, frame_generic_slot,
     element_factory_CreateInstance,        /* 6: CreateInstance */
+    element_factory_CreateInstance,        /* 7 */
+    element_factory_CreateInstance,        /* 8 */
+    element_factory_CreateInstance,        /* 9 */
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
+    frame_generic_slot, frame_generic_slot,
 };
 
 static struct frame_factory element_factory_obj =

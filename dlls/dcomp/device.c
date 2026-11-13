@@ -1637,6 +1637,9 @@ static void render_composite_frame(struct composite_frame *frame)
             dst_rect = composite_dst_rect(frame, sc_desc.backbuffer_width, sc_desc.backbuffer_height);
             dst_rect_ptr = &dst_rect;
         }
+        TRACE("DCOMP: present path A ws %p hwnd %p dst %ld,%ld-%ldx%ld\n", wined3d_swapchain,
+                frame->target_hwnd, dst_rect.left, dst_rect.top,
+                dst_rect.right - dst_rect.left, dst_rect.bottom - dst_rect.top);
         wined3d_swapchain_present(wined3d_swapchain, NULL, dst_rect_ptr, frame->target_hwnd, 0, 0);
         frame->rendered = TRUE;
         goto done;
@@ -1657,6 +1660,9 @@ static void render_composite_frame(struct composite_frame *frame)
                 dst_rect = composite_dst_rect(frame, sc_desc.backbuffer_width, sc_desc.backbuffer_height);
                 dst_rect_ptr = &dst_rect;
             }
+            TRACE("DCOMP: present path B ws %p hwnd %p dst %ld,%ld-%ldx%ld\n", wined3d_swapchain,
+                    frame->target_hwnd, dst_rect.left, dst_rect.top,
+                    dst_rect.right - dst_rect.left, dst_rect.bottom - dst_rect.top);
             wined3d_swapchain_present(wined3d_swapchain, NULL, dst_rect_ptr, frame->target_hwnd, 0, 0);
             frame->rendered = TRUE;
         }

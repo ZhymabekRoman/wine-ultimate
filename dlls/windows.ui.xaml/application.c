@@ -214,6 +214,8 @@ static const GUID IID_IWindow_96061c05 =
     { 0x96061c05, 0x2dba, 0x4d08, { 0xb0, 0xbd, 0x2b, 0x30, 0xa1, 0x31, 0xc6, 0xaa } };
 static const GUID IID_IComponentConnector_x =
     { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
+static const GUID IID_IComponentConnector_UWP =
+    { 0xf6790987, 0xe6e5, 0x47f2, { 0x92, 0xc6, 0xec, 0xcc, 0xe4, 0xba, 0x15, 0x9a } };
 static const GUID IID_IUriRuntimeClass_x =
     { 0x9e365e57, 0x48b2, 0x4160, { 0x95, 0x6f, 0xc7, 0x38, 0x51, 0x20, 0xbb, 0xfc } };
 
@@ -459,6 +461,13 @@ static HRESULT WINAPI view_Run( IFrameworkView *iface )
 
     impl->state = VIEW_STATE_RUNNING;
 
+    /* Attach the swapchain visual to the CoreWindow's composition target and map the
+     * top-level HWND now, before the app's Window.Current.Activate() lands. An app that
+     * builds its page asynchronously (Calculator awaits its view model) leaves the window
+     * unmapped and unpainted until that completes; presenting here gets a frame on screen
+     * at Run() time. */
+    xaml_window_present_current();
+
     if (impl->window)
     {
         hr = ICoreWindow_get_Dispatcher( impl->window, &dispatcher );
@@ -651,6 +660,14 @@ static const IID IID_pinterface_IMapView_HSTRING_IInspectable =
 
 static const GUID IID_IResourceDictionary_WinUI =
     { 0x1b690975, 0xa710, 0x5783, { 0xa6, 0xe1, 0x15, 0x83, 0x6f, 0x61, 0x86, 0xc2 } };
+static const GUID IID_IResourceDictionary_UWP =
+    { 0x44a9796f, 0x723e, 0x4fdf, { 0xa2, 0x18, 0x03, 0x3e, 0x75, 0xb0, 0xc0, 0x84 } };
+static const GUID IID_IResourceDictionary_Mcg =
+    { 0xc1ea4f24, 0xd6de, 0x4191, { 0x8e, 0x3a, 0xf4, 0x86, 0x01, 0xf7, 0x48, 0x9c } };
+static const GUID IID_IResourceDictionaryFactory_UWP =
+    { 0xea3639b5, 0x31b7, 0x4271, { 0x92, 0xc9, 0x7c, 0x95, 0x84, 0xa9, 0x1c, 0x22 } };
+static const GUID IID_IResourceDictionaryFactory_WinUI =
+    { 0xea22a48f, 0xab71, 0x56f6, { 0xa3, 0x92, 0xd8, 0x23, 0x10, 0xc8, 0xaa, 0x7b } };
 static const GUID IID_IMap_Object_Object_WinUI =
     { 0x1c200999, 0x1a6d, 0x5f79, { 0xb6, 0x10, 0xf8, 0x5a, 0x2c, 0xd7, 0x77, 0xd8 } };
 static const GUID IID_IMapView_Object_Object_WinUI =
@@ -717,7 +734,9 @@ static HRESULT WINAPI rd_QueryInterface( IInspectable *iface, REFIID iid, void *
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IPropertySet ) ||
-        IsEqualGUID( iid, &IID_IResourceDictionary_WinUI ))
+        IsEqualGUID( iid, &IID_IResourceDictionary_WinUI ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionary_UWP ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionary_Mcg ))
     {
         *out = &impl->IInspectable_iface;
         rd_AddRef( iface );
@@ -773,18 +792,18 @@ static HRESULT WINAPI rd_get_ThemeDictionaries( void *iface, void **value )
 
 static HRESULT WINAPI rd_map_Lookup( void *iface, void *key, void **value )
 {
-    ERR( "rd_map_Lookup iface %p, key %p, value %p\n", iface, key, value );
-    if (!value) return E_POINTER;
-    return element_create_typed( L"Microsoft.UI.Xaml.Style", value );
+    TRACE( "rd_map_Lookup iface %p, key %p, value %p\n", iface, key, value );
+    if (value) *value = NULL;
+    return 0x8000000b; /* E_BOUNDS */
 }
 static HRESULT WINAPI rd_map_get_Size( void *iface, UINT32 *size )
 {
-    if (size) *size = 1;
+    if (size) *size = 0;
     return S_OK;
 }
 static HRESULT WINAPI rd_map_HasKey( void *iface, void *key, boolean *found )
 {
-    if (found) *found = TRUE;
+    if (found) *found = FALSE;
     return S_OK;
 }
 static HRESULT WINAPI rd_map_GetView( void *iface, void **view )
@@ -834,6 +853,104 @@ static HRESULT xaml_resource_dictionary_create( void **out )
     *out = &impl->IInspectable_iface;
     return S_OK;
 }
+
+/* ResourceDictionary Factory */
+struct rd_factory
+{
+    const void **vtbl_act;
+    const void **vtbl_fac;
+};
+
+static struct rd_factory rd_factory_obj;
+
+static HRESULT WINAPI rd_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p\n", iface, debugstr_guid( iid ), out );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &rd_factory_obj.vtbl_act;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceDictionaryFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionaryFactory_WinUI ))
+    {
+        *out = &rd_factory_obj.vtbl_fac;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IResourceDictionary_UWP ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionary_WinUI ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionary_Mcg ))
+    {
+        return xaml_resource_dictionary_create( out );
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI rd_factory_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI rd_factory_Release( void *iface ) { return 1; }
+static HRESULT WINAPI rd_factory_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    IID *array;
+    if (!count || !iids) return E_POINTER;
+    array = CoTaskMemAlloc( sizeof(IID) * 2 );
+    if (!array) return E_OUTOFMEMORY;
+    array[0] = IID_IResourceDictionaryFactory_UWP;
+    array[1] = IID_IResourceDictionaryFactory_WinUI;
+    *count = 2;
+    *iids = array;
+    return S_OK;
+}
+static HRESULT WINAPI rd_factory_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.ResourceDictionary", 34, name );
+}
+static HRESULT WINAPI rd_factory_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI rd_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    return xaml_resource_dictionary_create( (void **)instance );
+}
+static HRESULT WINAPI rd_factory_CreateInstance( void *iface, void *outer, void **inner, void **instance )
+{
+    HRESULT hr = xaml_resource_dictionary_create( instance );
+    if (SUCCEEDED(hr) && inner)
+    {
+        *inner = *instance;
+        IInspectable_AddRef( (IInspectable *)*inner );
+    }
+    return hr;
+}
+
+static const void *rd_act_vtbl[] =
+{
+    rd_factory_QueryInterface,
+    rd_factory_AddRef,
+    rd_factory_Release,
+    rd_factory_GetIids,
+    rd_factory_GetRuntimeClassName,
+    rd_factory_GetTrustLevel,
+    rd_factory_ActivateInstance,
+};
+
+static const void *rd_fac_vtbl[] =
+{
+    rd_factory_QueryInterface,
+    rd_factory_AddRef,
+    rd_factory_Release,
+    rd_factory_GetIids,
+    rd_factory_GetRuntimeClassName,
+    rd_factory_GetTrustLevel,
+    rd_factory_CreateInstance,
+};
+
+static struct rd_factory rd_factory_obj = { rd_act_vtbl, rd_fac_vtbl };
+IActivationFactory *resource_dictionary_factory = (IActivationFactory *)&rd_factory_obj.vtbl_act;
 
 static HRESULT resources_propget( struct application *impl, REFIID iid, void **out )
 {
@@ -1097,6 +1214,8 @@ static const struct application_extended_vtbl application_vtbl =
 
 static const GUID IID_IXamlMetadataProvider_WinUI =
     { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
+static const GUID IID_IXamlMetadataProvider_UWP =
+    { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
 
 static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REFIID iid, void **out );
 static ULONG WINAPI application_inner_AddRef( IInspectable *iface );
@@ -1112,18 +1231,42 @@ static HRESULT WINAPI app_meta_GetXamlTypeByFullName( void *iface, HSTRING name,
 static HRESULT WINAPI app_meta_GetXmlnsDefinitions( void *iface, ULONG *count, void ***out )
 { if (count) *count = 0; if (out) *out = NULL; return S_OK; }
 
+static HRESULT WINAPI app_meta_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
+        IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI app_meta_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI app_meta_Release( void *iface ) { return 1; }
+static HRESULT WINAPI app_meta_GetIids( void *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI app_meta_GetRuntimeClassName( void *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Xaml.Markup.IXamlMetadataProvider", 43, name ); }
+static HRESULT WINAPI app_meta_GetTrustLevel( void *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
 static const void *app_meta_provider_vtbl[] =
 {
-    (void *)application_inner_QueryInterface,
-    (void *)application_inner_AddRef,
-    (void *)application_inner_Release,
-    (void *)application_inner_GetIids,
-    (void *)application_inner_GetRuntimeClassName,
-    (void *)application_inner_GetTrustLevel,
+    app_meta_QueryInterface,
+    app_meta_AddRef,
+    app_meta_Release,
+    app_meta_GetIids,
+    app_meta_GetRuntimeClassName,
+    app_meta_GetTrustLevel,
     app_meta_GetXamlType,           /* 6: GetXamlType */
     app_meta_GetXamlTypeByFullName, /* 7: GetXamlTypeByFullName */
     app_meta_GetXmlnsDefinitions,   /* 8: GetXmlnsDefinitions */
 };
+static struct { const void *vtbl; } app_meta_provider_obj = { app_meta_provider_vtbl };
 
 static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
@@ -1145,20 +1288,15 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IUnknown ))
+    if (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
+        IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP ))
     {
-        if (impl->outer)
-        {
-            *out = impl->outer;
-            IInspectable_AddRef( impl->outer );
-            return S_OK;
-        }
-        *out = &impl->inner_iface;
-        IInspectable_AddRef( (IInspectable *)*out );
+        *out = &app_meta_provider_obj;
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IInspectable ) ||
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IApplication ) ||
         IsEqualGUID( iid, &IID_IApplication_WinUI ) ||
@@ -1723,27 +1861,102 @@ static void xaml_window_subscribe_core_window( struct xaml_window *impl )
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content )
 {
     RECT rc;
-    HDC memdc;
-    HBITMAP bmp, old_bmp;
     HBRUSH bg_brush;
 
     if (width <= 0 || height <= 0) return;
     SetRect( &rc, 0, 0, width, height );
 
-    memdc = CreateCompatibleDC( hdc );
-    bmp = CreateCompatibleBitmap( hdc, width, height );
-    old_bmp = SelectObject( memdc, bmp );
-
-    /* Background: Windows 10/11 Dark Application theme (RGB 32, 32, 32) */
-    bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
-    FillRect( memdc, &rc, bg_brush );
-
-    BitBlt( hdc, 0, 0, width, height, memdc, 0, 0, SRCCOPY );
-
-    SelectObject( memdc, old_bmp );
+    /* Fill the target DC directly. A memory-DC + BitBlt roundtrip fails against the
+     * CoreWindow's BeginPaint DC (BitBlt returns white), and a plain FillRect is what
+     * the winex11 driver flushes to the X pixmap on the paint cycle. Blue stands in
+     * for the XAML content layer; swap in the real layout walk when the tree paints. */
+    bg_brush = CreateSolidBrush( RGB( 0, 0, 255 ) );
+    FillRect( hdc, &rc, bg_brush );
     DeleteObject( bg_brush );
-    DeleteObject( bmp );
-    DeleteDC( memdc );
+    TRACE( "xaml layout fill %p %ux%u probe=%06lx\n", hdc, width, height, GetPixel( hdc, 5, 5 ) );
+}
+
+static WNDPROC xaml_corewindow_prev_proc;
+static BOOL xaml_corewindow_subclassed;
+/* FLIP_SEQUENTIAL back buffer: wine swaps front/back on each Present, so paint the
+ * buffer that is currently the back buffer and track the flip after every Present.
+ * Always painting buffer 0 shows one-present-stale content (black on the first flip). */
+static UINT xaml_back_index;
+
+/* Paint every child's DC as well: the X tree shows a child window at the same
+ * geometry as the mapped top-level, and the visible surface may be that child. */
+static BOOL CALLBACK xaml_paint_child( HWND hwnd, LPARAM lparam )
+{
+    RECT rc;
+    HDC hdc = GetDC( hwnd );
+    if (hdc)
+    {
+        GetClientRect( hwnd, &rc );
+        if (rc.right > 0 && rc.bottom > 0)
+            xaml_layout_render( hwnd, hdc, rc.right, rc.bottom, global_xaml_window.content );
+        ReleaseDC( hwnd, hdc );
+        TRACE( "xaml painted child %p %ldx%ld\n", hwnd, rc.right, rc.bottom );
+    }
+    return TRUE;
+}
+
+/* Paint the composed layout inside WM_PAINT. A GetDC() blit lands on the window's
+ * GDI surface, but on the winex11 driver only the BeginPaint/EndPaint cycle flushes
+ * a surface to the X pixmap, so the mapped window is painted from here. */
+static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    if (msg == WM_PAINT)
+    {
+        RECT rc;
+        /* Paint through GetDC, not BeginPaint: this window's BeginPaint DC targets a
+         * surface that reads back white (GetPixel probe), while a GetDC DC is the
+         * drawable the winex11 driver shows. ValidateRect replaces EndPaint.
+         * The CoreWindow is a child at the same geometry; its X parent occludes it,
+         * so paint the root ancestor too — that is the window on screen. */
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        HDC hdc = GetDC( top );
+        GetClientRect( top, &rc );
+        TRACE( "xaml corewindow WM_PAINT hdc %p rc %ldx%ld\n", hdc, rc.right, rc.bottom );
+        if (rc.right > 0 && rc.bottom > 0)
+            xaml_layout_render( top, hdc, rc.right, rc.bottom, global_xaml_window.content );
+        ReleaseDC( top, hdc );
+        ValidateRect( hwnd, NULL );
+        /* Re-present the composition swapchain after the GDI flush: the CoreWindow's X
+         * drawable is the GL surface the compositor presents into, the last writer wins,
+         * and the dcomp compositor thread only presents on content change, so a later
+         * GDI expose cycle would otherwise bury the composited frame. */
+        if (global_xaml_window.swapchain)
+        {
+            /* Repaint the back buffer every expose: the DIB->texture upload happens on
+             * ReleaseDC, and Present shows the buffer painted in the previous cycle.
+             * Filling only at attach leaves the visible front buffer stale. */
+            IDXGISurface1 *buf = NULL;
+            if (SUCCEEDED( IDXGISwapChain1_GetBuffer( global_xaml_window.swapchain, xaml_back_index,
+                        &IID_IDXGISurface1, (void **)&buf ) ) && buf)
+            {
+                HDC bdc = NULL;
+                if (SUCCEEDED( IDXGISurface1_GetDC( buf, FALSE, &bdc ) ) && bdc)
+                {
+                    RECT rc2;
+                    GetClientRect( top, &rc2 );
+                    xaml_layout_render( top, bdc, rc2.right, rc2.bottom, global_xaml_window.content );
+                    TRACE( "xaml wm_paint buffer fill idx %u probe=%06lx\n", xaml_back_index, GetPixel( bdc, 5, 5 ) );
+                    IDXGISurface1_ReleaseDC( buf, NULL );
+                }
+                else TRACE( "xaml wm_paint GetDC failed buf %p\n", buf );
+                IDXGISurface1_Release( buf );
+            }
+            else TRACE( "xaml wm_paint GetBuffer %u failed\n", xaml_back_index );
+            IDXGISwapChain1_Present( global_xaml_window.swapchain, 1, 0 );
+            xaml_back_index = 1 - xaml_back_index;
+            /* A/B: Commit off — the dcomp composite thread (path A, 60 Hz) only
+             * re-renders on commit; without it the window shows purely the
+             * WM_PAINT writers (GDI fill + buffer Present). */
+        }
+        return 0;
+    }
+    TRACE( "xaml corewindow msg %x\n", msg );
+    return CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
 }
 
 static HRESULT xaml_window_present( struct xaml_window *impl )
@@ -1767,9 +1980,35 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     if (!hwnd) hwnd = GetActiveWindow();
     if (!hwnd) return S_FALSE;
 
+    /* Re-install the window-slot subclass on every attach: twinapi sets the CoreWindow
+     * wndproc on activation, which pushes a previous window-slot subclass aside. The
+     * class proc is the wrong layer (twinapi's proc never chains to it), so stay on the
+     * window slot and re-assert it whenever we present. */
+    {
+        WNDPROC cur = (WNDPROC)(void *)GetWindowLongPtrW( hwnd, GWLP_WNDPROC );
+        if (cur != xaml_corewindow_wndproc)
+        {
+            xaml_corewindow_prev_proc = cur;
+            SetWindowLongPtrW( hwnd, GWLP_WNDPROC, (LONG_PTR)xaml_corewindow_wndproc );
+            xaml_corewindow_subclassed = TRUE;
+        }
+        /* Drive the class background brush too: WM_ERASEBKGND from the DefWindowProc
+         * paint path is the one GDI operation the winex11 driver reliably flushes to
+         * the X pixmap of a fresh top-level. Blue = the X-layer chain is alive. */
+        SetClassLongPtrW( hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)(void *)CreateSolidBrush( RGB( 0, 0, 255 ) ) );
+    }
+
     /* The DComp target and swapchain attach to this HWND; it must be visible so the
-     * X11 driver maps the top-level window and the composited frames show on screen. */
+     * X11 driver maps the top-level window and the composited frames show on screen.
+     * Invalidate + update right after ShowWindow: a window mapped before the swapchain
+     * existed has a stale X11 backing store, and only a fresh paint cycle flushes the
+     * first composited frame. */
     ShowWindow( hwnd, SW_SHOW );
+    SetWindowPos( hwnd, 0, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE );
+    TRACE( "xaml show: visible %u style %08lx exstyle %08lx\n", IsWindowVisible( hwnd ),
+           GetWindowLongW( hwnd, GWL_STYLE ), GetWindowLongW( hwnd, GWL_EXSTYLE ) );
+    InvalidateRect( hwnd, NULL, TRUE );
+    UpdateWindow( hwnd );
 
     if (impl->core_window) xaml_window_subscribe_core_window( impl );
 
@@ -1853,6 +2092,11 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         desc.Scaling = DXGI_SCALING_STRETCH;
         desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
+        /* GDI_COMPATIBLE: wined3d_texture_get_dc only serves a DC for swapchain
+         * buffers created with this flag; without it the per-frame buffer fill
+         * in WM_PAINT gets WINED3DERR_INVALIDCALL and present shows a black
+         * never-painted texture. */
+        desc.Flags = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
 
         hr = D3D11CreateDevice( NULL, D3D_DRIVER_TYPE_HARDWARE, NULL,
                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -1876,8 +2120,13 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                     hr = IDXGIAdapter_GetParent( dxgi_adapter, &IID_IDXGIFactory2, (void **)&dxgi_factory );
                     if (SUCCEEDED(hr))
                     {
-                        hr = IDXGIFactory2_CreateSwapChainForComposition( dxgi_factory, (IUnknown *)impl->d3d11_dev,
-                                                                          &desc, NULL, &impl->swapchain );
+                        /* ForHwnd (not ForComposition): wined3d binds the swapchain to a
+                         * GLX drawable for this HWND once, and each Present shows the front
+                         * buffer on the mapped X window. A composition swapchain needs the
+                         * compositor to re-attach the window every present, which resets the
+                         * drawable and shows a cleared front buffer. */
+                        hr = IDXGIFactory2_CreateSwapChainForHwnd( dxgi_factory, (IUnknown *)impl->d3d11_dev,
+                                                                    hwnd, &desc, NULL, NULL, &impl->swapchain );
                         IDXGIFactory2_Release( dxgi_factory );
                     }
                     IDXGIAdapter_Release( dxgi_adapter );
@@ -1897,7 +2146,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     if (impl->swapchain)
     {
         IDXGISurface1 *surface1 = NULL;
-        hr = IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_IDXGISurface1, (void **)&surface1 );
+        hr = IDXGISwapChain1_GetBuffer( impl->swapchain, xaml_back_index, &IID_IDXGISurface1, (void **)&surface1 );
         if (SUCCEEDED(hr) && surface1)
         {
             HDC hdc = NULL;
@@ -1912,10 +2161,60 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
 
         /* 7. Present swapchain via wined3d CS-thread path */
         IDXGISwapChain1_Present( impl->swapchain, 1, 0 );
+        xaml_back_index = 1 - xaml_back_index;
+
+        {
+            IDXGISurface1 *probe = NULL;
+            HDC hdc = NULL;
+            if (SUCCEEDED(IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_IDXGISurface1, (void **)&probe )) && probe)
+            {
+                if (SUCCEEDED(IDXGISurface1_GetDC( probe, FALSE, &hdc )))
+                    TRACE( "xaml post-present buf0 probe=%06lx\n", GetPixel( hdc, 5, 5 ) );
+                IDXGISurface1_ReleaseDC( probe, NULL );
+                IDXGISurface1_Release( probe );
+            }
+            probe = NULL;
+            hdc = NULL;
+            if (SUCCEEDED(IDXGISwapChain1_GetBuffer( impl->swapchain, 1, &IID_IDXGISurface1, (void **)&probe )) && probe)
+            {
+                if (SUCCEEDED(IDXGISurface1_GetDC( probe, FALSE, &hdc )))
+                    TRACE( "xaml post-present buf1 probe=%06lx\n", GetPixel( hdc, 5, 5 ) );
+                IDXGISurface1_ReleaseDC( probe, NULL );
+                IDXGISurface1_Release( probe );
+            }
+        }
     }
 
     /* 8. Commit the DirectComposition tree */
     IDCompositionDesktopDevice_Commit( impl->dcomp_device );
+
+    /* 9. Blit the composed layout into the top-level window DC. A composition swapchain
+     * has no GDI backing store, so the winex11 driver's window pixmap stays blank until
+     * something paints the HWND; drawing the same layout here is what makes the mapped
+     * window show content on screen. */
+    {
+        /* The X11 driver paints the root ancestor's pixmap; a child HWND has no backing
+         * store of its own on screen, so blit through the root window. */
+        HWND root = GetAncestor( hwnd, GA_ROOT );
+        HDC hdc = root ? GetDC( root ) : NULL;
+        if (hdc)
+        {
+            RECT rc;
+            if (root != hwnd && GetClientRect( root, &rc ))
+            {
+                width = rc.right > 0 ? rc.right : width;
+                height = rc.bottom > 0 ? rc.bottom : height;
+            }
+            xaml_layout_render( root, hdc, width, height, impl->content );
+            TRACE( "xaml step9 root %p hwnd %p hdc %p probe=%06lx\n", root, hwnd, hdc, GetPixel( hdc, 5, 5 ) );
+            ReleaseDC( root, hdc );
+            /* Flush after the blit: the X11 driver copies the DC surface on the paint
+             * cycle, so an invalidate issued before the draw shows a stale pixmap. */
+            InvalidateRect( root, NULL, TRUE );
+            UpdateWindow( root );
+        }
+    }
+
     TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u)\n", hwnd, width, height );
     return S_OK;
 }
@@ -2782,9 +3081,6 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
     return application_factory_CreateInstance( &impl->IApplicationFactory_iface, NULL, NULL, (IApplication **)instance );
 }
 
-static const GUID IID_IXamlMetadataProvider_UWP =
-    { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
-
 static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void **out )
 {
     void *provider = NULL;
@@ -2865,7 +3161,8 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
 
     TRACE( "xaml_load_xbf_components: target_conn %p, uri_insp %p, depth %d\n", target_conn, uri_insp, load_depth );
 
-    if (!target_conn || FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_x, (void **)&connector)))
+    if (!target_conn || (FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_x, (void **)&connector)) &&
+                         FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_UWP, (void **)&connector))))
     {
         TRACE( "failed to QI target_conn for IComponentConnector\n" );
         load_depth--;
@@ -3020,6 +3317,10 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                      * names fall back to Grid, which hosts any content. */
                                                     if (wcsstr(elem_name, L"WebView") || wcsstr(elem_name, L"webview"))
                                                         class_name = L"Microsoft.UI.Xaml.Controls.WebView2";
+                                                    else if (wcsstr(elem_name, L"Image") || wcsstr(elem_name, L"image"))
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.Image";
+                                                    else if (wcsstr(elem_name, L"Canvas") || wcsstr(elem_name, L"canvas"))
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.Canvas";
                                                     else if (wcsstr(elem_name, L"ErrorScreen"))
                                                         class_name = L"Microsoft.UI.Xaml.Controls.Grid";
                                                     else if (wcsstr(elem_name, L"Backdrop") || wcsstr(elem_name, L"Rectangle"))
@@ -3032,6 +3333,8 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                         class_name = L"Microsoft.UI.Xaml.Controls.Border";
                                                     else if (wcsstr(elem_name, L"Panel") || wcsstr(elem_name, L"Stack"))
                                                         class_name = L"Microsoft.UI.Xaml.Controls.StackPanel";
+                                                    else if (wcsstr(elem_name, L"Template") || wcsstr(elem_name, L"Layout"))
+                                                        class_name = L"Microsoft.UI.Xaml.DataTemplate";
                                                     else
                                                         class_name = L"Microsoft.UI.Xaml.Controls.Grid";
                                                     TRACE("XBF connect conn_id %lu, elem_name %s, class_name %s\n",

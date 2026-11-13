@@ -23,6 +23,9 @@
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 /* Windows.UI.Xaml.PropertyMetadata */
+static const GUID IID_IPropertyMetadata_WinUI =
+    { 0xb3644425, 0x9464, 0x5434, { 0xb0, 0xae, 0xaf, 0xf8, 0xd3, 0x15, 0x9f, 0xe1 } };
+
 struct property_metadata
 {
     IPropertyMetadata IPropertyMetadata_iface;
@@ -45,7 +48,8 @@ static HRESULT WINAPI property_metadata_QueryInterface( IPropertyMetadata *iface
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IPropertyMetadata ))
+        IsEqualGUID( iid, &IID_IPropertyMetadata ) ||
+        IsEqualGUID( iid, &IID_IPropertyMetadata_WinUI ))
     {
         *out = &impl->IPropertyMetadata_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -143,6 +147,13 @@ static HRESULT property_metadata_create( IInspectable *default_value, IPropertyC
     return S_OK;
 }
 
+static const GUID IID_IPropertyMetadataFactory_WinUI =
+    { 0x9f420906, 0x111a, 0x5465, { 0x91, 0xee, 0xbe, 0xd1, 0x4b, 0x3e, 0x7f, 0xec } };
+static const GUID IID_IPropertyMetadataStatics_WinUI =
+    { 0x37b8add4, 0x7a4a, 0x5cf7, { 0xa1, 0x74, 0x23, 0x51, 0x82, 0xcd, 0x08, 0x2e } };
+static const GUID IID_IDependencyPropertyStatics_WinUI =
+    { 0x61ddc651, 0x0383, 0x5d6f, { 0x98, 0xce, 0x5c, 0x04, 0x6a, 0xaa, 0xaa, 0x8f } };
+
 struct property_metadata_factory
 {
     IActivationFactory IActivationFactory_iface;
@@ -171,13 +182,15 @@ static HRESULT WINAPI pm_factory_QueryInterface( IActivationFactory *iface, REFI
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IPropertyMetadataFactory ))
+    if (IsEqualGUID( iid, &IID_IPropertyMetadataFactory ) ||
+        IsEqualGUID( iid, &IID_IPropertyMetadataFactory_WinUI ))
     {
         *out = &impl->IPropertyMetadataFactory_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IPropertyMetadataStatics ))
+    if (IsEqualGUID( iid, &IID_IPropertyMetadataStatics ) ||
+        IsEqualGUID( iid, &IID_IPropertyMetadataStatics_WinUI ))
     {
         *out = &impl->IPropertyMetadataStatics_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -247,10 +260,13 @@ static HRESULT WINAPI pm_metadata_factory_CreateInstanceWithDefaultValue(
     IInspectable **inner_interface,
     IPropertyMetadata **value )
 {
-    TRACE( "iface %p, default_value %p, base %p, inner %p, value %p\n",
-           iface, default_value, base_interface, inner_interface, value );
-    if (inner_interface) *inner_interface = NULL;
-    return property_metadata_create( default_value, NULL, value );
+    HRESULT hr = property_metadata_create( default_value, NULL, value );
+    if (SUCCEEDED(hr) && inner_interface && value && *value)
+    {
+        *inner_interface = (IInspectable *)*value;
+        IInspectable_AddRef( *inner_interface );
+    }
+    return hr;
 }
 
 static HRESULT WINAPI pm_metadata_factory_CreateInstanceWithDefaultValueAndCallback(
@@ -261,10 +277,13 @@ static HRESULT WINAPI pm_metadata_factory_CreateInstanceWithDefaultValueAndCallb
     IInspectable **inner_interface,
     IPropertyMetadata **value )
 {
-    TRACE( "iface %p, default_value %p, callback %p, base %p, inner %p, value %p\n",
-           iface, default_value, property_changed_callback, base_interface, inner_interface, value );
-    if (inner_interface) *inner_interface = NULL;
-    return property_metadata_create( default_value, property_changed_callback, value );
+    HRESULT hr = property_metadata_create( default_value, property_changed_callback, value );
+    if (SUCCEEDED(hr) && inner_interface && value && *value)
+    {
+        *inner_interface = (IInspectable *)*value;
+        IInspectable_AddRef( *inner_interface );
+    }
+    return hr;
 }
 
 static const struct __x_ABI_CWindows_CUI_CXaml_CIPropertyMetadataFactoryVtbl pm_metadata_factory_vtbl =
@@ -346,6 +365,9 @@ struct dependency_property
     IPropertyMetadata *metadata;
 };
 
+static const GUID IID_IDependencyProperty_WinUI =
+    { 0x960eab49, 0x9672, 0x58a0, { 0x99, 0x5b, 0x3a, 0x42, 0xe5, 0xea, 0x62, 0x78 } };
+
 static inline struct dependency_property *impl_from_IDependencyProperty( IDependencyProperty *iface )
 {
     return CONTAINING_RECORD( iface, struct dependency_property, IDependencyProperty_iface );
@@ -360,7 +382,8 @@ static HRESULT WINAPI dep_prop_QueryInterface( IDependencyProperty *iface, REFII
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IDependencyProperty ))
+        IsEqualGUID( iid, &IID_IDependencyProperty ) ||
+        IsEqualGUID( iid, &IID_IDependencyProperty_WinUI ))
     {
         *out = &impl->IDependencyProperty_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -402,7 +425,7 @@ static HRESULT WINAPI dep_prop_GetIids( IDependencyProperty *iface, ULONG *count
 
 static HRESULT WINAPI dep_prop_GetRuntimeClassName( IDependencyProperty *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.UI.Xaml.DependencyProperty", 34, name );
+    return WindowsCreateString( L"Microsoft.UI.Xaml.DependencyProperty", 36, name );
 }
 
 static HRESULT WINAPI dep_prop_GetTrustLevel( IDependencyProperty *iface, TrustLevel *level )
@@ -434,7 +457,7 @@ static const struct __x_ABI_CWindows_CUI_CXaml_CIDependencyPropertyVtbl dep_prop
     dep_prop_GetMetadata,
 };
 
-static HRESULT dependency_property_create( IPropertyMetadata *metadata, IDependencyProperty **out )
+HRESULT dependency_property_create( IPropertyMetadata *metadata, IDependencyProperty **out )
 {
     struct dependency_property *impl;
 
@@ -475,7 +498,8 @@ static HRESULT WINAPI dp_factory_QueryInterface( IActivationFactory *iface, REFI
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IDependencyPropertyStatics ))
+    if (IsEqualGUID( iid, &IID_IDependencyPropertyStatics ) ||
+        IsEqualGUID( iid, &IID_IDependencyPropertyStatics_WinUI ))
     {
         *out = &impl->IDependencyPropertyStatics_iface;
         IInspectable_AddRef( (IInspectable *)*out );
@@ -508,7 +532,7 @@ static HRESULT WINAPI dp_factory_GetIids( IActivationFactory *iface, ULONG *coun
 
 static HRESULT WINAPI dp_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.UI.Xaml.DependencyProperty", 34, name );
+    return WindowsCreateString( L"Microsoft.UI.Xaml.DependencyProperty", 36, name );
 }
 
 static HRESULT WINAPI dp_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
@@ -769,6 +793,96 @@ static struct cvs_factory_s cvs_factory_obj =
     {(const struct IActivationFactoryVtbl *)cvs_statics_vtbl},
 };
 IActivationFactory *collection_view_source_factory = &cvs_factory_obj.factory_iface;
+
+/* Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider */
+static const GUID IID_IXamlMetadataProvider_WinUI2 =
+    { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
+static const GUID IID_IXamlMetadataProvider_UWP =
+    { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
+
+static HRESULT WINAPI meta_provider_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI2 ) ||
+        IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI meta_provider_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI meta_provider_Release( void *iface ) { return 1; }
+static HRESULT WINAPI meta_provider_GetIids( void *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI meta_provider_GetRuntimeClassName( void *iface, HSTRING *name )
+{ return WindowsCreateString( L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider", 61, name ); }
+static HRESULT WINAPI meta_provider_GetTrustLevel( void *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI meta_provider_GetXamlType( void *iface, void *type_name, void **out )
+{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI meta_provider_GetXamlTypeByFullName( void *iface, HSTRING name, void **out )
+{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI meta_provider_GetXmlnsDefinitions( void *iface, ULONG *count, void ***out )
+{ if (count) *count = 0; if (out) *out = NULL; return S_OK; }
+
+static const void *meta_provider_vtbl[] =
+{
+    meta_provider_QueryInterface,
+    meta_provider_AddRef,
+    meta_provider_Release,
+    meta_provider_GetIids,
+    meta_provider_GetRuntimeClassName,
+    meta_provider_GetTrustLevel,
+    meta_provider_GetXamlType,           /* 6: GetXamlType */
+    meta_provider_GetXamlTypeByFullName, /* 7: GetXamlTypeByFullName */
+    meta_provider_GetXmlnsDefinitions,   /* 8: GetXmlnsDefinitions */
+};
+
+static struct { const void *vtbl; } meta_provider_obj = { meta_provider_vtbl };
+
+static HRESULT WINAPI meta_provider_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI2 ) ||
+        IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP ))
+    {
+        *out = &meta_provider_obj;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI meta_provider_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    *instance = (IInspectable *)&meta_provider_obj;
+    return S_OK;
+}
+
+static const struct IActivationFactoryVtbl meta_provider_factory_vtbl =
+{
+    meta_provider_factory_QueryInterface,
+    cvs_factory_AddRef,
+    cvs_factory_Release,
+    (void *)cvs_GetIids,
+    (void *)cvs_GetRuntimeClassName,
+    (void *)cvs_GetTrustLevel,
+    meta_provider_factory_ActivateInstance,
+};
+
+static struct { const struct IActivationFactoryVtbl *vtbl; } meta_provider_factory_obj = { &meta_provider_factory_vtbl };
+static IActivationFactory *meta_provider_factory = (IActivationFactory *)&meta_provider_factory_obj;
 
 /* Microsoft.UI.Xaml.PropertyPath / Windows.UI.Xaml.PropertyPath */
 static const GUID IID_IPropertyPath =
@@ -1119,6 +1233,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Data.CollectionViewSource" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Data.CollectionViewSource" ))
         IActivationFactory_QueryInterface( collection_view_source_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.ResourceDictionary" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.ResourceDictionary" ))
+        IActivationFactory_QueryInterface( resource_dictionary_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Data.PropertyChangedEventArgs" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Data.PropertyChangedEventArgs" ))
         IActivationFactory_QueryInterface( property_changed_factory, &IID_IActivationFactory, (void **)factory );
@@ -1134,23 +1251,59 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.Page" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Page" ))
         IActivationFactory_QueryInterface( page_factory, &IID_IActivationFactory, (void **)factory );
-    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.Grid" ) ||
-             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Grid" ) ||
-             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Canvas" ) ||
-             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Canvas" ) ||
-             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.StackPanel" ) ||
-             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.StackPanel" ) ||
-             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Border" ) ||
-             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Border" ) ||
-             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.RowDefinition" ) ||
-             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.RowDefinition" ) ||
-             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.ColumnDefinition" ) ||
-             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.ColumnDefinition" ) ||
-             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.RowDefinitionCollection" ) ||
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.RowDefinitionCollection" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.RowDefinitionCollection" ) ||
              !wcscmp( buffer, L"Windows.UI.Xaml.Controls.ColumnDefinitionCollection" ) ||
              !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.ColumnDefinitionCollection" ))
+        IActivationFactory_QueryInterface( coll_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.RowDefinition" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.RowDefinition" ))
+        IActivationFactory_QueryInterface( row_def_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.ColumnDefinition" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.ColumnDefinition" ))
+        IActivationFactory_QueryInterface( col_def_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.WebView2" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.WebView2" ))
+        IActivationFactory_QueryInterface( webview2_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.UserControl" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.UserControl" ))
+        IActivationFactory_QueryInterface( user_control_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider" ))
+        IActivationFactory_QueryInterface( meta_provider_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.Canvas" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Canvas" ))
+        IActivationFactory_QueryInterface( canvas_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.Grid" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Grid" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.StackPanel" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.StackPanel" ))
         IActivationFactory_QueryInterface( grid_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.ContentControl" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.ContentControl" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Button" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Button" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Border" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Border" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.UserControl" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.UserControl" ))
+        IActivationFactory_QueryInterface( content_control_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.UI.Xaml.Controls.TextBlock" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.TextBlock" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Shapes.Rectangle" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Shapes.Rectangle" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Image" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Image" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.Viewbox" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.Viewbox" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Controls.SwapChainPanel" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Controls.SwapChainPanel" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.Style" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.Style" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.DataTemplate" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.DataTemplate" ) ||
+             !wcscmp( buffer, L"Windows.UI.Xaml.FrameworkTemplate" ) ||
+             !wcscmp( buffer, L"Microsoft.UI.Xaml.FrameworkTemplate" ))
+        IActivationFactory_QueryInterface( element_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;
