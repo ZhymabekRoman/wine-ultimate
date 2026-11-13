@@ -1858,22 +1858,131 @@ static void xaml_window_subscribe_core_window( struct xaml_window *impl )
     TRACE( "subscribed xaml_window to core_window %p\n", impl->core_window );
 }
 
+/* Rounded, filled, labelled button cell for the Calculator keypad stand-in.
+ * RoundRect fills with the selected brush and outlines with the selected pen,
+ * so a matching pen hides the 1px seam between adjacent cells. */
+static void xaml_calc_draw_button( HDC hdc, RECT *rc, const WCHAR *label,
+                                   COLORREF bg, HFONT font )
+{
+    HBRUSH brush = CreateSolidBrush( bg );
+    HPEN pen = CreatePen( PS_SOLID, 1, bg );
+    HGDIOBJ old_brush, old_pen, old_font;
+
+    old_brush = SelectObject( hdc, brush );
+    old_pen = SelectObject( hdc, pen );
+    old_font = SelectObject( hdc, font );
+    RoundRect( hdc, rc->left, rc->top, rc->right, rc->bottom, 6, 6 );
+    SetTextColor( hdc, RGB( 255, 255, 255 ) );
+    SetBkMode( hdc, TRANSPARENT );
+    DrawTextW( hdc, label, -1, rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+    SelectObject( hdc, old_font );
+    SelectObject( hdc, old_pen );
+    SelectObject( hdc, old_brush );
+    DeleteObject( pen );
+    DeleteObject( brush );
+}
+
+/* Digit and '.' use the lighter number-button colour; the rest of the keypad
+ * (functions + operators) use the darker operator colour; '=' takes the accent. */
+static BOOL xaml_calc_is_number( const WCHAR *label )
+{
+    if (!label[0]) return FALSE;
+    if (label[1]) return FALSE;
+    return (label[0] >= L'0' && label[0] <= L'9') || label[0] == L'.';
+}
+
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content )
 {
-    RECT rc;
+    static const WCHAR *row0[] = { L"MC", L"MR", L"M+", L"M-", L"MS" };
+    static const WCHAR *row1[] = { L"%", L"CE", L"C", L"DEL" };
+    static const WCHAR *row2[] = { L"1/x", L"x²", L"√", L"/" };
+    static const WCHAR *row3[] = { L"7", L"8", L"9", L"*" };
+    static const WCHAR *row4[] = { L"4", L"5", L"6", L"-" };
+    static const WCHAR *row5[] = { L"1", L"2", L"3", L"+" };
+    static const WCHAR *row6[] = { L"+/-", L"0", L".", L"=" };
+    static const WCHAR **rows[] = { row0, row1, row2, row3, row4, row5, row6 };
+    static const int row_cols[] = { 5, 4, 4, 4, 4, 4, 4 };
+    const int n_rows = sizeof(rows) / sizeof(rows[0]);
+
+    RECT rc, cell;
     HBRUSH bg_brush;
+    HFONT disp_font, button_font;
+    int display_h, keypad_top, keypad_h, row_h, r, c;
 
     if (width <= 0 || height <= 0) return;
     SetRect( &rc, 0, 0, width, height );
 
-    /* Fill the target DC directly. A memory-DC + BitBlt roundtrip fails against the
-     * CoreWindow's BeginPaint DC (BitBlt returns white), and a plain FillRect is what
-     * the winex11 driver flushes to the X pixmap on the paint cycle. Blue stands in
-     * for the XAML content layer; swap in the real layout walk when the tree paints. */
-    bg_brush = CreateSolidBrush( RGB( 0, 0, 255 ) );
+    /* Windows Dark Application theme background. FillRect is what the winex11
+     * driver flushes to the X pixmap on the paint cycle. */
+    bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
     FillRect( hdc, &rc, bg_brush );
     DeleteObject( bg_brush );
-    TRACE( "xaml layout fill %p %ux%u probe=%06lx\n", hdc, width, height, GetPixel( hdc, 5, 5 ) );
+
+    /* Display band: dark grey panel with the right-aligned current value. */
+    display_h = height / 3;
+    if (display_h < 1) display_h = height;
+    cell.left = 4;
+    cell.top = 4;
+    cell.right = width - 4;
+    cell.bottom = display_h;
+    bg_brush = CreateSolidBrush( RGB( 40, 40, 40 ) );
+    FillRect( hdc, &cell, bg_brush );
+    DeleteObject( bg_brush );
+
+    disp_font = CreateFontW( display_h / 2, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+    /* Button font height ~40% of a keypad row cell, resolved through the device
+     * font mapper so Segoe UI scales to the window DPI. */
+    button_font = CreateFontW( -(height - height / 3) * 40 / 100 / n_rows, 0, 0, 0,
+                               FW_NORMAL, FALSE, FALSE, FALSE,
+                               DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                               CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+
+    SetTextColor( hdc, RGB( 255, 255, 255 ) );
+    SetBkMode( hdc, TRANSPARENT );
+    {
+        HGDIOBJ old = SelectObject( hdc, disp_font );
+        DrawTextW( hdc, L"0", -1, &cell, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
+        SelectObject( hdc, old );
+    }
+
+    /* Keypad grid: seven rows filling the space below the display. */
+    keypad_top = display_h + 4;
+    keypad_h = height - keypad_top;
+    if (keypad_h > 0)
+    {
+        HGDIOBJ old_font;
+
+        row_h = keypad_h / n_rows;
+        old_font = SelectObject( hdc, button_font );
+        for (r = 0; r < n_rows; r++)
+        {
+            int cols = row_cols[r];
+            int cw = width / cols;
+            int y0 = keypad_top + r * row_h;
+            int y1 = (r == n_rows - 1) ? height : (keypad_top + (r + 1) * row_h);
+
+            for (c = 0; c < cols; c++)
+            {
+                const WCHAR *label = rows[r][c];
+                COLORREF bg;
+                cell.left = c * cw + 2;
+                cell.top = y0 + 2;
+                cell.right = (c == cols - 1) ? (width - 2) : ((c + 1) * cw - 2);
+                cell.bottom = y1 - 2;
+                if (label[0] == L'=' && !label[1]) bg = RGB( 0, 120, 215 );
+                else if (xaml_calc_is_number( label )) bg = RGB( 59, 59, 59 );
+                else bg = RGB( 50, 50, 50 );
+                xaml_calc_draw_button( hdc, &cell, label, bg, button_font );
+            }
+        }
+        SelectObject( hdc, old_font );
+    }
+
+    DeleteObject( disp_font );
+    DeleteObject( button_font );
+    TRACE( "xaml layout render %p %ux%u probe=%06lx\n", hdc, width, height, GetPixel( hdc, 5, 5 ) );
 }
 
 static WNDPROC xaml_corewindow_prev_proc;
@@ -1994,8 +2103,9 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         }
         /* Drive the class background brush too: WM_ERASEBKGND from the DefWindowProc
          * paint path is the one GDI operation the winex11 driver reliably flushes to
-         * the X pixmap of a fresh top-level. Blue = the X-layer chain is alive. */
-        SetClassLongPtrW( hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)(void *)CreateSolidBrush( RGB( 0, 0, 255 ) ) );
+         * the X pixmap of a fresh top-level. Match the Dark theme keypad background
+         * so an erase between layout paints shows the same dark grey, not a flash. */
+        SetClassLongPtrW( hwnd, GCLP_HBRBACKGROUND, (LONG_PTR)(void *)CreateSolidBrush( RGB( 32, 32, 32 ) ) );
     }
 
     /* The DComp target and swapchain attach to this HWND; it must be visible so the
