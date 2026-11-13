@@ -1854,67 +1854,202 @@ static HRESULT decimal_formatter_create( void **instance )
 }
 
 /* DecimalFormatter factory */
-static HRESULT WINAPI decimal_formatter_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+struct decimal_formatter_factory_impl
 {
+    const void *vtbl_activation;
+    const void *vtbl_factory;
+};
+
+static inline struct decimal_formatter_factory_impl *impl_from_df_activation( void *iface )
+{
+    return (struct decimal_formatter_factory_impl *)iface;
+}
+static inline struct decimal_formatter_factory_impl *impl_from_df_factory( void *iface )
+{
+    return (struct decimal_formatter_factory_impl *)((char *)iface - sizeof(void *));
+}
+
+static HRESULT WINAPI df_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct decimal_formatter_factory_impl *impl = impl_from_df_activation( iface );
+    if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IDecimalFormatterFactory ))
+        IsEqualGUID( iid, &IID_IActivationFactory ))
     {
-        *out = iface;
-        IUnknown_AddRef( iface );
+        *out = (void *)&impl->vtbl_activation;
         return S_OK;
     }
-    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IDecimalFormatterFactory ))
+    {
+        *out = (void *)&impl->vtbl_factory;
+        return S_OK;
+    }
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI decimal_formatter_factory_AddRef( IActivationFactory *iface )
-{
-    return 2;
-}
-static ULONG WINAPI decimal_formatter_factory_Release( IActivationFactory *iface )
-{
-    return 1;
-}
-static HRESULT WINAPI decimal_formatter_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
-{
-    if (count) *count = 0;
-    if (iids) *iids = NULL;
-    return S_OK;
-}
-static HRESULT WINAPI decimal_formatter_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
-{
-    return WindowsCreateString( L"Windows.Globalization.NumberFormatting.DecimalFormatter", 55, name );
-}
-static HRESULT WINAPI decimal_formatter_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
-{
-    if (level) *level = BaseTrust;
-    return S_OK;
-}
-static HRESULT WINAPI decimal_formatter_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+static ULONG WINAPI df_factory_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI df_factory_Release( void *iface ) { return 1; }
+static HRESULT WINAPI df_factory_GetIids( void *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI df_factory_GetRuntimeClassName( void *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.Globalization.NumberFormatting.DecimalFormatter", 55, name ); }
+static HRESULT WINAPI df_factory_GetTrustLevel( void *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
+/* Face 1: IActivationFactory */
+static HRESULT WINAPI df_factory_ActivateInstance( void *iface, IInspectable **instance )
 {
     return decimal_formatter_create( (void **)instance );
 }
-static HRESULT WINAPI decimal_formatter_factory_CreateDecimalFormatter( void *iface, void *languages, HSTRING geographicregion, void **result )
+static const void *df_activation_vtbl[] =
 {
-    return decimal_formatter_create( result );
-}
-
-static const void *decimal_formatter_factory_vtbl[] =
-{
-    decimal_formatter_factory_QueryInterface,
-    decimal_formatter_factory_AddRef,
-    decimal_formatter_factory_Release,
-    decimal_formatter_factory_GetIids,
-    decimal_formatter_factory_GetRuntimeClassName,
-    decimal_formatter_factory_GetTrustLevel,
-    decimal_formatter_factory_ActivateInstance,
-    decimal_formatter_factory_CreateDecimalFormatter,
+    df_factory_QueryInterface,
+    df_factory_AddRef,
+    df_factory_Release,
+    df_factory_GetIids,
+    df_factory_GetRuntimeClassName,
+    df_factory_GetTrustLevel,
+    df_factory_ActivateInstance,
 };
 
-static struct { const void **vtbl; } decimal_formatter_factory_obj = { decimal_formatter_factory_vtbl };
+/* Face 2: IDecimalFormatterFactory */
+static HRESULT WINAPI df_factory2_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct decimal_formatter_factory_impl *impl = impl_from_df_factory( iface );
+    return df_factory_QueryInterface( (void *)&impl->vtbl_activation, iid, out );
+}
+static ULONG WINAPI df_factory2_AddRef( void *iface )
+{
+    return df_factory_AddRef( (void *)&impl_from_df_factory( iface )->vtbl_activation );
+}
+static ULONG WINAPI df_factory2_Release( void *iface )
+{
+    return df_factory_Release( (void *)&impl_from_df_factory( iface )->vtbl_activation );
+}
+static HRESULT WINAPI df_factory_CreateDecimalFormatter( void *iface, void *languages, HSTRING geographicregion, void **result )
+{
+    TRACE( "CreateDecimalFormatter iface %p languages %p region %s out %p\n",
+           iface, languages, debugstr_hstring(geographicregion), result );
+    return decimal_formatter_create( result );
+}
+static HRESULT WINAPI df_factory_CreateDecimalFormatterWithDigits( void *iface, void *languages,
+        INT32 integer_digits, INT32 fraction_digits, INT32 significant_digits,
+        HSTRING geographicregion, void **result )
+{
+    TRACE( "CreateDecimalFormatterWithDigits iface %p integer %d fraction %d significant %d region %s out %p\n",
+           iface, integer_digits, fraction_digits, significant_digits, debugstr_hstring(geographicregion), result );
+    return decimal_formatter_create( result );
+}
+static const void *df_factory_vtbl[] =
+{
+    df_factory2_QueryInterface,
+    df_factory2_AddRef,
+    df_factory2_Release,
+    df_factory_GetIids,
+    df_factory_GetRuntimeClassName,
+    df_factory_GetTrustLevel,
+    df_factory_CreateDecimalFormatter,
+    df_factory_CreateDecimalFormatterWithDigits,
+};
+
+static struct decimal_formatter_factory_impl decimal_formatter_factory_inst =
+{
+    df_activation_vtbl,
+    df_factory_vtbl,
+};
+
+/* Windows.Globalization.CalendarIdentifiers */
+static HRESULT WINAPI cal_id_get_Gregorian( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"GregorianCalendar", 17, value );
+}
+static HRESULT WINAPI cal_id_get_Hebrew( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"HebrewCalendar", 14, value );
+}
+static HRESULT WINAPI cal_id_get_Hijri( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"HijriCalendar", 13, value );
+}
+static HRESULT WINAPI cal_id_get_Japanese( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"JapaneseCalendar", 16, value );
+}
+static HRESULT WINAPI cal_id_get_Julian( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"JulianCalendar", 14, value );
+}
+static HRESULT WINAPI cal_id_get_Korean( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"KoreanCalendar", 14, value );
+}
+static HRESULT WINAPI cal_id_get_Taiwan( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"TaiwanCalendar", 14, value );
+}
+static HRESULT WINAPI cal_id_get_Thai( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"ThaiCalendar", 12, value );
+}
+static HRESULT WINAPI cal_id_get_UmAlQura( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"UmAlQuraCalendar", 16, value );
+}
+static HRESULT WINAPI cal_id_get_Persian( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"PersianCalendar", 15, value );
+}
+
+static HRESULT WINAPI cal_id_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    TRACE( "cal_id_QI: iid %s\n", debugstr_guid(iid) );
+    if (!out) return E_POINTER;
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI cal_id_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI cal_id_Release( void *iface ) { return 1; }
+static HRESULT WINAPI cal_id_GetIids( void *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI cal_id_GetRuntimeClassName( void *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.Globalization.CalendarIdentifiers", 41, name ); }
+static HRESULT WINAPI cal_id_GetTrustLevel( void *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
+static const void *cal_id_factory_vtbl[] =
+{
+    cal_id_QueryInterface,
+    cal_id_AddRef,
+    cal_id_Release,
+    cal_id_GetIids,
+    cal_id_GetRuntimeClassName,
+    cal_id_GetTrustLevel,
+    cal_id_get_Gregorian,
+    cal_id_get_Hebrew,
+    cal_id_get_Hijri,
+    cal_id_get_Japanese,
+    cal_id_get_Julian,
+    cal_id_get_Korean,
+    cal_id_get_Taiwan,
+    cal_id_get_Thai,
+    cal_id_get_UmAlQura,
+    cal_id_get_Persian,
+    cal_id_get_Gregorian,
+    cal_id_get_Gregorian,
+};
+static struct { const void **vtbl; } cal_id_factory_obj = { cal_id_factory_vtbl };
 
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
@@ -1949,12 +2084,15 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         *factory = (IActivationFactory *)&font_group_factory_obj;
         IUnknown_AddRef(*factory);
     }
+    else if (!wcscmp(name, L"Windows.Globalization.CalendarIdentifiers"))
+    {
+        *factory = (IActivationFactory *)&cal_id_factory_obj;
+    }
     else if (!wcscmp(name, L"Windows.Globalization.NumberFormatting.DecimalFormatter") ||
              !wcscmp(name, L"Windows.Globalization.NumberFormatting.CurrencyFormatter") ||
              !wcscmp(name, L"Windows.Globalization.NumberFormatting.PercentFormatter"))
     {
-        *factory = (IActivationFactory *)&decimal_formatter_factory_obj;
-        IUnknown_AddRef(*factory);
+        *factory = (IActivationFactory *)&decimal_formatter_factory_inst.vtbl_activation;
     }
 
     if (*factory) return S_OK;

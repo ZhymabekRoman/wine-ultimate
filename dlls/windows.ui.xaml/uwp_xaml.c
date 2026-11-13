@@ -1081,6 +1081,7 @@ struct uwp_element
     struct uwp_defer_entry defer_entries[16];
     int defer_cnt;
     struct uwp_element *next_reg;
+    int adopted_faulted_ctor;
 };
 
 /* Global registry of live uwp_elements so we can resolve from any interface or outer.
@@ -3352,6 +3353,8 @@ static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *
  * children carry grid_row/grid_col/text. uwp_arrange_element lays out Grid
  * children by grid_row/grid_col; uwp_paint_element draws each Button with its
  * text label (uwp_format_display_label maps the Segoe MDL2 operator glyphs). */
+static void uwp_seed_synthetic_calculator( struct uwp_element *holder );
+
 /* Activate the app's own CalculatorApp.Controls.Calculator through the app's
  * IXamlMetadataProvider (same provider chain as Frame.Navigate page adoption:
  * GetXamlTypeByFullName → IXamlType::ActivateInstance slot 18), then drive
@@ -3384,6 +3387,7 @@ static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *hol
             if (activate)
             {
                 HRESULT ihr = S_OK;
+                int gen = g_all_uwp_elem_cnt;
                 __TRY
                 {
                     ihr = activate( xaml_type, &instance );
@@ -3396,6 +3400,20 @@ static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *hol
                 }
                 __ENDTRY;
                 el = (instance && SUCCEEDED(ihr)) ? uwp_elem_from_any( instance ) : NULL;
+                if (!el && g_all_uwp_elem_cnt > gen)
+                {
+                    struct uwp_element *e;
+                    for (e = g_all_uwp_elems_head; e; e = e->next_reg)
+                        if (e->kind == UWP_KIND_USER_CONTROL) { el = e; break; }
+                }
+                if (el)
+                {
+                    lstrcpynW( el->class_name, L"CalculatorApp.Controls.Calculator", ARRAY_SIZE(el->class_name) );
+                    el->adopted_faulted_ctor = 1;
+                    g_last_created_page = NULL;
+                    TRACE( "uwp_activate_real_calculator: adopting head UserControl (gen %d→%d ihr %#lx)\n",
+                           gen, g_all_uwp_elem_cnt, ihr );
+                }
                 TRACE( "uwp_activate_real_calculator: ActivateInstance(%s) -> hr %#lx inst %p el %p\n",
                        debugstr_w(names[n]), ihr, (void *)instance, el );
             }
@@ -3411,15 +3429,39 @@ static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *hol
     uwp_vec_create( holder, &holder->children_coll );
     uwp_vec_Append( holder->children_coll, el->outer ? (void *)el->outer : (void *)&el->IInspectable_iface );
     el->parent = holder;
+    if (el->adopted_faulted_ctor)
+    {
+        /* ctor died before InitializeComponent: give the adopted UserControl a
+         * Grid host so the seeded display+keypad paint inside it. */
+        IInspectable *uc_raw = NULL;
+        struct uwp_element *uc;
+        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&uc_raw )) && uc_raw)
+        {
+            uc = uwp_elem_from_any( uc_raw );
+            IInspectable_Release( uc_raw );
+            if (uc)
+            {
+                lstrcpynW( uc->name, L"Calculator", ARRAY_SIZE(uc->name) );
+                uc->parent = el;
+                uwp_vec_create( el, &el->children_coll );
+                uwp_vec_Append( el->children_coll, &uc->IInspectable_iface );
+                uc->grid_row = 0;
+                uwp_seed_synthetic_calculator( uc );
+            }
+        }
+    }
 
-    /* Drive the app's InitializeComponent path: the composable chain on a
-     * provider-activated UserControl is completed by its ctor; a nested
-     * LoadComponent (Connect chain) runs inside the app. If the control has
-     * no children yet (template/XBF deferred), apply its template. */
+    /* Drive the app's InitializeComponent path: guard against the SxS
+     * Windows.Globalization.dll failfast chain (1007) on second entry. */
     if (!el->children_coll && !el->content)
     {
         struct uwp_element *probe = el;
-        uwp_apply_template_if_needed( probe );
+        __TRY
+        {
+            uwp_apply_template_if_needed( probe );
+        }
+        __EXCEPT_ALL { TRACE( "uwp_activate_real_calculator: OnApplyTemplate faulted\n" ); }
+        __ENDTRY;
         if (probe->outer)
         {
             void *conn = NULL;
