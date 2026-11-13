@@ -232,6 +232,8 @@ static void shape_set_shaper(struct scriptshaping_context *context)
 
 HRESULT shape_get_positions(struct scriptshaping_context *context, const unsigned int *scripts)
 {
+    /* Mark positioning: base marks first, then mark-to-mark, both with
+     * manually placed joiners respected. */
     static const struct shaping_feature common_features[] =
     {
         { DWRITE_MAKE_OPENTYPE_TAG('a','b','v','m') },
@@ -239,6 +241,7 @@ HRESULT shape_get_positions(struct scriptshaping_context *context, const unsigne
         { DWRITE_MAKE_OPENTYPE_TAG('m','a','r','k'), FEATURE_MANUAL_JOINERS },
         { DWRITE_MAKE_OPENTYPE_TAG('m','k','m','k'), FEATURE_MANUAL_JOINERS },
     };
+    /* Cursive attachment for connected scripts, spacing and pair kerning. */
     static const unsigned int horizontal_features[] =
     {
         DWRITE_MAKE_OPENTYPE_TAG('c','u','r','s'),
@@ -305,6 +308,99 @@ static unsigned int shape_get_script_lang_index(struct scriptshaping_context *co
     return 0;
 }
 
+static BOOL shape_feature_is_requested(const struct scriptshaping_context *context, unsigned int tag)
+{
+    const DWRITE_TYPOGRAPHIC_FEATURES **user_features = context->user_features.features;
+    unsigned int i, j;
+
+    if (!user_features || !context->user_features.range_lengths)
+        return FALSE;
+
+    for (i = 0; i < context->user_features.range_count; ++i)
+    {
+        for (j = 0; j < user_features[i]->featureCount; ++j)
+            if (user_features[i]->features[j].nameTag == tag)
+                return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Each feature of the list is applied in its own GSUB stage, lists are ordered. */
+static void shape_add_staged_features(struct shaping_features *features, const unsigned int *tags, unsigned int count)
+{
+    unsigned int i;
+
+    for (i = 0; i < count; ++i)
+    {
+        shape_add_feature(features, tags[i]);
+        shape_start_next_stage(features, NULL);
+    }
+}
+
+static void shape_collect_script_features(struct scriptshaping_context *context, struct shaping_features *features)
+{
+    /* Joining forms, applied in isolation -> final -> medial -> initial order. */
+    static const unsigned int arabic_features[] =
+    {
+        DWRITE_MAKE_OPENTYPE_TAG('i','s','o','l'),
+        DWRITE_MAKE_OPENTYPE_TAG('f','i','n','a'),
+        DWRITE_MAKE_OPENTYPE_TAG('m','e','d','i'),
+        DWRITE_MAKE_OPENTYPE_TAG('i','n','i','t'),
+    };
+    /* Indic consonant cluster formation order, see the HarfBuzz Indic shaper. */
+    static const unsigned int indic_features[] =
+    {
+        DWRITE_MAKE_OPENTYPE_TAG('l','o','c','l'),
+        DWRITE_MAKE_OPENTYPE_TAG('n','u','k','t'),
+        DWRITE_MAKE_OPENTYPE_TAG('a','k','h','n'),
+        DWRITE_MAKE_OPENTYPE_TAG('r','p','h','f'),
+        DWRITE_MAKE_OPENTYPE_TAG('r','k','r','f'),
+        DWRITE_MAKE_OPENTYPE_TAG('p','r','e','f'),
+        DWRITE_MAKE_OPENTYPE_TAG('b','l','w','f'),
+        DWRITE_MAKE_OPENTYPE_TAG('a','b','v','f'),
+        DWRITE_MAKE_OPENTYPE_TAG('h','a','l','f'),
+        DWRITE_MAKE_OPENTYPE_TAG('p','s','t','f'),
+        DWRITE_MAKE_OPENTYPE_TAG('v','a','t','u'),
+        DWRITE_MAKE_OPENTYPE_TAG('c','j','c','t'),
+    };
+    static const unsigned int hebrew_features[] =
+    {
+        DWRITE_MAKE_OPENTYPE_TAG('l','o','c','l'),
+        DWRITE_MAKE_OPENTYPE_TAG('c','c','m','p'),
+        DWRITE_MAKE_OPENTYPE_TAG('d','l','i','g'),
+    };
+
+    switch (context->script)
+    {
+        case Script_Arabic:
+        case Script_Syriac:
+            /* Arabic and Syriac joining forms are staged by the shaper itself,
+             * arabic_collect_features() also covers 'fin2'/'fin3'/'med2'. Features
+             * added here are merged into the stages chosen by the shaper. */
+            if (context->shaper->collect_features)
+                context->shaper->collect_features(context, features);
+
+            shape_add_staged_features(features, arabic_features, ARRAY_SIZE(arabic_features));
+            break;
+        case Script_Bengali:
+        case Script_Devanagari:
+        case Script_Gujarati:
+        case Script_Gurmukhi:
+        case Script_Kannada:
+        case Script_Malayalam:
+        case Script_Oriya:
+        case Script_Sinhala:
+        case Script_Tamil:
+        case Script_Telugu:
+            shape_add_staged_features(features, indic_features, ARRAY_SIZE(indic_features));
+            break;
+        case Script_Hebrew:
+            shape_add_staged_features(features, hebrew_features, ARRAY_SIZE(hebrew_features));
+            break;
+    }
+}
+
 HRESULT shape_get_glyphs(struct scriptshaping_context *context, const unsigned int *scripts)
 {
     static const unsigned int common_features[] =
@@ -319,6 +415,12 @@ HRESULT shape_get_glyphs(struct scriptshaping_context *context, const unsigned i
         DWRITE_MAKE_OPENTYPE_TAG('c','l','i','g'),
         DWRITE_MAKE_OPENTYPE_TAG('l','i','g','a'),
         DWRITE_MAKE_OPENTYPE_TAG('r','c','l','t'),
+    };
+    /* Discretionary ligatures, off by default, applied on request only. */
+    static const unsigned int discretionary_features[] =
+    {
+        DWRITE_MAKE_OPENTYPE_TAG('d','l','i','g'),
+        DWRITE_MAKE_OPENTYPE_TAG('h','l','i','g'),
     };
     unsigned int script_index, language_index;
     struct shaping_features features = { 0 };
@@ -340,8 +442,7 @@ HRESULT shape_get_glyphs(struct scriptshaping_context *context, const unsigned i
         }
     }
 
-    if (context->shaper->collect_features)
-        context->shaper->collect_features(context, &features);
+    shape_collect_script_features(context, &features);
 
     for (i = 0; i < ARRAY_SIZE(common_features); ++i)
         shape_add_feature(&features, common_features[i]);
@@ -354,6 +455,12 @@ HRESULT shape_get_glyphs(struct scriptshaping_context *context, const unsigned i
     }
     else
         shape_enable_feature(&features, DWRITE_MAKE_OPENTYPE_TAG('v','e','r','t'), FEATURE_GLOBAL_SEARCH);
+
+    for (i = 0; i < ARRAY_SIZE(discretionary_features); ++i)
+    {
+        if (shape_feature_is_requested(context, discretionary_features[i]))
+            shape_enable_feature(&features, discretionary_features[i], FEATURE_GLOBAL_SEARCH);
+    }
 
     shape_merge_features(context, &features);
 
