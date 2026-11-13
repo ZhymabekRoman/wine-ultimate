@@ -1466,6 +1466,21 @@ static struct decoder_pattern const tiff_patterns[] = {
     {0}
 };
 
+static const BYTE webp_magic[] = {0x52,0x49,0x46,0x46, 0,0,0,0, 0x57,0x45,0x42,0x50};
+static const BYTE webp_mask[] = {0xff,0xff,0xff,0xff, 0,0,0,0, 0xff,0xff,0xff,0xff};
+
+static struct decoder_pattern const webp_patterns[] = {
+    {12,0,webp_magic,webp_mask,0},
+    {0}
+};
+
+static GUID const * const webp_formats[] = {
+    &GUID_WICPixelFormat32bppBGRA,
+    &GUID_WICPixelFormat32bppRGBA,
+    &GUID_WICPixelFormat24bppBGR,
+    NULL
+};
+
 static struct regsvr_decoder const decoder_list[] = {
     {   &CLSID_WICBmpDecoder,
 	"The Wine Project",
@@ -1554,6 +1569,17 @@ static struct regsvr_decoder const decoder_list[] = {
         ".tiff,.tif",
         tiff_decode_formats,
         tiff_patterns
+    },
+    {   &CLSID_WICWebpDecoder,
+        "The Wine Project",
+        "WebP Decoder",
+        "1.0.0.0",
+        &GUID_VendorMicrosoft,
+        &GUID_ContainerFormatWebp,
+        "image/webp",
+        ".webp",
+        webp_formats,
+        webp_patterns
     },
     { NULL }			/* list terminator */
 };

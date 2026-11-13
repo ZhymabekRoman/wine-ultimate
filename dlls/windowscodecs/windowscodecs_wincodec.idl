@@ -133,6 +133,13 @@ coclass WICDdsDecoder { interface IWICBitmapDecoder; }
 coclass WICDdsEncoder { interface IWICBitmapEncoder; }
 
 [
+    helpstring("WIC WebP Decoder"),
+    threading(both),
+    uuid(7693e886-51c9-4070-8419-9f70738ec8fa)
+]
+coclass WICWebpDecoder { interface IWICBitmapDecoder; }
+
+[
     helpstring("WIC Default Format Converter"),
     threading(both),
     uuid(1a3f11dc-b514-4b17-8c5f-2154513852f1)

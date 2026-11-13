@@ -1,7 +1,9 @@
 MODULE    = windowscodecs.dll
+UNIXLIB   = windowscodecs.so
 IMPORTLIB = windowscodecs
 IMPORTS   = $(TIFF_PE_LIBS) $(JPEG_PE_LIBS) $(PNG_PE_LIBS) windowscodecs uuid ole32 oleaut32 propsys rpcrt4 shlwapi user32 gdi32 advapi32
 EXTRAINCL = $(TIFF_PE_CFLAGS) $(JPEG_PE_CFLAGS) $(PNG_PE_CFLAGS)
+UNIX_LIBS = -lwebp -lwebpdemux
 
 VER_FILEDESCRIPTION_STR = "Wine Windows Codecs Library"
 VER_PRODUCTVERSION      = 6,0,6001,17009
@@ -37,7 +39,9 @@ SOURCES = \
 	scaler.c \
 	stream.c \
 	ungif.c \
+	unixlib.c \
 	uuid.c \
+	webpformat.c \
 	wincodecs_common.c \
 	windowscodecs_wincodec.idl
 

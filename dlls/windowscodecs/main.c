@@ -27,6 +27,7 @@
 #include "objbase.h"
 
 #include "wincodecs_private.h"
+#include "wine/unixlib.h"
 
 #include "wine/debug.h"
 
@@ -42,6 +43,7 @@ BOOL WINAPI DllMain(HINSTANCE hinstDLL, DWORD fdwReason, LPVOID lpvReserved)
         case DLL_PROCESS_ATTACH:
             DisableThreadLibraryCalls(hinstDLL);
             windowscodecs_module = hinstDLL;
+            __wine_init_unix_call();
             break;
         case DLL_PROCESS_DETACH:
             if (lpvReserved) break;

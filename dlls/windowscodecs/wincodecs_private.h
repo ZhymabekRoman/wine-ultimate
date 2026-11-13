@@ -455,6 +455,8 @@ void CDECL encoder_destroy(struct encoder* This);
 HRESULT CDECL png_decoder_create(struct decoder_info *info, struct decoder **result);
 HRESULT CDECL tiff_decoder_create(struct decoder_info *info, struct decoder **result);
 HRESULT CDECL jpeg_decoder_create(struct decoder_info *info, struct decoder **result);
+HRESULT CDECL webp_decoder_create(struct decoder_info *info, struct decoder **result);
+extern HRESULT WebpDecoder_CreateInstance(REFIID iid, void** ppv);
 
 HRESULT CDECL png_encoder_create(struct encoder_info *info, struct encoder **result);
 HRESULT CDECL tiff_encoder_create(struct encoder_info *info, struct encoder **result);

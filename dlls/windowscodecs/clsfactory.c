@@ -59,6 +59,7 @@ static const classinfo wic_classes[] = {
     {&CLSID_WICTiffEncoder, TiffEncoder_CreateInstance},
     {&CLSID_WICDdsDecoder, DdsDecoder_CreateInstance},
     {&CLSID_WICDdsEncoder, DdsEncoder_CreateInstance},
+    {&CLSID_WICWebpDecoder, WebpDecoder_CreateInstance},
     {&CLSID_WICDefaultFormatConverter, FormatConverter_CreateInstance},
     {&CLSID_WICUnknownMetadataReader, UnknownMetadataReader_CreateInstance},
     {&CLSID_WICUnknownMetadataWriter, UnknownMetadataWriter_CreateInstance},

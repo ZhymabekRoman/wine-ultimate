@@ -16,4 +16,5 @@ SOURCES = \
 	propertybag.c \
 	stream.c \
 	tiffformat.c \
+	webpformat.c \
 	wmpformat.c
