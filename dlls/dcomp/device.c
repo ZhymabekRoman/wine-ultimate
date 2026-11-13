@@ -1596,7 +1596,7 @@ static void render_composite_frame(struct composite_frame *frame)
                 &IID_IDXGISurface, (void **)&dxgi_surface)))
         {
             do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
-                    dxgi_surface, 1.0f, NULL);
+                    dxgi_surface, opacity, clip);
             IDXGISurface_Release(dxgi_surface);
             frame->rendered = TRUE;
         }
@@ -1621,8 +1621,10 @@ static void render_composite_frame(struct composite_frame *frame)
      * interop + BitBlt copy for swapchain content; the drawable lease is
      * honored by wined3d_swapchain_present itself. dst_rect is the visual's
      * accumulated region so that each visual of a composition tree updates
-     * only its own part of the window. */
-    if (frame->visual && frame->visual->wined3d_swapchain)
+     * only its own part of the window. A visual with opacity < 1.0 or a
+     * rectangle clip cannot be served by that pass, which copies the back
+     * buffer verbatim, so those go through the sampling pass below. */
+    if (frame->visual && frame->visual->wined3d_swapchain && opacity == 1.0f && !clip)
     {
         struct wined3d_swapchain *wined3d_swapchain = frame->visual->wined3d_swapchain;
         RECT *dst_rect_ptr = NULL;
@@ -1639,7 +1641,8 @@ static void render_composite_frame(struct composite_frame *frame)
         frame->rendered = TRUE;
         goto done;
     }
-    else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain)))
+    else if (opacity == 1.0f && !clip
+            && SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain)))
     {
         struct wined3d_swapchain *wined3d_swapchain = dxgi_get_wined3d_swapchain(swapchain);
         RECT *dst_rect_ptr = NULL;

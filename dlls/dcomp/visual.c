@@ -339,6 +339,23 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
                     return hr;
                 }
             }
+            else if (dcomp_surface && dcomp_surface->draw_surface &&
+                SUCCEEDED(ID3D11Texture2D_QueryInterface(dcomp_surface->draw_surface, &IID_IDXGISurface, (void **)&dxgi_surface)))
+            {
+                /* Surface drawn through BeginDraw(): the GDI-compatible Direct2D
+                 * texture is the content. It is a wined3d texture, so the
+                 * compositor samples it on the GPU, no CPU staging readback. */
+                iid = &IID_IDCompositionSurface;
+
+                hr = IDXGISurface_GetDevice(dxgi_surface, &IID_IDXGIDevice, (void **)&dxgi_device);
+                IDXGISurface_Release(dxgi_surface);
+                IDCompositionSurface_Release(suface);
+                if (FAILED(hr))
+                {
+                    ERR("Failed to get the dxgi surface device, hr %#lx.\n", hr);
+                    return hr;
+                }
+            }
             else
             {
                 FIXME("Only IDCompositionSurface from IDXGISurface is currently supported.\n");
