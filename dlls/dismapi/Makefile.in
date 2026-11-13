@@ -1,6 +1,6 @@
 MODULE    = dismapi.dll
 IMPORTLIB = dismapi
-IMPORTS   = advapi32 user32
+IMPORTS   = advapi32 setupapi user32
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 
