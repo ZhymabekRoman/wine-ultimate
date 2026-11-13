@@ -654,7 +654,14 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         *out = wcsdup(L"windows.applicationmodel.dll");
         return S_OK;
     }
-    if (!wcsncmp( classid, L"Microsoft.Windows.Management.Deployment.", 40))
+    /* Both deployment namespaces answer from appxdeploymentclient: the
+     * WinAppSDK Microsoft.Windows.Management.Deployment.* classes and the
+     * standard UWP Windows.Management.Deployment.PackageManager that
+     * unpackaged app (and the Store) activate; without the plain namespace
+     * route the class falls to the registry and answers REGDB_E_CLASSNOTREG
+     * in a prefix that ships no appxdeploymentclient registration. */
+    if (!wcsncmp( classid, L"Microsoft.Windows.Management.Deployment.", 40 ) ||
+        !wcsncmp( classid, L"Windows.Management.Deployment.", 30 ))
     {
         *out = wcsdup(L"appxdeploymentclient.dll");
         return S_OK;

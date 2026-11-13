@@ -588,8 +588,13 @@ static HRESULT WINAPI package_manager_RemovePackageAsync( IPackageManager *iface
 static HRESULT WINAPI package_manager_StagePackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    FIXME( "iface %p, uri %p, dependencies %p, operation %p stub!\n", iface, uri, dependencies, operation );
-    return E_NOTIMPL;
+    TRACE( "iface %p, uri %p, dependencies %p, operation %p.\n", iface, uri, dependencies, operation );
+
+    /* staging and registering are the same ladder here (the staged directory
+     * is the install directory), so stage answers like AddPackageAsync: the
+     * manifest registration happens synchronously and the returned operation
+     * is born completed with a DeploymentResult. */
+    return package_manager_RegisterPackageAsync( iface, uri, dependencies, 0, operation );
 }
 
 static HRESULT WINAPI package_manager_FindPackages( IPackageManager *iface, IIterable_Package **packages )
@@ -2428,7 +2433,7 @@ static HRESULT WINAPI user_view_get_Size( IVectorView_User *iface, UINT32 *size 
 static HRESULT WINAPI user_view_IndexOf( IVectorView_User *iface, IUser *item, UINT32 *index, boolean *found )
 {
     *index = 0;
-    *found = false;
+    *found = FALSE;
     return S_OK;
 }
 

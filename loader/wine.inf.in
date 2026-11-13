@@ -637,6 +637,12 @@ HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationMod
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DesignMode,,16
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DesignMode,"DllPath",2,"%12%\windows.applicationmodel.dll"
 HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.DesignMode,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager,"DllPath",2,"%12%\appxdeploymentclient.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.Management.Deployment.PackageManager,"ThreadingModel",0x10001,2
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.PackageCatalog,,16
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.PackageCatalog,"DllPath",2,"%12%\appxdeploymentclient.dll"
+HKLM,Software\Microsoft\WindowsRuntime\ActivatableClassId\Windows.ApplicationModel.PackageCatalog,"ThreadingModel",0x10001,2
 
 ; Store deployment plane: the AppModel registration the apprepository service
 ; would keep in its StateRepository.  Seeded so a fresh prefix boots with the
