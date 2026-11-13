@@ -21,6 +21,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <math.h>
+#include <excpt.h>
+#include "wine/exception.h"
 #include "private.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
@@ -1092,6 +1094,174 @@ static struct uwp_element *g_last_created_page = NULL;
 /* Page element adopted by the last Frame.Navigate; rendered directly because
  * Frame.content often holds an unresolvable MCG RCW pointer. */
 static struct uwp_element *g_navigated_page_el = NULL;
+
+static void uwp_invalidate_window( void );
+static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *want );
+
+/* --- Live engine: StandardCalculatorViewModel (CalcViewModel.dll) ---
+ * Slot 7 = get_DisplayValue(HSTRING*), slot 79 = SendCommandToCalcManager(int).
+ * Init is async (Concurrency task): m_calculatorManager lands at this+392
+ * ~100ms after activation, so pump messages before the first SendCommand. */
+extern HRESULT WINAPI RoActivateInstance( HSTRING activatableClassId, IInspectable **instance );
+
+static struct
+{
+    IInspectable *vm;      /* StandardCalculatorViewModel RCW */
+    HWND pump_hwnd;        /* CoreWindow used to pump the async init task */
+    BOOL pumped;
+    int last_code;         /* dedupe repeated clicks on init-pending VM */
+} g_calc_vm;
+
+static int uwp_key_to_calc_code( const WCHAR *name, const WCHAR *text )
+{
+    if (name)
+    {
+        if (!wcscmp( name, L"PercentButton" )) return 95;
+        if (!wcscmp( name, L"ClearEntryButton" )) return 82;
+        if (!wcscmp( name, L"ClearButton" )) return 81;
+        if (!wcscmp( name, L"BackSpaceButton" )) return 83;
+        if (!wcscmp( name, L"divButton" )) return 91;
+        if (!wcscmp( name, L"mulButton" )) return 92;
+        if (!wcscmp( name, L"minusButton" )) return 94;
+        if (!wcscmp( name, L"plusButton" )) return 93;
+        if (!wcscmp( name, L"EqualButton" )) return 121;
+        if (!wcscmp( name, L"SqrtButton" )) return 141;
+        if (!wcscmp( name, L"num0Button" )) return 130;
+        if (!wcscmp( name, L"num1Button" )) return 131;
+        if (!wcscmp( name, L"num2Button" )) return 132;
+        if (!wcscmp( name, L"num3Button" )) return 133;
+        if (!wcscmp( name, L"num4Button" )) return 134;
+        if (!wcscmp( name, L"num5Button" )) return 135;
+        if (!wcscmp( name, L"num6Button" )) return 136;
+        if (!wcscmp( name, L"num7Button" )) return 137;
+        if (!wcscmp( name, L"num8Button" )) return 138;
+        if (!wcscmp( name, L"num9Button" )) return 139;
+        if (!wcscmp( name, L"DecimalSeparatorButton" )) return 90;
+        if (!wcscmp( name, L"NegateButton" )) return 97;
+        if (!wcscmp( name, L"InvertButton" )) return 145;
+        if (!wcscmp( name, L"SquareButton" )) return 143;
+    }
+    if (text && text[0] && !text[1])
+    {
+        if (text[0] >= L'0' && text[0] <= L'9') return 130 + (text[0] - L'0');
+        switch (text[0])
+        {
+        case L'+': return 93;
+        case L'-': return 94;
+        case L'*': return 92;
+        case L'/': return 91;
+        case L'=': return 121;
+        case L'.': return 90;
+        case L'%': return 95;
+        }
+    }
+    return -1;
+}
+
+static void uwp_calc_vm_ensure( void )
+{
+    HSTRING h = NULL;
+    if (g_calc_vm.vm) return;
+    WindowsCreateString( L"CalculatorApp.ViewModel.StandardCalculatorViewModel",
+                         wcslen(L"CalculatorApp.ViewModel.StandardCalculatorViewModel"), &h );
+    if (h)
+    {
+        HRESULT hr = RoActivateInstance( h, &g_calc_vm.vm );
+        TRACE( "uwp_calc_vm_ensure: RoActivateInstance -> %#lx vm %p\n", hr, (void *)g_calc_vm.vm );
+        WindowsDeleteString( h );
+        if (FAILED(hr)) g_calc_vm.vm = NULL;
+    }
+}
+
+static void uwp_calc_vm_pump( void )
+{
+    UINT i;
+    if (g_calc_vm.pumped) return;
+    g_calc_vm.pumped = TRUE;
+    for (i = 0; i < 60; i++)
+    {
+        MSG msg;
+        while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+        Sleep( 25 );
+    }
+    TRACE( "uwp_calc_vm_pump: pumped ~1.5s for async calc manager init\n" );
+}
+
+static void uwp_calc_vm_send( int code )
+{
+    HRESULT hr;
+    HRESULT (WINAPI *send)(void *, int);
+    HRESULT (WINAPI *get_disp)(void *, HSTRING *);
+    HSTRING hval = NULL;
+
+    uwp_calc_vm_ensure();
+    if (!g_calc_vm.vm) return;
+    if (!g_calc_vm.pumped) uwp_calc_vm_pump();
+
+    /* Pre-read display value (slot 7 is safe) to confirm RCW marshalling. */
+    get_disp = (void *)(*(void ***)g_calc_vm.vm)[7];
+    hval = NULL;
+    hr = get_disp( g_calc_vm.vm, &hval );
+    TRACE( "uwp_calc_vm_send: get_DisplayValue(pre) -> %#lx hval %p\n", hr, (void *)hval );
+    if (SUCCEEDED(hr) && hval)
+    {
+        TRACE( "uwp_calc_vm_send: pre DisplayValue = %s\n", debugstr_w(WindowsGetStringRawBuffer(hval, NULL)) );
+        WindowsDeleteString( hval );
+        hval = NULL;
+    }
+
+    send = (void *)(*(void ***)g_calc_vm.vm)[79];
+    TRACE( "uwp_calc_vm_send: calling slot79 %p vm %p code %d\n", (void *)send, (void *)g_calc_vm.vm, code );
+    {
+        int attempt;
+        for (attempt = 0; attempt < 3; attempt++)
+        {
+            MSG msg;
+            __TRY
+            {
+                hr = send( g_calc_vm.vm, code );
+            }
+            __EXCEPT_ALL
+            {
+                hr = E_FAIL;
+                TRACE( "uwp_calc_vm_send: slot79 fault (attempt %d), pumping for calc manager\n", attempt );
+            }
+            __ENDTRY;
+            TRACE( "uwp_calc_vm_send: attempt %d hr=%#lx\n", attempt, hr );
+            if (hr != E_FAIL) break;
+            for (;;)
+            {
+                DWORD t0 = GetTickCount();
+                while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
+                { TranslateMessage( &msg ); DispatchMessageW( &msg ); }
+                if (GetTickCount() - t0 > 500) break;
+                Sleep( 10 );
+            }
+        }
+    }
+
+    get_disp = (void *)(*(void ***)g_calc_vm.vm)[7];
+    hval = NULL;
+    hr = get_disp( g_calc_vm.vm, &hval );
+    TRACE( "uwp_calc_vm_send: get_DisplayValue -> %#lx hval %p\n", hr, (void *)hval );
+    if (SUCCEEDED(hr) && hval)
+    {
+        const WCHAR *s = WindowsGetStringRawBuffer( hval, NULL );
+        struct uwp_element *disp = g_navigated_page_el ?
+            uwp_find_named( g_navigated_page_el, L"NormalOutput" ) : NULL;
+        TRACE( "uwp_calc_vm_send: DisplayValue = %s\n", debugstr_w(s) );
+        if (disp && s)
+        {
+            lstrcpynW( disp->text, s, ARRAY_SIZE(disp->text) );
+            uwp_invalidate_window();
+        }
+        WindowsDeleteString( hval );
+    }
+}
 
 static void register_uwp_elem( struct uwp_element *el )
 {
@@ -3216,6 +3386,7 @@ static void uwp_seed_synthetic_calculator( struct uwp_element *holder )
     result_el->grid_row = 0;
     result_el->grid_row_span = 1;
     result_el->font_size = 46.0;
+    uwp_calc_vm_ensure();   /* early activation: async calc manager init lands while UI idles */
 
     if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&grid_raw )))
         return;
@@ -4785,6 +4956,13 @@ void uwp_invoke_button( struct uwp_element *btn )
         }
     }
 
+    /* 3. Seeded keypad has no app-side binding: drive the real engine */
+    {
+        int code = uwp_key_to_calc_code( btn->name, btn->text );
+        if (code >= 0 && (!btn->command || !btn->click_cnt))
+            uwp_calc_vm_send( code );
+    }
+
     uwp_invalidate_window();
 }
 
@@ -4793,7 +4971,10 @@ static struct uwp_element *g_pressed_btn = NULL;
 BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content )
 {
     struct uwp_element *root_el = uwp_elem_from_any( root_content );
+    if (!root_el && g_navigated_page_el) root_el = g_navigated_page_el;
     if (!root_el) return FALSE;
+    if (root_el->kind == UWP_KIND_FRAME && g_navigated_page_el)
+        root_el = g_navigated_page_el;   /* Frame.content RCW unresolvable; hit the adopted page */
 
     if (!root_el->has_bounds && width > 0 && height > 0)
     {
