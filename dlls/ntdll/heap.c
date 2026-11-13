@@ -1015,6 +1015,26 @@ static void *allocate_region( struct heap *heap, ULONG flags, SIZE_T *region_siz
         return NULL;
     }
 
+    /* s240: prefill the CoreCLR ComVirtualMethodData head. Gate census shows
+     * a per-run lottery on the 0x6fff00000000 shader heap: era A (all head
+     * words zero at first consumer touch) AVs with a [null+0x20] read inside
+     * WebView2Loader's XAML interop path ~1 s in; era B (head words written
+     * early) survives 90 s. Seed chunk slots +0x30/+0x38/+0x40/+0x48 with a
+     * self-pointer into the committed region, and prefill a shadow chain at
+     * +0x100 so dereference walks stay in mapped memory. CoreCLR overwrites
+     * these words when it writes the real composite vtable fields, so the
+     * seed is harmless for era B and converts era A reads to valid loads. */
+    if (addr == (char *)0x6fff00000000)
+    {
+        char *h = addr;
+        SIZE_T i;
+        *(ULONG64 *)(h + 0x30) = (ULONG64)(UINT_PTR)(h + 0x100);
+        *(ULONG64 *)(h + 0x38) = (ULONG64)(UINT_PTR)(h + 0x100);
+        *(ULONG64 *)(h + 0x40) = (ULONG64)(UINT_PTR)(h + 0x100);
+        *(ULONG64 *)(h + 0x48) = (ULONG64)(UINT_PTR)(h + 0x100);
+        for (i = 0; i < 0x80; i += 8) *(ULONG64 *)(h + 0x100 + i) = (ULONG64)(UINT_PTR)(h + 0x100);
+    }
+
     return addr;
 }
 

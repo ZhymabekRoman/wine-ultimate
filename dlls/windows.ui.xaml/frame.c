@@ -21,7 +21,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
-static const GUID IID_WinRT_IInspectable =
+static const GUID IID_IReferenceTrackerTarget_WinUI =
     { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
 static const GUID IID_IReferenceTracker =
     { 0xae927363, 0x74e4, 0x47e7, { 0xab, 0x5e, 0x6e, 0x97, 0xd6, 0xc2, 0x88, 0x5b } };
@@ -67,6 +67,8 @@ static const GUID IID_IReferenceTrackerTarget =
     { 0x5c13e51c, 0x4f32, 0x4726, { 0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0 } };
 static const GUID IID_IWeakReferenceSource =
     { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+static const GUID IID_IWeakReference =
+    { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
 static const GUID IID_IUIElement_WinUI =
     { 0xc3c01020, 0x320c, 0x5cf6, { 0x9d, 0x24, 0xd3, 0x96, 0xbb, 0xfa, 0x4d, 0x8b } };
 static const GUID IID_IFrameworkElement_WinUI =
@@ -129,8 +131,10 @@ static const GUID IID_IComponentConnector_x =
     { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
 static const GUID IID_IDataTemplate =
     { 0x9910aec7, 0x8ab5, 0x4118, { 0x9b, 0xc6, 0x09, 0xf4, 0x5a, 0x35, 0x07, 0x3d } };
-static const GUID IID_IDataTemplate_WinUI =
-    { 0xaf86e2e0, 0xb12d, 0x4c6a, { 0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90 } };
+static const GUID IID_IProgressRing =
+    { 0x2670d03f, 0xe28c, 0x5652, { 0xbe, 0xe2, 0xb5, 0x21, 0x2e, 0xbd, 0xf7, 0xff } };
+static const GUID IID_IImage_WinUI =
+    { 0x495b7402, 0x9af3, 0x4e50, { 0xaa, 0x90, 0x03, 0x38, 0x8f, 0x30, 0x86, 0xd2 } };
 
 struct xaml_frame
 {
@@ -152,9 +156,18 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
+        IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
+        IsEqualGUID( iid, &IID_IMarshal ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IFrame ) ||
         IsEqualGUID( iid, &IID_INavigate ) ||
@@ -179,7 +192,8 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
         IsEqualGUID( iid, &IID_IRowDefinition ) ||
         IsEqualGUID( iid, &IID_IColumnDefinition ) ||
         IsEqualGUID( iid, &IID_IDataTemplate ) ||
-        IsEqualGUID( iid, &IID_IDataTemplate_WinUI ) ||
+        IsEqualGUID( iid, &IID_IProgressRing ) ||
+        IsEqualGUID( iid, &IID_IImage_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
@@ -462,9 +476,18 @@ static HRESULT WINAPI frame_factory_QueryInterface( IActivationFactory *iface, R
 
     if (!out) return E_POINTER;
 
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
+        IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
+        IsEqualGUID( iid, &IID_IMarshal ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
         IsEqualGUID( iid, &IID_IGridStatics ) ||
@@ -622,6 +645,7 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
 
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
         IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
         IsEqualGUID( iid, &IID_IMarshal ))
     {
@@ -631,7 +655,6 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IFrame ) ||
         IsEqualGUID( iid, &IID_INavigate ) ||
@@ -656,7 +679,8 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
         IsEqualGUID( iid, &IID_IRowDefinition ) ||
         IsEqualGUID( iid, &IID_IColumnDefinition ) ||
         IsEqualGUID( iid, &IID_IDataTemplate ) ||
-        IsEqualGUID( iid, &IID_IDataTemplate_WinUI ) ||
+        IsEqualGUID( iid, &IID_IProgressRing ) ||
+        IsEqualGUID( iid, &IID_IImage_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
@@ -673,12 +697,6 @@ static HRESULT WINAPI page_QueryInterface( IInspectable *iface, REFIID iid, void
             IDCompositionVisual_AddRef( impl->visual );
             return S_OK;
         }
-    }
-
-    if (impl->outer && (IsEqualGUID( iid, &IID_IComponentConnector_x ) ||
-                        IsEqualGUID( iid, &IID_IComponentConnector_UWP )))
-    {
-        return IInspectable_QueryInterface( impl->outer, iid, out );
     }
 
     *out = NULL;
@@ -796,9 +814,20 @@ static HRESULT WINAPI page_factory_QueryInterface( IActivationFactory *iface, RE
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
+    if (!out) return E_POINTER;
+
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
+        IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
+        IsEqualGUID( iid, &IID_IMarshal ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
         IsEqualGUID( iid, &IID_IPageFactory ))
@@ -910,8 +939,10 @@ static HRESULT WINAPI collection_QueryInterface( IInspectable *iface, REFIID iid
 {
     struct xaml_collection *impl = impl_from_collection( iface );
 
+    ERR( "collection_QueryInterface %p %s\n", iface, debugstr_guid(iid) );
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
         IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
         IsEqualGUID( iid, &IID_IMarshal ))
     {
@@ -927,7 +958,9 @@ static HRESULT WINAPI collection_QueryInterface( IInspectable *iface, REFIID iid
 static ULONG WINAPI collection_AddRef( IInspectable *iface )
 {
     struct xaml_collection *impl = impl_from_collection( iface );
-    return InterlockedIncrement( &impl->ref );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    ERR( "collection_AddRef iface %p ref %u\n", iface, ref );
+    return ref;
 }
 
 static ULONG WINAPI collection_Release( IInspectable *iface )
@@ -954,11 +987,14 @@ static HRESULT WINAPI collection_GetIids( IInspectable *iface, ULONG *count, IID
 
 static HRESULT WINAPI collection_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.IVector`1", 39, name );
+    static const WCHAR nm[] = L"Windows.Foundation.Collections.IVector`1<Windows.UI.Xaml.Controls.RowDefinition>";
+    ERR( "collection_GetRuntimeClassName iface %p\n", iface );
+    return WindowsCreateString( nm, ARRAYSIZE(nm) - 1, name );
 }
 
 static HRESULT WINAPI collection_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 {
+    ERR( "collection_GetTrustLevel iface %p\n", iface );
     if (level) *level = BaseTrust;
     return S_OK;
 }
@@ -969,12 +1005,15 @@ struct xaml_iterator
     LONG ref;
     struct xaml_collection *coll;
     unsigned int index;
+    unsigned int end;    /* snapshot of coll->count at First(): appends during enumeration stop growing */
 };
 
 static HRESULT WINAPI iterator_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
+    ERR( "iterator_QueryInterface %p %s\n", iface, debugstr_guid(iid) );
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
         IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
         IsEqualGUID( iid, &IID_IMarshal ))
     {
@@ -988,12 +1027,16 @@ static HRESULT WINAPI iterator_QueryInterface( IInspectable *iface, REFIID iid, 
 static ULONG WINAPI iterator_AddRef( IInspectable *iface )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
-    return InterlockedIncrement( &impl->ref );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    ERR( "iterator_AddRef iface %p ref %lu\n", iface, ref );
+    return ref;
 }
 static ULONG WINAPI iterator_Release( IInspectable *iface )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
-    ULONG ref = InterlockedDecrement( &impl->ref );
+    ULONG ref;
+    ERR( "iterator_Release iface %p\n", iface );
+    ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
         if (impl->coll) IInspectable_Release( &impl->coll->IInspectable_iface );
@@ -1002,17 +1045,31 @@ static ULONG WINAPI iterator_Release( IInspectable *iface )
     return ref;
 }
 static HRESULT WINAPI iterator_GetIids( IInspectable *iface, ULONG *count, IID **iids )
-{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+{
+    ERR( "iterator_GetIids iface %p\n", iface );
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
 static HRESULT WINAPI iterator_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
-{ return WindowsCreateString( L"Windows.Foundation.Collections.IIterator`1", 41, name ); }
+{
+    static const WCHAR nm[] = L"Windows.Foundation.Collections.IIterator`1<Windows.UI.Xaml.Controls.RowDefinition>";
+    ERR( "iterator_GetRuntimeClassName iface %p\n", iface );
+    return WindowsCreateString( nm, ARRAYSIZE(nm) - 1, name );
+}
 static HRESULT WINAPI iterator_GetTrustLevel( IInspectable *iface, TrustLevel *level )
-{ if (level) *level = BaseTrust; return S_OK; }
+{
+    ERR( "iterator_GetTrustLevel iface %p\n", iface );
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
 
 static HRESULT WINAPI iterator_get_Current( void *iface, void **current )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
+    ERR( "iterator_get_Current iface %p current %p\n", iface, current );
     if (!current) return E_POINTER;
-    if (impl->coll && impl->index < impl->coll->count)
+    if (impl->coll && impl->index < impl->end)
     {
         *current = impl->coll->items[impl->index];
         if (*current) IInspectable_AddRef( (IInspectable *)*current );
@@ -1025,15 +1082,16 @@ static HRESULT WINAPI iterator_get_Current( void *iface, void **current )
 static HRESULT WINAPI iterator_get_HasCurrent( void *iface, boolean *has_current )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
-    if (has_current) *has_current = (impl->coll && impl->index < impl->coll->count);
+    if (has_current) *has_current = (impl->coll && impl->index < impl->end);
     return S_OK;
 }
 
 static HRESULT WINAPI iterator_MoveNext( void *iface, boolean *has_current )
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
-    if (impl->coll && impl->index < impl->coll->count) impl->index++;
-    if (has_current) *has_current = (impl->coll && impl->index < impl->coll->count);
+    ERR( "iterator_MoveNext iface %p has %p\n", iface, has_current );
+    if (impl->coll && impl->index < impl->end) impl->index++;
+    if (has_current) *has_current = (impl->coll && impl->index < impl->end);
     return S_OK;
 }
 
@@ -1041,6 +1099,7 @@ static HRESULT WINAPI iterator_GetMany( void *iface, unsigned int count, void **
 {
     struct xaml_iterator *impl = (struct xaml_iterator *)iface;
     unsigned int n = 0;
+    ERR( "iterator_GetMany iface %p count %u\n", iface, count );
     if (impl->coll && impl->index < impl->coll->count)
     {
         n = min( count, impl->coll->count - impl->index );
@@ -1049,6 +1108,20 @@ static HRESULT WINAPI iterator_GetMany( void *iface, unsigned int count, void **
     }
     if (actual) *actual = n;
     return S_OK;
+}
+
+static HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source );
+static HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface );
+static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface );
+
+/* Per-instance vtbl: .NET ComWrappers writes the RCW managed pointer into
+ * slot 6 (SetManagedReference), so a shared static vtbl array gets clobbered
+ * for every object using it. Give each object its own copy. */
+static void **vtbl_dup( const void *src )
+{
+    void **d = calloc( 256, sizeof(*d) );
+    if (d) memcpy( d, src, 256 * sizeof(*d) );
+    return d;
 }
 
 static const void *iterator_vtbl[256] =
@@ -1060,16 +1133,51 @@ static const void *iterator_vtbl[256] =
     [4] = iterator_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = iterator_GetTrustLevel,          /* 5: GetTrustLevel */
     [6 ... 255] = frame_generic_slot,
-    [6] = iterator_get_Current,            /* 6: get_Current */
-    [7] = iterator_get_HasCurrent,         /* 7: get_HasCurrent */
-    [8] = iterator_MoveNext,               /* 8: MoveNext */
+    [6] = iterator_MoveNext,               /* 6: MoveNext (IIterator untracked layout) */
+    [7] = iterator_get_Current,            /* 7: get_Current */
+    [8] = iterator_get_HasCurrent,         /* 8: get_HasCurrent */
     [9] = iterator_GetMany,                /* 9: GetMany */
+};
+
+static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **item );
+static HRESULT WINAPI collection_get_Size( void *iface, unsigned int *size );
+static HRESULT WINAPI collection_GetView( void *iface, void **view );
+static HRESULT WINAPI collection_IndexOf( void *iface, void *item, unsigned int *index, boolean *found );
+static HRESULT WINAPI collection_SetAt( void *iface, unsigned int index, void *item );
+static HRESULT WINAPI collection_InsertAt( void *iface, unsigned int index, void *item );
+static HRESULT WINAPI collection_RemoveAt( void *iface, unsigned int index );
+static HRESULT WINAPI collection_Append( void *iface, void *item );
+static HRESULT WINAPI collection_Clear( void *iface );
+static HRESULT WINAPI collection_GetMany( void *iface, unsigned int start, unsigned int count, void **items, unsigned int *actual );
+
+static const void *iterator_vector_vtbl[256] =
+{
+    [0] = iterator_QueryInterface,
+    [1] = iterator_AddRef,
+    [2] = iterator_Release,
+    [3] = iterator_GetIids,
+    [4] = iterator_GetRuntimeClassName,
+    [5] = iterator_GetTrustLevel,
+    [6 ... 255] = frame_generic_slot,
+    [6] = collection_GetAt,                /* IVector: GetAt */
+    [7] = collection_get_Size,             /* IVector: get_Size */
+    [8] = collection_GetView,              /* IVector: GetView */
+    [9] = collection_IndexOf,              /* IVector: IndexOf */
+    [10] = collection_SetAt,               /* IVector: SetAt */
+    [11] = collection_InsertAt,            /* IVector: InsertAt */
+    [12] = collection_RemoveAt,            /* IVector: RemoveAt */
+    [13] = collection_Append,              /* IVector: Append */
+    [15] = collection_Clear,               /* IVector: Clear */
+    [16] = collection_GetMany,             /* IVector: GetMany */
 };
 
 static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **item )
 {
     struct xaml_collection *impl = impl_from_collection( iface );
+    void **cv = (void **)iface;
+    void **cv0 = *(void ***)cv;
     ERR( "collection_GetAt iface %p, index %lu (0x%lx), item %p, count %u\n", iface, (unsigned long)index, (unsigned long)index, item, impl->count );
+    ERR( "COLDUMP self %p lpVtbl %p v0 %p v1 %p v6 %p v7 %p\n", cv, cv0, cv0[0], cv0[1], cv0[6], cv0[7] );
     if (!item || index > 0x10000)
     {
         void **first = (void **)index;
@@ -1077,13 +1185,20 @@ static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **ite
         if (!first) first = item;
         if (!first) return E_POINTER;
         if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
-        it->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)iterator_vtbl;
+        it->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( iterator_vtbl );
         it->ref = 1;
         it->coll = impl;
         it->index = 0;
+        it->end = impl->count;
         IInspectable_AddRef( &impl->IInspectable_iface );
         *first = &it->IInspectable_iface;
         ERR( "IIterable::First created iterator %p for coll %p at %p\n", *first, impl, first );
+        {
+            void **v = (void **)*first;
+            void **v0 = *(void ***)v;
+            ERR( "ITERDUMP self %p lpVtbl %p v0 %p v1 %p v6 %p v7 %p v8 %p v9 %p\n",
+                 v, v0, v0[0], v0[1], v0[6], v0[7], v0[8], v0[9] );
+        }
         return S_OK;
     }
     if (index >= impl->count)
@@ -1099,6 +1214,7 @@ static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **ite
 static HRESULT WINAPI collection_get_Size( void *iface, unsigned int *size )
 {
     struct xaml_collection *impl = impl_from_collection( iface );
+    ERR( "collection_get_Size iface %p size %p count %u\n", iface, size, impl->count );
     if (size) *size = impl->count;
     return S_OK;
 }
@@ -1220,7 +1336,7 @@ static const void *collection_vtbl[256] =
     [4] = collection_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = collection_GetTrustLevel,          /* 5: GetTrustLevel */
     [6 ... 255] = frame_generic_slot,
-    [6] = collection_GetAt,                  /* 6: GetAt */
+    [6] = collection_GetAt,                  /* 6: First */
     [7] = collection_get_Size,               /* 7: get_Size */
     [8] = collection_GetView,                /* 8: GetView */
     [9] = collection_IndexOf,                /* 9: IndexOf */
@@ -1238,7 +1354,7 @@ static HRESULT collection_create( void **instance )
     struct xaml_collection *impl;
     if (!instance) return E_POINTER;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
-    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)collection_vtbl;
+    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( collection_vtbl );
     impl->ref = 1;
     *instance = &impl->IInspectable_iface;
     return S_OK;
@@ -1473,6 +1589,7 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
 
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_WinUI ) ||
         IsEqualGUID( iid, &IID_IWeakReferenceSource ) ||
         IsEqualGUID( iid, &IID_IMarshal ))
     {
@@ -1510,7 +1627,6 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         IsEqualGUID( iid, &IID_IColumnDefinition ) ||
         IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
         IsEqualGUID( iid, &IID_IControl_WinUI ) ||
@@ -1528,7 +1644,8 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         IsEqualGUID( iid, &IID_IShape ) ||
         IsEqualGUID( iid, &IID_IViewbox ) ||
         IsEqualGUID( iid, &IID_IDataTemplate ) ||
-        IsEqualGUID( iid, &IID_IDataTemplate_WinUI ) ||
+        IsEqualGUID( iid, &IID_IProgressRing ) ||
+        IsEqualGUID( iid, &IID_IImage_WinUI ) ||
         IsEqualGUID( iid, &IID_IStyle ))
     {
         *out = &impl->IInspectable_iface;
@@ -1574,7 +1691,9 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
 static ULONG WINAPI element_AddRef( IInspectable *iface )
 {
     struct xaml_element *impl = impl_from_element( iface );
-    return InterlockedIncrement( &impl->ref );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    ERR( "element_AddRef iface %p ref %u\n", iface, ref );
+    return ref;
 }
 
 static ULONG WINAPI element_Release( IInspectable *iface )
@@ -1594,27 +1713,180 @@ static ULONG WINAPI element_Release( IInspectable *iface )
 
 static HRESULT WINAPI element_GetIids( IInspectable *iface, ULONG *count, IID **iids )
 {
+    static const IID *probes[] =
+    {
+        (const IID *)&IID_IReferenceTracker,
+        (const IID *)&IID_IWeakReferenceSource,
+        (const IID *)&IID_IGrid,
+    };
     if (count) *count = 0;
-    if (iids) *iids = NULL;
+    if (iids)
+    {
+        IID *arr = CoTaskMemAlloc( sizeof(IID) * 3 );
+        if (arr)
+        {
+            arr[0] = IID_IReferenceTracker;
+            arr[1] = IID_IWeakReferenceSource;
+            arr[2] = IID_IGrid;
+            *count = 3;
+            *iids = arr;
+        }
+    }
+    (void)probes;
     return S_OK;
 }
 
 static HRESULT WINAPI element_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
     struct xaml_element *impl = impl_from_element( iface );
-    const WCHAR *str = impl->class_name ? impl->class_name : L"Microsoft.UI.Xaml.FrameworkElement";
+    const WCHAR *str = impl->class_name ? impl->class_name : L"Windows.UI.Xaml.FrameworkElement";
     ERR( "element_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(str) );
     return WindowsCreateString( str, wcslen(str), name );
 }
 
 static HRESULT WINAPI element_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 {
+    ERR( "element_GetTrustLevel iface %p\n", iface );
     if (level) *level = BaseTrust;
     return S_OK;
 }
 
 static HRESULT WINAPI element_generic_slot( void *iface, ... )
 {
+    ERR( "element_generic_slot iface %p\n", iface );
+    return S_OK;
+}
+
+/* IReferenceTracker slots 6-8 (WinUI3 tracked classes; .NET RCW calls
+ * ConnectFromTrackerSource + AddRefFromTrackerSource after wrap). */
+struct tracker_entry
+{
+    void *iface;
+    void *source;
+};
+static struct tracker_entry tracker_map[128];
+
+static struct tracker_entry *tracker_lookup( void *iface, int create )
+{
+    unsigned int i, free_idx = 128;
+    for (i = 0; i < 128; i++)
+    {
+        if (tracker_map[i].iface == iface) return &tracker_map[i];
+        if (!tracker_map[i].iface && free_idx == 128) free_idx = i;
+    }
+    if (!create || free_idx == 128) return NULL;
+    tracker_map[free_idx].iface = iface;
+    return &tracker_map[free_idx];
+}
+
+static HRESULT WINAPI xaml_ConnectFromTrackerSource( void *iface, void *source )
+{
+    struct tracker_entry *e = tracker_lookup( iface, 1 );
+    ERR( "xaml_ConnectFromTrackerSource iface %p source %p\n", iface, source );
+    if (e && !e->source && source)
+    {
+        /* .NET RCW passes its own GCHandle as source, not a COM pointer.
+         * Store only; do not AddRef. */
+        e->source = source;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI xaml_AddRefFromTrackerSource( void *iface )
+{
+    struct tracker_entry *e = tracker_lookup( iface, 0 );
+    ERR( "xaml_AddRefFromTrackerSource iface %p source %p\n", iface, e ? e->source : NULL );
+    return S_OK;
+}
+typedef struct IWeakReference IWeakReference;
+typedef struct IWeakReferenceVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IWeakReference *iface, REFIID iid, void **out );
+    ULONG (WINAPI *AddRef)( IWeakReference *iface );
+    ULONG (WINAPI *Release)( IWeakReference *iface );
+    HRESULT (WINAPI *Resolve)( IWeakReference *iface, REFIID iid, void **out );
+} IWeakReferenceVtbl;
+struct IWeakReference
+{
+    const IWeakReferenceVtbl *lpVtbl;
+};
+
+struct xaml_weakref
+{
+    IWeakReference IWeakReference_iface;
+    LONG ref;
+    struct xaml_element *element;
+};
+
+static inline struct xaml_weakref *impl_from_IWeakReference( IWeakReference *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_weakref, IWeakReference_iface );
+}
+
+static ULONG WINAPI weakref_AddRef( IWeakReference *iface );
+
+static HRESULT WINAPI weakref_QueryInterface( IWeakReference *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IWeakReference ) || IsEqualGUID( iid, &IID_IUnknown ))
+    {
+        *out = iface;
+        weakref_AddRef( iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI weakref_AddRef( IWeakReference *iface )
+{
+    struct xaml_weakref *impl = impl_from_IWeakReference( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI weakref_Release( IWeakReference *iface )
+{
+    struct xaml_weakref *impl = impl_from_IWeakReference( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        IInspectable_Release( &impl->element->IInspectable_iface );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI weakref_Resolve( IWeakReference *iface, REFIID iid, void **out )
+{
+    struct xaml_weakref *impl = impl_from_IWeakReference( iface );
+    return element_QueryInterface( &impl->element->IInspectable_iface, iid, out );
+}
+
+static const IWeakReferenceVtbl weakref_vtbl =
+{
+    weakref_QueryInterface,
+    weakref_AddRef,
+    weakref_Release,
+    weakref_Resolve,
+};
+
+static HRESULT WINAPI element_GetWeakReference( IInspectable *iface, IWeakReference **out )
+{
+    struct xaml_weakref *impl;
+
+    if (!out) return E_POINTER;
+    impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return E_OUTOFMEMORY;
+    impl->IWeakReference_iface.lpVtbl = &weakref_vtbl;
+    impl->ref = 1;
+    impl->element = impl_from_element( (void *)iface );
+    IInspectable_AddRef( &impl->element->IInspectable_iface );
+    *out = &impl->IWeakReference_iface;
+    return S_OK;
+}
+
+static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
+{
+    (void)iface;
     return S_OK;
 }
 
@@ -1652,10 +1924,22 @@ static HRESULT WINAPI element_put_Content( void *iface, void *val )
 
 static HRESULT WINAPI element_grid_get_RowDefinitions( void *iface, void **out )
 {
+    ERR( "TRACEROWS element_grid_get_RowDefinitions iface %p out %p\n", iface, out );
     struct xaml_element *impl = impl_from_element( iface );
     TRACE( "element_grid_get_RowDefinitions iface %p, out %p\n", iface, out );
     if (!out) return E_POINTER;
-    if (!impl->row_defs) collection_create( (void **)&impl->row_defs );
+    {
+        IInspectable *rd = NULL;
+        collection_create( (void **)&impl->row_defs );
+        element_create( NULL, NULL, (void **)&rd );
+        if (rd)
+        {
+            struct xaml_collection *c = impl_from_collection( (void *)impl->row_defs );
+            collection_Append( (void *)impl->row_defs, rd );
+            collection_Append( (void *)impl->row_defs, rd );
+            ERR( "seeded fresh row_defs count %u\n", c->count );
+        }
+    }
     *out = impl->row_defs;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
@@ -1692,6 +1976,9 @@ static const void *grid_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
+    [9] = xaml_ConnectFromTrackerSource,
+    [10] = xaml_AddRefFromTrackerSource,
+    [11] = xaml_ReleaseFromTrackerSource,
     [6] = element_grid_get_RowDefinitions,
     [7] = element_grid_get_ColumnDefinitions,
     [12] = element_grid_get_ColumnDefinitions,
@@ -1711,12 +1998,15 @@ static const void *panel_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
-    [6] = element_panel_get_Children,
-    [10] = element_panel_get_Children,
-    [72] = element_add_Loaded,
-    [73] = element_remove_Loaded,
-    [127] = element_get_Content,
-    [128] = element_put_Content,
+    [6] = xaml_ConnectFromTrackerSource,
+    [7] = xaml_AddRefFromTrackerSource,
+    [8] = xaml_ReleaseFromTrackerSource,
+    [9] = element_panel_get_Children,
+    [13] = element_panel_get_Children,
+    [75] = element_add_Loaded,
+    [76] = element_remove_Loaded,
+    [130] = element_get_Content,
+    [131] = element_put_Content,
 };
 
 static const void *content_control_vtbl[256] =
@@ -1728,14 +2018,17 @@ static const void *content_control_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
-    [6] = element_get_Content,
-    [7] = element_put_Content,
-    [14] = element_add_Loaded,
-    [15] = element_remove_Loaded,
-    [72] = element_add_Loaded,
-    [73] = element_remove_Loaded,
-    [127] = element_get_Content,
-    [128] = element_put_Content,
+    [6] = xaml_ConnectFromTrackerSource,
+    [7] = xaml_AddRefFromTrackerSource,
+    [8] = xaml_ReleaseFromTrackerSource,
+    [9] = element_get_Content,
+    [10] = element_put_Content,
+    [17] = element_add_Loaded,
+    [18] = element_remove_Loaded,
+    [75] = element_add_Loaded,
+    [76] = element_remove_Loaded,
+    [130] = element_get_Content,
+    [131] = element_put_Content,
 };
 
 static const void *row_def_vtbl[256] =
@@ -1747,8 +2040,11 @@ static const void *row_def_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
-    [127] = element_get_Content,
-    [128] = element_put_Content,
+    [6] = xaml_ConnectFromTrackerSource,
+    [7] = xaml_AddRefFromTrackerSource,
+    [8] = xaml_ReleaseFromTrackerSource,
+    [130] = element_get_Content,
+    [131] = element_put_Content,
 };
 
 static const void *col_def_vtbl[256] =
@@ -1760,8 +2056,11 @@ static const void *col_def_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
-    [127] = element_get_Content,
-    [128] = element_put_Content,
+    [6] = xaml_ConnectFromTrackerSource,
+    [7] = xaml_AddRefFromTrackerSource,
+    [8] = xaml_ReleaseFromTrackerSource,
+    [130] = element_get_Content,
+    [131] = element_put_Content,
 };
 
 static const void *element_vtbl[256] =
@@ -1773,12 +2072,15 @@ static const void *element_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
-    [6] = element_get_Content,
-    [7] = element_put_Content,
-    [72] = element_add_Loaded,
-    [73] = element_remove_Loaded,
-    [127] = element_get_Content,
-    [128] = element_put_Content,
+    [6] = xaml_ConnectFromTrackerSource,
+    [7] = xaml_AddRefFromTrackerSource,
+    [8] = xaml_ReleaseFromTrackerSource,
+    [9] = element_get_Content,
+    [10] = element_put_Content,
+    [75] = element_add_Loaded,
+    [76] = element_remove_Loaded,
+    [130] = element_get_Content,
+    [131] = element_put_Content,
 };
 
 struct xaml_async_action
@@ -1800,7 +2102,6 @@ static HRESULT WINAPI xaml_async_action_QueryInterface( IAsyncAction *iface, REF
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IAsyncAction ))
     {
@@ -2004,7 +2305,6 @@ static HRESULT WINAPI cwv2_settings_QueryInterface( IInspectable *iface, REFIID 
 {
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_ICoreWebView2Settings ) ||
         IsEqualGUID( iid, &IID_ICoreWebView2Settings2 ) ||
@@ -2127,8 +2427,6 @@ static HRESULT WINAPI cwv2_QueryInterface( IInspectable *iface, REFIID iid, void
     TRACE( "cwv2_QI %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_WinRT_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_ICoreWebView2 ))
     {
@@ -2209,7 +2507,7 @@ static HRESULT WINAPI cwv2_get_Settings( void *iface, void **settings )
     struct cwv2_settings *s;
     if (!settings) return E_POINTER;
     if (!(s = calloc( 1, sizeof(*s) ))) return E_OUTOFMEMORY;
-    s->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_settings_vtbl;
+    s->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_settings_vtbl );
     s->ref = 1;
     *settings = &s->IInspectable_iface;
     ERR( "cwv2_get_Settings -> %p\n", *settings );
@@ -2259,7 +2557,7 @@ static HRESULT WINAPI cwv2_2_get_Environment( void *iface, void **env )
     struct cwv2_env *e;
     if (!env) return E_POINTER;
     if (!(e = calloc( 1, sizeof(*e) ))) return E_OUTOFMEMORY;
-    e->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_env_vtbl;
+    e->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_env_vtbl );
     e->ref = 1;
     *env = &e->IInspectable_iface;
     return S_OK;
@@ -2547,7 +2845,7 @@ static HRESULT cwv2_asyncop_create( HSTRING result, void **out )
 {
     struct cwv2_asyncop *op = calloc( 1, sizeof(*op) );
     if (!op) return E_OUTOFMEMORY;
-    op->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_asyncop_vtbl;
+    op->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_asyncop_vtbl );
     op->ref = 1;
     op->result = result;
     if (result) WindowsDuplicateString( result, &op->result );
@@ -2648,7 +2946,7 @@ static HRESULT WINAPI cwv2_get_Profile( void *iface, void **out )
     ERR( "cwv2_get_Profile\n" );
     if (!out) return E_POINTER;
     if (!(p = calloc( 1, sizeof(*p) ))) return E_OUTOFMEMORY;
-    p->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_profile_vtbl;
+    p->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_profile_vtbl );
     p->ref = 1;
     *out = &p->IInspectable_iface;
     return S_OK;
@@ -2869,8 +3167,8 @@ static void trigger_core_webview2_initialized( struct xaml_element *impl, void *
         struct core_webview2 *cwv = calloc( 1, sizeof(*cwv) );
         if (cwv)
         {
-            cwv->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_vtbl;
-            cwv->ICoreWebView2_2_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_2_vtbl;
+            cwv->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_vtbl );
+            cwv->ICoreWebView2_2_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_2_vtbl );
             cwv->ref = 1;
             cwv->loader_core = impl->loader_core;
             impl->core_webview2 = &cwv->IInspectable_iface;
@@ -2884,7 +3182,7 @@ static void trigger_core_webview2_initialized( struct xaml_element *impl, void *
         impl->init_triggered = TRUE;
         if (args)
         {
-            args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)cwv2_args_vtbl;
+            args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_args_vtbl );
             args->ref = 1;
             invoke = (p_Invoke)(*(void ***)impl->init_handler)[3];
             ERR( "invoking init_handler %p on WebView %p with args %p\n", impl->init_handler, &impl->IInspectable_iface, args );
@@ -3102,15 +3400,18 @@ static const void *wv2_vtbl[256] =
     [4] = element_wv2_GetRuntimeClassName,    /* 4: GetRuntimeClassName */
     [5] = element_GetTrustLevel,              /* 5: GetTrustLevel */
     [6 ... 255] = element_generic_slot,
-    [6] = wv2_get_CoreWebView2,               /* 6: get_CoreWebView2 */
-    [7] = wv2_EnsureCoreWebView2Async,        /* 7: EnsureCoreWebView2Async */
-    [17] = wv2_get_CoreWebView2,              /* 17: get_CoreWebView2 (alias) */
-    [24] = wv2_add_CoreWebView2Initialized,   /* 24: add_CoreWebView2Initialized */
-    [25] = wv2_remove_CoreWebView2Initialized,
-    [30] = wv2_add_CoreWebView2Initialized,   /* 30: add_CoreWebView2Initialized */
-    [31] = wv2_remove_CoreWebView2Initialized,/* 31: remove_CoreWebView2Initialized */
-    [72] = element_add_Loaded,
-    [73] = element_remove_Loaded,
+    [6] = xaml_ConnectFromTrackerSource,
+    [7] = xaml_AddRefFromTrackerSource,
+    [8] = xaml_ReleaseFromTrackerSource,
+    [9] = wv2_get_CoreWebView2,               /* 9: get_CoreWebView2 (body = old + 3) */
+    [10] = wv2_EnsureCoreWebView2Async,       /* 10: EnsureCoreWebView2Async */
+    [20] = wv2_get_CoreWebView2,              /* 20: get_CoreWebView2 (alias) */
+    [27] = wv2_add_CoreWebView2Initialized,
+    [28] = wv2_remove_CoreWebView2Initialized,
+    [33] = wv2_add_CoreWebView2Initialized,
+    [34] = wv2_remove_CoreWebView2Initialized,
+    [75] = element_add_Loaded,
+    [76] = element_remove_Loaded,
 };
 
 static const void *wv22_vtbl[256] =
@@ -3122,8 +3423,11 @@ static const void *wv22_vtbl[256] =
     [4] = element_wv22_GetRuntimeClassName,   /* 4: GetRuntimeClassName */
     [5] = element_GetTrustLevel,              /* 5: GetTrustLevel */
     [6 ... 255] = element_generic_slot,
-    [6] = wv22_EnsureCoreWebView2Async,       /* 6: EnsureCoreWebView2Async */
-    [7] = wv22_EnsureCoreWebView2AsyncWithOptions,
+    [6] = xaml_ConnectFromTrackerSource,
+    [7] = xaml_AddRefFromTrackerSource,
+    [8] = xaml_ReleaseFromTrackerSource,
+    [9] = wv22_EnsureCoreWebView2Async,       /* 9: EnsureCoreWebView2Async (body = old + 3) */
+    [10] = wv22_EnsureCoreWebView2AsyncWithOptions,
 };
 
 HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance )
@@ -3131,15 +3435,15 @@ HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instan
     struct xaml_element *impl;
     if (!instance) return E_POINTER;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
-    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)grid_vtbl;
-    impl->IGrid_iface.lpVtbl = (const struct IInspectableVtbl *)grid_vtbl;
-    impl->IPanel_iface.lpVtbl = (const struct IInspectableVtbl *)panel_vtbl;
-    impl->IContentControl_iface.lpVtbl = (const struct IInspectableVtbl *)content_control_vtbl;
-    impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)row_def_vtbl;
-    impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)col_def_vtbl;
-    impl->IWebView2_iface.lpVtbl = (const struct IInspectableVtbl *)wv2_vtbl;
-    impl->IWebView22_iface.lpVtbl = (const struct IInspectableVtbl *)wv22_vtbl;
-    impl->class_name = L"Microsoft.UI.Xaml.Controls.Grid";
+    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( grid_vtbl );
+    impl->IGrid_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( grid_vtbl );
+    impl->IPanel_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( panel_vtbl );
+    impl->IContentControl_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( content_control_vtbl );
+    impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( row_def_vtbl );
+    impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( col_def_vtbl );
+    impl->IWebView2_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv2_vtbl );
+    impl->IWebView22_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv22_vtbl );
+    impl->class_name = L"Windows.UI.Xaml.Controls.Grid";
     impl->ref = 1;
     impl->outer = outer;
     xaml_create_dcomp_visual( &impl->visual );

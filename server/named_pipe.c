@@ -2544,15 +2544,13 @@ static void pipe_end_transceive( struct pipe_end *pipe_end, struct async *async 
         return;
     }
 
-    /* not allowed if we already have read data buffered */
-    if (!list_empty( &pipe_end->message_queue ))
-    {
-        set_error( STATUS_PIPE_BUSY );
-        if (wv2io_wanted( pipe_end ))
-            WV2IO( "T pid=%04x ep=%p st=%x (busy)\n", current->process->id, pipe_end,
-                   (unsigned int)STATUS_PIPE_BUSY );
-        return;
-    }
+    /* A transceive with a message already queued is legal on Windows: the write
+     * appends to the queue and the read side returns the oldest queued message
+     * right away. Reporting STATUS_PIPE_BUSY here stalls the Mojo/ipcz loop,
+     * whose pump transceives a reply as soon as the response has arrived, so the
+     * browser-side end sits on BUSY and the composition replies never drain. */
+    if (!list_empty( &pipe_end->message_queue ) && wv2io_wanted( pipe_end ))
+        WV2IO( "T pid=%04x ep=%p (queued read)\n", current->process->id, pipe_end );
 
     iosb = async_get_iosb( async );
     /* ignore output buffer copy transferred because of METHOD_NEITHER */

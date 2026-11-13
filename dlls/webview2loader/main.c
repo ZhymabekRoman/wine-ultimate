@@ -61,6 +61,7 @@ struct webview
 
 static HRESULT WINAPI webview_QueryInterface( void *t, REFIID riid, void **obj )
 {
+    ERR( "webview_QI %p iid %s\n", t, debugstr_guid( riid ) );
     *obj = t;
     return S_OK;
 }
@@ -106,21 +107,62 @@ static HRESULT WINAPI webview_get_Source( void *t, LPWSTR *v )
     return *v ? S_OK : E_OUTOFMEMORY;
 }
 
+/* WinRT IInspectable prologue slots (3-5) + ICoreWebView2 body. The app's RCW
+ * (ComWrappers) reads GetIids/GetRuntimeClassName/GetTrustLevel right after
+ * QI, and the WhatsApp bridge then drives Navigate/add_* (r43 AV: the RCW
+ * called Navigate-as-GetIids when the vtbl omitted the prologue). */
+static HRESULT WINAPI webview_GetIids( void *t, ULONG *count, GUID **ids )
+{
+    ERR( "webview_GetIids %p\n", t );
+    *count = 0;
+    *ids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI webview_GetRuntimeClassName( void *t, LPWSTR *name )
+{
+    ERR( "webview_GetRuntimeClassName %p\n", t );
+    *name = dup_wstr( L"Microsoft.Web.WebView2.Core.CoreWebView2" );
+    return *name ? S_OK : E_OUTOFMEMORY;
+}
+static HRESULT WINAPI webview_GetTrustLevel( void *t, LONG *level )
+{
+    ERR( "webview_GetTrustLevel %p\n", t );
+    *level = 0;
+    return S_OK;
+}
+static HRESULT WINAPI webview_stub( void *t, ... )
+{
+    return S_OK;
+}
+static HRESULT WINAPI webview_put_Source( void *t, LPCWSTR v )
+{
+    struct webview *w = t;
+    CoTaskMemFree( w->source );
+    w->source = dup_wstr( v );
+    return S_OK;
+}
+
 static struct webview *create_webview( struct controller *c )
 {
     struct webview *w = HeapAlloc( GetProcessHeap(), 0, sizeof(*w) );
     const void **vt;
+    unsigned int i;
     if (!w) return NULL;
-    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 5 * sizeof(*vt) )))
+    if (!(vt = HeapAlloc( GetProcessHeap(), 0, 48 * sizeof(*vt) )))
     {
         HeapFree( GetProcessHeap(), 0, w );
         return NULL;
     }
+    for (i = 0; i < 48; i++) vt[i] = webview_stub;
     vt[0] = webview_QueryInterface;
     vt[1] = webview_AddRef;
     vt[2] = webview_Release;
-    vt[3] = webview_Navigate;
-    vt[4] = webview_get_Source;
+    vt[3] = webview_GetIids;
+    vt[4] = webview_GetRuntimeClassName;
+    vt[5] = webview_GetTrustLevel;
+    vt[6] = webview_Navigate;
+    vt[8] = webview_get_Source;
+    vt[9] = webview_put_Source;
     w->vtbl = vt;
     w->ref = 1;
     w->controller = c;
@@ -205,7 +247,25 @@ static HRESULT post_completion( void *handler, void *object, int deref )
     HWND hwnd;
 
     if (!handler) return E_POINTER;
+    ERR( "post_completion handler %p object %p deref %d slot3 %p\n", handler, object, deref,
+         *((void **)(deref ? *(void ***)handler : handler) + 3) );
+    if (!deref)
+    {
+        void **vt = handler;
+        void **t = *(void ***)handler;
+        ERR( "  handler+0 vt=%p [0]=%p [1]=%p [2]=%p [3]=%p\n", vt, t[0], t[1], t[2], t[3] );
+    }
 
+    /* s310: invoke synchronously. All loader calls happen on the UI thread,
+     * and the app's ShowWindow cycle overflow (unwinding the message loop
+     * mid-pump) drops the posted WM_APP_COMPLETION: the env/controller chain
+     * stalls with the browser spawned and the mojo pipe never opened. */
+    {
+        void **vt = deref ? *(void ***)handler : handler;
+        HRESULT (WINAPI *invoke)( void *, HRESULT, void * ) = (void *)vt[3];
+        return invoke( handler, S_OK, object );
+    }
+#if 0
     register_completion_class();
     hwnd = CreateWindowExW( 0, L"WebView2CompletionWindow", NULL, 0, 0, 0, 0, 0,
                             HWND_MESSAGE, NULL, GetModuleHandleW( NULL ), NULL );
@@ -241,6 +301,7 @@ static HRESULT post_completion( void *handler, void *object, int deref )
         }
     }
     return S_OK;
+#endif
 }
 
 /* ------------------------------------------------------------------ */
@@ -268,6 +329,9 @@ static HRESULT WINAPI controller_put_IsVisible( void *t, BOOL v )
     return S_OK;
 }
 
+/* Heap vtbl filled with per-slot stores (RIP-relative immediates): static
+ * .rdata vtbl arrays go stale because the shared pages are relocated once,
+ * by whichever process (app or msedgewebview2 child) maps them first. */
 static struct controller *create_controller( HWND parent )
 {
     struct controller *c = HeapAlloc( GetProcessHeap(), 0, sizeof(*c) );
@@ -486,8 +550,8 @@ static HRESULT WINAPI environment_CreateCoreWebView2Controller( void *t, HWND pa
     struct environment *e = t;
     struct controller *c;
 
-    TRACE( "env %p parent %p handler %p self-slot %p\n", e, parent, handler,
-           ((const void **)e->vtbl)[3] );
+    ERR( "env %p parent %p handler %p self-slot %p\n", e, parent, handler,
+         ((const void **)e->vtbl)[3] );
 
     if (!(c = create_controller( parent ))) return E_OUTOFMEMORY;
     return post_completion( handler, c, 0 );
@@ -510,20 +574,13 @@ static struct environment *create_environment( LPCWSTR browser_version )
         HeapFree( GetProcessHeap(), 0, e );
         return NULL;
     }
-    /* per-slot stores: RIP-relative immediates, immune to the loader
-     * relocating .rdata pages once (shared pages) for another image base */
+    /* per-slot stores: RIP-relative immediates, immune to the shared .rdata
+     * pages being relocated once (app vs msedgewebview2 child image base) */
     vt[0] = environment_QueryInterface;
     vt[1] = environment_AddRef;
     vt[2] = environment_Release;
     vt[3] = environment_CreateCoreWebView2Controller;
     vt[4] = environment_get_BrowserVersion;
-    /* census + repair: slot 3 has been observed overwritten with a heap
-     * value between fill and the controller call on ccThread */
-    if (vt[3] != (void *)environment_CreateCoreWebView2Controller)
-    {
-        WARN("vt[3] corrupted at fill: got %p\n", vt[3]);
-        vt[3] = environment_CreateCoreWebView2Controller;
-    }
     e->vtbl = vt;
     e->ref = 1;
     e->version = dup_wstr( browser_version && *browser_version ? browser_version : L"157.0.4341.42" );
@@ -702,6 +759,34 @@ HRESULT WINAPI CreateCoreWebView2Controller( HWND parent, void *handler )
     if (!(e = create_environment( NULL ))) return E_OUTOFMEMORY;
     hr = environment_CreateCoreWebView2Controller( e, parent, handler );
     return hr;
+}
+
+/* s380: vtbl slots of the env/controller objects live in shared builtin
+ * pages relocated once (app vs msedgewebview2 child image base); a stale slot
+ * dispatch faults. This export lets callers fetch the CoreWebView2 without
+ * reading controller vtbl[7]. */
+HRESULT WINAPI GetCoreWebView2FromController( void *controller, void **core )
+{
+    return controller_get_CoreWebView2( controller, core );
+}
+
+/* s430: synchronous environment -> controller -> core chain in one export
+ * call. The async handler completions dispatch through vtbl slots that have
+ * been observed to read back as child image-base VAs (r35-r41: heap-filled
+ * vtbl slots clobbered mid-chain), so the env handler calls this and gets the
+ * CoreWebView2 directly, with no handler vtbl hops at all. */
+void *WINAPI CreateCoreWebView2ControllerSync( HWND parent, HRESULT *phr )
+{
+    struct environment *e;
+    struct controller *c;
+    void *core = NULL;
+    HRESULT hr;
+
+    if (!(e = create_environment( NULL ))) { if (phr) *phr = E_OUTOFMEMORY; return NULL; }
+    if (!(c = create_controller( parent ))) { if (phr) *phr = E_OUTOFMEMORY; return NULL; }
+    hr = controller_get_CoreWebView2( c, &core );
+    if (phr) *phr = hr;
+    return core;
 }
 
 HRESULT WINAPI GetAvailableCoreWebView2BrowserVersionString( LPCWSTR browser_version, LPWSTR *version )

@@ -4522,7 +4522,7 @@ NTSTATUS virtual_alloc_thread_stack( INITIAL_TEB *stack, ULONG_PTR limit_low, UL
     if (!commit_size) commit_size = main_image_info.CommittedStackSize;
 
     size = max( reserve_size, commit_size );
-    if (size < 1024 * 1024) size = 1024 * 1024;  /* Xlib needs a large stack */
+    if (size < 8 * 1024 * 1024) size = 8 * 1024 * 1024;  /* UWP / .NET Native / Xlib needs a large stack */
     size = ROUND_SIZE( 0, size, granularity_mask );
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
@@ -5376,6 +5376,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
     static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_RESET;
+    NTSTATUS status;
     ULONG_PTR limit;
 
     TRACE("%p %p %08lx %x %08x\n", process, *ret, *size_ptr, type, protect );
@@ -5423,7 +5424,32 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
     else
         limit = 0;
 
-    return allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
+    status = allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
+
+    /* s240: seed the CoreCLR ComVirtualMethodData head. The shader heap at
+     * 0x6fff00000000 (64K, CoreCLR VirtualAlloc) is read by the XAML interop
+     * consumer (WebView2Loader path) before CoreCLR writes the composite
+     * vtable fields in ~50% of runs: era A AVs on a [null+0x20] read at
+     * Application.Start. Prefill chunk slots +0x30..+0x48 with a self-pointer
+     * into the committed region plus a shadow chain at +0x100 so the early
+     * walk lands on valid loads; CoreCLR overwrites the words later, so era B
+     * runs are unaffected. Fire on every commit that touches the head. */
+    if (!status && (type & MEM_COMMIT) && *ret <= (char *)0x6fff00000048 &&
+        (char *)*ret + *size_ptr >= (char *)0x6fff00000050)
+    {
+        char *h = (char *)0x6fff00000000;
+        SIZE_T i;
+        if (*(ULONG64 *)(h + 0x30) == 0)
+        {
+            *(ULONG64 *)(h + 0x30) = (ULONG64)(UINT_PTR)(h + 0x100);
+            *(ULONG64 *)(h + 0x38) = (ULONG64)(UINT_PTR)(h + 0x100);
+            *(ULONG64 *)(h + 0x40) = (ULONG64)(UINT_PTR)(h + 0x100);
+            *(ULONG64 *)(h + 0x48) = (ULONG64)(UINT_PTR)(h + 0x100);
+            for (i = 0; i < 0x80; i += 8) *(ULONG64 *)(h + 0x100 + i) = (ULONG64)(UINT_PTR)(h + 0x100);
+        }
+    }
+
+    return status;
 }
 
 

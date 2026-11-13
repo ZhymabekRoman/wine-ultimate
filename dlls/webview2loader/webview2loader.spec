@@ -5,3 +5,5 @@
 @ stdcall CreateCoreWebView2EnvironmentWithOptions(wstr wstr ptr ptr)
 @ stdcall GetAvailableCoreWebView2BrowserVersionString(wstr ptr)
 @ stdcall GetAvailableCoreWebView2BrowserVersionStringWithOptions(wstr ptr ptr)
+@ stdcall GetCoreWebView2FromController(ptr ptr)
+@ stdcall CreateCoreWebView2ControllerSync(ptr ptr)
