@@ -24,6 +24,7 @@
 #include <wchar.h>
 
 #include "dismapi.h"
+#include "setupapi.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(dismapi);
@@ -33,6 +34,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(dismapi);
 #define FEATURE_NETFX4    L"NetFx4"
 #define FEATURE_APPX      L"Appx-Deployment-Service"
 #define FEATURE_APPXSVC   L"AppXSvc"
+
+#ifndef ERROR_PACKAGE_NOT_FOUND
+#define ERROR_PACKAGE_NOT_FOUND 15612
+#endif
 
 #define MAX_SESSIONS 32
 
@@ -829,6 +834,214 @@ static BOOL disable_appx(HANDLE cancel_event, DISM_PROGRESS_CALLBACK progress, P
 }
 
 /* ========================================================================= */
+/* Component Based Servicing package implementation                          */
+/* ========================================================================= */
+
+#define CBS_PACKAGES_KEY L"SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Component Based Servicing\\Packages"
+
+#define CBS_STATE_INSTALLED 0x70
+#define CBS_STATE_ABSENT    0x50
+
+#ifndef ERROR_PACKAGE_NOT_FOUND
+#define ERROR_PACKAGE_NOT_FOUND 1605
+#endif
+
+static DismPackageFeatureState state_from_registry(DWORD current_state)
+{
+    switch (current_state)
+    {
+    case 0x10: return DismStateUninstallPending;
+    case 0x30: return DismStateStaged;
+    case 0x50: return DismStateResolved;
+    case 0x70: return DismStateInstalled;
+    case 0x78: return DismStateInstallPending;
+    case 0xb0: return DismStateSuperseded;
+    case 0xc0: return DismStatePartiallyInstalled;
+    default:   return DismStateNotPresent;
+    }
+}
+
+/* Open (creating when needed) the CBS Packages key. */
+static LONG open_cbs_packages_key(REGSAM access, HKEY *ret)
+{
+    return RegCreateKeyExW(HKEY_LOCAL_MACHINE, CBS_PACKAGES_KEY, 0, NULL, 0,
+                           access, NULL, ret, NULL);
+}
+
+/* Resolve an identifier to an existing package subkey name.
+ * DismPackageName/DismPackageNone: exact match first, then substring match.
+ * DismPackagePath: identifier is a file path, the package name is its base
+ * name without extension. Returns TRUE and fills name_out on success. */
+static BOOL resolve_package_name(HKEY hroot, PCWSTR identifier,
+                                 DismPackageIdentifier id_type,
+                                 WCHAR *name_out, DWORD name_len)
+{
+    DWORD idx = 0;
+    WCHAR subkey[512];
+    DWORD subkey_len;
+    BOOL found = FALSE;
+
+    if (id_type == DismPackagePath)
+    {
+        const WCHAR *base;
+        WCHAR *dot;
+        if (!(base = wcsrchr(identifier, '\\'))) base = wcsrchr(identifier, '/');
+        base = base ? base + 1 : identifier;
+        lstrcpynW(name_out, base, name_len);
+        if ((dot = wcsrchr(name_out, '.')) && dot > name_out) *dot = 0;
+        return TRUE;
+    }
+
+    /* First pass: exact (case-insensitive) match */
+    subkey_len = ARRAY_SIZE(subkey);
+    while (RegEnumKeyExW(hroot, idx++, subkey, &subkey_len, NULL, NULL, NULL, NULL) == ERROR_SUCCESS)
+    {
+        if (!wcsicmp(subkey, identifier))
+        {
+            lstrcpynW(name_out, subkey, name_len);
+            return TRUE;
+        }
+        subkey_len = ARRAY_SIZE(subkey);
+    }
+
+    /* Second pass: substring match */
+    idx = 0;
+    subkey_len = ARRAY_SIZE(subkey);
+    while (RegEnumKeyExW(hroot, idx++, subkey, &subkey_len, NULL, NULL, NULL, NULL) == ERROR_SUCCESS)
+    {
+        if (wcsstr(subkey, identifier))
+        {
+            lstrcpynW(name_out, subkey, name_len);
+            found = TRUE;
+            break;
+        }
+        subkey_len = ARRAY_SIZE(subkey);
+    }
+    return found;
+}
+
+static BOOL read_reg_dword(HKEY hkey, PCWSTR name, DWORD *value)
+{
+    DWORD size = sizeof(*value), type = 0;
+    if (RegQueryValueExW(hkey, name, NULL, &type, (BYTE *)value, &size) == ERROR_SUCCESS &&
+        type == REG_DWORD)
+        return TRUE;
+    return FALSE;
+}
+
+/* Read a REG_SZ value into a heap string; falls back to def on absence. */
+static WCHAR *dup_reg_sz(HKEY hkey, PCWSTR name, PCWSTR def)
+{
+    WCHAR buf[512], *out;
+    DWORD size = sizeof(buf), type = 0;
+
+    buf[0] = 0;
+    RegQueryValueExW(hkey, name, NULL, &type, (BYTE *)buf, &size);
+    if (!buf[0] && def) lstrcpynW(buf, def, ARRAY_SIZE(buf));
+    out = HeapAlloc(GetProcessHeap(), 0, (wcslen(buf) + 1) * sizeof(WCHAR));
+    if (out) wcscpy(out, buf);
+    return out;
+}
+
+/* Extract a .cab/.msu payload into dest_dir using expand.exe. */
+static BOOL extract_package(PCWSTR package_path, PCWSTR dest_dir)
+{
+    WCHAR cmd[3 * MAX_PATH];
+    STARTUPINFOW si;
+    PROCESS_INFORMATION pi;
+    DWORD exit_code = 1;
+    BOOL is_msu = FALSE;
+    const WCHAR *dot = wcsrchr(package_path, '.');
+
+    if (dot && !wcsicmp(dot, L".msu")) is_msu = TRUE;
+
+    swprintf(cmd, ARRAY_SIZE(cmd), L"expand.exe -F:* \"%s\" \"%s\"", package_path, dest_dir);
+
+    memset(&si, 0, sizeof(si));
+    si.cb = sizeof(si);
+
+    if (!CreateProcessW(NULL, cmd, NULL, NULL, FALSE, 0, NULL, NULL, &si, &pi))
+    {
+        /* Fall back to a plain copy so at least the payload is visible */
+        WCHAR dst_file[MAX_PATH];
+        const WCHAR *base = wcsrchr(package_path, '\\');
+        base = base ? base + 1 : package_path;
+        swprintf(dst_file, ARRAY_SIZE(dst_file), L"%s\\%s", dest_dir, base);
+        return CopyFileW(package_path, dst_file, FALSE);
+    }
+    WaitForSingleObject(pi.hProcess, INFINITE);
+    GetExitCodeProcess(pi.hProcess, &exit_code);
+    CloseHandle(pi.hThread);
+    CloseHandle(pi.hProcess);
+
+    if (is_msu)
+    {
+        /* An .msu is a cabinet wrapping a nested .cab; expand it too */
+        WCHAR search[MAX_PATH], nested[MAX_PATH];
+        WIN32_FIND_DATAW fd;
+        HANDLE hFind;
+
+        swprintf(search, ARRAY_SIZE(search), L"%s\\*.cab", dest_dir);
+        hFind = FindFirstFileW(search, &fd);
+        if (hFind != INVALID_HANDLE_VALUE)
+        {
+            FindClose(hFind);
+            swprintf(nested, ARRAY_SIZE(nested), L"%s\\%s", dest_dir, fd.cFileName);
+            return extract_package(nested, dest_dir);
+        }
+        return exit_code == 0;
+    }
+    return exit_code == 0;
+}
+
+/* Install every .inf found (depth 2) in dir via SetupCopyOEMInfW. */
+static BOOL install_package_infs(PCWSTR dir)
+{
+    WCHAR search[MAX_PATH], child[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE hFind;
+    BOOL any = FALSE;
+
+    swprintf(search, ARRAY_SIZE(search), L"%s\\*.inf", dir);
+    hFind = FindFirstFileW(search, &fd);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do {
+            swprintf(child, ARRAY_SIZE(child), L"%s\\%s", dir, fd.cFileName);
+            if (SetupCopyOEMInfW(child, NULL, 0, 0, NULL, 0, NULL, NULL))
+                any = TRUE;
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+    }
+
+    /* One level of subdirectories (typical msu/cab layout) */
+    swprintf(search, ARRAY_SIZE(search), L"%s\\*", dir);
+    hFind = FindFirstFileW(search, &fd);
+    if (hFind != INVALID_HANDLE_VALUE)
+    {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) continue;
+            if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L".."))
+                continue;
+            swprintf(child, ARRAY_SIZE(child), L"%s\\%s", dir, fd.cFileName);
+            if (install_package_infs(child)) any = TRUE;
+        } while (FindNextFileW(hFind, &fd));
+        FindClose(hFind);
+    }
+    return any;
+}
+
+static void package_name_from_path(PCWSTR path, WCHAR *name, DWORD name_len)
+{
+    const WCHAR *base;
+    WCHAR *dot;
+    base = wcsrchr(path, '\\');
+    base = base ? base + 1 : path;
+    lstrcpynW(name, base, name_len);
+    if ((dot = wcsrchr(name, '.')) && dot > name) *dot = 0;
+}
+
+/* ========================================================================= */
 /* Public DISM API Exports                                                   */
 /* ========================================================================= */
 
@@ -1129,6 +1342,348 @@ HRESULT WINAPI DismDelete(VOID *DismStructure)
     TRACE("(%p)\n", DismStructure);
     if (DismStructure)
         HeapFree(GetProcessHeap(), 0, DismStructure);
+    return S_OK;
+}
+
+HRESULT WINAPI DismGetSession(DismSession *Session)
+{
+    UINT i;
+    TRACE("(%p)\n", Session);
+
+    if (!Session)
+        return E_INVALIDARG;
+
+    EnterCriticalSection(&g_cs);
+    for (i = 0; i < MAX_SESSIONS; i++)
+    {
+        if (g_sessions[i].in_use)
+        {
+            *Session = (DismSession)(i + 1);
+            LeaveCriticalSection(&g_cs);
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection(&g_cs);
+    return DISMAPI_E_INVALID_DISM_SESSION;
+}
+
+HRESULT WINAPI DismGetSessionImagePath(DismSession Session, WCHAR **ImagePath)
+{
+    WCHAR *path;
+    TRACE("(%u, %p)\n", Session, ImagePath);
+
+    if (!ImagePath)
+        return E_INVALIDARG;
+
+    if (!is_valid_session(Session))
+        return DISMAPI_E_INVALID_DISM_SESSION;
+
+    path = HeapAlloc(GetProcessHeap(), 0,
+                     (lstrlenW(g_sessions[Session - 1].image_path) + 1) * sizeof(WCHAR));
+    if (!path)
+        return E_OUTOFMEMORY;
+    lstrcpyW(path, g_sessions[Session - 1].image_path);
+
+    *ImagePath = path;
+    return S_OK;
+}
+
+HRESULT WINAPI DismAddPackage(DismSession Session, PCWSTR PackagePath, BOOL IgnoreCheck,
+                              BOOL PreventPending, HANDLE CancelEvent,
+                              DISM_PROGRESS_CALLBACK Progress, PVOID UserContext)
+{
+    WCHAR tmp_template[MAX_PATH], tmp_dir[MAX_PATH], name[512];
+    WCHAR base[MAX_PATH];
+    FILETIME ft;
+    HKEY hkey;
+    DWORD state = CBS_STATE_INSTALLED, client_size;
+    HRESULT hr = S_OK;
+
+    (void)IgnoreCheck;
+    (void)PreventPending;
+
+    TRACE("(%u, %s, %d, %d, %p, %p, %p)\n", Session, wine_dbgstr_w(PackagePath),
+          IgnoreCheck, PreventPending, CancelEvent, Progress, UserContext);
+
+    if (!PackagePath || !*PackagePath)
+        return E_INVALIDARG;
+
+    if (!is_valid_session(Session))
+        return DISMAPI_E_INVALID_DISM_SESSION;
+
+    if (GetFileAttributesW(PackagePath) == INVALID_FILE_ATTRIBUTES)
+        return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+    if (CancelEvent && WaitForSingleObject(CancelEvent, 0) == WAIT_OBJECT_0)
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+
+    if (Progress) Progress(10, 100, UserContext);
+
+    /* Create a private scratch directory below %TEMP% */
+    if (!GetTempPathW(ARRAY_SIZE(tmp_template), tmp_template) ||
+        !GetTempFileNameW(tmp_template, L"dsm", 0, tmp_dir) ||
+        !DeleteFileW(tmp_dir) ||
+        !CreateDirectoryW(tmp_dir, NULL))
+        return HRESULT_FROM_WIN32(GetLastError());
+
+    if (Progress) Progress(25, 100, UserContext);
+
+    if (!extract_package(PackagePath, tmp_dir))
+        TRACE("Package extraction for %s was only partially successful\n", wine_dbgstr_w(PackagePath));
+
+    if (CancelEvent && WaitForSingleObject(CancelEvent, 0) == WAIT_OBJECT_0)
+    {
+        remove_directory_tree(tmp_dir);
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    }
+
+    if (Progress) Progress(50, 100, UserContext);
+
+    install_package_infs(tmp_dir);
+
+    if (CancelEvent && WaitForSingleObject(CancelEvent, 0) == WAIT_OBJECT_0)
+    {
+        remove_directory_tree(tmp_dir);
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+    }
+
+    if (Progress) Progress(75, 100, UserContext);
+
+    /* Record the package under Component Based Servicing */
+    lstrcpynW(base, PackagePath, ARRAY_SIZE(base));
+    package_name_from_path(base, name, ARRAY_SIZE(name));
+
+    GetSystemTimeAsFileTime(&ft);
+
+    if (RegCreateKeyExW(HKEY_LOCAL_MACHINE, CBS_PACKAGES_KEY, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL) == ERROR_SUCCESS)
+    {
+        WCHAR subkey[600];
+        HKEY hsub;
+
+        swprintf(subkey, ARRAY_SIZE(subkey), L"%s", name);
+        if (RegCreateKeyExW(hkey, subkey, 0, NULL, 0, KEY_SET_VALUE, NULL, &hsub, NULL) == ERROR_SUCCESS)
+        {
+            DWORD high = ft.dwHighDateTime, low = ft.dwLowDateTime;
+
+            RegSetValueExW(hsub, L"CurrentState", 0, REG_DWORD, (const BYTE *)&state, sizeof(state));
+            RegSetValueExW(hsub, L"InstallTimeHigh", 0, REG_DWORD, (const BYTE *)&high, sizeof(high));
+            RegSetValueExW(hsub, L"InstallTimeLow", 0, REG_DWORD, (const BYTE *)&low, sizeof(low));
+            client_size = (lstrlenW(L"DISM") + 1) * sizeof(WCHAR);
+            RegSetValueExW(hsub, L"InstallClient", 0, REG_SZ, (const BYTE *)L"DISM", client_size);
+            RegCloseKey(hsub);
+        }
+        RegCloseKey(hkey);
+    }
+    else
+    {
+        hr = E_FAIL;
+    }
+
+    remove_directory_tree(tmp_dir);
+
+    if (SUCCEEDED(hr) && Progress)
+        Progress(100, 100, UserContext);
+
+    return hr;
+}
+
+HRESULT WINAPI DismRemovePackage(DismSession Session, PCWSTR Identifier,
+                                 DismPackageIdentifier PackageIdentifier,
+                                 HANDLE CancelEvent, DISM_PROGRESS_CALLBACK Progress,
+                                 PVOID UserContext)
+{
+    WCHAR name[512];
+    HKEY hroot, hsub;
+    DWORD state = CBS_STATE_ABSENT;
+    HRESULT hr = S_OK;
+
+    TRACE("(%u, %s, %d, %p, %p, %p)\n", Session, wine_dbgstr_w(Identifier),
+          PackageIdentifier, CancelEvent, Progress, UserContext);
+
+    if (!Identifier || !*Identifier)
+        return E_INVALIDARG;
+
+    if (!is_valid_session(Session))
+        return DISMAPI_E_INVALID_DISM_SESSION;
+
+    if (CancelEvent && WaitForSingleObject(CancelEvent, 0) == WAIT_OBJECT_0)
+        return HRESULT_FROM_WIN32(ERROR_CANCELLED);
+
+    if (Progress) Progress(25, 100, UserContext);
+
+    if (open_cbs_packages_key(KEY_READ | KEY_WRITE, &hroot) != ERROR_SUCCESS)
+        return E_FAIL;
+
+    if (PackageIdentifier == DismPackagePath)
+        package_name_from_path(Identifier, name, ARRAY_SIZE(name));
+    else if (!resolve_package_name(hroot, Identifier, PackageIdentifier, name, ARRAY_SIZE(name)))
+    {
+        RegCloseKey(hroot);
+        return HRESULT_FROM_WIN32(ERROR_PACKAGE_NOT_FOUND);
+    }
+
+    if (RegOpenKeyExW(hroot, name, 0, KEY_SET_VALUE, &hsub) == ERROR_SUCCESS)
+    {
+        RegSetValueExW(hsub, L"CurrentState", 0, REG_DWORD, (const BYTE *)&state, sizeof(state));
+        RegCloseKey(hsub);
+    }
+    else
+    {
+        hr = HRESULT_FROM_WIN32(ERROR_PACKAGE_NOT_FOUND);
+    }
+    RegCloseKey(hroot);
+
+    if (SUCCEEDED(hr) && Progress)
+        Progress(100, 100, UserContext);
+
+    return hr;
+}
+
+HRESULT WINAPI DismGetPackages(DismSession Session, DismPackage **Package, UINT *Count)
+{
+    HKEY hroot;
+    DWORD idx = 0, count = 0, total_bytes = 0;
+    WCHAR subkey[512];
+    DWORD subkey_len;
+    DismPackage *packages;
+    WCHAR *str_ptr;
+
+    TRACE("(%u, %p, %p)\n", Session, Package, Count);
+
+    if (!Package || !Count)
+        return E_INVALIDARG;
+
+    if (!is_valid_session(Session))
+        return DISMAPI_E_INVALID_DISM_SESSION;
+
+    if (open_cbs_packages_key(KEY_READ, &hroot) != ERROR_SUCCESS)
+    {
+        *Package = NULL;
+        *Count = 0;
+        return S_OK;
+    }
+
+    /* Pass 1: count packages and total string size */
+    subkey_len = ARRAY_SIZE(subkey);
+    while (RegEnumKeyExW(hroot, idx++, subkey, &subkey_len, NULL, NULL, NULL, NULL) == ERROR_SUCCESS)
+    {
+        count++;
+        total_bytes += (lstrlenW(subkey) + 1) * sizeof(WCHAR);
+        subkey_len = ARRAY_SIZE(subkey);
+    }
+
+    packages = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY,
+                         count * sizeof(DismPackage) + total_bytes);
+    if (!packages)
+    {
+        RegCloseKey(hroot);
+        return E_OUTOFMEMORY;
+    }
+
+    str_ptr = (WCHAR *)(packages + count);
+    idx = 0;
+    subkey_len = ARRAY_SIZE(subkey);
+    count = 0;
+    while (RegEnumKeyExW(hroot, idx++, subkey, &subkey_len, NULL, NULL, NULL, NULL) == ERROR_SUCCESS)
+    {
+        HKEY hsub;
+        DWORD state = 0;
+
+        packages[count].PackageName = str_ptr;
+        wcscpy(str_ptr, subkey);
+        str_ptr += lstrlenW(str_ptr) + 1;
+
+        if (RegOpenKeyExW(hroot, subkey, 0, KEY_READ, &hsub) == ERROR_SUCCESS)
+        {
+            read_reg_dword(hsub, L"CurrentState", &state);
+            RegCloseKey(hsub);
+        }
+        packages[count].State = state_from_registry(state);
+        count++;
+        subkey_len = ARRAY_SIZE(subkey);
+    }
+    RegCloseKey(hroot);
+
+    *Package = packages;
+    *Count = count;
+    return S_OK;
+}
+
+HRESULT WINAPI DismGetPackageInfo(DismSession Session, PCWSTR Identifier,
+                                  DismPackageIdentifier PackageIdentifier,
+                                  DismPackageInfo **PackageInfo)
+{
+    WCHAR name[512];
+    HKEY hroot, hsub;
+    DismPackageInfo *info;
+    DWORD state = 0;
+    FILETIME ft;
+
+    TRACE("(%u, %s, %d, %p)\n", Session, wine_dbgstr_w(Identifier), PackageIdentifier, PackageInfo);
+
+    if (!Identifier || !*Identifier || !PackageInfo)
+        return E_INVALIDARG;
+
+    if (!is_valid_session(Session))
+        return DISMAPI_E_INVALID_DISM_SESSION;
+
+    if (open_cbs_packages_key(KEY_READ, &hroot) != ERROR_SUCCESS)
+        return HRESULT_FROM_WIN32(ERROR_PACKAGE_NOT_FOUND);
+
+    if (PackageIdentifier == DismPackagePath)
+        package_name_from_path(Identifier, name, ARRAY_SIZE(name));
+    else if (!resolve_package_name(hroot, Identifier, PackageIdentifier, name, ARRAY_SIZE(name)))
+    {
+        RegCloseKey(hroot);
+        return HRESULT_FROM_WIN32(ERROR_PACKAGE_NOT_FOUND);
+    }
+
+    if (RegOpenKeyExW(hroot, name, 0, KEY_READ, &hsub) != ERROR_SUCCESS)
+    {
+        RegCloseKey(hroot);
+        return HRESULT_FROM_WIN32(ERROR_PACKAGE_NOT_FOUND);
+    }
+
+    info = HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(DismPackageInfo));
+    if (!info)
+    {
+        RegCloseKey(hsub);
+        RegCloseKey(hroot);
+        return E_OUTOFMEMORY;
+    }
+
+    read_reg_dword(hsub, L"CurrentState", &state);
+    info->PackageState = state_from_registry(state);
+    info->ReleaseType = DismReleaseTypeUpdate;
+
+    {
+        DWORD high = 0, low = 0;
+        if (read_reg_dword(hsub, L"InstallTimeHigh", &high) &&
+            read_reg_dword(hsub, L"InstallTimeLow", &low))
+        {
+            ft.dwHighDateTime = high;
+            ft.dwLowDateTime = low;
+            FileTimeToSystemTime(&ft, &info->InstallTime);
+        }
+    }
+
+    info->Identifier = HeapAlloc(GetProcessHeap(), 0, (lstrlenW(name) + 1) * sizeof(WCHAR));
+    if (info->Identifier) wcscpy((WCHAR *)info->Identifier, name);
+
+    info->Copyright = dup_reg_sz(hsub, L"Copyright", L"Microsoft Corporation");
+    info->Products = dup_reg_sz(hsub, L"Products", L"Windows");
+    info->ProductCount = 1;
+    info->Languages = dup_reg_sz(hsub, L"Languages", L"Neutral");
+    info->LanguageCount = 1;
+    info->Assembly = dup_reg_sz(hsub, L"Assembly", NULL);
+    info->Foundation = dup_reg_sz(hsub, L"Foundation", NULL);
+
+    RegCloseKey(hsub);
+    RegCloseKey(hroot);
+
+    info->RebootRequired = DismRebootRequiredFalse;
+    info->FullyOfflineInstallable = DismFullyOfflineInstallable;
+    *PackageInfo = info;
     return S_OK;
 }
 

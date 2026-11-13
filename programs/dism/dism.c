@@ -271,6 +271,221 @@ static int do_disable_feature(const WCHAR *feature_name)
     return 1;
 }
 
+static const WCHAR *package_state_to_str(DismPackageFeatureState state)
+{
+    switch (state)
+    {
+    case DismStateInstalled:         return L"Installed";
+    case DismStateUninstallPending:  return L"Uninstall Pending";
+    case DismStateStaged:            return L"Staged";
+    case DismStateResolved:          return L"Removed";
+    case DismStateInstallPending:    return L"Install Pending";
+    case DismStateSuperseded:        return L"Superseded";
+    case DismStatePartiallyInstalled:return L"Partially Installed";
+    default:                         return L"Not Present";
+    }
+}
+
+static const WCHAR *release_type_to_str(DismReleaseType type)
+{
+    switch (type)
+    {
+    case DismReleaseTypeCriticalUpdate:  return L"Critical Update";
+    case DismReleaseTypeDriver:          return L"Driver";
+    case DismReleaseTypeFeaturePack:     return L"Feature Pack";
+    case DismReleaseTypeHotfix:          return L"Hotfix";
+    case DismReleaseTypeSecurityUpdate:  return L"Security Update";
+    case DismReleaseTypeSoftwareUpdate:  return L"Software Update";
+    case DismReleaseTypeUpdate:          return L"Update";
+    case DismReleaseTypeUpdateRollup:    return L"Update Rollup";
+    case DismReleaseTypeLanguagePack:    return L"Language Pack";
+    case DismReleaseTypeFoundation:      return L"Foundation";
+    case DismReleaseTypeServicePack:     return L"Service Pack";
+    case DismReleaseTypeProduct:         return L"Product";
+    case DismReleaseTypeLocalPack:       return L"Local Pack";
+    case DismReleaseTypeOnDemandPack:    return L"On-Demand Pack";
+    default:                             return L"Other";
+    }
+}
+
+static HRESULT open_dism_session(DismSession *session)
+{
+    HRESULT hr;
+
+    hr = DismInitialize(DismLogErrorsWarningsInfo, NULL, NULL);
+    if (FAILED(hr) && hr != DISMAPI_E_DISMAPI_ALREADY_INITIALIZED)
+        return hr;
+
+    return DismOpenSession(DISM_ONLINE_IMAGE, NULL, NULL, session);
+}
+
+static int do_get_packages(void)
+{
+    DismSession session;
+    DismPackage *packages = NULL;
+    UINT count = 0, i;
+    HRESULT hr;
+
+    print_header();
+
+    hr = open_dism_session(&session);
+    if (FAILED(hr))
+    {
+        output_printf(L"Error opening DISM session: 0x%08lx\r\n", hr);
+        return 1;
+    }
+
+    output_write(L"Packages listing for image :\r\n\r\n");
+
+    hr = DismGetPackages(session, &packages, &count);
+    if (SUCCEEDED(hr) && packages)
+    {
+        for (i = 0; i < count; i++)
+        {
+            output_printf(L"Identity : %s\r\n"
+                          L"State : %s\r\n\r\n",
+                          packages[i].PackageName,
+                          package_state_to_str(packages[i].State));
+        }
+        DismDelete(packages);
+    }
+    else
+    {
+        output_printf(L"Error getting packages: 0x%08lx\r\n", hr);
+        DismCloseSession(session);
+        DismShutdown();
+        return 1;
+    }
+
+    DismCloseSession(session);
+    DismShutdown();
+
+    output_write(L"The operation completed successfully.\r\n");
+    return 0;
+}
+
+static int do_get_package_info(const WCHAR *package_name)
+{
+    DismSession session;
+    DismPackageInfo *info = NULL;
+    HRESULT hr;
+
+    if (!package_name || !*package_name)
+    {
+        output_write(L"Error: A package name must be specified.\r\n");
+        return 1;
+    }
+
+    print_header();
+
+    hr = open_dism_session(&session);
+    if (FAILED(hr))
+    {
+        output_printf(L"Error opening DISM session: 0x%08lx\r\n", hr);
+        return 1;
+    }
+
+    hr = DismGetPackageInfo(session, package_name, DismPackageName, &info);
+    if (SUCCEEDED(hr) && info)
+    {
+        output_printf(L"Package Information:\r\n\r\n"
+                      L"Identity : %s\r\n"
+                      L"State : %s\r\n"
+                      L"Release Type : %s\r\n"
+                      L"Install Time : %04u-%02u-%02u\r\n"
+                      L"Copyright : %s\r\n\r\n",
+                      info->Identifier,
+                      package_state_to_str(info->PackageState),
+                      release_type_to_str(info->ReleaseType),
+                      info->InstallTime.wYear, info->InstallTime.wMonth, info->InstallTime.wDay,
+                      info->Copyright ? info->Copyright : L"");
+        DismDelete(info);
+        DismCloseSession(session);
+        DismShutdown();
+
+        output_write(L"The operation completed successfully.\r\n");
+        return 0;
+    }
+
+    DismCloseSession(session);
+    DismShutdown();
+
+    output_printf(L"Package %s was not found.\r\n", package_name);
+    return 1;
+}
+
+static int do_add_package(const WCHAR *package_path)
+{
+    DismSession session;
+    HRESULT hr;
+
+    if (!package_path || !*package_path)
+    {
+        output_write(L"Error: A package path must be specified.\r\n");
+        return 1;
+    }
+
+    print_header();
+    output_printf(L"Adding package from %s\r\n", package_path);
+
+    hr = open_dism_session(&session);
+    if (FAILED(hr))
+    {
+        output_printf(L"Error opening DISM session: 0x%08lx\r\n", hr);
+        return 1;
+    }
+
+    hr = DismAddPackage(session, package_path, FALSE, FALSE, NULL, dism_cli_progress, NULL);
+
+    DismCloseSession(session);
+    DismShutdown();
+
+    if (SUCCEEDED(hr))
+    {
+        output_write(L"The operation completed successfully.\r\n");
+        return 0;
+    }
+
+    output_printf(L"Error adding package: 0x%08lx\r\n", hr);
+    return 1;
+}
+
+static int do_remove_package(const WCHAR *package_name)
+{
+    DismSession session;
+    HRESULT hr;
+
+    if (!package_name || !*package_name)
+    {
+        output_write(L"Error: A package name must be specified.\r\n");
+        return 1;
+    }
+
+    print_header();
+    output_printf(L"Removing package %s\r\n", package_name);
+
+    hr = open_dism_session(&session);
+    if (FAILED(hr))
+    {
+        output_printf(L"Error opening DISM session: 0x%08lx\r\n", hr);
+        return 1;
+    }
+
+    hr = DismRemovePackage(session, package_name, DismPackageName, NULL, dism_cli_progress, NULL);
+
+    DismCloseSession(session);
+    DismShutdown();
+
+    if (SUCCEEDED(hr))
+    {
+        output_write(L"The operation completed successfully.\r\n");
+        return 0;
+    }
+
+    output_printf(L"Error removing package: 0x%08lx\r\n", hr);
+    return 1;
+}
+
 static void show_help(void)
 {
     print_header();
@@ -280,7 +495,13 @@ static void show_help(void)
                  L"  /Get-Features                   - Displays information about all features.\r\n"
                  L"  /Get-FeatureInfo                - Displays detailed information about a specific feature.\r\n"
                  L"  /Enable-Feature                 - Enables a specific feature in the image.\r\n"
-                 L"  /Disable-Feature                - Disables a specific feature in the image.\r\n\r\n"
+                 L"  /Disable-Feature                - Disables a specific feature in the image.\r\n"
+                 L"  /Get-Packages                   - Displays information about all packages.\r\n"
+                 L"  /Get-PackageInfo                - Displays detailed information about a specific package.\r\n"
+                 L"  /Add-Package                    - Adds a package to the image.\r\n"
+                 L"  /Remove-Package                 - Removes a package from the image.\r\n\r\n"
+                 L"  /PackagePath:<path>             - Specifies the path to a .cab or .msu package file.\r\n"
+                 L"  /PackageName:<name>             - Specifies the name of the package.\r\n\r\n"
                  L"The operation completed successfully.\r\n");
 }
 
@@ -290,7 +511,13 @@ int __cdecl wmain(int argc, WCHAR *argv[])
     BOOL get_feature_info = FALSE;
     BOOL enable_feature = FALSE;
     BOOL disable_feature = FALSE;
+    BOOL get_packages = FALSE;
+    BOOL get_package_info = FALSE;
+    BOOL add_package = FALSE;
+    BOOL remove_package = FALSE;
     const WCHAR *feature_name = NULL;
+    const WCHAR *package_path = NULL;
+    const WCHAR *package_name = NULL;
     int i;
 
     if (argc < 2)
@@ -350,6 +577,54 @@ int __cdecl wmain(int argc, WCHAR *argv[])
             feature_name = argv[++i];
             continue;
         }
+
+        if (!wcsicmp(arg, L"/Get-Packages") || !wcsicmp(arg, L"-Get-Packages"))
+        {
+            get_packages = TRUE;
+            continue;
+        }
+
+        if (!wcsicmp(arg, L"/Get-PackageInfo") || !wcsicmp(arg, L"-Get-PackageInfo"))
+        {
+            get_package_info = TRUE;
+            continue;
+        }
+
+        if (!wcsicmp(arg, L"/Add-Package") || !wcsicmp(arg, L"-Add-Package"))
+        {
+            add_package = TRUE;
+            continue;
+        }
+
+        if (!wcsicmp(arg, L"/Remove-Package") || !wcsicmp(arg, L"-Remove-Package"))
+        {
+            remove_package = TRUE;
+            continue;
+        }
+
+        if (!_wcsnicmp(arg, L"/PackagePath:", 13) || !_wcsnicmp(arg, L"-PackagePath:", 13))
+        {
+            package_path = arg + 13;
+            continue;
+        }
+
+        if ((!wcsicmp(arg, L"/PackagePath") || !wcsicmp(arg, L"-PackagePath")) && i + 1 < argc)
+        {
+            package_path = argv[++i];
+            continue;
+        }
+
+        if (!_wcsnicmp(arg, L"/PackageName:", 13) || !_wcsnicmp(arg, L"-PackageName:", 13))
+        {
+            package_name = arg + 13;
+            continue;
+        }
+
+        if ((!wcsicmp(arg, L"/PackageName") || !wcsicmp(arg, L"-PackageName")) && i + 1 < argc)
+        {
+            package_name = argv[++i];
+            continue;
+        }
     }
 
     if (get_features)
@@ -363,6 +638,18 @@ int __cdecl wmain(int argc, WCHAR *argv[])
 
     if (disable_feature)
         return do_disable_feature(feature_name);
+
+    if (get_packages)
+        return do_get_packages();
+
+    if (get_package_info)
+        return do_get_package_info(package_name);
+
+    if (add_package)
+        return do_add_package(package_path);
+
+    if (remove_package)
+        return do_remove_package(package_name);
 
     show_help();
     return 0;

@@ -111,6 +111,13 @@ typedef enum _DismFullyOfflineInstallableType
     DismFullyOfflineInstallableUndetermined
 } DismFullyOfflineInstallableType;
 
+typedef enum _DismRebootRequired
+{
+    DismRebootRequiredFalse = 0,
+    DismRebootRequiredTrue,
+    DismRebootRequiredUnknown
+} DismRebootRequired;
+
 #pragma pack(push, 1)
 
 typedef struct _DismCustomProperty
@@ -142,6 +149,33 @@ typedef struct _DismString
     PCWSTR Value;
 } DismString;
 
+typedef struct _DismPackage
+{
+    PCWSTR PackageName;
+    DismPackageFeatureState State;
+} DismPackage;
+
+typedef struct _DismPackageInfo
+{
+    PCWSTR Identifier;
+    DismPackageFeatureState PackageState;
+    DismReleaseType ReleaseType;
+    SYSTEMTIME InstallTime;
+    PCWSTR Copyright;
+    PCWSTR Products;
+    UINT ProductCount;
+    PCWSTR Languages;
+    UINT LanguageCount;
+    PCWSTR Assembly;
+    PCWSTR Foundation;
+    DismCustomProperty *CustomProperty;
+    UINT CustomPropertyCount;
+    DismFeature *Capability;
+    UINT CapabilityCount;
+    DismRebootRequired RebootRequired;
+    DismFullyOfflineInstallableType FullyOfflineInstallable;
+} DismPackageInfo;
+
 #pragma pack(pop)
 
 HRESULT WINAPI DismInitialize(DismLogLevel LogLevel, PCWSTR LogFilePath, PCWSTR ScratchDirectory);
@@ -153,6 +187,12 @@ HRESULT WINAPI DismGetFeatureInfo(DismSession Session, PCWSTR FeatureName, PCWST
 HRESULT WINAPI DismEnableFeature(DismSession Session, PCWSTR FeatureName, PCWSTR Identifier, DismPackageType PackageType, BOOL LimitAccess, PCWSTR *SourcePaths, UINT SourcePathCount, BOOL EnableAllDependencies, HANDLE CancelEvent, DISM_PROGRESS_CALLBACK Progress, PVOID UserContext);
 HRESULT WINAPI DismDisableFeature(DismSession Session, PCWSTR FeatureName, PCWSTR PackageName, BOOL RemovePayload, HANDLE CancelEvent, DISM_PROGRESS_CALLBACK Progress, PVOID UserContext);
 HRESULT WINAPI DismDelete(VOID *DismStructure);
+HRESULT WINAPI DismAddPackage(DismSession Session, PCWSTR PackagePath, BOOL IgnoreCheck, BOOL PreventPending, HANDLE CancelEvent, DISM_PROGRESS_CALLBACK Progress, PVOID UserContext);
+HRESULT WINAPI DismRemovePackage(DismSession Session, PCWSTR Identifier, DismPackageIdentifier PackageIdentifier, HANDLE CancelEvent, DISM_PROGRESS_CALLBACK Progress, PVOID UserContext);
+HRESULT WINAPI DismGetPackages(DismSession Session, DismPackage **Package, UINT *Count);
+HRESULT WINAPI DismGetPackageInfo(DismSession Session, PCWSTR Identifier, DismPackageIdentifier PackageIdentifier, DismPackageInfo **PackageInfo);
+HRESULT WINAPI DismGetSession(DismSession *Session);
+HRESULT WINAPI DismGetSessionImagePath(DismSession Session, WCHAR **ImagePath);
 
 #ifdef __cplusplus
 }

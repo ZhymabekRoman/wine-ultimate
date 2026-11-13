@@ -1,5 +1,5 @@
 @ stub DismAddDriver
-@ stub DismAddPackage
+@ stdcall DismAddPackage(long wstr long long long ptr ptr)
 @ stub DismApplyUnattend
 @ stub DismCheckImageHealth
 @ stub DismCleanupMountpoints
@@ -16,14 +16,16 @@
 @ stub DismGetImageInfo
 @ stub DismGetLastErrorMessage
 @ stub DismGetMountedImageInfo
-@ stub DismGetPackageInfo
-@ stub DismGetPackages
+@ stdcall DismGetPackageInfo(long wstr long ptr)
+@ stdcall DismGetPackages(long ptr ptr)
+@ stdcall DismGetSession(ptr)
+@ stdcall DismGetSessionImagePath(long ptr)
 @ stdcall DismInitialize(long wstr wstr)
 @ stub DismMountImage
 @ stdcall DismOpenSession(wstr wstr wstr ptr)
 @ stub DismRemountImage
 @ stub DismRemoveDriver
-@ stub DismRemovePackage
+@ stdcall DismRemovePackage(long wstr long ptr ptr ptr)
 @ stub DismRestoreImageHealth
 @ stdcall DismShutdown()
 @ stub DismUnmountImage
