@@ -539,12 +539,481 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_GetDisplaySurfaceData1(IDXGIOutput6
     return E_NOTIMPL;
 }
 
+/* IDXGIOutputDuplication methods */
+
+static inline struct dxgi_output_duplication *impl_from_IDXGIOutputDuplication(IDXGIOutputDuplication *iface)
+{
+    return CONTAINING_RECORD(iface, struct dxgi_output_duplication, IDXGIOutputDuplication_iface);
+}
+
+/* IUnknown methods */
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_QueryInterface(IDXGIOutputDuplication *iface,
+        REFIID iid, void **object)
+{
+    TRACE("iface %p, iid %s, object %p.\n", iface, debugstr_guid(iid), object);
+
+    if (IsEqualGUID(iid, &IID_IDXGIOutputDuplication)
+            || IsEqualGUID(iid, &IID_IDXGIObject)
+            || IsEqualGUID(iid, &IID_IUnknown))
+    {
+        IUnknown_AddRef(iface);
+        *object = iface;
+        return S_OK;
+    }
+
+    WARN("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(iid));
+
+    *object = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE dxgi_output_duplication_AddRef(IDXGIOutputDuplication *iface)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+    ULONG refcount = InterlockedIncrement(&duplication->refcount);
+
+    TRACE("%p increasing refcount to %lu.\n", duplication, refcount);
+
+    return refcount;
+}
+
+static ULONG STDMETHODCALLTYPE dxgi_output_duplication_Release(IDXGIOutputDuplication *iface)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+    ULONG refcount = InterlockedDecrement(&duplication->refcount);
+
+    TRACE("%p decreasing refcount to %lu.\n", duplication, refcount);
+
+    if (!refcount)
+    {
+        if (duplication->capture_bitmap)
+        {
+            SelectObject(duplication->capture_dc, duplication->capture_old_object);
+            DeleteObject(duplication->capture_bitmap);
+        }
+        if (duplication->capture_dc)
+            DeleteDC(duplication->capture_dc);
+        if (duplication->desktop_resource)
+            IDXGIResource_Release(duplication->desktop_resource);
+        if (duplication->desktop_texture)
+            ID3D11Texture2D_Release(duplication->desktop_texture);
+        if (duplication->device_context)
+            ID3D11DeviceContext_Release(duplication->device_context);
+        if (duplication->d3d11_device)
+            ID3D11Device_Release(duplication->d3d11_device);
+        if (duplication->device)
+            IUnknown_Release(duplication->device);
+        wined3d_private_store_cleanup(&duplication->private_store);
+        IDXGIOutput6_Release(&duplication->output->IDXGIOutput6_iface);
+        free(duplication);
+    }
+
+    return refcount;
+}
+
+/* IDXGIObject methods */
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_SetPrivateData(IDXGIOutputDuplication *iface,
+        REFGUID guid, UINT data_size, const void *data)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+
+    TRACE("iface %p, guid %s, data_size %u, data %p.\n", iface, debugstr_guid(guid), data_size, data);
+
+    return dxgi_set_private_data(&duplication->private_store, guid, data_size, data);
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_SetPrivateDataInterface(IDXGIOutputDuplication *iface,
+        REFGUID guid, const IUnknown *object)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+
+    TRACE("iface %p, guid %s, object %p.\n", iface, debugstr_guid(guid), object);
+
+    return dxgi_set_private_data_interface(&duplication->private_store, guid, object);
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_GetPrivateData(IDXGIOutputDuplication *iface,
+        REFGUID guid, UINT *data_size, void *data)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+
+    TRACE("iface %p, guid %s, data_size %p, data %p.\n", iface, debugstr_guid(guid), data_size, data);
+
+    return dxgi_get_private_data(&duplication->private_store, guid, data_size, data);
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_GetParent(IDXGIOutputDuplication *iface,
+        REFIID riid, void **parent)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+
+    TRACE("iface %p, riid %s, parent %p.\n", iface, debugstr_guid(riid), parent);
+
+    return IDXGIOutput6_QueryInterface(&duplication->output->IDXGIOutput6_iface, riid, parent);
+}
+
+static void dxgi_output_duplication_GetDesc(IDXGIOutputDuplication *iface, DXGI_OUTDUPL_DESC *desc)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+
+    TRACE("iface %p, desc %p.\n", iface, desc);
+
+    if (!desc)
+        return;
+
+    *desc = duplication->desc;
+}
+
+/* Create the desktop texture, and the GDI capture surface feeding it, on first use. */
+static HRESULT dxgi_output_duplication_ensure_texture(struct dxgi_output_duplication *duplication)
+{
+    D3D11_TEXTURE2D_DESC texture_desc;
+    BITMAPINFO bitmap_info;
+    HRESULT hr;
+
+    if (duplication->desktop_texture)
+        return S_OK;
+
+    if (!duplication->d3d11_device)
+        return DXGI_ERROR_INVALID_CALL;
+
+    memset(&texture_desc, 0, sizeof(texture_desc));
+    texture_desc.Width = duplication->width;
+    texture_desc.Height = duplication->height;
+    texture_desc.MipLevels = 1;
+    texture_desc.ArraySize = 1;
+    texture_desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    texture_desc.SampleDesc.Count = 1;
+    texture_desc.SampleDesc.Quality = 0;
+    texture_desc.Usage = D3D11_USAGE_DEFAULT;
+    texture_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE | D3D11_BIND_RENDER_TARGET;
+
+    if (FAILED(hr = ID3D11Device_CreateTexture2D(duplication->d3d11_device,
+            &texture_desc, NULL, &duplication->desktop_texture)))
+    {
+        WARN("Failed to create desktop texture, hr %#lx.\n", hr);
+        return hr;
+    }
+
+    if (FAILED(hr = ID3D11Texture2D_QueryInterface(duplication->desktop_texture,
+            &IID_IDXGIResource, (void **)&duplication->desktop_resource)))
+    {
+        WARN("Failed to get IDXGIResource interface, hr %#lx.\n", hr);
+        ID3D11Texture2D_Release(duplication->desktop_texture);
+        duplication->desktop_texture = NULL;
+        return hr;
+    }
+
+    if (!(duplication->capture_dc = CreateCompatibleDC(NULL)))
+        return S_OK;
+
+    memset(&bitmap_info, 0, sizeof(bitmap_info));
+    bitmap_info.bmiHeader.biSize = sizeof(bitmap_info.bmiHeader);
+    bitmap_info.bmiHeader.biWidth = duplication->width;
+    bitmap_info.bmiHeader.biHeight = -(int)duplication->height;
+    bitmap_info.bmiHeader.biPlanes = 1;
+    bitmap_info.bmiHeader.biBitCount = 32;
+    bitmap_info.bmiHeader.biCompression = BI_RGB;
+
+    if (!(duplication->capture_bitmap = CreateDIBSection(duplication->capture_dc, &bitmap_info,
+            DIB_RGB_COLORS, &duplication->capture_bits, NULL, 0)))
+    {
+        WARN("Failed to create capture DIB section.\n");
+        DeleteDC(duplication->capture_dc);
+        duplication->capture_dc = NULL;
+        return S_OK;
+    }
+
+    duplication->capture_old_object = SelectObject(duplication->capture_dc, duplication->capture_bitmap);
+
+    return S_OK;
+}
+
+/* Blit the current desktop pixels of the output into the capture DIB and upload them. */
+static void dxgi_output_duplication_capture(struct dxgi_output_duplication *duplication)
+{
+    unsigned int stride = duplication->width * sizeof(DWORD);
+    ID3D11Resource *resource;
+    HDC src_dc;
+
+    if (!duplication->desktop_texture || !duplication->capture_dc || !duplication->capture_bits)
+        return;
+
+    if (!(src_dc = GetDC(NULL)))
+        return;
+
+    BitBlt(duplication->capture_dc, 0, 0, duplication->width, duplication->height, src_dc,
+            duplication->desktop_rect.left, duplication->desktop_rect.top, SRCCOPY);
+
+    ReleaseDC(NULL, src_dc);
+
+    if (!duplication->device_context)
+        return;
+
+    resource = (ID3D11Resource *)duplication->desktop_texture;
+    ID3D11DeviceContext_UpdateSubresource(duplication->device_context, resource, 0, NULL,
+            duplication->capture_bits, stride, 0);
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_AcquireNextFrame(IDXGIOutputDuplication *iface,
+        UINT timeout, DXGI_OUTDUPL_FRAME_INFO *frame_info, IDXGIResource **desktop_resource)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+    HRESULT hr;
+
+    TRACE("iface %p, timeout %u, frame_info %p, desktop_resource %p.\n",
+            iface, timeout, frame_info, desktop_resource);
+
+    if (!frame_info || !desktop_resource)
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (duplication->frame_locked)
+        return DXGI_ERROR_INVALID_CALL;
+
+    if (FAILED(hr = dxgi_output_duplication_ensure_texture(duplication)))
+        return hr;
+
+    dxgi_output_duplication_capture(duplication);
+
+    memset(frame_info, 0, sizeof(*frame_info));
+    GetSystemTimePreciseAsFileTime((FILETIME *)&frame_info->LastPresentTime);
+    duplication->last_present_time = frame_info->LastPresentTime;
+    frame_info->LastMouseUpdateTime = frame_info->LastPresentTime;
+    frame_info->AccumulatedFrames = 1;
+    frame_info->RectsCoalesced = FALSE;
+    frame_info->ProtectedContentMaskedOut = FALSE;
+    frame_info->PointerPosition.Position.x = 0;
+    frame_info->PointerPosition.Position.y = 0;
+    frame_info->PointerPosition.Visible = FALSE;
+    frame_info->TotalMetadataBufferSize = 0;
+    frame_info->PointerShapeBufferSize = 0;
+
+    IDXGIResource_AddRef(duplication->desktop_resource);
+    *desktop_resource = duplication->desktop_resource;
+    duplication->frame_locked = TRUE;
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_GetFrameDirtyRects(IDXGIOutputDuplication *iface,
+        UINT dirty_rects_buffer_size, RECT *dirty_rects_buffer, UINT *dirty_rects_size_required)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+
+    TRACE("iface %p, dirty_rects_buffer_size %u, dirty_rects_buffer %p, dirty_rects_size_required %p.\n",
+            iface, dirty_rects_buffer_size, dirty_rects_buffer, dirty_rects_size_required);
+
+    if (!dirty_rects_size_required)
+        return DXGI_ERROR_INVALID_CALL;
+
+    *dirty_rects_size_required = sizeof(*dirty_rects_buffer);
+
+    if (dirty_rects_buffer_size < sizeof(*dirty_rects_buffer))
+        return DXGI_ERROR_MORE_DATA;
+
+    if (dirty_rects_buffer)
+    {
+        dirty_rects_buffer[0].left = 0;
+        dirty_rects_buffer[0].top = 0;
+        dirty_rects_buffer[0].right = duplication->width;
+        dirty_rects_buffer[0].bottom = duplication->height;
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_GetFrameMoveRects(IDXGIOutputDuplication *iface,
+        UINT move_rects_buffer_size, DXGI_OUTDUPL_MOVE_RECT *move_rect_buffer,
+        UINT *move_rects_size_required)
+{
+    TRACE("iface %p, move_rects_buffer_size %u, move_rect_buffer %p, move_rects_size_required %p.\n",
+            iface, move_rects_buffer_size, move_rect_buffer, move_rects_size_required);
+
+    if (!move_rects_size_required)
+        return DXGI_ERROR_INVALID_CALL;
+
+    *move_rects_size_required = 0;
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_GetFramePointerShape(IDXGIOutputDuplication *iface,
+        UINT pointer_shape_buffer_size, void *pointer_shape_buffer,
+        UINT *pointer_shape_size_required, DXGI_OUTDUPL_POINTER_SHAPE_INFO *pointer_shape_info)
+{
+    TRACE("iface %p, pointer_shape_buffer_size %u, pointer_shape_buffer %p, "
+            "pointer_shape_size_required %p, pointer_shape_info %p.\n",
+            iface, pointer_shape_buffer_size, pointer_shape_buffer,
+            pointer_shape_size_required, pointer_shape_info);
+
+    if (!pointer_shape_size_required)
+        return DXGI_ERROR_INVALID_CALL;
+
+    *pointer_shape_size_required = 0;
+
+    if (pointer_shape_info)
+    {
+        memset(pointer_shape_info, 0, sizeof(*pointer_shape_info));
+        pointer_shape_info->Type = DXGI_OUTDUPL_POINTER_SHAPE_TYPE_COLOR;
+    }
+
+    return S_OK;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_MapDesktopSurface(IDXGIOutputDuplication *iface,
+        DXGI_MAPPED_RECT *locked_rect)
+{
+    TRACE("iface %p, locked_rect %p.\n", iface, locked_rect);
+
+    return DXGI_ERROR_UNSUPPORTED;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_UnMapDesktopSurface(IDXGIOutputDuplication *iface)
+{
+    TRACE("iface %p.\n", iface);
+
+    return DXGI_ERROR_UNSUPPORTED;
+}
+
+static HRESULT STDMETHODCALLTYPE dxgi_output_duplication_ReleaseFrame(IDXGIOutputDuplication *iface)
+{
+    struct dxgi_output_duplication *duplication = impl_from_IDXGIOutputDuplication(iface);
+
+    TRACE("iface %p.\n", iface);
+
+    duplication->frame_locked = FALSE;
+
+    return S_OK;
+}
+
+static const struct IDXGIOutputDuplicationVtbl dxgi_output_duplication_vtbl =
+{
+    dxgi_output_duplication_QueryInterface,
+    dxgi_output_duplication_AddRef,
+    dxgi_output_duplication_Release,
+    /* IDXGIObject methods */
+    dxgi_output_duplication_SetPrivateData,
+    dxgi_output_duplication_SetPrivateDataInterface,
+    dxgi_output_duplication_GetPrivateData,
+    dxgi_output_duplication_GetParent,
+    /* IDXGIOutputDuplication methods */
+    dxgi_output_duplication_GetDesc,
+    dxgi_output_duplication_AcquireNextFrame,
+    dxgi_output_duplication_GetFrameDirtyRects,
+    dxgi_output_duplication_GetFrameMoveRects,
+    dxgi_output_duplication_GetFramePointerShape,
+    dxgi_output_duplication_MapDesktopSurface,
+    dxgi_output_duplication_UnMapDesktopSurface,
+    dxgi_output_duplication_ReleaseFrame,
+};
+
+static HRESULT dxgi_output_duplication_init(struct dxgi_output_duplication *duplication)
+{
+    struct wined3d_output_desc wined3d_desc;
+    enum wined3d_display_rotation rotation;
+    struct wined3d_display_mode mode;
+    DXGI_OUTPUT_DESC desc;
+    HRESULT hr;
+
+    wined3d_mutex_lock();
+    hr = wined3d_output_get_desc(duplication->output->wined3d_output, &wined3d_desc);
+    if (SUCCEEDED(hr))
+        hr = wined3d_output_get_display_mode(duplication->output->wined3d_output, &mode, &rotation);
+    wined3d_mutex_unlock();
+    if (FAILED(hr))
+    {
+        WARN("Failed to get output desc, hr %#lx.\n", hr);
+        return hr;
+    }
+
+    duplication->desktop_rect = wined3d_desc.desktop_rect;
+    duplication->width = wined3d_desc.desktop_rect.right - wined3d_desc.desktop_rect.left;
+    duplication->height = wined3d_desc.desktop_rect.bottom - wined3d_desc.desktop_rect.top;
+
+    memset(&duplication->desc, 0, sizeof(duplication->desc));
+    duplication->desc.ModeDesc.Width = mode.width;
+    duplication->desc.ModeDesc.Height = mode.height;
+    duplication->desc.ModeDesc.RefreshRate.Numerator = mode.refresh_rate;
+    duplication->desc.ModeDesc.RefreshRate.Denominator = 1;
+    duplication->desc.ModeDesc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    duplication->desc.ModeDesc.ScanlineOrdering = DXGI_MODE_SCANLINE_ORDER_PROGRESSIVE;
+    duplication->desc.ModeDesc.Scaling = DXGI_MODE_SCALING_UNSPECIFIED;
+    duplication->desc.Rotation = dxgi_mode_rotation_from_wined3d(rotation);
+    duplication->desc.DesktopImageInSystemMemory = FALSE;
+
+    if (FAILED(hr = IDXGIOutput6_GetDesc(&duplication->output->IDXGIOutput6_iface, &desc)))
+        return hr;
+
+    if (!duplication->width || !duplication->height)
+    {
+        duplication->width = desc.DesktopCoordinates.right - desc.DesktopCoordinates.left;
+        duplication->height = desc.DesktopCoordinates.bottom - desc.DesktopCoordinates.top;
+        duplication->desktop_rect = desc.DesktopCoordinates;
+    }
+    if (!duplication->desc.ModeDesc.Width)
+        duplication->desc.ModeDesc.Width = duplication->width;
+    if (!duplication->desc.ModeDesc.Height)
+        duplication->desc.ModeDesc.Height = duplication->height;
+
+    return S_OK;
+}
+
+HRESULT dxgi_output_duplication_create(struct dxgi_output *output, IUnknown *device,
+        REFIID riid, void **duplication)
+{
+    struct dxgi_output_duplication *o;
+    HRESULT hr;
+
+    if (!(o = calloc(1, sizeof(*o))))
+        return E_OUTOFMEMORY;
+
+    o->IDXGIOutputDuplication_iface.lpVtbl = &dxgi_output_duplication_vtbl;
+    o->refcount = 1;
+    wined3d_private_store_init(&o->private_store);
+    o->output = output;
+    IDXGIOutput6_AddRef(&output->IDXGIOutput6_iface);
+
+    if (device)
+    {
+        IUnknown_AddRef(device);
+        o->device = device;
+        hr = IUnknown_QueryInterface(device, &IID_ID3D11Device, (void **)&o->d3d11_device);
+        if (FAILED(hr))
+            goto fail;
+        o->device_context = NULL;
+        ID3D11Device_GetImmediateContext(o->d3d11_device, &o->device_context);
+    }
+
+    if (FAILED(hr = dxgi_output_duplication_init(o)))
+        goto fail;
+
+    hr = IDXGIOutputDuplication_QueryInterface(&o->IDXGIOutputDuplication_iface, riid, duplication);
+    if (FAILED(hr))
+        goto fail;
+
+    o->refcount = 1; /* Discount the reference taken by the query above. */
+
+    return S_OK;
+
+fail:
+    IDXGIOutputDuplication_Release(&o->IDXGIOutputDuplication_iface);
+    return hr;
+}
+
 static HRESULT STDMETHODCALLTYPE dxgi_output_DuplicateOutput(IDXGIOutput6 *iface,
         IUnknown *device, IDXGIOutputDuplication **output_duplication)
 {
-    FIXME("iface %p, device %p, output_duplication %p stub!\n", iface, device, output_duplication);
+    struct dxgi_output *output = impl_from_IDXGIOutput6(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, device %p, output_duplication %p.\n", iface, device, output_duplication);
+
+    if (!output_duplication)
+        return E_INVALIDARG;
+
+    return dxgi_output_duplication_create(output, device, &IID_IDXGIOutputDuplication,
+            (void **)output_duplication);
 }
 
 /* IDXGIOutput2 methods */
@@ -583,11 +1052,17 @@ static HRESULT STDMETHODCALLTYPE dxgi_output_DuplicateOutput1(IDXGIOutput6 *ifac
         IUnknown *device, UINT flags, UINT format_count, const DXGI_FORMAT *formats,
         IDXGIOutputDuplication **output_duplication)
 {
-    FIXME("iface %p, device %p, flags %#x, format_count %u, formats %p, "
-            "output_duplication %p stub!\n", iface, device, flags, format_count,
+    struct dxgi_output *output = impl_from_IDXGIOutput6(iface);
+
+    TRACE("iface %p, device %p, flags %#x, format_count %u, formats %p, "
+            "output_duplication %p.\n", iface, device, flags, format_count,
             formats, output_duplication);
 
-    return E_NOTIMPL;
+    if (!output_duplication)
+        return E_INVALIDARG;
+
+    return dxgi_output_duplication_create(output, device, &IID_IDXGIOutputDuplication,
+            (void **)output_duplication);
 }
 
 /* IDXGIOutput6 methods */

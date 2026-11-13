@@ -162,6 +162,32 @@ HRESULT dxgi_output_create(struct dxgi_adapter *adapter, unsigned int output_idx
         struct dxgi_output **output);
 struct dxgi_output *unsafe_impl_from_IDXGIOutput(IDXGIOutput *iface);
 
+struct dxgi_output_duplication
+{
+    IDXGIOutputDuplication IDXGIOutputDuplication_iface;
+    LONG refcount;
+    struct dxgi_output *output;
+    IUnknown *device;
+    ID3D11Device *d3d11_device;
+    ID3D11DeviceContext *device_context;
+    ID3D11Texture2D *desktop_texture;
+    IDXGIResource *desktop_resource;
+    DXGI_OUTDUPL_DESC desc;
+    struct wined3d_private_store private_store;
+    RECT desktop_rect;
+    unsigned int width;
+    unsigned int height;
+    BOOL frame_locked;
+    LARGE_INTEGER last_present_time;
+    HDC capture_dc;
+    HBITMAP capture_bitmap;
+    HGDIOBJ capture_old_object;
+    void *capture_bits;
+};
+
+HRESULT dxgi_output_duplication_create(struct dxgi_output *output, IUnknown *device,
+        REFIID riid, void **duplication);
+
 /* IDXGIAdapter */
 struct dxgi_adapter
 {

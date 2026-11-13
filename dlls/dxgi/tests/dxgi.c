@@ -1526,6 +1526,221 @@ static void test_output(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_output_duplication(void)
+{
+    DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info;
+    IDXGIOutputDuplication *duplication;
+    IDXGIOutputDuplication *duplication2;
+    DXGI_OUTDUPL_FRAME_INFO frame_info;
+    D3D11_TEXTURE2D_DESC texture_desc;
+    ID3D11Texture2D *texture;
+    IDXGIOutput5 *output5;
+    IDXGIOutput1 *output1;
+    IDXGIResource *resource;
+    IDXGIDevice *device;
+    IDXGIAdapter *adapter;
+    DXGI_OUTDUPL_DESC dup_desc;
+    DXGI_OUTPUT_DESC output_desc;
+    DXGI_MAPPED_RECT mapped_rect;
+    IDXGIOutput *output;
+    ULONG refcount;
+    DXGI_FORMAT format;
+    RECT dirty_rects[4];
+    UINT size;
+    HRESULT hr;
+
+    if (!(device = create_device(0)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = IDXGIDevice_GetAdapter(device, &adapter);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDXGIAdapter_EnumOutputs(adapter, 0, &output);
+    if (hr == DXGI_ERROR_NOT_FOUND)
+    {
+        skip("Adapter doesn't have any outputs.\n");
+        IDXGIAdapter_Release(adapter);
+        IDXGIDevice_Release(device);
+        return;
+    }
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hr = IDXGIOutput_GetDesc(output, &output_desc);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    duplication = NULL;
+    output1 = NULL;
+    hr = IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput1, (void **)&output1);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+
+    hr = IDXGIOutput1_DuplicateOutput(output1, (IUnknown *)device, &duplication);
+    ok(SUCCEEDED(hr), "Got unexpected hr %#lx.\n", hr);
+    if (FAILED(hr))
+        goto done;
+    ok(!!duplication, "Got NULL duplication.\n");
+
+    /* IDXGIOutputDuplication::GetDesc */
+    memset(&dup_desc, 0xcd, sizeof(dup_desc));
+    IDXGIOutputDuplication_GetDesc(duplication, &dup_desc);
+    ok(dup_desc.ModeDesc.Width == output_desc.DesktopCoordinates.right
+            - output_desc.DesktopCoordinates.left,
+            "Got unexpected width %u.\n", dup_desc.ModeDesc.Width);
+    ok(dup_desc.ModeDesc.Height == output_desc.DesktopCoordinates.bottom
+            - output_desc.DesktopCoordinates.top,
+            "Got unexpected height %u.\n", dup_desc.ModeDesc.Height);
+    ok(dup_desc.ModeDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
+            "Got unexpected format %u.\n", dup_desc.ModeDesc.Format);
+    ok(dup_desc.Rotation == DXGI_MODE_ROTATION_IDENTITY,
+            "Got unexpected rotation %#x.\n", dup_desc.Rotation);
+    ok(!dup_desc.DesktopImageInSystemMemory, "Got unexpected DesktopImageInSystemMemory.\n");
+
+    /* IDXGIOutputDuplication::AcquireNextFrame */
+    resource = NULL;
+    memset(&frame_info, 0xcd, sizeof(frame_info));
+    hr = IDXGIOutputDuplication_AcquireNextFrame(duplication, 1000, &frame_info, &resource);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!!resource, "Got NULL resource.\n");
+    ok(!frame_info.TotalMetadataBufferSize, "Got unexpected metadata size %u.\n",
+            frame_info.TotalMetadataBufferSize);
+    ok(frame_info.AccumulatedFrames == 1, "Got unexpected accumulated frames %u.\n",
+            frame_info.AccumulatedFrames);
+    ok(frame_info.LastPresentTime.QuadPart, "Got unexpected present time %#I64x.\n",
+            frame_info.LastPresentTime.QuadPart);
+
+    /* The desktop resource is a texture matching the output mode. */
+    texture = NULL;
+    hr = IDXGIResource_QueryInterface(resource, &IID_ID3D11Texture2D, (void **)&texture);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        memset(&texture_desc, 0xcd, sizeof(texture_desc));
+        ID3D11Texture2D_GetDesc(texture, &texture_desc);
+        ok(texture_desc.Width == dup_desc.ModeDesc.Width, "Got unexpected width %u.\n",
+                texture_desc.Width);
+        ok(texture_desc.Height == dup_desc.ModeDesc.Height, "Got unexpected height %u.\n",
+                texture_desc.Height);
+        ok(texture_desc.Format == DXGI_FORMAT_B8G8R8A8_UNORM, "Got unexpected format %u.\n",
+                texture_desc.Format);
+        ok(texture_desc.ArraySize == 1, "Got unexpected array size %u.\n", texture_desc.ArraySize);
+        ok(texture_desc.MipLevels == 1, "Got unexpected mip levels %u.\n", texture_desc.MipLevels);
+        ID3D11Texture2D_Release(texture);
+    }
+    IDXGIResource_Release(resource);
+
+    /* Acquiring a second frame without releasing the first one is invalid. */
+    resource = NULL;
+    hr = IDXGIOutputDuplication_AcquireNextFrame(duplication, 0, &frame_info, &resource);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    ok(!resource, "Got unexpected resource %p.\n", resource);
+
+    /* IDXGIOutputDuplication::GetFrameDirtyRects */
+    size = 0xcdcdcdcd;
+    hr = IDXGIOutputDuplication_GetFrameDirtyRects(duplication, 0, NULL, &size);
+    ok(hr == DXGI_ERROR_MORE_DATA, "Got unexpected hr %#lx.\n", hr);
+    ok(size == sizeof(RECT), "Got unexpected size %u.\n", size);
+
+    size = 0xcdcdcdcd;
+    memset(dirty_rects, 0xcd, sizeof(dirty_rects));
+    hr = IDXGIOutputDuplication_GetFrameDirtyRects(duplication, sizeof(dirty_rects),
+            dirty_rects, &size);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(size == sizeof(RECT), "Got unexpected size %u.\n", size);
+    ok(!dirty_rects[0].left && !dirty_rects[0].top, "Got unexpected rect %ld, %ld.\n",
+            dirty_rects[0].left, dirty_rects[0].top);
+    ok(dirty_rects[0].right == dup_desc.ModeDesc.Width, "Got unexpected rect right %ld.\n",
+            dirty_rects[0].right);
+    ok(dirty_rects[0].bottom == dup_desc.ModeDesc.Height, "Got unexpected rect bottom %ld.\n",
+            dirty_rects[0].bottom);
+
+    /* IDXGIOutputDuplication::GetFrameMoveRects */
+    size = 0xcdcdcdcd;
+    hr = IDXGIOutputDuplication_GetFrameMoveRects(duplication, sizeof(dirty_rects),
+            (DXGI_OUTDUPL_MOVE_RECT *)dirty_rects, &size);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!size, "Got unexpected size %u.\n", size);
+
+    /* IDXGIOutputDuplication::GetFramePointerShape */
+    size = 0xcdcdcdcd;
+    memset(&shape_info, 0xcd, sizeof(shape_info));
+    hr = IDXGIOutputDuplication_GetFramePointerShape(duplication, 0, NULL, &size, &shape_info);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!size, "Got unexpected size %u.\n", size);
+
+    /* IDXGIOutputDuplication::MapDesktopSurface */
+    hr = IDXGIOutputDuplication_MapDesktopSurface(duplication, &mapped_rect);
+    ok(hr == DXGI_ERROR_UNSUPPORTED, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIOutputDuplication_UnMapDesktopSurface(duplication);
+    ok(hr == DXGI_ERROR_UNSUPPORTED, "Got unexpected hr %#lx.\n", hr);
+
+    /* IDXGIOutputDuplication::ReleaseFrame */
+    hr = IDXGIOutputDuplication_ReleaseFrame(duplication);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* A second frame can be acquired after releasing the previous one. */
+    resource = NULL;
+    hr = IDXGIOutputDuplication_AcquireNextFrame(duplication, 1000, &frame_info, &resource);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    ok(!!resource, "Got NULL resource.\n");
+    if (SUCCEEDED(hr))
+        IDXGIResource_Release(resource);
+    hr = IDXGIOutputDuplication_ReleaseFrame(duplication);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Argument validation. */
+    hr = IDXGIOutputDuplication_AcquireNextFrame(duplication, 0, NULL, &resource);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIOutputDuplication_AcquireNextFrame(duplication, 0, &frame_info, NULL);
+    ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+
+    /* IDXGIOutput5::DuplicateOutput1 */
+    hr = IDXGIOutput_QueryInterface(output, &IID_IDXGIOutput5, (void **)&output5);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    duplication2 = NULL;
+    hr = IDXGIOutput5_DuplicateOutput1(output5, (IUnknown *)device, 0, 1, &format, &duplication2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr))
+    {
+        memset(&dup_desc, 0xcd, sizeof(dup_desc));
+        IDXGIOutputDuplication_GetDesc(duplication2, &dup_desc);
+        ok(dup_desc.ModeDesc.Format == DXGI_FORMAT_B8G8R8A8_UNORM,
+                "Got unexpected format %u.\n", dup_desc.ModeDesc.Format);
+        resource = NULL;
+        hr = IDXGIOutputDuplication_AcquireNextFrame(duplication2, 1000, &frame_info, &resource);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        if (SUCCEEDED(hr))
+            IDXGIResource_Release(resource);
+        hr = IDXGIOutputDuplication_ReleaseFrame(duplication2);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        refcount = IDXGIOutputDuplication_Release(duplication2);
+        ok(!refcount, "Duplication has %lu references left.\n", refcount);
+    }
+    IDXGIOutput5_Release(output5);
+
+    refcount = IDXGIOutputDuplication_AddRef(duplication);
+    ok(refcount == 2, "Got unexpected refcount %lu.\n", refcount);
+    refcount = IDXGIOutputDuplication_Release(duplication);
+    ok(refcount == 1, "Got unexpected refcount %lu.\n", refcount);
+
+    IDXGIOutput1_Release(output1);
+
+done:
+    if (duplication)
+    {
+        refcount = IDXGIOutputDuplication_Release(duplication);
+        ok(!refcount, "Duplication has %lu references left.\n", refcount);
+    }
+    IDXGIOutput_Release(output);
+    IDXGIAdapter_Release(adapter);
+    refcount = IDXGIDevice_Release(device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_find_closest_matching_mode(void)
 {
     static const DXGI_MODE_SCALING scaling_tests[] =
@@ -8977,6 +9192,7 @@ START_TEST(dxgi)
     queue_test(test_subresource_surface);
     queue_test(test_parents);
     queue_test(test_output);
+    queue_test(test_output_duplication);
     queue_test(test_find_closest_matching_mode);
     queue_test(test_create_factory);
     queue_test(test_private_data);
