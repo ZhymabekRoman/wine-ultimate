@@ -1,10 +1,17 @@
-MODULE  = windows.storage.dll
-IMPORTS = shell32 combase
+MODULE       = windows.storage.dll
+IMPORTS      = shell32 combase ole32
+DELAYIMPORTS = comdlg32
+
+UNIXLIB      = windows.storage.so
+UNIX_CFLAGS  = $(DBUS_CFLAGS)
+UNIX_LIBS    = $(DBUS_LIBS)
 
 SOURCES = \
 	async.c \
 	catalog.c \
 	classes.idl \
 	main.c \
+	pickers.c \
 	storage.c \
-	streams.c
+	streams.c \
+	unixlib.c

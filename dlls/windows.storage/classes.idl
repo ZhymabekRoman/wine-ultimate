@@ -28,12 +28,19 @@ import "windows.foundation.idl";
 import "windowscontracts.idl";
 import "windows.system.idl";
 import "windows.storage.idl";
+import "windows.storage.pickers.idl";
 
 namespace Windows.Storage {
     runtimeclass FileIO;
     runtimeclass PathIO;
     runtimeclass StorageFile;
     runtimeclass StorageFolder;
+}
+
+namespace Windows.Storage.Pickers {
+    runtimeclass FileOpenPicker;
+    runtimeclass FileSavePicker;
+    runtimeclass FolderPicker;
 }
 
 namespace Windows.Storage.Streams {

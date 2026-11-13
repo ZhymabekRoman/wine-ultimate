@@ -2,4 +2,5 @@ TESTDLL = windows.storage.dll
 IMPORTS = combase
 
 SOURCES = \
+	pickers.c \
 	storage.c

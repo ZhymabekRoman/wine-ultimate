@@ -514,7 +514,8 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
-    if (!wcsncmp(classid, L"Windows.Storage.Streams.", 24))
+    if (!wcsncmp(classid, L"Windows.Storage.Streams.", 24) ||
+        !wcsncmp(classid, L"Windows.Storage.Pickers.", 24))
     {
         *out = wcsdup(L"windows.storage.dll");
         return S_OK;

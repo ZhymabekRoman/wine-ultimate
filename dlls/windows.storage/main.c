@@ -56,6 +56,12 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         IActivationFactory_QueryInterface( in_memory_random_access_stream_factory, &IID_IActivationFactory, (void **)factory );
     else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Streams_RandomAccessStreamReference ))
         IActivationFactory_QueryInterface( random_access_stream_reference_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Pickers_FileOpenPicker ))
+        IActivationFactory_QueryInterface( file_open_picker_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Pickers_FileSavePicker ))
+        IActivationFactory_QueryInterface( file_save_picker_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, RuntimeClass_Windows_Storage_Pickers_FolderPicker ))
+        IActivationFactory_QueryInterface( folder_picker_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     WARN( "class %s not available, returning E_NOINTERFACE.\n", debugstr_hstring( classid ) );
