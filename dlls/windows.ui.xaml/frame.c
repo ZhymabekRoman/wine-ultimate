@@ -21,6 +21,8 @@
 
 #include "private.h"
 
+#include "wine/exception.h"
+
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
 static const GUID IID_IReferenceTrackerTarget_WinUI =
@@ -949,6 +951,7 @@ struct xaml_collection
     unsigned int capacity;
     void *iterable_view;  /* cached IIterable<RowDefinition> view for IV {5ddd9577} */
     void *vector_view;    /* cached IVectorView<RowDefinition> for IV3 {94ea2b94} */
+    void *parent;         /* owner collection of a view shard (back-pointer) */
 };
 
 static inline struct xaml_collection *impl_from_collection( void *iface )
@@ -996,6 +999,7 @@ static HRESULT WINAPI collection_QueryInterface( IInspectable *iface, REFIID iid
             v->capacity = ~0u;                            /* sentinel: view owns no array */
             v->vector_view = v;
             v->iterable_view = NULL;
+            v->parent = impl;
             v->IInspectable_iface.lpVtbl =
                 (const struct IInspectableVtbl *)vtbl_dup( collection_view_vtbl );
             impl->vector_view = v;
@@ -1030,6 +1034,11 @@ static ULONG WINAPI collection_Release( IInspectable *iface )
         {
             ERR( "collection_Release view %p freed\n", iface );
             if (impl->vector_view == impl) impl->vector_view = NULL;
+            if (impl->parent)                             /* drop parent's stale cache slot */
+            {
+                struct xaml_collection *p = impl->parent;
+                if (p->vector_view == (void *)impl) p->vector_view = NULL;
+            }
             free( impl );
             return 0;
         }
@@ -1442,6 +1451,20 @@ static HRESULT WINAPI collection_GetMany( void *iface, unsigned int start, unsig
     return S_OK;
 }
 
+/* IVectorView<T>::GetMany is (count, items, actual) — 3 args, no start index.
+ * IObservableVector<T>::GetMany is (start, count, items, actual). Feeding the
+ * 4-arg form through the 3-arg slot shifted every returned item pointer by
+ * one qword, handing the app a stack-junk ComObject (AV in set_MinHeight). */
+static HRESULT WINAPI collection_GetMany_view( void *iface, unsigned int count, void **items, unsigned int *actual )
+{
+    struct xaml_collection *impl = impl_from_collection( iface );
+    unsigned int n = min(count, impl->count);
+    if (items && n) memcpy( items, impl->items, n * sizeof(*impl->items) );
+    ERR( "collection_GetMany_view iface %p count %u -> %u\n", iface, count, n );
+    if (actual) *actual = n;
+    return S_OK;
+}
+
 /* WinUI3 RowDefinitionCollection IV3 {94ea2b94} = IVectorView<RowDefinition>:
  * GetAt6, Size7, GetView8, IndexOf9, GetMany10 (IObservableVector has SetAt10). */
 static const void *collection_view_vtbl[256] =
@@ -1457,7 +1480,7 @@ static const void *collection_view_vtbl[256] =
     [7] = collection_get_Size,
     [8] = collection_GetView,
     [9] = collection_IndexOf,
-    [10] = collection_GetMany,
+    [10] = collection_GetMany_view,
     [13] = collection_Append,
     [15] = collection_Clear,
     [16] = collection_GetMany,
@@ -1514,7 +1537,9 @@ struct xaml_element
     IInspectable IColumnDefinition_iface;
     IInspectable IWebView2_iface;
     IInspectable IWebView22_iface;
+    IInspectable IUIElement_iface;
     LONG ref;
+    int visibility;
     IInspectable *outer;
     IDCompositionVisual *visual;
     IInspectable *row_defs;
@@ -1539,6 +1564,10 @@ static inline struct xaml_element *impl_from_element( void *iface )
 static inline struct xaml_element *impl_from_IGrid( void *iface )
 {
     return CONTAINING_RECORD( iface, struct xaml_element, IGrid_iface );
+}
+static inline struct xaml_element *impl_from_IUIElement( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_element, IUIElement_iface );
 }
 static inline struct xaml_element *impl_from_IPanel( void *iface )
 {
@@ -1758,6 +1787,14 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         }
     }
 
+    if (IsEqualGUID( iid, &IID_IUIElement_g ) ||
+        IsEqualGUID( iid, &IID_IUIElement_WinUI ))
+    {
+        *out = &impl->IUIElement_iface;
+        element_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IGrid ) ||
         IsEqualGUID( iid, &IID_IGrid_WinUI ) ||
         IsEqualGUID( iid, &IID_IGrid_WinUI2 ) ||
@@ -1780,8 +1817,6 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IControl_g ) ||
         IsEqualGUID( iid, &IID_IControl_WinUI ) ||
-        IsEqualGUID( iid, &IID_IUIElement_g ) ||
-        IsEqualGUID( iid, &IID_IUIElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
@@ -2149,8 +2184,15 @@ static HRESULT WINAPI element_grid_get_RowDefinitions( void *iface, void **out )
             ERR( "seeded fresh row_defs count %u\n", c->count );
         }
     }
-    *out = impl->row_defs;
-    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    /* Slots are shared: IUIElement::set_Visibility(iface, int) can land on a
+     * collection getter whose second param is the out pointer. Guard the store. */
+    __TRY
+    {
+        *out = impl->row_defs;
+        if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    }
+    __EXCEPT_ALL { }
+    __ENDTRY;
     return S_OK;
 }
 
@@ -2176,8 +2218,13 @@ static HRESULT WINAPI element_grid_get_ColumnDefinitions( void *iface, void **ou
         collection_Append( (void *)impl->col_defs, cd2 ? cd2 : cd );
         ERR( "seeded fresh col_defs\n" );
     }
-    *out = impl->col_defs;
-    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    __TRY
+    {
+        *out = impl->col_defs;
+        if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    }
+    __EXCEPT_ALL { }
+    __ENDTRY;
     return S_OK;
 }
 
@@ -3784,6 +3831,58 @@ static const void *wv22_vtbl[256] =
     [66] = wv2_probe60, [67] = wv2_probe61, [68] = wv2_probe62, [69] = wv2_probe63,
 };
 
+/* WinUI3 IUIElement IV slots: set_Visibility is slot 10, get_Visibility 11.
+ * On the shared element/grid vtbl, slot 10 collides with Grid IV2
+ * get_RowDefinitions and WebView2 CreateCoreWebView2Controller — serve IUIElement
+ * from its own view so the app's projection hits the right slots. */
+static HRESULT WINAPI uie_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct xaml_element *impl = impl_from_IUIElement( iface );
+    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI uie_AddRef( IInspectable *iface )
+{
+    struct xaml_element *impl = impl_from_IUIElement( iface );
+    return element_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI uie_Release( IInspectable *iface )
+{
+    struct xaml_element *impl = impl_from_IUIElement( iface );
+    return element_Release( &impl->IInspectable_iface );
+}
+static HRESULT WINAPI uie_set_visibility( void *iface, int vis )
+{
+    struct xaml_element *impl = impl_from_IUIElement( iface );
+    impl->visibility = vis;
+    return S_OK;
+}
+static HRESULT WINAPI uie_get_visibility( void *iface, int *out )
+{
+    struct xaml_element *impl = impl_from_IUIElement( iface );
+    if (out) *out = impl->visibility;
+    return S_OK;
+}
+static HRESULT WINAPI uie_get_ptr( void *iface, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static const void *uielement_vtbl[64] =
+{
+    [0] = uie_QueryInterface,
+    [1] = uie_AddRef,
+    [2] = uie_Release,
+    [3] = element_GetIids,
+    [4] = element_GetRuntimeClassName,
+    [5] = element_GetTrustLevel,
+    [6 ... 63] = element_generic_slot,
+    [8] = uie_get_ptr,   /* GetValue */
+    [10] = uie_set_visibility,
+    [11] = uie_get_visibility,
+    [12] = uie_get_ptr,  /* ReadLocalValue */
+    [13] = uie_get_ptr,  /* GetAnimationBaseValue */
+};
+
 HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance )
 {
     struct xaml_element *impl;
@@ -3797,6 +3896,7 @@ HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instan
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( col_def_vtbl );
     impl->IWebView2_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv2_vtbl );
     impl->IWebView22_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv22_vtbl );
+    impl->IUIElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( uielement_vtbl );
     impl->class_name = L"Windows.UI.Xaml.Controls.Grid";
     impl->ref = 1;
     impl->outer = outer;
@@ -3859,6 +3959,50 @@ static HRESULT WINAPI grid_factory_CreateInstance( void *iface, void *outer, voi
 {
     TRACE( "iface %p, outer %p, inner %p, instance %p\n", iface, outer, inner, instance );
     return element_create( (IInspectable *)outer, (IInspectable **)inner, instance );
+}
+
+/* RowDefinition/ColumnDefinition need their own vtbl: the app's WindowEx ctor calls
+ * `new RowDefinition()` then rd.MinHeight = 48. On the shared grid vtbl, slot 12 is
+ * get_ColumnDefinitions(iface, out) and the double 48.0 lands as `out` -> store to
+ * 0x4048000000000000 -> AccessViolationException (AV bt[9] get_ColumnDefinitions+0x26). */
+static HRESULT WINAPI rowdef_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.RowDefinition", (void **)instance );
+    ERR( "rowdef_factory_ActivateInstance -> %p hr %08x\n", (void *)*instance, hr );
+    return hr;
+}
+
+static HRESULT WINAPI rowdef_factory_CreateInstance( void *iface, void *outer, void **inner, void **instance )
+{
+    struct xaml_element *impl = NULL;
+    HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.RowDefinition", (void **)&impl );
+    if (SUCCEEDED(hr) && impl)
+    {
+        if (inner) { *inner = (void *)impl; IInspectable_AddRef( (IInspectable *)*inner ); }
+        *instance = (void *)impl;
+    }
+    ERR( "rowdef_factory_CreateInstance outer %p -> %p hr %08x\n", outer, (void *)impl, hr );
+    return hr;
+}
+
+static HRESULT WINAPI coldef_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.ColumnDefinition", (void **)instance );
+    ERR( "coldef_factory_ActivateInstance -> %p hr %08x\n", (void *)*instance, hr );
+    return hr;
+}
+
+static HRESULT WINAPI coldef_factory_CreateInstance( void *iface, void *outer, void **inner, void **instance )
+{
+    struct xaml_element *impl = NULL;
+    HRESULT hr = element_create_typed( L"Microsoft.UI.Xaml.Controls.ColumnDefinition", (void **)&impl );
+    if (SUCCEEDED(hr) && impl)
+    {
+        if (inner) { *inner = (void *)impl; IInspectable_AddRef( (IInspectable *)*inner ); }
+        *instance = (void *)impl;
+    }
+    ERR( "coldef_factory_CreateInstance outer %p -> %p hr %08x\n", outer, (void *)impl, hr );
+    return hr;
 }
 
 static HRESULT WINAPI coll_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
@@ -3933,18 +4077,66 @@ static struct frame_factory grid_factory_obj =
 };
 IActivationFactory *grid_factory = &grid_factory_obj.IActivationFactory_iface;
 
+static const void *row_def_factory_vtbl[64] =
+{
+    [0] = frame_factory_QueryInterface,
+    [1] = frame_factory_AddRef,
+    [2] = frame_factory_Release,
+    [3] = frame_factory_GetIids,
+    [4] = frame_factory_GetRuntimeClassName,
+    [5] = frame_factory_GetTrustLevel,
+    [6] = rowdef_factory_ActivateInstance,
+    [7 ... 63] = frame_generic_slot,
+};
+
+static const void *row_def_composable_vtbl[64] =
+{
+    [0] = composable_factory_QueryInterface,
+    [1] = composable_factory_AddRef,
+    [2] = composable_factory_Release,
+    [3] = frame_factory_GetIids,
+    [4] = frame_factory_GetRuntimeClassName,
+    [5] = frame_factory_GetTrustLevel,
+    [6 ... 9] = rowdef_factory_CreateInstance,
+    [10 ... 63] = frame_generic_slot,
+};
+
+static const void *col_def_factory_vtbl[64] =
+{
+    [0] = frame_factory_QueryInterface,
+    [1] = frame_factory_AddRef,
+    [2] = frame_factory_Release,
+    [3] = frame_factory_GetIids,
+    [4] = frame_factory_GetRuntimeClassName,
+    [5] = frame_factory_GetTrustLevel,
+    [6] = coldef_factory_ActivateInstance,
+    [7 ... 63] = frame_generic_slot,
+};
+
+static const void *col_def_composable_vtbl[64] =
+{
+    [0] = composable_factory_QueryInterface,
+    [1] = composable_factory_AddRef,
+    [2] = composable_factory_Release,
+    [3] = frame_factory_GetIids,
+    [4] = frame_factory_GetRuntimeClassName,
+    [5] = frame_factory_GetTrustLevel,
+    [6 ... 9] = coldef_factory_CreateInstance,
+    [10 ... 63] = frame_generic_slot,
+};
+
 static struct frame_factory row_def_factory_obj =
 {
-    {(const struct IActivationFactoryVtbl *)grid_factory_vtbl},
-    {(const struct IInspectableVtbl *)grid_composable_vtbl},
+    {(const struct IActivationFactoryVtbl *)row_def_factory_vtbl},
+    {(const struct IInspectableVtbl *)row_def_composable_vtbl},
     1,
 };
 IActivationFactory *row_def_factory = &row_def_factory_obj.IActivationFactory_iface;
 
 static struct frame_factory col_def_factory_obj =
 {
-    {(const struct IActivationFactoryVtbl *)grid_factory_vtbl},
-    {(const struct IInspectableVtbl *)grid_composable_vtbl},
+    {(const struct IActivationFactoryVtbl *)col_def_factory_vtbl},
+    {(const struct IInspectableVtbl *)col_def_composable_vtbl},
     1,
 };
 IActivationFactory *col_def_factory = &col_def_factory_obj.IActivationFactory_iface;

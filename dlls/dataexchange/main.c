@@ -233,27 +233,6 @@ static HRESULT WINAPI async_operation_get_ErrorCode(IAsyncInfo *iface, HRESULT *
     return S_OK;
 }
 
-static HRESULT WINAPI async_operation_get_Completed(IAsyncInfo *iface,
-        __FIAsyncOperationCompletedHandler_1_DataPackageOperation **handler)
-{
-    struct async_operation *impl = async_operation_from_IAsyncInfo(iface);
-
-    *handler = impl->completed;
-    if (*handler) __FIAsyncOperationCompletedHandler_1_DataPackageOperation_AddRef(*handler);
-    return S_OK;
-}
-
-static HRESULT WINAPI async_operation_put_Completed(IAsyncInfo *iface,
-        __FIAsyncOperationCompletedHandler_1_DataPackageOperation *handler)
-{
-    struct async_operation *impl = async_operation_from_IAsyncInfo(iface);
-
-    __FIAsyncOperationCompletedHandler_1_DataPackageOperation_AddRef(handler);
-    __FIAsyncOperationCompletedHandler_1_DataPackageOperation_Release(impl->completed);
-    impl->completed = handler;
-    return S_OK;
-}
-
 static HRESULT WINAPI async_operation_Cancel(IAsyncInfo *iface)
 {
     return S_OK;
@@ -275,8 +254,6 @@ static const struct IAsyncInfoVtbl async_operation_async_info_vtbl =
     async_operation_get_Id,
     async_operation_get_Status,
     async_operation_get_ErrorCode,
-    async_operation_get_Completed,
-    async_operation_put_Completed,
     async_operation_Cancel,
     async_operation_Close,
 };
@@ -355,18 +332,10 @@ static const struct __FIAsyncOperation_1_DataPackageOperationVtbl async_operatio
     async_operation_op_GetIids,
     async_operation_op_GetRuntimeClassName,
     async_operation_op_GetTrustLevel,
-    /* IAsyncInfo methods */
-    async_operation_get_Id,
-    async_operation_get_Status,
-    async_operation_get_ErrorCode,
-    async_operation_get_Completed,
-    async_operation_put_Completed,
-    async_operation_Cancel,
-    async_operation_Close,
     /* __FIAsyncOperation_1_DataPackageOperation methods */
-    async_operation_op_GetResults,
     async_operation_op_put_Completed,
     async_operation_op_get_Completed,
+    async_operation_op_GetResults,
 };
 
 static HRESULT create_async_operation(__FIAsyncOperation_1_DataPackageOperation **out)
@@ -544,20 +513,6 @@ static HRESULT WINAPI async_action_info_get_ErrorCode(IAsyncInfo *iface, HRESULT
     return S_OK;
 }
 
-static HRESULT WINAPI async_action_info_get_Completed(IAsyncInfo *iface,
-        IAsyncActionCompletedHandler **handler)
-{
-    struct async_action *impl = CONTAINING_RECORD(iface, struct async_action, IAsyncInfo_iface);
-    return IAsyncAction_get_Completed(&impl->IAsyncAction_iface, handler);
-}
-
-static HRESULT WINAPI async_action_info_put_Completed(IAsyncInfo *iface,
-        IAsyncActionCompletedHandler *handler)
-{
-    struct async_action *impl = CONTAINING_RECORD(iface, struct async_action, IAsyncInfo_iface);
-    return IAsyncAction_put_Completed(&impl->IAsyncAction_iface, handler);
-}
-
 static HRESULT WINAPI async_action_info_Cancel(IAsyncInfo *iface)
 {
     return S_OK;
@@ -579,8 +534,6 @@ static const struct IAsyncInfoVtbl async_action_async_info_vtbl =
     async_action_info_get_Id,
     async_action_info_get_Status,
     async_action_info_get_ErrorCode,
-    async_action_info_get_Completed,
-    async_action_info_put_Completed,
     async_action_info_Cancel,
     async_action_info_Close,
 };
@@ -658,7 +611,7 @@ static HRESULT WINAPI core_dragdrop_target_GetTrustLevel(ICoreDropOperationTarge
 }
 
 static HRESULT WINAPI core_dragdrop_target_EnterAsync(ICoreDropOperationTarget *iface,
-        __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CCoreDragInfo *info, __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CCoreDragUIOverride *override,
+        __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CICoreDragInfo *info, __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CICoreDragUIOverride *override,
         __FIAsyncOperation_1_DataPackageOperation **return_value)
 {
     TRACE("iface %p, info %p, override %p, return_value %p.\n", iface, info, override, return_value);
@@ -666,7 +619,7 @@ static HRESULT WINAPI core_dragdrop_target_EnterAsync(ICoreDropOperationTarget *
 }
 
 static HRESULT WINAPI core_dragdrop_target_OverAsync(ICoreDropOperationTarget *iface,
-        __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CCoreDragInfo *info, __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CCoreDragUIOverride *override,
+        __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CICoreDragInfo *info, __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CICoreDragUIOverride *override,
         __FIAsyncOperation_1_DataPackageOperation **return_value)
 {
     TRACE("iface %p, info %p, override %p, return_value %p.\n", iface, info, override, return_value);
@@ -674,14 +627,14 @@ static HRESULT WINAPI core_dragdrop_target_OverAsync(ICoreDropOperationTarget *i
 }
 
 static HRESULT WINAPI core_dragdrop_target_LeaveAsync(ICoreDropOperationTarget *iface,
-        __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CCoreDragInfo *info, IAsyncAction **return_value)
+        __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CICoreDragInfo *info, IAsyncAction **return_value)
 {
     TRACE("iface %p, info %p, return_value %p.\n", iface, info, return_value);
     return create_async_action(return_value);
 }
 
 static HRESULT WINAPI core_dragdrop_target_DropAsync(ICoreDropOperationTarget *iface,
-        __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CCoreDragInfo *info, __FIAsyncOperation_1_DataPackageOperation **return_value)
+        __x_ABI_CWindows_CApplicationModel_CDataTransfer_CDragDrop_CCore_CICoreDragInfo *info, __FIAsyncOperation_1_DataPackageOperation **return_value)
 {
     TRACE("iface %p, info %p, return_value %p.\n", iface, info, return_value);
     return create_async_operation(return_value);

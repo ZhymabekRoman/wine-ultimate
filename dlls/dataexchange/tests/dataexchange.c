@@ -29,6 +29,7 @@
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Networking_Connectivity
 #include "windows.networking.connectivity.h"
+#define WIDL_using_Windows_ApplicationModel_DataTransfer
 #define WIDL_using_Windows_ApplicationModel_DataTransfer_DragDrop_Core
 #include "windows.applicationmodel.datatransfer.dragdrop.core.h"
 
@@ -300,7 +301,7 @@ static void test_core_dragdrop_target(void)
     op = DataPackageOperation_Move;
     hr = __FIAsyncOperation_1_DataPackageOperation_GetResults(operation, &op);
     ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-    ok(op == DataPackageOperation_Copy, "Got unexpected operation %#lx.\n", op);
+    ok(op == DataPackageOperation_Copy, "Got unexpected operation %#x.\n", (unsigned int)op);
     __FIAsyncOperation_1_DataPackageOperation_Release(operation);
 
     hr = ICoreDropOperationTarget_DropAsync(target, NULL, &operation);

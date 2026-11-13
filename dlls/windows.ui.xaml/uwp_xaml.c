@@ -216,6 +216,14 @@ static const GUID IID_IPropertyValue_g =
     { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
 static const GUID IID_IPropertyValueStatics_g =
     { 0x629bdbc8, 0xd932, 0x4ff4, { 0x96, 0xb9, 0x8d, 0x96, 0xc5, 0xc1, 0xe8, 0x58 } };
+static const GUID IID_IDependencyPropertyChangedEventArgs_UWP =
+    { 0x81212c2b, 0x24d0, 0x4957, { 0xab, 0xc3, 0x22, 0x44, 0x70, 0xa9, 0x3a, 0x4e } };
+static const GUID IID_IDataContextChangedEventArgs_UWP =
+    { 0x7da68e21, 0x0b8f, 0x4f9f, { 0xa1, 0x43, 0xf8, 0xe7, 0x78, 0x01, 0x36, 0xa2 } };
+static const GUID IID_IRadioButton_UWP =
+    { 0xd20e4c28, 0xf18b, 0x491a, { 0xa0, 0xf1, 0x45, 0x9a, 0x93, 0x4a, 0xa4, 0x69 } };
+static const GUID IID_IRadioButtons_WinUI =
+    { 0xdd372d64, 0xb740, 0x5739, { 0x8d, 0x24, 0xb6, 0xde, 0xcc, 0x91, 0xf4, 0x08 } };
 static const GUID IID_IUriRuntimeClass_g =
     { 0x9e365e57, 0x48b2, 0x4160, { 0x95, 0x6f, 0xc7, 0x38, 0x51, 0x20, 0xbb, 0xfc } };
 
@@ -1070,44 +1078,134 @@ struct uwp_element
     int named_cnt;
     struct uwp_defer_entry defer_entries[16];
     int defer_cnt;
+    struct uwp_element *next_reg;
 };
 
-/* Global registry of live uwp_elements so we can resolve from any interface or outer */
-static struct uwp_element *g_all_uwp_elems[2048];
+/* Global registry of live uwp_elements so we can resolve from any interface or outer.
+ * Linked list (newest first): static-array registry overflowed at 2048 entries with
+ * App.xbf style/setter/visualstate churn, silently dropping the Page root. */
+static struct uwp_element *g_all_uwp_elems_head = NULL;
 static int g_all_uwp_elem_cnt = 0;
+/* Last PAGE-kind element created (set by uwp_element_create). Navigate uses it
+ * as fallback when the RCW page pointer cannot be resolved to an element. */
+static struct uwp_element *g_last_created_page = NULL;
+/* Page element adopted by the last Frame.Navigate; rendered directly because
+ * Frame.content often holds an unresolvable MCG RCW pointer. */
+static struct uwp_element *g_navigated_page_el = NULL;
 
 static void register_uwp_elem( struct uwp_element *el )
 {
-    if (g_all_uwp_elem_cnt < (int)ARRAY_SIZE(g_all_uwp_elems))
-        g_all_uwp_elems[g_all_uwp_elem_cnt++] = el;
+    el->next_reg = g_all_uwp_elems_head;
+    g_all_uwp_elems_head = el;
+    g_all_uwp_elem_cnt++;
 }
+
+static const GUID IID_UWP_ELEM_SELF =
+    { 0x7a1b2c3d, 0x4e5f, 0x4678, { 0x9a, 0xbc, 0xde, 0xf0, 0x12, 0x34, 0x56, 0x79 } };
 
 static struct uwp_element *uwp_elem_from_any( void *ptr )
 {
-    int i;
-    if (!ptr) return NULL;
-    for (i = g_all_uwp_elem_cnt - 1; i >= 0; i--)
+    struct uwp_element *el;
+    void *self_iface = NULL;
+    void *inner = NULL;
+    if (!ptr || (ULONG_PTR)ptr < 0x10000) return NULL;
+    for (el = g_all_uwp_elems_head; el; el = el->next_reg)
     {
-        struct uwp_element *el = g_all_uwp_elems[i];
-        if (!el) continue;
         if ((void *)ptr == (void *)el->outer ||
-            (char *)ptr >= (char *)el && (char *)ptr < (char *)(el + 1))
+            ((char *)ptr >= (char *)el && (char *)ptr < (char *)(el + 1)))
             return el;
     }
-    /* Try QI for IID_IDependencyObject_UWP to unwrap MCG RCW/CCW */
+    /* .NET Native hands us __ComObject RCWs that answer QI from their own
+     * projection table (only IUnknown): unwrap get_Inner (slot 6) /
+     * get_InnerIUnknown (slot 7) to reach our CCW face, then resolve that.
+     * Only when the SELF identity QI failed (i.e. ptr is a foreign RCW). */
+    if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_UWP_ELEM_SELF, &self_iface )) && self_iface)
+    {
+        void *probe_ptr = self_iface;
+        for (el = g_all_uwp_elems_head; el; el = el->next_reg)
+        {
+            if (probe_ptr == (void *)&el->nondelegating_iface ||
+                ((char *)probe_ptr >= (char *)el && (char *)probe_ptr < (char *)(el + 1)))
+            {
+                IUnknown_Release( (IUnknown *)self_iface );
+                return el;
+            }
+        }
+        IUnknown_Release( (IUnknown *)self_iface );
+    }
+    {
+        void **vtbl = *(void ***)ptr;
+        HRESULT (WINAPI *get_inner)(void *, void **) = (void *)vtbl[6];
+        HRESULT (WINAPI *get_inner_iu)(void *, void **) = (void *)vtbl[7];
+        void *cand = NULL;
+        if (get_inner && SUCCEEDED(get_inner( ptr, &cand )) && cand)
+            inner = cand;
+        else if (get_inner_iu && SUCCEEDED(get_inner_iu( ptr, &cand )) && cand)
+            inner = cand;
+        else inner = NULL;
+        if (inner)
+        {
+            /* Validate: trust inner only when it answers our identity IID
+             * (slot 6 on native objects is an arbitrary property getter). */
+            void *id = NULL;
+            if (FAILED(IUnknown_QueryInterface( (IUnknown *)inner, &IID_UWP_ELEM_SELF, &id )) || !id)
+            {
+                IUnknown_Release( (IUnknown *)inner );
+                return NULL;
+            }
+            IUnknown_Release( (IUnknown *)id );
+            for (el = g_all_uwp_elems_head; el; el = el->next_reg)
+            {
+                if ((void *)inner == (void *)el->outer ||
+                    (void *)inner == (void *)&el->nondelegating_iface ||
+                    ((char *)inner >= (char *)el && (char *)inner < (char *)(el + 1)))
+                {
+                    IUnknown_Release( (IUnknown *)inner );
+                    return el;
+                }
+            }
+            TRACE( "uwp_elem_from_any: INNER-MISS ptr=%p inner=%p cnt=%d\n", ptr, inner, g_all_uwp_elem_cnt );
+            IUnknown_Release( (IUnknown *)inner );
+            return NULL;
+        }
+    }
+    /* Fallback: Try QI for IID_IDependencyObject_UWP to unwrap MCG RCW/CCW */
     {
         void *do_iface = NULL;
         if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IDependencyObject_UWP, &do_iface )) && do_iface)
         {
-            for (i = g_all_uwp_elem_cnt - 1; i >= 0; i--)
+            el = NULL;
+            void **vtbl = *(void ***)do_iface;
+            void *probe[8];
+            struct uwp_element *e2;
+            int k;
+            /* RCW may return its own projected face; probe all our faces on it */
+            for (k = 0; k < 8; k++)
             {
-                struct uwp_element *el = g_all_uwp_elems[i];
-                if (el && &el->IDependencyObject_iface == do_iface)
+                void *cand = NULL;
+                static const GUID *iids[8] = { &IID_IUIElement_UWP, &IID_IFrameworkElement_UWP,
+                    &IID_IControl_UWP, &IID_IColumnDefinition_UWP };
+                if (k >= 4) break;
+                if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)do_iface, iids[k], &cand )) && cand)
                 {
-                    IUnknown_Release( (IUnknown *)do_iface );
-                    return el;
+                    for (e2 = g_all_uwp_elems_head; e2; e2 = e2->next_reg)
+                    {
+                        if ((void *)cand == (void *)e2->outer ||
+                            ((char *)cand >= (char *)e2 && (char *)cand < (char *)(e2 + 1)))
+                        { el = e2; break; }
+                    }
+                    IUnknown_Release( (IUnknown *)cand );
+                    if (el) break;
                 }
             }
+            if (el)
+            {
+                IUnknown_Release( (IUnknown *)do_iface );
+                return el;
+            }
+            (void)vtbl;
+            probe[0] = ptr;
+            TRACE( "uwp_elem_from_any: MISS ptr=%p do_iface=%p cnt=%d\n", ptr, do_iface, g_all_uwp_elem_cnt );
             IUnknown_Release( (IUnknown *)do_iface );
         }
     }
@@ -1133,6 +1231,15 @@ static HRESULT WINAPI uwp_sub_QueryInterface( IInspectable *iface, REFIID iid, v
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return E_NOINTERFACE;
+    /* Private identity IID: answer locally so app-side RCW QIs can be
+     * resolved back to our element (delegation to outer loses this). */
+    if (IsEqualGUID( iid, &IID_UWP_ELEM_SELF ))
+    {
+        if (!out) return E_POINTER;
+        *out = &impl->nondelegating_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
     if (impl->outer)
         return IInspectable_QueryInterface( impl->outer, iid, out );
     return uwp_nondelegating_QueryInterface( &impl->nondelegating_iface, iid, out );
@@ -1187,6 +1294,13 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     if (!out) return E_POINTER;
     *out = NULL;
 
+    if (IsEqualGUID( iid, &IID_UWP_ELEM_SELF ))
+    {
+        *out = &impl->nondelegating_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ))
@@ -1224,8 +1338,11 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_IButtonBase_UWP ) ||
              IsEqualGUID( iid, &IID_IHyperlinkButton_UWP ))
         *out = &impl->IButtonBase_iface;
-    else if (IsEqualGUID( iid, &IID_IToggleButton_UWP ))
+    else if (IsEqualGUID( iid, &IID_IToggleButton_UWP ) ||
+             IsEqualGUID( iid, &IID_IRadioButton_UWP ))
         *out = &impl->IToggleButton_iface;
+    else if (IsEqualGUID( iid, &IID_IRadioButtons_WinUI ))
+        *out = &impl->IStyle_iface;
     else if (IsEqualGUID( iid, &IID_IPanel_UWP ) ||
              IsEqualGUID( iid, &IID_IStackPanel_UWP ))
         *out = &impl->IPanel_iface;
@@ -1360,10 +1477,21 @@ struct uwp_dp_changed_args
 
 static HRESULT WINAPI dp_args_QI( void *iface, REFIID iid, void **out )
 {
+    static const GUID IID_IRoutedEventArgs_UWP =
+        { 0x443ecc75, 0x7e5d, 0x48a5, { 0x93, 0x1a, 0x30, 0x0e, 0x46, 0xa4, 0x91, 0x6a } };
     if (!out) return E_POINTER;
-    *out = iface;
-    InterlockedIncrement( &((struct uwp_dp_changed_args *)iface)->ref );
-    return S_OK;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IDependencyPropertyChangedEventArgs_UWP ) ||
+        IsEqualGUID( iid, &IID_IRoutedEventArgs_UWP ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_dp_changed_args *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
 }
 static ULONG WINAPI dp_args_AddRef( void *iface )
 {
@@ -1380,6 +1508,22 @@ static ULONG WINAPI dp_args_Release( void *iface )
         free( a );
     }
     return r;
+}
+static HRESULT WINAPI dp_args_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI dp_args_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    const WCHAR *cls = L"Windows.UI.Xaml.DependencyPropertyChangedEventArgs";
+    return WindowsCreateString( cls, wcslen(cls), name );
+}
+static HRESULT WINAPI dp_args_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
 }
 static HRESULT WINAPI dp_args_get_Property( void *iface, void **out )
 {
@@ -1411,9 +1555,9 @@ static const void *dp_changed_args_vtbl[] =
     dp_args_QI,
     dp_args_AddRef,
     dp_args_Release,
-    uwp_sub_GetIids,
-    uwp_sub_GetRuntimeClassName,
-    uwp_sub_GetTrustLevel,
+    dp_args_GetIids,
+    dp_args_GetRuntimeClassName,
+    dp_args_GetTrustLevel,
     dp_args_get_Property, /* 6: get_Property */
     dp_args_get_OldValue, /* 7: get_OldValue */
     dp_args_get_NewValue, /* 8: get_NewValue */
@@ -1535,6 +1679,12 @@ static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val 
                            pml->callback, sender, debugstr_w(impl->class_name), dp, old_val, val );
                     IPropertyChangedCallback_Invoke( pml->callback, (IDependencyObject *)sender,
                                                      (IDependencyPropertyChangedEventArgs *)args );
+                    {
+                        IInspectable *nv = NULL;
+                        IDependencyPropertyChangedEventArgs_get_NewValue( (IDependencyPropertyChangedEventArgs *)args, &nv );
+                        TRACE( "uwp_do_SetValue callback read NewValue -> %p (val %p)\n", (void *)nv, (void *)val );
+                        if (nv) IInspectable_Release( nv );
+                    }
                     dp_args_Release( args );
                 }
             }
@@ -1837,14 +1987,34 @@ static HRESULT WINAPI dc_args_put_Handled( void *iface, boolean h )
     a->handled = h;
     return S_OK;
 }
+static HRESULT WINAPI dc_args_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IDataContextChangedEventArgs_UWP ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_dc_args *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI dc_args_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    const WCHAR *cls = L"Windows.UI.Xaml.DataContextChangedEventArgs";
+    return WindowsCreateString( cls, wcslen(cls), name );
+}
 static const void *dc_args_vtbl[] =
 {
-    dp_args_QI,
+    dc_args_QI,
     dp_args_AddRef,
     dp_args_Release,
-    uwp_sub_GetIids,
-    uwp_sub_GetRuntimeClassName,
-    uwp_sub_GetTrustLevel,
+    dp_args_GetIids,
+    dc_args_GetRuntimeClassName,
+    dp_args_GetTrustLevel,
     dc_args_get_NewValue,
     dc_args_get_Handled,
     dc_args_put_Handled,
@@ -1885,6 +2055,7 @@ static HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     struct uwp_element *root;
+    struct uwp_element *el;
     const WCHAR *want = WindowsGetStringRawBuffer( name, NULL );
     int i;
 
@@ -1922,10 +2093,9 @@ static HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
             return S_OK;
         }
     }
-    for (i = g_all_uwp_elem_cnt - 1; i >= 0; i--)
+    for (el = g_all_uwp_elems_head; el; el = el->next_reg)
     {
-        struct uwp_element *el = g_all_uwp_elems[i];
-        if (el && !wcscmp( el->name, want ))
+        if (!wcscmp( el->name, want ))
         {
             *out = el->outer ? el->outer : &el->IInspectable_iface;
             IInspectable_AddRef( (IInspectable *)*out );
@@ -2750,6 +2920,8 @@ static enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
     if (wcsstr( cls, L"StackPanel" )) return UWP_KIND_STACK_PANEL;
     if (wcsstr( cls, L"Grid" ) || wcsstr( cls, L"Panel" ) || wcsstr( cls, L"Canvas" )) return UWP_KIND_GRID;
     if (wcsstr( cls, L"Border" )) return UWP_KIND_BORDER;
+    if (wcsstr( cls, L"RadioButtons" )) return UWP_KIND_CONTENT_CONTROL;
+    if (wcsstr( cls, L"RadioButton" )) return UWP_KIND_TOGGLE_BUTTON;
     if (wcsstr( cls, L"ToggleButton" )) return UWP_KIND_TOGGLE_BUTTON;
     if (wcsstr( cls, L"Button" )) return UWP_KIND_BUTTON;
     if (wcsstr( cls, L"TextBlock" ) || wcsstr( cls, L"CalculationResult" )) return UWP_KIND_TEXT_BLOCK;
@@ -2803,6 +2975,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->outer = outer;
     lstrcpynW( impl->class_name, class_name ? class_name : L"Windows.UI.Xaml.FrameworkElement", ARRAY_SIZE(impl->class_name) );
     impl->kind = classify_uwp_class( impl->class_name );
+    if (impl->kind == UWP_KIND_PAGE) g_last_created_page = impl;
     impl->grid_row_span = 1;
     impl->grid_col_span = 1;
     impl->grid_len_type = 2; /* Star */
@@ -2896,7 +3069,24 @@ static void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *
     }
 }
 
-static struct { const void *vtbl; LONG ref; } g_dummy_routed_args = { (const void *)dp_changed_args_vtbl, 1 };
+static struct { const void *vtbl; LONG ref; } g_dp_routed_args = { (const void *)dp_changed_args_vtbl, 1 };
+/* Loaded/Click/Navigation callbacks receive this: McgMarshal ComInterfaceToObject
+ * calls GetRuntimeClassName on it, so it must be an element face naming
+ * RoutedEventArgs. */
+static struct uwp_element *g_routed_args_el = NULL;
+static void *g_routed_args(void)
+{
+    if (!g_routed_args_el)
+    {
+        void *inst = NULL;
+        uwp_element_create( L"Windows.UI.Xaml.RoutedEventArgs", NULL, NULL, &inst );
+        g_routed_args_el = uwp_elem_from_any( inst );
+    }
+    if (g_routed_args_el && g_routed_args_el->outer) return g_routed_args_el->outer;
+    if (g_routed_args_el) return &g_routed_args_el->IInspectable_iface;
+    return &g_dp_routed_args;
+}
+#define g_dummy_routed_args g_routed_args()
 
 static void uwp_apply_template_if_needed( struct uwp_element *el )
 {
@@ -2935,7 +3125,7 @@ static void uwp_fire_loaded_tree( struct uwp_element *el )
                 HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)el->loaded_handlers[i])[3];
                 TRACE( "Firing Loaded handler[%d] on %s (%s)\n",
                        i, debugstr_w(el->class_name), debugstr_w(el->name) );
-                invoke( el->loaded_handlers[i], sender, &g_dummy_routed_args );
+                invoke( el->loaded_handlers[i], sender, g_routed_args() );
             }
         }
     }
@@ -2957,6 +3147,125 @@ static void uwp_fire_loaded_tree( struct uwp_element *el )
     }
 }
 
+static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *want )
+{
+    struct uwp_vec_view *v;
+    unsigned int k;
+    if (!el || !want) return NULL;
+    if (el->name[0] && !wcscmp( el->name, want )) return el;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        struct uwp_element *r;
+        if (ch && ch != el && (r = uwp_find_named( ch, want ))) return r;
+    }
+    if (el->children_coll)
+    {
+        v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            struct uwp_element *r;
+            if (ch && ch != el && (r = uwp_find_named( ch, want ))) return r;
+        }
+    }
+    return NULL;
+}
+
+/* The app's Calculator UserControl (CalculatorApp.Controls.Calculator) comes
+ * from the app XAML provider; its content (display band + 5x4 keypad grid) is
+ * built by the app. Provider activation of the view never completes, so seed a
+ * synthetic Standard-calculator tree (CalculationResult TextBlock + Grid of
+ * numbered/operator buttons) into the CalcHolder border.
+ *
+ * The synthetic keypad is a plain Grid (4 cols x 5 rows, star-sized) whose
+ * children carry grid_row/grid_col/text. uwp_arrange_element lays out Grid
+ * children by grid_row/grid_col; uwp_paint_element draws each Button with its
+ * text label (uwp_format_display_label maps the Segoe MDL2 operator glyphs). */
+static void uwp_seed_synthetic_calculator( struct uwp_element *holder )
+{
+    static const WCHAR *keys[20] =
+    {
+        L"%", L"CE", L"C", L"\x232b",
+        L"1", L"2", L"3", L"\x00f7",
+        L"4", L"5", L"6", L"\x00d7",
+        L"7", L"8", L"9", L"-",
+        L"\x221a", L"0", L"+", L"=",
+    };
+    static const WCHAR *names[20] =
+    {
+        L"PercentButton", L"ClearEntryButton", L"ClearButton", L"BackSpaceButton",
+        L"num1Button", L"num2Button", L"num3Button", L"divButton",
+        L"num4Button", L"num5Button", L"num6Button", L"mulButton",
+        L"num7Button", L"num8Button", L"num9Button", L"minusButton",
+        L"SqrtButton", L"num0Button", L"plusButton", L"EqualButton",
+    };
+    struct uwp_element *result_el, *grid_el;
+    IInspectable *result_raw = NULL, *grid_raw = NULL;
+    int i;
+
+    if (!holder || holder->children_coll) return;
+
+    if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&result_raw )))
+        return;
+    result_el = uwp_elem_from_any( result_raw );
+    IInspectable_Release( result_raw );
+    if (!result_el) return;
+    lstrcpynW( result_el->name, L"NormalOutput", ARRAY_SIZE(result_el->name) );
+    lstrcpynW( result_el->text, L"0", ARRAY_SIZE(result_el->text) );
+    result_el->grid_row = 0;
+    result_el->grid_row_span = 1;
+    result_el->font_size = 46.0;
+
+    if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&grid_raw )))
+        return;
+    grid_el = uwp_elem_from_any( grid_raw );
+    IInspectable_Release( grid_raw );
+    if (!grid_el) return;
+    grid_el->grid_row = 1;
+    grid_el->grid_row_span = 1;
+
+    uwp_vec_create( grid_el, &grid_el->children_coll );
+    for (i = 0; i < 20; i++)
+    {
+        IInspectable *btn_raw = NULL;
+        struct uwp_element *btn;
+        if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&btn_raw )))
+            break;
+        btn = uwp_elem_from_any( btn_raw );
+        IInspectable_Release( btn_raw );
+        if (!btn) break;
+        lstrcpynW( btn->name, names[i], ARRAY_SIZE(btn->name) );
+        lstrcpynW( btn->text, keys[i], ARRAY_SIZE(btn->text) );
+        btn->grid_row = i / 4;
+        btn->grid_col = i % 4;
+        uwp_vec_Append( grid_el->children_coll, &btn->IInspectable_iface );
+    }
+
+    /* Wrap in a UserControl mimicking CalculatorApp.Controls.Calculator:
+     * the app's Control template host fills CalcHolder with it. */
+    {
+        IInspectable *uc_raw = NULL;
+        struct uwp_element *uc;
+        if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&uc_raw )) || !uc_raw)
+            return;
+        uc = uwp_elem_from_any( uc_raw );
+        IInspectable_Release( uc_raw );
+        if (!uc) return;
+        lstrcpynW( uc->name, L"Calculator", ARRAY_SIZE(uc->name) );
+        uwp_vec_create( uc, &uc->children_coll );
+        uwp_vec_Append( uc->children_coll, &result_el->IInspectable_iface );
+        uwp_vec_Append( uc->children_coll, &grid_el->IInspectable_iface );
+        result_el->parent = uc;
+        grid_el->parent = uc;
+        uc->parent = holder;
+        uwp_vec_create( holder, &holder->children_coll );
+        uwp_vec_Append( holder->children_coll, &uc->IInspectable_iface );
+    }
+    TRACE( "uwp_seed_synthetic_calculator: seeded display + keypad(20) into %s\n",
+           debugstr_w(holder->name) );
+}
+
 static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_ptr, void *param, boolean *result )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -2975,6 +3284,29 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
         if (SUCCEEDED(hr) && page)
         {
             struct uwp_element *page_el = uwp_elem_from_any( page );
+            TRACE( "NAVIGATE probe: page=%p g_last_created_page=%p kind=%d\n",
+                   page, g_last_created_page, g_last_created_page ? g_last_created_page->kind : -1 );
+            if (!page_el && g_last_created_page)
+            {
+                /* Provider returns the page as an MCG RCW we cannot unwrap
+                 * (answers QI only for IUnknown). The composable Page element
+                 * built for this activation is g_last_created_page. */
+                page_el = g_last_created_page;
+                TRACE( "uwp_frame_NavigateWithParam: RCW page unresolvable, using last PAGE element %p\n", page_el );
+            }
+            TRACE( "uwp_frame_NavigateWithParam page_el=%p outer=%p\n", page_el, page_el ? page_el->outer : NULL );
+            if (page_el)
+            {
+                /* Store a resolvable face: RCW pointer is unresolvable by uwp_elem_from_any. */
+                impl->content = page_el->outer ? page_el->outer : &page_el->IInspectable_iface;
+                IInspectable_AddRef( (IInspectable *)impl->content );
+                g_navigated_page_el = page_el;
+                page_el->parent = impl;
+                {
+                    struct uwp_element *holder = uwp_find_named( page_el, L"CalcHolder" );
+                    uwp_seed_synthetic_calculator( holder );
+                }
+            }
             impl->content = page;
             if (page_el)
             {
@@ -2983,10 +3315,13 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 if (page_el->outer)
                 {
                     void *page_ovr = NULL;
-                    if (SUCCEEDED(IInspectable_QueryInterface( page_el->outer, &IID_IPageOverrides_UWP, &page_ovr )) && page_ovr)
+                    HRESULT qi_hr = IInspectable_QueryInterface( page_el->outer, &IID_IPageOverrides_UWP, &page_ovr );
+                    TRACE( "uwp_frame_NavigateWithParam QI IPageOverrides -> hr %#lx ptr %p\n", qi_hr, page_ovr );
+                    if (SUCCEEDED(qi_hr) && page_ovr)
                     {
                         HRESULT (WINAPI *on_nav)(void *, void *) = (void *)(*(void ***)page_ovr)[8];
-                        if (on_nav) on_nav( page_ovr, &g_dummy_routed_args );
+                        HRESULT nav_hr = on_nav ? on_nav( page_ovr, g_routed_args() ) : S_OK;
+                        TRACE( "uwp_frame_NavigateWithParam OnNavigatedTo -> hr %#lx\n", nav_hr );
                         IUnknown_Release( (IUnknown *)page_ovr );
                     }
                 }
@@ -3018,15 +3353,22 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x811e: return L"Windows.UI.Xaml.Controls.Border";
     case 0x8146: return L"Windows.UI.Xaml.Controls.Image";
     case 0x816b: return L"Windows.UI.Xaml.Controls.Primitives.Popup";
+    case 0x8173: return L"Windows.UI.Xaml.ResourceDictionary";
+    case 0x8176: return L"Windows.UI.Xaml.Controls.RichTextBlock";
+    case 0x817c: return L"Windows.UI.Xaml.Documents.Run";
     case 0x8189: return L"Windows.UI.Xaml.Media.Animation.Storyboard";
     case 0x818c: return L"Windows.UI.Xaml.Controls.TextBlock";
     case 0x819c: return L"Windows.UI.Xaml.Controls.FontIcon";
     case 0x81b8: return L"Windows.UI.Xaml.Controls.FontIcon";
     case 0x81ba: return L"Windows.UI.Xaml.Controls.Grid";
+    case 0x81bf: return L"Windows.UI.Xaml.Documents.Hyperlink";
     case 0x81e1: return L"Windows.UI.Xaml.Controls.StackPanel";
     case 0x81eb: return L"Windows.UI.Xaml.Controls.UserControl";
     case 0x820d: return L"Windows.UI.Xaml.Controls.Page";
     case 0x821c: return L"Windows.UI.Xaml.Controls.Button";
+    case 0x8222: return L"Windows.UI.Xaml.Controls.HyperlinkButton";
+    case 0x8228: return L"Windows.UI.Xaml.Controls.ScrollViewer";
+    case 0x8232: return L"Windows.UI.Xaml.Controls.RadioButton";
     case 0x8234: return L"Windows.UI.Xaml.Controls.Primitives.ToggleButton";
     case 0x82ea: return L"Windows.UI.Xaml.DeferredElement";
     case 0x82f5: return L"Windows.UI.Xaml.AdaptiveTrigger";
@@ -3397,6 +3739,9 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             if (p + 2 > end_p) break;
             tid = *(const WORD *)(ctx->nodes + p);
             p += 2;
+            TRACE( "XBF push op=%#x tid=%#x cls=%s at %lu/%lu (sub %d)\n", op, tid,
+                   (tid < ctx->type_cnt) ? debugstr_w(ctx->types[tid].full_name) : "(btype)",
+                   (unsigned long)(p - 3), (unsigned long)end_p, sub_idx );
 
             if (op == 0x17 && ctx->root_el)
             {
@@ -3512,11 +3857,19 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             if (prop_sp < (int)ARRAY_SIZE(prop_stack))
                 prop_stack[prop_sp++] = pid;
         }
+        else if (op == 0x01) /* EndOfAttributes / Scope marker */
+        {
+        }
         else if (op == 0x02) /* PopProperty */
         {
             if (prop_sp > 0) prop_sp--;
         }
-        else if (op >= 0x1a && op <= 0x1f) /* SetValue */
+        else if (op == 0x1d) /* SetValueWithType: <pid:u16> <tid:u16> */
+        {
+            if (p + 4 > end_p) break;
+            p += 4;
+        }
+        else if ((op >= 0x1a && op <= 0x1f) || op == 0x24) /* SetValue / SetStaticResource */
         {
             WORD pid;
             int vt = 0;
@@ -3528,6 +3881,20 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 )) break;
             if (obj_sp > 0 && obj_stack[obj_sp - 1])
                 xbf_apply_property( ctx, obj_stack[obj_sp - 1], pid, vt, num, sbuf, vec4 );
+        }
+        else if (op == 0x22) /* AddStaticResourceValue <xbf_value> */
+        {
+            int vt = 0;
+            double num = 0;
+            WCHAR sbuf[128] = {0};
+            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
+        }
+        else if (op == 0x0a) /* AddToDictionaryInline <xbf_value> */
+        {
+            int vt = 0;
+            double num = 0;
+            WCHAR sbuf[128] = {0};
+            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
         }
         else if (op == 0x0f) /* DeferSubstream */
         {
@@ -3562,20 +3929,72 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                     }
                 }
             }
-            else if (def_kind == 0x0a || def_kind == 0x05)
+            else if (def_kind == 0x05) /* VisualStateGroupCollection */
             {
-                /* Skip compressed index table up to matching 0x02 (PopProperty) */
-                if (def_kind == 0x0a)
-                    xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
-                else if (def_kind == 0x05)
-                    xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
-
+                DWORD n_states = 0, s_idx;
+                int shift = 0;
+                xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
                 while (p < end_p)
                 {
-                    /* Wait for 0x02 followed by next valid opcode (0x13, 0x14, 0x21, etc.) */
+                    BYTE b = ctx->nodes[p++];
+                    n_states |= (DWORD)(b & 0x7f) << shift;
+                    if (!(b & 0x80)) break;
+                    shift += 7;
+                }
+                for (s_idx = 0; s_idx < n_states && p < end_p; s_idx++)
+                {
+                    while (p < end_p && (ctx->nodes[p++] & 0x80)) {}
+                }
+                /* Find VisualStateGroups footer: 00 02 00 00 01 <cnt_uleb> <cnt*u16> 02 */
+                while (p + 7 < end_p)
+                {
+                    if (ctx->nodes[p] == 0x00 && ctx->nodes[p + 1] == 0x02 &&
+                        ctx->nodes[p + 2] == 0x00 && ctx->nodes[p + 3] == 0x00 &&
+                        ctx->nodes[p + 4] == 0x01)
+                    {
+                        DWORD q = p + 5, cnt = 0;
+                        int sh = 0;
+                        while (q < end_p)
+                        {
+                            BYTE b = ctx->nodes[q++];
+                            cnt |= (DWORD)(b & 0x7f) << sh;
+                            if (!(b & 0x80)) break;
+                            sh += 7;
+                        }
+                        if (cnt >= n_states && q + cnt * 2 < end_p && ctx->nodes[q + cnt * 2] == 0x02)
+                        {
+                            p = q + cnt * 2 + 1;
+                            if (prop_sp > 0) prop_sp--;
+                            break;
+                        }
+                    }
+                    p++;
+                }
+            }
+            else if (def_kind == 0x08) /* Style Setters table: ends before 0x21 0x0a / 0x02 / end_p */
+            {
+                xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
+                while (p < end_p)
+                {
+                    if (p + 1 < end_p && ctx->nodes[p] == 0x21 && ctx->nodes[p + 1] == 0x0a)
+                        break;
+                    if (ctx->nodes[p] == 0x02 && (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14))
+                    {
+                        p++;
+                        if (prop_sp > 0) prop_sp--;
+                        break;
+                    }
+                    p++;
+                }
+            }
+            else if (def_kind == 0x0a) /* ResourceDictionary table */
+            {
+                xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
+                while (p < end_p)
+                {
                     if (ctx->nodes[p] == 0x02 &&
                         (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14 ||
-                         ctx->nodes[p + 1] == 0x21 || ctx->nodes[p + 1] == 0x12))
+                         ctx->nodes[p + 1] == 0x15 || ctx->nodes[p + 1] == 0x21 || ctx->nodes[p + 1] == 0x12))
                     {
                         p++;
                         if (prop_sp > 0) prop_sp--;
@@ -3586,6 +4005,7 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             }
             else
             {
+                TRACE( "XBF unknown DeferSubstream kind=%#x at %lu/%lu\n", def_kind, (unsigned long)p, (unsigned long)end_p );
                 break;
             }
         }
@@ -3695,13 +4115,10 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                 if (obj_sp > 1) obj_sp--;
             }
         }
-        else if (op == 0x22)
-        {
-            break;
-        }
         else
         {
             /* Unrecognized opcode: stop substream cleanly */
+            TRACE( "XBF unrecognized op=%#x at %lu/%lu (sub %d)\n", op, (unsigned long)(p - 1), (unsigned long)end_p, sub_idx );
             break;
         }
     }
@@ -3911,7 +4328,8 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
     /* 1. Connect(1, component) first so root field is wired */
     {
         HRESULT (WINAPI *conn_fn)(void *, int, void *) = (void *)(*(void ***)conn)[6];
-        conn_fn( conn, 1, component );
+        HRESULT chr = conn_fn( conn, 1, component );
+        TRACE( "uwp_try_load_xbf_component: Connect(1,comp) -> %#lx\n", chr );
     }
 
     /* 2. Build visual tree from XBF v2 stream and Connect child elements */
@@ -4101,6 +4519,16 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
         if (ch && ch != el)
             uwp_arrange_element( ch, rc );
     }
+    if (el->kind != UWP_KIND_GRID && el->kind != UWP_KIND_STACK_PANEL && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el) uwp_arrange_element( ch, rc );
+        }
+    }
 }
 
 /* Format Segoe MDL2 Assets / private use glyphs to readable symbols if font lacks them */
@@ -4135,6 +4563,9 @@ static const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHA
 static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 {
     if (!el || !el->has_bounds || el->visibility != 0) return;
+    TRACE( "uwp_paint %s (%s) kind %d bounds %ld,%ld-%ld,%ld\n",
+           debugstr_w(el->class_name), debugstr_w(el->name), el->kind,
+           el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom );
 
     if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
@@ -4247,11 +4678,39 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     DeleteObject( bg_brush );
 
     root_el = uwp_elem_from_any( content );
+    if (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
+        !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
+    {
+        /* Frame.content holds an MCG RCW pointer; render the adopted page. */
+        uwp_arrange_element( g_navigated_page_el, rc );
+        uwp_paint_element( hdc, g_navigated_page_el );
+        return;
+    }
     if (root_el)
     {
+        struct uwp_vec_view *chv = root_el->children_coll ?
+            CONTAINING_RECORD( root_el->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+        TRACE( "xaml_layout_render root %s kind %d content %p children %u\n",
+               debugstr_w(root_el->class_name), root_el->kind, (void *)root_el->content,
+               chv ? chv->count : 0xFFFFFFFFu );
         uwp_arrange_element( root_el, rc );
+        {
+            struct uwp_vec_view *av = root_el->children_coll ?
+                CONTAINING_RECORD( root_el->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+            TRACE( "xaml_layout_render after arrange root bounds %ld,%ld-%ld,%ld has_bounds %d\n",
+                   root_el->bounds.left, root_el->bounds.top, root_el->bounds.right, root_el->bounds.bottom,
+                   root_el->has_bounds );
+            if (av && av->count)
+            {
+                struct uwp_element *c0 = uwp_elem_from_any( av->items[0] );
+                if (c0) TRACE( "xaml_layout_render child0 %s bounds %ld,%ld-%ld,%ld vis %d\n",
+                               debugstr_w(c0->class_name), c0->bounds.left, c0->bounds.top,
+                               c0->bounds.right, c0->bounds.bottom, c0->visibility );
+            }
+        }
         uwp_paint_element( hdc, root_el );
     }
+    else TRACE( "xaml_layout_render: root_el NULL (content %p)\n", (void *)content );
 }
 
 static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, int y )
@@ -4322,7 +4781,7 @@ void uwp_invoke_button( struct uwp_element *btn )
         {
             IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
             HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)btn->click_handlers[i])[3];
-            invoke( btn->click_handlers[i], sender, &g_dummy_routed_args );
+            invoke( btn->click_handlers[i], sender, g_routed_args() );
         }
     }
 

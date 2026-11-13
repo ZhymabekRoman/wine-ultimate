@@ -174,7 +174,7 @@ static void test_XmlDocument(void)
 
         hr = IXmlNode_get_ParentNode( element_node, &parent );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
-        ok( parent, "got parent %p.\n", parent );
+        ok( !!parent, "got parent %p.\n", parent );
         if (parent)
         {
             hr = IXmlNode_get_NodeType( parent, &parent_type );

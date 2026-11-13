@@ -1626,6 +1626,20 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         return S_OK;
     }
 
+    /* Windows.UI.Xaml.Window v2 (titlebar/Compositor contract, {d384759f-...}):
+     * TitleBar..ctor QIs Window.Current for it and casts the result to
+     * Windows.UI.Xaml.Window, so the returned face must answer that QI too. */
+    {
+        static const GUID IID_IWindow_v2 =
+            { 0xd384759f, 0x34f6, 0x4482, { 0x84, 0x35, 0xf5, 0x52, 0xf9, 0xb2, 0x4c, 0xc8 } };
+        if (IsEqualGUID( iid, &IID_IWindow_v2 ))
+        {
+            *out = &impl->ms_IWindow_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+    }
+
     if (IsEqualGUID( iid, &IID_IWindow_WinUI ))
     {
         *out = &impl->ms_IWindow_iface;

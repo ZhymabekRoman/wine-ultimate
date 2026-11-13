@@ -2755,7 +2755,7 @@ done:
 START_TEST(core)
 {
     HRESULT hr = RoInitialize(RO_INIT_MULTITHREADED);
-    ok(SUCCEEDED(hr), "RoInitialize hr=%08x\n", hr);
+    ok(SUCCEEDED(hr), "RoInitialize hr=%08lx\n", hr);
 
     test_resourcecontext_activation();
     set_pri_env();
