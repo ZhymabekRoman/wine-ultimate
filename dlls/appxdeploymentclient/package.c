@@ -564,8 +564,8 @@ static HRESULT WINAPI package_manager_AddPackageAsync( IPackageManager *iface, I
 static HRESULT WINAPI package_manager_UpdatePackageAsync( IPackageManager *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
     DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    TRACE( "iface %p, uri %p, dependencies %p, options %d, operation %p.\n", iface, uri, dependencies, options, operation );
+    return package_manager_RegisterPackageAsync( iface, uri, dependencies, options, operation );
 }
 
 static HRESULT WINAPI package_manager_RemovePackageAsync( IPackageManager *iface, HSTRING name,
@@ -1089,22 +1089,54 @@ DEFINE_IINSPECTABLE( package_manager2, IPackageManager2, struct package_manager,
 static HRESULT WINAPI package_manager2_RemovePackageWithOptionsAsync( IPackageManager2 *iface, HSTRING name, RemovalOptions options,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    FIXME( "iface %p, name %s, options %d, operation %p stub!\n", iface, debugstr_hstring(name), options, operation );
-    return E_NOTIMPL;
+    struct package_manager *impl = CONTAINING_RECORD( iface, struct package_manager, IPackageManager2_iface );
+    TRACE( "iface %p, name %s, options %d, operation %p.\n", iface, debugstr_hstring(name), options, operation );
+    return package_manager_RemovePackageAsync( &impl->IPackageManager_iface, name, operation );
 }
 
 static HRESULT WINAPI package_manager2_StagePackageWithOptionsAsync( IPackageManager2 *iface, IUriRuntimeClass *uri, IIterable_Uri *dependencies,
     DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    FIXME( "iface %p, uri %p, dependencies %p, options %d, operation %p stub!\n", iface, uri, dependencies, options, operation );
-    return E_NOTIMPL;
+    struct package_manager *impl = CONTAINING_RECORD( iface, struct package_manager, IPackageManager2_iface );
+    TRACE( "iface %p, uri %p, dependencies %p, options %d, operation %p.\n", iface, uri, dependencies, options, operation );
+    return package_manager_RegisterPackageAsync( &impl->IPackageManager_iface, uri, dependencies, options, operation );
 }
 
 static HRESULT WINAPI package_manager2_RegisterPackageByFullNameAsync( IPackageManager2 *iface, HSTRING name, IIterable_HSTRING *dependencies,
     DeploymentOptions options, IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    FIXME( "iface %p, name %s, dependencies %p, options %d, operation %p stub!\n", iface, debugstr_hstring(name), dependencies, options, operation );
-    return E_NOTIMPL;
+    const WCHAR *full_name;
+    HKEY key;
+    WCHAR path[MAX_PATH];
+    DWORD size, type;
+
+    TRACE( "iface %p, name %s, dependencies %p, options %d, operation %p.\n", iface, debugstr_hstring(name), dependencies, options, operation );
+
+    if (!name || !operation) return E_INVALIDARG;
+    *operation = NULL;
+
+    full_name = WindowsGetStringRawBuffer( name, NULL );
+    if (!full_name || !*full_name) return E_INVALIDARG;
+
+    if (RegOpenKeyExW( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages",
+                       0, KEY_READ, &key ) == ERROR_SUCCESS ||
+        RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages",
+                       0, KEY_READ, &key ) == ERROR_SUCCESS)
+    {
+        HKEY pkg_key;
+        if (RegOpenKeyExW( key, full_name, 0, KEY_READ, &pkg_key ) == ERROR_SUCCESS)
+        {
+            size = sizeof(path);
+            if (RegQueryValueExW( pkg_key, L"PackagePath", NULL, &type, (BYTE *)path, &size ) == ERROR_SUCCESS && type == REG_SZ)
+            {
+                register_staged_package( path );
+            }
+            RegCloseKey( pkg_key );
+        }
+        RegCloseKey( key );
+    }
+
+    return register_async_op_create( operation );
 }
 
 /* The WithPackageTypes family answers the plain one with the Framework flag
@@ -1185,8 +1217,9 @@ static HRESULT WINAPI __attribute__((unused)) package_manager2_FindUsersForPacka
 static HRESULT WINAPI package_manager2_StageUserDataAsync( IPackageManager2 *iface, HSTRING name,
     IAsyncOperationWithProgress_DeploymentResult_DeploymentProgress **operation )
 {
-    FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring(name), operation );
-    return E_NOTIMPL;
+    TRACE( "iface %p, name %s, operation %p.\n", iface, debugstr_hstring(name), operation );
+    if (!name || !operation) return E_INVALIDARG;
+    return register_async_op_create( operation );
 }
 
 static const struct IPackageManager2Vtbl package_manager2_vtbl =
