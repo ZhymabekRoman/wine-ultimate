@@ -2034,8 +2034,27 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
     if (!impl)
         impl = thread_core_window;
 
+    {
+        static int cwp_depth;
+        if (cwp_depth < 10) ERR( "CWP d=%d hwnd %p msg %x\n", cwp_depth, hwnd, msg );
+        cwp_depth++;
+    }
     switch (msg)
     {
+    case WM_WINDOWPOSCHANGING:
+    {
+        /* The WinUI3 Window defaults Width/Height to NaN; when the app activates before the
+         * XAML-set size is applied, the window lands at 0x0, never maps, and WM_PAINT (hence
+         * layout, Loaded and the whole WebView2 chain) never fires. Clamp to a sane default. */
+        WINDOWPOS *pos = (WINDOWPOS *)lparam;
+        if (!pos->cx || !pos->cy)
+        {
+            if (!pos->cx) pos->cx = 960;
+            if (!pos->cy) pos->cy = 768;
+        }
+        return 0;
+    }
+
     case WM_ERASEBKGND:
         return 1;
 

@@ -2156,6 +2156,8 @@ static void sync_window_position( struct x11drv_win_data *data, UINT swp_flags, 
     update_net_wm_states( data );
 
     new_rect = data->rects.visible;
+    if (!new_rect.right) new_rect.right = new_rect.left + 960;
+    if (!new_rect.bottom) new_rect.bottom = new_rect.top + 768;
 
     /* if the window has been moved offscreen by the window manager, we didn't tell the Win32 side about it */
     window_rect = window_rect_from_visible( old_rects, data->desired_state.rect );
@@ -2438,9 +2440,11 @@ static void create_whole_window( struct x11drv_win_data *data )
     mask = get_window_attributes( data, &attr ) | CWOverrideRedirect;
     attr.override_redirect = !data->managed;
 
-    if (!(cx = data->rects.visible.right - data->rects.visible.left)) cx = 1;
+    /* WhatsApp WindowEx has NaN Width/Height -> 0x0 rect -> 1x1 X11 host that never
+       paints; give zero-sized toplevels a real default geometry. */
+    if (!(cx = data->rects.visible.right - data->rects.visible.left)) cx = 960;
     else if (cx > 65535) cx = 65535;
-    if (!(cy = data->rects.visible.bottom - data->rects.visible.top)) cy = 1;
+    if (!(cy = data->rects.visible.bottom - data->rects.visible.top)) cy = 768;
     else if (cy > 65535) cy = 65535;
 
     pos = virtual_screen_to_root( data->rects.visible.left, data->rects.visible.top );

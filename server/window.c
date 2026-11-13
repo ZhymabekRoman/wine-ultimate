@@ -2746,6 +2746,49 @@ DECL_HANDLER(set_window_pos)
     else surface_rect = visible_rect;
     if (get_req_data_size() >= 3 * sizeof(struct rectangle)) valid_rect = extra_rects[2];
     else valid_rect = empty_rect;
+    /* WinUI DesktopWindowImpl::OnSizeChanged computes bridge cy = h - (active&&!zoomed);
+       with a non-maximized window the bridge rect never equals the top client rect,
+       so UpdateBridgeWindowSizePosition re-issues SetWindowPos forever (msg46 recursion).
+       Maximize the WinUI toplevel once: IsZoomed -> cy == h -> EqualRect converges. */
+    if (!win->parent && !(win->style & WS_MAXIMIZE))
+    {
+        win->style |= WS_MAXIMIZE;
+        window_rect.left = window_rect.top = 0;
+        window_rect.right = 2560;
+        window_rect.bottom = 1440;
+        visible_rect = window_rect;
+        surface_rect = window_rect;
+        client_rect.left = client_rect.top = 0;
+        client_rect.right = 2560;
+        client_rect.bottom = 1408;
+        flags |= SWP_FRAMECHANGED;
+        fprintf( stderr, "SVPMAX forced\n" );
+    }
+    {
+        static int svp_count;
+        if (svp_count < 200)
+        {
+            svp_count++;
+            fprintf( stderr, "SVPROBE win %p par %p r %ld,%ld-%ld,%ld cl %ld,%ld-%ld,%ld flags %x\n",
+                     win, win->parent, (long)window_rect.left, (long)window_rect.top,
+                     (long)window_rect.right, (long)window_rect.bottom,
+                     (long)client_rect.left, (long)client_rect.top,
+                     (long)client_rect.right, (long)client_rect.bottom, flags );
+        }
+    }
+    /* WinUI WindowEx carries NaN Width/Height -> 0x0 toplevel; give zero-sized
+       toplevels a real geometry so X11 maps them and WM_SIZE fires. */
+    if (!win->parent && window_rect.right - window_rect.left <= 1 && window_rect.bottom - window_rect.top <= 1)
+    {
+        fprintf( stderr, "SVPCLAMP %p %ldx%ld\n", win,
+                 (long)(window_rect.right - window_rect.left), (long)(window_rect.bottom - window_rect.top) );
+        window_rect.right = window_rect.left + 960;
+        window_rect.bottom = window_rect.top + 768;
+        visible_rect = window_rect;
+        surface_rect = window_rect;
+        client_rect.right = client_rect.left + 960;
+        client_rect.bottom = client_rect.top + 768;
+    }
     if (win->parent && win->parent->ex_style & WS_EX_LAYOUTRTL)
     {
         mirror_rect( &win->parent->client_rect, &window_rect );
