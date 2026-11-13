@@ -3352,6 +3352,94 @@ static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *
  * children carry grid_row/grid_col/text. uwp_arrange_element lays out Grid
  * children by grid_row/grid_col; uwp_paint_element draws each Button with its
  * text label (uwp_format_display_label maps the Segoe MDL2 operator glyphs). */
+/* Activate the app's own CalculatorApp.Controls.Calculator through the app's
+ * IXamlMetadataProvider (same provider chain as Frame.Navigate page adoption:
+ * GetXamlTypeByFullName → IXamlType::ActivateInstance slot 18), then drive
+ * LoadComponent with the ms-appx URI so the app's Connect()/XBF machinery
+ * builds the real control. Returns the element face hosted into holder. */
+static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *holder )
+{
+    static const WCHAR *names[] = { L"CalculatorApp.Controls.Calculator", L"CalculatorApp.Calculator" };
+    void *provider = NULL, *xaml_type = NULL, *instance = NULL;
+    struct uwp_element *el = NULL;
+    void *app = uwp_get_app_outer();
+    unsigned int n;
+
+    if (!holder) return NULL;
+    if (!app || FAILED(IInspectable_QueryInterface( (IInspectable *)app, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
+        return NULL;
+
+    for (n = 0; n < ARRAY_SIZE(names) && !el; n++)
+    {
+        HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = NULL;
+        void **vtbl = *(void ***)provider;
+        HSTRING h = NULL;
+        get_by_name = (void *)vtbl[7];   /* GetXamlTypeByFullName */
+        if (FAILED(WindowsCreateString( names[n], wcslen(names[n]), &h )) || !h) continue;
+        if (SUCCEEDED(get_by_name( provider, h, &xaml_type )) && xaml_type)
+        {
+            void **tv = *(void ***)xaml_type;
+            HRESULT (WINAPI *activate)(void *, void **) = (void *)tv[18];   /* IXamlType UWP slot */
+            TRACE( "uwp_activate_real_calculator: provider has %s\n", debugstr_w(names[n]) );
+            if (activate)
+            {
+                HRESULT ihr = S_OK;
+                __TRY
+                {
+                    ihr = activate( xaml_type, &instance );
+                }
+                __EXCEPT_ALL
+                {
+                    ihr = E_FAIL;
+                    TRACE( "uwp_activate_real_calculator: ActivateInstance(%s) faulted (composable ctor wall)\n",
+                           debugstr_w(names[n]) );
+                }
+                __ENDTRY;
+                el = (instance && SUCCEEDED(ihr)) ? uwp_elem_from_any( instance ) : NULL;
+                TRACE( "uwp_activate_real_calculator: ActivateInstance(%s) -> hr %#lx inst %p el %p\n",
+                       debugstr_w(names[n]), ihr, (void *)instance, el );
+            }
+            IInspectable_Release( (IInspectable *)xaml_type );
+            xaml_type = NULL;
+        }
+        WindowsDeleteString( h );
+    }
+    IInspectable_Release( (IInspectable *)provider );
+    if (!el) return NULL;
+
+    /* Host into holder (CalcHolder border) */
+    uwp_vec_create( holder, &holder->children_coll );
+    uwp_vec_Append( holder->children_coll, el->outer ? (void *)el->outer : (void *)&el->IInspectable_iface );
+    el->parent = holder;
+
+    /* Drive the app's InitializeComponent path: the composable chain on a
+     * provider-activated UserControl is completed by its ctor; a nested
+     * LoadComponent (Connect chain) runs inside the app. If the control has
+     * no children yet (template/XBF deferred), apply its template. */
+    if (!el->children_coll && !el->content)
+    {
+        struct uwp_element *probe = el;
+        uwp_apply_template_if_needed( probe );
+        if (probe->outer)
+        {
+            void *conn = NULL;
+            __TRY
+            {
+                if (SUCCEEDED(IInspectable_QueryInterface( probe->outer, &IID_IComponentConnector_UWP_g, &conn )) && conn)
+                {
+                    HRESULT (WINAPI *conn_fn)(void *, int, void *) = (void *)(*(void ***)conn)[6];
+                    conn_fn( conn, 1, probe->outer );
+                    IUnknown_Release( (IUnknown *)conn );
+                }
+            }
+            __EXCEPT_ALL { TRACE( "uwp_activate_real_calculator: Connect(1) faulted\n" ); }
+            __ENDTRY;
+        }
+    }
+    TRACE( "uwp_activate_real_calculator: hosting %s in %s\n", debugstr_w(el->class_name), debugstr_w(holder->name) );
+    return el;
+}
+
 static void uwp_seed_synthetic_calculator( struct uwp_element *holder )
 {
     static const WCHAR *keys[20] =
@@ -3475,7 +3563,8 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 page_el->parent = impl;
                 {
                     struct uwp_element *holder = uwp_find_named( page_el, L"CalcHolder" );
-                    uwp_seed_synthetic_calculator( holder );
+                    if (!uwp_activate_real_calculator( holder ))
+                        uwp_seed_synthetic_calculator( holder );
                 }
             }
             impl->content = page;
