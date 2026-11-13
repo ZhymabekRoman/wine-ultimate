@@ -20,6 +20,7 @@
 #include "private.h"
 
 #include "unixlib.h"
+#include "pri.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
 
@@ -1309,6 +1310,138 @@ static const void *push_trigger_factory_vtbl[] =
     push_trigger_factory_ActivateInstance,
 };
 
+/* Direct PRI (resources.pri) support for ResourceLoader, sharing the mrm_pri2
+ * reader from dlls/windows.applicationmodel.resources.core/pri.c. One
+ * process-wide index, loaded lazily on the first GetString/GetStringForUri
+ * call from the app's resources.pri. */
+static pri_index *cached_pri_index;
+static INIT_ONCE pri_init_once = INIT_ONCE_STATIC_INIT;
+
+/* Install directory of the running package (Package.Current.InstalledLocation):
+ * WINE_PACKAGE_PATH env first, then the AppModel registration
+ * (Exes\<exe> -> PackageFullName -> Packages\<name>\PackagePath /
+ * PackageRootPath), same resolution order as windows.applicationmodel.
+ * Leaves buf empty when the process carries no package identity. */
+static void package_installed_location( WCHAR *buf, DWORD cch )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    static const WCHAR appmodel_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
+    WCHAR subkey[576], name[MAX_PATH], exe[MAX_PATH];
+    SIZE_T i;
+
+    buf[0] = 0;
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", buf, cch ) && buf[0]) return;
+
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", name, ARRAY_SIZE( name ) ))
+    {
+        WCHAR *slash, exename[MAX_PATH];
+
+        name[0] = 0;
+        if (!GetModuleFileNameW( NULL, exe, ARRAY_SIZE( exe ) )) return;
+        if (!(slash = wcsrchr( exe, '\\' ))) return;
+        lstrcpyW( exename, slash + 1 );
+        lstrcpyW( subkey, appmodel_key );
+        lstrcatW( subkey, L"\\Exes\\" );
+        lstrcatW( subkey, exename );
+        for (i = 0; i < ARRAY_SIZE( roots ); i++)
+        {
+            HKEY key;
+            DWORD type, size = sizeof(name);
+            if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key )) continue;
+            if (!RegQueryValueExW( key, L"PackageFullName", 0, &type, (BYTE *)name, &size )
+                    && type == REG_SZ && size)
+            {
+                RegCloseKey( key );
+                break;
+            }
+            RegCloseKey( key );
+        }
+    }
+    if (!name[0]) return;
+
+    lstrcpyW( subkey, appmodel_key );
+    lstrcatW( subkey, L"\\Packages\\" );
+    lstrcatW( subkey, name );
+    for (i = 0; i < ARRAY_SIZE( roots ); i++)
+    {
+        static const WCHAR *const values[] = { L"PackagePath", L"PackageRootPath" };
+        HKEY key;
+        SIZE_T j;
+
+        if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &key )) continue;
+        for (j = 0; j < ARRAY_SIZE( values ); j++)
+        {
+            DWORD type, size = cch * sizeof(*buf);
+            if (!RegQueryValueExW( key, values[j], 0, &type, (BYTE *)buf, &size ) && type == REG_SZ && size)
+            {
+                RegCloseKey( key );
+                return;
+            }
+        }
+        RegCloseKey( key );
+    }
+    buf[0] = 0;
+}
+
+static BOOL CALLBACK init_cached_pri( INIT_ONCE *once, void *param, void **context )
+{
+    static const WCHAR pri_name[] = L"\\resources.pri";
+    WCHAR dir[2048], path[4096];
+    DWORD len;
+
+    /* 1) <exe dir>\resources.pri, 2) <exe dir>\..\resources.pri */
+    len = GetModuleFileNameW( NULL, dir, ARRAY_SIZE( dir ) );
+    if (len && len < ARRAY_SIZE( dir ) && wcsrchr( dir, '\\' ))
+    {
+        lstrcpyW( path, dir );
+        lstrcatW( path, pri_name );
+        if ((cached_pri_index = pri_load( path ))) return TRUE;
+
+        lstrcatW( dir, L"\\.." );
+        lstrcpyW( path, dir );
+        lstrcatW( path, pri_name );
+        if ((cached_pri_index = pri_load( path ))) return TRUE;
+    }
+
+    /* 3) <Package.Current.InstalledLocation>\resources.pri */
+    package_installed_location( dir, ARRAY_SIZE( dir ) );
+    if (dir[0])
+    {
+        lstrcpyW( path, dir );
+        lstrcatW( path, pri_name );
+        if ((cached_pri_index = pri_load( path ))) return TRUE;
+    }
+
+    TRACE( "no resources.pri found, falling back to the built-in overrides\n" );
+    return TRUE;
+}
+
+/* Resolve a resource key against the cached index.  A bare key is tried in
+ * the main map, then under the default "Resources" scope and the "Files"
+ * scope (ms-resource file URIs); the scope prefix is skipped when the key
+ * already carries one.  On success *value holds the string. */
+static HRESULT pri_lookup_key( const WCHAR *key, HSTRING *value )
+{
+    static const WCHAR *const scopes[] = { L"", L"Resources\\", L"Files\\" };
+    WCHAR full[1024], namebuf[1024];
+    WCHAR *val = NULL;
+    SIZE_T i;
+
+    if (!cached_pri_index || !key[0]) return S_FALSE;
+    for (i = 0; i < ARRAY_SIZE( scopes ); i++)
+    {
+        lstrcpyW( full, scopes[i] );
+        lstrcatW( full, key );
+        if (pri_lookup( cached_pri_index, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ), &val, NULL, NULL ))
+        {
+            HRESULT hr = WindowsCreateString( val, (UINT32)lstrlenW( val ), value );
+            pri_free_result( val, NULL );
+            return hr;
+        }
+    }
+    return S_FALSE;
+}
+
 /* Windows.ApplicationModel.Resources.ResourceLoader */
 static const GUID IID_IResourceLoader = {0x08524908, 0x16ef, 0x45ad, {0xa6, 0x02, 0x29, 0x36, 0x37, 0xd7, 0xe6, 0x1a}};
 static const GUID IID_IResourceLoader2 = {0x10eb6ec6, 0x8138, 0x48c1, {0xbc, 0x65, 0xe1, 0xf1, 0x42, 0x07, 0x36, 0x7c}};
@@ -1373,23 +1506,72 @@ static HRESULT WINAPI resource_loader_GetRuntimeClassName( void *iface, HSTRING 
 static HRESULT WINAPI resource_loader_GetString( void *iface, HSTRING resource, HSTRING *value )
 {
     const WCHAR *str = WindowsGetStringRawBuffer( resource, NULL );
-    ERR( "TWINAPI: resource_loader_GetString resource %s\n", debugstr_hstring(resource) );
+    HRESULT hr;
+
+    TRACE( "resource_loader_GetString resource %s\n", debugstr_hstring( resource ) );
     if (!value) return E_POINTER;
-    if (str && !wcscmp( str, L"LocalizedFontFamilyOverride" ))
+    if (!str) return E_POINTER;
+
+    InitOnceExecuteOnce( &pri_init_once, init_cached_pri, NULL, NULL );
+    if (SUCCEEDED( pri_lookup_key( str, value ) )) return S_OK;
+
+    /* built-in overrides, kept for keys the app's resources.pri does not carry */
+    if (!wcscmp( str, L"LocalizedFontFamilyOverride" ))
         return WindowsCreateString( L"RESERVED_FOR_FONTLOC", 20, value );
-    if (str && !wcscmp( str, L"LocalizedFontWeightOverride" ))
+    if (!wcscmp( str, L"LocalizedFontWeightOverride" ))
         return WindowsCreateString( L"normal", 6, value );
-    if (str && !wcscmp( str, L"LocalizedUICaptionFontSizeFactorOverride" ))
+    if (!wcscmp( str, L"LocalizedUICaptionFontSizeFactorOverride" ))
         return WindowsCreateString( L"1.0", 3, value );
-    if (str && !wcscmp( str, L"LocalizedUITextFontSizeFactorOverride" ))
+    if (!wcscmp( str, L"LocalizedUITextFontSizeFactorOverride" ))
         return WindowsCreateString( L"1.0", 3, value );
+
+    /* documented stub tier: key as value, so lookups never fail */
+    WARN( "resources.pri lookup failed for %s, using key as value\n", debugstr_w( str ) );
     return WindowsDuplicateString( resource, value );
 }
 
 static HRESULT WINAPI resource_loader_GetStringForUri( void *iface, void *uri, HSTRING *value )
 {
-    ERR( "TWINAPI: resource_loader_GetStringForUri uri %p\n", uri );
+    static const WCHAR ms_resource[] = L"ms-resource:";
+    HRESULT (STDMETHODCALLTYPE *get_RawUri)( void *, HSTRING * );
+    const WCHAR *raw;
+    HSTRING hstr = NULL;
+    WCHAR key[1024];
+    SIZE_T i;
+
+    TRACE( "resource_loader_GetStringForUri uri %p\n", uri );
     if (!value) return E_POINTER;
+    if (!uri) return E_POINTER;
+
+    InitOnceExecuteOnce( &pri_init_once, init_cached_pri, NULL, NULL );
+
+    /* IUriRuntimeClass::get_RawUri: 15 URI properties after the 5 IInspectable
+     * slots, RawUri last -> vtable slot 20.  The app hands us a
+     * Windows.Foundation.Uri; its RawUri is the string it was built from. */
+    get_RawUri = (void *)((void **)(*(void **)uri))[20];
+    if (FAILED( get_RawUri( uri, &hstr ) ) || !hstr)
+        return WindowsCreateString( L"", 0, value );
+
+    raw = WindowsGetStringRawBuffer( hstr, NULL );
+    if (!raw)
+    {
+        WindowsDeleteString( hstr );
+        return WindowsCreateString( L"", 0, value );
+    }
+    /* strip "ms-resource:" plus the optional "//" authority and leading '/' */
+    if (!wcsncmp( raw, ms_resource, ARRAY_SIZE( ms_resource ) - 1 ))
+    {
+        raw += ARRAY_SIZE( ms_resource ) - 1;
+        if (raw[0] == '/' && raw[1] == '/') raw += 2;
+        if (*raw == '/') raw++;
+    }
+
+    for (i = 0; *raw && i < ARRAY_SIZE( key ) - 1; raw++, i++)
+        key[i] = *raw == '/' ? '\\' : *raw;
+    key[i] = 0;
+    WindowsDeleteString( hstr );
+
+    if (SUCCEEDED( pri_lookup_key( key, value ) )) return S_OK;
     return WindowsCreateString( L"", 0, value );
 }
 
@@ -1564,6 +1746,8 @@ static const void *resource_loader_statics_vtbl[] =
     resource_loader_GetIids,
     resource_loader_GetRuntimeClassName,
     push_notification_factory_GetTrustLevel,
+    resource_loader_GetString,
+    resource_loader_statics2_GetForCurrentView,
     resource_loader_statics_GetStringForReference,
 };
 

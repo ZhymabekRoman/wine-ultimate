@@ -18,6 +18,7 @@ SOURCES = \
 	data_transfer.c \
 	main.c \
 	power_manager.c \
+	pri.c \
 	static_lifetime_map.c \
 	toast_notification_manager.c \
 	unixlib.c
