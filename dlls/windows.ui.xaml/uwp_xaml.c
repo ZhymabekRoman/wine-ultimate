@@ -45,13 +45,13 @@ static const GUID IID_IUIElement5_UWP =
 static const GUID IID_IUIElementOverrides_UWP =
     { 0x608d2f1d, 0x7858, 0x4aeb, { 0x89, 0xe4, 0xb5, 0x4e, 0x2c, 0x7e, 0xd3, 0xd3 } };
 static const GUID IID_IUIElementFactory_UWP =
-    { 0xb9ee93fe, 0xa338, 0x419f, { 0xac, 0x32, 0x91, 0xdc, 0x12, 0x5d, 0x08, 0x41 } };
+    { 0xb61c4d87, 0x70e5, 0x412e, { 0xb5, 0x20, 0x1a, 0x41, 0xee, 0x76, 0xbb, 0xf4 } };
 static const GUID IID_IUIElementStatics_UWP =
     { 0x58d3573b, 0xf52c, 0x45be, { 0x98, 0x8b, 0xa5, 0x86, 0x95, 0x64, 0x87, 0x3c } };
 static const GUID IID_IFrameworkElement_UWP =
     { 0xa391d09b, 0x4a99, 0x4b7c, { 0x9d, 0x8d, 0x6f, 0xa5, 0xd0, 0x1f, 0x6f, 0xbf } };
 static const GUID IID_IFrameworkElement2_UWP =
-    { 0xf19104be, 0x422a, 0x4904, { 0xa5, 0x2f, 0xde, 0x72, 0x01, 0x04, 0x29, 0xe0 } };
+    { 0xf19104be, 0x422a, 0x4904, { 0xa5, 0x2f, 0xee, 0x72, 0x01, 0x04, 0x29, 0xe5 } };
 static const GUID IID_IFrameworkElement3_UWP =
     { 0xc81c2720, 0x5c52, 0x4bbe, { 0xa1, 0x99, 0x2b, 0x1e, 0x34, 0xf0, 0x0f, 0x70 } };
 static const GUID IID_IFrameworkElement4_UWP =
@@ -81,17 +81,17 @@ static const GUID IID_IControlOverrides_UWP =
 static const GUID IID_IControlProtected_UWP =
     { 0x1791587a, 0x2a7c, 0x4981, { 0xa2, 0xd8, 0xab, 0x99, 0xff, 0xfc, 0x65, 0xb9 } };
 static const GUID IID_IControlFactory_UWP =
-    { 0xb01602b8, 0x3370, 0x422a, { 0x94, 0x9c, 0x59, 0x9d, 0x26, 0x17, 0x6f, 0x2e } };
+    { 0xb12b1d5a, 0x6419, 0x4e16, { 0xb2, 0x12, 0xa4, 0x53, 0x36, 0xb7, 0x57, 0x78 } };
 static const GUID IID_IContentControl_UWP =
     { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } };
 static const GUID IID_IContentControlOverrides_UWP =
     { 0x3874208b, 0x57d6, 0x4697, { 0x9f, 0x01, 0xf6, 0xf6, 0x64, 0x23, 0xa2, 0x2b } };
 static const GUID IID_IContentControlFactory_UWP =
-    { 0xab51a1b5, 0x1e98, 0x4892, { 0x82, 0x2c, 0x25, 0x97, 0x58, 0x22, 0x0b, 0x35 } };
+    { 0x6584ebdf, 0xcbc7, 0x4e19, { 0x84, 0x3a, 0xa1, 0x4f, 0x24, 0xa7, 0x93, 0xea } };
 static const GUID IID_IUserControl_UWP =
     { 0xa7a69ec9, 0xea35, 0x4679, { 0xbf, 0x29, 0xf4, 0xf0, 0x92, 0x86, 0xd3, 0x14 } };
 static const GUID IID_IUserControlFactory_UWP =
-    { 0xb12b1d5a, 0x6419, 0x4e16, { 0xb2, 0x12, 0xa4, 0x53, 0x36, 0xb7, 0x57, 0x78 } };
+    { 0x38b1ed92, 0xa28a, 0x4972, { 0x93, 0xdf, 0xf4, 0xf7, 0x59, 0xb8, 0xaf, 0xd2 } };
 static const GUID IID_IPage_UWP =
     { 0xc4b27075, 0xe641, 0x453e, { 0x82, 0x4d, 0x01, 0x2f, 0xc7, 0xcf, 0x95, 0xcf } };
 static const GUID IID_IPageOverrides_UWP =
@@ -105,19 +105,23 @@ static const GUID IID_INavigate_UWP =
 static const GUID IID_IButtonBase_UWP =
     { 0xfa002c1a, 0x494e, 0x46cf, { 0x91, 0xd4, 0xe1, 0x4a, 0x8d, 0x79, 0x86, 0x74 } };
 static const GUID IID_IButtonBaseFactory_UWP =
-    { 0x38534690, 0x802a, 0x46c3, { 0x8e, 0x02, 0x7e, 0xf2, 0x8c, 0x3a, 0x0e, 0x4c } };
+    { 0x389b7c71, 0x5220, 0x42b2, { 0x99, 0x92, 0x26, 0x90, 0xc1, 0xa6, 0x70, 0x2f } };
+static const GUID IID_IButtonBaseStatics_UWP =
+    { 0x541c8d6c, 0x0283, 0x4581, { 0xb9, 0x45, 0x2a, 0x64, 0xc2, 0x8a, 0x06, 0x46 } };
 static const GUID IID_IButton_UWP =
-    { 0x258c3f1c, 0xf6c2, 0x40e7, { 0x89, 0xbe, 0x28, 0xd8, 0xdc, 0x42, 0x00, 0x84 } };
+    { 0x280335ae, 0x5570, 0x46c7, { 0x8e, 0x0b, 0x60, 0x2b, 0xe7, 0x12, 0x29, 0xa2 } };
 static const GUID IID_IButtonWithFlyout_UWP =
     { 0x06e32cce, 0xdfdd, 0x3639, { 0x94, 0xa5, 0xc7, 0xff, 0x91, 0x19, 0x93, 0xf8 } };
 static const GUID IID_IButtonFactory_UWP =
-    { 0x408669b7, 0x2d24, 0x4212, { 0xa9, 0x63, 0x2a, 0x16, 0x1e, 0x6f, 0x03, 0x37 } };
+    { 0xe2d795e3, 0x85c0, 0x4de2, { 0xba, 0xc1, 0x52, 0x94, 0xca, 0x01, 0x1a, 0x78 } };
 static const GUID IID_IToggleButton_UWP =
     { 0x589877fb, 0x0fc7, 0x4036, { 0x9d, 0x8b, 0x12, 0x7d, 0xfa, 0x75, 0xc1, 0x6d } };
 static const GUID IID_IToggleButtonOverrides_UWP =
     { 0x84e5b964, 0x4d3d, 0x49c1, { 0xab, 0xe7, 0xcb, 0xd3, 0xc5, 0x77, 0x49, 0x0d } };
 static const GUID IID_IToggleButtonFactory_UWP =
     { 0x80a13c19, 0x843a, 0x451c, { 0x8c, 0xf5, 0x44, 0xc7, 0x01, 0xb0, 0xe2, 0x16 } };
+static const GUID IID_IToggleButtonFactory2_UWP =
+    { 0x13300b06, 0xbd10, 0x4e09, { 0xbf, 0xf7, 0x71, 0xef, 0xb8, 0xbb, 0xb4, 0x2b } };
 static const GUID IID_IToggleButtonStatics_UWP =
     { 0xaf1eab12, 0x0128, 0x4f67, { 0x9c, 0x5a, 0x82, 0x32, 0x0c, 0x44, 0x5d, 0x19 } };
 static const GUID IID_IHyperlinkButton_UWP =
@@ -125,11 +129,17 @@ static const GUID IID_IHyperlinkButton_UWP =
 static const GUID IID_IPanel_UWP =
     { 0xa50a4bbd, 0x8361, 0x469c, { 0x90, 0xda, 0xe9, 0xa4, 0x0c, 0x74, 0x74, 0xdf } };
 static const GUID IID_IPanelFactory_UWP =
-    { 0x26d06b5c, 0x0c5e, 0x4e42, { 0xb5, 0x34, 0x08, 0x35, 0x01, 0x59, 0x68, 0x6b } };
+    { 0xbfd07f53, 0xf8ca, 0x4e47, { 0x94, 0x9e, 0x9e, 0x80, 0x42, 0x9b, 0x3d, 0x16 } };
 static const GUID IID_IGrid_UWP =
     { 0x709133c7, 0x38f3, 0x5083, { 0xa4, 0xbb, 0x06, 0xa5, 0x48, 0xa1, 0xd2, 0x31 } };
 static const GUID IID_IGrid_UWP2 =
-    { 0xdf104460, 0x2e15, 0x4ba3, { 0x8b, 0x8f, 0xfa, 0x69, 0x3a, 0x41, 0x61, 0xe9 } };
+    { 0xfd104460, 0x2e15, 0x4ba3, { 0x8b, 0x8f, 0xfa, 0x69, 0x3a, 0x41, 0x61, 0xe9 } };
+static const GUID IID_IFlyoutBaseFactory_UWP =
+    { 0xf82b435e, 0x65b3, 0x41c6, { 0xa9, 0xe2, 0x77, 0xb6, 0x7b, 0xc4, 0xc0, 0x0c } };
+static const GUID IID_IStateTriggerBaseFactory_UWP =
+    { 0x0fa0f896, 0x64c0, 0x45fb, { 0x8d, 0x24, 0xfb, 0x83, 0x29, 0x8c, 0x0d, 0x93 } };
+static const GUID IID_IMenuFlyoutItemBaseFactory_UWP =
+    { 0x9727b2e3, 0xb2b6, 0x49dc, { 0x8c, 0x22, 0xe0, 0x13, 0x8b, 0x94, 0x15, 0x59 } };
 static const GUID IID_IGridStatics_UWP =
     { 0xed02d274, 0x81f1, 0x5ac2, { 0xa0, 0xc3, 0xbb, 0xda, 0xf5, 0xa3, 0xff, 0xee } };
 static const GUID IID_IGridStatics_UWP2 =
@@ -214,6 +224,55 @@ static const GUID IID_IGrid_Calc =
     { 0x280335ae, 0x5570, 0x46c7, { 0x8e, 0x0b, 0x60, 0x2b, 0xe7, 0x12, 0x29, 0xa2 } };
 static const GUID IID_IUIElement_Calc2 =
     { 0x33d1299d, 0x8d6e, 0x4290, { 0xbf, 0x22, 0x90, 0x5c, 0xcc, 0xd0, 0x4d, 0x31 } };
+static const GUID IID_INavigationView_UWP =
+    { 0xb00eb54c, 0x9174, 0x5d84, { 0x96, 0x78, 0x56, 0xc9, 0x80, 0x16, 0xe6, 0x89 } };
+static const GUID IID_INavigationView2_UWP =
+    { 0x5ba2eefc, 0x3736, 0x5e42, { 0xac, 0x56, 0x9d, 0x0b, 0xe5, 0x52, 0x3d, 0x40 } };
+static const GUID IID_IPopup_UWP =
+    { 0x62418240, 0xe6d3, 0x4705, { 0xa1, 0xdc, 0x39, 0x15, 0x64, 0x56, 0xee, 0x29 } };
+static const GUID IID_IPopup2_UWP =
+    { 0x376a8c4c, 0xaac0, 0x4b20, { 0x96, 0x6a, 0x0b, 0x93, 0x64, 0xfe, 0xb4, 0xb5 } };
+static const GUID IID_IPopup3_UWP =
+    { 0x1870b836, 0xdf2f, 0x5fc6, { 0xa5, 0xf2, 0x74, 0x8e, 0xd6, 0xce, 0x73, 0x21 } };
+static const GUID IID_IContentControl2_UWP =
+    { 0x652c208c, 0x8ccf, 0x4399, { 0xbd, 0x3e, 0x5a, 0x01, 0x5a, 0xa1, 0xbc, 0x03 } };
+static const GUID IID_IContentControlOvr_Calc =
+    { 0x5f4c0b10, 0xe38e, 0x4b5d, { 0xbe, 0x1a, 0x5e, 0xd0, 0x42, 0x46, 0xa6, 0x35 } };
+static const GUID IID_IBorder2_Calc =
+    { 0xa1efbd9d, 0xcb8b, 0x56b5, { 0x87, 0x8d, 0x3a, 0x7f, 0x43, 0xbc, 0x97, 0x30 } };
+static const GUID IID_IGrid3_Calc =
+    { 0xf76efa41, 0x380e, 0x45db, { 0xbe, 0x87, 0x9e, 0x13, 0x26, 0xba, 0x4b, 0x57 } };
+static const GUID IID_ITextBlock_Calc2 =
+    { 0x45206a4c, 0x0a4e, 0x4fbf, { 0xae, 0xe9, 0x33, 0x5d, 0x5a, 0x20, 0x5f, 0x6e } };
+static const GUID IID_ITextBlock_Calc3 =
+    { 0xb651dd5a, 0x424b, 0x48c3, { 0x9b, 0x67, 0x48, 0x6f, 0x4e, 0x13, 0x98, 0x99 } };
+static const GUID IID_ITextBlock_Calc4 =
+    { 0x31816cd9, 0x0404, 0x410f, { 0x91, 0xec, 0x33, 0xb0, 0xa0, 0xbb, 0x92, 0xb2 } };
+static const GUID IID_IUIE_Extra[] =
+{
+    { 0xbc2b28f1, 0x26f2, 0x4aab, { 0xb2, 0x56, 0x3b, 0x53, 0x50, 0x88, 0x1e, 0x37 } },
+    { 0x69145cd4, 0x199a, 0x4657, { 0x9e, 0x57, 0xe9, 0x9e, 0x8f, 0x13, 0x67, 0x12 } },
+    { 0x8eed9bc2, 0xa58c, 0x4453, { 0xaf, 0x0f, 0xa9, 0x2e, 0xe0, 0x6d, 0x03, 0x17 } },
+    { 0xcafc4968, 0x6369, 0x4249, { 0x80, 0xf9, 0x3d, 0x65, 0x63, 0x19, 0xe8, 0x11 } },
+    { 0x3ab70e85, 0xd508, 0x4477, { 0xb6, 0xf8, 0x0e, 0x43, 0x57, 0x01, 0xc8, 0x36 } },
+    { 0xb4a04776, 0x4e88, 0x50ca, { 0x8f, 0x2b, 0x08, 0x94, 0x0d, 0x6c, 0x5f, 0x94 } },
+    { 0xd531c629, 0xad2c, 0x5f6b, { 0xad, 0xcf, 0xfb, 0x87, 0x28, 0x7d, 0x18, 0xd7 } },
+    { 0xb97f7f68, 0xc29b, 0x4c99, { 0xa1, 0xc3, 0x95, 0x26, 0x19, 0xd6, 0xe7, 0x20 } },
+    { 0x4a5a645c, 0x548d, 0x48cf, { 0xb9, 0x98, 0x78, 0x44, 0xd6, 0xe2, 0x35, 0xa1 } },
+    { 0x9a6e5973, 0x6d63, 0x54f2, { 0x90, 0xfa, 0x62, 0x81, 0x3b, 0x20, 0xb7, 0xb9 } },
+    { 0xe7141e0a, 0x04b8, 0x4fc5, { 0xa4, 0xdc, 0x19, 0x53, 0x92, 0xe5, 0x78, 0x07 } },
+    { 0x01e64612, 0x1d82, 0x42f4, { 0x8e, 0x3f, 0xa7, 0x22, 0xde, 0xd3, 0x3f, 0xc7 } },
+    { 0x6b765bb3, 0xfba3, 0x4404, { 0xbd, 0xee, 0x1a, 0x45, 0xd1, 0xca, 0x5f, 0x21 } },
+    { 0x792a5d91, 0x62a1, 0x40bf, { 0xa0, 0xce, 0xf9, 0xc1, 0x31, 0xfc, 0xb7, 0xa7 } },
+    { 0x2263886c, 0xc069, 0x570f, { 0xb9, 0xcc, 0x9e, 0x21, 0xdd, 0x02, 0x8d, 0x8e } },
+    { 0x65aa0480, 0x22e3, 0x5103, { 0xad, 0x2a, 0xb6, 0x26, 0xf8, 0x8c, 0xa5, 0xae } },
+    { 0x43e0fe10, 0x14ec, 0x427e, { 0x8c, 0x57, 0xde, 0xe6, 0x0d, 0xf6, 0x0a, 0xa8 } },
+    { 0x077b29e4, 0xdade, 0x4f55, { 0x9b, 0x96, 0x09, 0xe2, 0x1b, 0x28, 0xeb, 0x1c } },
+    { 0x0e18aeee, 0x5f2e, 0x44ea, { 0x85, 0x13, 0xd3, 0x87, 0x5c, 0x0a, 0x75, 0x13 } },
+    { 0x5ebb51d5, 0x9e58, 0x49b7, { 0xbc, 0x2d, 0x01, 0x55, 0xff, 0x11, 0x86, 0x64 } },
+    { 0x3550dbe1, 0xe561, 0x5934, { 0xa3, 0xef, 0x7d, 0xb8, 0xbf, 0x6e, 0x3b, 0x45 } },
+    { 0xe194c96a, 0xd8cc, 0x4339, { 0xa0, 0xe1, 0x2e, 0x9c, 0x42, 0x08, 0x79, 0xec } },
+};
 
 /* ============================================================================
  * 1. PRI v2 (mrm_pri2) Container Reader
@@ -1141,64 +1200,43 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IDependencyObject_iface;
     else if (IsEqualGUID( iid, &IID_IDependencyObject2_UWP ))
         *out = &impl->IDependencyObject2_iface;
-    else if (IsEqualGUID( iid, &IID_IUIElement_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement2_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement3_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement4_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement5_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElementOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_IUIElement_Calc2 ))
+    else if (IsEqualGUID( iid, &IID_IUIElement_UWP ))
         *out = &impl->IUIElement_iface;
-    else if (IsEqualGUID( iid, &IID_IFrameworkElement_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElement2_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElement4_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElement6_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElementOverrides_UWP ) ||
-             IsEqualGUID( iid, &IID_IFrameworkElementOverrides2_UWP ))
+    else if (IsEqualGUID( iid, &IID_IFrameworkElement_UWP ))
         *out = &impl->IFrameworkElement_iface;
     else if (IsEqualGUID( iid, &IID_IFrameworkElement3_UWP ))
         *out = &impl->IFrameworkElement3_iface;
-    else if (IsEqualGUID( iid, &IID_IControl_UWP ) ||
-             IsEqualGUID( iid, &IID_IControl2_UWP ) ||
-             IsEqualGUID( iid, &IID_IControl3_UWP ) ||
-             IsEqualGUID( iid, &IID_IControl4_UWP ) ||
-             IsEqualGUID( iid, &IID_IControl5_UWP ) ||
-             IsEqualGUID( iid, &IID_IControlOverrides_UWP ))
+    else if (IsEqualGUID( iid, &IID_IControl_UWP ))
         *out = &impl->IControl_iface;
     else if (IsEqualGUID( iid, &IID_IControlProtected_UWP ))
         *out = &impl->IControlProtected_iface;
     else if (IsEqualGUID( iid, &IID_IContentControl_UWP ) ||
-             IsEqualGUID( iid, &IID_IContentControlOverrides_UWP ))
+             IsEqualGUID( iid, &IID_INavigationView_UWP ) ||
+             IsEqualGUID( iid, &IID_INavigationView2_UWP ))
         *out = &impl->IContentControl_iface;
     else if (IsEqualGUID( iid, &IID_IUserControl_UWP ))
         *out = &impl->IUserControl_iface;
-    else if (IsEqualGUID( iid, &IID_IPage_UWP ) ||
-             IsEqualGUID( iid, &IID_IPageOverrides_UWP ))
+    else if (IsEqualGUID( iid, &IID_IPage_UWP ))
         *out = &impl->IPage_iface;
     else if (IsEqualGUID( iid, &IID_IFrame_UWP ) ||
              IsEqualGUID( iid, &IID_INavigate_UWP ))
         *out = &impl->IFrame_iface;
     else if (IsEqualGUID( iid, &IID_IButtonBase_UWP ) ||
-             IsEqualGUID( iid, &IID_IButton_UWP ) ||
-             IsEqualGUID( iid, &IID_IButtonWithFlyout_UWP ) ||
              IsEqualGUID( iid, &IID_IHyperlinkButton_UWP ))
         *out = &impl->IButtonBase_iface;
-    else if (IsEqualGUID( iid, &IID_IToggleButton_UWP ) ||
-             IsEqualGUID( iid, &IID_IToggleButtonOverrides_UWP ))
+    else if (IsEqualGUID( iid, &IID_IToggleButton_UWP ))
         *out = &impl->IToggleButton_iface;
     else if (IsEqualGUID( iid, &IID_IPanel_UWP ) ||
              IsEqualGUID( iid, &IID_IStackPanel_UWP ))
         *out = &impl->IPanel_iface;
     else if (IsEqualGUID( iid, &IID_IGrid_UWP ) ||
              IsEqualGUID( iid, &IID_IGrid_UWP2 ) ||
-             IsEqualGUID( iid, &IID_IGrid_Calc ))
+             IsEqualGUID( iid, &IID_IGrid3_Calc ))
         *out = &impl->IGrid_iface;
-    else if (IsEqualGUID( iid, &IID_IBorder_UWP ))
+    else if (IsEqualGUID( iid, &IID_IBorder_UWP ) ||
+             IsEqualGUID( iid, &IID_IBorder2_Calc ))
         *out = &impl->IBorder_iface;
-    else if (IsEqualGUID( iid, &IID_ITextBlock_UWP ) ||
-             IsEqualGUID( iid, &IID_ITextBlock2_UWP ) ||
-             IsEqualGUID( iid, &IID_ITextBlock3_UWP ) ||
-             IsEqualGUID( iid, &IID_ITextBlock6_UWP ))
+    else if (IsEqualGUID( iid, &IID_ITextBlock_UWP ))
         *out = &impl->ITextBlock_iface;
     else if (IsEqualGUID( iid, &IID_IRowDefinition_UWP ))
         *out = &impl->IRowDefinition_iface;
@@ -1208,7 +1246,39 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_IScrollViewer2_UWP ) ||
              IsEqualGUID( iid, &IID_IScrollViewer3_UWP ))
         *out = &impl->IContentControl_iface;
-    else if (IsEqualGUID( iid, &IID_IStyle_UWP ) ||
+    else if (IsEqualGUID( iid, &IID_IUIElement2_UWP ) ||
+             IsEqualGUID( iid, &IID_IUIElement3_UWP ) ||
+             IsEqualGUID( iid, &IID_IUIElement4_UWP ) ||
+             IsEqualGUID( iid, &IID_IUIElement5_UWP ) ||
+             IsEqualGUID( iid, &IID_IUIElementOverrides_UWP ) ||
+             IsEqualGUID( iid, &IID_IUIElement_Calc2 ) ||
+             IsEqualGUID( iid, &IID_IFrameworkElement2_UWP ) ||
+             IsEqualGUID( iid, &IID_IFrameworkElement4_UWP ) ||
+             IsEqualGUID( iid, &IID_IFrameworkElement6_UWP ) ||
+             IsEqualGUID( iid, &IID_IFrameworkElementOverrides_UWP ) ||
+             IsEqualGUID( iid, &IID_IFrameworkElementOverrides2_UWP ) ||
+             IsEqualGUID( iid, &IID_IControl2_UWP ) ||
+             IsEqualGUID( iid, &IID_IControl3_UWP ) ||
+             IsEqualGUID( iid, &IID_IControl4_UWP ) ||
+             IsEqualGUID( iid, &IID_IControl5_UWP ) ||
+             IsEqualGUID( iid, &IID_IControlOverrides_UWP ) ||
+             IsEqualGUID( iid, &IID_IContentControl2_UWP ) ||
+             IsEqualGUID( iid, &IID_IContentControlOverrides_UWP ) ||
+             IsEqualGUID( iid, &IID_IContentControlOvr_Calc ) ||
+             IsEqualGUID( iid, &IID_IPageOverrides_UWP ) ||
+             IsEqualGUID( iid, &IID_IButton_UWP ) ||
+             IsEqualGUID( iid, &IID_IButtonWithFlyout_UWP ) ||
+             IsEqualGUID( iid, &IID_IToggleButtonOverrides_UWP ) ||
+             IsEqualGUID( iid, &IID_ITextBlock2_UWP ) ||
+             IsEqualGUID( iid, &IID_ITextBlock3_UWP ) ||
+             IsEqualGUID( iid, &IID_ITextBlock6_UWP ) ||
+             IsEqualGUID( iid, &IID_ITextBlock_Calc2 ) ||
+             IsEqualGUID( iid, &IID_ITextBlock_Calc3 ) ||
+             IsEqualGUID( iid, &IID_ITextBlock_Calc4 ) ||
+             IsEqualGUID( iid, &IID_IPopup_UWP ) ||
+             IsEqualGUID( iid, &IID_IPopup2_UWP ) ||
+             IsEqualGUID( iid, &IID_IPopup3_UWP ) ||
+             IsEqualGUID( iid, &IID_IStyle_UWP ) ||
              IsEqualGUID( iid, &IID_ISetter_UWP ) ||
              IsEqualGUID( iid, &IID_ISetterBase_UWP ) ||
              IsEqualGUID( iid, &IID_IVisualStateGroup_UWP ) ||
@@ -1227,8 +1297,20 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_IMarkupExtension_UWP ) ||
              IsEqualGUID( iid, &IID_IMarkupExtensionOverrides_UWP ))
         *out = &impl->IStateTrigger_iface;
-    else if (IsEqualGUID( iid, &IID_IDCompositionVisual ) ||
-             IsEqualGUID( iid, &IID_IDCompositionVisual2 ))
+    else
+    {
+        size_t k;
+        for (k = 0; k < ARRAY_SIZE(IID_IUIE_Extra); k++)
+        {
+            if (IsEqualGUID( iid, &IID_IUIE_Extra[k] ))
+            {
+                *out = &impl->IStyle_iface;
+                break;
+            }
+        }
+    }
+    if (!*out && (IsEqualGUID( iid, &IID_IDCompositionVisual ) ||
+                  IsEqualGUID( iid, &IID_IDCompositionVisual2 )))
     {
         if (impl->visual)
         {
@@ -1449,6 +1531,8 @@ static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val 
                     if (old_val) IInspectable_AddRef( old_val );
                     args->new_val = val;
                     if (val) IInspectable_AddRef( val );
+                    TRACE( "uwp_do_SetValue invoking PropertyChangedCallback=%p sender=%p (%s) dp=%p old=%p new=%p\n",
+                           pml->callback, sender, debugstr_w(impl->class_name), dp, old_val, val );
                     IPropertyChangedCallback_Invoke( pml->callback, (IDependencyObject *)sender,
                                                      (IDependencyPropertyChangedEventArgs *)args );
                     dp_args_Release( args );
@@ -2509,7 +2593,7 @@ static const void *uwp_ctrl_prot_vtbl[16] =
     [8] = uwp_ctrl_prot_GetTemplateChild,
 };
 
-static const void *uwp_cc_vtbl[32] =
+static const void *uwp_noop_vtbl[128] =
 {
     [0] = uwp_sub_QueryInterface,
     [1] = uwp_sub_AddRef,
@@ -2517,7 +2601,18 @@ static const void *uwp_cc_vtbl[32] =
     [3] = uwp_sub_GetIids,
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
-    [6 ... 31] = uwp_generic_noop,
+    [6 ... 127] = uwp_generic_noop,
+};
+
+static const void *uwp_cc_vtbl[128] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 127] = uwp_generic_noop,
     [6] = uwp_cc_get_Content,
     [7] = uwp_cc_put_Content,
 };
@@ -2699,10 +2794,10 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->ITextBlock_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_tb_vtbl;
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
-    impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_fe_vtbl;
-    impl->IBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_fe_vtbl;
-    impl->IFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_fe_vtbl;
-    impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_fe_vtbl;
+    impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
+    impl->IBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
+    impl->IFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
+    impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
 
     impl->ref = 1;
     impl->outer = outer;
@@ -3328,8 +3423,9 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                 else if (tid < ctx->type_cnt)
                 {
                     cls_name = ctx->types[tid].full_name;
-                    /* Do not activate ResourceString or ResourceVirtualKey via provider if we evaluate it in XBF */
-                    if (wcsstr( cls_name, L"ResourceString" ) || wcsstr( cls_name, L"ResourceVirtualKey" ))
+                    /* Do not activate ResourceString, ResourceVirtualKey, or Microsoft.UI.Xaml controls via provider */
+                    if (wcsstr( cls_name, L"ResourceString" ) || wcsstr( cls_name, L"ResourceVirtualKey" ) ||
+                        !wcsncmp( cls_name, L"Microsoft.UI.Xaml.", 18 ))
                     {
                         uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
                         el = uwp_elem_from_any( inst );
@@ -4378,7 +4474,11 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IButtonFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IButtonBaseFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IToggleButtonFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IToggleButtonFactory2_UWP ) ||
         IsEqualGUID( iid, &IID_IPanelFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IFlyoutBaseFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IStateTriggerBaseFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IMenuFlyoutItemBaseFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IMarkupExtensionFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IRoutedEventArgsFactory_UWP ))
     {
@@ -4550,8 +4650,9 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         return S_OK;
     }
 
-    /* For Calculator (UWP), serve all Windows.UI.Xaml.* runtime classes with our UWP multi-iface element factory */
-    if (is_calculator_app() && !wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) &&
+    /* For Calculator (UWP), serve all Windows.UI.Xaml.* and Microsoft.UI.Xaml.* runtime classes with our UWP multi-iface element factory */
+    if (is_calculator_app() &&
+        (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 )) &&
         wcscmp( buf, L"Windows.UI.Xaml.Application" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Window" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.PropertyMetadata" ) != 0 &&

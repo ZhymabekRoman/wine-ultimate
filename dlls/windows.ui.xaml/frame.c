@@ -55,6 +55,18 @@ static const GUID IID_IControl_g =
     { 0xedf04eb1, 0x37d1, 0x471f, { 0x85, 0x70, 0x38, 0x29, 0xee, 0x5b, 0x2b, 0xc6 } };
 static const GUID IID_IGrid =
     { 0xc4496219, 0x9014, 0x58a1, { 0xb4, 0xad, 0xc5, 0x04, 0x49, 0x13, 0xa5, 0xbb } };
+/* WinUI3 (Microsoft.UI.Xaml.Controls.Grid) interface versions asked by the
+ * .NET 8 projection when casting RootVisual children to Grid / app views. */
+static const GUID IID_IGrid_WinUI =
+    { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
+static const GUID IID_IGrid_WinUI2 =
+    { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
+static const GUID IID_IGrid_v1 =
+    { 0xf6790987, 0xe6e5, 0x47f2, { 0x92, 0xc6, 0xec, 0xcc, 0xe4, 0xba, 0x15, 0x9a } };
+static const GUID IID_IView_IV1 =
+    { 0x9e5f3ed0, 0xcf1c, 0x5d38, { 0x83, 0x2c, 0xac, 0xea, 0x61, 0x64, 0xbf, 0x5c } };
+static const GUID IID_IView_IV2 =
+    { 0x90c71c29, 0xa9b5, 0x5267, { 0xa5, 0xad, 0x8b, 0x75, 0x67, 0x36, 0x31, 0x7c } };
 static const GUID IID_IPanel =
     { 0x27a1b418, 0x56f3, 0x525e, { 0xb8, 0x83, 0xce, 0xfe, 0xd9, 0x05, 0xee, 0xd3 } };
 static const GUID IID_IRowDefinition =
@@ -354,7 +366,7 @@ static HRESULT WINAPI frame_Navigate( void *iface, void *type_name_ptr, boolean 
 
 static HRESULT WINAPI frame_generic_slot( void *iface, ... )
 {
-    TRACE( "frame generic slot called on %p\n", iface );
+    ERR( "frame generic slot called on %p\n", iface );
     return S_OK;
 }
 
@@ -935,12 +947,26 @@ struct xaml_collection
     IInspectable **items;
     unsigned int count;
     unsigned int capacity;
+    void *iterable_view;  /* cached IIterable<RowDefinition> view for IV {5ddd9577} */
+    void *vector_view;    /* cached IVectorView<RowDefinition> for IV3 {94ea2b94} */
 };
 
 static inline struct xaml_collection *impl_from_collection( void *iface )
 {
     return CONTAINING_RECORD( iface, struct xaml_collection, IInspectable_iface );
 }
+
+/* WinUI3 RowDefinitionCollection enumerable IV (IIterable<RowDefinition> dephased view) */
+static const GUID IID_IIterable_RowDef =
+    { 0x5ddd9577, 0x3f94, 0x567f, { 0xbe, 0xef, 0x54, 0x05, 0x68, 0x52, 0x22, 0x89 } };
+
+/* WinUI3 RowDefinitionCollection IV3 = IVectorView<RowDefinition> (GetMany at slot 10) */
+static const GUID IID_IVectorView_RowDef =
+    { 0x94ea2b94, 0xe9cc, 0x49e0, { 0xc0, 0xff, 0xee, 0x64, 0xca, 0x8f, 0x5b, 0x90 } };
+
+static const void *collection_view_vtbl[256];
+static void **vtbl_dup( const void *src );
+static HRESULT collection_iterable_view( struct xaml_collection *coll, void **out );
 
 static HRESULT WINAPI collection_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
@@ -955,6 +981,29 @@ static HRESULT WINAPI collection_QueryInterface( IInspectable *iface, REFIID iid
     {
         *out = NULL;
         return E_NOINTERFACE;
+    }
+    if (IsEqualGUID( iid, &IID_IIterable_RowDef ))
+        return collection_iterable_view( impl, out );
+
+    if (IsEqualGUID( iid, &IID_IVectorView_RowDef ))
+    {
+        struct xaml_collection *v = impl->vector_view;
+        if (!v)
+        {
+            if (!(v = calloc( 1, sizeof(*v) ))) return E_OUTOFMEMORY;
+            *v = *impl;                                   /* shallow: items/count shared */
+            v->ref = 1;
+            v->capacity = ~0u;                            /* sentinel: view owns no array */
+            v->vector_view = v;
+            v->iterable_view = NULL;
+            v->IInspectable_iface.lpVtbl =
+                (const struct IInspectableVtbl *)vtbl_dup( collection_view_vtbl );
+            impl->vector_view = v;
+            ERR( "collection QI %p IV3 vectorview created %p\n", iface, v );
+        }
+        else InterlockedIncrement( &v->ref );
+        *out = (IInspectable *)v;
+        return S_OK;
     }
 
     *out = &impl->IInspectable_iface;
@@ -977,6 +1026,15 @@ static ULONG WINAPI collection_Release( IInspectable *iface )
     if (!ref)
     {
         unsigned int i;
+        if (impl->capacity == ~0u)                        /* IV3 view shard: array shared */
+        {
+            ERR( "collection_Release view %p freed\n", iface );
+            if (impl->vector_view == impl) impl->vector_view = NULL;
+            free( impl );
+            return 0;
+        }
+        InterlockedIncrement( &impl->ref );               /* leak-keep: GC-strand guard */
+        return 1;
         for (i = 0; i < impl->count; i++)
             if (impl->items[i]) IInspectable_Release( impl->items[i] );
         free( impl->items );
@@ -1046,8 +1104,10 @@ static ULONG WINAPI iterator_Release( IInspectable *iface )
     ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
-        if (impl->coll) IInspectable_Release( &impl->coll->IInspectable_iface );
-        free( impl );
+        /* leak-keep: app caches raw ptrs in CoreRT RCWs; GC compaction
+         * strands freed objects -> stale-vtbl AV in WindowEx ctor. */
+        InterlockedIncrement( &impl->ref );
+        return 1;
     }
     return ref;
 }
@@ -1145,6 +1205,54 @@ static const void *iterator_vtbl[256] =
     [8] = iterator_get_HasCurrent,         /* 8: get_HasCurrent */
     [9] = iterator_GetMany,                /* 9: GetMany */
 };
+
+/* IIterable<RowDefinition> view: slot 6 = First() -> fresh IIterator enumerator */
+static HRESULT WINAPI iterable_First( void *iface, void **current )
+{
+    struct xaml_iterator *impl = (struct xaml_iterator *)iface;
+    struct xaml_iterator *it;
+    ERR( "iterable_First iface %p out %p\n", iface, current );
+    if (!current) return E_POINTER;
+    if (!(it = calloc( 1, sizeof(*it) ))) return E_OUTOFMEMORY;
+    it->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( iterator_vtbl );
+    it->ref = 1;
+    it->coll = impl->coll;
+    it->index = 0;
+    it->end = impl->end;
+    *current = &it->IInspectable_iface;
+    return S_OK;
+}
+
+static const void *iterable_vtbl[256] =
+{
+    [0] = iterator_QueryInterface,
+    [1] = iterator_AddRef,
+    [2] = iterator_Release,
+    [3] = iterator_GetIids,
+    [4] = iterator_GetRuntimeClassName,
+    [5] = iterator_GetTrustLevel,
+    [6 ... 255] = frame_generic_slot,
+    [6] = iterable_First,                  /* IIterable: First */
+};
+
+static HRESULT collection_iterable_view( struct xaml_collection *coll, void **out )
+{
+    struct xaml_iterator *v;
+    if (coll->iterable_view)
+    {
+        *out = coll->iterable_view;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+    if (!(v = calloc( 1, sizeof(*v) ))) return E_OUTOFMEMORY;
+    v->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( iterable_vtbl );
+    v->ref = 1;
+    v->coll = coll;
+    v->end = coll->count;
+    coll->iterable_view = &v->IInspectable_iface;  /* leak-kept for collection lifetime */
+    *out = &v->IInspectable_iface;
+    return S_OK;
+}
 
 static HRESULT WINAPI collection_GetAt( void *iface, ULONG_PTR index, void **item );
 static HRESULT WINAPI collection_get_Size( void *iface, unsigned int *size );
@@ -1334,6 +1442,27 @@ static HRESULT WINAPI collection_GetMany( void *iface, unsigned int start, unsig
     return S_OK;
 }
 
+/* WinUI3 RowDefinitionCollection IV3 {94ea2b94} = IVectorView<RowDefinition>:
+ * GetAt6, Size7, GetView8, IndexOf9, GetMany10 (IObservableVector has SetAt10). */
+static const void *collection_view_vtbl[256] =
+{
+    [0] = collection_QueryInterface,
+    [1] = collection_AddRef,
+    [2] = collection_Release,
+    [3] = collection_GetIids,
+    [4] = collection_GetRuntimeClassName,
+    [5] = collection_GetTrustLevel,
+    [6 ... 255] = frame_generic_slot,
+    [6] = collection_GetAt,
+    [7] = collection_get_Size,
+    [8] = collection_GetView,
+    [9] = collection_IndexOf,
+    [10] = collection_GetMany,
+    [13] = collection_Append,
+    [15] = collection_Clear,
+    [16] = collection_GetMany,
+};
+
 static const void *collection_vtbl[256] =
 {
     [0] = collection_QueryInterface,         /* 0: QI */
@@ -1372,6 +1501,8 @@ static const GUID IID_IWebView2_g =
     { 0x2b2c76c2, 0x997c, 0x5069, { 0xa8, 0xf0, 0x9b, 0x84, 0xcd, 0x7e, 0x62, 0x4b } };
 static const GUID IID_IWebView22_g =
     { 0x560c5eed, 0x3e7a, 0x51e4, { 0xb1, 0x4f, 0x10, 0x7b, 0xa0, 0x2b, 0x89, 0xbe } };
+static const GUID IID_IWebView2IV1_g =
+    { 0xaf86e2e0, 0xb12d, 0x4c6a, { 0x9c, 0x5a, 0xd7, 0xaa, 0x65, 0x10, 0x1e, 0x90 } };
 
 struct xaml_element
 {
@@ -1593,7 +1724,7 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
 
     if (!out) return E_POINTER;
 
-    ERR( "element_QueryInterface(%p, %s, class=%s)\n", iface, debugstr_guid( iid ), debugstr_w( impl->class_name ) );
+    ERR( "element_QueryInterface(%p vt=%p, %s, class=%s)\n", iface, iface->lpVtbl, debugstr_guid( iid ), debugstr_w( impl->class_name ) );
 
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
@@ -1607,13 +1738,19 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
 
     if (impl->is_webview)
     {
-        if (IsEqualGUID( iid, &IID_IWebView2_g ))
+        if (IsEqualGUID( iid, &IID_IWebView2_g ) ||
+            IsEqualGUID( iid, &IID_IGrid_WinUI ) ||
+            IsEqualGUID( iid, &IID_IGrid_WinUI2 ) ||
+            IsEqualGUID( iid, &IID_IGrid_v1 ))
         {
+            /* WinUI3 WebView2 IV1/IV2: serve the real IWebView2 vtbl, not the
+             * generic element slots (r100: get_double outs AV webview calls). */
             *out = &impl->IWebView2_iface;
             element_AddRef( iface );
             return S_OK;
         }
-        if (IsEqualGUID( iid, &IID_IWebView22_g ))
+        if (IsEqualGUID( iid, &IID_IWebView22_g ) ||
+            IsEqualGUID( iid, &IID_IWebView2IV1_g ))
         {
             *out = &impl->IWebView22_iface;
             element_AddRef( iface );
@@ -1622,6 +1759,11 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
     }
 
     if (IsEqualGUID( iid, &IID_IGrid ) ||
+        IsEqualGUID( iid, &IID_IGrid_WinUI ) ||
+        IsEqualGUID( iid, &IID_IGrid_WinUI2 ) ||
+        IsEqualGUID( iid, &IID_IGrid_v1 ) ||
+        IsEqualGUID( iid, &IID_IView_IV1 ) ||
+        IsEqualGUID( iid, &IID_IView_IV2 ) ||
         IsEqualGUID( iid, &IID_IPanel ) ||
         IsEqualGUID( iid, &IID_ICanvas ) ||
         IsEqualGUID( iid, &IID_IStackPanel ) ||
@@ -1710,11 +1852,12 @@ static ULONG WINAPI element_Release( IInspectable *iface )
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
-        if (impl->visual) IDCompositionVisual_Release( impl->visual );
-        if (impl->row_defs) IInspectable_Release( impl->row_defs );
-        if (impl->col_defs) IInspectable_Release( impl->col_defs );
-        if (impl->children) IInspectable_Release( impl->children );
-        free( impl );
+        /* Leak-keep elements: the .NET 8 ComWrappers RCW caches the native
+         * iface and QIs it after our ref drains (r100-r106 stale-iface AV in
+         * element_QueryInterface via coreclr thunk). Tree is app-lifetime. */
+        ERR( "element_Release iface %p ref 0 (leak-kept)\n", iface );
+        InterlockedIncrement( &impl->ref );
+        return 1;
     }
     return ref;
 }
@@ -1736,6 +1879,7 @@ static HRESULT WINAPI element_GetIids( IInspectable *iface, ULONG *count, IID **
             arr[0] = IID_IReferenceTracker;
             arr[1] = IID_IWeakReferenceSource;
             arr[2] = IID_IGrid;
+            ERR( "element_GetIids arr %p count 3\n", arr );
             *count = 3;
             *iids = arr;
         }
@@ -1764,6 +1908,17 @@ static HRESULT WINAPI element_generic_slot( void *iface, ... )
     ERR( "element_generic_slot iface %p\n", iface );
     return S_OK;
 }
+
+/* slot-probe prototypes (definitions near wv2_vtbl below) */
+#define WVPROT(i) static HRESULT WINAPI wv2_probe##i( void *iface, ... );
+WVPROT(0) WVPROT(1) WVPROT(2) WVPROT(3) WVPROT(4) WVPROT(5) WVPROT(6) WVPROT(7)
+WVPROT(8) WVPROT(9) WVPROT(10) WVPROT(11) WVPROT(12) WVPROT(13) WVPROT(14) WVPROT(15)
+WVPROT(16) WVPROT(17) WVPROT(18) WVPROT(19) WVPROT(20) WVPROT(21) WVPROT(22) WVPROT(23)
+WVPROT(24) WVPROT(25) WVPROT(26) WVPROT(27) WVPROT(28) WVPROT(29) WVPROT(30) WVPROT(31)
+WVPROT(32) WVPROT(33) WVPROT(34) WVPROT(35) WVPROT(36) WVPROT(37) WVPROT(38) WVPROT(39)
+WVPROT(40) WVPROT(41) WVPROT(42) WVPROT(43) WVPROT(44) WVPROT(45) WVPROT(46) WVPROT(47)
+WVPROT(48) WVPROT(49) WVPROT(50) WVPROT(51) WVPROT(52) WVPROT(53) WVPROT(54) WVPROT(55)
+WVPROT(56) WVPROT(57) WVPROT(58) WVPROT(59) WVPROT(60) WVPROT(61) WVPROT(62) WVPROT(63)
 
 static HRESULT WINAPI element_get_double( void *iface, double *val )
 {
@@ -1958,6 +2113,7 @@ static HRESULT WINAPI element_get_Content( void *iface, void **out )
 {
     struct xaml_element *impl = impl_from_element( iface );
     TRACE( "element_get_Content iface %p, out %p\n", iface, out );
+    ERR( "TRACEROWS element_get_Content iface %p out %p content %p\n", iface, out, impl->content );
     if (!out) return E_POINTER;
     *out = impl->content;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
@@ -1982,12 +2138,14 @@ static HRESULT WINAPI element_grid_get_RowDefinitions( void *iface, void **out )
     {
         IInspectable *rd = NULL;
         collection_create( (void **)&impl->row_defs );
-        element_create( NULL, NULL, (void **)&rd );
+        element_create_typed( L"Windows.UI.Xaml.Controls.RowDefinition", (void **)&rd );
         if (rd)
         {
+            IInspectable *rd2 = NULL;
             struct xaml_collection *c = impl_from_collection( (void *)impl->row_defs );
+            element_create_typed( L"Windows.UI.Xaml.Controls.RowDefinition", (void **)&rd2 );
             collection_Append( (void *)impl->row_defs, rd );
-            collection_Append( (void *)impl->row_defs, rd );
+            collection_Append( (void *)impl->row_defs, rd2 ? rd2 : rd );
             ERR( "seeded fresh row_defs count %u\n", c->count );
         }
     }
@@ -1996,15 +2154,38 @@ static HRESULT WINAPI element_grid_get_RowDefinitions( void *iface, void **out )
     return S_OK;
 }
 
+/* WinUI3 Grid IV1 (c3c01020) slot 10: get_RowDefinitions(HSTRING count_in, IObservableVector** out) */
+static HRESULT WINAPI element_grid_get_RowDefinitions_abi3( void *iface, void *count, void **out )
+{
+    (void)count;
+    return element_grid_get_RowDefinitions( iface, out );
+}
+
 static HRESULT WINAPI element_grid_get_ColumnDefinitions( void *iface, void **out )
 {
     struct xaml_element *impl = impl_from_element( iface );
     TRACE( "element_grid_get_ColumnDefinitions iface %p, out %p\n", iface, out );
     if (!out) return E_POINTER;
-    if (!impl->col_defs) collection_create( (void **)&impl->col_defs );
+    if (!impl->col_defs)
+    {
+        void *cd = NULL, *cd2 = NULL;
+        collection_create( (void **)&impl->col_defs );
+        element_create_typed( L"Windows.UI.Xaml.Controls.ColumnDefinition", (void **)&cd );
+        element_create_typed( L"Windows.UI.Xaml.Controls.ColumnDefinition", (void **)&cd2 );
+        collection_Append( (void *)impl->col_defs, cd );
+        collection_Append( (void *)impl->col_defs, cd2 ? cd2 : cd );
+        ERR( "seeded fresh col_defs\n" );
+    }
     *out = impl->col_defs;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
+}
+
+/* WinUI3 Grid IV2 (94ea2b94) slots 10/11: get_RowDefinitions / get_ColumnDefinitions (HSTRING in, out) */
+static HRESULT WINAPI element_grid_get_ColumnDefinitions_abi3( void *iface, void *count, void **out )
+{
+    (void)count;
+    return element_grid_get_ColumnDefinitions( iface, out );
 }
 
 static HRESULT WINAPI element_panel_get_Children( void *iface, void **out )
@@ -2028,12 +2209,42 @@ static const void *grid_vtbl[256] =
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
     [9] = xaml_ConnectFromTrackerSource,
-    [10] = xaml_AddRefFromTrackerSource,
-    [11] = xaml_ReleaseFromTrackerSource,
+    [10] = element_grid_get_RowDefinitions_abi3,  /* IV2 94ea2b94 WinUI3 view: RowDefinitions(HSTRING, vec**) */
+    [11] = element_grid_get_ColumnDefinitions_abi3,
     [6] = element_grid_get_RowDefinitions,
     [7] = element_grid_get_ColumnDefinitions,
     [12] = element_grid_get_ColumnDefinitions,
-    [19] = element_grid_get_RowDefinitions,
+    [13] = wv2_probe57, [14] = wv2_probe58, [15] = wv2_probe59,
+    [16] = element_get_Content, [17] = wv2_probe61, [18] = wv2_probe62,
+    [19] = wv2_probe63, [20] = wv2_probe0,
+    [23] = wv2_probe1, [24] = wv2_probe2, [25] = wv2_probe3,
+    [26] = wv2_probe4, [27] = wv2_probe5, [28] = wv2_probe6,
+    [29] = wv2_probe7, [30] = wv2_probe8, [31] = wv2_probe9,
+    [32] = wv2_probe10, [33] = wv2_probe11, [34] = wv2_probe12,
+    [35] = wv2_probe13, [36] = wv2_probe14, [37] = wv2_probe15,
+    [38] = wv2_probe16, [39] = wv2_probe17, [40] = wv2_probe18,
+    [20] = wv2_probe0,  [21] = wv2_probe1,  [22] = wv2_probe2,  [23] = wv2_probe3,
+    [24] = wv2_probe4,  [25] = wv2_probe5,  [26] = wv2_probe6,  [27] = wv2_probe7,
+    [28] = wv2_probe8,  [29] = wv2_probe9,  [30] = wv2_probe10, [31] = wv2_probe11,
+    [32] = wv2_probe12, [33] = wv2_probe13, [34] = wv2_probe14, [35] = wv2_probe15,
+    [36] = wv2_probe16, [37] = wv2_probe17, [38] = wv2_probe18, [39] = wv2_probe19,
+    [40] = wv2_probe20, [41] = wv2_probe21, [42] = wv2_probe22, [43] = wv2_probe23,
+    [44] = wv2_probe24, [45] = wv2_probe25, [46] = wv2_probe26, [47] = wv2_probe27,
+    [48] = wv2_probe28, [49] = wv2_probe29, [50] = wv2_probe30, [51] = wv2_probe31,
+    [52] = wv2_probe32, [53] = wv2_probe33, [54] = wv2_probe34, [55] = wv2_probe35,
+    [56] = wv2_probe36, [57] = wv2_probe37, [58] = wv2_probe38, [59] = wv2_probe39,
+    [60] = wv2_probe40, [61] = wv2_probe41, [62] = wv2_probe42, [63] = wv2_probe43,
+    [64] = wv2_probe44, [65] = wv2_probe45, [66] = wv2_probe46, [67] = wv2_probe47,
+    [68] = wv2_probe48, [69] = wv2_probe49, [70] = wv2_probe50, [71] = wv2_probe51,
+    [72] = wv2_probe52,
+    [73] = element_remove_Loaded,
+    [74] = wv2_probe53, [75] = wv2_probe54, [76] = wv2_probe55, [77] = wv2_probe56,
+    [78] = wv2_probe57, [79] = wv2_probe58, [80] = wv2_probe59, [81] = wv2_probe60,
+    [82] = wv2_probe61, [83] = wv2_probe62, [84] = wv2_probe63,
+    [85] = wv2_probe0,  [86] = wv2_probe1,  [87] = wv2_probe2,  [88] = wv2_probe3,
+    [89] = wv2_probe4,  [90] = wv2_probe5,  [91] = wv2_probe6,  [92] = wv2_probe7,
+    [93] = wv2_probe8,  [94] = wv2_probe9,  [95] = wv2_probe10, [96] = wv2_probe11,
+    [97] = wv2_probe12, [98] = wv2_probe13, [99] = wv2_probe14, [100] = wv2_probe15,
     [72] = element_add_Loaded,
     [73] = element_remove_Loaded,
     [127] = element_get_Content,
@@ -2082,6 +2293,52 @@ static const void *content_control_vtbl[256] =
     [131] = element_put_Content,
 };
 
+/* WinUI3 IRowDefinition ABI: [6]get_Height(GridLength) [8]get_MaxHeight [10]get_MinHeight
+ * [12]get_Priority. GridLength = { double value; GridUnitType unit(Star=2) }. */
+struct xaml_grid_length { double value; unsigned int unit; };
+static HRESULT WINAPI rowdef_get_Height( void *iface, void *out )
+{
+    struct xaml_grid_length gl = { 1.0, 2 };
+    ERR( "rowdef_get_Height iface %p out %p\n", iface, out );
+    if (out) *(struct xaml_grid_length *)out = gl;
+    return S_OK;
+}
+static HRESULT WINAPI rowdef_get_max( void *iface, double *out )
+{
+    if (out) *out = 1.7976931348623157e308;
+    return S_OK;
+}
+static HRESULT WINAPI rowdef_get_min( void *iface, double *out )
+{
+    if (out) *out = 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI rowdef_get_priority( void *iface, int *out )
+{
+    if (out) *out = 5;
+    return S_OK;
+}
+static HRESULT WINAPI rowdef_get_actual( void *iface, double *out )
+{
+    if (out) *out = 0.0;
+    return S_OK;
+}
+static HRESULT WINAPI rowdef_set_Height( void *iface, struct xaml_grid_length val )
+{
+    (void)val;
+    return S_OK;
+}
+static HRESULT WINAPI rowdef_set_max( void *iface, double val )
+{
+    (void)val;
+    return S_OK;
+}
+static HRESULT WINAPI rowdef_set_min( void *iface, double val )
+{
+    (void)val;
+    return S_OK;
+}
+
 static const void *row_def_vtbl[256] =
 {
     [0] = element_QueryInterface,
@@ -2091,9 +2348,15 @@ static const void *row_def_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
-    [6] = xaml_ConnectFromTrackerSource,
-    [7] = xaml_AddRefFromTrackerSource,
-    [8] = xaml_ReleaseFromTrackerSource,
+    /* CsWinRT IRowDefinition: 6 ActualHeight, 7 get_Height, 8 set_Height,
+     * 9 get_MaxHeight, 10 set_MaxHeight, 11 get_MinHeight, 12 set_MinHeight. */
+    [6] = rowdef_get_actual,
+    [7] = rowdef_get_Height,
+    [8] = rowdef_set_Height,
+    [9] = rowdef_get_max,
+    [10] = rowdef_set_max,
+    [11] = rowdef_get_min,
+    [12] = rowdef_set_min,
     [130] = element_get_Content,
     [131] = element_put_Content,
 };
@@ -2107,9 +2370,15 @@ static const void *col_def_vtbl[256] =
     [4] = element_GetRuntimeClassName,
     [5] = element_GetTrustLevel,
     [6 ... 255] = element_generic_slot,
-    [6] = xaml_ConnectFromTrackerSource,
-    [7] = xaml_AddRefFromTrackerSource,
-    [8] = xaml_ReleaseFromTrackerSource,
+    /* CsWinRT IColumnDefinition: 6 ActualWidth, 7 get_Width, 8 set_Width,
+     * 9 get_MaxWidth, 10 set_MaxWidth, 11 get_MinWidth, 12 set_MinWidth. */
+    [6] = rowdef_get_actual,
+    [7] = rowdef_get_Height,
+    [8] = rowdef_set_Height,
+    [9] = rowdef_get_max,
+    [10] = rowdef_set_max,
+    [11] = rowdef_get_min,
+    [12] = rowdef_set_min,
     [130] = element_get_Content,
     [131] = element_put_Content,
 };
@@ -3443,6 +3712,27 @@ static HRESULT WINAPI wv22_EnsureCoreWebView2AsyncWithOptions( void *iface, void
     return xaml_async_action_create( (IAsyncAction **)op );
 }
 
+/* IV1 (af86e2e0) slot-layout probe: 64 named variadic stubs cycling across
+ * [6..255]; slot identity = (idx-6)%64, unique within 6..69. Writes NULL to
+ * the first pointer out-param so getters hand back benign objects. */
+#define WVP(i) \
+    static HRESULT WINAPI wv2_probe##i( void *iface, ... ) \
+    { \
+        va_list args; va_start( args, iface ); \
+        void *a0 = va_arg( args, void * ); \
+        va_end( args ); \
+        ERR( "WVPROBE slot%u iface %p a0 %p\n", (i) + 6, iface, a0 ); \
+        if (a0) *(void **)a0 = NULL; \
+        return S_OK; \
+    }
+WVP(0) WVP(1) WVP(2) WVP(3) WVP(4) WVP(5) WVP(6) WVP(7)
+WVP(8) WVP(9) WVP(10) WVP(11) WVP(12) WVP(13) WVP(14) WVP(15)
+WVP(16) WVP(17) WVP(18) WVP(19) WVP(20) WVP(21) WVP(22) WVP(23)
+WVP(24) WVP(25) WVP(26) WVP(27) WVP(28) WVP(29) WVP(30) WVP(31)
+WVP(32) WVP(33) WVP(34) WVP(35) WVP(36) WVP(37) WVP(38) WVP(39)
+WVP(40) WVP(41) WVP(42) WVP(43) WVP(44) WVP(45) WVP(46) WVP(47)
+WVP(48) WVP(49) WVP(50) WVP(51) WVP(52) WVP(53) WVP(54) WVP(55)
+WVP(56) WVP(57) WVP(58) WVP(59) WVP(60) WVP(61) WVP(62) WVP(63)
 static const void *wv2_vtbl[256] =
 {
     [0] = element_wv2_QueryInterface,         /* 0: QI */
@@ -3475,11 +3765,23 @@ static const void *wv22_vtbl[256] =
     [4] = element_wv22_GetRuntimeClassName,   /* 4: GetRuntimeClassName */
     [5] = element_GetTrustLevel,              /* 5: GetTrustLevel */
     [6 ... 255] = element_generic_slot,
-    [6] = xaml_ConnectFromTrackerSource,
-    [7] = xaml_AddRefFromTrackerSource,
-    [8] = xaml_ReleaseFromTrackerSource,
-    [9] = wv22_EnsureCoreWebView2Async,       /* 9: EnsureCoreWebView2Async (body = old + 3) */
-    [10] = wv22_EnsureCoreWebView2AsyncWithOptions,
+    [6] = wv2_probe0,   [7] = wv2_probe1,   [8] = wv2_probe2,   [9] = wv2_probe3,
+    [10] = element_grid_get_RowDefinitions_abi3,  /* IV1 c3c01020 slot10 = RowDefinitions(this, HSTRING, vec**) */
+    [11] = wv2_probe5,  [12] = wv2_probe6,  [13] = wv2_probe7,
+    [14] = wv2_probe8,  [15] = wv2_probe9,  [16] = wv2_probe10, [17] = wv2_probe11,
+    [18] = wv2_probe12, [19] = wv2_probe13, [20] = wv2_probe14, [21] = wv2_probe15,
+    [22] = wv2_probe16, [23] = wv2_probe17, [24] = wv2_probe18, [25] = wv2_probe19,
+    [26] = wv2_probe20, [27] = wv2_probe21, [28] = wv2_probe22, [29] = wv2_probe23,
+    [30] = wv2_probe24, [31] = wv2_probe25, [32] = wv2_probe26, [33] = wv2_probe27,
+    [34] = wv2_probe28, [35] = wv2_probe29, [36] = wv2_probe30, [37] = wv2_probe31,
+    [38] = wv2_probe32, [39] = wv2_probe33, [40] = wv2_probe34, [41] = wv2_probe35,
+    [42] = wv2_probe36, [43] = wv2_probe37, [44] = wv2_probe38, [45] = wv2_probe39,
+    [46] = wv2_probe40, [47] = wv2_probe41, [48] = wv2_probe42, [49] = wv2_probe43,
+    [50] = wv2_probe44, [51] = wv2_probe45, [52] = wv2_probe46, [53] = wv2_probe47,
+    [54] = wv2_probe48, [55] = wv2_probe49, [56] = wv2_probe50, [57] = wv2_probe51,
+    [58] = wv2_probe52, [59] = wv2_probe53, [60] = wv2_probe54, [61] = wv2_probe55,
+    [62] = wv2_probe56, [63] = wv2_probe57, [64] = wv2_probe58, [65] = wv2_probe59,
+    [66] = wv2_probe60, [67] = wv2_probe61, [68] = wv2_probe62, [69] = wv2_probe63,
 };
 
 HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instance )
