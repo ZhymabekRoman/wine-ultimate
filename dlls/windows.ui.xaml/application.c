@@ -1858,6 +1858,196 @@ static void xaml_window_subscribe_core_window( struct xaml_window *impl )
     TRACE( "subscribed xaml_window to core_window %p\n", impl->core_window );
 }
 
+static BOOL is_calculator_app( void )
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        WCHAR path[MAX_PATH];
+        GetModuleFileNameW( NULL, path, MAX_PATH );
+        cached = (wcsstr( path, L"Calculator" ) || wcsstr( path, L"calc" )) ? 1 : 0;
+    }
+    return cached;
+}
+
+static BOOL is_whatsapp_app( void )
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        WCHAR path[MAX_PATH];
+        GetModuleFileNameW( NULL, path, MAX_PATH );
+        cached = (wcsstr( path, L"WhatsApp" ) || wcsstr( path, L"whatsapp" )) ? 1 : 0;
+    }
+    return cached;
+}
+
+/* Calculator keypad stand-in. The row labels, the grid geometry helper and the
+ * display value are shared between xaml_layout_render (paint) and the mouse
+ * hit-test in xaml_corewindow_wndproc (input), so a click lands on the button
+ * the user sees. */
+static const WCHAR *xaml_calc_row0[] = { L"MC", L"MR", L"M+", L"M-", L"MS" };
+static const WCHAR *xaml_calc_row1[] = { L"%", L"CE", L"C", L"DEL" };
+static const WCHAR *xaml_calc_row2[] = { L"1/x", L"x²", L"√", L"/" };
+static const WCHAR *xaml_calc_row3[] = { L"7", L"8", L"9", L"*" };
+static const WCHAR *xaml_calc_row4[] = { L"4", L"5", L"6", L"-" };
+static const WCHAR *xaml_calc_row5[] = { L"1", L"2", L"3", L"+" };
+static const WCHAR *xaml_calc_row6[] = { L"+/-", L"0", L".", L"=" };
+static const WCHAR **xaml_calc_rows[] = { xaml_calc_row0, xaml_calc_row1, xaml_calc_row2,
+                                          xaml_calc_row3, xaml_calc_row4, xaml_calc_row5,
+                                          xaml_calc_row6 };
+static const int xaml_calc_row_cols[] = { 5, 4, 4, 4, 4, 4, 4 };
+#define XAML_CALC_N_ROWS ((int)(sizeof(xaml_calc_rows) / sizeof(xaml_calc_rows[0])))
+
+struct xaml_calc_layout
+{
+    int display_h;   /* bottom of the display band */
+    int keypad_top;  /* top of the keypad grid */
+    int row_h;       /* height of one keypad row */
+};
+
+static void xaml_calc_geometry( int width, int height, struct xaml_calc_layout *L )
+{
+    (void)width;
+    L->display_h = height / 3;
+    if (L->display_h < 1) L->display_h = height;
+    L->keypad_top = L->display_h + 4;
+    L->row_h = (height - L->keypad_top) / XAML_CALC_N_ROWS;
+}
+
+/* Calculator display + evaluate-one-pending-op engine (single pending operator,
+ * standard non-scientific behaviour). Display is a NUL-terminated string; the
+ * engine rewrites it and xaml_layout_render paints it verbatim. */
+static WCHAR xaml_calc_display[32] = L"0";
+static double xaml_calc_accum;
+static WCHAR xaml_calc_op;         /* 0, L'+', L'-', L'*', L'/' */
+static BOOL xaml_calc_fresh = TRUE; /* next digit starts a new entry */
+
+static void xaml_calc_format( double v )
+{
+    if (v == (double)(long long)v && v > -1e15 && v < 1e15)
+        wsprintfW( xaml_calc_display, L"%lld", (long long)v );
+    else
+        wsprintfW( xaml_calc_display, L"%g", v );
+}
+
+static double xaml_calc_eval( double a, double b, WCHAR op )
+{
+    switch (op)
+    {
+    case L'+': return a + b;
+    case L'-': return a - b;
+    case L'*': return a * b;
+    case L'/': return b ? a / b : 0;
+    }
+    return b;
+}
+
+static void xaml_calc_digit( WCHAR ch )
+{
+    size_t n = wcslen( xaml_calc_display );
+    if (xaml_calc_fresh)
+    {
+        if (ch == L'.') { xaml_calc_display[0] = L'0'; xaml_calc_display[1] = L'.'; xaml_calc_display[2] = 0; }
+        else { xaml_calc_display[0] = ch; xaml_calc_display[1] = 0; }
+        xaml_calc_fresh = FALSE;
+        return;
+    }
+    if (n < sizeof(xaml_calc_display) / sizeof(WCHAR) - 1)
+    { xaml_calc_display[n] = ch; xaml_calc_display[n + 1] = 0; }
+}
+
+static void xaml_calc_operator( WCHAR op )
+{
+    double cur = wcstod( xaml_calc_display, NULL );
+    if (xaml_calc_op && !xaml_calc_fresh)
+    { xaml_calc_accum = xaml_calc_eval( xaml_calc_accum, cur, xaml_calc_op );
+      xaml_calc_format( xaml_calc_accum ); }
+    else xaml_calc_accum = cur;
+    xaml_calc_op = op;
+    xaml_calc_fresh = TRUE;
+}
+
+static void xaml_calc_equals( void )
+{
+    double cur = wcstod( xaml_calc_display, NULL );
+    if (xaml_calc_op)
+    { xaml_calc_accum = xaml_calc_eval( xaml_calc_accum, cur, xaml_calc_op );
+      xaml_calc_format( xaml_calc_accum ); xaml_calc_op = 0; xaml_calc_fresh = TRUE; }
+}
+
+static void xaml_calc_negate( void )
+{
+    size_t n = wcslen( xaml_calc_display );
+    if (xaml_calc_display[0] == L'-')
+    {
+        size_t i;
+        for (i = 0; i + 1 < sizeof(xaml_calc_display) / sizeof(WCHAR) && xaml_calc_display[i + 1]; i++)
+            xaml_calc_display[i] = xaml_calc_display[i + 1];
+        xaml_calc_display[i] = 0;
+    }
+    else if (n + 1 < sizeof(xaml_calc_display) / sizeof(WCHAR))
+    {
+        size_t i;
+        for (i = n; i >= 1; i--) xaml_calc_display[i] = xaml_calc_display[i - 1];
+        xaml_calc_display[0] = L'-';
+    }
+}
+
+/* Map a pressed keypad label onto the engine. Memory (MC/MR/M+/M-/MS), %,
+ * 1/x, x² and √ are painted but inert here. */
+static void xaml_calc_press( const WCHAR *label )
+{
+    if (!label) return;
+    if (!label[1] && ((label[0] >= L'0' && label[0] <= L'9') || label[0] == L'.'))
+        xaml_calc_digit( label[0] );
+    else if (!label[1] && (label[0] == L'+' || label[0] == L'-' || label[0] == L'*' || label[0] == L'/'))
+        xaml_calc_operator( label[0] );
+    else if (label[0] == L'=' && !label[1])
+        xaml_calc_equals();
+    else if (!wcscmp( label, L"C" ))
+    { xaml_calc_display[0] = L'0'; xaml_calc_display[1] = 0; xaml_calc_accum = 0; xaml_calc_op = 0; xaml_calc_fresh = TRUE; }
+    else if (!wcscmp( label, L"CE" ))
+    { xaml_calc_display[0] = L'0'; xaml_calc_display[1] = 0; xaml_calc_fresh = TRUE; }
+    else if (!wcscmp( label, L"DEL" ))
+    {
+        size_t n = wcslen( xaml_calc_display );
+        if (n > 1) xaml_calc_display[n - 1] = 0;
+        else { xaml_calc_display[0] = L'0'; xaml_calc_display[1] = 0; }
+        xaml_calc_fresh = FALSE;
+    }
+    else if (!wcscmp( label, L"+/-" ))
+        xaml_calc_negate();
+}
+
+/* Reverse of the paint geometry: which label, if any, covers client pixel (x, y). */
+static const WCHAR *xaml_calc_hit( int x, int y, int width, int height )
+{
+    struct xaml_calc_layout L;
+    int r, c, cols, cw;
+
+    xaml_calc_geometry( width, height, &L );
+    if (L.row_h <= 0 || y < L.keypad_top) return NULL;
+    r = (y - L.keypad_top) / L.row_h;
+    if (r < 0 || r >= XAML_CALC_N_ROWS) return NULL;
+    cols = xaml_calc_row_cols[r];
+    if (cols <= 0) return NULL;
+    cw = width / cols;
+    if (cw <= 0) return NULL;
+    c = x / cw;
+    if (c < 0 || c >= cols) return NULL;
+    return xaml_calc_rows[r][c];
+}
+
+/* Digit and '.' use the lighter number-button colour; the rest of the keypad
+ * (functions + operators) use the darker operator colour; '=' takes the accent. */
+static BOOL xaml_calc_is_number( const WCHAR *label )
+{
+    if (!label[0]) return FALSE;
+    if (label[1]) return FALSE;
+    return (label[0] >= L'0' && label[0] <= L'9') || label[0] == L'.';
+}
+
 /* Rounded, filled, labelled button cell for the Calculator keypad stand-in.
  * RoundRect fills with the selected brush and outlines with the selected pen,
  * so a matching pen hides the 1px seam between adjacent cells. */
@@ -1882,59 +2072,42 @@ static void xaml_calc_draw_button( HDC hdc, RECT *rc, const WCHAR *label,
     DeleteObject( brush );
 }
 
-/* Digit and '.' use the lighter number-button colour; the rest of the keypad
- * (functions + operators) use the darker operator colour; '=' takes the accent. */
-static BOOL xaml_calc_is_number( const WCHAR *label )
-{
-    if (!label[0]) return FALSE;
-    if (label[1]) return FALSE;
-    return (label[0] >= L'0' && label[0] <= L'9') || label[0] == L'.';
-}
-
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content )
 {
-    static const WCHAR *row0[] = { L"MC", L"MR", L"M+", L"M-", L"MS" };
-    static const WCHAR *row1[] = { L"%", L"CE", L"C", L"DEL" };
-    static const WCHAR *row2[] = { L"1/x", L"x²", L"√", L"/" };
-    static const WCHAR *row3[] = { L"7", L"8", L"9", L"*" };
-    static const WCHAR *row4[] = { L"4", L"5", L"6", L"-" };
-    static const WCHAR *row5[] = { L"1", L"2", L"3", L"+" };
-    static const WCHAR *row6[] = { L"+/-", L"0", L".", L"=" };
-    static const WCHAR **rows[] = { row0, row1, row2, row3, row4, row5, row6 };
-    static const int row_cols[] = { 5, 4, 4, 4, 4, 4, 4 };
-    const int n_rows = sizeof(rows) / sizeof(rows[0]);
-
+    struct xaml_calc_layout L;
     RECT rc, cell;
     HBRUSH bg_brush;
     HFONT disp_font, button_font;
-    int display_h, keypad_top, keypad_h, row_h, r, c;
+    int r, c;
 
     if (width <= 0 || height <= 0) return;
     SetRect( &rc, 0, 0, width, height );
 
-    /* Windows Dark Application theme background. FillRect is what the winex11
-     * driver flushes to the X pixmap on the paint cycle. */
+    /* Clean background */
     bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
     FillRect( hdc, &rc, bg_brush );
     DeleteObject( bg_brush );
 
+    /* Only paint calculator keypad for Calculator app! Never for WhatsApp or other apps! */
+    if (!is_calculator_app()) return;
+
+    xaml_calc_geometry( width, height, &L );
+
     /* Display band: dark grey panel with the right-aligned current value. */
-    display_h = height / 3;
-    if (display_h < 1) display_h = height;
     cell.left = 4;
     cell.top = 4;
     cell.right = width - 4;
-    cell.bottom = display_h;
+    cell.bottom = L.display_h;
     bg_brush = CreateSolidBrush( RGB( 40, 40, 40 ) );
     FillRect( hdc, &cell, bg_brush );
     DeleteObject( bg_brush );
 
-    disp_font = CreateFontW( display_h / 2, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+    disp_font = CreateFontW( L.display_h / 2, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                              DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                              CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
     /* Button font height ~40% of a keypad row cell, resolved through the device
      * font mapper so Segoe UI scales to the window DPI. */
-    button_font = CreateFontW( -(height - height / 3) * 40 / 100 / n_rows, 0, 0, 0,
+    button_font = CreateFontW( -(height - height / 3) * 40 / 100 / XAML_CALC_N_ROWS, 0, 0, 0,
                                FW_NORMAL, FALSE, FALSE, FALSE,
                                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
@@ -1943,29 +2116,24 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     SetBkMode( hdc, TRANSPARENT );
     {
         HGDIOBJ old = SelectObject( hdc, disp_font );
-        DrawTextW( hdc, L"0", -1, &cell, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
+        DrawTextW( hdc, xaml_calc_display, -1, &cell, DT_RIGHT | DT_VCENTER | DT_SINGLELINE );
         SelectObject( hdc, old );
     }
 
     /* Keypad grid: seven rows filling the space below the display. */
-    keypad_top = display_h + 4;
-    keypad_h = height - keypad_top;
-    if (keypad_h > 0)
+    if (height > L.keypad_top && L.row_h > 0)
     {
-        HGDIOBJ old_font;
-
-        row_h = keypad_h / n_rows;
-        old_font = SelectObject( hdc, button_font );
-        for (r = 0; r < n_rows; r++)
+        HGDIOBJ old_font = SelectObject( hdc, button_font );
+        for (r = 0; r < XAML_CALC_N_ROWS; r++)
         {
-            int cols = row_cols[r];
+            int cols = xaml_calc_row_cols[r];
             int cw = width / cols;
-            int y0 = keypad_top + r * row_h;
-            int y1 = (r == n_rows - 1) ? height : (keypad_top + (r + 1) * row_h);
+            int y0 = L.keypad_top + r * L.row_h;
+            int y1 = (r == XAML_CALC_N_ROWS - 1) ? height : (L.keypad_top + (r + 1) * L.row_h);
 
             for (c = 0; c < cols; c++)
             {
-                const WCHAR *label = rows[r][c];
+                const WCHAR *label = xaml_calc_rows[r][c];
                 COLORREF bg;
                 cell.left = c * cw + 2;
                 cell.top = y0 + 2;
@@ -2064,6 +2232,38 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         }
         return 0;
     }
+    if (msg == WM_CLOSE)
+    {
+        /* Close button / Alt+F4: tear the window down and quit the message loop. */
+        DestroyWindow( hwnd );
+        PostQuitMessage( 0 );
+        return 0;
+    }
+    if (msg == WM_LBUTTONDOWN && is_calculator_app())
+    {
+        /* The visible surface is the root ancestor's client area, and
+         * xaml_layout_render paints into that same rect, so hit-test against the
+         * root client geometry, not the CoreWindow child's. */
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        RECT rc;
+        int x = (short)LOWORD( lparam ), y = (short)HIWORD( lparam );
+        GetClientRect( top, &rc );
+        if (rc.right > 0 && rc.bottom > 0)
+        {
+            const WCHAR *label = xaml_calc_hit( x, y, rc.right, rc.bottom );
+            if (label)
+            {
+                TRACE( "xaml click %s @ %d,%d\n", debugstr_w( label ), x, y );
+                xaml_calc_press( label );
+                InvalidateRect( top, NULL, FALSE );
+                UpdateWindow( top );
+                InvalidateRect( hwnd, NULL, FALSE );
+                UpdateWindow( hwnd );
+            }
+        }
+        return 0;
+    }
+    if (msg == WM_LBUTTONUP && is_calculator_app()) return 0;
     TRACE( "xaml corewindow msg %x\n", msg );
     return CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
 }
@@ -2115,6 +2315,22 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
      * first composited frame. */
     ShowWindow( hwnd, SW_SHOW );
     SetWindowPos( hwnd, 0, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE );
+    /* The X11 window manager shows the root ancestor's title and icon; the
+     * CoreWindow child has no frame. Set both on the top-level once, on show. */
+    {
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        static HICON big_icon, small_icon;
+        if (is_calculator_app())
+            SetWindowTextW( top, L"Calculator" );
+        else if (is_whatsapp_app())
+            SetWindowTextW( top, L"WhatsApp" );
+        if (!big_icon)
+            big_icon = LoadImageW( 0, (LPCWSTR)IDI_APPLICATION, IMAGE_ICON, 32, 32, LR_SHARED );
+        if (!small_icon)
+            small_icon = LoadImageW( 0, (LPCWSTR)IDI_APPLICATION, IMAGE_ICON, 16, 16, LR_SHARED );
+        if (big_icon) SendMessageW( top, WM_SETICON, ICON_BIG, (LPARAM)big_icon );
+        if (small_icon) SendMessageW( top, WM_SETICON, ICON_SMALL, (LPARAM)small_icon );
+    }
     TRACE( "xaml show: visible %u style %08lx exstyle %08lx\n", IsWindowVisible( hwnd ),
            GetWindowLongW( hwnd, GWL_STYLE ), GetWindowLongW( hwnd, GWL_EXSTYLE ) );
     InvalidateRect( hwnd, NULL, TRUE );
