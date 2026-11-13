@@ -1034,9 +1034,13 @@ static void *store_create_empty_map_view( void )
     return store_create_map_view( NULL, NULL, 0, &IID_IMapView_Object, &IID_IIterable_KeyValuePair_Object, &IID_IKeyValuePair_Object );
 }
 
+static const GUID IID_IAsyncInfo_s =
+    { 0x00000036, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+
 struct store_async_op
 {
-    const void *vtbl;
+    const void *vtbl_async_op;
+    const void *vtbl_async_info;
     LONG ref;
     void *result;
     BOOL is_bool;
@@ -1044,25 +1048,48 @@ struct store_async_op
     HRESULT error_code;
 };
 
+static inline struct store_async_op *impl_from_async_info( void *iface )
+{
+    return (struct store_async_op *)((char *)iface - offsetof(struct store_async_op, vtbl_async_info));
+}
+
 static HRESULT WINAPI store_async_QueryInterface( void *iface, REFIID iid, void **out )
 {
     static const GUID IID_IReferenceTracker =
         { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
     static const GUID IID_IReferenceTrackerManager =
         { 0x3cf184b4, 0x7ccb, 0x4dda, { 0x84, 0x55, 0x7e, 0x39, 0x35, 0xe2, 0x37, 0xf3 } };
+    static const GUID IID_IReferenceTrackerTarget =
+        { 0x5c13e51c, 0x4f32, 0x4726, { 0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0 } };
+    static const GUID IID_IMarshal =
+        { 0x00000003, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+    static const GUID IID_IWeakReferenceSource =
+        { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
     struct store_async_op *op = iface;
 
     if (!out) return E_INVALIDARG;
+    ERR( "store_async_QueryInterface iid=%s\n", debugstr_guid(iid) );
+
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
-        IsEqualGUID( iid, &IID_IReferenceTrackerManager ))
+        IsEqualGUID( iid, &IID_IReferenceTrackerManager ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ) ||
+        IsEqualGUID( iid, &IID_IMarshal ) ||
+        IsEqualGUID( iid, &IID_IWeakReferenceSource ))
     {
         *out = NULL;
         return E_NOINTERFACE;
     }
-    *out = iface;
+    if (IsEqualGUID( iid, &IID_IAsyncInfo_s ))
+    {
+        *out = &op->vtbl_async_info;
+        InterlockedIncrement( &op->ref );
+        return S_OK;
+    }
+    *out = &op->vtbl_async_op;
     InterlockedIncrement( &op->ref );
     return S_OK;
 }
+
 static ULONG WINAPI store_async_AddRef( void *iface )
 {
     struct store_async_op *op = iface;
@@ -1079,6 +1106,26 @@ static ULONG WINAPI store_async_Release( void *iface )
     }
     return ref;
 }
+
+static HRESULT WINAPI store_async_info_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct store_async_op *op = impl_from_async_info( iface );
+    return store_async_QueryInterface( &op->vtbl_async_op, iid, out );
+}
+static ULONG WINAPI store_async_info_AddRef( void *iface )
+{
+    struct store_async_op *op = impl_from_async_info( iface );
+    return InterlockedIncrement( &op->ref );
+}
+static ULONG WINAPI store_async_info_Release( void *iface )
+{
+    struct store_async_op *op = impl_from_async_info( iface );
+    return store_async_Release( &op->vtbl_async_op );
+}
+static HRESULT WINAPI store_async_info_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.Foundation.IAsyncInfo", 29, n );
+}
 static HRESULT WINAPI store_async_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
 static HRESULT WINAPI store_async_GetRuntimeClassName( void *iface, HSTRING *n )
 {
@@ -1092,7 +1139,7 @@ static HRESULT WINAPI store_async_put_Completed( void *iface, void *handler )
     {
         void **vtbl = *(void ***)handler;
         HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, UINT32) = (void *)vtbl[3];
-        if (invoke) invoke( handler, op, 1 /* AsyncStatus_Completed */ );
+        if (invoke) invoke( handler, &op->vtbl_async_op, 1 /* AsyncStatus_Completed */ );
     }
     return S_OK;
 }
@@ -1114,7 +1161,7 @@ static HRESULT WINAPI store_async_get_Id( void *iface, UINT32 *id ) { if (id) *i
 static HRESULT WINAPI store_async_get_Status( void *iface, UINT32 *status ) { if (status) *status = 1; return S_OK; }
 static HRESULT WINAPI store_async_get_ErrorCode( void *iface, HRESULT *code )
 {
-    struct store_async_op *op = iface;
+    struct store_async_op *op = impl_from_async_info( iface );
     if (code) *code = op->error_code;
     return S_OK;
 }
@@ -1132,6 +1179,16 @@ static const void *store_async_vtbl[] =
     store_async_put_Completed,
     store_async_get_Completed,
     store_async_GetResults,
+};
+
+static const void *store_async_info_vtbl[] =
+{
+    store_async_info_QueryInterface,
+    store_async_info_AddRef,
+    store_async_info_Release,
+    store_async_GetIids,
+    store_async_info_GetRuntimeClassName,
+    store_async_GetTrustLevel,
     store_async_get_Id,
     store_async_get_Status,
     store_async_get_ErrorCode,
@@ -1145,14 +1202,15 @@ static HRESULT store_async_create( void *result, BOOL is_bool, BOOL bool_result,
     if (!out) return E_INVALIDARG;
     *out = NULL;
     if (!(op = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*op) ))) return E_OUTOFMEMORY;
-    op->vtbl = store_async_vtbl;
+    op->vtbl_async_op = store_async_vtbl;
+    op->vtbl_async_info = store_async_info_vtbl;
     op->ref = 1;
     op->result = result;
     if (result && !is_bool) IUnknown_AddRef( (IUnknown *)result );
     op->is_bool = is_bool;
     op->bool_result = bool_result;
     op->error_code = error_code;
-    *out = op;
+    *out = &op->vtbl_async_op;
     return S_OK;
 }
 
