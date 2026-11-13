@@ -32,6 +32,7 @@ struct application
     IInspectable inner_iface;
     IInspectable ms_IApplication_iface;
     IInspectable overrides_uwp_iface;
+    IInspectable metadata_provider_iface;
     LONG ref;
     IInspectable *outer;
     IInspectable *resources;   /* lazy Windows.Foundation.Collections.PropertySet for the Resources QI set */
@@ -184,6 +185,7 @@ struct xaml_window
     BOOL core_window_subscribed;
 };
 static struct xaml_window global_xaml_window;
+static IInspectable *global_window_outer = NULL;
 static BOOL lifecycle_started = FALSE;
 
 /* The class activation interface IID of Windows.UI.Xaml.Application (the
@@ -210,6 +212,10 @@ static const GUID IID_IWindow_f722dcc2 =
     { 0xf722dcc2, 0x9827, 0x403d, { 0xaa, 0xed, 0xec, 0xca, 0x9a, 0xc1, 0x73, 0x98 } };
 static const GUID IID_IWindow_96061c05 =
     { 0x96061c05, 0x2dba, 0x4d08, { 0xb0, 0xbd, 0x2b, 0x30, 0xa1, 0x31, 0xc6, 0xaa } };
+static const GUID IID_IComponentConnector_x =
+    { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
+static const GUID IID_IUriRuntimeClass_x =
+    { 0x9e365e57, 0x48b2, 0x4160, { 0x95, 0x6f, 0xc7, 0x38, 0x51, 0x20, 0xbb, 0xfc } };
 
 /* CoreApplicationViewSource and View implementation
  *
@@ -643,38 +649,206 @@ static const IID IID_pinterface_IMap_HSTRING_IInspectable =
 static const IID IID_pinterface_IMapView_HSTRING_IInspectable =
     { 0x2f13c006, 0xa03a, 0x5f69, {0xb0, 0x90, 0x75, 0xa4, 0x3e, 0x33, 0x42, 0x3e} };
 
+static const GUID IID_IResourceDictionary_WinUI =
+    { 0x1b690975, 0xa710, 0x5783, { 0xa6, 0xe1, 0x15, 0x83, 0x6f, 0x61, 0x86, 0xc2 } };
+static const GUID IID_IMap_Object_Object_WinUI =
+    { 0x1c200999, 0x1a6d, 0x5f79, { 0xb6, 0x10, 0xf8, 0x5a, 0x2c, 0xd7, 0x77, 0xd8 } };
+static const GUID IID_IMapView_Object_Object_WinUI =
+    { 0x8e411a90, 0x5410, 0x5dd2, { 0x9b, 0x64, 0x25, 0xb5, 0xc5, 0xf0, 0xfc, 0x9f } };
+static const GUID IID_IDictionary_Object_Object =
+    { 0xf5f69427, 0x55ed, 0x5512, { 0x84, 0x29, 0xd4, 0xf6, 0x62, 0x6d, 0xfc, 0xdd } };
+static const GUID IID_IMap_Object_Object_Old =
+    { 0x9f03235a, 0xf3e2, 0x5cbe, { 0x81, 0x22, 0x21, 0xf7, 0xf4, 0xda, 0xd6, 0xf6 } };
+static const GUID IID_IMapView_Object_Object_Old =
+    { 0x28cb687b, 0xca64, 0x5c58, { 0xa0, 0xc5, 0xee, 0x73, 0x50, 0x15, 0x10, 0xc2 } };
+
+struct xaml_resource_dictionary
+{
+    IInspectable IInspectable_iface; /* IResourceDictionary face */
+    IInspectable IMap_iface;          /* IMap / IDictionary face */
+    LONG ref;
+};
+
+static inline struct xaml_resource_dictionary *impl_from_rd( IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_resource_dictionary, IInspectable_iface );
+}
+static inline struct xaml_resource_dictionary *impl_from_rd_map( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_resource_dictionary, IMap_iface );
+}
+
+static HRESULT WINAPI rd_generic_slot( void *iface, ... )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI rd_QueryInterface( IInspectable *iface, REFIID iid, void **out );
+static ULONG WINAPI rd_AddRef( IInspectable *iface );
+static ULONG WINAPI rd_Release( IInspectable *iface );
+static HRESULT WINAPI rd_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI rd_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{ return WindowsCreateString( L"Microsoft.UI.Xaml.ResourceDictionary", 35, name ); }
+static HRESULT WINAPI rd_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI rd_map_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
+    return rd_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI rd_map_AddRef( void *iface )
+{
+    struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
+    return rd_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI rd_map_Release( void *iface )
+{
+    struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
+    return rd_Release( &impl->IInspectable_iface );
+}
+
+static HRESULT WINAPI rd_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct xaml_resource_dictionary *impl = impl_from_rd( iface );
+    ERR( "rd_QueryInterface %p, iid %s\n", iface, debugstr_guid( iid ) );
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPropertySet ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionary_WinUI ))
+    {
+        *out = &impl->IInspectable_iface;
+        rd_AddRef( iface );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IDictionary_Object_Object ) ||
+        IsEqualGUID( iid, &IID_IMap_Object_Object_WinUI ) ||
+        IsEqualGUID( iid, &IID_IMapView_Object_Object_WinUI ) ||
+        IsEqualGUID( iid, &IID_IMap_Object_Object_Old ) ||
+        IsEqualGUID( iid, &IID_IMapView_Object_Object_Old ))
+    {
+        *out = &impl->IMap_iface;
+        rd_AddRef( iface );
+        return S_OK;
+    }
+    ERR( "rd_QueryInterface iid %s not implemented, returning E_NOINTERFACE\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI rd_AddRef( IInspectable *iface )
+{
+    struct xaml_resource_dictionary *impl = impl_from_rd( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+static ULONG WINAPI rd_Release( IInspectable *iface )
+{
+    struct xaml_resource_dictionary *impl = impl_from_rd( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI rd_get_MergedDictionaries( void *iface, void **value )
+{
+    TRACE( "rd_get_MergedDictionaries iface %p, value %p\n", iface, value );
+    if (value) *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI rd_get_Source( void *iface, void **value )
+{
+    if (value) *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI rd_set_Source( void *iface, void *value )
+{
+    return S_OK;
+}
+static HRESULT WINAPI rd_get_ThemeDictionaries( void *iface, void **value )
+{
+    if (value) *value = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI rd_map_Lookup( void *iface, void *key, void **value )
+{
+    ERR( "rd_map_Lookup iface %p, key %p, value %p\n", iface, key, value );
+    if (!value) return E_POINTER;
+    return element_create_typed( L"Microsoft.UI.Xaml.Style", value );
+}
+static HRESULT WINAPI rd_map_get_Size( void *iface, UINT32 *size )
+{
+    if (size) *size = 1;
+    return S_OK;
+}
+static HRESULT WINAPI rd_map_HasKey( void *iface, void *key, boolean *found )
+{
+    if (found) *found = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI rd_map_GetView( void *iface, void **view )
+{
+    if (view) *view = NULL;
+    return S_OK;
+}
+
+static const void *rd_vtbl[256] =
+{
+    [0] = rd_QueryInterface,
+    [1] = rd_AddRef,
+    [2] = rd_Release,
+    [3] = rd_GetIids,
+    [4] = rd_GetRuntimeClassName,
+    [5] = rd_GetTrustLevel,
+    [10 ... 255] = rd_generic_slot,
+    [6] = rd_get_MergedDictionaries,
+    [7] = rd_get_Source,
+    [8] = rd_set_Source,
+    [9] = rd_get_ThemeDictionaries,
+};
+
+static const void *rd_map_vtbl[256] =
+{
+    [0] = rd_map_QueryInterface,
+    [1] = rd_map_AddRef,
+    [2] = rd_map_Release,
+    [3] = rd_GetIids,
+    [4] = rd_GetRuntimeClassName,
+    [5] = rd_GetTrustLevel,
+    [10 ... 255] = rd_generic_slot,
+    [6] = rd_map_Lookup,
+    [7] = rd_map_get_Size,
+    [8] = rd_map_HasKey,
+    [9] = rd_map_GetView,
+};
+
+static HRESULT xaml_resource_dictionary_create( void **out )
+{
+    struct xaml_resource_dictionary *impl;
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)rd_vtbl;
+    impl->IMap_iface.lpVtbl = (const struct IInspectableVtbl *)rd_map_vtbl;
+    impl->ref = 1;
+    *out = &impl->IInspectable_iface;
+    return S_OK;
+}
+
 static HRESULT resources_propget( struct application *impl, REFIID iid, void **out )
 {
-    static const WCHAR propertyset_name[] = L"Windows.Foundation.Collections.PropertySet";
-    static HSTRING_HEADER propertyset_header;
-    IInspectable *face = NULL;
-    HSTRING hstr = NULL;
-    HRESULT hr;
-
+    ERR( "resources_propget impl %p, iid %s\n", impl, debugstr_guid( iid ) );
+    if (!impl) return E_FAIL;
+    if (!impl->resources)
+    {
+        xaml_resource_dictionary_create( (void **)&impl->resources );
+    }
     if (impl->resources)
     {
-        hr = IInspectable_QueryInterface( impl->resources, iid, out );
-        if (SUCCEEDED( hr )) return S_OK;
+        return IInspectable_QueryInterface( impl->resources, iid, out );
     }
-
-    if (FAILED( hr = WindowsCreateStringReference( propertyset_name,
-            sizeof(propertyset_name) / sizeof(WCHAR) - 1, &propertyset_header, &hstr )))
-    {
-        WARN( "PropertySet HSTRING create failed, hr %#lx.\n", hr );
-        *out = NULL;
-        return hr;
-    }
-
-    hr = RoActivateInstance( hstr, (IInspectable **)&face );
-    if (FAILED( hr ))
-    {
-        WARN( "PropertySet instance create failed, hr %#lx.\n", hr );
-        *out = NULL;
-        return hr;
-    }
-
-    impl->resources = face;
-    return IInspectable_QueryInterface( face, iid, out );
+    *out = NULL;
+    return E_FAIL;
 }
 
 struct application_extended_vtbl
@@ -716,10 +890,10 @@ static HRESULT WINAPI application_stub_ok( void *iface )
 
 static struct application *app_from_iface( void *iface )
 {
-    struct application *impl = (struct application *)iface;
-    if (impl->IApplication_iface.lpVtbl == (const struct IApplicationVtbl *)&application_vtbl)
-        return impl;
-    if (impl->ms_IApplication_iface.lpVtbl == (const struct IInspectableVtbl *)ms_application_vtbl)
+    const void *vtbl = *(const void **)iface;
+    if (vtbl == &application_vtbl)
+        return CONTAINING_RECORD( iface, struct application, IApplication_iface );
+    if (vtbl == ms_application_vtbl)
         return CONTAINING_RECORD( iface, struct application, ms_IApplication_iface );
     return impl_from_inner_IInspectable( (IInspectable *)iface );
 }
@@ -727,9 +901,9 @@ static struct application *app_from_iface( void *iface )
 static HRESULT WINAPI application_get_Resources( void *iface, void **value )
 {
     struct application *impl = app_from_iface( iface );
-    TRACE( "iface %p, value %p\n", iface, value );
+    ERR( "application_get_Resources iface %p, impl %p\n", iface, impl );
     if (!value) return E_POINTER;
-    return resources_propget( impl, &IID_IPropertySet, value );
+    return resources_propget( impl, &IID_IResourceDictionary_WinUI, value );
 }
 
 static HRESULT WINAPI application_put_Resources( void *iface, void *value )
@@ -787,7 +961,7 @@ static HRESULT WINAPI application_QueryInterface( IApplication *iface, REFIID ii
 {
     struct application *impl = impl_from_IApplication( iface );
 
-    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    ERR( "application_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (impl->outer &&
         !IsEqualGUID( iid, &IID_IApplication ) &&
@@ -921,11 +1095,41 @@ static const struct application_extended_vtbl application_vtbl =
     }
 };
 
+static const GUID IID_IXamlMetadataProvider_WinUI =
+    { 0xa96251f0, 0x2214, 0x5d53, { 0x87, 0x46, 0xce, 0x99, 0xa2, 0x59, 0x3c, 0xd7 } };
+
+static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REFIID iid, void **out );
+static ULONG WINAPI application_inner_AddRef( IInspectable *iface );
+static ULONG WINAPI application_inner_Release( IInspectable *iface );
+static HRESULT WINAPI application_inner_GetIids( IInspectable *iface, ULONG *iid_count, IID **iids );
+static HRESULT WINAPI application_inner_GetRuntimeClassName( IInspectable *iface, HSTRING *class_name );
+static HRESULT WINAPI application_inner_GetTrustLevel( IInspectable *iface, TrustLevel *trust_level );
+
+static HRESULT WINAPI app_meta_GetXamlType( void *iface, void *type_name, void **out )
+{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI app_meta_GetXamlTypeByFullName( void *iface, HSTRING name, void **out )
+{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI app_meta_GetXmlnsDefinitions( void *iface, ULONG *count, void ***out )
+{ if (count) *count = 0; if (out) *out = NULL; return S_OK; }
+
+static const void *app_meta_provider_vtbl[] =
+{
+    (void *)application_inner_QueryInterface,
+    (void *)application_inner_AddRef,
+    (void *)application_inner_Release,
+    (void *)application_inner_GetIids,
+    (void *)application_inner_GetRuntimeClassName,
+    (void *)application_inner_GetTrustLevel,
+    app_meta_GetXamlType,           /* 6: GetXamlType */
+    app_meta_GetXamlTypeByFullName, /* 7: GetXamlTypeByFullName */
+    app_meta_GetXmlnsDefinitions,   /* 8: GetXmlnsDefinitions */
+};
+
 static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct application *impl = impl_from_inner_IInspectable( iface );
 
-    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    ERR( "application_inner_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (IsEqualGUID( iid, &IID_IApplication_WinUI3 ))
     {
@@ -941,8 +1145,20 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IUnknown ) ||
-        IsEqualGUID( iid, &IID_IInspectable ) ||
+    if (IsEqualGUID( iid, &IID_IUnknown ))
+    {
+        if (impl->outer)
+        {
+            *out = impl->outer;
+            IInspectable_AddRef( impl->outer );
+            return S_OK;
+        }
+        *out = &impl->inner_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IApplication ) ||
         IsEqualGUID( iid, &IID_IApplication_WinUI ) ||
@@ -988,8 +1204,8 @@ static HRESULT WINAPI application_inner_GetIids( IInspectable *iface, ULONG *iid
 
 static HRESULT WINAPI application_inner_GetRuntimeClassName( IInspectable *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.UI.Xaml.Application",
-                                wcslen( L"Windows.UI.Xaml.Application" ),
+    return WindowsCreateString( L"Microsoft.UI.Xaml.Application",
+                                wcslen( L"Microsoft.UI.Xaml.Application" ),
                                 class_name );
 }
 
@@ -1038,6 +1254,7 @@ static inline struct application *impl_from_ms_IApplication( void *iface )
 static HRESULT WINAPI application_ms_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct application *impl = impl_from_ms_IApplication( iface );
+    ERR( "application_ms_QueryInterface iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
     return application_QueryInterface( &impl->IApplication_iface, iid, out );
 }
 
@@ -1053,26 +1270,33 @@ static ULONG WINAPI application_ms_Release( void *iface )
     return application_Release( &impl->IApplication_iface );
 }
 
+static HRESULT WINAPI ms_application_GetRuntimeClassName( void *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Microsoft.UI.Xaml.Application",
+                                wcslen( L"Microsoft.UI.Xaml.Application" ),
+                                class_name );
+}
+
 static const void *ms_application_vtbl[] =
 {
     application_ms_QueryInterface,        /* 0: QI */
     application_ms_AddRef,                /* 1: AddRef */
     application_ms_Release,               /* 2: Release */
     application_GetIids,                  /* 3: GetIids */
-    application_GetRuntimeClassName,      /* 4: GetRuntimeClassName */
+    ms_application_GetRuntimeClassName,   /* 4: GetRuntimeClassName */
     application_GetTrustLevel,            /* 5: GetTrustLevel */
     application_get_Resources,            /* 6: get_Resources */
     application_put_Resources,            /* 7: set_Resources */
-    application_stub_zero,                /* 8: get_DebugSettings */
-    application_stub_zero,                /* 9: get_RequestedTheme */
-    application_stub_ok,                  /* 10: set_RequestedTheme */
-    application_stub_zero,                /* 11: get_FocusVisualKind */
-    application_stub_ok,                  /* 12: set_FocusVisualKind */
-    application_stub_zero,                /* 13: get_HighContrastAdjustment */
-    application_stub_ok,                  /* 14: set_HighContrastAdjustment */
-    application_add_UnhandledException,   /* 15: add_UnhandledException */
-    application_remove_UnhandledException,/* 16: remove_UnhandledException */
-    application_Exit,                     /* 17: Exit */
+    application_add_UnhandledException,   /* 8: add_UnhandledException */
+    application_remove_UnhandledException,/* 9: remove_UnhandledException */
+    application_stub_zero,                /* 10: get_HighContrastAdjustment */
+    application_stub_ok,                  /* 11: set_HighContrastAdjustment */
+    application_stub_zero,                /* 12: get_RequestedTheme */
+    application_stub_ok,                  /* 13: set_RequestedTheme */
+    application_get_Resources,            /* 14: get_Resources */
+    application_put_Resources,            /* 15: set_Resources */
+    application_Exit,                     /* 16: Exit */
+    application_stub_zero,                /* 17 */
     application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
     application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
     application_stub_zero, application_stub_zero, application_stub_zero, application_stub_zero,
@@ -1195,6 +1419,32 @@ static ICoreWindow *get_current_core_window(void)
     return cw;
 }
 
+/* Window.Current.Activate() needs a CoreWindow on the UI thread to show. The WinRT
+ * CoreWindow factory hands out a window that already exists and answers NULL when the
+ * thread has none (CoreWindow.GetForCurrentThread); on-demand creation is env-gated in
+ * windows.ui. When the app never made one, create it through windows.ui's CoreWindow_Create
+ * export: it makes the top-level WS_OVERLAPPEDWINDOW | WS_VISIBLE window whose HWND the X11
+ * driver maps. */
+static ICoreWindow *create_current_core_window( void )
+{
+    ICoreWindow *(WINAPI *pCoreWindow_Create)( void );
+    HMODULE module;
+
+    module = GetModuleHandleW( L"windows.ui.dll" );
+    if (!module) module = LoadLibraryW( L"windows.ui.dll" );
+    if (!module) return NULL;
+    if (!(pCoreWindow_Create = (void *)GetProcAddress( module, "CoreWindow_Create" ))) return NULL;
+    return pCoreWindow_Create();
+}
+
+/* Resolve the thread CoreWindow, creating a top-level one when the thread has none. */
+static ICoreWindow *ensure_core_window( struct xaml_window *impl )
+{
+    if (!impl->core_window) impl->core_window = get_current_core_window();
+    if (!impl->core_window) impl->core_window = create_current_core_window();
+    return impl->core_window;
+}
+
 static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct xaml_window *impl = (struct xaml_window *)iface;
@@ -1273,7 +1523,8 @@ static HRESULT WINAPI xaml_window_GetIids( IInspectable *iface, ULONG *count, II
 
 static HRESULT WINAPI xaml_window_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.UI.Xaml.Window", 21, name );
+    ERR( "xaml_window_GetRuntimeClassName on %p -> Microsoft.UI.Xaml.Window\n", iface );
+    return WindowsCreateString( L"Microsoft.UI.Xaml.Window", 23, name );
 }
 
 static HRESULT WINAPI xaml_window_GetTrustLevel( IInspectable *iface, TrustLevel *level )
@@ -1502,6 +1753,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     UINT width, height;
     HRESULT hr;
 
+    if (!impl->core_window) ensure_core_window( impl );
     if (impl->core_window)
     {
         ICoreWindowInterop *interop = NULL;
@@ -1515,7 +1767,10 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     if (!hwnd) hwnd = GetActiveWindow();
     if (!hwnd) return S_FALSE;
 
-    if (!impl->core_window) impl->core_window = get_current_core_window();
+    /* The DComp target and swapchain attach to this HWND; it must be visible so the
+     * X11 driver maps the top-level window and the composited frames show on screen. */
+    ShowWindow( hwnd, SW_SHOW );
+
     if (impl->core_window) xaml_window_subscribe_core_window( impl );
 
     GetClientRect( hwnd, &rc );
@@ -1770,14 +2025,23 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
     ICoreWindow *cw = NULL;
     HWND hwnd = NULL;
     TRACE( "iface %p\n", iface );
-    if (!impl->core_window) impl->core_window = get_current_core_window();
-    cw = impl->core_window;
+    cw = ensure_core_window( impl );
     if (cw)
     {
+        ICoreWindowInterop *interop = NULL;
         ICoreWindow_Activate( cw );
-        hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+        if (SUCCEEDED( ICoreWindow_QueryInterface( cw, &IID_ICoreWindowInterop, (void **)&interop ) ))
+        {
+            interop->lpVtbl->GetWindowHandle( interop, &hwnd );
+            interop->lpVtbl->Release( interop );
+        }
+        if (!hwnd) hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
         if (!hwnd) hwnd = GetActiveWindow();
-        if (hwnd) InvalidateRect( hwnd, NULL, TRUE );
+        if (hwnd)
+        {
+            ShowWindow( hwnd, SW_SHOW );
+            InvalidateRect( hwnd, NULL, TRUE );
+        }
     }
     xaml_window_present( impl );
     return S_OK;
@@ -1882,7 +2146,8 @@ static HRESULT WINAPI xaml_window2_GetIids( IInspectable *iface, ULONG *count, I
 }
 static HRESULT WINAPI xaml_window2_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.UI.Xaml.Window", 21, name );
+    ERR( "xaml_window2_GetRuntimeClassName on %p -> Microsoft.UI.Xaml.Window\n", iface );
+    return WindowsCreateString( L"Microsoft.UI.Xaml.Window", 23, name );
 }
 static HRESULT WINAPI xaml_window2_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 {
@@ -2186,7 +2451,7 @@ static HRESULT WINAPI xaml_window_native_GetWindowHandle( IWindowNative *iface, 
 
     if (!hwnd) return E_POINTER;
     *hwnd = NULL;
-    if (!impl->core_window) impl->core_window = get_current_core_window();
+    ensure_core_window( impl );
     if (impl->core_window)
     {
         if (SUCCEEDED( hr = ICoreWindow_QueryInterface( impl->core_window, &IID_ICoreWindowInterop, (void **)&interop ) ))
@@ -2242,6 +2507,8 @@ static struct window_statics window_statics_obj;
 static HRESULT WINAPI window_statics_CreateInstance( void *iface, void *outer, void **inner, void **instance )
 {
     TRACE( "iface %p, outer %p, inner %p, instance %p\n", iface, outer, inner, instance );
+    global_window_outer = (IInspectable *)outer;
+    TRACE( "stored global_window_outer = %p\n", global_window_outer );
     if (inner && (void *)inner != (void *)outer)
     {
         *inner = (void *)&global_xaml_window.IInspectable_iface;
@@ -2515,69 +2782,311 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
     return application_factory_CreateInstance( &impl->IApplicationFactory_iface, NULL, NULL, (IApplication **)instance );
 }
 
-static HRESULT WINAPI application_LoadComponentWithLocation( void *iface, void *component, void *resourceLocator, int location )
+static const GUID IID_IXamlMetadataProvider_UWP =
+    { 0xb3765d69, 0x68a5, 0x4b32, { 0x88, 0x61, 0xfd, 0xb9, 0x0c, 0x1f, 0x58, 0x36 } };
+
+static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void **out )
 {
-    static const GUID IID_IComponentConnector =
-        { 0xad401812, 0xb091, 0x51d0, { 0xb9, 0x15, 0x2d, 0x68, 0x2c, 0xd2, 0xaf, 0x10 } };
-    static const GUID IID_IComponentConnector_UWP =
-        { 0x5c21c742, 0x2ced, 0x47c0, { 0xab, 0x65, 0xf3, 0xd6, 0x61, 0x56, 0xc4, 0x7b } };
-    IInspectable *connector = NULL;
-    HRESULT hr;
+    void *provider = NULL;
+    void *xaml_type = NULL;
+    HSTRING hname = NULL;
+    HRESULT hr = E_FAIL;
 
-    TRACE( "iface %p, component %p, resourceLocator %p, location %d\n", iface, component, resourceLocator, location );
+    if (!out) return E_POINTER;
+    *out = NULL;
 
-    if (resourceLocator)
+    if (current_application && current_application->outer)
     {
-        void **uri_vtbl = *(void ***)resourceLocator;
-        HRESULT (WINAPI *get_RawUri)( void *, HSTRING * ) = (void *)uri_vtbl[6];
-        HSTRING uri_str = NULL;
-        if (SUCCEEDED(get_RawUri( resourceLocator, &uri_str )) && uri_str)
+        hr = IInspectable_QueryInterface( current_application->outer, &IID_IXamlMetadataProvider_WinUI, &provider );
+        if (FAILED(hr) || !provider)
+            hr = IInspectable_QueryInterface( current_application->outer, &IID_IXamlMetadataProvider_UWP, &provider );
+        if (SUCCEEDED(hr) && provider)
         {
-            WARN( "LoadComponent uri: %s\n", debugstr_hstring( uri_str ) );
-            WindowsDeleteString( uri_str );
+            void **vtbl = *(void ***)provider;
+            HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)vtbl[7];
+            if (get_by_name && SUCCEEDED(WindowsCreateString( full_name, wcslen(full_name), &hname )) && hname)
+            {
+                hr = get_by_name( provider, hname, &xaml_type );
+                ERR( "GetXamlTypeByFullName(%s) -> hr %#lx, type %p\n", debugstr_w(full_name), hr, xaml_type );
+                WindowsDeleteString( hname );
+                if (SUCCEEDED(hr) && xaml_type)
+                {
+                    void **type_vtbl = *(void ***)xaml_type;
+                    /* In WinUI 3: Slot 19 is ActivateInstance (Do_Abi_ActivateInstance_13) */
+                    HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[19];
+                    if (activate)
+                    {
+                        hr = activate( xaml_type, out );
+                        ERR( "ActivateInstance(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
+                    }
+                    IInspectable_Release( (IInspectable *)xaml_type );
+                }
+            }
+            IInspectable_Release( (IInspectable *)provider );
         }
     }
+    ERR( "xaml_create_instance_from_provider(%s) -> hr %#lx, instance %p\n", debugstr_w(full_name), hr, *out );
+    return hr;
+}
 
-    if (!component) return S_OK;
+struct comp_connector_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)(void *this, REFIID riid, void **ppvObject);
+    ULONG (WINAPI *AddRef)(void *this);
+    ULONG (WINAPI *Release)(void *this);
+    HRESULT (WINAPI *GetIids)(void *this, ULONG *iidCount, IID **iids);
+    HRESULT (WINAPI *GetRuntimeClassName)(void *this, HSTRING *className);
+    HRESULT (WINAPI *GetTrustLevel)(void *this, TrustLevel *trustLevel);
+    HRESULT (WINAPI *Connect)(void *this, int connectionId, void *target);
+    HRESULT (WINAPI *GetBindingConnector)(void *this, int connectionId, void *target, void **bindingConnector);
+};
 
-    hr = IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector, (void **)&connector );
-    WARN( "application_LoadComponentWithLocation: component %p QI IComponentConnector hr %#lx, connector %p\n",
-          component, hr, connector );
-    if (FAILED(hr))
+static void xaml_load_xbf_components( void *component, void *resourceLocator )
+{
+    static int load_depth = 0;
+    struct { const struct comp_connector_vtbl *lpVtbl; } *connector = NULL;
+    IInspectable *uri_insp = (IInspectable *)resourceLocator;
+    void *uri_rt = NULL;
+    WCHAR comp_name[MAX_PATH] = {0};
+    char target_xbf[MAX_PATH] = {0};
+    WCHAR pri_path[MAX_PATH];
+    WCHAR *p_slash;
+    WCHAR *dot;
+    HANDLE hFile;
+    void *binding = NULL;
+    IInspectable *target_conn = (IInspectable *)component;
+
+    if (load_depth > 4)
     {
-        hr = IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector_UWP, (void **)&connector );
-        WARN( "application_LoadComponentWithLocation: component %p QI IComponentConnector_UWP hr %#lx, connector %p\n",
-              component, hr, connector );
+        TRACE( "recursion depth limit exceeded (%d)\n", load_depth );
+        return;
+    }
+    load_depth++;
+
+    TRACE( "xaml_load_xbf_components: target_conn %p, uri_insp %p, depth %d\n", target_conn, uri_insp, load_depth );
+
+    if (!target_conn || FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_x, (void **)&connector)))
+    {
+        TRACE( "failed to QI target_conn for IComponentConnector\n" );
+        load_depth--;
+        return;
     }
 
-    if (SUCCEEDED(hr) && connector)
+    TRACE( "got connector %p\n", connector );
+
+    if (uri_insp && SUCCEEDED(IInspectable_QueryInterface(uri_insp, &IID_IUriRuntimeClass_x, &uri_rt)))
     {
-        void **conn_vtbl = *(void ***)connector;
-        HRESULT (WINAPI *pConnect)( void *, int, void * ) = (void *)conn_vtbl[6];
-        IInspectable *grid2 = NULL, *wv3 = NULL, *grid4 = NULL, *grid5 = NULL;
-        HSTRING grid_name = NULL, wv_name = NULL;
-
-        WindowsCreateString( L"Microsoft.UI.Xaml.Controls.Grid", 30, &grid_name );
-        WindowsCreateString( L"Microsoft.UI.Xaml.Controls.WebView2", 34, &wv_name );
-
-        RoActivateInstance( grid_name, &grid2 );
-        RoActivateInstance( wv_name, &wv3 );
-        RoActivateInstance( grid_name, &grid4 );
-        RoActivateInstance( grid_name, &grid5 );
-
-        WindowsDeleteString( grid_name );
-        WindowsDeleteString( wv_name );
-
-        WARN( "application_LoadComponent: connecting XAML components: connector %p, grid2 %p, wv3 %p, grid4 %p, grid5 %p\n",
-              connector, grid2, wv3, grid4, grid5 );
-
-        if (grid2) { pConnect( connector, 2, grid2 ); IInspectable_Release( grid2 ); }
-        if (wv3)   { pConnect( connector, 3, wv3 );   IInspectable_Release( wv3 ); }
-        if (grid4) { pConnect( connector, 4, grid4 ); IInspectable_Release( grid4 ); }
-        if (grid5) { pConnect( connector, 5, grid5 ); IInspectable_Release( grid5 ); }
-
-        IInspectable_Release( connector );
+        typedef HRESULT (WINAPI *p_get_RawUri)(void *, HSTRING *);
+        p_get_RawUri get_raw_uri = (p_get_RawUri)(*(void ***)uri_rt)[6]; /* slot 6: get_AbsoluteUri */
+        HSTRING raw = NULL;
+        if (SUCCEEDED(get_raw_uri(uri_rt, &raw)) && raw)
+        {
+            const WCHAR *str = WindowsGetStringRawBuffer(raw, NULL);
+            const WCHAR *slash = wcsrchr(str, '/');
+            TRACE( "URI raw buffer: %s\n", debugstr_w(str) );
+            if (slash) slash++; else slash = str;
+            lstrcpynW(comp_name, slash, MAX_PATH);
+            dot = wcsrchr(comp_name, '.');
+            if (dot) *dot = 0;
+            WindowsDeleteString(raw);
+        }
+        IInspectable_Release((IInspectable *)uri_rt);
     }
+
+    TRACE( "comp_name: %s\n", debugstr_w(comp_name) );
+
+    if (!comp_name[0])
+    {
+        connector->lpVtbl->Release(connector);
+        load_depth--;
+        return;
+    }
+
+    snprintf(target_xbf, sizeof(target_xbf), "%ls.xbf", comp_name);
+
+    GetModuleFileNameW(NULL, pri_path, MAX_PATH);
+    p_slash = wcsrchr(pri_path, '\\');
+    if (p_slash) *(p_slash + 1) = 0;
+    lstrcatW(pri_path, L"resources.pri");
+
+    hFile = CreateFileW(pri_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL);
+    if (hFile != INVALID_HANDLE_VALUE)
+    {
+        DWORD size = GetFileSize(hFile, NULL);
+        if (size > 0 && size < 64 * 1024 * 1024)
+        {
+            HANDLE hMap = CreateFileMappingW(hFile, NULL, PAGE_READONLY, 0, 0, NULL);
+            if (hMap)
+            {
+                const BYTE *data = MapViewOfFile(hMap, FILE_MAP_READ, 0, 0, 0);
+                if (data)
+                {
+                    int target_idx = -1;
+                    int cur_idx = 0;
+                    const BYTE *scan = data;
+                    const BYTE *scan_limit = data + min(size, 0x100000);
+                    size_t target_len = strlen(target_xbf);
+
+                    /* 1. Find index of target_xbf in PRI name list */
+                    while (scan + 5 <= scan_limit)
+                    {
+                        if (!memcmp(scan, ".xbf\0", 5))
+                        {
+                            const BYTE *b = scan;
+                            while (b > data && *(b - 1) != 0 && (scan - b) < 128)
+                                b--;
+                            if ((size_t)(scan + 4 - b) == target_len && !strncasecmp((const char *)b, target_xbf, target_len))
+                            {
+                                target_idx = cur_idx;
+                                TRACE( "Found XBF name '%s' at index %d\n", target_xbf, target_idx );
+                                break;
+                            }
+                            cur_idx++;
+                        }
+                        scan++;
+                    }
+
+                    if (target_idx >= 0)
+                    {
+                        /* 2. Locate target_idx-th XBF stream */
+                        int found_cnt = 0;
+                        const BYTE *xbf_stream = NULL;
+                        const BYTE *p = data;
+                        const BYTE *end = data + size;
+
+                        while (p + 32 < end)
+                        {
+                            if (p[0] == 'X' && p[1] == 'B' && p[2] == 'F' && p[3] == 0)
+                            {
+                                if (found_cnt == target_idx)
+                                {
+                                    xbf_stream = p;
+                                    break;
+                                }
+                                found_cnt++;
+                            }
+                            p += 4;
+                        }
+
+                        if (xbf_stream)
+                        {
+                            DWORD meta_size = *(const DWORD*)(xbf_stream + 4);
+                            DWORD node_size = *(const DWORD*)(xbf_stream + 8);
+                            TRACE( "XBF stream for %s: meta_size %lu, node_size %lu\n",
+                                   target_xbf, (unsigned long)meta_size, (unsigned long)node_size );
+                            if (xbf_stream + meta_size + node_size <= end && meta_size > 0x80 && node_size > 0)
+                            {
+                                UINT64 str_off = *(const UINT64*)(xbf_stream + 20);
+                                const BYTE *f_str = xbf_stream + (size_t)str_off + 12;
+                                if (f_str + 4 <= xbf_stream + meta_size)
+                                {
+                                    DWORD str_cnt = *(const DWORD*)f_str;
+                                    if (str_cnt > 0 && str_cnt < 2000)
+                                    {
+                                        const WCHAR **strings = calloc(str_cnt, sizeof(WCHAR*));
+                                        const BYTE *cur = f_str + 4;
+                                        const BYTE *n_cur;
+                                        const BYTE *n_end;
+                                        DWORD i;
+                                        for (i = 0; i < str_cnt && cur + 4 <= xbf_stream + meta_size; i++)
+                                        {
+                                            DWORD len = *(const DWORD*)cur;
+                                            cur += 4;
+                                            if (cur + len * 2 + 2 <= xbf_stream + meta_size)
+                                            {
+                                                strings[i] = (const WCHAR*)cur;
+                                                cur += len * 2 + 2;
+                                            }
+                                        }
+
+                                        n_cur = xbf_stream + meta_size;
+                                        n_end = n_cur + node_size;
+                                        while (n_cur + 10 <= n_end)
+                                        {
+                                            if (n_cur[0] == 0x0c && n_cur[1] == 0x04)
+                                            {
+                                                DWORD conn_id = *(const DWORD*)(n_cur + 2);
+                                                if (n_cur + 10 <= n_end && n_cur[6] == 0x0d && n_cur[7] == 0x05)
+                                                {
+                                                    WORD str_id = *(const WORD*)(n_cur + 8);
+                                                    const WCHAR *elem_name = (str_id < str_cnt && strings[str_id]) ? strings[str_id] : L"";
+                                                    const WCHAR *class_name = L"Microsoft.UI.Xaml.Controls.Grid";
+                                                    void *target = NULL;
+                                                    /* Map the XBF connection-id node to a stock control by the
+                                                     * element's x:Name. Names carry the control kind by convention
+                                                     * (x:Name="WebView", "TitleText", ...), which holds across apps;
+                                                     * the raw conn_id is per-component and says nothing about the
+                                                     * type, so it only feeds the Connect() call below. Unknown
+                                                     * names fall back to Grid, which hosts any content. */
+                                                    if (wcsstr(elem_name, L"WebView") || wcsstr(elem_name, L"webview"))
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.WebView2";
+                                                    else if (wcsstr(elem_name, L"ErrorScreen"))
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.Grid";
+                                                    else if (wcsstr(elem_name, L"Backdrop") || wcsstr(elem_name, L"Rectangle"))
+                                                        class_name = L"Microsoft.UI.Xaml.Shapes.Rectangle";
+                                                    else if (wcsstr(elem_name, L"Cactus") || wcsstr(elem_name, L"Viewbox") || wcsstr(elem_name, L"viewbox"))
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.Viewbox";
+                                                    else if (wcsstr(elem_name, L"Title") || wcsstr(elem_name, L"Message") || wcsstr(elem_name, L"Text"))
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.TextBlock";
+                                                    else if (wcsstr(elem_name, L"Border"))
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.Border";
+                                                    else if (wcsstr(elem_name, L"Panel") || wcsstr(elem_name, L"Stack"))
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.StackPanel";
+                                                    else
+                                                        class_name = L"Microsoft.UI.Xaml.Controls.Grid";
+                                                    TRACE("XBF connect conn_id %lu, elem_name %s, class_name %s\n",
+                                                          (unsigned long)conn_id, debugstr_w(elem_name), debugstr_w(class_name));
+                                                    if (FAILED(xaml_create_instance_from_provider(class_name, &target)) || !target)
+                                                        element_create_typed(class_name, &target);
+                                                    if (target)
+                                                    {
+                                                        connector->lpVtbl->Connect(connector, conn_id, target);
+                                                    }
+                                                }
+                                            }
+                                            n_cur++;
+                                        }
+                                        free(strings);
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    UnmapViewOfFile(data);
+                }
+                CloseHandle(hMap);
+            }
+        }
+        CloseHandle(hFile);
+    }
+
+    connector->lpVtbl->Connect(connector, 1, component);
+    connector->lpVtbl->GetBindingConnector(connector, 1, component, &binding);
+    if (binding)
+    {
+        struct { const struct comp_connector_vtbl *lpVtbl; } *b_conn = binding;
+        void *font_scale = NULL;
+
+        b_conn->lpVtbl->Connect( b_conn, 1, component );
+        if (!wcscmp( comp_name, L"MainWindow" ))
+        {
+            if (SUCCEEDED( xaml_create_instance_from_provider( L"WhatsApp.Design.FontScaleControlPanel", &font_scale ) ) && font_scale)
+            {
+                ERR( "binding font_scale %p to conn_id 6\n", font_scale );
+                b_conn->lpVtbl->Connect( b_conn, 6, font_scale );
+            }
+        }
+        b_conn->lpVtbl->Release( b_conn );
+    }
+
+    connector->lpVtbl->Release(connector);
+    load_depth--;
+}
+
+static HRESULT WINAPI application_LoadComponentWithLocation( void *iface, void *component, void *resourceLocator, int location )
+{
+    TRACE( "iface %p, component %p, resourceLocator %p, location %d\n", iface, component, resourceLocator, location );
+    xaml_load_xbf_components( component, resourceLocator );
     return S_OK;
 }
 
@@ -2782,7 +3291,7 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
 {
     struct application *impl;
 
-    TRACE( "iface %p, outer %p, inner %p, instance %p.\n", iface, outer, inner, instance );
+    ERR( "application_factory_CreateInstance outer %p, inner %p, instance %p\n", outer, inner, instance );
 
     impl = calloc( 1, sizeof(*impl) );
     if (!impl) return E_OUTOFMEMORY;
@@ -2791,6 +3300,7 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
     impl->inner_iface.lpVtbl = (const struct IInspectableVtbl *)&application_inner_vtbl;
     impl->ms_IApplication_iface.lpVtbl = (const struct IInspectableVtbl *)ms_application_vtbl;
     impl->overrides_uwp_iface.lpVtbl = (const struct IInspectableVtbl *)application_overrides_uwp_vtbl;
+    impl->metadata_provider_iface.lpVtbl = (const struct IInspectableVtbl *)app_meta_provider_vtbl;
     impl->ref = 1;
     impl->outer = outer;
 
@@ -2924,15 +3434,45 @@ static ULONG WINAPI ms_statics_Release( IApplicationStatics *iface )
     return factory_Release( &impl->IActivationFactory_iface );
 }
 
+static HRESULT WINAPI ms_application_statics_get_Current( IApplicationStatics *iface,
+        IApplication **current )
+{
+    struct application_factory *impl = impl_from_ms_IApplicationStatics( iface );
+    ERR( "ms_application_statics_get_Current iface %p, current %p, current_application %p, outer %p\n",
+         iface, current, current_application, current_application ? current_application->outer : NULL );
+    if (!current) return E_POINTER;
+    if (!current_application)
+    {
+        IApplication *app;
+        HRESULT hr = application_factory_CreateInstance( &impl->IApplicationFactory_iface, NULL, NULL, &app );
+        if (FAILED(hr)) return hr;
+        current_application = impl_from_IApplication( app );
+    }
+    if (current_application->outer)
+    {
+        *current = (IApplication *)current_application->outer;
+        IInspectable_AddRef( current_application->outer );
+        return S_OK;
+    }
+    *current = (IApplication *)&current_application->ms_IApplication_iface;
+    IInspectable_AddRef( &current_application->ms_IApplication_iface );
+    return S_OK;
+}
+
+static HRESULT WINAPI ms_statics_GetRuntimeClassName( IApplicationStatics *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( L"Microsoft.UI.Xaml.Application", 28, class_name );
+}
+
 static const void *ms_application_statics_vtbl[] =
 {
     ms_statics_QueryInterface,           /* 0: QI */
     ms_statics_AddRef,                   /* 1: AddRef */
     ms_statics_Release,                  /* 2: Release */
     statics_GetIids,                     /* 3: GetIids */
-    statics_GetRuntimeClassName,         /* 4: GetRuntimeClassName */
+    ms_statics_GetRuntimeClassName,      /* 4: GetRuntimeClassName */
     statics_GetTrustLevel,               /* 5: GetTrustLevel */
-    application_statics_get_Current,     /* 6: get_Current */
+    ms_application_statics_get_Current,  /* 6: get_Current */
     application_statics_Start,           /* 7: Start */
     application_LoadComponent,           /* 8: LoadComponent */
     application_LoadComponentWithLocation,/* 9: LoadComponent */
@@ -2995,8 +3535,8 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
             if (SUCCEEDED(hr) && xaml_type)
             {
                 void **type_vtbl = *(void ***)xaml_type;
-                /* Slot 18: ActivateInstance(IInspectable**) */
-                HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[18];
+                /* Slot 19: ActivateInstance(IInspectable**) (Do_Abi_ActivateInstance_13) */
+                HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[19];
                 TRACE( "calling IXamlType::ActivateInstance (%p)\n", activate );
                 if (activate)
                 {
