@@ -316,13 +316,6 @@ static const struct propertyset_reference_tracker_vtbl propertyset_tracker_store
     tracker_PegFromTrackerSource,
 };
 
-static BOOL is_store_app(void)
-{
-    WCHAR path[MAX_PATH];
-    GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
-    return (wcsstr( path, L"WinStore" ) != NULL);
-}
-
 static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface, REFIID iid, void **out )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
