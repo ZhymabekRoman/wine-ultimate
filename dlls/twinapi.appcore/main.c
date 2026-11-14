@@ -1218,14 +1218,606 @@ static const void *push_trigger_vtbl[] =
 };
 static struct { const void *vtbl; } dummy_push_trigger = { push_trigger_vtbl };
 
-/* BackgroundTaskBuilder stub */
+/* BackgroundTaskBuilder & CoreApplication lifecycle event registries */
 struct bg_event_entry
 {
     void *handler;
     INT64 token;
 };
-static struct bg_event_entry bg_events[64];
-static INT64 bg_event_next_token;
+
+struct bg_event_registry
+{
+    struct bg_event_entry entries[64];
+    INT64 next_token;
+};
+
+static struct bg_event_registry bg_events;
+static struct bg_event_registry leaving_bg_events;
+static struct bg_event_registry entered_bg_events;
+static struct bg_event_registry resuming_events;
+
+static CRITICAL_SECTION lifecycle_cs;
+static CRITICAL_SECTION_DEBUG lifecycle_cs_debug =
+{
+    0, 0, &lifecycle_cs,
+    { &lifecycle_cs_debug.ProcessLocksList, &lifecycle_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": lifecycle_cs") }
+};
+static CRITICAL_SECTION lifecycle_cs = { &lifecycle_cs_debug, -1, 0, 0, 0, 0 };
+
+static INIT_ONCE focus_watcher_once = INIT_ONCE_STATIC_INIT;
+
+static HRESULT event_registry_add( struct bg_event_registry *reg, void *handler, INT64 *token, BOOL addref )
+{
+    unsigned int i;
+
+    if (!handler)
+    {
+        if (token) *token = 0;
+        return S_OK;
+    }
+
+    EnterCriticalSection( &lifecycle_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    {
+        if (!reg->entries[i].handler)
+        {
+            INT64 tok = InterlockedIncrement64( &reg->next_token );
+            if (addref) IUnknown_AddRef( (IUnknown *)handler );
+            reg->entries[i].handler = handler;
+            reg->entries[i].token = tok;
+            if (token) *token = tok;
+            LeaveCriticalSection( &lifecycle_cs );
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection( &lifecycle_cs );
+    return E_OUTOFMEMORY;
+}
+
+static HRESULT event_registry_remove( struct bg_event_registry *reg, INT64 token, BOOL release, HRESULT not_found_hr )
+{
+    unsigned int i;
+
+    EnterCriticalSection( &lifecycle_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    {
+        if (reg->entries[i].handler && reg->entries[i].token == token)
+        {
+            void *h = reg->entries[i].handler;
+            reg->entries[i].handler = NULL;
+            reg->entries[i].token = 0;
+            LeaveCriticalSection( &lifecycle_cs );
+            if (release) IUnknown_Release( (IUnknown *)h );
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection( &lifecycle_cs );
+    return not_found_hr;
+}
+
+static unsigned int event_registry_snapshot( struct bg_event_registry *reg, void **out, unsigned int max_out )
+{
+    unsigned int i, count = 0;
+
+    EnterCriticalSection( &lifecycle_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ) && count < max_out; i++)
+    {
+        if (reg->entries[i].handler)
+        {
+            IUnknown_AddRef( (IUnknown *)reg->entries[i].handler );
+            out[count++] = reg->entries[i].handler;
+        }
+    }
+    LeaveCriticalSection( &lifecycle_cs );
+    return count;
+}
+
+/* Complete-able deferral implementing Windows.Foundation.IDeferral, IClosable,
+ * and Windows.ApplicationModel.Background.IBackgroundTaskDeferral. */
+static const GUID IID_IBackgroundTaskDeferral_local = {0x93cc156d, 0xaf27, 0x4dd3, {0x84, 0x6e, 0x24, 0xee, 0x40, 0xca, 0xdd, 0x25}};
+
+struct bg_deferral
+{
+    __x_ABI_CWindows_CFoundation_CIDeferral IDeferral_iface;
+    __x_ABI_CWindows_CFoundation_CIClosable IClosable_iface;
+    LONG ref;
+    LONG completed;
+};
+
+static inline struct bg_deferral *impl_from_IDeferral( __x_ABI_CWindows_CFoundation_CIDeferral *iface )
+{
+    return CONTAINING_RECORD( iface, struct bg_deferral, IDeferral_iface );
+}
+
+static inline struct bg_deferral *impl_from_IClosable_deferral( __x_ABI_CWindows_CFoundation_CIClosable *iface )
+{
+    return CONTAINING_RECORD( iface, struct bg_deferral, IClosable_iface );
+}
+
+static HRESULT WINAPI bg_deferral_QueryInterface( __x_ABI_CWindows_CFoundation_CIDeferral *iface, REFIID iid, void **out )
+{
+    struct bg_deferral *impl = impl_from_IDeferral( iface );
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CFoundation_CIDeferral ) ||
+        IsEqualGUID( iid, &IID_IBackgroundTaskDeferral_local ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IDeferral_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID___x_ABI_CWindows_CFoundation_CIClosable ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IClosable_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI bg_deferral_AddRef( __x_ABI_CWindows_CFoundation_CIDeferral *iface )
+{
+    struct bg_deferral *impl = impl_from_IDeferral( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI bg_deferral_Release( __x_ABI_CWindows_CFoundation_CIDeferral *iface )
+{
+    struct bg_deferral *impl = impl_from_IDeferral( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI bg_deferral_GetIids( __x_ABI_CWindows_CFoundation_CIDeferral *iface, ULONG *count, IID **iids )
+{
+    if (!count) return E_POINTER;
+    *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI bg_deferral_GetRuntimeClassName( __x_ABI_CWindows_CFoundation_CIDeferral *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Deferral";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( cls, ARRAY_SIZE( cls ) - 1, name );
+}
+
+static HRESULT WINAPI bg_deferral_GetTrustLevel( __x_ABI_CWindows_CFoundation_CIDeferral *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI bg_deferral_Complete( __x_ABI_CWindows_CFoundation_CIDeferral *iface )
+{
+    struct bg_deferral *impl = impl_from_IDeferral( iface );
+    if (!InterlockedCompareExchange( &impl->completed, 1, 0 ))
+        TRACE( "deferral %p completed\n", impl );
+    return S_OK;
+}
+
+static const __x_ABI_CWindows_CFoundation_CIDeferralVtbl bg_deferral_vtbl =
+{
+    bg_deferral_QueryInterface,
+    bg_deferral_AddRef,
+    bg_deferral_Release,
+    bg_deferral_GetIids,
+    bg_deferral_GetRuntimeClassName,
+    bg_deferral_GetTrustLevel,
+    bg_deferral_Complete,
+};
+
+static HRESULT WINAPI bg_deferral_closable_QueryInterface( __x_ABI_CWindows_CFoundation_CIClosable *iface, REFIID iid, void **out )
+{
+    struct bg_deferral *impl = impl_from_IClosable_deferral( iface );
+    return bg_deferral_QueryInterface( &impl->IDeferral_iface, iid, out );
+}
+
+static ULONG WINAPI bg_deferral_closable_AddRef( __x_ABI_CWindows_CFoundation_CIClosable *iface )
+{
+    struct bg_deferral *impl = impl_from_IClosable_deferral( iface );
+    return bg_deferral_AddRef( &impl->IDeferral_iface );
+}
+
+static ULONG WINAPI bg_deferral_closable_Release( __x_ABI_CWindows_CFoundation_CIClosable *iface )
+{
+    struct bg_deferral *impl = impl_from_IClosable_deferral( iface );
+    return bg_deferral_Release( &impl->IDeferral_iface );
+}
+
+static HRESULT WINAPI bg_deferral_closable_GetIids( __x_ABI_CWindows_CFoundation_CIClosable *iface, ULONG *count, IID **iids )
+{
+    struct bg_deferral *impl = impl_from_IClosable_deferral( iface );
+    return bg_deferral_GetIids( &impl->IDeferral_iface, count, iids );
+}
+
+static HRESULT WINAPI bg_deferral_closable_GetRuntimeClassName( __x_ABI_CWindows_CFoundation_CIClosable *iface, HSTRING *name )
+{
+    struct bg_deferral *impl = impl_from_IClosable_deferral( iface );
+    return bg_deferral_GetRuntimeClassName( &impl->IDeferral_iface, name );
+}
+
+static HRESULT WINAPI bg_deferral_closable_GetTrustLevel( __x_ABI_CWindows_CFoundation_CIClosable *iface, TrustLevel *level )
+{
+    struct bg_deferral *impl = impl_from_IClosable_deferral( iface );
+    return bg_deferral_GetTrustLevel( &impl->IDeferral_iface, level );
+}
+
+static HRESULT WINAPI bg_deferral_closable_Close( __x_ABI_CWindows_CFoundation_CIClosable *iface )
+{
+    struct bg_deferral *impl = impl_from_IClosable_deferral( iface );
+    return bg_deferral_Complete( &impl->IDeferral_iface );
+}
+
+static const __x_ABI_CWindows_CFoundation_CIClosableVtbl bg_deferral_closable_vtbl =
+{
+    bg_deferral_closable_QueryInterface,
+    bg_deferral_closable_AddRef,
+    bg_deferral_closable_Release,
+    bg_deferral_closable_GetIids,
+    bg_deferral_closable_GetRuntimeClassName,
+    bg_deferral_closable_GetTrustLevel,
+    bg_deferral_closable_Close,
+};
+
+static __x_ABI_CWindows_CFoundation_CIDeferral *bg_deferral_create( void )
+{
+    struct bg_deferral *impl;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->IDeferral_iface.lpVtbl = &bg_deferral_vtbl;
+    impl->IClosable_iface.lpVtbl = &bg_deferral_closable_vtbl;
+    impl->ref = 1;
+    return &impl->IDeferral_iface;
+}
+
+/* LeavingBackgroundEventArgs / EnteredBackgroundEventArgs */
+struct bg_lifecycle_args
+{
+    const void *lpVtbl;
+    LONG ref;
+    BOOL entered;
+};
+
+static HRESULT WINAPI bg_lifecycle_args_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct bg_lifecycle_args *impl = iface;
+    const IID *primary = impl->entered
+        ? &IID___x_ABI_CWindows_CApplicationModel_CIEnteredBackgroundEventArgs
+        : &IID___x_ABI_CWindows_CApplicationModel_CILeavingBackgroundEventArgs;
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, primary ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI bg_lifecycle_args_AddRef( void *iface )
+{
+    struct bg_lifecycle_args *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI bg_lifecycle_args_Release( void *iface )
+{
+    struct bg_lifecycle_args *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI bg_lifecycle_args_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (!count) return E_POINTER;
+    *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI bg_lifecycle_args_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    struct bg_lifecycle_args *impl = iface;
+    static const WCHAR entered_cls[] = L"Windows.ApplicationModel.EnteredBackgroundEventArgs";
+    static const WCHAR leaving_cls[] = L"Windows.ApplicationModel.LeavingBackgroundEventArgs";
+    if (!name) return E_POINTER;
+    return impl->entered
+        ? WindowsCreateString( entered_cls, ARRAY_SIZE( entered_cls ) - 1, name )
+        : WindowsCreateString( leaving_cls, ARRAY_SIZE( leaving_cls ) - 1, name );
+}
+
+static HRESULT WINAPI bg_lifecycle_args_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (!level) return E_POINTER;
+    *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI bg_lifecycle_args_GetDeferral( void *iface, __x_ABI_CWindows_CFoundation_CIDeferral **value )
+{
+    struct bg_lifecycle_args *impl = iface;
+    __x_ABI_CWindows_CFoundation_CIDeferral *def;
+
+    TRACE( "%s args %p GetDeferral\n", impl->entered ? "EnteredBackground" : "LeavingBackground", impl );
+    if (!value) return E_POINTER;
+    if (!(def = bg_deferral_create()))
+    {
+        *value = NULL;
+        return E_OUTOFMEMORY;
+    }
+    *value = def;
+    return S_OK;
+}
+
+static const void *bg_lifecycle_args_vtbl[] =
+{
+    bg_lifecycle_args_QueryInterface,
+    bg_lifecycle_args_AddRef,
+    bg_lifecycle_args_Release,
+    bg_lifecycle_args_GetIids,
+    bg_lifecycle_args_GetRuntimeClassName,
+    bg_lifecycle_args_GetTrustLevel,
+    bg_lifecycle_args_GetDeferral,
+};
+
+static void *bg_lifecycle_args_create( BOOL entered )
+{
+    struct bg_lifecycle_args *impl;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
+    impl->lpVtbl = bg_lifecycle_args_vtbl;
+    impl->ref = 1;
+    impl->entered = entered;
+    return impl;
+}
+
+/* Window-focus watcher: EnumWindows lookup for the process's top-level frame
+ * window (xaml_get_window_hwnd-style), polling GetForegroundWindow/GetActiveWindow
+ * every 250 ms and firing LeavingBackground/Resuming on gain, EnteredBackground on loss. */
+struct focus_enum_ctx
+{
+    DWORD pid;
+    HWND preferred;
+    HWND fallback;
+};
+
+static BOOL CALLBACK focus_enum_windows_cb( HWND hwnd, LPARAM lparam )
+{
+    struct focus_enum_ctx *ctx = (struct focus_enum_ctx *)lparam;
+    DWORD wpid = 0;
+    WCHAR cls[128];
+    RECT rc;
+
+    GetWindowThreadProcessId( hwnd, &wpid );
+    if (wpid != ctx->pid) return TRUE;
+    if (!IsWindowVisible( hwnd )) return TRUE;
+    if (GetWindow( hwnd, GW_OWNER )) return TRUE;
+    if (!GetWindowRect( hwnd, &rc )) return TRUE;
+    if (rc.right - rc.left < 64 || rc.bottom - rc.top < 64) return TRUE;
+
+    if (GetClassNameW( hwnd, cls, ARRAY_SIZE( cls ) ))
+    {
+        if (!wcscmp( cls, L"WinUIDesktopWin32WindowClass" ) ||
+            !wcscmp( cls, L"Windows.UI.Core.CoreWindow" ) ||
+            !wcscmp( cls, L"ApplicationFrameWindow" ))
+        {
+            ctx->preferred = hwnd;
+            return FALSE;
+        }
+    }
+    if (!ctx->fallback) ctx->fallback = hwnd;
+    return TRUE;
+}
+
+static HWND find_app_main_hwnd( void )
+{
+    struct focus_enum_ctx ctx = { GetCurrentProcessId(), NULL, NULL };
+    EnumWindows( focus_enum_windows_cb, (LPARAM)&ctx );
+    return ctx.preferred ? ctx.preferred : ctx.fallback;
+}
+
+static BOOL is_app_window_focused( HWND main_hwnd )
+{
+    HWND fg, active;
+    DWORD fg_pid = 0, main_tid;
+    GUITHREADINFO gti;
+
+    if (!main_hwnd || !IsWindow( main_hwnd ) || !IsWindowVisible( main_hwnd ) || IsIconic( main_hwnd ))
+        return FALSE;
+
+    fg = GetForegroundWindow();
+    if (fg)
+    {
+        if (fg == main_hwnd || GetAncestor( fg, GA_ROOT ) == main_hwnd ||
+            GetWindow( fg, GW_OWNER ) == main_hwnd)
+            return TRUE;
+        GetWindowThreadProcessId( fg, &fg_pid );
+        if (fg_pid == GetCurrentProcessId() && IsWindowVisible( fg ))
+            return TRUE;
+        return FALSE;
+    }
+
+    active = GetActiveWindow();
+    if (active && (active == main_hwnd || GetAncestor( active, GA_ROOT ) == main_hwnd))
+        return TRUE;
+
+    main_tid = GetWindowThreadProcessId( main_hwnd, NULL );
+    gti.cbSize = sizeof(gti);
+    if (main_tid && GetGUIThreadInfo( main_tid, &gti ) && gti.hwndActive)
+    {
+        if (gti.hwndActive == main_hwnd || GetAncestor( gti.hwndActive, GA_ROOT ) == main_hwnd)
+            return TRUE;
+    }
+    return FALSE;
+}
+
+static void fire_leaving_background( void )
+{
+    void *handlers[64];
+    unsigned int i, count = event_registry_snapshot( &leaving_bg_events, handlers, ARRAY_SIZE( handlers ) );
+    __x_ABI_CWindows_CApplicationModel_CILeavingBackgroundEventArgs *args;
+
+    if (!count) return;
+    if (!(args = bg_lifecycle_args_create( FALSE )))
+    {
+        for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+        return;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        __FIEventHandler_1_Windows__CApplicationModel__CLeavingBackgroundEventArgs *h = handlers[i];
+        TRACE( "firing LeavingBackground handler %p\n", h );
+        __FIEventHandler_1_Windows__CApplicationModel__CLeavingBackgroundEventArgs_Invoke(
+            h, (IInspectable *)core_application_factory, args );
+        IUnknown_Release( (IUnknown *)h );
+    }
+    IUnknown_Release( (IUnknown *)args );
+}
+
+static void fire_resuming( void )
+{
+    void *handlers[64];
+    unsigned int i, count = event_registry_snapshot( &resuming_events, handlers, ARRAY_SIZE( handlers ) );
+
+    for (i = 0; i < count; i++)
+    {
+        __FIEventHandler_1_IInspectable *h = handlers[i];
+        TRACE( "firing Resuming handler %p\n", h );
+        __FIEventHandler_1_IInspectable_Invoke( h, (IInspectable *)core_application_factory, NULL );
+        IUnknown_Release( (IUnknown *)h );
+    }
+}
+
+static void fire_entered_background( void )
+{
+    void *handlers[64];
+    unsigned int i, count = event_registry_snapshot( &entered_bg_events, handlers, ARRAY_SIZE( handlers ) );
+    __x_ABI_CWindows_CApplicationModel_CIEnteredBackgroundEventArgs *args;
+
+    if (!count) return;
+    if (!(args = bg_lifecycle_args_create( TRUE )))
+    {
+        for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+        return;
+    }
+
+    for (i = 0; i < count; i++)
+    {
+        __FIEventHandler_1_Windows__CApplicationModel__CEnteredBackgroundEventArgs *h = handlers[i];
+        TRACE( "firing EnteredBackground handler %p\n", h );
+        __FIEventHandler_1_Windows__CApplicationModel__CEnteredBackgroundEventArgs_Invoke(
+            h, (IInspectable *)core_application_factory, args );
+        IUnknown_Release( (IUnknown *)h );
+    }
+    IUnknown_Release( (IUnknown *)args );
+}
+
+static DWORD WINAPI focus_watcher_proc( void *param )
+{
+    HWND tracked_hwnd = NULL;
+    BOOL was_focused = FALSE;
+
+    CoInitializeEx( NULL, COINIT_MULTITHREADED );
+    TRACE( "focus_watcher_proc started\n" );
+
+    for (;;)
+    {
+        BOOL now_focused;
+
+        Sleep( 250 );
+        if (!tracked_hwnd || !IsWindow( tracked_hwnd ) || !IsWindowVisible( tracked_hwnd ))
+            tracked_hwnd = find_app_main_hwnd();
+
+        now_focused = is_app_window_focused( tracked_hwnd );
+        if (now_focused && !was_focused)
+        {
+            TRACE( "focus gained hwnd=%p -> LeavingBackground + Resuming\n", tracked_hwnd );
+            was_focused = TRUE;
+            fire_leaving_background();
+            fire_resuming();
+        }
+        else if (!now_focused && was_focused)
+        {
+            TRACE( "focus lost hwnd=%p -> EnteredBackground\n", tracked_hwnd );
+            was_focused = FALSE;
+            fire_entered_background();
+        }
+    }
+    return 0;
+}
+
+static BOOL CALLBACK init_focus_watcher_cb( INIT_ONCE *once, void *param, void **context )
+{
+    HANDLE thread = CreateThread( NULL, 0, focus_watcher_proc, NULL, 0, NULL );
+    if (thread) CloseHandle( thread );
+    return thread != NULL;
+}
+
+static void ensure_focus_watcher_started( void )
+{
+    InitOnceExecuteOnce( &focus_watcher_once, init_focus_watcher_cb, NULL, NULL );
+}
+
+HRESULT core_app_add_leaving_background(
+        __FIEventHandler_1_Windows__CApplicationModel__CLeavingBackgroundEventArgs *handler,
+        EventRegistrationToken *token )
+{
+    HRESULT hr = event_registry_add( &leaving_bg_events, handler, token ? &token->value : NULL, TRUE );
+    TRACE( "handler %p -> token %#I64x, hr %#lx\n", handler, token ? token->value : 0, hr );
+    if (SUCCEEDED( hr ) && handler) ensure_focus_watcher_started();
+    return hr;
+}
+
+HRESULT core_app_remove_leaving_background( EventRegistrationToken token )
+{
+    TRACE( "token %#I64x\n", token.value );
+    return event_registry_remove( &leaving_bg_events, token.value, TRUE, S_OK );
+}
+
+HRESULT core_app_add_entered_background(
+        __FIEventHandler_1_Windows__CApplicationModel__CEnteredBackgroundEventArgs *handler,
+        EventRegistrationToken *token )
+{
+    HRESULT hr = event_registry_add( &entered_bg_events, handler, token ? &token->value : NULL, TRUE );
+    TRACE( "handler %p -> token %#I64x, hr %#lx\n", handler, token ? token->value : 0, hr );
+    if (SUCCEEDED( hr ) && handler) ensure_focus_watcher_started();
+    return hr;
+}
+
+HRESULT core_app_remove_entered_background( EventRegistrationToken token )
+{
+    TRACE( "token %#I64x\n", token.value );
+    return event_registry_remove( &entered_bg_events, token.value, TRUE, S_OK );
+}
+
+HRESULT core_app_add_resuming( __FIEventHandler_1_IInspectable *handler,
+                               EventRegistrationToken *token )
+{
+    HRESULT hr = event_registry_add( &resuming_events, handler, token ? &token->value : NULL, TRUE );
+    TRACE( "handler %p -> token %#I64x, hr %#lx\n", handler, token ? token->value : 0, hr );
+    if (SUCCEEDED( hr ) && handler) ensure_focus_watcher_started();
+    return hr;
+}
+
+HRESULT core_app_remove_resuming( EventRegistrationToken token )
+{
+    TRACE( "token %#I64x\n", token.value );
+    return event_registry_remove( &resuming_events, token.value, TRUE, S_OK );
+}
 
 /* One registration per app: the id is stable for the process lifetime and
  * unique across processes (time + QPC + pid entropy), like a real TaskId. */
@@ -1258,35 +1850,11 @@ static HRESULT WINAPI bg_task_reg_get_Name( void *iface, HSTRING *name ) { retur
 static HRESULT WINAPI bg_task_reg_Unregister( void *iface, boolean cancel ) { return S_OK; }
 static HRESULT WINAPI bg_task_reg_add_event( void *iface, void *handler, INT64 *token )
 {
-    INT64 tok = InterlockedIncrement64( &bg_event_next_token );
-    unsigned int i;
-
-    for (i = 0; i < ARRAY_SIZE( bg_events ); i++)
-    {
-        if (!bg_events[i].handler)
-        {
-            bg_events[i].handler = handler;
-            bg_events[i].token = tok;
-            if (token) *token = tok;
-            return S_OK;
-        }
-    }
-    return E_OUTOFMEMORY;
+    return event_registry_add( &bg_events, handler, token, FALSE );
 }
 static HRESULT WINAPI bg_task_reg_remove_event( void *iface, INT64 token )
 {
-    unsigned int i;
-
-    for (i = 0; i < ARRAY_SIZE( bg_events ); i++)
-    {
-        if (bg_events[i].handler && bg_events[i].token == token)
-        {
-            bg_events[i].handler = NULL;
-            bg_events[i].token = 0;
-            return S_OK;
-        }
-    }
-    return E_INVALIDARG;
+    return event_registry_remove( &bg_events, token, FALSE, E_INVALIDARG );
 }
 static HRESULT WINAPI bg_task_reg_Cancel( void *iface ) { return S_OK; }
 static HRESULT WINAPI bg_task_reg_get_Trigger( void *iface, void **trigger )

@@ -1388,15 +1388,14 @@ static HRESULT WINAPI core_application_remove_Suspending( ICoreApplication *ifac
 static HRESULT WINAPI core_application_add_Resuming( ICoreApplication *iface,
         IEventHandler_IInspectable *handler, EventRegistrationToken *token )
 {
-    FIXME( "iface %p, handler %p, token %p semi-stub.\n", iface, handler, token );
-    if (token) token->value = 0;
-    return S_OK;
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    return core_app_add_resuming( handler, token );
 }
 
 static HRESULT WINAPI core_application_remove_Resuming( ICoreApplication *iface, EventRegistrationToken token )
 {
-    FIXME( "iface %p, token %#I64x semi-stub.\n", iface, token.value );
-    return S_OK;
+    TRACE( "iface %p, token %#I64x\n", iface, token.value );
+    return core_app_remove_resuming( token );
 }
 
 static HRESULT WINAPI core_application_get_Properties( ICoreApplication *iface, IPropertySet **value )
@@ -2036,14 +2035,26 @@ static HRESULT WINAPI core_application2_remove_BackgroundActivated( ICoreApplica
 { FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
 static HRESULT WINAPI core_application2_add_LeavingBackground( ICoreApplication2 *iface,
         __FIEventHandler_1_Windows__CApplicationModel__CLeavingBackgroundEventArgs *handler, EventRegistrationToken *token )
-{ FIXME( "iface %p semi-stub.\n", iface ); if (token) token->value = 0; return S_OK; }
+{
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    return core_app_add_leaving_background( handler, token );
+}
 static HRESULT WINAPI core_application2_remove_LeavingBackground( ICoreApplication2 *iface, EventRegistrationToken token )
-{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+{
+    TRACE( "iface %p, token %#I64x\n", iface, token.value );
+    return core_app_remove_leaving_background( token );
+}
 static HRESULT WINAPI core_application2_add_EnteredBackground( ICoreApplication2 *iface,
         __FIEventHandler_1_Windows__CApplicationModel__CEnteredBackgroundEventArgs *handler, EventRegistrationToken *token )
-{ FIXME( "iface %p semi-stub.\n", iface ); if (token) token->value = 0; return S_OK; }
+{
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    return core_app_add_entered_background( handler, token );
+}
 static HRESULT WINAPI core_application2_remove_EnteredBackground( ICoreApplication2 *iface, EventRegistrationToken token )
-{ FIXME( "iface %p semi-stub.\n", iface ); return S_OK; }
+{
+    TRACE( "iface %p, token %#I64x\n", iface, token.value );
+    return core_app_remove_entered_background( token );
+}
 static HRESULT WINAPI core_application2_EnablePrelaunch( ICoreApplication2 *iface, boolean value )
 { FIXME( "iface %p, value %d semi-stub.\n", iface, value ); return S_OK; }
 

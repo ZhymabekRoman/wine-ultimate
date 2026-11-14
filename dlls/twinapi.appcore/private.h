@@ -137,3 +137,15 @@ HRESULT toast_extract_payload( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *d
 extern IActivationFactory *app_notification_manager_statics_factory;
 extern IActivationFactory *app_notification_factory;
 extern IActivationFactory *app_notification_activated_args_factory;
+
+HRESULT core_app_add_leaving_background(
+        __FIEventHandler_1_Windows__CApplicationModel__CLeavingBackgroundEventArgs *handler,
+        EventRegistrationToken *token );
+HRESULT core_app_remove_leaving_background( EventRegistrationToken token );
+HRESULT core_app_add_entered_background(
+        __FIEventHandler_1_Windows__CApplicationModel__CEnteredBackgroundEventArgs *handler,
+        EventRegistrationToken *token );
+HRESULT core_app_remove_entered_background( EventRegistrationToken token );
+HRESULT core_app_add_resuming( __FIEventHandler_1_IInspectable *handler,
+                               EventRegistrationToken *token );
+HRESULT core_app_remove_resuming( EventRegistrationToken token );

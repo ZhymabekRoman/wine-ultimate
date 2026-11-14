@@ -21,6 +21,7 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "winuser.h"
 
 #define COBJMACROS
 #include "initguid.h"
@@ -559,6 +560,249 @@ static void test_CoreApplication(void)
 
     ref = IActivationFactory_Release( factory );
     ok( ref == 1, "got ref %ld.\n", ref );
+}
+
+struct test_lifecycle_handler
+{
+    void *lpVtbl;
+    LONG ref;
+    LONG count;
+    BOOL try_deferral;
+    BOOL deferral_ok;
+    HANDLE event;
+};
+
+static HRESULT WINAPI test_lifecycle_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        InterlockedIncrement( &((struct test_lifecycle_handler *)iface)->ref );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI test_lifecycle_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct test_lifecycle_handler *)iface)->ref );
+}
+
+static ULONG WINAPI test_lifecycle_Release( void *iface )
+{
+    return InterlockedDecrement( &((struct test_lifecycle_handler *)iface)->ref );
+}
+
+static HRESULT WINAPI test_leaving_Invoke(
+        __FIEventHandler_1_Windows__CApplicationModel__CLeavingBackgroundEventArgs *iface,
+        IInspectable *sender, __x_ABI_CWindows_CApplicationModel_CILeavingBackgroundEventArgs *args )
+{
+    struct test_lifecycle_handler *impl = (struct test_lifecycle_handler *)iface;
+    __x_ABI_CWindows_CFoundation_CIDeferral *def = NULL;
+    HRESULT hr;
+
+    if (impl->try_deferral && args)
+    {
+        hr = __x_ABI_CWindows_CApplicationModel_CILeavingBackgroundEventArgs_GetDeferral( args, &def );
+        if (SUCCEEDED( hr ) && def)
+        {
+            hr = __x_ABI_CWindows_CFoundation_CIDeferral_Complete( def );
+            impl->deferral_ok = SUCCEEDED( hr );
+            __x_ABI_CWindows_CFoundation_CIDeferral_Release( def );
+        }
+    }
+    InterlockedIncrement( &impl->count );
+    SetEvent( impl->event );
+    return S_OK;
+}
+
+static HRESULT WINAPI test_entered_Invoke(
+        __FIEventHandler_1_Windows__CApplicationModel__CEnteredBackgroundEventArgs *iface,
+        IInspectable *sender, __x_ABI_CWindows_CApplicationModel_CIEnteredBackgroundEventArgs *args )
+{
+    struct test_lifecycle_handler *impl = (struct test_lifecycle_handler *)iface;
+    __x_ABI_CWindows_CFoundation_CIDeferral *def = NULL;
+    HRESULT hr;
+
+    if (impl->try_deferral && args)
+    {
+        hr = __x_ABI_CWindows_CApplicationModel_CIEnteredBackgroundEventArgs_GetDeferral( args, &def );
+        if (SUCCEEDED( hr ) && def)
+        {
+            __x_ABI_CWindows_CFoundation_CIClosable *closable = NULL;
+            hr = __x_ABI_CWindows_CFoundation_CIDeferral_Complete( def );
+            impl->deferral_ok = SUCCEEDED( hr );
+            if (SUCCEEDED( __x_ABI_CWindows_CFoundation_CIDeferral_QueryInterface( def,
+                    &IID___x_ABI_CWindows_CFoundation_CIClosable, (void **)&closable ) ))
+            {
+                hr = __x_ABI_CWindows_CFoundation_CIClosable_Close( closable );
+                impl->deferral_ok = impl->deferral_ok && SUCCEEDED( hr );
+                __x_ABI_CWindows_CFoundation_CIClosable_Release( closable );
+            }
+            __x_ABI_CWindows_CFoundation_CIDeferral_Release( def );
+        }
+    }
+    InterlockedIncrement( &impl->count );
+    SetEvent( impl->event );
+    return S_OK;
+}
+
+static HRESULT WINAPI test_resuming_Invoke( __FIEventHandler_1_IInspectable *iface,
+        IInspectable *sender, IInspectable *args )
+{
+    struct test_lifecycle_handler *impl = (struct test_lifecycle_handler *)iface;
+    InterlockedIncrement( &impl->count );
+    SetEvent( impl->event );
+    return S_OK;
+}
+
+static const void *test_leaving_vtbl[] =
+{
+    test_lifecycle_QueryInterface, test_lifecycle_AddRef, test_lifecycle_Release, test_leaving_Invoke,
+};
+static const void *test_entered_vtbl[] =
+{
+    test_lifecycle_QueryInterface, test_lifecycle_AddRef, test_lifecycle_Release, test_entered_Invoke,
+};
+static const void *test_resuming_vtbl[] =
+{
+    test_lifecycle_QueryInterface, test_lifecycle_AddRef, test_lifecycle_Release, test_resuming_Invoke,
+};
+
+static void pump_until_event( HANDLE event, DWORD timeout_ms,
+        BOOL (WINAPI *pPeekMessageW)(MSG *, HWND, UINT, UINT, UINT),
+        BOOL (WINAPI *pTranslateMessage)(const MSG *),
+        LRESULT (WINAPI *pDispatchMessageW)(const MSG *),
+        DWORD (WINAPI *pMsgWaitForMultipleObjects)(DWORD, const HANDLE *, BOOL, DWORD, DWORD) )
+{
+    DWORD deadline = GetTickCount() + timeout_ms;
+    for (;;)
+    {
+        MSG msg;
+        DWORD rem;
+        while (pPeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+        {
+            pTranslateMessage( &msg );
+            pDispatchMessageW( &msg );
+        }
+        if (WaitForSingleObject( event, 0 ) == WAIT_OBJECT_0) break;
+        rem = deadline > GetTickCount() ? deadline - GetTickCount() : 0;
+        if (!rem) break;
+        pMsgWaitForMultipleObjects( 1, &event, FALSE, rem, QS_ALLINPUT );
+    }
+}
+
+static void test_CoreApplication_lifecycle(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_ApplicationModel_Core_CoreApplication;
+    HMODULE user32 = LoadLibraryA( "user32.dll" );
+    ATOM (WINAPI *pRegisterClassW)(const WNDCLASSW *);
+    HWND (WINAPI *pCreateWindowExW)(DWORD, const WCHAR *, const WCHAR *, DWORD, int, int, int, int, HWND, HMENU, HINSTANCE, void *);
+    BOOL (WINAPI *pDestroyWindow)(HWND);
+    BOOL (WINAPI *pShowWindow)(HWND, int);
+    BOOL (WINAPI *pSetForegroundWindow)(HWND);
+    BOOL (WINAPI *pPeekMessageW)(MSG *, HWND, UINT, UINT, UINT);
+    BOOL (WINAPI *pTranslateMessage)(const MSG *);
+    LRESULT (WINAPI *pDispatchMessageW)(const MSG *);
+    LRESULT (WINAPI *pDefWindowProcW)(HWND, UINT, WPARAM, LPARAM);
+    DWORD (WINAPI *pMsgWaitForMultipleObjects)(DWORD, const HANDLE *, BOOL, DWORD, DWORD);
+    IActivationFactory *factory = NULL;
+    ICoreApplication *core_app = NULL;
+    ICoreApplication2 *core_app2 = NULL;
+    EventRegistrationToken tok_leaving = {0}, tok_entered = {0}, tok_resuming = {0};
+    struct test_lifecycle_handler leaving_h = { test_leaving_vtbl, 1, 0, TRUE, FALSE, NULL };
+    struct test_lifecycle_handler entered_h = { test_entered_vtbl, 1, 0, TRUE, FALSE, NULL };
+    struct test_lifecycle_handler resuming_h = { test_resuming_vtbl, 1, 0, FALSE, FALSE, NULL };
+    WNDCLASSW wc = {0};
+    HWND hwnd;
+    HSTRING str;
+    HRESULT hr;
+
+    ok( user32 != NULL, "LoadLibrary user32 failed\n" );
+    pRegisterClassW = (void *)GetProcAddress( user32, "RegisterClassW" );
+    pCreateWindowExW = (void *)GetProcAddress( user32, "CreateWindowExW" );
+    pDestroyWindow = (void *)GetProcAddress( user32, "DestroyWindow" );
+    pShowWindow = (void *)GetProcAddress( user32, "ShowWindow" );
+    pSetForegroundWindow = (void *)GetProcAddress( user32, "SetForegroundWindow" );
+    pPeekMessageW = (void *)GetProcAddress( user32, "PeekMessageW" );
+    pTranslateMessage = (void *)GetProcAddress( user32, "TranslateMessage" );
+    pDispatchMessageW = (void *)GetProcAddress( user32, "DispatchMessageW" );
+    pDefWindowProcW = (void *)GetProcAddress( user32, "DefWindowProcW" );
+    pMsgWaitForMultipleObjects = (void *)GetProcAddress( user32, "MsgWaitForMultipleObjects" );
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    if (FAILED( hr ))
+    {
+        FreeLibrary( user32 );
+        return;
+    }
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICoreApplication, (void **)&core_app );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICoreApplication2, (void **)&core_app2 );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+
+    leaving_h.event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    entered_h.event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    resuming_h.event = CreateEventW( NULL, TRUE, FALSE, NULL );
+
+    hr = ICoreApplication2_add_LeavingBackground( core_app2,
+            (__FIEventHandler_1_Windows__CApplicationModel__CLeavingBackgroundEventArgs *)&leaving_h, &tok_leaving );
+    ok( hr == S_OK && tok_leaving.value != 0, "add_LeavingBackground hr %#lx, tok %I64d\n", hr, tok_leaving.value );
+
+    hr = ICoreApplication2_add_EnteredBackground( core_app2,
+            (__FIEventHandler_1_Windows__CApplicationModel__CEnteredBackgroundEventArgs *)&entered_h, &tok_entered );
+    ok( hr == S_OK && tok_entered.value != 0, "add_EnteredBackground hr %#lx, tok %I64d\n", hr, tok_entered.value );
+
+    hr = ICoreApplication_add_Resuming( core_app,
+            (__FIEventHandler_1_IInspectable *)&resuming_h, &tok_resuming );
+    ok( hr == S_OK && tok_resuming.value != 0, "add_Resuming hr %#lx, tok %I64d\n", hr, tok_resuming.value );
+
+    wc.lpfnWndProc = pDefWindowProcW;
+    wc.hInstance = GetModuleHandleW( NULL );
+    wc.lpszClassName = L"WineTwinapiLifecycleTest";
+    pRegisterClassW( &wc );
+
+    hwnd = pCreateWindowExW( 0, wc.lpszClassName, L"LifecycleTest", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+                             100, 100, 240, 200, NULL, NULL, wc.hInstance, NULL );
+    ok( hwnd != NULL, "CreateWindowExW failed\n" );
+    pShowWindow( hwnd, SW_SHOWNORMAL );
+    pSetForegroundWindow( hwnd );
+
+    pump_until_event( leaving_h.event, 3000, pPeekMessageW, pTranslateMessage, pDispatchMessageW, pMsgWaitForMultipleObjects );
+    pump_until_event( resuming_h.event, 1000, pPeekMessageW, pTranslateMessage, pDispatchMessageW, pMsgWaitForMultipleObjects );
+    ok( leaving_h.count >= 1, "LeavingBackground did not fire\n" );
+    ok( leaving_h.deferral_ok, "LeavingBackground deferral failed\n" );
+    ok( resuming_h.count >= 1, "Resuming did not fire\n" );
+
+    pShowWindow( hwnd, SW_HIDE );
+    pump_until_event( entered_h.event, 3000, pPeekMessageW, pTranslateMessage, pDispatchMessageW, pMsgWaitForMultipleObjects );
+    ok( entered_h.count >= 1, "EnteredBackground did not fire\n" );
+    ok( entered_h.deferral_ok, "EnteredBackground deferral failed\n" );
+
+    hr = ICoreApplication2_remove_LeavingBackground( core_app2, tok_leaving );
+    ok( hr == S_OK, "remove_LeavingBackground hr %#lx\n", hr );
+    hr = ICoreApplication2_remove_EnteredBackground( core_app2, tok_entered );
+    ok( hr == S_OK, "remove_EnteredBackground hr %#lx\n", hr );
+    hr = ICoreApplication_remove_Resuming( core_app, tok_resuming );
+    ok( hr == S_OK, "remove_Resuming hr %#lx\n", hr );
+
+    ok( leaving_h.ref == 1, "leaving_h ref %ld\n", leaving_h.ref );
+    ok( entered_h.ref == 1, "entered_h ref %ld\n", entered_h.ref );
+    ok( resuming_h.ref == 1, "resuming_h ref %ld\n", resuming_h.ref );
+
+    pDestroyWindow( hwnd );
+    CloseHandle( leaving_h.event );
+    CloseHandle( entered_h.event );
+    CloseHandle( resuming_h.event );
+    ICoreApplication2_Release( core_app2 );
+    ICoreApplication_Release( core_app );
+    IActivationFactory_Release( factory );
+    FreeLibrary( user32 );
 }
 
 /* Microsoft.Windows.AppLifecycle.IMicrosoftAppInstanceStatics */
@@ -1256,6 +1500,7 @@ START_TEST(twinapi)
     test_EasClientDeviceInformation();
     test_AnalyticsVersionInfo();
     test_AdvertisingManager();
+    test_CoreApplication_lifecycle();
     test_ApplicationView();
     test_CoreApplication();
     test_AppInstance();
