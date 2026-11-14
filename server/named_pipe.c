@@ -44,6 +44,7 @@
 #include "unicode.h"
 #include "security.h"
 #include "process.h"
+#include "slab.h"
 
 struct named_pipe;
 
@@ -730,16 +731,18 @@ static int relay_scan( struct pipe_end *writer_end, struct pipe_message *message
                     s_line = 1;
                     continue;
                 }
-                if (!(box = mem_alloc( sizeof(*box) )))
+                if (!(box = wine_slab_alloc( sizeof(*box) )))
                 {
+                    set_error( STATUS_NO_MEMORY );
                     release_object( obj );
                     return scanned;
                 }
                 if (!message->relay)
                 {
-                    if (!(message->relay = malloc( sizeof(*message->relay) )))
+                    if (!(message->relay = wine_slab_alloc( sizeof(*message->relay) )))
                     {
-                        free( box );
+                        set_error( STATUS_NO_MEMORY );
+                        wine_slab_free( box, sizeof(*box) );
                         release_object( obj );
                         return scanned;
                     }
@@ -855,16 +858,18 @@ static int relay_scan( struct pipe_end *writer_end, struct pipe_message *message
                         clear_error();
                         continue;
                     }
-                    if (!(box = mem_alloc( sizeof(*box) )))
+                    if (!(box = wine_slab_alloc( sizeof(*box) )))
                     {
+                        set_error( STATUS_NO_MEMORY );
                         release_object( obj );
                         return scanned;
                     }
                     if (!message->relay)
                     {
-                        if (!(message->relay = malloc( sizeof(*message->relay) )))
+                        if (!(message->relay = wine_slab_alloc( sizeof(*message->relay) )))
                         {
-                            free( box );
+                            set_error( STATUS_NO_MEMORY );
+                            wine_slab_free( box, sizeof(*box) );
                             release_object( obj );
                             return scanned;
                         }
@@ -1120,9 +1125,9 @@ static void relay_free( struct pipe_message *message, int close_src )
         release_object( box->writer );
         if (box->reader) release_object( box->reader );
         release_object( box->obj );
-        free( box );
+        wine_slab_free( box, sizeof(*box) );
     }
-    free( message->relay );
+    wine_slab_free( message->relay, sizeof(*message->relay) );
     message->relay = NULL;
 }
 
@@ -1480,7 +1485,11 @@ static struct pipe_message *queue_message( struct pipe_end *pipe_end, struct ios
 {
     struct pipe_message *message;
 
-    if (!(message = mem_alloc( sizeof(*message) ))) return NULL;
+    if (!(message = wine_slab_alloc( sizeof(*message) )))
+    {
+        set_error( STATUS_NO_MEMORY );
+        return NULL;
+    }
     message->iosb = (struct iosb *)grab_object( iosb );
     message->async = NULL;
     message->read_pos = 0;
@@ -1505,7 +1514,7 @@ static void free_message( struct pipe_message *message )
     relay_free( message, 0 );  /* dropped, not consumed: leave the source handles alone */
     list_remove( &message->entry );
     if (message->iosb) release_object( message->iosb );
-    free( message );
+    wine_slab_free( message, sizeof(*message) );
 }
 
 static void pipe_end_disconnect( struct pipe_end *pipe_end, unsigned int status )
@@ -2086,7 +2095,8 @@ static void mirror_heartbeat( void *private )
 {
     struct pipe_end *pipe_end = private;
 
-    set_fd_signaled( pipe_end->fd, 1 );
+    if (pipe_end->state == FILE_PIPE_CONNECTED_STATE)
+        set_fd_signaled( pipe_end->fd, 1 );
     pipe_end->hb_timeout = add_timeout_user( -10000000 /* 10 ms, monotonic ns */, mirror_heartbeat, pipe_end );
 }
 
@@ -2104,7 +2114,7 @@ static void arm_mirror_continuation( struct pipe_end *pipe_end )
     set_fd_events( pipe_end->fd, pipe_end_get_poll_events( pipe_end->fd ) );
 }
 
-static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
+static void message_queue_read( struct pipe_end *pipe_end, struct async *async, int allow_heartbeat )
 {
     struct iosb *iosb = async_get_iosb( async );
     unsigned int status = STATUS_SUCCESS;
@@ -2132,14 +2142,17 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
 
     dupx_io( "R", pipe_end, out_size );
     message = LIST_ENTRY( list_head(&pipe_end->message_queue), struct pipe_message, entry );
-    if (!message->read_pos && message->iosb->in_size == iosb->out_size) /* fast path */
+    if (!message->read_pos && out_size == message->iosb->in_size) /* zero-copy fast path */
     {
-        relay_patch( message, async_get_thread( async )->process, 0, message->iosb->in_size,
-                     message->iosb->in_data );
-        wapipex_dump( "R", pipe_end, async_get_thread( async )->process->id,
-                      message->iosb->in_data, message->iosb->in_size );
-        async_request_complete( async, status, out_size, out_size, message->iosb->in_data );
-        message->iosb->in_data = NULL;
+        void *data = out_size ? message->iosb->in_data : NULL;
+
+        if (data)
+        {
+            relay_patch( message, async_get_thread( async )->process, 0, out_size, data );
+            message->iosb->in_data = NULL;
+        }
+        wapipex_dump( "R", pipe_end, async_get_thread( async )->process->id, data, out_size );
+        async_request_complete( async, status, out_size, out_size, data );
         relay_free( message, !relay_no_close );  /* fully consumed: relay closes the source */
         wake_message( message, message->iosb->in_size );
         free_message( message );
@@ -2209,7 +2222,8 @@ static void message_queue_read( struct pipe_end *pipe_end, struct async *async )
     /* gate104 lever (b): duplex read completed with no queued reader behind it —
      * start the 10 ms mirror heartbeat so the parked LRPC idle receive wakes on a
      * beat and rpcrt4 re-arms (request 7 issues). */
-    if (pipe_end->pipe && pipe_end->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE) &&
+    if (allow_heartbeat && pipe_end->pipe &&
+        pipe_end->pipe->sharing == (FILE_SHARE_READ | FILE_SHARE_WRITE) &&
         list_empty( &pipe_end->read_q.queue ))
         arm_mirror_heartbeat( pipe_end );
 
@@ -2229,7 +2243,7 @@ static void reselect_read_queue( struct pipe_end *pipe_end, int reselect_write )
     ignore_reselect = 1;
     while (!list_empty( &pipe_end->message_queue ) && (async = find_pending_async( &pipe_end->read_q )))
     {
-        message_queue_read( pipe_end, async );
+        message_queue_read( pipe_end, async, 1 );
         release_object( async );
         reselect_write = 1;
     }
@@ -2341,6 +2355,37 @@ static void pipe_end_read( struct fd *fd, struct async *async, file_pos_t pos )
         if (!list_empty( &pipe_end->message_queue )) break;
         set_error( STATUS_PIPE_BROKEN );
         return;
+    }
+
+    if (!list_empty( &pipe_end->message_queue ))
+    {
+        struct async *pending = list_empty( &pipe_end->read_q.queue )
+            ? NULL : find_pending_async( &pipe_end->read_q );
+
+        if (pending)
+        {
+            release_object( pending );
+        }
+        else
+        {
+            ignore_reselect = 1;
+            message_queue_read( pipe_end, async, 0 );
+            ignore_reselect = 0;
+
+            if (pipe_end->connection)
+            {
+                if (list_empty( &pipe_end->message_queue ))
+                {
+                    pipe_end->cont_armed = 0;
+                    fd_async_wake_up( pipe_end->connection->fd, ASYNC_TYPE_WAIT, STATUS_SUCCESS );
+                }
+                else
+                    reselect_write_queue( pipe_end->connection );
+            }
+            if (relay_wanted( pipe_end )) relay_queue_census( pipe_end, "R" );
+            set_error( STATUS_PENDING );
+            return;
+        }
     }
 
     queue_async( &pipe_end->read_q, async );
