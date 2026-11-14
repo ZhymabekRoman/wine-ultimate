@@ -23,6 +23,8 @@
 #define COBJMACROS
 #include "windef.h"
 #include "winbase.h"
+#include "wingdi.h"
+#include "winuser.h"
 #include "winstring.h"
 #include "activation.h"
 #include "wine/debug.h"
