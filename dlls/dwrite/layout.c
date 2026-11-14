@@ -1113,21 +1113,233 @@ failed:
     return hr;
 }
 
-struct glyph_cache_entry {
+#define GLYPH_RUN_CACHE_SIZE    512
+#define GLYPH_RUN_CACHE_BUCKETS 1024
+#define GLYPH_RUN_CACHE_MAX_LEN 2048
+
+struct glyph_run_cache_key
+{
     IDWriteFontFace *font_face;
+    UINT32 em_size_bits;
     DWRITE_SCRIPT_ANALYSIS sa;
+    DWRITE_MEASURING_MODE measuring_mode;
+    UINT32 ppdip_bits;
+    DWRITE_MATRIX transform;
+    UINT8 is_rtl;
+    UINT8 is_sideways;
+    const WCHAR *locale;
+    UINT32 locale_len;
+    const WCHAR *string;
     UINT32 string_len;
-    WCHAR string[16];
-    UINT32 glyph_count;
-    UINT16 glyphs[24];
-    UINT16 clustermap[16];
-    DWRITE_SHAPING_TEXT_PROPERTIES text_props[16];
-    DWRITE_SHAPING_GLYPH_PROPERTIES glyph_props[24];
+    UINT64 hash;
 };
 
-#define GLYPH_CACHE_SIZE 64
-static struct glyph_cache_entry glyph_cache[GLYPH_CACHE_SIZE];
-static unsigned int glyph_cache_idx = 0;
+struct glyph_run_cache_entry
+{
+    struct list lru_entry;
+    struct list hash_entry;
+
+    IDWriteFontFace *font_face;
+    UINT32 em_size_bits;
+    DWRITE_SCRIPT_ANALYSIS sa;
+    DWRITE_MEASURING_MODE measuring_mode;
+    UINT32 ppdip_bits;
+    DWRITE_MATRIX transform;
+    UINT8 is_rtl;
+    UINT8 is_sideways;
+    UINT32 locale_len;
+    UINT32 string_len;
+    UINT64 hash;
+
+    UINT32 glyph_count;
+    FLOAT advance_width;
+    FLOAT baseline;
+    FLOAT height;
+
+    FLOAT *advances;
+    DWRITE_GLYPH_OFFSET *offsets;
+    UINT16 *glyphs;
+    UINT16 *clustermap;
+    DWRITE_SHAPING_GLYPH_PROPERTIES *glyph_props;
+    WCHAR *string;
+    WCHAR *locale;
+};
+
+struct glyph_run_cache
+{
+    struct list lru;
+    struct list buckets[GLYPH_RUN_CACHE_BUCKETS];
+    unsigned int count;
+};
+
+static inline UINT32 float_to_norm_bits(FLOAT f)
+{
+    UINT32 bits;
+    if (f == 0.0f) f = 0.0f;
+    memcpy(&bits, &f, sizeof(bits));
+    return bits;
+}
+
+static inline void normalize_dwrite_matrix(DWRITE_MATRIX *dst, const DWRITE_MATRIX *src)
+{
+    dst->m11 = src->m11 == 0.0f ? 0.0f : src->m11;
+    dst->m12 = src->m12 == 0.0f ? 0.0f : src->m12;
+    dst->m21 = src->m21 == 0.0f ? 0.0f : src->m21;
+    dst->m22 = src->m22 == 0.0f ? 0.0f : src->m22;
+    dst->dx = src->dx == 0.0f ? 0.0f : src->dx;
+    dst->dy = src->dy == 0.0f ? 0.0f : src->dy;
+}
+
+static inline UINT64 fnv1a_bytes(UINT64 hash, const void *data, size_t len)
+{
+    const BYTE *p = data;
+    size_t i;
+
+    for (i = 0; i < len; ++i)
+    {
+        hash ^= p[i];
+        hash *= 1099511628211ULL;
+    }
+    return hash;
+}
+
+static void glyph_run_cache_init_key(const struct dwrite_textlayout *layout, const struct regular_layout_run *run,
+        struct glyph_run_cache_key *key)
+{
+    UINT64 h = 14695981039346656037ULL;
+    UINT32 i;
+
+    memset(key, 0, sizeof(*key));
+    key->font_face = run->run.fontFace;
+    key->em_size_bits = float_to_norm_bits(run->run.fontEmSize);
+    key->sa = run->sa;
+    key->measuring_mode = layout->measuringmode;
+    if (is_layout_gdi_compatible(layout))
+    {
+        key->ppdip_bits = float_to_norm_bits(layout->ppdip);
+        normalize_dwrite_matrix(&key->transform, &layout->transform);
+    }
+    key->is_rtl = run->run.bidiLevel & 1;
+    key->is_sideways = !!run->run.isSideways;
+    key->locale = run->descr.localeName ? run->descr.localeName : L"";
+    key->locale_len = wcslen(key->locale);
+    key->string = run->descr.string;
+    key->string_len = run->descr.stringLength;
+
+    h = fnv1a_bytes(h, &key->font_face, sizeof(key->font_face));
+    h = fnv1a_bytes(h, &key->em_size_bits, sizeof(key->em_size_bits));
+    h = fnv1a_bytes(h, &key->sa, sizeof(key->sa));
+    h = fnv1a_bytes(h, &key->measuring_mode, sizeof(key->measuring_mode));
+    h = fnv1a_bytes(h, &key->ppdip_bits, sizeof(key->ppdip_bits));
+    h = fnv1a_bytes(h, &key->transform, sizeof(key->transform));
+    h = fnv1a_bytes(h, &key->is_rtl, sizeof(key->is_rtl));
+    h = fnv1a_bytes(h, &key->is_sideways, sizeof(key->is_sideways));
+    h = fnv1a_bytes(h, &key->locale_len, sizeof(key->locale_len));
+    h = fnv1a_bytes(h, &key->string_len, sizeof(key->string_len));
+
+    for (i = 0; i < key->locale_len; ++i)
+    {
+        WCHAR c = key->locale[i];
+        if (c >= 'A' && c <= 'Z') c += 'a' - 'A';
+        h = fnv1a_bytes(h, &c, sizeof(c));
+    }
+    h = fnv1a_bytes(h, key->string, key->string_len * sizeof(WCHAR));
+    key->hash = h;
+}
+
+static BOOL glyph_run_cache_entry_matches(const struct glyph_run_cache_entry *e,
+        const struct glyph_run_cache_key *key)
+{
+    return e->hash == key->hash &&
+           e->font_face == key->font_face &&
+           e->em_size_bits == key->em_size_bits &&
+           e->sa.script == key->sa.script &&
+           e->sa.shapes == key->sa.shapes &&
+           e->measuring_mode == key->measuring_mode &&
+           e->ppdip_bits == key->ppdip_bits &&
+           e->is_rtl == key->is_rtl &&
+           e->is_sideways == key->is_sideways &&
+           e->string_len == key->string_len &&
+           e->locale_len == key->locale_len &&
+           !memcmp(&e->transform, &key->transform, sizeof(e->transform)) &&
+           !wcsicmp(e->locale, key->locale) &&
+           !memcmp(e->string, key->string, key->string_len * sizeof(WCHAR));
+}
+
+static struct glyph_run_cache_entry *glyph_run_cache_find(struct glyph_run_cache *cache,
+        const struct glyph_run_cache_key *key)
+{
+    struct list *bucket = &cache->buckets[key->hash & (GLYPH_RUN_CACHE_BUCKETS - 1)];
+    struct glyph_run_cache_entry *e;
+
+    LIST_FOR_EACH_ENTRY(e, bucket, struct glyph_run_cache_entry, hash_entry)
+    {
+        if (glyph_run_cache_entry_matches(e, key))
+            return e;
+    }
+    return NULL;
+}
+
+void release_glyph_run_cache(struct glyph_run_cache *cache)
+{
+    struct glyph_run_cache_entry *e, *next;
+
+    if (!cache)
+        return;
+
+    LIST_FOR_EACH_ENTRY_SAFE(e, next, &cache->lru, struct glyph_run_cache_entry, lru_entry)
+    {
+        list_remove(&e->lru_entry);
+        list_remove(&e->hash_entry);
+        free(e);
+    }
+    free(cache);
+}
+
+/* Must be called with factory_lock(factory) held. */
+void glyph_run_cache_invalidate_fontface(IDWriteFactory7 *factory, IDWriteFontFace *font_face)
+{
+    struct glyph_run_cache *cache;
+    struct glyph_run_cache_entry *e, *next;
+
+    if (!factory || !font_face)
+        return;
+
+    cache = *factory_get_glyph_run_cache(factory);
+    if (!cache)
+        return;
+
+    LIST_FOR_EACH_ENTRY_SAFE(e, next, &cache->lru, struct glyph_run_cache_entry, lru_entry)
+    {
+        if (e->font_face == font_face)
+        {
+            list_remove(&e->lru_entry);
+            list_remove(&e->hash_entry);
+            free(e);
+            cache->count--;
+        }
+    }
+}
+
+static BOOL layout_run_has_character_spacing(const struct dwrite_textlayout *layout,
+        const struct regular_layout_run *run)
+{
+    struct layout_range_header *h;
+
+    LIST_FOR_EACH_ENTRY(h, &layout->spacing, struct layout_range_header, entry)
+    {
+        if ((h->range.startPosition >= run->descr.textPosition &&
+                h->range.startPosition <= run->descr.textPosition + run->descr.stringLength) ||
+            (run->descr.textPosition >= h->range.startPosition &&
+                run->descr.textPosition <= h->range.startPosition + h->range.length))
+        {
+            const struct layout_range_spacing *s = (const struct layout_range_spacing *)h;
+            if (s->leading != 0.0f || s->trailing != 0.0f || s->min_advance != 0.0f)
+                return TRUE;
+        }
+    }
+    return FALSE;
+}
 
 static HRESULT layout_shape_get_glyphs(struct dwrite_textlayout *layout, struct shaping_context *context)
 {
@@ -1135,7 +1347,6 @@ static HRESULT layout_shape_get_glyphs(struct dwrite_textlayout *layout, struct 
     unsigned int max_count;
     HRESULT hr;
 
-    run->descr.localeName = get_layout_range_by_pos(layout, run->descr.textPosition)->locale;
     run->clustermap = calloc(run->descr.stringLength, sizeof(*run->clustermap));
     if (!run->clustermap)
         return E_OUTOFMEMORY;
@@ -1149,32 +1360,6 @@ static HRESULT layout_shape_get_glyphs(struct dwrite_textlayout *layout, struct 
     context->glyph_props = calloc(max_count, sizeof(*context->glyph_props));
     if (!context->text_props || !context->glyph_props)
         return E_OUTOFMEMORY;
-
-    if (FAILED(hr = layout_shape_get_user_features(layout, context)))
-        return hr;
-
-    if (run->descr.stringLength <= 16 && !context->user_features.range_count && !run->run.isSideways)
-    {
-        unsigned int i;
-        for (i = 0; i < GLYPH_CACHE_SIZE; i++)
-        {
-            struct glyph_cache_entry *c = &glyph_cache[i];
-            if (c->font_face == run->run.fontFace &&
-                c->string_len == run->descr.stringLength &&
-                !memcmp(&c->sa, &run->sa, sizeof(DWRITE_SCRIPT_ANALYSIS)) &&
-                !memcmp(c->string, run->descr.string, c->string_len * sizeof(WCHAR)))
-            {
-                memcpy(run->glyphs, c->glyphs, c->glyph_count * sizeof(UINT16));
-                memcpy(run->clustermap, c->clustermap, c->string_len * sizeof(UINT16));
-                memcpy(context->text_props, c->text_props, c->string_len * sizeof(DWRITE_SHAPING_TEXT_PROPERTIES));
-                memcpy(context->glyph_props, c->glyph_props, c->glyph_count * sizeof(DWRITE_SHAPING_GLYPH_PROPERTIES));
-                run->glyphcount = c->glyph_count;
-                run->run.glyphIndices = run->glyphs;
-                run->descr.clusterMap = run->clustermap;
-                return S_OK;
-            }
-        }
-    }
 
     for (;;)
     {
@@ -1202,22 +1387,6 @@ static HRESULT layout_shape_get_glyphs(struct dwrite_textlayout *layout, struct 
         }
 
         break;
-    }
-
-    if (SUCCEEDED(hr) && run->descr.stringLength <= 16 && !context->user_features.range_count
-        && !run->run.isSideways && run->glyphcount <= 24)
-    {
-        struct glyph_cache_entry *c = &glyph_cache[glyph_cache_idx];
-        glyph_cache_idx = (glyph_cache_idx + 1) % GLYPH_CACHE_SIZE;
-        c->font_face = run->run.fontFace;
-        c->sa = run->sa;
-        c->string_len = run->descr.stringLength;
-        memcpy(c->string, run->descr.string, c->string_len * sizeof(WCHAR));
-        c->glyph_count = run->glyphcount;
-        memcpy(c->glyphs, run->glyphs, run->glyphcount * sizeof(UINT16));
-        memcpy(c->clustermap, run->clustermap, c->string_len * sizeof(UINT16));
-        memcpy(c->text_props, context->text_props, c->string_len * sizeof(DWRITE_SHAPING_TEXT_PROPERTIES));
-        memcpy(c->glyph_props, context->glyph_props, run->glyphcount * sizeof(DWRITE_SHAPING_GLYPH_PROPERTIES));
     }
 
     if (FAILED(hr))
@@ -1306,13 +1475,13 @@ static HRESULT layout_shape_apply_character_spacing(struct dwrite_textlayout *la
     return S_OK;
 }
 
-static HRESULT layout_shape_get_positions(struct dwrite_textlayout *layout, struct shaping_context *context)
+static HRESULT layout_shape_get_positions_base(struct dwrite_textlayout *layout, struct shaping_context *context)
 {
     struct regular_layout_run *run = context->run;
     HRESULT hr;
 
-    run->advances = calloc(run->glyphcount, sizeof(*run->advances));
-    run->offsets = calloc(run->glyphcount, sizeof(*run->offsets));
+    run->advances = calloc(max(run->glyphcount, 1), sizeof(*run->advances));
+    run->offsets = calloc(max(run->glyphcount, 1), sizeof(*run->offsets));
     if (!run->advances || !run->offsets)
         return E_OUTOFMEMORY;
 
@@ -1338,25 +1507,285 @@ static HRESULT layout_shape_get_positions(struct dwrite_textlayout *layout, stru
         WARN("%s: failed to get glyph placement info, hr %#lx.\n", debugstr_rundescr(&run->descr), hr);
     }
 
-    if (SUCCEEDED(hr))
-        hr = layout_shape_apply_character_spacing(layout, context);
-
     run->run.glyphAdvances = run->advances;
     run->run.glyphOffsets = run->offsets;
 
     return hr;
 }
 
-static HRESULT layout_shape_run(struct dwrite_textlayout *layout, struct regular_layout_run *run)
+static HRESULT glyph_run_cache_lookup(struct dwrite_textlayout *layout, struct layout_run *r,
+        struct shaping_context *context, BOOL *hit)
 {
+    struct regular_layout_run *run = &r->u.regular;
+    struct glyph_run_cache_key key;
+    struct glyph_run_cache *cache;
+    struct glyph_run_cache_entry *e;
+    BOOL has_spacing;
+    HRESULT hr = S_OK;
+
+    *hit = FALSE;
+
+    if (!layout->factory || !run->run.fontFace || !run->descr.stringLength ||
+            run->descr.stringLength > GLYPH_RUN_CACHE_MAX_LEN)
+        return S_OK;
+
+    glyph_run_cache_init_key(layout, run, &key);
+    has_spacing = layout_run_has_character_spacing(layout, run);
+
+    factory_lock(layout->factory);
+
+    cache = *factory_get_glyph_run_cache(layout->factory);
+    if (!cache)
+    {
+        factory_unlock(layout->factory);
+        return S_OK;
+    }
+
+    e = glyph_run_cache_find(cache, &key);
+    if (!e)
+    {
+        factory_unlock(layout->factory);
+        return S_OK;
+    }
+
+    /* Promote to MRU head. */
+    list_remove(&e->lru_entry);
+    list_add_head(&cache->lru, &e->lru_entry);
+
+    run->clustermap = malloc(e->string_len * sizeof(*run->clustermap));
+    run->glyphs = malloc(max(e->glyph_count, 1) * sizeof(*run->glyphs));
+    run->advances = malloc(max(e->glyph_count, 1) * sizeof(*run->advances));
+    run->offsets = malloc(max(e->glyph_count, 1) * sizeof(*run->offsets));
+    if (has_spacing)
+        context->glyph_props = malloc(max(e->glyph_count, 1) * sizeof(*context->glyph_props));
+
+    if (!run->clustermap || !run->glyphs || !run->advances || !run->offsets ||
+            (has_spacing && !context->glyph_props))
+    {
+        factory_unlock(layout->factory);
+        free(run->clustermap);
+        free(run->glyphs);
+        free(run->advances);
+        free(run->offsets);
+        free(context->glyph_props);
+        run->clustermap = NULL;
+        run->glyphs = NULL;
+        run->advances = NULL;
+        run->offsets = NULL;
+        context->glyph_props = NULL;
+        return E_OUTOFMEMORY;
+    }
+
+    memcpy(run->clustermap, e->clustermap, e->string_len * sizeof(*run->clustermap));
+    if (e->glyph_count)
+    {
+        memcpy(run->glyphs, e->glyphs, e->glyph_count * sizeof(*run->glyphs));
+        memcpy(run->advances, e->advances, e->glyph_count * sizeof(*run->advances));
+        memcpy(run->offsets, e->offsets, e->glyph_count * sizeof(*run->offsets));
+        if (has_spacing)
+            memcpy(context->glyph_props, e->glyph_props, e->glyph_count * sizeof(*context->glyph_props));
+    }
+
+    run->glyphcount = e->glyph_count;
+    r->baseline = e->baseline;
+    r->height = e->height;
+
+    factory_unlock(layout->factory);
+
+    run->run.glyphIndices = run->glyphs;
+    run->run.glyphAdvances = run->advances;
+    run->run.glyphOffsets = run->offsets;
+    run->descr.clusterMap = run->clustermap;
+
+    if (has_spacing)
+        hr = layout_shape_apply_character_spacing(layout, context);
+
+    if (run->sa.shapes == DWRITE_SCRIPT_SHAPES_NO_VISUAL)
+        run->run.glyphCount = 0;
+    else
+        run->run.glyphCount = run->glyphcount;
+
+    *hit = TRUE;
+    return hr;
+}
+
+static void glyph_run_cache_insert(struct dwrite_textlayout *layout, const struct layout_run *r,
+        const struct shaping_context *context)
+{
+    const struct regular_layout_run *run = &r->u.regular;
+    struct glyph_run_cache_key key;
+    struct glyph_run_cache *cache, **cache_slot;
+    struct glyph_run_cache_entry *e, *existing;
+    size_t advances_bytes, offsets_bytes, glyphs_bytes, clustermap_bytes;
+    size_t glyph_props_bytes, string_bytes, locale_bytes, total_bytes;
+    FLOAT advance_width = 0.0f;
+    char *p;
+    UINT32 i;
+
+    if (!layout->factory || !run->run.fontFace || !run->descr.stringLength ||
+            run->descr.stringLength > GLYPH_RUN_CACHE_MAX_LEN || run->glyphcount > 65536)
+        return;
+
+    glyph_run_cache_init_key(layout, run, &key);
+
+    advances_bytes = run->glyphcount * sizeof(FLOAT);
+    offsets_bytes = run->glyphcount * sizeof(DWRITE_GLYPH_OFFSET);
+    glyphs_bytes = run->glyphcount * sizeof(UINT16);
+    clustermap_bytes = key.string_len * sizeof(UINT16);
+    glyph_props_bytes = run->glyphcount * sizeof(DWRITE_SHAPING_GLYPH_PROPERTIES);
+    string_bytes = key.string_len * sizeof(WCHAR);
+    locale_bytes = (key.locale_len + 1) * sizeof(WCHAR);
+    total_bytes = sizeof(*e) + advances_bytes + offsets_bytes + glyphs_bytes +
+            clustermap_bytes + glyph_props_bytes + string_bytes + locale_bytes;
+
+    if (!(e = malloc(total_bytes)))
+        return;
+
+    p = (char *)(e + 1);
+    e->advances = (FLOAT *)p;
+    p += advances_bytes;
+    e->offsets = (DWRITE_GLYPH_OFFSET *)p;
+    p += offsets_bytes;
+    e->glyphs = (UINT16 *)p;
+    p += glyphs_bytes;
+    e->clustermap = (UINT16 *)p;
+    p += clustermap_bytes;
+    e->glyph_props = (DWRITE_SHAPING_GLYPH_PROPERTIES *)p;
+    p += glyph_props_bytes;
+    e->string = (WCHAR *)p;
+    p += string_bytes;
+    e->locale = (WCHAR *)p;
+
+    e->font_face = key.font_face;
+    e->em_size_bits = key.em_size_bits;
+    e->sa = key.sa;
+    e->measuring_mode = key.measuring_mode;
+    e->ppdip_bits = key.ppdip_bits;
+    e->transform = key.transform;
+    e->is_rtl = key.is_rtl;
+    e->is_sideways = key.is_sideways;
+    e->locale_len = key.locale_len;
+    e->string_len = key.string_len;
+    e->hash = key.hash;
+    e->glyph_count = run->glyphcount;
+    e->baseline = r->baseline;
+    e->height = r->height;
+
+    if (run->glyphcount)
+    {
+        memcpy(e->advances, run->advances, advances_bytes);
+        memcpy(e->offsets, run->offsets, offsets_bytes);
+        memcpy(e->glyphs, run->glyphs, glyphs_bytes);
+        memcpy(e->glyph_props, context->glyph_props, glyph_props_bytes);
+        if (run->sa.shapes != DWRITE_SCRIPT_SHAPES_NO_VISUAL)
+        {
+            for (i = 0; i < run->glyphcount; ++i)
+                advance_width += run->advances[i];
+        }
+    }
+    e->advance_width = advance_width;
+    memcpy(e->clustermap, run->clustermap, clustermap_bytes);
+    memcpy(e->string, key.string, string_bytes);
+    memcpy(e->locale, key.locale, locale_bytes);
+
+    factory_lock(layout->factory);
+
+    cache_slot = factory_get_glyph_run_cache(layout->factory);
+    if (!*cache_slot)
+    {
+        if (!(cache = malloc(sizeof(*cache))))
+        {
+            factory_unlock(layout->factory);
+            free(e);
+            return;
+        }
+        list_init(&cache->lru);
+        for (i = 0; i < GLYPH_RUN_CACHE_BUCKETS; ++i)
+            list_init(&cache->buckets[i]);
+        cache->count = 0;
+        *cache_slot = cache;
+    }
+    else
+        cache = *cache_slot;
+
+    if ((existing = glyph_run_cache_find(cache, &key)))
+    {
+        list_remove(&existing->lru_entry);
+        list_add_head(&cache->lru, &existing->lru_entry);
+        factory_unlock(layout->factory);
+        free(e);
+        return;
+    }
+
+    while (cache->count >= GLYPH_RUN_CACHE_SIZE)
+    {
+        struct list *tail = list_tail(&cache->lru);
+        struct glyph_run_cache_entry *victim;
+
+        if (!tail)
+            break;
+        victim = LIST_ENTRY(tail, struct glyph_run_cache_entry, lru_entry);
+        list_remove(&victim->lru_entry);
+        list_remove(&victim->hash_entry);
+        free(victim);
+        cache->count--;
+    }
+
+    list_add_head(&cache->lru, &e->lru_entry);
+    list_add_head(&cache->buckets[e->hash & (GLYPH_RUN_CACHE_BUCKETS - 1)], &e->hash_entry);
+    cache->count++;
+
+    factory_unlock(layout->factory);
+}
+
+static HRESULT layout_shape_run(struct dwrite_textlayout *layout, struct layout_run *r)
+{
+    struct regular_layout_run *run = &r->u.regular;
     struct shaping_context context = { 0 };
+    DWRITE_FONT_METRICS fontmetrics = { 0 };
+    BOOL cache_hit = FALSE;
     HRESULT hr;
 
     context.analyzer = get_text_analyzer();
     context.run = run;
+    run->descr.localeName = get_layout_range_by_pos(layout, run->descr.textPosition)->locale;
+
+    if (FAILED(hr = layout_shape_get_user_features(layout, &context)))
+    {
+        layout_get_font_metrics(layout, run->run.fontFace, run->run.fontEmSize, &fontmetrics);
+        layout_get_font_height(run->run.fontEmSize, &fontmetrics, &r->baseline, &r->height);
+        layout_shape_clear_context(&context);
+        return hr;
+    }
+
+    if (!context.user_features.range_count)
+    {
+        hr = glyph_run_cache_lookup(layout, r, &context, &cache_hit);
+        if (cache_hit || FAILED(hr))
+        {
+            if (FAILED(hr))
+            {
+                layout_get_font_metrics(layout, run->run.fontFace, run->run.fontEmSize, &fontmetrics);
+                layout_get_font_height(run->run.fontEmSize, &fontmetrics, &r->baseline, &r->height);
+            }
+            layout_shape_clear_context(&context);
+            return hr;
+        }
+    }
 
     if (SUCCEEDED(hr = layout_shape_get_glyphs(layout, &context)))
-        hr = layout_shape_get_positions(layout, &context);
+        hr = layout_shape_get_positions_base(layout, &context);
+
+    /* baseline derived from font metrics */
+    layout_get_font_metrics(layout, run->run.fontFace, run->run.fontEmSize, &fontmetrics);
+    layout_get_font_height(run->run.fontEmSize, &fontmetrics, &r->baseline, &r->height);
+
+    if (SUCCEEDED(hr))
+    {
+        if (!context.user_features.range_count)
+            glyph_run_cache_insert(layout, r, &context);
+        hr = layout_shape_apply_character_spacing(layout, &context);
+    }
 
     layout_shape_clear_context(&context);
 
@@ -1407,7 +1836,6 @@ static HRESULT layout_compute_runs(struct dwrite_textlayout *layout)
     /* fill run info */
     LIST_FOR_EACH_ENTRY(r, &layout->runs, struct layout_run, entry) {
         struct regular_layout_run *run = &r->u.regular;
-        DWRITE_FONT_METRICS fontmetrics = { 0 };
 
         /* we need to do very little in case of inline objects */
         if (r->kind == LAYOUT_RUN_INLINE)
@@ -1444,12 +1872,8 @@ static HRESULT layout_compute_runs(struct dwrite_textlayout *layout)
             continue;
         }
 
-        if (FAILED(hr = layout_shape_run(layout, run)))
+        if (FAILED(hr = layout_shape_run(layout, r)))
             WARN("%s: shaping failed, hr %#lx.\n", debugstr_rundescr(&run->descr), hr);
-
-        /* baseline derived from font metrics */
-        layout_get_font_metrics(layout, run->run.fontFace, run->run.fontEmSize, &fontmetrics);
-        layout_get_font_height(run->run.fontEmSize, &fontmetrics, &r->baseline, &r->height);
 
         layout_set_cluster_metrics(layout, r, &cluster);
     }

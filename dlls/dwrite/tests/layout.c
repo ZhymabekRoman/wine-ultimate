@@ -7924,6 +7924,188 @@ static void test_HitTestTextPosition(void)
     IDWriteFactory_Release(factory);
 }
 
+struct glyph_cache_thread_ctx
+{
+    IDWriteFactory *factory;
+    IDWriteTextFormat *format;
+    const WCHAR *long_str;
+    FLOAT expected_width;
+    FLOAT expected_height;
+    int tid;
+    BOOL passed;
+};
+
+static DWORD WINAPI glyph_cache_worker(void *arg)
+{
+    struct glyph_cache_thread_ctx *ctx = arg;
+    WCHAR buf[64];
+    int i;
+
+    ctx->passed = TRUE;
+    for (i = 0; i < 64; ++i)
+    {
+        IDWriteTextLayout *layout;
+        DWRITE_TEXT_METRICS m;
+        HRESULT hr;
+
+        if ((i & 1) == 0)
+        {
+            hr = IDWriteFactory_CreateTextLayout(ctx->factory, ctx->long_str, lstrlenW(ctx->long_str),
+                    ctx->format, 2000.0f, 1000.0f, &layout);
+            if (FAILED(hr)) { ctx->passed = FALSE; break; }
+            hr = IDWriteTextLayout_GetMetrics(layout, &m);
+            IDWriteTextLayout_Release(layout);
+            if (FAILED(hr) || m.width != ctx->expected_width || m.height != ctx->expected_height)
+            {
+                ctx->passed = FALSE;
+                break;
+            }
+        }
+        else
+        {
+            wsprintfW(buf, L"Chat item thread %d row %d: status message preview", ctx->tid, i);
+            hr = IDWriteFactory_CreateTextLayout(ctx->factory, buf, lstrlenW(buf),
+                    ctx->format, 2000.0f, 1000.0f, &layout);
+            if (FAILED(hr)) { ctx->passed = FALSE; break; }
+            hr = IDWriteTextLayout_GetMetrics(layout, &m);
+            IDWriteTextLayout_Release(layout);
+            if (FAILED(hr) || m.width <= 0.0f || m.height <= 0.0f)
+            {
+                ctx->passed = FALSE;
+                break;
+            }
+        }
+    }
+    return 0;
+}
+
+static void test_glyph_run_cache(void)
+{
+    static const WCHAR long_str[] =
+        L"WhatsApp Web QR code login: Open WhatsApp on your phone and scan this code to link your device.";
+    IDWriteFactory *factory, *isolated;
+    IDWriteTextFormat *format1, *format2;
+    IDWriteTextLayout *layout;
+    DWRITE_TEXT_METRICS m_cold, m_hit, m_big, m_iso, m_gdi1, m_gdi2;
+    DWRITE_LINE_METRICS lm_cold, lm_hit;
+    struct glyph_cache_thread_ctx ctx[4];
+    HANDLE threads[4];
+    UINT32 count, i;
+    WCHAR buf[64];
+    HRESULT hr;
+
+    factory = create_factory();
+    ok(!!factory, "failed to create factory\n");
+
+    hr = DWriteCreateFactory(DWRITE_FACTORY_TYPE_ISOLATED, &IID_IDWriteFactory, (IUnknown **)&isolated);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IDWriteFactory_CreateTextFormat(factory, L"Tahoma", NULL, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 14.0f, L"en-US", &format1);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    hr = IDWriteFactory_CreateTextFormat(factory, L"Tahoma", NULL, DWRITE_FONT_WEIGHT_NORMAL,
+            DWRITE_FONT_STYLE_NORMAL, DWRITE_FONT_STRETCH_NORMAL, 28.0f, L"en-US", &format2);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+
+    /* 1. Cold miss vs warm hit on long run (>16 chars) */
+    hr = IDWriteFactory_CreateTextLayout(factory, long_str, lstrlenW(long_str), format1, 2000.0f, 1000.0f, &layout);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetMetrics(layout, &m_cold);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetLineMetrics(layout, &lm_cold, 1, &count);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IDWriteTextLayout_Release(layout);
+
+    hr = IDWriteFactory_CreateTextLayout(factory, long_str, lstrlenW(long_str), format1, 2000.0f, 1000.0f, &layout);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetMetrics(layout, &m_hit);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetLineMetrics(layout, &lm_hit, 1, &count);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IDWriteTextLayout_Release(layout);
+
+    ok(m_cold.width == m_hit.width, "width mismatch: %.6f vs %.6f\n", m_cold.width, m_hit.width);
+    ok(m_cold.height == m_hit.height, "height mismatch: %.6f vs %.6f\n", m_cold.height, m_hit.height);
+    ok(lm_cold.height == lm_hit.height, "line height mismatch: %.6f vs %.6f\n", lm_cold.height, lm_hit.height);
+    ok(lm_cold.baseline == lm_hit.baseline, "baseline mismatch: %.6f vs %.6f\n", lm_cold.baseline, lm_hit.baseline);
+
+    /* 2. Different em size must not falsely hit */
+    hr = IDWriteFactory_CreateTextLayout(factory, long_str, lstrlenW(long_str), format2, 2000.0f, 1000.0f, &layout);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetMetrics(layout, &m_big);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IDWriteTextLayout_Release(layout);
+    ok(m_big.width > m_cold.width * 1.5f && m_big.height > m_cold.height * 1.5f,
+            "unexpected big metrics: %.2f x %.2f vs %.2f x %.2f\n", m_big.width, m_big.height, m_cold.width, m_cold.height);
+
+    /* 3. GDI-compatible measuring modes and ppdip key isolation */
+    hr = IDWriteFactory_CreateGdiCompatibleTextLayout(factory, long_str, lstrlenW(long_str), format1,
+            2000.0f, 1000.0f, 1.0f, NULL, FALSE, &layout);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetMetrics(layout, &m_gdi1);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IDWriteTextLayout_Release(layout);
+
+    hr = IDWriteFactory_CreateGdiCompatibleTextLayout(factory, long_str, lstrlenW(long_str), format1,
+            2000.0f, 1000.0f, 2.0f, NULL, TRUE, &layout);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetMetrics(layout, &m_gdi2);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IDWriteTextLayout_Release(layout);
+    ok(m_gdi1.width > 0.0f && m_gdi2.width > 0.0f, "unexpected zero gdi width\n");
+
+    /* 4. LRU eviction (> 512 entries) and parity with fresh isolated factory */
+    for (i = 0; i < 600; ++i)
+    {
+        wsprintfW(buf, L"Eviction probe message #%u with sufficient text length", i);
+        hr = IDWriteFactory_CreateTextLayout(factory, buf, lstrlenW(buf), format1, 2000.0f, 1000.0f, &layout);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        hr = IDWriteTextLayout_GetMetrics(layout, &m_hit);
+        ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+        IDWriteTextLayout_Release(layout);
+    }
+
+    hr = IDWriteFactory_CreateTextLayout(factory, long_str, lstrlenW(long_str), format1, 2000.0f, 1000.0f, &layout);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetMetrics(layout, &m_hit);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IDWriteTextLayout_Release(layout);
+
+    hr = IDWriteFactory_CreateTextLayout(isolated, long_str, lstrlenW(long_str), format1, 2000.0f, 1000.0f, &layout);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    hr = IDWriteTextLayout_GetMetrics(layout, &m_iso);
+    ok(hr == S_OK, "Unexpected hr %#lx.\n", hr);
+    IDWriteTextLayout_Release(layout);
+    ok(m_hit.width == m_iso.width && m_hit.height == m_iso.height,
+            "post-eviction mismatch: %.6f x %.6f vs %.6f x %.6f\n", m_hit.width, m_hit.height, m_iso.width, m_iso.height);
+
+    /* 5. Multi-threaded concurrency on shared factory */
+    for (i = 0; i < 4; ++i)
+    {
+        ctx[i].factory = factory;
+        ctx[i].format = format1;
+        ctx[i].long_str = long_str;
+        ctx[i].expected_width = m_cold.width;
+        ctx[i].expected_height = m_cold.height;
+        ctx[i].tid = i;
+        ctx[i].passed = FALSE;
+        threads[i] = CreateThread(NULL, 0, glyph_cache_worker, &ctx[i], 0, NULL);
+        ok(!!threads[i], "CreateThread failed\n");
+    }
+    WaitForMultipleObjects(4, threads, TRUE, INFINITE);
+    for (i = 0; i < 4; ++i)
+    {
+        CloseHandle(threads[i]);
+        ok(ctx[i].passed, "thread %u failed glyph cache stress\n", i);
+    }
+
+    IDWriteTextFormat_Release(format2);
+    IDWriteTextFormat_Release(format1);
+    IDWriteFactory_Release(isolated);
+    IDWriteFactory_Release(factory);
+}
+
 START_TEST(layout)
 {
     IDWriteFactory *factory;
@@ -7981,6 +8163,7 @@ START_TEST(layout)
     test_layout_range_length();
     test_HitTestTextRange();
     test_HitTestTextPosition();
+    test_glyph_run_cache();
 
     IDWriteFactory_Release(factory);
 }

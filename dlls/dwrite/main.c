@@ -616,6 +616,8 @@ struct dwritefactory
     struct list collection_loaders;
     struct list file_loaders;
 
+    struct glyph_run_cache *glyph_run_cache;
+
     CRITICAL_SECTION cs;
 };
 
@@ -681,6 +683,9 @@ static void release_dwritefactory(struct dwritefactory *factory)
         IDWriteFontCollection1_Release(factory->eudc_collection);
     if (factory->fallback)
         release_system_fontfallback(factory->fallback);
+
+    release_glyph_run_cache(factory->glyph_run_cache);
+    factory->glyph_run_cache = NULL;
 
     factory->cs.DebugInfo->Spare[0] = 0;
     DeleteCriticalSection(&factory->cs);
@@ -939,6 +944,12 @@ void factory_unlock(IDWriteFactory7 *iface)
 {
     struct dwritefactory *factory = impl_from_IDWriteFactory7(iface);
     LeaveCriticalSection(&factory->cs);
+}
+
+struct glyph_run_cache **factory_get_glyph_run_cache(IDWriteFactory7 *iface)
+{
+    struct dwritefactory *factory = impl_from_IDWriteFactory7(iface);
+    return &factory->glyph_run_cache;
 }
 
 HRESULT factory_get_cached_fontface(IDWriteFactory7 *iface, IDWriteFontFile * const *font_files, UINT32 index,

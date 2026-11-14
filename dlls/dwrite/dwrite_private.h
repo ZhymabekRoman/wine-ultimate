@@ -373,8 +373,12 @@ extern HRESULT get_fontsig_from_font(IDWriteFont*,FONTSIGNATURE*);
 extern HRESULT get_fontsig_from_fontface(IDWriteFontFace*,FONTSIGNATURE*);
 extern HRESULT create_gdiinterop(IDWriteFactory7 *factory, IDWriteGdiInterop1 **interop);
 extern void fontface_detach_from_cache(IDWriteFontFace5 *fontface);
+struct glyph_run_cache;
 extern void factory_lock(IDWriteFactory7 *factory);
 extern void factory_unlock(IDWriteFactory7 *factory);
+extern struct glyph_run_cache **factory_get_glyph_run_cache(IDWriteFactory7 *factory);
+extern void release_glyph_run_cache(struct glyph_run_cache *cache);
+extern void glyph_run_cache_invalidate_fontface(IDWriteFactory7 *factory, IDWriteFontFace *font_face);
 extern HRESULT create_inmemory_fileloader(IDWriteInMemoryFontFileLoader **loader);
 extern HRESULT create_font_resource(IDWriteFactory7 *factory, IDWriteFontFile *file, UINT32 face_index,
         IDWriteFontResource **resource);

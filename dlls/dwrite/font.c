@@ -868,13 +868,12 @@ static ULONG WINAPI dwritefontface_Release(IDWriteFontFace5 *iface)
     {
         UINT32 i;
 
+        factory_lock(fontface->factory);
         if (fontface->cached)
-        {
-            factory_lock(fontface->factory);
             list_remove(&fontface->cached->entry);
-            factory_unlock(fontface->factory);
-            free(fontface->cached);
-        }
+        glyph_run_cache_invalidate_fontface(fontface->factory, (IDWriteFontFace *)&fontface->IDWriteFontFace5_iface);
+        factory_unlock(fontface->factory);
+        free(fontface->cached);
         release_scriptshaping_cache(fontface->shaping_cache);
         if (fontface->vdmx.context)
             IDWriteFontFace5_ReleaseFontTable(iface, fontface->vdmx.context);

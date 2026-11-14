@@ -2597,7 +2597,7 @@ static void fallback_map_default_font(const struct dwrite_fontfallback *fallback
 
         if ((mapped = fallback_font_get_supported_length(font, source, position, length)))
         {
-            IDWriteFont3_Release(first);
+            if (first) IDWriteFont3_Release(first);
             *ret_font = (IDWriteFont *)font;
             *ret_length = mapped;
             return;
