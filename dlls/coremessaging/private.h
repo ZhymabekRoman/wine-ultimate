@@ -42,6 +42,10 @@
 
 HRESULT async_action_create( IUnknown *invoker, async_operation_callback callback, IAsyncAction **out );
 
+/* Returns a handle a consumer can block on to be woken when the queue has work
+ * enqueued.  Backed by a wait completion packet, so no polling is required. */
+HRESULT dispatcher_queue_get_wake_handle( IDispatcherQueue *queue, HANDLE *handle );
+
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

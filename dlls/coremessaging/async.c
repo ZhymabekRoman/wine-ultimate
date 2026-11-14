@@ -431,21 +431,27 @@ static ULONG WINAPI async_bool_Release( IAsyncOperation_boolean *iface )
 
 static HRESULT WINAPI async_bool_GetIids( IAsyncOperation_boolean *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    IID *array;
+
+    if (!iid_count || !iids) return E_POINTER;
+    if (!(array = CoTaskMemAlloc( sizeof(*array) ))) return E_OUTOFMEMORY;
+    array[0] = IID_IAsyncOperation_boolean;
+    *iid_count = 1;
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI async_bool_GetRuntimeClassName( IAsyncOperation_boolean *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<Boolean>",
-                                ARRAY_SIZE(L"Windows.Foundation.IAsyncOperation`1<Boolean>"),
-                                class_name );
+    static const WCHAR name[] = L"Windows.Foundation.IAsyncOperation`1<Boolean>";
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
 }
 
 static HRESULT WINAPI async_bool_GetTrustLevel( IAsyncOperation_boolean *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    if (!trust_level) return E_POINTER;
+    *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI async_bool_put_Completed( IAsyncOperation_boolean *iface, IAsyncOperationCompletedHandler_boolean *bool_handler )
@@ -576,21 +582,27 @@ static ULONG WINAPI async_action_Release( IAsyncAction *iface )
 
 static HRESULT WINAPI async_action_GetIids( IAsyncAction *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    IID *array;
+
+    if (!iid_count || !iids) return E_POINTER;
+    if (!(array = CoTaskMemAlloc( sizeof(*array) ))) return E_OUTOFMEMORY;
+    array[0] = IID_IAsyncAction;
+    *iid_count = 1;
+    *iids = array;
+    return S_OK;
 }
 
 static HRESULT WINAPI async_action_GetRuntimeClassName( IAsyncAction *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Foundation.IAsyncOperation`1<Boolean>",
-                                ARRAY_SIZE(L"Windows.Foundation.IAsyncOperation`1<Boolean>"),
-                                class_name );
+    static const WCHAR name[] = L"Windows.Foundation.IAsyncAction";
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
 }
 
 static HRESULT WINAPI async_action_GetTrustLevel( IAsyncAction *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    if (!trust_level) return E_POINTER;
+    *trust_level = BaseTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI async_action_put_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler *bool_handler )
