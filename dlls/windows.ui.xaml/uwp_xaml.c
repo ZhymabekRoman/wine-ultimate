@@ -1205,6 +1205,8 @@ static HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out
 static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val );
 static HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token );
 static HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val );
+static void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
+                                        const WCHAR *prop_name, void *target_obj, const WCHAR *str_val );
 
 /* --- Live engine: StandardCalculatorViewModel (CalcViewModel.dll) ---
  * Slot 7 = get_DisplayValue(HSTRING*), slot 79 = SendCommandToCalcManager(int).
@@ -1513,7 +1515,12 @@ static void uwp_push_display_value_to_results( const WCHAR *s )
     for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
     {
         if (wcsstr( scan->class_name, L"CalculationResult" ) || !wcscmp( scan->name, L"Results" ))
+        {
+            IInspectable *target = scan->outer ? scan->outer : &scan->IInspectable_iface;
+            if (wcsstr( scan->class_name, L"CalculationResult" ))
+                uwp_set_custom_xaml_member( uwp_get_app_outer(), scan->class_name, L"DisplayValue", target, s );
             uwp_do_SetValue( &scan->IDependencyObject_iface, g_calc_vm.display_dp, boxed );
+        }
     }
     IInspectable_Release( boxed );
 }
@@ -2994,7 +3001,12 @@ static HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child
     {
         if (!impl->tpl_text_container)
         {
-            uwp_element_create( L"Windows.UI.Xaml.Controls.ScrollViewer", NULL, NULL, (void **)&child );
+            IInspectable *raw = NULL;
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.ScrollViewer", NULL, NULL, (void **)&raw )) && raw)
+            {
+                child = uwp_elem_from_any( raw );
+                IInspectable_Release( raw );
+            }
             if (child)
             {
                 child->parent = impl;
@@ -3010,7 +3022,12 @@ static HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child
     {
         if (!impl->tpl_normal_output)
         {
-            uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&child );
+            IInspectable *raw = NULL;
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&raw )) && raw)
+            {
+                child = uwp_elem_from_any( raw );
+                IInspectable_Release( raw );
+            }
             if (child)
             {
                 child->parent = impl->tpl_text_container ? impl->tpl_text_container : impl;
@@ -3030,7 +3047,12 @@ static HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child
     }
     else if (!wcscmp( nm, L"ScrollLeft" ) || !wcscmp( nm, L"ScrollRight" ))
     {
-        uwp_element_create( L"Windows.UI.Xaml.Controls.HyperlinkButton", NULL, NULL, (void **)&child );
+        IInspectable *raw = NULL;
+        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.HyperlinkButton", NULL, NULL, (void **)&raw )) && raw)
+        {
+            child = uwp_elem_from_any( raw );
+            IInspectable_Release( raw );
+        }
         if (child)
         {
             child->parent = impl;
@@ -5361,7 +5383,12 @@ static void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type
                             hr = from_str( member_type, h_val, &boxed_val );
                             if (SUCCEEDED(hr) && boxed_val && set_val)
                             {
-                                hr = set_val( member, target_obj, boxed_val );
+                                __TRY
+                                {
+                                    hr = set_val( member, target_obj, boxed_val );
+                                }
+                                __EXCEPT_ALL { hr = E_FAIL; }
+                                __ENDTRY;
                                 TRACE( "IXamlMember::SetValue(%s.%s = %s) -> hr %#lx\n",
                                        debugstr_w(owner_type_name), debugstr_w(prop_name),
                                        debugstr_w(str_val), hr );
@@ -6991,7 +7018,8 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         if (is_calculator_app() && (!wcscmp( el->name, L"NormalOutput" ) || !wcscmp( el->name, L"Results" )) && !el->text[0])
             lstrcpynW( el->text, L"0", ARRAY_SIZE(el->text) );
         /* Avoid double-painting CalculationResult if its inner NormalOutput TextBlock is painted */
-        if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface)
+        if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
+            el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)
         {
             if (el->text[0] && wcscmp( el->tpl_normal_output->text, el->text ) != 0)
                 lstrcpynW( el->tpl_normal_output->text, el->text, ARRAY_SIZE(el->tpl_normal_output->text) );
