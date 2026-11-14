@@ -335,8 +335,10 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IPropertySet ) ||
         IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMap_String_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ) ||
         IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMap_String_Object ) ||
@@ -568,8 +570,14 @@ static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, void *
     HRESULT hr;
 
     if (!value)
+    {
+        /* Shared slot 6: IMapView/IMap consumers reach IIterable::First here
+         * with the iterator out-pointer in the key slot. A null out-pointer
+         * is E_POINTER, not an AV inside First's *value store. */
+        if (!key) return E_POINTER;
         return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable,
                                                                    (IIterator_IKeyValuePair_HSTRING_IInspectable **)key );
+    }
 
     hkey = propertyset_decode_key( key, &allocated );
     TRACE( "iface %p (vtbl %p), key %p (decoded %s), value %p\n",
@@ -579,6 +587,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, void *
     if (FAILED(hr) && hkey)
     {
         const WCHAR *name = WindowsGetStringRawBuffer( hkey, NULL );
+        ERR( "propertyset_Lookup missing key: %s\n", debugstr_w(name) );
         if (name)
         {
             if (!wcscmp( name, L"AppMinWindowWidth" ))
@@ -590,6 +599,11 @@ static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, void *
             {
                 hr = create_double_property_value( 500.0, (IInspectable **)value );
                 TRACE( "propertyset_Lookup fallback: AppMinWindowHeight -> 500.0, hr %#lx\n", hr );
+            }
+            else if (!wcscmp( name, L"ClearCacheOnNextLaunch" ))
+            {
+                hr = create_boolean_property_value( FALSE, (IInspectable **)value );
+                TRACE( "propertyset_Lookup fallback: ClearCacheOnNextLaunch -> FALSE, hr %#lx\n", hr );
             }
         }
     }
@@ -618,7 +632,9 @@ static HRESULT STDMETHODCALLTYPE propertyset_HasKey( IPropertySet *iface, HSTRIN
     if (hkey && found && !*found)
     {
         const WCHAR *name = WindowsGetStringRawBuffer( hkey, NULL );
-        if (name && (!wcscmp( name, L"AppMinWindowWidth" ) || !wcscmp( name, L"AppMinWindowHeight" )))
+        if (name && (!wcscmp( name, L"AppMinWindowWidth" ) ||
+                     !wcscmp( name, L"AppMinWindowHeight" ) ||
+                     !wcscmp( name, L"ClearCacheOnNextLaunch" )))
         {
             *found = TRUE;
             hr = S_OK;

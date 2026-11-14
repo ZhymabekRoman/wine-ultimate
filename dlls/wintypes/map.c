@@ -55,6 +55,14 @@ static const GUID IID_IMapView_String_Object =
 { 0x7c054694, 0x4acd, 0x3716, { 0xa1, 0x7a, 0xd5, 0x83, 0xc5, 0xb3, 0xde, 0x8b } };
 static const GUID IID_IObservableMap_String_Object =
 { 0x65df2bf5, 0xbf39, 0x41b5, { 0xae, 0xbc, 0x5a, 0x9d, 0x86, 0x5e, 0x47, 0x2b } };
+/* The .NET/CsWinRT projection of IMap<String, object>::GetView()->First()
+ * enumerates IIterable<IKeyValuePair<String, object>> and QIs each boxed
+ * current item for the *parameterized* pair id (not Wine's own
+ * IKeyValuePair<HSTRING, IInspectable*> instantiation id); a pair that
+ * answers E_NOINTERFACE here makes the RCW projection fall back to
+ * IUnknown-bag decoding and failfast c0000602 on the null result. */
+static const GUID IID_IKeyValuePair_String_Object =
+{ 0xa8a91c24, 0xa1e1, 0x5d56, { 0x81, 0x9e, 0x60, 0x1e, 0xda, 0x63, 0xfb, 0x5c } };
 
 struct map_entry
 {
@@ -127,7 +135,9 @@ static HRESULT WINAPI pair_QueryInterface( IKeyValuePair_HSTRING_IInspectable *i
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, impl->iid ))
+        IsEqualGUID( iid, impl->iid ) ||
+        IsEqualGUID( iid, &IID_IKeyValuePair_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IKeyValuePair_String_Object ))
     {
         IInspectable_AddRef( (*out = &impl->IKeyValuePair_HSTRING_IInspectable_iface) );
         return S_OK;
@@ -164,9 +174,15 @@ static ULONG WINAPI pair_Release( IKeyValuePair_HSTRING_IInspectable *iface )
 
 static HRESULT WINAPI pair_GetIids( IKeyValuePair_HSTRING_IInspectable *iface, ULONG *iid_count, IID **iids )
 {
+    /* CoreCLR's ComWrappers shader consumes this as ComInterfaceEntry pairs
+     * (vtable, IID); hand it a fresh CoTaskMemAlloc'd array (it frees with
+     * CoTaskMemFree) carrying every id pair_QueryInterface answers for, so a
+     * boxed IKeyValuePair from a map enumeration projects on both the Wine
+     * instantiation id and the .NET <String, object> parameterized id. */
     struct com_interface_entry entries[] =
     {
         { map_pair_vtbl_ptr(), (IID *)&IID_IKeyValuePair_HSTRING_IInspectable },
+        { map_pair_vtbl_ptr(), (IID *)&IID_IKeyValuePair_String_Object },
     };
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
@@ -184,14 +200,20 @@ static HRESULT WINAPI pair_GetIids( IKeyValuePair_HSTRING_IInspectable *iface, U
 
 static HRESULT WINAPI pair_GetRuntimeClassName( IKeyValuePair_HSTRING_IInspectable *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IKeyValuePair`2<String, Object>";
+
+    TRACE( "iface %p, class_name %p.\n", iface, class_name );
+
+    if (!class_name) return E_POINTER;
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
 }
 
 static HRESULT WINAPI pair_GetTrustLevel( IKeyValuePair_HSTRING_IInspectable *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    TRACE( "iface %p, trust_level %p.\n", iface, trust_level );
+
+    if (trust_level) *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI pair_get_Key( IKeyValuePair_HSTRING_IInspectable *iface, HSTRING *value )
@@ -377,6 +399,7 @@ static HRESULT WINAPI iterator_get_Current_impl( IIterator_IKeyValuePair_HSTRING
 
     TRACE( "iface %p, value %p\n", iface, value );
 
+    if (!value) return E_POINTER;
     if (FAILED(hr = map_view_check_serial( impl->view ))) return hr;
     if (impl->index >= impl->view->size) return E_BOUNDS;
     return pair_create( impl->view->map->iids.pair, impl->view->entries + impl->index, value );
@@ -413,6 +436,9 @@ static HRESULT WINAPI iterator_GetMany_impl( IIterator_IKeyValuePair_HSTRING_IIn
 
     TRACE( "iface %p, items_size %u, items %p, count %p\n", iface, items_size, items, count );
 
+    if (!count) return E_POINTER;
+    if (!items && items_size) return E_POINTER;
+    *count = 0;
     if (FAILED(hr = map_view_check_serial( impl->view ))) return hr;
     if ((len = impl->view->size - impl->index) < 0) return E_BOUNDS;
     for (UINT32 i = 0; i < len; ++i)
@@ -556,23 +582,25 @@ static HRESULT WINAPI map_view_GetIids( IMapView_HSTRING_IInspectable *iface, UL
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = 2; /* filled on the (NULL, NULL) probe itself */
-    if (!impl->iids_cache)
+    /* Windows contract: GetIids hands out a fresh CoTaskMemAlloc'd array the
+     * caller frees with CoTaskMemFree (a static shared array double-frees
+     * once two consumers own it). Entries are the ComInterfaceEntry pairs
+     * CoreCLR's ComWrappers shader walks; every face the QI answers for is
+     * listed with its exact PIID. */
+    struct com_interface_entry entries[] =
     {
-        struct com_interface_entry entries[] =
-        {
-            { map_map_view_vtbl_ptr(), (IID *)&IID_IMapView_HSTRING_IInspectable },
-            { map_iterable_view_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
-        };
-        /* Static array: the shader caches (count, array) for the process
-         * lifetime, outliving this view (p202/p204 AVs = recycled shared-heap
-         * pair arrays). Identical entries per face type → one shared array. */
-        static struct com_interface_entry shared[ARRAY_SIZE( entries )];
-        if (!shared[0].vtable) memcpy( shared, entries, sizeof( entries ) );
-        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, shared, NULL );
+        { map_map_view_vtbl_ptr(), (IID *)&IID_IMapView_HSTRING_IInspectable },
+        { map_iterable_view_vtbl_ptr(), (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
+    };
+
+    if (iid_count) *iid_count = ARRAY_SIZE( entries );
+    if (iids)
+    {
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
     }
-    if (iid_count) *iid_count = 2;
-    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 
@@ -603,8 +631,10 @@ static HRESULT WINAPI map_view_Lookup_impl( IMapView_HSTRING_IInspectable *iface
 
     TRACE( "iface %p, key %s, value %p\n", iface, debugstr_hstring( key ), value );
 
+    if (!value) return E_POINTER;
     if (FAILED(hr = map_view_check_serial( impl ))) return hr;
-    if (!(entry = map_entries_lower_bound( impl->entries, impl->size, key, &order )) || order) return E_BOUNDS;
+    entry = map_entries_lower_bound( impl->entries, impl->size, key, &order );
+    if (order) return E_BOUNDS;
     IInspectable_AddRef( (*value = entry->value ));
     return S_OK;
 }
@@ -731,6 +761,7 @@ static HRESULT WINAPI iterable_view_First_impl( IIterable_IKeyValuePair_HSTRING_
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
+    if (!value) return E_POINTER;
     if (FAILED(hr = map_view_check_serial( impl ))) return hr;
 
     if (!(iter = calloc( 1, sizeof(struct iterator) ))) return E_OUTOFMEMORY;
@@ -877,25 +908,29 @@ static HRESULT WINAPI map_inner_GetIids( IInspectable *iface, ULONG *iid_count, 
 
     TRACE( "iface %p, iid_count %p, iids %p.\n", iface, iid_count, iids );
 
-    if (iid_count) *iid_count = 5; /* filled on the (NULL, NULL) probe itself */
-    if (!impl->iids_cache)
+    /* Fresh CoTaskMemAlloc'd ComInterfaceEntry array per call (caller frees
+     * with CoTaskMemFree, per the Windows GetIids contract); carries every id
+     * map_inner_QueryInterface answers for, including the .NET projection
+     * parameterized ids, with the exact vtable per face. */
+    struct com_interface_entry entries[] =
     {
-        struct com_interface_entry entries[] =
-        {
-            { map_map_vtbl_ptr(), (IID *)impl->iids.map },
-            { map_map_view_vtbl_ptr(), (IID *)impl->iids.view },
-            { map_iterable_vtbl_ptr(), (IID *)impl->iids.iterable },
-            { map_iterator_vtbl_ptr(), (IID *)impl->iids.iterator },
-            { map_pair_vtbl_ptr(), (IID *)impl->iids.pair },
-        };
-        /* Static shared array (IID pointers are process-lifetime globals);
-         * shader caches (count, array) beyond the map's death. */
-        static struct com_interface_entry shared[ARRAY_SIZE( entries )];
-        if (!shared[0].vtable) memcpy( shared, entries, sizeof( entries ) );
-        InterlockedCompareExchangePointer( (void **)&impl->iids_cache, shared, NULL );
+        { map_map_vtbl_ptr(), (IID *)impl->iids.map },
+        { map_map_view_vtbl_ptr(), (IID *)impl->iids.view },
+        { map_iterable_vtbl_ptr(), (IID *)impl->iids.iterable },
+        { map_iterator_vtbl_ptr(), (IID *)impl->iids.iterator },
+        { map_pair_vtbl_ptr(), (IID *)impl->iids.pair },
+        { map_map_vtbl_ptr(), (IID *)&IID_IMap_String_Object },
+        { map_map_view_vtbl_ptr(), (IID *)&IID_IMapView_String_Object },
+    };
+
+    if (iid_count) *iid_count = ARRAY_SIZE( entries );
+    if (iids)
+    {
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        *iids = (IID *)array;
     }
-    if (iid_count) *iid_count = 5;
-    if (iids) *iids = (IID *)impl->iids_cache;
     return S_OK;
 }
 
@@ -942,7 +977,13 @@ static HRESULT WINAPI map_Lookup_impl( IMap_HSTRING_IInspectable *iface, HSTRING
 
     TRACE( "iface %p, key %s, value %p\n", iface, debugstr_hstring( key ), value );
 
-    if (!(entry = map_entries_lower_bound( impl->entries, impl->size, key, &order )) || order) return E_BOUNDS;
+    if (!value) return E_POINTER;
+    /* NULL and empty HSTRING are the same key: WindowsDuplicateString/
+     * WindowsCompareStringOrdinal map both onto the empty string, so the
+     * binary search runs cleanly and misses land on E_BOUNDS (0x8000000b)
+     * instead of an AV on the value out-param. */
+    entry = map_entries_lower_bound( impl->entries, impl->size, key, &order );
+    if (order) return E_BOUNDS;
     IInspectable_AddRef( (*value = entry->value ));
     return S_OK;
 }
@@ -985,6 +1026,8 @@ static HRESULT WINAPI map_Insert_impl( IMap_HSTRING_IInspectable *iface, HSTRING
 
     TRACE( "iface %p, key %p, value %p, replaced %p\n", iface, key, value, replaced );
 
+    if (!value) return E_POINTER;
+    if (!replaced) return E_POINTER;
     if (impl->size == impl->capacity)
     {
         impl->capacity = max( 32, impl->capacity * 3 / 2 );
