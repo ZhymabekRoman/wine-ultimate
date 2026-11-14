@@ -16250,6 +16250,143 @@ static void test_swapchain_flip(void)
     DestroyWindow(window);
 }
 
+static void test_swapchain_flip_model(void)
+{
+    static const DXGI_SWAP_EFFECT flip_effects[] =
+    {
+        DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL,
+        DXGI_SWAP_EFFECT_FLIP_DISCARD,
+    };
+    static const float red[] = {1.0f, 0.0f, 0.0f, 1.0f};
+    static const float green[] = {0.0f, 1.0f, 0.0f, 1.0f};
+    DXGI_SWAP_CHAIN_DESC1 desc1, got_desc1;
+    DXGI_PRESENT_PARAMETERS present_params;
+    ID3D11RenderTargetView *rtv;
+    ID3D11DeviceContext *context;
+    IDXGIFactory2 *factory2;
+    IDXGISwapChain1 *sc1;
+    IDXGISwapChain3 *sc3;
+    ID3D11Texture2D *bb0;
+    IDXGIDevice *dxgi_dev;
+    IDXGIAdapter *adapter;
+    ID3D11Device *device;
+    UINT present_count;
+    HANDLE waitable;
+    ULONG refcount;
+    RECT dirty_rect;
+    unsigned int i;
+    DWORD color;
+    HWND window;
+    HRESULT hr;
+
+    if (!(device = create_device(NULL)))
+    {
+        skip("Failed to create device, skipping flip-model tests.\n");
+        return;
+    }
+
+    hr = ID3D11Device_QueryInterface(device, &IID_IDXGIDevice, (void **)&dxgi_dev);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIDevice_GetAdapter(dxgi_dev, &adapter);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDXGIAdapter_GetParent(adapter, &IID_IDXGIFactory2, (void **)&factory2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    IDXGIAdapter_Release(adapter);
+    IDXGIDevice_Release(dxgi_dev);
+
+    ID3D11Device_GetImmediateContext(device, &context);
+    window = CreateWindowA("static", "d3d11_flip_test", WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+            0, 0, 128, 128, NULL, NULL, NULL, NULL);
+
+    for (i = 0; i < ARRAY_SIZE(flip_effects); ++i)
+    {
+        memset(&desc1, 0, sizeof(desc1));
+        desc1.Width = 64;
+        desc1.Height = 64;
+        desc1.Format = DXGI_FORMAT_R8G8B8A8_UNORM;
+        desc1.SampleDesc.Count = 1;
+        desc1.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
+        desc1.BufferCount = 2;
+        desc1.Scaling = DXGI_SCALING_STRETCH;
+        desc1.SwapEffect = flip_effects[i];
+        desc1.AlphaMode = DXGI_ALPHA_MODE_IGNORE;
+        desc1.Flags = DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING;
+
+        hr = IDXGIFactory2_CreateSwapChainForHwnd(factory2, (IUnknown *)device,
+                window, &desc1, NULL, NULL, &sc1);
+        ok(hr == S_OK, "Effect %u: CreateSwapChainForHwnd failed, hr %#lx.\n", flip_effects[i], hr);
+
+        hr = IDXGISwapChain1_GetDesc1(sc1, &got_desc1);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        ok(got_desc1.SwapEffect == flip_effects[i], "Got SwapEffect %u.\n", got_desc1.SwapEffect);
+        ok((got_desc1.Flags & desc1.Flags) == desc1.Flags, "Got Flags %#x, expected %#x.\n",
+                got_desc1.Flags, desc1.Flags);
+
+        hr = IDXGISwapChain1_QueryInterface(sc1, &IID_IDXGISwapChain3, (void **)&sc3);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        waitable = IDXGISwapChain3_GetFrameLatencyWaitableObject(sc3);
+        ok(!!waitable, "Got NULL waitable object.\n");
+        if (waitable)
+        {
+            ok(WaitForSingleObject(waitable, 0) == WAIT_OBJECT_0, "Initial semaphore not signaled.\n");
+            CloseHandle(waitable);
+        }
+
+        hr = IDXGISwapChain3_GetBuffer(sc3, 0, &IID_ID3D11Texture2D, (void **)&bb0);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+        hr = ID3D11Device_CreateRenderTargetView(device, (ID3D11Resource *)bb0, NULL, &rtv);
+        ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+        ID3D11DeviceContext_ClearRenderTargetView(context, rtv, red);
+        color = get_texture_color(bb0, 16, 16);
+        ok(compare_color(color, 0xff0000ff, 1), "Got unexpected color 0x%08lx.\n", color);
+
+        ok(IDXGISwapChain3_GetCurrentBackBufferIndex(sc3) == 0, "Expected index 0.\n");
+
+        /* Invalid tearing with sync_interval > 0 and invalid interval > 4 */
+        hr = IDXGISwapChain3_Present(sc3, 1, DXGI_PRESENT_ALLOW_TEARING);
+        ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+        hr = IDXGISwapChain3_Present(sc3, 5, 0);
+        ok(hr == DXGI_ERROR_INVALID_CALL, "Got unexpected hr %#lx.\n", hr);
+
+        /* Present with sync_interval 0 + ALLOW_TEARING */
+        hr = IDXGISwapChain3_Present(sc3, 0, DXGI_PRESENT_ALLOW_TEARING);
+        ok(hr == S_OK, "Present(0, ALLOW_TEARING) failed, hr %#lx.\n", hr);
+
+        /* Present with sync_interval 1 and Present1 dirty rect */
+        ID3D11DeviceContext_ClearRenderTargetView(context, rtv, green);
+        SetRect(&dirty_rect, 0, 0, 64, 64);
+        memset(&present_params, 0, sizeof(present_params));
+        present_params.DirtyRectsCount = 1;
+        present_params.pDirtyRects = &dirty_rect;
+        hr = IDXGISwapChain3_Present1(sc3, 1, 0, &present_params);
+        ok(hr == S_OK, "Present1(1, 0) failed, hr %#lx.\n", hr);
+
+        /* Present with DO_NOT_SEQUENCE must not advance present_count */
+        hr = IDXGISwapChain3_GetLastPresentCount(sc3, &present_count);
+        ok(hr == S_OK && present_count == 2, "Got present_count %u, hr %#lx.\n", present_count, hr);
+        hr = IDXGISwapChain3_Present(sc3, 0, DXGI_PRESENT_DO_NOT_SEQUENCE);
+        ok(hr == S_OK, "Present(DO_NOT_SEQUENCE) failed, hr %#lx.\n", hr);
+        hr = IDXGISwapChain3_GetLastPresentCount(sc3, &present_count);
+        ok(hr == S_OK && present_count == 2, "Got present_count %u, hr %#lx.\n", present_count, hr);
+
+        ID3D11RenderTargetView_Release(rtv);
+        ID3D11Texture2D_Release(bb0);
+        hr = IDXGISwapChain3_ResizeBuffers(sc3, 0, 96, 96, DXGI_FORMAT_UNKNOWN, desc1.Flags);
+        ok(hr == S_OK, "ResizeBuffers failed, hr %#lx.\n", hr);
+
+        IDXGISwapChain3_Release(sc3);
+        IDXGISwapChain1_Release(sc1);
+    }
+
+    DestroyWindow(window);
+    ID3D11DeviceContext_Release(context);
+    IDXGIFactory2_Release(factory2);
+    refcount = ID3D11Device_Release(device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 static void test_clear_render_target_view_1d(void)
 {
     static const float color[] = {0.1f, 0.5f, 0.3f, 0.75f};
@@ -37671,6 +37808,7 @@ START_TEST(d3d11)
     queue_for_each_feature_level(test_swapchain_formats);
     queue_test(test_swapchain_views);
     queue_test(test_swapchain_flip);
+    queue_test(test_swapchain_flip_model);
     queue_test(test_clear_render_target_view_1d);
     queue_test(test_clear_render_target_view_2d);
     queue_test(test_clear_render_target_view_3d);

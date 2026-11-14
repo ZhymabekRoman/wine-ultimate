@@ -333,7 +333,8 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
 {
     HRESULT hr;
 
-    ERR("DXGI: d3d11_swapchain_present swapchain %p hwnd %p\n", swapchain, d3d11_swapchain_get_hwnd(swapchain));
+    TRACE("swapchain %p, hwnd %p, sync_interval %u, flags %#x.\n",
+            swapchain, d3d11_swapchain_get_hwnd(swapchain), sync_interval, flags);
 
     if (sync_interval > 4)
     {
@@ -341,19 +342,48 @@ static HRESULT d3d11_swapchain_present(struct d3d11_swapchain *swapchain,
         return DXGI_ERROR_INVALID_CALL;
     }
 
+    if (flags & DXGI_PRESENT_ALLOW_TEARING)
+    {
+        if (sync_interval || !swapchain->flip_model
+                || !(swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING))
+        {
+            WARN("DXGI_PRESENT_ALLOW_TEARING requires flip model, sync_interval 0, and DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING.\n");
+            return DXGI_ERROR_INVALID_CALL;
+        }
+    }
+
     if (IsIconic(d3d11_swapchain_get_hwnd(swapchain)))
         return DXGI_STATUS_OCCLUDED;
 
-    if (flags & ~(DXGI_PRESENT_TEST | DXGI_PRESENT_ALLOW_TEARING))
+    if (flags & ~(DXGI_PRESENT_TEST | DXGI_PRESENT_ALLOW_TEARING
+            | DXGI_PRESENT_DO_NOT_SEQUENCE | DXGI_PRESENT_DO_NOT_WAIT
+            | DXGI_PRESENT_RESTART | DXGI_PRESENT_USE_DURATION))
         FIXME("Unimplemented flags %#x.\n", flags);
     if (flags & DXGI_PRESENT_TEST)
     {
-        WARN("Returning S_OK for DXGI_PRESENT_TEST.\n");
+        TRACE("Returning S_OK for DXGI_PRESENT_TEST.\n");
         return S_OK;
     }
 
-    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain, NULL, NULL, NULL, sync_interval, 0)))
-        InterlockedIncrement(&swapchain->present_count);
+    swapchain->present_interval = sync_interval;
+
+    if (SUCCEEDED(hr = wined3d_swapchain_present(swapchain->wined3d_swapchain,
+            NULL, NULL, NULL, sync_interval, 0)))
+    {
+        if (!(flags & DXGI_PRESENT_DO_NOT_SEQUENCE))
+        {
+            InterlockedIncrement(&swapchain->present_count);
+            if (swapchain->flip_model && swapchain->buffer_count > 1)
+            {
+                swapchain->front_buffer_index = swapchain->back_buffer_index;
+                swapchain->back_buffer_index = (swapchain->back_buffer_index + 1) % swapchain->buffer_count;
+            }
+        }
+
+        if (swapchain->frame_latency_semaphore
+                && !ReleaseSemaphore(swapchain->frame_latency_semaphore, 1, NULL))
+            ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());
+    }
     return hr;
 }
 
@@ -534,7 +564,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc(IDXGISwapChain4 *iface,
     desc->OutputWindow = wined3d_desc.device_window;
     desc->Windowed = wined3d_desc.windowed;
     desc->SwapEffect = dxgi_swap_effect_from_wined3d(wined3d_desc.swap_effect);
-    desc->Flags = dxgi_swapchain_flags_from_wined3d(wined3d_desc.flags);
+    desc->Flags = dxgi_swapchain_flags_from_wined3d(wined3d_desc.flags)
+            | (swapchain->dxgi_flags & (DXGI_SWAP_CHAIN_FLAG_NONPREROTATED
+                    | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
+                    | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING));
 
     return S_OK;
 }
@@ -555,7 +588,9 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
     TRACE("iface %p, buffer_count %u, width %u, height %u, format %s, flags %#x.\n",
             iface, buffer_count, width, height, debug_dxgi_format(format), flags);
 
-    if (flags)
+    if (flags & ~(DXGI_SWAP_CHAIN_FLAG_ALLOW_MODE_SWITCH | DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE
+            | DXGI_SWAP_CHAIN_FLAG_NONPREROTATED | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
+            | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING))
         FIXME("Ignoring flags %#x.\n", flags);
 
     wined3d_mutex_lock();
@@ -575,6 +610,18 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_ResizeBuffers(IDXGISwapChain4 *
         wined3d_desc.backbuffer_format = wined3dformat_from_dxgi_format(format);
     hr = wined3d_swapchain_resize_buffers(swapchain->wined3d_swapchain, buffer_count, width, height,
             wined3d_desc.backbuffer_format, wined3d_desc.multisample_type, wined3d_desc.multisample_quality);
+    if (SUCCEEDED(hr))
+    {
+        wined3d_swapchain_get_desc(swapchain->wined3d_swapchain, &wined3d_desc);
+        swapchain->buffer_count = wined3d_desc.backbuffer_count;
+        swapchain->back_buffer_index = 0;
+        swapchain->front_buffer_index = swapchain->buffer_count > 1 ? swapchain->buffer_count - 1 : 0;
+        if (flags)
+        {
+            UINT preserve = swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT;
+            swapchain->dxgi_flags = (flags & ~DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT) | preserve;
+        }
+    }
     /* wined3d_swapchain_resize_buffers() may recreate swapchain textures.
      * We do not need to remove the reference to the wined3d swapchain from the
      * old d3d11 textures: we just validated above that they have 0 references,
@@ -668,7 +715,10 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetDesc1(IDXGISwapChain4 *iface
     desc->Scaling = DXGI_SCALING_STRETCH;
     desc->SwapEffect = dxgi_swap_effect_from_wined3d(wined3d_desc.swap_effect);
     desc->AlphaMode = DXGI_ALPHA_MODE_IGNORE;
-    desc->Flags = dxgi_swapchain_flags_from_wined3d(wined3d_desc.flags);
+    desc->Flags = dxgi_swapchain_flags_from_wined3d(wined3d_desc.flags)
+            | (swapchain->dxgi_flags & (DXGI_SWAP_CHAIN_FLAG_NONPREROTATED
+                    | DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT
+                    | DXGI_SWAP_CHAIN_FLAG_ALLOW_TEARING));
 
     return S_OK;
 }
@@ -738,7 +788,13 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_Present1(IDXGISwapChain4 *iface
             iface, sync_interval, flags, present_parameters);
 
     if (present_parameters)
-        FIXME("Ignored present parameters %p.\n", present_parameters);
+    {
+        if ((present_parameters->DirtyRectsCount && !present_parameters->pDirtyRects)
+                || (present_parameters->pScrollRect && !present_parameters->pScrollOffset))
+            return DXGI_ERROR_INVALID_CALL;
+        TRACE("Present parameters: dirty_rects %u, scroll_rect %p.\n",
+                present_parameters->DirtyRectsCount, present_parameters->pScrollRect);
+    }
 
     return d3d11_swapchain_present(swapchain, sync_interval, flags);
 }
@@ -810,23 +866,76 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetSourceSize(IDXGISwapChain4 *
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetMaximumFrameLatency(IDXGISwapChain4 *iface, UINT max_latency)
 {
-    FIXME("iface %p, max_latency %u stub!\n", iface, max_latency);
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, max_latency %u.\n", iface, max_latency);
+
+    if (!(swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+    {
+        WARN("DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT not set for swap chain %p.\n", iface);
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (!max_latency)
+    {
+        WARN("Invalid maximum frame latency %u.\n", max_latency);
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (max_latency > swapchain->frame_latency && swapchain->frame_latency_semaphore)
+    {
+        if (!ReleaseSemaphore(swapchain->frame_latency_semaphore, max_latency - swapchain->frame_latency, NULL))
+        {
+            ERR("Failed to release frame latency semaphore, last error %lu.\n", GetLastError());
+            return HRESULT_FROM_WIN32(GetLastError());
+        }
+    }
+
+    swapchain->frame_latency = max_latency;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetMaximumFrameLatency(IDXGISwapChain4 *iface, UINT *max_latency)
 {
-    FIXME("iface %p, max_latency %p stub!\n", iface, max_latency);
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
 
-    return E_NOTIMPL;
+    TRACE("iface %p, max_latency %p.\n", iface, max_latency);
+
+    if (!(swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+    {
+        WARN("DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT not set for swap chain %p.\n", iface);
+        return DXGI_ERROR_INVALID_CALL;
+    }
+
+    if (!max_latency)
+        return DXGI_ERROR_INVALID_CALL;
+
+    *max_latency = swapchain->frame_latency;
+    return S_OK;
 }
 
 static HANDLE STDMETHODCALLTYPE d3d11_swapchain_GetFrameLatencyWaitableObject(IDXGISwapChain4 *iface)
 {
-    FIXME("iface %p stub!\n", iface);
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+    HANDLE dup;
 
-    return NULL;
+    TRACE("iface %p.\n", iface);
+
+    if (!(swapchain->dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)
+            || !swapchain->frame_latency_semaphore)
+    {
+        WARN("DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT not set for swap chain %p.\n", iface);
+        return NULL;
+    }
+
+    if (!DuplicateHandle(GetCurrentProcess(), swapchain->frame_latency_semaphore, GetCurrentProcess(),
+            &dup, 0, FALSE, DUPLICATE_SAME_ACCESS))
+    {
+        ERR("Cannot duplicate handle, last error %lu.\n", GetLastError());
+        return NULL;
+    }
+
+    return dup;
 }
 
 static HRESULT STDMETHODCALLTYPE d3d11_swapchain_SetMatrixTransform(IDXGISwapChain4 *iface,
@@ -849,7 +958,13 @@ static HRESULT STDMETHODCALLTYPE d3d11_swapchain_GetMatrixTransform(IDXGISwapCha
 
 static UINT STDMETHODCALLTYPE d3d11_swapchain_GetCurrentBackBufferIndex(IDXGISwapChain4 *iface)
 {
-    FIXME("iface %p stub!\n", iface);
+    struct d3d11_swapchain *swapchain = d3d11_swapchain_from_IDXGISwapChain4(iface);
+
+    /* D3D11 rotates buffer 0 to the current back buffer inside wined3d on Present,
+     * so GetBuffer(0) always aliases the active back buffer and GetCurrentBackBufferIndex
+     * returns 0 on D3D11 while internal flip-model indices track the ring slot. */
+    TRACE("iface %p, internal back_buffer_index %u, front_buffer_index %u.\n",
+            iface, swapchain->back_buffer_index, swapchain->front_buffer_index);
 
     return 0;
 }
@@ -949,6 +1064,8 @@ static void STDMETHODCALLTYPE d3d11_swapchain_wined3d_object_released(void *pare
 {
     struct d3d11_swapchain *swapchain = parent;
 
+    if (swapchain->frame_latency_semaphore)
+        CloseHandle(swapchain->frame_latency_semaphore);
     wined3d_private_store_cleanup(&swapchain->private_store);
     free(parent);
 }
@@ -1018,7 +1135,7 @@ static HRESULT d3d11_swapchain_create_d3d11_textures(struct d3d11_swapchain *swa
 }
 
 HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_device *device,
-        struct wined3d_swapchain_desc *desc)
+        struct wined3d_swapchain_desc *desc, UINT dxgi_flags)
 {
     struct wined3d_swapchain_state *state;
     BOOL fullscreen;
@@ -1038,6 +1155,28 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     swapchain->IDXGISwapChain4_iface.lpVtbl = &d3d11_swapchain_vtbl;
     swapchain->state_parent.ops = &d3d11_swapchain_state_parent_ops;
     swapchain->refcount = 1;
+    swapchain->swap_effect = dxgi_swap_effect_from_wined3d(desc->swap_effect);
+    swapchain->flip_model = (swapchain->swap_effect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+            || swapchain->swap_effect == DXGI_SWAP_EFFECT_FLIP_DISCARD);
+    swapchain->buffer_count = desc->backbuffer_count;
+    swapchain->dxgi_flags = dxgi_flags;
+    swapchain->back_buffer_index = 0;
+    swapchain->front_buffer_index = desc->backbuffer_count > 1 ? desc->backbuffer_count - 1 : 0;
+    swapchain->present_interval = 0;
+    swapchain->frame_latency_semaphore = NULL;
+    swapchain->frame_latency = (swapchain->flip_model
+            && (dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT)) ? 1 : 3;
+    if (swapchain->flip_model && (dxgi_flags & DXGI_SWAP_CHAIN_FLAG_FRAME_LATENCY_WAITABLE_OBJECT))
+    {
+        if (!(swapchain->frame_latency_semaphore = CreateSemaphoreW(NULL, swapchain->frame_latency, LONG_MAX, NULL)))
+        {
+            hr = HRESULT_FROM_WIN32(GetLastError());
+            WARN("Failed to create frame latency semaphore, hr %#lx.\n", hr);
+            IWineDXGIFactory_Release(swapchain->factory);
+            IWineDXGIDevice_Release(swapchain->device);
+            return hr;
+        }
+    }
     wined3d_mutex_lock();
     wined3d_private_store_init(&swapchain->private_store);
 
@@ -1091,6 +1230,11 @@ HRESULT d3d11_swapchain_init(struct d3d11_swapchain *swapchain, struct dxgi_devi
     return S_OK;
 
 cleanup:
+    if (swapchain->frame_latency_semaphore)
+    {
+        CloseHandle(swapchain->frame_latency_semaphore);
+        swapchain->frame_latency_semaphore = NULL;
+    }
     wined3d_private_store_cleanup(&swapchain->private_store);
     wined3d_mutex_unlock();
     IWineDXGIFactory_Release(swapchain->factory);
@@ -2194,7 +2338,12 @@ static HRESULT d3d12_swapchain_set_sync_interval(struct d3d12_swapchain *swapcha
     switch (sync_interval)
     {
         case 0:
-            present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            if (d3d12_swapchain_is_present_mode_supported(swapchain, VK_PRESENT_MODE_IMMEDIATE_KHR))
+                present_mode = VK_PRESENT_MODE_IMMEDIATE_KHR;
+            else if (d3d12_swapchain_is_present_mode_supported(swapchain, VK_PRESENT_MODE_MAILBOX_KHR))
+                present_mode = VK_PRESENT_MODE_MAILBOX_KHR;
+            else
+                present_mode = VK_PRESENT_MODE_FIFO_KHR;
             break;
         default:
             FIXME("Unsupported sync interval %u.\n", sync_interval);
