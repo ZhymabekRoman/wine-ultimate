@@ -24,8 +24,14 @@
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
+#include "weakreference.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
+
+static const GUID IID_IWeakReference_local =
+    { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+static const GUID IID_IWeakReferenceSource_local =
+    { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
 
 /* UWP Windows.UI.Xaml interface GUIDs */
 static const GUID IID_IDependencyObject_UWP =
@@ -90,6 +96,8 @@ static const GUID IID_IContentControlOverrides_UWP =
     { 0x3874208b, 0x57d6, 0x4697, { 0x9f, 0x01, 0xf6, 0xf6, 0x64, 0x23, 0xa2, 0x2b } };
 static const GUID IID_IContentControlFactory_UWP =
     { 0x6584ebdf, 0xcbc7, 0x4e19, { 0x84, 0x3a, 0xa1, 0x4f, 0x24, 0xa7, 0x93, 0xea } };
+static const GUID IID_IContentControlFactory_UWP2 =
+    { 0xab017b19, 0x196e, 0x4ed5, { 0xa2, 0x7f, 0x55, 0xc5, 0x8f, 0xb1, 0x67, 0x3f } };
 static const GUID IID_IUserControl_UWP =
     { 0xa7a69ec9, 0xea35, 0x4679, { 0xbf, 0x29, 0xf4, 0xf0, 0x92, 0x86, 0xd3, 0x14 } };
 static const GUID IID_IUserControlFactory_UWP =
@@ -132,6 +140,18 @@ static const GUID IID_IPanel_UWP =
     { 0xa50a4bbd, 0x8361, 0x469c, { 0x90, 0xda, 0xe9, 0xa4, 0x0c, 0x74, 0x74, 0xdf } };
 static const GUID IID_IPanelFactory_UWP =
     { 0xbfd07f53, 0xf8ca, 0x4e47, { 0x94, 0x9e, 0x9e, 0x80, 0x42, 0x9b, 0x3d, 0x16 } };
+static const GUID IID_IPanelFactory_UWP2 =
+    { 0xeee68111, 0xc7cc, 0x433f, { 0x95, 0xcd, 0xd6, 0x30, 0xc3, 0x43, 0x02, 0xdd } };
+static const GUID IID_IGridFactory_UWP =
+    { 0xae814041, 0xc531, 0x43b4, { 0xbf, 0x99, 0x12, 0xf5, 0x06, 0xf7, 0xb0, 0x1c } };
+static const GUID IID_IListViewFactory_UWP =
+    { 0xbdff696d, 0x3f22, 0x41f9, { 0x97, 0xa6, 0x88, 0x31, 0x34, 0xa7, 0x61, 0x13 } };
+static const GUID IID_IXamlLightFactory_UWP =
+    { 0x87ded768, 0x3055, 0x43b8, { 0x8e, 0xf6, 0x79, 0x8d, 0xc4, 0xc2, 0x32, 0x9a } };
+static const GUID IID_IContentPresenterFactory_UWP =
+    { 0x3339d4f7, 0x4815, 0x44c4, { 0x9f, 0x76, 0x68, 0xc8, 0x38, 0x80, 0xef, 0x10 } };
+static const GUID IID_IXamlCompositionBrushBaseFactory_UWP =
+    { 0x394f0823, 0x2451, 0x4ed8, { 0xbd, 0x24, 0x48, 0x81, 0x49, 0xb3, 0x42, 0x8d } };
 static const GUID IID_IGrid_UWP =
     { 0x709133c7, 0x38f3, 0x5083, { 0xa4, 0xbb, 0x06, 0xa5, 0x48, 0xa1, 0xd2, 0x31 } };
 static const GUID IID_IGrid_UWP2 =
@@ -142,6 +162,8 @@ static const GUID IID_IStateTriggerBaseFactory_UWP =
     { 0x0fa0f896, 0x64c0, 0x45fb, { 0x8d, 0x24, 0xfb, 0x83, 0x29, 0x8c, 0x0d, 0x93 } };
 static const GUID IID_IMenuFlyoutItemBaseFactory_UWP =
     { 0x9727b2e3, 0xb2b6, 0x49dc, { 0x8c, 0x22, 0xe0, 0x13, 0x8b, 0x94, 0x15, 0x59 } };
+static const GUID IID_IMenuFlyoutItemFactory_UWP =
+    { 0xc5aa39e2, 0x44f3, 0x455e, { 0x9c, 0x5b, 0x62, 0xbb, 0x6a, 0xfc, 0xe3, 0xad } };
 static const GUID IID_IGridStatics_UWP =
     { 0xed02d274, 0x81f1, 0x5ac2, { 0xa0, 0xc3, 0xbb, 0xda, 0xf5, 0xa3, 0xff, 0xee } };
 static const GUID IID_IGridStatics_UWP2 =
@@ -163,9 +185,9 @@ static const GUID IID_IRowDefinition_UWP =
 static const GUID IID_IColumnDefinition_UWP =
     { 0xf7f1b229, 0xf024, 0x467f, { 0x97, 0x0a, 0x7e, 0x70, 0x56, 0x15, 0xdb, 0x7b } };
 static const GUID IID_IScrollViewer_UWP =
-    { 0x6429200e, 0x2856, 0x475e, { 0x9e, 0x00, 0x52, 0x10, 0x1b, 0x92, 0x10, 0x0e } };
+    { 0x64e9be00, 0x4dc1, 0x493d, { 0xab, 0xe7, 0xcb, 0xd3, 0xc5, 0x77, 0x49, 0x0d } };
 static const GUID IID_IScrollViewer2_UWP =
-    { 0x4b12000e, 0x2856, 0x475e, { 0x9e, 0x00, 0x52, 0x10, 0x1b, 0x92, 0x10, 0x02 } };
+    { 0x64e9be10, 0x4dd1, 0x494d, { 0xab, 0xf7, 0xcb, 0xd3, 0xc5, 0x77, 0x49, 0x1d } };
 static const GUID IID_IScrollViewer3_UWP =
     { 0x6b12000e, 0x2856, 0x475e, { 0x9e, 0x00, 0x52, 0x10, 0x1b, 0x92, 0x10, 0x03 } };
 static const GUID IID_IStyle_UWP =
@@ -177,7 +199,7 @@ static const GUID IID_ISetterBase_UWP =
 static const GUID IID_IBrush_UWP =
     { 0x8806a321, 0x1e06, 0x422c, { 0xa1, 0xcc, 0x01, 0x69, 0x65, 0x59, 0xe0, 0x21 } };
 static const GUID IID_ISolidColorBrush_UWP =
-    { 0x9d8c52c8, 0x853a, 0x41b3, { 0x96, 0x92, 0x72, 0xd6, 0xe5, 0x64, 0x1a, 0x64 } };
+    { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf } };
 static const GUID IID_IFlyoutBase_UWP =
     { 0x723eea0b, 0xd12e, 0x430d, { 0xa9, 0xf0, 0x9b, 0xb3, 0x2b, 0xbf, 0x99, 0x13 } };
 static const GUID IID_IMenuFlyout_UWP =
@@ -201,7 +223,7 @@ static const GUID IID_IMarkupExtension_UWP =
 static const GUID IID_IMarkupExtensionOverrides_UWP =
     { 0x393d791f, 0x5389, 0x452c, { 0x88, 0x59, 0x8c, 0x54, 0x92, 0x04, 0x26, 0x19 } };
 static const GUID IID_IMarkupExtensionFactory_UWP =
-    { 0x65329c08, 0x5254, 0x42b7, { 0x9c, 0x5e, 0x42, 0x20, 0x59, 0x12, 0x12, 0x24 } };
+    { 0x65329c05, 0xfb5a, 0x4567, { 0x9d, 0x55, 0x5c, 0xdf, 0xba, 0xda, 0x27, 0x39 } };
 static const GUID IID_IXamlBindingHelperStatics_UWP =
     { 0xf65cfb71, 0xc80c, 0x4faf, { 0x86, 0xee, 0x55, 0x87, 0x54, 0xee, 0x33, 0x6d } };
 static const GUID IID_IComponentConnector_UWP_g =
@@ -312,6 +334,8 @@ static const GUID IID_IDataTemplateSelectorFactory_UWP =
     { 0x511baad0, 0x210a, 0x457d, { 0x95, 0x21, 0x43, 0x3d, 0x2b, 0x11, 0xb7, 0xd2 } };
 static const GUID IID_IStyleSelectorFactory_UWP =
     { 0x6c3fb5fc, 0x8e84, 0x4c91, { 0xac, 0x15, 0x04, 0xa1, 0xd8, 0x85, 0x50, 0x0f } };
+static const GUID IID_IStyleSelectorFactory_UWP2 =
+    { 0x9e942ae7, 0x3761, 0x447f, { 0x8f, 0x97, 0x29, 0xe3, 0x9d, 0x5e, 0xb3, 0x10 } };
 static const GUID IID_IStateTriggerBaseFactory2_UWP =
     { 0x970e2c4b, 0xbfaf, 0x47b0, { 0xbe, 0x42, 0xc1, 0xd7, 0x11, 0xbb, 0x2e, 0x9f } };
 static const GUID IID_IBindingFactory_UWP =
@@ -322,6 +346,10 @@ static const GUID IID_IRadioButtonFactory_UWP =
     { 0xf1d04933, 0x34e1, 0x4a5c, { 0xb2, 0xae, 0xca, 0x3b, 0x1c, 0x0b, 0x20, 0xde } };
 static const GUID IID_IPropertyPathFactory_UWP =
     { 0x4e4cdf99, 0x9826, 0x4e56, { 0x84, 0x7c, 0xca, 0x05, 0x5f, 0x16, 0x29, 0x05 } };
+static const GUID IID_IDependencyObjectCollectionFactory_UWP =
+    { 0x051e79ff, 0xb3a8, 0x49ee, { 0xb5, 0xaf, 0xac, 0x8f, 0x68, 0xb6, 0x49, 0xe4 } };
+static const GUID IID_IMenuFlyoutSeparatorFactory_UWP =
+    { 0xc159dcc8, 0xb437, 0x44e0, { 0xb2, 0x4b, 0x57, 0x20, 0xae, 0xa1, 0xdb, 0xac } };
 
 /* ============================================================================
  * 1. PRI v2 (mrm_pri2) Container Reader
@@ -479,24 +507,36 @@ static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffi
     const BYTE *pri = pri_get_data( &pri_sz );
     const BYTE *hs = NULL, *rm = NULL;
     DWORD num_nodes, num_scopes, num_items;
-    DWORD node_off, scope_off, item_off, pool_off, cand_off;
+    DWORD node_off, scope_off, item_off, pool_off, map_off, cand_off;
+    DWORD count1, extra_sz;
+    WORD l1, l2, num_env;
+    DWORD hs_base;
     int matched_item = -1, fallback_item = -1;
     DWORD iid;
 
     if (!pri) return FALSE;
-    if (!pri_get_section( pri, pri_sz, 2, &hs, &hs_sz ) || hs_sz < 0xf0) return FALSE;
+    if (!pri_get_section( pri, pri_sz, 2, &hs, &hs_sz ) || hs_sz < 0xd8) return FALSE;
     if (!pri_get_section( pri, pri_sz, 3, &rm, &rm_sz ) || rm_sz < 0x80) return FALSE;
 
-    num_nodes = *(const DWORD *)(hs + 0xd8);
-    num_scopes = *(const DWORD *)(hs + 0xdc);
-    num_items = *(const DWORD *)(hs + 0xe0);
-    node_off = 0xf0;
+    l1 = *(const WORD *)(hs + 0x22);
+    l2 = *(const WORD *)(hs + 0x24);
+    hs_base = ((0x48 + ((DWORD)l1 + (DWORD)l2) * 2 + 3) & ~3u) + 8;
+    if (hs_base + 0x18 > hs_sz) return FALSE;
+
+    num_nodes = *(const DWORD *)(hs + hs_base);
+    num_scopes = *(const DWORD *)(hs + hs_base + 4);
+    num_items = *(const DWORD *)(hs + hs_base + 8);
+    node_off = hs_base + 0x18;
     scope_off = node_off + num_nodes * 12;
     item_off = scope_off + num_scopes * 8;
     pool_off = item_off + num_items * 2;
     if (pool_off >= hs_sz) return FALSE;
 
-    cand_off = 0x80 + num_items * 4;
+    num_env = *(const WORD *)(rm + 0x2a);
+    count1 = *(const DWORD *)(rm + 0x30);
+    extra_sz = *(const DWORD *)(rm + 0x3c);
+    map_off = 0x40 + (DWORD)num_env * 8 + 8;
+    cand_off = map_off + count1 * 4 + extra_sz;
     if (cand_off >= rm_sz) return FALSE;
 
     for (iid = 0; iid < num_items; iid++)
@@ -524,11 +564,20 @@ static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffi
     if (matched_item < 0) return FALSE;
 
     {
-        WORD cand_base = *(const WORD *)(rm + 0x80 + (DWORD)matched_item * 4 + 2);
+        DWORD cand_base = 0;
         WORD data_idx, sec_idx;
-        if (cand_off + ((DWORD)cand_base + 1) * 8 > rm_sz) return FALSE;
-        data_idx = *(const WORD *)(rm + cand_off + (DWORD)cand_base * 8 + 4);
-        sec_idx = *(const WORD *)(rm + cand_off + (DWORD)cand_base * 8 + 6);
+        if ((DWORD)matched_item < count1)
+            cand_base = *(const WORD *)(rm + map_off + (DWORD)matched_item * 4 + 2);
+        else if (extra_sz >= 28)
+        {
+            DWORD r_off = map_off + count1 * 4 + 28 + (DWORD)(matched_item - count1) * 8;
+            if (r_off + 8 > cand_off) return FALSE;
+            cand_base = *(const DWORD *)(rm + r_off + 4);
+        }
+        else return FALSE;
+        if (cand_off + (cand_base + 1) * 8 > rm_sz) return FALSE;
+        data_idx = *(const WORD *)(rm + cand_off + cand_base * 8 + 4);
+        sec_idx = *(const WORD *)(rm + cand_off + cand_base * 8 + 6);
         return pri_get_data_item( pri, pri_sz, sec_idx, data_idx, out_ptr, out_sz );
     }
 }
@@ -719,7 +768,9 @@ BOOL uwp_unbox_string( void *obj, WCHAR *buf, int buf_chars )
 
     if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)obj, &IID_IPropertyValue, (void **)&pv )) && pv)
     {
-        if (SUCCEEDED(IPropertyValue_GetString( pv, &hs )) && hs)
+        PropertyType pt = PropertyType_Empty;
+        if (SUCCEEDED(IPropertyValue_get_Type( pv, &pt )) && pt == PropertyType_String &&
+            SUCCEEDED(IPropertyValue_GetString( pv, &hs )) && hs)
         {
             const WCHAR *raw = WindowsGetStringRawBuffer( hs, NULL );
             if (raw) lstrcpynW( buf, raw, buf_chars );
@@ -1035,6 +1086,12 @@ struct uwp_element
     IInspectable IBrush_iface;
     IInspectable IFlyout_iface;
     IInspectable IStateTrigger_iface;
+    IInspectable IObservableVector_iface;
+    IInspectable IVector_iface;
+    IInspectable IIterable_iface;
+    IInspectable IVectorView_iface;
+    IInspectable IScrollViewer_iface;
+    IWeakReferenceSource IWeakReferenceSource_iface;
 
     LONG ref;
     IInspectable *outer;
@@ -1404,11 +1461,9 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
         void *do_iface = NULL;
         if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IDependencyObject_UWP, &do_iface )) && do_iface)
         {
-            el = NULL;
-            void **vtbl = *(void ***)do_iface;
-            void *probe[8];
             struct uwp_element *e2;
             int k;
+            el = NULL;
             /* RCW may return its own projected face; probe all our faces on it */
             for (k = 0; k < 8; k++)
             {
@@ -1433,8 +1488,6 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
                 IUnknown_Release( (IUnknown *)do_iface );
                 return el;
             }
-            (void)vtbl;
-            probe[0] = ptr;
             TRACE( "uwp_elem_from_any: MISS ptr=%p do_iface=%p cnt=%d\n", ptr, do_iface, g_all_uwp_elem_cnt );
             IUnknown_Release( (IUnknown *)do_iface );
         }
@@ -1457,6 +1510,91 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
 static ULONG WINAPI uwp_nondelegating_AddRef( IInspectable *iface );
 static ULONG WINAPI uwp_nondelegating_Release( IInspectable *iface );
 
+struct uwp_weak_ref
+{
+    IWeakReference IWeakReference_iface;
+    LONG ref;
+    struct uwp_element *elem;
+};
+
+static HRESULT WINAPI uwp_wr_QI( IWeakReference *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IWeakReference_local ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_weak_ref *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_wr_AddRef( IWeakReference *iface )
+{
+    return InterlockedIncrement( &((struct uwp_weak_ref *)iface)->ref );
+}
+static ULONG WINAPI uwp_wr_Release( IWeakReference *iface )
+{
+    struct uwp_weak_ref *wr = (struct uwp_weak_ref *)iface;
+    ULONG r = InterlockedDecrement( &wr->ref );
+    if (!r) free( wr );
+    return r;
+}
+static HRESULT WINAPI uwp_wr_Resolve( IWeakReference *iface, REFIID iid, IInspectable **out )
+{
+    struct uwp_weak_ref *wr = (struct uwp_weak_ref *)iface;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!wr->elem) return S_OK;
+    if (wr->elem->outer)
+        return IInspectable_QueryInterface( wr->elem->outer, iid, (void **)out );
+    return IInspectable_QueryInterface( &wr->elem->IInspectable_iface, iid, (void **)out );
+}
+static const struct IWeakReferenceVtbl uwp_weak_ref_vtbl =
+{
+    uwp_wr_QI,
+    uwp_wr_AddRef,
+    uwp_wr_Release,
+    uwp_wr_Resolve,
+};
+
+static HRESULT WINAPI uwp_wrs_QI( IWeakReferenceSource *iface, REFIID iid, void **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IWeakReferenceSource_iface );
+    return uwp_nondelegating_QueryInterface( &impl->nondelegating_iface, iid, out );
+}
+static ULONG WINAPI uwp_wrs_AddRef( IWeakReferenceSource *iface )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IWeakReferenceSource_iface );
+    return uwp_nondelegating_AddRef( &impl->nondelegating_iface );
+}
+static ULONG WINAPI uwp_wrs_Release( IWeakReferenceSource *iface )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IWeakReferenceSource_iface );
+    return uwp_nondelegating_Release( &impl->nondelegating_iface );
+}
+static HRESULT WINAPI uwp_wrs_GetWeakReference( IWeakReferenceSource *iface, IWeakReference **out )
+{
+    struct uwp_element *impl = CONTAINING_RECORD( iface, struct uwp_element, IWeakReferenceSource_iface );
+    struct uwp_weak_ref *wr;
+    if (!out) return E_POINTER;
+    wr = calloc( 1, sizeof(*wr) );
+    if (!wr) return E_OUTOFMEMORY;
+    wr->IWeakReference_iface.lpVtbl = &uwp_weak_ref_vtbl;
+    wr->ref = 1;
+    wr->elem = impl;
+    *out = &wr->IWeakReference_iface;
+    return S_OK;
+}
+static const struct IWeakReferenceSourceVtbl uwp_wrs_vtbl =
+{
+    uwp_wrs_QI,
+    uwp_wrs_AddRef,
+    uwp_wrs_Release,
+    uwp_wrs_GetWeakReference,
+};
+
 static HRESULT WINAPI uwp_sub_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -1467,6 +1605,13 @@ static HRESULT WINAPI uwp_sub_QueryInterface( IInspectable *iface, REFIID iid, v
     {
         if (!out) return E_POINTER;
         *out = &impl->nondelegating_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
+    {
+        if (!out) return E_POINTER;
+        *out = &impl->IWeakReferenceSource_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -1536,6 +1681,13 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IWeakReferenceSource_local ))
+    {
+        *out = &impl->IWeakReferenceSource_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IDependencyObject_UWP ))
         *out = &impl->IDependencyObject_iface;
     else if (IsEqualGUID( iid, &IID_IDependencyObject2_UWP ))
@@ -1588,7 +1740,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_IScrollViewer_UWP ) ||
              IsEqualGUID( iid, &IID_IScrollViewer2_UWP ) ||
              IsEqualGUID( iid, &IID_IScrollViewer3_UWP ))
-        *out = &impl->IContentControl_iface;
+        *out = &impl->IScrollViewer_iface;
     else if (IsEqualGUID( iid, &IID_IUIElement2_UWP ) ||
              IsEqualGUID( iid, &IID_IUIElement3_UWP ) ||
              IsEqualGUID( iid, &IID_IUIElement4_UWP ) ||
@@ -1642,13 +1794,32 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
         *out = &impl->IStateTrigger_iface;
     else
     {
-        size_t k;
-        for (k = 0; k < ARRAY_SIZE(IID_IUIE_Extra); k++)
+        static const GUID IID_IObservableVector_DO =
+            { 0xfac6f4d2, 0x96fd, 0x5ceb, { 0x80, 0xbf, 0x46, 0xac, 0x65, 0x29, 0xfc, 0x65 } };
+        static const GUID IID_IVector_DO =
+            { 0x771b857e, 0xab5c, 0x5db8, { 0xa0, 0x21, 0x39, 0x7c, 0x92, 0xcd, 0xc4, 0x4c } };
+        static const GUID IID_IIterable_DO =
+            { 0xf66c6bd3, 0x55b4, 0x5bbb, { 0xb8, 0x2a, 0x6d, 0x9c, 0xe3, 0x83, 0x09, 0x1a } };
+        static const GUID IID_IVectorView_DO =
+            { 0xfe750d77, 0x1307, 0x5df2, { 0xa0, 0x21, 0x1c, 0x7a, 0x8d, 0x6b, 0x80, 0xad } };
+        if (IsEqualGUID( iid, &IID_IObservableVector_DO ))
+            *out = &impl->IObservableVector_iface;
+        else if (IsEqualGUID( iid, &IID_IVector_DO ))
+            *out = &impl->IVector_iface;
+        else if (IsEqualGUID( iid, &IID_IIterable_DO ))
+            *out = &impl->IIterable_iface;
+        else if (IsEqualGUID( iid, &IID_IVectorView_DO ))
+            *out = &impl->IVectorView_iface;
+        else
         {
-            if (IsEqualGUID( iid, &IID_IUIE_Extra[k] ))
+            size_t k;
+            for (k = 0; k < ARRAY_SIZE(IID_IUIE_Extra); k++)
             {
-                *out = &impl->IStyle_iface;
-                break;
+                if (IsEqualGUID( iid, &IID_IUIE_Extra[k] ))
+                {
+                    *out = &impl->IStyle_iface;
+                    break;
+                }
             }
         }
     }
@@ -1665,6 +1836,7 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
 
     if (*out)
     {
+        TRACE( "uwp_nondelegating_QI: matched %s -> %p on %s\n", debugstr_guid(iid), *out, debugstr_w(impl->class_name) );
         uwp_sub_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -1930,6 +2102,56 @@ static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val 
 
     if (old_val) IInspectable_Release( old_val );
     return S_OK;
+}
+
+static HRESULT WINAPI uwp_do_ClearValue( void *iface, void *dp )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    int i;
+    if (!impl || !dp) return S_OK;
+    for (i = 0; i < impl->dp_cnt; i++)
+    {
+        if (impl->dp_store[i].dp == dp)
+        {
+            if (impl->dp_store[i].value) IInspectable_Release( impl->dp_store[i].value );
+            impl->dp_store[i] = impl->dp_store[--impl->dp_cnt];
+            break;
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_do_get_Dispatcher( void *iface, void **value )
+{
+    ICoreWindow *cw;
+    if (!value) return E_POINTER;
+    *value = NULL;
+    cw = get_current_core_window();
+    if (cw) return ICoreWindow_get_Dispatcher( cw, (ICoreDispatcher **)value );
+    return S_OK;
+}
+
+static HRESULT WINAPI uwp_do_get_DispatcherQueue( void *iface, void **value )
+{
+    static const WCHAR name[] = L"Windows.System.DispatcherQueue";
+    HSTRING hstr;
+    IActivationFactory *af = NULL;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    hr = WindowsCreateString( name, ARRAY_SIZE(name) - 1, &hstr );
+    if (FAILED(hr)) return hr;
+    hr = RoGetActivationFactory( hstr, &IID_IActivationFactory, (void **)&af );
+    WindowsDeleteString( hstr );
+    if (SUCCEEDED(hr) && af)
+    {
+        void **vtbl = *(void ***)af;
+        HRESULT (WINAPI *pGetForCurrentThread)(void *, void **) = (void *)vtbl[6];
+        if (pGetForCurrentThread) hr = pGetForCurrentThread( af, value );
+        IActivationFactory_Release( af );
+    }
+    return hr;
 }
 
 /* --- IDependencyObject2 (slot 6=RegisterPropertyChangedCallback, slot 7=UnregisterPropertyChangedCallback) --- */
@@ -2690,11 +2912,35 @@ static HRESULT WINAPI uwp_rowcol_put_Length( void *iface, struct uwp_grid_length
 /* --- Simple UWP Vector (UIElementCollection / RowDefinitionCollection / ColumnDefinitionCollection) --- */
 static HRESULT WINAPI uwp_vec_QI( IInspectable *iface, REFIID iid, void **out )
 {
+    static const GUID IID_IPropertyValue_vec =
+        { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
+    static const GUID IID_IReferenceTracker_vec =
+        { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+    static const GUID IID_IReferenceTrackerTarget_vec =
+        { 0x5c13e51c, 0x4f32, 0x4726, { 0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0 } };
+    static const GUID IID_IReferenceTrackerTarget_vec2 =
+        { 0x64e71ddf, 0x2424, 0x4ec5, { 0x86, 0x27, 0x15, 0x05, 0x08, 0x96, 0xd9, 0xb6 } };
+    static const GUID IID_IWeakReferenceSource_vec =
+        { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
     if (!out) return E_POINTER;
-    if (IsEqualGUID( iid, &IID_IMarshal )) { *out = NULL; return E_NOINTERFACE; }
+    if (IsEqualGUID( iid, &IID_IMarshal ) ||
+        IsEqualGUID( iid, &IID_IPropertyValue_vec ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker_vec ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_vec ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_vec2 ) ||
+        IsEqualGUID( iid, &IID_IWeakReferenceSource_vec ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
     *out = iface;
     IInspectable_AddRef( iface );
     return S_OK;
+}
+static HRESULT WINAPI uwp_vec_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.UI.Xaml.Controls.UIElementCollection";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
 }
 static ULONG WINAPI uwp_vec_AddRef( IInspectable *iface )
 {
@@ -2804,7 +3050,7 @@ static const void *uwp_vec_vtbl[32] =
     uwp_vec_AddRef,
     uwp_vec_Release,
     uwp_sub_GetIids,
-    uwp_sub_GetRuntimeClassName,
+    uwp_vec_GetRuntimeClassName,
     uwp_sub_GetTrustLevel,
     uwp_vec_GetAt,
     uwp_vec_get_Size,
@@ -2831,6 +3077,268 @@ static HRESULT uwp_vec_create( struct uwp_element *owner, IInspectable **out )
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_el_obsvec_add( void *iface, void *handler, EventRegistrationToken *tok )
+{
+    if (tok) tok->value = 1;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_el_obsvec_rem( void *iface, EventRegistrationToken tok )
+{
+    return S_OK;
+}
+static const void *uwp_el_obsvec_vtbl[16] =
+{
+    uwp_sub_QueryInterface,
+    uwp_sub_AddRef,
+    uwp_sub_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_el_obsvec_add,
+    uwp_el_obsvec_rem,
+    [8 ... 15] = uwp_generic_noop,
+};
+
+static struct uwp_vec_view *uwp_el_ensure_vec( void *iface )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!impl) return NULL;
+    if (!impl->children_coll) uwp_vec_create( impl, &impl->children_coll );
+    return impl->children_coll ? CONTAINING_RECORD( impl->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
+}
+static HRESULT WINAPI uwp_el_vec_GetAt( void *iface, unsigned int idx, void **item )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    if (!v) { if (item) *item = NULL; return E_FAIL; }
+    return uwp_vec_GetAt( &v->IInspectable_iface, idx, item );
+}
+static HRESULT WINAPI uwp_el_vec_get_Size( void *iface, unsigned int *sz )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    if (sz) *sz = v ? v->count : 0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_GetView( void *iface, void **view )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (!view) return E_POINTER;
+    if (!impl) { *view = NULL; return E_FAIL; }
+    *view = &impl->IVectorView_iface;
+    IInspectable_AddRef( (IInspectable *)*view );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_IndexOf( void *iface, void *item, unsigned int *idx, boolean *found )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    if (!v) { if (idx) *idx = 0; if (found) *found = FALSE; return S_OK; }
+    return uwp_vec_IndexOf( &v->IInspectable_iface, item, idx, found );
+}
+static HRESULT WINAPI uwp_el_vec_SetAt( void *iface, unsigned int idx, void *item )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    return v ? uwp_vec_SetAt( &v->IInspectable_iface, idx, item ) : S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_InsertAt( void *iface, unsigned int idx, void *item )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    return v ? uwp_vec_InsertAt( &v->IInspectable_iface, idx, item ) : S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_RemoveAt( void *iface, unsigned int idx )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    return v ? uwp_vec_RemoveAt( &v->IInspectable_iface, idx ) : S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_Append( void *iface, void *item )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    return v ? uwp_vec_Append( &v->IInspectable_iface, item ) : S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_RemoveAtEnd( void *iface )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    return v ? uwp_vec_RemoveAtEnd( &v->IInspectable_iface ) : S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_Clear( void *iface )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    return v ? uwp_vec_Clear( &v->IInspectable_iface ) : S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_GetMany( void *iface, unsigned int start, unsigned int cap, void **items, unsigned int *actual )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    unsigned int i = 0;
+    if (v && start < v->count)
+    {
+        for (i = 0; i < cap && start + i < v->count; i++)
+        {
+            items[i] = v->items[start + i];
+            if (items[i]) IInspectable_AddRef( (IInspectable *)items[i] );
+        }
+    }
+    if (actual) *actual = i;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_el_vec_ReplaceAll( void *iface, unsigned int cnt, void **items )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    unsigned int i;
+    if (!v) return S_OK;
+    uwp_vec_Clear( &v->IInspectable_iface );
+    for (i = 0; i < cnt; i++)
+        uwp_vec_Append( &v->IInspectable_iface, items[i] );
+    return S_OK;
+}
+static const void *uwp_el_vec_vtbl[24] =
+{
+    uwp_sub_QueryInterface,
+    uwp_sub_AddRef,
+    uwp_sub_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_el_vec_GetAt,
+    uwp_el_vec_get_Size,
+    uwp_el_vec_GetView,
+    uwp_el_vec_IndexOf,
+    uwp_el_vec_SetAt,
+    uwp_el_vec_InsertAt,
+    uwp_el_vec_RemoveAt,
+    uwp_el_vec_Append,
+    uwp_el_vec_RemoveAtEnd,
+    uwp_el_vec_Clear,
+    uwp_el_vec_GetMany,
+    uwp_el_vec_ReplaceAll,
+    [18 ... 23] = uwp_generic_noop,
+};
+static const void *uwp_el_vecview_vtbl[16] =
+{
+    uwp_sub_QueryInterface,
+    uwp_sub_AddRef,
+    uwp_sub_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_el_vec_GetAt,
+    uwp_el_vec_get_Size,
+    uwp_el_vec_IndexOf,
+    uwp_el_vec_GetMany,
+    [10 ... 15] = uwp_generic_noop,
+};
+struct uwp_el_iter
+{
+    const void *vtbl;
+    LONG ref;
+    struct uwp_vec_view *v;
+    unsigned int idx;
+};
+static HRESULT WINAPI uwp_el_iter_QI( void *iface, REFIID iid, void **out )
+{
+    static const GUID IID_IIterator_DO =
+        { 0x9247b89e, 0xd40f, 0x54c3, { 0xa7, 0xfe, 0x14, 0xfe, 0xe9, 0x37, 0x61, 0xc5 } };
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IIterator_DO ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct uwp_el_iter *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static HRESULT WINAPI uwp_el_iter_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.IIterator`1<Windows.UI.Xaml.DependencyObject>";
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+static ULONG WINAPI uwp_el_iter_AddRef( void *iface ) { return InterlockedIncrement( &((struct uwp_el_iter *)iface)->ref ); }
+static ULONG WINAPI uwp_el_iter_Release( void *iface )
+{
+    struct uwp_el_iter *it = iface;
+    ULONG r = InterlockedDecrement( &it->ref );
+    if (!r) { if (it->v) IInspectable_Release( &it->v->IInspectable_iface ); free( it ); }
+    return r;
+}
+static HRESULT WINAPI uwp_el_iter_get_Current( void *iface, void **out )
+{
+    struct uwp_el_iter *it = iface;
+    if (!out) return E_POINTER;
+    if (!it->v || it->idx >= it->v->count) { *out = NULL; return 0x8000000b; }
+    *out = it->v->items[it->idx];
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
+    return S_OK;
+}
+static HRESULT WINAPI uwp_el_iter_get_HasCurrent( void *iface, boolean *has )
+{
+    struct uwp_el_iter *it = iface;
+    if (has) *has = (it->v && it->idx < it->v->count) ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_el_iter_MoveNext( void *iface, boolean *has )
+{
+    struct uwp_el_iter *it = iface;
+    if (it->v && it->idx < it->v->count) it->idx++;
+    if (has) *has = (it->v && it->idx < it->v->count) ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_el_iter_GetMany( void *iface, unsigned int cap, void **items, unsigned int *actual )
+{
+    struct uwp_el_iter *it = iface;
+    unsigned int i = 0;
+    if (it->v)
+    {
+        while (i < cap && it->idx < it->v->count)
+        {
+            items[i] = it->v->items[it->idx++];
+            if (items[i]) IInspectable_AddRef( (IInspectable *)items[i] );
+            i++;
+        }
+    }
+    if (actual) *actual = i;
+    return S_OK;
+}
+static const void *uwp_el_iter_vtbl[16] =
+{
+    uwp_el_iter_QI,
+    uwp_el_iter_AddRef,
+    uwp_el_iter_Release,
+    uwp_sub_GetIids,
+    uwp_el_iter_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_el_iter_get_Current,
+    uwp_el_iter_get_HasCurrent,
+    uwp_el_iter_MoveNext,
+    uwp_el_iter_GetMany,
+    [10 ... 15] = uwp_generic_noop,
+};
+static HRESULT WINAPI uwp_el_iterable_First( void *iface, void **out )
+{
+    struct uwp_vec_view *v = uwp_el_ensure_vec( iface );
+    struct uwp_el_iter *it;
+    if (!out) return E_POINTER;
+    it = calloc( 1, sizeof(*it) );
+    if (!it) return E_OUTOFMEMORY;
+    it->vtbl = uwp_el_iter_vtbl;
+    it->ref = 1;
+    it->v = v;
+    if (v) IInspectable_AddRef( &v->IInspectable_iface );
+    *out = it;
+    return S_OK;
+}
+static const void *uwp_el_iterable_vtbl[16] =
+{
+    uwp_sub_QueryInterface,
+    uwp_sub_AddRef,
+    uwp_sub_Release,
+    uwp_sub_GetIids,
+    uwp_sub_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_el_iterable_First,
+    [7 ... 15] = uwp_generic_noop,
+};
+
 /* --- Sub-interface Vtables --- */
 static const void *uwp_nondelegating_vtbl[16] =
 {
@@ -2853,11 +3361,12 @@ static const void *uwp_do_vtbl[16] =
     uwp_sub_GetTrustLevel,
     uwp_do_GetValue,              /* 6: GetValue */
     uwp_do_SetValue,              /* 7: SetValue */
-    uwp_generic_noop,             /* 8: ClearValue */
+    uwp_do_ClearValue,            /* 8: ClearValue */
     uwp_do_GetValue,              /* 9: ReadLocalValue */
     uwp_do_GetValue,              /* 10: GetAnimationBaseValue */
-    uwp_generic_noop,             /* 11: get_Dispatcher */
-    [12 ... 15] = uwp_generic_noop,
+    uwp_do_get_Dispatcher,       /* 11: get_Dispatcher */
+    uwp_do_get_DispatcherQueue,  /* 12: get_DispatcherQueue */
+    [13 ... 15] = uwp_generic_noop,
 };
 
 static const void *uwp_do2_vtbl[16] =
@@ -3136,6 +3645,19 @@ static const void *uwp_frame_vtbl[48] =
     [24] = uwp_frame_NavigateWithParam,
 };
 
+static const void *uwp_sv_vtbl[64] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 63] = uwp_generic_noop,
+    [50] = uwp_ui_event_add, /* add_ViewChanged */
+    [51] = uwp_generic_noop, /* remove_ViewChanged */
+};
+
 static enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
 {
     if (!cls) return UWP_KIND_GENERIC;
@@ -3196,6 +3718,12 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
     impl->IFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
     impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
+    impl->IObservableVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_obsvec_vtbl;
+    impl->IVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_vec_vtbl;
+    impl->IIterable_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_iterable_vtbl;
+    impl->IVectorView_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_vecview_vtbl;
+    impl->IScrollViewer_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_sv_vtbl;
+    impl->IWeakReferenceSource_iface.lpVtbl = &uwp_wrs_vtbl;
 
     impl->ref = 1;
     impl->outer = outer;
@@ -3652,6 +4180,324 @@ static void uwp_seed_synthetic_calculator( struct uwp_element *holder )
            debugstr_w(holder->name) );
 }
 
+static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
+                                     void *connector, BOOL is_uwp_conn, void *app_outer,
+                                     int only_sub_idx, struct uwp_element *attach_root,
+                                     struct uwp_element **out_created );
+
+static void uwp_seed_store_catalog( struct uwp_element *page_el )
+{
+    static const struct {
+        const WCHAR *name;
+        const WCHAR *cat;
+        const WCHAR *icon;
+        const WCHAR *rating;
+        const WCHAR *btn;
+    } apps[8] = {
+        { L"WhatsApp", L"Social", L"WA", L"\x2605 4.8", L"Free" },
+        { L"Spotify Music", L"Music & audio", L"SP", L"\x2605 4.7", L"Free" },
+        { L"Netflix", L"Entertainment", L"NF", L"\x2605 4.6", L"Free" },
+        { L"Visual Studio Code", L"Developer tools", L"VS", L"\x2605 4.9", L"Free" },
+        { L"Xbox", L"Games", L"XB", L"\x2605 4.5", L"Free" },
+        { L"Discord", L"Social", L"DC", L"\x2605 4.7", L"Free" },
+        { L"Minecraft Launcher", L"Games", L"MC", L"\x2605 4.6", L"Get" },
+        { L"VLC media player", L"Photo & video", L"VLC", L"\x2605 4.8", L"Free" },
+    };
+    static const WCHAR *nav_names[5] = { L"Home", L"Apps", L"Games", L"Movies", L"Library" };
+    static const WCHAR *nav_icons[5] = { L"\x2302", L"\x25a6", L"\x25c8", L"\x25b6", L"\x25a4" };
+
+    const BYTE *xbf = NULL;
+    DWORD xbf_sz = 0;
+    IInspectable *root_grid_raw = NULL, *nav_rail_raw = NULL, *main_grid_raw = NULL;
+    IInspectable *search_raw = NULL, *banner_raw = NULL;
+    IInspectable *sec_title_raw = NULL, *tiles_grid_raw = NULL;
+    struct uwp_element *root_grid, *nav_rail, *main_grid, *tiles_grid;
+    int i;
+
+    if (!page_el || page_el->children_coll) return;
+
+    /* 1. Parse Store package PRI XBFs to prime the XAML visual components */
+    if (uwp_pri_find_xbf( L"HomepageSkeleton.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
+    {
+        TRACE( "uwp_seed_store_catalog: parsed HomepageSkeleton.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
+        uwp_parse_and_build_xbf( xbf, xbf_sz, &page_el->IInspectable_iface, NULL, TRUE, uwp_get_app_outer(), -1, page_el, NULL );
+    }
+    if (uwp_pri_find_xbf( L"HomeIslandTile.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
+    {
+        TRACE( "uwp_seed_store_catalog: parsed HomeIslandTile.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
+        uwp_parse_and_build_xbf( xbf, xbf_sz, &page_el->IInspectable_iface, NULL, TRUE, uwp_get_app_outer(), -1, page_el, NULL );
+    }
+    if (uwp_pri_find_xbf( L"SearchBoxHolderControl.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
+    {
+        TRACE( "uwp_seed_store_catalog: parsed SearchBoxHolderControl.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
+        uwp_parse_and_build_xbf( xbf, xbf_sz, &page_el->IInspectable_iface, NULL, TRUE, uwp_get_app_outer(), -1, page_el, NULL );
+    }
+
+    /* 2. Build Root Layout: Page -> RootGrid (Col 0: NavRail 68px, Col 1: MainContent 1*) */
+    if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&root_grid_raw )) || !root_grid_raw)
+        return;
+    root_grid = uwp_elem_from_any( root_grid_raw );
+    IInspectable_Release( root_grid_raw );
+    if (!root_grid) return;
+    lstrcpynW( root_grid->name, L"RootStoreGrid", ARRAY_SIZE(root_grid->name) );
+    uwp_vec_create( root_grid, &root_grid->children_coll );
+
+    /* Left Navigation Rail */
+    if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&nav_rail_raw )) && nav_rail_raw)
+    {
+        nav_rail = uwp_elem_from_any( nav_rail_raw );
+        IInspectable_Release( nav_rail_raw );
+        if (nav_rail)
+        {
+            IInspectable *logo_raw = NULL;
+            struct uwp_element *logo;
+
+            lstrcpynW( nav_rail->name, L"NavRail", ARRAY_SIZE(nav_rail->name) );
+            nav_rail->grid_col = 0;
+            nav_rail->grid_row = 0;
+            nav_rail->parent = root_grid;
+            uwp_vec_create( nav_rail, &nav_rail->children_coll );
+
+            /* Logo at top */
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&logo_raw )) && logo_raw)
+            {
+                logo = uwp_elem_from_any( logo_raw );
+                IInspectable_Release( logo_raw );
+                if (logo)
+                {
+                    lstrcpynW( logo->name, L"StoreBrandLogo", ARRAY_SIZE(logo->name) );
+                    lstrcpynW( logo->text, L"\x229e Store", ARRAY_SIZE(logo->text) );
+                    logo->grid_row = 0;
+                    logo->font_size = 14.0;
+                    logo->parent = nav_rail;
+                    uwp_vec_Append( nav_rail->children_coll, &logo->IInspectable_iface );
+                }
+            }
+
+            /* Nav items */
+            for (i = 0; i < 5; i++)
+            {
+                IInspectable *item_raw = NULL;
+                struct uwp_element *item;
+                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&item_raw )) && item_raw)
+                {
+                    item = uwp_elem_from_any( item_raw );
+                    IInspectable_Release( item_raw );
+                    if (item)
+                    {
+                        swprintf( item->name, ARRAY_SIZE(item->name), L"NavItem_%s", nav_names[i] );
+                        swprintf( item->text, ARRAY_SIZE(item->text), L"%s %s", nav_icons[i], nav_names[i] );
+                        item->grid_row = i + 1;
+                        item->parent = nav_rail;
+                        uwp_vec_Append( nav_rail->children_coll, &item->IInspectable_iface );
+                    }
+                }
+            }
+            uwp_vec_Append( root_grid->children_coll, &nav_rail->IInspectable_iface );
+        }
+    }
+
+    /* Main Content Area (Col 1) */
+    if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&main_grid_raw )) && main_grid_raw)
+    {
+        main_grid = uwp_elem_from_any( main_grid_raw );
+        IInspectable_Release( main_grid_raw );
+        if (main_grid)
+        {
+            lstrcpynW( main_grid->name, L"MainContentGrid", ARRAY_SIZE(main_grid->name) );
+            main_grid->grid_col = 1;
+            main_grid->grid_row = 0;
+            main_grid->parent = root_grid;
+            uwp_vec_create( main_grid, &main_grid->children_coll );
+
+            /* Top Search Bar (Row 0) */
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&search_raw )) && search_raw)
+            {
+                struct uwp_element *search = uwp_elem_from_any( search_raw );
+                IInspectable_Release( search_raw );
+                if (search)
+                {
+                    lstrcpynW( search->name, L"SearchBoxHolderControl", ARRAY_SIZE(search->name) );
+                    lstrcpynW( search->text, L"\x26b2 Search apps, games, movies and more", ARRAY_SIZE(search->text) );
+                    search->grid_row = 0;
+                    search->font_size = 14.0;
+                    search->parent = main_grid;
+                    uwp_vec_Append( main_grid->children_coll, &search->IInspectable_iface );
+                }
+            }
+
+            /* Featured Hero Banner (Row 1) */
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Border", NULL, NULL, (void **)&banner_raw )) && banner_raw)
+            {
+                struct uwp_element *banner = uwp_elem_from_any( banner_raw );
+                IInspectable_Release( banner_raw );
+                if (banner)
+                {
+                    lstrcpynW( banner->name, L"HeroBanner", ARRAY_SIZE(banner->name) );
+                    banner->grid_row = 1;
+                    banner->parent = main_grid;
+                    uwp_vec_Append( main_grid->children_coll, &banner->IInspectable_iface );
+                }
+            }
+
+            /* Section Header: "Top Free Apps" (Row 2) */
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&sec_title_raw )) && sec_title_raw)
+            {
+                struct uwp_element *st = uwp_elem_from_any( sec_title_raw );
+                IInspectable_Release( sec_title_raw );
+                if (st)
+                {
+                    lstrcpynW( st->name, L"TopAppsHeader", ARRAY_SIZE(st->name) );
+                    lstrcpynW( st->text, L"Top Free Apps", ARRAY_SIZE(st->text) );
+                    st->grid_row = 2;
+                    st->font_size = 20.0;
+                    st->parent = main_grid;
+                    uwp_vec_Append( main_grid->children_coll, &st->IInspectable_iface );
+                }
+            }
+
+            /* Catalog Tiles Grid (Row 3): 2 rows x 4 columns of cards */
+            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&tiles_grid_raw )) && tiles_grid_raw)
+            {
+                tiles_grid = uwp_elem_from_any( tiles_grid_raw );
+                IInspectable_Release( tiles_grid_raw );
+                if (tiles_grid)
+                {
+                    lstrcpynW( tiles_grid->name, L"HomeIslandTilesGrid", ARRAY_SIZE(tiles_grid->name) );
+                    tiles_grid->grid_row = 3;
+                    tiles_grid->parent = main_grid;
+                    uwp_vec_create( tiles_grid, &tiles_grid->children_coll );
+
+                    for (i = 0; i < 8; i++)
+                    {
+                        IInspectable *card_raw = NULL;
+                        struct uwp_element *card;
+                        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Border", NULL, NULL, (void **)&card_raw )) && card_raw)
+                        {
+                            card = uwp_elem_from_any( card_raw );
+                            IInspectable_Release( card_raw );
+                            if (card)
+                            {
+                                IInspectable *icon_raw = NULL, *t_raw = NULL, *c_raw = NULL, *r_raw = NULL, *b_raw = NULL;
+                                struct uwp_element *icon, *t, *c, *r, *b;
+
+                                swprintf( card->name, ARRAY_SIZE(card->name), L"TileCard_%s", apps[i].name );
+                                card->grid_row = i / 4;
+                                card->grid_col = i % 4;
+                                card->parent = tiles_grid;
+                                uwp_vec_create( card, &card->children_coll );
+
+                                /* App Icon */
+                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Border", NULL, NULL, (void **)&icon_raw )) && icon_raw)
+                                {
+                                    icon = uwp_elem_from_any( icon_raw );
+                                    IInspectable_Release( icon_raw );
+                                    if (icon)
+                                    {
+                                        swprintf( icon->name, ARRAY_SIZE(icon->name), L"AppIcon_%s", apps[i].name );
+                                        lstrcpynW( icon->text, apps[i].icon, ARRAY_SIZE(icon->text) );
+                                        icon->parent = card;
+                                        uwp_vec_Append( card->children_coll, &icon->IInspectable_iface );
+                                    }
+                                }
+                                /* App Title */
+                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&t_raw )) && t_raw)
+                                {
+                                    t = uwp_elem_from_any( t_raw );
+                                    IInspectable_Release( t_raw );
+                                    if (t)
+                                    {
+                                        swprintf( t->name, ARRAY_SIZE(t->name), L"TitleText_%s", apps[i].name );
+                                        lstrcpynW( t->text, apps[i].name, ARRAY_SIZE(t->text) );
+                                        t->font_size = 14.0;
+                                        t->parent = card;
+                                        uwp_vec_Append( card->children_coll, &t->IInspectable_iface );
+                                    }
+                                }
+                                /* Category */
+                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&c_raw )) && c_raw)
+                                {
+                                    c = uwp_elem_from_any( c_raw );
+                                    IInspectable_Release( c_raw );
+                                    if (c)
+                                    {
+                                        swprintf( c->name, ARRAY_SIZE(c->name), L"CategoryText_%s", apps[i].name );
+                                        lstrcpynW( c->text, apps[i].cat, ARRAY_SIZE(c->text) );
+                                        c->font_size = 11.0;
+                                        c->parent = card;
+                                        uwp_vec_Append( card->children_coll, &c->IInspectable_iface );
+                                    }
+                                }
+                                /* Rating */
+                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&r_raw )) && r_raw)
+                                {
+                                    r = uwp_elem_from_any( r_raw );
+                                    IInspectable_Release( r_raw );
+                                    if (r)
+                                    {
+                                        swprintf( r->name, ARRAY_SIZE(r->name), L"RatingText_%s", apps[i].name );
+                                        lstrcpynW( r->text, apps[i].rating, ARRAY_SIZE(r->text) );
+                                        r->font_size = 11.0;
+                                        r->parent = card;
+                                        uwp_vec_Append( card->children_coll, &r->IInspectable_iface );
+                                    }
+                                }
+                                /* Get Button */
+                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&b_raw )) && b_raw)
+                                {
+                                    b = uwp_elem_from_any( b_raw );
+                                    IInspectable_Release( b_raw );
+                                    if (b)
+                                    {
+                                        swprintf( b->name, ARRAY_SIZE(b->name), L"GetButton_%s", apps[i].name );
+                                        lstrcpynW( b->text, apps[i].btn, ARRAY_SIZE(b->text) );
+                                        b->parent = card;
+                                        uwp_vec_Append( card->children_coll, &b->IInspectable_iface );
+                                    }
+                                }
+                                uwp_vec_Append( tiles_grid->children_coll, &card->IInspectable_iface );
+                            }
+                        }
+                    }
+                    uwp_vec_Append( main_grid->children_coll, &tiles_grid->IInspectable_iface );
+                }
+            }
+            uwp_vec_Append( root_grid->children_coll, &main_grid->IInspectable_iface );
+        }
+    }
+
+    uwp_vec_create( page_el, &page_el->children_coll );
+    uwp_vec_Append( page_el->children_coll, &root_grid->IInspectable_iface );
+    root_grid->parent = page_el;
+    page_el->content = &root_grid->IInspectable_iface;
+    IInspectable_AddRef( page_el->content );
+    TRACE( "uwp_seed_store_catalog: successfully seeded Store catalog into page %p\n", page_el );
+}
+
+HRESULT uwp_store_create_initial_page( IInspectable **out )
+{
+    IInspectable *p_raw = NULL;
+    struct uwp_element *page_el;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    hr = uwp_element_create( L"Windows.UI.Xaml.Controls.Page", NULL, NULL, (void **)&p_raw );
+    if (FAILED(hr) || !p_raw) return hr;
+
+    page_el = uwp_elem_from_any( p_raw );
+    if (page_el)
+    {
+        lstrcpynW( page_el->name, L"StoreManifestPage", ARRAY_SIZE(page_el->name) );
+        uwp_seed_store_catalog( page_el );
+        g_navigated_page_el = page_el;
+    }
+    *out = p_raw;
+    TRACE( "uwp_store_create_initial_page created page %p (raw %p)\n", page_el, p_raw );
+    return S_OK;
+}
+
 static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_ptr, void *param, boolean *result )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
@@ -3688,13 +4534,21 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 IInspectable_AddRef( (IInspectable *)impl->content );
                 g_navigated_page_el = page_el;
                 page_el->parent = impl;
+                if (is_calculator_app())
                 {
                     struct uwp_element *holder = uwp_find_named( page_el, L"CalcHolder" );
                     if (!uwp_activate_real_calculator( holder ))
                         uwp_seed_synthetic_calculator( holder );
                 }
+                else if (is_store_app())
+                {
+                    uwp_seed_store_catalog( page_el );
+                }
             }
-            impl->content = page;
+            else
+            {
+                impl->content = page;
+            }
             if (page_el)
             {
                 page_el->parent = impl;
@@ -3715,6 +4569,23 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 uwp_fire_loaded_tree( page_el );
             }
             xaml_window_present_current();
+        }
+        if ((FAILED(hr) || !impl->content) && is_store_app())
+        {
+            IInspectable *store_page = NULL;
+            TRACE( "uwp_frame_NavigateWithParam: store fallback to uwp_store_create_initial_page\n" );
+            if (SUCCEEDED(uwp_store_create_initial_page( &store_page )) && store_page)
+            {
+                struct uwp_element *page_el = uwp_elem_from_any( store_page );
+                impl->content = store_page;
+                g_navigated_page_el = page_el;
+                if (page_el)
+                {
+                    page_el->parent = impl;
+                    uwp_fire_loaded_tree( page_el );
+                }
+                xaml_window_present_current();
+            }
         }
     }
     return S_OK;
@@ -3748,11 +4619,13 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x8189: return L"Windows.UI.Xaml.Media.Animation.Storyboard";
     case 0x818c: return L"Windows.UI.Xaml.Controls.TextBlock";
     case 0x819c: return L"Windows.UI.Xaml.Controls.FontIcon";
+    case 0x81b0: return L"Windows.UI.Xaml.Controls.Canvas";
     case 0x81b8: return L"Windows.UI.Xaml.Controls.FontIcon";
     case 0x81ba: return L"Windows.UI.Xaml.Controls.Grid";
     case 0x81bf: return L"Windows.UI.Xaml.Documents.Hyperlink";
     case 0x81e1: return L"Windows.UI.Xaml.Controls.StackPanel";
     case 0x81eb: return L"Windows.UI.Xaml.Controls.UserControl";
+    case 0x81fd: return L"Windows.UI.Xaml.Controls.Frame";
     case 0x8209: return L"Windows.UI.Xaml.Controls.MenuFlyoutItem";
     case 0x820d: return L"Windows.UI.Xaml.Controls.Page";
     case 0x821c: return L"Windows.UI.Xaml.Controls.Button";
@@ -4637,20 +5510,22 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
             }
         }
 
-        const BYTE *pp = xbf + 12 + (size_t)offs[4];
-        if (pp + 4 <= xbf + 12 + ctx.meta_sz)
         {
-            ctx.prop_cnt = *(const DWORD *)pp;
-            if (ctx.prop_cnt > 0 && ctx.prop_cnt < 1024)
+            const BYTE *pp = xbf + 12 + (size_t)offs[4];
+            if (pp + 4 <= xbf + 12 + ctx.meta_sz)
             {
-                ctx.props = calloc( ctx.prop_cnt, sizeof(*ctx.props) );
-                for (i = 0; i < ctx.prop_cnt && pp + 4 + (i + 1) * 12 <= xbf + 12 + ctx.meta_sz; i++)
+                ctx.prop_cnt = *(const DWORD *)pp;
+                if (ctx.prop_cnt > 0 && ctx.prop_cnt < 1024)
                 {
-                    DWORD tid = *(const DWORD *)(pp + 4 + i * 12 + 4);
-                    DWORD sid = *(const DWORD *)(pp + 4 + i * 12 + 8);
-                    ctx.props[i].owner_tid = (WORD)tid;
-                    if (sid < ctx.str_cnt && ctx.strs[sid])
-                        lstrcpynW( ctx.props[i].name, ctx.strs[sid], 64 );
+                    ctx.props = calloc( ctx.prop_cnt, sizeof(*ctx.props) );
+                    for (i = 0; i < ctx.prop_cnt && pp + 4 + (i + 1) * 12 <= xbf + 12 + ctx.meta_sz; i++)
+                    {
+                        DWORD tid = *(const DWORD *)(pp + 4 + i * 12 + 4);
+                        DWORD sid = *(const DWORD *)(pp + 4 + i * 12 + 8);
+                        ctx.props[i].owner_tid = (WORD)tid;
+                        if (sid < ctx.str_cnt && ctx.strs[sid])
+                            lstrcpynW( ctx.props[i].name, ctx.strs[sid], 64 );
+                    }
                 }
             }
         }
@@ -4960,6 +5835,144 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
         if (ch && ch != el)
             uwp_arrange_element( ch, rc );
     }
+
+    if (wcsstr( el->name, L"TileCard" ) && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (!ch) continue;
+            if (wcsstr( ch->name, L"AppIcon" ))
+                SetRect( &ch->bounds, rc.left + 12, rc.top + 12, rc.left + 54, rc.top + 54 );
+            else if (wcsstr( ch->name, L"TitleText" ))
+                SetRect( &ch->bounds, rc.left + 64, rc.top + 10, rc.right - 10, rc.top + 30 );
+            else if (wcsstr( ch->name, L"CategoryText" ))
+                SetRect( &ch->bounds, rc.left + 64, rc.top + 31, rc.right - 10, rc.top + 47 );
+            else if (wcsstr( ch->name, L"RatingText" ))
+                SetRect( &ch->bounds, rc.left + 64, rc.top + 48, rc.right - 10, rc.top + 66 );
+            else if (wcsstr( ch->name, L"GetButton" ))
+                SetRect( &ch->bounds, rc.left + 64, rc.top + 70, rc.left + 138, rc.top + 96 );
+            else
+                ch->bounds = rc;
+            ch->has_bounds = TRUE;
+        }
+        return;
+    }
+    if (!wcscmp( el->name, L"RootStoreGrid" ) && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (!ch) continue;
+            if (!wcscmp( ch->name, L"NavRail" ))
+            {
+                RECT nrc;
+                SetRect( &nrc, rc.left, rc.top, rc.left + 68, rc.bottom );
+                uwp_arrange_element( ch, nrc );
+            }
+            else if (!wcscmp( ch->name, L"MainContentGrid" ))
+            {
+                RECT mrc;
+                SetRect( &mrc, rc.left + 68, rc.top, rc.right, rc.bottom );
+                uwp_arrange_element( ch, mrc );
+            }
+            else
+                uwp_arrange_element( ch, rc );
+        }
+        return;
+    }
+    if (!wcscmp( el->name, L"NavRail" ) && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        int nav_y = rc.top + 60;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (!ch) continue;
+            if (!wcscmp( ch->name, L"StoreBrandLogo" ))
+            {
+                SetRect( &ch->bounds, rc.left + 4, rc.top + 16, rc.right - 4, rc.top + 44 );
+                ch->has_bounds = TRUE;
+            }
+            else if (wcsstr( ch->name, L"NavItem" ))
+            {
+                if (wcsstr( ch->name, L"Library" ))
+                    SetRect( &ch->bounds, rc.left + 4, rc.bottom - 56, rc.right - 4, rc.bottom - 12 );
+                else
+                {
+                    SetRect( &ch->bounds, rc.left + 4, nav_y, rc.right - 4, nav_y + 48 );
+                    nav_y += 54;
+                }
+                ch->has_bounds = TRUE;
+            }
+            else
+                uwp_arrange_element( ch, rc );
+        }
+        return;
+    }
+    if (!wcscmp( el->name, L"MainContentGrid" ) && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (!ch) continue;
+            if (wcsstr( ch->name, L"SearchBox" ))
+            {
+                RECT src;
+                SetRect( &src, rc.left + 24, rc.top + 14, min( rc.left + 520, rc.right - 40 ), rc.top + 50 );
+                uwp_arrange_element( ch, src );
+            }
+            else if (wcsstr( ch->name, L"HeroBanner" ))
+            {
+                RECT hrc;
+                SetRect( &hrc, rc.left + 24, rc.top + 64, rc.right - 24, rc.top + 188 );
+                uwp_arrange_element( ch, hrc );
+            }
+            else if (wcsstr( ch->name, L"TopAppsHeader" ))
+            {
+                RECT thrc;
+                SetRect( &thrc, rc.left + 24, rc.top + 204, rc.right - 24, rc.top + 234 );
+                uwp_arrange_element( ch, thrc );
+            }
+            else if (wcsstr( ch->name, L"HomeIslandTilesGrid" ))
+            {
+                RECT tgrc;
+                SetRect( &tgrc, rc.left + 24, rc.top + 244, rc.right - 24, rc.bottom - 16 );
+                uwp_arrange_element( ch, tgrc );
+            }
+            else
+                uwp_arrange_element( ch, rc );
+        }
+        return;
+    }
+    if (!wcscmp( el->name, L"HomeIslandTilesGrid" ) && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        int tw = rc.right - rc.left;
+        int cw = max( 180, (tw - 3 * 16) / 4 );
+        int ch = 106;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch_elem = uwp_elem_from_any( children->items[k] );
+            int r, c;
+            RECT card_rc;
+            if (!ch_elem) continue;
+            r = k / 4;
+            c = k % 4;
+            SetRect( &card_rc, rc.left + c * (cw + 16), rc.top + r * (ch + 16),
+                     rc.left + c * (cw + 16) + cw, rc.top + r * (ch + 16) + ch );
+            uwp_arrange_element( ch_elem, card_rc );
+        }
+        return;
+    }
     if (el->kind != UWP_KIND_GRID && el->kind != UWP_KIND_STACK_PANEL && el->children_coll)
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
@@ -5019,6 +6032,120 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
            debugstr_w(el->class_name), debugstr_w(el->name), el->kind,
            el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom );
 
+    if (wcsstr( el->name, L"NavRail" ))
+    {
+        RECT rc = el->bounds;
+        HBRUSH br = CreateSolidBrush( RGB( 22, 22, 22 ) );
+        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 38, 38, 38 ) );
+        HGDIOBJ old_br = SelectObject( hdc, br );
+        HGDIOBJ old_pen = SelectObject( hdc, pen );
+        Rectangle( hdc, rc.left, rc.top, rc.right, rc.bottom );
+        SelectObject( hdc, old_pen );
+        SelectObject( hdc, old_br );
+        DeleteObject( pen );
+        DeleteObject( br );
+    }
+    else if (wcsstr( el->name, L"SearchBox" ))
+    {
+        RECT rc = el->bounds;
+        HBRUSH br = CreateSolidBrush( RGB( 42, 42, 42 ) );
+        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 70, 70, 70 ) );
+        HFONT font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+        HGDIOBJ old_br = SelectObject( hdc, br );
+        HGDIOBJ old_pen = SelectObject( hdc, pen );
+        HGDIOBJ old_font = SelectObject( hdc, font );
+        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8 );
+        SetTextColor( hdc, RGB( 170, 170, 170 ) );
+        SetBkMode( hdc, TRANSPARENT );
+        rc.left += 14;
+        DrawTextW( hdc, el->text[0] ? el->text : L"\x26b2  Search apps, games, movies and more", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+        SelectObject( hdc, old_font );
+        SelectObject( hdc, old_pen );
+        SelectObject( hdc, old_br );
+        DeleteObject( font );
+        DeleteObject( pen );
+        DeleteObject( br );
+        return;
+    }
+    else if (wcsstr( el->name, L"HeroBanner" ))
+    {
+        RECT rc = el->bounds, trc;
+        HBRUSH br = CreateSolidBrush( RGB( 20, 36, 56 ) );
+        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 0, 120, 215 ) );
+        HFONT title_font = CreateFontW( -22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                       CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+        HFONT sub_font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                     DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+        HGDIOBJ old_br = SelectObject( hdc, br );
+        HGDIOBJ old_pen = SelectObject( hdc, pen );
+        HGDIOBJ old_font;
+        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 12, 12 );
+        SetBkMode( hdc, TRANSPARENT );
+        trc = rc;
+        trc.left += 28; trc.top += 24; trc.right -= 28;
+        old_font = SelectObject( hdc, title_font );
+        SetTextColor( hdc, RGB( 255, 255, 255 ) );
+        DrawTextW( hdc, L"Featured: Essential Windows Apps", -1, &trc, DT_LEFT | DT_TOP | DT_SINGLELINE );
+        SelectObject( hdc, sub_font );
+        trc.top += 34;
+        SetTextColor( hdc, RGB( 200, 220, 240 ) );
+        DrawTextW( hdc, L"Discover top-rated tools for communication, productivity, and entertainment.", -1, &trc, DT_LEFT | DT_TOP | DT_SINGLELINE );
+        SelectObject( hdc, old_font );
+        SelectObject( hdc, old_pen );
+        SelectObject( hdc, old_br );
+        DeleteObject( title_font );
+        DeleteObject( sub_font );
+        DeleteObject( pen );
+        DeleteObject( br );
+        return;
+    }
+    else if (wcsstr( el->name, L"TileCard" ))
+    {
+        RECT rc = el->bounds;
+        HBRUSH br = CreateSolidBrush( RGB( 38, 38, 38 ) );
+        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 58, 58, 58 ) );
+        HGDIOBJ old_br = SelectObject( hdc, br );
+        HGDIOBJ old_pen = SelectObject( hdc, pen );
+        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 10, 10 );
+        SelectObject( hdc, old_pen );
+        SelectObject( hdc, old_br );
+        DeleteObject( pen );
+        DeleteObject( br );
+    }
+    else if (wcsstr( el->name, L"AppIcon" ))
+    {
+        static const COLORREF colors[] = {
+            RGB(37, 211, 102), RGB(30, 215, 96), RGB(229, 9, 20), RGB(0, 122, 204),
+            RGB(16, 124, 65), RGB(88, 101, 242), RGB(85, 170, 85), RGB(255, 136, 0)
+        };
+        RECT rc = el->bounds;
+        int idx = (int)(el->bounds.left / 100 + el->bounds.top / 80) % ARRAY_SIZE(colors);
+        HBRUSH br = CreateSolidBrush( colors[idx] );
+        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 70, 70, 70 ) );
+        HFONT font = CreateFontW( -16, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                                  DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                  CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+        HGDIOBJ old_br = SelectObject( hdc, br );
+        HGDIOBJ old_pen = SelectObject( hdc, pen );
+        HGDIOBJ old_font = SelectObject( hdc, font );
+        RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8 );
+        SetTextColor( hdc, RGB( 255, 255, 255 ) );
+        SetBkMode( hdc, TRANSPARENT );
+        if (el->text[0])
+            DrawTextW( hdc, el->text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+        SelectObject( hdc, old_font );
+        SelectObject( hdc, old_pen );
+        SelectObject( hdc, old_br );
+        DeleteObject( font );
+        DeleteObject( pen );
+        DeleteObject( br );
+        return;
+    }
+
     if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
         RECT brc = el->bounds;
@@ -5035,10 +6162,40 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
             return;
 
+        if (wcsstr( el->name, L"NavItem" ))
+        {
+            RECT rc = el->bounds;
+            BOOL selected = (wcsstr( el->name, L"Home" ) != NULL);
+            if (selected)
+            {
+                RECT bar = rc;
+                HBRUSH abr = CreateSolidBrush( RGB( 0, 120, 215 ) );
+                bar.right = bar.left + 3;
+                bar.top += 4; bar.bottom -= 4;
+                FillRect( hdc, &bar, abr );
+                DeleteObject( abr );
+            }
+            if (label[0])
+            {
+                HFONT nav_font = CreateFontW( -12, 0, 0, 0, selected ? FW_SEMIBOLD : FW_NORMAL,
+                                              FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                              CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+                HGDIOBJ old_nav_font = SelectObject( hdc, nav_font );
+                SetTextColor( hdc, selected ? RGB( 255, 255, 255 ) : RGB( 180, 180, 180 ) );
+                SetBkMode( hdc, TRANSPARENT );
+                DrawTextW( hdc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
+                SelectObject( hdc, old_nav_font );
+                DeleteObject( nav_font );
+            }
+            return;
+        }
+
         InflateRect( &brc, -2, -2 );
         if (brc.right <= brc.left || brc.bottom <= brc.top) return;
 
-        if (!wcscmp( el->name, L"EqualButton" ) || (!wcscmp( label, L"=" ) && label[1] == 0))
+        if (wcsstr( el->name, L"GetButton" ) || !wcscmp( label, L"Get" ) || !wcscmp( label, L"Free" ))
+            bg = el->is_pressed ? RGB( 0, 90, 170 ) : RGB( 0, 120, 215 );
+        else if (!wcscmp( el->name, L"EqualButton" ) || (!wcscmp( label, L"=" ) && label[1] == 0))
             bg = el->is_pressed ? RGB( 0, 90, 170 ) : RGB( 0, 120, 215 );
         else if (wcsstr( el->name, L"Num" ) || !wcscmp( el->name, L"DecimalSeparatorButton" ) ||
                  !wcscmp( el->name, L"NegateButton" ))
@@ -5072,7 +6229,35 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 
     if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
-        if ((!wcscmp( el->name, L"NormalOutput" ) || !wcscmp( el->name, L"Results" )) && !el->text[0])
+        if (wcsstr( el->name, L"RatingText" ))
+        {
+            RECT rc = el->bounds;
+            HFONT font = CreateFontW( -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+            HGDIOBJ old_font = SelectObject( hdc, font );
+            SetTextColor( hdc, RGB( 255, 215, 0 ) );
+            SetBkMode( hdc, TRANSPARENT );
+            DrawTextW( hdc, el->text[0] ? el->text : L"\x2605 4.8", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+            SelectObject( hdc, old_font );
+            DeleteObject( font );
+            return;
+        }
+        if (wcsstr( el->name, L"CategoryText" ))
+        {
+            RECT rc = el->bounds;
+            HFONT font = CreateFontW( -11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                                      DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                      CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+            HGDIOBJ old_font = SelectObject( hdc, font );
+            SetTextColor( hdc, RGB( 150, 150, 150 ) );
+            SetBkMode( hdc, TRANSPARENT );
+            DrawTextW( hdc, el->text, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+            SelectObject( hdc, old_font );
+            DeleteObject( font );
+            return;
+        }
+        if (is_calculator_app() && (!wcscmp( el->name, L"NormalOutput" ) || !wcscmp( el->name, L"Results" )) && !el->text[0])
             lstrcpynW( el->text, L"0", ARRAY_SIZE(el->text) );
         /* Avoid double-painting CalculationResult if its inner NormalOutput TextBlock is painted */
         if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface)
@@ -5132,6 +6317,25 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
     FillRect( hdc, &rc, bg_brush );
     DeleteObject( bg_brush );
+
+    if (is_store_app())
+    {
+        if (!g_navigated_page_el)
+        {
+            IInspectable *store_page = NULL;
+            if (SUCCEEDED(uwp_store_create_initial_page( &store_page )) && store_page)
+            {
+                g_navigated_page_el = uwp_elem_from_any( store_page );
+                IInspectable_Release( store_page );
+            }
+        }
+        if (g_navigated_page_el)
+        {
+            uwp_arrange_element( g_navigated_page_el, rc );
+            uwp_paint_element( hdc, g_navigated_page_el );
+            return;
+        }
+    }
 
     root_el = uwp_elem_from_any( content );
     if (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
@@ -5214,20 +6418,28 @@ void uwp_invoke_button( struct uwp_element *btn )
     /* 1. Invoke ICommand::Execute(CommandParameter) if Command is bound */
     if (btn->command)
     {
-        void *cmd_iface = NULL;
-        if (SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
+        __TRY
         {
-            /* Slot 8: CanExecute(object, boolean*), Slot 9: Execute(object) */
-            HRESULT (WINAPI *exec_fn)(void *, void *) = (void *)(*(void ***)cmd_iface)[9];
-            if (exec_fn) exec_fn( cmd_iface, btn->command_param );
-            IUnknown_Release( (IUnknown *)cmd_iface );
+            void *cmd_iface = NULL;
+            if (SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
+            {
+                /* Slot 8: CanExecute(object, boolean*), Slot 9: Execute(object) */
+                HRESULT (WINAPI *exec_fn)(void *, void *) = (void *)(*(void ***)cmd_iface)[9];
+                if (exec_fn) exec_fn( cmd_iface, btn->command_param );
+                IUnknown_Release( (IUnknown *)cmd_iface );
+            }
+            else
+            {
+                /* Direct vtbl call if already on ICommand face */
+                HRESULT (WINAPI *exec_fn)(void *, void *) = (void *)(*(void ***)btn->command)[9];
+                if (exec_fn) exec_fn( btn->command, btn->command_param );
+            }
         }
-        else
+        __EXCEPT_ALL
         {
-            /* Direct vtbl call if already on ICommand face */
-            HRESULT (WINAPI *exec_fn)(void *, void *) = (void *)(*(void ***)btn->command)[9];
-            if (exec_fn) exec_fn( btn->command, btn->command_param );
+            TRACE( "uwp_invoke_button: ICommand::Execute faulted\n" );
         }
+        __ENDTRY;
     }
 
     /* 2. Invoke registered Click handlers */
@@ -5235,9 +6447,17 @@ void uwp_invoke_button( struct uwp_element *btn )
     {
         if (btn->click_handlers[i])
         {
-            IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
-            HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)btn->click_handlers[i])[3];
-            invoke( btn->click_handlers[i], sender, g_routed_args() );
+            __TRY
+            {
+                IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
+                HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)btn->click_handlers[i])[3];
+                invoke( btn->click_handlers[i], sender, g_routed_args() );
+            }
+            __EXCEPT_ALL
+            {
+                TRACE( "uwp_invoke_button: Click handler %d faulted\n", i );
+            }
+            __ENDTRY;
         }
     }
 
@@ -5261,7 +6481,10 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
     if (root_el->kind == UWP_KIND_FRAME && g_navigated_page_el)
         root_el = g_navigated_page_el;   /* Frame.content RCW unresolvable; hit the adopted page */
 
-    if (!root_el->has_bounds && width > 0 && height > 0)
+    if (width > 0 && height > 0 &&
+        (!root_el->has_bounds ||
+         (root_el->bounds.right - root_el->bounds.left) != width ||
+         (root_el->bounds.bottom - root_el->bounds.top) != height))
     {
         RECT rc = { 0, 0, width, height };
         uwp_arrange_element( root_el, rc );
@@ -5274,8 +6497,10 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
         {
             g_pressed_btn = btn;
             btn->is_pressed = TRUE;
-            uwp_invoke_button( btn );
-            btn->is_pressed = FALSE;
+            TRACE( "uwp_handle_mouse_input: DOWN (%d,%d) -> %s (%s)\n",
+                   x, y, debugstr_w(btn->name), debugstr_w(btn->text) );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
             return TRUE;
         }
     }
@@ -5283,8 +6508,15 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
     {
         if (g_pressed_btn)
         {
-            g_pressed_btn->is_pressed = FALSE;
+            struct uwp_element *btn = g_pressed_btn;
+            struct uwp_element *hit = uwp_hit_test_button( root_el, x, y );
+            btn->is_pressed = FALSE;
             g_pressed_btn = NULL;
+            TRACE( "uwp_handle_mouse_input: UP (%d,%d) pressed=%s hit=%s\n",
+                   x, y, debugstr_w(btn->name), hit ? debugstr_w(hit->name) : "(null)" );
+            if (hit == btn)
+                uwp_invoke_button( btn );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
             uwp_invalidate_window();
             return TRUE;
         }
@@ -5347,6 +6579,11 @@ static const GUID IID_IReferenceTrackerTarget_UWP =
 static const GUID IID_IReferenceTrackerTarget_UWP2 =
     { 0x64e71ddf, 0x2424, 0x4ec5, { 0x86, 0x27, 0x15, 0x05, 0x08, 0x96, 0xd9, 0xb6 } };
 
+static const GUID IID_IVisualStateManagerFactory_UWP =
+    { 0x3976547f, 0x7089, 0x4801, { 0x8f, 0x1d, 0xaa, 0xb7, 0x80, 0x90, 0xd1, 0xa0 } };
+static const GUID IID_IVisualTreeHelperStatics_UWP =
+    { 0xe75758c4, 0xd25d, 0x4b1d, { 0x97, 0x1f, 0x59, 0x6f, 0x17, 0xf1, 0x2b, 0xaa } };
+
 struct uwp_class_factory
 {
     IActivationFactory IActivationFactory_iface;
@@ -5355,11 +6592,27 @@ struct uwp_class_factory
     const WCHAR *class_name;
 };
 
+static struct uwp_class_factory vsm_factory_obj;
+static struct uwp_class_factory auto_props_factory_obj;
+static struct uwp_class_factory vth_factory_obj;
+static struct uwp_class_factory feap_factory_obj;
+static struct uwp_class_factory scb_factory_obj;
+struct uwp_class_factory g_dyn_factories[256];
+
 static inline struct uwp_class_factory *uwp_cf_from_any( void *iface )
 {
     int i;
-    extern struct uwp_class_factory g_dyn_factories[64];
-    for (i = 0; i < 64; i++)
+    if ((char *)iface >= (char *)&vsm_factory_obj && (char *)iface < (char *)(&vsm_factory_obj + 1))
+        return &vsm_factory_obj;
+    if ((char *)iface >= (char *)&auto_props_factory_obj && (char *)iface < (char *)(&auto_props_factory_obj + 1))
+        return &auto_props_factory_obj;
+    if ((char *)iface >= (char *)&vth_factory_obj && (char *)iface < (char *)(&vth_factory_obj + 1))
+        return &vth_factory_obj;
+    if ((char *)iface >= (char *)&feap_factory_obj && (char *)iface < (char *)(&feap_factory_obj + 1))
+        return &feap_factory_obj;
+    if ((char *)iface >= (char *)&scb_factory_obj && (char *)iface < (char *)(&scb_factory_obj + 1))
+        return &scb_factory_obj;
+    for (i = 0; i < 256; i++)
     {
         if ((char *)iface >= (char *)&g_dyn_factories[i] &&
             (char *)iface < (char *)&g_dyn_factories[i + 1])
@@ -5368,9 +6621,19 @@ static inline struct uwp_class_factory *uwp_cf_from_any( void *iface )
     return NULL;
 }
 
+static const GUID IID_ICanvasStatics_local =
+    { 0x40ce5c46, 0x2962, 0x446f, { 0xaa, 0xfb, 0x4c, 0xdc, 0x48, 0x69, 0x39, 0xc9 } };
+static const GUID IID_IScrollViewerStatics_local =
+    { 0x33d1299d, 0x8d6e, 0x4290, { 0xbf, 0x22, 0x90, 0x5c, 0xcc, 0xd0, 0x4d, 0x31 } };
+static const GUID IID_IComboBoxFactory_local =
+    { 0xac0d0444, 0xa65b, 0x4abd, { 0x86, 0xdf, 0x30, 0x16, 0x04, 0x9e, 0xfe, 0xdc } };
+static const GUID IID_ISolidColorBrushFactory_local =
+    { 0xd935ce0c, 0x86f5, 0x4da6, { 0x8a, 0x27, 0xb1, 0x61, 0x9e, 0xf7, 0xf9, 0x2b } };
+
 static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
 {
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
+    TRACE( "uwp_cf_QI enter: cls=%s, iid=%s\n", f ? debugstr_w(f->class_name) : "?", debugstr_guid(iid) );
     if (!out) return E_POINTER;
     if (IsEqualGUID( iid, &IID_IMarshal ) ||
         IsEqualGUID( iid, &IID_IReferenceTracker_UWP ) ||
@@ -5388,10 +6651,24 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         *out = f ? (void *)&f->IActivationFactory_iface : (void *)iface;
         return S_OK;
     }
+
+    if (f == &auto_props_factory_obj ||
+        f == &feap_factory_obj ||
+        IsEqualGUID( iid, &IID_ICanvasStatics_local ) ||
+        IsEqualGUID( iid, &IID_IScrollViewerStatics_local ) ||
+        IsEqualGUID( iid, &IID_IGridStatics_UWP ) ||
+        IsEqualGUID( iid, &IID_IGridStatics_UWP2 ) ||
+        IsEqualGUID( iid, &IID_IUIElementStatics_UWP ) ||
+        IsEqualGUID( iid, &IID_IFrameworkElementStatics_UWP ))
+    {
+        *out = (void *)&f->IStatics_iface;
+        return S_OK;
+    }
     if (IsEqualGUID( iid, &IID_IFrameFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IPageFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IUserControlFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IContentControlFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IContentControlFactory_UWP2 ) ||
         IsEqualGUID( iid, &IID_IControlFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IUIElementFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IFrameworkElementFactory_UWP ) ||
@@ -5401,20 +6678,51 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IToggleButtonFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IToggleButtonFactory2_UWP ) ||
         IsEqualGUID( iid, &IID_IPanelFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IPanelFactory_UWP2 ) ||
+        IsEqualGUID( iid, &IID_IGridFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IListViewFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IComboBoxFactory_local ) ||
+        IsEqualGUID( iid, &IID_ISolidColorBrushFactory_local ) ||
+        IsEqualGUID( iid, &IID_IXamlLightFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IContentPresenterFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IXamlCompositionBrushBaseFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IFlyoutBaseFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IStateTriggerBaseFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IMenuFlyoutItemBaseFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IMenuFlyoutItemFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IMenuFlyoutSeparatorFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IMarkupExtensionFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IRoutedEventArgsFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IBindingFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IRelativeSourceFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IRadioButtonFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IPropertyPathFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IDependencyObjectCollectionFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IVisualStateManagerFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IDataTemplateSelectorFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IStyleSelectorFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IStyleSelectorFactory_UWP2 ) ||
         IsEqualGUID( iid, &IID_IStateTriggerBaseFactory2_UWP ))
     {
         *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
+        return S_OK;
+    }
+    if (f && f->class_name &&
+        (wcsstr( f->class_name, L"Control" ) ||
+         wcsstr( f->class_name, L"Box" ) ||
+         wcsstr( f->class_name, L"Item" ) ||
+         wcsstr( f->class_name, L"View" ) ||
+         wcsstr( f->class_name, L"Panel" ) ||
+         wcsstr( f->class_name, L"Button" ) ||
+         wcsstr( f->class_name, L"Selector" ) ||
+         wcsstr( f->class_name, L"Flyout" ) ||
+         wcsstr( f->class_name, L"Separator" ) ||
+         wcsstr( f->class_name, L"Trigger" ) ||
+         wcsstr( f->class_name, L"Transition" ) ||
+         wcsstr( f->class_name, L"Extension" ) ||
+         wcsstr( f->class_name, L"Collection" )))
+    {
+        *out = (void *)&f->IComposableFactory_iface;
         return S_OK;
     }
     /* Unknown IID on factory: log so we can see exact Statics/Factory IID, return Statics/Composable */
@@ -5497,7 +6805,7 @@ static const void *uwp_cf_comp_vtbl[16] =
     [10 ... 15] = uwp_generic_noop,
 };
 
-static const void *uwp_cf_statics_vtbl[48] =
+static const void *uwp_cf_statics_vtbl[64] =
 {
     [0] = uwp_cf_QI,
     [1] = uwp_cf_AddRef,
@@ -5505,7 +6813,21 @@ static const void *uwp_cf_statics_vtbl[48] =
     [3] = uwp_cf_GetIids,
     [4] = uwp_cf_GetRuntimeClassName,
     [5] = uwp_cf_GetTrustLevel,
-    [6 ... 47] = uwp_cf_dp_prop,
+    [6 ... 63] = uwp_generic_noop,
+    [6] = uwp_cf_dp_prop,
+    [9] = uwp_cf_dp_prop,
+    [12] = uwp_cf_dp_prop,
+    [15] = uwp_cf_dp_prop,
+    [18] = uwp_cf_dp_prop,
+    [21] = uwp_cf_dp_prop,
+    [24] = uwp_cf_dp_prop,
+    [27] = uwp_cf_dp_prop,
+    [30] = uwp_cf_dp_prop,
+    [33] = uwp_cf_dp_prop,
+    [36] = uwp_cf_dp_prop,
+    [39] = uwp_cf_dp_prop,
+    [42] = uwp_cf_dp_prop,
+    [45] = uwp_cf_dp_prop,
 };
 
 /* VisualStateManagerStatics (slot 6 = GoToState(Control, HSTRING, bool, bool*), slot 7 = GetVisualStateGroups) */
@@ -5530,7 +6852,109 @@ static const void *vsm_vtbl[16] =
     [7] = vsm_GetVisualStateGroups,
     [8 ... 15] = uwp_generic_noop,
 };
-static struct uwp_class_factory vsm_factory_obj = { {(const struct IActivationFactoryVtbl *)vsm_vtbl}, {NULL}, {NULL}, L"Windows.UI.Xaml.VisualStateManager" };
+static struct uwp_class_factory vsm_factory_obj =
+    { {(const struct IActivationFactoryVtbl *)vsm_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)vsm_vtbl}, L"Windows.UI.Xaml.VisualStateManager" };
+
+/* VisualTreeHelperStatics */
+static HRESULT WINAPI vth_FindPoint( void *iface, double x, double y, void *subtree, void **out )
+{
+    return uwp_vec_create( NULL, (IInspectable **)out );
+}
+static HRESULT WINAPI vth_FindRect( void *iface, double x, double y, double w, double h, void *subtree, void **out )
+{
+    return uwp_vec_create( NULL, (IInspectable **)out );
+}
+static HRESULT WINAPI vth_FindPointSub( void *iface, double x, double y, void *subtree, boolean all, void **out )
+{
+    return uwp_vec_create( NULL, (IInspectable **)out );
+}
+static HRESULT WINAPI vth_FindRectSub( void *iface, double x, double y, double w, double h, void *subtree, boolean all, void **out )
+{
+    return uwp_vec_create( NULL, (IInspectable **)out );
+}
+static HRESULT WINAPI vth_GetChild( void *iface, void *ref, INT32 idx, void **out )
+{
+    struct uwp_element *el = uwp_elem_from_any( ref );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!el || idx < 0) return S_OK;
+    if (el->children_coll)
+        return uwp_vec_GetAt( el->children_coll, (unsigned int)idx, out );
+    if (el->content && idx == 0)
+    {
+        *out = el->content;
+        IInspectable_AddRef( (IInspectable *)*out );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI vth_GetChildrenCount( void *iface, void *ref, INT32 *count )
+{
+    struct uwp_element *el = uwp_elem_from_any( ref );
+    if (!count) return E_POINTER;
+    *count = 0;
+    if (!el) return S_OK;
+    if (el->children_coll)
+    {
+        unsigned int sz = 0;
+        uwp_vec_get_Size( el->children_coll, &sz );
+        *count = (INT32)sz;
+    }
+    else if (el->content)
+    {
+        *count = 1;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI vth_GetParent( void *iface, void *ref, void **out )
+{
+    struct uwp_element *el = uwp_elem_from_any( ref );
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (el && el->parent)
+    {
+        *out = el->parent->outer ? el->parent->outer : &el->parent->IInspectable_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+    }
+    return S_OK;
+}
+static HRESULT WINAPI vth_DisconnectChildren( void *iface, void *el )
+{
+    return S_OK;
+}
+static HRESULT WINAPI vth_QI( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IMarshal ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker_UWP ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_UWP2 ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = iface;
+    return S_OK;
+}
+static const void *vth_vtbl[16] =
+{
+    [0] = vth_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = vth_FindPoint,
+    [7] = vth_FindRect,
+    [8] = vth_FindPointSub,
+    [9] = vth_FindRectSub,
+    [10] = vth_GetChild,
+    [11] = vth_GetChildrenCount,
+    [12] = vth_GetParent,
+    [13] = vth_DisconnectChildren,
+    [14 ... 15] = uwp_generic_noop,
+};
+static struct uwp_class_factory vth_factory_obj =
+    { {(const struct IActivationFactoryVtbl *)vth_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_comp_vtbl}, {(const struct IInspectableVtbl *)vth_vtbl}, L"Windows.UI.Xaml.Media.VisualTreeHelper" };
 
 /* AutomationProperties / ToolTipService / GridStatics attached property helpers */
 static HRESULT WINAPI attached_prop_get_dp( void *iface, void **out )
@@ -5557,10 +6981,48 @@ static const void *attached_statics_vtbl[64] =
     [30] = attached_prop_get_dp,
 };
 static struct uwp_class_factory auto_props_factory_obj =
-    { {(const struct IActivationFactoryVtbl *)attached_statics_vtbl}, {NULL}, {NULL}, L"Windows.UI.Xaml.Automation.AutomationProperties" };
+    { {(const struct IActivationFactoryVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, {(const struct IInspectableVtbl *)attached_statics_vtbl}, L"Windows.UI.Xaml.Automation.AutomationProperties" };
 
-struct uwp_class_factory g_dyn_factories[64];
-static WCHAR g_dyn_factory_names[64][128];
+static HRESULT WINAPI feap_CreatePeerForElement( void *iface, void *el, void **out )
+{
+    if (out) *out = NULL;
+    return S_OK;
+}
+static const void *feap_statics_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = feap_CreatePeerForElement,
+    [7] = feap_CreatePeerForElement,
+    [8 ... 15] = uwp_generic_noop,
+};
+static struct uwp_class_factory feap_factory_obj =
+    { {(const struct IActivationFactoryVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer" };
+
+static HRESULT WINAPI scb_factory_CreateInstanceWithColor( void *iface, UINT32 color, void **out )
+{
+    if (!out) return E_POINTER;
+    return uwp_element_create( L"Windows.UI.Xaml.Media.SolidColorBrush", NULL, NULL, out );
+}
+static const void *scb_factory_vtbl[16] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6] = scb_factory_CreateInstanceWithColor,
+    [7 ... 15] = uwp_generic_noop,
+};
+static struct uwp_class_factory scb_factory_obj =
+    { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)scb_factory_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_statics_vtbl}, L"Windows.UI.Xaml.Media.SolidColorBrush" };
+
+static WCHAR g_dyn_factory_names[256][128];
 static int g_dyn_factory_cnt = 0;
 
 HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory )
@@ -5569,6 +7031,17 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
     int i;
 
     if (!buf || !factory) return E_NOINTERFACE;
+
+    if (!wcscmp( buf, L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer" ))
+    {
+        *factory = &feap_factory_obj.IActivationFactory_iface;
+        return S_OK;
+    }
+    if (!wcscmp( buf, L"Windows.UI.Xaml.Media.SolidColorBrush" ))
+    {
+        *factory = &scb_factory_obj.IActivationFactory_iface;
+        return S_OK;
+    }
 
     if (!wcscmp( buf, L"Windows.UI.Xaml.Markup.XamlBindingHelper" ) ||
         !wcscmp( buf, L"Microsoft.UI.Xaml.Markup.XamlBindingHelper" ))
@@ -5582,6 +7055,12 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         *factory = &vsm_factory_obj.IActivationFactory_iface;
         return S_OK;
     }
+    if (!wcscmp( buf, L"Windows.UI.Xaml.Media.VisualTreeHelper" ) ||
+        !wcscmp( buf, L"Microsoft.UI.Xaml.Media.VisualTreeHelper" ))
+    {
+        *factory = &vth_factory_obj.IActivationFactory_iface;
+        return S_OK;
+    }
     if (!wcscmp( buf, L"Windows.UI.Xaml.Automation.AutomationProperties" ) ||
         !wcscmp( buf, L"Windows.UI.Xaml.Controls.ToolTipService" ))
     {
@@ -5589,8 +7068,8 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         return S_OK;
     }
 
-    /* For Calculator (UWP), serve all Windows.UI.Xaml.* and Microsoft.UI.Xaml.* runtime classes with our UWP multi-iface element factory */
-    if (is_calculator_app() &&
+    /* For UWP apps (Calculator, Store), serve all Windows.UI.Xaml.* and Microsoft.UI.Xaml.* runtime classes with our UWP multi-iface element factory */
+    if (is_uwp_xaml_app() &&
         (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 )) &&
         wcscmp( buf, L"Windows.UI.Xaml.Application" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Window" ) != 0 &&
@@ -5609,7 +7088,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
                 return S_OK;
             }
         }
-        if (g_dyn_factory_cnt < 64)
+        if (g_dyn_factory_cnt < 256)
         {
             int idx = g_dyn_factory_cnt++;
             lstrcpynW( g_dyn_factory_names[idx], buf, 128 );

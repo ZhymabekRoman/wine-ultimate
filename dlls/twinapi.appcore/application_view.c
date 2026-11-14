@@ -214,6 +214,7 @@ struct application_view
     IApplicationView IApplicationView_iface;
     IApplicationView2 IApplicationView2_iface;
     IApplicationView3 IApplicationView3_iface;
+    IApplicationView4 IApplicationView4_iface;
     LONG ref;
 
     INT32 id;
@@ -228,6 +229,7 @@ struct application_view
 static const struct IApplicationViewVtbl application_view_vtbl;
 static const struct IApplicationView2Vtbl application_view2_vtbl;
 static const struct IApplicationView3Vtbl application_view3_vtbl;
+static const struct IApplicationView4Vtbl application_view4_vtbl;
 
 static inline struct application_view *impl_from_IApplicationView(IApplicationView *iface)
 {
@@ -236,6 +238,7 @@ static inline struct application_view *impl_from_IApplicationView(IApplicationVi
 
 DEFINE_IINSPECTABLE(application_view2, IApplicationView2, struct application_view, IApplicationView_iface)
 DEFINE_IINSPECTABLE(application_view3, IApplicationView3, struct application_view, IApplicationView_iface)
+DEFINE_IINSPECTABLE(application_view4, IApplicationView4, struct application_view, IApplicationView_iface)
 
 static __thread struct application_view *thread_application_view;
 
@@ -266,6 +269,12 @@ static HRESULT WINAPI application_view_QueryInterface(IApplicationView *iface, R
     {
         IApplicationView3_AddRef(&impl->IApplicationView3_iface);
         *out = &impl->IApplicationView3_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID(iid, &IID_IApplicationView4))
+    {
+        IApplicationView4_AddRef(&impl->IApplicationView4_iface);
+        *out = &impl->IApplicationView4_iface;
         return S_OK;
     }
 
@@ -620,6 +629,64 @@ static const struct IApplicationView3Vtbl application_view3_vtbl =
     application_view3_SetPreferredMinSize,
 };
 
+static HRESULT WINAPI application_view4_get_ViewMode(IApplicationView4 *iface, ApplicationViewMode *value)
+{
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    *value = ApplicationViewMode_Default;
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view4_IsViewModeSupported(IApplicationView4 *iface, ApplicationViewMode mode, boolean *is_mode_supported)
+{
+    TRACE("iface %p, mode %d, is_mode_supported %p\n", iface, mode, is_mode_supported);
+    if (!is_mode_supported) return E_POINTER;
+    *is_mode_supported = (mode == ApplicationViewMode_Default);
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view4_TryEnterViewModeAsync(IApplicationView4 *iface, ApplicationViewMode mode, __FIAsyncOperation_1_boolean **operation)
+{
+    TRACE("iface %p, mode %d, operation %p\n", iface, mode, operation);
+    if (!operation) return E_POINTER;
+    *operation = (__FIAsyncOperation_1_boolean *)get_dummy_async_bool();
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view4_TryEnterViewModeWithPreferencesAsync(IApplicationView4 *iface, ApplicationViewMode mode,
+    __x_ABI_CWindows_CUI_CViewManagement_CIViewModePreferences *preferences, __FIAsyncOperation_1_boolean **operation)
+{
+    TRACE("iface %p, mode %d, operation %p\n", iface, mode, operation);
+    if (!operation) return E_POINTER;
+    *operation = (__FIAsyncOperation_1_boolean *)get_dummy_async_bool();
+    return S_OK;
+}
+
+static HRESULT WINAPI application_view4_TryConsolidateAsync(IApplicationView4 *iface, __FIAsyncOperation_1_boolean **operation)
+{
+    TRACE("iface %p, operation %p\n", iface, operation);
+    if (!operation) return E_POINTER;
+    *operation = (__FIAsyncOperation_1_boolean *)get_dummy_async_bool();
+    return S_OK;
+}
+
+static const struct IApplicationView4Vtbl application_view4_vtbl =
+{
+    application_view4_QueryInterface,
+    application_view4_AddRef,
+    application_view4_Release,
+    /* IInspectable methods */
+    application_view4_GetIids,
+    application_view4_GetRuntimeClassName,
+    application_view4_GetTrustLevel,
+    /* IApplicationView4 methods */
+    application_view4_get_ViewMode,
+    application_view4_IsViewModeSupported,
+    application_view4_TryEnterViewModeAsync,
+    application_view4_TryEnterViewModeWithPreferencesAsync,
+    application_view4_TryConsolidateAsync,
+};
+
 static HRESULT application_view_create(struct application_view **out)
 {
     struct application_view *impl;
@@ -628,6 +695,7 @@ static HRESULT application_view_create(struct application_view **out)
     impl->IApplicationView_iface.lpVtbl = &application_view_vtbl;
     impl->IApplicationView2_iface.lpVtbl = &application_view2_vtbl;
     impl->IApplicationView3_iface.lpVtbl = &application_view3_vtbl;
+    impl->IApplicationView4_iface.lpVtbl = &application_view4_vtbl;
     impl->ref = 1;
     impl->id = 1;
     *out = impl;

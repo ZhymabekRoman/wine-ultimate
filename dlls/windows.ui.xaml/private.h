@@ -84,7 +84,15 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
 HRESULT xaml_window_present_current( void );
 void xaml_fire_all_loaded( void );
 void xaml_register_loaded( void *handler, IInspectable *sender );
+#define WM_APP_WV2_START (WM_APP + 0x57)
+HWND xaml_get_window_hwnd( void );
+IDCompositionVisual *xaml_get_dcomp_root_visual( void );
+void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height );
+void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height );
+void xaml_wv2_handle_start_msg( LPARAM lparam );
 BOOL is_calculator_app( void );
+BOOL is_store_app( void );
+BOOL is_uwp_xaml_app( void );
 void *uwp_get_app_outer( void );
 HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out );
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance );
@@ -94,6 +102,9 @@ BOOL uwp_rd_haskey( void *rd_key, void *key_obj );
 BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *app_outer );
 BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content );
 HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory );
+ICoreWindow *get_current_core_window( void );
+HRESULT uwp_store_create_initial_page( IInspectable **out );
+BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

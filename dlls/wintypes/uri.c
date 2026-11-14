@@ -240,10 +240,14 @@ static HRESULT WINAPI uri_QueryInterface( IUriRuntimeClass *iface, REFIID iid, v
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
+    static const GUID IID_Uri_RuntimeClass =
+        { 0x44a9796f, 0x723e, 0x4fdf, { 0xa2, 0x18, 0x03, 0x3e, 0x75, 0xb0, 0xc0, 0x84 } };
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IUriRuntimeClass ))
+        IsEqualGUID( iid, &IID_IUriRuntimeClass ) ||
+        IsEqualGUID( iid, &IID_Uri_RuntimeClass ))
     {
         IInspectable_AddRef( (*out = &impl->IUriRuntimeClass_iface) );
         return S_OK;

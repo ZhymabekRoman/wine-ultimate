@@ -330,12 +330,14 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
     TRACE( "(%p, %s, %p)\n", iface, debugstr_guid( iid ), out );
 
     *out = NULL;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
+        return E_NOINTERFACE;
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IPropertySet ) ||
         IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMap_String_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ) ||
@@ -430,7 +432,7 @@ static HRESULT STDMETHODCALLTYPE propertyset_GetIids( IPropertySet *iface, ULONG
     /* Standard WinRT PropertySet runtime class interface list (winmd):
      * IPropertySet (default) + IMap<HSTRING, IInspectable> + IObservableMap<HSTRING, IInspectable>.
      * CsWinRT and .NET runtime consume this as a standard CoTaskMemAlloc'd IID array. */
-    if (1)
+    if (0)
     {
         static const IID store_iids[] =
         {

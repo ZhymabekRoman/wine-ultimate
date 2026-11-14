@@ -467,10 +467,14 @@ static HRESULT find_packages( const WCHAR *family, const WCHAR *name, const WCHA
                               PackageTypes types, IIterable_Package **packages );
 static HRESULT find_package_by_full_name( const WCHAR *full_name, IPackage **package );
 
+static const GUID IID_IPackageManager3 =
+    { 0xdaad9948, 0x36f1, 0x41a7, { 0x91, 0x88, 0xbc, 0x26, 0x3e, 0x0d, 0xcb, 0x72 } };
+
 struct package_manager
 {
     IPackageManager IPackageManager_iface;
     IPackageManager2 IPackageManager2_iface;
+    IInspectable IPackageManager3_iface;
     LONG ref;
 };
 
@@ -498,6 +502,13 @@ static HRESULT WINAPI package_manager_QueryInterface( IPackageManager *iface, RE
     if (IsEqualGUID( iid, &IID_IPackageManager2 ))
     {
         *out = &impl->IPackageManager2_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IPackageManager3 ))
+    {
+        *out = &impl->IPackageManager3_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -1242,6 +1253,73 @@ static const struct IPackageManager2Vtbl package_manager2_vtbl =
     package_manager2_FindPackagesByPackageFamilyNameWithPackageTypes,
     package_manager2_FindPackagesByUserSecurityIdPackageFamilyNameWithPackageTypes,
     package_manager2_StageUserDataAsync,
+};
+
+static HRESULT WINAPI package_manager3_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct package_manager *impl = CONTAINING_RECORD( iface, struct package_manager, IPackageManager3_iface );
+    return package_manager_QueryInterface( &impl->IPackageManager_iface, iid, out );
+}
+static ULONG WINAPI package_manager3_AddRef( IInspectable *iface )
+{
+    struct package_manager *impl = CONTAINING_RECORD( iface, struct package_manager, IPackageManager3_iface );
+    return package_manager_AddRef( &impl->IPackageManager_iface );
+}
+static ULONG WINAPI package_manager3_Release( IInspectable *iface )
+{
+    struct package_manager *impl = CONTAINING_RECORD( iface, struct package_manager, IPackageManager3_iface );
+    return package_manager_Release( &impl->IPackageManager_iface );
+}
+static HRESULT WINAPI package_manager3_GetIids( IInspectable *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI package_manager3_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Management.Deployment.PackageManager", 44, name );
+}
+static HRESULT WINAPI package_manager3_GetTrustLevel( IInspectable *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI package_manager3_stub( void *iface, ... )
+{
+    return S_OK;
+}
+static HRESULT WINAPI package_manager3_GetDefaultPackageVolume( void *iface, void **volume )
+{
+    TRACE( "iface %p, volume %p\n", iface, volume );
+    if (volume) *volume = NULL;
+    return S_OK;
+}
+static const void *package_manager3_vtbl[] =
+{
+    package_manager3_QueryInterface,
+    package_manager3_AddRef,
+    package_manager3_Release,
+    package_manager3_GetIids,
+    package_manager3_GetRuntimeClassName,
+    package_manager3_GetTrustLevel,
+    package_manager3_stub, /* 6: AddPackageVolumeAsync */
+    package_manager3_stub, /* 7: AddPackageToVolumeAsync */
+    package_manager3_stub, /* 8: ClearPackageStatus */
+    package_manager3_stub, /* 9: RegisterPackageWithAppDataVolumeAsync */
+    package_manager3_stub, /* 10: FindPackageVolumeByName */
+    package_manager3_stub, /* 11: FindPackageVolumes */
+    package_manager3_GetDefaultPackageVolume, /* 12: GetDefaultPackageVolume */
+    package_manager3_stub, /* 13: MovePackageToVolumeAsync */
+    package_manager3_stub, /* 14: RemovePackageVolumeAsync */
+    package_manager3_stub, /* 15: SetDefaultPackageVolume */
+    package_manager3_stub, /* 16: SetPackageStatus */
+    package_manager3_stub, /* 17: SetPackageVolumeOfflineAsync */
+    package_manager3_stub, /* 18: SetPackageVolumeOnlineAsync */
+    package_manager3_stub, /* 19: StagePackageToVolumeAsync */
+    package_manager3_stub, /* 20: StageUserDataWithOptionsAsync */
+    package_manager3_stub, package_manager3_stub, package_manager3_stub, package_manager3_stub,
+    package_manager3_stub, package_manager3_stub, package_manager3_stub, package_manager3_stub,
 };
 
 /*
@@ -2696,6 +2774,7 @@ HRESULT package_manager_create( IPackageManager **out )
 
     impl->IPackageManager_iface.lpVtbl = &package_manager_vtbl;
     impl->IPackageManager2_iface.lpVtbl = &package_manager2_vtbl;
+    impl->IPackageManager3_iface.lpVtbl = (const struct IInspectableVtbl *)package_manager3_vtbl;
     impl->ref = 1;
     *out = &impl->IPackageManager_iface;
     return S_OK;

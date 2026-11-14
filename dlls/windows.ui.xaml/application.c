@@ -184,6 +184,9 @@ struct xaml_window
     HWND target_hwnd;
     UINT width, height;
     BOOL core_window_subscribed;
+    void *activated_handlers[8];
+    int activated_handler_count;
+    BOOL is_active;
 };
 static struct xaml_window global_xaml_window;
 static IInspectable *global_window_outer = NULL;
@@ -795,7 +798,7 @@ static HRESULT WINAPI rd_map_Lookup( void *iface, void *key, void **value )
 {
     struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
     TRACE( "rd_map_Lookup iface %p, key %p, value %p\n", iface, key, value );
-    if (is_calculator_app())
+    if (is_uwp_xaml_app())
         return uwp_rd_lookup( &impl->IInspectable_iface, key, value );
     if (value) *value = NULL;
     return 0x8000000b; /* E_BOUNDS */
@@ -808,7 +811,7 @@ static HRESULT WINAPI rd_map_get_Size( void *iface, UINT32 *size )
 static HRESULT WINAPI rd_map_HasKey( void *iface, void *key, boolean *found )
 {
     struct xaml_resource_dictionary *impl = impl_from_rd_map( iface );
-    if (is_calculator_app())
+    if (is_uwp_xaml_app())
     {
         if (found) *found = uwp_rd_haskey( &impl->IInspectable_iface, key );
         return S_OK;
@@ -1303,7 +1306,7 @@ static HRESULT WINAPI application_inner_QueryInterface( IInspectable *iface, REF
         return S_OK;
     }
 
-    if (!is_calculator_app() &&
+    if (!is_uwp_xaml_app() &&
         (IsEqualGUID( iid, &IID_IXamlMetadataProvider_WinUI ) ||
          IsEqualGUID( iid, &IID_IXamlMetadataProvider_UWP )))
     {
@@ -1549,7 +1552,7 @@ static inline struct xaml_window *impl_from_IWindow2( void *iface )
     return CONTAINING_RECORD( iface, struct xaml_window, IWindow2_iface );
 }
 
-static ICoreWindow *get_current_core_window(void)
+ICoreWindow *get_current_core_window(void)
 {
     IActivationFactory *cwf = NULL;
     __x_ABI_CWindows_CUI_CCore_CICoreWindowStatic *cws = NULL;
@@ -1900,6 +1903,23 @@ BOOL is_calculator_app( void )
     return cached;
 }
 
+BOOL is_store_app( void )
+{
+    static int cached = -1;
+    if (cached == -1)
+    {
+        WCHAR path[MAX_PATH];
+        GetModuleFileNameW( NULL, path, MAX_PATH );
+        cached = (wcsstr( path, L"WinStore" ) || wcsstr( path, L"WindowsStore" )) ? 1 : 0;
+    }
+    return cached;
+}
+
+BOOL is_uwp_xaml_app( void )
+{
+    return is_calculator_app() || is_store_app();
+}
+
 void *uwp_get_app_outer( void )
 {
     return current_application ? current_application->outer : NULL;
@@ -1996,6 +2016,21 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         }
         return 0;
     }
+    if (msg == WM_APP_WV2_START)
+    {
+        ERR( "xaml_corewindow_wndproc: WM_APP_WV2_START hwnd %p\n", hwnd );
+        xaml_wv2_handle_start_msg( lparam );
+        return 0;
+    }
+    if (msg == WM_SIZE)
+    {
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        RECT rc;
+        if (!top) top = hwnd;
+        GetClientRect( top, &rc );
+        if (rc.right > 0 && rc.bottom > 0)
+            xaml_wv2_on_window_resize( top, rc.right, rc.bottom );
+    }
     if (msg == WM_CLOSE)
     {
         /* Close button / Alt+F4: tear the window down and quit the message loop. */
@@ -2007,11 +2042,15 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     {
         HWND top = GetAncestor( hwnd, GA_ROOT );
         RECT rc;
-        int x = (short)LOWORD( lparam ), y = (short)HIWORD( lparam );
+        POINT pt = { (short)LOWORD( lparam ), (short)HIWORD( lparam ) };
+        if (top && top != hwnd)
+            MapWindowPoints( hwnd, top, &pt, 1 );
         GetClientRect( top, &rc );
         if (rc.right > 0 && rc.bottom > 0 &&
-            uwp_handle_mouse_input( top, msg, x, y, rc.right, rc.bottom, global_xaml_window.content ))
+            uwp_handle_mouse_input( top, msg, pt.x, pt.y, rc.right, rc.bottom, global_xaml_window.content ))
         {
+            InvalidateRect( top, NULL, FALSE );
+            InvalidateRect( hwnd, NULL, FALSE );
             UpdateWindow( top );
             UpdateWindow( hwnd );
             return 0;
@@ -2075,6 +2114,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         static HICON big_icon, small_icon;
         if (is_calculator_app())
             SetWindowTextW( top, L"Calculator" );
+        else if (is_store_app())
+            SetWindowTextW( top, L"Microsoft Store" );
         else if (is_whatsapp_app())
             SetWindowTextW( top, L"WhatsApp" );
         if (!big_icon)
@@ -2086,6 +2127,18 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
     TRACE( "xaml show: visible %u style %08lx exstyle %08lx\n", IsWindowVisible( hwnd ),
            GetWindowLongW( hwnd, GWL_STYLE ), GetWindowLongW( hwnd, GWL_EXSTYLE ) );
+    {
+        LONG style = GetWindowLongW( hwnd, GWL_STYLE );
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        if (!(style & WS_CLIPCHILDREN))
+            SetWindowLongW( hwnd, GWL_STYLE, style | WS_CLIPCHILDREN );
+        if (top && top != hwnd)
+        {
+            LONG top_style = GetWindowLongW( top, GWL_STYLE );
+            if (!(top_style & WS_CLIPCHILDREN))
+                SetWindowLongW( top, GWL_STYLE, top_style | WS_CLIPCHILDREN );
+        }
+    }
     InvalidateRect( hwnd, NULL, TRUE );
     UpdateWindow( hwnd );
 
@@ -2295,7 +2348,35 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
 
     TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u)\n", hwnd, width, height );
+    ERR( "xaml_window_present done: hwnd %p (%ux%u)\n", hwnd, width, height );
+    xaml_wv2_on_window_ready( hwnd, width, height );
     return S_OK;
+}
+
+HWND xaml_get_window_hwnd( void )
+{
+    HWND hw = global_xaml_window.target_hwnd;
+    if (hw && IsWindow( hw ))
+    {
+        HWND root = GetAncestor( hw, GA_ROOT );
+        return root ? root : hw;
+    }
+    hw = FindWindowW( L"WinUIDesktopWin32WindowClass", NULL );
+    if (hw) return hw;
+    hw = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    if (hw)
+    {
+        HWND root = GetAncestor( hw, GA_ROOT );
+        return root ? root : hw;
+    }
+    hw = FindWindowW( NULL, L"WhatsApp" );
+    if (hw) return hw;
+    return GetActiveWindow();
+}
+
+IDCompositionVisual *xaml_get_dcomp_root_visual( void )
+{
+    return (IDCompositionVisual *)global_xaml_window.dcomp_root_visual;
 }
 
 HRESULT xaml_window_present_current( void )
@@ -2352,10 +2433,63 @@ static HRESULT WINAPI xaml_window_get_Dispatcher( IInspectable *iface, void *a2,
     return hr;
 }
 
+static const GUID IID_IWindowActivatedEventArgs_app =
+    { 0x179d65e7, 0x4658, 0x4cb6, { 0xaa, 0x13, 0x41, 0xd0, 0x94, 0xea, 0x25, 0x5e } };
+
+static HRESULT WINAPI dummy_wa_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_app ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI dummy_wa_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI dummy_wa_Release( void *iface ) { return 1; }
+static HRESULT WINAPI dummy_wa_GetIids( void *iface, ULONG *count, IID **iids ) { if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI dummy_wa_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Core.WindowActivatedEventArgs", 39, name );
+}
+static HRESULT WINAPI dummy_wa_GetTrustLevel( void *iface, TrustLevel *level ) { if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI dummy_wa_get_WindowActivationState( void *iface, int *value )
+{
+    if (value) *value = 0; /* CodeActivated */
+    return S_OK;
+}
+static const void *dummy_wa_vtbl[] =
+{
+    dummy_wa_QueryInterface,
+    dummy_wa_AddRef,
+    dummy_wa_Release,
+    dummy_wa_GetIids,
+    dummy_wa_GetRuntimeClassName,
+    dummy_wa_GetTrustLevel,
+    dummy_wa_get_WindowActivationState,
+};
+static struct { const void **vtbl; } dummy_wa_obj = { dummy_wa_vtbl };
+
 static HRESULT WINAPI xaml_window_add_Activated( IInspectable *iface, void *handler, EventRegistrationToken *token )
 {
+    struct xaml_window *impl = (struct xaml_window *)iface;
     TRACE( "iface %p, handler %p\n", iface, handler );
-    if (token) token->value = 1;
+    if (impl->activated_handler_count < ARRAY_SIZE(impl->activated_handlers))
+    {
+        impl->activated_handlers[impl->activated_handler_count++] = handler;
+        if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    }
+    if (token) token->value = impl->activated_handler_count;
+    if (impl->is_active && handler)
+    {
+        HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, void *) = (*(void ***)handler)[3];
+        TRACE( "window already active: immediately invoking Window.Activated handler %p\n", handler );
+        invoke( handler, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_wa_obj );
+    }
     return S_OK;
 }
 
@@ -2402,6 +2536,7 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
     struct xaml_window *impl = (struct xaml_window *)iface;
     ICoreWindow *cw = NULL;
     HWND hwnd = NULL;
+    int i;
     TRACE( "iface %p\n", iface );
     cw = ensure_core_window( impl );
     if (cw)
@@ -2419,6 +2554,17 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
         {
             ShowWindow( hwnd, SW_SHOW );
             InvalidateRect( hwnd, NULL, TRUE );
+        }
+    }
+    impl->is_active = TRUE;
+    for (i = 0; i < impl->activated_handler_count; i++)
+    {
+        void *h = impl->activated_handlers[i];
+        if (h)
+        {
+            HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, void *) = (*(void ***)h)[3];
+            TRACE( "invoking Window.Activated handler %p\n", h );
+            invoke( h, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_wa_obj );
         }
     }
     xaml_window_present( impl );
@@ -3186,7 +3332,7 @@ static HRESULT xaml_create_instance_from_provider( const WCHAR *full_name, void 
 
     if (current_application && current_application->outer)
     {
-        if (is_calculator_app())
+        if (is_uwp_xaml_app())
         {
             hr = IInspectable_QueryInterface( current_application->outer, &IID_IXamlMetadataProvider_UWP, &provider );
             if (SUCCEEDED(hr) && provider) is_uwp = TRUE;
@@ -3261,7 +3407,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
     void *binding = NULL;
     IInspectable *target_conn = (IInspectable *)component;
 
-    if (is_calculator_app() && uwp_try_load_xbf_component( component, resourceLocator, uwp_get_app_outer() ))
+    if (is_uwp_xaml_app() && uwp_try_load_xbf_component( component, resourceLocator, uwp_get_app_outer() ))
         return;
 
     if (load_depth > 4)
@@ -3954,7 +4100,7 @@ HRESULT xaml_create_page( void *type_name_ptr, IInspectable **out )
             {
                 void **type_vtbl = *(void ***)xaml_type;
                 /* UWP IXamlType has ActivateInstance at slot 18; WinUI 3 has it at slot 19 */
-                int act_slot = is_calculator_app() ? 18 : 19;
+                int act_slot = is_uwp_xaml_app() ? 18 : 19;
                 HRESULT (WINAPI *activate)(void *, void **) = (void *)type_vtbl[act_slot];
                 TRACE( "calling IXamlType::ActivateInstance slot %d (%p)\n", act_slot, activate );
                 if (activate)
