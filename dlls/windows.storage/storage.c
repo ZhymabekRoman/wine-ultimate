@@ -18,6 +18,7 @@
  */
 
 #include <string.h>
+#include <wchar.h>
 
 #include "private.h"
 #include "objbase.h"
@@ -1104,6 +1105,60 @@ static HRESULT WINAPI storage_folder_GetTrustLevel( IStorageFolder *iface, Trust
     return S_OK;
 }
 
+static void folder_join_path( const WCHAR *dir, const WCHAR *name, WCHAR *out, SIZE_T cch )
+{
+    lstrcpynW( out, dir, cch );
+    if (out[0] && out[wcslen( out ) - 1] != '\\')
+        lstrcatW( out, L"\\" );
+    lstrcatW( out, name );
+}
+
+/* Windows GenerateUniqueName: "name.ext" becomes "name (1).ext", "name (2).ext", ...
+ * until a free slot is found. Writes the resulting full path into out. */
+static void folder_build_unique_path( const WCHAR *dir, const WCHAR *name, WCHAR *out, SIZE_T cch )
+{
+    WCHAR stem[MAX_PATH], ext[MAX_PATH], candidate[MAX_PATH];
+    const WCHAR *dot, *slash;
+    unsigned int i = 1;
+
+    slash = wcsrchr( name, '\\' );
+    slash = slash ? slash + 1 : name;
+    dot = wcsrchr( slash, '.' );
+    if (dot && dot > slash)
+    {
+        lstrcpynW( stem, name, (dot - name) + 1 );
+        lstrcpyW( ext, dot );
+    }
+    else
+    {
+        lstrcpyW( stem, name );
+        ext[0] = 0;
+    }
+
+    for (;;)
+    {
+        if (i == 1)
+            folder_join_path( dir, stem, candidate, ARRAY_SIZE(candidate) ), lstrcatW( candidate, ext );
+        else
+        {
+            WCHAR numbered[MAX_PATH];
+            swprintf( numbered, ARRAY_SIZE(numbered), L"%s (%u)%s", stem, i, ext );
+            folder_join_path( dir, numbered, candidate, ARRAY_SIZE(candidate) );
+        }
+
+        if (GetFileAttributesW( candidate ) == INVALID_FILE_ATTRIBUTES)
+        {
+            lstrcpynW( out, candidate, cch );
+            return;
+        }
+        if (++i > 9999)
+        {
+            folder_join_path( dir, name, out, cch );
+            return;
+        }
+    }
+}
+
 static HRESULT WINAPI storage_folder_CreateFileAsyncOverloadDefaultOptions( IStorageFolder *iface, HSTRING name,
                                                                            IAsyncOperation_StorageFile **operation )
 {
@@ -1125,18 +1180,20 @@ static HRESULT WINAPI storage_folder_CreateFileAsync( IStorageFolder *iface, HST
     if (!name || !operation) return E_POINTER;
 
     file_name = WindowsGetStringRawBuffer( name, NULL );
-    lstrcpyW( file_path, impl->path );
-    if (file_path[wcslen( file_path ) - 1] != '\\')
-        lstrcatW( file_path, L"\\" );
-    lstrcatW( file_path, file_name );
+
+    if (options == CreationCollisionOption_GenerateUniqueName)
+        folder_build_unique_path( impl->path, file_name, file_path, ARRAY_SIZE(file_path) );
+    else
+        folder_join_path( impl->path, file_name, file_path, ARRAY_SIZE(file_path) );
 
     disposition = (options == CreationCollisionOption_ReplaceExisting) ? CREATE_ALWAYS :
                   (options == CreationCollisionOption_OpenIfExists) ? OPEN_ALWAYS : CREATE_NEW;
 
     hFile = CreateFileW( file_path, GENERIC_READ | GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE,
                          NULL, disposition, FILE_ATTRIBUTE_NORMAL, NULL );
-    if (hFile != INVALID_HANDLE_VALUE)
-        CloseHandle( hFile );
+    if (hFile == INVALID_HANDLE_VALUE)
+        return HRESULT_FROM_WIN32( GetLastError() );
+    CloseHandle( hFile );
 
     if (FAILED(hr = storage_file_create( file_path, &file )))
         return hr;
@@ -1162,17 +1219,30 @@ static HRESULT WINAPI storage_folder_CreateFolderAsync( IStorageFolder *iface, H
     const WCHAR *folder_name;
     WCHAR folder_path[MAX_PATH];
     IStorageFolder *folder;
+    DWORD attr;
     HRESULT hr;
 
     if (!name || !operation) return E_POINTER;
 
     folder_name = WindowsGetStringRawBuffer( name, NULL );
-    lstrcpyW( folder_path, impl->path );
-    if (folder_path[wcslen( folder_path ) - 1] != '\\')
-        lstrcatW( folder_path, L"\\" );
-    lstrcatW( folder_path, folder_name );
 
-    CreateDirectoryW( folder_path, NULL );
+    if (options == CreationCollisionOption_GenerateUniqueName)
+        folder_build_unique_path( impl->path, folder_name, folder_path, ARRAY_SIZE(folder_path) );
+    else
+        folder_join_path( impl->path, folder_name, folder_path, ARRAY_SIZE(folder_path) );
+
+    attr = GetFileAttributesW( folder_path );
+
+    if (options == CreationCollisionOption_ReplaceExisting &&
+        attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+        RemoveDirectoryW( folder_path );
+
+    if (!CreateDirectoryW( folder_path, NULL ))
+    {
+        DWORD err = GetLastError();
+        if (err != ERROR_ALREADY_EXISTS)
+            return HRESULT_FROM_WIN32( err );
+    }
 
     if (FAILED(hr = storage_folder_create( folder_path, &folder )))
         return hr;
@@ -1190,16 +1260,20 @@ static HRESULT WINAPI storage_folder_GetFileAsync( IStorageFolder *iface, HSTRIN
     struct storage_folder *impl = impl_from_IStorageFolder( iface );
     const WCHAR *file_name;
     WCHAR file_path[MAX_PATH];
+    DWORD attr;
     IStorageFile *file;
     HRESULT hr;
 
     if (!name || !operation) return E_POINTER;
 
     file_name = WindowsGetStringRawBuffer( name, NULL );
-    lstrcpyW( file_path, impl->path );
-    if (file_path[wcslen( file_path ) - 1] != '\\')
-        lstrcatW( file_path, L"\\" );
-    lstrcatW( file_path, file_name );
+    folder_join_path( impl->path, file_name, file_path, ARRAY_SIZE(file_path) );
+
+    attr = GetFileAttributesW( file_path );
+    if (attr == INVALID_FILE_ATTRIBUTES)
+        return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
+    if (attr & FILE_ATTRIBUTE_DIRECTORY)
+        return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
 
     if (FAILED(hr = storage_file_create( file_path, &file )))
         return hr;
@@ -1217,16 +1291,18 @@ static HRESULT WINAPI storage_folder_GetFolderAsync( IStorageFolder *iface, HSTR
     struct storage_folder *impl = impl_from_IStorageFolder( iface );
     const WCHAR *folder_name;
     WCHAR folder_path[MAX_PATH];
+    DWORD attr;
     IStorageFolder *folder;
     HRESULT hr;
 
     if (!name || !operation) return E_POINTER;
 
     folder_name = WindowsGetStringRawBuffer( name, NULL );
-    lstrcpyW( folder_path, impl->path );
-    if (folder_path[wcslen( folder_path ) - 1] != '\\')
-        lstrcatW( folder_path, L"\\" );
-    lstrcatW( folder_path, folder_name );
+    folder_join_path( impl->path, folder_name, folder_path, ARRAY_SIZE(folder_path) );
+
+    attr = GetFileAttributesW( folder_path );
+    if (attr == INVALID_FILE_ATTRIBUTES || !(attr & FILE_ATTRIBUTE_DIRECTORY))
+        return HRESULT_FROM_WIN32( ERROR_PATH_NOT_FOUND );
 
     if (FAILED(hr = storage_folder_create( folder_path, &folder )))
         return hr;

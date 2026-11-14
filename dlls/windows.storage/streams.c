@@ -444,6 +444,12 @@ struct in_memory_content
     BYTE *buffer;
     UINT64 size;
     UINT64 capacity;
+
+    /* Backing file for streams opened from a StorageFile. Writes are buffered in
+     * memory and flushed back to the file on FlushAsync()/Close() (Windows semantics). */
+    WCHAR backing_path[MAX_PATH];
+    WCHAR content_type[64];
+    BOOL dirty;
 };
 
 static struct in_memory_content *content_create( void )
@@ -452,8 +458,29 @@ static struct in_memory_content *content_create( void )
 
     if (!content) return NULL;
     content->ref = 1;
+    lstrcpyW( content->content_type, L"application/octet-stream" );
     InitializeCriticalSection( &content->cs );
     return content;
+}
+
+/* Write the buffered content back to the backing file. Caller holds content->cs. */
+static void content_flush_to_file( struct in_memory_content *content )
+{
+    HANDLE hFile;
+    DWORD written = 0, size;
+
+    if (!content->dirty || !content->backing_path[0]) return;
+
+    if (content->size > 0xffffffff) size = 0xffffffff;
+    else size = (DWORD)content->size;
+
+    hFile = CreateFileW( content->backing_path, GENERIC_WRITE, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL,
+                         CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (hFile == INVALID_HANDLE_VALUE) return;
+
+    if (size) WriteFile( hFile, content->buffer, size, &written, NULL );
+    CloseHandle( hFile );
+    content->dirty = FALSE;
 }
 
 static struct in_memory_content *content_addref( struct in_memory_content *content )
@@ -472,9 +499,36 @@ static void content_release( struct in_memory_content *content )
     }
 }
 
+/* Real WinRT layout: IRandomAccessStreamWithContentType extends IRandomAccessStream
+ * and appends get_ContentType() as slot 15. Wine's IDL models it as an empty interface,
+ * so use an extended vtable with the content type accessor appended; the per-slot
+ * thunks below translate the interface pointer to the shared impl. */
+struct in_memory_stream_wct_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IRandomAccessStreamWithContentType *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IRandomAccessStreamWithContentType *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IRandomAccessStreamWithContentType *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IRandomAccessStreamWithContentType *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IRandomAccessStreamWithContentType *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IRandomAccessStreamWithContentType *iface, TrustLevel *level );
+    HRESULT (STDMETHODCALLTYPE *get_Size)( IRandomAccessStreamWithContentType *iface, UINT64 *value );
+    HRESULT (STDMETHODCALLTYPE *put_Size)( IRandomAccessStreamWithContentType *iface, UINT64 value );
+    HRESULT (STDMETHODCALLTYPE *GetInputStreamAt)( IRandomAccessStreamWithContentType *iface, UINT64 position,
+                                                   IInputStream **stream );
+    HRESULT (STDMETHODCALLTYPE *GetOutputStreamAt)( IRandomAccessStreamWithContentType *iface, UINT64 position,
+                                                    IOutputStream **stream );
+    HRESULT (STDMETHODCALLTYPE *get_Position)( IRandomAccessStreamWithContentType *iface, UINT64 *value );
+    HRESULT (STDMETHODCALLTYPE *Seek)( IRandomAccessStreamWithContentType *iface, UINT64 position );
+    HRESULT (STDMETHODCALLTYPE *CloneStream)( IRandomAccessStreamWithContentType *iface, IRandomAccessStream **stream );
+    HRESULT (STDMETHODCALLTYPE *get_CanRead)( IRandomAccessStreamWithContentType *iface, boolean *value );
+    HRESULT (STDMETHODCALLTYPE *get_CanWrite)( IRandomAccessStreamWithContentType *iface, boolean *value );
+    HRESULT (STDMETHODCALLTYPE *get_ContentType)( IRandomAccessStreamWithContentType *iface, HSTRING *value );
+};
+
 struct in_memory_stream
 {
     IRandomAccessStream IRandomAccessStream_iface;
+    IRandomAccessStreamWithContentType IRandomAccessStreamWithContentType_iface;
     IInputStream IInputStream_iface;
     IOutputStream IOutputStream_iface;
     IContentTypeProvider IContentTypeProvider_iface;
@@ -504,10 +558,16 @@ static HRESULT WINAPI in_memory_stream_QueryInterface( IRandomAccessStream *ifac
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IRandomAccessStream ) ||
-        IsEqualGUID( iid, &IID_IRandomAccessStreamWithContentType ))
+        IsEqualGUID( iid, &IID_IRandomAccessStream ))
     {
         *out = &impl->IRandomAccessStream_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IRandomAccessStreamWithContentType ))
+    {
+        *out = &impl->IRandomAccessStreamWithContentType_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -628,6 +688,7 @@ static HRESULT WINAPI in_memory_stream_put_Size( IRandomAccessStream *iface, UIN
         impl->content->capacity = value;
     }
     impl->content->size = value;
+    impl->content->dirty = TRUE;
     if (impl->position > impl->content->size)
         impl->position = impl->content->size;
     LeaveCriticalSection( &impl->content->cs );
@@ -640,6 +701,9 @@ static HRESULT WINAPI in_memory_stream_GetInputStreamAt( IRandomAccessStream *if
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
 
     if (!stream) return E_POINTER;
+    EnterCriticalSection( &impl->content->cs );
+    impl->position = min( position, impl->content->size );
+    LeaveCriticalSection( &impl->content->cs );
     *stream = &impl->IInputStream_iface;
     IInputStream_AddRef( *stream );
     return S_OK;
@@ -651,6 +715,9 @@ static HRESULT WINAPI in_memory_stream_GetOutputStreamAt( IRandomAccessStream *i
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
 
     if (!stream) return E_POINTER;
+    EnterCriticalSection( &impl->content->cs );
+    impl->position = min( position, impl->content->size );
+    LeaveCriticalSection( &impl->content->cs );
     *stream = &impl->IOutputStream_iface;
     IOutputStream_AddRef( *stream );
     return S_OK;
@@ -820,6 +887,7 @@ static HRESULT WINAPI in_memory_stream_output_WriteAsync( IOutputStream *iface, 
         impl->position += len;
         if (impl->position > impl->content->size)
             impl->content->size = impl->position;
+        impl->content->dirty = TRUE;
     }
     LeaveCriticalSection( &impl->content->cs );
 
@@ -828,6 +896,12 @@ static HRESULT WINAPI in_memory_stream_output_WriteAsync( IOutputStream *iface, 
 
 static HRESULT WINAPI in_memory_stream_output_FlushAsync( IOutputStream *iface, IAsyncOperation_boolean **operation )
 {
+    struct in_memory_stream *impl = impl_from_IOutputStream( iface );
+
+    EnterCriticalSection( &impl->content->cs );
+    content_flush_to_file( impl->content );
+    LeaveCriticalSection( &impl->content->cs );
+
     return async_operation_boolean_create( L"Windows.Foundation.IAsyncOperation`1<Boolean>", TRUE, operation );
 }
 
@@ -848,8 +922,9 @@ DEFINE_IINSPECTABLE( in_memory_stream_content_type, IContentTypeProvider, struct
 
 static HRESULT WINAPI in_memory_stream_content_type_get_ContentType( IContentTypeProvider *iface, HSTRING *value )
 {
+    struct in_memory_stream *impl = impl_from_IContentTypeProvider( iface );
     if (!value) return E_POINTER;
-    return WindowsCreateString( L"application/octet-stream", 24, value );
+    return WindowsCreateString( impl->content->content_type, wcslen( impl->content->content_type ), value );
 }
 
 static const struct IContentTypeProviderVtbl in_memory_stream_content_type_vtbl =
@@ -871,11 +946,115 @@ static HRESULT WINAPI in_memory_stream_closable_Close( IClosable *iface )
     struct in_memory_stream *impl = impl_from_IClosable_Stream( iface );
 
     EnterCriticalSection( &impl->content->cs );
+    content_flush_to_file( impl->content );
     impl->closed = TRUE;
     impl->position = 0;
     LeaveCriticalSection( &impl->content->cs );
     return S_OK;
 }
+
+/* IRandomAccessStreamWithContentType for InMemoryRandomAccessStream. Shares the
+ * IRandomAccessStream vtable slots 0..14 (see struct in_memory_stream_wct_vtbl);
+ * only get_ContentType is interface specific. */
+static inline struct in_memory_stream *impl_from_IRandomAccessStreamWithContentType(
+        IRandomAccessStreamWithContentType *iface )
+{
+    return CONTAINING_RECORD( iface, struct in_memory_stream, IRandomAccessStreamWithContentType_iface );
+}
+
+static HRESULT WINAPI in_memory_stream_wct_get_ContentType( IRandomAccessStreamWithContentType *iface, HSTRING *value )
+{
+    struct in_memory_stream *impl = impl_from_IRandomAccessStreamWithContentType( iface );
+    if (!value) return E_POINTER;
+    return WindowsCreateString( impl->content->content_type, wcslen( impl->content->content_type ), value );
+}
+
+#define WCT_IMPL struct in_memory_stream *impl = impl_from_IRandomAccessStreamWithContentType( iface )
+#define WCT_RAS( fn, ... ) (fn)( &impl->IRandomAccessStream_iface, ##__VA_ARGS__ )
+
+static HRESULT WINAPI in_memory_stream_wct_QueryInterface( IRandomAccessStreamWithContentType *iface, REFIID iid, void **out )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_QueryInterface, iid, out );
+}
+static ULONG WINAPI in_memory_stream_wct_AddRef( IRandomAccessStreamWithContentType *iface )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_AddRef );
+}
+static ULONG WINAPI in_memory_stream_wct_Release( IRandomAccessStreamWithContentType *iface )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_Release );
+}
+static HRESULT WINAPI in_memory_stream_wct_GetIids( IRandomAccessStreamWithContentType *iface, ULONG *count, IID **iids )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_GetIids, count, iids );
+}
+static HRESULT WINAPI in_memory_stream_wct_GetRuntimeClassName( IRandomAccessStreamWithContentType *iface, HSTRING *name )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_GetRuntimeClassName, name );
+}
+static HRESULT WINAPI in_memory_stream_wct_GetTrustLevel( IRandomAccessStreamWithContentType *iface, TrustLevel *level )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_GetTrustLevel, level );
+}
+static HRESULT WINAPI in_memory_stream_wct_get_Size( IRandomAccessStreamWithContentType *iface, UINT64 *value )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_get_Size, value );
+}
+static HRESULT WINAPI in_memory_stream_wct_put_Size( IRandomAccessStreamWithContentType *iface, UINT64 value )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_put_Size, value );
+}
+static HRESULT WINAPI in_memory_stream_wct_GetInputStreamAt( IRandomAccessStreamWithContentType *iface,
+                                                             UINT64 position, IInputStream **stream )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_GetInputStreamAt, position, stream );
+}
+static HRESULT WINAPI in_memory_stream_wct_GetOutputStreamAt( IRandomAccessStreamWithContentType *iface,
+                                                              UINT64 position, IOutputStream **stream )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_GetOutputStreamAt, position, stream );
+}
+static HRESULT WINAPI in_memory_stream_wct_get_Position( IRandomAccessStreamWithContentType *iface, UINT64 *value )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_get_Position, value );
+}
+static HRESULT WINAPI in_memory_stream_wct_Seek( IRandomAccessStreamWithContentType *iface, UINT64 position )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_Seek, position );
+}
+static HRESULT WINAPI in_memory_stream_wct_CloneStream( IRandomAccessStreamWithContentType *iface,
+                                                        IRandomAccessStream **stream )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_CloneStream, stream );
+}
+static HRESULT WINAPI in_memory_stream_wct_get_CanRead( IRandomAccessStreamWithContentType *iface, boolean *value )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_get_CanRead, value );
+}
+static HRESULT WINAPI in_memory_stream_wct_get_CanWrite( IRandomAccessStreamWithContentType *iface, boolean *value )
+{
+    WCT_IMPL; return WCT_RAS( in_memory_stream_get_CanWrite, value );
+}
+
+static const struct in_memory_stream_wct_vtbl in_memory_stream_wct_vtbl =
+{
+    in_memory_stream_wct_QueryInterface,
+    in_memory_stream_wct_AddRef,
+    in_memory_stream_wct_Release,
+    in_memory_stream_wct_GetIids,
+    in_memory_stream_wct_GetRuntimeClassName,
+    in_memory_stream_wct_GetTrustLevel,
+    in_memory_stream_wct_get_Size,
+    in_memory_stream_wct_put_Size,
+    in_memory_stream_wct_GetInputStreamAt,
+    in_memory_stream_wct_GetOutputStreamAt,
+    in_memory_stream_wct_get_Position,
+    in_memory_stream_wct_Seek,
+    in_memory_stream_wct_CloneStream,
+    in_memory_stream_wct_get_CanRead,
+    in_memory_stream_wct_get_CanWrite,
+    in_memory_stream_wct_get_ContentType,
+};
 
 static const struct IClosableVtbl in_memory_stream_closable_vtbl =
 {
@@ -899,6 +1078,8 @@ HRESULT in_memory_stream_create( IRandomAccessStream **out )
         return E_OUTOFMEMORY;
 
     impl->IRandomAccessStream_iface.lpVtbl = &in_memory_stream_vtbl;
+    impl->IRandomAccessStreamWithContentType_iface.lpVtbl =
+            (CONST_VTBL struct IRandomAccessStreamWithContentTypeVtbl *)&in_memory_stream_wct_vtbl;
     impl->IInputStream_iface.lpVtbl = &in_memory_stream_input_vtbl;
     impl->IOutputStream_iface.lpVtbl = &in_memory_stream_output_vtbl;
     impl->IContentTypeProvider_iface.lpVtbl = &in_memory_stream_content_type_vtbl;
@@ -914,6 +1095,40 @@ HRESULT in_memory_stream_create( IRandomAccessStream **out )
     return S_OK;
 }
 
+static const WCHAR *content_type_for_path( const WCHAR *path )
+{
+    static const struct
+    {
+        const WCHAR *ext;
+        const WCHAR *mime;
+    } map[] =
+    {
+        { L".txt",  L"text/plain" },
+        { L".json", L"application/json" },
+        { L".xml",  L"application/xml" },
+        { L".html", L"text/html" },
+        { L".htm",  L"text/html" },
+        { L".js",   L"application/javascript" },
+        { L".css",  L"text/css" },
+        { L".png",  L"image/png" },
+        { L".jpg",  L"image/jpeg" },
+        { L".jpeg", L"image/jpeg" },
+        { L".gif",  L"image/gif" },
+        { L".webp", L"image/webp" },
+        { L".svg",  L"image/svg+xml" },
+        { L".pdf",  L"application/pdf" },
+    };
+    const WCHAR *dot;
+    size_t i;
+
+    if (!path || !(dot = wcsrchr( path, '.' ))) return L"application/octet-stream";
+
+    for (i = 0; i < ARRAY_SIZE(map); i++)
+        if (!wcsicmp( dot, map[i].ext )) return map[i].mime;
+
+    return L"application/octet-stream";
+}
+
 HRESULT in_memory_stream_create_from_file( const WCHAR *path, IRandomAccessStream **out )
 {
     struct in_memory_stream *impl;
@@ -925,12 +1140,21 @@ HRESULT in_memory_stream_create_from_file( const WCHAR *path, IRandomAccessStrea
         return hr;
 
     impl = impl_from_IRandomAccessStream( *out );
-    if (SUCCEEDED(read_file_bytes( path, &bytes, &size )))
+    if (FAILED(hr = read_file_bytes( path, &bytes, &size )))
     {
-        impl->content->buffer = bytes;
-        impl->content->size = size;
-        impl->content->capacity = size;
-        impl->position = 0;
+        IRandomAccessStream_Release( *out );
+        *out = NULL;
+        return hr;
+    }
+
+    impl->content->buffer = bytes;
+    impl->content->size = size;
+    impl->content->capacity = size;
+    impl->position = 0;
+    if (path)
+    {
+        lstrcpyW( impl->content->backing_path, path );
+        lstrcpyW( impl->content->content_type, content_type_for_path( path ) );
     }
 
     return S_OK;

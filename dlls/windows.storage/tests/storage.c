@@ -439,6 +439,217 @@ static void test_FileIO_PathIO(void)
     DeleteFileW( temp_file );
 }
 
+static IStorageFolder *get_temp_folder( const WCHAR *dir )
+{
+    IStorageFolderStatics *statics = NULL;
+    IAsyncOperation_StorageFolder *op = NULL;
+    IStorageFolder *folder = NULL;
+    HSTRING str;
+
+    WindowsCreateString( dir, wcslen( dir ), &str );
+    RoGetActivationFactory( str, &IID_IStorageFolderStatics, (void **)&statics );
+    WindowsDeleteString( str );
+
+    WindowsCreateString( dir, wcslen( dir ), &str );
+    IStorageFolderStatics_GetFolderFromPathAsync( statics, str, &op );
+    WindowsDeleteString( str );
+    IAsyncOperation_StorageFolder_GetResults( op, &folder );
+    IAsyncOperation_StorageFolder_Release( op );
+    IStorageFolderStatics_Release( statics );
+    return folder;
+}
+
+static IStorageFile *create_file( IStorageFolder *folder, const WCHAR *name, CreationCollisionOption opt )
+{
+    IAsyncOperation_StorageFile *op = NULL;
+    IStorageFile *file = NULL;
+    HSTRING str;
+
+    WindowsCreateString( name, wcslen( name ), &str );
+    if (SUCCEEDED( IStorageFolder_CreateFileAsync( folder, str, opt, &op ) ))
+        IAsyncOperation_StorageFile_GetResults( op, &file );
+    IAsyncOperation_StorageFile_Release( op );
+    WindowsDeleteString( str );
+    return file;
+}
+
+static void get_file_name( IStorageFile *file, WCHAR *out, SIZE_T cch )
+{
+    IStorageItem *item = NULL;
+    HSTRING str;
+
+    IStorageFile_QueryInterface( file, &IID_IStorageItem, (void **)&item );
+    IStorageItem_get_Name( item, &str );
+    lstrcpynW( out, WindowsGetStringRawBuffer( str, NULL ), cch );
+    WindowsDeleteString( str );
+    IStorageItem_Release( item );
+}
+
+static void test_CollisionOptions_StreamContentType(void)
+{
+    WCHAR temp_dir[MAX_PATH], path[MAX_PATH];
+    IStorageFolder *folder = NULL;
+    IStorageFile *file = NULL, *file2 = NULL;
+    IRandomAccessStream *stream = NULL;
+    IRandomAccessStreamWithContentType *wct = NULL;
+    IContentTypeProvider *cp = NULL;
+    IAsyncOperation_IRandomAccessStream *open_op = NULL;
+    IAsyncOperation_StorageFolder *fop = NULL;
+    IAsyncOperation_StorageFile *file_op = NULL;
+    IAsyncOperationWithProgress_UINT32_UINT32 *write_op = NULL;
+    IAsyncOperation_boolean *flush_op = NULL;
+    IBufferFactory *buffer_factory = NULL;
+    IOutputStream *output = NULL;
+    IClosable *closable = NULL;
+    IBuffer *buffer = NULL;
+    HSTRING str, type = NULL;
+    const WCHAR *raw;
+    DWORD read = 0;
+    HANDLE h;
+    HRESULT hr;
+
+    GetTempPathW( MAX_PATH, temp_dir );
+
+    hr = WindowsCreateString( L"Windows.Storage.Streams.Buffer", 30, &str );
+    hr = RoGetActivationFactory( str, &IID_IBufferFactory, (void **)&buffer_factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "RoGetActivationFactory Buffer failed, hr %#lx\n", hr );
+
+    folder = get_temp_folder( temp_dir );
+    ok( !!folder, "GetFolderFromPathAsync failed\n" );
+    if (!folder)
+    {
+        IBufferFactory_Release( buffer_factory );
+        return;
+    }
+
+    /* GenerateUniqueName produces distinct names */
+    file = create_file( folder, L"wns_unique.txt", CreationCollisionOption_GenerateUniqueName );
+    ok( !!file, "CreateFileAsync GenerateUniqueName #1 failed\n" );
+    file2 = create_file( folder, L"wns_unique.txt", CreationCollisionOption_GenerateUniqueName );
+    ok( !!file2, "CreateFileAsync GenerateUniqueName #2 failed\n" );
+    if (file && file2)
+    {
+        WCHAR name1[MAX_PATH], name2[MAX_PATH];
+        get_file_name( file, name1, ARRAY_SIZE(name1) );
+        get_file_name( file2, name2, ARRAY_SIZE(name2) );
+        ok( wcscmp( name1, name2 ), "GenerateUniqueName returned the same name %s twice\n", wine_dbgstr_w( name1 ) );
+    }
+    IStorageFile_Release( file2 );
+    IStorageFile_Release( file );
+
+    /* ReplaceExisting truncates; OpenIfExists keeps content */
+    file = create_file( folder, L"wns_collide.txt", CreationCollisionOption_ReplaceExisting );
+    ok( !!file, "CreateFileAsync ReplaceExisting failed\n" );
+    IStorageFile_Release( file );
+
+    file = create_file( folder, L"wns_collide.txt", CreationCollisionOption_OpenIfExists );
+    ok( !!file, "CreateFileAsync OpenIfExists failed\n" );
+
+    /* OpenAsync(ReadWrite) stream round-trips to disk and exposes ContentType */
+    hr = IStorageFile_OpenAsync( file, FileAccessMode_ReadWrite, &open_op );
+    ok( hr == S_OK, "OpenAsync failed, hr %#lx\n", hr );
+    hr = IAsyncOperation_IRandomAccessStream_GetResults( open_op, &stream );
+    ok( hr == S_OK && !!stream, "OpenAsync GetResults failed, hr %#lx\n", hr );
+    IAsyncOperation_IRandomAccessStream_Release( open_op );
+
+    hr = IRandomAccessStream_QueryInterface( stream, &IID_IRandomAccessStreamWithContentType, (void **)&wct );
+    ok( hr == S_OK && !!wct, "QI IRandomAccessStreamWithContentType failed, hr %#lx\n", hr );
+    IRandomAccessStreamWithContentType_Release( wct );
+
+    hr = IRandomAccessStream_QueryInterface( stream, &IID_IContentTypeProvider, (void **)&cp );
+    ok( hr == S_OK, "QI IContentTypeProvider failed, hr %#lx\n", hr );
+    hr = IContentTypeProvider_get_ContentType( cp, &type );
+    ok( hr == S_OK, "get_ContentType failed, hr %#lx\n", hr );
+    raw = WindowsGetStringRawBuffer( type, NULL );
+    ok( !wcscmp( raw, L"text/plain" ), "expected text/plain, got %s\n", wine_dbgstr_w( raw ) );
+    WindowsDeleteString( type );
+    IContentTypeProvider_Release( cp );
+
+    /* Write "hello" through the stream; it must land in the file after Close() */
+    hr = IRandomAccessStream_QueryInterface( stream, &IID_IOutputStream, (void **)&output );
+    ok( hr == S_OK, "QI IOutputStream failed, hr %#lx\n" , hr );
+    hr = IBufferFactory_Create( buffer_factory, 16, &buffer );
+    ok( hr == S_OK, "IBufferFactory_Create failed, hr %#lx\n", hr );
+    IBuffer_put_Length( buffer, 5 );
+
+    hr = IOutputStream_WriteAsync( output, buffer, &write_op );
+    ok( hr == S_OK, "WriteAsync failed, hr %#lx\n", hr );
+    IAsyncOperationWithProgress_UINT32_UINT32_Release( write_op );
+
+    hr = IOutputStream_FlushAsync( output, &flush_op );
+    ok( hr == S_OK, "FlushAsync failed, hr %#lx\n", hr );
+    IAsyncOperation_boolean_Release( flush_op );
+
+    hr = IRandomAccessStream_QueryInterface( stream, &IID_IClosable, (void **)&closable );
+    ok( hr == S_OK, "QI IClosable failed, hr %#lx\n", hr );
+    IClosable_Close( closable );
+    IClosable_Release( closable );
+
+    /* the 5 written bytes must be on disk now */
+    lstrcpyW( path, temp_dir );
+    if (path[wcslen( path ) - 1] != '\\') lstrcatW( path, L"\\" );
+    lstrcatW( path, L"wns_collide.txt" );
+    h = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
+    ok( h != INVALID_HANDLE_VALUE, "could not reopen %s\n", wine_dbgstr_w( path ) );
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        BYTE bytes[8];
+        SIZE_T size;
+
+        size = GetFileSize( h, NULL );
+        ReadFile( h, bytes, ARRAY_SIZE(bytes), &read, NULL );
+        ok( size == 5 && read == 5, "expected 5 bytes on disk, got size %I64u read %lu\n", (UINT64)size, read );
+        CloseHandle( h );
+    }
+
+    IBuffer_Release( buffer );
+    IOutputStream_Release( output );
+    IRandomAccessStream_Release( stream );
+    IStorageFile_Release( file );
+
+    /* GetFileAsync fails cleanly for a missing file (method hr or op result hr) */
+    WindowsCreateString( L"wns_missing_file.dat", 20, &str );
+    hr = IStorageFolder_GetFileAsync( folder, str, &file_op );
+    WindowsDeleteString( str );
+    if (hr == S_OK)
+    {
+        hr = IAsyncOperation_StorageFile_GetResults( file_op, &file );
+        IAsyncOperation_StorageFile_Release( file_op );
+    }
+    ok( FAILED(hr) && !file, "expected failure for missing file, hr %#lx\n", hr );
+
+    /* CreateFolderAsync GenerateUniqueName twice must produce distinct folders */
+    WindowsCreateString( L"wns_sub", 7, &str );
+    hr = IStorageFolder_CreateFolderAsync( folder, str, CreationCollisionOption_GenerateUniqueName, &fop );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "CreateFolderAsync GenerateUniqueName #1 failed, hr %#lx\n", hr );
+    IAsyncOperation_StorageFolder_Release( fop );
+    fop = NULL;
+
+    WindowsCreateString( L"wns_sub", 7, &str );
+    hr = IStorageFolder_CreateFolderAsync( folder, str, CreationCollisionOption_GenerateUniqueName, &fop );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "CreateFolderAsync GenerateUniqueName #2 failed, hr %#lx\n", hr );
+    IAsyncOperation_StorageFolder_Release( fop );
+    fop = NULL;
+
+    IStorageFolder_Release( folder );
+    IBufferFactory_Release( buffer_factory );
+
+    lstrcpyW( path, temp_dir );
+    if (path[wcslen( path ) - 1] != '\\') lstrcatW( path, L"\\" );
+    DeleteFileW( lstrcatW( path, L"wns_collide.txt" ) );
+    path[wcslen( path ) - wcslen( L"wns_collide.txt" )] = 0;
+    DeleteFileW( lstrcatW( path, L"wns_unique.txt" ) );
+    path[wcslen( path ) - wcslen( L"wns_unique.txt" )] = 0;
+    DeleteFileW( lstrcatW( path, L"wns_unique (1).txt" ) );
+    path[wcslen( path ) - wcslen( L"wns_unique (1).txt" )] = 0;
+    RemoveDirectoryW( lstrcatW( path, L"wns_sub" ) );
+    path[wcslen( path ) - wcslen( L"wns_sub" )] = 0;
+    RemoveDirectoryW( lstrcatW( path, L"wns_sub (1)" ) );
+}
+
 START_TEST(storage)
 {
     HRESULT hr;
@@ -452,6 +663,7 @@ START_TEST(storage)
     test_DataReader_DataWriter();
     test_StorageFile_StorageFolder();
     test_FileIO_PathIO();
+    test_CollisionOptions_StreamContentType();
 
     RoUninitialize();
 }
