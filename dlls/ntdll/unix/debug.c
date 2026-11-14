@@ -274,6 +274,7 @@ NTSTATUS unixcall_wine_dbg_write( void *args )
 {
     struct wine_dbg_write_params *params = args;
 
+    flight_recorder_log_raw( params->str, params->len );
     return write( 2, params->str, params->len );
 }
 
@@ -289,6 +290,7 @@ NTSTATUS wow64_wine_dbg_write( void *args )
         unsigned int len;
     } const *params32 = args;
 
+    flight_recorder_log_raw( ULongToPtr(params32->str), params32->len );
     return write( 2, ULongToPtr(params32->str), params32->len );
 }
 #endif
@@ -305,6 +307,7 @@ int __cdecl __wine_dbg_output( const char *str )
     if (end)
     {
         ret += append_output( info, str, end + 1 - str );
+        flight_recorder_log_raw( info->output, info->out_pos );
         write( 2, info->output, info->out_pos );
         info->out_pos = 0;
         str = end + 1;

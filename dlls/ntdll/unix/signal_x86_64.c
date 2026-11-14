@@ -1485,6 +1485,10 @@ static void setup_raise_exception( struct thread_data *data, ucontext_t *sigcont
     XSAVE_AREA_HEADER *src_xs;
     void *callback;
 
+    flight_recorder_log( "SIG_EXC code=%08x flags=%08x addr=%p rip=%p rsp=%p",
+                         (unsigned int)rec->ExceptionCode, (unsigned int)rec->ExceptionFlags,
+                         rec->ExceptionAddress, (void *)context->Rip, (void *)context->Rsp );
+
     status = send_debug_event( data, rec, context, TRUE, TRUE );
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
     {
@@ -2124,6 +2128,12 @@ void write_crash_minidump( EXCEPTION_RECORD *rec, CONTEXT *context )
     /* Write directory table */
     mdmp_write_at( fd, sizeof(hdr), dirs, sizeof(dirs) );
     close( fd );
+    {
+        char trace_path[512];
+        snprintf( trace_path, sizeof(trace_path), "/var/tmp/wa-lanes/dumps/%s_%u_trace.txt",
+                  proc_name, (unsigned int)cur_pid );
+        flight_recorder_dump( trace_path );
+    }
     ERR_(seh)( "Crash minidump written to %s (code=%08x rip=%p rsp=%p)\n",
                dump_path, (unsigned int)rec->ExceptionCode, (void *)context->Rip, (void *)context->Rsp );
 }
@@ -2141,10 +2151,19 @@ NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_REC
     if (rec && (rec->ExceptionCode == STATUS_FAIL_FAST_EXCEPTION ||
                 rec->ExceptionCode == STATUS_STACK_BUFFER_OVERRUN ||
                 rec->ExceptionCode == 0xe0464645))
+    {
+        flight_recorder_log( "FAILFAST code=%08x rip=%p rsp=%p",
+                             (unsigned int)rec->ExceptionCode,
+                             context ? (void *)context->Rip : NULL,
+                             context ? (void *)context->Rsp : NULL );
         write_crash_minidump( rec, context );
+    }
 
     if (status)
     {
+        flight_recorder_log( "DISPATCH_FAIL status=%08x code=%08x rip=%p",
+                             (unsigned int)status, rec ? (unsigned int)rec->ExceptionCode : 0,
+                             context ? (void *)context->Rip : NULL );
         write_crash_minidump( rec, context );
         return status;
     }
@@ -2455,6 +2474,8 @@ static inline BOOL handle_interrupt( struct thread_data *data, ucontext_t *sigco
     {
     case 0x29:
         /* __fastfail: process state is corrupted */
+        flight_recorder_log( "FASTFAIL rcx=%llu rip=%p rsp=%p",
+                             (unsigned long long)context->Rcx, (void *)context->Rip, (void *)context->Rsp );
         rec->ExceptionCode = STATUS_STACK_BUFFER_OVERRUN;
         rec->ExceptionFlags = EXCEPTION_NONCONTINUABLE;
         rec->NumberParameters = 1;

@@ -915,6 +915,8 @@ NTSTATUS WINAPI NtCreateUserProcess( HANDLE *process_handle_ptr, HANDLE *thread_
     *thread_handle_ptr = thread_handle;
     process_handle = thread_handle = 0;
     status = STATUS_SUCCESS;
+    flight_recorder_log( "SPAWN_PROC child_pid=%u exe=%s",
+                         (unsigned int)process_id, unix_name ? unix_name : "<unknown>" );
 
 done:
     if (file_handle) NtClose( file_handle );
@@ -938,6 +940,8 @@ NTSTATUS WINAPI NtTerminateProcess( HANDLE handle, LONG exit_code )
 {
     unsigned int ret;
     BOOL self;
+
+    flight_recorder_log( "TERMINATE_PROC handle=%p exit=%08x", handle, (unsigned int)exit_code );
 
     SERVER_START_REQ( terminate_process )
     {

@@ -1015,6 +1015,7 @@ static const unixlib_entry_t unix_call_funcs[] =
     unixcall_wine_server_handle_to_fd,
     unixcall_wine_spawnvp,
     system_time_precise,
+    unixcall_flight_recorder_log,
 };
 
 
@@ -1033,6 +1034,7 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
     wow64_wine_server_handle_to_fd,
     wow64_wine_spawnvp,
     system_time_precise,
+    wow64_flight_recorder_log,
 };
 
 #endif  /* _WIN64 */
@@ -1857,6 +1859,7 @@ static void start_main_thread(void)
 
     dbg_init();
     startup_info_size = server_init_process();
+    flight_recorder_log( "PROC_START exe=%s", (main_argc > 1 && main_argv[1]) ? main_argv[1] : "<unknown>" );
     virtual_map_user_shared_data();
     init_cpu_info();
     init_files();

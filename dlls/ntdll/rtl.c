@@ -94,10 +94,24 @@ NTSTATUS WINAPI vDbgPrintExWithPrefix( LPCSTR prefix, ULONG id, ULONG level, LPC
     char buf[1024], *end;
 
     strcpy( buf, prefix );
-    len += _vsnprintf( buf + len, sizeof(buf) - len, fmt, args );
-    end = buf + len - 1;
+    {
+        int n = _vsnprintf( buf + len, sizeof(buf) - len, fmt, args );
+        if (n < 0 || len + (SIZE_T)n >= sizeof(buf))
+        {
+            buf[sizeof(buf) - 1] = 0;
+            len = strlen( buf );
+        }
+        else len += (SIZE_T)n;
+    }
+    end = len ? buf + len - 1 : buf;
 
-    WARN_(debugstr)(*end == '\n' ? "%08lx:%08lx: %s" : "%08lx:%08lx: %s\n", id, level_mask, buf);
+    if (WARN_ON(debugstr))
+        WARN_(debugstr)(*end == '\n' ? "%08lx:%08lx: %s" : "%08lx:%08lx: %s\n", id, level_mask, buf);
+    else if (len > 0)
+    {
+        struct wine_dbg_write_params params = { buf, (unsigned int)len };
+        WINE_UNIX_CALL( unix_flight_recorder_log, &params );
+    }
 
     if (level_mask & (1 << DPFLTR_ERROR_LEVEL) && NtCurrentTeb()->Peb->BeingDebugged)
     {

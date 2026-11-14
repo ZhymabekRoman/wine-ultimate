@@ -55,6 +55,7 @@ SOURCES = \
 	unix/debug.c \
 	unix/env.c \
 	unix/file.c \
+	unix/flight_recorder.c \
 	unix/loader.c \
 	unix/loadorder.c \
 	unix/process.c \

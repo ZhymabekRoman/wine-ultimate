@@ -399,12 +399,14 @@ extern void set_async_direct_result( HANDLE *async_handle, unsigned int options,
                                      NTSTATUS status, ULONG_PTR information, BOOL mark_pending );
 
 extern NTSTATUS unixcall_wine_dbg_write( void *args );
+extern NTSTATUS unixcall_flight_recorder_log( void *args );
 extern NTSTATUS unixcall_wine_server_call( void *args );
 extern NTSTATUS unixcall_wine_server_fd_to_handle( void *args );
 extern NTSTATUS unixcall_wine_server_handle_to_fd( void *args );
 extern NTSTATUS unixcall_wine_spawnvp( void *args );
 #ifdef _WIN64
 extern NTSTATUS wow64_wine_dbg_write( void *args );
+extern NTSTATUS wow64_flight_recorder_log( void *args );
 extern NTSTATUS wow64_wine_server_call( void *args );
 extern NTSTATUS wow64_wine_server_fd_to_handle( void *args );
 extern NTSTATUS wow64_wine_server_handle_to_fd( void *args );
@@ -412,6 +414,10 @@ extern NTSTATUS wow64_wine_spawnvp( void *args );
 #endif
 
 extern void dbg_init(void);
+extern void flight_recorder_log( const char *fmt, ... ) __WINE_PRINTF_ATTR(1,2);
+extern void flight_recorder_vlog( const char *fmt, va_list ap );
+extern void flight_recorder_log_raw( const char *str, unsigned int len );
+extern void flight_recorder_dump( const char *path );
 
 extern void close_inproc_sync( HANDLE handle );
 extern void invalidate_type_cache( HANDLE handle );

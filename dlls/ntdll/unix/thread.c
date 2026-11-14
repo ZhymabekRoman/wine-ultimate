@@ -1512,6 +1512,7 @@ void abort_thread( int status )
  */
 void abort_process( int status )
 {
+    flight_recorder_log( "ABORT_PROCESS status=%08x", (unsigned int)status );
     _exit( get_unix_exit_code( status ));
 }
 
@@ -1642,7 +1643,32 @@ NTSTATUS send_debug_event( struct thread_data *data, EXCEPTION_RECORD *rec,
 NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL first_chance )
 {
     struct thread_data *data = get_thread_data();
-    NTSTATUS status = send_debug_event( data, rec, context, first_chance, !(is_win64 || is_wow64()) );
+    NTSTATUS status;
+
+    if (rec->ExceptionCode == DBG_PRINTEXCEPTION_C && rec->NumberParameters >= 2 && rec->ExceptionInformation[1])
+    {
+        char dbgbuf[181];
+        SIZE_T req_len = min( (SIZE_T)rec->ExceptionInformation[0], sizeof(dbgbuf) - 1 );
+        SIZE_T got = virtual_uninterrupted_read_memory( (const void *)rec->ExceptionInformation[1], dbgbuf, req_len );
+        dbgbuf[got] = 0;
+        flight_recorder_log( "DBG_PRINT %s", dbgbuf );
+    }
+    else if (rec->ExceptionCode == STATUS_ACCESS_VIOLATION && rec->NumberParameters >= 2)
+    {
+        flight_recorder_log( "RAISE_EXC code=%08x flags=%08x addr=%p fa=%p first=%d rip=%p rsp=%p",
+                             (unsigned int)rec->ExceptionCode, (unsigned int)rec->ExceptionFlags,
+                             rec->ExceptionAddress, (void *)rec->ExceptionInformation[1], first_chance,
+                             context ? (void *)context->Rip : NULL, context ? (void *)context->Rsp : NULL );
+    }
+    else
+    {
+        flight_recorder_log( "RAISE_EXC code=%08x flags=%08x addr=%p first=%d rip=%p rsp=%p",
+                             (unsigned int)rec->ExceptionCode, (unsigned int)rec->ExceptionFlags,
+                             rec->ExceptionAddress, first_chance,
+                             context ? (void *)context->Rip : NULL, context ? (void *)context->Rsp : NULL );
+    }
+
+    status = send_debug_event( data, rec, context, first_chance, !(is_win64 || is_wow64()) );
 
     if (status == DBG_CONTINUE || status == DBG_EXCEPTION_HANDLED)
         return NtContinue( context, FALSE );
@@ -1774,6 +1800,10 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
         }
     }
 
+    flight_recorder_log( "FATAL_EXC code=%08x flags=%08x addr=%p rip=%p rsp=%p",
+                         (unsigned int)rec->ExceptionCode, (unsigned int)rec->ExceptionFlags,
+                         rec->ExceptionAddress,
+                         context ? (void *)context->Rip : NULL, context ? (void *)context->Rsp : NULL );
     write_crash_minidump( rec, context );
     NtTerminateProcess( NtCurrentProcess(), rec->ExceptionCode );
     return STATUS_SUCCESS;
