@@ -172,6 +172,17 @@ static const struct IActivationFactoryVtbl factory_vtbl =
 #define DQMSG_RUN      (WM_USER + 0x11)
 #define DQMSG_SHUTDOWN (WM_USER + 0x12)
 #define DQMSG_DESTROY  (WM_USER + 0x13)
+#define DQMSG_TIMER_HI (WM_USER + 0x14)
+
+/* High-resolution waitable timer pacing.  WM_TIMER is quantised to the ~15.6 ms
+ * system clock; Chromium/WebView2 script pacing wants 1 ms ticks, so short
+ * intervals are driven by CREATE_WAITABLE_TIMER_HIGH_RESOLUTION instead. */
+#ifndef CREATE_WAITABLE_TIMER_HIGH_RESOLUTION
+#define CREATE_WAITABLE_TIMER_HIGH_RESOLUTION 0x00000002
+#endif
+#ifndef TIMER_ALL_ACCESS
+#define TIMER_ALL_ACCESS (TIMER_SET_TIMER|TIMER_RELEASE_TIMER|0x0002u)
+#endif
 
 #define DQ_PRIORITY_COUNT 3
 
@@ -436,6 +447,16 @@ struct dispatcher_queue_timer
     boolean running;
     UINT timer_id;
     struct list handlers;
+    /* High-resolution pacing state.  When the interval is below the ~15.6 ms WM_TIMER
+     * quantisation the timer runs off a dedicated pump thread waiting on a
+     * CREATE_WAITABLE_TIMER_HIGH_RESOLUTION handle (hi_timer) instead of SetTimer; the
+     * pump posts DQMSG_TIMER_HI to the queue window so the Tick handlers still run on
+     * the dispatcher-queue thread.  hi_stop asks the pump to exit; hi_thread is the
+     * pump's handle, set to NULL by the thread itself on exit.  All fields guarded by
+     * queue->cs. */
+    HANDLE hi_timer;
+    HANDLE hi_stop;
+    HANDLE hi_thread;
 };
 
 static inline struct dispatcher_queue_timer *impl_from_IDispatcherQueueTimer( IDispatcherQueueTimer *iface )
@@ -450,6 +471,113 @@ static UINT dq_timer_ms( const TimeSpan *interval )
     if (ms <= 0) return 1;
     if (ms > ~0u) return ~0u;
     return (UINT)ms;
+}
+
+/* WM_TIMER fires on the system clock, quantised to ~15.6 ms.  Intervals below that are
+ * driven by a high-resolution waitable timer to give the sub-10 ms tick pacing that
+ * Chromium/WebView2 script engines expect. */
+#define DQ_TIMER_HIRES_MS 16
+
+static boolean dq_timer_is_hires( const TimeSpan *interval )
+{
+    return dq_timer_ms( interval ) < DQ_TIMER_HIRES_MS;
+}
+
+/* Forward declaration: defined below, invoked from the queue window proc on
+ * DQMSG_TIMER_HI, exactly as the WM_TIMER path invokes it. */
+static void dispatcher_queue_timer_tick( struct dispatcher_queue_timer *timer );
+
+/* Dedicated pump for a high-resolution timer.  Runs independently of the queue thread:
+ * it arms a one-shot high-resolution waitable timer, blocks on it, and posts a tick
+ * message to the queue window when it expires.  The queue thread (window proc) delivers
+ * the Tick handlers, preserving the WinRT contract.  Re-arming is a loop: after each
+ * delivery the pump re-arms the one-shot for the next period, so interval changes and
+ * stop requests made under queue->cs are picked up on the next wake — the pump never
+ * touches the handler list, so it cannot block on user code. */
+static DWORD WINAPI dispatcher_queue_timer_hi_thread( void *arg )
+{
+    struct dispatcher_queue_timer *timer = arg;
+    struct dispatcher_queue *queue = timer->queue;
+    HANDLE handles[2];
+    LARGE_INTEGER due;
+    LONG period;
+    boolean repeating;
+    DWORD r;
+
+    handles[0] = timer->hi_timer;
+    handles[1] = timer->hi_stop;
+
+    for (;;)
+    {
+        EnterCriticalSection( &queue->cs );
+        period = (LONG)dq_timer_ms( &timer->interval );
+        repeating = timer->repeating;
+        LeaveCriticalSection( &queue->cs );
+
+        /* Relative due time, in 100 ns units (negative => from now).  One-shot: the
+         * loop re-arms each period, giving a clean restart when the interval changes. */
+        due.QuadPart = -(LONGLONG)period * 10000;
+        SetWaitableTimer( timer->hi_timer, &due, 0, NULL, 0, FALSE );
+
+        r = WaitForMultipleObjects( 2, handles, FALSE, INFINITE );
+        if (r != 0) break;                        /* hi_stop set, or wait failed */
+
+        EnterCriticalSection( &queue->cs );
+        if (!timer->running)
+        {
+            LeaveCriticalSection( &queue->cs );
+            break;
+        }
+        repeating = timer->repeating;
+        if (!repeating) timer->running = FALSE;   /* one-shot: consume the running flag */
+        LeaveCriticalSection( &queue->cs );
+
+        PostMessageW( queue->hwnd, DQMSG_TIMER_HI, (WPARAM)timer->timer_id, 0 );
+        if (!repeating) break;
+    }
+
+    EnterCriticalSection( &queue->cs );
+    timer->hi_thread = NULL;
+    LeaveCriticalSection( &queue->cs );
+    return 0;
+}
+
+/* (Re)arm the active mechanism and restart the countdown.  Call with queue->cs held on
+ * a timer that is running with a valid timer_id and a bound window.  High-resolution:
+ * cancelling wakes the pump, which re-arms with the freshly set interval.  Coarse:
+ * SetTimer restarts the WM_TIMER countdown. */
+static void dispatcher_queue_timer_arm( struct dispatcher_queue *queue, struct dispatcher_queue_timer *timer )
+{
+    if (dq_timer_is_hires( &timer->interval ))
+    {
+        if (timer->hi_thread) CancelWaitableTimer( timer->hi_timer );
+    }
+    else
+    {
+        if (timer->hi_thread)
+        {
+            SetEvent( timer->hi_stop );
+            CancelWaitableTimer( timer->hi_timer );
+            timer->hi_thread = NULL;
+        }
+        SetTimer( queue->hwnd, timer->timer_id, dq_timer_ms( &timer->interval ), NULL );
+    }
+}
+
+/* Cancel the active mechanism.  Call with queue->cs held.  The pump thread is left to
+ * exit on its own; it clears timer->hi_thread under the lock. */
+static void dispatcher_queue_timer_disarm( struct dispatcher_queue *queue, struct dispatcher_queue_timer *timer )
+{
+    timer->running = FALSE;
+    if (timer->hi_thread)
+    {
+        SetEvent( timer->hi_stop );
+        CancelWaitableTimer( timer->hi_timer );
+    }
+    else if (queue->hwnd && timer->timer_id)
+    {
+        KillTimer( queue->hwnd, timer->timer_id );
+    }
 }
 
 static HRESULT WINAPI dispatcher_queue_timer_QueryInterface( IDispatcherQueueTimer *iface, REFIID iid, void **out )
@@ -472,13 +600,26 @@ static ULONG WINAPI dispatcher_queue_timer_AddRef( IDispatcherQueueTimer *iface 
 static ULONG WINAPI dispatcher_queue_timer_Release( IDispatcherQueueTimer *iface )
 {
     struct dispatcher_queue_timer *impl = impl_from_IDispatcherQueueTimer( iface );
+    struct dispatcher_queue *queue = impl->queue;
+    HANDLE thread, hi_timer, hi_stop;
     ULONG ref = InterlockedDecrement( &impl->ref );
     if (!ref)
     {
-        EnterCriticalSection( &impl->queue->cs );
-        if (impl->running && impl->queue->hwnd) KillTimer( impl->queue->hwnd, impl->timer_id );
+        EnterCriticalSection( &queue->cs );
+        if (impl->running) dispatcher_queue_timer_disarm( queue, impl );
         list_remove( &impl->entry );
-        LeaveCriticalSection( &impl->queue->cs );
+        thread = impl->hi_thread;
+        hi_timer = impl->hi_timer;
+        hi_stop = impl->hi_stop;
+        impl->hi_thread = impl->hi_timer = impl->hi_stop = NULL;
+        LeaveCriticalSection( &queue->cs );
+        if (thread)
+        {
+            WaitForSingleObject( thread, INFINITE );
+            CloseHandle( thread );
+        }
+        if (hi_timer) CloseHandle( hi_timer );
+        if (hi_stop) CloseHandle( hi_stop );
         {
             struct dispatcher_event_handler *entry, *tmp;
             LIST_FOR_EACH_ENTRY_SAFE( entry, tmp, &impl->handlers, struct dispatcher_event_handler, entry )
@@ -524,7 +665,7 @@ static HRESULT WINAPI dispatcher_queue_timer_put_Interval( IDispatcherQueueTimer
      * repeating and the one-shot case. */
     EnterCriticalSection( &queue->cs );
     if (impl->running && queue->hwnd && impl->timer_id)
-        SetTimer( queue->hwnd, impl->timer_id, dq_timer_ms( &impl->interval ), NULL );
+        dispatcher_queue_timer_arm( queue, impl );
     LeaveCriticalSection( &queue->cs );
     return S_OK;
 }
@@ -549,7 +690,7 @@ static HRESULT WINAPI dispatcher_queue_timer_put_IsRepeating( IDispatcherQueueTi
     impl->repeating = value;
     EnterCriticalSection( &queue->cs );
     if (impl->running && queue->hwnd && impl->timer_id)
-        SetTimer( queue->hwnd, impl->timer_id, dq_timer_ms( &impl->interval ), NULL );
+        dispatcher_queue_timer_arm( queue, impl );
     LeaveCriticalSection( &queue->cs );
     return S_OK;
 }
@@ -566,8 +707,54 @@ static HRESULT WINAPI dispatcher_queue_timer_Start( IDispatcherQueueTimer *iface
         return E_FAIL;
     }
     if (!impl->timer_id) impl->timer_id = (UINT)InterlockedIncrement64( &queue->next_timer_id );
-    impl->running = TRUE;
-    SetTimer( queue->hwnd, impl->timer_id, dq_timer_ms( &impl->interval ), NULL );
+
+    if (dq_timer_is_hires( &impl->interval ))
+    {
+        /* High-resolution pacing: drive ticks from a waitable timer on a pump thread. */
+        if (!impl->hi_timer)
+        {
+            impl->hi_timer = CreateWaitableTimerExW( NULL, NULL, CREATE_WAITABLE_TIMER_HIGH_RESOLUTION, TIMER_ALL_ACCESS );
+            if (!impl->hi_timer)
+            {
+                LeaveCriticalSection( &queue->cs );
+                return E_FAIL;
+            }
+        }
+        if (!impl->hi_stop && !(impl->hi_stop = CreateEventW( NULL, TRUE, FALSE, NULL )))
+        {
+            LeaveCriticalSection( &queue->cs );
+            return E_FAIL;
+        }
+        if (!impl->hi_thread)
+        {
+            ResetEvent( impl->hi_stop );
+            impl->running = TRUE;
+            if (!(impl->hi_thread = CreateThread( NULL, 0, dispatcher_queue_timer_hi_thread, impl, 0, NULL )))
+            {
+                LeaveCriticalSection( &queue->cs );
+                return E_FAIL;
+            }
+        }
+        else
+        {
+            /* Pump already live (restart of a running timer): wake it to re-arm. */
+            impl->running = TRUE;
+            ResetEvent( impl->hi_stop );
+            CancelWaitableTimer( impl->hi_timer );
+        }
+    }
+    else
+    {
+        /* Coarse pacing: WM_TIMER on the queue window. */
+        if (impl->hi_thread)
+        {
+            SetEvent( impl->hi_stop );
+            CancelWaitableTimer( impl->hi_timer );
+            impl->hi_thread = NULL;
+        }
+        impl->running = TRUE;
+        SetTimer( queue->hwnd, impl->timer_id, dq_timer_ms( &impl->interval ), NULL );
+    }
     LeaveCriticalSection( &queue->cs );
     return S_OK;
 }
@@ -577,8 +764,7 @@ static HRESULT WINAPI dispatcher_queue_timer_Stop( IDispatcherQueueTimer *iface 
     struct dispatcher_queue *queue = impl->queue;
 
     EnterCriticalSection( &queue->cs );
-    impl->running = FALSE;
-    if (queue->hwnd && impl->timer_id) KillTimer( queue->hwnd, impl->timer_id );
+    dispatcher_queue_timer_disarm( queue, impl );
     LeaveCriticalSection( &queue->cs );
     return S_OK;
 }
@@ -647,10 +833,7 @@ static void dispatcher_queue_timer_tick( struct dispatcher_queue_timer *timer )
 
     EnterCriticalSection( &queue->cs );
     if (!timer->repeating)
-    {
-        timer->running = FALSE;
-        if (queue->hwnd && timer->timer_id) KillTimer( queue->hwnd, timer->timer_id );
-    }
+        dispatcher_queue_timer_disarm( queue, timer );
     LIST_FOR_EACH_ENTRY( entry, &timer->handlers, struct dispatcher_event_handler, entry )
     {
         struct dispatcher_event_handler *snapshot;
@@ -814,7 +997,7 @@ static LRESULT WINAPI dispatcher_queue_wndproc( HWND hwnd, UINT msg, WPARAM wpar
             struct dispatcher_queue_item *item;
             EnterCriticalSection( &queue->cs );
             LIST_FOR_EACH_ENTRY_SAFE( timer, tmp, &queue->timers, struct dispatcher_queue_timer, entry )
-                if (timer->running) KillTimer( hwnd, timer->timer_id );
+                if (timer->running) dispatcher_queue_timer_disarm( queue, timer );
             LeaveCriticalSection( &queue->cs );
             while ((item = dispatcher_queue_pop( queue )))
             {
@@ -825,7 +1008,8 @@ static LRESULT WINAPI dispatcher_queue_wndproc( HWND hwnd, UINT msg, WPARAM wpar
         }
         return 0;
 
-    case WM_TIMER:
+    case WM_TIMER:          /* coarse (SetTimer) tick */
+    case DQMSG_TIMER_HI:    /* high-resolution pump tick */
         {
             struct dispatcher_queue_timer *timer;
             EnterCriticalSection( &queue->cs );
