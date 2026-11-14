@@ -1114,6 +1114,7 @@ static BOOL parse_appx_manifest(const WCHAR *manifest_path, struct appx_package 
     XmlNodeType node_type;
     BOOL in_properties = FALSE;
     BOOL in_framework = FALSE;
+    BOOL in_dependencies = FALSE;
     BOOL in_inproc_server = FALSE;
     BOOL in_path = FALSE;
     DWORD server_class_start = 0;
@@ -1220,7 +1221,11 @@ static BOOL parse_appx_manifest(const WCHAR *manifest_path, struct appx_package 
             {
                 in_framework = TRUE;
             }
-            else if (!wcscmp(local_name, L"PackageDependency"))
+            else if (!wcscmp(local_name, L"Dependencies"))
+            {
+                in_dependencies = TRUE;
+            }
+            else if (in_dependencies && !wcscmp(local_name, L"PackageDependency"))
             {
                 WCHAR dep_name[256] = {0};
                 WCHAR min_ver[64] = {0};
@@ -1346,6 +1351,8 @@ static BOOL parse_appx_manifest(const WCHAR *manifest_path, struct appx_package 
 
             if (!wcscmp(local_name, L"Properties"))
                 in_properties = FALSE;
+            else if (!wcscmp(local_name, L"Dependencies"))
+                in_dependencies = FALSE;
             else if (!wcscmp(local_name, L"Framework"))
                 in_framework = FALSE;
             else if (!wcscmp(local_name, L"Path"))
@@ -1382,6 +1389,12 @@ static void set_reg_str(HKEY hkey, const WCHAR *name, const WCHAR *value)
 static void set_reg_dword(HKEY hkey, const WCHAR *name, DWORD value)
 {
     RegSetValueExW(hkey, name, 0, REG_DWORD, (const BYTE *)&value, sizeof(value));
+}
+
+static void set_reg_multi_sz(HKEY hkey, const WCHAR *name, const WCHAR *data, DWORD bytes)
+{
+    if (data && bytes)
+        RegSetValueExW(hkey, name, 0, REG_MULTI_SZ, (const BYTE *)data, bytes);
 }
 
 static BOOL register_package(const struct appx_package *pkg)
@@ -1560,11 +1573,18 @@ static void append_to_path(const WCHAR *new_dir)
                         SMTO_ABORTIFHUNG, 5000, &dwResult);
 }
 
-static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR *dep_name, WCHAR *out_path, DWORD cch)
+/* A <PackageDependency Name="..."/> names a package family, not a full name: the
+ * staged framework is the registration (or the sibling folder) whose name is
+ * '<dep_name>_<rest>'. Both the directory and the full name come back, the name
+ * being what the dependency graph on the package's own key is written from. */
+static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR *dep_name,
+                                    WCHAR *out_path, DWORD cch, WCHAR *out_full_name, DWORD cch_name)
 {
     static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
     WCHAR key[600], name[256];
     DWORD r, i;
+
+    if (out_full_name && cch_name) out_full_name[0] = 0;
 
     for (r = 0; r < ARRAY_SIZE(roots); r++)
     {
@@ -1589,6 +1609,7 @@ static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR 
                         DWORD type = 0;
                         if (RegQueryValueExW(sub, L"PackagePath", NULL, &type, (BYTE *)out_path, &size) == ERROR_SUCCESS && out_path[0])
                         {
+                            if (out_full_name && cch_name) lstrcpynW(out_full_name, name, cch_name);
                             RegCloseKey(sub);
                             RegCloseKey(hkey);
                             return TRUE;
@@ -1624,6 +1645,8 @@ static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR 
                         wcscmp(fd.cFileName, L".") && wcscmp(fd.cFileName, L".."))
                     {
                         swprintf(out_path, cch, L"%ls\\%ls", parent_dir, fd.cFileName);
+                        if (out_full_name && cch_name)
+                            lstrcpynW(out_full_name, fd.cFileName, cch_name);
                         FindClose(hFind);
                         return TRUE;
                     }
@@ -1636,18 +1659,73 @@ static BOOL resolve_dependency_path(const struct appx_package *pkg, const WCHAR 
     return FALSE;
 }
 
+/* Grow-as-needed REG_MULTI_SZ builder. count is the WCHAR length in use, cap the
+ * allocated WCHAR capacity, and the list is closed with the extra NUL the
+ * Windows registry expects. */
+struct multi_sz
+{
+    WCHAR *buf;
+    DWORD count;
+    DWORD cap;
+};
+
+static BOOL multi_sz_append(struct multi_sz *m, const WCHAR *value)
+{
+    DWORD vlen = lstrlenW( value );
+    DWORD need = m->count + vlen + 2;    /* the string, its NUL, the list's final NUL */
+
+    if (need > m->cap)
+    {
+        DWORD cap = m->cap * 2 + 64;
+        WCHAR *mem;
+        if (!(mem = realloc( m->buf, cap * sizeof(WCHAR) ))) return FALSE;
+        m->buf = mem;
+        m->cap = cap;
+    }
+    lstrcpyW( m->buf + m->count, value );
+    m->buf[need - 1] = 0;
+    m->count = need - 1;                 /* leave room for the next append's NUL */
+    return TRUE;
+}
+
+static void multi_sz_flush( const struct multi_sz *m, HKEY root, const WCHAR *key, const WCHAR *name )
+{
+    HKEY hkey;
+
+    if (!m->buf || !m->count) return;
+    if (RegCreateKeyExW( root, key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ) == ERROR_SUCCESS)
+    {
+        set_reg_multi_sz( hkey, name, m->buf, (m->count + 1) * sizeof(WCHAR) );
+        RegCloseKey( hkey );
+    }
+}
+
+/*
+ * The <Dependencies> section names package families, not full names, so each
+ * entry is matched against the staged set (registration first, then a sibling
+ * folder under the package's own parent). A resolved framework is registered
+ * under its own full name, its bin directory joins the DLL search path, and the
+ * full name is appended to the package's Dependencies value: that value is the
+ * dependency graph IPackage::Dependencies reads back.
+ */
 static void process_dependencies(const struct appx_package *pkg)
 {
-    DWORD i;
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    static const WCHAR appmodel_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    struct multi_sz graph = {0};
+    WCHAR pkg_key[600];
+    DWORD i, r;
+
     for (i = 0; i < pkg->dependencies_count; i++)
     {
         const WCHAR *dep = pkg->dependencies[i].name;
         BOOL is_framework_dep = (wcsstr(dep, L"VCLibs") != NULL ||
                                  wcsstr(dep, L"Native") != NULL ||
                                  wcsstr(dep, L"Xaml") != NULL);
-        WCHAR dep_path[MAX_PATH];
+        WCHAR dep_path[MAX_PATH], dep_full[512];
 
-        if (resolve_dependency_path(pkg, dep, dep_path, ARRAY_SIZE(dep_path)))
+        if (resolve_dependency_path(pkg, dep, dep_path, ARRAY_SIZE(dep_path),
+                                    dep_full, ARRAY_SIZE(dep_full)))
         {
             WCHAR manifest[MAX_PATH];
             const WCHAR *folder;
@@ -1692,12 +1770,27 @@ static void process_dependencies(const struct appx_package *pkg)
                 else
                     append_to_path(dep_path);
             }
+
+            if (!dep_full[0])
+            {
+                const WCHAR *slash = wcsrchr( dep_path, L'\\' );
+                if (!slash) slash = wcsrchr( dep_path, L'/' );
+                lstrcpynW( dep_full, slash ? slash + 1 : dep_path, ARRAY_SIZE(dep_full) );
+            }
+            multi_sz_append( &graph, dep_full );
         }
         else
         {
             TRACE("Dependency %s not found locally\n", debugstr_w(dep));
         }
     }
+
+    /* the graph hangs off the package's own registration, both hives */
+    swprintf( pkg_key, ARRAY_SIZE(pkg_key), L"%ls\\%ls", appmodel_path, pkg->identity.full_name );
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+        multi_sz_flush( &graph, roots[r], pkg_key, L"Dependencies" );
+
+    free( graph.buf );
 }
 
 HRESULT WINAPI AppxRegisterPackageManifest( const WCHAR *manifest_path )

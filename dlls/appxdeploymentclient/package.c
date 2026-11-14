@@ -1579,6 +1579,8 @@ struct package_record
     BOOL framework;
 };
 
+#define MAX_RECORDS 64
+
 /* Parse the full name's identity parts; missing parts answer neutral/zero. */
 static void split_full_name( const WCHAR *full, WCHAR *name, DWORD cch_name,
                              PackageVersion *version, ProcessorArchitecture *arch,
@@ -1749,12 +1751,140 @@ static HRESULT WINAPI package_get_IsFramework( IPackage *iface, boolean *value )
     return S_OK;
 }
 
-static HRESULT create_empty_vectorview( IVectorView_Package **value );
+static HRESULT create_package_vectorview( struct package **items, ULONG count, IVectorView_Package **value );
+
+/*
+ * The dependency graph: <PackageDependency Name="..."/> names a package family,
+ * and registration (manifest.c's process_dependencies) resolves each against the
+ * staged framework set, writing the resolved full names into the package's own
+ * AppModel\Packages\<FullName> Dependencies value. The rows IPackage::
+ * Dependencies hands back are that graph, read through the same registration the
+ * FindPackages calls answer from: HKCU's shadow over HKLM's, framework flag and
+ * path from the framework's own key. A hand-seeded key naming only the family
+ * resolves to the staged package prefixed by it.
+ */
+
+#define APPMODEL_PACKAGES_KEY L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages"
+
+/* Family name in, staged full name out: the first package key prefixed by it. */
+static BOOL dependency_find_full_name( HKEY root, const WCHAR *family, WCHAR *full, DWORD cch )
+{
+    HKEY hkey;
+    DWORD i = 0;
+
+    if (RegOpenKeyExW( root, APPMODEL_PACKAGES_KEY, 0, KEY_READ, &hkey )) return FALSE;
+
+    for (;; i++)
+    {
+        DWORD size = cch;
+        SIZE_T n = lstrlenW( family );
+
+        if (RegEnumKeyExW( hkey, i, full, &size, NULL, NULL, NULL, NULL )) break;
+        if (!wcsnicmp( full, family, n ) && full[n] == L'_')
+        {
+            RegCloseKey( hkey );
+            return TRUE;
+        }
+    }
+
+    RegCloseKey( hkey );
+    return FALSE;
+}
+
+static BOOL dependency_record_fill( const WCHAR *entry, struct package_record *rec )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR full[PACKAGE_FULL_NAME_MAX_LENGTH + 1], subkey[640];
+    SIZE_T r;
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        DWORD type = 0, len = 0, fw = 0;
+        HKEY hkey;
+
+        lstrcpynW( full, entry, ARRAY_SIZE(full) );
+        swprintf( subkey, ARRAY_SIZE(subkey), L"%ls\\%ls", APPMODEL_PACKAGES_KEY, full );
+        if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &hkey ))
+        {
+            if (!dependency_find_full_name( roots[r], entry, full, ARRAY_SIZE(full) )) continue;
+            swprintf( subkey, ARRAY_SIZE(subkey), L"%ls\\%ls", APPMODEL_PACKAGES_KEY, full );
+            if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &hkey )) continue;
+        }
+
+        rec->full_name[0] = rec->family_name[0] = rec->path[0] = 0;
+        rec->framework = TRUE;
+        lstrcpynW( rec->full_name, full, ARRAY_SIZE(rec->full_name) );
+
+        len = sizeof(fw);
+        if (RegQueryValueExW( hkey, L"Framework", NULL, &type, (BYTE *)&fw, &len ) == ERROR_SUCCESS
+            && type == REG_DWORD)
+            rec->framework = fw;
+        len = sizeof(rec->path);
+        type = 0;
+        RegQueryValueExW( hkey, L"PackagePath", NULL, &type, (BYTE *)rec->path, &len );
+        RegCloseKey( hkey );
+
+        if (!rec->path[0])
+        {
+            UINT32 path_len = ARRAY_SIZE(rec->path);
+            GetPackagePathByFullName( rec->full_name, &path_len, rec->path );
+        }
+        {
+            UINT32 family_len = ARRAY_SIZE(rec->family_name);
+            PackageFamilyNameFromFullName( rec->full_name, &family_len, rec->family_name );
+        }
+        return TRUE;
+    }
+
+    return FALSE;
+}
 
 static HRESULT WINAPI package_get_Dependencies( IPackage *iface, IVectorView_Package **value )
 {
-    /* the registration records no dependency graph: the empty view is the truth */
-    return create_empty_vectorview( value );
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    struct package *impl = impl_from_IPackage( iface );
+    struct package *items[MAX_RECORDS];
+    ULONG count = 0;
+    SIZE_T r;
+    HRESULT hr;
+
+    if (!value) return E_INVALIDARG;
+
+    /* the first hive holding a graph answers; an unregistered package has none */
+    for (r = 0; r < ARRAY_SIZE(roots) && !count; r++)
+    {
+        WCHAR subkey[640], *buf = NULL, *p, *end;
+        DWORD size = 0, type = 0;
+        HKEY hkey;
+
+        swprintf( subkey, ARRAY_SIZE(subkey), L"%ls\\%ls", APPMODEL_PACKAGES_KEY, impl->rec.full_name );
+        if (RegOpenKeyExW( roots[r], subkey, 0, KEY_READ, &hkey )) continue;
+
+        if (RegQueryValueExW( hkey, L"Dependencies", NULL, &type, NULL, &size ) == ERROR_SUCCESS
+            && type == REG_MULTI_SZ && size >= sizeof(WCHAR) && (buf = malloc( size + sizeof(WCHAR) )))
+        {
+            size += sizeof(WCHAR);  /* room for the closing NUL a short value may omit */
+            type = 0;
+            if (RegQueryValueExW( hkey, L"Dependencies", NULL, &type, (BYTE *)buf, &size ) == ERROR_SUCCESS)
+            {
+                for (p = buf, end = (WCHAR *)((BYTE *)buf + size); p < end && *p && count < MAX_RECORDS;
+                     p += lstrlenW( p ) + 1)
+                {
+                    struct package_record rec;
+
+                    if (!dependency_record_fill( p, &rec )) continue;
+                    if (SUCCEEDED(package_create( &rec, &items[count] ))) count++;
+                }
+            }
+        }
+
+        RegCloseKey( hkey );
+        free( buf );
+    }
+
+    hr = create_package_vectorview( items, count, value );
+    for (ULONG i = 0; i < count; i++) IPackage_Release( &items[i]->IPackage_iface );
+    return hr;
 }
 
 static const struct IPackageVtbl package_vtbl =
@@ -2339,12 +2469,19 @@ static HRESULT package_collection_create( struct package **items, ULONG count, I
     return S_OK;
 }
 
-/* IPackage's Dependencies: the registration records no graph; the empty view. */
+/*
+ * IPackage's Dependencies: a view over the resolved dependency set, built once
+ * per call. The rows are the packages the registration held at that moment; the
+ * view owns a reference to each, so a caller holding the view after the graph
+ * was re-registered sees a stable set.
+ */
 
 struct package_vectorview
 {
     IVectorView_Package IVectorView_Package_iface;
     LONG ref;
+    ULONG count;
+    struct package *items[1];
 };
 
 static inline struct package_vectorview *impl_from_IVectorView_Package( IVectorView_Package *iface )
@@ -2378,7 +2515,11 @@ static ULONG WINAPI package_vectorview_Release( IVectorView_Package *iface )
     struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
 
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        for (ULONG i = 0; i < impl->count; i++) IPackage_Release( &impl->items[i]->IPackage_iface );
+        free( impl );
+    }
     return ref;
 }
 
@@ -2403,27 +2544,57 @@ static HRESULT WINAPI package_vectorview_GetTrustLevel( IVectorView_Package *ifa
 
 static HRESULT WINAPI package_vectorview_GetAt( IVectorView_Package *iface, UINT32 index, IPackage **item )
 {
-    return E_BOUNDS;
+    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+
+    if (!item) return E_INVALIDARG;
+    if (index >= impl->count) return E_BOUNDS;
+
+    *item = &impl->items[index]->IPackage_iface;
+    IPackage_AddRef( *item );
+    return S_OK;
 }
 
 static HRESULT WINAPI package_vectorview_get_Size( IVectorView_Package *iface, UINT32 *size )
 {
-    *size = 0;
+    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+
+    if (!size) return E_INVALIDARG;
+    *size = impl->count;
     return S_OK;
 }
 
 static HRESULT WINAPI package_vectorview_IndexOf( IVectorView_Package *iface, IPackage *item, UINT32 *index,
         boolean *found )
 {
-    *index = 0;
-    *found = FALSE;
+    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    ULONG i;
+
+    if (!index || !found) return E_INVALIDARG;
+
+    for (i = 0; i < impl->count; i++)
+        if (&impl->items[i]->IPackage_iface == item) break;
+
+    *index = i < impl->count ? i : 0;
+    *found = i < impl->count;
     return S_OK;
 }
 
 static HRESULT WINAPI package_vectorview_GetMany( IVectorView_Package *iface, UINT32 start, UINT32 capacity,
         IPackage **items, UINT32 *written )
 {
-    *written = 0;
+    struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    ULONG n;
+
+    if (!items || !written) return E_INVALIDARG;
+    if (start > impl->count) return E_BOUNDS;
+
+    n = min( capacity, impl->count - start );
+    for (ULONG i = 0; i < n; i++)
+    {
+        items[i] = &impl->items[start + i]->IPackage_iface;
+        IPackage_AddRef( items[i] );
+    }
+    *written = n;
     return S_OK;
 }
 
@@ -2441,17 +2612,28 @@ static const struct IVectorView_PackageVtbl package_vectorview_vtbl =
     package_vectorview_GetMany,
 };
 
-static HRESULT create_empty_vectorview( IVectorView_Package **value )
+/* The rows are the caller's: the view takes a reference to each and drops them
+ * with its own. count 0 is the empty view, no allocation for the tail. */
+static HRESULT create_package_vectorview( struct package **items, ULONG count, IVectorView_Package **value )
 {
     struct package_vectorview *impl;
+    SIZE_T size = offsetof( struct package_vectorview, items[count ? count : 1] );
 
     if (!value) return E_INVALIDARG;
-    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    if (!(impl = calloc( 1, size ))) return E_OUTOFMEMORY;
     impl->IVectorView_Package_iface.lpVtbl = &package_vectorview_vtbl;
     impl->ref = 1;
+    impl->count = count;
+    for (ULONG i = 0; i < count; i++)
+    {
+        impl->items[i] = items[i];
+        IPackage_AddRef( &items[i]->IPackage_iface );
+    }
     *value = &impl->IVectorView_Package_iface;
     return S_OK;
 }
+
+/* count 0 is the empty view: what a package with no recorded graph answers. */
 
 /*
  * The registration read: the running package, the env framework, then every
@@ -2460,8 +2642,6 @@ static HRESULT create_empty_vectorview( IVectorView_Package **value )
  * the set; the package APIs answer the family and path for each record. This
  * is the same graph kernelbase's GetCurrentPackageInfo builds.
  */
-#define MAX_RECORDS 64
-
 struct registration
 {
     struct package_record records[MAX_RECORDS];

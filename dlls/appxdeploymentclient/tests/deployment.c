@@ -859,9 +859,207 @@ static void test_package_catalog( void )
     FreeLibrary( mod );
 }
 
+/* Seed one AppModel\Packages\<full> registration the dependency face reads. */
+static void seed_package_key( const WCHAR *full, const WCHAR *path, DWORD framework )
+{
+    static const WCHAR appmodel_root[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    WCHAR subkey[640];
+    HKEY hkey;
+
+    swprintf( subkey, ARRAY_SIZE(subkey), L"%ls\\%ls", appmodel_root, full );
+    if (RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL )) return;
+    RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)path, (lstrlenW( path ) + 1) * sizeof(WCHAR) );
+    RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&framework, sizeof(framework) );
+    RegCloseKey( hkey );
+}
+
+static void check_package_full_name( IPackage *pkg, const WCHAR *expected )
+{
+    IPackageId *id;
+    HSTRING name = NULL;
+
+    if (SUCCEEDED( IPackage_get_Id( pkg, &id ) ))
+    {
+        IPackageId_get_FullName( id, &name );
+        IPackageId_Release( id );
+    }
+    ok( name && !wcscmp( WindowsGetStringRawBuffer( name, NULL ), expected ),
+            "dependency full name %s, expected %s\n", debugstr_hstring( name ), debugstr_w( expected ) );
+    WindowsDeleteString( name );
+}
+
+/* The dependency graph the manifest parser writes on the package key comes
+ * back as the IPackage::Dependencies rows: an entry naming the exact full
+ * name is answered from its own key, an entry naming only the family
+ * resolves to the staged package prefixed by it, and a name with no staged
+ * package is skipped. */
+static void test_package_dependencies( void )
+{
+    static const DWORD zero = 0;
+    static const WCHAR class_name[] = L"Windows.Management.Deployment.PackageManager";
+    static const WCHAR fw1_full[] = L"Microsoft.VCLibs.140.00_14.0.30704.0_x64__8wekyb3d8bbwe";
+    static const WCHAR fw1_path[] = L"C:\\WineTestFw\\Microsoft.VCLibs.140.00_14.0.30704.0_x64__8wekyb3d8bbwe";
+    static const WCHAR fw2_full[] = L"Microsoft.NET.Native.Framework.2.2_2.2.29512.0_x64__8wekyb3d8bbwe";
+    static const WCHAR fw2_family[] = L"Microsoft.NET.Native.Framework.2.2_8wekyb3d8bbwe";
+    static const WCHAR fw2_path[] = L"C:\\WineTestFw\\Microsoft.NET.Native.Framework.2.2_2.2.29512.0_x64__8wekyb3d8bbwe";
+    static const WCHAR deps[] =
+        L"Microsoft.VCLibs.140.00_14.0.30704.0_x64__8wekyb3d8bbwe\0"
+        L"Microsoft.NET.Native.Framework.2.2\0"
+        L"WineTest.Absent_1.0.0.0_x64__t7q2w3e4r5y6\0";
+    HRESULT (WINAPI *p_DllGetActivationFactory)( HSTRING, IActivationFactory ** );
+    IVectorView_Package *view;
+    HMODULE mod;
+    HSTRING str;
+    IActivationFactory *factory;
+    IInspectable *inspectable;
+    IPackageManager *pm;
+    IPackage *pkg, *row;
+    IPackageId *id;
+    HKEY hkey;
+    UINT32 size = 0, index = 0;
+    ULONG written = 0;
+    IPackage *items[4];
+    boolean framework;
+    HRESULT hr;
+
+    mod = LoadLibraryA( "appxdeploymentclient.dll" );
+    if (!mod) return;
+    p_DllGetActivationFactory = (void *)GetProcAddress( mod, "DllGetActivationFactory" );
+    if (!p_DllGetActivationFactory)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+
+    WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &str );
+    factory = NULL;
+    hr = p_DllGetActivationFactory( str, &factory );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && factory, "dependency test factory hr %#lx\n", hr );
+    if (hr != S_OK || !factory)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+    inspectable = NULL;
+    hr = IActivationFactory_ActivateInstance( factory, &inspectable );
+    IActivationFactory_Release( factory );
+    if (FAILED( hr ))
+    {
+        FreeLibrary( mod );
+        return;
+    }
+    pm = NULL;
+    hr = IInspectable_QueryInterface( inspectable, &IID_ipm, (void **)&pm );
+    IInspectable_Release( inspectable );
+    ok( hr == S_OK && pm, "dependency test PackageManager QI hr %#lx\n", hr );
+    if (!pm)
+    {
+        FreeLibrary( mod );
+        return;
+    }
+
+    seed_package_key( fw1_full, fw1_path, 1 );
+    seed_package_key( fw2_full, fw2_path, 1 );
+    if (!RegCreateKeyExW( HKEY_CURRENT_USER, appmodel_key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
+    {
+        RegSetValueExW( hkey, L"PackagePath", 0, REG_SZ, (const BYTE *)staged_path,
+                        (lstrlenW( staged_path ) + 1) * sizeof(WCHAR) );
+        RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&zero, sizeof(zero) );
+        RegSetValueExW( hkey, L"Dependencies", 0, REG_MULTI_SZ, (const BYTE *)deps, sizeof(deps) );
+        RegCloseKey( hkey );
+    }
+
+    pkg = NULL;
+    WindowsCreateString( full_name, ARRAY_SIZE(full_name) - 1, &str );
+    hr = IPackageManager_FindPackageByPackageFullName( pm, str, &pkg );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && pkg, "dependency test FindPackageByPackageFullName hr %#lx\n", hr );
+
+    view = NULL;
+    if (pkg) hr = IPackage_get_Dependencies( pkg, &view );
+    ok( hr == S_OK && view, "get_Dependencies hr %#lx view %p\n", hr );
+    if (view)
+    {
+        IVectorView_Package_get_Size( view, &size );
+        ok( size == 2, "dependencies size %u, expected 2\n", size );
+
+        row = NULL;
+        hr = IVectorView_Package_GetAt( view, 0, &row );
+        ok( hr == S_OK && row, "GetAt(0) hr %#lx\n", hr );
+        if (row)
+        {
+            check_package_full_name( row, fw1_full );
+            framework = FALSE;
+            IPackage_get_IsFramework( row, &framework );
+            ok( framework, "first dependency IsFramework %d\n", framework );
+            IPackage_Release( row );
+        }
+
+        row = NULL;
+        hr = IVectorView_Package_GetAt( view, 1, &row );
+        ok( hr == S_OK && row, "GetAt(1) hr %#lx\n", hr );
+        if (row)
+        {
+            /* the bare-family entry resolved to the staged package prefixed by it */
+            check_package_full_name( row, fw2_full );
+            if (SUCCEEDED( IPackage_get_Id( row, &id ) ))
+            {
+                HSTRING fam = NULL;
+                IPackageId_get_FamilyName( id, &fam );
+                IPackageId_Release( id );
+                ok( fam && !wcscmp( WindowsGetStringRawBuffer( fam, NULL ), fw2_family ),
+                        "family %s, expected %s\n", debugstr_hstring( fam ), debugstr_w( fw2_family ) );
+                WindowsDeleteString( fam );
+            }
+            framework = FALSE;
+            IPackage_get_IsFramework( row, &framework );
+            ok( framework, "second dependency IsFramework %d\n", framework );
+            IPackage_Release( row );
+        }
+
+        /* the view is bounded: the index past the last row answers E_BOUNDS */
+        row = (void *)0xdead;
+        hr = IVectorView_Package_GetAt( view, size, &row );
+        ok( hr == E_BOUNDS && !row, "GetAt(%u) hr %#lx row %p\n", size, hr, row );
+
+        /* the row the view handed out is found at its own index */
+        row = NULL;
+        if (SUCCEEDED( IVectorView_Package_GetAt( view, 0, &row ) ) && row)
+        {
+            index = 0xdead;
+            hr = IVectorView_Package_IndexOf( view, row, &index );
+            ok( hr == S_OK && index == 0, "IndexOf hr %#lx index %u\n", hr, index );
+            IPackage_Release( row );
+        }
+
+        /* GetMany fills the whole view in order */
+        written = 0;
+        hr = IVectorView_Package_GetMany( view, 0, ARRAY_SIZE(items), items, &written );
+        ok( hr == S_OK && written == size, "GetMany hr %#lx written %lu\n", hr, written );
+        for (ULONG i = 0; i < written; i++)
+        {
+            IPackage_Release( items[i] );
+        }
+
+        IVectorView_Package_Release( view );
+    }
+
+    if (pkg) IPackage_Release( pkg );
+    IPackageManager_Release( pm );
+
+    RegDeleteTreeW( HKEY_CURRENT_USER, appmodel_key );
+    RegDeleteTreeW( HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\Microsoft.VCLibs.140.00_14.0.30704.0_x64__8wekyb3d8bbwe" );
+    RegDeleteTreeW( HKEY_CURRENT_USER,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\Microsoft.NET.Native.Framework.2.2_2.2.29512.0_x64__8wekyb3d8bbwe" );
+    FreeLibrary( mod );
+}
+
 START_TEST( deployment )
 {
     test_register_package();
+    test_package_dependencies();
     test_class_factory();
     test_package_catalog();
 }
