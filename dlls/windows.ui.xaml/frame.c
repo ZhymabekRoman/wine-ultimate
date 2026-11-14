@@ -18,8 +18,10 @@
  */
 
 #include <stdarg.h>
+#include <stdio.h>
 
 #include "private.h"
+#include "winreg.h"
 
 #include "wine/exception.h"
 
@@ -462,7 +464,26 @@ struct frame_factory
     IActivationFactory IActivationFactory_iface;
     IInspectable IComposableFactory_iface;
     LONG ref;
+    IInspectable IStatics_iface;
 };
+
+static IDependencyProperty *wv2_source_dp;
+
+static HRESULT WINAPI wv2_statics_get_SourceProperty( void *iface, void **value )
+{
+    if (!value) return E_POINTER;
+    if (!wv2_source_dp)
+        dependency_property_create( NULL, &wv2_source_dp );
+    *value = wv2_source_dp;
+    if (*value) IDependencyProperty_AddRef( wv2_source_dp );
+    return *value ? S_OK : E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI wv2_statics_get_prop( void *iface, void **value )
+{
+    if (!value) return E_POINTER;
+    return dependency_property_create( NULL, (IDependencyProperty **)value );
+}
 
 static inline struct frame_factory *impl_from_IActivationFactory( IActivationFactory *iface )
 {
@@ -476,6 +497,27 @@ static ULONG WINAPI frame_factory_Release( IActivationFactory *iface );
 static inline struct frame_factory *impl_from_IComposableFactory( void *iface )
 {
     return CONTAINING_RECORD( iface, struct frame_factory, IComposableFactory_iface );
+}
+
+static inline struct frame_factory *impl_from_IStatics( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct frame_factory, IStatics_iface );
+}
+
+static HRESULT WINAPI statics_factory_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct frame_factory *impl = impl_from_IStatics( iface );
+    return frame_factory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+static ULONG WINAPI statics_factory_AddRef( IInspectable *iface )
+{
+    struct frame_factory *impl = impl_from_IStatics( iface );
+    return frame_factory_AddRef( &impl->IActivationFactory_iface );
+}
+static ULONG WINAPI statics_factory_Release( IInspectable *iface )
+{
+    struct frame_factory *impl = impl_from_IStatics( iface );
+    return frame_factory_Release( &impl->IActivationFactory_iface );
 }
 
 static HRESULT WINAPI composable_factory_QueryInterface( IInspectable *iface, REFIID iid, void **out )
@@ -510,6 +552,13 @@ static HRESULT WINAPI frame_factory_QueryInterface( IActivationFactory *iface, R
     {
         *out = NULL;
         return E_NOINTERFACE;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWebView2Statics ) && impl->IStatics_iface.lpVtbl)
+    {
+        *out = &impl->IStatics_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
     }
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
@@ -1543,6 +1592,7 @@ struct xaml_element
     IInspectable IWebView2_iface;
     IInspectable IWebView22_iface;
     IInspectable IUIElement_iface;
+    IInspectable IDependencyObject_iface;
     LONG ref;
     int visibility;
     IInspectable *outer;
@@ -1553,6 +1603,8 @@ struct xaml_element
     IInspectable *content;
     IInspectable *core_webview2;
     IInspectable *init_handler;
+    IInspectable *wv2_source;
+    HSTRING wv2_source_uri;
     void *loaded_fn;    /* ABI RoutedEventHandler Invoke fn (vtbl[3]) */
     BOOL init_triggered;
     BOOL browser_queued;
@@ -1603,6 +1655,10 @@ static inline struct xaml_element *impl_from_IWebView2( void *iface )
 static inline struct xaml_element *impl_from_IWebView22( void *iface )
 {
     return CONTAINING_RECORD( iface, struct xaml_element, IWebView22_iface );
+}
+static inline struct xaml_element *impl_from_IDependencyObject( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_element, IDependencyObject_iface );
 }
 
 static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, void **out );
@@ -1793,6 +1849,13 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
             IsEqualGUID( iid, &IID_IWebView2IV1_g ))
         {
             *out = &impl->IWebView22_iface;
+            element_AddRef( iface );
+            return S_OK;
+        }
+        if (IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+            IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
+        {
+            *out = &impl->IDependencyObject_iface;
             element_AddRef( iface );
             return S_OK;
         }
@@ -2621,6 +2684,7 @@ struct core_webview2
     BOOL real_loader;
     void *loader_core;
     void *tracker_source;      /* webview2loader webview object */
+    struct xaml_element *owner;
 };
 
 static const GUID IID_ICoreWebView2 =
@@ -2948,7 +3012,21 @@ static HRESULT WINAPI cwv2_get_Source( void *iface, HSTRING *uri )
     struct core_webview2 *impl = impl_from_cwv2( iface );
     if (!uri) return E_POINTER;
     if (impl->source_uri) return WindowsDuplicateString( impl->source_uri, uri );
-    return WindowsCreateString( L"https://web.whatsapp.com", 24, uri );
+    if (impl->owner && impl->owner->wv2_source_uri)
+        return WindowsDuplicateString( impl->owner->wv2_source_uri, uri );
+    if (impl->loader_core && impl->real_loader)
+    {
+        LPWSTR raw = NULL;
+        HRESULT (WINAPI *p_get_source)( void *, LPWSTR * ) =
+            (void *)(*(void ***)impl->loader_core)[4]; /* COM ICoreWebView2::get_Source */
+        if (p_get_source && SUCCEEDED( p_get_source( impl->loader_core, &raw ) ) && raw)
+        {
+            HRESULT hr = WindowsCreateString( raw, lstrlenW( raw ), uri );
+            CoTaskMemFree( raw );
+            return hr;
+        }
+    }
+    return WindowsCreateString( L"about:blank", 11, uri );
 }
 
 static HRESULT WINAPI cwv2_2_get_Environment( void *iface, void **env )
@@ -3703,19 +3781,63 @@ static HRESULT WINAPI wv2_remove_CoreWebView2Initialized( void *iface, EventRegi
     return S_OK;
 }
 
+static HSTRING wv2_extract_uri_string( IInspectable *obj )
+{
+    static const GUID IID_IUriRuntimeClass_local =
+        { 0x9e365e57, 0x48b2, 0x4160, { 0x95, 0x6f, 0xc7, 0x38, 0x51, 0x20, 0xbb, 0xfc } };
+    static const GUID IID_IPropertyValue_local =
+        { 0x4bd682dd, 0x7554, 0x40e9, { 0x9a, 0x9b, 0x82, 0x65, 0x4e, 0xde, 0x7e, 0x62 } };
+    void *uri_rt = NULL, *pv = NULL;
+    HSTRING hstr = NULL;
+
+    if (!obj) return NULL;
+    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IUriRuntimeClass_local, &uri_rt )) && uri_rt)
+    {
+        HRESULT (WINAPI *get_abs)( void *, HSTRING * ) = (void *)(*(void ***)uri_rt)[6];
+        if (FAILED(get_abs( uri_rt, &hstr )) || !hstr)
+        {
+            HRESULT (WINAPI *get_raw)( void *, HSTRING * ) = (void *)(*(void ***)uri_rt)[16];
+            if (get_raw) get_raw( uri_rt, &hstr );
+        }
+        IInspectable_Release( (IInspectable *)uri_rt );
+        if (hstr) return hstr;
+    }
+    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IPropertyValue_local, &pv )) && pv)
+    {
+        HRESULT (WINAPI *get_str)( void *, HSTRING * ) = (void *)(*(void ***)pv)[23];
+        if (get_str) get_str( pv, &hstr );
+        IInspectable_Release( (IInspectable *)pv );
+    }
+    return hstr;
+}
+
 static void wv2_navigate_once( struct xaml_element *impl )
 {
-    static WCHAR url[] = L"https://web.whatsapp.com/";
+    const WCHAR *url = NULL;
 
     if (impl->navigated) return;
     if (!impl->loader_core) { ERR( "wv2_navigate_once: no loader_core\n" ); return; }
+    if (impl->wv2_source_uri)
+        url = WindowsGetStringRawBuffer( impl->wv2_source_uri, NULL );
+    else if (impl->core_webview2)
+    {
+        struct core_webview2 *cwv = impl_from_cwv2( impl->core_webview2 );
+        if (cwv->source_uri)
+            url = WindowsGetStringRawBuffer( cwv->source_uri, NULL );
+    }
+    if (!url || !*url)
+    {
+        ERR( "wv2_navigate_once: no WebView2.Source URI set, deferring navigation\n" );
+        return;
+    }
     impl->navigated = TRUE;
     if (impl->real_loader)
     {
         HRESULT (WINAPI *p_navigate)( void *, LPCWSTR ) =
             (void *)(*(void ***)impl->loader_core)[5];  /* COM ICoreWebView2::Navigate */
         HRESULT hr = p_navigate( impl->loader_core, url );
-        ERR( "wv2_navigate_once (real): loader_core %p hr %#lx\n", impl->loader_core, hr );
+        ERR( "wv2_navigate_once (real): loader_core %p url=%s hr %#lx\n",
+             impl->loader_core, debugstr_w( url ), hr );
     }
     else
     {
@@ -3723,8 +3845,53 @@ static void wv2_navigate_once( struct xaml_element *impl )
         typedef HRESULT (WINAPI *p_nav_fn)( void *, LPCWSTR, void * );
         p_nav_fn p_navigate = (p_nav_fn)(*(void ***)impl->loader_core)[6];
         HRESULT hr = p_navigate( impl->loader_core, url, NULL );
-        ERR( "wv2_navigate_once (builtin): loader_core %p hr %#lx\n", impl->loader_core, hr );
+        ERR( "wv2_navigate_once (builtin): loader_core %p url=%s hr %#lx\n",
+             impl->loader_core, debugstr_w( url ), hr );
     }
+}
+
+static HRESULT WINAPI wv2_get_Source( void *iface, IInspectable **value )
+{
+    struct xaml_element *impl = impl_from_IWebView2( iface );
+    if (!value) return E_POINTER;
+    *value = impl->wv2_source;
+    if (*value) IInspectable_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI wv2_put_Source( void *iface, IInspectable *value )
+{
+    struct xaml_element *impl = impl_from_IWebView2( iface );
+    HSTRING hstr;
+
+    if (impl->wv2_source) IInspectable_Release( impl->wv2_source );
+    impl->wv2_source = value;
+    if (impl->wv2_source) IInspectable_AddRef( impl->wv2_source );
+
+    if (impl->wv2_source_uri)
+    {
+        WindowsDeleteString( impl->wv2_source_uri );
+        impl->wv2_source_uri = NULL;
+    }
+    hstr = wv2_extract_uri_string( value );
+    if (hstr)
+    {
+        impl->wv2_source_uri = hstr;
+        ERR( "wv2_put_Source: set Source URI %s on %p\n", debugstr_hstring( hstr ), impl );
+        if (impl->core_webview2)
+        {
+            struct core_webview2 *cwv = impl_from_cwv2( impl->core_webview2 );
+            if (cwv->source_uri) WindowsDeleteString( cwv->source_uri );
+            cwv->source_uri = NULL;
+            WindowsDuplicateString( hstr, &cwv->source_uri );
+        }
+        if (impl->loader_core)
+        {
+            impl->navigated = FALSE;
+            wv2_navigate_once( impl );
+        }
+    }
+    return S_OK;
 }
 
 static void trigger_core_webview2_initialized( struct xaml_element *impl, void *iface )
@@ -3739,6 +3906,9 @@ static void trigger_core_webview2_initialized( struct xaml_element *impl, void *
             cwv->ref = 1;
             cwv->real_loader = impl->real_loader;
             cwv->loader_core = impl->loader_core;
+            cwv->owner = impl;
+            if (impl->wv2_source_uri)
+                WindowsDuplicateString( impl->wv2_source_uri, &cwv->source_uri );
             impl->core_webview2 = &cwv->IInspectable_iface;
         }
     }
@@ -3859,7 +4029,8 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                 ERR( "wv2_ctrl_handler_Invoke: found CompositionController %p visual=%p\n", comp_ctrl, vis );
                 if (vis)
                 {
-                    HRESULT hr_rv = ((HRESULT (WINAPI *)(void *, IUnknown *))(*(void ***)comp_ctrl)[4])(
+                    /* ICoreWebView2CompositionController::put_RootVisualTarget is slot 27 */
+                    HRESULT hr_rv = ((HRESULT (WINAPI *)(void *, IUnknown *))(*(void ***)comp_ctrl)[27])(
                         comp_ctrl, (IUnknown *)vis );
                     ERR( "wv2_ctrl_handler_Invoke: put_RootVisualTarget hr=%#lx\n", hr_rv );
                 }
@@ -3869,9 +4040,10 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             if (SUCCEEDED( ((IUnknown *)controller)->lpVtbl->QueryInterface(
                     (IUnknown *)controller, &IID_ICoreWebView2Controller_g, &ctrl) ) && ctrl)
             {
+                /* get_Parent=3, put_Parent=4, get_Bounds=5, put_Bounds=6, get_IsVisible=7, put_IsVisible=8 */
+                if (parent) ((HRESULT (WINAPI *)(void *, HWND))(*(void ***)ctrl)[4])( ctrl, parent );
                 hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)ctrl)[6])( ctrl, rc );
-                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)ctrl)[4])( ctrl, TRUE );
-                ((HRESULT (WINAPI *)(void *))(*(void ***)ctrl)[23])( ctrl );
+                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)ctrl)[8])( ctrl, TRUE );
                 get_core = (void *)(*(void ***)ctrl)[25];
                 hr_c = get_core( ctrl, &core );
                 ERR( "wv2_ctrl_handler_Invoke (ctrl): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx get_CoreWebView2=%#lx core=%p\n",
@@ -3880,9 +4052,9 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             }
             else
             {
+                if (parent) ((HRESULT (WINAPI *)(void *, HWND))(*(void ***)controller)[4])( controller, parent );
                 hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)controller)[6])( controller, rc );
-                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)controller)[4])( controller, TRUE );
-                ((HRESULT (WINAPI *)(void *))(*(void ***)controller)[23])( controller );
+                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)controller)[8])( controller, TRUE );
                 get_core = (void *)(*(void ***)controller)[25];  /* COM ICoreWebView2Controller::get_CoreWebView2 */
                 hr_c = get_core( controller, &core );
                 ERR( "wv2_ctrl_handler_Invoke (fallback): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx hr_c=%#lx core=%p\n",
@@ -4044,13 +4216,232 @@ static BOOL wv2_folder_has_runtime( const WCHAR *dir )
     return GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES;
 }
 
+static int wv2_compare_versions( const WCHAR *a, const WCHAR *b )
+{
+    unsigned int av[4] = {0}, bv[4] = {0};
+    int i;
+    swscanf( a, L"%u.%u.%u.%u", &av[0], &av[1], &av[2], &av[3] );
+    swscanf( b, L"%u.%u.%u.%u", &bv[0], &bv[1], &bv[2], &bv[3] );
+    for (i = 0; i < 4; i++)
+    {
+        if (av[i] != bv[i]) return av[i] > bv[i] ? 1 : -1;
+    }
+    return 0;
+}
+
+static void wv2_add_runtime_candidate( WCHAR candidates[][MAX_PATH], WCHAR versions[][64], int *ncand, int max_cand,
+                                       const WCHAR *dir, const WCHAR *ver )
+{
+    int i;
+    if (!dir || !*dir || !wv2_folder_has_runtime( dir )) return;
+    for (i = 0; i < *ncand; i++)
+    {
+        if (!wcsicmp( candidates[i], dir )) return;
+    }
+    if (*ncand >= max_cand) return;
+
+    /* Insert sorted newest-version-first when version string is known */
+    i = *ncand;
+    if (ver && *ver)
+    {
+        for (i = 0; i < *ncand; i++)
+        {
+            if (!versions[i][0] || wv2_compare_versions( ver, versions[i] ) > 0)
+                break;
+        }
+        if (i < *ncand)
+        {
+            int j;
+            for (j = *ncand; j > i; j--)
+            {
+                lstrcpynW( candidates[j], candidates[j - 1], MAX_PATH );
+                lstrcpynW( versions[j], versions[j - 1], 64 );
+            }
+        }
+    }
+    lstrcpynW( candidates[i], dir, MAX_PATH );
+    lstrcpynW( versions[i], ver ? ver : L"", 64 );
+    (*ncand)++;
+}
+
+static void wv2_scan_app_base( const WCHAR *base_dir, WCHAR candidates[][MAX_PATH], WCHAR versions[][64],
+                               int *ncand, int max_cand )
+{
+    WCHAR pattern[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE hfind;
+
+    if (!base_dir || !*base_dir) return;
+    lstrcpynW( pattern, base_dir, MAX_PATH - 4 );
+    lstrcatW( pattern, L"\\*" );
+    hfind = FindFirstFileW( pattern, &fd );
+    if (hfind == INVALID_HANDLE_VALUE) return;
+    do
+    {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            fd.cFileName[0] >= L'0' && fd.cFileName[0] <= L'9')
+        {
+            WCHAR full[MAX_PATH];
+            lstrcpynW( full, base_dir, MAX_PATH - 68 );
+            lstrcatW( full, L"\\" );
+            lstrcatW( full, fd.cFileName );
+            wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, full, fd.cFileName );
+        }
+    } while (FindNextFileW( hfind, &fd ));
+    FindClose( hfind );
+}
+
+static void wv2_discover_runtimes( WCHAR candidates[][MAX_PATH], int *ncand, int max_cand, const WCHAR *exe_dir )
+{
+    static const GUID FOLDERID_ProgramFilesX86_g =
+        { 0x7c5a40ef, 0xa0fb, 0x4bfc, { 0x87, 0x4a, 0xc0, 0xf2, 0xe0, 0xb9, 0xfa, 0x8e } };
+    WCHAR versions[16][64];
+    WCHAR env_browser[MAX_PATH] = {0}, pf86[MAX_PATH] = {0}, pf[MAX_PATH] = {0}, app_dir[MAX_PATH];
+    HMODULE reg_mod, shell_mod;
+    typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
+    typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
+    typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
+    typedef HRESULT (WINAPI *p_SHGetKnownFolderPath_t)( const GUID *, DWORD, HANDLE, PWSTR * );
+
+    *ncand = 0;
+    memset( versions, 0, sizeof(versions) );
+
+    if (GetEnvironmentVariableW( L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", env_browser, MAX_PATH ))
+        wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, env_browser, L"9999.0.0.0" );
+
+    if (ExpandEnvironmentStringsW( L"%ProgramFiles(x86)%", pf86, MAX_PATH ) == 0 || wcschr( pf86, L'%' ))
+    {
+        pf86[0] = 0;
+        shell_mod = GetModuleHandleW( L"shell32.dll" );
+        if (!shell_mod) shell_mod = LoadLibraryW( L"shell32.dll" );
+        if (shell_mod)
+        {
+            p_SHGetKnownFolderPath_t p_known = (p_SHGetKnownFolderPath_t)GetProcAddress( shell_mod, "SHGetKnownFolderPath" );
+            PWSTR p = NULL;
+            if (p_known && SUCCEEDED( p_known( &FOLDERID_ProgramFilesX86_g, 0, NULL, &p ) ) && p)
+            {
+                lstrcpynW( pf86, p, MAX_PATH );
+                CoTaskMemFree( p );
+            }
+        }
+    }
+
+    reg_mod = GetModuleHandleW( L"kernelbase.dll" );
+    if (!reg_mod) reg_mod = LoadLibraryW( L"advapi32.dll" );
+    if (reg_mod)
+    {
+        p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
+        p_RegQueryValueExW_t p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
+        p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
+        if (p_open && p_query && p_close)
+        {
+            static const HKEY roots[] = { HKEY_LOCAL_MACHINE, HKEY_CURRENT_USER };
+            static const WCHAR *reg_paths[] = {
+                L"SOFTWARE\\WOW6432Node\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+                L"SOFTWARE\\Microsoft\\EdgeUpdate\\Clients\\{F3017226-FE2A-4295-8BDF-00C3A9A7E4C5}",
+            };
+            size_t r, p;
+            for (r = 0; r < ARRAY_SIZE(roots); r++)
+            {
+                for (p = 0; p < ARRAY_SIZE(reg_paths); p++)
+                {
+                    HKEY hk = NULL;
+                    WCHAR pv[64] = {0}, loc[MAX_PATH] = {0};
+                    DWORD type = 0, cb;
+                    REGSAM sam = KEY_READ | (p == 1 ? KEY_WOW64_32KEY : 0);
+                    if (p_open( roots[r], reg_paths[p], 0, sam, &hk ) != ERROR_SUCCESS) continue;
+                    cb = sizeof(pv);
+                    if (p_query( hk, L"pv", NULL, &type, (BYTE *)pv, &cb ) != ERROR_SUCCESS || type != REG_SZ)
+                        pv[0] = 0;
+                    cb = sizeof(loc);
+                    if (p_query( hk, L"location", NULL, &type, (BYTE *)loc, &cb ) == ERROR_SUCCESS && type == REG_SZ && loc[0])
+                        wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, loc, pv );
+                    if (pv[0] && pf86[0])
+                    {
+                        lstrcpynW( app_dir, pf86, MAX_PATH - 96 );
+                        lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application\\" );
+                        lstrcatW( app_dir, pv );
+                        wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, app_dir, pv );
+                    }
+                    p_close( hk );
+                }
+            }
+        }
+    }
+
+    if (pf86[0])
+    {
+        lstrcpynW( app_dir, pf86, MAX_PATH - 48 );
+        lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application" );
+        wv2_scan_app_base( app_dir, candidates, versions, ncand, max_cand );
+    }
+    if (ExpandEnvironmentStringsW( L"%ProgramFiles%", pf, MAX_PATH ) > 0 && !wcschr( pf, L'%' ) &&
+        (!pf86[0] || wcsicmp( pf, pf86 ) != 0))
+    {
+        lstrcpynW( app_dir, pf, MAX_PATH - 48 );
+        lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application" );
+        wv2_scan_app_base( app_dir, candidates, versions, ncand, max_cand );
+    }
+
+    if (exe_dir && *exe_dir)
+        wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, exe_dir, L"" );
+}
+
+static void wv2_resolve_default_udf( WCHAR *out_udf, size_t out_len )
+{
+    static const GUID FOLDERID_LocalAppData_g =
+        { 0xf1b32785, 0x6fba, 0x4fcf, { 0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91 } };
+    typedef HRESULT (WINAPI *p_SHGetKnownFolderPath_t)( const GUID *, DWORD, HANDLE, PWSTR * );
+    typedef LONG (WINAPI *p_GetCurrentPackageFamilyName_t)( UINT32 *, PWSTR );
+    HMODULE shell_mod, k32_mod;
+    PWSTR local_app_data = NULL;
+    WCHAR family[256] = {0};
+
+    out_udf[0] = 0;
+    shell_mod = GetModuleHandleW( L"shell32.dll" );
+    if (!shell_mod) shell_mod = LoadLibraryW( L"shell32.dll" );
+    if (shell_mod)
+    {
+        p_SHGetKnownFolderPath_t p_known = (p_SHGetKnownFolderPath_t)GetProcAddress( shell_mod, "SHGetKnownFolderPath" );
+        if (p_known && SUCCEEDED( p_known( &FOLDERID_LocalAppData_g, 0, NULL, &local_app_data ) ) && local_app_data)
+        {
+            k32_mod = GetModuleHandleW( L"kernelbase.dll" );
+            if (!k32_mod) k32_mod = GetModuleHandleW( L"kernel32.dll" );
+            if (k32_mod)
+            {
+                p_GetCurrentPackageFamilyName_t p_fam =
+                    (p_GetCurrentPackageFamilyName_t)GetProcAddress( k32_mod, "GetCurrentPackageFamilyName" );
+                UINT32 flen = ARRAY_SIZE(family);
+                if (p_fam && p_fam( &flen, family ) == ERROR_SUCCESS && family[0])
+                {
+                    WCHAR pkg_cache[MAX_PATH];
+                    swprintf( pkg_cache, ARRAY_SIZE(pkg_cache), L"%s\\Packages\\%s\\LocalCache",
+                              local_app_data, family );
+                    if (GetFileAttributesW( pkg_cache ) != INVALID_FILE_ATTRIBUTES)
+                    {
+                        swprintf( out_udf, out_len, L"%s\\EBWebView", pkg_cache );
+                        CoTaskMemFree( local_app_data );
+                        return;
+                    }
+                }
+            }
+            swprintf( out_udf, out_len, L"%s\\Microsoft\\Edge\\User Data", local_app_data );
+            CoTaskMemFree( local_app_data );
+            return;
+        }
+    }
+    if (ExpandEnvironmentStringsW( L"%LOCALAPPDATA%\\Microsoft\\Edge\\User Data", out_udf, out_len ) == 0 ||
+        wcschr( out_udf, L'%' ))
+        lstrcpynW( out_udf, L"C:\\Microsoft\\Edge\\User Data", out_len );
+}
+
 static void wv2_start_browser( struct xaml_element *impl )
 {
     HRESULT (WINAPI *p_create)( LPCWSTR, LPCWSTR, void *, void * );
     struct wv2_env_handler *eh;
     HMODULE module = NULL;
     WCHAR exe_dir[MAX_PATH] = {0}, orig_loader[MAX_PATH] = {0};
-    WCHAR env_browser[MAX_PATH] = {0}, udf[MAX_PATH] = {0};
+    WCHAR udf[MAX_PATH] = {0}, default_udf[MAX_PATH] = {0};
     const WCHAR *browser_folder = NULL, *user_data_folder = NULL;
 
     if (impl->browser_started) return;
@@ -4075,30 +4466,18 @@ static void wv2_start_browser( struct xaml_element *impl )
 
     if (module && (p_create = (void *)GetProcAddress( module, "CreateCoreWebView2EnvironmentWithOptions" )))
     {
-        static const WCHAR wb_runtime[] =
-            L"Z:\\var\\tmp\\wine-installs\\wbappgate\\drive_c\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\157.0.4341.42";
-        static const WCHAR pfx_runtime[] =
-            L"C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\156.0.4314.42";
-        static const WCHAR default_udf[] =
-            L"C:\\users\\olge\\AppData\\Local\\WhatsApp\\LocalCache\\EBWebView";
-        const WCHAR *candidates[5];
+        WCHAR candidates[16][MAX_PATH];
         int ncand = 0, ci;
 
-        if (GetEnvironmentVariableW( L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", env_browser, MAX_PATH ) &&
-            wv2_folder_has_runtime( env_browser ))
-            candidates[ncand++] = env_browser;
-        if (wv2_folder_has_runtime( pfx_runtime ))
-            candidates[ncand++] = pfx_runtime;
-        if (wv2_folder_has_runtime( wb_runtime ))
-            candidates[ncand++] = wb_runtime;
-        if (wv2_folder_has_runtime( exe_dir ))
-            candidates[ncand++] = exe_dir;
-        candidates[ncand++] = NULL;
+        wv2_discover_runtimes( candidates, &ncand, ARRAY_SIZE(candidates) - 1, exe_dir );
 
         if (GetEnvironmentVariableW( L"WEBVIEW2_USER_DATA_FOLDER", udf, MAX_PATH ) && udf[0])
             user_data_folder = udf;
         else
+        {
+            wv2_resolve_default_udf( default_udf, ARRAY_SIZE(default_udf) );
             user_data_folder = default_udf;
+        }
 
         if ((eh = calloc( 1, sizeof(*eh) )))
         {
@@ -4107,29 +4486,35 @@ static void wv2_start_browser( struct xaml_element *impl )
             eh->ref = 1;
             eh->impl = impl;
             impl->real_loader = TRUE;
-            for (ci = 0; ci < ncand; ci++)
+            for (ci = 0; ci <= ncand; ci++)
             {
                 HRESULT hr;
-                browser_folder = candidates[ci];
+                browser_folder = (ci < ncand) ? candidates[ci] : NULL;
                 ERR( "wv2_start_browser: try real loader[%d] browser=%s udf=%s\n",
                      ci, debugstr_w( browser_folder ), debugstr_w( user_data_folder ) );
                 hr = p_create( browser_folder, user_data_folder, NULL, eh );
                 ERR( "wv2_start_browser: real CreateCoreWebView2EnvironmentWithOptions[%d] -> %#lx\n", ci, hr );
                 if (SUCCEEDED( hr )) return;
             }
-            /* Direct fallback: load EmbeddedBrowserWebView.dll and invoke CreateWebViewEnvironmentWithOptionsInternal */
+            /* Direct fallback: load EmbeddedBrowserWebView.dll from discovered runtime candidates */
+            for (ci = 0; ci < ncand; ci++)
             {
-                static const WCHAR *eb_paths[] = {
-                    L"C:\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\156.0.4314.42\\EBWebView\\x64\\EmbeddedBrowserWebView.dll",
-                    L"Z:\\var\\tmp\\wine-installs\\wbappgate\\drive_c\\Program Files (x86)\\Microsoft\\EdgeWebView\\Application\\157.0.4341.42\\EBWebView\\x64\\EmbeddedBrowserWebView.dll",
+                static const WCHAR *rel_dlls[] = {
+                    L"\\EBWebView\\x64\\EmbeddedBrowserWebView.dll",
+                    L"\\EmbeddedBrowserWebView.dll",
                 };
-                int ei;
-                for (ei = 0; ei < (int)ARRAY_SIZE(eb_paths); ei++)
+                int ri;
+                for (ri = 0; ri < (int)ARRAY_SIZE(rel_dlls); ri++)
                 {
-                    HMODULE eb = LoadLibraryExW( eb_paths[ei], NULL, LOAD_WITH_ALTERED_SEARCH_PATH );
+                    WCHAR eb_path[MAX_PATH];
+                    HMODULE eb;
                     HRESULT (WINAPI *p_int)( BOOL, int, LPCWSTR, void *, void * );
+                    lstrcpynW( eb_path, candidates[ci], MAX_PATH - 48 );
+                    lstrcatW( eb_path, rel_dlls[ri] );
+                    if (GetFileAttributesW( eb_path ) == INVALID_FILE_ATTRIBUTES) continue;
+                    eb = LoadLibraryExW( eb_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH );
                     ERR( "wv2_start_browser: LoadLibraryEx(%s) -> %p gle=%lu\n",
-                         debugstr_w( eb_paths[ei] ), eb, GetLastError() );
+                         debugstr_w( eb_path ), eb, GetLastError() );
                     if (eb && (p_int = (void *)GetProcAddress( eb, "CreateWebViewEnvironmentWithOptionsInternal" )))
                     {
                         HRESULT hr = p_int( TRUE, 0, user_data_folder, NULL, eh );
@@ -4208,6 +4593,53 @@ WVP(32) WVP(33) WVP(34) WVP(35) WVP(36) WVP(37) WVP(38) WVP(39)
 WVP(40) WVP(41) WVP(42) WVP(43) WVP(44) WVP(45) WVP(46) WVP(47)
 WVP(48) WVP(49) WVP(50) WVP(51) WVP(52) WVP(53) WVP(54) WVP(55)
 WVP(56) WVP(57) WVP(58) WVP(59) WVP(60) WVP(61) WVP(62) WVP(63)
+static HRESULT WINAPI wv2_do_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct xaml_element *impl = impl_from_IDependencyObject( iface );
+    return element_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI wv2_do_AddRef( IInspectable *iface )
+{
+    struct xaml_element *impl = impl_from_IDependencyObject( iface );
+    return element_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI wv2_do_Release( IInspectable *iface )
+{
+    struct xaml_element *impl = impl_from_IDependencyObject( iface );
+    return element_Release( &impl->IInspectable_iface );
+}
+static HRESULT WINAPI wv2_do_GetValue( void *iface, void *dp, IInspectable **out )
+{
+    struct xaml_element *impl = impl_from_IDependencyObject( iface );
+    if (!out) return E_POINTER;
+    if (dp && dp == wv2_source_dp)
+        return wv2_get_Source( &impl->IWebView2_iface, out );
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI wv2_do_SetValue( void *iface, void *dp, IInspectable *value )
+{
+    struct xaml_element *impl = impl_from_IDependencyObject( iface );
+    if (dp && dp == wv2_source_dp)
+        return wv2_put_Source( &impl->IWebView2_iface, value );
+    return S_OK;
+}
+
+static const void *wv2_do_vtbl[64] =
+{
+    [0] = wv2_do_QueryInterface,
+    [1] = wv2_do_AddRef,
+    [2] = wv2_do_Release,
+    [3] = element_GetIids,
+    [4] = element_GetRuntimeClassName,
+    [5] = element_GetTrustLevel,
+    [6 ... 63] = element_generic_slot,
+    [6] = wv2_do_GetValue,
+    [7] = wv2_do_SetValue,
+    [9] = wv2_do_GetValue,
+    [10] = wv2_do_SetValue,
+};
+
 static const void *wv2_vtbl[256] =
 {
     [0] = element_wv2_QueryInterface,         /* 0: QI */
@@ -4222,6 +4654,8 @@ static const void *wv2_vtbl[256] =
     [8] = xaml_ReleaseFromTrackerSource,
     [9] = wv2_get_CoreWebView2,               /* 9: get_CoreWebView2 (body = old + 3) */
     [10] = wv2_EnsureCoreWebView2Async,       /* 10: EnsureCoreWebView2Async */
+    [12] = wv2_get_Source,                    /* 12: get_Source (tracked +3) */
+    [13] = wv2_put_Source,                    /* 13: put_Source (tracked +3) */
     [20] = wv2_get_CoreWebView2,              /* 20: get_CoreWebView2 (alias) */
     [27] = wv2_add_CoreWebView2Initialized,
     [28] = wv2_remove_CoreWebView2Initialized,
@@ -4325,6 +4759,7 @@ HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instan
     impl->IWebView2_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv2_vtbl );
     impl->IWebView22_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv22_vtbl );
     impl->IUIElement_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( uielement_vtbl );
+    impl->IDependencyObject_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( wv2_do_vtbl );
     impl->class_name = L"Windows.UI.Xaml.Controls.Grid";
     impl->ref = 1;
     impl->outer = outer;
@@ -4931,11 +5366,26 @@ static const void *webview2_composable_vtbl[] =
     frame_generic_slot,
 };
 
+static const void *webview2_statics_vtbl[] =
+{
+    statics_factory_QueryInterface,
+    statics_factory_AddRef,
+    statics_factory_Release,
+    frame_factory_GetIids,
+    frame_factory_GetRuntimeClassName,
+    frame_factory_GetTrustLevel,
+    wv2_statics_get_SourceProperty,        /* 6: get_SourceProperty */
+    wv2_statics_get_prop,                  /* 7: get_CanGoForwardProperty */
+    wv2_statics_get_prop,                  /* 8: get_CanGoBackProperty */
+    wv2_statics_get_prop,                  /* 9: get_DefaultBackgroundColorProperty */
+};
+
 static struct frame_factory webview2_factory_obj =
 {
     {(const struct IActivationFactoryVtbl *)webview2_factory_vtbl},
     {(const struct IInspectableVtbl *)webview2_composable_vtbl},
     1,
+    {(const struct IInspectableVtbl *)webview2_statics_vtbl},
 };
 IActivationFactory *webview2_factory = &webview2_factory_obj.IActivationFactory_iface;
 

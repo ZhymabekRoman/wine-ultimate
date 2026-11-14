@@ -25,6 +25,10 @@
 #include "wine/exception.h"
 #include "private.h"
 #include "weakreference.h"
+#include "winreg.h"
+#define WIDL_using_Windows_ApplicationModel
+#define WIDL_using_Windows_Management_Deployment
+#include "windows.management.deployment.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
@@ -1196,6 +1200,11 @@ static struct uwp_element *g_navigated_page_el = NULL;
 
 static void uwp_invalidate_window( void );
 static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *want );
+static struct uwp_element *uwp_elem_from_any( void *ptr );
+static HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out );
+static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val );
+static HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token );
+static HRESULT WINAPI uwp_tb_put_Text( void *iface, HSTRING val );
 
 /* --- Live engine: StandardCalculatorViewModel (CalcViewModel.dll) ---
  * Slot 7 = get_DisplayValue(HSTRING*), slot 79 = SendCommandToCalcManager(int).
@@ -1203,64 +1212,390 @@ static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *
  * ~100ms after activation, so pump messages before the first SendCommand. */
 extern HRESULT WINAPI RoActivateInstance( HSTRING activatableClassId, IInspectable **instance );
 
+static const GUID IID_INotifyPropertyChanged_UWP =
+    { 0xcf75d69c, 0xf2f4, 0x4fb6, { 0xa7, 0xc3, 0x5f, 0x20, 0x42, 0x0f, 0x5d, 0x42 } };
+static const GUID IID_IPropertyChangedEventHandler_UWP =
+    { 0x50f19c16, 0x0a22, 0x4d8e, { 0xa0, 0x89, 0x1e, 0xa9, 0x95, 0x16, 0x57, 0xd2 } };
+static const GUID IID_IPropertyChangedEventArgs_UWP =
+    { 0x4f33a9a0, 0x5cf4, 0x47a4, { 0xb1, 0x6f, 0xd7, 0xfa, 0xaf, 0x17, 0x45, 0x7e } };
+static const GUID IID_IReference_NumbersAndOperatorsEnum =
+    { 0x487a747c, 0x8529, 0x548a, { 0x92, 0x6f, 0x3b, 0xe3, 0x9f, 0x3e, 0xcb, 0xbf } };
+static const GUID IID_IDependencyPropertyChangedCallback_UWP =
+    { 0x49c85e2a, 0xf407, 0x48e8, { 0x84, 0x54, 0x3e, 0x3f, 0x98, 0x31, 0xe9, 0xb9 } };
+
 static struct
 {
-    IInspectable *vm;      /* StandardCalculatorViewModel RCW */
-    HWND pump_hwnd;        /* CoreWindow used to pump the async init task */
+    IInspectable *vm;             /* StandardCalculatorViewModel RCW */
+    HWND pump_hwnd;               /* CoreWindow used to pump the async init task */
     BOOL pumped;
-    int last_code;         /* dedupe repeated clicks on init-pending VM */
+    BOOL npc_hooked;
+    IDependencyProperty *display_dp;
+    int last_code;                /* dedupe repeated clicks on init-pending VM */
 } g_calc_vm;
 
-static int uwp_key_to_calc_code( const WCHAR *name, const WCHAR *text )
+static BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_plain_int )
 {
-    if (name)
+    IPropertyValue *pv = NULL;
+    PropertyType pt = PropertyType_Empty;
+    void *iref = NULL;
+
+    if (!obj || !out_val) return FALSE;
+    if (allow_plain_int && uwp_unbox_int32( obj, out_val )) return TRUE;
+
+    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IPropertyValue_g, (void **)&pv )) && pv)
     {
-        if (!wcsicmp( name, L"PercentButton" )) return 95;
-        if (!wcsicmp( name, L"ClearEntryButton" )) return 82;
-        if (!wcsicmp( name, L"ClearButton" )) return 81;
-        if (!wcsicmp( name, L"BackSpaceButton" )) return 83;
-        if (!wcsicmp( name, L"divButton" ) || !wcsicmp( name, L"DivideButton" )) return 91;
-        if (!wcsicmp( name, L"mulButton" ) || !wcsicmp( name, L"MultiplyButton" )) return 92;
-        if (!wcsicmp( name, L"minusButton" ) || !wcsicmp( name, L"MinusButton" )) return 94;
-        if (!wcsicmp( name, L"plusButton" ) || !wcsicmp( name, L"PlusButton" )) return 93;
-        if (!wcsicmp( name, L"EqualButton" )) return 121;
-        if (!wcsicmp( name, L"SqrtButton" ) || !wcsicmp( name, L"SquareRootButton" )) return 141;
-        if (!wcsicmp( name, L"num0Button" )) return 130;
-        if (!wcsicmp( name, L"num1Button" )) return 131;
-        if (!wcsicmp( name, L"num2Button" )) return 132;
-        if (!wcsicmp( name, L"num3Button" )) return 133;
-        if (!wcsicmp( name, L"num4Button" )) return 134;
-        if (!wcsicmp( name, L"num5Button" )) return 135;
-        if (!wcsicmp( name, L"num6Button" )) return 136;
-        if (!wcsicmp( name, L"num7Button" )) return 137;
-        if (!wcsicmp( name, L"num8Button" )) return 138;
-        if (!wcsicmp( name, L"num9Button" )) return 139;
-        if (!wcsicmp( name, L"DecimalSeparatorButton" )) return 90;
-        if (!wcsicmp( name, L"NegateButton" )) return 97;
-        if (!wcsicmp( name, L"InvertButton" )) return 145;
-        if (!wcsicmp( name, L"SquareButton" ) || !wcsicmp( name, L"XPower2Button" )) return 143;
+        HRESULT hr = IPropertyValue_get_Type( pv, &pt );
+        IPropertyValue_Release( pv );
+        if (FAILED(hr) || pt != 20 /* PropertyType_OtherType */)
+            return FALSE;
     }
-    if (text && text[0] && !text[1])
+    else return FALSE;
+
+    if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IReference_NumbersAndOperatorsEnum, &iref )) && iref)
     {
-        if (text[0] >= L'0' && text[0] <= L'9') return 130 + (text[0] - L'0');
-        switch (text[0])
+        HRESULT (WINAPI *get_val)(void *, INT32 *) = (void *)(*(void ***)iref)[6];
+        INT32 v = 0;
+        HRESULT hr = get_val ? get_val( iref, &v ) : E_FAIL;
+        IUnknown_Release( (IUnknown *)iref );
+        if (SUCCEEDED(hr))
         {
-        case L'+': return 93;
-        case L'-': return 94;
-        case L'*': return 92;
-        case L'/': return 91;
-        case L'=': return 121;
-        case L'.': return 90;
-        case L'%': return 95;
+            *out_val = v;
+            return TRUE;
         }
     }
+
+    /* Generic IReference<Enum> fallback via runtime class name + GetIids */
+    {
+        HSTRING hcls = NULL;
+        const WCHAR *cls = NULL;
+        ULONG cnt = 0, k;
+        IID *iids = NULL;
+        if (SUCCEEDED(IInspectable_GetRuntimeClassName( obj, &hcls )) && hcls)
+        {
+            cls = WindowsGetStringRawBuffer( hcls, NULL );
+            if (cls && wcsstr( cls, L"IReference`1<" ) &&
+                SUCCEEDED(IInspectable_GetIids( obj, &cnt, &iids )) && iids)
+            {
+                for (k = 0; k < cnt; k++)
+                {
+                    if (IsEqualGUID( &iids[k], &IID_IUnknown ) ||
+                        IsEqualGUID( &iids[k], &IID_IInspectable ) ||
+                        IsEqualGUID( &iids[k], &IID_IAgileObject ) ||
+                        IsEqualGUID( &iids[k], &IID_IPropertyValue_g ))
+                        continue;
+                    iref = NULL;
+                    if (SUCCEEDED(IInspectable_QueryInterface( obj, &iids[k], &iref )) && iref)
+                    {
+                        INT32 v = 0;
+                        HRESULT hr = E_FAIL;
+                        __TRY
+                        {
+                            HRESULT (WINAPI *get_val)(void *, INT32 *) = (void *)(*(void ***)iref)[6];
+                            if (get_val) hr = get_val( iref, &v );
+                        }
+                        __EXCEPT_ALL { hr = E_FAIL; }
+                        __ENDTRY;
+                        IUnknown_Release( (IUnknown *)iref );
+                        if (SUCCEEDED(hr))
+                        {
+                            *out_val = v;
+                            CoTaskMemFree( iids );
+                            WindowsDeleteString( hcls );
+                            return TRUE;
+                        }
+                    }
+                }
+                CoTaskMemFree( iids );
+            }
+            WindowsDeleteString( hcls );
+        }
+    }
+    return FALSE;
+}
+
+static BOOL uwp_get_custom_xaml_member( void *app_outer, const WCHAR *owner_type_name,
+                                        const WCHAR *prop_name, void *target_obj, IInspectable **out_val )
+{
+    void *provider = NULL, *xaml_type = NULL, *member = NULL;
+    HSTRING h_owner = NULL, h_prop = NULL;
+    BOOL ok = FALSE;
+
+    if (!out_val) return FALSE;
+    *out_val = NULL;
+    if (!app_outer || !owner_type_name || !owner_type_name[0] || !prop_name || !target_obj) return FALSE;
+    if (FAILED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
+        return FALSE;
+
+    if (SUCCEEDED(WindowsCreateString( owner_type_name, wcslen(owner_type_name), &h_owner )))
+    {
+        HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)(*(void ***)provider)[7];
+        if (get_by_name && SUCCEEDED(get_by_name( provider, h_owner, &xaml_type )) && xaml_type)
+        {
+            HRESULT (WINAPI *get_member)(void *, HSTRING, void **) = (void *)(*(void ***)xaml_type)[20];
+            if (get_member && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
+            {
+                if (SUCCEEDED(get_member( xaml_type, h_prop, &member )) && member)
+                {
+                    /* Slot 12 on IXamlMember: GetValue(IInspectable *instance, IInspectable **value) */
+                    HRESULT (WINAPI *get_val)(void *, void *, IInspectable **) = (void *)(*(void ***)member)[12];
+                    if (get_val)
+                    {
+                        HRESULT hr = E_FAIL;
+                        __TRY
+                        {
+                            hr = get_val( member, target_obj, out_val );
+                        }
+                        __EXCEPT_ALL { hr = E_FAIL; *out_val = NULL; }
+                        __ENDTRY;
+                        if (SUCCEEDED(hr) && *out_val) ok = TRUE;
+                    }
+                    IInspectable_Release( (IInspectable *)member );
+                }
+                WindowsDeleteString( h_prop );
+            }
+            IInspectable_Release( (IInspectable *)xaml_type );
+        }
+        WindowsDeleteString( h_owner );
+    }
+    IInspectable_Release( (IInspectable *)provider );
+    return ok;
+}
+
+static int uwp_resolve_button_calc_code( struct uwp_element *btn )
+{
+    IInspectable *val = NULL;
+    INT32 code = -1;
+    int i;
+
+    if (!btn) return -1;
+
+    /* 1. Read ButtonId dynamically from the app's IXamlMetadataProvider */
+    if (btn->class_name[0])
+    {
+        IInspectable *target = btn->outer ? btn->outer : &btn->IInspectable_iface;
+        if (uwp_get_custom_xaml_member( uwp_get_app_outer(), btn->class_name, L"ButtonId", target, &val ) && val)
+        {
+            BOOL ok = uwp_unbox_enum_int32( val, &code, TRUE );
+            IInspectable_Release( val );
+            if (ok && code >= 0)
+            {
+                TRACE( "uwp_resolve_button_calc_code: provider ButtonId on %s -> %d\n",
+                       debugstr_w(btn->name), (int)code );
+                return (int)code;
+            }
+        }
+    }
+
+    /* 2. Read CommandParameter set by CalculatorButton::OnButtonIdPropertyChanged */
+    if (btn->command_param && uwp_unbox_enum_int32( btn->command_param, &code, TRUE ) && code >= 0)
+    {
+        TRACE( "uwp_resolve_button_calc_code: CommandParameter on %s -> %d\n",
+               debugstr_w(btn->name), (int)code );
+        return (int)code;
+    }
+
+    /* 3. Read boxed ButtonId enum from element's DependencyProperty bag */
+    for (i = 0; i < btn->dp_cnt; i++)
+    {
+        if (btn->dp_store[i].value &&
+            uwp_unbox_enum_int32( btn->dp_store[i].value, &code, FALSE ) && code >= 0)
+        {
+            TRACE( "uwp_resolve_button_calc_code: dp_store[%d] on %s -> %d\n",
+                   i, debugstr_w(btn->name), (int)code );
+            return (int)code;
+        }
+    }
+
     return -1;
 }
+
+/* DependencyPropertyChangedCallback attached to CalculationResult controls */
+static HRESULT WINAPI calc_result_dp_cb_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IDependencyPropertyChangedCallback_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI calc_result_dp_cb_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI calc_result_dp_cb_Release( void *iface ) { return 1; }
+static HRESULT WINAPI calc_result_dp_cb_Invoke( void *iface, void *sender, void *dp )
+{
+    struct uwp_element *res = uwp_elem_from_any( sender );
+    IInspectable *val = NULL;
+    WCHAR buf[256] = {0};
+
+    if (!res || !dp) return S_OK;
+    if (SUCCEEDED(uwp_do_GetValue( &res->IDependencyObject_iface, dp, &val )) && val)
+    {
+        if (uwp_unbox_string( val, buf, ARRAY_SIZE(buf) ) && buf[0])
+        {
+            lstrcpynW( res->text, buf, ARRAY_SIZE(res->text) );
+            if (res->tpl_normal_output)
+            {
+                HSTRING htxt = NULL;
+                if (SUCCEEDED(WindowsCreateString( buf, wcslen(buf), &htxt )) && htxt)
+                {
+                    uwp_tb_put_Text( &res->tpl_normal_output->ITextBlock_iface, htxt );
+                    WindowsDeleteString( htxt );
+                }
+                else
+                {
+                    lstrcpynW( res->tpl_normal_output->text, buf, ARRAY_SIZE(res->tpl_normal_output->text) );
+                    uwp_invalidate_window();
+                }
+            }
+            else
+            {
+                uwp_invalidate_window();
+            }
+        }
+        IInspectable_Release( val );
+    }
+    return S_OK;
+}
+static const void *g_calc_result_dp_cb_vtbl[] =
+{
+    calc_result_dp_cb_QI,
+    calc_result_dp_cb_AddRef,
+    calc_result_dp_cb_Release,
+    calc_result_dp_cb_Invoke,
+};
+static struct { const void *vtbl; } g_calc_result_dp_cb = { g_calc_result_dp_cb_vtbl };
+
+static void uwp_bind_calc_result_elements( void )
+{
+    struct uwp_element *scan;
+    if (!g_calc_vm.display_dp)
+        dependency_property_create( NULL, &g_calc_vm.display_dp );
+    if (!g_calc_vm.display_dp) return;
+
+    for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
+    {
+        if (wcsstr( scan->class_name, L"CalculationResult" ) || !wcscmp( scan->name, L"Results" ))
+        {
+            BOOL already = FALSE;
+            int i;
+            for (i = 0; i < scan->dp_cb_cnt; i++)
+            {
+                if (scan->dp_cbs[i].dp == g_calc_vm.display_dp) { already = TRUE; break; }
+            }
+            if (!already)
+            {
+                INT64 tok = 0;
+                uwp_do2_RegisterPropertyChangedCallback( &scan->IDependencyObject2_iface,
+                                                        g_calc_vm.display_dp, &g_calc_result_dp_cb, &tok );
+                TRACE( "uwp_bind_calc_result_elements: bound DP changed callback on %p (%s)\n",
+                       scan, debugstr_w(scan->name) );
+            }
+        }
+    }
+}
+
+static void uwp_push_display_value_to_results( const WCHAR *s )
+{
+    IInspectable *boxed = NULL;
+    struct uwp_element *scan;
+
+    if (!s || !s[0]) return;
+    uwp_bind_calc_result_elements();
+    if (!g_calc_vm.display_dp) return;
+
+    boxed = box_string_value( s );
+    if (!boxed) return;
+
+    for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
+    {
+        if (wcsstr( scan->class_name, L"CalculationResult" ) || !wcscmp( scan->name, L"Results" ))
+            uwp_do_SetValue( &scan->IDependencyObject_iface, g_calc_vm.display_dp, boxed );
+    }
+    IInspectable_Release( boxed );
+}
+
+static void uwp_sync_calc_display_from_vm( void )
+{
+    HRESULT (WINAPI *get_disp)(void *, HSTRING *);
+    HSTRING hval = NULL;
+    HRESULT hr;
+
+    if (!g_calc_vm.vm) return;
+    get_disp = (void *)(*(void ***)g_calc_vm.vm)[7];
+    if (!get_disp) return;
+    hr = get_disp( g_calc_vm.vm, &hval );
+    TRACE( "uwp_sync_calc_display_from_vm: get_DisplayValue -> %#lx hval %p\n", hr, (void *)hval );
+    if (SUCCEEDED(hr) && hval)
+    {
+        const WCHAR *s = WindowsGetStringRawBuffer( hval, NULL );
+        TRACE( "uwp_sync_calc_display_from_vm: DisplayValue = %s\n", debugstr_w(s) );
+        if (s && s[0]) uwp_push_display_value_to_results( s );
+        WindowsDeleteString( hval );
+    }
+}
+
+/* INotifyPropertyChanged listener for StandardCalculatorViewModel.DisplayValue */
+static HRESULT WINAPI calc_vm_npc_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPropertyChangedEventHandler_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI calc_vm_npc_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI calc_vm_npc_Release( void *iface ) { return 1; }
+static HRESULT WINAPI calc_vm_npc_Invoke( void *iface, void *sender, void *args )
+{
+    HSTRING hprop = NULL;
+    const WCHAR *pname = NULL;
+    BOOL match = FALSE;
+
+    if (args)
+    {
+        void *pcea = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)args, &IID_IPropertyChangedEventArgs_UWP, &pcea )) && pcea)
+        {
+            HRESULT (WINAPI *get_name)(void *, HSTRING *) = (void *)(*(void ***)pcea)[6];
+            if (get_name && SUCCEEDED(get_name( pcea, &hprop )) && hprop)
+                pname = WindowsGetStringRawBuffer( hprop, NULL );
+            IUnknown_Release( (IUnknown *)pcea );
+        }
+    }
+    if (!pname || !pname[0] || !wcscmp( pname, L"DisplayValue" ))
+        match = TRUE;
+    if (hprop) WindowsDeleteString( hprop );
+
+    if (match)
+        uwp_sync_calc_display_from_vm();
+    return S_OK;
+}
+static const void *g_calc_vm_npc_vtbl[] =
+{
+    calc_vm_npc_QI,
+    calc_vm_npc_AddRef,
+    calc_vm_npc_Release,
+    calc_vm_npc_Invoke,
+};
+static struct { const void *vtbl; } g_calc_vm_npc_handler = { g_calc_vm_npc_vtbl };
 
 static void uwp_calc_vm_ensure( void )
 {
     HSTRING h = NULL;
-    if (g_calc_vm.vm) return;
+    if (g_calc_vm.vm)
+    {
+        uwp_bind_calc_result_elements();
+        return;
+    }
     WindowsCreateString( L"CalculatorApp.ViewModel.StandardCalculatorViewModel",
                          wcslen(L"CalculatorApp.ViewModel.StandardCalculatorViewModel"), &h );
     if (h)
@@ -1271,12 +1606,26 @@ static void uwp_calc_vm_ensure( void )
         if (FAILED(hr)) g_calc_vm.vm = NULL;
         else if (g_calc_vm.vm)
         {
+            void *npc = NULL;
+            /* Subscribe to StandardCalculatorViewModel INotifyPropertyChanged */
+            if (!g_calc_vm.npc_hooked &&
+                SUCCEEDED(IInspectable_QueryInterface( g_calc_vm.vm, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
+            {
+                HRESULT (WINAPI *add_pc)(void *, void *, EventRegistrationToken *) = (void *)(*(void ***)npc)[6];
+                EventRegistrationToken tok = {0};
+                if (add_pc && SUCCEEDED(add_pc( npc, &g_calc_vm_npc_handler, &tok )))
+                    g_calc_vm.npc_hooked = TRUE;
+                IUnknown_Release( (IUnknown *)npc );
+            }
             /* Command::ModeBasic (200 = 0xc8) synchronously allocates m_calculatorManager
              * (CCalcEngine) at this+392 in CStandardCalculatorManager::SendCommand. */
-            HRESULT (WINAPI *send)(void *, int) = (void *)(*(void ***)g_calc_vm.vm)[79];
-            HRESULT mhr = send ? send( g_calc_vm.vm, 200 ) : E_FAIL;
-            TRACE( "uwp_calc_vm_ensure: SendCommandToCalcManager(200 ModeBasic) -> %#lx\n", mhr );
+            {
+                HRESULT (WINAPI *send)(void *, int) = (void *)(*(void ***)g_calc_vm.vm)[79];
+                HRESULT mhr = send ? send( g_calc_vm.vm, 200 ) : E_FAIL;
+                TRACE( "uwp_calc_vm_ensure: SendCommandToCalcManager(200 ModeBasic) -> %#lx\n", mhr );
+            }
             g_calc_vm.pumped = TRUE;
+            uwp_sync_calc_display_from_vm();
         }
     }
 }
@@ -1352,31 +1701,7 @@ static void uwp_calc_vm_send( int code )
         }
     }
 
-    get_disp = (void *)(*(void ***)g_calc_vm.vm)[7];
-    hval = NULL;
-    hr = get_disp( g_calc_vm.vm, &hval );
-    TRACE( "uwp_calc_vm_send: get_DisplayValue -> %#lx hval %p\n", hr, (void *)hval );
-    if (SUCCEEDED(hr) && hval)
-    {
-        const WCHAR *s = WindowsGetStringRawBuffer( hval, NULL );
-        struct uwp_element *disp = g_navigated_page_el ?
-            uwp_find_named( g_navigated_page_el, L"NormalOutput" ) : NULL;
-        struct uwp_element *res = g_navigated_page_el ?
-            uwp_find_named( g_navigated_page_el, L"Results" ) : NULL;
-        TRACE( "uwp_calc_vm_send: DisplayValue = %s\n", debugstr_w(s) );
-        if (s)
-        {
-            if (disp) lstrcpynW( disp->text, s, ARRAY_SIZE(disp->text) );
-            if (res)
-            {
-                lstrcpynW( res->text, s, ARRAY_SIZE(res->text) );
-                if (res->tpl_normal_output)
-                    lstrcpynW( res->tpl_normal_output->text, s, ARRAY_SIZE(res->tpl_normal_output->text) );
-            }
-            uwp_invalidate_window();
-        }
-        WindowsDeleteString( hval );
-    }
+    uwp_sync_calc_display_from_vm();
 }
 
 static void register_uwp_elem( struct uwp_element *el )
@@ -2175,6 +2500,18 @@ static HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void
 
 static HRESULT WINAPI uwp_do2_UnregisterPropertyChangedCallback( void *iface, void *dp, INT64 token )
 {
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    int i;
+    if (!impl) return S_OK;
+    for (i = 0; i < impl->dp_cb_cnt; i++)
+    {
+        if (impl->dp_cbs[i].dp == dp && impl->dp_cbs[i].token == token)
+        {
+            if (impl->dp_cbs[i].callback) IUnknown_Release( (IUnknown *)impl->dp_cbs[i].callback );
+            impl->dp_cbs[i] = impl->dp_cbs[--impl->dp_cb_cnt];
+            break;
+        }
+    }
     return S_OK;
 }
 
@@ -3939,6 +4276,95 @@ static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *
  * text label (uwp_format_display_label maps the Segoe MDL2 operator glyphs). */
 static void uwp_seed_synthetic_calculator( struct uwp_element *holder );
 static void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
+static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
+                                     void *connector, BOOL is_uwp_conn, void *app_outer,
+                                     int only_sub_idx, struct uwp_element *attach_root,
+                                     struct uwp_element **out_created );
+
+/* Parse app's genuine Calculator.xbf, CalculatorStandardOperators.xbf, and NumberPad.xbf
+ * via the XBF v2 parser. Returns TRUE if XBF loaded and populated the visual tree. */
+static BOOL uwp_load_calculator_xbfs( struct uwp_element *calc_el )
+{
+    const BYTE *xbf = NULL;
+    DWORD xbf_sz = 0;
+    struct uwp_element *scan;
+    BOOL loaded_any = FALSE;
+
+    if (!calc_el) return FALSE;
+
+    if (!calc_el->children_coll && !calc_el->content)
+    {
+        if (uwp_pri_find_xbf( L"Calculator.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
+        {
+            void *conn = NULL;
+            IInspectable *comp = calc_el->outer ? calc_el->outer : &calc_el->IInspectable_iface;
+            if (calc_el->outer)
+                IInspectable_QueryInterface( calc_el->outer, &IID_IComponentConnector_UWP_g, &conn );
+            TRACE( "uwp_load_calculator_xbfs: parsing Calculator.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
+            uwp_parse_and_build_xbf( xbf, xbf_sz, comp, conn, TRUE, uwp_get_app_outer(), -1, calc_el, NULL );
+            if (conn) IUnknown_Release( (IUnknown *)conn );
+            loaded_any = TRUE;
+        }
+    }
+    else
+    {
+        loaded_any = TRUE;
+    }
+
+    /* Realize deferred StandardOperators inside OperatorsPanel so CalculatorStandardOperators.xbf
+     * and NumberPad.xbf load via the app's XBF component path. */
+    for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
+    {
+        int d;
+        for (d = 0; d < scan->defer_cnt; d++)
+        {
+            if (!scan->defer_entries[d].realized &&
+                wcsstr( scan->defer_entries[d].name, L"Standard" ))
+            {
+                uwp_realize_deferred_entry( &scan->defer_entries[d] );
+            }
+        }
+        /* Collapse docked History/Memory panel in row 1 so keypad fills height */
+        if (!wcscmp( scan->name, L"DockPanel" ) ||
+            (scan->kind == UWP_KIND_BORDER && scan->grid_row == 1))
+            scan->visibility = 1;
+    }
+
+    /* If CalculatorStandardOperators.xbf was not already parsed via LoadComponent, parse it directly */
+    if (!uwp_find_named( calc_el, L"EqualButton" ))
+    {
+        if (uwp_pri_find_xbf( L"CalculatorStandardOperators.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
+        {
+            struct uwp_element *ops_host = uwp_find_named( calc_el, L"StandardOperators" );
+            if (!ops_host) ops_host = uwp_find_named( calc_el, L"OpsPanel" );
+            if (!ops_host) ops_host = calc_el;
+            TRACE( "uwp_load_calculator_xbfs: parsing CalculatorStandardOperators.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
+            uwp_parse_and_build_xbf( xbf, xbf_sz,
+                                     ops_host->outer ? ops_host->outer : &ops_host->IInspectable_iface,
+                                     NULL, TRUE, uwp_get_app_outer(), -1, ops_host, NULL );
+            loaded_any = TRUE;
+        }
+    }
+
+    /* If NumberPad.xbf was not already parsed via LoadComponent, parse it directly */
+    if (!uwp_find_named( calc_el, L"Num0Button" ))
+    {
+        if (uwp_pri_find_xbf( L"NumberPad.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
+        {
+            struct uwp_element *pad_host = uwp_find_named( calc_el, L"NumberPad" );
+            if (!pad_host) pad_host = uwp_find_named( calc_el, L"StandardOperators" );
+            if (!pad_host) pad_host = calc_el;
+            TRACE( "uwp_load_calculator_xbfs: parsing NumberPad.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
+            uwp_parse_and_build_xbf( xbf, xbf_sz,
+                                     pad_host->outer ? pad_host->outer : &pad_host->IInspectable_iface,
+                                     NULL, TRUE, uwp_get_app_outer(), -1, pad_host, NULL );
+            loaded_any = TRUE;
+        }
+    }
+
+    uwp_calc_vm_ensure();
+    return loaded_any && (calc_el->children_coll != NULL || calc_el->content != NULL);
+}
 
 /* Activate the app's own CalculatorApp.Controls.Calculator through the app's
  * IXamlMetadataProvider (same provider chain as Frame.Navigate page adoption:
@@ -4018,55 +4444,15 @@ static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *hol
     uwp_vec_create( holder, &holder->children_coll );
     uwp_vec_Append( holder->children_coll, el->outer ? (void *)el->outer : (void *)&el->IInspectable_iface );
     el->parent = holder;
-    if (el->adopted_faulted_ctor)
+
+    if (!uwp_load_calculator_xbfs( el ))
     {
-        /* ctor died before InitializeComponent: give the adopted UserControl a
-         * Grid host so the seeded display+keypad paint inside it. */
-        IInspectable *uc_raw = NULL;
-        struct uwp_element *uc;
-        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&uc_raw )) && uc_raw)
-        {
-            uc = uwp_elem_from_any( uc_raw );
-            IInspectable_Release( uc_raw );
-            if (uc)
-            {
-                lstrcpynW( uc->name, L"Calculator", ARRAY_SIZE(uc->name) );
-                uc->parent = el;
-                uwp_vec_create( el, &el->children_coll );
-                uwp_vec_Append( el->children_coll, &uc->IInspectable_iface );
-                uc->grid_row = 0;
-                uwp_seed_synthetic_calculator( uc );
-            }
-        }
-    }
-    else
-    {
-        /* Real Calculator.xbf tree is present: realize StandardOperators inside
-         * OperatorsPanel so NumberPad.xbf and standard operator buttons load. */
-        struct uwp_element *scan;
-        for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
-        {
-            int d;
-            for (d = 0; d < scan->defer_cnt; d++)
-            {
-                if (!scan->defer_entries[d].realized &&
-                    wcsstr( scan->defer_entries[d].name, L"Standard" ))
-                {
-                    uwp_realize_deferred_entry( &scan->defer_entries[d] );
-                }
-            }
-            if (!wcscmp( scan->name, L"Results" ) && !scan->text[0])
-                lstrcpynW( scan->text, L"0", ARRAY_SIZE(scan->text) );
-            /* Collapse docked History/Memory panel in row 1 so keypad fills height */
-            if (!wcscmp( scan->name, L"DockPanel" ) ||
-                (scan->kind == UWP_KIND_BORDER && scan->grid_row == 1))
-                scan->visibility = 1;
-        }
-        uwp_calc_vm_ensure();
+        /* Error fallback strictly when genuine XBF fails to load */
+        WARN( "uwp_activate_real_calculator: XBF load failed, falling back to synthetic calculator\n" );
+        uwp_seed_synthetic_calculator( el );
     }
 
-    /* Drive the app's InitializeComponent path: guard against the SxS
-     * Windows.Globalization.dll failfast chain (1007) on second entry. */
+    /* Drive the app's InitializeComponent path if still unpopulated */
     if (!el->children_coll && !el->content)
     {
         struct uwp_element *probe = el;
@@ -4096,6 +4482,7 @@ static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *hol
     return el;
 }
 
+/* Error fallback strictly when Calculator.xbf / NumberPad.xbf / CalculatorStandardOperators.xbf fail to load */
 static void uwp_seed_synthetic_calculator( struct uwp_element *holder )
 {
     static const WCHAR *keys[20] =
@@ -4186,27 +4573,314 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
                                      int only_sub_idx, struct uwp_element *attach_root,
                                      struct uwp_element **out_created );
 
+struct store_catalog_item
+{
+    WCHAR full_name[256];
+    WCHAR name[128];
+    WCHAR cat[64];
+    WCHAR icon[8];
+    WCHAR rating[32];
+    WCHAR btn[16];
+    BOOL is_framework;
+};
+
+typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
+typedef LONG (WINAPI *p_RegEnumKeyExW_t)( HKEY, DWORD, LPWSTR, LPDWORD, LPDWORD, LPWSTR, LPDWORD, PFILETIME );
+typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
+typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
+
+static void store_make_icon_monogram( const WCHAR *title, WCHAR *icon, size_t icon_len )
+{
+    size_t n = 0;
+    const WCHAR *p = title;
+    BOOL take_next = TRUE;
+
+    while (*p && n + 1 < icon_len && n < 3)
+    {
+        WCHAR ch = *p++;
+        if (ch == L'.' || ch == L' ' || ch == L'-' || ch == L'_')
+        {
+            take_next = TRUE;
+            continue;
+        }
+        if (take_next)
+        {
+            if (ch >= L'a' && ch <= L'z') ch -= (L'a' - L'A');
+            icon[n++] = ch;
+            take_next = FALSE;
+        }
+    }
+    if (!n && title[0])
+    {
+        WCHAR ch = title[0];
+        if (ch >= L'a' && ch <= L'z') ch -= (L'a' - L'A');
+        icon[n++] = ch;
+    }
+    icon[n] = 0;
+}
+
+static void store_split_identity( const WCHAR *full, WCHAR *name, size_t name_len, WCHAR *ver, size_t ver_len )
+{
+    const WCHAR *u1 = wcschr( full, L'_' );
+    if (!u1)
+    {
+        lstrcpynW( name, full, name_len );
+        if (ver_len) ver[0] = 0;
+        return;
+    }
+    {
+        size_t len = min( (size_t)(u1 - full), name_len - 1 );
+        memcpy( name, full, len * sizeof(WCHAR) );
+        name[len] = 0;
+    }
+    if (ver_len)
+    {
+        const WCHAR *u2 = wcschr( u1 + 1, L'_' );
+        size_t vlen = u2 ? (size_t)(u2 - (u1 + 1)) : wcslen( u1 + 1 );
+        vlen = min( vlen, ver_len - 1 );
+        memcpy( ver, u1 + 1, vlen * sizeof(WCHAR) );
+        ver[vlen] = 0;
+    }
+}
+
+static void store_query_reg_display_info( HMODULE reg_mod, const WCHAR *full_name, WCHAR *disp_name, size_t disp_len, BOOL *is_fw )
+{
+    p_RegOpenKeyExW_t p_open;
+    p_RegQueryValueExW_t p_query;
+    p_RegCloseKey_t p_close;
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    static const WCHAR *prefixes[] = {
+        L"Software\\Classes\\AppModel\\Repository\\Packages\\",
+        L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\",
+    };
+    size_t r, p;
+
+    if (!reg_mod) return;
+    p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
+    p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
+    p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
+    if (!p_open || !p_query || !p_close) return;
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        for (p = 0; p < ARRAY_SIZE(prefixes); p++)
+        {
+            WCHAR sub[512];
+            HKEY hk = NULL;
+            DWORD type = 0, cb;
+            lstrcpynW( sub, prefixes[p], ARRAY_SIZE(sub) - 256 );
+            lstrcatW( sub, full_name );
+            if (p_open( roots[r], sub, 0, KEY_READ, &hk ) != ERROR_SUCCESS) continue;
+
+            if (disp_name && !disp_name[0])
+            {
+                WCHAR buf[128] = {0};
+                cb = sizeof(buf);
+                if (p_query( hk, L"DisplayName", NULL, &type, (BYTE *)buf, &cb ) == ERROR_SUCCESS &&
+                    type == REG_SZ && buf[0] && wcsncmp( buf, L"ms-resource:", 12 ) != 0)
+                {
+                    lstrcpynW( disp_name, buf, disp_len );
+                }
+            }
+            if (is_fw)
+            {
+                DWORD fw = 0;
+                cb = sizeof(fw);
+                if (p_query( hk, L"Framework", NULL, &type, (BYTE *)&fw, &cb ) == ERROR_SUCCESS && type == REG_DWORD)
+                    *is_fw = (fw != 0);
+            }
+            p_close( hk );
+        }
+    }
+}
+
+static void store_add_catalog_item( struct store_catalog_item **items, int *count, int *cap,
+                                    const WCHAR *full_name, const WCHAR *disp_name,
+                                    const WCHAR *pkg_name, const WCHAR *ver_str, BOOL is_fw )
+{
+    int i;
+    struct store_catalog_item *arr, *it;
+    const WCHAR *title;
+
+    if (!full_name || !full_name[0] || !wcschr( full_name, L'_' )) return;
+
+    for (i = 0; i < *count; i++)
+    {
+        if (!wcsicmp( (*items)[i].full_name, full_name )) return;
+    }
+    if (*count >= *cap)
+    {
+        int new_cap = *cap ? (*cap * 2) : 16;
+        arr = realloc( *items, new_cap * sizeof(*arr) );
+        if (!arr) return;
+        *items = arr;
+        *cap = new_cap;
+    }
+
+    it = &(*items)[(*count)++];
+    memset( it, 0, sizeof(*it) );
+    lstrcpynW( it->full_name, full_name, ARRAY_SIZE(it->full_name) );
+    it->is_framework = is_fw;
+
+    title = (disp_name && disp_name[0]) ? disp_name : (pkg_name && pkg_name[0] ? pkg_name : full_name);
+    lstrcpynW( it->name, title, ARRAY_SIZE(it->name) );
+    lstrcpynW( it->cat, is_fw ? L"Framework" : L"Installed App", ARRAY_SIZE(it->cat) );
+    store_make_icon_monogram( it->name, it->icon, ARRAY_SIZE(it->icon) );
+    if (ver_str && ver_str[0])
+        swprintf( it->rating, ARRAY_SIZE(it->rating), L"v%s", ver_str );
+    else
+        lstrcpynW( it->rating, L"Installed", ARRAY_SIZE(it->rating) );
+    lstrcpynW( it->btn, is_fw ? L"Installed" : L"Open", ARRAY_SIZE(it->btn) );
+}
+
+static void store_query_installed_packages( struct store_catalog_item **out_items, int *out_count )
+{
+    static const GUID IID_IPackageManager_local =
+        { 0x9a7d4b65, 0x5e8f, 0x4fc7, { 0xa2, 0xe5, 0x7f, 0x69, 0x25, 0xcb, 0x8b, 0x53 } };
+    struct store_catalog_item *items = NULL;
+    int count = 0, cap = 0;
+    HMODULE reg_mod;
+    HSTRING pm_cls = NULL;
+    IInspectable *pm_insp = NULL;
+    IPackageManager *pm = NULL;
+    IIterable_Package *iterable = NULL;
+    IIterator_Package *iter = NULL;
+    HRESULT hr;
+
+    *out_items = NULL;
+    *out_count = 0;
+
+    reg_mod = GetModuleHandleW( L"kernelbase.dll" );
+    if (!reg_mod) reg_mod = LoadLibraryW( L"advapi32.dll" );
+
+    /* 1. Query via Windows.Management.Deployment.IPackageManager::FindPackagesForUser */
+    if (SUCCEEDED(WindowsCreateString( L"Windows.Management.Deployment.PackageManager", 44, &pm_cls )) && pm_cls)
+    {
+        if (SUCCEEDED(RoActivateInstance( pm_cls, &pm_insp )) && pm_insp)
+        {
+            if (SUCCEEDED(IInspectable_QueryInterface( pm_insp, &IID_IPackageManager_local, (void **)&pm )) && pm)
+            {
+                hr = IPackageManager_FindPackagesByUserSecurityId( pm, NULL, &iterable );
+                if (FAILED(hr) || !iterable)
+                    hr = IPackageManager_FindPackages( pm, &iterable );
+                if (SUCCEEDED(hr) && iterable)
+                {
+                    if (SUCCEEDED(IIterable_Package_First( iterable, &iter )) && iter)
+                    {
+                        boolean has_cur = FALSE;
+                        while (SUCCEEDED(IIterator_Package_get_HasCurrent( iter, &has_cur )) && has_cur)
+                        {
+                            __x_ABI_CWindows_CApplicationModel_CIPackage *pkg = NULL;
+                            if (SUCCEEDED(IIterator_Package_get_Current( iter, &pkg )) && pkg)
+                            {
+                                __x_ABI_CWindows_CApplicationModel_CIPackageId *pkg_id = NULL;
+                                boolean is_fw = FALSE;
+                                __x_ABI_CWindows_CApplicationModel_CIPackage_get_IsFramework( pkg, &is_fw );
+                                if (SUCCEEDED(__x_ABI_CWindows_CApplicationModel_CIPackage_get_Id( pkg, &pkg_id )) && pkg_id)
+                                {
+                                    HSTRING hfull = NULL;
+                                    WCHAR disp[128] = {0}, name_buf[128] = {0}, ver_str[32] = {0};
+                                    const WCHAR *full_s = NULL;
+                                    BOOL fw_reg = is_fw;
+
+                                    __x_ABI_CWindows_CApplicationModel_CIPackageId_get_FullName( pkg_id, &hfull );
+                                    full_s = hfull ? WindowsGetStringRawBuffer( hfull, NULL ) : NULL;
+                                    if (full_s)
+                                    {
+                                        store_split_identity( full_s, name_buf, ARRAY_SIZE(name_buf), ver_str, ARRAY_SIZE(ver_str) );
+                                        store_query_reg_display_info( reg_mod, full_s, disp, ARRAY_SIZE(disp), &fw_reg );
+                                        store_add_catalog_item( &items, &count, &cap, full_s, disp, name_buf, ver_str, fw_reg );
+                                    }
+                                    if (hfull) WindowsDeleteString( hfull );
+                                    __x_ABI_CWindows_CApplicationModel_CIPackageId_Release( pkg_id );
+                                }
+                                __x_ABI_CWindows_CApplicationModel_CIPackage_Release( pkg );
+                            }
+                            if (FAILED(IIterator_Package_MoveNext( iter, &has_cur )) || !has_cur)
+                                break;
+                        }
+                        IIterator_Package_Release( iter );
+                    }
+                    IIterable_Package_Release( iterable );
+                }
+                IPackageManager_Release( pm );
+            }
+            IInspectable_Release( pm_insp );
+        }
+        WindowsDeleteString( pm_cls );
+    }
+
+    /* 2. Supplement / fallback from AppModel package registry keys */
+    if (reg_mod)
+    {
+        p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
+        p_RegEnumKeyExW_t p_enum = (p_RegEnumKeyExW_t)GetProcAddress( reg_mod, "RegEnumKeyExW" );
+        p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
+        if (p_open && p_enum && p_close)
+        {
+            static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+            static const WCHAR *paths[] = {
+                L"Software\\Classes\\AppModel\\Repository\\Packages",
+                L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages",
+            };
+            size_t r, p;
+            for (r = 0; r < ARRAY_SIZE(roots); r++)
+            {
+                for (p = 0; p < ARRAY_SIZE(paths); p++)
+                {
+                    HKEY hk = NULL;
+                    DWORD idx = 0;
+                    if (p_open( roots[r], paths[p], 0, KEY_READ, &hk ) != ERROR_SUCCESS) continue;
+                    for (;; idx++)
+                    {
+                        WCHAR full[256], name[128], ver[32], disp[128] = {0};
+                        DWORD cch = ARRAY_SIZE(full);
+                        BOOL is_fw = FALSE;
+                        if (p_enum( hk, idx, full, &cch, NULL, NULL, NULL, NULL ) != ERROR_SUCCESS) break;
+                        store_split_identity( full, name, ARRAY_SIZE(name), ver, ARRAY_SIZE(ver) );
+                        store_query_reg_display_info( reg_mod, full, disp, ARRAY_SIZE(disp), &is_fw );
+                        store_add_catalog_item( &items, &count, &cap, full, disp, name, ver, is_fw );
+                    }
+                    p_close( hk );
+                }
+            }
+        }
+    }
+
+    /* Order non-framework apps before framework packages */
+    if (count > 1)
+    {
+        int i, j;
+        for (i = 0; i < count; i++)
+        {
+            if (items[i].is_framework)
+            {
+                for (j = i + 1; j < count; j++)
+                {
+                    if (!items[j].is_framework)
+                    {
+                        struct store_catalog_item tmp = items[i];
+                        items[i] = items[j];
+                        items[j] = tmp;
+                        break;
+                    }
+                }
+            }
+        }
+    }
+
+    TRACE( "store_query_installed_packages: discovered %d packages\n", count );
+    *out_items = items;
+    *out_count = count;
+}
+
 static void uwp_seed_store_catalog( struct uwp_element *page_el )
 {
-    static const struct {
-        const WCHAR *name;
-        const WCHAR *cat;
-        const WCHAR *icon;
-        const WCHAR *rating;
-        const WCHAR *btn;
-    } apps[8] = {
-        { L"WhatsApp", L"Social", L"WA", L"\x2605 4.8", L"Free" },
-        { L"Spotify Music", L"Music & audio", L"SP", L"\x2605 4.7", L"Free" },
-        { L"Netflix", L"Entertainment", L"NF", L"\x2605 4.6", L"Free" },
-        { L"Visual Studio Code", L"Developer tools", L"VS", L"\x2605 4.9", L"Free" },
-        { L"Xbox", L"Games", L"XB", L"\x2605 4.5", L"Free" },
-        { L"Discord", L"Social", L"DC", L"\x2605 4.7", L"Free" },
-        { L"Minecraft Launcher", L"Games", L"MC", L"\x2605 4.6", L"Get" },
-        { L"VLC media player", L"Photo & video", L"VLC", L"\x2605 4.8", L"Free" },
-    };
     static const WCHAR *nav_names[5] = { L"Home", L"Apps", L"Games", L"Movies", L"Library" };
     static const WCHAR *nav_icons[5] = { L"\x2302", L"\x25a6", L"\x25c8", L"\x25b6", L"\x25a4" };
 
+    struct store_catalog_item *apps = NULL;
+    int app_count = 0;
     const BYTE *xbf = NULL;
     DWORD xbf_sz = 0;
     IInspectable *root_grid_raw = NULL, *nav_rail_raw = NULL, *main_grid_raw = NULL;
@@ -4216,6 +4890,7 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
     int i;
 
     if (!page_el || page_el->children_coll) return;
+    store_query_installed_packages( &apps, &app_count );
 
     /* 1. Parse Store package PRI XBFs to prime the XAML visual components */
     if (uwp_pri_find_xbf( L"HomepageSkeleton.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
@@ -4236,10 +4911,13 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
 
     /* 2. Build Root Layout: Page -> RootGrid (Col 0: NavRail 68px, Col 1: MainContent 1*) */
     if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&root_grid_raw )) || !root_grid_raw)
+    {
+        free( apps );
         return;
+    }
     root_grid = uwp_elem_from_any( root_grid_raw );
     IInspectable_Release( root_grid_raw );
-    if (!root_grid) return;
+    if (!root_grid) { free( apps ); return; }
     lstrcpynW( root_grid->name, L"RootStoreGrid", ARRAY_SIZE(root_grid->name) );
     uwp_vec_create( root_grid, &root_grid->children_coll );
 
@@ -4341,7 +5019,7 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
                 }
             }
 
-            /* Section Header: "Top Free Apps" (Row 2) */
+            /* Section Header (Row 2) */
             if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&sec_title_raw )) && sec_title_raw)
             {
                 struct uwp_element *st = uwp_elem_from_any( sec_title_raw );
@@ -4349,7 +5027,7 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
                 if (st)
                 {
                     lstrcpynW( st->name, L"TopAppsHeader", ARRAY_SIZE(st->name) );
-                    lstrcpynW( st->text, L"Top Free Apps", ARRAY_SIZE(st->text) );
+                    swprintf( st->text, ARRAY_SIZE(st->text), L"Installed Packages (%d)", app_count );
                     st->grid_row = 2;
                     st->font_size = 20.0;
                     st->parent = main_grid;
@@ -4357,7 +5035,7 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
                 }
             }
 
-            /* Catalog Tiles Grid (Row 3): 2 rows x 4 columns of cards */
+            /* Catalog Tiles Grid (Row 3): dynamic rows x 4 columns of cards */
             if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&tiles_grid_raw )) && tiles_grid_raw)
             {
                 tiles_grid = uwp_elem_from_any( tiles_grid_raw );
@@ -4369,7 +5047,7 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
                     tiles_grid->parent = main_grid;
                     uwp_vec_create( tiles_grid, &tiles_grid->children_coll );
 
-                    for (i = 0; i < 8; i++)
+                    for (i = 0; i < app_count && i < 8; i++)
                     {
                         IInspectable *card_raw = NULL;
                         struct uwp_element *card;
@@ -4472,7 +5150,9 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
     root_grid->parent = page_el;
     page_el->content = &root_grid->IInspectable_iface;
     IInspectable_AddRef( page_el->content );
-    TRACE( "uwp_seed_store_catalog: successfully seeded Store catalog into page %p\n", page_el );
+    free( apps );
+    TRACE( "uwp_seed_store_catalog: successfully populated %d dynamic Store catalog items into page %p\n",
+           app_count, page_el );
 }
 
 HRESULT uwp_store_create_initial_page( IInspectable **out )
@@ -4538,8 +5218,11 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 if (is_calculator_app())
                 {
                     struct uwp_element *holder = uwp_find_named( page_el, L"CalcHolder" );
-                    if (!uwp_activate_real_calculator( holder ))
+                    if (!uwp_activate_real_calculator( holder ) && holder && !uwp_load_calculator_xbfs( holder ))
+                    {
+                        WARN( "uwp_frame_NavigateWithParam: XBF load failed, falling back to synthetic calculator\n" );
                         uwp_seed_synthetic_calculator( holder );
+                    }
                 }
                 else if (is_store_app())
                 {
@@ -4701,6 +5384,7 @@ static void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type
 
 struct xbf_type_info
 {
+    WCHAR xmlns[128];
     WCHAR full_name[128];
     WCHAR short_name[64];
 };
@@ -4719,6 +5403,8 @@ struct xbf_ctx
     DWORD node_sz;
     WCHAR **strs;
     DWORD str_cnt;
+    WCHAR **xmlns;
+    DWORD xmlns_cnt;
     struct xbf_type_info *types;
     DWORD type_cnt;
     struct xbf_prop_info *props;
@@ -4864,11 +5550,33 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, WOR
                 lstrcpynW( el->uid, sval, ARRAY_SIZE(el->uid) );
                 if (!el->text[0])
                 {
-                    WCHAR res_key[160], res_val[128];
-                    swprintf( res_key, ARRAY_SIZE(res_key),
-                              L"%s/[using:CalculatorApp.Common]KeyboardShortcutManager/Character", sval );
-                    if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
-                        lstrcpynW( el->text, res_val, ARRAY_SIZE(el->text) );
+                    WCHAR res_key[256], res_val[128];
+                    static const WCHAR *std_props[] = { L"Content", L"Text" };
+                    unsigned int sp;
+                    DWORD k;
+
+                    for (sp = 0; sp < ARRAY_SIZE(std_props) && !el->text[0]; sp++)
+                    {
+                        swprintf( res_key, ARRAY_SIZE(res_key), L"%s/%s", sval, std_props[sp] );
+                        if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
+                            lstrcpynW( el->text, res_val, ARRAY_SIZE(el->text) );
+                    }
+                    for (k = 0; k < ctx->prop_cnt && !el->text[0]; k++)
+                    {
+                        const struct xbf_prop_info *kpi = &ctx->props[k];
+                        if (kpi->owner_tid < ctx->type_cnt &&
+                            !wcsncmp( ctx->types[kpi->owner_tid].xmlns, L"using:", 6 ) &&
+                            (!wcscmp( kpi->name, L"Character" ) ||
+                             !wcscmp( kpi->name, L"Content" ) ||
+                             !wcscmp( kpi->name, L"Text" )))
+                        {
+                            swprintf( res_key, ARRAY_SIZE(res_key), L"%s/[%s]%s/%s",
+                                      sval, ctx->types[kpi->owner_tid].xmlns,
+                                      ctx->types[kpi->owner_tid].short_name, kpi->name );
+                            if (uwp_pri_lookup_string( res_key, res_val, ARRAY_SIZE(res_val) ) && res_val[0])
+                                lstrcpynW( el->text, res_val, ARRAY_SIZE(el->text) );
+                        }
+                    }
                 }
             }
             break;
@@ -4911,10 +5619,11 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, WOR
         else if (!wcscmp( pi->name, L"ButtonId" ) && sval && sval[0])
         {
             IInspectable *target = el->outer ? el->outer : &el->IInspectable_iface;
-            const WCHAR *owner_cls = (pi->owner_tid < ctx->type_cnt)
+            const WCHAR *owner_cls = (pi->owner_tid < ctx->type_cnt && ctx->types[pi->owner_tid].full_name[0])
                 ? ctx->types[pi->owner_tid].full_name
-                : L"CalculatorApp.Controls.CalculatorButton";
-            uwp_set_custom_xaml_member( ctx->app_outer, owner_cls, L"ButtonId", target, sval );
+                : (el->class_name[0] ? el->class_name : NULL);
+            if (owner_cls)
+                uwp_set_custom_xaml_member( ctx->app_outer, owner_cls, L"ButtonId", target, sval );
             /* Fallback label from ButtonId if button still has no text */
             if (!el->text[0])
             {
@@ -5488,8 +6197,21 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
         const BYTE *xp = xbf + 12 + (size_t)offs[5];
         DWORD xcnt = (xp + 4 <= xbf + 12 + ctx.meta_sz) ? *(const DWORD *)xp : 0;
         const DWORD *x_sids = (const DWORD *)(xp + 4);
-
         const BYTE *tp = xbf + 12 + (size_t)offs[3];
+
+        if (xcnt > 0 && xcnt < 1024 && xp + 4 + xcnt * 4 <= xbf + 12 + ctx.meta_sz)
+        {
+            ctx.xmlns_cnt = xcnt;
+            ctx.xmlns = calloc( xcnt, sizeof(WCHAR *) );
+            for (i = 0; i < xcnt && ctx.xmlns; i++)
+            {
+                DWORD xsid = x_sids[i];
+                const WCHAR *ns = (xsid < ctx.str_cnt && ctx.strs[xsid]) ? ctx.strs[xsid] : L"";
+                ctx.xmlns[i] = calloc( wcslen(ns) + 1, sizeof(WCHAR) );
+                if (ctx.xmlns[i]) lstrcpyW( ctx.xmlns[i], ns );
+            }
+        }
+
         if (tp + 4 <= xbf + 12 + ctx.meta_sz)
         {
             ctx.type_cnt = *(const DWORD *)tp;
@@ -5501,7 +6223,10 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
                     DWORD xid = *(const DWORD *)(tp + 4 + i * 12 + 4);
                     DWORD sid = *(const DWORD *)(tp + 4 + i * 12 + 8);
                     const WCHAR *sname = (sid < ctx.str_cnt && ctx.strs[sid]) ? ctx.strs[sid] : L"";
-                    const WCHAR *ns = (xid < xcnt && x_sids[xid] < ctx.str_cnt) ? ctx.strs[x_sids[xid]] : L"";
+                    const WCHAR *ns = (xid < ctx.xmlns_cnt && ctx.xmlns && ctx.xmlns[xid])
+                        ? ctx.xmlns[xid]
+                        : ((xid < xcnt && x_sids[xid] < ctx.str_cnt) ? ctx.strs[x_sids[xid]] : L"");
+                    lstrcpynW( ctx.types[i].xmlns, ns ? ns : L"", ARRAY_SIZE(ctx.types[i].xmlns) );
                     lstrcpynW( ctx.types[i].short_name, sname, 64 );
                     if (ns && !wcsncmp( ns, L"using:", 6 ))
                         swprintf( ctx.types[i].full_name, 128, L"%s.%s", ns + 6, sname );
@@ -5567,6 +6292,11 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
 
     for (i = 0; i < ctx.str_cnt; i++) free( ctx.strs[i] );
     free( ctx.strs );
+    if (ctx.xmlns)
+    {
+        for (i = 0; i < ctx.xmlns_cnt; i++) free( ctx.xmlns[i] );
+        free( ctx.xmlns );
+    }
     free( ctx.types );
     free( ctx.props );
 }
@@ -6263,7 +6993,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         /* Avoid double-painting CalculationResult if its inner NormalOutput TextBlock is painted */
         if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface)
         {
-            if (el->text[0] && !el->tpl_normal_output->text[0])
+            if (el->text[0] && wcscmp( el->tpl_normal_output->text, el->text ) != 0)
                 lstrcpynW( el->tpl_normal_output->text, el->text, ARRAY_SIZE(el->tpl_normal_output->text) );
             uwp_paint_element( hdc, el->tpl_normal_output );
             return;
@@ -6462,9 +7192,9 @@ void uwp_invoke_button( struct uwp_element *btn )
         }
     }
 
-    /* 3. Drive the real StandardCalculatorViewModel engine for keypad buttons */
+    /* 3. Resolve CalculatorButton.ButtonId / CommandParameter dynamically via IXamlMetadataProvider */
     {
-        int code = uwp_key_to_calc_code( btn->name, btn->text );
+        int code = uwp_resolve_button_calc_code( btn );
         if (code >= 0)
             uwp_calc_vm_send( code );
     }
@@ -6591,6 +7321,7 @@ struct uwp_class_factory
     IInspectable IComposableFactory_iface;
     IInspectable IStatics_iface;
     const WCHAR *class_name;
+    IInspectable IDpStatics_iface;
 };
 
 static struct uwp_class_factory vsm_factory_obj;
@@ -6630,6 +7361,8 @@ static const GUID IID_IComboBoxFactory_local =
     { 0xac0d0444, 0xa65b, 0x4abd, { 0x86, 0xdf, 0x30, 0x16, 0x04, 0x9e, 0xfe, 0xdc } };
 static const GUID IID_ISolidColorBrushFactory_local =
     { 0xd935ce0c, 0x86f5, 0x4da6, { 0x8a, 0x27, 0xb1, 0x61, 0x9e, 0xf7, 0xf9, 0x2b } };
+static const GUID IID_IButtonBaseStatics_Calc =
+    { 0x67ef17e1, 0xfe37, 0x474f, { 0x9e, 0x97, 0x3b, 0x5e, 0x0b, 0x30, 0xf2, 0xdf } };
 
 static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
 {
@@ -6650,6 +7383,14 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IActivationFactory ))
     {
         *out = f ? (void *)&f->IActivationFactory_iface : (void *)iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IButtonBaseStatics_UWP ) ||
+        IsEqualGUID( iid, &IID_IButtonBaseStatics_Calc ) ||
+        IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ))
+    {
+        *out = f && f->IDpStatics_iface.lpVtbl ? (void *)&f->IDpStatics_iface : (void *)&f->IStatics_iface;
         return S_OK;
     }
 
@@ -6830,6 +7571,17 @@ static const void *uwp_cf_statics_vtbl[64] =
     [39] = uwp_cf_dp_prop,
     [42] = uwp_cf_dp_prop,
     [45] = uwp_cf_dp_prop,
+};
+
+static const void *uwp_dp_statics_vtbl[32] =
+{
+    [0] = uwp_cf_QI,
+    [1] = uwp_cf_AddRef,
+    [2] = uwp_cf_Release,
+    [3] = uwp_cf_GetIids,
+    [4] = uwp_cf_GetRuntimeClassName,
+    [5] = uwp_cf_GetTrustLevel,
+    [6 ... 31] = uwp_cf_dp_prop,
 };
 
 /* VisualStateManagerStatics (slot 6 = GoToState(Control, HSTRING, bool, bool*), slot 7 = GetVisualStateGroups) */
@@ -7097,6 +7849,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
             g_dyn_factories[idx].IActivationFactory_iface.lpVtbl = (const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl;
             g_dyn_factories[idx].IComposableFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_comp_vtbl;
             g_dyn_factories[idx].IStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_statics_vtbl;
+            g_dyn_factories[idx].IDpStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dp_statics_vtbl;
             g_dyn_factories[idx].class_name = g_dyn_factory_names[idx];
             *factory = &g_dyn_factories[idx].IActivationFactory_iface;
             return S_OK;
