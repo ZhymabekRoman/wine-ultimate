@@ -1,5 +1,5 @@
 MODULE        = windows.networking.connectivity.dll
-IMPORTS       = combase
+IMPORTS       = combase iphlpapi
 EXTRAIDLFLAGS = -DDO_NO_IMPORTS
 
 SOURCES = \

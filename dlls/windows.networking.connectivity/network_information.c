@@ -18,24 +18,342 @@
  */
 
 #include <string.h>
+#include <stdio.h>
 
 #include "private.h"
 #include "initguid.h"
 #include "netlistmgr.h"
 #include "objbase.h"
+#include "iphlpapi.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(connectivity);
 
 DEFINE_GUID( IID_IConnectionProfile3, 0x57da83ad, 0xb584, 0x4252, 0x82, 0xab, 0x26, 0xe7, 0x65, 0x80, 0x75, 0xd6 );
 DEFINE_GUID( IID_IConnectionProfile4, 0x7a2d42cd, 0x81e0, 0x4ae3, 0xab, 0x32, 0xef, 0xf4, 0xb3, 0x9e, 0x32, 0x24 );
 
-static EventRegistrationToken dummy_cookie = {.value = 0xdeadbeef};
 static const GUID dummy_adapter_id = {0x11111111, 0x2222, 0x3333, {0x44, 0x55, 0x66, 0x77, 0x88, 0x99, 0xaa, 0xbb}};
+
+/* Wine's ipifcons.h stops at the classic MIB_IF_TYPE_* list. */
+#ifndef IF_TYPE_IEEE802_11
+#define IF_TYPE_IEEE802_11 71
+#endif
+#ifndef IF_TYPE_GSM
+#define IF_TYPE_GSM 23
+#endif
+
+/* How often the NetworkStatusChanged worker re-reads the interface table. */
+static const ULONG network_status_poll_interval = 2000;
+
+/*
+ * Adapter snapshot: the iphlpapi view of the interface that carries traffic.
+ *
+ * GetAdaptersInfo enumerates the interfaces and gives the adapter GUID
+ * (AdapterName), the driver description and the IPv4 binding; it does not
+ * fill in link state, so GetIfEntry turns the interface index into the
+ * operational status, IANA type and link speed. The snapshot backs the
+ * ConnectionProfile, NetworkAdapter and Wlan/Wwan details objects, and is
+ * the state the NetworkStatusChanged worker polls for changes.
+ */
+struct adapter_snapshot
+{
+    GUID guid;            /* adapter GUID from IP_ADAPTER_INFO.AdapterName */
+    ULONG index;          /* interface index fed back into GetIfEntry */
+    ULONG iana_type;      /* MIB_IFROW.dwType, falls back to IP_ADAPTER_INFO.Type */
+    ULONG64 speed;        /* link speed in bits per second, 0 when unknown */
+    BOOL connected;       /* GetIfEntry reports the interface as operational */
+    BOOL wlan;            /* IF_TYPE_IEEE802_11 */
+    BOOL wwan;            /* IF_TYPE_GSM */
+    WCHAR *name;          /* adapter description, used as profile name and SSID */
+};
+
+static void adapter_snapshot_reset( struct adapter_snapshot *snapshot )
+{
+    free( snapshot->name );
+    memset( snapshot, 0, sizeof(*snapshot) );
+}
+
+static void adapter_snapshot_copy( const struct adapter_snapshot *src, struct adapter_snapshot *dst )
+{
+    *dst = *src;
+    dst->name = src->name ? wcsdup( src->name ) : NULL;
+}
+
+static BOOL ip_addr_string_is_set( const IP_ADDR_STRING *s )
+{
+    return s && s->IpAddress.String[0] && strcmp( s->IpAddress.String, "0.0.0.0" );
+}
+
+static void guid_from_adapter_name( const char *name, GUID *guid )
+{
+    unsigned int low, mid, high, a, b, bytes[6];
+
+    memset( guid, 0, sizeof(*guid) );
+    if (sscanf( name, "%08x-%04x-%04x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+                &low, &mid, &high, &a, &b,
+                &bytes[0], &bytes[1], &bytes[2], &bytes[3], &bytes[4], &bytes[5] ) != 11 )
+        return;
+
+    guid->Data1 = low;
+    guid->Data2 = mid;
+    guid->Data3 = high;
+    guid->Data4[0] = a;
+    guid->Data4[1] = b;
+    guid->Data4[2] = bytes[0];
+    guid->Data4[3] = bytes[1];
+    guid->Data4[4] = bytes[2];
+    guid->Data4[5] = bytes[3];
+    guid->Data4[6] = bytes[4];
+    guid->Data4[7] = bytes[5];
+}
+
+static WCHAR *strdup_ansi_as_wchar( const char *str )
+{
+    WCHAR *ret;
+    int len;
+
+    if (!str || !str[0]) return NULL;
+    if (!(len = MultiByteToWideChar( CP_ACP, 0, str, -1, NULL, 0 ))) return NULL;
+    if (!(ret = calloc( len, sizeof(*ret) ))) return NULL;
+    MultiByteToWideChar( CP_ACP, 0, str, -1, ret, len );
+    return ret;
+}
+
+static IP_ADAPTER_INFO *get_adapters_info( void )
+{
+    ULONG size = 2048;
+    IP_ADAPTER_INFO *info;
+    unsigned int i;
+
+    for (i = 0; i < 3; i++)
+    {
+        /* The ERROR_BUFFER_OVERFLOW pass is how the caller learns the size. */
+        if (!(info = calloc( 1, size ))) return NULL;
+        if (GetAdaptersInfo( info, &size ) == ERROR_SUCCESS) return info;
+        free( info );
+        if (!size) size = 2048;
+    }
+    return NULL;
+}
+
+static BOOL adapter_is_connected( const IP_ADAPTER_INFO *adapter, const MIB_IFROW *row )
+{
+    if (row->dwOperStatus)
+        return row->dwOperStatus == MIB_IF_OPER_STATUS_OPERATIONAL || row->dwOperStatus == MIB_IF_OPER_STATUS_CONNECTED;
+
+    /* Some interfaces report no operational status; an address means it is up. */
+    return ip_addr_string_is_set( &adapter->IpAddressList );
+}
+
+static unsigned int adapter_score( const IP_ADAPTER_INFO *adapter, const MIB_IFROW *row )
+{
+    unsigned int score = 0;
+
+    if (adapter_is_connected( adapter, row )) score += 8;
+    if (ip_addr_string_is_set( &adapter->GatewayList )) score += 4; /* has a default route */
+    if (ip_addr_string_is_set( &adapter->IpAddressList )) score += 2;
+    switch (adapter->Type)
+    {
+        case MIB_IF_TYPE_ETHERNET:
+        case IF_TYPE_IEEE802_11:
+        case IF_TYPE_GSM:
+            score += 3;
+            break;
+        default:
+            score += 1;
+            break;
+    }
+    return score;
+}
+
+static BOOL get_adapter_snapshot( struct adapter_snapshot *snapshot )
+{
+    IP_ADAPTER_INFO *first, *adapter;
+    unsigned int best_score = 0;
+    BOOL found = FALSE;
+
+    adapter_snapshot_reset( snapshot );
+    if (!(first = get_adapters_info() )) return FALSE;
+
+    for (adapter = first; adapter; adapter = adapter->Next)
+    {
+        struct adapter_snapshot candidate;
+        MIB_IFROW row;
+
+        memset( &row, 0, sizeof(row) );
+        row.dwIndex = adapter->Index;
+        if (GetIfEntry( &row ) != NO_ERROR) continue;
+
+        memset( &candidate, 0, sizeof(candidate) );
+        guid_from_adapter_name( adapter->AdapterName, &candidate.guid );
+        candidate.index = adapter->Index;
+        candidate.iana_type = row.dwType ? row.dwType : adapter->Type;
+        candidate.speed = row.dwSpeed;
+        candidate.connected = adapter_is_connected( adapter, &row );
+        candidate.wlan = candidate.iana_type == IF_TYPE_IEEE802_11;
+        candidate.wwan = candidate.iana_type == IF_TYPE_GSM;
+        candidate.name = strdup_ansi_as_wchar( adapter->Description );
+
+        if (found && adapter_score( adapter, &row ) < best_score)
+        {
+            free( candidate.name );
+            continue;
+        }
+
+        adapter_snapshot_reset( snapshot );
+        *snapshot = candidate;
+        best_score = adapter_score( adapter, &row );
+        found = TRUE;
+    }
+
+    free( first );
+    return found;
+}
+
+/*
+ * NetworkStatusChanged registry, modelled on the package_catalog event
+ * registry in dlls/appxdeploymentclient/package.c: every add_ records
+ * (handler, token), keeps the handler alive and hands back the token the
+ * caller passes to remove_; remove_ of an unknown token is E_INVALIDARG.
+ * A worker thread polls the adapter snapshot every 2 s and invokes the
+ * handlers with the NetworkInformation statics face as sender when the
+ * connectivity state flips.
+ */
+struct network_status_event
+{
+    INetworkStatusChangedEventHandler *handler;
+    LONG64 token;
+};
+
+#define NETWORK_STATUS_EVENT_MAX 32
+
+static struct network_status_event network_status_events[NETWORK_STATUS_EVENT_MAX];
+static ULONG network_status_event_count;
+static LONG64 network_status_token;
+static HANDLE network_status_thread;
+static ULONG64 network_status_last_key = ~(ULONG64)0;
+
+static CRITICAL_SECTION network_status_cs;
+static CRITICAL_SECTION_DEBUG network_status_cs_debug =
+{
+    0, 0, &network_status_cs,
+    { &network_status_cs_debug.ProcessLocksList, &network_status_cs_debug.ProcessLocksList },
+      0, 0, { (DWORD_PTR)(__FILE__ ": network_status_cs") }
+};
+static CRITICAL_SECTION network_status_cs = { &network_status_cs_debug, -1, 0, 0, 0, 0 };
+
+/* The NetworkInformation statics face is the sender handlers are invoked with. */
+static IInspectable *network_information_statics_inspectable( void );
+
+static ULONG64 adapter_snapshot_key( const struct adapter_snapshot *snapshot )
+{
+    ULONG64 key = 1;
+
+    if (!snapshot->connected) return 0;
+    key = ((ULONG64)snapshot->iana_type << 24) ^ ((ULONG64)snapshot->index << 4) ^ 1;
+    if (snapshot->wlan) key |= 2;
+    if (snapshot->wwan) key |= 4;
+    return key;
+}
+
+static void network_status_fire( void )
+{
+    IInspectable *sender = network_information_statics_inspectable();
+    INetworkStatusChangedEventHandler **handlers;
+    ULONG i, count;
+
+    EnterCriticalSection( &network_status_cs );
+    count = network_status_event_count;
+    if (!count || !(handlers = calloc( count, sizeof(*handlers) )))
+    {
+        LeaveCriticalSection( &network_status_cs );
+        return;
+    }
+    for (i = 0; i < count; i++)
+    {
+        handlers[i] = network_status_events[i].handler;
+        IUnknown_AddRef( handlers[i] );
+    }
+    LeaveCriticalSection( &network_status_cs );
+
+    for (i = 0; i < count; i++)
+    {
+        TRACE( "signalling handler %p.\n", handlers[i] );
+        INetworkStatusChangedEventHandler_Invoke( handlers[i], sender );
+        IUnknown_Release( handlers[i] );
+    }
+    free( handlers );
+}
+
+static void WINAPI network_status_worker( void *arg )
+{
+    struct adapter_snapshot snapshot;
+
+    memset( &snapshot, 0, sizeof(snapshot) );
+    for (;;)
+    {
+        ULONG64 key;
+
+        Sleep( network_status_poll_interval );
+        if (get_adapter_snapshot( &snapshot )) key = adapter_snapshot_key( &snapshot );
+        else key = 0;
+
+        if (key != network_status_last_key)
+        {
+            TRACE( "connectivity state %#I64x -> %#I64x\n", network_status_last_key, key );
+            network_status_last_key = key;
+            network_status_fire();
+        }
+        adapter_snapshot_reset( &snapshot );
+    }
+}
+
+static HRESULT network_status_add_event( INetworkStatusChangedEventHandler *handler, EventRegistrationToken *token )
+{
+    HRESULT hr = S_OK;
+
+    EnterCriticalSection( &network_status_cs );
+    if (network_status_event_count == ARRAY_SIZE( network_status_events )) hr = E_OUTOFMEMORY;
+    else
+    {
+        IUnknown_AddRef( handler );
+        network_status_events[network_status_event_count].handler = handler;
+        network_status_events[network_status_event_count].token = InterlockedIncrement64( &network_status_token );
+        token->value = network_status_events[network_status_event_count].token;
+        network_status_event_count++;
+
+        if (!network_status_thread &&
+                !(network_status_thread = CreateThread( NULL, 0, (LPTHREAD_START_ROUTINE)network_status_worker, NULL, 0, NULL )))
+            hr = E_FAIL;
+    }
+    LeaveCriticalSection( &network_status_cs );
+    return hr;
+}
+
+static HRESULT network_status_remove_event( EventRegistrationToken token )
+{
+    HRESULT hr = E_INVALIDARG;
+    ULONG i;
+
+    EnterCriticalSection( &network_status_cs );
+    for (i = 0; i < network_status_event_count; i++)
+    {
+        if (network_status_events[i].token != token.value) continue;
+        IUnknown_Release( network_status_events[i].handler );
+        network_status_events[i] = network_status_events[network_status_event_count - 1];
+        network_status_event_count--;
+        hr = S_OK;
+        break;
+    }
+    LeaveCriticalSection( &network_status_cs );
+    return hr;
+}
 
 struct network_adapter
 {
     INetworkAdapter INetworkAdapter_iface;
     LONG ref;
+
+    struct adapter_snapshot snapshot;
 };
 
 static inline struct network_adapter *impl_from_INetworkAdapter( INetworkAdapter *iface )
@@ -77,7 +395,11 @@ static ULONG WINAPI network_adapter_Release( INetworkAdapter *iface )
     struct network_adapter *impl = impl_from_INetworkAdapter( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
     TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        adapter_snapshot_reset( &impl->snapshot );
+        free( impl );
+    }
     return ref;
 }
 
@@ -111,25 +433,31 @@ static HRESULT WINAPI network_adapter_GetTrustLevel( INetworkAdapter *iface, Tru
 
 static HRESULT WINAPI network_adapter_get_OutboundMaxBitsPerSecond( INetworkAdapter *iface, UINT64 *value )
 {
+    struct network_adapter *impl = impl_from_INetworkAdapter( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = 1000000000ULL;
+    *value = impl->snapshot.speed ? impl->snapshot.speed : 1000000000ULL;
     return S_OK;
 }
 
 static HRESULT WINAPI network_adapter_get_InboundMaxBitsPerSecond( INetworkAdapter *iface, UINT64 *value )
 {
+    struct network_adapter *impl = impl_from_INetworkAdapter( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = 1000000000ULL;
+    *value = impl->snapshot.speed ? impl->snapshot.speed : 1000000000ULL;
     return S_OK;
 }
 
 static HRESULT WINAPI network_adapter_get_IanaInterfaceType( INetworkAdapter *iface, UINT32 *value )
 {
+    struct network_adapter *impl = impl_from_INetworkAdapter( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = 6; /* MIB_IF_TYPE_ETHERNET */
+    *value = impl->snapshot.iana_type ? impl->snapshot.iana_type : MIB_IF_TYPE_ETHERNET;
     return S_OK;
 }
 
@@ -143,9 +471,11 @@ static HRESULT WINAPI network_adapter_get_NetworkItem( INetworkAdapter *iface, I
 
 static HRESULT WINAPI network_adapter_get_NetworkAdapterId( INetworkAdapter *iface, GUID *value )
 {
+    struct network_adapter *impl = impl_from_INetworkAdapter( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = dummy_adapter_id;
+    *value = impl->snapshot.index ? impl->snapshot.guid : dummy_adapter_id;
     return S_OK;
 }
 
@@ -174,15 +504,28 @@ static const struct INetworkAdapterVtbl network_adapter_vtbl =
     network_adapter_GetConnectedProfileAsync,
 };
 
-static HRESULT network_adapter_create( INetworkAdapter **adapter )
+static HRESULT network_adapter_create_snapshot( const struct adapter_snapshot *snapshot, INetworkAdapter **adapter )
 {
     struct network_adapter *impl;
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->INetworkAdapter_iface.lpVtbl = &network_adapter_vtbl;
     impl->ref = 1;
+    adapter_snapshot_copy( snapshot, &impl->snapshot );
     *adapter = &impl->INetworkAdapter_iface;
     return S_OK;
+}
+
+static HRESULT network_adapter_create( INetworkAdapter **adapter )
+{
+    struct adapter_snapshot snapshot;
+    HRESULT hr;
+
+    memset( &snapshot, 0, sizeof(snapshot) );
+    get_adapter_snapshot( &snapshot );
+    hr = network_adapter_create_snapshot( &snapshot, adapter );
+    adapter_snapshot_reset( &snapshot );
+    return hr;
 }
 
 struct ip_information
@@ -818,6 +1161,8 @@ struct wlan_details
 {
     IWlanConnectionProfileDetails IWlanConnectionProfileDetails_iface;
     LONG ref;
+
+    WCHAR *ssid;
 };
 
 static inline struct wlan_details *impl_from_IWlanConnectionProfileDetails( IWlanConnectionProfileDetails *iface )
@@ -859,7 +1204,11 @@ static ULONG WINAPI wlan_details_Release( IWlanConnectionProfileDetails *iface )
     struct wlan_details *impl = impl_from_IWlanConnectionProfileDetails( iface );
     ULONG ref = InterlockedDecrement( &impl->ref );
     TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        free( impl->ssid );
+        free( impl );
+    }
     return ref;
 }
 
@@ -893,9 +1242,12 @@ static HRESULT WINAPI wlan_details_GetTrustLevel( IWlanConnectionProfileDetails 
 
 static HRESULT WINAPI wlan_details_GetConnectedSsid( IWlanConnectionProfileDetails *iface, HSTRING *value )
 {
+    struct wlan_details *impl = impl_from_IWlanConnectionProfileDetails( iface );
+    const WCHAR *ssid = impl->ssid ? impl->ssid : L"Wine Network";
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    return WindowsCreateString( L"Wine Network", 12, value );
+    return WindowsCreateString( ssid, wcslen( ssid ), value );
 }
 
 static const struct IWlanConnectionProfileDetailsVtbl wlan_details_vtbl =
@@ -909,14 +1261,156 @@ static const struct IWlanConnectionProfileDetailsVtbl wlan_details_vtbl =
     wlan_details_GetConnectedSsid,
 };
 
-static HRESULT wlan_details_create( IWlanConnectionProfileDetails **details )
+static HRESULT wlan_details_create_snapshot( const struct adapter_snapshot *snapshot,
+                                             IWlanConnectionProfileDetails **details )
 {
     struct wlan_details *impl;
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IWlanConnectionProfileDetails_iface.lpVtbl = &wlan_details_vtbl;
     impl->ref = 1;
+    /* iphlpapi has no SSID field; the adapter description is the closest
+       human readable name Windows-style consumers expect here. */
+    if (snapshot->name && !(impl->ssid = wcsdup( snapshot->name )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
     *details = &impl->IWlanConnectionProfileDetails_iface;
+    return S_OK;
+}
+
+/* Backs the GsmConnectionProfileDetails runtime class returned for WWAN adapters. */
+struct gsm_details
+{
+    IWwanConnectionProfileDetails IWwanConnectionProfileDetails_iface;
+    LONG ref;
+};
+
+static inline struct gsm_details *impl_from_IWwanConnectionProfileDetails( IWwanConnectionProfileDetails *iface )
+{
+    return CONTAINING_RECORD( iface, struct gsm_details, IWwanConnectionProfileDetails_iface );
+}
+
+static HRESULT WINAPI gsm_details_QueryInterface( IWwanConnectionProfileDetails *iface, REFIID iid, void **out )
+{
+    struct gsm_details *impl = impl_from_IWwanConnectionProfileDetails( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IWwanConnectionProfileDetails ))
+    {
+        *out = &impl->IWwanConnectionProfileDetails_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI gsm_details_AddRef( IWwanConnectionProfileDetails *iface )
+{
+    struct gsm_details *impl = impl_from_IWwanConnectionProfileDetails( iface );
+    ULONG ref = InterlockedIncrement( &impl->ref );
+    TRACE( "iface %p increasing refcount to %lu.\n", iface, ref );
+    return ref;
+}
+
+static ULONG WINAPI gsm_details_Release( IWwanConnectionProfileDetails *iface )
+{
+    struct gsm_details *impl = impl_from_IWwanConnectionProfileDetails( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI gsm_details_GetIids( IWwanConnectionProfileDetails *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] =
+    {
+        IID_IWwanConnectionProfileDetails,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI gsm_details_GetRuntimeClassName( IWwanConnectionProfileDetails *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Networking_Connectivity_WwanConnectionProfileDetails,
+                                wcslen( RuntimeClass_Windows_Networking_Connectivity_WwanConnectionProfileDetails ),
+                                class_name );
+}
+
+static HRESULT WINAPI gsm_details_GetTrustLevel( IWwanConnectionProfileDetails *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI gsm_details_get_HomeProviderId( IWwanConnectionProfileDetails *iface, HSTRING *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"", 0, value );
+}
+
+static HRESULT WINAPI gsm_details_get_AccessPointName( IWwanConnectionProfileDetails *iface, HSTRING *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"", 0, value );
+}
+
+static HRESULT WINAPI gsm_details_GetNetworkRegistrationState( IWwanConnectionProfileDetails *iface,
+                                                               WwanNetworkRegistrationState *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = WwanNetworkRegistrationState_Home;
+    return S_OK;
+}
+
+static HRESULT WINAPI gsm_details_GetCurrentDataClass( IWwanConnectionProfileDetails *iface, WwanDataClass *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = WwanDataClass_LteAdvanced;
+    return S_OK;
+}
+
+static const struct IWwanConnectionProfileDetailsVtbl gsm_details_vtbl =
+{
+    gsm_details_QueryInterface,
+    gsm_details_AddRef,
+    gsm_details_Release,
+    gsm_details_GetIids,
+    gsm_details_GetRuntimeClassName,
+    gsm_details_GetTrustLevel,
+    gsm_details_get_HomeProviderId,
+    gsm_details_get_AccessPointName,
+    gsm_details_GetNetworkRegistrationState,
+    gsm_details_GetCurrentDataClass,
+};
+
+static HRESULT gsm_details_create( IWwanConnectionProfileDetails **details )
+{
+    struct gsm_details *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IWwanConnectionProfileDetails_iface.lpVtbl = &gsm_details_vtbl;
+    impl->ref = 1;
+    *details = &impl->IWwanConnectionProfileDetails_iface;
     return S_OK;
 }
 
@@ -1207,6 +1701,7 @@ struct connection_profile
     LONG ref;
 
     INetworkListManager *network_list_manager;
+    struct adapter_snapshot snapshot;
 };
 
 static inline struct connection_profile *impl_from_IConnectionProfile( IConnectionProfile *iface )
@@ -1275,6 +1770,7 @@ static ULONG WINAPI connection_profile_Release( IConnectionProfile *iface )
     {
         if (impl->network_list_manager)
             INetworkListManager_Release( impl->network_list_manager );
+        adapter_snapshot_reset( &impl->snapshot );
         free( impl );
     }
     return ref;
@@ -1313,9 +1809,12 @@ static HRESULT WINAPI connection_profile_GetTrustLevel( IConnectionProfile *ifac
 
 static HRESULT WINAPI connection_profile_get_ProfileName( IConnectionProfile *iface, HSTRING *value )
 {
+    struct connection_profile *impl = impl_from_IConnectionProfile( iface );
+    const WCHAR *name = impl->snapshot.name ? impl->snapshot.name : L"Wine Network";
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    return WindowsCreateString( L"Wine Network", 12, value );
+    return WindowsCreateString( name, wcslen( name ), value );
 }
 
 static HRESULT WINAPI connection_profile_GetNetworkConnectivityLevel( IConnectionProfile *iface, NetworkConnectivityLevel *value )
@@ -1368,9 +1867,11 @@ static HRESULT WINAPI connection_profile_GetDataPlanStatus( IConnectionProfile *
 
 static HRESULT WINAPI connection_profile_get_NetworkAdapter( IConnectionProfile *iface, INetworkAdapter **value )
 {
+    struct connection_profile *impl = impl_from_IConnectionProfile( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    return network_adapter_create( value );
+    return network_adapter_create_snapshot( &impl->snapshot, value );
 }
 
 static HRESULT WINAPI connection_profile_GetLocalUsage( IConnectionProfile *iface, DateTime start, DateTime end, IDataUsage **value )
@@ -1473,33 +1974,43 @@ static HRESULT WINAPI connection_profile2_GetTrustLevel( IConnectionProfile2 *if
 
 HRESULT WINAPI connection_profile2_get_IsWwanConnectionProfile( IConnectionProfile2 *iface, boolean *value )
 {
+    struct connection_profile *impl = impl_from_IConnectionProfile2( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = 0;
+    *value = impl->snapshot.wwan;
     return S_OK;
 }
 
 HRESULT WINAPI connection_profile2_get_IsWlanConnectionProfile( IConnectionProfile2 *iface, boolean *value )
 {
+    struct connection_profile *impl = impl_from_IConnectionProfile2( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = 0;
+    *value = impl->snapshot.wlan;
     return S_OK;
 }
 
 HRESULT WINAPI connection_profile2_get_WwanConnectionProfileDetails( IConnectionProfile2 *iface, IWwanConnectionProfileDetails **value )
 {
+    struct connection_profile *impl = impl_from_IConnectionProfile2( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
     *value = NULL;
-    return S_OK;
+    /* Windows returns GsmConnectionProfileDetails only for a WWAN profile. */
+    return impl->snapshot.wwan ? gsm_details_create( value ) : S_OK;
 }
 
 HRESULT WINAPI connection_profile2_get_WlanConnectionProfileDetails( IConnectionProfile2 *iface, IWlanConnectionProfileDetails **value )
 {
+    struct connection_profile *impl = impl_from_IConnectionProfile2( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    return wlan_details_create( value );
+    *value = NULL;
+    return impl->snapshot.wlan ? wlan_details_create_snapshot( &impl->snapshot, value ) : S_OK;
 }
 
 HRESULT WINAPI connection_profile2_get_ServiceProviderGuid( IConnectionProfile2 *iface, IReference_GUID **value )
@@ -1729,6 +2240,9 @@ static HRESULT connection_profile_create( INetworkListManager *network_list_mana
     impl->network_list_manager = network_list_manager;
     if (impl->network_list_manager)
         INetworkListManager_AddRef( impl->network_list_manager );
+    get_adapter_snapshot( &impl->snapshot );
+    TRACE( "profile bound to interface %lu, type %lu, connected %d.\n",
+           impl->snapshot.index, impl->snapshot.iana_type, impl->snapshot.connected );
 
     *profile = &impl->IConnectionProfile_iface;
     return S_OK;
@@ -2047,15 +2561,15 @@ static HRESULT WINAPI network_information_statics_add_NetworkStatusChanged( INet
                                                                             EventRegistrationToken *cookie )
 {
     TRACE( "iface %p, handler %p, cookie %p\n", iface, handler, cookie );
+    if (!handler) return E_INVALIDARG;
     if (!cookie) return E_POINTER;
-    *cookie = dummy_cookie;
-    return S_OK;
+    return network_status_add_event( handler, cookie );
 }
 
 static HRESULT WINAPI network_information_statics_remove_NetworkStatusChanged( INetworkInformationStatics *iface, EventRegistrationToken cookie )
 {
     TRACE( "iface %p, cookie %#I64x\n", iface, cookie.value );
-    return S_OK;
+    return network_status_remove_event( cookie );
 }
 
 static const struct INetworkInformationStaticsVtbl network_information_statics_vtbl =
@@ -2086,3 +2600,8 @@ static struct network_information_statics network_information_statics =
 };
 
 IActivationFactory *network_information_factory = &network_information_statics.IActivationFactory_iface;
+
+static IInspectable *network_information_statics_inspectable( void )
+{
+    return (IInspectable *)&network_information_statics.INetworkInformationStatics_iface;
+}
