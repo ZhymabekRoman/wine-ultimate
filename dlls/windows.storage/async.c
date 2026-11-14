@@ -124,9 +124,15 @@ static ULONG WINAPI async_op_Release( IInspectable *iface )
 
 static HRESULT WINAPI async_op_GetIids( IInspectable *iface, ULONG *iid_count, IID **iids )
 {
+    struct async_op *impl = impl_from_IInspectable( iface );
+    IID *array;
+
     if (!iid_count || !iids) return E_INVALIDARG;
-    *iid_count = 0;
-    *iids = NULL;
+    if (!(array = CoTaskMemAlloc( 2 * sizeof(*array) ))) return E_OUTOFMEMORY;
+    array[0] = impl->iid;
+    array[1] = IID_IAsyncInfo;
+    *iid_count = 2;
+    *iids = array;
     return S_OK;
 }
 
@@ -163,13 +169,19 @@ static HRESULT WINAPI async_op_put_Completed( IInspectable *iface, void *handler
         impl->completed_handler = h;
         IUnknown_AddRef( h );
     }
-    if (h && impl->status == Completed)
+    if (h && impl->status != Started)
     {
         pfn_async_completed_invoke invoke;
         void **vtbl = *(void ***)h;
+        AsyncStatus status = impl->status;
+
         invoke = (pfn_async_completed_invoke)vtbl[3];
+        IUnknown_AddRef( h );
+        async_op_AddRef( &impl->IInspectable_iface );
         LeaveCriticalSection( &impl->cs );
-        invoke( h, &impl->IInspectable_iface, impl->status );
+        invoke( h, &impl->IInspectable_iface, status );
+        async_op_Release( &impl->IInspectable_iface );
+        IUnknown_Release( h );
         return S_OK;
     }
     LeaveCriticalSection( &impl->cs );
@@ -471,6 +483,7 @@ HRESULT async_action_create( const WCHAR *class_name, HRESULT hr_result, IAsyncA
         return E_OUTOFMEMORY;
 
     impl->hr = hr_result;
+    if (FAILED(hr_result)) impl->status = Error;
     *out = (IAsyncAction *)&impl->IInspectable_iface;
     return S_OK;
 }

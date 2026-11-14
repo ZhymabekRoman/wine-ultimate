@@ -3,4 +3,5 @@ IMPORTS = combase
 
 SOURCES = \
 	pickers.c \
-	storage.c
+	storage.c \
+	stream.c

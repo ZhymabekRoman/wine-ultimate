@@ -18,6 +18,7 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 
+#include <stdint.h>
 #include <string.h>
 
 #include "private.h"
@@ -119,7 +120,7 @@ static HRESULT WINAPI buffer_GetIids( IBuffer *iface, ULONG *iid_count, IID **ii
 
 static HRESULT WINAPI buffer_GetRuntimeClassName( IBuffer *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.Buffer", 29, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.Buffer", 30, class_name );
 }
 
 static HRESULT WINAPI buffer_GetTrustLevel( IBuffer *iface, TrustLevel *trust_level )
@@ -205,7 +206,7 @@ static const struct IBufferByteAccessVtbl buffer_byte_access_vtbl =
     buffer_byte_access_Buffer,
 };
 
-HRESULT buffer_create( UINT32 capacity, IBuffer **out )
+static HRESULT buffer_create_raw( UINT32 capacity, BOOL zero_init, struct buffer **out )
 {
     struct buffer *impl;
 
@@ -223,12 +224,39 @@ HRESULT buffer_create( UINT32 capacity, IBuffer **out )
 
     if (capacity)
     {
-        if (!(impl->data = calloc( 1, capacity )))
+        impl->data = zero_init ? calloc( 1, capacity ) : malloc( capacity );
+        if (!impl->data)
         {
             free( impl );
             return E_OUTOFMEMORY;
         }
     }
+
+    *out = impl;
+    return S_OK;
+}
+
+static HRESULT buffer_ensure_capacity( struct buffer *impl, UINT32 needed )
+{
+    BYTE *new_data;
+
+    if (needed <= impl->capacity) return S_OK;
+    if (!(new_data = realloc( impl->data, needed ))) return E_OUTOFMEMORY;
+    impl->data = new_data;
+    impl->capacity = needed;
+    return S_OK;
+}
+
+HRESULT buffer_create( UINT32 capacity, IBuffer **out )
+{
+    struct buffer *impl;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    if (FAILED(hr = buffer_create_raw( capacity, TRUE, &impl )))
+        return hr;
 
     *out = &impl->IBuffer_iface;
     TRACE( "created IBuffer %p (impl %p, data %p, capacity %u).\n", *out, impl, impl->data, capacity );
@@ -327,7 +355,7 @@ static HRESULT WINAPI buffer_factory_GetIids( IActivationFactory *iface, ULONG *
 
 static HRESULT WINAPI buffer_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.Buffer", 29, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.Buffer", 30, class_name );
 }
 
 static HRESULT WINAPI buffer_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
@@ -542,6 +570,7 @@ struct in_memory_stream
     struct in_memory_content *content;
     UINT64 position;
     BOOL closed;
+    BOOL read_only;
 };
 
 static inline struct in_memory_stream *impl_from_IRandomAccessStream( IRandomAccessStream *iface )
@@ -650,7 +679,7 @@ static HRESULT WINAPI in_memory_stream_GetIids( IRandomAccessStream *iface, ULON
 
 static HRESULT WINAPI in_memory_stream_GetRuntimeClassName( IRandomAccessStream *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.InMemoryRandomAccessStream", 49, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.InMemoryRandomAccessStream", 50, class_name );
 }
 
 static HRESULT WINAPI in_memory_stream_GetTrustLevel( IRandomAccessStream *iface, TrustLevel *trust_level )
@@ -660,10 +689,32 @@ static HRESULT WINAPI in_memory_stream_GetTrustLevel( IRandomAccessStream *iface
     return S_OK;
 }
 
+static HRESULT in_memory_stream_clone_at( struct in_memory_stream *impl, UINT64 position,
+                                          struct in_memory_stream **out )
+{
+    IRandomAccessStream *stream;
+    struct in_memory_stream *clone;
+    HRESULT hr;
+
+    if (FAILED(hr = in_memory_stream_create( &stream )))
+        return hr;
+
+    clone = impl_from_IRandomAccessStream( stream );
+    EnterCriticalSection( &impl->content->cs );
+    content_release( clone->content );
+    clone->content = content_addref( impl->content );
+    clone->position = position;
+    clone->read_only = impl->read_only;
+    LeaveCriticalSection( &impl->content->cs );
+    *out = clone;
+    return S_OK;
+}
+
 static HRESULT WINAPI in_memory_stream_get_Size( IRandomAccessStream *iface, UINT64 *value )
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
     if (!value) return E_POINTER;
+    if (impl->closed) return RO_E_CLOSED;
     EnterCriticalSection( &impl->content->cs );
     *value = impl->content->size;
     LeaveCriticalSection( &impl->content->cs );
@@ -673,6 +724,9 @@ static HRESULT WINAPI in_memory_stream_get_Size( IRandomAccessStream *iface, UIN
 static HRESULT WINAPI in_memory_stream_put_Size( IRandomAccessStream *iface, UINT64 value )
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
+
+    if (impl->closed) return RO_E_CLOSED;
+    if (impl->read_only) return E_ACCESSDENIED;
 
     EnterCriticalSection( &impl->content->cs );
     if (value > impl->content->capacity)
@@ -687,6 +741,8 @@ static HRESULT WINAPI in_memory_stream_put_Size( IRandomAccessStream *iface, UIN
         impl->content->buffer = new_buf;
         impl->content->capacity = value;
     }
+    if (value > impl->content->size)
+        memset( impl->content->buffer + impl->content->size, 0, value - impl->content->size );
     impl->content->size = value;
     impl->content->dirty = TRUE;
     if (impl->position > impl->content->size)
@@ -699,13 +755,17 @@ static HRESULT WINAPI in_memory_stream_GetInputStreamAt( IRandomAccessStream *if
                                                          IInputStream **stream )
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
+    struct in_memory_stream *clone;
+    HRESULT hr;
 
     if (!stream) return E_POINTER;
-    EnterCriticalSection( &impl->content->cs );
-    impl->position = min( position, impl->content->size );
-    LeaveCriticalSection( &impl->content->cs );
-    *stream = &impl->IInputStream_iface;
-    IInputStream_AddRef( *stream );
+    *stream = NULL;
+    if (impl->closed) return RO_E_CLOSED;
+
+    if (FAILED(hr = in_memory_stream_clone_at( impl, position, &clone )))
+        return hr;
+
+    *stream = &clone->IInputStream_iface;
     return S_OK;
 }
 
@@ -713,13 +773,18 @@ static HRESULT WINAPI in_memory_stream_GetOutputStreamAt( IRandomAccessStream *i
                                                           IOutputStream **stream )
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
+    struct in_memory_stream *clone;
+    HRESULT hr;
 
     if (!stream) return E_POINTER;
-    EnterCriticalSection( &impl->content->cs );
-    impl->position = min( position, impl->content->size );
-    LeaveCriticalSection( &impl->content->cs );
-    *stream = &impl->IOutputStream_iface;
-    IOutputStream_AddRef( *stream );
+    *stream = NULL;
+    if (impl->closed) return RO_E_CLOSED;
+    if (impl->read_only) return E_ACCESSDENIED;
+
+    if (FAILED(hr = in_memory_stream_clone_at( impl, position, &clone )))
+        return hr;
+
+    *stream = &clone->IOutputStream_iface;
     return S_OK;
 }
 
@@ -727,6 +792,7 @@ static HRESULT WINAPI in_memory_stream_get_Position( IRandomAccessStream *iface,
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
     if (!value) return E_POINTER;
+    if (impl->closed) return RO_E_CLOSED;
     EnterCriticalSection( &impl->content->cs );
     *value = impl->position;
     LeaveCriticalSection( &impl->content->cs );
@@ -736,8 +802,9 @@ static HRESULT WINAPI in_memory_stream_get_Position( IRandomAccessStream *iface,
 static HRESULT WINAPI in_memory_stream_Seek( IRandomAccessStream *iface, UINT64 position )
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
+    if (impl->closed) return RO_E_CLOSED;
     EnterCriticalSection( &impl->content->cs );
-    impl->position = (position <= impl->content->size) ? position : impl->content->size;
+    impl->position = position;
     LeaveCriticalSection( &impl->content->cs );
     return S_OK;
 }
@@ -746,19 +813,18 @@ static HRESULT WINAPI in_memory_stream_CloneStream( IRandomAccessStream *iface, 
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
     struct in_memory_stream *clone;
+    HRESULT hr;
 
     if (!stream) return E_POINTER;
-    if (FAILED(in_memory_stream_create( stream )))
-        return E_OUTOFMEMORY;
+    *stream = NULL;
+    if (impl->closed) return RO_E_CLOSED;
 
-    clone = impl_from_IRandomAccessStream( *stream );
-    EnterCriticalSection( &impl->content->cs );
     /* Windows semantics: the clone shares the source content (writes to one are visible
      * to the other) and starts with its own independent position at the start. */
-    content_release( clone->content );
-    clone->content = content_addref( impl->content );
-    clone->position = 0;
-    LeaveCriticalSection( &impl->content->cs );
+    if (FAILED(hr = in_memory_stream_clone_at( impl, 0, &clone )))
+        return hr;
+
+    *stream = &clone->IRandomAccessStream_iface;
     return S_OK;
 }
 
@@ -774,7 +840,7 @@ static HRESULT WINAPI in_memory_stream_get_CanWrite( IRandomAccessStream *iface,
 {
     struct in_memory_stream *impl = impl_from_IRandomAccessStream( iface );
     if (!value) return E_POINTER;
-    *value = !impl->closed;
+    *value = !impl->closed && !impl->read_only;
     return S_OK;
 }
 
@@ -807,20 +873,26 @@ static HRESULT WINAPI in_memory_stream_input_ReadAsync( IInputStream *iface, IBu
     struct in_memory_stream *impl = impl_from_IInputStream( iface );
     IBufferByteAccess *access = NULL;
     BYTE *dest = NULL;
-    UINT32 to_read = 0;
+    UINT32 cap = 0, to_read = 0;
     HRESULT hr;
 
     if (!buffer || !operation) return E_POINTER;
+    *operation = NULL;
+    if (impl->closed) return RO_E_CLOSED;
 
     TRACE( "PUMPTID input_ReadAsync impl %p count %u.\n", impl, count );
+
+    IBuffer_get_Capacity( buffer, &cap );
 
     EnterCriticalSection( &impl->content->cs );
     if (impl->position < impl->content->size)
     {
-        to_read = min( count, (UINT32)(impl->content->size - impl->position) );
-        if (SUCCEEDED(hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access )))
+        UINT64 avail = impl->content->size - impl->position;
+        to_read = (avail < count) ? (UINT32)avail : count;
+        if (to_read > cap) to_read = cap;
+        if (to_read && SUCCEEDED(hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access )))
         {
-            if (SUCCEEDED(IBufferByteAccess_Buffer( access, &dest )) && dest && to_read)
+            if (SUCCEEDED(IBufferByteAccess_Buffer( access, &dest )) && dest)
                 memcpy( dest, impl->content->buffer + impl->position, to_read );
             IBufferByteAccess_Release( access );
         }
@@ -846,6 +918,48 @@ static const struct IInputStreamVtbl in_memory_stream_input_vtbl =
 /* IOutputStream for InMemoryRandomAccessStream */
 DEFINE_IINSPECTABLE( in_memory_stream_output, IOutputStream, struct in_memory_stream, IRandomAccessStream_iface )
 
+static HRESULT in_memory_stream_write_raw( struct in_memory_stream *impl, const BYTE *src, UINT32 len )
+{
+    if (impl->closed) return RO_E_CLOSED;
+    if (impl->read_only) return E_ACCESSDENIED;
+
+    EnterCriticalSection( &impl->content->cs );
+    if (len)
+    {
+        UINT64 needed;
+
+        if (len > UINT64_MAX - impl->position)
+        {
+            LeaveCriticalSection( &impl->content->cs );
+            return E_OUTOFMEMORY;
+        }
+        needed = impl->position + len;
+        if (needed > impl->content->capacity)
+        {
+            UINT64 new_cap = max( impl->content->capacity * 2, needed + 1024 );
+            BYTE *new_buf;
+
+            if (new_cap < needed) new_cap = needed;
+            if (!(new_buf = realloc( impl->content->buffer, new_cap )))
+            {
+                LeaveCriticalSection( &impl->content->cs );
+                return E_OUTOFMEMORY;
+            }
+            impl->content->buffer = new_buf;
+            impl->content->capacity = new_cap;
+        }
+        if (impl->position > impl->content->size)
+            memset( impl->content->buffer + impl->content->size, 0, impl->position - impl->content->size );
+        memcpy( impl->content->buffer + impl->position, src, len );
+        impl->position += len;
+        if (impl->position > impl->content->size)
+            impl->content->size = impl->position;
+        impl->content->dirty = TRUE;
+    }
+    LeaveCriticalSection( &impl->content->cs );
+    return S_OK;
+}
+
 static HRESULT WINAPI in_memory_stream_output_WriteAsync( IOutputStream *iface, IBuffer *buffer,
                                                           IAsyncOperationWithProgress_UINT32_UINT32 **operation )
 {
@@ -856,40 +970,23 @@ static HRESULT WINAPI in_memory_stream_output_WriteAsync( IOutputStream *iface, 
     HRESULT hr;
 
     if (!buffer || !operation) return E_POINTER;
-
-    TRACE( "PUMPTID output_WriteAsync impl %p len %u.\n", impl, len );
+    *operation = NULL;
+    if (impl->closed) return RO_E_CLOSED;
+    if (impl->read_only) return E_ACCESSDENIED;
 
     IBuffer_get_Length( buffer, &len );
-    if (FAILED(hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access )))
-        return hr;
+    TRACE( "PUMPTID output_WriteAsync impl %p len %u.\n", impl, len );
 
-    hr = IBufferByteAccess_Buffer( access, &src );
-    IBufferByteAccess_Release( access );
-    if (FAILED(hr)) return hr;
-
-    EnterCriticalSection( &impl->content->cs );
     if (len)
     {
-        UINT64 needed = impl->position + len;
-        if (needed > impl->content->capacity)
-        {
-            UINT64 new_cap = max( impl->content->capacity * 2, needed + 1024 );
-            BYTE *new_buf = realloc( impl->content->buffer, new_cap );
-            if (!new_buf)
-            {
-                LeaveCriticalSection( &impl->content->cs );
-                return E_OUTOFMEMORY;
-            }
-            impl->content->buffer = new_buf;
-            impl->content->capacity = new_cap;
-        }
-        memcpy( impl->content->buffer + impl->position, src, len );
-        impl->position += len;
-        if (impl->position > impl->content->size)
-            impl->content->size = impl->position;
-        impl->content->dirty = TRUE;
+        if (FAILED(hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access )))
+            return hr;
+        hr = IBufferByteAccess_Buffer( access, &src );
+        IBufferByteAccess_Release( access );
+        if (FAILED(hr)) return hr;
+        if (FAILED(hr = in_memory_stream_write_raw( impl, src, len )))
+            return hr;
     }
-    LeaveCriticalSection( &impl->content->cs );
 
     return async_operation_progress_uint32_create( len, operation );
 }
@@ -897,6 +994,10 @@ static HRESULT WINAPI in_memory_stream_output_WriteAsync( IOutputStream *iface, 
 static HRESULT WINAPI in_memory_stream_output_FlushAsync( IOutputStream *iface, IAsyncOperation_boolean **operation )
 {
     struct in_memory_stream *impl = impl_from_IOutputStream( iface );
+
+    if (!operation) return E_POINTER;
+    *operation = NULL;
+    if (impl->closed) return RO_E_CLOSED;
 
     EnterCriticalSection( &impl->content->cs );
     content_flush_to_file( impl->content );
@@ -1129,7 +1230,7 @@ static const WCHAR *content_type_for_path( const WCHAR *path )
     return L"application/octet-stream";
 }
 
-HRESULT in_memory_stream_create_from_file( const WCHAR *path, IRandomAccessStream **out )
+HRESULT in_memory_stream_create_from_file( const WCHAR *path, BOOL read_only, IRandomAccessStream **out )
 {
     struct in_memory_stream *impl;
     BYTE *bytes = NULL;
@@ -1151,10 +1252,11 @@ HRESULT in_memory_stream_create_from_file( const WCHAR *path, IRandomAccessStrea
     impl->content->size = size;
     impl->content->capacity = size;
     impl->position = 0;
+    impl->read_only = read_only;
     if (path)
     {
-        lstrcpyW( impl->content->backing_path, path );
-        lstrcpyW( impl->content->content_type, content_type_for_path( path ) );
+        lstrcpynW( impl->content->backing_path, path, ARRAY_SIZE(impl->content->backing_path) );
+        lstrcpynW( impl->content->content_type, content_type_for_path( path ), ARRAY_SIZE(impl->content->content_type) );
     }
 
     return S_OK;
@@ -1234,7 +1336,7 @@ static HRESULT WINAPI in_memory_stream_factory_GetIids( IActivationFactory *ifac
 
 static HRESULT WINAPI in_memory_stream_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.InMemoryRandomAccessStream", 49, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.InMemoryRandomAccessStream", 50, class_name );
 }
 
 static HRESULT WINAPI in_memory_stream_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
@@ -1323,6 +1425,7 @@ struct data_reader
 
     CRITICAL_SECTION cs;
     IInputStream *input_stream;
+    struct buffer *scratch_buf;
     BYTE *buffer;
     UINT32 capacity;
     UINT32 length;
@@ -1384,6 +1487,8 @@ static ULONG WINAPI data_reader_Release( IDataReader *iface )
     {
         if (impl->input_stream)
             IInputStream_Release( impl->input_stream );
+        if (impl->scratch_buf)
+            IBuffer_Release( &impl->scratch_buf->IBuffer_iface );
         DeleteCriticalSection( &impl->cs );
         free( impl->buffer );
         free( impl );
@@ -1410,7 +1515,7 @@ static HRESULT WINAPI data_reader_GetIids( IDataReader *iface, ULONG *iid_count,
 
 static HRESULT WINAPI data_reader_GetRuntimeClassName( IDataReader *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.DataReader", 33, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.DataReader", 34, class_name );
 }
 
 static HRESULT WINAPI data_reader_GetTrustLevel( IDataReader *iface, TrustLevel *trust_level )
@@ -1479,14 +1584,23 @@ static HRESULT data_reader_read_raw( struct data_reader *impl, void *dest, UINT3
 {
     HRESULT hr = S_OK;
     EnterCriticalSection( &impl->cs );
-    if (impl->position + count > impl->length)
+    if (impl->closed)
+    {
+        hr = RO_E_CLOSED;
+    }
+    else if (count > impl->length - impl->position)
     {
         hr = E_BOUNDS;
     }
     else
     {
-        memcpy( dest, impl->buffer + impl->position, count );
+        if (count) memcpy( dest, impl->buffer + impl->position, count );
         impl->position += count;
+        if (impl->position == impl->length)
+        {
+            impl->position = 0;
+            impl->length = 0;
+        }
     }
     LeaveCriticalSection( &impl->cs );
     return hr;
@@ -1630,44 +1744,47 @@ static HRESULT WINAPI data_reader_ReadString( IDataReader *iface, UINT32 code_un
 
     if (impl->encoding == UnicodeEncoding_Utf8)
     {
-        char *utf8 = malloc( code_unit_count + 1 );
+        char stack_utf8[256];
+        WCHAR stack_wbuf[256];
+        char *utf8 = (code_unit_count < sizeof(stack_utf8)) ? stack_utf8 : malloc( code_unit_count + 1 );
         int wlen;
         WCHAR *wbuf;
 
         if (!utf8) return E_OUTOFMEMORY;
         if (FAILED(hr = data_reader_read_raw( impl, utf8, code_unit_count )))
         {
-            free( utf8 );
+            if (utf8 != stack_utf8) free( utf8 );
             return hr;
         }
         utf8[code_unit_count] = 0;
         wlen = MultiByteToWideChar( CP_UTF8, 0, utf8, code_unit_count, NULL, 0 );
-        wbuf = malloc( (wlen + 1) * sizeof(WCHAR) );
+        wbuf = (wlen < (int)ARRAY_SIZE(stack_wbuf)) ? stack_wbuf : malloc( (wlen + 1) * sizeof(WCHAR) );
         if (!wbuf)
         {
-            free( utf8 );
+            if (utf8 != stack_utf8) free( utf8 );
             return E_OUTOFMEMORY;
         }
         MultiByteToWideChar( CP_UTF8, 0, utf8, code_unit_count, wbuf, wlen );
         wbuf[wlen] = 0;
         hr = WindowsCreateString( wbuf, wlen, value );
-        free( wbuf );
-        free( utf8 );
+        if (wbuf != stack_wbuf) free( wbuf );
+        if (utf8 != stack_utf8) free( utf8 );
         return hr;
     }
     else
     {
+        WCHAR stack_wbuf[128];
         UINT32 bytes = code_unit_count * sizeof(WCHAR);
-        WCHAR *wbuf = malloc( bytes + sizeof(WCHAR) );
+        WCHAR *wbuf = (code_unit_count < ARRAY_SIZE(stack_wbuf)) ? stack_wbuf : malloc( bytes + sizeof(WCHAR) );
         if (!wbuf) return E_OUTOFMEMORY;
         if (FAILED(hr = data_reader_read_raw( impl, wbuf, bytes )))
         {
-            free( wbuf );
+            if (wbuf != stack_wbuf) free( wbuf );
             return hr;
         }
         wbuf[code_unit_count] = 0;
         hr = WindowsCreateString( wbuf, code_unit_count, value );
-        free( wbuf );
+        if (wbuf != stack_wbuf) free( wbuf );
         return hr;
     }
 }
@@ -1684,49 +1801,227 @@ static HRESULT WINAPI data_reader_ReadTimeSpan( IDataReader *iface, TimeSpan *va
     return data_reader_ReadInt64( iface, &value->Duration );
 }
 
+struct sync_wait_handler
+{
+    const void *lpVtbl;
+    LONG ref;
+    HANDLE event;
+};
+
+static HRESULT WINAPI sync_wait_handler_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct sync_wait_handler *)iface)->ref );
+        return S_OK;
+    }
+    *out = iface;
+    InterlockedIncrement( &((struct sync_wait_handler *)iface)->ref );
+    return S_OK;
+}
+
+static ULONG WINAPI sync_wait_handler_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct sync_wait_handler *)iface)->ref );
+}
+
+static ULONG WINAPI sync_wait_handler_Release( void *iface )
+{
+    struct sync_wait_handler *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->event) CloseHandle( impl->event );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI sync_wait_handler_Invoke( void *iface, void *sender, AsyncStatus status )
+{
+    struct sync_wait_handler *impl = iface;
+    if (impl->event) SetEvent( impl->event );
+    return S_OK;
+}
+
+static const void *sync_wait_handler_vtbl[] =
+{
+    sync_wait_handler_QueryInterface,
+    sync_wait_handler_AddRef,
+    sync_wait_handler_Release,
+    sync_wait_handler_Invoke,
+};
+
+static BOOL async_op_is_started( IUnknown *op )
+{
+    IAsyncInfo *info = NULL;
+    AsyncStatus status = Completed;
+
+    if (SUCCEEDED(IUnknown_QueryInterface( op, &IID_IAsyncInfo, (void **)&info )))
+    {
+        IAsyncInfo_get_Status( info, &status );
+        IAsyncInfo_Release( info );
+    }
+    return status == Started;
+}
+
+static HRESULT data_reader_ensure_space( struct data_reader *impl, UINT32 extra )
+{
+    if (impl->position == impl->length)
+    {
+        impl->position = 0;
+        impl->length = 0;
+    }
+    else if (impl->position > 0 && extra > impl->capacity - impl->length)
+    {
+        UINT32 unconsumed = impl->length - impl->position;
+        memmove( impl->buffer, impl->buffer + impl->position, unconsumed );
+        impl->length = unconsumed;
+        impl->position = 0;
+    }
+
+    if (extra > impl->capacity - impl->length)
+    {
+        UINT64 needed = (UINT64)impl->length + extra;
+        UINT64 new_cap = max( (UINT64)impl->capacity * 2, needed );
+        BYTE *new_buf;
+
+        if (needed > UINT32_MAX) return E_OUTOFMEMORY;
+        if (new_cap > UINT32_MAX) new_cap = UINT32_MAX;
+        if (!(new_buf = realloc( impl->buffer, (SIZE_T)new_cap ))) return E_OUTOFMEMORY;
+        impl->buffer = new_buf;
+        impl->capacity = (UINT32)new_cap;
+    }
+
+    return S_OK;
+}
+
 static HRESULT WINAPI data_reader_LoadAsync( IDataReader *iface, UINT32 count,
                                             IAsyncOperation_UINT32 **operation )
 {
     struct data_reader *impl = impl_from_IDataReader( iface );
     UINT32 loaded = 0;
+    HRESULT hr = S_OK;
 
     TRACE( "iface %p, count %u, operation %p.\n", iface, count, operation );
 
     if (!operation) return E_POINTER;
+    *operation = NULL;
 
     EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return RO_E_CLOSED;
+    }
+
     if (impl->input_stream && count)
     {
-        IBuffer *buf = NULL;
-        IAsyncOperationWithProgress_IBuffer_UINT32 *read_op = NULL;
-        if (SUCCEEDED(buffer_create( count, &buf )))
+        if (impl->input_stream->lpVtbl == &in_memory_stream_input_vtbl)
         {
-            if (SUCCEEDED(IInputStream_ReadAsync( impl->input_stream, buf, count, impl->options, &read_op )))
+            struct in_memory_stream *stream = impl_from_IInputStream( impl->input_stream );
+            if (stream->closed)
             {
+                LeaveCriticalSection( &impl->cs );
+                return RO_E_CLOSED;
+            }
+            EnterCriticalSection( &stream->content->cs );
+            if (stream->position < stream->content->size)
+            {
+                UINT64 avail = stream->content->size - stream->position;
+                UINT32 to_read = (avail < count) ? (UINT32)avail : count;
+                if (SUCCEEDED(hr = data_reader_ensure_space( impl, to_read )))
+                {
+                    memcpy( impl->buffer + impl->length, stream->content->buffer + stream->position, to_read );
+                    stream->position += to_read;
+                    impl->length += to_read;
+                    loaded = to_read;
+                }
+            }
+            LeaveCriticalSection( &stream->content->cs );
+            if (FAILED(hr))
+            {
+                LeaveCriticalSection( &impl->cs );
+                return hr;
+            }
+        }
+        else
+        {
+            struct buffer *scratch = impl->scratch_buf;
+            IAsyncOperationWithProgress_IBuffer_UINT32 *read_op = NULL;
+
+            if (!scratch || scratch->ref > 1)
+            {
+                if (scratch) IBuffer_Release( &scratch->IBuffer_iface );
+                impl->scratch_buf = NULL;
+                if (FAILED(hr = buffer_create_raw( count, FALSE, &scratch )))
+                {
+                    LeaveCriticalSection( &impl->cs );
+                    return hr;
+                }
+                impl->scratch_buf = scratch;
+            }
+            else if (FAILED(hr = buffer_ensure_capacity( scratch, count )))
+            {
+                LeaveCriticalSection( &impl->cs );
+                return hr;
+            }
+            scratch->length = 0;
+
+            if (SUCCEEDED(hr = IInputStream_ReadAsync( impl->input_stream, &scratch->IBuffer_iface, count,
+                                                       impl->options, &read_op )) && read_op)
+            {
+                IBuffer *res_buf = NULL;
                 IBufferByteAccess *access = NULL;
                 BYTE *data = NULL;
                 UINT32 rlen = 0;
 
-                IBuffer_get_Length( buf, &rlen );
-                if (SUCCEEDED(IBuffer_QueryInterface( buf, &IID_IBufferByteAccess, (void **)&access )))
+                if (async_op_is_started( (IUnknown *)read_op ))
                 {
-                    if (SUCCEEDED(IBufferByteAccess_Buffer( access, &data )) && data && rlen)
+                    struct sync_wait_handler *handler = calloc( 1, sizeof(*handler) );
+                    if (handler)
                     {
-                        if (impl->length + rlen > impl->capacity)
+                        handler->lpVtbl = sync_wait_handler_vtbl;
+                        handler->ref = 1;
+                        handler->event = CreateEventW( NULL, TRUE, FALSE, NULL );
+                        if (handler->event &&
+                            SUCCEEDED(IAsyncOperationWithProgress_IBuffer_UINT32_put_Completed(
+                                    read_op, (__FIAsyncOperationWithProgressCompletedHandler_2_Windows__CStorage__CStreams__CIBuffer_UINT32 *)handler )))
                         {
-                            UINT32 new_cap = max( impl->capacity * 2, impl->length + rlen + 64 );
-                            impl->buffer = realloc( impl->buffer, new_cap );
-                            impl->capacity = new_cap;
+                            WaitForSingleObject( handler->event, INFINITE );
                         }
-                        memcpy( impl->buffer + impl->length, data, rlen );
-                        impl->length += rlen;
-                        loaded = rlen;
+                        sync_wait_handler_Release( handler );
+                    }
+                }
+                if (FAILED(IAsyncOperationWithProgress_IBuffer_UINT32_GetResults( read_op, &res_buf )) || !res_buf)
+                {
+                    res_buf = &scratch->IBuffer_iface;
+                    IBuffer_AddRef( res_buf );
+                }
+
+                IBuffer_get_Length( res_buf, &rlen );
+                if (rlen && SUCCEEDED(IBuffer_QueryInterface( res_buf, &IID_IBufferByteAccess, (void **)&access )))
+                {
+                    if (SUCCEEDED(IBufferByteAccess_Buffer( access, &data )) && data)
+                    {
+                        if (SUCCEEDED(hr = data_reader_ensure_space( impl, rlen )))
+                        {
+                            memcpy( impl->buffer + impl->length, data, rlen );
+                            impl->length += rlen;
+                            loaded = rlen;
+                        }
                     }
                     IBufferByteAccess_Release( access );
                 }
+                IBuffer_Release( res_buf );
                 IAsyncOperationWithProgress_IBuffer_UINT32_Release( read_op );
+                if (FAILED(hr))
+                {
+                    LeaveCriticalSection( &impl->cs );
+                    return hr;
+                }
             }
-            IBuffer_Release( buf );
         }
     }
     LeaveCriticalSection( &impl->cs );
@@ -1745,8 +2040,14 @@ static HRESULT WINAPI data_reader_DetachBuffer( IDataReader *iface, IBuffer **bu
     HRESULT hr;
 
     if (!buffer) return E_POINTER;
+    *buffer = NULL;
 
     EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return RO_E_CLOSED;
+    }
     unconsumed = (impl->position < impl->length) ? (impl->length - impl->position) : 0;
     if (FAILED(hr = buffer_create( unconsumed, &buf )))
     {
@@ -1764,7 +2065,8 @@ static HRESULT WINAPI data_reader_DetachBuffer( IDataReader *iface, IBuffer **bu
         }
         IBuffer_put_Length( buf, unconsumed );
     }
-    impl->position = impl->length;
+    impl->position = 0;
+    impl->length = 0;
     LeaveCriticalSection( &impl->cs );
 
     *buffer = buf;
@@ -1775,7 +2077,13 @@ static HRESULT WINAPI data_reader_DetachStream( IDataReader *iface, IInputStream
 {
     struct data_reader *impl = impl_from_IDataReader( iface );
     if (!stream) return E_POINTER;
+    *stream = NULL;
     EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return RO_E_CLOSED;
+    }
     *stream = impl->input_stream;
     impl->input_stream = NULL;
     LeaveCriticalSection( &impl->cs );
@@ -1829,8 +2137,19 @@ static HRESULT WINAPI data_reader_closable_Close( IClosable *iface )
     impl->closed = TRUE;
     if (impl->input_stream)
     {
+        IClosable *closable = NULL;
+        if (SUCCEEDED(IInputStream_QueryInterface( impl->input_stream, &IID_IClosable, (void **)&closable )))
+        {
+            IClosable_Close( closable );
+            IClosable_Release( closable );
+        }
         IInputStream_Release( impl->input_stream );
         impl->input_stream = NULL;
+    }
+    if (impl->scratch_buf)
+    {
+        IBuffer_Release( &impl->scratch_buf->IBuffer_iface );
+        impl->scratch_buf = NULL;
     }
     free( impl->buffer );
     impl->buffer = NULL;
@@ -1970,7 +2289,7 @@ static HRESULT WINAPI data_reader_factory_GetIids( IActivationFactory *iface, UL
 
 static HRESULT WINAPI data_reader_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.DataReader", 33, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.DataReader", 34, class_name );
 }
 
 static HRESULT WINAPI data_reader_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
@@ -2155,6 +2474,7 @@ struct data_writer
 
     CRITICAL_SECTION cs;
     IOutputStream *output_stream;
+    struct buffer *scratch_buf;
     BYTE *buffer;
     UINT32 capacity;
     UINT32 length;
@@ -2214,6 +2534,8 @@ static ULONG WINAPI data_writer_Release( IDataWriter *iface )
     {
         if (impl->output_stream)
             IOutputStream_Release( impl->output_stream );
+        if (impl->scratch_buf)
+            IBuffer_Release( &impl->scratch_buf->IBuffer_iface );
         DeleteCriticalSection( &impl->cs );
         free( impl->buffer );
         free( impl );
@@ -2240,7 +2562,7 @@ static HRESULT WINAPI data_writer_GetIids( IDataWriter *iface, ULONG *iid_count,
 
 static HRESULT WINAPI data_writer_GetRuntimeClassName( IDataWriter *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.DataWriter", 33, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.DataWriter", 34, class_name );
 }
 
 static HRESULT WINAPI data_writer_GetTrustLevel( IDataWriter *iface, TrustLevel *trust_level )
@@ -2293,19 +2615,33 @@ static HRESULT WINAPI data_writer_put_ByteOrder( IDataWriter *iface, ByteOrder v
 static HRESULT data_writer_write_raw( struct data_writer *impl, const void *src, UINT32 count )
 {
     EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return RO_E_CLOSED;
+    }
+    if (count > UINT32_MAX - impl->length)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return E_OUTOFMEMORY;
+    }
     if (impl->length + count > impl->capacity)
     {
-        UINT32 new_cap = max( impl->capacity * 2, impl->length + count + 64 );
-        BYTE *new_buf = realloc( impl->buffer, new_cap );
+        UINT64 needed = (UINT64)impl->length + count;
+        UINT64 new_cap = max( (UINT64)impl->capacity * 2, needed + 64 );
+        BYTE *new_buf;
+
+        if (new_cap > UINT32_MAX) new_cap = UINT32_MAX;
+        new_buf = realloc( impl->buffer, (SIZE_T)new_cap );
         if (!new_buf)
         {
             LeaveCriticalSection( &impl->cs );
             return E_OUTOFMEMORY;
         }
         impl->buffer = new_buf;
-        impl->capacity = new_cap;
+        impl->capacity = (UINT32)new_cap;
     }
-    memcpy( impl->buffer + impl->length, src, count );
+    if (count) memcpy( impl->buffer + impl->length, src, count );
     impl->length += count;
     LeaveCriticalSection( &impl->cs );
     return S_OK;
@@ -2452,12 +2788,13 @@ static HRESULT WINAPI data_writer_WriteString( IDataWriter *iface, HSTRING value
 
     if (impl->encoding == UnicodeEncoding_Utf8)
     {
+        char stack_utf8[256];
         int utf8_len = WideCharToMultiByte( CP_UTF8, 0, raw, len, NULL, 0, NULL, NULL );
-        char *utf8 = malloc( utf8_len );
+        char *utf8 = (utf8_len <= (int)sizeof(stack_utf8)) ? stack_utf8 : malloc( utf8_len );
         if (!utf8) return E_OUTOFMEMORY;
         WideCharToMultiByte( CP_UTF8, 0, raw, len, utf8, utf8_len, NULL, NULL );
         hr = data_writer_write_raw( impl, utf8, utf8_len );
-        free( utf8 );
+        if (utf8 != stack_utf8) free( utf8 );
         if (code_unit_count) *code_unit_count = utf8_len;
         return hr;
     }
@@ -2490,36 +2827,67 @@ static HRESULT WINAPI data_writer_StoreAsync( IDataWriter *iface, IAsyncOperatio
 {
     struct data_writer *impl = impl_from_IDataWriter( iface );
     UINT32 stored = 0;
+    HRESULT hr = S_OK;
 
     TRACE( "iface %p, operation %p.\n", iface, operation );
 
     if (!operation) return E_POINTER;
+    *operation = NULL;
 
     EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return RO_E_CLOSED;
+    }
     stored = impl->length;
     if (impl->output_stream && impl->length)
     {
-        IBuffer *buf = NULL;
-        IBufferByteAccess *access = NULL;
-        BYTE *dest = NULL;
-        IAsyncOperationWithProgress_UINT32_UINT32 *write_op = NULL;
-
-        if (SUCCEEDED(buffer_create( impl->length, &buf )))
+        if (impl->output_stream->lpVtbl == &in_memory_stream_output_vtbl)
         {
-            if (SUCCEEDED(IBuffer_QueryInterface( buf, &IID_IBufferByteAccess, (void **)&access )))
+            struct in_memory_stream *stream = impl_from_IOutputStream( impl->output_stream );
+            hr = in_memory_stream_write_raw( stream, impl->buffer, impl->length );
+            if (FAILED(hr))
             {
-                if (SUCCEEDED(IBufferByteAccess_Buffer( access, &dest )) && dest)
-                    memcpy( dest, impl->buffer, impl->length );
-                IBufferByteAccess_Release( access );
+                LeaveCriticalSection( &impl->cs );
+                return hr;
             }
-            IBuffer_put_Length( buf, impl->length );
-
-            if (SUCCEEDED(IOutputStream_WriteAsync( impl->output_stream, buf, &write_op )))
-                IAsyncOperationWithProgress_UINT32_UINT32_Release( write_op );
-
-            IBuffer_Release( buf );
+            impl->length = 0;
         }
-        impl->length = 0;
+        else
+        {
+            struct buffer *scratch = impl->scratch_buf;
+            IAsyncOperationWithProgress_UINT32_UINT32 *write_op = NULL;
+
+            if (!scratch || scratch->ref > 1)
+            {
+                if (scratch) IBuffer_Release( &scratch->IBuffer_iface );
+                impl->scratch_buf = NULL;
+                if (FAILED(hr = buffer_create_raw( impl->length, FALSE, &scratch )))
+                {
+                    LeaveCriticalSection( &impl->cs );
+                    return hr;
+                }
+                impl->scratch_buf = scratch;
+            }
+            else if (FAILED(hr = buffer_ensure_capacity( scratch, impl->length )))
+            {
+                LeaveCriticalSection( &impl->cs );
+                return hr;
+            }
+
+            memcpy( scratch->data, impl->buffer, impl->length );
+            scratch->length = impl->length;
+
+            if (SUCCEEDED(hr = IOutputStream_WriteAsync( impl->output_stream, &scratch->IBuffer_iface, &write_op )) && write_op)
+                IAsyncOperationWithProgress_UINT32_UINT32_Release( write_op );
+            if (FAILED(hr))
+            {
+                LeaveCriticalSection( &impl->cs );
+                return hr;
+            }
+            impl->length = 0;
+        }
     }
     LeaveCriticalSection( &impl->cs );
 
@@ -2532,6 +2900,8 @@ static HRESULT WINAPI data_writer_FlushAsync( IDataWriter *iface, IAsyncOperatio
     struct data_writer *impl = impl_from_IDataWriter( iface );
 
     if (!operation) return E_POINTER;
+    *operation = NULL;
+    if (impl->closed) return RO_E_CLOSED;
 
     if (impl->output_stream)
         return IOutputStream_FlushAsync( impl->output_stream, operation );
@@ -2548,8 +2918,14 @@ static HRESULT WINAPI data_writer_DetachBuffer( IDataWriter *iface, IBuffer **bu
     HRESULT hr;
 
     if (!buffer) return E_POINTER;
+    *buffer = NULL;
 
     EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return RO_E_CLOSED;
+    }
     if (FAILED(hr = buffer_create( impl->length, &buf )))
     {
         LeaveCriticalSection( &impl->cs );
@@ -2577,7 +2953,13 @@ static HRESULT WINAPI data_writer_DetachStream( IDataWriter *iface, IOutputStrea
 {
     struct data_writer *impl = impl_from_IDataWriter( iface );
     if (!output_stream) return E_POINTER;
+    *output_stream = NULL;
     EnterCriticalSection( &impl->cs );
+    if (impl->closed)
+    {
+        LeaveCriticalSection( &impl->cs );
+        return RO_E_CLOSED;
+    }
     *output_stream = impl->output_stream;
     impl->output_stream = NULL;
     LeaveCriticalSection( &impl->cs );
@@ -2632,8 +3014,19 @@ static HRESULT WINAPI data_writer_closable_Close( IClosable *iface )
     impl->closed = TRUE;
     if (impl->output_stream)
     {
+        IClosable *closable = NULL;
+        if (SUCCEEDED(IOutputStream_QueryInterface( impl->output_stream, &IID_IClosable, (void **)&closable )))
+        {
+            IClosable_Close( closable );
+            IClosable_Release( closable );
+        }
         IOutputStream_Release( impl->output_stream );
         impl->output_stream = NULL;
+    }
+    if (impl->scratch_buf)
+    {
+        IBuffer_Release( &impl->scratch_buf->IBuffer_iface );
+        impl->scratch_buf = NULL;
     }
     free( impl->buffer );
     impl->buffer = NULL;
@@ -2763,7 +3156,7 @@ static HRESULT WINAPI data_writer_factory_GetIids( IActivationFactory *iface, UL
 
 static HRESULT WINAPI data_writer_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.DataWriter", 33, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.DataWriter", 34, class_name );
 }
 
 static HRESULT WINAPI data_writer_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
@@ -2972,7 +3365,7 @@ static HRESULT WINAPI random_access_stream_reference_GetIids( IRandomAccessStrea
 
 static HRESULT WINAPI random_access_stream_reference_GetRuntimeClassName( IRandomAccessStreamReference *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.RandomAccessStreamReference", 48, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.RandomAccessStreamReference", 51, class_name );
 }
 
 static HRESULT WINAPI random_access_stream_reference_GetTrustLevel( IRandomAccessStreamReference *iface, TrustLevel *trust_level )
@@ -2987,6 +3380,8 @@ static HRESULT WINAPI random_access_stream_reference_OpenReadAsync( IRandomAcces
 {
     struct random_access_stream_reference *impl = impl_from_IRandomAccessStreamReference( iface );
     IRandomAccessStream *cloned = NULL;
+    IRandomAccessStreamWithContentType *wct = NULL;
+    IInspectable *result;
     HRESULT hr;
 
     if (!operation) return E_POINTER;
@@ -3002,9 +3397,15 @@ static HRESULT WINAPI random_access_stream_reference_OpenReadAsync( IRandomAcces
             return hr;
     }
 
+    if (SUCCEEDED(IRandomAccessStream_QueryInterface( cloned, &IID_IRandomAccessStreamWithContentType, (void **)&wct )))
+        result = (IInspectable *)wct;
+    else
+        result = (IInspectable *)cloned;
+
     hr = async_operation_inspectable_create( &IID_IAsyncOperation_IRandomAccessStreamWithContentType,
                                             L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.Streams.IRandomAccessStreamWithContentType>",
-                                            (IInspectable *)cloned, (void **)operation );
+                                            result, (void **)operation );
+    if (wct) IRandomAccessStreamWithContentType_Release( wct );
     IRandomAccessStream_Release( cloned );
     return hr;
 }
@@ -3125,7 +3526,7 @@ static HRESULT WINAPI stream_ref_factory_GetIids( IActivationFactory *iface, ULO
 
 static HRESULT WINAPI stream_ref_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.Streams.RandomAccessStreamReference", 48, class_name );
+    return WindowsCreateString( L"Windows.Storage.Streams.RandomAccessStreamReference", 51, class_name );
 }
 
 static HRESULT WINAPI stream_ref_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
@@ -3172,7 +3573,7 @@ static HRESULT WINAPI stream_ref_statics_CreateFromFile( IRandomAccessStreamRefe
     IStorageItem_Release( item );
 
     raw_path = WindowsGetStringRawBuffer( path_str, NULL );
-    hr = in_memory_stream_create_from_file( raw_path, &stream );
+    hr = in_memory_stream_create_from_file( raw_path, TRUE, &stream );
     WindowsDeleteString( path_str );
     if (FAILED(hr)) return hr;
 

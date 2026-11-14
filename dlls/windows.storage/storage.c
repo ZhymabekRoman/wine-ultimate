@@ -60,11 +60,21 @@ HRESULT read_file_bytes( const WCHAR *path, BYTE **out_bytes, DWORD *out_size )
         return E_OUTOFMEMORY;
     }
 
-    if (!ReadFile( hFile, buf, size.LowPart, &read, NULL ))
     {
-        free( buf );
-        CloseHandle( hFile );
-        return HRESULT_FROM_WIN32( GetLastError() );
+        DWORD total = 0;
+
+        while (total < size.LowPart)
+        {
+            if (!ReadFile( hFile, buf + total, size.LowPart - total, &read, NULL ))
+            {
+                free( buf );
+                CloseHandle( hFile );
+                return HRESULT_FROM_WIN32( GetLastError() );
+            }
+            if (!read) break;
+            total += read;
+        }
+        read = total;
     }
 
     CloseHandle( hFile );
@@ -211,7 +221,7 @@ static HRESULT WINAPI storage_file_GetIids( IStorageFile *iface, ULONG *iid_coun
 
 static HRESULT WINAPI storage_file_GetRuntimeClassName( IStorageFile *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.StorageFile", 26, class_name );
+    return WindowsCreateString( L"Windows.Storage.StorageFile", 27, class_name );
 }
 
 static HRESULT WINAPI storage_file_GetTrustLevel( IStorageFile *iface, TrustLevel *trust_level )
@@ -256,7 +266,7 @@ static HRESULT WINAPI storage_file_OpenAsync( IStorageFile *iface, FileAccessMod
 
     if (!operation) return E_POINTER;
 
-    if (FAILED(hr = in_memory_stream_create_from_file( impl->path, &stream )))
+    if (FAILED(hr = in_memory_stream_create_from_file( impl->path, mode == FileAccessMode_Read, &stream )))
         return hr;
 
     hr = async_operation_inspectable_create( &IID_IAsyncOperation_IRandomAccessStream,
@@ -622,17 +632,25 @@ static HRESULT WINAPI storage_file_stream_ref_OpenReadAsync( IRandomAccessStream
 {
     struct storage_file *impl = impl_from_IRandomAccessStreamReference_File( iface );
     IRandomAccessStream *stream = NULL;
+    IRandomAccessStreamWithContentType *wct = NULL;
     HRESULT hr;
 
     if (!operation) return E_POINTER;
 
-    if (FAILED(hr = in_memory_stream_create_from_file( impl->path, &stream )))
+    if (FAILED(hr = in_memory_stream_create_from_file( impl->path, TRUE, &stream )))
         return hr;
+
+    if (FAILED(hr = IRandomAccessStream_QueryInterface( stream, &IID_IRandomAccessStreamWithContentType, (void **)&wct )))
+    {
+        IRandomAccessStream_Release( stream );
+        return hr;
+    }
+    IRandomAccessStream_Release( stream );
 
     hr = async_operation_inspectable_create( &IID_IAsyncOperation_IRandomAccessStreamWithContentType,
                                             L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.Streams.IRandomAccessStreamWithContentType>",
-                                            (IInspectable *)stream, (void **)operation );
-    IRandomAccessStream_Release( stream );
+                                            (IInspectable *)wct, (void **)operation );
+    IRandomAccessStreamWithContentType_Release( wct );
     return hr;
 }
 
@@ -660,7 +678,7 @@ static HRESULT WINAPI storage_file_input_ref_OpenSequentialReadAsync( IInputStre
 
     if (!operation) return E_POINTER;
 
-    if (FAILED(hr = in_memory_stream_create_from_file( impl->path, &stream )))
+    if (FAILED(hr = in_memory_stream_create_from_file( impl->path, TRUE, &stream )))
         return hr;
 
     if (FAILED(hr = IRandomAccessStream_QueryInterface( stream, &IID_IInputStream, (void **)&input_stream )))
@@ -812,7 +830,7 @@ static HRESULT WINAPI storage_file_factory_GetIids( IActivationFactory *iface, U
 
 static HRESULT WINAPI storage_file_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.StorageFile", 26, class_name );
+    return WindowsCreateString( L"Windows.Storage.StorageFile", 27, class_name );
 }
 
 static HRESULT WINAPI storage_file_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
@@ -1095,7 +1113,7 @@ static HRESULT WINAPI storage_folder_GetIids( IStorageFolder *iface, ULONG *iid_
 
 static HRESULT WINAPI storage_folder_GetRuntimeClassName( IStorageFolder *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.StorageFolder", 28, class_name );
+    return WindowsCreateString( L"Windows.Storage.StorageFolder", 29, class_name );
 }
 
 static HRESULT WINAPI storage_folder_GetTrustLevel( IStorageFolder *iface, TrustLevel *trust_level )
@@ -1615,7 +1633,7 @@ static HRESULT WINAPI storage_folder_factory_GetIids( IActivationFactory *iface,
 
 static HRESULT WINAPI storage_folder_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.StorageFolder", 28, class_name );
+    return WindowsCreateString( L"Windows.Storage.StorageFolder", 29, class_name );
 }
 
 static HRESULT WINAPI storage_folder_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
@@ -1806,7 +1824,7 @@ static HRESULT WINAPI file_io_factory_GetIids( IActivationFactory *iface, ULONG 
 
 static HRESULT WINAPI file_io_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.FileIO", 21, class_name );
+    return WindowsCreateString( L"Windows.Storage.FileIO", 22, class_name );
 }
 
 static HRESULT WINAPI file_io_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )
@@ -2188,7 +2206,7 @@ static HRESULT WINAPI path_io_factory_GetIids( IActivationFactory *iface, ULONG 
 
 static HRESULT WINAPI path_io_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *class_name )
 {
-    return WindowsCreateString( L"Windows.Storage.PathIO", 21, class_name );
+    return WindowsCreateString( L"Windows.Storage.PathIO", 22, class_name );
 }
 
 static HRESULT WINAPI path_io_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *trust_level )

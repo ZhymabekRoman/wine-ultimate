@@ -60,7 +60,7 @@ HRESULT storage_folder_create( const WCHAR *path, IStorageFolder **out );
 HRESULT read_file_bytes( const WCHAR *path, BYTE **out_bytes, DWORD *out_size );
 HRESULT buffer_create( UINT32 capacity, IBuffer **out );
 HRESULT in_memory_stream_create( IRandomAccessStream **out );
-HRESULT in_memory_stream_create_from_file( const WCHAR *path, IRandomAccessStream **out );
+HRESULT in_memory_stream_create_from_file( const WCHAR *path, BOOL read_only, IRandomAccessStream **out );
 HRESULT data_reader_create( IInputStream *stream, IDataReader **out );
 HRESULT data_writer_create( IOutputStream *stream, IDataWriter **out );
 HRESULT random_access_stream_reference_create( IRandomAccessStream *stream, IRandomAccessStreamReference **out );
