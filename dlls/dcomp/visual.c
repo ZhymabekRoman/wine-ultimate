@@ -474,6 +474,7 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
     visual->device_context = NULL;
     visual->content = NULL;
     visual->wined3d_swapchain = NULL;
+    visual->shared_content_handle = NULL;
 
     if (content)
     {
@@ -1612,12 +1613,29 @@ static HRESULT content_get_size(IUnknown *content, UINT *width, UINT *height)
     return E_FAIL;
 }
 
+static struct composition_visual *visual_find_first_content(struct composition_visual *visual)
+{
+    struct composition_visual *child, *found;
+
+    if (!visual)
+        return NULL;
+    if (visual->content)
+        return visual;
+    LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
+    {
+        if ((found = visual_find_first_content(child)))
+            return found;
+    }
+    return NULL;
+}
+
 /* Publish this visual's content to whoever consumes its shared visual handle.
  * Runs with dcomp_cs released: taking the shared handle enters Direct3D. The
  * handle is cached on the visual (a shared resource keeps its name for the
  * lifetime of the texture), so the per-frame republish is a memory read. */
 void visual_publish_shared_content(struct composition_visual *visual, HANDLE *handle, UINT *width, UINT *height)
 {
+    struct composition_visual *cv;
     HANDLE shared_handle = NULL;
     UINT w = 0, h = 0;
 
@@ -1625,18 +1643,22 @@ void visual_publish_shared_content(struct composition_visual *visual, HANDLE *ha
     *width = 0;
     *height = 0;
 
-    if (!visual || !visual->content)
+    if (!visual)
         return;
 
-    if (visual->shared_content_handle)
-        shared_handle = visual->shared_content_handle;
-    else if (SUCCEEDED(content_get_shared_handle(visual->content, &shared_handle)) && shared_handle)
-        visual->shared_content_handle = shared_handle;
+    cv = visual_find_first_content(visual);
+    if (!cv || !cv->content)
+        return;
 
-    if (FAILED(content_get_size(visual->content, &w, &h)))
+    if (cv->shared_content_handle)
+        shared_handle = cv->shared_content_handle;
+    else if (SUCCEEDED(content_get_shared_handle(cv->content, &shared_handle)) && shared_handle)
+        cv->shared_content_handle = shared_handle;
+
+    if (FAILED(content_get_size(cv->content, &w, &h)))
     {
-        w = (UINT)visual->size.cx;
-        h = (UINT)visual->size.cy;
+        w = (UINT)cv->size.cx;
+        h = (UINT)cv->size.cy;
     }
 
     *handle = shared_handle;

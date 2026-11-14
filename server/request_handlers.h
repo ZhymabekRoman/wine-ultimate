@@ -2517,8 +2517,9 @@ C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, target_root) == 8 
 C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, target_surface) == 16 );
 C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, width) == 20 );
 C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, height) == 24 );
-C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, owner_pid) == 28 );
-C_ASSERT( sizeof(struct dcomp_get_shared_visual_info_reply) == 32 );
+C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, dirty_count) == 28 );
+C_ASSERT( offsetof(struct dcomp_get_shared_visual_info_reply, owner_pid) == 32 );
+C_ASSERT( sizeof(struct dcomp_get_shared_visual_info_reply) == 40 );
 C_ASSERT( offsetof(struct alpc_query_port_request, handle) == 12 );
 C_ASSERT( sizeof(struct alpc_query_port_request) == 16 );
 C_ASSERT( offsetof(struct alpc_query_port_reply, flags) == 8 );

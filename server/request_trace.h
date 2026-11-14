@@ -3703,6 +3703,7 @@ static void dump_dcomp_get_shared_visual_info_reply( const struct dcomp_get_shar
     fprintf( stderr, ", target_surface=%04x", req->target_surface );
     fprintf( stderr, ", width=%08x", req->width );
     fprintf( stderr, ", height=%08x", req->height );
+    fprintf( stderr, ", dirty_count=%08x", req->dirty_count );
     fprintf( stderr, ", owner_pid=%04x", req->owner_pid );
 }
 

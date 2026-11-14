@@ -763,6 +763,8 @@ static void do_composite_dxgi_surface(struct composition_target *target,
     {
         hr = IDXGIKeyedMutex_AcquireSync(keyed_mutex, 0, 0);
         if (hr == (HRESULT)WAIT_TIMEOUT)
+            hr = IDXGIKeyedMutex_AcquireSync(keyed_mutex, 1, 0);
+        if (hr == (HRESULT)WAIT_TIMEOUT)
         {
             /* GPU producer is still rendering into the surface; skip composite tick without stalling CPU */
             IDXGIKeyedMutex_Release(keyed_mutex);
@@ -1037,7 +1039,7 @@ void shared_visual_cache_set(HANDLE handle, IDCompositionVisual *root)
  * can read. The proxy is referenced by the cache, which lives for the lifetime
  * of the process, so the reference create_visual() hands out is kept here. */
 static IDCompositionVisual *shared_visual_proxy_root(HANDLE shared_visual_handle, HANDLE surface,
-        UINT width, UINT height)
+        UINT width, UINT height, unsigned int dirty_count)
 {
     IDCompositionVisual *root;
     struct composition_visual *impl;
@@ -1048,13 +1050,24 @@ static IDCompositionVisual *shared_visual_proxy_root(HANDLE shared_visual_handle
         impl = impl_from_IDCompositionVisual(root);
         if (impl->is_shared_proxy)
         {
-            /* Republish: a resized surface, or a new content handle after a
-             * device lost. Bump the change counter so the next tick re-renders. */
+            /* Republish: a resized surface, a new content handle after a
+             * device lost, or a new frame presented by the producer. Bump the change
+             * counter so the next tick re-renders. */
             impl->size.cx = width;
             impl->size.cy = height;
             if (surface && surface != impl->shared_content_handle)
                 impl->shared_content_handle = surface;
-            impl->content_version++;
+            if (dirty_count != impl->shared_dirty_count)
+            {
+                impl->shared_dirty_count = dirty_count;
+                impl->content_version++;
+            }
+            else
+            {
+                /* Re-read and re-composite shared-proxy visual every tick so
+                 * per-frame producer Present is never starved. */
+                impl->content_version++;
+            }
         }
         dcomp_unlock();
         return root;
@@ -1070,6 +1083,8 @@ static IDCompositionVisual *shared_visual_proxy_root(HANDLE shared_visual_handle
     impl->shared_content_handle = surface;
     impl->size.cx = width;
     impl->size.cy = height;
+    impl->shared_dirty_count = dirty_count;
+    impl->content_version = 1;
 
     return root;
 }
@@ -1082,6 +1097,7 @@ IDCompositionVisual *shared_visual_query_root(HANDLE shared_visual_handle)
     NTSTATUS status;
     HANDLE surface = NULL;
     UINT width = 0, height = 0;
+    unsigned int dirty_count = 0;
     DWORD owner = 0;
 
     SERVER_START_REQ(dcomp_get_shared_visual_info)
@@ -1093,6 +1109,7 @@ IDCompositionVisual *shared_visual_query_root(HANDLE shared_visual_handle)
             surface = wine_server_ptr_handle(reply->target_surface);
             width = reply->width;
             height = reply->height;
+            dirty_count = reply->dirty_count;
             owner = reply->owner_pid;
         }
     }
@@ -1111,7 +1128,7 @@ IDCompositionVisual *shared_visual_query_root(HANDLE shared_visual_handle)
      * process consumes): target_root names a visual in the publisher's address
      * space, so use a local proxy bound to the surface it published. */
     if (owner && owner != GetCurrentProcessId() && (proxy = shared_visual_proxy_root(shared_visual_handle,
-            surface, width, height)))
+            surface, width, height, dirty_count)))
         root = proxy;
 
     /* Publish the mapping on every successful query, including a cleared root:
@@ -2248,6 +2265,8 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
 {
     struct composition_device *device = impl_from_IDCompositionDevice(iface);
     struct composition_target *t;
+    struct { HANDLE handle; IDCompositionVisual *root; } to_republish[16];
+    int n_republish = 0, i;
     HRESULT hr = S_OK;
 
     TRACE("DCOMP: device_Commit iface %p\n", iface);
@@ -2257,8 +2276,24 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
     {
         TRACE("DCOMP: device_Commit device %p has target %p hwnd %p root %p\n",
             device, t, t->hwnd, t->root);
+        if (t->shared_visual_handle && t->root && n_republish < (int)ARRAY_SIZE(to_republish))
+        {
+            to_republish[n_republish].handle = t->shared_visual_handle;
+            to_republish[n_republish].root = t->root;
+            IDCompositionVisual_AddRef(t->root);
+            n_republish++;
+        }
     }
     dcomp_unlock();
+
+    for (i = 0; i < n_republish; i++)
+    {
+        shared_visual_target_set_root(to_republish[i].handle, to_republish[i].root);
+        dcomp_lock();
+        shared_visual_cache_set(to_republish[i].handle, to_republish[i].root);
+        dcomp_unlock();
+        IDCompositionVisual_Release(to_republish[i].root);
+    }
 
     ensure_composite_thread(device);
 

@@ -881,6 +881,7 @@ struct composition
     unsigned int height;                    /* published content height in pixels */
     obj_handle_t shared_handle;             /* handle value the handle was created with; global registry key */
     struct list shared_entry;               /* entry in shared_visual_list */
+    unsigned int dirty_count;               /* generation / dirty counter incremented on every publish/commit */
 };
 
 /* Every shared visual handle ever created, kept alive for as long as some
@@ -992,6 +993,7 @@ static struct composition *create_composition(void)
         composition->width = 0;
         composition->height = 0;
         composition->shared_handle = 0;
+        composition->dirty_count = 0;
         composition->target_process = NULL;
         composition->process = (struct process *)grab_object( current->process );
         list_add_tail( &shared_visual_list, &composition->shared_entry );
@@ -1031,6 +1033,7 @@ DECL_HANDLER(dcomp_set_shared_visual_info)
     composition->target_surface = req->target_surface;
     composition->width = req->width;
     composition->height = req->height;
+    composition->dirty_count++;
     release_object( composition );
 }
 
@@ -1052,6 +1055,7 @@ DECL_HANDLER(dcomp_get_shared_visual_info)
     reply->target_surface = composition->target_surface;
     reply->width = composition->width;
     reply->height = composition->height;
+    reply->dirty_count = composition->dirty_count;
     reply->owner_pid = composition->target_process ? composition->target_process->id : 0;
 
     release_object( composition );

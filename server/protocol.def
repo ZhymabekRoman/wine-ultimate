@@ -4480,6 +4480,7 @@ typedef struct _ALPC_DATA_VIEW_ATTR
     obj_handle_t  target_surface;             /* shared resource handle of the published content, 0 when none */
     unsigned int  width;                      /* published content width in pixels */
     unsigned int  height;                     /* published content height in pixels */
+    unsigned int  dirty_count;                /* producer present / commit generation */
     process_id_t  owner_pid;                  /* pid of the process that published the target, 0 when none */
 @END
 

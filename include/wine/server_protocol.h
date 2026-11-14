@@ -6475,7 +6475,9 @@ struct dcomp_get_shared_visual_info_reply
     obj_handle_t  target_surface;
     unsigned int  width;
     unsigned int  height;
+    unsigned int  dirty_count;
     process_id_t  owner_pid;
+    char __pad_36[4];
 };
 
 
@@ -7576,6 +7578,6 @@ union generic_reply
     struct get_swap_interval_reply get_swap_interval_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 973
+#define SERVER_PROTOCOL_VERSION 974
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

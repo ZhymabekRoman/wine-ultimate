@@ -99,7 +99,7 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
  * space, publish the GPU surface the root renders into and its size: those are
  * the two things the consumer can act on, and they let it sample the publisher's
  * texture on the GPU instead of reading it back through the CPU. */
-static void shared_visual_target_set_root(HANDLE shared_visual_handle, IDCompositionVisual *visual)
+void shared_visual_target_set_root(HANDLE shared_visual_handle, IDCompositionVisual *visual)
 {
     struct composition_visual *root;
     NTSTATUS status;
