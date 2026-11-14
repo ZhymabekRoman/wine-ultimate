@@ -213,6 +213,90 @@ DECLARE_INTERFACE_IID_(IPackageCatalog3, IInspectable, "96dd5c88-8837-43f9-9015-
 #define IPackageCatalog3_Release(This) (This)->lpVtbl->Release(This)
 #define IPackageCatalog3_RemoveOptionalPackagesAsync(This,names,op) (This)->lpVtbl->RemoveOptionalPackagesAsync(This,names,op)
 
+/*
+ * IPackageManager4, IPackageManager5 and IPackageManagerDebugSettings:
+ * this tree's windows.management.deployment.idl stops at IPackageManager3,
+ * so the 1703/1709 contract vtbls are declared by hand. The layouts and
+ * IIDs match the Windows SDK's windows.management.deployment.h.
+ */
+
+static const GUID IID_IPackageManager4 =
+    { 0x3c719963, 0xbab6, 0x46bf, { 0x8f, 0xf7, 0xda, 0x47, 0x19, 0x23, 0x0a, 0xe6 } };
+static const GUID IID_IPackageManager5 =
+    { 0x711f3117, 0x1afd, 0x4313, { 0x97, 0x8c, 0x9b, 0xb6, 0xe1, 0xb8, 0x64, 0xa7 } };
+static const GUID IID_IPackageManagerDebugSettings =
+    { 0x1a611683, 0xa988, 0x4fcf, { 0x8f, 0x0f, 0xce, 0x17, 0x58, 0x98, 0xe8, 0xeb } };
+
+typedef interface IPackageManager4 IPackageManager4;
+typedef interface IPackageManager5 IPackageManager5;
+typedef interface IPackageManagerDebugSettings IPackageManagerDebugSettings;
+
+#undef INTERFACE
+#define INTERFACE IPackageManager4
+DECLARE_INTERFACE_IID_(IPackageManager4, IInspectable, "3c719963-bab6-46bf-8ff7-da4719230ae6")
+{
+    /*** IUnknown methods ***/
+    STDMETHOD_(HRESULT, QueryInterface)(THIS_ REFIID riid, void **ppvObject) PURE;
+    STDMETHOD_(ULONG, AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG, Release)(THIS) PURE;
+    /*** IInspectable methods ***/
+    STDMETHOD_(HRESULT, GetIids)(THIS_ ULONG *iidCount, IID **iids) PURE;
+    STDMETHOD_(HRESULT, GetRuntimeClassName)(THIS_ HSTRING *className) PURE;
+    STDMETHOD_(HRESULT, GetTrustLevel)(THIS_ TrustLevel *trustLevel) PURE;
+    /*** IPackageManager4 methods ***/
+    STDMETHOD_(HRESULT, GetPackageVolumesAsync)(THIS_ void **operation) PURE;
+};
+#undef INTERFACE
+
+#undef INTERFACE
+#define INTERFACE IPackageManager5
+DECLARE_INTERFACE_IID_(IPackageManager5, IInspectable, "711f3117-1afd-4313-978c-9bb6e1b864a7")
+{
+    /*** IUnknown methods ***/
+    STDMETHOD_(HRESULT, QueryInterface)(THIS_ REFIID riid, void **ppvObject) PURE;
+    STDMETHOD_(ULONG, AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG, Release)(THIS) PURE;
+    /*** IInspectable methods ***/
+    STDMETHOD_(HRESULT, GetIids)(THIS_ ULONG *iidCount, IID **iids) PURE;
+    STDMETHOD_(HRESULT, GetRuntimeClassName)(THIS_ HSTRING *className) PURE;
+    STDMETHOD_(HRESULT, GetTrustLevel)(THIS_ TrustLevel *trustLevel) PURE;
+    /*** IPackageManager5 methods ***/
+    STDMETHOD_(HRESULT, AddPackageToVolumeAndOptionalPackagesAsync)(THIS_ void *uri, void *dependencies,
+        int options, void *target_volume, void *optional_package_family_names, void *external_package_uris,
+        void **operation) PURE;
+    STDMETHOD_(HRESULT, StagePackageToVolumeAndOptionalPackagesAsync)(THIS_ void *uri, void *dependencies,
+        int options, void *target_volume, void *optional_package_family_names, void *external_package_uris,
+        void **operation) PURE;
+    STDMETHOD_(HRESULT, RegisterPackageByFamilyNameAndOptionalPackagesAsync)(THIS_ HSTRING family_name,
+        void *dependency_package_family_names, int options, void *appdata_volume,
+        void *optional_package_family_names, void **operation) PURE;
+    STDMETHOD_(HRESULT, DebugSettings)(THIS_ IPackageManagerDebugSettings **settings) PURE;
+};
+#undef INTERFACE
+
+#undef INTERFACE
+#define INTERFACE IPackageManagerDebugSettings
+DECLARE_INTERFACE_IID_(IPackageManagerDebugSettings, IInspectable, "1a611683-a988-4fcf-8f0f-ce175898e8eb")
+{
+    /*** IUnknown methods ***/
+    STDMETHOD_(HRESULT, QueryInterface)(THIS_ REFIID riid, void **ppvObject) PURE;
+    STDMETHOD_(ULONG, AddRef)(THIS) PURE;
+    STDMETHOD_(ULONG, Release)(THIS) PURE;
+    /*** IInspectable methods ***/
+    STDMETHOD_(HRESULT, GetIids)(THIS_ ULONG *iidCount, IID **iids) PURE;
+    STDMETHOD_(HRESULT, GetRuntimeClassName)(THIS_ HSTRING *className) PURE;
+    STDMETHOD_(HRESULT, GetTrustLevel)(THIS_ TrustLevel *trustLevel) PURE;
+    /*** IPackageManagerDebugSettings methods ***/
+    STDMETHOD_(HRESULT, SetContentGroupStateAsync)(THIS_ void *package, HSTRING group_name,
+        int state, void **operation) PURE;
+    STDMETHOD_(HRESULT, SetContentGroupStateWithPercentageAsync)(THIS_ void *package, HSTRING group_name,
+        int state, double percentage, void **operation) PURE;
+};
+#undef INTERFACE
+
+#define IPackageManager4_GetPackageVolumesAsync(This,operation) (This)->lpVtbl->GetPackageVolumesAsync(This,operation)
+#define IPackageManager5_DebugSettings(This,settings) (This)->lpVtbl->DebugSettings(This,settings)
+
 HRESULT package_manager_create( IPackageManager **out );
 HRESULT WINAPI AppxRegisterPackageManifest( const WCHAR *manifest_path );
 HRESULT WINAPI AppxUnregisterPackageByName( const WCHAR *package_full_name );
