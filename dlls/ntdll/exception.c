@@ -460,6 +460,8 @@ EXCEPTION_DISPOSITION WINAPI call_unhandled_exception_handler( EXCEPTION_RECORD 
     case EXCEPTION_EXECUTE_HANDLER:
         break;
     }
+    if (!NtCurrentTeb()->Peb->BeingDebugged)
+        NtRaiseException( rec, context, FALSE );
     NtTerminateProcess( GetCurrentProcess(), rec->ExceptionCode );
     return ExceptionContinueExecution;
 }

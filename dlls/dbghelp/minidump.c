@@ -67,8 +67,9 @@ static BOOL fetch_process_info(struct dump_context* dc)
                 if (!dc->threads) break;
                 for (i = 0; i < spi->dwThreadCount; i++)
                 {
-                    /* don't include current thread */
-                    if (HandleToULong(spi->ti[i].ClientId.UniqueThread) == GetCurrentThreadId())
+                    /* don't include current thread unless only thread */
+                    if (spi->dwThreadCount > 1 &&
+                        HandleToULong(spi->ti[i].ClientId.UniqueThread) == GetCurrentThreadId())
                         continue;
                     dc->threads[dc->num_threads].tid        = HandleToULong(spi->ti[i].ClientId.UniqueThread);
                     dc->threads[dc->num_threads].prio_class = spi->ti[i].dwBasePriority; /* FIXME */
@@ -513,15 +514,92 @@ static  unsigned        dump_modules(struct dump_context* dc, BOOL dump_elf)
             append(dc, ms, sizeof(ULONG) + ms->Length + sizeof(WCHAR));
             if (!dump_elf) fetch_module_versioninfo(ms->Buffer, &mdModule.VersionInfo);
             else memset(&mdModule.VersionInfo, 0, sizeof(mdModule.VersionInfo));
-            mdModule.CvRecord.DataSize = 0; /* FIXME */
-            mdModule.CvRecord.Rva = 0; /* FIXME */
-            mdModule.MiscRecord.DataSize = 0; /* FIXME */
-            mdModule.MiscRecord.Rva = 0; /* FIXME */
-            mdModule.Reserved0 = 0; /* FIXME */
-            mdModule.Reserved1 = 0; /* FIXME */
+            mdModule.CvRecord.DataSize = 0;
+            mdModule.CvRecord.Rva = 0;
+            mdModule.MiscRecord.DataSize = 0;
+            mdModule.MiscRecord.Rva = 0;
+            mdModule.Reserved0 = 0;
+            mdModule.Reserved1 = 0;
+
+            if (!dump_elf && ((flags_out & ModuleWriteCvRecord) || (flags_out & ModuleWriteDataSeg)))
+            {
+                IMAGE_DOS_HEADER dos;
+                IMAGE_NT_HEADERS nth;
+
+                if (ReadProcessMemory(dc->process->handle, (const void*)(DWORD_PTR)dc->modules[i].base, &dos, sizeof(dos), NULL) &&
+                    dos.e_magic == IMAGE_DOS_SIGNATURE &&
+                    ReadProcessMemory(dc->process->handle, (const void*)(DWORD_PTR)(dc->modules[i].base + dos.e_lfanew), &nth, sizeof(nth), NULL) &&
+                    nth.Signature == IMAGE_NT_SIGNATURE)
+                {
+                    if (flags_out & ModuleWriteCvRecord)
+                    {
+                        DWORD dbg_rva = nth.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].VirtualAddress;
+                        DWORD dbg_sz  = nth.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_DEBUG].Size;
+                        if (dbg_rva && dbg_sz >= sizeof(IMAGE_DEBUG_DIRECTORY) && dbg_rva < dc->modules[i].size)
+                        {
+                            unsigned n_dbg = min(dbg_sz / (unsigned)sizeof(IMAGE_DEBUG_DIRECTORY), 16u);
+                            unsigned d;
+                            for (d = 0; d < n_dbg; d++)
+                            {
+                                IMAGE_DEBUG_DIRECTORY dbg_dir;
+                                if (ReadProcessMemory(dc->process->handle,
+                                                      (const void*)(DWORD_PTR)(dc->modules[i].base + dbg_rva + d * sizeof(dbg_dir)),
+                                                      &dbg_dir, sizeof(dbg_dir), NULL) &&
+                                    dbg_dir.Type == IMAGE_DEBUG_TYPE_CODEVIEW &&
+                                    dbg_dir.AddressOfRawData &&
+                                    dbg_dir.SizeOfData > 0 && dbg_dir.SizeOfData <= 1024 &&
+                                    dbg_dir.AddressOfRawData + dbg_dir.SizeOfData <= dc->modules[i].size)
+                                {
+                                    BYTE cv_buf[1024];
+                                    if (ReadProcessMemory(dc->process->handle,
+                                                          (const void*)(DWORD_PTR)(dc->modules[i].base + dbg_dir.AddressOfRawData),
+                                                          cv_buf, dbg_dir.SizeOfData, NULL))
+                                    {
+                                        mdModule.CvRecord.Rva = dc->rva;
+                                        mdModule.CvRecord.DataSize = dbg_dir.SizeOfData;
+                                        append(dc, cv_buf, dbg_dir.SizeOfData);
+                                        break;
+                                    }
+                                }
+                            }
+                        }
+                    }
+
+                    if ((flags_out & ModuleWriteDataSeg) && !(dc->type & MiniDumpWithFullMemory))
+                    {
+                        DWORD64 sec_base = dc->modules[i].base + dos.e_lfanew +
+                                           FIELD_OFFSET(IMAGE_NT_HEADERS, OptionalHeader) +
+                                           nth.FileHeader.SizeOfOptionalHeader;
+                        DWORD exc_rva = nth.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION].VirtualAddress;
+                        DWORD exc_sz  = nth.OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXCEPTION].Size;
+                        unsigned s, n_sec = min((unsigned)nth.FileHeader.NumberOfSections, 64u);
+                        for (s = 0; s < n_sec; s++)
+                        {
+                            IMAGE_SECTION_HEADER sec;
+                            if (ReadProcessMemory(dc->process->handle,
+                                                  (const void*)(DWORD_PTR)(sec_base + s * sizeof(sec)),
+                                                  &sec, sizeof(sec), NULL))
+                            {
+                                ULONG sec_sz = sec.Misc.VirtualSize ? sec.Misc.VirtualSize : sec.SizeOfRawData;
+                                if ((sec.Characteristics & IMAGE_SCN_MEM_WRITE) &&
+                                    (sec.Characteristics & (IMAGE_SCN_CNT_INITIALIZED_DATA | IMAGE_SCN_CNT_UNINITIALIZED_DATA)) &&
+                                    !(sec.Characteristics & IMAGE_SCN_MEM_EXECUTE) &&
+                                    sec_sz > 0 &&
+                                    sec.VirtualAddress >= nth.OptionalHeader.SizeOfHeaders &&
+                                    sec.VirtualAddress + sec_sz <= dc->modules[i].size &&
+                                    (!exc_rva || sec.VirtualAddress + sec_sz <= exc_rva || sec.VirtualAddress >= exc_rva + exc_sz))
+                                {
+                                    minidump_add_memory_block(dc, dc->modules[i].base + sec.VirtualAddress, sec_sz, 0);
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+
             writeat(dc,
-                    rva_base + sizeof(mdModuleList.NumberOfModules) + 
-                        mdModuleList.NumberOfModules++ * sizeof(mdModule), 
+                    rva_base + sizeof(mdModuleList.NumberOfModules) +
+                        mdModuleList.NumberOfModules++ * sizeof(mdModule),
                     &mdModule, sizeof(mdModule));
         }
     }
@@ -807,8 +885,9 @@ static unsigned         dump_memory_info(struct dump_context* dc)
         for (pos = 0; pos < dc->mem[i].size; pos += sizeof(tmp))
         {
             len = min(dc->mem[i].size - pos, sizeof(tmp));
-            if (read_process_memory(dc->process, dc->mem[i].base + pos, tmp, len))
-                WriteFile(dc->hFile, tmp, len, &written, NULL);
+            if (!read_process_memory(dc->process, dc->mem[i].base + pos, tmp, len))
+                memset(tmp, 0, len);
+            WriteFile(dc->hFile, tmp, len, &written, NULL);
         }
         dc->rva += mdMem.Memory.DataSize;
         writeat(dc, rva_base + i * sizeof(mdMem), &mdMem, sizeof(mdMem));
@@ -863,8 +942,9 @@ static unsigned         dump_memory64_info(struct dump_context* dc)
         for (pos = 0; pos < dc->mem64[i].size; pos += sizeof(tmp))
         {
             len = min(dc->mem64[i].size - pos, sizeof(tmp));
-            if (read_process_memory(dc->process, dc->mem64[i].base + pos, tmp, len))
-                WriteFile(dc->hFile, tmp, len, &written, NULL);
+            if (!read_process_memory(dc->process, dc->mem64[i].base + pos, tmp, len))
+                memset(tmp, 0, len);
+            WriteFile(dc->hFile, tmp, len, &written, NULL);
         }
         filepos.QuadPart += mdMem64.DataSize;
         writeat(dc, rva_base + i * sizeof(mdMem64), &mdMem64, sizeof(mdMem64));
@@ -889,6 +969,60 @@ static unsigned         dump_misc_info(struct dump_context* dc)
     return sizeof(mmi);
 }
 
+static unsigned         dump_handle_data(struct dump_context* dc)
+{
+    MINIDUMP_HANDLE_DATA_STREAM hds;
+    MINIDUMP_HANDLE_DESCRIPTOR  hd;
+    ULONG                       buf_size = 0x10000;
+    NTSTATUS                    nts;
+    SYSTEM_HANDLE_INFORMATION  *shi = NULL;
+    ULONG                       i, count = 0;
+
+    if ((shi = HeapAlloc(GetProcessHeap(), 0, buf_size)))
+    {
+        for (;;)
+        {
+            nts = NtQuerySystemInformation(SystemHandleInformation, shi, buf_size, NULL);
+            if (nts != STATUS_INFO_LENGTH_MISMATCH) break;
+            buf_size *= 2;
+            if (!(shi = HeapReAlloc(GetProcessHeap(), 0, shi, buf_size)))
+                break;
+        }
+        if (shi && nts == STATUS_SUCCESS)
+        {
+            for (i = 0; i < shi->Count; i++)
+            {
+                if (shi->Handle[i].OwnerPid == dc->pid)
+                    count++;
+            }
+        }
+    }
+
+    hds.SizeOfHeader = sizeof(hds);
+    hds.SizeOfDescriptor = sizeof(hd);
+    hds.NumberOfDescriptors = count;
+    hds.Reserved = 0;
+    append(dc, &hds, sizeof(hds));
+
+    if (shi && count)
+    {
+        for (i = 0; i < shi->Count; i++)
+        {
+            if (shi->Handle[i].OwnerPid != dc->pid) continue;
+            memset(&hd, 0, sizeof(hd));
+            hd.Handle = shi->Handle[i].HandleValue;
+            hd.Attributes = shi->Handle[i].HandleFlags;
+            hd.GrantedAccess = shi->Handle[i].AccessMask;
+            hd.HandleCount = 1;
+            hd.PointerCount = 1;
+            append(dc, &hd, sizeof(hd));
+        }
+    }
+
+    HeapFree(GetProcessHeap(), 0, shi);
+    return sizeof(hds) + count * sizeof(hd);
+}
+
 static DWORD CALLBACK write_minidump(void *_args)
 {
     struct dump_context *dc = _args;
@@ -902,6 +1036,7 @@ static DWORD CALLBACK write_minidump(void *_args)
 
     /* 1) init */
     nStreams = 7 + (dc->except_param ? 1 : 0) +
+        ((dc->type & MiniDumpWithHandleData) ? 1 : 0) +
         (dc->user_stream ? dc->user_stream->UserStreamCount : 0);
 
     /* pad the directory size to a multiple of 4 for alignment purposes */
@@ -970,6 +1105,15 @@ static DWORD CALLBACK write_minidump(void *_args)
     writeat(dc, mdHead.StreamDirectoryRva + idx_stream++ * sizeof(mdDir),
             &mdDir, sizeof(mdDir));
 
+    if (dc->type & MiniDumpWithHandleData)
+    {
+        mdDir.StreamType = HandleDataStream;
+        mdDir.Location.Rva = dc->rva;
+        mdDir.Location.DataSize = dump_handle_data(dc);
+        writeat(dc, mdHead.StreamDirectoryRva + idx_stream++ * sizeof(mdDir),
+                &mdDir, sizeof(mdDir));
+    }
+
     /* 3.2) write exception information (if any) */
     if (dc->except_param)
     {
@@ -1032,9 +1176,16 @@ BOOL WINAPI MiniDumpWriteDump(HANDLE hProcess, DWORD pid, HANDLE hFile,
     TRACE("(%p, %lu, %p, %u, %p, %p, %p)\n",
           hProcess, pid, hFile, DumpType, ExceptionParam, UserStreamParam, CallbackParam);
 
+    if (!hProcess || !hFile || hFile == INVALID_HANDLE_VALUE)
+    {
+        SetLastError(ERROR_INVALID_PARAMETER);
+        return FALSE;
+    }
+
     if (!(dc.process = process_find_by_handle(hProcess)))
     {
-        if (!(sym_initialized = SymInitializeW(hProcess, NULL, TRUE)))
+        if (!(sym_initialized = SymInitializeW(hProcess, NULL, TRUE)) &&
+            !(sym_initialized = SymInitializeW(hProcess, NULL, FALSE)))
         {
             WARN("failed to initialize process\n");
             return FALSE;
@@ -1042,17 +1193,13 @@ BOOL WINAPI MiniDumpWriteDump(HANDLE hProcess, DWORD pid, HANDLE hFile,
         dc.process = process_find_by_handle(hProcess);
     }
 
-    if (DumpType & MiniDumpWithDataSegs)
-        FIXME("NIY MiniDumpWithDataSegs\n");
-    if (DumpType & MiniDumpWithHandleData)
-        FIXME("NIY MiniDumpWithHandleData\n");
     if (DumpType & MiniDumpFilterMemory)
-        FIXME("NIY MiniDumpFilterMemory\n");
+        TRACE("MiniDumpFilterMemory requested\n");
     if (DumpType & MiniDumpScanMemory)
-        FIXME("NIY MiniDumpScanMemory\n");
+        TRACE("MiniDumpScanMemory requested\n");
 
     dc.hFile = hFile;
-    dc.pid = pid;
+    dc.pid = pid ? pid : GetProcessId(hProcess);
     dc.modules = NULL;
     dc.num_modules = 0;
     dc.alloc_modules = 0;
@@ -1085,6 +1232,8 @@ BOOL WINAPI MiniDumpWriteDump(HANDLE hProcess, DWORD pid, HANDLE hFile,
                 TerminateThread(h, 0);
             CloseHandle(h);
         }
+        else
+            ret = write_minidump(&dc);
     }
 
     if (sym_initialized)

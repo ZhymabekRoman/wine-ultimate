@@ -27,13 +27,16 @@
 #include "config.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <sys/types.h>
+#include <sys/stat.h>
 #include <sys/mman.h>
+#include <time.h>
 #include <unistd.h>
 #ifdef HAVE_LINK_H
 # include <link.h>
@@ -1609,6 +1612,524 @@ void call_raise_user_exception_dispatcher( struct thread_data *data )
 
 
 /***********************************************************************
+ *           write_crash_minidump
+ *
+ * Automated Windows Minidump (.dmp) crash writer on fatal exceptions / failfast.
+ */
+#pragma pack(push,4)
+struct mdmp_location_desc
+{
+    ULONG32 DataSize;
+    ULONG32 Rva;
+};
+
+struct mdmp_header
+{
+    ULONG32 Signature;
+    ULONG32 Version;
+    ULONG32 NumberOfStreams;
+    ULONG32 StreamDirectoryRva;
+    ULONG32 CheckSum;
+    ULONG32 TimeDateStamp;
+    ULONG64 Flags;
+};
+
+struct mdmp_directory
+{
+    ULONG32 StreamType;
+    struct mdmp_location_desc Location;
+};
+
+struct mdmp_system_info
+{
+    USHORT ProcessorArchitecture;
+    USHORT ProcessorLevel;
+    USHORT ProcessorRevision;
+    UCHAR  NumberOfProcessors;
+    UCHAR  ProductType;
+    ULONG32 MajorVersion;
+    ULONG32 MinorVersion;
+    ULONG32 BuildNumber;
+    ULONG32 PlatformId;
+    ULONG32 CSDVersionRva;
+    USHORT SuiteMask;
+    USHORT Reserved2;
+    ULONG32 CpuInfo[6];
+};
+
+struct mdmp_misc_info
+{
+    ULONG32 SizeOfInfo;
+    ULONG32 Flags1;
+    ULONG32 ProcessId;
+    ULONG32 ProcessCreateTime;
+    ULONG32 ProcessUserTime;
+    ULONG32 ProcessKernelTime;
+};
+
+struct mdmp_exception
+{
+    ULONG32 ExceptionCode;
+    ULONG32 ExceptionFlags;
+    ULONG64 ExceptionRecord;
+    ULONG64 ExceptionAddress;
+    ULONG32 NumberParameters;
+    ULONG32 __unusedAlignment;
+    ULONG64 ExceptionInformation[EXCEPTION_MAXIMUM_PARAMETERS];
+};
+
+struct mdmp_exception_stream
+{
+    ULONG32 ThreadId;
+    ULONG32 __alignment;
+    struct mdmp_exception ExceptionRecord;
+    struct mdmp_location_desc ThreadContext;
+};
+
+struct mdmp_memory_desc
+{
+    ULONG64 StartOfMemoryRange;
+    struct mdmp_location_desc Memory;
+};
+
+struct mdmp_thread
+{
+    ULONG32 ThreadId;
+    ULONG32 SuspendCount;
+    ULONG32 PriorityClass;
+    ULONG32 Priority;
+    ULONG64 Teb;
+    struct mdmp_memory_desc Stack;
+    struct mdmp_location_desc ThreadContext;
+};
+
+struct mdmp_module
+{
+    ULONG64 BaseOfImage;
+    ULONG32 SizeOfImage;
+    ULONG32 CheckSum;
+    ULONG32 TimeDateStamp;
+    ULONG32 ModuleNameRva;
+    ULONG32 VersionInfo[13];
+    struct mdmp_location_desc CvRecord;
+    struct mdmp_location_desc MiscRecord;
+    ULONG64 Reserved0;
+    ULONG64 Reserved1;
+};
+
+struct mdmp_handle_data_stream
+{
+    ULONG32 SizeOfHeader;
+    ULONG32 SizeOfDescriptor;
+    ULONG32 NumberOfDescriptors;
+    ULONG32 Reserved;
+};
+#pragma pack(pop)
+
+C_ASSERT( sizeof(struct mdmp_header) == 32 );
+C_ASSERT( sizeof(struct mdmp_directory) == 12 );
+C_ASSERT( sizeof(struct mdmp_system_info) == 56 );
+C_ASSERT( sizeof(struct mdmp_misc_info) == 24 );
+C_ASSERT( sizeof(struct mdmp_exception_stream) == 168 );
+C_ASSERT( sizeof(struct mdmp_thread) == 48 );
+C_ASSERT( sizeof(struct mdmp_module) == 108 );
+C_ASSERT( sizeof(struct mdmp_handle_data_stream) == 16 );
+
+static void mdmp_write_at( int fd, ULONG32 rva, const void *buf, size_t len )
+{
+    const char *p = buf;
+    off_t off = rva;
+    while (len > 0)
+    {
+        ssize_t n = pwrite( fd, p, len, off );
+        if (n <= 0) break;
+        p += n;
+        off += n;
+        len -= n;
+    }
+}
+
+void write_crash_minidump( EXCEPTION_RECORD *rec, CONTEXT *context )
+{
+    static LONG dump_written;
+    char proc_name[128] = "process";
+    char dump_path[512];
+    ULONG32 rva = 0;
+    int fd;
+    DWORD cur_pid = GetCurrentProcessId();
+    DWORD cur_tid = GetCurrentThreadId();
+    TEB *teb = NtCurrentTeb();
+    CONTEXT local_ctx;
+    EXCEPTION_RECORD local_rec;
+    struct mdmp_header hdr;
+    struct mdmp_directory dirs[8];
+    struct mdmp_system_info sys_info;
+    struct mdmp_misc_info misc_info;
+    struct mdmp_exception_stream exc_stream;
+    struct mdmp_thread thd_entry;
+    struct mdmp_handle_data_stream hds;
+    ULONG64 stack_start = 0, stack_end = 0;
+    ULONG32 stack_size = 0;
+    ULONG64 instr_start = 0;
+    ULONG32 instr_size = 0;
+    ULONG32 ctx_rva, stack_rva = 0, instr_rva = 0;
+    ULONG32 csd_len = 0;
+    WCHAR csd_zero = 0;
+    unsigned int i;
+
+    if (InterlockedCompareExchange( &dump_written, 1, 0 ) != 0) return;
+
+    if (!context)
+    {
+        memset( &local_ctx, 0, sizeof(local_ctx) );
+        local_ctx.ContextFlags = CONTEXT_AMD64_ALL;
+        context = &local_ctx;
+    }
+    else
+    {
+        local_ctx = *context;
+        local_ctx.ContextFlags |= CONTEXT_AMD64_ALL;
+        context = &local_ctx;
+    }
+
+    if (!rec)
+    {
+        memset( &local_rec, 0, sizeof(local_rec) );
+        local_rec.ExceptionCode = STATUS_FAIL_FAST_EXCEPTION;
+        local_rec.ExceptionFlags = EXCEPTION_NONCONTINUABLE;
+        local_rec.ExceptionAddress = (void *)context->Rip;
+        rec = &local_rec;
+    }
+
+    /* Extract process basename from PEB ImagePathName if readable */
+    if (peb)
+    {
+        RTL_USER_PROCESS_PARAMETERS *params = NULL;
+        if (virtual_uninterrupted_read_memory( &peb->ProcessParameters, &params, sizeof(params) ) == sizeof(params) && params)
+        {
+            UNICODE_STRING img;
+            if (virtual_uninterrupted_read_memory( &params->ImagePathName, &img, sizeof(img) ) == sizeof(img) &&
+                img.Buffer && img.Length >= sizeof(WCHAR))
+            {
+                WCHAR wbuf[260];
+                SIZE_T wlen = min( (SIZE_T)(img.Length / sizeof(WCHAR)), ARRAY_SIZE(wbuf) - 1 );
+                if (virtual_uninterrupted_read_memory( img.Buffer, wbuf, wlen * sizeof(WCHAR) ) == wlen * sizeof(WCHAR))
+                {
+                    const WCHAR *base = wbuf;
+                    size_t k, out = 0;
+                    wbuf[wlen] = 0;
+                    for (k = 0; k < wlen; k++)
+                        if (wbuf[k] == L'\\' || wbuf[k] == L'/') base = &wbuf[k + 1];
+                    for (k = 0; base[k] && out < sizeof(proc_name) - 1; k++)
+                    {
+                        WCHAR c = base[k];
+                        if ((c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') ||
+                            (c >= L'0' && c <= L'9') || c == L'.' || c == L'_' || c == L'-')
+                            proc_name[out++] = (char)c;
+                        else
+                            proc_name[out++] = '_';
+                    }
+                    if (out > 0) proc_name[out] = 0;
+                }
+            }
+        }
+    }
+
+    mkdir( "/var/tmp/wa-lanes", 0755 );
+    mkdir( "/var/tmp/wa-lanes/dumps", 0755 );
+    snprintf( dump_path, sizeof(dump_path), "/var/tmp/wa-lanes/dumps/%s_%u_%lu.dmp",
+              proc_name, (unsigned int)cur_pid, (unsigned long)time( NULL ) );
+
+    fd = open( dump_path, O_CREAT | O_TRUNC | O_WRONLY | O_CLOEXEC, 0644 );
+    if (fd < 0) return;
+
+    memset( &hdr, 0, sizeof(hdr) );
+    hdr.Signature          = 0x504d444d; /* 'MDMP' */
+    hdr.Version            = 42899;
+    hdr.NumberOfStreams    = 8;
+    hdr.StreamDirectoryRva = sizeof(hdr);
+    hdr.CheckSum           = 0;
+    hdr.TimeDateStamp      = (ULONG32)time( NULL );
+    hdr.Flags              = 0x00000005; /* MiniDumpWithDataSegs | MiniDumpWithHandleData */
+    mdmp_write_at( fd, 0, &hdr, sizeof(hdr) );
+
+    memset( dirs, 0, sizeof(dirs) );
+    rva = sizeof(hdr) + sizeof(dirs);
+
+    /* Stream 0: SystemInfoStream (7) */
+    memset( &sys_info, 0, sizeof(sys_info) );
+    sys_info.ProcessorArchitecture = 9; /* PROCESSOR_ARCHITECTURE_AMD64 */
+    sys_info.ProcessorLevel        = 6;
+    sys_info.NumberOfProcessors    = peb ? (UCHAR)peb->NumberOfProcessors : 4;
+    if (!sys_info.NumberOfProcessors) sys_info.NumberOfProcessors = 4;
+    sys_info.ProductType           = VER_NT_WORKSTATION;
+    sys_info.MajorVersion          = peb ? peb->OSMajorVersion : 10;
+    sys_info.MinorVersion          = peb ? peb->OSMinorVersion : 0;
+    sys_info.BuildNumber           = peb ? peb->OSBuildNumber : 19045;
+    sys_info.PlatformId            = VER_PLATFORM_WIN32_NT;
+    sys_info.SuiteMask             = VER_SUITE_TERMINAL;
+    sys_info.CSDVersionRva         = rva + sizeof(sys_info);
+
+    dirs[0].StreamType        = 7; /* SystemInfoStream */
+    dirs[0].Location.Rva      = rva;
+    dirs[0].Location.DataSize = sizeof(sys_info);
+    mdmp_write_at( fd, rva, &sys_info, sizeof(sys_info) );
+    rva += sizeof(sys_info);
+    mdmp_write_at( fd, rva, &csd_len, sizeof(csd_len) );
+    rva += sizeof(csd_len);
+    mdmp_write_at( fd, rva, &csd_zero, sizeof(csd_zero) );
+    rva += sizeof(csd_zero);
+    rva = (rva + 3) & ~3u;
+
+    /* Stream 1: MiscInfoStream (15) */
+    memset( &misc_info, 0, sizeof(misc_info) );
+    misc_info.SizeOfInfo = sizeof(misc_info);
+    misc_info.Flags1     = 1; /* MINIDUMP_MISC1_PROCESS_ID */
+    misc_info.ProcessId  = cur_pid;
+    dirs[1].StreamType        = 15; /* MiscInfoStream */
+    dirs[1].Location.Rva      = rva;
+    dirs[1].Location.DataSize = sizeof(misc_info);
+    mdmp_write_at( fd, rva, &misc_info, sizeof(misc_info) );
+    rva += sizeof(misc_info);
+
+    /* Write shared CONTEXT for ExceptionStream and ThreadListStream */
+    ctx_rva = rva;
+    mdmp_write_at( fd, ctx_rva, context, sizeof(*context) );
+    rva += sizeof(*context);
+
+    /* Stream 2: ExceptionStream (6) */
+    memset( &exc_stream, 0, sizeof(exc_stream) );
+    exc_stream.ThreadId = cur_tid;
+    exc_stream.ExceptionRecord.ExceptionCode    = rec->ExceptionCode;
+    exc_stream.ExceptionRecord.ExceptionFlags   = rec->ExceptionFlags;
+    exc_stream.ExceptionRecord.ExceptionRecord  = (ULONG64)(ULONG_PTR)rec->ExceptionRecord;
+    exc_stream.ExceptionRecord.ExceptionAddress = (ULONG64)(ULONG_PTR)rec->ExceptionAddress;
+    exc_stream.ExceptionRecord.NumberParameters = min( (ULONG32)rec->NumberParameters, (ULONG32)EXCEPTION_MAXIMUM_PARAMETERS );
+    for (i = 0; i < exc_stream.ExceptionRecord.NumberParameters; i++)
+        exc_stream.ExceptionRecord.ExceptionInformation[i] = rec->ExceptionInformation[i];
+    exc_stream.ThreadContext.DataSize = sizeof(*context);
+    exc_stream.ThreadContext.Rva      = ctx_rva;
+
+    dirs[2].StreamType        = 6; /* ExceptionStream */
+    dirs[2].Location.Rva      = rva;
+    dirs[2].Location.DataSize = sizeof(exc_stream);
+    mdmp_write_at( fd, rva, &exc_stream, sizeof(exc_stream) );
+    rva += sizeof(exc_stream);
+
+    /* Determine crashing thread stack bounds */
+    if (teb)
+    {
+        NT_TIB tib;
+        if (virtual_uninterrupted_read_memory( teb, &tib, sizeof(tib) ) == sizeof(tib) &&
+            (ULONG64)(ULONG_PTR)tib.StackBase > (ULONG64)(ULONG_PTR)tib.StackLimit)
+        {
+            stack_end = (ULONG64)(ULONG_PTR)tib.StackBase;
+            if (context->Rsp >= (ULONG64)(ULONG_PTR)tib.StackLimit && context->Rsp < stack_end)
+                stack_start = context->Rsp & ~(ULONG64)7;
+            else
+                stack_start = (ULONG64)(ULONG_PTR)tib.StackLimit;
+        }
+    }
+    if (!stack_start || stack_end <= stack_start)
+    {
+        stack_start = context->Rsp ? (context->Rsp & ~(ULONG64)7) : 0x1000;
+        stack_end = stack_start + 0x2000;
+    }
+    if (stack_end - stack_start > 0x20000)
+        stack_end = stack_start + 0x20000; /* Cap stack snapshot to 128 KB */
+    stack_size = (ULONG32)(stack_end - stack_start);
+
+    if (context->Rip >= 0x80)
+    {
+        instr_start = context->Rip - 0x80;
+        instr_size  = 0x100;
+    }
+
+    /* Stream 3: ThreadListStream (3) */
+    {
+        ULONG32 num_threads = 1;
+        ULONG32 thd_list_rva = rva;
+        mdmp_write_at( fd, rva, &num_threads, sizeof(num_threads) );
+        rva += sizeof(num_threads);
+
+        memset( &thd_entry, 0, sizeof(thd_entry) );
+        thd_entry.ThreadId                 = cur_tid;
+        thd_entry.SuspendCount             = 0;
+        thd_entry.Teb                      = (ULONG64)(ULONG_PTR)teb;
+        thd_entry.Stack.StartOfMemoryRange = stack_start;
+        thd_entry.Stack.Memory.DataSize    = stack_size;
+        thd_entry.Stack.Memory.Rva         = 0; /* Patched when MemoryListStream is written */
+        thd_entry.ThreadContext.DataSize   = sizeof(*context);
+        thd_entry.ThreadContext.Rva        = ctx_rva;
+
+        mdmp_write_at( fd, rva, &thd_entry, sizeof(thd_entry) );
+        rva += sizeof(thd_entry);
+
+        dirs[3].StreamType        = 3; /* ThreadListStream */
+        dirs[3].Location.Rva      = thd_list_rva;
+        dirs[3].Location.DataSize = sizeof(num_threads) + sizeof(thd_entry);
+    }
+
+    /* Stream 4: ModuleListStream (4) */
+    {
+        struct mod_item
+        {
+            ULONG64 base;
+            ULONG32 size;
+            ULONG32 timestamp;
+            ULONG32 checksum;
+            WCHAR   name[260];
+            ULONG32 name_len;
+        } mods[64];
+        ULONG32 n_mods = 0;
+        ULONG32 mod_list_rva = rva;
+        PEB_LDR_DATA *ldr = NULL;
+
+        if (peb && virtual_uninterrupted_read_memory( &peb->LdrData, &ldr, sizeof(ldr) ) == sizeof(ldr) && ldr)
+        {
+            LIST_ENTRY *head = &ldr->InLoadOrderModuleList;
+            LIST_ENTRY *curr = NULL;
+            if (virtual_uninterrupted_read_memory( &head->Flink, &curr, sizeof(curr) ) == sizeof(curr))
+            {
+                while (curr && curr != head && n_mods < ARRAY_SIZE(mods))
+                {
+                    LDR_DATA_TABLE_ENTRY entry;
+                    if (virtual_uninterrupted_read_memory( CONTAINING_RECORD( curr, LDR_DATA_TABLE_ENTRY, InLoadOrderLinks ),
+                                                           &entry, sizeof(entry) ) != sizeof(entry))
+                        break;
+                    if (entry.DllBase && entry.SizeOfImage)
+                    {
+                        IMAGE_DOS_HEADER dos;
+                        IMAGE_NT_HEADERS64 nth;
+                        ULONG32 m_idx = n_mods++;
+                        memset( &mods[m_idx], 0, sizeof(mods[m_idx]) );
+                        mods[m_idx].base      = (ULONG64)(ULONG_PTR)entry.DllBase;
+                        mods[m_idx].size      = entry.SizeOfImage;
+                        mods[m_idx].timestamp = entry.TimeDateStamp;
+                        if (virtual_uninterrupted_read_memory( entry.DllBase, &dos, sizeof(dos) ) == sizeof(dos) &&
+                            dos.e_magic == IMAGE_DOS_SIGNATURE &&
+                            virtual_uninterrupted_read_memory( (const char *)entry.DllBase + dos.e_lfanew, &nth, sizeof(nth) ) == sizeof(nth) &&
+                            nth.Signature == IMAGE_NT_SIGNATURE)
+                        {
+                            mods[m_idx].timestamp = nth.FileHeader.TimeDateStamp;
+                            mods[m_idx].checksum  = nth.OptionalHeader.CheckSum;
+                        }
+                        if (entry.FullDllName.Buffer && entry.FullDllName.Length >= sizeof(WCHAR))
+                        {
+                            ULONG32 wchars = min( (ULONG32)(entry.FullDllName.Length / sizeof(WCHAR)), (ULONG32)ARRAY_SIZE(mods[m_idx].name) - 1 );
+                            if (virtual_uninterrupted_read_memory( entry.FullDllName.Buffer, mods[m_idx].name, wchars * sizeof(WCHAR) ) == wchars * sizeof(WCHAR))
+                            {
+                                mods[m_idx].name[wchars] = 0;
+                                mods[m_idx].name_len = wchars;
+                            }
+                        }
+                    }
+                    curr = entry.InLoadOrderLinks.Flink;
+                }
+            }
+        }
+
+        mdmp_write_at( fd, rva, &n_mods, sizeof(n_mods) );
+        rva += sizeof(n_mods) + n_mods * sizeof(struct mdmp_module);
+        dirs[4].StreamType        = 4; /* ModuleListStream */
+        dirs[4].Location.Rva      = mod_list_rva;
+        dirs[4].Location.DataSize = sizeof(n_mods) + n_mods * sizeof(struct mdmp_module);
+
+        for (i = 0; i < n_mods; i++)
+        {
+            struct mdmp_module m;
+            ULONG32 byte_len = mods[i].name_len * sizeof(WCHAR);
+            WCHAR zero = 0;
+
+            memset( &m, 0, sizeof(m) );
+            m.BaseOfImage   = mods[i].base;
+            m.SizeOfImage   = mods[i].size;
+            m.CheckSum      = mods[i].checksum;
+            m.TimeDateStamp = mods[i].timestamp;
+            m.ModuleNameRva = rva;
+
+            mdmp_write_at( fd, rva, &byte_len, sizeof(byte_len) );
+            rva += sizeof(byte_len);
+            if (byte_len)
+            {
+                mdmp_write_at( fd, rva, mods[i].name, byte_len );
+                rva += byte_len;
+            }
+            mdmp_write_at( fd, rva, &zero, sizeof(zero) );
+            rva += sizeof(zero);
+
+            mdmp_write_at( fd, mod_list_rva + sizeof(n_mods) + i * sizeof(m), &m, sizeof(m) );
+        }
+        rva = (rva + 3) & ~3u;
+    }
+
+    /* Stream 5: MemoryListStream (5) */
+    {
+        ULONG32 num_ranges = instr_size ? 2 : 1;
+        struct mdmp_memory_desc mdesc[2];
+        ULONG32 mem_list_rva = rva;
+        BYTE buf[1024];
+        ULONG32 pos;
+
+        rva += sizeof(num_ranges) + num_ranges * sizeof(struct mdmp_memory_desc);
+
+        stack_rva = rva;
+        mdesc[0].StartOfMemoryRange = stack_start;
+        mdesc[0].Memory.DataSize    = stack_size;
+        mdesc[0].Memory.Rva         = stack_rva;
+        for (pos = 0; pos < stack_size; pos += sizeof(buf))
+        {
+            ULONG32 chunk = min( stack_size - pos, (ULONG32)sizeof(buf) );
+            memset( buf, 0, chunk );
+            virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)(stack_start + pos), buf, chunk );
+            mdmp_write_at( fd, rva + pos, buf, chunk );
+        }
+        rva += stack_size;
+
+        if (instr_size)
+        {
+            instr_rva = rva;
+            mdesc[1].StartOfMemoryRange = instr_start;
+            mdesc[1].Memory.DataSize    = instr_size;
+            mdesc[1].Memory.Rva         = instr_rva;
+            memset( buf, 0, instr_size );
+            virtual_uninterrupted_read_memory( (const void *)(ULONG_PTR)instr_start, buf, instr_size );
+            mdmp_write_at( fd, rva, buf, instr_size );
+            rva += instr_size;
+        }
+
+        mdmp_write_at( fd, mem_list_rva, &num_ranges, sizeof(num_ranges) );
+        mdmp_write_at( fd, mem_list_rva + sizeof(num_ranges), mdesc, num_ranges * sizeof(mdesc[0]) );
+
+        /* Backpatch ThreadListStream Stack.Memory.Rva */
+        thd_entry.Stack.Memory.Rva = stack_rva;
+        mdmp_write_at( fd, dirs[3].Location.Rva + sizeof(ULONG32), &thd_entry, sizeof(thd_entry) );
+
+        dirs[5].StreamType        = 5; /* MemoryListStream */
+        dirs[5].Location.Rva      = mem_list_rva;
+        dirs[5].Location.DataSize = sizeof(num_ranges) + num_ranges * sizeof(mdesc[0]);
+    }
+
+    /* Stream 6: HandleDataStream (12) */
+    memset( &hds, 0, sizeof(hds) );
+    hds.SizeOfHeader        = sizeof(hds);
+    hds.SizeOfDescriptor    = 32; /* sizeof(MINIDUMP_HANDLE_DESCRIPTOR) */
+    hds.NumberOfDescriptors = 0;
+    dirs[6].StreamType        = 12; /* HandleDataStream */
+    dirs[6].Location.Rva      = rva;
+    dirs[6].Location.DataSize = sizeof(hds);
+    mdmp_write_at( fd, rva, &hds, sizeof(hds) );
+    rva += sizeof(hds);
+
+    /* Write directory table */
+    mdmp_write_at( fd, sizeof(hdr), dirs, sizeof(dirs) );
+    close( fd );
+    ERR_(seh)( "Crash minidump written to %s (code=%08x rip=%p rsp=%p)\n",
+               dump_path, (unsigned int)rec->ExceptionCode, (void *)context->Rip, (void *)context->Rsp );
+}
+
+
+/***********************************************************************
  *           call_user_exception_dispatcher
  */
 NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_RECORD *rec, CONTEXT *context )
@@ -1617,7 +2138,16 @@ NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_REC
     struct exc_stack_layout *stack;
     NTSTATUS status = NtSetContextThread( GetCurrentThread(), context );
 
-    if (status) return status;
+    if (rec && (rec->ExceptionCode == STATUS_FAIL_FAST_EXCEPTION ||
+                rec->ExceptionCode == STATUS_STACK_BUFFER_OVERRUN ||
+                rec->ExceptionCode == 0xe0464645))
+        write_crash_minidump( rec, context );
+
+    if (status)
+    {
+        write_crash_minidump( rec, context );
+        return status;
+    }
     stack = (struct exc_stack_layout *)((context->Rsp - sizeof(*stack) - xstate_size) & ~(ULONG_PTR)63);
     memmove( &stack->context, context, sizeof(*context) );
 

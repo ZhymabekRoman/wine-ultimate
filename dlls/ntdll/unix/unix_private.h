@@ -421,6 +421,7 @@ extern NTSTATUS call_user_apc_dispatcher( CONTEXT *context_ptr, unsigned int fla
 extern NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_RECORD *rec,
                                                 CONTEXT *context );
 extern void call_raise_user_exception_dispatcher( struct thread_data *data );
+extern void write_crash_minidump( EXCEPTION_RECORD *rec, CONTEXT *context );
 
 #define IMAGE_DLLCHARACTERISTICS_PREFER_NATIVE 0x0010 /* Wine extension */
 
