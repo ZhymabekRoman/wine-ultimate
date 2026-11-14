@@ -5386,16 +5386,33 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
         else if (view->protect & SEC_FILE) status = STATUS_ALREADY_COMMITTED;
         else if (view->protect & VPROT_FREE_PLACEHOLDER) status = STATUS_CONFLICTING_ADDRESSES;
-        else if (!(status = set_protection( view, base, size, protect )) && (view->protect & SEC_RESERVE))
+        else
         {
-            SERVER_START_REQ( add_mapping_committed_range )
+            if (is_view_valloc( view ))
             {
-                req->base   = wine_server_client_ptr( view->base );
-                req->offset = (char *)base - (char *)view->base;
-                req->size   = size;
-                wine_server_call( req );
+                char *p = base;
+                size_t remaining = size;
+                while (remaining)
+                {
+                    BYTE page_vprot;
+                    size_t range_len = get_vprot_range_size( p, remaining, VPROT_COMMITTED, &page_vprot );
+                    if (!(page_vprot & VPROT_COMMITTED))
+                        madvise( p, range_len, MADV_DONTNEED );
+                    p += range_len;
+                    remaining -= range_len;
+                }
             }
-            SERVER_END_REQ;
+            if (!(status = set_protection( view, base, size, protect )) && (view->protect & SEC_RESERVE))
+            {
+                SERVER_START_REQ( add_mapping_committed_range )
+                {
+                    req->base   = wine_server_client_ptr( view->base );
+                    req->offset = (char *)base - (char *)view->base;
+                    req->size   = size;
+                    wine_server_call( req );
+                }
+                SERVER_END_REQ;
+            }
         }
     }
 
@@ -5936,9 +5953,10 @@ static unsigned int fill_basic_memory_info( const void *addr, MEMORY_BASIC_INFOR
     else
     {
         BYTE vprot;
+        BYTE vprot_mask = (get_host_page_vprot( base ) & VPROT_COMMITTED) ? ~VPROT_WRITEWATCH : VPROT_COMMITTED;
 
         info->AllocationBase = alloc_base;
-        info->RegionSize = get_committed_size( view, base, ~(size_t)0, &vprot, ~VPROT_WRITEWATCH );
+        info->RegionSize = get_committed_size( view, base, ~(size_t)0, &vprot, vprot_mask );
         info->State = (vprot & VPROT_COMMITTED) ? MEM_COMMIT : MEM_RESERVE;
         info->Protect = (vprot & VPROT_COMMITTED) ? get_win32_prot( vprot, view->protect ) : 0;
         info->AllocationProtect = get_win32_prot( view->protect, view->protect );

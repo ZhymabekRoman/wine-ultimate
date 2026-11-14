@@ -2150,6 +2150,8 @@ NTSTATUS call_user_exception_dispatcher( struct thread_data *data, EXCEPTION_REC
 
     if (rec && (rec->ExceptionCode == STATUS_FAIL_FAST_EXCEPTION ||
                 rec->ExceptionCode == STATUS_STACK_BUFFER_OVERRUN ||
+                rec->ExceptionCode == STATUS_BREAKPOINT ||
+                (rec->ExceptionCode == STATUS_ACCESS_VIOLATION && rec->NumberParameters >= 2 && !rec->ExceptionInformation[1]) ||
                 rec->ExceptionCode == 0xe0464645))
     {
         flight_recorder_log( "FAILFAST code=%08x rip=%p rsp=%p",
@@ -2946,6 +2948,24 @@ static void segv_handler( int signal, siginfo_t *siginfo, void *_sigcontext )
         {
             leave_handler( data, sigcontext );
             return;
+        }
+        if (rec.ExceptionInformation[0] == EXCEPTION_WRITE_FAULT && !rec.ExceptionInformation[1])
+        {
+            const unsigned char *pc = (const unsigned char *)RIP_sig(sigcontext);
+            if (pc && pc[0] == 0x4c && pc[1] == 0x89 && pc[2] == 0x02 &&
+                pc[3] == 0x49 && pc[4] == 0xf7 && pc[5] == 0xd0 &&
+                pc[6] == 0x4c && pc[7] == 0x89 && pc[8] == 0x42 && pc[9] == 0x08 &&
+                !RDX_sig(sigcontext))
+            {
+                void *rbp_val = (void *)RBP_sig(sigcontext);
+                void **head_ptr = (void **)R14_sig(sigcontext);
+                if (!virtual_uninterrupted_write_memory( head_ptr, &rbp_val, sizeof(rbp_val) ))
+                {
+                    RIP_sig(sigcontext) += 10;
+                    leave_handler( data, sigcontext );
+                    return;
+                }
+            }
         }
         if (rec.ExceptionCode == EXCEPTION_ACCESS_VIOLATION &&
             rec.ExceptionInformation[0] == EXCEPTION_EXECUTE_FAULT)
