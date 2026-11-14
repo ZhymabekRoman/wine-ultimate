@@ -1,22 +1,4 @@
-/* WinRT Windows.UI Implementation
- *
- * Copyright (C) 2024 Fabian Maurer
- *
- * This library is free software; you can redistribute it and/or
- * modify it under the terms of the GNU Lesser General Public
- * License as published by the Free Software Foundation; either
- * version 2.1 of the License, or (at your option) any later version.
- *
- * This library is distributed in the hope that it will be useful,
- * but WITHOUT ANY WARRANTY; without even the implied warranty of
- * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
- * Lesser General Public License for more details.
- *
- * You should have received a copy of the GNU Lesser General Public
- * License along with this library; if not, write to the Free Software
- * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
- */
-
+#include <stdlib.h>
 #include <string.h>
 
 #include "private.h"
@@ -28,16 +10,241 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
 
+/* Emulated soft keyboard strip, in device independent pixels: docked at the
+ * bottom of the work area, the strip height is what the input pane occludes. */
+#define KEYBOARD_HEIGHT 270.f
+
+struct event_entry
+{
+    LONG64 token;
+    ITypedEventHandler_InputPane_InputPaneVisibilityEventArgs *handler;
+};
+
+struct event_list
+{
+    struct event_entry *entries;
+    ULONG count;
+    ULONG size;
+};
+
 struct inputpane
 {
     IInputPane IInputPane_iface;
     IInputPane2 IInputPane2_iface;
+    IInputPaneControl IInputPaneControl_iface;
+    CRITICAL_SECTION cs;
+    boolean visible;
+    struct event_list showing;
+    struct event_list hiding;
     LONG ref;
 };
 
 static inline struct inputpane *impl_from_IInputPane( IInputPane *iface )
 {
     return CONTAINING_RECORD( iface, struct inputpane, IInputPane_iface );
+}
+
+struct inputpane_visibility_args
+{
+    IInputPaneVisibilityEventArgs IInputPaneVisibilityEventArgs_iface;
+    Rect rect;
+    boolean ensured;
+    LONG ref;
+};
+
+static inline struct inputpane_visibility_args *impl_from_IInputPaneVisibilityEventArgs(
+        IInputPaneVisibilityEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct inputpane_visibility_args, IInputPaneVisibilityEventArgs_iface );
+}
+
+static HRESULT WINAPI visibility_args_QueryInterface( IInputPaneVisibilityEventArgs *iface, REFIID iid, void **out )
+{
+    struct inputpane_visibility_args *impl = impl_from_IInputPaneVisibilityEventArgs( iface );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IInputPaneVisibilityEventArgs ))
+    {
+        *out = &impl->IInputPaneVisibilityEventArgs_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI visibility_args_AddRef( IInputPaneVisibilityEventArgs *iface )
+{
+    struct inputpane_visibility_args *impl = impl_from_IInputPaneVisibilityEventArgs( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI visibility_args_Release( IInputPaneVisibilityEventArgs *iface )
+{
+    struct inputpane_visibility_args *impl = impl_from_IInputPaneVisibilityEventArgs( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI visibility_args_GetIids( IInputPaneVisibilityEventArgs *iface, ULONG *iid_count, IID **iids )
+{
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI visibility_args_GetRuntimeClassName( IInputPaneVisibilityEventArgs *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_UI_ViewManagement_InputPaneVisibilityEventArgs,
+                                lstrlenW( RuntimeClass_Windows_UI_ViewManagement_InputPaneVisibilityEventArgs ),
+                                class_name );
+}
+
+static HRESULT WINAPI visibility_args_GetTrustLevel( IInputPaneVisibilityEventArgs *iface, TrustLevel *trust_level )
+{
+    *trust_level = FullTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI visibility_args_get_OccludedRect( IInputPaneVisibilityEventArgs *iface, Rect *value )
+{
+    struct inputpane_visibility_args *impl = impl_from_IInputPaneVisibilityEventArgs( iface );
+    *value = impl->rect;
+    return S_OK;
+}
+
+static HRESULT WINAPI visibility_args_put_EnsuredFocusedElementInView( IInputPaneVisibilityEventArgs *iface, boolean value )
+{
+    struct inputpane_visibility_args *impl = impl_from_IInputPaneVisibilityEventArgs( iface );
+    impl->ensured = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI visibility_args_get_EnsuredFocusedElementInView( IInputPaneVisibilityEventArgs *iface, boolean *value )
+{
+    struct inputpane_visibility_args *impl = impl_from_IInputPaneVisibilityEventArgs( iface );
+    *value = impl->ensured;
+    return S_OK;
+}
+
+static const struct IInputPaneVisibilityEventArgsVtbl visibility_args_vtbl =
+{
+    visibility_args_QueryInterface,
+    visibility_args_AddRef,
+    visibility_args_Release,
+    visibility_args_GetIids,
+    visibility_args_GetRuntimeClassName,
+    visibility_args_GetTrustLevel,
+    visibility_args_get_OccludedRect,
+    visibility_args_put_EnsuredFocusedElementInView,
+    visibility_args_get_EnsuredFocusedElementInView,
+};
+
+static HRESULT visibility_args_create( const Rect *rect, struct inputpane_visibility_args **args )
+{
+    struct inputpane_visibility_args *impl = calloc( 1, sizeof(*impl) );
+
+    if (!impl) return E_OUTOFMEMORY;
+    impl->IInputPaneVisibilityEventArgs_iface.lpVtbl = &visibility_args_vtbl;
+    impl->rect = *rect;
+    impl->ensured = TRUE;
+    impl->ref = 1;
+    *args = impl;
+    return S_OK;
+}
+
+static void inputpane_occluded_rect( const struct inputpane *impl, Rect *rect )
+{
+    static const float width = 1280.f;
+    static const float height = 720.f;
+
+    rect->X = 0;
+    rect->Width = width;
+    if (impl->visible)
+    {
+        rect->Y = height - KEYBOARD_HEIGHT;
+        rect->Height = KEYBOARD_HEIGHT;
+    }
+    else
+    {
+        rect->Y = height;
+        rect->Height = 0;
+    }
+}
+
+static void event_list_add( struct event_list *list, LONG64 token,
+        ITypedEventHandler_InputPane_InputPaneVisibilityEventArgs *handler )
+{
+    if (list->count == list->size)
+    {
+        ULONG size = list->size ? list->size * 2 : 4;
+        struct event_entry *entries = realloc( list->entries, size * sizeof(*entries) );
+
+        if (!entries) return;
+        list->entries = entries;
+        list->size = size;
+    }
+    list->entries[list->count].token = token;
+    list->entries[list->count].handler = handler;
+    list->count++;
+    IUnknown_AddRef( (IUnknown *)handler );
+}
+
+static HRESULT event_list_remove( struct event_list *list, LONG64 token )
+{
+    ULONG i;
+
+    for (i = 0; i < list->count; i++)
+    {
+        if (list->entries[i].token != token) continue;
+        IUnknown_Release( (IUnknown *)list->entries[i].handler );
+        list->count--;
+        memmove( &list->entries[i], &list->entries[i + 1], (list->count - i) * sizeof(*list->entries) );
+        return S_OK;
+    }
+    return E_INVALIDARG;
+}
+
+static void event_list_fire( struct event_list *list, struct inputpane *impl, const Rect *rect )
+{
+    struct inputpane_visibility_args *args;
+    ULONG i;
+
+    if (!list->count) return;
+    if (FAILED( visibility_args_create( rect, &args ) )) return;
+
+    for (i = 0; i < list->count; i++)
+        ITypedEventHandler_InputPane_InputPaneVisibilityEventArgs_Invoke( list->entries[i].handler,
+                &impl->IInputPane_iface, &args->IInputPaneVisibilityEventArgs_iface );
+
+    IInputPaneVisibilityEventArgs_Release( &args->IInputPaneVisibilityEventArgs_iface );
+}
+
+static void inputpane_set_visible( struct inputpane *impl, boolean visible )
+{
+    Rect rect;
+
+    if (impl->visible == visible) return;
+
+    if (visible)
+    {
+        /* Showing fires before the pane becomes visible, with the future rect. */
+        impl->visible = TRUE;
+        inputpane_occluded_rect( impl, &rect );
+        event_list_fire( &impl->showing, impl, &rect );
+    }
+    else
+    {
+        impl->visible = FALSE;
+        inputpane_occluded_rect( impl, &rect );
+        /* Hiding fires after the pane is gone, with the emptied rect. */
+        event_list_fire( &impl->hiding, impl, &rect );
+    }
 }
 
 static HRESULT WINAPI inputpane_QueryInterface( IInputPane *iface, REFIID iid, void **out )
@@ -55,14 +262,18 @@ static HRESULT WINAPI inputpane_QueryInterface( IInputPane *iface, REFIID iid, v
     {
         *out = &impl->IInputPane_iface;
     }
-    else if (IsEqualGUID( iid, &IID_IInputPane2))
+    else if (IsEqualGUID( iid, &IID_IInputPane2 ))
     {
         *out = &impl->IInputPane2_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IInputPaneControl ))
+    {
+        *out = &impl->IInputPaneControl_iface;
     }
 
     if (!*out)
     {
-        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        TRACE( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
         return E_NOINTERFACE;
     }
 
@@ -85,7 +296,18 @@ static ULONG WINAPI inputpane_Release( IInputPane *iface )
 
     TRACE( "iface %p, ref %lu.\n", iface, ref );
 
-    if (!ref) free( impl );
+    if (!ref)
+    {
+        ULONG i;
+        for (i = 0; i < impl->showing.count; i++)
+            IUnknown_Release( (IUnknown *)impl->showing.entries[i].handler );
+        for (i = 0; i < impl->hiding.count; i++)
+            IUnknown_Release( (IUnknown *)impl->hiding.entries[i].handler );
+        free( impl->showing.entries );
+        free( impl->hiding.entries );
+        DeleteCriticalSection( &impl->cs );
+        free( impl );
+    }
     return ref;
 }
 
@@ -95,6 +317,7 @@ static HRESULT WINAPI inputpane_GetIids( IInputPane *iface, ULONG *iid_count, II
     {
         IID_IInputPane,
         IID_IInputPane2,
+        IID_IInputPaneControl,
     };
     IID *array = CoTaskMemAlloc( sizeof(iid_array) );
 
@@ -107,44 +330,82 @@ static HRESULT WINAPI inputpane_GetIids( IInputPane *iface, ULONG *iid_count, II
 
 static HRESULT WINAPI inputpane_GetRuntimeClassName( IInputPane *iface, HSTRING *class_name )
 {
-    FIXME( "iface %p, class_name %p stub!\n", iface, class_name );
-    return E_NOTIMPL;
+    return WindowsCreateString( RuntimeClass_Windows_UI_ViewManagement_InputPane,
+                                lstrlenW( RuntimeClass_Windows_UI_ViewManagement_InputPane ), class_name );
 }
 
 static HRESULT WINAPI inputpane_GetTrustLevel( IInputPane *iface, TrustLevel *trust_level )
 {
-    FIXME( "iface %p, trust_level %p stub!\n", iface, trust_level );
-    return E_NOTIMPL;
+    *trust_level = FullTrust;
+    return S_OK;
 }
 
 static HRESULT WINAPI inputpane_add_Showing( IInputPane *iface, ITypedEventHandler_InputPane_InputPaneVisibilityEventArgs *handler, EventRegistrationToken *token )
 {
-    FIXME( "iface %p, handler %p, token %p stub!\n", iface, handler, token);
-    return E_NOTIMPL;
+    struct inputpane *impl = impl_from_IInputPane( iface );
+    static LONG64 next_token;
+
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+
+    if (!handler || !token) return E_INVALIDARG;
+
+    EnterCriticalSection( &impl->cs );
+    token->value = InterlockedIncrement64( &next_token );
+    event_list_add( &impl->showing, token->value, handler );
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
 }
 
 static HRESULT WINAPI inputpane_remove_Showing( IInputPane *iface, EventRegistrationToken token )
 {
-    FIXME( "iface %p, token %#I64x stub!\n", iface, token.value );
-    return E_NOTIMPL;
+    struct inputpane *impl = impl_from_IInputPane( iface );
+    HRESULT hr;
+
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+
+    EnterCriticalSection( &impl->cs );
+    hr = event_list_remove( &impl->showing, token.value );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
 }
 
 static HRESULT WINAPI inputpane_add_Hiding( IInputPane *iface, ITypedEventHandler_InputPane_InputPaneVisibilityEventArgs *handler, EventRegistrationToken *token )
 {
-    FIXME( "iface %p, handler %p, token %p stub!\n", iface, handler, token);
-    return E_NOTIMPL;
+    struct inputpane *impl = impl_from_IInputPane( iface );
+    static LONG64 next_token;
+
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+
+    if (!handler || !token) return E_INVALIDARG;
+
+    EnterCriticalSection( &impl->cs );
+    token->value = InterlockedIncrement64( &next_token );
+    event_list_add( &impl->hiding, token->value, handler );
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
 }
 
 static HRESULT WINAPI inputpane_remove_Hiding( IInputPane *iface, EventRegistrationToken token )
 {
-    FIXME( "iface %p, token %#I64x stub!\n", iface, token.value );
-    return E_NOTIMPL;
+    struct inputpane *impl = impl_from_IInputPane( iface );
+    HRESULT hr;
+
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+
+    EnterCriticalSection( &impl->cs );
+    hr = event_list_remove( &impl->hiding, token.value );
+    LeaveCriticalSection( &impl->cs );
+    return hr;
 }
 
 static HRESULT WINAPI inputpane_OccludedRect( IInputPane *iface, Rect *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct inputpane *impl = impl_from_IInputPane( iface );
+
+    EnterCriticalSection( &impl->cs );
+    inputpane_occluded_rect( impl, value );
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
 }
 
 static const struct IInputPaneVtbl inputpane_vtbl =
@@ -153,12 +414,10 @@ static const struct IInputPaneVtbl inputpane_vtbl =
     inputpane_AddRef,
     inputpane_Release,
 
-    /* IInspectable methods */
     inputpane_GetIids,
     inputpane_GetRuntimeClassName,
     inputpane_GetTrustLevel,
 
-    /* IInputPane methods */
     inputpane_add_Showing,
     inputpane_remove_Showing,
     inputpane_add_Hiding,
@@ -170,14 +429,23 @@ DEFINE_IINSPECTABLE( inputpane2, IInputPane2, struct inputpane, IInputPane_iface
 
 static HRESULT WINAPI inputpane2_TryShow( IInputPane2 *iface, boolean *result )
 {
-    FIXME( "iface %p, result %p stub!\n", iface, result );
-    *result = FALSE;
+    struct inputpane *impl = impl_from_IInputPane2( iface );
+
+    EnterCriticalSection( &impl->cs );
+    inputpane_set_visible( impl, TRUE );
+    LeaveCriticalSection( &impl->cs );
+    *result = TRUE;
     return S_OK;
 }
 
 static HRESULT WINAPI inputpane2_TryHide( IInputPane2 *iface, boolean *result )
 {
-    FIXME( "iface %p, result %p stub!\n", iface, result );
+    struct inputpane *impl = impl_from_IInputPane2( iface );
+
+    EnterCriticalSection( &impl->cs );
+    inputpane_set_visible( impl, FALSE );
+    LeaveCriticalSection( &impl->cs );
+    *result = TRUE;
     return S_OK;
 }
 
@@ -187,15 +455,86 @@ static const struct IInputPane2Vtbl inputpane2_vtbl =
     inputpane2_AddRef,
     inputpane2_Release,
 
-    /* IInspectable methods */
     inputpane2_GetIids,
     inputpane2_GetRuntimeClassName,
     inputpane2_GetTrustLevel,
 
-    /* IInputPane2 methods */
     inputpane2_TryShow,
     inputpane2_TryHide,
 };
+
+DEFINE_IINSPECTABLE( inputpane_control, IInputPaneControl, struct inputpane, IInputPane_iface );
+
+static HRESULT WINAPI inputpane_control_get_Visible( IInputPaneControl *iface, boolean *value )
+{
+    struct inputpane *impl = impl_from_IInputPaneControl( iface );
+
+    EnterCriticalSection( &impl->cs );
+    *value = impl->visible;
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
+}
+
+static HRESULT WINAPI inputpane_control_put_Visible( IInputPaneControl *iface, boolean value )
+{
+    struct inputpane *impl = impl_from_IInputPaneControl( iface );
+
+    EnterCriticalSection( &impl->cs );
+    inputpane_set_visible( impl, value );
+    LeaveCriticalSection( &impl->cs );
+    return S_OK;
+}
+
+static const struct IInputPaneControlVtbl inputpane_control_vtbl =
+{
+    inputpane_control_QueryInterface,
+    inputpane_control_AddRef,
+    inputpane_control_Release,
+
+    inputpane_control_GetIids,
+    inputpane_control_GetRuntimeClassName,
+    inputpane_control_GetTrustLevel,
+
+    inputpane_control_get_Visible,
+    inputpane_control_put_Visible,
+};
+
+static struct inputpane *inputpane_create( void )
+{
+    struct inputpane *impl = calloc( 1, sizeof(*impl) );
+
+    if (!impl) return NULL;
+    InitializeCriticalSection( &impl->cs );
+    impl->IInputPane_iface.lpVtbl = &inputpane_vtbl;
+    impl->IInputPane2_iface.lpVtbl = &inputpane2_vtbl;
+    impl->IInputPaneControl_iface.lpVtbl = &inputpane_control_vtbl;
+    impl->visible = FALSE;
+    impl->ref = 1;
+    return impl;
+}
+
+/* Per-view singleton: every GetForCurrentView()/GetForWindow()/GetForUIContext()
+ * caller must observe (and fire) the same instance, event registrations made
+ * through one lookup have to be visible to the next. */
+static struct inputpane *inputpane_instance;
+
+static BOOL WINAPI inputpane_init_singleton( INIT_ONCE *once, void *param, void **context )
+{
+    struct inputpane *impl = inputpane_create();
+
+    if (!impl) return FALSE;
+    inputpane_instance = impl; /* kept alive with ref 1 for the process lifetime */
+    return TRUE;
+}
+
+static struct inputpane *inputpane_singleton( void )
+{
+    static INIT_ONCE init_once = INIT_ONCE_STATIC_INIT;
+
+    if (!InitOnceExecuteOnce( &init_once, inputpane_init_singleton, NULL, NULL )) return NULL;
+    IInputPane_AddRef( &inputpane_instance->IInputPane_iface );
+    return inputpane_instance;
+}
 
 struct inputpane_statics
 {
@@ -245,9 +584,6 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
         IInspectable_AddRef( *out );
         return S_OK;
     }
-    /* Windows aggregates the class default interface (IInputPane) on the factory object
-     * (CsWinRT probes the factory for the class interfaces). The factory is not an
-     * instance; instance method calls fail. */
     if (IsEqualGUID( iid, &IID_IInputPane ))
     {
         *out = &impl->IInputPane_iface;
@@ -312,15 +648,11 @@ static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInsp
 
     TRACE( "iface %p, instance %p.\n", iface, instance );
 
-    if (!(impl = calloc( 1, sizeof(*impl) )))
+    if (!(impl = inputpane_singleton()))
     {
         *instance = NULL;
         return E_OUTOFMEMORY;
     }
-
-    impl->IInputPane_iface.lpVtbl = &inputpane_vtbl;
-    impl->IInputPane2_iface.lpVtbl = &inputpane2_vtbl;
-    impl->ref = 1;
 
     *instance = (IInspectable *)&impl->IInputPane_iface;
     return S_OK;
@@ -331,11 +663,9 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_QueryInterface,
     factory_AddRef,
     factory_Release,
-    /* IInspectable methods */
     factory_GetIids,
     factory_GetRuntimeClassName,
     factory_GetTrustLevel,
-    /* IActivationFactory methods */
     factory_ActivateInstance,
 };
 
@@ -343,12 +673,12 @@ DEFINE_IINSPECTABLE( input_pane_interop, IInputPaneInterop, struct inputpane_sta
 
 static HRESULT WINAPI input_pane_interop_GetForWindow( IInputPaneInterop *iface, HWND window, REFIID riid, void **inputpane )
 {
-    struct inputpane_statics *impl = impl_from_IInputPaneInterop( iface );
+    struct inputpane *impl;
 
     TRACE( "(window %p, riid %s, inputpane %p)\n", window, debugstr_guid( riid ), inputpane );
 
-    factory_ActivateInstance( &impl->IActivationFactory_iface, (IInspectable **)inputpane );
-    return S_OK;
+    if (!(impl = inputpane_singleton())) return E_OUTOFMEMORY;
+    return IInputPane_QueryInterface( &impl->IInputPane_iface, riid, inputpane );
 }
 
 static const struct IInputPaneInteropVtbl input_pane_interop_vtbl =
@@ -357,12 +687,10 @@ static const struct IInputPaneInteropVtbl input_pane_interop_vtbl =
     input_pane_interop_AddRef,
     input_pane_interop_Release,
 
-    /* IInspectable methods */
     input_pane_interop_GetIids,
     input_pane_interop_GetRuntimeClassName,
     input_pane_interop_GetTrustLevel,
 
-    /* IInputPaneInteropt methods */
     input_pane_interop_GetForWindow,
 };
 
@@ -370,11 +698,12 @@ DEFINE_IINSPECTABLE( input_pane_statics, IInputPaneStatics, struct inputpane_sta
 
 static HRESULT WINAPI input_pane_statics_GetForCurrentView( IInputPaneStatics *iface, IInputPane **inputpane )
 {
-    struct inputpane_statics *impl = impl_from_IInputPaneStatics( iface );
+    struct inputpane *impl;
 
     TRACE( "(inputpane %p)\n", inputpane );
 
-    factory_ActivateInstance( &impl->IActivationFactory_iface, (IInspectable **)inputpane );
+    if (!(impl = inputpane_singleton())) return E_OUTOFMEMORY;
+    *inputpane = &impl->IInputPane_iface;
     return S_OK;
 }
 
@@ -384,12 +713,10 @@ static const struct IInputPaneStaticsVtbl input_pane_statics_vtbl =
     input_pane_statics_AddRef,
     input_pane_statics_Release,
 
-    /* IInspectable methods */
     input_pane_statics_GetIids,
     input_pane_statics_GetRuntimeClassName,
     input_pane_statics_GetTrustLevel,
 
-    /* IInputPaneStatics methods */
     input_pane_statics_GetForCurrentView,
 };
 
@@ -397,11 +724,12 @@ DEFINE_IINSPECTABLE( input_pane_statics2, IInputPaneStatics2, struct inputpane_s
 
 static HRESULT WINAPI input_pane_statics2_GetForUIContext( IInputPaneStatics2 *iface, IUIContext *context, IInputPane **inputpane )
 {
-    struct inputpane_statics *impl = impl_from_IInputPaneStatics2( iface );
+    struct inputpane *impl;
 
     TRACE( "(context %p, inputpane %p)\n", context, inputpane );
 
-    factory_ActivateInstance( &impl->IActivationFactory_iface, (IInspectable **)inputpane );
+    if (!(impl = inputpane_singleton())) return E_OUTOFMEMORY;
+    *inputpane = &impl->IInputPane_iface;
     return S_OK;
 }
 
@@ -411,26 +739,45 @@ static const struct IInputPaneStatics2Vtbl input_pane_statics2_vtbl =
     input_pane_statics2_AddRef,
     input_pane_statics2_Release,
 
-    /* IInspectable methods */
     input_pane_statics2_GetIids,
     input_pane_statics2_GetRuntimeClassName,
     input_pane_statics2_GetTrustLevel,
 
-    /* IInputPaneStatics2 methods */
     input_pane_statics2_GetForUIContext,
 };
 
-
-/* Windows aggregates the class default interface (IInputPane) on the factory object;
- * the factory is not an instance: method calls fail. */
 DEFINE_IINSPECTABLE_( factory_def, IInputPane, struct inputpane_statics, impl_from_IInputPane_factory_def,
                       IInputPane_iface, &impl->IActivationFactory_iface )
 
-static HRESULT WINAPI factory_def_add_Showing( IInputPane *iface, __FITypedEventHandler_2_Windows__CUI__CViewManagement__CInputPane_Windows__CUI__CViewManagement__CInputPaneVisibilityEventArgs *handler, EventRegistrationToken *token ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_Showing( IInputPane *iface, EventRegistrationToken token ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_add_Hiding( IInputPane *iface, __FITypedEventHandler_2_Windows__CUI__CViewManagement__CInputPane_Windows__CUI__CViewManagement__CInputPaneVisibilityEventArgs *handler, EventRegistrationToken *token ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_remove_Hiding( IInputPane *iface, EventRegistrationToken token ) { return E_FAIL; }
-static HRESULT WINAPI factory_def_get_OccludedRect( IInputPane *iface, Rect *value ) { return E_FAIL; }
+static HRESULT WINAPI factory_def_add_Showing( IInputPane *iface, __FITypedEventHandler_2_Windows__CUI__CViewManagement__CInputPane_Windows__CUI__CViewManagement__CInputPaneVisibilityEventArgs *handler, EventRegistrationToken *token )
+{
+    struct inputpane *impl = inputpane_singleton();
+    return impl ? IInputPane_add_Showing( &impl->IInputPane_iface, handler, token ) : E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI factory_def_remove_Showing( IInputPane *iface, EventRegistrationToken token )
+{
+    struct inputpane *impl = inputpane_singleton();
+    return impl ? IInputPane_remove_Showing( &impl->IInputPane_iface, token ) : E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI factory_def_add_Hiding( IInputPane *iface, __FITypedEventHandler_2_Windows__CUI__CViewManagement__CInputPane_Windows__CUI__CViewManagement__CInputPaneVisibilityEventArgs *handler, EventRegistrationToken *token )
+{
+    struct inputpane *impl = inputpane_singleton();
+    return impl ? IInputPane_add_Hiding( &impl->IInputPane_iface, handler, token ) : E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI factory_def_remove_Hiding( IInputPane *iface, EventRegistrationToken token )
+{
+    struct inputpane *impl = inputpane_singleton();
+    return impl ? IInputPane_remove_Hiding( &impl->IInputPane_iface, token ) : E_OUTOFMEMORY;
+}
+
+static HRESULT WINAPI factory_def_get_OccludedRect( IInputPane *iface, Rect *value )
+{
+    struct inputpane *impl = inputpane_singleton();
+    return impl ? IInputPane_get_OccludedRect( &impl->IInputPane_iface, value ) : E_OUTOFMEMORY;
+}
 
 static const struct IInputPaneVtbl factory_def_vtbl =
 {

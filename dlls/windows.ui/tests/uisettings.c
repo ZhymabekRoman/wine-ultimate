@@ -337,7 +337,7 @@ static void test_UISettings(void)
     text_scale_factor = 12345.6;
     hr = IUISettings2_get_TextScaleFactor( uisettings2, &text_scale_factor );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
-    ok( text_scale_factor >= 1.0 && text_scale_factor <= 2.25, "got text_scale_factor %f.\n", text_scale_factor );
+    ok( text_scale_factor >= 100.0 && text_scale_factor <= 225.0, "got text_scale_factor %f.\n", text_scale_factor );
 
     IUISettings2_Release( uisettings2 );
 

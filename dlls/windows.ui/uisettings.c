@@ -300,8 +300,8 @@ DEFINE_IINSPECTABLE( uisettings2, IUISettings2, struct uisettings, IUISettings_i
 
 static HRESULT WINAPI uisettings2_get_TextScaleFactor( IUISettings2 *iface, DOUBLE *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    *value = 1.0;
+    /* the projection exposes the scale in percent: 100 is the default 1:1 */
+    *value = 100.0;
     return S_OK;
 }
 
