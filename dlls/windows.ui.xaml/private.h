@@ -85,6 +85,8 @@ HRESULT xaml_window_present_current( void );
 void xaml_fire_all_loaded( void );
 void xaml_register_loaded( void *handler, IInspectable *sender );
 #define WM_APP_WV2_START (WM_APP + 0x57)
+#define XAML_DEFAULT_CLIENT_SIZE ((SIZE){ 1024, 768 })
+void xaml_get_layout_metrics( HWND hwnd, SIZE *client, float *scale );
 HWND xaml_get_window_hwnd( void );
 IDCompositionVisual *xaml_get_dcomp_root_visual( void );
 void xaml_dcomp_commit( void );

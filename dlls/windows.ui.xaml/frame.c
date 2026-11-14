@@ -2032,16 +2032,20 @@ WVPROT(48) WVPROT(49) WVPROT(50) WVPROT(51) WVPROT(52) WVPROT(53) WVPROT(54) WVP
 WVPROT(56) WVPROT(57) WVPROT(58) WVPROT(59) WVPROT(60) WVPROT(61) WVPROT(62) WVPROT(63)
 
 /* FrameworkElement numeric getters (Width/Height/ActualWidth/ActualHeight
- * share this slot body): report the hosting window's real client width;
- * 960.0 only until the first host window exists. */
+ * share this slot body): report the hosting window's real client width,
+ * falling back to monitor-derived layout metrics until a window exists. */
 static HRESULT WINAPI element_get_double( void *iface, double *val )
 {
     struct xaml_element *impl = impl_from_element( (IInspectable *)iface );
     HWND hw = impl->parent_hwnd;
-    RECT rc;
+    SIZE sz;
 
     if (!hw || !IsWindow( hw )) hw = xaml_get_window_hwnd();
-    if (val) *val = (hw && GetClientRect( hw, &rc ) && rc.right > 0) ? (double)rc.right : 960.0;
+    if (val)
+    {
+        xaml_get_layout_metrics( hw, &sz, NULL );
+        *val = (double)sz.cx;
+    }
     return S_OK;
 }
 
@@ -3686,17 +3690,13 @@ static void wv2_sync_child_hwnds( HWND parent, UINT width, UINT height )
     struct wv2_enum_ctx ctx;
 
     if (!parent || !IsWindow( parent )) parent = wv2_get_controller_parent();
-    if (!width || !height)
+    if ((int)width <= 0 || (int)height <= 0)
     {
-        RECT rc;
-        if (parent && GetClientRect( parent, &rc ))
-        {
-            width = rc.right;
-            height = rc.bottom;
-        }
+        SIZE sz;
+        xaml_get_layout_metrics( parent, &sz, NULL );
+        if ((int)width <= 0) width = (UINT)sz.cx;
+        if ((int)height <= 0) height = (UINT)sz.cy;
     }
-    if ((int)width <= 0) width = 1024;
-    if ((int)height <= 0) height = 768;
 
     ctx.width = (int)width;
     ctx.height = (int)height;
@@ -4053,7 +4053,9 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
         if (h->impl->real_loader)
         {
             HWND parent = h->impl->parent_hwnd ? h->impl->parent_hwnd : wv2_get_controller_parent();
-            RECT rc = { 0, 0, 1024, 768 };
+            SIZE sz;
+            float scale = 1.0f;
+            RECT rc;
             HRESULT hr_b = S_OK, hr_v = S_OK, hr_c = S_OK;
             void *comp_ctrl = NULL;
             void *ctrl = NULL;
@@ -4061,12 +4063,8 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             h->impl->loader_controller = controller;
             ((IUnknown *)controller)->lpVtbl->AddRef( (IUnknown *)controller );
 
-            if (parent && IsWindow( parent ))
-            {
-                GetClientRect( parent, &rc );
-                if (rc.right <= 0) rc.right = 1024;
-                if (rc.bottom <= 0) rc.bottom = 768;
-            }
+            xaml_get_layout_metrics( parent, &sz, &scale );
+            SetRect( &rc, 0, 0, sz.cx, sz.cy );
 
             /* If controller is ICoreWebView2CompositionController, connect its visual to XAML root */
             if (SUCCEEDED( ((IUnknown *)controller)->lpVtbl->QueryInterface(
@@ -4074,7 +4072,12 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             {
                 IDCompositionVisual *root = xaml_get_dcomp_root_visual();
                 IDCompositionVisual *vis = h->impl->visual;
+                D2D_RECT_F clip = { 0.0f, 0.0f, (float)rc.right, (float)rc.bottom };
                 if (!vis) { xaml_create_dcomp_visual( &h->impl->visual ); vis = h->impl->visual; }
+                if (root)
+                    IDCompositionVisual_SetClip( root, &clip );
+                if (vis)
+                    IDCompositionVisual_SetClip( vis, &clip );
                 if (root && vis && vis != root && !h->impl->visual_attached)
                 {
                     HRESULT hr_add = IDCompositionVisual_AddVisual( root, vis, TRUE, NULL );
@@ -4083,9 +4086,9 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                         h->impl->visual_attached = TRUE;
                         xaml_dcomp_commit();
                     }
-                    ERR( "wv2_ctrl_handler_Invoke: AddVisual root=%p vis=%p hr=%#lx\n", root, vis, hr_add );
+                    ERR( "wv2_ctrl_handler_Invoke: AddVisual root=%p vis=%p scale=%.2f hr=%#lx\n", root, vis, scale, hr_add );
                 }
-                ERR( "wv2_ctrl_handler_Invoke: found CompositionController %p visual=%p root=%p\n", comp_ctrl, vis, root );
+                ERR( "wv2_ctrl_handler_Invoke: found CompositionController %p visual=%p root=%p scale=%.2f\n", comp_ctrl, vis, root, scale );
                 if (vis)
                 {
                     /* ICoreWebView2CompositionController: get_RootVisualTarget=3, put_RootVisualTarget=4 */
@@ -4216,7 +4219,11 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
                 h->impl->loader_core = core;
                 trigger_core_webview2_initialized( h->impl, &h->impl->IWebView2_iface );
             }
-            wv2_sync_child_hwnds( hw, 1024, 768 );
+            {
+                SIZE sz;
+                xaml_get_layout_metrics( hw, &sz, NULL );
+                wv2_sync_child_hwnds( hw, sz.cx, sz.cy );
+            }
             return hr2;
         }
     }

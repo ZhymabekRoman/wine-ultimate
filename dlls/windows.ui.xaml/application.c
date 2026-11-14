@@ -1720,8 +1720,10 @@ static HRESULT WINAPI xaml_window_get_Bounds( IInspectable *iface, void *a2, voi
     if (cw && value) return ICoreWindow_get_Bounds( cw, value );
     if (value)
     {
+        SIZE sz;
+        xaml_get_layout_metrics( impl->target_hwnd, &sz, NULL );
         value->X = 0; value->Y = 0;
-        value->Width = 1024; value->Height = 768;
+        value->Width = (float)sz.cx; value->Height = (float)sz.cy;
     }
     return S_OK;
 }
@@ -2260,9 +2262,9 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     }
     if (msg == WM_TIMER && wparam == 0x5756)
     {
-        RECT rc;
-        GetClientRect( hwnd, &rc );
-        xaml_wv2_on_window_ready( hwnd, rc.right > 0 ? rc.right : 1024, rc.bottom > 0 ? rc.bottom : 768 );
+        SIZE sz;
+        xaml_get_layout_metrics( hwnd, &sz, NULL );
+        xaml_wv2_on_window_ready( hwnd, sz.cx, sz.cy );
         return 0;
     }
     if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) && global_xaml_window.content)
@@ -2293,7 +2295,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
 {
     static BOOL in_present;
     HWND hwnd = NULL;
-    RECT rc;
+    SIZE sz;
+    float scale = 1.0f;
     UINT width, height;
     HRESULT hr;
 
@@ -2341,6 +2344,22 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
      * Invalidate + update right after ShowWindow: a window mapped before the swapchain
      * existed has a stale X11 backing store, and only a fresh paint cycle flushes the
      * first composited frame. */
+    if (!impl->target_hwnd)
+    {
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        RECT wrc;
+        SIZE target_sz, def_sz = XAML_DEFAULT_CLIENT_SIZE;
+
+        if (!top) top = hwnd;
+        if (GetWindowRect( top, &wrc ) &&
+            (wrc.right - wrc.left) == def_sz.cx &&
+            (wrc.bottom - wrc.top) == def_sz.cy)
+        {
+            xaml_get_layout_metrics( NULL, &target_sz, NULL );
+            SetWindowPos( top, 0, 0, 0, target_sz.cx, target_sz.cy,
+                          SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE );
+        }
+    }
     ShowWindow( hwnd, SW_SHOW );
     SetWindowPos( hwnd, 0, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE );
     /* The X11 window manager shows the root ancestor's title and icon; the
@@ -2376,9 +2395,9 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
 
     if (impl->core_window) xaml_window_subscribe_core_window( impl );
 
-    GetClientRect( hwnd, &rc );
-    width = rc.right > 0 ? rc.right : 1024;
-    height = rc.bottom > 0 ? rc.bottom : 768;
+    xaml_get_layout_metrics( hwnd, &sz, &scale );
+    width = (UINT)sz.cx;
+    height = (UINT)sz.cy;
 
     impl->target_hwnd = hwnd;
     impl->width = width;
@@ -2419,6 +2438,11 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
             return hr;
         }
         IDCompositionTarget_SetRoot( impl->dcomp_target, (IDCompositionVisual *)impl->dcomp_root_visual );
+    }
+    if (impl->dcomp_root_visual)
+    {
+        D2D_RECT_F clip = { 0.0f, 0.0f, (float)width, (float)height };
+        IDCompositionVisual_SetClip( (IDCompositionVisual *)impl->dcomp_root_visual, &clip );
     }
 
     /* 4. Connect Window.Current.Content visual to root visual */
@@ -2560,12 +2584,70 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         }
     }
 
-    TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u)\n", hwnd, width, height );
+    TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u scale %.2f)\n", hwnd, width, height, scale );
     ERR( "xaml_window_present done: hwnd %p (%ux%u)\n", hwnd, width, height );
     SetTimer( hwnd, 0x5756, 500, NULL );
     xaml_wv2_on_window_ready( hwnd, width, height );
     in_present = FALSE;
     return S_OK;
+}
+
+void xaml_get_layout_metrics( HWND hwnd, SIZE *client, float *scale )
+{
+    RECT rc;
+    UINT dpi = 0;
+
+    if (client)
+    {
+        if (hwnd && IsWindow( hwnd ) && GetClientRect( hwnd, &rc ) && rc.right > 0 && rc.bottom > 0)
+        {
+            client->cx = rc.right;
+            client->cy = rc.bottom;
+        }
+        else
+        {
+            HMONITOR mon = (hwnd && IsWindow( hwnd ))
+                ? MonitorFromWindow( hwnd, MONITOR_DEFAULTTOPRIMARY )
+                : MonitorFromPoint( (POINT){ 0, 0 }, MONITOR_DEFAULTTOPRIMARY );
+            MONITORINFO mi = { sizeof(mi) };
+            LONG w = 0, h = 0;
+
+            if (mon && GetMonitorInfoW( mon, &mi ))
+            {
+                w = mi.rcWork.right - mi.rcWork.left;
+                h = mi.rcWork.bottom - mi.rcWork.top;
+            }
+            if (w <= 0 || h <= 0)
+            {
+                w = GetSystemMetrics( SM_CXSCREEN );
+                h = GetSystemMetrics( SM_CYSCREEN );
+            }
+            if (w > 0 && h > 0)
+            {
+                LONG cw = (LONG)(w * 0.8f + 0.5f);
+                LONG ch = (LONG)(h * 0.8f + 0.5f);
+
+                if (cw < 800) cw = 800;
+                if (cw > 1920) cw = 1920;
+                if (ch < 600) ch = 600;
+                if (ch > 1920) ch = 1920;
+                client->cx = cw;
+                client->cy = ch;
+            }
+            else
+            {
+                *client = XAML_DEFAULT_CLIENT_SIZE;
+            }
+        }
+    }
+
+    if (scale)
+    {
+        HWND target = (hwnd && IsWindow( hwnd )) ? hwnd : xaml_get_window_hwnd();
+        if (target && IsWindow( target )) dpi = GetDpiForWindow( target );
+        if (!dpi) dpi = GetDpiForSystem();
+        *scale = dpi ? (float)dpi / 96.0f : 1.0f;
+    }
 }
 
 HWND xaml_get_window_hwnd( void )

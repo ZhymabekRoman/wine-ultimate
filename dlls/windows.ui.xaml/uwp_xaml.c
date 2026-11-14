@@ -6430,6 +6430,8 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
  * 7. Genuine Visual Tree Layout, Rendering & Input Dispatch
  * ============================================================================ */
 
+static float g_layout_scale = 1.0f;
+
 static void uwp_arrange_element( struct uwp_element *el, RECT rc )
 {
     int w, h;
@@ -6498,7 +6500,7 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
             if (r_type[i] == 0) /* Auto */
             {
                 r_type[i] = 1;
-                r_val[i] = has_vis ? 36.0 : 0.0;
+                r_val[i] = has_vis ? 36.0 * g_layout_scale : 0.0;
             }
             if (r_type[i] == 1) r_fixed += r_val[i];
             else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
@@ -6963,7 +6965,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 
         br = CreateSolidBrush( bg );
         pen = CreatePen( PS_SOLID, 1, RGB( 68, 68, 68 ) );
-        fh = max( 12, min( 24, (int)((brc.bottom - brc.top) * 2 / 5) ) );
+        fh = max( (int)(12 * g_layout_scale + 0.5f), min( (int)(24 * g_layout_scale + 0.5f), (int)((brc.bottom - brc.top) * 2 / 5) ) );
         font = CreateFontW( -fh, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
@@ -7032,8 +7034,8 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             BOOL is_result = (!wcscmp( el->name, L"NormalOutput" ) || !wcscmp( el->name, L"Results" ) ||
                               wcsstr( el->class_name, L"CalculationResult" ) != NULL);
             int fh = is_result
-                ? max( 20, min( 56, (int)((trc.bottom - trc.top) * 3 / 5) ) )
-                : max( 12, min( 22, (int)el->font_size ) );
+                ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
+                : max( (int)(12 * g_layout_scale + 0.5f), min( (int)(22 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
             HFONT font = CreateFontW( -fh, 0, 0, 0, is_result ? FW_SEMIBOLD : FW_NORMAL,
                                       FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
@@ -7072,6 +7074,7 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     struct uwp_element *root_el;
 
     if (width <= 0 || height <= 0 || !hdc) return;
+    xaml_get_layout_metrics( hwnd, NULL, &g_layout_scale );
     SetRect( &rc, 0, 0, width, height );
     bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
     FillRect( hdc, &rc, bg_brush );
