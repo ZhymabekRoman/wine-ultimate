@@ -2732,6 +2732,67 @@ static void test_NtFreeVirtualMemory(void)
     ok(status == STATUS_SUCCESS, "Unexpected status %08lx.\n", status);
 }
 
+static void test_decommit_recommit_zeroing(void)
+{
+    SIZE_T sz = 16 * 1024 * 1024;
+    char *base = (char *)VirtualAlloc(NULL, sz, MEM_RESERVE, PAGE_NOACCESS);
+    char *mid, *b_page, *reset_page;
+    SIZE_T mid_sz, decom_sz;
+    void *r;
+    int i, non_zero, b_nonzero;
+
+    ok(base != NULL, "VirtualAlloc 16MB reserve failed %lu\n", GetLastError());
+    if (!base) return;
+
+    /* 1. 16MB alloc, commit, touch, MEM_DECOMMIT middle, MEM_COMMIT again - verify zeroed */
+    mid = base + 1024 * 1024;
+    mid_sz = 1024 * 1024;
+    r = VirtualAlloc(mid, mid_sz, MEM_COMMIT, PAGE_READWRITE);
+    ok(r != NULL, "VirtualAlloc commit failed %lu\n", GetLastError());
+
+    memset(mid, 0x5a, mid_sz);
+    decom_sz = 512 * 1024;
+    ok(VirtualFree(mid, decom_sz, MEM_DECOMMIT), "VirtualFree decommit failed %lu\n", GetLastError());
+
+    r = VirtualAlloc(mid, decom_sz, MEM_COMMIT, PAGE_READWRITE);
+    ok(r != NULL, "VirtualAlloc recommit failed %lu\n", GetLastError());
+
+    non_zero = 0;
+    for (i = 0; i < decom_sz; i++)
+    {
+        if (mid[i] != 0) non_zero++;
+    }
+    ok(non_zero == 0, "Recommitted memory contains %d dirty bytes\n", non_zero);
+
+    /* 2. Boundary-straddling MEM_DECOMMIT at 64KB granularity edge */
+    b_page = base + 2 * 1024 * 1024;
+    r = VirtualAlloc(b_page, 128 * 1024, MEM_COMMIT, PAGE_READWRITE);
+    ok(r != NULL, "VirtualAlloc boundary page commit failed %lu\n", GetLastError());
+    memset(b_page, 0x77, 128 * 1024);
+
+    ok(VirtualFree(b_page + 60 * 1024, 8 * 1024, MEM_DECOMMIT), "Boundary-straddling decommit failed %lu\n", GetLastError());
+    r = VirtualAlloc(b_page + 60 * 1024, 8 * 1024, MEM_COMMIT, PAGE_READWRITE);
+    ok(r != NULL, "Boundary-straddling recommit failed %lu\n", GetLastError());
+
+    b_nonzero = 0;
+    for (i = 0; i < 8 * 1024; i++)
+    {
+        if ((b_page + 60 * 1024)[i] != 0) b_nonzero++;
+    }
+    ok(b_nonzero == 0, "Boundary-straddling recommit has %d dirty bytes\n", b_nonzero);
+
+    /* 3. MEM_RESET content retention */
+    reset_page = base + 3 * 1024 * 1024;
+    r = VirtualAlloc(reset_page, 64 * 1024, MEM_COMMIT, PAGE_READWRITE);
+    ok(r != NULL, "VirtualAlloc reset_page commit failed %lu\n", GetLastError());
+    memset(reset_page, 0x33, 64 * 1024);
+    r = VirtualAlloc(reset_page, 64 * 1024, MEM_RESET, PAGE_READWRITE);
+    ok(r != NULL, "VirtualAlloc MEM_RESET failed %lu\n", GetLastError());
+    ok(reset_page[0] == 0x33, "MEM_RESET content was not retained, got 0x%02x\n", (unsigned char)reset_page[0]);
+
+    VirtualFree(base, 0, MEM_RELEASE);
+}
+
 static void test_NtProtectVirtualMemory(void)
 {
     void *addr, *addr2;
@@ -3798,6 +3859,7 @@ START_TEST(virtual)
     test_NtAllocateVirtualMemoryEx();
     test_NtAllocateVirtualMemoryEx_address_requirements();
     test_NtFreeVirtualMemory();
+    test_decommit_recommit_zeroing();
     test_NtProtectVirtualMemory();
     test_NtProtectVirtualMemory_compound();
     test_RtlCreateUserStack();

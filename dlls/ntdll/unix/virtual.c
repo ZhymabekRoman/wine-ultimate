@@ -2568,14 +2568,22 @@ static SIZE_T get_committed_size( struct file_view *view, void *base, size_t max
  */
 static NTSTATUS decommit_pages( struct file_view *view, char *base, size_t size )
 {
-    char *host_end, *host_start = (char *)ROUND_SIZE( 0, base, host_page_mask );
+    char *host_start, *host_end;
 
     if (!size)
     {
+        base = view->base;
         size = view->size;
-        host_end = host_start + view->size;
+        host_start = view->base;
+        host_end = (char *)view->base + view->size;
     }
-    else host_end = ROUND_ADDR( base + size, host_page_mask );
+    else
+    {
+        host_start = ROUND_ADDR( base, host_page_mask );
+        host_end = (char *)ROUND_ADDR( (char *)base + size + host_page_mask, host_page_mask );
+        if (host_start < (char *)view->base) host_start = view->base;
+        if (host_end > (char *)view->base + view->size) host_end = (char *)view->base + view->size;
+    }
 
     if (host_start < host_end) anon_mmap_fixed( host_start, host_end - host_start, PROT_NONE, 0 );
     set_page_vprot_bits( base, size, 0, VPROT_COMMITTED );
@@ -5326,7 +5334,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
 
     /* Compute the alloc type flags */
 
-    if (!(type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET))
+    if (!(type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET | MEM_RESET_UNDO))
         || (type & MEM_REPLACE_PLACEHOLDER && !(type & (MEM_RESERVE | MEM_COMMIT))))
     {
         WARN("called with wrong alloc type flags (%08x) !\n", type);
@@ -5364,10 +5372,14 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
             }
         }
     }
-    else if (type & MEM_RESET)
+    else if (type & (MEM_RESET | MEM_RESET_UNDO))
     {
         if (!(view = find_view( base, size ))) status = STATUS_NOT_MAPPED_VIEW;
-        else madvise( base, size, MADV_DONTNEED );
+#ifdef MADV_FREE
+        else if (type & MEM_RESET) madvise( base, size, MADV_FREE );
+#elif defined(MADV_DONTNEED)
+        else if (type & MEM_RESET) madvise( base, size, MADV_DONTNEED );
+#endif
     }
     else  /* commit the pages */
     {
@@ -5416,7 +5428,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
 NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR zero_bits,
                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
-    static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_RESET;
+    static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_RESET | MEM_RESET_UNDO;
     NTSTATUS status;
     ULONG_PTR limit;
 
@@ -5584,7 +5596,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemoryEx( HANDLE process, PVOID *ret, SIZE_T *s
                                            ULONG count )
 {
     static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH
-                                   | MEM_RESET | MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER;
+                                   | MEM_RESET | MEM_RESET_UNDO | MEM_RESERVE_PLACEHOLDER | MEM_REPLACE_PLACEHOLDER;
     ULONG_PTR limit_low = 0;
     ULONG_PTR limit_high = 0;
     ULONG_PTR align = 0;
