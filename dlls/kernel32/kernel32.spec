@@ -1119,6 +1119,7 @@
 @ stdcall -import MapUserPhysicalPages(ptr long ptr)
 # @ stub MapUserPhysicalPagesScatter
 @ stdcall -import MapViewOfFile(long long long long long)
+@ stdcall -import MapViewOfFile3(long long ptr int64 long long long ptr long)
 @ stdcall -import MapViewOfFileEx(long long long long long ptr)
 @ stdcall -import MapViewOfFileExNuma(long long long long long ptr long)
 @ stdcall MapViewOfFileFromApp(long long int64 long) kernelbase.MapViewOfFileFromApp
@@ -1592,6 +1593,7 @@
 @ stdcall -import UnlockFile(long long long long long)
 @ stdcall -import UnlockFileEx(long long long long ptr)
 @ stdcall -import UnmapViewOfFile(ptr)
+@ stdcall -import UnmapViewOfFile2(long ptr long)
 @ stdcall -import UnmapViewOfFileEx(ptr long)
 # @ stub UnregisterApplicationRecoveryCallback
 @ stdcall UnregisterApplicationRestart()
@@ -1614,8 +1616,11 @@
 @ stdcall VerifyVersionInfoA(ptr long int64)
 @ stdcall VerifyVersionInfoW(ptr long int64)
 @ stdcall -import VirtualAlloc(ptr long long long)
+@ stdcall -import VirtualAlloc2(long ptr long long long ptr long)
+@ stdcall -import VirtualAlloc2FromApp(long ptr long long long ptr long)
 @ stdcall -import VirtualAllocEx(long ptr long long long)
 @ stdcall -import VirtualAllocExNuma(long ptr long long long long)
+@ stdcall -import VirtualAllocFromApp(ptr long long long)
 @ stub VirtualBufferExceptionHandler
 @ stdcall -import VirtualFree(ptr long long)
 @ stdcall -import VirtualFreeEx(long ptr long long)

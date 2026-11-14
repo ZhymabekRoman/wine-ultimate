@@ -2365,7 +2365,7 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
     {
         if (is_beyond_limit( base, size, address_space_limit )) return STATUS_WORKING_SET_LIMIT_RANGE;
         if (limit_low && base < (void *)limit_low) return STATUS_CONFLICTING_ADDRESSES;
-        if (limit_high && is_beyond_limit( base, size, (void *)limit_high )) return STATUS_CONFLICTING_ADDRESSES;
+        if (limit_high && is_beyond_limit( base, size, (char *)limit_high + 1 )) return STATUS_CONFLICTING_ADDRESSES;
         if (is_beyond_limit( base, size, host_addr_space_limit )) return STATUS_CONFLICTING_ADDRESSES;
         if ((status = map_fixed_area( base, size, unix_prot ))) return status;
         if (is_beyond_limit( base, size, working_set_limit )) working_set_limit = address_space_limit;
@@ -5327,7 +5327,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
     /* Compute the alloc type flags */
 
     if (!(type & (MEM_COMMIT | MEM_RESERVE | MEM_RESET))
-        || (type & MEM_REPLACE_PLACEHOLDER && !(type & MEM_RESERVE)))
+        || (type & MEM_REPLACE_PLACEHOLDER && !(type & (MEM_RESERVE | MEM_COMMIT))))
     {
         WARN("called with wrong alloc type flags (%08x) !\n", type);
         return STATUS_INVALID_PARAMETER;
@@ -5343,7 +5343,7 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
 
-    if ((type & MEM_RESERVE) || !base)
+    if ((type & (MEM_RESERVE | MEM_REPLACE_PLACEHOLDER)) || !base)
     {
         if (!(status = get_vprot_flags( protect, &vprot, FALSE )))
         {
@@ -5522,7 +5522,7 @@ static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, U
 
             if (r->Alignment)
             {
-                if ((r->Alignment & (r->Alignment - 1)) || r->Alignment - 1 < granularity_mask)
+                if ((r->Alignment & (r->Alignment - 1)) || r->Alignment - 1 < page_mask)
                 {
                     WARN( "Invalid alignment %lu.\n", r->Alignment );
                     return STATUS_INVALID_PARAMETER;
@@ -5541,13 +5541,13 @@ static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, U
             if (r->HighestEndingAddress)
             {
                 *limit_high = (ULONG_PTR)r->HighestEndingAddress;
-                if (*limit_high > limit ||
-                    *limit_high <= *limit_low ||
-                    ((*limit_high + 1) & (page_mask - 1)))
+                if (*limit_high <= *limit_low ||
+                    ((*limit_high + 1) & page_mask))
                 {
                     WARN( "Invalid limit %p.\n", r->HighestEndingAddress );
                     return STATUS_INVALID_PARAMETER;
                 }
+                if (*limit_high > limit) *limit_high = limit;
             }
             break;
         }
