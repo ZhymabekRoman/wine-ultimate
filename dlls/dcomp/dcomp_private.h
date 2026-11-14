@@ -36,6 +36,7 @@ struct composition_device
     HANDLE thread;
     LONG exit_thread;
     LONG thread_exited;
+    BOOL self_release;
     int version;
     LONG ref;
     IUnknown *rendering_device;
@@ -50,10 +51,12 @@ enum dcomp_object_kind
     TRANSFORM_ROTATE,
     TRANSFORM_SKEW,
     TRANSFORM_MATRIX,
+    TRANSFORM_GROUP,
     TRANSFORM_TRANSLATE_3D,
     TRANSFORM_SCALE_3D,
     TRANSFORM_ROTATE_3D,
     TRANSFORM_MATRIX_3D,
+    TRANSFORM_3D_GROUP,
     OBJECT_EFFECT_GROUP,
     OBJECT_RECTANGLE_CLIP,
 };
@@ -74,6 +77,7 @@ struct dcomp_transform
     struct IDCompositionEffectGroup IDCompositionEffectGroup_iface;
     struct IDCompositionRectangleClip IDCompositionRectangleClip_iface;
     LONG ref;
+    LONG version;
     struct composition_device *device;
     enum dcomp_object_kind kind;
     FLOAT offset_x, offset_y, offset_z;
@@ -90,10 +94,21 @@ struct dcomp_transform
     FLOAT clip_bl_radius_x, clip_bl_radius_y;
     FLOAT clip_br_radius_x, clip_br_radius_y;
     IDCompositionTransform3D *transform3d;
+    IUnknown **group_items;
+    UINT group_count;
 };
 
 struct dcomp_transform *dcomp_transform_create( struct composition_device *device,
         enum dcomp_object_kind kind );
+struct dcomp_transform *dcomp_transform_group_create( struct composition_device *device,
+        enum dcomp_object_kind kind, IUnknown *const *items, UINT count );
+struct dcomp_transform *unsafe_impl_from_dcomp_transform( IUnknown *iface );
+void dcomp_matrix_identity( D3DMATRIX *m );
+void dcomp_matrix_multiply( D3DMATRIX *out, const D3DMATRIX *a, const D3DMATRIX *b );
+void dcomp_matrix_from_2d( D3DMATRIX *out, const D2D_MATRIX_3X2_F *m2d );
+BOOL dcomp_matrix_is_identity( const D3DMATRIX *m );
+void dcomp_transform_get_matrix_3d( const struct dcomp_transform *impl, D3DMATRIX *out );
+unsigned int dcomp_transform_get_version( const struct dcomp_transform *impl );
 
 struct composition_surface_factory
 {
@@ -161,6 +176,9 @@ struct composition_visual
     float offset_y;
     SIZE size;
     IDCompositionTransform *transform;
+    D2D_MATRIX_3X2_F transform_matrix;
+    BOOL has_transform_matrix;
+    IDCompositionEffect *effect;
     IDCompositionClip *clip;        /* geometry clip set via SetClipObject; stored, not composited (conformance: accept + refcount) */
     D2D_RECT_F rect_clip;           /* rectangle clip set via SetClip */
     BOOL has_rect_clip;             /* TRUE when rect_clip is set (SetClip with non-NULL rect) */
@@ -176,6 +194,7 @@ struct composition_visual
     int version;
     unsigned int content_version;   /* bumped whenever the visual content is (re)set: change counter */
     unsigned int composited_version;/* content_version as of the last blit to the window */
+    unsigned int composited_transform_version; /* transform/effect version as of last blit */
     HWND composited_hwnd;           /* window last composited into */
     LONG ref;
 };
@@ -248,6 +267,10 @@ HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXG
 void ensure_composite_thread(struct composition_device *device);
 BOOL dcomp_has_active_composite_thread(void);
 void visual_tree_mark_dirty(struct composition_visual *visual);
+void visual_get_local_transform_3d(const struct composition_visual *visual, D3DMATRIX *out);
+void visual_get_transform_3d(const struct composition_visual *visual, UINT width, UINT height,
+        const D3DMATRIX *world_transform, float vp_x, float vp_y, float vp_w, float vp_h, D3DMATRIX *out);
+unsigned int visual_get_transform_version(const struct composition_visual *visual);
 struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain);
 extern struct list dcomp_devices;
 

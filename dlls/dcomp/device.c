@@ -17,10 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
  */
 #include <assert.h>
+#include <math.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <string.h>
-#include <assert.h>
 
 #include "ntstatus.h"
 #define WIN32_NO_STATUS
@@ -281,6 +281,11 @@ static ULONG STDMETHODCALLTYPE device_Release(IDCompositionDevice *iface)
         if (device->thread)
         {
             InterlockedExchange(&device->exit_thread, TRUE);
+            if (GetThreadId(device->thread) == GetCurrentThreadId())
+            {
+                device->self_release = TRUE;
+                return 0;
+            }
             WaitForSingleObject(device->thread, INFINITE);
             CloseHandle(device->thread);
             device->thread = NULL;
@@ -339,6 +344,11 @@ static HWND find_root_top_level_window(void)
     return hwnd;
 }
 
+struct composite_vs_data
+{
+    D3DMATRIX transform;
+};
+
 /*
  * Constant buffer for the composite blit pixel shader: premultiplied-alpha
  * opacity applied to the sampled pixel, and the visual's rectangle clip in
@@ -352,12 +362,20 @@ struct composite_blit_data
 };
 
 static const char composite_vs_code[] =
+    "cbuffer vs_data : register(b0)\n"
+    "{\n"
+    "    float4 m0;\n"
+    "    float4 m1;\n"
+    "    float4 m2;\n"
+    "    float4 m3;\n"
+    "};\n"
     "void main(in float4 in_position : POSITION,\n"
     "          in float2 in_texcoord : TEXCOORD,\n"
     "          out float4 position : SV_Position,\n"
     "          out float2 texcoord : TEXCOORD)\n"
     "{\n"
-    "     position = in_position;\n"
+    "     float4 p = float4(in_position.xy, 0.0, 1.0);\n"
+    "     position = p.x * m0 + p.y * m1 + p.z * m2 + p.w * m3;\n"
     "     texcoord = in_texcoord;\n"
     "}";
 
@@ -453,7 +471,8 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
  */
 static HRESULT composite_surface_to_backbuffer(struct composition_target *target,
         ID3D11Device1 *d3d11_device, ID3D11DeviceContext *d3d11_device_context,
-        ID3D11Texture2D *src_texture, UINT width, UINT height,
+        ID3D11Texture2D *src_texture, UINT src_width, UINT src_height,
+        UINT dst_width, UINT dst_height, const D3DMATRIX *proj_matrix,
         float opacity, const D2D_RECT_F *clip_rect)
 {
     static ID3D10Blob *vs_blob = NULL, *ps_blob = NULL;
@@ -474,10 +493,14 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
+    static const float clear_color[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    struct composite_vs_data vs_data;
     struct composite_blit_data blit_data;
     D3D11_SUBRESOURCE_DATA resource_data;
     ID3D11ShaderResourceView *srv = NULL;
     D3D11_BUFFER_DESC buffer_desc;
+    D3D11_RASTERIZER_DESC rs_desc;
+    ID3D11RasterizerState *rs = NULL;
     ID3D11InputLayout *input_layout = NULL;
     ID3D11DeviceContext1 *context1 = NULL;
     ID3D11RenderTargetView *rtv = NULL;
@@ -485,7 +508,7 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
     ID3D11PixelShader *ps = NULL;
     ID3D11SamplerState *sampler = NULL;
     D3D11_SAMPLER_DESC sampler_desc;
-    ID3D11Buffer *cb = NULL, *vb = NULL;
+    ID3D11Buffer *cb = NULL, *vs_cb = NULL, *vb = NULL;
     ID3D11Texture2D *backbuffer = NULL;
     D3D11_VIEWPORT viewport;
     unsigned int stride, offset;
@@ -553,21 +576,28 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         if (FAILED(hr))
             goto done;
 
-        buffer_desc.ByteWidth = sizeof(blit_data);
+        buffer_desc.ByteWidth = sizeof(vs_data);
         buffer_desc.Usage = D3D11_USAGE_DEFAULT;
         buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
         buffer_desc.CPUAccessFlags = 0;
         buffer_desc.MiscFlags = 0;
         buffer_desc.StructureByteStride = 0;
+        vs_data.transform = *proj_matrix;
+        resource_data.pSysMem = &vs_data;
+        resource_data.SysMemPitch = 0;
+        resource_data.SysMemSlicePitch = 0;
+        hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &vs_cb);
+        if (FAILED(hr))
+            goto done;
+
+        buffer_desc.ByteWidth = sizeof(blit_data);
         blit_data.opacity = opacity;
         blit_data.pad[0] = blit_data.pad[1] = blit_data.pad[2] = 0;
         blit_data.clip_rect[0] = clip_rect ? clip_rect->left : 0.0f;
         blit_data.clip_rect[1] = clip_rect ? clip_rect->top : 0.0f;
-        blit_data.clip_rect[2] = clip_rect ? clip_rect->right : (FLOAT)width;
-        blit_data.clip_rect[3] = clip_rect ? clip_rect->bottom : (FLOAT)height;
+        blit_data.clip_rect[2] = clip_rect ? clip_rect->right : (FLOAT)dst_width;
+        blit_data.clip_rect[3] = clip_rect ? clip_rect->bottom : (FLOAT)dst_height;
         resource_data.pSysMem = &blit_data;
-        resource_data.SysMemPitch = 0;
-        resource_data.SysMemSlicePitch = 0;
         hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &cb);
         if (FAILED(hr))
             goto done;
@@ -576,6 +606,14 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
         resource_data.pSysMem = quad;
         hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &vb);
+        if (FAILED(hr))
+            goto done;
+
+        memset(&rs_desc, 0, sizeof(rs_desc));
+        rs_desc.FillMode = D3D11_FILL_SOLID;
+        rs_desc.CullMode = D3D11_CULL_NONE;
+        rs_desc.DepthClipEnable = TRUE;
+        hr = ID3D11Device1_CreateRasterizerState(d3d11_device, &rs_desc, &rs);
         if (FAILED(hr))
             goto done;
 
@@ -592,8 +630,11 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
             goto done;
 
         ID3D11DeviceContext_OMSetRenderTargets(d3d11_device_context, 1, &rtv, NULL);
+        ID3D11DeviceContext_ClearRenderTargetView(d3d11_device_context, rtv, clear_color);
+        ID3D11DeviceContext_RSSetState(d3d11_device_context, rs);
         ID3D11DeviceContext_PSSetShaderResources(d3d11_device_context, 0, 1, &srv);
         ID3D11DeviceContext_PSSetSamplers(d3d11_device_context, 0, 1, &sampler);
+        ID3D11DeviceContext_VSSetConstantBuffers(d3d11_device_context, 0, 1, &vs_cb);
         ID3D11DeviceContext_PSSetConstantBuffers(d3d11_device_context, 0, 1, &cb);
         ID3D11DeviceContext_IASetInputLayout(d3d11_device_context, input_layout);
         ID3D11DeviceContext_IASetPrimitiveTopology(d3d11_device_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
@@ -604,8 +645,8 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         ID3D11DeviceContext_PSSetShader(d3d11_device_context, ps, NULL, 0);
         viewport.TopLeftX = 0;
         viewport.TopLeftY = 0;
-        viewport.Width = width;
-        viewport.Height = height;
+        viewport.Width = dst_width;
+        viewport.Height = dst_height;
         viewport.MinDepth = 0;
         viewport.MaxDepth = 1;
         ID3D11DeviceContext_RSSetViewports(d3d11_device_context, 1, &viewport);
@@ -613,22 +654,29 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         goto done;
     }
 
-    /* Source not sampleable: one GPU copy, opacity not applied. */
+    /* Source not sampleable: one GPU copy, opacity/transform not applied. */
     hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&backbuffer);
     if (FAILED(hr))
     {
         ERR("Failed to get composite back buffer, hr %#lx.\n", hr);
         goto done;
     }
-    ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context, (ID3D11Resource *)backbuffer,
-            0, 0, 0, 0, (ID3D11Resource *)src_texture, 0, NULL);
+    {
+        D3D11_BOX box = {0, 0, 0, min(src_width, dst_width), min(src_height, dst_height), 1};
+        ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context, (ID3D11Resource *)backbuffer,
+                0, 0, 0, 0, (ID3D11Resource *)src_texture, 0, &box);
+    }
     hr = S_OK;
 
 done:
     if (context1)
         ID3D11DeviceContext1_Release(context1);
+    if (rs)
+        ID3D11RasterizerState_Release(rs);
     if (input_layout)
         ID3D11InputLayout_Release(input_layout);
+    if (vs_cb)
+        ID3D11Buffer_Release(vs_cb);
     if (cb)
         ID3D11Buffer_Release(cb);
     if (vb)
@@ -655,9 +703,11 @@ done:
  * instead of clobbering the whole drawable.
  */
 static void do_composite_dxgi_surface(struct composition_target *target,
+                                      const struct composition_visual *visual,
                                       HWND target_hwnd, POINT pt,
                                       IDXGISurface *dxgi_surface,
-                                      float opacity, const D2D_RECT_F *clip_rect)
+                                      float opacity, const D2D_RECT_F *clip_rect,
+                                      BOOL has_transform, const D3DMATRIX *world_transform)
 {
     ID3DDeviceContextState *state = NULL, *old_state = NULL;
     ID3D11DeviceContext1 *d3d11_device_context1 = NULL;
@@ -669,6 +719,12 @@ static void do_composite_dxgi_surface(struct composition_target *target,
     ID3D11Device1 *d3d11_device = NULL;
     ID3D11Texture2D *texture = NULL;
     HWND root_hwnd = NULL;
+    POINT win_off = {0, 0};
+    LONG dst_x, dst_y;
+    UINT dst_w, dst_h;
+    D3DMATRIX proj_matrix;
+    D2D_RECT_F adjusted_clip;
+    const D2D_RECT_F *effective_clip = clip_rect;
     HRESULT hr;
 
     static const D3D_FEATURE_LEVEL feature_levels[] =
@@ -746,7 +802,7 @@ static void do_composite_dxgi_surface(struct composition_target *target,
                 root_hwnd = target_hwnd;
 
             if (root_hwnd != target_hwnd)
-                MapWindowPoints(target_hwnd, root_hwnd, &pt, 1);
+                MapWindowPoints(target_hwnd, root_hwnd, &win_off, 1);
         }
     }
 
@@ -766,15 +822,107 @@ static void do_composite_dxgi_surface(struct composition_target *target,
         goto done;
     }
 
+    if (has_transform && world_transform)
+    {
+        D3DMATRIX win_shift, root_m;
+        float corners_x[4] = {0.0f, (float)surface_desc.Width, 0.0f, (float)surface_desc.Width};
+        float corners_y[4] = {0.0f, 0.0f, (float)surface_desc.Height, (float)surface_desc.Height};
+        float min_x = 0.0f, min_y = 0.0f, max_x = 0.0f, max_y = 0.0f;
+        BOOL valid_bounds = TRUE;
+        RECT client_rect;
+        int i;
+
+        dcomp_matrix_identity(&win_shift);
+        win_shift.m[3][0] = (float)win_off.x;
+        win_shift.m[3][1] = (float)win_off.y;
+        dcomp_matrix_multiply(&root_m, world_transform, &win_shift);
+
+        for (i = 0; i < 4; i++)
+        {
+            float cx = corners_x[i];
+            float cy = corners_y[i];
+            float x = cx * root_m.m[0][0] + cy * root_m.m[1][0] + root_m.m[3][0];
+            float y = cx * root_m.m[0][1] + cy * root_m.m[1][1] + root_m.m[3][1];
+            float w = cx * root_m.m[0][3] + cy * root_m.m[1][3] + root_m.m[3][3];
+            if (w <= 1e-4f)
+            {
+                valid_bounds = FALSE;
+                break;
+            }
+            x /= w;
+            y /= w;
+            if (i == 0 || x < min_x) min_x = x;
+            if (i == 0 || y < min_y) min_y = y;
+            if (i == 0 || x > max_x) max_x = x;
+            if (i == 0 || y > max_y) max_y = y;
+        }
+
+        if (valid_bounds)
+        {
+            LONG left = (LONG)floorf(min_x);
+            LONG top = (LONG)floorf(min_y);
+            LONG right = (LONG)ceilf(max_x);
+            LONG bottom = (LONG)ceilf(max_y);
+
+            if (GetClientRect(root_hwnd, &client_rect) && client_rect.right > 0 && client_rect.bottom > 0)
+            {
+                if (left < 0) left = 0;
+                if (top < 0) top = 0;
+                if (right > client_rect.right) right = client_rect.right;
+                if (bottom > client_rect.bottom) bottom = client_rect.bottom;
+            }
+            if (right <= left || bottom <= top)
+                goto done;
+
+            dst_x = left;
+            dst_y = top;
+            dst_w = (UINT)(right - left);
+            dst_h = (UINT)(bottom - top);
+            if (dst_w > 4096) dst_w = 4096;
+            if (dst_h > 4096) dst_h = 4096;
+        }
+        else
+        {
+            dst_x = pt.x + win_off.x;
+            dst_y = pt.y + win_off.y;
+            dst_w = surface_desc.Width;
+            dst_h = surface_desc.Height;
+        }
+
+        if (clip_rect)
+        {
+            float shift_x = (float)(pt.x + win_off.x - dst_x);
+            float shift_y = (float)(pt.y + win_off.y - dst_y);
+            adjusted_clip.left = clip_rect->left + shift_x;
+            adjusted_clip.top = clip_rect->top + shift_y;
+            adjusted_clip.right = clip_rect->right + shift_x;
+            adjusted_clip.bottom = clip_rect->bottom + shift_y;
+            effective_clip = &adjusted_clip;
+        }
+
+        visual_get_transform_3d(visual, surface_desc.Width, surface_desc.Height, &root_m,
+                (float)dst_x, (float)dst_y, (float)dst_w, (float)dst_h, &proj_matrix);
+    }
+    else
+    {
+        dst_x = pt.x + win_off.x;
+        dst_y = pt.y + win_off.y;
+        dst_w = surface_desc.Width;
+        dst_h = surface_desc.Height;
+        visual_get_transform_3d(visual, surface_desc.Width, surface_desc.Height, NULL,
+                0.0f, 0.0f, (float)dst_w, (float)dst_h, &proj_matrix);
+    }
+
     if (FAILED(hr = ensure_composite_swapchain(target, (ID3D11Device *)d3d11_device,
-            surface_desc.Width, surface_desc.Height)))
+            dst_w, dst_h)))
     {
         ERR("Failed to ensure composite swapchain, hr %#lx.\n", hr);
         goto done;
     }
 
     if (FAILED(hr = composite_surface_to_backbuffer(target, d3d11_device, d3d11_device_context,
-            texture, surface_desc.Width, surface_desc.Height, opacity, clip_rect)))
+            texture, surface_desc.Width, surface_desc.Height, dst_w, dst_h, &proj_matrix,
+            opacity, effective_clip)))
     {
         ERR("Failed to blit surface to back buffer, hr %#lx.\n", hr);
         goto done;
@@ -789,10 +937,10 @@ static void do_composite_dxgi_surface(struct composition_target *target,
     {
         RECT dst_rect;
 
-        SetRect(&dst_rect, pt.x, pt.y, pt.x + (LONG)surface_desc.Width, pt.y + (LONG)surface_desc.Height);
+        SetRect(&dst_rect, dst_x, dst_y, dst_x + (LONG)dst_w, dst_y + (LONG)dst_h);
         wined3d_swapchain_present(wined3d_swapchain, NULL, &dst_rect, root_hwnd, 0, 0);
-        TRACE("DCOMP: presented frame %ux%u to root_hwnd %p (target hwnd %p at %ld,%ld)\n",
-                surface_desc.Width, surface_desc.Height, root_hwnd, target_hwnd, pt.x, pt.y);
+        TRACE("DCOMP: presented frame %ux%u (src %ux%u) to root_hwnd %p (target hwnd %p at %ld,%ld)\n",
+                dst_w, dst_h, surface_desc.Width, surface_desc.Height, root_hwnd, target_hwnd, dst_x, dst_y);
     }
     else
     {
@@ -1211,8 +1359,11 @@ struct composite_frame
     ID2D1DeviceContext *frame_context;
     ID2D1GdiInteropRenderTarget *frame_interop;
     unsigned int version;                     /* content_version this frame renders */
+    unsigned int transform_version;           /* accumulated transform/effect version */
     HWND target_hwnd;
     POINT pt;                                 /* accumulated visual offset chain */
+    D3DMATRIX world_transform;                /* accumulated 3D transform to target space */
+    BOOL has_transform;
     BOOL is_fallback;
     BOOL rendered;
     struct list entry;
@@ -1249,21 +1400,29 @@ static void composite_frame_init(struct composite_frame *frame, struct compositi
     frame->device_context = NULL;
     frame->interop = NULL;
     frame->version = 0;
+    frame->transform_version = 0;
     frame->frame_content = NULL;
     frame->frame_context = NULL;
     frame->frame_interop = NULL;
     frame->target_hwnd = target_hwnd;
     frame->pt = pt;
+    dcomp_matrix_identity(&frame->world_transform);
+    frame->has_transform = FALSE;
     frame->is_fallback = FALSE;
     frame->rendered = FALSE;
     list_init(&frame->entry);
 }
 
 static void collect_visual_frames(struct composition_target *target, struct composition_visual *visual,
-        HWND target_hwnd, POINT pt, unsigned int depth, struct list *frames, unsigned int *queued)
+        HWND target_hwnd, POINT pt, const D3DMATRIX *parent_transform, BOOL parent_has_transform,
+        unsigned int parent_xform_ver, unsigned int depth, struct list *frames, unsigned int *queued)
 {
     struct composition_visual *child, *child_root;
     struct composite_frame *frame;
+    D3DMATRIX local_m, world_m, offset_m, parent_world;
+    BOOL local_has, has_transform;
+    unsigned int xform_ver;
+    POINT parent_pt = pt;
 
     if (!visual || depth > 256)
         return;
@@ -1274,11 +1433,40 @@ static void collect_visual_frames(struct composition_target *target, struct comp
     pt.x += (LONG)visual->offset_x;
     pt.y += (LONG)visual->offset_y;
 
+    visual_get_local_transform_3d(visual, &local_m);
+    local_has = !dcomp_matrix_is_identity(&local_m);
+    xform_ver = parent_xform_ver + visual_get_transform_version(visual);
+    has_transform = parent_has_transform || local_has;
+
+    if (has_transform)
+    {
+        dcomp_matrix_identity(&offset_m);
+        offset_m.m[3][0] = visual->offset_x;
+        offset_m.m[3][1] = visual->offset_y;
+        if (parent_has_transform && parent_transform)
+            parent_world = *parent_transform;
+        else
+        {
+            dcomp_matrix_identity(&parent_world);
+            parent_world.m[3][0] = (float)parent_pt.x;
+            parent_world.m[3][1] = (float)parent_pt.y;
+        }
+        dcomp_matrix_multiply(&world_m, &local_m, &offset_m);
+        dcomp_matrix_multiply(&world_m, &world_m, &parent_world);
+    }
+    else
+    {
+        dcomp_matrix_identity(&world_m);
+        world_m.m[3][0] = (float)pt.x;
+        world_m.m[3][1] = (float)pt.y;
+    }
+
     if (visual->shared_visual_handle)
     {
         child_root = resolve_shared_visual_root(visual->shared_visual_handle);
         if (child_root && child_root != visual)
-            collect_visual_frames(target, child_root, target_hwnd, pt, depth + 1, frames, queued);
+            collect_visual_frames(target, child_root, target_hwnd, pt, &world_m, has_transform,
+                    xform_ver, depth + 1, frames, queued);
 
         if (!*queued && !visual_tree_has_content(child_root) && g_last_rendered_surface
                 && g_last_rendered_surface->physical_surface
@@ -1288,6 +1476,9 @@ static void collect_visual_frames(struct composition_target *target, struct comp
             {
                 composite_frame_init(frame, target, visual, target_hwnd, pt);
                 frame->surface = g_last_rendered_surface;
+                frame->world_transform = world_m;
+                frame->has_transform = has_transform;
+                frame->transform_version = xform_ver;
                 IDCompositionSurfaceUnknown_AddRef(&frame->surface->IDCompositionSurfaceUnknown_iface);
                 IDCompositionVisual_AddRef((IDCompositionVisual *)&visual->IDCompositionVisualUnknown_iface);
                 frame->is_fallback = TRUE;
@@ -1301,6 +1492,7 @@ static void collect_visual_frames(struct composition_target *target, struct comp
      * surface, which changes on every publisher frame, so queue it every tick. */
     if (visual->is_shared_proxy
             || (visual->content && (visual->content_version != visual->composited_version
+                || xform_ver != visual->composited_transform_version
                 || visual->composited_hwnd != target_hwnd)))
     {
         if ((frame = malloc(sizeof(*frame))))
@@ -1310,6 +1502,9 @@ static void collect_visual_frames(struct composition_target *target, struct comp
             frame->device_context = visual->device_context;
             frame->interop = visual->interop;
             frame->version = visual->content_version;
+            frame->transform_version = xform_ver;
+            frame->world_transform = world_m;
+            frame->has_transform = has_transform;
             IDCompositionVisual_AddRef((IDCompositionVisual *)&visual->IDCompositionVisualUnknown_iface);
             list_add_tail(frames, &frame->entry);
             (*queued)++;
@@ -1317,7 +1512,8 @@ static void collect_visual_frames(struct composition_target *target, struct comp
     }
 
     LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, struct composition_visual, entry)
-        collect_visual_frames(target, child, target_hwnd, pt, depth + 1, frames, queued);
+        collect_visual_frames(target, child, target_hwnd, pt, &world_m, has_transform,
+                xform_ver, depth + 1, frames, queued);
 }
 
 /* Pure memory: gather the shared visual handles in use, so that the window
@@ -1470,8 +1666,10 @@ static void collect_device_frames(struct composition_device *device, struct list
     struct composition_visual *root;
     struct target_snapshot *snap;
     POINT pt = {0, 0};
+    D3DMATRIX identity;
     unsigned int queued = 0;
 
+    dcomp_matrix_identity(&identity);
     dcomp_lock();
     LIST_FOR_EACH_ENTRY(snap, snapshots, struct target_snapshot, entry)
     {
@@ -1482,7 +1680,7 @@ static void collect_device_frames(struct composition_device *device, struct list
 
         if (!snap->needs_hwnd)
         {
-            collect_visual_frames(target, root, target->hwnd, pt, 0, frames, &queued);
+            collect_visual_frames(target, root, target->hwnd, pt, &identity, FALSE, 0, 0, frames, &queued);
             continue;
         }
 
@@ -1496,7 +1694,7 @@ static void collect_device_frames(struct composition_device *device, struct list
             target->hwnd = snap->resolved_hwnd;
         }
 
-        collect_visual_frames(target, root, target->hwnd, pt, 0, frames, &queued);
+        collect_visual_frames(target, root, target->hwnd, pt, &identity, FALSE, 0, 0, frames, &queued);
     }
     dcomp_unlock();
 }
@@ -1516,20 +1714,20 @@ static inline struct dcomp_transform *impl_from_rectangle_clip(IDCompositionRect
 
 static float visual_get_opacity(const struct composition_visual *visual)
 {
-    IDCompositionEffectGroup *effect_group;
     struct dcomp_transform *transform;
-    float opacity = 1.0f;
 
-    if (!visual->transform)
-        return 1.0f;
-
-    if (SUCCEEDED(IDCompositionTransform_QueryInterface(visual->transform,
-            &IID_IDCompositionEffectGroup, (void **)&effect_group)))
+    if (visual->effect)
     {
-        transform = impl_from_effect_group(effect_group);
-        opacity = transform->opacity;
-        IDCompositionEffectGroup_Release(effect_group);
-        return opacity;
+        transform = unsafe_impl_from_dcomp_transform((IUnknown *)visual->effect);
+        if (transform && transform->kind == OBJECT_EFFECT_GROUP)
+            return transform->opacity;
+    }
+
+    if (visual->transform)
+    {
+        transform = unsafe_impl_from_dcomp_transform((IUnknown *)visual->transform);
+        if (transform && transform->kind == OBJECT_EFFECT_GROUP)
+            return transform->opacity;
     }
     return 1.0f;
 }
@@ -1662,8 +1860,8 @@ static void render_composite_frame(struct composite_frame *frame)
         if (SUCCEEDED(IUnknown_QueryInterface(frame->surface->physical_surface,
                 &IID_IDXGISurface, (void **)&dxgi_surface)))
         {
-            do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
-                    dxgi_surface, opacity, clip);
+            do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
+                    dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform);
             IDXGISurface_Release(dxgi_surface);
             frame->rendered = TRUE;
         }
@@ -1681,8 +1879,8 @@ static void render_composite_frame(struct composite_frame *frame)
                 visual->shared_content_handle, frame->target_hwnd, frame->pt.x, frame->pt.y);
         if ((dxgi_surface = shared_proxy_open_surface(visual)))
         {
-            do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
-                    dxgi_surface, opacity, clip);
+            do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
+                    dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform);
             IDXGISurface_Release(dxgi_surface);
             frame->rendered = TRUE;
         }
@@ -1707,10 +1905,12 @@ static void render_composite_frame(struct composite_frame *frame)
      * interop + BitBlt copy for swapchain content; the drawable lease is
      * honored by wined3d_swapchain_present itself. dst_rect is the visual's
      * accumulated region so that each visual of a composition tree updates
-     * only its own part of the window. A visual with opacity < 1.0 or a
-     * rectangle clip cannot be served by that pass, which copies the back
-     * buffer verbatim, so those go through the sampling pass below. */
-    if (frame->visual && frame->visual->wined3d_swapchain && opacity == 1.0f && !clip)
+     * only its own part of the window. A visual with opacity < 1.0, a
+     * rectangle clip, or a 2D/3D transform cannot be served by that pass,
+     * which copies the back buffer verbatim, so those go through the sampling
+     * pass below. */
+    if (frame->visual && frame->visual->wined3d_swapchain && opacity == 1.0f && !clip
+            && !frame->has_transform)
     {
         struct wined3d_swapchain *wined3d_swapchain = frame->visual->wined3d_swapchain;
         RECT *dst_rect_ptr = NULL;
@@ -1730,7 +1930,7 @@ static void render_composite_frame(struct composite_frame *frame)
         frame->rendered = TRUE;
         goto done;
     }
-    else if (opacity == 1.0f && !clip
+    else if (opacity == 1.0f && !clip && !frame->has_transform
             && SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain)))
     {
         struct wined3d_swapchain *wined3d_swapchain = dxgi_get_wined3d_swapchain(swapchain);
@@ -1769,8 +1969,8 @@ static void render_composite_frame(struct composite_frame *frame)
          * every tick, which clobbers the app's own Present-to-window frames and
          * thrashes the Direct2D and Direct3D resources. The compositor paints on
          * change, the swapchain Present path owns the window drawable in between. */
-        do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
-                dxgi_surface, opacity, clip);
+        do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
+                dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform);
         IDXGISurface_Release(dxgi_surface);
         frame->rendered = TRUE;
     }
@@ -1848,6 +2048,7 @@ static void composite_device(struct composition_device *device)
         else
         {
             frame->visual->composited_version = frame->version;
+            frame->visual->composited_transform_version = frame->transform_version;
             frame->visual->composited_hwnd = frame->target_hwnd;
         }
     }
@@ -1911,6 +2112,8 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 SetEvent(g_compositor_clock_event);
             LeaveCriticalSection(&composite_render_cs);
         }
+        if (device->self_release)
+            break;
         /* Throttle the completion-side pulses to ~30Hz (every 2nd present tick).
          * A full-60Hz commit-completion pulse drives the composition churn so hard
          * the WebView2 browser tears down early (ShowWindow climbs, LRPC drain is
@@ -1945,6 +2148,23 @@ static DWORD WINAPI composite_thread_proc(void *iface)
 
     TRACE("DCOMP: composite_thread_proc exiting.\n");
     InterlockedExchange(&device->thread_exited, TRUE);
+    if (device->self_release)
+    {
+        if (device->thread)
+        {
+            CloseHandle(device->thread);
+            device->thread = NULL;
+        }
+        if (device->surface_factory)
+        {
+            IDCompositionSurfaceFactory *factory = device->surface_factory;
+            device->surface_factory = NULL;
+            IDCompositionSurfaceFactory_Release(factory);
+        }
+        if (device->rendering_device)
+            IUnknown_Release(device->rendering_device);
+        free(device);
+    }
     return 0;
 }
 
@@ -2553,9 +2773,29 @@ static HRESULT STDMETHODCALLTYPE device_CreateTransformGroup(IDCompositionDevice
         IDCompositionTransform **transforms, UINT elements,
         IDCompositionTransform **transform_group)
 {
-    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n", iface, transforms,
-            elements, transform_group);
-    return E_NOTIMPL;
+    struct composition_device *device = impl_from_IDCompositionDevice( iface );
+    struct dcomp_transform *impl;
+    UINT i;
+
+    TRACE("DCOMP: device_CreateTransformGroup iface %p, transforms %p, elements %u, transform_group %p\n",
+            iface, transforms, elements, transform_group);
+
+    if (!transform_group)
+        return E_POINTER;
+    *transform_group = NULL;
+
+    if (!transforms || !elements)
+        return E_INVALIDARG;
+    for (i = 0; i < elements; i++)
+        if (!transforms[i])
+            return E_INVALIDARG;
+
+    if (!(impl = dcomp_transform_group_create( device, TRANSFORM_GROUP,
+            (IUnknown *const *)transforms, elements )))
+        return E_OUTOFMEMORY;
+
+    *transform_group = (IDCompositionTransform *)&impl->IDCompositionTranslateTransform_iface;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE device_CreateTranslateTransform3D(IDCompositionDevice *iface,
@@ -2634,9 +2874,29 @@ static HRESULT STDMETHODCALLTYPE device_CreateTransform3DGroup(IDCompositionDevi
         IDCompositionTransform3D **transforms_3d, UINT elements,
         IDCompositionTransform3D **transform_3d_group)
 {
-    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n", iface,
-            transforms_3d, elements, transform_3d_group);
-    return E_NOTIMPL;
+    struct composition_device *device = impl_from_IDCompositionDevice( iface );
+    struct dcomp_transform *impl;
+    UINT i;
+
+    TRACE("DCOMP: device_CreateTransform3DGroup iface %p, transforms_3d %p, elements %u, transform_3d_group %p\n",
+            iface, transforms_3d, elements, transform_3d_group);
+
+    if (!transform_3d_group)
+        return E_POINTER;
+    *transform_3d_group = NULL;
+
+    if (!transforms_3d || !elements)
+        return E_INVALIDARG;
+    for (i = 0; i < elements; i++)
+        if (!transforms_3d[i])
+            return E_INVALIDARG;
+
+    if (!(impl = dcomp_transform_group_create( device, TRANSFORM_3D_GROUP,
+            (IUnknown *const *)transforms_3d, elements )))
+        return E_OUTOFMEMORY;
+
+    *transform_3d_group = (IDCompositionTransform3D *)&impl->IDCompositionTranslateTransform3D_iface;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE device_CreateEffectGroup(IDCompositionDevice *iface,
@@ -2905,9 +3165,8 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateMatrixTransform(IDComposit
 static HRESULT STDMETHODCALLTYPE desktop_device_CreateTransformGroup(IDCompositionDeviceUnknown *iface,
         IDCompositionTransform **transforms, UINT elements, IDCompositionTransform **transform_group)
 {
-    FIXME("iface %p, transforms %p, elements %u, transform_group %p stub!\n", iface, transforms,
-            elements, transform_group);
-    return E_NOTIMPL;
+    struct composition_device *device = impl_from_IDCompositionDeviceUnknown( iface );
+    return device_CreateTransformGroup(&device->IDCompositionDevice_iface, transforms, elements, transform_group);
 }
 
 static HRESULT STDMETHODCALLTYPE desktop_device_CreateTranslateTransform3D(IDCompositionDeviceUnknown *iface,
@@ -2942,9 +3201,8 @@ static HRESULT STDMETHODCALLTYPE desktop_device_CreateTransform3DGroup(IDComposi
         IDCompositionTransform3D **transforms_3d, UINT elements,
         IDCompositionTransform3D **transform_3d_group)
 {
-    FIXME("iface %p, transforms_3d %p, elements %u, transform_3d_group %p stub!\n", iface,
-            transforms_3d, elements, transform_3d_group);
-    return E_NOTIMPL;
+    struct composition_device *device = impl_from_IDCompositionDeviceUnknown( iface );
+    return device_CreateTransform3DGroup(&device->IDCompositionDevice_iface, transforms_3d, elements, transform_3d_group);
 }
 
 static HRESULT STDMETHODCALLTYPE desktop_device_CreateEffectGroup(IDCompositionDeviceUnknown *iface,

@@ -28,6 +28,7 @@
 
 #define COBJMACROS
 
+#include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -41,16 +42,158 @@
 
 #include "dcomp_private.h"
 
+#ifndef M_PI
+#define M_PI 3.14159265358979323846
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 
-/* IDCompositionTransform / Transform3D / Effect base interface GUIDs
- * (the generated header exposes them only through C++ __declspec(uuid)). */
-static const GUID GUID_IDCompositionTransform =
-    {0x3ee707f3, 0xf8cb, 0x4dbc, {0xa5, 0x3f, 0x93, 0x75, 0x4a, 0xf4, 0x55, 0x54}};
-static const GUID GUID_IDCompositionTransform3D =
-    {0x2be42e71, 0xc5c1, 0x4ff4, {0xaa, 0xbf, 0x16, 0xf2, 0x64, 0x2d, 0x86, 0x01}};
-static const GUID GUID_IDCompositionEffect =
-    {0x8883610f, 0x659e, 0x4a3f, {0xa9, 0xf5, 0x14, 0x83, 0xff, 0x8e, 0x79, 0xe6}};
+void dcomp_matrix_identity( D3DMATRIX *m )
+{
+    memset( m, 0, sizeof(*m) );
+    m->m[0][0] = 1.0f;
+    m->m[1][1] = 1.0f;
+    m->m[2][2] = 1.0f;
+    m->m[3][3] = 1.0f;
+}
+
+void dcomp_matrix_multiply( D3DMATRIX *out, const D3DMATRIX *a, const D3DMATRIX *b )
+{
+    D3DMATRIX tmp;
+    int i, j;
+
+    for (i = 0; i < 4; i++)
+    {
+        for (j = 0; j < 4; j++)
+        {
+            tmp.m[i][j] = a->m[i][0] * b->m[0][j]
+                        + a->m[i][1] * b->m[1][j]
+                        + a->m[i][2] * b->m[2][j]
+                        + a->m[i][3] * b->m[3][j];
+        }
+    }
+    *out = tmp;
+}
+
+void dcomp_matrix_from_2d( D3DMATRIX *out, const D2D_MATRIX_3X2_F *m2d )
+{
+    dcomp_matrix_identity( out );
+    out->m[0][0] = m2d->m11;
+    out->m[0][1] = m2d->m12;
+    out->m[1][0] = m2d->m21;
+    out->m[1][1] = m2d->m22;
+    out->m[3][0] = m2d->dx;
+    out->m[3][1] = m2d->dy;
+}
+
+BOOL dcomp_matrix_is_identity( const D3DMATRIX *m )
+{
+    static const D3DMATRIX id = {{
+        {1.0f, 0.0f, 0.0f, 0.0f},
+        {0.0f, 1.0f, 0.0f, 0.0f},
+        {0.0f, 0.0f, 1.0f, 0.0f},
+        {0.0f, 0.0f, 0.0f, 1.0f},
+    }};
+    return !memcmp( m, &id, sizeof(id) );
+}
+
+static void transform_update_matrix_3d( struct dcomp_transform *impl )
+{
+    D3DMATRIX *m = &impl->matrix3d;
+    float rad, s, c, t;
+
+    switch (impl->kind)
+    {
+    case TRANSFORM_TRANSLATE:
+        dcomp_matrix_identity( m );
+        m->m[3][0] = impl->offset_x;
+        m->m[3][1] = impl->offset_y;
+        break;
+    case TRANSFORM_SCALE:
+        dcomp_matrix_identity( m );
+        m->m[0][0] = impl->scale_x;
+        m->m[1][1] = impl->scale_y;
+        m->m[3][0] = impl->center_x * (1.0f - impl->scale_x);
+        m->m[3][1] = impl->center_y * (1.0f - impl->scale_y);
+        break;
+    case TRANSFORM_ROTATE:
+        dcomp_matrix_identity( m );
+        rad = impl->angle * (float)(M_PI / 180.0);
+        s = sinf( rad );
+        c = cosf( rad );
+        m->m[0][0] = c;
+        m->m[0][1] = s;
+        m->m[1][0] = -s;
+        m->m[1][1] = c;
+        m->m[3][0] = impl->center_x - (impl->center_x * c - impl->center_y * s);
+        m->m[3][1] = impl->center_y - (impl->center_x * s + impl->center_y * c);
+        break;
+    case TRANSFORM_SKEW:
+    {
+        float tx = tanf( impl->angle_x * (float)(M_PI / 180.0) );
+        float ty = tanf( impl->angle_y * (float)(M_PI / 180.0) );
+        dcomp_matrix_identity( m );
+        m->m[0][1] = ty;
+        m->m[1][0] = tx;
+        m->m[3][0] = -impl->center_y * tx;
+        m->m[3][1] = -impl->center_x * ty;
+        break;
+    }
+    case TRANSFORM_MATRIX:
+        dcomp_matrix_from_2d( m, &impl->matrix );
+        break;
+    case TRANSFORM_TRANSLATE_3D:
+        dcomp_matrix_identity( m );
+        m->m[3][0] = impl->offset_x;
+        m->m[3][1] = impl->offset_y;
+        m->m[3][2] = impl->offset_z;
+        break;
+    case TRANSFORM_SCALE_3D:
+        dcomp_matrix_identity( m );
+        m->m[0][0] = impl->scale_x;
+        m->m[1][1] = impl->scale_y;
+        m->m[2][2] = impl->scale_z;
+        m->m[3][0] = impl->center_x * (1.0f - impl->scale_x);
+        m->m[3][1] = impl->center_y * (1.0f - impl->scale_y);
+        m->m[3][2] = impl->center_z * (1.0f - impl->scale_z);
+        break;
+    case TRANSFORM_ROTATE_3D:
+    {
+        float x = impl->axis_x, y = impl->axis_y, z = impl->axis_z;
+        float len = sqrtf( x * x + y * y + z * z );
+        dcomp_matrix_identity( m );
+        if (len >= 1e-8f && impl->angle != 0.0f)
+        {
+            x /= len;
+            y /= len;
+            z /= len;
+            rad = impl->angle * (float)(M_PI / 180.0);
+            s = sinf( rad );
+            c = cosf( rad );
+            t = 1.0f - c;
+
+            m->m[0][0] = t * x * x + c;
+            m->m[0][1] = t * x * y + s * z;
+            m->m[0][2] = t * x * z - s * y;
+
+            m->m[1][0] = t * x * y - s * z;
+            m->m[1][1] = t * y * y + c;
+            m->m[1][2] = t * y * z + s * x;
+
+            m->m[2][0] = t * x * z + s * y;
+            m->m[2][1] = t * y * z - s * x;
+            m->m[2][2] = t * z * z + c;
+
+            m->m[3][0] = impl->center_x - (impl->center_x * m->m[0][0] + impl->center_y * m->m[1][0] + impl->center_z * m->m[2][0]);
+            m->m[3][1] = impl->center_y - (impl->center_x * m->m[0][1] + impl->center_y * m->m[1][1] + impl->center_z * m->m[2][1]);
+            m->m[3][2] = impl->center_z - (impl->center_x * m->m[0][2] + impl->center_y * m->m[1][2] + impl->center_z * m->m[2][2]);
+        }
+        break;
+    }
+    default:
+        break;
+    }
+}
 
 static HRESULT transform_QI( struct dcomp_transform *impl, void *this_iface, REFIID iid, void **out )
 {
@@ -59,10 +202,29 @@ static HRESULT transform_QI( struct dcomp_transform *impl, void *this_iface, REF
     if (!out) return E_POINTER;
     *out = NULL;
 
-    if (IsEqualGUID( iid, &IID_IUnknown )
-            || IsEqualGUID( iid, &GUID_IDCompositionTransform )
-            || IsEqualGUID( iid, &GUID_IDCompositionTransform3D )
-            || IsEqualGUID( iid, &GUID_IDCompositionEffect ))
+    if (IsEqualGUID( iid, &IID_IUnknown ))
+    {
+        *out = this_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IDCompositionEffect )
+            && impl->kind != OBJECT_RECTANGLE_CLIP)
+    {
+        *out = this_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IDCompositionTransform3D )
+            && (impl->kind == TRANSFORM_TRANSLATE || impl->kind == TRANSFORM_SCALE
+                || impl->kind == TRANSFORM_ROTATE || impl->kind == TRANSFORM_SKEW
+                || impl->kind == TRANSFORM_MATRIX || impl->kind == TRANSFORM_GROUP
+                || impl->kind == TRANSFORM_TRANSLATE_3D || impl->kind == TRANSFORM_SCALE_3D
+                || impl->kind == TRANSFORM_ROTATE_3D || impl->kind == TRANSFORM_MATRIX_3D
+                || impl->kind == TRANSFORM_3D_GROUP))
+    {
+        *out = this_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IDCompositionTransform )
+            && (impl->kind == TRANSFORM_TRANSLATE || impl->kind == TRANSFORM_SCALE
+                || impl->kind == TRANSFORM_ROTATE || impl->kind == TRANSFORM_SKEW
+                || impl->kind == TRANSFORM_MATRIX || impl->kind == TRANSFORM_GROUP))
     {
         *out = this_iface;
     }
@@ -124,10 +286,17 @@ static ULONG transform_addref( struct dcomp_transform *impl )
 static ULONG transform_release( struct dcomp_transform *impl )
 {
     ULONG ref = InterlockedDecrement( &impl->ref );
+    UINT i;
 
     if (!ref)
     {
         if (impl->transform3d) IDCompositionTransform3D_Release( impl->transform3d );
+        if (impl->group_items)
+        {
+            for (i = 0; i < impl->group_count; i++)
+                if (impl->group_items[i]) IUnknown_Release( impl->group_items[i] );
+            free( impl->group_items );
+        }
         free( impl );
     }
     return ref;
@@ -158,6 +327,8 @@ static ULONG transform_release( struct dcomp_transform *impl )
         struct dcomp_transform *impl = impl_from_##pfx( iface );                                   \
         TRACE( "iface %p, value %g.\n", iface, value );                                            \
         impl->field = value;                                                                       \
+        transform_update_matrix_3d( impl );                                                        \
+        InterlockedIncrement( &impl->version );                                                    \
         return S_OK;                                                                               \
     }
 
@@ -272,6 +443,8 @@ static HRESULT STDMETHODCALLTYPE mt_SetMatrix( IDCompositionMatrixTransform *ifa
 
     if (!matrix) return E_INVALIDARG;
     impl->matrix = *matrix;
+    transform_update_matrix_3d( impl );
+    InterlockedIncrement( &impl->version );
     return S_OK;
 }
 
@@ -294,18 +467,8 @@ static HRESULT STDMETHODCALLTYPE mt_SetMatrixElement( IDCompositionMatrixTransfo
 
     if (row < 0 || row > 2 || column < 0 || column > 1) return E_INVALIDARG;
     m[row * 2 + column] = value;
-    return S_OK;
-}
-
-static HRESULT STDMETHODCALLTYPE mt_GetMatrix( IDCompositionMatrixTransform *iface,
-        D2D_MATRIX_3X2_F *matrix )
-{
-    struct dcomp_transform *impl = impl_from_mt( iface );
-
-    TRACE( "iface %p, matrix %p.\n", iface, matrix );
-
-    if (!matrix) return E_POINTER;
-    *matrix = impl->matrix;
+    transform_update_matrix_3d( impl );
+    InterlockedIncrement( &impl->version );
     return S_OK;
 }
 
@@ -317,7 +480,6 @@ static const struct IDCompositionMatrixTransformVtbl matrix_transform_vtbl =
     mt_SetMatrix,
     mt_SetMatrixElementAnimation,
     mt_SetMatrixElement,
-    mt_GetMatrix,
 };
 
 /*
@@ -426,6 +588,7 @@ static HRESULT STDMETHODCALLTYPE mt3_SetMatrix( IDCompositionMatrixTransform3D *
 
     if (!matrix) return E_INVALIDARG;
     impl->matrix3d = *matrix;
+    InterlockedIncrement( &impl->version );
     return S_OK;
 }
 
@@ -442,12 +605,12 @@ static HRESULT STDMETHODCALLTYPE mt3_SetMatrixElement( IDCompositionMatrixTransf
         int row, int column, float value )
 {
     struct dcomp_transform *impl = impl_from_mt3( iface );
-    float *m = (float *)&impl->matrix3d;
 
     TRACE( "iface %p, row %d, column %d, value %g.\n", iface, row, column, value );
 
     if (row < 0 || row > 3 || column < 0 || column > 3) return E_INVALIDARG;
-    m[row * 4 + column] = value;
+    impl->matrix3d.m[row][column] = value;
+    InterlockedIncrement( &impl->version );
     return S_OK;
 }
 
@@ -481,6 +644,7 @@ static HRESULT STDMETHODCALLTYPE eg_SetOpacity( IDCompositionEffectGroup *iface,
 
     TRACE( "iface %p, opacity %g.\n", iface, opacity );
     impl->opacity = opacity;
+    InterlockedIncrement( &impl->version );
     return S_OK;
 }
 
@@ -496,6 +660,7 @@ static HRESULT STDMETHODCALLTYPE eg_SetTransform3D( IDCompositionEffectGroup *if
         if (transform) IDCompositionTransform3D_AddRef( transform );
         if (impl->transform3d) IDCompositionTransform3D_Release( impl->transform3d );
         impl->transform3d = transform;
+        InterlockedIncrement( &impl->version );
     }
     return S_OK;
 }
@@ -522,6 +687,7 @@ TRANSFORM_PROLOGUE( rc, IDCompositionRectangleClip, IDCompositionRectangleClip_i
         struct dcomp_transform *impl = impl_from_rc( iface );                                      \
         TRACE( "iface %p, value %g.\n", iface, value );                                            \
         impl->field = value;                                                                       \
+        InterlockedIncrement( &impl->version );                                                    \
         return S_OK;                                                                               \
     }
 
@@ -589,6 +755,173 @@ static const struct IDCompositionRectangleClipVtbl rectangle_clip_vtbl =
     rc_SetBottomRightRadiusY,
 };
 
+static HRESULT STDMETHODCALLTYPE tg_QueryInterface( IDCompositionTransform *iface, REFIID iid, void **out )
+{
+    struct dcomp_transform *impl = CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionTranslateTransform_iface );
+    return transform_QI( impl, (void *)iface, iid, out );
+}
+
+static ULONG STDMETHODCALLTYPE tg_AddRef( IDCompositionTransform *iface )
+{
+    struct dcomp_transform *impl = CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionTranslateTransform_iface );
+    return transform_addref( impl );
+}
+
+static ULONG STDMETHODCALLTYPE tg_Release( IDCompositionTransform *iface )
+{
+    struct dcomp_transform *impl = CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionTranslateTransform_iface );
+    return transform_release( impl );
+}
+
+static const struct IDCompositionTransformVtbl transform_group_vtbl =
+{
+    tg_QueryInterface,
+    tg_AddRef,
+    tg_Release,
+};
+
+static HRESULT STDMETHODCALLTYPE tg3_QueryInterface( IDCompositionTransform3D *iface, REFIID iid, void **out )
+{
+    struct dcomp_transform *impl = CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionTranslateTransform3D_iface );
+    return transform_QI( impl, (void *)iface, iid, out );
+}
+
+static ULONG STDMETHODCALLTYPE tg3_AddRef( IDCompositionTransform3D *iface )
+{
+    struct dcomp_transform *impl = CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionTranslateTransform3D_iface );
+    return transform_addref( impl );
+}
+
+static ULONG STDMETHODCALLTYPE tg3_Release( IDCompositionTransform3D *iface )
+{
+    struct dcomp_transform *impl = CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionTranslateTransform3D_iface );
+    return transform_release( impl );
+}
+
+static const struct IDCompositionTransform3DVtbl transform3d_group_vtbl =
+{
+    tg3_QueryInterface,
+    tg3_AddRef,
+    tg3_Release,
+};
+
+struct dcomp_transform *unsafe_impl_from_dcomp_transform( IUnknown *iface )
+{
+    const void *vtbl;
+
+    if (!iface) return NULL;
+    vtbl = iface->lpVtbl;
+
+    if (vtbl == &translate_transform_vtbl || vtbl == &transform_group_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionTranslateTransform_iface );
+    if (vtbl == &scale_transform_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionScaleTransform_iface );
+    if (vtbl == &rotate_transform_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionRotateTransform_iface );
+    if (vtbl == &skew_transform_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionSkewTransform_iface );
+    if (vtbl == &matrix_transform_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionMatrixTransform_iface );
+    if (vtbl == &translate_transform3d_vtbl || vtbl == &transform3d_group_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionTranslateTransform3D_iface );
+    if (vtbl == &scale_transform3d_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionScaleTransform3D_iface );
+    if (vtbl == &rotate_transform3d_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionRotateTransform3D_iface );
+    if (vtbl == &matrix_transform3d_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionMatrixTransform3D_iface );
+    if (vtbl == &effect_group_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionEffectGroup_iface );
+    if (vtbl == &rectangle_clip_vtbl)
+        return CONTAINING_RECORD( (void *)iface, struct dcomp_transform, IDCompositionRectangleClip_iface );
+
+    return NULL;
+}
+
+static void transform_get_matrix_3d_depth( const struct dcomp_transform *impl, D3DMATRIX *out, unsigned int depth )
+{
+    D3DMATRIX child_m;
+    UINT i;
+
+    if (!impl || depth > 64)
+    {
+        dcomp_matrix_identity( out );
+        return;
+    }
+
+    switch (impl->kind)
+    {
+    case TRANSFORM_GROUP:
+    case TRANSFORM_3D_GROUP:
+        dcomp_matrix_identity( out );
+        for (i = 0; i < impl->group_count; i++)
+        {
+            struct dcomp_transform *child = unsafe_impl_from_dcomp_transform( impl->group_items[i] );
+            if (child)
+            {
+                transform_get_matrix_3d_depth( child, &child_m, depth + 1 );
+                dcomp_matrix_multiply( out, out, &child_m );
+            }
+        }
+        break;
+    case OBJECT_EFFECT_GROUP:
+        if (impl->transform3d)
+        {
+            struct dcomp_transform *child = unsafe_impl_from_dcomp_transform( (IUnknown *)impl->transform3d );
+            if (child)
+            {
+                transform_get_matrix_3d_depth( child, out, depth + 1 );
+                return;
+            }
+        }
+        dcomp_matrix_identity( out );
+        break;
+    case OBJECT_RECTANGLE_CLIP:
+        dcomp_matrix_identity( out );
+        break;
+    default:
+        *out = impl->matrix3d;
+        break;
+    }
+}
+
+void dcomp_transform_get_matrix_3d( const struct dcomp_transform *impl, D3DMATRIX *out )
+{
+    transform_get_matrix_3d_depth( impl, out, 0 );
+}
+
+static unsigned int transform_get_version_depth( const struct dcomp_transform *impl, unsigned int depth )
+{
+    unsigned int ver;
+    UINT i;
+
+    if (!impl || depth > 64)
+        return 0;
+
+    ver = (unsigned int)impl->version;
+    if (impl->kind == OBJECT_EFFECT_GROUP && impl->transform3d)
+    {
+        struct dcomp_transform *child = unsafe_impl_from_dcomp_transform( (IUnknown *)impl->transform3d );
+        if (child)
+            ver += transform_get_version_depth( child, depth + 1 );
+    }
+    else if (impl->kind == TRANSFORM_GROUP || impl->kind == TRANSFORM_3D_GROUP)
+    {
+        for (i = 0; i < impl->group_count; i++)
+        {
+            struct dcomp_transform *child = unsafe_impl_from_dcomp_transform( impl->group_items[i] );
+            if (child)
+                ver += transform_get_version_depth( child, depth + 1 );
+        }
+    }
+    return ver;
+}
+
+unsigned int dcomp_transform_get_version( const struct dcomp_transform *impl )
+{
+    return transform_get_version_depth( impl, 0 );
+}
+
 struct dcomp_transform *dcomp_transform_create( struct composition_device *device,
         enum dcomp_object_kind kind )
 {
@@ -596,13 +929,14 @@ struct dcomp_transform *dcomp_transform_create( struct composition_device *devic
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
     impl->ref = 1;
+    impl->version = 1;
     impl->kind = kind;
     impl->device = device;
     impl->scale_x = impl->scale_y = impl->scale_z = 1.0f;
-    impl->axis_x = 1.0f;
+    impl->axis_z = 1.0f;
     impl->opacity = 1.0f;
     impl->matrix.m11 = impl->matrix.m22 = 1.0f;
-    impl->matrix3d.m[0][0] = impl->matrix3d.m[1][1] = impl->matrix3d.m[2][2] = impl->matrix3d.m[3][3] = 1.0f;
+    dcomp_matrix_identity( &impl->matrix3d );
 
     switch (kind)
     {
@@ -621,6 +955,9 @@ struct dcomp_transform *dcomp_transform_create( struct composition_device *devic
     case TRANSFORM_MATRIX:
         impl->IDCompositionMatrixTransform_iface.lpVtbl = &matrix_transform_vtbl;
         break;
+    case TRANSFORM_GROUP:
+        impl->IDCompositionTranslateTransform_iface.lpVtbl = (const struct IDCompositionTranslateTransformVtbl *)&transform_group_vtbl;
+        break;
     case TRANSFORM_TRANSLATE_3D:
         impl->IDCompositionTranslateTransform3D_iface.lpVtbl = &translate_transform3d_vtbl;
         break;
@@ -632,6 +969,9 @@ struct dcomp_transform *dcomp_transform_create( struct composition_device *devic
         break;
     case TRANSFORM_MATRIX_3D:
         impl->IDCompositionMatrixTransform3D_iface.lpVtbl = &matrix_transform3d_vtbl;
+        break;
+    case TRANSFORM_3D_GROUP:
+        impl->IDCompositionTranslateTransform3D_iface.lpVtbl = (const struct IDCompositionTranslateTransform3DVtbl *)&transform3d_group_vtbl;
         break;
     case OBJECT_EFFECT_GROUP:
         impl->IDCompositionEffectGroup_iface.lpVtbl = &effect_group_vtbl;
@@ -645,5 +985,34 @@ struct dcomp_transform *dcomp_transform_create( struct composition_device *devic
     }
 
     TRACE( "created object %p, kind %u.\n", impl, kind );
+    return impl;
+}
+
+struct dcomp_transform *dcomp_transform_group_create( struct composition_device *device,
+        enum dcomp_object_kind kind, IUnknown *const *items, UINT count )
+{
+    struct dcomp_transform *impl;
+    UINT i;
+
+    if (!items || !count) return NULL;
+    for (i = 0; i < count; i++)
+        if (!items[i]) return NULL;
+
+    if (!(impl = dcomp_transform_create( device, kind )))
+        return NULL;
+
+    if (!(impl->group_items = calloc( count, sizeof(impl->group_items[0]) )))
+    {
+        transform_release( impl );
+        return NULL;
+    }
+
+    impl->group_count = count;
+    for (i = 0; i < count; i++)
+    {
+        impl->group_items[i] = items[i];
+        IUnknown_AddRef( items[i] );
+    }
+
     return impl;
 }

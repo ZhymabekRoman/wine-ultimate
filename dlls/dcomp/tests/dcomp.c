@@ -2295,6 +2295,274 @@ static void test_surface_begin_end_Draw(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+#define expect_rendered_color_at(a, x, y, b) _expect_rendered_color_at(__LINE__, a, x, y, b)
+static void _expect_rendered_color_at(int line, HWND hwnd, int x, int y, COLORREF expected_color)
+{
+    COLORREF color = CLR_INVALID;
+    int time = 0;
+    POINT pt;
+    HDC hdc;
+
+    pt.x = x;
+    pt.y = y;
+    ClientToScreen(hwnd, &pt);
+
+    hdc = GetDC(0);
+    while (time < 500)
+    {
+        color = GetPixel(hdc, pt.x, pt.y);
+        if (color == expected_color)
+            break;
+
+        Sleep(100);
+        time += 100;
+    }
+    ReleaseDC(0, hdc);
+    ok_(__FILE__, line)(color == expected_color, "At (%d,%d) expected color %#06lx, got %#06lx.\n",
+            x, y, expected_color, color);
+}
+
+static void test_transforms_3d(void)
+{
+    IDCompositionTranslateTransform3D *translate3d;
+    IDCompositionScaleTransform3D *scale3d;
+    IDCompositionRotateTransform3D *rotate3d;
+    IDCompositionMatrixTransform3D *matrix3d;
+    IDCompositionTransform3D *group3d_items[2];
+    IDCompositionTransform3D *group3d;
+    IDCompositionTranslateTransform *translate2d;
+    IDCompositionTransform *group2d_items[1];
+    IDCompositionTransform *group2d;
+    IDCompositionEffectGroup *effect_group;
+    IDCompositionSurfaceFactory *surface_factory;
+    IDCompositionDevice2 *dcomp_device2;
+    IDCompositionDevice *dcomp_device;
+    IDCompositionSurface *surface;
+    IDCompositionTarget *target;
+    IDCompositionVisual *root_visual, *visual;
+    IDXGISurface *dxgi_surface;
+    IDXGIDevice *dxgi_device;
+    D2D1_COLOR_F color;
+    D3DMATRIX m;
+    ULONG refcount;
+    HBRUSH brush;
+    POINT offset;
+    HRESULT hr;
+    HWND hwnd;
+    RECT rect;
+    HDC hdc;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDevice,
+            (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_QueryInterface(dcomp_device, &IID_IDCompositionDevice2, (void **)&dcomp_device2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    /* Create 3D transform objects and check QI hierarchy */
+    hr = IDCompositionDevice_CreateTranslateTransform3D(dcomp_device, &translate3d);
+    ok(hr == S_OK, "CreateTranslateTransform3D hr %#lx.\n", hr);
+    check_interface(translate3d, &IID_IUnknown, TRUE);
+    check_interface(translate3d, &IID_IDCompositionEffect, TRUE);
+    check_interface(translate3d, &IID_IDCompositionTransform3D, TRUE);
+    check_interface(translate3d, &IID_IDCompositionTransform, FALSE);
+    check_interface(translate3d, &IID_IDCompositionTranslateTransform3D, TRUE);
+
+    hr = IDCompositionDevice_CreateScaleTransform3D(dcomp_device, &scale3d);
+    ok(hr == S_OK, "CreateScaleTransform3D hr %#lx.\n", hr);
+    check_interface(scale3d, &IID_IDCompositionTransform3D, TRUE);
+    check_interface(scale3d, &IID_IDCompositionScaleTransform3D, TRUE);
+
+    hr = IDCompositionDevice_CreateRotateTransform3D(dcomp_device, &rotate3d);
+    ok(hr == S_OK, "CreateRotateTransform3D hr %#lx.\n", hr);
+    check_interface(rotate3d, &IID_IDCompositionTransform3D, TRUE);
+    check_interface(rotate3d, &IID_IDCompositionRotateTransform3D, TRUE);
+
+    hr = IDCompositionDevice_CreateMatrixTransform3D(dcomp_device, &matrix3d);
+    ok(hr == S_OK, "CreateMatrixTransform3D hr %#lx.\n", hr);
+    check_interface(matrix3d, &IID_IDCompositionTransform3D, TRUE);
+    check_interface(matrix3d, &IID_IDCompositionMatrixTransform3D, TRUE);
+
+    hr = IDCompositionDevice_CreateEffectGroup(dcomp_device, &effect_group);
+    ok(hr == S_OK, "CreateEffectGroup hr %#lx.\n", hr);
+    check_interface(effect_group, &IID_IDCompositionEffect, TRUE);
+    check_interface(effect_group, &IID_IDCompositionTransform3D, FALSE);
+    check_interface(effect_group, &IID_IDCompositionEffectGroup, TRUE);
+
+    /* 2D transform also implements IDCompositionTransform3D and IDCompositionEffect */
+    hr = IDCompositionDevice_CreateTranslateTransform(dcomp_device, &translate2d);
+    ok(hr == S_OK, "CreateTranslateTransform hr %#lx.\n", hr);
+    check_interface(translate2d, &IID_IDCompositionEffect, TRUE);
+    check_interface(translate2d, &IID_IDCompositionTransform3D, TRUE);
+    check_interface(translate2d, &IID_IDCompositionTransform, TRUE);
+
+    /* Group validation & creation */
+    hr = IDCompositionDevice_CreateTransform3DGroup(dcomp_device, NULL, 1, &group3d);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateTransform3DGroup(dcomp_device, group3d_items, 0, &group3d);
+    ok(hr == E_INVALIDARG, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateTransform3DGroup(dcomp_device, group3d_items, 1, NULL);
+    ok(hr == E_POINTER, "Got unexpected hr %#lx.\n", hr);
+
+    group3d_items[0] = (IDCompositionTransform3D *)rotate3d;
+    group3d_items[1] = (IDCompositionTransform3D *)matrix3d;
+    hr = IDCompositionDevice_CreateTransform3DGroup(dcomp_device, group3d_items, 2, &group3d);
+    ok(hr == S_OK, "CreateTransform3DGroup hr %#lx.\n", hr);
+    check_interface(group3d, &IID_IDCompositionTransform3D, TRUE);
+    check_interface(group3d, &IID_IDCompositionTransform, FALSE);
+
+    group2d_items[0] = (IDCompositionTransform *)translate2d;
+    hr = IDCompositionDevice_CreateTransformGroup(dcomp_device, group2d_items, 1, &group2d);
+    ok(hr == S_OK, "CreateTransformGroup hr %#lx.\n", hr);
+    check_interface(group2d, &IID_IDCompositionTransform, TRUE);
+
+    /* MatrixTransform3D parameter checks */
+    hr = IDCompositionMatrixTransform3D_SetMatrix(matrix3d, NULL);
+    ok(hr == E_INVALIDARG, "SetMatrix(NULL) hr %#lx.\n", hr);
+    hr = IDCompositionMatrixTransform3D_SetMatrixElement(matrix3d, -1, 0, 1.0f);
+    ok(hr == E_INVALIDARG, "SetMatrixElement(-1, 0) hr %#lx.\n", hr);
+    hr = IDCompositionMatrixTransform3D_SetMatrixElement(matrix3d, 0, 4, 1.0f);
+    ok(hr == E_INVALIDARG, "SetMatrixElement(0, 4) hr %#lx.\n", hr);
+
+    /* Rendering checks for 3D transforms */
+    hwnd = create_window();
+    flush_events();
+
+    hdc = GetDC(hwnd);
+    brush = CreateSolidBrush(RGB(0, 0xff, 0));
+    GetClientRect(hwnd, &rect);
+    FillRect(hdc, &rect, brush);
+    DeleteObject(brush);
+    ReleaseDC(hwnd, hdc);
+    flush_events();
+
+    hr = IDCompositionDevice_CreateTargetForHwnd(dcomp_device, hwnd, TRUE, &target);
+    ok(hr == S_OK, "CreateTargetForHwnd hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &root_visual);
+    ok(hr == S_OK, "CreateVisual hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &visual);
+    ok(hr == S_OK, "CreateVisual hr %#lx.\n", hr);
+    hr = IDCompositionVisual_AddVisual(root_visual, visual, TRUE, NULL);
+    ok(hr == S_OK, "AddVisual hr %#lx.\n", hr);
+    hr = IDCompositionTarget_SetRoot(target, root_visual);
+    ok(hr == S_OK, "SetRoot hr %#lx.\n", hr);
+
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)dxgi_device, &surface_factory);
+    ok(hr == S_OK, "CreateSurfaceFactory hr %#lx.\n", hr);
+    hr = IDCompositionSurfaceFactory_CreateSurface(surface_factory, 200, 100, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_IGNORE, &surface);
+    ok(hr == S_OK, "CreateSurface hr %#lx.\n", hr);
+
+    hr = IDCompositionSurface_BeginDraw(surface, NULL, &IID_IDXGISurface, (void **)&dxgi_surface, &offset);
+    ok(hr == S_OK, "BeginDraw hr %#lx.\n", hr);
+    set_color(&color, 1.0f, 0.0f, 0.0f, 1.0f);
+    render_color_surface(dxgi_surface, &color, DXGI_FORMAT_B8G8R8A8_UNORM);
+    IDXGISurface_Release(dxgi_surface);
+    hr = IDCompositionSurface_EndDraw(surface);
+    ok(hr == S_OK, "EndDraw hr %#lx.\n", hr);
+
+    hr = IDCompositionVisual_SetContent(visual, (IUnknown *)surface);
+    ok(hr == S_OK, "SetContent hr %#lx.\n", hr);
+
+    /* 1. TranslateTransform3D moves 200x100 red quad to (120, 80) */
+    hr = IDCompositionTranslateTransform3D_SetOffsetX(translate3d, 120.0f);
+    ok(hr == S_OK, "SetOffsetX hr %#lx.\n", hr);
+    hr = IDCompositionTranslateTransform3D_SetOffsetY(translate3d, 80.0f);
+    ok(hr == S_OK, "SetOffsetY hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetEffect(visual, (IDCompositionEffect *)translate3d);
+    ok(hr == S_OK, "SetEffect hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Commit hr %#lx.\n", hr);
+    expect_rendered_color_at(hwnd, 170, 130, RGB(0xff, 0x00, 0x00));
+
+    /* 2. ScaleTransform3D shrinks 200x100 red quad by 0.5x around (100, 50, 0) */
+    hr = IDCompositionScaleTransform3D_SetCenterX(scale3d, 100.0f);
+    ok(hr == S_OK, "SetCenterX hr %#lx.\n", hr);
+    hr = IDCompositionScaleTransform3D_SetCenterY(scale3d, 50.0f);
+    ok(hr == S_OK, "SetCenterY hr %#lx.\n", hr);
+    hr = IDCompositionScaleTransform3D_SetScaleX(scale3d, 0.5f);
+    ok(hr == S_OK, "SetScaleX hr %#lx.\n", hr);
+    hr = IDCompositionScaleTransform3D_SetScaleY(scale3d, 0.5f);
+    ok(hr == S_OK, "SetScaleY hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetEffect(visual, (IDCompositionEffect *)scale3d);
+    ok(hr == S_OK, "SetEffect hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Commit hr %#lx.\n", hr);
+    expect_rendered_color_at(hwnd, 100, 50, RGB(0xff, 0x00, 0x00));
+
+    /* 3. RotateTransform3D rotates 200x100 quad 90 deg around default Z axis at (100, 50, 0) */
+    hr = IDCompositionVisual_SetOffsetX(visual, 100.0f);
+    ok(hr == S_OK, "SetOffsetX hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetOffsetY(visual, 100.0f);
+    ok(hr == S_OK, "SetOffsetY hr %#lx.\n", hr);
+    hr = IDCompositionRotateTransform3D_SetCenterX(rotate3d, 100.0f);
+    ok(hr == S_OK, "SetCenterX hr %#lx.\n", hr);
+    hr = IDCompositionRotateTransform3D_SetCenterY(rotate3d, 50.0f);
+    ok(hr == S_OK, "SetCenterY hr %#lx.\n", hr);
+    hr = IDCompositionRotateTransform3D_SetAngle(rotate3d, 90.0f);
+    ok(hr == S_OK, "SetAngle hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetEffect(visual, (IDCompositionEffect *)rotate3d);
+    ok(hr == S_OK, "SetEffect hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Commit hr %#lx.\n", hr);
+    expect_rendered_color_at(hwnd, 200, 75, RGB(0xff, 0x00, 0x00));
+    expect_rendered_color_at(hwnd, 200, 225, RGB(0xff, 0x00, 0x00));
+
+    /* 4. Perspective MatrixTransform3D + RotateTransform3D (Y-axis tilt) via EffectGroup */
+    hr = IDCompositionRotateTransform3D_SetAxisZ(rotate3d, 0.0f);
+    ok(hr == S_OK, "SetAxisZ hr %#lx.\n", hr);
+    hr = IDCompositionRotateTransform3D_SetAxisY(rotate3d, 1.0f);
+    ok(hr == S_OK, "SetAxisY hr %#lx.\n", hr);
+    hr = IDCompositionRotateTransform3D_SetAngle(rotate3d, 30.0f);
+    ok(hr == S_OK, "SetAngle hr %#lx.\n", hr);
+    memset(&m, 0, sizeof(m));
+    m.m[0][0] = 1.0f;
+    m.m[1][1] = 1.0f;
+    m.m[2][2] = 1.0f;
+    m.m[2][3] = -1.0f / 1000.0f;
+    m.m[3][3] = 1.0f;
+    hr = IDCompositionMatrixTransform3D_SetMatrix(matrix3d, &m);
+    ok(hr == S_OK, "SetMatrix hr %#lx.\n", hr);
+    hr = IDCompositionEffectGroup_SetTransform3D(effect_group, group3d);
+    ok(hr == S_OK, "SetTransform3D hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetEffect(visual, (IDCompositionEffect *)effect_group);
+    ok(hr == S_OK, "SetEffect(effect_group) hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Commit hr %#lx.\n", hr);
+    expect_rendered_color_at(hwnd, 200, 150, RGB(0xff, 0x00, 0x00));
+
+    /* Clear effect & transform */
+    hr = IDCompositionVisual_SetEffect(visual, NULL);
+    ok(hr == S_OK, "SetEffect(NULL) hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetTransform(visual, NULL);
+    ok(hr == E_INVALIDARG, "SetTransform(NULL) hr %#lx.\n", hr);
+
+    DestroyWindow(hwnd);
+    IDCompositionSurface_Release(surface);
+    IDCompositionSurfaceFactory_Release(surface_factory);
+    IDCompositionTarget_Release(target);
+    IDCompositionVisual_Release(root_visual);
+    IDCompositionVisual_Release(visual);
+    IDCompositionTransform_Release(group2d);
+    IDCompositionTransform3D_Release(group3d);
+    IDCompositionTranslateTransform_Release(translate2d);
+    IDCompositionEffectGroup_Release(effect_group);
+    IDCompositionMatrixTransform3D_Release(matrix3d);
+    IDCompositionRotateTransform3D_Release(rotate3d);
+    IDCompositionScaleTransform3D_Release(scale3d);
+    IDCompositionTranslateTransform3D_Release(translate3d);
+    IDCompositionDevice2_Release(dcomp_device2);
+    refcount = IDCompositionDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 START_TEST(dcomp)
 {
     HMODULE module;
@@ -2342,6 +2610,7 @@ START_TEST(dcomp)
     test_visual_SetOffsetX();
     test_visual_SetOffsetXAnimation();
     test_visual_AddVisual();
+    test_transforms_3d();
 
     FreeLibrary(module);
 }

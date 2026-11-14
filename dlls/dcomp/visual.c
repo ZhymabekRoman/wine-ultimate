@@ -71,11 +71,13 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
         ID2D1GdiInteropRenderTarget *interop = visual->interop;
         ID2D1DeviceContext *device_context = visual->device_context;
         IDCompositionClip *clip = visual->clip;
+        IDCompositionEffect *effect = visual->effect;
         IUnknown *content = visual->content;
 
         visual->interop = NULL;
         visual->device_context = NULL;
         visual->clip = NULL;
+        visual->effect = NULL;
         visual->content = NULL;
         visual->wined3d_swapchain = NULL;
 
@@ -99,6 +101,8 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             ID2D1DeviceContext_Release(device_context);
         if (clip)
             IDCompositionClip_Release(clip);
+        if (effect)
+            IDCompositionEffect_Release(effect);
         if (content)
             IUnknown_Release(content);
         if (visual->transform)
@@ -167,6 +171,7 @@ static HRESULT STDMETHODCALLTYPE visual_SetTransformObject(IDCompositionVisualUn
     dcomp_lock();
     old = visual->transform;
     visual->transform = transform;
+    visual->has_transform_matrix = FALSE;
     visual->content_version++;
     dcomp_unlock();
     if (old) IDCompositionTransform_Release(old);
@@ -177,8 +182,24 @@ static HRESULT STDMETHODCALLTYPE visual_SetTransformObject(IDCompositionVisualUn
 static HRESULT STDMETHODCALLTYPE visual_SetTransform(IDCompositionVisualUnknown *iface,
         const D2D_MATRIX_3X2_F *matrix)
 {
-    FIXME("iface %p, matrix %p stub!\n", iface, matrix);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+    IDCompositionTransform *old;
+
+    TRACE("iface %p, matrix %p.\n", iface, matrix);
+
+    if (!matrix)
+        return E_INVALIDARG;
+
+    dcomp_lock();
+    old = visual->transform;
+    visual->transform = NULL;
+    visual->transform_matrix = *matrix;
+    visual->has_transform_matrix = TRUE;
+    visual->content_version++;
+    dcomp_unlock();
+    if (old) IDCompositionTransform_Release(old);
+
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetTransformParent(IDCompositionVisualUnknown *iface,
@@ -191,8 +212,20 @@ static HRESULT STDMETHODCALLTYPE visual_SetTransformParent(IDCompositionVisualUn
 static HRESULT STDMETHODCALLTYPE visual_SetEffect(IDCompositionVisualUnknown *iface,
         IDCompositionEffect *effect)
 {
-    FIXME("iface %p, effect %p stub!\n", iface, effect);
-    return E_NOTIMPL;
+    struct composition_visual *visual = impl_from_IDCompositionVisualUnknown(iface);
+    IDCompositionEffect *old;
+
+    TRACE("iface %p, effect %p.\n", iface, effect);
+
+    if (effect) IDCompositionEffect_AddRef(effect);
+    dcomp_lock();
+    old = visual->effect;
+    visual->effect = effect;
+    visual->content_version++;
+    dcomp_unlock();
+    if (old) IDCompositionEffect_Release(old);
+
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE visual_SetBitmapInterpolationMode(IDCompositionVisualUnknown *iface,
@@ -481,6 +514,101 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
     }
 
     return S_OK;
+}
+
+void visual_get_local_transform_3d(const struct composition_visual *visual, D3DMATRIX *out)
+{
+    struct dcomp_transform *t;
+    D3DMATRIX m;
+
+    dcomp_matrix_identity(out);
+    if (!visual)
+        return;
+
+    if (visual->transform)
+    {
+        t = unsafe_impl_from_dcomp_transform((IUnknown *)visual->transform);
+        if (t && t->kind != OBJECT_RECTANGLE_CLIP)
+        {
+            dcomp_transform_get_matrix_3d(t, &m);
+            dcomp_matrix_multiply(out, out, &m);
+        }
+    }
+    else if (visual->has_transform_matrix)
+    {
+        dcomp_matrix_from_2d(&m, &visual->transform_matrix);
+        dcomp_matrix_multiply(out, out, &m);
+    }
+
+    if (visual->effect)
+    {
+        t = unsafe_impl_from_dcomp_transform((IUnknown *)visual->effect);
+        if (t && t->kind != OBJECT_RECTANGLE_CLIP)
+        {
+            dcomp_transform_get_matrix_3d(t, &m);
+            dcomp_matrix_multiply(out, out, &m);
+        }
+    }
+}
+
+void visual_get_transform_3d(const struct composition_visual *visual, UINT width, UINT height,
+        const D3DMATRIX *world_transform, float vp_x, float vp_y, float vp_w, float vp_h, D3DMATRIX *out)
+{
+    D3DMATRIX ndc_to_px, local_m, px_to_clip;
+    float w = width ? (float)width : 1.0f;
+    float h = height ? (float)height : 1.0f;
+    float vw = vp_w > 0.0f ? vp_w : w;
+    float vh = vp_h > 0.0f ? vp_h : h;
+
+    /* Quad vertex NDC (-1..1, -1..1) -> visual local pixels (0..w, 0..h). */
+    dcomp_matrix_identity(&ndc_to_px);
+    ndc_to_px.m[0][0] = 0.5f * w;
+    ndc_to_px.m[1][1] = -0.5f * h;
+    ndc_to_px.m[3][0] = 0.5f * w;
+    ndc_to_px.m[3][1] = 0.5f * h;
+
+    if (world_transform)
+        local_m = *world_transform;
+    else
+        visual_get_local_transform_3d(visual, &local_m);
+
+    /* Transformed pixel space [vp_x..vp_x+vw, vp_y..vp_y+vh] -> D3D11 clip space. */
+    memset(&px_to_clip, 0, sizeof(px_to_clip));
+    px_to_clip.m[0][0] = 2.0f / vw;
+    px_to_clip.m[1][1] = -2.0f / vh;
+    px_to_clip.m[3][0] = -(1.0f + 2.0f * vp_x / vw);
+    px_to_clip.m[3][1] = 1.0f + 2.0f * vp_y / vh;
+    px_to_clip.m[3][2] = 0.5f;
+    px_to_clip.m[3][3] = 1.0f;
+
+    dcomp_matrix_multiply(out, &ndc_to_px, &local_m);
+    dcomp_matrix_multiply(out, out, &px_to_clip);
+}
+
+unsigned int visual_get_transform_version(const struct composition_visual *visual)
+{
+    struct dcomp_transform *t;
+    unsigned int ver = 0;
+
+    if (!visual)
+        return 0;
+
+    if (visual->transform)
+    {
+        t = unsafe_impl_from_dcomp_transform((IUnknown *)visual->transform);
+        if (t) ver += dcomp_transform_get_version(t);
+    }
+    if (visual->effect)
+    {
+        t = unsafe_impl_from_dcomp_transform((IUnknown *)visual->effect);
+        if (t) ver += dcomp_transform_get_version(t);
+    }
+    if (visual->clip)
+    {
+        t = unsafe_impl_from_dcomp_transform((IUnknown *)visual->clip);
+        if (t) ver += dcomp_transform_get_version(t);
+    }
+    return ver;
 }
 
 void visual_tree_mark_dirty(struct composition_visual *visual)
