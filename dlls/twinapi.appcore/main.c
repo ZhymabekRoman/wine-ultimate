@@ -1205,20 +1205,94 @@ static const void *startup_task_factory_vtbl[] =
     startup_task_GetAsync,
 };
 
+/* PushNotificationTrigger stub (shared by the trigger factory below and
+ * IBackgroundTaskRegistration::Trigger). */
+static const void *push_trigger_vtbl[] =
+{
+    dummy_channel_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+};
+static struct { const void *vtbl; } dummy_push_trigger = { push_trigger_vtbl };
+
 /* BackgroundTaskBuilder stub */
-static HRESULT WINAPI bg_task_reg_get_TaskId( void *iface, GUID *id ) { if (id) memset(id, 0x42, sizeof(GUID)); return S_OK; }
+struct bg_event_entry
+{
+    void *handler;
+    INT64 token;
+};
+static struct bg_event_entry bg_events[64];
+static INT64 bg_event_next_token;
+
+/* One registration per app: the id is stable for the process lifetime and
+ * unique across processes (time + QPC + pid entropy), like a real TaskId. */
+static GUID bg_task_id;
+
+static HRESULT WINAPI bg_task_reg_get_TaskId( void *iface, GUID *id )
+{
+    LARGE_INTEGER pc;
+
+    if (!id) return E_POINTER;
+    if (!bg_task_id.Data1)
+    {
+        QueryPerformanceCounter( &pc );
+        bg_task_id.Data1 = pc.LowPart;
+        bg_task_id.Data2 = (USHORT)(pc.HighPart & 0xffff);
+        bg_task_id.Data3 = (USHORT)((pc.HighPart >> 16) ^ GetTickCount());
+        bg_task_id.Data4[0] = (BYTE)GetCurrentProcessId();
+        bg_task_id.Data4[1] = (BYTE)(GetCurrentProcessId() >> 8);
+        bg_task_id.Data4[2] = (BYTE)(GetCurrentProcessId() >> 16);
+        bg_task_id.Data4[3] = (BYTE)(GetCurrentProcessId() >> 24);
+        bg_task_id.Data4[4] = (BYTE)GetCurrentThreadId();
+        bg_task_id.Data4[5] = (BYTE)(GetTickCount() >> 8);
+        bg_task_id.Data4[6] = (BYTE)(GetTickCount() >> 16);
+        bg_task_id.Data4[7] = (BYTE)(GetTickCount() >> 24);
+    }
+    *id = bg_task_id;
+    return S_OK;
+}
 static HRESULT WINAPI bg_task_reg_get_Name( void *iface, HSTRING *name ) { return WindowsCreateString( L"WhatsApp Push Notification", 26, name ); }
 static HRESULT WINAPI bg_task_reg_Unregister( void *iface, boolean cancel ) { return S_OK; }
 static HRESULT WINAPI bg_task_reg_add_event( void *iface, void *handler, INT64 *token )
 {
-    if (token) *token = 0x42;
-    return S_OK;
+    INT64 tok = InterlockedIncrement64( &bg_event_next_token );
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE( bg_events ); i++)
+    {
+        if (!bg_events[i].handler)
+        {
+            bg_events[i].handler = handler;
+            bg_events[i].token = tok;
+            if (token) *token = tok;
+            return S_OK;
+        }
+    }
+    return E_OUTOFMEMORY;
 }
-static HRESULT WINAPI bg_task_reg_remove_event( void *iface, INT64 token ) { return S_OK; }
+static HRESULT WINAPI bg_task_reg_remove_event( void *iface, INT64 token )
+{
+    unsigned int i;
+
+    for (i = 0; i < ARRAY_SIZE( bg_events ); i++)
+    {
+        if (bg_events[i].handler && bg_events[i].token == token)
+        {
+            bg_events[i].handler = NULL;
+            bg_events[i].token = 0;
+            return S_OK;
+        }
+    }
+    return E_INVALIDARG;
+}
 static HRESULT WINAPI bg_task_reg_Cancel( void *iface ) { return S_OK; }
 static HRESULT WINAPI bg_task_reg_get_Trigger( void *iface, void **trigger )
 {
-    if (trigger) *trigger = NULL;
+    if (!trigger) return E_POINTER;
+    *trigger = &dummy_push_trigger;
     return S_OK;
 }
 
@@ -1314,18 +1388,6 @@ static const void *bg_builder_factory_vtbl[] =
     push_notification_factory_GetTrustLevel,
     bg_builder_factory_ActivateInstance,
 };
-
-/* PushNotificationTrigger stub */
-static const void *push_trigger_vtbl[] =
-{
-    dummy_channel_QueryInterface,
-    dummy_async_AddRef,
-    dummy_async_Release,
-    dummy_async_GetIids,
-    dummy_async_GetRuntimeClassName,
-    dummy_async_GetTrustLevel,
-};
-static struct { const void *vtbl; } dummy_push_trigger = { push_trigger_vtbl };
 
 static HRESULT WINAPI push_trigger_factory_ActivateInstance( void *iface, void **instance )
 {

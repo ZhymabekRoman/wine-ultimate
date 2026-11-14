@@ -3030,8 +3030,12 @@ static HRESULT WINAPI ms_xaml_window_get_DispatcherQueue( void *iface, void **va
 
 static HRESULT WINAPI ms_xaml_window_get_Title( void *iface, HSTRING *value )
 {
+    const WCHAR *name;
+
     if (!value) return E_POINTER;
-    return WindowsCreateString( L"WhatsApp", 8, value );
+    if ((name = xaml_package_display_name()))
+        return WindowsCreateString( name, wcslen( name ), value );
+    return WindowsCreateString( NULL, 0, value );
 }
 
 static HRESULT WINAPI ms_xaml_window_get_ExtendsContentIntoTitleBar( void *iface, boolean *value )

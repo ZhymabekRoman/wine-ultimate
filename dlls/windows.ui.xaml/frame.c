@@ -2031,9 +2031,17 @@ WVPROT(40) WVPROT(41) WVPROT(42) WVPROT(43) WVPROT(44) WVPROT(45) WVPROT(46) WVP
 WVPROT(48) WVPROT(49) WVPROT(50) WVPROT(51) WVPROT(52) WVPROT(53) WVPROT(54) WVPROT(55)
 WVPROT(56) WVPROT(57) WVPROT(58) WVPROT(59) WVPROT(60) WVPROT(61) WVPROT(62) WVPROT(63)
 
+/* FrameworkElement numeric getters (Width/Height/ActualWidth/ActualHeight
+ * share this slot body): report the hosting window's real client width;
+ * 960.0 only until the first host window exists. */
 static HRESULT WINAPI element_get_double( void *iface, double *val )
 {
-    if (val) *val = 960.0;  /* plausible width/height/size for numeric getters */
+    struct xaml_element *impl = impl_from_element( (IInspectable *)iface );
+    HWND hw = impl->parent_hwnd;
+    RECT rc;
+
+    if (!hw || !IsWindow( hw )) hw = xaml_get_window_hwnd();
+    if (val) *val = (hw && GetClientRect( hw, &rc ) && rc.right > 0) ? (double)rc.right : 960.0;
     return S_OK;
 }
 
@@ -3613,8 +3621,8 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
             ShowWindow( child, SW_SHOW );
             SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
                           SWP_SHOWWINDOW | SWP_NOACTIVATE );
-            ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
-                 child, debugstr_w( cls ), ctx->width, ctx->height );
+            TRACE( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
+                   child, debugstr_w( cls ), ctx->width, ctx->height );
         }
         ctx->count++;
     }
@@ -3645,7 +3653,7 @@ static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
     WCHAR cls[128] = {0};
 
     GetClassNameW( hwnd, cls, ARRAY_SIZE( cls ) );
-    ERR( "wv2_sync_top_cb: seen hwnd %p class %s\n", hwnd, debugstr_w(cls) );
+    TRACE( "wv2_sync_top_cb: seen hwnd %p class %s\n", hwnd, debugstr_w(cls) );
     if (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
         wcsstr( cls, L"RenderWidget" ))
     {
