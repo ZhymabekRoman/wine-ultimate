@@ -23,6 +23,8 @@
 
 #include "private.h"
 #include "windows.applicationmodel.activation.h"
+#include "appmodel.h"
+#include "pri.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
@@ -1891,28 +1893,283 @@ static void xaml_window_subscribe_core_window( struct xaml_window *impl )
     TRACE( "subscribed xaml_window to core_window %p\n", impl->core_window );
 }
 
+/* AppModel package identity, not process-name sniffing: the deployment record
+ * (AppModel\Exes\<image>, AppModel\Packages\<FullName>, seeded per prefix and
+ * read by kernelbase's GetCurrentPackage*) is the source of truth. The
+ * display name comes from the package manifest's uap:VisualElements
+ * DisplayName, with ms-resource: keys resolved from the package
+ * resources.pri (the same mrm_pri2 reader twinapi.appcore uses). */
+
+struct xaml_package
+{
+    BOOL is_packaged;
+    WCHAR full_name[512];
+    WCHAR family_name[512];
+    WCHAR installed_location[MAX_PATH];
+    WCHAR display_name[512];
+};
+
+static struct xaml_package xaml_package;
+static INIT_ONCE xaml_package_once = INIT_ONCE_STATIC_INIT;
+static pri_index *xaml_package_pri;
+
+static const HKEY xaml_reg_roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+static const WCHAR xaml_appmodel_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
+
+static BOOL xaml_read_reg_str( HKEY root, const WCHAR *subkey, const WCHAR *value, WCHAR *buf, DWORD cch )
+{
+    WCHAR path[640];
+    HKEY hkey;
+    DWORD type = 0, size;
+    LONG ret;
+
+    lstrcpyW( path, xaml_appmodel_key );
+    if (subkey && subkey[0]) lstrcatW( path, L"\\" ), lstrcatW( path, subkey );
+    if (RegOpenKeyExW( root, path, 0, KEY_READ, &hkey )) return FALSE;
+    buf[0] = 0;
+    size = cch * sizeof(*buf);
+    ret = RegQueryValueExW( hkey, value, NULL, &type, (BYTE *)buf, &size );
+    RegCloseKey( hkey );
+    return ret == ERROR_SUCCESS && type == REG_SZ && buf[0];
+}
+
+/* InstalledLocation: WINE_PACKAGE_PATH env, then Packages\<FullName>\PackagePath
+ * (PackageRootPath accepted as a synonym), HKCU before HKLM. May stay empty;
+ * callers fall back to the exe directory, which is the package dir for UWP. */
+static void xaml_package_resolve_location( struct xaml_package *pkg )
+{
+    WCHAR subkey[600];
+    SIZE_T i;
+
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", pkg->installed_location,
+                                 ARRAY_SIZE( pkg->installed_location ) ) && pkg->installed_location[0])
+        return;
+    pkg->installed_location[0] = 0;
+    if (!pkg->full_name[0]) return;
+
+    lstrcpyW( subkey, L"Packages\\" );
+    lstrcatW( subkey, pkg->full_name );
+    for (i = 0; i < ARRAY_SIZE( xaml_reg_roots ); i++)
+    {
+        static const WCHAR *const values[] = { L"PackagePath", L"PackageRootPath" };
+        SIZE_T j;
+        for (j = 0; j < ARRAY_SIZE( values ); j++)
+            if (xaml_read_reg_str( xaml_reg_roots[i], subkey, values[j],
+                                   pkg->installed_location, ARRAY_SIZE( pkg->installed_location ) ))
+                return;
+    }
+}
+
+static void xml_unescape( WCHAR *s )
+{
+    static const struct { const WCHAR *ent; WCHAR ch; } ents[] =
+    {
+        { L"&amp;", L'&' }, { L"&lt;", L'<' }, { L"&gt;", L'>' }, { L"&quot;", L'"' }, { L"&apos;", L'\'' },
+    };
+    SIZE_T i;
+
+    for (i = 0; i < ARRAY_SIZE( ents ); i++)
+    {
+        WCHAR *p;
+        while ((p = wcsstr( s, ents[i].ent )))
+        {
+            *p = ents[i].ch;
+            memmove( p + 1, p + lstrlenW( ents[i].ent ),
+                     (lstrlenW( p + lstrlenW( ents[i].ent ) ) + 1) * sizeof(WCHAR) );
+        }
+    }
+}
+
+/* <uap:VisualElements DisplayName="..." ...> attribute from AppxManifest.xml
+ * in dir. Returns FALSE when the file or attribute is absent. */
+static BOOL xaml_manifest_display_name( const WCHAR *dir, WCHAR *out, DWORD cch )
+{
+    static const WCHAR manifest_name[] = L"\\AppxManifest.xml";
+    WCHAR path[MAX_PATH + 32];
+    char *raw;
+    WCHAR *xml;
+    DWORD size, read, wlen;
+    HANDLE file;
+    BOOL ok = FALSE;
+
+    lstrcpyW( path, dir );
+    lstrcatW( path, manifest_name );
+    if ((file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL )) == INVALID_HANDLE_VALUE)
+        return FALSE;
+    size = GetFileSize( file, NULL );
+    if (!size || size == INVALID_FILE_SIZE || !(raw = malloc( size + 2 )))
+    {
+        CloseHandle( file );
+        return FALSE;
+    }
+    ReadFile( file, raw, size, &read, NULL );
+    CloseHandle( file );
+    raw[read] = 0;
+    if (!(wlen = MultiByteToWideChar( CP_UTF8, 0, raw, read, NULL, 0 ))
+            || !(xml = malloc( (wlen + 1) * sizeof(*xml) )))
+    {
+        free( raw );
+        return FALSE;
+    }
+    MultiByteToWideChar( CP_UTF8, 0, raw, read, xml, wlen );
+    xml[wlen] = 0;
+    free( raw );
+
+    {
+        WCHAR *tag = wcsstr( xml, L"uap:VisualElements" );
+        WCHAR *end, *attr;
+        if (tag && (end = wcschr( tag, L'>' )) && (attr = wcsstr( tag, L"DisplayName=\"" )) && attr < end)
+        {
+            WCHAR *val = attr + lstrlenW( L"DisplayName=\"" );
+            WCHAR *close = wcschr( val, L'"' );
+            if (close)
+            {
+                DWORD len = min( (DWORD)(close - val), cch - 1 );
+                memcpy( out, val, len * sizeof(WCHAR) );
+                out[len] = 0;
+                xml_unescape( out );
+                ok = out[0] != 0;
+            }
+        }
+    }
+    free( xml );
+    return ok;
+}
+
+static pri_index *xaml_package_open_pri( struct xaml_package *pkg )
+{
+    static const WCHAR pri_name[] = L"\\resources.pri";
+    WCHAR dir[MAX_PATH], path[MAX_PATH + 32];
+    DWORD len;
+
+    if (pkg->installed_location[0])
+    {
+        lstrcpyW( path, pkg->installed_location );
+        lstrcatW( path, pri_name );
+        if ((xaml_package_pri = pri_load( path ))) return xaml_package_pri;
+    }
+    len = GetModuleFileNameW( NULL, dir, ARRAY_SIZE( dir ) );
+    if (len && len < ARRAY_SIZE( dir ) && wcsrchr( dir, L'\\' ))
+    {
+        *wcsrchr( dir, L'\\' ) = 0;
+        lstrcpyW( path, dir );
+        lstrcatW( path, pri_name );
+        xaml_package_pri = pri_load( path );
+    }
+    return xaml_package_pri;
+}
+
+/* DisplayName="ms-resource:AppName" resolves through the package resource map:
+ * bare key, then Resources\ and Files\ scopes (same order as twinapi's
+ * ResourceLoader). Leaves display_name as the bare key on a miss. */
+static void xaml_package_resolve_ms_resource( struct xaml_package *pkg )
+{
+    static const WCHAR ms_resource[] = L"ms-resource:";
+    static const WCHAR *const scopes[] = { L"", L"Resources\\", L"Files\\" };
+    WCHAR key[512], full[600], namebuf[512];
+    WCHAR *val = NULL;
+    SIZE_T i;
+
+    if (wcsncmp( pkg->display_name, ms_resource, ARRAY_SIZE( ms_resource ) - 1 )) return;
+
+    lstrcpyW( key, pkg->display_name + ARRAY_SIZE( ms_resource ) - 1 );
+    if (key[0] == L'/' && key[1] == L'/') lstrcpyW( key, key + 2 );
+    if (key[0] == L'/') lstrcpyW( key, key + 1 );
+    for (i = 0; key[i]; i++) if (key[i] == L'/') key[i] = L'\\';
+
+    if (xaml_package_open_pri( pkg ))
+    {
+        for (i = 0; i < ARRAY_SIZE( scopes ); i++)
+        {
+            lstrcpyW( full, scopes[i] );
+            lstrcatW( full, key );
+            if (pri_lookup( xaml_package_pri, full, NULL, 0, namebuf, ARRAY_SIZE( namebuf ),
+                            &val, NULL, NULL ))
+            {
+                lstrcpynW( pkg->display_name, val, ARRAY_SIZE( pkg->display_name ) );
+                pri_free_result( val, NULL );
+                return;
+            }
+        }
+    }
+    lstrcpynW( pkg->display_name, key, ARRAY_SIZE( pkg->display_name ) );
+}
+
+static BOOL WINAPI xaml_package_init( INIT_ONCE *once, void *param, void **context )
+{
+    struct xaml_package *pkg = &xaml_package;
+    WCHAR subkey[600];
+    UINT32 len;
+    SIZE_T i;
+
+    pkg->full_name[0] = pkg->family_name[0] = 0;
+    len = ARRAY_SIZE( pkg->full_name );
+    pkg->is_packaged = GetCurrentPackageFullName( &len, pkg->full_name ) == ERROR_SUCCESS;
+    if (pkg->is_packaged)
+    {
+        len = ARRAY_SIZE( pkg->family_name );
+        GetCurrentPackageFamilyName( &len, pkg->family_name );
+    }
+
+    xaml_package_resolve_location( pkg );
+
+    /* manifest in the installed location, then the exe dir (the package dir
+     * for a deployed UWP app): the authoritative DisplayName. */
+    if (pkg->installed_location[0] && xaml_manifest_display_name( pkg->installed_location,
+                                                                  pkg->display_name, ARRAY_SIZE( pkg->display_name ) ));
+    else
+    {
+        WCHAR dir[MAX_PATH];
+        DWORD len2 = GetModuleFileNameW( NULL, dir, ARRAY_SIZE( dir ) );
+        if (len2 && len2 < ARRAY_SIZE( dir ) && wcsrchr( dir, L'\\' ))
+        {
+            *wcsrchr( dir, L'\\' ) = 0;
+            xaml_manifest_display_name( dir, pkg->display_name, ARRAY_SIZE( pkg->display_name ) );
+        }
+    }
+
+    /* a DisplayName seeded on the deployment record overrides, and covers
+     * packages shipping no manifest attribute. */
+    if (pkg->full_name[0])
+    {
+        lstrcpyW( subkey, L"Packages\\" );
+        lstrcatW( subkey, pkg->full_name );
+        for (i = 0; i < ARRAY_SIZE( xaml_reg_roots ); i++)
+            if (xaml_read_reg_str( xaml_reg_roots[i], subkey, L"DisplayName",
+                                   pkg->display_name, ARRAY_SIZE( pkg->display_name ) ))
+                break;
+    }
+
+    xaml_package_resolve_ms_resource( pkg );
+    return TRUE;
+}
+
+static const WCHAR *xaml_package_display_name( void )
+{
+    InitOnceExecuteOnce( &xaml_package_once, xaml_package_init, NULL, NULL );
+    return xaml_package.display_name[0] ? xaml_package.display_name : NULL;
+}
+
+/* Family test: <Name>_<Publisher>, matched on the name part. */
+static BOOL xaml_package_family_is( const WCHAR *name )
+{
+    SIZE_T len;
+
+    InitOnceExecuteOnce( &xaml_package_once, xaml_package_init, NULL, NULL );
+    if (!xaml_package.family_name[0]) return FALSE;
+    len = lstrlenW( name );
+    return !wcsnicmp( xaml_package.family_name, name, len )
+           && (!xaml_package.family_name[len] || xaml_package.family_name[len] == L'_');
+}
+
 BOOL is_calculator_app( void )
 {
-    static int cached = -1;
-    if (cached == -1)
-    {
-        WCHAR path[MAX_PATH];
-        GetModuleFileNameW( NULL, path, MAX_PATH );
-        cached = (wcsstr( path, L"Calculator" ) || wcsstr( path, L"calc" )) ? 1 : 0;
-    }
-    return cached;
+    return xaml_package_family_is( L"Microsoft.WindowsCalculator" );
 }
 
 BOOL is_store_app( void )
 {
-    static int cached = -1;
-    if (cached == -1)
-    {
-        WCHAR path[MAX_PATH];
-        GetModuleFileNameW( NULL, path, MAX_PATH );
-        cached = (wcsstr( path, L"WinStore" ) || wcsstr( path, L"WindowsStore" )) ? 1 : 0;
-    }
-    return cached;
+    return xaml_package_family_is( L"Microsoft.WindowsStore" );
 }
 
 BOOL is_uwp_xaml_app( void )
@@ -1927,14 +2184,7 @@ void *uwp_get_app_outer( void )
 
 static BOOL is_whatsapp_app( void )
 {
-    static int cached = -1;
-    if (cached == -1)
-    {
-        WCHAR path[MAX_PATH];
-        GetModuleFileNameW( NULL, path, MAX_PATH );
-        cached = (wcsstr( path, L"WhatsApp" ) || wcsstr( path, L"whatsapp" )) ? 1 : 0;
-    }
-    return cached;
+    return xaml_package_family_is( L"5319275A.WhatsAppDesktop" );
 }
 
 static WNDPROC xaml_corewindow_prev_proc;
@@ -2112,12 +2362,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     {
         HWND top = GetAncestor( hwnd, GA_ROOT );
         static HICON big_icon, small_icon;
-        if (is_calculator_app())
-            SetWindowTextW( top, L"Calculator" );
-        else if (is_store_app())
-            SetWindowTextW( top, L"Microsoft Store" );
-        else if (is_whatsapp_app())
-            SetWindowTextW( top, L"WhatsApp" );
+        const WCHAR *title = xaml_package_display_name();
+        if (title) SetWindowTextW( top, title );
         if (!big_icon)
             big_icon = LoadImageW( 0, (LPCWSTR)IDI_APPLICATION, IMAGE_ICON, 32, 32, LR_SHARED );
         if (!small_icon)
