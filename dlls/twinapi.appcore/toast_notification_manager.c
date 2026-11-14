@@ -57,6 +57,26 @@ WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
         return IInspectable_GetTrustLevel( (IInspectable *)(base_expr), trust_level );                \
     }
 
+/* IInspectable::GetIids over a fixed list of the interfaces the object
+ * answers for in QueryInterface. The caller frees the array with CoTaskMemFree. */
+static HRESULT notifications_get_iids( const IID *const *iids, ULONG count, ULONG *iid_count, IID **out )
+{
+    IID *arr;
+    ULONG i;
+
+    if (!count)
+    {
+        *iid_count = 0;
+        *out = NULL;
+        return S_OK;
+    }
+    if (!(arr = CoTaskMemAlloc( count * sizeof(*arr) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < count; ++i) arr[i] = *iids[i];
+    *iid_count = count;
+    *out = arr;
+    return S_OK;
+}
+
 /*
  * Template documents served by ToastNotificationManager::GetTemplateContent.
  * The layout matches the Windows templates (toast/visual/binding, numbered
@@ -439,9 +459,9 @@ HRESULT toast_xml_first_attribute( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocumen
         hr = IXmlDocument_GetElementsByTagName( doc, tag_name, &list );
     if (SUCCEEDED( hr )) hr = IXmlNodeList_get_Length( list, &length );
     if (SUCCEEDED( hr ) && length) hr = IXmlNodeList_Item( list, 0, &node );
-    if (SUCCEEDED( hr ))
+    if (SUCCEEDED( hr ) && node)
         hr = IInspectable_QueryInterface( (IInspectable *)node, &IID_IXmlElement, (void **)&element );
-    if (SUCCEEDED( hr )) hr = IXmlElement_GetAttribute( element, attr_name, value );
+    if (SUCCEEDED( hr ) && element) hr = IXmlElement_GetAttribute( element, attr_name, value );
 
     if (element) IInspectable_Release( (IInspectable *)element );
     if (node) IInspectable_Release( (IInspectable *)node );
@@ -589,6 +609,7 @@ static inline struct toast_notification *impl_from_IToastNotification( IToastNot
 }
 
 static void toast_notifier_drain_events( void );
+static void toast_history_add( IToastNotification *toast );
 
 /* ToastNotifications currently visible in the notification daemon, keyed by
  * the daemon-assigned id carried in ActionInvoked/NotificationClosed. */
@@ -645,8 +666,13 @@ static ULONG WINAPI toast_notifier_Release( IToastNotifier *iface )
 
 static HRESULT WINAPI toast_notifier_GetIids( IToastNotifier *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID *const iids_arr[] =
+    {
+        &IID_IToastNotifier,
+    };
+
+    if (!iid_count || !iids) return E_POINTER;
+    return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
 }
 
 static HRESULT WINAPI toast_notifier_GetRuntimeClassName( IToastNotifier *iface, HSTRING *class_name )
@@ -685,6 +711,10 @@ static HRESULT WINAPI toast_notifier_Show( IToastNotifier *iface,
     WindowsDeleteString( impl->launch_args );
     impl->launch_args = payload.launch;
     payload.launch = NULL;
+
+    /* Showing a toast puts it in the app's notification history, whether or not
+     * a notification daemon answered to display it. */
+    toast_history_add( notification );
 
     params.app_name = L"Wine Application";
     params.icon = payload.image ? WindowsGetStringRawBuffer( payload.image, NULL ) : NULL;
@@ -1196,6 +1226,782 @@ static HRESULT create_toast_notifier( __x_ABI_CWindows_CUI_CNotifications_CIToas
     return S_OK;
 }
 
+/*
+ * Windows.UI.Notifications.ToastNotificationHistory
+ * (IToastNotificationHistory 5caddc63-01d3-4c97-986f-0533483fee14,
+ *  IToastNotificationHistory2 3bc3d253-2f31-4092-9129-8ad5abf067da):
+ * the store of toasts this app has shown. The FreeDesktop bridge keeps no
+ * history of its own, so the manager owns the list: IToastNotifier::Show
+ * records every toast it is handed, replacing the entry carrying the same
+ * tag/group the way Windows does, and the history accessors read from and
+ * prune that list. A NULL tag or group in a Remove() call is the wildcard,
+ * matching every toast on the other dimension, as on Windows.
+ *
+ * GetHistory() snapshots the list into an IVectorView<ToastNotification>,
+ * answered with the closed IIterable<ToastNotification> pinterface on the same
+ * object because the C# projection enumerates IReadOnlyList<T> through
+ * IEnumerable<T>; see the scheduled set above for the same requirement.
+ */
+struct toast_history_entry
+{
+    struct list entry;
+    IToastNotification *toast;
+    HSTRING tag, group;
+};
+
+static struct list toast_history = LIST_INIT( toast_history );
+
+static BOOLEAN toast_history_matches( HSTRING a, HSTRING b )
+{
+    const WCHAR *raw_a, *raw_b;
+    UINT32 len_a = 0, len_b = 0;
+
+    if (a == b) return TRUE;
+    if (!a || !b) return FALSE;
+    raw_a = WindowsGetStringRawBuffer( a, &len_a );
+    raw_b = WindowsGetStringRawBuffer( b, &len_b );
+    return len_a == len_b && !memcmp( raw_a, raw_b, len_a * sizeof(*raw_a) );
+}
+
+static void toast_history_add( IToastNotification *toast )
+{
+    __x_ABI_CWindows_CUI_CNotifications_CIToastNotification2 *toast2;
+    struct toast_history_entry *entry, *next;
+    HSTRING tag = NULL, group = NULL;
+
+    if (SUCCEEDED( IToastNotification_QueryInterface( toast, &IID_IToastNotification2, (void **)&toast2 ) ))
+    {
+        IToastNotification2_get_Tag( toast2, &tag );
+        IToastNotification2_get_Group( toast2, &group );
+        IToastNotification2_Release( toast2 );
+    }
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &toast_history, struct toast_history_entry, entry )
+    {
+        if (!toast_history_matches( entry->tag, tag ) || !toast_history_matches( entry->group, group ))
+            continue;
+        list_remove( &entry->entry );
+        IToastNotification_Release( entry->toast );
+        WindowsDeleteString( entry->tag );
+        WindowsDeleteString( entry->group );
+        free( entry );
+    }
+
+    if (!(entry = malloc( sizeof(*entry) )))
+    {
+        WindowsDeleteString( tag );
+        WindowsDeleteString( group );
+        return;
+    }
+    list_init( &entry->entry );
+    entry->toast = toast;
+    entry->tag = tag;      /* the dups handed out by get_Tag/get_Group, owned here */
+    entry->group = group;
+    IToastNotification_AddRef( toast );
+    list_add_tail( &toast_history, &entry->entry );
+}
+
+/* Drop the history entries matching tag and group; NULL matches anything. */
+static void toast_history_prune( HSTRING tag, HSTRING group )
+{
+    struct toast_history_entry *entry, *next;
+
+    LIST_FOR_EACH_ENTRY_SAFE( entry, next, &toast_history, struct toast_history_entry, entry )
+    {
+        if (tag && !toast_history_matches( entry->tag, tag )) continue;
+        if (group && !toast_history_matches( entry->group, group )) continue;
+        list_remove( &entry->entry );
+        IToastNotification_Release( entry->toast );
+        WindowsDeleteString( entry->tag );
+        WindowsDeleteString( entry->group );
+        free( entry );
+    }
+}
+
+/*
+ * IVectorView<ToastNotification>/IIterable<ToastNotification> snapshot of the
+ * history taken at GetHistory() time; it owns a reference on each toast.
+ */
+struct toast_snapshot_vector
+{
+    __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface;
+    __FIIterable_1_Windows__CUI__CNotifications__CToastNotification
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification_iface;
+    IToastNotification **items;
+    UINT32 size;
+    LONG ref;
+};
+
+static inline struct toast_snapshot_vector *impl_from_FIVectorView_ToastNotification(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    return CONTAINING_RECORD( iface, struct toast_snapshot_vector,
+            __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface );
+}
+
+static inline struct toast_snapshot_vector *impl_from_FIIterable_ToastNotification(
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    return CONTAINING_RECORD( iface, struct toast_snapshot_vector,
+            __FIIterable_1_Windows__CUI__CNotifications__CToastNotification_iface );
+}
+
+static const struct __FIIterator_1_Windows__CUI__CNotifications__CToastNotificationVtbl
+        history_iterator_vtbl;
+
+struct toast_snapshot_iterator
+{
+    __FIIterator_1_Windows__CUI__CNotifications__CToastNotification
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification_iface;
+    struct toast_snapshot_vector *vector;
+    INT32 index;   /* position of Current, -1 before the first MoveNext */
+    LONG ref;
+};
+
+static inline struct toast_snapshot_iterator *impl_from_FIIterator_ToastNotification(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    return CONTAINING_RECORD( iface, struct toast_snapshot_iterator,
+            __FIIterator_1_Windows__CUI__CNotifications__CToastNotification_iface );
+}
+
+static HRESULT WINAPI history_vector_QueryInterface(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown )
+            || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject )
+            || IsEqualGUID( iid, &IID___FIVectorView_1_Windows__CUI__CNotifications__CToastNotification ))
+    {
+        IUnknown_AddRef( (IUnknown *)iface );
+        *out = iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID___FIIterable_1_Windows__CUI__CNotifications__CToastNotification ))
+    {
+        struct toast_snapshot_vector *impl = impl_from_FIVectorView_ToastNotification( iface );
+
+        IUnknown_AddRef( (IUnknown *)iface );
+        *out = &impl->__FIIterable_1_Windows__CUI__CNotifications__CToastNotification_iface;
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI history_vector_AddRef(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIVectorView_ToastNotification( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI history_vector_Release(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIVectorView_ToastNotification( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        UINT32 i;
+
+        TRACE( "destroying %p\n", iface );
+        for (i = 0; i < impl->size; ++i) IToastNotification_Release( impl->items[i] );
+        free( impl->items );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI history_vector_GetIids(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface, ULONG *iid_count, IID **iids )
+{
+    static const IID *const iids_arr[] =
+    {
+        &IID___FIVectorView_1_Windows__CUI__CNotifications__CToastNotification,
+        &IID___FIIterable_1_Windows__CUI__CNotifications__CToastNotification,
+    };
+
+    if (!iid_count || !iids) return E_POINTER;
+    return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
+}
+
+static HRESULT WINAPI history_vector_GetRuntimeClassName(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IVectorView`1<Windows.UI.Notifications.ToastNotification>";
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
+}
+
+static HRESULT WINAPI history_vector_GetTrustLevel(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI history_vector_GetAt(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface, UINT32 index,
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotification **value )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIVectorView_ToastNotification( iface );
+
+    if (!value) return E_POINTER;
+    if (index >= impl->size) return E_BOUNDS;
+    *value = impl->items[index];
+    IToastNotification_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI history_vector_get_Size(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface, UINT32 *value )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIVectorView_ToastNotification( iface );
+
+    if (!value) return E_POINTER;
+    *value = impl->size;
+    return S_OK;
+}
+
+static HRESULT WINAPI history_vector_IndexOf(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface,
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotification *element, UINT32 *index, BOOLEAN *value )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIVectorView_ToastNotification( iface );
+    UINT32 i;
+
+    if (!index || !value) return E_POINTER;
+    for (i = 0; i < impl->size; ++i)
+    {
+        if (impl->items[i] != (IToastNotification *)element) continue;
+        *index = i;
+        *value = TRUE;
+        return S_OK;
+    }
+    *index = 0;
+    *value = FALSE;
+    return S_OK;
+}
+
+static HRESULT WINAPI history_vector_GetMany(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *iface, UINT32 start_index,
+        UINT32 items_size, __x_ABI_CWindows_CUI_CNotifications_CIToastNotification **items, UINT32 *value )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIVectorView_ToastNotification( iface );
+    UINT32 i = 0;
+
+    if (!value) return E_POINTER;
+    if (items && start_index < impl->size)
+    {
+        for (; i < items_size && start_index + i < impl->size; ++i)
+        {
+            items[i] = impl->items[start_index + i];
+            IToastNotification_AddRef( items[i] );
+        }
+    }
+    *value = i;
+    return S_OK;
+}
+
+static const struct __FIVectorView_1_Windows__CUI__CNotifications__CToastNotificationVtbl history_vector_vtbl =
+{
+    history_vector_QueryInterface,
+    history_vector_AddRef,
+    history_vector_Release,
+    /* IInspectable methods */
+    history_vector_GetIids,
+    history_vector_GetRuntimeClassName,
+    history_vector_GetTrustLevel,
+    /* IVectorView<ToastNotification> methods */
+    history_vector_GetAt,
+    history_vector_get_Size,
+    history_vector_IndexOf,
+    history_vector_GetMany,
+};
+
+static HRESULT WINAPI history_iterable_QueryInterface(
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iface, REFIID iid, void **out )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIIterable_ToastNotification( iface );
+
+    return IUnknown_QueryInterface( (IUnknown *)&impl->
+            __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface, iid, out );
+}
+
+static ULONG WINAPI history_iterable_AddRef(
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIIterable_ToastNotification( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI history_iterable_Release(
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    struct toast_snapshot_vector *impl = impl_from_FIIterable_ToastNotification( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        UINT32 i;
+
+        TRACE( "destroying %p\n", iface );
+        for (i = 0; i < impl->size; ++i) IToastNotification_Release( impl->items[i] );
+        free( impl->items );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI history_iterable_GetIids(
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iface, ULONG *iid_count, IID **iids )
+{
+    static const IID *const iids_arr[] =
+    {
+        &IID___FIVectorView_1_Windows__CUI__CNotifications__CToastNotification,
+        &IID___FIIterable_1_Windows__CUI__CNotifications__CToastNotification,
+    };
+
+    if (!iid_count || !iids) return E_POINTER;
+    return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
+}
+
+static HRESULT WINAPI history_iterable_GetRuntimeClassName(
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IIterable`1<Windows.UI.Notifications.ToastNotification>";
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
+}
+
+static HRESULT WINAPI history_iterable_GetTrustLevel(
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI history_iterable_First(
+        __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iface,
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification **result )
+{
+    struct toast_snapshot_vector *vector = impl_from_FIIterable_ToastNotification( iface );
+    struct toast_snapshot_iterator *impl;
+
+    TRACE( "iface %p, result %p.\n", iface, result );
+
+    if (!result) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+
+    impl->__FIIterator_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_iterator_vtbl;
+    impl->vector = vector;
+    InterlockedIncrement( &vector->ref );
+    impl->index = -1;
+    impl->ref = 1;
+    *result = &impl->__FIIterator_1_Windows__CUI__CNotifications__CToastNotification_iface;
+    return S_OK;
+}
+
+static const struct __FIIterable_1_Windows__CUI__CNotifications__CToastNotificationVtbl history_iterable_vtbl =
+{
+    history_iterable_QueryInterface,
+    history_iterable_AddRef,
+    history_iterable_Release,
+    /* IInspectable methods */
+    history_iterable_GetIids,
+    history_iterable_GetRuntimeClassName,
+    history_iterable_GetTrustLevel,
+    /* IIterable<ToastNotification> methods */
+    history_iterable_First,
+};
+
+static HRESULT WINAPI history_iterator_QueryInterface(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface, REFIID iid, void **out )
+{
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown )
+            || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject )
+            || IsEqualGUID( iid, &IID___FIIterator_1_Windows__CUI__CNotifications__CToastNotification ))
+    {
+        IUnknown_AddRef( (IUnknown *)iface );
+        *out = iface;
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI history_iterator_AddRef(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    struct toast_snapshot_iterator *impl = impl_from_FIIterator_ToastNotification( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI history_iterator_Release(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface )
+{
+    struct toast_snapshot_iterator *impl = impl_from_FIIterator_ToastNotification( iface );
+    LONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        TRACE( "destroying %p\n", iface );
+        InterlockedDecrement( &impl->vector->ref );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI history_iterator_GetIids(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface, ULONG *iid_count, IID **iids )
+{
+    if (!iid_count || !iids) return E_POINTER;
+    *iid_count = 0;
+    *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI history_iterator_GetRuntimeClassName(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.Collections.IIterator`1<Windows.UI.Notifications.ToastNotification>";
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
+}
+
+static HRESULT WINAPI history_iterator_GetTrustLevel(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI history_iterator_get_Current(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface,
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotification **value )
+{
+    struct toast_snapshot_iterator *impl = impl_from_FIIterator_ToastNotification( iface );
+
+    if (!value) return E_POINTER;
+    if (impl->index < 0 || (UINT32)impl->index >= impl->vector->size) return E_BOUNDS;
+    *value = impl->vector->items[impl->index];
+    IToastNotification_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI history_iterator_get_HasCurrent(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface, BOOLEAN *value )
+{
+    struct toast_snapshot_iterator *impl = impl_from_FIIterator_ToastNotification( iface );
+
+    if (!value) return E_POINTER;
+    *value = (impl->index >= 0 && (UINT32)impl->index < impl->vector->size);
+    return S_OK;
+}
+
+static HRESULT WINAPI history_iterator_MoveNext(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface, BOOLEAN *value )
+{
+    struct toast_snapshot_iterator *impl = impl_from_FIIterator_ToastNotification( iface );
+
+    if (!value) return E_POINTER;
+    ++impl->index;
+    *value = (impl->index < (INT32)impl->vector->size);
+    return S_OK;
+}
+
+static HRESULT WINAPI history_iterator_GetMany(
+        __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface, UINT32 size,
+        __x_ABI_CWindows_CUI_CNotifications_CIToastNotification **items, UINT32 *value )
+{
+    struct toast_snapshot_iterator *impl = impl_from_FIIterator_ToastNotification( iface );
+    struct toast_snapshot_vector *vector = impl->vector;
+    UINT32 i = 0;
+
+    if (!value) return E_POINTER;
+    if (items && impl->index >= 0)
+    {
+        for (; i < size && (UINT32)impl->index < vector->size; ++i)
+        {
+            items[i] = vector->items[impl->index];
+            IToastNotification_AddRef( items[i] );
+            ++impl->index;
+        }
+        if (i) --impl->index;   /* leave Current on the last item handed out */
+    }
+    *value = i;
+    return S_OK;
+}
+
+static const struct __FIIterator_1_Windows__CUI__CNotifications__CToastNotificationVtbl history_iterator_vtbl =
+{
+    history_iterator_QueryInterface,
+    history_iterator_AddRef,
+    history_iterator_Release,
+    /* IInspectable methods */
+    history_iterator_GetIids,
+    history_iterator_GetRuntimeClassName,
+    history_iterator_GetTrustLevel,
+    /* IIterator<ToastNotification> methods */
+    history_iterator_get_Current,
+    history_iterator_get_HasCurrent,
+    history_iterator_MoveNext,
+    history_iterator_GetMany,
+};
+
+/* Snapshot of the current history, as IVectorView<ToastNotification>. */
+static HRESULT toast_history_snapshot(
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification **out )
+{
+    struct toast_snapshot_vector *impl;
+    struct toast_history_entry *entry;
+    UINT32 i = 0, size = 0;
+
+    if (!out) return E_POINTER;
+    LIST_FOR_EACH_ENTRY( entry, &toast_history, struct toast_history_entry, entry ) ++size;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_vector_vtbl;
+    impl->__FIIterable_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_iterable_vtbl;
+    impl->ref = 1;
+    impl->size = size;
+
+    if (size && !(impl->items = malloc( size * sizeof(*impl->items) )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+    LIST_FOR_EACH_ENTRY( entry, &toast_history, struct toast_history_entry, entry )
+    {
+        impl->items[i++] = entry->toast;
+        IToastNotification_AddRef( entry->toast );
+    }
+    *out = &impl->__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface;
+    return S_OK;
+}
+
+/*
+ * The history object itself: Windows hands every caller of ToastNotificationManager.History
+ * (or ToastNotificationManagerForUser.History) the app's one history store, so this is a
+ * process-wide singleton, kept alive like the other static objects of the file.
+ */
+struct toast_notification_history
+{
+    IToastNotificationHistory IToastNotificationHistory_iface;
+    IToastNotificationHistory2 IToastNotificationHistory2_iface;
+    LONG ref;
+};
+
+static inline struct toast_notification_history *impl_from_IToastNotificationHistory(
+        IToastNotificationHistory *iface )
+{
+    return CONTAINING_RECORD( iface, struct toast_notification_history, IToastNotificationHistory_iface );
+}
+
+static inline struct toast_notification_history *impl_from_IToastNotificationHistory2(
+        IToastNotificationHistory2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct toast_notification_history, IToastNotificationHistory2_iface );
+}
+
+static HRESULT WINAPI toast_notification_history_QueryInterface( IToastNotificationHistory *iface,
+        REFIID iid, void **out )
+{
+    struct toast_notification_history *impl = impl_from_IToastNotificationHistory( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown )
+            || IsEqualGUID( iid, &IID_IInspectable )
+            || IsEqualGUID( iid, &IID_IAgileObject )
+            || IsEqualGUID( iid, &IID_IToastNotificationHistory ))
+    {
+        IUnknown_AddRef( (IUnknown *)iface );
+        *out = iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IToastNotificationHistory2 ))
+    {
+        IUnknown_AddRef( (IUnknown *)iface );
+        *out = &impl->IToastNotificationHistory2_iface;
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI toast_notification_history_AddRef( IToastNotificationHistory *iface )
+{
+    struct toast_notification_history *impl = impl_from_IToastNotificationHistory( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI toast_notification_history_Release( IToastNotificationHistory *iface )
+{
+    struct toast_notification_history *impl = impl_from_IToastNotificationHistory( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI toast_notification_history_GetIids( IToastNotificationHistory *iface,
+        ULONG *iid_count, IID **iids )
+{
+    static const IID *const iids_arr[] =
+    {
+        &IID_IToastNotificationHistory,
+        &IID_IToastNotificationHistory2,
+    };
+
+    if (!iid_count || !iids) return E_POINTER;
+    return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
+}
+
+static HRESULT WINAPI toast_notification_history_GetRuntimeClassName( IToastNotificationHistory *iface,
+        HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_UI_Notifications_ToastNotificationHistory,
+            ARRAY_SIZE( RuntimeClass_Windows_UI_Notifications_ToastNotificationHistory ) - 1, class_name );
+}
+
+static HRESULT WINAPI toast_notification_history_GetTrustLevel( IToastNotificationHistory *iface,
+        TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI toast_notification_history_RemoveGroup( IToastNotificationHistory *iface, HSTRING group )
+{
+    TRACE( "iface %p, group %s.\n", iface, debugstr_hstring( group ) );
+    toast_history_prune( NULL, group );
+    return S_OK;
+}
+
+static HRESULT WINAPI toast_notification_history_RemoveGroupWithId( IToastNotificationHistory *iface,
+        HSTRING group, HSTRING application_id )
+{
+    TRACE( "iface %p, group %s, application_id %s.\n", iface, debugstr_hstring( group ),
+            debugstr_hstring( application_id ) );
+    toast_history_prune( NULL, group );
+    return S_OK;
+}
+
+static HRESULT WINAPI toast_notification_history_RemoveGroupedTagWithId( IToastNotificationHistory *iface,
+        HSTRING tag, HSTRING group, HSTRING application_id )
+{
+    TRACE( "iface %p, tag %s, group %s, application_id %s.\n", iface, debugstr_hstring( tag ),
+            debugstr_hstring( group ), debugstr_hstring( application_id ) );
+    toast_history_prune( tag, group );
+    return S_OK;
+}
+
+static HRESULT WINAPI toast_notification_history_RemoveGroupedTag( IToastNotificationHistory *iface,
+        HSTRING tag, HSTRING group )
+{
+    TRACE( "iface %p, tag %s, group %s.\n", iface, debugstr_hstring( tag ), debugstr_hstring( group ) );
+    toast_history_prune( tag, group );
+    return S_OK;
+}
+
+static HRESULT WINAPI toast_notification_history_Remove( IToastNotificationHistory *iface, HSTRING tag )
+{
+    TRACE( "iface %p, tag %s.\n", iface, debugstr_hstring( tag ) );
+    toast_history_prune( tag, NULL );
+    return S_OK;
+}
+
+static HRESULT WINAPI toast_notification_history_Clear( IToastNotificationHistory *iface )
+{
+    TRACE( "iface %p.\n", iface );
+    toast_history_prune( NULL, NULL );
+    return S_OK;
+}
+
+static HRESULT WINAPI toast_notification_history_ClearWithId( IToastNotificationHistory *iface,
+        HSTRING application_id )
+{
+    TRACE( "iface %p, application_id %s.\n", iface, debugstr_hstring( application_id ) );
+    toast_history_prune( NULL, NULL );
+    return S_OK;
+}
+
+static const struct IToastNotificationHistoryVtbl toast_notification_history_vtbl =
+{
+    toast_notification_history_QueryInterface,
+    toast_notification_history_AddRef,
+    toast_notification_history_Release,
+    /* IInspectable methods */
+    toast_notification_history_GetIids,
+    toast_notification_history_GetRuntimeClassName,
+    toast_notification_history_GetTrustLevel,
+    /* IToastNotificationHistory methods */
+    toast_notification_history_RemoveGroup,
+    toast_notification_history_RemoveGroupWithId,
+    toast_notification_history_RemoveGroupedTagWithId,
+    toast_notification_history_RemoveGroupedTag,
+    toast_notification_history_Remove,
+    toast_notification_history_Clear,
+    toast_notification_history_ClearWithId,
+};
+
+FORWARD_IINSPECTABLE( toast_notification_history2, IToastNotificationHistory2, struct toast_notification_history,
+        impl_from_IToastNotificationHistory2, &impl->IToastNotificationHistory_iface )
+
+static HRESULT WINAPI toast_notification_history2_GetHistory( IToastNotificationHistory2 *iface,
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification **result )
+{
+    TRACE( "iface %p, result %p.\n", iface, result );
+    return toast_history_snapshot( result );
+}
+
+static HRESULT WINAPI toast_notification_history2_GetHistoryWithId( IToastNotificationHistory2 *iface,
+        HSTRING application_id, __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification **result )
+{
+    TRACE( "iface %p, application_id %s, result %p.\n", iface, debugstr_hstring( application_id ), result );
+    return toast_history_snapshot( result );
+}
+
+static const struct IToastNotificationHistory2Vtbl toast_notification_history2_vtbl =
+{
+    toast_notification_history2_QueryInterface,
+    toast_notification_history2_AddRef,
+    toast_notification_history2_Release,
+    /* IInspectable methods */
+    toast_notification_history2_GetIids,
+    toast_notification_history2_GetRuntimeClassName,
+    toast_notification_history2_GetTrustLevel,
+    /* IToastNotificationHistory2 methods */
+    toast_notification_history2_GetHistory,
+    toast_notification_history2_GetHistoryWithId,
+};
+
+static struct toast_notification_history toast_notification_history =
+{
+    { &toast_notification_history_vtbl },
+    { &toast_notification_history2_vtbl },
+    1
+};
+
+static HRESULT create_toast_notification_history( IToastNotificationHistory **out )
+{
+    if (!out) return E_POINTER;
+    IToastNotificationHistory_AddRef( &toast_notification_history.IToastNotificationHistory_iface );
+    *out = &toast_notification_history.IToastNotificationHistory_iface;
+    return S_OK;
+}
+
 struct toast_notification_manager_statics
 {
     IActivationFactory IActivationFactory_iface;
@@ -1276,8 +2082,16 @@ static ULONG WINAPI toast_notification_manager_statics_factory_Release( IActivat
 static HRESULT WINAPI toast_notification_manager_statics_factory_GetIids( IActivationFactory *iface,
         ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    static const IID *const iids_arr[] =
+    {
+        &IID_IToastNotificationManagerStatics,
+        &IID_IToastNotificationManagerStatics2,
+        &IID_IToastNotificationManagerStatics4,
+        &IID_IToastNotificationManagerStatics5,
+    };
+
+    if (!iid_count || !iids) return E_POINTER;
+    return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
 }
 
 static HRESULT WINAPI toast_notification_manager_statics_factory_GetRuntimeClassName( IActivationFactory *iface,
@@ -1366,10 +2180,8 @@ static const struct IToastNotificationManagerStaticsVtbl toast_notification_mana
  * IToastNotificationManagerStatics4 8f993fd3-e516-45fb-8130-398e93fa52c3:1290,
  * IToastNotificationManagerStatics5 d6f5f569-d40d-407c-8989-88cab42cfd14:1301).
  * The .NET projection of the notification path reaches its notifier through
- * GetDefault()/GetForUser(), so those hand out the per-user manager; the toast
- * history is a real store on Windows and is not produced here, so its accessors
- * report E_NOTIMPL instead of answering with an object the tray would drive
- * blind.
+ * GetDefault()/GetForUser(), so those hand out the per-user manager; History()
+ * hands out the app-wide toast store kept by IToastNotifier::Show above.
  */
 static inline struct toast_notification_manager_statics *impl_from_IToastNotificationManagerStatics2(
         IToastNotificationManagerStatics2 *iface )
@@ -1401,8 +2213,8 @@ FORWARD_IINSPECTABLE( toast_notification_manager_statics5, IToastNotificationMan
 static HRESULT WINAPI toast_notification_manager_statics2_get_History(
         IToastNotificationManagerStatics2 *iface, IToastNotificationHistory **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    TRACE( "iface %p, value %p.\n", iface, value );
+    return create_toast_notification_history( value );
 }
 
 static const struct IToastNotificationManagerStatics2Vtbl toast_notification_manager_statics2_vtbl =
@@ -1424,7 +2236,8 @@ static HRESULT WINAPI toast_notification_manager_statics4_GetForUser( IToastNoti
     TRACE( "iface %p, user %p, result %p.\n", iface, user, result );
 
     /* A prefix has one interactive user and no user identity to key on, so every
-     * user's manager is the same functional surface. */
+     * user's manager is the same functional surface.
+ */
     return create_toast_notification_manager_for_user( result );
 }
 
@@ -1473,9 +2286,9 @@ static const struct IToastNotificationManagerStatics5Vtbl toast_notification_man
 /*
  * Windows.UI.Notifications.ToastNotificationManagerForUser
  * (IToastNotificationManagerForUser 79ab57f6-43fe-487b-8a7f-99567200ae94:1228):
- * the per-user notifier factory.  The history and user accessors report
- * E_NOTIMPL, the honest marker for the store and the identity this prefix has
- * no answer for.
+ * the per-user notifier factory.  History() hands out the same app-wide toast
+ * store as the statics; the user accessor reports E_NOTIMPL, the honest marker
+ * for the identity this prefix has no answer for.
  */
 struct toast_notification_manager_for_user
 {
@@ -1566,8 +2379,8 @@ static HRESULT WINAPI for_user_CreateToastNotifierWithId( IToastNotificationMana
 static HRESULT WINAPI for_user_get_History( IToastNotificationManagerForUser *iface,
         IToastNotificationHistory **value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    TRACE( "iface %p, value %p.\n", iface, value );
+    return create_toast_notification_history( value );
 }
 
 static HRESULT WINAPI for_user_get_User( IToastNotificationManagerForUser *iface,

@@ -293,6 +293,30 @@ static const void *dummy_async_info_vtbl[] =
 
 static struct dummy_async_impl dummy_async = { dummy_async_op_vtbl, dummy_async_info_vtbl };
 
+static HRESULT WINAPI dummy_async_bool_GetResults( void *iface, boolean *results )
+{
+    if (results) *results = TRUE;
+    return S_OK;
+}
+static const void *dummy_async_bool_op_vtbl[] =
+{
+    dummy_async_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    dummy_async_put_Completed,
+    dummy_async_get_Completed,
+    dummy_async_bool_GetResults,
+};
+static struct dummy_async_impl dummy_async_bool = { dummy_async_bool_op_vtbl, dummy_async_info_vtbl };
+
+void *get_dummy_async_bool( void )
+{
+    return (void *)&dummy_async_bool.vtbl_op;
+}
+
 /* Push Notification Channel Manager */
 static HRESULT WINAPI push_notification_add_ChannelsRevoked( void *iface, void *handler, EventRegistrationToken *token )
 {
@@ -364,7 +388,27 @@ static HRESULT WINAPI push_notification_statics4_QueryInterface( void *iface, RE
 
 static ULONG WINAPI push_notification_factory_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI push_notification_factory_Release( void *iface ) { return 1; }
-static HRESULT WINAPI push_notification_factory_GetIids( void *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
+static HRESULT WINAPI push_notification_factory_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    /* {8baf9b65-77a1-4588-bd19-861529a9dcf0} */
+    static const IID IID_IPushNotificationChannelManagerStatics = {0x8baf9b65, 0x77a1, 0x4588, {0xbd, 0x19, 0x86, 0x15, 0x29, 0xa9, 0xdc, 0xf0}};
+    /* the statics and the statics4 surface the factory answers for */
+    static const IID IID_IPushNotificationChannelManagerStatics4 = {0xbc540efb, 0x7820, 0x5a5b, {0x9c, 0x01, 0xb4, 0x75, 0x7f, 0x77, 0x40, 0x25}};
+    static const IID *const iids_arr[] =
+    {
+        &IID_IPushNotificationChannelManagerStatics,
+        &IID_IPushNotificationChannelManagerStatics4,
+    };
+    IID *arr;
+    ULONG i;
+
+    if (!count || !iids) return E_POINTER;
+    if (!(arr = CoTaskMemAlloc( ARRAY_SIZE( iids_arr ) * sizeof(*arr) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < ARRAY_SIZE( iids_arr ); ++i) arr[i] = *iids_arr[i];
+    *count = ARRAY_SIZE( iids_arr );
+    *iids = arr;
+    return S_OK;
+}
 static HRESULT WINAPI push_notification_factory_GetRuntimeClassName( void *iface, HSTRING *name )
 {
     return WindowsCreateString( L"Windows.Networking.PushNotifications.PushNotificationChannelManager", 59, name );

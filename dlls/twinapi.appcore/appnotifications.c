@@ -42,6 +42,8 @@ const IID IID___x_ABI_CMicrosoft_CWindows_CAppNotifications_CIAppNotificationMan
         {0xf90c357c, 0x1266, 0x0d53, {0xe0, 0x3d, 0xf1, 0x1c, 0x72, 0x03, 0xa4, 0xd4}};
 const IID IID___x_ABI_CMicrosoft_CWindows_CAppNotifications_CIAppNotificationManagerStatics2 =
         {0xfca74de0, 0xebf0, 0x71a8, {0x92, 0xda, 0xf4, 0x4a, 0xea, 0xc3, 0x18, 0xcd}};
+const IID IID___FIAsyncOperation_1_AppNotificationProgressResult =
+        {0xaa739d3f, 0xd458, 0x5d30, {0xb2, 0x92, 0xde, 0x6d, 0x52, 0x97, 0x9e, 0xb4}};
 
 /* IInspectable forwarder for secondary interfaces (shared with
  * toast_notification_manager.c, duplicated for locality). */
@@ -951,16 +953,363 @@ static HRESULT WINAPI app_notification_manager_ShowWithId( IAppNotificationManag
     return show_app_notification( impl, notification );
 }
 
+/*
+ * Completed async operations
+ *
+ * The removal and update calls of the manager are asynchronous on Windows and
+ * the C# projection awaits them, so each answers an operation that is already
+ * in the Completed state: get_Status reports Completed, GetResults succeeds,
+ * and put_Completed invokes the handler inline. Nothing blocks on a remote
+ * notification endpoint and no caller thread parks.
+ *
+ * One object carries both flavours asked for here, IAsyncAction and
+ * IAsyncOperation<AppNotificationProgressResult>, plus the IAsyncInfo side of
+ * both; the manager hands out the flavour each call is declared with.
+ */
+struct completed_async
+{
+    IAsyncAction IAsyncAction_iface;
+    __FIAsyncOperation_1_AppNotificationProgressResult op_iface;
+    IAsyncInfo IAsyncInfo_iface;
+    LONG ref;
+    IAsyncActionCompletedHandler *action_handler;
+    __FIAsyncOperationCompletedHandler_1_AppNotificationProgressResult *op_handler;
+};
+
+static inline struct completed_async *impl_from_completed_IAsyncAction( IAsyncAction *iface )
+{
+    return CONTAINING_RECORD( iface, struct completed_async, IAsyncAction_iface );
+}
+
+static inline struct completed_async *impl_from_completed_op(
+        __FIAsyncOperation_1_AppNotificationProgressResult *iface )
+{
+    return CONTAINING_RECORD( iface, struct completed_async, op_iface );
+}
+
+static inline struct completed_async *impl_from_completed_IAsyncInfo( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct completed_async, IAsyncInfo_iface );
+}
+
+#define COMPLETED_ASYNC_QI( pfx, iface_type, impl_from )                                              \
+    static HRESULT WINAPI pfx##_QueryInterface( iface_type *iface, REFIID iid, void **out )            \
+    {                                                                                                  \
+        struct completed_async *impl = impl_from( iface );                                             \
+                                                                                                       \
+        TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );                      \
+                                                                                                       \
+        if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable )                 \
+                || IsEqualGUID( iid, &IID_IAgileObject ))                                              \
+        {                                                                                              \
+            IUnknown_AddRef( (IUnknown *)iface );                                                      \
+            *out = iface;                                                                              \
+            return S_OK;                                                                               \
+        }                                                                                              \
+                                                                                                       \
+        if (IsEqualGUID( iid, &IID_IAsyncAction ))                                                     \
+        {                                                                                              \
+            IUnknown_AddRef( (IUnknown *)&impl->IAsyncAction_iface );                                  \
+            *out = &impl->IAsyncAction_iface;                                                          \
+            return S_OK;                                                                               \
+        }                                                                                              \
+                                                                                                       \
+        if (IsEqualGUID( iid, &IID_IAsyncInfo ))                                                       \
+        {                                                                                              \
+            IUnknown_AddRef( (IUnknown *)&impl->IAsyncInfo_iface );                                    \
+            *out = &impl->IAsyncInfo_iface;                                                            \
+            return S_OK;                                                                               \
+        }                                                                                              \
+                                                                                                       \
+        if (IsEqualGUID( iid, &IID___FIAsyncOperation_1_AppNotificationProgressResult ))               \
+        {                                                                                              \
+            IUnknown_AddRef( (IUnknown *)&impl->op_iface );                                            \
+            *out = &impl->op_iface;                                                                    \
+            return S_OK;                                                                               \
+        }                                                                                              \
+                                                                                                       \
+        FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );               \
+        *out = NULL;                                                                                   \
+        return E_NOINTERFACE;                                                                          \
+    }
+
+#define COMPLETED_ASYNC_REFCOUNT( pfx, iface_type, impl_from )                                        \
+    static ULONG WINAPI pfx##_AddRef( iface_type *iface )                                              \
+    {                                                                                                  \
+        struct completed_async *impl = impl_from( iface );                                             \
+        return InterlockedIncrement( &impl->ref );                                                     \
+    }                                                                                                  \
+    static ULONG WINAPI pfx##_Release( iface_type *iface )                                             \
+    {                                                                                                  \
+        struct completed_async *impl = impl_from( iface );                                             \
+        LONG ref = InterlockedDecrement( &impl->ref );                                                 \
+                                                                                                       \
+        if (!ref)                                                                                      \
+        {                                                                                              \
+            TRACE( "destroying %p\n", iface );                                                         \
+            if (impl->action_handler) IUnknown_Release( (IUnknown *)impl->action_handler );            \
+            if (impl->op_handler) IUnknown_Release( (IUnknown *)impl->op_handler );                    \
+            free( impl );                                                                              \
+        }                                                                                              \
+        return ref;                                                                                    \
+    }
+
+COMPLETED_ASYNC_QI( completed_action, IAsyncAction, impl_from_completed_IAsyncAction )
+COMPLETED_ASYNC_QI( completed_op, __FIAsyncOperation_1_AppNotificationProgressResult, impl_from_completed_op )
+COMPLETED_ASYNC_QI( completed_info, IAsyncInfo, impl_from_completed_IAsyncInfo )
+
+COMPLETED_ASYNC_REFCOUNT( completed_action, IAsyncAction, impl_from_completed_IAsyncAction )
+COMPLETED_ASYNC_REFCOUNT( completed_op, __FIAsyncOperation_1_AppNotificationProgressResult, impl_from_completed_op )
+COMPLETED_ASYNC_REFCOUNT( completed_info, IAsyncInfo, impl_from_completed_IAsyncInfo )
+
+static HRESULT completed_async_dup_iids( const IID *const *iids, ULONG count, ULONG *iid_count, IID **out )
+{
+    IID *arr;
+    ULONG i;
+
+    if (!(arr = CoTaskMemAlloc( count * sizeof(*arr) ))) return E_OUTOFMEMORY;
+    for (i = 0; i < count; ++i) arr[i] = *iids[i];
+    *iid_count = count;
+    *out = arr;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_action_GetIids( IAsyncAction *iface, ULONG *iid_count, IID **iids )
+{
+    static const IID *const iids_arr[] = { &IID_IAsyncAction, &IID_IAsyncInfo };
+    if (!iid_count || !iids) return E_POINTER;
+    return completed_async_dup_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
+}
+
+static HRESULT WINAPI completed_op_GetIids( __FIAsyncOperation_1_AppNotificationProgressResult *iface,
+        ULONG *iid_count, IID **iids )
+{
+    static const IID *const iids_arr[] =
+    {
+        &IID___FIAsyncOperation_1_AppNotificationProgressResult,
+        &IID_IAsyncInfo,
+    };
+    if (!iid_count || !iids) return E_POINTER;
+    return completed_async_dup_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
+}
+
+static HRESULT WINAPI completed_info_GetIids( IAsyncInfo *iface, ULONG *iid_count, IID **iids )
+{
+    static const IID *const iids_arr[] = { &IID_IAsyncInfo };
+    if (!iid_count || !iids) return E_POINTER;
+    return completed_async_dup_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
+}
+
+static HRESULT WINAPI completed_action_GetRuntimeClassName( IAsyncAction *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.IAsyncAction";
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
+}
+
+static HRESULT WINAPI completed_op_GetRuntimeClassName(
+        __FIAsyncOperation_1_AppNotificationProgressResult *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.IAsyncOperation`1<Microsoft.Windows.AppNotifications.AppNotificationProgressResult>";
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
+}
+
+static HRESULT WINAPI completed_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.IAsyncInfo";
+    return WindowsCreateString( name, ARRAY_SIZE( name ) - 1, class_name );
+}
+
+static HRESULT WINAPI completed_action_GetTrustLevel( IAsyncAction *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_op_GetTrustLevel( __FIAsyncOperation_1_AppNotificationProgressResult *iface,
+        TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_action_put_Completed( IAsyncAction *iface,
+        IAsyncActionCompletedHandler *handler )
+{
+    struct completed_async *impl = impl_from_completed_IAsyncAction( iface );
+
+    TRACE( "iface %p, handler %p.\n", iface, handler );
+
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    if (impl->action_handler) IUnknown_Release( (IUnknown *)impl->action_handler );
+    impl->action_handler = handler;
+    /* The operation is already done: report it to the handler inline. */
+    if (handler) IAsyncActionCompletedHandler_Invoke( handler, iface, Completed );
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_action_get_Completed( IAsyncAction *iface,
+        IAsyncActionCompletedHandler **handler )
+{
+    struct completed_async *impl = impl_from_completed_IAsyncAction( iface );
+
+    if (!handler) return E_POINTER;
+    if (impl->action_handler) IUnknown_AddRef( (IUnknown *)impl->action_handler );
+    *handler = impl->action_handler;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_action_GetResults( IAsyncAction *iface )
+{
+    TRACE( "iface %p.\n", iface );
+    return S_OK;
+}
+
+static const struct IAsyncActionVtbl completed_action_vtbl =
+{
+    completed_action_QueryInterface,
+    completed_action_AddRef,
+    completed_action_Release,
+    completed_action_GetIids,
+    completed_action_GetRuntimeClassName,
+    completed_action_GetTrustLevel,
+    completed_action_put_Completed,
+    completed_action_get_Completed,
+    completed_action_GetResults,
+};
+
+static HRESULT WINAPI completed_op_put_Completed( __FIAsyncOperation_1_AppNotificationProgressResult *iface,
+        __FIAsyncOperationCompletedHandler_1_AppNotificationProgressResult *handler )
+{
+    struct completed_async *impl = impl_from_completed_op( iface );
+
+    TRACE( "iface %p, handler %p.\n", iface, handler );
+
+    if (handler) IUnknown_AddRef( (IUnknown *)handler );
+    if (impl->op_handler) IUnknown_Release( (IUnknown *)impl->op_handler );
+    impl->op_handler = handler;
+    if (handler)
+        __FIAsyncOperationCompletedHandler_1_AppNotificationProgressResult_Invoke( handler, iface, Completed );
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_op_get_Completed( __FIAsyncOperation_1_AppNotificationProgressResult *iface,
+        __FIAsyncOperationCompletedHandler_1_AppNotificationProgressResult **handler )
+{
+    struct completed_async *impl = impl_from_completed_op( iface );
+
+    if (!handler) return E_POINTER;
+    if (impl->op_handler) IUnknown_AddRef( (IUnknown *)impl->op_handler );
+    *handler = impl->op_handler;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_op_GetResults( __FIAsyncOperation_1_AppNotificationProgressResult *iface,
+        __x_ABI_CMicrosoft_CWindows_CAppNotifications_CAppNotificationProgressResult *value )
+{
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = AppNotificationProgressResult_AppNotificationProgressResult_UserDismissed;
+    return S_OK;
+}
+
+static const struct __FIAsyncOperation_1_AppNotificationProgressResultVtbl completed_op_vtbl =
+{
+    completed_op_QueryInterface,
+    completed_op_AddRef,
+    completed_op_Release,
+    completed_op_GetIids,
+    completed_op_GetRuntimeClassName,
+    completed_op_GetTrustLevel,
+    completed_op_put_Completed,
+    completed_op_get_Completed,
+    completed_op_GetResults,
+};
+
+static HRESULT WINAPI completed_info_get_Id( IAsyncInfo *iface, UINT32 *id )
+{
+    if (!id) return E_POINTER;
+    *id = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_info_get_Status( IAsyncInfo *iface, AsyncStatus *status )
+{
+    if (!status) return E_POINTER;
+    *status = Completed;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *error_code )
+{
+    if (!error_code) return E_POINTER;
+    *error_code = S_OK;
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_info_Cancel( IAsyncInfo *iface )
+{
+    TRACE( "iface %p.\n", iface );
+    return S_OK;
+}
+
+static HRESULT WINAPI completed_info_Close( IAsyncInfo *iface )
+{
+    TRACE( "iface %p.\n", iface );
+    return S_OK;
+}
+
+static const struct IAsyncInfoVtbl completed_info_vtbl =
+{
+    completed_info_QueryInterface,
+    completed_info_AddRef,
+    completed_info_Release,
+    completed_info_GetIids,
+    completed_info_GetRuntimeClassName,
+    completed_info_GetTrustLevel,
+    completed_info_get_Id,
+    completed_info_get_Status,
+    completed_info_get_ErrorCode,
+    completed_info_Cancel,
+    completed_info_Close,
+};
+
+/* Hand out one operation that has already completed. */
+static HRESULT create_completed_async( IAsyncAction **action,
+        __FIAsyncOperation_1_AppNotificationProgressResult **op )
+{
+    struct completed_async *impl;
+
+    if (!action && !op) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+
+    impl->IAsyncAction_iface.lpVtbl = &completed_action_vtbl;
+    impl->op_iface.lpVtbl = &completed_op_vtbl;
+    impl->IAsyncInfo_iface.lpVtbl = &completed_info_vtbl;
+    impl->ref = 1;
+    if (action) *action = &impl->IAsyncAction_iface;
+    if (op) *op = &impl->op_iface;
+    return S_OK;
+}
+
 static HRESULT WINAPI app_notification_manager_RemoveByIdAsync( IAppNotificationManager *iface,
         UINT32 notification_id, IAsyncAction **value )
 {
     struct fd_close_params close_params = { notification_id };
+    HRESULT hr;
 
     TRACE( "iface %p, notification_id %u, value %p.\n", iface, notification_id, value );
 
     if (close_params.id) TWINAPI_CALL( fd_close, &close_params );
-    if (value) *value = NULL;
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    hr = create_completed_async( value, NULL );
+    return hr;
 }
 
 static HRESULT WINAPI app_notification_manager_get_Setting( IAppNotificationManager *iface,
@@ -978,8 +1327,8 @@ static HRESULT WINAPI app_notification_manager_RemoveByTagAsync( IAppNotificatio
 {
     TRACE( "iface %p, tag %s, value %p.\n", iface, debugstr_hstring( tag ), value );
 
-    if (value) *value = NULL;
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    return create_completed_async( value, NULL );
 }
 
 static HRESULT WINAPI app_notification_manager_RemoveByTagAndGroupAsync( IAppNotificationManager *iface,
@@ -988,17 +1337,29 @@ static HRESULT WINAPI app_notification_manager_RemoveByTagAndGroupAsync( IAppNot
     TRACE( "iface %p, tag %s, group %s, value %p.\n", iface, debugstr_hstring( tag ),
             debugstr_hstring( group ), value );
 
-    if (value) *value = NULL;
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    return create_completed_async( value, NULL );
 }
 
 static HRESULT WINAPI app_notification_manager_RemoveAllAsync( IAppNotificationManager *iface,
         IAsyncAction **value )
 {
+    struct app_notification *obj, *next;
+    struct fd_close_params close_params;
+
     TRACE( "iface %p, value %p.\n", iface, value );
 
-    if (value) *value = NULL;
-    return E_NOTIMPL;
+    LIST_FOR_EACH_ENTRY_SAFE( obj, next, &shown_app_notifications, struct app_notification, shown_entry )
+    {
+        close_params.id = obj->fd_id;
+        obj->fd_id = 0;
+        if (close_params.id) TWINAPI_CALL( fd_close, &close_params );
+        list_remove( &obj->shown_entry );
+        list_init( &obj->shown_entry );
+        IInspectable_Release( (IInspectable *)obj );
+    }
+    if (!value) return E_POINTER;
+    return create_completed_async( value, NULL );
 }
 
 static HRESULT WINAPI app_notification_manager_UpdateAsync( IAppNotificationManager *iface,
@@ -1008,8 +1369,8 @@ static HRESULT WINAPI app_notification_manager_UpdateAsync( IAppNotificationMana
     TRACE( "iface %p, progress_data %p, tag %s, group %s, value %p.\n", iface, progress_data,
             debugstr_hstring( tag ), debugstr_hstring( group ), value );
 
-    if (value) *value = NULL;
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    return create_completed_async( NULL, value );
 }
 
 static HRESULT WINAPI app_notification_manager_Register2( IAppNotificationManager *iface,

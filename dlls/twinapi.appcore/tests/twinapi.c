@@ -934,13 +934,152 @@ static void test_ToastNotificationManager(void)
         hr = IActivationFactory_QueryInterface( factory, &IID_IToastNotificationManagerStatics2,
                                                 (void **)&statics2 );
         ok( hr == S_OK, "got hr %#lx.\n", hr );
-        /* the history surface is not implemented; the call reports that, it does
-         * not hand out an object the tray path would then drive blind */
+        /* the toast history store: Clear, Show -> GetHistory, Remove */
         {
-            __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationHistory *history = (void *)0x1;
+            __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationHistory *history = NULL;
+            __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationHistory2 *history2;
+            __x_ABI_CWindows_CUI_CNotifications_CIToastNotificationFactory *toast_factory;
+            __x_ABI_CWindows_CUI_CNotifications_CIToastNotification2 *hist_toast2;
+            __x_ABI_CWindows_CUI_CNotifications_CIToastNotification *hist_toast;
+            __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier *hist_notifier;
+            __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification *view;
+            __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *content;
+            IActivationFactory *content_factory, *toast_class_factory;
+            IInspectable *instance;
+            static const WCHAR *xml_class = RuntimeClass_Windows_Data_Xml_Dom_XmlDocument;
+            static const WCHAR *toast_class = RuntimeClass_Windows_UI_Notifications_ToastNotification;
+            static const WCHAR *hist_tag = L"wine.history.test";
+            UINT32 size = 0xc0ffee;
+
             hr = IToastNotificationManagerStatics2_get_History( statics2, &history );
-            ok( hr == E_NOTIMPL || hr == S_OK, "got hr %#lx.\n", hr );
-            if (hr == S_OK && history) IToastNotificationHistory_Release( history );
+            ok( hr == S_OK && history, "got hr %#lx, history %p.\n", hr, history );
+            if (hr != S_OK) goto history_done;
+
+            hr = IToastNotificationHistory_Clear( history );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IToastNotificationHistory_QueryInterface( history, &IID_IToastNotificationHistory2,
+                                                           (void **)&history2 );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IToastNotificationHistory2_GetHistory( history2, &view );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_get_Size( view, &size );
+            ok( hr == S_OK && !size, "got hr %#lx, size %u.\n", hr, size );
+            __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_Release( view );
+            IToastNotificationHistory2_Release( history2 );
+
+            /* show a tagged toast and find it back in the history */
+            hr = WindowsCreateString( xml_class, wcslen( xml_class ), &str );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&content_factory );
+            WindowsDeleteString( str );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IActivationFactory_ActivateInstance( content_factory, &instance );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IInspectable_QueryInterface( instance, &IID_IXmlDocument, (void **)&content );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            IInspectable_Release( instance );
+            IActivationFactory_Release( content_factory );
+
+            hr = WindowsCreateString( toast_class, wcslen( toast_class ), &str );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&toast_class_factory );
+            WindowsDeleteString( str );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IActivationFactory_QueryInterface( toast_class_factory, &IID_IToastNotificationFactory,
+                                                    (void **)&toast_factory );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IToastNotificationFactory_CreateToastNotification( toast_factory, content, &hist_toast );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+            hr = WindowsCreateString( hist_tag, wcslen( hist_tag ), &str );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IToastNotification_QueryInterface( hist_toast, &IID_IToastNotification2,
+                                                    (void **)&hist_toast2 );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IToastNotification2_put_Tag( hist_toast2, str );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+            hr = IToastNotificationManagerStatics_CreateToastNotifier( toast_notification_manager_statics,
+                                                                       &hist_notifier );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Show( hist_notifier, hist_toast );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            /* showing the same tagged toast again replaces its history entry */
+            hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Show( hist_notifier, hist_toast );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+            /* the toast is in the history, and the snapshot is the toast shown */
+            hr = IToastNotificationHistory2_GetHistory( history2, &view );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_get_Size( view, &size );
+            ok( hr == S_OK && size == 1, "got hr %#lx, size %u.\n", hr, size );
+            if (hr == S_OK && size == 1)
+            {
+                __x_ABI_CWindows_CUI_CNotifications_CIToastNotification *shown;
+                IUnknown *shown_unk, *toast_unk;
+
+                hr = __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_GetAt( view, 0, &shown );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                hr = __x_ABI_CWindows_CUI_CNotifications_CIToastNotification_QueryInterface( shown, &IID_IUnknown,
+                                                                                             (void **)&shown_unk );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                hr = IToastNotification_QueryInterface( hist_toast, &IID_IUnknown, (void **)&toast_unk );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                ok( shown_unk == toast_unk, "got shown %p, toast %p.\n", shown_unk, toast_unk );
+                IUnknown_Release( toast_unk );
+                IUnknown_Release( shown_unk );
+                __x_ABI_CWindows_CUI_CNotifications_CIToastNotification_Release( shown );
+            }
+
+            /* the snapshot enumerates: the closed IIterable pinterface is answered */
+            check_interface( view, &IID___FIVectorView_1_Windows__CUI__CNotifications__CToastNotification, TRUE );
+            check_interface( view, &IID___FIIterable_1_Windows__CUI__CNotifications__CToastNotification, TRUE );
+            {
+                __FIIterable_1_Windows__CUI__CNotifications__CToastNotification *iterable;
+                __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iterator;
+                __x_ABI_CWindows_CUI_CNotifications_CIToastNotification *current = NULL;
+                BOOLEAN moved = FALSE;
+
+                hr = __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_QueryInterface(
+                        view, &IID___FIIterable_1_Windows__CUI__CNotifications__CToastNotification,
+                        (void **)&iterable );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                hr = __FIIterable_1_Windows__CUI__CNotifications__CToastNotification_First( iterable, &iterator );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                hr = __FIIterator_1_Windows__CUI__CNotifications__CToastNotification_MoveNext( iterator, &moved );
+                ok( hr == S_OK && moved, "got hr %#lx, moved %d.\n", hr, moved );
+                hr = __FIIterator_1_Windows__CUI__CNotifications__CToastNotification_get_Current( iterator,
+                                                                                                  &current );
+                ok( hr == S_OK && current, "got hr %#lx, current %p.\n", hr, current );
+                __x_ABI_CWindows_CUI_CNotifications_CIToastNotification_Release( current );
+                moved = TRUE;
+                hr = __FIIterator_1_Windows__CUI__CNotifications__CToastNotification_MoveNext( iterator, &moved );
+                ok( hr == S_OK && !moved, "got hr %#lx, moved %d.\n", hr, moved );
+                __FIIterator_1_Windows__CUI__CNotifications__CToastNotification_Release( iterator );
+                __FIIterable_1_Windows__CUI__CNotifications__CToastNotification_Release( iterable );
+            }
+            __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_Release( view );
+
+            /* Remove(tag) prunes the entry by tag, Clear empties the store */
+            hr = IToastNotificationHistory_Remove( history, str );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = IToastNotificationHistory2_GetHistory( history2, &view );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            hr = __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_get_Size( view, &size );
+            ok( hr == S_OK && !size, "got hr %#lx, size %u.\n", hr, size );
+            __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_Release( view );
+            hr = IToastNotificationHistory_Clear( history );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+            IToastNotification2_Release( hist_toast2 );
+            IToastNotification_Release( hist_toast );
+            __x_ABI_CWindows_CUI_CNotifications_CIToastNotifier_Release( hist_notifier );
+            IToastNotificationFactory_Release( toast_factory );
+            IActivationFactory_Release( toast_class_factory );
+            IXmlDocument_Release( content );
+            WindowsDeleteString( str );
+history_done:
+            IToastNotificationHistory_Release( history );
         }
         IToastNotificationManagerStatics2_Release( statics2 );
     }
