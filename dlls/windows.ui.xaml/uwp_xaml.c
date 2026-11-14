@@ -282,7 +282,46 @@ static const GUID IID_IUIE_Extra[] =
     { 0x5ebb51d5, 0x9e58, 0x49b7, { 0xbc, 0x2d, 0x01, 0x55, 0xff, 0x11, 0x86, 0x64 } },
     { 0x3550dbe1, 0xe561, 0x5934, { 0xa3, 0xef, 0x7d, 0xb8, 0xbf, 0x6e, 0x3b, 0x45 } },
     { 0xe194c96a, 0xd8cc, 0x4339, { 0xa0, 0xe1, 0x2e, 0x9c, 0x42, 0x08, 0x79, 0xec } },
+    /* IBinding, IBinding2, IBindingBase, IPropertyPath, IRelativeSource, IStoryboard, IRun */
+    { 0x3f7a0c6b, 0xd00f, 0x4730, { 0x8c, 0x1d, 0x48, 0xe1, 0x6c, 0x46, 0xf9, 0xca } },
+    { 0x34f96fcb, 0x0406, 0x48b3, { 0x9e, 0x82, 0xf3, 0x33, 0xec, 0x4c, 0x69, 0x10 } },
+    { 0x1589a2ab, 0x3d15, 0x49bc, { 0xa4, 0x47, 0x8a, 0x54, 0x48, 0xe5, 0x88, 0x70 } },
+    { 0x300e5d8a, 0x1ff3, 0x4d2c, { 0x95, 0xec, 0x27, 0xf8, 0x1d, 0xeb, 0xac, 0xb8 } },
+    { 0x2397ce84, 0x2822, 0x483a, { 0xb4, 0x99, 0xd0, 0xf0, 0x31, 0xe0, 0x6c, 0x6b } },
+    { 0x0bc465dc, 0xbe4d, 0x4d0d, { 0x95, 0x49, 0x22, 0x08, 0xb7, 0x15, 0xf4, 0x0d } },
+    { 0x59553c83, 0x0e14, 0x49bd, { 0xb8, 0x4b, 0xc5, 0x26, 0xf3, 0x03, 0x43, 0x49 } },
+    /* MenuFlyout, MenuFlyoutItem, Flyout, Hyperlink, RichTextBlock, Storyboard, ValueConverter */
+    { 0xad3210f1, 0x985b, 0x4171, { 0xbb, 0xba, 0x67, 0xbc, 0xc7, 0x29, 0x64, 0x9b } },
+    { 0x507c7bad, 0xd9d1, 0x4c05, { 0x9d, 0x4b, 0xcd, 0xa8, 0xde, 0x9a, 0xb2, 0x42 } },
+    { 0x0ae266eb, 0x028c, 0x4423, { 0xa8, 0xe3, 0x98, 0x9f, 0xd9, 0xdd, 0x71, 0x26 } },
+    { 0x6584ebdf, 0xcbc7, 0x4e19, { 0x84, 0x3a, 0xa1, 0x4f, 0x24, 0xa7, 0x93, 0xea } },
+    { 0xccebaca3, 0x3b5c, 0x4f4c, { 0x9b, 0xfd, 0x86, 0x88, 0x7b, 0xc7, 0x97, 0x72 } },
+    { 0xe5fff9e2, 0xb968, 0x49e7, { 0x97, 0xd4, 0x8c, 0xca, 0x2a, 0xc3, 0xae, 0x7c } },
+    { 0x9c7dc0c6, 0x7a9f, 0x45b6, { 0x88, 0x18, 0x82, 0x2c, 0x54, 0x9b, 0xa0, 0x94 } },
+    { 0xd45c1e6e, 0x3594, 0x460e, { 0x98, 0x1a, 0x32, 0x27, 0x1b, 0xd3, 0xaa, 0x06 } },
+    { 0x7b01c14b, 0xe5e6, 0x3c6e, { 0x9d, 0x1b, 0x93, 0xa4, 0x7c, 0xbf, 0x7d, 0x96 } },
+    /* DataTemplateSelector & StyleSelector interfaces */
+    { 0xa26dd1dc, 0xcd44, 0x435c, { 0xbe, 0x94, 0x01, 0xd6, 0x24, 0x1c, 0x23, 0x1c } },
+    { 0x51ed9d7e, 0x2b53, 0x475b, { 0x9c, 0x88, 0x0c, 0x18, 0x32, 0xc8, 0x35, 0x1a } },
+    { 0x8af77d73, 0xaa01, 0x471e, { 0xbe, 0xdd, 0x8b, 0xad, 0x86, 0x21, 0x9b, 0x77 } },
+    { 0x595e9547, 0xcdff, 0x4b92, { 0xb7, 0x73, 0xab, 0x39, 0x68, 0x78, 0xf3, 0x53 } },
+    { 0xa907d496, 0x46a0, 0x4cd7, { 0x8d, 0xbe, 0xf9, 0xa5, 0x81, 0xdf, 0x60, 0xb1 } },
+    { 0x2d162925, 0x5966, 0x4bfa, { 0x86, 0x38, 0x4d, 0x34, 0x56, 0x89, 0xf6, 0xcf } },
 };
+static const GUID IID_IDataTemplateSelectorFactory_UWP =
+    { 0x511baad0, 0x210a, 0x457d, { 0x95, 0x21, 0x43, 0x3d, 0x2b, 0x11, 0xb7, 0xd2 } };
+static const GUID IID_IStyleSelectorFactory_UWP =
+    { 0x6c3fb5fc, 0x8e84, 0x4c91, { 0xac, 0x15, 0x04, 0xa1, 0xd8, 0x85, 0x50, 0x0f } };
+static const GUID IID_IStateTriggerBaseFactory2_UWP =
+    { 0x970e2c4b, 0xbfaf, 0x47b0, { 0xbe, 0x42, 0xc1, 0xd7, 0x11, 0xbb, 0x2e, 0x9f } };
+static const GUID IID_IBindingFactory_UWP =
+    { 0xff42bb08, 0xc39e, 0x4f7e, { 0x84, 0x34, 0xa1, 0x56, 0x90, 0x83, 0x88, 0x3c } };
+static const GUID IID_IRelativeSourceFactory_UWP =
+    { 0xef8392cd, 0x446e, 0x4f93, { 0xaa, 0xcb, 0x9b, 0x12, 0x55, 0x57, 0x74, 0x60 } };
+static const GUID IID_IRadioButtonFactory_UWP =
+    { 0xf1d04933, 0x34e1, 0x4a5c, { 0xb2, 0xae, 0xca, 0x3b, 0x1c, 0x0b, 0x20, 0xde } };
+static const GUID IID_IPropertyPathFactory_UWP =
+    { 0x4e4cdf99, 0x9826, 0x4e56, { 0x84, 0x7c, 0xca, 0x05, 0x5f, 0x16, 0x29, 0x05 } };
 
 /* ============================================================================
  * 1. PRI v2 (mrm_pri2) Container Reader
@@ -1082,6 +1121,8 @@ struct uwp_element
     int defer_cnt;
     struct uwp_element *next_reg;
     int adopted_faulted_ctor;
+    IInspectable *provider_inst;
+    void *outer_unk;
 };
 
 /* Global registry of live uwp_elements so we can resolve from any interface or outer.
@@ -1117,30 +1158,30 @@ static int uwp_key_to_calc_code( const WCHAR *name, const WCHAR *text )
 {
     if (name)
     {
-        if (!wcscmp( name, L"PercentButton" )) return 95;
-        if (!wcscmp( name, L"ClearEntryButton" )) return 82;
-        if (!wcscmp( name, L"ClearButton" )) return 81;
-        if (!wcscmp( name, L"BackSpaceButton" )) return 83;
-        if (!wcscmp( name, L"divButton" )) return 91;
-        if (!wcscmp( name, L"mulButton" )) return 92;
-        if (!wcscmp( name, L"minusButton" )) return 94;
-        if (!wcscmp( name, L"plusButton" )) return 93;
-        if (!wcscmp( name, L"EqualButton" )) return 121;
-        if (!wcscmp( name, L"SqrtButton" )) return 141;
-        if (!wcscmp( name, L"num0Button" )) return 130;
-        if (!wcscmp( name, L"num1Button" )) return 131;
-        if (!wcscmp( name, L"num2Button" )) return 132;
-        if (!wcscmp( name, L"num3Button" )) return 133;
-        if (!wcscmp( name, L"num4Button" )) return 134;
-        if (!wcscmp( name, L"num5Button" )) return 135;
-        if (!wcscmp( name, L"num6Button" )) return 136;
-        if (!wcscmp( name, L"num7Button" )) return 137;
-        if (!wcscmp( name, L"num8Button" )) return 138;
-        if (!wcscmp( name, L"num9Button" )) return 139;
-        if (!wcscmp( name, L"DecimalSeparatorButton" )) return 90;
-        if (!wcscmp( name, L"NegateButton" )) return 97;
-        if (!wcscmp( name, L"InvertButton" )) return 145;
-        if (!wcscmp( name, L"SquareButton" )) return 143;
+        if (!wcsicmp( name, L"PercentButton" )) return 95;
+        if (!wcsicmp( name, L"ClearEntryButton" )) return 82;
+        if (!wcsicmp( name, L"ClearButton" )) return 81;
+        if (!wcsicmp( name, L"BackSpaceButton" )) return 83;
+        if (!wcsicmp( name, L"divButton" ) || !wcsicmp( name, L"DivideButton" )) return 91;
+        if (!wcsicmp( name, L"mulButton" ) || !wcsicmp( name, L"MultiplyButton" )) return 92;
+        if (!wcsicmp( name, L"minusButton" ) || !wcsicmp( name, L"MinusButton" )) return 94;
+        if (!wcsicmp( name, L"plusButton" ) || !wcsicmp( name, L"PlusButton" )) return 93;
+        if (!wcsicmp( name, L"EqualButton" )) return 121;
+        if (!wcsicmp( name, L"SqrtButton" ) || !wcsicmp( name, L"SquareRootButton" )) return 141;
+        if (!wcsicmp( name, L"num0Button" )) return 130;
+        if (!wcsicmp( name, L"num1Button" )) return 131;
+        if (!wcsicmp( name, L"num2Button" )) return 132;
+        if (!wcsicmp( name, L"num3Button" )) return 133;
+        if (!wcsicmp( name, L"num4Button" )) return 134;
+        if (!wcsicmp( name, L"num5Button" )) return 135;
+        if (!wcsicmp( name, L"num6Button" )) return 136;
+        if (!wcsicmp( name, L"num7Button" )) return 137;
+        if (!wcsicmp( name, L"num8Button" )) return 138;
+        if (!wcsicmp( name, L"num9Button" )) return 139;
+        if (!wcsicmp( name, L"DecimalSeparatorButton" )) return 90;
+        if (!wcsicmp( name, L"NegateButton" )) return 97;
+        if (!wcsicmp( name, L"InvertButton" )) return 145;
+        if (!wcsicmp( name, L"SquareButton" ) || !wcsicmp( name, L"XPower2Button" )) return 143;
     }
     if (text && text[0] && !text[1])
     {
@@ -1171,6 +1212,15 @@ static void uwp_calc_vm_ensure( void )
         TRACE( "uwp_calc_vm_ensure: RoActivateInstance -> %#lx vm %p\n", hr, (void *)g_calc_vm.vm );
         WindowsDeleteString( h );
         if (FAILED(hr)) g_calc_vm.vm = NULL;
+        else if (g_calc_vm.vm)
+        {
+            /* Command::ModeBasic (200 = 0xc8) synchronously allocates m_calculatorManager
+             * (CCalcEngine) at this+392 in CStandardCalculatorManager::SendCommand. */
+            HRESULT (WINAPI *send)(void *, int) = (void *)(*(void ***)g_calc_vm.vm)[79];
+            HRESULT mhr = send ? send( g_calc_vm.vm, 200 ) : E_FAIL;
+            TRACE( "uwp_calc_vm_ensure: SendCommandToCalcManager(200 ModeBasic) -> %#lx\n", mhr );
+            g_calc_vm.pumped = TRUE;
+        }
     }
 }
 
@@ -1254,10 +1304,18 @@ static void uwp_calc_vm_send( int code )
         const WCHAR *s = WindowsGetStringRawBuffer( hval, NULL );
         struct uwp_element *disp = g_navigated_page_el ?
             uwp_find_named( g_navigated_page_el, L"NormalOutput" ) : NULL;
+        struct uwp_element *res = g_navigated_page_el ?
+            uwp_find_named( g_navigated_page_el, L"Results" ) : NULL;
         TRACE( "uwp_calc_vm_send: DisplayValue = %s\n", debugstr_w(s) );
-        if (disp && s)
+        if (s)
         {
-            lstrcpynW( disp->text, s, ARRAY_SIZE(disp->text) );
+            if (disp) lstrcpynW( disp->text, s, ARRAY_SIZE(disp->text) );
+            if (res)
+            {
+                lstrcpynW( res->text, s, ARRAY_SIZE(res->text) );
+                if (res->tpl_normal_output)
+                    lstrcpynW( res->tpl_normal_output->text, s, ARRAY_SIZE(res->tpl_normal_output->text) );
+            }
             uwp_invalidate_window();
         }
         WindowsDeleteString( hval );
@@ -1283,6 +1341,7 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
     for (el = g_all_uwp_elems_head; el; el = el->next_reg)
     {
         if ((void *)ptr == (void *)el->outer ||
+            (void *)ptr == (void *)el->provider_inst ||
             ((char *)ptr >= (char *)el && (char *)ptr < (char *)(el + 1)))
             return el;
     }
@@ -1420,8 +1479,6 @@ static ULONG WINAPI uwp_sub_AddRef( IInspectable *iface )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return 1;
-    if (impl->outer)
-        return IInspectable_AddRef( impl->outer );
     return uwp_nondelegating_AddRef( &impl->nondelegating_iface );
 }
 
@@ -1429,8 +1486,6 @@ static ULONG WINAPI uwp_sub_Release( IInspectable *iface )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (!impl) return 1;
-    if (impl->outer)
-        return IInspectable_Release( impl->outer );
     return uwp_nondelegating_Release( &impl->nondelegating_iface );
 }
 
@@ -3354,6 +3409,7 @@ static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *
  * children by grid_row/grid_col; uwp_paint_element draws each Button with its
  * text label (uwp_format_display_label maps the Segoe MDL2 operator glyphs). */
 static void uwp_seed_synthetic_calculator( struct uwp_element *holder );
+static void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
 
 /* Activate the app's own CalculatorApp.Controls.Calculator through the app's
  * IXamlMetadataProvider (same provider chain as Frame.Navigate page adoption:
@@ -3388,6 +3444,7 @@ static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *hol
             {
                 HRESULT ihr = S_OK;
                 int gen = g_all_uwp_elem_cnt;
+                struct uwp_element *prev_head = g_all_uwp_elems_head;
                 __TRY
                 {
                     ihr = activate( xaml_type, &instance );
@@ -3399,20 +3456,23 @@ static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *hol
                            debugstr_w(names[n]) );
                 }
                 __ENDTRY;
-                el = (instance && SUCCEEDED(ihr)) ? uwp_elem_from_any( instance ) : NULL;
-                if (!el && g_all_uwp_elem_cnt > gen)
+                if (g_all_uwp_elem_cnt > gen)
                 {
                     struct uwp_element *e;
-                    for (e = g_all_uwp_elems_head; e; e = e->next_reg)
-                        if (e->kind == UWP_KIND_USER_CONTROL) { el = e; break; }
+                    for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
+                        if (e->kind == UWP_KIND_USER_CONTROL) el = e;
                 }
+                if (!el && instance && SUCCEEDED(ihr))
+                    el = uwp_elem_from_any( instance );
                 if (el)
                 {
+                    if (instance) el->provider_inst = (IInspectable *)instance;
                     lstrcpynW( el->class_name, L"CalculatorApp.Controls.Calculator", ARRAY_SIZE(el->class_name) );
-                    el->adopted_faulted_ctor = 1;
+                    if (!el->children_coll && !el->content)
+                        el->adopted_faulted_ctor = 1;
                     g_last_created_page = NULL;
-                    TRACE( "uwp_activate_real_calculator: adopting head UserControl (gen %d→%d ihr %#lx)\n",
-                           gen, g_all_uwp_elem_cnt, ihr );
+                    TRACE( "uwp_activate_real_calculator: adopted Calculator UserControl %p (gen %d→%d ihr %#lx children=%p content=%p)\n",
+                           el, gen, g_all_uwp_elem_cnt, ihr, el->children_coll, el->content );
                 }
                 TRACE( "uwp_activate_real_calculator: ActivateInstance(%s) -> hr %#lx inst %p el %p\n",
                        debugstr_w(names[n]), ihr, (void *)instance, el );
@@ -3449,6 +3509,31 @@ static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *hol
                 uwp_seed_synthetic_calculator( uc );
             }
         }
+    }
+    else
+    {
+        /* Real Calculator.xbf tree is present: realize StandardOperators inside
+         * OperatorsPanel so NumberPad.xbf and standard operator buttons load. */
+        struct uwp_element *scan;
+        for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
+        {
+            int d;
+            for (d = 0; d < scan->defer_cnt; d++)
+            {
+                if (!scan->defer_entries[d].realized &&
+                    wcsstr( scan->defer_entries[d].name, L"Standard" ))
+                {
+                    uwp_realize_deferred_entry( &scan->defer_entries[d] );
+                }
+            }
+            if (!wcscmp( scan->name, L"Results" ) && !scan->text[0])
+                lstrcpynW( scan->text, L"0", ARRAY_SIZE(scan->text) );
+            /* Collapse docked History/Memory panel in row 1 so keypad fills height */
+            if (!wcscmp( scan->name, L"DockPanel" ) ||
+                (scan->kind == UWP_KIND_BORDER && scan->grid_row == 1))
+                scan->visibility = 1;
+        }
+        uwp_calc_vm_ensure();
     }
 
     /* Drive the app's InitializeComponent path: guard against the SxS
@@ -3649,8 +3734,10 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x8089: return L"Windows.UI.Xaml.VisualState";
     case 0x808a: return L"Windows.UI.Xaml.VisualStateGroup";
     case 0x80bf: return L"Windows.UI.Xaml.DataTemplate";
+    case 0x80c2: return L"Windows.UI.Xaml.Media.SolidColorBrush";
     case 0x80d2: return L"Windows.UI.Xaml.Media.SolidColorBrush";
-    case 0x80d5: return L"Windows.UI.Xaml.Controls.MenuFlyout";
+    case 0x80d5: return L"Windows.UI.Xaml.Controls.Flyout";
+    case 0x80ee: return L"Windows.UI.Xaml.Controls.MenuFlyout";
     case 0x8106: return L"Windows.UI.Xaml.Setter";
     case 0x811e: return L"Windows.UI.Xaml.Controls.Border";
     case 0x8146: return L"Windows.UI.Xaml.Controls.Image";
@@ -3666,6 +3753,7 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x81bf: return L"Windows.UI.Xaml.Documents.Hyperlink";
     case 0x81e1: return L"Windows.UI.Xaml.Controls.StackPanel";
     case 0x81eb: return L"Windows.UI.Xaml.Controls.UserControl";
+    case 0x8209: return L"Windows.UI.Xaml.Controls.MenuFlyoutItem";
     case 0x820d: return L"Windows.UI.Xaml.Controls.Page";
     case 0x821c: return L"Windows.UI.Xaml.Controls.Button";
     case 0x8222: return L"Windows.UI.Xaml.Controls.HyperlinkButton";
@@ -4041,6 +4129,14 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             if (p + 2 > end_p) break;
             tid = *(const WORD *)(ctx->nodes + p);
             p += 2;
+            if (op == 0x15)
+            {
+                int vt_init = 0;
+                double num_init = 0;
+                WCHAR sbuf_init[128] = {0};
+                if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt_init, &num_init, sbuf_init, ARRAY_SIZE(sbuf_init), NULL ))
+                    break;
+            }
             TRACE( "XBF push op=%#x tid=%#x cls=%s at %lu/%lu (sub %d)\n", op, tid,
                    (tid < ctx->type_cnt) ? debugstr_w(ctx->types[tid].full_name) : "(btype)",
                    (unsigned long)(p - 3), (unsigned long)end_p, sub_idx );
@@ -4079,9 +4175,28 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                     }
                     else
                     {
-                        if (FAILED(uwp_create_instance_from_provider( cls_name, (void **)&inst )) || !inst)
-                            uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
-                        el = uwp_elem_from_any( inst );
+                        struct uwp_element *prev_head = g_all_uwp_elems_head;
+                        HRESULT phr = uwp_create_instance_from_provider( cls_name, (void **)&inst );
+                        if (g_all_uwp_elems_head != prev_head)
+                        {
+                            struct uwp_element *e;
+                            for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
+                                el = e;
+                            if (el)
+                            {
+                                if (inst) el->provider_inst = inst;
+                                else inst = el->outer ? el->outer : &el->IInspectable_iface;
+                                lstrcpynW( el->class_name, cls_name, ARRAY_SIZE(el->class_name) );
+                                el->kind = classify_uwp_class( el->class_name );
+                            }
+                        }
+                        if (FAILED(phr) || !inst)
+                        {
+                            if (!inst) uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
+                            if (!el) el = uwp_elem_from_any( inst );
+                        }
+                        else if (!el)
+                            el = uwp_elem_from_any( inst );
                     }
                 }
                 else
@@ -4159,8 +4274,26 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             if (prop_sp < (int)ARRAY_SIZE(prop_stack))
                 prop_stack[prop_sp++] = pid;
         }
-        else if (op == 0x01) /* EndOfAttributes / Scope marker */
+        else if (op == 0x01 || op == 0x27) /* EndOfAttributes / EndConditionalScope */
         {
+        }
+        else if (op == 0x26) /* BeginConditionalScope <pred_tid:u16> <arg_sid:u16> */
+        {
+            if (p + 4 > end_p) break;
+            p += 4;
+        }
+        else if (op == 0x11) /* SetDeferredProperty <pid:u16> <sub_idx:uleb> <c1:uleb> <c2:uleb> <(c1+c2)*u16> */
+        {
+            DWORD sub_i = 0, c1 = 0, c2 = 0;
+            int sh;
+            if (p + 2 > end_p) break;
+            p += 2;
+            for (sh = 0; p < end_p; sh += 7) { BYTE b = ctx->nodes[p++]; sub_i |= (DWORD)(b & 0x7f) << sh; if (!(b & 0x80)) break; }
+            for (sh = 0; p < end_p; sh += 7) { BYTE b = ctx->nodes[p++]; c1    |= (DWORD)(b & 0x7f) << sh; if (!(b & 0x80)) break; }
+            for (sh = 0; p < end_p; sh += 7) { BYTE b = ctx->nodes[p++]; c2    |= (DWORD)(b & 0x7f) << sh; if (!(b & 0x80)) break; }
+            (void)sub_i;
+            if (p + (c1 + c2) * 2 > end_p) break;
+            p += (c1 + c2) * 2;
         }
         else if (op == 0x02) /* PopProperty */
         {
@@ -4273,12 +4406,13 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                     p++;
                 }
             }
-            else if (def_kind == 0x08) /* Style Setters table: ends before 0x21 0x0a / 0x02 / end_p */
+            else if (def_kind == 0x08) /* Style Setters table: ends before 0x21 0x0a / 0x21 0x09 / 0x02 / end_p */
             {
                 xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
                 while (p < end_p)
                 {
-                    if (p + 1 < end_p && ctx->nodes[p] == 0x21 && ctx->nodes[p + 1] == 0x0a)
+                    if (p + 1 < end_p && ctx->nodes[p] == 0x21 &&
+                        (ctx->nodes[p + 1] == 0x0a || ctx->nodes[p + 1] == 0x09))
                         break;
                     if (ctx->nodes[p] == 0x02 && (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14))
                     {
@@ -4294,6 +4428,10 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                 xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
                 while (p < end_p)
                 {
+                    if (p + 1 < end_p && p >= 2 &&
+                        ctx->nodes[p - 2] == 0x00 && ctx->nodes[p - 1] == 0x00 &&
+                        ctx->nodes[p] == 0x21 && ctx->nodes[p + 1] == 0x0a)
+                        break;
                     if (ctx->nodes[p] == 0x02 &&
                         (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14 ||
                          ctx->nodes[p + 1] == 0x15 || ctx->nodes[p + 1] == 0x21 || ctx->nodes[p + 1] == 0x12))
@@ -4412,7 +4550,7 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                     }
                 }
             }
-            else if (subop == 0x01)
+            else if (subop == 0x01 || subop == 0x09)
             {
                 if (obj_sp > 1) obj_sp--;
             }
@@ -4711,20 +4849,21 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
         for (i = 0; i < nrows; i++)
         {
             struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
+            BOOL has_vis = FALSE;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                    ch->grid_row <= i && i < ch->grid_row + ch->grid_row_span)
+                { has_vis = TRUE; break; }
+            }
             r_type[i] = rd ? rd->grid_len_type : 2;
             r_val[i]  = rd ? rd->grid_len_val  : 1.0;
             /* Collapse empty history/dock or 0-star rows */
-            if (r_type[i] == 2 && r_val[i] <= 0.001) { r_type[i] = 1; r_val[i] = 0; }
+            if (r_type[i] == 2 && (r_val[i] <= 0.001 || (i > 0 && !has_vis)))
+            { r_type[i] = 1; r_val[i] = 0; }
             if (r_type[i] == 0) /* Auto */
             {
-                /* Check if any visible child is in this row */
-                BOOL has_vis = FALSE;
-                for (k = 0; k < children->count; k++)
-                {
-                    struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-                    if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED && ch->grid_row == i)
-                    { has_vis = TRUE; break; }
-                }
                 r_type[i] = 1;
                 r_val[i] = has_vis ? 36.0 : 0.0;
             }
@@ -4837,6 +4976,17 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
 static const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHAR *tmp, size_t tmp_len )
 {
     const WCHAR *s = el->text;
+    if (el->name[0])
+    {
+        if (!wcscmp( el->name, L"DecimalSeparatorButton" )) return L".";
+        if (!wcscmp( el->name, L"NegateButton" )) return L"+/-";
+        if (!wcscmp( el->name, L"ClearMemoryButton" )) return L"MC";
+        if (!wcscmp( el->name, L"MemRecall" )) return L"MR";
+        if (!wcscmp( el->name, L"MemPlus" )) return L"M+";
+        if (!wcscmp( el->name, L"MemMinus" )) return L"M-";
+        if (!wcscmp( el->name, L"MemButton" )) return L"MS";
+        if (!wcscmp( el->name, L"MemoryButton" )) return L"M\x25be";
+    }
     if (!s || !s[0]) return L"";
     if (s[1] == 0)
     {
@@ -4881,8 +5031,8 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         HGDIOBJ old_br, old_pen, old_font;
         int fh;
 
-        /* Skip invisible shortcut-only buttons (CopyButton, PasteButton) that have no label and tiny/zero cell */
-        if (!label[0] && (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" )))
+        /* Skip invisible shortcut-only buttons (CopyButton, PasteButton) */
+        if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
             return;
 
         InflateRect( &brc, -2, -2 );
@@ -4922,9 +5072,13 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 
     if (el->kind == UWP_KIND_TEXT_BLOCK)
     {
+        if ((!wcscmp( el->name, L"NormalOutput" ) || !wcscmp( el->name, L"Results" )) && !el->text[0])
+            lstrcpynW( el->text, L"0", ARRAY_SIZE(el->text) );
         /* Avoid double-painting CalculationResult if its inner NormalOutput TextBlock is painted */
         if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface)
         {
+            if (el->text[0] && !el->tpl_normal_output->text[0])
+                lstrcpynW( el->tpl_normal_output->text, el->text, ARRAY_SIZE(el->tpl_normal_output->text) );
             uwp_paint_element( hdc, el->tpl_normal_output );
             return;
         }
@@ -5041,7 +5195,7 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
 
     if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
-        if (!el->text[0] && (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" )))
+        if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
             return NULL;
         return el;
     }
@@ -5087,10 +5241,10 @@ void uwp_invoke_button( struct uwp_element *btn )
         }
     }
 
-    /* 3. Seeded keypad has no app-side binding: drive the real engine */
+    /* 3. Drive the real StandardCalculatorViewModel engine for keypad buttons */
     {
         int code = uwp_key_to_calc_code( btn->name, btn->text );
-        if (code >= 0 && (!btn->command || !btn->click_cnt))
+        if (code >= 0)
             uwp_calc_vm_send( code );
     }
 
@@ -5251,7 +5405,14 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IStateTriggerBaseFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IMenuFlyoutItemBaseFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IMarkupExtensionFactory_UWP ) ||
-        IsEqualGUID( iid, &IID_IRoutedEventArgsFactory_UWP ))
+        IsEqualGUID( iid, &IID_IRoutedEventArgsFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IBindingFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IRelativeSourceFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IRadioButtonFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IPropertyPathFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IDataTemplateSelectorFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IStyleSelectorFactory_UWP ) ||
+        IsEqualGUID( iid, &IID_IStateTriggerBaseFactory2_UWP ))
     {
         *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
         return S_OK;
@@ -5293,6 +5454,13 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
 {
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
     const WCHAR *cls = f ? f->class_name : L"Windows.UI.Xaml.FrameworkElement";
+    /* IPropertyPathFactory::CreateInstance(HSTRING path, IPropertyPath **out)
+     * takes 2 args after iface, so the output pointer arrives in `inner`. */
+    if (!wcscmp( cls, L"Windows.UI.Xaml.PropertyPath" ))
+    {
+        TRACE( "uwp_cf_CreateInstance(PropertyPath, path=%p, out=%p)\n", outer, inner );
+        return uwp_element_create( cls, NULL, NULL, (void **)inner );
+    }
     TRACE( "uwp_cf_CreateInstance(%s, outer=%p, inner=%p, inst=%p)\n", debugstr_w(cls), outer, inner, instance );
     return uwp_element_create( cls, outer, inner, instance );
 }
@@ -5429,7 +5597,6 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         wcscmp( buf, L"Windows.UI.Xaml.PropertyMetadata" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.DependencyProperty" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.ResourceDictionary" ) != 0 &&
-        wcscmp( buf, L"Windows.UI.Xaml.PropertyPath" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.SizeHelper" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Data.PropertyChangedEventArgs" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Data.CollectionViewSource" ) != 0)

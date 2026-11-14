@@ -1290,9 +1290,24 @@ HRESULT WINAPI DllGetClassObject(REFCLSID clsid, REFIID riid, void **out)
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+static const GUID IID_IReferenceTrackerTarget_glob =
+    { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6 } };
+static const GUID IID_IReferenceTracker_glob =
+    { 0x11d3b13a, 0x180e, 0x4789, { 0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe5 } };
+static const GUID IID_ISignedZeroOption =
+    { 0xfd1cdd31, 0x0a3c, 0x49c4, { 0xa6, 0x42, 0x96, 0xa1, 0x56, 0x4f, 0x4f, 0x30 } };
+
 /* LanguageFont implementation */
 static HRESULT WINAPI language_font_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IMarshal ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_glob ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker_glob ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
     *out = iface;
     return S_OK;
 }
@@ -1357,8 +1372,7 @@ static struct { const void **vtbl; } language_font_obj = { language_font_vtbl };
 /* LanguageFontGroup implementation */
 static HRESULT WINAPI language_font_group_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    *out = iface;
-    return S_OK;
+    return language_font_QueryInterface( iface, iid, out );
 }
 static ULONG WINAPI language_font_group_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI language_font_group_Release( void *iface ) { return 1; }
@@ -1404,8 +1418,7 @@ static struct { const void **vtbl; } language_font_group_obj = { language_font_g
 /* LanguageFontGroupFactory implementation */
 static HRESULT WINAPI font_group_factory_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    *out = iface;
-    return S_OK;
+    return language_font_QueryInterface( iface, iid, out );
 }
 static ULONG WINAPI font_group_factory_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI font_group_factory_Release( void *iface ) { return 1; }
@@ -1494,6 +1507,14 @@ static HRESULT WINAPI decimal_formatter_QueryInterface( void *iface, REFIID iid,
 
     if (!out) return E_INVALIDARG;
 
+    if (IsEqualGUID( iid, &IID_IMarshal ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget_glob ) ||
+        IsEqualGUID( iid, &IID_IReferenceTracker_glob ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -1511,13 +1532,16 @@ static HRESULT WINAPI decimal_formatter_QueryInterface( void *iface, REFIID iid,
     {
         *out = (void *)&impl->vtbl_parser;
     }
-    else if (IsEqualGUID( iid, &IID_ISignificantDigitsOption ))
+    else if (IsEqualGUID( iid, &IID_ISignificantDigitsOption ) ||
+             IsEqualGUID( iid, &IID_ISignedZeroOption ))
     {
         *out = (void *)&impl->vtbl_sigdigits;
     }
     else
     {
-        *out = (void *)&impl->vtbl_formatter;
+        FIXME( "decimal_formatter %s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+        *out = NULL;
+        return E_NOINTERFACE;
     }
 
     InterlockedIncrement( &impl->ref );
@@ -1540,8 +1564,20 @@ static ULONG WINAPI decimal_formatter_Release( void *iface )
 
 static HRESULT WINAPI decimal_formatter_GetIids( void *iface, ULONG *count, IID **iids )
 {
-    if (count) *count = 0;
-    if (iids) *iids = NULL;
+    static IID *cache;
+    static const IID *iids_arr[] = { &IID_INumberFormatter, &IID_INumberFormatter2,
+        &IID_INumberFormatterOptions, &IID_INumberParser, &IID_ISignificantDigitsOption,
+        &IID_INumberRounderOption };
+    ULONG i, n = sizeof(iids_arr)/sizeof(iids_arr[0]);
+    if (!count || !iids) return E_POINTER;
+    if (!cache)
+    {
+        cache = malloc( n * sizeof(IID) );
+        for (i = 0; i < n; i++) cache[i] = *iids_arr[i];
+    }
+    *count = n;
+    *iids = cache;   /* leaked static: .NET Native never CoTaskMemFrees */
+    (void)i;
     return S_OK;
 }
 
