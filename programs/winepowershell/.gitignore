@@ -2,6 +2,6 @@
 /.gitignore
 /Makefile
 x86_64-windows/main.o
-x86_64-windows/powershell.exe
+x86_64-windows/winepowershell.exe
 i386-windows/main.o
-i386-windows/powershell.exe
+i386-windows/winepowershell.exe

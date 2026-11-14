@@ -1563,6 +1563,7 @@ struct xaml_element
     void *loader_controller;
     void *loader_core;
     BOOL is_webview;
+    HWND parent_hwnd;
     unsigned int qi_count;
     const WCHAR *class_name;
 };
@@ -3529,20 +3530,77 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
              child, debugstr_w( cls ), ctx->width, ctx->height );
         ctx->count++;
     }
+    EnumChildWindows( child, wv2_sync_child_cb, lparam );
+    return TRUE;
+}
+
+static HWND wv2_get_controller_parent( void )
+{
+    HWND hw = g_active_wv2_impl && g_active_wv2_impl->parent_hwnd ? g_active_wv2_impl->parent_hwnd : g_wv2_core_hwnd;
+    if (hw && IsWindow( hw ))
+    {
+        HWND root = GetAncestor( hw, GA_ROOT );
+        return root ? root : hw;
+    }
+    hw = xaml_get_window_hwnd();
+    if (hw && IsWindow( hw )) return hw;
+    hw = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    if (hw) return hw;
+    hw = FindWindowW( NULL, L"WhatsApp" );
+    if (hw) return hw;
+    return NULL;
+}
+
+static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
+{
+    struct wv2_enum_ctx *ctx = (struct wv2_enum_ctx *)lparam;
+    WCHAR cls[128] = {0};
+
+    GetClassNameW( hwnd, cls, ARRAY_SIZE( cls ) );
+    ERR( "wv2_sync_top_cb: seen hwnd %p class %s\n", hwnd, debugstr_w(cls) );
+    if (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
+        wcsstr( cls, L"RenderWidget" ))
+    {
+        HWND parent = wv2_get_controller_parent();
+        if (parent && IsWindow( parent ) && hwnd != parent)
+        {
+            SetParent( hwnd, parent );
+            ShowWindow( hwnd, SW_SHOW );
+            SetWindowPos( hwnd, HWND_TOP, 0, 0, ctx->width, ctx->height,
+                          SWP_SHOWWINDOW | SWP_NOACTIVATE );
+            ERR( "wv2_sync_top_cb: re-parented and positioned child %p (%s) to parent %p %dx%d\n",
+                 hwnd, debugstr_w( cls ), parent, ctx->width, ctx->height );
+            EnumChildWindows( hwnd, wv2_sync_child_cb, lparam );
+            ctx->count++;
+        }
+    }
     return TRUE;
 }
 
 static void wv2_sync_child_hwnds( HWND parent, UINT width, UINT height )
 {
-    struct wv2_enum_ctx ctx = { (int)width, (int)height, 0 };
+    struct wv2_enum_ctx ctx;
 
-    if (!parent || !IsWindow( parent ) || !width || !height) return;
-    EnumChildWindows( parent, wv2_sync_child_cb, (LPARAM)&ctx );
-}
+    if (!parent || !IsWindow( parent )) parent = wv2_get_controller_parent();
+    if (!width || !height)
+    {
+        RECT rc;
+        if (parent && GetClientRect( parent, &rc ))
+        {
+            width = rc.right;
+            height = rc.bottom;
+        }
+    }
+    if ((int)width <= 0) width = 1024;
+    if ((int)height <= 0) height = 768;
 
-static HWND wv2_get_controller_parent( void )
-{
-    return xaml_get_window_hwnd();
+    ctx.width = (int)width;
+    ctx.height = (int)height;
+    ctx.count = 0;
+
+    if (parent && IsWindow( parent ))
+        EnumChildWindows( parent, wv2_sync_child_cb, (LPARAM)&ctx );
+    EnumWindows( wv2_sync_top_cb, (LPARAM)&ctx );
 }
 
 void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height )
@@ -3550,24 +3608,19 @@ void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height )
     ERR( "xaml_wv2_on_window_ready hwnd=%p %ux%u active=%p queued=%d\n",
          hwnd, width, height, g_active_wv2_impl, g_active_wv2_impl ? g_active_wv2_impl->browser_queued : -1 );
     g_wv2_core_hwnd = hwnd;
+    if (g_active_wv2_impl) g_active_wv2_impl->parent_hwnd = hwnd;
     if (g_wv2_host_hwnd && IsWindow( g_wv2_host_hwnd ) && width > 0 && height > 0)
     {
         SetWindowPos( g_wv2_host_hwnd, HWND_TOP, 0, 0, width, height, SWP_SHOWWINDOW | SWP_NOACTIVATE );
     }
-    if (g_active_wv2_impl && g_active_wv2_impl->loader_controller && g_active_wv2_impl->real_loader)
-    {
-        HWND parent = wv2_get_controller_parent();
-        RECT rc = { 0, 0, (LONG)width, (LONG)height };
-        ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)g_active_wv2_impl->loader_controller)[6])(
-            g_active_wv2_impl->loader_controller, rc );
-        ((HRESULT (WINAPI *)(void *))(*(void ***)g_active_wv2_impl->loader_controller)[23])(
-            g_active_wv2_impl->loader_controller );
-        wv2_sync_child_hwnds( parent ? parent : hwnd, width, height );
-    }
+    wv2_sync_child_hwnds( hwnd, width, height );
 }
 
 void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height )
 {
+    static BOOL in_resize;
+    if (in_resize) return;
+    in_resize = TRUE;
     if (g_wv2_host_hwnd && IsWindow( g_wv2_host_hwnd ) && width > 0 && height > 0)
         SetWindowPos( g_wv2_host_hwnd, HWND_TOP, 0, 0, width, height, SWP_SHOWWINDOW | SWP_NOACTIVATE );
     if (g_active_wv2_impl && g_active_wv2_impl->loader_controller && g_active_wv2_impl->real_loader &&
@@ -3580,6 +3633,7 @@ void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height )
             g_active_wv2_impl->loader_controller );
         wv2_sync_child_hwnds( wv2_get_controller_parent(), width, height );
     }
+    in_resize = FALSE;
 }
 
 void xaml_wv2_handle_start_msg( LPARAM lparam )
@@ -3604,6 +3658,8 @@ static DWORD WINAPI wv2_sta_thread( void *arg )
         Sleep( 20 );
     }
     ERR( "wv2_sta_thread: starting browser, target=%p\n", hw );
+    impl->parent_hwnd = hw;
+    g_wv2_core_hwnd = hw;
     wv2_start_browser( impl );
     while (GetMessageW( &msg, NULL, 0, 0 ) > 0)
     {
@@ -3649,7 +3705,7 @@ static HRESULT WINAPI wv2_remove_CoreWebView2Initialized( void *iface, EventRegi
 
 static void wv2_navigate_once( struct xaml_element *impl )
 {
-    static const WCHAR url[] = L"https://web.whatsapp.com/";
+    static WCHAR url[] = L"https://web.whatsapp.com/";
 
     if (impl->navigated) return;
     if (!impl->loader_core) { ERR( "wv2_navigate_once: no loader_core\n" ); return; }
@@ -3663,8 +3719,9 @@ static void wv2_navigate_once( struct xaml_element *impl )
     }
     else
     {
-        HRESULT (WINAPI *p_navigate)( void *, const WCHAR *, void * ) =
-            (void *)(*(void ***)impl->loader_core)[6];  /* builtin webview2loader webview_Navigate */
+        /* Builtin webview2loader core: slot 6 is Navigate(uri, handler) */
+        typedef HRESULT (WINAPI *p_nav_fn)( void *, LPCWSTR, void * );
+        p_nav_fn p_navigate = (p_nav_fn)(*(void ***)impl->loader_core)[6];
         HRESULT hr = p_navigate( impl->loader_core, url, NULL );
         ERR( "wv2_navigate_once (builtin): loader_core %p hr %#lx\n", impl->loader_core, hr );
     }
@@ -3772,14 +3829,15 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
     void *core = NULL;
 
     ERR( "wv2_ctrl_handler_Invoke hr %#lx controller %p real=%d\n", hr, controller, h->impl->real_loader );
-    if (SUCCEEDED( hr ) && controller)
+    if (controller)
     {
         if (h->impl->real_loader)
         {
-            HWND parent = wv2_get_controller_parent();
+            HWND parent = h->impl->parent_hwnd ? h->impl->parent_hwnd : wv2_get_controller_parent();
             RECT rc = { 0, 0, 1024, 768 };
-            HRESULT hr_b, hr_v, hr_c;
+            HRESULT hr_b = S_OK, hr_v = S_OK, hr_c = S_OK;
             void *comp_ctrl = NULL;
+            void *ctrl = NULL;
 
             h->impl->loader_controller = controller;
             ((IUnknown *)controller)->lpVtbl->AddRef( (IUnknown *)controller );
@@ -3808,17 +3866,31 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                 ((IUnknown *)comp_ctrl)->lpVtbl->Release( (IUnknown *)comp_ctrl );
             }
 
-            hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)controller)[6])( controller, rc );
-            hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)controller)[4])( controller, TRUE );
-            ((HRESULT (WINAPI *)(void *))(*(void ***)controller)[23])( controller );
+            if (SUCCEEDED( ((IUnknown *)controller)->lpVtbl->QueryInterface(
+                    (IUnknown *)controller, &IID_ICoreWebView2Controller_g, &ctrl) ) && ctrl)
+            {
+                hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)ctrl)[6])( ctrl, rc );
+                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)ctrl)[4])( ctrl, TRUE );
+                ((HRESULT (WINAPI *)(void *))(*(void ***)ctrl)[23])( ctrl );
+                get_core = (void *)(*(void ***)ctrl)[25];
+                hr_c = get_core( ctrl, &core );
+                ERR( "wv2_ctrl_handler_Invoke (ctrl): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx get_CoreWebView2=%#lx core=%p\n",
+                     parent, rc.right, rc.bottom, hr_b, hr_v, hr_c, core );
+                ((IUnknown *)ctrl)->lpVtbl->Release( (IUnknown *)ctrl );
+            }
+            else
+            {
+                hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)controller)[6])( controller, rc );
+                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)controller)[4])( controller, TRUE );
+                ((HRESULT (WINAPI *)(void *))(*(void ***)controller)[23])( controller );
+                get_core = (void *)(*(void ***)controller)[25];  /* COM ICoreWebView2Controller::get_CoreWebView2 */
+                hr_c = get_core( controller, &core );
+                ERR( "wv2_ctrl_handler_Invoke (fallback): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx hr_c=%#lx core=%p\n",
+                     parent, rc.right, rc.bottom, hr_b, hr_v, hr_c, core );
+            }
             wv2_sync_child_hwnds( parent, rc.right, rc.bottom );
-            ERR( "wv2_ctrl_handler_Invoke (real): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx\n",
-                 parent, rc.right, rc.bottom, hr_b, hr_v );
 
-            get_core = (void *)(*(void ***)controller)[25];  /* COM ICoreWebView2Controller::get_CoreWebView2 */
-            hr_c = get_core( controller, &core );
-            ERR( "wv2_ctrl_handler_Invoke (real): get_CoreWebView2 hr=%#lx core=%p\n", hr_c, core );
-            if (SUCCEEDED( hr_c ) && core && !h->impl->loader_core)
+            if (core && !h->impl->loader_core)
             {
                 h->impl->loader_core = core;
                 wv2_navigate_once( h->impl );
@@ -3888,8 +3960,10 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
          ((void **)ch->vtbl)[3], hw );
 
     if (!h->impl->real_loader)
-    {   /* s430: prefer the synchronous loader export: one call, no handler vtbl hops */
+    {
+        /* s430: prefer the synchronous loader export: one call, no handler vtbl hops */
         HMODULE loader = GetModuleHandleW( L"webview2loader.dll" );
+        if (!loader) loader = LoadLibraryW( L"webview2loader.dll" );
         void *(WINAPI *p_sync)( HWND, HRESULT * ) = (void *)GetProcAddress( loader, "CreateCoreWebView2ControllerSync" );
         if (p_sync)
         {
@@ -3903,9 +3977,11 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
                 /* s460: the app's CoreCLR RCW chokes (0x80131506) on the loader
                  * webview object; hand it the builtin cwv2 shell (known-good RCW
                  * layout) and keep the loader object for Navigate forwarding. */
+                h->impl->real_loader = FALSE;
                 h->impl->loader_core = core;
                 trigger_core_webview2_initialized( h->impl, &h->impl->IWebView2_iface );
             }
+            wv2_sync_child_hwnds( hw, 1024, 768 );
             return hr2;
         }
     }
@@ -3930,17 +4006,6 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
 
     create_ctrl = (void *)(*(void ***)env)[3];  /* ICoreWebView2Environment::CreateCoreWebView2Controller */
     ERR( "wv2_env_handler_Invoke: env vtbl %p slot3 %p\n", *(void **)env, create_ctrl );
-    /* Shared builtin pages get relocated once (app vs msedgewebview2 child
-     * image base): vtbl slots read back as high-VA (>= 0x7ffc00000000) are
-     * child-mapped pointers, unmapped in this process. Fall back to the
-     * loader's CreateCoreWebView2Controller export, which skips the vtbl. */
-    if ((ULONG_PTR)create_ctrl >= (ULONG_PTR)0x7ffc00000000)
-    {
-        HMODULE loader = GetModuleHandleW( L"webview2loader.dll" );
-        HRESULT (WINAPI *p_export)( HWND, void * ) = (void *)GetProcAddress( loader, "CreateCoreWebView2Controller" );
-        ERR( "wv2_env_handler_Invoke: stale slot3, using export %p\n", p_export );
-        if (p_export) return p_export( hw, ch );
-    }
     {
         HRESULT hr_c;
         ERR( "wv2_env_handler_Invoke: calling create_ctrl env=%p hw=%p vis=%d ch=%p\n",

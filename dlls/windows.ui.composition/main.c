@@ -24,6 +24,124 @@ WINE_DEFAULT_DEBUG_CHANNEL(composition);
 
 extern IActivationFactory *compositor_factory_get( void );
 
+static const GUID IID_ICompositionEffectSourceParameterFactory_local =
+    { 0xb3d9f276, 0xaba3, 0x4724, { 0xac, 0xf3, 0xd0, 0x39, 0x74, 0x64, 0xdb, 0x1c } };
+static const GUID IID_ICompositionEffectSourceParameter_local =
+    { 0x859e13ec, 0x6952, 0x4d48, { 0x96, 0x47, 0x3f, 0x7e, 0x8e, 0x5d, 0x06, 0x7c } };
+static const GUID IID_IGraphicsEffectSource_local =
+    { 0x2d8f9ddc, 0x4339, 0x4eb9, { 0x92, 0x16, 0xf9, 0xde, 0xb7, 0x56, 0x58, 0xa2 } };
+
+struct cesp_obj
+{
+    const void *vtbl;
+    LONG ref;
+    HSTRING name;
+};
+
+static HRESULT WINAPI cesp_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ICompositionEffectSourceParameter_local ) ||
+        IsEqualGUID( iid, &IID_IGraphicsEffectSource_local ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct cesp_obj *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cesp_AddRef( void *iface ) { return InterlockedIncrement( &((struct cesp_obj *)iface)->ref ); }
+static ULONG WINAPI cesp_Release( void *iface )
+{
+    struct cesp_obj *obj = iface;
+    ULONG r = InterlockedDecrement( &obj->ref );
+    if (!r) { if (obj->name) WindowsDeleteString( obj->name ); free( obj ); }
+    return r;
+}
+static HRESULT WINAPI cesp_GetIids( void *iface, ULONG *cnt, IID **iids )
+{
+    if (cnt) *cnt = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI cesp_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Composition.CompositionEffectSourceParameter", 55, name );
+}
+static HRESULT WINAPI cesp_GetTrustLevel( void *iface, TrustLevel *lvl )
+{
+    if (lvl) *lvl = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI cesp_get_Name( void *iface, HSTRING *name )
+{
+    struct cesp_obj *obj = iface;
+    if (!name) return E_POINTER;
+    return WindowsDuplicateString( obj->name, name );
+}
+static const void *cesp_vtbl[] =
+{
+    cesp_QI, cesp_AddRef, cesp_Release,
+    cesp_GetIids, cesp_GetRuntimeClassName, cesp_GetTrustLevel,
+    cesp_get_Name,
+};
+
+static HRESULT WINAPI cesp_factory_QI( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_ICompositionEffectSourceParameterFactory_local ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cesp_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI cesp_factory_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI cesp_factory_GetIids( IActivationFactory *iface, ULONG *cnt, IID **iids )
+{
+    if (cnt) *cnt = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI cesp_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Composition.CompositionEffectSourceParameter", 55, name );
+}
+static HRESULT WINAPI cesp_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *lvl )
+{
+    if (lvl) *lvl = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI cesp_factory_Create( IActivationFactory *iface, HSTRING name, void **out )
+{
+    struct cesp_obj *obj;
+    if (!out) return E_POINTER;
+    obj = calloc( 1, sizeof(*obj) );
+    if (!obj) return E_OUTOFMEMORY;
+    obj->vtbl = cesp_vtbl;
+    obj->ref = 1;
+    if (name) WindowsDuplicateString( name, &obj->name );
+    *out = obj;
+    return S_OK;
+}
+static const void *cesp_factory_vtbl[] =
+{
+    cesp_factory_QI, cesp_factory_AddRef, cesp_factory_Release,
+    cesp_factory_GetIids, cesp_factory_GetRuntimeClassName, cesp_factory_GetTrustLevel,
+    cesp_factory_Create,
+};
+static struct { const void **vtbl; } cesp_factory_obj = { cesp_factory_vtbl };
+
 HRESULT WINAPI DllCanUnloadNow( void )
 {
     return S_OK;
@@ -46,6 +164,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (name && !wcscmp( name, RuntimeClass_Windows_UI_Composition_Compositor ))
         IActivationFactory_QueryInterface( compositor_factory_get(), &IID_IActivationFactory,
                 (void **)factory );
+    else if (name && !wcscmp( name, L"Windows.UI.Composition.CompositionEffectSourceParameter" ))
+        *factory = (IActivationFactory *)&cesp_factory_obj;
 
     if (*factory) return S_OK;
 

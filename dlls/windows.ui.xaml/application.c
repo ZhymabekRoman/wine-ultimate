@@ -1597,6 +1597,7 @@ static ICoreWindow *create_current_core_window( void )
 /* Resolve the thread CoreWindow, creating a top-level one when the thread has none. */
 static ICoreWindow *ensure_core_window( struct xaml_window *impl )
 {
+    impl = &global_xaml_window;
     if (!impl->core_window) impl->core_window = get_current_core_window();
     if (!impl->core_window) impl->core_window = create_current_core_window();
     return impl->core_window;
@@ -1604,7 +1605,7 @@ static ICoreWindow *ensure_core_window( struct xaml_window *impl )
 
 static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID iid, void **out )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
 
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
@@ -1671,7 +1672,7 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
 
 static ULONG WINAPI xaml_window_AddRef( IInspectable *iface )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     ULONG ref = InterlockedIncrement( &impl->ref );
     TRACE( "iface %p, ref %lu.\n", iface, ref );
     return ref;
@@ -1679,7 +1680,7 @@ static ULONG WINAPI xaml_window_AddRef( IInspectable *iface )
 
 static ULONG WINAPI xaml_window_Release( IInspectable *iface )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     ULONG ref = InterlockedDecrement( &impl->ref );
     TRACE( "iface %p, ref %lu.\n", iface, ref );
     return ref;
@@ -1706,7 +1707,7 @@ static HRESULT WINAPI xaml_window_GetTrustLevel( IInspectable *iface, TrustLevel
 
 static HRESULT WINAPI xaml_window_get_Bounds( IInspectable *iface, void *a2, void *a3 )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     Rect *value = (Rect *)a2;
     ICoreWindow *cw = NULL;
 
@@ -1725,7 +1726,7 @@ static HRESULT WINAPI xaml_window_get_Bounds( IInspectable *iface, void *a2, voi
 
 static HRESULT WINAPI xaml_window_get_Visible( IInspectable *iface, void *a2, void *a3 )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     boolean *value = (boolean *)a2;
     ICoreWindow *cw = NULL;
 
@@ -1740,7 +1741,7 @@ static HRESULT WINAPI xaml_window_get_Visible( IInspectable *iface, void *a2, vo
 
 static HRESULT WINAPI xaml_window_get_Content( IInspectable *iface, void *a2, void *a3 )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     IInspectable **value = (IInspectable **)a2;
 
     if (!value) value = (IInspectable **)a3;
@@ -1882,6 +1883,7 @@ static struct { const void **vtbl; } xaml_key_down_handler_obj = { xaml_key_down
 static void xaml_window_subscribe_core_window( struct xaml_window *impl )
 {
     EventRegistrationToken tok;
+    impl = &global_xaml_window;
     if (!impl->core_window || impl->core_window_subscribed) return;
     impl->core_window_subscribed = TRUE;
     ICoreWindow_add_PointerPressed( impl->core_window, (void *)&xaml_pointer_pressed_handler_obj, &tok );
@@ -1966,54 +1968,22 @@ static BOOL CALLBACK xaml_paint_child( HWND hwnd, LPARAM lparam )
  * a surface to the X pixmap, so the mapped window is painted from here. */
 static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
+    if (msg == WM_ERASEBKGND && !is_uwp_xaml_app())
+        return TRUE;
     if (msg == WM_PAINT)
     {
-        RECT rc;
-        /* Paint through GetDC, not BeginPaint: this window's BeginPaint DC targets a
-         * surface that reads back white (GetPixel probe), while a GetDC DC is the
-         * drawable the winex11 driver shows. ValidateRect replaces EndPaint.
-         * The CoreWindow is a child at the same geometry; its X parent occludes it,
-         * so paint the root ancestor too — that is the window on screen. */
-        HWND top = GetAncestor( hwnd, GA_ROOT );
-        HDC hdc = GetDC( top );
-        GetClientRect( top, &rc );
-        TRACE( "xaml corewindow WM_PAINT hdc %p rc %ldx%ld\n", hdc, rc.right, rc.bottom );
-        if (rc.right > 0 && rc.bottom > 0)
-            xaml_layout_render( top, hdc, rc.right, rc.bottom, global_xaml_window.content );
-        ReleaseDC( top, hdc );
-        ValidateRect( hwnd, NULL );
-        /* Re-present the composition swapchain after the GDI flush: the CoreWindow's X
-         * drawable is the GL surface the compositor presents into, the last writer wins,
-         * and the dcomp compositor thread only presents on content change, so a later
-         * GDI expose cycle would otherwise bury the composited frame. */
-        if (global_xaml_window.swapchain)
+        if (is_uwp_xaml_app())
         {
-            /* Repaint the back buffer every expose: the DIB->texture upload happens on
-             * ReleaseDC, and Present shows the buffer painted in the previous cycle.
-             * Filling only at attach leaves the visible front buffer stale. */
-            IDXGISurface1 *buf = NULL;
-            if (SUCCEEDED( IDXGISwapChain1_GetBuffer( global_xaml_window.swapchain, xaml_back_index,
-                        &IID_IDXGISurface1, (void **)&buf ) ) && buf)
-            {
-                HDC bdc = NULL;
-                if (SUCCEEDED( IDXGISurface1_GetDC( buf, FALSE, &bdc ) ) && bdc)
-                {
-                    RECT rc2;
-                    GetClientRect( top, &rc2 );
-                    xaml_layout_render( top, bdc, rc2.right, rc2.bottom, global_xaml_window.content );
-                    TRACE( "xaml wm_paint buffer fill idx %u probe=%06lx\n", xaml_back_index, GetPixel( bdc, 5, 5 ) );
-                    IDXGISurface1_ReleaseDC( buf, NULL );
-                }
-                else TRACE( "xaml wm_paint GetDC failed buf %p\n", buf );
-                IDXGISurface1_Release( buf );
-            }
-            else TRACE( "xaml wm_paint GetBuffer %u failed\n", xaml_back_index );
-            IDXGISwapChain1_Present( global_xaml_window.swapchain, 1, 0 );
-            xaml_back_index = 1 - xaml_back_index;
-            /* A/B: Commit off — the dcomp composite thread (path A, 60 Hz) only
-             * re-renders on commit; without it the window shows purely the
-             * WM_PAINT writers (GDI fill + buffer Present). */
+            RECT rc;
+            HWND top = GetAncestor( hwnd, GA_ROOT );
+            HDC hdc = GetDC( top );
+            GetClientRect( top, &rc );
+            TRACE( "xaml corewindow WM_PAINT hdc %p rc %ldx%ld\n", hdc, rc.right, rc.bottom );
+            if (rc.right > 0 && rc.bottom > 0)
+                xaml_layout_render( top, hdc, rc.right, rc.bottom, global_xaml_window.content );
+            ReleaseDC( top, hdc );
         }
+        ValidateRect( hwnd, NULL );
         return 0;
     }
     if (msg == WM_APP_WV2_START)
@@ -2038,6 +2008,13 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         PostQuitMessage( 0 );
         return 0;
     }
+    if (msg == WM_TIMER && wparam == 0x5756)
+    {
+        RECT rc;
+        GetClientRect( hwnd, &rc );
+        xaml_wv2_on_window_ready( hwnd, rc.right > 0 ? rc.right : 1024, rc.bottom > 0 ? rc.bottom : 768 );
+        return 0;
+    }
     if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) && global_xaml_window.content)
     {
         HWND top = GetAncestor( hwnd, GA_ROOT );
@@ -2057,15 +2034,22 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         }
     }
     TRACE( "xaml corewindow msg %x\n", msg );
+    if (xaml_corewindow_prev_proc == xaml_corewindow_wndproc || !xaml_corewindow_prev_proc)
+        return DefWindowProcW( hwnd, msg, wparam, lparam );
     return CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
 }
 
 static HRESULT xaml_window_present( struct xaml_window *impl )
 {
+    static BOOL in_present;
     HWND hwnd = NULL;
     RECT rc;
     UINT width, height;
     HRESULT hr;
+
+    impl = &global_xaml_window;
+    if (in_present) return S_OK;
+    in_present = TRUE;
 
     if (!impl->core_window) ensure_core_window( impl );
     if (impl->core_window)
@@ -2079,17 +2063,19 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
     if (!hwnd) hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
     if (!hwnd) hwnd = GetActiveWindow();
-    if (!hwnd) return S_FALSE;
+    if (!hwnd) { in_present = FALSE; return S_FALSE; }
+
+    ERR( "xaml_window_present: hwnd=%p swapchain=%p dev=%p is_uwp=%d\n",
+         hwnd, impl->swapchain, impl->d3d11_dev, is_uwp_xaml_app() );
 
     /* Re-install the window-slot subclass on every attach: twinapi sets the CoreWindow
      * wndproc on activation, which pushes a previous window-slot subclass aside. The
      * class proc is the wrong layer (twinapi's proc never chains to it), so stay on the
      * window slot and re-assert it whenever we present. */
     {
-        WNDPROC cur = (WNDPROC)(void *)GetWindowLongPtrW( hwnd, GWLP_WNDPROC );
-        if (cur != xaml_corewindow_wndproc)
+        if (!xaml_corewindow_subclassed)
         {
-            xaml_corewindow_prev_proc = cur;
+            xaml_corewindow_prev_proc = (WNDPROC)(void *)GetWindowLongPtrW( hwnd, GWLP_WNDPROC );
             SetWindowLongPtrW( hwnd, GWLP_WNDPROC, (LONG_PTR)xaml_corewindow_wndproc );
             xaml_corewindow_subclassed = TRUE;
         }
@@ -2159,6 +2145,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "xaml_get_or_create_dcomp_device failed hr %#lx\n", hr );
+            in_present = FALSE;
             return hr;
         }
     }
@@ -2170,6 +2157,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "CreateTargetForHwnd failed hr %#lx\n", hr );
+            in_present = FALSE;
             return hr;
         }
     }
@@ -2181,6 +2169,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "CreateVisual failed hr %#lx\n", hr );
+            in_present = FALSE;
             return hr;
         }
         IDCompositionTarget_SetRoot( impl->dcomp_target, (IDCompositionVisual *)impl->dcomp_root_visual );
@@ -2198,7 +2187,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
 
     /* 5. Ensure composition swapchain created via CreateSwapChainForComposition */
-    if (!impl->swapchain)
+    if (!impl->swapchain && is_uwp_xaml_app())
     {
         static const D3D_FEATURE_LEVEL feature_levels[] =
         {
@@ -2275,10 +2264,10 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
 
     /* 6. Render the XAML layout / visual elements onto the swapchain backbuffer */
-    if (impl->swapchain)
+    if (impl->swapchain && is_uwp_xaml_app())
     {
         IDXGISurface1 *surface1 = NULL;
-        hr = IDXGISwapChain1_GetBuffer( impl->swapchain, xaml_back_index, &IID_IDXGISurface1, (void **)&surface1 );
+        hr = IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_IDXGISurface1, (void **)&surface1 );
         if (SUCCEEDED(hr) && surface1)
         {
             HDC hdc = NULL;
@@ -2293,28 +2282,6 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
 
         /* 7. Present swapchain via wined3d CS-thread path */
         IDXGISwapChain1_Present( impl->swapchain, 1, 0 );
-        xaml_back_index = 1 - xaml_back_index;
-
-        {
-            IDXGISurface1 *probe = NULL;
-            HDC hdc = NULL;
-            if (SUCCEEDED(IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_IDXGISurface1, (void **)&probe )) && probe)
-            {
-                if (SUCCEEDED(IDXGISurface1_GetDC( probe, FALSE, &hdc )))
-                    TRACE( "xaml post-present buf0 probe=%06lx\n", GetPixel( hdc, 5, 5 ) );
-                IDXGISurface1_ReleaseDC( probe, NULL );
-                IDXGISurface1_Release( probe );
-            }
-            probe = NULL;
-            hdc = NULL;
-            if (SUCCEEDED(IDXGISwapChain1_GetBuffer( impl->swapchain, 1, &IID_IDXGISurface1, (void **)&probe )) && probe)
-            {
-                if (SUCCEEDED(IDXGISurface1_GetDC( probe, FALSE, &hdc )))
-                    TRACE( "xaml post-present buf1 probe=%06lx\n", GetPixel( hdc, 5, 5 ) );
-                IDXGISurface1_ReleaseDC( probe, NULL );
-                IDXGISurface1_Release( probe );
-            }
-        }
     }
 
     /* 8. Commit the DirectComposition tree */
@@ -2349,7 +2316,9 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
 
     TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u)\n", hwnd, width, height );
     ERR( "xaml_window_present done: hwnd %p (%ux%u)\n", hwnd, width, height );
+    SetTimer( hwnd, 0x5756, 500, NULL );
     xaml_wv2_on_window_ready( hwnd, width, height );
+    in_present = FALSE;
     return S_OK;
 }
 
@@ -2386,7 +2355,7 @@ HRESULT xaml_window_present_current( void )
 
 static HRESULT WINAPI xaml_window_put_Content( IInspectable *iface, void *a2, void *a3 )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     IInspectable *content = (IInspectable *)a2;
 
     if (!content) content = (IInspectable *)a3;
@@ -2400,7 +2369,7 @@ static HRESULT WINAPI xaml_window_put_Content( IInspectable *iface, void *a2, vo
 
 static HRESULT WINAPI xaml_window_get_CoreWindow( IInspectable *iface, void *a2, void *a3 )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     ICoreWindow **value = (ICoreWindow **)a2;
 
     if (!value) value = (ICoreWindow **)a3;
@@ -2416,7 +2385,7 @@ static HRESULT WINAPI xaml_window_get_CoreWindow( IInspectable *iface, void *a2,
 
 static HRESULT WINAPI xaml_window_get_Dispatcher( IInspectable *iface, void *a2, void *a3 )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     ICoreDispatcher **value = (ICoreDispatcher **)a2;
     ICoreWindow *cw = NULL;
     HRESULT hr = S_OK;
@@ -2476,7 +2445,7 @@ static struct { const void **vtbl; } dummy_wa_obj = { dummy_wa_vtbl };
 
 static HRESULT WINAPI xaml_window_add_Activated( IInspectable *iface, void *handler, EventRegistrationToken *token )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     TRACE( "iface %p, handler %p\n", iface, handler );
     if (impl->activated_handler_count < ARRAY_SIZE(impl->activated_handlers))
     {
@@ -2533,7 +2502,7 @@ static HRESULT WINAPI xaml_window_remove_VisibilityChanged( IInspectable *iface,
 
 static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     ICoreWindow *cw = NULL;
     HWND hwnd = NULL;
     int i;
@@ -2573,7 +2542,7 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
 
 static HRESULT WINAPI xaml_window_Close( IInspectable *iface )
 {
-    struct xaml_window *impl = (struct xaml_window *)iface;
+    struct xaml_window *impl = &global_xaml_window;
     ICoreWindow *cw = NULL;
     TRACE( "iface %p\n", iface );
     if (!impl->core_window) impl->core_window = get_current_core_window();

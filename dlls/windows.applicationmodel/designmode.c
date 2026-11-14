@@ -141,7 +141,9 @@ static HRESULT WINAPI design_mode_statics_DesignModeEnabled(IDesignModeStatics *
 {
     FIXME("iface %p, value %p.\n", iface, value);
 
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static const struct IDesignModeStaticsVtbl design_mode_statics_vtbl =
@@ -163,7 +165,9 @@ static HRESULT WINAPI design_mode_statics2_DesignMode2Enabled(IDesignModeStatics
 {
     FIXME("iface %p, value %p.\n", iface, value);
 
-    return E_NOTIMPL;
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
 }
 
 static const struct IDesignModeStatics2Vtbl design_mode_statics2_vtbl =

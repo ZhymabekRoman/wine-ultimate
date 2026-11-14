@@ -159,9 +159,10 @@ static unsigned int get_tty_cp( struct console *console )
 
 static void tty_flush( struct console *console )
 {
-    if (!console->tty_output || !console->tty_buffer_count) return;
+    HANDLE out = console->tty_output ? console->tty_output : GetStdHandle( STD_ERROR_HANDLE );
+    if (!out || !console->tty_buffer_count) return;
     TRACE("%s\n", debugstr_an(console->tty_buffer, console->tty_buffer_count));
-    if (!WriteFile( console->tty_output, console->tty_buffer, console->tty_buffer_count,
+    if (!WriteFile( out, console->tty_buffer, console->tty_buffer_count,
                     NULL, NULL ))
         WARN( "write failed: %lu\n", GetLastError() );
     console->tty_buffer_count = 0;
@@ -169,7 +170,8 @@ static void tty_flush( struct console *console )
 
 static void tty_write( struct console *console, const char *buffer, size_t size )
 {
-    if (!size || !console->tty_output) return;
+    HANDLE out = console->tty_output ? console->tty_output : GetStdHandle( STD_ERROR_HANDLE );
+    if (!size || !out) return;
     if (console->tty_buffer_count + size > sizeof(console->tty_buffer))
         tty_flush( console );
     if (console->tty_buffer_count + size <= sizeof(console->tty_buffer))
@@ -180,7 +182,7 @@ static void tty_write( struct console *console, const char *buffer, size_t size 
     else
     {
         assert( !console->tty_buffer_count );
-        if (!WriteFile( console->tty_output, buffer, size, NULL, NULL ))
+        if (!WriteFile( out, buffer, size, NULL, NULL ))
             WARN( "write failed: %lu\n", GetLastError() );
     }
 }
@@ -3081,7 +3083,10 @@ int __cdecl wmain(int argc, WCHAR *argv[])
         if (!init_window( &console )) return 1;
         GetStartupInfoW( &si );
         set_console_title( &console, si.lpTitle, wcslen( si.lpTitle ) * sizeof(WCHAR) );
-        ShowWindow( console.win, (si.dwFlags & STARTF_USESHOWWINDOW) ? si.wShowWindow : SW_SHOW );
+        if (GetEnvironmentVariableW( L"WINE_HEADLESS_CONSOLE", NULL, 0 ))
+            ShowWindow( console.win, SW_HIDE );
+        else
+            ShowWindow( console.win, (si.dwFlags & STARTF_USESHOWWINDOW) ? si.wShowWindow : SW_SHOW );
     }
 
     ret = main_loop( &console, signal );

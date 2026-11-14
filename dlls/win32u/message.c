@@ -459,7 +459,6 @@ static BOOL init_window_call_params( struct win_proc_params *params, HWND hwnd, 
     params->mapping = mapping;
     params->dpi_context = get_window_dpi_awareness_context( params->hwnd );
     get_winproc_params( params, !is_dialog );
-    fprintf( stderr, "WINCALL msg=%x hwnd=%p winproc=%p func=%p\n", msg, hwnd, win->winproc, params->func );
     return TRUE;
 }
 
@@ -946,11 +945,14 @@ static BOOL unpack_message( HWND hwnd, UINT message, WPARAM *wparam, LPARAM *lpa
         if (!*wparam) return TRUE;
         /* fall through */
 
+    case WM_ERASEBKGND:
+        *wparam = 0;
+        return TRUE;
+
     /* these contain an HFONT */
     case WM_SETFONT:
     case WM_GETFONT:
     /* these contain an HDC */
-    case WM_ERASEBKGND:
     case WM_ICONERASEBKGND:
     case WM_CTLCOLORMSGBOX:
     case WM_CTLCOLOREDIT:

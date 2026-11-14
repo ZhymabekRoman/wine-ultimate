@@ -1132,8 +1132,10 @@ enable_difxapi
 enable_dinput
 enable_dinput8
 enable_directmanipulation
+enable_dismapi
 enable_dispex
 enable_dmband
+enable_dmprocessxmlfiltered
 enable_dmcompos
 enable_dmime
 enable_dmloader
@@ -1186,6 +1188,7 @@ enable_gamingtcui
 enable_gdi32
 enable_gdiplus
 enable_geolocation
+enable_windows_devices_geolocation
 enable_glu32
 enable_gphoto2_ds
 enable_gpkcsp
@@ -1521,6 +1524,7 @@ enable_wbemprox
 enable_wdscore
 enable_webservices
 enable_websocket
+enable_webview2loader
 enable_wer
 enable_wevtapi
 enable_wevtsvc
@@ -1771,6 +1775,7 @@ enable_netsh
 enable_netstat
 enable_ngen
 enable_notepad
+enable_OptionalFeatures
 enable_odbcad32
 enable_oleview
 enable_ping
@@ -1814,6 +1819,7 @@ enable_view
 enable_wevtutil
 enable_where
 enable_whoami
+enable_wineappx
 enable_wineboot
 enable_winebrowser
 enable_winecfg
@@ -1825,6 +1831,7 @@ enable_winemenubuilder
 enable_winemine
 enable_winemsibuilder
 enable_winepath
+enable_winepowershell
 enable_winetest
 enable_winevdm
 enable_winhlp32
@@ -12348,7 +12355,7 @@ printf '%s\n' "$ac_cv_cflags__Wl__no_huge" >&6; }
 if test "x$ac_cv_cflags__Wl__no_huge" = xyes
 then :
   wine_use_preloader=no
-            WINELOADER_LDFLAGS="$WINELOADER_LDFLAGS -Wl,-no_pie,-image_base,0x200000000,-no_huge,-no_fixup_chains,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000,-segaddr,WINE_TOP_DOWN,0x7ff000000000"
+            WINELOADER_LDFLAGS="$WINELOADER_LDFLAGS -Wl,-no_pie,-image_base,0x200000000,-no_huge,-no_fixup_chains,-segalign,0x1000,-segaddr,WINE_RESERVE,0x1000,-segaddr,WINE_TOP_DOWN,0x800000000"
 else case e in #(
   e) wine_use_preloader=yes ;;
 esac
@@ -23046,12 +23053,14 @@ wine_fn_config_makefile dlls/dinput/tests enable_tests
 wine_fn_config_makefile dlls/dinput8 enable_dinput8
 wine_fn_config_makefile dlls/directmanipulation enable_directmanipulation
 wine_fn_config_makefile dlls/directmanipulation/tests enable_tests
+wine_fn_config_makefile dlls/dismapi enable_dismapi
 wine_fn_config_makefile dlls/dispdib.dll16 enable_win16
 wine_fn_config_makefile dlls/dispex enable_dispex
 wine_fn_config_makefile dlls/dispex/tests enable_tests
 wine_fn_config_makefile dlls/display.drv16 enable_win16
 wine_fn_config_makefile dlls/dmband enable_dmband
 wine_fn_config_makefile dlls/dmband/tests enable_tests
+wine_fn_config_makefile dlls/dmprocessxmlfiltered enable_dmprocessxmlfiltered
 wine_fn_config_makefile dlls/dmcompos enable_dmcompos
 wine_fn_config_makefile dlls/dmcompos/tests enable_tests
 wine_fn_config_makefile dlls/dmime enable_dmime
@@ -23135,6 +23144,8 @@ wine_fn_config_makefile dlls/gdiplus enable_gdiplus
 wine_fn_config_makefile dlls/gdiplus/tests enable_tests
 wine_fn_config_makefile dlls/geolocation enable_geolocation
 wine_fn_config_makefile dlls/geolocation/tests enable_tests
+wine_fn_config_makefile dlls/windows.devices.geolocation enable_windows_devices_geolocation
+wine_fn_config_makefile dlls/windows.devices.geolocation/tests enable_tests
 wine_fn_config_makefile dlls/glu32 enable_glu32
 wine_fn_config_makefile dlls/glu32/tests enable_tests
 wine_fn_config_makefile dlls/gphoto2.ds enable_gphoto2_ds
@@ -23670,6 +23681,7 @@ wine_fn_config_makefile dlls/wdscore enable_wdscore
 wine_fn_config_makefile dlls/webservices enable_webservices
 wine_fn_config_makefile dlls/webservices/tests enable_tests
 wine_fn_config_makefile dlls/websocket enable_websocket
+wine_fn_config_makefile dlls/webview2loader enable_webview2loader
 wine_fn_config_makefile dlls/wer enable_wer
 wine_fn_config_makefile dlls/wer/tests enable_tests
 wine_fn_config_makefile dlls/wevtapi enable_wevtapi
@@ -24010,6 +24022,7 @@ wine_fn_config_makefile programs/netsh enable_netsh
 wine_fn_config_makefile programs/netstat enable_netstat
 wine_fn_config_makefile programs/ngen enable_ngen
 wine_fn_config_makefile programs/notepad enable_notepad
+wine_fn_config_makefile programs/OptionalFeatures enable_OptionalFeatures
 wine_fn_config_makefile programs/odbcad32 enable_odbcad32
 wine_fn_config_makefile programs/oleview enable_oleview
 wine_fn_config_makefile programs/ping enable_ping
@@ -24061,6 +24074,7 @@ wine_fn_config_makefile programs/view enable_view
 wine_fn_config_makefile programs/wevtutil enable_wevtutil
 wine_fn_config_makefile programs/where enable_where
 wine_fn_config_makefile programs/whoami enable_whoami
+wine_fn_config_makefile programs/wineappx enable_wineappx
 wine_fn_config_makefile programs/wineboot enable_wineboot
 wine_fn_config_makefile programs/winebrowser enable_winebrowser
 wine_fn_config_makefile programs/winecfg enable_winecfg
@@ -24072,6 +24086,7 @@ wine_fn_config_makefile programs/winemenubuilder enable_winemenubuilder
 wine_fn_config_makefile programs/winemine enable_winemine
 wine_fn_config_makefile programs/winemsibuilder enable_winemsibuilder
 wine_fn_config_makefile programs/winepath enable_winepath
+wine_fn_config_makefile programs/winepowershell enable_winepowershell
 wine_fn_config_makefile programs/winetest enable_winetest
 wine_fn_config_makefile programs/winevdm enable_winevdm
 wine_fn_config_makefile programs/winhelp.exe16 enable_win16

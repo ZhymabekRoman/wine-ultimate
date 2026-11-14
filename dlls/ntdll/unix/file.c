@@ -5832,7 +5832,7 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
         0,                                             /* FileCaseSensitiveInformation */
         0,                                             /* FileLinkInformationEx */
         0,                                             /* FileLinkInformationExBypassAccessCheck */
-        0,                                             /* FileStorageReserveIdInformation */
+        sizeof(ULONG),                                 /* FileStorageReserveIdInformation */
         0,                                             /* FileCaseSensitiveInformationForceAccessCheck */
         0,                                             /* FileKnownFolderInformation */
     };
@@ -5998,6 +5998,10 @@ NTSTATUS WINAPI NtQueryInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
             info->NumberOfLinks  = std.NumberOfLinks;
             info->EffectiveAccess = FILE_ALL_ACCESS; /* FIXME */
         }
+        break;
+    case FileStorageReserveIdInformation:
+        *(ULONG *)ptr = 0; /* StorageReserveIdNone */
+        status = STATUS_SUCCESS;
         break;
     default:
         FIXME("Unsupported class (%d)\n", class);

@@ -44,6 +44,14 @@ const IID IID___x_ABI_CMicrosoft_CWindows_CAppNotifications_CIAppNotificationMan
         {0xfca74de0, 0xebf0, 0x71a8, {0x92, 0xda, 0xf4, 0x4a, 0xea, 0xc3, 0x18, 0xcd}};
 const IID IID___FIAsyncOperation_1_AppNotificationProgressResult =
         {0xaa739d3f, 0xd458, 0x5d30, {0xb2, 0x92, 0xde, 0x6d, 0x52, 0x97, 0x9e, 0xb4}};
+static const GUID IID_IAppNotificationManager_WAR =
+        {0x38ba268d, 0xe0c7, 0x522e, {0xa7, 0x9d, 0x8a, 0x29, 0xdc, 0xdd, 0x71, 0x35}};
+static const GUID IID_IAppNotificationManagerStatics_WAR =
+        {0x6cfc0d8d, 0x84a3, 0x5592, {0xb4, 0xc6, 0xe3, 0xe7, 0xe7, 0xc6, 0x80, 0xe4}};
+static const GUID IID_IAppNotificationManagerStatics2_WAR =
+        {0x6eb42a35, 0xe82f, 0x5732, {0x98, 0xf1, 0x12, 0x97, 0x05, 0x60, 0x2f, 0x2e}};
+static const GUID IID_IAppNotificationManager_WASDK16 =
+        {0x55129688, 0xb4bd, 0x550b, {0xae, 0x6b, 0xc2, 0x40, 0x61, 0x95, 0x4d, 0x91}};
 
 /* IInspectable forwarder for secondary interfaces (shared with
  * toast_notification_manager.c, duplicated for locality). */
@@ -694,7 +702,9 @@ static HRESULT WINAPI app_notification_manager_QueryInterface( IAppNotificationM
     if (IsEqualGUID( iid, &IID_IUnknown )
             || IsEqualGUID( iid, &IID_IInspectable )
             || IsEqualGUID( iid, &IID_IAgileObject )
-            || IsEqualGUID( iid, &IID_IAppNotificationManager ))
+            || IsEqualGUID( iid, &IID_IAppNotificationManager )
+            || IsEqualGUID( iid, &IID_IAppNotificationManager_WAR )
+            || IsEqualGUID( iid, &IID_IAppNotificationManager_WASDK16 ))
     {
         IUnknown_AddRef( (IUnknown *)iface );
         *out = iface;
@@ -1469,14 +1479,16 @@ static HRESULT WINAPI manager_factory_QueryInterface( IActivationFactory *iface,
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IAppNotificationManagerStatics ))
+    if (IsEqualGUID( iid, &IID_IAppNotificationManagerStatics )
+            || IsEqualGUID( iid, &IID_IAppNotificationManagerStatics_WAR ))
     {
         IUnknown_AddRef( (IUnknown *)iface );
         *out = &impl->IAppNotificationManagerStatics_iface;
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IAppNotificationManagerStatics2 ))
+    if (IsEqualGUID( iid, &IID_IAppNotificationManagerStatics2 )
+            || IsEqualGUID( iid, &IID_IAppNotificationManagerStatics2_WAR ))
     {
         IUnknown_AddRef( (IUnknown *)iface );
         *out = &impl->IAppNotificationManagerStatics2_iface;

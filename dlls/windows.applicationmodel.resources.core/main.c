@@ -71,6 +71,10 @@ static const GUID IID_IResourceCandidate_g        = {0xaf5207d9, 0xc433, 0x4764,
 static const GUID IID_IResourceCandidate2_g       = {0x69e5b468, 0xf6fc, 0x4013, {0xaa, 0xa2, 0xd5, 0x3f, 0x17, 0x57, 0xd3, 0xb5}};
 static const GUID IID_IResourceCandidate3_g       = {0x08ae97f8, 0x517a, 0x4674, {0x95, 0x8c, 0x4a, 0x3c, 0x7c, 0xd2, 0xcc, 0x6b}};
 static const GUID IID_INamedResource_g            = {0x1c98c219, 0x0b13, 0x4240, {0x89, 0xa5, 0xd4, 0x95, 0xdc, 0x18, 0x9a, 0x00}};
+static const GUID IID_IMapView_String_NamedRes_g  = {0x4825d6c4, 0x835a, 0x5da1, {0x9b, 0xdd, 0x12, 0xe9, 0x7e, 0x16, 0xfb, 0x7a}};
+static const GUID IID_IIterable_KVP_String_NR_g   = {0xbf16482e, 0x80ed, 0x51f0, {0xb9, 0xc9, 0x3a, 0x80, 0x4e, 0x2d, 0x64, 0x03}};
+static const GUID IID_IIterator_KVP_String_NR_g   = {0x46ad4d3d, 0x8a84, 0x5d07, {0xbc, 0xa8, 0x58, 0xd2, 0x8a, 0xb0, 0x2f, 0xf9}};
+static const GUID IID_IKVP_String_NamedRes_g      = {0xbd4b0143, 0x3a22, 0x5ee2, {0x92, 0xed, 0x7b, 0xc3, 0xc1, 0x29, 0xe5, 0x2b}};
 static const GUID IID_IResourceLoader_g           = {0x59ed1f35, 0x0942, 0x4b61, {0x9a, 0xef, 0x20, 0xd8, 0x94, 0x8f, 0x46, 0x28}}; /* (unverified) */
 static const GUID IID_IResourceLoader2_g          = {0xe29bbb9e, 0xbb14, 0x47d2, {0x9a, 0x2e, 0xf1, 0xa7, 0x4a, 0x58, 0x38, 0x7f}}; /* (unverified, 8.1 metadata) */
 static const GUID IID_IResourceQualifier_g        = {0x785da5b2, 0x4afd, 0x4376, {0xa8, 0x88, 0xc5, 0xf9, 0xa6, 0xb7, 0xa0, 0x5c}};
@@ -549,6 +553,9 @@ static HRESULT map_lookup_ctx( struct res_map *map, const WCHAR *key, const pri_
                                struct res_candidate **out );
 static const void *res_context2_vtbl[];
 static const void *res_map2_vtbl[];
+static const void *res_mapview_vtbl[];
+static const void *res_mapiter_vtbl[];
+static const void *named_resource_vtbl[];
 
 /* ------------------------------------------------------------------ */
 /* map/qualifier key decode: HSTRING payload, else managed-string CCW   */
@@ -848,10 +855,11 @@ static HRESULT WINAPI svv_GetIids( void *iface, ULONG *c, IID **i )
     /* Seed the CoreRT cast cache with the whole face set the object answers
      * (see svv_QueryInterface E8): a miss there is what turns a QI-free
      * castclass into an InvalidCastException. */
-    return fill_param_iids( c, i, 4, 2, ELEM_VECTORVIEW L"`1", ELEM_STRING,
+    return fill_param_iids( c, i, 5, 2, ELEM_VECTORVIEW L"`1", ELEM_STRING,
                                 2, ELEM_ITERABLE L"`1", ELEM_STRING,
                                 2, ELEM_VECTOR L"`1", ELEM_STRING,
-                                2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING );
+                                2, ELEM_OBSERVABLEVECTOR L"`1", ELEM_STRING,
+                                4, ELEM_ITERABLE L"`1", ELEM_KEYVALUEPAIR L"`2", ELEM_STRING, ELEM_STRING );
 }
 static HRESULT WINAPI svv_GetRuntimeClassName( void *iface, HSTRING *n )
 {
@@ -2856,11 +2864,15 @@ struct res_map
 {
     const void *vt_map;
     const void *vt_map2;   /* IResourceMap2: [II 5][GetByIndex 6][GetCount 7][GetFullCount 8][FullGetByIndex 9] */
+    const void *vt_mapview; /* IMapView<String, NamedResource> */
+    const void *vt_mapiter; /* IIterable<IKeyValuePair<String, NamedResource>> */
     LONG ref;
     WCHAR *prefix;  /* subtree prefix "X\" for GetSubtree("X"), NULL for main map */
 };
 static inline struct res_map *map_from( void *iface ) { return (struct res_map *)iface; }
 static inline struct res_map *map2_from( void *iface ) { return (struct res_map *)((BYTE *)iface - sizeof(void *)); }
+static inline struct res_map *mapview_from( void *iface ) { return (struct res_map *)((BYTE *)iface - 2 * sizeof(void *)); }
+static inline struct res_map *mapiter_from( void *iface ) { return (struct res_map *)((BYTE *)iface - 3 * sizeof(void *)); }
 
 static struct kv_pair default_qualifiers[] =
 {
@@ -3215,6 +3227,18 @@ static HRESULT WINAPI map_QueryInterface( void *iface, REFIID iid, void **out )
         incr( &impl->ref );
         return S_OK;
     }
+    if (IsEqualGUID( iid, &IID_IMapView_String_NamedRes_g ))
+    {
+        *out = &impl->vt_mapview;
+        incr( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterable_KVP_String_NR_g ))
+    {
+        *out = &impl->vt_mapiter;
+        incr( &impl->ref );
+        return S_OK;
+    }
     FIXME( "%s not implemented (Map3 GetInt32/GetInts/GetUri/GetEmbedded/GetView/GetString)\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -3335,6 +3359,8 @@ static HRESULT WINAPI map_GetSubtree( void *iface, HSTRING name, void **out )
         {
             sub->vt_map = res_map_vtbl;
             sub->vt_map2 = res_map2_vtbl;
+            sub->vt_mapview = res_mapview_vtbl;
+            sub->vt_mapiter = res_mapiter_vtbl;
             sub->ref = 2;
             sub->prefix = lstrdupW( prefix );
             subtree_maps[subtree_count++] = sub;
@@ -3431,15 +3457,212 @@ static const void *res_map2_vtbl[] =
     map2_GetByIndex, map2_GetCount, map2_GetFullCount, map2_FullGetByIndex,
 };
 
-/* ------------------------------------------------------------------ */
-/* NamedResource: [II 5][Uri 6][Candidates 7][Resolve 8][ResolveForContext 9][ResolveAll 10][ResolveAllForContext 11] */
-/* ------------------------------------------------------------------ */
-
 struct named_resource
 {
     const void *vt_named;
     LONG ref;
     struct res_candidate *cand;
+};
+
+static HRESULT WINAPI mapview_QueryInterface( void *iface, REFIID iid, void **out ) { return map_QueryInterface( mapview_from( iface ), iid, out ); }
+static ULONG WINAPI mapview_AddRef( void *iface ) { return incr( &mapview_from( iface )->ref ); }
+static ULONG WINAPI mapview_Release( void *iface ) { return decr( &mapview_from( iface )->ref ); }
+static HRESULT WINAPI mapview_Lookup( void *iface, HSTRING key, void **out )
+{
+    struct res_map *impl = mapview_from( iface );
+    struct res_candidate *cand = NULL;
+    struct named_resource *nr;
+    const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
+    HRESULT hr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!key_decode( key, &raw, &tmp, &owned )) return ELEMENT_NOT_FOUND_E;
+    hr = map_lookup( impl, raw, &cand );
+    key_release( tmp, owned );
+    if (FAILED( hr ) || !cand) return ELEMENT_NOT_FOUND_E;
+    nr = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*nr) );
+    if (!nr) { decr( &cand->ref ); return E_OUTOFMEMORY; }
+    nr->vt_named = named_resource_vtbl;
+    nr->ref = 1;
+    nr->cand = cand;
+    *out = &nr->vt_named;
+    return S_OK;
+}
+static HRESULT WINAPI mapview_get_Size( void *iface, UINT32 *size ) { return map_ResourceCount( mapview_from( iface ), size ); }
+static HRESULT WINAPI mapview_HasKey( void *iface, HSTRING key, boolean *found )
+{
+    struct res_map *impl = mapview_from( iface );
+    const WCHAR *raw;
+    HSTRING tmp;
+    BOOL owned;
+    WCHAR full[2048], namebuf[2048];
+    WCHAR *value = NULL;
+    pri_qual *quals = NULL;
+    UINT32 qcount = 0, ctxcount;
+    if (!found) return E_POINTER;
+    *found = FALSE;
+    if (!key_decode( key, &raw, &tmp, &owned )) return S_OK;
+    init_pri();
+    full[0] = 0;
+    if (impl->prefix) lstrcpynW( full, impl->prefix, ARRAYSIZE( full ) );
+    lstrcatW( full, raw );
+    if (the_index && pri_lookup( the_index, full, default_pri_ctx( &ctxcount ), ctxcount,
+                                 namebuf, ARRAYSIZE( namebuf ), &value, &quals, &qcount ))
+    {
+        *found = TRUE;
+        pri_free_result( value, quals );
+    }
+    else if (builtin_find( full[0] ? full : raw ))
+        *found = TRUE;
+    key_release( tmp, owned );
+    return S_OK;
+}
+static HRESULT WINAPI mapview_Split( void *iface, void **first, void **second )
+{
+    if (first) *first = NULL;
+    if (second) *second = NULL;
+    return S_OK;
+}
+static const void *res_mapview_vtbl[] =
+{
+    mapview_QueryInterface, mapview_AddRef, mapview_Release, map2_GetIids, map2_GetRuntimeClassName, map2_GetTrustLevel,
+    mapview_Lookup, mapview_get_Size, mapview_HasKey, mapview_Split,
+};
+
+struct map_nr_iter
+{
+    const void *vt;
+    LONG ref;
+    struct res_map *map;
+    UINT32 idx;
+    UINT32 count;
+};
+static HRESULT WINAPI mapnriter_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IIterator_KVP_String_NR_g ))
+    {
+        *out = iface;
+        incr( &((struct map_nr_iter *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI mapnriter_AddRef( void *iface ) { return incr( &((struct map_nr_iter *)iface)->ref ); }
+static ULONG WINAPI mapnriter_Release( void *iface )
+{
+    struct map_nr_iter *it = iface;
+    LONG r = decr( &it->ref );
+    if (!r) { if (it->map) decr( &it->map->ref ); HeapFree( GetProcessHeap(), 0, it ); }
+    return r;
+}
+static HRESULT WINAPI mapnriter_GetIids( void *iface, ULONG *c, IID **i ) { return simple_get_iids( iface, c, i ); }
+static HRESULT WINAPI mapnriter_GetRCN( void *iface, HSTRING *n ) { return WindowsCreateString( L"Windows.Foundation.Collections.IIterator`1<Windows.Foundation.Collections.IKeyValuePair`2<String, Windows.ApplicationModel.Resources.Core.NamedResource>>", 149, n ); }
+static HRESULT WINAPI mapnriter_GetTL( void *iface, INT32 *t ) { return get_trust_base( iface, t ); }
+static HRESULT WINAPI mapnriter_get_HasCurrent( void *iface, boolean *has )
+{
+    struct map_nr_iter *it = iface;
+    if (has) *has = (it->idx < it->count) ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI mapnriter_MoveNext( void *iface, boolean *has )
+{
+    struct map_nr_iter *it = iface;
+    if (it->idx < it->count) it->idx++;
+    if (has) *has = (it->idx < it->count) ? TRUE : FALSE;
+    return S_OK;
+}
+struct map_nr_kvp { const void *vt; LONG ref; HSTRING k; void *v; };
+static HRESULT WINAPI mapnrkvp_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IKVP_String_NamedRes_g ))
+    {
+        *out = iface; incr( &((struct map_nr_kvp *)iface)->ref ); return S_OK;
+    }
+    *out = NULL; return E_NOINTERFACE;
+}
+static ULONG WINAPI mapnrkvp_AddRef( void *iface ) { return incr( &((struct map_nr_kvp *)iface)->ref ); }
+static ULONG WINAPI mapnrkvp_Release( void *iface )
+{
+    struct map_nr_kvp *p = iface;
+    LONG r = decr( &p->ref );
+    if (!r) { WindowsDeleteString( p->k ); if (p->v) IUnknown_Release( (IUnknown *)p->v ); HeapFree( GetProcessHeap(), 0, p ); }
+    return r;
+}
+static HRESULT WINAPI mapnrkvp_GetRCN( void *iface, HSTRING *n ) { return WindowsCreateString( L"Windows.Foundation.Collections.IKeyValuePair`2<String, Windows.ApplicationModel.Resources.Core.NamedResource>", 109, n ); }
+static HRESULT WINAPI mapnrkvp_get_Key( void *iface, HSTRING *k ) { return WindowsDuplicateString( ((struct map_nr_kvp *)iface)->k, k ); }
+static HRESULT WINAPI mapnrkvp_get_Value( void *iface, void **v ) { struct map_nr_kvp *p = iface; *v = p->v; if (p->v) IUnknown_AddRef( (IUnknown *)p->v ); return S_OK; }
+static const void *mapnrkvp_vtbl[] = { mapnrkvp_QI, mapnrkvp_AddRef, mapnrkvp_Release, mapnriter_GetIids, mapnrkvp_GetRCN, mapnriter_GetTL, mapnrkvp_get_Key, mapnrkvp_get_Value };
+static HRESULT WINAPI mapnriter_get_Current( void *iface, void **out )
+{
+    struct map_nr_iter *it = iface;
+    WCHAR namebuf[2048];
+    WCHAR *value = NULL;
+    pri_qual *quals = NULL;
+    UINT32 qcount = 0, ctxcount;
+    struct res_candidate *cand = NULL;
+    struct named_resource *nr;
+    struct map_nr_kvp *kv;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (it->idx >= it->count) return E_BOUNDS;
+    if (!the_index || !pri_map_get( the_index, it->map->prefix, it->idx, default_pri_ctx( &ctxcount ), ctxcount,
+                                     namebuf, ARRAYSIZE( namebuf ), &value, &quals, &qcount ))
+        return E_BOUNDS;
+    if (FAILED( create_candidate( namebuf, value, quals, qcount, &cand ) )) { pri_free_result( value, quals ); return E_OUTOFMEMORY; }
+    pri_free_result( NULL, quals );
+    nr = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*nr) );
+    kv = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*kv) );
+    if (!nr || !kv) { if (nr) HeapFree( GetProcessHeap(), 0, nr ); if (kv) HeapFree( GetProcessHeap(), 0, kv ); decr( &cand->ref ); return E_OUTOFMEMORY; }
+    nr->vt_named = named_resource_vtbl; nr->ref = 1; nr->cand = cand;
+    kv->vt = mapnrkvp_vtbl; kv->ref = 1;
+    WindowsCreateString( namebuf, (UINT32)lstrlenW( namebuf ), &kv->k );
+    kv->v = &nr->vt_named;
+    *out = kv;
+    return S_OK;
+}
+static HRESULT WINAPI mapnriter_GetMany( void *iface, UINT32 cap, void **items, UINT32 *actual )
+{
+    struct map_nr_iter *it = iface;
+    UINT32 i = 0;
+    while (i < cap && it->idx < it->count)
+    {
+        if (FAILED( mapnriter_get_Current( iface, &items[i] ) )) break;
+        it->idx++; i++;
+    }
+    if (actual) *actual = i;
+    return S_OK;
+}
+static const void *mapnriter_vtbl[] = { mapnriter_QI, mapnriter_AddRef, mapnriter_Release, mapnriter_GetIids, mapnriter_GetRCN, mapnriter_GetTL, mapnriter_get_Current, mapnriter_get_HasCurrent, mapnriter_MoveNext, mapnriter_GetMany };
+
+static HRESULT WINAPI mapiter_QueryInterface( void *iface, REFIID iid, void **out ) { return map_QueryInterface( mapiter_from( iface ), iid, out ); }
+static ULONG WINAPI mapiter_AddRef( void *iface ) { return incr( &mapiter_from( iface )->ref ); }
+static ULONG WINAPI mapiter_Release( void *iface ) { return decr( &mapiter_from( iface )->ref ); }
+static HRESULT WINAPI mapiter_First( void *iface, void **out )
+{
+    struct res_map *m = mapiter_from( iface );
+    struct map_nr_iter *it;
+    UINT32 cnt = 0;
+    if (!out) return E_POINTER;
+    init_pri();
+    cnt = the_index ? pri_map_count( the_index, m->prefix ) : 0;
+    it = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*it) );
+    if (!it) return E_OUTOFMEMORY;
+    it->vt = mapnriter_vtbl; it->ref = 1; it->map = m; it->idx = 0; it->count = cnt;
+    incr( &m->ref );
+    *out = it;
+    return S_OK;
+}
+static const void *res_mapiter_vtbl[] =
+{
+    mapiter_QueryInterface, mapiter_AddRef, mapiter_Release, map2_GetIids, map2_GetRuntimeClassName, map2_GetTrustLevel,
+    mapiter_First,
 };
 static inline struct named_resource *named_from( void *iface ) { return (struct named_resource *)iface; }
 static HRESULT WINAPI named_QueryInterface( void *iface, REFIID iid, void **out )
@@ -4433,7 +4656,7 @@ static struct res_loader res_loader_inst = { res_loader_vtbl, res_loader2_vtbl, 
 static inline struct res_loader *loader_from( void *iface ) { return (struct res_loader *)iface; }
 static inline struct res_loader *loader2_from( void *iface ) { return (struct res_loader *)((BYTE *)iface - sizeof(void *)); }
 
-static struct res_map main_map = { NULL, NULL, 1, NULL };
+static struct res_map main_map = { NULL, NULL, NULL, NULL, 1, NULL };
 
 static HRESULT WINAPI rm_QueryInterface( void *iface, REFIID iid, void **out )
 {
@@ -4881,6 +5104,7 @@ static struct simple_factory qual_factory_inst  = { simple_factory_vtbl, RTCLASS
  * Statics2/Statics3/AppReport/AppEntry IIDs carry the metadata values
  * (single-source, treat as unverified until the app QIs them live). */
 static const GUID IID_IMemoryManagerStatics_g   = {0x6eee351f, 0x6d62, 0x423f, {0x94, 0x79, 0xb0, 0x1f, 0x9c, 0x9f, 0x76, 0x69}};
+static const GUID IID_IMemoryManagerStatics_Real = {0x5c6c279c, 0xd7ca, 0x4779, {0x91, 0x88, 0x40, 0x57, 0x21, 0x9c, 0xe6, 0x4c}};
 static const GUID IID_IMemoryManagerStatics2_g  = {0x13dc79ba, 0x55e3, 0x5951, {0xa1, 0xb8, 0xdd, 0x0a, 0xbd, 0xd3, 0x01, 0x60}};
 static const GUID IID_IMemoryManagerStatics3_g  = {0xecb7a292, 0xfd03, 0x5492, {0xb4, 0xd8, 0xd9, 0xd5, 0x17, 0xd7, 0x9e, 0x5c}}; /* (unverified) */
 static const GUID IID_IMemoryAppReport_g        = {0x267f7f6a, 0x5743, 0x4acf, {0xb2, 0x04, 0xe5, 0xc4, 0xd0, 0x86, 0x4a, 0x0a}}; /* (unverified) */
@@ -4986,6 +5210,22 @@ static struct mm_factory *mmf_from_s( void *iface, size_t off ) { return (struct
 static HRESULT WINAPI msm_AppMemoryUsage( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x02000000; return S_OK; }
 static HRESULT WINAPI msm_AvailableMemoryUsage( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x40000000; return S_OK; }
 static HRESULT WINAPI msm_TotalAvailableMemory( void *iface, UINT64 *v ) { TRACE( "enter\n" ); if (!v) return E_POINTER; *v = 0x80000000; return S_OK; }
+static HRESULT WINAPI msm_add_event( void *iface, void *handler, UINT64 *token )
+{
+    TRACE( "iface %p, handler %p, token %p\n", iface, handler, token );
+    if (token) *token = 1;
+    return S_OK;
+}
+static HRESULT WINAPI msm_remove_event( void *iface, UINT64 token )
+{
+    TRACE( "iface %p, token %llu\n", iface, (unsigned long long)token );
+    return S_OK;
+}
+static HRESULT WINAPI msm_stub_zero( void *iface, void *v )
+{
+    if (v) *(UINT64 *)v = 0;
+    return S_OK;
+}
 static HRESULT WINAPI msm_GetCurrentAppMemoryReport( void *iface, void **out )
 {
     TRACE( "enter\n" );
@@ -5007,7 +5247,19 @@ static HRESULT WINAPI msm_GetTrustLevel( void *iface, INT32 *t ) { return get_tr
 static const void *mm_statics_vtbl[] =
 {
     msm_QueryInterface, msm_AddRef, msm_Release, msm_GetIids, msm_GetRuntimeClassName, msm_GetTrustLevel,
-    msm_AppMemoryUsage, msm_AvailableMemoryUsage, msm_TotalAvailableMemory, msm_GetCurrentAppMemoryReport,
+    msm_AppMemoryUsage,              /* 6: get_AppMemoryUsage */
+    msm_AvailableMemoryUsage,        /* 7: get_AppMemoryUsageLimit */
+    msm_stub_zero,                   /* 8: get_AppMemoryUsageLevel (0 = Low) */
+    msm_add_event,                   /* 9: add_AppMemoryUsageIncreased */
+    msm_remove_event,                /* 10: remove_AppMemoryUsageIncreased */
+    msm_add_event,                   /* 11: add_AppMemoryUsageDecreased */
+    msm_remove_event,                /* 12: remove_AppMemoryUsageDecreased */
+    msm_add_event,                   /* 13: add_AppMemoryUsageLimitChanging */
+    msm_remove_event,                /* 14: remove_AppMemoryUsageLimitChanging */
+    msm_AvailableMemoryUsage,        /* 15: get_ExpectedAppMemoryUsageLimit */
+    msm_GetCurrentAppMemoryReport,   /* 16: GetCurrentAppMemoryReport */
+    msm_stub_zero, msm_stub_zero, msm_stub_zero, msm_stub_zero,
+    msm_stub_zero, msm_stub_zero, msm_stub_zero, msm_stub_zero,
 };
 /* IMemoryManagerStatics2: [GetForPackageFamily 6] -> the same report face */
 static HRESULT WINAPI msm2_QueryInterface( void *iface, REFIID iid, void **out )
@@ -5053,7 +5305,8 @@ static HRESULT WINAPI msmf_QueryInterface( struct mm_factory *impl, REFIID iid, 
         *out = &impl->vt_primary;
         return S_OK;
     }
-    if (IsEqualGUID( iid, &IID_IMemoryManagerStatics_g ))
+    if (IsEqualGUID( iid, &IID_IMemoryManagerStatics_g ) ||
+        IsEqualGUID( iid, &IID_IMemoryManagerStatics_Real ))
     {
         *out = &impl->vt_statics;
         return S_OK;
@@ -5409,6 +5662,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
     {
         main_map.vt_map = res_map_vtbl;
         main_map.vt_map2 = res_map2_vtbl;
+        main_map.vt_mapview = res_mapview_vtbl;
+        main_map.vt_mapiter = res_mapiter_vtbl;
         *factory = (void *)&rc_factory_inst.vt_primary;
         return S_OK;
     }
@@ -5416,6 +5671,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
     {
         main_map.vt_map = res_map_vtbl;
         main_map.vt_map2 = res_map2_vtbl;
+        main_map.vt_mapview = res_mapview_vtbl;
+        main_map.vt_mapiter = res_mapiter_vtbl;
         *factory = (void *)&rm_factory_inst.vt_primary;
         return S_OK;
     }
@@ -5423,6 +5680,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
     {
         main_map.vt_map = res_map_vtbl;
         main_map.vt_map2 = res_map2_vtbl;
+        main_map.vt_mapview = res_mapview_vtbl;
+        main_map.vt_mapiter = res_mapiter_vtbl;
         *factory = (void *)&map_factory_inst.vt_primary;
         return S_OK;
     }
@@ -5438,6 +5697,8 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, void **factory)
          * pri default map. */
         main_map.vt_map = res_map_vtbl;
         main_map.vt_map2 = res_map2_vtbl;
+        main_map.vt_mapview = res_mapview_vtbl;
+        main_map.vt_mapiter = res_mapiter_vtbl;
         *factory = (void *)&rm_factory_inst.vt_primary;
         return S_OK;
     }

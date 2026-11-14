@@ -118,6 +118,9 @@ struct display_information
 {
     IDisplayInformation IDisplayInformation_iface;
     IDisplayInformation2 IDisplayInformation2_iface;
+    IDisplayInformation3 IDisplayInformation3_iface;
+    IDisplayInformation4 IDisplayInformation4_iface;
+    IDisplayInformation5 IDisplayInformation5_iface;
     LONG ref;
 };
 
@@ -128,6 +131,18 @@ static inline struct display_information *impl_from_IDisplayInformation( IDispla
 static inline struct display_information *impl_from_IDisplayInformation2( IDisplayInformation2 *iface )
 {
     return CONTAINING_RECORD( iface, struct display_information, IDisplayInformation2_iface );
+}
+static inline struct display_information *impl_from_IDisplayInformation3( IDisplayInformation3 *iface )
+{
+    return CONTAINING_RECORD( iface, struct display_information, IDisplayInformation3_iface );
+}
+static inline struct display_information *impl_from_IDisplayInformation4( IDisplayInformation4 *iface )
+{
+    return CONTAINING_RECORD( iface, struct display_information, IDisplayInformation4_iface );
+}
+static inline struct display_information *impl_from_IDisplayInformation5( IDisplayInformation5 *iface )
+{
+    return CONTAINING_RECORD( iface, struct display_information, IDisplayInformation5_iface );
 }
 
 static HRESULT WINAPI display_info_QueryInterface( IDisplayInformation *iface, REFIID iid, void **out )
@@ -148,6 +163,24 @@ static HRESULT WINAPI display_info_QueryInterface( IDisplayInformation *iface, R
         IDisplayInformation2_AddRef( *out );
         return S_OK;
     }
+    else if (IsEqualGUID( iid, &IID_IDisplayInformation3 ))
+    {
+        *out = &impl->IDisplayInformation3_iface;
+        IDisplayInformation3_AddRef( *out );
+        return S_OK;
+    }
+    else if (IsEqualGUID( iid, &IID_IDisplayInformation4 ))
+    {
+        *out = &impl->IDisplayInformation4_iface;
+        IDisplayInformation4_AddRef( *out );
+        return S_OK;
+    }
+    else if (IsEqualGUID( iid, &IID_IDisplayInformation5 ))
+    {
+        *out = &impl->IDisplayInformation5_iface;
+        IDisplayInformation5_AddRef( *out );
+        return S_OK;
+    }
     FIXME( "%s not implemented.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -165,9 +198,32 @@ static ULONG WINAPI display_info_Release( IDisplayInformation *iface )
     if (!ref) free( impl );
     return ref;
 }
-static HRESULT WINAPI display_info_GetIids( IDisplayInformation *iface, ULONG *count, IID **iids ) { return E_NOTIMPL; }
-static HRESULT WINAPI display_info_GetRuntimeClassName( IDisplayInformation *iface, HSTRING *name ) { return E_NOTIMPL; }
-static HRESULT WINAPI display_info_GetTrustLevel( IDisplayInformation *iface, TrustLevel *level ) { return E_NOTIMPL; }
+static HRESULT WINAPI display_info_GetIids( IDisplayInformation *iface, ULONG *count, IID **iids )
+{
+    static const IID iid_array[] =
+    {
+        IID_IDisplayInformation,
+        IID_IDisplayInformation2,
+        IID_IDisplayInformation3,
+        IID_IDisplayInformation4,
+        IID_IDisplayInformation5,
+    };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+static HRESULT WINAPI display_info_GetRuntimeClassName( IDisplayInformation *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Graphics.Display.DisplayInformation", 41, name );
+}
+static HRESULT WINAPI display_info_GetTrustLevel( IDisplayInformation *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
 
 static HRESULT WINAPI display_info_get_CurrentOrientation( IDisplayInformation *iface, DisplayOrientations *value )
 {
@@ -292,9 +348,21 @@ static ULONG WINAPI display_info2_Release( IDisplayInformation2 *iface )
     struct display_information *impl = impl_from_IDisplayInformation2( iface );
     return IDisplayInformation_Release( &impl->IDisplayInformation_iface );
 }
-static HRESULT WINAPI display_info2_GetIids( IDisplayInformation2 *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
-static HRESULT WINAPI display_info2_GetRuntimeClassName( IDisplayInformation2 *iface, HSTRING *n ) { return E_NOTIMPL; }
-static HRESULT WINAPI display_info2_GetTrustLevel( IDisplayInformation2 *iface, TrustLevel *l ) { return E_NOTIMPL; }
+static HRESULT WINAPI display_info2_GetIids( IDisplayInformation2 *iface, ULONG *c, IID **i )
+{
+    struct display_information *impl = impl_from_IDisplayInformation2( iface );
+    return display_info_GetIids( &impl->IDisplayInformation_iface, c, i );
+}
+static HRESULT WINAPI display_info2_GetRuntimeClassName( IDisplayInformation2 *iface, HSTRING *n )
+{
+    struct display_information *impl = impl_from_IDisplayInformation2( iface );
+    return display_info_GetRuntimeClassName( &impl->IDisplayInformation_iface, n );
+}
+static HRESULT WINAPI display_info2_GetTrustLevel( IDisplayInformation2 *iface, TrustLevel *l )
+{
+    struct display_information *impl = impl_from_IDisplayInformation2( iface );
+    return display_info_GetTrustLevel( &impl->IDisplayInformation_iface, l );
+}
 static HRESULT WINAPI display_info2_get_RawPixelsPerViewPixel( IDisplayInformation2 *iface, DOUBLE *value )
 {
     if (value) *value = 1.0;
@@ -312,6 +380,162 @@ static const struct IDisplayInformation2Vtbl display_info2_vtbl =
     display_info2_get_RawPixelsPerViewPixel,
 };
 
+static HRESULT WINAPI display_info3_QueryInterface( IDisplayInformation3 *iface, REFIID iid, void **out )
+{
+    struct display_information *impl = impl_from_IDisplayInformation3( iface );
+    return IDisplayInformation_QueryInterface( &impl->IDisplayInformation_iface, iid, out );
+}
+static ULONG WINAPI display_info3_AddRef( IDisplayInformation3 *iface )
+{
+    struct display_information *impl = impl_from_IDisplayInformation3( iface );
+    return IDisplayInformation_AddRef( &impl->IDisplayInformation_iface );
+}
+static ULONG WINAPI display_info3_Release( IDisplayInformation3 *iface )
+{
+    struct display_information *impl = impl_from_IDisplayInformation3( iface );
+    return IDisplayInformation_Release( &impl->IDisplayInformation_iface );
+}
+static HRESULT WINAPI display_info3_GetIids( IDisplayInformation3 *iface, ULONG *c, IID **i )
+{
+    struct display_information *impl = impl_from_IDisplayInformation3( iface );
+    return display_info_GetIids( &impl->IDisplayInformation_iface, c, i );
+}
+static HRESULT WINAPI display_info3_GetRuntimeClassName( IDisplayInformation3 *iface, HSTRING *n )
+{
+    struct display_information *impl = impl_from_IDisplayInformation3( iface );
+    return display_info_GetRuntimeClassName( &impl->IDisplayInformation_iface, n );
+}
+static HRESULT WINAPI display_info3_GetTrustLevel( IDisplayInformation3 *iface, TrustLevel *l )
+{
+    struct display_information *impl = impl_from_IDisplayInformation3( iface );
+    return display_info_GetTrustLevel( &impl->IDisplayInformation_iface, l );
+}
+static HRESULT WINAPI display_info3_get_DiagonalSizeInInches( IDisplayInformation3 *iface, IReference_DOUBLE **value )
+{
+    if (value) *value = NULL;
+    return S_OK;
+}
+static const struct IDisplayInformation3Vtbl display_info3_vtbl =
+{
+    display_info3_QueryInterface,
+    display_info3_AddRef,
+    display_info3_Release,
+    display_info3_GetIids,
+    display_info3_GetRuntimeClassName,
+    display_info3_GetTrustLevel,
+    display_info3_get_DiagonalSizeInInches,
+};
+
+static HRESULT WINAPI display_info4_QueryInterface( IDisplayInformation4 *iface, REFIID iid, void **out )
+{
+    struct display_information *impl = impl_from_IDisplayInformation4( iface );
+    return IDisplayInformation_QueryInterface( &impl->IDisplayInformation_iface, iid, out );
+}
+static ULONG WINAPI display_info4_AddRef( IDisplayInformation4 *iface )
+{
+    struct display_information *impl = impl_from_IDisplayInformation4( iface );
+    return IDisplayInformation_AddRef( &impl->IDisplayInformation_iface );
+}
+static ULONG WINAPI display_info4_Release( IDisplayInformation4 *iface )
+{
+    struct display_information *impl = impl_from_IDisplayInformation4( iface );
+    return IDisplayInformation_Release( &impl->IDisplayInformation_iface );
+}
+static HRESULT WINAPI display_info4_GetIids( IDisplayInformation4 *iface, ULONG *c, IID **i )
+{
+    struct display_information *impl = impl_from_IDisplayInformation4( iface );
+    return display_info_GetIids( &impl->IDisplayInformation_iface, c, i );
+}
+static HRESULT WINAPI display_info4_GetRuntimeClassName( IDisplayInformation4 *iface, HSTRING *n )
+{
+    struct display_information *impl = impl_from_IDisplayInformation4( iface );
+    return display_info_GetRuntimeClassName( &impl->IDisplayInformation_iface, n );
+}
+static HRESULT WINAPI display_info4_GetTrustLevel( IDisplayInformation4 *iface, TrustLevel *l )
+{
+    struct display_information *impl = impl_from_IDisplayInformation4( iface );
+    return display_info_GetTrustLevel( &impl->IDisplayInformation_iface, l );
+}
+static HRESULT WINAPI display_info4_get_ScreenWidthInRawPixels( IDisplayInformation4 *iface, UINT32 *value )
+{
+    if (value) *value = 1920;
+    return S_OK;
+}
+static HRESULT WINAPI display_info4_get_ScreenHeightInRawPixels( IDisplayInformation4 *iface, UINT32 *value )
+{
+    if (value) *value = 1080;
+    return S_OK;
+}
+static const struct IDisplayInformation4Vtbl display_info4_vtbl =
+{
+    display_info4_QueryInterface,
+    display_info4_AddRef,
+    display_info4_Release,
+    display_info4_GetIids,
+    display_info4_GetRuntimeClassName,
+    display_info4_GetTrustLevel,
+    display_info4_get_ScreenWidthInRawPixels,
+    display_info4_get_ScreenHeightInRawPixels,
+};
+
+static HRESULT WINAPI display_info5_QueryInterface( IDisplayInformation5 *iface, REFIID iid, void **out )
+{
+    struct display_information *impl = impl_from_IDisplayInformation5( iface );
+    return IDisplayInformation_QueryInterface( &impl->IDisplayInformation_iface, iid, out );
+}
+static ULONG WINAPI display_info5_AddRef( IDisplayInformation5 *iface )
+{
+    struct display_information *impl = impl_from_IDisplayInformation5( iface );
+    return IDisplayInformation_AddRef( &impl->IDisplayInformation_iface );
+}
+static ULONG WINAPI display_info5_Release( IDisplayInformation5 *iface )
+{
+    struct display_information *impl = impl_from_IDisplayInformation5( iface );
+    return IDisplayInformation_Release( &impl->IDisplayInformation_iface );
+}
+static HRESULT WINAPI display_info5_GetIids( IDisplayInformation5 *iface, ULONG *c, IID **i )
+{
+    struct display_information *impl = impl_from_IDisplayInformation5( iface );
+    return display_info_GetIids( &impl->IDisplayInformation_iface, c, i );
+}
+static HRESULT WINAPI display_info5_GetRuntimeClassName( IDisplayInformation5 *iface, HSTRING *n )
+{
+    struct display_information *impl = impl_from_IDisplayInformation5( iface );
+    return display_info_GetRuntimeClassName( &impl->IDisplayInformation_iface, n );
+}
+static HRESULT WINAPI display_info5_GetTrustLevel( IDisplayInformation5 *iface, TrustLevel *l )
+{
+    struct display_information *impl = impl_from_IDisplayInformation5( iface );
+    return display_info_GetTrustLevel( &impl->IDisplayInformation_iface, l );
+}
+static HRESULT WINAPI display_info5_GetAdvancedColorInfo( IDisplayInformation5 *iface, IAdvancedColorInfo **value )
+{
+    if (value) *value = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI display_info5_add_AdvancedColorInfoChanged( IDisplayInformation5 *iface,
+        __FITypedEventHandler_2_Windows__CGraphics__CDisplay__CDisplayInformation_IInspectable *h, EventRegistrationToken *t )
+{
+    if (t) t->value = 0;
+    return S_OK;
+}
+static HRESULT WINAPI display_info5_remove_AdvancedColorInfoChanged( IDisplayInformation5 *iface, EventRegistrationToken t )
+{
+    return S_OK;
+}
+static const struct IDisplayInformation5Vtbl display_info5_vtbl =
+{
+    display_info5_QueryInterface,
+    display_info5_AddRef,
+    display_info5_Release,
+    display_info5_GetIids,
+    display_info5_GetRuntimeClassName,
+    display_info5_GetTrustLevel,
+    display_info5_GetAdvancedColorInfo,
+    display_info5_add_AdvancedColorInfoChanged,
+    display_info5_remove_AdvancedColorInfoChanged,
+};
+
 DEFINE_IINSPECTABLE( display_info_statics, IDisplayInformationStatics, struct display_info_statics,
                      IActivationFactory_iface )
 
@@ -324,6 +548,9 @@ static HRESULT WINAPI display_info_statics_GetForCurrentView( IDisplayInformatio
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IDisplayInformation_iface.lpVtbl = &display_info_vtbl;
     impl->IDisplayInformation2_iface.lpVtbl = &display_info2_vtbl;
+    impl->IDisplayInformation3_iface.lpVtbl = &display_info3_vtbl;
+    impl->IDisplayInformation4_iface.lpVtbl = &display_info4_vtbl;
+    impl->IDisplayInformation5_iface.lpVtbl = &display_info5_vtbl;
     impl->ref = 1;
     *current = &impl->IDisplayInformation_iface;
     return S_OK;

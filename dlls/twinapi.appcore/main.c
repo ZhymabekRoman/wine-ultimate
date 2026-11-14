@@ -402,11 +402,14 @@ static HRESULT WINAPI push_notification_factory_GetIids( void *iface, ULONG *cou
     IID *arr;
     ULONG i;
 
-    if (!count || !iids) return E_POINTER;
-    if (!(arr = CoTaskMemAlloc( ARRAY_SIZE( iids_arr ) * sizeof(*arr) ))) return E_OUTOFMEMORY;
-    for (i = 0; i < ARRAY_SIZE( iids_arr ); ++i) arr[i] = *iids_arr[i];
+    if (!count) return E_POINTER;
     *count = ARRAY_SIZE( iids_arr );
-    *iids = arr;
+    if (iids)
+    {
+        if (!(arr = CoTaskMemAlloc( ARRAY_SIZE( iids_arr ) * sizeof(*arr) ))) return E_OUTOFMEMORY;
+        for (i = 0; i < ARRAY_SIZE( iids_arr ); ++i) arr[i] = *iids_arr[i];
+        *iids = arr;
+    }
     return S_OK;
 }
 static HRESULT WINAPI push_notification_factory_GetRuntimeClassName( void *iface, HSTRING *name )

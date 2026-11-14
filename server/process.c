@@ -29,6 +29,8 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <stdarg.h>
+#include <time.h>
 #include <sys/types.h>
 #include <sys/time.h>
 #include <sys/socket.h>
@@ -96,6 +98,8 @@ static void process_poll_event( struct fd *fd, int event );
 static struct list *process_get_kernel_obj_list( struct object *obj );
 static void process_destroy( struct object *obj );
 static void terminate_process( struct process *process, struct thread *skip, int exit_code );
+static int wv2io_on( void );
+static void wv2io_print( const char *fmt, ... ) __attribute__((format(printf,1,2)));
 
 static const struct object_ops process_ops =
 {
@@ -938,6 +942,7 @@ static void terminate_process( struct process *process, struct thread *skip, int
 
     grab_object( process );  /* make sure it doesn't get freed when threads die */
     process->is_terminating = 1;
+    if (wv2io_on()) wv2io_print( "D pid=%04x exit=%x\n", process->id, exit_code );
 
 restart:
     LIST_FOR_EACH_ENTRY( thread, &process->thread_list, struct thread, proc_entry )
@@ -1152,6 +1157,33 @@ int set_process_debug_flag( struct process *process, int flag )
     return write_process_memory( process, process->peb + 2, 1, &data, NULL );
 }
 
+/* wv2io birth census: mirrors the named_pipe.c/alpc.c helper pattern.  Logs every
+ * server-side process spawn (object name = exe path) so gate runs can see where
+ * the WhatsApp -> WebView2Loader -> msedgewebview2 spawn chain stops. */
+static int wv2io_on( void )
+{
+    static int on = -1;
+    if (on < 0)
+    {
+        const char *dbg = getenv( "WINEDEBUG" );
+        on = (dbg && strstr( dbg, "wv2io" )) ? 1 : 0;
+    }
+    return on;
+}
+
+static void wv2io_print( const char *fmt, ... )
+{
+    struct timespec ts;
+    va_list args;
+
+    clock_gettime( CLOCK_MONOTONIC, &ts );
+    fprintf( stderr, "WA_WV2: t=%u.%03u ", (unsigned int)ts.tv_sec,
+             (unsigned int)(ts.tv_nsec / 1000000) );
+    va_start( args, fmt );
+    vfprintf( stderr, fmt, args );
+    va_end( args );
+}
+
 /* create a new process */
 DECL_HANDLER(new_process)
 {
@@ -1181,6 +1213,16 @@ DECL_HANDLER(new_process)
         set_error( STATUS_INVALID_PARAMETER );
         close( socket_fd );
         return;
+    }
+    if (wv2io_on())
+    {
+        char nm[160], cl[256];
+        unsigned int n, i;
+        n = name.len / sizeof(WCHAR);
+        if (n > sizeof(nm) - 1) n = sizeof(nm) - 1;
+        for (i = 0; i < n; i++) nm[i] = name.str[i] < 128 ? (char)name.str[i] : '?';
+        nm[n] = 0;
+        wv2io_print( "B parent=%04x spawn %s\n", current->process->id, nm );
     }
     if (fcntl( socket_fd, F_SETFL, O_NONBLOCK ) == -1)
     {
@@ -1313,6 +1355,25 @@ DECL_HANDLER(new_process)
         FIXUP_LEN( info->data->shellinfo_len );
         FIXUP_LEN( info->data->runtime_len );
 #undef FIXUP_LEN
+        if (wv2io_on())  /* birth census with full image path + command line */
+        {
+            static char nm[160], cl[512];
+            const WCHAR *w;
+            data_size_t off = sizeof(*info->data);
+            unsigned int k, nn;
+
+            off += info->data->curdir_len + info->data->dllpath_len;
+            w = (const WCHAR *)((const char *)info->data + off);
+            nn = min( info->data->imagepath_len / sizeof(WCHAR), sizeof(nm) - 1 );
+            for (k = 0; k < nn; k++) nm[k] = w[k] < 128 ? (char)w[k] : '?';
+            nm[nn] = 0;
+            off += info->data->imagepath_len;
+            w = (const WCHAR *)((const char *)info->data + off);
+            nn = min( info->data->cmdline_len / sizeof(WCHAR), sizeof(cl) - 1 );
+            for (k = 0; k < nn; k++) cl[k] = w[k] < 128 ? (char)w[k] : '?';
+            cl[nn] = 0;
+            wv2io_print( "B2 parent=%04x spawn %s CMD %s\n", current->process->id, nm, cl );
+        }
     }
 
     if (req->token && !(token = get_token_obj( current->process, req->token, TOKEN_QUERY | TOKEN_ASSIGN_PRIMARY )))

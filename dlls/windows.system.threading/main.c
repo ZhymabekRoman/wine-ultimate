@@ -265,17 +265,11 @@ static void run_handler( struct threadpool_timer *timer )
     if (!handler) return;
 
     {
-        struct async_action *action = create_async_action( ASYNC_STATUS_STARTED );
+        void **lpVtbl = *(void ***)handler;
+        HRESULT (STDMETHODCALLTYPE *invoke)( void *, IThreadPoolTimer * ) = (void *)lpVtbl[3];
+        HRESULT hr = invoke( handler, &timer->IThreadPoolTimer_iface );
 
-        if (action)
-        {
-            void **lpVtbl = *(void ***)handler;
-            HRESULT (STDMETHODCALLTYPE *invoke)( void *, IAsyncAction * ) = (void *)lpVtbl[3];
-            HRESULT hr = invoke( handler, (IAsyncAction *)&action->IAsyncAction_iface );
-
-            TRACE( "WorkItemHandler invocation returned %#lx.\n", hr );
-            IUnknown_Release( (IUnknown *)&action->IAsyncAction_iface );
-        }
+        TRACE( "TimerElapsedHandler invocation returned %#lx.\n", hr );
     }
     IInspectable_Release( handler );
 }
@@ -319,10 +313,12 @@ static DWORD WINAPI timer_thread_proc( void *arg )
 
 static HRESULT WINAPI timer_QueryInterface( IThreadPoolTimer *iface, REFIID iid, void **out )
 {
+    static const IID IID_IThreadPoolTimer = {0x594ebe78, 0x55ea, 0x4a88, {0xa5, 0x0d, 0x34, 0x02, 0xae, 0x1f, 0x9c, 0xf2}};
+
     TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
 
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable )
-            || IsEqualGUID( iid, &IID_IAgileObject ))
+            || IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IThreadPoolTimer ))
     {
         IUnknown_AddRef( (IUnknown *)iface );
         *out = iface;

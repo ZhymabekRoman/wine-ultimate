@@ -1420,6 +1420,7 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
         }
         IUnknown_Release( (IUnknown *)self_iface );
     }
+    if (is_uwp_xaml_app())
     {
         void **vtbl = *(void ***)ptr;
         HRESULT (WINAPI *get_inner)(void *, void **) = (void *)vtbl[6];
@@ -6658,6 +6659,7 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IScrollViewerStatics_local ) ||
         IsEqualGUID( iid, &IID_IGridStatics_UWP ) ||
         IsEqualGUID( iid, &IID_IGridStatics_UWP2 ) ||
+        IsEqualGUID( iid, &IID_IVisualTreeHelperStatics_UWP ) ||
         IsEqualGUID( iid, &IID_IUIElementStatics_UWP ) ||
         IsEqualGUID( iid, &IID_IFrameworkElementStatics_UWP ))
     {

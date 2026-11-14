@@ -226,7 +226,7 @@ static ULONG WINAPI toast_activated_args_Release(
 static HRESULT WINAPI toast_activated_args_GetIids(
         __x_ABI_CWindows_CUI_CNotifications_CIToastActivatedEventArgs *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     *iid_count = 0;
     *iids = NULL;
     return S_OK;
@@ -341,7 +341,7 @@ static ULONG WINAPI toast_dismissed_args_Release(
 static HRESULT WINAPI toast_dismissed_args_GetIids(
         __x_ABI_CWindows_CUI_CNotifications_CIToastDismissedEventArgs *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     *iid_count = 0;
     *iids = NULL;
     return S_OK;
@@ -671,7 +671,7 @@ static HRESULT WINAPI toast_notifier_GetIids( IToastNotifier *iface, ULONG *iid_
         &IID_IToastNotifier,
     };
 
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
 }
 
@@ -866,8 +866,10 @@ static ULONG WINAPI sched_vector_Release(
 static HRESULT WINAPI sched_vector_GetIids(
         __FIVectorView_1_Windows__CUI__CNotifications__CScheduledToastNotification *iface, ULONG *iid_count, IID **iids )
 {
-    FIXME( "iface %p, iid_count %p, iids %p stub!\n", iface, iid_count, iids );
-    return E_NOTIMPL;
+    if (!iid_count) return E_POINTER;
+    *iid_count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
 }
 
 static HRESULT WINAPI sched_vector_GetRuntimeClassName(
@@ -998,7 +1000,7 @@ static ULONG WINAPI sched_iterator_Release(
 static HRESULT WINAPI sched_iterator_GetIids(
         __FIIterator_1_Windows__CUI__CNotifications__CScheduledToastNotification *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     *iid_count = 0;
     *iids = NULL;
     return S_OK;
@@ -1130,7 +1132,7 @@ static ULONG WINAPI sched_iterable_Release(
 static HRESULT WINAPI sched_iterable_GetIids(
         __FIIterable_1_Windows__CUI__CNotifications__CScheduledToastNotification *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     *iid_count = 0;
     *iids = NULL;
     return S_OK;
@@ -1429,7 +1431,7 @@ static HRESULT WINAPI history_vector_GetIids(
         &IID___FIIterable_1_Windows__CUI__CNotifications__CToastNotification,
     };
 
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
 }
 
@@ -1569,7 +1571,7 @@ static HRESULT WINAPI history_iterable_GetIids(
         &IID___FIIterable_1_Windows__CUI__CNotifications__CToastNotification,
     };
 
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
 }
 
@@ -1666,7 +1668,7 @@ static ULONG WINAPI history_iterator_Release(
 static HRESULT WINAPI history_iterator_GetIids(
         __FIIterator_1_Windows__CUI__CNotifications__CToastNotification *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     *iid_count = 0;
     *iids = NULL;
     return S_OK;
@@ -1864,7 +1866,7 @@ static HRESULT WINAPI toast_notification_history_GetIids( IToastNotificationHist
         &IID_IToastNotificationHistory2,
     };
 
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
 }
 
@@ -2090,7 +2092,7 @@ static HRESULT WINAPI toast_notification_manager_statics_factory_GetIids( IActiv
         &IID_IToastNotificationManagerStatics5,
     };
 
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     return notifications_get_iids( iids_arr, ARRAY_SIZE( iids_arr ), iid_count, iids );
 }
 
@@ -2343,7 +2345,7 @@ static ULONG WINAPI for_user_Release( IToastNotificationManagerForUser *iface )
 
 static HRESULT WINAPI for_user_GetIids( IToastNotificationManagerForUser *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     *iid_count = 0;
     *iids = NULL;
     return S_OK;
@@ -2566,7 +2568,7 @@ static ULONG WINAPI toast_notification_Release( IToastNotification *iface )
 
 static HRESULT WINAPI toast_notification_GetIids( IToastNotification *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     *iid_count = 0;
     *iids = NULL;
     return S_OK;
@@ -2909,7 +2911,7 @@ static ULONG WINAPI toast_notification_factory_Release( IActivationFactory *ifac
 
 static HRESULT WINAPI toast_notification_factory_GetIids( IActivationFactory *iface, ULONG *iid_count, IID **iids )
 {
-    if (!iid_count || !iids) return E_POINTER;
+    if (!iid_count) return E_POINTER;
     *iid_count = 0;
     *iids = NULL;
     return S_OK;

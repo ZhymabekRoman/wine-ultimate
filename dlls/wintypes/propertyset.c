@@ -340,7 +340,6 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
         IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ) ||
         IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMap_String_Object ) ||

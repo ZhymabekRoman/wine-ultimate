@@ -7876,12 +7876,19 @@ NTSTATUS WINAPI NtUserDisplayConfigGetDeviceInfo( DISPLAYCONFIG_DEVICE_INFO_HEAD
         unlock_display_devices();
         return ret;
     }
+    case DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL:
+    {
+        DISPLAYCONFIG_SDR_WHITE_LEVEL *white_level = (DISPLAYCONFIG_SDR_WHITE_LEVEL *)packet;
+        if (packet->size < sizeof(*white_level))
+            return STATUS_INVALID_PARAMETER;
+        white_level->SDRWhiteLevel = 1000;
+        return STATUS_SUCCESS;
+    }
     case DISPLAYCONFIG_DEVICE_INFO_SET_TARGET_PERSISTENCE:
     case DISPLAYCONFIG_DEVICE_INFO_GET_TARGET_BASE_TYPE:
     case DISPLAYCONFIG_DEVICE_INFO_GET_SUPPORT_VIRTUAL_RESOLUTION:
     case DISPLAYCONFIG_DEVICE_INFO_SET_SUPPORT_VIRTUAL_RESOLUTION:
     case DISPLAYCONFIG_DEVICE_INFO_SET_ADVANCED_COLOR_STATE:
-    case DISPLAYCONFIG_DEVICE_INFO_GET_SDR_WHITE_LEVEL:
     default:
         FIXME( "Unimplemented packet type %u.\n", packet->type );
         return STATUS_INVALID_PARAMETER;

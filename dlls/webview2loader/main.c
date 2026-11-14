@@ -84,11 +84,24 @@ static ULONG WINAPI webview_Release( void *t )
     return ref;
 }
 
+static BOOL CALLBACK loader_find_child_cb( HWND hwnd, LPARAM lparam )
+{
+    WCHAR cls[128] = {0};
+    GetClassNameW( hwnd, cls, ARRAY_SIZE( cls ) );
+    if (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
+        wcsstr( cls, L"RenderWidget" ))
+    {
+        *(HWND *)lparam = hwnd;
+        return FALSE;
+    }
+    return TRUE;
+}
+
 static HRESULT WINAPI webview_Navigate( void *t, LPCWSTR uri, void *handler )
 {
     struct webview *w = t;
 
-    WARN( "NAVIGATE %s\n", debugstr_w( uri ) );
+    TRACE( "NAVIGATE %s\n", debugstr_w( uri ) );
     CoTaskMemFree( w->source );
     w->source = dup_wstr( uri );
     if (handler)
@@ -325,7 +338,17 @@ static HRESULT WINAPI controller_put_IsVisible( void *t, BOOL v )
 {
     struct controller *c = t;
     c->visible = v;
-    if (c->child) ShowWindow( c->child, v ? SW_SHOW : SW_HIDE );
+    if (!c->child && c->parent && IsWindow( c->parent ))
+        EnumChildWindows( c->parent, loader_find_child_cb, (LPARAM)&c->child );
+    if (!c->child)
+        EnumWindows( loader_find_child_cb, (LPARAM)&c->child );
+    if (c->child)
+    {
+        if (c->parent && IsWindow( c->parent ) && GetParent( c->child ) != c->parent)
+            SetParent( c->child, c->parent );
+        ShowWindow( c->child, v ? SW_SHOW : SW_HIDE );
+        SetWindowPos( c->child, HWND_TOP, 0, 0, 1024, 768, SWP_SHOWWINDOW | SWP_NOACTIVATE );
+    }
     return S_OK;
 }
 
