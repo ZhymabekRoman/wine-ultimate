@@ -2367,7 +2367,7 @@ Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *vis
 {
     struct x11drv_win_data *data = get_win_data( hwnd ), dummy = {0};
     XSetWindowAttributes attr;
-    Window ret;
+    Window parent_win, ret;
     int x, y, cx, cy;
 
     if (!data) data = &dummy; /* use a dummy window data for HWND_MESSAGE and foreign windows, to create an offscreen client window */
@@ -2380,14 +2380,24 @@ Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *vis
     attr.backing_store = NotUseful;
     attr.border_pixel = 0;
 
-    x = data->rects.client.left - data->rects.visible.left;
-    y = data->rects.client.top - data->rects.visible.top;
+    if (data == &dummy)
+    {
+        parent_win = hwnd ? X11DRV_get_whole_window( hwnd ) : 0;
+        x = 0;
+        y = 0;
+    }
+    else
+    {
+        parent_win = data->whole_window;
+        x = data->rects.client.left - data->rects.visible.left;
+        y = data->rects.client.top - data->rects.visible.top;
+    }
     cx = min( max( 1, client_rect.right - client_rect.left ), 65535 );
     cy = min( max( 1, client_rect.bottom - client_rect.top ), 65535 );
 
     XSync( gdi_display, False ); /* make sure whole_window is known from gdi_display */
     ret = data->client_window = XCreateWindow( gdi_display,
-                                               data->whole_window ? data->whole_window : get_dummy_parent(),
+                                               parent_win ? parent_win : get_dummy_parent(),
                                                x, y, cx, cy, 0, visual->depth, InputOutput,
                                                visual->visual, CWBitGravity | CWWinGravity |
                                                CWBackingStore | CWColormap | CWBorderPixel, &attr );
@@ -2395,13 +2405,13 @@ Window create_client_window( HWND hwnd, RECT client_rect, const XVisualInfo *vis
     {
         XMapWindow( gdi_display, data->client_window );
         fprintf(stderr, "XWID create hwnd=%p whole=%08lx client=%08lx\n",
-                data->hwnd, data->whole_window, data->client_window );
+                hwnd, parent_win, data->client_window );
         if (data->whole_window)
         {
             XFlush( gdi_display ); /* make sure client_window is created for XSelectInput */
             client_window_events_enable( data, data->client_window );
         }
-        TRACE( "%p xwin %lx/%lx\n", data->hwnd, data->whole_window, data->client_window );
+        TRACE( "%p xwin %lx/%lx\n", data->hwnd, parent_win, data->client_window );
     }
 
     if (data != &dummy) release_win_data( data );

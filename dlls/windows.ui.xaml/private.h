@@ -87,11 +87,13 @@ void xaml_register_loaded( void *handler, IInspectable *sender );
 #define WM_APP_WV2_START (WM_APP + 0x57)
 HWND xaml_get_window_hwnd( void );
 IDCompositionVisual *xaml_get_dcomp_root_visual( void );
+void xaml_dcomp_commit( void );
 void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_handle_start_msg( LPARAM lparam );
 BOOL is_calculator_app( void );
 BOOL is_store_app( void );
+BOOL is_whatsapp_app( void );
 BOOL is_uwp_xaml_app( void );
 void *uwp_get_app_outer( void );
 HRESULT uwp_create_instance_from_provider( const WCHAR *full_name, void **out );

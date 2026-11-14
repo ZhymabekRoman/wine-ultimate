@@ -2184,7 +2184,7 @@ void *uwp_get_app_outer( void )
     return current_application ? current_application->outer : NULL;
 }
 
-static BOOL is_whatsapp_app( void )
+BOOL is_whatsapp_app( void )
 {
     return xaml_package_family_is( L"5319275A.WhatsAppDesktop" );
 }
@@ -2592,6 +2592,14 @@ HWND xaml_get_window_hwnd( void )
 IDCompositionVisual *xaml_get_dcomp_root_visual( void )
 {
     return (IDCompositionVisual *)global_xaml_window.dcomp_root_visual;
+}
+
+void xaml_dcomp_commit( void )
+{
+    if (global_xaml_window.dcomp_device)
+        IDCompositionDesktopDevice_Commit( global_xaml_window.dcomp_device );
+    else if (global_dcomp_device)
+        IDCompositionDesktopDevice_Commit( global_dcomp_device );
 }
 
 HRESULT xaml_window_present_current( void )

@@ -966,9 +966,19 @@ static struct composition *get_composition_obj( struct process *process, obj_han
         return (struct composition *)obj;
 
     enum_processes( find_shared_obj_cb, &fso );
-    if (fso.obj) return (struct composition *)fso.obj;
+    if (fso.obj)
+    {
+        clear_error();
+        return (struct composition *)fso.obj;
+    }
 
-    return composition_from_shared_handle( handle );
+    if ((obj = (struct object *)composition_from_shared_handle( handle )))
+    {
+        clear_error();
+        return (struct composition *)obj;
+    }
+
+    return NULL;
 }
 
 static struct composition *create_composition(void)

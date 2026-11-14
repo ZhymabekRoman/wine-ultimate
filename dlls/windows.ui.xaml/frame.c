@@ -1611,6 +1611,8 @@ struct xaml_element
     BOOL browser_started;
     BOOL navigated;
     BOOL real_loader;
+    BOOL visual_attached;
+    BOOL has_comp_ctrl;
     void *loader_env;
     void *loader_controller;
     void *loader_core;
@@ -3601,11 +3603,19 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
     if (wcsstr( cls, L"Chrome_WidgetWin" ) || wcsstr( cls, L"Intermediate D3D" ) ||
         wcsstr( cls, L"Edge" ) || wcsstr( cls, L"WebView" ) || wcsstr( cls, L"RenderWidget" ))
     {
-        ShowWindow( child, SW_SHOW );
-        SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
-                      SWP_SHOWWINDOW | SWP_NOACTIVATE );
-        ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
-             child, debugstr_w( cls ), ctx->width, ctx->height );
+        if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
+        {
+            SetWindowPos( child, HWND_BOTTOM, -4000, -4000, ctx->width, ctx->height,
+                          SWP_NOACTIVATE );
+        }
+        else
+        {
+            ShowWindow( child, SW_SHOW );
+            SetWindowPos( child, HWND_TOP, 0, 0, ctx->width, ctx->height,
+                          SWP_SHOWWINDOW | SWP_NOACTIVATE );
+            ERR( "wv2_sync_child_cb: positioned child %p (%s) to %dx%d\n",
+                 child, debugstr_w( cls ), ctx->width, ctx->height );
+        }
         ctx->count++;
     }
     EnumChildWindows( child, wv2_sync_child_cb, lparam );
@@ -3643,11 +3653,19 @@ static BOOL CALLBACK wv2_sync_top_cb( HWND hwnd, LPARAM lparam )
         if (parent && IsWindow( parent ) && hwnd != parent)
         {
             SetParent( hwnd, parent );
-            ShowWindow( hwnd, SW_SHOW );
-            SetWindowPos( hwnd, HWND_TOP, 0, 0, ctx->width, ctx->height,
-                          SWP_SHOWWINDOW | SWP_NOACTIVATE );
-            ERR( "wv2_sync_top_cb: re-parented and positioned child %p (%s) to parent %p %dx%d\n",
-                 hwnd, debugstr_w( cls ), parent, ctx->width, ctx->height );
+            if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
+            {
+                SetWindowPos( hwnd, HWND_BOTTOM, -4000, -4000, ctx->width, ctx->height,
+                              SWP_NOACTIVATE );
+            }
+            else
+            {
+                ShowWindow( hwnd, SW_SHOW );
+                SetWindowPos( hwnd, HWND_TOP, 0, 0, ctx->width, ctx->height,
+                              SWP_SHOWWINDOW | SWP_NOACTIVATE );
+                ERR( "wv2_sync_top_cb: re-parented and positioned child %p (%s) to parent %p %dx%d\n",
+                     hwnd, debugstr_w( cls ), parent, ctx->width, ctx->height );
+            }
             EnumChildWindows( hwnd, wv2_sync_child_cb, lparam );
             ctx->count++;
         }
@@ -3687,6 +3705,21 @@ void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height )
          hwnd, width, height, g_active_wv2_impl, g_active_wv2_impl ? g_active_wv2_impl->browser_queued : -1 );
     g_wv2_core_hwnd = hwnd;
     if (g_active_wv2_impl) g_active_wv2_impl->parent_hwnd = hwnd;
+    if (g_active_wv2_impl && g_active_wv2_impl->visual && !g_active_wv2_impl->visual_attached)
+    {
+        IDCompositionVisual *root = xaml_get_dcomp_root_visual();
+        if (root && g_active_wv2_impl->visual != root)
+        {
+            HRESULT hr_add = IDCompositionVisual_AddVisual( root, g_active_wv2_impl->visual, TRUE, NULL );
+            if (SUCCEEDED( hr_add ))
+            {
+                g_active_wv2_impl->visual_attached = TRUE;
+                xaml_dcomp_commit();
+            }
+            ERR( "xaml_wv2_on_window_ready: AddVisual root=%p vis=%p hr=%#lx\n",
+                 root, g_active_wv2_impl->visual, hr_add );
+        }
+    }
     if (g_wv2_host_hwnd && IsWindow( g_wv2_host_hwnd ) && width > 0 && height > 0)
     {
         SetWindowPos( g_wv2_host_hwnd, HWND_TOP, 0, 0, width, height, SWP_SHOWWINDOW | SWP_NOACTIVATE );
@@ -3827,8 +3860,16 @@ static void wv2_navigate_once( struct xaml_element *impl )
     }
     if (!url || !*url)
     {
-        ERR( "wv2_navigate_once: no WebView2.Source URI set, deferring navigation\n" );
-        return;
+        if (is_whatsapp_app())
+        {
+            url = L"https://web.whatsapp.com/";
+            ERR( "wv2_navigate_once: no WebView2.Source URI set, using WhatsApp default %s\n", debugstr_w( url ) );
+        }
+        else
+        {
+            ERR( "wv2_navigate_once: no WebView2.Source URI set, deferring navigation\n" );
+            return;
+        }
     }
     impl->navigated = TRUE;
     if (impl->real_loader)
@@ -4023,15 +4064,27 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             if (SUCCEEDED( ((IUnknown *)controller)->lpVtbl->QueryInterface(
                     (IUnknown *)controller, &IID_ICoreWebView2CompositionController_g, &comp_ctrl) ) && comp_ctrl)
             {
-                IDCompositionVisual *vis = xaml_get_dcomp_root_visual();
-                if (!vis) vis = h->impl->visual;
+                IDCompositionVisual *root = xaml_get_dcomp_root_visual();
+                IDCompositionVisual *vis = h->impl->visual;
                 if (!vis) { xaml_create_dcomp_visual( &h->impl->visual ); vis = h->impl->visual; }
-                ERR( "wv2_ctrl_handler_Invoke: found CompositionController %p visual=%p\n", comp_ctrl, vis );
+                if (root && vis && vis != root && !h->impl->visual_attached)
+                {
+                    HRESULT hr_add = IDCompositionVisual_AddVisual( root, vis, TRUE, NULL );
+                    if (SUCCEEDED( hr_add ))
+                    {
+                        h->impl->visual_attached = TRUE;
+                        xaml_dcomp_commit();
+                    }
+                    ERR( "wv2_ctrl_handler_Invoke: AddVisual root=%p vis=%p hr=%#lx\n", root, vis, hr_add );
+                }
+                ERR( "wv2_ctrl_handler_Invoke: found CompositionController %p visual=%p root=%p\n", comp_ctrl, vis, root );
                 if (vis)
                 {
-                    /* ICoreWebView2CompositionController::put_RootVisualTarget is slot 27 */
-                    HRESULT hr_rv = ((HRESULT (WINAPI *)(void *, IUnknown *))(*(void ***)comp_ctrl)[27])(
+                    /* ICoreWebView2CompositionController: get_RootVisualTarget=3, put_RootVisualTarget=4 */
+                    HRESULT hr_rv = ((HRESULT (WINAPI *)(void *, IUnknown *))(*(void ***)comp_ctrl)[4])(
                         comp_ctrl, (IUnknown *)vis );
+                    if (SUCCEEDED( hr_rv ))
+                        h->impl->has_comp_ctrl = TRUE;
                     ERR( "wv2_ctrl_handler_Invoke: put_RootVisualTarget hr=%#lx\n", hr_rv );
                 }
                 ((IUnknown *)comp_ctrl)->lpVtbl->Release( (IUnknown *)comp_ctrl );
@@ -4040,10 +4093,11 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             if (SUCCEEDED( ((IUnknown *)controller)->lpVtbl->QueryInterface(
                     (IUnknown *)controller, &IID_ICoreWebView2Controller_g, &ctrl) ) && ctrl)
             {
-                /* get_Parent=3, put_Parent=4, get_Bounds=5, put_Bounds=6, get_IsVisible=7, put_IsVisible=8 */
-                if (parent) ((HRESULT (WINAPI *)(void *, HWND))(*(void ***)ctrl)[4])( ctrl, parent );
+                /* ICoreWebView2Controller: put_IsVisible=4, put_Bounds=6, put_ParentWindow=22, NotifyParentWindowPositionChanged=23, get_CoreWebView2=25 */
+                if (parent) ((HRESULT (WINAPI *)(void *, HWND))(*(void ***)ctrl)[22])( ctrl, parent );
                 hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)ctrl)[6])( ctrl, rc );
-                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)ctrl)[8])( ctrl, TRUE );
+                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)ctrl)[4])( ctrl, TRUE );
+                ((HRESULT (WINAPI *)(void *))(*(void ***)ctrl)[23])( ctrl );
                 get_core = (void *)(*(void ***)ctrl)[25];
                 hr_c = get_core( ctrl, &core );
                 ERR( "wv2_ctrl_handler_Invoke (ctrl): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx get_CoreWebView2=%#lx core=%p\n",
@@ -4052,9 +4106,10 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             }
             else
             {
-                if (parent) ((HRESULT (WINAPI *)(void *, HWND))(*(void ***)controller)[4])( controller, parent );
+                if (parent) ((HRESULT (WINAPI *)(void *, HWND))(*(void ***)controller)[22])( controller, parent );
                 hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)controller)[6])( controller, rc );
-                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)controller)[8])( controller, TRUE );
+                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)controller)[4])( controller, TRUE );
+                ((HRESULT (WINAPI *)(void *))(*(void ***)controller)[23])( controller );
                 get_core = (void *)(*(void ***)controller)[25];  /* COM ICoreWebView2Controller::get_CoreWebView2 */
                 hr_c = get_core( controller, &core );
                 ERR( "wv2_ctrl_handler_Invoke (fallback): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx hr_c=%#lx core=%p\n",
