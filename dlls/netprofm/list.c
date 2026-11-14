@@ -50,6 +50,7 @@ struct network
     VARIANT_BOOL         connected_to_internet_v6;
     VARIANT_BOOL         connected_v4;
     VARIANT_BOOL         connected_v6;
+    NLM_CONNECTIVITY     connectivity;  /* last computed state, for change detection */
 };
 
 struct connection
@@ -87,6 +88,10 @@ struct list_manager
     struct connection_point cost_mgr_cp;
     struct connection_point conn_mgr_cp;
     struct connection_point events_cp;
+    CRITICAL_SECTION        cs;           /* guards the lists, flags and sink lists */
+    HANDLE                  poll_thread;  /* worker re-reading the adapter table */
+    HANDLE                  stop_event;   /* set to retire the worker */
+    NLM_CONNECTIVITY        connectivity; /* manager-wide last computed state */
 };
 
 struct sink_entry
@@ -209,8 +214,10 @@ static HRESULT WINAPI connection_point_Advise(
     }
 
     sink_entry->unk = unk;
+    EnterCriticalSection( &impl_from_IConnectionPointContainer( cp->container )->cs );
     *cookie = sink_entry->cookie = ++cp->cookie;
     list_add_tail( &cp->sinks, &sink_entry->entry );
+    LeaveCriticalSection( &impl_from_IConnectionPointContainer( cp->container )->cs );
     return S_OK;
 }
 
@@ -226,19 +233,23 @@ static HRESULT WINAPI connection_point_Unadvise(
     DWORD cookie )
 {
     struct connection_point *cp = impl_from_IConnectionPoint( iface );
+    struct list_manager *mgr = impl_from_IConnectionPointContainer( cp->container );
     struct sink_entry *iter;
+    HRESULT hr = CONNECT_E_NOCONNECTION;
 
     TRACE( "%p, %ld\n", cp, cookie );
 
+    EnterCriticalSection( &mgr->cs );
     LIST_FOR_EACH_ENTRY( iter, &cp->sinks, struct sink_entry, entry )
     {
         if (iter->cookie != cookie) continue;
         sink_entry_release( iter );
-        return S_OK;
+        hr = S_OK;
+        break;
     }
-
-    WARN( "invalid cookie\n" );
-    return CONNECT_E_NOCONNECTION;
+    LeaveCriticalSection( &mgr->cs );
+    if (hr == CONNECT_E_NOCONNECTION) WARN( "invalid cookie\n" );
+    return hr;
 }
 
 static HRESULT WINAPI connection_point_EnumConnections(
@@ -279,6 +290,94 @@ static void connection_point_release( struct connection_point *cp )
 {
     while (!list_empty( &cp->sinks ))
         sink_entry_release( LIST_ENTRY( list_head( &cp->sinks ), struct sink_entry, entry ) );
+}
+
+/*
+ * Event delivery: the poll worker snapshots the sinks registered on a
+ * connection point (add_ = Advise with a cookie token, remove_ = Unadvise,
+ * modelled on the package_catalog event registry in
+ * dlls/appxdeploymentclient/package.c), then invokes the handlers outside
+ * the critical section so a sink may re-enter the manager.
+ */
+struct sink_array
+{
+    IUnknown **sinks;
+    ULONG      count;
+};
+
+static void connection_point_snapshot( struct connection_point *cp, struct sink_array *arr )
+{
+    struct list_manager *mgr = impl_from_IConnectionPointContainer( cp->container );
+    struct sink_entry *entry;
+
+    arr->sinks = NULL;
+    arr->count = 0;
+
+    EnterCriticalSection( &mgr->cs );
+    LIST_FOR_EACH_ENTRY( entry, &cp->sinks, struct sink_entry, entry ) arr->count++;
+    if (arr->count && (arr->sinks = calloc( arr->count, sizeof(*arr->sinks) )))
+    {
+        ULONG i = 0;
+        arr->count = 0;
+        LIST_FOR_EACH_ENTRY( entry, &cp->sinks, struct sink_entry, entry )
+        {
+            IUnknown_AddRef( entry->unk );
+            arr->sinks[i++] = entry->unk;
+        }
+        arr->count = i;
+    }
+    else arr->count = 0;
+    LeaveCriticalSection( &mgr->cs );
+}
+
+static void connection_point_snapshot_release( struct sink_array *arr )
+{
+    ULONG i;
+
+    for (i = 0; i < arr->count; i++)
+        IUnknown_Release( arr->sinks[i] );
+    free( arr->sinks );
+}
+
+/* A connectivity flip on one network, queued by the worker for delivery. */
+struct net_change
+{
+    GUID             id;
+    NLM_CONNECTIVITY connectivity;
+    BOOL             added;   /* the network appeared in this pass */
+};
+
+static void fire_manager_connectivity( struct list_manager *mgr, NLM_CONNECTIVITY connectivity )
+{
+    struct sink_array arr;
+    ULONG i;
+
+    connection_point_snapshot( &mgr->list_mgr_cp, &arr );
+    for (i = 0; i < arr.count; i++)
+        INetworkListManagerEvents_ConnectivityChanged( (INetworkListManagerEvents *)arr.sinks[i], connectivity );
+    connection_point_snapshot_release( &arr );
+}
+
+static void fire_network_event( struct list_manager *mgr, const struct net_change *change )
+{
+    struct sink_array arr;
+    ULONG i;
+
+    connection_point_snapshot( &mgr->events_cp, &arr );
+    for (i = 0; i < arr.count; i++)
+    {
+        if (change->added)
+            INetworkEvents_NetworkAdded( (INetworkEvents *)arr.sinks[i], change->id );
+        INetworkEvents_NetworkConnectivityChanged( (INetworkEvents *)arr.sinks[i],
+            change->id, change->connectivity );
+    }
+    connection_point_snapshot_release( &arr );
+
+    connection_point_snapshot( &mgr->conn_mgr_cp, &arr );
+    for (i = 0; i < arr.count; i++)
+        INetworkConnectionEvents_NetworkConnectionConnectivityChanged(
+            (INetworkConnectionEvents *)arr.sinks[i], change->id, change->connectivity );
+    connection_point_snapshot_release( &arr );
 }
 
 static inline struct network *impl_from_INetwork(
@@ -441,6 +540,24 @@ static inline struct list_manager *impl_from_INetworkListManager(
     return CONTAINING_RECORD( iface, struct list_manager, INetworkListManager_iface );
 }
 
+static NLM_CONNECTIVITY connectivity_from_flags( VARIANT_BOOL connected_v4, VARIANT_BOOL connected_v6,
+                                                 VARIANT_BOOL internet_v4, VARIANT_BOOL internet_v6 )
+{
+    NLM_CONNECTIVITY connectivity = NLM_CONNECTIVITY_DISCONNECTED;
+
+    if (internet_v4)
+        connectivity |= NLM_CONNECTIVITY_IPV4_INTERNET;
+    else if (connected_v4)
+        connectivity |= NLM_CONNECTIVITY_IPV4_LOCALNETWORK;
+
+    if (internet_v6)
+        connectivity |= NLM_CONNECTIVITY_IPV6_INTERNET;
+    else if (connected_v6)
+        connectivity |= NLM_CONNECTIVITY_IPV6_LOCALNETWORK;
+
+    return connectivity;
+}
+
 static HRESULT create_connections_enum(
     struct list_manager *, IEnumNetworkConnections** );
 
@@ -501,18 +618,8 @@ static HRESULT WINAPI network_GetConnectivity(
 
     TRACE( "%p, %p\n", iface, pConnectivity );
 
-    *pConnectivity = NLM_CONNECTIVITY_DISCONNECTED;
-
-    if (network->connected_to_internet_v4)
-        *pConnectivity |= NLM_CONNECTIVITY_IPV4_INTERNET;
-    else if (network->connected_v4)
-        *pConnectivity |= NLM_CONNECTIVITY_IPV4_LOCALNETWORK;
-
-    if (network->connected_to_internet_v6)
-        *pConnectivity |= NLM_CONNECTIVITY_IPV6_INTERNET;
-    else if (network->connected_v6)
-        *pConnectivity |= NLM_CONNECTIVITY_IPV6_LOCALNETWORK;
-
+    /* The poll worker keeps connectivity in step with the adapter table. */
+    *pConnectivity = network->connectivity;
     TRACE( "<- %#x\n", *pConnectivity );
     return S_OK;
 }
@@ -1156,6 +1263,13 @@ static ULONG WINAPI list_manager_Release(
 
         TRACE( "destroying %p\n", mgr );
 
+        if (mgr->poll_thread)
+        {
+            SetEvent( mgr->stop_event );
+            WaitForSingleObject( mgr->poll_thread, 5000 );
+            CloseHandle( mgr->poll_thread );
+            CloseHandle( mgr->stop_event );
+        }
         connection_point_release( &mgr->events_cp );
         connection_point_release( &mgr->conn_mgr_cp );
         connection_point_release( &mgr->cost_mgr_cp );
@@ -1168,6 +1282,7 @@ static ULONG WINAPI list_manager_Release(
         {
             INetwork_Release( &network->INetwork_iface );
         }
+        DeleteCriticalSection( &mgr->cs );
         free( mgr );
     }
     return refs;
@@ -1376,17 +1491,7 @@ static HRESULT WINAPI list_manager_GetConnectivity(
     *pConnectivity = NLM_CONNECTIVITY_DISCONNECTED;
 
     LIST_FOR_EACH_ENTRY( network, &mgr->networks, struct network, entry )
-    {
-        if (network->connected_to_internet_v4)
-            *pConnectivity |= NLM_CONNECTIVITY_IPV4_INTERNET;
-        else if (network->connected_v4)
-            *pConnectivity |= NLM_CONNECTIVITY_IPV4_LOCALNETWORK;
-
-        if (network->connected_to_internet_v6)
-            *pConnectivity |= NLM_CONNECTIVITY_IPV6_INTERNET;
-        else if (network->connected_v6)
-            *pConnectivity |= NLM_CONNECTIVITY_IPV6_LOCALNETWORK;
-    }
+        *pConnectivity |= network->connectivity;
 
     TRACE( "<- %#x\n", *pConnectivity );
     return S_OK;
@@ -1627,18 +1732,10 @@ static HRESULT WINAPI connection_GetConnectivity(
 
     TRACE( "%p, %p\n", iface, pConnectivity );
 
-    *pConnectivity = NLM_CONNECTIVITY_DISCONNECTED;
-
-    if (connection->connected_to_internet_v4)
-        *pConnectivity |= NLM_CONNECTIVITY_IPV4_INTERNET;
-    else if (connection->connected_v4)
-        *pConnectivity |= NLM_CONNECTIVITY_IPV4_LOCALNETWORK;
-
-    if (connection->connected_to_internet_v6)
-        *pConnectivity |= NLM_CONNECTIVITY_IPV6_INTERNET;
-    else if (connection->connected_v6)
-        *pConnectivity |= NLM_CONNECTIVITY_IPV6_LOCALNETWORK;
-
+    /* The poll worker keeps the connection flags in step with the adapter table. */
+    *pConnectivity = connectivity_from_flags( connection->connected_v4, connection->connected_v6,
+                                              connection->connected_to_internet_v4,
+                                              connection->connected_to_internet_v6 );
     TRACE( "<- %#x\n", *pConnectivity );
     return S_OK;
 }
@@ -1841,13 +1938,200 @@ static BOOL has_ipv4_gateway_address( const IP_ADAPTER_ADDRESSES *aa )
     return FALSE;
 }
 
+/*
+ * Link state from GetIfEntry, mirroring the adapter walk in
+ * dlls/windows.networking.connectivity/network_information.c: an
+ * operational or connected interface is up, an interface that reports no
+ * operational status is judged by its addresses (treated as up here, which
+ * is what the enumeration alone asserted before).
+ */
+static BOOL adapter_link_up( const IP_ADAPTER_ADDRESSES *aa )
+{
+    MIB_IFROW row;
+
+    memset( &row, 0, sizeof(row) );
+    row.dwIndex = aa->IfIndex ? aa->IfIndex : aa->Ipv6IfIndex;
+    if (!row.dwIndex) return TRUE;
+    if (GetIfEntry( &row ) != NO_ERROR) return TRUE;
+    if (!row.dwOperStatus) return TRUE;
+    return row.dwOperStatus == MIB_IF_OPER_STATUS_OPERATIONAL ||
+           row.dwOperStatus == MIB_IF_OPER_STATUS_CONNECTED;
+}
+
+static void apply_adapter_flags( struct network *network, struct connection *connection,
+                                 const IP_ADAPTER_ADDRESSES *aa )
+{
+    VARIANT_BOOL connected_v4 = FALSE, connected_v6 = FALSE;
+    VARIANT_BOOL internet_v4 = FALSE, internet_v6 = FALSE;
+    BOOL has_local, has_global;
+
+    if (adapter_link_up( aa ))
+    {
+        has_ipv6_address( aa, &has_local, &has_global );
+        if (has_local || has_global) connected_v6 = VARIANT_TRUE;
+        if (has_global) internet_v6 = VARIANT_TRUE;
+        if (has_ipv4_address( aa )) connected_v4 = VARIANT_TRUE;
+        if (has_ipv4_gateway_address( aa )) internet_v4 = VARIANT_TRUE;
+    }
+
+    if (network)
+    {
+        network->connected_v4 = connected_v4;
+        network->connected_v6 = connected_v6;
+        network->connected_to_internet_v4 = internet_v4;
+        network->connected_to_internet_v6 = internet_v6;
+        network->connectivity = connectivity_from_flags( connected_v4, connected_v6,
+                                                         internet_v4, internet_v6 );
+    }
+    if (connection)
+    {
+        connection->connected_v4 = connected_v4;
+        connection->connected_v6 = connected_v6;
+        connection->connected_to_internet_v4 = internet_v4;
+        connection->connected_to_internet_v6 = internet_v6;
+    }
+}
+
+static BOOL adapter_network_id( const IP_ADAPTER_ADDRESSES *aa, GUID *id )
+{
+    NET_LUID luid;
+
+    if (ConvertInterfaceIndexToLuid( aa->IfIndex, &luid )) return FALSE;
+    return ConvertInterfaceLuidToGuid( &luid, id ) == NO_ERROR;
+}
+
+static struct network *find_network( struct list_manager *mgr, const GUID *id )
+{
+    struct network *network;
+
+    LIST_FOR_EACH_ENTRY( network, &mgr->networks, struct network, entry )
+        if (IsEqualGUID( &network->id, id )) return network;
+    return NULL;
+}
+
+static struct connection *find_connection( struct list_manager *mgr, const GUID *id )
+{
+    struct connection *connection;
+
+    LIST_FOR_EACH_ENTRY( connection, &mgr->connections, struct connection, entry )
+        if (IsEqualGUID( &connection->id, id )) return connection;
+    return NULL;
+}
+
+#define NETPROFM_MAX_CHANGES 64
+
+/*
+ * Re-read the adapter table and refresh the network/connection flags.
+ * Adapters that appeared get a fresh network/connection pair and a
+ * NetworkAdded event; adapters whose connectivity flipped queue a
+ * net_change. Events are delivered after the critical section is
+ * released. Caller must hold no locks; mgr is only touched by the
+ * creating thread, the worker and the COM clients.
+ */
+static void update_networks( struct list_manager *mgr )
+{
+    struct net_change changes[NETPROFM_MAX_CHANGES];
+    NLM_CONNECTIVITY mgr_connectivity;
+    IP_ADAPTER_ADDRESSES *buf, *aa;
+    ULONG count = 0;
+    BOOL mgr_changed = FALSE;
+
+    if (!(buf = get_network_adapters())) return;
+
+    EnterCriticalSection( &mgr->cs );
+    for (aa = buf; aa; aa = aa->Next)
+    {
+        struct network *network;
+        struct connection *connection;
+        GUID id;
+        BOOL added = FALSE;
+
+        if (!wcscmp( aa->FriendlyName, L"lo" )) continue;
+        memset( &id, 0, sizeof(id) );
+        adapter_network_id( aa, &id );
+
+        network = find_network( mgr, &id );
+        connection = find_connection( mgr, &id );
+
+        if (network && connection)
+        {
+            NLM_CONNECTIVITY prev = network->connectivity;
+            apply_adapter_flags( network, connection, aa );
+            if (prev != network->connectivity && count < ARRAY_SIZE( changes ))
+            {
+                changes[count].id = id;
+                changes[count].connectivity = network->connectivity;
+                changes[count].added = FALSE;
+                count++;
+            }
+            continue;
+        }
+
+        /* assume a one-to-one mapping between networks and connections */
+        if (!network)
+        {
+            if (!(network = create_network( &id ))) break;
+            network->mgr = &mgr->INetworkListManager_iface;
+            INetworkListManager_AddRef( network->mgr );
+            list_add_tail( &mgr->networks, &network->entry );
+            added = TRUE;
+        }
+        if (!connection)
+        {
+            if (!(connection = create_connection( &id ))) break;
+            connection->network = &network->INetwork_iface;
+            INetwork_AddRef( connection->network );
+            list_add_tail( &mgr->connections, &connection->entry );
+        }
+        apply_adapter_flags( network, connection, aa );
+        if (added && count < ARRAY_SIZE( changes ))
+        {
+            changes[count].id = id;
+            changes[count].connectivity = network->connectivity;
+            changes[count].added = TRUE;
+            count++;
+        }
+    }
+
+    mgr_connectivity = NLM_CONNECTIVITY_DISCONNECTED;
+    {
+        struct network *network;
+        LIST_FOR_EACH_ENTRY( network, &mgr->networks, struct network, entry )
+            mgr_connectivity |= network->connectivity;
+    }
+    if (mgr_connectivity != mgr->connectivity)
+    {
+        TRACE( "manager connectivity %#x -> %#x\n", mgr->connectivity, mgr_connectivity );
+        mgr->connectivity = mgr_connectivity;
+        mgr_changed = TRUE;
+    }
+    LeaveCriticalSection( &mgr->cs );
+
+    free( buf );
+
+    while (count--) fire_network_event( mgr, &changes[count] );
+    if (mgr_changed) fire_manager_connectivity( mgr, mgr_connectivity );
+}
+
+/* How often the poll worker re-reads the adapter table. */
+static const ULONG netprofm_poll_interval = 2000;
+
+static void WINAPI netprofm_worker( void *arg )
+{
+    struct list_manager *mgr = arg;
+
+    for (;;)
+    {
+        if (WaitForSingleObject( mgr->stop_event, netprofm_poll_interval ) != WAIT_TIMEOUT)
+            break;
+        update_networks( mgr );
+    }
+}
+
 static void init_networks( struct list_manager *mgr )
 {
-    BOOL has_local, has_global;
     IP_ADAPTER_ADDRESSES *buf, *aa;
     GUID id;
-
-    FIXME( "no support for detecting network changes\n" );
 
     list_init( &mgr->networks );
     list_init( &mgr->connections );
@@ -1859,12 +2143,10 @@ static void init_networks( struct list_manager *mgr )
     {
         struct network *network;
         struct connection *connection;
-        NET_LUID luid;
 
         if (!wcscmp( aa->FriendlyName, L"lo" )) continue;
 
-        ConvertInterfaceIndexToLuid(aa->IfIndex, &luid);
-        ConvertInterfaceLuidToGuid(&luid, &id);
+        adapter_network_id( aa, &id );
 
         /* assume a one-to-one mapping between networks and connections */
         if (!(network = create_network( &id ))) goto done;
@@ -1874,27 +2156,7 @@ static void init_networks( struct list_manager *mgr )
             goto done;
         }
 
-        has_ipv6_address( aa, &has_local, &has_global );
-        if (has_local || has_global)
-        {
-            network->connected_v6 = VARIANT_TRUE;
-            connection->connected_v6 = VARIANT_TRUE;
-        }
-        if (has_global)
-        {
-            network->connected_to_internet_v6 = VARIANT_TRUE;
-            connection->connected_to_internet_v6 = VARIANT_TRUE;
-        }
-        if (has_ipv4_address( aa ))
-        {
-            network->connected_v4 = VARIANT_TRUE;
-            connection->connected_v4 = VARIANT_TRUE;
-        }
-        if (has_ipv4_gateway_address( aa ))
-        {
-            network->connected_to_internet_v4 = VARIANT_TRUE;
-            connection->connected_to_internet_v4 = VARIANT_TRUE;
-        }
+        apply_adapter_flags( network, connection, aa );
 
         network->mgr = &mgr->INetworkListManager_iface;
         INetworkListManager_AddRef( network->mgr );
@@ -1916,11 +2178,21 @@ HRESULT list_manager_create( void **obj )
     TRACE( "%p\n", obj );
 
     if (!(mgr = calloc( 1, sizeof(*mgr) ))) return E_OUTOFMEMORY;
+    InitializeCriticalSection( &mgr->cs );
     mgr->INetworkListManager_iface.lpVtbl = &list_manager_vtbl;
     mgr->INetworkCostManager_iface.lpVtbl = &cost_manager_vtbl;
     mgr->IConnectionPointContainer_iface.lpVtbl = &cpc_vtbl;
     init_networks( mgr );
     mgr->refs = 1;
+
+    /* 2 s poll worker keeps GetConnectivity live and flips the events. */
+    if ((mgr->stop_event = CreateEventA( NULL, FALSE, FALSE, NULL )) &&
+        !(mgr->poll_thread = CreateThread( NULL, 0, (LPTHREAD_START_ROUTINE)netprofm_worker,
+                                          mgr, 0, NULL )))
+    {
+        CloseHandle( mgr->stop_event );
+        mgr->stop_event = NULL;
+    }
 
     connection_point_init( &mgr->list_mgr_cp, &IID_INetworkListManagerEvents,
                            &mgr->IConnectionPointContainer_iface );
