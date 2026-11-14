@@ -1009,6 +1009,112 @@ static void test_NtAllocateVirtualMemoryEx_address_requirements(void)
     status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr, &size, MEM_RESERVE,
                                         PAGE_EXECUTE_READWRITE, ext, 1);
     ok(status == STATUS_INVALID_PARAMETER, "Unexpected status %08lx.\n", status);
+
+    /* Reject MEM_RESERVE_PLACEHOLDER combined with MEM_COMMIT */
+    size = 0x10000;
+    addr = NULL;
+    status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr, &size,
+                                        MEM_RESERVE | MEM_COMMIT | MEM_RESERVE_PLACEHOLDER,
+                                        PAGE_NOACCESS, NULL, 0);
+    ok(status == STATUS_INVALID_PARAMETER, "Unexpected status %08lx.\n", status);
+
+    /* Reject NULL Pointer for MemExtendedParameterAddressRequirements */
+    ext[0].Type = MemExtendedParameterAddressRequirements;
+    ext[0].Pointer = NULL;
+    size = 0x10000;
+    addr = NULL;
+    status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr, &size, MEM_RESERVE,
+                                        PAGE_NOACCESS, ext, 1);
+    ok(status == STATUS_INVALID_PARAMETER, "Unexpected status %08lx.\n", status);
+
+#ifdef _WIN64
+    /* Large 4GB/16GB power-of-two alignments (GigaCage) + placeholder split/commit */
+    memset(&ext, 0, sizeof(ext));
+    memset(&a, 0, sizeof(a));
+    a.Alignment = (SIZE_T)1 << 32; /* 4GB */
+    ext[0].Type = MemExtendedParameterAddressRequirements;
+    ext[0].Pointer = &a;
+    ext[1].Type = MemExtendedParameterNumaNode;
+    ext[1].ULong = 0;
+    size = (SIZE_T)1 << 32;
+    addr = NULL;
+    status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr, &size,
+                                        MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                                        PAGE_NOACCESS, ext, 2);
+    ok(!status, "Unexpected status %08lx for 4GB aligned placeholder.\n", status);
+    if (!status)
+    {
+        char *mid = (char *)addr + 0x80000000;
+        SIZE_T chunk = 0x200000;
+        SIZE_T com_size = 0x10000;
+        void *com_addr = mid + 0x10000;
+
+        ok(!((ULONG_PTR)addr & (a.Alignment - 1)), "Unaligned 4GB addr %p.\n", addr);
+        status = NtFreeVirtualMemory(NtCurrentProcess(), (void **)&mid, &chunk,
+                                     MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+        ok(!status, "Unexpected split status %08lx.\n", status);
+        status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), (void **)&mid, &chunk,
+                                            MEM_RESERVE | MEM_REPLACE_PLACEHOLDER,
+                                            PAGE_NOACCESS, NULL, 0);
+        ok(!status, "Unexpected replace status %08lx.\n", status);
+        status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &com_addr, &com_size,
+                                            MEM_COMMIT, PAGE_READWRITE, NULL, 0);
+        ok(!status, "Unexpected commit status %08lx.\n", status);
+        if (!status) *(volatile DWORD *)com_addr = 0x12345678;
+
+        status = NtFreeVirtualMemory(NtCurrentProcess(), (void **)&mid, &chunk,
+                                     MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+        ok(!status, "Unexpected preserve status %08lx.\n", status);
+        status = NtFreeVirtualMemory(NtCurrentProcess(), &addr, &size,
+                                     MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
+        ok(!status, "Unexpected coalesce status %08lx.\n", status);
+        size = 0;
+        status = NtFreeVirtualMemory(NtCurrentProcess(), &addr, &size, MEM_RELEASE);
+        ok(!status, "Unexpected release status %08lx.\n", status);
+    }
+
+    /* 16GB power-of-two alignment */
+    memset(&ext, 0, sizeof(ext));
+    memset(&a, 0, sizeof(a));
+    a.Alignment = (SIZE_T)1 << 34; /* 16GB */
+    ext[0].Type = MemExtendedParameterAddressRequirements;
+    ext[0].Pointer = &a;
+    size = (SIZE_T)1 << 34;
+    addr = NULL;
+    status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr, &size,
+                                        MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                                        PAGE_NOACCESS, ext, 1);
+    ok(!status || status == STATUS_NO_MEMORY, "Unexpected status %08lx for 16GB aligned cage.\n", status);
+    if (!status)
+    {
+        ok(!((ULONG_PTR)addr & (a.Alignment - 1)), "Unaligned 16GB addr %p.\n", addr);
+        size = 0;
+        status = NtFreeVirtualMemory(NtCurrentProcess(), &addr, &size, MEM_RELEASE);
+        ok(!status, "Unexpected release status %08lx.\n", status);
+    }
+
+    /* MEM_TOP_DOWN + 4GB alignment + HighestEndingAddress below 64GB reserved window */
+    memset(&ext, 0, sizeof(ext));
+    memset(&a, 0, sizeof(a));
+    a.Alignment = (SIZE_T)1 << 32; /* 4GB */
+    a.HighestEndingAddress = (void *)(ULONG_PTR)0x000fffffffffULL;
+    ext[0].Type = MemExtendedParameterAddressRequirements;
+    ext[0].Pointer = &a;
+    size = (SIZE_T)1 << 32;
+    addr = NULL;
+    status = pNtAllocateVirtualMemoryEx(NtCurrentProcess(), &addr, &size,
+                                        MEM_RESERVE | MEM_TOP_DOWN,
+                                        PAGE_NOACCESS, ext, 1);
+    ok(!status || status == STATUS_NO_MEMORY, "Unexpected status %08lx for TOP_DOWN <= 64GB.\n", status);
+    if (!status)
+    {
+        ok(!((ULONG_PTR)addr & (a.Alignment - 1)), "Unaligned TOP_DOWN 4GB addr %p.\n", addr);
+        ok((ULONG_PTR)addr + size <= 0x001000000000ULL, "Exceeded HighestEndingAddress: %p.\n", addr);
+        size = 0;
+        status = NtFreeVirtualMemory(NtCurrentProcess(), &addr, &size, MEM_RELEASE);
+        ok(!status, "Unexpected release status %08lx.\n", status);
+    }
+#endif
 }
 
 struct test_stack_size_thread_args

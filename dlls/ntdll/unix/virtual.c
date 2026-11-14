@@ -281,7 +281,7 @@ void *anon_mmap_alloc( size_t size, int prot )
 {
     assert( !(size & host_page_mask) );
 
-    return mmap( NULL, size, prot, MAP_PRIVATE | MAP_ANON | MAP_POPULATE, -1, 0 );
+    return mmap( NULL, size, prot, MAP_PRIVATE | MAP_ANON, -1, 0 );
 }
 
 #ifdef USE_UFFD_WRITEWATCH
@@ -1387,7 +1387,7 @@ static int get_unix_prot( BYTE vprot )
  */
 static void dump_view( struct file_view *view )
 {
-    UINT i, count;
+    SIZE_T i, count;
     char *addr = view->base;
     BYTE prot = get_page_vprot( addr );
 
@@ -1551,7 +1551,7 @@ static struct wine_rb_entry *find_view_inside_range( void **base_ptr, void **end
 static void* try_map_free_area( void *base, void *end, ptrdiff_t step,
                                 void *start, size_t size, int unix_prot )
 {
-    while (start && base <= start && (char*)start + size <= (char*)end)
+    while (start && base <= start && start <= end && (size_t)((char *)end - (char *)start) >= size)
     {
         if (anon_mmap_tryfixed( start, size, unix_prot, 0 ) != MAP_FAILED) return start;
         TRACE( "Found free area is already mapped, start %p.\n", start );
@@ -1581,8 +1581,12 @@ static void* try_map_free_area( void *base, void *end, ptrdiff_t step,
 static void *map_free_area( void *base, void *end, size_t size, int top_down, int unix_prot, size_t align_mask )
 {
     struct wine_rb_entry *first = find_view_inside_range( &base, &end, top_down );
-    ptrdiff_t step = top_down ? -(align_mask + 1) : (align_mask + 1);
+    ptrdiff_t step;
     void *start;
+
+    if (base >= end || (char *)end - (char *)base < size) return NULL;
+    if (align_mask >= (~(size_t)0 >> 1)) return NULL;
+    step = top_down ? -(align_mask + 1) : (align_mask + 1);
 
     if (top_down)
     {
@@ -1594,6 +1598,7 @@ static void *map_free_area( void *base, void *end, size_t size, int top_down, in
             struct file_view *view = WINE_RB_ENTRY_VALUE( first, struct file_view, entry );
             if ((start = try_map_free_area( (char *)view->base + view->size, (char *)start + size, step,
                                             start, size, unix_prot ))) break;
+            if ((char *)view->base < (char *)base + size) return NULL;
             start = ROUND_ADDR( (char *)view->base - size, align_mask );
             /* stop if remaining space is not large enough */
             if (!start || start >= end || start < base) return NULL;
@@ -1602,17 +1607,19 @@ static void *map_free_area( void *base, void *end, size_t size, int top_down, in
     }
     else
     {
+        if ((UINT_PTR)base + align_mask < (UINT_PTR)base) return NULL;
         start = ROUND_ADDR( (char *)base + align_mask, align_mask );
-        if (!start || start >= end || (char *)end - (char *)start < size) return NULL;
+        if (!start || start < base || start >= end || (char *)end - (char *)start < size) return NULL;
 
         while (first)
         {
             struct file_view *view = WINE_RB_ENTRY_VALUE( first, struct file_view, entry );
             if ((start = try_map_free_area( start, view->base, step,
                                             start, size, unix_prot ))) break;
+            if ((UINT_PTR)view->base + view->size + align_mask < (UINT_PTR)view->base + view->size) return NULL;
             start = ROUND_ADDR( (char *)view->base + view->size + align_mask, align_mask );
             /* stop if remaining space is not large enough */
-            if (!start || start >= end || (char *)end - (char *)start < size) return NULL;
+            if (!start || start < base || start >= end || (char *)end - (char *)start < size) return NULL;
             first = rb_next( first );
         }
     }
@@ -1639,8 +1646,12 @@ static void *find_reserved_free_area( void *base, void *end, size_t size, int to
     struct range_entry *range;
     void *start;
 
+    if (base >= end || (char *)end - (char *)base < size) return NULL;
+    if ((UINT_PTR)base + align_mask < (UINT_PTR)base) return NULL;
     base = ROUND_ADDR( (char *)base + align_mask, align_mask );
+    if (base >= end || (char *)end - (char *)base < size) return NULL;
     end = (char *)ROUND_ADDR( (char *)end - size, align_mask ) + size;
+    if (end <= base || (char *)end - (char *)base < size) return NULL;
 
     if (top_down)
     {
@@ -1648,12 +1659,17 @@ static void *find_reserved_free_area( void *base, void *end, size_t size, int to
         range = free_ranges_lower_bound( start );
         assert(range != free_ranges_end && range->end >= start);
 
-        if ((char *)range->end - (char *)start < size) start = ROUND_ADDR( (char *)range->end - size, align_mask );
+        if ((char *)range->end - (char *)start < size)
+        {
+            if ((char *)range->end < (char *)base + size) return NULL;
+            start = ROUND_ADDR( (char *)range->end - size, align_mask );
+        }
         do
         {
             if (start >= end || start < base || (char *)end - (char *)start < size) return NULL;
             if (start < range->end && start >= range->base && (char *)range->end - (char *)start >= size) break;
             if (--range < free_ranges) return NULL;
+            if ((char *)range->end < (char *)base + size) return NULL;
             start = ROUND_ADDR( (char *)range->end - size, align_mask );
         }
         while (1);
@@ -1664,12 +1680,17 @@ static void *find_reserved_free_area( void *base, void *end, size_t size, int to
         range = free_ranges_lower_bound( start );
         assert(range != free_ranges_end && range->end >= start);
 
-        if (start < range->base) start = ROUND_ADDR( (char *)range->base + align_mask, align_mask );
+        if (start < range->base)
+        {
+            if ((UINT_PTR)range->base + align_mask < (UINT_PTR)range->base) return NULL;
+            start = ROUND_ADDR( (char *)range->base + align_mask, align_mask );
+        }
         do
         {
             if (start >= end || start < base || (char *)end - (char *)start < size) return NULL;
             if (start < range->end && start >= range->base && (char *)range->end - (char *)start >= size) break;
             if (++range == free_ranges_end) return NULL;
+            if ((UINT_PTR)range->base + align_mask < (UINT_PTR)range->base) return NULL;
             start = ROUND_ADDR( (char *)range->base + align_mask, align_mask );
         }
         while (1);
@@ -2360,13 +2381,17 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
         if (limit_low && (void *)limit_low > start) start = (void *)limit_low;
         if (limit_high && (void *)limit_high < end) end = (char *)limit_high + 1;
 
+        if (start >= end || (char *)end - (char *)start < host_size || (align_mask >> 1) >= ((size_t)end >> 1))
+            return STATUS_NO_MEMORY;
+
         if ((ptr = map_reserved_area( start, end, host_size, top_down, unix_prot, align_mask )))
         {
             TRACE( "got mem in reserved area %p-%p\n", ptr, (char *)ptr + size );
             goto done;
         }
 
-        if (start > address_space_start || end < host_addr_space_limit || top_down)
+        if (start > address_space_start || end < host_addr_space_limit || top_down ||
+            view_size < host_size || view_size <= align_mask)
         {
             if (!(ptr = map_free_area( start, end, host_size, top_down, unix_prot, align_mask )))
                 return STATUS_NO_MEMORY;
@@ -2378,8 +2403,14 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
         {
             if ((ptr = anon_mmap_alloc( view_size, unix_prot )) == MAP_FAILED)
             {
+                if (errno == ENOMEM &&
+                    (ptr = map_free_area( start, end, host_size, top_down, unix_prot, align_mask )))
+                {
+                    TRACE( "got mem with map_free_area fallback %p-%p\n", ptr, (char *)ptr + size );
+                    goto done;
+                }
                 status = (errno == ENOMEM) ? STATUS_NO_MEMORY : STATUS_INVALID_PARAMETER;
-                ERR( "anon mmap error %s, size %p, unix_prot %#x\n",
+                ERR( "anon mmap error %s, size %p, unix_prot %#x.\n",
                      strerror(errno), (void *)view_size, unix_prot );
                 return status;
             }
@@ -2390,9 +2421,16 @@ static NTSTATUS map_view( struct file_view **view_ret, void *base, size_t size,
             if (unmap_size) munmap( ptr, unmap_size );
         }
         ptr = unmap_extra_space( ptr, view_size, host_size, align_mask );
+        if (is_beyond_limit( ptr, host_size, end ))
+        {
+            unmap_area( ptr, host_size );
+            if (!(ptr = map_free_area( start, end, host_size, top_down, unix_prot, align_mask )))
+                return STATUS_NO_MEMORY;
+            TRACE( "got mem with map_free_area %p-%p\n", ptr, (char *)ptr + size );
+        }
     }
 done:
-    seed_card_shadow( ptr, size, unix_prot );
+    if (unix_prot != PROT_NONE || size < 0x40000000) seed_card_shadow( ptr, size, unix_prot );
     status = create_view( view_ret, ptr, size, vprot );
     if (status != STATUS_SUCCESS) unmap_area( ptr, size );
     return status;
@@ -2626,7 +2664,7 @@ static NTSTATUS free_pages_preserve_placeholder( struct file_view *view, char *b
 
     view->protect = VPROT_PLACEHOLDER | VPROT_FREE_PLACEHOLDER;
     set_page_vprot( view->base, view->size, 0 );
-    anon_mmap_fixed( view->base, ROUND_SIZE( 0, view->size, host_page_mask ), PROT_NONE, 0 );
+    anon_mmap_fixed( view->base, ROUND_SIZE( 0, view->size, host_page_mask ), PROT_NONE, MAP_NORESERVE );
     return STATUS_SUCCESS;
 }
 
@@ -5295,7 +5333,10 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
         return STATUS_INVALID_PARAMETER;
     }
 
-    if (type & MEM_RESERVE_PLACEHOLDER && (protect != PAGE_NOACCESS)) return STATUS_INVALID_PARAMETER;
+    if ((type & MEM_RESERVE_PLACEHOLDER)
+        && ((type & ~(MEM_RESERVE | MEM_TOP_DOWN | MEM_RESERVE_PLACEHOLDER))
+            || !(type & MEM_RESERVE) || protect != PAGE_NOACCESS))
+        return STATUS_INVALID_PARAMETER;
     if (!arm64ec_view && (attributes & MEM_EXTENDED_PARAMETER_EC_CODE)) return STATUS_INVALID_PARAMETER;
 
     /* Reserve the memory */
@@ -5463,6 +5504,7 @@ static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, U
 
     for (i = 0; i < count; ++i)
     {
+        if (parameters[i].Reserved) return STATUS_INVALID_PARAMETER;
         if (parameters[i].Type >= 32) return STATUS_INVALID_PARAMETER;
         if (present & (1u << parameters[i].Type)) return STATUS_INVALID_PARAMETER;
         present |= 1u << parameters[i].Type;
@@ -5474,6 +5516,7 @@ static NTSTATUS get_extended_params( const MEM_EXTENDED_PARAMETER *parameters, U
             MEM_ADDRESS_REQUIREMENTS *r = parameters[i].Pointer;
             ULONG_PTR limit;
 
+            if (!r) return STATUS_INVALID_PARAMETER;
             if (is_wow64()) limit = get_wow_user_space_limit();
             else limit = (ULONG_PTR)user_space_limit;
 

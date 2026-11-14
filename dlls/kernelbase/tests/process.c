@@ -415,6 +415,46 @@ static void test_VirtualAlloc2(void)
     ok(ret, "Failed to release a region.\n");
     ret = VirtualFree(p2, 0, MEM_RELEASE);
     ok(ret, "Failed to release a region.\n");
+
+#ifdef _WIN64
+    {
+        MEM_EXTENDED_PARAMETER ext[2];
+        MEM_ADDRESS_REQUIREMENTS req;
+        SIZE_T cage_size = (SIZE_T)1 << 32; /* 4GB */
+        char *cage, *mid, *com;
+
+        memset(ext, 0, sizeof(ext));
+        memset(&req, 0, sizeof(req));
+        req.Alignment = cage_size;
+        ext[0].Type = MemExtendedParameterAddressRequirements;
+        ext[0].Pointer = &req;
+        ext[1].Type = MemExtendedParameterNumaNode;
+        ext[1].ULong = 0;
+
+        cage = pVirtualAlloc2(NULL, NULL, cage_size, MEM_RESERVE | MEM_RESERVE_PLACEHOLDER,
+                              PAGE_NOACCESS, ext, 2);
+        ok(!!cage, "VirtualAlloc2 4GB aligned failed, error %lu.\n", GetLastError());
+        if (cage)
+        {
+            ok(!((ULONG_PTR)cage & (cage_size - 1)), "Unaligned 4GB cage %p.\n", cage);
+            mid = cage + 0x80000000;
+            ret = VirtualFree(mid, 0x200000, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+            ok(ret, "Failed to split 4GB placeholder, error %lu.\n", GetLastError());
+            p1 = pVirtualAlloc2(NULL, mid, 0x200000, MEM_RESERVE | MEM_REPLACE_PLACEHOLDER,
+                                PAGE_NOACCESS, NULL, 0);
+            ok(p1 == mid, "Failed to replace split placeholder %p, error %lu.\n", p1, GetLastError());
+            com = VirtualAlloc(mid + 0x10000, 0x10000, MEM_COMMIT, PAGE_READWRITE);
+            ok(!!com, "Failed to commit replaced placeholder, error %lu.\n", GetLastError());
+            if (com) *(volatile DWORD *)com = 0x55aa55aa;
+            ret = VirtualFree(mid, 0x200000, MEM_RELEASE | MEM_PRESERVE_PLACEHOLDER);
+            ok(ret, "Failed to preserve placeholder, error %lu.\n", GetLastError());
+            ret = VirtualFree(cage, cage_size, MEM_RELEASE | MEM_COALESCE_PLACEHOLDERS);
+            ok(ret, "Failed to coalesce 4GB placeholder, error %lu.\n", GetLastError());
+            ret = VirtualFree(cage, 0, MEM_RELEASE);
+            ok(ret, "Failed to release 4GB cage, error %lu.\n", GetLastError());
+        }
+    }
+#endif
 }
 
 static void test_VirtualAllocFromApp(void)
