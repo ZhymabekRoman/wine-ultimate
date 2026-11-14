@@ -169,7 +169,10 @@ struct composition_visual
     struct composition_visual *parent;
     BOOL is_root;
     BOOL is_child;
+    BOOL is_shared_proxy;           /* stand-in for a shared visual published by another process */
     HANDLE shared_visual_handle;
+    HANDLE shared_content_handle;   /* shared resource handle of the content: published by the
+                                     * publisher of this tree, opened by the consumer of a proxy */
     int version;
     unsigned int content_version;   /* bumped whenever the visual content is (re)set: change counter */
     unsigned int composited_version;/* content_version as of the last blit to the window */
@@ -239,6 +242,8 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
 HRESULT create_target_from_shared_visual_handle(struct composition_device *device, HANDLE shared_visual_handle, void **new_target);
 HRESULT create_visual(int version, REFIID iid, void **visual);
 HRESULT create_visual_from_shared_visual_handle(HANDLE shared_visual_handle, void **new_visual);
+void visual_publish_shared_content(struct composition_visual *visual, HANDLE *handle, UINT *width, UINT *height);
+IDXGISurface *shared_proxy_open_surface(struct composition_visual *visual);
 HRESULT create_surface_from_dxgi_surface(struct composition_device *device, IDXGISurface *dxgi_surface, IUnknown **out_surface);
 void ensure_composite_thread(struct composition_device *device);
 BOOL dcomp_has_active_composite_thread(void);

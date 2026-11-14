@@ -6435,12 +6435,21 @@ struct dcomp_create_shared_visual_reply
 };
 
 
-
+/* Set info for a DirectComposition shared visual object.
+ * The publisher publishes not only the root pointer of its visual tree (which
+ * is only meaningful in its own address space) but also a shared resource
+ * handle naming the GPU surface it renders into, plus its pixel size. The
+ * receiving process opens that handle on its own device: a cross-process,
+ * zero-copy connection of the publisher's surface into the consumer's tree. */
 struct dcomp_set_shared_visual_info_request
 {
     struct request_header __header;
     obj_handle_t  handle;
     client_ptr_t  target_root;
+    obj_handle_t  target_surface;
+    unsigned int  width;
+    unsigned int  height;
+    char __pad_36[4];
 };
 struct dcomp_set_shared_visual_info_reply
 {
@@ -6448,7 +6457,12 @@ struct dcomp_set_shared_visual_info_reply
 };
 
 
-
+/* Get info for a DirectComposition shared visual.
+ * A shared visual handle is deliberately readable from a process other than
+ * the one that published it; that is the whole point of sharing it. The reply
+ * carries the owner pid so that the consumer knows whether target_root is a
+ * pointer it can dereference (same process) or an opaque identity (cross
+ * process, where it must go through target_surface instead). */
 struct dcomp_get_shared_visual_info_request
 {
     struct request_header __header;
@@ -6458,6 +6472,10 @@ struct dcomp_get_shared_visual_info_reply
 {
     struct reply_header __header;
     client_ptr_t  target_root;
+    obj_handle_t  target_surface;
+    unsigned int  width;
+    unsigned int  height;
+    process_id_t  owner_pid;
 };
 
 
@@ -7558,6 +7576,6 @@ union generic_reply
     struct get_swap_interval_reply get_swap_interval_reply;
 };
 
-#define SERVER_PROTOCOL_VERSION 972
+#define SERVER_PROTOCOL_VERSION 973
 
 #endif /* __WINE_WINE_SERVER_PROTOCOL_H */

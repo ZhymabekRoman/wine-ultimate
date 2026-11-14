@@ -105,6 +105,8 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             IDCompositionTransform_Release(visual->transform);
         if (visual->shared_visual_handle)
             CloseHandle(visual->shared_visual_handle);
+        if (visual->shared_content_handle)
+            CloseHandle(visual->shared_content_handle);
         free(visual);
     }
 
@@ -1353,6 +1355,166 @@ static const struct IDCompositionVisualUnknownVtbl visual_unknown_vtbl =
     visual_unknown_method98,
     visual_unknown_method99,
 };
+
+/* Shared-resource identity of a visual's content.
+ *
+ * A shared visual handle travels to a consumer process (Chromium's GPU process
+ * publishes, WhatsApp's dcomp consumes). The publisher's visual tree is a set
+ * of pointers in the publisher's address space, so the only thing the consumer
+ * can use is the GPU surface the content is rendered into, named by a shared
+ * resource handle that the window server resolves for any process. The
+ * consumer opens that handle on its own device and samples the texture on the
+ * GPU: no CPU staging readback on either side.
+ *
+ * Content kinds a composition visual can carry are covered: IDCompositionSurface
+ * (through its physical surface / draw surface), a swapchain (its current back
+ * buffer), and a bare texture or DXGI surface. A visual with no GPU-backed
+ * content publishes no handle, and the consumer composites the tree structure
+ * alone, as before. */
+static HRESULT content_get_shared_handle(IUnknown *content, HANDLE *handle)
+{
+    IDCompositionSurface *surface = NULL;
+    IDXGISwapChain *swapchain = NULL;
+    IDXGIResource *dxgi_resource = NULL;
+    ID3D11Texture2D *texture = NULL;
+    IUnknown *physical = NULL;
+    HRESULT hr;
+
+    *handle = NULL;
+
+    if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDCompositionSurface, (void **)&surface)))
+    {
+        struct composition_surface *surface_impl = unsafe_impl_from_IDCompositionSurface(surface);
+
+        if (surface_impl && surface_impl->physical_surface)
+        {
+            physical = surface_impl->physical_surface;
+            IUnknown_AddRef(physical);
+        }
+        if (!physical && surface_impl && surface_impl->draw_surface)
+            ID3D11Texture2D_QueryInterface(surface_impl->draw_surface, &IID_IUnknown, (void **)&physical);
+        IDCompositionSurface_Release(surface);
+        hr = physical ? IUnknown_QueryInterface(physical, &IID_IDXGIResource, (void **)&dxgi_resource) : E_FAIL;
+    }
+    else if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain, (void **)&swapchain)))
+    {
+        hr = IDXGISwapChain_GetBuffer(swapchain, 0, &IID_ID3D11Texture2D, (void **)&texture);
+        IDXGISwapChain_Release(swapchain);
+        if (SUCCEEDED(hr))
+        {
+            hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGIResource, (void **)&dxgi_resource);
+            ID3D11Texture2D_Release(texture);
+        }
+    }
+    else
+    {
+        hr = IUnknown_QueryInterface(content, &IID_IDXGIResource, (void **)&dxgi_resource);
+    }
+
+    if (FAILED(hr))
+        return hr;
+
+    hr = IDXGIResource_GetSharedHandle(dxgi_resource, handle);
+    IDXGIResource_Release(dxgi_resource);
+    if (SUCCEEDED(hr) && !*handle)
+        return E_FAIL; /* content is not shared yet */
+    return hr;
+}
+
+static HRESULT content_get_size(IUnknown *content, UINT *width, UINT *height)
+{
+    IDCompositionSurface *surface = NULL;
+    IDXGISwapChain *swapchain = NULL;
+    DXGI_SWAP_CHAIN_DESC sc_desc;
+    DXGI_SURFACE_DESC desc;
+    ID3D11Texture2D *texture = NULL;
+    IDXGISurface *dxgi_surface = NULL;
+    D3D11_TEXTURE2D_DESC tex_desc;
+    HRESULT hr;
+
+    if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDCompositionSurface, (void **)&surface)))
+    {
+        struct composition_surface *surface_impl = unsafe_impl_from_IDCompositionSurface(surface);
+
+        IDCompositionSurface_Release(surface);
+        if (surface_impl && surface_impl->width && surface_impl->height)
+        {
+            *width = surface_impl->width;
+            *height = surface_impl->height;
+            return S_OK;
+        }
+        return E_FAIL;
+    }
+
+    if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISurface, (void **)&dxgi_surface)))
+    {
+        hr = IDXGISurface_GetDesc(dxgi_surface, &desc);
+        IDXGISurface_Release(dxgi_surface);
+        if (SUCCEEDED(hr))
+        {
+            *width = desc.Width;
+            *height = desc.Height;
+            return S_OK;
+        }
+        return hr;
+    }
+
+    if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_IDXGISwapChain, (void **)&swapchain)))
+    {
+        hr = IDXGISwapChain_GetDesc(swapchain, &sc_desc);
+        IDXGISwapChain_Release(swapchain);
+        if (SUCCEEDED(hr))
+        {
+            *width = sc_desc.BufferDesc.Width;
+            *height = sc_desc.BufferDesc.Height;
+            return S_OK;
+        }
+        return hr;
+    }
+
+    if (SUCCEEDED(IUnknown_QueryInterface(content, &IID_ID3D11Texture2D, (void **)&texture)))
+    {
+        ID3D11Texture2D_GetDesc(texture, &tex_desc);
+        IUnknown_Release(texture);
+        *width = tex_desc.Width;
+        *height = tex_desc.Height;
+        return S_OK;
+    }
+
+    return E_FAIL;
+}
+
+/* Publish this visual's content to whoever consumes its shared visual handle.
+ * Runs with dcomp_cs released: taking the shared handle enters Direct3D. The
+ * handle is cached on the visual (a shared resource keeps its name for the
+ * lifetime of the texture), so the per-frame republish is a memory read. */
+void visual_publish_shared_content(struct composition_visual *visual, HANDLE *handle, UINT *width, UINT *height)
+{
+    HANDLE shared_handle = NULL;
+    UINT w = 0, h = 0;
+
+    *handle = NULL;
+    *width = 0;
+    *height = 0;
+
+    if (!visual || !visual->content)
+        return;
+
+    if (visual->shared_content_handle)
+        shared_handle = visual->shared_content_handle;
+    else if (SUCCEEDED(content_get_shared_handle(visual->content, &shared_handle)) && shared_handle)
+        visual->shared_content_handle = shared_handle;
+
+    if (FAILED(content_get_size(visual->content, &w, &h)))
+    {
+        w = (UINT)visual->size.cx;
+        h = (UINT)visual->size.cy;
+    }
+
+    *handle = shared_handle;
+    *width = w;
+    *height = h;
+}
 
 HRESULT create_visual(int version, REFIID iid, void **new_visual)
 {

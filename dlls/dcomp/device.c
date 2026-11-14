@@ -880,17 +880,73 @@ void shared_visual_cache_set(HANDLE handle, IDCompositionVisual *root)
     }
 }
 
+/* Root of a shared visual published by another process.
+ *
+ * The publisher's root is a pointer into its address space, so the consumer
+ * cannot dereference it. Build a local stand-in (a 'proxy') once per handle and
+ * hand that to the visual tree walk: it carries the published size, the shared
+ * resource handle of the publisher's surface, and it is a struct this process
+ * can read. The proxy is referenced by the cache, which lives for the lifetime
+ * of the process, so the reference create_visual() hands out is kept here. */
+static IDCompositionVisual *shared_visual_proxy_root(HANDLE shared_visual_handle, HANDLE surface,
+        UINT width, UINT height)
+{
+    IDCompositionVisual *root;
+    struct composition_visual *impl;
+
+    dcomp_lock();
+    if ((root = shared_visual_cache_lookup(shared_visual_handle)))
+    {
+        impl = impl_from_IDCompositionVisual(root);
+        if (impl->is_shared_proxy)
+        {
+            /* Republish: a resized surface, or a new content handle after a
+             * device lost. Bump the change counter so the next tick re-renders. */
+            impl->size.cx = width;
+            impl->size.cy = height;
+            if (surface && surface != impl->shared_content_handle)
+                impl->shared_content_handle = surface;
+            impl->content_version++;
+        }
+        dcomp_unlock();
+        return root;
+    }
+    dcomp_unlock();
+
+    if (FAILED(create_visual(2, &IID_IDCompositionVisual, (void **)&root)))
+        return NULL;
+
+    impl = impl_from_IDCompositionVisual(root);
+    impl->is_shared_proxy = TRUE;
+    impl->shared_visual_handle = shared_visual_handle;
+    impl->shared_content_handle = surface;
+    impl->size.cx = width;
+    impl->size.cy = height;
+
+    return root;
+}
+
 /* Window server round trip: must run with dcomp_cs released. */
 IDCompositionVisual *shared_visual_query_root(HANDLE shared_visual_handle)
 {
     IDCompositionVisual *root = NULL;
+    IDCompositionVisual *proxy;
     NTSTATUS status;
+    HANDLE surface = NULL;
+    UINT width = 0, height = 0;
+    DWORD owner = 0;
 
     SERVER_START_REQ(dcomp_get_shared_visual_info)
     {
         req->handle = wine_server_obj_handle(shared_visual_handle);
         if (!(status = wine_server_call(req)))
+        {
             root = wine_server_get_ptr(reply->target_root);
+            surface = wine_server_ptr_handle(reply->target_surface);
+            width = reply->width;
+            height = reply->height;
+            owner = reply->owner_pid;
+        }
     }
     SERVER_END_REQ;
 
@@ -898,10 +954,17 @@ IDCompositionVisual *shared_visual_query_root(HANDLE shared_visual_handle)
     {
         struct composition_visual *cached;
 
-        ERR("dcomp_get_shared_visual_info failed, not in the same process? status %#lx.\n", status);
+        ERR("dcomp_get_shared_visual_info failed, status %#lx.\n", status);
         cached = shared_visual_cached_root(shared_visual_handle);
         return cached ? (IDCompositionVisual *)&cached->IDCompositionVisualUnknown_iface : NULL;
     }
+
+    /* Cross-process shared visual (Chromium's GPU process publishes, this
+     * process consumes): target_root names a visual in the publisher's address
+     * space, so use a local proxy bound to the surface it published. */
+    if (owner && owner != GetCurrentProcessId() && (proxy = shared_visual_proxy_root(shared_visual_handle,
+            surface, width, height)))
+        root = proxy;
 
     /* Publish the mapping on every successful query, including a cleared root:
      * a target that lost its root must not keep serving the stale one. */
@@ -1234,7 +1297,11 @@ static void collect_visual_frames(struct composition_target *target, struct comp
         }
     }
 
-    if (visual->content && (visual->content_version != visual->composited_version || visual->composited_hwnd != target_hwnd))
+    /* A proxy has no content of its own: its pixels come from the publisher's
+     * surface, which changes on every publisher frame, so queue it every tick. */
+    if (visual->is_shared_proxy
+            || (visual->content && (visual->content_version != visual->composited_version
+                || visual->composited_hwnd != target_hwnd)))
     {
         if ((frame = malloc(sizeof(*frame))))
         {
@@ -1594,6 +1661,25 @@ static void render_composite_frame(struct composite_frame *frame)
         TRACE("DCOMP: fallback blitting surface %p to hwnd %p.\n", frame->surface, frame->target_hwnd);
         if (SUCCEEDED(IUnknown_QueryInterface(frame->surface->physical_surface,
                 &IID_IDXGISurface, (void **)&dxgi_surface)))
+        {
+            do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
+                    dxgi_surface, opacity, clip);
+            IDXGISurface_Release(dxgi_surface);
+            frame->rendered = TRUE;
+        }
+        return;
+    }
+
+    if (visual && visual->is_shared_proxy)
+    {
+        /* Cross-process shared visual: open the surface the publisher published
+         * on this process's device. The window server keys a shared resource by
+         * handle, so the texture view wraps the publisher's GPU resource; the
+         * composite samples it on the GPU into this target's presentation
+         * swapchain. No CPU staging readback on either side. */
+        TRACE("DCOMP: shared proxy visual %p handle %p to hwnd %p at %ld,%ld\n", visual,
+                visual->shared_content_handle, frame->target_hwnd, frame->pt.x, frame->pt.y);
+        if ((dxgi_surface = shared_proxy_open_surface(visual)))
         {
             do_composite_dxgi_surface(frame->target, frame->target_hwnd, frame->pt,
                     dxgi_surface, opacity, clip);
@@ -2100,6 +2186,47 @@ static HRESULT get_default_rendering_device(IUnknown **out_device)
 
     ERR("Failed to create default D3D11 rendering device, hr %#lx.\n", hr);
     return hr;
+}
+
+/* Surface of a shared visual published by another process.
+ *
+ * The publisher's content is a texture in the GPU's memory; a shared resource
+ * is named by a handle that the window server resolves for any process, so
+ * opening it on a device of this process yields a view of the same resource.
+ * The device is created once per process and kept: shared-resource views are
+ * not device specific, and creating one per frame would cost a device. */
+IDXGISurface *shared_proxy_open_surface(struct composition_visual *visual)
+{
+    static ID3D11Device *device;
+    ID3D11Texture2D *texture = NULL;
+    IUnknown *rendering_device = NULL;
+    IDXGISurface *surface = NULL;
+    HRESULT hr;
+
+    if (!visual->shared_content_handle)
+        return NULL;
+
+    if (!device)
+    {
+        if (FAILED(get_default_rendering_device(&rendering_device)) || !rendering_device)
+            return NULL;
+        device = (ID3D11Device *)rendering_device; /* the reference is kept for the process */
+    }
+
+    hr = ID3D11Device_OpenSharedResource(device, visual->shared_content_handle,
+            &IID_ID3D11Texture2D, (void **)&texture);
+    if (FAILED(hr) || !texture)
+    {
+        TRACE("Failed to open shared content handle %p, hr %#lx.\n", visual->shared_content_handle, hr);
+        return NULL;
+    }
+
+    hr = ID3D11Texture2D_QueryInterface(texture, &IID_IDXGISurface, (void **)&surface);
+    ID3D11Texture2D_Release(texture);
+    if (FAILED(hr))
+        return NULL;
+
+    return surface;
 }
 
 static HRESULT device_get_or_create_rendering_device(struct composition_device *device,

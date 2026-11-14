@@ -3687,6 +3687,9 @@ static void dump_dcomp_set_shared_visual_info_request( const struct dcomp_set_sh
 {
     fprintf( stderr, " handle=%04x", req->handle );
     dump_uint64( ", target_root=", &req->target_root );
+    fprintf( stderr, ", target_surface=%04x", req->target_surface );
+    fprintf( stderr, ", width=%08x", req->width );
+    fprintf( stderr, ", height=%08x", req->height );
 }
 
 static void dump_dcomp_get_shared_visual_info_request( const struct dcomp_get_shared_visual_info_request *req )
@@ -3697,6 +3700,10 @@ static void dump_dcomp_get_shared_visual_info_request( const struct dcomp_get_sh
 static void dump_dcomp_get_shared_visual_info_reply( const struct dcomp_get_shared_visual_info_reply *req )
 {
     dump_uint64( " target_root=", &req->target_root );
+    fprintf( stderr, ", target_surface=%04x", req->target_surface );
+    fprintf( stderr, ", width=%08x", req->width );
+    fprintf( stderr, ", height=%08x", req->height );
+    fprintf( stderr, ", owner_pid=%04x", req->owner_pid );
 }
 
 static void dump_alpc_query_port_request( const struct alpc_query_port_request *req )

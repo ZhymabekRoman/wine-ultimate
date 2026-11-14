@@ -874,9 +874,23 @@ struct composition
 {
     struct object obj;                      /* object header */
     struct process *process;                /* owner process */
-    struct process *target_process;         /* process that set target_root */
-    client_ptr_t target_root;               /* root IDCompositionVisual pointer for the target created from this shared visual */
+    struct process *target_process;         /* process that published the target */
+    client_ptr_t target_root;               /* publisher's root IDCompositionVisual pointer (valid in its address space only) */
+    obj_handle_t target_surface;            /* shared resource handle naming the published GPU surface, 0 when none */
+    unsigned int width;                     /* published content width in pixels */
+    unsigned int height;                    /* published content height in pixels */
+    obj_handle_t shared_handle;             /* handle value the handle was created with; global registry key */
+    struct list shared_entry;               /* entry in shared_visual_list */
 };
+
+/* Every shared visual handle ever created, kept alive for as long as some
+ * process can name it. A shared visual outlives the handle it was created
+ * with: the publisher hands the handle to the consumer over mojo, and the
+ * consumer resolves it on every composite tick, so an entry whose creating
+ * handle has been closed must still answer. It is also the lookup path for a
+ * handle value that lives in another process's handle table, where
+ * get_handle_obj( current->process, ... ) cannot see it. */
+static struct list shared_visual_list = LIST_INIT( shared_visual_list );
 
 static void composition_dump( struct object *obj, int verbose );
 static void composition_destroy( struct object *obj );
@@ -916,8 +930,31 @@ static void composition_destroy( struct object *obj )
 {
     struct composition *composition = (struct composition *)obj;
 
+    list_remove( &composition->shared_entry );
     if (composition->target_process) release_object( composition->target_process );
     release_object( composition->process );
+}
+
+/* Look a shared visual up by the handle value it was created with, without
+ * regard to which process's handle table currently names it. This is the
+ * cross-process path: Chromium creates the handle in its GPU process, hands
+ * the value to WhatsApp over mojo, and WhatsApp's dcomp resolves it here. A
+ * value whose creating handle was closed still resolves, because the registry
+ * holds a reference for the lifetime of the object. */
+static struct composition *composition_from_shared_handle( obj_handle_t handle )
+{
+    struct composition *composition;
+
+    LIST_FOR_EACH_ENTRY( composition, &shared_visual_list, struct composition, shared_entry )
+    {
+        if (composition->shared_handle == handle)
+        {
+            grab_object( composition );
+            return composition;
+        }
+    }
+
+    return NULL;
 }
 
 static struct composition *get_composition_obj( struct process *process, obj_handle_t handle, unsigned int access )
@@ -929,7 +966,9 @@ static struct composition *get_composition_obj( struct process *process, obj_han
         return (struct composition *)obj;
 
     enum_processes( find_shared_obj_cb, &fso );
-    return (struct composition *)fso.obj;
+    if (fso.obj) return (struct composition *)fso.obj;
+
+    return composition_from_shared_handle( handle );
 }
 
 static struct composition *create_composition(void)
@@ -939,8 +978,14 @@ static struct composition *create_composition(void)
     if ((composition = alloc_object( &composition_ops )))
     {
         composition->target_root = 0;
+        composition->target_surface = 0;
+        composition->width = 0;
+        composition->height = 0;
+        composition->shared_handle = 0;
         composition->target_process = NULL;
         composition->process = (struct process *)grab_object( current->process );
+        list_add_tail( &shared_visual_list, &composition->shared_entry );
+        grab_object( composition ); /* the registry's reference */
     }
 
     return composition;
@@ -953,13 +998,16 @@ DECL_HANDLER(dcomp_create_shared_visual)
 
     if ((composition = create_composition()))
     {
-        reply->handle = alloc_handle_no_access_check( current->process, composition, 0, 0 );
+        composition->shared_handle = alloc_handle_no_access_check( current->process, composition, 0, 0 );
+        reply->handle = composition->shared_handle;
         release_object( composition );
     }
 }
 
 
-/* Set info for a DirectComposition shared visual object */
+/* Set info for a DirectComposition shared visual object.
+ * The publisher may re-publish (a resized surface, a new root); the last
+ * publish wins, and the consumer picks the new values up on its next query. */
 DECL_HANDLER(dcomp_set_shared_visual_info)
 {
     struct composition *composition;
@@ -970,11 +1018,19 @@ DECL_HANDLER(dcomp_set_shared_visual_info)
     if (composition->target_process) release_object( composition->target_process );
     composition->target_process = (struct process *)grab_object( current->process );
     composition->target_root = req->target_root;
+    composition->target_surface = req->target_surface;
+    composition->width = req->width;
+    composition->height = req->height;
     release_object( composition );
 }
 
 
-/* Get info for a DirectComposition shared visual */
+/* Get info for a DirectComposition shared visual.
+ * Sharing is the point of the object, so any process that can name the handle
+ * reads the published target, its surface and its size; the same-process check
+ * that used to gate this made the handle useless to the consumer it was handed
+ * to. The reply carries the publisher's pid so that the consumer knows when
+ * target_root is a foreign pointer it must not dereference. */
 DECL_HANDLER(dcomp_get_shared_visual_info)
 {
     struct composition *composition;
@@ -982,10 +1038,11 @@ DECL_HANDLER(dcomp_get_shared_visual_info)
     composition = get_composition_obj( current->process, req->handle, 0);
     if (!composition) return;
 
-    if (composition->target_process && composition->target_process == current->process)
-        reply->target_root = composition->target_root;
-    else
-        reply->target_root = 0;
+    reply->target_root = composition->target_root;
+    reply->target_surface = composition->target_surface;
+    reply->width = composition->width;
+    reply->height = composition->height;
+    reply->owner_pid = composition->target_process ? composition->target_process->id : 0;
 
     release_object( composition );
 }

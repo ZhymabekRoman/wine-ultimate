@@ -4452,18 +4452,35 @@ typedef struct _ALPC_DATA_VIEW_ATTR
 @END
 
 
-/* Set info for a DirectComposition shared visual object */
+/* Set info for a DirectComposition shared visual object.
+ * The publisher publishes not only the root pointer of its visual tree (which
+ * is only meaningful in its own address space) but also a shared resource
+ * handle naming the GPU surface it renders into, plus its pixel size. The
+ * receiving process opens that handle on its own device: a cross-process,
+ * zero-copy connection of the publisher's surface into the consumer's tree. */
 @REQ(dcomp_set_shared_visual_info)
     obj_handle_t  handle;                    /* shared visual visual handle */
     client_ptr_t  target_root;               /* root IDCompositionVisual pointer for the target created from this shared visual */
+    obj_handle_t  target_surface;            /* shared resource handle of the published content, 0 when none */
+    unsigned int  width;                     /* published content width in pixels */
+    unsigned int  height;                    /* published content height in pixels */
 @END
 
 
-/* Get info for a DirectComposition shared visual */
+/* Get info for a DirectComposition shared visual.
+ * A shared visual handle is deliberately readable from a process other than
+ * the one that published it; that is the whole point of sharing it. The reply
+ * carries the owner pid so that the consumer knows whether target_root is a
+ * pointer it can dereference (same process) or an opaque identity (cross
+ * process, where it must go through target_surface instead). */
 @REQ(dcomp_get_shared_visual_info)
     obj_handle_t  handle;                     /* shared visual handle */
 @REPLY
-    client_ptr_t  target_root;                /* root IDCompositionVisual pointer for the target created from this shared visual */
+    client_ptr_t  target_root;                /* publisher's root IDCompositionVisual pointer */
+    obj_handle_t  target_surface;             /* shared resource handle of the published content, 0 when none */
+    unsigned int  width;                      /* published content width in pixels */
+    unsigned int  height;                     /* published content height in pixels */
+    process_id_t  owner_pid;                  /* pid of the process that published the target, 0 when none */
 @END
 
 

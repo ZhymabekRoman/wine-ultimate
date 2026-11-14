@@ -94,20 +94,37 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
     return ref;
 }
 
-static void shared_visual_target_set_root(HANDLE shared_visual_handle, IDCompositionVisual *root)
+/* Publish this target's root to the process that consumes the shared visual
+ * handle. Alongside the root pointer, which is only meaningful in this address
+ * space, publish the GPU surface the root renders into and its size: those are
+ * the two things the consumer can act on, and they let it sample the publisher's
+ * texture on the GPU instead of reading it back through the CPU. */
+static void shared_visual_target_set_root(HANDLE shared_visual_handle, IDCompositionVisual *visual)
 {
+    struct composition_visual *root;
     NTSTATUS status;
+    HANDLE surface;
+    UINT width, height;
+
+    root = visual ? impl_from_IDCompositionVisual(visual) : NULL;
+    surface = NULL;
+    width = height = 0;
+    if (root)
+        visual_publish_shared_content(root, &surface, &width, &height);
 
     SERVER_START_REQ(dcomp_set_shared_visual_info)
     {
         req->handle = wine_server_obj_handle(shared_visual_handle);
-        req->target_root = wine_server_client_ptr(root);
+        req->target_root = wine_server_client_ptr(visual);
+        req->target_surface = wine_server_obj_handle(surface);
+        req->width = width;
+        req->height = height;
         status = wine_server_call(req);
     }
     SERVER_END_REQ;
 
     if (status)
-        ERR("dcomp_set_shared_visual_info failed, not in the same process? status %#lx.\n", status);
+        ERR("dcomp_set_shared_visual_info failed, status %#lx.\n", status);
 }
 
 static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
