@@ -24,6 +24,7 @@
 #include <string.h>
 
 #include "wine/debug.h"
+#include "appmodel.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
 
@@ -2332,6 +2333,78 @@ static const ICoreWindowAdapterInteropVtbl core_window_adapter_vtbl =
     core_window_adapter_SetWindowClientAdapter,
 };
 
+/* Window class name for this process's CoreWindow, chosen so winex11 publishes it
+ * as WM_CLASS: the package's short name (DisplayName identity), not the exe name.
+ * Resolution order: seeded AppModel registry identity (ApplicationShortName, then
+ * DisplayName on the package key and its VisualElements subkey, HKCU before HKLM),
+ * then the WINE_PACKAGE_AUMID app id (the part after '!'), then the classic name.
+ * windows.ui.xaml seeds ApplicationShortName from the manifest-resolved DisplayName
+ * at package init; a XAML app therefore lands on its package display name. */
+static const WCHAR *core_window_class_name( void )
+{
+    static const WCHAR default_class[] = L"Windows.UI.Core.CoreWindow";
+    static const WCHAR appmodel_key[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\";
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    static WCHAR cached[128];
+    static BOOL done;
+    WCHAR full[330], sub[640], val[128];
+    UINT32 len;
+    SIZE_T i;
+
+    if (done) return cached[0] ? cached : default_class;
+    done = TRUE;
+
+    len = ARRAY_SIZE( full );
+    if (GetCurrentPackageFullName( &len, full ) == ERROR_SUCCESS && full[0])
+    {
+        static const WCHAR *const subkeys[] = { L"", L"\\VisualElements" };
+        static const WCHAR *const values[] = { L"ApplicationShortName", L"DisplayName" };
+        SIZE_T j;
+        for (i = 0; i < ARRAY_SIZE( roots ); i++)
+        {
+            for (j = 0; j < ARRAY_SIZE( subkeys ); j++)
+            {
+                SIZE_T k;
+                HKEY hkey;
+                lstrcpyW( sub, full );
+                lstrcatW( sub, subkeys[j] );
+                {
+                    WCHAR path[640];
+                    lstrcpyW( path, appmodel_key );
+                    lstrcatW( path, sub );
+                    if (RegOpenKeyExW( roots[i], path, 0, KEY_READ, &hkey ) != ERROR_SUCCESS)
+                        continue;
+                }
+                for (k = 0; k < ARRAY_SIZE( values ); k++)
+                {
+                    DWORD type = 0, size = sizeof(val);
+                    LONG ret = RegQueryValueExW( hkey, values[k], NULL, &type, (BYTE *)val, &size );
+                    if (ret == ERROR_SUCCESS && type == REG_SZ && val[0])
+                    {
+                        RegCloseKey( hkey );
+                        lstrcpynW( cached, val, ARRAY_SIZE(cached) );
+                        return cached;
+                    }
+                }
+                RegCloseKey( hkey );
+            }
+        }
+    }
+
+    len = GetEnvironmentVariableW( L"WINE_PACKAGE_AUMID", val, ARRAY_SIZE(val) );
+    if (len && len < ARRAY_SIZE( val ))
+    {
+        WCHAR *p = wcschr( val, L'!' );
+        const WCHAR *app = p ? p + 1 : val;
+        if (*app)
+        {
+            lstrcpynW( cached, app, ARRAY_SIZE(cached) );
+            return cached;
+        }
+    }
+    return default_class;
+}
+
 /* Create a CoreWindow with its own dispatcher. The shell's window factory hands the window its
  * title, position and size (PrivateCreateCoreWindow below); the plain WinRT path has no arguments
  * and keeps the size this module has always used, which is why the geometry is applied only when
@@ -2339,7 +2412,7 @@ static const ICoreWindowAdapterInteropVtbl core_window_adapter_vtbl =
 static struct core_window *create_core_window( const WCHAR *title, INT x, INT y, UINT width, UINT height,
                                                BOOL set_geometry )
 {
-    static const WCHAR class_name[] = L"Windows.UI.Core.CoreWindow";
+    const WCHAR *class_name = core_window_class_name();
     WNDCLASSEXW wc = { sizeof(wc) };
     struct core_window *impl;
     HINSTANCE inst = GetModuleHandleW( NULL );

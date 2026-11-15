@@ -45,8 +45,10 @@
 #undef Status
 
 #include "ntstatus.h"
+#define WIN32_NO_STATUS
 
 #include "x11drv.h"
+#include "ntuser.h"
 #include "wingdi.h"
 #include "winuser.h"
 
@@ -1155,12 +1157,14 @@ static void set_style_hints( struct x11drv_win_data *data, DWORD style, DWORD ex
  *
  * Set the window manager hints that don't change over the lifetime of a window.
  */
-static void set_initial_wm_hints( Display *display, Window window )
+static void set_initial_wm_hints( Display *display, Window window, HWND hwnd )
 {
     long i;
     Atom protocols[3];
     Atom dndVersion = WINE_XDND_VERSION;
     XClassHint *class_hints;
+    WCHAR wclass[128];
+    char *name = NULL;
 
     /* wm protocols */
     i = 0;
@@ -1170,14 +1174,32 @@ static void set_initial_wm_hints( Display *display, Window window )
     XChangeProperty( display, window, x11drv_atom(WM_PROTOCOLS),
                      XA_ATOM, 32, PropModeReplace, (unsigned char *)protocols, i );
 
-    /* class hints */
+    /* class hints: WM_CLASS from the window's own Win32 class name, so a UWP
+     * app whose window class is named after the package (windows.ui CoreWindow)
+     * shows the package short name; fall back to the process name. */
+    wclass[0] = 0;
+    if (hwnd)
+    {
+        UNICODE_STRING name;
+        name.Buffer = wclass;
+        name.MaximumLength = sizeof(wclass);
+        name.Length = 0;
+        if (!NtUserGetClassName( hwnd, TRUE, &name )) wclass[0] = 0;
+    }
+    if (wclass[0])
+    {
+        int len = lstrlenW( wclass );
+        if ((name = malloc((len + 1) * 3 + 1)))
+            ntdll_wcstoumbs( wclass, len + 1, name, (len + 1) * 3 + 1, FALSE );
+    }
     if ((class_hints = XAllocClassHint()))
     {
-        class_hints->res_name = process_name;
-        class_hints->res_class = process_name;
+        class_hints->res_name = name ? name : process_name;
+        class_hints->res_class = name ? name : process_name;
         XSetClassHint( display, window, class_hints );
         XFree( class_hints );
     }
+    free( name );
 
     /* set the WM_CLIENT_MACHINE and WM_LOCALE_NAME properties */
     XSetWMProperties(display, window, NULL, NULL, NULL, 0, NULL, NULL, NULL);
@@ -2467,7 +2489,7 @@ static void create_whole_window( struct x11drv_win_data *data )
     data->desired_state.rect = data->current_state.rect;
 
     x11drv_xinput2_enable( data->display, data->whole_window );
-    set_initial_wm_hints( data->display, data->whole_window );
+    set_initial_wm_hints( data->display, data->whole_window, data->hwnd );
     set_wm_hints( data );
 
     XSaveContext( data->display, data->whole_window, winContext, (char *)data->hwnd );
@@ -2690,7 +2712,7 @@ static BOOL create_desktop_win_data( Window win, HWND hwnd )
     data->whole_window = win;
     window_set_managed( data, TRUE );
     NtUserSetProp( data->hwnd, whole_window_prop, (HANDLE)win );
-    set_initial_wm_hints( display, win );
+    set_initial_wm_hints( display, win, hwnd );
     if (is_desktop_fullscreen()) window_set_net_wm_state( data, (1 << NET_WM_STATE_FULLSCREEN) );
     release_win_data( data );
     if (thread_data->clip_window) XReparentWindow( display, thread_data->clip_window, win, 0, 0 );
