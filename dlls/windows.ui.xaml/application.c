@@ -4429,6 +4429,11 @@ void xaml_mark_window_dirty( void )
 {
     InterlockedExchange( &g_xaml_window_dirty, 1 );
     g_xaml_timer_idle_ticks = 0;
+    if (!g_xaml_timer_armed_hwnd && global_xaml_window.target_hwnd && IsWindow( global_xaml_window.target_hwnd ))
+    {
+        g_xaml_timer_armed_hwnd = global_xaml_window.target_hwnd;
+        SetTimer( g_xaml_timer_armed_hwnd, 0x5756, 500, NULL );
+    }
 }
 
 static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
@@ -4464,10 +4469,31 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     {
         HWND top = GetAncestor( hwnd, GA_ROOT );
         RECT rc;
+        LRESULT ret;
         if (!top) top = hwnd;
+        if (xaml_corewindow_prev_proc && xaml_corewindow_prev_proc != xaml_corewindow_wndproc)
+            ret = CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
+        else
+            ret = DefWindowProcW( hwnd, msg, wparam, lparam );
         GetClientRect( top, &rc );
+        TRACE( "xaml corewindow WM_SIZE hwnd %p top %p rc %ldx%ld (prev %ux%u)\n",
+               hwnd, top, rc.right, rc.bottom, global_xaml_window.width, global_xaml_window.height );
         if (rc.right > 0 && rc.bottom > 0)
+        {
+            if (top != hwnd)
+                SetWindowPos( hwnd, 0, 0, 0, rc.right, rc.bottom,
+                              SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE );
             xaml_wv2_on_window_resize( top, rc.right, rc.bottom );
+            if ((UINT)rc.right != global_xaml_window.width ||
+                (UINT)rc.bottom != global_xaml_window.height)
+            {
+                xaml_mark_window_dirty();
+                InvalidateRect( top, NULL, FALSE );
+                if (top != hwnd) InvalidateRect( hwnd, NULL, FALSE );
+                xaml_window_present( &global_xaml_window );
+            }
+        }
+        return ret;
     }
     if (msg == WM_CLOSE)
     {
@@ -4625,10 +4651,11 @@ forward_msg:
 static HRESULT xaml_window_present( struct xaml_window *impl )
 {
     static BOOL in_present;
+    static BOOL d3d11_create_failed;
     HWND hwnd = NULL;
     SIZE sz;
     float scale = 1.0f;
-    UINT width, height;
+    UINT width, height, prev_width, prev_height;
     HRESULT hr;
 
     impl = &global_xaml_window;
@@ -4696,9 +4723,13 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
             SetWindowPos( top, 0, 0, 0, target_sz.cx, target_sz.cy,
                           SWP_NOZORDER | SWP_NOMOVE | SWP_NOACTIVATE );
         }
+        ShowWindow( hwnd, SW_SHOW );
+        SetWindowPos( hwnd, 0, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE );
     }
-    ShowWindow( hwnd, SW_SHOW );
-    SetWindowPos( hwnd, 0, 0, 0, 0, 0, SWP_SHOWWINDOW | SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE );
+    else if (!IsWindowVisible( hwnd ))
+    {
+        ShowWindow( hwnd, SW_SHOW );
+    }
     /* The X11 window manager shows the root ancestor's title and icon; the
      * CoreWindow child has no frame. Set both on the top-level once, on show. */
     {
@@ -4731,6 +4762,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     width = (UINT)sz.cx;
     height = (UINT)sz.cy;
 
+    prev_width = impl->width;
+    prev_height = impl->height;
     impl->target_hwnd = hwnd;
     impl->width = width;
     impl->height = height;
@@ -4789,7 +4822,15 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
 
     /* 5. Ensure composition swapchain created via CreateSwapChainForComposition */
-    if (!impl->swapchain && is_uwp_xaml_app())
+    if (impl->swapchain && (width != prev_width || height != prev_height))
+    {
+        hr = IDXGISwapChain1_ResizeBuffers( impl->swapchain, 0, width, height,
+                                            DXGI_FORMAT_B8G8R8A8_UNORM,
+                                            DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE );
+        TRACE( "XAML: resized composition swapchain %p to %ux%u (hr %#lx)\n",
+               impl->swapchain, width, height, hr );
+    }
+    if (!impl->swapchain && is_uwp_xaml_app() && !d3d11_create_failed)
     {
         static const D3D_FEATURE_LEVEL feature_levels[] =
         {
@@ -4832,6 +4873,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                                     feature_levels, ARRAY_SIZE(feature_levels),
                                     D3D11_SDK_VERSION, &impl->d3d11_dev, &feature_level, &impl->d3d11_ctx );
         }
+        if (FAILED(hr) || !impl->d3d11_dev)
+            d3d11_create_failed = TRUE;
         if (SUCCEEDED(hr) && impl->d3d11_dev)
         {
             hr = ID3D11Device_QueryInterface( impl->d3d11_dev, &IID_IDXGIDevice, (void **)&dxgi_dev );

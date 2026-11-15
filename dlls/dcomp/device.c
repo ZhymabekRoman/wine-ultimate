@@ -430,13 +430,24 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
         height = 1;
 
     if (target->composite_swapchain && target->composite_device == device
-            && target->composite_width >= width && target->composite_height >= height)
+            && target->composite_width == width && target->composite_height == height)
         return S_OK;
 
     if (target->composite_rtv)
     {
         ID3D11RenderTargetView_Release(target->composite_rtv);
         target->composite_rtv = NULL;
+    }
+    if (target->composite_swapchain && target->composite_device == device)
+    {
+        hr = IDXGISwapChain1_ResizeBuffers(target->composite_swapchain, 0, width, height,
+                DXGI_FORMAT_B8G8R8A8_UNORM, 0);
+        if (SUCCEEDED(hr))
+        {
+            target->composite_width = width;
+            target->composite_height = height;
+            return S_OK;
+        }
     }
     if (target->composite_swapchain)
     {

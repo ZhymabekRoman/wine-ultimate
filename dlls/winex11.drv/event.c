@@ -1026,6 +1026,12 @@ static BOOL X11DRV_MapNotify( HWND hwnd, XEvent *event )
         data->reparenting = 0;
     }
 
+    if (data->managed && data->wm_state_serial && data->pending_state.wm_state == NormalState &&
+        !data->reparenting && !x11drv_thread_data()->net_supported_count)
+    {
+        window_wm_state_notify( data, event->xany.serial, NormalState, CurrentTime );
+    }
+
     if (!data->managed && !data->embedded && data->desired_state.wm_state != WithdrawnState)
     {
         HWND hwndFocus = get_focus();
