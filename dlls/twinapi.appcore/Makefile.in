@@ -1,7 +1,7 @@
 EXTRADEFS = -D_CONTRACT_GEN
 MODULE    = twinapi.appcore.dll
 UNIXLIB   = twinapi.appcore.so
-IMPORTS   = combase advapi32 user32
+IMPORTS   = combase advapi32 user32 shell32
 UNIX_LIBS   = $(DBUS_LIBS)
 UNIX_CFLAGS = $(DBUS_CFLAGS)
 

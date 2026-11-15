@@ -19,6 +19,7 @@
 
 #include "private.h"
 #include "roapi.h"
+#include "wine/exception.h"
 #define WIDL_using_Windows_UI_Core
 #include "windows.ui.core.h"
 #define WIDL_using_Windows_ApplicationModel_Activation
@@ -63,6 +64,7 @@ struct factory
     ICoreApplication2 ICoreApplication2_iface;
     ICoreApplicationUnhandledError ICoreApplicationUnhandledError_iface;
     IStaticLifetime IStaticLifetime_iface;
+    IWineSessionProperties IWineSessionProperties_iface;
     __FIMap_2_HSTRING_IInspectable *static_map;
     LONG ref;
 };
@@ -118,6 +120,13 @@ static HRESULT WINAPI activation_factory_QueryInterface( IActivationFactory *ifa
     {
         IActivationFactory_AddRef( &impl->IActivationFactory_iface );
         *out = &impl->ICoreApplicationUnhandledError_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWineSessionProperties ))
+    {
+        IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+        *out = &impl->IWineSessionProperties_iface;
         return S_OK;
     }
 
@@ -1432,31 +1441,1075 @@ static HRESULT WINAPI core_application_remove_Resuming( ICoreApplication *iface,
     return core_app_remove_resuming( token );
 }
 
-static HRESULT WINAPI core_application_get_Properties( ICoreApplication *iface, IPropertySet **value )
+/* ---- CoreApplication.Properties session persistence (%LOCALAPPDATA%\<FamilyName>\Session\state.ini) ---- */
+
+static const GUID IID_IReferenceTracker_props = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
+static const GUID IID_IMapView_String_IInspectable_props = {0xe8cc1dcf, 0xaa1b, 0x51e7, {0x90, 0xa7, 0x6b, 0x7d, 0x99, 0xbd, 0x99, 0xa0}};
+static const GUID IID_IMapView_StringObject_IInspectable_props = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
+static const GUID IID_IMap_String_Object_props = {0x8114f3e9, 0xf118, 0x3c7b, {0x91, 0x94, 0x00, 0xa3, 0xa2, 0x4d, 0x96, 0x7d}};
+static const GUID IID_IMapView_String_Object_props = {0x7c054694, 0x4acd, 0x3716, {0xa1, 0x7a, 0xd5, 0x83, 0xc5, 0xb3, 0xde, 0x8b}};
+static const GUID IID_IObservableMap_String_Object_props = {0x65df2bf5, 0xbf39, 0x41b5, {0xae, 0xbc, 0x5a, 0x9d, 0x86, 0x5e, 0x47, 0x2b}};
+static const GUID IID_IMap_Object_Object_props = {0xf5f69427, 0x55ed, 0x5512, {0x84, 0x29, 0xd4, 0xf6, 0x62, 0x6d, 0xfc, 0xdd}};
+static const GUID IID_IMapView_Object_Object_props = {0x59e7ae0c, 0xc29d, 0x5ad6, {0xbe, 0xf5, 0xde, 0xdb, 0x52, 0xa1, 0x98, 0xe1}};
+static const GUID IID_IIterable_KeyValuePair_Object_Object_props = {0x33ac68f0, 0x1084, 0x529a, {0x8a, 0x17, 0x4e, 0x7c, 0x8a, 0xdb, 0x7a, 0x0c}};
+static const GUID IID_IResourceDictionary_props = {0xc1ea4f24, 0xd6de, 0x4191, {0x8e, 0x3a, 0xf4, 0x86, 0x01, 0xf7, 0x48, 0x9c}};
+static const GUID IID_INotifyCollectionChanged_props = {0x350ffb1a, 0xdf08, 0x56fd, {0x98, 0xd1, 0x37, 0x4d, 0x77, 0x72, 0x34, 0x9f}};
+static const GUID IID_INotifyPropertyChanged_props = {0xe8a31095, 0x6789, 0x587b, {0xb8, 0xe5, 0xcc, 0x7a, 0x1b, 0xdd, 0x8e, 0x37}};
+static const GUID IID_IStringable_props = {0x96369f54, 0x8eb6, 0x48f0, {0xab, 0xce, 0xc1, 0xb2, 0x11, 0xe6, 0x27, 0xc3}};
+
+struct core_com_interface_entry
 {
-    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
-    static IPropertySet *properties;
+    void **vtable;
+    IID *iid;
+};
+
+struct core_properties_inner_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IPropertySet *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IPropertySet *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IPropertySet *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IPropertySet *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IPropertySet *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IPropertySet *iface, TrustLevel *level );
+    HRESULT (STDMETHODCALLTYPE *Lookup)( IPropertySet *iface, HSTRING key, IInspectable **value );
+    HRESULT (STDMETHODCALLTYPE *get_Size)( IPropertySet *iface, UINT32 *size );
+    HRESULT (STDMETHODCALLTYPE *HasKey)( IPropertySet *iface, HSTRING key, boolean *found );
+    HRESULT (STDMETHODCALLTYPE *GetView)( IPropertySet *iface, IMapView_HSTRING_IInspectable **first, IMapView_HSTRING_IInspectable **second );
+    HRESULT (STDMETHODCALLTYPE *Insert)( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced );
+    HRESULT (STDMETHODCALLTYPE *Remove)( IPropertySet *iface, HSTRING key );
+    HRESULT (STDMETHODCALLTYPE *Clear)( IPropertySet *iface );
+    HRESULT (STDMETHODCALLTYPE *First)( IPropertySet *iface, IIterator_IKeyValuePair_HSTRING_IInspectable **iter );
+    HRESULT (STDMETHODCALLTYPE *add_MapChanged)( IPropertySet *iface, IMapChangedEventHandler_HSTRING_IInspectable *handler, EventRegistrationToken *token );
+    HRESULT (STDMETHODCALLTYPE *remove_MapChanged)( IPropertySet *iface, EventRegistrationToken token );
+    HRESULT (STDMETHODCALLTYPE *get_MapChanged)( IPropertySet *iface, IMapChangedEventHandler_HSTRING_IInspectable **handler );
+    HRESULT (STDMETHODCALLTYPE *add_CollectionChanged)( IPropertySet *iface, void *handler, EventRegistrationToken *token );
+    HRESULT (STDMETHODCALLTYPE *remove_CollectionChanged)( IPropertySet *iface, EventRegistrationToken token );
+    HRESULT (STDMETHODCALLTYPE *get_CollectionChanged)( IPropertySet *iface, void **handler );
+    HRESULT (STDMETHODCALLTYPE *add_PropertyChanged)( IPropertySet *iface, void *handler, EventRegistrationToken *token );
+    HRESULT (STDMETHODCALLTYPE *remove_PropertyChanged)( IPropertySet *iface, EventRegistrationToken token );
+    HRESULT (STDMETHODCALLTYPE *get_PropertyChanged)( IPropertySet *iface, void **handler );
+};
+
+struct core_properties
+{
+    IPropertySet IPropertySet_iface;
+    IMapView_HSTRING_IInspectable IMapView_iface;
+    IIterable_IKeyValuePair_HSTRING_IInspectable IIterable_iface;
+    IWineSessionProperties IWineSessionProperties_iface;
+    LONG ref;
+    IPropertySet *inner;
+    CRITICAL_SECTION cs;
+    HSTRING *keys;
+    SIZE_T key_count, key_cap;
+    struct core_com_interface_entry *iids_cache;
+    ULONG iids_count;
+};
+
+static CRITICAL_SECTION core_properties_singleton_cs;
+static CRITICAL_SECTION_DEBUG core_properties_singleton_cs_debug =
+{
+    0, 0, &core_properties_singleton_cs,
+    { &core_properties_singleton_cs_debug.ProcessLocksList, &core_properties_singleton_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": core_properties_singleton_cs") }
+};
+static CRITICAL_SECTION core_properties_singleton_cs = { &core_properties_singleton_cs_debug, -1, 0, 0, 0, 0 };
+
+static struct core_properties *the_core_properties;
+
+static inline struct core_properties *impl_from_core_properties_IPropertySet( IPropertySet *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_properties, IPropertySet_iface );
+}
+
+static inline struct core_properties *impl_from_core_properties_IMapView( IMapView_HSTRING_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_properties, IMapView_iface );
+}
+
+static inline struct core_properties *impl_from_core_properties_IIterable( IIterable_IKeyValuePair_HSTRING_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_properties, IIterable_iface );
+}
+
+static inline struct core_properties *impl_from_core_properties_IWineSessionProperties( IWineSessionProperties *iface )
+{
+    return CONTAINING_RECORD( iface, struct core_properties, IWineSessionProperties_iface );
+}
+
+static inline const struct core_properties_inner_vtbl *core_properties_inner_vt( struct core_properties *impl )
+{
+    return (const struct core_properties_inner_vtbl *)impl->inner->lpVtbl;
+}
+
+static void core_app_get_family_name( WCHAR *buf, DWORD cch )
+{
+    WCHAR exe[MAX_PATH], *p;
+    DWORD len;
+
+    len = GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", buf, cch );
+    if (len && len < cch) return;
+
+    len = GetModuleFileNameW( NULL, exe, ARRAY_SIZE(exe) );
+    if (!len || len >= ARRAY_SIZE(exe))
+    {
+        lstrcpynW( buf, L"Windows", cch );
+        return;
+    }
+    if ((p = wcsrchr( exe, L'\\' ))) p++;
+    else if ((p = wcsrchr( exe, L'/' ))) p++;
+    else p = exe;
+    lstrcpynW( buf, p, cch );
+    if ((p = wcsrchr( buf, L'.' )) && p > buf) *p = 0;
+}
+
+static BOOL core_app_get_session_ini_path( WCHAR *path, DWORD cch )
+{
+    WCHAR base[MAX_PATH], family[MAX_PATH], dir[MAX_PATH * 2];
+
+    if (FAILED(SHGetFolderPathW( NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, base )) || !base[0])
+    {
+        if (!GetEnvironmentVariableW( L"LOCALAPPDATA", base, ARRAY_SIZE(base) ) || !base[0])
+        {
+            if (!GetEnvironmentVariableW( L"USERPROFILE", base, ARRAY_SIZE(base) ) || !base[0])
+                return FALSE;
+            lstrcatW( base, L"\\AppData\\Local" );
+        }
+    }
+
+    core_app_get_family_name( family, ARRAY_SIZE(family) );
+
+    if (swprintf( dir, ARRAY_SIZE(dir), L"%ls\\%ls", base, family ) < 0) return FALSE;
+    CreateDirectoryW( dir, NULL );
+    if (swprintf( dir, ARRAY_SIZE(dir), L"%ls\\%ls\\Session", base, family ) < 0) return FALSE;
+    CreateDirectoryW( dir, NULL );
+
+    return swprintf( path, cch, L"%ls\\state.ini", dir ) > 0;
+}
+
+static HRESULT core_app_pv_statics( IPropertyValueStatics **out )
+{
+    static const WCHAR *cls = RuntimeClass_Windows_Foundation_PropertyValue;
+    static IPropertyValueStatics *cache;
     HSTRING class_id;
     HRESULT hr;
 
-    TRACE( "iface %p, value %p\n", iface, value );
-    if (!value) return E_POINTER;
-    if (properties)
+    if (cache)
     {
-        *value = properties;
-        IPropertySet_AddRef( properties );
+        IPropertyValueStatics_AddRef( cache );
+        *out = cache;
+        return S_OK;
+    }
+    if (FAILED(hr = WindowsCreateString( cls, wcslen( cls ), &class_id ))) return hr;
+    hr = RoGetActivationFactory( class_id, &IID_IPropertyValueStatics, (void **)&cache );
+    WindowsDeleteString( class_id );
+    if (FAILED(hr)) return hr;
+    IPropertyValueStatics_AddRef( cache );
+    *out = cache;
+    return S_OK;
+}
+
+static HSTRING core_properties_resolve_key( void *key, BOOL *allocated )
+{
+    UINT32 len = 0;
+    const WCHAR *raw;
+    HSTRING str = NULL;
+
+    *allocated = FALSE;
+    if (!key) return NULL;
+
+    raw = WindowsGetStringRawBuffer( (HSTRING)key, &len );
+    if (raw && len < 0x1000) return (HSTRING)key;
+
+    __TRY
+    {
+        IUnknown *unk = (IUnknown *)key;
+        void *stringable = NULL;
+        if (SUCCEEDED(IUnknown_QueryInterface( unk, &IID_IStringable_props, &stringable )) && stringable)
+        {
+            void **v = *(void ***)stringable;
+            HRESULT (STDMETHODCALLTYPE *to_string)( void *, HSTRING * ) = (void *)v[6];
+            if (SUCCEEDED(to_string( stringable, &str )) && str)
+                *allocated = TRUE;
+            IUnknown_Release( (IUnknown *)stringable );
+        }
+    }
+    __EXCEPT_ALL
+    {
+    }
+    __ENDTRY
+
+    return str;
+}
+
+static void core_properties_track_key( struct core_properties *impl, HSTRING key )
+{
+    SIZE_T i;
+    HSTRING dup = NULL;
+
+    EnterCriticalSection( &impl->cs );
+    for (i = 0; i < impl->key_count; i++)
+    {
+        INT32 cmp = 1;
+        WindowsCompareStringOrdinal( impl->keys[i], key, &cmp );
+        if (cmp == 0)
+        {
+            LeaveCriticalSection( &impl->cs );
+            return;
+        }
+    }
+
+    if (impl->key_count >= impl->key_cap)
+    {
+        SIZE_T cap = impl->key_cap ? impl->key_cap * 2 : 8;
+        HSTRING *tmp = realloc( impl->keys, cap * sizeof(*tmp) );
+        if (!tmp)
+        {
+            LeaveCriticalSection( &impl->cs );
+            return;
+        }
+        impl->keys = tmp;
+        impl->key_cap = cap;
+    }
+
+    if (SUCCEEDED(WindowsDuplicateString( key, &dup )))
+        impl->keys[impl->key_count++] = dup;
+    LeaveCriticalSection( &impl->cs );
+}
+
+static void core_properties_untrack_key( struct core_properties *impl, HSTRING key )
+{
+    SIZE_T i;
+
+    EnterCriticalSection( &impl->cs );
+    for (i = 0; i < impl->key_count; i++)
+    {
+        INT32 cmp = 1;
+        WindowsCompareStringOrdinal( impl->keys[i], key, &cmp );
+        if (cmp == 0)
+        {
+            WindowsDeleteString( impl->keys[i] );
+            memmove( &impl->keys[i], &impl->keys[i + 1], (impl->key_count - i - 1) * sizeof(*impl->keys) );
+            impl->key_count--;
+            break;
+        }
+    }
+    LeaveCriticalSection( &impl->cs );
+}
+
+static void core_properties_clear_keys( struct core_properties *impl )
+{
+    SIZE_T i;
+
+    EnterCriticalSection( &impl->cs );
+    for (i = 0; i < impl->key_count; i++)
+        WindowsDeleteString( impl->keys[i] );
+    impl->key_count = 0;
+    LeaveCriticalSection( &impl->cs );
+}
+
+static void core_properties_ensure_empty_ini( const WCHAR *ini_path )
+{
+    static const char header[] = "[Session]\r\n";
+    HANDLE h = CreateFileW( ini_path, GENERIC_WRITE, 0, NULL, CREATE_NEW, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (h != INVALID_HANDLE_VALUE)
+    {
+        DWORD written;
+        WriteFile( h, header, sizeof(header) - 1, &written, NULL );
+        CloseHandle( h );
+    }
+}
+
+static HRESULT core_properties_flush_impl( struct core_properties *impl )
+{
+    WCHAR ini_path[MAX_PATH * 2];
+    HSTRING *keys = NULL;
+    SIZE_T count = 0, i;
+    BOOL wrote_any = FALSE;
+
+    if (!impl) return S_OK;
+    if (!core_app_get_session_ini_path( ini_path, ARRAY_SIZE(ini_path) )) return E_FAIL;
+
+    EnterCriticalSection( &impl->cs );
+    if (impl->key_count)
+    {
+        keys = calloc( impl->key_count, sizeof(*keys) );
+        if (keys)
+        {
+            for (i = 0; i < impl->key_count; i++)
+            {
+                if (SUCCEEDED(WindowsDuplicateString( impl->keys[i], &keys[count] )))
+                    count++;
+            }
+        }
+    }
+    LeaveCriticalSection( &impl->cs );
+
+    WritePrivateProfileStringW( L"Session", NULL, NULL, ini_path );
+    WritePrivateProfileStringW( L"Types", NULL, NULL, ini_path );
+
+    for (i = 0; i < count; i++)
+    {
+        const WCHAR *key_w = WindowsGetStringRawBuffer( keys[i], NULL );
+        IInspectable *val = NULL;
+        IPropertyValue *pv = NULL;
+        PropertyType ptype;
+
+        if (!key_w || !key_w[0])
+        {
+            WindowsDeleteString( keys[i] );
+            continue;
+        }
+        if (SUCCEEDED(core_properties_inner_vt( impl )->Lookup( impl->inner, keys[i], &val )) && val)
+        {
+            if (SUCCEEDED(IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&pv )) && pv)
+            {
+                if (SUCCEEDED(IPropertyValue_get_Type( pv, &ptype )))
+                {
+                    WCHAR num_buf[64];
+                    switch (ptype)
+                    {
+                    case PropertyType_String:
+                    {
+                        HSTRING sval = NULL;
+                        if (SUCCEEDED(IPropertyValue_GetString( pv, &sval )))
+                        {
+                            const WCHAR *w = WindowsGetStringRawBuffer( sval, NULL );
+                            WritePrivateProfileStringW( L"Session", key_w, w ? w : L"", ini_path );
+                            WritePrivateProfileStringW( L"Types", key_w, L"string", ini_path );
+                            wrote_any = TRUE;
+                            WindowsDeleteString( sval );
+                        }
+                        break;
+                    }
+                    case PropertyType_UInt64:
+                    {
+                        UINT64 u = 0;
+                        if (SUCCEEDED(IPropertyValue_GetUInt64( pv, &u )))
+                        {
+                            swprintf( num_buf, ARRAY_SIZE(num_buf), L"%I64u", u );
+                            WritePrivateProfileStringW( L"Session", key_w, num_buf, ini_path );
+                            WritePrivateProfileStringW( L"Types", key_w, L"uint64", ini_path );
+                            wrote_any = TRUE;
+                        }
+                        break;
+                    }
+                    case PropertyType_Int64:
+                    {
+                        INT64 v = 0;
+                        if (SUCCEEDED(IPropertyValue_GetInt64( pv, &v )))
+                        {
+                            swprintf( num_buf, ARRAY_SIZE(num_buf), L"%I64d", v );
+                            WritePrivateProfileStringW( L"Session", key_w, num_buf, ini_path );
+                            WritePrivateProfileStringW( L"Types", key_w, L"int64", ini_path );
+                            wrote_any = TRUE;
+                        }
+                        break;
+                    }
+                    case PropertyType_UInt32:
+                    {
+                        UINT32 u = 0;
+                        if (SUCCEEDED(IPropertyValue_GetUInt32( pv, &u )))
+                        {
+                            swprintf( num_buf, ARRAY_SIZE(num_buf), L"%u", u );
+                            WritePrivateProfileStringW( L"Session", key_w, num_buf, ini_path );
+                            WritePrivateProfileStringW( L"Types", key_w, L"uint32", ini_path );
+                            wrote_any = TRUE;
+                        }
+                        break;
+                    }
+                    case PropertyType_Int32:
+                    {
+                        INT32 v = 0;
+                        if (SUCCEEDED(IPropertyValue_GetInt32( pv, &v )))
+                        {
+                            swprintf( num_buf, ARRAY_SIZE(num_buf), L"%d", v );
+                            WritePrivateProfileStringW( L"Session", key_w, num_buf, ini_path );
+                            WritePrivateProfileStringW( L"Types", key_w, L"int32", ini_path );
+                            wrote_any = TRUE;
+                        }
+                        break;
+                    }
+                    case PropertyType_Boolean:
+                    {
+                        boolean b = FALSE;
+                        if (SUCCEEDED(IPropertyValue_GetBoolean( pv, &b )))
+                        {
+                            WritePrivateProfileStringW( L"Session", key_w, b ? L"1" : L"0", ini_path );
+                            WritePrivateProfileStringW( L"Types", key_w, L"boolean", ini_path );
+                            wrote_any = TRUE;
+                        }
+                        break;
+                    }
+                    case PropertyType_Double:
+                    {
+                        DOUBLE d = 0.0;
+                        if (SUCCEEDED(IPropertyValue_GetDouble( pv, &d )))
+                        {
+                            swprintf( num_buf, ARRAY_SIZE(num_buf), L"%.17g", d );
+                            WritePrivateProfileStringW( L"Session", key_w, num_buf, ini_path );
+                            WritePrivateProfileStringW( L"Types", key_w, L"double", ini_path );
+                            wrote_any = TRUE;
+                        }
+                        break;
+                    }
+                    default:
+                        break;
+                    }
+                }
+                IPropertyValue_Release( pv );
+            }
+            IInspectable_Release( val );
+        }
+        WindowsDeleteString( keys[i] );
+    }
+    free( keys );
+
+    WritePrivateProfileStringW( NULL, NULL, NULL, ini_path );
+    if (!wrote_any)
+    {
+        HANDLE h = CreateFileW( ini_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+        if (h != INVALID_HANDLE_VALUE)
+        {
+            static const char header[] = "[Session]\r\n";
+            DWORD written;
+            WriteFile( h, header, sizeof(header) - 1, &written, NULL );
+            CloseHandle( h );
+        }
+    }
+    TRACE( "flushed %Iu keys to %s\n", count, debugstr_w( ini_path ) );
+    return S_OK;
+}
+
+static void core_properties_load_impl( struct core_properties *impl )
+{
+    WCHAR ini_path[MAX_PATH * 2];
+    IPropertyValueStatics *statics = NULL;
+    DWORD cap = 4096, len;
+    WCHAR *sec_buf = NULL, *p;
+
+    if (!core_app_get_session_ini_path( ini_path, ARRAY_SIZE(ini_path) )) return;
+
+    if (GetFileAttributesW( ini_path ) == INVALID_FILE_ATTRIBUTES)
+    {
+        core_properties_ensure_empty_ini( ini_path );
+        return;
+    }
+
+    for (;;)
+    {
+        WCHAR *tmp = realloc( sec_buf, cap * sizeof(WCHAR) );
+        if (!tmp) { free( sec_buf ); return; }
+        sec_buf = tmp;
+        len = GetPrivateProfileSectionW( L"Session", sec_buf, cap, ini_path );
+        if (len < cap - 2 || cap >= 65536) break;
+        cap *= 2;
+    }
+
+    if (!len)
+    {
+        WritePrivateProfileStringW( NULL, NULL, NULL, ini_path );
+        free( sec_buf );
+        return;
+    }
+
+    if (FAILED(core_app_pv_statics( &statics )))
+    {
+        WritePrivateProfileStringW( NULL, NULL, NULL, ini_path );
+        free( sec_buf );
+        return;
+    }
+
+    for (p = sec_buf; *p; p += wcslen( p ) + 1)
+    {
+        WCHAR *eq = wcschr( p, L'=' );
+        WCHAR type_buf[32];
+        IInspectable *boxed = NULL;
+        HSTRING hkey = NULL;
+        const WCHAR *val;
+        HRESULT hr = E_FAIL;
+
+        if (!eq) continue;
+        *eq = 0;
+        val = eq + 1;
+        if (!p[0]) continue;
+
+        GetPrivateProfileStringW( L"Types", p, L"string", type_buf, ARRAY_SIZE(type_buf), ini_path );
+        if (!wcscmp( type_buf, L"uint64" ))
+            hr = IPropertyValueStatics_CreateUInt64( statics, wcstoull( val, NULL, 10 ), &boxed );
+        else if (!wcscmp( type_buf, L"int64" ))
+            hr = IPropertyValueStatics_CreateInt64( statics, wcstoll( val, NULL, 10 ), &boxed );
+        else if (!wcscmp( type_buf, L"uint32" ))
+            hr = IPropertyValueStatics_CreateUInt32( statics, (UINT32)wcstoul( val, NULL, 10 ), &boxed );
+        else if (!wcscmp( type_buf, L"int32" ))
+            hr = IPropertyValueStatics_CreateInt32( statics, (INT32)wcstol( val, NULL, 10 ), &boxed );
+        else if (!wcscmp( type_buf, L"boolean" ))
+            hr = IPropertyValueStatics_CreateBoolean( statics, (!wcscmp( val, L"1" ) || !_wcsicmp( val, L"true" )), &boxed );
+        else if (!wcscmp( type_buf, L"double" ))
+            hr = IPropertyValueStatics_CreateDouble( statics, wcstod( val, NULL ), &boxed );
+        else
+        {
+            HSTRING hval = NULL;
+            if (SUCCEEDED(WindowsCreateString( val, wcslen( val ), &hval )))
+            {
+                hr = IPropertyValueStatics_CreateString( statics, hval, &boxed );
+                WindowsDeleteString( hval );
+            }
+        }
+
+        if (SUCCEEDED(hr) && boxed)
+        {
+            if (SUCCEEDED(WindowsCreateString( p, wcslen( p ), &hkey )))
+            {
+                boolean replaced = FALSE;
+                if (SUCCEEDED(core_properties_inner_vt( impl )->Insert( impl->inner, hkey, boxed, &replaced )))
+                    core_properties_track_key( impl, hkey );
+                WindowsDeleteString( hkey );
+            }
+            IInspectable_Release( boxed );
+        }
+    }
+
+    WritePrivateProfileStringW( NULL, NULL, NULL, ini_path );
+    IPropertyValueStatics_Release( statics );
+    free( sec_buf );
+    TRACE( "loaded session properties from %s\n", debugstr_w( ini_path ) );
+}
+
+static const struct core_properties_inner_vtbl core_properties_vtbl;
+static const struct IMapView_HSTRING_IInspectableVtbl core_properties_map_view_vtbl;
+static const struct IIterable_IKeyValuePair_HSTRING_IInspectableVtbl core_properties_iterable_vtbl;
+static const struct IWineSessionPropertiesVtbl core_properties_wine_session_vtbl;
+
+static HRESULT core_properties_first_impl( struct core_properties *impl,
+                                           IIterator_IKeyValuePair_HSTRING_IInspectable **iter )
+{
+    IMapView_HSTRING_IInspectable *view = NULL;
+    IIterable_IKeyValuePair_HSTRING_IInspectable *iterable = NULL;
+    HRESULT hr;
+
+    if (!iter) return E_POINTER;
+    *iter = NULL;
+    if (FAILED(hr = core_properties_inner_vt( impl )->GetView( impl->inner, &view, NULL )) || !view)
+        return FAILED(hr) ? hr : E_FAIL;
+    hr = IMapView_HSTRING_IInspectable_QueryInterface( view, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable,
+                                                       (void **)&iterable );
+    IMapView_HSTRING_IInspectable_Release( view );
+    if (FAILED(hr) || !iterable) return hr;
+    hr = IIterable_IKeyValuePair_HSTRING_IInspectable_First( iterable, iter );
+    IIterable_IKeyValuePair_HSTRING_IInspectable_Release( iterable );
+    return hr;
+}
+
+static HRESULT WINAPI core_properties_QueryInterface( IPropertySet *iface, REFIID iid, void **out )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    if (IsEqualGUID( iid, &IID_IReferenceTracker_props ))
+        return E_NOINTERFACE;
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPropertySet ) ||
+        IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMap_String_Object_props ) ||
+        IsEqualGUID( iid, &IID_IObservableMap_String_Object_props ) ||
+        IsEqualGUID( iid, &IID_IMap_Object_Object_props ) ||
+        IsEqualGUID( iid, &IID_IResourceDictionary_props ) ||
+        IsEqualGUID( iid, &IID_INotifyCollectionChanged_props ) ||
+        IsEqualGUID( iid, &IID_INotifyPropertyChanged_props ))
+    {
+        *out = &impl->IPropertySet_iface;
+        InterlockedIncrement( &impl->ref );
         return S_OK;
     }
 
-    WindowsCreateString( name, wcslen(name), &class_id );
-    hr = RoActivateInstance( class_id, (IInspectable **)&properties );
-    WindowsDeleteString( class_id );
-    if (SUCCEEDED(hr))
+    if (IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_IInspectable_props ) ||
+        IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable_props ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_Object_props ) ||
+        IsEqualGUID( iid, &IID_IMapView_Object_Object_props ))
     {
-        *value = properties;
-        IPropertySet_AddRef( properties );
+        *out = &impl->IMapView_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
     }
+
+    if (IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IIterable_KeyValuePair_Object_Object_props ))
+    {
+        *out = &impl->IIterable_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IWineSessionProperties ))
+    {
+        *out = &impl->IWineSessionProperties_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI core_properties_AddRef( IPropertySet *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI core_properties_Release( IPropertySet *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        SIZE_T i;
+        for (i = 0; i < impl->key_count; i++)
+            WindowsDeleteString( impl->keys[i] );
+        free( impl->keys );
+        impl->cs.DebugInfo->Spare[0] = 0;
+        DeleteCriticalSection( &impl->cs );
+        IPropertySet_Release( impl->inner );
+        CoTaskMemFree( impl->iids_cache );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI core_properties_GetIids( IPropertySet *iface, ULONG *count, IID **iids )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+
+    if (!impl->iids_cache)
+    {
+        const struct core_com_interface_entry entries[] =
+        {
+            { (void **)&core_properties_vtbl, (IID *)&IID_IPropertySet },
+            { (void **)&core_properties_map_view_vtbl, (IID *)&IID_IMapView_HSTRING_IInspectable },
+            { (void **)&core_properties_iterable_vtbl, (IID *)&IID_IIterable_IKeyValuePair_HSTRING_IInspectable },
+        };
+        struct core_com_interface_entry *array = CoTaskMemAlloc( sizeof(entries) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof(entries) );
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE(entries);
+    }
+    if (count) *count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_properties_GetRuntimeClassName( IPropertySet *iface, HSTRING *name )
+{
+    static const WCHAR cls[] = L"Windows.Foundation.Collections.PropertySet";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( cls, ARRAY_SIZE(cls) - 1, name );
+}
+
+static HRESULT WINAPI core_properties_GetTrustLevel( IPropertySet *iface, TrustLevel *level )
+{
+    if (level) *level = FullTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_properties_Lookup( IPropertySet *iface, HSTRING key, IInspectable **value )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->Lookup( impl->inner, key, value );
+}
+
+static HRESULT WINAPI core_properties_get_Size( IPropertySet *iface, UINT32 *size )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->get_Size( impl->inner, size );
+}
+
+static HRESULT WINAPI core_properties_HasKey( IPropertySet *iface, HSTRING key, boolean *found )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->HasKey( impl->inner, key, found );
+}
+
+static HRESULT WINAPI core_properties_GetView( IPropertySet *iface, IMapView_HSTRING_IInspectable **view )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->GetView( impl->inner, view, NULL );
+}
+
+static HRESULT WINAPI core_properties_Insert( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    boolean local_replaced = FALSE;
+    BOOL allocated = FALSE;
+    HSTRING hkey;
+    HRESULT hr;
+
+    hkey = core_properties_resolve_key( key, &allocated );
+    hr = core_properties_inner_vt( impl )->Insert( impl->inner, hkey, value, replaced ? replaced : &local_replaced );
+    if (SUCCEEDED(hr) && hkey)
+        core_properties_track_key( impl, hkey );
+    if (allocated) WindowsDeleteString( hkey );
     return hr;
+}
+
+static HRESULT WINAPI core_properties_Remove( IPropertySet *iface, HSTRING key )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    BOOL allocated = FALSE;
+    HSTRING hkey;
+    HRESULT hr;
+
+    hkey = core_properties_resolve_key( key, &allocated );
+    hr = core_properties_inner_vt( impl )->Remove( impl->inner, hkey );
+    if (SUCCEEDED(hr) && hkey)
+        core_properties_untrack_key( impl, hkey );
+    if (allocated) WindowsDeleteString( hkey );
+    return hr;
+}
+
+static HRESULT WINAPI core_properties_Clear( IPropertySet *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    HRESULT hr = core_properties_inner_vt( impl )->Clear( impl->inner );
+    if (SUCCEEDED(hr)) core_properties_clear_keys( impl );
+    return hr;
+}
+
+static HRESULT WINAPI core_properties_First( IPropertySet *iface, IIterator_IKeyValuePair_HSTRING_IInspectable **iter )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_first_impl( impl, iter );
+}
+
+static HRESULT WINAPI core_properties_add_MapChanged( IPropertySet *iface,
+        IMapChangedEventHandler_HSTRING_IInspectable *handler, EventRegistrationToken *token )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->add_MapChanged( impl->inner, handler, token );
+}
+
+static HRESULT WINAPI core_properties_remove_MapChanged( IPropertySet *iface, EventRegistrationToken token )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->remove_MapChanged( impl->inner, token );
+}
+
+static HRESULT WINAPI core_properties_get_MapChanged( IPropertySet *iface,
+        IMapChangedEventHandler_HSTRING_IInspectable **handler )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->get_MapChanged( impl->inner, handler );
+}
+
+static HRESULT WINAPI core_properties_add_CollectionChanged( IPropertySet *iface, void *handler, EventRegistrationToken *token )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->add_CollectionChanged( impl->inner, handler, token );
+}
+
+static HRESULT WINAPI core_properties_remove_CollectionChanged( IPropertySet *iface, EventRegistrationToken token )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->remove_CollectionChanged( impl->inner, token );
+}
+
+static HRESULT WINAPI core_properties_get_CollectionChanged( IPropertySet *iface, void **handler )
+{
+    struct core_properties *impl = impl_from_core_properties_IPropertySet( iface );
+    return core_properties_inner_vt( impl )->get_CollectionChanged( impl->inner, handler );
+}
+
+static const struct core_properties_inner_vtbl core_properties_vtbl =
+{
+    core_properties_QueryInterface,
+    core_properties_AddRef,
+    core_properties_Release,
+    core_properties_GetIids,
+    core_properties_GetRuntimeClassName,
+    core_properties_GetTrustLevel,
+    core_properties_Lookup,
+    core_properties_get_Size,
+    core_properties_HasKey,
+    (void *)core_properties_GetView,
+    core_properties_Insert,
+    core_properties_Remove,
+    core_properties_Clear,
+    core_properties_First,
+    core_properties_add_MapChanged,
+    core_properties_remove_MapChanged,
+    core_properties_get_MapChanged,
+    core_properties_add_CollectionChanged,
+    core_properties_remove_CollectionChanged,
+    core_properties_get_CollectionChanged,
+    core_properties_add_CollectionChanged,
+    core_properties_remove_CollectionChanged,
+    core_properties_get_CollectionChanged,
+};
+
+static HRESULT WINAPI core_properties_mv_QueryInterface( IMapView_HSTRING_IInspectable *iface, REFIID iid, void **out )
+{
+    struct core_properties *impl = impl_from_core_properties_IMapView( iface );
+    return core_properties_QueryInterface( &impl->IPropertySet_iface, iid, out );
+}
+
+static ULONG WINAPI core_properties_mv_AddRef( IMapView_HSTRING_IInspectable *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IMapView( iface );
+    return core_properties_AddRef( &impl->IPropertySet_iface );
+}
+
+static ULONG WINAPI core_properties_mv_Release( IMapView_HSTRING_IInspectable *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IMapView( iface );
+    return core_properties_Release( &impl->IPropertySet_iface );
+}
+
+static HRESULT WINAPI core_properties_mv_GetIids( IMapView_HSTRING_IInspectable *iface, ULONG *count, IID **iids )
+{
+    struct core_properties *impl = impl_from_core_properties_IMapView( iface );
+    return core_properties_GetIids( &impl->IPropertySet_iface, count, iids );
+}
+
+static HRESULT WINAPI core_properties_mv_GetRuntimeClassName( IMapView_HSTRING_IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IMapView`2", 40, name );
+}
+
+static HRESULT WINAPI core_properties_mv_GetTrustLevel( IMapView_HSTRING_IInspectable *iface, TrustLevel *level )
+{
+    if (level) *level = FullTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_properties_mv_Lookup( IMapView_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
+{
+    struct core_properties *impl = impl_from_core_properties_IMapView( iface );
+    return core_properties_inner_vt( impl )->Lookup( impl->inner, key, value );
+}
+
+static HRESULT WINAPI core_properties_mv_get_Size( IMapView_HSTRING_IInspectable *iface, UINT32 *size )
+{
+    struct core_properties *impl = impl_from_core_properties_IMapView( iface );
+    return core_properties_inner_vt( impl )->get_Size( impl->inner, size );
+}
+
+static HRESULT WINAPI core_properties_mv_HasKey( IMapView_HSTRING_IInspectable *iface, HSTRING key, boolean *found )
+{
+    struct core_properties *impl = impl_from_core_properties_IMapView( iface );
+    return core_properties_inner_vt( impl )->HasKey( impl->inner, key, found );
+}
+
+static HRESULT WINAPI core_properties_mv_Split( IMapView_HSTRING_IInspectable *iface,
+        IMapView_HSTRING_IInspectable **first, IMapView_HSTRING_IInspectable **second )
+{
+    struct core_properties *impl = impl_from_core_properties_IMapView( iface );
+    IMapView_HSTRING_IInspectable *view = NULL;
+    HRESULT hr;
+
+    if (FAILED(hr = core_properties_inner_vt( impl )->GetView( impl->inner, &view, NULL )) || !view)
+        return FAILED(hr) ? hr : E_FAIL;
+    hr = IMapView_HSTRING_IInspectable_Split( view, first, second );
+    IMapView_HSTRING_IInspectable_Release( view );
+    return hr;
+}
+
+static const struct IMapView_HSTRING_IInspectableVtbl core_properties_map_view_vtbl =
+{
+    core_properties_mv_QueryInterface,
+    core_properties_mv_AddRef,
+    core_properties_mv_Release,
+    core_properties_mv_GetIids,
+    core_properties_mv_GetRuntimeClassName,
+    core_properties_mv_GetTrustLevel,
+    core_properties_mv_Lookup,
+    core_properties_mv_get_Size,
+    core_properties_mv_HasKey,
+    core_properties_mv_Split,
+};
+
+static HRESULT WINAPI core_properties_ii_QueryInterface( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, REFIID iid, void **out )
+{
+    struct core_properties *impl = impl_from_core_properties_IIterable( iface );
+    return core_properties_QueryInterface( &impl->IPropertySet_iface, iid, out );
+}
+
+static ULONG WINAPI core_properties_ii_AddRef( IIterable_IKeyValuePair_HSTRING_IInspectable *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IIterable( iface );
+    return core_properties_AddRef( &impl->IPropertySet_iface );
+}
+
+static ULONG WINAPI core_properties_ii_Release( IIterable_IKeyValuePair_HSTRING_IInspectable *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IIterable( iface );
+    return core_properties_Release( &impl->IPropertySet_iface );
+}
+
+static HRESULT WINAPI core_properties_ii_GetIids( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, ULONG *count, IID **iids )
+{
+    struct core_properties *impl = impl_from_core_properties_IIterable( iface );
+    return core_properties_GetIids( &impl->IPropertySet_iface, count, iids );
+}
+
+static HRESULT WINAPI core_properties_ii_GetRuntimeClassName( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.IIterable`1", 42, name );
+}
+
+static HRESULT WINAPI core_properties_ii_GetTrustLevel( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, TrustLevel *level )
+{
+    if (level) *level = FullTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI core_properties_ii_First( IIterable_IKeyValuePair_HSTRING_IInspectable *iface,
+        IIterator_IKeyValuePair_HSTRING_IInspectable **iter )
+{
+    struct core_properties *impl = impl_from_core_properties_IIterable( iface );
+    return core_properties_first_impl( impl, iter );
+}
+
+static const struct IIterable_IKeyValuePair_HSTRING_IInspectableVtbl core_properties_iterable_vtbl =
+{
+    core_properties_ii_QueryInterface,
+    core_properties_ii_AddRef,
+    core_properties_ii_Release,
+    core_properties_ii_GetIids,
+    core_properties_ii_GetRuntimeClassName,
+    core_properties_ii_GetTrustLevel,
+    core_properties_ii_First,
+};
+
+static HRESULT WINAPI core_properties_wine_QueryInterface( IWineSessionProperties *iface, REFIID iid, void **out )
+{
+    struct core_properties *impl = impl_from_core_properties_IWineSessionProperties( iface );
+    return core_properties_QueryInterface( &impl->IPropertySet_iface, iid, out );
+}
+
+static ULONG WINAPI core_properties_wine_AddRef( IWineSessionProperties *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IWineSessionProperties( iface );
+    return core_properties_AddRef( &impl->IPropertySet_iface );
+}
+
+static ULONG WINAPI core_properties_wine_Release( IWineSessionProperties *iface )
+{
+    struct core_properties *impl = impl_from_core_properties_IWineSessionProperties( iface );
+    return core_properties_Release( &impl->IPropertySet_iface );
+}
+
+static HRESULT WINAPI core_properties_wine_Flush( IWineSessionProperties *iface )
+{
+    core_app_flush_properties();
+    return S_OK;
+}
+
+static HRESULT WINAPI core_properties_wine_Reload( IWineSessionProperties *iface )
+{
+    struct core_properties *old = NULL;
+
+    EnterCriticalSection( &core_properties_singleton_cs );
+    old = the_core_properties;
+    the_core_properties = NULL;
+    LeaveCriticalSection( &core_properties_singleton_cs );
+    if (old) IPropertySet_Release( &old->IPropertySet_iface );
+    return S_OK;
+}
+
+static const struct IWineSessionPropertiesVtbl core_properties_wine_session_vtbl =
+{
+    core_properties_wine_QueryInterface,
+    core_properties_wine_AddRef,
+    core_properties_wine_Release,
+    core_properties_wine_Flush,
+    core_properties_wine_Reload,
+};
+
+static HRESULT core_properties_create( struct core_properties **out )
+{
+    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
+    struct core_properties *impl;
+    HSTRING class_id;
+    HRESULT hr;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IPropertySet_iface.lpVtbl = (const struct IPropertySetVtbl *)&core_properties_vtbl;
+    impl->IMapView_iface.lpVtbl = &core_properties_map_view_vtbl;
+    impl->IIterable_iface.lpVtbl = &core_properties_iterable_vtbl;
+    impl->IWineSessionProperties_iface.lpVtbl = &core_properties_wine_session_vtbl;
+    impl->ref = 1;
+    InitializeCriticalSectionEx( &impl->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
+    impl->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": core_properties.cs");
+
+    if (FAILED(hr = WindowsCreateString( name, ARRAY_SIZE(name) - 1, &class_id )))
+    {
+        impl->cs.DebugInfo->Spare[0] = 0;
+        DeleteCriticalSection( &impl->cs );
+        free( impl );
+        return hr;
+    }
+    hr = RoActivateInstance( class_id, (IInspectable **)&impl->inner );
+    WindowsDeleteString( class_id );
+    if (FAILED(hr))
+    {
+        impl->cs.DebugInfo->Spare[0] = 0;
+        DeleteCriticalSection( &impl->cs );
+        free( impl );
+        return hr;
+    }
+
+    core_properties_load_impl( impl );
+    *out = impl;
+    return S_OK;
+}
+
+static HRESULT core_properties_ensure( IPropertySet **out )
+{
+    struct core_properties *props;
+    HRESULT hr = S_OK;
+
+    EnterCriticalSection( &core_properties_singleton_cs );
+    if (!the_core_properties)
+        hr = core_properties_create( &the_core_properties );
+    props = the_core_properties;
+    if (props && out) IPropertySet_AddRef( &props->IPropertySet_iface );
+    LeaveCriticalSection( &core_properties_singleton_cs );
+
+    if (out) *out = props ? &props->IPropertySet_iface : NULL;
+    return hr;
+}
+
+void core_app_flush_properties( void )
+{
+    struct core_properties *props = NULL;
+
+    EnterCriticalSection( &core_properties_singleton_cs );
+    if ((props = the_core_properties))
+        IPropertySet_AddRef( &props->IPropertySet_iface );
+    LeaveCriticalSection( &core_properties_singleton_cs );
+
+    if (props)
+    {
+        core_properties_flush_impl( props );
+        IPropertySet_Release( &props->IPropertySet_iface );
+    }
+}
+
+static HRESULT WINAPI core_application_get_Properties( ICoreApplication *iface, IPropertySet **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return core_properties_ensure( value );
 }
 
 static HRESULT WINAPI core_application_GetCurrentView( ICoreApplication *iface, ICoreApplicationView **value )
@@ -1758,6 +2811,9 @@ static HRESULT WINAPI core_application_Run( ICoreApplication *iface, IFrameworkV
     FIXME( "iface %p, view_source %p semi-stub.\n", iface, view_source );
 
     if (!view_source) return E_INVALIDARG;
+
+    core_properties_ensure( NULL );
+    ensure_focus_watcher_started();
 
     /* Create the DispatcherQueue BEFORE FrameworkView.Initialize — the real
      * CoreApplication.Run does this. The DispatcherQueue drives the composition
@@ -2109,6 +3165,48 @@ static const struct ICoreApplication2Vtbl core_application2_vtbl =
     core_application2_EnablePrelaunch,
 };
 
+static inline struct factory *impl_from_IWineSessionProperties_factory( IWineSessionProperties *iface )
+{
+    return CONTAINING_RECORD( iface, struct factory, IWineSessionProperties_iface );
+}
+
+static HRESULT WINAPI factory_session_QueryInterface( IWineSessionProperties *iface, REFIID iid, void **out )
+{
+    struct factory *impl = impl_from_IWineSessionProperties_factory( iface );
+    return IActivationFactory_QueryInterface( &impl->IActivationFactory_iface, iid, out );
+}
+
+static ULONG WINAPI factory_session_AddRef( IWineSessionProperties *iface )
+{
+    struct factory *impl = impl_from_IWineSessionProperties_factory( iface );
+    return IActivationFactory_AddRef( &impl->IActivationFactory_iface );
+}
+
+static ULONG WINAPI factory_session_Release( IWineSessionProperties *iface )
+{
+    struct factory *impl = impl_from_IWineSessionProperties_factory( iface );
+    return IActivationFactory_Release( &impl->IActivationFactory_iface );
+}
+
+static HRESULT WINAPI factory_session_Flush( IWineSessionProperties *iface )
+{
+    return core_properties_wine_Flush( iface );
+}
+
+static HRESULT WINAPI factory_session_Reload( IWineSessionProperties *iface )
+{
+    return core_properties_wine_Reload( iface );
+}
+
+static const struct IWineSessionPropertiesVtbl factory_session_vtbl =
+{
+    factory_session_QueryInterface,
+    factory_session_AddRef,
+    factory_session_Release,
+    factory_session_Flush,
+    factory_session_Reload,
+};
+
 static struct factory factory =
 {
     {&activation_factory_vtbl},
@@ -2116,6 +3214,7 @@ static struct factory factory =
     {&core_application2_vtbl},
     {&unhandled_error_vtbl},
     {&static_lifetime_vtbl},
+    {&factory_session_vtbl},
     NULL,
     1,
 };

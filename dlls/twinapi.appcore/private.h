@@ -149,9 +149,26 @@ HRESULT core_app_remove_entered_background( EventRegistrationToken token );
 HRESULT core_app_add_resuming( __FIEventHandler_1_IInspectable *handler,
                                EventRegistrationToken *token );
 HRESULT core_app_remove_resuming( EventRegistrationToken token );
+void ensure_focus_watcher_started( void );
+void core_app_flush_properties( void );
 
 /* Wine extension interfaces on the ToastNotification face, answered by
  * toast_notification_manager.c (NotificationSuppressed event sink registry,
  * ToastContent/ToastTemplate readback of the parsed payload). */
 DEFINE_GUID( IID_IToastNotificationSuppressed, 0x4b3e2a91, 0x77d5, 0x4f1a, 0x9d,0x8e, 0x6c,0x3b, 0x5a,0x2f, 0x18,0xc4 );
 DEFINE_GUID( IID_IToastNotificationTemplate,  0x0d2f6b83, 0x62e1, 0x4c9f, 0xb0,0xa7, 0x54,0x1e, 0x9d,0xc6, 0x38,0x72 );
+
+/* Wine extension interface on CoreApplication / CoreApplication.Properties
+ * for flushing and reloading session state in tests. */
+DEFINE_GUID( IID_IWineSessionProperties, 0x7c4e9b21, 0x3a14, 0x4d88, 0x91,0x52, 0xe4,0x7a, 0x2b,0x91, 0x6c,0x03 );
+
+typedef struct IWineSessionProperties IWineSessionProperties;
+typedef struct IWineSessionPropertiesVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IWineSessionProperties *, REFIID, void ** );
+    ULONG   (STDMETHODCALLTYPE *AddRef)( IWineSessionProperties * );
+    ULONG   (STDMETHODCALLTYPE *Release)( IWineSessionProperties * );
+    HRESULT (STDMETHODCALLTYPE *Flush)( IWineSessionProperties * );
+    HRESULT (STDMETHODCALLTYPE *Reload)( IWineSessionProperties * );
+} IWineSessionPropertiesVtbl;
+struct IWineSessionProperties { const IWineSessionPropertiesVtbl *lpVtbl; };

@@ -30,6 +30,7 @@
 #include "roapi.h"
 #include "weakreference.h"
 #include "shobjidl_core.h"
+#include "shlobj.h"
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
@@ -803,6 +804,200 @@ static void test_CoreApplication_lifecycle(void)
     ICoreApplication_Release( core_app );
     IActivationFactory_Release( factory );
     FreeLibrary( user32 );
+}
+
+static const GUID IID_IWineSessionProperties_test =
+    {0x7c4e9b21, 0x3a14, 0x4d88, {0x91, 0x52, 0xe4, 0x7a, 0x2b, 0x91, 0x6c, 0x03}};
+
+typedef struct IWineSessionPropertiesTest IWineSessionPropertiesTest;
+typedef struct IWineSessionPropertiesTestVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IWineSessionPropertiesTest *, REFIID, void ** );
+    ULONG   (STDMETHODCALLTYPE *AddRef)( IWineSessionPropertiesTest * );
+    ULONG   (STDMETHODCALLTYPE *Release)( IWineSessionPropertiesTest * );
+    HRESULT (STDMETHODCALLTYPE *Flush)( IWineSessionPropertiesTest * );
+    HRESULT (STDMETHODCALLTYPE *Reload)( IWineSessionPropertiesTest * );
+} IWineSessionPropertiesTestVtbl;
+struct IWineSessionPropertiesTest { const IWineSessionPropertiesTestVtbl *lpVtbl; };
+
+static void test_CoreApplication_properties(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_ApplicationModel_Core_CoreApplication;
+    static const WCHAR *pv_class = RuntimeClass_Windows_Foundation_PropertyValue;
+    HMODULE shell32 = LoadLibraryA( "shell32.dll" );
+    HRESULT (WINAPI *pSHGetFolderPathW)(HWND, int, HANDLE, DWORD, WCHAR *);
+    IActivationFactory *factory = NULL;
+    ICoreApplication *core_app = NULL;
+    IWineSessionPropertiesTest *session_hook = NULL;
+    IPropertyValueStatics *pv_statics = NULL;
+    IPropertySet *props = NULL, *props2 = NULL;
+    IMap_HSTRING_IInspectable *map = NULL;
+    IInspectable *str_val = NULL, *u64_val = NULL, *bool_val = NULL, *val = NULL;
+    IPropertyValue *pv = NULL;
+    HSTRING str = NULL, k_str = NULL, k_u64 = NULL, k_bool = NULL, s_in = NULL, s_out = NULL;
+    WCHAR base[MAX_PATH], exe[MAX_PATH], family[MAX_PATH], ini_path[MAX_PATH * 2], ini_val[128], *p;
+    PropertyType ptype;
+    UINT64 u64 = 0;
+    boolean b = FALSE, replaced = FALSE;
+    UINT32 size = 0;
+    HRESULT hr;
+
+    ok( shell32 != NULL, "LoadLibrary shell32 failed\n" );
+    pSHGetFolderPathW = (void *)GetProcAddress( shell32, "SHGetFolderPathW" );
+    ok( pSHGetFolderPathW != NULL, "SHGetFolderPathW missing\n" );
+
+    hr = pSHGetFolderPathW( NULL, CSIDL_LOCAL_APPDATA | CSIDL_FLAG_CREATE, NULL, SHGFP_TYPE_CURRENT, base );
+    ok( hr == S_OK, "SHGetFolderPathW failed, hr %#lx\n", hr );
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FAMILY_NAME", family, ARRAY_SIZE(family) ))
+    {
+        GetModuleFileNameW( NULL, exe, ARRAY_SIZE(exe) );
+        if ((p = wcsrchr( exe, L'\\' ))) p++;
+        else p = exe;
+        lstrcpyW( family, p );
+        if ((p = wcsrchr( family, L'.' )) && p > family) *p = 0;
+    }
+    swprintf( ini_path, ARRAY_SIZE(ini_path), L"%ls\\%ls\\Session\\state.ini", base, family );
+    DeleteFileW( ini_path );
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( str );
+    if (FAILED(hr))
+    {
+        FreeLibrary( shell32 );
+        return;
+    }
+
+    hr = IActivationFactory_QueryInterface( factory, &IID_ICoreApplication, (void **)&core_app );
+    ok( hr == S_OK, "QI ICoreApplication failed, hr %#lx\n", hr );
+    hr = IActivationFactory_QueryInterface( factory, &IID_IWineSessionProperties_test, (void **)&session_hook );
+    ok( hr == S_OK, "QI IWineSessionProperties failed, hr %#lx\n", hr );
+
+    hr = WindowsCreateString( pv_class, wcslen( pv_class ), &str );
+    ok( hr == S_OK, "got hr %#lx\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IPropertyValueStatics, (void **)&pv_statics );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "RoGetActivationFactory PropertyValue failed, hr %#lx\n", hr );
+
+    /* Reset singleton so first get_Properties starts clean without prior state.ini */
+    hr = session_hook->lpVtbl->Reload( session_hook );
+    ok( hr == S_OK, "Reload failed, hr %#lx\n", hr );
+
+    hr = ICoreApplication_get_Properties( core_app, &props );
+    ok( hr == S_OK && props != NULL, "get_Properties failed, hr %#lx\n", hr );
+
+    hr = IPropertySet_QueryInterface( props, &IID_IMap_HSTRING_IInspectable, (void **)&map );
+    ok( hr == S_OK, "QI IMap failed, hr %#lx\n", hr );
+
+    WindowsCreateString( L"sessionState", 12, &k_str );
+    WindowsCreateString( L"lastTimestamp", 13, &k_u64 );
+    WindowsCreateString( L"restoredFlag", 12, &k_bool );
+    WindowsCreateString( L"reconnect-payload-42", 20, &s_in );
+
+    hr = IPropertyValueStatics_CreateString( pv_statics, s_in, &str_val );
+    ok( hr == S_OK, "CreateString failed, hr %#lx\n", hr );
+    hr = IPropertyValueStatics_CreateUInt64( pv_statics, 0x1122334455667788ULL, &u64_val );
+    ok( hr == S_OK, "CreateUInt64 failed, hr %#lx\n", hr );
+    hr = IPropertyValueStatics_CreateBoolean( pv_statics, TRUE, &bool_val );
+    ok( hr == S_OK, "CreateBoolean failed, hr %#lx\n", hr );
+
+    hr = IMap_HSTRING_IInspectable_Insert( map, k_str, str_val, &replaced );
+    ok( hr == S_OK && !replaced, "Insert string failed, hr %#lx\n", hr );
+    hr = IMap_HSTRING_IInspectable_Insert( map, k_u64, u64_val, &replaced );
+    ok( hr == S_OK && !replaced, "Insert uint64 failed, hr %#lx\n", hr );
+    hr = IMap_HSTRING_IInspectable_Insert( map, k_bool, bool_val, &replaced );
+    ok( hr == S_OK && !replaced, "Insert boolean failed, hr %#lx\n", hr );
+
+    IMap_HSTRING_IInspectable_Release( map );
+    IPropertySet_Release( props );
+
+    /* Simulate EnteredBackground flush via test hook, then reload fresh map from state.ini */
+    hr = session_hook->lpVtbl->Flush( session_hook );
+    ok( hr == S_OK, "Flush failed, hr %#lx\n", hr );
+
+    ok( GetFileAttributesW( ini_path ) != INVALID_FILE_ATTRIBUTES, "session state.ini missing at %s\n",
+        wine_dbgstr_w( ini_path ) );
+    GetPrivateProfileStringW( L"Session", L"sessionState", L"", ini_val, ARRAY_SIZE(ini_val), ini_path );
+    ok( !wcscmp( ini_val, L"reconnect-payload-42" ), "got ini sessionState %s\n", wine_dbgstr_w( ini_val ) );
+    WritePrivateProfileStringW( NULL, NULL, NULL, ini_path );
+
+    hr = session_hook->lpVtbl->Reload( session_hook );
+    ok( hr == S_OK, "Reload failed, hr %#lx\n", hr );
+
+    hr = ICoreApplication_get_Properties( core_app, &props2 );
+    ok( hr == S_OK && props2 != NULL, "get_Properties (reload) failed, hr %#lx\n", hr );
+    hr = IPropertySet_QueryInterface( props2, &IID_IMap_HSTRING_IInspectable, (void **)&map );
+    ok( hr == S_OK, "QI IMap (reload) failed, hr %#lx\n", hr );
+
+    hr = IMap_HSTRING_IInspectable_get_Size( map, &size );
+    ok( hr == S_OK && size == 3, "got size %u, hr %#lx\n", size, hr );
+
+    val = NULL;
+    hr = IMap_HSTRING_IInspectable_Lookup( map, k_str, &val );
+    ok( hr == S_OK && val != NULL, "Lookup string failed, hr %#lx\n", hr );
+    if (SUCCEEDED(hr) && val)
+    {
+        hr = IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&pv );
+        ok( hr == S_OK, "QI IPropertyValue failed, hr %#lx\n", hr );
+        hr = IPropertyValue_get_Type( pv, &ptype );
+        ok( hr == S_OK && ptype == PropertyType_String, "got type %d, hr %#lx\n", ptype, hr );
+        hr = IPropertyValue_GetString( pv, &s_out );
+        ok( hr == S_OK && s_out && !wcscmp( WindowsGetStringRawBuffer( s_out, NULL ), L"reconnect-payload-42" ),
+            "got string %s, hr %#lx\n", wine_dbgstr_w( WindowsGetStringRawBuffer( s_out, NULL ) ), hr );
+        WindowsDeleteString( s_out );
+        IPropertyValue_Release( pv );
+        IInspectable_Release( val );
+    }
+
+    val = NULL;
+    hr = IMap_HSTRING_IInspectable_Lookup( map, k_u64, &val );
+    ok( hr == S_OK && val != NULL, "Lookup uint64 failed, hr %#lx\n", hr );
+    if (SUCCEEDED(hr) && val)
+    {
+        hr = IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&pv );
+        ok( hr == S_OK, "QI IPropertyValue failed, hr %#lx\n", hr );
+        hr = IPropertyValue_get_Type( pv, &ptype );
+        ok( hr == S_OK && ptype == PropertyType_UInt64, "got type %d, hr %#lx\n", ptype, hr );
+        hr = IPropertyValue_GetUInt64( pv, &u64 );
+        ok( hr == S_OK && u64 == 0x1122334455667788ULL, "got uint64 %s, hr %#lx\n", wine_dbgstr_longlong( u64 ), hr );
+        IPropertyValue_Release( pv );
+        IInspectable_Release( val );
+    }
+
+    val = NULL;
+    hr = IMap_HSTRING_IInspectable_Lookup( map, k_bool, &val );
+    ok( hr == S_OK && val != NULL, "Lookup boolean failed, hr %#lx\n", hr );
+    if (SUCCEEDED(hr) && val)
+    {
+        hr = IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&pv );
+        ok( hr == S_OK, "QI IPropertyValue failed, hr %#lx\n", hr );
+        hr = IPropertyValue_get_Type( pv, &ptype );
+        ok( hr == S_OK && ptype == PropertyType_Boolean, "got type %d, hr %#lx\n", ptype, hr );
+        hr = IPropertyValue_GetBoolean( pv, &b );
+        ok( hr == S_OK && b == TRUE, "got boolean %d, hr %#lx\n", b, hr );
+        IPropertyValue_Release( pv );
+        IInspectable_Release( val );
+    }
+
+    IMap_HSTRING_IInspectable_Clear( map );
+    IMap_HSTRING_IInspectable_Release( map );
+    IPropertySet_Release( props2 );
+    session_hook->lpVtbl->Reload( session_hook );
+    DeleteFileW( ini_path );
+
+    WindowsDeleteString( s_in );
+    WindowsDeleteString( k_str );
+    WindowsDeleteString( k_u64 );
+    WindowsDeleteString( k_bool );
+    IInspectable_Release( str_val );
+    IInspectable_Release( u64_val );
+    IInspectable_Release( bool_val );
+    IPropertyValueStatics_Release( pv_statics );
+    session_hook->lpVtbl->Release( session_hook );
+    ICoreApplication_Release( core_app );
+    IActivationFactory_Release( factory );
+    FreeLibrary( shell32 );
 }
 
 /* Microsoft.Windows.AppLifecycle.IMicrosoftAppInstanceStatics */
@@ -1779,6 +1974,7 @@ START_TEST(twinapi)
     test_AnalyticsVersionInfo();
     test_AdvertisingManager();
     test_CoreApplication_lifecycle();
+    test_CoreApplication_properties();
     test_ApplicationView();
     test_CoreApplication();
     test_AppInstance();

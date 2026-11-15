@@ -1708,6 +1708,8 @@ static void fire_entered_background( void )
     unsigned int i, count = event_registry_snapshot( &entered_bg_events, handlers, ARRAY_SIZE( handlers ) );
     __x_ABI_CWindows_CApplicationModel_CIEnteredBackgroundEventArgs *args;
 
+    core_app_flush_properties();
+
     if (!count) return;
     if (!(args = bg_lifecycle_args_create( TRUE )))
     {
@@ -1767,7 +1769,7 @@ static BOOL CALLBACK init_focus_watcher_cb( INIT_ONCE *once, void *param, void *
     return thread != NULL;
 }
 
-static void ensure_focus_watcher_started( void )
+void ensure_focus_watcher_started( void )
 {
     InitOnceExecuteOnce( &focus_watcher_once, init_focus_watcher_cb, NULL, NULL );
 }
