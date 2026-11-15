@@ -1851,6 +1851,7 @@ struct uwp_element
     IInspectable *outer;
     enum uwp_elem_kind kind;
     WCHAR class_name[128];
+    WCHAR x_class[128];
     WCHAR name[64];
     WCHAR uid[64];
     WCHAR text[256];
@@ -2153,11 +2154,14 @@ static const GUID IID_IDependencyPropertyChangedCallback_UWP =
 
 static struct
 {
-    IInspectable *vm;             /* StandardCalculatorViewModel RCW */
-    HWND pump_hwnd;               /* CoreWindow used to pump the async init task */
-    BOOL pumped;
+    IInspectable *vm;             /* Active ViewModel RCW/instance */
+    IInspectable *npc;            /* Held INotifyPropertyChanged face for remove_PropertyChanged on teardown */
+    EventRegistrationToken npc_token;
     BOOL npc_hooked;
+    IInspectable *cmd;            /* Optional ICommand face resolved via IXamlMember / QI */
     IDependencyProperty *display_dp;
+    WCHAR vm_class_name[128];
+    BOOL pumped;
     int last_code;                /* dedupe repeated clicks on init-pending VM */
 } g_calc_vm;
 
@@ -2397,6 +2401,16 @@ static const void *g_calc_result_dp_cb_vtbl[] =
 };
 static struct { const void *vtbl; } g_calc_result_dp_cb = { g_calc_result_dp_cb_vtbl };
 
+static BOOL uwp_is_display_result_element( const struct uwp_element *el )
+{
+    if (!el) return FALSE;
+    if (!wcscmp( el->name, L"Results" ) || !wcscmp( el->name, L"NormalOutput" ))
+        return TRUE;
+    if (wcsstr( el->class_name, L"CalculationResult" ) != NULL)
+        return TRUE;
+    return FALSE;
+}
+
 static void uwp_bind_calc_result_elements( void )
 {
     struct uwp_element *scan, *matches[32];
@@ -2408,7 +2422,7 @@ static void uwp_bind_calc_result_elements( void )
     AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     for (scan = g_all_uwp_elems_head; scan && mcnt < (int)ARRAY_SIZE(matches); scan = scan->next_reg)
     {
-        if (wcsstr( scan->class_name, L"CalculationResult" ) || !wcscmp( scan->name, L"Results" ))
+        if (uwp_is_display_result_element( scan ))
             matches[mcnt++] = scan;
     }
     ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
@@ -2449,7 +2463,7 @@ static void uwp_push_display_value_to_results( const WCHAR *s )
     AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     for (scan = g_all_uwp_elems_head; scan && mcnt < (int)ARRAY_SIZE(matches); scan = scan->next_reg)
     {
-        if (wcsstr( scan->class_name, L"CalculationResult" ) || !wcscmp( scan->name, L"Results" ))
+        if (uwp_is_display_result_element( scan ))
             matches[mcnt++] = scan;
     }
     ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
@@ -2459,34 +2473,71 @@ static void uwp_push_display_value_to_results( const WCHAR *s )
         IInspectable *target;
         scan = matches[m];
         target = scan->outer ? scan->outer : &scan->IInspectable_iface;
-        if (wcsstr( scan->class_name, L"CalculationResult" ))
+        if (scan->class_name[0] && uwp_get_app_outer())
             uwp_set_custom_xaml_member( uwp_get_app_outer(), scan->class_name, L"DisplayValue", target, s );
         uwp_do_SetValue( &scan->IDependencyObject_iface, g_calc_vm.display_dp, boxed );
     }
     IInspectable_Release( boxed );
 }
 
-static void uwp_sync_calc_display_from_vm( void )
+static BOOL uwp_vm_read_display_value( IInspectable *vm, const WCHAR *vm_class_name, WCHAR *out_buf, size_t max_chars )
 {
-    HRESULT (WINAPI *get_disp)(void *, HSTRING *);
+    IInspectable *val = NULL;
     HSTRING hval = NULL;
-    HRESULT hr;
+    HRESULT hr = E_FAIL;
 
-    if (!g_calc_vm.vm) return;
-    get_disp = (void *)(*(void ***)g_calc_vm.vm)[7];
-    if (!get_disp) return;
-    hr = get_disp( g_calc_vm.vm, &hval );
-    TRACE( "uwp_sync_calc_display_from_vm: get_DisplayValue -> %#lx hval %p\n", hr, (void *)hval );
+    if (!vm || !out_buf || !max_chars) return FALSE;
+    out_buf[0] = 0;
+
+    /* 1. Try IXamlMetadataProvider member "DisplayValue" when provider is available */
+    if (vm_class_name && vm_class_name[0] && uwp_get_app_outer() &&
+        uwp_get_custom_xaml_member( uwp_get_app_outer(), vm_class_name, L"DisplayValue", vm, &val ) && val)
+    {
+        BOOL ok = uwp_unbox_string( val, out_buf, (int)max_chars );
+        IInspectable_Release( val );
+        if (ok && out_buf[0]) return TRUE;
+    }
+
+    /* 2. Try unboxing directly if VM is a PropertyValue string */
+    if (uwp_unbox_string( vm, out_buf, (int)max_chars ) && out_buf[0])
+        return TRUE;
+
+    /* 3. Fallback to default interface slot 7 get_DisplayValue(HSTRING*) */
+    __TRY
+    {
+        HRESULT (WINAPI *get_disp)(void *, HSTRING *) = (void *)(*(void ***)vm)[7];
+        if (get_disp) hr = get_disp( vm, &hval );
+    }
+    __EXCEPT_ALL
+    {
+        hr = E_FAIL;
+        hval = NULL;
+    }
+    __ENDTRY;
+
     if (SUCCEEDED(hr) && hval)
     {
         const WCHAR *s = WindowsGetStringRawBuffer( hval, NULL );
-        TRACE( "uwp_sync_calc_display_from_vm: DisplayValue = %s\n", debugstr_w(s) );
-        if (s && s[0]) uwp_push_display_value_to_results( s );
+        if (s && s[0]) lstrcpynW( out_buf, s, (int)max_chars );
         WindowsDeleteString( hval );
+        return out_buf[0] != 0;
+    }
+    return FALSE;
+}
+
+static void uwp_sync_calc_display_from_vm( void )
+{
+    WCHAR buf[256] = {0};
+
+    if (!g_calc_vm.vm) return;
+    if (uwp_vm_read_display_value( g_calc_vm.vm, g_calc_vm.vm_class_name, buf, ARRAY_SIZE(buf) ))
+    {
+        TRACE( "uwp_sync_calc_display_from_vm: DisplayValue = %s\n", debugstr_w(buf) );
+        uwp_push_display_value_to_results( buf );
     }
 }
 
-/* INotifyPropertyChanged listener for StandardCalculatorViewModel.DisplayValue */
+/* INotifyPropertyChanged listener for ViewModel DisplayValue */
 static HRESULT WINAPI calc_vm_npc_QI( void *iface, REFIID iid, void **out )
 {
     if (!out) return E_POINTER;
@@ -2536,97 +2587,365 @@ static const void *g_calc_vm_npc_vtbl[] =
 };
 static struct { const void *vtbl; } g_calc_vm_npc_handler = { g_calc_vm_npc_vtbl };
 
+static void uwp_calc_vm_teardown( BOOL final_cleanup )
+{
+    if (g_calc_vm.npc)
+    {
+        if (g_calc_vm.npc_hooked)
+        {
+            /* Slot 7 on INotifyPropertyChanged: remove_PropertyChanged(EventRegistrationToken) */
+            HRESULT (WINAPI *rem_pc)(void *, EventRegistrationToken) = (void *)(*(void ***)g_calc_vm.npc)[7];
+            if (rem_pc)
+            {
+                __TRY { rem_pc( g_calc_vm.npc, g_calc_vm.npc_token ); }
+                __EXCEPT_ALL { }
+                __ENDTRY;
+            }
+        }
+        IInspectable_Release( g_calc_vm.npc );
+        g_calc_vm.npc = NULL;
+        g_calc_vm.npc_hooked = FALSE;
+        g_calc_vm.npc_token.value = 0;
+    }
+    if (g_calc_vm.cmd)
+    {
+        IInspectable_Release( g_calc_vm.cmd );
+        g_calc_vm.cmd = NULL;
+    }
+    if (g_calc_vm.vm)
+    {
+        IInspectable_Release( g_calc_vm.vm );
+        g_calc_vm.vm = NULL;
+    }
+    g_calc_vm.vm_class_name[0] = 0;
+    g_calc_vm.pumped = FALSE;
+    if (final_cleanup && g_calc_vm.display_dp)
+    {
+        IDependencyProperty_Release( g_calc_vm.display_dp );
+        g_calc_vm.display_dp = NULL;
+    }
+}
+
+/* Single documented shim for .NET Native / C++/CX StandardCalculatorViewModel RCW:
+ * ButtonPressed::Execute on the real C++/CX VM expects a CalculatorButtonPressedEventArgs
+ * ref class, whereas vtbl slot 79 is SendCommandToCalcManager(int) which directly drives
+ * CStandardCalculatorManager::SendCommand (including 200 = Command::ModeBasic to allocate
+ * m_calculatorManager at this+392). */
+static HRESULT uwp_calc_vm_slot79_shim( IInspectable *vm, int code )
+{
+    HRESULT hr = E_FAIL;
+    int attempt;
+
+    if (!vm) return E_POINTER;
+    for (attempt = 0; attempt < 2; attempt++)
+    {
+        MSG msg;
+        __TRY
+        {
+            HRESULT (WINAPI *send)(void *, int) = (void *)(*(void ***)vm)[79];
+            hr = send ? send( vm, code ) : E_FAIL;
+        }
+        __EXCEPT_ALL
+        {
+            hr = E_FAIL;
+            TRACE( "uwp_calc_vm_slot79_shim: slot 79 fault (attempt %d, code %d)\n", attempt, code );
+        }
+        __ENDTRY;
+        TRACE( "uwp_calc_vm_slot79_shim: code %d attempt %d -> hr %#lx\n", code, attempt, hr );
+        if (hr != E_FAIL || attempt > 0) break;
+        MsgWaitForMultipleObjectsEx( 0, NULL, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
+        while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
+        {
+            TranslateMessage( &msg );
+            DispatchMessageW( &msg );
+        }
+    }
+    return hr;
+}
+
+/* Resolve ViewModel type name (and optionally activate via IXamlType) from the page/view XBF
+ * metadata via IXamlMetadataProvider::GetXamlTypeByFullName(view_type)->GetMember("Model")->get_Type(). */
+static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_chars, IInspectable **out_instance )
+{
+    static const WCHAR * const member_names[] = { L"Model", L"ViewModel", L"DataContext" };
+    void *app_outer = uwp_get_app_outer();
+    void *provider = NULL;
+    WCHAR candidates[8][128];
+    int ncand = 0, c;
+
+    if (out_type_name && max_chars) out_type_name[0] = 0;
+    if (out_instance) *out_instance = NULL;
+
+    /* Collect view/page candidate types from parsed XBF tree */
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    if (g_navigated_page_el)
+    {
+        int r;
+        for (r = 0; r < g_navigated_page_el->xbf_ref_cnt && ncand < (int)ARRAY_SIZE(candidates); r++)
+        {
+            if (!g_navigated_page_el->xbf_refs[r].is_resource_path &&
+                g_navigated_page_el->xbf_refs[r].full_name[0])
+                lstrcpynW( candidates[ncand++], g_navigated_page_el->xbf_refs[r].full_name, 128 );
+        }
+        if (g_navigated_page_el->x_class[0] && ncand < (int)ARRAY_SIZE(candidates))
+            lstrcpynW( candidates[ncand++], g_navigated_page_el->x_class, 128 );
+    }
+    {
+        struct uwp_element *scan;
+        for (scan = g_all_uwp_elems_head; scan && ncand < (int)ARRAY_SIZE(candidates); scan = scan->next_reg)
+        {
+            const WCHAR *cls = scan->x_class[0] ? scan->x_class : scan->class_name;
+            if ((scan->kind == UWP_KIND_USER_CONTROL || scan->kind == UWP_KIND_PAGE) &&
+                cls[0] && wcsncmp( cls, L"Windows.UI.Xaml.", 16 ) != 0 &&
+                wcsncmp( cls, L"Microsoft.UI.Xaml.", 18 ) != 0)
+            {
+                int k;
+                BOOL dup = FALSE;
+                for (k = 0; k < ncand; k++) if (!wcscmp( candidates[k], cls )) { dup = TRUE; break; }
+                if (!dup) lstrcpynW( candidates[ncand++], cls, 128 );
+            }
+        }
+    }
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+
+    if (app_outer && ncand > 0 &&
+        SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider)
+    {
+        HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)(*(void ***)provider)[7];
+        for (c = 0; c < ncand && (!out_type_name || !out_type_name[0]); c++)
+        {
+            HSTRING h_cls = NULL;
+            void *view_xt = NULL;
+            if (get_by_name && SUCCEEDED(WindowsCreateString( candidates[c], wcslen(candidates[c]), &h_cls )))
+            {
+                if (SUCCEEDED(get_by_name( provider, h_cls, &view_xt )) && view_xt)
+                {
+                    HRESULT (WINAPI *get_member)(void *, HSTRING, void **) = (void *)(*(void ***)view_xt)[20];
+                    size_t m;
+                    for (m = 0; get_member && m < ARRAY_SIZE(member_names); m++)
+                    {
+                        HSTRING h_mem = NULL;
+                        void *xm = NULL;
+                        if (SUCCEEDED(WindowsCreateString( member_names[m], wcslen(member_names[m]), &h_mem )))
+                        {
+                            if (SUCCEEDED(get_member( view_xt, h_mem, &xm )) && xm)
+                            {
+                                HRESULT (WINAPI *get_mtype)(void *, void **) = (void *)(*(void ***)xm)[11];
+                                void *vm_xt = NULL;
+                                if (get_mtype && SUCCEEDED(get_mtype( xm, &vm_xt )) && vm_xt)
+                                {
+                                    /* Follow nested CalculatorViewModel if Model is ApplicationViewModel */
+                                    HRESULT (WINAPI *vm_get_mem)(void *, HSTRING, void **) = (void *)(*(void ***)vm_xt)[20];
+                                    HSTRING h_sub = NULL;
+                                    void *sub_xm = NULL;
+                                    if (vm_get_mem && SUCCEEDED(WindowsCreateString( L"CalculatorViewModel", 19, &h_sub )))
+                                    {
+                                        if (SUCCEEDED(vm_get_mem( vm_xt, h_sub, &sub_xm )) && sub_xm)
+                                        {
+                                            HRESULT (WINAPI *sub_get_mtype)(void *, void **) = (void *)(*(void ***)sub_xm)[11];
+                                            void *sub_xt = NULL;
+                                            if (sub_get_mtype && SUCCEEDED(sub_get_mtype( sub_xm, &sub_xt )) && sub_xt)
+                                            {
+                                                IInspectable_Release( (IInspectable *)vm_xt );
+                                                vm_xt = sub_xt;
+                                            }
+                                            IInspectable_Release( (IInspectable *)sub_xm );
+                                        }
+                                        WindowsDeleteString( h_sub );
+                                    }
+                                    /* Slot 8 on IXamlType: get_FullName(HSTRING*) */
+                                    {
+                                        HRESULT (WINAPI *get_fn)(void *, HSTRING *) = (void *)(*(void ***)vm_xt)[8];
+                                        HSTRING h_fn = NULL;
+                                        if (get_fn && SUCCEEDED(get_fn( vm_xt, &h_fn )) && h_fn)
+                                        {
+                                            const WCHAR *fn = WindowsGetStringRawBuffer( h_fn, NULL );
+                                            if (fn && fn[0] && out_type_name && max_chars)
+                                            {
+                                                lstrcpynW( out_type_name, fn, (int)max_chars );
+                                                TRACE( "uwp_resolve_vm_type_from_metadata: %s.%s -> %s\n",
+                                                       debugstr_w(candidates[c]), debugstr_w(member_names[m]),
+                                                       debugstr_w(out_type_name) );
+                                            }
+                                            WindowsDeleteString( h_fn );
+                                        }
+                                    }
+                                    /* Slot 18 on IXamlType: ActivateInstance(IInspectable**) */
+                                    if (out_instance && !*out_instance)
+                                    {
+                                        HRESULT (WINAPI *act_fn)(void *, IInspectable **) = (void *)(*(void ***)vm_xt)[18];
+                                        if (act_fn)
+                                        {
+                                            __TRY { act_fn( vm_xt, out_instance ); }
+                                            __EXCEPT_ALL { *out_instance = NULL; }
+                                            __ENDTRY;
+                                        }
+                                    }
+                                    IInspectable_Release( (IInspectable *)vm_xt );
+                                }
+                                IInspectable_Release( (IInspectable *)xm );
+                            }
+                            WindowsDeleteString( h_mem );
+                        }
+                        if (out_type_name && out_type_name[0]) break;
+                    }
+                    IInspectable_Release( (IInspectable *)view_xt );
+                }
+                WindowsDeleteString( h_cls );
+            }
+        }
+        IInspectable_Release( (IInspectable *)provider );
+    }
+
+    /* Single fallback call site when IXamlMetadataProvider is unavailable */
+    if (out_type_name && max_chars && !out_type_name[0])
+        lstrcpynW( out_type_name, L"CalculatorApp.ViewModel.StandardCalculatorViewModel", (int)max_chars );
+}
+
+static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name, BOOL send_mode_basic )
+{
+    void *npc = NULL;
+    IInspectable *cmd_prop = NULL;
+    void *cmd_iface = NULL;
+
+    if (g_calc_vm.vm == vm && vm != NULL)
+    {
+        uwp_bind_calc_result_elements();
+        uwp_sync_calc_display_from_vm();
+        return;
+    }
+
+    uwp_calc_vm_teardown( FALSE );
+    if (!vm) return;
+
+    g_calc_vm.vm = vm;
+    IInspectable_AddRef( vm );
+
+    if (class_name && class_name[0])
+        lstrcpynW( g_calc_vm.vm_class_name, class_name, ARRAY_SIZE(g_calc_vm.vm_class_name) );
+    else
+    {
+        HSTRING hcls = NULL;
+        if (SUCCEEDED(IInspectable_GetRuntimeClassName( vm, &hcls )) && hcls)
+        {
+            const WCHAR *raw = WindowsGetStringRawBuffer( hcls, NULL );
+            if (raw) lstrcpynW( g_calc_vm.vm_class_name, raw, ARRAY_SIZE(g_calc_vm.vm_class_name) );
+            WindowsDeleteString( hcls );
+        }
+    }
+
+    /* Subscribe to INotifyPropertyChanged and retain token + interface for teardown */
+    if (SUCCEEDED(IInspectable_QueryInterface( vm, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
+    {
+        HRESULT (WINAPI *add_pc)(void *, void *, EventRegistrationToken *) = (void *)(*(void ***)npc)[6];
+        EventRegistrationToken tok = {0};
+        if (add_pc && SUCCEEDED(add_pc( npc, &g_calc_vm_npc_handler, &tok )))
+        {
+            g_calc_vm.npc = (IInspectable *)npc;
+            g_calc_vm.npc_token = tok;
+            g_calc_vm.npc_hooked = TRUE;
+        }
+        else
+        {
+            IUnknown_Release( (IUnknown *)npc );
+        }
+    }
+
+    /* Resolve ICommand face via IXamlMember ("ButtonPressed") or direct QI on VM */
+    if (g_calc_vm.vm_class_name[0] && uwp_get_app_outer() &&
+        uwp_get_custom_xaml_member( uwp_get_app_outer(), g_calc_vm.vm_class_name, L"ButtonPressed", vm, &cmd_prop ) && cmd_prop)
+    {
+        if (SUCCEEDED(IInspectable_QueryInterface( cmd_prop, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
+            g_calc_vm.cmd = (IInspectable *)cmd_iface;
+        else
+        {
+            g_calc_vm.cmd = cmd_prop;
+            IInspectable_AddRef( cmd_prop );
+        }
+        IInspectable_Release( cmd_prop );
+    }
+    if (!g_calc_vm.cmd && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
+        g_calc_vm.cmd = (IInspectable *)cmd_iface;
+
+    if (send_mode_basic)
+    {
+        /* Command::ModeBasic (200 = 0xc8) synchronously initializes CCalcEngine */
+        HRESULT mhr = uwp_calc_vm_slot79_shim( g_calc_vm.vm, 200 );
+        TRACE( "uwp_calc_vm_set_instance: ModeBasic(200) -> %#lx\n", mhr );
+    }
+    g_calc_vm.pumped = TRUE;
+    uwp_sync_calc_display_from_vm();
+}
+
 static void uwp_calc_vm_ensure( void )
 {
+    WCHAR vm_type_name[128] = {0};
+    IInspectable *vm_inst = NULL;
     HSTRING h = NULL;
+
     if (g_calc_vm.vm)
     {
         uwp_bind_calc_result_elements();
         return;
     }
-    WindowsCreateString( L"CalculatorApp.ViewModel.StandardCalculatorViewModel",
-                         wcslen(L"CalculatorApp.ViewModel.StandardCalculatorViewModel"), &h );
-    if (h)
+
+    uwp_resolve_vm_type_from_metadata( vm_type_name, ARRAY_SIZE(vm_type_name), &vm_inst );
+    if (!vm_inst && vm_type_name[0] &&
+        SUCCEEDED(WindowsCreateString( vm_type_name, wcslen(vm_type_name), &h )) && h)
     {
-        HRESULT hr = RoActivateInstance( h, &g_calc_vm.vm );
-        TRACE( "uwp_calc_vm_ensure: RoActivateInstance -> %#lx vm %p\n", hr, (void *)g_calc_vm.vm );
+        HRESULT hr = RoActivateInstance( h, &vm_inst );
+        TRACE( "uwp_calc_vm_ensure: RoActivateInstance(%s) -> %#lx vm %p\n",
+               debugstr_w(vm_type_name), hr, (void *)vm_inst );
         WindowsDeleteString( h );
-        if (FAILED(hr)) g_calc_vm.vm = NULL;
-        else if (g_calc_vm.vm)
-        {
-            void *npc = NULL;
-            /* Subscribe to StandardCalculatorViewModel INotifyPropertyChanged */
-            if (!g_calc_vm.npc_hooked &&
-                SUCCEEDED(IInspectable_QueryInterface( g_calc_vm.vm, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
-            {
-                HRESULT (WINAPI *add_pc)(void *, void *, EventRegistrationToken *) = (void *)(*(void ***)npc)[6];
-                EventRegistrationToken tok = {0};
-                if (add_pc && SUCCEEDED(add_pc( npc, &g_calc_vm_npc_handler, &tok )))
-                    g_calc_vm.npc_hooked = TRUE;
-                IUnknown_Release( (IUnknown *)npc );
-            }
-            /* Command::ModeBasic (200 = 0xc8) synchronously allocates m_calculatorManager
-             * (CCalcEngine) at this+392 in CStandardCalculatorManager::SendCommand. */
-            {
-                HRESULT (WINAPI *send)(void *, int) = (void *)(*(void ***)g_calc_vm.vm)[79];
-                HRESULT mhr = send ? send( g_calc_vm.vm, 200 ) : E_FAIL;
-                TRACE( "uwp_calc_vm_ensure: SendCommandToCalcManager(200 ModeBasic) -> %#lx\n", mhr );
-            }
-            g_calc_vm.pumped = TRUE;
-            uwp_sync_calc_display_from_vm();
-        }
+        if (FAILED(hr)) vm_inst = NULL;
+    }
+
+    if (vm_inst)
+    {
+        uwp_calc_vm_set_instance( vm_inst, vm_type_name, TRUE );
+        IInspectable_Release( vm_inst );
     }
 }
 
 static void uwp_calc_vm_send( int code )
 {
-    HRESULT hr;
-    HRESULT (WINAPI *send)(void *, int);
-    HRESULT (WINAPI *get_disp)(void *, HSTRING *);
-    HSTRING hval = NULL;
+    WCHAR pre_disp[256] = {0}, post_disp[256] = {0};
+    BOOL handled = FALSE;
 
     uwp_calc_vm_ensure();
     if (!g_calc_vm.vm) return;
 
-    /* Pre-read display value (slot 7 is safe) to confirm RCW marshalling. */
-    get_disp = (void *)(*(void ***)g_calc_vm.vm)[7];
-    hval = NULL;
-    hr = get_disp( g_calc_vm.vm, &hval );
-    TRACE( "uwp_calc_vm_send: get_DisplayValue(pre) -> %#lx hval %p\n", hr, (void *)hval );
-    if (SUCCEEDED(hr) && hval)
-    {
-        TRACE( "uwp_calc_vm_send: pre DisplayValue = %s\n", debugstr_w(WindowsGetStringRawBuffer(hval, NULL)) );
-        WindowsDeleteString( hval );
-        hval = NULL;
-    }
+    uwp_vm_read_display_value( g_calc_vm.vm, g_calc_vm.vm_class_name, pre_disp, ARRAY_SIZE(pre_disp) );
+    TRACE( "uwp_calc_vm_send: code %d pre DisplayValue = %s\n", code, debugstr_w(pre_disp) );
 
-    send = (void *)(*(void ***)g_calc_vm.vm)[79];
-    TRACE( "uwp_calc_vm_send: calling slot79 %p vm %p code %d\n", (void *)send, (void *)g_calc_vm.vm, code );
+    /* 1. Try ICommand::Execute(boxed_code) when an ICommand face is available */
+    if (g_calc_vm.cmd)
     {
-        int attempt;
-        for (attempt = 0; attempt < 2; attempt++)
+        IInspectable *param = box_int32_value( code );
+        HRESULT chr = E_FAIL;
+        __TRY
         {
-            MSG msg;
-            __TRY
-            {
-                hr = send( g_calc_vm.vm, code );
-            }
-            __EXCEPT_ALL
-            {
-                hr = E_FAIL;
-                TRACE( "uwp_calc_vm_send: slot79 fault (attempt %d), pumping for calc manager\n", attempt );
-            }
-            __ENDTRY;
-            TRACE( "uwp_calc_vm_send: attempt %d hr=%#lx\n", attempt, hr );
-            if (hr != E_FAIL || attempt > 0) break;
-            MsgWaitForMultipleObjectsEx( 0, NULL, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
-            while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
-            {
-                TranslateMessage( &msg );
-                DispatchMessageW( &msg );
-            }
+            /* Slot 9 on ICommand: Execute(IInspectable *parameter) */
+            HRESULT (WINAPI *exec_fn)(void *, void *) = (void *)(*(void ***)g_calc_vm.cmd)[9];
+            if (exec_fn) chr = exec_fn( g_calc_vm.cmd, param );
+        }
+        __EXCEPT_ALL
+        {
+            chr = E_FAIL;
+        }
+        __ENDTRY;
+        if (param) IInspectable_Release( param );
+        if (SUCCEEDED(chr) &&
+            uwp_vm_read_display_value( g_calc_vm.vm, g_calc_vm.vm_class_name, post_disp, ARRAY_SIZE(post_disp) ) &&
+            wcscmp( pre_disp, post_disp ) != 0)
+        {
+            handled = TRUE;
         }
     }
+
+    /* 2. Fallback to documented slot-79 shim for .NET Native / C++/CX RCW */
+    if (!handled)
+        uwp_calc_vm_slot79_shim( g_calc_vm.vm, code );
 
     uwp_sync_calc_display_from_vm();
 }
@@ -3290,7 +3609,7 @@ static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val 
     /* Check if val is a string (e.g. CalculationResult.DisplayValue or Content) */
     if (val && uwp_unbox_string( val, str_val, ARRAY_SIZE(str_val) ) && str_val[0])
     {
-        if (wcsstr( impl->class_name, L"CalculationResult" ) ||
+        if (uwp_is_display_result_element( impl ) ||
             wcsstr( impl->class_name, L"OverflowTextBlock" ) ||
             impl->kind == UWP_KIND_TEXT_BLOCK)
         {
@@ -5251,6 +5570,24 @@ static void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *
         if (dc) IInspectable_AddRef( dc );
     }
 
+    if (dc)
+    {
+        void *npc = NULL;
+        if (SUCCEEDED(IInspectable_QueryInterface( dc, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
+        {
+            IUnknown_Release( (IUnknown *)npc );
+            uwp_calc_vm_set_instance( dc, NULL, FALSE );
+        }
+        else if (uwp_is_display_result_element( impl ))
+        {
+            uwp_calc_vm_set_instance( dc, NULL, FALSE );
+        }
+    }
+    else if (!is_calculator_app() && g_calc_vm.vm)
+    {
+        uwp_calc_vm_teardown( FALSE );
+    }
+
     for (i = 0; i < impl->dc_cnt; i++)
     {
         if (impl->dc_handlers[i])
@@ -5323,7 +5660,7 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         }
         IUnknown_Release( (IUnknown *)fe_ovr );
     }
-    if (is_calculator_app() && wcsstr( el->class_name, L"CalculationResult" ))
+    if (is_calculator_app() && uwp_is_display_result_element( el ))
     {
         uwp_calc_vm_ensure();
         uwp_sync_calc_display_from_vm();
@@ -7536,7 +7873,16 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             DWORD slen;
             if (p + 4 > end_p) break;
             slen = *(const DWORD *)(ctx->nodes + p);
-            p += 4 + slen * 2;
+            p += 4;
+            if (p + slen * 2 > end_p) break;
+            if (obj_sp > 0 && obj_stack[obj_sp - 1] && slen > 0)
+            {
+                struct uwp_element *top_el = obj_stack[obj_sp - 1];
+                DWORD cp = min( slen, (DWORD)(ARRAY_SIZE(top_el->x_class) - 1) );
+                memcpy( top_el->x_class, ctx->nodes + p, cp * sizeof(WCHAR) );
+                top_el->x_class[cp] = 0;
+            }
+            p += slen * 2;
         }
         else if (op == 0x0c) /* ConnectionId */
         {
@@ -9367,8 +9713,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         if (el->text[0])
         {
             RECT trc = el->bounds;
-            BOOL is_result = (!wcscmp( el->name, L"NormalOutput" ) || !wcscmp( el->name, L"Results" ) ||
-                              wcsstr( el->class_name, L"CalculationResult" ) != NULL);
+            BOOL is_result = uwp_is_display_result_element( el );
             int fh = is_result
                 ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
                 : max( (int)(12 * g_layout_scale + 0.5f), min( (int)(22 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
@@ -10683,8 +11028,11 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Panel" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Border" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Canvas" ) ||
-           !wcscmp( buf, L"Windows.UI.Xaml.Controls.Button" )))) &&
-        (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 )) &&
+           !wcscmp( buf, L"Windows.UI.Xaml.Controls.Button" ) ||
+           !wcscmp( buf, L"Windows.UI.Xaml.Controls.TextBlock" ) ||
+           !wcscmp( buf, L"CalculatorApp.Controls.CalculationResult" )))) &&
+        (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 ) ||
+         !wcscmp( buf, L"CalculatorApp.Controls.CalculationResult" )) &&
         wcscmp( buf, L"Windows.UI.Xaml.Application" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Window" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.PropertyMetadata" ) != 0 &&
