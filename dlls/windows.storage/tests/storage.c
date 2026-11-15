@@ -650,6 +650,80 @@ static void test_CollisionOptions_StreamContentType(void)
     RemoveDirectoryW( lstrcatW( path, L"wns_sub (1)" ) );
 }
 
+static void test_FileAttributes(void)
+{
+    static const WCHAR *class_name = L"Windows.Storage.StorageFile";
+    IStorageFileStatics *file_statics = NULL;
+    IAsyncOperation_StorageFile *file_op = NULL;
+    IAsyncOperation_FileAttributes *attr_op = NULL;
+    IStorageFile *file = NULL;
+    IStorageItem *item = NULL;
+    IStorageItem2 *item2 = NULL;
+    FileAttributes attr = (FileAttributes)0xffffffff, attr2 = (FileAttributes)0xffffffff;
+    WCHAR temp_dir[MAX_PATH], temp_file[MAX_PATH];
+    DWORD w32;
+    HSTRING str;
+    HRESULT hr;
+
+    GetTempPathW( MAX_PATH, temp_dir );
+    GetTempFileNameW( temp_dir, L"wns", 0, temp_file );
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "WindowsCreateString failed, hr %#lx\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IStorageFileStatics, (void **)&file_statics );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "RoGetActivationFactory StorageFile failed, hr %#lx\n", hr );
+
+    /* NotContentIndexed (extended bit, 8192) must round-trip through get_Attributes */
+    SetFileAttributesW( temp_file, FILE_ATTRIBUTE_NORMAL | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED );
+    w32 = GetFileAttributesW( temp_file );
+
+    hr = WindowsCreateString( temp_file, wcslen( temp_file ), &str );
+    ok( hr == S_OK, "WindowsCreateString failed, hr %#lx\n", hr );
+    hr = IStorageFileStatics_GetFileFromPathAsync( file_statics, str, &file_op );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "GetFileFromPathAsync failed, hr %#lx\n", hr );
+    hr = IAsyncOperation_StorageFile_GetResults( file_op, &file );
+    ok( hr == S_OK && !!file, "GetResults StorageFile failed, hr %#lx\n", hr );
+    IAsyncOperation_StorageFile_Release( file_op );
+
+    hr = IStorageFile_QueryInterface( file, &IID_IStorageItem, (void **)&item );
+    ok( hr == S_OK, "QI IStorageItem failed, hr %#lx\n", hr );
+
+    attr = (FileAttributes)0xffffffff;
+    hr = IStorageItem_get_Attributes( item, &attr );
+    ok( hr == S_OK, "get_Attributes failed, hr %#lx\n", hr );
+    ok( attr != (FileAttributes)0xffffffff, "get_Attributes did not write a value\n" );
+    ok( !(attr & FileAttributes_Directory), "file attributes should not have Directory bit, got %#x\n", attr );
+    if (w32 & FILE_ATTRIBUTE_NOT_CONTENT_INDEXED)
+        ok( attr & 0x2000, "expected NotContentIndexed (8192) in %#x\n", attr );
+
+    /* ReadOnly projection */
+    SetFileAttributesW( temp_file, FILE_ATTRIBUTE_READONLY );
+    w32 = GetFileAttributesW( temp_file );
+    hr = IStorageItem_get_Attributes( item, &attr );
+    ok( hr == S_OK, "get_Attributes #2 failed, hr %#lx\n", hr );
+    if (w32 & FILE_ATTRIBUTE_READONLY)
+        ok( attr & FileAttributes_ReadOnly, "expected ReadOnly bit in %#x\n", attr );
+
+    /* GetAttributesAsync via IStorageItem2 must agree with the property */
+    hr = IStorageFile_QueryInterface( file, &IID_IStorageItem2, (void **)&item2 );
+    ok( hr == S_OK, "QI IStorageItem2 failed, hr %#lx\n", hr );
+    hr = IStorageItem2_GetAttributesAsync( item2, &attr_op );
+    ok( hr == S_OK, "GetAttributesAsync failed, hr %#lx\n", hr );
+    hr = IAsyncOperation_FileAttributes_GetResults( attr_op, &attr2 );
+    ok( hr == S_OK, "GetAttributesAsync GetResults failed, hr %#lx\n", hr );
+    ok( attr2 == attr, "GetAttributesAsync %#x != get_Attributes %#x\n", attr2, attr );
+    IAsyncOperation_FileAttributes_Release( attr_op );
+
+    IStorageItem2_Release( item2 );
+    IStorageItem_Release( item );
+    IStorageFile_Release( file );
+    IStorageFileStatics_Release( file_statics );
+
+    DeleteFileW( temp_file );
+}
+
 START_TEST(storage)
 {
     HRESULT hr;
@@ -662,6 +736,7 @@ START_TEST(storage)
     test_InMemoryRandomAccessStream();
     test_DataReader_DataWriter();
     test_StorageFile_StorageFolder();
+    test_FileAttributes();
     test_FileIO_PathIO();
     test_CollisionOptions_StreamContentType();
 

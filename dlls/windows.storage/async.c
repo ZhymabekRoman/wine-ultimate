@@ -518,6 +518,24 @@ HRESULT async_operation_uint32_create( const WCHAR *class_name, UINT32 result, I
     return S_OK;
 }
 
+HRESULT async_operation_fileattributes_create( FileAttributes result, IAsyncOperation_FileAttributes **out )
+{
+    struct async_op *impl;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    /* FileAttributes is a 32-bit enum; reuse the UINT32 result plumbing. */
+    if (!(impl = async_op_alloc( &IID_IAsyncOperation_FileAttributes,
+                                 L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.FileAttributes>",
+                                 ASYNC_UINT32, async_op_vtbl_uint32 )))
+        return E_OUTOFMEMORY;
+
+    impl->result.u32 = result;
+    *out = (IAsyncOperation_FileAttributes *)&impl->IInspectable_iface;
+    return S_OK;
+}
+
 HRESULT async_operation_boolean_create( const WCHAR *class_name, boolean result, IAsyncOperation_boolean **out )
 {
     struct async_op *impl;

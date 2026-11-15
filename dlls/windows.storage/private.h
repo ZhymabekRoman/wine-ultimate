@@ -67,6 +67,7 @@ HRESULT random_access_stream_reference_create( IRandomAccessStream *stream, IRan
 
 HRESULT async_operation_inspectable_create( const GUID *iid, const WCHAR *class_name, IInspectable *result, void **out );
 HRESULT async_operation_uint32_create( const WCHAR *class_name, UINT32 result, IAsyncOperation_UINT32 **out );
+HRESULT async_operation_fileattributes_create( FileAttributes result, IAsyncOperation_FileAttributes **out );
 HRESULT async_operation_boolean_create( const WCHAR *class_name, boolean result, IAsyncOperation_boolean **out );
 HRESULT async_operation_hstring_create( const WCHAR *class_name, HSTRING result, IAsyncOperation_HSTRING **out );
 HRESULT async_action_create( const WCHAR *class_name, HRESULT hr_result, IAsyncAction **out );

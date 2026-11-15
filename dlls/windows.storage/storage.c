@@ -116,6 +116,7 @@ struct storage_file
     IStorageFile IStorageFile_iface;
     IStorageFile2 IStorageFile2_iface;
     IStorageItem IStorageItem_iface;
+    IStorageItem2 IStorageItem2_iface;
     IRandomAccessStreamReference IRandomAccessStreamReference_iface;
     IInputStreamReference IInputStreamReference_iface;
     LONG ref;
@@ -156,6 +157,13 @@ static HRESULT WINAPI storage_file_QueryInterface( IStorageFile *iface, REFIID i
     if (IsEqualGUID( iid, &IID_IStorageItem ))
     {
         *out = &impl->IStorageItem_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IStorageItem2 ))
+    {
+        *out = &impl->IStorageItem2_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -580,14 +588,27 @@ static HRESULT WINAPI storage_item_file_get_Path( IStorageItem *iface, HSTRING *
     return WindowsCreateString( impl->path, wcslen( impl->path ), value );
 }
 
+/*
+ * Translate Win32 FILE_ATTRIBUTE_* bits into the WinRT FileAttributes projection.
+ * ReadOnly/Directory/Archive/Temporary share values between the two enums; Hidden
+ * and System have no WinRT counterpart and are dropped. Offline and
+ * NotContentIndexed are passed through as extended bits.
+ */
+static FileAttributes file_attributes_from_win32( DWORD attr )
+{
+    if (attr == INVALID_FILE_ATTRIBUTES) return FileAttributes_Normal;
+
+    return (FileAttributes)(attr & (FileAttributes_ReadOnly | FileAttributes_Directory | FileAttributes_Archive
+                                    | FileAttributes_Temporary | FILE_ATTRIBUTE_OFFLINE
+                                    | FILE_ATTRIBUTE_NOT_CONTENT_INDEXED));
+}
+
 static HRESULT WINAPI storage_item_file_get_Attributes( IStorageItem *iface, FileAttributes *value )
 {
     struct storage_file *impl = impl_from_IStorageItem_File( iface );
-    DWORD attr;
 
     if (!value) return E_POINTER;
-    attr = GetFileAttributesW( impl->path );
-    *value = (attr == INVALID_FILE_ATTRIBUTES) ? FileAttributes_Normal : (FileAttributes)attr;
+    *value = file_attributes_from_win32( GetFileAttributesW( impl->path ) );
     return S_OK;
 }
 
@@ -622,6 +643,77 @@ static const struct IStorageItemVtbl storage_item_file_vtbl =
     storage_item_file_get_Attributes,
     storage_item_file_get_DateCreated,
     storage_item_file_IsOfType,
+};
+
+/* IStorageItem2 */
+DEFINE_IINSPECTABLE( storage_item2_file, IStorageItem2, struct storage_file, IStorageFile_iface )
+
+static HRESULT WINAPI storage_item2_file_GetParentAsync( IStorageItem2 *iface, IAsyncOperation_IStorageItem **result )
+{
+    struct storage_file *impl = impl_from_IStorageItem2( iface );
+    WCHAR parent[MAX_PATH], *slash;
+    IStorageFolder *folder = NULL;
+    HRESULT hr;
+
+    if (!result) return E_POINTER;
+
+    lstrcpyW( parent, impl->path );
+    if (!(slash = wcsrchr( parent, '\\' )) && !(slash = wcsrchr( parent, '/' ))) return E_FAIL;
+    *slash = 0;
+    if (!*parent) lstrcpyW( parent, L"\\" );
+
+    if (FAILED(hr = storage_folder_create( parent, &folder )))
+        return hr;
+
+    hr = async_operation_inspectable_create( &IID_IAsyncOperation_IStorageItem,
+            L"Windows.Foundation.IAsyncOperation`1<Windows.Storage.IStorageItem>",
+            (IInspectable *)folder, (void **)result );
+    IStorageFolder_Release( folder );
+    return hr;
+}
+
+static HRESULT WINAPI storage_item2_file_IsEqual( IStorageItem2 *iface, IStorageItem *item, boolean *result )
+{
+    struct storage_file *impl = impl_from_IStorageItem2( iface );
+    const WCHAR *path;
+    HSTRING str = NULL;
+    HRESULT hr;
+
+    if (!result) return E_POINTER;
+    *result = FALSE;
+    if (!item) return S_OK;
+
+    if (FAILED(hr = IStorageItem_get_Path( item, &str )))
+        return hr;
+
+    path = WindowsGetStringRawBuffer( str, NULL );
+    *result = path && !lstrcmpiW( path, impl->path );
+    WindowsDeleteString( str );
+    return S_OK;
+}
+
+static HRESULT WINAPI storage_item2_file_GetAttributesAsync( IStorageItem2 *iface, IAsyncOperation_FileAttributes **result )
+{
+    struct storage_file *impl = impl_from_IStorageItem2( iface );
+    FileAttributes attr;
+
+    if (!result) return E_POINTER;
+
+    attr = file_attributes_from_win32( GetFileAttributesW( impl->path ) );
+    return async_operation_fileattributes_create( attr, result );
+}
+
+static const struct IStorageItem2Vtbl storage_item2_file_vtbl =
+{
+    storage_item2_file_QueryInterface,
+    storage_item2_file_AddRef,
+    storage_item2_file_Release,
+    storage_item2_file_GetIids,
+    storage_item2_file_GetRuntimeClassName,
+    storage_item2_file_GetTrustLevel,
+    storage_item2_file_GetParentAsync,
+    storage_item2_file_IsEqual,
+    storage_item2_file_GetAttributesAsync,
 };
 
 /* IRandomAccessStreamReference for StorageFile */
@@ -721,6 +813,7 @@ HRESULT storage_file_create( const WCHAR *path, IStorageFile **out )
     impl->IStorageFile_iface.lpVtbl = &storage_file_vtbl;
     impl->IStorageFile2_iface.lpVtbl = &storage_file2_vtbl;
     impl->IStorageItem_iface.lpVtbl = &storage_item_file_vtbl;
+    impl->IStorageItem2_iface.lpVtbl = &storage_item2_file_vtbl;
     impl->IRandomAccessStreamReference_iface.lpVtbl = &storage_file_stream_ref_vtbl;
     impl->IInputStreamReference_iface.lpVtbl = &storage_file_input_ref_vtbl;
     impl->ref = 1;
@@ -1483,8 +1576,11 @@ static HRESULT WINAPI storage_item_folder_get_Path( IStorageItem *iface, HSTRING
 
 static HRESULT WINAPI storage_item_folder_get_Attributes( IStorageItem *iface, FileAttributes *value )
 {
+    struct storage_folder *impl = impl_from_IStorageItem_Folder( iface );
+
     if (!value) return E_POINTER;
-    *value = FileAttributes_Directory;
+    *value = file_attributes_from_win32( GetFileAttributesW( impl->path ) );
+    if (*value == FileAttributes_Normal) *value = FileAttributes_Directory;
     return S_OK;
 }
 
