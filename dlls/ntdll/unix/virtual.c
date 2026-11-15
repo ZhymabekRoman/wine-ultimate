@@ -138,6 +138,7 @@ struct file_view
 #define VPROT_GUARD      0x10
 #define VPROT_COMMITTED  0x20
 #define VPROT_WRITEWATCH 0x40
+#define VPROT_EXEC_SUSPENDED 0x80  /* host mapping has no exec: write access was granted */
 /* per-mapping protection flags */
 #define VPROT_ARM64EC          0x0100  /* view may contain ARM64EC code */
 #define VPROT_SYSTEM           0x0200  /* system view (underlying mmap not under our control) */
@@ -265,6 +266,29 @@ static inline BOOL is_beyond_limit( const void *addr, size_t size, const void *l
 static inline BOOL is_vprot_exec_write( BYTE vprot )
 {
     return (vprot & VPROT_EXEC) && (vprot & (VPROT_WRITE | VPROT_WRITECOPY));
+}
+
+/* A/B gate for layer-2: the VPROT_EXEC_SUSPENDED fault-driven exec/write
+ * alternation for private EXEC+WRITE pages.  Layer-1 (compound PAGE_*
+ * normalisation in get_vprot_flags) is always active; layer-2 is enabled by
+ * default and becomes inert when WINE_DISABLE_VPROT_LAYER2=1 is present in
+ * the environment: the flag is then never set on a vprot and every branch
+ * that consumes it is skipped, giving pure layer-1 behaviour.
+ * The env var is evaluated lazily exactly once (same tri-state trick as
+ * vfs_cache_disabled in file.c); a benign race between threads evaluating it
+ * concurrently is acceptable for an A/B experiment. */
+static int layer2_disabled_state = -1;  /* -1 = unset, 0 = enabled, 1 = disabled */
+
+static inline BOOL layer2_disabled(void)
+{
+    int state = layer2_disabled_state;
+    if (state == -1)
+    {
+        const char *env = getenv( "WINE_DISABLE_VPROT_LAYER2" );
+        state = (env && env[0] == '1') ? 1 : 0;
+        layer2_disabled_state = state;
+    }
+    return state;
 }
 
 /* mmap() anonymous memory at a fixed address */
@@ -1207,6 +1231,40 @@ static void set_page_vprot( const void *addr, size_t size, BYTE vprot )
 #endif
 }
 
+static BOOL is_page_vprot_all( const void *addr, size_t size, BYTE vprot )
+{
+    size_t idx = (size_t)addr >> page_shift;
+    size_t end = ((size_t)addr + size + page_mask) >> page_shift;
+
+#ifdef _WIN64
+    while (idx >> pages_vprot_shift != end >> pages_vprot_shift)
+    {
+        size_t dir_size = pages_vprot_mask + 1 - (idx & pages_vprot_mask);
+        const BYTE *ptr = pages_vprot[idx >> pages_vprot_shift];
+        size_t i;
+        if (!ptr) return FALSE;
+        ptr += (idx & pages_vprot_mask);
+        for (i = 0; i < dir_size; i++)
+            if (ptr[i] != vprot) return FALSE;
+        idx += dir_size;
+    }
+    {
+        const BYTE *ptr = pages_vprot[idx >> pages_vprot_shift];
+        size_t rem = end - idx;
+        size_t i;
+        if (!ptr) return FALSE;
+        ptr += (idx & pages_vprot_mask);
+        for (i = 0; i < rem; i++)
+            if (ptr[i] != vprot) return FALSE;
+    }
+#else
+    size_t i;
+    for (i = idx; i < end; i++)
+        if (pages_vprot[i] != vprot) return FALSE;
+#endif
+    return TRUE;
+}
+
 
 /***********************************************************************
  *           set_page_vprot_bits
@@ -1376,6 +1434,7 @@ static int get_unix_prot( BYTE vprot )
         if (vprot & VPROT_WRITECOPY) prot |= PROT_WRITE | PROT_READ;
         if (vprot & VPROT_EXEC) prot |= PROT_EXEC | PROT_READ;
         if (vprot & VPROT_WRITEWATCH) prot &= ~PROT_WRITE;
+        if (!layer2_disabled() && (vprot & VPROT_EXEC_SUSPENDED)) prot &= ~PROT_EXEC;
     }
     if (!prot) prot = PROT_NONE;
     return prot;
@@ -1806,6 +1865,20 @@ static void free_view( struct file_view *view )
 }
 
 
+#define VQUERY_CACHE_SIZE 32
+struct vquery_cache_entry {
+    const void *base_page;
+    MEMORY_BASIC_INFORMATION info;
+    unsigned int gen;
+};
+static struct vquery_cache_entry vquery_cache[VQUERY_CACHE_SIZE];
+static unsigned int vquery_cache_gen = 1;
+
+static inline void invalidate_vquery_cache(void)
+{
+    __atomic_add_fetch( &vquery_cache_gen, 1, __ATOMIC_RELEASE );
+}
+
 /***********************************************************************
  *           unregister_view
  *
@@ -1813,6 +1886,7 @@ static void free_view( struct file_view *view )
  */
 static void unregister_view( struct file_view *view )
 {
+    invalidate_vquery_cache();
     if (mmap_is_in_reserved_area( view->base, view->size ))
         free_ranges_remove_view( view );
     wine_rb_remove( &views_tree, &view->entry );
@@ -1841,6 +1915,7 @@ static void delete_view( struct file_view *view ) /* [in] View */
  */
 static void register_view( struct file_view *view )
 {
+    invalidate_vquery_cache();
     wine_rb_put( &views_tree, view->base, &view->entry );
     if (mmap_is_in_reserved_area( view->base, view->size ))
         free_ranges_insert_view( view );
@@ -1916,6 +1991,28 @@ static DWORD get_win32_prot( BYTE vprot, unsigned int map_prot )
  */
 static NTSTATUS get_vprot_flags( DWORD protect, unsigned int *vprot, BOOL image )
 {
+    static const DWORD exe_mask = PAGE_EXECUTE | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY;
+    static const DWORD acc_mask = PAGE_READONLY | PAGE_READWRITE | PAGE_WRITECOPY;
+    DWORD type = protect & 0xff;
+
+    /* windows treats the PAGE_EXECUTE_* bits as modifiers that may be combined
+     * with the base access rights, e.g. PAGE_EXECUTE_READWRITE | PAGE_READWRITE
+     * (0x44) requests read/write/execute and is accepted. Normalise such
+     * compound forms to the single canonical value with the same rights
+     * instead of rejecting them as an invalid protection. */
+    if ((type & exe_mask) && !(type & ~(exe_mask | acc_mask | PAGE_NOACCESS)))
+    {
+        const BOOL has_write = !!(type & (PAGE_READWRITE | PAGE_EXECUTE_READWRITE));
+        const BOOL has_writecopy = !!(type & (PAGE_WRITECOPY | PAGE_EXECUTE_WRITECOPY));
+        const BOOL has_read = !!(type & (acc_mask | PAGE_EXECUTE_READ | PAGE_EXECUTE_READWRITE | PAGE_EXECUTE_WRITECOPY));
+
+        if (has_writecopy) type = PAGE_EXECUTE_WRITECOPY;
+        else if (has_write) type = PAGE_EXECUTE_READWRITE;
+        else if (has_read) type = PAGE_EXECUTE_READ;
+        else type = PAGE_EXECUTE;
+        protect = (protect & ~0xff) | type;
+    }
+
     switch(protect & 0xff)
     {
     case PAGE_READONLY:
@@ -2021,6 +2118,10 @@ static BOOL set_vprot( struct file_view *view, void *base, size_t size, BYTE vpr
     {
         if (enable_write_exceptions && is_vprot_exec_write( vprot )) vprot |= VPROT_WRITEWATCH;
         else if (use_kernel_writewatch && view->protect & VPROT_WRITEWATCH) vprot &= ~VPROT_WRITEWATCH;
+
+        if (!(view->protect & VPROT_WRITEWATCH) && !enable_write_exceptions && is_page_vprot_all( base, size, vprot ))
+            return TRUE;
+
         set_page_vprot( base, size, vprot );
     }
     return !mprotect_range( base, size, 0, 0 );
@@ -2041,6 +2142,12 @@ static NTSTATUS set_protection( struct file_view *view, void *base, SIZE_T size,
     if (is_view_valloc( view ))
     {
         if (vprot & VPROT_WRITECOPY) return STATUS_INVALID_PAGE_PROTECTION;
+        /* CoreRT/CoreCLR's interop stub heap is a plain PAGE_READWRITE
+         * VirtualAlloc region that the runtime both writes (stub emission) and
+         * executes from; on Windows committed pages of a VirtualAlloc region
+         * carry execute. Map committed writable pages of a valloc view executable
+         * so the stubs run directly instead of faulting on every invocation. */
+        if (vprot & VPROT_WRITE) vprot |= VPROT_EXEC;
     }
     else
     {
@@ -3360,6 +3467,33 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
         if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)   vprot |= VPROT_WRITECOPY;
         if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
 
+#ifdef MADV_MERGEABLE
+        /* Enable KSM kernel samepage merging for read-only constant data (.rdata) */
+        if ((sec[i].Characteristics & IMAGE_SCN_MEM_READ) &&
+            !(sec[i].Characteristics & (IMAGE_SCN_MEM_WRITE | IMAGE_SCN_MEM_EXECUTE)))
+        {
+            madvise( ptr + sec[i].VirtualAddress, size, MADV_MERGEABLE );
+        }
+#endif
+
+#ifdef MADV_POPULATE_READ
+        /* Synchronously populate executable page tables (.text) to eliminate startup minor faults */
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
+        {
+            if (madvise( ptr + sec[i].VirtualAddress, size, MADV_POPULATE_READ ))
+            {
+#ifdef MADV_WILLNEED
+                madvise( ptr + sec[i].VirtualAddress, size, MADV_WILLNEED );
+#endif
+            }
+        }
+#elif defined(MADV_WILLNEED)
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE)
+        {
+            madvise( ptr + sec[i].VirtualAddress, size, MADV_WILLNEED );
+        }
+#endif
+
         if (!set_vprot( view, ptr + sec[i].VirtualAddress, size, vprot ) && (vprot & VPROT_EXEC))
             ERR( "failed to set %08x protection on %s section %.8s, noexec filesystem?\n",
                  sec[i].Characteristics, debugstr_us(nt_name), sec[i].Name );
@@ -3628,6 +3762,15 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
     }
     if (NT_SUCCESS(status))
     {
+#ifdef MADV_HUGEPAGE
+        if (size >= 2 * 1024 * 1024)
+        {
+            madvise( view->base, size, MADV_HUGEPAGE );
+#ifdef MADV_COLLAPSE
+            madvise( view->base, size, MADV_COLLAPSE );
+#endif
+        }
+#endif
         if (is_builtin && !offset) add_builtin_module( view->base, NULL );
         *addr_ptr = view->base;
         *size_ptr = size;
@@ -3769,6 +3912,10 @@ static unsigned int virtual_map_section( HANDLE handle, PVOID *addr_ptr, ULONG_P
     {
         *addr_ptr = view->base;
         *size_ptr = size;
+#ifdef MADV_POPULATE_READ
+        if ((vprot & VPROT_READ) && !(vprot & VPROT_WRITE) && size >= 64 * 1024)
+            madvise( view->base, size, MADV_POPULATE_READ );
+#endif
         VIRTUAL_DEBUG_DUMP_VIEW( view );
     }
     else delete_view( view );
@@ -4829,15 +4976,40 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, 
         }
         else ret = grow_thread_stack( data, page, &stack_info );
     }
+    else if (!layer2_disabled() && (err == EXCEPTION_EXECUTE_FAULT || err == EXCEPTION_READ_FAULT) && (vprot & VPROT_EXEC_SUSPENDED))
+    {
+        /* a write was granted to this page earlier, which had to remove host
+         * execution permission; restore it and re-arm the write watch */
+        set_page_vprot_bits( page, host_page_size, VPROT_WRITEWATCH, VPROT_EXEC_SUSPENDED );
+        mprotect_range( page, host_page_size, 0, 0 );
+        ret = STATUS_SUCCESS;
+    }
     else if (err == EXCEPTION_WRITE_FAULT)
     {
         if (vprot & VPROT_WRITEWATCH)
         {
             if (enable_write_exceptions && is_vprot_exec_write( vprot ) && !data->allow_writes)
             {
-                rec->NumberParameters = 3;
-                rec->ExceptionInformation[2] = STATUS_EXECUTABLE_MEMORY_WRITE;
-                ret = STATUS_IN_PAGE_ERROR;
+                struct file_view *view = find_view( page, 0 );
+
+                /* on windows a write to a private read/write/execute allocation never
+                 * faults, so it must not be reported to the process. when the host
+                 * refuses writable executable mappings, grant the write by suspending
+                 * execution of that page; it is restored on the next execute fault.
+                 * with layer-2 disabled this grant is never made (the flag is not set),
+                 * so executable-memory writes are reported as in pure layer-1. */
+                if (!layer2_disabled() && view && !(view->protect & (SEC_FILE | SEC_IMAGE | SEC_RESERVE | SEC_COMMIT)))
+                {
+                    set_page_vprot_bits( page, host_page_size, VPROT_EXEC_SUSPENDED, VPROT_WRITEWATCH );
+                    mprotect_range( page, host_page_size, 0, 0 );
+                    ret = STATUS_SUCCESS;
+                }
+                else
+                {
+                    rec->NumberParameters = 3;
+                    rec->ExceptionInformation[2] = STATUS_EXECUTABLE_MEMORY_WRITE;
+                    ret = STATUS_IN_PAGE_ERROR;
+                }
             }
             else
             {
@@ -5432,6 +5604,14 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
                 }
                 SERVER_END_REQ;
             }
+
+#ifdef MADV_HUGEPAGE
+            /* Enable Transparent Huge Pages for large anonymous allocations (>= 2MB) */
+            if (!status && size >= 2 * 1024 * 1024 && view && !(view->protect & SEC_FILE))
+            {
+                madvise( base, size, MADV_HUGEPAGE );
+            }
+#endif
         }
     }
 
@@ -6026,7 +6206,25 @@ static unsigned int get_basic_memory_info( HANDLE process, LPCVOID addr,
         return result.virtual_query.status;
     }
 
-    if ((status = fill_basic_memory_info( addr, info ))) return status;
+    {
+        const void *base_page = ROUND_ADDR( addr, page_mask );
+        unsigned int idx = ((ULONG_PTR)base_page >> 12) % VQUERY_CACHE_SIZE;
+        struct vquery_cache_entry *entry = &vquery_cache[idx];
+        unsigned int gen = __atomic_load_n( &vquery_cache_gen, __ATOMIC_ACQUIRE );
+
+        if (entry->base_page == base_page && entry->gen == gen)
+        {
+            *info = entry->info;
+            if (res_len) *res_len = sizeof(*info);
+            return STATUS_SUCCESS;
+        }
+
+        if ((status = fill_basic_memory_info( addr, info ))) return status;
+
+        entry->base_page = base_page;
+        entry->info = *info;
+        entry->gen = gen;
+    }
 
     if (res_len) *res_len = sizeof(*info);
     return STATUS_SUCCESS;
