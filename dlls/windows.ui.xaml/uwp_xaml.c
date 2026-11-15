@@ -1812,6 +1812,51 @@ struct uwp_defer_entry
     BOOL realized;
 };
 
+struct uwp_vsm_setter
+{
+    WCHAR target[64];
+    WCHAR property[64];
+    WCHAR val_str[128];
+    int vt;
+    double num;
+    BOOL is_res_ref;
+    BOOL has_saved;
+    int saved_grid_len_type;
+    double saved_grid_len_val;
+    int saved_visibility;
+    double saved_width;
+    double saved_height;
+    double saved_min_width;
+    double saved_max_width;
+    double saved_min_height;
+    double saved_max_height;
+    boolean saved_is_enabled;
+    int saved_grid_row;
+    int saved_grid_col;
+    double saved_font_size;
+};
+
+struct uwp_vsm_state
+{
+    WCHAR name[64];
+    BOOL has_trigger;
+    double min_window_width;
+    double min_window_height;
+    struct uwp_vsm_setter *setters;
+    int setter_cnt;
+    int setter_cap;
+};
+
+struct uwp_vsm_group
+{
+    WCHAR name[64];
+    WCHAR current_state[64];
+    int active_state_idx;
+    struct uwp_vsm_state *states;
+    int state_cnt;
+    int state_cap;
+};
+
 struct uwp_element
 {
     IInspectable nondelegating_iface;
@@ -1973,6 +2018,9 @@ struct uwp_element
     } xbf_refs[32];
     int xbf_ref_cnt;
     BOOL xbf_parsed;
+    struct uwp_vsm_group *vsm_groups;
+    int vsm_group_cnt;
+    int vsm_group_cap;
     WCHAR image_src[256];
     BYTE *img_pixels;
     UINT img_w, img_h;
@@ -6804,10 +6852,13 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x808a: return L"Windows.UI.Xaml.VisualStateGroup";
     case 0x80bf: return L"Windows.UI.Xaml.DataTemplate";
     case 0x80c2: return L"Windows.UI.Xaml.Media.SolidColorBrush";
+    case 0x80c5: return L"Windows.UI.Xaml.Media.Animation.DiscreteObjectKeyFrame";
     case 0x80d2: return L"Windows.UI.Xaml.Media.SolidColorBrush";
     case 0x80d5: return L"Windows.UI.Xaml.Controls.Flyout";
     case 0x80ee: return L"Windows.UI.Xaml.Controls.MenuFlyout";
+    case 0x80f0: return L"Windows.UI.Xaml.Media.Animation.ObjectAnimationUsingKeyFrames";
     case 0x8106: return L"Windows.UI.Xaml.Setter";
+    case 0x8107: return L"Windows.UI.Xaml.Setter";
     case 0x8109: return L"Windows.UI.Xaml.Media.SolidColorBrush";
     case 0x811e: return L"Windows.UI.Xaml.Controls.Border";
     case 0x8146: return L"Windows.UI.Xaml.Controls.Image";
@@ -6832,6 +6883,7 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x8228: return L"Windows.UI.Xaml.Controls.ScrollViewer";
     case 0x8232: return L"Windows.UI.Xaml.Controls.RadioButton";
     case 0x8234: return L"Windows.UI.Xaml.Controls.Primitives.ToggleButton";
+    case 0x8242: return L"Windows.UI.Xaml.GridLength";
     case 0x82ea: return L"Windows.UI.Xaml.DeferredElement";
     case 0x82f5: return L"Windows.UI.Xaml.AdaptiveTrigger";
     case 0x8381: return L"Windows.UI.Xaml.Input.KeyboardAccelerator";
@@ -6941,6 +6993,7 @@ struct xbf_ctx
     struct uwp_rd_bucket *target_rd;
     char base_xbf_dir[256];
     BOOL rd_only;
+    BOOL vsm_collect;
 };
 
 struct xbf_rd_map_item
@@ -6958,6 +7011,7 @@ struct xbf_rd_table
 struct xbf_stack_val
 {
     enum uwp_rd_kind kind;
+    WORD tid;
     struct uwp_element *el;
     IInspectable *raw;
     UINT32 argb;
@@ -6970,7 +7024,109 @@ struct xbf_stack_val
     struct uwp_style_setter *setters;
     int setter_cnt;
     int setter_cap;
+    WCHAR vsm_target[64];
+    WCHAR vsm_prop[64];
+    WCHAR vsm_val_str[128];
+    int vsm_vt;
+    double vsm_num;
+    BOOL vsm_is_res_ref;
+    BOOL vsm_has_val;
 };
+
+static struct uwp_vsm_group *uwp_vsm_add_group( struct uwp_element *el, const WCHAR *name )
+{
+    struct uwp_vsm_group *g;
+    if (!el) return NULL;
+    if (el->vsm_group_cnt >= el->vsm_group_cap)
+    {
+        int ncap = el->vsm_group_cap ? el->vsm_group_cap * 2 : 4;
+        struct uwp_vsm_group *ng = realloc( el->vsm_groups, (size_t)ncap * sizeof(*ng) );
+        if (!ng) return NULL;
+        el->vsm_groups = ng;
+        el->vsm_group_cap = ncap;
+    }
+    g = &el->vsm_groups[el->vsm_group_cnt++];
+    memset( g, 0, sizeof(*g) );
+    g->active_state_idx = -1;
+    if (name && name[0]) lstrcpynW( g->name, name, ARRAY_SIZE(g->name) );
+    return g;
+}
+
+static struct uwp_vsm_state *uwp_vsm_add_state( struct uwp_vsm_group *g, const WCHAR *name )
+{
+    struct uwp_vsm_state *st;
+    if (!g) return NULL;
+    if (g->state_cnt >= g->state_cap)
+    {
+        int ncap = g->state_cap ? g->state_cap * 2 : 8;
+        struct uwp_vsm_state *ns = realloc( g->states, (size_t)ncap * sizeof(*ns) );
+        if (!ns) return NULL;
+        g->states = ns;
+        g->state_cap = ncap;
+    }
+    st = &g->states[g->state_cnt++];
+    memset( st, 0, sizeof(*st) );
+    if (name && name[0]) lstrcpynW( st->name, name, ARRAY_SIZE(st->name) );
+    return st;
+}
+
+static void uwp_vsm_state_add_setter( struct uwp_vsm_state *st, const WCHAR *target, const WCHAR *prop,
+                                      const WCHAR *val_str, int vt, double num, BOOL is_res_ref )
+{
+    struct uwp_vsm_setter *s;
+    if (!st || !target || !target[0] || !prop || !prop[0]) return;
+    if (st->setter_cnt >= st->setter_cap)
+    {
+        int ncap = st->setter_cap ? st->setter_cap * 2 : 8;
+        struct uwp_vsm_setter *ns = realloc( st->setters, (size_t)ncap * sizeof(*ns) );
+        if (!ns) return;
+        st->setters = ns;
+        st->setter_cap = ncap;
+    }
+    s = &st->setters[st->setter_cnt++];
+    memset( s, 0, sizeof(*s) );
+    lstrcpynW( s->target, target, ARRAY_SIZE(s->target) );
+    lstrcpynW( s->property, prop, ARRAY_SIZE(s->property) );
+    if (val_str && val_str[0]) lstrcpynW( s->val_str, val_str, ARRAY_SIZE(s->val_str) );
+    s->vt = vt;
+    s->num = num;
+    s->is_res_ref = is_res_ref;
+}
+
+static void vsm_clean_prop_name( const WCHAR *raw, WCHAR *out_prop, size_t max_prop )
+{
+    const WCHAR *p = raw;
+    size_t len;
+    if (!out_prop || !max_prop) return;
+    out_prop[0] = 0;
+    if (!p) return;
+    while (*p == L' ' || *p == L'(') p++;
+    len = wcslen( p );
+    while (len > 0 && (p[len - 1] == L')' || p[len - 1] == L' ')) len--;
+    if (len >= max_prop) len = max_prop - 1;
+    memcpy( out_prop, p, len * sizeof(WCHAR) );
+    out_prop[len] = 0;
+}
+
+static void vsm_split_setter_target( const WCHAR *spec, WCHAR *out_target, size_t max_target,
+                                     WCHAR *out_prop, size_t max_prop )
+{
+    const WCHAR *dot;
+    size_t tlen;
+    if (out_target && max_target) out_target[0] = 0;
+    if (out_prop && max_prop) out_prop[0] = 0;
+    if (!spec || !spec[0]) return;
+    dot = wcschr( spec, L'.' );
+    if (!dot) return;
+    tlen = (size_t)(dot - spec);
+    if (out_target && max_target)
+    {
+        if (tlen >= max_target) tlen = max_target - 1;
+        memcpy( out_target, spec, tlen * sizeof(WCHAR) );
+        out_target[tlen] = 0;
+    }
+    vsm_clean_prop_name( dot + 1, out_prop, max_prop );
+}
 
 static BOOL xbf_read_uleb( const BYTE *buf, DWORD *io_p, DWORD end_p, DWORD *out_val )
 {
@@ -7382,6 +7538,30 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
         case 0x805f: /* ColumnDefinition.Width */
             if (vt == 0x07) { el->grid_len_type = (int)vec4[0]; el->grid_len_val = vec4[1]; }
             else if (vt == 0x03 || vt == 0x04) { el->grid_len_type = 1; el->grid_len_val = num; }
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE)
+                {
+                    el->grid_len_type = 1;
+                    el->grid_len_val = de->dval;
+                }
+            }
+            break;
+        case 0x805d: /* ColumnDefinition.MaxWidth */
+        case 0x818e: /* FrameworkElement.MaxWidth */
+            if (vt == 0x03 || vt == 0x04) el->max_width = num;
+            break;
+        case 0x805e: /* ColumnDefinition.MinWidth */
+            if (vt == 0x03 || vt == 0x04) el->min_width = num;
+            break;
+        case 0x80e4: /* RowDefinition.MaxHeight */
+        case 0x818f: /* FrameworkElement.MaxHeight */
+            if (vt == 0x03 || vt == 0x04) el->max_height = num;
+            break;
+        case 0x80e5: /* RowDefinition.MinHeight */
+            if (vt == 0x03 || vt == 0x04) el->min_height = num;
             break;
         case 0x818d: /* Margin */
             if (vt == 0x06)
@@ -7478,6 +7658,7 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
             }
             break;
         case 0x8188: /* Height */
+        case 0x8189: /* FrameworkElement.Height */
             if (vt == 0x03 || vt == 0x04) el->height = num;
             else if (is_res_ref && sval && sval[0])
             {
@@ -7488,10 +7669,24 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
             }
             break;
         case 0x8191: /* MinWidth */
-            el->min_width = num;
+            if (vt == 0x03 || vt == 0x04) el->min_width = num;
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE)
+                    el->min_width = de->dval;
+            }
             break;
         case 0x8190: /* MinHeight */
-            el->min_height = num;
+            if (vt == 0x03 || vt == 0x04) el->min_height = num;
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE)
+                    el->min_height = de->dval;
+            }
             break;
         case 0x818a: /* HorizontalAlignment */
             el->h_align = (int)num;
@@ -7499,9 +7694,10 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
         case 0x8198: /* VerticalAlignment */
             el->v_align = (int)num;
             break;
-        case 0x8138: /* StackPanel.Orientation */
+        case 0x8438: /* StackPanel.Orientation */
             el->orientation = (int)num;
             break;
+        case 0x8138: /* UIElement.Visibility (XBF v2) */
         case 0x8167: /* UIElement.Visibility */
             el->visibility = (int)num;
             break;
@@ -7716,6 +7912,11 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 sv.kind = UWP_RD_DOUBLE;
                 sv.dval = num_init;
             }
+            else if (tid == 0x8242)
+            {
+                sv.kind = UWP_RD_DOUBLE;
+                sv.dval = (vt_init == 0x07) ? vec4_init[1] : num_init;
+            }
             else if (tid == 0x807c)
             {
                 sv.kind = UWP_RD_THICKNESS;
@@ -7851,9 +8052,23 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     }
                 }
             }
+            sv.tid = tid;
             sv.el = el;
             sv.raw = inst;
             if (out_created && !*out_created && el) *out_created = el;
+
+            if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && ctx->root_el)
+            {
+                if (tid == 0x808a)
+                    uwp_vsm_add_group( ctx->root_el, NULL );
+                else if (tid == 0x8089)
+                {
+                    struct uwp_vsm_group *grp = (ctx->root_el->vsm_group_cnt > 0)
+                        ? &ctx->root_el->vsm_groups[ctx->root_el->vsm_group_cnt - 1]
+                        : uwp_vsm_add_group( ctx->root_el, L"DefaultGroup" );
+                    uwp_vsm_add_state( grp, NULL );
+                }
+            }
 
             if (obj_sp < (int)ARRAY_SIZE(obj_stack))
             {
@@ -7911,12 +8126,24 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             double num = 0;
             WCHAR sbuf[128] = {0};
             if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
-            if (obj_sp > 0 && obj_stack[obj_sp - 1] && sbuf[0])
+            if (obj_sp > 0 && sbuf[0])
             {
                 struct uwp_element *top_el = obj_stack[obj_sp - 1];
-                lstrcpynW( top_el->name, sbuf, ARRAY_SIZE(top_el->name) );
-                if (ctx->root_el && ctx->root_el->named_cnt < (int)ARRAY_SIZE(ctx->root_el->named_elems))
-                    ctx->root_el->named_elems[ctx->root_el->named_cnt++] = top_el;
+                WORD top_tid = val_stack[obj_sp - 1].tid;
+                if (top_el)
+                {
+                    lstrcpynW( top_el->name, sbuf, ARRAY_SIZE(top_el->name) );
+                    if (ctx->root_el && ctx->root_el->named_cnt < (int)ARRAY_SIZE(ctx->root_el->named_elems))
+                        ctx->root_el->named_elems[ctx->root_el->named_cnt++] = top_el;
+                }
+                if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && ctx->root_el && ctx->root_el->vsm_group_cnt > 0)
+                {
+                    struct uwp_vsm_group *grp = &ctx->root_el->vsm_groups[ctx->root_el->vsm_group_cnt - 1];
+                    if (top_tid == 0x808a)
+                        lstrcpynW( grp->name, sbuf, ARRAY_SIZE(grp->name) );
+                    else if (top_tid == 0x8089 && grp->state_cnt > 0)
+                        lstrcpynW( grp->states[grp->state_cnt - 1].name, sbuf, ARRAY_SIZE(grp->states[grp->state_cnt - 1].name) );
+                }
             }
         }
         else if (op == 0x0e) /* x:Key */
@@ -7980,8 +8207,61 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             p += 2;
             if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 )) break;
             if (obj_sp > 0)
-                xbf_apply_property( ctx, obj_stack[obj_sp - 1], &val_stack[obj_sp - 1],
+            {
+                struct xbf_stack_val *top_sv = &val_stack[obj_sp - 1];
+                xbf_apply_property( ctx, obj_stack[obj_sp - 1], top_sv,
                                     pid, vt, num, sbuf, vec4, is_res_ref );
+                if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && ctx->root_el && ctx->root_el->vsm_group_cnt > 0)
+                {
+                    struct uwp_vsm_group *grp = &ctx->root_el->vsm_groups[ctx->root_el->vsm_group_cnt - 1];
+                    struct uwp_vsm_state *st = (grp->state_cnt > 0) ? &grp->states[grp->state_cnt - 1] : NULL;
+                    if (top_sv->tid == 0x82f5 && st && (pid == 0x8618 || pid == 0x8619))
+                    {
+                        double trig_val = num;
+                        if ((is_res_ref || vt == 0x05 || vt == 0x09) && sbuf[0])
+                        {
+                            struct uwp_rd_entry *de = NULL;
+                            if (uwp_rd_find_entry( active_rd ? active_rd : ctx->target_rd, ctx->root_el, sbuf, 0, &de, NULL ) &&
+                                de && de->kind == UWP_RD_DOUBLE)
+                                trig_val = de->dval;
+                            else
+                                trig_val = wcstod( sbuf, NULL );
+                        }
+                        if (pid == 0x8618) st->min_window_height = trig_val;
+                        else st->min_window_width = trig_val;
+                        st->has_trigger = TRUE;
+                    }
+                    else if ((top_sv->tid == 0x8106 || top_sv->tid == 0x8107) && st)
+                    {
+                        if (pid == 0x861a && sbuf[0])
+                            vsm_split_setter_target( sbuf, top_sv->vsm_target, ARRAY_SIZE(top_sv->vsm_target),
+                                                     top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
+                        else if (pid == 0x81db)
+                        {
+                            lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
+                            top_sv->vsm_vt = vt;
+                            top_sv->vsm_num = num;
+                            top_sv->vsm_is_res_ref = is_res_ref;
+                            top_sv->vsm_has_val = TRUE;
+                        }
+                    }
+                    else if (top_sv->tid == 0x80f0 && st)
+                    {
+                        if (pid == 0x8306 && sbuf[0])
+                            lstrcpynW( top_sv->vsm_target, sbuf, ARRAY_SIZE(top_sv->vsm_target) );
+                        else if (pid == 0x8307 && sbuf[0])
+                            vsm_clean_prop_name( sbuf, top_sv->vsm_prop, ARRAY_SIZE(top_sv->vsm_prop) );
+                    }
+                    else if (top_sv->tid == 0x80c5 && st && pid == 0x80b8)
+                    {
+                        lstrcpynW( top_sv->vsm_val_str, sbuf, ARRAY_SIZE(top_sv->vsm_val_str) );
+                        top_sv->vsm_vt = vt;
+                        top_sv->vsm_num = num;
+                        top_sv->vsm_is_res_ref = is_res_ref;
+                        top_sv->vsm_has_val = TRUE;
+                    }
+                }
+            }
         }
         else if (op == 0x22) /* AddStaticResourceValue <xbf_value> */
         {
@@ -8007,6 +8287,28 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 last_popped_off = start_off_stack[obj_sp];
                 memset( &val_stack[obj_sp], 0, sizeof(val_stack[obj_sp]) );
                 has_last_popped = TRUE;
+
+                if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && ctx->root_el && ctx->root_el->vsm_group_cnt > 0)
+                {
+                    struct uwp_vsm_group *grp = &ctx->root_el->vsm_groups[ctx->root_el->vsm_group_cnt - 1];
+                    struct uwp_vsm_state *st = (grp->state_cnt > 0) ? &grp->states[grp->state_cnt - 1] : NULL;
+                    if ((last_popped.tid == 0x8106 || last_popped.tid == 0x8107) && st &&
+                        last_popped.vsm_target[0] && last_popped.vsm_prop[0] && last_popped.vsm_has_val)
+                    {
+                        uwp_vsm_state_add_setter( st, last_popped.vsm_target, last_popped.vsm_prop,
+                                                  last_popped.vsm_val_str, last_popped.vsm_vt,
+                                                  last_popped.vsm_num, last_popped.vsm_is_res_ref );
+                    }
+                    else if (last_popped.tid == 0x80c5 && st && last_popped.vsm_has_val &&
+                             obj_sp > 0 && val_stack[obj_sp - 1].tid == 0x80f0 &&
+                             val_stack[obj_sp - 1].vsm_target[0] && val_stack[obj_sp - 1].vsm_prop[0])
+                    {
+                        uwp_vsm_state_add_setter( st, val_stack[obj_sp - 1].vsm_target,
+                                                  val_stack[obj_sp - 1].vsm_prop,
+                                                  last_popped.vsm_val_str, last_popped.vsm_vt,
+                                                  last_popped.vsm_num, last_popped.vsm_is_res_ref );
+                    }
+                }
 
                 /* Indexed ResourceDictionary entry without trailing 0x0a AddToDictionary (e.g. Dark.xbf) */
                 if (active_rd && rd_tbl && obj_sp == base_sp)
@@ -8099,7 +8401,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                         if (!parent_el->col_defs_coll) uwp_vec_create( parent_el, &parent_el->col_defs_coll );
                         uwp_vec_Append( parent_el->col_defs_coll, last_popped.raw );
                     }
-                    else if (pid == 0x8288 || parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL)
+                    else if (pid == 0x8288 || pid == 0x8377 || parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL)
                     {
                         if (!parent_el->children_coll) uwp_vec_create( parent_el, &parent_el->children_coll );
                         uwp_vec_Append( parent_el->children_coll, last_popped.raw );
@@ -8181,11 +8483,17 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                             xbf_apply_property( ctx, parent_el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
                         }
                     }
+                    else if (pid == 0x000c && last_popped.el && last_popped.el->text[0])
+                    {
+                        if (!parent_el->text[0])
+                            lstrcpynW( parent_el->text, last_popped.el->text, ARRAY_SIZE(parent_el->text) );
+                    }
                     else if (last_popped.raw &&
                              last_popped.kind != UWP_KIND_STYLE &&
                              last_popped.kind != UWP_KIND_BRUSH &&
                              last_popped.kind != UWP_KIND_COLOR &&
-                             (pid == 0x8340 || pid == 0x83e7 || pid == 0x8134 || pid == 0x829c || !parent_el->content))
+                             (pid == 0x8340 || pid == 0x83e7 || pid == 0x81fa || pid == 0x8134 || pid == 0x829c ||
+                              (!parent_el->content && pid != 0x8133 && pid != 0x8194 && pid != 0x8010 && pid != 0x000c)))
                     {
                         if (parent_el->content) IInspectable_Release( parent_el->content );
                         parent_el->content = last_popped.raw;
@@ -8210,7 +8518,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 WCHAR resolved[256] = {0};
                 if (uwp_pri_lookup_string( last_popped.el->text, resolved, ARRAY_SIZE(resolved) ) && resolved[0])
                 {
-                    if (pid == 0x8340 || pid == 0x8769 || !target_el->text[0])
+                    if (pid == 0x8340 || pid == 0x8769 || pid == 0x8320 || !target_el->text[0])
                         lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
                 }
             }
@@ -8261,7 +8569,12 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             {
                 DWORD n_states = 0, s_idx;
                 if (!ctx->rd_only)
+                {
+                    BOOL prev_vsm = ctx->vsm_collect;
+                    ctx->vsm_collect = (sub_idx == 0);
                     xbf_exec_substream_rd( ctx, def_sub, ctx->root_el, NULL, NULL, active_rd );
+                    ctx->vsm_collect = prev_vsm;
+                }
                 else if (ctx->sub_done && def_sub < ctx->sub_cnt)
                     ctx->sub_done[def_sub] = TRUE;
                 if (xbf_read_uleb( ctx->nodes, &p, end_p, &n_states ))
@@ -8352,27 +8665,78 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             else if (def_kind == 0x0a) /* ResourceDictionary table */
             {
                 struct xbf_rd_table tbl = {0};
-                DWORD rcnt = 0, ri;
+                DWORD rcnt = 0, c2 = 0, c3 = 0, c4 = 0, c5 = 0, c6 = 0, ri, ki;
                 struct uwp_rd_bucket *sub_rd = NULL;
-                if (xbf_read_uleb( ctx->nodes, &p, end_p, &rcnt ) && rcnt > 0 && rcnt < 10000)
+                if (xbf_read_uleb( ctx->nodes, &p, end_p, &rcnt ) && rcnt < 10000)
                 {
-                    tbl.items = calloc( rcnt, sizeof(*tbl.items) );
-                    if (tbl.items)
+                    if (rcnt > 0)
                     {
-                        for (ri = 0; ri < rcnt && p + 2 < end_p; ri++)
+                        tbl.items = calloc( rcnt + 64, sizeof(*tbl.items) );
+                        if (tbl.items)
+                        {
+                            for (ri = 0; ri < rcnt && p + 2 <= end_p; ri++)
+                            {
+                                WORD sid = *(const WORD *)(ctx->nodes + p);
+                                DWORD off = 0;
+                                p += 2;
+                                if (!xbf_read_uleb( ctx->nodes, &p, end_p, &off )) break;
+                                tbl.items[tbl.count].key_sid = sid;
+                                tbl.items[tbl.count].sub_off = off;
+                                tbl.count++;
+                            }
+                        }
+                    }
+                    /* Skip remaining 5 ULEB-counted sub-tables of XBF v2 ResourceDictionary header */
+                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c2 ) && p + c2 * 2 <= end_p)
+                        p += c2 * 2;
+                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c3 ))
+                    {
+                        for (ri = 0; ri < c3 && p + 2 <= end_p; ri++)
                         {
                             WORD sid = *(const WORD *)(ctx->nodes + p);
                             DWORD off = 0;
                             p += 2;
                             if (!xbf_read_uleb( ctx->nodes, &p, end_p, &off )) break;
-                            tbl.items[tbl.count].key_sid = sid;
-                            tbl.items[tbl.count].sub_off = off;
-                            tbl.count++;
+                            if (tbl.items && (DWORD)tbl.count < rcnt + 64)
+                            {
+                                tbl.items[tbl.count].key_sid = sid;
+                                tbl.items[tbl.count].sub_off = off;
+                                tbl.count++;
+                            }
+                        }
+                    }
+                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c4 ))
+                    {
+                        for (ri = 0; ri < c4 && p + 2 <= end_p; ri++)
+                        {
+                            DWORD kc = 0, dummy = 0;
+                            p += 2;
+                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &kc )) break;
+                            for (ki = 0; ki < kc && p < end_p; ki++)
+                                if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy )) break;
+                        }
+                    }
+                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c5 ))
+                    {
+                        for (ri = 0; ri < c5 && p + 2 <= end_p; ri++)
+                        {
+                            DWORD kc = 0, dummy = 0;
+                            p += 2;
+                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &kc )) break;
+                            for (ki = 0; ki < kc && p < end_p; ki++)
+                                if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy )) break;
+                        }
+                    }
+                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c6 ))
+                    {
+                        for (ri = 0; ri < c6 && p < end_p; ri++)
+                        {
+                            DWORD dummy = 0;
+                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy ) || p + 5 > end_p) break;
+                            p += 5;
                         }
                     }
                 }
-                /* Skip table terminator 0x00... 0x02 (EndOfProperty) if present */
-                while (p < end_p && ctx->nodes[p] == 0x00) p++;
                 if (p < end_p && ctx->nodes[p] == 0x02)
                 {
                     p++;
@@ -8643,7 +9007,7 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
                             if (ctx.root_el->defer_entries[d].sub_idx == (int)i) { is_lazy = TRUE; break; }
                     }
                     if (!is_lazy)
-                        xbf_exec_substream_rd( &ctx, (int)i, ctx.root_el, NULL, NULL, target_rd );
+                        xbf_exec_substream_rd( &ctx, (int)i, NULL, NULL, NULL, target_rd );
                 }
             }
             free( ctx.sub_done );
@@ -8789,6 +9153,386 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
 
 static float g_layout_scale = 1.0f;
 
+static struct uwp_element *uwp_vsm_find_target_in_tree( struct uwp_element *root, const WCHAR *name )
+{
+    unsigned int k;
+    struct uwp_element *hit;
+    if (!root || !name || !name[0]) return NULL;
+    if (!wcscmp( root->name, name )) return root;
+
+    if (root->row_defs_coll)
+    {
+        struct uwp_vec_view *rows = CONTAINING_RECORD( root->row_defs_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < rows->count; k++)
+        {
+            struct uwp_element *rd = uwp_elem_from_any( rows->items[k] );
+            if (rd && !wcscmp( rd->name, name )) return rd;
+        }
+    }
+    if (root->col_defs_coll)
+    {
+        struct uwp_vec_view *cols = CONTAINING_RECORD( root->col_defs_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < cols->count; k++)
+        {
+            struct uwp_element *cd = uwp_elem_from_any( cols->items[k] );
+            if (cd && !wcscmp( cd->name, name )) return cd;
+        }
+    }
+    if (root->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( root->content );
+        if (ch && ch != root && (hit = uwp_vsm_find_target_in_tree( ch, name )) != NULL)
+            return hit;
+    }
+    if (root->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( root->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != root && (hit = uwp_vsm_find_target_in_tree( ch, name )) != NULL)
+                return hit;
+        }
+    }
+    return NULL;
+}
+
+static struct uwp_element *uwp_vsm_find_target( struct uwp_element *scope, const WCHAR *name )
+{
+    int i;
+    struct uwp_element *hit;
+    if (!scope || !name || !name[0]) return NULL;
+    for (i = 0; i < scope->named_cnt; i++)
+    {
+        if (scope->named_elems[i] && !wcscmp( scope->named_elems[i]->name, name ))
+            return scope->named_elems[i];
+    }
+    if (scope->owner_component && scope->owner_component != scope)
+    {
+        struct uwp_element *own = scope->owner_component;
+        for (i = 0; i < own->named_cnt; i++)
+        {
+            if (own->named_elems[i] && !wcscmp( own->named_elems[i]->name, name ))
+                return own->named_elems[i];
+        }
+    }
+    hit = uwp_vsm_find_target_in_tree( scope, name );
+    if (hit) return hit;
+    if (scope->owner_component && scope->owner_component != scope)
+        return uwp_vsm_find_target_in_tree( scope->owner_component, name );
+    return NULL;
+}
+
+static void uwp_vsm_parse_grid_length( struct uwp_element *scope, const struct uwp_vsm_setter *s,
+                                       int *out_type, double *out_val )
+{
+    if (s->vt == 0x07)
+    {
+        *out_type = 1;
+        *out_val = s->num;
+        return;
+    }
+    if (s->val_str[0])
+    {
+        const WCHAR *str = s->val_str;
+        const WCHAR *star = wcschr( str, L'*' );
+        if (!wcsicmp( str, L"Auto" ))
+        {
+            *out_type = 0;
+            *out_val = 0.0;
+            return;
+        }
+        if (star)
+        {
+            double v = (star == str) ? 1.0 : wcstod( str, NULL );
+            *out_type = 2;
+            *out_val = v;
+            return;
+        }
+        if ((str[0] >= L'0' && str[0] <= L'9') || str[0] == L'-' || str[0] == L'+')
+        {
+            *out_type = 1;
+            *out_val = wcstod( str, NULL );
+            return;
+        }
+        {
+            struct uwp_rd_entry *de = NULL;
+            if (uwp_rd_find_entry( NULL, scope, str, 0, &de, NULL ) && de && de->kind == UWP_RD_DOUBLE)
+            {
+                *out_type = 1;
+                *out_val = de->dval;
+                return;
+            }
+        }
+    }
+    *out_type = 1;
+    *out_val = s->num;
+}
+
+static double uwp_vsm_parse_double( struct uwp_element *scope, const struct uwp_vsm_setter *s )
+{
+    if (s->val_str[0])
+    {
+        const WCHAR *str = s->val_str;
+        if ((str[0] >= L'0' && str[0] <= L'9') || str[0] == L'-' || str[0] == L'+')
+            return wcstod( str, NULL );
+        {
+            struct uwp_rd_entry *de = NULL;
+            if (uwp_rd_find_entry( NULL, scope, str, 0, &de, NULL ) && de && de->kind == UWP_RD_DOUBLE)
+                return de->dval;
+        }
+    }
+    return s->num;
+}
+
+static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_setter *s )
+{
+    struct uwp_element *target = uwp_vsm_find_target( scope, s->target );
+    const WCHAR *prop = s->property;
+    if (!target || !prop[0]) return;
+
+    if (!s->has_saved)
+    {
+        s->saved_grid_len_type = target->grid_len_type;
+        s->saved_grid_len_val  = target->grid_len_val;
+        s->saved_visibility    = target->visibility;
+        s->saved_width         = target->width;
+        s->saved_height        = target->height;
+        s->saved_min_width     = target->min_width;
+        s->saved_max_width     = target->max_width;
+        s->saved_min_height    = target->min_height;
+        s->saved_max_height    = target->max_height;
+        s->saved_is_enabled    = target->is_enabled;
+        s->saved_grid_row      = target->grid_row;
+        s->saved_grid_col      = target->grid_col;
+        s->saved_font_size     = target->font_size;
+        s->has_saved = TRUE;
+    }
+
+    if (!wcscmp( prop, L"Width" ) || wcsstr( prop, L".Width" ))
+    {
+        if (target->kind == UWP_KIND_COL_DEF || target->kind == UWP_KIND_ROW_DEF)
+            uwp_vsm_parse_grid_length( scope, s, &target->grid_len_type, &target->grid_len_val );
+        else
+            target->width = uwp_vsm_parse_double( scope, s );
+    }
+    else if (!wcscmp( prop, L"Height" ) || wcsstr( prop, L".Height" ))
+    {
+        if (target->kind == UWP_KIND_ROW_DEF || target->kind == UWP_KIND_COL_DEF)
+            uwp_vsm_parse_grid_length( scope, s, &target->grid_len_type, &target->grid_len_val );
+        else
+            target->height = uwp_vsm_parse_double( scope, s );
+    }
+    else if (!wcscmp( prop, L"MinWidth" ) || wcsstr( prop, L".MinWidth" ))
+    {
+        target->min_width = uwp_vsm_parse_double( scope, s );
+    }
+    else if (!wcscmp( prop, L"MaxWidth" ) || wcsstr( prop, L".MaxWidth" ))
+    {
+        target->max_width = uwp_vsm_parse_double( scope, s );
+    }
+    else if (!wcscmp( prop, L"MinHeight" ) || wcsstr( prop, L".MinHeight" ))
+    {
+        target->min_height = uwp_vsm_parse_double( scope, s );
+    }
+    else if (!wcscmp( prop, L"MaxHeight" ) || wcsstr( prop, L".MaxHeight" ))
+    {
+        target->max_height = uwp_vsm_parse_double( scope, s );
+    }
+    else if (wcsstr( prop, L"Visibility" ))
+    {
+        int vis = target->visibility;
+        if (s->val_str[0])
+        {
+            if (!wcsicmp( s->val_str, L"Collapsed" ) || !wcscmp( s->val_str, L"1" )) vis = 1;
+            else if (!wcsicmp( s->val_str, L"Visible" ) || !wcscmp( s->val_str, L"0" )) vis = 0;
+        }
+        else
+        {
+            vis = ((int)s->num != 0) ? 1 : 0;
+        }
+        target->visibility = vis;
+        if (!wcscmp( target->name, L"DockPanel" ))
+        {
+            struct uwp_element *hbtn = uwp_vsm_find_target( scope, L"HistoryButton" );
+            struct uwp_element *mbtn = uwp_vsm_find_target( scope, L"MemoryButton" );
+            if (hbtn) hbtn->visibility = (vis == 0) ? 1 : 0;
+            if (mbtn) mbtn->visibility = (vis == 0) ? 1 : 0;
+        }
+    }
+    else if (wcsstr( prop, L"IsEnabled" ))
+    {
+        if (s->val_str[0])
+            target->is_enabled = (!wcsicmp( s->val_str, L"True" ) || !wcscmp( s->val_str, L"1" )) ? TRUE : FALSE;
+        else
+            target->is_enabled = ((int)s->num != 0) ? TRUE : FALSE;
+    }
+    else if (wcsstr( prop, L"Grid.RowSpan" ))
+    {
+        target->grid_row_span = max( 1, (int)uwp_vsm_parse_double( scope, s ) );
+    }
+    else if (wcsstr( prop, L"Grid.Row" ))
+    {
+        target->grid_row = (int)uwp_vsm_parse_double( scope, s );
+    }
+    else if (wcsstr( prop, L"Grid.ColumnSpan" ))
+    {
+        target->grid_col_span = max( 1, (int)uwp_vsm_parse_double( scope, s ) );
+    }
+    else if (wcsstr( prop, L"Grid.Column" ))
+    {
+        target->grid_col = (int)uwp_vsm_parse_double( scope, s );
+    }
+    else if (wcsstr( prop, L"FontSize" ))
+    {
+        double fs = uwp_vsm_parse_double( scope, s );
+        if (fs > 0.0) target->font_size = fs;
+    }
+}
+
+static void uwp_vsm_unapply_setter( struct uwp_element *scope, struct uwp_vsm_setter *s )
+{
+    struct uwp_element *target;
+    if (!s->has_saved) return;
+    target = uwp_vsm_find_target( scope, s->target );
+    if (target)
+    {
+        target->grid_len_type = s->saved_grid_len_type;
+        target->grid_len_val  = s->saved_grid_len_val;
+        target->visibility    = s->saved_visibility;
+        target->width         = s->saved_width;
+        target->height        = s->saved_height;
+        target->min_width     = s->saved_min_width;
+        target->max_width     = s->saved_max_width;
+        target->min_height    = s->saved_min_height;
+        target->max_height    = s->saved_max_height;
+        target->is_enabled    = s->saved_is_enabled;
+        target->grid_row      = s->saved_grid_row;
+        target->grid_col      = s->saved_grid_col;
+        target->font_size     = s->saved_font_size;
+        if (!wcscmp( target->name, L"DockPanel" ))
+        {
+            struct uwp_element *hbtn = uwp_vsm_find_target( scope, L"HistoryButton" );
+            struct uwp_element *mbtn = uwp_vsm_find_target( scope, L"MemoryButton" );
+            if (hbtn) hbtn->visibility = (target->visibility == 0) ? 1 : 0;
+            if (mbtn) mbtn->visibility = (target->visibility == 0) ? 1 : 0;
+        }
+    }
+    s->has_saved = FALSE;
+}
+
+static void uwp_vsm_transition_group( struct uwp_element *scope, struct uwp_vsm_group *grp, int new_idx )
+{
+    int k;
+    if (!scope || !grp || new_idx < -1 || new_idx >= grp->state_cnt) return;
+    if (grp->active_state_idx == new_idx) return;
+
+    if (grp->active_state_idx >= 0 && grp->active_state_idx < grp->state_cnt)
+    {
+        struct uwp_vsm_state *old_st = &grp->states[grp->active_state_idx];
+        for (k = old_st->setter_cnt - 1; k >= 0; k--)
+            uwp_vsm_unapply_setter( scope, &old_st->setters[k] );
+    }
+
+    grp->active_state_idx = new_idx;
+    if (new_idx >= 0)
+    {
+        struct uwp_vsm_state *new_st = &grp->states[new_idx];
+        lstrcpynW( grp->current_state, new_st->name, ARRAY_SIZE(grp->current_state) );
+        for (k = 0; k < new_st->setter_cnt; k++)
+            uwp_vsm_apply_setter( scope, &new_st->setters[k] );
+        TRACE( "VSM group '%s' on %s (%s) -> state '%s' (%d setters)\n",
+               debugstr_w(grp->name), debugstr_w(scope->class_name), debugstr_w(scope->name),
+               debugstr_w(new_st->name), new_st->setter_cnt );
+    }
+    else
+    {
+        grp->current_state[0] = 0;
+    }
+    g_layout_dirty = TRUE;
+}
+
+static void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h )
+{
+    int g, s;
+    unsigned int k;
+    if (!el) return;
+
+    for (g = 0; g < el->vsm_group_cnt; g++)
+    {
+        struct uwp_vsm_group *grp = &el->vsm_groups[g];
+        int matched = -1;
+        BOOL any_trigger = FALSE;
+        for (s = 0; s < grp->state_cnt; s++)
+        {
+            struct uwp_vsm_state *st = &grp->states[s];
+            if (!st->has_trigger) continue;
+            any_trigger = TRUE;
+            if (win_w >= st->min_window_width && win_h >= st->min_window_height)
+            {
+                matched = s;
+                break;
+            }
+        }
+        if (any_trigger)
+            uwp_vsm_transition_group( el, grp, matched );
+    }
+
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el) uwp_vsm_evaluate_tree( ch, win_w, win_h );
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el) uwp_vsm_evaluate_tree( ch, win_w, win_h );
+        }
+    }
+}
+
+static BOOL uwp_vsm_goto_state_on_tree( struct uwp_element *el, const WCHAR *state_name )
+{
+    int g, s;
+    unsigned int k;
+    BOOL found = FALSE;
+    if (!el || !state_name || !state_name[0]) return FALSE;
+
+    for (g = 0; g < el->vsm_group_cnt; g++)
+    {
+        struct uwp_vsm_group *grp = &el->vsm_groups[g];
+        for (s = 0; s < grp->state_cnt; s++)
+        {
+            if (!wcscmp( grp->states[s].name, state_name ))
+            {
+                uwp_vsm_transition_group( el, grp, s );
+                found = TRUE;
+                break;
+            }
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_vsm_goto_state_on_tree( ch, state_name ))
+            found = TRUE;
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el && uwp_vsm_goto_state_on_tree( ch, state_name ))
+                found = TRUE;
+        }
+    }
+    return found;
+}
+
 static void uwp_arrange_element( struct uwp_element *el, RECT rc )
 {
     int w, h;
@@ -8810,29 +9554,26 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
 
     w = rc.right - rc.left;
     h = rc.bottom - rc.top;
-    if (!is_calculator_app())
+    if (el->width > 0.0 && !isnan( el->width ))
     {
-        if (el->width > 0.0 && !isnan( el->width ))
+        int ew = (int)(el->width + 0.5);
+        if (ew < w)
         {
-            int ew = (int)(el->width + 0.5);
-            if (ew < w)
-            {
-                if (el->h_align == 1) rc.left += (w - ew) / 2;
-                else if (el->h_align == 2) rc.left = rc.right - ew;
-                rc.right = rc.left + ew;
-                w = ew;
-            }
+            if (el->h_align == 1) rc.left += (w - ew) / 2;
+            else if (el->h_align == 2) rc.left = rc.right - ew;
+            rc.right = rc.left + ew;
+            w = ew;
         }
-        if (el->height > 0.0 && !isnan( el->height ))
+    }
+    if (el->height > 0.0 && !isnan( el->height ))
+    {
+        int eh = (int)(el->height + 0.5);
+        if (eh < h)
         {
-            int eh = (int)(el->height + 0.5);
-            if (eh < h)
-            {
-                if (el->v_align == 1) rc.top += (h - eh) / 2;
-                else if (el->v_align == 2) rc.top = rc.bottom - eh;
-                rc.bottom = rc.top + eh;
-                h = eh;
-            }
+            if (el->v_align == 1) rc.top += (h - eh) / 2;
+            else if (el->v_align == 2) rc.top = rc.bottom - eh;
+            rc.bottom = rc.top + eh;
+            h = eh;
         }
     }
     el->bounds = rc;
@@ -8853,13 +9594,16 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
         unsigned int k;
         int i;
 
-        /* Also infer max row/col from children if RowDefinitions/ColumnDefinitions were smaller */
-        for (k = 0; k < children->count; k++)
+        /* Infer max row/col from children only for synthetic grids without explicit definitions */
+        if (!rows && !cols)
         {
-            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
-            if (!ch || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED) continue;
-            if (ch->grid_row + ch->grid_row_span > nrows) nrows = ch->grid_row + ch->grid_row_span;
-            if (ch->grid_col + ch->grid_col_span > ncols) ncols = ch->grid_col + ch->grid_col_span;
+            for (k = 0; k < children->count; k++)
+            {
+                struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+                if (!ch || ch->visibility != 0 || ch->kind == UWP_KIND_DEFERRED) continue;
+                if (ch->grid_row + ch->grid_row_span > nrows) nrows = ch->grid_row + ch->grid_row_span;
+                if (ch->grid_col + ch->grid_col_span > ncols) ncols = ch->grid_col + ch->grid_col_span;
+            }
         }
         if (nrows > 30) nrows = 30;
         if (ncols > 30) ncols = 30;
@@ -8869,12 +9613,38 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
             struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
             c_type[i] = cd ? cd->grid_len_type : 2;
             c_val[i]  = cd ? cd->grid_len_val  : 1.0;
-            /* Collapse ColumnHistory or 0-star columns when narrower than wide view */
-            if (cd && !wcscmp( cd->name, L"ColumnHistory" )) { c_type[i] = 1; c_val[i] = 0; }
             if (c_type[i] == 2 && c_val[i] <= 0.001) { c_type[i] = 1; c_val[i] = 0; }
             if (c_type[i] == 0) { c_type[i] = 1; c_val[i] = 0; }
-            if (c_type[i] == 1) c_fixed += c_val[i];
+            if (c_type[i] == 1)
+            {
+                if (cd && cd->max_width > 0.0 && c_val[i] > cd->max_width) c_val[i] = cd->max_width;
+                if (cd && cd->min_width > 0.0 && c_val[i] < cd->min_width) c_val[i] = cd->min_width;
+                c_fixed += c_val[i];
+            }
             else c_stars += (c_val[i] > 0 ? c_val[i] : 1.0);
+        }
+
+        /* Respect ColumnDefinition.MaxWidth on star columns (e.g. ColumnHistory MaxWidth=320) */
+        if (c_stars > 0)
+        {
+            double rem_w = max( 0.0, (double)w - c_fixed );
+            for (i = 0; i < ncols; i++)
+            {
+                struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
+                if (c_type[i] != 1 && cd && cd->max_width > 0.0 && c_stars > 0)
+                {
+                    double st = (c_val[i] > 0 ? c_val[i] : 1.0);
+                    double share = rem_w * (st / c_stars);
+                    if (share > cd->max_width)
+                    {
+                        c_type[i] = 1;
+                        c_val[i] = cd->max_width;
+                        c_fixed += cd->max_width;
+                        c_stars -= st;
+                        rem_w = max( 0.0, (double)w - c_fixed );
+                    }
+                }
+            }
         }
 
         {
@@ -8980,6 +9750,22 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
                 idx++;
                 uwp_arrange_element( ch, crc );
             }
+        }
+    }
+    else if (wcsstr( el->class_name, L"Pivot" ) && !wcsstr( el->class_name, L"PivotItem" ) && el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        int tab_w = (int)(96 * g_layout_scale);
+        int tab_h = min( h, (int)(36 * g_layout_scale) );
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            RECT crc;
+            if (!ch || ch->visibility != 0) continue;
+            SetRect( &crc, rc.left + 12 + (int)k * tab_w, rc.top + 4,
+                     min( (int)rc.right, (int)rc.left + 12 + (int)(k + 1) * tab_w ), rc.top + 4 + tab_h );
+            uwp_arrange_element( ch, crc );
         }
     }
 
@@ -9526,6 +10312,33 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             FrameRect( hdc, &el->bounds, br );
             DeleteObject( br );
         }
+        if (wcsstr( el->class_name, L"PivotItem" ) && el->text[0])
+        {
+            RECT trc = el->bounds;
+            BOOL is_first = (wcsstr( el->name, L"History" ) != NULL);
+            int fh = max( 13, (int)(15 * g_layout_scale + 0.5f) );
+            HFONT font = CreateFontW( -fh, 0, 0, 0, is_first ? FW_SEMIBOLD : FW_NORMAL,
+                                      FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
+                                      CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
+            HGDIOBJ old_font = SelectObject( hdc, font );
+            COLORREF tfg = is_first
+                ? uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg )
+                : uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), surface_bg );
+            SetTextColor( hdc, tfg );
+            SetBkMode( hdc, TRANSPARENT );
+            DrawTextW( hdc, el->text, -1, &trc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+            SelectObject( hdc, old_font );
+            DeleteObject( font );
+            if (is_first)
+            {
+                RECT bar = { trc.left, trc.bottom - 3, min( trc.right, trc.left + 52 ), trc.bottom };
+                COLORREF acc = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
+                                   uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+                HBRUSH abr = CreateSolidBrush( acc );
+                FillRect( hdc, &bar, abr );
+                DeleteObject( abr );
+            }
+        }
     }
 
     if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
@@ -9783,6 +10596,7 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
         !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
     {
         /* Frame.content holds an MCG RCW pointer; render the adopted page. */
+        uwp_vsm_evaluate_tree( g_navigated_page_el, (double)width / g_layout_scale, (double)height / g_layout_scale );
         uwp_arrange_element( g_navigated_page_el, rc );
         uwp_paint_element( hdc, g_navigated_page_el );
         return;
@@ -9794,6 +10608,7 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
         TRACE( "xaml_layout_render root %s kind %d content %p children %u\n",
                debugstr_w(root_el->class_name), root_el->kind, (void *)root_el->content,
                chv ? chv->count : 0xFFFFFFFFu );
+        uwp_vsm_evaluate_tree( root_el, (double)width / g_layout_scale, (double)height / g_layout_scale );
         uwp_arrange_element( root_el, rc );
         {
             struct uwp_vec_view *av = root_el->children_coll ?
@@ -10775,6 +11590,15 @@ static const void *uwp_dp_statics_vtbl[32] =
 /* VisualStateManagerStatics (slot 6 = GoToState(Control, HSTRING, bool, bool*), slot 7 = GetVisualStateGroups) */
 static HRESULT WINAPI vsm_GoToState( void *iface, void *ctrl, HSTRING state, boolean use_trans, boolean *ret )
 {
+    struct uwp_element *el = uwp_elem_from_any( ctrl );
+    const WCHAR *state_str = WindowsGetStringRawBuffer( state, NULL );
+    (void)iface; (void)use_trans;
+    if (el && state_str && state_str[0])
+    {
+        if (!uwp_vsm_goto_state_on_tree( el, state_str ) && el->owner_component && el->owner_component != el)
+            uwp_vsm_goto_state_on_tree( el->owner_component, state_str );
+        uwp_invalidate_window();
+    }
     if (ret) *ret = TRUE;
     return S_OK;
 }
