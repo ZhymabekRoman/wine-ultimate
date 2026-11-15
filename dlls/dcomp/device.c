@@ -784,6 +784,9 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
         if (hr == (HRESULT)WAIT_TIMEOUT)
         {
             /* GPU producer is still rendering into the surface; skip composite tick without stalling CPU */
+            static unsigned int km_timeout_tick;
+            if (!(km_timeout_tick++ % 64))
+                TRACE("DCOMP: keyed mutex busy, skip composite tick (%u)\n", km_timeout_tick);
             IDXGIKeyedMutex_Release(keyed_mutex);
             keyed_mutex = NULL;
             goto done;
@@ -918,6 +921,7 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
             {
                 if (out_culled)
                     *out_culled = TRUE;
+                TRACE("DCOMP: culled proj rect %ld,%ld-%ldx%ld\n", left, top, right - left, bottom - top);
                 goto done;
             }
 
@@ -2252,12 +2256,23 @@ static BOOL composite_device(struct composition_device *device)
     }
     collect_device_frames(device, &tree_ver, &xform_ver);
 
+    {
+        static unsigned int diag_tick;
+        if (!(diag_tick++ % 64))
+            TRACE("DCOMP: diag tick %u tree_ver %ld xform_ver %ld last %ld/%ld shared %d snaps %u frames %u\n",
+                    diag_tick, tree_ver, xform_ver, device->last_tree_version, device->last_xform_version,
+                    has_shared, device->snap_buf_count, device->frame_buf_count);
+    }
+
     for (i = 0; i < device->frame_buf_count; i++)
     {
         struct composite_frame *frame = &device->frame_buf[i];
         render_composite_frame(frame);
         if (frame->rendered)
             count++;
+        TRACE("DCOMP: frame %u rendered %d culled %d fallback %d proxy %d\n",
+                i, frame->rendered, frame->culled, frame->is_fallback,
+                frame->visual && frame->visual->is_shared_proxy);
     }
 
     dcomp_lock();
