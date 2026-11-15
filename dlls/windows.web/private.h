@@ -37,6 +37,8 @@
 #define WIDL_using_Windows_Data_Json
 #include "windows.data.json.h"
 
+#include "cjson/cJSON.h"
+
 extern IActivationFactory *json_array_factory;
 extern IActivationFactory *json_object_factory;
 extern IActivationFactory *json_value_factory;
@@ -48,7 +50,116 @@ extern IActivationFactory *http_string_content_factory;
 extern IActivationFactory *http_method_factory;
 extern IActivationFactory *http_base_protocol_filter_factory;
 
+struct json_root
+{
+    LONG ref;
+    cJSON *tree;
+};
+
+static inline struct json_root *json_root_create( cJSON *tree )
+{
+    struct json_root *root = malloc( sizeof(*root) );
+    if (!root) return NULL;
+    root->ref = 1;
+    root->tree = tree;
+    return root;
+}
+
+static inline void json_root_addref( struct json_root *root )
+{
+    if (root) InterlockedIncrement( &root->ref );
+}
+
+static inline void json_root_release( struct json_root *root )
+{
+    if (root && !InterlockedDecrement( &root->ref ))
+    {
+        if (root->tree) cJSON_Delete( root->tree );
+        free( root );
+    }
+}
+
+/* {65A7C57E-0644-48E0-A6E5-A9D6A0553A89} */
+static const GUID IID_IJsonValueInternal = {0x65a7c57e, 0x0644, 0x48e0, {0xa6, 0xe5, 0xa9, 0xd6, 0xa0, 0x55, 0x3a, 0x89}};
+
+typedef struct IJsonValueInternal IJsonValueInternal;
+typedef struct IJsonValueInternalVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(IJsonValueInternal *This, REFIID riid, void **ppvObject);
+    ULONG (STDMETHODCALLTYPE *AddRef)(IJsonValueInternal *This);
+    ULONG (STDMETHODCALLTYPE *Release)(IJsonValueInternal *This);
+    cJSON *(STDMETHODCALLTYPE *GetNode)(IJsonValueInternal *This);
+} IJsonValueInternalVtbl;
+
+struct IJsonValueInternal
+{
+    const IJsonValueInternalVtbl *lpVtbl;
+};
+
+HRESULT create_json_value( cJSON *node, struct json_root *root, IJsonValue **out );
+HRESULT create_json_object( cJSON *node, struct json_root *root, IJsonObject **out );
+HRESULT create_json_array( cJSON *node, struct json_root *root, IJsonArray **out );
+cJSON *cjson_node_duplicate_from_IJsonValue( IJsonValue *value );
 HRESULT json_array_push( IJsonArray *iface, IJsonValue *value );
+
+static inline HRESULT hstring_from_utf8_len( const char *utf8, int utf8_len, HSTRING *out )
+{
+    int len;
+    WCHAR *wstr;
+    HRESULT hr;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!utf8 || utf8_len <= 0) return WindowsCreateString( L"", 0, out );
+    len = MultiByteToWideChar( CP_UTF8, 0, utf8, utf8_len, NULL, 0 );
+    if (!len) return E_FAIL;
+    wstr = malloc( len * sizeof(WCHAR) );
+    if (!wstr) return E_OUTOFMEMORY;
+    MultiByteToWideChar( CP_UTF8, 0, utf8, utf8_len, wstr, len );
+    hr = WindowsCreateString( wstr, len, out );
+    free( wstr );
+    return hr;
+}
+
+static inline HRESULT hstring_from_utf8( const char *utf8, HSTRING *out )
+{
+    if (!utf8) return WindowsCreateString( L"", 0, out );
+    return hstring_from_utf8_len( utf8, strlen(utf8), out );
+}
+
+static inline char *utf8_from_hstring( HSTRING str, int *out_len )
+{
+    UINT32 len = 0;
+    const WCHAR *wstr;
+    int utf8_len;
+    char *utf8;
+
+    if (!str)
+    {
+        if (out_len) *out_len = 0;
+        return strdup( "" );
+    }
+    wstr = WindowsGetStringRawBuffer( str, &len );
+    utf8_len = WideCharToMultiByte( CP_UTF8, 0, wstr, len, NULL, 0, NULL, NULL );
+    utf8 = malloc( utf8_len + 1 );
+    if (!utf8) return NULL;
+    WideCharToMultiByte( CP_UTF8, 0, wstr, len, utf8, utf8_len, NULL, NULL );
+    utf8[utf8_len] = 0;
+    if (out_len) *out_len = utf8_len;
+    return utf8;
+}
+
+static inline JsonValueType get_json_value_type( const cJSON *node )
+{
+    if (!node) return JsonValueType_Null;
+    if (node->type & (cJSON_False | cJSON_True)) return JsonValueType_Boolean;
+    if (node->type & cJSON_NULL) return JsonValueType_Null;
+    if (node->type & cJSON_Number) return JsonValueType_Number;
+    if (node->type & cJSON_String) return JsonValueType_String;
+    if (node->type & cJSON_Array) return JsonValueType_Array;
+    if (node->type & cJSON_Object) return JsonValueType_Object;
+    return JsonValueType_Null;
+}
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

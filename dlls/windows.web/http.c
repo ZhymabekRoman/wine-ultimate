@@ -1507,6 +1507,7 @@ static const void *http_client_factory_vtbl[] =
     http_client_factory_GetIids,
     http_client_factory_GetRuntimeClassName,
     http_client_factory_GetTrustLevel,
+    http_client_factory_ActivateInstance,
     http_client_factory_Create,
 };
 

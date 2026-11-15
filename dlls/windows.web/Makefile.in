@@ -2,6 +2,7 @@ MODULE  = windows.web.dll
 IMPORTS = combase
 
 SOURCES = \
+	cjson/cJSON.c \
 	classes.idl \
 	http.c \
 	json_array.c \
