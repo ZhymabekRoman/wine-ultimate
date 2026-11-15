@@ -481,10 +481,7 @@ static HRESULT WINAPI dispatcher_async_action_GetTrustLevel( IAsyncAction *iface
 static HRESULT WINAPI dispatcher_async_action_put_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler *handler )
 {
     if (handler)
-    {
-        void (STDMETHODCALLTYPE *invoke)(void *, void *, int) = (*(void ***)handler)[3];
-        invoke( handler, iface, 1 /* Completed */ );
-    }
+        handler->lpVtbl->Invoke( handler, iface, 1 /* Completed */ );
     return S_OK;
 }
 static HRESULT WINAPI dispatcher_async_action_get_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler **handler )
@@ -567,17 +564,30 @@ static BOOL strict_dispatch_enabled( void )
     return cached;
 }
 
+/* The callback is the RunAsync/RunIdleAsync argument — an IDispatchedHandler (Invoke()) or an
+ * IIdleDispatchedHandler (Invoke(e)); the idle flag stored with it tells the two faces apart. */
+static void dispatcher_invoke( void *handler, BOOL idle )
+{
+    if (idle)
+    {
+        __x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandler *h =
+                (__x_ABI_CWindows_CUI_CCore_CIIdleDispatchedHandler *)handler;
+        h->lpVtbl->Invoke( h, NULL );
+        return;
+    }
+    ((__x_ABI_CWindows_CUI_CCore_CIDispatchedHandler *)handler)->lpVtbl->Invoke(
+            (__x_ABI_CWindows_CUI_CCore_CIDispatchedHandler *)handler );
+}
+
 static void dispatcher_run_or_post( struct core_dispatcher *impl, void *agileCallback, BOOL idle )
 {
-    HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)agileCallback)[3];
-
     /* Live bisect (WhatsApp Desktop p53 wave, gate57/58): queue-routed foreign RunAsync was the
      * 1.10-vs-1.11 behavior delta that blocked the unpackaged WinUI3 client's managed init; the
      * 1.10 baseline runs every callback inline on the caller.  The window-queue route is opt-in
      * via WINE_COREWINDOW_STRICT_DISPATCH; the owner_tid recording stays live in both modes. */
     if (!strict_dispatch_enabled() || GetCurrentThreadId() == impl->owner_tid)
     {
-        invoke( agileCallback );
+        dispatcher_invoke( agileCallback, idle );
         return;
     }
     if (impl->window && impl->window->hwnd)
@@ -598,7 +608,7 @@ static void dispatcher_run_or_post( struct core_dispatcher *impl, void *agileCal
             IUnknown_Release( (IUnknown *)agileCallback );
         }
     }
-    invoke( agileCallback );
+    dispatcher_invoke( agileCallback, idle );
 }
 
 static HRESULT WINAPI core_dispatcher_RunAsync( ICoreDispatcher *iface, CoreDispatcherPriority priority,
@@ -2234,11 +2244,11 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
         if (post)
         {
             void *handler = post->handler;
+            BOOL idle = post->idle;
             free( post );
             if (handler)
             {
-                HRESULT (STDMETHODCALLTYPE *invoke)(void *) = (*(void ***)handler)[3];
-                invoke( handler );
+                dispatcher_invoke( handler, idle );
                 IUnknown_Release( (IUnknown *)handler );
             }
         }

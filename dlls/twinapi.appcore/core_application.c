@@ -2570,6 +2570,89 @@ static const GUID IID_ICoreWindowNavigation_ =
 static const GUID IID_INavigationClientPrepareToActivate_ =
     { 0x075be329, 0x825a, 0x4f2a, { 0xa8, 0xaf, 0xcd, 0x2f, 0x9a, 0x81, 0x02, 0xec } };
 
+/* Slot layouts for the shell's broker faces, named from CoreUIComponents' symbols. The objects
+ * behind them (wineuwp's in-process broker, the shell's window factory, windows.ui's CoreWindow)
+ * are QI'd for the matching IID by the callers below; the structs replace the raw vtable indexes. */
+struct core_window_broker;
+struct core_window_broker_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct core_window_broker *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct core_window_broker *This );
+    ULONG (WINAPI *Release)( struct core_window_broker *This );
+    HRESULT (WINAPI *QueryService)( struct core_window_broker *This, const GUID *service,
+                                    const GUID *iid, void **out );
+};
+struct core_window_broker
+{
+    const struct core_window_broker_vtbl *lpVtbl;
+};
+
+struct core_window_factory;
+struct core_window_factory_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct core_window_factory *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct core_window_factory *This );
+    ULONG (WINAPI *Release)( struct core_window_factory *This );
+    HRESULT (WINAPI *GetIids)( struct core_window_factory *This, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( struct core_window_factory *This, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( struct core_window_factory *This, TrustLevel *level );
+    HRESULT (WINAPI *CreateCoreWindow)( struct core_window_factory *This, HSTRING title,
+                                        IUnknown **window );
+};
+struct core_window_factory
+{
+    const struct core_window_factory_vtbl *lpVtbl;
+};
+
+struct activatable_application_registrar;
+struct activatable_application_registrar_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct activatable_application_registrar *This, REFIID riid,
+                                      void **ppv );
+    ULONG (WINAPI *AddRef)( struct activatable_application_registrar *This );
+    ULONG (WINAPI *Release)( struct activatable_application_registrar *This );
+    HRESULT (WINAPI *RegisterActivatableApplication)( struct activatable_application_registrar *This,
+                                                      IUnknown *app );
+};
+struct activatable_application_registrar
+{
+    const struct activatable_application_registrar_vtbl *lpVtbl;
+};
+
+struct core_window_navigation;
+struct core_window_navigation_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct core_window_navigation *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct core_window_navigation *This );
+    ULONG (WINAPI *Release)( struct core_window_navigation *This );
+    HRESULT (WINAPI *GetIids)( struct core_window_navigation *This, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( struct core_window_navigation *This, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( struct core_window_navigation *This, TrustLevel *level );
+    HRESULT (WINAPI *get_NavigationClient)( struct core_window_navigation *This, IUnknown **client );
+    HRESULT (WINAPI *put_NavigationClient)( struct core_window_navigation *This, IUnknown *client );
+};
+struct core_window_navigation
+{
+    const struct core_window_navigation_vtbl *lpVtbl;
+};
+
+struct navigation_client_prepare;
+struct navigation_client_prepare_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct navigation_client_prepare *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct navigation_client_prepare *This );
+    ULONG (WINAPI *Release)( struct navigation_client_prepare *This );
+    HRESULT (WINAPI *GetIids)( struct navigation_client_prepare *This, ULONG *count, IID **iids );
+    HRESULT (WINAPI *GetRuntimeClassName)( struct navigation_client_prepare *This, HSTRING *name );
+    HRESULT (WINAPI *GetTrustLevel)( struct navigation_client_prepare *This, TrustLevel *level );
+    HRESULT (WINAPI *PrepareToActivate)( struct navigation_client_prepare *This, UINT64 cookie,
+                                         void **action );
+};
+struct navigation_client_prepare
+{
+    const struct navigation_client_prepare_vtbl *lpVtbl;
+};
+
 static BOOL use_shell_brokers( void )
 {
     static int cached = -1;
@@ -2578,24 +2661,25 @@ static BOOL use_shell_brokers( void )
     return cached == 1;
 }
 
-/* The shell's brokers speak private interfaces no header describes, so their vtables are indexed. */
+/* The shell's brokers speak private interfaces no header describes, so their vtables are indexed;
+ * the structs above name the slots. */
 static HRESULT broker_QueryService( IUnknown *broker, const GUID *service, const GUID *iid, void **out )
 {
-    HRESULT (WINAPI *func)( void *, const GUID *, const GUID *, void ** ) = (void *)(*(void ***)broker)[3];
+    struct core_window_broker *b = (struct core_window_broker *)broker; /* private face: no QI needed */
 
-    return func( broker, service, iid, out );
+    return b->lpVtbl->QueryService( b, service, iid, out );
 }
 static HRESULT factory_CreateCoreWindow( IUnknown *factory, HSTRING title, IUnknown **window )
 {
-    HRESULT (WINAPI *func)( void *, HSTRING, void ** ) = (void *)(*(void ***)factory)[6];
+    struct core_window_factory *f = (struct core_window_factory *)factory; /* QI'd for IID_ICoreWindowFactory_ */
 
-    return func( factory, title, (void **)window );
+    return f->lpVtbl->CreateCoreWindow( f, title, window );
 }
 static HRESULT registrar_RegisterActivatableApplication( IUnknown *registrar, IUnknown *app )
 {
-    HRESULT (WINAPI *func)( void *, IUnknown * ) = (void *)(*(void ***)registrar)[3];
+    struct activatable_application_registrar *r = (struct activatable_application_registrar *)registrar; /* private face: no QI needed */
 
-    return func( registrar, app );
+    return r->lpVtbl->RegisterActivatableApplication( r, app );
 }
 
 struct broker_app
@@ -2661,8 +2745,8 @@ static void invoke_view_activated( ICoreApplicationView *app_view )
 static HRESULT prepare_to_activate( IUnknown *window )
 {
     IUnknown *host = NULL, *client = NULL, *prepare = NULL, *action = NULL;
-    HRESULT (WINAPI *get_NavigationClient)( void *, IUnknown ** );
-    HRESULT (WINAPI *PrepareToActivate)( void *, UINT64, void ** );
+    struct core_window_navigation *nav;
+    struct navigation_client_prepare *prepare_face;
     HRESULT hr;
 
     if (FAILED( hr = IUnknown_QueryInterface( window, &IID_ICoreWindowNavigation_, (void **)&host ) ))
@@ -2670,8 +2754,8 @@ static HRESULT prepare_to_activate( IUnknown *window )
         WARN( "CoreWindow has no navigation client property, hr %#lx.\n", hr );
         return hr;
     }
-    get_NavigationClient = (void *)(*(void ***)host)[6];
-    hr = get_NavigationClient( host, &client );
+    nav = (struct core_window_navigation *)host;   /* QI'd for IID_ICoreWindowNavigation_ above */
+    hr = nav->lpVtbl->get_NavigationClient( nav, &client );
     if (FAILED( hr ) || !client)
     {
         WARN( "no navigation client on the window, hr %#lx.\n", hr );
@@ -2682,8 +2766,8 @@ static HRESULT prepare_to_activate( IUnknown *window )
     if (FAILED( hr = IUnknown_QueryInterface( client, &IID_INavigationClientPrepareToActivate_,
                                               (void **)&prepare ) ))
         goto done;
-    PrepareToActivate = (void *)(*(void ***)prepare)[6];
-    hr = PrepareToActivate( prepare, 0, (void **)&action );
+    prepare_face = (struct navigation_client_prepare *)prepare;   /* QI'd for the IID above */
+    hr = prepare_face->lpVtbl->PrepareToActivate( prepare_face, 0, (void **)&action );
     TRACE( "PrepareToActivate hr %#lx, action %p.\n", hr, action );
     if (action) IUnknown_Release( action );
 done:

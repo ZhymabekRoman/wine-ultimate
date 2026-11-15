@@ -56,6 +56,9 @@ static const GUID IID_IAsyncInfo = {0x00000036, 0x0000, 0x0000, {0xc0, 0x00, 0x0
 static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
 static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
 
+/* After the IID definitions above: the header names those GUIDs and declares its own. */
+#include "windows.foundation.h"
+
 static HRESULT create_http_response( INT32 status_code, void **out );
 static HRESULT create_http_string_content( HSTRING content, void **out );
 static HRESULT create_http_headers( const GUID *collection_iid, void **out );
@@ -160,12 +163,15 @@ static HRESULT WINAPI async_http_op_get_Progress( void *iface, void **handler ) 
 
 static HRESULT WINAPI async_http_op_put_Completed( void *iface, void *handler )
 {
+    /* The completed handler is IAsyncOperationWithProgressCompletedHandler`2<T, HttpProgress>;
+     * every completed handler is { QueryInterface, AddRef, Release, Invoke }, so the handler is
+     * called through the action-handler layout. */
     if (handler)
     {
-        typedef HRESULT (WINAPI *invoke_fn)( void *handler, void *async, int status );
-        void **vtbl = *(void ***)handler;
-        invoke_fn invoke = (invoke_fn)vtbl[3];
-        invoke( handler, iface, 1 /* Completed */ );
+        __x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler *h =
+                (__x_ABI_CWindows_CFoundation_CIAsyncActionCompletedHandler *)handler;
+        h->lpVtbl->Invoke( h, (__x_ABI_CWindows_CFoundation_CIAsyncAction *)iface,
+                           1 /* Completed */ );
     }
     return S_OK;
 }

@@ -71,15 +71,15 @@ static inline struct async_op *impl_from_info( const void *iface )
 
 static void invoke_completed_handler( struct async_op *impl )
 {
-    void **vtbl;
-    HRESULT (STDMETHODCALLTYPE *invoke)( void *handler, void *async, enum AsyncStatus status );
+    IAsyncActionCompletedHandler *handler;
 
     if (!impl->handler) return;
 
-    /* The completed handlers are { QueryInterface, AddRef, Release, Invoke }. */
-    vtbl = *(void ***)impl->handler;
-    invoke = (void *)vtbl[3];
-    invoke( impl->handler, (void *)impl, Completed );
+    /* The completed handlers are { QueryInterface, AddRef, Release, Invoke }; the concrete
+     * interface is IAsync(Action|Operation...)CompletedHandler`1<T> and T varies with the
+     * operation, so the handler is called through the action-handler layout. */
+    handler = (IAsyncActionCompletedHandler *)impl->handler;
+    handler->lpVtbl->Invoke( handler, (IAsyncAction *)(void *)impl, Completed );
 }
 
 static void release_result( struct async_op *impl )

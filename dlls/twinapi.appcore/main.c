@@ -127,9 +127,11 @@ static HRESULT WINAPI dummy_async_put_Completed( void *iface, void *handler )
 {
     if (handler)
     {
-        void **vtbl = *(void ***)handler;
-        HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, UINT32) = (void *)vtbl[3];
-        if (invoke) invoke( handler, iface, 1 /* Completed */ );
+        /* Every completed handler is { QueryInterface, AddRef, Release, Invoke }; the concrete
+         * generic IID varies with the operation's T, so the handler is called through the
+         * action-handler layout. */
+        IAsyncActionCompletedHandler *h = (IAsyncActionCompletedHandler *)handler;
+        h->lpVtbl->Invoke( h, (IAsyncAction *)iface, 1 /* Completed */ );
     }
     return S_OK;
 }
