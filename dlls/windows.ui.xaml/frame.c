@@ -3068,6 +3068,14 @@ struct ICoreWebView2Controller
 };
 
 typedef struct ICoreWebView2CompositionController ICoreWebView2CompositionController;
+/* Verified against WebView2.idl / WebView2.h: ICoreWebView2CompositionController has
+ * 11 vtable slots (0..2 IUnknown, 3 get_RootVisualTarget, 4 put_RootVisualTarget,
+ * 5 SendMouseInput, 6 SendPointerInput, 7 get_Cursor, 8 get_SystemCursorId,
+ * 9 add_CursorChanged, 10 remove_CursorChanged). There is no SendKeyboardInput or
+ * SendCharacterInput slot on ICoreWebView2CompositionController; keyboard/character
+ * input in visual-hosting mode enters EmbeddedBrowserWebView.dll through its
+ * in-process ClientWindowWin32 child HWND (ClientWindow::OnKeyEvent ->
+ * Controller::SendKeyEvent -> EmbeddedBrowserProxy::SendInputEvent). */
 typedef struct ICoreWebView2CompositionControllerVtbl
 {
     HRESULT (WINAPI *QueryInterface)( ICoreWebView2CompositionController *This, REFIID riid, void **ppvObject );
@@ -3078,6 +3086,10 @@ typedef struct ICoreWebView2CompositionControllerVtbl
     HRESULT (WINAPI *SendMouseInput)( ICoreWebView2CompositionController *This, UINT32 eventKind,
                                       UINT32 virtualKeys, UINT32 mouseData, POINT point );
     HRESULT (WINAPI *SendPointerInput)( ICoreWebView2CompositionController *This, UINT32 eventKind, void *pointerInfo );
+    HRESULT (WINAPI *get_Cursor)( ICoreWebView2CompositionController *This, HCURSOR *cursor );
+    HRESULT (WINAPI *get_SystemCursorId)( ICoreWebView2CompositionController *This, UINT32 *systemCursorId );
+    void *add_CursorChanged;
+    void *remove_CursorChanged;
 } ICoreWebView2CompositionControllerVtbl;
 
 struct ICoreWebView2CompositionController
@@ -3816,7 +3828,14 @@ static HWND g_wv2_host_hwnd;
 static HWND g_wv2_subclassed_hwnd;
 static WNDPROC g_wv2_prev_wndproc;
 static HWND g_wv2_sta_hwnd;
+static BOOL g_wv2_focused;
+static BOOL g_wv2_ctrl_down;
+static BOOL g_wv2_shift_down;
+static BOOL g_wv2_alt_down;
 #define WM_APP_WV2_WHEEL (WM_APP + 0x58)
+#define WM_APP_WV2_MOUSE (WM_APP + 0x59)
+#define WM_APP_WV2_KEY   (WM_APP + 0x5a)
+#define WM_APP_WV2_CHAR  (WM_APP + 0x5b)
 
 static BOOL CALLBACK wv2_post_wheel_cb( HWND child, LPARAM lparam )
 {
@@ -3828,6 +3847,136 @@ static BOOL CALLBACK wv2_post_wheel_cb( HWND child, LPARAM lparam )
         PostMessageW( child, m->message, m->wParam, m->lParam );
     EnumChildWindows( child, wv2_post_wheel_cb, lparam );
     return TRUE;
+}
+
+static BOOL CALLBACK wv2_find_client_cb( HWND child, LPARAM lparam )
+{
+    WCHAR cls[128] = {0};
+    DWORD pid = 0;
+
+    GetWindowThreadProcessId( child, &pid );
+    if (pid == GetCurrentProcessId())
+    {
+        GetClassNameW( child, cls, ARRAY_SIZE( cls ) );
+        if (wcsstr( cls, L"Chrome_WidgetWin" ))
+        {
+            *(HWND *)lparam = child;
+            return FALSE;
+        }
+    }
+    EnumChildWindows( child, wv2_find_client_cb, lparam );
+    return *(HWND *)lparam == NULL;
+}
+
+static HWND wv2_find_client_hwnd( HWND host )
+{
+    HWND vis, cli = NULL;
+
+    if (host && IsWindow( host ))
+    {
+        vis = (HWND)GetPropW( host, L"ClientVisualWindow" );
+        if (vis && IsWindow( vis ))
+        {
+            cli = (HWND)GetPropW( vis, L"ClientWindow" );
+            if (cli && IsWindow( cli )) return cli;
+        }
+        EnumChildWindows( host, wv2_find_client_cb, (LPARAM)&cli );
+        if (cli && IsWindow( cli )) return cli;
+    }
+    return NULL;
+}
+
+static void wv2_ensure_focus( struct xaml_element *impl, HWND host, BOOL force )
+{
+    HWND cli;
+    DWORD host_tid, cur_tid;
+    BOOL attached = FALSE;
+
+    if (!impl) return;
+    if (g_wv2_focused && !force) return;
+    cli = wv2_find_client_hwnd( host );
+    host_tid = (host && IsWindow( host )) ? GetWindowThreadProcessId( host, NULL ) : 0;
+    cur_tid = GetCurrentThreadId();
+    if (host_tid && host_tid != cur_tid)
+        attached = AttachThreadInput( cur_tid, host_tid, TRUE );
+    if (impl->loader_controller && impl->real_loader)
+    {
+        ICoreWebView2Controller *ctrl = impl->loader_controller;
+        HRESULT hr_f = ctrl->lpVtbl->MoveFocus( ctrl, 0 );
+        TRACE( "wv2_ensure_focus: MoveFocus(PROGRAMMATIC) hr=%#lx\n", hr_f );
+    }
+    if (cli && IsWindow( cli ))
+    {
+        SetFocus( cli );
+        SendMessageW( cli, WM_SETFOCUS, 0, 0 );
+        g_wv2_focused = TRUE;
+    }
+    if (attached)
+        AttachThreadInput( cur_tid, host_tid, FALSE );
+}
+
+static HRESULT wv2_sta_send_keyboard_input( struct xaml_element *impl, HWND host,
+                                            UINT key_msg, UINT32 vk, UINT32 scan,
+                                            UINT32 repeat, UINT32 mods, LPARAM lparam )
+{
+    HWND cli;
+    HRESULT hr = E_NOINTERFACE;
+
+    if (!impl) return E_POINTER;
+    wv2_ensure_focus( impl, host, FALSE );
+    cli = wv2_find_client_hwnd( host );
+    if (cli && IsWindow( cli ))
+    {
+        SendMessageW( cli, key_msg, vk, lparam );
+        hr = S_OK;
+    }
+    else if (host && IsWindow( host ))
+    {
+        MSG m = { host, key_msg, vk, lparam };
+        EnumChildWindows( host, wv2_post_wheel_cb, (LPARAM)&m );
+        hr = impl->loader_comp_ctrl ? S_OK : S_FALSE;
+    }
+    TRACE( "wv2_sta_wndproc: SendKeyboardInput hr=%#lx msg=%#x vk=%#x scan=%#x repeat=%u mods=%#x cli=%p\n",
+           hr, key_msg, vk, scan, repeat, mods, cli );
+    return hr;
+}
+
+static HRESULT wv2_sta_send_character_input( struct xaml_element *impl, HWND host,
+                                             WCHAR ch, BOOL keydown, LPARAM lparam )
+{
+    HWND cli;
+    BYTE ks[256];
+    BOOL had_ks = FALSE;
+    HRESULT hr = E_NOINTERFACE;
+
+    if (!impl) return E_POINTER;
+    wv2_ensure_focus( impl, host, FALSE );
+    cli = wv2_find_client_hwnd( host );
+    if (GetKeyboardState( ks ))
+    {
+        BYTE clean_ks[256];
+        memcpy( clean_ks, ks, sizeof(clean_ks) );
+        clean_ks[VK_CONTROL] = clean_ks[VK_LCONTROL] = clean_ks[VK_RCONTROL] = 0;
+        clean_ks[VK_MENU] = clean_ks[VK_LMENU] = clean_ks[VK_RMENU] = 0;
+        SetKeyboardState( clean_ks );
+        had_ks = TRUE;
+    }
+    if (cli && IsWindow( cli ))
+    {
+        SendMessageW( cli, WM_CHAR, (WPARAM)ch, lparam ? lparam : 1 );
+        hr = S_OK;
+    }
+    else if (host && IsWindow( host ))
+    {
+        MSG m = { host, WM_CHAR, (WPARAM)ch, lparam ? lparam : 1 };
+        EnumChildWindows( host, wv2_post_wheel_cb, (LPARAM)&m );
+        hr = impl->loader_comp_ctrl ? S_OK : S_FALSE;
+    }
+    if (had_ks)
+        SetKeyboardState( ks );
+    TRACE( "wv2_sta_wndproc: SendCharacterInput hr=%#lx ch=%#x keydown=%d cli=%p\n",
+           hr, (unsigned int)ch, keydown, cli );
+    return hr;
 }
 
 static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
@@ -3852,6 +4001,54 @@ static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
         }
         return 0;
     }
+    if (msg == WM_APP_WV2_MOUSE && g_active_wv2_impl)
+    {
+        HWND host = g_active_wv2_impl->parent_hwnd ? g_active_wv2_impl->parent_hwnd : g_wv2_core_hwnd;
+        UINT32 ev_kind = LOWORD( wparam );
+        UINT32 vkeys = HIWORD( wparam );
+        POINT pt = { (short)LOWORD( lparam ), (short)HIWORD( lparam ) };
+        if (ev_kind == WM_MOUSELEAVE)
+        {
+            vkeys = 0;
+            pt.x = 0;
+            pt.y = 0;
+        }
+        if (ev_kind == WM_LBUTTONDOWN || ev_kind == WM_RBUTTONDOWN || ev_kind == WM_MBUTTONDOWN)
+            wv2_ensure_focus( g_active_wv2_impl, host, TRUE );
+        if (g_active_wv2_impl->loader_comp_ctrl)
+        {
+            ICoreWebView2CompositionController *comp_ctrl = g_active_wv2_impl->loader_comp_ctrl;
+            HRESULT hr_m = comp_ctrl->lpVtbl->SendMouseInput( comp_ctrl, ev_kind, vkeys, 0, pt );
+            if (ev_kind != WM_MOUSEMOVE)
+                TRACE( "wv2_sta_wndproc: SendMouseInput(%#x) pt=%ld,%ld vkeys=%#x hr=%#lx\n",
+                       ev_kind, pt.x, pt.y, vkeys, hr_m );
+        }
+        else if (host)
+        {
+            MSG m = { host, ev_kind, vkeys, lparam };
+            EnumChildWindows( host, wv2_post_wheel_cb, (LPARAM)&m );
+        }
+        return 0;
+    }
+    if (msg == WM_APP_WV2_KEY && g_active_wv2_impl)
+    {
+        HWND host = g_active_wv2_impl->parent_hwnd ? g_active_wv2_impl->parent_hwnd : g_wv2_core_hwnd;
+        UINT32 vk = LOWORD( wparam ) & 0xff;
+        UINT32 mods = (LOWORD( wparam ) >> 8) & 0xff;
+        UINT key_msg = HIWORD( wparam );
+        UINT32 repeat = (UINT32)LOWORD( lparam );
+        UINT32 scan = (UINT32)((lparam >> 16) & 0xff);
+        wv2_sta_send_keyboard_input( g_active_wv2_impl, host, key_msg, vk, scan, repeat, mods, lparam );
+        return 0;
+    }
+    if (msg == WM_APP_WV2_CHAR && g_active_wv2_impl)
+    {
+        HWND host = g_active_wv2_impl->parent_hwnd ? g_active_wv2_impl->parent_hwnd : g_wv2_core_hwnd;
+        WCHAR ch = (WCHAR)LOWORD( wparam );
+        BOOL keydown = HIWORD( wparam ) != 0;
+        wv2_sta_send_character_input( g_active_wv2_impl, host, ch, keydown, lparam );
+        return 0;
+    }
     return DefWindowProcW( hwnd, msg, wparam, lparam );
 }
 
@@ -3866,6 +4063,31 @@ static void wv2_ensure_sta_hwnd( void )
     RegisterClassW( &wc );
     g_wv2_sta_hwnd = CreateWindowExW( 0, L"WineWv2StaWheelBridge", L"", 0, 0, 0, 0, 0,
                                       HWND_MESSAGE, NULL, wc.hInstance, NULL );
+}
+
+static void wv2_send_keyboard_input( HWND hwnd, UINT key_msg, UINT32 vk, UINT32 scan,
+                                     UINT32 repeat, UINT32 mods, LPARAM lparam )
+{
+    WPARAM wp = MAKEWPARAM( (vk & 0xff) | ((mods & 0xff) << 8), key_msg & 0xffff );
+    if (g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
+        PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_KEY, wp, lparam );
+    else if (hwnd)
+    {
+        MSG m = { hwnd, key_msg, vk, lparam };
+        EnumChildWindows( hwnd, wv2_post_wheel_cb, (LPARAM)&m );
+    }
+}
+
+static void wv2_send_character_input( HWND hwnd, WCHAR ch, BOOL keydown, LPARAM lparam )
+{
+    WPARAM wp = MAKEWPARAM( (WORD)ch, (WORD)(keydown ? 1 : 0) );
+    if (g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
+        PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_CHAR, wp, lparam );
+    else if (hwnd)
+    {
+        MSG m = { hwnd, WM_CHAR, (WPARAM)ch, lparam };
+        EnumChildWindows( hwnd, wv2_post_wheel_cb, (LPARAM)&m );
+    }
 }
 
 static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
@@ -3884,6 +4106,44 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
             EnumChildWindows( hwnd, wv2_post_wheel_cb, (LPARAM)&m );
         }
     }
+    else if ((msg == WM_MOUSEMOVE || msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP ||
+              msg == WM_LBUTTONDBLCLK || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+              msg == WM_RBUTTONDBLCLK || msg == WM_MBUTTONDOWN || msg == WM_MBUTTONUP ||
+              msg == WM_MBUTTONDBLCLK || msg == WM_MOUSELEAVE) && g_active_wv2_impl)
+    {
+        WPARAM wp = MAKEWPARAM( msg, LOWORD( wparam ) & 0x7f );
+        if (g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
+            PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_MOUSE, wp, lparam );
+        else
+        {
+            MSG m = { hwnd, msg, wparam, lparam };
+            EnumChildWindows( hwnd, wv2_post_wheel_cb, (LPARAM)&m );
+        }
+    }
+    else if ((msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_SYSKEYDOWN || msg == WM_SYSKEYUP) &&
+             g_active_wv2_impl)
+    {
+        UINT32 vk = (UINT32)wparam;
+        UINT32 repeat = (UINT32)LOWORD( lparam );
+        UINT32 scan = (UINT32)((lparam >> 16) & 0xff);
+        UINT32 mods = 0;
+        BOOL is_down = (msg == WM_KEYDOWN || msg == WM_SYSKEYDOWN);
+
+        if (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL) g_wv2_ctrl_down = is_down;
+        if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) g_wv2_shift_down = is_down;
+        if (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) g_wv2_alt_down = is_down;
+        if (g_wv2_shift_down || (GetKeyState( VK_SHIFT ) & 0x8000)) mods |= MK_SHIFT;
+        if (g_wv2_ctrl_down || (GetKeyState( VK_CONTROL ) & 0x8000)) mods |= MK_CONTROL;
+        if (g_wv2_alt_down || (GetKeyState( VK_MENU ) & 0x8000)) mods |= 0x20;
+
+        wv2_send_keyboard_input( hwnd, msg, vk, scan, repeat, mods, lparam );
+    }
+    else if (msg == WM_CHAR && g_active_wv2_impl)
+    {
+        WCHAR ch = (WCHAR)wparam;
+        if (!g_wv2_ctrl_down && (ch >= 0x20 || ch == '\b' || ch == '\t' || ch == '\r'))
+            wv2_send_character_input( hwnd, ch, TRUE, lparam );
+    }
     if (g_wv2_prev_wndproc && g_wv2_prev_wndproc != wv2_host_wndproc)
         return CallWindowProcW( g_wv2_prev_wndproc, hwnd, msg, wparam, lparam );
     return DefWindowProcW( hwnd, msg, wparam, lparam );
@@ -3891,8 +4151,11 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
 
 static void wv2_ensure_host_subclass( HWND parent )
 {
-    WNDPROC prev;
-    if (!parent || !IsWindow( parent ) || g_wv2_subclassed_hwnd == parent) return;
+    WNDPROC cur, prev;
+    if (!parent || !IsWindow( parent )) return;
+    if (GetWindowThreadProcessId( parent, NULL ) != GetCurrentThreadId()) return;
+    cur = (WNDPROC)GetWindowLongPtrW( parent, GWLP_WNDPROC );
+    if (cur == wv2_host_wndproc) return;
     prev = (WNDPROC)SetWindowLongPtrW( parent, GWLP_WNDPROC, (LONG_PTR)wv2_host_wndproc );
     if (prev && prev != wv2_host_wndproc)
     {
@@ -4041,8 +4304,7 @@ void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height )
          hwnd, width, height, g_active_wv2_impl, g_active_wv2_impl ? g_active_wv2_impl->browser_queued : -1 );
     g_wv2_core_hwnd = hwnd;
     if (g_active_wv2_impl) g_active_wv2_impl->parent_hwnd = hwnd;
-    if (g_active_wv2_impl && g_active_wv2_impl->loader_controller)
-        wv2_ensure_host_subclass( hwnd );
+    wv2_ensure_host_subclass( hwnd );
     if (hwnd && IsWindow( hwnd ))
     {
         HANDLE ev = get_xaml_window_ready_event();
@@ -4105,6 +4367,7 @@ static DWORD WINAPI wv2_sta_thread( void *arg )
     MSG msg;
 
     CoInitializeEx( NULL, COINIT_APARTMENTTHREADED );
+    wv2_ensure_sta_hwnd();
     ev = get_xaml_window_ready_event();
     start = GetTickCount();
     while (!(hw = xaml_get_window_hwnd()) || !IsWindow( hw ))
