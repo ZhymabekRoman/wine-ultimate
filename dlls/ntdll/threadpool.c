@@ -526,7 +526,12 @@ NTSTATUS WINAPI RtlSetIoCompletionCallback(HANDLE FileHandle, PRTL_OVERLAPPED_CO
     IO_STATUS_BLOCK iosb;
     FILE_COMPLETION_INFORMATION info;
 
-    if (Flags) FIXME("Unknown value Flags=0x%lx\n", Flags);
+    if (Flags)
+    {
+        FIXME("Unknown value Flags=0x%lx\n", Flags);
+        return STATUS_INVALID_PARAMETER;
+    }
+    if (!Function) return STATUS_INVALID_PARAMETER;
 
     if (!old_threadpool.compl_port)
     {

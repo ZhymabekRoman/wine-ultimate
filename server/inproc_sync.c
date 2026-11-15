@@ -262,20 +262,55 @@ static int inproc_sync_signal( struct object *obj, unsigned int access, int sign
     return 1;
 }
 
+struct orphan_inproc_mutex
+{
+    struct list entry;
+    int         fd;
+};
+
+static struct list orphan_inproc_mutexes = LIST_INIT( orphan_inproc_mutexes );
+
 static void inproc_sync_destroy( struct object *obj )
 {
     struct inproc_sync *sync = (struct inproc_sync *)obj;
     assert( obj->ops == &inproc_sync_ops );
     list_remove( &sync->entry );
+    if (sync->type == INPROC_SYNC_MUTEX)
+    {
+        struct ntsync_mutex_args args = {0};
+        if (!ioctl( sync->fd, NTSYNC_IOC_MUTEX_READ, &args ) && args.owner)
+        {
+            struct orphan_inproc_mutex *orphan = malloc( sizeof(*orphan) );
+            if (orphan)
+            {
+                orphan->fd = sync->fd;
+                list_add_tail( &orphan_inproc_mutexes, &orphan->entry );
+                return;
+            }
+        }
+    }
     close( sync->fd );
 }
 
 void abandon_inproc_mutexes( thread_id_t tid )
 {
     struct inproc_sync *mutex;
+    struct orphan_inproc_mutex *orphan, *next;
 
     LIST_FOR_EACH_ENTRY( mutex, &inproc_mutexes, struct inproc_sync, entry )
         ioctl( mutex->fd, NTSYNC_IOC_MUTEX_KILL, &tid );
+
+    LIST_FOR_EACH_ENTRY_SAFE( orphan, next, &orphan_inproc_mutexes, struct orphan_inproc_mutex, entry )
+    {
+        struct ntsync_mutex_args args = {0};
+        ioctl( orphan->fd, NTSYNC_IOC_MUTEX_KILL, &tid );
+        if (ioctl( orphan->fd, NTSYNC_IOC_MUTEX_READ, &args ) < 0 || !args.owner)
+        {
+            list_remove( &orphan->entry );
+            close( orphan->fd );
+            free( orphan );
+        }
+    }
 }
 
 static int get_obj_inproc_sync( struct object *obj, int *type )

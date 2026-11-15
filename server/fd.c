@@ -3427,8 +3427,12 @@ DECL_HANDLER(set_completion_info)
 
         if (completion)
         {
-            if (!is_fd_overlapped( fd )) set_error( STATUS_INVALID_PARAMETER );
-            else if (fd->completion && fd->completion != completion)
+            if (!is_fd_overlapped( fd ))
+            {
+                set_error( STATUS_INVALID_PARAMETER );
+                release_object( completion );
+            }
+            else if (fd->completion && (fd->completion != completion || fd->comp_key == req->ckey || !req->ckey))
             {
                 /* a handle can only be associated with a single completion port */
                 set_error( STATUS_INVALID_PARAMETER );

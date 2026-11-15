@@ -540,8 +540,8 @@ void WINAPI RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
 
         do
         {
-            old.s = *u.s;
-            new.s = old.s;
+            old.l = *(volatile LONG *)u.l;
+            new.l = old.l;
 
             if (!old.s.owners)
             {
@@ -567,7 +567,11 @@ void WINAPI RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
             {
                 YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
                 spin_old.l = *(volatile LONG *)u.l;
-                if (spin_old.s.owners) continue;
+                if (spin_old.s.owners)
+                {
+                    new.l = spin_old.l;
+                    continue;
+                }
 
                 spin_new.l = spin_old.l;
                 spin_new.s.owners = 1;
@@ -599,8 +603,8 @@ void WINAPI RtlAcquireSRWLockShared( RTL_SRWLOCK *lock )
 
         do
         {
-            old.s = *u.s;
-            new = old;
+            old.l = *(volatile LONG *)u.l;
+            new.l = old.l;
 
             if (!old.s.exclusive_waiters)
             {
@@ -625,7 +629,11 @@ void WINAPI RtlAcquireSRWLockShared( RTL_SRWLOCK *lock )
             {
                 YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
                 spin_old.l = *(volatile LONG *)u.l;
-                if (spin_old.s.exclusive_waiters || spin_old.s.owners == 0xffff) continue;
+                if (spin_old.s.exclusive_waiters || spin_old.s.owners == 0xffff)
+                {
+                    new.l = spin_old.l;
+                    continue;
+                }
 
                 spin_new.l = spin_old.l;
                 ++spin_new.s.owners;
@@ -647,8 +655,8 @@ void WINAPI RtlReleaseSRWLockExclusive( RTL_SRWLOCK *lock )
 
     do
     {
-        old.s = *u.s;
-        new = old;
+        old.l = *(volatile LONG *)u.l;
+        new.l = old.l;
 
         if (!(old.s.exclusive_waiters & 1)) ERR("Lock %p is not owned exclusive!\n", lock);
 
@@ -672,8 +680,8 @@ void WINAPI RtlReleaseSRWLockShared( RTL_SRWLOCK *lock )
 
     do
     {
-        old.s = *u.s;
-        new = old;
+        old.l = *(volatile LONG *)u.l;
+        new.l = old.l;
 
         if (old.s.exclusive_waiters & 1) ERR("Lock %p is owned exclusive!\n", lock);
         else if (!old.s.owners) ERR("Lock %p is not owned shared!\n", lock);
@@ -700,8 +708,8 @@ BOOLEAN WINAPI RtlTryAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
 
     do
     {
-        old.s = *u.s;
-        new.s = old.s;
+        old.l = *(volatile LONG *)u.l;
+        new.l = old.l;
 
         if (!old.s.owners)
         {
@@ -730,8 +738,8 @@ BOOLEAN WINAPI RtlTryAcquireSRWLockShared( RTL_SRWLOCK *lock )
 
     do
     {
-        old.s = *u.s;
-        new.s = old.s;
+        old.l = *(volatile LONG *)u.l;
+        new.l = old.l;
 
         if (!old.s.exclusive_waiters)
         {
