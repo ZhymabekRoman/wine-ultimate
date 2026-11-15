@@ -913,8 +913,8 @@ static HRESULT layout_run_get_last_resort_font(const struct dwrite_textlayout *l
     if (FAILED(create_matching_font(range->collection, range->fontfamily, range->weight, range->style,
             range->stretch, &IID_IDWriteFont3, (void **)&font)))
     {
-        if (FAILED(hr = create_matching_font(layout->system_collection, L"Tahoma", range->weight, range->style,
-                range->stretch, &IID_IDWriteFont3, (void **)&font)))
+        if (FAILED(hr = create_fallback_last_resort_font(layout->factory, layout->system_collection,
+                range->fontfamily, range->weight, range->style, range->stretch, &IID_IDWriteFont3, (void **)&font)))
         {
             WARN("Failed to create last resort font, hr %#lx.\n", hr);
             return hr;

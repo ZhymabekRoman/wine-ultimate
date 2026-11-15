@@ -224,54 +224,55 @@ const char *debugstr_sa_script(UINT16 script)
     return script < Script_LastId ? debugstr_fourcc(dwritescripts_properties[script].props.isoScriptCode) : "undefined";
 }
 
-static const struct fallback_description
+static const struct dwrite_fallback_entry
 {
+    const WCHAR *family;
     const char *ranges;
-    const WCHAR *families;
     const WCHAR *locale;
+    const WCHAR *fallbacks[8];
 }
-system_fallback_config[] =
+dwrite_fallback_map[] =
 {
     /* Latin, Combining Diacritical Marks */
-    { "0000-007F, 0080-00FF, 0100-017F, 0180-024F, "
-      "0250-02AF, 02B0-02FF, 0300-036F", L"Tahoma" },
+    { NULL, "0000-007F, 0080-00FF, 0100-017F, 0180-024F, "
+            "0250-02AF, 02B0-02FF, 0300-036F", NULL, { L"Tahoma", NULL } },
 
     /* Cyrillic, Cyrillic Supplement */
-    { "0400-052F",              L"Tahoma" },
+    { NULL, "0400-052F",              NULL, { L"Tahoma", NULL } },
 
-    { "0530-058F, FB10-FB1C",   L"Noto Sans Armenian" },
+    { NULL, "0530-058F, FB10-FB1C",   NULL, { L"Noto Sans Armenian", NULL } },
 
-    { "0590-05FF, FB1D-FB4F",   L"Noto Sans Hebrew" },
+    { NULL, "0590-05FF, FB1D-FB4F",   NULL, { L"Noto Sans Hebrew", NULL } },
 
-    { "0600-06FF, 0750-077F, "
-      "08A0-08FF, FB50-FDCF, "
-      "FDF0-FDFF, FE70-FEFE",   L"Noto Sans Arabic" },
+    { NULL, "0600-06FF, 0750-077F, "
+            "08A0-08FF, FB50-FDCF, "
+            "FDF0-FDFF, FE70-FEFE",   NULL, { L"Noto Sans Arabic", NULL } },
 
-    { "0700-074F",              L"Noto Sans Syriac" },
-    { "0780-07BF",              L"Noto Sans Thaana" },
-    { "07C0-07FF",              L"Noto Sans NKo" },
-    { "0800-083F",              L"Noto Sans Samaritan" },
-    { "0840-085F",              L"Noto Sans Mandaic" },
+    { NULL, "0700-074F",              NULL, { L"Noto Sans Syriac", NULL } },
+    { NULL, "0780-07BF",              NULL, { L"Noto Sans Thaana", NULL } },
+    { NULL, "07C0-07FF",              NULL, { L"Noto Sans NKo", NULL } },
+    { NULL, "0800-083F",              NULL, { L"Noto Sans Samaritan", NULL } },
+    { NULL, "0840-085F",              NULL, { L"Noto Sans Mandaic", NULL } },
 
-    { "0900-097F",              L"Noto Sans Devanagari" },
-    { "0980-09FF",              L"Noto Sans Bengali" },
-    { "0A00-0A7F",              L"Noto Sans Gurmukhi" },
-    { "0A80-0AFF",              L"Noto Sans Gujarati" },
-    { "0B00-0B7F",              L"Noto Sans Oriya" },
-    { "0B80-0BFF",              L"Noto Sans Tamil" },
-    { "0C00-0C7F",              L"Noto Sans Telugu" },
-    { "0C80-0CFF",              L"Noto Sans Kannada" },
-    { "0D00-0D7F",              L"Noto Sans Malayalam" },
-    { "0D80-0DFF",              L"Noto Sans Sinhala" },
+    { NULL, "0900-097F",              NULL, { L"Noto Sans Devanagari", NULL } },
+    { NULL, "0980-09FF",              NULL, { L"Noto Sans Bengali", NULL } },
+    { NULL, "0A00-0A7F",              NULL, { L"Noto Sans Gurmukhi", NULL } },
+    { NULL, "0A80-0AFF",              NULL, { L"Noto Sans Gujarati", NULL } },
+    { NULL, "0B00-0B7F",              NULL, { L"Noto Sans Oriya", NULL } },
+    { NULL, "0B80-0BFF",              NULL, { L"Noto Sans Tamil", NULL } },
+    { NULL, "0C00-0C7F",              NULL, { L"Noto Sans Telugu", NULL } },
+    { NULL, "0C80-0CFF",              NULL, { L"Noto Sans Kannada", NULL } },
+    { NULL, "0D00-0D7F",              NULL, { L"Noto Sans Malayalam", NULL } },
+    { NULL, "0D80-0DFF",              NULL, { L"Noto Sans Sinhala", NULL } },
 
-    { "0E00-0E7F",              L"Noto Sans Thai" },
-    { "0E80-0EFF",              L"Noto Sans Lao" },
+    { NULL, "0E00-0E7F",              NULL, { L"Noto Sans Thai", NULL } },
+    { NULL, "0E80-0EFF",              NULL, { L"Noto Sans Lao", NULL } },
 
-    { "0F00-0FFF",              L"Noto Serif Tibetan" },
+    { NULL, "0F00-0FFF",              NULL, { L"Noto Serif Tibetan", NULL } },
 
-    { "1000-109F, A9E0-A9FF, AA60-AA7F", L"Noto Sans Myanmar" },
+    { NULL, "1000-109F, A9E0-A9FF, AA60-AA7F", NULL, { L"Noto Sans Myanmar", NULL } },
 
-    { "10A0-10FF, 2D00-2D2F",   L"Noto Sans Georgian" },
+    { NULL, "10A0-10FF, 2D00-2D2F",   NULL, { L"Noto Sans Georgian", NULL } },
 
     /* Hangul Jamo               - 1100-11FF
        Hangul Compatibility Jamo - 3130-318F
@@ -281,106 +282,106 @@ system_fallback_config[] =
        Hangul Syllables          - AC00-D7AF
        Hangul Jamo Extended-B    - D7B0-D7FF */
 
-    { "1100-11FF, 3130-318F, "
-      "3200-321F, 3260-327F, "
-      "A960-A97F, AC00-D7FF, "
-      "D7B0-D7FF",              L"Noto Sans CJK KR" },
+    { NULL, "1100-11FF, 3130-318F, "
+            "3200-321F, 3260-327F, "
+            "A960-A97F, AC00-D7FF, "
+            "D7B0-D7FF",              NULL, { L"Noto Sans CJK KR", NULL } },
 
-    { "1680-169F",              L"Noto Sans Ogham" },
+    { NULL, "1680-169F",              NULL, { L"Noto Sans Ogham", NULL } },
 
-    { "16A0-16FF",              L"Noto Sans Runic" },
+    { NULL, "16A0-16FF",              NULL, { L"Noto Sans Runic", NULL } },
 
-    { "1700-171F",              L"Noto Sans Tagalog" },
-    { "1720-173F",              L"Noto Sans Hanunoo" },
-    { "1740-175F",              L"Noto Sans Buhid" },
-    { "1760-177F",              L"Noto Sans Tagbanwa" },
+    { NULL, "1700-171F",              NULL, { L"Noto Sans Tagalog", NULL } },
+    { NULL, "1720-173F",              NULL, { L"Noto Sans Hanunoo", NULL } },
+    { NULL, "1740-175F",              NULL, { L"Noto Sans Buhid", NULL } },
+    { NULL, "1760-177F",              NULL, { L"Noto Sans Tagbanwa", NULL } },
 
-    { "1800-18AF, 202F, 11660-1167F", L"Noto Sans Mongolian" },
+    { NULL, "1800-18AF, 202F, 11660-1167F", NULL, { L"Noto Sans Mongolian", NULL } },
 
-    { "1900-194F",              L"Noto Sans Limbu" },
-    { "1950-197F",              L"Noto Sans Tai Le" },
-    { "1980-19DF",              L"Noto Sans New Tai Lue" },
-    { "1A00-1A1F",              L"Noto Sans Buginese" },
-    { "1A20-1AAF",              L"Noto Sans Tai Tham" },
-    { "1B00-1B7F",              L"Noto Sans Balinese" },
-    { "1B80-1BBF, 1CC0-1CCF",   L"Noto Sans Sundanese" },
-    { "1BC0-1BFF",              L"Noto Sans Batak" },
-    { "1C00-1C4F",              L"Noto Sans Lepcha" },
-    { "1C50-1C7F",              L"Noto Sans Ol Chiki" },
+    { NULL, "1900-194F",              NULL, { L"Noto Sans Limbu", NULL } },
+    { NULL, "1950-197F",              NULL, { L"Noto Sans Tai Le", NULL } },
+    { NULL, "1980-19DF",              NULL, { L"Noto Sans New Tai Lue", NULL } },
+    { NULL, "1A00-1A1F",              NULL, { L"Noto Sans Buginese", NULL } },
+    { NULL, "1A20-1AAF",              NULL, { L"Noto Sans Tai Tham", NULL } },
+    { NULL, "1B00-1B7F",              NULL, { L"Noto Sans Balinese", NULL } },
+    { NULL, "1B80-1BBF, 1CC0-1CCF",   NULL, { L"Noto Sans Sundanese", NULL } },
+    { NULL, "1BC0-1BFF",              NULL, { L"Noto Sans Batak", NULL } },
+    { NULL, "1C00-1C4F",              NULL, { L"Noto Sans Lepcha", NULL } },
+    { NULL, "1C50-1C7F",              NULL, { L"Noto Sans Ol Chiki", NULL } },
 
     /* Miscellaneous Symbols - 2600-26FF */
-    { "2600-26FF",              L"Noto Sans Symbols2, Noto Sans Symbols" },
+    { NULL, "2600-26FF",              NULL, { L"Noto Sans Symbols2", L"Noto Sans Symbols", NULL } },
 
     /* Dingbats - 2700-27BF */
-    { "2700-27BF",              L"Noto Sans Symbols2, Noto Sans Symbols 2" },
+    { NULL, "2700-27BF",              NULL, { L"Noto Sans Symbols2", L"Noto Sans Symbols 2", NULL } },
 
-    { "2C80-2CFF",              L"Noto Sans Coptic" },
-    { "2D30-2D7F",              L"Noto Sans Tifinagh" },
+    { NULL, "2C80-2CFF",              NULL, { L"Noto Sans Coptic", NULL } },
+    { NULL, "2D30-2D7F",              NULL, { L"Noto Sans Tifinagh", NULL } },
 
     /* CJK Radicals Supplement - 2E80-2EFF */
 
-    { "2E80-2EFF",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "2E80-2EFF",              L"Noto Sans CJK TC", L"zh-Hant" },
-    { "2E80-2EFF",              L"Noto Sans CJK KR", L"ko" },
+    { NULL, "2E80-2EFF",              L"zh-Hans", { L"Noto Sans CJK SC", NULL } },
+    { NULL, "2E80-2EFF",              L"zh-Hant", { L"Noto Sans CJK TC", NULL } },
+    { NULL, "2E80-2EFF",              L"ko",      { L"Noto Sans CJK KR", NULL } },
 
     /* CJK Symbols and Punctuation - 3000-303F
        Hiragana                    - 3040-309F
        Katakana                    - 30A0-30FF
        Katakana Phonetic Ext.      - 31F0-31FF */
 
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK SC", L"zh-Hans" },
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK TC", L"zh-Hant" },
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK KR", L"ko" },
-    { "3000-30FF, 31F0-31FF",   L"Noto Sans CJK JP" },
+    { NULL, "3000-30FF, 31F0-31FF",   L"zh-Hans", { L"Noto Sans CJK SC", NULL } },
+    { NULL, "3000-30FF, 31F0-31FF",   L"zh-Hant", { L"Noto Sans CJK TC", NULL } },
+    { NULL, "3000-30FF, 31F0-31FF",   L"ko",      { L"Noto Sans CJK KR", NULL } },
+    { NULL, "3000-30FF, 31F0-31FF",   NULL,       { L"Noto Sans CJK JP", NULL } },
 
     /* CJK Unified Ext A - 3400-4DBF
        CJK Unified       - 4E00-9FFF */
 
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK SC", L"zh-Hans" },
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK TC", L"zh-Hant" },
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK KR", L"ko" },
-    { "3400-4DBF, 4E00-9FFF",   L"Noto Sans CJK JP" },
+    { NULL, "3400-4DBF, 4E00-9FFF",   L"zh-Hans", { L"Noto Sans CJK SC", NULL } },
+    { NULL, "3400-4DBF, 4E00-9FFF",   L"zh-Hant", { L"Noto Sans CJK TC", NULL } },
+    { NULL, "3400-4DBF, 4E00-9FFF",   L"ko",      { L"Noto Sans CJK KR", NULL } },
+    { NULL, "3400-4DBF, 4E00-9FFF",   NULL,       { L"Noto Sans CJK JP", NULL } },
 
-    { "A000-A4CF",              L"Noto Sans Yi" },
-    { "A4D0-A4FF",              L"Noto Sans Lisu" },
-    { "A500-A63F",              L"Noto Sans Vai" },
-    { "A6A0-A6FF, 16800-16A38", L"Noto Sans Bamum" },
-    { "A800-A82F",              L"Noto Sans Syloti Nagri" },
-    { "A840-A87F",              L"Noto Sans PhagsPa" },
-    { "A880-A8DF",              L"Noto Sans Saurashtra" },
-    { "A900-A92F",              L"Noto Sans Kayah Li" },
-    { "A930-A95F",              L"Noto Sans Rejang" },
-    { "A980-A9DF",              L"Noto Sans Javanese" },
-    { "AA00-AA5F",              L"Noto Sans Cham" },
+    { NULL, "A000-A4CF",              NULL, { L"Noto Sans Yi", NULL } },
+    { NULL, "A4D0-A4FF",              NULL, { L"Noto Sans Lisu", NULL } },
+    { NULL, "A500-A63F",              NULL, { L"Noto Sans Vai", NULL } },
+    { NULL, "A6A0-A6FF, 16800-16A38", NULL, { L"Noto Sans Bamum", NULL } },
+    { NULL, "A800-A82F",              NULL, { L"Noto Sans Syloti Nagri", NULL } },
+    { NULL, "A840-A87F",              NULL, { L"Noto Sans PhagsPa", NULL } },
+    { NULL, "A880-A8DF",              NULL, { L"Noto Sans Saurashtra", NULL } },
+    { NULL, "A900-A92F",              NULL, { L"Noto Sans Kayah Li", NULL } },
+    { NULL, "A930-A95F",              NULL, { L"Noto Sans Rejang", NULL } },
+    { NULL, "A980-A9DF",              NULL, { L"Noto Sans Javanese", NULL } },
+    { NULL, "AA00-AA5F",              NULL, { L"Noto Sans Cham", NULL } },
 
     /* CJK Compatibility Ideographs - F900-FAFF */
 
-    { "F900-FAFF",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "F900-FAFF",              L"Noto Sans CJK TC", L"zh-Hant" },
-    { "F900-FAFF",              L"Noto Sans CJK KR", L"ko" },
-    { "F900-FAFF",              L"Noto Sans CJK JP" },
+    { NULL, "F900-FAFF",              L"zh-Hans", { L"Noto Sans CJK SC", NULL } },
+    { NULL, "F900-FAFF",              L"zh-Hant", { L"Noto Sans CJK TC", NULL } },
+    { NULL, "F900-FAFF",              L"ko",      { L"Noto Sans CJK KR", NULL } },
+    { NULL, "F900-FAFF",              NULL,       { L"Noto Sans CJK JP", NULL } },
 
     /* Vertical Forms - FE10-FE1F */
 
-    { "FE10-FE1F",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "FE10-FE1F",              L"Noto Sans CJK KR", L"ko" },
-    { "FE10-FE1F",              L"Noto Sans CJK TC" },
+    { NULL, "FE10-FE1F",              L"zh-Hans", { L"Noto Sans CJK SC", NULL } },
+    { NULL, "FE10-FE1F",              L"ko",      { L"Noto Sans CJK KR", NULL } },
+    { NULL, "FE10-FE1F",              NULL,       { L"Noto Sans CJK TC", NULL } },
 
     /* CJK Compatibility Forms - FE30-FE4F
        Small Form Variants     - FE50-FE6F */
 
-    { "FE30-FE6F",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "FE30-FE6F",              L"Noto Sans CJK KR", L"ko" },
-    { "FE30-FE6F",              L"Noto Sans CJK JP", L"ja" },
-    { "FE30-FE6F",              L"Noto Sans CJK TC" },
+    { NULL, "FE30-FE6F",              L"zh-Hans", { L"Noto Sans CJK SC", NULL } },
+    { NULL, "FE30-FE6F",              L"ko",      { L"Noto Sans CJK KR", NULL } },
+    { NULL, "FE30-FE6F",              L"ja",      { L"Noto Sans CJK JP", NULL } },
+    { NULL, "FE30-FE6F",              NULL,       { L"Noto Sans CJK TC", NULL } },
 
     /* Halfwidth and Fullwidth Forms */
-    { "FF00-FFEF",              L"Noto Sans CJK SC", L"zh-Hans" },
-    { "FF00-FFEF",              L"Noto Sans CJK TC", L"zh-Hant" },
-    { "FF00-FFEF",              L"Noto Sans CJK KR", L"ko" },
-    { "FF00-FFEF",              L"Noto Sans CJK JP" },
+    { NULL, "FF00-FFEF",              L"zh-Hans", { L"Noto Sans CJK SC", NULL } },
+    { NULL, "FF00-FFEF",              L"zh-Hant", { L"Noto Sans CJK TC", NULL } },
+    { NULL, "FF00-FFEF",              L"ko",      { L"Noto Sans CJK KR", NULL } },
+    { NULL, "FF00-FFEF",              NULL,       { L"Noto Sans CJK JP", NULL } },
 
-    { "1F800-1F8FF",            L"Noto Sans Symbols2, Noto Sans Symbols 2" },
+    { NULL, "1F800-1F8FF",            NULL, { L"Noto Sans Symbols2", L"Noto Sans Symbols 2", NULL } },
 
     /* Miscellaneous Symbols and Pictographs - 1F300-1F5FF
        Emoticons                           - 1F600-1F64F
@@ -388,15 +389,15 @@ system_fallback_config[] =
        Supplemental Symbols and Pictographs- 1F900-1F9FF
        Symbols and Pictographs Extended-A  - 1FA70-1FAFF */
 
-    { "1F300-1F5FF, 1F600-1F64F, "
-      "1F680-1F6FF, 1F900-1F9FF, "
-      "1FA70-1FAFF",            L"Segoe UI Emoji, Noto Color Emoji, Apple Color Emoji, Noto Emoji" },
+    { NULL, "1F300-1F5FF, 1F600-1F64F, "
+            "1F680-1F6FF, 1F900-1F9FF, "
+            "1FA70-1FAFF",            NULL, { L"Segoe UI Emoji", L"Noto Color Emoji", L"Apple Color Emoji", L"Noto Emoji", NULL } },
 
     /* Mahjong Tiles, Dominoes, Playing Cards - 1F000-1F02F, 1F0A0-1F0FF
        Enclosed Alphanumerics                - 1F100-1F2FF */
 
-    { "1F000-1F02F, 1F0A0-1F0FF, "
-      "1F100-1F2FF",            L"Segoe UI Symbol, Noto Sans Symbols, Noto Sans Symbols2" },
+    { NULL, "1F000-1F02F, 1F0A0-1F0FF, "
+            "1F100-1F2FF",            NULL, { L"Segoe UI Symbol", L"Noto Sans Symbols", L"Noto Sans Symbols2", NULL } },
 
     /* CJK Unified Ideographs Extension B - 20000-2A6DF
        CJK Unified Ideographs Extension C  - 2A700-2B73F
@@ -404,16 +405,19 @@ system_fallback_config[] =
        CJK Unified Ideographs Extension E  - 2B820-2CEAF
        CJK Unified Ideographs Extension F  - 2CEB0-2EBEF */
 
-    { "20000-2A6DF, 2A700-2B73F, "
-      "2B740-2B81F, 2B820-2CEAF, "
-      "2CEB0-2EBEF",            L"Noto Sans CJK SC, Noto Sans CJK TC, Noto Sans CJK JP, Noto Sans CJK KR, Microsoft YaHei" },
+    { NULL, "20000-2A6DF, 2A700-2B73F, "
+            "2B740-2B81F, 2B820-2CEAF, "
+            "2CEB0-2EBEF",            NULL, { L"Noto Sans CJK SC", L"Noto Sans CJK TC", L"Noto Sans CJK JP", L"Noto Sans CJK KR", L"Microsoft YaHei", NULL } },
 
     /* Geometric Shapes Extended   - 1F780-1F7FF
        Miscellaneous Symbols       - 2600-26FF
        Dingbats                    - 2700-27BF */
 
-    { "1F780-1F7FF, 2600-26FF, "
-      "2700-27BF",              L"Segoe UI Symbol, Noto Sans Symbols" },
+    { NULL, "1F780-1F7FF, 2600-26FF, "
+            "2700-27BF",              NULL, { L"Segoe UI Symbol", L"Noto Sans Symbols", NULL } },
+
+    /* Default / last-resort UI fallback */
+    { NULL, NULL,                     NULL, { L"Segoe UI", L"Tahoma", NULL } },
 };
 
 struct text_source_context
@@ -517,7 +521,15 @@ struct fallback_mapping
     WCHAR **families;
     UINT32 families_count;
     IDWriteFontCollection *collection;
+    WCHAR *base_family;
     float scale;
+};
+
+struct fallback_system_link
+{
+    WCHAR *family;
+    WCHAR **fallbacks;
+    UINT32 count;
 };
 
 struct fallback_locale
@@ -587,6 +599,8 @@ struct fallback_data
     struct fallback_mapping *mappings;
     size_t count;
     struct list locales;
+    struct fallback_system_link *links;
+    size_t links_count;
 };
 
 struct dwrite_fontfallback
@@ -621,6 +635,7 @@ static void release_fallback_mapping(struct fallback_mapping *mapping)
     for (i = 0; i < mapping->families_count; ++i)
         free(mapping->families[i]);
     free(mapping->families);
+    free(mapping->base_family);
     if (mapping->collection)
         IDWriteFontCollection_Release(mapping->collection);
 }
@@ -632,6 +647,16 @@ static void release_fallback_data(struct fallback_data *data)
     for (i = 0; i < data->count; ++i)
         release_fallback_mapping(&data->mappings[i]);
     free(data->mappings);
+    for (i = 0; i < data->links_count; ++i)
+    {
+        UINT32 j;
+
+        free(data->links[i].family);
+        for (j = 0; j < data->links[i].count; ++j)
+            free(data->links[i].fallbacks[j]);
+        free(data->links[i].fallbacks);
+    }
+    free(data->links);
     fallback_locale_list_destroy(&data->locales);
 }
 
@@ -648,11 +673,14 @@ static BOOL fallback_mapping_contains_character(const struct fallback_mapping *m
     return FALSE;
 }
 
-static const struct fallback_mapping * find_fallback_mapping(const struct fallback_data *fallback,
-        const struct fallback_locale *locale, UINT32 ch)
+static const struct fallback_mapping * find_fallback_mapping_in_locale(const struct fallback_data *fallback,
+        const struct fallback_locale *locale, const WCHAR *base_family, UINT32 ch)
 {
     const struct fallback_mapping *mapping;
     size_t i, j;
+
+    if (!locale)
+        return NULL;
 
     for (i = 0; i < locale->ranges.count; i += 2)
     {
@@ -660,20 +688,43 @@ static const struct fallback_mapping * find_fallback_mapping(const struct fallba
         for (j = start; j <= end; ++j)
         {
             mapping = &fallback->mappings[j];
+            if (base_family)
+            {
+                if (!mapping->base_family || wcsicmp(mapping->base_family, base_family))
+                    continue;
+            }
+            else if (mapping->base_family)
+            {
+                continue;
+            }
             if (fallback_mapping_contains_character(mapping, ch)) return mapping;
         }
     }
 
-    mapping = NULL;
+    return NULL;
+}
 
-    /* Mapping wasn't found for specific locale, try with neutral one. This will only recurse once. */
-    if (*locale->name)
+static const struct fallback_mapping * find_fallback_mapping(const struct fallback_data *fallback,
+        const struct fallback_locale *locale, const WCHAR *base_family, UINT32 ch)
+{
+    const struct fallback_locale *neutral = NULL;
+    const struct fallback_mapping *mapping;
+
+    if (locale && *locale->name)
+        neutral = font_fallback_get_locale(&fallback->locales, L"", true);
+
+    if (base_family && *base_family)
     {
-        locale = font_fallback_get_locale(&fallback->locales, L"", true);
-        mapping = find_fallback_mapping(fallback, locale, ch);
+        if ((mapping = find_fallback_mapping_in_locale(fallback, locale, base_family, ch)))
+            return mapping;
+        if ((mapping = find_fallback_mapping_in_locale(fallback, neutral, base_family, ch)))
+            return mapping;
     }
 
-    return mapping;
+    if ((mapping = find_fallback_mapping_in_locale(fallback, locale, NULL, ch)))
+        return mapping;
+
+    return find_fallback_mapping_in_locale(fallback, neutral, NULL, ch);
 }
 
 struct dwrite_numbersubstitution
@@ -2564,34 +2615,124 @@ static HRESULT create_matching_font_by_index(IDWriteFontCollection *collection, 
     return hr;
 }
 
-static const WCHAR *const system_default_families[] = { L"Segoe UI", L"Tahoma" };
+static BOOL fallback_try_family(IDWriteFontCollection *collection, const WCHAR *family,
+        IDWriteTextAnalysisSource *source, UINT32 position, UINT32 length, DWRITE_FONT_WEIGHT weight,
+        DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch, IDWriteFont **ret_font, UINT32 *ret_length)
+{
+    IDWriteFont3 *font;
+    UINT32 mapped;
+
+    if (FAILED(create_matching_font(collection, family, weight, style, stretch, &IID_IDWriteFont3, (void **)&font)))
+        return FALSE;
+
+    if ((mapped = fallback_font_get_supported_length(font, source, position, length)))
+    {
+        *ret_font = (IDWriteFont *)font;
+        *ret_length = mapped;
+        return TRUE;
+    }
+
+    IDWriteFont3_Release(font);
+    return FALSE;
+}
+
+static BOOL fallback_map_family_links(const struct dwrite_fontfallback *fallback, const struct fallback_data *data,
+        const WCHAR *base_family, const WCHAR *locale_name, IDWriteTextAnalysisSource *source, UINT32 position,
+        UINT32 length, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch,
+        IDWriteFont **ret_font, UINT32 *ret_length, float *scale)
+{
+    IDWriteFontCollection *collection = fallback->systemcollection;
+    size_t i, j;
+
+    if (!collection || !base_family || !*base_family || !length)
+        return FALSE;
+
+    for (i = 0; i < ARRAY_SIZE(dwrite_fallback_map); ++i)
+    {
+        const struct dwrite_fallback_entry *entry = &dwrite_fallback_map[i];
+
+        if (entry->ranges || !entry->family || wcsicmp(entry->family, base_family))
+            continue;
+        if (entry->locale && wcsicmp(entry->locale, locale_name))
+            continue;
+
+        for (j = 0; entry->fallbacks[j]; ++j)
+        {
+            if (fallback_try_family(collection, entry->fallbacks[j], source, position, length,
+                    weight, style, stretch, ret_font, ret_length))
+            {
+                *scale = 1.0f;
+                return TRUE;
+            }
+        }
+    }
+
+    for (i = 0; i < data->links_count; ++i)
+    {
+        const struct fallback_system_link *link = &data->links[i];
+
+        if (wcsicmp(link->family, base_family))
+            continue;
+
+        for (j = 0; j < link->count; ++j)
+        {
+            if (fallback_try_family(collection, link->fallbacks[j], source, position, length,
+                    weight, style, stretch, ret_font, ret_length))
+            {
+                *scale = 1.0f;
+                return TRUE;
+            }
+        }
+    }
+
+    return FALSE;
+}
 
 /* Last resort mapping used when the fallback data has no range covering the input, or the mapped
-   families are not installed. Try the UI font families first, then the system collection in order,
-   so that callers reliably get a font instance instead of NULL. */
+   families are not installed. Try the default UI families from dwrite_fallback_map first, then the
+   system collection in order, so that callers reliably get a font instance instead of NULL. */
 static void fallback_map_default_font(const struct dwrite_fontfallback *fallback, IDWriteTextAnalysisSource *source,
         UINT32 position, UINT32 length, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style,
         DWRITE_FONT_STRETCH stretch, IDWriteFont **ret_font, UINT32 *ret_length)
 {
-    const UINT32 named_count = ARRAY_SIZE(system_default_families);
     IDWriteFontCollection *collection = fallback->systemcollection;
     IDWriteFont3 *first = NULL, *font;
-    UINT32 i, count = 0, mapped;
+    UINT32 i, j, count = 0, mapped;
 
     if (!collection || !length)
         return;
 
-    count = IDWriteFontCollection_GetFontFamilyCount(collection);
-
-    for (i = 0; i < named_count + count; ++i)
+    for (i = 0; i < ARRAY_SIZE(dwrite_fallback_map); ++i)
     {
-        if (i < named_count)
+        const struct dwrite_fallback_entry *entry = &dwrite_fallback_map[i];
+
+        if (entry->family || entry->ranges || entry->locale)
+            continue;
+
+        for (j = 0; entry->fallbacks[j]; ++j)
         {
-            if (FAILED(create_matching_font(collection, system_default_families[i], weight, style, stretch,
+            if (FAILED(create_matching_font(collection, entry->fallbacks[j], weight, style, stretch,
                     &IID_IDWriteFont3, (void **)&font)))
                 continue;
+
+            if ((mapped = fallback_font_get_supported_length(font, source, position, length)))
+            {
+                if (first) IDWriteFont3_Release(first);
+                *ret_font = (IDWriteFont *)font;
+                *ret_length = mapped;
+                return;
+            }
+
+            if (first) IDWriteFont3_Release(font);
+            else first = font;
         }
-        else if (FAILED(create_matching_font_by_index(collection, i - named_count, weight, style, stretch,
+    }
+
+    count = IDWriteFontCollection_GetFontFamilyCount(collection);
+
+    for (i = 0; i < count; ++i)
+    {
+        if (FAILED(create_matching_font_by_index(collection, i, weight, style, stretch,
                 &IID_IDWriteFont3, (void **)&font)))
             continue;
 
@@ -2616,8 +2757,8 @@ static void fallback_map_default_font(const struct dwrite_fontfallback *fallback
 }
 
 static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallback, IDWriteTextAnalysisSource *source,
-        UINT32 position, UINT32 text_length, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style,
-        DWRITE_FONT_STRETCH stretch, IDWriteFont **ret_font, UINT32 *ret_length, float *scale)
+        UINT32 position, UINT32 text_length, const WCHAR *base_family, DWRITE_FONT_WEIGHT weight,
+        DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch, IDWriteFont **ret_font, UINT32 *ret_length, float *scale)
 {
     const struct fallback_mapping *mapping = NULL;
     struct text_source_context context;
@@ -2644,14 +2785,14 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
 
     if (FAILED(hr = text_source_context_init(&context, source, position, length))) return hr;
 
-    /* Find a mapping for given locale. */
+    /* Find a mapping for given locale and base family. */
     text_source_get_next_u32_char(&context);
     first_ch = context.ch;
-    mapping = find_fallback_mapping(data, locale, context.ch);
+    mapping = find_fallback_mapping(data, locale, base_family, context.ch);
     mapped = text_source_get_char_length(&context);
     while (!text_source_get_next_u32_char(&context))
     {
-        if (find_fallback_mapping(data, locale, context.ch) != mapping) break;
+        if (find_fallback_mapping(data, locale, base_family, context.ch) != mapping) break;
         mapped += text_source_get_char_length(&context);
     }
 
@@ -2663,7 +2804,11 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
         /* Variation selectors are rendered with the font of the preceding character, a span
            consisting only of them has no font of its own. */
         if (!fallback_ch_is_uvs(first_ch))
-            fallback_map_default_font(fallback, source, position, mapped, weight, style, stretch, ret_font, ret_length);
+        {
+            if (!fallback_map_family_links(fallback, data, base_family, locale_name, source, position, mapped,
+                    weight, style, stretch, ret_font, ret_length, scale))
+                fallback_map_default_font(fallback, source, position, mapped, weight, style, stretch, ret_font, ret_length);
+        }
 
         return S_OK;
     }
@@ -2688,10 +2833,12 @@ static HRESULT fallback_map_characters(const struct dwrite_fontfallback *fallbac
     }
 
     /* Mapping was found, but either font couldn't be created or there's no font that supports given input.
-       Fall back to the default UI font, so that the input still gets rendered by something. */
+       Try per-family registry links, then fall back to the default UI font. */
     *ret_font = NULL;
     *ret_length = length;
-    fallback_map_default_font(fallback, source, position, length, weight, style, stretch, ret_font, ret_length);
+    if (!fallback_map_family_links(fallback, data, base_family, locale_name, source, position, length,
+            weight, style, stretch, ret_font, ret_length, scale))
+        fallback_map_default_font(fallback, source, position, length, weight, style, stretch, ret_font, ret_length);
 
     return S_OK;
 }
@@ -2769,7 +2916,7 @@ static HRESULT WINAPI fontfallback_MapCharacters(IDWriteFontFallback1 *iface, ID
         }
     }
 
-    return fallback_map_characters(fallback, source, position, length, weight, style, stretch, ret_font, mapped_length, scale);
+    return fallback_map_characters(fallback, source, position, length, basefamily, weight, style, stretch, ret_font, mapped_length, scale);
 }
 
 static HRESULT WINAPI fontfallback1_MapCharacters(IDWriteFontFallback1 *iface, IDWriteTextAnalysisSource *source,
@@ -2963,9 +3110,6 @@ static HRESULT WINAPI fontfallbackbuilder_AddMapping(IDWriteFontFallbackBuilder 
     if (!ranges || !ranges_count || !families || !families_count || scale < 0.0f)
         return E_INVALIDARG;
 
-    if (base_family)
-        FIXME("base family ignored.\n");
-
     if (!dwrite_array_reserve((void **)&builder->data.mappings, &builder->mappings_size,
             builder->data.count + 1, sizeof(*builder->data.mappings)))
     {
@@ -2979,6 +3123,9 @@ static HRESULT WINAPI fontfallbackbuilder_AddMapping(IDWriteFontFallbackBuilder 
 
     if (!(locale = fallback_builder_add_locale(builder, locale_name)))
         return E_FAIL;
+
+    if (base_family && *base_family && !(mapping->base_family = wcsdup(base_family)))
+        goto failed;
 
     if (!(mapping->ranges = calloc(ranges_count, sizeof(*mapping->ranges))))
         goto failed;
@@ -3109,6 +3256,8 @@ static HRESULT fallbackbuilder_init_fallback_data(const struct dwrite_fontfallba
         dst->collection = src->collection;
         if (dst->collection)
             IDWriteFontCollection_AddRef(dst->collection);
+        if (src->base_family && !(dst->base_family = wcsdup(src->base_family)))
+            goto failed;
         dst->scale = src->scale;
     }
 
@@ -3236,21 +3385,125 @@ static void system_fallback_parse_ranges(const char *str, DWRITE_UNICODE_RANGE *
     *ret = count;
 }
 
-static void system_fallback_parse_families(WCHAR *str, WCHAR **families, unsigned int max_count,
-        unsigned int *ret)
+static void parse_system_link_entry(const WCHAR *entry, WCHAR ***list, UINT32 *count, size_t *capacity)
 {
-    unsigned int count = 0;
-    WCHAR *family, *ctx;
+    const WCHAR *comma, *end;
+    WCHAR *family;
+    size_t len;
+    UINT32 i;
 
-    family = wcstok_s(str, L",", &ctx);
-    while (family && count < max_count)
+    comma = wcschr(entry, ',');
+    if (comma)
+        entry = comma + 1;
+
+    while (*entry == ' ')
+        entry++;
+
+    end = wcschr(entry, ',');
+    len = end ? (size_t)(end - entry) : wcslen(entry);
+    while (len && entry[len - 1] == ' ')
+        len--;
+
+    if (!len)
+        return;
+
+    for (i = 0; i < *count; ++i)
     {
-        while (*family == ' ') family++;
-        families[count++] = family;
-        family = wcstok_s(NULL, L",", &ctx);
+        if (wcslen((*list)[i]) == len && !wcsnicmp((*list)[i], entry, len))
+            return;
     }
 
-    *ret = count;
+    if (!dwrite_array_reserve((void **)list, capacity, *count + 1, sizeof(**list)))
+        return;
+
+    if (!(family = malloc((len + 1) * sizeof(WCHAR))))
+        return;
+
+    memcpy(family, entry, len * sizeof(WCHAR));
+    family[len] = 0;
+    (*list)[(*count)++] = family;
+}
+
+static void system_fallback_load_registry_links(struct fallback_data *data)
+{
+    DWORD max_namelen, max_datalen, index = 0, type, namelen, datalen;
+    size_t links_capacity = 0;
+    WCHAR *name, *buf;
+    HKEY hkey;
+
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE,
+            L"Software\\Microsoft\\Windows NT\\CurrentVersion\\FontLink\\SystemLink",
+            0, KEY_READ, &hkey))
+        return;
+
+    if (RegQueryInfoKeyW(hkey, NULL, NULL, NULL, NULL, NULL, NULL, NULL,
+            &max_namelen, &max_datalen, NULL, NULL))
+    {
+        RegCloseKey(hkey);
+        return;
+    }
+
+    max_namelen++;
+    name = malloc(max_namelen * sizeof(WCHAR));
+    buf = malloc(max_datalen + 2 * sizeof(WCHAR));
+    if (!name || !buf)
+    {
+        free(name);
+        free(buf);
+        RegCloseKey(hkey);
+        return;
+    }
+
+    for (;;)
+    {
+        WCHAR **fallbacks = NULL;
+        size_t fb_capacity = 0;
+        UINT32 fb_count = 0;
+
+        namelen = max_namelen;
+        datalen = max_datalen;
+        if (RegEnumValueW(hkey, index++, name, &namelen, NULL, &type, (BYTE *)buf, &datalen))
+            break;
+
+        if (!*name)
+            continue;
+
+        buf[datalen / sizeof(WCHAR)] = 0;
+        buf[datalen / sizeof(WCHAR) + 1] = 0;
+
+        if (type == REG_MULTI_SZ)
+        {
+            const WCHAR *p;
+            for (p = buf; *p; p += wcslen(p) + 1)
+                parse_system_link_entry(p, &fallbacks, &fb_count, &fb_capacity);
+        }
+        else if (type == REG_SZ && *buf)
+        {
+            parse_system_link_entry(buf, &fallbacks, &fb_count, &fb_capacity);
+        }
+
+        if (fb_count && dwrite_array_reserve((void **)&data->links, &links_capacity,
+                data->links_count + 1, sizeof(*data->links)))
+        {
+            WCHAR *dup = wcsdup(name);
+            if (dup)
+            {
+                data->links[data->links_count].family = dup;
+                data->links[data->links_count].fallbacks = fallbacks;
+                data->links[data->links_count].count = fb_count;
+                data->links_count++;
+                continue;
+            }
+        }
+
+        while (fb_count--)
+            free(fallbacks[fb_count]);
+        free(fallbacks);
+    }
+
+    free(name);
+    free(buf);
+    RegCloseKey(hkey);
 }
 
 static INIT_ONCE init_system_fallback_once = INIT_ONCE_STATIC_INIT;
@@ -3264,34 +3517,37 @@ static BOOL WINAPI dwrite_system_fallback_initonce(INIT_ONCE *once, void *param,
     unsigned int range_count, families_count;
     IDWriteFactory7 *factory = param;
     DWRITE_UNICODE_RANGE ranges[16];
-    WCHAR *families[8], *str;
     HRESULT hr;
     size_t i;
 
     if (FAILED(create_fontfallback_builder_internal(factory, &builder))) return FALSE;
     builder_iface = &builder->IDWriteFontFallbackBuilder_iface;
 
-    for (i = 0; i < ARRAY_SIZE(system_fallback_config); ++i)
+    for (i = 0; i < ARRAY_SIZE(dwrite_fallback_map); ++i)
     {
-        const struct fallback_description *entry = &system_fallback_config[i];
+        const struct dwrite_fallback_entry *entry = &dwrite_fallback_map[i];
+
+        if (!entry->ranges)
+            continue;
 
         system_fallback_parse_ranges(entry->ranges, ranges, ARRAY_SIZE(ranges), &range_count);
 
-        /* TODO: reuse the buffer */
-        str = wcsdup(entry->families);
-        system_fallback_parse_families(str, families, ARRAY_SIZE(families), &families_count);
+        families_count = 0;
+        while (families_count < ARRAY_SIZE(entry->fallbacks) && entry->fallbacks[families_count])
+            families_count++;
 
         if (FAILED(hr = IDWriteFontFallbackBuilder_AddMapping(builder_iface, ranges, range_count,
-                (const WCHAR **)families, families_count, NULL, entry->locale, NULL, 1.0f)))
+                (const WCHAR **)entry->fallbacks, families_count, NULL, entry->locale, entry->family, 1.0f)))
         {
             WARN("Failed to add mapping, hr %#lx.\n", hr);
         }
-
-        free(str);
     }
 
     hr = fallbackbuilder_init_fallback_data(builder, &system_fallback);
     IDWriteFontFallbackBuilder_Release(builder_iface);
+
+    if (hr == S_OK)
+        system_fallback_load_registry_links(&system_fallback);
 
     return hr == S_OK;
 }
@@ -3299,6 +3555,65 @@ static BOOL WINAPI dwrite_system_fallback_initonce(INIT_ONCE *once, void *param,
 void release_system_fallback_data(void)
 {
     release_fallback_data(&system_fallback);
+}
+
+HRESULT create_fallback_last_resort_font(IDWriteFactory7 *factory, IDWriteFontCollection *collection,
+        const WCHAR *base_family, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch,
+        REFIID riid, void **obj)
+{
+    size_t i, j;
+
+    *obj = NULL;
+
+    if (!collection)
+        return E_FAIL;
+
+    if (base_family && *base_family)
+    {
+        for (i = 0; i < ARRAY_SIZE(dwrite_fallback_map); ++i)
+        {
+            const struct dwrite_fallback_entry *entry = &dwrite_fallback_map[i];
+
+            if (entry->ranges || !entry->family || wcsicmp(entry->family, base_family))
+                continue;
+            for (j = 0; entry->fallbacks[j]; ++j)
+            {
+                if (SUCCEEDED(create_matching_font(collection, entry->fallbacks[j], weight, style, stretch, riid, obj)))
+                    return S_OK;
+            }
+        }
+
+        if (factory && InitOnceExecuteOnce(&init_system_fallback_once, dwrite_system_fallback_initonce, factory, NULL))
+        {
+            for (i = 0; i < system_fallback.links_count; ++i)
+            {
+                const struct fallback_system_link *link = &system_fallback.links[i];
+
+                if (wcsicmp(link->family, base_family))
+                    continue;
+                for (j = 0; j < link->count; ++j)
+                {
+                    if (SUCCEEDED(create_matching_font(collection, link->fallbacks[j], weight, style, stretch, riid, obj)))
+                        return S_OK;
+                }
+            }
+        }
+    }
+
+    for (i = 0; i < ARRAY_SIZE(dwrite_fallback_map); ++i)
+    {
+        const struct dwrite_fallback_entry *entry = &dwrite_fallback_map[i];
+
+        if (entry->family || entry->ranges || entry->locale)
+            continue;
+        for (j = 0; entry->fallbacks[j]; ++j)
+        {
+            if (SUCCEEDED(create_matching_font(collection, entry->fallbacks[j], weight, style, stretch, riid, obj)))
+                return S_OK;
+        }
+    }
+
+    return E_FAIL;
 }
 
 HRESULT create_system_fontfallback(IDWriteFactory7 *factory, IDWriteFontFallback1 **ret)

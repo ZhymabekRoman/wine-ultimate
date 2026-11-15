@@ -357,6 +357,9 @@ extern void release_system_fallback_data(void);
 extern HRESULT create_fontfallback_builder(IDWriteFactory7 *factory, IDWriteFontFallbackBuilder **builder);
 extern HRESULT create_matching_font(IDWriteFontCollection *collection, const WCHAR *family, DWRITE_FONT_WEIGHT weight,
         DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch, REFIID riid, void **obj);
+extern HRESULT create_fallback_last_resort_font(IDWriteFactory7 *factory, IDWriteFontCollection *collection,
+        const WCHAR *base_family, DWRITE_FONT_WEIGHT weight, DWRITE_FONT_STYLE style, DWRITE_FONT_STRETCH stretch,
+        REFIID riid, void **obj);
 extern HRESULT create_fontfacereference(IDWriteFactory7 *factory, IDWriteFontFile *file, UINT32 face_index,
         DWRITE_FONT_SIMULATIONS simulations, DWRITE_FONT_AXIS_VALUE const *axis_values, UINT32 axis_values_count,
         IDWriteFontFaceReference1 **reference);
