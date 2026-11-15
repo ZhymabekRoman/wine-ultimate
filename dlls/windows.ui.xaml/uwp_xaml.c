@@ -26,9 +26,17 @@
 #include "private.h"
 #include "weakreference.h"
 #include "winreg.h"
+#include "wincodec.h"
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
+
+static const GUID CLSID_WICImagingFactory_local =
+    { 0xcacaf262, 0x9370, 0x4615, { 0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a } };
+static const GUID IID_IWICImagingFactory_local =
+    { 0xec5ec8a9, 0xc395, 0x4314, { 0x9c, 0x77, 0x54, 0xd7, 0xa9, 0x35, 0xff, 0x70 } };
+static const GUID GUID_WICPixelFormat32bppBGRA_local =
+    { 0x6fddc324, 0x4e03, 0x4bfe, { 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0f } };
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
@@ -504,6 +512,27 @@ static void pri_build_node_path( const BYTE *hs, DWORD hs_sz, DWORD node_off, DW
     buf[pos] = 0;
 }
 
+static BOOL pri_resolve_item_data( const BYTE *pri, DWORD pri_sz, const BYTE *rm, DWORD rm_sz,
+                                   DWORD count1, DWORD extra_sz, DWORD map_off, DWORD cand_off,
+                                   DWORD item_id, const BYTE **out_ptr, DWORD *out_sz )
+{
+    DWORD cand_base = 0;
+    WORD data_idx, sec_idx;
+    if (item_id < count1)
+        cand_base = *(const WORD *)(rm + map_off + item_id * 4 + 2);
+    else if (extra_sz >= 28)
+    {
+        DWORD r_off = map_off + count1 * 4 + 28 + (item_id - count1) * 8;
+        if (r_off + 8 > cand_off) return FALSE;
+        cand_base = *(const DWORD *)(rm + r_off + 4);
+    }
+    else return FALSE;
+    if (cand_off + (cand_base + 1) * 8 > rm_sz) return FALSE;
+    data_idx = *(const WORD *)(rm + cand_off + cand_base * 8 + 4);
+    sec_idx = *(const WORD *)(rm + cand_off + cand_base * 8 + 6);
+    return pri_get_data_item( pri, pri_sz, sec_idx, data_idx, out_ptr, out_sz );
+}
+
 static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffix,
                                    const BYTE **out_ptr, DWORD *out_sz )
 {
@@ -567,23 +596,103 @@ static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffi
     if (matched_item < 0) matched_item = fallback_item;
     if (matched_item < 0) return FALSE;
 
+    return pri_resolve_item_data( pri, pri_sz, rm, rm_sz, count1, extra_sz, map_off, cand_off,
+                                  (DWORD)matched_item, out_ptr, out_sz );
+}
+
+static void uwp_pri_enum_xbfs( BOOL (*cb)(const char *path, const BYTE *xbf, DWORD sz, void *ctx), void *ctx )
+{
+    DWORD pri_sz = 0, hs_sz = 0, rm_sz = 0;
+    const BYTE *pri = pri_get_data( &pri_sz );
+    const BYTE *hs = NULL, *rm = NULL;
+    DWORD num_nodes, num_scopes, num_items;
+    DWORD node_off, scope_off, item_off, pool_off, map_off, cand_off;
+    DWORD count1, extra_sz;
+    WORD l1, l2, num_env;
+    DWORD hs_base, iid;
+
+    if (!pri || !cb) return;
+    if (!pri_get_section( pri, pri_sz, 2, &hs, &hs_sz ) || hs_sz < 0xd8) return;
+    if (!pri_get_section( pri, pri_sz, 3, &rm, &rm_sz ) || rm_sz < 0x80) return;
+
+    l1 = *(const WORD *)(hs + 0x22);
+    l2 = *(const WORD *)(hs + 0x24);
+    hs_base = ((0x48 + ((DWORD)l1 + (DWORD)l2) * 2 + 3) & ~3u) + 8;
+    if (hs_base + 0x18 > hs_sz) return;
+
+    num_nodes = *(const DWORD *)(hs + hs_base);
+    num_scopes = *(const DWORD *)(hs + hs_base + 4);
+    num_items = *(const DWORD *)(hs + hs_base + 8);
+    node_off = hs_base + 0x18;
+    scope_off = node_off + num_nodes * 12;
+    item_off = scope_off + num_scopes * 8;
+    pool_off = item_off + num_items * 2;
+    if (pool_off >= hs_sz) return;
+
+    num_env = *(const WORD *)(rm + 0x2a);
+    count1 = *(const DWORD *)(rm + 0x30);
+    extra_sz = *(const DWORD *)(rm + 0x3c);
+    map_off = 0x40 + (DWORD)num_env * 8 + 8;
+    cand_off = map_off + count1 * 4 + extra_sz;
+    if (cand_off >= rm_sz) return;
+
+    for (iid = 0; iid < num_items; iid++)
     {
-        DWORD cand_base = 0;
-        WORD data_idx, sec_idx;
-        if ((DWORD)matched_item < count1)
-            cand_base = *(const WORD *)(rm + map_off + (DWORD)matched_item * 4 + 2);
-        else if (extra_sz >= 28)
+        WORD nid = *(const WORD *)(hs + item_off + iid * 2);
+        char path[256];
+        size_t plen;
+        const BYTE *ptr = NULL;
+        DWORD sz = 0;
+
+        pri_build_node_path( hs, hs_sz, node_off, num_nodes, pool_off, nid, path, sizeof(path) );
+        plen = strlen( path );
+        if (plen < 4 || strcasecmp( path + plen - 4, ".xbf" )) continue;
+        if (pri_resolve_item_data( pri, pri_sz, rm, rm_sz, count1, extra_sz, map_off, cand_off,
+                                   iid, &ptr, &sz ) && ptr && sz > 0x50)
         {
-            DWORD r_off = map_off + count1 * 4 + 28 + (DWORD)(matched_item - count1) * 8;
-            if (r_off + 8 > cand_off) return FALSE;
-            cand_base = *(const DWORD *)(rm + r_off + 4);
+            if (!cb( path, ptr, sz, ctx )) break;
         }
-        else return FALSE;
-        if (cand_off + (cand_base + 1) * 8 > rm_sz) return FALSE;
-        data_idx = *(const WORD *)(rm + cand_off + cand_base * 8 + 4);
-        sec_idx = *(const WORD *)(rm + cand_off + cand_base * 8 + 6);
-        return pri_get_data_item( pri, pri_sz, sec_idx, data_idx, out_ptr, out_sz );
     }
+}
+
+struct pri_xbf_entry
+{
+    char path[256];
+    const char *base;
+    const BYTE *data;
+    DWORD size;
+};
+
+static struct pri_xbf_entry *g_pri_xbfs = NULL;
+static DWORD g_pri_xbf_cnt = 0;
+static DWORD g_pri_xbf_cap = 0;
+static INIT_ONCE g_pri_xbf_cat_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL pri_xbf_collect_cb( const char *path, const BYTE *xbf, DWORD sz, void *ctx )
+{
+    const char *slash;
+    if (g_pri_xbf_cnt >= g_pri_xbf_cap)
+    {
+        DWORD ncap = g_pri_xbf_cap ? g_pri_xbf_cap * 2 : 64;
+        struct pri_xbf_entry *ne = realloc( g_pri_xbfs, ncap * sizeof(*ne) );
+        if (!ne) return FALSE;
+        g_pri_xbfs = ne;
+        g_pri_xbf_cap = ncap;
+    }
+    snprintf( g_pri_xbfs[g_pri_xbf_cnt].path, sizeof(g_pri_xbfs[0].path), "%s", path );
+    slash = strrchr( g_pri_xbfs[g_pri_xbf_cnt].path, '/' );
+    g_pri_xbfs[g_pri_xbf_cnt].base = slash ? slash + 1 : g_pri_xbfs[g_pri_xbf_cnt].path;
+    g_pri_xbfs[g_pri_xbf_cnt].data = xbf;
+    g_pri_xbfs[g_pri_xbf_cnt].size = sz;
+    g_pri_xbf_cnt++;
+    return TRUE;
+}
+
+static BOOL WINAPI init_pri_xbf_cat_once( INIT_ONCE *once, void *param, void **ctx )
+{
+    uwp_pri_enum_xbfs( pri_xbf_collect_cb, NULL );
+    TRACE( "PRI XBF catalog indexed %lu .xbf entries\n", (unsigned long)g_pri_xbf_cnt );
+    return TRUE;
 }
 
 BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz )
@@ -592,6 +701,8 @@ BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *ou
     char suffix[256] = {0};
     const WCHAR *p = uri_or_name;
     size_t i, len;
+    DWORD k;
+    int fallback = -1;
 
     if (!uri_or_name || !out_ptr || !out_sz) return FALSE;
     *out_ptr = NULL;
@@ -618,10 +729,26 @@ BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *ou
         snprintf( suffix, sizeof(suffix), "%s", slash ? slash + 1 : full_path );
     }
 
-    if (pri_find_item_by_path( full_path, suffix, out_ptr, out_sz ))
+    InitOnceExecuteOnce( &g_pri_xbf_cat_once, init_pri_xbf_cat_once, NULL, NULL );
+    for (k = 0; k < g_pri_xbf_cnt; k++)
     {
+        if (!strcasecmp( g_pri_xbfs[k].path, full_path ))
+        {
+            *out_ptr = g_pri_xbfs[k].data;
+            *out_sz = g_pri_xbfs[k].size;
+            TRACE( "Resolved PRI XBF '%s' (suffix '%s') -> %p (%lu bytes)\n",
+                   full_path, suffix, *out_ptr, (unsigned long)*out_sz );
+            return TRUE;
+        }
+        if (fallback < 0 && !strcasecmp( g_pri_xbfs[k].base, suffix ))
+            fallback = (int)k;
+    }
+    if (fallback >= 0)
+    {
+        *out_ptr = g_pri_xbfs[fallback].data;
+        *out_sz = g_pri_xbfs[fallback].size;
         TRACE( "Resolved PRI XBF '%s' (suffix '%s') -> %p (%lu bytes)\n",
-               full_path, suffix, *out_ptr, (unsigned long)*out_sz );
+               g_pri_xbfs[fallback].path, suffix, *out_ptr, (unsigned long)*out_sz );
         return TRUE;
     }
     return FALSE;
@@ -1036,6 +1163,8 @@ enum uwp_elem_kind
     UWP_KIND_FLYOUT,
     UWP_KIND_POPUP,
     UWP_KIND_DEFERRED,
+    UWP_KIND_IMAGE,
+    UWP_KIND_PROGRESS_RING,
 };
 
 struct uwp_dp_entry
@@ -1180,6 +1309,19 @@ struct uwp_element
     int named_cnt;
     struct uwp_defer_entry defer_entries[16];
     int defer_cnt;
+    struct uwp_xbf_ref
+    {
+        WCHAR full_name[128];
+        WCHAR short_name[128];
+        BOOL is_resource_path;
+        BOOL instantiated;
+    } xbf_refs[32];
+    int xbf_ref_cnt;
+    BOOL xbf_parsed;
+    WCHAR image_src[256];
+    BYTE *img_pixels;
+    UINT img_w, img_h;
+    BOOL img_loaded;
     struct uwp_element *next_reg;
     int adopted_faulted_ctor;
     IInspectable *provider_inst;
@@ -3036,7 +3178,6 @@ static HRESULT WINAPI uwp_ctrl_prot_GetTemplateChild( void *iface, HSTRING child
                 child->font_size = 44.0;
                 lstrcpynW( child->name, nm, ARRAY_SIZE(child->name) );
                 if (impl->text[0]) lstrcpynW( child->text, impl->text, ARRAY_SIZE(child->text) );
-                else lstrcpyW( child->text, L"0" );
                 impl->tpl_normal_output = child;
                 if (impl->tpl_text_container)
                     impl->tpl_text_container->content = &child->IInspectable_iface;
@@ -4026,6 +4167,8 @@ static enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
     if (wcsstr( cls, L"RowDefinition" )) return UWP_KIND_ROW_DEF;
     if (wcsstr( cls, L"ColumnDefinition" )) return UWP_KIND_COL_DEF;
     if (wcsstr( cls, L"StackPanel" )) return UWP_KIND_STACK_PANEL;
+    if (!wcscmp( cls, L"Windows.UI.Xaml.Controls.Image" ) || !wcscmp( cls, L"Image" )) return UWP_KIND_IMAGE;
+    if (wcsstr( cls, L"ProgressRing" )) return UWP_KIND_PROGRESS_RING;
     if (wcsstr( cls, L"Grid" ) || wcsstr( cls, L"Panel" ) || wcsstr( cls, L"Canvas" )) return UWP_KIND_GRID;
     if (wcsstr( cls, L"Border" )) return UWP_KIND_BORDER;
     if (wcsstr( cls, L"RadioButtons" )) return UWP_KIND_CONTENT_CONTROL;
@@ -4219,6 +4362,11 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         }
         IUnknown_Release( (IUnknown *)fe_ovr );
     }
+    if (is_calculator_app() && wcsstr( el->class_name, L"CalculationResult" ))
+    {
+        uwp_calc_vm_ensure();
+        uwp_sync_calc_display_from_vm();
+    }
 }
 
 static void uwp_fire_loaded_tree( struct uwp_element *el )
@@ -4286,16 +4434,6 @@ static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *
     return NULL;
 }
 
-/* The app's Calculator UserControl (CalculatorApp.Controls.Calculator) comes
- * from the app XAML provider; its content (display band + 5x4 keypad grid) is
- * built by the app. Provider activation of the view never completes, so seed a
- * synthetic Standard-calculator tree (CalculationResult TextBlock + Grid of
- * numbered/operator buttons) into the CalcHolder border.
- *
- * The synthetic keypad is a plain Grid (4 cols x 5 rows, star-sized) whose
- * children carry grid_row/grid_col/text. uwp_arrange_element lays out Grid
- * children by grid_row/grid_col; uwp_paint_element draws each Button with its
- * text label (uwp_format_display_label maps the Segoe MDL2 operator glyphs). */
 static void uwp_seed_synthetic_calculator( struct uwp_element *holder );
 static void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
 static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
@@ -4303,205 +4441,267 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
                                      int only_sub_idx, struct uwp_element *attach_root,
                                      struct uwp_element **out_created );
 
-/* Parse app's genuine Calculator.xbf, CalculatorStandardOperators.xbf, and NumberPad.xbf
- * via the XBF v2 parser. Returns TRUE if XBF loaded and populated the visual tree. */
-static BOOL uwp_load_calculator_xbfs( struct uwp_element *calc_el )
+static BOOL uwp_panel_has_concrete_child( struct uwp_element *panel )
+{
+    struct uwp_vec_view *v;
+    unsigned int k;
+    if (!panel) return FALSE;
+    if (panel->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( panel->content );
+        if (ch && ch->kind != UWP_KIND_DEFERRED && ch->visibility == 0) return TRUE;
+    }
+    if (!panel->children_coll) return FALSE;
+    v = CONTAINING_RECORD( panel->children_coll, struct uwp_vec_view, IInspectable_iface );
+    for (k = 0; k < v->count; k++)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+        if (ch && ch->kind != UWP_KIND_DEFERRED && ch->visibility == 0) return TRUE;
+    }
+    return FALSE;
+}
+
+static void uwp_realize_empty_panel_defers( struct uwp_element *root )
+{
+    int d;
+    if (!root) return;
+    for (d = 0; d < root->defer_cnt; d++)
+    {
+        struct uwp_defer_entry *de = &root->defer_entries[d];
+        if (!de->realized && de->parent_panel &&
+            (de->parent_panel->kind == UWP_KIND_GRID ||
+             de->parent_panel->kind == UWP_KIND_STACK_PANEL ||
+             de->parent_panel->kind == UWP_KIND_BORDER) &&
+            !uwp_panel_has_concrete_child( de->parent_panel ))
+        {
+            uwp_realize_deferred_entry( de );
+        }
+    }
+}
+
+static void uwp_record_xbf_ref( struct uwp_element *root, const WCHAR *full_name,
+                                const WCHAR *short_name, BOOL is_resource_path )
+{
+    int i;
+    if (!root || !full_name || !full_name[0] || !short_name || !short_name[0]) return;
+    for (i = 0; i < root->xbf_ref_cnt; i++)
+    {
+        if (!wcscmp( root->xbf_refs[i].full_name, full_name )) return;
+    }
+    if (root->xbf_ref_cnt >= (int)ARRAY_SIZE(root->xbf_refs)) return;
+    lstrcpynW( root->xbf_refs[root->xbf_ref_cnt].full_name, full_name,
+               ARRAY_SIZE(root->xbf_refs[0].full_name) );
+    lstrcpynW( root->xbf_refs[root->xbf_ref_cnt].short_name, short_name,
+               ARRAY_SIZE(root->xbf_refs[0].short_name) );
+    root->xbf_refs[root->xbf_ref_cnt].is_resource_path = is_resource_path;
+    root->xbf_refs[root->xbf_ref_cnt].instantiated = FALSE;
+    root->xbf_ref_cnt++;
+}
+
+static void uwp_mark_xbf_ref_instantiated( struct uwp_element *root, const WCHAR *cls_name )
+{
+    int i;
+    if (!root || !cls_name || !cls_name[0]) return;
+    for (i = 0; i < root->xbf_ref_cnt; i++)
+    {
+        if (!wcscmp( root->xbf_refs[i].full_name, cls_name ))
+            root->xbf_refs[i].instantiated = TRUE;
+    }
+}
+
+static BOOL uwp_tree_has_class( struct uwp_element *el, const WCHAR *full_name )
+{
+    struct uwp_vec_view *v;
+    unsigned int k;
+    if (!el || !full_name) return FALSE;
+    if (el->class_name[0] && !wcscmp( el->class_name, full_name )) return TRUE;
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el && uwp_tree_has_class( ch, full_name )) return TRUE;
+    }
+    if (el->children_coll)
+    {
+        v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            if (ch && ch != el && uwp_tree_has_class( ch, full_name )) return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static struct uwp_element *uwp_find_empty_holder_border( struct uwp_element *el, const WCHAR *match_prefix, BOOL prefix_only )
+{
+    struct uwp_vec_view *v;
+    unsigned int k;
+    if (!el) return NULL;
+    if (el->kind == UWP_KIND_BORDER && el->visibility == 0 && !el->children_coll && !el->content)
+    {
+        if (!prefix_only) return el;
+        if (match_prefix && el->name[0])
+        {
+            WCHAR pfx[8];
+            int plen = min( 4, (int)wcslen( match_prefix ) );
+            if (plen >= 3)
+            {
+                lstrcpynW( pfx, match_prefix, plen + 1 );
+                if (wcsstr( el->name, pfx )) return el;
+            }
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        struct uwp_element *r;
+        if (ch && ch != el && (r = uwp_find_empty_holder_border( ch, match_prefix, prefix_only ))) return r;
+    }
+    if (el->children_coll)
+    {
+        v = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        for (k = 0; k < v->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( v->items[k] );
+            struct uwp_element *r;
+            if (ch && ch != el && (r = uwp_find_empty_holder_border( ch, match_prefix, prefix_only ))) return r;
+        }
+    }
+    return NULL;
+}
+
+static BOOL uwp_populate_element_from_pri_xbf( struct uwp_element *el, const WCHAR *short_name )
 {
     const BYTE *xbf = NULL;
     DWORD xbf_sz = 0;
-    struct uwp_element *scan;
-    BOOL loaded_any = FALSE;
+    const WCHAR *lookup = short_name;
 
-    if (!calc_el) return FALSE;
-
-    if (!calc_el->children_coll && !calc_el->content)
+    if (!el) return FALSE;
+    if (!lookup || !lookup[0])
     {
-        if (uwp_pri_find_xbf( L"Calculator.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
-        {
-            void *conn = NULL;
-            IInspectable *comp = calc_el->outer ? calc_el->outer : &calc_el->IInspectable_iface;
-            if (calc_el->outer)
-                IInspectable_QueryInterface( calc_el->outer, &IID_IComponentConnector_UWP_g, &conn );
-            TRACE( "uwp_load_calculator_xbfs: parsing Calculator.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
-            uwp_parse_and_build_xbf( xbf, xbf_sz, comp, conn, TRUE, uwp_get_app_outer(), -1, calc_el, NULL );
-            if (conn) IUnknown_Release( (IUnknown *)conn );
-            loaded_any = TRUE;
-        }
+        const WCHAR *dot = wcsrchr( el->class_name, '.' );
+        lookup = dot ? dot + 1 : el->class_name;
     }
-    else
-    {
-        loaded_any = TRUE;
-    }
+    if (!lookup || !lookup[0]) return FALSE;
+    if (!uwp_pri_find_xbf( lookup, &xbf, &xbf_sz ) || !xbf || xbf_sz <= 0x50)
+        return FALSE;
 
-    /* Realize deferred StandardOperators inside OperatorsPanel so CalculatorStandardOperators.xbf
-     * and NumberPad.xbf load via the app's XBF component path. */
-    for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
+    if (!el->children_coll && !el->content)
     {
-        int d;
-        for (d = 0; d < scan->defer_cnt; d++)
-        {
-            if (!scan->defer_entries[d].realized &&
-                wcsstr( scan->defer_entries[d].name, L"Standard" ))
-            {
-                uwp_realize_deferred_entry( &scan->defer_entries[d] );
-            }
-        }
-        /* Collapse docked History/Memory panel in row 1 so keypad fills height */
-        if (!wcscmp( scan->name, L"DockPanel" ) ||
-            (scan->kind == UWP_KIND_BORDER && scan->grid_row == 1))
-            scan->visibility = 1;
+        void *conn = NULL;
+        IInspectable *comp = el->outer ? el->outer : &el->IInspectable_iface;
+        if (el->outer)
+            IInspectable_QueryInterface( el->outer, &IID_IComponentConnector_UWP_g, &conn );
+        TRACE( "uwp_populate_element_from_pri_xbf: parsing %s.xbf (%lu bytes) into %p\n",
+               debugstr_w(lookup), (unsigned long)xbf_sz, el );
+        uwp_parse_and_build_xbf( xbf, xbf_sz, comp, conn, TRUE, uwp_get_app_outer(), -1, el, NULL );
+        if (conn) IUnknown_Release( (IUnknown *)conn );
     }
-
-    /* If CalculatorStandardOperators.xbf was not already parsed via LoadComponent, parse it directly */
-    if (!uwp_find_named( calc_el, L"EqualButton" ))
-    {
-        if (uwp_pri_find_xbf( L"CalculatorStandardOperators.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
-        {
-            struct uwp_element *ops_host = uwp_find_named( calc_el, L"StandardOperators" );
-            if (!ops_host) ops_host = uwp_find_named( calc_el, L"OpsPanel" );
-            if (!ops_host) ops_host = calc_el;
-            TRACE( "uwp_load_calculator_xbfs: parsing CalculatorStandardOperators.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
-            uwp_parse_and_build_xbf( xbf, xbf_sz,
-                                     ops_host->outer ? ops_host->outer : &ops_host->IInspectable_iface,
-                                     NULL, TRUE, uwp_get_app_outer(), -1, ops_host, NULL );
-            loaded_any = TRUE;
-        }
-    }
-
-    /* If NumberPad.xbf was not already parsed via LoadComponent, parse it directly */
-    if (!uwp_find_named( calc_el, L"Num0Button" ))
-    {
-        if (uwp_pri_find_xbf( L"NumberPad.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
-        {
-            struct uwp_element *pad_host = uwp_find_named( calc_el, L"NumberPad" );
-            if (!pad_host) pad_host = uwp_find_named( calc_el, L"StandardOperators" );
-            if (!pad_host) pad_host = calc_el;
-            TRACE( "uwp_load_calculator_xbfs: parsing NumberPad.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
-            uwp_parse_and_build_xbf( xbf, xbf_sz,
-                                     pad_host->outer ? pad_host->outer : &pad_host->IInspectable_iface,
-                                     NULL, TRUE, uwp_get_app_outer(), -1, pad_host, NULL );
-            loaded_any = TRUE;
-        }
-    }
-
-    uwp_calc_vm_ensure();
-    return loaded_any && (calc_el->children_coll != NULL || calc_el->content != NULL);
+    uwp_realize_empty_panel_defers( el );
+    return el->children_coll != NULL || el->content != NULL;
 }
 
-/* Activate the app's own CalculatorApp.Controls.Calculator through the app's
- * IXamlMetadataProvider (same provider chain as Frame.Navigate page adoption:
- * GetXamlTypeByFullName → IXamlType::ActivateInstance slot 18), then drive
- * LoadComponent with the ms-appx URI so the app's Connect()/XBF machinery
- * builds the real control. Returns the element face hosted into holder. */
-static struct uwp_element *uwp_activate_real_calculator( struct uwp_element *holder )
+static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const WCHAR *full_name,
+                                              const WCHAR *short_name )
 {
-    static const WCHAR *names[] = { L"CalculatorApp.Controls.Calculator", L"CalculatorApp.Calculator" };
-    void *provider = NULL, *xaml_type = NULL, *instance = NULL;
+    void *inst = NULL;
     struct uwp_element *el = NULL;
-    void *app = uwp_get_app_outer();
-    unsigned int n;
+    struct uwp_element *prev_head = g_all_uwp_elems_head;
+    int gen = g_all_uwp_elem_cnt;
+    HRESULT hr;
 
-    if (!holder) return NULL;
-    if (!app || FAILED(IInspectable_QueryInterface( (IInspectable *)app, &IID_IXamlMetadataProvider_UWP_g, &provider )) || !provider)
-        return NULL;
+    if (!holder || !full_name || !full_name[0]) return FALSE;
 
-    for (n = 0; n < ARRAY_SIZE(names) && !el; n++)
+    __TRY
     {
-        HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = NULL;
-        void **vtbl = *(void ***)provider;
-        HSTRING h = NULL;
-        get_by_name = (void *)vtbl[7];   /* GetXamlTypeByFullName */
-        if (FAILED(WindowsCreateString( names[n], wcslen(names[n]), &h )) || !h) continue;
-        if (SUCCEEDED(get_by_name( provider, h, &xaml_type )) && xaml_type)
-        {
-            void **tv = *(void ***)xaml_type;
-            HRESULT (WINAPI *activate)(void *, void **) = (void *)tv[18];   /* IXamlType UWP slot */
-            TRACE( "uwp_activate_real_calculator: provider has %s\n", debugstr_w(names[n]) );
-            if (activate)
-            {
-                HRESULT ihr = S_OK;
-                int gen = g_all_uwp_elem_cnt;
-                struct uwp_element *prev_head = g_all_uwp_elems_head;
-                __TRY
-                {
-                    ihr = activate( xaml_type, &instance );
-                }
-                __EXCEPT_ALL
-                {
-                    ihr = E_FAIL;
-                    TRACE( "uwp_activate_real_calculator: ActivateInstance(%s) faulted (composable ctor wall)\n",
-                           debugstr_w(names[n]) );
-                }
-                __ENDTRY;
-                if (g_all_uwp_elem_cnt > gen)
-                {
-                    struct uwp_element *e;
-                    for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
-                        if (e->kind == UWP_KIND_USER_CONTROL) el = e;
-                }
-                if (!el && instance && SUCCEEDED(ihr))
-                    el = uwp_elem_from_any( instance );
-                if (el)
-                {
-                    if (instance) el->provider_inst = (IInspectable *)instance;
-                    lstrcpynW( el->class_name, L"CalculatorApp.Controls.Calculator", ARRAY_SIZE(el->class_name) );
-                    if (!el->children_coll && !el->content)
-                        el->adopted_faulted_ctor = 1;
-                    g_last_created_page = NULL;
-                    TRACE( "uwp_activate_real_calculator: adopted Calculator UserControl %p (gen %d→%d ihr %#lx children=%p content=%p)\n",
-                           el, gen, g_all_uwp_elem_cnt, ihr, el->children_coll, el->content );
-                }
-                TRACE( "uwp_activate_real_calculator: ActivateInstance(%s) -> hr %#lx inst %p el %p\n",
-                       debugstr_w(names[n]), ihr, (void *)instance, el );
-            }
-            IInspectable_Release( (IInspectable *)xaml_type );
-            xaml_type = NULL;
-        }
-        WindowsDeleteString( h );
+        hr = uwp_create_instance_from_provider( full_name, &inst );
     }
-    IInspectable_Release( (IInspectable *)provider );
-    if (!el) return NULL;
+    __EXCEPT_ALL
+    {
+        hr = E_FAIL;
+        TRACE( "uwp_instantiate_xbf_control_into: provider activation(%s) faulted\n", debugstr_w(full_name) );
+    }
+    __ENDTRY;
 
-    /* Host into holder (CalcHolder border) */
+    if (g_all_uwp_elem_cnt > gen)
+    {
+        struct uwp_element *e;
+        for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
+        {
+            if (e->kind == UWP_KIND_USER_CONTROL || e->kind == UWP_KIND_PAGE)
+                el = e;
+        }
+    }
+    if (!el && inst && SUCCEEDED(hr))
+        el = uwp_elem_from_any( inst );
+
+    if (!el)
+    {
+        IInspectable *raw = NULL;
+        if (SUCCEEDED(uwp_element_create( full_name, NULL, NULL, (void **)&raw )) && raw)
+        {
+            el = uwp_elem_from_any( raw );
+            IInspectable_Release( raw );
+        }
+    }
+    if (!el) return FALSE;
+
+    if (inst) el->provider_inst = (IInspectable *)inst;
+    lstrcpynW( el->class_name, full_name, ARRAY_SIZE(el->class_name) );
+    if (!el->children_coll && !el->content)
+        uwp_populate_element_from_pri_xbf( el, short_name );
+
+    if (!el->children_coll && !el->content)
+    {
+        TRACE( "uwp_instantiate_xbf_control_into: %s yielded empty tree\n", debugstr_w(full_name) );
+        return FALSE;
+    }
+
     uwp_vec_create( holder, &holder->children_coll );
     uwp_vec_Append( holder->children_coll, el->outer ? (void *)el->outer : (void *)&el->IInspectable_iface );
     el->parent = holder;
+    uwp_realize_empty_panel_defers( el );
+    uwp_fire_loaded_tree( el );
+    TRACE( "uwp_instantiate_xbf_control_into: hosted %s in %s\n",
+           debugstr_w(el->class_name), debugstr_w(holder->name) );
+    return TRUE;
+}
 
-    if (!uwp_load_calculator_xbfs( el ))
+static BOOL uwp_populate_page_from_xbf_refs( struct uwp_element *page_el )
+{
+    int i;
+    struct uwp_element *any_holder;
+
+    if (!page_el || !page_el->xbf_parsed) return FALSE;
+
+    uwp_realize_empty_panel_defers( page_el );
+
+    /* Check if page already has populated content and no empty placeholder holders needing XBF controls */
+    any_holder = uwp_find_empty_holder_border( page_el, NULL, FALSE );
+    if (!any_holder)
+        return page_el->children_coll != NULL || page_el->content != NULL;
+
+    for (i = 0; i < page_el->xbf_ref_cnt; i++)
     {
-        /* Error fallback strictly when genuine XBF fails to load */
-        WARN( "uwp_activate_real_calculator: XBF load failed, falling back to synthetic calculator\n" );
-        uwp_seed_synthetic_calculator( el );
+        struct uwp_xbf_ref *ref = &page_el->xbf_refs[i];
+        struct uwp_element *holder;
+
+        if (ref->is_resource_path || ref->instantiated) continue;
+        if (uwp_tree_has_class( page_el, ref->full_name ))
+        {
+            ref->instantiated = TRUE;
+            continue;
+        }
+        holder = uwp_find_empty_holder_border( page_el, ref->short_name, TRUE );
+        if (!holder) holder = any_holder;
+        if (holder && uwp_instantiate_xbf_control_into( holder, ref->full_name, ref->short_name ))
+        {
+            ref->instantiated = TRUE;
+            return TRUE;
+        }
     }
 
-    /* Drive the app's InitializeComponent path if still unpopulated */
-    if (!el->children_coll && !el->content)
-    {
-        struct uwp_element *probe = el;
-        __TRY
-        {
-            uwp_apply_template_if_needed( probe );
-        }
-        __EXCEPT_ALL { TRACE( "uwp_activate_real_calculator: OnApplyTemplate faulted\n" ); }
-        __ENDTRY;
-        if (probe->outer)
-        {
-            void *conn = NULL;
-            __TRY
-            {
-                if (SUCCEEDED(IInspectable_QueryInterface( probe->outer, &IID_IComponentConnector_UWP_g, &conn )) && conn)
-                {
-                    HRESULT (WINAPI *conn_fn)(void *, int, void *) = (void *)(*(void ***)conn)[6];
-                    conn_fn( conn, 1, probe->outer );
-                    IUnknown_Release( (IUnknown *)conn );
-                }
-            }
-            __EXCEPT_ALL { TRACE( "uwp_activate_real_calculator: Connect(1) faulted\n" ); }
-            __ENDTRY;
-        }
-    }
-    TRACE( "uwp_activate_real_calculator: hosting %s in %s\n", debugstr_w(el->class_name), debugstr_w(holder->name) );
-    return el;
+    return page_el->children_coll != NULL || page_el->content != NULL;
 }
 
 /* Error fallback strictly when Calculator.xbf / NumberPad.xbf / CalculatorStandardOperators.xbf fail to load */
@@ -4896,6 +5096,7 @@ static void store_query_installed_packages( struct store_catalog_item **out_item
     *out_count = count;
 }
 
+/* Documented fallback only: invoked strictly when XBF parsing fails to build a visual tree. */
 static void uwp_seed_store_catalog( struct uwp_element *page_el )
 {
     static const WCHAR *nav_names[5] = { L"Home", L"Apps", L"Games", L"Movies", L"Library" };
@@ -4903,8 +5104,6 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
 
     struct store_catalog_item *apps = NULL;
     int app_count = 0;
-    const BYTE *xbf = NULL;
-    DWORD xbf_sz = 0;
     IInspectable *root_grid_raw = NULL, *nav_rail_raw = NULL, *main_grid_raw = NULL;
     IInspectable *search_raw = NULL, *banner_raw = NULL;
     IInspectable *sec_title_raw = NULL, *tiles_grid_raw = NULL;
@@ -4912,24 +5111,8 @@ static void uwp_seed_store_catalog( struct uwp_element *page_el )
     int i;
 
     if (!page_el || page_el->children_coll) return;
+    TRACE( "xbf: falling back to seed tree\n" );
     store_query_installed_packages( &apps, &app_count );
-
-    /* 1. Parse Store package PRI XBFs to prime the XAML visual components */
-    if (uwp_pri_find_xbf( L"HomepageSkeleton.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
-    {
-        TRACE( "uwp_seed_store_catalog: parsed HomepageSkeleton.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
-        uwp_parse_and_build_xbf( xbf, xbf_sz, &page_el->IInspectable_iface, NULL, TRUE, uwp_get_app_outer(), -1, page_el, NULL );
-    }
-    if (uwp_pri_find_xbf( L"HomeIslandTile.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
-    {
-        TRACE( "uwp_seed_store_catalog: parsed HomeIslandTile.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
-        uwp_parse_and_build_xbf( xbf, xbf_sz, &page_el->IInspectable_iface, NULL, TRUE, uwp_get_app_outer(), -1, page_el, NULL );
-    }
-    if (uwp_pri_find_xbf( L"SearchBoxHolderControl.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
-    {
-        TRACE( "uwp_seed_store_catalog: parsed SearchBoxHolderControl.xbf (%lu bytes)\n", (unsigned long)xbf_sz );
-        uwp_parse_and_build_xbf( xbf, xbf_sz, &page_el->IInspectable_iface, NULL, TRUE, uwp_get_app_outer(), -1, page_el, NULL );
-    }
 
     /* 2. Build Root Layout: Page -> RootGrid (Col 0: NavRail 68px, Col 1: MainContent 1*) */
     if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&root_grid_raw )) || !root_grid_raw)
@@ -5237,27 +5420,7 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 IInspectable_AddRef( (IInspectable *)impl->content );
                 g_navigated_page_el = page_el;
                 page_el->parent = impl;
-                if (is_calculator_app())
-                {
-                    struct uwp_element *holder = uwp_find_named( page_el, L"CalcHolder" );
-                    if (!uwp_activate_real_calculator( holder ) && holder && !uwp_load_calculator_xbfs( holder ))
-                    {
-                        WARN( "uwp_frame_NavigateWithParam: XBF load failed, falling back to synthetic calculator\n" );
-                        uwp_seed_synthetic_calculator( holder );
-                    }
-                }
-                else if (is_store_app())
-                {
-                    uwp_seed_store_catalog( page_el );
-                }
-            }
-            else
-            {
-                impl->content = page;
-            }
-            if (page_el)
-            {
-                page_el->parent = impl;
+
                 /* Invoke IPageOverrides::OnNavigatedTo (slot 8) if implemented */
                 if (page_el->outer)
                 {
@@ -5273,6 +5436,25 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                     }
                 }
                 uwp_fire_loaded_tree( page_el );
+
+                /* Populate any empty placeholder containers from the page XBF's referenced PRI resources */
+                if (!uwp_populate_page_from_xbf_refs( page_el ))
+                {
+                    if (is_calculator_app())
+                    {
+                        struct uwp_element *holder = uwp_find_empty_holder_border( page_el, NULL, FALSE );
+                        TRACE( "xbf: falling back to seed tree\n" );
+                        uwp_seed_synthetic_calculator( holder ? holder : page_el );
+                    }
+                    else if (is_store_app())
+                    {
+                        uwp_seed_store_catalog( page_el );
+                    }
+                }
+            }
+            else
+            {
+                impl->content = page;
             }
             xaml_window_present_current();
         }
@@ -5571,6 +5753,10 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, WOR
             if (sval && sval[0])
                 lstrcpynW( el->text, sval, ARRAY_SIZE(el->text) );
             break;
+        case 0x824c: /* Image.Source */
+            if (sval && sval[0])
+                lstrcpynW( el->image_src, sval, ARRAY_SIZE(el->image_src) );
+            break;
         case 0x8008: /* x:Uid or Name */
             if (sval && sval[0])
             {
@@ -5776,6 +5962,7 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                 else if (tid < ctx->type_cnt)
                 {
                     cls_name = ctx->types[tid].full_name;
+                    if (ctx->root_el) uwp_mark_xbf_ref_instantiated( ctx->root_el, cls_name );
                     /* Do not activate ResourceString, ResourceVirtualKey, or Microsoft.UI.Xaml controls via provider */
                     if (wcsstr( cls_name, L"ResourceString" ) || wcsstr( cls_name, L"ResourceVirtualKey" ) ||
                         !wcsncmp( cls_name, L"Microsoft.UI.Xaml.", 18 ))
@@ -5787,26 +5974,39 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                     {
                         struct uwp_element *prev_head = g_all_uwp_elems_head;
                         HRESULT phr = uwp_create_instance_from_provider( cls_name, (void **)&inst );
-                        if (g_all_uwp_elems_head != prev_head)
+                        if (SUCCEEDED(phr) && inst)
+                            el = uwp_elem_from_any( inst );
+                        if (!el && g_all_uwp_elems_head != prev_head)
                         {
                             struct uwp_element *e;
                             for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
-                                el = e;
-                            if (el)
                             {
-                                if (inst) el->provider_inst = inst;
-                                else inst = el->outer ? el->outer : &el->IInspectable_iface;
-                                lstrcpynW( el->class_name, cls_name, ARRAY_SIZE(el->class_name) );
-                                el->kind = classify_uwp_class( el->class_name );
+                                if (e->kind == UWP_KIND_USER_CONTROL || e->kind == UWP_KIND_PAGE)
+                                    el = e;
                             }
+                            if (!el)
+                            {
+                                for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
+                                    el = e;
+                            }
+                        }
+                        if (el)
+                        {
+                            if (inst && !el->provider_inst) el->provider_inst = inst;
+                            else if (!inst) inst = el->outer ? el->outer : &el->IInspectable_iface;
+                            lstrcpynW( el->class_name, cls_name, ARRAY_SIZE(el->class_name) );
+                            el->kind = classify_uwp_class( el->class_name );
                         }
                         if (FAILED(phr) || !inst)
                         {
                             if (!inst) uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
                             if (!el) el = uwp_elem_from_any( inst );
+                            if (el && !el->xbf_parsed && !el->children_coll && !el->content &&
+                                !wcsncmp( ctx->types[tid].xmlns, L"using:", 6 ))
+                            {
+                                uwp_populate_element_from_pri_xbf( el, ctx->types[tid].short_name );
+                            }
                         }
-                        else if (!el)
-                            el = uwp_elem_from_any( inst );
                     }
                 }
                 else
@@ -6197,6 +6397,7 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
     ctx.is_uwp_conn = is_uwp_conn;
     ctx.root_comp = component;
     ctx.root_el = attach_root ? attach_root : uwp_elem_from_any( component );
+    if (ctx.root_el) ctx.root_el->xbf_parsed = TRUE;
 
     /* 1. String Table */
     {
@@ -6284,7 +6485,32 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
         }
     }
 
-    /* 3. Node Substreams */
+    /* 3. Record XBF-referenced resources and using: controls from metadata tables */
+    if (ctx.root_el && only_sub_idx < 0)
+    {
+        const BYTE *rx = NULL;
+        DWORD rsz = 0;
+        for (i = 0; i < ctx.type_cnt; i++)
+        {
+            if (!wcsncmp( ctx.types[i].xmlns, L"using:", 6 ) && ctx.types[i].short_name[0] &&
+                uwp_pri_find_xbf( ctx.types[i].short_name, &rx, &rsz ))
+            {
+                uwp_record_xbf_ref( ctx.root_el, ctx.types[i].full_name, ctx.types[i].short_name, FALSE );
+            }
+        }
+        for (i = 0; i < ctx.str_cnt; i++)
+        {
+            const WCHAR *s = ctx.strs[i];
+            size_t slen = s ? wcslen( s ) : 0;
+            if (slen >= 5 && (!wcsicmp( s + slen - 5, L".xaml" ) || !wcsicmp( s + slen - 4, L".xbf" )) &&
+                uwp_pri_find_xbf( s, &rx, &rsz ))
+            {
+                uwp_record_xbf_ref( ctx.root_el, s, s, TRUE );
+            }
+        }
+    }
+
+    /* 4. Node Substreams */
     ctx.nodes = xbf + 12 + ctx.meta_sz;
     if (ctx.node_sz >= 12)
     {
@@ -6408,6 +6634,13 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
     /* 2. Build visual tree from XBF v2 stream and Connect child elements */
     uwp_parse_and_build_xbf( xbf, xbf_sz, (IInspectable *)component, conn, TRUE, app_outer, -1, NULL, NULL );
 
+    /* 2b. Realize default deferred elements inside empty panels */
+    {
+        struct uwp_element *comp_el = uwp_elem_from_any( component );
+        if (comp_el)
+            uwp_realize_empty_panel_defers( comp_el );
+    }
+
     /* 3. Query IComponentConnector2 (slot 6 = GetBindingConnector) and initialize {x:Bind} */
     if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)component, &IID_IComponentConnector2_UWP_g, &conn2 )) && conn2)
     {
@@ -6481,6 +6714,31 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
         if (nrows > 30) nrows = 30;
         if (ncols > 30) ncols = 30;
 
+        for (i = 0; i < ncols; i++)
+        {
+            struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
+            c_type[i] = cd ? cd->grid_len_type : 2;
+            c_val[i]  = cd ? cd->grid_len_val  : 1.0;
+            /* Collapse ColumnHistory or 0-star columns when narrower than wide view */
+            if (cd && !wcscmp( cd->name, L"ColumnHistory" )) { c_type[i] = 1; c_val[i] = 0; }
+            if (c_type[i] == 2 && c_val[i] <= 0.001) { c_type[i] = 1; c_val[i] = 0; }
+            if (c_type[i] == 0) { c_type[i] = 1; c_val[i] = 0; }
+            if (c_type[i] == 1) c_fixed += c_val[i];
+            else c_stars += (c_val[i] > 0 ? c_val[i] : 1.0);
+        }
+
+        {
+            double rem_w = max( 0.0, (double)w - c_fixed );
+            double cur_x = (double)rc.left;
+            for (i = 0; i < ncols; i++)
+            {
+                col_x[i] = (int)(cur_x + 0.5);
+                if (c_type[i] == 1) cur_x += c_val[i];
+                else if (c_stars > 0) cur_x += rem_w * (c_val[i] / c_stars);
+            }
+            col_x[ncols] = rc.right;
+        }
+
         for (i = 0; i < nrows; i++)
         {
             struct uwp_element *rd = (rows && (unsigned)i < rows->count) ? uwp_elem_from_any( rows->items[i] ) : NULL;
@@ -6489,8 +6747,18 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
             {
                 struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
                 if (ch && ch->visibility == 0 && ch->kind != UWP_KIND_DEFERRED &&
+                    ch->kind != UWP_KIND_STYLE && ch->kind != UWP_KIND_BRUSH &&
+                    ch->kind != UWP_KIND_FLYOUT && ch->kind != UWP_KIND_POPUP &&
                     ch->grid_row <= i && i < ch->grid_row + ch->grid_row_span)
-                { has_vis = TRUE; break; }
+                {
+                    int c0 = max( 0, min( ncols - 1, ch->grid_col ) );
+                    int c1 = max( c0 + 1, min( ncols, c0 + ch->grid_col_span ) );
+                    if (col_x[c1] > col_x[c0])
+                    {
+                        has_vis = TRUE;
+                        break;
+                    }
+                }
             }
             r_type[i] = rd ? rd->grid_len_type : 2;
             r_val[i]  = rd ? rd->grid_len_val  : 1.0;
@@ -6506,19 +6774,6 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
             else r_stars += (r_val[i] > 0 ? r_val[i] : 1.0);
         }
 
-        for (i = 0; i < ncols; i++)
-        {
-            struct uwp_element *cd = (cols && (unsigned)i < cols->count) ? uwp_elem_from_any( cols->items[i] ) : NULL;
-            c_type[i] = cd ? cd->grid_len_type : 2;
-            c_val[i]  = cd ? cd->grid_len_val  : 1.0;
-            /* Collapse ColumnHistory or 0-star columns when narrower than wide view */
-            if (cd && !wcscmp( cd->name, L"ColumnHistory" )) { c_type[i] = 1; c_val[i] = 0; }
-            if (c_type[i] == 2 && c_val[i] <= 0.001) { c_type[i] = 1; c_val[i] = 0; }
-            if (c_type[i] == 0) { c_type[i] = 1; c_val[i] = 0; }
-            if (c_type[i] == 1) c_fixed += c_val[i];
-            else c_stars += (c_val[i] > 0 ? c_val[i] : 1.0);
-        }
-
         {
             double rem_h = max( 0.0, (double)h - r_fixed );
             double cur_y = (double)rc.top;
@@ -6529,17 +6784,6 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
                 else if (r_stars > 0) cur_y += rem_h * (r_val[i] / r_stars);
             }
             row_y[nrows] = rc.bottom;
-        }
-        {
-            double rem_w = max( 0.0, (double)w - c_fixed );
-            double cur_x = (double)rc.left;
-            for (i = 0; i < ncols; i++)
-            {
-                col_x[i] = (int)(cur_x + 0.5);
-                if (c_type[i] == 1) cur_x += c_val[i];
-                else if (c_stars > 0) cur_x += rem_w * (c_val[i] / c_stars);
-            }
-            col_x[ncols] = rc.right;
         }
 
         for (k = 0; k < children->count; k++)
@@ -6785,12 +7029,180 @@ static const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHA
     return s;
 }
 
+static void uwp_load_image_asset( struct uwp_element *el )
+{
+    WCHAR rel[MAX_PATH] = {0}, base_dir[MAX_PATH] = {0}, candidate[MAX_PATH] = {0};
+    const WCHAR *p = el->image_src;
+    static const WCHAR *scales[] = { L"", L".scale-100", L".scale-125", L".scale-150", L".scale-200", L".scale-400" };
+    WCHAR *slash, *dot;
+    size_t i;
+    IWICImagingFactory *wic = NULL;
+    IWICBitmapDecoder *dec = NULL;
+    IWICBitmapFrameDecode *frame = NULL;
+    IWICFormatConverter *conv = NULL;
+    UINT w = 0, h = 0;
+
+    if (!el || el->img_loaded || !el->image_src[0]) return;
+    el->img_loaded = TRUE;
+
+    if (!wcsncmp( p, L"ms-appx:///", 11 )) p += 11;
+    else if (!wcsncmp( p, L"ms-appx://", 10 )) p += 10;
+    while (*p == '/' || *p == '\\') p++;
+    lstrcpynW( rel, p, ARRAY_SIZE(rel) );
+    for (i = 0; rel[i]; i++) if (rel[i] == '/') rel[i] = '\\';
+
+    GetModuleFileNameW( NULL, base_dir, ARRAY_SIZE(base_dir) );
+    slash = wcsrchr( base_dir, '\\' );
+    if (slash) *(slash + 1) = 0;
+
+    dot = wcsrchr( rel, '.' );
+    for (i = 0; i < ARRAY_SIZE(scales); i++)
+    {
+        if (i > 0 && !dot) break;
+        if (i == 0)
+            swprintf( candidate, ARRAY_SIZE(candidate), L"%s%s", base_dir, rel );
+        else
+        {
+            WCHAR stem[MAX_PATH] = {0};
+            size_t slen = min( (size_t)(dot - rel), ARRAY_SIZE(stem) - 1 );
+            memcpy( stem, rel, slen * sizeof(WCHAR) );
+            stem[slen] = 0;
+            swprintf( candidate, ARRAY_SIZE(candidate), L"%s%s%s%s", base_dir, stem, scales[i], dot );
+        }
+        if (GetFileAttributesW( candidate ) != INVALID_FILE_ATTRIBUTES) break;
+        candidate[0] = 0;
+    }
+    if (!candidate[0]) return;
+
+    if (SUCCEEDED(CoCreateInstance( &CLSID_WICImagingFactory_local, NULL, CLSCTX_INPROC_SERVER,
+                                    &IID_IWICImagingFactory_local, (void **)&wic )) && wic)
+    {
+        if (SUCCEEDED(IWICImagingFactory_CreateDecoderFromFilename( wic, candidate, NULL, GENERIC_READ,
+                                                                    WICDecodeMetadataCacheOnLoad, &dec )) && dec)
+        {
+            if (SUCCEEDED(IWICBitmapDecoder_GetFrame( dec, 0, &frame )) && frame)
+            {
+                if (SUCCEEDED(IWICImagingFactory_CreateFormatConverter( wic, &conv )) && conv)
+                {
+                    if (SUCCEEDED(IWICFormatConverter_Initialize( conv, (IWICBitmapSource *)frame,
+                                                                  &GUID_WICPixelFormat32bppBGRA_local,
+                                                                  WICBitmapDitherTypeNone, NULL, 0.0,
+                                                                  WICBitmapPaletteTypeCustom )) &&
+                        SUCCEEDED(IWICFormatConverter_GetSize( conv, &w, &h )) &&
+                        w > 0 && h > 0 && w <= 4096 && h <= 4096)
+                    {
+                        BYTE *buf = malloc( (size_t)w * h * 4 );
+                        if (buf)
+                        {
+                            if (SUCCEEDED(IWICFormatConverter_CopyPixels( conv, NULL, w * 4, w * h * 4, buf )))
+                            {
+                                size_t npix = (size_t)w * h, px;
+                                for (px = 0; px < npix; px++)
+                                {
+                                    BYTE b = buf[px * 4 + 0];
+                                    BYTE g = buf[px * 4 + 1];
+                                    BYTE r = buf[px * 4 + 2];
+                                    BYTE a = buf[px * 4 + 3];
+                                    buf[px * 4 + 0] = (BYTE)((b * a + 32 * (255 - a)) / 255);
+                                    buf[px * 4 + 1] = (BYTE)((g * a + 32 * (255 - a)) / 255);
+                                    buf[px * 4 + 2] = (BYTE)((r * a + 32 * (255 - a)) / 255);
+                                    buf[px * 4 + 3] = 255;
+                                }
+                                el->img_pixels = buf;
+                                el->img_w = w;
+                                el->img_h = h;
+                                TRACE( "uwp_load_image_asset: loaded %s (%ux%u)\n", debugstr_w(candidate), w, h );
+                            }
+                            else free( buf );
+                        }
+                    }
+                    IWICFormatConverter_Release( conv );
+                }
+                IWICBitmapFrameDecode_Release( frame );
+            }
+            IWICBitmapDecoder_Release( dec );
+        }
+        IWICImagingFactory_Release( wic );
+    }
+}
+
 static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 {
     if (!el || !el->has_bounds || el->visibility != 0) return;
     TRACE( "uwp_paint %s (%s) kind %d bounds %ld,%ld-%ld,%ld\n",
            debugstr_w(el->class_name), debugstr_w(el->name), el->kind,
            el->bounds.left, el->bounds.top, el->bounds.right, el->bounds.bottom );
+
+    if (el->kind == UWP_KIND_IMAGE)
+    {
+        uwp_load_image_asset( el );
+        if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+        {
+            RECT rc = el->bounds;
+            int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
+            int dw = (int)el->img_w, dh = (int)el->img_h;
+            int dx, dy;
+            BITMAPINFO bmi = {0};
+            void *dib_bits = NULL;
+            HDC memdc = CreateCompatibleDC( hdc );
+            HBITMAP hbm;
+
+            if (dw > bw && bw > 0) { dh = MulDiv( dh, bw, dw ); dw = bw; }
+            if (dh > bh && bh > 0) { dw = MulDiv( dw, bh, dh ); dh = bh; }
+            dx = rc.left + (bw - dw) / 2;
+            dy = rc.top + (bh - dh) / 2;
+            bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+            bmi.bmiHeader.biWidth = (LONG)el->img_w;
+            bmi.bmiHeader.biHeight = -(LONG)el->img_h;
+            bmi.bmiHeader.biPlanes = 1;
+            bmi.bmiHeader.biBitCount = 32;
+            bmi.bmiHeader.biCompression = BI_RGB;
+            hbm = CreateDIBSection( memdc, &bmi, DIB_RGB_COLORS, &dib_bits, NULL, 0 );
+            if (memdc && hbm && dib_bits)
+            {
+                HGDIOBJ old_bm = SelectObject( memdc, hbm );
+                BOOL ok;
+                memcpy( dib_bits, el->img_pixels, (size_t)el->img_w * el->img_h * 4 );
+                if (dw == (int)el->img_w && dh == (int)el->img_h)
+                    ok = BitBlt( hdc, dx, dy, dw, dh, memdc, 0, 0, SRCCOPY );
+                else
+                {
+                    SetStretchBltMode( hdc, HALFTONE );
+                    ok = StretchBlt( hdc, dx, dy, dw, dh, memdc, 0, 0, el->img_w, el->img_h, SRCCOPY );
+                }
+                TRACE( "uwp_paint IMAGE (%dx%d -> %d,%d %dx%d) ok=%d center_px=%06lx\n",
+                       el->img_w, el->img_h, dx, dy, dw, dh, ok, GetPixel( hdc, dx + dw / 2, dy + dh / 2 ) );
+                SelectObject( memdc, old_bm );
+            }
+            if (hbm) DeleteObject( hbm );
+            if (memdc) DeleteDC( memdc );
+        }
+        return;
+    }
+
+    if (el->kind == UWP_KIND_PROGRESS_RING)
+    {
+        RECT rc = el->bounds;
+        int cx = (rc.left + rc.right) / 2;
+        int cy = min( rc.bottom - 36, (rc.top + rc.bottom) / 2 + 120 );
+        int r = 18;
+        HPEN track_pen = CreatePen( PS_SOLID, 3, RGB( 68, 68, 68 ) );
+        HPEN arc_pen = CreatePen( PS_SOLID, 3, RGB( 0, 120, 215 ) );
+        HBRUSH null_br = GetStockObject( NULL_BRUSH );
+        HGDIOBJ old_pen = SelectObject( hdc, track_pen );
+        HGDIOBJ old_br = SelectObject( hdc, null_br );
+        BOOL eok = Ellipse( hdc, cx - r, cy - r, cx + r, cy + r );
+        BOOL aok;
+        SelectObject( hdc, arc_pen );
+        aok = Arc( hdc, cx - r, cy - r, cx + r, cy + r, cx, cy - r, cx - r, cy );
+        TRACE( "uwp_paint PROGRESS_RING (%d,%d r=%d) eok=%d aok=%d top_px=%06lx\n",
+               cx, cy, r, eok, aok, GetPixel( hdc, cx, cy - r ) );
+        SelectObject( hdc, old_br );
+        SelectObject( hdc, old_pen );
+        DeleteObject( track_pen );
+        DeleteObject( arc_pen );
+        return;
+    }
 
     if (wcsstr( el->name, L"NavRail" ))
     {
@@ -7017,8 +7429,6 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             DeleteObject( font );
             return;
         }
-        if (is_calculator_app() && (!wcscmp( el->name, L"NormalOutput" ) || !wcscmp( el->name, L"Results" )) && !el->text[0])
-            lstrcpynW( el->text, L"0", ARRAY_SIZE(el->text) );
         /* Avoid double-painting CalculationResult if its inner NormalOutput TextBlock is painted */
         if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
             el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)
@@ -7080,25 +7490,6 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     FillRect( hdc, &rc, bg_brush );
     DeleteObject( bg_brush );
 
-    if (is_store_app())
-    {
-        if (!g_navigated_page_el)
-        {
-            IInspectable *store_page = NULL;
-            if (SUCCEEDED(uwp_store_create_initial_page( &store_page )) && store_page)
-            {
-                g_navigated_page_el = uwp_elem_from_any( store_page );
-                IInspectable_Release( store_page );
-            }
-        }
-        if (g_navigated_page_el)
-        {
-            uwp_arrange_element( g_navigated_page_el, rc );
-            uwp_paint_element( hdc, g_navigated_page_el );
-            return;
-        }
-    }
-
     root_el = uwp_elem_from_any( content );
     if (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
         !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
@@ -7108,7 +7499,7 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
         uwp_paint_element( hdc, g_navigated_page_el );
         return;
     }
-    if (root_el)
+    if (root_el && (root_el->content || root_el->children_coll || root_el->xbf_parsed))
     {
         struct uwp_vec_view *chv = root_el->children_coll ?
             CONTAINING_RECORD( root_el->children_coll, struct uwp_vec_view, IInspectable_iface ) : NULL;
@@ -7131,6 +7522,25 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
             }
         }
         uwp_paint_element( hdc, root_el );
+    }
+    else if (is_store_app())
+    {
+        /* Fallback strictly when Store XBF failed to populate a visual tree */
+        if (!g_navigated_page_el)
+        {
+            IInspectable *store_page = NULL;
+            if (SUCCEEDED(uwp_store_create_initial_page( &store_page )) && store_page)
+            {
+                g_navigated_page_el = uwp_elem_from_any( store_page );
+                IInspectable_Release( store_page );
+            }
+        }
+        if (g_navigated_page_el)
+        {
+            uwp_arrange_element( g_navigated_page_el, rc );
+            uwp_paint_element( hdc, g_navigated_page_el );
+            return;
+        }
     }
     else TRACE( "xaml_layout_render: root_el NULL (content %p)\n", (void *)content );
 }

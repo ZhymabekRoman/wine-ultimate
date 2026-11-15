@@ -349,6 +349,7 @@ static HRESULT WINAPI frame_NavigateWithParam( void *iface, void *type_name_ptr,
         TRACE( "xaml_create_page(%s) returned hr %#lx, content %p\n", debugstr_w( name ), hr, impl->content );
         if ((FAILED(hr) || !impl->content) && is_store_app())
         {
+            TRACE( "xbf: falling back to seed tree\n" );
             hr = uwp_store_create_initial_page( &impl->content );
             TRACE( "uwp_store_create_initial_page for store returned hr %#lx, content %p\n", hr, impl->content );
         }
