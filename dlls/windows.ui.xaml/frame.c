@@ -3031,6 +3031,144 @@ static HRESULT WINAPI cwv2_get_Settings( void *iface, void **settings )
     return S_OK;
 }
 
+typedef struct ICoreWebView2Controller ICoreWebView2Controller;
+typedef struct ICoreWebView2ControllerVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWebView2Controller *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( ICoreWebView2Controller *This );
+    ULONG (WINAPI *Release)( ICoreWebView2Controller *This );
+    HRESULT (WINAPI *get_IsVisible)( ICoreWebView2Controller *This, BOOL *isVisible );
+    HRESULT (WINAPI *put_IsVisible)( ICoreWebView2Controller *This, BOOL isVisible );
+    HRESULT (WINAPI *get_Bounds)( ICoreWebView2Controller *This, RECT *bounds );
+    HRESULT (WINAPI *put_Bounds)( ICoreWebView2Controller *This, RECT bounds );
+    HRESULT (WINAPI *get_ZoomFactor)( ICoreWebView2Controller *This, double *zoomFactor );
+    HRESULT (WINAPI *put_ZoomFactor)( ICoreWebView2Controller *This, double zoomFactor );
+    void *add_ZoomFactorChanged;
+    void *remove_ZoomFactorChanged;
+    HRESULT (WINAPI *SetBoundsAndZoomFactor)( ICoreWebView2Controller *This, RECT bounds, double zoomFactor );
+    HRESULT (WINAPI *MoveFocus)( ICoreWebView2Controller *This, int reason );
+    void *add_MoveFocusRequested;
+    void *remove_MoveFocusRequested;
+    void *add_GotFocus;
+    void *remove_GotFocus;
+    void *add_LostFocus;
+    void *remove_LostFocus;
+    void *add_AcceleratorKeyPressed;
+    void *remove_AcceleratorKeyPressed;
+    HRESULT (WINAPI *get_ParentWindow)( ICoreWebView2Controller *This, HWND *parentWindow );
+    HRESULT (WINAPI *put_ParentWindow)( ICoreWebView2Controller *This, HWND parentWindow );
+    HRESULT (WINAPI *NotifyParentWindowPositionChanged)( ICoreWebView2Controller *This );
+    HRESULT (WINAPI *Close)( ICoreWebView2Controller *This );
+    HRESULT (WINAPI *get_CoreWebView2)( ICoreWebView2Controller *This, void **coreWebView2 );
+} ICoreWebView2ControllerVtbl;
+
+struct ICoreWebView2Controller
+{
+    const ICoreWebView2ControllerVtbl *lpVtbl;
+};
+
+typedef struct ICoreWebView2CompositionController ICoreWebView2CompositionController;
+typedef struct ICoreWebView2CompositionControllerVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( ICoreWebView2CompositionController *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( ICoreWebView2CompositionController *This );
+    ULONG (WINAPI *Release)( ICoreWebView2CompositionController *This );
+    HRESULT (WINAPI *get_RootVisualTarget)( ICoreWebView2CompositionController *This, IUnknown **target );
+    HRESULT (WINAPI *put_RootVisualTarget)( ICoreWebView2CompositionController *This, IUnknown *target );
+    HRESULT (WINAPI *SendMouseInput)( ICoreWebView2CompositionController *This, UINT32 eventKind,
+                                      UINT32 virtualKeys, UINT32 mouseData, POINT point );
+    HRESULT (WINAPI *SendPointerInput)( ICoreWebView2CompositionController *This, UINT32 eventKind, void *pointerInfo );
+} ICoreWebView2CompositionControllerVtbl;
+
+struct ICoreWebView2CompositionController
+{
+    const ICoreWebView2CompositionControllerVtbl *lpVtbl;
+};
+
+static inline void *wv2_slot_fn( void *obj, BOOL real_loader, int slot_real, int slot_builtin )
+{
+    int slot = real_loader ? slot_real : slot_builtin;
+    if (!obj || !*(void ***)obj || slot < 0) return NULL;
+    return (*(void ***)obj)[slot];
+}
+
+static HRESULT wv2_call_navigate( void *obj, BOOL real_loader, int slot_real, int slot_builtin, LPCWSTR uri )
+{
+    void *fn = wv2_slot_fn( obj, real_loader, slot_real, slot_builtin );
+    if (!fn || (ULONG_PTR)fn >= (ULONG_PTR)0x7ffc00000000) return E_NOINTERFACE;
+    if (real_loader)
+        return ((HRESULT (WINAPI *)( void *, LPCWSTR ))fn)( obj, uri );
+    return ((HRESULT (WINAPI *)( void *, LPCWSTR, void * ))fn)( obj, uri, NULL );
+}
+
+static HRESULT wv2_call_get_source( void *obj, BOOL real_loader, int slot_real, int slot_builtin, LPWSTR *raw )
+{
+    void *fn = wv2_slot_fn( obj, real_loader, slot_real, slot_builtin );
+    if (!fn || (ULONG_PTR)fn >= (ULONG_PTR)0x7ffc00000000) return E_NOINTERFACE;
+    return ((HRESULT (WINAPI *)( void *, LPWSTR * ))fn)( obj, raw );
+}
+
+static HRESULT wv2_call_bounds( void *obj, BOOL real_loader, int slot_real, int slot_builtin, RECT rc )
+{
+    void *fn = wv2_slot_fn( obj, real_loader, slot_real, slot_builtin );
+    if (!fn || (ULONG_PTR)fn >= (ULONG_PTR)0x7ffc00000000) return E_NOINTERFACE;
+    return ((HRESULT (WINAPI *)( void *, RECT ))fn)( obj, rc );
+}
+
+static HRESULT wv2_call_bool( void *obj, BOOL real_loader, int slot_real, int slot_builtin, BOOL val )
+{
+    void *fn = wv2_slot_fn( obj, real_loader, slot_real, slot_builtin );
+    if (!fn || (ULONG_PTR)fn >= (ULONG_PTR)0x7ffc00000000) return E_NOINTERFACE;
+    return ((HRESULT (WINAPI *)( void *, BOOL ))fn)( obj, val );
+}
+
+static HRESULT wv2_call_hwnd( void *obj, BOOL real_loader, int slot_real, int slot_builtin, HWND hwnd )
+{
+    void *fn = wv2_slot_fn( obj, real_loader, slot_real, slot_builtin );
+    if (!fn || (ULONG_PTR)fn >= (ULONG_PTR)0x7ffc00000000) return E_NOINTERFACE;
+    return ((HRESULT (WINAPI *)( void *, HWND ))fn)( obj, hwnd );
+}
+
+static HRESULT wv2_call_void( void *obj, BOOL real_loader, int slot_real, int slot_builtin )
+{
+    void *fn = wv2_slot_fn( obj, real_loader, slot_real, slot_builtin );
+    if (!fn || (ULONG_PTR)fn >= (ULONG_PTR)0x7ffc00000000) return E_NOINTERFACE;
+    return ((HRESULT (WINAPI *)( void * ))fn)( obj );
+}
+
+static HRESULT wv2_call_get_core( void *controller, BOOL real_loader, int slot_real, int slot_builtin, void **core )
+{
+    HRESULT (WINAPI *get_core)( void *, void ** ) = wv2_slot_fn( controller, real_loader, slot_real, slot_builtin );
+    if ((ULONG_PTR)get_core >= (ULONG_PTR)0x7ffc00000000)  /* stale shared-page slot, see s380 */
+    {
+        HMODULE loader = GetModuleHandleW( L"webview2loader.dll" );
+        get_core = (void *)GetProcAddress( loader, "GetCoreWebView2FromController" );
+        ERR( "wv2_call_get_core: stale slot%d, using export %p\n", real_loader ? slot_real : slot_builtin, get_core );
+    }
+    if (!get_core) return E_NOINTERFACE;
+    return get_core( controller, core );
+}
+
+static BOOL wv2_probe_bounds( ICoreWebView2Controller *c )  /* call slot-4 getter/putter with known rect, read back */
+{
+    static const RECT probe_rc = { 0, 0, 321, 123 };
+    RECT orig = {0}, readback = {0};
+    HRESULT hr_put, hr_get;
+    BOOL ok;
+
+    if (!c || !c->lpVtbl || !c->lpVtbl->get_Bounds || !c->lpVtbl->put_Bounds)
+        return FALSE;
+    c->lpVtbl->get_Bounds( c, &orig );
+    hr_put = c->lpVtbl->put_Bounds( c, probe_rc );
+    hr_get = c->lpVtbl->get_Bounds( c, &readback );
+    ok = SUCCEEDED( hr_put ) && SUCCEEDED( hr_get ) &&
+         readback.right == probe_rc.right && readback.bottom == probe_rc.bottom;
+    c->lpVtbl->put_Bounds( c, orig );
+    ERR( "wv2_probe_bounds: ctrl=%p put=%#lx get=%#lx read=%ldx%ld ok=%d\n",
+         c, hr_put, hr_get, readback.right, readback.bottom, ok );
+    return ok;
+}
+
 static HRESULT WINAPI cwv2_Navigate( void *iface, HSTRING uri )
 {
     struct core_webview2 *impl = impl_from_cwv2( iface );
@@ -3040,19 +3178,7 @@ static HRESULT WINAPI cwv2_Navigate( void *iface, HSTRING uri )
     if (impl->loader_core)
     {
         const WCHAR *s = WindowsGetStringRawBuffer( uri, NULL );
-        HRESULT hr2;
-        if (impl->real_loader)
-        {
-            HRESULT (WINAPI *p_navigate)( void *, LPCWSTR ) =
-                (void *)(*(void ***)impl->loader_core)[5];
-            hr2 = p_navigate( impl->loader_core, s );
-        }
-        else
-        {
-            HRESULT (WINAPI *p_navigate)( void *, LPCWSTR, void * ) =
-                (void *)(*(void ***)impl->loader_core)[6];
-            hr2 = p_navigate( impl->loader_core, s, NULL );
-        }
+        HRESULT hr2 = wv2_call_navigate( impl->loader_core, impl->real_loader, 5, 6, s );
         ERR( "cwv2_Navigate: loader forward hr %#lx\n", hr2 );
     }
     return S_OK;
@@ -3063,19 +3189,8 @@ static HRESULT WINAPI cwv2_NavigateToString( void *iface, LPCWSTR html )
     ERR( "=== CoreWebView2::NavigateToString (%u chars) ===\n", html ? (unsigned)lstrlenW( html ) : 0u );
     if (impl->loader_core)
     {
-        HRESULT hr2;
-        if (impl->real_loader)
-        {
-            HRESULT (WINAPI *p_navstr)( void *, LPCWSTR ) =
-                (void *)(*(void ***)impl->loader_core)[6];
-            hr2 = p_navstr( impl->loader_core, html ? html : L"" );
-        }
-        else
-        {
-            HRESULT (WINAPI *p_navigate)( void *, LPCWSTR, void * ) =
-                (void *)(*(void ***)impl->loader_core)[6];
-            hr2 = p_navigate( impl->loader_core, L"data:text/html,", NULL );
-        }
+        LPCWSTR s = impl->real_loader ? (html ? html : L"") : L"data:text/html,";
+        HRESULT hr2 = wv2_call_navigate( impl->loader_core, impl->real_loader, 6, 6, s );
         ERR( "cwv2_NavigateToString: loader forward hr %#lx\n", hr2 );
     }
     return S_OK;
@@ -3090,9 +3205,7 @@ static HRESULT WINAPI cwv2_get_Source( void *iface, HSTRING *uri )
     if (impl->loader_core && impl->real_loader)
     {
         LPWSTR raw = NULL;
-        HRESULT (WINAPI *p_get_source)( void *, LPWSTR * ) =
-            (void *)(*(void ***)impl->loader_core)[4]; /* COM ICoreWebView2::get_Source */
-        if (p_get_source && SUCCEEDED( p_get_source( impl->loader_core, &raw ) ) && raw)
+        if (SUCCEEDED( wv2_call_get_source( impl->loader_core, impl->real_loader, 4, 8, &raw ) ) && raw)
         {
             HRESULT hr = WindowsCreateString( raw, lstrlenW( raw ), uri );
             CoTaskMemFree( raw );
@@ -3683,10 +3796,9 @@ static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
         if (host && IsWindow( host )) ScreenToClient( host, &pt );
         if (g_active_wv2_impl->loader_comp_ctrl)
         {
-            HRESULT (WINAPI *send_mouse)( void *, UINT32, UINT32, UINT32, POINT ) =
-                (void *)(*(void ***)g_active_wv2_impl->loader_comp_ctrl)[5];
-            HRESULT hr_m = send_mouse( g_active_wv2_impl->loader_comp_ctrl, WM_MOUSEWHEEL,
-                                       (UINT32)LOWORD( wparam ), (UINT32)(short)HIWORD( wparam ), pt );
+            ICoreWebView2CompositionController *comp_ctrl = g_active_wv2_impl->loader_comp_ctrl;
+            HRESULT hr_m = comp_ctrl->lpVtbl->SendMouseInput( comp_ctrl, WM_MOUSEWHEEL,
+                (UINT32)LOWORD( wparam ), (UINT32)(short)HIWORD( wparam ), pt );
             TRACE( "wv2_sta_wndproc: SendMouseInput(WM_MOUSEWHEEL) pt=%ld,%ld delta=%d hr=%#lx\n",
                    pt.x, pt.y, (int)(short)HIWORD( wparam ), hr_m );
         }
@@ -3925,11 +4037,10 @@ void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height )
     if (g_active_wv2_impl && g_active_wv2_impl->loader_controller && g_active_wv2_impl->real_loader &&
         width > 0 && height > 0)
     {
+        ICoreWebView2Controller *ctrl = g_active_wv2_impl->loader_controller;
         RECT rc = { 0, 0, (LONG)width, (LONG)height };
-        ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)g_active_wv2_impl->loader_controller)[6])(
-            g_active_wv2_impl->loader_controller, rc );
-        ((HRESULT (WINAPI *)(void *))(*(void ***)g_active_wv2_impl->loader_controller)[23])(
-            g_active_wv2_impl->loader_controller );
+        ctrl->lpVtbl->put_Bounds( ctrl, rc );
+        ctrl->lpVtbl->NotifyParentWindowPositionChanged( ctrl );
         wv2_sync_child_hwnds( wv2_get_controller_parent(), width, height );
     }
     in_resize = FALSE;
@@ -4067,22 +4178,10 @@ static void wv2_navigate_once( struct xaml_element *impl )
         }
     }
     impl->navigated = TRUE;
-    if (impl->real_loader)
     {
-        HRESULT (WINAPI *p_navigate)( void *, LPCWSTR ) =
-            (void *)(*(void ***)impl->loader_core)[5];  /* COM ICoreWebView2::Navigate */
-        HRESULT hr = p_navigate( impl->loader_core, url );
-        ERR( "wv2_navigate_once (real): loader_core %p url=%s hr %#lx\n",
-             impl->loader_core, debugstr_w( url ), hr );
-    }
-    else
-    {
-        /* Builtin webview2loader core: slot 6 is Navigate(uri, handler) */
-        typedef HRESULT (WINAPI *p_nav_fn)( void *, LPCWSTR, void * );
-        p_nav_fn p_navigate = (p_nav_fn)(*(void ***)impl->loader_core)[6];
-        HRESULT hr = p_navigate( impl->loader_core, url, NULL );
-        ERR( "wv2_navigate_once (builtin): loader_core %p url=%s hr %#lx\n",
-             impl->loader_core, debugstr_w( url ), hr );
+        HRESULT hr = wv2_call_navigate( impl->loader_core, impl->real_loader, 5, 6, url );
+        ERR( "wv2_navigate_once (%s): loader_core %p url=%s hr %#lx\n",
+             impl->real_loader ? "real" : "builtin", impl->loader_core, debugstr_w( url ), hr );
     }
 }
 
@@ -4237,7 +4336,6 @@ static ULONG WINAPI wv2h_Release( void *t )
 static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *controller )
 {
     struct wv2_ctrl_handler *h = t;
-    HRESULT (WINAPI *get_core)( void *, void ** );
     void *core = NULL;
 
     ERR( "wv2_ctrl_handler_Invoke hr %#lx controller %p real=%d\n", hr, controller, h->impl->real_loader );
@@ -4245,13 +4343,14 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
     {
         if (h->impl->real_loader)
         {
+            static BOOL bounds_probed;
             HWND parent = h->impl->parent_hwnd ? h->impl->parent_hwnd : wv2_get_controller_parent();
             SIZE sz;
             float scale = 1.0f;
             RECT rc;
             HRESULT hr_b = S_OK, hr_v = S_OK, hr_c = S_OK;
-            void *comp_ctrl = NULL;
-            void *ctrl = NULL;
+            ICoreWebView2CompositionController *comp_ctrl = NULL;
+            ICoreWebView2Controller *ctrl = NULL;
 
             xaml_get_layout_metrics( parent, &sz, &scale );
             SetRect( &rc, 0, 0, sz.cx, sz.cy );
@@ -4263,7 +4362,7 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             }
 
             if (SUCCEEDED( ((IUnknown *)controller)->lpVtbl->QueryInterface(
-                    (IUnknown *)controller, &IID_ICoreWebView2CompositionController_g, &comp_ctrl) ) && comp_ctrl)
+                    (IUnknown *)controller, &IID_ICoreWebView2CompositionController_g, (void **)&comp_ctrl) ) && comp_ctrl)
             {
                 IDCompositionVisual *root = xaml_get_dcomp_root_visual();
                 IDCompositionVisual *vis = h->impl->visual;
@@ -4286,9 +4385,7 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
                 ERR( "wv2_ctrl_handler_Invoke: found CompositionController %p visual=%p root=%p scale=%.2f\n", comp_ctrl, vis, root, scale );
                 if (vis)
                 {
-                    /* ICoreWebView2CompositionController: get_RootVisualTarget=3, put_RootVisualTarget=4 */
-                    HRESULT hr_rv = ((HRESULT (WINAPI *)(void *, IUnknown *))(*(void ***)comp_ctrl)[4])(
-                        comp_ctrl, (IUnknown *)vis );
+                    HRESULT hr_rv = comp_ctrl->lpVtbl->put_RootVisualTarget( comp_ctrl, (IUnknown *)vis );
                     if (SUCCEEDED( hr_rv ))
                         h->impl->has_comp_ctrl = TRUE;
                     ERR( "wv2_ctrl_handler_Invoke: put_RootVisualTarget hr=%#lx\n", hr_rv );
@@ -4297,31 +4394,32 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             }
 
             if (SUCCEEDED( ((IUnknown *)controller)->lpVtbl->QueryInterface(
-                    (IUnknown *)controller, &IID_ICoreWebView2Controller_g, &ctrl) ) && ctrl)
+                    (IUnknown *)controller, &IID_ICoreWebView2Controller_g, (void **)&ctrl) ) && ctrl)
             {
-                /* ICoreWebView2Controller: put_IsVisible=4, put_Bounds=6, put_ParentWindow=22, NotifyParentWindowPositionChanged=23, get_CoreWebView2=25 */
                 h->impl->loader_controller = ctrl;
-                ((IUnknown *)ctrl)->lpVtbl->AddRef( (IUnknown *)ctrl );
-                if (parent) ((HRESULT (WINAPI *)(void *, HWND))(*(void ***)ctrl)[22])( ctrl, parent );
-                hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)ctrl)[6])( ctrl, rc );
-                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)ctrl)[4])( ctrl, TRUE );
-                ((HRESULT (WINAPI *)(void *))(*(void ***)ctrl)[23])( ctrl );
-                get_core = (void *)(*(void ***)ctrl)[25];
-                hr_c = get_core( ctrl, &core );
+                if (!bounds_probed)
+                {
+                    bounds_probed = TRUE;
+                    wv2_probe_bounds( ctrl );
+                }
+                if (parent) ctrl->lpVtbl->put_ParentWindow( ctrl, parent );
+                hr_b = ctrl->lpVtbl->put_Bounds( ctrl, rc );
+                hr_v = ctrl->lpVtbl->put_IsVisible( ctrl, TRUE );
+                ctrl->lpVtbl->NotifyParentWindowPositionChanged( ctrl );
+                hr_c = ctrl->lpVtbl->get_CoreWebView2( ctrl, &core );
                 ERR( "wv2_ctrl_handler_Invoke (ctrl): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx get_CoreWebView2=%#lx core=%p\n",
                      parent, rc.right, rc.bottom, hr_b, hr_v, hr_c, core );
-                ((IUnknown *)ctrl)->lpVtbl->Release( (IUnknown *)ctrl );
             }
-            else
+            else if (!comp_ctrl)
             {
+                /* Last-resort fallback only when controller is NOT a 7-slot CompositionController */
                 h->impl->loader_controller = controller;
                 ((IUnknown *)controller)->lpVtbl->AddRef( (IUnknown *)controller );
-                if (parent) ((HRESULT (WINAPI *)(void *, HWND))(*(void ***)controller)[22])( controller, parent );
-                hr_b = ((HRESULT (WINAPI *)(void *, RECT))(*(void ***)controller)[6])( controller, rc );
-                hr_v = ((HRESULT (WINAPI *)(void *, BOOL))(*(void ***)controller)[4])( controller, TRUE );
-                ((HRESULT (WINAPI *)(void *))(*(void ***)controller)[23])( controller );
-                get_core = (void *)(*(void ***)controller)[25];  /* COM ICoreWebView2Controller::get_CoreWebView2 */
-                hr_c = get_core( controller, &core );
+                if (parent) wv2_call_hwnd( controller, TRUE, 22, -1, parent );
+                hr_b = wv2_call_bounds( controller, TRUE, 6, 4, rc );
+                hr_v = wv2_call_bool( controller, TRUE, 4, 4, TRUE );
+                wv2_call_void( controller, TRUE, 23, -1 );
+                hr_c = wv2_call_get_core( controller, TRUE, 25, 7, &core );
                 ERR( "wv2_ctrl_handler_Invoke (fallback): parent=%p rc=%ldx%ld put_Bounds=%#lx put_IsVisible=%#lx hr_c=%#lx core=%p\n",
                      parent, rc.right, rc.bottom, hr_b, hr_v, hr_c, core );
             }
@@ -4338,15 +4436,7 @@ static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *contro
             return S_OK;
         }
 
-        get_core = (void *)(*(void ***)controller)[7];  /* builtin ICoreWebView2Controller::get_CoreWebView2 */
-        if ((ULONG_PTR)get_core >= (ULONG_PTR)0x7ffc00000000)  /* stale shared-page slot, see s380 */
-        {
-            HMODULE loader = GetModuleHandleW( L"webview2loader.dll" );
-            get_core = (void *)GetProcAddress( loader, "GetCoreWebView2FromController" );
-            ERR( "wv2_ctrl_handler_Invoke: stale slot7, using export %p\n", get_core );
-            if (!get_core) return E_NOINTERFACE;
-        }
-        if (SUCCEEDED( get_core( controller, &core ) ) && core && !h->impl->loader_core)
+        if (SUCCEEDED( wv2_call_get_core( controller, FALSE, 25, 7, &core ) ) && core && !h->impl->loader_core)
         {
             /* Keep the loader object as the forward target; trigger creates the
              * cwv2 shell (static vtbl) as the RCW the app sees (r46 lesson: the
@@ -4506,14 +4596,42 @@ static int wv2_compare_versions( const WCHAR *a, const WCHAR *b )
     return 0;
 }
 
+static void wv2_extract_folder_version( const WCHAR *dir, WCHAR *out_ver, size_t out_len )
+{
+    WCHAR tmp[1024];
+    WCHAR *slash;
+    size_t len;
+
+    out_ver[0] = 0;
+    if (!dir || !*dir) return;
+    lstrcpynW( tmp, dir, ARRAY_SIZE(tmp) );
+    len = lstrlenW( tmp );
+    while (len > 0 && (tmp[len - 1] == '\\' || tmp[len - 1] == '/'))
+        tmp[--len] = 0;
+    slash = wcsrchr( tmp, '\\' );
+    if (!slash) slash = wcsrchr( tmp, '/' );
+    slash = slash ? slash + 1 : tmp;
+    if (slash[0] >= L'0' && slash[0] <= L'9')
+        lstrcpynW( out_ver, slash, out_len );
+}
+
 static void wv2_add_runtime_candidate( WCHAR candidates[][1024], WCHAR versions[][64], int *ncand, int max_cand,
                                        const WCHAR *dir, const WCHAR *ver )
 {
+    WCHAR folder_ver[64] = {0};
+    const WCHAR *stored_ver;
     int i;
     if (!dir || !*dir || !wv2_folder_has_runtime( dir )) return;
+    wv2_extract_folder_version( dir, folder_ver, ARRAY_SIZE(folder_ver) );
+    stored_ver = (ver && *ver && wcscmp( ver, L"9999.0.0.0" )) ? ver : folder_ver;
     for (i = 0; i < *ncand; i++)
     {
-        if (!wcsicmp( candidates[i], dir )) return;
+        if (!wcsicmp( candidates[i], dir ))
+        {
+            if (!versions[i][0] && stored_ver[0])
+                lstrcpynW( versions[i], stored_ver, 64 );
+            return;
+        }
     }
     if (*ncand >= max_cand) return;
 
@@ -4537,7 +4655,7 @@ static void wv2_add_runtime_candidate( WCHAR candidates[][1024], WCHAR versions[
         }
     }
     lstrcpynW( candidates[i], dir, 1024 );
-    lstrcpynW( versions[i], ver ? ver : L"", 64 );
+    lstrcpynW( versions[i], stored_ver, 64 );
     (*ncand)++;
 }
 
@@ -4568,11 +4686,10 @@ static void wv2_scan_app_base( const WCHAR *base_dir, WCHAR candidates[][1024], 
     FindClose( hfind );
 }
 
-static void wv2_discover_runtimes( WCHAR candidates[][1024], int *ncand, int max_cand, const WCHAR *exe_dir )
+static void wv2_discover_runtimes( WCHAR candidates[][1024], WCHAR versions[][64], int *ncand, int max_cand, const WCHAR *exe_dir )
 {
     static const GUID FOLDERID_ProgramFilesX86_g =
         { 0x7c5a40ef, 0xa0fb, 0x4bfc, { 0x87, 0x4a, 0xc0, 0xf2, 0xe0, 0xb9, 0xfa, 0x8e } };
-    WCHAR versions[16][64];
     WCHAR env_browser[1024] = {0}, pf86[1024] = {0}, pf[1024] = {0}, app_dir[1024];
     HMODULE reg_mod, shell_mod;
     typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
@@ -4581,7 +4698,7 @@ static void wv2_discover_runtimes( WCHAR candidates[][1024], int *ncand, int max
     typedef HRESULT (WINAPI *p_SHGetKnownFolderPath_t)( const GUID *, DWORD, HANDLE, PWSTR * );
 
     *ncand = 0;
-    memset( versions, 0, sizeof(versions) );
+    memset( versions, 0, sizeof(WCHAR) * 64 * max_cand );
 
     if (GetEnvironmentVariableW( L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", env_browser, ARRAY_SIZE(env_browser) ))
         wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, env_browser, L"9999.0.0.0" );
@@ -4719,6 +4836,8 @@ struct wv2_env_options
     const void **vtbl;
     LONG ref;
     WCHAR args[1024];
+    WCHAR target_version[64];
+    HSTRING target_version_hstr;
 };
 
 static LPWSTR wv2_cotask_dup( const WCHAR *s )
@@ -4759,6 +4878,7 @@ static ULONG WINAPI wv2_opts_Release( void *t )
     ULONG r = InterlockedDecrement( &o->ref );
     if (!r)
     {
+        if (o->target_version_hstr) WindowsDeleteString( o->target_version_hstr );
         HeapFree( GetProcessHeap(), 0, (void *)o->vtbl );
         HeapFree( GetProcessHeap(), 0, o );
     }
@@ -4795,13 +4915,26 @@ static HRESULT WINAPI wv2_opts_put_Language( void *t, LPCWSTR val )
 
 static HRESULT WINAPI wv2_opts_get_TargetCompatibleBrowserVersion( void *t, LPWSTR *val )
 {
+    struct wv2_env_options *o = t;
+    const WCHAR *ver = o->target_version_hstr
+        ? WindowsGetStringRawBuffer( o->target_version_hstr, NULL )
+        : (o->target_version[0] ? o->target_version : L"156.0.4314.42");
     if (!val) return E_POINTER;
-    *val = wv2_cotask_dup( L"156.0.4314.42" );
+    *val = wv2_cotask_dup( ver );
     return *val ? S_OK : E_OUTOFMEMORY;
 }
 
 static HRESULT WINAPI wv2_opts_put_TargetCompatibleBrowserVersion( void *t, LPCWSTR val )
 {
+    struct wv2_env_options *o = t;
+    const WCHAR *ver = (val && *val) ? val : L"156.0.4314.42";
+    if (o->target_version_hstr)
+    {
+        WindowsDeleteString( o->target_version_hstr );
+        o->target_version_hstr = NULL;
+    }
+    WindowsCreateString( ver, lstrlenW( ver ), &o->target_version_hstr );
+    lstrcpynW( o->target_version, ver, ARRAY_SIZE(o->target_version) );
     return S_OK;
 }
 
@@ -4816,7 +4949,7 @@ static HRESULT WINAPI wv2_opts_put_AllowSSO( void *t, BOOL val )
     return S_OK;
 }
 
-static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl )
+static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl, const WCHAR *discovered_ver )
 {
     struct wv2_env_options *o;
     const void **vt;
@@ -4845,6 +4978,7 @@ static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl
     vt[10] = wv2_opts_put_AllowSSO;
     o->vtbl = vt;
     o->ref = 1;
+    wv2_opts_put_TargetCompatibleBrowserVersion( o, discovered_ver );
 
     GetEnvironmentVariableW( L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", env_args, ARRAY_SIZE(env_args) );
     xaml_get_layout_metrics( hw, &sz, NULL );
@@ -4862,7 +4996,7 @@ static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl
     {
         lstrcpynW( o->args, env_args, ARRAY_SIZE(o->args) );
     }
-    ERR( "wv2_create_env_options: args=%s\n", debugstr_w( o->args ) );
+    ERR( "wv2_create_env_options: ver=%s args=%s\n", debugstr_w( o->target_version ), debugstr_w( o->args ) );
     return o;
 }
 
@@ -4888,19 +5022,59 @@ static void wv2_start_browser( struct xaml_element *impl )
         lstrcatW( orig_loader, L"\\WebView2Loader.dll.orig5" );
     }
 
-    if (orig_loader[0] && GetFileAttributesW( orig_loader ) != INVALID_FILE_ATTRIBUTES)
+    /* 3-level WebView2 loader ladder:
+     * 1. Registry HKLM\Software\Microsoft\EdgeUpdate\WebView2\LoaderName (REG_SZ),
+     *    defaulting to "webview2loader.dll" (must be a native loader, not the builtin stub).
+     * 2. Shadowed native loader "<exe_dir>\WebView2Loader.dll.orig5" when the app
+     *    directory's WebView2Loader.dll is shadowed by the builtin stub.
+     * 3. Builtin "webview2loader.dll" stub fallback (real_loader = FALSE).
+     */
+    {
+        WCHAR loader_name[256] = L"webview2loader.dll";
+        WCHAR cand_loader[1024] = {0};
+        HKEY hkey = NULL;
+        DWORD type = 0, cb = sizeof(loader_name);
+
+        if (RegOpenKeyExW( HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\EdgeUpdate\\WebView2",
+                           0, KEY_READ, &hkey ) == ERROR_SUCCESS)
+        {
+            if (RegQueryValueExW( hkey, L"LoaderName", NULL, &type, (BYTE *)loader_name, &cb ) != ERROR_SUCCESS ||
+                type != REG_SZ || !loader_name[0])
+                lstrcpyW( loader_name, L"webview2loader.dll" );
+            RegCloseKey( hkey );
+        }
+
+        if (wcschr( loader_name, '\\' ) || wcschr( loader_name, '/' ))
+            lstrcpynW( cand_loader, loader_name, ARRAY_SIZE(cand_loader) );
+        else if (exe_dir[0])
+            swprintf( cand_loader, ARRAY_SIZE(cand_loader), L"%s\\%s", exe_dir, loader_name );
+
+        if (cand_loader[0] && GetFileAttributesW( cand_loader ) != INVALID_FILE_ATTRIBUTES)
+        {
+            HMODULE m = LoadLibraryW( cand_loader );
+            if (m && !GetProcAddress( m, "CreateCoreWebView2ControllerSync" ))
+            {
+                module = m;
+                ERR( "wv2_start_browser: level-1 LoadLibrary(%s) -> %p\n",
+                     debugstr_w( cand_loader ), module );
+            }
+        }
+    }
+
+    if (!module && orig_loader[0] && GetFileAttributesW( orig_loader ) != INVALID_FILE_ATTRIBUTES)
     {
         module = LoadLibraryW( orig_loader );
-        ERR( "wv2_start_browser: LoadLibrary(%s) -> %p gle=%lu\n",
+        ERR( "wv2_start_browser: level-2 LoadLibrary(%s) -> %p gle=%lu\n",
              debugstr_w( orig_loader ), module, GetLastError() );
     }
 
     if (module && (p_create = (void *)GetProcAddress( module, "CreateCoreWebView2EnvironmentWithOptions" )))
     {
         WCHAR candidates[16][1024];
+        WCHAR versions[16][64];
         int ncand = 0, ci;
 
-        wv2_discover_runtimes( candidates, &ncand, ARRAY_SIZE(candidates) - 1, exe_dir );
+        wv2_discover_runtimes( candidates, versions, &ncand, ARRAY_SIZE(candidates) - 1, exe_dir );
 
         if (GetEnvironmentVariableW( L"WEBVIEW2_USER_DATA_FOLDER", udf, ARRAY_SIZE(udf) ) && udf[0])
             user_data_folder = udf;
@@ -4925,10 +5099,13 @@ static void wv2_start_browser( struct xaml_element *impl )
             for (ci = 0; ci <= ncand; ci++)
             {
                 HRESULT hr;
-                struct wv2_env_options *opts = wv2_create_env_options( impl );
+                const WCHAR *chosen_ver = (ci < ncand && versions[ci][0])
+                    ? versions[ci]
+                    : (ncand > 0 && versions[0][0] ? versions[0] : NULL);
+                struct wv2_env_options *opts = wv2_create_env_options( impl, chosen_ver );
                 browser_folder = (ci < ncand) ? candidates[ci] : NULL;
-                ERR( "wv2_start_browser: try real loader[%d] browser=%s udf=%s\n",
-                     ci, debugstr_w( browser_folder ), debugstr_w( user_data_folder ) );
+                ERR( "wv2_start_browser: try real loader[%d] browser=%s ver=%s udf=%s\n",
+                     ci, debugstr_w( browser_folder ), debugstr_w( chosen_ver ), debugstr_w( user_data_folder ) );
                 hr = p_create( browser_folder, user_data_folder, opts, eh );
                 if (opts) wv2_opts_Release( opts );
                 ERR( "wv2_start_browser: real CreateCoreWebView2EnvironmentWithOptions[%d] -> %#lx\n", ci, hr );
@@ -4955,7 +5132,8 @@ static void wv2_start_browser( struct xaml_element *impl )
                          debugstr_w( eb_path ), eb, GetLastError() );
                     if (eb && (p_int = (void *)GetProcAddress( eb, "CreateWebViewEnvironmentWithOptionsInternal" )))
                     {
-                        struct wv2_env_options *opts = wv2_create_env_options( impl );
+                        const WCHAR *chosen_ver = versions[ci][0] ? versions[ci] : (versions[0][0] ? versions[0] : NULL);
+                        struct wv2_env_options *opts = wv2_create_env_options( impl, chosen_ver );
                         HRESULT hr = p_int( TRUE, 0, user_data_folder, opts, eh );
                         if (opts) wv2_opts_Release( opts );
                         ERR( "wv2_start_browser: CreateWebViewEnvironmentWithOptionsInternal -> %#lx\n", hr );
