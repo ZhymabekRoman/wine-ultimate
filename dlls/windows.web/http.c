@@ -822,8 +822,9 @@ static HRESULT WINAPI resp_get_Content( void *iface, void **content )
     if (!impl->content)
     {
         /* Documented fallback when no response body was stored by the caller/transport. */
+        static const WCHAR fallback_html[] = L"<html><head><title>Response</title></head><body></body></html>";
         HSTRING dummy_html;
-        WindowsCreateString( L"<html><head><title>WhatsApp</title></head><body></body></html>", 60, &dummy_html );
+        WindowsCreateString( fallback_html, ARRAY_SIZE(fallback_html) - 1, &dummy_html );
         create_http_string_content( dummy_html, &impl->content );
         WindowsDeleteString( dummy_html );
     }

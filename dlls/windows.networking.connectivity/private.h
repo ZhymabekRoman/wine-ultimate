@@ -81,8 +81,69 @@ extern void network_status_shutdown( BOOL process_termination );
 #define DEFINE_IINSPECTABLE( pfx, iface_type, impl_type, base_iface )                              \
     DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from_##iface_type, iface_type##_iface, &impl->base_iface )
 
+extern const GUID IID_IConnectionCost2;
 extern const GUID IID_IConnectionProfile3;
 extern const GUID IID_IConnectionProfile4;
+
+#ifndef ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionCost2_INTERFACE_DEFINED__
+#define ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionCost2_INTERFACE_DEFINED__
+
+typedef interface IConnectionCost2 IConnectionCost2;
+
+typedef struct IConnectionCost2Vtbl
+{
+    BEGIN_INTERFACE
+
+    /*** IUnknown methods ***/
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(
+        IConnectionCost2 *This,
+        REFIID riid,
+        void **ppvObject);
+
+    ULONG (STDMETHODCALLTYPE *AddRef)(
+        IConnectionCost2 *This);
+
+    ULONG (STDMETHODCALLTYPE *Release)(
+        IConnectionCost2 *This);
+
+    /*** IInspectable methods ***/
+    HRESULT (STDMETHODCALLTYPE *GetIids)(
+        IConnectionCost2 *This,
+        ULONG *iidCount,
+        IID **iids);
+
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(
+        IConnectionCost2 *This,
+        HSTRING *className);
+
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(
+        IConnectionCost2 *This,
+        TrustLevel *trustLevel);
+
+    /*** IConnectionCost2 methods ***/
+    HRESULT (STDMETHODCALLTYPE *get_BackgroundDataUsageRestricted)(
+        IConnectionCost2 *This,
+        boolean *value);
+
+    END_INTERFACE
+} IConnectionCost2Vtbl;
+
+interface IConnectionCost2
+{
+    CONST_VTBL struct IConnectionCost2Vtbl *lpVtbl;
+};
+
+#ifdef COBJMACROS
+#define IConnectionCost2_QueryInterface(This,riid,ppvObject) (This)->lpVtbl->QueryInterface(This,riid,ppvObject)
+#define IConnectionCost2_AddRef(This) (This)->lpVtbl->AddRef(This)
+#define IConnectionCost2_Release(This) (This)->lpVtbl->Release(This)
+#define IConnectionCost2_GetIids(This,iidCount,iids) (This)->lpVtbl->GetIids(This,iidCount,iids)
+#define IConnectionCost2_GetRuntimeClassName(This,className) (This)->lpVtbl->GetRuntimeClassName(This,className)
+#define IConnectionCost2_GetTrustLevel(This,trustLevel) (This)->lpVtbl->GetTrustLevel(This,trustLevel)
+#define IConnectionCost2_get_BackgroundDataUsageRestricted(This,value) (This)->lpVtbl->get_BackgroundDataUsageRestricted(This,value)
+#endif
+
+#endif /* ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionCost2_INTERFACE_DEFINED__ */
 
 #ifndef ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionProfile3_INTERFACE_DEFINED__
 #define ____x_ABI_CWindows_CNetworking_CConnectivity_CIConnectionProfile3_INTERFACE_DEFINED__

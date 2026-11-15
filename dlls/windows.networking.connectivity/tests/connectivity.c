@@ -378,6 +378,106 @@ static void test_NetworkInformationStatics(void)
         IConnectionCost_Release( connection_cost );
     }
 
+    {
+        HSTRING profile_name = NULL, net_name = NULL;
+        IVectorView_HSTRING *names = NULL;
+        IDataPlanStatus *plan_status = NULL;
+        INetworkAdapter *adapter = NULL;
+        INetworkSecuritySettings *sec_settings = NULL;
+        IDataUsage *local_usage = NULL;
+        DateTime dt_start = { 0 }, dt_end = { 0 };
+        unsigned int count = 0;
+
+        hr = IConnectionProfile_get_ProfileName( connection_profile, &profile_name );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( profile_name != NULL, "expected non-NULL profile_name.\n" );
+
+        hr = IConnectionProfile_GetNetworkNames( connection_profile, &names );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( names != NULL, "expected non-NULL names.\n" );
+        if (names)
+        {
+            hr = IVectorView_HSTRING_get_Size( names, &count );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( count >= 1, "got count %u.\n", count );
+            if (count >= 1)
+            {
+                hr = IVectorView_HSTRING_GetAt( names, 0, &net_name );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                ok( net_name != NULL, "expected non-NULL net_name.\n" );
+                WindowsDeleteString( net_name );
+            }
+            IVectorView_HSTRING_Release( names );
+        }
+        WindowsDeleteString( profile_name );
+
+        hr = IConnectionProfile_GetDataPlanStatus( connection_profile, &plan_status );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( plan_status != NULL, "expected non-NULL plan_status.\n" );
+        if (plan_status)
+        {
+            IDataPlanUsage *plan_usage = NULL;
+            IReference_UINT64 *bps = NULL;
+            UINT64 speed = 0;
+
+            hr = IDataPlanStatus_get_DataPlanUsage( plan_status, &plan_usage );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( plan_usage != NULL, "expected non-NULL plan_usage.\n" );
+            if (plan_usage) IDataPlanUsage_Release( plan_usage );
+
+            hr = IDataPlanStatus_get_InboundBitsPerSecond( plan_status, &bps );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( bps != NULL, "expected non-NULL bps.\n" );
+            if (bps)
+            {
+                hr = IReference_UINT64_get_Value( bps, &speed );
+                ok( hr == S_OK, "got hr %#lx.\n", hr );
+                ok( speed > 0, "got speed %I64u.\n", speed );
+                IReference_UINT64_Release( bps );
+            }
+            IDataPlanStatus_Release( plan_status );
+        }
+
+        hr = IConnectionProfile_get_NetworkAdapter( connection_profile, &adapter );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( adapter != NULL, "expected non-NULL adapter.\n" );
+        if (adapter)
+        {
+            UINT32 iana_type = 0;
+            UINT64 in_bps = 0, out_bps = 0;
+            INetworkItem *net_item = NULL;
+
+            hr = INetworkAdapter_get_IanaInterfaceType( adapter, &iana_type );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( iana_type != 0, "got iana_type %u.\n", iana_type );
+
+            hr = INetworkAdapter_get_InboundMaxBitsPerSecond( adapter, &in_bps );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( in_bps > 0, "got in_bps %I64u.\n", in_bps );
+
+            hr = INetworkAdapter_get_OutboundMaxBitsPerSecond( adapter, &out_bps );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( out_bps > 0, "got out_bps %I64u.\n", out_bps );
+
+            hr = INetworkAdapter_get_NetworkItem( adapter, &net_item );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            ok( net_item != NULL, "expected non-NULL net_item.\n" );
+            if (net_item) INetworkItem_Release( net_item );
+
+            INetworkAdapter_Release( adapter );
+        }
+
+        hr = IConnectionProfile_get_NetworkSecuritySettings( connection_profile, &sec_settings );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( sec_settings != NULL, "expected non-NULL sec_settings.\n" );
+        if (sec_settings) INetworkSecuritySettings_Release( sec_settings );
+
+        hr = IConnectionProfile_GetLocalUsage( connection_profile, dt_start, dt_end, &local_usage );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( local_usage != NULL, "expected non-NULL local_usage.\n" );
+        if (local_usage) IDataUsage_Release( local_usage );
+    }
+
     hr = INetworkInformationStatics_GetConnectionProfiles( network_information_statics, &profiles );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     if (profiles)

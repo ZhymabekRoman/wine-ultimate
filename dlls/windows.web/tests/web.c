@@ -1745,6 +1745,19 @@ static void test_HttpResponseMessage(void)
     ok( hr == S_OK, "got hr %#lx.\n", hr );
     ok( content != NULL, "got content %p.\n", content );
     check_interface( content, &IID_IHttpContent );
+    {
+        IWebStringable *content_str = NULL;
+        hr = IHttpContent_QueryInterface( content, &IID_web_IStringable, (void **)&content_str );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        if (content_str)
+        {
+            hr = IWebStringable_ToString( content_str, &str );
+            ok( hr == S_OK, "got hr %#lx.\n", hr );
+            check_string( str, L"<html><head><title>Response</title></head><body></body></html>" );
+            WindowsDeleteString( str );
+            IWebStringable_Release( content_str );
+        }
+    }
     IHttpContent_Release( content );
 
     hr = IHttpResponseMessage_get_Headers( resp, &headers );
@@ -1946,7 +1959,26 @@ static void test_HttpClient(void)
     resp = NULL;
     hr = IAsyncOpHttp_GetResults( op, &resp );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
-    if (resp) IHttpResponseMessage_Release( resp );
+    ok( resp != NULL, "got response %p.\n", resp );
+    if (resp)
+    {
+        IHttpContent *resp_content = NULL;
+
+        code = 0;
+        hr = IHttpResponseMessage_get_StatusCode( resp, &code );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( code == 200, "got status code %d.\n", code );
+
+        hr = IHttpResponseMessage_get_Content( resp, &resp_content );
+        ok( hr == S_OK, "got hr %#lx.\n", hr );
+        ok( resp_content != NULL, "got content %p.\n", resp_content );
+        if (resp_content)
+        {
+            check_interface( resp_content, &IID_IHttpContent );
+            IHttpContent_Release( resp_content );
+        }
+        IHttpResponseMessage_Release( resp );
+    }
     IAsyncOpHttp_Release( op );
     IHttpRequestMessage_Release( request );
 

@@ -28,6 +28,7 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(connectivity);
 
+DEFINE_GUID( IID_IConnectionCost2, 0x8e113a05, 0xe109, 0x4549, 0xbb, 0x25, 0x5e, 0x0d, 0xb6, 0x91, 0xcb, 0x05 );
 DEFINE_GUID( IID_IConnectionProfile3, 0x57da83ad, 0xb584, 0x4252, 0x82, 0xab, 0x26, 0xe7, 0x65, 0x80, 0x75, 0xd6 );
 DEFINE_GUID( IID_IConnectionProfile4, 0x7a2d42cd, 0x81e0, 0x4ae3, 0xab, 0x32, 0xef, 0xf4, 0xb3, 0x9e, 0x32, 0x24 );
 
@@ -420,6 +421,527 @@ static HRESULT network_status_remove_event( EventRegistrationToken token )
     return hr;
 }
 
+struct reference_byte
+{
+    IReference_BYTE IReference_BYTE_iface;
+    LONG ref;
+    BYTE value;
+};
+
+static inline struct reference_byte *impl_from_IReference_BYTE( IReference_BYTE *iface )
+{
+    return CONTAINING_RECORD( iface, struct reference_byte, IReference_BYTE_iface );
+}
+
+static HRESULT WINAPI reference_byte_QueryInterface( IReference_BYTE *iface, REFIID iid, void **out )
+{
+    struct reference_byte *impl = impl_from_IReference_BYTE( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IReference_BYTE ))
+    {
+        *out = &impl->IReference_BYTE_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI reference_byte_AddRef( IReference_BYTE *iface )
+{
+    struct reference_byte *impl = impl_from_IReference_BYTE( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI reference_byte_Release( IReference_BYTE *iface )
+{
+    struct reference_byte *impl = impl_from_IReference_BYTE( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI reference_byte_GetIids( IReference_BYTE *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_IReference_BYTE };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI reference_byte_GetRuntimeClassName( IReference_BYTE *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.IReference`1<UInt8>";
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
+}
+
+static HRESULT WINAPI reference_byte_GetTrustLevel( IReference_BYTE *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI reference_byte_get_Value( IReference_BYTE *iface, BYTE *value )
+{
+    struct reference_byte *impl = impl_from_IReference_BYTE( iface );
+    if (!value) return E_POINTER;
+    *value = impl->value;
+    return S_OK;
+}
+
+static const struct IReference_BYTEVtbl reference_byte_vtbl =
+{
+    reference_byte_QueryInterface,
+    reference_byte_AddRef,
+    reference_byte_Release,
+    reference_byte_GetIids,
+    reference_byte_GetRuntimeClassName,
+    reference_byte_GetTrustLevel,
+    reference_byte_get_Value,
+};
+
+static HRESULT reference_byte_create( BYTE value, IReference_BYTE **out )
+{
+    struct reference_byte *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IReference_BYTE_iface.lpVtbl = &reference_byte_vtbl;
+    impl->ref = 1;
+    impl->value = value;
+    *out = &impl->IReference_BYTE_iface;
+    return S_OK;
+}
+
+struct reference_uint32
+{
+    IReference_UINT32 IReference_UINT32_iface;
+    LONG ref;
+    UINT32 value;
+};
+
+static inline struct reference_uint32 *impl_from_IReference_UINT32( IReference_UINT32 *iface )
+{
+    return CONTAINING_RECORD( iface, struct reference_uint32, IReference_UINT32_iface );
+}
+
+static HRESULT WINAPI reference_uint32_QueryInterface( IReference_UINT32 *iface, REFIID iid, void **out )
+{
+    struct reference_uint32 *impl = impl_from_IReference_UINT32( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IReference_UINT32 ))
+    {
+        *out = &impl->IReference_UINT32_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI reference_uint32_AddRef( IReference_UINT32 *iface )
+{
+    struct reference_uint32 *impl = impl_from_IReference_UINT32( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI reference_uint32_Release( IReference_UINT32 *iface )
+{
+    struct reference_uint32 *impl = impl_from_IReference_UINT32( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI reference_uint32_GetIids( IReference_UINT32 *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_IReference_UINT32 };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI reference_uint32_GetRuntimeClassName( IReference_UINT32 *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.IReference`1<UInt32>";
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
+}
+
+static HRESULT WINAPI reference_uint32_GetTrustLevel( IReference_UINT32 *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI reference_uint32_get_Value( IReference_UINT32 *iface, UINT32 *value )
+{
+    struct reference_uint32 *impl = impl_from_IReference_UINT32( iface );
+    if (!value) return E_POINTER;
+    *value = impl->value;
+    return S_OK;
+}
+
+static const struct IReference_UINT32Vtbl reference_uint32_vtbl =
+{
+    reference_uint32_QueryInterface,
+    reference_uint32_AddRef,
+    reference_uint32_Release,
+    reference_uint32_GetIids,
+    reference_uint32_GetRuntimeClassName,
+    reference_uint32_GetTrustLevel,
+    reference_uint32_get_Value,
+};
+
+static HRESULT reference_uint32_create( UINT32 value, IReference_UINT32 **out )
+{
+    struct reference_uint32 *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IReference_UINT32_iface.lpVtbl = &reference_uint32_vtbl;
+    impl->ref = 1;
+    impl->value = value;
+    *out = &impl->IReference_UINT32_iface;
+    return S_OK;
+}
+
+struct reference_uint64
+{
+    IReference_UINT64 IReference_UINT64_iface;
+    LONG ref;
+    UINT64 value;
+};
+
+static inline struct reference_uint64 *impl_from_IReference_UINT64( IReference_UINT64 *iface )
+{
+    return CONTAINING_RECORD( iface, struct reference_uint64, IReference_UINT64_iface );
+}
+
+static HRESULT WINAPI reference_uint64_QueryInterface( IReference_UINT64 *iface, REFIID iid, void **out )
+{
+    struct reference_uint64 *impl = impl_from_IReference_UINT64( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IReference_UINT64 ))
+    {
+        *out = &impl->IReference_UINT64_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI reference_uint64_AddRef( IReference_UINT64 *iface )
+{
+    struct reference_uint64 *impl = impl_from_IReference_UINT64( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI reference_uint64_Release( IReference_UINT64 *iface )
+{
+    struct reference_uint64 *impl = impl_from_IReference_UINT64( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI reference_uint64_GetIids( IReference_UINT64 *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_IReference_UINT64 };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI reference_uint64_GetRuntimeClassName( IReference_UINT64 *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.IReference`1<UInt64>";
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
+}
+
+static HRESULT WINAPI reference_uint64_GetTrustLevel( IReference_UINT64 *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI reference_uint64_get_Value( IReference_UINT64 *iface, UINT64 *value )
+{
+    struct reference_uint64 *impl = impl_from_IReference_UINT64( iface );
+    if (!value) return E_POINTER;
+    *value = impl->value;
+    return S_OK;
+}
+
+static const struct IReference_UINT64Vtbl reference_uint64_vtbl =
+{
+    reference_uint64_QueryInterface,
+    reference_uint64_AddRef,
+    reference_uint64_Release,
+    reference_uint64_GetIids,
+    reference_uint64_GetRuntimeClassName,
+    reference_uint64_GetTrustLevel,
+    reference_uint64_get_Value,
+};
+
+static HRESULT reference_uint64_create( UINT64 value, IReference_UINT64 **out )
+{
+    struct reference_uint64 *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IReference_UINT64_iface.lpVtbl = &reference_uint64_vtbl;
+    impl->ref = 1;
+    impl->value = value;
+    *out = &impl->IReference_UINT64_iface;
+    return S_OK;
+}
+
+struct reference_datetime
+{
+    IReference_DateTime IReference_DateTime_iface;
+    LONG ref;
+    DateTime value;
+};
+
+static inline struct reference_datetime *impl_from_IReference_DateTime( IReference_DateTime *iface )
+{
+    return CONTAINING_RECORD( iface, struct reference_datetime, IReference_DateTime_iface );
+}
+
+static HRESULT WINAPI reference_datetime_QueryInterface( IReference_DateTime *iface, REFIID iid, void **out )
+{
+    struct reference_datetime *impl = impl_from_IReference_DateTime( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IReference_DateTime ))
+    {
+        *out = &impl->IReference_DateTime_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI reference_datetime_AddRef( IReference_DateTime *iface )
+{
+    struct reference_datetime *impl = impl_from_IReference_DateTime( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI reference_datetime_Release( IReference_DateTime *iface )
+{
+    struct reference_datetime *impl = impl_from_IReference_DateTime( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI reference_datetime_GetIids( IReference_DateTime *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_IReference_DateTime };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI reference_datetime_GetRuntimeClassName( IReference_DateTime *iface, HSTRING *class_name )
+{
+    static const WCHAR name[] = L"Windows.Foundation.IReference`1<Windows.Foundation.DateTime>";
+    return WindowsCreateString( name, ARRAY_SIZE(name) - 1, class_name );
+}
+
+static HRESULT WINAPI reference_datetime_GetTrustLevel( IReference_DateTime *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI reference_datetime_get_Value( IReference_DateTime *iface, DateTime *value )
+{
+    struct reference_datetime *impl = impl_from_IReference_DateTime( iface );
+    if (!value) return E_POINTER;
+    *value = impl->value;
+    return S_OK;
+}
+
+static const struct IReference_DateTimeVtbl reference_datetime_vtbl =
+{
+    reference_datetime_QueryInterface,
+    reference_datetime_AddRef,
+    reference_datetime_Release,
+    reference_datetime_GetIids,
+    reference_datetime_GetRuntimeClassName,
+    reference_datetime_GetTrustLevel,
+    reference_datetime_get_Value,
+};
+
+static HRESULT reference_datetime_create( DateTime value, IReference_DateTime **out )
+{
+    struct reference_datetime *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IReference_DateTime_iface.lpVtbl = &reference_datetime_vtbl;
+    impl->ref = 1;
+    impl->value = value;
+    *out = &impl->IReference_DateTime_iface;
+    return S_OK;
+}
+
+struct network_item
+{
+    INetworkItem INetworkItem_iface;
+    LONG ref;
+    GUID guid;
+};
+
+static inline struct network_item *impl_from_INetworkItem( INetworkItem *iface )
+{
+    return CONTAINING_RECORD( iface, struct network_item, INetworkItem_iface );
+}
+
+static HRESULT WINAPI network_item_QueryInterface( INetworkItem *iface, REFIID iid, void **out )
+{
+    struct network_item *impl = impl_from_INetworkItem( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_INetworkItem ))
+    {
+        *out = &impl->INetworkItem_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI network_item_AddRef( INetworkItem *iface )
+{
+    struct network_item *impl = impl_from_INetworkItem( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI network_item_Release( INetworkItem *iface )
+{
+    struct network_item *impl = impl_from_INetworkItem( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI network_item_GetIids( INetworkItem *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_INetworkItem };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_item_GetRuntimeClassName( INetworkItem *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Networking_Connectivity_NetworkItem,
+                                wcslen( RuntimeClass_Windows_Networking_Connectivity_NetworkItem ),
+                                class_name );
+}
+
+static HRESULT WINAPI network_item_GetTrustLevel( INetworkItem *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_item_get_NetworkId( INetworkItem *iface, GUID *value )
+{
+    struct network_item *impl = impl_from_INetworkItem( iface );
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = impl->guid;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_item_GetNetworkTypes( INetworkItem *iface, NetworkTypes *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = NetworkTypes_Internet | NetworkTypes_PrivateNetwork;
+    return S_OK;
+}
+
+static const struct INetworkItemVtbl network_item_vtbl =
+{
+    network_item_QueryInterface,
+    network_item_AddRef,
+    network_item_Release,
+    network_item_GetIids,
+    network_item_GetRuntimeClassName,
+    network_item_GetTrustLevel,
+    network_item_get_NetworkId,
+    network_item_GetNetworkTypes,
+};
+
+static HRESULT network_item_create( const struct adapter_snapshot *snapshot, INetworkItem **item )
+{
+    struct network_item *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->INetworkItem_iface.lpVtbl = &network_item_vtbl;
+    impl->ref = 1;
+    impl->guid = snapshot && snapshot->index ? snapshot->guid : dummy_adapter_id;
+    *item = &impl->INetworkItem_iface;
+    return S_OK;
+}
+
 struct network_adapter
 {
     INetworkAdapter INetworkAdapter_iface;
@@ -535,10 +1057,11 @@ static HRESULT WINAPI network_adapter_get_IanaInterfaceType( INetworkAdapter *if
 
 static HRESULT WINAPI network_adapter_get_NetworkItem( INetworkAdapter *iface, INetworkItem **value )
 {
+    struct network_adapter *impl = impl_from_INetworkAdapter( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = NULL;
-    return S_OK;
+    return network_item_create( &impl->snapshot, value );
 }
 
 static HRESULT WINAPI network_adapter_get_NetworkAdapterId( INetworkAdapter *iface, GUID *value )
@@ -688,8 +1211,7 @@ static HRESULT WINAPI ip_information_get_PrefixLength( IIPInformation *iface, IR
 {
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = NULL;
-    return S_OK;
+    return reference_byte_create( 24, value );
 }
 
 static const struct IIPInformationVtbl ip_information_vtbl =
@@ -1098,12 +1620,18 @@ static HRESULT hostnames_view_create( IVectorView_HostName **view )
 struct connection_cost
 {
     IConnectionCost IConnectionCost_iface;
+    IConnectionCost2 IConnectionCost2_iface;
     LONG ref;
 };
 
 static inline struct connection_cost *impl_from_IConnectionCost( IConnectionCost *iface )
 {
     return CONTAINING_RECORD( iface, struct connection_cost, IConnectionCost_iface );
+}
+
+static inline struct connection_cost *impl_from_IConnectionCost2( IConnectionCost2 *iface )
+{
+    return CONTAINING_RECORD( iface, struct connection_cost, IConnectionCost2_iface );
 }
 
 static HRESULT WINAPI connection_cost_QueryInterface( IConnectionCost *iface, REFIID iid, void **out )
@@ -1118,6 +1646,13 @@ static HRESULT WINAPI connection_cost_QueryInterface( IConnectionCost *iface, RE
         IsEqualGUID( iid, &IID_IConnectionCost ))
     {
         *out = &impl->IConnectionCost_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IConnectionCost2 ))
+    {
+        *out = &impl->IConnectionCost2_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -1149,6 +1684,7 @@ static HRESULT WINAPI connection_cost_GetIids( IConnectionCost *iface, ULONG *ii
     IID iid_array[] =
     {
         IID_IConnectionCost,
+        IID_IConnectionCost2,
     };
     IID *array = CoTaskMemAlloc( sizeof(iid_array) );
 
@@ -1218,14 +1754,435 @@ static const struct IConnectionCostVtbl connection_cost_vtbl =
     connection_cost_get_ApproachingDataLimit,
 };
 
+static HRESULT WINAPI connection_cost2_QueryInterface( IConnectionCost2 *iface, REFIID iid, void **out )
+{
+    struct connection_cost *impl = impl_from_IConnectionCost2( iface );
+    return IConnectionCost_QueryInterface( &impl->IConnectionCost_iface, iid, out );
+}
+
+static ULONG WINAPI connection_cost2_AddRef( IConnectionCost2 *iface )
+{
+    struct connection_cost *impl = impl_from_IConnectionCost2( iface );
+    return IConnectionCost_AddRef( &impl->IConnectionCost_iface );
+}
+
+static ULONG WINAPI connection_cost2_Release( IConnectionCost2 *iface )
+{
+    struct connection_cost *impl = impl_from_IConnectionCost2( iface );
+    return IConnectionCost_Release( &impl->IConnectionCost_iface );
+}
+
+static HRESULT WINAPI connection_cost2_GetIids( IConnectionCost2 *iface, ULONG *iid_count, IID **iids )
+{
+    struct connection_cost *impl = impl_from_IConnectionCost2( iface );
+    return IConnectionCost_GetIids( &impl->IConnectionCost_iface, iid_count, iids );
+}
+
+static HRESULT WINAPI connection_cost2_GetRuntimeClassName( IConnectionCost2 *iface, HSTRING *class_name )
+{
+    struct connection_cost *impl = impl_from_IConnectionCost2( iface );
+    return IConnectionCost_GetRuntimeClassName( &impl->IConnectionCost_iface, class_name );
+}
+
+static HRESULT WINAPI connection_cost2_GetTrustLevel( IConnectionCost2 *iface, TrustLevel *trust_level )
+{
+    struct connection_cost *impl = impl_from_IConnectionCost2( iface );
+    return IConnectionCost_GetTrustLevel( &impl->IConnectionCost_iface, trust_level );
+}
+
+static HRESULT WINAPI connection_cost2_get_BackgroundDataUsageRestricted( IConnectionCost2 *iface, boolean *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+
+static const struct IConnectionCost2Vtbl connection_cost2_vtbl =
+{
+    connection_cost2_QueryInterface,
+    connection_cost2_AddRef,
+    connection_cost2_Release,
+    connection_cost2_GetIids,
+    connection_cost2_GetRuntimeClassName,
+    connection_cost2_GetTrustLevel,
+    connection_cost2_get_BackgroundDataUsageRestricted,
+};
+
 static HRESULT connection_cost_create( IConnectionCost **cost )
 {
     struct connection_cost *impl;
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IConnectionCost_iface.lpVtbl = &connection_cost_vtbl;
+    impl->IConnectionCost2_iface.lpVtbl = &connection_cost2_vtbl;
     impl->ref = 1;
     *cost = &impl->IConnectionCost_iface;
+    return S_OK;
+}
+
+struct data_plan_usage
+{
+    IDataPlanUsage IDataPlanUsage_iface;
+    LONG ref;
+};
+
+static inline struct data_plan_usage *impl_from_IDataPlanUsage( IDataPlanUsage *iface )
+{
+    return CONTAINING_RECORD( iface, struct data_plan_usage, IDataPlanUsage_iface );
+}
+
+static HRESULT WINAPI data_plan_usage_QueryInterface( IDataPlanUsage *iface, REFIID iid, void **out )
+{
+    struct data_plan_usage *impl = impl_from_IDataPlanUsage( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IDataPlanUsage ))
+    {
+        *out = &impl->IDataPlanUsage_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI data_plan_usage_AddRef( IDataPlanUsage *iface )
+{
+    struct data_plan_usage *impl = impl_from_IDataPlanUsage( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI data_plan_usage_Release( IDataPlanUsage *iface )
+{
+    struct data_plan_usage *impl = impl_from_IDataPlanUsage( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI data_plan_usage_GetIids( IDataPlanUsage *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_IDataPlanUsage };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI data_plan_usage_GetRuntimeClassName( IDataPlanUsage *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Networking_Connectivity_DataPlanUsage,
+                                wcslen( RuntimeClass_Windows_Networking_Connectivity_DataPlanUsage ),
+                                class_name );
+}
+
+static HRESULT WINAPI data_plan_usage_GetTrustLevel( IDataPlanUsage *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI data_plan_usage_get_MegabytesUsed( IDataPlanUsage *iface, UINT32 *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI data_plan_usage_get_LastSyncTime( IDataPlanUsage *iface, DateTime *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    value->UniversalTime = 0;
+    return S_OK;
+}
+
+static const struct IDataPlanUsageVtbl data_plan_usage_vtbl =
+{
+    data_plan_usage_QueryInterface,
+    data_plan_usage_AddRef,
+    data_plan_usage_Release,
+    data_plan_usage_GetIids,
+    data_plan_usage_GetRuntimeClassName,
+    data_plan_usage_GetTrustLevel,
+    data_plan_usage_get_MegabytesUsed,
+    data_plan_usage_get_LastSyncTime,
+};
+
+static HRESULT data_plan_usage_create( IDataPlanUsage **usage )
+{
+    struct data_plan_usage *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IDataPlanUsage_iface.lpVtbl = &data_plan_usage_vtbl;
+    impl->ref = 1;
+    *usage = &impl->IDataPlanUsage_iface;
+    return S_OK;
+}
+
+struct data_plan_status
+{
+    IDataPlanStatus IDataPlanStatus_iface;
+    LONG ref;
+    UINT64 speed;
+};
+
+static inline struct data_plan_status *impl_from_IDataPlanStatus( IDataPlanStatus *iface )
+{
+    return CONTAINING_RECORD( iface, struct data_plan_status, IDataPlanStatus_iface );
+}
+
+static HRESULT WINAPI data_plan_status_QueryInterface( IDataPlanStatus *iface, REFIID iid, void **out )
+{
+    struct data_plan_status *impl = impl_from_IDataPlanStatus( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IDataPlanStatus ))
+    {
+        *out = &impl->IDataPlanStatus_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI data_plan_status_AddRef( IDataPlanStatus *iface )
+{
+    struct data_plan_status *impl = impl_from_IDataPlanStatus( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI data_plan_status_Release( IDataPlanStatus *iface )
+{
+    struct data_plan_status *impl = impl_from_IDataPlanStatus( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI data_plan_status_GetIids( IDataPlanStatus *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_IDataPlanStatus };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI data_plan_status_GetRuntimeClassName( IDataPlanStatus *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Networking_Connectivity_DataPlanStatus,
+                                wcslen( RuntimeClass_Windows_Networking_Connectivity_DataPlanStatus ),
+                                class_name );
+}
+
+static HRESULT WINAPI data_plan_status_GetTrustLevel( IDataPlanStatus *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI data_plan_status_get_DataPlanUsage( IDataPlanStatus *iface, IDataPlanUsage **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return data_plan_usage_create( value );
+}
+
+static HRESULT WINAPI data_plan_status_get_DataLimitInMegabytes( IDataPlanStatus *iface, IReference_UINT32 **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return reference_uint32_create( 0, value );
+}
+
+static HRESULT WINAPI data_plan_status_get_InboundBitsPerSecond( IDataPlanStatus *iface, IReference_UINT64 **value )
+{
+    struct data_plan_status *impl = impl_from_IDataPlanStatus( iface );
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return reference_uint64_create( impl->speed ? impl->speed : 1000000000ULL, value );
+}
+
+static HRESULT WINAPI data_plan_status_get_OutboundBitsPerSecond( IDataPlanStatus *iface, IReference_UINT64 **value )
+{
+    struct data_plan_status *impl = impl_from_IDataPlanStatus( iface );
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return reference_uint64_create( impl->speed ? impl->speed : 1000000000ULL, value );
+}
+
+static HRESULT WINAPI data_plan_status_get_NextBillingCycle( IDataPlanStatus *iface, IReference_DateTime **value )
+{
+    DateTime dt = { 0 };
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return reference_datetime_create( dt, value );
+}
+
+static HRESULT WINAPI data_plan_status_get_MaxTransferSizeInMegabytes( IDataPlanStatus *iface, IReference_UINT32 **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return reference_uint32_create( 0, value );
+}
+
+static const struct IDataPlanStatusVtbl data_plan_status_vtbl =
+{
+    data_plan_status_QueryInterface,
+    data_plan_status_AddRef,
+    data_plan_status_Release,
+    data_plan_status_GetIids,
+    data_plan_status_GetRuntimeClassName,
+    data_plan_status_GetTrustLevel,
+    data_plan_status_get_DataPlanUsage,
+    data_plan_status_get_DataLimitInMegabytes,
+    data_plan_status_get_InboundBitsPerSecond,
+    data_plan_status_get_OutboundBitsPerSecond,
+    data_plan_status_get_NextBillingCycle,
+    data_plan_status_get_MaxTransferSizeInMegabytes,
+};
+
+static HRESULT data_plan_status_create( const struct adapter_snapshot *snapshot, IDataPlanStatus **status )
+{
+    struct data_plan_status *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IDataPlanStatus_iface.lpVtbl = &data_plan_status_vtbl;
+    impl->ref = 1;
+    impl->speed = snapshot && snapshot->speed ? snapshot->speed : 1000000000ULL;
+    *status = &impl->IDataPlanStatus_iface;
+    return S_OK;
+}
+
+struct data_usage
+{
+    IDataUsage IDataUsage_iface;
+    LONG ref;
+};
+
+static inline struct data_usage *impl_from_IDataUsage( IDataUsage *iface )
+{
+    return CONTAINING_RECORD( iface, struct data_usage, IDataUsage_iface );
+}
+
+static HRESULT WINAPI data_usage_QueryInterface( IDataUsage *iface, REFIID iid, void **out )
+{
+    struct data_usage *impl = impl_from_IDataUsage( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IDataUsage ))
+    {
+        *out = &impl->IDataUsage_iface;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI data_usage_AddRef( IDataUsage *iface )
+{
+    struct data_usage *impl = impl_from_IDataUsage( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI data_usage_Release( IDataUsage *iface )
+{
+    struct data_usage *impl = impl_from_IDataUsage( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI data_usage_GetIids( IDataUsage *iface, ULONG *iid_count, IID **iids )
+{
+    IID iid_array[] = { IID_IDataUsage };
+    IID *array = CoTaskMemAlloc( sizeof(iid_array) );
+
+    if (!array) return E_OUTOFMEMORY;
+    memcpy( array, iid_array, sizeof(iid_array) );
+    *iid_count = ARRAY_SIZE(iid_array);
+    *iids = array;
+    return S_OK;
+}
+
+static HRESULT WINAPI data_usage_GetRuntimeClassName( IDataUsage *iface, HSTRING *class_name )
+{
+    return WindowsCreateString( RuntimeClass_Windows_Networking_Connectivity_DataUsage,
+                                wcslen( RuntimeClass_Windows_Networking_Connectivity_DataUsage ),
+                                class_name );
+}
+
+static HRESULT WINAPI data_usage_GetTrustLevel( IDataUsage *iface, TrustLevel *trust_level )
+{
+    if (trust_level) *trust_level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI data_usage_get_BytesSent( IDataUsage *iface, UINT64 *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI data_usage_get_BytesReceived( IDataUsage *iface, UINT64 *value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+
+static const struct IDataUsageVtbl data_usage_vtbl =
+{
+    data_usage_QueryInterface,
+    data_usage_AddRef,
+    data_usage_Release,
+    data_usage_GetIids,
+    data_usage_GetRuntimeClassName,
+    data_usage_GetTrustLevel,
+    data_usage_get_BytesSent,
+    data_usage_get_BytesReceived,
+};
+
+static HRESULT data_usage_create( IDataUsage **usage )
+{
+    struct data_usage *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IDataUsage_iface.lpVtbl = &data_usage_vtbl;
+    impl->ref = 1;
+    *usage = &impl->IDataUsage_iface;
     return S_OK;
 }
 
@@ -1486,27 +2443,54 @@ static HRESULT gsm_details_create( IWwanConnectionProfileDetails **details )
     return S_OK;
 }
 
-struct empty_hstrings_view
+struct network_names_view
 {
     IVectorView_HSTRING IVectorView_HSTRING_iface;
+    LONG ref;
+    WCHAR *name;
 };
 
-static HRESULT WINAPI empty_hstrings_QueryInterface( IVectorView_HSTRING *iface, REFIID iid, void **out )
+static inline struct network_names_view *impl_from_IVectorView_HSTRING( IVectorView_HSTRING *iface )
 {
+    return CONTAINING_RECORD( iface, struct network_names_view, IVectorView_HSTRING_iface );
+}
+
+static HRESULT WINAPI network_names_view_QueryInterface( IVectorView_HSTRING *iface, REFIID iid, void **out )
+{
+    struct network_names_view *impl = impl_from_IVectorView_HSTRING( iface );
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IVectorView_HSTRING ))
     {
-        *out = iface;
+        *out = &impl->IVectorView_HSTRING_iface;
+        IInspectable_AddRef( *out );
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI empty_hstrings_AddRef( IVectorView_HSTRING *iface ) { return 2; }
-static ULONG WINAPI empty_hstrings_Release( IVectorView_HSTRING *iface ) { return 1; }
-static HRESULT WINAPI empty_hstrings_GetIids( IVectorView_HSTRING *iface, ULONG *c, IID **i )
+
+static ULONG WINAPI network_names_view_AddRef( IVectorView_HSTRING *iface )
+{
+    struct network_names_view *impl = impl_from_IVectorView_HSTRING( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI network_names_view_Release( IVectorView_HSTRING *iface )
+{
+    struct network_names_view *impl = impl_from_IVectorView_HSTRING( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        free( impl->name );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI network_names_view_GetIids( IVectorView_HSTRING *iface, ULONG *c, IID **i )
 {
     IID iid_array[] =
     {
@@ -1521,51 +2505,89 @@ static HRESULT WINAPI empty_hstrings_GetIids( IVectorView_HSTRING *iface, ULONG 
     return S_OK;
 }
 
-static HRESULT WINAPI empty_hstrings_GetTrustLevel( IVectorView_HSTRING *iface, TrustLevel *l )
+static HRESULT WINAPI network_names_view_GetTrustLevel( IVectorView_HSTRING *iface, TrustLevel *l )
 {
-    if (l) *l = BaseTrust; return S_OK;
-}
-static HRESULT WINAPI empty_hstrings_GetAt( IVectorView_HSTRING *iface, unsigned int index, HSTRING *item )
-{
-    if (item) *item = NULL;
-    return 0x8000000b; /* E_BOUNDS */
-}
-static HRESULT WINAPI empty_hstrings_get_Size( IVectorView_HSTRING *iface, unsigned int *size )
-{
-    if (size) *size = 0;
-    return S_OK;
-}
-static HRESULT WINAPI empty_hstrings_IndexOf( IVectorView_HSTRING *iface, HSTRING item, unsigned int *index, boolean *found )
-{
-    if (found) *found = FALSE;
-    if (index) *index = 0;
-    return S_OK;
-}
-static HRESULT WINAPI empty_hstrings_GetMany( IVectorView_HSTRING *iface, unsigned int start, unsigned int count, HSTRING *items, unsigned int *actual )
-{
-    if (actual) *actual = 0;
+    if (l) *l = BaseTrust;
     return S_OK;
 }
 
-static HRESULT WINAPI empty_hstrings_GetRuntimeClassName( IVectorView_HSTRING *iface, HSTRING *n )
+static HRESULT WINAPI network_names_view_GetAt( IVectorView_HSTRING *iface, unsigned int index, HSTRING *item )
+{
+    struct network_names_view *impl = impl_from_IVectorView_HSTRING( iface );
+    const WCHAR *name = impl->name ? impl->name : L"Wine Network";
+
+    if (!item) return E_POINTER;
+    if (index == 0)
+        return WindowsCreateString( name, wcslen( name ), item );
+    *item = NULL;
+    return 0x8000000b; /* E_BOUNDS */
+}
+
+static HRESULT WINAPI network_names_view_get_Size( IVectorView_HSTRING *iface, unsigned int *size )
+{
+    if (!size) return E_POINTER;
+    *size = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_names_view_IndexOf( IVectorView_HSTRING *iface, HSTRING item, unsigned int *index, boolean *found )
+{
+    struct network_names_view *impl = impl_from_IVectorView_HSTRING( iface );
+    const WCHAR *name = impl->name ? impl->name : L"Wine Network";
+    const WCHAR *buf = item ? WindowsGetStringRawBuffer( item, NULL ) : L"";
+
+    if (!found) return E_POINTER;
+    *found = !wcscmp( buf, name );
+    if (index) *index = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_names_view_GetMany( IVectorView_HSTRING *iface, unsigned int start, unsigned int count, HSTRING *items, unsigned int *actual )
+{
+    if (!actual) return E_POINTER;
+    if (start == 0 && count > 0 && items && SUCCEEDED(network_names_view_GetAt( iface, 0, &items[0] )))
+    {
+        *actual = 1;
+        return S_OK;
+    }
+    *actual = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI network_names_view_GetRuntimeClassName( IVectorView_HSTRING *iface, HSTRING *n )
 {
     return WindowsCreateString( L"Windows.Foundation.Collections.IVectorView`1<String>", 49, n );
 }
 
-static const struct IVectorView_HSTRINGVtbl empty_hstrings_vtbl =
+static const struct IVectorView_HSTRINGVtbl network_names_view_vtbl =
 {
-    empty_hstrings_QueryInterface,
-    empty_hstrings_AddRef,
-    empty_hstrings_Release,
-    empty_hstrings_GetIids,
-    empty_hstrings_GetRuntimeClassName,
-    empty_hstrings_GetTrustLevel,
-    empty_hstrings_GetAt,
-    empty_hstrings_get_Size,
-    empty_hstrings_IndexOf,
-    empty_hstrings_GetMany,
+    network_names_view_QueryInterface,
+    network_names_view_AddRef,
+    network_names_view_Release,
+    network_names_view_GetIids,
+    network_names_view_GetRuntimeClassName,
+    network_names_view_GetTrustLevel,
+    network_names_view_GetAt,
+    network_names_view_get_Size,
+    network_names_view_IndexOf,
+    network_names_view_GetMany,
 };
-static struct empty_hstrings_view empty_hstrings_obj = { { &empty_hstrings_vtbl } };
+
+static HRESULT network_names_view_create( const struct adapter_snapshot *snapshot, IVectorView_HSTRING **view )
+{
+    struct network_names_view *impl;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IVectorView_HSTRING_iface.lpVtbl = &network_names_view_vtbl;
+    impl->ref = 1;
+    if (snapshot && snapshot->name && !(impl->name = wcsdup( snapshot->name )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+    *view = &impl->IVectorView_HSTRING_iface;
+    return S_OK;
+}
 
 struct empty_lan_identifiers_view
 {
@@ -1916,10 +2938,11 @@ static HRESULT WINAPI connection_profile_GetNetworkConnectivityLevel( IConnectio
 
 static HRESULT WINAPI connection_profile_GetNetworkNames( IConnectionProfile *iface, IVectorView_HSTRING **value )
 {
+    struct connection_profile *impl = impl_from_IConnectionProfile( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = &empty_hstrings_obj.IVectorView_HSTRING_iface;
-    return S_OK;
+    return network_names_view_create( &impl->snapshot, value );
 }
 
 static HRESULT WINAPI connection_profile_GetConnectionCost( IConnectionProfile *iface, IConnectionCost **value )
@@ -1931,10 +2954,11 @@ static HRESULT WINAPI connection_profile_GetConnectionCost( IConnectionProfile *
 
 static HRESULT WINAPI connection_profile_GetDataPlanStatus( IConnectionProfile *iface, IDataPlanStatus **value )
 {
+    struct connection_profile *impl = impl_from_IConnectionProfile( iface );
+
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = NULL;
-    return S_OK;
+    return data_plan_status_create( &impl->snapshot, value );
 }
 
 static HRESULT WINAPI connection_profile_get_NetworkAdapter( IConnectionProfile *iface, INetworkAdapter **value )
@@ -1950,16 +2974,14 @@ static HRESULT WINAPI connection_profile_GetLocalUsage( IConnectionProfile *ifac
 {
     TRACE( "iface %p, start %I64d, end %I64d, value %p\n", iface, start.UniversalTime, end.UniversalTime, value );
     if (!value) return E_POINTER;
-    *value = NULL;
-    return S_OK;
+    return data_usage_create( value );
 }
 
 static HRESULT WINAPI connection_profile_GetLocalUsagePerRoamingStates( IConnectionProfile *iface, DateTime start, DateTime end, RoamingStates states, IDataUsage **value )
 {
     TRACE( "iface %p, start %I64d, end %I64d, states %u, value %p\n", iface, start.UniversalTime, end.UniversalTime, states, value );
     if (!value) return E_POINTER;
-    *value = NULL;
-    return S_OK;
+    return data_usage_create( value );
 }
 
 static HRESULT WINAPI connection_profile_get_NetworkSecuritySettings( IConnectionProfile *iface, INetworkSecuritySettings **value )
@@ -2097,8 +3119,7 @@ HRESULT WINAPI connection_profile2_GetSignalBars( IConnectionProfile2 *iface, IR
 {
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    *value = NULL;
-    return S_OK;
+    return reference_byte_create( 5, value );
 }
 
 HRESULT WINAPI connection_profile2_GetDomainConnectivityLevel( IConnectionProfile2 *iface, DomainConnectivityLevel *value )
