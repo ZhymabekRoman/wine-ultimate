@@ -1594,6 +1594,110 @@ static char *build_portal_filters_from_map( struct choices_map *map )
     return buf;
 }
 
+/* --- wide (UTF-16) builder for OPENFILENAMEW.lpstrFilter --- */
+
+struct wstr
+{
+    WCHAR *s;
+    size_t cap;
+    size_t pos;   /* chars used, s[pos] always NUL */
+};
+
+static BOOL wstr_append( struct wstr *w, const WCHAR *str, size_t len )
+{
+    if (w->pos + len + 1 > w->cap)
+    {
+        size_t cap = (w->pos + len + 1) * 2;
+        WCHAR *grown = realloc( w->s, cap * sizeof(*grown) );
+        if (!grown) return FALSE;
+        w->s = grown;
+        w->cap = cap;
+    }
+    wmemcpy( w->s + w->pos, str, len );
+    w->pos += len;
+    w->s[w->pos] = 0;
+    return TRUE;
+}
+
+/* Append one glob pattern (".png" -> "*.png", "*" -> "*"), ';'-separated. */
+static BOOL wstr_append_ext( struct wstr *w, const WCHAR *ext, BOOL *first )
+{
+    if (!ext || !*ext) return TRUE;
+    if (!*first && !wstr_append( w, L";", 1 )) return FALSE;
+    *first = FALSE;
+    if (ext[0] == '*' && !ext[1]) return wstr_append( w, L"*", 1 );
+    if (!wstr_append( w, L"*", 1 )) return FALSE;
+    if (ext[0] != '.' && !wstr_append( w, L".", 1 )) return FALSE;
+    return wstr_append( w, ext, wcslen( ext ) );
+}
+
+static const WCHAR win32_all_files_filter[] = L"All Files (*.*)\0*.*\0";
+
+static WCHAR *build_win32_filter_from_vector( struct hstring_vector *vec )
+{
+    struct wstr w = { 0 }, pat = { 0 };
+    BOOL first = TRUE;
+    UINT32 i;
+
+    if (!vec) return NULL;
+    EnterCriticalSection( &vec->cs );
+    for (i = 0; i < vec->count; ++i)
+    {
+        const WCHAR *ext = WindowsGetStringRawBuffer( vec->items[i], NULL );
+        wstr_append_ext( &pat, ext, &first );
+    }
+    LeaveCriticalSection( &vec->cs );
+
+    if (first) { free( pat.s ); return NULL; }  /* empty filter -> default */
+    wstr_append( &w, L"Files", 5 );
+    wstr_append( &w, pat.s ? pat.s : L"", pat.pos );
+    free( pat.s );
+    wstr_append( &w, L"All Files (*.*)", 14 );
+    wstr_append( &w, L"*.*", 3 );
+    return w.s;
+}
+
+static WCHAR *build_win32_filter_from_map_wide( struct choices_map *map )
+{
+    struct wstr w = { 0 };
+    UINT32 i;
+
+    if (!map) return NULL;
+    EnterCriticalSection( &map->cs );
+    for (i = 0; i < map->count; ++i)
+    {
+        const WCHAR *label = WindowsGetStringRawBuffer( map->entries[i].key, NULL );
+        __FIVector_1_HSTRING *exts = map->entries[i].value;
+        struct wstr pat = { 0 };
+        BOOL first = TRUE;
+        UINT32 j, count = 0;
+
+        if (!label || !*label || !exts) continue;
+        __FIVector_1_HSTRING_get_Size( exts, &count );
+        for (j = 0; j < count; ++j)
+        {
+            HSTRING h = NULL;
+            const WCHAR *ext;
+            if (FAILED(__FIVector_1_HSTRING_GetAt( exts, j, &h ))) continue;
+            ext = WindowsGetStringRawBuffer( h, NULL );
+            wstr_append_ext( &pat, ext, &first );
+            WindowsDeleteString( h );
+        }
+        if (!first)
+        {
+            wstr_append( &w, label, wcslen( label ) );
+            wstr_append( &w, pat.s ? pat.s : L"", pat.pos );
+        }
+        free( pat.s );
+    }
+    LeaveCriticalSection( &map->cs );
+
+    if (!w.pos) { free( w.s ); return NULL; }
+    wstr_append( &w, L"All Files (*.*)", 14 );
+    wstr_append( &w, L"*.*", 3 );
+    return w.s;
+}
+
 static BOOL try_portal_pick( int mode, const WCHAR *title_w, HSTRING accept_label_h,
                              HSTRING current_name_h, PickerLocationId start_loc,
                              const char *filters, WCHAR ***out_paths, UINT32 *out_count )
@@ -1673,7 +1777,8 @@ static void free_dos_paths( WCHAR **paths, UINT32 count )
 }
 
 static void win32_pick_files( HWND owner, BOOL multi, BOOL save, PickerLocationId start_loc,
-                              HSTRING suggested_name, WCHAR ***out_paths, UINT32 *out_count )
+                              HSTRING suggested_name, HSTRING def_ext, HSTRING title,
+                              const WCHAR *filter, WCHAR ***out_paths, UINT32 *out_count )
 {
     WCHAR buf[4096];
     OPENFILENAMEW ofn;
@@ -1693,7 +1798,17 @@ static void win32_pick_files( HWND owner, BOOL multi, BOOL save, PickerLocationI
     memset( &ofn, 0, sizeof(ofn) );
     ofn.lStructSize = sizeof(ofn);
     ofn.hwndOwner = owner;
-    ofn.lpstrFilter = L"All Files (*.*)\0*.*\0";
+    ofn.lpstrFilter = filter ? filter : win32_all_files_filter;
+    if (title)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( title, NULL );
+        if (raw && *raw) ofn.lpstrTitle = (WCHAR *)raw;
+    }
+    if (save && def_ext)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( def_ext, NULL );
+        if (raw && *raw) ofn.lpstrDefExt = (WCHAR *)(raw[0] == '.' ? raw + 1 : raw);
+    }
     ofn.lpstrFile = buf;
     ofn.nMaxFile = ARRAY_SIZE(buf);
     ofn.lpstrInitialDir = init_dir;
@@ -1934,7 +2049,10 @@ static HRESULT WINAPI file_open_picker_PickSingleFileAsync( IFileOpenPicker *ifa
     if (!try_portal_pick( PORTAL_PICKER_OPEN_SINGLE, L"Open File", impl->commit_button_text,
                           NULL, impl->start_location, filters, &paths, &count ))
     {
-        win32_pick_files( impl->owner, FALSE, FALSE, impl->start_location, NULL, &paths, &count );
+        WCHAR *wfilter = build_win32_filter_from_vector( impl->filters );
+        win32_pick_files( impl->owner, FALSE, FALSE, impl->start_location, NULL, NULL,
+                          impl->commit_button_text, wfilter, &paths, &count );
+        free( wfilter );
     }
     free( filters );
 
@@ -1967,7 +2085,10 @@ static HRESULT WINAPI file_open_picker_PickMultipleFilesAsync( IFileOpenPicker *
     if (!try_portal_pick( PORTAL_PICKER_OPEN_MULTIPLE, L"Open Files", impl->commit_button_text,
                           NULL, impl->start_location, filters, &paths, &count ))
     {
-        win32_pick_files( impl->owner, TRUE, FALSE, impl->start_location, NULL, &paths, &count );
+        WCHAR *wfilter = build_win32_filter_from_vector( impl->filters );
+        win32_pick_files( impl->owner, TRUE, FALSE, impl->start_location, NULL, NULL,
+                          impl->commit_button_text, wfilter, &paths, &count );
+        free( wfilter );
     }
     free( filters );
 
@@ -2242,7 +2363,10 @@ static HRESULT WINAPI file_save_picker_PickSaveFileAsync( IFileSavePicker *iface
     if (!try_portal_pick( PORTAL_PICKER_SAVE, L"Save File", impl->commit_button_text,
                           impl->suggested_name, impl->start_location, filters, &paths, &count ))
     {
-        win32_pick_files( impl->owner, FALSE, TRUE, impl->start_location, impl->suggested_name, &paths, &count );
+        WCHAR *wfilter = build_win32_filter_from_map_wide( impl->choices );
+        win32_pick_files( impl->owner, FALSE, TRUE, impl->start_location, impl->suggested_name,
+                          impl->default_ext, impl->commit_button_text, wfilter, &paths, &count );
+        free( wfilter );
     }
     free( filters );
 

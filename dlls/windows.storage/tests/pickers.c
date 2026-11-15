@@ -24,6 +24,7 @@
 
 #include "windef.h"
 #include "winbase.h"
+#include "winuser.h"
 #include "winstring.h"
 
 #include "roapi.h"
@@ -54,6 +55,51 @@ static const GUID test_IID_IFolderPicker =
 {
     0x084f7799, 0xf3fb, 0x400a, { 0x99, 0xb1, 0x7b, 0x4a, 0x77, 0x2f, 0xd6, 0x0d }
 };
+
+static IFileOpenPicker *dialog_picker;
+static IAsyncOperation_StorageFile *dialog_op;
+
+static DWORD WINAPI dialog_thread_proc( LPVOID arg )
+{
+    dialog_op = NULL;
+    return IFileOpenPicker_PickSingleFileAsync( dialog_picker, &dialog_op ) == S_OK ? 0 : 1;
+}
+
+static void test_dialog( IFileOpenPicker *open_picker )
+{
+    IStorageFile *file = NULL;
+    HANDLE thread;
+    HWND dlg = NULL;
+    int i;
+    HRESULT hr;
+
+    /* PickSingleFileAsync is modal-synchronous: run it on a worker thread,
+     * wait for the common dialog window, cancel it, expect a null StorageFile. */
+    dialog_picker = open_picker;
+    thread = CreateThread( NULL, 0, dialog_thread_proc, NULL, 0, NULL );
+    ok( thread != NULL, "CreateThread failed\n" );
+    if (!thread) return;
+
+    for (i = 0; i < 200 && !dlg; i++)
+    {
+        dlg = FindWindowW( L"#32770", NULL );
+        if (!dlg) Sleep( 50 );
+    }
+    ok( dlg != NULL, "expected common dialog window #32770\n" );
+    if (dlg) SendMessageW( dlg, WM_CLOSE, 0, 0 );
+
+    ok( WaitForSingleObject( thread, 20000 ) == WAIT_OBJECT_0, "dialog thread did not finish\n" );
+    CloseHandle( thread );
+
+    ok( dialog_op != NULL, "PickSingleFileAsync produced no operation\n" );
+    if (!dialog_op) return;
+    file = (IStorageFile *)0x1;
+    hr = IAsyncOperation_StorageFile_GetResults( dialog_op, &file );
+    ok( hr == S_OK && !file, "cancelled pick expected S_OK + null file, got hr %#lx file %p\n", hr, file );
+    if (file) IStorageFile_Release( file );
+    IAsyncOperation_StorageFile_Release( dialog_op );
+    dialog_op = NULL;
+}
 
 static void test_pickers(void)
 {
@@ -125,6 +171,8 @@ static void test_pickers(void)
     ok( hr == S_OK && !wcscmp( WindowsGetStringRawBuffer( hout, NULL ), L".jpg" ), "GetAt(1) mismatch\n" );
     WindowsDeleteString( hout );
     __FIVector_1_HSTRING_Release( filters );
+
+    test_dialog( open_picker );
 
     /* FileSavePicker */
     hr = WindowsCreateString( RuntimeClass_Windows_Storage_Pickers_FileSavePicker,
