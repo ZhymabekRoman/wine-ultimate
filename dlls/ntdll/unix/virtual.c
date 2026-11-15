@@ -7715,50 +7715,61 @@ NTSTATUS WINAPI NtWow64IsProcessorFeaturePresent( UINT feature )
 #endif  /* _WIN64 */
 
 /* fork helper (lost virtual.c restore, p207): report the mapping backing an
- * address, for the BREAKPOINT diagnostic in signal_x86_64.c.  Parses
- * /proc/self/maps so it needs no virtual.c internal state. */
-#include <stdio.h>
+ * address, for the BREAKPOINT diagnostic in signal_x86_64.c.  Uses views_tree
+ * instead of scanning /proc/self/maps. */
 const char *virtual_get_module_name( const void *addr, void **base_out )
 {
-    static pthread_mutex_t cs = PTHREAD_MUTEX_INITIALIZER;
     static char buf[512];
-    char line[1024];
     const char *name = NULL;
-    FILE *f;
+    struct file_view *view;
+    sigset_t sigset;
 
     if (base_out) *base_out = NULL;
-    pthread_mutex_lock( &cs );
-    if ((f = fopen( "/proc/self/maps", "r" )))
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+    if ((view = find_view( addr, 0 )))
     {
-        while (fgets( line, sizeof(line), f ))
+        struct builtin_module *builtin;
+        const char *src = NULL;
+
+        if (base_out) *base_out = view->base;
+        if ((builtin = get_builtin_module( view->base )) && builtin->unix_path)
+            src = builtin->unix_path;
+        else if ((view->protect & SEC_IMAGE) && view->size >= sizeof(IMAGE_DOS_HEADER))
         {
-            unsigned long start, end;
-            char path[512] = "";
-            if (sscanf( line, "%lx-%*x %*s %*s %*s %*s %511[^\n]", &start, path ) >= 1 )
+            const IMAGE_DOS_HEADER *dos = (const IMAGE_DOS_HEADER *)view->base;
+            if (dos->e_magic == IMAGE_DOS_SIGNATURE &&
+                dos->e_lfanew > 0 && (size_t)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS64) <= view->size)
             {
-                if ((unsigned long)addr >= start)
+                const IMAGE_NT_HEADERS64 *nt = (const IMAGE_NT_HEADERS64 *)((const char *)view->base + dos->e_lfanew);
+                DWORD exp_rva = 0, exp_sz = 0;
+                if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
                 {
-                    sscanf( line, "%lx-%lx", &start, &end );
-                    if ((unsigned long)addr < end)
-                    {
-                        if (path[0])
-                        {
-                            name = path;
-                            if (base_out) *base_out = (void *)start;
-                        }
-                        break;
-                    }
+                    exp_rva = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+                    exp_sz  = nt->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+                }
+                else if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR32_MAGIC)
+                {
+                    const IMAGE_NT_HEADERS32 *nt32 = (const IMAGE_NT_HEADERS32 *)nt;
+                    exp_rva = nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].VirtualAddress;
+                    exp_sz  = nt32->OptionalHeader.DataDirectory[IMAGE_DIRECTORY_ENTRY_EXPORT].Size;
+                }
+                if (exp_rva && exp_sz >= sizeof(IMAGE_EXPORT_DIRECTORY) &&
+                    (size_t)exp_rva + sizeof(IMAGE_EXPORT_DIRECTORY) <= view->size)
+                {
+                    const IMAGE_EXPORT_DIRECTORY *exp = (const IMAGE_EXPORT_DIRECTORY *)((const char *)view->base + exp_rva);
+                    if (exp->Name && exp->Name < view->size)
+                        src = (const char *)view->base + exp->Name;
                 }
             }
         }
-        fclose( f );
-        if (name)
+        buf[0] = 0;
+        if (src && src[0])
         {
-            strncat( buf, name, sizeof(buf) - 1 );
+            strncat( buf, src, sizeof(buf) - 1 );
             buf[sizeof(buf) - 1] = 0;
             name = buf;
         }
     }
-    pthread_mutex_unlock( &cs );
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
     return name;
 }
