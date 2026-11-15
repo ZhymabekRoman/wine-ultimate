@@ -1571,6 +1571,105 @@ static HRESULT WINAPI core_window_remove_VisibilityChanged( ICoreWindow *iface, 
     return S_OK;
 }
 
+/* ---- ICoreWindowInputProperties (minimal live face) ----
+ * The real class vtbl puts this at slot 9 (after Dispatcher); apps probe it on startup
+ * (KeyboardPresent gates the whole keyboard-input path), so return a live face. */
+static const IID IID___x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties =
+    { 0x46cb65bf, 0x0471, 0x42ab, { 0xa9, 0x48, 0x71, 0x00, 0x86, 0xf2, 0xd9, 0x88 } };
+
+struct input_properties
+{
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties ICoreWindowInputProperties_iface;
+    LONG ref;
+};
+
+static inline struct input_properties *impl_from_ICoreWindowInputProperties(
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface )
+{
+    return CONTAINING_RECORD( iface, struct input_properties, ICoreWindowInputProperties_iface );
+}
+
+static HRESULT WINAPI input_props_QueryInterface( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface,
+                                                  REFIID iid, void **out )
+{
+    struct input_properties *impl = impl_from_ICoreWindowInputProperties( iface );
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICoreWindowInputProperties_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI input_props_AddRef( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface )
+{
+    return InterlockedIncrement( &impl_from_ICoreWindowInputProperties( iface )->ref );
+}
+static ULONG WINAPI input_props_Release( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface )
+{
+    struct input_properties *impl = impl_from_ICoreWindowInputProperties( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI input_props_GetIids( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, ULONG *count, IID **iids )
+{ if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
+static HRESULT WINAPI input_props_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, HSTRING *name )
+{ return WindowsCreateString( L"Windows.UI.Core.CoreWindowInputProperties", 41, name ); }
+static HRESULT WINAPI input_props_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, TrustLevel *level )
+{ if (level) *level = BaseTrust; return S_OK; }
+static HRESULT WINAPI input_props_get_KeyboardPresent( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, boolean *value )
+{ if (!value) return E_POINTER; *value = TRUE; return S_OK; }
+static HRESULT WINAPI input_props_get_MousePresent( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, boolean *value )
+{ if (!value) return E_POINTER; *value = TRUE; return S_OK; }
+static HRESULT WINAPI input_props_get_TouchPresentation( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, boolean *value )
+{ if (!value) return E_POINTER; *value = FALSE; return S_OK; }
+static HRESULT WINAPI input_props_get_PointerPointerPromoted( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, boolean *value )
+{ if (!value) return E_POINTER; *value = FALSE; return S_OK; }
+static HRESULT WINAPI input_props_put_PointerPointerPromoted( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, boolean value )
+{ return S_OK; }
+static HRESULT WINAPI input_props_get_PointerPromotion( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, boolean *value )
+{ if (!value) return E_POINTER; *value = FALSE; return S_OK; }
+static HRESULT WINAPI input_props_put_PointerPromotion( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, boolean value )
+{ return S_OK; }
+static HRESULT WINAPI input_props_get_FirstSignature( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, INT32 *value )
+{ if (!value) return E_POINTER; *value = 1; return S_OK; }
+static HRESULT WINAPI input_props_get_MaxTouchPoints( __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties *iface, INT32 *value )
+{ if (!value) return E_POINTER; *value = 10; return S_OK; }
+
+static const struct __x_ABI_CWindows_CUI_CCore_CICoreWindowInputPropertiesVtbl input_props_vtbl =
+{
+    input_props_QueryInterface,
+    input_props_AddRef,
+    input_props_Release,
+    input_props_GetIids,
+    input_props_GetRuntimeClassName,
+    input_props_GetTrustLevel,
+    input_props_get_KeyboardPresent,
+    input_props_get_MousePresent,
+    input_props_get_TouchPresentation,
+    input_props_get_PointerPointerPromoted,
+    input_props_put_PointerPointerPromoted,
+    input_props_get_PointerPromotion,
+    input_props_put_PointerPromotion,
+    input_props_get_FirstSignature,
+    input_props_get_MaxTouchPoints,
+};
+
+static HRESULT WINAPI core_window_get_InputProperties( ICoreWindow *iface,
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowInputProperties **value )
+{
+    struct input_properties *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return E_OUTOFMEMORY;
+    impl->ICoreWindowInputProperties_iface.lpVtbl = &input_props_vtbl;
+    impl->ref = 1;
+    *value = &impl->ICoreWindowInputProperties_iface;
+    return S_OK;
+}
+
 static const struct ICoreWindowVtbl core_window_vtbl =
 {
     core_window_QueryInterface,
@@ -1579,15 +1678,12 @@ static const struct ICoreWindowVtbl core_window_vtbl =
     core_window_GetIids,
     core_window_GetRuntimeClassName,
     core_window_GetTrustLevel,
-    /* ICoreWindow properties */
     core_window_get_AutomationHostProvider,
+    /* ICoreWindow properties, real class-vtbl order */
     core_window_get_Bounds,
     core_window_get_CustomProperties,
     core_window_get_Dispatcher,
-    core_window_get_FlowDirection,
-    core_window_put_FlowDirection,
-    core_window_get_IsInputEnabled,
-    core_window_put_IsInputEnabled,
+    core_window_get_InputProperties,
     core_window_get_PointerCursor,
     core_window_put_PointerCursor,
     core_window_get_PointerPosition,
@@ -1624,16 +1720,19 @@ static const struct ICoreWindowVtbl core_window_vtbl =
     core_window_add_PointerPressed,
     core_window_remove_PointerPressed,
     core_window_add_PointerReleased,
-    core_window_remove_PointerReleased,
-    core_window_add_TouchHitTesting,
-    core_window_remove_TouchHitTesting,
-    core_window_add_PointerWheelChanged,
+    core_window_remove_PointerReleased,    core_window_add_PointerWheelChanged,
     core_window_remove_PointerWheelChanged,
     core_window_add_SizeChanged,
     core_window_remove_SizeChanged,
     core_window_add_VisibilityChanged,
     core_window_remove_VisibilityChanged,
-};
+    core_window_add_TouchHitTesting,
+    core_window_remove_TouchHitTesting,
+    /* appended versions */
+    core_window_get_FlowDirection,
+    core_window_put_FlowDirection,
+    core_window_get_IsInputEnabled,
+    core_window_put_IsInputEnabled,};
 
 /* KeyEventArgs */
 struct key_event_args
@@ -1780,7 +1879,7 @@ static void core_window_deliver_keydown( struct core_window *impl, __x_ABI_CWind
     if (!(args = key_event_args_create( key ))) return;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
         impl->keydown_handler, &impl->ICoreWindow_iface, args );
-    __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs_Release( args );
+    /* args outlive Invoke: handlers queue them through the dispatcher */
 }
 
 static void core_window_deliver_keyup( struct core_window *impl, __x_ABI_CWindows_CSystem_CVirtualKey key )
@@ -1936,7 +2035,7 @@ static void core_window_deliver_character_received( struct core_window *impl, UI
     if (!(args = character_received_args_create( key_code ))) return;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Invoke(
         impl->character_received_handler, &impl->ICoreWindow_iface, args );
-    __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs_Release( args );
+    /* args outlive Invoke: handlers queue them through the dispatcher */
 }
 
 /* PointerEventArgs */
@@ -2543,6 +2642,32 @@ ICoreWindow *core_window_create( void )
     struct core_window *impl = create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, FALSE );
 
     return impl ? &impl->ICoreWindow_iface : NULL;
+}
+
+/* Fire the KeyDown/KeyUp/CharacterReceived listeners of the CoreWindow that owns hwnd.
+ * windows.ui.xaml's host window proc sits on the window slot ahead of core_window_proc
+ * (it swallows pointer messages), so it drives this for keyboard messages it has
+ * already routed to its own listener registries. */
+void core_window_notify_key( HWND hwnd, UINT msg, WPARAM wparam )
+{
+    struct core_window *impl = (struct core_window *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
+    if (!impl) impl = thread_core_window; /* the XAML host window is not always the CoreWindow's own HWND */
+    if (!impl) return;
+    switch (msg)
+    {
+    case WM_KEYDOWN:
+        if (impl->keydown_handler)
+            core_window_deliver_keydown( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
+        break;
+    case WM_KEYUP:
+        if (impl->keyup_handler)
+            core_window_deliver_keyup( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
+        break;
+    case WM_CHAR:
+        if (impl->character_received_handler)
+            core_window_deliver_character_received( impl, (UINT32)wparam );
+        break;
+    }
 }
 
 /* Windows' shell makes a view's CoreWindow through its UAP window factory, which ends in this

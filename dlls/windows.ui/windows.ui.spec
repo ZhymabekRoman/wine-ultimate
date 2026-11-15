@@ -13,6 +13,7 @@
 @ stub CreateControlInput
 @ stub CreateControlInputEx
 @ stdcall CoreWindow_Create() core_window_create
+@ stdcall CoreWindow_NotifyKeyMsg(ptr long long) core_window_notify_key
 
 # The shell's UAP window factory ends here: it gives a view's CoreWindow its title and geometry.
 # wineuwp's in-process CoreWindowBroker stand-in reaches it the same way (by ordinal, as Windows'

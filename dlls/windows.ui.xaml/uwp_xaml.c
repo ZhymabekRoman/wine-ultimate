@@ -2600,7 +2600,7 @@ static BOOL uwp_vm_read_display_value( IInspectable *vm, const WCHAR *vm_class_n
     return FALSE;
 }
 
-static void uwp_sync_calc_display_from_vm( void )
+void uwp_sync_calc_display_from_vm( void )
 {
     WCHAR buf[256] = {0};
 
@@ -10748,6 +10748,42 @@ static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, i
         return el;
     }
     return NULL;
+}
+
+void uwp_invoke_button( struct uwp_element *btn );
+
+static struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, const WCHAR *text )
+{
+    if (!el || el->visibility != 0 || !el->is_enabled) return NULL;
+
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        int k;
+        for (k = (int)children->count - 1; k >= 0; k--)
+        {
+            struct uwp_element *hit = uwp_find_button_by_text( uwp_elem_from_any( children->items[k] ), text );
+            if (hit) return hit;
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *hit = uwp_find_button_by_text( uwp_elem_from_any( el->content ), text );
+        if (hit) return hit;
+    }
+    if ((el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON) && el->text[0] &&
+        !lstrcmpiW( el->text, text ))
+        return el;
+    return NULL;
+}
+
+void uwp_keyboard_press_char( WCHAR ch )
+{
+    WCHAR buf[2] = { ch, 0 };
+    struct uwp_element *root = g_navigated_page_el, *hit;
+
+    if (!root) return;
+    if ((hit = uwp_find_button_by_text( root, buf ))) uwp_invoke_button( hit );
 }
 
 void uwp_invoke_button( struct uwp_element *btn )
