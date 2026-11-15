@@ -1366,8 +1366,42 @@ static HRESULT WINAPI core_application_GetTrustLevel( ICoreApplication *iface, T
 
 static HRESULT WINAPI core_application_get_Id( ICoreApplication *iface, HSTRING *value )
 {
-    FIXME( "iface %p, value %p semi-stub.\n", iface, value );
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR aumid[512] = {0}, exe[MAX_PATH], subkey[600];
+    const WCHAR *bang, *slash;
+    SIZE_T i;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
     if (!value) return E_POINTER;
+
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_AUMID", aumid, ARRAY_SIZE( aumid ) ))
+        aumid[0] = 0;
+
+    if (!aumid[0] && GetModuleFileNameW( NULL, exe, ARRAY_SIZE( exe ) ) &&
+        (slash = wcsrchr( exe, L'\\' )) && slash[1])
+    {
+        swprintf( subkey, ARRAY_SIZE( subkey ),
+                  L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Exes\\%ls", slash + 1 );
+        for (i = 0; i < ARRAY_SIZE( roots ); i++)
+        {
+            HKEY hkey;
+            DWORD type = 0, size = sizeof(aumid);
+            if (RegOpenKeyExW( roots[i], subkey, 0, KEY_READ, &hkey ) == ERROR_SUCCESS)
+            {
+                if (RegQueryValueExW( hkey, L"ApplicationUserModelId", NULL, &type, (BYTE *)aumid, &size ) == ERROR_SUCCESS &&
+                    type == REG_SZ && aumid[0])
+                {
+                    RegCloseKey( hkey );
+                    break;
+                }
+                aumid[0] = 0;
+                RegCloseKey( hkey );
+            }
+        }
+    }
+
+    if ((bang = wcschr( aumid, L'!' )) && bang[1])
+        return WindowsCreateString( bang + 1, wcslen( bang + 1 ), value );
     return WindowsCreateString( NULL, 0, value );
 }
 

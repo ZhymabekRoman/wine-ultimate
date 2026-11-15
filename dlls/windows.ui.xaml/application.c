@@ -25,6 +25,14 @@
 #include "windows.applicationmodel.activation.h"
 #include "appmodel.h"
 #include "pri.h"
+#include "wincodec.h"
+
+static const GUID CLSID_WICImagingFactory_xaml =
+    { 0xcacaf262, 0x9370, 0x4615, { 0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a } };
+static const GUID IID_IWICImagingFactory_xaml =
+    { 0xec5ec8a9, 0xc395, 0x4314, { 0x9c, 0x77, 0x54, 0xd7, 0xa9, 0x35, 0xff, 0x70 } };
+static const GUID GUID_WICPixelFormat32bppBGRA_xaml =
+    { 0x6fddc324, 0x4e03, 0x4bfe, { 0xb1, 0x85, 0x3d, 0x77, 0x76, 0x8d, 0xc9, 0x0f } };
 
 WINE_DEFAULT_DEBUG_CHANNEL(xaml);
 
@@ -2154,6 +2162,178 @@ static const WCHAR *xaml_package_display_name( void )
     return xaml_package.display_name[0] ? xaml_package.display_name : NULL;
 }
 
+static BOOL xaml_package_logo_path( WCHAR *out_path, DWORD cch )
+{
+    typedef HRESULT (WINAPI *p_AppxGetCurrentPackageSquare44x44Logo)( WCHAR *, DWORD );
+    p_AppxGetCurrentPackageSquare44x44Logo fn;
+    HMODULE mod;
+    WCHAR key[640];
+    SIZE_T i;
+
+    if (!out_path || !cch) return FALSE;
+    out_path[0] = 0;
+
+    InitOnceExecuteOnce( &xaml_package_once, xaml_package_init, NULL, NULL );
+    if (xaml_package.full_name[0])
+    {
+        lstrcpyW( key, L"Software\\Classes\\AppModel\\Repository\\Packages\\" );
+        lstrcatW( key, xaml_package.full_name );
+        lstrcatW( key, L"\\VisualElements" );
+        for (i = 0; i < ARRAY_SIZE( xaml_reg_roots ); i++)
+        {
+            HKEY hkey;
+            DWORD type = 0, size = cch * sizeof(WCHAR), attr;
+            if (RegOpenKeyExW( xaml_reg_roots[i], key, 0, KEY_READ, &hkey ) == ERROR_SUCCESS)
+            {
+                LONG ret = RegQueryValueExW( hkey, L"Square44x44LogoPath", NULL, &type, (BYTE *)out_path, &size );
+                RegCloseKey( hkey );
+                if (ret == ERROR_SUCCESS && type == REG_SZ && out_path[0] &&
+                    (attr = GetFileAttributesW( out_path )) != INVALID_FILE_ATTRIBUTES &&
+                    !(attr & FILE_ATTRIBUTE_DIRECTORY))
+                    return TRUE;
+                out_path[0] = 0;
+            }
+        }
+    }
+
+    mod = GetModuleHandleW( L"appxdeploymentclient.dll" );
+    if (!mod) mod = LoadLibraryW( L"appxdeploymentclient.dll" );
+    if (mod && (fn = (p_AppxGetCurrentPackageSquare44x44Logo)GetProcAddress( mod, "AppxGetCurrentPackageSquare44x44Logo" )))
+    {
+        if (SUCCEEDED( fn( out_path, cch ) ) && out_path[0])
+            return TRUE;
+        out_path[0] = 0;
+    }
+    return FALSE;
+}
+
+static HICON xaml_wic_create_icon_from_frame( IWICImagingFactory *wic, IWICBitmapSource *src, UINT w, UINT h )
+{
+    IWICBitmapScaler *scaler = NULL;
+    IWICFormatConverter *conv = NULL;
+    BITMAPINFO bmi;
+    void *bits = NULL;
+    HDC hdc;
+    HBITMAP color = NULL, mask = NULL;
+    HICON icon = NULL;
+    HRESULT hr;
+
+    hr = IWICImagingFactory_CreateBitmapScaler( wic, &scaler );
+    if (SUCCEEDED( hr ))
+        hr = IWICBitmapScaler_Initialize( scaler, src, w, h, WICBitmapInterpolationModeFant );
+    if (SUCCEEDED( hr ))
+        hr = IWICImagingFactory_CreateFormatConverter( wic, &conv );
+    if (SUCCEEDED( hr ))
+        hr = IWICFormatConverter_Initialize( conv, (IWICBitmapSource *)scaler, &GUID_WICPixelFormat32bppBGRA_xaml,
+                                             WICBitmapDitherTypeNone, NULL, 0.0, WICBitmapPaletteTypeCustom );
+    if (SUCCEEDED( hr ))
+    {
+        memset( &bmi, 0, sizeof(bmi) );
+        bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+        bmi.bmiHeader.biWidth = (LONG)w;
+        bmi.bmiHeader.biHeight = -(LONG)h;
+        bmi.bmiHeader.biPlanes = 1;
+        bmi.bmiHeader.biBitCount = 32;
+        bmi.bmiHeader.biCompression = BI_RGB;
+
+        hdc = GetDC( NULL );
+        color = CreateDIBSection( hdc, &bmi, DIB_RGB_COLORS, &bits, NULL, 0 );
+        ReleaseDC( NULL, hdc );
+        if (color && bits &&
+            SUCCEEDED( IWICFormatConverter_CopyPixels( conv, NULL, w * 4, w * h * 4, bits ) ))
+        {
+            mask = CreateBitmap( w, h, 1, 1, NULL );
+            if (mask)
+            {
+                ICONINFO ii = {0};
+                ii.fIcon = TRUE;
+                ii.hbmMask = mask;
+                ii.hbmColor = color;
+                icon = CreateIconIndirect( &ii );
+                DeleteObject( mask );
+            }
+        }
+        if (color) DeleteObject( color );
+    }
+
+    if (conv) IWICFormatConverter_Release( conv );
+    if (scaler) IWICBitmapScaler_Release( scaler );
+    return icon;
+}
+
+static void xaml_load_package_icons( HICON *out_big, HICON *out_small )
+{
+    WCHAR logo_path[MAX_PATH];
+    IWICImagingFactory *wic = NULL;
+    IWICBitmapDecoder *dec = NULL;
+    IWICBitmapFrameDecode *frame = NULL;
+    BOOL com_init = FALSE;
+    HRESULT hr;
+
+    *out_big = NULL;
+    *out_small = NULL;
+    if (!xaml_package_logo_path( logo_path, ARRAY_SIZE( logo_path ) )) return;
+
+    hr = CoCreateInstance( &CLSID_WICImagingFactory_xaml, NULL, CLSCTX_INPROC_SERVER,
+                           &IID_IWICImagingFactory_xaml, (void **)&wic );
+    if (hr == CO_E_NOTINITIALIZED && SUCCEEDED( CoInitializeEx( NULL, COINIT_APARTMENTTHREADED ) ))
+    {
+        com_init = TRUE;
+        hr = CoCreateInstance( &CLSID_WICImagingFactory_xaml, NULL, CLSCTX_INPROC_SERVER,
+                               &IID_IWICImagingFactory_xaml, (void **)&wic );
+    }
+    if (SUCCEEDED( hr ) && wic)
+    {
+        if (SUCCEEDED( IWICImagingFactory_CreateDecoderFromFilename( wic, logo_path, NULL, GENERIC_READ,
+                                                                     WICDecodeMetadataCacheOnLoad, &dec ) ) && dec)
+        {
+            if (SUCCEEDED( IWICBitmapDecoder_GetFrame( dec, 0, &frame ) ) && frame)
+            {
+                *out_big = xaml_wic_create_icon_from_frame( wic, (IWICBitmapSource *)frame, 48, 48 );
+                *out_small = xaml_wic_create_icon_from_frame( wic, (IWICBitmapSource *)frame, 16, 16 );
+                TRACE( "loaded package icon from %s -> big=%p small=%p\n",
+                       debugstr_w( logo_path ), *out_big, *out_small );
+                IWICBitmapFrameDecode_Release( frame );
+            }
+            IWICBitmapDecoder_Release( dec );
+        }
+        IWICImagingFactory_Release( wic );
+    }
+    if (com_init) CoUninitialize();
+}
+
+static void xaml_apply_window_icon( HWND top )
+{
+    static HICON big_icon, small_icon;
+    static BOOL icons_init;
+    static HWND last_icon_hwnd;
+
+    if (!top) return;
+    if (!icons_init)
+    {
+        xaml_load_package_icons( &big_icon, &small_icon );
+        if (!big_icon)
+            big_icon = LoadImageW( 0, (LPCWSTR)IDI_APPLICATION, IMAGE_ICON, 32, 32, LR_SHARED );
+        if (!small_icon)
+            small_icon = LoadImageW( 0, (LPCWSTR)IDI_APPLICATION, IMAGE_ICON, 16, 16, LR_SHARED );
+        icons_init = TRUE;
+    }
+    if (top != last_icon_hwnd)
+    {
+        last_icon_hwnd = top;
+        if (big_icon)
+        {
+            SetClassLongPtrW( top, GCLP_HICON, (LONG_PTR)big_icon );
+            SendMessageW( top, WM_SETICON, ICON_BIG, (LPARAM)big_icon );
+        }
+        if (small_icon)
+        {
+            SetClassLongPtrW( top, GCLP_HICONSM, (LONG_PTR)small_icon );
+            SendMessageW( top, WM_SETICON, ICON_SMALL, (LPARAM)small_icon );
+        }
+    }
+}
+
 /* Family test: <Name>_<Publisher>, matched on the name part. */
 static BOOL xaml_package_family_is( const WCHAR *name )
 {
@@ -2366,15 +2546,10 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
      * CoreWindow child has no frame. Set both on the top-level once, on show. */
     {
         HWND top = GetAncestor( hwnd, GA_ROOT );
-        static HICON big_icon, small_icon;
         const WCHAR *title = xaml_package_display_name();
+        if (!top) top = hwnd;
         if (title) SetWindowTextW( top, title );
-        if (!big_icon)
-            big_icon = LoadImageW( 0, (LPCWSTR)IDI_APPLICATION, IMAGE_ICON, 32, 32, LR_SHARED );
-        if (!small_icon)
-            small_icon = LoadImageW( 0, (LPCWSTR)IDI_APPLICATION, IMAGE_ICON, 16, 16, LR_SHARED );
-        if (big_icon) SendMessageW( top, WM_SETICON, ICON_BIG, (LPARAM)big_icon );
-        if (small_icon) SendMessageW( top, WM_SETICON, ICON_SMALL, (LPARAM)small_icon );
+        xaml_apply_window_icon( top );
     }
     TRACE( "xaml show: visible %u style %08lx exstyle %08lx\n", IsWindowVisible( hwnd ),
            GetWindowLongW( hwnd, GWL_STYLE ), GetWindowLongW( hwnd, GWL_EXSTYLE ) );
@@ -2857,6 +3032,9 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
         if (!hwnd) hwnd = GetActiveWindow();
         if (hwnd)
         {
+            HWND top = GetAncestor( hwnd, GA_ROOT );
+            if (!top) top = hwnd;
+            xaml_apply_window_icon( top );
             ShowWindow( hwnd, SW_SHOW );
             InvalidateRect( hwnd, NULL, TRUE );
         }

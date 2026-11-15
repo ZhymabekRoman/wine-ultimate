@@ -84,6 +84,7 @@
 @ stdcall CheckForUpdatesAndWaitForInstallerIfNeeded(long)
 @ stdcall AppxRegisterPackageManifest(wstr)
 @ stdcall AppxUnregisterPackageByName(wstr)
+@ stdcall AppxGetCurrentPackageSquare44x44Logo(ptr long)
 @ stdcall -private DllCanUnloadNow()
 @ stdcall -private DllGetActivationFactory(ptr ptr)
 @ stdcall -private DllGetClassObject(ptr ptr ptr)

@@ -872,6 +872,7 @@ struct appx_application
 {
     WCHAR id[128];
     WCHAR executable[256];
+    WCHAR square44x44_logo[MAX_PATH];
 };
 
 struct appx_dependency
@@ -893,6 +894,7 @@ struct appx_package
     struct appx_identity identity;
     BOOL is_framework;
     WCHAR package_path[MAX_PATH];
+    WCHAR square44x44_logo[MAX_PATH];
 
     struct appx_application *applications;
     DWORD applications_count;
@@ -1278,6 +1280,38 @@ static BOOL parse_appx_manifest(const WCHAR *manifest_path, struct appx_package 
                 if (app_exe[0])
                     add_application(pkg, app_id, app_exe);
             }
+            else if (!wcscmp(local_name, L"VisualElements"))
+            {
+                WCHAR sq44[MAX_PATH] = {0}, fallback[MAX_PATH] = {0};
+
+                if (IXmlReader_MoveToFirstAttribute(reader) == S_OK)
+                {
+                    do
+                    {
+                        const WCHAR *aname = NULL, *aval = NULL;
+                        IXmlReader_GetLocalName(reader, &aname, NULL);
+                        IXmlReader_GetValue(reader, &aval, NULL);
+                        if (aname && aval)
+                        {
+                            if (!wcscmp(aname, L"Square44x44Logo"))
+                                lstrcpynW(sq44, aval, ARRAY_SIZE(sq44));
+                            else if (!wcscmp(aname, L"Logo"))
+                                lstrcpynW(fallback, aval, ARRAY_SIZE(fallback));
+                        }
+                    } while (IXmlReader_MoveToNextAttribute(reader) == S_OK);
+                    IXmlReader_MoveToElement(reader);
+                }
+                if (!sq44[0] && fallback[0])
+                    lstrcpynW(sq44, fallback, ARRAY_SIZE(sq44));
+                if (sq44[0])
+                {
+                    if (pkg->applications_count > 0)
+                        lstrcpynW(pkg->applications[pkg->applications_count - 1].square44x44_logo,
+                                  sq44, ARRAY_SIZE(pkg->applications[0].square44x44_logo));
+                    if (!pkg->square44x44_logo[0])
+                        lstrcpynW(pkg->square44x44_logo, sq44, ARRAY_SIZE(pkg->square44x44_logo));
+                }
+            }
             else if (!wcscmp(local_name, L"InProcessServer"))
             {
                 in_inproc_server = TRUE;
@@ -1380,10 +1414,96 @@ static BOOL parse_appx_manifest(const WCHAR *manifest_path, struct appx_package 
     return TRUE;
 }
 
+static BOOL logo_file_exists( const WCHAR *path )
+{
+    DWORD attr = GetFileAttributesW( path );
+    return attr != INVALID_FILE_ATTRIBUTES && !(attr & FILE_ATTRIBUTE_DIRECTORY);
+}
+
+static BOOL resolve_logo_asset_path( const WCHAR *pkg_dir, const WCHAR *rel_logo, WCHAR *out_path, DWORD cch )
+{
+    static const WCHAR *const qualifiers[] = {
+        L"",
+        L".targetsize-48_altform-unplated",
+        L".targetsize-48",
+        L".scale-150",
+        L".scale-200",
+        L".scale-125",
+        L".scale-100",
+        L".scale-400",
+        L".targetsize-32_altform-unplated",
+        L".targetsize-32",
+        L".targetsize-24",
+        L".targetsize-16",
+    };
+    WCHAR dir[MAX_PATH], rel[MAX_PATH], candidate[MAX_PATH];
+    const WCHAR *p = rel_logo;
+    WCHAR *dot;
+    SIZE_T dlen, i;
+
+    if (!pkg_dir || !pkg_dir[0] || !rel_logo || !rel_logo[0] || !out_path || !cch) return FALSE;
+
+    lstrcpynW( dir, pkg_dir, ARRAY_SIZE( dir ) );
+    dlen = lstrlenW( dir );
+    while (dlen && (dir[dlen - 1] == L'\\' || dir[dlen - 1] == L'/'))
+        dir[--dlen] = 0;
+
+    if (!wcsncmp( p, L"ms-appx:///", 11 )) p += 11;
+    else if (!wcsncmp( p, L"ms-appx://", 10 )) p += 10;
+    while (*p == L'/' || *p == L'\\') p++;
+    lstrcpynW( rel, p, ARRAY_SIZE( rel ) );
+    for (i = 0; rel[i]; i++) if (rel[i] == L'/') rel[i] = L'\\';
+    if (!rel[0]) return FALSE;
+
+    dot = wcsrchr( rel, L'.' );
+    for (i = 0; i < ARRAY_SIZE( qualifiers ); i++)
+    {
+        if (i > 0 && !dot) break;
+        if (i == 0)
+        {
+            if (swprintf( candidate, ARRAY_SIZE( candidate ), L"%ls\\%ls", dir, rel ) < 0) continue;
+        }
+        else
+        {
+            WCHAR stem[MAX_PATH];
+            size_t slen = min( (size_t)(dot - rel), ARRAY_SIZE( stem ) - 1 );
+            memcpy( stem, rel, slen * sizeof(WCHAR) );
+            stem[slen] = 0;
+            if (swprintf( candidate, ARRAY_SIZE( candidate ), L"%ls\\%ls%ls%ls",
+                          dir, stem, qualifiers[i], dot ) < 0)
+                continue;
+        }
+        if (logo_file_exists( candidate ))
+        {
+            lstrcpynW( out_path, candidate, cch );
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
 static void set_reg_str(HKEY hkey, const WCHAR *name, const WCHAR *value)
 {
     if (value)
         RegSetValueExW(hkey, name, 0, REG_SZ, (const BYTE *)value, (lstrlenW(value) + 1) * sizeof(WCHAR));
+}
+
+static void write_visual_elements_reg( HKEY root, const WCHAR *full_name, const WCHAR *rel_logo, const WCHAR *resolved_path )
+{
+    WCHAR key[600];
+    HKEY hkey;
+
+    if (!full_name || !full_name[0] || (!rel_logo[0] && !resolved_path[0])) return;
+    if (swprintf( key, ARRAY_SIZE( key ),
+                  L"Software\\Classes\\AppModel\\Repository\\Packages\\%ls\\VisualElements",
+                  full_name ) < 0)
+        return;
+    if (RegCreateKeyExW( root, key, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ) == ERROR_SUCCESS)
+    {
+        if (rel_logo && rel_logo[0]) set_reg_str( hkey, L"Square44x44Logo", rel_logo );
+        if (resolved_path && resolved_path[0]) set_reg_str( hkey, L"Square44x44LogoPath", resolved_path );
+        RegCloseKey( hkey );
+    }
 }
 
 static void set_reg_dword(HKEY hkey, const WCHAR *name, DWORD value)
@@ -1492,6 +1612,13 @@ static BOOL register_package(const struct appx_package *pkg)
                 set_reg_str(hkey, L"PackageFullName", pkg->identity.full_name);
                 RegCloseKey(hkey);
             }
+        }
+
+        if (pkg->identity.full_name[0] && pkg->square44x44_logo[0])
+        {
+            WCHAR resolved[MAX_PATH] = {0};
+            resolve_logo_asset_path(pkg->package_path, pkg->square44x44_logo, resolved, ARRAY_SIZE(resolved));
+            write_visual_elements_reg(root, pkg->identity.full_name, pkg->square44x44_logo, resolved);
         }
     }
 
@@ -2070,8 +2197,197 @@ HRESULT WINAPI AppxUnregisterPackageByName( const WCHAR *package_full_name )
             }
             RegCloseKey(hkey_rt);
         }
+
+        /* 5. Delete Software\Classes\AppModel\Repository\Packages\<package_full_name> */
+        swprintf(key, ARRAY_SIZE(key),
+                 L"Software\\Classes\\AppModel\\Repository\\Packages\\%ls", package_full_name);
+        RegDeleteTreeW(root, key);
     }
 
     package_reg_delete( package_full_name );
+    return S_OK;
+}
+
+static WCHAR cached_current_logo_path[MAX_PATH];
+static HRESULT cached_current_logo_hr = E_NOT_FOUND;
+static INIT_ONCE current_logo_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL read_appmodel_reg_str( HKEY root, const WCHAR *subkey, const WCHAR *value, WCHAR *out, DWORD cch )
+{
+    HKEY hkey;
+    DWORD type = 0, size;
+    LONG ret;
+
+    if (RegOpenKeyExW( root, subkey, 0, KEY_READ, &hkey ) != ERROR_SUCCESS) return FALSE;
+    out[0] = 0;
+    size = cch * sizeof(WCHAR);
+    ret = RegQueryValueExW( hkey, value, NULL, &type, (BYTE *)out, &size );
+    RegCloseKey( hkey );
+    return ret == ERROR_SUCCESS && type == REG_SZ && out[0];
+}
+
+static BOOL WINAPI init_current_package_logo( INIT_ONCE *once, void *param, void **context )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR full_name[512] = {0}, pkg_dir[MAX_PATH] = {0}, app_id[128] = {0};
+    WCHAR exe_path[MAX_PATH] = {0}, aumid[512] = {0}, key[600], rel_logo[MAX_PATH] = {0};
+    const WCHAR *slash, *bang;
+    UINT32 len;
+    DWORD r;
+
+    len = ARRAY_SIZE( full_name );
+    if (GetCurrentPackageFullName( &len, full_name ) != ERROR_SUCCESS)
+        full_name[0] = 0;
+    if (!full_name[0])
+        GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", full_name, ARRAY_SIZE( full_name ) );
+
+    if (GetEnvironmentVariableW( L"WINE_PACKAGE_AUMID", aumid, ARRAY_SIZE( aumid ) ) && aumid[0])
+    {
+        if ((bang = wcschr( aumid, L'!' )) && bang[1])
+            lstrcpynW( app_id, bang + 1, ARRAY_SIZE( app_id ) );
+    }
+    if (!app_id[0])
+    {
+        len = ARRAY_SIZE( aumid );
+        if (GetCurrentApplicationUserModelId( &len, aumid ) == ERROR_SUCCESS &&
+            (bang = wcschr( aumid, L'!' )) && bang[1])
+            lstrcpynW( app_id, bang + 1, ARRAY_SIZE( app_id ) );
+    }
+
+    if (!GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", pkg_dir, ARRAY_SIZE( pkg_dir ) ) || !pkg_dir[0])
+        pkg_dir[0] = 0;
+
+    if ((!full_name[0] || !pkg_dir[0]) && GetModuleFileNameW( NULL, exe_path, ARRAY_SIZE( exe_path ) ))
+    {
+        slash = wcsrchr( exe_path, L'\\' );
+        if (slash && slash[1])
+        {
+            swprintf( key, ARRAY_SIZE( key ),
+                      L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Exes\\%ls", slash + 1 );
+            for (r = 0; r < ARRAY_SIZE( roots ); r++)
+            {
+                if (!full_name[0])
+                    read_appmodel_reg_str( roots[r], key, L"PackageFullName", full_name, ARRAY_SIZE( full_name ) );
+                if (!pkg_dir[0])
+                    read_appmodel_reg_str( roots[r], key, L"PackagePath", pkg_dir, ARRAY_SIZE( pkg_dir ) );
+                if (full_name[0] && pkg_dir[0]) break;
+            }
+        }
+    }
+
+    if (full_name[0] && !pkg_dir[0])
+    {
+        swprintf( key, ARRAY_SIZE( key ),
+                  L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages\\%ls", full_name );
+        for (r = 0; r < ARRAY_SIZE( roots ); r++)
+        {
+            if (read_appmodel_reg_str( roots[r], key, L"PackagePath", pkg_dir, ARRAY_SIZE( pkg_dir ) )) break;
+            if (read_appmodel_reg_str( roots[r], key, L"PackageRootPath", pkg_dir, ARRAY_SIZE( pkg_dir ) )) break;
+        }
+    }
+
+    if (!pkg_dir[0] && full_name[0] && exe_path[0])
+    {
+        WCHAR *s = wcsrchr( exe_path, L'\\' );
+        if (s)
+        {
+            *s = 0;
+            lstrcpynW( pkg_dir, exe_path, ARRAY_SIZE( pkg_dir ) );
+        }
+    }
+
+    /* Reuse cached VisualElements registry record if present */
+    if (full_name[0])
+    {
+        swprintf( key, ARRAY_SIZE( key ),
+                  L"Software\\Classes\\AppModel\\Repository\\Packages\\%ls\\VisualElements", full_name );
+        for (r = 0; r < ARRAY_SIZE( roots ); r++)
+        {
+            WCHAR reg_path[MAX_PATH] = {0};
+            if (read_appmodel_reg_str( roots[r], key, L"Square44x44LogoPath", reg_path, ARRAY_SIZE( reg_path ) ) &&
+                logo_file_exists( reg_path ))
+            {
+                lstrcpynW( cached_current_logo_path, reg_path, ARRAY_SIZE( cached_current_logo_path ) );
+                cached_current_logo_hr = S_OK;
+                return TRUE;
+            }
+            if (!rel_logo[0])
+                read_appmodel_reg_str( roots[r], key, L"Square44x44Logo", rel_logo, ARRAY_SIZE( rel_logo ) );
+        }
+        if (rel_logo[0] && pkg_dir[0] &&
+            resolve_logo_asset_path( pkg_dir, rel_logo, cached_current_logo_path, ARRAY_SIZE( cached_current_logo_path ) ))
+        {
+            write_visual_elements_reg( HKEY_CURRENT_USER, full_name, rel_logo, cached_current_logo_path );
+            cached_current_logo_hr = S_OK;
+            return TRUE;
+        }
+    }
+
+    /* Fall back to parsing <pkg_dir>\AppxManifest.xml */
+    if (pkg_dir[0])
+    {
+        WCHAR manifest_path[MAX_PATH];
+        struct appx_package pkg;
+        const WCHAR *chosen = NULL;
+        DWORD i;
+
+        swprintf( manifest_path, ARRAY_SIZE( manifest_path ), L"%ls\\AppxManifest.xml", pkg_dir );
+        if (logo_file_exists( manifest_path ))
+        {
+            memset( &pkg, 0, sizeof(pkg) );
+            lstrcpynW( pkg.package_path, pkg_dir, ARRAY_SIZE( pkg.package_path ) );
+            if (parse_appx_manifest( manifest_path, &pkg ))
+            {
+                if (app_id[0])
+                {
+                    for (i = 0; i < pkg.applications_count; i++)
+                    {
+                        if (!wcsicmp( pkg.applications[i].id, app_id ) && pkg.applications[i].square44x44_logo[0])
+                        {
+                            chosen = pkg.applications[i].square44x44_logo;
+                            break;
+                        }
+                    }
+                }
+                if (!chosen)
+                {
+                    for (i = 0; i < pkg.applications_count; i++)
+                    {
+                        if (pkg.applications[i].square44x44_logo[0])
+                        {
+                            chosen = pkg.applications[i].square44x44_logo;
+                            break;
+                        }
+                    }
+                }
+                if (!chosen && pkg.square44x44_logo[0])
+                    chosen = pkg.square44x44_logo;
+
+                if (chosen && resolve_logo_asset_path( pkg_dir, chosen, cached_current_logo_path,
+                                                       ARRAY_SIZE( cached_current_logo_path ) ))
+                {
+                    if (full_name[0])
+                        write_visual_elements_reg( HKEY_CURRENT_USER, full_name, chosen, cached_current_logo_path );
+                    cached_current_logo_hr = S_OK;
+                }
+            }
+            free( pkg.applications );
+            free( pkg.dependencies );
+            free( pkg.classes );
+        }
+    }
+
+    return TRUE;
+}
+
+HRESULT WINAPI AppxGetCurrentPackageSquare44x44Logo( WCHAR *out_path, DWORD cch )
+{
+    TRACE( "out_path %p, cch %lu.\n", out_path, cch );
+
+    if (!out_path || !cch) return E_INVALIDARG;
+    out_path[0] = 0;
+    InitOnceExecuteOnce( &current_logo_once, init_current_package_logo, NULL, NULL );
+    if (FAILED( cached_current_logo_hr )) return cached_current_logo_hr;
+    lstrcpynW( out_path, cached_current_logo_path, cch );
     return S_OK;
 }
