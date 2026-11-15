@@ -4569,6 +4569,7 @@ static void wv2_resolve_default_udf( WCHAR *out_udf, size_t out_len )
     static const GUID FOLDERID_LocalAppData_g =
         { 0xf1b32785, 0x6fba, 0x4fcf, { 0x9d, 0x55, 0x7b, 0x8e, 0x7f, 0x15, 0x70, 0x91 } };
     typedef HRESULT (WINAPI *p_SHGetKnownFolderPath_t)( const GUID *, DWORD, HANDLE, PWSTR * );
+    typedef int (WINAPI *p_SHCreateDirectoryExW_t)( HWND, LPCWSTR, const SECURITY_ATTRIBUTES * );
     typedef LONG (WINAPI *p_GetCurrentPackageFamilyName_t)( UINT32 *, PWSTR );
     HMODULE shell_mod, k32_mod;
     PWSTR local_app_data = NULL;
@@ -4580,6 +4581,7 @@ static void wv2_resolve_default_udf( WCHAR *out_udf, size_t out_len )
     if (shell_mod)
     {
         p_SHGetKnownFolderPath_t p_known = (p_SHGetKnownFolderPath_t)GetProcAddress( shell_mod, "SHGetKnownFolderPath" );
+        p_SHCreateDirectoryExW_t p_mkdir = (p_SHCreateDirectoryExW_t)GetProcAddress( shell_mod, "SHCreateDirectoryExW" );
         if (p_known && SUCCEEDED( p_known( &FOLDERID_LocalAppData_g, 0, NULL, &local_app_data ) ) && local_app_data)
         {
             k32_mod = GetModuleHandleW( L"kernelbase.dll" );
@@ -4591,15 +4593,12 @@ static void wv2_resolve_default_udf( WCHAR *out_udf, size_t out_len )
                 UINT32 flen = ARRAY_SIZE(family);
                 if (p_fam && p_fam( &flen, family ) == ERROR_SUCCESS && family[0])
                 {
-                    WCHAR pkg_cache[1024];
-                    swprintf( pkg_cache, ARRAY_SIZE(pkg_cache), L"%s\\Packages\\%s\\LocalCache",
+                    swprintf( out_udf, out_len, L"%s\\Packages\\%s\\LocalCache\\EBWebView",
                               local_app_data, family );
-                    if (GetFileAttributesW( pkg_cache ) != INVALID_FILE_ATTRIBUTES)
-                    {
-                        swprintf( out_udf, out_len, L"%s\\EBWebView", pkg_cache );
-                        CoTaskMemFree( local_app_data );
-                        return;
-                    }
+                    if (GetFileAttributesW( out_udf ) == INVALID_FILE_ATTRIBUTES && p_mkdir)
+                        p_mkdir( NULL, out_udf, NULL );
+                    CoTaskMemFree( local_app_data );
+                    return;
                 }
             }
             swprintf( out_udf, out_len, L"%s\\Microsoft\\Edge\\User Data", local_app_data );
