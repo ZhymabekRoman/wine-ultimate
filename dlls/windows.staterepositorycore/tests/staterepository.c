@@ -358,16 +358,17 @@ static void test_cache_statecache( void )
     ok( hr == S_OK && manager, "CreateStateCacheManager hr %#lx manager %p\n", hr, manager );
 
     /* manager slots 8..11: the C plane's SRCacheManager surface */
+    if (manager)
     {
-        struct cache_manager_vtbl *m = (void *)manager;
+        const struct cache_statics_vtbl *m = *(const struct cache_statics_vtbl **)manager;
         void *opened = NULL;
         ULONG value = 0xffffffff;
 
         hr = m->Open( manager, NULL, &opened );
         ok( hr == S_OK && opened, "Open hr %#lx opened %p\n", hr, opened );
-        if (opened) m->Release( opened );
+        if (opened) (*(const struct cache_statics_vtbl **)opened)->Release( opened );
         hr = m->GetProperty_UInt32( manager, 1, &value );
-        ok( hr == S_OK && value == 0, "GetProperty_UInt32 hr %#lx value %u\n", hr, value );
+        ok( hr == S_OK && value == 0, "GetProperty_UInt32 hr %#lx value %lu\n", hr, value );
         hr = m->SetProperty_UInt32( manager, 1, 2 );
         ok( hr == S_OK, "SetProperty_UInt32 hr %#lx\n", hr );
         hr = m->SetProperty_UInt64( manager, 1, 3 );

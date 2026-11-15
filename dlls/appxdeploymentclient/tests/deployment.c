@@ -916,8 +916,7 @@ static void test_package_dependencies( void )
     IPackage *pkg, *row;
     IPackageId *id;
     HKEY hkey;
-    UINT32 size = 0, index = 0;
-    ULONG written = 0;
+    UINT32 size = 0, index = 0, written = 0;
     IPackage *items[4];
     boolean framework;
     HRESULT hr;
@@ -978,7 +977,7 @@ static void test_package_dependencies( void )
 
     view = NULL;
     if (pkg) hr = IPackage_get_Dependencies( pkg, &view );
-    ok( hr == S_OK && view, "get_Dependencies hr %#lx view %p\n", hr );
+    ok( hr == S_OK && view, "get_Dependencies hr %#lx view %p\n", hr, view );
     if (view)
     {
         IVectorView_Package_get_Size( view, &size );
@@ -1027,17 +1026,18 @@ static void test_package_dependencies( void )
         row = NULL;
         if (SUCCEEDED( IVectorView_Package_GetAt( view, 0, &row ) ) && row)
         {
+            BOOLEAN found = FALSE;
             index = 0xdead;
-            hr = IVectorView_Package_IndexOf( view, row, &index );
-            ok( hr == S_OK && index == 0, "IndexOf hr %#lx index %u\n", hr, index );
+            hr = IVectorView_Package_IndexOf( view, row, &index, &found );
+            ok( hr == S_OK && found && index == 0, "IndexOf hr %#lx found %d index %u\n", hr, found, index );
             IPackage_Release( row );
         }
 
         /* GetMany fills the whole view in order */
         written = 0;
         hr = IVectorView_Package_GetMany( view, 0, ARRAY_SIZE(items), items, &written );
-        ok( hr == S_OK && written == size, "GetMany hr %#lx written %lu\n", hr, written );
-        for (ULONG i = 0; i < written; i++)
+        ok( hr == S_OK && written == size, "GetMany hr %#lx written %u\n", hr, written );
+        for (UINT32 i = 0; i < written; i++)
         {
             IPackage_Release( items[i] );
         }

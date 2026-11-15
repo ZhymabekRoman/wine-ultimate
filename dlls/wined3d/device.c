@@ -5368,7 +5368,7 @@ HDC wined3d_device_gl_get_backup_dc(struct wined3d_device_gl *device_gl)
             return NULL;
         }
 
-        if (InterlockedCompareExchangePointer(&device_gl->backup_wnd, window, NULL))
+        if (InterlockedCompareExchangePointer((void **)&device_gl->backup_wnd, window, NULL))
             DestroyWindow(window);
 
         if (!(device_gl->backup_dc = GetDC(device_gl->backup_wnd)))

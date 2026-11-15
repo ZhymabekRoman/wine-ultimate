@@ -60,7 +60,7 @@ static void test_PenDevice_Statics(void)
     static const WCHAR pen_device_name[] = L"Windows.Devices.Input.PenDevice";
     IActivationFactory *factory = (void *)0xdeadbeef;
     IPenDeviceStatics *statics = (void *)0xdeadbeef;
-    __x_ABI_CWindows_CDevices_CInput_CPenDevice *device = (void *)0xdeadbeef;
+    IPenDevice *device = (void *)0xdeadbeef;
     HSTRING str = NULL;
     HRESULT hr;
     LONG ref;

@@ -141,10 +141,10 @@ static void check_born_completed_op_( ULONG line, IInspectable *op )
 
     /* get_Completed must hand back the handler that was attached. */
     {
-        void *handler = NULL;
+        __FIAsyncOperationCompletedHandler_1_IInspectable *handler = NULL;
         hr = __FIAsyncOperation_1_IInspectable_get_Completed( async, &handler );
         ok_(__FILE__, line)( hr == S_OK, "got hr %#lx.\n", hr );
-        ok_(__FILE__, line)( handler == (void *)&completed_handler, "got handler %p.\n", handler );
+        ok_(__FILE__, line)( handler == &completed_handler, "got handler %p.\n", handler );
         if (handler) IUnknown_Release( (IUnknown *)handler );
     }
 
@@ -200,7 +200,7 @@ static void test_User_Statics(void)
     ok( hr == E_POINTER, "got hr %#lx.\n", hr );
     hr = IUserStatics2_GetDefault( statics2, &user );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
-    ok( user, "got NULL user.\n" );
+    ok( user != NULL, "got NULL user.\n" );
 
     /* User.GetFromId: a prefix has one identity, so the id resolves to that same user. */
     hr = WindowsCreateString( some_id, ARRAYSIZE( some_id ) - 1, &id );
@@ -284,7 +284,7 @@ static void test_User_Object(void)
     ok( hr == E_POINTER, "got hr %#lx.\n", hr );
     hr = IUser_get_NonRoamableId( user, &id );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
-    ok( id, "got NULL id.\n" );
+    ok( id != NULL, "got NULL id.\n" );
     if (id)
     {
         HSTRING id2 = NULL;
@@ -325,7 +325,7 @@ static void test_User_Object(void)
     ok( hr == E_POINTER, "got hr %#lx.\n", hr );
     hr = IUser_GetPropertyAsync( user, id, &op );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
-    ok( op, "got NULL operation.\n" );
+    ok( op != NULL, "got NULL operation.\n" );
     if (op) check_born_completed_op_( __LINE__, (IInspectable *)op );
     if (op) __FIAsyncOperation_1_IInspectable_Release( op );
 
@@ -333,7 +333,7 @@ static void test_User_Object(void)
     ok( hr == E_POINTER, "got hr %#lx.\n", hr );
     hr = IUser_GetPropertiesAsync( user, NULL, &op2 );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
-    ok( op2, "got NULL operation.\n" );
+    ok( op2 != NULL, "got NULL operation.\n" );
     if (op2) check_born_completed_op_( __LINE__, (IInspectable *)op2 );
     if (op2) __FIAsyncOperation_1_Windows__CFoundation__CCollections__CIPropertySet_Release( op2 );
 
@@ -341,7 +341,7 @@ static void test_User_Object(void)
     ok( hr == E_POINTER, "got hr %#lx.\n", hr );
     hr = IUser_GetPictureAsync( user, UserPictureSize_Size64x64, &op3 );
     ok( hr == S_OK, "got hr %#lx.\n", hr );
-    ok( op3, "got NULL operation.\n" );
+    ok( op3 != NULL, "got NULL operation.\n" );
     if (op3) check_born_completed_op_( __LINE__, (IInspectable *)op3 );
     if (op3) __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamReference_Release( op3 );
 
