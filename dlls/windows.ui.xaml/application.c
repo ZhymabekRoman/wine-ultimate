@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "private.h"
+#include "wine/exception.h"
 #include "windows.applicationmodel.activation.h"
 #include "appmodel.h"
 #include "pri.h"
@@ -88,6 +89,44 @@ static const GUID IID_IWindowFactory_WinUI =
 static const GUID IID_IWindow_WinUI =
     { 0x61f0ec79, 0x5d52, 0x56b5, { 0x86, 0xfb, 0x40, 0xfa, 0x4a, 0xf2, 0x88, 0xb0 } };
 
+typedef struct IWindowNative IWindowNative;
+typedef struct IWindowNativeVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IWindowNative *This, REFIID riid, void **ppvObject );
+    ULONG (WINAPI *AddRef)( IWindowNative *This );
+    ULONG (WINAPI *Release)( IWindowNative *This );
+    HRESULT (WINAPI *GetWindowHandle)( IWindowNative *This, HWND *hwnd );
+} IWindowNativeVtbl;
+struct IWindowNative { const IWindowNativeVtbl *lpVtbl; };
+
+struct xaml_window
+{
+    IInspectable IInspectable_iface;
+    IInspectable IWindow2_iface;
+    IInspectable ms_IWindow_iface;
+    IInspectable ms_IWindow2_iface;
+    IWindowNative IWindowNative_iface;
+    LONG ref;
+    IInspectable *content;
+    ICoreWindow *core_window;
+    IDCompositionDesktopDevice *dcomp_device;
+    IDCompositionTarget *dcomp_target;
+    IDCompositionVisual2 *dcomp_root_visual;
+    IDXGISwapChain1 *swapchain;
+    ID3D11Device *d3d11_dev;
+    ID3D11DeviceContext *d3d11_ctx;
+    HWND target_hwnd;
+    UINT width, height;
+    BOOL core_window_subscribed;
+    void *activated_handlers[8];
+    int activated_handler_count;
+    BOOL is_active;
+};
+static struct xaml_window global_xaml_window;
+static IInspectable *global_window_outer = NULL;
+static WCHAR xaml_explicit_title[128];
+static BOOL lifecycle_started = FALSE;
+
 static HRESULT WINAPI app_view_activated_Invoke(
     __FITypedEventHandler_2_Windows__CApplicationModel__CCore__CCoreApplicationView_Windows__CApplicationModel__CActivation__CIActivatedEventArgs *iface,
     ICoreApplicationView *sender,
@@ -120,7 +159,13 @@ static HRESULT WINAPI app_view_activated_Invoke(
                 HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
                 WARN( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
                        on_launched, overrides, args );
-                if (on_launched) on_launched( overrides, args );
+                if (is_store_app())
+                {
+                    IInspectable *store_page = NULL;
+                    if (SUCCEEDED(uwp_store_create_initial_page( &store_page )) && store_page)
+                        global_xaml_window.content = store_page;
+                }
+                else if (on_launched) on_launched( overrides, args );
                 IInspectable_Release( overrides );
             }
             else
@@ -164,46 +209,6 @@ typedef struct ICoreWindowInteropVtbl
     HRESULT (WINAPI *SetMessageHandled)( ICoreWindowInterop *This, boolean value );
 } ICoreWindowInteropVtbl;
 struct ICoreWindowInterop { const ICoreWindowInteropVtbl *lpVtbl; };
-
-typedef struct IWindowNative IWindowNative;
-typedef struct IWindowNativeVtbl
-{
-    HRESULT (WINAPI *QueryInterface)( IWindowNative *This, REFIID riid, void **ppvObject );
-    ULONG (WINAPI *AddRef)( IWindowNative *This );
-    ULONG (WINAPI *Release)( IWindowNative *This );
-    HRESULT (WINAPI *GetWindowHandle)( IWindowNative *This, HWND *hwnd );
-} IWindowNativeVtbl;
-struct IWindowNative { const IWindowNativeVtbl *lpVtbl; };
-
-struct xaml_window
-{
-    IInspectable IInspectable_iface;
-    IInspectable IWindow2_iface;
-    IInspectable ms_IWindow_iface;
-    IInspectable ms_IWindow2_iface;
-    IWindowNative IWindowNative_iface;
-    LONG ref;
-    IInspectable *content;
-    ICoreWindow *core_window;
-    IDCompositionDesktopDevice *dcomp_device;
-    IDCompositionTarget *dcomp_target;
-    IDCompositionVisual2 *dcomp_root_visual;
-    IDXGISwapChain1 *swapchain;
-    ID3D11Device *d3d11_dev;
-    ID3D11DeviceContext *d3d11_ctx;
-    HWND target_hwnd;
-    UINT width, height;
-    BOOL core_window_subscribed;
-    void *activated_handlers[8];
-    int activated_handler_count;
-    BOOL is_active;
-};
-static struct xaml_window global_xaml_window;
-static IInspectable *global_window_outer = NULL;
-/* Window.Title set explicitly by the app; empty until it does, which is when
- * the package DisplayName acts as the default title. */
-static WCHAR xaml_explicit_title[128];
-static BOOL lifecycle_started = FALSE;
 
 /* ---- Shared WinRT Event Registry (token-based, twinapi bg_events pattern) ---- */
 static CRITICAL_SECTION xaml_event_cs;
@@ -1504,6 +1509,11 @@ static ICoreWindow *wrap_core_window( ICoreWindow *inner )
 {
     struct xaml_core_window *wrap;
     if (!inner) return NULL;
+    if (is_store_app())
+    {
+        ICoreWindow_AddRef( inner );
+        return inner;
+    }
     if (inner->lpVtbl == &xaml_cw_vtbl)
     {
         ICoreWindow_AddRef( inner );
@@ -3095,8 +3105,9 @@ static HRESULT WINAPI xaml_window_GetIids( IInspectable *iface, ULONG *count, II
 
 static HRESULT WINAPI xaml_window_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    ERR( "xaml_window_GetRuntimeClassName on %p -> Microsoft.UI.Xaml.Window\n", iface );
-    return WindowsCreateString( L"Microsoft.UI.Xaml.Window", 23, name );
+    const WCHAR *cls = is_whatsapp_app() ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
+    TRACE( "xaml_window_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(cls) );
+    return WindowsCreateString( cls, wcslen( cls ), name );
 }
 
 static HRESULT WINAPI xaml_window_GetTrustLevel( IInspectable *iface, TrustLevel *level )
@@ -3602,7 +3613,8 @@ HWND xaml_find_core_window( void )
     const WCHAR *short_name = xaml_package_short_name();
     HWND hw = NULL;
     if (short_name) hw = FindWindowW( short_name, NULL );
-    if (!hw) hw = xaml_find_core_window();
+    if (!hw) hw = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    if (!hw) hw = FindWindowW( L"App", NULL );
     return hw;
 }
 
@@ -4530,21 +4542,32 @@ static HRESULT WINAPI xaml_window_get_Dispatcher( IInspectable *iface, void *a2,
 static const GUID IID_IWindowActivatedEventArgs_app =
     { 0x179d65e7, 0x4658, 0x4cb6, { 0xaa, 0x13, 0x41, 0xd0, 0x94, 0xea, 0x25, 0x5e } };
 
+static HRESULT WINAPI dummy_wa_noop( void *iface, void *a1, void *a2 )
+{
+    if (a1) *(void **)a1 = NULL;
+    if (a2) *(void **)a2 = NULL;
+    return S_OK;
+}
+
+static ULONG WINAPI dummy_wa_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI dummy_wa_Release( void *iface ) { return 1; }
+
 static HRESULT WINAPI dummy_wa_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    if (!out) return E_POINTER;
+    TRACE( "dummy_wa_QueryInterface iid %s\n", debugstr_guid( iid ) );
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IWindowActivatedEventArgs_app ))
     {
         *out = iface;
+        dummy_wa_AddRef( iface );
         return S_OK;
     }
     *out = NULL;
     return E_NOINTERFACE;
 }
-static ULONG WINAPI dummy_wa_AddRef( void *iface ) { return 2; }
-static ULONG WINAPI dummy_wa_Release( void *iface ) { return 1; }
 static HRESULT WINAPI dummy_wa_GetIids( void *iface, ULONG *count, IID **iids ) { if (count) *count = 0; if (iids) *iids = NULL; return S_OK; }
 static HRESULT WINAPI dummy_wa_GetRuntimeClassName( void *iface, HSTRING *name )
 {
@@ -4556,15 +4579,16 @@ static HRESULT WINAPI dummy_wa_get_WindowActivationState( void *iface, int *valu
     if (value) *value = 0; /* CodeActivated */
     return S_OK;
 }
-static const void *dummy_wa_vtbl[] =
+static const void *dummy_wa_vtbl[64] =
 {
-    dummy_wa_QueryInterface,
-    dummy_wa_AddRef,
-    dummy_wa_Release,
-    dummy_wa_GetIids,
-    dummy_wa_GetRuntimeClassName,
-    dummy_wa_GetTrustLevel,
-    dummy_wa_get_WindowActivationState,
+    [0] = dummy_wa_QueryInterface,
+    [1] = dummy_wa_AddRef,
+    [2] = dummy_wa_Release,
+    [3] = dummy_wa_GetIids,
+    [4] = dummy_wa_GetRuntimeClassName,
+    [5] = dummy_wa_GetTrustLevel,
+    [6] = dummy_wa_get_WindowActivationState,
+    [7 ... 63] = dummy_wa_noop,
 };
 static struct { const void **vtbl; } dummy_wa_obj = { dummy_wa_vtbl };
 
@@ -4661,7 +4685,15 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
         {
             HRESULT (STDMETHODCALLTYPE *invoke)(void *, void *, void *) = (*(void ***)h)[3];
             TRACE( "invoking Window.Activated handler %p\n", h );
-            invoke( h, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_wa_obj );
+            __TRY
+            {
+                invoke( h, global_window_outer ? global_window_outer : &impl->IInspectable_iface, (void *)&dummy_wa_obj );
+            }
+            __EXCEPT_ALL
+            {
+                TRACE( "Window.Activated handler %p faulted\n", h );
+            }
+            __ENDTRY;
         }
     }
     xaml_window_present( impl );
@@ -4780,8 +4812,9 @@ static HRESULT WINAPI xaml_window2_GetIids( IInspectable *iface, ULONG *count, I
 }
 static HRESULT WINAPI xaml_window2_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    ERR( "xaml_window2_GetRuntimeClassName on %p -> Microsoft.UI.Xaml.Window\n", iface );
-    return WindowsCreateString( L"Microsoft.UI.Xaml.Window", 23, name );
+    const WCHAR *cls = is_whatsapp_app() ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
+    TRACE( "xaml_window2_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(cls) );
+    return WindowsCreateString( cls, wcslen( cls ), name );
 }
 static HRESULT WINAPI xaml_window2_GetTrustLevel( IInspectable *iface, TrustLevel *level )
 {

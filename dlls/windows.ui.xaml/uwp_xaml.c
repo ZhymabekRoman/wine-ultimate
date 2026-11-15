@@ -1435,6 +1435,8 @@ static BOOL uwp_lookup_in_bucket( struct uwp_rd_bucket *b, const WCHAR *key, int
 {
     int i;
     if (!b || !key || !key[0] || depth > 12) return FALSE;
+    TRACE( "uwp_lookup_in_bucket: b=%p count=%d merged_cnt=%d key=%s\n",
+           b, b->count, b->merged_cnt, debugstr_w(key) );
 
     for (i = 0; i < b->count; i++)
     {
@@ -1670,9 +1672,11 @@ HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
 
     uwp_ensure_app_resources_loaded();
     b = get_rd_bucket( rd_key, FALSE );
+    TRACE( "uwp_rd_lookup: b=%p owner=%p\n", b, b ? b->owner_el : NULL );
     if (uwp_rd_find_entry( b, b ? b->owner_el : NULL, key_str, 0, &e, &found_b ) && e)
     {
         IInspectable *val = uwp_rd_materialize_entry( found_b ? found_b : b, e );
+        TRACE( "uwp_rd_lookup: e=%p found_b=%p val=%p\n", e, found_b, val );
         if (val)
         {
             *out_val = val;
@@ -2095,8 +2099,9 @@ static BOOL uwp_rd_find_entry( struct uwp_rd_bucket *start_bucket, struct uwp_el
     /* App-level Resources (App.xbf + registry Resources_xbf + merged/theme) wins over theme defaults */
     {
         struct uwp_rd_bucket *app_b = get_rd_bucket( &g_app_rd_sentinel, FALSE );
-        if (app_b && uwp_lookup_in_bucket( app_b, key, 0, &e, &found_b ))
-            goto found;
+        BOOL ok = (app_b && uwp_lookup_in_bucket( app_b, key, 0, &e, &found_b ));
+        TRACE( "uwp_rd_find_entry: app_b=%p ok=%d key=%s\n", app_b, ok, debugstr_w(key) );
+        if (ok) goto found;
     }
 
     /* Theme defaults (WinUI themeresources.xbf Dark/Default) */
@@ -6654,6 +6659,7 @@ static void uwp_rd_store_stack_val( struct uwp_rd_bucket *b, const WCHAR *key, s
 {
     struct uwp_rd_entry *e;
     if (!b || !key || !key[0] || !sv) return;
+    TRACE( "uwp_rd_store_stack_val b=%p key=%s kind=%d dval=%f\n", b, debugstr_w(key), sv->kind, sv->dval );
     e = rd_bucket_upsert( b, key );
     if (!e) return;
 
@@ -7464,10 +7470,17 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     el->brush_argb = sv.argb;
                     el->has_brush_argb = TRUE;
                 }
-                if (is_rd_type && op == 0x17 && active_rd)
+                if (is_rd_type)
                 {
-                    el->rd_bucket = active_rd;
-                    active_rd->owner_el = el;
+                    if (op == 0x17 && active_rd)
+                    {
+                        el->rd_bucket = active_rd;
+                        active_rd->owner_el = el;
+                    }
+                    else
+                    {
+                        uwp_rd_bucket_for_el( el, TRUE );
+                    }
                 }
             }
             sv.el = el;
@@ -7667,12 +7680,16 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 else
                 {
                     struct uwp_rd_bucket *dest_rd = NULL;
-                    if (parent_el && (parent_el->kind != UWP_KIND_RESOURCE_DICT || !active_rd))
+                    if (parent_el && parent_el->kind == UWP_KIND_RESOURCE_DICT)
                         dest_rd = uwp_rd_bucket_for_el( parent_el, TRUE );
                     else
-                        dest_rd = active_rd ? active_rd : uwp_rd_bucket_for_el( parent_el, TRUE );
+                        dest_rd = active_rd ? active_rd : (parent_el ? uwp_rd_bucket_for_el( parent_el, TRUE ) : NULL);
                     if (dest_rd)
+                    {
                         uwp_rd_store_stack_val( dest_rd, kbuf, &last_popped );
+                        if (active_rd && active_rd != dest_rd)
+                            uwp_rd_store_stack_val( active_rd, kbuf, &last_popped );
+                    }
                 }
             }
             free( last_popped.setters );
@@ -7721,55 +7738,83 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
         {
             WORD pid = 0;
             if (p + 2 <= end_p) { pid = *(const WORD *)(ctx->nodes + p); p += 2; }
-            if (has_last_popped && obj_sp > 0 && obj_stack[obj_sp - 1])
+            TRACE( "xbf-trace: op=0x07 pid=%#x has_last=%d last_el=%p\n",
+                   pid, has_last_popped, last_popped.el );
+            if (has_last_popped)
             {
-                struct uwp_element *parent_el = obj_stack[obj_sp - 1];
-                if (last_popped.kind == UWP_RD_BRUSH || last_popped.kind == UWP_RD_COLOR)
+                struct uwp_element *parent_el = (obj_sp > 0) ? obj_stack[obj_sp - 1] : NULL;
+                BOOL is_dict = (last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT);
+                struct uwp_rd_bucket *child_rd = last_popped.el ? uwp_rd_bucket_for_el( last_popped.el, FALSE ) : NULL;
+
+                if (is_dict || child_rd)
                 {
-                    UINT32 argb = 0;
-                    BOOL got = FALSE;
-                    if (last_popped.has_argb)
+                    struct uwp_rd_bucket *dest_b = (parent_el && parent_el->kind == UWP_KIND_RESOURCE_DICT)
+                        ? uwp_rd_bucket_for_el( parent_el, TRUE )
+                        : (active_rd ? active_rd : ctx->target_rd);
+                    if (!child_rd && last_popped.el)
+                        child_rd = uwp_rd_bucket_for_el( last_popped.el, TRUE );
+                    if (dest_b && child_rd && dest_b != child_rd)
                     {
-                        argb = apply_opacity_to_argb( last_popped.argb, last_popped.opacity );
-                        got = TRUE;
-                    }
-                    else if (last_popped.str_val[0] &&
-                             uwp_resolve_brush_or_color( active_rd ? active_rd : ctx->target_rd, parent_el,
-                                                         last_popped.str_val, 0, &argb ))
-                    {
-                        argb = apply_opacity_to_argb( argb, last_popped.opacity );
-                        got = TRUE;
-                    }
-                    else if (last_popped.el && last_popped.el->has_brush_argb)
-                    {
-                        argb = apply_opacity_to_argb( last_popped.el->brush_argb, last_popped.el->brush_opacity );
-                        got = TRUE;
-                    }
-                    if (got)
-                    {
-                        if (uwp_is_bg_pid( pid )) uwp_el_set_bg_argb( parent_el, argb );
-                        else if (uwp_is_fg_pid( pid )) uwp_el_set_fg_argb( parent_el, argb );
-                        else if (uwp_is_border_pid( pid )) uwp_el_set_border_argb( parent_el, argb );
+                        if (pid == 0x82b1) /* ThemeDictionaries */
+                            uwp_rd_link_theme( dest_b, (last_popped.el && last_popped.el->name[0]) ? last_popped.el->name : L"Default", child_rd );
+                        else
+                            uwp_rd_link_merged( dest_b, child_rd );
+                        TRACE( "xbf-res: linked child_rd %p into dest_b %p (parent_el %p pid %#x)\n",
+                               child_rd, dest_b, parent_el, pid );
                     }
                 }
-                else if (last_popped.kind == UWP_RD_STYLE && pid == 0x8195)
+                else if (parent_el)
                 {
-                    int si;
-                    if (last_popped.based_on[0])
-                        uwp_apply_style_by_name( ctx, parent_el, last_popped.based_on );
-                    for (si = 0; si < last_popped.setter_cnt; si++)
+                    if (last_popped.kind == UWP_RD_BRUSH || last_popped.kind == UWP_RD_COLOR)
                     {
-                        const struct uwp_style_setter *st = &last_popped.setters[si];
-                        xbf_apply_property( ctx, parent_el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
+                        UINT32 argb = 0;
+                        BOOL got = FALSE;
+                        if (last_popped.has_argb)
+                        {
+                            argb = apply_opacity_to_argb( last_popped.argb, last_popped.opacity );
+                            got = TRUE;
+                        }
+                        else if (last_popped.str_val[0] &&
+                                 uwp_resolve_brush_or_color( active_rd ? active_rd : ctx->target_rd, parent_el,
+                                                             last_popped.str_val, 0, &argb ))
+                        {
+                            argb = apply_opacity_to_argb( argb, last_popped.opacity );
+                            got = TRUE;
+                        }
+                        else if (last_popped.el && last_popped.el->has_brush_argb)
+                        {
+                            argb = apply_opacity_to_argb( last_popped.el->brush_argb, last_popped.el->brush_opacity );
+                            got = TRUE;
+                        }
+                        if (got)
+                        {
+                            if (uwp_is_bg_pid( pid )) uwp_el_set_bg_argb( parent_el, argb );
+                            else if (uwp_is_fg_pid( pid )) uwp_el_set_fg_argb( parent_el, argb );
+                            else if (uwp_is_border_pid( pid )) uwp_el_set_border_argb( parent_el, argb );
+                        }
                     }
-                }
-                else if (last_popped.raw &&
-                         (pid == 0x8340 || pid == 0x83e7 || pid == 0x8134 || pid == 0x829c || !parent_el->content))
-                {
-                    if (parent_el->content) IInspectable_Release( parent_el->content );
-                    parent_el->content = last_popped.raw;
-                    IInspectable_AddRef( last_popped.raw );
-                    if (last_popped.el) last_popped.el->parent = parent_el;
+                    else if (last_popped.kind == UWP_RD_STYLE && pid == 0x8195)
+                    {
+                        int si;
+                        if (last_popped.based_on[0])
+                            uwp_apply_style_by_name( ctx, parent_el, last_popped.based_on );
+                        for (si = 0; si < last_popped.setter_cnt; si++)
+                        {
+                            const struct uwp_style_setter *st = &last_popped.setters[si];
+                            xbf_apply_property( ctx, parent_el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
+                        }
+                    }
+                    else if (last_popped.raw &&
+                             last_popped.kind != UWP_KIND_STYLE &&
+                             last_popped.kind != UWP_KIND_BRUSH &&
+                             last_popped.kind != UWP_KIND_COLOR &&
+                             (pid == 0x8340 || pid == 0x83e7 || pid == 0x8134 || pid == 0x829c || !parent_el->content))
+                    {
+                        if (parent_el->content) IInspectable_Release( parent_el->content );
+                        parent_el->content = last_popped.raw;
+                        IInspectable_AddRef( last_popped.raw );
+                        if (last_popped.el) last_popped.el->parent = parent_el;
+                    }
                 }
             }
             free( last_popped.setters );
@@ -7949,74 +7994,12 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                         }
                     }
                 }
-                /* Advance past optional footer (c2..c6) if clean, else scan to end marker */
+                /* Skip table terminator 0x00... 0x02 (EndOfProperty) if present */
+                while (p < end_p && ctx->nodes[p] == 0x00) p++;
+                if (p < end_p && ctx->nodes[p] == 0x02)
                 {
-                    DWORD saved_p = p, c2 = 0, c3 = 0, c4 = 0, c5 = 0, c6 = 0;
-                    BOOL skipped = FALSE;
-                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c2 ) && p + c2 * 2 <= end_p)
-                    {
-                        p += c2 * 2;
-                        if (xbf_read_uleb( ctx->nodes, &p, end_p, &c3 ) && c3 == 0 &&
-                            xbf_read_uleb( ctx->nodes, &p, end_p, &c4 ))
-                        {
-                            DWORD k;
-                            BOOL ok4 = TRUE;
-                            for (k = 0; k < c4; k++)
-                            {
-                                DWORD n4 = 0, j;
-                                if (p + 2 > end_p) { ok4 = FALSE; break; }
-                                p += 2;
-                                if (!xbf_read_uleb( ctx->nodes, &p, end_p, &n4 )) { ok4 = FALSE; break; }
-                                for (j = 0; j < n4; j++)
-                                {
-                                    DWORD dummy = 0;
-                                    if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy )) { ok4 = FALSE; break; }
-                                }
-                                if (!ok4) break;
-                            }
-                            if (ok4 && xbf_read_uleb( ctx->nodes, &p, end_p, &c5 ) && c5 == 0 &&
-                                xbf_read_uleb( ctx->nodes, &p, end_p, &c6 ))
-                            {
-                                BOOL ok6 = TRUE;
-                                for (k = 0; k < c6; k++)
-                                {
-                                    DWORD dummy = 0, n6 = 0;
-                                    if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy ) ||
-                                        !xbf_read_uleb( ctx->nodes, &p, end_p, &n6 ) ||
-                                        p + n6 * 4 > end_p)
-                                    {
-                                        ok6 = FALSE;
-                                        break;
-                                    }
-                                    p += n6 * 4;
-                                }
-                                if (ok6) skipped = TRUE;
-                            }
-                        }
-                    }
-                    if (!skipped)
-                    {
-                        p = saved_p;
-                        while (p < end_p)
-                        {
-                            if (p + 1 < end_p && p >= 2 &&
-                                ctx->nodes[p - 2] == 0x00 && ctx->nodes[p - 1] == 0x00 &&
-                                ctx->nodes[p] == 0x21 &&
-                                (ctx->nodes[p + 1] == 0x0a || ctx->nodes[p + 1] == 0x07))
-                                break;
-                            if (ctx->nodes[p] == 0x21 && p + 1 == end_p)
-                                break;
-                            if (ctx->nodes[p] == 0x02 &&
-                                (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14 ||
-                                 ctx->nodes[p + 1] == 0x15 || ctx->nodes[p + 1] == 0x21 || ctx->nodes[p + 1] == 0x12))
-                            {
-                                p++;
-                                if (prop_sp > 0) prop_sp--;
-                                break;
-                            }
-                            p++;
-                        }
-                    }
+                    p++;
+                    if (prop_sp > 0) prop_sp--;
                 }
                 if (obj_sp > 0 && obj_stack[obj_sp - 1])
                     sub_rd = uwp_rd_bucket_for_el( obj_stack[obj_sp - 1], TRUE );
@@ -8053,8 +8036,16 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     continue;
                 }
             }
-            TRACE( "XBF unrecognized op=%#x at %lu/%lu (sub %d)\n", op, (unsigned long)cur_rel_off, (unsigned long)end_p, sub_idx );
-            break;
+            TRACE( "XBF unrecognized op=%#x at %lu/%lu (sub %d), scanning forward\n",
+                   op, (unsigned long)cur_rel_off, (unsigned long)end_p, sub_idx );
+            while (p < end_p)
+            {
+                if (ctx->nodes[p] == 0x21 || ctx->nodes[p] == 0x07 || ctx->nodes[p] == 0x08 ||
+                    ctx->nodes[p] == 0x14 || ctx->nodes[p] == 0x15)
+                    break;
+                p++;
+            }
+            if (p >= end_p) break;
         }
     }
 
@@ -8064,12 +8055,6 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
         free( val_stack[obj_sp].setters );
     }
     free( last_popped.setters );
-}
-
-static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_element *initial_root,
-                                struct uwp_element **out_created )
-{
-    xbf_exec_substream_rd( ctx, sub_idx, initial_root, out_created, NULL, ctx->target_rd );
 }
 
 static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
@@ -8229,7 +8214,7 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
     }
     else if (rd_only && target_rd)
     {
-        /* Also follow any explicit *ResourceDictionary*.xaml / *Themes/*.xaml strings referenced in this RD */
+        /* Also follow any explicit ResourceDictionary.xaml / Themes XAML strings referenced in this RD */
         for (i = 0; i < ctx.str_cnt; i++)
         {
             const WCHAR *s = ctx.strs[i];
