@@ -724,6 +724,221 @@ static void test_FileAttributes(void)
     DeleteFileW( temp_file );
 }
 
+static HSTRING test_make_hstring( const WCHAR *s )
+{
+    HSTRING h = NULL;
+    WindowsCreateString( s, wcslen( s ), &h );
+    return h;
+}
+
+struct test_data_changed_handler
+{
+    const struct ITypedEventHandler_ApplicationData_IInspectableVtbl *lpVtbl;
+    LONG ref;
+    LONG fired;
+};
+
+static HRESULT WINAPI data_changed_QueryInterface( ITypedEventHandler_ApplicationData_IInspectable *iface,
+                                                   REFIID riid, void **obj )
+{
+    if (IsEqualGUID( riid, &IID_IUnknown ) ||
+        IsEqualGUID( riid, &IID_ITypedEventHandler_ApplicationData_IInspectable ))
+    {
+        *obj = iface;
+        ITypedEventHandler_ApplicationData_IInspectable_AddRef( iface );
+        return S_OK;
+    }
+    *obj = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI data_changed_AddRef( ITypedEventHandler_ApplicationData_IInspectable *iface )
+{
+    struct test_data_changed_handler *h = (void *)iface;
+    return InterlockedIncrement( &h->ref );
+}
+static ULONG WINAPI data_changed_Release( ITypedEventHandler_ApplicationData_IInspectable *iface )
+{
+    struct test_data_changed_handler *h = (void *)iface;
+    return InterlockedDecrement( &h->ref );
+}
+static HRESULT WINAPI data_changed_Invoke( ITypedEventHandler_ApplicationData_IInspectable *iface,
+                                           IApplicationData *sender, IInspectable *args )
+{
+    struct test_data_changed_handler *h = (void *)iface;
+    h->fired++;
+    return S_OK;
+}
+static const struct ITypedEventHandler_ApplicationData_IInspectableVtbl data_changed_vtbl =
+{
+    data_changed_QueryInterface, data_changed_AddRef, data_changed_Release, data_changed_Invoke,
+};
+
+static void test_ApplicationDataSettings( void )
+{
+    static const WCHAR class_name[] = L"Windows.Storage.ApplicationData";
+    static const WCHAR pv_class[] = L"Windows.Foundation.PropertyValue";
+    IApplicationDataStatics *statics = NULL;
+    IPropertyValueStatics *pv_statics = NULL;
+    IApplicationDataContainer *container = NULL;
+    IApplicationData *appdata = NULL;
+    IPropertyValue *pv = NULL;
+    IPropertySet *values = NULL;
+    struct test_data_changed_handler handler = { &data_changed_vtbl, 1, 0 };
+    IInspectable *str_val = NULL, *i64_val = NULL, *bool_val = NULL, *val = NULL;
+    EventRegistrationToken token;
+    HSTRING str = NULL, key1 = NULL, key2 = NULL, key3 = NULL;
+    WCHAR path[MAX_PATH], name[MAX_PATH], subkey[512], *p;
+    PropertyType type;
+    INT64 i64;
+    boolean b, replaced;
+    unsigned int size;
+    HRESULT hr;
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IApplicationDataStatics, (void **)&statics );
+    WindowsDeleteString( str );
+    ok( hr == S_OK || broken( hr == REGDB_E_CLASSNOTREG ), "got hr %#lx.\n", hr );
+    if (hr == REGDB_E_CLASSNOTREG)
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        return;
+    }
+
+    hr = WindowsCreateString( pv_class, wcslen( pv_class ), &str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = RoGetActivationFactory( str, &IID_IPropertyValueStatics, (void **)&pv_statics );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    /* clean slate for the per-package Settings key */
+    GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
+    if ((p = wcsrchr( path, L'\\' ))) p++;
+    else p = path;
+    lstrcpyW( name, p );
+    if ((p = wcsrchr( name, L'.' ))) *p = 0;
+    wsprintfW( subkey, L"Software\\%s\\Settings", name );
+    RegDeleteTreeW( HKEY_CURRENT_USER, subkey );
+
+    hr = IApplicationDataStatics_get_Current( statics, &appdata );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    {
+        HSTRING sval = test_make_hstring( L"wine-settings-test" );
+        hr = IPropertyValueStatics_CreateString( pv_statics, sval, &str_val );
+        WindowsDeleteString( sval );
+    }
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IPropertyValueStatics_CreateInt64( pv_statics, 0x1122334455667788, &i64_val );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IPropertyValueStatics_CreateBoolean( pv_statics, TRUE, &bool_val );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    key1 = test_make_hstring( L"wine_str" );
+    key2 = test_make_hstring( L"wine_i64" );
+    key3 = test_make_hstring( L"wine_bool" );
+
+    /* first touch: insert string + int64 + bool through LocalSettings Values */
+    hr = IApplicationData_get_LocalSettings( appdata, &container );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IApplicationDataContainer_get_Values( container, &values );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IMap_HSTRING_IInspectable_Insert( (IMap_HSTRING_IInspectable *)values, key1, str_val, &replaced );
+    ok( hr == S_OK && !replaced, "got hr %#lx, replaced %d.\n", hr, replaced );
+    hr = IMap_HSTRING_IInspectable_Insert( (IMap_HSTRING_IInspectable *)values, key2, i64_val, &replaced );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IMap_HSTRING_IInspectable_Insert( (IMap_HSTRING_IInspectable *)values, key3, bool_val, &replaced );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    IPropertySet_Release( values );
+    IApplicationDataContainer_Release( container );
+
+    /* reload: a fresh container + fresh Values map must see the same values
+     * (registry write-through + load-on-first-touch) */
+    hr = IApplicationData_get_LocalSettings( appdata, &container );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IApplicationDataContainer_get_Values( container, &values );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IMap_HSTRING_IInspectable_get_Size( (IMap_HSTRING_IInspectable *)values, &size );
+    ok( hr == S_OK && size == 3, "got hr %#lx, size %u.\n", hr, size );
+
+    hr = IMap_HSTRING_IInspectable_Lookup( (IMap_HSTRING_IInspectable *)values, key1, &val );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&pv );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IPropertyValue_get_Type( pv, &type );
+    ok( hr == S_OK && type == PropertyType_String, "got hr %#lx, type %d.\n", hr, type );
+    {
+        HSTRING s = NULL;
+        hr = IPropertyValue_GetString( pv, &s );
+        ok( hr == S_OK && s && !wcscmp( WindowsGetStringRawBuffer( s, NULL ), L"wine-settings-test" ),
+            "got hr %#lx.\n", hr );
+        WindowsDeleteString( s );
+    }
+    IPropertyValue_Release( pv );
+    IInspectable_Release( val );
+
+    hr = IMap_HSTRING_IInspectable_Lookup( (IMap_HSTRING_IInspectable *)values, key2, &val );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&pv );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IPropertyValue_get_Type( pv, &type );
+    ok( hr == S_OK && type == PropertyType_Int64, "got hr %#lx, type %d.\n", hr, type );
+    hr = IPropertyValue_GetInt64( pv, &i64 );
+    ok( hr == S_OK && i64 == 0x1122334455667788, "got hr %#lx, i64 %s.\n", hr, wine_dbgstr_longlong( i64 ) );
+    IPropertyValue_Release( pv );
+    IInspectable_Release( val );
+
+    hr = IMap_HSTRING_IInspectable_Lookup( (IMap_HSTRING_IInspectable *)values, key3, &val );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IInspectable_QueryInterface( val, &IID_IPropertyValue, (void **)&pv );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IPropertyValue_get_Type( pv, &type );
+    ok( hr == S_OK && type == PropertyType_Boolean, "got hr %#lx, type %d.\n", hr, type );
+    b = FALSE;
+    hr = IPropertyValue_GetBoolean( pv, &b );
+    ok( hr == S_OK && b, "got hr %#lx, b %d.\n", hr, b );
+    IPropertyValue_Release( pv );
+    IInspectable_Release( val );
+
+    /* DataChanged: handler fires in-process on a write, stops after remove */
+    handler.lpVtbl = &data_changed_vtbl;
+    handler.ref = 1;
+    handler.fired = 0;
+    hr = IApplicationData_add_DataChanged( appdata, (ITypedEventHandler_ApplicationData_IInspectable *)&handler,
+                                          &token );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+
+    hr = IMap_HSTRING_IInspectable_Insert( (IMap_HSTRING_IInspectable *)values, key2, i64_val, &replaced );
+    ok( hr == S_OK && replaced, "got hr %#lx, replaced %d.\n", hr, replaced );
+    ok( handler.fired == 1, "got fired %ld.\n", handler.fired );
+
+    hr = IApplicationData_remove_DataChanged( appdata, token );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    hr = IApplicationData_SignalDataChanged( appdata );
+    ok( hr == S_OK, "got hr %#lx.\n", hr );
+    ok( handler.fired == 1, "got fired %ld.\n", handler.fired );
+
+    IMap_HSTRING_IInspectable_Clear( (IMap_HSTRING_IInspectable *)values );
+    hr = IMap_HSTRING_IInspectable_get_Size( (IMap_HSTRING_IInspectable *)values, &size );
+    ok( hr == S_OK && size == 0, "got hr %#lx, size %u.\n", hr, size );
+
+    RegDeleteTreeW( HKEY_CURRENT_USER, subkey );
+
+    WindowsDeleteString( key1 );
+    WindowsDeleteString( key2 );
+    WindowsDeleteString( key3 );
+    IPropertySet_Release( values );
+    IApplicationDataContainer_Release( container );
+    IInspectable_Release( str_val );
+    IInspectable_Release( i64_val );
+    IInspectable_Release( bool_val );
+    IApplicationData_Release( appdata );
+    IPropertyValueStatics_Release( pv_statics );
+    IApplicationDataStatics_Release( statics );
+}
+
 START_TEST(storage)
 {
     HRESULT hr;
@@ -737,6 +952,10 @@ START_TEST(storage)
     test_DataReader_DataWriter();
     test_StorageFile_StorageFolder();
     test_FileAttributes();
+    /* Kept ahead of test_FileIO_PathIO: that test crashes the process at
+     * storage.c:409 on the current baseline, which would cut off everything
+     * scheduled after it. */
+    test_ApplicationDataSettings();
     test_FileIO_PathIO();
     test_CollisionOptions_StreamContentType();
 

@@ -384,6 +384,8 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_ActivateInstance,
 };
 
+struct data_changed_entry;
+
 struct application_data
 {
     IApplicationData IApplicationData_iface;
@@ -393,6 +395,8 @@ struct application_data
     LONG ref;
     struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
     ULONG iids_count;
+    struct data_changed_entry *handlers;    /* DataChanged registrations, see application_data_fire_data_changed */
+    LONG next_data_changed_token;
 };
 
 static inline struct application_data *impl_from_IApplicationData( IApplicationData *iface )
@@ -551,12 +555,644 @@ static HRESULT WINAPI application_data_ClearAsync( IApplicationData *iface, Appl
     return E_NOTIMPL;
 }
 
+/* DataChanged registrations on the Current singleton. Single-process scope:
+ * handlers added via add_DataChanged fire in-process when this process writes
+ * through LocalSettings/RoamingSettings Values::Insert (and on explicit
+ * SignalDataChanged). Real UWP fires across processes on the settings
+ * container change; here the registry is the shared store and the fan-out is
+ * process-local (documented limitation). Push list, walk under no lock: the
+ * appdata chain is exercised from the UI thread. */
+struct data_changed_entry
+{
+    ITypedEventHandler_ApplicationData_IInspectable *handler;
+    EventRegistrationToken token;
+    struct data_changed_entry *next;
+};
+
+static void application_data_fire_data_changed( struct application_data *impl )
+{
+    struct data_changed_entry *entry;
+
+    for (entry = impl->handlers; entry; entry = entry->next)
+        ITypedEventHandler_ApplicationData_IInspectable_Invoke( entry->handler,
+                                                                &impl->IApplicationData_iface, NULL );
+}
+
+/* ---- per-package identity + settings persistence -----------------------
+ *
+ * Package key = WINE_PACKAGE_FAMILY_NAME (set by the lane launcher for
+ * packaged apps, kernelbase appmodel pattern of 36782d4f). Unpackaged
+ * fallback = exe base name without extension, mirroring the
+ * %LOCALAPPDATA%\<exe> convention.
+ *
+ * Settings containers persist to HKCU\Software\<key>\Settings (Local) and
+ * ...\RoamingSettings (Roaming) as
+ *   String -> REG_SZ
+ *   Boolean/UInt8/Int16/UInt16/Int32/UInt32 -> REG_DWORD
+ *   Int64/UInt64/DateTime/TimeSpan -> REG_QWORD (decoded back as Int64)
+ *   Single/Double/Char16/Guid -> REG_BINARY (decoded back by size)
+ * Composite (Inspectable) values stay in-memory only. Load-on-first-touch:
+ * every fresh Values map (one per get_Values call, see container_get_Values)
+ * reads the whole key; every Insert writes through immediately. */
+
+static void get_package_name( WCHAR *buf, DWORD size )
+{
+    static const WCHAR env_name[] = L"WINE_PACKAGE_FAMILY_NAME";
+    WCHAR path[MAX_PATH], *p;
+    DWORD len;
+
+    len = GetEnvironmentVariableW( env_name, buf, size );
+    if (len && len < size) return;
+
+    len = GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
+    if (!len || len >= ARRAY_SIZE(path))
+    {
+        lstrcpynW( buf, L"Windows", size );
+        return;
+    }
+    if ((p = wcsrchr( path, L'\\' ))) p++;
+    else p = path;
+    lstrcpynW( buf, p, size );
+    if ((p = wcsrchr( buf, L'.' )) && p > buf) *p = 0; /* strip .exe */
+}
+
+static void settings_subkey( ApplicationDataLocality locality, WCHAR *buf, DWORD size )
+{
+    WCHAR name[MAX_PATH];
+
+    get_package_name( name, ARRAY_SIZE(name) );
+    lstrcpynW( buf, L"Software\\", size );
+    lstrcatW( buf, name );
+    lstrcatW( buf, locality == ApplicationDataLocality_Roaming ? L"\\RoamingSettings" : L"\\Settings" );
+}
+
+static HRESULT property_value_statics( IPropertyValueStatics **out )
+{
+    static IPropertyValueStatics *cache;
+    HSTRING class_id;
+    HRESULT hr;
+
+    if (cache)
+    {
+        *out = cache;
+        return S_OK;
+    }
+    if (FAILED(hr = WindowsCreateString( RuntimeClass_Windows_Foundation_PropertyValue,
+                                         ARRAY_SIZE(RuntimeClass_Windows_Foundation_PropertyValue) - 1,
+                                         &class_id ))) return hr;
+    hr = RoGetActivationFactory( class_id, &IID_IPropertyValueStatics, (void **)&cache );
+    WindowsDeleteString( class_id );
+    if (FAILED(hr)) return hr;
+    *out = cache;
+    return S_OK;
+}
+
+/* Box a registry value into the WinRT type the map contract expects. */
+static HRESULT reg_value_box( IPropertyValueStatics *statics, DWORD type, const BYTE *data, DWORD len,
+                              IInspectable **out )
+{
+    switch (type)
+    {
+    case REG_SZ:
+    {
+        HSTRING str = NULL;
+        HRESULT hr2;
+        if (FAILED(hr2 = WindowsCreateString( (const WCHAR *)data, wcslen((const WCHAR *)data), &str )))
+            return hr2;
+        hr2 = IPropertyValueStatics_CreateString( statics, str, out );
+        WindowsDeleteString( str );
+        return hr2;
+    }
+    case REG_DWORD:
+    {
+        DWORD v;
+        if (len < sizeof(v)) return E_FAIL;
+        memcpy( &v, data, sizeof(v) );
+        return IPropertyValueStatics_CreateInt32( statics, (INT32)v, out );
+    }
+    case REG_QWORD:
+    {
+        INT64 v;
+        if (len < sizeof(v)) return E_FAIL;
+        memcpy( &v, data, sizeof(v) );
+        return IPropertyValueStatics_CreateInt64( statics, v, out );
+    }
+    case REG_BINARY:
+    {
+        if (len == 1)
+        {
+            if (!data[0]) return IPropertyValueStatics_CreateBoolean( statics, FALSE, out );
+            return IPropertyValueStatics_CreateBoolean( statics, TRUE, out );
+        }
+        if (len == sizeof(WCHAR))
+        {
+            WCHAR c;
+            memcpy( &c, data, sizeof(c) );
+            return IPropertyValueStatics_CreateChar16( statics, c, out );
+        }
+        if (len == sizeof(FLOAT))
+        {
+            FLOAT f;
+            memcpy( &f, data, sizeof(f) );
+            return IPropertyValueStatics_CreateSingle( statics, f, out );
+        }
+        if (len == sizeof(DOUBLE))
+        {
+            DOUBLE d;
+            memcpy( &d, data, sizeof(d) );
+            return IPropertyValueStatics_CreateDouble( statics, d, out );
+        }
+        if (len == sizeof(GUID))
+        {
+            GUID g;
+            memcpy( &g, data, sizeof(g) );
+            return IPropertyValueStatics_CreateGuid( statics, g, out );
+        }
+        break;
+    }
+    }
+    return E_FAIL;
+}
+
+/* The IPropertySet C face exposes only the six IInspectable slots; the map
+ * methods live in slots 6-12 of the merged face (IMap<HSTRING,IInspectable>
+ * layout, wintypes propertyset precedent). Cast to the map face to reach them. */
+#define IMAPFACE(p) ((IMap_HSTRING_IInspectable *)(p))
+
+static void reg_load_values( HKEY hkey, IPropertySet *map )
+{
+    IPropertyValueStatics *statics = NULL;
+    WCHAR name[256];
+    BYTE data[512];
+    DWORD i, namelen, dlen, type;
+    LONG status;
+
+    if (FAILED(property_value_statics(&statics))) return;
+
+    for (i = 0; ; i++)
+    {
+        IInspectable *box = NULL;
+        HSTRING key = NULL;
+
+        namelen = ARRAY_SIZE(name);
+        dlen = sizeof(data);
+        type = 0;
+        if ((status = RegEnumValueW( hkey, i, name, &namelen, NULL, &type, data, &dlen )) != ERROR_SUCCESS)
+        {
+            TRACE( "load: enum %lu status %ld\n", i, status );
+            break;
+        }
+        if (type == REG_SZ)
+        {
+            /* RegEnumValueW reports the byte count without the terminating
+             * NUL; ensure termination within the buffer before boxing. */
+            WCHAR *s = (WCHAR *)data;
+            DWORD chars = dlen / sizeof(WCHAR);
+            if (chars && s[chars - 1])
+            {
+                if (chars < ARRAY_SIZE(data) / sizeof(WCHAR)) s[chars] = 0;
+                else s[ARRAY_SIZE(data) / sizeof(WCHAR) - 1] = 0;
+            }
+        }
+        if (FAILED(reg_value_box( statics, type, data, dlen, &box )))
+        {
+            TRACE( "load: box value %s type %ld len %ld failed\n", debugstr_w(name), type, dlen );
+            continue;
+        }
+        if (SUCCEEDED(WindowsCreateString( name, wcslen(name), &key )))
+        {
+            boolean replaced;
+            HRESULT hr2 = IMap_HSTRING_IInspectable_Insert( IMAPFACE(map), key, box, &replaced );
+            TRACE( "load: inserted %s type %ld hr %#lx\n", debugstr_w(name), type, hr2 );
+            WindowsDeleteString( key );
+        }
+        IInspectable_Release( box );
+    }
+}
+
+static void reg_store_value( HKEY hkey, HSTRING key, IInspectable *value )
+{
+    IPropertyValue *pv = NULL;
+    PropertyType type;
+    LONG status;
+
+    if (FAILED(IInspectable_QueryInterface( value, &IID_IPropertyValue, (void **)&pv )))
+        return; /* composite Inspectable value: in-memory only */
+
+    if (FAILED(IPropertyValue_get_Type( pv, &type )))
+    {
+        IPropertyValue_Release( pv );
+        return;
+    }
+
+    switch (type)
+    {
+    case PropertyType_String:
+    {
+        HSTRING s = NULL;
+        if (SUCCEEDED(IPropertyValue_GetString( pv, &s )))
+        {
+            const WCHAR *w = WindowsGetStringRawBuffer( s, NULL );
+            status = RegSetValueExW( hkey, WindowsGetStringRawBuffer( key, NULL ), 0, REG_SZ,
+                                     (const BYTE *)w, (DWORD)((wcslen(w) + 1) * sizeof(WCHAR)) );
+            WindowsDeleteString( s );
+        }
+        break;
+    }
+    case PropertyType_Boolean:
+    {
+        boolean b = FALSE;
+        BYTE v;
+        if (SUCCEEDED(IPropertyValue_GetBoolean( pv, &b )))
+        {
+            /* REG_BINARY keeps Boolean distinguishable from the integer types
+             * on decode (REG_DWORD round-trips as Int32). */
+            v = b ? 1 : 0;
+            status = RegSetValueExW( hkey, WindowsGetStringRawBuffer(key, NULL), 0, REG_BINARY,
+                                     &v, sizeof(v) );
+        }
+        break;
+    }
+    case PropertyType_UInt8:
+    case PropertyType_Int16:
+    case PropertyType_UInt16:
+    case PropertyType_Int32:
+    case PropertyType_UInt32:
+    {
+        INT32 v = 0;
+        if (type == PropertyType_UInt8)
+        {
+            BYTE b;
+            if (SUCCEEDED(IPropertyValue_GetUInt8( pv, &b ))) v = b;
+            else break;
+        }
+        else if (type == PropertyType_Int16)
+        {
+            INT16 s;
+            if (SUCCEEDED(IPropertyValue_GetInt16( pv, &s ))) v = s;
+            else break;
+        }
+        else if (type == PropertyType_UInt16)
+        {
+            UINT16 u;
+            if (SUCCEEDED(IPropertyValue_GetUInt16( pv, &u ))) v = u;
+            else break;
+        }
+        else if (type == PropertyType_Int32)
+        {
+            if (FAILED(IPropertyValue_GetInt32( pv, &v ))) break;
+        }
+        else
+        {
+            UINT32 u = 0;
+            if (SUCCEEDED(IPropertyValue_GetUInt32( pv, &u ))) v = (INT32)u;
+            else break;
+        }
+        status = RegSetValueExW( hkey, WindowsGetStringRawBuffer(key, NULL), 0, REG_DWORD,
+                                 (const BYTE *)&v, sizeof(v) );
+        break;
+    }
+    case PropertyType_Int64:
+    case PropertyType_UInt64:
+    case PropertyType_DateTime:
+    case PropertyType_TimeSpan:
+    {
+        INT64 v = 0;
+        if (type == PropertyType_Int64)
+        {
+            if (FAILED(IPropertyValue_GetInt64( pv, &v ))) break;
+        }
+        else if (type == PropertyType_UInt64)
+        {
+            UINT64 u = 0;
+            if (SUCCEEDED(IPropertyValue_GetUInt64( pv, &u ))) v = (INT64)u;
+            else break;
+        }
+        else if (type == PropertyType_DateTime)
+        {
+            DateTime dt;
+            if (SUCCEEDED(IPropertyValue_GetDateTime( pv, &dt ))) v = dt.UniversalTime;
+            else break;
+        }
+        else
+        {
+            TimeSpan ts;
+            if (SUCCEEDED(IPropertyValue_GetTimeSpan( pv, &ts ))) v = ts.Duration;
+            else break;
+        }
+        status = RegSetValueExW( hkey, WindowsGetStringRawBuffer(key, NULL), 0, REG_QWORD,
+                                 (const BYTE *)&v, sizeof(v) );
+        break;
+    }
+    case PropertyType_Single:
+    {
+        FLOAT f = 0;
+        if (SUCCEEDED(IPropertyValue_GetSingle( pv, &f )))
+            status = RegSetValueExW( hkey, WindowsGetStringRawBuffer(key, NULL), 0, REG_BINARY,
+                                     (const BYTE *)&f, sizeof(f) );
+        break;
+    }
+    case PropertyType_Double:
+    {
+        DOUBLE d = 0;
+        if (SUCCEEDED(IPropertyValue_GetDouble( pv, &d )))
+            status = RegSetValueExW( hkey, WindowsGetStringRawBuffer(key, NULL), 0, REG_BINARY,
+                                     (const BYTE *)&d, sizeof(d) );
+        break;
+    }
+    case PropertyType_Char16:
+    {
+        WCHAR c = 0;
+        if (SUCCEEDED(IPropertyValue_GetChar16( pv, &c )))
+            status = RegSetValueExW( hkey, WindowsGetStringRawBuffer(key, NULL), 0, REG_BINARY,
+                                     (const BYTE *)&c, sizeof(c) );
+        break;
+    }
+    case PropertyType_Guid:
+    {
+        GUID g = {0};
+        if (SUCCEEDED(IPropertyValue_GetGuid( pv, &g )))
+            status = RegSetValueExW( hkey, WindowsGetStringRawBuffer(key, NULL), 0, REG_BINARY,
+                                     (const BYTE *)&g, sizeof(g) );
+        break;
+    }
+    default:
+        break;
+    }
+    TRACE( "stored %s status %ld\n", debugstr_w( WindowsGetStringRawBuffer(key, NULL) ), status );
+    (void)status;
+    IPropertyValue_Release( pv );
+}
+
+/* Registry-backed IPropertySet. The live map is the wintypes PropertySet
+ * (in-memory map, probe-hardened CoreCLR face); this object delegates every
+ * slot to it and adds registry load-on-create + write-through on Insert /
+ * Remove / Clear, plus a DataChanged poke on the owning ApplicationData.
+ * Single merged face (0-14 slots, wintypes propertyset layout: IMap 6-12,
+ * IObservableMap add/remove_MapChanged 13-14, IIterable consumers call slot 6
+ * as First): QI of IPropertySet/IMap/IMapView/IIterable/IObservableMap all
+ * return this face, matching the provider the CoreCLR shader already
+ * consumed via the bare PropertySet. */
+struct settings_values
+{
+    IPropertySet IPropertySet_iface;
+    LONG ref;
+    IPropertySet *inner;
+    HKEY hkey;
+    struct application_data *owner;
+    struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
+    ULONG iids_count;
+};
+
+static inline struct settings_values *impl_from_IPropertySet( IPropertySet *iface )
+{
+    return CONTAINING_RECORD( iface, struct settings_values, IPropertySet_iface );
+}
+
+struct settings_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IPropertySet *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IPropertySet *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IPropertySet *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IPropertySet *iface, ULONG *count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IPropertySet *iface, HSTRING *name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IPropertySet *iface, TrustLevel *level );
+    HRESULT (STDMETHODCALLTYPE *Lookup)( IPropertySet *iface, HSTRING key, IInspectable **value );
+    HRESULT (STDMETHODCALLTYPE *get_Size)( IPropertySet *iface, unsigned int *size );
+    HRESULT (STDMETHODCALLTYPE *HasKey)( IPropertySet *iface, HSTRING key, boolean *found );
+    HRESULT (STDMETHODCALLTYPE *GetView)( IPropertySet *iface, IMapView_HSTRING_IInspectable **view );
+    HRESULT (STDMETHODCALLTYPE *Insert)( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced );
+    HRESULT (STDMETHODCALLTYPE *Remove)( IPropertySet *iface, HSTRING key );
+    HRESULT (STDMETHODCALLTYPE *Clear)( IPropertySet *iface );
+    HRESULT (STDMETHODCALLTYPE *add_MapChanged)( IPropertySet *iface, IMapChangedEventHandler_HSTRING_IInspectable *handler,
+                                                EventRegistrationToken *token );
+    HRESULT (STDMETHODCALLTYPE *remove_MapChanged)( IPropertySet *iface, EventRegistrationToken token );
+};
+
+static const struct settings_vtbl *settings_inner_vt( struct settings_values *impl )
+{
+    return (const struct settings_vtbl *)impl->inner->lpVtbl;
+}
+
+static HRESULT WINAPI settings_values_QueryInterface( IPropertySet *iface, REFIID iid, void **out )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPropertySet ) ||
+        IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ))
+    {
+        *out = &impl->IPropertySet_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    FIXME( "iid %s not implemented.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI settings_values_AddRef( IPropertySet *iface )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI settings_values_Release( IPropertySet *iface )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+
+    if (!ref)
+    {
+        if (impl->hkey) RegCloseKey( impl->hkey );
+        IPropertySet_Release( impl->inner );
+        CoTaskMemFree( impl->iids_cache );
+        free( impl );
+    }
+    return ref;
+}
+
+static const struct settings_vtbl settings_values_vtbl;
+
+static HRESULT WINAPI settings_values_GetIids( IPropertySet *iface, ULONG *count, IID **iids )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+
+    /* Stable per-object pair block, see application_data_GetIids (xamlwave9). */
+    if (!impl->iids_cache)
+    {
+        static const struct com_interface_entry entries[] =
+        {
+            { (void **)&settings_values_vtbl, (IID *)&IID_IPropertySet },
+        };
+        struct com_interface_entry *array = CoTaskMemAlloc( sizeof( entries ) );
+        if (!array) return E_OUTOFMEMORY;
+        memcpy( array, entries, sizeof( entries ) );
+        impl->iids_cache = array;
+        impl->iids_count = ARRAY_SIZE( entries );
+    }
+    if (count) *count = impl->iids_count;
+    if (iids) *iids = (IID *)impl->iids_cache;
+    return S_OK;
+}
+
+static HRESULT WINAPI settings_values_GetRuntimeClassName( IPropertySet *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Collections.PropertySet", 44, name );
+}
+
+static HRESULT WINAPI settings_values_GetTrustLevel( IPropertySet *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI settings_values_Lookup( IPropertySet *iface, HSTRING key, IInspectable **value )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    return settings_inner_vt( impl )->Lookup( impl->inner, key, value );
+}
+
+static HRESULT WINAPI settings_values_get_Size( IPropertySet *iface, unsigned int *size )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    HRESULT hr = settings_inner_vt( impl )->get_Size( impl->inner, size );
+    TRACE( "map %p get_Size hr %#lx size %u\n", impl, hr, size ? *size : 0 );
+    return hr;
+}
+
+static HRESULT WINAPI settings_values_HasKey( IPropertySet *iface, HSTRING key, boolean *found )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    return settings_inner_vt( impl )->HasKey( impl->inner, key, found );
+}
+
+static HRESULT WINAPI settings_values_GetView( IPropertySet *iface, IMapView_HSTRING_IInspectable **view )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    return settings_inner_vt( impl )->GetView( impl->inner, view );
+}
+
+static HRESULT WINAPI settings_values_Insert( IPropertySet *iface, HSTRING key, IInspectable *value, boolean *replaced )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    HRESULT hr;
+
+    if (!(hr = settings_inner_vt( impl )->Insert( impl->inner, key, value, replaced )))
+    {
+        if (impl->hkey) reg_store_value( impl->hkey, key, value );
+        if (impl->owner) application_data_fire_data_changed( impl->owner );
+    }
+    return hr;
+}
+
+static HRESULT WINAPI settings_values_Remove( IPropertySet *iface, HSTRING key )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    HRESULT hr;
+
+    if (!(hr = settings_inner_vt( impl )->Remove( impl->inner, key )))
+    {
+        if (impl->hkey) RegDeleteValueW( impl->hkey, WindowsGetStringRawBuffer( key, NULL ) );
+    }
+    return hr;
+}
+
+static HRESULT WINAPI settings_values_Clear( IPropertySet *iface )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    HRESULT hr;
+
+    if (!(hr = settings_inner_vt( impl )->Clear( impl->inner )))
+    {
+        if (impl->hkey) RegDeleteTreeW( impl->hkey, NULL );
+    }
+    return hr;
+}
+
+static HRESULT WINAPI settings_values_add_MapChanged( IPropertySet *iface, IMapChangedEventHandler_HSTRING_IInspectable *handler,
+                                                      EventRegistrationToken *token )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    return settings_inner_vt( impl )->add_MapChanged( impl->inner, handler, token );
+}
+
+static HRESULT WINAPI settings_values_remove_MapChanged( IPropertySet *iface, EventRegistrationToken token )
+{
+    struct settings_values *impl = impl_from_IPropertySet( iface );
+    return settings_inner_vt( impl )->remove_MapChanged( impl->inner, token );
+}
+
+static const struct settings_vtbl settings_values_vtbl =
+{
+    settings_values_QueryInterface,
+    settings_values_AddRef,
+    settings_values_Release,
+    settings_values_GetIids,
+    settings_values_GetRuntimeClassName,
+    settings_values_GetTrustLevel,
+    settings_values_Lookup,
+    settings_values_get_Size,
+    settings_values_HasKey,
+    settings_values_GetView,
+    settings_values_Insert,
+    settings_values_Remove,
+    settings_values_Clear,
+    settings_values_add_MapChanged,
+    settings_values_remove_MapChanged,
+};
+
+static HRESULT settings_values_create( struct application_data *owner, const WCHAR *subkey, IPropertySet **out )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.Collections.PropertySet";
+    struct settings_values *impl;
+    HSTRING class_id;
+    HRESULT hr;
+
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->IPropertySet_iface.lpVtbl = (const struct IPropertySetVtbl *)&settings_values_vtbl;
+    impl->ref = 1;
+    impl->owner = owner;
+
+    if (FAILED(hr = WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, &class_id )))
+    {
+        free( impl );
+        return hr;
+    }
+    hr = RoActivateInstance( class_id, (IInspectable **)&impl->inner );
+    WindowsDeleteString( class_id );
+    if (FAILED(hr))
+    {
+        free( impl );
+        return hr;
+    }
+
+    {
+        LSTATUS status = RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_READ | KEY_WRITE, NULL,
+                                          &impl->hkey, NULL );
+        TRACE( "settings map %p open subkey %s status %ld\n", impl, debugstr_w(subkey), status );
+        if (status == ERROR_SUCCESS) reg_load_values( impl->hkey, impl->inner );
+    }
+
+    *out = &impl->IPropertySet_iface;
+    return S_OK;
+}
+
 struct application_data_container
 {
     IApplicationDataContainer IApplicationDataContainer_iface;
     IApplicationDataContainerMethods IApplicationDataContainerMethods_iface;
     LONG ref;
     ApplicationDataLocality locality;
+    WCHAR subkey[512];
+    struct application_data *owner;
     struct com_interface_entry *iids_cache; /* stable GetIids pair array, see factory_GetIids */
     ULONG iids_count;
     IPropertySet *values;
@@ -650,7 +1286,13 @@ static HRESULT WINAPI container_GetTrustLevel( IApplicationDataContainer *iface,
 { if (level) *level = BaseTrust; return S_OK; }
 
 static HRESULT WINAPI container_get_Name( IApplicationDataContainer *iface, HSTRING *value )
-{ return WindowsCreateString( L"LocalSettings", 13, value ); }
+{
+    struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
+    static const WCHAR local[] = L"LocalSettings";
+    static const WCHAR roaming[] = L"RoamingSettings";
+    const WCHAR *name = impl->locality == ApplicationDataLocality_Roaming ? roaming : local;
+    return WindowsCreateString( name, wcslen( name ), value );
+}
 
 static HRESULT WINAPI container_get_Locality( IApplicationDataContainer *iface, ApplicationDataLocality *value )
 {
@@ -663,27 +1305,26 @@ static HRESULT WINAPI container_get_Locality( IApplicationDataContainer *iface, 
 static HRESULT WINAPI container_get_Values( IApplicationDataContainer *iface, IPropertySet **value )
 {
     struct application_data_container *impl = impl_from_IApplicationDataContainer( iface );
-    static const WCHAR name[] = L"Windows.Foundation.Collections.PropertySet";
-    HSTRING class_id;
+    IPropertySet *values = NULL;
+    HRESULT hr;
 
     if (!value) return E_POINTER;
 
-    /* Values is a live view; hand out a fresh PropertySet per call so that
-     * the CLR RCW cache (keyed by ABI pointer) cannot alias a collected
-     * wrapper onto a new marshal.  The container keeps one ref on the last
-     * instance it handed out, mirroring the cached-map shape callers expect. */
-    WindowsCreateString( name, wcslen(name), &class_id );
-    RoActivateInstance( class_id, (IInspectable **)&impl->values );
-    WindowsDeleteString( class_id );
+    /* Values is a live view; hand out a fresh registry-backed map per call so
+     * that the CLR RCW cache (keyed by ABI pointer) cannot alias a collected
+     * wrapper onto a new marshal, and so writes made through other views (or
+     * a previous process run) are visible. The container keeps one ref on the
+     * last instance it handed out, mirroring the cached-map shape callers
+     * expect. */
+    if (FAILED(hr = settings_values_create( impl->owner, impl->subkey, &values ))) return hr;
 
-    *value = impl->values;
-    if (impl->values) IPropertySet_AddRef( impl->values );
-    /* Tag hypothesis probe: log the ring slot handed to the shader and the
-     * first qword (expected: the merged propertyset vtable, not a tagged
-     * base+count value like 0x6fff00000006). */
-    TRACE( "get_Values: ring iface %p first_qword %p\n", impl->values,
-           impl->values ? *(void **)impl->values : NULL );
-    return *value ? S_OK : E_FAIL;
+    if (impl->values) IPropertySet_Release( impl->values );
+    impl->values = values;
+    IPropertySet_AddRef( values );
+    *value = values;
+
+    TRACE( "get_Values: settings map iface %p\n", values );
+    return S_OK;
 }
 
 static HRESULT WINAPI empty_map_view_QueryInterface( IMapView_HSTRING_ApplicationDataContainer *iface, REFIID iid, void **out )
@@ -783,14 +1424,15 @@ static HRESULT WINAPI container_get_Containers( IApplicationDataContainer *iface
     return S_OK;
 }
 
-static HRESULT container_create( ApplicationDataLocality locality, IApplicationDataContainer **out );
+static HRESULT container_create( ApplicationDataLocality locality, struct application_data *owner,
+                                 IApplicationDataContainer **out );
 
 static HRESULT WINAPI container_CreateContainer( IApplicationDataContainer *iface, HSTRING name, ApplicationDataCreateDisposition disposition, IApplicationDataContainer **container )
 {
     struct application_data_container *parent = impl_from_IApplicationDataContainer( iface );
     TRACE( "iface %p, name %s, disposition %d, container %p\n", iface, debugstr_hstring(name), disposition, container );
     if (!container) return E_POINTER;
-    return container_create( parent->locality, container );
+    return container_create( parent->locality, parent->owner, container );
 }
 
 static HRESULT WINAPI container_DeleteContainer( IApplicationDataContainer *iface, HSTRING name )
@@ -893,7 +1535,8 @@ static const struct IApplicationDataContainerMethodsVtbl container_methods_vtbl 
     container_methods_DeleteContainer,
 };
 
-static HRESULT container_create( ApplicationDataLocality locality, IApplicationDataContainer **out )
+static HRESULT container_create( ApplicationDataLocality locality, struct application_data *owner,
+                                 IApplicationDataContainer **out )
 {
     struct application_data_container *impl;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
@@ -901,6 +1544,8 @@ static HRESULT container_create( ApplicationDataLocality locality, IApplicationD
     impl->IApplicationDataContainerMethods_iface.lpVtbl = &container_methods_vtbl;
     impl->ref = 1;
     impl->locality = locality;
+    impl->owner = owner;
+    settings_subkey( locality, impl->subkey, ARRAY_SIZE(impl->subkey) );
     *out = &impl->IApplicationDataContainer_iface;
     return S_OK;
 }
@@ -909,7 +1554,8 @@ static HRESULT WINAPI application_data_get_LocalSettings( IApplicationData *ifac
 {
     static IApplicationDataContainer *local_settings;
     if (!value) return E_POINTER;
-    if (!local_settings) container_create( ApplicationDataLocality_Local, &local_settings );
+    if (!local_settings)
+        container_create( ApplicationDataLocality_Local, impl_from_IApplicationData( iface ), &local_settings );
     *value = local_settings;
     if (local_settings) IApplicationDataContainer_AddRef( local_settings );
     return *value ? S_OK : E_FAIL;
@@ -919,7 +1565,8 @@ static HRESULT WINAPI application_data_get_RoamingSettings( IApplicationData *if
 {
     static IApplicationDataContainer *roaming_settings;
     if (!value) return E_POINTER;
-    if (!roaming_settings) container_create( ApplicationDataLocality_Roaming, &roaming_settings );
+    if (!roaming_settings)
+        container_create( ApplicationDataLocality_Roaming, impl_from_IApplicationData( iface ), &roaming_settings );
     *value = roaming_settings;
     if (roaming_settings) IApplicationDataContainer_AddRef( roaming_settings );
     return *value ? S_OK : E_FAIL;
@@ -1174,57 +1821,92 @@ static HRESULT storage_folder_create( const WCHAR *path, IStorageFolder **out )
     return S_OK;
 }
 
-static HRESULT WINAPI application_data_get_LocalFolder( IApplicationData *iface, IStorageFolder **value )
+/* Per-package state folders: %LOCALAPPDATA%\<pkg>\{LocalState,RoamingState,
+ * TempState,LocalCache}, created on demand. */
+static HRESULT appdata_folder_create( const WCHAR *subdir, IStorageFolder **value )
 {
-    WCHAR path[MAX_PATH];
-    if (!value) return E_POINTER;
+    WCHAR path[MAX_PATH], name[MAX_PATH];
+
+    get_package_name( name, ARRAY_SIZE(name) );
     if (!GetEnvironmentVariableW( L"LOCALAPPDATA", path, ARRAY_SIZE(path) ))
     {
         if (!GetEnvironmentVariableW( L"USERPROFILE", path, ARRAY_SIZE(path) ))
             return E_FAIL;
         lstrcatW( path, L"\\AppData\\Local" );
     }
+    lstrcatW( path, L"\\" );
+    lstrcatW( path, name );
+    lstrcatW( path, L"\\" );
+    lstrcatW( path, subdir );
     return storage_folder_create( path, value );
+}
+
+static HRESULT WINAPI application_data_get_LocalFolder( IApplicationData *iface, IStorageFolder **value )
+{
+    if (!value) return E_POINTER;
+    return appdata_folder_create( L"LocalState", value );
 }
 
 static HRESULT WINAPI application_data_get_RoamingFolder( IApplicationData *iface, IStorageFolder **value )
 {
-    WCHAR path[MAX_PATH];
     if (!value) return E_POINTER;
-    if (!GetEnvironmentVariableW( L"APPDATA", path, ARRAY_SIZE(path) ))
-    {
-        if (!GetEnvironmentVariableW( L"USERPROFILE", path, ARRAY_SIZE(path) ))
-            return E_FAIL;
-        lstrcatW( path, L"\\AppData\\Roaming" );
-    }
-    return storage_folder_create( path, value );
+    return appdata_folder_create( L"RoamingState", value );
 }
 
 static HRESULT WINAPI application_data_get_TemporaryFolder( IApplicationData *iface, IStorageFolder **value )
 {
-    WCHAR path[MAX_PATH];
     if (!value) return E_POINTER;
-    GetTempPathW( ARRAY_SIZE(path), path );
-    return storage_folder_create( path, value );
+    return appdata_folder_create( L"TempState", value );
 }
 
 static HRESULT WINAPI application_data_add_DataChanged( IApplicationData *iface, ITypedEventHandler_ApplicationData_IInspectable *handler,
                                                         EventRegistrationToken *token )
 {
-    FIXME( "iface %p, handler %p, token %p stub!\n", iface, handler, token );
-    return E_NOTIMPL;
+    struct application_data *impl = impl_from_IApplicationData( iface );
+    struct data_changed_entry *entry;
+
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+
+    if (!token) return E_POINTER;
+    if (!(entry = calloc( 1, sizeof(*entry) ))) return E_OUTOFMEMORY;
+    entry->handler = handler;
+    ITypedEventHandler_ApplicationData_IInspectable_AddRef( handler );
+    entry->token.value = (UINT64)(ULONG)InterlockedIncrement( &impl->next_data_changed_token );
+    entry->next = impl->handlers;
+    impl->handlers = entry;
+    *token = entry->token;
+    return S_OK;
 }
 
 static HRESULT WINAPI application_data_remove_DataChanged( IApplicationData *iface, EventRegistrationToken token )
 {
-    FIXME( "iface %p, token %#I64x stub!\n", iface, token.value );
-    return E_NOTIMPL;
+    struct application_data *impl = impl_from_IApplicationData( iface );
+    struct data_changed_entry **link = &impl->handlers;
+
+    TRACE( "iface %p, token %#I64x.\n", iface, token.value );
+
+    while (*link)
+    {
+        struct data_changed_entry *entry = *link;
+        if (entry->token.value == token.value)
+        {
+            *link = entry->next;
+            ITypedEventHandler_ApplicationData_IInspectable_Release( entry->handler );
+            free( entry );
+            return S_OK;
+        }
+        link = &entry->next;
+    }
+    return S_OK; /* unknown token: remove is idempotent, matching Windows */
 }
 
 static HRESULT WINAPI application_data_SignalDataChanged( IApplicationData *iface )
 {
-    FIXME( "iface %p stub!\n", iface );
-    return E_NOTIMPL;
+    struct application_data *impl = impl_from_IApplicationData( iface );
+
+    TRACE( "iface %p.\n", iface );
+    application_data_fire_data_changed( impl );
+    return S_OK;
 }
 
 static HRESULT WINAPI application_data_get_RoamingStorageQuota( IApplicationData *iface, UINT64 *value )
@@ -1288,17 +1970,9 @@ static HRESULT WINAPI application_data2_GetTrustLevel( IApplicationData2 *iface,
 }
 static HRESULT WINAPI application_data2_get_LocalCacheFolder( IApplicationData2 *iface, IStorageFolder **value )
 {
-    WCHAR path[MAX_PATH];
     TRACE( "iface %p, value %p\n", iface, value );
     if (!value) return E_POINTER;
-    if (!GetEnvironmentVariableW( L"LOCALAPPDATA", path, ARRAY_SIZE(path) ))
-    {
-        if (!GetEnvironmentVariableW( L"USERPROFILE", path, ARRAY_SIZE(path) ))
-            return E_FAIL;
-        lstrcatW( path, L"\\AppData\\Local" );
-    }
-    lstrcatW( path, L"\\WhatsApp\\LocalCache" );
-    return storage_folder_create( path, value );
+    return appdata_folder_create( L"LocalCache", value );
 }
 
 static const struct IApplicationData2Vtbl application_data2_vtbl =
