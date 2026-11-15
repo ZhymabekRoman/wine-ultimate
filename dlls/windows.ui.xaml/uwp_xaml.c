@@ -46,6 +46,134 @@ static const GUID IID_IWeakReference_local =
 static const GUID IID_IWeakReferenceSource_local =
     { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
 
+/* Faces we QI and call raw-indexed: the metadata provider, XAML type/member, property-change
+ * notification, boxed IReference<T>, ICommand and generic event delegates. The objects behind
+ * them are served by our own combase-side code and Calculator's .NET Native RCW projection,
+ * whose vtables follow the WinRT ABI. Naming each slot we call lets callers use typed calls;
+ * earlier, uncalled slots stay as void * placeholders. */
+struct xaml_type;
+struct xaml_member;
+
+struct xaml_metadata_provider;
+struct xaml_metadata_provider_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct xaml_metadata_provider *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct xaml_metadata_provider *This );
+    ULONG (WINAPI *Release)( struct xaml_metadata_provider *This );
+    void *pad3, *pad4, *pad5, *pad6;
+    HRESULT (WINAPI *GetXamlTypeByFullName)( struct xaml_metadata_provider *This, HSTRING name,
+                                             struct xaml_type **type );   /* slot 7 */
+};
+struct xaml_metadata_provider
+{
+    const struct xaml_metadata_provider_vtbl *lpVtbl;
+};
+
+struct xaml_type_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct xaml_type *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct xaml_type *This );
+    ULONG (WINAPI *Release)( struct xaml_type *This );
+    void *pad3, *pad4, *pad5, *pad6, *pad7;
+    HRESULT (WINAPI *get_FullName)( struct xaml_type *This, HSTRING *name );                /* slot 8 */
+    void *pad9, *pad10, *pad11, *pad12, *pad13, *pad14, *pad15, *pad16, *pad17;
+    HRESULT (WINAPI *ActivateInstance)( struct xaml_type *This, IInspectable **instance );  /* slot 18 */
+    HRESULT (WINAPI *CreateFromString)( struct xaml_type *This, HSTRING input, void **value ); /* slot 19 */
+    HRESULT (WINAPI *GetMember)( struct xaml_type *This, HSTRING name, struct xaml_member **member ); /* slot 20 */
+};
+struct xaml_type
+{
+    const struct xaml_type_vtbl *lpVtbl;
+};
+
+struct xaml_member_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct xaml_member *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct xaml_member *This );
+    ULONG (WINAPI *Release)( struct xaml_member *This );
+    void *pad3, *pad4, *pad5, *pad6, *pad7, *pad8, *pad9, *pad10;
+    HRESULT (WINAPI *get_Type)( struct xaml_member *This, struct xaml_type **type );        /* slot 11 */
+    HRESULT (WINAPI *GetValue)( struct xaml_member *This, void *instance, IInspectable **value ); /* slot 12 */
+    HRESULT (WINAPI *SetValue)( struct xaml_member *This, void *instance, void *value );    /* slot 13 */
+};
+struct xaml_member
+{
+    const struct xaml_member_vtbl *lpVtbl;
+};
+
+struct notify_property_changed;
+struct notify_property_changed_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct notify_property_changed *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct notify_property_changed *This );
+    ULONG (WINAPI *Release)( struct notify_property_changed *This );
+    void *pad3, *pad4, *pad5;
+    HRESULT (WINAPI *add_PropertyChanged)( struct notify_property_changed *This, void *handler,
+                                           EventRegistrationToken *token );                 /* slot 6 */
+    HRESULT (WINAPI *remove_PropertyChanged)( struct notify_property_changed *This,
+                                              EventRegistrationToken token );               /* slot 7 */
+};
+struct notify_property_changed
+{
+    const struct notify_property_changed_vtbl *lpVtbl;
+};
+
+struct property_changed_args;
+struct property_changed_args_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct property_changed_args *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct property_changed_args *This );
+    ULONG (WINAPI *Release)( struct property_changed_args *This );
+    void *pad3, *pad4, *pad5;
+    HRESULT (WINAPI *get_PropertyName)( struct property_changed_args *This, HSTRING *name ); /* slot 6 */
+};
+struct property_changed_args
+{
+    const struct property_changed_args_vtbl *lpVtbl;
+};
+
+struct reference_int32;
+struct reference_int32_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct reference_int32 *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct reference_int32 *This );
+    ULONG (WINAPI *Release)( struct reference_int32 *This );
+    void *pad3, *pad4, *pad5;
+    HRESULT (WINAPI *get_Value)( struct reference_int32 *This, INT32 *value );               /* slot 6 */
+};
+struct reference_int32
+{
+    const struct reference_int32_vtbl *lpVtbl;
+};
+
+struct command_iface;
+struct command_iface_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct command_iface *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct command_iface *This );
+    ULONG (WINAPI *Release)( struct command_iface *This );
+    void *pad3, *pad4, *pad5, *pad6, *pad7, *pad8;
+    HRESULT (WINAPI *Execute)( struct command_iface *This, void *parameter );                /* slot 9 */
+};
+struct command_iface
+{
+    const struct command_iface_vtbl *lpVtbl;
+};
+
+/* Generic event delegate: { QueryInterface, AddRef, Release, Invoke(sender, args) }. */
+struct xaml_event_handler;
+struct xaml_event_handler_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct xaml_event_handler *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct xaml_event_handler *This );
+    ULONG (WINAPI *Release)( struct xaml_event_handler *This );
+    HRESULT (WINAPI *Invoke)( struct xaml_event_handler *This, void *sender, void *args );   /* slot 3 */
+};
+struct xaml_event_handler
+{
+    const struct xaml_event_handler_vtbl *lpVtbl;
+};
+
 /* UWP Windows.UI.Xaml interface GUIDs */
 static const GUID IID_IDependencyObject_UWP =
     { 0x5c526665, 0xf60e, 0x4912, { 0xaf, 0x59, 0x5f, 0xe0, 0x68, 0x0f, 0x08, 0x9d } };
@@ -2260,9 +2388,9 @@ static BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_
 
     if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IReference_NumbersAndOperatorsEnum, &iref )) && iref)
     {
-        HRESULT (WINAPI *get_val)(void *, INT32 *) = (void *)(*(void ***)iref)[6];
+        struct reference_int32 *ref = (struct reference_int32 *)iref;
         INT32 v = 0;
-        HRESULT hr = get_val ? get_val( iref, &v ) : E_FAIL;
+        HRESULT hr = ref->lpVtbl->get_Value ? ref->lpVtbl->get_Value( ref, &v ) : E_FAIL;
         IUnknown_Release( (IUnknown *)iref );
         if (SUCCEEDED(hr))
         {
@@ -2297,8 +2425,8 @@ static BOOL uwp_unbox_enum_int32( IInspectable *obj, INT32 *out_val, BOOL allow_
                         HRESULT hr = E_FAIL;
                         __TRY
                         {
-                            HRESULT (WINAPI *get_val)(void *, INT32 *) = (void *)(*(void ***)iref)[6];
-                            if (get_val) hr = get_val( iref, &v );
+                            struct reference_int32 *ref = (struct reference_int32 *)iref;
+                            if (ref->lpVtbl->get_Value) hr = ref->lpVtbl->get_Value( ref, &v );
                         }
                         __EXCEPT_ALL { hr = E_FAIL; }
                         __ENDTRY;
@@ -2335,22 +2463,22 @@ static BOOL uwp_get_custom_xaml_member( void *app_outer, const WCHAR *owner_type
 
     if (SUCCEEDED(WindowsCreateString( owner_type_name, wcslen(owner_type_name), &h_owner )))
     {
-        HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)(*(void ***)provider)[7];
-        if (get_by_name && SUCCEEDED(get_by_name( provider, h_owner, &xaml_type )) && xaml_type)
+        struct xaml_metadata_provider *mp = (struct xaml_metadata_provider *)provider;
+        if (mp->lpVtbl->GetXamlTypeByFullName &&
+            SUCCEEDED(mp->lpVtbl->GetXamlTypeByFullName( mp, h_owner, (struct xaml_type **)&xaml_type )) && xaml_type)
         {
-            HRESULT (WINAPI *get_member)(void *, HSTRING, void **) = (void *)(*(void ***)xaml_type)[20];
-            if (get_member && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
+            struct xaml_type *xt = (struct xaml_type *)xaml_type;
+            if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
             {
-                if (SUCCEEDED(get_member( xaml_type, h_prop, &member )) && member)
+                if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, (struct xaml_member **)&member )) && member)
                 {
-                    /* Slot 12 on IXamlMember: GetValue(IInspectable *instance, IInspectable **value) */
-                    HRESULT (WINAPI *get_val)(void *, void *, IInspectable **) = (void *)(*(void ***)member)[12];
-                    if (get_val)
+                    struct xaml_member *xm = (struct xaml_member *)member;
+                    if (xm->lpVtbl->GetValue)
                     {
                         HRESULT hr = E_FAIL;
                         __TRY
                         {
-                            hr = get_val( member, target_obj, out_val );
+                            hr = xm->lpVtbl->GetValue( xm, target_obj, out_val );
                         }
                         __EXCEPT_ALL { hr = E_FAIL; *out_val = NULL; }
                         __ENDTRY;
@@ -2639,8 +2767,8 @@ static HRESULT WINAPI calc_vm_npc_Invoke( void *iface, void *sender, void *args 
         void *pcea = NULL;
         if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)args, &IID_IPropertyChangedEventArgs_UWP, &pcea )) && pcea)
         {
-            HRESULT (WINAPI *get_name)(void *, HSTRING *) = (void *)(*(void ***)pcea)[6];
-            if (get_name && SUCCEEDED(get_name( pcea, &hprop )) && hprop)
+            struct property_changed_args *pca = (struct property_changed_args *)pcea;
+            if (pca->lpVtbl->get_PropertyName && SUCCEEDED(pca->lpVtbl->get_PropertyName( pca, &hprop )) && hprop)
                 pname = WindowsGetStringRawBuffer( hprop, NULL );
             IUnknown_Release( (IUnknown *)pcea );
         }
@@ -2668,11 +2796,10 @@ static void uwp_calc_vm_teardown( BOOL final_cleanup )
     {
         if (g_calc_vm.npc_hooked)
         {
-            /* Slot 7 on INotifyPropertyChanged: remove_PropertyChanged(EventRegistrationToken) */
-            HRESULT (WINAPI *rem_pc)(void *, EventRegistrationToken) = (void *)(*(void ***)g_calc_vm.npc)[7];
-            if (rem_pc)
+            struct notify_property_changed *npc = (struct notify_property_changed *)g_calc_vm.npc;
+            if (npc->lpVtbl->remove_PropertyChanged)
             {
-                __TRY { rem_pc( g_calc_vm.npc, g_calc_vm.npc_token ); }
+                __TRY { npc->lpVtbl->remove_PropertyChanged( npc, g_calc_vm.npc_token ); }
                 __EXCEPT_ALL { }
                 __ENDTRY;
             }
@@ -2787,40 +2914,40 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
     if (app_outer && ncand > 0 &&
         SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider)
     {
-        HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)(*(void ***)provider)[7];
+        struct xaml_metadata_provider *mp = (struct xaml_metadata_provider *)provider;
         for (c = 0; c < ncand && (!out_type_name || !out_type_name[0]); c++)
         {
             HSTRING h_cls = NULL;
             void *view_xt = NULL;
-            if (get_by_name && SUCCEEDED(WindowsCreateString( candidates[c], wcslen(candidates[c]), &h_cls )))
+            if (mp->lpVtbl->GetXamlTypeByFullName && SUCCEEDED(WindowsCreateString( candidates[c], wcslen(candidates[c]), &h_cls )))
             {
-                if (SUCCEEDED(get_by_name( provider, h_cls, &view_xt )) && view_xt)
+                if (SUCCEEDED(mp->lpVtbl->GetXamlTypeByFullName( mp, h_cls, (struct xaml_type **)&view_xt )) && view_xt)
                 {
-                    HRESULT (WINAPI *get_member)(void *, HSTRING, void **) = (void *)(*(void ***)view_xt)[20];
+                    struct xaml_type *vxt = (struct xaml_type *)view_xt;
                     size_t m;
-                    for (m = 0; get_member && m < ARRAY_SIZE(member_names); m++)
+                    for (m = 0; vxt->lpVtbl->GetMember && m < ARRAY_SIZE(member_names); m++)
                     {
                         HSTRING h_mem = NULL;
                         void *xm = NULL;
                         if (SUCCEEDED(WindowsCreateString( member_names[m], wcslen(member_names[m]), &h_mem )))
                         {
-                            if (SUCCEEDED(get_member( view_xt, h_mem, &xm )) && xm)
+                            if (SUCCEEDED(vxt->lpVtbl->GetMember( vxt, h_mem, (struct xaml_member **)&xm )) && xm)
                             {
-                                HRESULT (WINAPI *get_mtype)(void *, void **) = (void *)(*(void ***)xm)[11];
+                                struct xaml_member *xm2 = (struct xaml_member *)xm;
                                 void *vm_xt = NULL;
-                                if (get_mtype && SUCCEEDED(get_mtype( xm, &vm_xt )) && vm_xt)
+                                if (xm2->lpVtbl->get_Type && SUCCEEDED(xm2->lpVtbl->get_Type( xm2, (struct xaml_type **)&vm_xt )) && vm_xt)
                                 {
                                     /* Follow nested CalculatorViewModel if Model is ApplicationViewModel */
-                                    HRESULT (WINAPI *vm_get_mem)(void *, HSTRING, void **) = (void *)(*(void ***)vm_xt)[20];
+                                    struct xaml_type *vmxt = (struct xaml_type *)vm_xt;
                                     HSTRING h_sub = NULL;
                                     void *sub_xm = NULL;
-                                    if (vm_get_mem && SUCCEEDED(WindowsCreateString( L"CalculatorViewModel", 19, &h_sub )))
+                                    if (vmxt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( L"CalculatorViewModel", 19, &h_sub )))
                                     {
-                                        if (SUCCEEDED(vm_get_mem( vm_xt, h_sub, &sub_xm )) && sub_xm)
+                                        if (SUCCEEDED(vmxt->lpVtbl->GetMember( vmxt, h_sub, (struct xaml_member **)&sub_xm )) && sub_xm)
                                         {
-                                            HRESULT (WINAPI *sub_get_mtype)(void *, void **) = (void *)(*(void ***)sub_xm)[11];
+                                            struct xaml_member *sxm = (struct xaml_member *)sub_xm;
                                             void *sub_xt = NULL;
-                                            if (sub_get_mtype && SUCCEEDED(sub_get_mtype( sub_xm, &sub_xt )) && sub_xt)
+                                            if (sxm->lpVtbl->get_Type && SUCCEEDED(sxm->lpVtbl->get_Type( sxm, (struct xaml_type **)&sub_xt )) && sub_xt)
                                             {
                                                 IInspectable_Release( (IInspectable *)vm_xt );
                                                 vm_xt = sub_xt;
@@ -2829,11 +2956,9 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
                                         }
                                         WindowsDeleteString( h_sub );
                                     }
-                                    /* Slot 8 on IXamlType: get_FullName(HSTRING*) */
                                     {
-                                        HRESULT (WINAPI *get_fn)(void *, HSTRING *) = (void *)(*(void ***)vm_xt)[8];
                                         HSTRING h_fn = NULL;
-                                        if (get_fn && SUCCEEDED(get_fn( vm_xt, &h_fn )) && h_fn)
+                                        if (vmxt->lpVtbl->get_FullName && SUCCEEDED(vmxt->lpVtbl->get_FullName( vmxt, &h_fn )) && h_fn)
                                         {
                                             const WCHAR *fn = WindowsGetStringRawBuffer( h_fn, NULL );
                                             if (fn && fn[0] && out_type_name && max_chars)
@@ -2846,13 +2971,11 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
                                             WindowsDeleteString( h_fn );
                                         }
                                     }
-                                    /* Slot 18 on IXamlType: ActivateInstance(IInspectable**) */
                                     if (out_instance && !*out_instance)
                                     {
-                                        HRESULT (WINAPI *act_fn)(void *, IInspectable **) = (void *)(*(void ***)vm_xt)[18];
-                                        if (act_fn)
+                                        if (vmxt->lpVtbl->ActivateInstance)
                                         {
-                                            __TRY { act_fn( vm_xt, out_instance ); }
+                                            __TRY { vmxt->lpVtbl->ActivateInstance( vmxt, out_instance ); }
                                             __EXCEPT_ALL { *out_instance = NULL; }
                                             __ENDTRY;
                                         }
@@ -2913,9 +3036,10 @@ static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name,
     /* Subscribe to INotifyPropertyChanged and retain token + interface for teardown */
     if (SUCCEEDED(IInspectable_QueryInterface( vm, &IID_INotifyPropertyChanged_UWP, &npc )) && npc)
     {
-        HRESULT (WINAPI *add_pc)(void *, void *, EventRegistrationToken *) = (void *)(*(void ***)npc)[6];
+        struct notify_property_changed *npcp = (struct notify_property_changed *)npc;
         EventRegistrationToken tok = {0};
-        if (add_pc && SUCCEEDED(add_pc( npc, &g_calc_vm_npc_handler, &tok )))
+        if (npcp->lpVtbl->add_PropertyChanged &&
+            SUCCEEDED(npcp->lpVtbl->add_PropertyChanged( npcp, &g_calc_vm_npc_handler, &tok )))
         {
             g_calc_vm.npc = (IInspectable *)npc;
             g_calc_vm.npc_token = tok;
@@ -3003,9 +3127,8 @@ static void uwp_calc_vm_send( int code )
         HRESULT chr = E_FAIL;
         __TRY
         {
-            /* Slot 9 on ICommand: Execute(IInspectable *parameter) */
-            HRESULT (WINAPI *exec_fn)(void *, void *) = (void *)(*(void ***)g_calc_vm.cmd)[9];
-            if (exec_fn) chr = exec_fn( g_calc_vm.cmd, param );
+            struct command_iface *cmd = (struct command_iface *)g_calc_vm.cmd;
+            if (cmd->lpVtbl->Execute) chr = cmd->lpVtbl->Execute( cmd, param );
         }
         __EXCEPT_ALL
         {
@@ -3781,8 +3904,8 @@ static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val 
         if (impl->dp_cbs[i].dp == dp && impl->dp_cbs[i].callback)
         {
             IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-            HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)impl->dp_cbs[i].callback)[3];
-            invoke( impl->dp_cbs[i].callback, sender, dp );
+            struct xaml_event_handler *h = (struct xaml_event_handler *)impl->dp_cbs[i].callback;
+            h->lpVtbl->Invoke( h, sender, dp );
         }
     }
 
@@ -4354,11 +4477,11 @@ static HRESULT WINAPI uwp_fe3_add_DataContextChanged( void *iface, void *handler
                 if (args)
                 {
                     IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-                    HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)handler)[3];
+                    struct xaml_event_handler *h = (struct xaml_event_handler *)handler;
                     args->vtbl = dc_args_vtbl;
                     args->ref = 1;
                     args->new_val = (IInspectable *)cur_dc;
-                    invoke( handler, sender, args );
+                    h->lpVtbl->Invoke( h, sender, args );
                     dp_args_Release( args );
                 }
                 else IInspectable_Release( (IInspectable *)cur_dc );
@@ -5698,12 +5821,12 @@ static void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *
             if (args)
             {
                 IInspectable *sender = impl->outer ? impl->outer : &impl->IInspectable_iface;
-                HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)impl->dc_handlers[i])[3];
+                struct xaml_event_handler *h = (struct xaml_event_handler *)impl->dc_handlers[i];
                 args->vtbl = dc_args_vtbl;
                 args->ref = 1;
                 args->new_val = dc;
                 if (dc) IInspectable_AddRef( dc );
-                invoke( impl->dc_handlers[i], sender, args );
+                h->lpVtbl->Invoke( h, sender, args );
                 dp_args_Release( args );
             }
         }
@@ -5784,10 +5907,10 @@ static void uwp_fire_loaded_tree( struct uwp_element *el )
         {
             if (el->loaded_handlers[i])
             {
-                HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)el->loaded_handlers[i])[3];
+                struct xaml_event_handler *h = (struct xaml_event_handler *)el->loaded_handlers[i];
                 TRACE( "Firing Loaded handler[%d] on %s (%s)\n",
                        i, debugstr_w(el->class_name), debugstr_w(el->name) );
-                invoke( el->loaded_handlers[i], sender, g_routed_args() );
+                h->lpVtbl->Invoke( h, sender, g_routed_args() );
             }
         }
     }
@@ -6960,32 +7083,27 @@ static void uwp_set_custom_xaml_member( void *app_outer, const WCHAR *owner_type
 
     if (SUCCEEDED(WindowsCreateString( owner_type_name, wcslen(owner_type_name), &h_owner )))
     {
-        /* Slot 7: GetXamlTypeByFullName */
-        HRESULT (WINAPI *get_by_name)(void *, HSTRING, void **) = (void *)(*(void ***)provider)[7];
-        if (get_by_name && SUCCEEDED(get_by_name( provider, h_owner, &xaml_type )) && xaml_type)
+        struct xaml_metadata_provider *mp = (struct xaml_metadata_provider *)provider;
+        if (mp->lpVtbl->GetXamlTypeByFullName &&
+            SUCCEEDED(mp->lpVtbl->GetXamlTypeByFullName( mp, h_owner, (struct xaml_type **)&xaml_type )) && xaml_type)
         {
-            /* Slot 20 on IXamlType_UWP: GetMember(HSTRING, IXamlMember**) */
-            HRESULT (WINAPI *get_member)(void *, HSTRING, void **) = (void *)(*(void ***)xaml_type)[20];
-            if (get_member && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
+            struct xaml_type *xt = (struct xaml_type *)xaml_type;
+            if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( prop_name, wcslen(prop_name), &h_prop )))
             {
-                if (SUCCEEDED(get_member( xaml_type, h_prop, &member )) && member)
+                if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_prop, (struct xaml_member **)&member )) && member)
                 {
-                    /* Slot 11 on IXamlMember: get_Type(IXamlType**) */
-                    HRESULT (WINAPI *get_mtype)(void *, void **) = (void *)(*(void ***)member)[11];
-                    /* Slot 13 on IXamlMember: SetValue(IInspectable*, IInspectable*) */
-                    HRESULT (WINAPI *set_val)(void *, void *, void *) = (void *)(*(void ***)member)[13];
-                    if (get_mtype && SUCCEEDED(get_mtype( member, &member_type )) && member_type)
+                    struct xaml_member *xm = (struct xaml_member *)member;
+                    if (xm->lpVtbl->get_Type && SUCCEEDED(xm->lpVtbl->get_Type( xm, (struct xaml_type **)&member_type )) && member_type)
                     {
-                        /* Slot 19 on IXamlType_UWP: CreateFromString(HSTRING, IInspectable**) */
-                        HRESULT (WINAPI *from_str)(void *, HSTRING, void **) = (void *)(*(void ***)member_type)[19];
-                        if (from_str && SUCCEEDED(WindowsCreateString( str_val, wcslen(str_val), &h_val )))
+                        struct xaml_type *mt = (struct xaml_type *)member_type;
+                        if (mt->lpVtbl->CreateFromString && SUCCEEDED(WindowsCreateString( str_val, wcslen(str_val), &h_val )))
                         {
-                            hr = from_str( member_type, h_val, &boxed_val );
-                            if (SUCCEEDED(hr) && boxed_val && set_val)
+                            hr = mt->lpVtbl->CreateFromString( mt, h_val, &boxed_val );
+                            if (SUCCEEDED(hr) && boxed_val && xm->lpVtbl->SetValue)
                             {
                                 __TRY
                                 {
-                                    hr = set_val( member, target_obj, boxed_val );
+                                    hr = xm->lpVtbl->SetValue( xm, target_obj, boxed_val );
                                 }
                                 __EXCEPT_ALL { hr = E_FAIL; }
                                 __ENDTRY;
@@ -9151,9 +9269,8 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
 
     if (SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)resourceLocator, &IID_IUriRuntimeClass_g, &uri_rt )) && uri_rt)
     {
-        HRESULT (WINAPI *get_raw)(void *, HSTRING *) = (void *)(*(void ***)uri_rt)[6];
         HSTRING hraw = NULL;
-        if (SUCCEEDED(get_raw( uri_rt, &hraw )) && hraw)
+        if (SUCCEEDED(IUriRuntimeClass_get_AbsoluteUri( (IUriRuntimeClass *)uri_rt, &hraw )) && hraw)
         {
             const WCHAR *s = WindowsGetStringRawBuffer( hraw, NULL );
             if (s) lstrcpynW( uri_str, s, MAX_PATH );
@@ -10807,15 +10924,15 @@ void uwp_invoke_button( struct uwp_element *btn )
             if (SUCCEEDED(IInspectable_QueryInterface( btn->command, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
             {
                 /* Slot 8: CanExecute(object, boolean*), Slot 9: Execute(object) */
-                HRESULT (WINAPI *exec_fn)(void *, void *) = (void *)(*(void ***)cmd_iface)[9];
-                if (exec_fn) exec_fn( cmd_iface, btn->command_param );
+                struct command_iface *cmd = (struct command_iface *)cmd_iface;
+                if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, btn->command_param );
                 IUnknown_Release( (IUnknown *)cmd_iface );
             }
             else
             {
                 /* Direct vtbl call if already on ICommand face */
-                HRESULT (WINAPI *exec_fn)(void *, void *) = (void *)(*(void ***)btn->command)[9];
-                if (exec_fn) exec_fn( btn->command, btn->command_param );
+                struct command_iface *cmd = (struct command_iface *)btn->command;
+                if (cmd->lpVtbl->Execute) cmd->lpVtbl->Execute( cmd, btn->command_param );
             }
         }
         __EXCEPT_ALL
@@ -10833,8 +10950,8 @@ void uwp_invoke_button( struct uwp_element *btn )
             __TRY
             {
                 IInspectable *sender = btn->outer ? btn->outer : &btn->IInspectable_iface;
-                HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)btn->click_handlers[i])[3];
-                invoke( btn->click_handlers[i], sender, g_routed_args() );
+                struct xaml_event_handler *h = (struct xaml_event_handler *)btn->click_handlers[i];
+                h->lpVtbl->Invoke( h, sender, g_routed_args() );
             }
             __EXCEPT_ALL
             {
@@ -11244,12 +11361,12 @@ static BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_poin
 
         for (i = 0; i < count; i++)
         {
-            HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)handlers[i])[3];
-            if (invoke)
+            struct xaml_event_handler *h = (struct xaml_event_handler *)handlers[i];
+            if (h->lpVtbl->Invoke)
             {
                 __TRY
                 {
-                    invoke( handlers[i], sender, &args->IPointerRoutedEventArgs_vtbl );
+                    h->lpVtbl->Invoke( h, sender, &args->IPointerRoutedEventArgs_vtbl );
                     fired = TRUE;
                 }
                 __EXCEPT_ALL

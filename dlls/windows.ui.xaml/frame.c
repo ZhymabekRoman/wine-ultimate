@@ -3136,6 +3136,48 @@ static HRESULT wv2_call_void( void *obj, BOOL real_loader, int slot_real, int sl
     return ((HRESULT (WINAPI *)( void * ))fn)( obj );
 }
 
+/* Handler faces the app hands to our shells: every WinRT event/completed delegate starts
+ * { QueryInterface, AddRef, Release, Invoke }. The 2nd/3rd Invoke parameters differ per
+ * operation, so name the layout for each shape we fire instead of indexing slot 3. */
+struct cwv2_action_completed_handler;
+struct cwv2_action_completed_handler_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct cwv2_action_completed_handler *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct cwv2_action_completed_handler *This );
+    ULONG (WINAPI *Release)( struct cwv2_action_completed_handler *This );
+    HRESULT (WINAPI *Invoke)( struct cwv2_action_completed_handler *This, void *async_info, AsyncStatus status );
+};
+struct cwv2_action_completed_handler
+{
+    const struct cwv2_action_completed_handler_vtbl *lpVtbl;
+};
+
+struct cwv2_result_completed_handler;
+struct cwv2_result_completed_handler_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct cwv2_result_completed_handler *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct cwv2_result_completed_handler *This );
+    ULONG (WINAPI *Release)( struct cwv2_result_completed_handler *This );
+    HRESULT (WINAPI *Invoke)( struct cwv2_result_completed_handler *This, HRESULT status, void *result );
+};
+struct cwv2_result_completed_handler
+{
+    const struct cwv2_result_completed_handler_vtbl *lpVtbl;
+};
+
+struct cwv2_typed_handler;
+struct cwv2_typed_handler_vtbl
+{
+    HRESULT (WINAPI *QueryInterface)( struct cwv2_typed_handler *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( struct cwv2_typed_handler *This );
+    ULONG (WINAPI *Release)( struct cwv2_typed_handler *This );
+    HRESULT (WINAPI *Invoke)( struct cwv2_typed_handler *This, void *sender, void *args );
+};
+struct cwv2_typed_handler
+{
+    const struct cwv2_typed_handler_vtbl *lpVtbl;
+};
+
 static HRESULT wv2_call_get_core( void *controller, BOOL real_loader, int slot_real, int slot_builtin, void **core )
 {
     HRESULT (WINAPI *get_core)( void *, void ** ) = wv2_slot_fn( controller, real_loader, slot_real, slot_builtin );
@@ -3316,7 +3358,8 @@ static HRESULT WINAPI cwv2_g( void *iface, int slot, void *a1, void *a2 )
         break;
     case 33: /* AddScriptToExecuteOnDocumentCreated(js, handler) */
     case 35: /* ExecuteScript(js, handler) */
-        if (a2) ((HRESULT (WINAPI *)(void *, HRESULT, LPCWSTR))(*(void ***)a2)[3])( a2, S_OK, L"" );
+        if (a2) ((struct cwv2_result_completed_handler *)a2)->lpVtbl->Invoke(
+                (struct cwv2_result_completed_handler *)a2, S_OK, L"" );
         break;
     case 43: if (a1) *(UINT32 *)a1 = GetCurrentProcessId(); break; /* get_BrowserProcessId */
     case 44: case 45: case 60: if (a1) *(BOOL *)a1 = FALSE; break; /* CanGoBack/Forward, ContainsFullScreen */
@@ -3479,14 +3522,14 @@ static HRESULT WINAPI asyncop_GetStatus( void *iface, AsyncStatus *status )
 static HRESULT WINAPI asyncop_put_Completed( void *iface, void *handler )
 {
     struct cwv2_asyncop *impl = impl_from_asyncop( iface );
-    typedef HRESULT (WINAPI *p_Invoke)( void *, void *, AsyncStatus );
+    struct cwv2_action_completed_handler *h = (struct cwv2_action_completed_handler *)handler;
     if (impl->handler) ((IInspectable *)impl->handler)->lpVtbl->Release( impl->handler );
     impl->handler = handler;
     if (handler)
     {
         ((IInspectable *)handler)->lpVtbl->AddRef( handler );
         /* Completed already: fire the projection's continuation inline. */
-        ((p_Invoke)(*(void ***)handler)[3])( handler, iface, Completed );
+        h->lpVtbl->Invoke( h, iface, Completed );
     }
     return S_OK;
 }
@@ -3557,12 +3600,12 @@ static ULONG WINAPI profile_Release( void *iface )
  * with a shell extension object (the asyncop shell answers get_Id/get_Name). */
 static HRESULT WINAPI profile_AddBrowserExtension( void *iface, HSTRING path, void *handler )
 {
-    typedef HRESULT (WINAPI *p_Invoke)( void *, HRESULT, void * );
+    struct cwv2_result_completed_handler *h = (struct cwv2_result_completed_handler *)handler;
     void *ext = NULL;
     (void)iface;
     ERR( "profile_AddBrowserExtension %s handler %p\n", debugstr_hstring( path ), handler );
     cwv2_asyncop_create( NULL, &ext );
-    if (handler) ((p_Invoke)(*(void ***)handler)[3])( handler, S_OK, ext );
+    if (handler) h->lpVtbl->Invoke( h, S_OK, ext );
     return S_OK;
 }
 /* the returned extension object answers .Id with the Zoom extension id */
@@ -3593,12 +3636,12 @@ static const void *cwv2_profile_vtbl[256] =
  * handler fires, so invoke the handler synchronously with a CDP-shaped reply. */
 static HRESULT WINAPI cwv2_CallDevToolsProtocolMethod( void *iface, LPCWSTR method, LPCWSTR params, void *handler )
 {
-    typedef HRESULT (WINAPI *p_Invoke)( void *, HRESULT, LPCWSTR );
+    struct cwv2_result_completed_handler *h = (struct cwv2_result_completed_handler *)handler;
     (void)iface;
     ERR( "cwv2_CallDevToolsProtocolMethod %s %s handler %p\n",
          debugstr_w(method), debugstr_w(params), handler );
     if (handler)
-        ((p_Invoke)(*(void ***)handler)[3])( handler, S_OK, L"{}" );
+        h->lpVtbl->Invoke( h, S_OK, L"{}" );
     return S_OK;
 }
 
@@ -4132,19 +4175,16 @@ static HSTRING wv2_extract_uri_string( IInspectable *obj )
     if (!obj) return NULL;
     if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IUriRuntimeClass_local, &uri_rt )) && uri_rt)
     {
-        HRESULT (WINAPI *get_abs)( void *, HSTRING * ) = (void *)(*(void ***)uri_rt)[6];
-        if (FAILED(get_abs( uri_rt, &hstr )) || !hstr)
+        if (FAILED(IUriRuntimeClass_get_AbsoluteUri( (IUriRuntimeClass *)uri_rt, &hstr )) || !hstr)
         {
-            HRESULT (WINAPI *get_raw)( void *, HSTRING * ) = (void *)(*(void ***)uri_rt)[16];
-            if (get_raw) get_raw( uri_rt, &hstr );
+            IUriRuntimeClass_get_RawUri( (IUriRuntimeClass *)uri_rt, &hstr );
         }
         IInspectable_Release( (IInspectable *)uri_rt );
         if (hstr) return hstr;
     }
     if (SUCCEEDED(IInspectable_QueryInterface( obj, &IID_IPropertyValue_local, &pv )) && pv)
     {
-        HRESULT (WINAPI *get_str)( void *, HSTRING * ) = (void *)(*(void ***)pv)[23];
-        if (get_str) get_str( pv, &hstr );
+        IPropertyValue_GetString( (IPropertyValue *)pv, &hstr );
         IInspectable_Release( (IInspectable *)pv );
     }
     return hstr;
@@ -4249,17 +4289,15 @@ static void trigger_core_webview2_initialized( struct xaml_element *impl, void *
     }
     if (impl->init_handler && !impl->init_triggered)
     {
-        typedef HRESULT (WINAPI *p_Invoke)(void *, void *, void *);
         struct cwv2_args *args = calloc( 1, sizeof(*args) );
-        p_Invoke invoke;
+        struct cwv2_typed_handler *h = (struct cwv2_typed_handler *)impl->init_handler;
         impl->init_triggered = TRUE;
         if (args)
         {
             args->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)vtbl_dup( cwv2_args_vtbl );
             args->ref = 1;
-            invoke = (p_Invoke)(*(void ***)impl->init_handler)[3];
             ERR( "invoking init_handler %p on WebView %p with args %p\n", impl->init_handler, &impl->IInspectable_iface, args );
-            invoke( impl->init_handler, &impl->IInspectable_iface, &args->IInspectable_iface );
+            h->lpVtbl->Invoke( h, &impl->IInspectable_iface, &args->IInspectable_iface );
             cwv2_args_Release( &args->IInspectable_iface );
         }
     }
