@@ -2,5 +2,4 @@ TESTDLL = windows.web.dll
 IMPORTS = combase
 
 SOURCES = \
-	json.c \
 	web.c

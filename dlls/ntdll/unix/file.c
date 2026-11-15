@@ -4497,8 +4497,11 @@ static BOOL path_cache_lookup( const OBJECT_ATTRIBUTES *attr, char **unix_name_r
         if (negative)
         {
             /* Cached negative lookup: the name did not exist as of verified_ts.
-             * Inside the lease window the answer needs no syscall at all, we skip
-             * lookup_unix_name()/find_file_in_dir() entirely. */
+             * Only valid when the caller requires an existing file (FILE_OPEN or
+             * FILE_OVERWRITE). Creating/superseding/renaming (FILE_CREATE, FILE_OPEN_IF,
+             * FILE_OVERWRITE_IF, FILE_SUPERSEDE) requires constructing the destination
+             * Unix path even if the file does not exist yet. */
+            if (disposition != FILE_OPEN && disposition != FILE_OVERWRITE) continue;
             if (!path_cache_lease_valid( verified_ts )) continue;
             __atomic_fetch_add( &path_cache_stat_negative_hits, 1, __ATOMIC_RELAXED );
             *unix_name_ret = strdup( cached_path );

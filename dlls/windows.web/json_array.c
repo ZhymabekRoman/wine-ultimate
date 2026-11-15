@@ -1,3 +1,22 @@
+/* WinRT Windows.Data.Json.JsonArray Implementation
+ *
+ * Copyright (C) 2026 Olivia Ryan
+ *
+ * This library is free software; you can redistribute it and/or
+ * modify it under the terms of the GNU Lesser General Public
+ * License as published by the Free Software Foundation; either
+ * version 2.1 of the License, or (at your option) any later version.
+ *
+ * This library is distributed in the hope that it will be useful,
+ * but WITHOUT ANY WARRANTY; without even the implied warranty of
+ * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+ * Lesser General Public License for more details.
+ *
+ * You should have received a copy of the GNU Lesser General Public
+ * License along with this library; if not, write to the Free Software
+ * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301, USA
+ */
+
 #include "private.h"
 #include "wine/debug.h"
 
@@ -6,12 +25,10 @@ WINE_DEFAULT_DEBUG_CHANNEL(web);
 struct json_array
 {
     IJsonArray IJsonArray_iface;
-    IJsonValueInternal IJsonValueInternal_iface;
     LONG ref;
-
-    cJSON *node;
-    struct json_root *root;
-    HSTRING str_cache;
+    IJsonValue **elements;
+    ULONG capacity;
+    ULONG length;
 };
 
 static inline struct json_array *impl_from_IJsonArray( IJsonArray *iface )
@@ -19,58 +36,23 @@ static inline struct json_array *impl_from_IJsonArray( IJsonArray *iface )
     return CONTAINING_RECORD( iface, struct json_array, IJsonArray_iface );
 }
 
-static inline struct json_array *impl_from_IJsonValueInternal( IJsonValueInternal *iface )
-{
-    return CONTAINING_RECORD( iface, struct json_array, IJsonValueInternal_iface );
-}
-
-static HRESULT WINAPI json_array_internal_QueryInterface( IJsonValueInternal *iface, REFIID iid, void **out )
-{
-    struct json_array *impl = impl_from_IJsonValueInternal( iface );
-    return IJsonArray_QueryInterface( &impl->IJsonArray_iface, iid, out );
-}
-
-static ULONG WINAPI json_array_internal_AddRef( IJsonValueInternal *iface )
-{
-    struct json_array *impl = impl_from_IJsonValueInternal( iface );
-    return IJsonArray_AddRef( &impl->IJsonArray_iface );
-}
-
-static ULONG WINAPI json_array_internal_Release( IJsonValueInternal *iface )
-{
-    struct json_array *impl = impl_from_IJsonValueInternal( iface );
-    return IJsonArray_Release( &impl->IJsonArray_iface );
-}
-
-static cJSON * WINAPI json_array_internal_GetNode( IJsonValueInternal *iface )
-{
-    struct json_array *impl = impl_from_IJsonValueInternal( iface );
-    return impl->node;
-}
-
-static const struct IJsonValueInternalVtbl json_array_internal_vtbl =
-{
-    json_array_internal_QueryInterface,
-    json_array_internal_AddRef,
-    json_array_internal_Release,
-    json_array_internal_GetNode,
-};
-
 HRESULT json_array_push( IJsonArray *iface, IJsonValue *value )
 {
     struct json_array *impl = impl_from_IJsonArray( iface );
-    cJSON *new_node = cjson_node_duplicate_from_IJsonValue( value );
 
     TRACE( "iface %p, value %p.\n", iface, value );
 
-    if (!new_node) return E_OUTOFMEMORY;
-    cJSON_AddItemToArray( impl->node, new_node );
-
-    if (impl->str_cache)
+    if (impl->length == impl->capacity)
     {
-        WindowsDeleteString( impl->str_cache );
-        impl->str_cache = NULL;
+        UINT32 capacity = max( 32, impl->capacity * 3 / 2 );
+        IJsonValue **new = impl->elements;
+        if (!(new = realloc( new, capacity * sizeof(*new) ))) return E_OUTOFMEMORY;
+        impl->elements = new;
+        impl->capacity = capacity;
     }
+
+    impl->elements[impl->length++] = value;
+    IJsonValue_AddRef( value );
     return S_OK;
 }
 
@@ -86,13 +68,6 @@ static HRESULT WINAPI json_array_QueryInterface( IJsonArray *iface, REFIID iid, 
         IsEqualGUID( iid, &IID_IJsonArray ))
     {
         *out = &impl->IJsonArray_iface;
-        IInspectable_AddRef( *out );
-        return S_OK;
-    }
-
-    if (IsEqualGUID( iid, &IID_IJsonValueInternal ))
-    {
-        *out = &impl->IJsonValueInternal_iface;
         IInspectable_AddRef( *out );
         return S_OK;
     }
@@ -119,9 +94,10 @@ static ULONG WINAPI json_array_Release( IJsonArray *iface )
 
     if (!ref)
     {
-        if (impl->str_cache)
-            WindowsDeleteString( impl->str_cache );
-        json_root_release( impl->root );
+        for (UINT32 i = 0; i < impl->length; i++)
+            IJsonValue_Release( impl->elements[i] );
+
+        free( impl->elements );
         free( impl );
     }
     return ref;
@@ -148,88 +124,61 @@ static HRESULT WINAPI json_array_GetTrustLevel( IJsonArray *iface, TrustLevel *t
 static HRESULT WINAPI json_array_GetObjectAt( IJsonArray *iface, UINT32 index, IJsonObject **value )
 {
     struct json_array *impl = impl_from_IJsonArray( iface );
-    cJSON *child;
 
     TRACE( "iface %p, index %u, value %p\n", iface, index, value );
 
     if (!value) return E_INVALIDARG;
-    *value = NULL;
+    if (index >= impl->length) return E_BOUNDS;
 
-    child = cJSON_GetArrayItem( impl->node, (int)index );
-    if (!child) return E_BOUNDS;
-    if (!(child->type & cJSON_Object)) return E_ILLEGAL_METHOD_CALL;
-
-    return create_json_object( child, impl->root, value );
+    return IJsonValue_GetObject( impl->elements[index], value );
 }
 
 static HRESULT WINAPI json_array_GetArrayAt( IJsonArray *iface, UINT32 index, IJsonArray **value )
 {
     struct json_array *impl = impl_from_IJsonArray( iface );
-    cJSON *child;
 
     TRACE( "iface %p, index %u, value %p\n", iface, index, value );
 
     if (!value) return E_INVALIDARG;
-    *value = NULL;
+    if (index >= impl->length) return E_BOUNDS;
 
-    child = cJSON_GetArrayItem( impl->node, (int)index );
-    if (!child) return E_BOUNDS;
-    if (!(child->type & cJSON_Array)) return E_ILLEGAL_METHOD_CALL;
-
-    return create_json_array( child, impl->root, value );
+    return IJsonValue_GetArray( impl->elements[index], value );
 }
 
 static HRESULT WINAPI json_array_GetStringAt( IJsonArray *iface, UINT32 index, HSTRING *value )
 {
     struct json_array *impl = impl_from_IJsonArray( iface );
-    cJSON *child;
-    int len;
 
     TRACE( "iface %p, index %u, value %p\n", iface, index, value );
 
     if (!value) return E_INVALIDARG;
-    *value = NULL;
+    if (index >= impl->length) return E_BOUNDS;
 
-    child = cJSON_GetArrayItem( impl->node, (int)index );
-    if (!child) return E_BOUNDS;
-    if (!(child->type & cJSON_String)) return E_ILLEGAL_METHOD_CALL;
-
-    len = child->valueint > 0 ? child->valueint : strlen( child->valuestring );
-    return hstring_from_utf8_len( child->valuestring, len, value );
+    return IJsonValue_GetString( impl->elements[index], value );
 }
 
 static HRESULT WINAPI json_array_GetNumberAt( IJsonArray *iface, UINT32 index, DOUBLE *value )
 {
     struct json_array *impl = impl_from_IJsonArray( iface );
-    cJSON *child;
 
     TRACE( "iface %p, index %u, value %p\n", iface, index, value );
 
     if (!value) return E_INVALIDARG;
+    if (index >= impl->length) return E_BOUNDS;
 
-    child = cJSON_GetArrayItem( impl->node, (int)index );
-    if (!child) return E_BOUNDS;
-    if (!(child->type & cJSON_Number)) return E_ILLEGAL_METHOD_CALL;
-
-    *value = child->valuedouble;
-    return S_OK;
+    return IJsonValue_GetNumber( impl->elements[index], value );
 }
 
 static HRESULT WINAPI json_array_GetBooleanAt( IJsonArray *iface, UINT32 index, boolean *value )
 {
     struct json_array *impl = impl_from_IJsonArray( iface );
-    cJSON *child;
 
     TRACE( "iface %p, index %u, value %p\n", iface, index, value );
 
     if (!value) return E_INVALIDARG;
+    if (index >= impl->length) return E_BOUNDS;
 
-    child = cJSON_GetArrayItem( impl->node, (int)index );
-    if (!child) return E_BOUNDS;
-    if (!(child->type & (cJSON_False | cJSON_True))) return E_ILLEGAL_METHOD_CALL;
-
-    *value = (child->type & cJSON_True) ? TRUE : FALSE;
-    return S_OK;
+    return IJsonValue_GetBoolean( impl->elements[index], value );
 }
 
 static const struct IJsonArrayVtbl json_array_vtbl =
@@ -237,35 +186,17 @@ static const struct IJsonArrayVtbl json_array_vtbl =
     json_array_QueryInterface,
     json_array_AddRef,
     json_array_Release,
+    /* IInspectable methods */
     json_array_GetIids,
     json_array_GetRuntimeClassName,
     json_array_GetTrustLevel,
+    /* IJsonArray methods */
     json_array_GetObjectAt,
     json_array_GetArrayAt,
     json_array_GetStringAt,
     json_array_GetNumberAt,
     json_array_GetBooleanAt,
 };
-
-HRESULT create_json_array( cJSON *node, struct json_root *root, IJsonArray **out )
-{
-    struct json_array *impl;
-
-    if (!out) return E_POINTER;
-    *out = NULL;
-    if (!node) return E_FAIL;
-
-    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
-    impl->IJsonArray_iface.lpVtbl = &json_array_vtbl;
-    impl->IJsonValueInternal_iface.lpVtbl = &json_array_internal_vtbl;
-    impl->ref = 1;
-    impl->node = node;
-    impl->root = root;
-    json_root_addref( root );
-
-    *out = &impl->IJsonArray_iface;
-    return S_OK;
-}
 
 struct json_array_statics
 {
@@ -282,7 +213,7 @@ static HRESULT WINAPI factory_QueryInterface( IActivationFactory *iface, REFIID 
 {
     struct json_array_statics *impl = impl_from_IActivationFactory( iface );
 
-    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid(iid), out);
 
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
@@ -335,31 +266,17 @@ static HRESULT WINAPI factory_GetTrustLevel( IActivationFactory *iface, TrustLev
 
 static HRESULT WINAPI factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
-    cJSON *node;
-    struct json_root *root;
-    IJsonArray *arr;
-    HRESULT hr;
+    struct json_array *impl;
 
     TRACE( "iface %p, instance %p.\n", iface, instance );
 
-    if (!instance) return E_POINTER;
     *instance = NULL;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 
-    node = cJSON_CreateArray();
-    if (!node) return E_OUTOFMEMORY;
+    impl->IJsonArray_iface.lpVtbl = &json_array_vtbl;
+    impl->ref = 1;
 
-    root = json_root_create( node );
-    if (!root)
-    {
-        cJSON_Delete( node );
-        return E_OUTOFMEMORY;
-    }
-
-    hr = create_json_array( node, root, &arr );
-    json_root_release( root );
-    if (FAILED(hr)) return hr;
-
-    *instance = (IInspectable *)arr;
+    *instance = (IInspectable *)&impl->IJsonArray_iface;
     return S_OK;
 }
 
@@ -368,9 +285,11 @@ static const struct IActivationFactoryVtbl factory_vtbl =
     factory_QueryInterface,
     factory_AddRef,
     factory_Release,
+    /* IInspectable methods */
     factory_GetIids,
     factory_GetRuntimeClassName,
     factory_GetTrustLevel,
+    /* IActivationFactory methods */
     factory_ActivateInstance,
 };
 
