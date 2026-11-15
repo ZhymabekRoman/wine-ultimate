@@ -188,9 +188,15 @@ typedef struct
 #endif
 
 #define SAMBA_XATTR_DOS_ATTRIB  XATTR_USER_PREFIX "DOSATTRIB"
-#define XATTR_ATTRIBS_MASK      (FILE_ATTRIBUTE_HIDDEN|FILE_ATTRIBUTE_SYSTEM)
+#define XATTR_ATTRIBS_MASK      (FILE_ATTRIBUTE_HIDDEN | FILE_ATTRIBUTE_SYSTEM | \
+                                 FILE_ATTRIBUTE_TEMPORARY | FILE_ATTRIBUTE_OFFLINE | \
+                                 FILE_ATTRIBUTE_NOT_CONTENT_INDEXED | \
+                                 FILE_ATTRIBUTE_INTEGRITY_STREAM | \
+                                 FILE_ATTRIBUTE_NO_SCRUB_DATA)
 
 #define XATTR_REPARSE XATTR_USER_PREFIX "WINEREPARSE"
+#define XATTR_ZONE_IDENTIFIER XATTR_USER_PREFIX "Zone.Identifier"
+#define ZONE_STREAM_MAX_SIZE  65536
 
 struct file_identity
 {
@@ -499,6 +505,41 @@ static int xattr_fget( int filedes, const char *name, void *value, size_t size )
 #elif defined(HAVE_SYS_EXTATTR_H)
     return extattr_get_fd( filedes, EXTATTR_NAMESPACE_USER, &name[XATTR_USER_PREFIX_LEN],
                            value, size );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+
+static int xattr_set( const char *path, const char *name, const void *value, size_t size )
+{
+#ifdef HAVE_SYS_XATTR_H
+# ifdef XATTR_ADDITIONAL_OPTIONS
+    return setxattr( path, name, value, size, 0, 0 );
+# else
+    return setxattr( path, name, value, size, 0 );
+# endif
+#elif defined(HAVE_SYS_EXTATTR_H)
+    return extattr_set_file( path, EXTATTR_NAMESPACE_USER, &name[XATTR_USER_PREFIX_LEN],
+                             value, size );
+#else
+    errno = ENOSYS;
+    return -1;
+#endif
+}
+
+
+static int xattr_remove( const char *path, const char *name )
+{
+#ifdef HAVE_SYS_XATTR_H
+# ifdef XATTR_ADDITIONAL_OPTIONS
+    return removexattr( path, name, 0 );
+# else
+    return removexattr( path, name );
+# endif
+#elif defined(HAVE_SYS_EXTATTR_H)
+    return extattr_delete_file( path, EXTATTR_NAMESPACE_USER, &name[XATTR_USER_PREFIX_LEN] );
 #else
     errno = ENOSYS;
     return -1;
@@ -1648,16 +1689,16 @@ static inline ULONG get_file_attributes( const struct stat *st )
 
 
 /* decode the xattr-stored DOS attributes */
-static int parse_samba_dos_attrib_data( char *data, int len )
+static ULONG parse_samba_dos_attrib_data( char *data, int len )
 {
     char *end;
-    int val;
+    unsigned long val;
 
     if (len > 2 && data[0] == '0' && data[1] == 'x')
     {
         data[len] = 0;
-        val = strtol( data, &end, 16 );
-        if (!*end) return val & XATTR_ATTRIBS_MASK;
+        val = strtoul( data, &end, 16 );
+        if (!*end) return (ULONG)(val & XATTR_ATTRIBS_MASK);
     }
     else
     {
@@ -1730,7 +1771,6 @@ static int fd_get_file_info( HANDLE handle, int fd, unsigned int options,
 
 static int fd_set_dos_attrib( int fd, UINT attr, BOOL force_set )
 {
-    /* we only store the HIDDEN and SYSTEM attributes */
     attr &= XATTR_ATTRIBS_MASK;
     if (force_set || attr != 0)
     {
@@ -5451,6 +5491,403 @@ NTSTATUS open_unix_file( HANDLE *handle, const char *unix_name, ACCESS_MASK acce
 }
 
 
+struct zone_stream_entry
+{
+    HANDLE handle;
+    dev_t  mem_dev;
+    ino_t  mem_ino;
+    char  *base_unix_name;
+};
+
+static struct zone_stream_entry *zone_streams;
+static unsigned int zone_streams_count;
+static unsigned int zone_streams_cap;
+static unsigned int zone_streams_active;
+static pthread_mutex_t zone_streams_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static BOOL split_zone_identifier_stream( const OBJECT_ATTRIBUTES *attr,
+                                          OBJECT_ATTRIBUTES *base_attr,
+                                          UNICODE_STRING *base_name )
+{
+    static const WCHAR zone_idW[] = {'Z','o','n','e','.','I','d','e','n','t','i','f','i','e','r'};
+    static const WCHAR data_typeW[] = {'$','D','A','T','A'};
+    const WCHAR *name, *comp_start, *colon, *stream;
+    unsigned int len, i, comp_idx, stream_len, prefix_len = 0;
+
+    base_name->Buffer = NULL;
+    if (!attr || !attr->ObjectName || !attr->ObjectName->Buffer) return FALSE;
+
+    name = attr->ObjectName->Buffer;
+    len = attr->ObjectName->Length / sizeof(WCHAR);
+    if (!len) return FALSE;
+
+    if (!attr->RootDirectory)
+    {
+        prefix_len = get_dos_prefix_len( attr->ObjectName );
+        if (!prefix_len) return FALSE;
+    }
+
+    comp_idx = prefix_len;
+    for (i = prefix_len; i < len; i++)
+    {
+        if (name[i] == '\\' || name[i] == '/') comp_idx = i + 1;
+    }
+    if (!attr->RootDirectory && comp_idx == prefix_len) return FALSE;
+    if (comp_idx >= len) return FALSE;
+    comp_start = name + comp_idx;
+
+    colon = NULL;
+    for (i = comp_idx; i < len; i++)
+    {
+        if (name[i] == ':')
+        {
+            colon = name + i;
+            break;
+        }
+    }
+    if (!colon || colon == comp_start) return FALSE;
+
+    stream = colon + 1;
+    stream_len = (name + len) - stream;
+
+    for (i = 0; i < stream_len; i++)
+    {
+        if (stream[i] == ':')
+        {
+            if (stream_len - (i + 1) != ARRAY_SIZE(data_typeW) ||
+                wcsnicmp( stream + i + 1, data_typeW, ARRAY_SIZE(data_typeW) ))
+                return FALSE;
+            stream_len = i;
+            break;
+        }
+    }
+
+    if (stream_len != ARRAY_SIZE(zone_idW) ||
+        wcsnicmp( stream, zone_idW, ARRAY_SIZE(zone_idW) ))
+        return FALSE;
+
+    base_name->Length = (colon - name) * sizeof(WCHAR);
+    base_name->MaximumLength = base_name->Length + sizeof(WCHAR);
+    if (!(base_name->Buffer = malloc( base_name->MaximumLength ))) return FALSE;
+    memcpy( base_name->Buffer, name, base_name->Length );
+    base_name->Buffer[colon - name] = 0;
+
+    *base_attr = *attr;
+    base_attr->ObjectName = base_name;
+    return TRUE;
+}
+
+static void zone_stream_register( HANDLE handle, dev_t mem_dev, ino_t mem_ino, const char *base_unix_name )
+{
+    char *copy = strdup( base_unix_name );
+    unsigned int i;
+
+    if (!copy) return;
+
+    pthread_mutex_lock( &zone_streams_mutex );
+
+    for (i = 0; i < zone_streams_count; )
+    {
+        if (zone_streams[i].handle == handle)
+        {
+            free( zone_streams[i].base_unix_name );
+            zone_streams[i] = zone_streams[--zone_streams_count];
+            continue;
+        }
+        if (zone_streams_count >= 16)
+        {
+            int pfd, pclose = 0;
+            struct stat pst;
+            BOOL alive = !server_get_unix_fd( zone_streams[i].handle, 0, &pfd, &pclose, NULL, NULL ) &&
+                         !fstat( pfd, &pst ) &&
+                         pst.st_dev == zone_streams[i].mem_dev &&
+                         pst.st_ino == zone_streams[i].mem_ino;
+            if (pclose) close( pfd );
+            if (!alive)
+            {
+                free( zone_streams[i].base_unix_name );
+                zone_streams[i] = zone_streams[--zone_streams_count];
+                continue;
+            }
+        }
+        i++;
+    }
+
+    if (zone_streams_count == zone_streams_cap)
+    {
+        unsigned int new_cap = zone_streams_cap ? zone_streams_cap * 2 : 16;
+        struct zone_stream_entry *new_arr = realloc( zone_streams, new_cap * sizeof(*new_arr) );
+        if (!new_arr)
+        {
+            pthread_mutex_unlock( &zone_streams_mutex );
+            free( copy );
+            return;
+        }
+        zone_streams = new_arr;
+        zone_streams_cap = new_cap;
+    }
+
+    zone_streams[zone_streams_count].handle = handle;
+    zone_streams[zone_streams_count].mem_dev = mem_dev;
+    zone_streams[zone_streams_count].mem_ino = mem_ino;
+    zone_streams[zone_streams_count].base_unix_name = copy;
+    zone_streams_count++;
+    __atomic_store_n( &zone_streams_active, zone_streams_count, __ATOMIC_RELEASE );
+
+    pthread_mutex_unlock( &zone_streams_mutex );
+}
+
+static BOOL zone_stream_find( int mem_fd, char **base_unix_name_ret )
+{
+    struct stat st;
+    unsigned int i;
+    BOOL found = FALSE;
+
+    if (!__atomic_load_n( &zone_streams_active, __ATOMIC_ACQUIRE )) return FALSE;
+    if (fstat( mem_fd, &st ) == -1) return FALSE;
+
+    pthread_mutex_lock( &zone_streams_mutex );
+    for (i = 0; i < zone_streams_count; i++)
+    {
+        if (zone_streams[i].mem_dev == st.st_dev && zone_streams[i].mem_ino == st.st_ino)
+        {
+            *base_unix_name_ret = strdup( zone_streams[i].base_unix_name );
+            found = (*base_unix_name_ret != NULL);
+            break;
+        }
+    }
+    pthread_mutex_unlock( &zone_streams_mutex );
+    return found;
+}
+
+static NTSTATUS zone_stream_sync_from_fd( int mem_fd )
+{
+    char *base_unix_name = NULL;
+    char *buf;
+    struct stat st;
+    size_t size, total = 0;
+    NTSTATUS status = STATUS_SUCCESS;
+
+    if (!zone_stream_find( mem_fd, &base_unix_name )) return STATUS_SUCCESS;
+    if (fstat( mem_fd, &st ) == -1)
+    {
+        status = errno_to_status( errno );
+        free( base_unix_name );
+        return status;
+    }
+    if (st.st_size > ZONE_STREAM_MAX_SIZE)
+    {
+        free( base_unix_name );
+        return STATUS_DISK_FULL;
+    }
+
+    size = (size_t)st.st_size;
+    buf = malloc( size ? size : 1 );
+    if (!buf)
+    {
+        free( base_unix_name );
+        return STATUS_NO_MEMORY;
+    }
+
+    while (total < size)
+    {
+        ssize_t r = pread( mem_fd, buf + total, size - total, total );
+        if (r < 0)
+        {
+            if (errno == EINTR) continue;
+            status = errno_to_status( errno );
+            goto done;
+        }
+        if (r == 0) break;
+        total += r;
+    }
+
+    if (xattr_set( base_unix_name, XATTR_ZONE_IDENTIFIER, buf, total ) == -1)
+        status = errno_to_status( errno );
+
+done:
+    free( buf );
+    free( base_unix_name );
+    return status;
+}
+
+static NTSTATUS create_zone_identifier_stream( HANDLE *handle, ACCESS_MASK access,
+                                               OBJECT_ATTRIBUTES *base_attr,
+                                               UNICODE_STRING *base_name,
+                                               IO_STATUS_BLOCK *io, ULONG disposition, ULONG options )
+{
+    UNICODE_STRING nt_name;
+    char *unix_name = NULL;
+    UINT base_disp;
+    NTSTATUS status;
+    int base_fd = -1, memfd = -1;
+    ssize_t xattr_len;
+    BOOL exists = FALSE;
+    ULONG_PTR info_result = 0;
+    struct stat mem_st;
+
+    nt_name.Buffer = NULL;
+
+    if (options & FILE_DIRECTORY_FILE)
+    {
+        status = STATUS_NOT_A_DIRECTORY;
+        goto done;
+    }
+
+    base_disp = (disposition == FILE_OPEN || disposition == FILE_OVERWRITE) ? FILE_OPEN : FILE_OPEN_IF;
+    status = get_nt_and_unix_names( base_attr, &nt_name, &unix_name, base_disp, options & FILE_OPEN_REPARSE_POINT );
+    if (status == STATUS_NO_SUCH_FILE)
+    {
+        int cfd = open( unix_name, O_CREAT | O_RDWR, 0666 & ~start_umask );
+        if (cfd == -1)
+        {
+            status = errno_to_status( errno );
+            goto done;
+        }
+        close( cfd );
+        path_cache_invalidate( base_attr );
+        status = STATUS_SUCCESS;
+    }
+    if (status != STATUS_SUCCESS) goto done;
+
+    base_fd = open( unix_name, O_RDONLY );
+    if (base_fd == -1)
+    {
+        status = errno_to_status( errno );
+        goto done;
+    }
+
+    xattr_len = xattr_fget( base_fd, XATTR_ZONE_IDENTIFIER, NULL, 0 );
+    if (xattr_len < 0)
+    {
+        if (errno == ENOTSUP)
+        {
+            status = STATUS_NOT_SUPPORTED;
+            goto done;
+        }
+#ifdef ENODATA
+        if (errno != ENODATA)
+#endif
+#ifdef ENOATTR
+        if (errno != ENOATTR)
+#endif
+        {
+            status = errno_to_status( errno );
+            goto done;
+        }
+        exists = FALSE;
+        xattr_len = 0;
+    }
+    else exists = TRUE;
+
+    switch (disposition)
+    {
+    case FILE_OPEN:
+        if (!exists) { status = STATUS_OBJECT_NAME_NOT_FOUND; goto done; }
+        info_result = FILE_OPENED;
+        break;
+    case FILE_OVERWRITE:
+        if (!exists) { status = STATUS_OBJECT_NAME_NOT_FOUND; goto done; }
+        info_result = FILE_OVERWRITTEN;
+        break;
+    case FILE_CREATE:
+        if (exists) { status = STATUS_OBJECT_NAME_COLLISION; goto done; }
+        info_result = FILE_CREATED;
+        break;
+    case FILE_OPEN_IF:
+        info_result = exists ? FILE_OPENED : FILE_CREATED;
+        break;
+    case FILE_OVERWRITE_IF:
+        info_result = exists ? FILE_OVERWRITTEN : FILE_CREATED;
+        break;
+    case FILE_SUPERSEDE:
+        info_result = exists ? FILE_SUPERSEDED : FILE_CREATED;
+        break;
+    default:
+        status = STATUS_INVALID_PARAMETER;
+        goto done;
+    }
+
+#ifdef HAVE_MEMFD_CREATE
+    memfd = memfd_create( "Zone.Identifier", MFD_CLOEXEC );
+    if (memfd == -1)
+    {
+        status = errno_to_status( errno );
+        goto done;
+    }
+#else
+    status = STATUS_NOT_SUPPORTED;
+    goto done;
+#endif
+
+    if (exists && (disposition == FILE_OPEN || disposition == FILE_OPEN_IF) && xattr_len > 0)
+    {
+        char *buf = malloc( xattr_len );
+        ssize_t got, off = 0;
+
+        if (!buf) { status = STATUS_NO_MEMORY; goto done; }
+        got = xattr_fget( base_fd, XATTR_ZONE_IDENTIFIER, buf, xattr_len );
+        if (got < 0)
+        {
+            status = errno_to_status( errno );
+            free( buf );
+            goto done;
+        }
+        while (off < got)
+        {
+            ssize_t w = write( memfd, buf + off, got - off );
+            if (w < 0)
+            {
+                if (errno == EINTR) continue;
+                status = errno_to_status( errno );
+                free( buf );
+                goto done;
+            }
+            off += w;
+        }
+        free( buf );
+        lseek( memfd, 0, SEEK_SET );
+    }
+
+    if (options & FILE_DELETE_ON_CLOSE)
+    {
+        xattr_fremove( base_fd, XATTR_ZONE_IDENTIFIER );
+    }
+    else if (!exists || disposition == FILE_OVERWRITE ||
+             disposition == FILE_OVERWRITE_IF || disposition == FILE_SUPERSEDE)
+    {
+        if (xattr_fset( base_fd, XATTR_ZONE_IDENTIFIER, "", 0 ) == -1)
+        {
+            status = errno_to_status( errno );
+            goto done;
+        }
+    }
+
+    if (fstat( memfd, &mem_st ) == -1)
+    {
+        status = errno_to_status( errno );
+        goto done;
+    }
+
+    status = wine_server_fd_to_handle( memfd, access, base_attr->Attributes & OBJ_INHERIT, handle );
+    close( memfd );
+    memfd = -1;
+    if (status == STATUS_SUCCESS)
+    {
+        zone_stream_register( *handle, mem_st.st_dev, mem_st.st_ino, unix_name );
+        io->Information = info_result;
+    }
+
+done:
+    if (memfd != -1) close( memfd );
+    if (base_fd != -1) close( base_fd );
+    free( unix_name );
+    free( nt_name.Buffer );
+    free( base_name->Buffer );
+    return io->Status = status;
+}
+
+
 /******************************************************************************
  *              NtCreateFile   (NTDLL.@)
  */
@@ -5460,7 +5897,7 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
                               ULONG options, void *ea_buffer, ULONG ea_length )
 {
     OBJECT_ATTRIBUTES new_attr;
-    UNICODE_STRING nt_name;
+    UNICODE_STRING nt_name, base_name;
     char *unix_name = NULL;
     BOOL name_hidden = FALSE;
     BOOL created = FALSE;
@@ -5474,6 +5911,10 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
 
     *handle = 0;
     if (!attr || !attr->ObjectName) return STATUS_INVALID_PARAMETER;
+
+    if (split_zone_identifier_stream( attr, &new_attr, &base_name ))
+        return create_zone_identifier_stream( handle, access, &new_attr, &base_name,
+                                              io, disposition, options );
 
     if (alloc_size) FIXME( "alloc_size not supported\n" );
 
@@ -5670,8 +6111,23 @@ NTSTATUS WINAPI NtDeleteFile( OBJECT_ATTRIBUTES *attr )
     HANDLE handle;
     NTSTATUS status;
     char *unix_name;
-    UNICODE_STRING nt_name;
+    UNICODE_STRING nt_name, base_name;
     OBJECT_ATTRIBUTES new_attr = *attr;
+
+    if (split_zone_identifier_stream( attr, &new_attr, &base_name ))
+    {
+        if (!(status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, FALSE )))
+        {
+            if (xattr_get( unix_name, XATTR_ZONE_IDENTIFIER, NULL, 0 ) < 0)
+                status = (errno == ENOTSUP) ? STATUS_NOT_SUPPORTED : STATUS_OBJECT_NAME_NOT_FOUND;
+            else if (xattr_remove( unix_name, XATTR_ZONE_IDENTIFIER ) == -1)
+                status = errno_to_status( errno );
+        }
+        free( unix_name );
+        free( nt_name.Buffer );
+        free( base_name.Buffer );
+        return status;
+    }
 
     if (!(status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, FALSE )))
     {
@@ -5699,8 +6155,9 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
 {
     char *unix_name;
     unsigned int status;
-    UNICODE_STRING nt_name;
+    UNICODE_STRING nt_name, base_name;
     OBJECT_ATTRIBUTES new_attr = *attr;
+    BOOL is_zone = split_zone_identifier_stream( attr, &new_attr, &base_name );
 
     if (!(status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE )))
     {
@@ -5711,12 +6168,25 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
             status = errno_to_status( errno );
         else if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
             status = STATUS_INVALID_INFO_CLASS;
+        else if (is_zone)
+        {
+            ssize_t xattr_len = xattr_get( unix_name, XATTR_ZONE_IDENTIFIER, NULL, 0 );
+            if (xattr_len < 0)
+                status = (errno == ENOTSUP) ? STATUS_NOT_SUPPORTED : STATUS_OBJECT_NAME_NOT_FOUND;
+            else
+            {
+                st.st_size = xattr_len;
+                st.st_blocks = (xattr_len + 511) / 512;
+                fill_file_info( &st, attributes, info, FileNetworkOpenInformation );
+            }
+        }
         else
             fill_file_info( &st, attributes, info, FileNetworkOpenInformation );
     }
     else WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), status );
     free( unix_name );
     free( nt_name.Buffer );
+    free( base_name.Buffer );
     return status;
 }
 
@@ -5728,8 +6198,9 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
 {
     char *unix_name;
     unsigned int status;
-    UNICODE_STRING nt_name;
+    UNICODE_STRING nt_name, base_name;
     OBJECT_ATTRIBUTES new_attr = *attr;
+    BOOL is_zone = split_zone_identifier_stream( attr, &new_attr, &base_name );
 
     if (!(status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE )))
     {
@@ -5740,12 +6211,21 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
             status = errno_to_status( errno );
         else if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
             status = STATUS_INVALID_INFO_CLASS;
+        else if (is_zone)
+        {
+            ssize_t xattr_len = xattr_get( unix_name, XATTR_ZONE_IDENTIFIER, NULL, 0 );
+            if (xattr_len < 0)
+                status = (errno == ENOTSUP) ? STATUS_NOT_SUPPORTED : STATUS_OBJECT_NAME_NOT_FOUND;
+            else
+                status = fill_file_info( &st, attributes, info, FileBasicInformation );
+        }
         else
             status = fill_file_info( &st, attributes, info, FileBasicInformation );
     }
     else WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), status );
     free( unix_name );
     free( nt_name.Buffer );
+    free( base_name.Buffer );
     return status;
 }
 
@@ -6083,6 +6563,14 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                 status = wine_server_call( req );
             }
             SERVER_END_REQ;
+            if (!status && __atomic_load_n( &zone_streams_active, __ATOMIC_ACQUIRE ))
+            {
+                if (!server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL ))
+                {
+                    status = zone_stream_sync_from_fd( fd );
+                    if (needs_close) close( fd );
+                }
+            }
         }
         else status = STATUS_INVALID_PARAMETER_3;
         break;
@@ -6211,6 +6699,21 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
         if (len >= sizeof(FILE_DISPOSITION_INFORMATION))
         {
             FILE_DISPOSITION_INFORMATION *info = ptr;
+            char *base_unix_name = NULL;
+
+            if (__atomic_load_n( &zone_streams_active, __ATOMIC_ACQUIRE ) &&
+                !server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL ))
+            {
+                BOOL is_zone = zone_stream_find( fd, &base_unix_name );
+                if (needs_close) close( fd );
+                if (is_zone)
+                {
+                    if (info->DoDeleteFile) xattr_remove( base_unix_name, XATTR_ZONE_IDENTIFIER );
+                    free( base_unix_name );
+                    status = STATUS_SUCCESS;
+                    break;
+                }
+            }
 
             SERVER_START_REQ( set_fd_disp_info )
             {
@@ -6228,6 +6731,22 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
         if (len >= sizeof(FILE_DISPOSITION_INFORMATION_EX))
         {
             FILE_DISPOSITION_INFORMATION_EX *info = ptr;
+            char *base_unix_name = NULL;
+
+            if (__atomic_load_n( &zone_streams_active, __ATOMIC_ACQUIRE ) &&
+                !server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, NULL ))
+            {
+                BOOL is_zone = zone_stream_find( fd, &base_unix_name );
+                if (needs_close) close( fd );
+                if (is_zone)
+                {
+                    if (info->Flags & FILE_DISPOSITION_DELETE)
+                        xattr_remove( base_unix_name, XATTR_ZONE_IDENTIFIER );
+                    free( base_unix_name );
+                    status = STATUS_SUCCESS;
+                    break;
+                }
+            }
 
             if (info->Flags & FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK)
                 FIXME( "FILE_DISPOSITION_FORCE_IMAGE_SECTION_CHECK not supported\n" );
@@ -7370,6 +7889,12 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
     }
 
 done:
+    if (status == STATUS_SUCCESS && type == FD_TYPE_FILE &&
+        __atomic_load_n( &zone_streams_active, __ATOMIC_ACQUIRE ))
+    {
+        NTSTATUS sync_status = zone_stream_sync_from_fd( unix_handle );
+        if (sync_status) status = sync_status;
+    }
     send_completion = cvalue != 0;
 
 err:

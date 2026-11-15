@@ -714,8 +714,10 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFile2( LPCWSTR name, DWORD access, DWORD s
                                          FILE_ATTRIBUTE_NORMAL |
                                          FILE_ATTRIBUTE_TEMPORARY |
                                          FILE_ATTRIBUTE_OFFLINE |
+                                         FILE_ATTRIBUTE_NOT_CONTENT_INDEXED |
                                          FILE_ATTRIBUTE_ENCRYPTED |
-                                         FILE_ATTRIBUTE_INTEGRITY_STREAM;
+                                         FILE_ATTRIBUTE_INTEGRITY_STREAM |
+                                         FILE_ATTRIBUTE_NO_SCRUB_DATA;
     static const DWORD flags_mask = FILE_FLAG_BACKUP_SEMANTICS |
                                     FILE_FLAG_DELETE_ON_CLOSE |
                                     FILE_FLAG_NO_BUFFERING |
@@ -869,8 +871,12 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
     }
     if (sa && sa->bInheritHandle) attr.Attributes |= OBJ_INHERIT;
 
+#define VALID_CREATE_FILE_ATTRIBUTES (FILE_ATTRIBUTE_VALID_FLAGS | \
+                                      FILE_ATTRIBUTE_INTEGRITY_STREAM | \
+                                      FILE_ATTRIBUTE_NO_SCRUB_DATA)
+
     status = NtCreateFile( &ret, access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, &attr, &io,
-                           NULL, attributes & FILE_ATTRIBUTE_VALID_FLAGS, sharing,
+                           NULL, attributes & VALID_CREATE_FILE_ATTRIBUTES, sharing,
                            nt_disposition[creation - CREATE_NEW],
                            get_nt_file_options( attributes, creation ), NULL, 0 );
 
@@ -883,7 +889,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
         {
             WARN( "Ignoring write flag on CD drive\n" );
             status = NtCreateFile( &ret, (access & ~GENERIC_WRITE) | SYNCHRONIZE | FILE_READ_ATTRIBUTES,
-                                   &attr, &io, NULL, attributes & FILE_ATTRIBUTE_VALID_FLAGS, sharing,
+                                   &attr, &io, NULL, attributes & VALID_CREATE_FILE_ATTRIBUTES, sharing,
                                    nt_disposition[creation - CREATE_NEW],
                                    get_nt_file_options( attributes, creation ), NULL, 0 );
         }
@@ -894,7 +900,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
         if (alloc_console( TRUE ))
         {
             status = NtCreateFile( &ret, access | SYNCHRONIZE | FILE_READ_ATTRIBUTES, &attr, &io,
-                                   NULL, attributes & FILE_ATTRIBUTE_VALID_FLAGS, sharing,
+                                   NULL, attributes & VALID_CREATE_FILE_ATTRIBUTES, sharing,
                                    nt_disposition[creation - CREATE_NEW],
                                    get_nt_file_options( attributes, creation ), NULL, 0 );
         }
