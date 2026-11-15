@@ -21,6 +21,8 @@
 #define __WINE_WINDOWS_UI_XAML_PRIVATE_H
 
 #include <stdarg.h>
+#include <stdlib.h>
+#include <string.h>
 
 #define COBJMACROS
 #include "windef.h"
@@ -134,6 +136,23 @@ HRESULT xaml_event_registry_add( struct xaml_event_registry *reg, void *handler,
 HRESULT xaml_event_registry_remove( struct xaml_event_registry *reg, EventRegistrationToken token );
 unsigned int xaml_event_registry_snapshot( struct xaml_event_registry *reg, void **out, unsigned int max_out );
 void xaml_event_registry_clear( struct xaml_event_registry *reg );
+
+/* Realloc-backed growable vector helper (grows capacity x2) */
+static inline BOOL xaml_vec_grow( void **items, int *cap, int needed, size_t elem_sz, int init_cap )
+{
+    int ncap;
+    void *nbuf;
+    if (needed <= *cap) return TRUE;
+    ncap = *cap > 0 ? *cap : (init_cap > 0 ? init_cap : 8);
+    while (ncap < needed) ncap *= 2;
+    nbuf = realloc( *items, (size_t)ncap * elem_sz );
+    if (!nbuf) return FALSE;
+    if (ncap > *cap)
+        memset( (char *)nbuf + (size_t)(*cap) * elem_sz, 0, (size_t)(ncap - *cap) * elem_sz );
+    *items = nbuf;
+    *cap = ncap;
+    return TRUE;
+}
 
 enum xaml_pointer_event_kind
 {

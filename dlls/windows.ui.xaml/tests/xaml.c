@@ -1174,6 +1174,90 @@ static void test_VmDataContextBinding( void )
     IInspectable_Release( res_obj );
 }
 
+static void test_VectorGrowthBeyondOldCaps( void )
+{
+    static const GUID IID_IDependencyObject_test =
+        { 0x5c526665, 0xf60e, 0x4912, { 0xaf, 0x59, 0x5f, 0xe0, 0x68, 0x0f, 0x08, 0x9d } };
+    static const GUID IID_IDependencyPropertyStatics_test =
+        { 0x49e5f28f, 0x8259, 0x4d5c, { 0xaa, 0xe0, 0x83, 0xd5, 0x6d, 0xbb, 0x68, 0xd9 } };
+    IActivationFactory *tb_af = NULL, *dp_af = NULL;
+    IInspectable *elem_obj = NULL;
+    void *do_iface = NULL, *dp_statics = NULL;
+    IUnknown *dps[30] = {0};
+    IInspectable *vals[30] = {0};
+    HSTRING str = NULL, hname = NULL;
+    struct { HSTRING Name; int Kind; } tname = { NULL, 0 };
+    HRESULT hr;
+    int i;
+
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.TextBlock", 34, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&tb_af );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && tb_af != NULL, "TextBlock factory hr %#lx\n", hr );
+    if (FAILED(hr) || !tb_af) return;
+
+    hr = IActivationFactory_ActivateInstance( tb_af, &elem_obj );
+    IActivationFactory_Release( tb_af );
+    ok( hr == S_OK && elem_obj != NULL, "TextBlock ActivateInstance hr %#lx\n", hr );
+    if (FAILED(hr) || !elem_obj) return;
+
+    hr = IInspectable_QueryInterface( elem_obj, &IID_IDependencyObject_test, &do_iface );
+    ok( hr == S_OK && do_iface != NULL, "QI IDependencyObject hr %#lx\n", hr );
+
+    WindowsCreateString( L"Windows.UI.Xaml.DependencyProperty", 34, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&dp_af );
+    WindowsDeleteString( str );
+    ok( hr == S_OK && dp_af != NULL, "DependencyProperty factory hr %#lx\n", hr );
+    hr = IActivationFactory_QueryInterface( dp_af, &IID_IDependencyPropertyStatics_test, &dp_statics );
+    IActivationFactory_Release( dp_af );
+    ok( hr == S_OK && dp_statics != NULL, "QI IDependencyPropertyStatics hr %#lx\n", hr );
+
+    WindowsCreateString( L"Int32", 5, &tname.Name );
+
+    /* Register and SetValue 30 distinct DependencyProperties (exceeding old dp_store[24] cap) */
+    for (i = 0; i < 30; i++)
+    {
+        WCHAR prop_name[32];
+        swprintf( prop_name, ARRAY_SIZE(prop_name), L"TestDP_%d", i );
+        WindowsCreateString( prop_name, wcslen( prop_name ), &hname );
+        /* Slot 7 on IDependencyPropertyStatics: Register(HSTRING, TypeName, TypeName, IPropertyMetadata*, IDependencyProperty**) */
+        hr = ((HRESULT (WINAPI *)(void *, HSTRING, void *, void *, void *, IUnknown **))(*(void ***)dp_statics)[7])(
+            dp_statics, hname, &tname, &tname, NULL, &dps[i] );
+        WindowsDeleteString( hname );
+        ok( hr == S_OK && dps[i] != NULL, "Register DP[%d] hr %#lx\n", i, hr );
+
+        /* Use a distinct TextBlock instance as the boxed value for each DP */
+        WindowsCreateString( L"Windows.UI.Xaml.Controls.TextBlock", 34, &str );
+        hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&tb_af );
+        WindowsDeleteString( str );
+        if (SUCCEEDED(hr) && tb_af)
+        {
+            IActivationFactory_ActivateInstance( tb_af, &vals[i] );
+            IActivationFactory_Release( tb_af );
+        }
+        /* Slot 7 on IDependencyObject: SetValue(IDependencyProperty*, IInspectable*) */
+        hr = ((HRESULT (WINAPI *)(void *, void *, IInspectable *))(*(void ***)do_iface)[7])( do_iface, dps[i], vals[i] );
+        ok( hr == S_OK, "SetValue DP[%d] hr %#lx\n", i, hr );
+    }
+
+    /* Round-trip GetValue for all 30 DependencyProperties */
+    for (i = 0; i < 30; i++)
+    {
+        IInspectable *got = NULL;
+        /* Slot 6 on IDependencyObject: GetValue(IDependencyProperty*, IInspectable**) */
+        hr = ((HRESULT (WINAPI *)(void *, void *, IInspectable **))(*(void ***)do_iface)[6])( do_iface, dps[i], &got );
+        ok( hr == S_OK && got == vals[i], "GetValue DP[%d] expected %p, got %p (hr %#lx)\n", i, vals[i], got, hr );
+        if (got) IInspectable_Release( got );
+        if (vals[i]) IInspectable_Release( vals[i] );
+        if (dps[i]) IUnknown_Release( dps[i] );
+    }
+
+    WindowsDeleteString( tname.Name );
+    IUnknown_Release( (IUnknown *)dp_statics );
+    IUnknown_Release( (IUnknown *)do_iface );
+    IInspectable_Release( elem_obj );
+}
+
 START_TEST(xaml)
 {
     HRESULT hr;
@@ -1187,6 +1271,7 @@ START_TEST(xaml)
     test_View_lifecycle();
     test_PointerBridge();
     test_VmDataContextBinding();
+    test_VectorGrowthBeyondOldCaps();
 
     RoUninitialize();
 }

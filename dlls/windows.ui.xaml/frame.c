@@ -2222,35 +2222,57 @@ static HRESULT WINAPI element_add_Loaded( void *iface, void *handler, EventRegis
 }
 
 struct loaded_reg { void *handler; IInspectable *sender; };
-static struct loaded_reg loaded_regs[8];
+static struct loaded_reg *loaded_regs;
 static int loaded_count;
+static int loaded_cap;
+static SRWLOCK loaded_regs_lock = SRWLOCK_INIT;
 
 void xaml_register_loaded( void *handler, IInspectable *sender );
 void xaml_register_loaded( void *handler, IInspectable *sender )
 {
     int i;
+    AcquireSRWLockExclusive( &loaded_regs_lock );
     for (i = 0; i < loaded_count; i++)
-        if (loaded_regs[i].sender == sender) { loaded_regs[i].handler = handler; return; }
-    if (loaded_count < (int)(sizeof(loaded_regs)/sizeof(loaded_regs[0])))
+    {
+        if (loaded_regs[i].sender == sender)
+        {
+            loaded_regs[i].handler = handler;
+            ReleaseSRWLockExclusive( &loaded_regs_lock );
+            return;
+        }
+    }
+    if (xaml_vec_grow( (void **)&loaded_regs, &loaded_cap, loaded_count + 1, sizeof(*loaded_regs), 8 ))
     {
         loaded_regs[loaded_count].handler = handler;
         loaded_regs[loaded_count].sender = sender;
         loaded_count++;
     }
+    ReleaseSRWLockExclusive( &loaded_regs_lock );
 }
 
 void xaml_fire_all_loaded( void );
 void xaml_fire_all_loaded( void )
 {
-    int i;
-    for (i = 0; i < loaded_count; i++)
+    int i, cnt;
+    struct loaded_reg *snap = NULL;
+    AcquireSRWLockExclusive( &loaded_regs_lock );
+    cnt = loaded_count;
+    if (cnt > 0)
+    {
+        snap = malloc( (size_t)cnt * sizeof(*snap) );
+        if (snap) memcpy( snap, loaded_regs, (size_t)cnt * sizeof(*snap) );
+    }
+    ReleaseSRWLockExclusive( &loaded_regs_lock );
+    if (!snap) return;
+    for (i = 0; i < cnt; i++)
     {
         HRESULT (WINAPI *fn)( void *, void *, void * );
-        if (!loaded_regs[i].handler) continue;
-        fn = (void *)((void **)((void **)loaded_regs[i].handler)[0])[3];
-        ERR( "firing Loaded on %p handler %p\n", (void *)loaded_regs[i].sender, loaded_regs[i].handler );
-        fn( loaded_regs[i].handler, (void *)loaded_regs[i].sender, NULL );
+        if (!snap[i].handler) continue;
+        fn = (void *)((void **)((void **)snap[i].handler)[0])[3];
+        ERR( "firing Loaded on %p handler %p\n", (void *)snap[i].sender, snap[i].handler );
+        fn( snap[i].handler, (void *)snap[i].sender, NULL );
     }
+    free( snap );
 }
 
 static HRESULT WINAPI element_remove_Loaded( void *iface, EventRegistrationToken token )

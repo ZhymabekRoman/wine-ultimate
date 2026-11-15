@@ -1362,10 +1362,28 @@ static void uwp_ensure_app_resources_loaded( void )
         {
             typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
             typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
+            typedef LONG (WINAPI *p_RegDeleteValueW_t)( HKEY, LPCWSTR );
             typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
             p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
             p_RegQueryValueExW_t p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
+            p_RegDeleteValueW_t p_del = (p_RegDeleteValueW_t)GetProcAddress( reg_mod, "RegDeleteValueW" );
             p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
+            if (p_open && p_del && p_close)
+            {
+                WCHAR fam[128] = {0};
+                UINT32 flen = ARRAY_SIZE(fam);
+                if (GetCurrentPackageFamilyName( &flen, fam ) == ERROR_SUCCESS && fam[0])
+                {
+                    WCHAR ssub[256];
+                    HKEY shk = NULL;
+                    swprintf( ssub, ARRAY_SIZE(ssub), L"Software\\%s\\Settings", fam );
+                    if (p_open( HKEY_CURRENT_USER, ssub, 0, KEY_SET_VALUE, &shk ) == ERROR_SUCCESS)
+                    {
+                        p_del( shk, L"VeryFirstLaunch" );
+                        p_close( shk );
+                    }
+                }
+            }
             if (p_open && p_query && p_close)
             {
                 static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
@@ -1972,16 +1990,19 @@ struct uwp_element
     BOOL has_bounds;
 
     /* Events & DependencyProperty store */
-    IInspectable *loaded_handlers[8];
+    IInspectable **loaded_handlers;
     int loaded_cnt;
+    int loaded_cap;
     BOOL loaded_fired;
     BOOL template_applied;
 
-    IInspectable *click_handlers[8];
+    IInspectable **click_handlers;
     int click_cnt;
+    int click_cap;
 
-    IInspectable *dc_handlers[8];
+    IInspectable **dc_handlers;
     int dc_cnt;
+    int dc_cap;
 
     struct xaml_event_registry ptr_pressed_reg;
     struct xaml_event_registry ptr_moved_reg;
@@ -1992,11 +2013,14 @@ struct uwp_element
     struct xaml_event_registry ptr_canceled_reg;
     struct xaml_event_registry ptr_wheel_reg;
 
-    struct uwp_dp_entry dp_store[24];
+    struct uwp_dp_entry *dp_store;
     int dp_cnt;
+    int dp_cap;
 
-    struct uwp_dp_cb_entry dp_cbs[16];
+    struct uwp_dp_cb_entry *dp_cbs;
     int dp_cb_cnt;
+    int dp_cb_cap;
+    INT64 dp_cb_next_token;
 
     /* Template children cache (for CalculationResult etc.) */
     struct uwp_element *tpl_text_container;
@@ -2005,18 +2029,21 @@ struct uwp_element
     struct uwp_element *tpl_scroll_right;
 
     /* Named children & deferred substreams for FindName */
-    struct uwp_element *named_elems[96];
+    struct uwp_element **named_elems;
     int named_cnt;
-    struct uwp_defer_entry defer_entries[16];
+    int named_cap;
+    struct uwp_defer_entry *defer_entries;
     int defer_cnt;
+    int defer_cap;
     struct uwp_xbf_ref
     {
         WCHAR full_name[128];
         WCHAR short_name[128];
         BOOL is_resource_path;
         BOOL instantiated;
-    } xbf_refs[32];
+    } *xbf_refs;
     int xbf_ref_cnt;
+    int xbf_ref_cap;
     BOOL xbf_parsed;
     struct uwp_vsm_group *vsm_groups;
     int vsm_group_cnt;
@@ -3051,15 +3078,30 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
     }
     if (is_uwp_xaml_app())
     {
-        void **vtbl = *(void ***)ptr;
-        HRESULT (WINAPI *get_inner)(void *, void **) = (void *)vtbl[6];
-        HRESULT (WINAPI *get_inner_iu)(void *, void **) = (void *)vtbl[7];
+        void *pv_iface = NULL;
         void *cand = NULL;
-        if (get_inner && SUCCEEDED(get_inner( ptr, &cand )) && cand)
-            inner = cand;
-        else if (get_inner_iu && SUCCEEDED(get_inner_iu( ptr, &cand )) && cand)
-            inner = cand;
-        else inner = NULL;
+        /* Boxed primitive PropertyValues are never UIElements; do not probe vtbl[6]/[7] on them */
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IPropertyValue_g, &pv_iface )) && pv_iface)
+        {
+            IUnknown_Release( (IUnknown *)pv_iface );
+            return NULL;
+        }
+        __TRY
+        {
+            void **vtbl = *(void ***)ptr;
+            HRESULT (WINAPI *get_inner)(void *, void **) = (void *)vtbl[6];
+            HRESULT (WINAPI *get_inner_iu)(void *, void **) = (void *)vtbl[7];
+            if (get_inner && SUCCEEDED(get_inner( ptr, &cand )) && cand)
+                inner = cand;
+            else if (get_inner_iu && SUCCEEDED(get_inner_iu( ptr, &cand )) && cand)
+                inner = cand;
+            else inner = NULL;
+        }
+        __EXCEPT_ALL
+        {
+            inner = NULL;
+        }
+        __ENDTRY;
         if (inner)
         {
             /* Validate: trust inner only when it answers our identity IID
@@ -3680,8 +3722,10 @@ static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val 
             break;
         }
     }
-    if (i == impl->dp_cnt && impl->dp_cnt < (int)ARRAY_SIZE(impl->dp_store))
+    if (i == impl->dp_cnt)
     {
+        if (!xaml_vec_grow( (void **)&impl->dp_store, &impl->dp_cap, impl->dp_cnt + 1, sizeof(*impl->dp_store), 24 ))
+            return E_OUTOFMEMORY;
         impl->dp_store[impl->dp_cnt].dp = dp;
         impl->dp_store[impl->dp_cnt].value = val;
         if (val) IInspectable_AddRef( val );
@@ -3799,14 +3843,15 @@ static HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (token) *token = 1;
     if (!impl || !cb) return S_OK;
-    if (impl->dp_cb_cnt < (int)ARRAY_SIZE(impl->dp_cbs))
+    if (xaml_vec_grow( (void **)&impl->dp_cbs, &impl->dp_cb_cap, impl->dp_cb_cnt + 1, sizeof(*impl->dp_cbs), 16 ))
     {
         int idx = impl->dp_cb_cnt++;
+        INT64 tok = ++impl->dp_cb_next_token;
         impl->dp_cbs[idx].dp = dp;
         impl->dp_cbs[idx].callback = (IInspectable *)cb;
-        impl->dp_cbs[idx].token = idx + 1;
+        impl->dp_cbs[idx].token = tok;
         IUnknown_AddRef( (IUnknown *)cb );
-        if (token) *token = idx + 1;
+        if (token) *token = tok;
     }
     return S_OK;
 }
@@ -4279,7 +4324,7 @@ static HRESULT WINAPI uwp_fe_add_Loaded( void *iface, void *handler, EventRegist
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (tok) tok->value = 1;
     if (!impl || !handler) return S_OK;
-    if (impl->loaded_cnt < (int)ARRAY_SIZE(impl->loaded_handlers))
+    if (xaml_vec_grow( (void **)&impl->loaded_handlers, &impl->loaded_cap, impl->loaded_cnt + 1, sizeof(*impl->loaded_handlers), 8 ))
     {
         impl->loaded_handlers[impl->loaded_cnt++] = (IInspectable *)handler;
         IUnknown_AddRef( (IUnknown *)handler );
@@ -4292,7 +4337,7 @@ static HRESULT WINAPI uwp_fe3_add_DataContextChanged( void *iface, void *handler
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (tok) tok->value = 1;
     if (!impl || !handler) return S_OK;
-    if (impl->dc_cnt < (int)ARRAY_SIZE(impl->dc_handlers))
+    if (xaml_vec_grow( (void **)&impl->dc_handlers, &impl->dc_cap, impl->dc_cnt + 1, sizeof(*impl->dc_handlers), 8 ))
     {
         impl->dc_handlers[impl->dc_cnt++] = (IInspectable *)handler;
         IUnknown_AddRef( (IUnknown *)handler );
@@ -4469,11 +4514,14 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     impl->content = (IInspectable *)val;
     if (impl->content) IInspectable_AddRef( impl->content );
 
-    if (val && uwp_unbox_string( val, str_buf, ARRAY_SIZE(str_buf) ) && str_buf[0])
+    if (val && uwp_unbox_string( val, str_buf, ARRAY_SIZE(str_buf) ))
     {
-        lstrcpynW( impl->text, str_buf, ARRAY_SIZE(impl->text) );
-        TRACE( "uwp_cc_put_Content string on %s (%s) -> %s\n",
-               debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_buf) );
+        if (str_buf[0])
+        {
+            lstrcpynW( impl->text, str_buf, ARRAY_SIZE(impl->text) );
+            TRACE( "uwp_cc_put_Content string on %s (%s) -> %s\n",
+                   debugstr_w(impl->class_name), debugstr_w(impl->name), debugstr_w(str_buf) );
+        }
     }
     else if ((child_el = uwp_elem_from_any( val )) != NULL)
     {
@@ -4530,7 +4578,7 @@ static HRESULT WINAPI uwp_btn_add_Click( void *iface, void *handler, EventRegist
     struct uwp_element *impl = uwp_elem_from_any( iface );
     if (tok) tok->value = 1;
     if (!impl || !handler) return S_OK;
-    if (impl->click_cnt < (int)ARRAY_SIZE(impl->click_handlers))
+    if (xaml_vec_grow( (void **)&impl->click_handlers, &impl->click_cap, impl->click_cnt + 1, sizeof(*impl->click_handlers), 8 ))
     {
         impl->click_handlers[impl->click_cnt++] = (IInspectable *)handler;
         IUnknown_AddRef( (IUnknown *)handler );
@@ -4578,8 +4626,9 @@ struct uwp_vec_view
 {
     IInspectable IInspectable_iface;
     LONG ref;
-    IInspectable *items[128];
+    IInspectable **items;
     unsigned int count;
+    int cap;
     struct uwp_element *owner;
 };
 
@@ -4741,7 +4790,9 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
 {
     struct uwp_vec_view *v = CONTAINING_RECORD( iface, struct uwp_vec_view, IInspectable_iface );
     struct uwp_element *child_el;
-    if (idx > v->count || v->count >= ARRAY_SIZE(v->items)) return S_OK;
+    if (idx > v->count) return S_OK;
+    if (!xaml_vec_grow( (void **)&v->items, &v->cap, (int)v->count + 1, sizeof(*v->items), 16 ))
+        return E_OUTOFMEMORY;
     memmove( &v->items[idx + 1], &v->items[idx], (v->count - idx) * sizeof(void *) );
     v->items[idx] = (IInspectable *)item;
     if (item) IInspectable_AddRef( (IInspectable *)item );
@@ -5834,7 +5885,8 @@ static void uwp_record_xbf_ref( struct uwp_element *root, const WCHAR *full_name
     {
         if (!wcscmp( root->xbf_refs[i].full_name, full_name )) return;
     }
-    if (root->xbf_ref_cnt >= (int)ARRAY_SIZE(root->xbf_refs)) return;
+    if (!xaml_vec_grow( (void **)&root->xbf_refs, &root->xbf_ref_cap, root->xbf_ref_cnt + 1, sizeof(*root->xbf_refs), 32 ))
+        return;
     lstrcpynW( root->xbf_refs[root->xbf_ref_cnt].full_name, full_name,
                ARRAY_SIZE(root->xbf_refs[0].full_name) );
     lstrcpynW( root->xbf_refs[root->xbf_ref_cnt].short_name, short_name,
@@ -7949,7 +8001,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     active_rd->owner_el = el;
                 }
             }
-            else if (ctx->rd_only && !is_rd_type)
+            else if ((ctx->rd_only || rd_tbl) && !is_rd_type)
             {
                 /* Lightweight mode inside ResourceDictionary XBFs: no COM/visual element needed */
                 el = NULL;
@@ -8133,8 +8185,12 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 if (top_el)
                 {
                     lstrcpynW( top_el->name, sbuf, ARRAY_SIZE(top_el->name) );
-                    if (ctx->root_el && ctx->root_el->named_cnt < (int)ARRAY_SIZE(ctx->root_el->named_elems))
+                    if (ctx->root_el &&
+                        xaml_vec_grow( (void **)&ctx->root_el->named_elems, &ctx->root_el->named_cap,
+                                       ctx->root_el->named_cnt + 1, sizeof(*ctx->root_el->named_elems), 32 ))
+                    {
                         ctx->root_el->named_elems[ctx->root_el->named_cnt++] = top_el;
+                    }
                 }
                 if ((sub_idx == 0 || ctx->vsm_collect) && !ctx->rd_only && ctx->root_el && ctx->root_el->vsm_group_cnt > 0)
                 {
@@ -8552,7 +8608,9 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     p += 4;
                     if (obj_sp > 0 && obj_stack[obj_sp - 1])
                         lstrcpynW( obj_stack[obj_sp - 1]->name, dname, ARRAY_SIZE(obj_stack[obj_sp - 1]->name) );
-                    if (ctx->root_el && ctx->root_el->defer_cnt < (int)ARRAY_SIZE(ctx->root_el->defer_entries))
+                    if (ctx->root_el &&
+                        xaml_vec_grow( (void **)&ctx->root_el->defer_entries, &ctx->root_el->defer_cap,
+                                       ctx->root_el->defer_cnt + 1, sizeof(*ctx->root_el->defer_entries), 16 ))
                     {
                         struct uwp_defer_entry *de = &ctx->root_el->defer_entries[ctx->root_el->defer_cnt++];
                         lstrcpynW( de->name, dname, ARRAY_SIZE(de->name) );
@@ -8746,7 +8804,12 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     sub_rd = uwp_rd_bucket_for_el( obj_stack[obj_sp - 1], TRUE );
                 else
                     sub_rd = active_rd ? active_rd : ctx->target_rd;
-                xbf_exec_substream_rd( ctx, def_sub, NULL, NULL, &tbl, sub_rd );
+                {
+                    BOOL prev_rd_only = ctx->rd_only;
+                    ctx->rd_only = TRUE;
+                    xbf_exec_substream_rd( ctx, def_sub, NULL, NULL, &tbl, sub_rd );
+                    ctx->rd_only = prev_rd_only;
+                }
                 free( tbl.items );
             }
             else
@@ -9756,17 +9819,22 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
     {
         struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
         unsigned int k;
-        int tab_w = (int)(96 * g_layout_scale);
+        int tab_w = (int)(84 * g_layout_scale);
         int tab_h = min( h, (int)(36 * g_layout_scale) );
         for (k = 0; k < children->count; k++)
         {
             struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
             RECT crc;
             if (!ch || ch->visibility != 0) continue;
-            SetRect( &crc, rc.left + 12 + (int)k * tab_w, rc.top + 4,
-                     min( (int)rc.right, (int)rc.left + 12 + (int)(k + 1) * tab_w ), rc.top + 4 + tab_h );
-            uwp_arrange_element( ch, crc );
+            ch->margin_t = 0;
+            SetRect( &crc, rc.left + 16 + (int)k * tab_w, rc.top + 8,
+                     min( (int)rc.right, (int)rc.left + 16 + (int)(k + 1) * tab_w ), rc.top + 8 + tab_h );
+            ch->bounds = crc;
+            ch->has_bounds = (crc.right > crc.left && crc.bottom > crc.top);
+            ch->actual_w = (double)(crc.right - crc.left);
+            ch->actual_h = (double)(crc.bottom - crc.top);
         }
+        return;
     }
 
     if (el->content)
@@ -10338,6 +10406,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                 FillRect( hdc, &bar, abr );
                 DeleteObject( abr );
             }
+            return;
         }
     }
 
