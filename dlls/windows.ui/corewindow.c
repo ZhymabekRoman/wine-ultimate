@@ -29,6 +29,50 @@
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
 
+/* Cached primary-monitor work area (device pixels). CoreWindow creation, the
+ * WM_WINDOWPOSCHANGING zero-size clamp and the get_Bounds fallback all use it
+ * instead of a hardcoded 1024x768/960x768. Refreshed on WM_DISPLAYCHANGE. */
+static SIZE work_area_size;
+
+static void refresh_work_area( void )
+{
+    MONITORINFO mi = { sizeof(mi) };
+    HMONITOR monitor;
+    RECT rect;
+    UINT dpi;
+
+    if (SystemParametersInfoW( SPI_GETWORKAREA, 0, &rect, 0 )
+        && rect.right > rect.left && rect.bottom > rect.top)
+    {
+        work_area_size.cx = rect.right - rect.left;
+        work_area_size.cy = rect.bottom - rect.top;
+    }
+    else if ((monitor = MonitorFromWindow( GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY ))
+             && GetMonitorInfoW( monitor, &mi )
+             && mi.rcWork.right > mi.rcWork.left && mi.rcWork.bottom > mi.rcWork.top)
+    {
+        work_area_size.cx = mi.rcWork.right - mi.rcWork.left;
+        work_area_size.cy = mi.rcWork.bottom - mi.rcWork.top;
+    }
+    else
+    {
+        work_area_size.cx = 1024;
+        work_area_size.cy = 768;
+        if ((dpi = GetDpiForSystem()))
+        {
+            work_area_size.cx = MulDiv( work_area_size.cx, dpi, 96 );
+            work_area_size.cy = MulDiv( work_area_size.cy, dpi, 96 );
+        }
+    }
+    TRACE( "work area %lux%lu\n", work_area_size.cx, work_area_size.cy );
+}
+
+static SIZE get_work_area_size( void )
+{
+    if (!work_area_size.cx || !work_area_size.cy) refresh_work_area();
+    return work_area_size;
+}
+
 struct corewindow_statics
 {
     IActivationFactory IActivationFactory_iface;
@@ -240,6 +284,8 @@ static BOOL ondemand_corewindow_enabled( void )
 
 static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWindowStatic *iface, ICoreWindow **windows )
 {
+    SIZE work_area;
+
     TRACE( "iface %p, windows %p.\n", iface, windows );
     if (!windows) return E_POINTER;
 
@@ -256,7 +302,8 @@ static HRESULT STDMETHODCALLTYPE corewindow_static_GetForCurrentThread( ICoreWin
             *windows = NULL;
             return S_OK;
         }
-        if (!create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, FALSE ))
+        work_area = get_work_area_size();
+        if (!create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, work_area.cx, work_area.cy, FALSE ))
             return E_OUTOFMEMORY;
     }
 
@@ -890,7 +937,10 @@ static HRESULT WINAPI core_window_get_Bounds( ICoreWindow *iface, Rect *value )
     }
     else
     {
-        value->X = 0; value->Y = 0; value->Width = 1024; value->Height = 768;
+        SIZE work_area = get_work_area_size();
+        value->X = 0; value->Y = 0;
+        value->Width = work_area.cx;
+        value->Height = work_area.cy;
     }
     return S_OK;
 }
@@ -2221,11 +2271,16 @@ static LRESULT CALLBACK core_window_proc( HWND hwnd, UINT msg, WPARAM wparam, LP
         WINDOWPOS *pos = (WINDOWPOS *)lparam;
         if (!pos->cx || !pos->cy)
         {
-            if (!pos->cx) pos->cx = 960;
-            if (!pos->cy) pos->cy = 768;
+            SIZE work_area = get_work_area_size();
+            if (!pos->cx) pos->cx = work_area.cx;
+            if (!pos->cy) pos->cy = work_area.cy;
         }
         return 0;
     }
+
+    case WM_DISPLAYCHANGE:
+        refresh_work_area();
+        return 0;
 
     case WM_ERASEBKGND:
         return 1;
@@ -2639,7 +2694,8 @@ static struct core_window *create_core_window( const WCHAR *title, INT x, INT y,
 
 ICoreWindow *core_window_create( void )
 {
-    struct core_window *impl = create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, 1024, 768, FALSE );
+    SIZE work_area = get_work_area_size();
+    struct core_window *impl = create_core_window( NULL, CW_USEDEFAULT, CW_USEDEFAULT, work_area.cx, work_area.cy, FALSE );
 
     return impl ? &impl->ICoreWindow_iface : NULL;
 }

@@ -552,12 +552,57 @@ static HRESULT WINAPI splash_GetRuntimeClassName( void *iface, HSTRING *name )
     return WindowsCreateString( L"Windows.ApplicationModel.Activation.SplashScreen", 47, name );
 }
 static HRESULT WINAPI splash_GetTrustLevel( void *iface, TrustLevel *level ) { *level = BaseTrust; return S_OK; }
+/* Primary-monitor work area (device pixels), cached. Replaces the hardcoded
+ * 1024x768 splash rect; mirrors windows.ui's corewindow.c work-area helper. */
+static void twinapi_get_work_area( SIZE *size )
+{
+    static SIZE cached;
+    MONITORINFO mi = { sizeof(mi) };
+    HMONITOR monitor;
+    RECT rect;
+    UINT dpi;
+
+    if (cached.cx && cached.cy)
+    {
+        *size = cached;
+        return;
+    }
+    if (SystemParametersInfoW( SPI_GETWORKAREA, 0, &rect, 0 )
+        && rect.right > rect.left && rect.bottom > rect.top)
+    {
+        cached.cx = rect.right - rect.left;
+        cached.cy = rect.bottom - rect.top;
+    }
+    else if ((monitor = MonitorFromWindow( GetDesktopWindow(), MONITOR_DEFAULTTOPRIMARY ))
+             && GetMonitorInfoW( monitor, &mi )
+             && mi.rcWork.right > mi.rcWork.left && mi.rcWork.bottom > mi.rcWork.top)
+    {
+        cached.cx = mi.rcWork.right - mi.rcWork.left;
+        cached.cy = mi.rcWork.bottom - mi.rcWork.top;
+    }
+    else
+    {
+        cached.cx = 1024;
+        cached.cy = 768;
+        if ((dpi = GetDpiForSystem()))
+        {
+            cached.cx = MulDiv( cached.cx, dpi, 96 );
+            cached.cy = MulDiv( cached.cy, dpi, 96 );
+        }
+    }
+    TRACE( "work area %lux%lu\n", cached.cx, cached.cy );
+    *size = cached;
+}
+
 static HRESULT WINAPI splash_get_ImageLocation( void *iface, Rect *rect )
 {
+    SIZE work_area;
+
     if (!rect) return E_POINTER;
+    twinapi_get_work_area( &work_area );
     rect->X = rect->Y = 0.0f;
-    rect->Width = 1024.0f;
-    rect->Height = 768.0f;
+    rect->Width = (float)work_area.cx;
+    rect->Height = (float)work_area.cy;
     return S_OK;
 }
 static DWORD WINAPI splash_dismiss_thread( void *arg )
