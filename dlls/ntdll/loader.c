@@ -2696,6 +2696,401 @@ static inline WCHAR *append_path( WCHAR *p, const WCHAR *str, int len )
     return p + len + 1;
 }
 
+static WCHAR *cached_pkg_load_path;
+static LONG cached_pkg_load_init;
+
+static BOOL dos_path_exists( const WCHAR *dos_path, BOOL want_dir )
+{
+    FILE_BASIC_INFORMATION info;
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING nt_name;
+    NTSTATUS status;
+
+    if (!dos_path || !dos_path[0]) return FALSE;
+    if (RtlDosPathNameToNtPathName_U_WithStatus( dos_path, &nt_name, NULL, NULL )) return FALSE;
+    InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    status = NtQueryAttributesFile( &attr, &info );
+    RtlFreeUnicodeString( &nt_name );
+    if (status) return FALSE;
+    return want_dir ? ((info.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) : TRUE;
+}
+
+static void pkg_path_append_raw( WCHAR **buf, SIZE_T *cap, SIZE_T *len, const WCHAR *dir )
+{
+    SIZE_T dlen;
+    const WCHAR *p;
+
+    if (!dir || !dir[0]) return;
+    dlen = wcslen( dir );
+    while (dlen > 0 && dir[dlen - 1] == '\\') dlen--;
+    if (!dlen) return;
+
+    if (*buf)
+    {
+        p = *buf;
+        while (*p)
+        {
+            const WCHAR *semi = wcschr( p, ';' );
+            SIZE_T slen = semi ? (SIZE_T)(semi - p) : wcslen( p );
+            if (slen == dlen && !wcsnicmp( p, dir, dlen )) return;
+            if (!semi) break;
+            p = semi + 1;
+        }
+    }
+
+    if (*len + dlen + 2 > *cap)
+    {
+        SIZE_T new_cap = *cap ? *cap * 2 : 1024;
+        WCHAR *new_buf;
+        while (new_cap < *len + dlen + 2) new_cap *= 2;
+        if (*buf)
+            new_buf = RtlReAllocateHeap( GetProcessHeap(), 0, *buf, new_cap * sizeof(WCHAR) );
+        else
+            new_buf = RtlAllocateHeap( GetProcessHeap(), 0, new_cap * sizeof(WCHAR) );
+        if (!new_buf) return;
+        *buf = new_buf;
+        *cap = new_cap;
+    }
+
+    if (*len > 0) (*buf)[(*len)++] = ';';
+    memcpy( *buf + *len, dir, dlen * sizeof(WCHAR) );
+    *len += dlen;
+    (*buf)[*len] = 0;
+}
+
+static void pkg_path_append_dir( WCHAR **buf, SIZE_T *cap, SIZE_T *len, const WCHAR *dir )
+{
+    WCHAR bin_dir[MAX_PATH];
+    SIZE_T dlen;
+
+    if (!dir || !dir[0]) return;
+    dlen = wcslen( dir );
+    if (dlen + 5 < ARRAY_SIZE(bin_dir))
+    {
+        memcpy( bin_dir, dir, dlen * sizeof(WCHAR) );
+        if (dlen && bin_dir[dlen - 1] != '\\') bin_dir[dlen++] = '\\';
+        wcscpy( bin_dir + dlen, L"bin" );
+        if (dos_path_exists( bin_dir, TRUE ))
+            pkg_path_append_raw( buf, cap, len, bin_dir );
+    }
+    pkg_path_append_raw( buf, cap, len, dir );
+}
+
+static void pkg_scan_subdirs( const WCHAR *base_dir, const WCHAR *prefix_filter,
+                              WCHAR **buf, SIZE_T *cap, SIZE_T *len )
+{
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING nt_name;
+    IO_STATUS_BLOCK io;
+    HANDLE hdir;
+    BYTE dir_buf[4096];
+    BOOLEAN first = TRUE;
+    SIZE_T base_len, pfx_len = prefix_filter ? wcslen( prefix_filter ) : 0;
+
+    if (!base_dir || !base_dir[0]) return;
+    base_len = wcslen( base_dir );
+    if (RtlDosPathNameToNtPathName_U_WithStatus( base_dir, &nt_name, NULL, NULL )) return;
+    InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
+    if (NtOpenFile( &hdir, GENERIC_READ | SYNCHRONIZE, &attr, &io,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT ))
+    {
+        RtlFreeUnicodeString( &nt_name );
+        return;
+    }
+    RtlFreeUnicodeString( &nt_name );
+
+    while (!NtQueryDirectoryFile( hdir, NULL, NULL, NULL, &io, dir_buf, sizeof(dir_buf),
+                                  FileBothDirectoryInformation, FALSE, NULL, first ))
+    {
+        FILE_BOTH_DIR_INFORMATION *info = (FILE_BOTH_DIR_INFORMATION *)dir_buf;
+        first = FALSE;
+        for (;;)
+        {
+            ULONG nlen = info->FileNameLength / sizeof(WCHAR);
+            if ((info->FileAttributes & FILE_ATTRIBUTE_DIRECTORY) && nlen > 0 && nlen < 256)
+            {
+                WCHAR name[256], full[MAX_PATH];
+                memcpy( name, info->FileName, nlen * sizeof(WCHAR) );
+                name[nlen] = 0;
+                if (wcscmp( name, L"." ) && wcscmp( name, L".." ))
+                {
+                    if (!prefix_filter || (!wcsnicmp( name, prefix_filter, pfx_len ) && name[pfx_len] == '_'))
+                    {
+                        if (base_len + 1 + nlen < ARRAY_SIZE(full))
+                        {
+                            memcpy( full, base_dir, base_len * sizeof(WCHAR) );
+                            full[base_len] = '\\';
+                            wcscpy( full + base_len + 1, name );
+                            pkg_path_append_dir( buf, cap, len, full );
+                        }
+                    }
+                }
+            }
+            if (!info->NextEntryOffset) break;
+            info = (FILE_BOTH_DIR_INFORMATION *)((BYTE *)info + info->NextEntryOffset);
+        }
+    }
+    NtClose( hdir );
+}
+
+static BOOL nt_reg_query_sz( HANDLE hkey, const WCHAR *name, WCHAR *out, DWORD cch )
+{
+    BYTE kv_buf[1024];
+    KEY_VALUE_PARTIAL_INFORMATION *info = (KEY_VALUE_PARTIAL_INFORMATION *)kv_buf;
+    UNICODE_STRING ustr;
+    ULONG size = 0;
+
+    RtlInitUnicodeString( &ustr, name );
+    if (NtQueryValueKey( hkey, &ustr, KeyValuePartialInformation, kv_buf, sizeof(kv_buf) - sizeof(WCHAR), &size ))
+        return FALSE;
+    if (info->Type != REG_SZ || !info->DataLength) return FALSE;
+    size = min( info->DataLength / sizeof(WCHAR), cch - 1 );
+    memcpy( out, info->Data, size * sizeof(WCHAR) );
+    out[size] = 0;
+    return out[0] != 0;
+}
+
+static NTSTATUS query_dword_option( HANDLE hkey, LPCWSTR name, LONG *value );
+
+static void pkg_scan_reg_frameworks( HANDLE root_key, const WCHAR *sub_prefix, const WCHAR *dep_name,
+                                     WCHAR **buf, SIZE_T *cap, SIZE_T *len )
+{
+    WCHAR pkgs_path[512];
+    OBJECT_ATTRIBUTES attr;
+    UNICODE_STRING ustr;
+    HANDLE hpkgs;
+    ULONG idx = 0;
+    SIZE_T dep_len = dep_name ? wcslen( dep_name ) : 0;
+
+    wcscpy( pkgs_path, sub_prefix );
+    wcscat( pkgs_path, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages" );
+    RtlInitUnicodeString( &ustr, pkgs_path );
+    InitializeObjectAttributes( &attr, &ustr, OBJ_CASE_INSENSITIVE, root_key, NULL );
+    if (NtOpenKey( &hpkgs, KEY_READ, &attr )) return;
+
+    for (idx = 0; ; idx++)
+    {
+        BYTE kbuf[1024];
+        KEY_BASIC_INFORMATION *kinfo = (KEY_BASIC_INFORMATION *)kbuf;
+        ULONG ret_len = 0, nlen;
+        WCHAR kname[256], fw_path[MAX_PATH];
+        UNICODE_STRING sub_ustr;
+        OBJECT_ATTRIBUTES sub_attr;
+        HANDLE hsub;
+        LONG fw_flag = 0;
+
+        if (NtEnumerateKey( hpkgs, idx, KeyBasicInformation, kbuf, sizeof(kbuf) - sizeof(WCHAR), &ret_len ))
+            break;
+        nlen = kinfo->NameLength / sizeof(WCHAR);
+        if (!nlen || nlen >= ARRAY_SIZE(kname)) continue;
+        memcpy( kname, kinfo->Name, nlen * sizeof(WCHAR) );
+        kname[nlen] = 0;
+        if (dep_name && (wcsnicmp( kname, dep_name, dep_len ) || kname[dep_len] != '_')) continue;
+
+        RtlInitUnicodeString( &sub_ustr, kname );
+        InitializeObjectAttributes( &sub_attr, &sub_ustr, OBJ_CASE_INSENSITIVE, hpkgs, NULL );
+        if (NtOpenKey( &hsub, KEY_READ, &sub_attr )) continue;
+        if (query_dword_option( hsub, L"Framework", &fw_flag ) == STATUS_SUCCESS && fw_flag == 1)
+        {
+            if ((nt_reg_query_sz( hsub, L"FrameworkPath", fw_path, ARRAY_SIZE(fw_path) ) ||
+                 nt_reg_query_sz( hsub, L"PackagePath", fw_path, ARRAY_SIZE(fw_path) )) &&
+                dos_path_exists( fw_path, TRUE ))
+            {
+                pkg_path_append_dir( buf, cap, len, fw_path );
+            }
+        }
+        NtClose( hsub );
+    }
+    NtClose( hpkgs );
+}
+
+static const WCHAR *get_package_load_path( void )
+{
+    if (is_prefix_bootstrap) return NULL;
+    if (cached_pkg_load_init == 2) return cached_pkg_load_path;
+    if (InterlockedCompareExchange( &cached_pkg_load_init, 1, 0 ) != 0)
+        return cached_pkg_load_path;
+
+    {
+        WCHAR pkg_dir[MAX_PATH] = {0}, fw_env[MAX_PATH] = {0}, manifest_path[MAX_PATH + 32];
+        UNICODE_STRING env_name, env_val;
+        const WCHAR *image = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
+        WCHAR *buf = NULL;
+        SIZE_T cap = 0, len = 0;
+        HANDLE hkcu = 0;
+
+        RtlOpenCurrentUser( KEY_READ, &hkcu );
+
+        RtlInitUnicodeString( &env_name, L"WINE_PACKAGE_PATH" );
+        env_val.Buffer = pkg_dir;
+        env_val.Length = 0;
+        env_val.MaximumLength = sizeof(pkg_dir) - sizeof(WCHAR);
+        if (!RtlQueryEnvironmentVariable_U( NULL, &env_name, &env_val ) && env_val.Length)
+            pkg_dir[env_val.Length / sizeof(WCHAR)] = 0;
+
+        if (!pkg_dir[0] && image && image[0])
+        {
+            const WCHAR *end = get_module_path_end( image );
+            SIZE_T dlen = end - image;
+            if (dlen > 0 && dlen < ARRAY_SIZE(pkg_dir))
+            {
+                memcpy( pkg_dir, image, dlen * sizeof(WCHAR) );
+                pkg_dir[dlen] = 0;
+                if (dlen + 18 < ARRAY_SIZE(manifest_path))
+                {
+                    wcscpy( manifest_path, pkg_dir );
+                    wcscat( manifest_path, L"\\AppxManifest.xml" );
+                    if (!dos_path_exists( manifest_path, FALSE ))
+                        pkg_dir[0] = 0;
+                }
+                else pkg_dir[0] = 0;
+            }
+        }
+
+        if (!pkg_dir[0] && image && image[0])
+        {
+            const WCHAR *slash = wcsrchr( image, '\\' );
+            const WCHAR *exe_name = slash ? slash + 1 : image;
+            WCHAR key_path[512];
+            UNICODE_STRING ustr;
+            OBJECT_ATTRIBUTES attr;
+            HANDLE hkey;
+
+            if (hkcu && wcslen( exe_name ) < 260)
+            {
+                wcscpy( key_path, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Exes\\" );
+                wcscat( key_path, exe_name );
+                RtlInitUnicodeString( &ustr, key_path );
+                InitializeObjectAttributes( &attr, &ustr, OBJ_CASE_INSENSITIVE, hkcu, NULL );
+                if (!NtOpenKey( &hkey, KEY_READ, &attr ))
+                {
+                    nt_reg_query_sz( hkey, L"PackagePath", pkg_dir, ARRAY_SIZE(pkg_dir) );
+                    NtClose( hkey );
+                }
+            }
+            if (!pkg_dir[0] && wcslen( exe_name ) < 260)
+            {
+                wcscpy( key_path, L"\\Registry\\Machine\\Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Exes\\" );
+                wcscat( key_path, exe_name );
+                RtlInitUnicodeString( &ustr, key_path );
+                InitializeObjectAttributes( &attr, &ustr, OBJ_CASE_INSENSITIVE, 0, NULL );
+                if (!NtOpenKey( &hkey, KEY_READ, &attr ))
+                {
+                    nt_reg_query_sz( hkey, L"PackagePath", pkg_dir, ARRAY_SIZE(pkg_dir) );
+                    NtClose( hkey );
+                }
+            }
+        }
+
+        if (pkg_dir[0])
+        {
+            WCHAR deps_dir[MAX_PATH], parent_dir[MAX_PATH], parent_pkgs[MAX_PATH], *slash;
+            UNICODE_STRING nt_manifest;
+            OBJECT_ATTRIBUTES attr;
+            IO_STATUS_BLOCK io;
+            HANDLE hfile;
+
+            pkg_path_append_dir( &buf, &cap, &len, pkg_dir );
+
+            if (wcslen( pkg_dir ) + 14 < ARRAY_SIZE(deps_dir))
+            {
+                wcscpy( deps_dir, pkg_dir );
+                wcscat( deps_dir, L"\\dependencies" );
+                pkg_scan_subdirs( deps_dir, NULL, &buf, &cap, &len );
+            }
+
+            RtlInitUnicodeString( &env_name, L"WINE_FRAMEWORK_PACKAGE_PATH" );
+            env_val.Buffer = fw_env;
+            env_val.Length = 0;
+            env_val.MaximumLength = sizeof(fw_env) - sizeof(WCHAR);
+            if (!RtlQueryEnvironmentVariable_U( NULL, &env_name, &env_val ) && env_val.Length)
+            {
+                fw_env[env_val.Length / sizeof(WCHAR)] = 0;
+                pkg_path_append_dir( &buf, &cap, &len, fw_env );
+            }
+
+            wcscpy( parent_dir, pkg_dir );
+            if ((slash = wcsrchr( parent_dir, '\\' ))) *slash = 0;
+            else parent_dir[0] = 0;
+
+            parent_pkgs[0] = 0;
+            if (parent_dir[0] && wcslen( parent_dir ) + 10 < ARRAY_SIZE(parent_pkgs))
+            {
+                wcscpy( parent_pkgs, parent_dir );
+                wcscat( parent_pkgs, L"\\packages" );
+            }
+
+            if (wcslen( pkg_dir ) + 18 < ARRAY_SIZE(manifest_path))
+            {
+                wcscpy( manifest_path, pkg_dir );
+                wcscat( manifest_path, L"\\AppxManifest.xml" );
+                if (!RtlDosPathNameToNtPathName_U_WithStatus( manifest_path, &nt_manifest, NULL, NULL ))
+                {
+                    InitializeObjectAttributes( &attr, &nt_manifest, OBJ_CASE_INSENSITIVE, 0, NULL );
+                    if (!NtOpenFile( &hfile, GENERIC_READ | SYNCHRONIZE, &attr, &io,
+                                     FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                                     FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE ))
+                    {
+                        FILE_STANDARD_INFORMATION std_info;
+                        if (!NtQueryInformationFile( hfile, &io, &std_info, sizeof(std_info), FileStandardInformation ) &&
+                            std_info.EndOfFile.QuadPart > 0 && std_info.EndOfFile.QuadPart <= 512 * 1024)
+                        {
+                            ULONG fsize = (ULONG)std_info.EndOfFile.QuadPart;
+                            char *xml = RtlAllocateHeap( GetProcessHeap(), 0, fsize + 1 );
+                            if (xml)
+                            {
+                                if (!NtReadFile( hfile, 0, NULL, NULL, &io, xml, fsize, NULL, NULL ))
+                                {
+                                    const char *cur = xml;
+                                    xml[io.Information] = 0;
+                                    while ((cur = strstr( cur, "<PackageDependency" )))
+                                    {
+                                        const char *end = strchr( cur, '>' );
+                                        const char *name_attr;
+                                        if (!end) break;
+                                        name_attr = strstr( cur, "Name=\"" );
+                                        if (name_attr && name_attr < end)
+                                        {
+                                            const char *q = strchr( name_attr + 6, '"' );
+                                            if (q && q < end && q - (name_attr + 6) > 0 && q - (name_attr + 6) < 250)
+                                            {
+                                                WCHAR dep_w[256];
+                                                SIZE_T k, dlen = (SIZE_T)(q - (name_attr + 6));
+                                                for (k = 0; k < dlen; k++) dep_w[k] = (unsigned char)name_attr[6 + k];
+                                                dep_w[dlen] = 0;
+
+                                                if (parent_dir[0])
+                                                    pkg_scan_subdirs( parent_dir, dep_w, &buf, &cap, &len );
+                                                if (parent_pkgs[0])
+                                                    pkg_scan_subdirs( parent_pkgs, dep_w, &buf, &cap, &len );
+                                                pkg_scan_subdirs( L"C:\\Program Files\\WindowsApps", dep_w, &buf, &cap, &len );
+                                                if (hkcu)
+                                                    pkg_scan_reg_frameworks( hkcu, L"", dep_w, &buf, &cap, &len );
+                                                pkg_scan_reg_frameworks( 0, L"\\Registry\\Machine\\", dep_w, &buf, &cap, &len );
+                                            }
+                                        }
+                                        cur = end + 1;
+                                    }
+                                }
+                                RtlFreeHeap( GetProcessHeap(), 0, xml );
+                            }
+                        }
+                        NtClose( hfile );
+                    }
+                    RtlFreeUnicodeString( &nt_manifest );
+                }
+            }
+        }
+
+        if (hkcu) NtClose( hkcu );
+        cached_pkg_load_path = buf;
+    }
+
+    InterlockedExchange( &cached_pkg_load_init, 2 );
+    return cached_pkg_load_path;
+}
+
 
 /******************************************************************
  *           get_dll_load_path
@@ -2703,6 +3098,7 @@ static inline WCHAR *append_path( WCHAR *p, const WCHAR *str, int len )
 static NTSTATUS get_dll_load_path( LPCWSTR module, LPCWSTR dll_dir, ULONG safe_mode, WCHAR **path )
 {
     const WCHAR *mod_end = module;
+    const WCHAR *pkg_path = get_package_load_path();
     UNICODE_STRING name = RTL_CONSTANT_STRING( L"PATH" ), value;
     WCHAR *p, *ret;
     int len = ARRAY_SIZE(system_path) + 1, path_len = 0;
@@ -2712,6 +3108,7 @@ static NTSTATUS get_dll_load_path( LPCWSTR module, LPCWSTR dll_dir, ULONG safe_m
         mod_end = get_module_path_end( module );
         len += (mod_end - module) + 1;
     }
+    if (pkg_path) len += wcslen( pkg_path ) + 1;
 
     value.Length = 0;
     value.MaximumLength = 0;
@@ -2729,6 +3126,7 @@ static NTSTATUS get_dll_load_path( LPCWSTR module, LPCWSTR dll_dir, ULONG safe_m
     else if (!safe_mode) p = append_path( p, L".", -1 );
     p = append_path( p, system_path, -1 );
     if (!dll_dir && safe_mode) p = append_path( p, L".", -1 );
+    if (pkg_path) p = append_path( p, pkg_path, -1 );
 
     value.Buffer = p;
     value.MaximumLength = path_len;
@@ -2759,7 +3157,7 @@ static NTSTATUS get_dll_load_path( LPCWSTR module, LPCWSTR dll_dir, ULONG safe_m
  */
 static NTSTATUS get_dll_load_path_search_flags( LPCWSTR module, DWORD flags, WCHAR **path )
 {
-    const WCHAR *image = NULL, *mod_end, *image_end;
+    const WCHAR *image = NULL, *mod_end, *image_end, *pkg_path = NULL;
     struct dll_dir_entry *dir;
     WCHAR *p, *ret;
     int len = 1;
@@ -2784,6 +3182,8 @@ static NTSTATUS get_dll_load_path_search_flags( LPCWSTR module, DWORD flags, WCH
         image = NtCurrentTeb()->Peb->ProcessParameters->ImagePathName.Buffer;
         image_end = get_module_path_end( image );
         len += (image_end - image) + 1;
+        if ((pkg_path = get_package_load_path()))
+            len += wcslen( pkg_path ) + 1;
     }
 
     if (flags & LOAD_LIBRARY_SEARCH_USER_DIRS)
@@ -2799,6 +3199,7 @@ static NTSTATUS get_dll_load_path_search_flags( LPCWSTR module, DWORD flags, WCH
     {
         if (module) p = append_path( p, module, mod_end - module );
         if (image) p = append_path( p, image, image_end - image );
+        if (pkg_path) p = append_path( p, pkg_path, -1 );
         if (flags & LOAD_LIBRARY_SEARCH_USER_DIRS)
         {
             LIST_FOR_EACH_ENTRY( dir, &dll_dir_list, struct dll_dir_entry, entry )
