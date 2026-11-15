@@ -35,7 +35,9 @@
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
+#define WIDL_using_Windows_Devices_Input
 #define WIDL_using_Windows_UI
+#define WIDL_using_Windows_UI_Input
 #define WIDL_using_Windows_UI_Core
 #define WIDL_using_Windows_ApplicationModel_Core
 #define WIDL_using_Windows_UI_Xaml
@@ -43,8 +45,10 @@
 #define WIDL_using_Windows_UI_Xaml_Interop
 
 #include "windows.foundation.h"
+#include "windows.devices.input.h"
 #include "windows.ui.h"
 #include "windows.applicationmodel.core.h"
+#include "windows.ui.input.h"
 #include "windows.ui.core.h"
 #include "windows.ui.xaml.h"
 
@@ -88,6 +92,8 @@ void xaml_register_loaded( void *handler, IInspectable *sender );
 #define XAML_DEFAULT_CLIENT_SIZE ((SIZE){ 1024, 768 })
 void xaml_get_layout_metrics( HWND hwnd, SIZE *client, float *scale );
 HWND xaml_get_window_hwnd( void );
+HWND xaml_find_core_window( void );
+void xaml_package_warm( void );
 IDCompositionVisual *xaml_get_dcomp_root_visual( void );
 void xaml_dcomp_commit( void );
 void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height );
@@ -109,6 +115,55 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
 ICoreWindow *get_current_core_window( void );
 HRESULT uwp_store_create_initial_page( IInspectable **out );
 BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz );
+
+/* Shared token-based WinRT event registry (twinapi bg_events pattern) */
+struct xaml_event_entry
+{
+    void *handler;
+    INT64 token;
+};
+
+struct xaml_event_registry
+{
+    struct xaml_event_entry entries[64];
+    INT64 next_token;
+};
+
+HRESULT xaml_event_registry_add( struct xaml_event_registry *reg, void *handler, EventRegistrationToken *token );
+HRESULT xaml_event_registry_remove( struct xaml_event_registry *reg, EventRegistrationToken token );
+unsigned int xaml_event_registry_snapshot( struct xaml_event_registry *reg, void **out, unsigned int max_out );
+void xaml_event_registry_clear( struct xaml_event_registry *reg );
+
+enum xaml_pointer_event_kind
+{
+    XAML_PTR_PRESSED = 0,
+    XAML_PTR_MOVED,
+    XAML_PTR_RELEASED,
+    XAML_PTR_WHEEL,
+    XAML_PTR_ENTERED,
+    XAML_PTR_EXITED,
+    XAML_PTR_CAPTURE_LOST,
+};
+
+struct xaml_pointer_info
+{
+    float x;
+    float y;
+    UINT32 pointer_id;
+    UINT32 key_modifiers;
+    INT32 wheel_delta;
+    BOOL is_in_contact;
+    BOOL is_in_window;
+    BOOL is_left;
+    BOOL is_right;
+    BOOL is_middle;
+    PointerUpdateKind update_kind;
+};
+
+IPointerPoint *xaml_pointer_point_create( const struct xaml_pointer_info *info, float rel_x, float rel_y );
+__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *xaml_core_pointer_args_create( const struct xaml_pointer_info *info );
+BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info,
+                              int width, int height, IInspectable *root_content );
 
 #define DEFINE_IINSPECTABLE_( pfx, iface_type, impl_type, impl_from, iface_mem, expr )             \
     static inline impl_type *impl_from( iface_type *iface )                                        \

@@ -29,12 +29,16 @@
 
 #define WIDL_using_Windows_Foundation
 #define WIDL_using_Windows_Foundation_Collections
-#include "windows.foundation.h"
+#define WIDL_using_Windows_Devices_Input
 #define WIDL_using_Windows_UI
-#include "windows.ui.h"
+#define WIDL_using_Windows_UI_Input
 #define WIDL_using_Windows_UI_Core
-#include "windows.ui.core.h"
 #define WIDL_using_Windows_ApplicationModel_Core
+#include "windows.foundation.h"
+#include "windows.devices.input.h"
+#include "windows.ui.h"
+#include "windows.ui.input.h"
+#include "windows.ui.core.h"
 #include "windows.applicationmodel.core.h"
 
 #include "wine/test.h"
@@ -562,6 +566,404 @@ static void test_SwapChainPanel(void)
     }
 }
 
+/* ---- Generic Pointer Bridge tests (CoreWindow + XAML element hit-test/bubbling) ---- */
+static const GUID IID_IWindowStatics_test = {0x93bbe361, 0xbe5a, 0x4ee3, {0xb4, 0xa3, 0x95, 0x11, 0x8d, 0xc9, 0x7a, 0x89}};
+static const GUID IID_IWindow_test        = {0x3276167d, 0xc9f6, 0x462d, {0x9d, 0xe2, 0xae, 0x4c, 0x1f, 0xd8, 0xc2, 0xe5}};
+static const GUID IID_IUIElement_test     = {0x676d0be9, 0xb65c, 0x41c6, {0xba, 0x40, 0x58, 0xcf, 0x87, 0xf2, 0x01, 0xc1}};
+static const GUID IID_IFrameworkElement_test = {0xa391d09b, 0x4a99, 0x4b7c, {0x9d, 0x8d, 0x6f, 0xa5, 0xd0, 0x1f, 0x6f, 0xbf}};
+static const GUID IID_IPanel_test         = {0xa50a4bbd, 0x8361, 0x469c, {0x90, 0xda, 0xe9, 0xa4, 0x0c, 0x74, 0x74, 0xdf}};
+static const GUID IID_IPointerRoutedEventArgs_test = {0xda628f0a, 0x9752, 0x49e2, {0xbd, 0xe2, 0x49, 0xec, 0xca, 0xb9, 0x19, 0x4d}};
+
+struct test_thickness { double Left, Top, Right, Bottom; };
+
+struct cw_ptr_test_state
+{
+    int pressed_cnt;
+    int moved_cnt;
+    int released_cnt;
+    int wheel_cnt;
+    float press_x, press_y;
+    UINT32 press_ptr_id;
+    boolean press_left;
+    PointerUpdateKind press_kind;
+    FLOAT press_pressure;
+    Rect press_contact;
+    BOOL saw_move_55_75;
+    PointerUpdateKind rel_kind;
+    INT32 last_wheel;
+};
+
+struct cw_ptr_handler
+{
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs iface;
+    LONG ref;
+    int kind; /* 0=pressed, 1=moved, 2=released, 3=wheel */
+    struct cw_ptr_test_state *st;
+};
+
+static HRESULT WINAPI cw_ptr_handler_QI(
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *iface,
+    REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs ))
+    {
+        *out = iface;
+        ((struct cw_ptr_handler *)iface)->ref++;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cw_ptr_handler_AddRef(
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *iface )
+{
+    return InterlockedIncrement( &((struct cw_ptr_handler *)iface)->ref );
+}
+static ULONG WINAPI cw_ptr_handler_Release(
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *iface )
+{
+    return InterlockedDecrement( &((struct cw_ptr_handler *)iface)->ref );
+}
+static HRESULT WINAPI cw_ptr_handler_Invoke(
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *iface,
+    ICoreWindow *sender, __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args )
+{
+    struct cw_ptr_handler *h = (struct cw_ptr_handler *)iface;
+    IPointerPoint *pt = NULL;
+    IPointerPointProperties *props = NULL;
+    Point pos = {0};
+    HRESULT hr;
+
+    if (h->kind == 0) h->st->pressed_cnt++;
+    else if (h->kind == 1) h->st->moved_cnt++;
+    else if (h->kind == 2) h->st->released_cnt++;
+    else if (h->kind == 3) h->st->wheel_cnt++;
+
+    if (args && SUCCEEDED( hr = __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs_get_CurrentPoint( args, &pt )) && pt)
+    {
+        IPointerPoint_get_Position( pt, &pos );
+        if (h->kind == 0)
+        {
+            h->st->press_x = pos.X;
+            h->st->press_y = pos.Y;
+            IPointerPoint_get_pointer_id( pt, &h->st->press_ptr_id );
+        }
+        else if (h->kind == 1 && pos.X == 55.0f && pos.Y == 75.0f)
+        {
+            h->st->saw_move_55_75 = TRUE;
+        }
+        if (SUCCEEDED( IPointerPoint_get_Properties( pt, &props ) ) && props)
+        {
+            if (h->kind == 0)
+            {
+                IPointerPointProperties_get_IsLeftButtonPressed( props, &h->st->press_left );
+                IPointerPointProperties_get_PointerUpdateKind( props, &h->st->press_kind );
+                IPointerPointProperties_get_Pressure( props, &h->st->press_pressure );
+                IPointerPointProperties_get_ContactRect( props, &h->st->press_contact );
+            }
+            else if (h->kind == 2)
+            {
+                IPointerPointProperties_get_PointerUpdateKind( props, &h->st->rel_kind );
+            }
+            else if (h->kind == 3)
+            {
+                IPointerPointProperties_get_MouseWheelDelta( props, &h->st->last_wheel );
+            }
+            IPointerPointProperties_Release( props );
+        }
+        IPointerPoint_Release( pt );
+    }
+    return S_OK;
+}
+static const __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgsVtbl cw_ptr_handler_vtbl =
+{
+    cw_ptr_handler_QI,
+    cw_ptr_handler_AddRef,
+    cw_ptr_handler_Release,
+    cw_ptr_handler_Invoke,
+};
+
+struct elem_ptr_handler
+{
+    const void **lpVtbl;
+    LONG ref;
+    int fired_cnt;
+    float last_abs_x, last_abs_y;
+    float last_rel_x, last_rel_y;
+    void *rel_elem;
+    boolean set_handled;
+};
+
+static HRESULT WINAPI elem_ptr_QI( void *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IAgileObject ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct elem_ptr_handler *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI elem_ptr_AddRef( void *iface ) { return InterlockedIncrement( &((struct elem_ptr_handler *)iface)->ref ); }
+static ULONG WINAPI elem_ptr_Release( void *iface ) { return InterlockedDecrement( &((struct elem_ptr_handler *)iface)->ref ); }
+static HRESULT WINAPI elem_ptr_Invoke( void *iface, IInspectable *sender, void *args )
+{
+    struct elem_ptr_handler *h = iface;
+    void *pargs = NULL;
+    h->fired_cnt++;
+    if (args && SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)args, &IID_IPointerRoutedEventArgs_test, &pargs ) ) && pargs)
+    {
+        HRESULT (WINAPI *get_cur)(void *, void *, IPointerPoint **) = (void *)(*(void ***)pargs)[10];
+        HRESULT (WINAPI *put_handled)(void *, boolean) = (void *)(*(void ***)pargs)[9];
+        IPointerPoint *pt = NULL;
+        if (get_cur && SUCCEEDED( get_cur( pargs, NULL, &pt ) ) && pt)
+        {
+            Point pos = {0};
+            IPointerPoint_get_Position( pt, &pos );
+            h->last_abs_x = pos.X;
+            h->last_abs_y = pos.Y;
+            IPointerPoint_Release( pt );
+        }
+        if (h->rel_elem && get_cur && SUCCEEDED( get_cur( pargs, h->rel_elem, &pt ) ) && pt)
+        {
+            Point pos = {0};
+            IPointerPoint_get_Position( pt, &pos );
+            h->last_rel_x = pos.X;
+            h->last_rel_y = pos.Y;
+            IPointerPoint_Release( pt );
+        }
+        if (h->set_handled && put_handled)
+            put_handled( pargs, TRUE );
+        IUnknown_Release( (IUnknown *)pargs );
+    }
+    return S_OK;
+}
+static const void *elem_ptr_vtbl[] = { elem_ptr_QI, elem_ptr_AddRef, elem_ptr_Release, elem_ptr_Invoke };
+
+static BOOL (WINAPI *pPeekMessageW)(MSG *, HWND, UINT, UINT, UINT);
+static BOOL (WINAPI *pTranslateMessage)(const MSG *);
+static LRESULT (WINAPI *pDispatchMessageW)(const MSG *);
+static BOOL (WINAPI *pIsWindow)(HWND);
+static BOOL (WINAPI *pPostMessageW)(HWND, UINT, WPARAM, LPARAM);
+static BOOL (WINAPI *pClientToScreen)(HWND, POINT *);
+
+static void init_user32_procs( void )
+{
+    HMODULE u32 = GetModuleHandleA( "user32.dll" );
+    if (!u32) u32 = LoadLibraryA( "user32.dll" );
+    pPeekMessageW = (void *)GetProcAddress( u32, "PeekMessageW" );
+    pTranslateMessage = (void *)GetProcAddress( u32, "TranslateMessage" );
+    pDispatchMessageW = (void *)GetProcAddress( u32, "DispatchMessageW" );
+    pIsWindow = (void *)GetProcAddress( u32, "IsWindow" );
+    pPostMessageW = (void *)GetProcAddress( u32, "PostMessageW" );
+    pClientToScreen = (void *)GetProcAddress( u32, "ClientToScreen" );
+}
+
+static void pump_messages( HWND hwnd )
+{
+    MSG msg;
+    DWORD start = GetTickCount();
+    while (GetTickCount() - start < 50)
+    {
+        while (pPeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+        {
+            pTranslateMessage( &msg );
+            pDispatchMessageW( &msg );
+        }
+        Sleep( 2 );
+    }
+}
+
+static void test_PointerBridge( void )
+{
+    IActivationFactory *win_af = NULL, *grid_af = NULL, *sp_af = NULL;
+    IInspectable *win_statics = NULL, *win = NULL;
+    IInspectable *parent_obj = NULL, *child_obj = NULL;
+    void *parent_ui = NULL, *child_ui = NULL, *parent_fe = NULL, *child_fe = NULL;
+    void *parent_panel = NULL, *children_vec = NULL;
+    ICoreWindow *cw = NULL;
+    ICoreWindowInterop *interop = NULL;
+    HWND hwnd = NULL;
+    HSTRING str;
+    HRESULT hr;
+    struct cw_ptr_test_state cw_st = {0};
+    struct cw_ptr_handler h_press = { { &cw_ptr_handler_vtbl }, 1, 0, &cw_st };
+    struct cw_ptr_handler h_move  = { { &cw_ptr_handler_vtbl }, 1, 1, &cw_st };
+    struct cw_ptr_handler h_rel   = { { &cw_ptr_handler_vtbl }, 1, 2, &cw_st };
+    struct cw_ptr_handler h_wheel = { { &cw_ptr_handler_vtbl }, 1, 3, &cw_st };
+    struct elem_ptr_handler h_child = { elem_ptr_vtbl, 1 };
+    struct elem_ptr_handler h_parent = { elem_ptr_vtbl, 1 };
+    EventRegistrationToken tok_press = {0}, tok_move = {0}, tok_rel = {0}, tok_wheel = {0};
+    EventRegistrationToken tok_child = {0}, tok_parent = {0};
+    struct test_thickness margin = { 20.0, 20.0, 0.0, 0.0 };
+
+    init_user32_procs();
+
+    WindowsCreateString( L"Windows.UI.Xaml.Window", 22, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&win_af );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "Window factory hr %#lx\n", hr );
+    if (FAILED(hr)) return;
+
+    hr = IActivationFactory_QueryInterface( win_af, &IID_IWindowStatics_test, (void **)&win_statics );
+    IActivationFactory_Release( win_af );
+    ok( hr == S_OK, "QI IWindowStatics hr %#lx\n", hr );
+    if (FAILED(hr)) return;
+
+    hr = ((HRESULT (WINAPI *)(void *, void **))(*(void ***)win_statics)[6])( win_statics, (void **)&win );
+    IInspectable_Release( win_statics );
+    ok( hr == S_OK && win != NULL, "get_Current hr %#lx\n", hr );
+    if (FAILED(hr) || !win) return;
+    check_interface( win, &IID_IWindow_test, FALSE );
+
+    /* Activate creates/attaches the CoreWindow HWND and subclasses it */
+    hr = ((HRESULT (WINAPI *)(void *))(*(void ***)win)[20])( win );
+    ok( hr == S_OK, "Window.Activate hr %#lx\n", hr );
+
+    hr = ((HRESULT (WINAPI *)(void *, ICoreWindow **))(*(void ***)win)[10])( win, &cw );
+    ok( hr == S_OK && cw != NULL, "Window.get_CoreWindow hr %#lx\n", hr );
+    if (!cw) { IInspectable_Release( win ); return; }
+
+    hr = ICoreWindow_QueryInterface( cw, &IID_ICoreWindowInterop, (void **)&interop );
+    ok( hr == S_OK && interop != NULL, "QI ICoreWindowInterop hr %#lx\n", hr );
+    if (SUCCEEDED(hr) && interop)
+    {
+        hr = interop->lpVtbl->GetWindowHandle( interop, &hwnd );
+        ok( hr == S_OK && pIsWindow( hwnd ), "GetWindowHandle hr %#lx hwnd %p\n", hr, hwnd );
+        interop->lpVtbl->Release( interop );
+    }
+    if (!pIsWindow( hwnd )) { ICoreWindow_Release( cw ); IInspectable_Release( win ); return; }
+
+    /* 1. CoreWindow pointer event registry + WM_* bridge */
+    hr = ICoreWindow_add_PointerPressed( cw, &h_press.iface, &tok_press );
+    ok( hr == S_OK && tok_press.value != 0, "add_PointerPressed hr %#lx tok %I64d\n", hr, tok_press.value );
+    hr = ICoreWindow_add_PointerMoved( cw, &h_move.iface, &tok_move );
+    ok( hr == S_OK && tok_move.value != 0, "add_PointerMoved hr %#lx\n", hr );
+    hr = ICoreWindow_add_PointerReleased( cw, &h_rel.iface, &tok_rel );
+    ok( hr == S_OK && tok_rel.value != 0, "add_PointerReleased hr %#lx\n", hr );
+    hr = ICoreWindow_add_PointerWheelChanged( cw, &h_wheel.iface, &tok_wheel );
+    ok( hr == S_OK && tok_wheel.value != 0, "add_PointerWheelChanged hr %#lx\n", hr );
+
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 45, 65 ) );
+    pump_messages( hwnd );
+    ok( cw_st.pressed_cnt == 1, "expected 1 PointerPressed, got %d\n", cw_st.pressed_cnt );
+    ok( cw_st.press_x == 45.0f && cw_st.press_y == 65.0f, "got coords (%.1f, %.1f)\n", cw_st.press_x, cw_st.press_y );
+    ok( cw_st.press_ptr_id == 1, "expected PointerId 1, got %u\n", cw_st.press_ptr_id );
+    ok( cw_st.press_left == TRUE, "expected IsLeftButtonPressed TRUE\n" );
+    ok( cw_st.press_kind == PointerUpdateKind_LeftButtonPressed, "got update kind %d\n", cw_st.press_kind );
+    ok( cw_st.press_pressure == 0.5f, "expected pressure 0.5, got %.2f\n", cw_st.press_pressure );
+    ok( cw_st.press_contact.Width == 1.0f && cw_st.press_contact.Height == 1.0f,
+        "expected 1x1 contact rect, got %.1fx%.1f\n", cw_st.press_contact.Width, cw_st.press_contact.Height );
+
+    pPostMessageW( hwnd, WM_MOUSEMOVE, MK_LBUTTON, MAKELPARAM( 55, 75 ) );
+    pump_messages( hwnd );
+    ok( cw_st.moved_cnt >= 1 && cw_st.saw_move_55_75, "expected PointerMoved at (55,75), cnt=%d saw=%d\n",
+        cw_st.moved_cnt, cw_st.saw_move_55_75 );
+
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 55, 75 ) );
+    pump_messages( hwnd );
+    ok( cw_st.released_cnt == 1, "expected 1 PointerReleased, got %d\n", cw_st.released_cnt );
+    ok( cw_st.rel_kind == PointerUpdateKind_LeftButtonReleased, "got release kind %d\n", cw_st.rel_kind );
+
+    {
+        POINT spt = { 55, 75 };
+        pClientToScreen( hwnd, &spt );
+        pPostMessageW( hwnd, WM_MOUSEWHEEL, MAKEWPARAM( 0, 120 ), MAKELPARAM( spt.x, spt.y ) );
+        pump_messages( hwnd );
+        ok( cw_st.wheel_cnt == 1, "expected 1 PointerWheelChanged, got %d\n", cw_st.wheel_cnt );
+        ok( cw_st.last_wheel == 120, "expected wheel delta 120, got %d\n", cw_st.last_wheel );
+    }
+
+    ICoreWindow_remove_PointerPressed( cw, tok_press );
+    ICoreWindow_remove_PointerMoved( cw, tok_move );
+    ICoreWindow_remove_PointerReleased( cw, tok_rel );
+    ICoreWindow_remove_PointerWheelChanged( cw, tok_wheel );
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 10, 10 ) );
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 10, 10 ) );
+    pump_messages( hwnd );
+    ok( cw_st.pressed_cnt == 1, "removed PointerPressed handler still fired (%d)\n", cw_st.pressed_cnt );
+
+    /* 2. Element tree hit-testing & bubbling */
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.Grid", 29, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&grid_af );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "Grid factory hr %#lx\n", hr );
+    hr = IActivationFactory_ActivateInstance( grid_af, &parent_obj );
+    IActivationFactory_Release( grid_af );
+    ok( hr == S_OK && parent_obj != NULL, "Grid ActivateInstance hr %#lx\n", hr );
+
+    WindowsCreateString( L"Windows.UI.Xaml.Controls.StackPanel", 35, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&sp_af );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "StackPanel factory hr %#lx\n", hr );
+    hr = IActivationFactory_ActivateInstance( sp_af, &child_obj );
+    IActivationFactory_Release( sp_af );
+    ok( hr == S_OK && child_obj != NULL, "StackPanel ActivateInstance hr %#lx\n", hr );
+
+    IInspectable_QueryInterface( parent_obj, &IID_IFrameworkElement_test, &parent_fe );
+    IInspectable_QueryInterface( child_obj, &IID_IFrameworkElement_test, &child_fe );
+    ((HRESULT (WINAPI *)(void *, double))(*(void ***)parent_fe)[16])( parent_fe, 200.0 );
+    ((HRESULT (WINAPI *)(void *, double))(*(void ***)parent_fe)[18])( parent_fe, 200.0 );
+    ((HRESULT (WINAPI *)(void *, double))(*(void ***)child_fe)[16])( child_fe, 80.0 );
+    ((HRESULT (WINAPI *)(void *, double))(*(void ***)child_fe)[18])( child_fe, 80.0 );
+    ((HRESULT (WINAPI *)(void *, struct test_thickness *))(*(void ***)child_fe)[32])( child_fe, &margin );
+
+    IInspectable_QueryInterface( parent_obj, &IID_IPanel_test, &parent_panel );
+    ((HRESULT (WINAPI *)(void *, void **))(*(void ***)parent_panel)[6])( parent_panel, &children_vec );
+    ((HRESULT (WINAPI *)(void *, void *))(*(void ***)children_vec)[13])( children_vec, child_obj );
+
+    IInspectable_QueryInterface( parent_obj, &IID_IUIElement_test, &parent_ui );
+    IInspectable_QueryInterface( child_obj, &IID_IUIElement_test, &child_ui );
+    h_child.rel_elem = child_obj;
+    ((HRESULT (WINAPI *)(void *, void *, EventRegistrationToken *))(*(void ***)child_ui)[57])( child_ui, &h_child, &tok_child );
+    ((HRESULT (WINAPI *)(void *, void *, EventRegistrationToken *))(*(void ***)parent_ui)[57])( parent_ui, &h_parent, &tok_parent );
+
+    ((HRESULT (WINAPI *)(void *, void *))(*(void ***)win)[9])( win, parent_obj );
+    pump_messages( hwnd );
+
+    /* Inside child rect [20,20 .. 100,100]: child fires and bubbles to parent */
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 50, 50 ) );
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 50, 50 ) );
+    pump_messages( hwnd );
+    ok( h_child.fired_cnt == 1, "expected child PointerPressed count 1, got %d\n", h_child.fired_cnt );
+    ok( h_parent.fired_cnt == 1, "expected parent PointerPressed (bubbled) count 1, got %d\n", h_parent.fired_cnt );
+    ok( h_child.last_abs_x == 50.0f && h_child.last_abs_y == 50.0f,
+        "child abs coords (%.1f, %.1f)\n", h_child.last_abs_x, h_child.last_abs_y );
+    ok( h_child.last_rel_x == 30.0f && h_child.last_rel_y == 30.0f,
+        "child rel coords (%.1f, %.1f), expected (30, 30)\n", h_child.last_rel_x, h_child.last_rel_y );
+
+    /* Outside parent rect [0,0 .. 200,200]: neither fires */
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 300, 300 ) );
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 300, 300 ) );
+    pump_messages( hwnd );
+    ok( h_child.fired_cnt == 1, "outside click fired child (%d)\n", h_child.fired_cnt );
+    ok( h_parent.fired_cnt == 1, "outside click fired parent (%d)\n", h_parent.fired_cnt );
+
+    /* Handled=TRUE on child stops bubbling to parent */
+    h_child.set_handled = TRUE;
+    pPostMessageW( hwnd, WM_LBUTTONDOWN, MK_LBUTTON, MAKELPARAM( 50, 50 ) );
+    pPostMessageW( hwnd, WM_LBUTTONUP, 0, MAKELPARAM( 50, 50 ) );
+    pump_messages( hwnd );
+    ok( h_child.fired_cnt == 2, "expected child count 2, got %d\n", h_child.fired_cnt );
+    ok( h_parent.fired_cnt == 1, "expected parent count still 1 when Handled=TRUE, got %d\n", h_parent.fired_cnt );
+
+    ((HRESULT (WINAPI *)(void *, EventRegistrationToken))(*(void ***)child_ui)[58])( child_ui, tok_child );
+    ((HRESULT (WINAPI *)(void *, EventRegistrationToken))(*(void ***)parent_ui)[58])( parent_ui, tok_parent );
+    ((HRESULT (WINAPI *)(void *, void *))(*(void ***)win)[9])( win, NULL );
+    IUnknown_Release( (IUnknown *)child_ui );
+    IUnknown_Release( (IUnknown *)parent_ui );
+    IUnknown_Release( (IUnknown *)children_vec );
+    IUnknown_Release( (IUnknown *)parent_panel );
+    IUnknown_Release( (IUnknown *)child_fe );
+    IUnknown_Release( (IUnknown *)parent_fe );
+    IInspectable_Release( child_obj );
+    IInspectable_Release( parent_obj );
+    ICoreWindow_Release( cw );
+    IInspectable_Release( win );
+}
+
 START_TEST(xaml)
 {
     HRESULT hr;
@@ -573,6 +975,7 @@ START_TEST(xaml)
     test_Application();
     test_SwapChainPanel();
     test_View_lifecycle();
+    test_PointerBridge();
 
     RoUninitialize();
 }

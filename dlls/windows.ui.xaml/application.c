@@ -200,7 +200,1363 @@ struct xaml_window
 };
 static struct xaml_window global_xaml_window;
 static IInspectable *global_window_outer = NULL;
+/* Window.Title set explicitly by the app; empty until it does, which is when
+ * the package DisplayName acts as the default title. */
+static WCHAR xaml_explicit_title[128];
 static BOOL lifecycle_started = FALSE;
+
+/* ---- Shared WinRT Event Registry (token-based, twinapi bg_events pattern) ---- */
+static CRITICAL_SECTION xaml_event_cs;
+static CRITICAL_SECTION_DEBUG xaml_event_cs_debug =
+{
+    0, 0, &xaml_event_cs,
+    { &xaml_event_cs_debug.ProcessLocksList, &xaml_event_cs_debug.ProcessLocksList },
+    0, 0, { (DWORD_PTR)(__FILE__ ": xaml_event_cs") }
+};
+static CRITICAL_SECTION xaml_event_cs = { &xaml_event_cs_debug, -1, 0, 0, 0, 0 };
+
+HRESULT xaml_event_registry_add( struct xaml_event_registry *reg, void *handler, EventRegistrationToken *token )
+{
+    unsigned int i;
+
+    if (!reg) return E_INVALIDARG;
+    if (!handler)
+    {
+        if (token) token->value = 0;
+        return S_OK;
+    }
+
+    EnterCriticalSection( &xaml_event_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    {
+        if (!reg->entries[i].handler)
+        {
+            INT64 tok = InterlockedIncrement64( &reg->next_token );
+            IUnknown_AddRef( (IUnknown *)handler );
+            reg->entries[i].handler = handler;
+            reg->entries[i].token = tok;
+            if (token) token->value = tok;
+            LeaveCriticalSection( &xaml_event_cs );
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection( &xaml_event_cs );
+    return E_OUTOFMEMORY;
+}
+
+HRESULT xaml_event_registry_remove( struct xaml_event_registry *reg, EventRegistrationToken token )
+{
+    unsigned int i;
+
+    if (!reg) return E_INVALIDARG;
+    EnterCriticalSection( &xaml_event_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    {
+        if (reg->entries[i].handler && reg->entries[i].token == token.value)
+        {
+            void *h = reg->entries[i].handler;
+            reg->entries[i].handler = NULL;
+            reg->entries[i].token = 0;
+            LeaveCriticalSection( &xaml_event_cs );
+            IUnknown_Release( (IUnknown *)h );
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection( &xaml_event_cs );
+    return S_OK;
+}
+
+unsigned int xaml_event_registry_snapshot( struct xaml_event_registry *reg, void **out, unsigned int max_out )
+{
+    unsigned int i, count = 0;
+
+    if (!reg || !out || !max_out) return 0;
+    EnterCriticalSection( &xaml_event_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ) && count < max_out; i++)
+    {
+        if (reg->entries[i].handler)
+        {
+            IUnknown_AddRef( (IUnknown *)reg->entries[i].handler );
+            out[count++] = reg->entries[i].handler;
+        }
+    }
+    LeaveCriticalSection( &xaml_event_cs );
+    return count;
+}
+
+void xaml_event_registry_clear( struct xaml_event_registry *reg )
+{
+    void *to_release[64];
+    unsigned int i, count = 0;
+
+    if (!reg) return;
+    EnterCriticalSection( &xaml_event_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    {
+        if (reg->entries[i].handler)
+        {
+            to_release[count++] = reg->entries[i].handler;
+            reg->entries[i].handler = NULL;
+            reg->entries[i].token = 0;
+        }
+    }
+    LeaveCriticalSection( &xaml_event_cs );
+    for (i = 0; i < count; i++)
+        IUnknown_Release( (IUnknown *)to_release[i] );
+}
+
+/* ---- Mouse PointerDevice + PointerPoint + PointerPointProperties + Core PointerEventArgs ---- */
+static HRESULT WINAPI mouse_dev_QueryInterface( IPointerDevice *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CDevices_CInput_CIPointerDevice ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI mouse_dev_AddRef( IPointerDevice *iface ) { return 2; }
+static ULONG WINAPI mouse_dev_Release( IPointerDevice *iface ) { return 1; }
+static HRESULT WINAPI mouse_dev_GetIids( IPointerDevice *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI mouse_dev_GetRuntimeClassName( IPointerDevice *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Devices.Input.PointerDevice", 35, name );
+}
+static HRESULT WINAPI mouse_dev_GetTrustLevel( IPointerDevice *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI mouse_dev_get_PointerDeviceType( IPointerDevice *iface, PointerDeviceType *value )
+{
+    if (!value) return E_POINTER;
+    *value = PointerDeviceType_Mouse;
+    return S_OK;
+}
+static HRESULT WINAPI mouse_dev_get_IsIntegrated( IPointerDevice *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI mouse_dev_get_MaxContacts( IPointerDevice *iface, UINT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 1;
+    return S_OK;
+}
+static HRESULT WINAPI mouse_dev_get_PhysicalDeviceRect( IPointerDevice *iface, Rect *value )
+{
+    if (!value) return E_POINTER;
+    value->X = 0.0f; value->Y = 0.0f;
+    value->Width = (float)GetSystemMetrics( SM_CXSCREEN );
+    value->Height = (float)GetSystemMetrics( SM_CYSCREEN );
+    return S_OK;
+}
+static HRESULT WINAPI mouse_dev_get_ScreenRect( IPointerDevice *iface, Rect *value )
+{
+    return mouse_dev_get_PhysicalDeviceRect( iface, value );
+}
+static HRESULT WINAPI mouse_dev_get_SupportedUsages( IPointerDevice *iface, __FIVectorView_1_PointerDeviceUsage **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+
+static const IPointerDeviceVtbl mouse_dev_vtbl =
+{
+    mouse_dev_QueryInterface,
+    mouse_dev_AddRef,
+    mouse_dev_Release,
+    mouse_dev_GetIids,
+    mouse_dev_GetRuntimeClassName,
+    mouse_dev_GetTrustLevel,
+    mouse_dev_get_PointerDeviceType,
+    mouse_dev_get_IsIntegrated,
+    mouse_dev_get_MaxContacts,
+    mouse_dev_get_PhysicalDeviceRect,
+    mouse_dev_get_ScreenRect,
+    mouse_dev_get_SupportedUsages,
+};
+static IPointerDevice mouse_pointer_device = { &mouse_dev_vtbl };
+
+struct xaml_pointer_point
+{
+    IPointerPoint IPointerPoint_iface;
+    IPointerPointProperties IPointerPointProperties_iface;
+    LONG ref;
+    float x;
+    float y;
+    UINT32 pointer_id;
+    UINT32 frame_id;
+    UINT64 timestamp;
+    BOOL is_in_contact;
+    BOOL is_in_window;
+    BOOL is_left;
+    BOOL is_right;
+    BOOL is_middle;
+    INT32 wheel_delta;
+    PointerUpdateKind update_kind;
+};
+
+static LONG xaml_pointer_frame_seq;
+
+static inline struct xaml_pointer_point *impl_from_IPointerPoint( IPointerPoint *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_pointer_point, IPointerPoint_iface );
+}
+static inline struct xaml_pointer_point *impl_from_IPointerPointProperties( IPointerPointProperties *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_pointer_point, IPointerPointProperties_iface );
+}
+
+static HRESULT WINAPI ptr_point_QueryInterface( IPointerPoint *iface, REFIID iid, void **out )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CInput_CIPointerPoint ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IPointerPoint_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CInput_CIPointerPointProperties ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IPointerPointProperties_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ptr_point_AddRef( IPointerPoint *iface )
+{
+    return InterlockedIncrement( &impl_from_IPointerPoint( iface )->ref );
+}
+static ULONG WINAPI ptr_point_Release( IPointerPoint *iface )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+static HRESULT WINAPI ptr_point_GetIids( IPointerPoint *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_GetRuntimeClassName( IPointerPoint *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Input.PointerPoint", 29, name );
+}
+static HRESULT WINAPI ptr_point_GetTrustLevel( IPointerPoint *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_get_PointerDevice( IPointerPoint *iface, IPointerDevice **value )
+{
+    if (!value) return E_POINTER;
+    *value = &mouse_pointer_device;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_get_Position( IPointerPoint *iface, Point *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    if (!value) return E_POINTER;
+    value->X = impl->x;
+    value->Y = impl->y;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_get_RawPosition( IPointerPoint *iface, Point *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    if (!value) return E_POINTER;
+    value->X = impl->x;
+    value->Y = impl->y;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_get_pointer_id( IPointerPoint *iface, UINT32 *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    if (!value) return E_POINTER;
+    *value = impl->pointer_id;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_get_FrameId( IPointerPoint *iface, UINT32 *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    if (!value) return E_POINTER;
+    *value = impl->frame_id;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_get_Timestamp( IPointerPoint *iface, UINT64 *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    if (!value) return E_POINTER;
+    *value = impl->timestamp;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_get_IsInContact( IPointerPoint *iface, boolean *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    if (!value) return E_POINTER;
+    *value = impl->is_in_contact ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_point_get_Properties( IPointerPoint *iface, IPointerPointProperties **value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPoint( iface );
+    if (!value) return E_POINTER;
+    InterlockedIncrement( &impl->ref );
+    *value = &impl->IPointerPointProperties_iface;
+    return S_OK;
+}
+
+static const IPointerPointVtbl ptr_point_vtbl =
+{
+    ptr_point_QueryInterface,
+    ptr_point_AddRef,
+    ptr_point_Release,
+    ptr_point_GetIids,
+    ptr_point_GetRuntimeClassName,
+    ptr_point_GetTrustLevel,
+    ptr_point_get_PointerDevice,
+    ptr_point_get_Position,
+    ptr_point_get_RawPosition,
+    ptr_point_get_pointer_id,
+    ptr_point_get_FrameId,
+    ptr_point_get_Timestamp,
+    ptr_point_get_IsInContact,
+    ptr_point_get_Properties,
+};
+
+static HRESULT WINAPI ptr_props_QueryInterface( IPointerPointProperties *iface, REFIID iid, void **out )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPointProperties( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CInput_CIPointerPointProperties ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IPointerPointProperties_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ptr_props_AddRef( IPointerPointProperties *iface )
+{
+    return InterlockedIncrement( &impl_from_IPointerPointProperties( iface )->ref );
+}
+static ULONG WINAPI ptr_props_Release( IPointerPointProperties *iface )
+{
+    return ptr_point_Release( &impl_from_IPointerPointProperties( iface )->IPointerPoint_iface );
+}
+static HRESULT WINAPI ptr_props_GetIids( IPointerPointProperties *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_GetRuntimeClassName( IPointerPointProperties *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Input.PointerPointProperties", 39, name );
+}
+static HRESULT WINAPI ptr_props_GetTrustLevel( IPointerPointProperties *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_Pressure( IPointerPointProperties *iface, FLOAT *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0.5f;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsInverted( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsEraser( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_Orientation( IPointerPointProperties *iface, FLOAT *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0.0f;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_XTilt( IPointerPointProperties *iface, FLOAT *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0.0f;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_YTilt( IPointerPointProperties *iface, FLOAT *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0.0f;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_Twist( IPointerPointProperties *iface, FLOAT *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0.0f;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_ContactRect( IPointerPointProperties *iface, Rect *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPointProperties( iface );
+    if (!value) return E_POINTER;
+    value->X = impl->x;
+    value->Y = impl->y;
+    value->Width = 1.0f;
+    value->Height = 1.0f;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_ContactRectRaw( IPointerPointProperties *iface, Rect *value )
+{
+    return ptr_props_get_ContactRect( iface, value );
+}
+static HRESULT WINAPI ptr_props_get_TouchConfidence( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsLeftButtonPressed( IPointerPointProperties *iface, boolean *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPointProperties( iface );
+    if (!value) return E_POINTER;
+    *value = impl->is_left ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsRightButtonPressed( IPointerPointProperties *iface, boolean *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPointProperties( iface );
+    if (!value) return E_POINTER;
+    *value = impl->is_right ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsMiddleButtonPressed( IPointerPointProperties *iface, boolean *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPointProperties( iface );
+    if (!value) return E_POINTER;
+    *value = impl->is_middle ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_MouseWheelDelta( IPointerPointProperties *iface, INT32 *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPointProperties( iface );
+    if (!value) return E_POINTER;
+    *value = impl->wheel_delta;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsHorizontalMouseWheel( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsPrimary( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = TRUE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsInRange( IPointerPointProperties *iface, boolean *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPointProperties( iface );
+    if (!value) return E_POINTER;
+    *value = impl->is_in_window ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsCanceled( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsBarrelButtonPressed( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsXButton1Pressed( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_IsXButton2Pressed( IPointerPointProperties *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_get_PointerUpdateKind( IPointerPointProperties *iface, PointerUpdateKind *value )
+{
+    struct xaml_pointer_point *impl = impl_from_IPointerPointProperties( iface );
+    if (!value) return E_POINTER;
+    *value = impl->update_kind;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_HasUsage( IPointerPointProperties *iface, UINT32 page, UINT32 id, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI ptr_props_GetUsageValue( IPointerPointProperties *iface, UINT32 page, UINT32 id, INT32 *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+
+static const IPointerPointPropertiesVtbl ptr_props_vtbl =
+{
+    ptr_props_QueryInterface,
+    ptr_props_AddRef,
+    ptr_props_Release,
+    ptr_props_GetIids,
+    ptr_props_GetRuntimeClassName,
+    ptr_props_GetTrustLevel,
+    ptr_props_get_Pressure,
+    ptr_props_get_IsInverted,
+    ptr_props_get_IsEraser,
+    ptr_props_get_Orientation,
+    ptr_props_get_XTilt,
+    ptr_props_get_YTilt,
+    ptr_props_get_Twist,
+    ptr_props_get_ContactRect,
+    ptr_props_get_ContactRectRaw,
+    ptr_props_get_TouchConfidence,
+    ptr_props_get_IsLeftButtonPressed,
+    ptr_props_get_IsRightButtonPressed,
+    ptr_props_get_IsMiddleButtonPressed,
+    ptr_props_get_MouseWheelDelta,
+    ptr_props_get_IsHorizontalMouseWheel,
+    ptr_props_get_IsPrimary,
+    ptr_props_get_IsInRange,
+    ptr_props_get_IsCanceled,
+    ptr_props_get_IsBarrelButtonPressed,
+    ptr_props_get_IsXButton1Pressed,
+    ptr_props_get_IsXButton2Pressed,
+    ptr_props_get_PointerUpdateKind,
+    ptr_props_HasUsage,
+    ptr_props_GetUsageValue,
+};
+
+IPointerPoint *xaml_pointer_point_create( const struct xaml_pointer_info *info, float rel_x, float rel_y )
+{
+    struct xaml_pointer_point *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->IPointerPoint_iface.lpVtbl = &ptr_point_vtbl;
+    impl->IPointerPointProperties_iface.lpVtbl = &ptr_props_vtbl;
+    impl->ref = 1;
+    impl->x = rel_x;
+    impl->y = rel_y;
+    impl->pointer_id = info && info->pointer_id ? info->pointer_id : 1;
+    impl->frame_id = (UINT32)InterlockedIncrement( &xaml_pointer_frame_seq );
+    impl->timestamp = GetTickCount64() * 1000;
+    if (info)
+    {
+        impl->is_in_contact = info->is_in_contact;
+        impl->is_in_window = info->is_in_window;
+        impl->is_left = info->is_left;
+        impl->is_right = info->is_right;
+        impl->is_middle = info->is_middle;
+        impl->wheel_delta = info->wheel_delta;
+        impl->update_kind = info->update_kind;
+    }
+    return &impl->IPointerPoint_iface;
+}
+
+struct xaml_core_pointer_args
+{
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs IPointerEventArgs_iface;
+    __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ICoreWindowEventArgs_iface;
+    LONG ref;
+    IPointerPoint *point;
+    UINT32 key_modifiers;
+    boolean handled;
+};
+
+static inline struct xaml_core_pointer_args *impl_from_cw_ptr_args( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_core_pointer_args, IPointerEventArgs_iface );
+}
+static inline struct xaml_core_pointer_args *impl_from_cw_core_args( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_core_pointer_args, ICoreWindowEventArgs_iface );
+}
+
+static HRESULT WINAPI cw_ptr_args_QueryInterface( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, REFIID iid, void **out )
+{
+    struct xaml_core_pointer_args *impl = impl_from_cw_ptr_args( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CIPointerEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->IPointerEventArgs_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID___x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICoreWindowEventArgs_iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI cw_ptr_args_AddRef( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface )
+{
+    return InterlockedIncrement( &impl_from_cw_ptr_args( iface )->ref );
+}
+static ULONG WINAPI cw_ptr_args_Release( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface )
+{
+    struct xaml_core_pointer_args *impl = impl_from_cw_ptr_args( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->point) IPointerPoint_Release( impl->point );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI cw_ptr_args_GetIids( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI cw_ptr_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Core.PointerEventArgs", 32, name );
+}
+static HRESULT WINAPI cw_ptr_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI cw_ptr_args_get_CurrentPoint( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, IPointerPoint **value )
+{
+    struct xaml_core_pointer_args *impl = impl_from_cw_ptr_args( iface );
+    if (!value) return E_POINTER;
+    *value = impl->point;
+    if (*value) IPointerPoint_AddRef( *value );
+    return S_OK;
+}
+static HRESULT WINAPI cw_ptr_args_get_KeyModifiers( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface, UINT32 *value )
+{
+    struct xaml_core_pointer_args *impl = impl_from_cw_ptr_args( iface );
+    if (!value) return E_POINTER;
+    *value = impl->key_modifiers;
+    return S_OK;
+}
+static HRESULT WINAPI cw_ptr_args_GetIntermediatePoints( __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *iface,
+    __FIVector_1_Windows__CUI__CInput__CPointerPoint **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CIPointerEventArgsVtbl cw_ptr_args_vtbl =
+{
+    cw_ptr_args_QueryInterface,
+    cw_ptr_args_AddRef,
+    cw_ptr_args_Release,
+    cw_ptr_args_GetIids,
+    cw_ptr_args_GetRuntimeClassName,
+    cw_ptr_args_GetTrustLevel,
+    cw_ptr_args_get_CurrentPoint,
+    cw_ptr_args_get_KeyModifiers,
+    cw_ptr_args_GetIntermediatePoints,
+};
+
+static HRESULT WINAPI cw_core_args_QueryInterface( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, REFIID iid, void **out )
+{
+    return cw_ptr_args_QueryInterface( &impl_from_cw_core_args( iface )->IPointerEventArgs_iface, iid, out );
+}
+static ULONG WINAPI cw_core_args_AddRef( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return cw_ptr_args_AddRef( &impl_from_cw_core_args( iface )->IPointerEventArgs_iface );
+}
+static ULONG WINAPI cw_core_args_Release( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface )
+{
+    return cw_ptr_args_Release( &impl_from_cw_core_args( iface )->IPointerEventArgs_iface );
+}
+static HRESULT WINAPI cw_core_args_GetIids( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI cw_core_args_GetRuntimeClassName( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Core.PointerEventArgs", 32, name );
+}
+static HRESULT WINAPI cw_core_args_GetTrustLevel( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI cw_core_args_get_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = impl_from_cw_core_args( iface )->handled;
+    return S_OK;
+}
+static HRESULT WINAPI cw_core_args_put_Handled( __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgs *iface, boolean value )
+{
+    impl_from_cw_core_args( iface )->handled = value;
+    return S_OK;
+}
+
+static const struct __x_ABI_CWindows_CUI_CCore_CICoreWindowEventArgsVtbl cw_core_args_vtbl =
+{
+    cw_core_args_QueryInterface,
+    cw_core_args_AddRef,
+    cw_core_args_Release,
+    cw_core_args_GetIids,
+    cw_core_args_GetRuntimeClassName,
+    cw_core_args_GetTrustLevel,
+    cw_core_args_get_Handled,
+    cw_core_args_put_Handled,
+};
+
+__x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *xaml_core_pointer_args_create( const struct xaml_pointer_info *info )
+{
+    struct xaml_core_pointer_args *impl = calloc( 1, sizeof(*impl) );
+    if (!impl) return NULL;
+    impl->IPointerEventArgs_iface.lpVtbl = &cw_ptr_args_vtbl;
+    impl->ICoreWindowEventArgs_iface.lpVtbl = &cw_core_args_vtbl;
+    impl->ref = 1;
+    impl->key_modifiers = info ? info->key_modifiers : 0;
+    impl->point = xaml_pointer_point_create( info, info ? info->x : 0.0f, info ? info->y : 0.0f );
+    return &impl->IPointerEventArgs_iface;
+}
+
+/* ---- CoreWindow Wrapper with Multi-Handler Pointer Event Registries ---- */
+struct xaml_core_window
+{
+    ICoreWindow ICoreWindow_iface;
+    ICoreWindowInterop ICoreWindowInterop_iface;
+    LONG ref;
+    ICoreWindow *inner;
+    HWND hwnd;
+    POINT last_pos;
+    BOOL has_pos;
+    BOOL pointer_inside;
+    BOOL has_capture;
+    struct xaml_event_registry pointer_pressed;
+    struct xaml_event_registry pointer_moved;
+    struct xaml_event_registry pointer_released;
+    struct xaml_event_registry pointer_wheel_changed;
+    struct xaml_event_registry pointer_entered;
+    struct xaml_event_registry pointer_exited;
+    struct xaml_event_registry pointer_capture_lost;
+};
+
+static const ICoreWindowVtbl xaml_cw_vtbl;
+
+static inline struct xaml_core_window *impl_from_cw_ICoreWindow( ICoreWindow *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_core_window, ICoreWindow_iface );
+}
+static inline struct xaml_core_window *impl_from_cw_Interop( ICoreWindowInterop *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_core_window, ICoreWindowInterop_iface );
+}
+
+static struct xaml_core_window *as_xaml_core_window( ICoreWindow *cw )
+{
+    if (!cw || cw->lpVtbl != &xaml_cw_vtbl) return NULL;
+    return impl_from_cw_ICoreWindow( cw );
+}
+
+static HWND xaml_cw_resolve_hwnd( struct xaml_core_window *impl )
+{
+    ICoreWindowInterop *interop = NULL;
+    HWND hw = NULL;
+    if (!impl) return NULL;
+    if (impl->hwnd && IsWindow( impl->hwnd )) return impl->hwnd;
+    if (impl->inner && SUCCEEDED(ICoreWindow_QueryInterface( impl->inner, &IID_ICoreWindowInterop, (void **)&interop )) && interop)
+    {
+        interop->lpVtbl->GetWindowHandle( interop, &hw );
+        interop->lpVtbl->Release( interop );
+        if (hw && IsWindow( hw )) impl->hwnd = hw;
+    }
+    return hw;
+}
+
+static HRESULT WINAPI xaml_cw_QueryInterface( ICoreWindow *iface, REFIID iid, void **out )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ICoreWindow ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICoreWindow_iface;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ICoreWindowInterop ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = &impl->ICoreWindowInterop_iface;
+        return S_OK;
+    }
+    if (impl->inner)
+        return ICoreWindow_QueryInterface( impl->inner, iid, out );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI xaml_cw_AddRef( ICoreWindow *iface )
+{
+    return InterlockedIncrement( &impl_from_cw_ICoreWindow( iface )->ref );
+}
+static ULONG WINAPI xaml_cw_Release( ICoreWindow *iface )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        xaml_event_registry_clear( &impl->pointer_pressed );
+        xaml_event_registry_clear( &impl->pointer_moved );
+        xaml_event_registry_clear( &impl->pointer_released );
+        xaml_event_registry_clear( &impl->pointer_wheel_changed );
+        xaml_event_registry_clear( &impl->pointer_entered );
+        xaml_event_registry_clear( &impl->pointer_exited );
+        xaml_event_registry_clear( &impl->pointer_capture_lost );
+        if (impl->inner) ICoreWindow_Release( impl->inner );
+        free( impl );
+    }
+    return ref;
+}
+static HRESULT WINAPI xaml_cw_GetIids( ICoreWindow *iface, ULONG *count, IID **iids )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    if (impl->inner) return ICoreWindow_GetIids( impl->inner, count, iids );
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_cw_GetRuntimeClassName( ICoreWindow *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Core.CoreWindow", 26, name );
+}
+static HRESULT WINAPI xaml_cw_GetTrustLevel( ICoreWindow *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_cw_get_AutomationHostProvider( ICoreWindow *iface, IInspectable **value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_get_AutomationHostProvider( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_get_Bounds( ICoreWindow *iface, Rect *value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    if (impl->inner) return ICoreWindow_get_Bounds( impl->inner, value );
+    if (!value) return E_POINTER;
+    value->X = 0; value->Y = 0; value->Width = 0; value->Height = 0;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_cw_get_CustomProperties( ICoreWindow *iface, __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet **value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_get_CustomProperties( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_get_Dispatcher( ICoreWindow *iface, ICoreDispatcher **value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_get_Dispatcher( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_get_FlowDirection( ICoreWindow *iface, CoreWindowFlowDirection *value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_get_FlowDirection( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_put_FlowDirection( ICoreWindow *iface, CoreWindowFlowDirection value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_put_FlowDirection( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_get_IsInputEnabled( ICoreWindow *iface, boolean *value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_get_IsInputEnabled( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_put_IsInputEnabled( ICoreWindow *iface, boolean value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_put_IsInputEnabled( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_get_PointerCursor( ICoreWindow *iface, ICoreCursor **value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_get_PointerCursor( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_put_PointerCursor( ICoreWindow *iface, ICoreCursor *value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_put_PointerCursor( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_get_PointerPosition( ICoreWindow *iface, Point *value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    HWND hw;
+    if (!value) return E_POINTER;
+    if (impl->has_pos)
+    {
+        value->X = (float)impl->last_pos.x;
+        value->Y = (float)impl->last_pos.y;
+        return S_OK;
+    }
+    hw = xaml_cw_resolve_hwnd( impl );
+    if (hw && IsWindow( hw ))
+    {
+        POINT pt;
+        if (GetCursorPos( &pt ) && ScreenToClient( hw, &pt ))
+        {
+            value->X = (float)pt.x;
+            value->Y = (float)pt.y;
+            return S_OK;
+        }
+    }
+    if (impl->inner) return ICoreWindow_get_PointerPosition( impl->inner, value );
+    value->X = 0.0f; value->Y = 0.0f;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_cw_get_Visible( ICoreWindow *iface, boolean *value )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_get_Visible( impl->inner, value ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_Activate( ICoreWindow *iface )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_Activate( impl->inner ) : S_OK;
+}
+static HRESULT WINAPI xaml_cw_Close( ICoreWindow *iface )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_Close( impl->inner ) : S_OK;
+}
+static HRESULT WINAPI xaml_cw_GetAsyncKeyState( ICoreWindow *iface, __x_ABI_CWindows_CSystem_CVirtualKey key, CoreVirtualKeyStates *state )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_GetAsyncKeyState( impl->inner, key, state ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_GetKeyState( ICoreWindow *iface, __x_ABI_CWindows_CSystem_CVirtualKey key, CoreVirtualKeyStates *state )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_GetKeyState( impl->inner, key, state ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_ReleasePointerCapture( ICoreWindow *iface )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    if (impl->has_capture)
+    {
+        ReleaseCapture();
+        impl->has_capture = FALSE;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI xaml_cw_SetPointerCapture( ICoreWindow *iface )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    HWND hw = xaml_cw_resolve_hwnd( impl );
+    if (hw && IsWindow( hw ))
+    {
+        SetCapture( hw );
+        impl->has_capture = TRUE;
+    }
+    return S_OK;
+}
+static HRESULT WINAPI xaml_cw_add_Activated( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowActivatedEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_Activated( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_Activated( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_Activated( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_AutomationProviderRequested( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CAutomationProviderRequestedEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_AutomationProviderRequested( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_AutomationProviderRequested( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_AutomationProviderRequested( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_CharacterReceived( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_CharacterReceived( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_CharacterReceived( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_CharacterReceived( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_Closed( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCoreWindowEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_Closed( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_Closed( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_Closed( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_InputEnabled( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CInputEnabledEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_InputEnabled( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_InputEnabled( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_InputEnabled( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_KeyDown( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_KeyDown( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_KeyDown( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_KeyDown( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_KeyUp( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_KeyUp( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_KeyUp( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_KeyUp( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_PointerCaptureLost( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h, EventRegistrationToken *c )
+{
+    return xaml_event_registry_add( &impl_from_cw_ICoreWindow( iface )->pointer_capture_lost, h, c );
+}
+static HRESULT WINAPI xaml_cw_remove_PointerCaptureLost( ICoreWindow *iface, EventRegistrationToken c )
+{
+    return xaml_event_registry_remove( &impl_from_cw_ICoreWindow( iface )->pointer_capture_lost, c );
+}
+static HRESULT WINAPI xaml_cw_add_PointerEntered( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h, EventRegistrationToken *c )
+{
+    return xaml_event_registry_add( &impl_from_cw_ICoreWindow( iface )->pointer_entered, h, c );
+}
+static HRESULT WINAPI xaml_cw_remove_PointerEntered( ICoreWindow *iface, EventRegistrationToken c )
+{
+    return xaml_event_registry_remove( &impl_from_cw_ICoreWindow( iface )->pointer_entered, c );
+}
+static HRESULT WINAPI xaml_cw_add_PointerExited( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h, EventRegistrationToken *c )
+{
+    return xaml_event_registry_add( &impl_from_cw_ICoreWindow( iface )->pointer_exited, h, c );
+}
+static HRESULT WINAPI xaml_cw_remove_PointerExited( ICoreWindow *iface, EventRegistrationToken c )
+{
+    return xaml_event_registry_remove( &impl_from_cw_ICoreWindow( iface )->pointer_exited, c );
+}
+static HRESULT WINAPI xaml_cw_add_PointerMoved( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h, EventRegistrationToken *c )
+{
+    return xaml_event_registry_add( &impl_from_cw_ICoreWindow( iface )->pointer_moved, h, c );
+}
+static HRESULT WINAPI xaml_cw_remove_PointerMoved( ICoreWindow *iface, EventRegistrationToken c )
+{
+    return xaml_event_registry_remove( &impl_from_cw_ICoreWindow( iface )->pointer_moved, c );
+}
+static HRESULT WINAPI xaml_cw_add_PointerPressed( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h, EventRegistrationToken *c )
+{
+    return xaml_event_registry_add( &impl_from_cw_ICoreWindow( iface )->pointer_pressed, h, c );
+}
+static HRESULT WINAPI xaml_cw_remove_PointerPressed( ICoreWindow *iface, EventRegistrationToken c )
+{
+    return xaml_event_registry_remove( &impl_from_cw_ICoreWindow( iface )->pointer_pressed, c );
+}
+static HRESULT WINAPI xaml_cw_add_PointerReleased( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h, EventRegistrationToken *c )
+{
+    return xaml_event_registry_add( &impl_from_cw_ICoreWindow( iface )->pointer_released, h, c );
+}
+static HRESULT WINAPI xaml_cw_remove_PointerReleased( ICoreWindow *iface, EventRegistrationToken c )
+{
+    return xaml_event_registry_remove( &impl_from_cw_ICoreWindow( iface )->pointer_released, c );
+}
+static HRESULT WINAPI xaml_cw_add_TouchHitTesting( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CTouchHitTestingEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_TouchHitTesting( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_TouchHitTesting( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_TouchHitTesting( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_PointerWheelChanged( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h, EventRegistrationToken *c )
+{
+    return xaml_event_registry_add( &impl_from_cw_ICoreWindow( iface )->pointer_wheel_changed, h, c );
+}
+static HRESULT WINAPI xaml_cw_remove_PointerWheelChanged( ICoreWindow *iface, EventRegistrationToken c )
+{
+    return xaml_event_registry_remove( &impl_from_cw_ICoreWindow( iface )->pointer_wheel_changed, c );
+}
+static HRESULT WINAPI xaml_cw_add_SizeChanged( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CWindowSizeChangedEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_SizeChanged( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_SizeChanged( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_SizeChanged( impl->inner, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_add_VisibilityChanged( ICoreWindow *iface,
+    __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CVisibilityChangedEventArgs *h, EventRegistrationToken *c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_add_VisibilityChanged( impl->inner, h, c ) : E_NOTIMPL;
+}
+static HRESULT WINAPI xaml_cw_remove_VisibilityChanged( ICoreWindow *iface, EventRegistrationToken c )
+{
+    struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
+    return impl->inner ? ICoreWindow_remove_VisibilityChanged( impl->inner, c ) : E_NOTIMPL;
+}
+
+static const ICoreWindowVtbl xaml_cw_vtbl =
+{
+    xaml_cw_QueryInterface,
+    xaml_cw_AddRef,
+    xaml_cw_Release,
+    xaml_cw_GetIids,
+    xaml_cw_GetRuntimeClassName,
+    xaml_cw_GetTrustLevel,
+    xaml_cw_get_AutomationHostProvider,
+    xaml_cw_get_Bounds,
+    xaml_cw_get_CustomProperties,
+    xaml_cw_get_Dispatcher,
+    xaml_cw_get_FlowDirection,
+    xaml_cw_put_FlowDirection,
+    xaml_cw_get_IsInputEnabled,
+    xaml_cw_put_IsInputEnabled,
+    xaml_cw_get_PointerCursor,
+    xaml_cw_put_PointerCursor,
+    xaml_cw_get_PointerPosition,
+    xaml_cw_get_Visible,
+    xaml_cw_Activate,
+    xaml_cw_Close,
+    xaml_cw_GetAsyncKeyState,
+    xaml_cw_GetKeyState,
+    xaml_cw_ReleasePointerCapture,
+    xaml_cw_SetPointerCapture,
+    xaml_cw_add_Activated,
+    xaml_cw_remove_Activated,
+    xaml_cw_add_AutomationProviderRequested,
+    xaml_cw_remove_AutomationProviderRequested,
+    xaml_cw_add_CharacterReceived,
+    xaml_cw_remove_CharacterReceived,
+    xaml_cw_add_Closed,
+    xaml_cw_remove_Closed,
+    xaml_cw_add_InputEnabled,
+    xaml_cw_remove_InputEnabled,
+    xaml_cw_add_KeyDown,
+    xaml_cw_remove_KeyDown,
+    xaml_cw_add_KeyUp,
+    xaml_cw_remove_KeyUp,
+    xaml_cw_add_PointerCaptureLost,
+    xaml_cw_remove_PointerCaptureLost,
+    xaml_cw_add_PointerEntered,
+    xaml_cw_remove_PointerEntered,
+    xaml_cw_add_PointerExited,
+    xaml_cw_remove_PointerExited,
+    xaml_cw_add_PointerMoved,
+    xaml_cw_remove_PointerMoved,
+    xaml_cw_add_PointerPressed,
+    xaml_cw_remove_PointerPressed,
+    xaml_cw_add_PointerReleased,
+    xaml_cw_remove_PointerReleased,
+    xaml_cw_add_TouchHitTesting,
+    xaml_cw_remove_TouchHitTesting,
+    xaml_cw_add_PointerWheelChanged,
+    xaml_cw_remove_PointerWheelChanged,
+    xaml_cw_add_SizeChanged,
+    xaml_cw_remove_SizeChanged,
+    xaml_cw_add_VisibilityChanged,
+    xaml_cw_remove_VisibilityChanged,
+};
+
+static HRESULT WINAPI xaml_cw_interop_QueryInterface( ICoreWindowInterop *iface, REFIID iid, void **out )
+{
+    return xaml_cw_QueryInterface( &impl_from_cw_Interop( iface )->ICoreWindow_iface, iid, out );
+}
+static ULONG WINAPI xaml_cw_interop_AddRef( ICoreWindowInterop *iface )
+{
+    return xaml_cw_AddRef( &impl_from_cw_Interop( iface )->ICoreWindow_iface );
+}
+static ULONG WINAPI xaml_cw_interop_Release( ICoreWindowInterop *iface )
+{
+    return xaml_cw_Release( &impl_from_cw_Interop( iface )->ICoreWindow_iface );
+}
+static HRESULT WINAPI xaml_cw_interop_GetWindowHandle( ICoreWindowInterop *iface, HWND *hwnd )
+{
+    struct xaml_core_window *impl = impl_from_cw_Interop( iface );
+    ICoreWindowInterop *interop = NULL;
+    HRESULT hr = E_NOINTERFACE;
+    if (!hwnd) return E_POINTER;
+    if (impl->hwnd && IsWindow( impl->hwnd ))
+    {
+        *hwnd = impl->hwnd;
+        return S_OK;
+    }
+    if (impl->inner && SUCCEEDED( hr = ICoreWindow_QueryInterface( impl->inner, &IID_ICoreWindowInterop, (void **)&interop )) && interop)
+    {
+        hr = interop->lpVtbl->GetWindowHandle( interop, hwnd );
+        interop->lpVtbl->Release( interop );
+        if (SUCCEEDED(hr) && *hwnd && IsWindow( *hwnd ))
+            impl->hwnd = *hwnd;
+        return hr;
+    }
+    *hwnd = NULL;
+    return hr;
+}
+static HRESULT WINAPI xaml_cw_interop_SetMessageHandled( ICoreWindowInterop *iface, boolean value )
+{
+    struct xaml_core_window *impl = impl_from_cw_Interop( iface );
+    ICoreWindowInterop *interop = NULL;
+    HRESULT hr = S_OK;
+    if (impl->inner && SUCCEEDED( ICoreWindow_QueryInterface( impl->inner, &IID_ICoreWindowInterop, (void **)&interop )) && interop)
+    {
+        hr = interop->lpVtbl->SetMessageHandled( interop, value );
+        interop->lpVtbl->Release( interop );
+    }
+    return hr;
+}
+
+static const ICoreWindowInteropVtbl xaml_cw_interop_vtbl =
+{
+    xaml_cw_interop_QueryInterface,
+    xaml_cw_interop_AddRef,
+    xaml_cw_interop_Release,
+    xaml_cw_interop_GetWindowHandle,
+    xaml_cw_interop_SetMessageHandled,
+};
+
+static ICoreWindow *wrap_core_window( ICoreWindow *inner )
+{
+    struct xaml_core_window *wrap;
+    if (!inner) return NULL;
+    if (inner->lpVtbl == &xaml_cw_vtbl)
+    {
+        ICoreWindow_AddRef( inner );
+        return inner;
+    }
+    if (!(wrap = calloc( 1, sizeof(*wrap) ))) return inner;
+    wrap->ICoreWindow_iface.lpVtbl = &xaml_cw_vtbl;
+    wrap->ICoreWindowInterop_iface.lpVtbl = &xaml_cw_interop_vtbl;
+    wrap->ref = 1;
+    wrap->inner = inner;
+    ICoreWindow_AddRef( inner );
+    xaml_cw_resolve_hwnd( wrap );
+    return &wrap->ICoreWindow_iface;
+}
+
+static void xaml_cw_fire_pointer_event( struct xaml_core_window *cw, enum xaml_pointer_event_kind kind,
+                                        const struct xaml_pointer_info *info )
+{
+    struct xaml_event_registry *reg = NULL;
+    void *handlers[64];
+    unsigned int i, count;
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs *args;
+
+    if (!cw) return;
+    switch (kind)
+    {
+    case XAML_PTR_PRESSED:      reg = &cw->pointer_pressed; break;
+    case XAML_PTR_MOVED:        reg = &cw->pointer_moved; break;
+    case XAML_PTR_RELEASED:     reg = &cw->pointer_released; break;
+    case XAML_PTR_WHEEL:        reg = &cw->pointer_wheel_changed; break;
+    case XAML_PTR_ENTERED:      reg = &cw->pointer_entered; break;
+    case XAML_PTR_EXITED:       reg = &cw->pointer_exited; break;
+    case XAML_PTR_CAPTURE_LOST: reg = &cw->pointer_capture_lost; break;
+    }
+    if (!reg) return;
+    count = xaml_event_registry_snapshot( reg, handlers, ARRAY_SIZE( handlers ) );
+    if (!count) return;
+
+    args = xaml_core_pointer_args_create( info );
+    if (!args)
+    {
+        for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+        return;
+    }
+    for (i = 0; i < count; i++)
+    {
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h = handlers[i];
+        __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Invoke(
+            h, &cw->ICoreWindow_iface, args );
+        IUnknown_Release( (IUnknown *)h );
+    }
+    __x_ABI_CWindows_CUI_CCore_CIPointerEventArgs_Release( args );
+}
 
 /* The class activation interface IID of Windows.UI.Xaml.Application (the
  * Windows.UI.Xaml.Application "activatable" interface; the WinUI3 projection
@@ -337,7 +1693,17 @@ static ULONG WINAPI view_Release( IFrameworkView *iface )
     TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
     if (!ref)
     {
-        if (impl->window) ICoreWindow_Release( impl->window );
+        if (impl->window)
+        {
+            struct xaml_core_window *cw = as_xaml_core_window( global_xaml_window.core_window );
+            if ((global_xaml_window.core_window == impl->window || (cw && cw->inner == impl->window)) &&
+                !global_xaml_window.target_hwnd)
+            {
+                ICoreWindow_Release( global_xaml_window.core_window );
+                global_xaml_window.core_window = NULL;
+            }
+            ICoreWindow_Release( impl->window );
+        }
         free( impl );
     }
     return ref;
@@ -422,14 +1788,23 @@ static HRESULT WINAPI view_SetWindow( IFrameworkView *iface, ICoreWindow *window
         TRACE( "lifecycle: SetWindow replaces window %p with %p (strict=off, accepted).\n",
                impl->window, window );
     }
-    if (impl->window) ICoreWindow_Release( impl->window );
+    if (impl->window)
+    {
+        struct xaml_core_window *cw = as_xaml_core_window( global_xaml_window.core_window );
+        if ((global_xaml_window.core_window == impl->window || (cw && cw->inner == impl->window)) &&
+            !global_xaml_window.target_hwnd)
+        {
+            ICoreWindow_Release( global_xaml_window.core_window );
+            global_xaml_window.core_window = NULL;
+        }
+        ICoreWindow_Release( impl->window );
+    }
     impl->window = window;
     if (window) ICoreWindow_AddRef( window );
     if (window) impl->state = VIEW_STATE_WINDOW_SET;
     if (window && !global_xaml_window.core_window)
     {
-        global_xaml_window.core_window = window;
-        ICoreWindow_AddRef( window );
+        global_xaml_window.core_window = wrap_core_window( window );
     }
     return S_OK;
 }
@@ -518,6 +1893,13 @@ static HRESULT WINAPI view_Uninitialize( IFrameworkView *iface )
 
     if (impl->window)
     {
+        struct xaml_core_window *cw = as_xaml_core_window( global_xaml_window.core_window );
+        if ((global_xaml_window.core_window == impl->window || (cw && cw->inner == impl->window)) &&
+            !global_xaml_window.target_hwnd)
+        {
+            ICoreWindow_Release( global_xaml_window.core_window );
+            global_xaml_window.core_window = NULL;
+        }
         ICoreWindow_Release( impl->window );
         impl->window = NULL;
     }
@@ -1608,8 +2990,16 @@ static ICoreWindow *create_current_core_window( void )
 static ICoreWindow *ensure_core_window( struct xaml_window *impl )
 {
     impl = &global_xaml_window;
-    if (!impl->core_window) impl->core_window = get_current_core_window();
-    if (!impl->core_window) impl->core_window = create_current_core_window();
+    if (!impl->core_window)
+    {
+        ICoreWindow *cw = get_current_core_window();
+        if (!cw) cw = create_current_core_window();
+        if (cw)
+        {
+            impl->core_window = wrap_core_window( cw );
+            if (impl->core_window != cw) ICoreWindow_Release( cw );
+        }
+    }
     return impl->core_window;
 }
 
@@ -2153,6 +3543,24 @@ static BOOL WINAPI xaml_package_init( INIT_ONCE *once, void *param, void **conte
     }
 
     xaml_package_resolve_ms_resource( pkg );
+
+    /* Publish the resolved DisplayName as the package short name on the seeded
+     * AppModel identity: windows.ui names the CoreWindow window class with it,
+     * and winex11 publishes that class name as WM_CLASS (taskbar identity). */
+    if (pkg->full_name[0] && pkg->display_name[0])
+    {
+        WCHAR sub[640];
+        HKEY hkey;
+        lstrcpyW( sub, xaml_appmodel_key );
+        lstrcatW( sub, L"\\Packages\\" );
+        lstrcatW( sub, pkg->full_name );
+        if (RegCreateKeyExW( HKEY_CURRENT_USER, sub, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ) == ERROR_SUCCESS)
+        {
+            RegSetValueExW( hkey, L"ApplicationShortName", 0, REG_SZ, (const BYTE *)pkg->display_name,
+                            (lstrlenW( pkg->display_name ) + 1) * sizeof(WCHAR) );
+            RegCloseKey( hkey );
+        }
+    }
     return TRUE;
 }
 
@@ -2160,6 +3568,42 @@ static const WCHAR *xaml_package_display_name( void )
 {
     InitOnceExecuteOnce( &xaml_package_once, xaml_package_init, NULL, NULL );
     return xaml_package.display_name[0] ? xaml_package.display_name : NULL;
+}
+
+void xaml_package_warm( void )
+{
+    xaml_package_display_name();
+}
+
+/* Short app identity for window lookups: the package DisplayName, else the
+ * WINE_PACKAGE_AUMID app id (the part after '!'), else nothing. Matches what
+ * windows.ui/corewindow.c picks as the CoreWindow class name. */
+static const WCHAR *xaml_package_short_name( void )
+{
+    static WCHAR aumid_app[128];
+    const WCHAR *name = xaml_package_display_name();
+    WCHAR buf[256];
+    DWORD len;
+
+    if (name) return name;
+    if (aumid_app[0]) return aumid_app;
+    len = GetEnvironmentVariableW( L"WINE_PACKAGE_AUMID", buf, ARRAY_SIZE(buf) );
+    if (len && len < ARRAY_SIZE(buf))
+    {
+        WCHAR *p = wcschr( buf, L'!' );
+        lstrcpynW( aumid_app, p ? p + 1 : buf, ARRAY_SIZE(aumid_app) );
+        if (aumid_app[0]) return aumid_app;
+    }
+    return NULL;
+}
+
+HWND xaml_find_core_window( void )
+{
+    const WCHAR *short_name = xaml_package_short_name();
+    HWND hw = NULL;
+    if (short_name) hw = FindWindowW( short_name, NULL );
+    if (!hw) hw = xaml_find_core_window();
+    return hw;
 }
 
 static BOOL xaml_package_logo_path( WCHAR *out_path, DWORD cch )
@@ -2372,11 +3816,75 @@ BOOL is_whatsapp_app( void )
 }
 
 static WNDPROC xaml_corewindow_prev_proc;
-static BOOL xaml_corewindow_subclassed;
+static HWND xaml_corewindow_subclassed_hwnd;
 /* FLIP_SEQUENTIAL back buffer: wine swaps front/back on each Present, so paint the
  * buffer that is currently the back buffer and track the flip after every Present.
  * Always painting buffer 0 shows one-present-stale content (black on the first flip). */
 static UINT xaml_back_index;
+
+static void xaml_fill_pointer_info( HWND hwnd, HWND top, UINT msg, WPARAM wparam, LPARAM lparam,
+                                    struct xaml_pointer_info *info, POINT *out_pt )
+{
+    WORD ks = LOWORD( wparam );
+    POINT pt;
+    RECT rc;
+
+    memset( info, 0, sizeof(*info) );
+    if (msg == WM_MOUSEWHEEL)
+    {
+        pt.x = (short)LOWORD( lparam );
+        pt.y = (short)HIWORD( lparam );
+        ScreenToClient( top, &pt );
+    }
+    else
+    {
+        pt.x = (short)LOWORD( lparam );
+        pt.y = (short)HIWORD( lparam );
+        if (top && top != hwnd)
+            MapWindowPoints( hwnd, top, &pt, 1 );
+    }
+
+    if (out_pt) *out_pt = pt;
+    info->x = (float)pt.x;
+    info->y = (float)pt.y;
+    info->pointer_id = 1;
+    if (ks & MK_CONTROL) info->key_modifiers |= 0x1;
+    if (GetKeyState( VK_MENU ) < 0) info->key_modifiers |= 0x2;
+    if (ks & MK_SHIFT) info->key_modifiers |= 0x4;
+    info->is_left = (ks & MK_LBUTTON) != 0;
+    info->is_right = (ks & MK_RBUTTON) != 0;
+    info->is_middle = (ks & MK_MBUTTON) != 0;
+    info->update_kind = PointerUpdateKind_Other;
+
+    if (msg == WM_LBUTTONDOWN)
+    {
+        info->is_left = TRUE;
+        info->update_kind = PointerUpdateKind_LeftButtonPressed;
+    }
+    else if (msg == WM_LBUTTONUP)
+    {
+        info->is_left = FALSE;
+        info->update_kind = PointerUpdateKind_LeftButtonReleased;
+    }
+    else if (msg == WM_RBUTTONDOWN)
+    {
+        info->is_right = TRUE;
+        info->update_kind = PointerUpdateKind_RightButtonPressed;
+    }
+    else if (msg == WM_RBUTTONUP)
+    {
+        info->is_right = FALSE;
+        info->update_kind = PointerUpdateKind_RightButtonReleased;
+    }
+    else if (msg == WM_MOUSEWHEEL)
+    {
+        info->wheel_delta = (INT32)(short)HIWORD( wparam );
+    }
+
+    info->is_in_contact = (info->is_left || info->is_right || info->is_middle);
+    GetClientRect( top, &rc );
+    info->is_in_window = (pt.x >= 0 && pt.y >= 0 && pt.x < rc.right && pt.y < rc.bottom);
+}
 
 /* Paint every child's DC as well: the X tree shows a child window at the same
  * geometry as the mapped top-level, and the visible surface may be that child. */
@@ -2447,16 +3955,106 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         xaml_wv2_on_window_ready( hwnd, sz.cx, sz.cy );
         return 0;
     }
-    if ((msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP) && global_xaml_window.content)
+    if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
+        msg == WM_MOUSEMOVE || msg == WM_MOUSEWHEEL || msg == WM_MOUSELEAVE || msg == WM_CAPTURECHANGED)
     {
         HWND top = GetAncestor( hwnd, GA_ROOT );
+        struct xaml_core_window *cw = as_xaml_core_window( global_xaml_window.core_window );
+        struct xaml_pointer_info info;
+        enum xaml_pointer_event_kind kind;
         RECT rc;
-        POINT pt = { (short)LOWORD( lparam ), (short)HIWORD( lparam ) };
-        if (top && top != hwnd)
-            MapWindowPoints( hwnd, top, &pt, 1 );
+        POINT pt = { 0, 0 };
+        BOOL btn_handled = FALSE;
+        BOOL tree_routed = FALSE;
+
+        if (!top) top = hwnd;
         GetClientRect( top, &rc );
-        if (rc.right > 0 && rc.bottom > 0 &&
-            uwp_handle_mouse_input( top, msg, pt.x, pt.y, rc.right, rc.bottom, global_xaml_window.content ))
+
+        if (msg == WM_CAPTURECHANGED)
+        {
+            if (cw && cw->has_capture && (HWND)lparam != hwnd)
+            {
+                cw->has_capture = FALSE;
+                memset( &info, 0, sizeof(info) );
+                info.x = (float)cw->last_pos.x;
+                info.y = (float)cw->last_pos.y;
+                info.pointer_id = 1;
+                info.is_in_window = cw->pointer_inside;
+                xaml_cw_fire_pointer_event( cw, XAML_PTR_CAPTURE_LOST, &info );
+                if (global_xaml_window.content && rc.right > 0 && rc.bottom > 0)
+                    uwp_route_pointer_event( top, XAML_PTR_CAPTURE_LOST, &info, rc.right, rc.bottom, global_xaml_window.content );
+            }
+            goto forward_msg;
+        }
+
+        if (msg == WM_MOUSELEAVE)
+        {
+            memset( &info, 0, sizeof(info) );
+            info.pointer_id = 1;
+            info.is_in_window = FALSE;
+            if (cw)
+            {
+                info.x = (float)cw->last_pos.x;
+                info.y = (float)cw->last_pos.y;
+                if (cw->pointer_inside)
+                {
+                    cw->pointer_inside = FALSE;
+                    xaml_cw_fire_pointer_event( cw, XAML_PTR_EXITED, &info );
+                }
+            }
+            if (global_xaml_window.content && rc.right > 0 && rc.bottom > 0)
+                uwp_route_pointer_event( top, XAML_PTR_EXITED, &info, rc.right, rc.bottom, global_xaml_window.content );
+            return 0;
+        }
+
+        xaml_fill_pointer_info( hwnd, top, msg, wparam, lparam, &info, &pt );
+        if (cw)
+        {
+            cw->last_pos = pt;
+            cw->has_pos = TRUE;
+            if (msg == WM_MOUSEMOVE && !cw->pointer_inside)
+            {
+                TRACKMOUSEEVENT tme;
+                cw->pointer_inside = TRUE;
+                tme.cbSize = sizeof(tme);
+                tme.dwFlags = TME_LEAVE;
+                tme.hwndTrack = hwnd;
+                tme.dwHoverTime = 0;
+                TrackMouseEvent( &tme );
+                xaml_cw_fire_pointer_event( cw, XAML_PTR_ENTERED, &info );
+            }
+        }
+
+        switch (msg)
+        {
+        case WM_LBUTTONDOWN:
+        case WM_RBUTTONDOWN:
+            kind = XAML_PTR_PRESSED;
+            if (cw) { SetCapture( hwnd ); cw->has_capture = TRUE; }
+            break;
+        case WM_LBUTTONUP:
+        case WM_RBUTTONUP:
+            kind = XAML_PTR_RELEASED;
+            if (cw && cw->has_capture) { ReleaseCapture(); cw->has_capture = FALSE; }
+            break;
+        case WM_MOUSEWHEEL:
+            kind = XAML_PTR_WHEEL;
+            break;
+        default:
+            kind = XAML_PTR_MOVED;
+            break;
+        }
+
+        xaml_cw_fire_pointer_event( cw, kind, &info );
+
+        if (global_xaml_window.content && rc.right > 0 && rc.bottom > 0)
+        {
+            tree_routed = uwp_route_pointer_event( top, kind, &info, rc.right, rc.bottom, global_xaml_window.content );
+            if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
+                btn_handled = uwp_handle_mouse_input( top, msg, pt.x, pt.y, rc.right, rc.bottom, global_xaml_window.content );
+        }
+
+        if (btn_handled || (tree_routed && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)))
         {
             InvalidateRect( top, NULL, FALSE );
             InvalidateRect( hwnd, NULL, FALSE );
@@ -2464,7 +4062,9 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             UpdateWindow( hwnd );
             return 0;
         }
+        return 0;
     }
+forward_msg:
     TRACE( "xaml corewindow msg %x\n", msg );
     if (xaml_corewindow_prev_proc == xaml_corewindow_wndproc || !xaml_corewindow_prev_proc)
         return DefWindowProcW( hwnd, msg, wparam, lparam );
@@ -2494,7 +4094,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
             interop->lpVtbl->Release( interop );
         }
     }
-    if (!hwnd) hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    if (!hwnd) hwnd = xaml_find_core_window();
     if (!hwnd) hwnd = GetActiveWindow();
     if (!hwnd) { in_present = FALSE; return S_FALSE; }
 
@@ -2506,11 +4106,17 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
      * class proc is the wrong layer (twinapi's proc never chains to it), so stay on the
      * window slot and re-assert it whenever we present. */
     {
-        if (!xaml_corewindow_subclassed)
+        struct xaml_core_window *cw = as_xaml_core_window( impl->core_window );
+        if (cw) cw->hwnd = hwnd;
+        if (xaml_corewindow_subclassed_hwnd != hwnd)
         {
-            xaml_corewindow_prev_proc = (WNDPROC)(void *)GetWindowLongPtrW( hwnd, GWLP_WNDPROC );
-            SetWindowLongPtrW( hwnd, GWLP_WNDPROC, (LONG_PTR)xaml_corewindow_wndproc );
-            xaml_corewindow_subclassed = TRUE;
+            WNDPROC cur = (WNDPROC)(void *)GetWindowLongPtrW( hwnd, GWLP_WNDPROC );
+            if (cur != xaml_corewindow_wndproc)
+            {
+                xaml_corewindow_prev_proc = cur;
+                SetWindowLongPtrW( hwnd, GWLP_WNDPROC, (LONG_PTR)xaml_corewindow_wndproc );
+            }
+            xaml_corewindow_subclassed_hwnd = hwnd;
         }
         /* Drive the class background brush too: WM_ERASEBKGND from the DefWindowProc
          * paint path is the one GDI operation the winex11 driver reliably flushes to
@@ -2546,7 +4152,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
      * CoreWindow child has no frame. Set both on the top-level once, on show. */
     {
         HWND top = GetAncestor( hwnd, GA_ROOT );
-        const WCHAR *title = xaml_package_display_name();
+        const WCHAR *title = xaml_explicit_title[0] ? xaml_explicit_title : xaml_package_display_name();
         if (!top) top = hwnd;
         if (title) SetWindowTextW( top, title );
         xaml_apply_window_icon( top );
@@ -2835,7 +4441,7 @@ HWND xaml_get_window_hwnd( void )
     }
     hw = FindWindowW( L"WinUIDesktopWin32WindowClass", NULL );
     if (hw) return hw;
-    hw = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    hw = xaml_find_core_window();
     if (hw)
     {
         HWND root = GetAncestor( hw, GA_ROOT );
@@ -2885,7 +4491,15 @@ static HRESULT WINAPI xaml_window_get_CoreWindow( IInspectable *iface, void *a2,
 
     if (!value) value = (ICoreWindow **)a3;
     TRACE( "iface %p, value %p\n", iface, value );
-    if (!impl->core_window) impl->core_window = get_current_core_window();
+    if (!impl->core_window)
+    {
+        ICoreWindow *cw = get_current_core_window();
+        if (cw)
+        {
+            impl->core_window = wrap_core_window( cw );
+            if (impl->core_window != cw) ICoreWindow_Release( cw );
+        }
+    }
     if (value)
     {
         *value = impl->core_window;
@@ -3028,7 +4642,7 @@ static HRESULT WINAPI xaml_window_Activate( IInspectable *iface )
             interop->lpVtbl->GetWindowHandle( interop, &hwnd );
             interop->lpVtbl->Release( interop );
         }
-        if (!hwnd) hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+        if (!hwnd) hwnd = xaml_find_core_window();
         if (!hwnd) hwnd = GetActiveWindow();
         if (hwnd)
         {
@@ -3293,9 +4907,26 @@ static HRESULT WINAPI ms_xaml_window_get_Title( void *iface, HSTRING *value )
     const WCHAR *name;
 
     if (!value) return E_POINTER;
+    if (xaml_explicit_title[0])
+        return WindowsCreateString( xaml_explicit_title, lstrlenW( xaml_explicit_title ), value );
     if ((name = xaml_package_display_name()))
         return WindowsCreateString( name, wcslen( name ), value );
     return WindowsCreateString( NULL, 0, value );
+}
+
+static HRESULT WINAPI ms_xaml_window_set_Title( void *iface, HSTRING value )
+{
+    const WCHAR *s = value ? WindowsGetStringRawBuffer( value, NULL ) : NULL;
+
+    if (s && *s)
+    {
+        HWND top = xaml_get_window_hwnd();
+        lstrcpynW( xaml_explicit_title, s, ARRAY_SIZE(xaml_explicit_title) );
+        if (top) SetWindowTextW( top, xaml_explicit_title );
+    }
+    else
+        xaml_explicit_title[0] = 0;
+    return S_OK;
 }
 
 static HRESULT WINAPI ms_xaml_window_get_ExtendsContentIntoTitleBar( void *iface, boolean *value )
@@ -3322,7 +4953,7 @@ static const void *ms_xaml_window_vtbl[] =
     xaml_window_get_Dispatcher,           /* 12: get_Dispatcher */
     ms_xaml_window_get_DispatcherQueue,   /* 13: get_DispatcherQueue */
     ms_xaml_window_get_Title,             /* 14: get_Title */
-    xaml_window_setter_noop,              /* 15: set_Title */
+    ms_xaml_window_set_Title,             /* 15: set_Title */
     ms_xaml_window_get_ExtendsContentIntoTitleBar, /* 16: get_ExtendsContentIntoTitleBar */
     xaml_window_setter_noop,              /* 17: set_ExtendsContentIntoTitleBar */
     xaml_window_add_Activated,            /* 18: add_Activated */
@@ -3385,7 +5016,7 @@ static HRESULT WINAPI ms_xaml_window2_get_AppWindow( void *iface, void **value )
     }
 
     if (!hwnd && impl->target_hwnd && IsWindow( impl->target_hwnd )) hwnd = impl->target_hwnd;
-    if (!hwnd) hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    if (!hwnd) hwnd = xaml_find_core_window();
     if (!hwnd) hwnd = FindWindowW( L"Window", NULL );
     if (!hwnd) hwnd = GetActiveWindow();
     if (!hwnd) hwnd = GetForegroundWindow();
@@ -3492,7 +5123,7 @@ static HRESULT WINAPI xaml_window_native_GetWindowHandle( IWindowNative *iface, 
         return S_OK;
     }
 
-    *hwnd = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    *hwnd = xaml_find_core_window();
     if (!*hwnd) *hwnd = FindWindowW( L"Window", NULL );
     if (!*hwnd) *hwnd = GetActiveWindow();
     if (!*hwnd) *hwnd = GetForegroundWindow();

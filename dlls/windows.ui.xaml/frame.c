@@ -3645,7 +3645,7 @@ static HWND wv2_get_controller_parent( void )
     }
     hw = xaml_get_window_hwnd();
     if (hw && IsWindow( hw )) return hw;
-    hw = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    hw = xaml_find_core_window();
     if (hw) return hw;
     hw = FindWindowW( NULL, L"WhatsApp" );
     if (hw) return hw;

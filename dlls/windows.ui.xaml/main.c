@@ -1313,3 +1313,15 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (*factory) return S_OK;
     return E_NOINTERFACE;
 }
+
+BOOL WINAPI DllMain( HINSTANCE inst, DWORD reason, LPVOID reserved )
+{
+    if (reason == DLL_PROCESS_ATTACH)
+    {
+        /* Resolve + seed the package identity (DisplayName -> ApplicationShortName
+         * registry value) before the first CoreWindow is created, so windows.ui
+         * names the window class (and WM_CLASS) with the package short name. */
+        xaml_package_warm();
+    }
+    return TRUE;
+}

@@ -24,6 +24,7 @@
 #include <excpt.h>
 #include "wine/exception.h"
 #include "private.h"
+#include "appmodel.h"
 #include "weakreference.h"
 #include "winreg.h"
 #include "wincodec.h"
@@ -371,17 +372,14 @@ static const BYTE *g_pri_data = NULL;
 static DWORD g_pri_size = 0;
 static INIT_ONCE g_pri_once = INIT_ONCE_STATIC_INIT;
 
-static BOOL WINAPI init_pri_once( INIT_ONCE *once, void *param, void **ctx )
+static const BYTE *g_winui_pri_data = NULL;
+static DWORD g_winui_pri_size = 0;
+static BOOL g_winui_pri_probed = FALSE;
+
+static void pri_map_file_to( const WCHAR *pri_path, const BYTE **out_data, DWORD *out_size )
 {
-    WCHAR pri_path[MAX_PATH];
-    WCHAR *slash;
     HANDLE hFile, hMap;
     DWORD sz;
-
-    GetModuleFileNameW( NULL, pri_path, MAX_PATH );
-    slash = wcsrchr( pri_path, '\\' );
-    if (slash) *(slash + 1) = 0;
-    lstrcatW( pri_path, L"resources.pri" );
 
     hFile = CreateFileW( pri_path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL );
     if (hFile != INVALID_HANDLE_VALUE)
@@ -395,9 +393,9 @@ static BOOL WINAPI init_pri_once( INIT_ONCE *once, void *param, void **ctx )
                 const BYTE *mapped = MapViewOfFile( hMap, FILE_MAP_READ, 0, 0, 0 );
                 if (mapped && !memcmp( mapped, "mrm_pri2", 8 ))
                 {
-                    g_pri_data = mapped;
-                    g_pri_size = sz;
-                    TRACE( "Mapped resources.pri (%lu bytes) at %p\n", (unsigned long)sz, mapped );
+                    *out_data = mapped;
+                    *out_size = sz;
+                    TRACE( "Mapped %s (%lu bytes) at %p\n", debugstr_w(pri_path), (unsigned long)sz, mapped );
                 }
                 else if (mapped)
                 {
@@ -408,6 +406,18 @@ static BOOL WINAPI init_pri_once( INIT_ONCE *once, void *param, void **ctx )
         }
         CloseHandle( hFile );
     }
+}
+
+static BOOL WINAPI init_pri_once( INIT_ONCE *once, void *param, void **ctx )
+{
+    WCHAR pri_path[MAX_PATH];
+    WCHAR *slash;
+
+    GetModuleFileNameW( NULL, pri_path, MAX_PATH );
+    slash = wcsrchr( pri_path, '\\' );
+    if (slash) *(slash + 1) = 0;
+    lstrcatW( pri_path, L"resources.pri" );
+    pri_map_file_to( pri_path, &g_pri_data, &g_pri_size );
     return TRUE;
 }
 
@@ -416,6 +426,29 @@ static const BYTE *pri_get_data( DWORD *out_size )
     InitOnceExecuteOnce( &g_pri_once, init_pri_once, NULL, NULL );
     if (out_size) *out_size = g_pri_size;
     return g_pri_data;
+}
+
+static const BYTE *winui_pri_get_data( DWORD *out_size )
+{
+    if (!g_winui_pri_probed)
+    {
+        HMODULE hmod = GetModuleHandleW( L"Microsoft.UI.Xaml.dll" );
+        if (hmod)
+        {
+            WCHAR pri_path[MAX_PATH];
+            WCHAR *slash;
+            g_winui_pri_probed = TRUE;
+            if (GetModuleFileNameW( hmod, pri_path, MAX_PATH ))
+            {
+                slash = wcsrchr( pri_path, '\\' );
+                if (slash) *(slash + 1) = 0;
+                lstrcatW( pri_path, L"resources.pri" );
+                pri_map_file_to( pri_path, &g_winui_pri_data, &g_winui_pri_size );
+            }
+        }
+    }
+    if (out_size) *out_size = g_winui_pri_size;
+    return g_winui_pri_data;
 }
 
 static BOOL pri_get_section( const BYTE *pri, DWORD pri_sz, int sec_idx, const BYTE **out_sec, DWORD *out_sz )
@@ -600,10 +633,10 @@ static BOOL pri_find_item_by_path( const char *want_path, const char *want_suffi
                                   (DWORD)matched_item, out_ptr, out_sz );
 }
 
-static void uwp_pri_enum_xbfs( BOOL (*cb)(const char *path, const BYTE *xbf, DWORD sz, void *ctx), void *ctx )
+static void uwp_pri_enum_xbfs_in_blob( const BYTE *pri, DWORD pri_sz,
+                                       BOOL (*cb)(const char *path, const BYTE *xbf, DWORD sz, void *ctx), void *ctx )
 {
-    DWORD pri_sz = 0, hs_sz = 0, rm_sz = 0;
-    const BYTE *pri = pri_get_data( &pri_sz );
+    DWORD hs_sz = 0, rm_sz = 0;
     const BYTE *hs = NULL, *rm = NULL;
     DWORD num_nodes, num_scopes, num_items;
     DWORD node_off, scope_off, item_off, pool_off, map_off, cand_off;
@@ -663,54 +696,85 @@ struct pri_xbf_entry
     DWORD size;
 };
 
-static struct pri_xbf_entry *g_pri_xbfs = NULL;
-static DWORD g_pri_xbf_cnt = 0;
-static DWORD g_pri_xbf_cap = 0;
+struct pri_xbf_catalog
+{
+    struct pri_xbf_entry *entries;
+    DWORD cnt;
+    DWORD cap;
+};
+
+static struct pri_xbf_catalog g_pri_cat = {0};
 static INIT_ONCE g_pri_xbf_cat_once = INIT_ONCE_STATIC_INIT;
+
+static struct pri_xbf_catalog g_winui_pri_cat = {0};
+static BOOL g_winui_pri_cat_done = FALSE;
 
 static BOOL pri_xbf_collect_cb( const char *path, const BYTE *xbf, DWORD sz, void *ctx )
 {
+    struct pri_xbf_catalog *cat = ctx;
     const char *slash;
-    if (g_pri_xbf_cnt >= g_pri_xbf_cap)
+    if (cat->cnt >= cat->cap)
     {
-        DWORD ncap = g_pri_xbf_cap ? g_pri_xbf_cap * 2 : 64;
-        struct pri_xbf_entry *ne = realloc( g_pri_xbfs, ncap * sizeof(*ne) );
+        DWORD ncap = cat->cap ? cat->cap * 2 : 64;
+        struct pri_xbf_entry *ne = realloc( cat->entries, ncap * sizeof(*ne) );
         if (!ne) return FALSE;
-        g_pri_xbfs = ne;
-        g_pri_xbf_cap = ncap;
+        cat->entries = ne;
+        cat->cap = ncap;
     }
-    snprintf( g_pri_xbfs[g_pri_xbf_cnt].path, sizeof(g_pri_xbfs[0].path), "%s", path );
-    slash = strrchr( g_pri_xbfs[g_pri_xbf_cnt].path, '/' );
-    g_pri_xbfs[g_pri_xbf_cnt].base = slash ? slash + 1 : g_pri_xbfs[g_pri_xbf_cnt].path;
-    g_pri_xbfs[g_pri_xbf_cnt].data = xbf;
-    g_pri_xbfs[g_pri_xbf_cnt].size = sz;
-    g_pri_xbf_cnt++;
+    snprintf( cat->entries[cat->cnt].path, sizeof(cat->entries[0].path), "%s", path );
+    slash = strrchr( cat->entries[cat->cnt].path, '/' );
+    cat->entries[cat->cnt].base = slash ? slash + 1 : cat->entries[cat->cnt].path;
+    cat->entries[cat->cnt].data = xbf;
+    cat->entries[cat->cnt].size = sz;
+    cat->cnt++;
     return TRUE;
 }
 
 static BOOL WINAPI init_pri_xbf_cat_once( INIT_ONCE *once, void *param, void **ctx )
 {
-    uwp_pri_enum_xbfs( pri_xbf_collect_cb, NULL );
-    TRACE( "PRI XBF catalog indexed %lu .xbf entries\n", (unsigned long)g_pri_xbf_cnt );
+    DWORD pri_sz = 0;
+    const BYTE *pri = pri_get_data( &pri_sz );
+    uwp_pri_enum_xbfs_in_blob( pri, pri_sz, pri_xbf_collect_cb, &g_pri_cat );
+    TRACE( "PRI XBF catalog indexed %lu .xbf entries\n", (unsigned long)g_pri_cat.cnt );
     return TRUE;
 }
 
-BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz )
+static void ensure_winui_pri_cat( void )
+{
+    if (!g_winui_pri_cat_done)
+    {
+        DWORD sz = 0;
+        const BYTE *pri = winui_pri_get_data( &sz );
+        if (pri)
+        {
+            g_winui_pri_cat_done = TRUE;
+            uwp_pri_enum_xbfs_in_blob( pri, sz, pri_xbf_collect_cb, &g_winui_pri_cat );
+            TRACE( "WinUI PRI XBF catalog indexed %lu .xbf entries\n", (unsigned long)g_winui_pri_cat.cnt );
+        }
+    }
+}
+
+static BOOL pri_cat_find_xbf( struct pri_xbf_catalog *cat, const char *base_xbf_dir,
+                              const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz,
+                              char *out_resolved, size_t out_resolved_sz )
 {
     char full_path[256] = "Files/";
+    char rel_path[256] = {0};
     char suffix[256] = {0};
     const WCHAR *p = uri_or_name;
     size_t i, len;
     DWORD k;
     int fallback = -1;
+    BOOL is_appx = FALSE;
 
-    if (!uri_or_name || !out_ptr || !out_sz) return FALSE;
+    if (!cat || !uri_or_name || !out_ptr || !out_sz) return FALSE;
     *out_ptr = NULL;
     *out_sz = 0;
+    if (out_resolved && out_resolved_sz) out_resolved[0] = 0;
 
-    if (!wcsncmp( p, L"ms-appx:///", 11 )) p += 11;
-    else if (!wcsncmp( p, L"ms-appx://", 10 )) p += 10;
-    while (*p == '/' || *p == '\\') p++;
+    if (!wcsncmp( p, L"ms-appx:///", 11 )) { p += 11; is_appx = TRUE; }
+    else if (!wcsncmp( p, L"ms-appx://", 10 )) { p += 10; is_appx = TRUE; }
+    while (*p == '/' || *p == '\\') { p++; is_appx = TRUE; }
 
     len = wcslen( p );
     for (i = 0; i < len && i + 7 < sizeof(full_path) - 5; i++)
@@ -724,34 +788,74 @@ BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *ou
     else if (len < 4 || strcasecmp( full_path + len - 4, ".xbf" ))
         strcat( full_path, ".xbf" );
 
+    if (!is_appx && base_xbf_dir && base_xbf_dir[0])
+    {
+        snprintf( rel_path, sizeof(rel_path), "%s%s", base_xbf_dir, full_path + 6 );
+        for (k = 0; k < cat->cnt; k++)
+        {
+            if (!strcasecmp( cat->entries[k].path, rel_path ))
+            {
+                *out_ptr = cat->entries[k].data;
+                *out_sz = cat->entries[k].size;
+                if (out_resolved && out_resolved_sz)
+                    snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[k].path );
+                TRACE( "Resolved PRI XBF rel '%s' -> %p (%lu bytes)\n",
+                       cat->entries[k].path, *out_ptr, (unsigned long)*out_sz );
+                return TRUE;
+            }
+        }
+    }
+
     {
         const char *slash = strrchr( full_path, '/' );
         snprintf( suffix, sizeof(suffix), "%s", slash ? slash + 1 : full_path );
     }
 
-    InitOnceExecuteOnce( &g_pri_xbf_cat_once, init_pri_xbf_cat_once, NULL, NULL );
-    for (k = 0; k < g_pri_xbf_cnt; k++)
+    for (k = 0; k < cat->cnt; k++)
     {
-        if (!strcasecmp( g_pri_xbfs[k].path, full_path ))
+        if (!strcasecmp( cat->entries[k].path, full_path ))
         {
-            *out_ptr = g_pri_xbfs[k].data;
-            *out_sz = g_pri_xbfs[k].size;
+            *out_ptr = cat->entries[k].data;
+            *out_sz = cat->entries[k].size;
+            if (out_resolved && out_resolved_sz)
+                snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[k].path );
             TRACE( "Resolved PRI XBF '%s' (suffix '%s') -> %p (%lu bytes)\n",
                    full_path, suffix, *out_ptr, (unsigned long)*out_sz );
             return TRUE;
         }
-        if (fallback < 0 && !strcasecmp( g_pri_xbfs[k].base, suffix ))
+        if (fallback < 0 && !strcasecmp( cat->entries[k].base, suffix ))
             fallback = (int)k;
     }
     if (fallback >= 0)
     {
-        *out_ptr = g_pri_xbfs[fallback].data;
-        *out_sz = g_pri_xbfs[fallback].size;
+        *out_ptr = cat->entries[fallback].data;
+        *out_sz = cat->entries[fallback].size;
+        if (out_resolved && out_resolved_sz)
+            snprintf( out_resolved, out_resolved_sz, "%s", cat->entries[fallback].path );
         TRACE( "Resolved PRI XBF '%s' (suffix '%s') -> %p (%lu bytes)\n",
-               g_pri_xbfs[fallback].path, suffix, *out_ptr, (unsigned long)*out_sz );
+               cat->entries[fallback].path, suffix, *out_ptr, (unsigned long)*out_sz );
         return TRUE;
     }
     return FALSE;
+}
+
+static BOOL uwp_pri_find_xbf_rel( const char *base_xbf_dir, const WCHAR *uri_or_name,
+                                  const BYTE **out_ptr, DWORD *out_sz,
+                                  char *out_resolved, size_t out_resolved_sz )
+{
+    InitOnceExecuteOnce( &g_pri_xbf_cat_once, init_pri_xbf_cat_once, NULL, NULL );
+    if (pri_cat_find_xbf( &g_pri_cat, base_xbf_dir, uri_or_name, out_ptr, out_sz, out_resolved, out_resolved_sz ))
+        return TRUE;
+    ensure_winui_pri_cat();
+    if (g_winui_pri_cat.cnt > 0 &&
+        pri_cat_find_xbf( &g_winui_pri_cat, base_xbf_dir, uri_or_name, out_ptr, out_sz, out_resolved, out_resolved_sz ))
+        return TRUE;
+    return FALSE;
+}
+
+BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz )
+{
+    return uwp_pri_find_xbf_rel( NULL, uri_or_name, out_ptr, out_sz, NULL, 0 );
 }
 
 BOOL uwp_pri_lookup_string( const WCHAR *res_name, WCHAR *out_buf, int out_chars )
@@ -927,166 +1031,676 @@ static BOOL uwp_unbox_int32( void *obj, INT32 *out_val )
 }
 
 /* ============================================================================
- * 3. ResourceDictionary Key-Value Store (App.xbf & Component Resources)
+ * 3. ResourceDictionary Key-Value Store (Scoped Chain & XBF Resource Parsing)
  * ============================================================================ */
+
+struct uwp_element;
+struct uwp_rd_bucket;
+
+static struct uwp_element *uwp_elem_from_any( void *ptr );
+static void uwp_set_brush_element_argb( IInspectable *br, UINT32 argb );
+static void uwp_parse_xbf_into_rd( const BYTE *xbf, DWORD xbf_sz, const char *base_xbf_path,
+                                   struct uwp_rd_bucket *target_rd );
+
+enum uwp_rd_kind
+{
+    UWP_RD_OBJ = 0,
+    UWP_RD_BRUSH,
+    UWP_RD_COLOR,
+    UWP_RD_DOUBLE,
+    UWP_RD_THICKNESS,
+    UWP_RD_STRING,
+    UWP_RD_ALIAS,
+    UWP_RD_STYLE,
+};
+
+struct uwp_style_setter
+{
+    WORD pid;
+    int vt;
+    BOOL is_res_ref;
+    double num;
+    double vec4[4];
+    WCHAR str[128];
+};
 
 struct uwp_rd_entry
 {
     WCHAR key[96];
+    enum uwp_rd_kind kind;
     IInspectable *value;
+    UINT32 argb;
+    BOOL has_argb;
+    double opacity;
+    double dval;
+    double vec4[4];
+    WCHAR str_val[128];
+    struct uwp_style_setter *setters;
+    int setter_cnt;
+    int setter_cap;
 };
 
 struct uwp_rd_bucket
 {
     void *rd_key;
+    struct uwp_element *owner_el;
     struct uwp_rd_entry *entries;
     int count;
     int cap;
+    struct uwp_rd_bucket **merged;
+    int merged_cnt;
+    int merged_cap;
+    struct uwp_rd_bucket *theme_dark;
+    struct uwp_rd_bucket *theme_default;
+    struct uwp_rd_bucket *theme_light;
+    struct uwp_rd_bucket *theme_hc;
     BOOL app_seeded;
+    struct uwp_rd_bucket *next;
 };
 
-static struct uwp_rd_bucket g_rd_buckets[32];
-static int g_rd_bucket_cnt = 0;
+static struct uwp_rd_bucket *g_rd_buckets_head = NULL;
+static int g_app_rd_sentinel = 0;
+static int g_theme_rd_sentinel = 0;
+static BOOL g_app_res_loaded = FALSE;
+static BOOL g_app_res_loading = FALSE;
+static char g_loaded_res_xbfs[128][256];
+static int g_loaded_res_xbf_cnt = 0;
+
+static COLORREF argb_to_colorref( UINT32 argb )
+{
+    return RGB( (argb >> 16) & 0xff, (argb >> 8) & 0xff, argb & 0xff );
+}
+
+static UINT32 apply_opacity_to_argb( UINT32 argb, double opacity )
+{
+    BYTE a;
+    if (opacity >= 0.999) return argb;
+    if (opacity <= 0.0) return argb & 0x00ffffffu;
+    a = (BYTE)((double)((argb >> 24) & 0xff) * opacity + 0.5);
+    return (argb & 0x00ffffffu) | ((UINT32)a << 24);
+}
+
+static COLORREF blend_argb_over( UINT32 fg_argb, COLORREF bg_cr )
+{
+    BYTE a = (BYTE)((fg_argb >> 24) & 0xff);
+    BYTE r = (BYTE)((fg_argb >> 16) & 0xff);
+    BYTE g = (BYTE)((fg_argb >> 8) & 0xff);
+    BYTE b = (BYTE)(fg_argb & 0xff);
+    BYTE br, bg, bb;
+    if (a == 255) return RGB( r, g, b );
+    if (a == 0) return bg_cr;
+    br = GetRValue( bg_cr );
+    bg = GetGValue( bg_cr );
+    bb = GetBValue( bg_cr );
+    return RGB( (BYTE)((r * a + br * (255 - a)) / 255),
+                (BYTE)((g * a + bg * (255 - a)) / 255),
+                (BYTE)((b * a + bb * (255 - a)) / 255) );
+}
+
+static int hex_nib( WCHAR c )
+{
+    if (c >= L'0' && c <= L'9') return c - L'0';
+    if (c >= L'a' && c <= L'f') return 10 + (c - L'a');
+    if (c >= L'A' && c <= L'F') return 10 + (c - L'A');
+    return -1;
+}
+
+static BOOL uwp_parse_color_string( const WCHAR *s, UINT32 *out_argb )
+{
+    size_t len;
+    if (!s || !s[0] || !out_argb) return FALSE;
+    while (*s == L' ' || *s == L'\t') s++;
+    if (s[0] == L'#')
+    {
+        UINT32 v = 0;
+        size_t i;
+        s++;
+        len = wcslen( s );
+        while (len > 0 && (s[len - 1] == L' ' || s[len - 1] == L'\t')) len--;
+        if (len != 3 && len != 4 && len != 6 && len != 8) return FALSE;
+        for (i = 0; i < len; i++)
+        {
+            int n = hex_nib( s[i] );
+            if (n < 0) return FALSE;
+            v = (v << 4) | (UINT32)n;
+        }
+        if (len == 3)
+        {
+            UINT32 r = (v >> 8) & 0xf, g = (v >> 4) & 0xf, b = v & 0xf;
+            *out_argb = 0xff000000u | (r * 0x11 << 16) | (g * 0x11 << 8) | (b * 0x11);
+        }
+        else if (len == 4)
+        {
+            UINT32 a = (v >> 12) & 0xf, r = (v >> 8) & 0xf, g = (v >> 4) & 0xf, b = v & 0xf;
+            *out_argb = (a * 0x11 << 24) | (r * 0x11 << 16) | (g * 0x11 << 8) | (b * 0x11);
+        }
+        else if (len == 6)
+            *out_argb = 0xff000000u | v;
+        else
+            *out_argb = v;
+        return TRUE;
+    }
+    if (!wcsicmp( s, L"Transparent" )) { *out_argb = 0x00ffffffu; return TRUE; }
+    if (!wcsicmp( s, L"Black" ))       { *out_argb = 0xff000000u; return TRUE; }
+    if (!wcsicmp( s, L"White" ))       { *out_argb = 0xffffffffu; return TRUE; }
+    if (!wcsicmp( s, L"Red" ))         { *out_argb = 0xffff0000u; return TRUE; }
+    if (!wcsicmp( s, L"Green" ))       { *out_argb = 0xff008000u; return TRUE; }
+    if (!wcsicmp( s, L"Blue" ))        { *out_argb = 0xff0000ffu; return TRUE; }
+    if (!wcsicmp( s, L"Gray" ))        { *out_argb = 0xff808080u; return TRUE; }
+    if (!wcsicmp( s, L"DarkGray" ))    { *out_argb = 0xffa9a9a9u; return TRUE; }
+    if (!wcsicmp( s, L"LightGray" ))   { *out_argb = 0xffd3d3d3u; return TRUE; }
+    if (!wcsicmp( s, L"Yellow" ))      { *out_argb = 0xffffff00u; return TRUE; }
+    if (!wcsicmp( s, L"Orange" ))      { *out_argb = 0xffffa500u; return TRUE; }
+    return FALSE;
+}
+
+static BOOL uwp_extract_resource_key( const WCHAR *in, WCHAR *out, size_t out_chars )
+{
+    const WCHAR *p = in;
+    size_t len;
+    BOOL is_markup = FALSE;
+    if (!in || !out || !out_chars) return FALSE;
+    out[0] = 0;
+    while (*p == L' ' || *p == L'\t') p++;
+    if (*p == L'{')
+    {
+        p++;
+        while (*p == L' ' || *p == L'\t') p++;
+        if (!wcsnicmp( p, L"StaticResource", 14 ) && (p[14] == L' ' || p[14] == L'\t'))
+        {
+            p += 14;
+            is_markup = TRUE;
+        }
+        else if (!wcsnicmp( p, L"ThemeResource", 13 ) && (p[13] == L' ' || p[13] == L'\t'))
+        {
+            p += 13;
+            is_markup = TRUE;
+        }
+        while (*p == L' ' || *p == L'\t') p++;
+        if (!wcsnicmp( p, L"ResourceKey=", 12 )) p += 12;
+        lstrcpynW( out, p, out_chars );
+        len = wcslen( out );
+        while (len > 0 && (out[len - 1] == L'}' || out[len - 1] == L' ' || out[len - 1] == L'\t'))
+            out[--len] = 0;
+        return is_markup;
+    }
+    lstrcpynW( out, p, out_chars );
+    len = wcslen( out );
+    while (len > 0 && (out[len - 1] == L' ' || out[len - 1] == L'\t'))
+        out[--len] = 0;
+    return FALSE;
+}
 
 static struct uwp_rd_bucket *get_rd_bucket( void *rd_key, BOOL create )
 {
-    int i;
-    for (i = 0; i < g_rd_bucket_cnt; i++)
-        if (g_rd_buckets[i].rd_key == rd_key) return &g_rd_buckets[i];
-    if (!create || g_rd_bucket_cnt >= 32) return NULL;
-    g_rd_buckets[g_rd_bucket_cnt].rd_key = rd_key;
-    return &g_rd_buckets[g_rd_bucket_cnt++];
+    struct uwp_rd_bucket *b;
+    for (b = g_rd_buckets_head; b; b = b->next)
+        if (b->rd_key == rd_key) return b;
+    if (!create || !rd_key) return NULL;
+    b = calloc( 1, sizeof(*b) );
+    if (!b) return NULL;
+    b->rd_key = rd_key;
+    b->next = g_rd_buckets_head;
+    g_rd_buckets_head = b;
+    return b;
 }
 
-void uwp_rd_insert( void *rd_key, const WCHAR *key, IInspectable *val )
+static struct uwp_rd_entry *rd_bucket_upsert( struct uwp_rd_bucket *b, const WCHAR *key )
 {
-    struct uwp_rd_bucket *b;
     int i;
-    if (!rd_key || !key || !key[0] || !val) return;
-    b = get_rd_bucket( rd_key, TRUE );
-    if (!b) return;
+    if (!b || !key || !key[0]) return NULL;
     for (i = 0; i < b->count; i++)
     {
         if (!wcscmp( b->entries[i].key, key ))
-        {
-            if (b->entries[i].value) IInspectable_Release( b->entries[i].value );
-            b->entries[i].value = val;
-            IInspectable_AddRef( val );
-            return;
-        }
+            return &b->entries[i];
     }
     if (b->count >= b->cap)
     {
         int ncap = b->cap ? b->cap * 2 : 32;
         struct uwp_rd_entry *ne = realloc( b->entries, ncap * sizeof(*ne) );
-        if (!ne) return;
+        if (!ne) return NULL;
         b->entries = ne;
         b->cap = ncap;
     }
+    memset( &b->entries[b->count], 0, sizeof(b->entries[0]) );
     lstrcpynW( b->entries[b->count].key, key, 96 );
-    b->entries[b->count].value = val;
-    IInspectable_AddRef( val );
-    b->count++;
+    b->entries[b->count].opacity = 1.0;
+    return &b->entries[b->count++];
 }
 
-static void uwp_seed_app_xbf_into_rd( void *rd_key )
+static void uwp_rd_link_merged( struct uwp_rd_bucket *parent, struct uwp_rd_bucket *child )
+{
+    int i;
+    if (!parent || !child || parent == child) return;
+    for (i = 0; i < parent->merged_cnt; i++)
+        if (parent->merged[i] == child) return;
+    if (parent->merged_cnt >= parent->merged_cap)
+    {
+        int ncap = parent->merged_cap ? parent->merged_cap * 2 : 8;
+        struct uwp_rd_bucket **nm = realloc( parent->merged, ncap * sizeof(*nm) );
+        if (!nm) return;
+        parent->merged = nm;
+        parent->merged_cap = ncap;
+    }
+    parent->merged[parent->merged_cnt++] = child;
+}
+
+static void uwp_rd_link_theme( struct uwp_rd_bucket *parent, const WCHAR *theme_name, struct uwp_rd_bucket *child )
+{
+    if (!parent || !theme_name || !child || parent == child) return;
+    if (!wcsicmp( theme_name, L"Dark" )) parent->theme_dark = child;
+    else if (!wcsicmp( theme_name, L"Default" )) parent->theme_default = child;
+    else if (!wcsicmp( theme_name, L"Light" )) parent->theme_light = child;
+    else if (!wcsicmp( theme_name, L"HighContrast" )) parent->theme_hc = child;
+}
+
+void uwp_rd_insert( void *rd_key, const WCHAR *key, IInspectable *val )
+{
+    struct uwp_rd_bucket *b;
+    struct uwp_rd_entry *e;
+    if (!rd_key || !key || !key[0] || !val) return;
+    b = get_rd_bucket( rd_key, TRUE );
+    e = rd_bucket_upsert( b, key );
+    if (!e) return;
+    if (e->value) IInspectable_Release( e->value );
+    e->value = val;
+    IInspectable_AddRef( val );
+    e->kind = UWP_RD_OBJ;
+}
+
+static BOOL uwp_mark_res_xbf_loaded( const char *resolved_path )
+{
+    int i;
+    if (!resolved_path || !resolved_path[0]) return FALSE;
+    for (i = 0; i < g_loaded_res_xbf_cnt; i++)
+    {
+        if (!strcasecmp( g_loaded_res_xbfs[i], resolved_path ))
+            return FALSE;
+    }
+    if (g_loaded_res_xbf_cnt < (int)ARRAY_SIZE(g_loaded_res_xbfs))
+    {
+        snprintf( g_loaded_res_xbfs[g_loaded_res_xbf_cnt++], 256, "%s", resolved_path );
+    }
+    return TRUE;
+}
+
+static void uwp_load_res_xbf_into_bucket( const char *base_dir, const WCHAR *uri_or_path, struct uwp_rd_bucket *target )
 {
     const BYTE *xbf = NULL;
     DWORD xbf_sz = 0;
-    struct uwp_rd_bucket *b = get_rd_bucket( rd_key, TRUE );
-    if (!b || b->app_seeded) return;
-    b->app_seeded = TRUE;
+    char resolved[256] = {0};
 
-    /* Parse App.xbf for top-level double/int/string/object resources */
-    if (uwp_pri_find_xbf( L"App.xbf", &xbf, &xbf_sz ) && xbf && xbf_sz > 0x50)
+    if (!uri_or_path || !uri_or_path[0] || !target) return;
+    if (!uwp_pri_find_xbf_rel( base_dir, uri_or_path, &xbf, &xbf_sz, resolved, sizeof(resolved) ))
+        return;
+    if (!uwp_mark_res_xbf_loaded( resolved[0] ? resolved : "xbf" ))
+        return;
+    TRACE( "xbf-res: loading %s (%lu bytes) into rd %p\n", resolved, (unsigned long)xbf_sz, target );
+    uwp_parse_xbf_into_rd( xbf, xbf_sz, resolved, target );
+}
+
+/* Registry-driven per-app Resources_xbf + App.xbf + WinUI theme defaults (no hardcoded app families) */
+static void uwp_ensure_app_resources_loaded( void )
+{
+    struct uwp_rd_bucket *app_b, *theme_b;
+    WCHAR pkg_full[256] = {0};
+    UINT32 len = ARRAY_SIZE(pkg_full);
+    HMODULE reg_mod;
+
+    if (g_app_res_loaded || g_app_res_loading) return;
+    g_app_res_loading = TRUE;
+
+    app_b = get_rd_bucket( &g_app_rd_sentinel, TRUE );
+    theme_b = get_rd_bucket( &g_theme_rd_sentinel, TRUE );
+
+    /* 1. Check Software\Classes\AppModel\Repository\Packages\<FullName>\Resources_xbf */
+    if (GetCurrentPackageFullName( &len, pkg_full ) == ERROR_SUCCESS && pkg_full[0])
     {
-        DWORD meta_sz = *(const DWORD *)(xbf + 4);
-        UINT64 str_off = *(const UINT64 *)(xbf + 20);
-        const BYTE *f_str = xbf + 12 + (size_t)str_off;
-        if (12 + meta_sz < xbf_sz && f_str + 4 <= xbf + 12 + meta_sz)
+        reg_mod = GetModuleHandleW( L"kernelbase.dll" );
+        if (!reg_mod) reg_mod = LoadLibraryW( L"advapi32.dll" );
+        if (reg_mod)
         {
-            DWORD str_cnt = *(const DWORD *)f_str;
-            if (str_cnt > 0 && str_cnt < 4096)
+            typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
+            typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
+            typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
+            p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
+            p_RegQueryValueExW_t p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
+            p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
+            if (p_open && p_query && p_close)
             {
-                WCHAR **strs = calloc( str_cnt, sizeof(WCHAR *) );
-                const BYTE *cur = f_str + 4;
-                DWORD i;
-                for (i = 0; i < str_cnt && cur + 4 <= xbf + 12 + meta_sz; i++)
+                static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+                WCHAR sub[512];
+                size_t r;
+                swprintf( sub, ARRAY_SIZE(sub), L"Software\\Classes\\AppModel\\Repository\\Packages\\%s", pkg_full );
+                for (r = 0; r < ARRAY_SIZE(roots); r++)
                 {
-                    DWORD slen = *(const DWORD *)cur;
-                    cur += 4;
-                    if (cur + slen * 2 <= xbf + 12 + meta_sz)
+                    HKEY hk = NULL;
+                    WCHAR valbuf[1024] = {0};
+                    DWORD type = 0, cb = sizeof(valbuf) - sizeof(WCHAR);
+                    if (p_open( roots[r], sub, 0, KEY_READ, &hk ) != ERROR_SUCCESS) continue;
+                    if (p_query( hk, L"Resources_xbf", NULL, &type, (BYTE *)valbuf, &cb ) == ERROR_SUCCESS)
                     {
-                        strs[i] = calloc( slen + 1, sizeof(WCHAR) );
-                        if (strs[i]) memcpy( strs[i], cur, slen * 2 );
-                        cur += slen * 2 + 2;
-                    }
-                }
-                /* Scan node stream for 15 34 80 03 <f32> 21 0a 05 <sid:u16> (x:Double in ResourceDictionary) */
-                {
-                    const BYTE *nd = xbf + 12 + meta_sz;
-                    const BYTE *nd_end = xbf + xbf_sz;
-                    const BYTE *p = nd;
-                    while (p + 12 <= nd_end)
-                    {
-                        if (p[0] == 0x15 && p[1] == 0x34 && p[2] == 0x80 && p[3] == 0x03 &&
-                            p[8] == 0x21 && p[9] == 0x0a && p[10] == 0x05)
+                        if (type == REG_MULTI_SZ)
                         {
-                            float fval = *(const float *)(p + 4);
-                            WORD sid = *(const WORD *)(p + 11);
-                            if (sid < str_cnt && strs[sid])
+                            const WCHAR *it = valbuf;
+                            while (*it)
                             {
-                                IInspectable *boxed = box_double_value( (double)fval );
-                                if (boxed)
-                                {
-                                    TRACE( "App.xbf resource[%s] = %f\n", debugstr_w(strs[sid]), fval );
-                                    uwp_rd_insert( rd_key, strs[sid], boxed );
-                                    IInspectable_Release( boxed );
-                                }
+                                TRACE( "xbf-res: registry Resources_xbf[%s] -> %s\n", debugstr_w(pkg_full), debugstr_w(it) );
+                                uwp_load_res_xbf_into_bucket( NULL, it, app_b );
+                                it += wcslen( it ) + 1;
                             }
-                            p += 13;
-                            continue;
                         }
-                        p++;
+                        else if ((type == REG_SZ || type == REG_EXPAND_SZ) && valbuf[0])
+                        {
+                            WCHAR *tok = valbuf;
+                            while (*tok)
+                            {
+                                WCHAR *sep = wcspbrk( tok, L";," );
+                                if (sep) *sep = 0;
+                                while (*tok == L' ') tok++;
+                                if (*tok)
+                                {
+                                    TRACE( "xbf-res: registry Resources_xbf[%s] -> %s\n", debugstr_w(pkg_full), debugstr_w(tok) );
+                                    uwp_load_res_xbf_into_bucket( NULL, tok, app_b );
+                                }
+                                if (!sep) break;
+                                tok = sep + 1;
+                            }
+                        }
                     }
+                    p_close( hk );
                 }
-                for (i = 0; i < str_cnt; i++) free( strs[i] );
-                free( strs );
             }
         }
     }
+
+    /* 2. Parse App.xbf (and any MergedDictionaries / ThemeDictionaries it references) */
+    if (app_b)
+        uwp_load_res_xbf_into_bucket( NULL, L"App.xbf", app_b );
+
+    /* 3. Load WinUI / system theme XBF into theme defaults bucket */
+    if (theme_b)
+    {
+        uwp_load_res_xbf_into_bucket( NULL, L"Microsoft.UI.Xaml/Themes/21h1_themeresources.xbf", theme_b );
+        if (theme_b->count == 0 && !theme_b->theme_default && !theme_b->theme_dark)
+            uwp_load_res_xbf_into_bucket( NULL, L"Microsoft.UI.Xaml/Themes/rs5_themeresources.xbf", theme_b );
+    }
+
+    g_app_res_loaded = TRUE;
+    g_app_res_loading = FALSE;
+}
+
+static BOOL uwp_lookup_in_bucket( struct uwp_rd_bucket *b, const WCHAR *key, int depth,
+                                  struct uwp_rd_entry **out_entry, struct uwp_rd_bucket **out_bucket )
+{
+    int i;
+    if (!b || !key || !key[0] || depth > 12) return FALSE;
+
+    for (i = 0; i < b->count; i++)
+    {
+        if (!wcscmp( b->entries[i].key, key ))
+        {
+            *out_entry = &b->entries[i];
+            if (out_bucket) *out_bucket = b;
+            return TRUE;
+        }
+    }
+    if (b->theme_dark && uwp_lookup_in_bucket( b->theme_dark, key, depth + 1, out_entry, out_bucket ))
+        return TRUE;
+    if (b->theme_default && uwp_lookup_in_bucket( b->theme_default, key, depth + 1, out_entry, out_bucket ))
+        return TRUE;
+    for (i = b->merged_cnt - 1; i >= 0; i--)
+    {
+        if (uwp_lookup_in_bucket( b->merged[i], key, depth + 1, out_entry, out_bucket ))
+            return TRUE;
+    }
+    if (b->theme_light && uwp_lookup_in_bucket( b->theme_light, key, depth + 1, out_entry, out_bucket ))
+        return TRUE;
+    return FALSE;
+}
+
+static UINT32 uwp_get_system_accent_argb( void )
+{
+    static UINT32 cached_accent = 0;
+    static BOOL accent_init = FALSE;
+    if (!accent_init)
+    {
+        HMODULE reg_mod = GetModuleHandleW( L"kernelbase.dll" );
+        accent_init = TRUE;
+        cached_accent = 0xff0078d4u; /* Windows Fluent default blue */
+        if (!reg_mod) reg_mod = LoadLibraryW( L"advapi32.dll" );
+        if (reg_mod)
+        {
+            typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
+            typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
+            typedef LONG (WINAPI *p_RegCloseKey_t)( HKEY );
+            p_RegOpenKeyExW_t p_open = (p_RegOpenKeyExW_t)GetProcAddress( reg_mod, "RegOpenKeyExW" );
+            p_RegQueryValueExW_t p_query = (p_RegQueryValueExW_t)GetProcAddress( reg_mod, "RegQueryValueExW" );
+            p_RegCloseKey_t p_close = (p_RegCloseKey_t)GetProcAddress( reg_mod, "RegCloseKey" );
+            if (p_open && p_query && p_close)
+            {
+                HKEY hk = NULL;
+                DWORD abgr = 0, type = 0, cb = sizeof(abgr);
+                if (p_open( HKEY_CURRENT_USER, L"Software\\Microsoft\\Windows\\DWM", 0, KEY_READ, &hk ) == ERROR_SUCCESS)
+                {
+                    if (p_query( hk, L"AccentColor", NULL, &type, (BYTE *)&abgr, &cb ) == ERROR_SUCCESS &&
+                        type == REG_DWORD && (abgr & 0x00ffffffu))
+                    {
+                        BYTE r = (BYTE)(abgr & 0xff);
+                        BYTE g = (BYTE)((abgr >> 8) & 0xff);
+                        BYTE b = (BYTE)((abgr >> 16) & 0xff);
+                        cached_accent = 0xff000000u | ((UINT32)r << 16) | ((UINT32)g << 8) | b;
+                    }
+                    p_close( hk );
+                }
+            }
+        }
+    }
+    return cached_accent;
+}
+
+/* Documented system/Fluent dark theme fallback ONLY with TRACE when not found in element/page/app/WinUI dicts */
+static BOOL uwp_theme_default_fallback( const WCHAR *key, UINT32 *out_argb )
+{
+    static const struct { const WCHAR *name; UINT32 argb; } defaults[] =
+    {
+        { L"ApplicationPageBackgroundThemeBrush",       0xff1f1f1fu },
+        { L"SystemControlPageBackgroundChromeLowBrush", 0xff1f1f1fu },
+        { L"SolidBackgroundFillColorBaseBrush",         0xff202020u },
+        { L"SystemAltHighColor",                        0xff000000u },
+        { L"SystemAltMediumHighColor",                  0xcc000000u },
+        { L"SystemAltMediumColor",                      0x99000000u },
+        { L"SystemAltMediumLowColor",                   0x66000000u },
+        { L"SystemAltLowColor",                         0x33000000u },
+        { L"SystemBaseHighColor",                       0xffffffffu },
+        { L"SystemBaseMediumHighColor",                 0xccffffffu },
+        { L"SystemBaseMediumColor",                     0x99ffffffu },
+        { L"SystemBaseMediumLowColor",                  0x66ffffffu },
+        { L"SystemBaseLowColor",                        0x33ffffffu },
+        { L"SystemChromeWhiteColor",                    0xffffffffu },
+        { L"SystemChromeBlackLowColor",                 0xff171717u },
+        { L"SystemChromeMediumLowColor",                0xff2b2b2bu },
+        { L"SystemListLowColor",                        0x19ffffffu },
+        { L"SystemColorWindowColor",                    0xff202020u },
+        { L"SystemColorWindowTextColor",                0xffffffffu },
+        { L"SystemColorButtonFaceColor",                0xff323232u },
+        { L"DefaultTextForegroundThemeBrush",           0xffffffffu },
+        { L"TextFillColorPrimaryBrush",                 0xffffffffu },
+        { L"TextFillColorSecondaryBrush",               0xffc5c5c5u },
+        { L"TextFillColorDisabledBrush",                0x5dffffffu },
+        { L"TextOnAccentFillColorPrimaryBrush",         0xffffffffu },
+        { L"ControlFillColorDefaultBrush",              0x18ffffffu },
+        { L"ControlFillColorSecondaryBrush",            0x22ffffffu },
+        { L"ControlStrokeColorDefaultBrush",            0x18ffffffu },
+        { L"CardBackgroundFillColorDefaultBrush",       0x0dffffffu },
+        { L"SystemAccentColorLight1",                   0xff2b88d8u },
+        { L"SystemAccentColorLight2",                   0xff4cc2ffu },
+        { L"SystemAccentColorLight3",                   0xff99ebffu },
+        { L"SystemAccentColorDark1",                    0xff005a9eu },
+        { L"SystemAccentColorDark2",                    0xff004578u },
+        { L"SystemAccentColorDark3",                    0xff002642u },
+        { L"AccentTextThemeResource",                   0xff4cc2ffu },
+        { L"SystemControlForegroundAccentBrush",        0xff4cc2ffu },
+        { L"AccentTextFillColorPrimaryBrush",           0xff4cc2ffu },
+    };
+    size_t i;
+    if (!key || !key[0] || !out_argb) return FALSE;
+    if (!wcscmp( key, L"SystemAccentColor" ) ||
+        !wcscmp( key, L"AccentFillColorDefaultBrush" ) ||
+        !wcscmp( key, L"SystemControlHighlightAccentBrush" ) ||
+        !wcscmp( key, L"AccentBrush" ))
+    {
+        *out_argb = uwp_get_system_accent_argb();
+        TRACE( "xbf-res: theme default fallback key=%s -> #%08x\n", debugstr_w(key), *out_argb );
+        return TRUE;
+    }
+    for (i = 0; i < ARRAY_SIZE(defaults); i++)
+    {
+        if (!wcscmp( key, defaults[i].name ))
+        {
+            *out_argb = defaults[i].argb;
+            TRACE( "xbf-res: theme default fallback key=%s -> #%08x\n", debugstr_w(key), *out_argb );
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL uwp_rd_find_entry( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
+                               const WCHAR *raw_key, int depth,
+                               struct uwp_rd_entry **out_entry, struct uwp_rd_bucket **out_bucket );
+
+static BOOL uwp_resolve_brush_or_color( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
+                                        const WCHAR *key_or_expr, int depth, UINT32 *out_argb )
+{
+    WCHAR key[128] = {0};
+    struct uwp_rd_entry *e = NULL;
+    struct uwp_rd_bucket *found_b = NULL;
+
+    if (!key_or_expr || !key_or_expr[0] || !out_argb || depth > 12) return FALSE;
+    if (uwp_parse_color_string( key_or_expr, out_argb )) return TRUE;
+
+    uwp_extract_resource_key( key_or_expr, key, ARRAY_SIZE(key) );
+    if (!key[0]) return FALSE;
+    if (uwp_parse_color_string( key, out_argb )) return TRUE;
+
+    uwp_ensure_app_resources_loaded();
+    if (uwp_rd_find_entry( start_bucket, scope_el, key, depth, &e, &found_b ) && e)
+    {
+        if (e->kind == UWP_RD_COLOR)
+        {
+            *out_argb = e->argb;
+            return TRUE;
+        }
+        if (e->kind == UWP_RD_BRUSH)
+        {
+            if (e->has_argb)
+            {
+                *out_argb = apply_opacity_to_argb( e->argb, e->opacity );
+                return TRUE;
+            }
+            if (e->str_val[0])
+            {
+                UINT32 inner = 0;
+                if (uwp_resolve_brush_or_color( found_b ? found_b : start_bucket, scope_el, e->str_val, depth + 1, &inner ))
+                {
+                    *out_argb = apply_opacity_to_argb( inner, e->opacity );
+                    return TRUE;
+                }
+            }
+        }
+        if (e->kind == UWP_RD_STRING && e->str_val[0])
+            return uwp_resolve_brush_or_color( found_b ? found_b : start_bucket, scope_el, e->str_val, depth + 1, out_argb );
+    }
+
+    return uwp_theme_default_fallback( key, out_argb );
+}
+
+static IInspectable *uwp_rd_materialize_entry( struct uwp_rd_bucket *b, struct uwp_rd_entry *e )
+{
+    if (!e) return NULL;
+    if (e->value) return e->value;
+    if (e->kind == UWP_RD_DOUBLE)
+        e->value = box_double_value( e->dval );
+    else if (e->kind == UWP_RD_STRING)
+        e->value = box_string_value( e->str_val );
+    else if (e->kind == UWP_RD_BRUSH)
+    {
+        IInspectable *br = NULL;
+        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Media.SolidColorBrush", (void **)&br )) && br)
+        {
+            UINT32 argb = 0;
+            if (uwp_resolve_brush_or_color( b, b ? b->owner_el : NULL, e->key, 0, &argb ))
+            {
+                e->argb = argb;
+                e->has_argb = TRUE;
+                uwp_set_brush_element_argb( br, argb );
+            }
+            e->value = br;
+        }
+    }
+    else if (e->kind == UWP_RD_STYLE)
+    {
+        IInspectable *st = NULL;
+        if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Style", (void **)&st )) && st)
+            e->value = st;
+    }
+    return e->value;
 }
 
 HRESULT uwp_rd_lookup( void *rd_key, void *key_obj, void **out_val )
 {
-    WCHAR key_str[128] = {0};
-    struct uwp_rd_bucket *b;
-    int i;
+    WCHAR raw_str[128] = {0}, key_str[128] = {0};
+    struct uwp_rd_bucket *b, *found_b = NULL;
+    struct uwp_rd_entry *e = NULL;
 
     if (!out_val) return E_POINTER;
     *out_val = NULL;
     if (!key_obj) return 0x8000000b; /* E_BOUNDS */
 
-    if (!uwp_unbox_string( key_obj, key_str, ARRAY_SIZE(key_str) ))
+    if (!uwp_unbox_string( key_obj, raw_str, ARRAY_SIZE(raw_str) ))
     {
-        /* Also check if key_obj is a raw HSTRING */
         const WCHAR *raw = WindowsGetStringRawBuffer( (HSTRING)key_obj, NULL );
-        if (raw) lstrcpynW( key_str, raw, ARRAY_SIZE(key_str) );
+        if (raw) lstrcpynW( raw_str, raw, ARRAY_SIZE(raw_str) );
     }
+    uwp_extract_resource_key( raw_str, key_str, ARRAY_SIZE(key_str) );
 
     TRACE( "uwp_rd_lookup rd=%p key=%s\n", rd_key, debugstr_w(key_str) );
     if (!key_str[0]) return 0x8000000b;
 
-    uwp_seed_app_xbf_into_rd( rd_key );
+    uwp_ensure_app_resources_loaded();
     b = get_rd_bucket( rd_key, FALSE );
-    if (b)
+    if (uwp_rd_find_entry( b, b ? b->owner_el : NULL, key_str, 0, &e, &found_b ) && e)
     {
-        for (i = 0; i < b->count; i++)
+        IInspectable *val = uwp_rd_materialize_entry( found_b ? found_b : b, e );
+        if (val)
         {
-            if (!wcscmp( b->entries[i].key, key_str ))
+            *out_val = val;
+            IInspectable_AddRef( val );
+            return S_OK;
+        }
+    }
+
+    /* Documented fallback for system theme brush keys queried via Application.Resources */
+    {
+        UINT32 argb = 0;
+        if (uwp_theme_default_fallback( key_str, &argb ))
+        {
+            IInspectable *br = NULL;
+            if (SUCCEEDED(element_create_typed( L"Windows.UI.Xaml.Media.SolidColorBrush", (void **)&br )) && br)
             {
-                *out_val = b->entries[i].value;
-                if (*out_val) IInspectable_AddRef( (IInspectable *)*out_val );
+                struct uwp_rd_bucket *target = b ? b : get_rd_bucket( rd_key, TRUE );
+                struct uwp_rd_entry *ne = rd_bucket_upsert( target, key_str );
+                if (ne)
+                {
+                    ne->kind = UWP_RD_BRUSH;
+                    ne->argb = argb;
+                    ne->has_argb = TRUE;
+                    ne->value = br;
+                    IInspectable_AddRef( br );
+                }
+                uwp_set_brush_element_argb( br, argb );
+                *out_val = br;
                 return S_OK;
             }
         }
@@ -1165,6 +1779,8 @@ enum uwp_elem_kind
     UWP_KIND_DEFERRED,
     UWP_KIND_IMAGE,
     UWP_KIND_PROGRESS_RING,
+    UWP_KIND_RESOURCE_DICT,
+    UWP_KIND_COLOR,
 };
 
 struct uwp_dp_entry
@@ -1217,6 +1833,7 @@ struct uwp_element
     IInspectable IColumnDefinition_iface;
     IInspectable IStyle_iface;
     IInspectable IBrush_iface;
+    IInspectable ISolidColorBrush_iface;
     IInspectable IFlyout_iface;
     IInspectable IStateTrigger_iface;
     IInspectable IObservableVector_iface;
@@ -1261,6 +1878,7 @@ struct uwp_element
     int is_checked;    /* 0=Unchecked, 1=Checked, 2=Indeterminate */
     BOOL is_pressed;
     BOOL is_hovered;
+    BOOL is_hit_test_visible;
     double opacity;
     double width, height;
     double min_width, max_width;
@@ -1272,9 +1890,32 @@ struct uwp_element
     int v_align;       /* 0=Top, 1=Center, 2=Bottom, 3=Stretch */
     double font_size;
     COLORREF bg_color;
+    UINT32 bg_argb;
+    BYTE bg_alpha;
     BOOL has_bg;
     COLORREF fg_color;
+    UINT32 fg_argb;
+    BYTE fg_alpha;
     BOOL has_fg;
+    COLORREF border_color;
+    UINT32 border_argb;
+    BYTE border_alpha;
+    BOOL has_border;
+    double border_thick_l, border_thick_t, border_thick_r, border_thick_b;
+    double corner_radius;
+
+    /* SolidColorBrush / Color fields */
+    UINT32 brush_argb;
+    BOOL has_brush_argb;
+    double brush_opacity;
+    WCHAR brush_color_ref[96];
+
+    /* Style / Setter fields */
+    WCHAR style_based_on[96];
+    struct uwp_style_setter *style_setters;
+    int style_setter_cnt;
+    int style_setter_cap;
+    struct uwp_rd_bucket *rd_bucket;
 
     /* Computed screen rectangle */
     RECT bounds;
@@ -1291,6 +1932,15 @@ struct uwp_element
 
     IInspectable *dc_handlers[8];
     int dc_cnt;
+
+    struct xaml_event_registry ptr_pressed_reg;
+    struct xaml_event_registry ptr_moved_reg;
+    struct xaml_event_registry ptr_released_reg;
+    struct xaml_event_registry ptr_entered_reg;
+    struct xaml_event_registry ptr_exited_reg;
+    struct xaml_event_registry ptr_capture_lost_reg;
+    struct xaml_event_registry ptr_canceled_reg;
+    struct xaml_event_registry ptr_wheel_reg;
 
     struct uwp_dp_entry dp_store[24];
     int dp_cnt;
@@ -1333,6 +1983,9 @@ struct uwp_element
  * App.xbf style/setter/visualstate churn, silently dropping the Page root. */
 static struct uwp_element *g_all_uwp_elems_head = NULL;
 static int g_all_uwp_elem_cnt = 0;
+static BOOL g_layout_dirty = TRUE;
+static struct uwp_element *g_captured_elem = NULL;
+static struct uwp_element *g_hovered_elem = NULL;
 /* Last PAGE-kind element created (set by uwp_element_create). Navigate uses it
  * as fallback when the RCW page pointer cannot be resolved to an element. */
 static struct uwp_element *g_last_created_page = NULL;
@@ -1343,6 +1996,131 @@ static struct uwp_element *g_navigated_page_el = NULL;
 static void uwp_invalidate_window( void );
 static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *want );
 static struct uwp_element *uwp_elem_from_any( void *ptr );
+
+static void uwp_set_brush_element_argb( IInspectable *br, UINT32 argb )
+{
+    struct uwp_element *el = uwp_elem_from_any( br );
+    if (el)
+    {
+        el->brush_argb = argb;
+        el->has_brush_argb = TRUE;
+        el->brush_opacity = (double)((argb >> 24) & 0xff) / 255.0;
+    }
+}
+
+static struct uwp_rd_bucket *uwp_rd_bucket_for_el( struct uwp_element *el, BOOL create )
+{
+    struct uwp_rd_bucket *b;
+    if (!el) return NULL;
+    if (el->rd_bucket) return el->rd_bucket;
+    if (el->resources_rd)
+    {
+        b = get_rd_bucket( el->resources_rd, create );
+        if (b) { b->owner_el = el; el->rd_bucket = b; }
+        return b;
+    }
+    if (el->kind == UWP_KIND_RESOURCE_DICT)
+    {
+        b = get_rd_bucket( &el->IInspectable_iface, create );
+        if (b) { b->owner_el = el; el->rd_bucket = b; }
+        return b;
+    }
+    if (!create) return NULL;
+    xaml_resource_dictionary_create_for_uwp( (void **)&el->resources_rd );
+    if (!el->resources_rd) return NULL;
+    b = get_rd_bucket( el->resources_rd, TRUE );
+    if (b) { b->owner_el = el; el->rd_bucket = b; }
+    return b;
+}
+
+static BOOL uwp_rd_find_entry( struct uwp_rd_bucket *start_bucket, struct uwp_element *scope_el,
+                               const WCHAR *raw_key, int depth,
+                               struct uwp_rd_entry **out_entry, struct uwp_rd_bucket **out_bucket )
+{
+    WCHAR key[128] = {0};
+    struct uwp_rd_entry *e = NULL;
+    struct uwp_rd_bucket *found_b = NULL;
+    struct uwp_rd_bucket *visited[32];
+    int vis_cnt = 0;
+    struct uwp_element *cur;
+
+    if (!raw_key || !raw_key[0] || !out_entry || depth > 14) return FALSE;
+    *out_entry = NULL;
+    if (out_bucket) *out_bucket = NULL;
+
+    uwp_extract_resource_key( raw_key, key, ARRAY_SIZE(key) );
+    if (!key[0]) return FALSE;
+
+    if (start_bucket)
+    {
+        if (vis_cnt < 32) visited[vis_cnt++] = start_bucket;
+        if (uwp_lookup_in_bucket( start_bucket, key, 0, &e, &found_b ))
+            goto found;
+    }
+
+    /* Walk element -> parent -> ... -> page/component scope */
+    cur = scope_el ? scope_el : (start_bucket ? start_bucket->owner_el : NULL);
+    while (cur)
+    {
+        struct uwp_rd_bucket *cb = uwp_rd_bucket_for_el( cur, FALSE );
+        if (cb)
+        {
+            int v;
+            BOOL seen = FALSE;
+            for (v = 0; v < vis_cnt; v++) if (visited[v] == cb) { seen = TRUE; break; }
+            if (!seen)
+            {
+                if (vis_cnt < 32) visited[vis_cnt++] = cb;
+                if (uwp_lookup_in_bucket( cb, key, 0, &e, &found_b ))
+                    goto found;
+            }
+        }
+        if (cur->parent) cur = cur->parent;
+        else if (cur->owner_component && cur->owner_component != cur) cur = cur->owner_component;
+        else break;
+    }
+    if (scope_el && scope_el->owner_component)
+    {
+        struct uwp_rd_bucket *ob = uwp_rd_bucket_for_el( scope_el->owner_component, FALSE );
+        if (ob)
+        {
+            int v;
+            BOOL seen = FALSE;
+            for (v = 0; v < vis_cnt; v++) if (visited[v] == ob) { seen = TRUE; break; }
+            if (!seen && uwp_lookup_in_bucket( ob, key, 0, &e, &found_b ))
+                goto found;
+        }
+    }
+
+    /* App-level Resources (App.xbf + registry Resources_xbf + merged/theme) wins over theme defaults */
+    {
+        struct uwp_rd_bucket *app_b = get_rd_bucket( &g_app_rd_sentinel, FALSE );
+        if (app_b && uwp_lookup_in_bucket( app_b, key, 0, &e, &found_b ))
+            goto found;
+    }
+
+    /* Theme defaults (WinUI themeresources.xbf Dark/Default) */
+    {
+        struct uwp_rd_bucket *theme_b = get_rd_bucket( &g_theme_rd_sentinel, FALSE );
+        if (theme_b && uwp_lookup_in_bucket( theme_b, key, 0, &e, &found_b ))
+            goto found;
+    }
+
+    return FALSE;
+
+found:
+    if (e && e->kind == UWP_RD_ALIAS && e->str_val[0])
+    {
+        if (uwp_rd_find_entry( start_bucket, scope_el, e->str_val, depth + 1, out_entry, out_bucket ))
+            return TRUE;
+        if (found_b && found_b != start_bucket &&
+            uwp_rd_find_entry( found_b, found_b->owner_el, e->str_val, depth + 1, out_entry, out_bucket ))
+            return TRUE;
+    }
+    *out_entry = e;
+    if (out_bucket) *out_bucket = found_b;
+    return TRUE;
+}
 static HRESULT WINAPI uwp_do_GetValue( void *iface, void *dp, IInspectable **out );
 static HRESULT WINAPI uwp_do_SetValue( void *iface, void *dp, IInspectable *val );
 static HRESULT WINAPI uwp_do2_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token );
@@ -1972,7 +2750,7 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
 
 static void uwp_invalidate_window( void )
 {
-    HWND top = FindWindowW( L"Windows.UI.Core.CoreWindow", NULL );
+    HWND top = xaml_find_core_window();
     if (top)
     {
         HWND root = GetAncestor( top, GA_ROOT );
@@ -2254,9 +3032,10 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
              IsEqualGUID( iid, &IID_IVisualStateGroup_UWP ) ||
              IsEqualGUID( iid, &IID_IVisualState_UWP ))
         *out = &impl->IStyle_iface;
-    else if (IsEqualGUID( iid, &IID_IBrush_UWP ) ||
-             IsEqualGUID( iid, &IID_ISolidColorBrush_UWP ))
+    else if (IsEqualGUID( iid, &IID_IBrush_UWP ))
         *out = &impl->IBrush_iface;
+    else if (IsEqualGUID( iid, &IID_ISolidColorBrush_UWP ))
+        *out = &impl->ISolidColorBrush_iface;
     else if (IsEqualGUID( iid, &IID_IFlyoutBase_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuFlyout_UWP ) ||
              IsEqualGUID( iid, &IID_IMenuFlyoutItem_UWP ) ||
@@ -2705,6 +3484,62 @@ static HRESULT WINAPI uwp_ui_event_add( void *iface, void *handler, EventRegistr
     return S_OK;
 }
 
+static HRESULT WINAPI uwp_ui_get_IsHitTestVisible( void *iface, boolean *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = (impl && impl->is_hit_test_visible) ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ui_put_IsHitTestVisible( void *iface, boolean val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->is_hit_test_visible = val ? TRUE : FALSE;
+    return S_OK;
+}
+
+#define UWP_UI_PTR_EVENT( name, field ) \
+static HRESULT WINAPI uwp_ui_add_##name( void *iface, void *handler, EventRegistrationToken *tok ) \
+{ \
+    struct uwp_element *impl = uwp_elem_from_any( iface ); \
+    if (!impl) { if (tok) tok->value = 0; return E_INVALIDARG; } \
+    return xaml_event_registry_add( &impl->field, handler, tok ); \
+} \
+static HRESULT WINAPI uwp_ui_remove_##name( void *iface, EventRegistrationToken tok ) \
+{ \
+    struct uwp_element *impl = uwp_elem_from_any( iface ); \
+    if (!impl) return E_INVALIDARG; \
+    return xaml_event_registry_remove( &impl->field, tok ); \
+}
+
+UWP_UI_PTR_EVENT( PointerPressed, ptr_pressed_reg )
+UWP_UI_PTR_EVENT( PointerMoved, ptr_moved_reg )
+UWP_UI_PTR_EVENT( PointerReleased, ptr_released_reg )
+UWP_UI_PTR_EVENT( PointerEntered, ptr_entered_reg )
+UWP_UI_PTR_EVENT( PointerExited, ptr_exited_reg )
+UWP_UI_PTR_EVENT( PointerCaptureLost, ptr_capture_lost_reg )
+UWP_UI_PTR_EVENT( PointerCanceled, ptr_canceled_reg )
+UWP_UI_PTR_EVENT( PointerWheelChanged, ptr_wheel_reg )
+
+static HRESULT WINAPI uwp_ui_CapturePointer( void *iface, void *pointer, boolean *ret )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) g_captured_elem = impl;
+    if (ret) *ret = impl != NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ui_ReleasePointerCapture( void *iface, void *pointer )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl && g_captured_elem == impl) g_captured_elem = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ui_ReleasePointerCaptures( void *iface )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl && g_captured_elem == impl) g_captured_elem = NULL;
+    return S_OK;
+}
+
 /* --- IFrameworkElement --- */
 static void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
 static void uwp_fire_loaded_tree( struct uwp_element *el );
@@ -2717,6 +3552,11 @@ static HRESULT WINAPI uwp_fe_get_Resources( void *iface, void **out )
     if (!impl) return S_OK;
     if (!impl->resources_rd)
         xaml_resource_dictionary_create_for_uwp( (void **)&impl->resources_rd );
+    if (impl->resources_rd && !impl->rd_bucket)
+    {
+        impl->rd_bucket = get_rd_bucket( impl->resources_rd, TRUE );
+        if (impl->rd_bucket) impl->rd_bucket->owner_el = impl;
+    }
     *out = impl->resources_rd;
     if (*out) IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
@@ -2728,7 +3568,13 @@ static HRESULT WINAPI uwp_fe_put_Resources( void *iface, void *val )
     if (!impl) return S_OK;
     if (impl->resources_rd) IInspectable_Release( impl->resources_rd );
     impl->resources_rd = (IInspectable *)val;
-    if (impl->resources_rd) IInspectable_AddRef( impl->resources_rd );
+    impl->rd_bucket = NULL;
+    if (impl->resources_rd)
+    {
+        IInspectable_AddRef( impl->resources_rd );
+        impl->rd_bucket = get_rd_bucket( impl->resources_rd, TRUE );
+        if (impl->rd_bucket) impl->rd_bucket->owner_el = impl;
+    }
     return S_OK;
 }
 
@@ -2774,7 +3620,7 @@ static HRESULT WINAPI uwp_fe_get_Width( void *iface, double *val )
 static HRESULT WINAPI uwp_fe_put_Width( void *iface, double val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->width = val;
+    if (impl) { impl->width = val; g_layout_dirty = TRUE; }
     return S_OK;
 }
 static HRESULT WINAPI uwp_fe_get_Height( void *iface, double *val )
@@ -2786,7 +3632,7 @@ static HRESULT WINAPI uwp_fe_get_Height( void *iface, double *val )
 static HRESULT WINAPI uwp_fe_put_Height( void *iface, double val )
 {
     struct uwp_element *impl = uwp_elem_from_any( iface );
-    if (impl) impl->height = val;
+    if (impl) { impl->height = val; g_layout_dirty = TRUE; }
     return S_OK;
 }
 static HRESULT WINAPI uwp_fe_get_MinWidth( void *iface, double *val )
@@ -2862,6 +3708,7 @@ static HRESULT WINAPI uwp_fe_put_Margin( void *iface, struct uwp_thickness *t )
         impl->margin_t = t->Top;
         impl->margin_r = t->Right;
         impl->margin_b = t->Bottom;
+        g_layout_dirty = TRUE;
     }
     return S_OK;
 }
@@ -3244,6 +4091,7 @@ static HRESULT WINAPI uwp_cc_put_Content( void *iface, void *val )
     else if ((child_el = uwp_elem_from_any( val )) != NULL)
     {
         child_el->parent = impl;
+        g_layout_dirty = TRUE;
         TRACE( "uwp_cc_put_Content element on %s (%s) -> %s (%s)\n",
                debugstr_w(impl->class_name), debugstr_w(impl->name),
                debugstr_w(child_el->class_name), debugstr_w(child_el->name) );
@@ -3513,6 +4361,7 @@ static HRESULT WINAPI uwp_vec_InsertAt( void *iface, unsigned int idx, void *ite
     v->count++;
     if ((child_el = uwp_elem_from_any( item )) != NULL && v->owner)
         child_el->parent = v->owner;
+    g_layout_dirty = TRUE;
     return S_OK;
 }
 static HRESULT WINAPI uwp_vec_RemoveAt( void *iface, unsigned int idx )
@@ -3522,6 +4371,7 @@ static HRESULT WINAPI uwp_vec_RemoveAt( void *iface, unsigned int idx )
     if (v->items[idx]) IInspectable_Release( v->items[idx] );
     memmove( &v->items[idx], &v->items[idx + 1], (v->count - idx - 1) * sizeof(void *) );
     v->count--;
+    g_layout_dirty = TRUE;
     return S_OK;
 }
 static HRESULT WINAPI uwp_vec_Append( void *iface, void *item )
@@ -3893,10 +4743,31 @@ static const void *uwp_ui_vtbl[128] =
     [5] = uwp_sub_GetTrustLevel,
     [6 ... 127] = uwp_generic_noop,
     [6] = uwp_ui_get_DesiredSize,
+    [19] = uwp_ui_get_IsHitTestVisible,
+    [20] = uwp_ui_put_IsHitTestVisible,
     [21] = uwp_ui_get_Visibility,
     [22] = uwp_ui_put_Visibility,
     [23] = uwp_ui_get_RenderSize,
     [41 ... 85] = uwp_ui_event_add,
+    [57] = uwp_ui_add_PointerPressed,
+    [58] = uwp_ui_remove_PointerPressed,
+    [59] = uwp_ui_add_PointerMoved,
+    [60] = uwp_ui_remove_PointerMoved,
+    [61] = uwp_ui_add_PointerReleased,
+    [62] = uwp_ui_remove_PointerReleased,
+    [63] = uwp_ui_add_PointerEntered,
+    [64] = uwp_ui_remove_PointerEntered,
+    [65] = uwp_ui_add_PointerExited,
+    [66] = uwp_ui_remove_PointerExited,
+    [67] = uwp_ui_add_PointerCaptureLost,
+    [68] = uwp_ui_remove_PointerCaptureLost,
+    [69] = uwp_ui_add_PointerCanceled,
+    [70] = uwp_ui_remove_PointerCanceled,
+    [71] = uwp_ui_add_PointerWheelChanged,
+    [72] = uwp_ui_remove_PointerWheelChanged,
+    [93] = uwp_ui_CapturePointer,
+    [94] = uwp_ui_ReleasePointerCapture,
+    [95] = uwp_ui_ReleasePointerCaptures,
 };
 
 static HRESULT WINAPI uwp_fe_get_FlowDirection( void *iface, int *dir )
@@ -4182,12 +5053,74 @@ static enum uwp_elem_kind classify_uwp_class( const WCHAR *cls )
         wcsstr( cls, L"Operators" )) return UWP_KIND_USER_CONTROL;
     if (wcsstr( cls, L"ContentControl" ) || wcsstr( cls, L"NavigationView" ) ||
         wcsstr( cls, L"Pivot" ) || wcsstr( cls, L"Viewbox" )) return UWP_KIND_CONTENT_CONTROL;
+    if (wcsstr( cls, L"ResourceDictionary" ) || !wcscmp( cls, L"Microsoft.UI.Xaml.Controls.XamlControlsResources" ))
+        return UWP_KIND_RESOURCE_DICT;
+    if (!wcscmp( cls, L"Windows.UI.Color" )) return UWP_KIND_COLOR;
     if (wcsstr( cls, L"Style" ) || wcsstr( cls, L"Setter" ) || wcsstr( cls, L"VisualState" )) return UWP_KIND_STYLE;
     if (wcsstr( cls, L"Brush" )) return UWP_KIND_BRUSH;
     if (wcsstr( cls, L"Flyout" )) return UWP_KIND_FLYOUT;
     if (wcsstr( cls, L"Popup" )) return UWP_KIND_POPUP;
     return UWP_KIND_GENERIC;
 }
+
+static HRESULT WINAPI uwp_brush_get_Opacity( void *iface, double *val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (val) *val = impl ? impl->brush_opacity : 1.0;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_brush_put_Opacity( void *iface, double val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl) impl->brush_opacity = val;
+    return S_OK;
+}
+static const void *uwp_brush_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_brush_get_Opacity,
+    [7] = uwp_brush_put_Opacity,
+    [8 ... 15] = uwp_generic_noop,
+};
+
+static HRESULT WINAPI uwp_scb_get_Color( void *iface, Color *out )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    UINT32 argb = (impl && impl->has_brush_argb) ? impl->brush_argb : 0;
+    if (!out) return E_POINTER;
+    out->A = (BYTE)((argb >> 24) & 0xff);
+    out->R = (BYTE)((argb >> 16) & 0xff);
+    out->G = (BYTE)((argb >> 8) & 0xff);
+    out->B = (BYTE)(argb & 0xff);
+    return S_OK;
+}
+static HRESULT WINAPI uwp_scb_put_Color( void *iface, Color val )
+{
+    struct uwp_element *impl = uwp_elem_from_any( iface );
+    if (impl)
+    {
+        impl->brush_argb = ((UINT32)val.A << 24) | ((UINT32)val.R << 16) | ((UINT32)val.G << 8) | val.B;
+        impl->has_brush_argb = TRUE;
+    }
+    return S_OK;
+}
+static const void *uwp_scb_vtbl[16] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6] = uwp_scb_get_Color,
+    [7] = uwp_scb_put_Color,
+    [8 ... 15] = uwp_generic_noop,
+};
 
 HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspectable **inner, void **instance )
 {
@@ -4218,7 +5151,8 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IRowDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IColumnDefinition_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_rowcol_vtbl;
     impl->IStyle_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
-    impl->IBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
+    impl->IBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_brush_vtbl;
+    impl->ISolidColorBrush_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_scb_vtbl;
     impl->IFlyout_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
     impl->IStateTrigger_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_noop_vtbl;
     impl->IObservableVector_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_el_obsvec_vtbl;
@@ -4238,11 +5172,18 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->grid_len_type = 2; /* Star */
     impl->grid_len_val = 1.0;
     impl->is_enabled = TRUE;
+    impl->is_hit_test_visible = TRUE;
     impl->opacity = 1.0;
+    impl->brush_opacity = 1.0;
     impl->h_align = 3; /* Stretch */
     impl->v_align = 3; /* Stretch */
     impl->font_size = 16.0;
-    xaml_create_dcomp_visual( &impl->visual );
+    g_layout_dirty = TRUE;
+    if (impl->kind != UWP_KIND_BRUSH && impl->kind != UWP_KIND_STYLE &&
+        impl->kind != UWP_KIND_RESOURCE_DICT && impl->kind != UWP_KIND_COLOR &&
+        impl->kind != UWP_KIND_ROW_DEF && impl->kind != UWP_KIND_COL_DEF &&
+        impl->kind != UWP_KIND_DEFERRED)
+        xaml_create_dcomp_visual( &impl->visual );
 
     register_uwp_elem( impl );
 
@@ -5487,9 +6428,14 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
 {
     switch (tid)
     {
+    case 0x802a: return L"Windows.UI.Color";
     case 0x802c: return L"Windows.UI.Xaml.Controls.ColumnDefinition";
+    case 0x8034: return L"Windows.Foundation.Double";
+    case 0x803b: return L"Windows.UI.Xaml.Media.FontFamily";
+    case 0x803c: return L"Windows.UI.Text.FontWeight";
     case 0x806a: return L"Windows.UI.Xaml.Controls.RowDefinition";
     case 0x8072: return L"Windows.UI.Xaml.Style";
+    case 0x807c: return L"Windows.UI.Xaml.Thickness";
     case 0x8089: return L"Windows.UI.Xaml.VisualState";
     case 0x808a: return L"Windows.UI.Xaml.VisualStateGroup";
     case 0x80bf: return L"Windows.UI.Xaml.DataTemplate";
@@ -5498,6 +6444,7 @@ static const WCHAR *uwp_btype_to_class_name( WORD tid )
     case 0x80d5: return L"Windows.UI.Xaml.Controls.Flyout";
     case 0x80ee: return L"Windows.UI.Xaml.Controls.MenuFlyout";
     case 0x8106: return L"Windows.UI.Xaml.Setter";
+    case 0x8109: return L"Windows.UI.Xaml.Media.SolidColorBrush";
     case 0x811e: return L"Windows.UI.Xaml.Controls.Border";
     case 0x8146: return L"Windows.UI.Xaml.Controls.Image";
     case 0x816b: return L"Windows.UI.Xaml.Controls.Primitives.Popup";
@@ -5621,13 +6568,146 @@ struct xbf_ctx
     const BYTE *nodes;
     DWORD sub_cnt;
     DWORD sub_base;
-    BOOL sub_done[256];
+    BOOL *sub_done;
     void *app_outer;
     void *connector;
     BOOL is_uwp_conn;
     struct uwp_element *root_el;
     IInspectable *root_comp;
+    struct uwp_rd_bucket *target_rd;
+    char base_xbf_dir[256];
+    BOOL rd_only;
 };
+
+struct xbf_rd_map_item
+{
+    WORD key_sid;
+    DWORD sub_off;
+};
+
+struct xbf_rd_table
+{
+    struct xbf_rd_map_item *items;
+    int count;
+};
+
+struct xbf_stack_val
+{
+    enum uwp_rd_kind kind;
+    struct uwp_element *el;
+    IInspectable *raw;
+    UINT32 argb;
+    BOOL has_argb;
+    double opacity;
+    double dval;
+    double vec4[4];
+    WCHAR str_val[128];
+    WCHAR based_on[96];
+    struct uwp_style_setter *setters;
+    int setter_cnt;
+    int setter_cap;
+};
+
+static BOOL xbf_read_uleb( const BYTE *buf, DWORD *io_p, DWORD end_p, DWORD *out_val )
+{
+    DWORD p = *io_p, val = 0;
+    int sh = 0;
+    while (p < end_p)
+    {
+        BYTE b = buf[p++];
+        if (sh < 28) val |= (DWORD)(b & 0x7f) << sh;
+        if (!(b & 0x80))
+        {
+            *io_p = p;
+            *out_val = val;
+            return TRUE;
+        }
+        sh += 7;
+    }
+    return FALSE;
+}
+
+static void xbf_stack_val_add_setter( struct xbf_stack_val *sv, WORD pid, int vt, BOOL is_res_ref,
+                                      double num, const WCHAR *sval, const double vec4[4] )
+{
+    struct uwp_style_setter *st;
+    if (!sv) return;
+    if (sv->setter_cnt >= sv->setter_cap)
+    {
+        int ncap = sv->setter_cap ? sv->setter_cap * 2 : 16;
+        struct uwp_style_setter *ns = realloc( sv->setters, ncap * sizeof(*ns) );
+        if (!ns) return;
+        sv->setters = ns;
+        sv->setter_cap = ncap;
+    }
+    st = &sv->setters[sv->setter_cnt++];
+    memset( st, 0, sizeof(*st) );
+    st->pid = pid;
+    st->vt = vt;
+    st->is_res_ref = is_res_ref;
+    st->num = num;
+    if (vec4) memcpy( st->vec4, vec4, sizeof(st->vec4) );
+    if (sval && sval[0]) lstrcpynW( st->str, sval, ARRAY_SIZE(st->str) );
+}
+
+static void uwp_rd_store_stack_val( struct uwp_rd_bucket *b, const WCHAR *key, struct xbf_stack_val *sv )
+{
+    struct uwp_rd_entry *e;
+    if (!b || !key || !key[0] || !sv) return;
+    e = rd_bucket_upsert( b, key );
+    if (!e) return;
+
+    if (e->value) { IInspectable_Release( e->value ); e->value = NULL; }
+    free( e->setters );
+    e->setters = NULL;
+    e->setter_cnt = e->setter_cap = 0;
+
+    e->kind = sv->kind;
+    e->argb = sv->argb;
+    e->has_argb = sv->has_argb;
+    e->opacity = sv->opacity > 0.0 ? sv->opacity : (sv->kind == UWP_RD_BRUSH ? sv->opacity : 1.0);
+    if (sv->kind != UWP_RD_BRUSH && e->opacity == 0.0) e->opacity = 1.0;
+    e->dval = sv->dval;
+    memcpy( e->vec4, sv->vec4, sizeof(e->vec4) );
+    lstrcpynW( e->str_val, (sv->kind == UWP_RD_STYLE) ? sv->based_on : sv->str_val, ARRAY_SIZE(e->str_val) );
+
+    if (sv->kind == UWP_RD_STYLE && sv->setter_cnt > 0)
+    {
+        e->setters = malloc( (size_t)sv->setter_cnt * sizeof(*e->setters) );
+        if (e->setters)
+        {
+            memcpy( e->setters, sv->setters, (size_t)sv->setter_cnt * sizeof(*e->setters) );
+            e->setter_cnt = sv->setter_cnt;
+            e->setter_cap = sv->setter_cnt;
+        }
+    }
+    if (sv->el && sv->kind == UWP_RD_BRUSH)
+    {
+        if (sv->el->has_brush_argb)
+        {
+            e->argb = sv->el->brush_argb;
+            e->has_argb = TRUE;
+        }
+        e->opacity = sv->el->brush_opacity;
+        if (!e->str_val[0] && sv->el->brush_color_ref[0])
+            lstrcpynW( e->str_val, sv->el->brush_color_ref, ARRAY_SIZE(e->str_val) );
+    }
+    if (sv->kind == UWP_RD_OBJ && sv->raw)
+    {
+        e->value = sv->raw;
+        IInspectable_AddRef( sv->raw );
+    }
+    /* If it's a brush referencing a color key, try eager resolve if already in scope */
+    if (e->kind == UWP_RD_BRUSH && !e->has_argb && e->str_val[0])
+    {
+        UINT32 resolved = 0;
+        if (uwp_resolve_brush_or_color( b, b->owner_el, e->str_val, 0, &resolved ))
+        {
+            e->argb = resolved;
+            e->has_argb = TRUE;
+        }
+    }
+}
 
 static BOOL xbf_read_value( struct xbf_ctx *ctx, const BYTE *nd, DWORD *io_p, DWORD end_p,
                             int *out_vt, double *out_num, WCHAR *out_str, int max_str,
@@ -5723,14 +6803,212 @@ static BOOL xbf_read_value( struct xbf_ctx *ctx, const BYTE *nd, DWORD *io_p, DW
     return TRUE;
 }
 
-static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, WORD pid,
-                                int vt, double num, const WCHAR *sval, const double vec4[4] )
+static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
+                                WORD pid, int vt, double num, const WCHAR *sval,
+                                const double vec4[4], BOOL is_res_ref );
+
+static void uwp_apply_style_entry( struct xbf_ctx *ctx, struct uwp_element *el,
+                                   struct uwp_rd_bucket *b, struct uwp_rd_entry *se, int depth )
+{
+    int i;
+    if (!el || !se || se->kind != UWP_RD_STYLE || depth > 8) return;
+    if (se->str_val[0])
+    {
+        struct uwp_rd_entry *base_se = NULL;
+        struct uwp_rd_bucket *base_b = NULL;
+        if (uwp_rd_find_entry( b, el, se->str_val, 0, &base_se, &base_b ) && base_se)
+            uwp_apply_style_entry( ctx, el, base_b, base_se, depth + 1 );
+    }
+    for (i = 0; i < se->setter_cnt; i++)
+    {
+        const struct uwp_style_setter *st = &se->setters[i];
+        xbf_apply_property( ctx, el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
+    }
+}
+
+static void uwp_apply_style_by_name( struct xbf_ctx *ctx, struct uwp_element *el, const WCHAR *style_key )
+{
+    WCHAR key[128] = {0};
+    struct uwp_rd_entry *se = NULL;
+    struct uwp_rd_bucket *sb = NULL;
+    if (!el || !style_key || !style_key[0]) return;
+    uwp_extract_resource_key( style_key, key, ARRAY_SIZE(key) );
+    if (!key[0]) return;
+    uwp_ensure_app_resources_loaded();
+    if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, key, 0, &se, &sb ) && se && se->kind == UWP_RD_STYLE)
+        uwp_apply_style_entry( ctx, el, sb, se, 0 );
+}
+
+static void uwp_el_set_bg_argb( struct uwp_element *el, UINT32 argb )
 {
     if (!el) return;
+    el->bg_argb = argb;
+    el->bg_color = argb_to_colorref( argb );
+    el->bg_alpha = (BYTE)((argb >> 24) & 0xff);
+    el->has_bg = TRUE;
+}
+
+static void uwp_el_set_fg_argb( struct uwp_element *el, UINT32 argb )
+{
+    if (!el) return;
+    el->fg_argb = argb;
+    el->fg_color = argb_to_colorref( argb );
+    el->fg_alpha = (BYTE)((argb >> 24) & 0xff);
+    el->has_fg = TRUE;
+}
+
+static void uwp_el_set_border_argb( struct uwp_element *el, UINT32 argb )
+{
+    if (!el) return;
+    el->border_argb = argb;
+    el->border_color = argb_to_colorref( argb );
+    el->border_alpha = (BYTE)((argb >> 24) & 0xff);
+    el->has_border = TRUE;
+}
+
+static BOOL uwp_is_bg_pid( WORD pid )
+{
+    return pid == 0x821d || pid == 0x8287 || pid == 0x81f7 || pid == 0x82dd;
+}
+
+static BOOL uwp_is_fg_pid( WORD pid )
+{
+    return pid == 0x8228 || pid == 0x8314 || pid == 0x8248 || pid == 0x80ff;
+}
+
+static BOOL uwp_is_border_pid( WORD pid )
+{
+    return pid == 0x821e || pid == 0x81f8 || pid == 0x8695 || pid == 0x82e0;
+}
+
+static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, struct xbf_stack_val *sv,
+                                WORD pid, int vt, double num, const WCHAR *sval,
+                                const double vec4[4], BOOL is_res_ref )
+{
+    UINT32 argb = 0;
+
+    if (sv)
+    {
+        if (sv->kind == UWP_RD_BRUSH)
+        {
+            if (pid == 0x81dc || pid == 0x87a8) /* SolidColorBrush.Color / RevealBrush.Color */
+            {
+                if (vt == 0x08)
+                {
+                    sv->argb = (UINT32)num;
+                    sv->has_argb = TRUE;
+                }
+                else if (sval && sval[0])
+                {
+                    if (uwp_parse_color_string( sval, &argb ))
+                    {
+                        sv->argb = argb;
+                        sv->has_argb = TRUE;
+                    }
+                    else
+                    {
+                        lstrcpynW( sv->str_val, sval, ARRAY_SIZE(sv->str_val) );
+                    }
+                }
+            }
+            else if (pid == 0x804e) /* Brush.Opacity */
+            {
+                if (vt == 0x03 || vt == 0x04)
+                    sv->opacity = num;
+                else if (sval && sval[0])
+                {
+                    struct uwp_rd_entry *de = NULL;
+                    if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                        de && de->kind == UWP_RD_DOUBLE)
+                        sv->opacity = de->dval;
+                }
+            }
+        }
+        else if (sv->kind == UWP_RD_STYLE && pid == 0x80f4 && sval && sval[0]) /* Style.BasedOn */
+        {
+            uwp_extract_resource_key( sval, sv->based_on, ARRAY_SIZE(sv->based_on) );
+        }
+        else if (sv->kind == UWP_RD_COLOR && pid == 0x81dc && vt == 0x08)
+        {
+            sv->argb = (UINT32)num;
+            sv->has_argb = TRUE;
+        }
+    }
+
+    if (!el) return;
+
+    if (el->kind == UWP_KIND_BRUSH)
+    {
+        if (pid == 0x81dc || pid == 0x87a8)
+        {
+            if (vt == 0x08)
+            {
+                el->brush_argb = (UINT32)num;
+                el->has_brush_argb = TRUE;
+            }
+            else if (sval && sval[0])
+            {
+                if (uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+                {
+                    el->brush_argb = argb;
+                    el->has_brush_argb = TRUE;
+                }
+                else
+                {
+                    lstrcpynW( el->brush_color_ref, sval, ARRAY_SIZE(el->brush_color_ref) );
+                }
+            }
+            return;
+        }
+        if (pid == 0x804e)
+        {
+            if (vt == 0x03 || vt == 0x04) el->brush_opacity = num;
+            return;
+        }
+    }
+
+    if (el->kind == UWP_KIND_RESOURCE_DICT && pid == 0x82b0 && sval && sval[0]) /* Source */
+    {
+        uwp_load_res_xbf_into_bucket( ctx ? ctx->base_xbf_dir : NULL, sval, uwp_rd_bucket_for_el( el, TRUE ) );
+        return;
+    }
+
     if (pid & 0x8000)
     {
+        if (uwp_is_bg_pid( pid ))
+        {
+            if (vt == 0x08)
+                uwp_el_set_bg_argb( el, (UINT32)num );
+            else if (sval && sval[0] &&
+                     uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+                uwp_el_set_bg_argb( el, argb );
+            return;
+        }
+        if (uwp_is_fg_pid( pid ))
+        {
+            if (vt == 0x08)
+                uwp_el_set_fg_argb( el, (UINT32)num );
+            else if (sval && sval[0] &&
+                     uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+                uwp_el_set_fg_argb( el, argb );
+            return;
+        }
+        if (uwp_is_border_pid( pid ))
+        {
+            if (vt == 0x08)
+                uwp_el_set_border_argb( el, (UINT32)num );
+            else if (sval && sval[0] &&
+                     uwp_resolve_brush_or_color( ctx ? ctx->target_rd : NULL, el, sval, 0, &argb ))
+                uwp_el_set_border_argb( el, argb );
+            return;
+        }
+
         switch (pid)
         {
+        case 0x8195: /* FrameworkElement.Style */
+            if (sval && sval[0])
+                uwp_apply_style_by_name( ctx, el, sval );
+            break;
         case 0x835c: el->grid_row = (int)num; break;
         case 0x8359: el->grid_col = (int)num; break;
         case 0x835e: el->grid_row_span = max( 1, (int)num ); break;
@@ -5745,6 +7023,22 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, WOR
             {
                 el->margin_l = vec4[0]; el->margin_t = vec4[1];
                 el->margin_r = vec4[2]; el->margin_b = vec4[3];
+            }
+            break;
+        case 0x822d: /* Control.Padding */
+        case 0x828a: /* Border.Padding */
+            if (vt == 0x06)
+            {
+                el->padding_l = vec4[0]; el->padding_t = vec4[1];
+                el->padding_r = vec4[2]; el->padding_b = vec4[3];
+            }
+            break;
+        case 0x821f: /* Control.BorderThickness */
+        case 0x8289: /* Border.BorderThickness */
+            if (vt == 0x06)
+            {
+                el->border_thick_l = vec4[0]; el->border_thick_t = vec4[1];
+                el->border_thick_r = vec4[2]; el->border_thick_b = vec4[3];
             }
             break;
         case 0x8340: /* ContentControl.Content */
@@ -5794,13 +7088,39 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, WOR
             }
             break;
         case 0x829e: /* FontSize */
-            if (num > 0) el->font_size = num;
+        case 0x8224: /* Control.FontSize */
+        case 0x8310: /* TextBlock.FontSize */
+            if (vt == 0x03 || vt == 0x04)
+            {
+                if (num > 0) el->font_size = num;
+            }
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE && de->dval > 0)
+                    el->font_size = de->dval;
+            }
             break;
         case 0x8199: /* Width */
-            el->width = num;
+            if (vt == 0x03 || vt == 0x04) el->width = num;
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE)
+                    el->width = de->dval;
+            }
             break;
         case 0x8188: /* Height */
-            el->height = num;
+            if (vt == 0x03 || vt == 0x04) el->height = num;
+            else if (is_res_ref && sval && sval[0])
+            {
+                struct uwp_rd_entry *de = NULL;
+                if (uwp_rd_find_entry( ctx ? ctx->target_rd : NULL, el, sval, 0, &de, NULL ) &&
+                    de && de->kind == UWP_RD_DOUBLE)
+                    el->height = de->dval;
+            }
             break;
         case 0x8191: /* MinWidth */
             el->min_width = num;
@@ -5822,7 +7142,7 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, WOR
             break;
         }
     }
-    else if (pid < ctx->prop_cnt)
+    else if (ctx && pid < ctx->prop_cnt)
     {
         const struct xbf_prop_info *pi = &ctx->props[pid];
         if (!wcscmp( pi->name, L"Name" ) && sval && sval[0])
@@ -5869,19 +7189,91 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, WOR
     }
 }
 
-static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_element *initial_root,
-                                struct uwp_element **out_created )
+static void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD off, WORD target_pid,
+                                        struct xbf_stack_val *style_sv )
+{
+    DWORD ss, ee, p, end_p;
+    if (!ctx || !style_sv || sub_idx < 0 || (DWORD)sub_idx >= ctx->sub_cnt) return;
+    ss = *(const DWORD *)(ctx->nodes + 4 + sub_idx * 8);
+    ee = *(const DWORD *)(ctx->nodes + 4 + sub_idx * 8 + 4);
+    if (ss + off >= ee || ctx->sub_base + ee > ctx->node_sz) return;
+    p = ctx->sub_base + ss + off;
+    end_p = ctx->sub_base + ee;
+    if (p < end_p)
+    {
+        BYTE op = ctx->nodes[p++];
+        if ((op == 0x24 || op == 0x1e || op == 0x1a) && p + 2 <= end_p)
+        {
+            WORD vpid = *(const WORD *)(ctx->nodes + p);
+            int vt = 0;
+            double num = 0, vec4[4] = {0};
+            WCHAR sbuf[256] = {0};
+            (void)vpid;
+            p += 2;
+            if (xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 ))
+                xbf_stack_val_add_setter( style_sv, target_pid, vt, (op == 0x24 || op == 0x1e), num, sbuf, vec4 );
+        }
+        else if (op == 0x14 && p + 2 <= end_p)
+        {
+            WORD tid = *(const WORD *)(ctx->nodes + p);
+            p += 2;
+            if (tid == 0x8109) /* inline SolidColorBrush */
+            {
+                UINT32 argb = 0;
+                BOOL has_c = FALSE;
+                WCHAR cref[128] = {0};
+                while (p < end_p)
+                {
+                    BYTE sop = ctx->nodes[p++];
+                    if (sop == 0x21 || sop == 0x02) break;
+                    if ((sop == 0x1a || sop == 0x1e || sop == 0x24) && p + 2 <= end_p)
+                    {
+                        WORD spid = *(const WORD *)(ctx->nodes + p);
+                        int vt = 0;
+                        double num = 0;
+                        WCHAR sbuf[128] = {0};
+                        p += 2;
+                        if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
+                        if (spid == 0x81dc)
+                        {
+                            if (vt == 0x08) { argb = (UINT32)num; has_c = TRUE; }
+                            else if (sbuf[0]) lstrcpynW( cref, sbuf, ARRAY_SIZE(cref) );
+                        }
+                    }
+                    else break;
+                }
+                if (has_c)
+                    xbf_stack_val_add_setter( style_sv, target_pid, 0x08, FALSE, (double)argb, NULL, NULL );
+                else if (cref[0])
+                    xbf_stack_val_add_setter( style_sv, target_pid, 0x05, TRUE, 0, cref, NULL );
+            }
+        }
+    }
+}
+
+static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element *initial_root,
+                                   struct uwp_element **out_created, const struct xbf_rd_table *rd_tbl,
+                                   struct uwp_rd_bucket *active_rd )
 {
     DWORD ss, ee, p, end_p;
     struct uwp_element *obj_stack[64];
     IInspectable *raw_stack[64];
-    int obj_sp = 0;
+    struct xbf_stack_val val_stack[64];
+    DWORD start_off_stack[64];
+    int obj_sp = 0, base_sp = 0;
     WORD prop_stack[64];
     int prop_sp = 0;
+    struct xbf_stack_val last_popped;
+    DWORD last_popped_off = 0;
+    BOOL has_last_popped = FALSE;
+
+    memset( val_stack, 0, sizeof(val_stack) );
+    memset( &last_popped, 0, sizeof(last_popped) );
+    memset( start_off_stack, 0, sizeof(start_off_stack) );
 
     if (out_created) *out_created = NULL;
     if (sub_idx < 0 || (DWORD)sub_idx >= ctx->sub_cnt) return;
-    if (sub_idx < 256)
+    if (ctx->sub_done)
     {
         if (ctx->sub_done[sub_idx]) return;
         ctx->sub_done[sub_idx] = TRUE;
@@ -5898,10 +7290,12 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
         obj_stack[0] = initial_root;
         raw_stack[0] = initial_root->outer ? initial_root->outer : &initial_root->IInspectable_iface;
         obj_sp = 1;
+        base_sp = 1;
     }
 
     while (p < end_p)
     {
+        DWORD cur_rel_off = p - (ctx->sub_base + ss);
         BYTE op = ctx->nodes[p++];
         if (op == 0x12) /* LineInfo (6 bytes) */
         {
@@ -5921,50 +7315,96 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             const WCHAR *cls_name = L"Windows.UI.Xaml.Controls.ContentControl";
             IInspectable *inst = NULL;
             struct uwp_element *el = NULL;
+            struct xbf_stack_val sv = {0};
+            int vt_init = 0;
+            double num_init = 0, vec4_init[4] = {0};
+            WCHAR sbuf_init[256] = {0};
+            BOOL is_rd_type = FALSE;
 
+            sv.opacity = 1.0;
             if (p + 2 > end_p) break;
             tid = *(const WORD *)(ctx->nodes + p);
             p += 2;
-            if (op == 0x15)
+            if (op == 0x15 || op == 0x16)
             {
-                int vt_init = 0;
-                double num_init = 0;
-                WCHAR sbuf_init[128] = {0};
-                if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt_init, &num_init, sbuf_init, ARRAY_SIZE(sbuf_init), NULL ))
+                if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt_init, &num_init, sbuf_init, ARRAY_SIZE(sbuf_init), vec4_init ))
                     break;
             }
             TRACE( "XBF push op=%#x tid=%#x cls=%s at %lu/%lu (sub %d)\n", op, tid,
                    (tid < ctx->type_cnt) ? debugstr_w(ctx->types[tid].full_name) : "(btype)",
-                   (unsigned long)(p - 3), (unsigned long)end_p, sub_idx );
+                   (unsigned long)cur_rel_off, (unsigned long)end_p, sub_idx );
+
+            if (tid == 0x8173) is_rd_type = TRUE;
+            else if (!(tid & 0x8000) && tid < ctx->type_cnt &&
+                     (wcsstr( ctx->types[tid].short_name, L"ResourceDictionary" ) ||
+                      !wcscmp( ctx->types[tid].short_name, L"XamlControlsResources" )))
+                is_rd_type = TRUE;
+
+            if (tid == 0x802a)
+            {
+                sv.kind = UWP_RD_COLOR;
+                if (vt_init == 0x08) { sv.argb = (UINT32)num_init; sv.has_argb = TRUE; }
+                else if (sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv.argb )) sv.has_argb = TRUE;
+            }
+            else if (tid == 0x8034)
+            {
+                sv.kind = UWP_RD_DOUBLE;
+                sv.dval = num_init;
+            }
+            else if (tid == 0x807c)
+            {
+                sv.kind = UWP_RD_THICKNESS;
+                memcpy( sv.vec4, vec4_init, sizeof(sv.vec4) );
+            }
+            else if (tid == 0x8109 || tid == 0x80c2 || tid == 0x80d2 ||
+                     (!(tid & 0x8000) && tid < ctx->type_cnt && wcsstr( ctx->types[tid].short_name, L"Brush" )))
+            {
+                sv.kind = UWP_RD_BRUSH;
+                if (op == 0x16 && sbuf_init[0] && uwp_parse_color_string( sbuf_init, &sv.argb ))
+                    sv.has_argb = TRUE;
+            }
+            else if (tid == 0x8072)
+            {
+                sv.kind = UWP_RD_STYLE;
+            }
+            else if ((op == 0x15 || op == 0x16) && sbuf_init[0])
+            {
+                sv.kind = UWP_RD_STRING;
+                lstrcpynW( sv.str_val, sbuf_init, ARRAY_SIZE(sv.str_val) );
+            }
 
             if (op == 0x17 && ctx->root_el)
             {
                 el = ctx->root_el;
                 inst = ctx->root_comp;
+                if (is_rd_type && active_rd)
+                {
+                    el->rd_bucket = active_rd;
+                    active_rd->owner_el = el;
+                }
+            }
+            else if (ctx->rd_only && !is_rd_type)
+            {
+                /* Lightweight mode inside ResourceDictionary XBFs: no COM/visual element needed */
+                el = NULL;
+                inst = NULL;
             }
             else
             {
                 if (tid & 0x8000)
                 {
                     cls_name = uwp_btype_to_class_name( tid );
-                    if (tid == 0x82ea) /* DeferredElement placeholder */
-                    {
-                        uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
-                        el = uwp_elem_from_any( inst );
-                        if (el) el->kind = UWP_KIND_DEFERRED;
-                    }
-                    else
-                    {
-                        uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
-                        el = uwp_elem_from_any( inst );
-                    }
+                    uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
+                    el = uwp_elem_from_any( inst );
+                    if (el && tid == 0x82ea) el->kind = UWP_KIND_DEFERRED;
                 }
                 else if (tid < ctx->type_cnt)
                 {
                     cls_name = ctx->types[tid].full_name;
                     if (ctx->root_el) uwp_mark_xbf_ref_instantiated( ctx->root_el, cls_name );
                     /* Do not activate ResourceString, ResourceVirtualKey, or Microsoft.UI.Xaml controls via provider */
-                    if (wcsstr( cls_name, L"ResourceString" ) || wcsstr( cls_name, L"ResourceVirtualKey" ) ||
+                    if (is_rd_type || wcsstr( cls_name, L"ResourceString" ) ||
+                        wcsstr( cls_name, L"ResourceVirtualKey" ) ||
                         !wcsncmp( cls_name, L"Microsoft.UI.Xaml.", 18 ))
                     {
                         uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
@@ -6016,14 +7456,35 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                 }
             }
 
-            if (el && ctx->root_el) el->owner_component = ctx->root_el;
+            if (el)
+            {
+                if (ctx->root_el) el->owner_component = ctx->root_el;
+                if (sv.kind == UWP_RD_BRUSH && sv.has_argb)
+                {
+                    el->brush_argb = sv.argb;
+                    el->has_brush_argb = TRUE;
+                }
+                if (is_rd_type && op == 0x17 && active_rd)
+                {
+                    el->rd_bucket = active_rd;
+                    active_rd->owner_el = el;
+                }
+            }
+            sv.el = el;
+            sv.raw = inst;
             if (out_created && !*out_created && el) *out_created = el;
 
             if (obj_sp < (int)ARRAY_SIZE(obj_stack))
             {
                 obj_stack[obj_sp] = el;
                 raw_stack[obj_sp] = inst;
+                val_stack[obj_sp] = sv;
+                start_off_stack[obj_sp] = cur_rel_off;
                 obj_sp++;
+            }
+            else
+            {
+                free( sv.setters );
             }
         }
         else if (op == 0x0b) /* x:Class */
@@ -6095,12 +7556,11 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
         else if (op == 0x11) /* SetDeferredProperty <pid:u16> <sub_idx:uleb> <c1:uleb> <c2:uleb> <(c1+c2)*u16> */
         {
             DWORD sub_i = 0, c1 = 0, c2 = 0;
-            int sh;
             if (p + 2 > end_p) break;
             p += 2;
-            for (sh = 0; p < end_p; sh += 7) { BYTE b = ctx->nodes[p++]; sub_i |= (DWORD)(b & 0x7f) << sh; if (!(b & 0x80)) break; }
-            for (sh = 0; p < end_p; sh += 7) { BYTE b = ctx->nodes[p++]; c1    |= (DWORD)(b & 0x7f) << sh; if (!(b & 0x80)) break; }
-            for (sh = 0; p < end_p; sh += 7) { BYTE b = ctx->nodes[p++]; c2    |= (DWORD)(b & 0x7f) << sh; if (!(b & 0x80)) break; }
+            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &sub_i )) break;
+            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c1 )) break;
+            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c2 )) break;
             (void)sub_i;
             if (p + (c1 + c2) * 2 > end_p) break;
             p += (c1 + c2) * 2;
@@ -6111,21 +7571,27 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
         }
         else if (op == 0x1d) /* SetValueWithType: <pid:u16> <tid:u16> */
         {
+            WORD pid, tid;
             if (p + 4 > end_p) break;
+            pid = *(const WORD *)(ctx->nodes + p);
+            tid = *(const WORD *)(ctx->nodes + p + 2);
+            (void)pid; (void)tid;
             p += 4;
         }
-        else if ((op >= 0x1a && op <= 0x1f) || op == 0x24) /* SetValue / SetStaticResource */
+        else if ((op >= 0x1a && op <= 0x1f) || op == 0x24) /* SetValue / SetStaticResource / SetThemeResource */
         {
             WORD pid;
             int vt = 0;
             double num = 0, vec4[4] = {0};
             WCHAR sbuf[256] = {0};
+            BOOL is_res_ref = (op == 0x1e || op == 0x24);
             if (p + 2 > end_p) break;
             pid = *(const WORD *)(ctx->nodes + p);
             p += 2;
             if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 )) break;
-            if (obj_sp > 0 && obj_stack[obj_sp - 1])
-                xbf_apply_property( ctx, obj_stack[obj_sp - 1], pid, vt, num, sbuf, vec4 );
+            if (obj_sp > 0)
+                xbf_apply_property( ctx, obj_stack[obj_sp - 1], &val_stack[obj_sp - 1],
+                                    pid, vt, num, sbuf, vec4, is_res_ref );
         }
         else if (op == 0x22) /* AddStaticResourceValue <xbf_value> */
         {
@@ -6133,13 +7599,208 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             double num = 0;
             WCHAR sbuf[128] = {0};
             if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
+            free( last_popped.setters );
+            memset( &last_popped, 0, sizeof(last_popped) );
+            last_popped.kind = UWP_RD_ALIAS;
+            last_popped.opacity = 1.0;
+            lstrcpynW( last_popped.str_val, sbuf, ARRAY_SIZE(last_popped.str_val) );
+            last_popped_off = cur_rel_off;
+            has_last_popped = TRUE;
         }
-        else if (op == 0x0a) /* AddToDictionaryInline <xbf_value> */
+        else if (op == 0x21) /* EndOfObject / PopObject */
+        {
+            if (obj_sp > base_sp)
+            {
+                free( last_popped.setters );
+                obj_sp--;
+                last_popped = val_stack[obj_sp];
+                last_popped_off = start_off_stack[obj_sp];
+                memset( &val_stack[obj_sp], 0, sizeof(val_stack[obj_sp]) );
+                has_last_popped = TRUE;
+
+                /* Indexed ResourceDictionary entry without trailing 0x0a AddToDictionary (e.g. Dark.xbf) */
+                if (active_rd && rd_tbl && obj_sp == base_sp)
+                {
+                    BYTE next_op = (p < end_p) ? ctx->nodes[p] : 0xff;
+                    if (next_op != 0x0a && next_op != 0x07 && next_op != 0x08 && next_op != 0x09 && next_op != 0x20)
+                    {
+                        int k;
+                        for (k = 0; k < rd_tbl->count; k++)
+                        {
+                            if (rd_tbl->items[k].sub_off == last_popped_off &&
+                                rd_tbl->items[k].key_sid < ctx->str_cnt && ctx->strs[rd_tbl->items[k].key_sid])
+                            {
+                                uwp_rd_store_stack_val( active_rd, ctx->strs[rd_tbl->items[k].key_sid], &last_popped );
+                            }
+                        }
+                        free( last_popped.setters );
+                        memset( &last_popped, 0, sizeof(last_popped) );
+                        has_last_popped = FALSE;
+                    }
+                }
+            }
+            else
+            {
+                free( last_popped.setters );
+                memset( &last_popped, 0, sizeof(last_popped) );
+                has_last_popped = FALSE;
+            }
+        }
+        else if (op == 0x0a) /* AddToDictionary <xbf_value> */
         {
             int vt = 0;
             double num = 0;
-            WCHAR sbuf[128] = {0};
-            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), NULL )) break;
+            WCHAR kbuf[128] = {0};
+            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, kbuf, ARRAY_SIZE(kbuf), NULL )) break;
+            if (has_last_popped && kbuf[0])
+            {
+                struct uwp_element *parent_el = (obj_sp > 0) ? obj_stack[obj_sp - 1] : NULL;
+                WORD pid = (prop_sp > 0) ? prop_stack[prop_sp - 1] : 0;
+                if (pid == 0x82b1 && last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT)
+                {
+                    struct uwp_rd_bucket *parent_rd = (parent_el && parent_el->kind == UWP_KIND_RESOURCE_DICT)
+                        ? uwp_rd_bucket_for_el( parent_el, TRUE )
+                        : (active_rd ? active_rd : uwp_rd_bucket_for_el( parent_el, TRUE ));
+                    struct uwp_rd_bucket *child_rd = uwp_rd_bucket_for_el( last_popped.el, TRUE );
+                    uwp_rd_link_theme( parent_rd, kbuf, child_rd );
+                }
+                else
+                {
+                    struct uwp_rd_bucket *dest_rd = NULL;
+                    if (parent_el && (parent_el->kind != UWP_KIND_RESOURCE_DICT || !active_rd))
+                        dest_rd = uwp_rd_bucket_for_el( parent_el, TRUE );
+                    else
+                        dest_rd = active_rd ? active_rd : uwp_rd_bucket_for_el( parent_el, TRUE );
+                    if (dest_rd)
+                        uwp_rd_store_stack_val( dest_rd, kbuf, &last_popped );
+                }
+            }
+            free( last_popped.setters );
+            memset( &last_popped, 0, sizeof(last_popped) );
+            has_last_popped = FALSE;
+        }
+        else if (op == 0x08) /* AddToCollection */
+        {
+            if (has_last_popped && obj_sp > 0)
+            {
+                struct uwp_element *parent_el = obj_stack[obj_sp - 1];
+                WORD pid = (prop_sp > 0) ? prop_stack[prop_sp - 1] : 0x8288;
+                if (pid == 0x82af && last_popped.el && last_popped.el->kind == UWP_KIND_RESOURCE_DICT)
+                {
+                    struct uwp_rd_bucket *parent_rd = (parent_el && parent_el->kind == UWP_KIND_RESOURCE_DICT)
+                        ? uwp_rd_bucket_for_el( parent_el, TRUE )
+                        : (active_rd ? active_rd : uwp_rd_bucket_for_el( parent_el, TRUE ));
+                    struct uwp_rd_bucket *child_rd = uwp_rd_bucket_for_el( last_popped.el, TRUE );
+                    uwp_rd_link_merged( parent_rd, child_rd );
+                }
+                else if (parent_el && last_popped.raw)
+                {
+                    if (pid == 0x835d) /* RowDefinitions */
+                    {
+                        if (!parent_el->row_defs_coll) uwp_vec_create( parent_el, &parent_el->row_defs_coll );
+                        uwp_vec_Append( parent_el->row_defs_coll, last_popped.raw );
+                    }
+                    else if (pid == 0x835a) /* ColumnDefinitions */
+                    {
+                        if (!parent_el->col_defs_coll) uwp_vec_create( parent_el, &parent_el->col_defs_coll );
+                        uwp_vec_Append( parent_el->col_defs_coll, last_popped.raw );
+                    }
+                    else if (pid == 0x8288 || parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL)
+                    {
+                        if (!parent_el->children_coll) uwp_vec_create( parent_el, &parent_el->children_coll );
+                        uwp_vec_Append( parent_el->children_coll, last_popped.raw );
+                        if (last_popped.el) last_popped.el->parent = parent_el;
+                    }
+                }
+            }
+            free( last_popped.setters );
+            memset( &last_popped, 0, sizeof(last_popped) );
+            has_last_popped = FALSE;
+        }
+        else if (op == 0x07) /* SetObjectProperty <pid:u16> */
+        {
+            WORD pid = 0;
+            if (p + 2 <= end_p) { pid = *(const WORD *)(ctx->nodes + p); p += 2; }
+            if (has_last_popped && obj_sp > 0 && obj_stack[obj_sp - 1])
+            {
+                struct uwp_element *parent_el = obj_stack[obj_sp - 1];
+                if (last_popped.kind == UWP_RD_BRUSH || last_popped.kind == UWP_RD_COLOR)
+                {
+                    UINT32 argb = 0;
+                    BOOL got = FALSE;
+                    if (last_popped.has_argb)
+                    {
+                        argb = apply_opacity_to_argb( last_popped.argb, last_popped.opacity );
+                        got = TRUE;
+                    }
+                    else if (last_popped.str_val[0] &&
+                             uwp_resolve_brush_or_color( active_rd ? active_rd : ctx->target_rd, parent_el,
+                                                         last_popped.str_val, 0, &argb ))
+                    {
+                        argb = apply_opacity_to_argb( argb, last_popped.opacity );
+                        got = TRUE;
+                    }
+                    else if (last_popped.el && last_popped.el->has_brush_argb)
+                    {
+                        argb = apply_opacity_to_argb( last_popped.el->brush_argb, last_popped.el->brush_opacity );
+                        got = TRUE;
+                    }
+                    if (got)
+                    {
+                        if (uwp_is_bg_pid( pid )) uwp_el_set_bg_argb( parent_el, argb );
+                        else if (uwp_is_fg_pid( pid )) uwp_el_set_fg_argb( parent_el, argb );
+                        else if (uwp_is_border_pid( pid )) uwp_el_set_border_argb( parent_el, argb );
+                    }
+                }
+                else if (last_popped.kind == UWP_RD_STYLE && pid == 0x8195)
+                {
+                    int si;
+                    if (last_popped.based_on[0])
+                        uwp_apply_style_by_name( ctx, parent_el, last_popped.based_on );
+                    for (si = 0; si < last_popped.setter_cnt; si++)
+                    {
+                        const struct uwp_style_setter *st = &last_popped.setters[si];
+                        xbf_apply_property( ctx, parent_el, NULL, st->pid, st->vt, st->num, st->str, st->vec4, st->is_res_ref );
+                    }
+                }
+                else if (last_popped.raw &&
+                         (pid == 0x8340 || pid == 0x83e7 || pid == 0x8134 || pid == 0x829c || !parent_el->content))
+                {
+                    if (parent_el->content) IInspectable_Release( parent_el->content );
+                    parent_el->content = last_popped.raw;
+                    IInspectable_AddRef( last_popped.raw );
+                    if (last_popped.el) last_popped.el->parent = parent_el;
+                }
+            }
+            free( last_popped.setters );
+            memset( &last_popped, 0, sizeof(last_popped) );
+            has_last_popped = FALSE;
+        }
+        else if (op == 0x20) /* ProvideValue and SetProperty (u16 pid) */
+        {
+            WORD pid = 0;
+            if (p + 2 > end_p) break;
+            pid = *(const WORD *)(ctx->nodes + p);
+            p += 2;
+            if (has_last_popped && last_popped.el && obj_sp > 0 && obj_stack[obj_sp - 1] && last_popped.el->text[0])
+            {
+                struct uwp_element *target_el = obj_stack[obj_sp - 1];
+                WCHAR resolved[256] = {0};
+                if (uwp_pri_lookup_string( last_popped.el->text, resolved, ARRAY_SIZE(resolved) ) && resolved[0])
+                {
+                    if (pid == 0x8340 || pid == 0x8769 || !target_el->text[0])
+                        lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
+                }
+            }
+            free( last_popped.setters );
+            memset( &last_popped, 0, sizeof(last_popped) );
+            has_last_popped = FALSE;
+        }
+        else if (op == 0x09)
+        {
+            free( last_popped.setters );
+            memset( &last_popped, 0, sizeof(last_popped) );
+            has_last_popped = FALSE;
         }
         else if (op == 0x0f) /* DeferSubstream */
         {
@@ -6177,18 +7838,17 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             else if (def_kind == 0x05) /* VisualStateGroupCollection */
             {
                 DWORD n_states = 0, s_idx;
-                int shift = 0;
-                xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
-                while (p < end_p)
+                if (!ctx->rd_only)
+                    xbf_exec_substream_rd( ctx, def_sub, ctx->root_el, NULL, NULL, active_rd );
+                else if (ctx->sub_done && def_sub < ctx->sub_cnt)
+                    ctx->sub_done[def_sub] = TRUE;
+                if (xbf_read_uleb( ctx->nodes, &p, end_p, &n_states ))
                 {
-                    BYTE b = ctx->nodes[p++];
-                    n_states |= (DWORD)(b & 0x7f) << shift;
-                    if (!(b & 0x80)) break;
-                    shift += 7;
-                }
-                for (s_idx = 0; s_idx < n_states && p < end_p; s_idx++)
-                {
-                    while (p < end_p && (ctx->nodes[p++] & 0x80)) {}
+                    for (s_idx = 0; s_idx < n_states && p < end_p; s_idx++)
+                    {
+                        DWORD dummy = 0;
+                        xbf_read_uleb( ctx->nodes, &p, end_p, &dummy );
+                    }
                 }
                 /* Find VisualStateGroups footer: 00 02 00 00 01 <cnt_uleb> <cnt*u16> 02 */
                 while (p + 7 < end_p)
@@ -6198,15 +7858,8 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                         ctx->nodes[p + 4] == 0x01)
                     {
                         DWORD q = p + 5, cnt = 0;
-                        int sh = 0;
-                        while (q < end_p)
-                        {
-                            BYTE b = ctx->nodes[q++];
-                            cnt |= (DWORD)(b & 0x7f) << sh;
-                            if (!(b & 0x80)) break;
-                            sh += 7;
-                        }
-                        if (cnt >= n_states && q + cnt * 2 < end_p && ctx->nodes[q + cnt * 2] == 0x02)
+                        if (xbf_read_uleb( ctx->nodes, &q, end_p, &cnt ) &&
+                            cnt >= n_states && q + cnt * 2 < end_p && ctx->nodes[q + cnt * 2] == 0x02)
                         {
                             p = q + cnt * 2 + 1;
                             if (prop_sp > 0) prop_sp--;
@@ -6216,18 +7869,59 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                     p++;
                 }
             }
-            else if (def_kind == 0x08) /* Style Setters table: ends before 0x21 0x0a / 0x21 0x09 / 0x02 / end_p */
+            else if (def_kind == 0x08) /* Style Setters table */
             {
-                xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
+                DWORD scnt = 0, si;
+                struct xbf_stack_val *style_sv = (obj_sp > 0) ? &val_stack[obj_sp - 1] : NULL;
+                if (ctx->sub_done && def_sub < ctx->sub_cnt)
+                    ctx->sub_done[def_sub] = TRUE;
+                if (xbf_read_uleb( ctx->nodes, &p, end_p, &scnt ))
+                {
+                    for (si = 0; si < scnt && p < end_p; si++)
+                    {
+                        BYTE sop = ctx->nodes[p];
+                        if (sop == 0x30 && p + 3 <= end_p)
+                        {
+                            WORD spid = *(const WORD *)(ctx->nodes + p + 1);
+                            int vt = 0;
+                            double num = 0, vec4[4] = {0};
+                            WCHAR sbuf[256] = {0};
+                            p += 3;
+                            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 ))
+                                break;
+                            xbf_stack_val_add_setter( style_sv, spid, vt, FALSE, num, sbuf, vec4 );
+                        }
+                        else if ((sop == 0x11 || sop == 0x12 || sop == 0x18) && p + 3 <= end_p)
+                        {
+                            WORD spid = *(const WORD *)(ctx->nodes + p + 1);
+                            DWORD soff = 0;
+                            p += 3;
+                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &soff )) break;
+                            if (sop == 0x11 || sop == 0x12)
+                                xbf_parse_style_setter_sub( ctx, def_sub, soff, spid, style_sv );
+                        }
+                        else if ((sop == 0x01 || sop == 0x02 || sop == 0x20) && p + 5 <= end_p)
+                        {
+                            DWORD soff = 0;
+                            p += 5;
+                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &soff )) break;
+                        }
+                        else
+                        {
+                            break;
+                        }
+                    }
+                }
                 while (p < end_p)
                 {
-                    if (p + 1 < end_p && ctx->nodes[p] == 0x21 &&
-                        (ctx->nodes[p + 1] == 0x0a || ctx->nodes[p + 1] == 0x09))
-                        break;
-                    if (ctx->nodes[p] == 0x02 && (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14))
+                    if (ctx->nodes[p] == 0x21 ||
+                        (ctx->nodes[p] == 0x02 && (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14)))
                     {
-                        p++;
-                        if (prop_sp > 0) prop_sp--;
+                        if (ctx->nodes[p] == 0x02)
+                        {
+                            p++;
+                            if (prop_sp > 0) prop_sp--;
+                        }
                         break;
                     }
                     p++;
@@ -6235,23 +7929,101 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
             }
             else if (def_kind == 0x0a) /* ResourceDictionary table */
             {
-                xbf_exec_substream( ctx, def_sub, ctx->root_el, NULL );
-                while (p < end_p)
+                struct xbf_rd_table tbl = {0};
+                DWORD rcnt = 0, ri;
+                struct uwp_rd_bucket *sub_rd = NULL;
+                if (xbf_read_uleb( ctx->nodes, &p, end_p, &rcnt ) && rcnt > 0 && rcnt < 10000)
                 {
-                    if (p + 1 < end_p && p >= 2 &&
-                        ctx->nodes[p - 2] == 0x00 && ctx->nodes[p - 1] == 0x00 &&
-                        ctx->nodes[p] == 0x21 && ctx->nodes[p + 1] == 0x0a)
-                        break;
-                    if (ctx->nodes[p] == 0x02 &&
-                        (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14 ||
-                         ctx->nodes[p + 1] == 0x15 || ctx->nodes[p + 1] == 0x21 || ctx->nodes[p + 1] == 0x12))
+                    tbl.items = calloc( rcnt, sizeof(*tbl.items) );
+                    if (tbl.items)
                     {
-                        p++;
-                        if (prop_sp > 0) prop_sp--;
-                        break;
+                        for (ri = 0; ri < rcnt && p + 2 < end_p; ri++)
+                        {
+                            WORD sid = *(const WORD *)(ctx->nodes + p);
+                            DWORD off = 0;
+                            p += 2;
+                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &off )) break;
+                            tbl.items[tbl.count].key_sid = sid;
+                            tbl.items[tbl.count].sub_off = off;
+                            tbl.count++;
+                        }
                     }
-                    p++;
                 }
+                /* Advance past optional footer (c2..c6) if clean, else scan to end marker */
+                {
+                    DWORD saved_p = p, c2 = 0, c3 = 0, c4 = 0, c5 = 0, c6 = 0;
+                    BOOL skipped = FALSE;
+                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c2 ) && p + c2 * 2 <= end_p)
+                    {
+                        p += c2 * 2;
+                        if (xbf_read_uleb( ctx->nodes, &p, end_p, &c3 ) && c3 == 0 &&
+                            xbf_read_uleb( ctx->nodes, &p, end_p, &c4 ))
+                        {
+                            DWORD k;
+                            BOOL ok4 = TRUE;
+                            for (k = 0; k < c4; k++)
+                            {
+                                DWORD n4 = 0, j;
+                                if (p + 2 > end_p) { ok4 = FALSE; break; }
+                                p += 2;
+                                if (!xbf_read_uleb( ctx->nodes, &p, end_p, &n4 )) { ok4 = FALSE; break; }
+                                for (j = 0; j < n4; j++)
+                                {
+                                    DWORD dummy = 0;
+                                    if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy )) { ok4 = FALSE; break; }
+                                }
+                                if (!ok4) break;
+                            }
+                            if (ok4 && xbf_read_uleb( ctx->nodes, &p, end_p, &c5 ) && c5 == 0 &&
+                                xbf_read_uleb( ctx->nodes, &p, end_p, &c6 ))
+                            {
+                                BOOL ok6 = TRUE;
+                                for (k = 0; k < c6; k++)
+                                {
+                                    DWORD dummy = 0, n6 = 0;
+                                    if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy ) ||
+                                        !xbf_read_uleb( ctx->nodes, &p, end_p, &n6 ) ||
+                                        p + n6 * 4 > end_p)
+                                    {
+                                        ok6 = FALSE;
+                                        break;
+                                    }
+                                    p += n6 * 4;
+                                }
+                                if (ok6) skipped = TRUE;
+                            }
+                        }
+                    }
+                    if (!skipped)
+                    {
+                        p = saved_p;
+                        while (p < end_p)
+                        {
+                            if (p + 1 < end_p && p >= 2 &&
+                                ctx->nodes[p - 2] == 0x00 && ctx->nodes[p - 1] == 0x00 &&
+                                ctx->nodes[p] == 0x21 &&
+                                (ctx->nodes[p + 1] == 0x0a || ctx->nodes[p + 1] == 0x07))
+                                break;
+                            if (ctx->nodes[p] == 0x21 && p + 1 == end_p)
+                                break;
+                            if (ctx->nodes[p] == 0x02 &&
+                                (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14 ||
+                                 ctx->nodes[p + 1] == 0x15 || ctx->nodes[p + 1] == 0x21 || ctx->nodes[p + 1] == 0x12))
+                            {
+                                p++;
+                                if (prop_sp > 0) prop_sp--;
+                                break;
+                            }
+                            p++;
+                        }
+                    }
+                }
+                if (obj_sp > 0 && obj_stack[obj_sp - 1])
+                    sub_rd = uwp_rd_bucket_for_el( obj_stack[obj_sp - 1], TRUE );
+                else
+                    sub_rd = active_rd ? active_rd : ctx->target_rd;
+                xbf_exec_substream_rd( ctx, def_sub, NULL, NULL, &tbl, sub_rd );
+                free( tbl.items );
             }
             else
             {
@@ -6259,125 +8031,53 @@ static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_ele
                 break;
             }
         }
-        else if (op == 0x21)
-        {
-            BYTE subop;
-            if (p >= end_p) break;
-            subop = ctx->nodes[p++];
-            if (subop == 0x08) /* AddToCollection */
-            {
-                if (obj_sp >= 2)
-                {
-                    struct uwp_element *child_el = obj_stack[obj_sp - 1];
-                    IInspectable *child_raw = raw_stack[obj_sp - 1];
-                    struct uwp_element *parent_el = obj_stack[obj_sp - 2];
-                    WORD pid = (prop_sp > 0) ? prop_stack[prop_sp - 1] : 0x8288;
-                    obj_sp--;
-
-                    if (parent_el && child_raw)
-                    {
-                        if (pid == 0x835d) /* RowDefinitions */
-                        {
-                            if (!parent_el->row_defs_coll) uwp_vec_create( parent_el, &parent_el->row_defs_coll );
-                            uwp_vec_Append( parent_el->row_defs_coll, child_raw );
-                        }
-                        else if (pid == 0x835a) /* ColumnDefinitions */
-                        {
-                            if (!parent_el->col_defs_coll) uwp_vec_create( parent_el, &parent_el->col_defs_coll );
-                            uwp_vec_Append( parent_el->col_defs_coll, child_raw );
-                        }
-                        else if (pid == 0x8288 || parent_el->kind == UWP_KIND_GRID || parent_el->kind == UWP_KIND_STACK_PANEL)
-                        {
-                            if (!parent_el->children_coll) uwp_vec_create( parent_el, &parent_el->children_coll );
-                            uwp_vec_Append( parent_el->children_coll, child_raw );
-                            if (child_el) child_el->parent = parent_el;
-                        }
-                    }
-                }
-            }
-            else if (subop == 0x07) /* SetObjectProperty */
-            {
-                WORD pid = 0;
-                if (p + 2 <= end_p) { pid = *(const WORD *)(ctx->nodes + p); p += 2; }
-                if (obj_sp >= 2)
-                {
-                    struct uwp_element *child_el = obj_stack[obj_sp - 1];
-                    IInspectable *child_raw = raw_stack[obj_sp - 1];
-                    struct uwp_element *parent_el = obj_stack[obj_sp - 2];
-                    obj_sp--;
-                    if (parent_el && child_raw &&
-                        (pid == 0x8340 || pid == 0x83e7 || pid == 0x8134 || pid == 0x829c || !parent_el->content))
-                    {
-                        if (parent_el->content) IInspectable_Release( parent_el->content );
-                        parent_el->content = child_raw;
-                        IInspectable_AddRef( child_raw );
-                        if (child_el) child_el->parent = parent_el;
-                    }
-                }
-            }
-            else if (subop == 0x0a) /* AddToDictionary */
-            {
-                int vt = 0;
-                double num = 0;
-                WCHAR kbuf[128] = {0};
-                if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, kbuf, ARRAY_SIZE(kbuf), NULL )) break;
-                if (obj_sp >= 2)
-                {
-                    IInspectable *val_raw = raw_stack[obj_sp - 1];
-                    struct uwp_element *parent_el = obj_stack[obj_sp - 2];
-                    obj_sp--;
-                    if (parent_el && kbuf[0] && val_raw)
-                    {
-                        void *rd = NULL;
-                        uwp_fe_get_Resources( &parent_el->IFrameworkElement_iface, &rd );
-                        if (rd)
-                        {
-                            uwp_rd_insert( rd, kbuf, val_raw );
-                            IInspectable_Release( (IInspectable *)rd );
-                        }
-                    }
-                }
-            }
-            else if (subop == 0x20) /* ProvideValue and SetProperty (u16 pid) */
-            {
-                WORD pid = 0;
-                if (p + 2 > end_p) break;
-                pid = *(const WORD *)(ctx->nodes + p);
-                p += 2;
-                if (obj_sp >= 2)
-                {
-                    struct uwp_element *ext_el = obj_stack[obj_sp - 1];
-                    struct uwp_element *target_el = obj_stack[obj_sp - 2];
-                    obj_sp--;
-                    if (ext_el && target_el && ext_el->text[0])
-                    {
-                        WCHAR resolved[256] = {0};
-                        if (uwp_pri_lookup_string( ext_el->text, resolved, ARRAY_SIZE(resolved) ) && resolved[0])
-                        {
-                            if (pid == 0x8340 || pid == 0x8769 || !target_el->text[0])
-                                lstrcpynW( target_el->text, resolved, ARRAY_SIZE(target_el->text) );
-                        }
-                    }
-                }
-            }
-            else if (subop == 0x01 || subop == 0x09)
-            {
-                if (obj_sp > 1) obj_sp--;
-            }
-        }
         else
         {
-            /* Unrecognized opcode: stop substream cleanly */
-            TRACE( "XBF unrecognized op=%#x at %lu/%lu (sub %d)\n", op, (unsigned long)(p - 1), (unsigned long)end_p, sub_idx );
+            if (rd_tbl)
+            {
+                DWORD next_off = 0xffffffffu;
+                int k;
+                for (k = 0; k < rd_tbl->count; k++)
+                {
+                    if (rd_tbl->items[k].sub_off > cur_rel_off && rd_tbl->items[k].sub_off < next_off)
+                        next_off = rd_tbl->items[k].sub_off;
+                }
+                if (next_off != 0xffffffffu && ctx->sub_base + ss + next_off < end_p)
+                {
+                    p = ctx->sub_base + ss + next_off;
+                    while (obj_sp > base_sp) { obj_sp--; free( val_stack[obj_sp].setters ); memset( &val_stack[obj_sp], 0, sizeof(val_stack[obj_sp]) ); }
+                    prop_sp = 0;
+                    free( last_popped.setters );
+                    memset( &last_popped, 0, sizeof(last_popped) );
+                    has_last_popped = FALSE;
+                    continue;
+                }
+            }
+            TRACE( "XBF unrecognized op=%#x at %lu/%lu (sub %d)\n", op, (unsigned long)cur_rel_off, (unsigned long)end_p, sub_idx );
             break;
         }
     }
+
+    while (obj_sp > base_sp)
+    {
+        obj_sp--;
+        free( val_stack[obj_sp].setters );
+    }
+    free( last_popped.setters );
 }
 
-static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
-                                     void *connector, BOOL is_uwp_conn, void *app_outer,
-                                     int only_sub_idx, struct uwp_element *attach_root,
-                                     struct uwp_element **out_created )
+static void xbf_exec_substream( struct xbf_ctx *ctx, int sub_idx, struct uwp_element *initial_root,
+                                struct uwp_element **out_created )
+{
+    xbf_exec_substream_rd( ctx, sub_idx, initial_root, out_created, NULL, ctx->target_rd );
+}
+
+static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
+                                    void *connector, BOOL is_uwp_conn, void *app_outer,
+                                    int only_sub_idx, struct uwp_element *attach_root,
+                                    struct uwp_element **out_created,
+                                    const char *base_xbf_path, struct uwp_rd_bucket *target_rd,
+                                    BOOL rd_only )
 {
     struct xbf_ctx ctx = {0};
     UINT64 offs[6];
@@ -6396,6 +8096,18 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
     ctx.connector = connector;
     ctx.is_uwp_conn = is_uwp_conn;
     ctx.root_comp = component;
+    ctx.target_rd = target_rd;
+    ctx.rd_only = rd_only;
+    if (base_xbf_path && base_xbf_path[0])
+    {
+        const char *slash = strrchr( base_xbf_path, '/' );
+        if (slash)
+        {
+            size_t dlen = min( (size_t)(slash - base_xbf_path + 1), sizeof(ctx.base_xbf_dir) - 1 );
+            memcpy( ctx.base_xbf_dir, base_xbf_path, dlen );
+            ctx.base_xbf_dir[dlen] = 0;
+        }
+    }
     ctx.root_el = attach_root ? attach_root : uwp_elem_from_any( component );
     if (ctx.root_el) ctx.root_el->xbf_parsed = TRUE;
 
@@ -6405,7 +8117,7 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
         if (p + 4 > xbf + 12 + ctx.meta_sz) return;
         ctx.str_cnt = *(const DWORD *)p;
         p += 4;
-        if (ctx.str_cnt > 4096) return;
+        if (ctx.str_cnt > 16384) return;
         ctx.strs = calloc( ctx.str_cnt, sizeof(WCHAR *) );
         for (i = 0; i < ctx.str_cnt && p + 4 <= xbf + 12 + ctx.meta_sz; i++)
         {
@@ -6427,7 +8139,7 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
         const DWORD *x_sids = (const DWORD *)(xp + 4);
         const BYTE *tp = xbf + 12 + (size_t)offs[3];
 
-        if (xcnt > 0 && xcnt < 1024 && xp + 4 + xcnt * 4 <= xbf + 12 + ctx.meta_sz)
+        if (xcnt > 0 && xcnt < 4096 && xp + 4 + xcnt * 4 <= xbf + 12 + ctx.meta_sz)
         {
             ctx.xmlns_cnt = xcnt;
             ctx.xmlns = calloc( xcnt, sizeof(WCHAR *) );
@@ -6443,7 +8155,7 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
         if (tp + 4 <= xbf + 12 + ctx.meta_sz)
         {
             ctx.type_cnt = *(const DWORD *)tp;
-            if (ctx.type_cnt > 0 && ctx.type_cnt < 1024)
+            if (ctx.type_cnt > 0 && ctx.type_cnt < 4096)
             {
                 ctx.types = calloc( ctx.type_cnt, sizeof(*ctx.types) );
                 for (i = 0; i < ctx.type_cnt && tp + 4 + (i + 1) * 12 <= xbf + 12 + ctx.meta_sz; i++)
@@ -6469,7 +8181,7 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
             if (pp + 4 <= xbf + 12 + ctx.meta_sz)
             {
                 ctx.prop_cnt = *(const DWORD *)pp;
-                if (ctx.prop_cnt > 0 && ctx.prop_cnt < 1024)
+                if (ctx.prop_cnt > 0 && ctx.prop_cnt < 4096)
                 {
                     ctx.props = calloc( ctx.prop_cnt, sizeof(*ctx.props) );
                     for (i = 0; i < ctx.prop_cnt && pp + 4 + (i + 1) * 12 <= xbf + 12 + ctx.meta_sz; i++)
@@ -6486,7 +8198,7 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
     }
 
     /* 3. Record XBF-referenced resources and using: controls from metadata tables */
-    if (ctx.root_el && only_sub_idx < 0)
+    if (!rd_only && ctx.root_el && only_sub_idx < 0)
     {
         const BYTE *rx = NULL;
         DWORD rsz = 0;
@@ -6506,6 +8218,34 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
                 uwp_pri_find_xbf( s, &rx, &rsz ))
             {
                 uwp_record_xbf_ref( ctx.root_el, s, s, TRUE );
+                if (wcsstr( s, L"Resource" ) || wcsstr( s, L"Theme" ) || wcsstr( s, L"Generic" ) ||
+                    wcsstr( s, L"Dictionary" ) || wcsstr( s, L"Style" ))
+                {
+                    uwp_load_res_xbf_into_bucket( ctx.base_xbf_dir, s,
+                        target_rd ? target_rd : uwp_rd_bucket_for_el( ctx.root_el, TRUE ) );
+                }
+            }
+        }
+    }
+    else if (rd_only && target_rd)
+    {
+        /* Also follow any explicit *ResourceDictionary*.xaml / *Themes/*.xaml strings referenced in this RD */
+        for (i = 0; i < ctx.str_cnt; i++)
+        {
+            const WCHAR *s = ctx.strs[i];
+            size_t slen = s ? wcslen( s ) : 0;
+            if (slen >= 5 && (!wcsicmp( s + slen - 5, L".xaml" ) || !wcsicmp( s + slen - 4, L".xbf" )) &&
+                (wcsstr( s, L"Resource" ) || wcsstr( s, L"Themes/" ) || wcsstr( s, L"Generic" ) ||
+                 wcsstr( s, L"Dark" ) || wcsstr( s, L"Dictionary" )))
+            {
+                struct uwp_rd_bucket *child = get_rd_bucket( (void *)(ULONG_PTR)(0x70000000u + (unsigned int)i + (unsigned int)g_loaded_res_xbf_cnt), TRUE );
+                if (child)
+                {
+                    uwp_load_res_xbf_into_bucket( ctx.base_xbf_dir, s, child );
+                    if (wcsstr( s, L"Dark" )) uwp_rd_link_theme( target_rd, L"Dark", child );
+                    else if (!wcsstr( s, L"Light" ) && !wcsstr( s, L"HighContrast" ))
+                        uwp_rd_link_merged( target_rd, child );
+                }
             }
         }
     }
@@ -6516,19 +8256,23 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
     {
         ctx.sub_cnt = *(const DWORD *)ctx.nodes;
         ctx.sub_base = 4 + ctx.sub_cnt * 8;
-        if (ctx.sub_cnt < 256 && ctx.sub_base <= ctx.node_sz)
+        if (ctx.sub_cnt < 2048 && ctx.sub_base <= ctx.node_sz)
         {
+            ctx.sub_done = calloc( ctx.sub_cnt, sizeof(BOOL) );
             if (only_sub_idx >= 0)
             {
-                xbf_exec_substream( &ctx, only_sub_idx, NULL, out_created );
+                xbf_exec_substream_rd( &ctx, only_sub_idx, NULL, out_created, NULL, target_rd );
+            }
+            else if (rd_only)
+            {
+                xbf_exec_substream_rd( &ctx, 0, NULL, NULL, NULL, target_rd );
             }
             else
             {
-                xbf_exec_substream( &ctx, 0, ctx.root_el, out_created );
+                xbf_exec_substream_rd( &ctx, 0, ctx.root_el, out_created, NULL, target_rd );
                 /* Also execute substream 1..N for VisualStateGroups / Styles that hold connection IDs */
                 for (i = 1; i < ctx.sub_cnt; i++)
                 {
-                    /* Skip deferred x:Load substreams until FindName realizes them */
                     BOOL is_lazy = FALSE;
                     int d;
                     if (ctx.root_el)
@@ -6537,9 +8281,10 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
                             if (ctx.root_el->defer_entries[d].sub_idx == (int)i) { is_lazy = TRUE; break; }
                     }
                     if (!is_lazy)
-                        xbf_exec_substream( &ctx, (int)i, ctx.root_el, NULL );
+                        xbf_exec_substream_rd( &ctx, (int)i, ctx.root_el, NULL, NULL, target_rd );
                 }
             }
+            free( ctx.sub_done );
         }
     }
 
@@ -6552,6 +8297,23 @@ static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable
     }
     free( ctx.types );
     free( ctx.props );
+}
+
+static void uwp_parse_xbf_into_rd( const BYTE *xbf, DWORD xbf_sz, const char *base_xbf_path,
+                                   struct uwp_rd_bucket *target_rd )
+{
+    uwp_parse_xbf_internal( xbf, xbf_sz, NULL, NULL, FALSE, NULL, -1, NULL, NULL,
+                            base_xbf_path, target_rd, TRUE );
+}
+
+static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
+                                     void *connector, BOOL is_uwp_conn, void *app_outer,
+                                     int only_sub_idx, struct uwp_element *attach_root,
+                                     struct uwp_element **out_created )
+{
+    uwp_ensure_app_resources_loaded();
+    uwp_parse_xbf_internal( xbf, xbf_sz, component, connector, is_uwp_conn, app_outer,
+                            only_sub_idx, attach_root, out_created, NULL, NULL, FALSE );
 }
 
 static void uwp_realize_deferred_entry( struct uwp_defer_entry *de )
@@ -6670,7 +8432,8 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
     int w, h;
     if (!el) return;
     if (el->visibility != 0 || el->kind == UWP_KIND_STYLE || el->kind == UWP_KIND_BRUSH ||
-        el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_DEFERRED)
+        el->kind == UWP_KIND_FLYOUT || el->kind == UWP_KIND_POPUP || el->kind == UWP_KIND_DEFERRED ||
+        el->kind == UWP_KIND_RESOURCE_DICT || el->kind == UWP_KIND_COLOR)
     {
         el->has_bounds = FALSE;
         return;
@@ -6685,6 +8448,31 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
 
     w = rc.right - rc.left;
     h = rc.bottom - rc.top;
+    if (!is_calculator_app())
+    {
+        if (el->width > 0.0 && !isnan( el->width ))
+        {
+            int ew = (int)(el->width + 0.5);
+            if (ew < w)
+            {
+                if (el->h_align == 1) rc.left += (w - ew) / 2;
+                else if (el->h_align == 2) rc.left = rc.right - ew;
+                rc.right = rc.left + ew;
+                w = ew;
+            }
+        }
+        if (el->height > 0.0 && !isnan( el->height ))
+        {
+            int eh = (int)(el->height + 0.5);
+            if (eh < h)
+            {
+                if (el->v_align == 1) rc.top += (h - eh) / 2;
+                else if (el->v_align == 2) rc.top = rc.bottom - eh;
+                rc.bottom = rc.top + eh;
+                h = eh;
+            }
+        }
+    }
     el->bounds = rc;
     el->has_bounds = (w > 0 && h > 0);
     el->actual_w = (double)w;
@@ -7029,6 +8817,8 @@ static const WCHAR *uwp_format_display_label( const struct uwp_element *el, WCHA
     return s;
 }
 
+static COLORREF g_paint_page_bg = RGB( 31, 31, 31 );
+
 static void uwp_load_image_asset( struct uwp_element *el )
 {
     WCHAR rel[MAX_PATH] = {0}, base_dir[MAX_PATH] = {0}, candidate[MAX_PATH] = {0};
@@ -7097,15 +8887,18 @@ static void uwp_load_image_asset( struct uwp_element *el )
                             if (SUCCEEDED(IWICFormatConverter_CopyPixels( conv, NULL, w * 4, w * h * 4, buf )))
                             {
                                 size_t npix = (size_t)w * h, px;
+                                BYTE pbr = GetRValue( g_paint_page_bg );
+                                BYTE pbg = GetGValue( g_paint_page_bg );
+                                BYTE pbb = GetBValue( g_paint_page_bg );
                                 for (px = 0; px < npix; px++)
                                 {
                                     BYTE b = buf[px * 4 + 0];
                                     BYTE g = buf[px * 4 + 1];
                                     BYTE r = buf[px * 4 + 2];
                                     BYTE a = buf[px * 4 + 3];
-                                    buf[px * 4 + 0] = (BYTE)((b * a + 32 * (255 - a)) / 255);
-                                    buf[px * 4 + 1] = (BYTE)((g * a + 32 * (255 - a)) / 255);
-                                    buf[px * 4 + 2] = (BYTE)((r * a + 32 * (255 - a)) / 255);
+                                    buf[px * 4 + 0] = (BYTE)((b * a + pbb * (255 - a)) / 255);
+                                    buf[px * 4 + 1] = (BYTE)((g * a + pbg * (255 - a)) / 255);
+                                    buf[px * 4 + 2] = (BYTE)((r * a + pbr * (255 - a)) / 255);
                                     buf[px * 4 + 3] = 255;
                                 }
                                 el->img_pixels = buf;
@@ -7126,8 +8919,18 @@ static void uwp_load_image_asset( struct uwp_element *el )
     }
 }
 
+static COLORREF uwp_paint_resolve_color( struct uwp_element *el, const WCHAR *key,
+                                         COLORREF fallback, COLORREF surface_bg )
+{
+    UINT32 argb = 0;
+    if (key && uwp_resolve_brush_or_color( NULL, el, key, 0, &argb ))
+        return blend_argb_over( argb, surface_bg );
+    return fallback;
+}
+
 static void uwp_paint_element( HDC hdc, struct uwp_element *el )
 {
+    COLORREF surface_bg = g_paint_page_bg;
     if (!el || !el->has_bounds || el->visibility != 0) return;
     TRACE( "uwp_paint %s (%s) kind %d bounds %ld,%ld-%ld,%ld\n",
            debugstr_w(el->class_name), debugstr_w(el->name), el->kind,
@@ -7186,8 +8989,12 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         int cx = (rc.left + rc.right) / 2;
         int cy = min( rc.bottom - 36, (rc.top + rc.bottom) / 2 + 120 );
         int r = 18;
-        HPEN track_pen = CreatePen( PS_SOLID, 3, RGB( 68, 68, 68 ) );
-        HPEN arc_pen = CreatePen( PS_SOLID, 3, RGB( 0, 120, 215 ) );
+        COLORREF track_cr = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 68, 68, 68 ), surface_bg );
+        COLORREF arc_cr = (el->has_fg && el->fg_alpha > 0)
+            ? blend_argb_over( el->fg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"AccentBrush", uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+        HPEN track_pen = CreatePen( PS_SOLID, 3, track_cr );
+        HPEN arc_pen = CreatePen( PS_SOLID, 3, arc_cr );
         HBRUSH null_br = GetStockObject( NULL_BRUSH );
         HGDIOBJ old_pen = SelectObject( hdc, track_pen );
         HGDIOBJ old_br = SelectObject( hdc, null_br );
@@ -7207,8 +9014,14 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
     if (wcsstr( el->name, L"NavRail" ))
     {
         RECT rc = el->bounds;
-        HBRUSH br = CreateSolidBrush( RGB( 22, 22, 22 ) );
-        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 38, 38, 38 ) );
+        COLORREF rail_bg = (el->has_bg && el->bg_alpha > 0)
+            ? blend_argb_over( el->bg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"BodyBackgroundBrush", RGB( 22, 22, 22 ), surface_bg );
+        COLORREF rail_bd = (el->has_border && el->border_alpha > 0)
+            ? blend_argb_over( el->border_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"BodyBackgroundStroke", RGB( 38, 38, 38 ), surface_bg );
+        HBRUSH br = CreateSolidBrush( rail_bg );
+        HPEN pen = CreatePen( PS_SOLID, 1, rail_bd );
         HGDIOBJ old_br = SelectObject( hdc, br );
         HGDIOBJ old_pen = SelectObject( hdc, pen );
         Rectangle( hdc, rc.left, rc.top, rc.right, rc.bottom );
@@ -7220,8 +9033,15 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
     else if (wcsstr( el->name, L"SearchBox" ))
     {
         RECT rc = el->bounds;
-        HBRUSH br = CreateSolidBrush( RGB( 42, 42, 42 ) );
-        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 70, 70, 70 ) );
+        COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
+            ? blend_argb_over( el->bg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 42, 42, 42 ), surface_bg );
+        COLORREF sbd = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 70, 70, 70 ), surface_bg );
+        COLORREF sfg = (el->has_fg && el->fg_alpha > 0)
+            ? blend_argb_over( el->fg_argb, sbg )
+            : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 170, 170, 170 ), sbg );
+        HBRUSH br = CreateSolidBrush( sbg );
+        HPEN pen = CreatePen( PS_SOLID, 1, sbd );
         HFONT font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
@@ -7229,7 +9049,7 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         HGDIOBJ old_pen = SelectObject( hdc, pen );
         HGDIOBJ old_font = SelectObject( hdc, font );
         RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 8, 8 );
-        SetTextColor( hdc, RGB( 170, 170, 170 ) );
+        SetTextColor( hdc, sfg );
         SetBkMode( hdc, TRANSPARENT );
         rc.left += 14;
         DrawTextW( hdc, el->text[0] ? el->text : L"\x26b2  Search apps, games, movies and more", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
@@ -7244,8 +9064,12 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
     else if (wcsstr( el->name, L"HeroBanner" ))
     {
         RECT rc = el->bounds, trc;
-        HBRUSH br = CreateSolidBrush( RGB( 20, 36, 56 ) );
-        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 0, 120, 215 ) );
+        COLORREF hbg = uwp_paint_resolve_color( el, L"SystemAccentColorDark2", RGB( 20, 36, 56 ), surface_bg );
+        COLORREF hbd = uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg );
+        COLORREF hfg = uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), hbg );
+        COLORREF hsfg = uwp_paint_resolve_color( el, L"AccentTextFillColorPrimaryBrush", RGB( 200, 220, 240 ), hbg );
+        HBRUSH br = CreateSolidBrush( hbg );
+        HPEN pen = CreatePen( PS_SOLID, 1, hbd );
         HFONT title_font = CreateFontW( -22, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
                                        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                        CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
@@ -7260,11 +9084,11 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         trc = rc;
         trc.left += 28; trc.top += 24; trc.right -= 28;
         old_font = SelectObject( hdc, title_font );
-        SetTextColor( hdc, RGB( 255, 255, 255 ) );
+        SetTextColor( hdc, hfg );
         DrawTextW( hdc, L"Featured: Essential Windows Apps", -1, &trc, DT_LEFT | DT_TOP | DT_SINGLELINE );
         SelectObject( hdc, sub_font );
         trc.top += 34;
-        SetTextColor( hdc, RGB( 200, 220, 240 ) );
+        SetTextColor( hdc, hsfg );
         DrawTextW( hdc, L"Discover top-rated tools for communication, productivity, and entertainment.", -1, &trc, DT_LEFT | DT_TOP | DT_SINGLELINE );
         SelectObject( hdc, old_font );
         SelectObject( hdc, old_pen );
@@ -7278,8 +9102,14 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
     else if (wcsstr( el->name, L"TileCard" ))
     {
         RECT rc = el->bounds;
-        HBRUSH br = CreateSolidBrush( RGB( 38, 38, 38 ) );
-        HPEN pen = CreatePen( PS_SOLID, 1, RGB( 58, 58, 58 ) );
+        COLORREF cbg = (el->has_bg && el->bg_alpha > 0)
+            ? blend_argb_over( el->bg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"ProductCardBackground", uwp_paint_resolve_color( el, L"CardBackgroundFillColorDefaultBrush", RGB( 38, 38, 38 ), surface_bg ), surface_bg );
+        COLORREF cbd = (el->has_border && el->border_alpha > 0)
+            ? blend_argb_over( el->border_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"DefaultCardBorderBrush", RGB( 58, 58, 58 ), surface_bg );
+        HBRUSH br = CreateSolidBrush( cbg );
+        HPEN pen = CreatePen( PS_SOLID, 1, cbd );
         HGDIOBJ old_br = SelectObject( hdc, br );
         HGDIOBJ old_pen = SelectObject( hdc, pen );
         RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 10, 10 );
@@ -7317,17 +9147,36 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         DeleteObject( br );
         return;
     }
+    else if (el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON && el->kind != UWP_KIND_TEXT_BLOCK)
+    {
+        /* Paint resolved Background / BorderBrush for containers (Page, UserControl, Grid, Border, StackPanel) */
+        if (el->has_bg && el->bg_alpha > 0)
+        {
+            COLORREF bg = blend_argb_over( el->bg_argb, surface_bg );
+            HBRUSH br = CreateSolidBrush( bg );
+            FillRect( hdc, &el->bounds, br );
+            DeleteObject( br );
+        }
+        if (el->has_border && el->border_alpha > 0)
+        {
+            COLORREF bd = blend_argb_over( el->border_argb, surface_bg );
+            HBRUSH br = CreateSolidBrush( bd );
+            FrameRect( hdc, &el->bounds, br );
+            DeleteObject( br );
+        }
+    }
 
     if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
     {
         RECT brc = el->bounds;
         WCHAR tmp[64];
         const WCHAR *label = uwp_format_display_label( el, tmp, ARRAY_SIZE(tmp) );
-        COLORREF bg;
-        HBRUSH br;
-        HPEN pen;
+        COLORREF bg, fg, bd;
+        BOOL draw_bg = TRUE, draw_bd = TRUE;
+        HBRUSH br = NULL;
+        HPEN pen = NULL;
         HFONT font;
-        HGDIOBJ old_br, old_pen, old_font;
+        HGDIOBJ old_br = NULL, old_pen = NULL, old_font;
         int fh;
 
         /* Skip invisible shortcut-only buttons (CopyButton, PasteButton) */
@@ -7341,7 +9190,8 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
             if (selected)
             {
                 RECT bar = rc;
-                HBRUSH abr = CreateSolidBrush( RGB( 0, 120, 215 ) );
+                COLORREF accent_cr = uwp_paint_resolve_color( el, L"AccentBrush", uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+                HBRUSH abr = CreateSolidBrush( accent_cr );
                 bar.right = bar.left + 3;
                 bar.top += 4; bar.bottom -= 4;
                 FillRect( hdc, &bar, abr );
@@ -7353,7 +9203,10 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                                               FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                               CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
                 HGDIOBJ old_nav_font = SelectObject( hdc, nav_font );
-                SetTextColor( hdc, selected ? RGB( 255, 255, 255 ) : RGB( 180, 180, 180 ) );
+                COLORREF nfg = selected
+                    ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), surface_bg )
+                    : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 180, 180, 180 ), surface_bg );
+                SetTextColor( hdc, nfg );
                 SetBkMode( hdc, TRANSPARENT );
                 DrawTextW( hdc, label, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
                 SelectObject( hdc, old_nav_font );
@@ -7365,37 +9218,90 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         InflateRect( &brc, -2, -2 );
         if (brc.right <= brc.left || brc.bottom <= brc.top) return;
 
-        if (wcsstr( el->name, L"GetButton" ) || !wcscmp( label, L"Get" ) || !wcscmp( label, L"Free" ))
-            bg = el->is_pressed ? RGB( 0, 90, 170 ) : RGB( 0, 120, 215 );
-        else if (!wcscmp( el->name, L"EqualButton" ) || (!wcscmp( label, L"=" ) && label[1] == 0))
-            bg = el->is_pressed ? RGB( 0, 90, 170 ) : RGB( 0, 120, 215 );
+        if (el->has_bg)
+        {
+            if (el->bg_alpha == 0)
+            {
+                draw_bg = el->is_pressed || el->is_hovered;
+                bg = el->is_pressed ? RGB( 55, 55, 55 ) : (el->is_hovered ? RGB( 45, 45, 45 ) : surface_bg);
+            }
+            else
+            {
+                bg = blend_argb_over( el->bg_argb, surface_bg );
+                if (el->is_pressed)
+                    bg = RGB( max( 0, (int)GetRValue(bg) - 20 ), max( 0, (int)GetGValue(bg) - 20 ), max( 0, (int)GetBValue(bg) - 20 ) );
+            }
+        }
+        else if (wcsstr( el->name, L"GetButton" ) || !wcscmp( label, L"Get" ) || !wcscmp( label, L"Free" ) ||
+                 !wcscmp( el->name, L"EqualButton" ) || (!wcscmp( label, L"=" ) && label[1] == 0))
+        {
+            bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
+                     uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+            if (el->is_pressed)
+                bg = RGB( max( 0, (int)GetRValue(bg) - 25 ), max( 0, (int)GetGValue(bg) - 25 ), max( 0, (int)GetBValue(bg) - 25 ) );
+        }
         else if (wcsstr( el->name, L"Num" ) || !wcscmp( el->name, L"DecimalSeparatorButton" ) ||
                  !wcscmp( el->name, L"NegateButton" ))
-            bg = el->is_pressed ? RGB( 45, 45, 45 ) : (el->is_enabled ? RGB( 59, 59, 59 ) : RGB( 38, 38, 38 ));
+        {
+            bg = uwp_paint_resolve_color( el, L"CalcButtonFillColorDefaultBrush",
+                     uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 59, 59, 59 ), surface_bg ), surface_bg );
+            if (el->is_pressed)
+                bg = RGB( max( 0, (int)GetRValue(bg) - 14 ), max( 0, (int)GetGValue(bg) - 14 ), max( 0, (int)GetBValue(bg) - 14 ) );
+        }
         else
-            bg = el->is_pressed ? RGB( 40, 40, 40 ) : (el->is_enabled ? RGB( 50, 50, 50 ) : RGB( 36, 36, 36 ));
+        {
+            bg = uwp_paint_resolve_color( el, L"CalcButtonAltFillColorDefaultBrush",
+                     uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg ), surface_bg );
+            if (el->is_pressed)
+                bg = RGB( max( 0, (int)GetRValue(bg) - 12 ), max( 0, (int)GetGValue(bg) - 12 ), max( 0, (int)GetBValue(bg) - 12 ) );
+        }
 
-        br = CreateSolidBrush( bg );
-        pen = CreatePen( PS_SOLID, 1, RGB( 68, 68, 68 ) );
+        if (el->has_border)
+        {
+            draw_bd = (el->border_alpha > 0);
+            bd = blend_argb_over( el->border_argb, surface_bg );
+        }
+        else if (!draw_bg)
+        {
+            draw_bd = FALSE;
+            bd = surface_bg;
+        }
+        else
+        {
+            bd = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 68, 68, 68 ), surface_bg );
+        }
+
+        if (!el->is_enabled)
+            fg = uwp_paint_resolve_color( el, L"TextFillColorDisabledBrush", RGB( 120, 120, 120 ), bg );
+        else if (el->has_fg && el->fg_alpha > 0)
+            fg = blend_argb_over( el->fg_argb, bg );
+        else
+            fg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), bg );
+
         fh = max( (int)(12 * g_layout_scale + 0.5f), min( (int)(24 * g_layout_scale + 0.5f), (int)((brc.bottom - brc.top) * 2 / 5) ) );
         font = CreateFontW( -fh, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                             CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
 
-        old_br = SelectObject( hdc, br );
-        old_pen = SelectObject( hdc, pen );
         old_font = SelectObject( hdc, font );
-        RoundRect( hdc, brc.left, brc.top, brc.right, brc.bottom, 6, 6 );
-        SetTextColor( hdc, el->is_enabled ? RGB( 255, 255, 255 ) : RGB( 120, 120, 120 ) );
+        if (draw_bg || draw_bd)
+        {
+            br = draw_bg ? CreateSolidBrush( bg ) : NULL;
+            pen = draw_bd ? CreatePen( PS_SOLID, 1, bd ) : NULL;
+            old_br = SelectObject( hdc, br ? (HGDIOBJ)br : GetStockObject( NULL_BRUSH ) );
+            old_pen = SelectObject( hdc, pen ? (HGDIOBJ)pen : GetStockObject( NULL_PEN ) );
+            RoundRect( hdc, brc.left, brc.top, brc.right, brc.bottom, 6, 6 );
+            SelectObject( hdc, old_pen );
+            SelectObject( hdc, old_br );
+            if (pen) DeleteObject( pen );
+            if (br) DeleteObject( br );
+        }
+        SetTextColor( hdc, fg );
         SetBkMode( hdc, TRANSPARENT );
         if (label[0])
             DrawTextW( hdc, label, -1, &brc, DT_CENTER | DT_VCENTER | DT_SINGLELINE );
         SelectObject( hdc, old_font );
-        SelectObject( hdc, old_pen );
-        SelectObject( hdc, old_br );
         DeleteObject( font );
-        DeleteObject( pen );
-        DeleteObject( br );
         return;
     }
 
@@ -7408,7 +9314,8 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                       CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
             HGDIOBJ old_font = SelectObject( hdc, font );
-            SetTextColor( hdc, RGB( 255, 215, 0 ) );
+            COLORREF rfg = (el->has_fg && el->fg_alpha > 0) ? blend_argb_over( el->fg_argb, surface_bg ) : RGB( 255, 215, 0 );
+            SetTextColor( hdc, rfg );
             SetBkMode( hdc, TRANSPARENT );
             DrawTextW( hdc, el->text[0] ? el->text : L"\x2605 4.8", -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
             SelectObject( hdc, old_font );
@@ -7422,7 +9329,10 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                                       DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                       CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
             HGDIOBJ old_font = SelectObject( hdc, font );
-            SetTextColor( hdc, RGB( 150, 150, 150 ) );
+            COLORREF cfg = (el->has_fg && el->fg_alpha > 0)
+                ? blend_argb_over( el->fg_argb, surface_bg )
+                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 150, 150, 150 ), surface_bg );
+            SetTextColor( hdc, cfg );
             SetBkMode( hdc, TRANSPARENT );
             DrawTextW( hdc, el->text, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
             SelectObject( hdc, old_font );
@@ -7450,7 +9360,10 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
                                       FALSE, FALSE, FALSE, DEFAULT_CHARSET, OUT_DEFAULT_PRECIS,
                                       CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
             HGDIOBJ old_font = SelectObject( hdc, font );
-            SetTextColor( hdc, RGB( 255, 255, 255 ) );
+            COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
+                ? blend_argb_over( el->fg_argb, surface_bg )
+                : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
+            SetTextColor( hdc, tfg );
             SetBkMode( hdc, TRANSPARENT );
             InflateRect( &trc, -8, 0 );
             DrawTextW( hdc, el->text, -1, &trc,
@@ -7481,16 +9394,30 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
 {
     RECT rc;
     HBRUSH bg_brush;
-    struct uwp_element *root_el;
+    struct uwp_element *root_el, *bg_scope;
+    COLORREF page_bg;
 
     if (width <= 0 || height <= 0 || !hdc) return;
+    uwp_ensure_app_resources_loaded();
     xaml_get_layout_metrics( hwnd, NULL, &g_layout_scale );
     SetRect( &rc, 0, 0, width, height );
-    bg_brush = CreateSolidBrush( RGB( 32, 32, 32 ) );
+
+    root_el = uwp_elem_from_any( content );
+    bg_scope = (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
+                !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
+        ? g_navigated_page_el : root_el;
+
+    if (bg_scope && bg_scope->has_bg && bg_scope->bg_alpha > 0)
+        page_bg = blend_argb_over( bg_scope->bg_argb, RGB( 31, 31, 31 ) );
+    else
+        page_bg = uwp_paint_resolve_color( bg_scope, L"ApplicationPageBackgroundThemeBrush",
+                                           RGB( 31, 31, 31 ), RGB( 31, 31, 31 ) );
+    g_paint_page_bg = page_bg;
+
+    bg_brush = CreateSolidBrush( page_bg );
     FillRect( hdc, &rc, bg_brush );
     DeleteObject( bg_brush );
 
-    root_el = uwp_elem_from_any( content );
     if (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
         !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
     {
@@ -7694,6 +9621,456 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
         }
     }
     return FALSE;
+}
+
+/* ============================================================================
+ * 7b. Generic Pointer Hit-Testing, Capture, Bubbling & PointerRoutedEventArgs
+ * ============================================================================ */
+
+static const GUID IID_IRoutedEventArgs_UWP =
+    { 0x5c985ac6, 0xd802, 0x4b38, { 0xa2, 0x23, 0xbf, 0x07, 0x0c, 0x43, 0xfe, 0xdf } };
+static const GUID IID_IPointerRoutedEventArgs_UWP =
+    { 0xda628f0a, 0x9752, 0x49e2, { 0xbd, 0xe2, 0x49, 0xec, 0xca, 0xb9, 0x19, 0x4d } };
+static const GUID IID_IPointer_UWP =
+    { 0x5ee8f39f, 0x747d, 0x4171, { 0x90, 0xe6, 0xcd, 0x37, 0xa9, 0xdf, 0xfb, 0x11 } };
+
+struct uwp_pointer
+{
+    const void **lpVtbl;
+    LONG ref;
+    UINT32 pointer_id;
+    BOOL is_in_contact;
+    BOOL is_in_range;
+};
+
+static HRESULT WINAPI uwp_ptr_QI( void *iface, REFIID iid, void **out )
+{
+    struct uwp_pointer *p = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPointer_UWP ))
+    {
+        InterlockedIncrement( &p->ref );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI uwp_ptr_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_pointer *)iface)->ref );
+}
+static ULONG WINAPI uwp_ptr_Release( void *iface )
+{
+    struct uwp_pointer *p = iface;
+    ULONG ref = InterlockedDecrement( &p->ref );
+    if (!ref) free( p );
+    return ref;
+}
+static HRESULT WINAPI uwp_ptr_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Input.Pointer", 29, name );
+}
+static HRESULT WINAPI uwp_ptr_get_PointerId( void *iface, UINT32 *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct uwp_pointer *)iface)->pointer_id;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ptr_get_PointerDeviceType( void *iface, PointerDeviceType *val )
+{
+    if (!val) return E_POINTER;
+    *val = PointerDeviceType_Mouse;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ptr_get_IsInContact( void *iface, boolean *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct uwp_pointer *)iface)->is_in_contact ? TRUE : FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI uwp_ptr_get_IsInRange( void *iface, boolean *val )
+{
+    if (!val) return E_POINTER;
+    *val = ((struct uwp_pointer *)iface)->is_in_range ? TRUE : FALSE;
+    return S_OK;
+}
+static const void *uwp_ptr_vtbl[] =
+{
+    uwp_ptr_QI,
+    uwp_ptr_AddRef,
+    uwp_ptr_Release,
+    uwp_sub_GetIids,
+    uwp_ptr_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    uwp_ptr_get_PointerId,
+    uwp_ptr_get_PointerDeviceType,
+    uwp_ptr_get_IsInContact,
+    uwp_ptr_get_IsInRange,
+};
+
+struct uwp_pointer_routed_args
+{
+    const void **IPointerRoutedEventArgs_vtbl;
+    const void **IRoutedEventArgs_vtbl;
+    LONG ref;
+    struct xaml_pointer_info info;
+    IInspectable *orig_source;
+    struct uwp_pointer *pointer;
+    boolean handled;
+};
+
+static inline struct uwp_pointer_routed_args *pra_from_routed( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct uwp_pointer_routed_args, IRoutedEventArgs_vtbl );
+}
+
+static HRESULT WINAPI pra_QI( void *iface, REFIID iid, void **out )
+{
+    struct uwp_pointer_routed_args *a = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IPointerRoutedEventArgs_UWP ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->IPointerRoutedEventArgs_vtbl;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IRoutedEventArgs_UWP ))
+    {
+        InterlockedIncrement( &a->ref );
+        *out = &a->IRoutedEventArgs_vtbl;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI pra_AddRef( void *iface )
+{
+    return InterlockedIncrement( &((struct uwp_pointer_routed_args *)iface)->ref );
+}
+static ULONG WINAPI pra_Release( void *iface )
+{
+    struct uwp_pointer_routed_args *a = iface;
+    ULONG ref = InterlockedDecrement( &a->ref );
+    if (!ref)
+    {
+        if (a->orig_source) IInspectable_Release( a->orig_source );
+        if (a->pointer) uwp_ptr_Release( a->pointer );
+        free( a );
+    }
+    return ref;
+}
+static HRESULT WINAPI pra_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Input.PointerRoutedEventArgs", 44, name );
+}
+static HRESULT WINAPI pra_get_Pointer( void *iface, void **value )
+{
+    struct uwp_pointer_routed_args *a = iface;
+    if (!value) return E_POINTER;
+    if (!a->pointer)
+    {
+        a->pointer = calloc( 1, sizeof(*a->pointer) );
+        if (a->pointer)
+        {
+            a->pointer->lpVtbl = uwp_ptr_vtbl;
+            a->pointer->ref = 1;
+            a->pointer->pointer_id = a->info.pointer_id ? a->info.pointer_id : 1;
+            a->pointer->is_in_contact = a->info.is_in_contact;
+            a->pointer->is_in_range = a->info.is_in_window;
+        }
+    }
+    *value = a->pointer;
+    if (*value) uwp_ptr_AddRef( *value );
+    return S_OK;
+}
+static HRESULT WINAPI pra_get_KeyModifiers( void *iface, UINT32 *value )
+{
+    struct uwp_pointer_routed_args *a = iface;
+    if (!value) return E_POINTER;
+    *value = a->info.key_modifiers;
+    return S_OK;
+}
+static HRESULT WINAPI pra_get_Handled( void *iface, boolean *value )
+{
+    struct uwp_pointer_routed_args *a = iface;
+    if (!value) return E_POINTER;
+    *value = a->handled;
+    return S_OK;
+}
+static HRESULT WINAPI pra_put_Handled( void *iface, boolean value )
+{
+    struct uwp_pointer_routed_args *a = iface;
+    a->handled = value;
+    return S_OK;
+}
+static HRESULT WINAPI pra_GetCurrentPoint( void *iface, void *relative_to, IPointerPoint **value )
+{
+    struct uwp_pointer_routed_args *a = iface;
+    float rx = a->info.x, ry = a->info.y;
+    struct uwp_element *rel;
+
+    if (!value) return E_POINTER;
+    if (relative_to && (rel = uwp_elem_from_any( relative_to )) != NULL && rel->has_bounds)
+    {
+        rx -= (float)rel->bounds.left;
+        ry -= (float)rel->bounds.top;
+    }
+    *value = xaml_pointer_point_create( &a->info, rx, ry );
+    return *value ? S_OK : E_OUTOFMEMORY;
+}
+static HRESULT WINAPI pra_GetIntermediatePoints( void *iface, void *relative_to, void **value )
+{
+    if (!value) return E_POINTER;
+    *value = NULL;
+    return S_OK;
+}
+
+static const void *pra_vtbl[] =
+{
+    pra_QI,
+    pra_AddRef,
+    pra_Release,
+    uwp_sub_GetIids,
+    pra_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    pra_get_Pointer,
+    pra_get_KeyModifiers,
+    pra_get_Handled,
+    pra_put_Handled,
+    pra_GetCurrentPoint,
+    pra_GetIntermediatePoints,
+};
+
+static HRESULT WINAPI pra_routed_QI( void *iface, REFIID iid, void **out )
+{
+    return pra_QI( pra_from_routed( iface ), iid, out );
+}
+static ULONG WINAPI pra_routed_AddRef( void *iface )
+{
+    return pra_AddRef( pra_from_routed( iface ) );
+}
+static ULONG WINAPI pra_routed_Release( void *iface )
+{
+    return pra_Release( pra_from_routed( iface ) );
+}
+static HRESULT WINAPI pra_routed_get_OriginalSource( void *iface, IInspectable **value )
+{
+    struct uwp_pointer_routed_args *a = pra_from_routed( iface );
+    if (!value) return E_POINTER;
+    *value = a->orig_source;
+    if (*value) IInspectable_AddRef( *value );
+    return S_OK;
+}
+static const void *pra_routed_vtbl[] =
+{
+    pra_routed_QI,
+    pra_routed_AddRef,
+    pra_routed_Release,
+    uwp_sub_GetIids,
+    pra_GetRuntimeClassName,
+    uwp_sub_GetTrustLevel,
+    pra_routed_get_OriginalSource,
+};
+
+static struct uwp_pointer_routed_args *uwp_pointer_routed_args_create( const struct xaml_pointer_info *info,
+                                                                      IInspectable *orig_source )
+{
+    struct uwp_pointer_routed_args *a = calloc( 1, sizeof(*a) );
+    if (!a) return NULL;
+    a->IPointerRoutedEventArgs_vtbl = pra_vtbl;
+    a->IRoutedEventArgs_vtbl = pra_routed_vtbl;
+    a->ref = 1;
+    if (info) a->info = *info;
+    a->orig_source = orig_source;
+    if (orig_source) IInspectable_AddRef( orig_source );
+    return a;
+}
+
+static struct uwp_element *uwp_hit_test_element( struct uwp_element *el, int x, int y )
+{
+    if (!el || !el->has_bounds || el->visibility != 0 || !el->is_enabled || !el->is_hit_test_visible)
+        return NULL;
+    if (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom)
+        return NULL;
+
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        int k;
+        for (k = (int)children->count - 1; k >= 0; k--)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            struct uwp_element *hit;
+            if (ch && !ch->parent) ch->parent = el;
+            hit = uwp_hit_test_element( ch, x, y );
+            if (hit) return hit;
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        struct uwp_element *hit;
+        if (ch && !ch->parent && ch != el) ch->parent = el;
+        hit = uwp_hit_test_element( ch, x, y );
+        if (hit) return hit;
+    }
+    return el;
+}
+
+static struct xaml_event_registry *uwp_elem_ptr_registry( struct uwp_element *el, enum xaml_pointer_event_kind kind )
+{
+    if (!el) return NULL;
+    switch (kind)
+    {
+    case XAML_PTR_PRESSED:      return &el->ptr_pressed_reg;
+    case XAML_PTR_MOVED:        return &el->ptr_moved_reg;
+    case XAML_PTR_RELEASED:     return &el->ptr_released_reg;
+    case XAML_PTR_WHEEL:        return &el->ptr_wheel_reg;
+    case XAML_PTR_ENTERED:      return &el->ptr_entered_reg;
+    case XAML_PTR_EXITED:       return &el->ptr_exited_reg;
+    case XAML_PTR_CAPTURE_LOST: return &el->ptr_capture_lost_reg;
+    }
+    return NULL;
+}
+
+static BOOL uwp_fire_element_pointer( struct uwp_element *target, enum xaml_pointer_event_kind kind,
+                                      const struct xaml_pointer_info *info, BOOL bubble )
+{
+    struct uwp_pointer_routed_args *args;
+    struct uwp_element *cur;
+    BOOL fired = FALSE;
+
+    if (!target) return FALSE;
+    args = uwp_pointer_routed_args_create( info, target->outer ? target->outer : &target->IInspectable_iface );
+    if (!args) return FALSE;
+
+    for (cur = target; cur && !args->handled; cur = bubble ? cur->parent : NULL)
+    {
+        struct xaml_event_registry *reg = uwp_elem_ptr_registry( cur, kind );
+        void *handlers[64];
+        unsigned int i, count = reg ? xaml_event_registry_snapshot( reg, handlers, ARRAY_SIZE( handlers ) ) : 0;
+        IInspectable *sender = cur->outer ? cur->outer : &cur->IInspectable_iface;
+
+        for (i = 0; i < count; i++)
+        {
+            HRESULT (WINAPI *invoke)(void *, void *, void *) = (void *)(*(void ***)handlers[i])[3];
+            if (invoke)
+            {
+                __TRY
+                {
+                    invoke( handlers[i], sender, &args->IPointerRoutedEventArgs_vtbl );
+                    fired = TRUE;
+                }
+                __EXCEPT_ALL
+                {
+                    TRACE( "uwp_fire_element_pointer: handler %p faulted on %s\n", handlers[i], debugstr_w(cur->name) );
+                }
+                __ENDTRY;
+            }
+            IUnknown_Release( (IUnknown *)handlers[i] );
+        }
+    }
+
+    pra_Release( args );
+    return fired;
+}
+
+BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, const struct xaml_pointer_info *info,
+                              int width, int height, IInspectable *root_content )
+{
+    static struct uwp_element *last_root = NULL;
+    static int last_w = 0, last_h = 0;
+    struct uwp_element *root_el = uwp_elem_from_any( root_content );
+    struct uwp_element *target = NULL;
+    BOOL fired = FALSE;
+
+    if (!info) return FALSE;
+    if (!root_el && g_navigated_page_el) root_el = g_navigated_page_el;
+    if (!root_el) return FALSE;
+    if (root_el->kind == UWP_KIND_FRAME && g_navigated_page_el)
+        root_el = g_navigated_page_el;
+
+    if (width > 0 && height > 0 &&
+        (!root_el->has_bounds || g_layout_dirty || root_el != last_root || width != last_w || height != last_h))
+    {
+        RECT rc = { 0, 0, width, height };
+        uwp_arrange_element( root_el, rc );
+        g_layout_dirty = FALSE;
+        last_root = root_el;
+        last_w = width;
+        last_h = height;
+    }
+
+    if (kind == XAML_PTR_EXITED)
+    {
+        if (g_hovered_elem)
+        {
+            g_hovered_elem->is_hovered = FALSE;
+            uwp_fire_element_pointer( g_hovered_elem, XAML_PTR_EXITED, info, FALSE );
+            g_hovered_elem = NULL;
+        }
+        return TRUE;
+    }
+
+    if (kind == XAML_PTR_CAPTURE_LOST)
+    {
+        if (g_captured_elem)
+        {
+            struct uwp_element *cap = g_captured_elem;
+            g_captured_elem = NULL;
+            uwp_fire_element_pointer( cap, XAML_PTR_CAPTURE_LOST, info, FALSE );
+        }
+        return TRUE;
+    }
+
+    target = g_captured_elem ? g_captured_elem : uwp_hit_test_element( root_el, (int)info->x, (int)info->y );
+
+    if (!g_captured_elem && target != g_hovered_elem)
+    {
+        if (g_hovered_elem)
+        {
+            g_hovered_elem->is_hovered = FALSE;
+            uwp_fire_element_pointer( g_hovered_elem, XAML_PTR_EXITED, info, FALSE );
+        }
+        g_hovered_elem = target;
+        if (target)
+        {
+            target->is_hovered = TRUE;
+            uwp_fire_element_pointer( target, XAML_PTR_ENTERED, info, FALSE );
+        }
+    }
+
+    if (!target) return FALSE;
+
+    if (kind == XAML_PTR_PRESSED)
+    {
+        g_captured_elem = target;
+        TRACE( "pointer: pressed routed to element %p (%s / %s) at (%d,%d)\n",
+               target, debugstr_w(target->class_name), debugstr_w(target->name), (int)info->x, (int)info->y );
+        fired = uwp_fire_element_pointer( target, XAML_PTR_PRESSED, info, TRUE );
+    }
+    else if (kind == XAML_PTR_MOVED)
+    {
+        fired = uwp_fire_element_pointer( target, XAML_PTR_MOVED, info, TRUE );
+    }
+    else if (kind == XAML_PTR_RELEASED)
+    {
+        fired = uwp_fire_element_pointer( target, XAML_PTR_RELEASED, info, TRUE );
+        g_captured_elem = NULL;
+    }
+    else if (kind == XAML_PTR_WHEEL)
+    {
+        fired = uwp_fire_element_pointer( target, XAML_PTR_WHEEL, info, TRUE );
+    }
+
+    return fired || (kind == XAML_PTR_PRESSED);
 }
 
 /* ============================================================================
@@ -7904,6 +10281,7 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
          wcsstr( f->class_name, L"Trigger" ) ||
          wcsstr( f->class_name, L"Transition" ) ||
          wcsstr( f->class_name, L"Extension" ) ||
+         wcsstr( f->class_name, L"BitmapSource" ) ||
          wcsstr( f->class_name, L"Collection" )))
     {
         *out = (void *)&f->IComposableFactory_iface;
@@ -8198,10 +10576,22 @@ static const void *feap_statics_vtbl[16] =
 static struct uwp_class_factory feap_factory_obj =
     { {(const struct IActivationFactoryVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, {(const struct IInspectableVtbl *)feap_statics_vtbl}, L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer" };
 
-static HRESULT WINAPI scb_factory_CreateInstanceWithColor( void *iface, UINT32 color, void **out )
+static HRESULT WINAPI scb_factory_CreateInstanceWithColor( void *iface, Color color, void **out )
 {
+    HRESULT hr;
     if (!out) return E_POINTER;
-    return uwp_element_create( L"Windows.UI.Xaml.Media.SolidColorBrush", NULL, NULL, out );
+    hr = uwp_element_create( L"Windows.UI.Xaml.Media.SolidColorBrush", NULL, NULL, out );
+    if (SUCCEEDED(hr) && *out)
+    {
+        struct uwp_element *el = uwp_elem_from_any( *out );
+        if (el)
+        {
+            el->brush_argb = ((UINT32)color.A << 24) | ((UINT32)color.R << 16) | ((UINT32)color.G << 8) | color.B;
+            el->has_brush_argb = TRUE;
+            el->brush_opacity = 1.0;
+        }
+    }
+    return hr;
 }
 static const void *scb_factory_vtbl[16] =
 {
@@ -8263,8 +10653,16 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         return S_OK;
     }
 
-    /* For UWP apps (Calculator, Store), serve all Windows.UI.Xaml.* and Microsoft.UI.Xaml.* runtime classes with our UWP multi-iface element factory */
-    if (is_uwp_xaml_app() &&
+    /* For UWP apps (Calculator, Store), serve all Windows.UI.Xaml.* and Microsoft.UI.Xaml.* runtime classes with our UWP multi-iface element factory;
+     * also serve core Windows.UI.Xaml.Controls panels/buttons outside WhatsApp so UWP controls use the layout/pointer engine. */
+    if ((is_uwp_xaml_app() ||
+         (!is_whatsapp_app() &&
+          (!wcscmp( buf, L"Windows.UI.Xaml.Controls.Grid" ) ||
+           !wcscmp( buf, L"Windows.UI.Xaml.Controls.StackPanel" ) ||
+           !wcscmp( buf, L"Windows.UI.Xaml.Controls.Panel" ) ||
+           !wcscmp( buf, L"Windows.UI.Xaml.Controls.Border" ) ||
+           !wcscmp( buf, L"Windows.UI.Xaml.Controls.Canvas" ) ||
+           !wcscmp( buf, L"Windows.UI.Xaml.Controls.Button" )))) &&
         (!wcsncmp( buf, L"Windows.UI.Xaml.", 16 ) || !wcsncmp( buf, L"Microsoft.UI.Xaml.", 18 )) &&
         wcscmp( buf, L"Windows.UI.Xaml.Application" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Window" ) != 0 &&
