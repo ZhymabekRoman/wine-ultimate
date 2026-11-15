@@ -41,3 +41,4 @@
 @ stdcall DCompPrivates_SetCommitCompletionEvent(ptr ptr)
 @ stdcall DCompPrivates_SetVisualRelativeSize(ptr int64)
 @ stub DCompPrivates_SetVisualSize
+@ stdcall -private wine_dcomp_get_composite_count(ptr)

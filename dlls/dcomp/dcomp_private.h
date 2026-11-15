@@ -26,6 +26,8 @@
 #include "wine/list.h"
 
 struct wined3d_swapchain;
+struct composite_frame;
+struct target_snapshot;
 
 struct composition_device
 {
@@ -42,6 +44,23 @@ struct composition_device
     IUnknown *rendering_device;
     IDCompositionSurfaceFactory *surface_factory;
     struct list dev_entry;
+    struct composite_frame *frame_buf;
+    unsigned int frame_buf_count;
+    unsigned int frame_buf_cap;
+    struct target_snapshot *snap_buf;
+    unsigned int snap_buf_count;
+    unsigned int snap_buf_cap;
+    HANDLE *handle_buf;
+    unsigned int handle_buf_count;
+    unsigned int handle_buf_cap;
+    LONG last_tree_version;
+    LONG last_xform_version;
+    BOOL last_has_shared;
+    ULONGLONG last_composite_qpc;
+    LARGE_INTEGER qpc_freq;
+    unsigned int refresh_period_ms;
+    LONG commit_pending;
+    LONG composite_count;
 };
 
 enum dcomp_object_kind
@@ -194,6 +213,7 @@ struct composition_visual
     unsigned int shared_dirty_count;/* server-side dirty/generation counter of the shared visual */
     int version;
     unsigned int content_version;   /* bumped whenever the visual content is (re)set: change counter */
+    unsigned int transform_version; /* bumped on offset/transform/effect/clip changes (no tree rebuild) */
     unsigned int composited_version;/* content_version as of the last blit to the window */
     unsigned int composited_transform_version; /* transform/effect version as of last blit */
     HWND composited_hwnd;           /* window last composited into */
@@ -275,6 +295,8 @@ void visual_get_transform_3d(const struct composition_visual *visual, UINT width
 unsigned int visual_get_transform_version(const struct composition_visual *visual);
 struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain);
 extern struct list dcomp_devices;
+extern volatile LONG dcomp_tree_version;
+extern volatile LONG dcomp_transform_version;
 
 
 #endif /* __WINE_DCOMP_PRIVATE_H */

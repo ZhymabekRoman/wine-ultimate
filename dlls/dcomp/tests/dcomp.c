@@ -36,6 +36,7 @@
 static HRESULT (WINAPI *pDCompositionCreateDevice)(IDXGIDevice *dxgi_device, REFIID iid, void **device);
 static HRESULT (WINAPI *pDCompositionCreateDevice2)(IUnknown *rendering_device, REFIID iid, void **device);
 static HRESULT (WINAPI *pDCompositionCreateDevice3)(IUnknown *rendering_device, REFIID iid, void **device);
+static LONG (WINAPI *pWineDcompGetCompositeCount)(IDCompositionDevice *device);
 
 static void *get_stack_pointer(void)
 {
@@ -2563,6 +2564,167 @@ static void test_transforms_3d(void)
     ok(!refcount, "Device has %lu references left.\n", refcount);
 }
 
+static void test_container_offset_and_clip(void)
+{
+    IDCompositionVisual *root_visual, *bg_visual, *clip_container, *scroll_container, *item_visual;
+    IDCompositionSurfaceFactory *surface_factory;
+    IDCompositionDevice2 *dcomp_device2;
+    IDCompositionDevice *dcomp_device;
+    DCOMPOSITION_FRAME_STATISTICS stats;
+    IDCompositionSurface *bg_surface, *surface;
+    IDCompositionTarget *target;
+    IDXGISurface *dxgi_surface;
+    IDXGIDevice *dxgi_device;
+    D2D1_COLOR_F color;
+    LONG base_count, end_count, delta;
+    ULONG refcount;
+    POINT offset;
+    HRESULT hr;
+    HWND hwnd;
+    int i;
+
+    if (!(dxgi_device = create_device(D3D10_CREATE_DEVICE_BGRA_SUPPORT)))
+    {
+        skip("Failed to create device.\n");
+        return;
+    }
+
+    hr = pDCompositionCreateDevice2((IUnknown *)dxgi_device, &IID_IDCompositionDevice,
+            (void **)&dcomp_device);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+    hr = IDCompositionDevice_QueryInterface(dcomp_device, &IID_IDCompositionDevice2, (void **)&dcomp_device2);
+    ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
+
+    hwnd = create_window();
+    flush_events();
+
+    hr = IDCompositionDevice_CreateTargetForHwnd(dcomp_device, hwnd, TRUE, &target);
+    ok(hr == S_OK, "CreateTargetForHwnd hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &root_visual);
+    ok(hr == S_OK, "CreateVisual hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &bg_visual);
+    ok(hr == S_OK, "CreateVisual hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &clip_container);
+    ok(hr == S_OK, "CreateVisual hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &scroll_container);
+    ok(hr == S_OK, "CreateVisual hr %#lx.\n", hr);
+    hr = IDCompositionDevice_CreateVisual(dcomp_device, &item_visual);
+    ok(hr == S_OK, "CreateVisual hr %#lx.\n", hr);
+
+    hr = IDCompositionVisual_AddVisual(root_visual, bg_visual, TRUE, NULL);
+    ok(hr == S_OK, "AddVisual hr %#lx.\n", hr);
+    hr = IDCompositionVisual_AddVisual(root_visual, clip_container, TRUE, NULL);
+    ok(hr == S_OK, "AddVisual hr %#lx.\n", hr);
+    hr = IDCompositionVisual_AddVisual(clip_container, scroll_container, TRUE, NULL);
+    ok(hr == S_OK, "AddVisual hr %#lx.\n", hr);
+    hr = IDCompositionVisual_AddVisual(scroll_container, item_visual, TRUE, NULL);
+    ok(hr == S_OK, "AddVisual hr %#lx.\n", hr);
+    hr = IDCompositionTarget_SetRoot(target, root_visual);
+    ok(hr == S_OK, "SetRoot hr %#lx.\n", hr);
+
+    hr = IDCompositionDevice2_CreateSurfaceFactory(dcomp_device2, (IUnknown *)dxgi_device, &surface_factory);
+    ok(hr == S_OK, "CreateSurfaceFactory hr %#lx.\n", hr);
+    hr = IDCompositionSurfaceFactory_CreateSurface(surface_factory, 300, 300, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_IGNORE, &bg_surface);
+    ok(hr == S_OK, "CreateSurface hr %#lx.\n", hr);
+    hr = IDCompositionSurface_BeginDraw(bg_surface, NULL, &IID_IDXGISurface, (void **)&dxgi_surface, &offset);
+    ok(hr == S_OK, "BeginDraw hr %#lx.\n", hr);
+    set_color(&color, 0.0f, 1.0f, 0.0f, 1.0f);
+    render_color_surface(dxgi_surface, &color, DXGI_FORMAT_B8G8R8A8_UNORM);
+    IDXGISurface_Release(dxgi_surface);
+    hr = IDCompositionSurface_EndDraw(bg_surface);
+    ok(hr == S_OK, "EndDraw hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetContent(bg_visual, (IUnknown *)bg_surface);
+    ok(hr == S_OK, "SetContent hr %#lx.\n", hr);
+
+    hr = IDCompositionSurfaceFactory_CreateSurface(surface_factory, 200, 200, DXGI_FORMAT_B8G8R8A8_UNORM,
+            DXGI_ALPHA_MODE_IGNORE, &surface);
+    ok(hr == S_OK, "CreateSurface hr %#lx.\n", hr);
+
+    hr = IDCompositionSurface_BeginDraw(surface, NULL, &IID_IDXGISurface, (void **)&dxgi_surface, &offset);
+    ok(hr == S_OK, "BeginDraw hr %#lx.\n", hr);
+    set_color(&color, 1.0f, 0.0f, 0.0f, 1.0f);
+    render_color_surface(dxgi_surface, &color, DXGI_FORMAT_B8G8R8A8_UNORM);
+    IDXGISurface_Release(dxgi_surface);
+    hr = IDCompositionSurface_EndDraw(surface);
+    ok(hr == S_OK, "EndDraw hr %#lx.\n", hr);
+
+    hr = IDCompositionVisual_SetContent(item_visual, (IUnknown *)surface);
+    ok(hr == S_OK, "SetContent hr %#lx.\n", hr);
+
+    /* Parent clip container sits at (50, 50) with clip [0, 0, 100, 100] -> [50, 50, 150, 150] in target space. */
+    hr = IDCompositionVisual_SetOffsetX(clip_container, 50.0f);
+    ok(hr == S_OK, "SetOffsetX hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetOffsetY(clip_container, 50.0f);
+    ok(hr == S_OK, "SetOffsetY hr %#lx.\n", hr);
+    hr = IDCompositionVisual_SetClip(clip_container, &(const D2D_RECT_F){0.0f, 0.0f, 100.0f, 100.0f});
+    ok(hr == S_OK, "SetClip hr %#lx.\n", hr);
+
+    /* Child scroll container offsets -50 in Y; parent clip must stay at [50, 50, 150, 150]. */
+    hr = IDCompositionVisual_SetOffsetY(scroll_container, -50.0f);
+    ok(hr == S_OK, "SetOffsetY hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Commit hr %#lx.\n", hr);
+
+    expect_rendered_color_at(hwnd, 100, 100, RGB(0xff, 0x00, 0x00));
+    expect_rendered_color_at(hwnd, 100, 25, RGB(0x00, 0xff, 0x00));
+    expect_rendered_color_at(hwnd, 175, 100, RGB(0x00, 0xff, 0x00));
+
+    /* Expand parent clip to [0, 0, 300, 300] and animate 100 scroll commits. */
+    hr = IDCompositionVisual_SetClip(clip_container, &(const D2D_RECT_F){0.0f, 0.0f, 300.0f, 300.0f});
+    ok(hr == S_OK, "SetClip hr %#lx.\n", hr);
+    hr = IDCompositionDevice_Commit(dcomp_device);
+    ok(hr == S_OK, "Commit hr %#lx.\n", hr);
+    Sleep(30);
+
+    base_count = pWineDcompGetCompositeCount ? pWineDcompGetCompositeCount(dcomp_device) : 0;
+    for (i = 1; i <= 100; i++)
+    {
+        hr = IDCompositionVisual_SetOffsetY(scroll_container, (float)i);
+        ok(hr == S_OK, "SetOffsetY hr %#lx.\n", hr);
+        hr = IDCompositionDevice_Commit(dcomp_device);
+        ok(hr == S_OK, "Commit hr %#lx.\n", hr);
+    }
+    Sleep(40);
+    end_count = pWineDcompGetCompositeCount ? pWineDcompGetCompositeCount(dcomp_device) : 0;
+
+    if (pWineDcompGetCompositeCount)
+    {
+        delta = end_count - base_count;
+        trace("100 scroll commits produced %ld composites (base %ld, end %ld).\n", delta, base_count, end_count);
+        ok(delta >= 1 && delta <= 15, "Expected coalesced refresh-tick composites (1..15), got %ld.\n", delta);
+    }
+    else
+    {
+        win_skip("wine_dcomp_get_composite_count not exported.\n");
+    }
+
+    /* Final offset is (50, 50 + 100) = (50, 150), clipped to [50, 50, 350, 350]. */
+    expect_rendered_color_at(hwnd, 100, 200, RGB(0xff, 0x00, 0x00));
+
+    hr = IDCompositionDevice_GetFrameStatistics(dcomp_device, &stats);
+    ok(hr == S_OK, "GetFrameStatistics hr %#lx.\n", hr);
+    ok(stats.currentCompositionRate.Numerator == 60 && stats.currentCompositionRate.Denominator == 1,
+            "Unexpected composition rate %u/%u.\n", stats.currentCompositionRate.Numerator,
+            stats.currentCompositionRate.Denominator);
+
+    DestroyWindow(hwnd);
+    IDCompositionSurface_Release(bg_surface);
+    IDCompositionSurface_Release(surface);
+    IDCompositionSurfaceFactory_Release(surface_factory);
+    IDCompositionTarget_Release(target);
+    IDCompositionVisual_Release(root_visual);
+    IDCompositionVisual_Release(bg_visual);
+    IDCompositionVisual_Release(clip_container);
+    IDCompositionVisual_Release(scroll_container);
+    IDCompositionVisual_Release(item_visual);
+    IDCompositionDevice2_Release(dcomp_device2);
+    refcount = IDCompositionDevice_Release(dcomp_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+    refcount = IDXGIDevice_Release(dxgi_device);
+    ok(!refcount, "Device has %lu references left.\n", refcount);
+}
+
 START_TEST(dcomp)
 {
     HMODULE module;
@@ -2577,6 +2739,7 @@ START_TEST(dcomp)
     pDCompositionCreateDevice = (void *)GetProcAddress(module, "DCompositionCreateDevice");
     pDCompositionCreateDevice2 = (void *)GetProcAddress(module, "DCompositionCreateDevice2");
     pDCompositionCreateDevice3 = (void *)GetProcAddress(module, "DCompositionCreateDevice3");
+    pWineDcompGetCompositeCount = (void *)GetProcAddress(module, "wine_dcomp_get_composite_count");
 
     if (!pDCompositionCreateDevice)
     {
@@ -2611,6 +2774,7 @@ START_TEST(dcomp)
     test_visual_SetOffsetXAnimation();
     test_visual_AddVisual();
     test_transforms_3d();
+    test_container_offset_and_clip();
 
     FreeLibrary(module);
 }

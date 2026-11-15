@@ -72,6 +72,7 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
 
         dcomp_lock();
         list_remove(&target->entry);
+        InterlockedIncrement(&dcomp_tree_version);
         dcomp_unlock();
         IDCompositionDevice_Release(target->device);
         if (target->root)
@@ -156,6 +157,7 @@ static HRESULT STDMETHODCALLTYPE target_SetRoot(IDCompositionTarget *iface,
     if (old_root)
         impl_from_IDCompositionVisual(old_root)->is_root = FALSE;
     target->root = visual;
+    InterlockedIncrement(&dcomp_tree_version);
 
     dcomp_unlock();
 
@@ -219,6 +221,7 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     dcomp_lock();
     list_add_tail(&device->targets, &target->entry);
+    InterlockedIncrement(&dcomp_tree_version);
     dcomp_unlock();
     target->IDCompositionTarget_iface.lpVtbl = &target_vtbl;
     target->ref = 1;
@@ -263,6 +266,7 @@ HRESULT create_target_from_shared_visual_handle(struct composition_device *devic
     IDCompositionDevice_AddRef(&device->IDCompositionDevice_iface);
     dcomp_lock();
     list_add_tail(&device->targets, &target->entry);
+    InterlockedIncrement(&dcomp_tree_version);
     dcomp_unlock();
     target->IDCompositionTarget_iface.lpVtbl = &target_vtbl;
     target->ref = 1;

@@ -90,6 +90,7 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             child->is_child = FALSE;
             child->parent = NULL;
         }
+        InterlockedIncrement(&dcomp_tree_version);
         dcomp_unlock();
 
         /* A composite snapshot holds a reference to this visual, so reaching zero
@@ -131,8 +132,12 @@ static HRESULT STDMETHODCALLTYPE visual_SetOffsetX(IDCompositionVisualUnknown *i
     TRACE("iface %p, offset_x %f.\n", iface, offset_x);
 
     dcomp_lock();
-    visual->offset_x = offset_x;
-    visual->content_version++;
+    if (visual->offset_x != offset_x)
+    {
+        visual->offset_x = offset_x;
+        visual->transform_version++;
+        InterlockedIncrement(&dcomp_transform_version);
+    }
     dcomp_unlock();
     return S_OK;
 }
@@ -151,8 +156,12 @@ static HRESULT STDMETHODCALLTYPE visual_SetOffsetY(IDCompositionVisualUnknown *i
     TRACE("iface %p, offset_y %f.\n", iface, offset_y);
 
     dcomp_lock();
-    visual->offset_y = offset_y;
-    visual->content_version++;
+    if (visual->offset_y != offset_y)
+    {
+        visual->offset_y = offset_y;
+        visual->transform_version++;
+        InterlockedIncrement(&dcomp_transform_version);
+    }
     dcomp_unlock();
     return S_OK;
 }
@@ -172,7 +181,8 @@ static HRESULT STDMETHODCALLTYPE visual_SetTransformObject(IDCompositionVisualUn
     old = visual->transform;
     visual->transform = transform;
     visual->has_transform_matrix = FALSE;
-    visual->content_version++;
+    visual->transform_version++;
+    InterlockedIncrement(&dcomp_transform_version);
     dcomp_unlock();
     if (old) IDCompositionTransform_Release(old);
 
@@ -195,7 +205,8 @@ static HRESULT STDMETHODCALLTYPE visual_SetTransform(IDCompositionVisualUnknown 
     visual->transform = NULL;
     visual->transform_matrix = *matrix;
     visual->has_transform_matrix = TRUE;
-    visual->content_version++;
+    visual->transform_version++;
+    InterlockedIncrement(&dcomp_transform_version);
     dcomp_unlock();
     if (old) IDCompositionTransform_Release(old);
 
@@ -221,7 +232,8 @@ static HRESULT STDMETHODCALLTYPE visual_SetEffect(IDCompositionVisualUnknown *if
     dcomp_lock();
     old = visual->effect;
     visual->effect = effect;
-    visual->content_version++;
+    visual->transform_version++;
+    InterlockedIncrement(&dcomp_transform_version);
     dcomp_unlock();
     if (old) IDCompositionEffect_Release(old);
 
@@ -278,7 +290,8 @@ static HRESULT STDMETHODCALLTYPE visual_SetClipObject(IDCompositionVisualUnknown
         IDCompositionClip_AddRef(clip);
     visual->clip = clip;
     visual->has_rect_clip = FALSE;
-    visual->content_version++;
+    visual->transform_version++;
+    InterlockedIncrement(&dcomp_transform_version);
     dcomp_unlock();
 
     if (old)
@@ -296,8 +309,8 @@ static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *ifac
     if (!rect)
         return E_INVALIDARG;
 
-    /* Store the rectangle clip and succeed; the compositor does not apply it.  The
-     * rect is by-value (a reference in the C++ signature), so it is always valid. */
+    /* Store the rectangle clip; applied in the visual's coordinate space so
+     * child offset animations stay clipped in parent space. */
     dcomp_lock();
     visual->rect_clip = *rect;
     visual->has_rect_clip = TRUE;
@@ -306,7 +319,8 @@ static HRESULT STDMETHODCALLTYPE visual_SetClip(IDCompositionVisualUnknown *ifac
         IDCompositionClip_Release(visual->clip);
         visual->clip = NULL;
     }
-    visual->content_version++;
+    visual->transform_version++;
+    InterlockedIncrement(&dcomp_transform_version);
     dcomp_unlock();
 
     return S_OK;
@@ -489,6 +503,7 @@ static HRESULT STDMETHODCALLTYPE visual_SetContent(IDCompositionVisualUnknown *i
     /* Mark the visual's content as changed so the compositor re-blits it to the window
      * exactly once (change/commit-driven), instead of re-copying it every refresh tick. */
     visual->content_version++;
+    InterlockedIncrement(&dcomp_tree_version);
 
     dcomp_unlock();
 
@@ -589,11 +604,12 @@ void visual_get_transform_3d(const struct composition_visual *visual, UINT width
 unsigned int visual_get_transform_version(const struct composition_visual *visual)
 {
     struct dcomp_transform *t;
-    unsigned int ver = 0;
+    unsigned int ver;
 
     if (!visual)
         return 0;
 
+    ver = visual->transform_version;
     if (visual->transform)
     {
         t = unsafe_impl_from_dcomp_transform((IUnknown *)visual->transform);
@@ -667,6 +683,7 @@ static HRESULT STDMETHODCALLTYPE visual_AddVisual(IDCompositionVisualUnknown *if
     child_visual_impl->parent = parent_visual_impl;
     parent_visual_impl->content_version++;
     visual_tree_mark_dirty(child_visual_impl);
+    InterlockedIncrement(&dcomp_tree_version);
     dcomp_unlock();
     return S_OK;
 }
@@ -695,6 +712,7 @@ static HRESULT STDMETHODCALLTYPE visual_RemoveVisual(IDCompositionVisualUnknown 
     child_visual_impl->parent = NULL;
     parent_visual_impl->content_version++;
     visual_tree_mark_dirty(child_visual_impl);
+    InterlockedIncrement(&dcomp_tree_version);
     dcomp_unlock();
     return S_OK;
 }
@@ -715,6 +733,7 @@ static HRESULT STDMETHODCALLTYPE visual_RemoveAllVisuals(IDCompositionVisualUnkn
         visual_tree_mark_dirty(child_visual_impl);
     }
     parent_visual_impl->content_version++;
+    InterlockedIncrement(&dcomp_tree_version);
     dcomp_unlock();
     return S_OK;
 }
@@ -745,7 +764,10 @@ static HRESULT STDMETHODCALLTYPE visual_SetBackFaceVisibility(IDCompositionVisua
         && visibility != DCOMPOSITION_BACKFACE_VISIBILITY_INHERIT)
         return E_INVALIDARG;
 
+    dcomp_lock();
     visual->visibility = visibility;
+    InterlockedIncrement(&dcomp_tree_version);
+    dcomp_unlock();
     return S_OK;
 }
 

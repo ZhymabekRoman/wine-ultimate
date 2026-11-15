@@ -329,6 +329,7 @@ static ULONG transform_release( struct dcomp_transform *impl )
         impl->field = value;                                                                       \
         transform_update_matrix_3d( impl );                                                        \
         InterlockedIncrement( &impl->version );                                                    \
+        InterlockedIncrement( &dcomp_transform_version );                                          \
         return S_OK;                                                                               \
     }
 
@@ -445,6 +446,7 @@ static HRESULT STDMETHODCALLTYPE mt_SetMatrix( IDCompositionMatrixTransform *ifa
     impl->matrix = *matrix;
     transform_update_matrix_3d( impl );
     InterlockedIncrement( &impl->version );
+    InterlockedIncrement( &dcomp_transform_version );
     return S_OK;
 }
 
@@ -469,6 +471,7 @@ static HRESULT STDMETHODCALLTYPE mt_SetMatrixElement( IDCompositionMatrixTransfo
     m[row * 2 + column] = value;
     transform_update_matrix_3d( impl );
     InterlockedIncrement( &impl->version );
+    InterlockedIncrement( &dcomp_transform_version );
     return S_OK;
 }
 
@@ -589,6 +592,7 @@ static HRESULT STDMETHODCALLTYPE mt3_SetMatrix( IDCompositionMatrixTransform3D *
     if (!matrix) return E_INVALIDARG;
     impl->matrix3d = *matrix;
     InterlockedIncrement( &impl->version );
+    InterlockedIncrement( &dcomp_transform_version );
     return S_OK;
 }
 
@@ -611,6 +615,7 @@ static HRESULT STDMETHODCALLTYPE mt3_SetMatrixElement( IDCompositionMatrixTransf
     if (row < 0 || row > 3 || column < 0 || column > 3) return E_INVALIDARG;
     impl->matrix3d.m[row][column] = value;
     InterlockedIncrement( &impl->version );
+    InterlockedIncrement( &dcomp_transform_version );
     return S_OK;
 }
 
@@ -645,6 +650,7 @@ static HRESULT STDMETHODCALLTYPE eg_SetOpacity( IDCompositionEffectGroup *iface,
     TRACE( "iface %p, opacity %g.\n", iface, opacity );
     impl->opacity = opacity;
     InterlockedIncrement( &impl->version );
+    InterlockedIncrement( &dcomp_transform_version );
     return S_OK;
 }
 
@@ -661,6 +667,7 @@ static HRESULT STDMETHODCALLTYPE eg_SetTransform3D( IDCompositionEffectGroup *if
         if (impl->transform3d) IDCompositionTransform3D_Release( impl->transform3d );
         impl->transform3d = transform;
         InterlockedIncrement( &impl->version );
+        InterlockedIncrement( &dcomp_transform_version );
     }
     return S_OK;
 }
@@ -688,6 +695,7 @@ TRANSFORM_PROLOGUE( rc, IDCompositionRectangleClip, IDCompositionRectangleClip_i
         TRACE( "iface %p, value %g.\n", iface, value );                                            \
         impl->field = value;                                                                       \
         InterlockedIncrement( &impl->version );                                                    \
+        InterlockedIncrement( &dcomp_transform_version );                                          \
         return S_OK;                                                                               \
     }
 
