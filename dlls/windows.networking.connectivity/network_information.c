@@ -241,9 +241,6 @@ static CRITICAL_SECTION_DEBUG network_status_cs_debug =
 };
 static CRITICAL_SECTION network_status_cs = { &network_status_cs_debug, -1, 0, 0, 0, 0 };
 
-/* The NetworkInformation statics face is the sender handlers are invoked with. */
-static IInspectable *network_information_statics_inspectable( void );
-
 static ULONG64 adapter_snapshot_key( const struct adapter_snapshot *snapshot )
 {
     ULONG64 key = 1;
@@ -257,7 +254,6 @@ static ULONG64 adapter_snapshot_key( const struct adapter_snapshot *snapshot )
 
 static void network_status_fire( void )
 {
-    IInspectable *sender = network_information_statics_inspectable();
     INetworkStatusChangedEventHandler **handlers;
     ULONG i, count;
 
@@ -278,7 +274,8 @@ static void network_status_fire( void )
     for (i = 0; i < count; i++)
     {
         TRACE( "signalling handler %p.\n", handlers[i] );
-        INetworkStatusChangedEventHandler_Invoke( handlers[i], sender );
+        /* WinRT NetworkStatusChanged delivers sender as NULL to avoid ComWrappers RCW faults */
+        INetworkStatusChangedEventHandler_Invoke( handlers[i], NULL );
         IUnknown_Release( handlers[i] );
     }
     free( handlers );
@@ -288,6 +285,7 @@ static void WINAPI network_status_worker( void *arg )
 {
     struct adapter_snapshot snapshot;
 
+    CoInitializeEx( NULL, COINIT_MULTITHREADED );
     memset( &snapshot, 0, sizeof(snapshot) );
     for (;;)
     {
@@ -305,6 +303,7 @@ static void WINAPI network_status_worker( void *arg )
         }
         adapter_snapshot_reset( &snapshot );
     }
+    CoUninitialize();
 }
 
 static HRESULT network_status_add_event( INetworkStatusChangedEventHandler *handler, EventRegistrationToken *token )
@@ -321,9 +320,19 @@ static HRESULT network_status_add_event( INetworkStatusChangedEventHandler *hand
         token->value = network_status_events[network_status_event_count].token;
         network_status_event_count++;
 
-        if (!network_status_thread &&
-                !(network_status_thread = CreateThread( NULL, 0, (LPTHREAD_START_ROUTINE)network_status_worker, NULL, 0, NULL )))
-            hr = E_FAIL;
+        if (!network_status_thread)
+        {
+            struct adapter_snapshot snapshot;
+            memset( &snapshot, 0, sizeof(snapshot) );
+            if (get_adapter_snapshot( &snapshot ))
+                network_status_last_key = adapter_snapshot_key( &snapshot );
+            else
+                network_status_last_key = 0;
+            adapter_snapshot_reset( &snapshot );
+
+            if (!(network_status_thread = CreateThread( NULL, 0, (LPTHREAD_START_ROUTINE)network_status_worker, NULL, 0, NULL )))
+                hr = E_FAIL;
+        }
     }
     LeaveCriticalSection( &network_status_cs );
     return hr;
@@ -2600,8 +2609,3 @@ static struct network_information_statics network_information_statics =
 };
 
 IActivationFactory *network_information_factory = &network_information_statics.IActivationFactory_iface;
-
-static IInspectable *network_information_statics_inspectable( void )
-{
-    return (IInspectable *)&network_information_statics.INetworkInformationStatics_iface;
-}

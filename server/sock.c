@@ -2814,7 +2814,7 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
              * IPv6 on an IPv4-only host. Latch the error and synthesize the connect
              * event, so that the pending-completion contract of a nonblocking connect is
              * the same as on Windows. */
-            if (params->synchronous && sock->nonblocking && is_deferred_connect_error( errno ))
+            if (params->synchronous && sock->nonblocking && sock->type != WS_SOCK_DGRAM && is_deferred_connect_error( errno ))
             {
                 sock->errors[AFD_POLL_BIT_CONNECT_ERR] = errno;
                 post_socket_event( sock, AFD_POLL_BIT_CONNECT_ERR );
@@ -2852,7 +2852,7 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
              * reports the result on the connect event. Linux completes connects to a
              * local or directly connected peer synchronously, so report the same
              * WSAEWOULDBLOCK here. */
-            if (params->synchronous && sock->nonblocking)
+            if (params->synchronous && sock->nonblocking && sock->type != WS_SOCK_DGRAM)
             {
                 post_socket_event( sock, AFD_POLL_BIT_CONNECT );
                 post_socket_event( sock, AFD_POLL_BIT_WRITE );
@@ -2869,7 +2869,7 @@ static void sock_ioctl( struct fd *fd, ioctl_code_t code, struct async *async )
         if (sock->type != WS_SOCK_DGRAM)
             sock->state = SOCK_CONNECTING;
 
-        if (params->synchronous && sock->nonblocking)
+        if (params->synchronous && sock->nonblocking && sock->type != WS_SOCK_DGRAM)
         {
             sock_reselect( sock );
             set_error( STATUS_DEVICE_NOT_READY );
