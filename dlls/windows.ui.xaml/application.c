@@ -3937,6 +3937,18 @@ static BOOL CALLBACK xaml_paint_child( HWND hwnd, LPARAM lparam )
 /* Paint the composed layout inside WM_PAINT. A GetDC() blit lands on the window's
  * GDI surface, but on the winex11 driver only the BeginPaint/EndPaint cycle flushes
  * a surface to the X pixmap, so the mapped window is painted from here. */
+static volatile LONG g_xaml_window_dirty = 1;
+static BOOL g_xaml_post_load_presented;
+static HWND g_xaml_timer_armed_hwnd;
+static int g_xaml_timer_idle_ticks;
+static HRESULT xaml_window_present( struct xaml_window *impl );
+
+void xaml_mark_window_dirty( void )
+{
+    InterlockedExchange( &g_xaml_window_dirty, 1 );
+    g_xaml_timer_idle_ticks = 0;
+}
+
 static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
     if (msg == WM_ERASEBKGND && !is_uwp_xaml_app())
@@ -3951,7 +3963,10 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             GetClientRect( top, &rc );
             TRACE( "xaml corewindow WM_PAINT hdc %p rc %ldx%ld\n", hdc, rc.right, rc.bottom );
             if (rc.right > 0 && rc.bottom > 0)
+            {
                 xaml_layout_render( top, hdc, rc.right, rc.bottom, global_xaml_window.content );
+                InterlockedExchange( &g_xaml_window_dirty, 0 );
+            }
             ReleaseDC( top, hdc );
         }
         ValidateRect( hwnd, NULL );
@@ -3981,9 +3996,18 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     }
     if (msg == WM_TIMER && wparam == 0x5756)
     {
-        SIZE sz;
-        xaml_get_layout_metrics( hwnd, &sz, NULL );
-        xaml_wv2_on_window_ready( hwnd, sz.cx, sz.cy );
+        if (InterlockedExchange( &g_xaml_window_dirty, 0 ))
+        {
+            SIZE sz;
+            g_xaml_timer_idle_ticks = 0;
+            xaml_window_present( &global_xaml_window );
+            xaml_get_layout_metrics( hwnd, &sz, NULL );
+            xaml_wv2_on_window_ready( hwnd, sz.cx, sz.cy );
+        }
+        else if (g_xaml_post_load_presented && ++g_xaml_timer_idle_ticks >= 4)
+        {
+            KillTimer( hwnd, 0x5756 );
+        }
         return 0;
     }
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
@@ -4087,6 +4111,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
 
         if (btn_handled || (tree_routed && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)))
         {
+            xaml_mark_window_dirty();
             InvalidateRect( top, NULL, FALSE );
             InvalidateRect( hwnd, NULL, FALSE );
             UpdateWindow( top );
@@ -4398,7 +4423,14 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
 
     TRACE( "XAML: composited and presented visual tree for hwnd %p (%ux%u scale %.2f)\n", hwnd, width, height, scale );
     ERR( "xaml_window_present done: hwnd %p (%ux%u)\n", hwnd, width, height );
-    SetTimer( hwnd, 0x5756, 500, NULL );
+    InterlockedExchange( &g_xaml_window_dirty, 0 );
+    if (impl->content) g_xaml_post_load_presented = TRUE;
+    if (g_xaml_timer_armed_hwnd != hwnd)
+    {
+        g_xaml_timer_armed_hwnd = hwnd;
+        g_xaml_timer_idle_ticks = 0;
+        SetTimer( hwnd, 0x5756, 500, NULL );
+    }
     xaml_wv2_on_window_ready( hwnd, width, height );
     in_present = FALSE;
     return S_OK;
@@ -4462,6 +4494,17 @@ void xaml_get_layout_metrics( HWND hwnd, SIZE *client, float *scale )
     }
 }
 
+static BOOL CALLBACK xaml_find_process_window_cb( HWND hwnd, LPARAM lparam )
+{
+    DWORD pid = 0;
+    if (!IsWindowVisible( hwnd )) return TRUE;
+    if ((GetWindowLongW( hwnd, GWL_STYLE ) & WS_OVERLAPPEDWINDOW) != WS_OVERLAPPEDWINDOW) return TRUE;
+    GetWindowThreadProcessId( hwnd, &pid );
+    if (pid != GetCurrentProcessId()) return TRUE;
+    *(HWND *)lparam = hwnd;
+    return FALSE;
+}
+
 HWND xaml_get_window_hwnd( void )
 {
     HWND hw = global_xaml_window.target_hwnd;
@@ -4478,7 +4521,8 @@ HWND xaml_get_window_hwnd( void )
         HWND root = GetAncestor( hw, GA_ROOT );
         return root ? root : hw;
     }
-    hw = FindWindowW( NULL, L"WhatsApp" );
+    hw = NULL;
+    EnumWindows( xaml_find_process_window_cb, (LPARAM)&hw );
     if (hw) return hw;
     return GetActiveWindow();
 }
@@ -5775,6 +5819,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                     if (target)
                                                     {
                                                         connector->lpVtbl->Connect(connector, conn_id, target);
+                                                        IInspectable_Release( (IInspectable *)target );
                                                     }
                                                 }
                                             }
@@ -5808,6 +5853,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
             {
                 ERR( "binding font_scale %p to conn_id 6\n", font_scale );
                 b_conn->lpVtbl->Connect( b_conn, 6, font_scale );
+                IInspectable_Release( (IInspectable *)font_scale );
             }
         }
         b_conn->lpVtbl->Release( b_conn );

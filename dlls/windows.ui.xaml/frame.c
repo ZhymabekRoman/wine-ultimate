@@ -2050,12 +2050,35 @@ static HRESULT WINAPI element_get_double( void *iface, double *val )
     return S_OK;
 }
 
+static HRESULT WINAPI element_get_height_double( void *iface, double *val )
+{
+    struct xaml_element *impl = impl_from_element( (IInspectable *)iface );
+    HWND hw = impl->parent_hwnd;
+    SIZE sz;
+
+    if (!hw || !IsWindow( hw )) hw = xaml_get_window_hwnd();
+    if (val)
+    {
+        xaml_get_layout_metrics( hw, &sz, NULL );
+        *val = (double)sz.cy;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI element_put_double( void *iface, double val )
+{
+    (void)iface;
+    (void)val;
+    return S_OK;
+}
+
 /* IReferenceTracker slots 6-8 (WinUI3 tracked classes; .NET RCW calls
  * ConnectFromTrackerSource + AddRefFromTrackerSource after wrap). */
 struct tracker_entry
 {
     void *iface;
     void *source;
+    unsigned int idx;
 };
 static struct tracker_entry tracker_map[128];
 
@@ -2069,6 +2092,7 @@ static struct tracker_entry *tracker_lookup( void *iface, int create )
     }
     if (!create || free_idx == 128) return NULL;
     tracker_map[free_idx].iface = iface;
+    tracker_map[free_idx].idx = free_idx;
     return &tracker_map[free_idx];
 }
 
@@ -2179,7 +2203,9 @@ static HRESULT WINAPI element_GetWeakReference( IInspectable *iface, IWeakRefere
 
 static HRESULT WINAPI xaml_ReleaseFromTrackerSource( void *iface )
 {
-    (void)iface;
+    struct tracker_entry *e = tracker_lookup( iface, 0 );
+    if (e && e->idx < ARRAY_SIZE( tracker_map ))
+        memset( &tracker_map[e->idx], 0, sizeof(tracker_map[e->idx]) );
     return S_OK;
 }
 
@@ -2533,7 +2559,16 @@ static const void *element_vtbl[256] =
     [8] = xaml_ReleaseFromTrackerSource,
     [9] = element_get_Content,
     [10] = element_put_Content,
-    [11 ... 20] = element_get_double,      /* Width/MinWidth/MaxWidth/Height/Min/Max/Margin numerics */
+    [11] = element_get_double,
+    [12] = element_put_double,
+    [13] = element_get_height_double,
+    [14] = element_put_double,
+    [15] = element_get_double,
+    [16] = element_put_double,
+    [17] = element_get_double,
+    [18] = element_put_double,
+    [19] = element_get_height_double,
+    [20] = element_put_double,
     [75] = element_add_Loaded,
     [76] = element_remove_Loaded,
     [130] = element_get_Content,
@@ -3635,6 +3670,30 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
     return TRUE;
 }
 
+static HANDLE g_xaml_window_ready_event;
+
+static HANDLE get_xaml_window_ready_event( void )
+{
+    if (!g_xaml_window_ready_event)
+    {
+        HANDLE ev = CreateEventW( NULL, FALSE, FALSE, NULL );
+        if (ev && InterlockedCompareExchangePointer( &g_xaml_window_ready_event, ev, NULL ) != NULL)
+            CloseHandle( ev );
+    }
+    return g_xaml_window_ready_event;
+}
+
+static BOOL CALLBACK wv2_find_process_window_cb( HWND hwnd, LPARAM lparam )
+{
+    DWORD pid = 0;
+    if (!IsWindowVisible( hwnd )) return TRUE;
+    if ((GetWindowLongW( hwnd, GWL_STYLE ) & WS_OVERLAPPEDWINDOW) != WS_OVERLAPPEDWINDOW) return TRUE;
+    GetWindowThreadProcessId( hwnd, &pid );
+    if (pid != GetCurrentProcessId()) return TRUE;
+    *(HWND *)lparam = hwnd;
+    return FALSE;
+}
+
 static HWND wv2_get_controller_parent( void )
 {
     HWND hw = g_active_wv2_impl && g_active_wv2_impl->parent_hwnd ? g_active_wv2_impl->parent_hwnd : g_wv2_core_hwnd;
@@ -3647,7 +3706,8 @@ static HWND wv2_get_controller_parent( void )
     if (hw && IsWindow( hw )) return hw;
     hw = xaml_find_core_window();
     if (hw) return hw;
-    hw = FindWindowW( NULL, L"WhatsApp" );
+    hw = NULL;
+    EnumWindows( wv2_find_process_window_cb, (LPARAM)&hw );
     if (hw) return hw;
     return NULL;
 }
@@ -3714,6 +3774,11 @@ void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height )
          hwnd, width, height, g_active_wv2_impl, g_active_wv2_impl ? g_active_wv2_impl->browser_queued : -1 );
     g_wv2_core_hwnd = hwnd;
     if (g_active_wv2_impl) g_active_wv2_impl->parent_hwnd = hwnd;
+    if (hwnd && IsWindow( hwnd ))
+    {
+        HANDLE ev = get_xaml_window_ready_event();
+        if (ev) SetEvent( ev );
+    }
     if (g_active_wv2_impl && g_active_wv2_impl->visual && !g_active_wv2_impl->visual_attached)
     {
         IDCompositionVisual *root = xaml_get_dcomp_root_visual();
@@ -3767,15 +3832,22 @@ static DWORD WINAPI wv2_sta_thread( void *arg )
 {
     struct xaml_element *impl = arg;
     HWND hw = NULL;
+    HANDLE ev;
+    DWORD start;
     MSG msg;
-    int i;
 
     CoInitializeEx( NULL, COINIT_APARTMENTTHREADED );
-    for (i = 0; i < 100; i++)
+    ev = get_xaml_window_ready_event();
+    start = GetTickCount();
+    while (!(hw = xaml_get_window_hwnd()) || !IsWindow( hw ))
     {
-        hw = xaml_get_window_hwnd();
-        if (hw && IsWindow( hw )) break;
-        Sleep( 20 );
+        DWORD elapsed = GetTickCount() - start;
+        if (elapsed >= 2000) break;
+        if (!ev || WaitForSingleObject( ev, 2000 - elapsed ) != WAIT_OBJECT_0)
+        {
+            hw = xaml_get_window_hwnd();
+            break;
+        }
     }
     ERR( "wv2_sta_thread: starting browser, target=%p\n", hw );
     impl->parent_hwnd = hw;
@@ -4039,7 +4111,13 @@ static ULONG WINAPI wv2h_AddRef( void *t )
 static ULONG WINAPI wv2h_Release( void *t )
 {
     LONG *ref = (LONG *)((char *)t + sizeof(void *));
-    return InterlockedDecrement( ref );
+    ULONG r = InterlockedDecrement( ref );
+    if (!r)
+    {
+        HeapFree( GetProcessHeap(), 0, *(void **)t );
+        HeapFree( GetProcessHeap(), 0, t );
+    }
+    return r;
 }
 
 static HRESULT WINAPI wv2_ctrl_handler_Invoke( void *t, HRESULT hr, void *controller )
@@ -4190,13 +4268,7 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
         h->impl->loader_env = env;
         ((IUnknown *)env)->lpVtbl->AddRef( (IUnknown *)env );
     }
-    if (!(ch = calloc( 1, sizeof(*ch ) ))) return E_OUTOFMEMORY;
-    ch->vtbl = wv2_ctrl_handler_vtbl_fill();
-    ch->ref = 1;
-    ch->impl = h->impl;
     hw = wv2_get_controller_parent();
-    ERR( "wv2_env_handler_Invoke: ch %p vt %p vt3 %p hw %p\n", ch, ch->vtbl,
-         ((void **)ch->vtbl)[3], hw );
 
     if (!h->impl->real_loader)
     {
@@ -4228,6 +4300,18 @@ static HRESULT WINAPI wv2_env_handler_Invoke( void *t, HRESULT hr, void *env )
             return hr2;
         }
     }
+
+    if (!(ch = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*ch) ))) return E_OUTOFMEMORY;
+    if (!(ch->vtbl = wv2_ctrl_handler_vtbl_fill()))
+    {
+        HeapFree( GetProcessHeap(), 0, ch );
+        return E_OUTOFMEMORY;
+    }
+    ch->ref = 1;
+    ch->impl = h->impl;
+    ERR( "wv2_env_handler_Invoke: ch %p vt %p vt3 %p hw %p\n", ch, ch->vtbl,
+         ((void **)ch->vtbl)[3], hw );
+
     if (h->impl->real_loader)
     {
         void *env3 = NULL;
@@ -4274,15 +4358,15 @@ static const void **wv2_env_handler_vtbl_fill( void )
 
 static BOOL wv2_folder_has_runtime( const WCHAR *dir )
 {
-    WCHAR path[MAX_PATH];
+    WCHAR path[1024];
     if (!dir || !*dir) return FALSE;
-    lstrcpynW( path, dir, MAX_PATH - 48 );
+    lstrcpynW( path, dir, ARRAY_SIZE(path) - 48 );
     lstrcatW( path, L"\\msedgewebview2.exe" );
     if (GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES) return FALSE;
-    lstrcpynW( path, dir, MAX_PATH - 48 );
+    lstrcpynW( path, dir, ARRAY_SIZE(path) - 48 );
     lstrcatW( path, L"\\EBWebView\\x64\\EmbeddedBrowserWebView.dll" );
     if (GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES) return TRUE;
-    lstrcpynW( path, dir, MAX_PATH - 48 );
+    lstrcpynW( path, dir, ARRAY_SIZE(path) - 48 );
     lstrcatW( path, L"\\EmbeddedBrowserWebView.dll" );
     return GetFileAttributesW( path ) != INVALID_FILE_ATTRIBUTES;
 }
@@ -4300,7 +4384,7 @@ static int wv2_compare_versions( const WCHAR *a, const WCHAR *b )
     return 0;
 }
 
-static void wv2_add_runtime_candidate( WCHAR candidates[][MAX_PATH], WCHAR versions[][64], int *ncand, int max_cand,
+static void wv2_add_runtime_candidate( WCHAR candidates[][1024], WCHAR versions[][64], int *ncand, int max_cand,
                                        const WCHAR *dir, const WCHAR *ver )
 {
     int i;
@@ -4325,25 +4409,25 @@ static void wv2_add_runtime_candidate( WCHAR candidates[][MAX_PATH], WCHAR versi
             int j;
             for (j = *ncand; j > i; j--)
             {
-                lstrcpynW( candidates[j], candidates[j - 1], MAX_PATH );
+                lstrcpynW( candidates[j], candidates[j - 1], 1024 );
                 lstrcpynW( versions[j], versions[j - 1], 64 );
             }
         }
     }
-    lstrcpynW( candidates[i], dir, MAX_PATH );
+    lstrcpynW( candidates[i], dir, 1024 );
     lstrcpynW( versions[i], ver ? ver : L"", 64 );
     (*ncand)++;
 }
 
-static void wv2_scan_app_base( const WCHAR *base_dir, WCHAR candidates[][MAX_PATH], WCHAR versions[][64],
+static void wv2_scan_app_base( const WCHAR *base_dir, WCHAR candidates[][1024], WCHAR versions[][64],
                                int *ncand, int max_cand )
 {
-    WCHAR pattern[MAX_PATH];
+    WCHAR pattern[1024];
     WIN32_FIND_DATAW fd;
     HANDLE hfind;
 
     if (!base_dir || !*base_dir) return;
-    lstrcpynW( pattern, base_dir, MAX_PATH - 4 );
+    lstrcpynW( pattern, base_dir, ARRAY_SIZE(pattern) - 4 );
     lstrcatW( pattern, L"\\*" );
     hfind = FindFirstFileW( pattern, &fd );
     if (hfind == INVALID_HANDLE_VALUE) return;
@@ -4352,8 +4436,8 @@ static void wv2_scan_app_base( const WCHAR *base_dir, WCHAR candidates[][MAX_PAT
         if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
             fd.cFileName[0] >= L'0' && fd.cFileName[0] <= L'9')
         {
-            WCHAR full[MAX_PATH];
-            lstrcpynW( full, base_dir, MAX_PATH - 68 );
+            WCHAR full[1024];
+            lstrcpynW( full, base_dir, ARRAY_SIZE(full) - 68 );
             lstrcatW( full, L"\\" );
             lstrcatW( full, fd.cFileName );
             wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, full, fd.cFileName );
@@ -4362,12 +4446,12 @@ static void wv2_scan_app_base( const WCHAR *base_dir, WCHAR candidates[][MAX_PAT
     FindClose( hfind );
 }
 
-static void wv2_discover_runtimes( WCHAR candidates[][MAX_PATH], int *ncand, int max_cand, const WCHAR *exe_dir )
+static void wv2_discover_runtimes( WCHAR candidates[][1024], int *ncand, int max_cand, const WCHAR *exe_dir )
 {
     static const GUID FOLDERID_ProgramFilesX86_g =
         { 0x7c5a40ef, 0xa0fb, 0x4bfc, { 0x87, 0x4a, 0xc0, 0xf2, 0xe0, 0xb9, 0xfa, 0x8e } };
     WCHAR versions[16][64];
-    WCHAR env_browser[MAX_PATH] = {0}, pf86[MAX_PATH] = {0}, pf[MAX_PATH] = {0}, app_dir[MAX_PATH];
+    WCHAR env_browser[1024] = {0}, pf86[1024] = {0}, pf[1024] = {0}, app_dir[1024];
     HMODULE reg_mod, shell_mod;
     typedef LONG (WINAPI *p_RegOpenKeyExW_t)( HKEY, LPCWSTR, DWORD, REGSAM, PHKEY );
     typedef LONG (WINAPI *p_RegQueryValueExW_t)( HKEY, LPCWSTR, LPDWORD, LPDWORD, LPBYTE, LPDWORD );
@@ -4377,10 +4461,10 @@ static void wv2_discover_runtimes( WCHAR candidates[][MAX_PATH], int *ncand, int
     *ncand = 0;
     memset( versions, 0, sizeof(versions) );
 
-    if (GetEnvironmentVariableW( L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", env_browser, MAX_PATH ))
+    if (GetEnvironmentVariableW( L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", env_browser, ARRAY_SIZE(env_browser) ))
         wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, env_browser, L"9999.0.0.0" );
 
-    if (ExpandEnvironmentStringsW( L"%ProgramFiles(x86)%", pf86, MAX_PATH ) == 0 || wcschr( pf86, L'%' ))
+    if (ExpandEnvironmentStringsW( L"%ProgramFiles(x86)%", pf86, ARRAY_SIZE(pf86) ) == 0 || wcschr( pf86, L'%' ))
     {
         pf86[0] = 0;
         shell_mod = GetModuleHandleW( L"shell32.dll" );
@@ -4391,7 +4475,7 @@ static void wv2_discover_runtimes( WCHAR candidates[][MAX_PATH], int *ncand, int
             PWSTR p = NULL;
             if (p_known && SUCCEEDED( p_known( &FOLDERID_ProgramFilesX86_g, 0, NULL, &p ) ) && p)
             {
-                lstrcpynW( pf86, p, MAX_PATH );
+                lstrcpynW( pf86, p, ARRAY_SIZE(pf86) );
                 CoTaskMemFree( p );
             }
         }
@@ -4417,7 +4501,7 @@ static void wv2_discover_runtimes( WCHAR candidates[][MAX_PATH], int *ncand, int
                 for (p = 0; p < ARRAY_SIZE(reg_paths); p++)
                 {
                     HKEY hk = NULL;
-                    WCHAR pv[64] = {0}, loc[MAX_PATH] = {0};
+                    WCHAR pv[64] = {0}, loc[1024] = {0};
                     DWORD type = 0, cb;
                     REGSAM sam = KEY_READ | (p == 1 ? KEY_WOW64_32KEY : 0);
                     if (p_open( roots[r], reg_paths[p], 0, sam, &hk ) != ERROR_SUCCESS) continue;
@@ -4429,7 +4513,7 @@ static void wv2_discover_runtimes( WCHAR candidates[][MAX_PATH], int *ncand, int
                         wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, loc, pv );
                     if (pv[0] && pf86[0])
                     {
-                        lstrcpynW( app_dir, pf86, MAX_PATH - 96 );
+                        lstrcpynW( app_dir, pf86, ARRAY_SIZE(app_dir) - 96 );
                         lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application\\" );
                         lstrcatW( app_dir, pv );
                         wv2_add_runtime_candidate( candidates, versions, ncand, max_cand, app_dir, pv );
@@ -4442,14 +4526,14 @@ static void wv2_discover_runtimes( WCHAR candidates[][MAX_PATH], int *ncand, int
 
     if (pf86[0])
     {
-        lstrcpynW( app_dir, pf86, MAX_PATH - 48 );
+        lstrcpynW( app_dir, pf86, ARRAY_SIZE(app_dir) - 48 );
         lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application" );
         wv2_scan_app_base( app_dir, candidates, versions, ncand, max_cand );
     }
-    if (ExpandEnvironmentStringsW( L"%ProgramFiles%", pf, MAX_PATH ) > 0 && !wcschr( pf, L'%' ) &&
+    if (ExpandEnvironmentStringsW( L"%ProgramFiles%", pf, ARRAY_SIZE(pf) ) > 0 && !wcschr( pf, L'%' ) &&
         (!pf86[0] || wcsicmp( pf, pf86 ) != 0))
     {
-        lstrcpynW( app_dir, pf, MAX_PATH - 48 );
+        lstrcpynW( app_dir, pf, ARRAY_SIZE(app_dir) - 48 );
         lstrcatW( app_dir, L"\\Microsoft\\EdgeWebView\\Application" );
         wv2_scan_app_base( app_dir, candidates, versions, ncand, max_cand );
     }
@@ -4485,7 +4569,7 @@ static void wv2_resolve_default_udf( WCHAR *out_udf, size_t out_len )
                 UINT32 flen = ARRAY_SIZE(family);
                 if (p_fam && p_fam( &flen, family ) == ERROR_SUCCESS && family[0])
                 {
-                    WCHAR pkg_cache[MAX_PATH];
+                    WCHAR pkg_cache[1024];
                     swprintf( pkg_cache, ARRAY_SIZE(pkg_cache), L"%s\\Packages\\%s\\LocalCache",
                               local_app_data, family );
                     if (GetFileAttributesW( pkg_cache ) != INVALID_FILE_ATTRIBUTES)
@@ -4511,8 +4595,8 @@ static void wv2_start_browser( struct xaml_element *impl )
     HRESULT (WINAPI *p_create)( LPCWSTR, LPCWSTR, void *, void * );
     struct wv2_env_handler *eh;
     HMODULE module = NULL;
-    WCHAR exe_dir[MAX_PATH] = {0}, orig_loader[MAX_PATH] = {0};
-    WCHAR udf[MAX_PATH] = {0}, default_udf[MAX_PATH] = {0};
+    WCHAR exe_dir[1024] = {0}, orig_loader[1024] = {0};
+    WCHAR udf[1024] = {0}, default_udf[1024] = {0};
     const WCHAR *browser_folder = NULL, *user_data_folder = NULL;
 
     if (impl->browser_started) return;
@@ -4520,11 +4604,11 @@ static void wv2_start_browser( struct xaml_element *impl )
 
     CoInitializeEx( NULL, COINIT_APARTMENTTHREADED );
 
-    if (GetModuleFileNameW( NULL, exe_dir, MAX_PATH ))
+    if (GetModuleFileNameW( NULL, exe_dir, ARRAY_SIZE(exe_dir) ))
     {
         WCHAR *slash = wcsrchr( exe_dir, '\\' );
         if (slash) *slash = 0;
-        lstrcpynW( orig_loader, exe_dir, MAX_PATH - 32 );
+        lstrcpynW( orig_loader, exe_dir, ARRAY_SIZE(orig_loader) - 32 );
         lstrcatW( orig_loader, L"\\WebView2Loader.dll.orig5" );
     }
 
@@ -4537,12 +4621,12 @@ static void wv2_start_browser( struct xaml_element *impl )
 
     if (module && (p_create = (void *)GetProcAddress( module, "CreateCoreWebView2EnvironmentWithOptions" )))
     {
-        WCHAR candidates[16][MAX_PATH];
+        WCHAR candidates[16][1024];
         int ncand = 0, ci;
 
         wv2_discover_runtimes( candidates, &ncand, ARRAY_SIZE(candidates) - 1, exe_dir );
 
-        if (GetEnvironmentVariableW( L"WEBVIEW2_USER_DATA_FOLDER", udf, MAX_PATH ) && udf[0])
+        if (GetEnvironmentVariableW( L"WEBVIEW2_USER_DATA_FOLDER", udf, ARRAY_SIZE(udf) ) && udf[0])
             user_data_folder = udf;
         else
         {
@@ -4550,10 +4634,15 @@ static void wv2_start_browser( struct xaml_element *impl )
             user_data_folder = default_udf;
         }
 
-        if ((eh = calloc( 1, sizeof(*eh) )))
+        if ((eh = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*eh) )))
         {
             SetEnvironmentVariableW( L"WEBVIEW2_BROWSER_EXECUTABLE_FOLDER", NULL );
             eh->vtbl = wv2_env_handler_vtbl_fill();
+            if (!eh->vtbl)
+            {
+                HeapFree( GetProcessHeap(), 0, eh );
+                return;
+            }
             eh->ref = 1;
             eh->impl = impl;
             impl->real_loader = TRUE;
@@ -4577,10 +4666,10 @@ static void wv2_start_browser( struct xaml_element *impl )
                 int ri;
                 for (ri = 0; ri < (int)ARRAY_SIZE(rel_dlls); ri++)
                 {
-                    WCHAR eb_path[MAX_PATH];
+                    WCHAR eb_path[1024];
                     HMODULE eb;
                     HRESULT (WINAPI *p_int)( BOOL, int, LPCWSTR, void *, void * );
-                    lstrcpynW( eb_path, candidates[ci], MAX_PATH - 48 );
+                    lstrcpynW( eb_path, candidates[ci], ARRAY_SIZE(eb_path) - 48 );
                     lstrcatW( eb_path, rel_dlls[ri] );
                     if (GetFileAttributesW( eb_path ) == INVALID_FILE_ATTRIBUTES) continue;
                     eb = LoadLibraryExW( eb_path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH );
@@ -4595,6 +4684,7 @@ static void wv2_start_browser( struct xaml_element *impl )
                 }
             }
             impl->real_loader = FALSE;
+            wv2h_Release( eh );
         }
     }
 
@@ -4608,8 +4698,12 @@ static void wv2_start_browser( struct xaml_element *impl )
         ERR( "wv2_start_browser: no CreateCoreWebView2EnvironmentWithOptions\n" );
         return;
     }
-    if (!(eh = calloc( 1, sizeof(*eh) ))) return;
-    eh->vtbl = wv2_env_handler_vtbl_fill();
+    if (!(eh = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, sizeof(*eh) ))) return;
+    if (!(eh->vtbl = wv2_env_handler_vtbl_fill()))
+    {
+        HeapFree( GetProcessHeap(), 0, eh );
+        return;
+    }
     eh->ref = 1;
     eh->impl = impl;
     impl->real_loader = FALSE;

@@ -1987,6 +1987,7 @@ struct uwp_element
  * App.xbf style/setter/visualstate churn, silently dropping the Page root. */
 static struct uwp_element *g_all_uwp_elems_head = NULL;
 static int g_all_uwp_elem_cnt = 0;
+static SRWLOCK g_all_uwp_elems_lock = SRWLOCK_INIT;
 static BOOL g_layout_dirty = TRUE;
 static struct uwp_element *g_captured_elem = NULL;
 static struct uwp_element *g_hovered_elem = NULL;
@@ -2398,29 +2399,36 @@ static struct { const void *vtbl; } g_calc_result_dp_cb = { g_calc_result_dp_cb_
 
 static void uwp_bind_calc_result_elements( void )
 {
-    struct uwp_element *scan;
+    struct uwp_element *scan, *matches[32];
+    int mcnt = 0, m;
     if (!g_calc_vm.display_dp)
         dependency_property_create( NULL, &g_calc_vm.display_dp );
     if (!g_calc_vm.display_dp) return;
 
-    for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    for (scan = g_all_uwp_elems_head; scan && mcnt < (int)ARRAY_SIZE(matches); scan = scan->next_reg)
     {
         if (wcsstr( scan->class_name, L"CalculationResult" ) || !wcscmp( scan->name, L"Results" ))
+            matches[mcnt++] = scan;
+    }
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+
+    for (m = 0; m < mcnt; m++)
+    {
+        BOOL already = FALSE;
+        int i;
+        scan = matches[m];
+        for (i = 0; i < scan->dp_cb_cnt; i++)
         {
-            BOOL already = FALSE;
-            int i;
-            for (i = 0; i < scan->dp_cb_cnt; i++)
-            {
-                if (scan->dp_cbs[i].dp == g_calc_vm.display_dp) { already = TRUE; break; }
-            }
-            if (!already)
-            {
-                INT64 tok = 0;
-                uwp_do2_RegisterPropertyChangedCallback( &scan->IDependencyObject2_iface,
-                                                        g_calc_vm.display_dp, &g_calc_result_dp_cb, &tok );
-                TRACE( "uwp_bind_calc_result_elements: bound DP changed callback on %p (%s)\n",
-                       scan, debugstr_w(scan->name) );
-            }
+            if (scan->dp_cbs[i].dp == g_calc_vm.display_dp) { already = TRUE; break; }
+        }
+        if (!already)
+        {
+            INT64 tok = 0;
+            uwp_do2_RegisterPropertyChangedCallback( &scan->IDependencyObject2_iface,
+                                                     g_calc_vm.display_dp, &g_calc_result_dp_cb, &tok );
+            TRACE( "uwp_bind_calc_result_elements: bound DP changed callback on %p (%s)\n",
+                   scan, debugstr_w(scan->name) );
         }
     }
 }
@@ -2428,7 +2436,8 @@ static void uwp_bind_calc_result_elements( void )
 static void uwp_push_display_value_to_results( const WCHAR *s )
 {
     IInspectable *boxed = NULL;
-    struct uwp_element *scan;
+    struct uwp_element *scan, *matches[32];
+    int mcnt = 0, m;
 
     if (!s || !s[0]) return;
     uwp_bind_calc_result_elements();
@@ -2437,15 +2446,22 @@ static void uwp_push_display_value_to_results( const WCHAR *s )
     boxed = box_string_value( s );
     if (!boxed) return;
 
-    for (scan = g_all_uwp_elems_head; scan; scan = scan->next_reg)
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    for (scan = g_all_uwp_elems_head; scan && mcnt < (int)ARRAY_SIZE(matches); scan = scan->next_reg)
     {
         if (wcsstr( scan->class_name, L"CalculationResult" ) || !wcscmp( scan->name, L"Results" ))
-        {
-            IInspectable *target = scan->outer ? scan->outer : &scan->IInspectable_iface;
-            if (wcsstr( scan->class_name, L"CalculationResult" ))
-                uwp_set_custom_xaml_member( uwp_get_app_outer(), scan->class_name, L"DisplayValue", target, s );
-            uwp_do_SetValue( &scan->IDependencyObject_iface, g_calc_vm.display_dp, boxed );
-        }
+            matches[mcnt++] = scan;
+    }
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+
+    for (m = 0; m < mcnt; m++)
+    {
+        IInspectable *target;
+        scan = matches[m];
+        target = scan->outer ? scan->outer : &scan->IInspectable_iface;
+        if (wcsstr( scan->class_name, L"CalculationResult" ))
+            uwp_set_custom_xaml_member( uwp_get_app_outer(), scan->class_name, L"DisplayValue", target, s );
+        uwp_do_SetValue( &scan->IDependencyObject_iface, g_calc_vm.display_dp, boxed );
     }
     IInspectable_Release( boxed );
 }
@@ -2562,24 +2578,6 @@ static void uwp_calc_vm_ensure( void )
     }
 }
 
-static void uwp_calc_vm_pump( void )
-{
-    UINT i;
-    if (g_calc_vm.pumped) return;
-    g_calc_vm.pumped = TRUE;
-    for (i = 0; i < 60; i++)
-    {
-        MSG msg;
-        while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
-        {
-            TranslateMessage( &msg );
-            DispatchMessageW( &msg );
-        }
-        Sleep( 25 );
-    }
-    TRACE( "uwp_calc_vm_pump: pumped ~1.5s for async calc manager init\n" );
-}
-
 static void uwp_calc_vm_send( int code )
 {
     HRESULT hr;
@@ -2589,7 +2587,6 @@ static void uwp_calc_vm_send( int code )
 
     uwp_calc_vm_ensure();
     if (!g_calc_vm.vm) return;
-    if (!g_calc_vm.pumped) uwp_calc_vm_pump();
 
     /* Pre-read display value (slot 7 is safe) to confirm RCW marshalling. */
     get_disp = (void *)(*(void ***)g_calc_vm.vm)[7];
@@ -2607,7 +2604,7 @@ static void uwp_calc_vm_send( int code )
     TRACE( "uwp_calc_vm_send: calling slot79 %p vm %p code %d\n", (void *)send, (void *)g_calc_vm.vm, code );
     {
         int attempt;
-        for (attempt = 0; attempt < 3; attempt++)
+        for (attempt = 0; attempt < 2; attempt++)
         {
             MSG msg;
             __TRY
@@ -2621,14 +2618,12 @@ static void uwp_calc_vm_send( int code )
             }
             __ENDTRY;
             TRACE( "uwp_calc_vm_send: attempt %d hr=%#lx\n", attempt, hr );
-            if (hr != E_FAIL) break;
-            for (;;)
+            if (hr != E_FAIL || attempt > 0) break;
+            MsgWaitForMultipleObjectsEx( 0, NULL, 50, QS_ALLINPUT, MWMO_INPUTAVAILABLE );
+            while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
             {
-                DWORD t0 = GetTickCount();
-                while (PeekMessageW( &msg, 0, 0, 0, PM_REMOVE ))
-                { TranslateMessage( &msg ); DispatchMessageW( &msg ); }
-                if (GetTickCount() - t0 > 500) break;
-                Sleep( 10 );
+                TranslateMessage( &msg );
+                DispatchMessageW( &msg );
             }
         }
     }
@@ -2638,9 +2633,11 @@ static void uwp_calc_vm_send( int code )
 
 static void register_uwp_elem( struct uwp_element *el )
 {
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     el->next_reg = g_all_uwp_elems_head;
     g_all_uwp_elems_head = el;
     g_all_uwp_elem_cnt++;
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
 }
 
 static const GUID IID_UWP_ELEM_SELF =
@@ -2652,13 +2649,18 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
     void *self_iface = NULL;
     void *inner = NULL;
     if (!ptr || (ULONG_PTR)ptr < 0x10000) return NULL;
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     for (el = g_all_uwp_elems_head; el; el = el->next_reg)
     {
         if ((void *)ptr == (void *)el->outer ||
             (void *)ptr == (void *)el->provider_inst ||
             ((char *)ptr >= (char *)el && (char *)ptr < (char *)(el + 1)))
+        {
+            ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
             return el;
+        }
     }
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
     /* .NET Native hands us __ComObject RCWs that answer QI from their own
      * projection table (only IUnknown): unwrap get_Inner (slot 6) /
      * get_InnerIUnknown (slot 7) to reach our CCW face, then resolve that.
@@ -2666,15 +2668,18 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
     if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_UWP_ELEM_SELF, &self_iface )) && self_iface)
     {
         void *probe_ptr = self_iface;
+        AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
         for (el = g_all_uwp_elems_head; el; el = el->next_reg)
         {
             if (probe_ptr == (void *)&el->nondelegating_iface ||
                 ((char *)probe_ptr >= (char *)el && (char *)probe_ptr < (char *)(el + 1)))
             {
+                ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
                 IUnknown_Release( (IUnknown *)self_iface );
                 return el;
             }
         }
+        ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
         IUnknown_Release( (IUnknown *)self_iface );
     }
     if (is_uwp_xaml_app())
@@ -2699,17 +2704,20 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
                 return NULL;
             }
             IUnknown_Release( (IUnknown *)id );
+            AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
             for (el = g_all_uwp_elems_head; el; el = el->next_reg)
             {
                 if ((void *)inner == (void *)el->outer ||
                     (void *)inner == (void *)&el->nondelegating_iface ||
                     ((char *)inner >= (char *)el && (char *)inner < (char *)(el + 1)))
                 {
+                    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
                     IUnknown_Release( (IUnknown *)inner );
                     return el;
                 }
             }
             TRACE( "uwp_elem_from_any: INNER-MISS ptr=%p inner=%p cnt=%d\n", ptr, inner, g_all_uwp_elem_cnt );
+            ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
             IUnknown_Release( (IUnknown *)inner );
             return NULL;
         }
@@ -2731,12 +2739,14 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
                 if (k >= 4) break;
                 if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)do_iface, iids[k], &cand )) && cand)
                 {
+                    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
                     for (e2 = g_all_uwp_elems_head; e2; e2 = e2->next_reg)
                     {
                         if ((void *)cand == (void *)e2->outer ||
                             ((char *)cand >= (char *)e2 && (char *)cand < (char *)(e2 + 1)))
                         { el = e2; break; }
                     }
+                    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
                     IUnknown_Release( (IUnknown *)cand );
                     if (el) break;
                 }
@@ -2746,7 +2756,9 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
                 IUnknown_Release( (IUnknown *)do_iface );
                 return el;
             }
+            AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
             TRACE( "uwp_elem_from_any: MISS ptr=%p do_iface=%p cnt=%d\n", ptr, do_iface, g_all_uwp_elem_cnt );
+            ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
             IUnknown_Release( (IUnknown *)do_iface );
         }
     }
@@ -2756,6 +2768,7 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
 static void uwp_invalidate_window( void )
 {
     HWND top = xaml_find_core_window();
+    xaml_mark_window_dirty();
     if (top)
     {
         HWND root = GetAncestor( top, GA_ROOT );
@@ -3880,15 +3893,17 @@ static HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
             return S_OK;
         }
     }
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     for (el = g_all_uwp_elems_head; el; el = el->next_reg)
     {
         if (!wcscmp( el->name, want ))
         {
             *out = el->outer ? el->outer : &el->IInspectable_iface;
-            IInspectable_AddRef( (IInspectable *)*out );
-            return S_OK;
+            break;
         }
     }
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+    if (*out) IInspectable_AddRef( (IInspectable *)*out );
     return S_OK;
 }
 
@@ -5552,11 +5567,16 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
 {
     void *inst = NULL;
     struct uwp_element *el = NULL;
-    struct uwp_element *prev_head = g_all_uwp_elems_head;
-    int gen = g_all_uwp_elem_cnt;
+    struct uwp_element *prev_head;
+    int gen;
     HRESULT hr;
 
     if (!holder || !full_name || !full_name[0]) return FALSE;
+
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+    prev_head = g_all_uwp_elems_head;
+    gen = g_all_uwp_elem_cnt;
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
 
     __TRY
     {
@@ -5569,6 +5589,7 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
     }
     __ENDTRY;
 
+    AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
     if (g_all_uwp_elem_cnt > gen)
     {
         struct uwp_element *e;
@@ -5578,6 +5599,7 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
                 el = e;
         }
     }
+    ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
     if (!el && inst && SUCCEEDED(hr))
         el = uwp_elem_from_any( inst );
 
@@ -7418,23 +7440,32 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     }
                     else
                     {
-                        struct uwp_element *prev_head = g_all_uwp_elems_head;
-                        HRESULT phr = uwp_create_instance_from_provider( cls_name, (void **)&inst );
+                        struct uwp_element *prev_head;
+                        HRESULT phr;
+                        AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+                        prev_head = g_all_uwp_elems_head;
+                        ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+                        phr = uwp_create_instance_from_provider( cls_name, (void **)&inst );
                         if (SUCCEEDED(phr) && inst)
                             el = uwp_elem_from_any( inst );
-                        if (!el && g_all_uwp_elems_head != prev_head)
+                        if (!el)
                         {
-                            struct uwp_element *e;
-                            for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
+                            AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+                            if (g_all_uwp_elems_head != prev_head)
                             {
-                                if (e->kind == UWP_KIND_USER_CONTROL || e->kind == UWP_KIND_PAGE)
-                                    el = e;
-                            }
-                            if (!el)
-                            {
+                                struct uwp_element *e;
                                 for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
-                                    el = e;
+                                {
+                                    if (e->kind == UWP_KIND_USER_CONTROL || e->kind == UWP_KIND_PAGE)
+                                        el = e;
+                                }
+                                if (!el)
+                                {
+                                    for (e = g_all_uwp_elems_head; e && e != prev_head; e = e->next_reg)
+                                        el = e;
+                                }
                             }
+                            ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
                         }
                         if (el)
                         {
@@ -10133,6 +10164,9 @@ static struct uwp_class_factory vth_factory_obj;
 static struct uwp_class_factory feap_factory_obj;
 static struct uwp_class_factory scb_factory_obj;
 struct uwp_class_factory g_dyn_factories[256];
+static WCHAR g_dyn_factory_names[256][128];
+static int g_dyn_factory_cnt = 0;
+static SRWLOCK g_dyn_factories_lock = SRWLOCK_INIT;
 
 static inline struct uwp_class_factory *uwp_cf_from_any( void *iface )
 {
@@ -10147,12 +10181,17 @@ static inline struct uwp_class_factory *uwp_cf_from_any( void *iface )
         return &feap_factory_obj;
     if ((char *)iface >= (char *)&scb_factory_obj && (char *)iface < (char *)(&scb_factory_obj + 1))
         return &scb_factory_obj;
-    for (i = 0; i < 256; i++)
+    AcquireSRWLockExclusive( &g_dyn_factories_lock );
+    for (i = 0; i < g_dyn_factory_cnt; i++)
     {
         if ((char *)iface >= (char *)&g_dyn_factories[i] &&
             (char *)iface < (char *)&g_dyn_factories[i + 1])
+        {
+            ReleaseSRWLockExclusive( &g_dyn_factories_lock );
             return &g_dyn_factories[i];
+        }
     }
+    ReleaseSRWLockExclusive( &g_dyn_factories_lock );
     return NULL;
 }
 
@@ -10592,9 +10631,6 @@ static const void *scb_factory_vtbl[16] =
 static struct uwp_class_factory scb_factory_obj =
     { {(const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl}, {(const struct IInspectableVtbl *)scb_factory_vtbl}, {(const struct IInspectableVtbl *)uwp_cf_statics_vtbl}, L"Windows.UI.Xaml.Media.SolidColorBrush" };
 
-static WCHAR g_dyn_factory_names[256][128];
-static int g_dyn_factory_cnt = 0;
-
 HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buf = WindowsGetStringRawBuffer( classid, NULL );
@@ -10658,11 +10694,13 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
         wcscmp( buf, L"Windows.UI.Xaml.Data.PropertyChangedEventArgs" ) != 0 &&
         wcscmp( buf, L"Windows.UI.Xaml.Data.CollectionViewSource" ) != 0)
     {
+        AcquireSRWLockExclusive( &g_dyn_factories_lock );
         for (i = 0; i < g_dyn_factory_cnt; i++)
         {
             if (!wcscmp( g_dyn_factory_names[i], buf ))
             {
                 *factory = &g_dyn_factories[i].IActivationFactory_iface;
+                ReleaseSRWLockExclusive( &g_dyn_factories_lock );
                 return S_OK;
             }
         }
@@ -10676,8 +10714,10 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
             g_dyn_factories[idx].IDpStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dp_statics_vtbl;
             g_dyn_factories[idx].class_name = g_dyn_factory_names[idx];
             *factory = &g_dyn_factories[idx].IActivationFactory_iface;
+            ReleaseSRWLockExclusive( &g_dyn_factories_lock );
             return S_OK;
         }
+        ReleaseSRWLockExclusive( &g_dyn_factories_lock );
     }
 
     return E_NOINTERFACE;

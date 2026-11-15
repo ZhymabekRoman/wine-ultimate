@@ -86,6 +86,7 @@ HRESULT element_create_typed( const WCHAR *class_name, void **instance );
 HRESULT xaml_create_webview2( void **out );
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content );
 HRESULT xaml_window_present_current( void );
+void xaml_mark_window_dirty( void );
 void xaml_fire_all_loaded( void );
 void xaml_register_loaded( void *handler, IInspectable *sender );
 #define WM_APP_WV2_START (WM_APP + 0x57)
