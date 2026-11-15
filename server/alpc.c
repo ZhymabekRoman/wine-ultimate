@@ -1011,6 +1011,7 @@ static int alpc_queue_send_message( struct alpc_port *port, struct alpc_port *pe
      * receive armed on the listening port that accepted this connection. */
     if (!peer->is_server && !peer->listen_port && peer->peer && peer->peer->listen_port)
     {
+        peer->peer->listen_port->sequence_no++;
         wake_up( &peer->peer->listen_port->obj, 0 );
         reselect_alpc_port( peer->peer->listen_port );
     }

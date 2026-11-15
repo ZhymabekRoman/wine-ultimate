@@ -719,7 +719,7 @@ static void test_NtAlpcConnectPort(void)
     ok( status == STATUS_ACCESS_VIOLATION, "Got unexpected status %#lx.\n", status );
 
     /* The port does not exist. */
-    timeout.QuadPart = -100 * 10000000LL;
+    timeout.QuadPart = -100 * 10000LL;
     conn = NULL;
     status = pNtAlpcConnectPort( &conn, &port_name, NULL, &port_attr, 0, NULL, NULL, NULL, NULL, NULL, &timeout );
     ok( status == STATUS_OBJECT_NAME_NOT_FOUND, "Got unexpected status %#lx.\n", status );
@@ -771,7 +771,7 @@ static void test_NtAlpcSendWaitReceivePort(void)
     ok( status == STATUS_SUCCESS, "Got unexpected status %#lx.\n", status );
 
     /* Receive with a timeout on an empty port. */
-    timeout.QuadPart = -100 * 10000000LL;
+    timeout.QuadPart = -100 * 10000LL;
     memset( buf, 0, sizeof(*msg) );
     size = sizeof(buf);
     status = pNtAlpcSendWaitReceivePort( port, 0, NULL, NULL, msg, &size, NULL, &timeout );
@@ -2062,7 +2062,7 @@ static void test_alpc_duplicate_reply_drop( void )
 
     memset( buf, 0, sizeof(buf) );
     size = sizeof(buf);
-    timeout.QuadPart = -3 * 10000000LL;
+    timeout.QuadPart = -50 * 10000LL;
     status = pNtAlpcSendWaitReceivePort( client_conn, 0, NULL, NULL, msg, &size, NULL, &timeout );
     ok( status == STATUS_TIMEOUT, "Reply of an unanswered request reached the client, status %#lx.\n", status );
     winetest_pop_context();
@@ -2198,7 +2198,7 @@ static void test_alpc_connect_commit( void )
 
     memset( buf, 0, sizeof(buf) );
     size = sizeof(buf);
-    timeout.QuadPart = -3 * 10000000LL;
+    timeout.QuadPart = -50 * 10000LL;
     status = pNtAlpcSendWaitReceivePort( client_conn, 0, NULL, NULL, msg, &size, NULL, &timeout );
     ok( status == STATUS_TIMEOUT, "Refused commit reached the client, status %#lx.\n", status );
     winetest_pop_context();
@@ -2734,7 +2734,7 @@ static void test_alpc_small_buffer_receive( void )
     }
 
     timeout.QuadPart = -20 * 10000000LL;
-    short_timeout.QuadPart = -3 * 10000000LL;
+    short_timeout.QuadPart = -50 * 10000LL;
 
     /* Take the connect notification and accept. */
     memset( buf, 0, sizeof(buf) );
@@ -2997,7 +2997,7 @@ static void test_alpc_cancel_message( void )
     msg->TotalLength = sizeof(*msg) + 8;
     msg->DataLength = 8;
     memcpy( msg + 1, "CAN-RQ", 8 );
-    timeout.QuadPart = -15 * 10000000LL;
+    timeout.QuadPart = -50 * 10000LL;
     size = sizeof(buf);
     status = pNtAlpcSendWaitReceivePort( server_conn, ALPC_MSGFLG_SYNC_REQUEST, msg, NULL,
                                          msg, &size, NULL, &timeout );

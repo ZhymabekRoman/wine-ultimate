@@ -268,7 +268,8 @@ void async_terminate( struct async *async, unsigned int status )
          * files). the client should not fill the IOSB in this case; pass it as
          * NULL to communicate that.
          * note that we check the IOSB status and not the initial status */
-        if (NT_ERROR( status ) && (!is_fd_overlapped( async->fd ) || !async->pending))
+        if (NT_ERROR( status ) && status != STATUS_BUFFER_TOO_SMALL &&
+            (!is_fd_overlapped( async->fd ) || !async->pending))
             data.async_io.sb = 0;
         else
             data.async_io.sb = async->data.iosb;
@@ -488,6 +489,12 @@ obj_handle_t async_handoff( struct async *async, data_size_t *result, int force_
             async->wait_handle = 0;
         }
     }
+    if (async->iosb->status == STATUS_BUFFER_TOO_SMALL && async->iosb->result)
+    {
+        async->initial_status = STATUS_PENDING;
+        set_error( STATUS_PENDING );
+        return async->wait_handle;
+    }
     async->initial_status = async->iosb->status;
     set_error( async->iosb->status );
     return async->wait_handle;
@@ -511,6 +518,11 @@ void async_request_complete( struct async *async, unsigned int status, data_size
     iosb->result = result;
     iosb->out_data = out_data;
     iosb->out_size = out_size;
+    if (status == STATUS_BUFFER_TOO_SMALL && result)
+    {
+        async->pending = 1;
+        async->direct_result = 0;
+    }
 
     release_object( iosb );
 
