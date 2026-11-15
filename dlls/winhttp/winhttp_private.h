@@ -396,6 +396,7 @@ struct socket_send
     DWORD len;
     WSAOVERLAPPED ovr;
     BOOL complete_async;
+    char pong_buf[125];
 };
 
 struct socket_receive

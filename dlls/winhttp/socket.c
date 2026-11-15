@@ -134,6 +134,12 @@ HINTERNET WINAPI WinHttpWebSocketCompleteUpgrade( HINTERNET hrequest, DWORD_PTR 
         SetLastError( ERROR_WINHTTP_INCORRECT_HANDLE_TYPE );
         return NULL;
     }
+    if (!request->netconn)
+    {
+        release_object( &request->hdr );
+        SetLastError( ERROR_WINHTTP_INCORRECT_HANDLE_STATE );
+        return NULL;
+    }
     if (!(socket = calloc( 1, sizeof(*socket) )))
     {
         release_object( &request->hdr );
@@ -148,6 +154,8 @@ HINTERNET WINAPI WinHttpWebSocketCompleteUpgrade( HINTERNET hrequest, DWORD_PTR 
     socket->hdr.flags = request->connect->hdr.flags & WINHTTP_FLAG_ASYNC;
     socket->keepalive_interval = 30000;
     socket->send_buffer_size = request->websocket_send_buffer_size;
+    if (socket->send_buffer_size < MIN_WEBSOCKET_SEND_BUFFER_SIZE)
+        socket->send_buffer_size = MIN_WEBSOCKET_SEND_BUFFER_SIZE;
     if (request->read.size)
     {
         if (!(socket->read_buffer = malloc( request->read.size )))
@@ -306,6 +314,7 @@ static DWORD complete_send_frame( struct socket *socket, WSAOVERLAPPED *ovr, con
 
     assert( socket->bytes_in_send_frame_buffer <= socket->send_remaining_size );
     socket->send_remaining_size -= socket->bytes_in_send_frame_buffer;
+    socket->bytes_in_send_frame_buffer = 0;
 
     while (socket->send_remaining_size)
     {
@@ -546,7 +555,9 @@ DWORD WINAPI WinHttpWebSocketSend( HINTERNET hsocket, WINHTTP_WEB_SOCKET_BUFFER_
     {
         if (validate_buffer_type( type, socket->sending_fragment_type ))
         {
+            AcquireSRWLockExclusive( &socket->send_lock );
             ret = socket_send( socket, type, buf, len, NULL );
+            ReleaseSRWLockExclusive( &socket->send_lock );
         }
         else
         {
@@ -561,27 +572,45 @@ DWORD WINAPI WinHttpWebSocketSend( HINTERNET hsocket, WINHTTP_WEB_SOCKET_BUFFER_
 
 static DWORD receive_bytes( struct socket *socket, char *buf, DWORD len, DWORD *ret_len, BOOL read_full_buffer )
 {
-    DWORD err, size = 0, needed = len;
+    DWORD err, size = 0, needed = len, buf_used = 0;
     char *ptr = buf;
     int received;
 
     if (socket->bytes_in_read_buffer)
     {
-        size = min( needed, socket->bytes_in_read_buffer );
+        buf_used = size = min( needed, socket->bytes_in_read_buffer );
         memcpy( ptr, socket->read_buffer, size );
-        memmove( socket->read_buffer, socket->read_buffer + size, socket->bytes_in_read_buffer - size );
-        socket->bytes_in_read_buffer -= size;
         needed -= size;
         ptr += size;
     }
+    if (!read_full_buffer && size)
+    {
+        memmove( socket->read_buffer, socket->read_buffer + buf_used, socket->bytes_in_read_buffer - buf_used );
+        socket->bytes_in_read_buffer -= buf_used;
+        *ret_len = size;
+        return ERROR_SUCCESS;
+    }
     while (size != len)
     {
-        if ((err = netconn_recv( socket->netconn, ptr, needed, 0, &received ))) return err;
+        if ((err = netconn_recv( socket->netconn, ptr, needed, 0, &received )))
+        {
+            if (buf_used && size > buf_used)
+            {
+                memmove( socket->read_buffer, socket->read_buffer + buf_used, socket->bytes_in_read_buffer - buf_used );
+                socket->bytes_in_read_buffer -= buf_used;
+            }
+            return err;
+        }
         if (!received) break;
         size += received;
         if (!read_full_buffer) break;
         needed -= received;
         ptr += received;
+    }
+    if (buf_used)
+    {
+        memmove( socket->read_buffer, socket->read_buffer + buf_used, socket->bytes_in_read_buffer - buf_used );
+        socket->bytes_in_read_buffer -= buf_used;
     }
     *ret_len = size;
     if (size != len && (read_full_buffer || !size)) return ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
@@ -608,18 +637,28 @@ static BOOL is_supported_opcode( enum socket_opcode opcode )
 static DWORD receive_frame( struct socket *socket, DWORD *ret_len, enum socket_opcode *opcode, BOOL *final )
 {
     DWORD ret, len, count;
-    char hdr[2];
+    unsigned char hdr[2];
 
-    if ((ret = receive_bytes( socket, hdr, sizeof(hdr), &count, TRUE ))) return ret;
+    if ((ret = receive_bytes( socket, (char *)hdr, sizeof(hdr), &count, TRUE ))) return ret;
     if ((hdr[0] & RESERVED_BIT) || (hdr[1] & MASK_BIT) || !is_supported_opcode( hdr[0] & 0xf ))
     {
         return ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
     }
     *opcode = hdr[0] & 0xf;
-    *final = hdr[0] & FIN_BIT;
+    *final = !!(hdr[0] & FIN_BIT);
     TRACE("received %02x frame, final %#x\n", *opcode, *final);
 
-    len = hdr[1] & ~MASK_BIT;
+    len = hdr[1] & 0x7f;
+    if (*opcode & CONTROL_BIT)
+    {
+        if (!*final || len > 125) return ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
+    }
+    else
+    {
+        if ((*opcode == SOCKET_OPCODE_CONTINUE) != (socket->receiving_fragment_type != SOCKET_FRAGMENT_NONE))
+            return ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
+    }
+
     if (len == 126)
     {
         USHORT len16;
@@ -647,29 +686,38 @@ static void task_socket_send_pong( void *ctx, BOOL abort )
 
     TRACE("running %p\n", ctx);
 
-    if (s->complete_async) complete_send_frame( socket, &s->ovr, NULL );
-    else send_frame( socket, SOCKET_OPCODE_PONG, 0, NULL, 0, TRUE, NULL );
+    if (s->complete_async) complete_send_frame( socket, &s->ovr, s->pong_buf );
+    else send_frame( socket, SOCKET_OPCODE_PONG, 0, s->pong_buf, s->len, TRUE, NULL );
 
     send_io_complete( socket );
 }
 
-static DWORD socket_send_pong( struct socket *socket )
+static DWORD socket_send_pong( struct socket *socket, const char *buf, DWORD len )
 {
     BOOL async_send, complete_async = FALSE;
     struct socket_send *s;
     DWORD ret = 0;
 
+    if (len > sizeof(s->pong_buf)) return ERROR_INVALID_PARAMETER;
+
     if (!(socket->hdr.flags & WINHTTP_FLAG_ASYNC))
-        return send_frame( socket, SOCKET_OPCODE_PONG, 0, NULL, 0, TRUE, NULL );
+    {
+        AcquireSRWLockExclusive( &socket->send_lock );
+        ret = send_frame( socket, SOCKET_OPCODE_PONG, 0, buf, len, TRUE, NULL );
+        ReleaseSRWLockExclusive( &socket->send_lock );
+        return ret;
+    }
 
     if (!(s = malloc( sizeof(*s) ))) return ERROR_OUTOFMEMORY;
+    if (len) memcpy( s->pong_buf, buf, len );
+    s->len = len;
 
     AcquireSRWLockExclusive( &socket->send_lock );
     async_send = InterlockedIncrement( &socket->pending_sends ) > 1;
     if (!async_send)
     {
         memset( &s->ovr, 0, sizeof(s->ovr) );
-        if ((ret = send_frame( socket, SOCKET_OPCODE_PONG, 0, NULL, 0, TRUE, &s->ovr )) == WSA_IO_PENDING)
+        if ((ret = send_frame( socket, SOCKET_OPCODE_PONG, 0, s->pong_buf, s->len, TRUE, &s->ovr )) == WSA_IO_PENDING)
         {
             async_send = TRUE;
             complete_async = TRUE;
@@ -715,7 +763,12 @@ static DWORD receive_close_status( struct socket *socket, DWORD len )
     if ((len && (len < sizeof(socket->status) || len > sizeof(socket->status) + sizeof(socket->reason))))
         return (socket->close_frame_receive_err = ERROR_WINHTTP_INVALID_SERVER_RESPONSE);
 
-    if (!len) return (socket->close_frame_receive_err = ERROR_SUCCESS);
+    if (!len)
+    {
+        socket->status = WINHTTP_WEB_SOCKET_EMPTY_CLOSE_STATUS;
+        socket->reason_len = 0;
+        return (socket->close_frame_receive_err = ERROR_SUCCESS);
+    }
 
     reason_len = len - sizeof(socket->status);
     if ((ret = receive_bytes( socket, (char *)&socket->status, sizeof(socket->status), &len, TRUE )))
@@ -735,7 +788,17 @@ static DWORD handle_control_frame( struct socket *socket )
     switch (socket->opcode)
     {
     case SOCKET_OPCODE_PING:
-        return socket_send_pong( socket );
+    {
+        char payload[125];
+        DWORD count = 0;
+
+        if (socket->read_size > sizeof(payload))
+            return ERROR_WINHTTP_INVALID_SERVER_RESPONSE;
+        if (socket->read_size && (ret = receive_bytes( socket, payload, socket->read_size, &count, TRUE )))
+            return ret;
+        socket->read_size = 0;
+        return socket_send_pong( socket, payload, count );
+    }
 
     case SOCKET_OPCODE_PONG:
         return socket_drain( socket );
@@ -828,7 +891,7 @@ static DWORD socket_receive( struct socket *socket, void *buf, DWORD len, DWORD 
                 if (!(socket->opcode & CONTROL_BIT) || (ret = handle_control_frame( socket ))
                     || socket->opcode == SOCKET_OPCODE_CLOSE) break;
             }
-            else if (ret == WSAETIMEDOUT) ret = socket_send_pong( socket );
+            else if (ret == WSAETIMEDOUT) ret = socket_send_pong( socket, NULL, 0 );
             if (ret) break;
         }
     }
@@ -909,6 +972,11 @@ DWORD WINAPI WinHttpWebSocketReceive( HINTERNET hsocket, void *buf, DWORD len, D
         release_object( &socket->hdr );
         return ERROR_WINHTTP_INCORRECT_HANDLE_TYPE;
     }
+    if (!(socket->hdr.flags & WINHTTP_FLAG_ASYNC) && (!ret_len || !ret_type))
+    {
+        release_object( &socket->hdr );
+        return ERROR_INVALID_PARAMETER;
+    }
     if (!socket_can_receive( socket ))
     {
         release_object( &socket->hdr );
@@ -988,9 +1056,14 @@ static DWORD send_socket_shutdown( struct socket *socket, USHORT status, const v
     if (socket->state < SOCKET_STATE_SHUTDOWN) socket->state = SOCKET_STATE_SHUTDOWN;
 
     if (!(socket->hdr.flags & WINHTTP_FLAG_ASYNC))
-        return send_frame( socket, SOCKET_OPCODE_CLOSE, status, reason, len, TRUE, NULL );
+    {
+        AcquireSRWLockExclusive( &socket->send_lock );
+        ret = send_frame( socket, SOCKET_OPCODE_CLOSE, status, reason, len, TRUE, NULL );
+        ReleaseSRWLockExclusive( &socket->send_lock );
+        return ret;
+    }
 
-    if (!(s = malloc( sizeof(*s) ))) return FALSE;
+    if (!(s = malloc( sizeof(*s) ))) return ERROR_OUTOFMEMORY;
 
     AcquireSRWLockExclusive( &socket->send_lock );
     async_send = InterlockedIncrement( &socket->pending_sends ) > 1 || socket->hdr.recursion_count >= 3;
@@ -1008,7 +1081,7 @@ static DWORD send_socket_shutdown( struct socket *socket, USHORT status, const v
     {
         s->complete_async = complete_async;
         s->status = status;
-        memcpy( s->reason, reason, len );
+        if (len) memcpy( s->reason, reason, len );
         s->len    = len;
         s->send_callback = send_callback;
 
@@ -1205,7 +1278,7 @@ DWORD WINAPI WinHttpWebSocketQueryCloseStatus( HINTERNET hsocket, USHORT *status
     if (socket->reason_len > len) ret = ERROR_INSUFFICIENT_BUFFER;
     else
     {
-        memcpy( reason, socket->reason, socket->reason_len );
+        if (socket->reason_len) memcpy( reason, socket->reason, socket->reason_len );
         ret = ERROR_SUCCESS;
     }
 
