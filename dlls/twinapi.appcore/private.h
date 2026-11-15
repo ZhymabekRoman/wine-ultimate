@@ -149,3 +149,9 @@ HRESULT core_app_remove_entered_background( EventRegistrationToken token );
 HRESULT core_app_add_resuming( __FIEventHandler_1_IInspectable *handler,
                                EventRegistrationToken *token );
 HRESULT core_app_remove_resuming( EventRegistrationToken token );
+
+/* Wine extension interfaces on the ToastNotification face, answered by
+ * toast_notification_manager.c (NotificationSuppressed event sink registry,
+ * ToastContent/ToastTemplate readback of the parsed payload). */
+DEFINE_GUID( IID_IToastNotificationSuppressed, 0x4b3e2a91, 0x77d5, 0x4f1a, 0x9d,0x8e, 0x6c,0x3b, 0x5a,0x2f, 0x18,0xc4 );
+DEFINE_GUID( IID_IToastNotificationTemplate,  0x0d2f6b83, 0x62e1, 0x4c9f, 0xb0,0xa7, 0x54,0x1e, 0x9d,0xc6, 0x38,0x72 );

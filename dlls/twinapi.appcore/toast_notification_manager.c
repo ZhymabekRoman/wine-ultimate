@@ -21,6 +21,8 @@
 #include "unixlib.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(twinapi);
+WINE_DECLARE_DEBUG_CHANNEL(notify);
+#define NOTIFY_TRACE(...) WINE_TRACE_(notify)(__VA_ARGS__)
 
 /* IInspectable forwarder for the secondary interfaces of an object: identity,
  * refcount and the IInspectable entry points live on the object's canonical
@@ -510,6 +512,15 @@ static HRESULT toast_collect_texts( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocume
             IInspectable_Release( (IInspectable *)text );
             text = NULL;
         }
+        /* msxml6's DOM nodes answer IXmlCharacterData only for text nodes; an
+         * element's content is read through the serializer's InnerText. */
+        if (hr == E_NOINTERFACE)
+        {
+            __x_ABI_CWindows_CData_CXml_CDom_CIXmlNodeSerializer *serializer = NULL;
+            hr = IInspectable_QueryInterface( (IInspectable *)node, &IID_IXmlNodeSerializer, (void **)&serializer );
+            if (SUCCEEDED( hr )) hr = IXmlNodeSerializer_get_InnerText( serializer, &texts[i] );
+            if (serializer) IInspectable_Release( (IInspectable *)serializer );
+        }
         if (node)
         {
             IInspectable_Release( (IInspectable *)node );
@@ -588,16 +599,92 @@ HRESULT toast_extract_payload( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *d
     return toast_xml_first_attribute( doc, L"image", L"src", &payload->image );
 }
 
+/*
+ * Wine extension interfaces on the ToastNotification face.
+ *
+ * windows.ui.notifications.idl freezes the IToastNotification/IToastNotification2
+ * vtables at their 1081/1105-contract shapes, and the ToastGeneric template
+ * (binding/@template="ToastGeneric", the payload ToastNotificationManager.
+ * GetTemplateContent is documented to hand out on 1703+ builds) has no
+ * ToastTemplateType member before ToastImageAndText01..ToastText04.  The
+ * NotificationSuppressed event and the ToastContent/ToastTemplate readback of
+ * the parsed payload are therefore answered on module-private interfaces,
+ * QI-able on the same object with shared identity, keyed by fixed GUIDs.
+ */
+#define ToastTemplate_ToastImageAndText01 0
+#define ToastTemplate_ToastImageAndText02 1
+#define ToastTemplate_ToastImageAndText03 2
+#define ToastTemplate_ToastImageAndText04 3
+#define ToastTemplate_ToastText01         4
+#define ToastTemplate_ToastText02         5
+#define ToastTemplate_ToastText03         6
+#define ToastTemplate_ToastText04         7
+#define ToastTemplate_ToastGeneric        8
+
+interface IToastNotificationSuppressed;
+typedef interface IToastNotificationSuppressed IToastNotificationSuppressed;
+
+typedef struct IToastNotificationSuppressedVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IToastNotificationSuppressed *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IToastNotificationSuppressed *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IToastNotificationSuppressed *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IToastNotificationSuppressed *iface, ULONG *iid_count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IToastNotificationSuppressed *iface, HSTRING *class_name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IToastNotificationSuppressed *iface, TrustLevel *trust_level );
+    HRESULT (STDMETHODCALLTYPE *add_NotificationSuppressed)( IToastNotificationSuppressed *iface,
+            __FITypedEventHandler_2_Windows__CUI__CNotifications__CToastNotification_IInspectable *handler,
+            EventRegistrationToken *token );
+    HRESULT (STDMETHODCALLTYPE *remove_NotificationSuppressed)( IToastNotificationSuppressed *iface,
+            EventRegistrationToken token );
+} IToastNotificationSuppressedVtbl;
+
+interface IToastNotificationSuppressed
+{
+    const struct IToastNotificationSuppressedVtbl *lpVtbl;
+};
+
+#define IToastNotificationSuppressed_add_NotificationSuppressed(p,h,t) \
+        (p)->lpVtbl->add_NotificationSuppressed(p,h,t)
+#define IToastNotificationSuppressed_remove_NotificationSuppressed(p,t) \
+        (p)->lpVtbl->remove_NotificationSuppressed(p,t)
+
+interface IToastNotificationTemplate;
+typedef interface IToastNotificationTemplate IToastNotificationTemplate;
+
+typedef struct IToastNotificationTemplateVtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)( IToastNotificationTemplate *iface, REFIID iid, void **out );
+    ULONG (STDMETHODCALLTYPE *AddRef)( IToastNotificationTemplate *iface );
+    ULONG (STDMETHODCALLTYPE *Release)( IToastNotificationTemplate *iface );
+    HRESULT (STDMETHODCALLTYPE *GetIids)( IToastNotificationTemplate *iface, ULONG *iid_count, IID **iids );
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)( IToastNotificationTemplate *iface, HSTRING *class_name );
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)( IToastNotificationTemplate *iface, TrustLevel *trust_level );
+    HRESULT (STDMETHODCALLTYPE *get_ToastTemplate)( IToastNotificationTemplate *iface, INT32 *value );
+    HRESULT (STDMETHODCALLTYPE *get_ToastContent)( IToastNotificationTemplate *iface,
+            __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument **value );
+} IToastNotificationTemplateVtbl;
+
+interface IToastNotificationTemplate
+{
+    const struct IToastNotificationTemplateVtbl *lpVtbl;
+};
+
+#define IToastNotificationTemplate_get_ToastTemplate(p,v) (p)->lpVtbl->get_ToastTemplate(p,v)
+#define IToastNotificationTemplate_get_ToastContent(p,v) (p)->lpVtbl->get_ToastContent(p,v)
+
 struct toast_notification
 {
     IToastNotification IToastNotification_iface;
     IToastNotification2 IToastNotification2_iface;
+    IToastNotificationSuppressed IToastNotificationSuppressed_iface;
+    IToastNotificationTemplate IToastNotificationTemplate_iface;
     __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *content;
     __FIReference_1_DateTime *expiration_time;
     HSTRING tag, group;
     boolean suppress_popup;
     LONG ref;
-    struct list activated_sinks, dismissed_sinks, failed_sinks;
+    struct list activated_sinks, dismissed_sinks, failed_sinks, suppressed_sinks;
     struct list shown_entry;   /* entry on shown_toasts while visible */
     UINT32 fd_id;              /* notification daemon id of the visible toast */
     HSTRING launch_args;       /* toast/@launch of the content, replayed on activation */
@@ -610,10 +697,70 @@ static inline struct toast_notification *impl_from_IToastNotification( IToastNot
 
 static void toast_notifier_drain_events( void );
 static void toast_history_add( IToastNotification *toast );
+static void toast_notification_fire_suppressed( struct toast_notification *impl );
 
 /* ToastNotifications currently visible in the notification daemon, keyed by
  * the daemon-assigned id carried in ActionInvoked/NotificationClosed. */
 static struct list shown_toasts = LIST_INIT( shown_toasts );
+
+/*
+ * The app view's toast queue: the last 16 notifications handed to
+ * IToastNotifier::Show, oldest first, newest at the tail.  The queue is
+ * process-wide (the prefix has one app view, so every ToastNotifier reads and
+ * appends to the same queue, the way GetForCurrentView's single live notifier
+ * owns it on Windows); showing the same toast twice moves it to the newest
+ * slot, and showing a 17th drops the oldest.  ToastNotifier answers
+ * IVectorView<ToastNotification> (the .NET projection of IObservableVector)
+ * with a snapshot of it: that QI is the get_Notifications entry point.
+ */
+#define TOAST_SHOWN_QUEUE_SIZE 16
+
+struct toast_shown_entry
+{
+    struct list entry;
+    IToastNotification *toast;
+};
+
+static struct list shown_queue = LIST_INIT( shown_queue );
+static UINT32 shown_queue_size;
+
+static void toast_shown_queue_add( IToastNotification *toast )
+{
+    struct toast_shown_entry *entry;
+
+    LIST_FOR_EACH_ENTRY( entry, &shown_queue, struct toast_shown_entry, entry )
+    {
+        if (entry->toast != toast) continue;
+        list_remove( &entry->entry );
+        list_add_tail( &shown_queue, &entry->entry );
+        return;
+    }
+    if (!(entry = malloc( sizeof(*entry) ))) return;
+    entry->toast = toast;
+    IToastNotification_AddRef( toast );
+    list_add_tail( &shown_queue, &entry->entry );
+    ++shown_queue_size;
+
+    while (shown_queue_size > TOAST_SHOWN_QUEUE_SIZE)
+    {
+        entry = LIST_ENTRY( list_head( &shown_queue ), struct toast_shown_entry, entry );
+        list_remove( &entry->entry );
+        IToastNotification_Release( entry->toast );
+        free( entry );
+        --shown_queue_size;
+    }
+}
+
+static HRESULT toast_shown_queue_snapshot( __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification **out );
+
+/* get_Notifications: the shown-toast queue as IObservableVector, projected
+ * here as the closed IVectorView<ToastNotification> pinterface. */
+static HRESULT toast_notifier_get_Notifications( IToastNotifier *iface,
+        __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification **value )
+{
+    if (!value) return E_POINTER;
+    return toast_shown_queue_snapshot( value );
+}
 
 struct toast_notifier
 {
@@ -639,6 +786,11 @@ static HRESULT WINAPI toast_notifier_QueryInterface( IToastNotifier *iface, REFI
         *out = iface;
         return S_OK;
     }
+
+    /* get_Notifications: QI hands out a snapshot of the shown-toast queue. */
+    if (IsEqualGUID( iid, &IID___FIVectorView_1_Windows__CUI__CNotifications__CToastNotification ))
+        return toast_notifier_get_Notifications( iface,
+                (__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification **)out );
 
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
@@ -715,6 +867,8 @@ static HRESULT WINAPI toast_notifier_Show( IToastNotifier *iface,
     /* Showing a toast puts it in the app's notification history, whether or not
      * a notification daemon answered to display it. */
     toast_history_add( notification );
+    toast_shown_queue_add( notification );
+    if (impl->suppress_popup) toast_notification_fire_suppressed( impl );
 
     params.app_name = L"Wine Application";
     params.icon = payload.image ? WindowsGetStringRawBuffer( payload.image, NULL ) : NULL;
@@ -722,6 +876,11 @@ static HRESULT WINAPI toast_notifier_Show( IToastNotifier *iface,
     params.body = payload.body ? WindowsGetStringRawBuffer( payload.body, NULL ) : NULL;
     params.badge_count = -1;
     params.replaces_id = impl->fd_id;
+
+    /* The parsed <text> content of the payload, for gate traces. */
+    NOTIFY_TRACE( "toast shown: summary %s, body %s%s\n", debugstr_w( params.summary ),
+                  debugstr_w( params.body ), impl->suppress_popup ? " (popup suppressed)" : "" );
+
     if (TWINAPI_CALL( fd_notify, &params ) == STATUS_SUCCESS && params.id)
     {
         impl->fd_id = params.id;
@@ -1792,6 +1951,35 @@ static HRESULT toast_history_snapshot(
     return S_OK;
 }
 
+/* Snapshot of the shown-toast queue (oldest shown first), same vector object
+ * the history snapshot answers: IVectorView + closed IIterable pinterface. */
+static HRESULT toast_shown_queue_snapshot( __FIVectorView_1_Windows__CUI__CNotifications__CToastNotification **out )
+{
+    struct toast_snapshot_vector *impl;
+    struct toast_shown_entry *entry;
+    UINT32 i = 0;
+
+    if (!out) return E_POINTER;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_vector_vtbl;
+    impl->__FIIterable_1_Windows__CUI__CNotifications__CToastNotification_iface.lpVtbl = &history_iterable_vtbl;
+    impl->ref = 1;
+    impl->size = shown_queue_size;
+
+    if (shown_queue_size && !(impl->items = malloc( shown_queue_size * sizeof(*impl->items) )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+    LIST_FOR_EACH_ENTRY( entry, &shown_queue, struct toast_shown_entry, entry )
+    {
+        impl->items[i++] = entry->toast;
+        IToastNotification_AddRef( entry->toast );
+    }
+    *out = &impl->__FIVectorView_1_Windows__CUI__CNotifications__CToastNotification_iface;
+    return S_OK;
+}
+
 /*
  * The history object itself: Windows hands every caller of ToastNotificationManager.History
  * (or ToastNotificationManagerForUser.History) the app's one history store, so this is a
@@ -2475,6 +2663,28 @@ static void toast_notification_fire_dismissed( struct toast_notification *impl,
     IUnknown_Release( (IUnknown *)&args->IToastDismissedEventArgs_iface );
 }
 
+/* NotificationSuppressed (TypedEventHandler<ToastNotification *, IInspectable *>):
+ * fired when a Show() arrives while the toast is flagged SuppressPopup, the
+ * app-launched-over-visible-toast case Windows reports through this event.
+ * The args carry the launch arguments, as the activation args do. */
+static void toast_notification_fire_suppressed( struct toast_notification *impl )
+{
+    __FITypedEventHandler_2_Windows__CUI__CNotifications__CToastNotification_IInspectable *handler;
+    struct toast_activated_args *args;
+    struct toast_event_sink *sink;
+
+    if (list_empty( &impl->suppressed_sinks )) return;
+    if (FAILED( create_toast_activated_args( impl->launch_args, &args ) )) return;
+
+    LIST_FOR_EACH_ENTRY( sink, &impl->suppressed_sinks, struct toast_event_sink, entry )
+    {
+        handler = (void *)sink->handler;
+        handler->lpVtbl->Invoke( handler, &impl->IToastNotification_iface,
+                                 (IInspectable *)&args->IToastActivatedEventArgs_iface );
+    }
+    IUnknown_Release( (IUnknown *)&args->IToastActivatedEventArgs_iface );
+}
+
 /*
  * Pull every queued FreeDesktop Notifications signal and replay it onto the
  * ToastNotification shown under the matching daemon id: ActionInvoked fires
@@ -2529,6 +2739,20 @@ static HRESULT WINAPI toast_notification_QueryInterface( IToastNotification *ifa
         return S_OK;
     }
 
+    if (IsEqualGUID( iid, &IID_IToastNotificationSuppressed ))
+    {
+        IUnknown_AddRef( iface );
+        *out = &impl->IToastNotificationSuppressed_iface;
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IToastNotificationTemplate ))
+    {
+        IUnknown_AddRef( iface );
+        *out = &impl->IToastNotificationTemplate_iface;
+        return S_OK;
+    }
+
     FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
     *out = NULL;
     return E_NOINTERFACE;
@@ -2553,6 +2777,7 @@ static ULONG WINAPI toast_notification_Release( IToastNotification *iface )
         toast_event_clear( &impl->activated_sinks );
         toast_event_clear( &impl->dismissed_sinks );
         toast_event_clear( &impl->failed_sinks );
+        toast_event_clear( &impl->suppressed_sinks );
         if (!list_empty( &impl->shown_entry ))
         {
             list_remove( &impl->shown_entry );
@@ -2804,6 +3029,128 @@ static const struct IToastNotification2Vtbl toast_notification2_vtbl =
     toast_notification2_get_SuppressPopup,
 };
 
+/* The NotificationSuppressed handlers join the per-event sink lists kept by
+ * the Activated/Dismissed/Failed accessors: token-keyed, AddRef'd, replayed
+ * from toast_notifier_Show. */
+static inline struct toast_notification *impl_from_IToastNotificationSuppressed(
+        IToastNotificationSuppressed *iface )
+{
+    return CONTAINING_RECORD( iface, struct toast_notification, IToastNotificationSuppressed_iface );
+}
+
+static inline struct toast_notification *impl_from_IToastNotificationTemplate(
+        IToastNotificationTemplate *iface )
+{
+    return CONTAINING_RECORD( iface, struct toast_notification, IToastNotificationTemplate_iface );
+}
+
+FORWARD_IINSPECTABLE( toast_notification_suppressed, IToastNotificationSuppressed, struct toast_notification,
+                      impl_from_IToastNotificationSuppressed, &impl->IToastNotification_iface )
+FORWARD_IINSPECTABLE( toast_notification_template, IToastNotificationTemplate, struct toast_notification,
+                      impl_from_IToastNotificationTemplate, &impl->IToastNotification_iface )
+
+static HRESULT WINAPI toast_notification_Suppressed_add( IToastNotificationSuppressed *iface,
+        __FITypedEventHandler_2_Windows__CUI__CNotifications__CToastNotification_IInspectable *handler,
+        EventRegistrationToken *token )
+{
+    struct toast_notification *impl = impl_from_IToastNotificationSuppressed( iface );
+
+    TRACE( "iface %p, handler %p, token %p.\n", iface, handler, token );
+    return toast_event_add( &impl->suppressed_sinks, (IUnknown *)handler, token );
+}
+
+static HRESULT WINAPI toast_notification_Suppressed_remove( IToastNotificationSuppressed *iface,
+        EventRegistrationToken token )
+{
+    struct toast_notification *impl = impl_from_IToastNotificationSuppressed( iface );
+
+    TRACE( "iface %p, token %s.\n", iface, wine_dbgstr_longlong( token.value ) );
+    return toast_event_remove( &impl->suppressed_sinks, token );
+}
+
+static const struct IToastNotificationSuppressedVtbl toast_notification_suppressed_vtbl =
+{
+    toast_notification_suppressed_QueryInterface,
+    toast_notification_suppressed_AddRef,
+    toast_notification_suppressed_Release,
+    /* IInspectable methods */
+    toast_notification_suppressed_GetIids,
+    toast_notification_suppressed_GetRuntimeClassName,
+    toast_notification_suppressed_GetTrustLevel,
+    /* IToastNotificationSuppressed methods */
+    toast_notification_Suppressed_add,
+    toast_notification_Suppressed_remove,
+};
+
+/*
+ * The ToastContent/ToastTemplate readback of the parsed payload: the binding
+ * template attribute names the layout, mapped onto the ToastTemplateType
+ * values (ToastImageAndText01..04, ToastText01..04) with ToastGeneric — the
+ * only template the ToastGeneric-era payloads use — answering a document with
+ * no recognizable binding template, as GetTemplateContent defaults to it.
+ */
+static HRESULT WINAPI toast_notification_template_get_ToastTemplate( IToastNotificationTemplate *iface,
+        INT32 *value )
+{
+    static const WCHAR *const template_names[] =
+    {
+        L"ToastImageAndText01", L"ToastImageAndText02", L"ToastImageAndText03", L"ToastImageAndText04",
+        L"ToastText01", L"ToastText02", L"ToastText03", L"ToastText04",
+    };
+    struct toast_notification *impl = impl_from_IToastNotificationTemplate( iface );
+    HSTRING binding = NULL;
+    INT32 i;
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    *value = ToastTemplate_ToastGeneric;
+    if (!impl->content) return S_OK;
+
+    if (SUCCEEDED( toast_xml_first_attribute( impl->content, L"binding", L"template", &binding ) ) && binding)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer( binding, NULL );
+        for (i = 0; i < ARRAY_SIZE( template_names ); ++i)
+        {
+            if (raw && !lstrcmpW( raw, template_names[i] ))
+            {
+                *value = i;
+                break;
+            }
+        }
+    }
+    WindowsDeleteString( binding );
+    return S_OK;
+}
+
+static HRESULT WINAPI toast_notification_template_get_ToastContent( IToastNotificationTemplate *iface,
+        __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument **value )
+{
+    struct toast_notification *impl = impl_from_IToastNotificationTemplate( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+
+    if (!value) return E_POINTER;
+    if (!impl->content) return E_FAIL;
+    IInspectable_AddRef( (IInspectable *)impl->content );
+    *value = impl->content;
+    return S_OK;
+}
+
+static const struct IToastNotificationTemplateVtbl toast_notification_template_vtbl =
+{
+    toast_notification_template_QueryInterface,
+    toast_notification_template_AddRef,
+    toast_notification_template_Release,
+    /* IInspectable methods */
+    toast_notification_template_GetIids,
+    toast_notification_template_GetRuntimeClassName,
+    toast_notification_template_GetTrustLevel,
+    /* IToastNotificationTemplate methods */
+    toast_notification_template_get_ToastTemplate,
+    toast_notification_template_get_ToastContent,
+};
+
 static HRESULT create_toast_notification( __x_ABI_CWindows_CData_CXml_CDom_CIXmlDocument *content,
                                           IToastNotification **out )
 {
@@ -2816,10 +3163,13 @@ static HRESULT create_toast_notification( __x_ABI_CWindows_CData_CXml_CDom_CIXml
 
     impl->IToastNotification_iface.lpVtbl = &toast_notification_vtbl;
     impl->IToastNotification2_iface.lpVtbl = &toast_notification2_vtbl;
+    impl->IToastNotificationSuppressed_iface.lpVtbl = &toast_notification_suppressed_vtbl;
+    impl->IToastNotificationTemplate_iface.lpVtbl = &toast_notification_template_vtbl;
     impl->ref = 1;
     list_init( &impl->activated_sinks );
     list_init( &impl->dismissed_sinks );
     list_init( &impl->failed_sinks );
+    list_init( &impl->suppressed_sinks );
     list_init( &impl->shown_entry );
 
     if (content)
