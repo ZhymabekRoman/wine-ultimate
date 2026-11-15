@@ -51,6 +51,7 @@
 #include "windows.security.enterprisedata.h"
 #include "windows.storage.h"
 #include "windows.storage.streams.h"
+#include "robuffer.h"
 #include "windows.ui.h"
 #include "windows.applicationmodel.datatransfer.h"
 
@@ -353,7 +354,7 @@ static HRESULT WINAPI iter_MoveNext( __FIIterator_1_Windows__CStorage__CIStorage
 }
 
 static HRESULT WINAPI iter_GetMany( __FIIterator_1_Windows__CStorage__CIStorageItem *iface, UINT32 cap,
-                                    __x_ABI_CWindows_CStorage_CIStorageItem *items, UINT32 *count )
+                                    __x_ABI_CWindows_CStorage_CIStorageItem **items, UINT32 *count )
 {
     *count = 0;
     return S_OK;
@@ -768,9 +769,15 @@ static void test_standard_formats( void )
     check_format( statics, IStandardDataFormatsStatics_get_Rtf, L"Rtf" );
     check_format( statics, IStandardDataFormatsStatics_get_Bitmap, L"Bitmap" );
     check_format( statics, IStandardDataFormatsStatics_get_StorageItems, L"StorageItems" );
-    check_format( statics2, IStandardDataFormatsStatics2_get_WebLink, L"WebLink" );
-    check_format( statics2, IStandardDataFormatsStatics2_get_ApplicationLink, L"ApplicationLink" );
-    check_format( statics3, IStandardDataFormatsStatics3_get_UserActivityJsonArray, L"UserActivityJsonArray" );
+    check_format( (IStandardDataFormatsStatics *)statics2,
+                  (HRESULT (STDMETHODCALLTYPE *)( IStandardDataFormatsStatics *, HSTRING * ))IStandardDataFormatsStatics2_get_WebLink,
+                  L"WebLink" );
+    check_format( (IStandardDataFormatsStatics *)statics2,
+                  (HRESULT (STDMETHODCALLTYPE *)( IStandardDataFormatsStatics *, HSTRING * ))IStandardDataFormatsStatics2_get_ApplicationLink,
+                  L"ApplicationLink" );
+    check_format( (IStandardDataFormatsStatics *)statics3,
+                  (HRESULT (STDMETHODCALLTYPE *)( IStandardDataFormatsStatics *, HSTRING * ))IStandardDataFormatsStatics3_get_UserActivityJsonArray,
+                  L"UserActivityJsonArray" );
 
     IStandardDataFormatsStatics3_Release( statics3 );
     IStandardDataFormatsStatics2_Release( statics2 );
@@ -1077,6 +1084,414 @@ static void test_core_drag_drop( void )
     IActivationFactory_Release( factory );
 }
 
+static LONG cc_refs;
+static LONG cc_invocations;
+static HANDLE cc_event;
+
+static HRESULT WINAPI cc_handler_QueryInterface( __FIEventHandler_1_IInspectable *iface, REFIID iid, void **out )
+{
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID___FIEventHandler_1_IInspectable ))
+    {
+        *out = iface;
+        InterlockedIncrement( &cc_refs );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI cc_handler_AddRef( __FIEventHandler_1_IInspectable *iface ) { return InterlockedIncrement( &cc_refs ); }
+static ULONG WINAPI cc_handler_Release( __FIEventHandler_1_IInspectable *iface ) { return InterlockedDecrement( &cc_refs ); }
+
+static HRESULT WINAPI cc_handler_Invoke( __FIEventHandler_1_IInspectable *iface, IInspectable *sender, IInspectable *args )
+{
+    InterlockedIncrement( &cc_invocations );
+    if (cc_event) SetEvent( cc_event );
+    return S_OK;
+}
+
+static const __FIEventHandler_1_IInspectableVtbl cc_handler_vtbl =
+{
+    cc_handler_QueryInterface,
+    cc_handler_AddRef,
+    cc_handler_Release,
+    cc_handler_Invoke,
+};
+
+static __FIEventHandler_1_IInspectable cc_handler = { &cc_handler_vtbl };
+
+static __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *create_test_bitmap_ref( void )
+{
+    static const WCHAR stream_cls[] = L"Windows.Storage.Streams.InMemoryRandomAccessStream";
+    static const WCHAR buf_cls[] = L"Windows.Storage.Streams.Buffer";
+    static const WCHAR ref_cls[] = L"Windows.Storage.Streams.RandomAccessStreamReference";
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *stream = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIOutputStream *output = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory *buf_factory = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIBuffer *buf = NULL;
+    IBufferByteAccess *access = NULL;
+    __FIAsyncOperationWithProgress_2_UINT32_UINT32 *write_op = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceStatics *ref_statics = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *ref = NULL;
+    BYTE bmp[sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER) + 4 * 4 * 4];
+    BITMAPFILEHEADER *bfh = (BITMAPFILEHEADER *)bmp;
+    BITMAPINFOHEADER *bih = (BITMAPINFOHEADER *)(bmp + sizeof(BITMAPFILEHEADER));
+    DWORD *pixels = (DWORD *)(bmp + sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER));
+    BYTE *dst = NULL;
+    HSTRING hstr;
+    UINT32 written = 0, i;
+    HRESULT hr;
+
+    memset( bmp, 0, sizeof(bmp) );
+    bfh->bfType = 0x4D42;
+    bfh->bfSize = sizeof(bmp);
+    bfh->bfOffBits = sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER);
+    bih->biSize = sizeof(BITMAPINFOHEADER);
+    bih->biWidth = 4;
+    bih->biHeight = 4;
+    bih->biPlanes = 1;
+    bih->biBitCount = 32;
+    bih->biCompression = BI_RGB;
+    for (i = 0; i < 16; i++) pixels[i] = 0xFF112233;
+
+    hstr = str( stream_cls );
+    hr = RoActivateInstance( hstr, (IInspectable **)&stream );
+    WindowsDeleteString( hstr );
+    check_hr( hr, S_OK );
+    if (FAILED( hr )) return NULL;
+
+    hstr = str( buf_cls );
+    hr = RoGetActivationFactory( hstr, &IID___x_ABI_CWindows_CStorage_CStreams_CIBufferFactory, (void **)&buf_factory );
+    WindowsDeleteString( hstr );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory_Create( buf_factory, sizeof(bmp), &buf );
+    check_hr( hr, S_OK );
+    __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory_Release( buf_factory );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBuffer_QueryInterface( buf, &IID_IBufferByteAccess, (void **)&access );
+    check_hr( hr, S_OK );
+    hr = IBufferByteAccess_Buffer( access, &dst );
+    check_hr( hr, S_OK );
+    memcpy( dst, bmp, sizeof(bmp) );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBuffer_put_Length( buf, sizeof(bmp) );
+    check_hr( hr, S_OK );
+    IBufferByteAccess_Release( access );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_QueryInterface(
+            stream, &IID___x_ABI_CWindows_CStorage_CStreams_CIOutputStream, (void **)&output );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIOutputStream_WriteAsync( output, buf, &write_op );
+    check_hr( hr, S_OK );
+    __FIAsyncOperationWithProgress_2_UINT32_UINT32_GetResults( write_op, &written );
+    ok( written == sizeof(bmp), "wrote %u bytes.\n", written );
+    __FIAsyncOperationWithProgress_2_UINT32_UINT32_Release( write_op );
+    __x_ABI_CWindows_CStorage_CStreams_CIOutputStream_Release( output );
+    __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release( buf );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_Seek( stream, 0 );
+    check_hr( hr, S_OK );
+
+    hstr = str( ref_cls );
+    hr = RoGetActivationFactory( hstr, &IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceStatics,
+                                 (void **)&ref_statics );
+    WindowsDeleteString( hstr );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceStatics_CreateFromStream( ref_statics, stream, &ref );
+    check_hr( hr, S_OK );
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReferenceStatics_Release( ref_statics );
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_Release( stream );
+    return ref;
+}
+
+static void check_bitmap_ref_valid( __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *ref )
+{
+    static const WCHAR buf_cls[] = L"Windows.Storage.Streams.Buffer";
+    __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType *open_op = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType *wct = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream *stream = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIInputStream *input = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory *buf_factory = NULL;
+    __x_ABI_CWindows_CStorage_CStreams_CIBuffer *buf = NULL, *read_buf = NULL;
+    __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32 *read_op = NULL;
+    IBufferByteAccess *access = NULL;
+    UINT64 sz = 0;
+    UINT32 len = 0;
+    BYTE *bytes = NULL;
+    HSTRING hstr;
+    HRESULT hr;
+
+    ok( !!ref, "bitmap ref is NULL.\n" );
+    if (!ref) return;
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_OpenReadAsync( ref, &open_op );
+    check_hr( hr, S_OK );
+    hr = __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType_GetResults( open_op, &wct );
+    check_hr( hr, S_OK );
+    __FIAsyncOperation_1_Windows__CStorage__CStreams__CIRandomAccessStreamWithContentType_Release( open_op );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType_QueryInterface(
+            wct, &IID___x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream, (void **)&stream );
+    check_hr( hr, S_OK );
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamWithContentType_Release( wct );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_get_Size( stream, &sz );
+    check_hr( hr, S_OK );
+    ok( sz >= sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER), "got bitmap stream size %I64u.\n", sz );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_Seek( stream, 0 );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_QueryInterface(
+            stream, &IID___x_ABI_CWindows_CStorage_CStreams_CIInputStream, (void **)&input );
+    check_hr( hr, S_OK );
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStream_Release( stream );
+
+    hstr = str( buf_cls );
+    hr = RoGetActivationFactory( hstr, &IID___x_ABI_CWindows_CStorage_CStreams_CIBufferFactory, (void **)&buf_factory );
+    WindowsDeleteString( hstr );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory_Create( buf_factory, (UINT32)sz, &buf );
+    check_hr( hr, S_OK );
+    __x_ABI_CWindows_CStorage_CStreams_CIBufferFactory_Release( buf_factory );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIInputStream_ReadAsync( input, buf, (UINT32)sz, InputStreamOptions_None, &read_op );
+    check_hr( hr, S_OK );
+    hr = __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32_GetResults( read_op, &read_buf );
+    check_hr( hr, S_OK );
+    __FIAsyncOperationWithProgress_2_Windows__CStorage__CStreams__CIBuffer_UINT32_Release( read_op );
+    __x_ABI_CWindows_CStorage_CStreams_CIInputStream_Release( input );
+
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBuffer_get_Length( read_buf, &len );
+    check_hr( hr, S_OK );
+    hr = __x_ABI_CWindows_CStorage_CStreams_CIBuffer_QueryInterface( read_buf, &IID_IBufferByteAccess, (void **)&access );
+    check_hr( hr, S_OK );
+    hr = IBufferByteAccess_Buffer( access, &bytes );
+    check_hr( hr, S_OK );
+    ok( len >= sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER), "got %u bitmap bytes.\n", len );
+    if (len >= sizeof(BITMAPFILEHEADER) + sizeof(BITMAPINFOHEADER))
+    {
+        const BITMAPFILEHEADER *bfh = (const BITMAPFILEHEADER *)bytes;
+        const BITMAPINFOHEADER *bih = (const BITMAPINFOHEADER *)(bytes + sizeof(BITMAPFILEHEADER));
+        ok( bfh->bfType == 0x4D42, "got bfType %#x.\n", bfh->bfType );
+        ok( bih->biWidth == 4 && abs( bih->biHeight ) == 4, "got %ldx%ld.\n", bih->biWidth, bih->biHeight );
+    }
+    IBufferByteAccess_Release( access );
+    __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release( read_buf );
+    __x_ABI_CWindows_CStorage_CStreams_CIBuffer_Release( buf );
+}
+
+static void test_clipboard_roundtrip( void )
+{
+    static const WCHAR wa_text[] = L"hello wa";
+    static const WCHAR wa_html[] = L"<b>hello wa</b>";
+    IClipboardStatics *statics = NULL;
+    IHtmlFormatHelperStatics *helper = NULL;
+    IDataPackage *package = NULL;
+    IDataPackageView *view = NULL;
+    IDataObject *data_obj = NULL;
+    IActivationFactory *factory;
+    __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *bmp_ref = NULL, *got_bmp = NULL;
+    __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference *bmp_op = NULL;
+    IAsyncOperation_HSTRING *op = NULL;
+    EventRegistrationToken cc_token = { 0 };
+    HSTRING hstr, html_res = NULL, frag = NULL;
+    const WCHAR *raw;
+    boolean found = FALSE;
+    DWORD wait_res;
+    HRESULT hr;
+
+    factory = get_factory( RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard );
+    ok( !!factory, "no Clipboard factory.\n" );
+    if (!factory) return;
+    check_hr( IActivationFactory_QueryInterface( factory, &IID_IClipboardStatics, (void **)&statics ), S_OK );
+    IActivationFactory_Release( factory );
+
+    factory = get_factory( RuntimeClass_Windows_ApplicationModel_DataTransfer_HtmlFormatHelper );
+    ok( !!factory, "no HtmlFormatHelper factory.\n" );
+    check_hr( IActivationFactory_QueryInterface( factory, &IID_IHtmlFormatHelperStatics, (void **)&helper ), S_OK );
+    IActivationFactory_Release( factory );
+
+    cc_refs = 0;
+    cc_invocations = 0;
+    cc_event = CreateEventW( NULL, FALSE, FALSE, NULL );
+    hr = IClipboardStatics_add_ContentChanged( statics, &cc_handler, &cc_token );
+    check_hr( hr, S_OK );
+    ok( cc_token.value != 0, "got zero token.\n" );
+    ok( cc_refs >= 1, "handler ref not taken.\n" );
+
+    factory = get_factory( RuntimeClass_Windows_ApplicationModel_DataTransfer_DataPackage );
+    check_hr( IActivationFactory_ActivateInstance( factory, (IInspectable **)&package ), S_OK );
+    IActivationFactory_Release( factory );
+
+    hstr = str( wa_text );
+    check_hr( IDataPackage_SetText( package, hstr ), S_OK );
+    WindowsDeleteString( hstr );
+
+    hstr = str( wa_html );
+    check_hr( IDataPackage_SetHtmlFormat( package, hstr ), S_OK );
+    WindowsDeleteString( hstr );
+
+    bmp_ref = create_test_bitmap_ref();
+    ok( !!bmp_ref, "failed to create test bitmap ref.\n" );
+    if (bmp_ref)
+    {
+        check_hr( IDataPackage_SetBitmap( package, bmp_ref ), S_OK );
+        __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( bmp_ref );
+    }
+
+    /* SetContent + Flush must trigger WM_CLIPBOARDUPDATE -> ContentChanged and persist formats. */
+    ResetEvent( cc_event );
+    check_hr( IClipboardStatics_SetContent( statics, package ), S_OK );
+    check_hr( IClipboardStatics_Flush( statics ), S_OK );
+
+    wait_res = WaitForSingleObject( cc_event, 3000 );
+    ok( wait_res == WAIT_OBJECT_0, "ContentChanged did not fire after SetContent/Flush (wait %lu).\n", wait_res );
+    ok( cc_invocations >= 1, "expected ContentChanged invocations >= 1, got %ld.\n", cc_invocations );
+
+    check_hr( IClipboardStatics_GetContent( statics, &view ), S_OK );
+
+    /* DataPackageView must QI for IDataObject. */
+    hr = IDataPackageView_QueryInterface( view, &IID_IDataObject, (void **)&data_obj );
+    check_hr( hr, S_OK );
+    ok( !!data_obj, "no IDataObject on DataPackageView.\n" );
+
+    hstr = str( L"Text" );
+    check_hr( IDataPackageView_Contains( view, hstr, &found ), S_OK );
+    ok( found, "Text missing from clipboard view.\n" );
+    WindowsDeleteString( hstr );
+
+    hstr = str( L"Html" );
+    check_hr( IDataPackageView_Contains( view, hstr, &found ), S_OK );
+    ok( found, "Html missing from clipboard view.\n" );
+    WindowsDeleteString( hstr );
+
+    hstr = str( L"Bitmap" );
+    check_hr( IDataPackageView_Contains( view, hstr, &found ), S_OK );
+    ok( found, "Bitmap missing from clipboard view.\n" );
+    WindowsDeleteString( hstr );
+
+    check_hr( IDataPackageView_GetTextAsync( view, &op ), S_OK );
+    check_string_op( op, wa_text );
+    IAsyncOperation_HSTRING_Release( op );
+
+    check_hr( IDataPackageView_GetHtmlFormatAsync( view, &op ), S_OK );
+    check_hr( IAsyncOperation_HSTRING_GetResults( op, &html_res ), S_OK );
+    IAsyncOperation_HSTRING_Release( op );
+    raw = WindowsGetStringRawBuffer( html_res, NULL );
+    ok( raw && wcsstr( raw, L"<!--StartFragment-->" ) != NULL, "missing <!--StartFragment--> in %s.\n", debugstr_w( raw ) );
+    ok( raw && wcsstr( raw, wa_html ) != NULL, "missing fragment in %s.\n", debugstr_w( raw ) );
+    check_hr( IHtmlFormatHelperStatics_GetStaticFragment( helper, html_res, &frag ), S_OK );
+    ok( str_eq( frag, wa_html ), "got fragment %s, expected %s.\n",
+        debugstr_w( WindowsGetStringRawBuffer( frag, NULL ) ), debugstr_w( wa_html ) );
+    WindowsDeleteString( frag );
+    WindowsDeleteString( html_res );
+
+    check_hr( IDataPackageView_GetBitmapAsync( view, &bmp_op ), S_OK );
+    check_hr( __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference_GetResults( bmp_op, &got_bmp ), S_OK );
+    __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference_Release( bmp_op );
+    check_bitmap_ref_valid( got_bmp );
+    if (got_bmp) __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( got_bmp );
+
+    /* Verify direct IDataObject reads from the clipboard view. */
+    if (data_obj)
+    {
+        FORMATETC fmt_u = { CF_UNICODETEXT, NULL, DVASPECT_CONTENT, -1, TYMED_HGLOBAL };
+        FORMATETC fmt_b = { CF_BITMAP, NULL, DVASPECT_CONTENT, -1, TYMED_GDI };
+        STGMEDIUM med = { 0 };
+
+        hr = IDataObject_GetData( data_obj, &fmt_u, &med );
+        check_hr( hr, S_OK );
+        if (SUCCEEDED( hr ))
+        {
+            const WCHAR *p = GlobalLock( med.hGlobal );
+            ok( p && !wcscmp( p, wa_text ), "IDataObject CF_UNICODETEXT got %s.\n", debugstr_w( p ) );
+            GlobalUnlock( med.hGlobal );
+            ReleaseStgMedium( &med );
+        }
+
+        memset( &med, 0, sizeof(med) );
+        hr = IDataObject_GetData( data_obj, &fmt_b, &med );
+        check_hr( hr, S_OK );
+        if (SUCCEEDED( hr ))
+        {
+            ok( med.tymed == TYMED_GDI && med.hBitmap != NULL, "IDataObject CF_BITMAP missing.\n" );
+            ReleaseStgMedium( &med );
+        }
+        IDataObject_Release( data_obj );
+    }
+
+    IDataPackageView_Release( view );
+    IDataPackage_Release( package );
+
+    /* Win32 SetClipboardData -> ContentChanged + GetContent live clipboard read. */
+    {
+        static const WCHAR win32_txt[] = L"win32 hello";
+        static const char win32_html[] =
+            "Version:0.9\r\nStartHTML:0000000097\r\nEndHTML:0000000174\r\n"
+            "StartFragment:0000000131\r\nEndFragment:0000000143\r\n"
+            "<html><body>\r\n<!--StartFragment--><i>win32</i><!--EndFragment-->\r\n</body></html>";
+        UINT cf_html = RegisterClipboardFormatW( L"HTML Format" );
+        HGLOBAL hg_txt, hg_html;
+        HBITMAP hbm;
+        BYTE *bits = NULL;
+        BITMAPINFO bmi = { { sizeof(BITMAPINFOHEADER), 4, 4, 1, 32, BI_RGB } };
+        HDC hdc;
+        LONG prev_cc = cc_invocations;
+
+        ResetEvent( cc_event );
+        ok( OpenClipboard( NULL ), "OpenClipboard failed.\n" );
+        EmptyClipboard();
+        hg_txt = GlobalAlloc( GMEM_MOVEABLE | GMEM_DDESHARE, sizeof(win32_txt) );
+        memcpy( GlobalLock( hg_txt ), win32_txt, sizeof(win32_txt) );
+        GlobalUnlock( hg_txt );
+        SetClipboardData( CF_UNICODETEXT, hg_txt );
+
+        hg_html = GlobalAlloc( GMEM_MOVEABLE | GMEM_DDESHARE, sizeof(win32_html) );
+        memcpy( GlobalLock( hg_html ), win32_html, sizeof(win32_html) );
+        GlobalUnlock( hg_html );
+        SetClipboardData( cf_html, hg_html );
+
+        hdc = GetDC( NULL );
+        hbm = CreateDIBSection( hdc, &bmi, DIB_RGB_COLORS, (void **)&bits, NULL, 0 );
+        ReleaseDC( NULL, hdc );
+        if (bits) memset( bits, 0x7f, 4 * 4 * 4 );
+        SetClipboardData( CF_BITMAP, hbm );
+        CloseClipboard();
+
+        wait_res = WaitForSingleObject( cc_event, 3000 );
+        ok( wait_res == WAIT_OBJECT_0, "ContentChanged did not fire on Win32 SetClipboardData (wait %lu).\n", wait_res );
+        ok( cc_invocations > prev_cc, "ContentChanged count did not increment.\n" );
+
+        check_hr( IClipboardStatics_GetContent( statics, &view ), S_OK );
+        check_hr( IDataPackageView_GetTextAsync( view, &op ), S_OK );
+        check_string_op( op, win32_txt );
+        IAsyncOperation_HSTRING_Release( op );
+
+        check_hr( IDataPackageView_GetHtmlFormatAsync( view, &op ), S_OK );
+        check_hr( IAsyncOperation_HSTRING_GetResults( op, &html_res ), S_OK );
+        IAsyncOperation_HSTRING_Release( op );
+        raw = WindowsGetStringRawBuffer( html_res, NULL );
+        ok( raw && wcsstr( raw, L"<i>win32</i>" ) != NULL, "missing win32 html in %s.\n", debugstr_w( raw ) );
+        WindowsDeleteString( html_res );
+
+        check_hr( IDataPackageView_GetBitmapAsync( view, &bmp_op ), S_OK );
+        check_hr( __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference_GetResults( bmp_op, &got_bmp ), S_OK );
+        __FIAsyncOperation_1_Windows__CStorage__CStreams__CRandomAccessStreamReference_Release( bmp_op );
+        check_bitmap_ref_valid( got_bmp );
+        if (got_bmp) __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference_Release( got_bmp );
+        IDataPackageView_Release( view );
+    }
+
+    check_hr( IClipboardStatics_remove_ContentChanged( statics, cc_token ), S_OK );
+    ok( cc_refs == 0, "handler ref leaked (%ld).\n", cc_refs );
+    check_hr( IClipboardStatics_Clear( statics ), S_OK );
+
+    CloseHandle( cc_event );
+    cc_event = NULL;
+    IHtmlFormatHelperStatics_Release( helper );
+    IClipboardStatics_Release( statics );
+}
+
 START_TEST( dataexchange )
 {
     HRESULT hr;
@@ -1087,6 +1502,7 @@ START_TEST( dataexchange )
     test_activation();
     test_data_package();
     test_clipboard();
+    test_clipboard_roundtrip();
     test_standard_formats();
     test_format_keys();
     test_share_surface();

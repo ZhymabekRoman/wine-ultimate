@@ -47,6 +47,7 @@ struct data_package
     const void *iface3_vtbl;
     const void *iface4_vtbl;
     LONG ref;
+    SRWLOCK lock;
     struct fmt_entry *fmts;
     ULONG count, alloc;
     struct property_set *props;
@@ -102,23 +103,31 @@ static LONG fmt_find( struct data_package *impl, const WCHAR *format )
 
 static HRESULT package_set( struct data_package *impl, const WCHAR *format, void *value, enum fmt_kind kind )
 {
-    LONG idx = fmt_find( impl, format );
-    HRESULT hr;
+    LONG idx;
+    HRESULT hr = S_OK;
+
+    AcquireSRWLockExclusive( &impl->lock );
+    idx = fmt_find( impl, format );
 
     if (idx >= 0)
     {
         void *stored = value;
 
-        fmt_release( &impl->fmts[idx] );
         /* The ABI passes the string by value; the entry owns its own copy. */
         if (kind == FMT_STRING && value)
         {
-            HRESULT hr2 = WindowsDuplicateString( (HSTRING)value, (HSTRING *)&stored );
-            if (FAILED( hr2 )) return hr2;
+            hr = WindowsDuplicateString( (HSTRING)value, (HSTRING *)&stored );
+            if (FAILED( hr ))
+            {
+                ReleaseSRWLockExclusive( &impl->lock );
+                return hr;
+            }
         }
+        fmt_release( &impl->fmts[idx] );
         impl->fmts[idx].value = stored;
         impl->fmts[idx].kind = kind;
         if (kind == FMT_COM && value) IUnknown_AddRef( (IUnknown *)value );
+        ReleaseSRWLockExclusive( &impl->lock );
         return S_OK;
     }
 
@@ -126,37 +135,56 @@ static HRESULT package_set( struct data_package *impl, const WCHAR *format, void
     {
         ULONG alloc = max( impl->alloc * 2, 8 );
         struct fmt_entry *fmts = realloc( impl->fmts, alloc * sizeof(*fmts) );
-        if (!fmts) return E_OUTOFMEMORY;
+        if (!fmts)
+        {
+            ReleaseSRWLockExclusive( &impl->lock );
+            return E_OUTOFMEMORY;
+        }
         impl->fmts = fmts;
         impl->alloc = alloc;
     }
 
     if (FAILED( (hr = WindowsCreateString( format, lstrlenW( format ), &impl->fmts[impl->count].format )) ))
+    {
+        ReleaseSRWLockExclusive( &impl->lock );
         return hr;
+    }
     impl->fmts[impl->count].value = value;
     if (kind == FMT_STRING && value)
     {
         if (FAILED( (hr = WindowsDuplicateString( (HSTRING)value, (HSTRING *)&impl->fmts[impl->count].value )) ))
+        {
+            WindowsDeleteString( impl->fmts[impl->count].format );
+            ReleaseSRWLockExclusive( &impl->lock );
             return hr;
+        }
     }
     impl->fmts[impl->count].kind = kind;
     if (kind == FMT_COM && value) IUnknown_AddRef( (IUnknown *)value );
     impl->count++;
+    ReleaseSRWLockExclusive( &impl->lock );
     return S_OK;
 }
 
 static void package_remove( struct data_package *impl, const WCHAR *format )
 {
-    LONG idx = fmt_find( impl, format );
+    LONG idx;
     ULONG i;
 
-    if (idx < 0) return;
+    AcquireSRWLockExclusive( &impl->lock );
+    idx = fmt_find( impl, format );
+    if (idx < 0)
+    {
+        ReleaseSRWLockExclusive( &impl->lock );
+        return;
+    }
     fmt_release( &impl->fmts[idx] );
     for (i = idx; i + 1 < impl->count; i++) impl->fmts[i] = impl->fmts[i + 1];
     impl->count--;
+    ReleaseSRWLockExclusive( &impl->lock );
 }
 
-static void *package_get( struct data_package *impl, const WCHAR *format, enum fmt_kind *kind )
+static void *package_get_unlocked( struct data_package *impl, const WCHAR *format, enum fmt_kind *kind )
 {
     LONG idx = fmt_find( impl, format );
 
@@ -166,65 +194,103 @@ static void *package_get( struct data_package *impl, const WCHAR *format, enum f
 
 /* Cross-file accessors for the DataPackageView mirror (data_package_view.c). */
 
+void package_lock( struct data_package *pkg )
+{
+    if (pkg) AcquireSRWLockShared( &pkg->lock );
+}
+
+void package_unlock( struct data_package *pkg )
+{
+    if (pkg) ReleaseSRWLockShared( &pkg->lock );
+}
+
 void *package_get_raw( struct data_package *pkg, const WCHAR *format, enum fmt_kind *kind )
 {
-    return package_get( pkg, format, kind );
+    if (!pkg)
+    {
+        if (kind) *kind = FMT_NONE;
+        return NULL;
+    }
+    return package_get_unlocked( pkg, format, kind );
 }
 
 HSTRING package_get_string( struct data_package *pkg, const WCHAR *format )
 {
     enum fmt_kind kind;
-    void *value = pkg ? package_get( pkg, format, &kind ) : NULL;
+    void *value;
+    HSTRING dup = NULL;
 
-    if (kind == FMT_STRING && value)
+    if (pkg)
     {
-        HSTRING dup = NULL;
-        WindowsDuplicateString( (HSTRING)value, &dup );
-        return dup;
+        AcquireSRWLockShared( &pkg->lock );
+        value = package_get_unlocked( pkg, format, &kind );
+        if (kind == FMT_STRING && value) WindowsDuplicateString( (HSTRING)value, &dup );
+        ReleaseSRWLockShared( &pkg->lock );
+        if (dup) return dup;
     }
-    {
-        HSTRING empty = NULL;
-        WindowsCreateString( L"", 0, &empty );
-        return empty;
-    }
+    WindowsCreateString( L"", 0, &dup );
+    return dup;
 }
 
 void *package_get_com( struct data_package *pkg, const WCHAR *format )
 {
     enum fmt_kind kind;
-    void *value = package_get( pkg, format, &kind );
+    void *value = NULL;
 
+    if (!pkg) return NULL;
+    AcquireSRWLockShared( &pkg->lock );
+    value = package_get_unlocked( pkg, format, &kind );
     if (kind == FMT_COM && value) IUnknown_AddRef( (IUnknown *)value );
+    else value = NULL;
+    ReleaseSRWLockShared( &pkg->lock );
     return value;
 }
 
 struct winrt_vector *package_get_items( struct data_package *pkg )
 {
     enum fmt_kind kind;
-    void *value = package_get( pkg, format_storage_items, &kind );
+    void *value = NULL;
 
-    if (kind == FMT_ITEMS && value)
-    {
-        vector_add_ref( (struct winrt_vector *)value );
-        return (struct winrt_vector *)value;
-    }
-    return NULL;
+    if (!pkg) return NULL;
+    AcquireSRWLockShared( &pkg->lock );
+    value = package_get_unlocked( pkg, format_storage_items, &kind );
+    if (kind == FMT_ITEMS && value) vector_add_ref( (struct winrt_vector *)value );
+    else value = NULL;
+    ReleaseSRWLockShared( &pkg->lock );
+    return (struct winrt_vector *)value;
 }
 
 ULONG package_format_count( struct data_package *pkg )
 {
-    return pkg ? pkg->count : 0;
+    ULONG count;
+
+    if (!pkg) return 0;
+    AcquireSRWLockShared( &pkg->lock );
+    count = pkg->count;
+    ReleaseSRWLockShared( &pkg->lock );
+    return count;
 }
 
 const WCHAR *package_format_key( struct data_package *pkg, ULONG index )
 {
-    if (!pkg || index >= pkg->count) return NULL;
-    return WindowsGetStringRawBuffer( pkg->fmts[index].format, NULL );
+    const WCHAR *key = NULL;
+
+    if (!pkg) return NULL;
+    /* Callers enumerating keys should hold package_lock() or only inspect stable keys;
+     * reading under shared lock returns the interned HSTRING buffer. */
+    if (index < pkg->count) key = WindowsGetStringRawBuffer( pkg->fmts[index].format, NULL );
+    return key;
 }
 
 DataPackageOperation package_get_operation( struct data_package *pkg )
 {
-    return pkg ? pkg->op : DataPackageOperation_None;
+    DataPackageOperation op;
+
+    if (!pkg) return DataPackageOperation_None;
+    AcquireSRWLockShared( &pkg->lock );
+    op = pkg->op;
+    ReleaseSRWLockShared( &pkg->lock );
+    return op;
 }
 
 struct property_set *package_get_props( struct data_package *pkg )
@@ -361,7 +427,7 @@ static HRESULT WINAPI package_get_RequestedOperation( const void *iface, DataPac
     TRACE( "iface %p, value %p.\n", iface, value );
 
     if (!value) return E_POINTER;
-    *value = impl->op;
+    *value = package_get_operation( impl );
     return S_OK;
 }
 
@@ -371,7 +437,9 @@ static HRESULT WINAPI package_put_RequestedOperation( const void *iface, DataPac
 
     TRACE( "iface %p, value %#x.\n", iface, value );
 
+    AcquireSRWLockExclusive( &impl->lock );
     impl->op = value;
+    ReleaseSRWLockExclusive( &impl->lock );
     return S_OK;
 }
 
@@ -413,8 +481,11 @@ static HRESULT WINAPI package_remove_Destroyed( const void *iface, EventRegistra
 
 static HRESULT WINAPI package_SetData( const void *iface, HSTRING format_id, void *value )
 {
+    static const IID probe_iid = { 0x0f91e3a1, 0x7b4c, 0x4d8a, { 0x91, 0x22, 0x33, 0x44, 0x55, 0x66, 0x77, 0x88 } };
     struct data_package *impl = impl_from_any( iface );
     const WCHAR *key = WindowsGetStringRawBuffer( format_id, NULL );
+    IPropertyValue *pv = NULL;
+    IUnknown *probe = NULL;
 
     TRACE( "iface %p, format_id %s, value %p.\n", iface, debugstr_hstring( format_id ), value );
 
@@ -423,6 +494,26 @@ static HRESULT WINAPI package_SetData( const void *iface, HSTRING format_id, voi
     {
         package_remove( impl, key );
         return S_OK;
+    }
+    if (IUnknown_QueryInterface( (IUnknown *)value, &probe_iid, (void **)&probe ) == S_OK && probe)
+    {
+        IUnknown_Release( probe );
+    }
+    else if (SUCCEEDED( IUnknown_QueryInterface( (IUnknown *)value, &IID_IPropertyValue, (void **)&pv ) ) && pv)
+    {
+        PropertyType ptype = 0;
+        if (SUCCEEDED( IPropertyValue_get_Type( pv, &ptype ) ) && ptype == PropertyType_String)
+        {
+            HSTRING str = NULL;
+            if (SUCCEEDED( IPropertyValue_GetString( pv, &str ) ))
+            {
+                HRESULT hr = package_set( impl, key, str, FMT_STRING );
+                WindowsDeleteString( str );
+                IPropertyValue_Release( pv );
+                return hr;
+            }
+        }
+        IPropertyValue_Release( pv );
     }
     return package_set( impl, key, value, FMT_COM );
 }
@@ -717,6 +808,7 @@ IInspectable *create_data_package( void )
     impl->iface3_vtbl = data_package3_vtbl;
     impl->iface4_vtbl = data_package4_vtbl;
     impl->ref = 1;
+    InitializeSRWLock( &impl->lock );
     impl->op = DataPackageOperation_Copy;
 
     impl->props = (struct property_set *)create_property_set();

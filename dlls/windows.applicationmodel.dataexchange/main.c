@@ -23,6 +23,8 @@
 #include "ole2.h"
 #include "oleidl.h"
 #include "servprov.h"
+#include "propidl.h"
+#include "ocidl.h"
 #include "initguid.h"
 #include "private.h"
 

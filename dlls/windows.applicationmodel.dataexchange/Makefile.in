@@ -1,6 +1,6 @@
 MODULE  = windows.applicationmodel.dataexchange.dll
 ENABLE_ARCHS = x86_64
-IMPORTS = combase uuid kernelbase ole32
+IMPORTS = combase uuid kernelbase ole32 user32 gdi32
 
 EXTRADLLFLAGS = -Wb,--prefer-native
 

@@ -7,12 +7,17 @@
 #define COBJMACROS
 #include "windef.h"
 #include "winbase.h"
+#include "wingdi.h"
+#include "winuser.h"
 #include "winstring.h"
+#include "ole2.h"
+#include "oleidl.h"
 
 #include "activation.h"
 #include "asyncinfo.h"
 #include "eventtoken.h"
 #include "roapi.h"
+#include "wincodec.h"
 
 #include "wine/debug.h"
 
@@ -28,6 +33,7 @@
 #include "windows.security.enterprisedata.h"
 #include "windows.storage.h"
 #include "windows.storage.streams.h"
+#include "robuffer.h"
 #include "windows.ui.h"
 #include "windows.applicationmodel.datatransfer.h"
 
@@ -47,6 +53,7 @@ IInspectable *create_data_package_view( struct data_package *package );
 IInspectable *create_property_set( void );
 IInspectable *create_property_set_view( struct property_set *set );
 struct data_package_view *create_package_view_object( struct data_package *package );
+struct data_package_view *create_package_view_from_data_object( IDataObject *data_obj );
 
 /*
  * The DataPackage format table (data_package.c), read by the view mirror:
@@ -58,6 +65,8 @@ struct data_package_view *create_package_view_object( struct data_package *packa
  */
 enum fmt_kind { FMT_NONE, FMT_STRING, FMT_COM, FMT_ITEMS };
 
+void package_lock( struct data_package *pkg );
+void package_unlock( struct data_package *pkg );
 void *package_get_raw( struct data_package *pkg, const WCHAR *format, enum fmt_kind *kind );
 HSTRING package_get_string( struct data_package *pkg, const WCHAR *format );
 void *package_get_com( struct data_package *pkg, const WCHAR *format );
@@ -66,6 +75,17 @@ ULONG package_format_count( struct data_package *pkg );
 const WCHAR *package_format_key( struct data_package *pkg, ULONG index );
 DataPackageOperation package_get_operation( struct data_package *pkg );
 struct property_set *package_get_props( struct data_package *pkg );
+
+/* Clipboard format registration and Win32 <-> WinRT conversion helpers (data_package_view.c). */
+UINT clipboard_html_format( void );
+UINT clipboard_rtf_format( void );
+UINT clipboard_preferred_drop_effect_format( void );
+HRESULT build_cf_html_utf8( const WCHAR *html, UINT32 len, HGLOBAL *out );
+HRESULT parse_cf_html_utf8( const char *utf8, SIZE_T utf8_len, HSTRING *out );
+HRESULT stream_ref_to_hbitmap( __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference *ref, HBITMAP *out_hbm );
+HRESULT hbitmap_to_dib_global( HBITMAP hbm, HGLOBAL *out_global );
+HRESULT hbitmap_to_stream_ref( HBITMAP hbm, __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference **out_ref );
+HRESULT dib_to_stream_ref( const BITMAPINFO *bmi, SIZE_T dib_size, __x_ABI_CWindows_CStorage_CStreams_CIRandomAccessStreamReference **out_ref );
 
 /*
  * Generic WinRT collection objects (collections.c):  an array-backed
