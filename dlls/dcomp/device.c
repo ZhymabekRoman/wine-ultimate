@@ -258,6 +258,8 @@ static ULONG STDMETHODCALLTYPE device_AddRef(IDCompositionDevice *iface)
     return ref;
 }
 
+static void dcomp_reclaim_drain(void);
+
 static ULONG STDMETHODCALLTYPE device_Release(IDCompositionDevice *iface)
 {
     struct composition_device *device = impl_from_IDCompositionDevice(iface);
@@ -293,6 +295,7 @@ static ULONG STDMETHODCALLTYPE device_Release(IDCompositionDevice *iface)
             CloseHandle(device->thread);
             device->thread = NULL;
         }
+        dcomp_reclaim_drain();
         if (device->wake_event)
         {
             CloseHandle(device->wake_event);
@@ -677,6 +680,7 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context, (ID3D11Resource *)backbuffer,
                 0, 0, 0, 0, (ID3D11Resource *)src_texture, 0, &box);
     }
+    ID3D11Texture2D_Release(backbuffer);
     hr = S_OK;
 
 done:
@@ -1373,6 +1377,14 @@ void dcomp_reclaim_push(IUnknown *object)
         return;
     }
 
+    if (TryEnterCriticalSection(&composite_render_cs))
+    {
+        dcomp_reclaim_drain();
+        IUnknown_Release(object);
+        LeaveCriticalSection(&composite_render_cs);
+        return;
+    }
+
     entry = malloc(sizeof(*entry));
     if (!entry)
     {
@@ -1674,28 +1686,44 @@ static void collect_visual_frames(struct composition_device *device, struct comp
 
     /* A proxy has no content of its own: its pixels come from the publisher's
      * surface, which changes on every publisher frame, so queue it every tick. */
-    if (visual->is_shared_proxy
-            || (visual->content && (visual->content_version != visual->composited_version
-                || xform_ver != visual->composited_transform_version
-                || visual->composited_hwnd != target_hwnd)))
     {
-        if ((frame = device_alloc_frame(device)))
+        unsigned int content_ver = visual->content_version;
+        if (visual->content)
         {
-            composite_frame_init(frame, target, visual, target_hwnd, pt);
-            frame->content = visual->content;
-            frame->device_context = visual->device_context;
-            frame->interop = visual->interop;
-            frame->version = visual->content_version;
-            frame->transform_version = xform_ver;
-            frame->world_transform = world_m;
-            frame->has_transform = has_transform;
-            if (effective_clip_ptr)
+            struct composition_surface *surf = unsafe_impl_from_IDCompositionSurface((IDCompositionSurface *)visual->content);
+            if (surf)
+                content_ver += surf->content_version;
+            else if (visual->wined3d_swapchain)
             {
-                frame->target_clip = *effective_clip_ptr;
-                frame->has_clip = TRUE;
+                UINT present_count = 0;
+                device->last_has_swapchain = TRUE;
+                if (SUCCEEDED(IDXGISwapChain_GetLastPresentCount((IDXGISwapChain *)visual->content, &present_count)))
+                    content_ver += present_count + 1;
             }
-            IDCompositionVisual_AddRef((IDCompositionVisual *)&visual->IDCompositionVisualUnknown_iface);
-            (*queued)++;
+        }
+        if (visual->is_shared_proxy
+                || (visual->content && (content_ver != visual->composited_version
+                    || xform_ver != visual->composited_transform_version
+                    || visual->composited_hwnd != target_hwnd)))
+        {
+            if ((frame = device_alloc_frame(device)))
+            {
+                composite_frame_init(frame, target, visual, target_hwnd, pt);
+                frame->content = visual->content;
+                frame->device_context = visual->device_context;
+                frame->interop = visual->interop;
+                frame->version = content_ver;
+                frame->transform_version = xform_ver;
+                frame->world_transform = world_m;
+                frame->has_transform = has_transform;
+                if (effective_clip_ptr)
+                {
+                    frame->target_clip = *effective_clip_ptr;
+                    frame->has_clip = TRUE;
+                }
+                IDCompositionVisual_AddRef((IDCompositionVisual *)&visual->IDCompositionVisualUnknown_iface);
+                (*queued)++;
+            }
         }
     }
 
@@ -1974,16 +2002,34 @@ static IDXGISurface *frame_get_surface(struct composite_frame *frame)
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain1, (void **)&swapchain)))
     {
+        DXGI_SWAP_CHAIN_DESC1 desc;
+        UINT idx = 0, present_count = 0;
+
         /* The front buffer is the last back buffer because the composition swapchain must
          * be created with DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL */
-        hr = IDXGISwapChain1_GetBuffer(swapchain, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
+        if (SUCCEEDED(IDXGISwapChain1_GetDesc1(swapchain, &desc)) && desc.BufferCount > 1
+                && (desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+                    || desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD)
+                && SUCCEEDED(IDXGISwapChain1_GetLastPresentCount(swapchain, &present_count))
+                && present_count > 0)
+            idx = desc.BufferCount - 1;
+        hr = IDXGISwapChain1_GetBuffer(swapchain, idx, &IID_IDXGISurface, (void **)&dxgi_surface);
         IDXGISwapChain1_Release(swapchain);
         if (FAILED(hr))
             ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
     }
     else if (SUCCEEDED(IUnknown_QueryInterface(frame->frame_content, &IID_IDXGISwapChain, (void **)&swapchain_v1)))
     {
-        hr = IDXGISwapChain_GetBuffer(swapchain_v1, 0, &IID_IDXGISurface, (void **)&dxgi_surface);
+        DXGI_SWAP_CHAIN_DESC desc;
+        UINT idx = 0, present_count = 0;
+
+        if (SUCCEEDED(IDXGISwapChain_GetDesc(swapchain_v1, &desc)) && desc.BufferCount > 1
+                && (desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL
+                    || desc.SwapEffect == DXGI_SWAP_EFFECT_FLIP_DISCARD)
+                && SUCCEEDED(IDXGISwapChain_GetLastPresentCount(swapchain_v1, &present_count))
+                && present_count > 0)
+            idx = desc.BufferCount - 1;
+        hr = IDXGISwapChain_GetBuffer(swapchain_v1, idx, &IID_IDXGISurface, (void **)&dxgi_surface);
         IDXGISwapChain_Release(swapchain_v1);
         if (FAILED(hr))
             ERR("Failed to get the swapchain front buffer, hr %#lx.\n", hr);
@@ -2089,15 +2135,23 @@ static void render_composite_frame(struct composite_frame *frame)
     if ((frame->frame_interop = frame->interop))
         ID2D1GdiInteropRenderTarget_AddRef(frame->frame_interop);
 
-    /* Direct present: a composition swapchain's back buffer is presented
-     * through wined3d, which blits it into the window's GL drawable on the
-     * command stream thread. This replaces the GetBuffer(0) + Direct2D GDI
-     * interop + BitBlt copy for swapchain content; the drawable lease is
-     * honored by wined3d_swapchain_present itself. dst_rect is the visual's
-     * accumulated region so that each visual of a composition tree updates
-     * only its own part of the window. A visual with opacity < 1.0, a
-     * rectangle clip, a 2D/3D transform, or a negative offset cannot be served
-     * by that pass, so those go through the sampling pass below. */
+    /* Surface or swapchain content: frame_get_surface() extracts the underlying
+     * ID3D11Texture2D (wined3d texture) of the IDCompositionSurface /
+     * IDXGISwapChain / IDXGISurface directly; the blit samples or copies it on
+     * the GPU into the target's presentation swapchain, applying the visual
+     * opacity and clip, and presents the visual's region of the window. */
+    if ((dxgi_surface = frame_get_surface(frame)))
+    {
+        if (do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
+                dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform, &culled))
+            frame->rendered = TRUE;
+        else if (culled)
+            frame->culled = TRUE;
+        IDXGISurface_Release(dxgi_surface);
+        if (frame->rendered || frame->culled)
+            goto done;
+    }
+
     if (frame->visual && frame->visual->wined3d_swapchain && opacity == 1.0f && !clip
             && !frame->has_transform && frame->pt.x >= 0 && frame->pt.y >= 0)
     {
@@ -2145,26 +2199,6 @@ static void render_composite_frame(struct composite_frame *frame)
         IDXGISwapChain_Release(swapchain);
         if (frame->rendered)
             goto done;
-    }
-
-    /* Surface content: frame_get_surface() extracts the underlying
-     * ID3D11Texture2D (wined3d texture) of the IDCompositionSurface /
-     * IDXGISurface directly; the blit samples it on the GPU into the target's
-     * presentation swapchain, applying the visual opacity and clip, and
-     * presents the visual's region of the window. No CPU staging readback. */
-    if ((dxgi_surface = frame_get_surface(frame)))
-    {
-        /* Change/commit driven: only re-blit when the visual content changed. The
-         * refresh loop must not re-copy an unchanged (often empty or black) surface
-         * every tick, which clobbers the app's own Present-to-window frames and
-         * thrashes the Direct2D and Direct3D resources. The compositor paints on
-         * change, the swapchain Present path owns the window drawable in between. */
-        if (do_composite_dxgi_surface(frame->target, visual, frame->target_hwnd, frame->pt,
-                dxgi_surface, opacity, clip, frame->has_transform, &frame->world_transform, &culled))
-            frame->rendered = TRUE;
-        else if (culled)
-            frame->culled = TRUE;
-        IDXGISurface_Release(dxgi_surface);
     }
 
 done:
@@ -2222,19 +2256,85 @@ static unsigned int qpc_elapsed_ms(ULONGLONG since, LARGE_INTEGER freq)
     return (unsigned int)(((now - since) * 1000ULL) / (ULONGLONG)freq.QuadPart);
 }
 
+static BOOL visual_tree_check_swapchain(const struct composition_visual *visual, unsigned int depth,
+        BOOL *has_swapchain)
+{
+    const struct composition_visual *child;
+    BOOL updated = FALSE;
+
+    if (!visual || depth > 256)
+        return FALSE;
+
+    if (visual->content && visual->wined3d_swapchain)
+    {
+        UINT present_count = 0;
+        unsigned int content_ver = visual->content_version;
+        *has_swapchain = TRUE;
+        if (SUCCEEDED(IDXGISwapChain_GetLastPresentCount((IDXGISwapChain *)visual->content, &present_count)))
+            content_ver += present_count + 1;
+        if (content_ver != visual->composited_version)
+            updated = TRUE;
+    }
+
+    LIST_FOR_EACH_ENTRY(child, &visual->child_visuals, const struct composition_visual, entry)
+    {
+        if (visual_tree_check_swapchain(child, depth + 1, has_swapchain))
+            updated = TRUE;
+    }
+    return updated;
+}
+
+static BOOL device_check_swapchains(struct composition_device *device, BOOL *has_swapchain)
+{
+    struct composition_target *target;
+    BOOL updated = FALSE;
+
+    *has_swapchain = FALSE;
+    dcomp_lock();
+    LIST_FOR_EACH_ENTRY(target, &device->targets, struct composition_target, entry)
+    {
+        if (target->root && visual_tree_check_swapchain(impl_from_IDCompositionVisual(target->root), 0, has_swapchain))
+            updated = TRUE;
+    }
+    dcomp_unlock();
+    return updated;
+}
+
 static BOOL composite_device(struct composition_device *device)
 {
     LONG tree_ver, xform_ver;
-    BOOL has_shared = FALSE, any_needs_hwnd = FALSE;
+    BOOL has_shared = FALSE, any_needs_hwnd = FALSE, has_swapchain = FALSE, sc_updated;
     unsigned int count = 0, i;
 
     /* Objects released by the application's dcomp calls since the previous tick
      * are safe to drop now: no frame of that tick is in flight any more. */
     dcomp_reclaim_drain();
 
+    sc_updated = device_check_swapchains(device, &has_swapchain);
+    device->last_has_swapchain = has_swapchain;
+
+    if (!device->committed && !device->last_has_shared)
+    {
+        struct composition_target *t;
+        BOOL any_shared = FALSE;
+
+        dcomp_lock();
+        LIST_FOR_EACH_ENTRY(t, &device->targets, struct composition_target, entry)
+        {
+            if (t->shared_visual_handle || (t->root && impl_from_IDCompositionVisual(t->root)->shared_visual_handle))
+            {
+                any_shared = TRUE;
+                break;
+            }
+        }
+        dcomp_unlock();
+        if (!any_shared)
+            return FALSE;
+    }
+
     tree_ver = InterlockedCompareExchange(&dcomp_tree_version, 0, 0);
     xform_ver = InterlockedCompareExchange(&dcomp_transform_version, 0, 0);
-    if (!device->last_has_shared && device->last_tree_version != 0
+    if (!sc_updated && !device->last_has_shared && device->last_tree_version != 0
             && device->last_tree_version == tree_ver
             && device->last_xform_version == xform_ver)
     {
@@ -2289,6 +2389,7 @@ static BOOL composite_device(struct composition_device *device)
     device->last_tree_version = tree_ver;
     device->last_xform_version = xform_ver;
     device->last_has_shared = has_shared || any_needs_hwnd;
+    dcomp_reclaim_drain();
 
     if (count)
     {
@@ -2322,8 +2423,11 @@ static DWORD WINAPI composite_thread_proc(void *iface)
     while (!device->exit_thread)
     {
         unsigned int elapsed = qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq);
+        BOOL has_sc = FALSE;
+        BOOL sc_updated = device->committed && device_check_swapchains(device, &has_sc);
+        device->last_has_swapchain = has_sc;
 
-        if (!device->commit_pending && !device->last_has_shared)
+        if (!device->commit_pending && !device->last_has_shared && !sc_updated)
         {
             DWORD wait_ms = (elapsed < refresh_period && refresh_period - elapsed > 0)
                     ? refresh_period - elapsed : refresh_period;
@@ -2333,6 +2437,8 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 Sleep(wait_ms);
             if (device->exit_thread)
                 break;
+            sc_updated = device->committed && device_check_swapchains(device, &has_sc);
+            device->last_has_swapchain = has_sc;
         }
         else if (elapsed < refresh_period)
         {
@@ -2349,7 +2455,8 @@ static DWORD WINAPI composite_thread_proc(void *iface)
          * same tick: the CoreMessaging lifted-input workers that parked on the
          * commit-completion event then advance on the present cadence instead of
          * only when the app calls into device_Commit / WaitForCommitCompletion. */
-        if (TryEnterCriticalSection(&composite_render_cs))
+        if ((device->commit_pending || device->last_has_shared || sc_updated)
+                && TryEnterCriticalSection(&composite_render_cs))
         {
             if (qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq) >= refresh_period)
             {
@@ -2362,6 +2469,10 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                     SetEvent(g_compositor_clock_event);
             }
             LeaveCriticalSection(&composite_render_cs);
+        }
+        else if (g_compositor_clock_event)
+        {
+            SetEvent(g_compositor_clock_event);
         }
         if (device->self_release)
             break;
@@ -2556,10 +2667,12 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
         IDCompositionVisual_Release(to_republish[i].root);
     }
 
+    device->committed = TRUE;
     ensure_composite_thread(device);
 
     EnterCriticalSection(&composite_render_cs);
-    if (qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq) >= device->refresh_period_ms)
+    if (InterlockedCompareExchange(&dcomp_tree_version, 0, 0) != device->last_tree_version
+            || qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq) >= device->refresh_period_ms)
     {
         InterlockedExchange(&device->commit_pending, FALSE);
         if (composite_device(device))

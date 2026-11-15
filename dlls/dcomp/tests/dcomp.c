@@ -398,7 +398,6 @@ static void test_DCompositionCreateSharedVisualHandle(void)
     ok(stack_pointer == old_stack_pointer, "Got unexpected stack pointer.\n");
 
     status = NtQueryObject(handle, ObjectTypeInformation, buffer, sizeof(buffer), &len);
-    todo_wine
     ok(!status, "Got %#lx.\n", status);
     if (!status)
     {
@@ -488,9 +487,13 @@ static void test_device_CreateTargetForHwnd(void)
 
     hr3 = IDCompositionDevice_CreateTargetForHwnd(dcomp_device, hwnd, FALSE, &target3);
     ok(hr3 == DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr3))
+        IDCompositionTarget_Release(target3);
 
     hr3 = IDCompositionDevice_CreateTargetForHwnd(dcomp_device, hwnd, TRUE, &target3);
     ok(hr3 == DCOMPOSITION_ERROR_WINDOW_ALREADY_COMPOSED, "Got unexpected hr %#lx.\n", hr);
+    if (SUCCEEDED(hr3))
+        IDCompositionTarget_Release(target3);
 
     if (SUCCEEDED(hr))
         IDCompositionTarget_Release(target);
@@ -967,7 +970,6 @@ static void test_device_Commit(void)
 
         hr = IDCompositionDevice_Commit(dcomp_device);
         ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        todo_wine_if(surface_formats[i] == DXGI_FORMAT_R16G16B16A16_FLOAT)
         expect_rendered_color(hwnd, RGB(0, 0xff, 0x00));
 
         /* Render surface yellow */
@@ -983,12 +985,10 @@ static void test_device_Commit(void)
         }
 
         /* Remains green before calling Commit() */
-        todo_wine_if(surface_formats[i] == DXGI_FORMAT_R16G16B16A16_FLOAT)
         expect_rendered_color(hwnd, RGB(0, 0xff, 0x00));
 
         hr = IDCompositionDevice_Commit(dcomp_device);
         ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
-        todo_wine_if(surface_formats[i] == DXGI_FORMAT_R16G16B16A16_FLOAT)
         expect_rendered_color(hwnd, RGB(0xff, 0xff, 0x00));
 
         /* Test Commit() after two draws. Render surface white and then magenta. */
@@ -1943,7 +1943,6 @@ static void test_surface_factory_CreateSurface(void)
 
             hr = IDCompositionSurfaceFactory_CreateSurface(surface_factories[i], tests[j].width,
                     tests[j].height, tests[j].pixel_format, tests[j].alpha_mode, &surface);
-            todo_wine_if(i == 1 && tests[j].hr == S_OK)
             ok(hr == tests[j].hr, "Got unexpected hr %#lx.\n", hr);
             if (hr == S_OK)
                 IDCompositionSurface_Release(surface);
@@ -2030,7 +2029,6 @@ static void test_surface_begin_end_Draw(void)
 
             hr = IDCompositionSurfaceFactory_CreateSurface(surface_factories[i], width, height,
                     formats[j].pixel_format, formats[j].alpha_mode, &surface);
-            todo_wine_if(i == 1)
             ok(hr == S_OK, "Got unexpected hr %#lx.\n", hr);
             if (hr != S_OK)
             {

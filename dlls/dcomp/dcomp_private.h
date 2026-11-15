@@ -56,6 +56,8 @@ struct composition_device
     LONG last_tree_version;
     LONG last_xform_version;
     BOOL last_has_shared;
+    BOOL last_has_swapchain;
+    BOOL committed;
     ULONGLONG last_composite_qpc;
     LARGE_INTEGER qpc_freq;
     unsigned int refresh_period_ms;
@@ -154,6 +156,7 @@ struct composition_surface
     BOOL is_virtual;          /* answers IDCompositionVirtualSurface, BeginDraw takes sub-rects */
     RECT *trim_rects;         /* copy of the last Trim() rectangles, see surface_Trim() */
     UINT trim_count;
+    unsigned int content_version;
     LONG ref;
 };
 

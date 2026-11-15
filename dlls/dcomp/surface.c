@@ -238,7 +238,7 @@ static HRESULT STDMETHODCALLTYPE surface_BeginDraw(IDCompositionSurfaceUnknown *
         texture_desc.SampleDesc.Count = 1;
         texture_desc.SampleDesc.Quality = 0;
         texture_desc.Usage = D3D11_USAGE_DEFAULT;
-        texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET | D3D11_BIND_SHADER_RESOURCE;
+        texture_desc.BindFlags = D3D11_BIND_RENDER_TARGET;
         texture_desc.CPUAccessFlags = 0;
         texture_desc.MiscFlags = D3D11_RESOURCE_MISC_GUARDED;
         if (surface->pixel_format == DXGI_FORMAT_B8G8R8A8_UNORM)
@@ -305,6 +305,8 @@ static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *if
         return DCOMPOSITION_ERROR_SURFACE_NOT_BEING_RENDERED;
     }
     device->drawing_surface = NULL;
+    surface->content_version++;
+    InterlockedIncrement(&dcomp_tree_version);
     g_last_rendered_surface = surface;
     dcomp_unlock();
     TRACE("DCOMP: surface_EndDraw surface %p (size %ux%u)\n", surface, surface->width, surface->height);
@@ -452,6 +454,8 @@ static HRESULT composition_surface_resize(struct composition_surface *surface, U
     free(surface->trim_rects);
     surface->trim_rects = NULL;
     surface->trim_count = 0;
+    surface->content_version++;
+    InterlockedIncrement(&dcomp_tree_version);
     dcomp_unlock();
     return S_OK;
 }
