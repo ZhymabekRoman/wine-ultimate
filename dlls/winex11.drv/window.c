@@ -712,6 +712,7 @@ static void sync_window_text( Display *display, Window win, const WCHAR *text )
     */
     XChangeProperty( display, win, x11drv_atom(_NET_WM_NAME), x11drv_atom(UTF8_STRING),
                      8, PropModeReplace, (unsigned char *) utf8_buffer, count);
+    TRACE( "set _NET_WM_NAME %s\n", debugstr_a( buffer ) );
 
     free( utf8_buffer );
     free( buffer );
@@ -1178,7 +1179,11 @@ static void set_initial_wm_hints( Display *display, Window window, HWND hwnd )
      * app whose window class is named after the package (windows.ui CoreWindow)
      * shows the package short name; fall back to the process name. */
     wclass[0] = 0;
-    if (hwnd)
+    if (!(name = getenv( "WINE_PACKAGE_CLASS" )) || !name[0])
+        name = NULL;
+    else if (!(name = strdup( name )))
+        name = NULL;
+    if (!name && hwnd)
     {
         UNICODE_STRING name;
         name.Buffer = wclass;
@@ -1186,7 +1191,7 @@ static void set_initial_wm_hints( Display *display, Window window, HWND hwnd )
         name.Length = 0;
         if (!NtUserGetClassName( hwnd, TRUE, &name )) wclass[0] = 0;
     }
-    if (wclass[0])
+    if (!name && wclass[0])
     {
         int len = lstrlenW( wclass );
         if ((name = malloc((len + 1) * 3 + 1)))
@@ -1197,6 +1202,7 @@ static void set_initial_wm_hints( Display *display, Window window, HWND hwnd )
         class_hints->res_name = name ? name : process_name;
         class_hints->res_class = name ? name : process_name;
         XSetClassHint( display, window, class_hints );
+        TRACE( "set WM_CLASS %s\n", debugstr_a( class_hints->res_name ) );
         XFree( class_hints );
     }
     free( name );

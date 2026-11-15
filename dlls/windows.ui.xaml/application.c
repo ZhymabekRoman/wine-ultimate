@@ -3339,11 +3339,12 @@ static BOOL xaml_read_reg_str( HKEY root, const WCHAR *subkey, const WCHAR *valu
     lstrcpyW( path, xaml_appmodel_key );
     if (subkey && subkey[0]) lstrcatW( path, L"\\" ), lstrcatW( path, subkey );
     if (RegOpenKeyExW( root, path, 0, KEY_READ, &hkey )) return FALSE;
-    buf[0] = 0;
     size = cch * sizeof(*buf);
     ret = RegQueryValueExW( hkey, value, NULL, &type, (BYTE *)buf, &size );
     RegCloseKey( hkey );
-    return ret == ERROR_SUCCESS && type == REG_SZ && buf[0];
+    if (ret != ERROR_SUCCESS || type != REG_SZ) return FALSE;
+    buf[min( size / sizeof(*buf), cch - 1 )] = 0;
+    return buf[0] != 0;
 }
 
 /* InstalledLocation: WINE_PACKAGE_PATH env, then Packages\<FullName>\PackagePath
@@ -3408,7 +3409,10 @@ static BOOL xaml_manifest_display_name( const WCHAR *dir, WCHAR *out, DWORD cch 
     lstrcpyW( path, dir );
     lstrcatW( path, manifest_name );
     if ((file = CreateFileW( path, GENERIC_READ, FILE_SHARE_READ, NULL, OPEN_EXISTING, 0, NULL )) == INVALID_HANDLE_VALUE)
+    {
+        TRACE( "manifest open %s failed, err %u\n", debugstr_w( path ), GetLastError() );
         return FALSE;
+    }
     size = GetFileSize( file, NULL );
     if (!size || size == INVALID_FILE_SIZE || !(raw = malloc( size + 2 )))
     {
@@ -3418,13 +3422,21 @@ static BOOL xaml_manifest_display_name( const WCHAR *dir, WCHAR *out, DWORD cch 
     ReadFile( file, raw, size, &read, NULL );
     CloseHandle( file );
     raw[read] = 0;
-    if (!(wlen = MultiByteToWideChar( CP_UTF8, 0, raw, read, NULL, 0 ))
-            || !(xml = malloc( (wlen + 1) * sizeof(*xml) )))
+    UINT cp = CP_UTF8;
+    wlen = MultiByteToWideChar( cp, 0, raw, read, NULL, 0 );
+    if (!wlen
+            && !(wlen = MultiByteToWideChar( cp = CP_UTF8, MB_USEGLYPHCHARS, raw, read, NULL, 0 ))
+            && !(wlen = MultiByteToWideChar( cp = CP_UNIXCP, 0, raw, read, NULL, 0 )))
     {
         free( raw );
         return FALSE;
     }
-    MultiByteToWideChar( CP_UTF8, 0, raw, read, xml, wlen );
+    if (!(xml = malloc( (wlen + 1) * sizeof(*xml) )))
+    {
+        free( raw );
+        return FALSE;
+    }
+    MultiByteToWideChar( cp, cp == CP_UTF8 ? MB_USEGLYPHCHARS : 0, raw, read, xml, wlen );
     xml[wlen] = 0;
     free( raw );
 
@@ -3553,7 +3565,9 @@ static BOOL WINAPI xaml_package_init( INIT_ONCE *once, void *param, void **conte
                 break;
     }
 
+    TRACE( "package init: manifest/reg display_name %s, ms-resource resolving\n", debugstr_w( pkg->display_name ) );
     xaml_package_resolve_ms_resource( pkg );
+    TRACE( "package init: resolved display_name %s\n", debugstr_w( pkg->display_name ) );
 
     /* Publish the resolved DisplayName as the package short name on the seeded
      * AppModel identity: windows.ui names the CoreWindow window class with it,
@@ -3581,9 +3595,14 @@ static const WCHAR *xaml_package_display_name( void )
     return xaml_package.display_name[0] ? xaml_package.display_name : NULL;
 }
 
+static const WCHAR *xaml_package_short_name( void );
+
 void xaml_package_warm( void )
 {
-    xaml_package_display_name();
+    const WCHAR *short_name = xaml_package_short_name();
+    TRACE( "package warm: short name %s\n", debugstr_w( short_name ) );
+    if (short_name && short_name[0])
+        SetEnvironmentVariableW( L"WINE_PACKAGE_CLASS", short_name );
 }
 
 /* Short app identity for window lookups: the package DisplayName, else the
