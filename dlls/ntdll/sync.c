@@ -566,12 +566,10 @@ void WINAPI RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
             for (int spin = 0; spin < SRW_SPIN_COUNT; spin++)
             {
                 YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
-                if (u.s->owners) continue;
-
-                spin_old.s = *u.s;
+                spin_old.l = *(volatile LONG *)u.l;
                 if (spin_old.s.owners) continue;
 
-                spin_new.s = spin_old.s;
+                spin_new.l = spin_old.l;
                 spin_new.s.owners = 1;
                 spin_new.s.exclusive_waiters -= 2;
                 spin_new.s.exclusive_waiters |= 1;
@@ -626,12 +624,10 @@ void WINAPI RtlAcquireSRWLockShared( RTL_SRWLOCK *lock )
             for (int spin = 0; spin < SRW_SPIN_COUNT; spin++)
             {
                 YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
-                if (u.s->exclusive_waiters || u.s->owners == 0xffff) continue;
-
-                spin_old.s = *u.s;
+                spin_old.l = *(volatile LONG *)u.l;
                 if (spin_old.s.exclusive_waiters || spin_old.s.owners == 0xffff) continue;
 
-                spin_new.s = spin_old.s;
+                spin_new.l = spin_old.l;
                 ++spin_new.s.owners;
                 if (InterlockedCompareExchange( u.l, spin_new.l, spin_old.l ) == spin_old.l)
                     return;
