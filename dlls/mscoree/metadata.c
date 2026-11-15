@@ -33,6 +33,7 @@
 #include "corhdr.h"
 #include "cordebug.h"
 #include "metahost.h"
+#include "shlwapi.h"
 #include "wine/list.h"
 #include "mscoree_private.h"
 
@@ -154,20 +155,81 @@ static HRESULT WINAPI MetaDataDispenser_FindAssembly(IMetaDataDispenserEx* iface
     LPCWSTR szAppBase, LPCWSTR szPrivateBin, LPCWSTR szGlobalBin, LPCWSTR szAssemblyName,
     LPWSTR szName, ULONG cchName, ULONG *pcName)
 {
-    FIXME("%p %s %s %s %s %p %lu %p\n", iface, debugstr_w(szAppBase),
+    WCHAR path[1024];
+    WCHAR pkg_path[MAX_PATH];
+    DWORD len;
+
+    TRACE("%p %s %s %s %s %p %lu %p\n", iface, debugstr_w(szAppBase),
         debugstr_w(szPrivateBin), debugstr_w(szGlobalBin),
         debugstr_w(szAssemblyName), szName, cchName, pcName);
-    return E_NOTIMPL;
+
+    if (!szAssemblyName || !szName || !cchName)
+        return E_INVALIDARG;
+
+    /* If szAppBase is provided, search there */
+    if (szAppBase && szAppBase[0])
+    {
+        lstrcpynW(path, szAppBase, ARRAY_SIZE(path));
+        PathAppendW(path, szAssemblyName);
+        if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+            goto found;
+        lstrcatW(path, L".dll");
+        if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+            goto found;
+    }
+
+    /* Check WINE_PACKAGE_PATH */
+    if (GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", pkg_path, ARRAY_SIZE(pkg_path)))
+    {
+        lstrcpynW(path, pkg_path, ARRAY_SIZE(path));
+        PathAppendW(path, szAssemblyName);
+        if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+            goto found;
+        lstrcatW(path, L".dll");
+        if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+            goto found;
+    }
+
+    /* Check WINE_FRAMEWORK_PACKAGE_PATH */
+    if (GetEnvironmentVariableW(L"WINE_FRAMEWORK_PACKAGE_PATH", pkg_path, ARRAY_SIZE(pkg_path)))
+    {
+        lstrcpynW(path, pkg_path, ARRAY_SIZE(path));
+        PathAppendW(path, szAssemblyName);
+        if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+            goto found;
+        lstrcatW(path, L".dll");
+        if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+            goto found;
+    }
+
+    /* Check application directory */
+    GetModuleFileNameW(NULL, path, ARRAY_SIZE(path));
+    PathRemoveFileSpecW(path);
+    PathAppendW(path, szAssemblyName);
+    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+        goto found;
+    lstrcatW(path, L".dll");
+    if (GetFileAttributesW(path) != INVALID_FILE_ATTRIBUTES)
+        goto found;
+
+    return HRESULT_FROM_WIN32(ERROR_FILE_NOT_FOUND);
+
+found:
+    len = lstrlenW(path);
+    if (pcName) *pcName = len + 1;
+    if (cchName <= len)
+        return HRESULT_FROM_WIN32(ERROR_INSUFFICIENT_BUFFER);
+    lstrcpyW(szName, path);
+    return S_OK;
 }
 
 static HRESULT WINAPI MetaDataDispenser_FindAssemblyModule(IMetaDataDispenserEx* iface,
     LPCWSTR szAppBase, LPCWSTR szPrivateBin, LPCWSTR szGlobalBin, LPCWSTR szAssemblyName,
     LPCWSTR szModuleName, LPWSTR szName, ULONG cchName, ULONG *pcName)
 {
-    FIXME("%p %s %s %s %s %s %p %lu %p\n", iface, debugstr_w(szAppBase),
-        debugstr_w(szPrivateBin), debugstr_w(szGlobalBin), debugstr_w(szAssemblyName),
-        debugstr_w(szModuleName), szName, cchName, pcName);
-    return E_NOTIMPL;
+    return MetaDataDispenser_FindAssembly(iface, szAppBase, szPrivateBin, szGlobalBin,
+                                          szModuleName ? szModuleName : szAssemblyName,
+                                          szName, cchName, pcName);
 }
 
 static const struct IMetaDataDispenserExVtbl MetaDataDispenserVtbl =

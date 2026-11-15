@@ -1645,7 +1645,7 @@ static BOOL try_create_registration_free_com(REFIID clsid, WCHAR *classname, UIN
     struct clrclass_data *class_data;
     void *ptr_name;
     const WCHAR *ptr_path_start, *ptr_path_end;
-    WCHAR path[MAX_PATH] = {0};
+    WCHAR path[1024] = {0};
     WCHAR str_dll[] = {'.','d','l','l',0};
     BOOL ret = FALSE;
 
@@ -1679,10 +1679,23 @@ static BOOL try_create_registration_free_com(REFIID clsid, WCHAR *classname, UIN
 
     ptr_path_start = assembly_info->lpAssemblyEncodedAssemblyIdentity;
     ptr_path_end = wcschr(ptr_path_start, ',');
-    memcpy(path, ptr_path_start, (char*)ptr_path_end - (char*)ptr_path_start);
+    if (ptr_path_end)
+    {
+        size_t path_len = ptr_path_end - ptr_path_start;
+        if (path_len >= ARRAY_SIZE(path)) path_len = ARRAY_SIZE(path) - 1;
+        memcpy(path, ptr_path_start, path_len * sizeof(WCHAR));
+        path[path_len] = 0;
+    }
+    else
+    {
+        lstrcpynW(path, ptr_path_start, ARRAY_SIZE(path));
+    }
 
-    GetModuleFileNameW(NULL, filename, filename_size);
-    PathRemoveFileSpecW(filename);
+    if (!GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", filename, filename_size) || !filename[0])
+    {
+        GetModuleFileNameW(NULL, filename, filename_size);
+        PathRemoveFileSpecW(filename);
+    }
 
     if (lstrlenW(filename) + lstrlenW(path) + ARRAY_SIZE(str_dll) + 1 > filename_size) /* Include blackslash */
     {
@@ -1711,7 +1724,7 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
     static const WCHAR wszFileSlash[] = L"file:///";
     static const WCHAR wszCLSIDSlash[] = L"CLSID\\";
     static const WCHAR wszInprocServer32[] = L"\\InprocServer32";
-    WCHAR path[CHARS_IN_GUID + ARRAY_SIZE(wszCLSIDSlash) + ARRAY_SIZE(wszInprocServer32) - 1];
+    WCHAR path[1024];
     MonoDomain *domain;
     MonoAssembly *assembly;
     ICLRRuntimeInfo *info = NULL;
@@ -1722,9 +1735,9 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
     int offset = 0;
     HANDLE file = INVALID_HANDLE_VALUE;
     DWORD numKeys, keyLength;
-    WCHAR codebase[MAX_PATH + 8];
+    WCHAR codebase[1024];
     WCHAR classname[350], subkeyName[256];
-    WCHAR filename[MAX_PATH];
+    WCHAR filename[1024];
     DWORD dwBufLen;
 
     lstrcpyW(path, wszCLSIDSlash);
@@ -1842,7 +1855,7 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
                     goto cleanup;
             }
 
-            hr = get_file_from_strongname(assemblyname, filename, MAX_PATH);
+            hr = get_file_from_strongname(assemblyname, filename, ARRAY_SIZE(filename));
             if (FAILED(hr))
             {
                 /*
@@ -1852,17 +1865,41 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
                  *    Assembly : REG_SZ : AssemblyName, Version=X.X.X.X, Culture=neutral, PublicKeyToken=null
                  */
                 WCHAR *ns;
+                WCHAR simple_name[1024];
 
                 WARN("Attempt to load from the application directory.\n");
-                GetModuleFileNameW(NULL, filename, MAX_PATH);
-                ns = wcsrchr(filename, '\\');
-                *(ns+1) = '\0';
+                lstrcpynW(simple_name, assemblyname, ARRAY_SIZE(simple_name));
+                ns = wcschr(simple_name, ',');
+                if (ns) *ns = '\0';
 
-                ns = wcschr(assemblyname, ',');
-                *(ns) = '\0';
-                lstrcatW(filename, assemblyname);
-                *(ns) = '.';
+                if (!GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", filename, ARRAY_SIZE(filename)) || !filename[0])
+                {
+                    GetModuleFileNameW(NULL, filename, ARRAY_SIZE(filename));
+                    ns = wcsrchr(filename, '\\');
+                    if (ns) *(ns+1) = '\0';
+                }
+                else
+                {
+                    if (filename[lstrlenW(filename) - 1] != '\\')
+                        lstrcatW(filename, L"\\");
+                }
+
+                lstrcatW(filename, simple_name);
                 lstrcatW(filename, L".dll");
+
+                /* If not in package path, check framework package path */
+                if (GetFileAttributesW(filename) == INVALID_FILE_ATTRIBUTES)
+                {
+                    WCHAR fw_path[1024];
+                    if (GetEnvironmentVariableW(L"WINE_FRAMEWORK_PACKAGE_PATH", fw_path, ARRAY_SIZE(fw_path)) && fw_path[0])
+                    {
+                        lstrcpyW(filename, fw_path);
+                        if (filename[lstrlenW(filename) - 1] != '\\')
+                            lstrcatW(filename, L"\\");
+                        lstrcatW(filename, simple_name);
+                        lstrcatW(filename, L".dll");
+                    }
+                }
             }
         }
     }

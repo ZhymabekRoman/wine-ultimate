@@ -1744,7 +1744,7 @@ static MonoAssembly* CDECL wine_mono_assembly_preload_hook_v2_fn(MonoAssemblyNam
     const char *culture;
     LPWSTR stringnameW, cultureW;
     int stringnameW_size, cultureW_size;
-    WCHAR path[MAX_PATH];
+    WCHAR path[1024];
     char *pathA;
     MonoImageOpenStatus stat;
     DWORD search_flags;
@@ -1768,43 +1768,72 @@ static MonoAssembly* CDECL wine_mono_assembly_preload_hook_v2_fn(MonoAssemblyNam
     if (!stringname || !assemblyname) return NULL;
 
     search_flags = get_assembly_search_flags(aname);
-    if (private_path && (search_flags & ASSEMBLY_SEARCH_PRIVATEPATH) != 0)
+    if ((search_flags & ASSEMBLY_SEARCH_PRIVATEPATH) != 0)
     {
-        stringnameW_size = MultiByteToWideChar(CP_UTF8, 0, assemblyname, -1, NULL, 0);
-        stringnameW = malloc(stringnameW_size * sizeof(WCHAR));
-        if (stringnameW)
+        WCHAR pkg_path[MAX_PATH];
+        WCHAR fw_path[MAX_PATH];
+        WCHAR app_dir[MAX_PATH];
+        const WCHAR *probe_dirs[64];
+        int num_probes = 0;
+
+        if (private_path)
         {
-            MultiByteToWideChar(CP_UTF8, 0, assemblyname, -1, stringnameW, stringnameW_size);
-            for (i = 0; private_path[i] != NULL; i++)
+            for (i = 0; private_path[i] != NULL && num_probes < 50; i++)
+                probe_dirs[num_probes++] = private_path[i];
+        }
+
+        if (GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", pkg_path, ARRAY_SIZE(pkg_path)) && pkg_path[0])
+            probe_dirs[num_probes++] = pkg_path;
+
+        if (GetEnvironmentVariableW(L"WINE_FRAMEWORK_PACKAGE_PATH", fw_path, ARRAY_SIZE(fw_path)) && fw_path[0])
+            probe_dirs[num_probes++] = fw_path;
+
+        if (GetModuleFileNameW(NULL, app_dir, ARRAY_SIZE(app_dir)))
+        {
+            PathRemoveFileSpecW(app_dir);
+            probe_dirs[num_probes++] = app_dir;
+        }
+
+        if (num_probes > 0)
+        {
+            stringnameW_size = MultiByteToWideChar(CP_UTF8, 0, assemblyname, -1, NULL, 0);
+            stringnameW = malloc(stringnameW_size * sizeof(WCHAR));
+            if (stringnameW)
             {
-                /* This is the lookup order used in Mono */
-                /* 1st try: [culture]/[name].dll (culture may be empty) */
-                wcscpy(path, private_path[i]);
-                if (cultureW) PathAppendW(path, cultureW);
-                PathAppendW(path, stringnameW);
-                wcscat(path, dotdllW);
-                result = mono_assembly_try_load(path);
-                if (result) break;
+                MultiByteToWideChar(CP_UTF8, 0, assemblyname, -1, stringnameW, stringnameW_size);
+                for (i = 0; i < num_probes; i++)
+                {
+                    /* This is the lookup order used in Mono */
+                    /* 1st try: [culture]/[name].dll (culture may be empty) */
+                    lstrcpynW(path, probe_dirs[i], ARRAY_SIZE(path));
+                    if (cultureW) PathAppendW(path, cultureW);
+                    PathAppendW(path, stringnameW);
+                    lstrcatW(path, dotdllW);
+                    result = mono_assembly_try_load(path);
+                    if (result) break;
 
-                /* 2nd try: [culture]/[name].exe (culture may be empty) */
-                wcscpy(path + wcslen(path) - wcslen(dotdllW), dotexeW);
-                result = mono_assembly_try_load(path);
-                if (result) break;
+                    /* 2nd try: [culture]/[name].exe (culture may be empty) */
+                    path[wcslen(path) - wcslen(dotdllW)] = 0;
+                    lstrcatW(path, dotexeW);
+                    result = mono_assembly_try_load(path);
+                    if (result) break;
 
-                /* 3rd try: [culture]/[name]/[name].dll (culture may be empty) */
-                path[wcslen(path) - wcslen(dotexeW)] = 0;
-                PathAppendW(path, stringnameW);
-                wcscat(path, dotdllW);
-                result = mono_assembly_try_load(path);
-                if (result) break;
+                    /* 3rd try: [culture]/[name]/[name].dll (culture may be empty) */
+                    path[wcslen(path) - wcslen(dotexeW)] = 0;
+                    PathAppendW(path, stringnameW);
+                    lstrcatW(path, dotdllW);
+                    result = mono_assembly_try_load(path);
+                    if (result) break;
 
-                /* 4th try: [culture]/[name]/[name].exe (culture may be empty) */
-                wcscpy(path + wcslen(path) - wcslen(dotdllW), dotexeW);
-                result = mono_assembly_try_load(path);
-                if (result) break;
+                    /* 4th try: [culture]/[name]/[name].exe (culture may be empty) */
+                    path[wcslen(path) - wcslen(dotdllW)] = 0;
+                    lstrcatW(path, dotexeW);
+                    result = mono_assembly_try_load(path);
+                    if (result) break;
+                }
+                free(stringnameW);
+                if (result) goto done;
             }
-            free(stringnameW);
-            if (result) goto done;
         }
     }
 
