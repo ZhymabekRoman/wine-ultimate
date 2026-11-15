@@ -475,7 +475,7 @@ struct in_memory_content
 
     /* Backing file for streams opened from a StorageFile. Writes are buffered in
      * memory and flushed back to the file on FlushAsync()/Close() (Windows semantics). */
-    WCHAR backing_path[MAX_PATH];
+    WCHAR backing_path[STORAGE_MAX_PATH];
     WCHAR content_type[64];
     BOOL dirty;
 };

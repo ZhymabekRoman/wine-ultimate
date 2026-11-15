@@ -939,6 +939,129 @@ static void test_ApplicationDataSettings( void )
     IApplicationDataStatics_Release( statics );
 }
 
+static void test_DeepPath_StorageFile(void)
+{
+    static const WCHAR *file_statics_name = L"Windows.Storage.StorageFile";
+    static const WCHAR *file_io_name = L"Windows.Storage.FileIO";
+    static const WCHAR *file_name = L"deep_file.txt";
+    static const WCHAR segment[] = L"deep_directory_0\\";
+    IStorageFileStatics *file_statics = NULL;
+    IFileIOStatics *file_io = NULL;
+    IAsyncOperation_StorageFile *file_op = NULL;
+    IAsyncOperation_HSTRING *read_op = NULL;
+    IStorageFile *file = NULL;
+    IStorageItem *item = NULL;
+    HSTRING str = NULL, name_str = NULL, path_str = NULL, text_out = NULL;
+    const WCHAR *raw;
+    WCHAR dir[1024], file_path[1024] = {0};
+    size_t base_len = 0, len = 0;
+    HANDLE hFile;
+    DWORD written = 0;
+    HRESULT hr;
+
+    /* Deep UWP-style nesting such as
+     * %LOCALAPPDATA%\Packages\<FamilyName>\LocalCache\EBWebView\... is longer than
+     * MAX_PATH; the path must survive the round-trip untruncated. */
+    GetTempPathW( ARRAY_SIZE( dir ), dir );
+    base_len = len = wcslen( dir );
+
+    while (len < 300)
+    {
+        lstrcatW( dir, segment );
+        if (!CreateDirectoryW( dir, NULL ) && GetLastError() != ERROR_ALREADY_EXISTS) break;
+        len = wcslen( dir );
+    }
+    if (len < 300)
+    {
+        trace( "could not create a >260-char path, skipping\n" );
+        goto done;
+    }
+    ok( wcslen( dir ) > 260, "deep dir path is only %lu chars\n", (unsigned long)wcslen( dir ) );
+
+    lstrcatW( dir, file_name );
+    lstrcpyW( file_path, dir );
+    hFile = CreateFileW( file_path, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (hFile == INVALID_HANDLE_VALUE)
+    {
+        trace( "could not create %s, skipping\n", wine_dbgstr_w( file_path ) );
+        goto done;
+    }
+    WriteFile( hFile, "Deep path round-trip", 20, &written, NULL );
+    CloseHandle( hFile );
+    lstrcpyW( dir, file_path );
+    dir[wcslen( dir ) - wcslen( file_name )] = 0;
+    len = wcslen( dir );
+
+    hr = WindowsCreateString( file_statics_name, wcslen( file_statics_name ), &str );
+    hr = RoGetActivationFactory( str, &IID_IStorageFileStatics, (void **)&file_statics );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "RoGetActivationFactory StorageFile failed, hr %#lx\n", hr );
+    if (FAILED(hr)) goto done;
+
+    hr = WindowsCreateString( file_path, wcslen( file_path ), &str );
+    hr = IStorageFileStatics_GetFileFromPathAsync( file_statics, str, &file_op );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "GetFileFromPathAsync on deep path failed, hr %#lx\n", hr );
+    if (FAILED(hr)) goto done;
+
+    hr = IAsyncOperation_StorageFile_GetResults( file_op, &file );
+    ok( hr == S_OK && file, "GetResults StorageFile failed, hr %#lx\n", hr );
+    IAsyncOperation_StorageFile_Release( file_op );
+    file_op = NULL;
+    if (FAILED(hr) || !file) goto done;
+
+    hr = IStorageFile_QueryInterface( file, &IID_IStorageItem, (void **)&item );
+    ok( hr == S_OK, "QI IStorageItem failed, hr %#lx\n", hr );
+
+    hr = IStorageItem_get_Name( item, &name_str );
+    ok( hr == S_OK, "get_Name failed, hr %#lx\n", hr );
+    raw = WindowsGetStringRawBuffer( name_str, NULL );
+    ok( raw && !wcscmp( raw, file_name ), "deep path name mismatch: %s\n", wine_dbgstr_w( raw ) );
+
+    hr = IStorageItem_get_Path( item, &path_str );
+    ok( hr == S_OK, "get_Path failed, hr %#lx\n", hr );
+    raw = WindowsGetStringRawBuffer( path_str, NULL );
+    ok( raw && !wcscmp( raw, file_path ), "deep path mismatch: %s vs %s\n",
+        wine_dbgstr_w( raw ), wine_dbgstr_w( file_path ) );
+    IStorageItem_Release( item );
+    item = NULL;
+
+    hr = WindowsCreateString( file_io_name, wcslen( file_io_name ), &str );
+    hr = RoGetActivationFactory( str, &IID_IFileIOStatics, (void **)&file_io );
+    WindowsDeleteString( str );
+    ok( hr == S_OK, "RoGetActivationFactory FileIO failed, hr %#lx\n", hr );
+    if (FAILED(hr)) goto done;
+
+    hr = IFileIOStatics_ReadTextAsync( file_io, file, &read_op );
+    ok( hr == S_OK, "ReadTextAsync on deep path failed, hr %#lx\n", hr );
+    if (FAILED(hr)) goto done;
+
+    hr = IAsyncOperation_HSTRING_GetResults( read_op, &text_out );
+    ok( hr == S_OK, "GetResults ReadTextAsync failed, hr %#lx\n", hr );
+    raw = WindowsGetStringRawBuffer( text_out, NULL );
+    ok( raw && !wcscmp( raw, L"Deep path round-trip" ), "deep path read mismatch: %s\n", wine_dbgstr_w( raw ) );
+
+done:
+    WindowsDeleteString( name_str );
+    WindowsDeleteString( path_str );
+    WindowsDeleteString( text_out );
+    if (read_op) IAsyncOperation_HSTRING_Release( read_op );
+    if (file) IStorageFile_Release( file );
+    if (item) IStorageItem_Release( item );
+    if (file_io) IFileIOStatics_Release( file_io );
+    if (file_statics) IStorageFileStatics_Release( file_statics );
+    if (file_path[0]) DeleteFileW( file_path );
+    while (len > base_len)
+    {
+        WCHAR *slash;
+
+        dir[len - 1] = 0;
+        if (!(slash = wcsrchr( dir, '\\' ))) break;
+        RemoveDirectoryW( dir );
+        len = slash - dir + 1;
+    }
+}
+
 START_TEST(storage)
 {
     HRESULT hr;
@@ -956,6 +1079,7 @@ START_TEST(storage)
      * storage.c:409 on the current baseline, which would cut off everything
      * scheduled after it. */
     test_ApplicationDataSettings();
+    test_DeepPath_StorageFile();
     test_FileIO_PathIO();
     test_CollisionOptions_StreamContentType();
 

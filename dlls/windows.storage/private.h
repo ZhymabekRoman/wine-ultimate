@@ -42,6 +42,11 @@
 #include "windows.storage.streams.h"
 #include "robuffer.h"
 
+/* Full-path buffer size for StorageFile/StorageFolder/FileIO paths. MAX_PATH (260)
+ * truncates deep UWP paths such as
+ * %LOCALAPPDATA%\Packages\<FamilyName>\LocalCache\EBWebView\... */
+#define STORAGE_MAX_PATH 1024
+
 extern IActivationFactory *storage_file_factory;
 extern IActivationFactory *storage_folder_factory;
 extern IActivationFactory *file_io_factory;

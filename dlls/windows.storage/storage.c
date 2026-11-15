@@ -121,8 +121,8 @@ struct storage_file
     IInputStreamReference IInputStreamReference_iface;
     LONG ref;
 
-    WCHAR path[MAX_PATH];
-    WCHAR name[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
+    WCHAR name[STORAGE_MAX_PATH];
     WCHAR file_type[32];
 };
 
@@ -318,7 +318,7 @@ static HRESULT WINAPI storage_file_CopyOverload( IStorageFile *iface, IStorageFo
     HSTRING folder_path_str = NULL;
     const WCHAR *dest_dir;
     const WCHAR *dest_name;
-    WCHAR dest_path[MAX_PATH];
+    WCHAR dest_path[STORAGE_MAX_PATH];
     IStorageFile *new_file = NULL;
     BOOL fail_if_exists = (option == NameCollisionOption_FailIfExists);
     HRESULT hr;
@@ -410,7 +410,7 @@ static HRESULT WINAPI storage_file_MoveOverload( IStorageFile *iface, IStorageFo
     HSTRING folder_path_str = NULL;
     const WCHAR *dest_dir;
     const WCHAR *dest_name;
-    WCHAR dest_path[MAX_PATH];
+    WCHAR dest_path[STORAGE_MAX_PATH];
     DWORD flags = (option == NameCollisionOption_ReplaceExisting) ? MOVEFILE_REPLACE_EXISTING : 0;
     HRESULT hr;
 
@@ -534,7 +534,7 @@ static HRESULT WINAPI storage_item_file_RenameAsync( IStorageItem *iface, HSTRIN
 {
     struct storage_file *impl = impl_from_IStorageItem_File( iface );
     const WCHAR *new_name = WindowsGetStringRawBuffer( name, NULL );
-    WCHAR new_path[MAX_PATH];
+    WCHAR new_path[STORAGE_MAX_PATH];
     WCHAR *last_slash;
 
     lstrcpyW( new_path, impl->path );
@@ -651,7 +651,7 @@ DEFINE_IINSPECTABLE( storage_item2_file, IStorageItem2, struct storage_file, ISt
 static HRESULT WINAPI storage_item2_file_GetParentAsync( IStorageItem2 *iface, IAsyncOperation_IStorageItem **result )
 {
     struct storage_file *impl = impl_from_IStorageItem2( iface );
-    WCHAR parent[MAX_PATH], *slash;
+    WCHAR parent[STORAGE_MAX_PATH], *slash;
     IStorageFolder *folder = NULL;
     HRESULT hr;
 
@@ -979,7 +979,7 @@ static HRESULT WINAPI storage_file_statics_GetFileFromApplicationUriAsync( IStor
 {
     HSTRING raw_uri_str;
     const WCHAR *raw_uri;
-    WCHAR path[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
     IStorageFile *file;
     HRESULT hr;
 
@@ -992,14 +992,14 @@ static HRESULT WINAPI storage_file_statics_GetFileFromApplicationUriAsync( IStor
     if (!wcsncmp( raw_uri, L"ms-appx:///", 11 ))
     {
         WCHAR *slash;
-        GetModuleFileNameW( NULL, path, MAX_PATH );
+        GetModuleFileNameW( NULL, path, STORAGE_MAX_PATH );
         if ((slash = wcsrchr( path, '\\' ))) *slash = 0;
         lstrcatW( path, L"\\" );
         lstrcatW( path, raw_uri + 11 );
     }
     else
     {
-        lstrcpynW( path, raw_uri, MAX_PATH );
+        lstrcpynW( path, raw_uri, STORAGE_MAX_PATH );
     }
     WindowsDeleteString( raw_uri_str );
 
@@ -1136,8 +1136,8 @@ struct storage_folder
     IStorageItem IStorageItem_iface;
     LONG ref;
 
-    WCHAR path[MAX_PATH];
-    WCHAR name[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
+    WCHAR name[STORAGE_MAX_PATH];
 };
 
 static inline struct storage_folder *impl_from_IStorageFolder( IStorageFolder *iface )
@@ -1228,7 +1228,7 @@ static void folder_join_path( const WCHAR *dir, const WCHAR *name, WCHAR *out, S
  * until a free slot is found. Writes the resulting full path into out. */
 static void folder_build_unique_path( const WCHAR *dir, const WCHAR *name, WCHAR *out, SIZE_T cch )
 {
-    WCHAR stem[MAX_PATH], ext[MAX_PATH], candidate[MAX_PATH];
+    WCHAR stem[STORAGE_MAX_PATH], ext[STORAGE_MAX_PATH], candidate[STORAGE_MAX_PATH];
     const WCHAR *dot, *slash;
     unsigned int i = 1;
 
@@ -1252,7 +1252,7 @@ static void folder_build_unique_path( const WCHAR *dir, const WCHAR *name, WCHAR
             folder_join_path( dir, stem, candidate, ARRAY_SIZE(candidate) ), lstrcatW( candidate, ext );
         else
         {
-            WCHAR numbered[MAX_PATH];
+            WCHAR numbered[STORAGE_MAX_PATH];
             swprintf( numbered, ARRAY_SIZE(numbered), L"%s (%u)%s", stem, i, ext );
             folder_join_path( dir, numbered, candidate, ARRAY_SIZE(candidate) );
         }
@@ -1282,7 +1282,7 @@ static HRESULT WINAPI storage_folder_CreateFileAsync( IStorageFolder *iface, HST
 {
     struct storage_folder *impl = impl_from_IStorageFolder( iface );
     const WCHAR *file_name;
-    WCHAR file_path[MAX_PATH];
+    WCHAR file_path[STORAGE_MAX_PATH];
     HANDLE hFile;
     DWORD disposition;
     IStorageFile *file;
@@ -1328,7 +1328,7 @@ static HRESULT WINAPI storage_folder_CreateFolderAsync( IStorageFolder *iface, H
 {
     struct storage_folder *impl = impl_from_IStorageFolder( iface );
     const WCHAR *folder_name;
-    WCHAR folder_path[MAX_PATH];
+    WCHAR folder_path[STORAGE_MAX_PATH];
     IStorageFolder *folder;
     DWORD attr;
     HRESULT hr;
@@ -1370,7 +1370,7 @@ static HRESULT WINAPI storage_folder_GetFileAsync( IStorageFolder *iface, HSTRIN
 {
     struct storage_folder *impl = impl_from_IStorageFolder( iface );
     const WCHAR *file_name;
-    WCHAR file_path[MAX_PATH];
+    WCHAR file_path[STORAGE_MAX_PATH];
     DWORD attr;
     IStorageFile *file;
     HRESULT hr;
@@ -1401,7 +1401,7 @@ static HRESULT WINAPI storage_folder_GetFolderAsync( IStorageFolder *iface, HSTR
 {
     struct storage_folder *impl = impl_from_IStorageFolder( iface );
     const WCHAR *folder_name;
-    WCHAR folder_path[MAX_PATH];
+    WCHAR folder_path[STORAGE_MAX_PATH];
     DWORD attr;
     IStorageFolder *folder;
     HRESULT hr;
@@ -1430,7 +1430,7 @@ static HRESULT WINAPI storage_folder_GetItemAsync( IStorageFolder *iface, HSTRIN
 {
     struct storage_folder *impl = impl_from_IStorageFolder( iface );
     const WCHAR *item_name;
-    WCHAR item_path[MAX_PATH];
+    WCHAR item_path[STORAGE_MAX_PATH];
     DWORD attr;
     HRESULT hr;
 
@@ -1520,7 +1520,7 @@ static HRESULT WINAPI storage_item_folder_RenameAsync( IStorageItem *iface, HSTR
 {
     struct storage_folder *impl = impl_from_IStorageItem_Folder( iface );
     const WCHAR *new_name = WindowsGetStringRawBuffer( name, NULL );
-    WCHAR new_path[MAX_PATH];
+    WCHAR new_path[STORAGE_MAX_PATH];
     WCHAR *last_slash;
 
     lstrcpyW( new_path, impl->path );
@@ -2023,12 +2023,12 @@ static HRESULT file_io_write_text( const WCHAR *path, HSTRING contents, BOOL app
 static HRESULT WINAPI file_io_statics_ReadTextAsync( IFileIOStatics *iface, IStorageFile *file,
                                                     IAsyncOperation_HSTRING **operation )
 {
-    WCHAR path[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
     HSTRING str;
     HRESULT hr;
 
     if (!file || !operation) return E_POINTER;
-    if (FAILED(hr = file_get_path( file, path, MAX_PATH ))) return hr;
+    if (FAILED(hr = file_get_path( file, path, STORAGE_MAX_PATH ))) return hr;
     if (FAILED(hr = file_io_read_text( path, &str ))) return hr;
 
     return async_operation_hstring_create( L"Windows.Foundation.IAsyncOperation`1<String>", str, operation );
@@ -2044,11 +2044,11 @@ static HRESULT WINAPI file_io_statics_ReadTextWithEncodingAsync( IFileIOStatics 
 static HRESULT WINAPI file_io_statics_WriteTextAsync( IFileIOStatics *iface, IStorageFile *file,
                                                      HSTRING contents, IAsyncAction **operation )
 {
-    WCHAR path[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
     HRESULT hr;
 
     if (!file || !operation) return E_POINTER;
-    if (FAILED(hr = file_get_path( file, path, MAX_PATH ))) return hr;
+    if (FAILED(hr = file_get_path( file, path, STORAGE_MAX_PATH ))) return hr;
     if (FAILED(hr = file_io_write_text( path, contents, FALSE ))) return hr;
 
     return async_action_create( L"Windows.Foundation.IAsyncAction", S_OK, operation );
@@ -2064,11 +2064,11 @@ static HRESULT WINAPI file_io_statics_WriteTextWithEncodingAsync( IFileIOStatics
 static HRESULT WINAPI file_io_statics_AppendTextAsync( IFileIOStatics *iface, IStorageFile *file,
                                                       HSTRING contents, IAsyncAction **operation )
 {
-    WCHAR path[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
     HRESULT hr;
 
     if (!file || !operation) return E_POINTER;
-    if (FAILED(hr = file_get_path( file, path, MAX_PATH ))) return hr;
+    if (FAILED(hr = file_get_path( file, path, STORAGE_MAX_PATH ))) return hr;
     if (FAILED(hr = file_io_write_text( path, contents, TRUE ))) return hr;
 
     return async_action_create( L"Windows.Foundation.IAsyncAction", S_OK, operation );
@@ -2129,7 +2129,7 @@ static HRESULT WINAPI file_io_statics_AppendLinesWithEncodingAsync( IFileIOStati
 static HRESULT WINAPI file_io_statics_ReadBufferAsync( IFileIOStatics *iface, IStorageFile *file,
                                                       IAsyncOperation_IBuffer **operation )
 {
-    WCHAR path[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
     BYTE *bytes = NULL;
     DWORD size = 0;
     IBuffer *buf = NULL;
@@ -2138,7 +2138,7 @@ static HRESULT WINAPI file_io_statics_ReadBufferAsync( IFileIOStatics *iface, IS
     HRESULT hr;
 
     if (!file || !operation) return E_POINTER;
-    if (FAILED(hr = file_get_path( file, path, MAX_PATH ))) return hr;
+    if (FAILED(hr = file_get_path( file, path, STORAGE_MAX_PATH ))) return hr;
     if (FAILED(hr = read_file_bytes( path, &bytes, &size ))) return hr;
 
     if (FAILED(hr = buffer_create( size, &buf )))
@@ -2166,14 +2166,14 @@ static HRESULT WINAPI file_io_statics_ReadBufferAsync( IFileIOStatics *iface, IS
 static HRESULT WINAPI file_io_statics_WriteBufferAsync( IFileIOStatics *iface, IStorageFile *file,
                                                        IBuffer *buffer, IAsyncAction **operation )
 {
-    WCHAR path[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
     IBufferByteAccess *access = NULL;
     BYTE *data = NULL;
     UINT32 len = 0;
     HRESULT hr;
 
     if (!file || !buffer || !operation) return E_POINTER;
-    if (FAILED(hr = file_get_path( file, path, MAX_PATH ))) return hr;
+    if (FAILED(hr = file_get_path( file, path, STORAGE_MAX_PATH ))) return hr;
 
     IBuffer_get_Length( buffer, &len );
     if (FAILED(hr = IBuffer_QueryInterface( buffer, &IID_IBufferByteAccess, (void **)&access )))
@@ -2192,11 +2192,11 @@ static HRESULT WINAPI file_io_statics_WriteBufferAsync( IFileIOStatics *iface, I
 static HRESULT WINAPI file_io_statics_WriteBytesAsync( IFileIOStatics *iface, IStorageFile *file,
                                                       UINT32 count, BYTE *values, IAsyncAction **operation )
 {
-    WCHAR path[MAX_PATH];
+    WCHAR path[STORAGE_MAX_PATH];
     HRESULT hr;
 
     if (!file || !operation) return E_POINTER;
-    if (FAILED(hr = file_get_path( file, path, MAX_PATH ))) return hr;
+    if (FAILED(hr = file_get_path( file, path, STORAGE_MAX_PATH ))) return hr;
     if (FAILED(hr = write_file_bytes( path, values, count, FALSE ))) return hr;
 
     return async_action_create( L"Windows.Foundation.IAsyncAction", S_OK, operation );
