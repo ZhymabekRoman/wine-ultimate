@@ -1782,10 +1782,10 @@ static MonoAssembly* CDECL wine_mono_assembly_preload_hook_v2_fn(MonoAssemblyNam
                 probe_dirs[num_probes++] = private_path[i];
         }
 
-        if (GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", pkg_path, ARRAY_SIZE(pkg_path)) && pkg_path[0])
+        if (mscoree_get_package_path(pkg_path, ARRAY_SIZE(pkg_path)))
             probe_dirs[num_probes++] = pkg_path;
 
-        if (GetEnvironmentVariableW(L"WINE_FRAMEWORK_PACKAGE_PATH", fw_path, ARRAY_SIZE(fw_path)) && fw_path[0])
+        if (mscoree_get_framework_package_path(fw_path, ARRAY_SIZE(fw_path)))
             probe_dirs[num_probes++] = fw_path;
 
         if (GetModuleFileNameW(NULL, app_dir, ARRAY_SIZE(app_dir)))

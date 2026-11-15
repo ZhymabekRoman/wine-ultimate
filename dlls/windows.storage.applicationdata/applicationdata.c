@@ -18,6 +18,7 @@
  */
 
 #include "private.h"
+#include "appmodel.h"
 #include "wine/debug.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(data);
@@ -599,10 +600,12 @@ static void get_package_name( WCHAR *buf, DWORD size )
 {
     static const WCHAR env_name[] = L"WINE_PACKAGE_FAMILY_NAME";
     WCHAR path[MAX_PATH], *p;
+    UINT32 pkg_len = size;
     DWORD len;
 
     len = GetEnvironmentVariableW( env_name, buf, size );
     if (len && len < size) return;
+    if (GetCurrentPackageFamilyName( &pkg_len, buf ) == ERROR_SUCCESS && buf[0]) return;
 
     len = GetModuleFileNameW( NULL, path, ARRAY_SIZE(path) );
     if (!len || len >= ARRAY_SIZE(path))

@@ -1578,6 +1578,541 @@ LONG WINAPI PackageIdFromFullName( const WCHAR *full_name, UINT32 flags, UINT32 
  *     with no per-launch environment.
  */
 static const WCHAR appmodel_reg_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel";
+static BOOL appmodel_read_str( HKEY root, const WCHAR *subkey, const WCHAR *value, WCHAR *buf, DWORD cch );
+
+static INIT_ONCE appmodel_auto_once = INIT_ONCE_STATIC_INIT;
+
+static struct
+{
+    BOOL valid;
+    WCHAR exe[288];
+    WCHAR full_name[512];
+    WCHAR family_name[256];
+    WCHAR aumid[384];
+    WCHAR package_path[MAX_PATH];
+    WCHAR publisher[512];
+    WCHAR publisher_id[64];
+    WCHAR fw_full[16][512];
+    WCHAR fw_path[16][MAX_PATH];
+    UINT32 fw_count;
+} appmodel_auto_cache;
+
+static void sha256_publisher_id( const WCHAR *publisher, WCHAR *out_id )
+{
+    static const UINT32 k[64] =
+    {
+        0x428a2f98,0x71374491,0xb5c0fbcf,0xe9b5dba5,0x3956c25b,0x59f111f1,0x923f82a4,0xab1c5ed5,
+        0xd807aa98,0x12835b01,0x243185be,0x550c7dc3,0x72be5d74,0x80deb1fe,0x9bdc06a7,0xc19bf174,
+        0xe49b69c1,0xefbe4786,0x0fc19dc6,0x240ca1cc,0x2de92c6f,0x4a7484aa,0x5cb0a9dc,0x76f988da,
+        0x983e5152,0xa831c66d,0xb00327c8,0xbf597fc7,0xc6e00bf3,0xd5a79147,0x06ca6351,0x14292967,
+        0x27b70a85,0x2e1b2138,0x4d2c6dfc,0x53380d13,0x650a7354,0x766a0abb,0x81c2c92e,0x92722c85,
+        0xa2bfe8a1,0xa81a664b,0xc24b8b70,0xc76c51a3,0xd192e819,0xd6990624,0xf40e3585,0x106aa070,
+        0x19a4c116,0x1e376c08,0x2748774c,0x34b0bcb5,0x391c0cb3,0x4ed8aa4a,0x5b9cca4f,0x682e6ff3,
+        0x748f82ee,0x78a5636f,0x84c87814,0x8cc70208,0x90befffa,0xa4506ceb,0xbef9a3f7,0xc67178f2
+    };
+    static const WCHAR alphabet[] = L"0123456789abcdefghjkmnpqrstvwxyz";
+    UINT32 h[8] = { 0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a,
+                    0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19 };
+    const BYTE *data = (const BYTE *)publisher;
+    SIZE_T byte_len = wcslen( publisher ) * sizeof(WCHAR);
+    SIZE_T total_len = ((byte_len + 9 + 63) / 64) * 64;
+    BYTE *msg;
+    SIZE_T off;
+    UINT64 bits = (UINT64)byte_len * 8, val = 0;
+    int i;
+
+    if (!(msg = HeapAlloc( GetProcessHeap(), HEAP_ZERO_MEMORY, total_len )))
+    {
+        lstrcpyW( out_id, L"8wekyb3d8bbwe" );
+        return;
+    }
+    memcpy( msg, data, byte_len );
+    msg[byte_len] = 0x80;
+    for (i = 0; i < 8; i++) msg[total_len - 1 - i] = (BYTE)(bits >> (i * 8));
+
+    for (off = 0; off < total_len; off += 64)
+    {
+        UINT32 w[64], a, b, c, d, e, f, g, hh;
+        for (i = 0; i < 16; i++)
+            w[i] = ((UINT32)msg[off + i * 4] << 24) | ((UINT32)msg[off + i * 4 + 1] << 16) |
+                   ((UINT32)msg[off + i * 4 + 2] << 8) | (UINT32)msg[off + i * 4 + 3];
+        for (i = 16; i < 64; i++)
+        {
+            UINT32 s0 = ((w[i-15] >> 7) | (w[i-15] << 25)) ^ ((w[i-15] >> 18) | (w[i-15] << 14)) ^ (w[i-15] >> 3);
+            UINT32 s1 = ((w[i-2] >> 17) | (w[i-2] << 15)) ^ ((w[i-2] >> 19) | (w[i-2] << 13)) ^ (w[i-2] >> 10);
+            w[i] = w[i-16] + s0 + w[i-7] + s1;
+        }
+        a = h[0]; b = h[1]; c = h[2]; d = h[3]; e = h[4]; f = h[5]; g = h[6]; hh = h[7];
+        for (i = 0; i < 64; i++)
+        {
+            UINT32 S1 = ((e >> 6) | (e << 26)) ^ ((e >> 11) | (e << 21)) ^ ((e >> 25) | (e << 7));
+            UINT32 ch = (e & f) ^ ((~e) & g);
+            UINT32 temp1 = hh + S1 + ch + k[i] + w[i];
+            UINT32 S0 = ((a >> 2) | (a << 30)) ^ ((a >> 13) | (a << 19)) ^ ((a >> 22) | (a << 10));
+            UINT32 maj = (a & b) ^ (a & c) ^ (b & c);
+            UINT32 temp2 = S0 + maj;
+            hh = g; g = f; f = e; e = d + temp1; d = c; c = b; b = a; a = temp1 + temp2;
+        }
+        h[0] += a; h[1] += b; h[2] += c; h[3] += d; h[4] += e; h[5] += f; h[6] += g; h[7] += hh;
+    }
+    HeapFree( GetProcessHeap(), 0, msg );
+
+    val = ((UINT64)h[0] << 32) | (UINT64)h[1];
+    for (i = 0; i < 13; i++)
+    {
+        int shift = 64 - 5 * (i + 1);
+        out_id[i] = alphabet[(shift >= 0 ? (val >> shift) : (val << (-shift))) & 0x1f];
+    }
+    out_id[13] = 0;
+}
+
+static BOOL xml_tag_attr_w( const WCHAR *tag, const WCHAR *end, const WCHAR *attr, WCHAR *out, DWORD cch )
+{
+    SIZE_T attr_len = wcslen( attr );
+    const WCHAR *p = tag;
+
+    while (p < end)
+    {
+        const WCHAR *eq, *q1, *q2;
+        while (p < end && (*p == ' ' || *p == '\t' || *p == '\r' || *p == '\n' || *p == '/')) p++;
+        if (p >= end || *p == '>') break;
+        eq = p;
+        while (eq < end && *eq != '=' && *eq != '>' && *eq != ' ' && *eq != '\t') eq++;
+        if (eq >= end || *eq != '=') { p = eq + 1; continue; }
+        q1 = eq + 1;
+        while (q1 < end && (*q1 == ' ' || *q1 == '\t')) q1++;
+        if (q1 >= end || (*q1 != '"' && *q1 != '\'')) { p = q1 + 1; continue; }
+        q2 = wcschr( q1 + 1, *q1 );
+        if (!q2 || q2 >= end) break;
+        if ((SIZE_T)(eq - p) == attr_len && !wcsnicmp( p, attr, attr_len ))
+        {
+            SIZE_T vlen = min( (SIZE_T)(q2 - (q1 + 1)), (SIZE_T)(cch - 1) );
+            memcpy( out, q1 + 1, vlen * sizeof(WCHAR) );
+            out[vlen] = 0;
+            return TRUE;
+        }
+        p = q2 + 1;
+    }
+    return FALSE;
+}
+
+static const WCHAR *xml_next_tag_w( const WCHAR *cur, const WCHAR *name, const WCHAR **out_end )
+{
+    SIZE_T nlen = wcslen( name );
+    const WCHAR *p = cur;
+
+    while ((p = wcschr( p, '<' )))
+    {
+        const WCHAR *t = p + 1;
+        if (!wcsnicmp( t, name, nlen ) &&
+            (t[nlen] == ' ' || t[nlen] == '\t' || t[nlen] == '\r' || t[nlen] == '\n' || t[nlen] == '/' || t[nlen] == '>'))
+        {
+            const WCHAR *q = t + nlen;
+            BOOL in_q = FALSE;
+            WCHAR qc = 0;
+            while (*q)
+            {
+                if (in_q) { if (*q == qc) in_q = FALSE; }
+                else if (*q == '"' || *q == '\'') { in_q = TRUE; qc = *q; }
+                else if (*q == '>') { *out_end = q; return t + nlen; }
+                q++;
+            }
+            return NULL;
+        }
+        p++;
+    }
+    return NULL;
+}
+
+static void normalize_fw_full_name( const WCHAR *folder, const WCHAR *pub, WCHAR *out_full, DWORD cch )
+{
+    const WCHAR *u1, *u2, *u3;
+    WCHAR pub_id[16];
+
+    lstrcpynW( out_full, folder, cch );
+    u1 = wcschr( folder, '_' );
+    u2 = u1 ? wcschr( u1 + 1, '_' ) : NULL;
+    u3 = u2 ? wcschr( u2 + 1, '_' ) : NULL;
+    if (u1 && u2 && !u3)
+    {
+        if (pub && pub[0]) sha256_publisher_id( pub, pub_id );
+        else lstrcpyW( pub_id, L"8wekyb3d8bbwe" );
+        if (wcslen( out_full ) + 2 + wcslen( pub_id ) < cch)
+        {
+            lstrcatW( out_full, L"__" );
+            lstrcatW( out_full, pub_id );
+        }
+    }
+}
+
+static BOOL match_dep_dir( const WCHAR *base_dir, const WCHAR *dep_name, const WCHAR *dep_pub,
+                           WCHAR *out_path, DWORD cch_path, WCHAR *out_full, DWORD cch_full )
+{
+    WCHAR pattern[MAX_PATH];
+    WIN32_FIND_DATAW fd;
+    HANDLE hfind;
+
+    if (!base_dir || !base_dir[0]) return FALSE;
+    if (wcslen( base_dir ) + 1 + wcslen( dep_name ) + 3 >= ARRAY_SIZE(pattern)) return FALSE;
+    lstrcpyW( pattern, base_dir );
+    lstrcatW( pattern, L"\\" );
+    lstrcatW( pattern, dep_name );
+    lstrcatW( pattern, L"_*" );
+
+    hfind = FindFirstFileW( pattern, &fd );
+    if (hfind == INVALID_HANDLE_VALUE) return FALSE;
+    do
+    {
+        if ((fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) &&
+            wcscmp( fd.cFileName, L"." ) && wcscmp( fd.cFileName, L".." ))
+        {
+            if (wcslen( base_dir ) + 1 + wcslen( fd.cFileName ) < cch_path)
+            {
+                lstrcpyW( out_path, base_dir );
+                lstrcatW( out_path, L"\\" );
+                lstrcatW( out_path, fd.cFileName );
+                normalize_fw_full_name( fd.cFileName, dep_pub, out_full, cch_full );
+                FindClose( hfind );
+                return TRUE;
+            }
+        }
+    } while (FindNextFileW( hfind, &fd ));
+    FindClose( hfind );
+    return FALSE;
+}
+
+static BOOL resolve_auto_dependency( const WCHAR *exe_dir, const WCHAR *dep_name, const WCHAR *dep_pub,
+                                     WCHAR *out_path, DWORD cch_path, WCHAR *out_full, DWORD cch_full )
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    WCHAR dir[MAX_PATH], parent[MAX_PATH], *slash;
+    SIZE_T dep_len = wcslen( dep_name ), r;
+    DWORD i;
+
+    /* 1. <exe_dir>\dependencies\<dep>_* */
+    if (wcslen( exe_dir ) + 14 < ARRAY_SIZE(dir))
+    {
+        lstrcpyW( dir, exe_dir );
+        lstrcatW( dir, L"\\dependencies" );
+        if (match_dep_dir( dir, dep_name, dep_pub, out_path, cch_path, out_full, cch_full )) return TRUE;
+    }
+
+    /* 2. <parent_of_exe_dir>\<dep>_* and <parent_of_exe_dir>\packages\<dep>_* */
+    lstrcpynW( parent, exe_dir, ARRAY_SIZE(parent) );
+    if ((slash = wcsrchr( parent, '\\' )))
+    {
+        *slash = 0;
+        if (match_dep_dir( parent, dep_name, dep_pub, out_path, cch_path, out_full, cch_full )) return TRUE;
+        if (wcslen( parent ) + 10 < ARRAY_SIZE(dir))
+        {
+            lstrcpyW( dir, parent );
+            lstrcatW( dir, L"\\packages" );
+            if (match_dep_dir( dir, dep_name, dep_pub, out_path, cch_path, out_full, cch_full )) return TRUE;
+        }
+    }
+
+    /* 3. C:\Program Files\WindowsApps\<dep>_* */
+    if (match_dep_dir( L"C:\\Program Files\\WindowsApps", dep_name, dep_pub,
+                       out_path, cch_path, out_full, cch_full ))
+        return TRUE;
+
+    /* 4. Existing AppModel\Packages\<dep>_* in registry whose PackagePath exists on disk */
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        WCHAR reg_path[600], key_name[512];
+        HKEY hkey;
+
+        lstrcpyW( reg_path, appmodel_reg_path );
+        lstrcatW( reg_path, L"\\Packages" );
+        if (RegOpenKeyExW( roots[r], reg_path, 0, KEY_READ, &hkey )) continue;
+        for (i = 0; ; i++)
+        {
+            DWORD klen = ARRAY_SIZE(key_name);
+            if (RegEnumKeyExW( hkey, i, key_name, &klen, NULL, NULL, NULL, NULL )) break;
+            if (!wcsnicmp( key_name, dep_name, dep_len ) && key_name[dep_len] == '_')
+            {
+                WCHAR sub[600], pkg_path[MAX_PATH];
+                HKEY hsub;
+
+                lstrcpyW( sub, reg_path );
+                lstrcatW( sub, L"\\" );
+                lstrcatW( sub, key_name );
+                if (!RegOpenKeyExW( roots[r], sub, 0, KEY_READ, &hsub ))
+                {
+                    DWORD type = 0, sz = sizeof(pkg_path);
+                    if ((!RegQueryValueExW( hsub, L"FrameworkPath", NULL, &type, (BYTE *)pkg_path, &sz ) ||
+                         (sz = sizeof(pkg_path), !RegQueryValueExW( hsub, L"PackagePath", NULL, &type, (BYTE *)pkg_path, &sz ))) &&
+                        type == REG_SZ && pkg_path[0] && GetFileAttributesW( pkg_path ) != INVALID_FILE_ATTRIBUTES)
+                    {
+                        lstrcpynW( out_path, pkg_path, cch_path );
+                        lstrcpynW( out_full, key_name, cch_full );
+                        RegCloseKey( hsub );
+                        RegCloseKey( hkey );
+                        return TRUE;
+                    }
+                    RegCloseKey( hsub );
+                }
+            }
+        }
+        RegCloseKey( hkey );
+    }
+    return FALSE;
+}
+
+static void appmodel_write_reg_str( HKEY hkey, const WCHAR *name, const WCHAR *val )
+{
+    if (!val || !val[0]) return;
+    RegSetValueExW( hkey, name, 0, REG_SZ, (const BYTE *)val, (wcslen( val ) + 1) * sizeof(WCHAR) );
+}
+
+static BOOL WINAPI init_appmodel_auto_identity( INIT_ONCE *once, void *param, void **context )
+{
+    WCHAR exe_path[MAX_PATH], exe_dir[MAX_PATH], exe_name[288], manifest_path[MAX_PATH + 32];
+    WCHAR id_name[256] = {0}, id_pub[512] = {0}, id_ver[64] = {0}, id_arch[64] = L"neutral", id_res[64] = {0};
+    WCHAR app_id[128] = L"App", reg_full[512] = {0}, reg_path[MAX_PATH] = {0}, reg_aumid[384] = {0};
+    WCHAR *slash, *xml_w = NULL;
+    const WCHAR *tag, *tag_end, *cur;
+    HANDLE hfile;
+    DWORD size, read_bytes = 0, wlen;
+    char *raw = NULL;
+    BOOL need_reg_write = FALSE;
+
+    size = GetModuleFileNameW( 0, exe_path, ARRAY_SIZE(exe_path) );
+    if (!size || size >= ARRAY_SIZE(exe_path)) return TRUE;
+    if (!(slash = wcsrchr( exe_path, '\\' ))) return TRUE;
+    lstrcpynW( exe_name, slash + 1, ARRAY_SIZE(exe_name) );
+    *slash = 0;
+    lstrcpynW( exe_dir, exe_path, ARRAY_SIZE(exe_dir) );
+
+    if (wcslen( exe_dir ) + 18 >= ARRAY_SIZE(manifest_path)) return TRUE;
+    lstrcpyW( manifest_path, exe_dir );
+    lstrcatW( manifest_path, L"\\AppxManifest.xml" );
+
+    hfile = CreateFileW( manifest_path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                         NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL );
+    if (hfile == INVALID_HANDLE_VALUE) return TRUE;
+
+    size = GetFileSize( hfile, NULL );
+    if (!size || size == INVALID_FILE_SIZE || size > 512 * 1024 ||
+        !(raw = HeapAlloc( GetProcessHeap(), 0, size + 2 )))
+    {
+        CloseHandle( hfile );
+        return TRUE;
+    }
+    if (!ReadFile( hfile, raw, size, &read_bytes, NULL ) || !read_bytes)
+    {
+        HeapFree( GetProcessHeap(), 0, raw );
+        CloseHandle( hfile );
+        return TRUE;
+    }
+    CloseHandle( hfile );
+    raw[read_bytes] = 0;
+    raw[read_bytes + 1] = 0;
+
+    if (read_bytes >= 2 && (unsigned char)raw[0] == 0xff && (unsigned char)raw[1] == 0xfe)
+    {
+        wlen = read_bytes / sizeof(WCHAR);
+        if ((xml_w = HeapAlloc( GetProcessHeap(), 0, (wlen + 1) * sizeof(WCHAR) )))
+        {
+            memcpy( xml_w, raw + 2, (wlen - 1) * sizeof(WCHAR) );
+            xml_w[wlen - 1] = 0;
+        }
+    }
+    else
+    {
+        const char *utf8 = raw;
+        if (read_bytes >= 3 && (unsigned char)raw[0] == 0xef &&
+            (unsigned char)raw[1] == 0xbb && (unsigned char)raw[2] == 0xbf)
+            utf8 += 3;
+        wlen = MultiByteToWideChar( CP_UTF8, 0, utf8, -1, NULL, 0 );
+        if (wlen > 0 && (xml_w = HeapAlloc( GetProcessHeap(), 0, wlen * sizeof(WCHAR) )))
+            MultiByteToWideChar( CP_UTF8, 0, utf8, -1, xml_w, wlen );
+    }
+    HeapFree( GetProcessHeap(), 0, raw );
+    if (!xml_w) return TRUE;
+
+    if ((tag = xml_next_tag_w( xml_w, L"Identity", &tag_end )))
+    {
+        xml_tag_attr_w( tag, tag_end, L"Name", id_name, ARRAY_SIZE(id_name) );
+        xml_tag_attr_w( tag, tag_end, L"Publisher", id_pub, ARRAY_SIZE(id_pub) );
+        xml_tag_attr_w( tag, tag_end, L"Version", id_ver, ARRAY_SIZE(id_ver) );
+        xml_tag_attr_w( tag, tag_end, L"ProcessorArchitecture", id_arch, ARRAY_SIZE(id_arch) );
+        xml_tag_attr_w( tag, tag_end, L"ResourceId", id_res, ARRAY_SIZE(id_res) );
+    }
+
+    if (!id_name[0] || !id_ver[0])
+    {
+        HeapFree( GetProcessHeap(), 0, xml_w );
+        return TRUE;
+    }
+
+    cur = xml_w;
+    {
+        BOOL got_first = FALSE;
+        while ((tag = xml_next_tag_w( cur, L"Application", &tag_end )))
+        {
+            WCHAR cand_id[128] = {0}, cand_exe[256] = {0}, *p;
+            if (xml_tag_attr_w( tag, tag_end, L"Id", cand_id, ARRAY_SIZE(cand_id) ) && cand_id[0])
+            {
+                if (!got_first)
+                {
+                    lstrcpynW( app_id, cand_id, ARRAY_SIZE(app_id) );
+                    got_first = TRUE;
+                }
+                if (xml_tag_attr_w( tag, tag_end, L"Executable", cand_exe, ARRAY_SIZE(cand_exe) ) && cand_exe[0])
+                {
+                    p = wcsrchr( cand_exe, '\\' );
+                    if (!p) p = wcsrchr( cand_exe, '/' );
+                    p = p ? p + 1 : cand_exe;
+                    if (!wcsicmp( p, exe_name ))
+                    {
+                        lstrcpynW( app_id, cand_id, ARRAY_SIZE(app_id) );
+                        break;
+                    }
+                }
+            }
+            cur = tag_end + 1;
+        }
+    }
+
+    sha256_publisher_id( id_pub, appmodel_auto_cache.publisher_id );
+    lstrcpynW( appmodel_auto_cache.exe, exe_name, ARRAY_SIZE(appmodel_auto_cache.exe) );
+    lstrcpynW( appmodel_auto_cache.publisher, id_pub, ARRAY_SIZE(appmodel_auto_cache.publisher) );
+    lstrcpynW( appmodel_auto_cache.package_path, exe_dir, ARRAY_SIZE(appmodel_auto_cache.package_path) );
+
+    lstrcpyW( appmodel_auto_cache.family_name, id_name );
+    lstrcatW( appmodel_auto_cache.family_name, L"_" );
+    lstrcatW( appmodel_auto_cache.family_name, appmodel_auto_cache.publisher_id );
+
+    lstrcpyW( appmodel_auto_cache.full_name, id_name );
+    lstrcatW( appmodel_auto_cache.full_name, L"_" );
+    lstrcatW( appmodel_auto_cache.full_name, id_ver );
+    lstrcatW( appmodel_auto_cache.full_name, L"_" );
+    lstrcatW( appmodel_auto_cache.full_name, id_arch[0] ? id_arch : L"neutral" );
+    lstrcatW( appmodel_auto_cache.full_name, L"_" );
+    lstrcatW( appmodel_auto_cache.full_name, id_res );
+    lstrcatW( appmodel_auto_cache.full_name, L"_" );
+    lstrcatW( appmodel_auto_cache.full_name, appmodel_auto_cache.publisher_id );
+
+    lstrcpyW( appmodel_auto_cache.aumid, appmodel_auto_cache.family_name );
+    lstrcatW( appmodel_auto_cache.aumid, L"!" );
+    lstrcatW( appmodel_auto_cache.aumid, app_id );
+
+    cur = xml_w;
+    while (appmodel_auto_cache.fw_count < ARRAY_SIZE(appmodel_auto_cache.fw_full) &&
+           (tag = xml_next_tag_w( cur, L"PackageDependency", &tag_end )))
+    {
+        WCHAR dep_name[256] = {0}, dep_pub[512] = {0};
+        if (xml_tag_attr_w( tag, tag_end, L"Name", dep_name, ARRAY_SIZE(dep_name) ) && dep_name[0])
+        {
+            UINT32 idx = appmodel_auto_cache.fw_count;
+            xml_tag_attr_w( tag, tag_end, L"Publisher", dep_pub, ARRAY_SIZE(dep_pub) );
+            if (resolve_auto_dependency( exe_dir, dep_name, dep_pub,
+                                         appmodel_auto_cache.fw_path[idx], ARRAY_SIZE(appmodel_auto_cache.fw_path[idx]),
+                                         appmodel_auto_cache.fw_full[idx], ARRAY_SIZE(appmodel_auto_cache.fw_full[idx]) ))
+            {
+                appmodel_auto_cache.fw_count++;
+            }
+        }
+        cur = tag_end + 1;
+    }
+
+    HeapFree( GetProcessHeap(), 0, xml_w );
+    appmodel_auto_cache.valid = TRUE;
+
+    /* Check if registry entry is missing or points elsewhere; if so, write back to HKCU */
+    {
+        WCHAR subkey[600];
+        HKEY hkey;
+        UINT32 i;
+
+        lstrcpyW( subkey, L"Exes\\" );
+        lstrcatW( subkey, exe_name );
+        if (!appmodel_read_str( HKEY_CURRENT_USER, subkey, L"PackageFullName", reg_full, ARRAY_SIZE(reg_full) ) &&
+            !appmodel_read_str( HKEY_LOCAL_MACHINE, subkey, L"PackageFullName", reg_full, ARRAY_SIZE(reg_full) ))
+            need_reg_write = TRUE;
+        if (!appmodel_read_str( HKEY_CURRENT_USER, subkey, L"PackagePath", reg_path, ARRAY_SIZE(reg_path) ) &&
+            !appmodel_read_str( HKEY_LOCAL_MACHINE, subkey, L"PackagePath", reg_path, ARRAY_SIZE(reg_path) ))
+            need_reg_write = TRUE;
+        if (!appmodel_read_str( HKEY_CURRENT_USER, subkey, L"ApplicationUserModelId", reg_aumid, ARRAY_SIZE(reg_aumid) ) &&
+            !appmodel_read_str( HKEY_LOCAL_MACHINE, subkey, L"ApplicationUserModelId", reg_aumid, ARRAY_SIZE(reg_aumid) ))
+            need_reg_write = TRUE;
+        if (wcsicmp( reg_full, appmodel_auto_cache.full_name ) ||
+            wcsicmp( reg_path, appmodel_auto_cache.package_path ) ||
+            wcsicmp( reg_aumid, appmodel_auto_cache.aumid ))
+            need_reg_write = TRUE;
+
+        if (need_reg_write)
+        {
+            lstrcpyW( subkey, appmodel_reg_path );
+            lstrcatW( subkey, L"\\Exes\\" );
+            lstrcatW( subkey, exe_name );
+            if (!RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
+            {
+                appmodel_write_reg_str( hkey, L"PackageFullName", appmodel_auto_cache.full_name );
+                appmodel_write_reg_str( hkey, L"PackageFamilyName", appmodel_auto_cache.family_name );
+                appmodel_write_reg_str( hkey, L"PackagePath", appmodel_auto_cache.package_path );
+                appmodel_write_reg_str( hkey, L"ApplicationUserModelId", appmodel_auto_cache.aumid );
+                RegCloseKey( hkey );
+            }
+        }
+
+        lstrcpyW( subkey, L"Packages\\" );
+        lstrcatW( subkey, appmodel_auto_cache.full_name );
+        reg_path[0] = 0;
+        if ((!appmodel_read_str( HKEY_CURRENT_USER, subkey, L"PackagePath", reg_path, ARRAY_SIZE(reg_path) ) &&
+             !appmodel_read_str( HKEY_LOCAL_MACHINE, subkey, L"PackagePath", reg_path, ARRAY_SIZE(reg_path) )) ||
+            wcsicmp( reg_path, appmodel_auto_cache.package_path ))
+        {
+            DWORD fw_zero = 0;
+            lstrcpyW( subkey, appmodel_reg_path );
+            lstrcatW( subkey, L"\\Packages\\" );
+            lstrcatW( subkey, appmodel_auto_cache.full_name );
+            if (!RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
+            {
+                appmodel_write_reg_str( hkey, L"PackageFullName", appmodel_auto_cache.full_name );
+                appmodel_write_reg_str( hkey, L"PackageFamilyName", appmodel_auto_cache.family_name );
+                appmodel_write_reg_str( hkey, L"PackagePath", appmodel_auto_cache.package_path );
+                appmodel_write_reg_str( hkey, L"PackageRootPath", appmodel_auto_cache.package_path );
+                appmodel_write_reg_str( hkey, L"PackagePublisher", appmodel_auto_cache.publisher );
+                appmodel_write_reg_str( hkey, L"PackagePublisherId", appmodel_auto_cache.publisher_id );
+                RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&fw_zero, sizeof(fw_zero) );
+                RegCloseKey( hkey );
+            }
+        }
+
+        for (i = 0; i < appmodel_auto_cache.fw_count; i++)
+        {
+            WCHAR fw_reg_path[MAX_PATH] = {0};
+            lstrcpyW( subkey, L"Packages\\" );
+            lstrcatW( subkey, appmodel_auto_cache.fw_full[i] );
+            if (!appmodel_read_str( HKEY_CURRENT_USER, subkey, L"FrameworkPath", fw_reg_path, ARRAY_SIZE(fw_reg_path) ) ||
+                wcsicmp( fw_reg_path, appmodel_auto_cache.fw_path[i] ))
+            {
+                DWORD fw_one = 1;
+                lstrcpyW( subkey, appmodel_reg_path );
+                lstrcatW( subkey, L"\\Packages\\" );
+                lstrcatW( subkey, appmodel_auto_cache.fw_full[i] );
+                if (!RegCreateKeyExW( HKEY_CURRENT_USER, subkey, 0, NULL, 0, KEY_WRITE, NULL, &hkey, NULL ))
+                {
+                    appmodel_write_reg_str( hkey, L"PackageFullName", appmodel_auto_cache.fw_full[i] );
+                    appmodel_write_reg_str( hkey, L"PackagePath", appmodel_auto_cache.fw_path[i] );
+                    appmodel_write_reg_str( hkey, L"PackageRootPath", appmodel_auto_cache.fw_path[i] );
+                    appmodel_write_reg_str( hkey, L"FrameworkPath", appmodel_auto_cache.fw_path[i] );
+                    RegSetValueExW( hkey, L"Framework", 0, REG_DWORD, (const BYTE *)&fw_one, sizeof(fw_one) );
+                    RegCloseKey( hkey );
+                }
+            }
+        }
+    }
+
+    return TRUE;
+}
+
+static void appmodel_ensure_auto_identity( void )
+{
+    InitOnceExecuteOnce( &appmodel_auto_once, init_appmodel_auto_identity, NULL, NULL );
+}
 
 /* Copy src into the caller's length-prefixed string buffer, Windows style. */
 static LONG package_fill_str( const WCHAR *src, UINT32 *length, WCHAR *out )
@@ -1634,6 +2169,21 @@ static BOOL appmodel_get_str( const WCHAR *value, WCHAR *buf, DWORD cch )
     WCHAR subkey[576], exe[288];
     SIZE_T i;
 
+    appmodel_ensure_auto_identity();
+    if (appmodel_auto_cache.valid)
+    {
+        const WCHAR *src = NULL;
+        if (!wcsicmp( value, L"PackageFullName" )) src = appmodel_auto_cache.full_name;
+        else if (!wcsicmp( value, L"PackageFamilyName" )) src = appmodel_auto_cache.family_name;
+        else if (!wcsicmp( value, L"ApplicationUserModelId" )) src = appmodel_auto_cache.aumid;
+        else if (!wcsicmp( value, L"PackagePath" )) src = appmodel_auto_cache.package_path;
+        if (src && src[0] && wcslen( src ) < cch)
+        {
+            lstrcpyW( buf, src );
+            return TRUE;
+        }
+    }
+
     if (get_current_exe_name( exe, ARRAY_SIZE(exe) ))
     {
         lstrcpyW( subkey, L"Exes\\" );
@@ -1671,12 +2221,25 @@ static BOOL package_path_for( const WCHAR *full_name, WCHAR *buf, DWORD cch )
     WCHAR cur[512] = L"", fw[512] = L"", subkey[576];
     SIZE_T i;
 
+    appmodel_ensure_auto_identity();
     get_current_package_full_name( cur, ARRAY_SIZE(cur) );
     if (cur[0] && !wcsicmp( cur, full_name ) &&
         GetEnvironmentVariableW( L"WINE_PACKAGE_PATH", buf, cch )) return TRUE;
     if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ) &&
         !wcsicmp( fw, full_name ) &&
         GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_PATH", buf, cch )) return TRUE;
+    if (appmodel_auto_cache.valid)
+    {
+        for (i = 0; i < appmodel_auto_cache.fw_count; i++)
+        {
+            if (!wcsicmp( appmodel_auto_cache.fw_full[i], full_name ) &&
+                wcslen( appmodel_auto_cache.fw_path[i] ) < cch)
+            {
+                lstrcpyW( buf, appmodel_auto_cache.fw_path[i] );
+                return TRUE;
+            }
+        }
+    }
     if (cur[0] && !wcsicmp( cur, full_name ) &&
         appmodel_get_str( L"PackagePath", buf, cch )) return TRUE;
     lstrcpyW( subkey, L"Packages\\" );
@@ -1688,6 +2251,7 @@ static BOOL package_path_for( const WCHAR *full_name, WCHAR *buf, DWORD cch )
          * only records that one */
         if (appmodel_read_str( roots[i], subkey, L"PackagePath", buf, cch )) return TRUE;
         if (appmodel_read_str( roots[i], subkey, L"PackageRootPath", buf, cch )) return TRUE;
+        if (appmodel_read_str( roots[i], subkey, L"FrameworkPath", buf, cch )) return TRUE;
     }
     return FALSE;
 }
@@ -1695,7 +2259,7 @@ static BOOL package_path_for( const WCHAR *full_name, WCHAR *buf, DWORD cch )
 /* The registered package set: the running package, the env framework (when
  * pinned), and every entry of the Packages registration. A family filter
  * narrows the result; a NULL filter collects all. Entries fill full/path/fam. */
-#define MAX_PKG_ENTRIES 16
+#define MAX_PKG_ENTRIES 32
 
 struct pkg_entry
 {
@@ -1885,6 +2449,11 @@ LONG WINAPI GetCurrentPackageInfo( const UINT32 flags, UINT32 *buffer_size, BYTE
     if (get_current_package_full_name( full, ARRAY_SIZE(full) )) pkg_entry_add( entries, &n, full, FALSE );
     if (GetEnvironmentVariableW( L"WINE_FRAMEWORK_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ))
         pkg_entry_add( entries, &n, fw, TRUE );
+    else if (!GetEnvironmentVariableW( L"WINE_PACKAGE_FULL_NAME", fw, ARRAY_SIZE(fw) ) && appmodel_auto_cache.valid)
+    {
+        for (i = 0; i < appmodel_auto_cache.fw_count; i++)
+            pkg_entry_add( entries, &n, appmodel_auto_cache.fw_full[i], TRUE );
+    }
     if (!n)
     {
         FIXME( "(%#x %p %p %p): no package\n", flags, buffer_size, buffer, count );

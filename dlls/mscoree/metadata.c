@@ -178,8 +178,8 @@ static HRESULT WINAPI MetaDataDispenser_FindAssembly(IMetaDataDispenserEx* iface
             goto found;
     }
 
-    /* Check WINE_PACKAGE_PATH */
-    if (GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", pkg_path, ARRAY_SIZE(pkg_path)))
+    /* Check package path */
+    if (mscoree_get_package_path(pkg_path, ARRAY_SIZE(pkg_path)))
     {
         lstrcpynW(path, pkg_path, ARRAY_SIZE(path));
         PathAppendW(path, szAssemblyName);
@@ -190,8 +190,8 @@ static HRESULT WINAPI MetaDataDispenser_FindAssembly(IMetaDataDispenserEx* iface
             goto found;
     }
 
-    /* Check WINE_FRAMEWORK_PACKAGE_PATH */
-    if (GetEnvironmentVariableW(L"WINE_FRAMEWORK_PACKAGE_PATH", pkg_path, ARRAY_SIZE(pkg_path)))
+    /* Check framework package path */
+    if (mscoree_get_framework_package_path(pkg_path, ARRAY_SIZE(pkg_path)))
     {
         lstrcpynW(path, pkg_path, ARRAY_SIZE(path));
         PathAppendW(path, szAssemblyName);

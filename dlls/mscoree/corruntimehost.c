@@ -30,6 +30,7 @@
 #include "ole2.h"
 #include "shellapi.h"
 #include "shlwapi.h"
+#include "appmodel.h"
 
 #include "cor.h"
 #include "mscoree.h"
@@ -1636,6 +1637,63 @@ HRESULT RuntimeHost_GetInterface(RuntimeHost *This, REFCLSID clsid, REFIID riid,
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+BOOL mscoree_get_package_path(WCHAR *buf, DWORD cch)
+{
+    UINT32 len = cch;
+    if (GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", buf, cch) && buf[0]) return TRUE;
+    if (GetCurrentPackagePath(&len, buf) == ERROR_SUCCESS && buf[0]) return TRUE;
+    buf[0] = 0;
+    return FALSE;
+}
+
+BOOL mscoree_get_framework_package_path(WCHAR *buf, DWORD cch)
+{
+    static const HKEY roots[] = { HKEY_CURRENT_USER, HKEY_LOCAL_MACHINE };
+    static const WCHAR pkgs_path[] = L"Software\\Microsoft\\Windows NT\\CurrentVersion\\AppModel\\Packages";
+    WCHAR key_name[512], sub_path[600];
+    SIZE_T r;
+    DWORD i;
+
+    if (GetEnvironmentVariableW(L"WINE_FRAMEWORK_PACKAGE_PATH", buf, cch) && buf[0]) return TRUE;
+
+    for (r = 0; r < ARRAY_SIZE(roots); r++)
+    {
+        HKEY hkey;
+        if (RegOpenKeyExW(roots[r], pkgs_path, 0, KEY_READ, &hkey)) continue;
+        for (i = 0; ; i++)
+        {
+            DWORD klen = ARRAY_SIZE(key_name), type = 0, sz = cch * sizeof(WCHAR), fw = 0, fw_sz = sizeof(fw);
+            HKEY hsub;
+            if (RegEnumKeyExW(hkey, i, key_name, &klen, NULL, NULL, NULL, NULL)) break;
+            lstrcpyW(sub_path, pkgs_path);
+            lstrcatW(sub_path, L"\\");
+            lstrcatW(sub_path, key_name);
+            if (RegOpenKeyExW(roots[r], sub_path, 0, KEY_READ, &hsub)) continue;
+            buf[0] = 0;
+            if (!RegQueryValueExW(hsub, L"FrameworkPath", NULL, &type, (BYTE *)buf, &sz) && type == REG_SZ && buf[0])
+            {
+                RegCloseKey(hsub);
+                RegCloseKey(hkey);
+                return TRUE;
+            }
+            if (!RegQueryValueExW(hsub, L"Framework", NULL, &type, (BYTE *)&fw, &fw_sz) && fw == 1)
+            {
+                sz = cch * sizeof(WCHAR);
+                if (!RegQueryValueExW(hsub, L"PackagePath", NULL, &type, (BYTE *)buf, &sz) && type == REG_SZ && buf[0])
+                {
+                    RegCloseKey(hsub);
+                    RegCloseKey(hkey);
+                    return TRUE;
+                }
+            }
+            RegCloseKey(hsub);
+        }
+        RegCloseKey(hkey);
+    }
+    buf[0] = 0;
+    return FALSE;
+}
+
 static BOOL try_create_registration_free_com(REFIID clsid, WCHAR *classname, UINT classname_size, WCHAR *filename, UINT filename_size)
 {
     ACTCTX_SECTION_KEYED_DATA guid_info = { sizeof(ACTCTX_SECTION_KEYED_DATA) };
@@ -1691,7 +1749,7 @@ static BOOL try_create_registration_free_com(REFIID clsid, WCHAR *classname, UIN
         lstrcpynW(path, ptr_path_start, ARRAY_SIZE(path));
     }
 
-    if (!GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", filename, filename_size) || !filename[0])
+    if (!mscoree_get_package_path(filename, filename_size))
     {
         GetModuleFileNameW(NULL, filename, filename_size);
         PathRemoveFileSpecW(filename);
@@ -1872,7 +1930,7 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
                 ns = wcschr(simple_name, ',');
                 if (ns) *ns = '\0';
 
-                if (!GetEnvironmentVariableW(L"WINE_PACKAGE_PATH", filename, ARRAY_SIZE(filename)) || !filename[0])
+                if (!mscoree_get_package_path(filename, ARRAY_SIZE(filename)))
                 {
                     GetModuleFileNameW(NULL, filename, ARRAY_SIZE(filename));
                     ns = wcsrchr(filename, '\\');
@@ -1891,7 +1949,7 @@ HRESULT create_monodata(REFCLSID clsid, LPVOID *ppObj)
                 if (GetFileAttributesW(filename) == INVALID_FILE_ATTRIBUTES)
                 {
                     WCHAR fw_path[1024];
-                    if (GetEnvironmentVariableW(L"WINE_FRAMEWORK_PACKAGE_PATH", fw_path, ARRAY_SIZE(fw_path)) && fw_path[0])
+                    if (mscoree_get_framework_package_path(fw_path, ARRAY_SIZE(fw_path)))
                     {
                         lstrcpyW(filename, fw_path);
                         if (filename[lstrlenW(filename) - 1] != '\\')

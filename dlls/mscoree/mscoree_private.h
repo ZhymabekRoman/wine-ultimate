@@ -134,6 +134,9 @@ extern HRESULT parse_config_stream(IStream *stream, parsed_config_file *result);
 
 extern void free_parsed_config_file(parsed_config_file *file);
 
+extern BOOL mscoree_get_package_path(WCHAR *buf, DWORD cch);
+extern BOOL mscoree_get_framework_package_path(WCHAR *buf, DWORD cch);
+
 typedef enum {
 	MONO_IMAGE_OK,
 	MONO_IMAGE_ERROR_ERRNO,

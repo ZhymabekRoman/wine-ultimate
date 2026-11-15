@@ -39,6 +39,7 @@
 #include "wine/condrv.h"
 #include "wine/exception.h"
 #include "wine/debug.h"
+#include "appmodel.h"
 #include "kernelbase.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(console);
@@ -470,7 +471,14 @@ BOOL alloc_console( BOOL headless )
                                &server, sizeof(server), NULL, NULL );
     swprintf( conhost_path, ARRAY_SIZE(conhost_path), L"%s\\conhost.exe", system_dir );
     swprintf( cmd, ARRAY_SIZE(cmd),  L"\"%s\" --server 0x%x", conhost_path, condrv_handle( server ));
-    if (headless || GetEnvironmentVariableW( L"WINE_HEADLESS_CONSOLE", NULL, 0 )) wcscat( cmd, L" --headless" );
+    if (!headless)
+    {
+        UINT32 pkg_len = 0;
+        if (GetEnvironmentVariableW( L"WINE_HEADLESS_CONSOLE", NULL, 0 ) ||
+            GetCurrentPackageFullName( &pkg_len, NULL ) == ERROR_INSUFFICIENT_BUFFER)
+            headless = TRUE;
+    }
+    if (headless) wcscat( cmd, L" --headless" );
     Wow64DisableWow64FsRedirection( &redir );
     ret = CreateProcessW( conhost_path, cmd, NULL, NULL, TRUE, DETACHED_PROCESS | EXTENDED_STARTUPINFO_PRESENT,
                           NULL, system_dir, &console_si.StartupInfo, &pi );
