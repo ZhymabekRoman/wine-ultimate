@@ -1556,8 +1556,9 @@ static HKEY open_fonts_key(void)
 {
     HKEY hkey = NULL;
 
-    RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
-            0, GENERIC_READ | KEY_QUERY_VALUE, &hkey);
+    if (RegOpenKeyExW(HKEY_LOCAL_MACHINE, L"Software\\Microsoft\\Windows NT\\CurrentVersion\\Fonts",
+            0, GENERIC_READ | KEY_QUERY_VALUE, &hkey))
+        return NULL;
 
     return hkey;
 }

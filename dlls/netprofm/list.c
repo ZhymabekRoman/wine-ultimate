@@ -2113,12 +2113,32 @@ static void update_networks( struct list_manager *mgr )
     if (mgr_changed) fire_manager_connectivity( mgr, mgr_connectivity );
 }
 
-/* How often the poll worker re-reads the adapter table. */
+/* Fallback interval if NotifyIpInterfaceChange fails. */
 static const ULONG netprofm_poll_interval = 2000;
+
+DWORD WINAPI NotifyIpInterfaceChange( ADDRESS_FAMILY family, PIPINTERFACE_CHANGE_CALLBACK callback,
+                                      PVOID context, BOOLEAN init_notify, HANDLE *handle );
+DWORD WINAPI CancelMibChangeNotify2( HANDLE handle );
+
+static void WINAPI netprofm_ip_interface_change_cb( void *context, MIB_IPINTERFACE_ROW *row,
+                                                    MIB_NOTIFICATION_TYPE type )
+{
+    struct list_manager *mgr = context;
+    update_networks( mgr );
+}
 
 static void WINAPI netprofm_worker( void *arg )
 {
     struct list_manager *mgr = arg;
+    HANDLE notify_handle = NULL;
+
+    if (NotifyIpInterfaceChange( AF_INET, netprofm_ip_interface_change_cb,
+                                 mgr, TRUE, &notify_handle ) == NO_ERROR)
+    {
+        WaitForSingleObject( mgr->stop_event, INFINITE );
+        if (notify_handle) CancelMibChangeNotify2( notify_handle );
+        return;
+    }
 
     for (;;)
     {

@@ -121,12 +121,11 @@ static HANDLE g_compositor_clock_event = NULL;
 /*
  * Compositor-clock waiter registry. A caller of DCompositionWaitForCompositorClock
  * passes the handles it parks on (the CoreMessaging lifted-input workers register the
- * handle the present clock is expected to signal per frame). The composite thread
- * SetEvents each registered handle on its present tick, which is the in-process
- * equivalent of the DWM raising the per-frame clock: it wakes the compositor-clock
- * waiters on the present cadence so their continuation runs. Append-mostly, bounded;
- * handles are stable for the process lifetime, so a benign registration race can only
- * drop/overwrite a slot, never corrupt.
+ * handle the present clock is expected to signal per frame). Each caller handle is
+ * duplicated into the 16-slot registry under dcomp_cs so the composite thread never
+ * touches a raw caller handle after the caller closes it. If SetEvent fails with
+ * ERROR_INVALID_HANDLE the slot's duplicated handle is closed and evicted; when the
+ * 16-slot cap is full, the oldest slot (index 0) is closed and dropped to make room.
  */
 #define COMPOSITOR_CLOCK_MAX_HANDLES 16
 static HANDLE g_compositor_clock_handles[COMPOSITOR_CLOCK_MAX_HANDLES];
@@ -283,6 +282,8 @@ static ULONG STDMETHODCALLTYPE device_Release(IDCompositionDevice *iface)
         if (device->thread)
         {
             InterlockedExchange(&device->exit_thread, TRUE);
+            if (device->wake_event)
+                SetEvent(device->wake_event);
             if (GetThreadId(device->thread) == GetCurrentThreadId())
             {
                 device->self_release = TRUE;
@@ -291,6 +292,11 @@ static ULONG STDMETHODCALLTYPE device_Release(IDCompositionDevice *iface)
             WaitForSingleObject(device->thread, INFINITE);
             CloseHandle(device->thread);
             device->thread = NULL;
+        }
+        if (device->wake_event)
+        {
+            CloseHandle(device->wake_event);
+            device->wake_event = NULL;
         }
         if (device->surface_factory)
         {
@@ -2317,7 +2323,18 @@ static DWORD WINAPI composite_thread_proc(void *iface)
     {
         unsigned int elapsed = qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq);
 
-        if (elapsed < refresh_period)
+        if (!device->commit_pending && !device->last_has_shared)
+        {
+            DWORD wait_ms = (elapsed < refresh_period && refresh_period - elapsed > 0)
+                    ? refresh_period - elapsed : refresh_period;
+            if (device->wake_event)
+                WaitForSingleObject(device->wake_event, wait_ms);
+            else
+                Sleep(wait_ms);
+            if (device->exit_thread)
+                break;
+        }
+        else if (elapsed < refresh_period)
         {
             DWORD rem = refresh_period - elapsed;
             Sleep(rem > 0 ? rem : 1);
@@ -2339,7 +2356,7 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 BOOL had_pending = InterlockedExchange(&device->commit_pending, FALSE);
                 if (g_compositor_clock_event)
                     ResetEvent(g_compositor_clock_event);
-                if (composite_device(device) || had_pending)
+                if (composite_device(device) || had_pending || device->last_has_shared)
                     device->last_composite_qpc = qpc_now();
                 if (g_compositor_clock_event)
                     SetEvent(g_compositor_clock_event);
@@ -2356,10 +2373,28 @@ static DWORD WINAPI composite_thread_proc(void *iface)
          * LRPC requests on the composition plane. */
         if (!(++tick % 2))
         {
-            LONG n = g_compositor_clock_handle_count, k;
-            for (k = 0; k < n && k < COMPOSITOR_CLOCK_MAX_HANDLES; k++)
-                if (g_compositor_clock_handles[k])
-                    SetEvent(g_compositor_clock_handles[k]);
+            LONG k;
+            dcomp_lock();
+            for (k = 0; k < g_compositor_clock_handle_count; )
+            {
+                if (!g_compositor_clock_handles[k])
+                {
+                    memmove(&g_compositor_clock_handles[k], &g_compositor_clock_handles[k + 1],
+                            (g_compositor_clock_handle_count - k - 1) * sizeof(g_compositor_clock_handles[0]));
+                    g_compositor_clock_handles[--g_compositor_clock_handle_count] = NULL;
+                    continue;
+                }
+                if (!SetEvent(g_compositor_clock_handles[k]) && GetLastError() == ERROR_INVALID_HANDLE)
+                {
+                    CloseHandle(g_compositor_clock_handles[k]);
+                    memmove(&g_compositor_clock_handles[k], &g_compositor_clock_handles[k + 1],
+                            (g_compositor_clock_handle_count - k - 1) * sizeof(g_compositor_clock_handles[0]));
+                    g_compositor_clock_handles[--g_compositor_clock_handle_count] = NULL;
+                    continue;
+                }
+                k++;
+            }
+            dcomp_unlock();
             if (g_commit_completion_event)
                 SetEvent(g_commit_completion_event);
             /* gate104 lever (c): hand the UI thread one pump beat per
@@ -2377,7 +2412,6 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 if (bridge) PostMessageW( bridge, WM_NULL, 0, 0 );
             }
         }
-        Sleep(refresh_period);
     }
 
     TRACE("DCOMP: composite_thread_proc exiting.\n");
@@ -2388,6 +2422,11 @@ static DWORD WINAPI composite_thread_proc(void *iface)
         {
             CloseHandle(device->thread);
             device->thread = NULL;
+        }
+        if (device->wake_event)
+        {
+            CloseHandle(device->wake_event);
+            device->wake_event = NULL;
         }
         if (device->surface_factory)
         {
@@ -2424,6 +2463,8 @@ void ensure_composite_thread(struct composition_device *device)
     if (device->thread)
     {
         InterlockedExchange(&device->exit_thread, TRUE);
+        if (device->wake_event)
+            SetEvent(device->wake_event);
         thread = device->thread;
         device->thread = NULL;
     }
@@ -2533,6 +2574,8 @@ static HRESULT STDMETHODCALLTYPE device_Commit(IDCompositionDevice *iface)
         InterlockedExchange(&device->commit_pending, TRUE);
     }
     LeaveCriticalSection(&composite_render_cs);
+    if (device->wake_event)
+        SetEvent(device->wake_event);
 
     return hr;
 }
@@ -4461,6 +4504,7 @@ static HRESULT create_device(int version, IUnknown *rendering_device, REFIID iid
     device->ref = 1;
     QueryPerformanceFrequency(&device->qpc_freq);
     device->refresh_period_ms = 16;
+    device->wake_event = CreateEventW(NULL, FALSE, FALSE, NULL);
     dcomp_lock();
     list_add_tail(&dcomp_devices, &device->dev_entry);
     dcomp_unlock();
@@ -4797,19 +4841,34 @@ DWORD WINAPI DCompositionWaitForCompositorClock(UINT count, const HANDLE *handle
     if (count && handles)
     {
         DWORD ret;
-        /* Register the caller's park handles so the composite thread's present tick
-         * wakes them (the per-frame clock signal these workers wait for). */
+        /* Register the caller's park handles (duplicated into the 16-slot registry;
+         * oldest slot is closed and dropped on overflow) so the composite thread's
+         * present tick wakes them without holding raw caller handle values. */
+        dcomp_lock();
         for (i = 0; i < count; i++)
         {
-            LONG n = g_compositor_clock_handle_count, k;
-            for (k = 0; k < n; k++)
-                if (g_compositor_clock_handles[k] == handles[i]) break;
-            if (k == n && n < COMPOSITOR_CLOCK_MAX_HANDLES)
+            LONG k;
+            HANDLE dup = NULL;
+
+            if (!handles[i]) continue;
+            for (k = 0; k < g_compositor_clock_handle_count; k++)
+                if (compare_handles(g_compositor_clock_handles[k], handles[i])) break;
+            if (k < g_compositor_clock_handle_count) continue;
+
+            if (!DuplicateHandle(GetCurrentProcess(), handles[i], GetCurrentProcess(), &dup,
+                    0, FALSE, DUPLICATE_SAME_ACCESS))
+                continue;
+
+            if (g_compositor_clock_handle_count == COMPOSITOR_CLOCK_MAX_HANDLES)
             {
-                g_compositor_clock_handles[n] = handles[i];
-                InterlockedCompareExchange(&g_compositor_clock_handle_count, n + 1, n);
+                CloseHandle(g_compositor_clock_handles[0]);
+                memmove(&g_compositor_clock_handles[0], &g_compositor_clock_handles[1],
+                        (COMPOSITOR_CLOCK_MAX_HANDLES - 1) * sizeof(g_compositor_clock_handles[0]));
+                g_compositor_clock_handle_count--;
             }
+            g_compositor_clock_handles[g_compositor_clock_handle_count++] = dup;
         }
+        dcomp_unlock();
         ret = WaitForMultipleObjects(count, handles, FALSE, timeout < 16 ? timeout : 16);
         if (ret != WAIT_TIMEOUT) return ret;
     }

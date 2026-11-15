@@ -61,6 +61,7 @@ struct composition_device
     unsigned int refresh_period_ms;
     LONG commit_pending;
     LONG composite_count;
+    HANDLE wake_event;
 };
 
 enum dcomp_object_kind

@@ -3441,6 +3441,60 @@ static unsigned int get_mapping_info( HANDLE handle, ACCESS_MASK access, unsigne
  *
  * Map a view for a PE image at an appropriate address.
  */
+#ifdef _WIN64
+static LONG redhawk_arena_done;
+
+static void reserve_redhawk_arena(void)
+{
+    void *p;
+
+    if (InterlockedCompareExchange( &redhawk_arena_done, 1, 0 )) return;
+
+    /* p215: card mirror for host-image objects.  The wrapped WER responder
+     * (p214) hands the app a pinned handle over an object inside the
+     * SharedLibrary image (~0x6ffffc9xxxxx); the write-barrier card formula
+     * obj + obj/128 lands around 0x70DFF_exxxxx, a hole the pass-2 barrier
+     * faults on.  A 16GB window covers every image-base the loader picks
+     * (cards for [B, B+32MB) land in [B+B/128, B+B/128+256KB)). */
+    anon_mmap_fixed( (void *)0x700d00000000ULL, 0x400000000, PROT_READ | PROT_WRITE, 0 );
+    if ((p = anon_mmap_fixed( (void *)0x1801000000ULL, 0x9A00000, PROT_READ | PROT_WRITE, 0 )))
+    {
+        /* Zero pages make the MSZip decompress of the WER data buffer emit an
+         * empty/garbage string; the app catches, re-raises on the second pass
+         * and dies at the card helper (measured p210-p212).  Frozen refs land
+         * at region+...0001 offsets, so lay a complete zlib "en-US" stream
+         * (78 9c 0b c9 4c 2f 4d 55 28 c8 49 2d 06 00) at +1 mod 16: every
+         * frozen next_in reads a valid header, inflate retires Z_STREAM_END
+         * with "en-US", the WER publish completes on the first pass. */
+        static const char pattern[] = { 0x78, (char)0x9c, 0x0b, (char)0xc9, 0x4c, 0x2f, 0x4d, 0x55,
+                                        0x28, (char)0xc8, 0x49, 0x2d, 0x06, 0x00 };
+        size_t i, size = 0x9A00000;
+        for (i = 1; i + sizeof(pattern) <= size; i += 16)
+            memcpy( (char *)p + i, pattern, sizeof(pattern) );
+    }
+}
+
+static BOOL is_redhawk_image_name( const UNICODE_STRING *nt_name )
+{
+    static const WCHAR mrt100W[] = {'m','r','t','1','0','0','_','a','p','p','.','d','l','l'};
+    static const WCHAR sharedlibW[] = {'S','h','a','r','e','d','L','i','b','r','a','r','y','.','d','l','l'};
+    const WCHAR *p, *base;
+    size_t len, base_len;
+
+    if (!nt_name || !nt_name->Buffer || !nt_name->Length) return FALSE;
+    len = nt_name->Length / sizeof(WCHAR);
+    base = nt_name->Buffer;
+    for (p = base; p < nt_name->Buffer + len; p++)
+    {
+        if (*p == '\\' || *p == '/') base = p + 1;
+    }
+    base_len = (nt_name->Buffer + len) - base;
+    if (base_len == ARRAY_SIZE(mrt100W) && !wcsnicmp( base, mrt100W, base_len )) return TRUE;
+    if (base_len == ARRAY_SIZE(sharedlibW) && !wcsnicmp( base, sharedlibW, base_len )) return TRUE;
+    return FALSE;
+}
+#endif
+
 static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_info *image_info, SIZE_T size,
                                 ULONG_PTR limit_low, ULONG_PTR limit_high, ULONG alloc_type )
 {
@@ -3540,6 +3594,11 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
     }
 
     server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+
+#ifdef _WIN64
+    if (!redhawk_arena_done && is_redhawk_image_name( &pe_mapping->nt_name ))
+        reserve_redhawk_arena();
+#endif
 
     status = map_image_view( &view, &pe_mapping->image, size, limit_low, limit_high, alloc_type );
     if (status) goto done;
@@ -3767,9 +3826,6 @@ void virtual_init(void)
     size_t size;
     int i;
     pthread_mutexattr_t attr;
-#ifdef _WIN64
-    void *p;
-#endif
 
     pthread_mutexattr_init( &attr );
     pthread_mutexattr_settype( &attr, PTHREAD_MUTEX_RECURSIVE );
@@ -3836,51 +3892,14 @@ void virtual_init(void)
         anon_mmap_fixed( (void *)0x10000, size, PROT_READ | PROT_WRITE, 0 );
 
 #ifdef _WIN64
-    /* Calculator inflate-plateau wave (2026-11-08).  Two address holes the app's
-     * R2R code names directly, same DOS-area precedent (plain anon mmap, zero
-     * pages, kernel-served with no AV):
-     *   - the 47-bit top 64K block containing -1: the Redhawk write-barrier card
-     *     helper computes the card byte of a null GCHandle (value -1) per WER
-     *     publish, and the top page is the one address NtAllocateVirtualMemory
-     *     commits reject (c000000d), so the handled-continue pair repeats 18.9k
-     *     times (the inflate plateau);
-     *   - the frozen-reference arena at the SharedLibrary link-time base +
-     *     0x1000000 (TypeManager space): z_stream.next_in carries baked tagged
-     *     refs like 0x1801020001 that the Wine loader never relocates.
-     * With both pre-committed the WER publish costs ~0 AVs and the culture
-     * walk reaches the Map plane.  Keep ntdll/unix/thread.c NtRaiseException
-     * commits as backstop for addresses outside these ranges. */
-    /* Arena [0x1801000000, +0x6800000) = SharedLibrary TypeManager space, and
-     * the interleaved Redhawk card mirror: the card helper computes
-     * card = (obj & ~0xFFFF) + ((obj - 0x1000) >> 7), i.e. each 64K heap region
-     * carries its 512-byte card array at region_base + region_base/128.  For
-     * heap objects up to 0x1807900000 the card span is
-     * [0x1801000000 + 0x1801000000/128, 0x1807900000 + 0x1807900000/128)
-     * = [0x1804002000, 0x180A90F200), so one reservation
-     * [0x1801000000, +0x9A00000) covers arena + cards (up to 0x180AA00000). */
+    /* The 47-bit top 64K block containing -1: the Redhawk write-barrier card
+     * helper computes the card byte of a null GCHandle (value -1) per WER
+     * publish, and the top page is the one address NtAllocateVirtualMemory
+     * commits reject (c000000d).  Keep this small 64KB page unconditional;
+     * the 16GB card mirror (0x700d00000000) and frozen-reference arena
+     * (0x1801000000) are reserved lazily in reserve_redhawk_arena() when
+     * mrt100_app.dll or SharedLibrary.dll is mapped. */
     anon_mmap_fixed( (void *)0xffffffffffff0000ULL, 0x10000, PROT_READ | PROT_WRITE, 0 );
-    /* p215: card mirror for host-image objects.  The wrapped WER responder
-     * (p214) hands the app a pinned handle over an object inside the
-     * SharedLibrary image (~0x6ffffc9xxxxx); the write-barrier card formula
-     * obj + obj/128 lands around 0x70DFF_exxxxx, a hole the pass-2 barrier
-     * faults on.  A 16GB window covers every image-base the loader picks
-     * (cards for [B, B+32MB) land in [B+B/128, B+B/128+256KB)). */
-    anon_mmap_fixed( (void *)0x700d00000000ULL, 0x400000000, PROT_READ | PROT_WRITE, 0 );
-    if ((p = anon_mmap_fixed( (void *)0x1801000000ULL, 0x9A00000, PROT_READ | PROT_WRITE, 0 )))
-    {
-        /* Zero pages make the MSZip decompress of the WER data buffer emit an
-         * empty/garbage string; the app catches, re-raises on the second pass
-         * and dies at the card helper (measured p210-p212).  Frozen refs land
-         * at region+...0001 offsets, so lay a complete zlib "en-US" stream
-         * (78 9c 0b c9 4c 2f 4d 55 28 c8 49 2d 06 00) at +1 mod 16: every
-         * frozen next_in reads a valid header, inflate retires Z_STREAM_END
-         * with "en-US", the WER publish completes on the first pass. */
-        static const char pattern[] = { 0x78, (char)0x9c, 0x0b, (char)0xc9, 0x4c, 0x2f, 0x4d, 0x55,
-                                        0x28, (char)0xc8, 0x49, 0x2d, 0x06, 0x00 };
-        size_t i, size = 0x9A00000;
-        for (i = 1; i + sizeof(pattern) <= size; i += 16)
-            memcpy( (char *)p + i, pattern, sizeof(pattern) );
-    }
 #endif
 }
 

@@ -637,31 +637,75 @@ static ResolutionScale scale_from_dpi( UINT dpi )
     return ResolutionScale_Scale500Percent;
 }
 
+static void check_display_changes( struct display_information *impl )
+{
+    UINT dpi;
+    DisplayOrientations orient;
+    BOOL dpi_changed, orient_changed;
+
+    get_display_metrics( impl, &dpi, NULL, NULL, NULL, &orient );
+
+    EnterCriticalSection( &impl->cs );
+    dpi_changed = (dpi != impl->last_dpi);
+    orient_changed = (orient != impl->last_orientation);
+    impl->last_dpi = dpi;
+    impl->last_orientation = orient;
+    LeaveCriticalSection( &impl->cs );
+
+    if (dpi_changed)
+        event_list_fire( &impl->cs, &impl->dpi_changed, &impl->IDisplayInformation_iface );
+    if (orient_changed)
+        event_list_fire( &impl->cs, &impl->orientation_changed, &impl->IDisplayInformation_iface );
+}
+
+static LRESULT CALLBACK display_notify_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    if (msg == WM_DPICHANGED || msg == WM_DISPLAYCHANGE)
+    {
+        struct display_information *impl = (struct display_information *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
+        if (impl) check_display_changes( impl );
+    }
+    return DefWindowProcW( hwnd, msg, wparam, lparam );
+}
+
 static DWORD WINAPI display_poll_worker( void *arg )
 {
     struct display_information *impl = arg;
+    HWND notify_hwnd;
 
-    while (WaitForSingleObject( impl->stop_event, 500 ) == WAIT_TIMEOUT)
+    SetThreadDpiAwarenessContext( DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2 );
+    notify_hwnd = CreateWindowExW( 0, L"static", NULL, WS_POPUP, 0, 0, 0, 0, NULL, NULL, NULL, NULL );
+    if (notify_hwnd)
     {
-        UINT dpi;
-        DisplayOrientations orient;
-        BOOL dpi_changed, orient_changed;
-
-        get_display_metrics( impl, &dpi, NULL, NULL, NULL, &orient );
-
-        EnterCriticalSection( &impl->cs );
-        dpi_changed = (dpi != impl->last_dpi);
-        orient_changed = (orient != impl->last_orientation);
-        impl->last_dpi = dpi;
-        impl->last_orientation = orient;
-        LeaveCriticalSection( &impl->cs );
-
-        if (dpi_changed)
-            event_list_fire( &impl->cs, &impl->dpi_changed, &impl->IDisplayInformation_iface );
-        if (orient_changed)
-            event_list_fire( &impl->cs, &impl->orientation_changed, &impl->IDisplayInformation_iface );
+        SetWindowLongPtrW( notify_hwnd, GWLP_USERDATA, (LONG_PTR)impl );
+        SetWindowLongPtrW( notify_hwnd, GWLP_WNDPROC, (LONG_PTR)display_notify_wndproc );
     }
 
+    for (;;)
+    {
+        DWORD ret = MsgWaitForMultipleObjects( 1, &impl->stop_event, FALSE, 500, QS_ALLINPUT );
+
+        if (ret == WAIT_OBJECT_0)
+            break;
+        if (ret == WAIT_OBJECT_0 + 1)
+        {
+            MSG msg;
+            while (PeekMessageW( &msg, NULL, 0, 0, PM_REMOVE ))
+            {
+                TranslateMessage( &msg );
+                DispatchMessageW( &msg );
+            }
+            check_display_changes( impl );
+        }
+        else if (ret == WAIT_TIMEOUT)
+        {
+            check_display_changes( impl );
+        }
+        else
+            break;
+    }
+
+    if (notify_hwnd) DestroyWindow( notify_hwnd );
     return 0;
 }
 

@@ -230,6 +230,8 @@ static struct network_status_event network_status_events[NETWORK_STATUS_EVENT_MA
 static ULONG network_status_event_count;
 static LONG64 network_status_token;
 static HANDLE network_status_thread;
+static DWORD network_status_tid;
+static HANDLE network_status_stop_event;
 static ULONG64 network_status_last_key = ~(ULONG64)0;
 
 static CRITICAL_SECTION network_status_cs;
@@ -287,11 +289,10 @@ static void WINAPI network_status_worker( void *arg )
 
     CoInitializeEx( NULL, COINIT_MULTITHREADED );
     memset( &snapshot, 0, sizeof(snapshot) );
-    for (;;)
+    while (WaitForSingleObject( network_status_stop_event, network_status_poll_interval ) == WAIT_TIMEOUT)
     {
         ULONG64 key;
 
-        Sleep( network_status_poll_interval );
         if (get_adapter_snapshot( &snapshot )) key = adapter_snapshot_key( &snapshot );
         else key = 0;
 
@@ -304,6 +305,44 @@ static void WINAPI network_status_worker( void *arg )
         adapter_snapshot_reset( &snapshot );
     }
     CoUninitialize();
+}
+
+void network_status_init( void )
+{
+    EnterCriticalSection( &network_status_cs );
+    if (!network_status_stop_event)
+        network_status_stop_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+    LeaveCriticalSection( &network_status_cs );
+}
+
+void network_status_shutdown( BOOL process_termination )
+{
+    HANDLE thread = NULL, stop_event = NULL;
+    DWORD tid = 0;
+
+    if (process_termination)
+    {
+        if (network_status_stop_event) SetEvent( network_status_stop_event );
+        return;
+    }
+
+    EnterCriticalSection( &network_status_cs );
+    if (network_status_stop_event) SetEvent( network_status_stop_event );
+    thread = network_status_thread;
+    tid = network_status_tid;
+    network_status_thread = NULL;
+    network_status_tid = 0;
+    stop_event = network_status_stop_event;
+    network_status_stop_event = NULL;
+    LeaveCriticalSection( &network_status_cs );
+
+    if (thread)
+    {
+        if (GetCurrentThreadId() != tid)
+            WaitForSingleObject( thread, 5000 );
+        CloseHandle( thread );
+    }
+    if (stop_event) CloseHandle( stop_event );
 }
 
 static HRESULT network_status_add_event( INetworkStatusChangedEventHandler *handler, EventRegistrationToken *token )
@@ -330,7 +369,14 @@ static HRESULT network_status_add_event( INetworkStatusChangedEventHandler *hand
                 network_status_last_key = 0;
             adapter_snapshot_reset( &snapshot );
 
-            if (!(network_status_thread = CreateThread( NULL, 0, (LPTHREAD_START_ROUTINE)network_status_worker, NULL, 0, NULL )))
+            if (!network_status_stop_event)
+                network_status_stop_event = CreateEventW( NULL, TRUE, FALSE, NULL );
+            else
+                ResetEvent( network_status_stop_event );
+
+            if (!network_status_stop_event ||
+                !(network_status_thread = CreateThread( NULL, 0, (LPTHREAD_START_ROUTINE)network_status_worker,
+                                                        NULL, 0, &network_status_tid )))
                 hr = E_FAIL;
         }
     }
@@ -341,6 +387,8 @@ static HRESULT network_status_add_event( INetworkStatusChangedEventHandler *hand
 static HRESULT network_status_remove_event( EventRegistrationToken token )
 {
     HRESULT hr = E_INVALIDARG;
+    HANDLE thread = NULL;
+    DWORD tid = 0;
     ULONG i;
 
     EnterCriticalSection( &network_status_cs );
@@ -350,10 +398,25 @@ static HRESULT network_status_remove_event( EventRegistrationToken token )
         IUnknown_Release( network_status_events[i].handler );
         network_status_events[i] = network_status_events[network_status_event_count - 1];
         network_status_event_count--;
+        if (!network_status_event_count && network_status_thread)
+        {
+            if (network_status_stop_event) SetEvent( network_status_stop_event );
+            thread = network_status_thread;
+            tid = network_status_tid;
+            network_status_thread = NULL;
+            network_status_tid = 0;
+        }
         hr = S_OK;
         break;
     }
     LeaveCriticalSection( &network_status_cs );
+
+    if (thread)
+    {
+        if (GetCurrentThreadId() != tid)
+            WaitForSingleObject( thread, 5000 );
+        CloseHandle( thread );
+    }
     return hr;
 }
 

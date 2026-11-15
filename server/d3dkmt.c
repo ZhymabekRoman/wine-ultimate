@@ -884,12 +884,11 @@ struct composition
     unsigned int dirty_count;               /* generation / dirty counter incremented on every publish/commit */
 };
 
-/* Every shared visual handle ever created, kept alive for as long as some
- * process can name it. A shared visual outlives the handle it was created
- * with: the publisher hands the handle to the consumer over mojo, and the
- * consumer resolves it on every composite tick, so an entry whose creating
- * handle has been closed must still answer. It is also the lookup path for a
- * handle value that lives in another process's handle table, where
+/* Live shared visual objects. A shared visual stays in this list for as long
+ * as at least one handle to it remains open across processes; when the last
+ * handle is closed, refcount reaches 0 and composition_destroy unlinks the
+ * entry from shared_visual_list. This is also the lookup path for a handle
+ * value that lives in another process's handle table, where
  * get_handle_obj( current->process, ... ) cannot see it. */
 static struct list shared_visual_list = LIST_INIT( shared_visual_list );
 
@@ -997,7 +996,6 @@ static struct composition *create_composition(void)
         composition->target_process = NULL;
         composition->process = (struct process *)grab_object( current->process );
         list_add_tail( &shared_visual_list, &composition->shared_entry );
-        grab_object( composition ); /* the registry's reference */
     }
 
     return composition;

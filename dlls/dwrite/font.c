@@ -4858,11 +4858,10 @@ static HRESULT create_local_file_reference(IDWriteFactory7 *factory, const WCHAR
     /* Fonts installed in 'Fonts' system dir don't get full path in registry font files cache */
     if (!wcschr(filename, '\\'))
     {
-        WCHAR fullpathW[MAX_PATH];
+        WCHAR dir[MAX_PATH], fullpathW[MAX_PATH];
 
-        GetWindowsDirectoryW(fullpathW, ARRAY_SIZE(fullpathW));
-        wcscat(fullpathW, L"\\fonts\\");
-        wcscat(fullpathW, filename);
+        GetWindowsDirectoryW(dir, ARRAY_SIZE(dir));
+        swprintf( fullpathW, ARRAY_SIZE(fullpathW), L"%s\\fonts\\%s", dir, filename );
 
         hr = IDWriteFactory7_CreateFontFileReference(factory, fullpathW, NULL, file);
     }

@@ -37,8 +37,18 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     *factory = NULL;
 
     if (!wcscmp( buffer, RuntimeClass_Windows_Networking_Connectivity_NetworkInformation ))
+    {
+        network_status_init();
         IActivationFactory_QueryInterface( network_information_factory, &IID_IActivationFactory, (void **)factory );
+    }
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;
+}
+
+BOOL WINAPI DllMain( HINSTANCE instance, DWORD reason, void *reserved )
+{
+    if (reason == DLL_PROCESS_DETACH)
+        network_status_shutdown( reserved != NULL );
+    return TRUE;
 }
