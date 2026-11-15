@@ -1015,12 +1015,13 @@ static HRESULT WINAPI package_manager_FindUsers( IPackageManager *iface, HSTRING
 
         if (RegEnumKeyW( hkey, i++, keyname, ARRAY_SIZE(keyname) )) break;
         if (family && wcsncmp( keyname, family, lstrlenW(family) )) continue;
-        lstrcpyW( value, L"S-1-5-21-0" );
+        lstrcpynW( value, L"S-1-5-21-0", ARRAY_SIZE(value) );
         if (!RegOpenKeyExW( hkey, keyname, 0, KEY_READ, &hsub ))
         {
             type = REG_SZ;
             size = sizeof(value);
             RegQueryValueExW( hsub, L"UserSecurityId", NULL, &type, (BYTE *)value, &size );
+            value[ARRAY_SIZE(value) - 1] = 0;
             RegCloseKey( hsub );
         }
         if (!(info = calloc( 1, sizeof(*info) ))) continue;
@@ -1028,7 +1029,7 @@ static HRESULT WINAPI package_manager_FindUsers( IPackageManager *iface, HSTRING
         info->list = list;
         info->index = list->count;
         info->ref = 1;
-        lstrcpyW( list->entries[list->count].sid, value );
+        lstrcpynW( list->entries[list->count].sid, value, ARRAY_SIZE(list->entries[list->count].sid) );
         list->entries[list->count].info = info;
         list->count++;
     }
@@ -1180,7 +1181,14 @@ static HRESULT WINAPI package_manager2_FindPackagesWithPackageTypes( IPackageMan
 static HRESULT WINAPI package_manager2_FindPackagesByUserSecurityIdWithPackageTypes( IPackageManager2 *iface, HSTRING sid,
     PackageTypes types, IIterable_Package **packages )
 {
+    struct package_manager *impl = CONTAINING_RECORD( iface, struct package_manager, IPackageManager2_iface );
+
     TRACE( "iface %p, sid %s, types %d, packages %p.\n", iface, debugstr_hstring(sid), types, packages );
+
+    /* Ignore the per-user SID filter in single-user prefix deployments and
+     * delegate to package_manager_FindPackages (or find_packages when filtered by type). */
+    if (!types || types == PackageTypes_All)
+        return package_manager_FindPackages( &impl->IPackageManager_iface, packages );
     return find_packages( NULL, NULL, NULL, types, packages );
 }
 
@@ -1642,6 +1650,7 @@ static void split_full_name( const WCHAR *full, WCHAR *name, DWORD cch_name,
 struct package
 {
     IPackage IPackage_iface;
+    IPackage3 IPackage3_iface;
     IPackageId IPackageId_iface;
     IStorageFolder IStorageFolder_iface;
     IStorageItem IStorageItem_iface;
@@ -1669,6 +1678,10 @@ static HRESULT WINAPI package_QueryInterface( IPackage *iface, REFIID iid, void 
         IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPackage ))
     {
         *out = &impl->IPackage_iface;
+    }
+    else if (IsEqualGUID( iid, &IID_IPackage3 ))
+    {
+        *out = &impl->IPackage3_iface;
     }
     else if (IsEqualGUID( iid, &IID_IPackageId ))
     {
@@ -2214,12 +2227,243 @@ static const struct IStorageItemVtbl package_item_vtbl =
     package_item_IsOfType,
 };
 
+struct applist_async_op
+{
+    const void *vtbl_op;
+    const void *vtbl_info;
+    LONG ref;
+    IUnknown *handler;
+};
+
+static inline struct applist_async_op *applist_from_op( void *iface )
+{
+    return (struct applist_async_op *)iface;
+}
+
+static inline struct applist_async_op *applist_from_info( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct applist_async_op, vtbl_info );
+}
+
+static HRESULT WINAPI applist_op_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct applist_async_op *impl = applist_from_op( iface );
+    static const GUID IID_IAsyncOperation_AppListEntry =
+        { 0x51c74372, 0x9452, 0x57ce, { 0x92, 0x70, 0x76, 0x20, 0x09, 0xfb, 0xfe, 0x4d } };
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAsyncOperation_AppListEntry ))
+    {
+        *out = &impl->vtbl_op;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &impl->vtbl_info;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    *out = &impl->vtbl_op;
+    InterlockedIncrement( &impl->ref );
+    return S_OK;
+}
+
+static ULONG WINAPI applist_op_AddRef( void *iface )
+{
+    struct applist_async_op *impl = applist_from_op( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI applist_op_Release( void *iface )
+{
+    struct applist_async_op *impl = applist_from_op( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->handler) IUnknown_Release( impl->handler );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI applist_op_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI applist_op_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.IAsyncOperation`1<Windows.Foundation.Collections.IVectorView`1<Windows.ApplicationModel.Core.AppListEntry>>";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+
+static HRESULT WINAPI applist_op_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI applist_op_put_Completed( void *iface, void *handler )
+{
+    struct applist_async_op *impl = applist_from_op( iface );
+    if (impl->handler) IUnknown_Release( impl->handler );
+    impl->handler = (IUnknown *)handler;
+    if (handler)
+    {
+        void **vtbl = *(void ***)handler;
+        HRESULT (STDMETHODCALLTYPE *invoke)( void *, void *, AsyncStatus ) = (void *)vtbl[3];
+        IUnknown_AddRef( impl->handler );
+        if (invoke) invoke( handler, iface, Completed );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI applist_op_get_Completed( void *iface, void **handler )
+{
+    struct applist_async_op *impl = applist_from_op( iface );
+    if (!handler) return E_POINTER;
+    *handler = impl->handler;
+    if (*handler) IUnknown_AddRef( (IUnknown *)*handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI applist_op_GetResults( void *iface, void **results )
+{
+    if (!results) return E_INVALIDARG;
+    return create_package_vectorview( NULL, 0, (IVectorView_Package **)results );
+}
+
+static const void *applist_op_vtbl[] =
+{
+    applist_op_QueryInterface,
+    applist_op_AddRef,
+    applist_op_Release,
+    applist_op_GetIids,
+    applist_op_GetRuntimeClassName,
+    applist_op_GetTrustLevel,
+    applist_op_put_Completed,
+    applist_op_get_Completed,
+    applist_op_GetResults,
+};
+
+static HRESULT WINAPI applist_info_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct applist_async_op *impl = applist_from_info( iface );
+    return applist_op_QueryInterface( &impl->vtbl_op, iid, out );
+}
+
+static ULONG WINAPI applist_info_AddRef( void *iface )
+{
+    struct applist_async_op *impl = applist_from_info( iface );
+    return applist_op_AddRef( &impl->vtbl_op );
+}
+
+static ULONG WINAPI applist_info_Release( void *iface )
+{
+    struct applist_async_op *impl = applist_from_info( iface );
+    return applist_op_Release( &impl->vtbl_op );
+}
+
+static HRESULT WINAPI applist_info_get_Id( void *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI applist_info_get_Status( void *iface, AsyncStatus *status ) { if (status) *status = Completed; return S_OK; }
+static HRESULT WINAPI applist_info_get_ErrorCode( void *iface, HRESULT *code ) { if (code) *code = S_OK; return S_OK; }
+static HRESULT WINAPI applist_info_Cancel( void *iface ) { return S_OK; }
+static HRESULT WINAPI applist_info_Close( void *iface ) { return S_OK; }
+
+static const void *applist_info_vtbl[] =
+{
+    applist_info_QueryInterface,
+    applist_info_AddRef,
+    applist_info_Release,
+    applist_op_GetIids,
+    applist_op_GetRuntimeClassName,
+    applist_op_GetTrustLevel,
+    applist_info_get_Id,
+    applist_info_get_Status,
+    applist_info_get_ErrorCode,
+    applist_info_Cancel,
+    applist_info_Close,
+};
+
+static HRESULT create_empty_vectorview_async( void **operation )
+{
+    struct applist_async_op *impl;
+    if (!operation) return E_INVALIDARG;
+    if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    impl->vtbl_op = applist_op_vtbl;
+    impl->vtbl_info = applist_info_vtbl;
+    impl->ref = 1;
+    *operation = &impl->vtbl_op;
+    return S_OK;
+}
+
+DEFINE_PACKAGE_QI( package3, IPackage3, IPackage3_iface )
+
+static HRESULT WINAPI package3_GetIids( IPackage3 *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package3_GetRuntimeClassName( IPackage3 *iface, HSTRING *name )
+{
+    return package_GetRuntimeClassName( &CONTAINING_RECORD( iface, struct package, IPackage3_iface )->IPackage_iface, name );
+}
+
+static HRESULT WINAPI package3_GetTrustLevel( IPackage3 *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_get_Status( IPackage3 *iface, IPackageStatus **value )
+{
+    if (!value) return E_INVALIDARG;
+    *value = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_get_InstalledDate( IPackage3 *iface, DateTime *value )
+{
+    if (!value) return E_INVALIDARG;
+    memset( value, 0, sizeof(*value) );
+    return S_OK;
+}
+
+static HRESULT WINAPI package_GetAppListEntriesAsync( IPackage3 *iface,
+        __FIAsyncOperation_1___FIVectorView_1_Windows__CApplicationModel__CCore__CAppListEntry **operation )
+{
+    TRACE( "iface %p, operation %p.\n", iface, operation );
+    return create_empty_vectorview_async( (void **)operation );
+}
+
+static const struct IPackage3Vtbl package3_vtbl =
+{
+    package3_QueryInterface,
+    package3_AddRef,
+    package3_Release,
+    package3_GetIids,
+    package3_GetRuntimeClassName,
+    package3_GetTrustLevel,
+    package_get_Status,
+    package_get_InstalledDate,
+    package_GetAppListEntriesAsync,
+};
+
 static HRESULT package_create( const struct package_record *rec, struct package **ret )
 {
     struct package *impl;
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IPackage_iface.lpVtbl = &package_vtbl;
+    impl->IPackage3_iface.lpVtbl = &package3_vtbl;
     impl->IPackageId_iface.lpVtbl = &packageid_vtbl;
     impl->IStorageFolder_iface.lpVtbl = &package_folder_vtbl;
     impl->IStorageItem_iface.lpVtbl = &package_item_vtbl;
@@ -2492,9 +2736,12 @@ static inline struct package_vectorview *impl_from_IVectorView_Package( IVectorV
 static HRESULT WINAPI package_vectorview_QueryInterface( IVectorView_Package *iface, REFIID iid, void **out )
 {
     struct package_vectorview *impl = impl_from_IVectorView_Package( iface );
+    static const GUID IID_IVectorView_AppListEntry =
+        { 0x6f73e9e4, 0x7065, 0x5c2e, { 0x86, 0x26, 0x60, 0x61, 0x05, 0x74, 0x9b, 0x05 } };
 
     if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IVectorView_Package ))
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IVectorView_Package ) ||
+        IsEqualGUID( iid, &IID_IVectorView_AppListEntry ))
     {
         *out = &impl->IVectorView_Package_iface;
         InterlockedIncrement( &impl->ref );
@@ -3024,14 +3271,15 @@ static HRESULT find_users_async( const WCHAR *family, IAsyncOperation_IVectorVie
                 if (!PackageFamilyNameFromFullName( fam, &chars2, fam ) && lstrcmpiW( fam, family ))
                     continue;
             }
-            lstrcpyW( value, L"S-1-5-21-0" );
+            lstrcpynW( value, L"S-1-5-21-0", ARRAY_SIZE(value) );
             if (!RegOpenKeyExW( hkey, keyname, 0, KEY_READ, &hsub ))
             {
                 DWORD type = REG_SZ, size = sizeof(value);
                 RegQueryValueExW( hsub, L"UserSecurityId", NULL, &type, (BYTE *)value, &size );
+                value[ARRAY_SIZE(value) - 1] = 0;
                 RegCloseKey( hsub );
             }
-            lstrcpyW( list->sid[list->count], value );
+            lstrcpynW( list->sid[list->count], value, ARRAY_SIZE(list->sid[list->count]) );
             list->count++;
         }
         RegCloseKey( hkey );
@@ -3236,8 +3484,10 @@ struct package_catalog
     IPackageCatalog3 IPackageCatalog3_iface;
     LONG ref;
     IPackage *package;
-    struct package_catalog_event events[16];
+    CRITICAL_SECTION cs;
+    struct package_catalog_event *events;
     ULONG event_count;
+    ULONG event_capacity;
 };
 
 static inline struct package_catalog *impl_from_IPackageCatalog( IPackageCatalog *iface )
@@ -3295,7 +3545,11 @@ static ULONG WINAPI package_catalog_Release( IPackageCatalog *iface )
     TRACE( "iface %p decreasing refcount to %lu.\n", iface, ref );
     if (!ref)
     {
+        EnterCriticalSection( &impl->cs );
         for (ULONG i = 0; i < impl->event_count; i++) IUnknown_Release( impl->events[i].handler );
+        free( impl->events );
+        LeaveCriticalSection( &impl->cs );
+        DeleteCriticalSection( &impl->cs );
         if (impl->package) IPackage_Release( impl->package );
         free( impl );
     }
@@ -3338,29 +3592,48 @@ static HRESULT package_catalog_add_event( struct package_catalog *impl, void *ha
                                           EventRegistrationToken *token )
 {
     if (!handler || !token) return E_INVALIDARG;
-    if (impl->event_count == ARRAY_SIZE(impl->events)) return E_OUTOFMEMORY;
+
+    EnterCriticalSection( &impl->cs );
+    if (impl->event_count == impl->event_capacity)
+    {
+        ULONG new_cap = impl->event_capacity ? impl->event_capacity * 2 : 16;
+        struct package_catalog_event *new_events = realloc( impl->events, new_cap * sizeof(*new_events) );
+        if (!new_events)
+        {
+            LeaveCriticalSection( &impl->cs );
+            return E_OUTOFMEMORY;
+        }
+        impl->events = new_events;
+        impl->event_capacity = new_cap;
+    }
 
     IUnknown_AddRef( (IUnknown *)handler );
     impl->events[impl->event_count].handler = (IUnknown *)handler;
     impl->events[impl->event_count].token = InterlockedIncrement64( &package_catalog_event_token );
     token->value = impl->events[impl->event_count].token;
     impl->event_count++;
+    LeaveCriticalSection( &impl->cs );
     return S_OK;
 }
 
 static HRESULT package_catalog_remove_event( struct package_catalog *impl, EventRegistrationToken token )
 {
+    IUnknown *handler = NULL;
     ULONG i;
 
+    EnterCriticalSection( &impl->cs );
     for (i = 0; i < impl->event_count; i++)
     {
         if (impl->events[i].token != token.value) continue;
-        IUnknown_Release( impl->events[i].handler );
+        handler = impl->events[i].handler;
         impl->events[i] = impl->events[impl->event_count - 1];
         impl->event_count--;
-        return S_OK;
+        break;
     }
-    return E_INVALIDARG;
+    LeaveCriticalSection( &impl->cs );
+    if (!handler) return E_INVALIDARG;
+    IUnknown_Release( handler );
+    return S_OK;
 }
 
 static HRESULT WINAPI package_catalog_add_PackageStaging( IPackageCatalog *iface, void *handler,
@@ -3470,8 +3743,8 @@ static HRESULT WINAPI package_catalog2_remove_PackageContentGroupStaging( IPacka
 static HRESULT WINAPI package_catalog2_AddOptionalPackageAsync( IPackageCatalog2 *iface, HSTRING name, void **operation )
 {
     FIXME( "iface %p, name %s, operation %p stub!\n", iface, debugstr_hstring(name), operation );
-    if (operation) *operation = NULL;
-    return E_NOTIMPL;
+    if (!operation) return E_NOTIMPL;
+    return create_empty_vectorview_async( operation );
 }
 
 static const struct IPackageCatalog2Vtbl package_catalog2_vtbl =
@@ -3494,8 +3767,8 @@ DEFINE_IINSPECTABLE( package_catalog3, IPackageCatalog3, struct package_catalog,
 static HRESULT WINAPI package_catalog3_RemoveOptionalPackagesAsync( IPackageCatalog3 *iface, void *names, void **operation )
 {
     FIXME( "iface %p, names %p, operation %p stub!\n", iface, names, operation );
-    if (operation) *operation = NULL;
-    return E_NOTIMPL;
+    if (!operation) return E_NOTIMPL;
+    return create_empty_vectorview_async( operation );
 }
 
 static const struct IPackageCatalog3Vtbl package_catalog3_vtbl =
@@ -3517,6 +3790,13 @@ static HRESULT package_catalog_create( IPackage *package, IPackageCatalog **out 
 
     if (!out) return E_INVALIDARG;
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
+    if (!(impl->events = calloc( 16, sizeof(*impl->events) )))
+    {
+        free( impl );
+        return E_OUTOFMEMORY;
+    }
+    impl->event_capacity = 16;
+    InitializeCriticalSection( &impl->cs );
 
     impl->IPackageCatalog_iface.lpVtbl = &package_catalog_vtbl;
     impl->IPackageCatalog2_iface.lpVtbl = &package_catalog2_vtbl;

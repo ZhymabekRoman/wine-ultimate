@@ -278,6 +278,44 @@ static struct data_transfer_manager_statics data_transfer_manager_statics =
 IActivationFactory *data_transfer_manager_statics_factory = &data_transfer_manager_statics.IActivationFactory_iface;
 
 /* Clipboard statics */
+static IActivationFactory *get_real_clipboard_factory( void )
+{
+    static IActivationFactory *real_factory;
+    static LONG init_done;
+
+    if (!init_done)
+    {
+        HMODULE mod = LoadLibraryW( L"windows.applicationmodel.dataexchange.dll" );
+        if (mod)
+        {
+            HRESULT (WINAPI *pDllGetActivationFactory)( HSTRING, IActivationFactory ** );
+            pDllGetActivationFactory = (void *)GetProcAddress( mod, "DllGetActivationFactory" );
+            if (pDllGetActivationFactory)
+            {
+                HSTRING str;
+                if (SUCCEEDED( WindowsCreateString( RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard,
+                                                    wcslen( RuntimeClass_Windows_ApplicationModel_DataTransfer_Clipboard ), &str ) ))
+                {
+                    IActivationFactory *fac = NULL;
+                    if (SUCCEEDED( pDllGetActivationFactory( str, &fac ) ) && fac)
+                    {
+                        if (InterlockedCompareExchangePointer( (void **)&real_factory, fac, NULL ))
+                            IActivationFactory_Release( fac );
+                    }
+                    WindowsDeleteString( str );
+                }
+            }
+        }
+        InterlockedExchange( &init_done, 1 );
+    }
+    return real_factory;
+}
+
+static HRESULT WINAPI clipboard_stub_bool_1( void *iface, boolean *result )
+{
+    if (result) *result = FALSE;
+    return S_OK;
+}
 static HRESULT WINAPI clipboard_stub_bool( void *iface, void *a2, boolean *result )
 {
     if (result) *result = FALSE;
@@ -289,6 +327,11 @@ static HRESULT WINAPI clipboard_stub_zero( void *iface, void *out ) { if (out) *
 
 static HRESULT WINAPI clipboard_statics_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
 {
+    if (iface == clipboard_statics_factory)
+    {
+        IActivationFactory *real = get_real_clipboard_factory();
+        if (real) return IActivationFactory_QueryInterface( real, iid, out );
+    }
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
@@ -305,7 +348,16 @@ static ULONG WINAPI dummy_factory_Release( IActivationFactory *iface ) { return 
 static HRESULT WINAPI dummy_factory_GetIids( IActivationFactory *iface, ULONG *c, IID **i ) { return E_NOTIMPL; }
 static HRESULT WINAPI dummy_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *n ) { return WindowsCreateString( L"Windows.ApplicationModel.DataTransfer.Clipboard", 46, n ); }
 static HRESULT WINAPI dummy_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
-static HRESULT WINAPI dummy_factory_ActivateInstance( IActivationFactory *iface, IInspectable **inst ) { if (inst) *inst = (IInspectable *)iface; return S_OK; }
+static HRESULT WINAPI dummy_factory_ActivateInstance( IActivationFactory *iface, IInspectable **inst )
+{
+    if (iface == clipboard_statics_factory)
+    {
+        IActivationFactory *real = get_real_clipboard_factory();
+        if (real) return IActivationFactory_ActivateInstance( real, inst );
+    }
+    if (inst) *inst = (IInspectable *)iface;
+    return S_OK;
+}
 
 static const void *clipboard_statics_factory_vtbl[] =
 {
@@ -321,14 +373,14 @@ static const void *clipboard_statics_factory_vtbl[] =
     clipboard_stub_ok,                    /* 9: Flush */
     clipboard_stub_ok,                    /* 10: Clear */
     clipboard_stub_ok,                    /* 11: add_ContentChanged */
-    clipboard_stub_bool,                  /* 12: IsHistoryEnabled */
-    clipboard_stub_bool,                  /* 13: IsRoamingEnabled */
+    clipboard_stub_bool_1,                /* 12: IsHistoryEnabled */
+    clipboard_stub_bool_1,                /* 13: IsRoamingEnabled */
     clipboard_stub_bool,                  /* 14: SetContentWithOptions */
     clipboard_stub_ok,                    /* 15: add_HistoryChanged */
     clipboard_stub_ok,                    /* 16: remove_HistoryChanged */
     clipboard_stub_ok,                    /* 17: remove_ContentChanged */
     clipboard_stub_zero,                  /* 18: GetHistoryItemsAsync */
-    clipboard_stub_bool,                  /* 19: ClearHistory */
+    clipboard_stub_bool_1,                /* 19: ClearHistory */
     clipboard_stub_bool,                  /* 20: DeleteItemFromHistory */
     clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero,
     clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero, clipboard_stub_zero,

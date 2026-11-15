@@ -71,10 +71,17 @@ void WINAPI UnregisterAppStateChangeNotification( PAPPSTATE_REGISTRATION reg )
 static const GUID IID_IReferenceTracker = {0x11d3b13a, 0x180e, 0x4789, {0xa8, 0xbe, 0x77, 0x12, 0x88, 0x28, 0x93, 0xe6}};
 static const GUID IID_IReferenceTrackerTarget = {0x5c13e51c, 0x4f32, 0x4726, {0xa3, 0xfd, 0xf3, 0xed, 0xd6, 0x3d, 0xa3, 0xa0}};
 
+enum dummy_async_results_kind
+{
+    DUMMY_ASYNC_RESULTS_CHANNEL = 0,
+    DUMMY_ASYNC_RESULTS_STATUS32 = 1,
+};
+
 struct dummy_async_impl
 {
     const void *vtbl_op;
     const void *vtbl_info;
+    enum dummy_async_results_kind results_kind;
 };
 
 static const void *dummy_async_op_vtbl[];
@@ -83,6 +90,7 @@ static struct dummy_async_impl dummy_async;
 
 static HRESULT WINAPI dummy_async_QueryInterface( void *iface, REFIID iid, void **out )
 {
+    struct dummy_async_impl *impl = iface;
     if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
         IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
     {
@@ -91,15 +99,16 @@ static HRESULT WINAPI dummy_async_QueryInterface( void *iface, REFIID iid, void 
     }
     if (IsEqualGUID( iid, &IID_IAsyncInfo ))
     {
-        *out = &dummy_async.vtbl_info;
+        *out = &impl->vtbl_info;
         return S_OK;
     }
-    *out = &dummy_async.vtbl_op;
+    *out = &impl->vtbl_op;
     return S_OK;
 }
 static HRESULT WINAPI dummy_async_info_QueryInterface( void *iface, REFIID iid, void **out )
 {
-    return dummy_async_QueryInterface( iface, iid, out );
+    struct dummy_async_impl *impl = CONTAINING_RECORD( iface, struct dummy_async_impl, vtbl_info );
+    return dummy_async_QueryInterface( &impl->vtbl_op, iid, out );
 }
 static ULONG WINAPI dummy_async_AddRef( void *iface ) { return 2; }
 static ULONG WINAPI dummy_async_Release( void *iface ) { return 1; }
@@ -253,7 +262,12 @@ static struct dummy_channel_impl dummy_channel = { dummy_channel_vtbl };
 
 static HRESULT WINAPI dummy_async_GetResults( void *iface, void **results )
 {
-    if (results) *results = &dummy_channel;
+    struct dummy_async_impl *impl = iface;
+    if (!results) return S_OK;
+    if (impl->results_kind == DUMMY_ASYNC_RESULTS_STATUS32)
+        *(UINT32 *)results = (UINT32)1;
+    else
+        *results = &dummy_channel;
     return S_OK;
 }
 
@@ -460,7 +474,7 @@ static const void *push_notification_statics4_vtbl[] =
 
 static HRESULT WINAPI bg_async_GetResults( void *iface, DWORD *results )
 {
-    if (results) *results = 2; /* AllowedWithAlwaysOnRealTimeConnectivity */
+    if (results) *results = (UINT32)1;
     return S_OK;
 }
 
@@ -477,12 +491,20 @@ static const void *bg_async_op_vtbl[] =
     bg_async_GetResults,
 };
 
-static struct dummy_async_impl bg_async = { bg_async_op_vtbl, dummy_async_info_vtbl };
+static struct dummy_async_impl bg_async = { bg_async_op_vtbl, dummy_async_info_vtbl, DUMMY_ASYNC_RESULTS_STATUS32 };
 
 /* Background Execution Manager */
 static HRESULT WINAPI bg_manager_RequestAccessAsync( void *iface, void **operation )
 {
     TRACE( "iface %p, operation %p\n", iface, operation );
+    if (!operation) return E_POINTER;
+    *operation = &bg_async;
+    return S_OK;
+}
+
+static HRESULT WINAPI bg_manager_RequestAccessForApplicationAsync( void *iface, HSTRING app_id, void **operation )
+{
+    TRACE( "iface %p, app_id %s, operation %p\n", iface, debugstr_hstring( app_id ), operation );
     if (!operation) return E_POINTER;
     *operation = &bg_async;
     return S_OK;
@@ -517,7 +539,7 @@ static const void *bg_manager_factory_vtbl[] =
     push_notification_factory_GetRuntimeClassName,
     push_notification_factory_GetTrustLevel,
     bg_manager_RequestAccessAsync, /* slot 6: RequestAccessAsync */
-    push_notification_stub,
+    bg_manager_RequestAccessForApplicationAsync, /* slot 7: RequestAccessForApplicationAsync */
     push_notification_stub,
     push_notification_stub,
     push_notification_stub,

@@ -25,6 +25,7 @@
 
 #include "wine/debug.h"
 #include "appmodel.h"
+#include "roapi.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(ui);
 
@@ -213,7 +214,11 @@ struct core_window
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *keyup_handler;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *pointer_pressed_handler;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *pointer_released_handler;
+    __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *custom_properties;
+    ICoreCursor *pointer_cursor;
 };
+
+static HRESULT WINAPI cursor_factory_CreateCursor( ICoreCursorFactory *iface, CoreCursorType type, UINT32 id, ICoreCursor **cursor );
 
 static __thread struct core_window *thread_core_window;
 
@@ -848,6 +853,10 @@ static ULONG WINAPI core_window_Release( ICoreWindow *iface )
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Release( impl->pointer_pressed_handler );
         if (impl->pointer_released_handler)
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs_Release( impl->pointer_released_handler );
+        if (impl->custom_properties)
+            __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet_Release( impl->custom_properties );
+        if (impl->pointer_cursor)
+            ICoreCursor_Release( impl->pointer_cursor );
         free( impl );
     }
     return ref;
@@ -876,7 +885,35 @@ static HRESULT WINAPI core_window_get_Bounds( ICoreWindow *iface, Rect *value )
     return S_OK;
 }
 static HRESULT WINAPI core_window_get_CustomProperties( ICoreWindow *iface, __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet **value )
-{ FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    if (!impl->custom_properties)
+    {
+        HSTRING class_str;
+        IInspectable *insp = NULL;
+        if (SUCCEEDED( WindowsCreateString( L"Windows.Foundation.Collections.PropertySet", 42, &class_str ) ))
+        {
+            if (SUCCEEDED( RoActivateInstance( class_str, &insp ) ) && insp)
+            {
+                __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet *ps = NULL;
+                if (SUCCEEDED( IInspectable_QueryInterface( insp, &IID_IPropertySet, (void **)&ps ) ) && ps)
+                {
+                    if (InterlockedCompareExchangePointer( (void **)&impl->custom_properties, ps, NULL ))
+                        __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet_Release( ps );
+                }
+                IInspectable_Release( insp );
+            }
+            WindowsDeleteString( class_str );
+        }
+    }
+    if (impl->custom_properties)
+        __x_ABI_CWindows_CFoundation_CCollections_CIPropertySet_AddRef( impl->custom_properties );
+    *value = impl->custom_properties;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_get_Dispatcher( ICoreWindow *iface, ICoreDispatcher **value )
 {
     struct core_window *impl = impl_from_ICoreWindow( iface );
@@ -897,9 +934,34 @@ static HRESULT WINAPI core_window_get_IsInputEnabled( ICoreWindow *iface, boolea
 static HRESULT WINAPI core_window_put_IsInputEnabled( ICoreWindow *iface, boolean value )
 { FIXME( "stub\n" ); return S_OK; }
 static HRESULT WINAPI core_window_get_PointerCursor( ICoreWindow *iface, ICoreCursor **value )
-{ FIXME( "stub\n" ); if (value) *value = NULL; return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    if (!impl->pointer_cursor)
+    {
+        ICoreCursor *cur = NULL;
+        if (SUCCEEDED( cursor_factory_CreateCursor( NULL, CoreCursorType_Arrow, 0, &cur ) ) && cur)
+        {
+            if (InterlockedCompareExchangePointer( (void **)&impl->pointer_cursor, cur, NULL ))
+                ICoreCursor_Release( cur );
+        }
+    }
+    if (impl->pointer_cursor) ICoreCursor_AddRef( impl->pointer_cursor );
+    *value = impl->pointer_cursor;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_put_PointerCursor( ICoreWindow *iface, ICoreCursor *value )
-{ FIXME( "stub\n" ); return S_OK; }
+{
+    struct core_window *impl = impl_from_ICoreWindow( iface );
+
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (value) ICoreCursor_AddRef( value );
+    if (impl->pointer_cursor) ICoreCursor_Release( impl->pointer_cursor );
+    impl->pointer_cursor = value;
+    return S_OK;
+}
 static HRESULT WINAPI core_window_get_PointerPosition( ICoreWindow *iface, Point *value )
 { FIXME( "stub\n" ); if (value) memset( value, 0, sizeof(*value) ); return S_OK; }
 static HRESULT WINAPI core_window_get_Visible( ICoreWindow *iface, boolean *value )

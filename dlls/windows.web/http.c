@@ -821,6 +821,7 @@ static HRESULT WINAPI resp_get_Content( void *iface, void **content )
     if (!content) return E_POINTER;
     if (!impl->content)
     {
+        /* Documented fallback when no response body was stored by the caller/transport. */
         HSTRING dummy_html;
         WindowsCreateString( L"<html><head><title>WhatsApp</title></head><body></body></html>", 60, &dummy_html );
         create_http_string_content( dummy_html, &impl->content );
@@ -979,6 +980,7 @@ struct http_request_message
     void *headers;
     void *method;
     void *uri;
+    IInspectable *properties;
 };
 
 static inline struct http_request_message *impl_from_request( void *iface )
@@ -1026,6 +1028,7 @@ static ULONG WINAPI req_Release( void *iface )
         if (impl->headers) IUnknown_Release( (IUnknown *)impl->headers );
         if (impl->method) IUnknown_Release( (IUnknown *)impl->method );
         if (impl->uri) IUnknown_Release( (IUnknown *)impl->uri );
+        if (impl->properties) IInspectable_Release( impl->properties );
         free( impl );
     }
     return ref;
@@ -1080,7 +1083,28 @@ static HRESULT WINAPI req_set_Method( void *iface, void *val )
     if (impl->method) IUnknown_AddRef( (IUnknown *)impl->method );
     return S_OK;
 }
-static HRESULT WINAPI req_get_Properties( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI req_get_Properties( void *iface, void **val )
+{
+    struct http_request_message *impl = impl_from_request( iface );
+    if (!val) return E_POINTER;
+    if (!impl->properties)
+    {
+        HSTRING class_str;
+        IInspectable *props = NULL;
+        if (SUCCEEDED( WindowsCreateString( L"Windows.Foundation.Collections.PropertySet", 42, &class_str ) ))
+        {
+            if (SUCCEEDED( RoActivateInstance( class_str, &props ) ) && props)
+            {
+                if (InterlockedCompareExchangePointer( (void **)&impl->properties, props, NULL ))
+                    IInspectable_Release( props );
+            }
+            WindowsDeleteString( class_str );
+        }
+    }
+    if (impl->properties) IInspectable_AddRef( impl->properties );
+    *val = impl->properties;
+    return S_OK;
+}
 static HRESULT WINAPI req_get_RequestUri( void *iface, void **val )
 {
     struct http_request_message *impl = impl_from_request( iface );
@@ -1507,6 +1531,7 @@ static const void *http_client_factory_vtbl[] =
     http_client_factory_GetIids,
     http_client_factory_GetRuntimeClassName,
     http_client_factory_GetTrustLevel,
+    http_client_factory_ActivateInstance,
     http_client_factory_Create,
 };
 
@@ -1841,17 +1866,171 @@ static HRESULT WINAPI base_filter_GetTrustLevel( void *iface, TrustLevel *level 
     return S_OK;
 }
 
+static HRESULT WINAPI filter_stub_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = iface;
+    return S_OK;
+}
+static ULONG WINAPI filter_stub_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI filter_stub_Release( void *iface ) { return 1; }
+static HRESULT WINAPI filter_stub_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI filter_stub_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    static const WCHAR class_name[] = L"Windows.Foundation.Collections.PropertySet";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
+}
+static HRESULT WINAPI filter_stub_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI cache_control_get_behavior( void *iface, INT32 *val ) { if (val) *val = 0; return S_OK; }
+static HRESULT WINAPI cache_control_put_behavior( void *iface, INT32 val ) { return S_OK; }
+static const void *http_cache_control_vtbl[] =
+{
+    filter_stub_QueryInterface,
+    filter_stub_AddRef,
+    filter_stub_Release,
+    filter_stub_GetIids,
+    filter_stub_GetRuntimeClassName,
+    filter_stub_GetTrustLevel,
+    cache_control_get_behavior,
+    cache_control_put_behavior,
+    cache_control_get_behavior,
+    cache_control_put_behavior,
+};
+static const void *http_cache_control_obj = http_cache_control_vtbl;
+
+static HRESULT WINAPI cert_errors_GetAt( void *iface, UINT32 index, UINT32 *item )
+{
+    if (item) *item = 0;
+    return 0x8000000b /* E_BOUNDS */;
+}
+static HRESULT WINAPI cert_errors_get_Size( void *iface, UINT32 *size )
+{
+    if (!size) return E_POINTER;
+    *size = 0;
+    return S_OK;
+}
+static HRESULT WINAPI cert_errors_GetView( void *iface, void **view )
+{
+    if (!view) return E_POINTER;
+    *view = iface;
+    return S_OK;
+}
+static HRESULT WINAPI cert_errors_IndexOf( void *iface, UINT32 value, UINT32 *index, boolean *found )
+{
+    if (index) *index = 0;
+    if (found) *found = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI cert_errors_SetAt( void *iface, UINT32 index, UINT32 value ) { return S_OK; }
+static HRESULT WINAPI cert_errors_InsertAt( void *iface, UINT32 index, UINT32 value ) { return S_OK; }
+static HRESULT WINAPI cert_errors_RemoveAt( void *iface, UINT32 index ) { return S_OK; }
+static HRESULT WINAPI cert_errors_Append( void *iface, UINT32 value ) { return S_OK; }
+static HRESULT WINAPI cert_errors_RemoveAtEnd( void *iface ) { return S_OK; }
+static HRESULT WINAPI cert_errors_Clear( void *iface ) { return S_OK; }
+static HRESULT WINAPI cert_errors_GetMany( void *iface, UINT32 start, UINT32 cap, UINT32 *items, UINT32 *actual )
+{
+    if (actual) *actual = 0;
+    return S_OK;
+}
+static HRESULT WINAPI cert_errors_ReplaceAll( void *iface, UINT32 count, UINT32 *items ) { return S_OK; }
+
+static const void *cert_errors_vector_vtbl[] =
+{
+    filter_stub_QueryInterface,
+    filter_stub_AddRef,
+    filter_stub_Release,
+    filter_stub_GetIids,
+    filter_stub_GetRuntimeClassName,
+    filter_stub_GetTrustLevel,
+    cert_errors_GetAt,
+    cert_errors_get_Size,
+    cert_errors_GetView,
+    cert_errors_IndexOf,
+    cert_errors_SetAt,
+    cert_errors_InsertAt,
+    cert_errors_RemoveAt,
+    cert_errors_Append,
+    cert_errors_RemoveAtEnd,
+    cert_errors_Clear,
+    cert_errors_GetMany,
+    cert_errors_ReplaceAll,
+};
+static const void *cert_errors_vector_obj = cert_errors_vector_vtbl;
+
+static HRESULT WINAPI cookie_manager_SetCookie( void *iface, void *cookie, boolean *replaced )
+{
+    if (replaced) *replaced = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI cookie_manager_SetCookieWithThirdParty( void *iface, void *cookie, boolean third_party, boolean *replaced )
+{
+    if (replaced) *replaced = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI cookie_manager_DeleteCookie( void *iface, void *cookie ) { return S_OK; }
+static HRESULT WINAPI cookie_manager_GetCookies( void *iface, void *uri, void **cookies )
+{
+    if (!cookies) return E_POINTER;
+    *cookies = (void *)&cert_errors_vector_obj;
+    return S_OK;
+}
+static const void *http_cookie_manager_vtbl[] =
+{
+    filter_stub_QueryInterface,
+    filter_stub_AddRef,
+    filter_stub_Release,
+    filter_stub_GetIids,
+    filter_stub_GetRuntimeClassName,
+    filter_stub_GetTrustLevel,
+    cookie_manager_SetCookie,
+    cookie_manager_SetCookieWithThirdParty,
+    cookie_manager_DeleteCookie,
+    cookie_manager_GetCookies,
+};
+static const void *http_cookie_manager_obj = http_cookie_manager_vtbl;
+
 static HRESULT WINAPI base_filter_get_AllowAutoRedirect( void *iface, boolean *val ) { if (val) *val = TRUE; return S_OK; }
 static HRESULT WINAPI base_filter_put_AllowAutoRedirect( void *iface, boolean val ) { return S_OK; }
 static HRESULT WINAPI base_filter_get_AllowUI( void *iface, boolean *val ) { if (val) *val = TRUE; return S_OK; }
 static HRESULT WINAPI base_filter_put_AllowUI( void *iface, boolean val ) { return S_OK; }
 static HRESULT WINAPI base_filter_get_AutomaticDecompression( void *iface, boolean *val ) { if (val) *val = TRUE; return S_OK; }
 static HRESULT WINAPI base_filter_put_AutomaticDecompression( void *iface, boolean val ) { return S_OK; }
-static HRESULT WINAPI base_filter_get_CacheControl( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
-static HRESULT WINAPI base_filter_get_CookieManager( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI base_filter_get_CacheControl( void *iface, void **val )
+{
+    if (!val) return E_POINTER;
+    *val = (void *)&http_cache_control_obj;
+    return S_OK;
+}
+static HRESULT WINAPI base_filter_get_CookieManager( void *iface, void **val )
+{
+    if (!val) return E_POINTER;
+    *val = (void *)&http_cookie_manager_obj;
+    return S_OK;
+}
 static HRESULT WINAPI base_filter_get_ClientCertificate( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
 static HRESULT WINAPI base_filter_put_ClientCertificate( void *iface, void *val ) { return S_OK; }
-static HRESULT WINAPI base_filter_get_IgnorableServerCertificateErrors( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }
+static HRESULT WINAPI base_filter_get_IgnorableServerCertificateErrors( void *iface, void **val )
+{
+    if (!val) return E_POINTER;
+    *val = (void *)&cert_errors_vector_obj;
+    return S_OK;
+}
 static HRESULT WINAPI base_filter_get_MaxConnectionsPerServer( void *iface, UINT32 *val ) { if (val) *val = 6; return S_OK; }
 static HRESULT WINAPI base_filter_put_MaxConnectionsPerServer( void *iface, UINT32 val ) { return S_OK; }
 static HRESULT WINAPI base_filter_get_ProxyCredential( void *iface, void **val ) { if (val) *val = NULL; return S_OK; }

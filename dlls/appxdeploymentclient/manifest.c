@@ -193,7 +193,7 @@ HRESULT WINAPI AppxGetManifestPackageProperties( HANDLE handle, UINT32 property_
             const WCHAR *name = wcsrchr( c->dir, L'\\' );
             WCHAR family[512];
             name = name ? name + 1 : c->dir;
-            wcscpy( family, name );
+            lstrcpynW( family, name, ARRAY_SIZE(family) );
             {
                 WCHAR *dot = wcschr( family, L'_' );
                 WCHAR *tail = dot ? wcschr( dot + 1, L'_' ) : NULL;
