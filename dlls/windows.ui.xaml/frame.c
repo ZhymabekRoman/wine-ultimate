@@ -3889,30 +3889,30 @@ static HWND wv2_find_client_hwnd( HWND host )
 static void wv2_ensure_focus( struct xaml_element *impl, HWND host, BOOL force )
 {
     HWND cli;
-    DWORD host_tid, cur_tid;
-    BOOL attached = FALSE;
 
     if (!impl) return;
     if (g_wv2_focused && !force) return;
     cli = wv2_find_client_hwnd( host );
-    host_tid = (host && IsWindow( host )) ? GetWindowThreadProcessId( host, NULL ) : 0;
-    cur_tid = GetCurrentThreadId();
-    if (host_tid && host_tid != cur_tid)
-        attached = AttachThreadInput( cur_tid, host_tid, TRUE );
-    if (impl->loader_controller && impl->real_loader)
-    {
-        ICoreWebView2Controller *ctrl = impl->loader_controller;
-        HRESULT hr_f = ctrl->lpVtbl->MoveFocus( ctrl, 0 );
-        TRACE( "wv2_ensure_focus: MoveFocus(PROGRAMMATIC) hr=%#lx\n", hr_f );
-    }
     if (cli && IsWindow( cli ))
     {
-        SetFocus( cli );
         SendMessageW( cli, WM_SETFOCUS, 0, 0 );
         g_wv2_focused = TRUE;
     }
-    if (attached)
-        AttachThreadInput( cur_tid, host_tid, FALSE );
+    if (force && impl->loader_core && impl->real_loader)
+    {
+        /* Slot 29 on ICoreWebView2: ExecuteScript(LPCWSTR javaScript, ICoreWebView2ExecuteScriptCompletedHandler *handler) */
+        HRESULT (WINAPI *exec_script)( void *, LPCWSTR, void * ) =
+            wv2_slot_fn( impl->loader_core, TRUE, 29, -1 );
+        if (exec_script)
+        {
+            exec_script( impl->loader_core,
+                L"(function(){function f(){var a=document.activeElement;"
+                L"if(!a||(a.tagName!=='INPUT'&&a.tagName!=='TEXTAREA'&&!a.isContentEditable)){"
+                L"var el=document.querySelector('input:not([type=hidden]),textarea,[contenteditable=true]');"
+                L"if(el)el.focus();}}f();setTimeout(f,200);setTimeout(f,600);setTimeout(f,1500);setTimeout(f,3000);})()",
+                NULL );
+        }
+    }
 }
 
 static HRESULT wv2_sta_send_keyboard_input( struct xaml_element *impl, HWND host,
@@ -3920,11 +3920,31 @@ static HRESULT wv2_sta_send_keyboard_input( struct xaml_element *impl, HWND host
                                             UINT32 repeat, UINT32 mods, LPARAM lparam )
 {
     HWND cli;
+    BYTE ks[256];
+    BOOL had_ks = FALSE;
     HRESULT hr = E_NOINTERFACE;
 
     if (!impl) return E_POINTER;
-    wv2_ensure_focus( impl, host, FALSE );
+    wv2_ensure_focus( impl, host, (vk == VK_CONTROL || vk == VK_LCONTROL || vk == VK_RCONTROL) && key_msg == WM_KEYDOWN );
     cli = wv2_find_client_hwnd( host );
+    if (key_msg == WM_KEYDOWN && vk == 'V' && (mods & MK_CONTROL))
+    {
+        /* Ctrl+V is handled by wv2_paste_clipboard_text via per-char SendCharacterInput;
+         * skip forwarding raw Ctrl+V to ClientWindowWin32 to avoid double-pasting. */
+        hr = (cli || impl->loader_comp_ctrl) ? S_OK : S_FALSE;
+        TRACE( "wv2_sta_wndproc: SendKeyboardInput hr=%#lx msg=%#x vk=%#x scan=%#x repeat=%u mods=%#x cli=%p\n",
+               hr, key_msg, vk, scan, repeat, mods, cli );
+        return hr;
+    }
+    if (!(mods & MK_CONTROL) && GetKeyboardState( ks ))
+    {
+        BYTE clean_ks[256];
+        memcpy( clean_ks, ks, sizeof(clean_ks) );
+        clean_ks[VK_CONTROL] = clean_ks[VK_LCONTROL] = clean_ks[VK_RCONTROL] = 0;
+        clean_ks[VK_MENU] = clean_ks[VK_LMENU] = clean_ks[VK_RMENU] = 0;
+        SetKeyboardState( clean_ks );
+        had_ks = TRUE;
+    }
     if (cli && IsWindow( cli ))
     {
         SendMessageW( cli, key_msg, vk, lparam );
@@ -3936,6 +3956,8 @@ static HRESULT wv2_sta_send_keyboard_input( struct xaml_element *impl, HWND host
         EnumChildWindows( host, wv2_post_wheel_cb, (LPARAM)&m );
         hr = impl->loader_comp_ctrl ? S_OK : S_FALSE;
     }
+    if (had_ks)
+        SetKeyboardState( ks );
     TRACE( "wv2_sta_wndproc: SendKeyboardInput hr=%#lx msg=%#x vk=%#x scan=%#x repeat=%u mods=%#x cli=%p\n",
            hr, key_msg, vk, scan, repeat, mods, cli );
     return hr;
@@ -3971,6 +3993,41 @@ static HRESULT wv2_sta_send_character_input( struct xaml_element *impl, HWND hos
         MSG m = { host, WM_CHAR, (WPARAM)ch, lparam ? lparam : 1 };
         EnumChildWindows( host, wv2_post_wheel_cb, (LPARAM)&m );
         hr = impl->loader_comp_ctrl ? S_OK : S_FALSE;
+    }
+    if (impl->loader_core && impl->real_loader)
+    {
+        HRESULT (WINAPI *exec_script)( void *, LPCWSTR, void * ) =
+            wv2_slot_fn( impl->loader_core, TRUE, 29, -1 );
+        if (exec_script)
+        {
+            WCHAR script[512];
+            if (ch == '\b')
+            {
+                lstrcpyW( script,
+                    L"(function(){var a=document.activeElement;"
+                    L"if(!a||(a.tagName!=='INPUT'&&a.tagName!=='TEXTAREA'&&!a.isContentEditable)){"
+                    L"a=document.querySelector('input:not([type=hidden]),textarea,[contenteditable=true]');"
+                    L"if(a)a.focus();}"
+                    L"if(a)document.execCommand('delete',false,null);})()" );
+            }
+            else if (ch >= 0x20)
+            {
+                swprintf( script, ARRAY_SIZE(script),
+                    L"(function(){var a=document.activeElement;"
+                    L"if(!a||(a.tagName!=='INPUT'&&a.tagName!=='TEXTAREA'&&!a.isContentEditable)){"
+                    L"a=document.querySelector('input:not([type=hidden]),textarea,[contenteditable=true]');"
+                    L"if(a)a.focus();}"
+                    L"if(a)document.execCommand('insertText',false,'\\u%04x');})()",
+                    (unsigned int)ch );
+            }
+            else
+            {
+                script[0] = 0;
+            }
+            if (script[0])
+                exec_script( impl->loader_core, script, NULL );
+            hr = S_OK;
+        }
     }
     if (had_ks)
         SetKeyboardState( ks );
@@ -4013,7 +4070,8 @@ static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
             pt.x = 0;
             pt.y = 0;
         }
-        if (ev_kind == WM_LBUTTONDOWN || ev_kind == WM_RBUTTONDOWN || ev_kind == WM_MBUTTONDOWN)
+        if (ev_kind == WM_LBUTTONDOWN || ev_kind == WM_LBUTTONUP ||
+            ev_kind == WM_RBUTTONDOWN || ev_kind == WM_MBUTTONDOWN)
             wv2_ensure_focus( g_active_wv2_impl, host, TRUE );
         if (g_active_wv2_impl->loader_comp_ctrl)
         {
@@ -4090,6 +4148,86 @@ static void wv2_send_character_input( HWND hwnd, WCHAR ch, BOOL keydown, LPARAM 
     }
 }
 
+/* Paste path choice: read CF_UNICODETEXT (with CF_TEXT fallback) from the Win32
+ * clipboard and dispatch a per-character SendKeyboardInput(WM_KEYDOWN) +
+ * SendCharacterInput(WM_CHAR) + SendKeyboardInput(WM_KEYUP) loop with VK_CONTROL
+ * cleared in the STA thread's keyboard state. Chosen over CoreWebView2
+ * ExecuteScript("document.execCommand('paste')") because Chromium blocks
+ * programmatic paste without clipboard-read permission / transient user activation
+ * and bypasses the native keydown/keypress/beforeinput/input sequence expected by
+ * controlled React inputs (such as WhatsApp Web's phone-number field). */
+static void wv2_paste_clipboard_text( HWND hwnd )
+{
+    WCHAR *buf = NULL;
+    size_t i, len = 0;
+
+    if (!OpenClipboard( NULL ) && (!hwnd || !OpenClipboard( hwnd )))
+    {
+        TRACE( "wv2_paste_clipboard_text: OpenClipboard failed err=%lu\n", GetLastError() );
+        return;
+    }
+
+    if (IsClipboardFormatAvailable( CF_UNICODETEXT ))
+    {
+        HANDLE h = GetClipboardData( CF_UNICODETEXT );
+        const WCHAR *src = h ? GlobalLock( h ) : NULL;
+        if (src)
+        {
+            len = lstrlenW( src );
+            if ((buf = HeapAlloc( GetProcessHeap(), 0, (len + 1) * sizeof(WCHAR) )))
+                memcpy( buf, src, (len + 1) * sizeof(WCHAR) );
+            GlobalUnlock( h );
+        }
+    }
+    else if (IsClipboardFormatAvailable( CF_TEXT ))
+    {
+        HANDLE h = GetClipboardData( CF_TEXT );
+        const char *src = h ? GlobalLock( h ) : NULL;
+        if (src)
+        {
+            int wlen = MultiByteToWideChar( CP_UTF8, 0, src, -1, NULL, 0 );
+            if (wlen > 0 && (buf = HeapAlloc( GetProcessHeap(), 0, wlen * sizeof(WCHAR) )))
+            {
+                MultiByteToWideChar( CP_UTF8, 0, src, -1, buf, wlen );
+                len = (size_t)(wlen - 1);
+            }
+            GlobalUnlock( h );
+        }
+    }
+    CloseClipboard();
+
+    if (!buf || !len)
+    {
+        HeapFree( GetProcessHeap(), 0, buf );
+        return;
+    }
+
+    TRACE( "wv2_paste_clipboard_text: pasting %zu chars %s\n", len, debugstr_w( buf ) );
+    for (i = 0; i < len; i++)
+    {
+        WCHAR ch = buf[i];
+        SHORT vks;
+        UINT32 vk = 0, scan = 0;
+        LPARAM lp_down, lp_up;
+
+        if (ch == '\r' && buf[i + 1] == '\n') continue;
+        vks = VkKeyScanW( ch );
+        if (vks != -1)
+        {
+            vk = LOBYTE( vks ) & 0xff;
+            scan = MapVirtualKeyW( vk, MAPVK_VK_TO_VSC ) & 0xff;
+        }
+        lp_down = 1 | ((LPARAM)scan << 16);
+        lp_up = lp_down | (LPARAM)0xc0000000;
+        if (vk)
+            wv2_send_keyboard_input( hwnd, WM_KEYDOWN, vk, scan, 1, 0, lp_down );
+        wv2_send_character_input( hwnd, ch, TRUE, lp_down );
+        if (vk)
+            wv2_send_keyboard_input( hwnd, WM_KEYUP, vk, scan, 1, 0, lp_up );
+    }
+    HeapFree( GetProcessHeap(), 0, buf );
+}
+
 static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
     if (msg == WM_MOUSEWHEEL && g_active_wv2_impl)
@@ -4133,10 +4271,13 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
         if (vk == VK_SHIFT || vk == VK_LSHIFT || vk == VK_RSHIFT) g_wv2_shift_down = is_down;
         if (vk == VK_MENU || vk == VK_LMENU || vk == VK_RMENU) g_wv2_alt_down = is_down;
         if (g_wv2_shift_down || (GetKeyState( VK_SHIFT ) & 0x8000)) mods |= MK_SHIFT;
-        if (g_wv2_ctrl_down || (GetKeyState( VK_CONTROL ) & 0x8000)) mods |= MK_CONTROL;
+        if (g_wv2_ctrl_down || (GetKeyState( VK_CONTROL ) & 0x8000) || (GetAsyncKeyState( VK_CONTROL ) & 0x8000))
+            mods |= MK_CONTROL;
         if (g_wv2_alt_down || (GetKeyState( VK_MENU ) & 0x8000)) mods |= 0x20;
 
         wv2_send_keyboard_input( hwnd, msg, vk, scan, repeat, mods, lparam );
+        if (msg == WM_KEYDOWN && vk == 'V' && (mods & MK_CONTROL))
+            wv2_paste_clipboard_text( hwnd );
     }
     else if (msg == WM_CHAR && g_active_wv2_impl)
     {
@@ -4151,11 +4292,9 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
 
 static void wv2_ensure_host_subclass( HWND parent )
 {
-    WNDPROC cur, prev;
-    if (!parent || !IsWindow( parent )) return;
+    WNDPROC prev;
+    if (!parent || !IsWindow( parent ) || g_wv2_subclassed_hwnd == parent) return;
     if (GetWindowThreadProcessId( parent, NULL ) != GetCurrentThreadId()) return;
-    cur = (WNDPROC)GetWindowLongPtrW( parent, GWLP_WNDPROC );
-    if (cur == wv2_host_wndproc) return;
     prev = (WNDPROC)SetWindowLongPtrW( parent, GWLP_WNDPROC, (LONG_PTR)wv2_host_wndproc );
     if (prev && prev != wv2_host_wndproc)
     {
