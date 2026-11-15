@@ -102,6 +102,24 @@ void xaml_dcomp_commit( void );
 void xaml_wv2_on_window_ready( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_on_window_resize( HWND hwnd, UINT width, UINT height );
 void xaml_wv2_handle_start_msg( LPARAM lparam );
+struct xaml_app_profile
+{
+    const WCHAR *family_prefix;      /* e.g. L"5319275A.WhatsAppDesktop" */
+    BOOL use_winui3_window_class;    /* application.c:3508,5291 Microsoft.UI.Xaml vs Windows.UI.Xaml window class */
+    const WCHAR *webview2_template;  /* application.c:6207 template child class name, NULL = generic */
+    const WCHAR *design_component;   /* application.c:6265 e.g. WhatsApp.Design.FontScaleControlPanel, NULL none */
+    BOOL serve_core_controls;        /* uwp_xaml.c:11951 !is_whatsapp_app serve-list gate */
+    const WCHAR *vm_type_name;       /* uwp_xaml.c:2877 StandardCalculatorViewModel fallback, NULL none */
+    const WCHAR *vm_init_cmd;        /* ModeBasic command name, uwp_xaml.c:2947 */
+    UINT vm_command_modebasic;       /* numeric 200 ModeBasic command code, uwp_xaml.c:2947 */
+    BOOL vm_slot79;                  /* uwp_xaml.c:2213-2708 RCW shim enable */
+    BOOL display_sync;               /* uwp_xaml.c:5762 sync-from-VM gate */
+    BOOL teardown_vm;                /* uwp_xaml.c:5685 gate */
+    const WCHAR *seed_xbf;           /* seed-tree fallback page name (uwp_xaml.c:6112-6194/6505-6788 gate) */
+};
+
+extern const struct xaml_app_profile *g_profile;
+const struct xaml_app_profile *xaml_get_app_profile( void );
 BOOL is_calculator_app( void );
 BOOL is_store_app( void );
 BOOL is_whatsapp_app( void );

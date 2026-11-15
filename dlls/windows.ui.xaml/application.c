@@ -3505,7 +3505,7 @@ static HRESULT WINAPI xaml_window_GetIids( IInspectable *iface, ULONG *count, II
 
 static HRESULT WINAPI xaml_window_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    const WCHAR *cls = is_whatsapp_app() ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
+    const WCHAR *cls = xaml_get_app_profile()->use_winui3_window_class ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
     TRACE( "xaml_window_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(cls) );
     return WindowsCreateString( cls, wcslen( cls ), name );
 }
@@ -4209,31 +4209,113 @@ static void xaml_apply_window_icon( HWND top )
     }
 }
 
-/* Family test: <Name>_<Publisher>, matched on the name part. */
-static BOOL xaml_package_family_is( const WCHAR *name )
+static const struct xaml_app_profile xaml_app_profiles[] =
 {
-    SIZE_T len;
+    {
+        .family_prefix           = L"Microsoft.WindowsCalculator",
+        .use_winui3_window_class = FALSE,
+        .webview2_template       = NULL,
+        .design_component        = NULL,
+        .serve_core_controls     = TRUE,
+        .vm_type_name            = L"CalculatorApp.ViewModel.StandardCalculatorViewModel",
+        .vm_init_cmd             = L"ModeBasic",
+        .vm_command_modebasic    = 200,
+        .vm_slot79               = TRUE,
+        .display_sync            = TRUE,
+        .teardown_vm             = TRUE,
+        .seed_xbf                = L"Calculator",
+    },
+    {
+        .family_prefix           = L"Microsoft.WindowsStore",
+        .use_winui3_window_class = FALSE,
+        .webview2_template       = NULL,
+        .design_component        = NULL,
+        .serve_core_controls     = TRUE,
+        .vm_type_name            = NULL,
+        .vm_init_cmd             = NULL,
+        .vm_command_modebasic    = 0,
+        .vm_slot79               = FALSE,
+        .display_sync            = FALSE,
+        .teardown_vm             = FALSE,
+        .seed_xbf                = L"StoreManifestPage",
+    },
+    {
+        .family_prefix           = L"5319275A.WhatsAppDesktop",
+        .use_winui3_window_class = TRUE,
+        .webview2_template       = L"Microsoft.UI.Xaml.Controls.WebView2",
+        .design_component        = L"WhatsApp.Design.FontScaleControlPanel",
+        .serve_core_controls     = FALSE,
+        .vm_type_name            = NULL,
+        .vm_init_cmd             = NULL,
+        .vm_command_modebasic    = 0,
+        .vm_slot79               = FALSE,
+        .display_sync            = FALSE,
+        .teardown_vm             = FALSE,
+        .seed_xbf                = NULL,
+    },
+    {
+        .family_prefix           = NULL,
+        .use_winui3_window_class = FALSE,
+        .webview2_template       = NULL,
+        .design_component        = NULL,
+        .serve_core_controls     = TRUE,
+        .vm_type_name            = NULL,
+        .vm_init_cmd             = NULL,
+        .vm_command_modebasic    = 0,
+        .vm_slot79               = FALSE,
+        .display_sync            = FALSE,
+        .teardown_vm             = FALSE,
+        .seed_xbf                = NULL,
+    },
+};
 
-    InitOnceExecuteOnce( &xaml_package_once, xaml_package_init, NULL, NULL );
-    if (!xaml_package.family_name[0]) return FALSE;
-    len = lstrlenW( name );
-    return !wcsnicmp( xaml_package.family_name, name, len )
-           && (!xaml_package.family_name[len] || xaml_package.family_name[len] == L'_');
+const struct xaml_app_profile *g_profile = &xaml_app_profiles[ARRAY_SIZE( xaml_app_profiles ) - 1];
+static INIT_ONCE g_profile_once = INIT_ONCE_STATIC_INIT;
+
+static BOOL WINAPI xaml_profile_init( INIT_ONCE *once, void *param, void **context )
+{
+    WCHAR family[256] = {0};
+    UINT32 len = ARRAY_SIZE( family );
+    SIZE_T i;
+
+    g_profile = &xaml_app_profiles[ARRAY_SIZE( xaml_app_profiles ) - 1];
+    if (GetCurrentPackageFamilyName( &len, family ) == ERROR_SUCCESS && family[0])
+    {
+        for (i = 0; i < ARRAY_SIZE( xaml_app_profiles ) - 1; i++)
+        {
+            const WCHAR *pfx = xaml_app_profiles[i].family_prefix;
+            SIZE_T plen = pfx ? lstrlenW( pfx ) : 0;
+            if (plen && !wcsnicmp( family, pfx, plen ) &&
+                (!family[plen] || family[plen] == L'_'))
+            {
+                g_profile = &xaml_app_profiles[i];
+                break;
+            }
+        }
+    }
+    return TRUE;
+}
+
+const struct xaml_app_profile *xaml_get_app_profile( void )
+{
+    InitOnceExecuteOnce( &g_profile_once, xaml_profile_init, NULL, NULL );
+    return g_profile;
 }
 
 BOOL is_calculator_app( void )
 {
-    return xaml_package_family_is( L"Microsoft.WindowsCalculator" );
+    return xaml_get_app_profile()->vm_slot79;
 }
 
 BOOL is_store_app( void )
 {
-    return xaml_package_family_is( L"Microsoft.WindowsStore" );
+    const WCHAR *seed = xaml_get_app_profile()->seed_xbf;
+    return seed && !wcscmp( seed, L"StoreManifestPage" );
 }
 
 BOOL is_uwp_xaml_app( void )
 {
-    return is_calculator_app() || is_store_app();
+    return xaml_get_app_profile()->seed_xbf != NULL;
 }
 
 void *uwp_get_app_outer( void )
@@ -4243,7 +4325,7 @@ void *uwp_get_app_outer( void )
 
 BOOL is_whatsapp_app( void )
 {
-    return xaml_package_family_is( L"5319275A.WhatsAppDesktop" );
+    return xaml_get_app_profile()->use_winui3_window_class;
 }
 
 static WNDPROC xaml_corewindow_prev_proc;
@@ -5288,7 +5370,7 @@ static HRESULT WINAPI xaml_window2_GetIids( IInspectable *iface, ULONG *count, I
 }
 static HRESULT WINAPI xaml_window2_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
 {
-    const WCHAR *cls = is_whatsapp_app() ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
+    const WCHAR *cls = xaml_get_app_profile()->use_winui3_window_class ? L"Microsoft.UI.Xaml.Window" : L"Windows.UI.Xaml.Window";
     TRACE( "xaml_window2_GetRuntimeClassName on %p -> %s\n", iface, debugstr_w(cls) );
     return WindowsCreateString( cls, wcslen( cls ), name );
 }
@@ -6204,7 +6286,9 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
                                                     if (wcsstr(elem_name, L"ProgressRing") || wcsstr(elem_name, L"Ring"))
                                                         continue;
                                                     else if (wcsstr(elem_name, L"WebView") || wcsstr(elem_name, L"webview"))
-                                                        class_name = L"Microsoft.UI.Xaml.Controls.WebView2";
+                                                        class_name = xaml_get_app_profile()->webview2_template
+                                                                     ? xaml_get_app_profile()->webview2_template
+                                                                     : L"Windows.UI.Xaml.Controls.WebView2";
                                                     else if (wcsstr(elem_name, L"Image") || wcsstr(elem_name, L"image"))
                                                         class_name = L"Windows.UI.Xaml.Controls.Image";
                                                     else if (wcsstr(elem_name, L"Canvas") || wcsstr(elem_name, L"canvas"))
@@ -6260,9 +6344,9 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
         void *font_scale = NULL;
 
         b_conn->lpVtbl->Connect( b_conn, 1, component );
-        if (!wcscmp( comp_name, L"MainWindow" ))
+        if (!wcscmp( comp_name, L"MainWindow" ) && xaml_get_app_profile()->design_component)
         {
-            if (SUCCEEDED( xaml_create_instance_from_provider( L"WhatsApp.Design.FontScaleControlPanel", &font_scale ) ) && font_scale)
+            if (SUCCEEDED( xaml_create_instance_from_provider( xaml_get_app_profile()->design_component, &font_scale ) ) && font_scale)
             {
                 ERR( "binding font_scale %p to conn_id 6\n", font_scale );
                 b_conn->lpVtbl->Connect( b_conn, 6, font_scale );

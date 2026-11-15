@@ -2712,6 +2712,7 @@ static HRESULT uwp_calc_vm_slot79_shim( IInspectable *vm, int code )
     int attempt;
 
     if (!vm) return E_POINTER;
+    if (!xaml_get_app_profile()->vm_slot79) return E_FAIL;
     for (attempt = 0; attempt < 2; attempt++)
     {
         MSG msg;
@@ -2873,8 +2874,8 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
     }
 
     /* Single fallback call site when IXamlMetadataProvider is unavailable */
-    if (out_type_name && max_chars && !out_type_name[0])
-        lstrcpynW( out_type_name, L"CalculatorApp.ViewModel.StandardCalculatorViewModel", (int)max_chars );
+    if (out_type_name && max_chars && !out_type_name[0] && xaml_get_app_profile()->vm_type_name)
+        lstrcpynW( out_type_name, xaml_get_app_profile()->vm_type_name, (int)max_chars );
 }
 
 static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name, BOOL send_mode_basic )
@@ -2942,11 +2943,13 @@ static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name,
     if (!g_calc_vm.cmd && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
         g_calc_vm.cmd = (IInspectable *)cmd_iface;
 
-    if (send_mode_basic)
+    if (send_mode_basic && xaml_get_app_profile()->vm_command_modebasic)
     {
         /* Command::ModeBasic (200 = 0xc8) synchronously initializes CCalcEngine */
-        HRESULT mhr = uwp_calc_vm_slot79_shim( g_calc_vm.vm, 200 );
-        TRACE( "uwp_calc_vm_set_instance: ModeBasic(200) -> %#lx\n", mhr );
+        UINT cmd = xaml_get_app_profile()->vm_command_modebasic;
+        HRESULT mhr = uwp_calc_vm_slot79_shim( g_calc_vm.vm, (int)cmd );
+        TRACE( "uwp_calc_vm_set_instance: %s(%u) -> %#lx\n",
+               debugstr_w(xaml_get_app_profile()->vm_init_cmd), cmd, mhr );
     }
     g_calc_vm.pumped = TRUE;
     uwp_sync_calc_display_from_vm();
@@ -3019,7 +3022,7 @@ static void uwp_calc_vm_send( int code )
     }
 
     /* 2. Fallback to documented slot-79 shim for .NET Native / C++/CX RCW */
-    if (!handled)
+    if (!handled && xaml_get_app_profile()->vm_slot79)
         uwp_calc_vm_slot79_shim( g_calc_vm.vm, code );
 
     uwp_sync_calc_display_from_vm();
@@ -5682,7 +5685,7 @@ static void uwp_propagate_data_context( struct uwp_element *impl, IInspectable *
             uwp_calc_vm_set_instance( dc, NULL, FALSE );
         }
     }
-    else if (!is_calculator_app() && g_calc_vm.vm)
+    else if (!xaml_get_app_profile()->teardown_vm && g_calc_vm.vm)
     {
         uwp_calc_vm_teardown( FALSE );
     }
@@ -5759,7 +5762,7 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         }
         IUnknown_Release( (IUnknown *)fe_ovr );
     }
-    if (is_calculator_app() && uwp_is_display_result_element( el ))
+    if (xaml_get_app_profile()->display_sync && uwp_is_display_result_element( el ))
     {
         uwp_calc_vm_ensure();
         uwp_sync_calc_display_from_vm();
@@ -6181,7 +6184,7 @@ static void uwp_seed_synthetic_calculator( struct uwp_element *holder )
         uc = uwp_elem_from_any( uc_raw );
         IInspectable_Release( uc_raw );
         if (!uc) return;
-        lstrcpynW( uc->name, L"Calculator", ARRAY_SIZE(uc->name) );
+        lstrcpynW( uc->name, xaml_get_app_profile()->seed_xbf ? xaml_get_app_profile()->seed_xbf : L"Calculator", ARRAY_SIZE(uc->name) );
         uwp_vec_create( uc, &uc->children_coll );
         uwp_vec_Append( uc->children_coll, &result_el->IInspectable_iface );
         uwp_vec_Append( uc->children_coll, &grid_el->IInspectable_iface );
@@ -6780,7 +6783,7 @@ HRESULT uwp_store_create_initial_page( IInspectable **out )
     page_el = uwp_elem_from_any( p_raw );
     if (page_el)
     {
-        lstrcpynW( page_el->name, L"StoreManifestPage", ARRAY_SIZE(page_el->name) );
+        lstrcpynW( page_el->name, xaml_get_app_profile()->seed_xbf ? xaml_get_app_profile()->seed_xbf : L"StoreManifestPage", ARRAY_SIZE(page_el->name) );
         uwp_seed_store_catalog( page_el );
         g_navigated_page_el = page_el;
     }
@@ -6843,15 +6846,15 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 uwp_fire_loaded_tree( page_el );
 
                 /* Populate any empty placeholder containers from the page XBF's referenced PRI resources */
-                if (!uwp_populate_page_from_xbf_refs( page_el ))
+                if (!uwp_populate_page_from_xbf_refs( page_el ) && xaml_get_app_profile()->seed_xbf)
                 {
-                    if (is_calculator_app())
+                    if (!wcscmp( xaml_get_app_profile()->seed_xbf, L"Calculator" ))
                     {
                         struct uwp_element *holder = uwp_find_empty_holder_border( page_el, NULL, FALSE );
                         TRACE( "xbf: falling back to seed tree\n" );
                         uwp_seed_synthetic_calculator( holder ? holder : page_el );
                     }
-                    else if (is_store_app())
+                    else if (!wcscmp( xaml_get_app_profile()->seed_xbf, L"StoreManifestPage" ))
                     {
                         uwp_seed_store_catalog( page_el );
                     }
@@ -11951,7 +11954,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
     /* For UWP apps (Calculator, Store), serve all Windows.UI.Xaml.* and Microsoft.UI.Xaml.* runtime classes with our UWP multi-iface element factory;
      * also serve core Windows.UI.Xaml.Controls panels/buttons outside WhatsApp so UWP controls use the layout/pointer engine. */
     if ((is_uwp_xaml_app() ||
-         (!is_whatsapp_app() &&
+         (xaml_get_app_profile()->serve_core_controls &&
           (!wcscmp( buf, L"Windows.UI.Xaml.Controls.Grid" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.StackPanel" ) ||
            !wcscmp( buf, L"Windows.UI.Xaml.Controls.Panel" ) ||

@@ -218,9 +218,13 @@ static HRESULT WINAPI dummy_channel_QueryInterface( void *iface, REFIID iid, voi
     return S_OK;
 }
 
+/* Default offline/local WNS endpoint URI returned by PushNotificationChannel::get_Uri
+ * when no cloud push service daemon is connected. */
+#define WNS_DEFAULT_CHANNEL_URI L"https://wns2-sn1.notify.windows.com/dummy"
+
 static HRESULT WINAPI dummy_channel_get_Uri( void *iface, HSTRING *uri )
 {
-    return WindowsCreateString( L"https://wns2-sn1.notify.windows.com/dummy", 39, uri );
+    return WindowsCreateString( WNS_DEFAULT_CHANNEL_URI, 39, uri );
 }
 
 static HRESULT WINAPI dummy_channel_get_ExpirationTime( void *iface, void *expiration_time )
@@ -1872,7 +1876,15 @@ static HRESULT WINAPI bg_task_reg_get_TaskId( void *iface, GUID *id )
     *id = bg_task_id;
     return S_OK;
 }
-static HRESULT WINAPI bg_task_reg_get_Name( void *iface, HSTRING *name ) { return WindowsCreateString( L"WhatsApp Push Notification", 26, name ); }
+static WCHAR bg_task_name[256];
+static WCHAR bg_builder_name[256];
+
+static HRESULT WINAPI bg_task_reg_get_Name( void *iface, HSTRING *name )
+{
+    const WCHAR *n = bg_task_name[0] ? bg_task_name : L"BackgroundTask";
+    if (!name) return E_POINTER;
+    return WindowsCreateString( n, lstrlenW( n ), name );
+}
 static HRESULT WINAPI bg_task_reg_Unregister( void *iface, boolean cancel ) { return S_OK; }
 static HRESULT WINAPI bg_task_reg_add_event( void *iface, void *handler, INT64 *token )
 {
@@ -1910,23 +1922,50 @@ static const void *bg_task_reg_vtbl[] =
 };
 static struct { const void *vtbl; } dummy_bg_task_reg = { bg_task_reg_vtbl };
 
+static HRESULT WINAPI bg_builder_put_Name( void *iface, HSTRING name )
+{
+    const WCHAR *raw = name ? WindowsGetStringRawBuffer( name, NULL ) : NULL;
+    if (raw && raw[0])
+    {
+        lstrcpynW( bg_builder_name, raw, ARRAY_SIZE( bg_builder_name ) );
+        lstrcpynW( bg_task_name, raw, ARRAY_SIZE( bg_task_name ) );
+    }
+    else
+    {
+        bg_builder_name[0] = 0;
+        bg_task_name[0] = 0;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI bg_builder_get_Name( void *iface, HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( bg_builder_name, lstrlenW( bg_builder_name ), name );
+}
+
 static HRESULT WINAPI bg_builder_Register( void *iface, void **reg )
 {
     if (!reg) return E_POINTER;
+    if (bg_builder_name[0])
+        lstrcpynW( bg_task_name, bg_builder_name, ARRAY_SIZE( bg_task_name ) );
     *reg = &dummy_bg_task_reg;
     return S_OK;
 }
 static HRESULT WINAPI bg_builder_Register_name( void *iface, void *name, void **reg )
 {
+    const WCHAR *raw = name ? WindowsGetStringRawBuffer( (HSTRING)name, NULL ) : NULL;
     if (!reg) return E_POINTER;
+    if (raw && raw[0])
+        lstrcpynW( bg_task_name, raw, ARRAY_SIZE( bg_task_name ) );
+    else if (bg_builder_name[0])
+        lstrcpynW( bg_task_name, bg_builder_name, ARRAY_SIZE( bg_task_name ) );
     *reg = &dummy_bg_task_reg;
     return S_OK;
 }
 static HRESULT WINAPI bg_builder_Register_group( void *iface, void *name, const GUID *group, void **reg )
 {
-    if (!reg) return E_POINTER;
-    *reg = &dummy_bg_task_reg;
-    return S_OK;
+    return bg_builder_Register_name( iface, name, reg );
 }
 
 static HRESULT WINAPI bg_builder_success( void *iface, void *a, void *b, void *c ) { return S_OK; }
@@ -1943,8 +1982,8 @@ static const void *bg_builder_vtbl[] =
     bg_builder_success,     /* get_TaskEntryPoint */
     bg_builder_success,     /* SetTrigger */
     bg_builder_success,     /* AddCondition */
-    bg_builder_success,     /* put_Name */
-    bg_builder_success,     /* get_Name */
+    bg_builder_put_Name,    /* put_Name */
+    bg_builder_get_Name,    /* get_Name */
     bg_builder_Register,    /* Register() */
     bg_builder_Register_name,  /* Register(name) */
     bg_builder_Register_group, /* Register(name, group) */
