@@ -58,7 +58,6 @@ extern LONG __C_ExecuteExceptionFilter( EXCEPTION_POINTERS *ptrs, void *frame,
 
 struct dynamic_unwind_entry
 {
-    struct list       entry;
     ULONG_PTR         base;
     ULONG_PTR         end;
     RUNTIME_FUNCTION *table;
@@ -68,43 +67,111 @@ struct dynamic_unwind_entry
     PVOID             context;
 };
 
-static struct list dynamic_unwind_list = LIST_INIT(dynamic_unwind_list);
+static struct dynamic_unwind_entry **dynamic_unwind_entries;
+static unsigned int dynamic_unwind_count;
+static unsigned int dynamic_unwind_capacity;
+static RTL_SRWLOCK dynamic_unwind_lock = RTL_SRWLOCK_INIT;
 
-static RTL_CRITICAL_SECTION dynamic_unwind_section;
-static RTL_CRITICAL_SECTION_DEBUG dynamic_unwind_debug =
+static BOOL insert_dynamic_unwind_entry( struct dynamic_unwind_entry *entry )
 {
-    0, 0, &dynamic_unwind_section,
-    { &dynamic_unwind_debug.ProcessLocksList, &dynamic_unwind_debug.ProcessLocksList },
-      0, 0, { (DWORD_PTR)(__FILE__ ": dynamic_unwind_section") }
-};
-static RTL_CRITICAL_SECTION dynamic_unwind_section = { &dynamic_unwind_debug, -1, 0, 0, 0, 0 };
+    unsigned int lo = 0, hi = dynamic_unwind_count;
 
+    if (dynamic_unwind_count == dynamic_unwind_capacity)
+    {
+        unsigned int new_cap = dynamic_unwind_capacity ? dynamic_unwind_capacity * 2 : 64;
+        struct dynamic_unwind_entry **new_arr;
+        if (dynamic_unwind_entries)
+            new_arr = RtlReAllocateHeap( GetProcessHeap(), 0, dynamic_unwind_entries, new_cap * sizeof(*new_arr) );
+        else
+            new_arr = RtlAllocateHeap( GetProcessHeap(), 0, new_cap * sizeof(*new_arr) );
+        if (!new_arr) return FALSE;
+        dynamic_unwind_entries = new_arr;
+        dynamic_unwind_capacity = new_cap;
+    }
+
+    while (lo < hi)
+    {
+        unsigned int mid = (lo + hi) >> 1;
+        if (dynamic_unwind_entries[mid]->base <= entry->base)
+            lo = mid + 1;
+        else
+            hi = mid;
+    }
+
+    if (lo < dynamic_unwind_count)
+        memmove( &dynamic_unwind_entries[lo + 1], &dynamic_unwind_entries[lo],
+                 (dynamic_unwind_count - lo) * sizeof(*dynamic_unwind_entries) );
+    dynamic_unwind_entries[lo] = entry;
+    dynamic_unwind_count++;
+    return TRUE;
+}
 
 static RUNTIME_FUNCTION *lookup_dynamic_function_table( ULONG_PTR pc, ULONG_PTR *base, ULONG *count )
 {
-    struct dynamic_unwind_entry *entry;
     RUNTIME_FUNCTION *ret = NULL;
+    int lo, hi, pos = -1;
 
-    RtlEnterCriticalSection( &dynamic_unwind_section );
-    LIST_FOR_EACH_ENTRY( entry, &dynamic_unwind_list, struct dynamic_unwind_entry, entry )
+    RtlAcquireSRWLockShared( &dynamic_unwind_lock );
+    lo = 0;
+    hi = (int)dynamic_unwind_count - 1;
+    while (lo <= hi)
     {
-        if (pc >= entry->base && pc < entry->end)
+        int mid = (unsigned int)(lo + hi) >> 1;
+        if (dynamic_unwind_entries[mid]->base <= pc)
         {
-            *base = entry->base;
-            if (entry->callback)
+            pos = mid;
+            lo = mid + 1;
+        }
+        else hi = mid - 1;
+    }
+
+    if (pos >= 0)
+    {
+        while (pos > 0 && dynamic_unwind_entries[pos - 1]->base == dynamic_unwind_entries[pos]->base)
+            pos--;
+        for (unsigned int i = pos; i < dynamic_unwind_count && dynamic_unwind_entries[i]->base <= pc; i++)
+        {
+            struct dynamic_unwind_entry *entry = dynamic_unwind_entries[i];
+            if (pc < entry->end)
             {
-                ret = entry->callback( pc, entry->context );
-                *count = 1;
+                *base = entry->base;
+                if (entry->callback)
+                {
+                    ret = entry->callback( pc, entry->context );
+                    *count = 1;
+                }
+                else
+                {
+                    ret = entry->table;
+                    *count = entry->count;
+                }
+                break;
             }
-            else
+        }
+        if (!ret)
+        {
+            for (int i = pos - 1; i >= 0; i--)
             {
-                ret = entry->table;
-                *count = entry->count;
+                struct dynamic_unwind_entry *entry = dynamic_unwind_entries[i];
+                if (pc < entry->end)
+                {
+                    *base = entry->base;
+                    if (entry->callback)
+                    {
+                        ret = entry->callback( pc, entry->context );
+                        *count = 1;
+                    }
+                    else
+                    {
+                        ret = entry->table;
+                        *count = entry->count;
+                    }
+                    break;
+                }
             }
-            break;
         }
     }
-    RtlLeaveCriticalSection( &dynamic_unwind_section );
+    RtlReleaseSRWLockShared( &dynamic_unwind_lock );
     return ret;
 }
 
@@ -117,6 +184,7 @@ BOOLEAN CDECL RtlInstallFunctionTableCallback( ULONG_PTR table, ULONG_PTR base, 
                                                PCWSTR dll )
 {
     struct dynamic_unwind_entry *entry;
+    BOOL ok;
 
     TRACE( "%Ix %Ix %ld %p %p %s\n", table, base, length, callback, context, wine_dbgstr_w(dll) );
 
@@ -138,9 +206,15 @@ BOOLEAN CDECL RtlInstallFunctionTableCallback( ULONG_PTR table, ULONG_PTR base, 
     entry->callback  = callback;
     entry->context   = context;
 
-    RtlEnterCriticalSection( &dynamic_unwind_section );
-    list_add_tail( &dynamic_unwind_list, &entry->entry );
-    RtlLeaveCriticalSection( &dynamic_unwind_section );
+    RtlAcquireSRWLockExclusive( &dynamic_unwind_lock );
+    ok = insert_dynamic_unwind_entry( entry );
+    RtlReleaseSRWLockExclusive( &dynamic_unwind_lock );
+
+    if (!ok)
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, entry );
+        return FALSE;
+    }
 
     return TRUE;
 }
@@ -153,6 +227,7 @@ NTSTATUS WINAPI RtlAddGrowableFunctionTable( void **table, RUNTIME_FUNCTION *fun
                                              DWORD max_count, ULONG_PTR base, ULONG_PTR end )
 {
     struct dynamic_unwind_entry *entry;
+    BOOL ok;
 
     TRACE( "%p, %p, %lu, %lu, %Ix, %Ix\n", table, functions, count, max_count, base, end );
 
@@ -168,9 +243,15 @@ NTSTATUS WINAPI RtlAddGrowableFunctionTable( void **table, RUNTIME_FUNCTION *fun
     entry->callback  = NULL;
     entry->context   = NULL;
 
-    RtlEnterCriticalSection( &dynamic_unwind_section );
-    list_add_tail( &dynamic_unwind_list, &entry->entry );
-    RtlLeaveCriticalSection( &dynamic_unwind_section );
+    RtlAcquireSRWLockExclusive( &dynamic_unwind_lock );
+    ok = insert_dynamic_unwind_entry( entry );
+    RtlReleaseSRWLockExclusive( &dynamic_unwind_lock );
+
+    if (!ok)
+    {
+        RtlFreeHeap( GetProcessHeap(), 0, entry );
+        return STATUS_NO_MEMORY;
+    }
 
     *table = entry;
 
@@ -183,13 +264,12 @@ NTSTATUS WINAPI RtlAddGrowableFunctionTable( void **table, RUNTIME_FUNCTION *fun
  */
 void WINAPI RtlGrowFunctionTable( void *table, DWORD count )
 {
-    struct dynamic_unwind_entry *entry;
-
     TRACE( "%p, %lu\n", table, count );
 
-    RtlEnterCriticalSection( &dynamic_unwind_section );
-    LIST_FOR_EACH_ENTRY( entry, &dynamic_unwind_list, struct dynamic_unwind_entry, entry )
+    RtlAcquireSRWLockExclusive( &dynamic_unwind_lock );
+    for (unsigned int i = 0; i < dynamic_unwind_count; i++)
     {
+        struct dynamic_unwind_entry *entry = dynamic_unwind_entries[i];
         if (entry == table)
         {
             if (count > entry->count && count <= entry->max_count)
@@ -197,7 +277,7 @@ void WINAPI RtlGrowFunctionTable( void *table, DWORD count )
             break;
         }
     }
-    RtlLeaveCriticalSection( &dynamic_unwind_section );
+    RtlReleaseSRWLockExclusive( &dynamic_unwind_lock );
 }
 
 
@@ -206,21 +286,24 @@ void WINAPI RtlGrowFunctionTable( void *table, DWORD count )
  */
 void WINAPI RtlDeleteGrowableFunctionTable( void *table )
 {
-    struct dynamic_unwind_entry *entry, *to_free = NULL;
+    struct dynamic_unwind_entry *to_free = NULL;
 
     TRACE( "%p\n", table );
 
-    RtlEnterCriticalSection( &dynamic_unwind_section );
-    LIST_FOR_EACH_ENTRY( entry, &dynamic_unwind_list, struct dynamic_unwind_entry, entry )
+    RtlAcquireSRWLockExclusive( &dynamic_unwind_lock );
+    for (unsigned int i = 0; i < dynamic_unwind_count; i++)
     {
-        if (entry == table)
+        if (dynamic_unwind_entries[i] == table)
         {
-            to_free = entry;
-            list_remove( &entry->entry );
+            to_free = dynamic_unwind_entries[i];
+            dynamic_unwind_count--;
+            if (i < dynamic_unwind_count)
+                memmove( &dynamic_unwind_entries[i], &dynamic_unwind_entries[i + 1],
+                         (dynamic_unwind_count - i) * sizeof(*dynamic_unwind_entries) );
             break;
         }
     }
-    RtlLeaveCriticalSection( &dynamic_unwind_section );
+    RtlReleaseSRWLockExclusive( &dynamic_unwind_lock );
 
     RtlFreeHeap( GetProcessHeap(), 0, to_free );
 }
@@ -231,21 +314,24 @@ void WINAPI RtlDeleteGrowableFunctionTable( void *table )
  */
 BOOLEAN CDECL RtlDeleteFunctionTable( RUNTIME_FUNCTION *table )
 {
-    struct dynamic_unwind_entry *entry, *to_free = NULL;
+    struct dynamic_unwind_entry *to_free = NULL;
 
     TRACE( "%p\n", table );
 
-    RtlEnterCriticalSection( &dynamic_unwind_section );
-    LIST_FOR_EACH_ENTRY( entry, &dynamic_unwind_list, struct dynamic_unwind_entry, entry )
+    RtlAcquireSRWLockExclusive( &dynamic_unwind_lock );
+    for (unsigned int i = 0; i < dynamic_unwind_count; i++)
     {
-        if (entry->table == table)
+        if (dynamic_unwind_entries[i]->table == table)
         {
-            to_free = entry;
-            list_remove( &entry->entry );
+            to_free = dynamic_unwind_entries[i];
+            dynamic_unwind_count--;
+            if (i < dynamic_unwind_count)
+                memmove( &dynamic_unwind_entries[i], &dynamic_unwind_entries[i + 1],
+                         (dynamic_unwind_count - i) * sizeof(*dynamic_unwind_entries) );
             break;
         }
     }
-    RtlLeaveCriticalSection( &dynamic_unwind_section );
+    RtlReleaseSRWLockExclusive( &dynamic_unwind_lock );
 
     if (!to_free) return FALSE;
 
@@ -257,22 +343,85 @@ BOOLEAN CDECL RtlDeleteFunctionTable( RUNTIME_FUNCTION *table )
 /**********************************************************************
  *              RtlLookupFunctionTable   (NTDLL.@)
  */
+#define FUNCTION_TABLE_CACHE_SIZE 16
+
+struct function_table_cache_entry
+{
+    ULONG_PTR         base;
+    ULONG             image_size;
+    ULONG             exc_size;
+    RUNTIME_FUNCTION *exc_table;
+};
+
+static struct function_table_cache_entry function_table_cache[FUNCTION_TABLE_CACHE_SIZE];
+static unsigned int function_table_cache_count;
+static RTL_SRWLOCK function_table_cache_lock = RTL_SRWLOCK_INIT;
+
 PRUNTIME_FUNCTION WINAPI RtlLookupFunctionTable( ULONG_PTR pc, ULONG_PTR *base, ULONG *len )
 {
     LDR_DATA_TABLE_ENTRY *module;
+    RUNTIME_FUNCTION *ret;
+    unsigned int i;
 
-    if (LdrFindEntryForAddress( (void *)pc, &module )) return NULL;
-    *base = (ULONG_PTR)module->DllBase;
 #ifdef __arm64ec__
     if (RtlIsEcCode( pc ))
     {
-        IMAGE_ARM64EC_METADATA *metadata = arm64ec_get_module_metadata( module->DllBase );
+        IMAGE_ARM64EC_METADATA *metadata;
+        if (LdrFindEntryForAddress( (void *)pc, &module )) return NULL;
+        *base = (ULONG_PTR)module->DllBase;
+        metadata = arm64ec_get_module_metadata( module->DllBase );
         if (!metadata) return NULL;
         *len = metadata->ExtraRFETableSize;
         return (RUNTIME_FUNCTION *)(*base + metadata->ExtraRFETable);
     }
 #endif
-    return RtlImageDirectoryEntryToData( module->DllBase, TRUE, IMAGE_DIRECTORY_ENTRY_EXCEPTION, len );
+
+    RtlAcquireSRWLockShared( &function_table_cache_lock );
+    for (i = 0; i < function_table_cache_count; i++)
+    {
+        if (pc - function_table_cache[i].base < function_table_cache[i].image_size)
+        {
+            *base = function_table_cache[i].base;
+            *len  = function_table_cache[i].exc_size;
+            ret   = function_table_cache[i].exc_table;
+            RtlReleaseSRWLockShared( &function_table_cache_lock );
+            return ret;
+        }
+    }
+    RtlReleaseSRWLockShared( &function_table_cache_lock );
+
+    if (LdrFindEntryForAddress( (void *)pc, &module )) return NULL;
+    *base = (ULONG_PTR)module->DllBase;
+    ret = RtlImageDirectoryEntryToData( module->DllBase, TRUE, IMAGE_DIRECTORY_ENTRY_EXCEPTION, len );
+
+    if (module->SizeOfImage)
+    {
+        RtlAcquireSRWLockExclusive( &function_table_cache_lock );
+        for (i = 0; i < function_table_cache_count; i++)
+        {
+            if (function_table_cache[i].base == *base) break;
+        }
+        if (i < function_table_cache_count)
+        {
+            if (i > 0)
+                memmove( &function_table_cache[1], &function_table_cache[0], i * sizeof(function_table_cache[0]) );
+        }
+        else
+        {
+            unsigned int move_cnt = function_table_cache_count;
+            if (move_cnt >= FUNCTION_TABLE_CACHE_SIZE) move_cnt = FUNCTION_TABLE_CACHE_SIZE - 1;
+            else function_table_cache_count++;
+            if (move_cnt > 0)
+                memmove( &function_table_cache[1], &function_table_cache[0], move_cnt * sizeof(function_table_cache[0]) );
+        }
+        function_table_cache[0].base       = *base;
+        function_table_cache[0].image_size = module->SizeOfImage;
+        function_table_cache[0].exc_size   = *len;
+        function_table_cache[0].exc_table  = ret;
+        RtlReleaseSRWLockExclusive( &function_table_cache_lock );
+    }
+
+    return ret;
 }
 
 
@@ -2319,6 +2468,13 @@ EXCEPTION_DISPOSITION WINAPI __C_specific_handler( EXCEPTION_RECORD *rec, void *
 /**********************************************************************
  *              RtlLookupFunctionEntry   (NTDLL.@)
  */
+#define UNWIND_HISTORY_ONCE_MAGIC 0x57
+
+static inline BYTE unwind_table_cookie( const UNWIND_HISTORY_TABLE *table )
+{
+    return (BYTE)(((ULONG_PTR)table >> 4) ^ 0xa5);
+}
+
 PRUNTIME_FUNCTION WINAPI RtlLookupFunctionEntry( ULONG_PTR pc, ULONG_PTR *base,
                                                  UNWIND_HISTORY_TABLE *table )
 {
@@ -2331,8 +2487,73 @@ PRUNTIME_FUNCTION WINAPI RtlLookupFunctionEntry( ULONG_PTR pc, ULONG_PTR *base,
         return (RUNTIME_FUNCTION *)RtlLookupFunctionEntry_arm64( pc, base, table );
 #endif
 
+    if (table)
+    {
+        BYTE cookie = unwind_table_cookie( table );
+        if (table->Once != UNWIND_HISTORY_ONCE_MAGIC || table->GlobalHint != cookie ||
+            table->Count > UNWIND_HISTORY_TABLE_SIZE)
+        {
+            table->Count       = 0;
+            table->LocalHint   = 0;
+            table->GlobalHint  = cookie;
+            table->Search      = 0;
+            table->Once        = UNWIND_HISTORY_ONCE_MAGIC;
+            table->LowAddress  = ~(ULONG_PTR)0;
+            table->HighAddress = 0;
+        }
+        else if (table->Count && pc >= table->LowAddress && pc < table->HighAddress)
+        {
+            unsigned int hint = table->LocalHint;
+            if (hint < table->Count)
+            {
+                ULONG_PTR img_base = table->Entry[hint].ImageBase;
+                RUNTIME_FUNCTION *fn = table->Entry[hint].FunctionEntry;
+                if (pc >= img_base + fn->BeginAddress && pc < img_base + fn->EndAddress)
+                {
+                    *base = img_base;
+                    return fn;
+                }
+            }
+            for (unsigned int i = 0; i < table->Count; i++)
+            {
+                ULONG_PTR img_base;
+                RUNTIME_FUNCTION *fn;
+                if (i == hint) continue;
+                img_base = table->Entry[i].ImageBase;
+                fn = table->Entry[i].FunctionEntry;
+                if (pc >= img_base + fn->BeginAddress && pc < img_base + fn->EndAddress)
+                {
+                    table->LocalHint = i;
+                    *base = img_base;
+                    return fn;
+                }
+            }
+        }
+    }
+
     if ((func = RtlLookupFunctionTable( pc, base, &size )))
-        return find_function_info( pc, *base, func, size / sizeof(*func));
+    {
+        RUNTIME_FUNCTION *ret = find_function_info( pc, *base, func, size / sizeof(*func) );
+        if (ret && table && pc >= *base + ret->BeginAddress && pc < *base + ret->EndAddress)
+        {
+            ULONG_PTR range_lo = *base + ret->BeginAddress;
+            ULONG_PTR range_hi = *base + ret->EndAddress;
+            unsigned int idx;
+            if (table->Count < UNWIND_HISTORY_TABLE_SIZE)
+                idx = table->Count++;
+            else
+            {
+                idx = table->Search % UNWIND_HISTORY_TABLE_SIZE;
+                table->Search = (idx + 1) % UNWIND_HISTORY_TABLE_SIZE;
+            }
+            table->Entry[idx].ImageBase     = *base;
+            table->Entry[idx].FunctionEntry = ret;
+            table->LocalHint                = idx;
+            if (range_lo < table->LowAddress)  table->LowAddress  = range_lo;
+            if (range_hi > table->HighAddress) table->HighAddress = range_hi;
+        }
+        return ret;
+    }
 
     if ((func = lookup_dynamic_function_table( pc, &dynbase, &size )))
     {

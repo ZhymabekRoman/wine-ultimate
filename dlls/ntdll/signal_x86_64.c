@@ -234,7 +234,7 @@ static DWORD call_seh_handler( EXCEPTION_RECORD *rec, ULONG_PTR frame,
 NTSTATUS call_seh_handlers( EXCEPTION_RECORD *rec, CONTEXT *orig_context )
 {
     EXCEPTION_REGISTRATION_RECORD *teb_frame = NtCurrentTeb()->Tib.ExceptionList;
-    UNWIND_HISTORY_TABLE table;
+    UNWIND_HISTORY_TABLE table = { 0 };
     DISPATCHER_CONTEXT dispatch;
     CONTEXT context;
     NTSTATUS status;
@@ -871,7 +871,7 @@ BOOLEAN WINAPI RtlIsProcessorFeaturePresent( UINT feature )
  */
 ULONG WINAPI RtlWalkFrameChain( void **buffer, ULONG count, ULONG flags )
 {
-    UNWIND_HISTORY_TABLE table;
+    UNWIND_HISTORY_TABLE table = { 0 };
     RUNTIME_FUNCTION *func;
     PEXCEPTION_ROUTINE handler;
     ULONG_PTR frame, base;

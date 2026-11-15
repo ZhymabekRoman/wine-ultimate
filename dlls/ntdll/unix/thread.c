@@ -1679,8 +1679,8 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
         int i;
         static ULONG64 nre_calls;
         if (++nre_calls == 1)
-            ERR_(seh)("  v3sentinel np=%u fa=%p\n", (unsigned int)rec->NumberParameters,
-                      rec->NumberParameters >= 2 ? (void *)rec->ExceptionInformation[1] : (void *)0);
+            TRACE_(seh)("  v3sentinel np=%u fa=%p\n", (unsigned int)rec->NumberParameters,
+                        rec->NumberParameters >= 2 ? (void *)rec->ExceptionInformation[1] : (void *)0);
 
         /* Inflate-plateau wave (2026-11-08): the app's frozen R2R references bake
          * absolute guest pointers into the runtime heap at link-time layout
@@ -1706,31 +1706,31 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
                     SIZE_T len = fa == (ULONG64)-1 ? 0x4000000 : 0x10000;
                     NTSTATUS st = NtAllocateVirtualMemory( GetCurrentProcess(), &base, 0, &len,
                                                            MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE );
-                    ERR_(seh)("  av_commit fa=%p base=%p len=%lx st=%x\n",
-                              (void *)fa, base, len, (unsigned int)st);
+                    TRACE_(seh)("  av_commit fa=%p base=%p len=%lx st=%x\n",
+                                (void *)fa, base, len, (unsigned int)st);
                     if (k < 4) seen[k] = fa;
                 }
             }
         }
-        ERR_(seh)("FIRST_CHANCE_AV addr %p rip=%p rsp=%p rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx rsi=%016llx rdi=%016llx r8=%016llx r9=%016llx\n",
-                  rec->ExceptionAddress, (void *)context->Rip, (void *)context->Rsp,
-                  (unsigned long long)context->Rax, (unsigned long long)context->Rbx,
-                  (unsigned long long)context->Rcx, (unsigned long long)context->Rdx,
-                  (unsigned long long)context->Rsi, (unsigned long long)context->Rdi,
-                  (unsigned long long)context->R8, (unsigned long long)context->R9);
-        for (i = 0; i < 16; i++)
-            ERR_(seh)("  av_stack[%02d] (%p) = %016llx\n", i, sp + i, sp[i]);
-
+        if (TRACE_ON(seh))
         {
             static const char *const regnames[] = { "rbx", "rbp", "r12", "r13", "r14", "r15" };
             const ULONG64 regs[6] = { context->Rbx, context->Rbp,
                                       context->R12, context->R13, context->R14, context->R15 };
             int r, j;
-            ERR_(seh)("  av_regs rbp=%016llx r10=%016llx r11=%016llx r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
-                      (unsigned long long)context->Rbp, (unsigned long long)context->R10,
-                      (unsigned long long)context->R11, (unsigned long long)context->R12,
-                      (unsigned long long)context->R13, (unsigned long long)context->R14,
-                      (unsigned long long)context->R15);
+            TRACE_(seh)("FIRST_CHANCE_AV addr %p rip=%p rsp=%p rax=%016llx rbx=%016llx rcx=%016llx rdx=%016llx rsi=%016llx rdi=%016llx r8=%016llx r9=%016llx\n",
+                        rec->ExceptionAddress, (void *)context->Rip, (void *)context->Rsp,
+                        (unsigned long long)context->Rax, (unsigned long long)context->Rbx,
+                        (unsigned long long)context->Rcx, (unsigned long long)context->Rdx,
+                        (unsigned long long)context->Rsi, (unsigned long long)context->Rdi,
+                        (unsigned long long)context->R8, (unsigned long long)context->R9);
+            for (i = 0; i < 16; i++)
+                TRACE_(seh)("  av_stack[%02d] (%p) = %016llx\n", i, sp + i, sp[i]);
+            TRACE_(seh)("  av_regs rbp=%016llx r10=%016llx r11=%016llx r12=%016llx r13=%016llx r14=%016llx r15=%016llx\n",
+                        (unsigned long long)context->Rbp, (unsigned long long)context->R10,
+                        (unsigned long long)context->R11, (unsigned long long)context->R12,
+                        (unsigned long long)context->R13, (unsigned long long)context->R14,
+                        (unsigned long long)context->R15);
             for (r = 0; r < 6; r++)
             {
                 ULONG64 s = regs[r];
@@ -1738,31 +1738,31 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
                 {
                     ULONG64 *sq = (ULONG64 *)s;
                     ULONG64 strm = sq[0];
-                    ERR_(seh)("  av_state %s=%p: %016llx %016llx %016llx %016llx | %016llx %016llx %016llx %016llx\n",
-                              regnames[r], (void *)s,
-                              (unsigned long long)sq[0], (unsigned long long)sq[1],
-                              (unsigned long long)sq[2], (unsigned long long)sq[3],
-                              (unsigned long long)sq[4], (unsigned long long)sq[5],
-                              (unsigned long long)sq[6], (unsigned long long)sq[7]);
+                    TRACE_(seh)("  av_state %s=%p: %016llx %016llx %016llx %016llx | %016llx %016llx %016llx %016llx\n",
+                                regnames[r], (void *)s,
+                                (unsigned long long)sq[0], (unsigned long long)sq[1],
+                                (unsigned long long)sq[2], (unsigned long long)sq[3],
+                                (unsigned long long)sq[4], (unsigned long long)sq[5],
+                                (unsigned long long)sq[6], (unsigned long long)sq[7]);
                     if (strm && strm < 0x7FFFFFFF0000ULL && !(strm & 7))
                     {
                         ULONG64 *z = (ULONG64 *)strm;
                         ULONG64 ni = z[0];
-                        ERR_(seh)("  av_zstream %s->strm=%p: next_in=%016llx avail_in=%08lx total_in=%016llx next_out=%016llx avail_out=%08lx total_out=%016llx msg=%016llx state=%016llx\n",
-                                  regnames[r], (void *)strm,
-                                  (unsigned long long)z[0], (unsigned long)(ULONG64)(z[1] & 0xffffffff),
-                                  (unsigned long long)z[2], (unsigned long long)z[3],
-                                  (unsigned long)(ULONG64)(z[4] & 0xffffffff), (unsigned long long)z[5],
-                                  (unsigned long long)z[6], (unsigned long long)z[7]);
+                        TRACE_(seh)("  av_zstream %s->strm=%p: next_in=%016llx avail_in=%08lx total_in=%016llx next_out=%016llx avail_out=%08lx total_out=%016llx msg=%016llx state=%016llx\n",
+                                    regnames[r], (void *)strm,
+                                    (unsigned long long)z[0], (unsigned long)(ULONG64)(z[1] & 0xffffffff),
+                                    (unsigned long long)z[2], (unsigned long long)z[3],
+                                    (unsigned long)(ULONG64)(z[4] & 0xffffffff), (unsigned long long)z[5],
+                                    (unsigned long long)z[6], (unsigned long long)z[7]);
                         if (ni && ni < 0x7FFFFFFF0000ULL)
                         {
                             const unsigned char *b = (const unsigned char *)ni;
                             char buf[17];
                             for (j = 0; j < 16; j++) buf[j] = (b[j] >= 32 && b[j] < 127) ? b[j] : '.';
                             buf[16] = 0;
-                            ERR_(seh)("  av_nextin %s: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x |%s|\n",
-                                      regnames[r], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
-                                      b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15], buf);
+                            TRACE_(seh)("  av_nextin %s: %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x %02x |%s|\n",
+                                        regnames[r], b[0], b[1], b[2], b[3], b[4], b[5], b[6], b[7],
+                                        b[8], b[9], b[10], b[11], b[12], b[13], b[14], b[15], buf);
                         }
                     }
                 }
@@ -1784,10 +1784,10 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
         {
             ULONG64 *fsp = (ULONG64 *)context->Rsp;
             int j;
-            ERR_(seh)("  fatal_av fa=%p rip=%p\n",
-                      (void *)rec->ExceptionInformation[1], (void *)context->Rip);
+            TRACE_(seh)("  fatal_av fa=%p rip=%p\n",
+                        (void *)rec->ExceptionInformation[1], (void *)context->Rip);
             for (j = 0; j < 24; j++)
-                ERR_(seh)("  fatal_stack[%02d] (%p) = %016llx\n", j, fsp + j, fsp[j]);
+                TRACE_(seh)("  fatal_stack[%02d] (%p) = %016llx\n", j, fsp + j, fsp[j]);
         }
         if ((rec->ExceptionCode == 0xe0464645 || rec->ExceptionCode == 0xc0000602) && context)
         {
@@ -1795,7 +1795,7 @@ NTSTATUS WINAPI NtRaiseException( EXCEPTION_RECORD *rec, CONTEXT *context, BOOL 
             int i;
             for (i = 0; i < 48; i++)
             {
-                ERR_(seh)("  failfast_stack[%02d] (%p) = %016llx\n", i, sp + i, sp[i]);
+                TRACE_(seh)("  failfast_stack[%02d] (%p) = %016llx\n", i, sp + i, sp[i]);
             }
         }
     }
