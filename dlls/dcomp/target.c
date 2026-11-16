@@ -89,6 +89,22 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
             IDXGISwapChain1_Release(target->composite_swapchain);
         if (target->composite_device)
             ID3D11Device_Release(target->composite_device);
+        if (target->composite_sampler)
+            ID3D11SamplerState_Release(target->composite_sampler);
+        if (target->composite_rs)
+            ID3D11RasterizerState_Release(target->composite_rs);
+        if (target->composite_vb)
+            ID3D11Buffer_Release(target->composite_vb);
+        if (target->composite_ps_cb)
+            ID3D11Buffer_Release(target->composite_ps_cb);
+        if (target->composite_vs_cb)
+            ID3D11Buffer_Release(target->composite_vs_cb);
+        if (target->composite_input_layout)
+            ID3D11InputLayout_Release(target->composite_input_layout);
+        if (target->composite_ps)
+            ID3D11PixelShader_Release(target->composite_ps);
+        if (target->composite_vs)
+            ID3D11VertexShader_Release(target->composite_vs);
         if (target->composite_state)
             ID3DDeviceContextState_Release(target->composite_state);
         if (target->composite_context1)

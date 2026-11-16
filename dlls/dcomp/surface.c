@@ -87,6 +87,10 @@ static ULONG STDMETHODCALLTYPE surface_Release(IDCompositionSurfaceUnknown *ifac
 
     if (!ref)
     {
+        if (surface->cached_srv)
+            ID3D11ShaderResourceView_Release(surface->cached_srv);
+        if (surface->cached_srv_device)
+            ID3D11Device_Release(surface->cached_srv_device);
         if (surface->physical_surface)
             IUnknown_Release(surface->physical_surface);
         if (surface->factory)
@@ -417,6 +421,16 @@ static HRESULT composition_surface_resize(struct composition_surface *surface, U
         return S_OK;
     }
 
+    if (surface->cached_srv)
+    {
+        ID3D11ShaderResourceView_Release(surface->cached_srv);
+        surface->cached_srv = NULL;
+    }
+    if (surface->cached_srv_device)
+    {
+        ID3D11Device_Release(surface->cached_srv_device);
+        surface->cached_srv_device = NULL;
+    }
     IUnknown_Release(surface->physical_surface);
     if (surface->draw_surface)
     {

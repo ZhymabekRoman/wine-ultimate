@@ -106,6 +106,12 @@ static ULONG STDMETHODCALLTYPE visual_Release(IDCompositionVisualUnknown *iface)
             IDCompositionEffect_Release(effect);
         if (content)
             IUnknown_Release(content);
+        if (visual->cached_copy_srv)
+            ID3D11ShaderResourceView_Release(visual->cached_copy_srv);
+        if (visual->cached_copy_tex)
+            ID3D11Texture2D_Release(visual->cached_copy_tex);
+        if (visual->cached_copy_device)
+            ID3D11Device_Release(visual->cached_copy_device);
         if (visual->transform)
             IDCompositionTransform_Release(visual->transform);
         if (visual->shared_visual_handle)

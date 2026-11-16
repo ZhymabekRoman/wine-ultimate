@@ -502,18 +502,8 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
     return S_OK;
 }
 
-/*
- * One GPU pass: sample 'src_texture' (any 32-bit format; the output merger
- * converts to the back buffer's B8G8R8A8) into the composite swapchain back
- * buffer, multiplying by the visual opacity and discarding pixels outside the
- * visual's rectangle clip. Falls back to a plain GPU CopySubresourceRegion
- * when the source cannot be sampled (no shader-resource bind flag).
- */
-static HRESULT composite_surface_to_backbuffer(struct composition_target *target,
-        ID3D11Device1 *d3d11_device, ID3D11DeviceContext *d3d11_device_context,
-        ID3D11Texture2D *src_texture, UINT src_width, UINT src_height,
-        UINT dst_width, UINT dst_height, const D3DMATRIX *proj_matrix,
-        float opacity, const D2D_RECT_F *clip_rect, BOOL clear, POINT copy_off)
+static HRESULT ensure_composite_pipeline(struct composition_target *target,
+        ID3D11Device1 *d3d11_device)
 {
     static ID3D10Blob *vs_blob = NULL, *ps_blob = NULL;
     static const struct
@@ -533,25 +523,218 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         {"POSITION", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 0, D3D11_INPUT_PER_VERTEX_DATA, 0},
         {"TEXCOORD", 0, DXGI_FORMAT_R32G32_FLOAT, 0, 8, D3D11_INPUT_PER_VERTEX_DATA, 0},
     };
+    D3D11_SUBRESOURCE_DATA resource_data;
+    D3D11_BUFFER_DESC buffer_desc;
+    D3D11_RASTERIZER_DESC rs_desc;
+    D3D11_SAMPLER_DESC sampler_desc;
+    HRESULT hr;
+
+    if (target->composite_vs)
+        return S_OK;
+
+    if (!vs_blob)
+    {
+        hr = D3DCompile(composite_vs_code, sizeof(composite_vs_code) - 1, "vs", NULL, NULL, "main",
+                        "vs_4_0", 0, 0, &vs_blob, NULL);
+        if (FAILED(hr))
+        {
+            ERR("Failed to compile vertex shader, hr %#lx.\n", hr);
+            return hr;
+        }
+        hr = D3DCompile(composite_ps_code, sizeof(composite_ps_code) - 1, "ps", NULL, NULL, "main",
+                        "ps_4_0", 0, 0, &ps_blob, NULL);
+        if (FAILED(hr))
+        {
+            ERR("Failed to compile pixel shader, hr %#lx.\n", hr);
+            return hr;
+        }
+    }
+
+    if (FAILED(hr = ID3D11Device1_CreateVertexShader(d3d11_device, ID3D10Blob_GetBufferPointer(vs_blob),
+            ID3D10Blob_GetBufferSize(vs_blob), NULL, &target->composite_vs)))
+        return hr;
+    if (FAILED(hr = ID3D11Device1_CreatePixelShader(d3d11_device, ID3D10Blob_GetBufferPointer(ps_blob),
+            ID3D10Blob_GetBufferSize(ps_blob), NULL, &target->composite_ps)))
+        return hr;
+    if (FAILED(hr = ID3D11Device1_CreateInputLayout(d3d11_device, layout_desc, ARRAY_SIZE(layout_desc),
+            ID3D10Blob_GetBufferPointer(vs_blob), ID3D10Blob_GetBufferSize(vs_blob),
+            &target->composite_input_layout)))
+        return hr;
+
+    memset(&buffer_desc, 0, sizeof(buffer_desc));
+    buffer_desc.ByteWidth = sizeof(struct composite_vs_data);
+    buffer_desc.Usage = D3D11_USAGE_DEFAULT;
+    buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
+    if (FAILED(hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, NULL, &target->composite_vs_cb)))
+        return hr;
+
+    buffer_desc.ByteWidth = sizeof(struct composite_blit_data);
+    if (FAILED(hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, NULL, &target->composite_ps_cb)))
+        return hr;
+
+    buffer_desc.ByteWidth = sizeof(quad);
+    buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
+    resource_data.pSysMem = quad;
+    resource_data.SysMemPitch = 0;
+    resource_data.SysMemSlicePitch = 0;
+    if (FAILED(hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &target->composite_vb)))
+        return hr;
+
+    memset(&rs_desc, 0, sizeof(rs_desc));
+    rs_desc.FillMode = D3D11_FILL_SOLID;
+    rs_desc.CullMode = D3D11_CULL_NONE;
+    rs_desc.DepthClipEnable = TRUE;
+    if (FAILED(hr = ID3D11Device1_CreateRasterizerState(d3d11_device, &rs_desc, &target->composite_rs)))
+        return hr;
+
+    memset(&sampler_desc, 0, sizeof(sampler_desc));
+    sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
+    sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
+    sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
+    sampler_desc.MinLOD = 0;
+    sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
+    if (FAILED(hr = ID3D11Device1_CreateSamplerState(d3d11_device, &sampler_desc, &target->composite_sampler)))
+        return hr;
+
+    return S_OK;
+}
+
+static ID3D11ShaderResourceView *get_or_create_visual_srv(struct composition_visual *visual,
+        ID3D11Device1 *d3d11_device, ID3D11DeviceContext *d3d11_device_context,
+        ID3D11Texture2D *src_texture)
+{
+    struct composition_surface *surf = NULL;
+    ID3D11ShaderResourceView *srv = NULL;
+    D3D11_TEXTURE2D_DESC src_desc;
+    HRESULT hr;
+
+    if (visual && visual->content && dcomp_is_equal_guid(&visual->content_iid, &IID_IDCompositionSurface))
+    {
+        surf = unsafe_impl_from_IDCompositionSurface((IDCompositionSurface *)visual->content);
+        if (surf && surf->cached_srv && surf->cached_srv_device == (ID3D11Device *)d3d11_device)
+        {
+            ID3D11ShaderResourceView_AddRef(surf->cached_srv);
+            return surf->cached_srv;
+        }
+    }
+
+    ID3D11Texture2D_GetDesc(src_texture, &src_desc);
+    if ((src_desc.BindFlags & D3D11_BIND_SHADER_RESOURCE) && src_desc.SampleDesc.Count <= 1)
+    {
+        hr = ID3D11Device1_CreateShaderResourceView(d3d11_device, (ID3D11Resource *)src_texture, NULL, &srv);
+        if (SUCCEEDED(hr))
+        {
+            if (surf)
+            {
+                if (surf->cached_srv)
+                    ID3D11ShaderResourceView_Release(surf->cached_srv);
+                if (surf->cached_srv_device)
+                    ID3D11Device_Release(surf->cached_srv_device);
+                surf->cached_srv = srv;
+                ID3D11ShaderResourceView_AddRef(srv);
+                surf->cached_srv_device = (ID3D11Device *)d3d11_device;
+                ID3D11Device_AddRef(surf->cached_srv_device);
+            }
+            return srv;
+        }
+    }
+
+    /* Foreign swapchain/surface without D3D11_BIND_SHADER_RESOURCE (or MSAA):
+     * maintain a single persistent SRV-capable texture on the visual instead of
+     * allocating and destroying a staging texture or falling back to raw copy. */
+    if (!visual)
+        return NULL;
+
+    if (!visual->cached_copy_tex || visual->cached_copy_device != (ID3D11Device *)d3d11_device
+            || visual->cached_copy_width != src_desc.Width
+            || visual->cached_copy_height != src_desc.Height
+            || visual->cached_copy_format != src_desc.Format)
+    {
+        D3D11_TEXTURE2D_DESC copy_desc;
+
+        if (visual->cached_copy_srv)
+        {
+            ID3D11ShaderResourceView_Release(visual->cached_copy_srv);
+            visual->cached_copy_srv = NULL;
+        }
+        if (visual->cached_copy_tex)
+        {
+            ID3D11Texture2D_Release(visual->cached_copy_tex);
+            visual->cached_copy_tex = NULL;
+        }
+        if (visual->cached_copy_device)
+        {
+            ID3D11Device_Release(visual->cached_copy_device);
+            visual->cached_copy_device = NULL;
+        }
+
+        memset(&copy_desc, 0, sizeof(copy_desc));
+        copy_desc.Width = src_desc.Width;
+        copy_desc.Height = src_desc.Height;
+        copy_desc.MipLevels = 1;
+        copy_desc.ArraySize = 1;
+        copy_desc.Format = src_desc.Format;
+        copy_desc.SampleDesc.Count = 1;
+        copy_desc.Usage = D3D11_USAGE_DEFAULT;
+        copy_desc.BindFlags = D3D11_BIND_SHADER_RESOURCE;
+
+        hr = ID3D11Device1_CreateTexture2D(d3d11_device, &copy_desc, NULL, &visual->cached_copy_tex);
+        if (FAILED(hr))
+            return NULL;
+
+        hr = ID3D11Device1_CreateShaderResourceView(d3d11_device,
+                (ID3D11Resource *)visual->cached_copy_tex, NULL, &visual->cached_copy_srv);
+        if (FAILED(hr))
+        {
+            ID3D11Texture2D_Release(visual->cached_copy_tex);
+            visual->cached_copy_tex = NULL;
+            return NULL;
+        }
+
+        visual->cached_copy_device = (ID3D11Device *)d3d11_device;
+        ID3D11Device_AddRef(visual->cached_copy_device);
+        visual->cached_copy_width = src_desc.Width;
+        visual->cached_copy_height = src_desc.Height;
+        visual->cached_copy_format = src_desc.Format;
+    }
+
+    if (src_desc.SampleDesc.Count > 1)
+        ID3D11DeviceContext_ResolveSubresource(d3d11_device_context,
+                (ID3D11Resource *)visual->cached_copy_tex, 0,
+                (ID3D11Resource *)src_texture, 0, src_desc.Format);
+    else
+        ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context,
+                (ID3D11Resource *)visual->cached_copy_tex, 0, 0, 0, 0,
+                (ID3D11Resource *)src_texture, 0, NULL);
+
+    ID3D11ShaderResourceView_AddRef(visual->cached_copy_srv);
+    return visual->cached_copy_srv;
+}
+
+/*
+ * One GPU pass: sample 'src_texture' (any 32-bit format; the output merger
+ * converts to the back buffer's B8G8R8A8) into the composite swapchain back
+ * buffer, multiplying by the visual opacity and discarding pixels outside the
+ * visual's rectangle clip. Falls back to a plain GPU CopySubresourceRegion
+ * only when even a cached SRV copy texture cannot be created.
+ */
+static HRESULT composite_surface_to_backbuffer(struct composition_target *target,
+        struct composition_visual *visual,
+        ID3D11Device1 *d3d11_device, ID3D11DeviceContext *d3d11_device_context,
+        ID3D11Texture2D *src_texture, UINT src_width, UINT src_height,
+        UINT dst_width, UINT dst_height, const D3DMATRIX *proj_matrix,
+        float opacity, const D2D_RECT_F *clip_rect, BOOL clear, POINT copy_off)
+{
     static const float clear_color[4] = {0.0f, 0.0f, 0.0f, 1.0f};
     struct composite_vs_data vs_data;
     struct composite_blit_data blit_data;
-    D3D11_SUBRESOURCE_DATA resource_data;
     ID3D11ShaderResourceView *srv = NULL;
-    D3D11_BUFFER_DESC buffer_desc;
-    D3D11_RASTERIZER_DESC rs_desc;
-    ID3D11RasterizerState *rs = NULL;
-    ID3D11InputLayout *input_layout = NULL;
-    ID3D11DeviceContext1 *context1 = NULL;
     ID3D11RenderTargetView *rtv = NULL;
-    ID3D11VertexShader *vs = NULL;
-    ID3D11PixelShader *ps = NULL;
-    ID3D11SamplerState *sampler = NULL;
-    D3D11_SAMPLER_DESC sampler_desc;
-    ID3D11Buffer *cb = NULL, *vs_cb = NULL, *vb = NULL;
     ID3D11Texture2D *backbuffer = NULL;
     D3D11_VIEWPORT viewport;
-    unsigned int stride, offset;
+    unsigned int stride = sizeof(float) * 4, offset = 0;
     IDXGISwapChain1 *swapchain;
     HRESULT hr;
 
@@ -582,108 +765,35 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         ID3D11RenderTargetView_AddRef(rtv);
     }
 
-    if (SUCCEEDED(hr = ID3D11Device1_CreateShaderResourceView(d3d11_device, (ID3D11Resource *)src_texture,
-            NULL, &srv)))
+    if ((srv = get_or_create_visual_srv(visual, d3d11_device, d3d11_device_context, src_texture))
+            && SUCCEEDED(hr = ensure_composite_pipeline(target, d3d11_device)))
     {
-        if (!vs_blob)
-        {
-            hr = D3DCompile(composite_vs_code, sizeof(composite_vs_code) - 1, "vs", NULL, NULL, "main",
-                            "vs_4_0", 0, 0, &vs_blob, NULL);
-            if (FAILED(hr))
-            {
-                ERR("Failed to compile vertex shader, hr %#lx.\n", hr);
-                goto done;
-            }
-            hr = D3DCompile(composite_ps_code, sizeof(composite_ps_code) - 1, "ps", NULL, NULL, "main",
-                            "ps_4_0", 0, 0, &ps_blob, NULL);
-            if (FAILED(hr))
-            {
-                ERR("Failed to compile pixel shader, hr %#lx.\n", hr);
-                goto done;
-            }
-        }
-
-        hr = ID3D11Device1_CreateVertexShader(d3d11_device, ID3D10Blob_GetBufferPointer(vs_blob),
-                ID3D10Blob_GetBufferSize(vs_blob), NULL, &vs);
-        if (FAILED(hr))
-            goto done;
-        hr = ID3D11Device1_CreatePixelShader(d3d11_device, ID3D10Blob_GetBufferPointer(ps_blob),
-                ID3D10Blob_GetBufferSize(ps_blob), NULL, &ps);
-        if (FAILED(hr))
-            goto done;
-        hr = ID3D11Device1_CreateInputLayout(d3d11_device, layout_desc, ARRAY_SIZE(layout_desc),
-                ID3D10Blob_GetBufferPointer(vs_blob), ID3D10Blob_GetBufferSize(vs_blob), &input_layout);
-        if (FAILED(hr))
-            goto done;
-
-        buffer_desc.ByteWidth = sizeof(vs_data);
-        buffer_desc.Usage = D3D11_USAGE_DEFAULT;
-        buffer_desc.BindFlags = D3D11_BIND_CONSTANT_BUFFER;
-        buffer_desc.CPUAccessFlags = 0;
-        buffer_desc.MiscFlags = 0;
-        buffer_desc.StructureByteStride = 0;
         vs_data.transform = *proj_matrix;
-        resource_data.pSysMem = &vs_data;
-        resource_data.SysMemPitch = 0;
-        resource_data.SysMemSlicePitch = 0;
-        hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &vs_cb);
-        if (FAILED(hr))
-            goto done;
-
-        buffer_desc.ByteWidth = sizeof(blit_data);
         blit_data.opacity = opacity;
         blit_data.pad[0] = blit_data.pad[1] = blit_data.pad[2] = 0;
         blit_data.clip_rect[0] = clip_rect ? clip_rect->left : 0.0f;
         blit_data.clip_rect[1] = clip_rect ? clip_rect->top : 0.0f;
         blit_data.clip_rect[2] = clip_rect ? clip_rect->right : (FLOAT)dst_width;
         blit_data.clip_rect[3] = clip_rect ? clip_rect->bottom : (FLOAT)dst_height;
-        resource_data.pSysMem = &blit_data;
-        hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &cb);
-        if (FAILED(hr))
-            goto done;
 
-        buffer_desc.ByteWidth = sizeof(quad);
-        buffer_desc.BindFlags = D3D11_BIND_VERTEX_BUFFER;
-        resource_data.pSysMem = quad;
-        hr = ID3D11Device1_CreateBuffer(d3d11_device, &buffer_desc, &resource_data, &vb);
-        if (FAILED(hr))
-            goto done;
-
-        memset(&rs_desc, 0, sizeof(rs_desc));
-        rs_desc.FillMode = D3D11_FILL_SOLID;
-        rs_desc.CullMode = D3D11_CULL_NONE;
-        rs_desc.DepthClipEnable = TRUE;
-        hr = ID3D11Device1_CreateRasterizerState(d3d11_device, &rs_desc, &rs);
-        if (FAILED(hr))
-            goto done;
-
-        memset(&sampler_desc, 0, sizeof(sampler_desc));
-        sampler_desc.Filter = D3D11_FILTER_MIN_MAG_MIP_LINEAR;
-        sampler_desc.AddressU = D3D11_TEXTURE_ADDRESS_CLAMP;
-        sampler_desc.AddressV = D3D11_TEXTURE_ADDRESS_CLAMP;
-        sampler_desc.AddressW = D3D11_TEXTURE_ADDRESS_CLAMP;
-        sampler_desc.ComparisonFunc = D3D11_COMPARISON_NEVER;
-        sampler_desc.MinLOD = 0;
-        sampler_desc.MaxLOD = D3D11_FLOAT32_MAX;
-        hr = ID3D11Device1_CreateSamplerState(d3d11_device, &sampler_desc, &sampler);
-        if (FAILED(hr))
-            goto done;
+        ID3D11DeviceContext_UpdateSubresource(d3d11_device_context,
+                (ID3D11Resource *)target->composite_vs_cb, 0, NULL, &vs_data, 0, 0);
+        ID3D11DeviceContext_UpdateSubresource(d3d11_device_context,
+                (ID3D11Resource *)target->composite_ps_cb, 0, NULL, &blit_data, 0, 0);
 
         ID3D11DeviceContext_OMSetRenderTargets(d3d11_device_context, 1, &rtv, NULL);
         if (clear)
             ID3D11DeviceContext_ClearRenderTargetView(d3d11_device_context, rtv, clear_color);
-        ID3D11DeviceContext_RSSetState(d3d11_device_context, rs);
+        ID3D11DeviceContext_RSSetState(d3d11_device_context, target->composite_rs);
         ID3D11DeviceContext_PSSetShaderResources(d3d11_device_context, 0, 1, &srv);
-        ID3D11DeviceContext_PSSetSamplers(d3d11_device_context, 0, 1, &sampler);
-        ID3D11DeviceContext_VSSetConstantBuffers(d3d11_device_context, 0, 1, &vs_cb);
-        ID3D11DeviceContext_PSSetConstantBuffers(d3d11_device_context, 0, 1, &cb);
-        ID3D11DeviceContext_IASetInputLayout(d3d11_device_context, input_layout);
+        ID3D11DeviceContext_PSSetSamplers(d3d11_device_context, 0, 1, &target->composite_sampler);
+        ID3D11DeviceContext_VSSetConstantBuffers(d3d11_device_context, 0, 1, &target->composite_vs_cb);
+        ID3D11DeviceContext_PSSetConstantBuffers(d3d11_device_context, 0, 1, &target->composite_ps_cb);
+        ID3D11DeviceContext_IASetInputLayout(d3d11_device_context, target->composite_input_layout);
         ID3D11DeviceContext_IASetPrimitiveTopology(d3d11_device_context, D3D11_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP);
-        stride = sizeof(quad[0]);
-        offset = 0;
-        ID3D11DeviceContext_IASetVertexBuffers(d3d11_device_context, 0, 1, &vb, &stride, &offset);
-        ID3D11DeviceContext_VSSetShader(d3d11_device_context, vs, NULL, 0);
-        ID3D11DeviceContext_PSSetShader(d3d11_device_context, ps, NULL, 0);
+        ID3D11DeviceContext_IASetVertexBuffers(d3d11_device_context, 0, 1, &target->composite_vb, &stride, &offset);
+        ID3D11DeviceContext_VSSetShader(d3d11_device_context, target->composite_vs, NULL, 0);
+        ID3D11DeviceContext_PSSetShader(d3d11_device_context, target->composite_ps, NULL, 0);
         viewport.TopLeftX = 0;
         viewport.TopLeftY = 0;
         viewport.Width = dst_width;
@@ -692,6 +802,7 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         viewport.MaxDepth = 1;
         ID3D11DeviceContext_RSSetViewports(d3d11_device_context, 1, &viewport);
         ID3D11DeviceContext_Draw(d3d11_device_context, 4, 0);
+        hr = S_OK;
         goto done;
     }
 
@@ -711,24 +822,6 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
     hr = S_OK;
 
 done:
-    if (context1)
-        ID3D11DeviceContext1_Release(context1);
-    if (rs)
-        ID3D11RasterizerState_Release(rs);
-    if (input_layout)
-        ID3D11InputLayout_Release(input_layout);
-    if (vs_cb)
-        ID3D11Buffer_Release(vs_cb);
-    if (cb)
-        ID3D11Buffer_Release(cb);
-    if (vb)
-        ID3D11Buffer_Release(vb);
-    if (sampler)
-        ID3D11SamplerState_Release(sampler);
-    if (ps)
-        ID3D11PixelShader_Release(ps);
-    if (vs)
-        ID3D11VertexShader_Release(vs);
     if (srv)
         ID3D11ShaderResourceView_Release(srv);
     if (rtv)
@@ -745,13 +838,14 @@ done:
  * instead of clobbering the whole drawable.
  */
 static BOOL do_composite_dxgi_surface(struct composition_target *target,
-                                      const struct composition_visual *visual,
+                                      struct composition_visual *visual,
                                       HWND target_hwnd, POINT pt,
                                       IDXGISurface *dxgi_surface,
                                       float opacity, const D2D_RECT_F *clip_rect,
                                       BOOL has_transform, const D3DMATRIX *world_transform,
                                       BOOL *out_culled)
 {
+    LARGE_INTEGER qpc_start, qpc_end, qpc_freq;
     ID3DDeviceContextState *state = NULL, *old_state = NULL;
     ID3D11DeviceContext1 *d3d11_device_context1 = NULL;
     ID3D11DeviceContext *d3d11_device_context = NULL;
@@ -787,6 +881,8 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
 
     if (out_culled)
         *out_culled = FALSE;
+
+    QueryPerformanceCounter(&qpc_start);
 
     hr = IDXGISurface_GetDevice(dxgi_surface, &IID_ID3D11Device1, (void **)&d3d11_device);
     if (FAILED(hr))
@@ -835,12 +931,38 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
      * object (and the driver state that goes with it) each time. */
     if (target->composite_state_device != d3d11_device)
     {
+        if (target->composite_sampler)
+            ID3D11SamplerState_Release(target->composite_sampler);
+        if (target->composite_rs)
+            ID3D11RasterizerState_Release(target->composite_rs);
+        if (target->composite_vb)
+            ID3D11Buffer_Release(target->composite_vb);
+        if (target->composite_ps_cb)
+            ID3D11Buffer_Release(target->composite_ps_cb);
+        if (target->composite_vs_cb)
+            ID3D11Buffer_Release(target->composite_vs_cb);
+        if (target->composite_input_layout)
+            ID3D11InputLayout_Release(target->composite_input_layout);
+        if (target->composite_ps)
+            ID3D11PixelShader_Release(target->composite_ps);
+        if (target->composite_vs)
+            ID3D11VertexShader_Release(target->composite_vs);
+        target->composite_sampler = NULL;
+        target->composite_rs = NULL;
+        target->composite_vb = NULL;
+        target->composite_ps_cb = NULL;
+        target->composite_vs_cb = NULL;
+        target->composite_input_layout = NULL;
+        target->composite_ps = NULL;
+        target->composite_vs = NULL;
         if (target->composite_state)
             ID3DDeviceContextState_Release(target->composite_state);
         if (target->composite_context1)
             ID3D11DeviceContext1_Release(target->composite_context1);
         if (target->composite_context)
             ID3D11DeviceContext_Release(target->composite_context);
+        if (target->composite_state_device)
+            ID3D11Device1_Release(target->composite_state_device);
         target->composite_state = NULL;
         target->composite_context1 = NULL;
         target->composite_context = NULL;
@@ -1067,7 +1189,7 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
         goto done;
     }
 
-    if (FAILED(hr = composite_surface_to_backbuffer(target, d3d11_device, d3d11_device_context,
+    if (FAILED(hr = composite_surface_to_backbuffer(target, visual, d3d11_device, d3d11_device_context,
             texture, surface_desc.Width, surface_desc.Height, batch ? buf_w : dst_w,
             batch ? buf_h : dst_h, &proj_matrix, opacity, effective_clip,
             !batch || !target->composite_batch_cleared,
@@ -1140,6 +1262,14 @@ done:
     {
         IDXGIKeyedMutex_ReleaseSync(keyed_mutex, 0);
         IDXGIKeyedMutex_Release(keyed_mutex);
+    }
+    if (ok && TRACE_ON(dcomp))
+    {
+        QueryPerformanceCounter(&qpc_end);
+        QueryPerformanceFrequency(&qpc_freq);
+        if (qpc_freq.QuadPart)
+            TRACE("DCOMP: do_composite_dxgi_surface %llu us\n",
+                    (unsigned long long)((qpc_end.QuadPart - qpc_start.QuadPart) * 1000000ULL / qpc_freq.QuadPart));
     }
     return ok;
 }
@@ -1262,20 +1392,21 @@ static IDCompositionVisual *shared_visual_proxy_root(HANDLE shared_visual_handle
         {
             /* Republish: a resized surface, a new content handle after a
              * device lost, or a new frame presented by the producer. Bump the change
-             * counter so the next tick re-renders. */
-            impl->size.cx = width;
-            impl->size.cy = height;
+             * counter only when the server generation or geometry/surface changed. */
+            if (impl->size.cx != (LONG)width || impl->size.cy != (LONG)height)
+            {
+                impl->size.cx = width;
+                impl->size.cy = height;
+                impl->content_version++;
+            }
             if (surface && surface != impl->shared_content_handle)
+            {
                 impl->shared_content_handle = surface;
+                impl->content_version++;
+            }
             if (dirty_count != impl->shared_dirty_count)
             {
                 impl->shared_dirty_count = dirty_count;
-                impl->content_version++;
-            }
-            else
-            {
-                /* Re-read and re-composite shared-proxy visual every tick so
-                 * per-frame producer Present is never starved. */
                 impl->content_version++;
             }
         }
@@ -1863,10 +1994,11 @@ static void collect_visual_frames(struct composition_device *device, struct comp
                     content_ver += present_count + 1;
             }
         }
-        if ((visual->is_shared_proxy && visual->shared_content_handle)
-                || (visual->content && has_drawn_content && (content_ver != visual->composited_version
+        if (((visual->is_shared_proxy && visual->shared_content_handle)
+                    || (visual->content && has_drawn_content))
+                && (content_ver != visual->composited_version
                     || xform_ver != visual->composited_transform_version
-                    || visual->composited_hwnd != target_hwnd)))
+                    || visual->composited_hwnd != target_hwnd))
         {
             if ((frame = device_alloc_frame(device)))
             {
@@ -2518,6 +2650,15 @@ static BOOL device_check_swapchains(struct composition_device *device, BOOL *has
     dcomp_lock();
     LIST_FOR_EACH_ENTRY(target, &device->targets, struct composition_target, entry)
     {
+        RECT rc;
+        if (target->hwnd && IsWindow(target->hwnd) && GetClientRect(target->hwnd, &rc)
+                && (rc.right != target->last_client_rect.right
+                    || rc.bottom != target->last_client_rect.bottom))
+        {
+            target->last_client_rect = rc;
+            InterlockedIncrement(&dcomp_tree_version);
+            updated = TRUE;
+        }
         if (target->root && visual_tree_check_swapchain(impl_from_IDCompositionVisual(target->root), 0, has_swapchain))
             updated = TRUE;
     }

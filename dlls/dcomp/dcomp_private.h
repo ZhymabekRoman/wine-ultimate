@@ -161,6 +161,8 @@ struct composition_surface
     RECT *trim_rects;         /* copy of the last Trim() rectangles, see surface_Trim() */
     UINT trim_count;
     unsigned int content_version;
+    ID3D11Device *cached_srv_device;
+    ID3D11ShaderResourceView *cached_srv;
     LONG ref;
 };
 
@@ -195,6 +197,15 @@ struct composition_target
     ID3D11DeviceContext *composite_context; /* immediate context of composite_state_device */
     ID3D11DeviceContext1 *composite_context1; /* composite_context, queried to context1 */
     ID3DDeviceContextState *composite_state; /* created once, swapped in around the draws */
+    ID3D11VertexShader *composite_vs;
+    ID3D11PixelShader *composite_ps;
+    ID3D11InputLayout *composite_input_layout;
+    ID3D11Buffer *composite_vs_cb;
+    ID3D11Buffer *composite_ps_cb;
+    ID3D11Buffer *composite_vb;
+    ID3D11RasterizerState *composite_rs;
+    ID3D11SamplerState *composite_sampler;
+    RECT last_client_rect;
     HWND composite_root_hwnd;               /* window the batch present blits to */
     RECT composite_batch_rect;              /* union of the visual regions drawn this pass */
     BOOL composite_batch_active;            /* a composite pass for this target is open */
@@ -239,6 +250,12 @@ struct composition_visual
     unsigned int composited_version;/* content_version as of the last blit to the window */
     unsigned int composited_transform_version; /* transform/effect version as of last blit */
     HWND composited_hwnd;           /* window last composited into */
+    ID3D11Device *cached_copy_device;
+    ID3D11Texture2D *cached_copy_tex;
+    ID3D11ShaderResourceView *cached_copy_srv;
+    UINT cached_copy_width;
+    UINT cached_copy_height;
+    DXGI_FORMAT cached_copy_format;
     LONG ref;
 };
 
