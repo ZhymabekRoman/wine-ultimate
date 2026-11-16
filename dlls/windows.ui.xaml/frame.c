@@ -5438,6 +5438,11 @@ static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl
     struct wv2_env_options *o;
     const void **vt;
     WCHAR env_args[512] = {0};
+    WCHAR sf_txt[32] = L"1.00";
+    WCHAR sf_arg[64] = {0};
+    UINT dpi = 0;
+    double sf = 1.0;
+    LONG desktop_h = 0;
     SIZE sz;
     HWND hw = impl->parent_hwnd ? impl->parent_hwnd : wv2_get_controller_parent();
 
@@ -5466,21 +5471,54 @@ static struct wv2_env_options *wv2_create_env_options( struct xaml_element *impl
 
     GetEnvironmentVariableW( L"WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS", env_args, ARRAY_SIZE(env_args) );
     xaml_get_layout_metrics( hw, &sz, NULL );
-    if (sz.cy > 0 && sz.cy < 1600 && !wcsstr( env_args, L"--force-device-scale-factor" ))
+
+    /* Chromium device scale factor, in order of precedence:
+     *   1. an explicit --force-device-scale-factor in WEBVIEW2_ADDITIONAL_BROWSER_ARGUMENTS wins;
+     *   2. the real Linux/Wine DPI of the window. Xft.dpi / XSettings / Wayland display scale reach
+     *      Wine as HKCU\Control Panel\Desktop\LogPixels, surfaced by GetDpiForWindow()
+     *      (96 DPI = 1.00x, 144 = 1.50x, 192 = 2.00x);
+     *   3. at the 96 DPI default, a desktop of <= 1024 px means a headless Xvfb gate lane
+     *      (1024x768) where the login card only fits above the fold when zoomed out:
+     *      desktop height / 2048 clamped to [0.50, 1.00];
+     *   4. otherwise no override at all, i.e. the native 1.00x.
+     */
+    if (wcsstr( env_args, L"--force-device-scale-factor" ))
     {
-        double sf = (double)sz.cy / 1600.0;
-        if (sf < 0.5) sf = 0.5;
-        if (sf > 1.0) sf = 1.0;
-        if (env_args[0])
-            swprintf( o->args, ARRAY_SIZE(o->args), L"%s --force-device-scale-factor=%.2f", env_args, sf );
+        lstrcpynW( sf_txt, L"env", ARRAY_SIZE(sf_txt) );
+    }
+    else
+    {
+        if (hw && IsWindow( hw )) dpi = GetDpiForWindow( hw );
+        if (!dpi) dpi = GetDpiForSystem();
+        if (!dpi) dpi = 96;
+
+        if (dpi != 96) sf = (double)dpi / 96.0;
         else
-            swprintf( o->args, ARRAY_SIZE(o->args), L"--force-device-scale-factor=%.2f", sf );
+        {
+            /* Headless Xvfb gate lanes: a 1024 px desktop (1024x768 screen + Wine virtual desktop
+             * 1280x1024), where the WhatsApp login page (1600 px design height) only fits above the
+             * fold when zoomed out. A real desktop (2560x1440) keeps the native 1.00x. */
+            desktop_h = GetSystemMetrics( SM_CYSCREEN );
+            if (desktop_h > 0 && desktop_h <= 1024)
+            {
+                sf = (double)desktop_h / 2048.0;
+                if (sf < 0.5) sf = 0.5;
+                if (sf > 1.0) sf = 1.0;
+            }
+        }
+        swprintf( sf_txt, ARRAY_SIZE(sf_txt), L"%.2f", sf );
+        if (sf != 1.0) swprintf( sf_arg, ARRAY_SIZE(sf_arg), L"--force-device-scale-factor=%.2f", sf );
     }
-    else if (env_args[0])
+
+    if (env_args[0]) lstrcpynW( o->args, env_args, ARRAY_SIZE(o->args) );
+    if (sf_arg[0])
     {
-        lstrcpynW( o->args, env_args, ARRAY_SIZE(o->args) );
+        if (o->args[0]) lstrcatW( o->args, L" " );
+        lstrcatW( o->args, sf_arg );
     }
-    ERR( "wv2_create_env_options: ver=%s args=%s\n", debugstr_w( o->target_version ), debugstr_w( o->args ) );
+    ERR( "wv2_create_env_options: ver=%s args=%s dpi=%u cy=%d desktop=%d sf=%s\n",
+         debugstr_w( o->target_version ), debugstr_w( o->args ), dpi, sz.cy, desktop_h,
+         debugstr_w( sf_txt ) );
     return o;
 }
 
