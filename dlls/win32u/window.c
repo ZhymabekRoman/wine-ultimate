@@ -24,6 +24,15 @@
 #endif
 
 #include <assert.h>
+#include <fcntl.h>
+#include <pwd.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #include "ntgdi_private.h"
@@ -1013,6 +1022,507 @@ HWND WINAPI NtUserSetParent( HWND hwnd, HWND parent )
     return old_parent;
 }
 
+#define WIN_TREE_SHM_MAGIC      0x57545245U /* "WTRE" */
+#define WIN_TREE_SHM_VERSION    1
+#define WIN_TREE_SHM_MAX_NODES  4096
+#define WIN_TREE_SHM_HASH_SIZE  8192
+#define WIN_TREE_SHM_INVALID    0xffffffffU
+#define WIN_TREE_SHM_HASH_EMPTY 0xffffU
+
+#define WIN_TREE_NODE_HAS_REGION 0x01U
+#define WIN_TREE_NODE_LAYERED    0x02U
+#define WIN_TREE_NODE_DESKTOP    0x04U
+#define WIN_TREE_NODE_LINKED     0x08U
+#define WIN_TREE_NODE_MSG_WIN    0x10U
+
+struct win_tree_shm_rect
+{
+    int left, top, right, bottom;
+};
+
+struct win_tree_shm_node
+{
+    uint32_t hwnd;
+    uint32_t parent;
+    uint32_t owner;
+    uint32_t first_child_idx;
+    uint32_t last_child_idx;
+    uint32_t next_sib_idx;
+    uint32_t prev_sib_idx;
+    uint32_t parent_idx;
+    uint32_t style;
+    uint32_t ex_style;
+    uint32_t pid;
+    uint32_t tid;
+    uint32_t dpi;
+    uint32_t monitor_dpi;
+    uint32_t flags;
+    uint32_t reserved;
+    struct win_tree_shm_rect window_rect;
+    struct win_tree_shm_rect visible_rect;
+    struct win_tree_shm_rect client_rect;
+};
+
+struct win_tree_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    uint64_t seq;
+    uint32_t count;
+    uint32_t overflow;
+    uint32_t desktop_hwnd;
+    uint32_t msg_hwnd;
+    uint16_t hash_table[WIN_TREE_SHM_HASH_SIZE];
+    struct win_tree_shm_node nodes[WIN_TREE_SHM_MAX_NODES];
+};
+
+static const struct win_tree_shm *win_tree_shm = NULL;
+static pthread_once_t win_tree_shm_once = PTHREAD_ONCE_INIT;
+
+static void init_win_tree_shm(void)
+{
+    const char *prefix = getenv( "WINEPREFIX" );
+    char config_dir[1024], path[1024], *p;
+    struct stat st;
+    int fd;
+    const struct win_tree_shm *ptr;
+
+    if (prefix)
+    {
+        size_t len = strlen( prefix );
+        if (len == 0 || len >= sizeof(config_dir) || prefix[0] != '/') return;
+        memcpy( config_dir, prefix, len + 1 );
+        for (p = config_dir + len; p > config_dir; p--) if (p[-1] != '/') break;
+        if (p > config_dir) *p = 0;
+    }
+    else
+    {
+        const char *home = getenv( "HOME" );
+        if (!home)
+        {
+            struct passwd *pwd = getpwuid( getuid() );
+            if (pwd) home = pwd->pw_dir;
+        }
+        if (!home || home[0] != '/') return;
+        if (snprintf( config_dir, sizeof(config_dir), "%s", home ) >= (int)sizeof(config_dir)) return;
+        for (p = config_dir + strlen(config_dir); p > config_dir; p--) if (p[-1] != '/') break;
+        if ((size_t)(p - config_dir) + sizeof("/.wine") > sizeof(config_dir)) return;
+        strcpy( p, "/.wine" );
+    }
+
+    if (stat( config_dir, &st ) == -1) return;
+#ifdef __ANDROID__
+    snprintf( path, sizeof(path), "%s/.wineserver/server-%llx-%llx/win_tree_shm",
+              config_dir, (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#else
+    snprintf( path, sizeof(path), "/tmp/.wine-%u/server-%llx-%llx/win_tree_shm",
+              getuid(), (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#endif
+    fd = open( path, O_RDONLY | O_CLOEXEC );
+    if (fd == -1) return;
+    if (fstat( fd, &st ) == -1 || st.st_size < (off_t)sizeof(struct win_tree_shm))
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct win_tree_shm), PROT_READ, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+    if (__atomic_load_n( &ptr->magic, __ATOMIC_ACQUIRE ) != WIN_TREE_SHM_MAGIC ||
+        ptr->version != WIN_TREE_SHM_VERSION)
+    {
+        munmap( (void *)ptr, sizeof(struct win_tree_shm) );
+        return;
+    }
+    __atomic_store_n( &win_tree_shm, ptr, __ATOMIC_RELEASE );
+}
+
+static inline const struct win_tree_shm *get_win_tree_shm(void)
+{
+    const struct win_tree_shm *shm = __atomic_load_n( &win_tree_shm, __ATOMIC_ACQUIRE );
+    if (!shm)
+    {
+        pthread_once( &win_tree_shm_once, init_win_tree_shm );
+        shm = __atomic_load_n( &win_tree_shm, __ATOMIC_ACQUIRE );
+    }
+    return shm;
+}
+
+static inline uint32_t win_tree_shm_find_node( const struct win_tree_shm *shm, uint32_t hwnd, uint32_t count )
+{
+    uint32_t slot = (hwnd * 0x9e3779b1U) & (WIN_TREE_SHM_HASH_SIZE - 1);
+    uint32_t i;
+
+    if (!hwnd) return WIN_TREE_SHM_INVALID;
+    for (i = 0; i < WIN_TREE_SHM_HASH_SIZE; i++)
+    {
+        uint32_t pos = (slot + i) & (WIN_TREE_SHM_HASH_SIZE - 1);
+        uint16_t idx = shm->hash_table[pos];
+        if (idx == WIN_TREE_SHM_HASH_EMPTY) return WIN_TREE_SHM_INVALID;
+        if (idx < count && shm->nodes[idx].hwnd == hwnd) return idx;
+    }
+    return WIN_TREE_SHM_INVALID;
+}
+
+static BOOL win_tree_shm_get_relative( HWND hwnd, UINT rel, HWND *out )
+{
+    const struct win_tree_shm *shm = get_win_tree_shm();
+    uint32_t h = wine_server_user_handle( hwnd );
+    int retry;
+
+    if (!shm || !h) return FALSE;
+    switch (rel)
+    {
+    case GW_HWNDFIRST:
+    case GW_HWNDLAST:
+    case GW_HWNDNEXT:
+    case GW_HWNDPREV:
+    case GW_OWNER:
+    case GW_CHILD:
+        break;
+    default:
+        return FALSE;
+    }
+
+    for (retry = 0; retry < 64; retry++)
+    {
+        uint64_t s1 = __atomic_load_n( &shm->seq, __ATOMIC_ACQUIRE );
+        uint32_t count, idx, res_h = 0;
+        const struct win_tree_shm_node *node;
+        BOOL ok = FALSE;
+
+        if (s1 & 1) continue;
+        if (!shm->overflow && (count = shm->count) <= WIN_TREE_SHM_MAX_NODES)
+        {
+            idx = win_tree_shm_find_node( shm, h, count );
+            if (idx != WIN_TREE_SHM_INVALID)
+            {
+                node = &shm->nodes[idx];
+                ok = TRUE;
+                switch (rel)
+                {
+                case GW_HWNDFIRST:
+                    if (node->parent_idx < count)
+                    {
+                        uint32_t c = shm->nodes[node->parent_idx].first_child_idx;
+                        if (c < count) res_h = shm->nodes[c].hwnd;
+                    }
+                    break;
+                case GW_HWNDLAST:
+                    if (node->parent_idx < count)
+                    {
+                        uint32_t c = shm->nodes[node->parent_idx].last_child_idx;
+                        if (c < count) res_h = shm->nodes[c].hwnd;
+                    }
+                    break;
+                case GW_HWNDNEXT:
+                    if ((node->flags & WIN_TREE_NODE_LINKED) && node->next_sib_idx < count)
+                        res_h = shm->nodes[node->next_sib_idx].hwnd;
+                    break;
+                case GW_HWNDPREV:
+                    if ((node->flags & WIN_TREE_NODE_LINKED) && node->prev_sib_idx < count)
+                        res_h = shm->nodes[node->prev_sib_idx].hwnd;
+                    break;
+                case GW_OWNER:
+                    res_h = node->owner;
+                    break;
+                case GW_CHILD:
+                    if (node->first_child_idx < count)
+                        res_h = shm->nodes[node->first_child_idx].hwnd;
+                    break;
+                }
+            }
+        }
+        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+        if (s1 == __atomic_load_n( &shm->seq, __ATOMIC_RELAXED ))
+        {
+            if (!ok) return FALSE;
+            *out = wine_server_ptr_handle( res_h );
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static void win_tree_shm_collect_children( const struct win_tree_shm *shm, uint32_t count,
+                                           uint32_t parent_idx, ULONG thread_id,
+                                           ULONG max_handles, HWND *buffer, ULONG *total, int depth )
+{
+    uint32_t cidx;
+    if (depth > 256) return;
+    cidx = shm->nodes[parent_idx].first_child_idx;
+    while (cidx < count)
+    {
+        const struct win_tree_shm_node *cn = &shm->nodes[cidx];
+        if (!thread_id || cn->tid == thread_id)
+        {
+            if (*total < max_handles) buffer[*total] = wine_server_ptr_handle( cn->hwnd );
+            (*total)++;
+        }
+        win_tree_shm_collect_children( shm, count, cidx, thread_id, max_handles, buffer, total, depth + 1 );
+        cidx = cn->next_sib_idx;
+    }
+}
+
+static BOOL win_tree_shm_build_hwnd_list( HDESK desktop, HWND hwnd, BOOL children, ULONG thread_id,
+                                          ULONG count_buf, HWND *buffer, ULONG *size, NTSTATUS *status_out )
+{
+    const struct win_tree_shm *shm = get_win_tree_shm();
+    uint32_t h = wine_server_user_handle( hwnd );
+    uint32_t desk_h = wine_server_user_handle( get_desktop_window() );
+    int retry;
+
+    if (desktop || !shm || !desk_h) return FALSE;
+
+    for (retry = 0; retry < 64; retry++)
+    {
+        uint64_t s1 = __atomic_load_n( &shm->seq, __ATOMIC_ACQUIRE );
+        uint32_t count, max_handles = count_buf ? count_buf - 1 : 0;
+        ULONG total = 0;
+        BOOL ok = FALSE;
+
+        if (s1 & 1) continue;
+        if (!shm->overflow && (count = shm->count) <= WIN_TREE_SHM_MAX_NODES &&
+            shm->desktop_hwnd == desk_h)
+        {
+            if (!h)
+            {
+                uint32_t root_idx = win_tree_shm_find_node( shm, desk_h, count );
+                if (root_idx < count)
+                {
+                    uint32_t cidx = shm->nodes[root_idx].first_child_idx;
+                    ok = TRUE;
+                    while (cidx < count)
+                    {
+                        const struct win_tree_shm_node *cn = &shm->nodes[cidx];
+                        if (!thread_id || cn->tid == thread_id)
+                        {
+                            if (total < max_handles) buffer[total] = wine_server_ptr_handle( cn->hwnd );
+                            total++;
+                        }
+                        cidx = cn->next_sib_idx;
+                    }
+                }
+            }
+            else
+            {
+                uint32_t idx = win_tree_shm_find_node( shm, h, count );
+                if (idx < count)
+                {
+                    const struct win_tree_shm_node *node = &shm->nodes[idx];
+                    if (children)
+                    {
+                        ok = TRUE;
+                        win_tree_shm_collect_children( shm, count, idx, thread_id, max_handles, buffer, &total, 0 );
+                    }
+                    else if (!(node->flags & WIN_TREE_NODE_DESKTOP))
+                    {
+                        if (node->flags & WIN_TREE_NODE_LINKED)
+                        {
+                            uint32_t cidx = idx;
+                            ok = TRUE;
+                            while (cidx < count)
+                            {
+                                const struct win_tree_shm_node *cn = &shm->nodes[cidx];
+                                if (!thread_id || cn->tid == thread_id)
+                                {
+                                    if (total < max_handles) buffer[total] = wine_server_ptr_handle( cn->hwnd );
+                                    total++;
+                                }
+                                cidx = cn->next_sib_idx;
+                            }
+                        }
+                    }
+                    else
+                    {
+                        ok = TRUE;
+                        if (!thread_id || node->tid == thread_id)
+                        {
+                            if (total < max_handles) buffer[total] = wine_server_ptr_handle( node->hwnd );
+                            total++;
+                        }
+                        if ((node->flags & WIN_TREE_NODE_MSG_WIN) == 0 && shm->msg_hwnd)
+                        {
+                            uint32_t midx = win_tree_shm_find_node( shm, shm->msg_hwnd, count );
+                            if (midx < count && (!thread_id || shm->nodes[midx].tid == thread_id))
+                            {
+                                if (total < max_handles) buffer[total] = wine_server_ptr_handle( shm->msg_hwnd );
+                                total++;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+        if (s1 == __atomic_load_n( &shm->seq, __ATOMIC_RELAXED ))
+        {
+            if (!ok) return FALSE;
+            if (thread_id && total == 0) return FALSE; /* let server validate thread_id */
+            *size = total + 1;
+            if (total > max_handles)
+            {
+                *status_out = STATUS_BUFFER_TOO_SMALL;
+                return TRUE;
+            }
+            buffer[total] = HWND_BOTTOM;
+            *status_out = STATUS_SUCCESS;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static inline int win_tree_shm_point_in_node( const struct win_tree_shm_node *node,
+                                              int *x, int *y, UINT dpi )
+{
+    UINT from_dpi, to_dpi;
+    RECT r;
+
+    if (!(node->style & WS_VISIBLE)) return 0;
+    if ((node->style & (WS_POPUP|WS_CHILD|WS_DISABLED)) == (WS_CHILD|WS_DISABLED)) return 0;
+    if ((node->ex_style & (WS_EX_LAYERED|WS_EX_TRANSPARENT)) == (WS_EX_LAYERED|WS_EX_TRANSPARENT)) return 0;
+    from_dpi = dpi ? dpi : node->monitor_dpi;
+    to_dpi   = node->dpi ? node->dpi : node->monitor_dpi;
+    if (from_dpi != to_dpi)
+    {
+        POINT p = map_dpi_point( (POINT){ *x, *y }, from_dpi, to_dpi );
+        *x = p.x;
+        *y = p.y;
+    }
+    r.left   = node->visible_rect.left;
+    r.top    = node->visible_rect.top;
+    r.right  = node->visible_rect.right;
+    r.bottom = node->visible_rect.bottom;
+    if (!PtInRect( &r, (POINT){ *x, *y } )) return 0;
+    if (node->flags & WIN_TREE_NODE_HAS_REGION) return -1; /* fallback to server */
+    return 1;
+}
+
+static int win_tree_shm_collect_point( const struct win_tree_shm *shm, uint32_t count,
+                                       uint32_t parent_idx, int x, int y, UINT parent_dpi,
+                                       HWND *buf, uint32_t *styles, uint32_t *dpis,
+                                       int *buf_count, int max_buf, int depth )
+{
+    uint32_t cidx;
+    if (depth > 256) return -1;
+    cidx = shm->nodes[parent_idx].first_child_idx;
+    while (cidx < count)
+    {
+        const struct win_tree_shm_node *cn = &shm->nodes[cidx];
+        int xc = x, yc = y;
+        int hit = win_tree_shm_point_in_node( cn, &xc, &yc, parent_dpi );
+        if (hit < 0) return -1;
+        if (hit > 0)
+        {
+            if (!(cn->style & (WS_MINIMIZE|WS_DISABLED)) &&
+                xc >= cn->client_rect.left && xc < cn->client_rect.right &&
+                yc >= cn->client_rect.top && yc < cn->client_rect.bottom)
+            {
+                if (win_tree_shm_collect_point( shm, count, cidx,
+                                                xc - cn->client_rect.left,
+                                                yc - cn->client_rect.top,
+                                                cn->dpi, buf, styles, dpis,
+                                                buf_count, max_buf, depth + 1 ) < 0)
+                    return -1;
+            }
+            if (*buf_count >= max_buf) return -1;
+            buf[*buf_count] = wine_server_ptr_handle( cn->hwnd );
+            if (styles) styles[*buf_count] = cn->style;
+            if (dpis) dpis[*buf_count] = cn->dpi ? cn->dpi : cn->monitor_dpi;
+            (*buf_count)++;
+        }
+        cidx = cn->next_sib_idx;
+    }
+    return 0;
+}
+
+static BOOL win_tree_shm_children_from_point_buf( HWND hwnd, POINT pt, UINT dpi,
+                                                  HWND *buf, uint32_t *styles, uint32_t *dpis,
+                                                  int max_buf, int *out_count )
+{
+    const struct win_tree_shm *shm = get_win_tree_shm();
+    uint32_t h = wine_server_user_handle( hwnd );
+    int retry;
+
+    if (!shm || !h) return FALSE;
+
+    for (retry = 0; retry < 64; retry++)
+    {
+        uint64_t s1 = __atomic_load_n( &shm->seq, __ATOMIC_ACQUIRE );
+        uint32_t count, idx;
+        int buf_count = 0;
+        BOOL ok = FALSE;
+
+        if (s1 & 1) continue;
+        if (!shm->overflow && (count = shm->count) <= WIN_TREE_SHM_MAX_NODES)
+        {
+            idx = win_tree_shm_find_node( shm, h, count );
+            if (idx < count)
+            {
+                const struct win_tree_shm_node *top = &shm->nodes[idx];
+                if ((top->flags & WIN_TREE_NODE_DESKTOP) ||
+                    (top->parent_idx < count && (shm->nodes[top->parent_idx].flags & WIN_TREE_NODE_DESKTOP)))
+                {
+                    int x = pt.x, y = pt.y;
+                    int hit = win_tree_shm_point_in_node( top, &x, &y, dpi );
+                    if (hit == 0)
+                    {
+                        ok = TRUE;
+                    }
+                    else if (hit > 0)
+                    {
+                        int rc = 0;
+                        if (!(top->style & (WS_MINIMIZE|WS_DISABLED)) &&
+                            x >= top->client_rect.left && x < top->client_rect.right &&
+                            y >= top->client_rect.top && y < top->client_rect.bottom)
+                        {
+                            int cx = (top->flags & WIN_TREE_NODE_DESKTOP) ? x : x - top->client_rect.left;
+                            int cy = (top->flags & WIN_TREE_NODE_DESKTOP) ? y : y - top->client_rect.top;
+                            rc = win_tree_shm_collect_point( shm, count, idx, cx, cy, top->dpi,
+                                                             buf, styles, dpis, &buf_count, max_buf - 1, 0 );
+                        }
+                        if (rc == 0 && buf_count < max_buf)
+                        {
+                            buf[buf_count] = wine_server_ptr_handle( top->hwnd );
+                            if (styles) styles[buf_count] = top->style;
+                            if (dpis) dpis[buf_count] = top->dpi ? top->dpi : top->monitor_dpi;
+                            buf_count++;
+                            ok = TRUE;
+                        }
+                    }
+                }
+            }
+        }
+        __atomic_thread_fence( __ATOMIC_ACQUIRE );
+        if (s1 == __atomic_load_n( &shm->seq, __ATOMIC_RELAXED ))
+        {
+            if (!ok) return FALSE;
+            *out_count = buf_count;
+            return TRUE;
+        }
+    }
+    return FALSE;
+}
+
+static BOOL win_tree_shm_children_from_point( HWND hwnd, POINT pt, UINT dpi, HWND **out_list )
+{
+    HWND local_buf[256];
+    int buf_count = 0;
+
+    if (!win_tree_shm_children_from_point_buf( hwnd, pt, dpi, local_buf, NULL, NULL, 255, &buf_count ))
+        return FALSE;
+    if (!buf_count)
+    {
+        *out_list = NULL;
+        return TRUE;
+    }
+    if (!(*out_list = malloc( (buf_count + 1) * sizeof(HWND) ))) return FALSE;
+    memcpy( *out_list, local_buf, buf_count * sizeof(HWND) );
+    (*out_list)[buf_count] = 0;
+    return TRUE;
+}
+
 /* see GetWindow */
 HWND get_window_relative( HWND hwnd, UINT rel )
 {
@@ -1078,6 +1588,8 @@ HWND get_window_relative( HWND hwnd, UINT rel )
         }
         /* else fall through to server call */
     }
+
+    if (win_tree_shm_get_relative( hwnd, rel, &retval )) return retval;
 
     SERVER_START_REQ( get_window_tree )
     {
@@ -3379,6 +3891,8 @@ static HWND *list_children_from_point( HWND hwnd, POINT pt, UINT dpi )
     int i, size = 128;
     HWND *list;
 
+    if (win_tree_shm_children_from_point( hwnd, pt, dpi, &list )) return list;
+
     for (;;)
     {
         int count = 0;
@@ -3417,8 +3931,10 @@ static HWND *list_children_from_point( HWND hwnd, POINT pt, UINT dpi )
  */
 HWND window_from_point( HWND hwnd, POINT pt, INT *hittest, BOOL send_nchittest )
 {
-    int i, res;
+    int i, res, stack_count = 0;
     HWND ret, *list;
+    HWND stack_list[256];
+    uint32_t stack_styles[256], stack_dpis[256];
     POINT win_pt;
     UINT dpi, raw_dpi;
 
@@ -3426,6 +3942,35 @@ HWND window_from_point( HWND hwnd, POINT pt, INT *hittest, BOOL send_nchittest )
     if (!(dpi = get_thread_dpi())) dpi = get_win_monitor_dpi( hwnd, &raw_dpi );
 
     *hittest = HTNOWHERE;
+
+    if (win_tree_shm_children_from_point_buf( hwnd, pt, dpi, stack_list, stack_styles, stack_dpis, 255, &stack_count ))
+    {
+        if (!stack_count) return 0;
+        stack_list[stack_count] = 0;
+        for (i = 0; i < stack_count; i++)
+        {
+            if (stack_styles[i] & WS_DISABLED)
+            {
+                *hittest = HTERROR;
+                break;
+            }
+            if (!send_nchittest || !is_current_thread_window( stack_list[i] ))
+            {
+                *hittest = HTCLIENT;
+                break;
+            }
+            win_pt = map_dpi_point( pt, dpi, stack_dpis[i] );
+            res = send_message( stack_list[i], WM_NCHITTEST, 0, MAKELPARAM( win_pt.x, win_pt.y ));
+            if (res != HTTRANSPARENT)
+            {
+                *hittest = res;
+                break;
+            }
+        }
+        ret = stack_list[i];
+        TRACE( "scope %p (%d,%d) returning %p\n", hwnd, pt.x, pt.y, ret );
+        return ret;
+    }
 
     if (!(list = list_children_from_point( hwnd, pt, dpi ))) return 0;
 
@@ -3818,6 +4363,9 @@ NTSTATUS WINAPI NtUserBuildHwndList( HDESK desktop, HWND hwnd, BOOL children, BO
     user_handle_t *list = (user_handle_t *)buffer;
     int i;
     NTSTATUS status;
+
+    if (win_tree_shm_build_hwnd_list( desktop, hwnd, children, thread_id, count, buffer, size, &status ))
+        return status;
 
     SERVER_START_REQ( get_window_list )
     {

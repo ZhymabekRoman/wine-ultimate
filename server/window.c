@@ -21,7 +21,11 @@
 #include "config.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdarg.h>
+#include <stdint.h>
+#include <sys/mman.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -341,6 +345,221 @@ static unsigned int get_window_dpi( struct window *win )
 {
     if (NTUSER_DPI_CONTEXT_IS_MONITOR_AWARE( win->shared->dpi_context )) return get_monitor_dpi( win );
     return NTUSER_DPI_CONTEXT_GET_DPI( win->shared->dpi_context );
+}
+
+#define WIN_TREE_SHM_MAGIC      0x57545245U /* "WTRE" */
+#define WIN_TREE_SHM_VERSION    1
+#define WIN_TREE_SHM_MAX_NODES  4096
+#define WIN_TREE_SHM_HASH_SIZE  8192
+#define WIN_TREE_SHM_INVALID    0xffffffffU
+#define WIN_TREE_SHM_HASH_EMPTY 0xffffU
+
+#define WIN_TREE_NODE_HAS_REGION 0x01U
+#define WIN_TREE_NODE_LAYERED    0x02U
+#define WIN_TREE_NODE_DESKTOP    0x04U
+#define WIN_TREE_NODE_LINKED     0x08U
+#define WIN_TREE_NODE_MSG_WIN    0x10U
+
+struct win_tree_shm_rect
+{
+    int left, top, right, bottom;
+};
+
+struct win_tree_shm_node
+{
+    uint32_t hwnd;
+    uint32_t parent;
+    uint32_t owner;
+    uint32_t first_child_idx;
+    uint32_t last_child_idx;
+    uint32_t next_sib_idx;
+    uint32_t prev_sib_idx;
+    uint32_t parent_idx;
+    uint32_t style;
+    uint32_t ex_style;
+    uint32_t pid;
+    uint32_t tid;
+    uint32_t dpi;
+    uint32_t monitor_dpi;
+    uint32_t flags;
+    uint32_t reserved;
+    struct win_tree_shm_rect window_rect;
+    struct win_tree_shm_rect visible_rect;
+    struct win_tree_shm_rect client_rect;
+};
+
+struct win_tree_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    uint64_t seq;
+    uint32_t count;
+    uint32_t overflow;
+    uint32_t desktop_hwnd;
+    uint32_t msg_hwnd;
+    uint16_t hash_table[WIN_TREE_SHM_HASH_SIZE];
+    struct win_tree_shm_node nodes[WIN_TREE_SHM_MAX_NODES];
+};
+
+static struct win_tree_shm *win_tree_shm = NULL;
+static int win_tree_shm_tried = 0;
+static struct desktop *win_tree_shm_desktop = NULL;
+
+static void init_win_tree_shm(void)
+{
+    int fd;
+    void *ptr;
+
+    if (win_tree_shm || win_tree_shm_tried || server_dir_fd == -1) return;
+    win_tree_shm_tried = 1;
+    fd = openat( server_dir_fd, "win_tree_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
+    if (fd == -1) return;
+    if (ftruncate( fd, sizeof(struct win_tree_shm) ) == -1)
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct win_tree_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+
+    win_tree_shm = ptr;
+    memset( win_tree_shm, 0, sizeof(*win_tree_shm) );
+    memset( win_tree_shm->hash_table, 0xff, sizeof(win_tree_shm->hash_table) );
+    win_tree_shm->version = WIN_TREE_SHM_VERSION;
+    __atomic_store_n( &win_tree_shm->magic, WIN_TREE_SHM_MAGIC, __ATOMIC_RELEASE );
+}
+
+static inline void win_tree_shm_hash_insert( struct win_tree_shm *shm, uint32_t hwnd, uint16_t idx )
+{
+    uint32_t slot = (hwnd * 0x9e3779b1U) & (WIN_TREE_SHM_HASH_SIZE - 1);
+    uint32_t i;
+
+    for (i = 0; i < WIN_TREE_SHM_HASH_SIZE; i++)
+    {
+        uint32_t pos = (slot + i) & (WIN_TREE_SHM_HASH_SIZE - 1);
+        if (shm->hash_table[pos] == WIN_TREE_SHM_HASH_EMPTY)
+        {
+            shm->hash_table[pos] = idx;
+            return;
+        }
+    }
+}
+
+static uint32_t win_tree_shm_add_subtree( struct window *win, uint32_t parent_idx,
+                                          int is_linked, int is_desktop, int is_msg_win )
+{
+    struct win_tree_shm *shm = win_tree_shm;
+    struct win_tree_shm_node *node;
+    struct window *child;
+    uint32_t idx, prev_idx = WIN_TREE_SHM_INVALID;
+
+    if (!win->handle) return WIN_TREE_SHM_INVALID;
+    if (shm->count >= WIN_TREE_SHM_MAX_NODES)
+    {
+        shm->overflow = 1;
+        return WIN_TREE_SHM_INVALID;
+    }
+
+    idx = shm->count++;
+    node = &shm->nodes[idx];
+    node->hwnd            = win->handle;
+    node->parent          = win->parent ? win->parent->handle : 0;
+    node->owner           = win->owner;
+    node->first_child_idx = WIN_TREE_SHM_INVALID;
+    node->last_child_idx  = WIN_TREE_SHM_INVALID;
+    node->next_sib_idx    = WIN_TREE_SHM_INVALID;
+    node->prev_sib_idx    = WIN_TREE_SHM_INVALID;
+    node->parent_idx      = parent_idx;
+    node->style           = win->style;
+    node->ex_style        = win->ex_style;
+    node->pid             = (win->thread && win->thread->process) ? get_process_id( win->thread->process ) : 0;
+    node->tid             = win->thread ? get_thread_id( win->thread ) : 0;
+    node->dpi             = win->shared ? get_window_dpi( win ) : USER_DEFAULT_SCREEN_DPI;
+    node->monitor_dpi     = get_monitor_dpi( win );
+    node->flags           = (win->win_region ? WIN_TREE_NODE_HAS_REGION : 0) |
+                            (win->is_layered ? WIN_TREE_NODE_LAYERED : 0) |
+                            (is_desktop ? WIN_TREE_NODE_DESKTOP : 0) |
+                            (is_linked ? WIN_TREE_NODE_LINKED : 0) |
+                            (is_msg_win ? WIN_TREE_NODE_MSG_WIN : 0);
+    node->reserved        = 0;
+    node->window_rect.left   = win->window_rect.left;
+    node->window_rect.top    = win->window_rect.top;
+    node->window_rect.right  = win->window_rect.right;
+    node->window_rect.bottom = win->window_rect.bottom;
+    node->visible_rect.left   = win->visible_rect.left;
+    node->visible_rect.top    = win->visible_rect.top;
+    node->visible_rect.right  = win->visible_rect.right;
+    node->visible_rect.bottom = win->visible_rect.bottom;
+    node->client_rect.left   = win->client_rect.left;
+    node->client_rect.top    = win->client_rect.top;
+    node->client_rect.right  = win->client_rect.right;
+    node->client_rect.bottom = win->client_rect.bottom;
+
+    win_tree_shm_hash_insert( shm, node->hwnd, (uint16_t)idx );
+
+    LIST_FOR_EACH_ENTRY( child, &win->children, struct window, entry )
+    {
+        uint32_t cidx = win_tree_shm_add_subtree( child, idx, 1, 0, 0 );
+        if (cidx == WIN_TREE_SHM_INVALID) continue;
+        if (shm->nodes[idx].first_child_idx == WIN_TREE_SHM_INVALID)
+            shm->nodes[idx].first_child_idx = cidx;
+        shm->nodes[idx].last_child_idx = cidx;
+        shm->nodes[cidx].prev_sib_idx = prev_idx;
+        if (prev_idx != WIN_TREE_SHM_INVALID)
+            shm->nodes[prev_idx].next_sib_idx = cidx;
+        prev_idx = cidx;
+    }
+
+    LIST_FOR_EACH_ENTRY( child, &win->unlinked, struct window, entry )
+    {
+        win_tree_shm_add_subtree( child, idx, 0, 0, 0 );
+    }
+
+    return idx;
+}
+
+static void sync_win_tree_shm( struct desktop *desktop )
+{
+    uint64_t seq;
+
+    if (!win_tree_shm) init_win_tree_shm();
+    if (!win_tree_shm || !desktop || !desktop->top_window) return;
+    if (!win_tree_shm_desktop) win_tree_shm_desktop = desktop;
+    if (desktop != win_tree_shm_desktop) return;
+
+    seq = win_tree_shm->seq;
+    __atomic_store_n( &win_tree_shm->seq, seq + 1, __ATOMIC_RELEASE );
+    __atomic_thread_fence( __ATOMIC_SEQ_CST );
+
+    win_tree_shm->count = 0;
+    win_tree_shm->overflow = 0;
+    win_tree_shm->desktop_hwnd = desktop->top_window->handle;
+    win_tree_shm->msg_hwnd = desktop->msg_window ? desktop->msg_window->handle : 0;
+    memset( win_tree_shm->hash_table, 0xff, sizeof(win_tree_shm->hash_table) );
+
+    win_tree_shm_add_subtree( desktop->top_window, WIN_TREE_SHM_INVALID, 1, 1, 0 );
+    if (desktop->msg_window)
+        win_tree_shm_add_subtree( desktop->msg_window, WIN_TREE_SHM_INVALID, 1, 1, 1 );
+
+    __atomic_store_n( &win_tree_shm->seq, seq + 2, __ATOMIC_RELEASE );
+}
+
+static void clear_win_tree_shm(void)
+{
+    uint64_t seq;
+
+    if (!win_tree_shm) return;
+    seq = win_tree_shm->seq;
+    __atomic_store_n( &win_tree_shm->seq, seq + 1, __ATOMIC_RELEASE );
+    __atomic_thread_fence( __ATOMIC_SEQ_CST );
+    win_tree_shm->count = 0;
+    win_tree_shm->overflow = 0;
+    win_tree_shm->desktop_hwnd = 0;
+    win_tree_shm->msg_hwnd = 0;
+    memset( win_tree_shm->hash_table, 0xff, sizeof(win_tree_shm->hash_table) );
+    __atomic_store_n( &win_tree_shm->seq, seq + 2, __ATOMIC_RELEASE );
+    win_tree_shm_desktop = NULL;
 }
 
 /* link a window at the right place in the siblings list */
@@ -2128,6 +2347,7 @@ static void set_window_region( struct window *win, struct region *region, int re
     }
 
     if (old_vis_rgn) free_region( old_vis_rgn );
+    sync_win_tree_shm( win->desktop );
     clear_error();  /* we ignore out of memory errors since the region has been set */
 }
 
@@ -2136,8 +2356,10 @@ static void set_window_region( struct window *win, struct region *region, int re
 void free_window_handle( struct window *win )
 {
     struct window *child, *next;
+    int need_sync;
 
     assert( win->handle );
+    need_sync = (win->desktop == win_tree_shm_desktop);
 
     /* hide the window */
     if (is_visible(win))
@@ -2184,7 +2406,11 @@ void free_window_handle( struct window *win )
     {
         struct desktop *desktop = win->desktop;
         assert( desktop->top_window == win || desktop->msg_window == win );
-        if (desktop->top_window == win) desktop->top_window = NULL;
+        if (desktop->top_window == win)
+        {
+            desktop->top_window = NULL;
+            if (desktop == win_tree_shm_desktop) clear_win_tree_shm();
+        }
         else desktop->msg_window = NULL;
     }
     else if (is_desktop_window( win->parent ))
@@ -2198,6 +2424,7 @@ void free_window_handle( struct window *win )
     free_user_handle( win->handle );
     win->handle = 0;
     release_object( win );
+    if (need_sync && win_tree_shm_desktop) sync_win_tree_shm( win_tree_shm_desktop );
 }
 
 static void fix_window_ex_style( struct window *win )
@@ -2277,6 +2504,7 @@ DECL_HANDLER(create_window)
 
     win->style = req->style;
     win->ex_style = req->ex_style;
+    sync_win_tree_shm( win->desktop );
 
     reply->handle      = win->handle;
     reply->parent      = win->parent ? win->parent->handle : 0;
@@ -2326,6 +2554,7 @@ DECL_HANDLER(set_parent)
     reply->old_parent  = win->parent->handle;
     reply->full_parent = parent ? parent->handle : 0;
     set_parent_window( win, parent );
+    sync_win_tree_shm( win->desktop );
 }
 
 
@@ -2375,6 +2604,7 @@ DECL_HANDLER(get_desktop_window)
             desktop->msg_window->style = WS_POPUP | WS_CLIPSIBLINGS | WS_CLIPCHILDREN;
         }
     }
+    if (req->force && desktop->top_window) sync_win_tree_shm( desktop );
 
     reply->top_window = desktop->top_window ? desktop->top_window->handle : 0;
     reply->msg_window = desktop->msg_window ? desktop->msg_window->handle : 0;
@@ -2408,6 +2638,7 @@ DECL_HANDLER(set_window_owner)
 
     reply->prev_owner = win->owner;
     reply->full_owner = win->owner = owner ? owner->handle : 0;
+    sync_win_tree_shm( win->desktop );
 }
 
 
@@ -2456,6 +2687,7 @@ DECL_HANDLER(init_window_info)
 
     /* changing window style triggers a non-client paint */
     win->paint_flags |= PAINT_NONCLIENT;
+    sync_win_tree_shm( win->desktop );
 }
 
 
@@ -2479,10 +2711,12 @@ DECL_HANDLER(set_window_info)
         fix_window_ex_style( win );
         /* changing window style triggers a non-client paint */
         win->paint_flags |= PAINT_NONCLIENT;
+        sync_win_tree_shm( win->desktop );
         break;
     case GWL_EXSTYLE:
         reply->old_info = win->ex_style;
         set_window_ex_style( win, req->new_info );
+        sync_win_tree_shm( win->desktop );
         break;
     case GWLP_ID:
         reply->old_info = win->id;
@@ -2807,6 +3041,7 @@ DECL_HANDLER(set_window_pos)
     old_client = win->client_rect;
     set_window_pos( win, previous, flags, &window_rect, &client_rect,
                     &visible_rect, &surface_rect, &valid_rect );
+    sync_win_tree_shm( win->desktop );
     if ((win->style & old_style & WS_VISIBLE) && (memcmp( &old_client, &win->client_rect, sizeof(old_client) )
         || memcmp( &old_window, &win->window_rect, sizeof(old_window) )))
         update_cursor_pos( win->desktop );
@@ -3382,6 +3617,7 @@ DECL_HANDLER(set_window_layered_info)
         win->color_key     = req->color_key;
         win->layered_flags = req->flags;
         win->is_layered    = 1;
+        sync_win_tree_shm( win->desktop );
         /* repaint since we know now it's not going to use UpdateLayeredWindow */
         if (!was_layered) redraw_window( win, 0, RDW_ALLCHILDREN | RDW_INVALIDATE | RDW_ERASE | RDW_FRAME, 0 );
     }
