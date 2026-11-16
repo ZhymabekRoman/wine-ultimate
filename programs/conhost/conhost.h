@@ -112,6 +112,16 @@ struct console
     int                    tty_cursor_visible;  /* tty cursor visibility flag */
 };
 
+enum vt_state
+{
+    VT_STATE_NONE,
+    VT_STATE_ESC,
+    VT_STATE_CSI,
+    VT_STATE_OSC,
+    VT_STATE_OSC_ESC,
+    VT_STATE_CHARSET,
+};
+
 struct screen_buffer
 {
     struct console        *console;             /* console reference */
@@ -124,6 +134,7 @@ struct screen_buffer
     unsigned int           cursor_x;            /* position of cursor */
     unsigned int           cursor_y;            /* position of cursor */
     unsigned short         attr;                /* default fill attributes (screen colors) */
+    unsigned short         default_attr;        /* initial/reset attributes for SGR 0 */
     unsigned short         popup_attr;          /* pop-up color attributes */
     unsigned int           max_width;           /* size (w-h) of the window given font size */
     unsigned int           max_height;
@@ -131,6 +142,13 @@ struct screen_buffer
     unsigned int           color_map[16];       /* color table */
     RECT                   win;                 /* current visible window on the screen buffer */
     struct font_info       font;                /* console font information */
+    enum vt_state          vt_state;            /* VT100 output parser state */
+    WCHAR                  vt_buf[256];         /* VT100 sequence accumulator */
+    unsigned int           vt_len;              /* current length in vt_buf */
+    unsigned int           vt_saved_x;          /* saved cursor X */
+    unsigned int           vt_saved_y;          /* saved cursor Y */
+    BOOL                   vt_bold;             /* SGR 1 bold intensity active */
+    BOOL                   vt_reversed;         /* SGR 7 reverse video active */
     struct wine_rb_entry   entry;               /* map entry */
 };
 

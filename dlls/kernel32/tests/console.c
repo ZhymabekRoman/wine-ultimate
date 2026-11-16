@@ -542,6 +542,115 @@ static void testWriteWrappedProcessed(HANDLE hCon, COORD sbSize)
     okCURSOR(hCon, c);
 }
 
+static void test_vt_output(HANDLE hCon, COORD sbSize)
+{
+    CONSOLE_SCREEN_BUFFER_INFO sbi;
+    CONSOLE_CURSOR_INFO cci;
+    DWORD old_mode, len;
+    WORD old_attr;
+    char old_title[256], title[256];
+    COORD c;
+    BOOL ret;
+
+#define WRITE_VT(s) do { \
+    const char *__s = (s); \
+    DWORD __slen = (DWORD)strlen(__s); \
+    ok(WriteConsoleA(hCon, __s, __slen, &len, NULL) && len == __slen, "WriteConsoleA(%s) failed\n", __s); \
+} while (0)
+
+    ret = GetConsoleMode(hCon, &old_mode);
+    ok(ret, "GetConsoleMode failed: %lu\n", GetLastError());
+    ret = GetConsoleScreenBufferInfo(hCon, &sbi);
+    ok(ret, "GetConsoleScreenBufferInfo failed: %lu\n", GetLastError());
+    old_attr = sbi.wAttributes;
+    GetConsoleTitleA(old_title, sizeof(old_title));
+
+    if (!SetConsoleMode(hCon, ENABLE_PROCESSED_OUTPUT | ENABLE_WRAP_AT_EOL_OUTPUT | ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+    {
+        win_skip("ENABLE_VIRTUAL_TERMINAL_PROCESSING not supported\n");
+        return;
+    }
+
+    ok(SetConsoleTextAttribute(hCon, DEFAULT_ATTRIB), "SetConsoleTextAttribute failed\n");
+    resetContent(hCon, sbSize, FALSE);
+    c.X = 0; c.Y = 0;
+    ok(SetConsoleCursorPosition(hCon, c), "SetConsoleCursorPosition failed\n");
+
+    /* SGR bright red (91m) and reset (0m), plus split CSI sequence */
+    WRITE_VT("\x1b[91mA\x1b[0mB\x1b[1;");
+    WRITE_VT("32mC\x1b[0m");
+    c.X = 0; c.Y = 0;
+    okCHAR(hCon, c, 'A', FOREGROUND_RED | FOREGROUND_INTENSITY);
+    c.X = 1;
+    okCHAR(hCon, c, 'B', DEFAULT_ATTRIB);
+    c.X = 2;
+    okCHAR(hCon, c, 'C', FOREGROUND_GREEN | FOREGROUND_INTENSITY);
+
+    /* Background SGR + reverse video */
+    WRITE_VT("\x1b[44mD\x1b[7mE\x1b[27mF\x1b[0m");
+    c.X = 3;
+    okCHAR(hCon, c, 'D', BACKGROUND_BLUE | DEFAULT_ATTRIB);
+    c.X = 4;
+    okCHAR(hCon, c, 'E', FOREGROUND_BLUE | (DEFAULT_ATTRIB << 4));
+    c.X = 5;
+    okCHAR(hCon, c, 'F', BACKGROUND_BLUE | DEFAULT_ATTRIB);
+
+    /* Cursor positioning: H, A, B, C, D, G */
+    WRITE_VT("\x1b[3;5HX");
+    c.X = 4; c.Y = 2;
+    okCHAR(hCon, c, 'X', DEFAULT_ATTRIB);
+    c.X = 5; c.Y = 2;
+    okCURSOR(hCon, c);
+
+    WRITE_VT("\x1b[1A\x1b[2DY");
+    c.X = 3; c.Y = 1;
+    okCHAR(hCon, c, 'Y', DEFAULT_ATTRIB);
+
+    WRITE_VT("\x1b[2B\x1b[2CZ");
+    c.X = 6; c.Y = 3;
+    okCHAR(hCon, c, 'Z', DEFAULT_ATTRIB);
+
+    WRITE_VT("\x1b[2GW");
+    c.X = 1; c.Y = 3;
+    okCHAR(hCon, c, 'W', DEFAULT_ATTRIB);
+
+    /* Erase in line (K) and display (J) */
+    WRITE_VT("\x1b[1;1H123456\x1b[1;4H\x1b[K");
+    c.X = 2; c.Y = 0;
+    okCHAR(hCon, c, '3', DEFAULT_ATTRIB);
+    c.X = 3; c.Y = 0;
+    okCHAR(hCon, c, ' ', DEFAULT_ATTRIB);
+    c.X = 5; c.Y = 0;
+    okCHAR(hCon, c, ' ', DEFAULT_ATTRIB);
+
+    WRITE_VT("\x1b[2J\x1b[H");
+    c.X = 0; c.Y = 0;
+    okCHAR(hCon, c, ' ', DEFAULT_ATTRIB);
+    okCURSOR(hCon, c);
+
+    /* Cursor visibility (?25l / ?25h) */
+    WRITE_VT("\x1b[?25l");
+    ok(GetConsoleCursorInfo(hCon, &cci) && !cci.bVisible, "expected hidden cursor\n");
+    WRITE_VT("\x1b[?25h");
+    ok(GetConsoleCursorInfo(hCon, &cci) && cci.bVisible, "expected visible cursor\n");
+
+    /* OSC title (BEL) and progress (ST) without polluting buffer */
+    WRITE_VT("\x1b]0;vt_test_title\x07\x1b]9;4;1;50\x1b\\Q");
+    c.X = 0; c.Y = 0;
+    okCHAR(hCon, c, 'Q', DEFAULT_ATTRIB);
+    title[0] = 0;
+    GetConsoleTitleA(title, sizeof(title));
+    ok(!strcmp(title, "vt_test_title"), "unexpected title %s\n", title);
+
+#undef WRITE_VT
+
+    /* Restore */
+    SetConsoleTitleA(old_title);
+    SetConsoleMode(hCon, old_mode);
+    SetConsoleTextAttribute(hCon, old_attr);
+    resetContent(hCon, sbSize, FALSE);
+}
+
 static void testWrite(HANDLE hCon, COORD sbSize)
 {
     /* FIXME: should in fact ensure that the sb is at least 10 characters wide */
@@ -558,6 +667,7 @@ static void testWrite(HANDLE hCon, COORD sbSize)
     testWriteWrappedNotProcessed(hCon, sbSize);
     resetContent(hCon, sbSize, FALSE);
     testWriteWrappedProcessed(hCon, sbSize);
+    test_vt_output(hCon, sbSize);
 }
 
 static void testScroll(HANDLE hCon, COORD sbSize)

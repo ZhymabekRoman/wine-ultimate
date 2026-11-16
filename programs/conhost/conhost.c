@@ -122,6 +122,7 @@ static struct screen_buffer *create_screen_buffer( struct console *console, int 
         screen_buffer->font.weight = FW_NORMAL;
         screen_buffer->font.pitch_family = FIXED_PITCH | FF_DONTCARE;
     }
+    screen_buffer->default_attr = screen_buffer->attr;
 
     if (wine_rb_put( &screen_buffer_map, LongToPtr(id), &screen_buffer->entry ))
     {
@@ -283,7 +284,11 @@ static void set_tty_attr( struct console *console, unsigned int attr )
             sprintf(buf, "\x1b[%um", n);
             tty_write( console, buf, strlen(buf) );
         }
-        else tty_write( console, "\x1b[m", 3 );
+        else
+        {
+            tty_write( console, "\x1b[m", 3 );
+            console->tty_attr = 7;
+        }
     }
 
     if ((attr & 0xf0) != (console->tty_attr & 0xf0) && attr != 7)
@@ -306,7 +311,10 @@ static void tty_sync( struct console *console )
 
     if (console->active->cursor_visible)
     {
-        set_tty_cursor( console, get_bounded_cursor_x( console->active ), console->active->cursor_y );
+        if (console->use_relative_cursor)
+            set_tty_cursor_relative( console, get_bounded_cursor_x( console->active ), console->active->cursor_y );
+        else
+            set_tty_cursor( console, get_bounded_cursor_x( console->active ), console->active->cursor_y );
         if (!console->tty_cursor_visible)
         {
             tty_write( console, "\x1b[?25h", 6 ); /* show cursor */
@@ -391,7 +399,10 @@ static void update_output( struct screen_buffer *screen_buffer, RECT *rect )
         {
             ch = &screen_buffer->data[y * screen_buffer->width + x];
             set_tty_attr( screen_buffer->console, ch->attr );
-            set_tty_cursor( screen_buffer->console, x, y );
+            if (screen_buffer->console->use_relative_cursor)
+                set_tty_cursor_relative( screen_buffer->console, x, y );
+            else
+                set_tty_cursor( screen_buffer->console, x, y );
 
             if (x + trailing_spaces >= screen_buffer->width)
             {
@@ -2105,6 +2116,529 @@ static NTSTATUS set_output_info( struct screen_buffer *screen_buffer,
     return STATUS_SUCCESS;
 }
 
+static NTSTATUS set_console_title( struct console *console, const WCHAR *in_title, size_t size );
+
+static void vt_clear_cells( struct screen_buffer *sb, unsigned int start, unsigned int end, RECT *update_rect )
+{
+    unsigned short attr = sb->attr;
+    unsigned int i;
+
+    for (i = start; i < end; i++)
+    {
+        if (sb->data[i].ch != ' ' || sb->data[i].attr != attr)
+        {
+            unsigned int x = i % sb->width;
+            unsigned int y = i / sb->width;
+            sb->data[i].ch = ' ';
+            sb->data[i].attr = attr;
+            update_rect->left   = min( update_rect->left, x );
+            update_rect->top    = min( update_rect->top, y );
+            update_rect->right  = max( update_rect->right, x );
+            update_rect->bottom = max( update_rect->bottom, y );
+        }
+    }
+}
+
+static unsigned short vt_ansi_fg( unsigned int c )
+{
+    return ((c & 1) ? FOREGROUND_RED : 0) |
+           ((c & 2) ? FOREGROUND_GREEN : 0) |
+           ((c & 4) ? FOREGROUND_BLUE : 0);
+}
+
+static unsigned short vt_rgb_fg( unsigned int r, unsigned int g, unsigned int b )
+{
+    unsigned short fg = 0;
+    if (r >= 128) fg |= FOREGROUND_RED;
+    if (g >= 128) fg |= FOREGROUND_GREEN;
+    if (b >= 128) fg |= FOREGROUND_BLUE;
+    if (r >= 192 || g >= 192 || b >= 192 || (!fg && (r >= 64 || g >= 64 || b >= 64)))
+        fg |= FOREGROUND_INTENSITY;
+    return fg;
+}
+
+static unsigned short vt_256_fg( unsigned int n )
+{
+    static const unsigned char levels[6] = { 0, 95, 135, 175, 215, 255 };
+    if (n < 8) return vt_ansi_fg( n );
+    if (n < 16) return vt_ansi_fg( n - 8 ) | FOREGROUND_INTENSITY;
+    if (n < 232)
+    {
+        n -= 16;
+        return vt_rgb_fg( levels[n / 36], levels[(n / 6) % 6], levels[n % 6] );
+    }
+    n = 8 + (n - 232) * 10;
+    return vt_rgb_fg( n, n, n );
+}
+
+static void vt_set_fg( struct screen_buffer *sb, unsigned short fg )
+{
+    if (sb->vt_reversed)
+        sb->attr = (sb->attr & ~0xf0) | ((fg & 0x0f) << 4);
+    else
+        sb->attr = (sb->attr & ~0x0f) | (fg & 0x0f);
+}
+
+static void vt_set_bg( struct screen_buffer *sb, unsigned short fg_bits )
+{
+    if (sb->vt_reversed)
+        sb->attr = (sb->attr & ~0x0f) | (fg_bits & 0x0f);
+    else
+        sb->attr = (sb->attr & ~0xf0) | ((fg_bits & 0x0f) << 4);
+}
+
+static void vt_apply_sgr( struct screen_buffer *sb, const unsigned int *params, const BOOL *has_param, unsigned int nparams )
+{
+    unsigned int i, p;
+
+    if (!nparams)
+    {
+        sb->attr = sb->default_attr;
+        sb->vt_bold = FALSE;
+        sb->vt_reversed = FALSE;
+        return;
+    }
+
+    for (i = 0; i < nparams; i++)
+    {
+        p = has_param[i] ? params[i] : 0;
+        if (p == 0)
+        {
+            sb->attr = sb->default_attr;
+            sb->vt_bold = FALSE;
+            sb->vt_reversed = FALSE;
+        }
+        else if (p == 1)
+        {
+            sb->vt_bold = TRUE;
+            if (sb->vt_reversed) sb->attr |= BACKGROUND_INTENSITY;
+            else sb->attr |= FOREGROUND_INTENSITY;
+        }
+        else if (p == 2 || p == 22)
+        {
+            sb->vt_bold = FALSE;
+            if (sb->vt_reversed) sb->attr &= ~BACKGROUND_INTENSITY;
+            else sb->attr &= ~FOREGROUND_INTENSITY;
+        }
+        else if (p == 7)
+        {
+            if (!sb->vt_reversed)
+            {
+                unsigned short fg = sb->attr & 0x0f;
+                unsigned short bg = (sb->attr >> 4) & 0x0f;
+                sb->attr = (sb->attr & ~0xff) | (fg << 4) | bg;
+                sb->vt_reversed = TRUE;
+            }
+        }
+        else if (p == 27)
+        {
+            if (sb->vt_reversed)
+            {
+                unsigned short fg = sb->attr & 0x0f;
+                unsigned short bg = (sb->attr >> 4) & 0x0f;
+                sb->attr = (sb->attr & ~0xff) | (fg << 4) | bg;
+                sb->vt_reversed = FALSE;
+            }
+        }
+        else if (p >= 30 && p <= 37)
+        {
+            vt_set_fg( sb, vt_ansi_fg( p - 30 ) | (sb->vt_bold ? FOREGROUND_INTENSITY : 0) );
+        }
+        else if (p == 38 || p == 48)
+        {
+            BOOL is_bg = (p == 48);
+            unsigned int mode = (i + 1 < nparams && has_param[i + 1]) ? params[i + 1] : 0;
+            if (mode == 5 && i + 2 < nparams)
+            {
+                unsigned short c = vt_256_fg( has_param[i + 2] ? params[i + 2] : 0 );
+                if (is_bg) vt_set_bg( sb, c );
+                else vt_set_fg( sb, c );
+                i += 2;
+            }
+            else if (mode == 2 && i + 4 < nparams)
+            {
+                unsigned int r = has_param[i + 2] ? params[i + 2] : 0;
+                unsigned int g = has_param[i + 3] ? params[i + 3] : 0;
+                unsigned int b = has_param[i + 4] ? params[i + 4] : 0;
+                unsigned short c = vt_rgb_fg( r, g, b );
+                if (is_bg) vt_set_bg( sb, c );
+                else vt_set_fg( sb, c );
+                i += 4;
+            }
+        }
+        else if (p == 39)
+        {
+            vt_set_fg( sb, (sb->default_attr & 0x0f) | (sb->vt_bold ? FOREGROUND_INTENSITY : 0) );
+        }
+        else if (p >= 40 && p <= 47)
+        {
+            vt_set_bg( sb, vt_ansi_fg( p - 40 ) );
+        }
+        else if (p == 49)
+        {
+            vt_set_bg( sb, (sb->default_attr >> 4) & 0x0f );
+        }
+        else if (p >= 90 && p <= 97)
+        {
+            vt_set_fg( sb, vt_ansi_fg( p - 90 ) | FOREGROUND_INTENSITY );
+        }
+        else if (p >= 100 && p <= 107)
+        {
+            vt_set_bg( sb, vt_ansi_fg( p - 100 ) | FOREGROUND_INTENSITY );
+        }
+    }
+}
+
+static void vt_exec_csi( struct screen_buffer *sb, RECT *update_rect )
+{
+    unsigned int params[16] = { 0 };
+    BOOL has_param[16] = { 0 };
+    unsigned int nparams = 0;
+    WCHAR priv = 0, interm = 0, final;
+    unsigned int i = 0, val = 0, cx, cy, n;
+    BOOL in_num = FALSE;
+
+    if (!sb->vt_len) return;
+    final = sb->vt_buf[sb->vt_len - 1];
+
+    if (sb->vt_buf[0] == '?' || sb->vt_buf[0] == '>' || sb->vt_buf[0] == '<' || sb->vt_buf[0] == '=')
+        priv = sb->vt_buf[i++];
+
+    for (; i + 1 < sb->vt_len; i++)
+    {
+        WCHAR c = sb->vt_buf[i];
+        if (c >= '0' && c <= '9')
+        {
+            if (val < 100000) val = val * 10 + (c - '0');
+            in_num = TRUE;
+        }
+        else if (c == ';')
+        {
+            if (nparams < ARRAY_SIZE(params))
+            {
+                params[nparams] = val;
+                has_param[nparams] = in_num;
+                nparams++;
+            }
+            val = 0;
+            in_num = FALSE;
+        }
+        else if (c >= 0x20 && c <= 0x2f)
+        {
+            interm = c;
+        }
+    }
+    if ((in_num || nparams > 0) && nparams < ARRAY_SIZE(params))
+    {
+        params[nparams] = val;
+        has_param[nparams] = in_num;
+        nparams++;
+    }
+
+    if (priv == '?')
+    {
+        if (!interm && (final == 'h' || final == 'l'))
+        {
+            for (i = 0; i < nparams; i++)
+            {
+                if (has_param[i] && params[i] == 25)
+                    sb->cursor_visible = (final == 'h');
+            }
+        }
+        return;
+    }
+    if (priv || interm) return;
+
+#define VT_PARAM(idx, def) ((idx) < nparams && has_param[idx] ? params[idx] : (def))
+#define VT_PARAM1(idx) max( 1u, VT_PARAM(idx, 1) )
+
+    switch (final)
+    {
+    case 'A':
+        n = VT_PARAM1(0);
+        sb->cursor_x = get_bounded_cursor_x( sb );
+        sb->cursor_y = (sb->cursor_y > n) ? sb->cursor_y - n : 0;
+        break;
+    case 'B':
+    case 'e':
+        n = VT_PARAM1(0);
+        sb->cursor_x = get_bounded_cursor_x( sb );
+        sb->cursor_y = min( sb->height - 1, sb->cursor_y + n );
+        break;
+    case 'C':
+    case 'a':
+        n = VT_PARAM1(0);
+        sb->cursor_x = get_bounded_cursor_x( sb );
+        sb->cursor_x = min( sb->width - 1, sb->cursor_x + n );
+        break;
+    case 'D':
+        n = VT_PARAM1(0);
+        sb->cursor_x = get_bounded_cursor_x( sb );
+        sb->cursor_x = (sb->cursor_x > n) ? sb->cursor_x - n : 0;
+        break;
+    case 'E':
+        n = VT_PARAM1(0);
+        sb->cursor_x = 0;
+        sb->cursor_y = min( sb->height - 1, sb->cursor_y + n );
+        break;
+    case 'F':
+        n = VT_PARAM1(0);
+        sb->cursor_x = 0;
+        sb->cursor_y = (sb->cursor_y > n) ? sb->cursor_y - n : 0;
+        break;
+    case 'G':
+    case '`':
+        n = VT_PARAM1(0);
+        sb->cursor_x = min( sb->width - 1, n - 1 );
+        break;
+    case 'd':
+        n = VT_PARAM1(0);
+        sb->cursor_y = min( sb->height - 1, n - 1 );
+        break;
+    case 'H':
+    case 'f':
+        {
+            unsigned int row = VT_PARAM1(0);
+            unsigned int col = VT_PARAM1(1);
+            unsigned int top = max( 0, sb->win.top );
+            unsigned int left = max( 0, sb->win.left );
+            unsigned int bottom = min( sb->height - 1, (unsigned int)max( 0, sb->win.bottom ) );
+            unsigned int right = min( sb->width - 1, (unsigned int)max( 0, sb->win.right ) );
+            if (bottom < top) { top = 0; bottom = sb->height - 1; }
+            if (right < left) { left = 0; right = sb->width - 1; }
+            sb->cursor_y = min( bottom, top + row - 1 );
+            sb->cursor_x = min( right, left + col - 1 );
+        }
+        break;
+    case 'J':
+        n = VT_PARAM(0, 0);
+        cx = get_bounded_cursor_x( sb );
+        cy = sb->cursor_y;
+        if (n == 0) vt_clear_cells( sb, cy * sb->width + cx, sb->height * sb->width, update_rect );
+        else if (n == 1) vt_clear_cells( sb, 0, cy * sb->width + cx + 1, update_rect );
+        else if (n == 2 || n == 3) vt_clear_cells( sb, 0, sb->height * sb->width, update_rect );
+        break;
+    case 'K':
+        n = VT_PARAM(0, 0);
+        cx = get_bounded_cursor_x( sb );
+        cy = sb->cursor_y * sb->width;
+        if (n == 0) vt_clear_cells( sb, cy + cx, cy + sb->width, update_rect );
+        else if (n == 1) vt_clear_cells( sb, cy, cy + cx + 1, update_rect );
+        else if (n == 2) vt_clear_cells( sb, cy, cy + sb->width, update_rect );
+        break;
+    case 'X':
+        n = VT_PARAM1(0);
+        cx = get_bounded_cursor_x( sb );
+        cy = sb->cursor_y * sb->width;
+        vt_clear_cells( sb, cy + cx, cy + min( sb->width, cx + n ), update_rect );
+        break;
+    case 'm':
+        vt_apply_sgr( sb, params, has_param, nparams );
+        break;
+    case 's':
+        sb->vt_saved_x = get_bounded_cursor_x( sb );
+        sb->vt_saved_y = sb->cursor_y;
+        break;
+    case 'u':
+        sb->cursor_x = min( sb->vt_saved_x, sb->width - 1 );
+        sb->cursor_y = min( sb->vt_saved_y, sb->height - 1 );
+        break;
+    default:
+        TRACE( "unhandled CSI %s\n", debugstr_wn( sb->vt_buf, sb->vt_len ) );
+        break;
+    }
+
+#undef VT_PARAM
+#undef VT_PARAM1
+}
+
+static void vt_exec_osc( struct screen_buffer *sb )
+{
+    unsigned int sep = 0, cmd = 0;
+
+    if (!sb->vt_len || sb->vt_len >= ARRAY_SIZE(sb->vt_buf)) return;
+
+    while (sep < sb->vt_len && sb->vt_buf[sep] != ';')
+    {
+        if (sb->vt_buf[sep] >= '0' && sb->vt_buf[sep] <= '9')
+            cmd = cmd * 10 + (sb->vt_buf[sep] - '0');
+        else
+            break;
+        sep++;
+    }
+
+    if ((cmd == 0 || cmd == 2) && sep < sb->vt_len && sb->vt_buf[sep] == ';')
+    {
+        const WCHAR *title = sb->vt_buf + sep + 1;
+        size_t title_bytes = (sb->vt_len - sep - 1) * sizeof(WCHAR);
+        set_console_title( sb->console, title, title_bytes );
+        return;
+    }
+
+    if (sb->console->tty_output && (cmd == 9 || cmd == 8))
+    {
+        char utf8[512];
+        int len = WideCharToMultiByte( get_tty_cp( sb->console ), 0, sb->vt_buf, sb->vt_len,
+                                       utf8, sizeof(utf8), NULL, NULL );
+        if (len > 0)
+        {
+            tty_write( sb->console, "\x1b]", 2 );
+            tty_write( sb->console, utf8, len );
+            tty_write( sb->console, "\x07", 1 );
+        }
+    }
+    else
+    {
+        TRACE( "ignoring OSC %s\n", debugstr_wn( sb->vt_buf, sb->vt_len ) );
+    }
+}
+
+static BOOL vt_process_char( struct screen_buffer *sb, WCHAR ch, RECT *update_rect )
+{
+    switch (sb->vt_state)
+    {
+    case VT_STATE_NONE:
+        if (ch == 0x1b)
+        {
+            sb->vt_state = VT_STATE_ESC;
+            sb->vt_len = 0;
+            return TRUE;
+        }
+        return FALSE;
+
+    case VT_STATE_ESC:
+        if (ch == '[')
+        {
+            sb->vt_state = VT_STATE_CSI;
+            sb->vt_len = 0;
+        }
+        else if (ch == ']')
+        {
+            sb->vt_state = VT_STATE_OSC;
+            sb->vt_len = 0;
+        }
+        else if (ch == '(' || ch == ')' || ch == '*' || ch == '+')
+        {
+            sb->vt_state = VT_STATE_CHARSET;
+        }
+        else
+        {
+            switch (ch)
+            {
+            case '7':
+                sb->vt_saved_x = get_bounded_cursor_x( sb );
+                sb->vt_saved_y = sb->cursor_y;
+                break;
+            case '8':
+                sb->cursor_x = min( sb->vt_saved_x, sb->width - 1 );
+                sb->cursor_y = min( sb->vt_saved_y, sb->height - 1 );
+                break;
+            case 'D':
+                if (++sb->cursor_y == sb->height)
+                    new_line( sb, update_rect );
+                break;
+            case 'E':
+                sb->cursor_x = 0;
+                if (++sb->cursor_y == sb->height)
+                    new_line( sb, update_rect );
+                break;
+            case 'M':
+                if (sb->cursor_y) sb->cursor_y--;
+                break;
+            case 'c':
+                sb->attr = sb->default_attr;
+                sb->vt_bold = FALSE;
+                sb->vt_reversed = FALSE;
+                sb->cursor_x = 0;
+                sb->cursor_y = 0;
+                sb->cursor_visible = TRUE;
+                vt_clear_cells( sb, 0, sb->width * sb->height, update_rect );
+                break;
+            default:
+                break;
+            }
+            sb->vt_state = VT_STATE_NONE;
+        }
+        return TRUE;
+
+    case VT_STATE_CHARSET:
+        sb->vt_state = VT_STATE_NONE;
+        return TRUE;
+
+    case VT_STATE_CSI:
+        if (ch == 0x1b)
+        {
+            sb->vt_state = VT_STATE_ESC;
+            sb->vt_len = 0;
+            return TRUE;
+        }
+        if (ch == 0x18 || ch == 0x1a)
+        {
+            sb->vt_state = VT_STATE_NONE;
+            sb->vt_len = 0;
+            return TRUE;
+        }
+        if (ch < 0x20) return FALSE;
+        if (sb->vt_len < ARRAY_SIZE(sb->vt_buf))
+            sb->vt_buf[sb->vt_len++] = ch;
+        if (ch >= 0x40 && ch <= 0x7e)
+        {
+            if (sb->vt_len < ARRAY_SIZE(sb->vt_buf))
+                vt_exec_csi( sb, update_rect );
+            sb->vt_state = VT_STATE_NONE;
+            sb->vt_len = 0;
+        }
+        else if (sb->vt_len >= ARRAY_SIZE(sb->vt_buf))
+        {
+            sb->vt_state = VT_STATE_NONE;
+            sb->vt_len = 0;
+        }
+        return TRUE;
+
+    case VT_STATE_OSC:
+        if (ch == '\x07')
+        {
+            vt_exec_osc( sb );
+            sb->vt_state = VT_STATE_NONE;
+            sb->vt_len = 0;
+            return TRUE;
+        }
+        if (ch == 0x1b)
+        {
+            sb->vt_state = VT_STATE_OSC_ESC;
+            return TRUE;
+        }
+        if (sb->vt_len < ARRAY_SIZE(sb->vt_buf))
+            sb->vt_buf[sb->vt_len++] = ch;
+        return TRUE;
+
+    case VT_STATE_OSC_ESC:
+        if (ch == '\\')
+        {
+            vt_exec_osc( sb );
+            sb->vt_state = VT_STATE_NONE;
+            sb->vt_len = 0;
+        }
+        else if (ch == 0x1b)
+        {
+            return TRUE;
+        }
+        else if (ch == '[')
+        {
+            sb->vt_state = VT_STATE_CSI;
+            sb->vt_len = 0;
+        }
+        else
+        {
+            sb->vt_state = VT_STATE_NONE;
+            sb->vt_len = 0;
+        }
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
 static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR *buffer, size_t len )
 {
     RECT update_rect;
@@ -2118,6 +2652,10 @@ static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR 
     {
         if (screen_buffer->mode & ENABLE_PROCESSED_OUTPUT)
         {
+            if ((screen_buffer->mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING) &&
+                vt_process_char( screen_buffer, buffer[i], &update_rect ))
+                continue;
+
             switch (buffer[i])
             {
             case '\b':
@@ -2136,7 +2674,10 @@ static NTSTATUS write_console( struct screen_buffer *screen_buffer, const WCHAR 
                 else if (screen_buffer->mode & ENABLE_WRAP_AT_EOL_OUTPUT)
                 {
                     update_output( screen_buffer, &update_rect );
-                    set_tty_cursor( screen_buffer->console, screen_buffer->cursor_x, screen_buffer->cursor_y );
+                    if (screen_buffer->console->use_relative_cursor)
+                        set_tty_cursor_relative( screen_buffer->console, screen_buffer->cursor_x, screen_buffer->cursor_y );
+                    else
+                        set_tty_cursor( screen_buffer->console, screen_buffer->cursor_x, screen_buffer->cursor_y );
                 }
                 continue;
             case '\a':
@@ -2588,6 +3129,11 @@ static NTSTATUS screen_buffer_ioctl( struct screen_buffer *screen_buffer, unsign
     case IOCTL_CONDRV_SET_MODE:
         if (in_size != sizeof(unsigned int) || *out_size) return STATUS_INVALID_PARAMETER;
         screen_buffer->mode = *(unsigned int *)in_data;
+        if (!(screen_buffer->mode & ENABLE_VIRTUAL_TERMINAL_PROCESSING))
+        {
+            screen_buffer->vt_state = VT_STATE_NONE;
+            screen_buffer->vt_len = 0;
+        }
         TRACE( "set %x mode\n", screen_buffer->mode );
         return STATUS_SUCCESS;
 
