@@ -36,6 +36,8 @@
 #include "dwmapi.h"
 #include "d3d11_4.h"
 #include "d3dcompiler.h"
+#include <ddk/d3dkmthk.h>
+#include "ntgdi.h"
 #include "wine/server.h"
 #include "wine/wined3d.h"
 #include "wine/debug.h"
@@ -45,6 +47,18 @@ WINE_DEFAULT_DEBUG_CHANNEL(dcomp);
 /* Exported by dxgi (dxgi.spec): the wined3d swapchain behind a DXGI
  * swapchain, for direct-to-display composition. */
 struct wined3d_swapchain *dxgi_get_wined3d_swapchain(struct IDXGISwapChain *swapchain);
+
+/* D3DKMTWaitForVerticalBlankEvent (d3d11.spec, exported by d3d11.dll; the
+ * winex11 build is a stub that returns immediately) and the win32u syscall it
+ * forwards to on real hardware. Resolved at runtime: the spec stubs are not
+ * present in the import libraries. The caller measures the wait to tell a
+ * real vertical-blank signal from the stub's immediate return. */
+typedef struct
+{
+    D3DKMT_HANDLE hDevice;
+} D3DKMT_WAITFORVERTICALBLANKEVENT;
+
+typedef NTSTATUS (WINAPI *pfn_wait_vblank)( const D3DKMT_WAITFORVERTICALBLANKEVENT *params );
 
 /* Guards device->rendering_device and device->surface_factory, both of which
  * are created by calls into Direct3D. Locking order is dcomp_device_cs before
@@ -499,7 +513,7 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
         ID3D11Device1 *d3d11_device, ID3D11DeviceContext *d3d11_device_context,
         ID3D11Texture2D *src_texture, UINT src_width, UINT src_height,
         UINT dst_width, UINT dst_height, const D3DMATRIX *proj_matrix,
-        float opacity, const D2D_RECT_F *clip_rect)
+        float opacity, const D2D_RECT_F *clip_rect, BOOL clear, POINT copy_off)
 {
     static ID3D10Blob *vs_blob = NULL, *ps_blob = NULL;
     static const struct
@@ -656,7 +670,8 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
             goto done;
 
         ID3D11DeviceContext_OMSetRenderTargets(d3d11_device_context, 1, &rtv, NULL);
-        ID3D11DeviceContext_ClearRenderTargetView(d3d11_device_context, rtv, clear_color);
+        if (clear)
+            ID3D11DeviceContext_ClearRenderTargetView(d3d11_device_context, rtv, clear_color);
         ID3D11DeviceContext_RSSetState(d3d11_device_context, rs);
         ID3D11DeviceContext_PSSetShaderResources(d3d11_device_context, 0, 1, &srv);
         ID3D11DeviceContext_PSSetSamplers(d3d11_device_context, 0, 1, &sampler);
@@ -690,7 +705,7 @@ static HRESULT composite_surface_to_backbuffer(struct composition_target *target
     {
         D3D11_BOX box = {0, 0, 0, min(src_width, dst_width), min(src_height, dst_height), 1};
         ID3D11DeviceContext_CopySubresourceRegion(d3d11_device_context, (ID3D11Resource *)backbuffer,
-                0, 0, 0, 0, (ID3D11Resource *)src_texture, 0, &box);
+                0, copy_off.x, copy_off.y, 0, (ID3D11Resource *)src_texture, 0, &box);
     }
     ID3D11Texture2D_Release(backbuffer);
     hr = S_OK;
@@ -756,6 +771,11 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
     BOOL use_proj_path;
     BOOL ok = FALSE;
     HRESULT hr;
+    /* Single-pass mode: the back buffer covers the whole target window and
+     * composite_target_end() presents it once for all visuals of this tick. */
+    BOOL batch = target->composite_batch_active;
+    UINT buf_w, buf_h;
+    RECT root_client = {0, 0, 0, 0};
 
     static const D3D_FEATURE_LEVEL feature_levels[] =
     {
@@ -809,14 +829,40 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
     ID3D11Multithread_SetMultithreadProtected(multithread, TRUE);
     ID3D11Multithread_Enter(multithread);
 
-    /* Is this really necessary? anyway, just to be safe */
-    if (FAILED(hr = ID3D11Device1_CreateDeviceContextState(d3d11_device, 0, feature_levels,
-                                                           ARRAY_SIZE(feature_levels), D3D11_SDK_VERSION,
-                                                           &IID_ID3D11Device1, NULL, &state)))
+    /* Is this really necessary? anyway, just to be safe. The context state is
+     * cached on the target: one per composite device, reused by every visual
+     * of every frame. Creating it per visual allocates a full wined3d_state
+     * object (and the driver state that goes with it) each time. */
+    if (target->composite_state_device != d3d11_device)
     {
-        ERR("Failed to create device context state, hr %#lx.\n", hr);
-        goto done;
+        if (target->composite_state)
+            ID3DDeviceContextState_Release(target->composite_state);
+        if (target->composite_context1)
+            ID3D11DeviceContext1_Release(target->composite_context1);
+        if (target->composite_context)
+            ID3D11DeviceContext_Release(target->composite_context);
+        target->composite_state = NULL;
+        target->composite_context1 = NULL;
+        target->composite_context = NULL;
+        ID3D11Device1_AddRef(d3d11_device);
+        target->composite_state_device = d3d11_device;
     }
+    if (!target->composite_state)
+    {
+        if (FAILED(hr = ID3D11Device1_CreateDeviceContextState(d3d11_device, 0, feature_levels,
+                                                               ARRAY_SIZE(feature_levels), D3D11_SDK_VERSION,
+                                                               &IID_ID3D11Device1, NULL, &target->composite_state)))
+        {
+            ERR("Failed to create device context state, hr %#lx.\n", hr);
+            goto done;
+        }
+        ID3D11DeviceContext_AddRef(d3d11_device_context);
+        target->composite_context = d3d11_device_context;
+        ID3D11DeviceContext1_AddRef(d3d11_device_context1);
+        target->composite_context1 = d3d11_device_context1;
+    }
+    state = target->composite_state;
+    ID3DDeviceContextState_AddRef(state);
     ID3D11DeviceContext1_SwapDeviceContextState(d3d11_device_context1, state, &old_state);
 
     if (FAILED(hr = IDXGISurface_GetDesc(dxgi_surface, &surface_desc)))
@@ -852,6 +898,21 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
     {
         ERR("Failed to find a window to composite into\n");
         goto done;
+    }
+
+    /* Batch mode: the back buffer is the size of the window client, the pixel
+     * space the visual's projection matrix and clip rectangle are expressed
+     * in. The per-visual (non-batch) path keeps the visual-sized back buffer. */
+    if (batch)
+    {
+        GetClientRect(root_hwnd, &root_client);
+        buf_w = root_client.right > 0 ? (UINT)root_client.right : surface_desc.Width;
+        buf_h = root_client.bottom > 0 ? (UINT)root_client.bottom : surface_desc.Height;
+    }
+    else
+    {
+        buf_w = dst_w = surface_desc.Width;
+        buf_h = dst_h = surface_desc.Height;
     }
 
     hr = IDXGISurface_QueryInterface(dxgi_surface, &IID_ID3D11Texture2D, (void **)&texture);
@@ -958,15 +1019,20 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
 
         if (clip_rect)
         {
-            adjusted_clip.left = clip_rect->left + (float)win_off.x - (float)dst_x;
-            adjusted_clip.top = clip_rect->top + (float)win_off.y - (float)dst_y;
-            adjusted_clip.right = clip_rect->right + (float)win_off.x - (float)dst_x;
-            adjusted_clip.bottom = clip_rect->bottom + (float)win_off.y - (float)dst_y;
+            /* Batch: clip rectangle in window-client pixels. Per-visual: the
+             * back buffer starts at the visual's region, so subtract it. */
+            float off_x = (float)win_off.x - (batch ? 0.0f : (float)dst_x);
+            float off_y = (float)win_off.y - (batch ? 0.0f : (float)dst_y);
+            adjusted_clip.left = clip_rect->left + off_x;
+            adjusted_clip.top = clip_rect->top + off_y;
+            adjusted_clip.right = clip_rect->right + off_x;
+            adjusted_clip.bottom = clip_rect->bottom + off_y;
             effective_clip = &adjusted_clip;
         }
 
         visual_get_transform_3d(visual, surface_desc.Width, surface_desc.Height, &root_m,
-                (float)dst_x, (float)dst_y, (float)dst_w, (float)dst_h, &proj_matrix);
+                batch ? 0.0f : (float)dst_x, batch ? 0.0f : (float)dst_y,
+                (float)buf_w, (float)buf_h, &proj_matrix);
     }
     else
     {
@@ -974,22 +1040,57 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
         dst_y = pt.y + win_off.y;
         dst_w = surface_desc.Width;
         dst_h = surface_desc.Height;
-        visual_get_transform_3d(visual, surface_desc.Width, surface_desc.Height, NULL,
-                0.0f, 0.0f, (float)dst_w, (float)dst_h, &proj_matrix);
+        if (batch)
+        {
+            /* Pixel space is the whole window: bake the accumulated offset
+             * into the world matrix (local transform, then shift to the
+             * visual's window position) and map through the window-sized
+             * viewport. */
+            D3DMATRIX local_m, shift_m, world_m;
+            visual_get_local_transform_3d(visual, &local_m);
+            dcomp_matrix_identity(&shift_m);
+            shift_m.m[3][0] = (float)dst_x;
+            shift_m.m[3][1] = (float)dst_y;
+            dcomp_matrix_multiply(&world_m, &local_m, &shift_m);
+            visual_get_transform_3d(visual, surface_desc.Width, surface_desc.Height, &world_m,
+                    0.0f, 0.0f, (float)buf_w, (float)buf_h, &proj_matrix);
+        }
+        else
+            visual_get_transform_3d(visual, surface_desc.Width, surface_desc.Height, NULL,
+                    0.0f, 0.0f, (float)dst_w, (float)dst_h, &proj_matrix);
     }
 
     if (FAILED(hr = ensure_composite_swapchain(target, (ID3D11Device *)d3d11_device,
-            dst_w, dst_h)))
+            batch ? buf_w : dst_w, batch ? buf_h : dst_h)))
     {
         ERR("Failed to ensure composite swapchain, hr %#lx.\n", hr);
         goto done;
     }
 
     if (FAILED(hr = composite_surface_to_backbuffer(target, d3d11_device, d3d11_device_context,
-            texture, surface_desc.Width, surface_desc.Height, dst_w, dst_h, &proj_matrix,
-            opacity, effective_clip)))
+            texture, surface_desc.Width, surface_desc.Height, batch ? buf_w : dst_w,
+            batch ? buf_h : dst_h, &proj_matrix, opacity, effective_clip,
+            !batch || !target->composite_batch_cleared,
+            batch ? (POINT){dst_x, dst_y} : (POINT){0, 0})))
     {
         ERR("Failed to blit surface to back buffer, hr %#lx.\n", hr);
+        goto done;
+    }
+
+    if (batch)
+    {
+        /* Queue this visual's quad into the shared back buffer; the flush and
+         * the single present for the whole target happen in
+         * composite_target_end(). Track the union of the drawn regions. */
+        RECT r;
+
+        SetRect(&r, dst_x, dst_y, dst_x + (LONG)dst_w, dst_y + (LONG)dst_h);
+        TRACE("DCOMP: batch-draw dst %ld,%ld %ux%u buf %ux%u use_proj %u\n",
+                dst_x, dst_y, dst_w, dst_h, buf_w, buf_h, use_proj_path);
+        UnionRect(&target->composite_batch_rect, &target->composite_batch_rect, &r);
+        target->composite_batch_cleared = TRUE;
+        target->composite_root_hwnd = root_hwnd;
+        ok = TRUE;
         goto done;
     }
 
@@ -1041,6 +1142,46 @@ done:
         IDXGIKeyedMutex_Release(keyed_mutex);
     }
     return ok;
+}
+
+/*
+ * Single-pass composite: one device-context state, one back-buffer clear and
+ * one present per target per composite tick. composite_device() opens a pass
+ * on a target before rendering its visual tree's frames and closes it after
+ * the last frame of that target: every visual of one window is drawn into
+ * one back buffer (in z-order, each quad placed and clipped by its own
+ * projection matrix) and the window is updated with one present.
+ */
+static void composite_target_begin(struct composition_target *target)
+{
+    target->composite_batch_active = TRUE;
+    target->composite_batch_cleared = FALSE;
+    SetRect(&target->composite_batch_rect, 0, 0, 0, 0);
+    target->composite_root_hwnd = NULL;
+}
+
+static void composite_target_end(struct composition_target *target)
+{
+    struct wined3d_swapchain *wined3d_swapchain;
+    RECT rect;
+
+    if (!target->composite_batch_active)
+        return;
+    target->composite_batch_active = FALSE;
+    if (!target->composite_batch_cleared || !target->composite_context)
+        return;
+
+    ID3D11DeviceContext_Flush(target->composite_context);
+
+    rect = target->composite_batch_rect;
+    if ((wined3d_swapchain = dxgi_get_wined3d_swapchain((struct IDXGISwapChain *)target->composite_swapchain))
+            && target->composite_root_hwnd && rect.right > rect.left && rect.bottom > rect.top)
+    {
+        wined3d_swapchain_present(wined3d_swapchain, &rect, &rect, target->composite_root_hwnd, 0, 0);
+        TRACE("DCOMP: batch-presented %ldx%ld at %ld,%ld to root_hwnd %p\n",
+                rect.right - rect.left, rect.bottom - rect.top, rect.left, rect.top,
+                target->composite_root_hwnd);
+    }
 }
 
 /*
@@ -2277,6 +2418,69 @@ static unsigned int qpc_elapsed_ms(ULONGLONG since, LARGE_INTEGER freq)
     return (unsigned int)(((now - since) * 1000ULL) / (ULONGLONG)freq.QuadPart);
 }
 
+/*
+ * Vertical-blank gate for the composite tick. D3DKMTWaitForVerticalBlankEvent
+ * is the real cadence source: it blocks until the display's next vblank. Under
+ * the winex11 backend d3d11 exports it as a stub that returns immediately, so
+ * measure the wait: when it did not gate, emulate one refresh interval with a
+ * sleep. The adapter and device are opened once per composition device (a
+ * kernel handle, no window server round trip).
+ */
+static void composite_wait_vblank(struct composition_device *device, unsigned int refresh_period)
+{
+    static pfn_wait_vblank pfn;
+    static BOOL probed;
+    ULONGLONG start;
+    LONGLONG elapsed_us;
+
+    if (!device->vblank_valid)
+    {
+        D3DKMT_OPENADAPTERFROMHDC open_desc;
+        D3DKMT_CREATEDEVICE create_desc;
+        HDC screen_dc = GetDC(0);
+
+        device->vblank_valid = TRUE; /* probe once; failure = emulate forever */
+        memset(&open_desc, 0, sizeof(open_desc));
+        memset(&create_desc, 0, sizeof(create_desc));
+        if (screen_dc)
+        {
+            open_desc.hDc = screen_dc;
+            if (!D3DKMTOpenAdapterFromHdc(&open_desc))
+            {
+                create_desc.hAdapter = open_desc.hAdapter;
+                if (!D3DKMTCreateDevice(&create_desc))
+                    device->vblank_device = create_desc.hDevice;
+            }
+            ReleaseDC(0, screen_dc);
+        }
+    }
+
+    if (!probed) /* d3d11's export, then the win32u syscall it forwards to */
+    {
+        static const WCHAR d3d11W[] = L"d3d11.dll", win32uW[] = L"win32u.dll";
+        HMODULE mod = LoadLibraryW(d3d11W);
+        probed = TRUE;
+        if (mod)
+            pfn = (void *)GetProcAddress(mod, "D3DKMTWaitForVerticalBlankEvent");
+        if (!pfn && (mod = GetModuleHandleW(win32uW)))
+            pfn = (void *)GetProcAddress(mod, "NtGdiDdDDIWaitForVerticalBlankEvent");
+    }
+
+    start = qpc_now();
+    if (device->vblank_device && pfn)
+    {
+        D3DKMT_WAITFORVERTICALBLANKEVENT evt;
+
+        evt.hDevice = device->vblank_device;
+        pfn(&evt);
+    }
+
+    elapsed_us = device->qpc_freq.QuadPart ? (LONGLONG)((qpc_now() - start) * 1000000ULL
+            / (ULONGLONG)device->qpc_freq.QuadPart) : 0;
+    if (elapsed_us < (LONGLONG)refresh_period * 500) /* stub: emulate the vblank interval */
+        Sleep(refresh_period - (unsigned int)(elapsed_us / 1000));
+}
+
 static BOOL visual_tree_check_swapchain(const struct composition_visual *visual, unsigned int depth,
         BOOL *has_swapchain)
 {
@@ -2323,6 +2527,7 @@ static BOOL device_check_swapchains(struct composition_device *device, BOOL *has
 
 static BOOL composite_device(struct composition_device *device)
 {
+    struct composition_target *current_target;
     LONG tree_ver, xform_ver;
     BOOL has_shared = FALSE, any_needs_hwnd = FALSE, has_swapchain = FALSE, sc_updated;
     unsigned int count = 0, i;
@@ -2373,13 +2578,27 @@ static BOOL composite_device(struct composition_device *device)
     }
     collect_device_frames(device, &tree_ver, &xform_ver);
 
+    /* Frames are queued target by target (collect_device_frames walks the
+     * snapshots), so a pass opens on the first frame of a target and closes
+     * on the last: one clear, N quad draws, one present per target. */
+    current_target = NULL;
     for (i = 0; i < device->frame_buf_count; i++)
     {
         struct composite_frame *frame = &device->frame_buf[i];
+
+        if (frame->target != current_target)
+        {
+            if (current_target)
+                composite_target_end(current_target);
+            current_target = frame->target;
+            composite_target_begin(current_target);
+        }
         render_composite_frame(frame);
         if (frame->rendered)
             count++;
     }
+    if (current_target)
+        composite_target_end(current_target);
 
     dcomp_lock();
     for (i = 0; i < device->frame_buf_count; i++)
@@ -2427,7 +2646,7 @@ static DWORD WINAPI composite_thread_proc(void *iface)
     unsigned int frequency, refresh_period, tick = 0;
     HDC hdc;
 
-    /* TODO: Implement and use D3DKMTWaitForVerticalBlankEvent() */
+    /* Refresh interval for the emulated-vblank fallback of composite_wait_vblank(). */
     hdc = GetDC(0);
     frequency = hdc ? GetDeviceCaps(hdc, VREFRESH) : 0;
     if (frequency <= 1)
@@ -2481,7 +2700,10 @@ static DWORD WINAPI composite_thread_proc(void *iface)
         {
             if (qpc_elapsed_ms(device->last_composite_qpc, device->qpc_freq) >= refresh_period)
             {
-                BOOL had_pending = InterlockedExchange(&device->commit_pending, FALSE);
+                BOOL had_pending;
+
+                composite_wait_vblank(device, refresh_period);
+                had_pending = InterlockedExchange(&device->commit_pending, FALSE);
                 if (g_compositor_clock_event)
                     ResetEvent(g_compositor_clock_event);
                 if (composite_device(device) || had_pending || device->last_has_shared)

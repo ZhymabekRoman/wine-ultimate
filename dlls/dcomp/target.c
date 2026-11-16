@@ -89,6 +89,14 @@ static ULONG STDMETHODCALLTYPE target_Release(IDCompositionTarget *iface)
             IDXGISwapChain1_Release(target->composite_swapchain);
         if (target->composite_device)
             ID3D11Device_Release(target->composite_device);
+        if (target->composite_state)
+            ID3DDeviceContextState_Release(target->composite_state);
+        if (target->composite_context1)
+            ID3D11DeviceContext1_Release(target->composite_context1);
+        if (target->composite_context)
+            ID3D11DeviceContext_Release(target->composite_context);
+        if (target->composite_state_device)
+            ID3D11Device1_Release(target->composite_state_device);
         free(target);
     }
 

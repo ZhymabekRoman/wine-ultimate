@@ -22,7 +22,9 @@
 #include "dcomp_private_iface.h"
 #include "d2d1_3.h"
 #include <d3d11.h>
+#include "d3d11_1.h"
 #include "dxgi1_2.h"
+#include <ddk/d3dkmthk.h>
 #include "wine/list.h"
 
 struct wined3d_swapchain;
@@ -64,6 +66,8 @@ struct composition_device
     LONG commit_pending;
     LONG composite_count;
     HANDLE wake_event;
+    D3DKMT_HANDLE vblank_device;            /* D3DKMT device for the vblank gate, 0 = emulate */
+    BOOL vblank_valid;                      /* vblank_device opened, probed once */
 };
 
 enum dcomp_object_kind
@@ -181,6 +185,20 @@ struct composition_target
     ID3D11RenderTargetView *composite_rtv;  /* render target view of the back buffer */
     UINT composite_width;
     UINT composite_height;
+    /* Single-pass composite: one device-context state, one back-buffer clear
+     * and one present per target per composite tick. The device context state
+     * and the immediate context are created once with the composite device
+     * and reused by every visual of every frame; the batch fields below are
+     * the state of the pass currently open on this target (see
+     * composite_target_begin()/composite_target_end() in device.c). */
+    ID3D11Device1 *composite_state_device;  /* device the cached context/state belong to */
+    ID3D11DeviceContext *composite_context; /* immediate context of composite_state_device */
+    ID3D11DeviceContext1 *composite_context1; /* composite_context, queried to context1 */
+    ID3DDeviceContextState *composite_state; /* created once, swapped in around the draws */
+    HWND composite_root_hwnd;               /* window the batch present blits to */
+    RECT composite_batch_rect;              /* union of the visual regions drawn this pass */
+    BOOL composite_batch_active;            /* a composite pass for this target is open */
+    BOOL composite_batch_cleared;           /* the back buffer was cleared this pass */
     LONG ref;
 };
 
