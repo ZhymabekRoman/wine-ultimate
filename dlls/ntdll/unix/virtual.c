@@ -3580,30 +3580,76 @@ static LONG redhawk_arena_done;
 
 static void reserve_redhawk_arena(void)
 {
+    static const char pattern[] = { 0x78, (char)0x9c, 0x0b, (char)0xc9, 0x4c, 0x2f, 0x4d, 0x55,
+                                    0x28, (char)0xc8, 0x49, 0x2d, 0x06, 0x00 };
+    static const size_t typemgr_size = 0x6800000;
+    static const size_t card_size = 0x3200000;
+    void *typemgr_base = (void *)0x1801000000ULL;
     void *p;
+#ifdef HAVE_MEMFD_CREATE
+    static const size_t buf_size = 0x10000;
+    int fd;
+#endif
 
     if (InterlockedCompareExchange( &redhawk_arena_done, 1, 0 )) return;
 
-    /* p215: card mirror for host-image objects.  The wrapped WER responder
-     * (p214) hands the app a pinned handle over an object inside the
-     * SharedLibrary image (~0x6ffffc9xxxxx); the write-barrier card formula
-     * obj + obj/128 lands around 0x70DFF_exxxxx, a hole the pass-2 barrier
-     * faults on.  A 16GB window covers every image-base the loader picks
-     * (cards for [B, B+32MB) land in [B+B/128, B+B/128+256KB)). */
-    anon_mmap_fixed( (void *)0x700d00000000ULL, 0x400000000, PROT_READ | PROT_WRITE, 0 );
-    if ((p = anon_mmap_fixed( (void *)0x1801000000ULL, 0x9A00000, PROT_READ | PROT_WRITE, 0 )))
+    /* Host-image card pages in [0x700000000000, 0x710000000000) are mapped
+     * on demand in virtual_handle_fault() instead of reserving 16 GB upfront. */
+
+    /* Leave the card mirror [0x1807800000, 0x180AA00000) as pure demand-zero
+     * anonymous pages. */
+    anon_mmap_fixed( (void *)0x1807800000ULL, card_size, PROT_READ | PROT_WRITE, MAP_NORESERVE );
+
+    /* Zero pages make the MSZip decompress of the WER data buffer emit an
+     * empty/garbage string; the app catches, re-raises on the second pass
+     * and dies at the card helper (measured p210-p212).  Frozen refs land
+     * at region+...0001 offsets, so lay a complete zlib "en-US" stream
+     * (78 9c 0b c9 4c 2f 4d 55 28 c8 49 2d 06 00) at +1 mod 16 across the
+     * TypeManager range [0x1801000000, 0x1807800000): every frozen next_in
+     * reads a valid header, inflate retires Z_STREAM_END with "en-US", the
+     * WER publish completes on the first pass. */
+#ifdef HAVE_MEMFD_CREATE
+    fd = memfd_create( "redhawk-en-us", MFD_CLOEXEC );
+    if (fd != -1)
     {
-        /* Zero pages make the MSZip decompress of the WER data buffer emit an
-         * empty/garbage string; the app catches, re-raises on the second pass
-         * and dies at the card helper (measured p210-p212).  Frozen refs land
-         * at region+...0001 offsets, so lay a complete zlib "en-US" stream
-         * (78 9c 0b c9 4c 2f 4d 55 28 c8 49 2d 06 00) at +1 mod 16: every
-         * frozen next_in reads a valid header, inflate retires Z_STREAM_END
-         * with "en-US", the WER publish completes on the first pass. */
-        static const char pattern[] = { 0x78, (char)0x9c, 0x0b, (char)0xc9, 0x4c, 0x2f, 0x4d, 0x55,
-                                        0x28, (char)0xc8, 0x49, 0x2d, 0x06, 0x00 };
-        size_t i, size = 0x9A00000;
-        for (i = 1; i + sizeof(pattern) <= size; i += 16)
+        if (!ftruncate( fd, buf_size ) &&
+            (p = mmap( NULL, buf_size, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 )) != MAP_FAILED)
+        {
+            size_t i, off;
+
+            for (i = 1; i + sizeof(pattern) <= buf_size; i += 16)
+                memcpy( (char *)p + i, pattern, sizeof(pattern) );
+            munmap( p, buf_size );
+
+            for (off = 0; off < typemgr_size; off += buf_size)
+            {
+                if (mmap( (char *)typemgr_base + off, buf_size, PROT_READ | PROT_WRITE,
+                          MAP_PRIVATE | MAP_FIXED, fd, 0 ) == MAP_FAILED)
+                {
+                    WARN( "redhawk memfd mmap failed at %p: %s\n",
+                          (char *)typemgr_base + off, strerror(errno) );
+                    break;
+                }
+            }
+        }
+        else
+        {
+            WARN( "redhawk memfd init failed: %s\n", strerror(errno) );
+        }
+        close( fd );
+        return;
+    }
+    if (errno != ENOSYS)
+    {
+        WARN( "memfd_create(redhawk-en-us) failed: %s\n", strerror(errno) );
+        return;
+    }
+#endif
+
+    if ((p = anon_mmap_fixed( typemgr_base, typemgr_size, PROT_READ | PROT_WRITE, 0 )) != MAP_FAILED)
+    {
+        size_t i;
+        for (i = 1; i + sizeof(pattern) <= typemgr_size; i += 16)
             memcpy( (char *)p + i, pattern, sizeof(pattern) );
     }
 }
@@ -4984,6 +5030,46 @@ NTSTATUS virtual_handle_fault( struct thread_data *data, EXCEPTION_RECORD *rec, 
         mprotect_range( page, host_page_size, 0, 0 );
         ret = STATUS_SUCCESS;
     }
+#ifdef _WIN64
+    else if (redhawk_arena_done &&
+             (err == EXCEPTION_WRITE_FAULT || err == EXCEPTION_READ_FAULT) &&
+             (ULONG_PTR)addr >= 0x700000000000ULL && (ULONG_PTR)addr < 0x710000000000ULL)
+    {
+        static void *card_blocks[4096];
+        void *block = (void *)((ULONG_PTR)addr & ~0xffffULL);
+        unsigned int h = (unsigned int)((ULONG_PTR)block >> 16) & (ARRAY_SIZE(card_blocks) - 1);
+        unsigned int i;
+        BOOL known = FALSE;
+
+        for (i = 0; i < ARRAY_SIZE(card_blocks); i++)
+        {
+            unsigned int slot = (h + i) & (ARRAY_SIZE(card_blocks) - 1);
+            if (!card_blocks[slot]) break;
+            if (card_blocks[slot] == block) { known = TRUE; break; }
+        }
+        if (known)
+        {
+            ret = STATUS_SUCCESS;
+        }
+        else if (!find_view_range( block, 0x10000 ) &&
+                 mmap( block, 0x10000, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE, -1, 0 ) != MAP_FAILED)
+        {
+            for (i = 0; i < ARRAY_SIZE(card_blocks); i++)
+            {
+                unsigned int slot = (h + i) & (ARRAY_SIZE(card_blocks) - 1);
+                if (!card_blocks[slot]) { card_blocks[slot] = block; break; }
+            }
+            ret = STATUS_SUCCESS;
+        }
+        else if (!find_view_range( page, host_page_size ) &&
+                 mmap( page, host_page_size, PROT_READ | PROT_WRITE,
+                       MAP_PRIVATE | MAP_ANON | MAP_FIXED_NOREPLACE, -1, 0 ) != MAP_FAILED)
+        {
+            ret = STATUS_SUCCESS;
+        }
+    }
+#endif
     else if (err == EXCEPTION_WRITE_FAULT)
     {
         if (vprot & VPROT_WRITEWATCH)
@@ -5651,7 +5737,6 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
                                          SIZE_T *size_ptr, ULONG type, ULONG protect )
 {
     static const ULONG type_mask = MEM_COMMIT | MEM_RESERVE | MEM_TOP_DOWN | MEM_WRITE_WATCH | MEM_RESET | MEM_RESET_UNDO;
-    NTSTATUS status;
     ULONG_PTR limit;
 
     TRACE("%p %p %08lx %x %08x\n", process, *ret, *size_ptr, type, protect );
@@ -5699,32 +5784,7 @@ NTSTATUS WINAPI NtAllocateVirtualMemory( HANDLE process, PVOID *ret, ULONG_PTR z
     else
         limit = 0;
 
-    status = allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
-
-    /* s240: seed the CoreCLR ComVirtualMethodData head. The shader heap at
-     * 0x6fff00000000 (64K, CoreCLR VirtualAlloc) is read by the XAML interop
-     * consumer (WebView2Loader path) before CoreCLR writes the composite
-     * vtable fields in ~50% of runs: era A AVs on a [null+0x20] read at
-     * Application.Start. Prefill chunk slots +0x30..+0x48 with a self-pointer
-     * into the committed region plus a shadow chain at +0x100 so the early
-     * walk lands on valid loads; CoreCLR overwrites the words later, so era B
-     * runs are unaffected. Fire on every commit that touches the head. */
-    if (!status && (type & MEM_COMMIT) && *ret <= (char *)0x6fff00000048 &&
-        (char *)*ret + *size_ptr >= (char *)0x6fff00000050)
-    {
-        char *h = (char *)0x6fff00000000;
-        SIZE_T i;
-        if (*(ULONG64 *)(h + 0x30) == 0)
-        {
-            *(ULONG64 *)(h + 0x30) = (ULONG64)(UINT_PTR)(h + 0x100);
-            *(ULONG64 *)(h + 0x38) = (ULONG64)(UINT_PTR)(h + 0x100);
-            *(ULONG64 *)(h + 0x40) = (ULONG64)(UINT_PTR)(h + 0x100);
-            *(ULONG64 *)(h + 0x48) = (ULONG64)(UINT_PTR)(h + 0x100);
-            for (i = 0; i < 0x80; i += 8) *(ULONG64 *)(h + 0x100 + i) = (ULONG64)(UINT_PTR)(h + 0x100);
-        }
-    }
-
-    return status;
+    return allocate_virtual_memory( ret, size_ptr, type, protect, 0, limit, 0, 0 );
 }
 
 
