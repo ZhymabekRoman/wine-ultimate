@@ -448,6 +448,361 @@ static const void *sys_nav_factory_vtbl[] =
 static struct { const void **vtbl; } sys_nav_factory_obj = { sys_nav_factory_vtbl };
 static IActivationFactory *sys_nav_factory = (IActivationFactory *)&sys_nav_factory_obj;
 
+/* Windows.UI.ApplicationSettings.SettingsCommand */
+static const GUID IID_ISettingsCommandFactory_local =
+    { 0x68e15b33, 0x1c83, 0x433a, { 0xaa, 0x5a, 0xce, 0xee, 0xa5, 0xbd, 0x47, 0x64 } };
+static const GUID IID_ISettingsCommandStatics_local =
+    { 0x749ae954, 0x2f69, 0x4b17, { 0x8a, 0xba, 0xd0, 0x5c, 0xe5, 0x77, 0x8e, 0x46 } };
+static const GUID IID_IUICommand_local =
+    { 0x4ff93a75, 0x4145, 0x47ff, { 0xac, 0x7f, 0xdf, 0xf1, 0xc1, 0xfa, 0x5b, 0x0f } };
+
+struct settings_cmd_obj
+{
+    const void **vtbl;
+    LONG ref;
+    HSTRING label;
+    IInspectable *id;
+    IUnknown *handler;
+};
+
+static HRESULT WINAPI settings_cmd_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct settings_cmd_obj *impl = iface;
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IUICommand_local ))
+    {
+        InterlockedIncrement( &impl->ref );
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI settings_cmd_AddRef( void *iface )
+{
+    struct settings_cmd_obj *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI settings_cmd_Release( void *iface )
+{
+    struct settings_cmd_obj *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->label) WindowsDeleteString( impl->label );
+        if (impl->id) IInspectable_Release( impl->id );
+        if (impl->handler) IUnknown_Release( impl->handler );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI settings_cmd_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI settings_cmd_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.UI.ApplicationSettings.SettingsCommand", 46, name );
+}
+
+static HRESULT WINAPI settings_cmd_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI settings_cmd_get_Label( void *iface, HSTRING *value )
+{
+    struct settings_cmd_obj *impl = iface;
+    return WindowsDuplicateString( impl->label, value );
+}
+
+static HRESULT WINAPI settings_cmd_put_Label( void *iface, HSTRING value )
+{
+    struct settings_cmd_obj *impl = iface;
+    if (impl->label) WindowsDeleteString( impl->label );
+    impl->label = NULL;
+    return value ? WindowsDuplicateString( value, &impl->label ) : S_OK;
+}
+
+static HRESULT WINAPI settings_cmd_get_Invoked( void *iface, IUnknown **value )
+{
+    struct settings_cmd_obj *impl = iface;
+    if (!value) return E_POINTER;
+    *value = impl->handler;
+    if (*value) IUnknown_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI settings_cmd_put_Invoked( void *iface, IUnknown *value )
+{
+    struct settings_cmd_obj *impl = iface;
+    if (impl->handler) IUnknown_Release( impl->handler );
+    impl->handler = value;
+    if (value) IUnknown_AddRef( value );
+    return S_OK;
+}
+
+static HRESULT WINAPI settings_cmd_get_Id( void *iface, IInspectable **value )
+{
+    struct settings_cmd_obj *impl = iface;
+    if (!value) return E_POINTER;
+    *value = impl->id;
+    if (*value) IInspectable_AddRef( *value );
+    return S_OK;
+}
+
+static HRESULT WINAPI settings_cmd_put_Id( void *iface, IInspectable *value )
+{
+    struct settings_cmd_obj *impl = iface;
+    if (impl->id) IInspectable_Release( impl->id );
+    impl->id = value;
+    if (value) IInspectable_AddRef( value );
+    return S_OK;
+}
+
+static const void *settings_cmd_vtbl[] =
+{
+    settings_cmd_QueryInterface,
+    settings_cmd_AddRef,
+    settings_cmd_Release,
+    settings_cmd_GetIids,
+    settings_cmd_GetRuntimeClassName,
+    settings_cmd_GetTrustLevel,
+    settings_cmd_get_Label,
+    settings_cmd_put_Label,
+    settings_cmd_get_Invoked,
+    settings_cmd_put_Invoked,
+    settings_cmd_get_Id,
+    settings_cmd_put_Id,
+};
+
+static HRESULT settings_cmd_create( IInspectable *id, HSTRING label, IUnknown *handler, void **out )
+{
+    struct settings_cmd_obj *obj;
+    if (!out) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->vtbl = settings_cmd_vtbl;
+    obj->ref = 1;
+    if (label) WindowsDuplicateString( label, &obj->label );
+    if (id) { obj->id = id; IInspectable_AddRef( id ); }
+    if (handler) { obj->handler = handler; IUnknown_AddRef( handler ); }
+    *out = obj;
+    return S_OK;
+}
+
+/* Windows.UI.Shell.TaskbarManager */
+static const GUID IID_ITaskbarManagerStatics_local =
+    { 0xdb32ab74, 0xde52, 0x4fe6, { 0xb7, 0xb6, 0x95, 0xff, 0x9f, 0x83, 0x95, 0xdf } };
+static const GUID IID_ITaskbarManager_local =
+    { 0x87490a19, 0x1ad9, 0x49f4, { 0xb2, 0xe8, 0x86, 0x73, 0x8d, 0xc5, 0xac, 0x40 } };
+
+struct taskbar_mgr_obj { const void **vtbl; LONG ref; };
+static const void *taskbar_mgr_vtbl[];
+
+static HRESULT WINAPI taskbar_mgr_QI( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ITaskbarManager_local ))
+    {
+        *out = iface;
+        InterlockedIncrement( &((struct taskbar_mgr_obj *)iface)->ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI taskbar_mgr_AddRef( void *iface ) { return InterlockedIncrement( &((struct taskbar_mgr_obj *)iface)->ref ); }
+static ULONG WINAPI taskbar_mgr_Release( void *iface )
+{
+    struct taskbar_mgr_obj *obj = iface;
+    ULONG r = InterlockedDecrement( &obj->ref );
+    if (!r) free( obj );
+    return r;
+}
+static HRESULT WINAPI taskbar_mgr_GetIids( void *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI taskbar_mgr_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.UI.Shell.TaskbarManager", 31, n );
+}
+static HRESULT WINAPI taskbar_mgr_GetTrustLevel( void *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+
+static HRESULT WINAPI taskbar_mgr_get_IsSupported( void *iface, boolean *val ) { if (val) *val = FALSE; return S_OK; }
+static HRESULT WINAPI taskbar_mgr_get_IsPinningAllowed( void *iface, boolean *val ) { if (val) *val = FALSE; return S_OK; }
+static HRESULT WINAPI taskbar_mgr_stub_async( void *iface, void **op ) { if (op) *op = NULL; return E_NOTIMPL; }
+static HRESULT WINAPI taskbar_mgr_stub_entry_async( void *iface, void *entry, void **op ) { if (op) *op = NULL; return E_NOTIMPL; }
+
+static const void *taskbar_mgr_vtbl[] =
+{
+    taskbar_mgr_QI,
+    taskbar_mgr_AddRef,
+    taskbar_mgr_Release,
+    taskbar_mgr_GetIids,
+    taskbar_mgr_GetRuntimeClassName,
+    taskbar_mgr_GetTrustLevel,
+    taskbar_mgr_get_IsSupported,
+    taskbar_mgr_get_IsPinningAllowed,
+    taskbar_mgr_stub_async,
+    taskbar_mgr_stub_entry_async,
+    taskbar_mgr_stub_async,
+    taskbar_mgr_stub_entry_async,
+};
+
+static HRESULT taskbar_mgr_create( void **out )
+{
+    struct taskbar_mgr_obj *obj;
+    if (!out) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->vtbl = taskbar_mgr_vtbl;
+    obj->ref = 1;
+    *out = obj;
+    return S_OK;
+}
+
+static HRESULT WINAPI taskbar_mgr_factory_QI( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ) ||
+        IsEqualGUID( iid, &IID_ITaskbarManagerStatics_local ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI taskbar_mgr_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI taskbar_mgr_factory_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI taskbar_mgr_factory_GetIids( IActivationFactory *iface, ULONG *c, IID **i ) { if (c) *c = 0; if (i) *i = NULL; return S_OK; }
+static HRESULT WINAPI taskbar_mgr_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.UI.Shell.TaskbarManager", 31, n );
+}
+static HRESULT WINAPI taskbar_mgr_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *l ) { if (l) *l = BaseTrust; return S_OK; }
+static HRESULT WINAPI taskbar_mgr_factory_ActivateInstance( IActivationFactory *iface, IInspectable **out )
+{
+    return taskbar_mgr_create( (void **)out );
+}
+static HRESULT WINAPI taskbar_mgr_factory_GetDefault( IActivationFactory *iface, void **mgr )
+{
+    return taskbar_mgr_create( mgr );
+}
+
+static const void *taskbar_mgr_factory_vtbl[] =
+{
+    taskbar_mgr_factory_QI,
+    taskbar_mgr_factory_AddRef,
+    taskbar_mgr_factory_Release,
+    taskbar_mgr_factory_GetIids,
+    taskbar_mgr_factory_GetRuntimeClassName,
+    taskbar_mgr_factory_GetTrustLevel,
+    taskbar_mgr_factory_ActivateInstance,
+    taskbar_mgr_factory_GetDefault,
+};
+static struct { const void **vtbl; } taskbar_mgr_factory_obj = { taskbar_mgr_factory_vtbl };
+static IActivationFactory *taskbar_mgr_factory = (IActivationFactory *)&taskbar_mgr_factory_obj;
+
+static const void *sc_act_vtbl[];
+static const void *sc_fac_vtbl[];
+static const void *sc_stat_vtbl[];
+static struct {
+    const void **vtbl_act;
+    const void **vtbl_fac;
+    const void **vtbl_stat;
+} settings_cmd_factory_obj = { sc_act_vtbl, sc_fac_vtbl, sc_stat_vtbl };
+
+static HRESULT WINAPI sc_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &settings_cmd_factory_obj.vtbl_act;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ISettingsCommandFactory_local ))
+    {
+        *out = &settings_cmd_factory_obj.vtbl_fac;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ISettingsCommandStatics_local ))
+    {
+        *out = &settings_cmd_factory_obj.vtbl_stat;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI sc_factory_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI sc_factory_Release( void *iface ) { return 1; }
+static HRESULT WINAPI sc_factory_ActivateInstance( void *iface, IInspectable **out )
+{
+    return settings_cmd_create( NULL, NULL, NULL, (void **)out );
+}
+static HRESULT WINAPI sc_factory_CreateSettingsCommand( void *iface, IInspectable *id, HSTRING label, IUnknown *handler, void **out )
+{
+    return settings_cmd_create( id, label, handler, out );
+}
+static HRESULT WINAPI sc_statics_get_AccountsCommand( void *iface, void **out )
+{
+    HSTRING lbl = NULL;
+    HRESULT hr;
+    WindowsCreateString( L"Accounts", 8, &lbl );
+    hr = settings_cmd_create( NULL, lbl, NULL, out );
+    if (lbl) WindowsDeleteString( lbl );
+    return hr;
+}
+
+static const void *sc_act_vtbl[] =
+{
+    sc_factory_QueryInterface,
+    sc_factory_AddRef,
+    sc_factory_Release,
+    settings_cmd_GetIids,
+    settings_cmd_GetRuntimeClassName,
+    settings_cmd_GetTrustLevel,
+    sc_factory_ActivateInstance,
+};
+static const void *sc_fac_vtbl[] =
+{
+    sc_factory_QueryInterface,
+    sc_factory_AddRef,
+    sc_factory_Release,
+    settings_cmd_GetIids,
+    settings_cmd_GetRuntimeClassName,
+    settings_cmd_GetTrustLevel,
+    sc_factory_CreateSettingsCommand,
+};
+static const void *sc_stat_vtbl[] =
+{
+    sc_factory_QueryInterface,
+    sc_factory_AddRef,
+    sc_factory_Release,
+    settings_cmd_GetIids,
+    settings_cmd_GetRuntimeClassName,
+    settings_cmd_GetTrustLevel,
+    sc_statics_get_AccountsCommand,
+};
+static IActivationFactory *settings_cmd_factory = (IActivationFactory *)&settings_cmd_factory_obj.vtbl_act;
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
@@ -479,7 +834,8 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
      * module has them in its activation table (the WinAppSDK modules answer
      * CLASS_E_CLASSNOTAVAILABLE for FontWeights), so the registry routes them here.
      */
-    if (!wcscmp( buffer, RuntimeClass_Microsoft_UI_Text_FontWeights ))
+    if (!wcscmp( buffer, RuntimeClass_Microsoft_UI_Text_FontWeights ) ||
+        !wcscmp( buffer, L"Windows.UI.Text.FontWeights" ))
         IActivationFactory_QueryInterface( fontweights_factory, &IID_IActivationFactory, (void **)factory );
 
     if (!wcscmp( buffer, L"Windows.Foundation.IReference`1<Windows.UI.Text.FontWeight>" ))
@@ -496,6 +852,12 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
 
     if (!wcscmp( buffer, L"Windows.UI.Core.SystemNavigationManager" ))
         IActivationFactory_QueryInterface( sys_nav_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"Windows.UI.ApplicationSettings.SettingsCommand" ))
+        IActivationFactory_QueryInterface( settings_cmd_factory, &IID_IActivationFactory, (void **)factory );
+
+    if (!wcscmp( buffer, L"Windows.UI.Shell.TaskbarManager" ))
+        IActivationFactory_QueryInterface( taskbar_mgr_factory, &IID_IActivationFactory, (void **)factory );
 
     if (*factory) return S_OK;
     /* This module is reached through the ext-ms-win-windowing-internal-l1-1-0 apiset as

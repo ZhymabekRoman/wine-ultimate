@@ -5466,12 +5466,15 @@ static HRESULT WINAPI uwp_fe_FindName( void *iface, HSTRING name, void **out )
            debugstr_w(want), debugstr_w(impl->class_name), debugstr_w(root->class_name) );
 
     /* 1. Check deferred entries on root and impl */
-    for (i = 0; i < root->defer_cnt; i++)
+    if (root->defer_entries)
     {
-        if (!wcscmp( root->defer_entries[i].name, want ) && !root->defer_entries[i].realized)
-            uwp_realize_deferred_entry( &root->defer_entries[i] );
+        for (i = 0; i < root->defer_cnt; i++)
+        {
+            if (!wcscmp( root->defer_entries[i].name, want ) && !root->defer_entries[i].realized)
+                uwp_realize_deferred_entry( &root->defer_entries[i] );
+        }
     }
-    if (impl != root)
+    if (impl != root && impl->defer_entries)
     {
         for (i = 0; i < impl->defer_cnt; i++)
         {
@@ -8524,7 +8527,9 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     if (inner)
     {
         *inner = &impl->nondelegating_iface;
-        if (outer && !xaml_get_app_profile()->seed_xbf)
+        if (outer && !xaml_get_app_profile()->seed_xbf &&
+            !IsBadReadPtr( outer, sizeof(void *) ) &&
+            !IsBadReadPtr( *(void **)outer, 2 * sizeof(void *) ))
             IInspectable_AddRef( outer );
         else
             InterlockedIncrement( &impl->ref );
@@ -8666,7 +8671,16 @@ static void uwp_apply_template_if_needed( struct uwp_element *el )
         {
             TRACE( "Calling IFrameworkElementOverrides::OnApplyTemplate on %s (%s)\n",
                    debugstr_w(el->class_name), debugstr_w(el->name) );
-            on_apply( fe_ovr );
+            __TRY
+            {
+                on_apply( fe_ovr );
+            }
+            __EXCEPT_ALL
+            {
+                WARN( "OnApplyTemplate on %s (%s) threw exception\n",
+                      debugstr_w(el->class_name), debugstr_w(el->name) );
+            }
+            __ENDTRY;
         }
         IUnknown_Release( (IUnknown *)fe_ovr );
     }
@@ -8710,7 +8724,16 @@ static void uwp_fire_loaded_tree( struct uwp_element *el )
                 struct xaml_event_handler *h = (struct xaml_event_handler *)el->loaded_handlers[i];
                 TRACE( "Firing Loaded handler[%d] on %s (%s)\n",
                        i, debugstr_w(el->class_name), debugstr_w(el->name) );
-                h->lpVtbl->Invoke( h, sender, g_routed_args() );
+                __TRY
+                {
+                    h->lpVtbl->Invoke( h, sender, g_routed_args() );
+                }
+                __EXCEPT_ALL
+                {
+                    WARN( "Loaded handler[%d] on %s (%s) threw exception\n",
+                          i, debugstr_w(el->class_name), debugstr_w(el->name) );
+                }
+                __ENDTRY;
             }
         }
     }

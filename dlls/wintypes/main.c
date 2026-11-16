@@ -195,10 +195,18 @@ DEFINE_IINSPECTABLE(api_information_statics, IApiInformationStatics, struct api_
 static HRESULT STDMETHODCALLTYPE api_information_statics_IsTypePresent(
         IApiInformationStatics *iface, HSTRING type_name, BOOLEAN *value)
 {
+    const WCHAR *str = WindowsGetStringRawBuffer( type_name, NULL );
+
     FIXME("iface %p, type_name %s, value %p stub!\n", iface, debugstr_hstring(type_name), value);
 
     if (!type_name)
         return E_INVALIDARG;
+
+    if (str && !wcscmp( str, L"Windows.System.Profile.IWindowsIntegrityPolicyStatics" ))
+    {
+        *value = FALSE;
+        return S_OK;
+    }
 
     *value = TRUE;
     return S_OK;

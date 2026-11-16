@@ -154,14 +154,29 @@ static const GUID IID_IProgressRing =
     { 0x2670d03f, 0xe28c, 0x5652, { 0xbe, 0xe2, 0xb5, 0x21, 0x2e, 0xbd, 0xf7, 0xff } };
 static const GUID IID_IImage_WinUI =
     { 0x495b7402, 0x9af3, 0x4e50, { 0xaa, 0x90, 0x03, 0x38, 0x8f, 0x30, 0x86, 0xd2 } };
+static const GUID IID_IBrush_local =
+    { 0x8806a321, 0x1e06, 0x422c, { 0xa1, 0xcc, 0x01, 0x69, 0x65, 0x59, 0xe0, 0x21 } };
+static const GUID IID_ISolidColorBrush_local =
+    { 0x9d850850, 0x66f3, 0x48df, { 0x9a, 0x8f, 0x82, 0x4b, 0xd5, 0xe0, 0x70, 0xaf } };
+static const GUID IID_IStyle_local =
+    { 0xc4a9f225, 0x9db7, 0x4a7d, { 0xb6, 0xd1, 0xf7, 0x4e, 0xdb, 0x92, 0x93, 0xc2 } };
+
+struct xaml_frame_prop
+{
+    void *dp;
+    IInspectable *value;
+};
 
 struct xaml_frame
 {
     IInspectable IInspectable_iface;
+    const void **IDependencyObject_iface;
     LONG ref;
     IInspectable *outer;
     IInspectable *content;
     IDCompositionVisual *visual;
+    struct xaml_frame_prop props[16];
+    int prop_count;
 };
 
 static inline struct xaml_frame *impl_from_frame( void *iface )
@@ -185,13 +200,19 @@ static HRESULT WINAPI frame_QueryInterface( IInspectable *iface, REFIID iid, voi
         return E_NOINTERFACE;
     }
 
+    if (IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
+        IsEqualGUID( iid, &IID_IDependencyObject_WinUI ))
+    {
+        *out = &impl->IDependencyObject_iface;
+        IInspectable_AddRef( &impl->IInspectable_iface );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IFrame ) ||
         IsEqualGUID( iid, &IID_INavigate ) ||
-        IsEqualGUID( iid, &IID_IDependencyObject_g ) ||
-        IsEqualGUID( iid, &IID_IDependencyObject_WinUI ) ||
         IsEqualGUID( iid, &IID_IUIElement_g ) ||
         IsEqualGUID( iid, &IID_IUIElement_WinUI ) ||
         IsEqualGUID( iid, &IID_IFrameworkElement ) ||
@@ -251,6 +272,9 @@ static ULONG WINAPI frame_Release( IInspectable *iface )
     TRACE( "iface %p ref %lu.\n", iface, ref );
     if (!ref)
     {
+        int i;
+        for (i = 0; i < impl->prop_count; i++)
+            if (impl->props[i].value) IInspectable_Release( impl->props[i].value );
         if (impl->visual) IDCompositionVisual_Release( impl->visual );
         if (impl->content) IInspectable_Release( impl->content );
         free( impl );
@@ -348,12 +372,6 @@ static HRESULT WINAPI frame_NavigateWithParam( void *iface, void *type_name_ptr,
     {
         HRESULT hr = xaml_create_page( type_name_ptr, &impl->content );
         TRACE( "xaml_create_page(%s) returned hr %#lx, content %p\n", debugstr_w( name ), hr, impl->content );
-        if ((FAILED(hr) || !impl->content) && is_store_app())
-        {
-            TRACE( "xbf: falling back to seed tree\n" );
-            hr = uwp_store_create_initial_page( &impl->content );
-            TRACE( "uwp_store_create_initial_page for store returned hr %#lx, content %p\n", hr, impl->content );
-        }
         if (SUCCEEDED(hr) && impl->content && impl->visual)
         {
             IDCompositionVisual *page_visual = NULL;
@@ -439,6 +457,135 @@ static const void *frame_vtbl[] =
     frame_generic_slot, frame_generic_slot, frame_generic_slot, frame_generic_slot,
 };
 
+static inline struct xaml_frame *impl_from_depobj( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_frame, IDependencyObject_iface );
+}
+
+static HRESULT WINAPI frame_do_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct xaml_frame *impl = impl_from_depobj( iface );
+    return frame_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+
+static ULONG WINAPI frame_do_AddRef( void *iface )
+{
+    struct xaml_frame *impl = impl_from_depobj( iface );
+    return frame_AddRef( &impl->IInspectable_iface );
+}
+
+static ULONG WINAPI frame_do_Release( void *iface )
+{
+    struct xaml_frame *impl = impl_from_depobj( iface );
+    return frame_Release( &impl->IInspectable_iface );
+}
+
+static HRESULT WINAPI frame_do_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    return frame_GetIids( NULL, count, iids );
+}
+
+static HRESULT WINAPI frame_do_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    return frame_GetRuntimeClassName( NULL, name );
+}
+
+static HRESULT WINAPI frame_do_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    return frame_GetTrustLevel( NULL, level );
+}
+
+static HRESULT WINAPI frame_do_GetValue( void *iface, void *dp, IInspectable **value )
+{
+    struct xaml_frame *impl = impl_from_depobj( iface );
+    int i;
+
+    TRACE( "iface %p, dp %p, value %p.\n", iface, dp, value );
+    if (!value) return E_POINTER;
+    *value = NULL;
+    for (i = 0; i < impl->prop_count; i++)
+    {
+        if (impl->props[i].dp == dp)
+        {
+            *value = impl->props[i].value;
+            if (*value) IInspectable_AddRef( *value );
+            return S_OK;
+        }
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI frame_do_SetValue( void *iface, void *dp, IInspectable *value )
+{
+    struct xaml_frame *impl = impl_from_depobj( iface );
+    int i;
+
+    TRACE( "iface %p, dp %p, value %p.\n", iface, dp, value );
+    for (i = 0; i < impl->prop_count; i++)
+    {
+        if (impl->props[i].dp == dp)
+        {
+            if (impl->props[i].value) IInspectable_Release( impl->props[i].value );
+            impl->props[i].value = value;
+            if (value) IInspectable_AddRef( value );
+            return S_OK;
+        }
+    }
+    if (impl->prop_count < ARRAY_SIZE(impl->props))
+    {
+        impl->props[impl->prop_count].dp = dp;
+        impl->props[impl->prop_count].value = value;
+        if (value) IInspectable_AddRef( value );
+        impl->prop_count++;
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI frame_do_ClearValue( void *iface, void *dp )
+{
+    return frame_do_SetValue( iface, dp, NULL );
+}
+
+static HRESULT WINAPI frame_do_GetAnimationBaseValue( void *iface, void *dp, IInspectable **value )
+{
+    return frame_do_GetValue( iface, dp, value );
+}
+
+static HRESULT WINAPI frame_do_get_Dispatcher( void *iface, void **value )
+{
+    if (value) *value = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI frame_do_RegisterPropertyChangedCallback( void *iface, void *dp, void *cb, INT64 *token )
+{
+    if (token) *token = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI frame_do_UnregisterPropertyChangedCallback( void *iface, void *dp, INT64 token )
+{
+    return S_OK;
+}
+
+static const void *frame_depobj_vtbl[] =
+{
+    frame_do_QueryInterface,
+    frame_do_AddRef,
+    frame_do_Release,
+    frame_do_GetIids,
+    frame_do_GetRuntimeClassName,
+    frame_do_GetTrustLevel,
+    frame_do_GetValue,
+    frame_do_SetValue,
+    frame_do_ClearValue,
+    frame_do_GetValue, /* ReadLocalValue */
+    frame_do_GetAnimationBaseValue,
+    frame_do_get_Dispatcher,
+    frame_do_RegisterPropertyChangedCallback,
+    frame_do_UnregisterPropertyChangedCallback,
+};
+
 static HRESULT frame_create( IInspectable *outer, IInspectable **inner, void **instance )
 {
     struct xaml_frame *impl;
@@ -447,6 +594,7 @@ static HRESULT frame_create( IInspectable *outer, IInspectable **inner, void **i
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
 
     impl->IInspectable_iface.lpVtbl = (const struct IInspectableVtbl *)frame_vtbl;
+    impl->IDependencyObject_iface = frame_depobj_vtbl;
     impl->ref = 1;
     impl->outer = outer;
     xaml_create_dcomp_visual( &impl->visual );
@@ -1910,7 +2058,10 @@ static HRESULT WINAPI element_QueryInterface( IInspectable *iface, REFIID iid, v
         IsEqualGUID( iid, &IID_IDataTemplate ) ||
         IsEqualGUID( iid, &IID_IProgressRing ) ||
         IsEqualGUID( iid, &IID_IImage_WinUI ) ||
-        IsEqualGUID( iid, &IID_IStyle ))
+        IsEqualGUID( iid, &IID_IStyle ) ||
+        IsEqualGUID( iid, &IID_IBrush_local ) ||
+        IsEqualGUID( iid, &IID_ISolidColorBrush_local ) ||
+        IsEqualGUID( iid, &IID_IStyle_local ))
     {
         *out = &impl->IInspectable_iface;
         element_AddRef( &impl->IInspectable_iface );

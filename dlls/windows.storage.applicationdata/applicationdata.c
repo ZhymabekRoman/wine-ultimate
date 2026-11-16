@@ -398,6 +398,7 @@ struct application_data
     ULONG iids_count;
     struct data_changed_entry *handlers;    /* DataChanged registrations, see application_data_fire_data_changed */
     LONG next_data_changed_token;
+    UINT32 version;
 };
 
 static inline struct application_data *impl_from_IApplicationData( IApplicationData *iface )
@@ -533,15 +534,186 @@ static HRESULT WINAPI application_data_GetTrustLevel( IApplicationData *iface, T
 
 static HRESULT WINAPI application_data_get_Version( IApplicationData *iface, UINT32 *value )
 {
-    FIXME( "iface %p, value %p stub!\n", iface, value );
-    return E_NOTIMPL;
+    struct application_data *impl = impl_from_IApplicationData( iface );
+    TRACE( "iface %p, value %p.\n", iface, value );
+    if (!value) return E_POINTER;
+    *value = impl->version;
+    return S_OK;
 }
+
+struct set_version_action
+{
+    IAsyncAction IAsyncAction_iface;
+    IAsyncInfo IAsyncInfo_iface;
+    LONG ref;
+    IAsyncActionCompletedHandler *handler;
+};
+
+static inline struct set_version_action *sva_from_IAsyncAction( IAsyncAction *iface )
+{
+    return CONTAINING_RECORD( iface, struct set_version_action, IAsyncAction_iface );
+}
+static inline struct set_version_action *sva_from_IAsyncInfo( IAsyncInfo *iface )
+{
+    return CONTAINING_RECORD( iface, struct set_version_action, IAsyncInfo_iface );
+}
+
+static HRESULT WINAPI sva_QueryInterface( IAsyncAction *iface, REFIID iid, void **out )
+{
+    struct set_version_action *impl = sva_from_IAsyncAction( iface );
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IAsyncAction ))
+    {
+        *out = &impl->IAsyncAction_iface;
+        IAsyncAction_AddRef( &impl->IAsyncAction_iface );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IAsyncInfo ))
+    {
+        *out = &impl->IAsyncInfo_iface;
+        IAsyncAction_AddRef( &impl->IAsyncAction_iface );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI sva_AddRef( IAsyncAction *iface )
+{
+    struct set_version_action *impl = sva_from_IAsyncAction( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI sva_Release( IAsyncAction *iface )
+{
+    struct set_version_action *impl = sva_from_IAsyncAction( iface );
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref)
+    {
+        if (impl->handler) IAsyncActionCompletedHandler_Release( impl->handler );
+        free( impl );
+    }
+    return ref;
+}
+
+static HRESULT WINAPI sva_GetIids( IAsyncAction *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI sva_GetRuntimeClassName( IAsyncAction *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.IAsyncAction", 31, name );
+}
+
+static HRESULT WINAPI sva_GetTrustLevel( IAsyncAction *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT WINAPI sva_put_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler *handler )
+{
+    struct set_version_action *impl = sva_from_IAsyncAction( iface );
+    if (impl->handler) IAsyncActionCompletedHandler_Release( impl->handler );
+    impl->handler = handler;
+    if (handler)
+    {
+        IAsyncActionCompletedHandler_AddRef( handler );
+        IAsyncActionCompletedHandler_Invoke( handler, iface, Completed );
+    }
+    return S_OK;
+}
+
+static HRESULT WINAPI sva_get_Completed( IAsyncAction *iface, IAsyncActionCompletedHandler **handler )
+{
+    struct set_version_action *impl = sva_from_IAsyncAction( iface );
+    if (!handler) return E_POINTER;
+    *handler = impl->handler;
+    if (*handler) IAsyncActionCompletedHandler_AddRef( *handler );
+    return S_OK;
+}
+
+static HRESULT WINAPI sva_GetResults( IAsyncAction *iface ) { return S_OK; }
+
+static const struct IAsyncActionVtbl sva_vtbl =
+{
+    sva_QueryInterface,
+    sva_AddRef,
+    sva_Release,
+    sva_GetIids,
+    sva_GetRuntimeClassName,
+    sva_GetTrustLevel,
+    sva_put_Completed,
+    sva_get_Completed,
+    sva_GetResults,
+};
+
+static HRESULT WINAPI sva_info_QueryInterface( IAsyncInfo *iface, REFIID iid, void **out )
+{
+    return sva_QueryInterface( &sva_from_IAsyncInfo( iface )->IAsyncAction_iface, iid, out );
+}
+static ULONG WINAPI sva_info_AddRef( IAsyncInfo *iface )
+{
+    return sva_AddRef( &sva_from_IAsyncInfo( iface )->IAsyncAction_iface );
+}
+static ULONG WINAPI sva_info_Release( IAsyncInfo *iface )
+{
+    return sva_Release( &sva_from_IAsyncInfo( iface )->IAsyncAction_iface );
+}
+static HRESULT WINAPI sva_info_GetIids( IAsyncInfo *iface, ULONG *count, IID **iids )
+{
+    return sva_GetIids( &sva_from_IAsyncInfo( iface )->IAsyncAction_iface, count, iids );
+}
+static HRESULT WINAPI sva_info_GetRuntimeClassName( IAsyncInfo *iface, HSTRING *name )
+{
+    return sva_GetRuntimeClassName( &sva_from_IAsyncInfo( iface )->IAsyncAction_iface, name );
+}
+static HRESULT WINAPI sva_info_GetTrustLevel( IAsyncInfo *iface, TrustLevel *level )
+{
+    return sva_GetTrustLevel( &sva_from_IAsyncInfo( iface )->IAsyncAction_iface, level );
+}
+static HRESULT WINAPI sva_info_get_Id( IAsyncInfo *iface, UINT32 *id ) { if (id) *id = 1; return S_OK; }
+static HRESULT WINAPI sva_info_get_Status( IAsyncInfo *iface, AsyncStatus *status ) { if (status) *status = Completed; return S_OK; }
+static HRESULT WINAPI sva_info_get_ErrorCode( IAsyncInfo *iface, HRESULT *err ) { if (err) *err = S_OK; return S_OK; }
+static HRESULT WINAPI sva_info_Cancel( IAsyncInfo *iface ) { return S_OK; }
+static HRESULT WINAPI sva_info_Close( IAsyncInfo *iface ) { return S_OK; }
+
+static const struct IAsyncInfoVtbl sva_info_vtbl =
+{
+    sva_info_QueryInterface,
+    sva_info_AddRef,
+    sva_info_Release,
+    sva_info_GetIids,
+    sva_info_GetRuntimeClassName,
+    sva_info_GetTrustLevel,
+    sva_info_get_Id,
+    sva_info_get_Status,
+    sva_info_get_ErrorCode,
+    sva_info_Cancel,
+    sva_info_Close,
+};
 
 static HRESULT WINAPI application_data_SetVersionAsync( IApplicationData *iface, UINT32 version, IApplicationDataSetVersionHandler *handler,
                                                         IAsyncAction **operation )
 {
-    FIXME( "iface %p, version %d, handler %p, operation %p stub!\n", iface, version, handler, operation );
-    return E_NOTIMPL;
+    struct application_data *impl = impl_from_IApplicationData( iface );
+    struct set_version_action *act;
+
+    TRACE( "iface %p, version %u, handler %p, operation %p.\n", iface, version, handler, operation );
+    if (!operation) return E_POINTER;
+    if (!(act = calloc( 1, sizeof(*act) ))) return E_OUTOFMEMORY;
+    act->IAsyncAction_iface.lpVtbl = &sva_vtbl;
+    act->IAsyncInfo_iface.lpVtbl = &sva_info_vtbl;
+    act->ref = 1;
+    impl->version = version;
+    *operation = &act->IAsyncAction_iface;
+    return S_OK;
 }
 
 static HRESULT WINAPI application_data_ClearAllAsync( IApplicationData *iface, IAsyncAction **operation )
@@ -1060,7 +1232,13 @@ static HRESULT WINAPI settings_values_GetTrustLevel( IPropertySet *iface, TrustL
 static HRESULT WINAPI settings_values_Lookup( IPropertySet *iface, HSTRING key, IInspectable **value )
 {
     struct settings_values *impl = impl_from_IPropertySet( iface );
-    return settings_inner_vt( impl )->Lookup( impl->inner, key, value );
+    HRESULT hr = settings_inner_vt( impl )->Lookup( impl->inner, key, value );
+    if (hr == E_BOUNDS && value)
+    {
+        *value = NULL;
+        return S_OK;
+    }
+    return hr;
 }
 
 static HRESULT WINAPI settings_values_get_Size( IPropertySet *iface, unsigned int *size )

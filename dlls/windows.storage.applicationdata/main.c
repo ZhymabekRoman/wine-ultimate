@@ -30,6 +30,65 @@ HRESULT WINAPI DllGetClassObject( REFCLSID clsid, REFIID riid, void **out )
     return CLASS_E_CLASSNOTAVAILABLE;
 }
 
+static HRESULT WINAPI composite_factory_QueryInterface( IActivationFactory *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI composite_factory_AddRef( IActivationFactory *iface ) { return 2; }
+static ULONG WINAPI composite_factory_Release( IActivationFactory *iface ) { return 1; }
+static HRESULT WINAPI composite_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI composite_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Storage.ApplicationDataCompositeValue", 45, name );
+}
+static HRESULT WINAPI composite_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI composite_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    HSTRING cls;
+    HRESULT hr;
+    static const WCHAR propset[] = L"Windows.Foundation.Collections.PropertySet";
+
+    if (!instance) return E_POINTER;
+    *instance = NULL;
+    if (FAILED(hr = WindowsCreateString( propset, ARRAY_SIZE(propset) - 1, &cls )))
+        return hr;
+    hr = RoActivateInstance( cls, instance );
+    WindowsDeleteString( cls );
+    return hr;
+}
+
+static const struct IActivationFactoryVtbl composite_factory_vtbl =
+{
+    composite_factory_QueryInterface,
+    composite_factory_AddRef,
+    composite_factory_Release,
+    composite_factory_GetIids,
+    composite_factory_GetRuntimeClassName,
+    composite_factory_GetTrustLevel,
+    composite_factory_ActivateInstance,
+};
+static IActivationFactory composite_factory = { &composite_factory_vtbl };
+
 HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buffer = WindowsGetStringRawBuffer( classid, NULL );
@@ -50,6 +109,9 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
     if (!wcscmp( buffer, RuntimeClass_Windows_Storage_ApplicationData ) ||
         !wcscmp( buffer, L"Microsoft.Windows.Storage.ApplicationData" ))
         IActivationFactory_QueryInterface( application_data_factory, &IID_IActivationFactory, (void **)factory );
+    else if (!wcscmp( buffer, L"Windows.Storage.ApplicationDataCompositeValue" ) ||
+             !wcscmp( buffer, L"Microsoft.Windows.Storage.ApplicationDataCompositeValue" ))
+        *factory = &composite_factory;
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;

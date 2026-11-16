@@ -752,8 +752,11 @@ struct factory
     IActivationFactory IActivationFactory_iface;
     IApplicationViewStatics IApplicationViewStatics_iface;
     IApplicationViewStatics2 IApplicationViewStatics2_iface;
+    IApplicationViewStatics3 IApplicationViewStatics3_iface;
     const void *IApplicationViewInteropStatics_iface;
     LONG ref;
+    ApplicationViewWindowingMode preferred_windowing_mode;
+    Size preferred_launch_size;
 };
 
 static inline struct factory *impl_from_IActivationFactory(IActivationFactory *iface)
@@ -787,6 +790,12 @@ static HRESULT WINAPI activation_factory_QueryInterface(IActivationFactory *ifac
     {
         IApplicationViewStatics2_AddRef(&impl->IApplicationViewStatics2_iface);
         *out = &impl->IApplicationViewStatics2_iface;
+        return S_OK;
+    }
+    else if (IsEqualGUID(iid, &IID_IApplicationViewStatics3))
+    {
+        IApplicationViewStatics3_AddRef(&impl->IApplicationViewStatics3_iface);
+        *out = &impl->IApplicationViewStatics3_iface;
         return S_OK;
     }
     else if (IsEqualGUID(iid, &IID_IApplicationViewStatics2_alt))
@@ -932,6 +941,60 @@ static const struct IApplicationViewStatics2Vtbl statics2_vtbl =
     statics2_put_TerminateAppOnFinalViewClose
 };
 
+DEFINE_IINSPECTABLE(statics3, IApplicationViewStatics3, struct factory, IActivationFactory_iface)
+
+static HRESULT WINAPI statics3_get_PreferredLaunchWindowingMode(IApplicationViewStatics3 *iface,
+                                                                 ApplicationViewWindowingMode *value)
+{
+    struct factory *impl = impl_from_IApplicationViewStatics3(iface);
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    *value = impl->preferred_windowing_mode;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics3_put_PreferredLaunchWindowingMode(IApplicationViewStatics3 *iface,
+                                                                 ApplicationViewWindowingMode value)
+{
+    struct factory *impl = impl_from_IApplicationViewStatics3(iface);
+    TRACE("iface %p, value %d\n", iface, value);
+    impl->preferred_windowing_mode = value;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics3_get_PreferredLaunchViewSize(IApplicationViewStatics3 *iface, Size *value)
+{
+    struct factory *impl = impl_from_IApplicationViewStatics3(iface);
+    TRACE("iface %p, value %p\n", iface, value);
+    if (!value) return E_POINTER;
+    *value = impl->preferred_launch_size;
+    return S_OK;
+}
+
+static HRESULT WINAPI statics3_put_PreferredLaunchViewSize(IApplicationViewStatics3 *iface, Size value)
+{
+    struct factory *impl = impl_from_IApplicationViewStatics3(iface);
+    TRACE("iface %p, value {%f, %f}\n", iface, value.Width, value.Height);
+    impl->preferred_launch_size = value;
+    return S_OK;
+}
+
+static const struct IApplicationViewStatics3Vtbl statics3_vtbl =
+{
+    statics3_QueryInterface,
+    statics3_AddRef,
+    statics3_Release,
+    /* IInspectable methods */
+    statics3_GetIids,
+    statics3_GetRuntimeClassName,
+    statics3_GetTrustLevel,
+    /* IApplicationViewStatics3 methods */
+    statics3_get_PreferredLaunchWindowingMode,
+    statics3_put_PreferredLaunchWindowingMode,
+    statics3_get_PreferredLaunchViewSize,
+    statics3_put_PreferredLaunchViewSize,
+};
+
 static HRESULT WINAPI interop_statics_QueryInterface( void *iface, REFIID iid, void **out )
 {
     struct factory *impl = CONTAINING_RECORD( iface, struct factory, IApplicationViewInteropStatics_iface );
@@ -985,6 +1048,7 @@ static struct factory factory =
     {&activation_factory_vtbl},
     {&statics_vtbl},
     {&statics2_vtbl},
+    {&statics3_vtbl},
     interop_statics_vtbl,
     1,
 };

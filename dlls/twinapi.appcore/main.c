@@ -2052,6 +2052,184 @@ static const void *push_trigger_factory_vtbl[] =
     push_trigger_factory_ActivateInstance,
 };
 
+/* TimeTrigger and SystemTrigger */
+static const GUID IID_ITimeTriggerFactory_local =
+    { 0x38c682fe, 0x9b54, 0x45e6, { 0xb2, 0xf3, 0x26, 0x9b, 0x87, 0xa6, 0xf7, 0x34 } };
+static const GUID IID_ISystemTriggerFactory_local =
+    { 0xe80423d4, 0x8791, 0x4579, { 0x81, 0x26, 0x87, 0xec, 0x8a, 0xaa, 0x40, 0x7a } };
+
+struct bg_trigger_obj
+{
+    const void **vtbl;
+    LONG ref;
+    UINT32 param;
+    boolean one_shot;
+};
+
+static HRESULT WINAPI bg_trigger_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    IUnknown_AddRef( (IUnknown *)iface );
+    *out = iface;
+    return S_OK;
+}
+
+static ULONG WINAPI bg_trigger_AddRef( void *iface )
+{
+    struct bg_trigger_obj *impl = iface;
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI bg_trigger_Release( void *iface )
+{
+    struct bg_trigger_obj *impl = iface;
+    ULONG ref = InterlockedDecrement( &impl->ref );
+    if (!ref) free( impl );
+    return ref;
+}
+
+static HRESULT WINAPI time_trigger_get_FreshnessTime( void *iface, UINT32 *value )
+{
+    struct bg_trigger_obj *impl = iface;
+    if (!value) return E_POINTER;
+    *value = impl->param;
+    return S_OK;
+}
+
+static HRESULT WINAPI time_trigger_get_OneShot( void *iface, boolean *value )
+{
+    struct bg_trigger_obj *impl = iface;
+    if (!value) return E_POINTER;
+    *value = impl->one_shot;
+    return S_OK;
+}
+
+static const void *time_trigger_vtbl[] =
+{
+    bg_trigger_QueryInterface,
+    bg_trigger_AddRef,
+    bg_trigger_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    time_trigger_get_FreshnessTime,
+    time_trigger_get_OneShot,
+};
+
+static HRESULT WINAPI sys_trigger_get_OneShot( void *iface, boolean *value )
+{
+    struct bg_trigger_obj *impl = iface;
+    if (!value) return E_POINTER;
+    *value = impl->one_shot;
+    return S_OK;
+}
+
+static HRESULT WINAPI sys_trigger_get_TriggerType( void *iface, UINT32 *value )
+{
+    struct bg_trigger_obj *impl = iface;
+    if (!value) return E_POINTER;
+    *value = impl->param;
+    return S_OK;
+}
+
+static const void *sys_trigger_vtbl[] =
+{
+    bg_trigger_QueryInterface,
+    bg_trigger_AddRef,
+    bg_trigger_Release,
+    dummy_async_GetIids,
+    dummy_async_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    sys_trigger_get_OneShot,
+    sys_trigger_get_TriggerType,
+};
+
+static HRESULT WINAPI time_trigger_factory_Create( void *iface, UINT32 freshness_time, boolean one_shot, void **trigger )
+{
+    struct bg_trigger_obj *obj;
+    if (!trigger) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->vtbl = time_trigger_vtbl;
+    obj->ref = 1;
+    obj->param = freshness_time;
+    obj->one_shot = one_shot;
+    *trigger = obj;
+    return S_OK;
+}
+
+static const void *time_trigger_factory_vtbl[];
+static struct { const void **vtbl; } time_trigger_factory_obj = { time_trigger_factory_vtbl };
+
+static HRESULT WINAPI time_trigger_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = &time_trigger_factory_obj;
+    return S_OK;
+}
+
+static const void *time_trigger_factory_vtbl[] =
+{
+    time_trigger_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    push_notification_factory_GetIids,
+    push_notification_factory_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    time_trigger_factory_Create,
+};
+
+static HRESULT WINAPI sys_trigger_factory_Create( void *iface, UINT32 trigger_type, boolean one_shot, void **trigger )
+{
+    struct bg_trigger_obj *obj;
+    if (!trigger) return E_POINTER;
+    if (!(obj = calloc( 1, sizeof(*obj) ))) return E_OUTOFMEMORY;
+    obj->vtbl = sys_trigger_vtbl;
+    obj->ref = 1;
+    obj->param = trigger_type;
+    obj->one_shot = one_shot;
+    *trigger = obj;
+    return S_OK;
+}
+
+static const void *sys_trigger_factory_vtbl[];
+static struct { const void **vtbl; } sys_trigger_factory_obj = { sys_trigger_factory_vtbl };
+
+static HRESULT WINAPI sys_trigger_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IReferenceTracker ) ||
+        IsEqualGUID( iid, &IID_IReferenceTrackerTarget ))
+    {
+        *out = NULL;
+        return E_NOINTERFACE;
+    }
+    *out = &sys_trigger_factory_obj;
+    return S_OK;
+}
+
+static const void *sys_trigger_factory_vtbl[] =
+{
+    sys_trigger_factory_QueryInterface,
+    push_notification_factory_AddRef,
+    push_notification_factory_Release,
+    push_notification_factory_GetIids,
+    push_notification_factory_GetRuntimeClassName,
+    push_notification_factory_GetTrustLevel,
+    sys_trigger_factory_Create,
+};
+
 /* Direct PRI (resources.pri) support for ResourceLoader, sharing the mrm_pri2
  * reader from dlls/windows.applicationmodel.resources.core/pri.c. One
  * process-wide index, loaded lazily on the first GetString/GetStringForUri
@@ -2722,6 +2900,10 @@ HRESULT WINAPI DllGetActivationFactory( HSTRING classid, IActivationFactory **fa
         *factory = (IActivationFactory *)&bg_builder_factory_obj;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.PushNotificationTrigger" ))
         *factory = (IActivationFactory *)&push_trigger_factory_obj;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.TimeTrigger" ))
+        *factory = (IActivationFactory *)&time_trigger_factory_obj;
+    else if (!wcscmp( buffer, L"Windows.ApplicationModel.Background.SystemTrigger" ))
+        *factory = (IActivationFactory *)&sys_trigger_factory_obj;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.StartupTask" ))
         *factory = (IActivationFactory *)&startup_task_factory_obj;
     else if (!wcscmp( buffer, L"Windows.ApplicationModel.Resources.ResourceLoader" ))
