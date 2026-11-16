@@ -1258,6 +1258,102 @@ static void test_VectorGrowthBeyondOldCaps( void )
     IInspectable_Release( elem_obj );
 }
 
+static void test_TruncatedXbfBounds( void )
+{
+    static const GUID IID_IXamlReaderStatics_test =
+        { 0x9891c6bd, 0x534f, 0x4955, { 0xb8, 0x5a, 0x8a, 0x8d, 0xc0, 0xdc, 0xa6, 0x02 } };
+    IActivationFactory *xr_af = NULL;
+    void *xr_statics = NULL;
+    HSTRING str = NULL;
+    HRESULT hr;
+    BOOL all_ok = TRUE;
+    BYTE blob[160];
+    unsigned int tc;
+
+    WindowsCreateString( L"Windows.UI.Xaml.Markup.XamlReader", 33, &str );
+    hr = RoGetActivationFactory( str, &IID_IActivationFactory, (void **)&xr_af );
+    WindowsDeleteString( str );
+    if (FAILED(hr) || !xr_af)
+    {
+        ok( FALSE, "XamlReader factory hr %#lx\n", hr );
+        return;
+    }
+    hr = IActivationFactory_QueryInterface( xr_af, &IID_IXamlReaderStatics_test, &xr_statics );
+    IActivationFactory_Release( xr_af );
+    if (FAILED(hr) || !xr_statics)
+    {
+        ok( FALSE, "QI IXamlReaderStatics hr %#lx\n", hr );
+        return;
+    }
+
+    for (tc = 0; tc < 4; tc++)
+    {
+        IInspectable *root = NULL;
+        DWORD meta_sz = 0x44, node_sz = 0x38;
+        BYTE *nodes = blob + 12 + meta_sz;
+
+        memset( blob, 0, sizeof(blob) );
+        memcpy( blob, "XBF\0", 4 );
+        *(DWORD *)(blob + 4) = meta_sz;
+        *(DWORD *)(blob + 8) = node_sz;
+        /* Minimal valid metadata: offs[0..5] = 0x38, 0 entries at offset 0x38 */
+        *(UINT64 *)(blob + 20 + 0 * 8) = 0x38;
+        *(UINT64 *)(blob + 20 + 3 * 8) = 0x38;
+        *(UINT64 *)(blob + 20 + 4 * 8) = 0x38;
+        *(UINT64 *)(blob + 20 + 5 * 8) = 0x38;
+
+        /* 2 substreams: sub 0 = [0, 0x18), sub 1 = [0x18, 0x1c) (size 4) */
+        *(DWORD *)(nodes + 0) = 2;
+        *(DWORD *)(nodes + 4) = 0;
+        *(DWORD *)(nodes + 8) = 0x18;
+        *(DWORD *)(nodes + 12) = 0x18;
+        *(DWORD *)(nodes + 16) = 0x1c;
+
+        if (tc == 0)
+        {
+            /* Truncated def_kind=0x0a ResourceDictionary c1..c6 ULEB counts exceeding substream end */
+            BYTE *s0 = nodes + 20;
+            s0[0] = 0x17; s0[1] = 0x73; s0[2] = 0x81; /* Push ResourceDictionary */
+            s0[3] = 0x0f; s0[4] = 0x01; s0[5] = 0x00; s0[6] = 0x00; s0[7] = 0x0a; /* DeferSubstream sub=1 kind=0x0a */
+            s0[8] = 0x01; /* c1 = 1 */
+            s0[9] = 0x00; s0[10] = 0x00; s0[11] = 0x7f; /* key_sid=0, sub_off=127 (> def_sub_sz 4!) */
+            s0[12] = 0xff; s0[13] = 0x7f; /* c2 = 16383 (> remaining substream!) */
+        }
+        else if (tc == 1)
+        {
+            /* Truncated def_kind=0x05 VisualStateGroupCollection with state offset exceeding def_sub end */
+            BYTE *s0 = nodes + 20;
+            s0[0] = 0x17; s0[1] = 0xba; s0[2] = 0x81; /* Push Grid */
+            s0[3] = 0x0f; s0[4] = 0x01; s0[5] = 0x00; s0[6] = 0x00; s0[7] = 0x05; /* DeferSubstream sub=1 kind=0x05 */
+            s0[8] = 0x02; /* n_states = 2 */
+            s0[9] = 0x40; /* st_off = 64 (> def_sub_sz 4!) */
+            s0[10] = 0x80; /* truncated ULEB at substream end */
+        }
+        else if (tc == 2)
+        {
+            /* Out-of-range def_sub index in DeferSubstream */
+            BYTE *s0 = nodes + 20;
+            s0[0] = 0x0f; s0[1] = 0x55; s0[2] = 0x00; s0[3] = 0x00; s0[4] = 0x0a;
+        }
+        else
+        {
+            /* Substream directory end offset exceeding node_sz */
+            *(DWORD *)(nodes + 16) = 0x9999;
+        }
+
+        hr = WindowsCreateString( (const WCHAR *)blob, sizeof(blob) / sizeof(WCHAR), &str );
+        if (FAILED(hr)) { all_ok = FALSE; break; }
+        /* Slot 6 on IXamlReaderStatics: Load(HSTRING, IInspectable**) */
+        hr = ((HRESULT (WINAPI *)(void *, HSTRING, IInspectable **))(*(void ***)xr_statics)[6])( xr_statics, str, &root );
+        WindowsDeleteString( str );
+        if (FAILED(hr) || !root) all_ok = FALSE;
+        if (root) IInspectable_Release( root );
+    }
+
+    ok( all_ok, "truncated/malformed XBF v2 blobs should be rejected gracefully without crash\n" );
+    IUnknown_Release( (IUnknown *)xr_statics );
+}
+
 START_TEST(xaml)
 {
     HRESULT hr;
@@ -1272,6 +1368,7 @@ START_TEST(xaml)
     test_PointerBridge();
     test_VmDataContextBinding();
     test_VectorGrowthBeyondOldCaps();
+    test_TruncatedXbfBounds();
 
     RoUninitialize();
 }

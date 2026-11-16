@@ -2203,6 +2203,25 @@ struct uwp_defer_entry
     BOOL realized;
 };
 
+enum uwp_vsm_prop_kind
+{
+    UWP_VSM_PROP_NONE = 0,
+    UWP_VSM_PROP_GRID_LEN,
+    UWP_VSM_PROP_WIDTH,
+    UWP_VSM_PROP_HEIGHT,
+    UWP_VSM_PROP_MIN_WIDTH,
+    UWP_VSM_PROP_MAX_WIDTH,
+    UWP_VSM_PROP_MIN_HEIGHT,
+    UWP_VSM_PROP_MAX_HEIGHT,
+    UWP_VSM_PROP_VISIBILITY,
+    UWP_VSM_PROP_IS_ENABLED,
+    UWP_VSM_PROP_GRID_ROW,
+    UWP_VSM_PROP_GRID_ROW_SPAN,
+    UWP_VSM_PROP_GRID_COL,
+    UWP_VSM_PROP_GRID_COL_SPAN,
+    UWP_VSM_PROP_FONT_SIZE,
+};
+
 struct uwp_vsm_setter
 {
     WCHAR target[64];
@@ -2211,20 +2230,14 @@ struct uwp_vsm_setter
     int vt;
     double num;
     BOOL is_res_ref;
-    BOOL has_saved;
-    int saved_grid_len_type;
-    double saved_grid_len_val;
-    int saved_visibility;
-    double saved_width;
-    double saved_height;
-    double saved_min_width;
-    double saved_max_width;
-    double saved_min_height;
-    double saved_max_height;
-    boolean saved_is_enabled;
-    int saved_grid_row;
-    int saved_grid_col;
-    double saved_font_size;
+};
+
+struct uwp_vsm_snapshot_entry
+{
+    struct uwp_element *target;
+    enum uwp_vsm_prop_kind prop_kind;
+    int old_int;
+    double old_num;
 };
 
 struct uwp_vsm_state
@@ -2246,6 +2259,9 @@ struct uwp_vsm_group
     struct uwp_vsm_state *states;
     int state_cnt;
     int state_cap;
+    struct uwp_vsm_snapshot_entry *snapshots;
+    int snapshot_cnt;
+    int snapshot_cap;
 };
 
 struct uwp_element
@@ -2426,6 +2442,9 @@ struct uwp_element
     struct uwp_vsm_group *vsm_groups;
     int vsm_group_cnt;
     int vsm_group_cap;
+    double vsm_eval_width;
+    double vsm_eval_height;
+    BOOL vsm_eval_valid;
     WCHAR image_src[256];
     BYTE *img_pixels;
     UINT img_w, img_h;
@@ -6565,6 +6584,7 @@ static struct uwp_element *uwp_find_named( struct uwp_element *el, const WCHAR *
 
 static void uwp_seed_synthetic_calculator( struct uwp_element *holder );
 static void uwp_realize_deferred_entry( struct uwp_defer_entry *de );
+static void uwp_vsm_invalidate_eval_chain( struct uwp_element *el );
 static void uwp_parse_and_build_xbf( const BYTE *xbf, DWORD xbf_sz, IInspectable *component,
                                      void *connector, BOOL is_uwp_conn, void *app_outer,
                                      int only_sub_idx, struct uwp_element *attach_root,
@@ -6797,6 +6817,7 @@ static BOOL uwp_instantiate_xbf_control_into( struct uwp_element *holder, const 
     uwp_vec_create( holder, &holder->children_coll );
     uwp_vec_Append( holder->children_coll, el->outer ? (void *)el->outer : (void *)&el->IInspectable_iface );
     el->parent = holder;
+    uwp_vsm_invalidate_eval_chain( el );
     uwp_realize_empty_panel_defers( el );
     uwp_fire_loaded_tree( el );
     TRACE( "uwp_instantiate_xbf_control_into: hosted %s in %s\n",
@@ -7785,6 +7806,7 @@ struct xbf_rd_table
 {
     struct xbf_rd_map_item *items;
     int count;
+    int cap;
 };
 
 struct xbf_stack_val
@@ -7812,6 +7834,19 @@ struct xbf_stack_val
     BOOL vsm_has_val;
 };
 
+static void uwp_vsm_invalidate_eval_chain( struct uwp_element *el )
+{
+    int depth = 0;
+    while (el && depth++ < 32)
+    {
+        el->vsm_eval_valid = FALSE;
+        if (el->owner_component && el->owner_component != el)
+            el->owner_component->vsm_eval_valid = FALSE;
+        if (el->parent == el) break;
+        el = el->parent;
+    }
+}
+
 static struct uwp_vsm_group *uwp_vsm_add_group( struct uwp_element *el, const WCHAR *name )
 {
     struct uwp_vsm_group *g;
@@ -7828,6 +7863,7 @@ static struct uwp_vsm_group *uwp_vsm_add_group( struct uwp_element *el, const WC
     memset( g, 0, sizeof(*g) );
     g->active_state_idx = -1;
     if (name && name[0]) lstrcpynW( g->name, name, ARRAY_SIZE(g->name) );
+    uwp_vsm_invalidate_eval_chain( el );
     return g;
 }
 
@@ -7909,12 +7945,15 @@ static void vsm_split_setter_target( const WCHAR *spec, WCHAR *out_target, size_
 
 static BOOL xbf_read_uleb( const BYTE *buf, DWORD *io_p, DWORD end_p, DWORD *out_val )
 {
-    DWORD p = *io_p, val = 0;
+    DWORD p, val = 0;
     int sh = 0;
+    if (!buf || !io_p || !out_val) return FALSE;
+    p = *io_p;
     while (p < end_p)
     {
         BYTE b = buf[p++];
-        if (sh < 28) val |= (DWORD)(b & 0x7f) << sh;
+        if (sh >= 35 || (sh == 28 && (b & 0x70))) return FALSE;
+        val |= (DWORD)(b & 0x7f) << sh;
         if (!(b & 0x80))
         {
             *io_p = p;
@@ -7924,6 +7963,21 @@ static BOOL xbf_read_uleb( const BYTE *buf, DWORD *io_p, DWORD end_p, DWORD *out
         sh += 7;
     }
     return FALSE;
+}
+
+static BOOL xbf_get_substream_bounds( const struct xbf_ctx *ctx, DWORD sub_idx,
+                                      DWORD *out_start, DWORD *out_end, DWORD *out_size )
+{
+    DWORD ss, ee;
+    if (!ctx || !ctx->nodes || sub_idx >= ctx->sub_cnt) return FALSE;
+    if (ctx->sub_base < 4 || ctx->sub_base > ctx->node_sz || sub_idx >= (ctx->sub_base - 4) / 8) return FALSE;
+    ss = *(const DWORD *)(ctx->nodes + 4 + sub_idx * 8);
+    ee = *(const DWORD *)(ctx->nodes + 4 + sub_idx * 8 + 4);
+    if (ss > ee || ee > ctx->node_sz - ctx->sub_base) return FALSE;
+    if (out_start) *out_start = ctx->sub_base + ss;
+    if (out_end) *out_end = ctx->sub_base + ee;
+    if (out_size) *out_size = ee - ss;
+    return TRUE;
 }
 
 static void xbf_stack_val_add_setter( struct xbf_stack_val *sv, WORD pid, int vt, BOOL is_res_ref,
@@ -8081,7 +8135,7 @@ static BOOL xbf_read_value( struct xbf_ctx *ctx, const BYTE *nd, DWORD *io_p, DW
         {
             DWORD ccnt = *(const DWORD *)(nd + p);
             p += 4;
-            if (p + ccnt * 2 > end_p) return FALSE;
+            if (ccnt > (end_p - p) / 2) return FALSE;
             if (out_str && max_str > 0)
             {
                 DWORD cp = min( ccnt, (DWORD)(max_str - 1) );
@@ -8532,13 +8586,11 @@ static void xbf_apply_property( struct xbf_ctx *ctx, struct uwp_element *el, str
 static void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD off, WORD target_pid,
                                         struct xbf_stack_val *style_sv )
 {
-    DWORD ss, ee, p, end_p;
-    if (!ctx || !style_sv || sub_idx < 0 || (DWORD)sub_idx >= ctx->sub_cnt) return;
-    ss = *(const DWORD *)(ctx->nodes + 4 + sub_idx * 8);
-    ee = *(const DWORD *)(ctx->nodes + 4 + sub_idx * 8 + 4);
-    if (ss + off >= ee || ctx->sub_base + ee > ctx->node_sz) return;
-    p = ctx->sub_base + ss + off;
-    end_p = ctx->sub_base + ee;
+    DWORD sub_start = 0, end_p = 0, sub_sz = 0, p;
+    if (!ctx || !style_sv || sub_idx < 0) return;
+    if (!xbf_get_substream_bounds( ctx, (DWORD)sub_idx, &sub_start, &end_p, &sub_sz )) return;
+    if (off >= sub_sz) return;
+    p = sub_start + off;
     if (p < end_p)
     {
         BYTE op = ctx->nodes[p++];
@@ -8591,11 +8643,206 @@ static void xbf_parse_style_setter_sub( struct xbf_ctx *ctx, int sub_idx, DWORD 
     }
 }
 
+static BOOL xbf_read_vsm_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
+                                       DWORD def_sub_sz, int *io_prop_sp )
+{
+    DWORD p = *io_p, n_states = 0, s_idx;
+    if (!xbf_read_uleb( nodes, &p, end_p, &n_states ) || n_states > end_p - p || n_states > def_sub_sz)
+        return FALSE;
+    for (s_idx = 0; s_idx < n_states; s_idx++)
+    {
+        DWORD st_off = 0;
+        if (!xbf_read_uleb( nodes, &p, end_p, &st_off ) || st_off > def_sub_sz)
+            return FALSE;
+    }
+    /* Find VisualStateGroups footer: 00 02 00 00 01 <cnt_uleb> <cnt*u16> 02 */
+    while (p < end_p)
+    {
+        if (end_p - p >= 7 &&
+            nodes[p] == 0x00 && nodes[p + 1] == 0x02 &&
+            nodes[p + 2] == 0x00 && nodes[p + 3] == 0x00 &&
+            nodes[p + 4] == 0x01)
+        {
+            DWORD q = p + 5, cnt = 0;
+            if (xbf_read_uleb( nodes, &q, end_p, &cnt ) &&
+                cnt >= n_states && cnt <= (end_p - q) / 2 &&
+                q + cnt * 2 < end_p && nodes[q + cnt * 2] == 0x02)
+            {
+                p = q + cnt * 2 + 1;
+                if (io_prop_sp && *io_prop_sp > 0) (*io_prop_sp)--;
+                *io_p = p;
+                return TRUE;
+            }
+        }
+        p++;
+    }
+    *io_p = p;
+    return TRUE;
+}
+
+static BOOL xbf_read_style_defer_table( struct xbf_ctx *ctx, DWORD *io_p, DWORD end_p,
+                                        DWORD def_sub, DWORD def_sub_sz,
+                                        struct xbf_stack_val *style_sv, int *io_prop_sp )
+{
+    DWORD p = *io_p, scnt = 0, si;
+    if (!xbf_read_uleb( ctx->nodes, &p, end_p, &scnt ) || scnt > (end_p - p) / 3)
+        return FALSE;
+    for (si = 0; si < scnt; si++)
+    {
+        BYTE sop;
+        if (p >= end_p) return FALSE;
+        sop = ctx->nodes[p];
+        if (sop == 0x30)
+        {
+            WORD spid;
+            int vt = 0;
+            double num = 0, vec4[4] = {0};
+            WCHAR sbuf[256] = {0};
+            if (end_p - p < 3) return FALSE;
+            spid = *(const WORD *)(ctx->nodes + p + 1);
+            p += 3;
+            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 ))
+                return FALSE;
+            xbf_stack_val_add_setter( style_sv, spid, vt, FALSE, num, sbuf, vec4 );
+        }
+        else if (sop == 0x11 || sop == 0x12 || sop == 0x18)
+        {
+            WORD spid;
+            DWORD soff = 0;
+            if (end_p - p < 3) return FALSE;
+            spid = *(const WORD *)(ctx->nodes + p + 1);
+            p += 3;
+            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &soff ) || soff > def_sub_sz)
+                return FALSE;
+            if ((sop == 0x11 || sop == 0x12) && soff < def_sub_sz)
+                xbf_parse_style_setter_sub( ctx, (int)def_sub, soff, spid, style_sv );
+        }
+        else if (sop == 0x01 || sop == 0x02 || sop == 0x20)
+        {
+            DWORD soff = 0;
+            if (end_p - p < 5) return FALSE;
+            p += 5;
+            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &soff ) || soff > def_sub_sz)
+                return FALSE;
+        }
+        else
+        {
+            break;
+        }
+    }
+    while (p < end_p)
+    {
+        if (ctx->nodes[p] == 0x21 ||
+            (ctx->nodes[p] == 0x02 && (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14)))
+        {
+            if (ctx->nodes[p] == 0x02)
+            {
+                p++;
+                if (io_prop_sp && *io_prop_sp > 0) (*io_prop_sp)--;
+            }
+            break;
+        }
+        p++;
+    }
+    *io_p = p;
+    return TRUE;
+}
+
+static BOOL xbf_read_rd_defer_header( const BYTE *nodes, DWORD *io_p, DWORD end_p,
+                                      DWORD def_sub_sz, struct xbf_rd_table *tbl, int *io_prop_sp )
+{
+    DWORD p = *io_p, c1 = 0, c2 = 0, c3 = 0, c4 = 0, c5 = 0, c6 = 0, ri, ki;
+
+    if (!xbf_read_uleb( nodes, &p, end_p, &c1 ) || c1 >= 10000 || c1 > (end_p - p) / 3)
+        return FALSE;
+    for (ri = 0; ri < c1; ri++)
+    {
+        WORD sid;
+        DWORD off = 0;
+        if (end_p - p < 2) return FALSE;
+        sid = *(const WORD *)(nodes + p);
+        p += 2;
+        if (!xbf_read_uleb( nodes, &p, end_p, &off ) || off > def_sub_sz)
+            return FALSE;
+        if (!xaml_vec_grow( (void **)&tbl->items, &tbl->cap, tbl->count + 1, sizeof(*tbl->items), 32 ))
+            return FALSE;
+        tbl->items[tbl->count].key_sid = sid;
+        tbl->items[tbl->count].sub_off = off;
+        tbl->count++;
+    }
+
+    if (!xbf_read_uleb( nodes, &p, end_p, &c2 ) || c2 > (end_p - p) / 2)
+        return FALSE;
+    p += c2 * 2;
+
+    if (!xbf_read_uleb( nodes, &p, end_p, &c3 ) || c3 >= 10000 || c3 > (end_p - p) / 3)
+        return FALSE;
+    for (ri = 0; ri < c3; ri++)
+    {
+        WORD sid;
+        DWORD off = 0;
+        if (end_p - p < 2) return FALSE;
+        sid = *(const WORD *)(nodes + p);
+        p += 2;
+        if (!xbf_read_uleb( nodes, &p, end_p, &off ) || off > def_sub_sz)
+            return FALSE;
+        if (!xaml_vec_grow( (void **)&tbl->items, &tbl->cap, tbl->count + 1, sizeof(*tbl->items), 32 ))
+            return FALSE;
+        tbl->items[tbl->count].key_sid = sid;
+        tbl->items[tbl->count].sub_off = off;
+        tbl->count++;
+    }
+
+    if (!xbf_read_uleb( nodes, &p, end_p, &c4 ) || c4 > (end_p - p) / 3)
+        return FALSE;
+    for (ri = 0; ri < c4; ri++)
+    {
+        DWORD kc = 0, dummy = 0;
+        if (end_p - p < 2) return FALSE;
+        p += 2;
+        if (!xbf_read_uleb( nodes, &p, end_p, &kc ) || kc > end_p - p)
+            return FALSE;
+        for (ki = 0; ki < kc; ki++)
+            if (!xbf_read_uleb( nodes, &p, end_p, &dummy )) return FALSE;
+    }
+
+    if (!xbf_read_uleb( nodes, &p, end_p, &c5 ) || c5 > (end_p - p) / 3)
+        return FALSE;
+    for (ri = 0; ri < c5; ri++)
+    {
+        DWORD kc = 0, dummy = 0;
+        if (end_p - p < 2) return FALSE;
+        p += 2;
+        if (!xbf_read_uleb( nodes, &p, end_p, &kc ) || kc > end_p - p)
+            return FALSE;
+        for (ki = 0; ki < kc; ki++)
+            if (!xbf_read_uleb( nodes, &p, end_p, &dummy )) return FALSE;
+    }
+
+    if (!xbf_read_uleb( nodes, &p, end_p, &c6 ) || c6 > (end_p - p) / 6)
+        return FALSE;
+    for (ri = 0; ri < c6; ri++)
+    {
+        DWORD dummy = 0;
+        if (!xbf_read_uleb( nodes, &p, end_p, &dummy ) || end_p - p < 5)
+            return FALSE;
+        p += 5;
+    }
+
+    if (p < end_p && nodes[p] == 0x02)
+    {
+        p++;
+        if (io_prop_sp && *io_prop_sp > 0) (*io_prop_sp)--;
+    }
+    *io_p = p;
+    return TRUE;
+}
+
 static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_element *initial_root,
                                    struct uwp_element **out_created, const struct xbf_rd_table *rd_tbl,
                                    struct uwp_rd_bucket *active_rd )
 {
-    DWORD ss, ee, p, end_p;
+    DWORD sub_start = 0, end_p = 0, sub_sz = 0, p;
     struct uwp_element *obj_stack[64];
     IInspectable *raw_stack[64];
     struct xbf_stack_val val_stack[64];
@@ -8612,18 +8859,15 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
     memset( start_off_stack, 0, sizeof(start_off_stack) );
 
     if (out_created) *out_created = NULL;
-    if (sub_idx < 0 || (DWORD)sub_idx >= ctx->sub_cnt) return;
+    if (sub_idx < 0 || !xbf_get_substream_bounds( ctx, (DWORD)sub_idx, &sub_start, &end_p, &sub_sz ))
+        return;
     if (ctx->sub_done)
     {
         if (ctx->sub_done[sub_idx]) return;
         ctx->sub_done[sub_idx] = TRUE;
     }
 
-    ss = *(const DWORD *)(ctx->nodes + 4 + sub_idx * 8);
-    ee = *(const DWORD *)(ctx->nodes + 4 + sub_idx * 8 + 4);
-    p = ctx->sub_base + ss;
-    end_p = ctx->sub_base + ee;
-    if (end_p > ctx->node_sz) end_p = ctx->node_sz;
+    p = sub_start;
 
     if (initial_root)
     {
@@ -8635,18 +8879,19 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
 
     while (p < end_p)
     {
-        DWORD cur_rel_off = p - (ctx->sub_base + ss);
+        DWORD cur_rel_off = p - sub_start;
         BYTE op = ctx->nodes[p++];
         if (op == 0x12) /* LineInfo (6 bytes) */
         {
-            if (p + 6 > end_p) break;
+            if (end_p - p < 6) break;
             p += 6;
         }
         else if (op == 0x03) /* Xmlns prefix */
         {
             DWORD plen;
-            if (p + 6 > end_p) break;
+            if (end_p - p < 6) break;
             plen = *(const DWORD *)(ctx->nodes + p + 2);
+            if (plen > (end_p - (p + 6)) / 2) break;
             p += 6 + plen * 2;
         }
         else if (op == 0x17 || op == 0x14 || op == 0x15 || op == 0x16)
@@ -8865,10 +9110,10 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
         else if (op == 0x0b) /* x:Class */
         {
             DWORD slen;
-            if (p + 4 > end_p) break;
+            if (end_p - p < 4) break;
             slen = *(const DWORD *)(ctx->nodes + p);
             p += 4;
-            if (p + slen * 2 > end_p) break;
+            if (slen > (end_p - p) / 2) break;
             if (obj_sp > 0 && obj_stack[obj_sp - 1] && slen > 0)
             {
                 struct uwp_element *top_el = obj_stack[obj_sp - 1];
@@ -8960,14 +9205,15 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
         }
         else if (op == 0x11) /* SetDeferredProperty <pid:u16> <sub_idx:uleb> <c1:uleb> <c2:uleb> <(c1+c2)*u16> */
         {
-            DWORD sub_i = 0, c1 = 0, c2 = 0;
-            if (p + 2 > end_p) break;
+            DWORD sub_i = 0, def_sz = 0, c1 = 0, c2 = 0;
+            if (end_p - p < 2) break;
             p += 2;
             if (!xbf_read_uleb( ctx->nodes, &p, end_p, &sub_i )) break;
+            if (!xbf_get_substream_bounds( ctx, sub_i, NULL, NULL, &def_sz )) break;
             if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c1 )) break;
             if (!xbf_read_uleb( ctx->nodes, &p, end_p, &c2 )) break;
-            (void)sub_i;
-            if (p + (c1 + c2) * 2 > end_p) break;
+            (void)def_sz;
+            if (c1 > (end_p - p) / 2 || c2 > (end_p - p) / 2 - c1) break;
             p += (c1 + c2) * 2;
         }
         else if (op == 0x02) /* PopProperty */
@@ -9204,7 +9450,9 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
         else if (op == 0x07) /* SetObjectProperty <pid:u16> */
         {
             WORD pid = 0;
-            if (p + 2 <= end_p) { pid = *(const WORD *)(ctx->nodes + p); p += 2; }
+            if (end_p - p < 2) break;
+            pid = *(const WORD *)(ctx->nodes + p);
+            p += 2;
             TRACE( "xbf-trace: op=0x07 pid=%#x has_last=%d last_el=%p\n",
                    pid, has_last_popped, last_popped.el );
             if (has_last_popped)
@@ -9297,7 +9545,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
         else if (op == 0x20) /* ProvideValue and SetProperty (u16 pid) */
         {
             WORD pid = 0;
-            if (p + 2 > end_p) break;
+            if (end_p - p < 2) break;
             pid = *(const WORD *)(ctx->nodes + p);
             p += 2;
             if (has_last_popped && last_popped.el && obj_sp > 0 && obj_stack[obj_sp - 1] && last_popped.el->text[0])
@@ -9322,15 +9570,16 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
         }
         else if (op == 0x0f) /* DeferSubstream */
         {
-            DWORD def_sub = 0;
+            DWORD def_sub = 0, def_sub_sz = 0;
             BYTE def_kind;
-            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &def_sub ) || p + 3 > end_p) break;
+            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &def_sub ) || end_p - p < 3) break;
+            if (!xbf_get_substream_bounds( ctx, def_sub, NULL, NULL, &def_sub_sz )) break;
             def_kind = ctx->nodes[p + 2];
             p += 3;
 
             if (def_kind == 0x09) /* DeferredElement: <name_sid:u16> <00> <01> */
             {
-                if (p + 4 > end_p) break;
+                if (end_p - p < 4) break;
                 {
                     WORD nsid = *(const WORD *)(ctx->nodes + p);
                     const WCHAR *dname = (nsid < ctx->str_cnt && ctx->strs[nsid]) ? ctx->strs[nsid] : L"";
@@ -9354,180 +9603,34 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
             }
             else if (def_kind == 0x05) /* VisualStateGroupCollection */
             {
-                DWORD n_states = 0, s_idx;
+                if (!xbf_read_vsm_defer_header( ctx->nodes, &p, end_p, def_sub_sz, &prop_sp ))
+                    break;
                 if (!ctx->rd_only)
                 {
                     BOOL prev_vsm = ctx->vsm_collect;
                     ctx->vsm_collect = (sub_idx == 0);
-                    xbf_exec_substream_rd( ctx, def_sub, ctx->root_el, NULL, NULL, active_rd );
+                    xbf_exec_substream_rd( ctx, (int)def_sub, ctx->root_el, NULL, NULL, active_rd );
                     ctx->vsm_collect = prev_vsm;
                 }
                 else if (ctx->sub_done && def_sub < ctx->sub_cnt)
                     ctx->sub_done[def_sub] = TRUE;
-                if (xbf_read_uleb( ctx->nodes, &p, end_p, &n_states ))
-                {
-                    for (s_idx = 0; s_idx < n_states && p < end_p; s_idx++)
-                    {
-                        DWORD dummy = 0;
-                        xbf_read_uleb( ctx->nodes, &p, end_p, &dummy );
-                    }
-                }
-                /* Find VisualStateGroups footer: 00 02 00 00 01 <cnt_uleb> <cnt*u16> 02 */
-                while (p + 7 < end_p)
-                {
-                    if (ctx->nodes[p] == 0x00 && ctx->nodes[p + 1] == 0x02 &&
-                        ctx->nodes[p + 2] == 0x00 && ctx->nodes[p + 3] == 0x00 &&
-                        ctx->nodes[p + 4] == 0x01)
-                    {
-                        DWORD q = p + 5, cnt = 0;
-                        if (xbf_read_uleb( ctx->nodes, &q, end_p, &cnt ) &&
-                            cnt >= n_states && q + cnt * 2 < end_p && ctx->nodes[q + cnt * 2] == 0x02)
-                        {
-                            p = q + cnt * 2 + 1;
-                            if (prop_sp > 0) prop_sp--;
-                            break;
-                        }
-                    }
-                    p++;
-                }
             }
             else if (def_kind == 0x08) /* Style Setters table */
             {
-                DWORD scnt = 0, si;
                 struct xbf_stack_val *style_sv = (obj_sp > 0) ? &val_stack[obj_sp - 1] : NULL;
                 if (ctx->sub_done && def_sub < ctx->sub_cnt)
                     ctx->sub_done[def_sub] = TRUE;
-                if (xbf_read_uleb( ctx->nodes, &p, end_p, &scnt ))
-                {
-                    for (si = 0; si < scnt && p < end_p; si++)
-                    {
-                        BYTE sop = ctx->nodes[p];
-                        if (sop == 0x30 && p + 3 <= end_p)
-                        {
-                            WORD spid = *(const WORD *)(ctx->nodes + p + 1);
-                            int vt = 0;
-                            double num = 0, vec4[4] = {0};
-                            WCHAR sbuf[256] = {0};
-                            p += 3;
-                            if (!xbf_read_value( ctx, ctx->nodes, &p, end_p, &vt, &num, sbuf, ARRAY_SIZE(sbuf), vec4 ))
-                                break;
-                            xbf_stack_val_add_setter( style_sv, spid, vt, FALSE, num, sbuf, vec4 );
-                        }
-                        else if ((sop == 0x11 || sop == 0x12 || sop == 0x18) && p + 3 <= end_p)
-                        {
-                            WORD spid = *(const WORD *)(ctx->nodes + p + 1);
-                            DWORD soff = 0;
-                            p += 3;
-                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &soff )) break;
-                            if (sop == 0x11 || sop == 0x12)
-                                xbf_parse_style_setter_sub( ctx, def_sub, soff, spid, style_sv );
-                        }
-                        else if ((sop == 0x01 || sop == 0x02 || sop == 0x20) && p + 5 <= end_p)
-                        {
-                            DWORD soff = 0;
-                            p += 5;
-                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &soff )) break;
-                        }
-                        else
-                        {
-                            break;
-                        }
-                    }
-                }
-                while (p < end_p)
-                {
-                    if (ctx->nodes[p] == 0x21 ||
-                        (ctx->nodes[p] == 0x02 && (p + 1 == end_p || ctx->nodes[p + 1] == 0x13 || ctx->nodes[p + 1] == 0x14)))
-                    {
-                        if (ctx->nodes[p] == 0x02)
-                        {
-                            p++;
-                            if (prop_sp > 0) prop_sp--;
-                        }
-                        break;
-                    }
-                    p++;
-                }
+                if (!xbf_read_style_defer_table( ctx, &p, end_p, def_sub, def_sub_sz, style_sv, &prop_sp ))
+                    break;
             }
             else if (def_kind == 0x0a) /* ResourceDictionary table */
             {
                 struct xbf_rd_table tbl = {0};
-                DWORD rcnt = 0, c2 = 0, c3 = 0, c4 = 0, c5 = 0, c6 = 0, ri, ki;
                 struct uwp_rd_bucket *sub_rd = NULL;
-                if (xbf_read_uleb( ctx->nodes, &p, end_p, &rcnt ) && rcnt < 10000)
+                if (!xbf_read_rd_defer_header( ctx->nodes, &p, end_p, def_sub_sz, &tbl, &prop_sp ))
                 {
-                    if (rcnt > 0)
-                    {
-                        tbl.items = calloc( rcnt + 64, sizeof(*tbl.items) );
-                        if (tbl.items)
-                        {
-                            for (ri = 0; ri < rcnt && p + 2 <= end_p; ri++)
-                            {
-                                WORD sid = *(const WORD *)(ctx->nodes + p);
-                                DWORD off = 0;
-                                p += 2;
-                                if (!xbf_read_uleb( ctx->nodes, &p, end_p, &off )) break;
-                                tbl.items[tbl.count].key_sid = sid;
-                                tbl.items[tbl.count].sub_off = off;
-                                tbl.count++;
-                            }
-                        }
-                    }
-                    /* Skip remaining 5 ULEB-counted sub-tables of XBF v2 ResourceDictionary header */
-                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c2 ) && p + c2 * 2 <= end_p)
-                        p += c2 * 2;
-                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c3 ))
-                    {
-                        for (ri = 0; ri < c3 && p + 2 <= end_p; ri++)
-                        {
-                            WORD sid = *(const WORD *)(ctx->nodes + p);
-                            DWORD off = 0;
-                            p += 2;
-                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &off )) break;
-                            if (tbl.items && (DWORD)tbl.count < rcnt + 64)
-                            {
-                                tbl.items[tbl.count].key_sid = sid;
-                                tbl.items[tbl.count].sub_off = off;
-                                tbl.count++;
-                            }
-                        }
-                    }
-                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c4 ))
-                    {
-                        for (ri = 0; ri < c4 && p + 2 <= end_p; ri++)
-                        {
-                            DWORD kc = 0, dummy = 0;
-                            p += 2;
-                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &kc )) break;
-                            for (ki = 0; ki < kc && p < end_p; ki++)
-                                if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy )) break;
-                        }
-                    }
-                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c5 ))
-                    {
-                        for (ri = 0; ri < c5 && p + 2 <= end_p; ri++)
-                        {
-                            DWORD kc = 0, dummy = 0;
-                            p += 2;
-                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &kc )) break;
-                            for (ki = 0; ki < kc && p < end_p; ki++)
-                                if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy )) break;
-                        }
-                    }
-                    if (xbf_read_uleb( ctx->nodes, &p, end_p, &c6 ))
-                    {
-                        for (ri = 0; ri < c6 && p < end_p; ri++)
-                        {
-                            DWORD dummy = 0;
-                            if (!xbf_read_uleb( ctx->nodes, &p, end_p, &dummy ) || p + 5 > end_p) break;
-                            p += 5;
-                        }
-                    }
-                }
-                if (p < end_p && ctx->nodes[p] == 0x02)
-                {
-                    p++;
-                    if (prop_sp > 0) prop_sp--;
+                    free( tbl.items );
+                    break;
                 }
                 if (obj_sp > 0 && obj_stack[obj_sp - 1])
                     sub_rd = uwp_rd_bucket_for_el( obj_stack[obj_sp - 1], TRUE );
@@ -9536,7 +9639,7 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 {
                     BOOL prev_rd_only = ctx->rd_only;
                     ctx->rd_only = TRUE;
-                    xbf_exec_substream_rd( ctx, def_sub, NULL, NULL, &tbl, sub_rd );
+                    xbf_exec_substream_rd( ctx, (int)def_sub, NULL, NULL, &tbl, sub_rd );
                     ctx->rd_only = prev_rd_only;
                 }
                 free( tbl.items );
@@ -9552,9 +9655,9 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                         if (rd_tbl->items[k].sub_off > cur_rel_off && rd_tbl->items[k].sub_off < next_off)
                             next_off = rd_tbl->items[k].sub_off;
                     }
-                    if (next_off != 0xffffffffu && ctx->sub_base + ss + next_off < end_p)
+                    if (next_off != 0xffffffffu && next_off < sub_sz)
                     {
-                        p = ctx->sub_base + ss + next_off;
+                        p = sub_start + next_off;
                         while (obj_sp > base_sp) { obj_sp--; free( val_stack[obj_sp].setters ); memset( &val_stack[obj_sp], 0, sizeof(val_stack[obj_sp]) ); }
                         prop_sp = 0;
                         free( last_popped.setters );
@@ -9578,9 +9681,9 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                     if (rd_tbl->items[k].sub_off > cur_rel_off && rd_tbl->items[k].sub_off < next_off)
                         next_off = rd_tbl->items[k].sub_off;
                 }
-                if (next_off != 0xffffffffu && ctx->sub_base + ss + next_off < end_p)
+                if (next_off != 0xffffffffu && next_off < sub_sz)
                 {
-                    p = ctx->sub_base + ss + next_off;
+                    p = sub_start + next_off;
                     while (obj_sp > base_sp) { obj_sp--; free( val_stack[obj_sp].setters ); memset( &val_stack[obj_sp], 0, sizeof(val_stack[obj_sp]) ); }
                     prop_sp = 0;
                     free( last_popped.setters );
@@ -9618,6 +9721,7 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
                                     BOOL rd_only )
 {
     struct xbf_ctx ctx = {0};
+    const BYTE *meta_base, *meta_end;
     UINT64 offs[6];
     DWORD i;
 
@@ -9627,8 +9731,10 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
     ctx.xbf_sz = xbf_sz;
     ctx.meta_sz = *(const DWORD *)(xbf + 4);
     ctx.node_sz = *(const DWORD *)(xbf + 8);
-    if (12 + ctx.meta_sz + ctx.node_sz > xbf_sz) return;
+    if (ctx.meta_sz > xbf_sz - 12 || ctx.node_sz > xbf_sz - 12 - ctx.meta_sz) return;
 
+    meta_base = xbf + 12;
+    meta_end = meta_base + ctx.meta_sz;
     memcpy( offs, xbf + 20, sizeof(offs) );
     ctx.app_outer = app_outer;
     ctx.connector = connector;
@@ -9651,33 +9757,36 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
 
     /* 1. String Table */
     {
-        const BYTE *p = xbf + 12 + (size_t)offs[0];
-        if (p + 4 > xbf + 12 + ctx.meta_sz) return;
+        const BYTE *p;
+        if (offs[0] > ctx.meta_sz || ctx.meta_sz - (DWORD)offs[0] < 4) return;
+        p = meta_base + (size_t)offs[0];
         ctx.str_cnt = *(const DWORD *)p;
         p += 4;
-        if (ctx.str_cnt > 16384) return;
+        if (ctx.str_cnt > 16384 || ctx.str_cnt > (DWORD)(meta_end - p) / 4) return;
         ctx.strs = calloc( ctx.str_cnt, sizeof(WCHAR *) );
-        for (i = 0; i < ctx.str_cnt && p + 4 <= xbf + 12 + ctx.meta_sz; i++)
+        if (!ctx.strs && ctx.str_cnt > 0) return;
+        for (i = 0; i < ctx.str_cnt; i++)
         {
-            DWORD len = *(const DWORD *)p;
+            DWORD len;
+            if ((size_t)(meta_end - p) < 4) goto cleanup;
+            len = *(const DWORD *)p;
             p += 4;
-            if (p + len * 2 <= xbf + 12 + ctx.meta_sz)
-            {
-                ctx.strs[i] = calloc( len + 1, sizeof(WCHAR) );
-                if (ctx.strs[i]) memcpy( ctx.strs[i], p, len * 2 );
-                p += len * 2 + 2;
-            }
+            if (len > (DWORD)(meta_end - p) / 2) goto cleanup;
+            ctx.strs[i] = calloc( len + 1, sizeof(WCHAR) );
+            if (ctx.strs[i]) memcpy( ctx.strs[i], p, len * 2 );
+            p += len * 2;
+            if ((size_t)(meta_end - p) >= 2) p += 2;
         }
     }
 
     /* 2. XmlNamespace Table -> Type Table -> Property Table */
     {
-        const BYTE *xp = xbf + 12 + (size_t)offs[5];
-        DWORD xcnt = (xp + 4 <= xbf + 12 + ctx.meta_sz) ? *(const DWORD *)xp : 0;
+        const BYTE *xp = (offs[5] <= ctx.meta_sz) ? meta_base + (size_t)offs[5] : meta_end;
+        DWORD xcnt = ((size_t)(meta_end - xp) >= 4) ? *(const DWORD *)xp : 0;
         const DWORD *x_sids = (const DWORD *)(xp + 4);
-        const BYTE *tp = xbf + 12 + (size_t)offs[3];
+        const BYTE *tp = (offs[3] <= ctx.meta_sz) ? meta_base + (size_t)offs[3] : meta_end;
 
-        if (xcnt > 0 && xcnt < 4096 && xp + 4 + xcnt * 4 <= xbf + 12 + ctx.meta_sz)
+        if (xcnt > 0 && xcnt < 4096 && (size_t)(meta_end - xp) >= 4 && xcnt <= (DWORD)(meta_end - xp - 4) / 4)
         {
             ctx.xmlns_cnt = xcnt;
             ctx.xmlns = calloc( xcnt, sizeof(WCHAR *) );
@@ -9689,14 +9798,18 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
                 if (ctx.xmlns[i]) lstrcpyW( ctx.xmlns[i], ns );
             }
         }
+        else
+        {
+            xcnt = 0;
+        }
 
-        if (tp + 4 <= xbf + 12 + ctx.meta_sz)
+        if ((size_t)(meta_end - tp) >= 4)
         {
             ctx.type_cnt = *(const DWORD *)tp;
-            if (ctx.type_cnt > 0 && ctx.type_cnt < 4096)
+            if (ctx.type_cnt > 0 && ctx.type_cnt < 4096 && ctx.type_cnt <= (DWORD)(meta_end - tp - 4) / 12)
             {
                 ctx.types = calloc( ctx.type_cnt, sizeof(*ctx.types) );
-                for (i = 0; i < ctx.type_cnt && tp + 4 + (i + 1) * 12 <= xbf + 12 + ctx.meta_sz; i++)
+                for (i = 0; i < ctx.type_cnt && ctx.types; i++)
                 {
                     DWORD xid = *(const DWORD *)(tp + 4 + i * 12 + 4);
                     DWORD sid = *(const DWORD *)(tp + 4 + i * 12 + 8);
@@ -9712,17 +9825,21 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
                         swprintf( ctx.types[i].full_name, 128, L"Windows.UI.Xaml.Controls.%s", sname );
                 }
             }
+            else
+            {
+                ctx.type_cnt = 0;
+            }
         }
 
         {
-            const BYTE *pp = xbf + 12 + (size_t)offs[4];
-            if (pp + 4 <= xbf + 12 + ctx.meta_sz)
+            const BYTE *pp = (offs[4] <= ctx.meta_sz) ? meta_base + (size_t)offs[4] : meta_end;
+            if ((size_t)(meta_end - pp) >= 4)
             {
                 ctx.prop_cnt = *(const DWORD *)pp;
-                if (ctx.prop_cnt > 0 && ctx.prop_cnt < 4096)
+                if (ctx.prop_cnt > 0 && ctx.prop_cnt < 4096 && ctx.prop_cnt <= (DWORD)(meta_end - pp - 4) / 12)
                 {
                     ctx.props = calloc( ctx.prop_cnt, sizeof(*ctx.props) );
-                    for (i = 0; i < ctx.prop_cnt && pp + 4 + (i + 1) * 12 <= xbf + 12 + ctx.meta_sz; i++)
+                    for (i = 0; i < ctx.prop_cnt && ctx.props; i++)
                     {
                         DWORD tid = *(const DWORD *)(pp + 4 + i * 12 + 4);
                         DWORD sid = *(const DWORD *)(pp + 4 + i * 12 + 8);
@@ -9730,6 +9847,10 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
                         if (sid < ctx.str_cnt && ctx.strs[sid])
                             lstrcpynW( ctx.props[i].name, ctx.strs[sid], 64 );
                     }
+                }
+                else
+                {
+                    ctx.prop_cnt = 0;
                 }
             }
         }
@@ -9793,41 +9914,57 @@ static void uwp_parse_xbf_internal( const BYTE *xbf, DWORD xbf_sz, IInspectable 
     if (ctx.node_sz >= 12)
     {
         ctx.sub_cnt = *(const DWORD *)ctx.nodes;
-        ctx.sub_base = 4 + ctx.sub_cnt * 8;
-        if (ctx.sub_cnt < 2048 && ctx.sub_base <= ctx.node_sz)
+        if (ctx.sub_cnt > 0 && ctx.sub_cnt < 2048 && ctx.sub_cnt <= (ctx.node_sz - 4) / 8)
         {
-            ctx.sub_done = calloc( ctx.sub_cnt, sizeof(BOOL) );
-            if (only_sub_idx >= 0)
+            BOOL subs_valid = TRUE;
+            ctx.sub_base = 4 + ctx.sub_cnt * 8;
+            for (i = 0; i < ctx.sub_cnt; i++)
             {
-                xbf_exec_substream_rd( &ctx, only_sub_idx, NULL, out_created, NULL, target_rd );
-            }
-            else if (rd_only)
-            {
-                xbf_exec_substream_rd( &ctx, 0, NULL, NULL, NULL, target_rd );
-            }
-            else
-            {
-                xbf_exec_substream_rd( &ctx, 0, ctx.root_el, out_created, NULL, target_rd );
-                /* Also execute substream 1..N for VisualStateGroups / Styles that hold connection IDs */
-                for (i = 1; i < ctx.sub_cnt; i++)
+                if (!xbf_get_substream_bounds( &ctx, i, NULL, NULL, NULL ))
                 {
-                    BOOL is_lazy = FALSE;
-                    int d;
-                    if (ctx.root_el)
-                    {
-                        for (d = 0; d < ctx.root_el->defer_cnt; d++)
-                            if (ctx.root_el->defer_entries[d].sub_idx == (int)i) { is_lazy = TRUE; break; }
-                    }
-                    if (!is_lazy)
-                        xbf_exec_substream_rd( &ctx, (int)i, NULL, NULL, NULL, target_rd );
+                    subs_valid = FALSE;
+                    break;
                 }
             }
-            free( ctx.sub_done );
+            if (subs_valid)
+            {
+                ctx.sub_done = calloc( ctx.sub_cnt, sizeof(BOOL) );
+                if (only_sub_idx >= 0)
+                {
+                    xbf_exec_substream_rd( &ctx, only_sub_idx, NULL, out_created, NULL, target_rd );
+                }
+                else if (rd_only)
+                {
+                    xbf_exec_substream_rd( &ctx, 0, NULL, NULL, NULL, target_rd );
+                }
+                else
+                {
+                    xbf_exec_substream_rd( &ctx, 0, ctx.root_el, out_created, NULL, target_rd );
+                    /* Also execute substream 1..N for VisualStateGroups / Styles that hold connection IDs */
+                    for (i = 1; i < ctx.sub_cnt; i++)
+                    {
+                        BOOL is_lazy = FALSE;
+                        int d;
+                        if (ctx.root_el)
+                        {
+                            for (d = 0; d < ctx.root_el->defer_cnt; d++)
+                                if (ctx.root_el->defer_entries[d].sub_idx == (int)i) { is_lazy = TRUE; break; }
+                        }
+                        if (!is_lazy)
+                            xbf_exec_substream_rd( &ctx, (int)i, NULL, NULL, NULL, target_rd );
+                    }
+                }
+                free( ctx.sub_done );
+            }
         }
     }
 
-    for (i = 0; i < ctx.str_cnt; i++) free( ctx.strs[i] );
-    free( ctx.strs );
+cleanup:
+    if (ctx.strs)
+    {
+        for (i = 0; i < ctx.str_cnt; i++) free( ctx.strs[i] );
+        free( ctx.strs );
+    }
     if (ctx.xmlns)
     {
         for (i = 0; i < ctx.xmlns_cnt; i++) free( ctx.xmlns[i] );
@@ -9877,6 +10014,7 @@ static void uwp_realize_deferred_entry( struct uwp_defer_entry *de )
         uwp_vec_Append( de->parent_panel->children_coll, ch_iface );
         if (de->parent_panel->data_context && !created->data_context)
             uwp_propagate_data_context( created, de->parent_panel->data_context );
+        uwp_vsm_invalidate_eval_chain( created );
         uwp_fire_loaded_tree( created );
         uwp_invalidate_window();
     }
@@ -10095,58 +10233,136 @@ static double uwp_vsm_parse_double( struct uwp_element *scope, const struct uwp_
     return s->num;
 }
 
-static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_setter *s )
+static void uwp_vsm_record_snapshot( struct uwp_vsm_group *grp, struct uwp_element *target,
+                                     enum uwp_vsm_prop_kind prop_kind )
+{
+    int i;
+    struct uwp_vsm_snapshot_entry *e;
+    if (!grp || !target || prop_kind == UWP_VSM_PROP_NONE) return;
+
+    /* First-wins for current state entry */
+    for (i = 0; i < grp->snapshot_cnt; i++)
+    {
+        if (grp->snapshots[i].target == target && grp->snapshots[i].prop_kind == prop_kind)
+            return;
+    }
+
+    if (!xaml_vec_grow( (void **)&grp->snapshots, &grp->snapshot_cap, grp->snapshot_cnt + 1,
+                        sizeof(*grp->snapshots), 16 ))
+        return;
+
+    e = &grp->snapshots[grp->snapshot_cnt++];
+    memset( e, 0, sizeof(*e) );
+    e->target = target;
+    e->prop_kind = prop_kind;
+    switch (prop_kind)
+    {
+    case UWP_VSM_PROP_GRID_LEN:
+        e->old_int = target->grid_len_type;
+        e->old_num = target->grid_len_val;
+        break;
+    case UWP_VSM_PROP_WIDTH:         e->old_num = target->width; break;
+    case UWP_VSM_PROP_HEIGHT:        e->old_num = target->height; break;
+    case UWP_VSM_PROP_MIN_WIDTH:     e->old_num = target->min_width; break;
+    case UWP_VSM_PROP_MAX_WIDTH:     e->old_num = target->max_width; break;
+    case UWP_VSM_PROP_MIN_HEIGHT:    e->old_num = target->min_height; break;
+    case UWP_VSM_PROP_MAX_HEIGHT:    e->old_num = target->max_height; break;
+    case UWP_VSM_PROP_VISIBILITY:    e->old_int = target->visibility; break;
+    case UWP_VSM_PROP_IS_ENABLED:    e->old_int = target->is_enabled; break;
+    case UWP_VSM_PROP_GRID_ROW:      e->old_int = target->grid_row; break;
+    case UWP_VSM_PROP_GRID_ROW_SPAN: e->old_int = target->grid_row_span; break;
+    case UWP_VSM_PROP_GRID_COL:      e->old_int = target->grid_col; break;
+    case UWP_VSM_PROP_GRID_COL_SPAN: e->old_int = target->grid_col_span; break;
+    case UWP_VSM_PROP_FONT_SIZE:     e->old_num = target->font_size; break;
+    default: break;
+    }
+}
+
+static void uwp_vsm_restore_snapshots( struct uwp_vsm_group *grp )
+{
+    int i;
+    if (!grp) return;
+    for (i = grp->snapshot_cnt - 1; i >= 0; i--)
+    {
+        const struct uwp_vsm_snapshot_entry *e = &grp->snapshots[i];
+        struct uwp_element *target = e->target;
+        if (!target) continue;
+        switch (e->prop_kind)
+        {
+        case UWP_VSM_PROP_GRID_LEN:
+            target->grid_len_type = e->old_int;
+            target->grid_len_val  = e->old_num;
+            break;
+        case UWP_VSM_PROP_WIDTH:         target->width          = e->old_num; break;
+        case UWP_VSM_PROP_HEIGHT:        target->height         = e->old_num; break;
+        case UWP_VSM_PROP_MIN_WIDTH:     target->min_width      = e->old_num; break;
+        case UWP_VSM_PROP_MAX_WIDTH:     target->max_width      = e->old_num; break;
+        case UWP_VSM_PROP_MIN_HEIGHT:    target->min_height     = e->old_num; break;
+        case UWP_VSM_PROP_MAX_HEIGHT:    target->max_height     = e->old_num; break;
+        case UWP_VSM_PROP_VISIBILITY:    target->visibility     = e->old_int; break;
+        case UWP_VSM_PROP_IS_ENABLED:    target->is_enabled     = (boolean)e->old_int; break;
+        case UWP_VSM_PROP_GRID_ROW:      target->grid_row       = e->old_int; break;
+        case UWP_VSM_PROP_GRID_ROW_SPAN: target->grid_row_span  = e->old_int; break;
+        case UWP_VSM_PROP_GRID_COL:      target->grid_col       = e->old_int; break;
+        case UWP_VSM_PROP_GRID_COL_SPAN: target->grid_col_span  = e->old_int; break;
+        case UWP_VSM_PROP_FONT_SIZE:     target->font_size      = e->old_num; break;
+        default: break;
+        }
+    }
+    grp->snapshot_cnt = 0;
+}
+
+static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_group *grp,
+                                  const struct uwp_vsm_setter *s )
 {
     struct uwp_element *target = uwp_vsm_find_target( scope, s->target );
     const WCHAR *prop = s->property;
     if (!target || !prop[0]) return;
 
-    if (!s->has_saved)
-    {
-        s->saved_grid_len_type = target->grid_len_type;
-        s->saved_grid_len_val  = target->grid_len_val;
-        s->saved_visibility    = target->visibility;
-        s->saved_width         = target->width;
-        s->saved_height        = target->height;
-        s->saved_min_width     = target->min_width;
-        s->saved_max_width     = target->max_width;
-        s->saved_min_height    = target->min_height;
-        s->saved_max_height    = target->max_height;
-        s->saved_is_enabled    = target->is_enabled;
-        s->saved_grid_row      = target->grid_row;
-        s->saved_grid_col      = target->grid_col;
-        s->saved_font_size     = target->font_size;
-        s->has_saved = TRUE;
-    }
-
     if (!wcscmp( prop, L"Width" ) || wcsstr( prop, L".Width" ))
     {
         if (target->kind == UWP_KIND_COL_DEF || target->kind == UWP_KIND_ROW_DEF)
+        {
+            uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_GRID_LEN );
             uwp_vsm_parse_grid_length( scope, s, &target->grid_len_type, &target->grid_len_val );
+        }
         else
+        {
+            uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_WIDTH );
             target->width = uwp_vsm_parse_double( scope, s );
+        }
     }
     else if (!wcscmp( prop, L"Height" ) || wcsstr( prop, L".Height" ))
     {
         if (target->kind == UWP_KIND_ROW_DEF || target->kind == UWP_KIND_COL_DEF)
+        {
+            uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_GRID_LEN );
             uwp_vsm_parse_grid_length( scope, s, &target->grid_len_type, &target->grid_len_val );
+        }
         else
+        {
+            uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_HEIGHT );
             target->height = uwp_vsm_parse_double( scope, s );
+        }
     }
     else if (!wcscmp( prop, L"MinWidth" ) || wcsstr( prop, L".MinWidth" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_MIN_WIDTH );
         target->min_width = uwp_vsm_parse_double( scope, s );
     }
     else if (!wcscmp( prop, L"MaxWidth" ) || wcsstr( prop, L".MaxWidth" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_MAX_WIDTH );
         target->max_width = uwp_vsm_parse_double( scope, s );
     }
     else if (!wcscmp( prop, L"MinHeight" ) || wcsstr( prop, L".MinHeight" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_MIN_HEIGHT );
         target->min_height = uwp_vsm_parse_double( scope, s );
     }
     else if (!wcscmp( prop, L"MaxHeight" ) || wcsstr( prop, L".MaxHeight" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_MAX_HEIGHT );
         target->max_height = uwp_vsm_parse_double( scope, s );
     }
     else if (wcsstr( prop, L"Visibility" ))
@@ -10161,17 +10377,27 @@ static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_sett
         {
             vis = ((int)s->num != 0) ? 1 : 0;
         }
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_VISIBILITY );
         target->visibility = vis;
         if (!wcscmp( target->name, L"DockPanel" ))
         {
             struct uwp_element *hbtn = uwp_vsm_find_target( scope, L"HistoryButton" );
             struct uwp_element *mbtn = uwp_vsm_find_target( scope, L"MemoryButton" );
-            if (hbtn) hbtn->visibility = (vis == 0) ? 1 : 0;
-            if (mbtn) mbtn->visibility = (vis == 0) ? 1 : 0;
+            if (hbtn)
+            {
+                uwp_vsm_record_snapshot( grp, hbtn, UWP_VSM_PROP_VISIBILITY );
+                hbtn->visibility = (vis == 0) ? 1 : 0;
+            }
+            if (mbtn)
+            {
+                uwp_vsm_record_snapshot( grp, mbtn, UWP_VSM_PROP_VISIBILITY );
+                mbtn->visibility = (vis == 0) ? 1 : 0;
+            }
         }
     }
     else if (wcsstr( prop, L"IsEnabled" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_IS_ENABLED );
         if (s->val_str[0])
             target->is_enabled = (!wcsicmp( s->val_str, L"True" ) || !wcscmp( s->val_str, L"1" )) ? TRUE : FALSE;
         else
@@ -10179,56 +10405,33 @@ static void uwp_vsm_apply_setter( struct uwp_element *scope, struct uwp_vsm_sett
     }
     else if (wcsstr( prop, L"Grid.RowSpan" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_GRID_ROW_SPAN );
         target->grid_row_span = max( 1, (int)uwp_vsm_parse_double( scope, s ) );
     }
     else if (wcsstr( prop, L"Grid.Row" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_GRID_ROW );
         target->grid_row = (int)uwp_vsm_parse_double( scope, s );
     }
     else if (wcsstr( prop, L"Grid.ColumnSpan" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_GRID_COL_SPAN );
         target->grid_col_span = max( 1, (int)uwp_vsm_parse_double( scope, s ) );
     }
     else if (wcsstr( prop, L"Grid.Column" ))
     {
+        uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_GRID_COL );
         target->grid_col = (int)uwp_vsm_parse_double( scope, s );
     }
     else if (wcsstr( prop, L"FontSize" ))
     {
         double fs = uwp_vsm_parse_double( scope, s );
-        if (fs > 0.0) target->font_size = fs;
-    }
-}
-
-static void uwp_vsm_unapply_setter( struct uwp_element *scope, struct uwp_vsm_setter *s )
-{
-    struct uwp_element *target;
-    if (!s->has_saved) return;
-    target = uwp_vsm_find_target( scope, s->target );
-    if (target)
-    {
-        target->grid_len_type = s->saved_grid_len_type;
-        target->grid_len_val  = s->saved_grid_len_val;
-        target->visibility    = s->saved_visibility;
-        target->width         = s->saved_width;
-        target->height        = s->saved_height;
-        target->min_width     = s->saved_min_width;
-        target->max_width     = s->saved_max_width;
-        target->min_height    = s->saved_min_height;
-        target->max_height    = s->saved_max_height;
-        target->is_enabled    = s->saved_is_enabled;
-        target->grid_row      = s->saved_grid_row;
-        target->grid_col      = s->saved_grid_col;
-        target->font_size     = s->saved_font_size;
-        if (!wcscmp( target->name, L"DockPanel" ))
+        if (fs > 0.0)
         {
-            struct uwp_element *hbtn = uwp_vsm_find_target( scope, L"HistoryButton" );
-            struct uwp_element *mbtn = uwp_vsm_find_target( scope, L"MemoryButton" );
-            if (hbtn) hbtn->visibility = (target->visibility == 0) ? 1 : 0;
-            if (mbtn) mbtn->visibility = (target->visibility == 0) ? 1 : 0;
+            uwp_vsm_record_snapshot( grp, target, UWP_VSM_PROP_FONT_SIZE );
+            target->font_size = fs;
         }
     }
-    s->has_saved = FALSE;
 }
 
 static void uwp_vsm_transition_group( struct uwp_element *scope, struct uwp_vsm_group *grp, int new_idx )
@@ -10238,11 +10441,7 @@ static void uwp_vsm_transition_group( struct uwp_element *scope, struct uwp_vsm_
     if (grp->active_state_idx == new_idx) return;
 
     if (grp->active_state_idx >= 0 && grp->active_state_idx < grp->state_cnt)
-    {
-        struct uwp_vsm_state *old_st = &grp->states[grp->active_state_idx];
-        for (k = old_st->setter_cnt - 1; k >= 0; k--)
-            uwp_vsm_unapply_setter( scope, &old_st->setters[k] );
-    }
+        uwp_vsm_restore_snapshots( grp );
 
     grp->active_state_idx = new_idx;
     if (new_idx >= 0)
@@ -10250,7 +10449,7 @@ static void uwp_vsm_transition_group( struct uwp_element *scope, struct uwp_vsm_
         struct uwp_vsm_state *new_st = &grp->states[new_idx];
         lstrcpynW( grp->current_state, new_st->name, ARRAY_SIZE(grp->current_state) );
         for (k = 0; k < new_st->setter_cnt; k++)
-            uwp_vsm_apply_setter( scope, &new_st->setters[k] );
+            uwp_vsm_apply_setter( scope, grp, &new_st->setters[k] );
         TRACE( "VSM group '%s' on %s (%s) -> state '%s' (%d setters)\n",
                debugstr_w(grp->name), debugstr_w(scope->class_name), debugstr_w(scope->name),
                debugstr_w(new_st->name), new_st->setter_cnt );
@@ -10264,28 +10463,68 @@ static void uwp_vsm_transition_group( struct uwp_element *scope, struct uwp_vsm_
 
 static void uwp_vsm_evaluate_tree( struct uwp_element *el, double win_w, double win_h )
 {
-    int g, s;
+    int g, s, i, j;
     unsigned int k;
     if (!el) return;
+    if (el->vsm_eval_valid && el->vsm_eval_width == win_w && el->vsm_eval_height == win_h)
+        return;
+
+    el->vsm_eval_width = win_w;
+    el->vsm_eval_height = win_h;
+    el->vsm_eval_valid = TRUE;
 
     for (g = 0; g < el->vsm_group_cnt; g++)
     {
         struct uwp_vsm_group *grp = &el->vsm_groups[g];
+        int order[64];
+        int n_trig = 0;
         int matched = -1;
-        BOOL any_trigger = FALSE;
-        for (s = 0; s < grp->state_cnt; s++)
+        for (s = 0; s < grp->state_cnt && n_trig < (int)ARRAY_SIZE(order); s++)
         {
-            struct uwp_vsm_state *st = &grp->states[s];
-            if (!st->has_trigger) continue;
-            any_trigger = TRUE;
-            if (win_w >= st->min_window_width && win_h >= st->min_window_height)
-            {
-                matched = s;
-                break;
-            }
+            if (grp->states[s].has_trigger)
+                order[n_trig++] = s;
         }
-        if (any_trigger)
-            uwp_vsm_transition_group( el, grp, matched );
+        if (!n_trig) continue;
+
+        /* Sort trigger states in ascending MinWindowWidth (then MinWindowHeight);
+         * on equal trigger thresholds, place later-declared first so the LAST match
+         * in ascending order resolves stable ties to the first-declared state. */
+        for (i = 1; i < n_trig; i++)
+        {
+            int cur = order[i];
+            const struct uwp_vsm_state *st_cur = &grp->states[cur];
+            j = i - 1;
+            while (j >= 0)
+            {
+                int prev = order[j];
+                const struct uwp_vsm_state *st_prev = &grp->states[prev];
+                BOOL swap = FALSE;
+                if (st_cur->min_window_width < st_prev->min_window_width)
+                    swap = TRUE;
+                else if (st_cur->min_window_width == st_prev->min_window_width)
+                {
+                    if (st_cur->min_window_height < st_prev->min_window_height)
+                        swap = TRUE;
+                    else if (st_cur->min_window_height == st_prev->min_window_height && cur > prev)
+                        swap = TRUE;
+                }
+                if (!swap) break;
+                order[j + 1] = order[j];
+                j--;
+            }
+            order[j + 1] = cur;
+        }
+
+        for (i = 0; i < n_trig; i++)
+        {
+            int idx = order[i];
+            const struct uwp_vsm_state *st = &grp->states[idx];
+            if (win_w >= st->min_window_width && win_h >= st->min_window_height)
+                matched = idx;
+        }
+        if (matched < 0 && grp->state_cnt > 0)
+            matched = 0;
+        uwp_vsm_transition_group( el, grp, matched );
     }
 
     if (el->content)
@@ -11462,11 +11701,24 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     HBRUSH bg_brush;
     struct uwp_element *root_el, *bg_scope;
     COLORREF page_bg;
+    double eval_w, eval_h;
 
     if (width <= 0 || height <= 0 || !hdc) return;
     uwp_ensure_app_resources_loaded();
     xaml_get_layout_metrics( hwnd, NULL, &g_layout_scale );
     SetRect( &rc, 0, 0, width, height );
+    eval_w = (double)width / g_layout_scale;
+    eval_h = (double)height / g_layout_scale;
+    if (hwnd && IsWindow( hwnd ))
+    {
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        RECT top_rc;
+        if (top && GetClientRect( top, &top_rc ) && top_rc.right > 0 && top_rc.bottom > 0)
+        {
+            eval_w = (double)(top_rc.right - top_rc.left) / g_layout_scale;
+            eval_h = (double)(top_rc.bottom - top_rc.top) / g_layout_scale;
+        }
+    }
 
     root_el = uwp_elem_from_any( content );
     bg_scope = (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
@@ -11488,7 +11740,7 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
         !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
     {
         /* Frame.content holds an MCG RCW pointer; render the adopted page. */
-        uwp_vsm_evaluate_tree( g_navigated_page_el, (double)width / g_layout_scale, (double)height / g_layout_scale );
+        uwp_vsm_evaluate_tree( g_navigated_page_el, eval_w, eval_h );
         uwp_arrange_element( g_navigated_page_el, rc );
         uwp_paint_element( hdc, g_navigated_page_el );
         return;
@@ -11500,7 +11752,7 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
         TRACE( "xaml_layout_render root %s kind %d content %p children %u\n",
                debugstr_w(root_el->class_name), root_el->kind, (void *)root_el->content,
                chv ? chv->count : 0xFFFFFFFFu );
-        uwp_vsm_evaluate_tree( root_el, (double)width / g_layout_scale, (double)height / g_layout_scale );
+        uwp_vsm_evaluate_tree( root_el, eval_w, eval_h );
         uwp_arrange_element( root_el, rc );
         {
             struct uwp_vec_view *av = root_el->children_coll ?
@@ -12181,6 +12433,30 @@ BOOL uwp_route_pointer_event( HWND hwnd, enum xaml_pointer_event_kind kind, cons
  * 8. UWP Helper & Statics Factories (XamlBindingHelper, VisualStateManager, etc.)
  * ============================================================================ */
 
+static const GUID IID_IXamlReaderStatics_UWP =
+    { 0x9891c6bd, 0x534f, 0x4955, { 0xb8, 0x5a, 0x8a, 0x8d, 0xc0, 0xdc, 0xa6, 0x02 } };
+
+static HRESULT WINAPI xaml_reader_Load( void *iface, HSTRING xaml, IInspectable **out )
+{
+    UINT32 wlen = 0;
+    const WCHAR *raw = WindowsGetStringRawBuffer( xaml, &wlen );
+    DWORD byte_sz = wlen * sizeof(WCHAR);
+    IInspectable *root = NULL;
+
+    (void)iface;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    if (!raw || byte_sz < 4) return S_OK;
+
+    if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&root )) && root)
+    {
+        if (!memcmp( raw, "XBF\0", 4 ))
+            uwp_parse_xbf_internal( (const BYTE *)raw, byte_sz, root, NULL, FALSE, NULL, -1, NULL, NULL, NULL, NULL, FALSE );
+        *out = root;
+    }
+    return S_OK;
+}
+
 static HRESULT WINAPI xbh_ConvertValue( void *iface, TypeName *type, IInspectable *val, IInspectable **out )
 {
     if (!out) return E_POINTER;
@@ -12196,7 +12472,8 @@ static HRESULT WINAPI xbh_QI( void *iface, REFIID iid, void **out )
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IActivationFactory ) ||
-        IsEqualGUID( iid, &IID_IXamlBindingHelperStatics_UWP ))
+        IsEqualGUID( iid, &IID_IXamlBindingHelperStatics_UWP ) ||
+        IsEqualGUID( iid, &IID_IXamlReaderStatics_UWP ))
     {
         *out = iface;
         return S_OK;
@@ -12216,6 +12493,8 @@ static const void *xbh_vtbl[32] =
     [4] = uwp_sub_GetRuntimeClassName,
     [5] = uwp_sub_GetTrustLevel,
     [6 ... 31] = uwp_generic_noop,
+    [6] = xaml_reader_Load,  /* IXamlReaderStatics::Load(HSTRING, object**) */
+    [7] = xaml_reader_Load,  /* IXamlReaderStatics::LoadWithInitialTemplateValidation(HSTRING, object**) */
     [11] = xbh_ConvertValue, /* slot 11: ConvertValue(TypeName, object, object**) */
 };
 static struct { const void *vtbl; } xbh_factory_obj = { xbh_vtbl };
@@ -12795,7 +13074,9 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
     }
 
     if (!wcscmp( buf, L"Windows.UI.Xaml.Markup.XamlBindingHelper" ) ||
-        !wcscmp( buf, L"Microsoft.UI.Xaml.Markup.XamlBindingHelper" ))
+        !wcscmp( buf, L"Microsoft.UI.Xaml.Markup.XamlBindingHelper" ) ||
+        !wcscmp( buf, L"Windows.UI.Xaml.Markup.XamlReader" ) ||
+        !wcscmp( buf, L"Microsoft.UI.Xaml.Markup.XamlReader" ))
     {
         *factory = (IActivationFactory *)&xbh_factory_obj;
         return S_OK;
