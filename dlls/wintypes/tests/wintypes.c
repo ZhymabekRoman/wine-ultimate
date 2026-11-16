@@ -1485,6 +1485,215 @@ done:
     RoUninitialize();
 }
 
+struct map_changed_handler
+{
+    IMapChangedEventHandler_HSTRING_IInspectable IMapChangedEventHandler_HSTRING_IInspectable_iface;
+    LONG ref;
+    ULONG called;
+    enum CollectionChange status;
+    WCHAR key[16];
+    BOOL has_sender;
+};
+
+static inline struct map_changed_handler *mch_from_iface( IMapChangedEventHandler_HSTRING_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct map_changed_handler, IMapChangedEventHandler_HSTRING_IInspectable_iface );
+}
+
+static HRESULT STDMETHODCALLTYPE mch_QueryInterface( IMapChangedEventHandler_HSTRING_IInspectable *iface,
+                                                     REFIID iid, void **out )
+{
+    *out = NULL;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapChangedEventHandler_HSTRING_IInspectable ))
+    {
+        *out = iface;
+        IMapChangedEventHandler_HSTRING_IInspectable_AddRef( iface );
+        return S_OK;
+    }
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE mch_AddRef( IMapChangedEventHandler_HSTRING_IInspectable *iface )
+{
+    struct map_changed_handler *impl = mch_from_iface( iface );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG STDMETHODCALLTYPE mch_Release( IMapChangedEventHandler_HSTRING_IInspectable *iface )
+{
+    struct map_changed_handler *impl = mch_from_iface( iface );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT STDMETHODCALLTYPE mch_Invoke( IMapChangedEventHandler_HSTRING_IInspectable *iface,
+                                             IObservableMap_HSTRING_IInspectable *sender,
+                                             IMapChangedEventArgs_HSTRING *args )
+{
+    struct map_changed_handler *impl = mch_from_iface( iface );
+    HSTRING key = NULL;
+    const WCHAR *raw;
+
+    impl->called++;
+    impl->status = (enum CollectionChange)-1;
+    impl->key[0] = 0;
+    impl->has_sender = sender != NULL;
+    if (args)
+    {
+        IMapChangedEventArgs_HSTRING_get_CollectionChanged( args, &impl->status );
+        if (SUCCEEDED( IMapChangedEventArgs_HSTRING_get_Key( args, &key ) ) && key)
+        {
+            raw = WindowsGetStringRawBuffer( key, NULL );
+            if (raw) lstrcpynW( impl->key, raw, ARRAY_SIZE( impl->key ) );
+            WindowsDeleteString( key );
+        }
+    }
+    return S_OK;
+}
+
+/* The delegate projection is IUnknown + Invoke (no IInspectable). */
+static const IMapChangedEventHandler_HSTRING_IInspectableVtbl map_changed_handler_vtbl =
+{
+    mch_QueryInterface,
+    mch_AddRef,
+    mch_Release,
+    mch_Invoke,
+};
+
+static void test_PropertySet_MapChanged(void)
+{
+    static const WCHAR *class_name = RuntimeClass_Windows_Foundation_Collections_PropertySet;
+    struct map_changed_handler handler;
+    IActivationFactory *factory;
+    IPropertySet *propset;
+    IMap_HSTRING_IInspectable *map;
+    IObservableMap_HSTRING_IInspectable *observable_map;
+    IInspectable *inspectable, *value;
+    IPropertyValueStatics *propval_statics;
+    EventRegistrationToken token;
+    BOOLEAN replaced;
+    HRESULT hr;
+    HSTRING name, key;
+
+    hr = RoInitialize( RO_INIT_MULTITHREADED );
+    ok( hr == S_OK, "got %#lx\n", hr );
+
+    hr = WindowsCreateString( class_name, wcslen( class_name ), &name );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = RoGetActivationFactory( name, &IID_IActivationFactory, (void **)&factory );
+    WindowsDeleteString( name );
+    if (FAILED( hr ))
+    {
+        win_skip( "%s runtimeclass not registered, skipping tests.\n", wine_dbgstr_w( class_name ) );
+        goto done;
+    }
+    hr = WindowsCreateString( RuntimeClass_Windows_Foundation_PropertyValue,
+                              lstrlenW( RuntimeClass_Windows_Foundation_PropertyValue ), &name );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = RoGetActivationFactory( name, &IID_IPropertyValueStatics, (void **)&propval_statics );
+    WindowsDeleteString( name );
+    if (FAILED( hr ))
+    {
+        IActivationFactory_Release( factory );
+        win_skip( "IPropertyValueStatics not registered, skipping tests.\n" );
+        goto done;
+    }
+
+    hr = IActivationFactory_ActivateInstance( factory, &inspectable );
+    IActivationFactory_Release( factory );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = IInspectable_QueryInterface( inspectable, &IID_IPropertySet, (void **)&propset );
+    IInspectable_Release( inspectable );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = IPropertySet_QueryInterface( propset, &IID_IObservableMap_HSTRING_IInspectable, (void **)&observable_map );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = IPropertySet_QueryInterface( propset, &IID_IMap_HSTRING_IInspectable, (void **)&map );
+    ok( hr == S_OK, "got %#lx\n", hr );
+
+    handler.IMapChangedEventHandler_HSTRING_IInspectable_iface.lpVtbl = &map_changed_handler_vtbl;
+    handler.ref = 1;
+    handler.called = 0;
+    handler.has_sender = FALSE;
+    handler.key[0] = 0;
+
+    hr = WindowsCreateString( L"key", 3, &key );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    hr = IPropertyValueStatics_CreateUInt32( propval_statics, 1, &value );
+    ok( hr == S_OK, "got %#lx\n", hr );
+
+    token.value = 0;
+    hr = IObservableMap_HSTRING_IInspectable_add_MapChanged( observable_map,
+            &handler.IMapChangedEventHandler_HSTRING_IInspectable_iface, &token );
+    ok( hr == S_OK, "got %#lx\n", hr );
+
+    /* Insert of a fresh key fires ItemInserted with the key */
+    replaced = TRUE;
+    hr = IMap_HSTRING_IInspectable_Insert( map, key, value, &replaced );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( !replaced, "got replaced %d\n", replaced );
+    ok( handler.called == 1, "got %u calls\n", handler.called );
+    ok( handler.status == CollectionChange_ItemInserted, "got status %d\n", handler.status );
+    ok( !lstrcmpW( handler.key, L"key" ), "got key %s\n", debugstr_w( handler.key ) );
+    ok( handler.has_sender, "sender not passed\n" );
+
+    /* Insert over an existing key fires Replaced (ItemChanged) */
+    handler.status = (enum CollectionChange)-1;
+    replaced = FALSE;
+    hr = IMap_HSTRING_IInspectable_Insert( map, key, value, &replaced );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( replaced, "got replaced %d\n", replaced );
+    ok( handler.called == 2, "got %u calls\n", handler.called );
+    ok( handler.status == CollectionChange_ItemChanged, "got status %d\n", handler.status );
+    ok( !lstrcmpW( handler.key, L"key" ), "got key %s\n", debugstr_w( handler.key ) );
+
+    /* Insert through the IObservableMap face fires the same way */
+    handler.status = (enum CollectionChange)-1;
+    replaced = TRUE;
+    hr = IMap_HSTRING_IInspectable_Insert( (IMap_HSTRING_IInspectable *)observable_map, key, value, &replaced );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( handler.called == 3, "got %u calls\n", handler.called );
+    ok( handler.status == CollectionChange_ItemChanged, "got status %d\n", handler.status );
+
+    /* Remove fires ItemRemoved */
+    handler.status = (enum CollectionChange)-1;
+    hr = IMap_HSTRING_IInspectable_Remove( map, key );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( handler.called == 4, "got %u calls\n", handler.called );
+    ok( handler.status == CollectionChange_ItemRemoved, "got status %d\n", handler.status );
+
+    /* Clear fires a single Reset event with a NULL key */
+    handler.status = (enum CollectionChange)-1;
+    handler.key[0] = 'x';
+    replaced = TRUE;
+    hr = IMap_HSTRING_IInspectable_Insert( map, key, value, &replaced );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    handler.called = 0;
+    handler.status = (enum CollectionChange)-1;
+    hr = IMap_HSTRING_IInspectable_Clear( map );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( handler.called == 1, "got %u calls\n", handler.called );
+    ok( handler.status == CollectionChange_Reset, "got status %d\n", handler.status );
+    ok( !handler.key[0], "got key %s\n", debugstr_w( handler.key ) );
+
+    /* remove_MapChanged unregisters: further mutations are silent */
+    hr = IObservableMap_HSTRING_IInspectable_remove_MapChanged( observable_map, token );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    handler.called = 0;
+    hr = IMap_HSTRING_IInspectable_Clear( map );
+    ok( hr == S_OK, "got %#lx\n", hr );
+    ok( handler.called == 0, "got %u calls\n", handler.called );
+
+    WindowsDeleteString( key );
+    IInspectable_Release( value );
+    IMapChangedEventHandler_HSTRING_IInspectable_Release( &handler.IMapChangedEventHandler_HSTRING_IInspectable_iface );
+    IObservableMap_HSTRING_IInspectable_Release( observable_map );
+    IMap_HSTRING_IInspectable_Release( map );
+    IPropertySet_Release( propset );
+    IPropertyValueStatics_Release( propval_statics );
+done:
+    RoUninitialize();
+}
+
 START_TEST(wintypes)
 {
     IsWow64Process(GetCurrentProcess(), &is_wow64);
@@ -1496,4 +1705,5 @@ START_TEST(wintypes)
     test_RoParseTypeName();
     test_RoResolveNamespace();
     test_IPropertySet();
+    test_PropertySet_MapChanged();
 }

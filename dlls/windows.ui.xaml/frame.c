@@ -3821,6 +3821,7 @@ static HRESULT WINAPI wv2_get_CoreWebView2( void *iface, void **out )
 static void trigger_core_webview2_initialized( struct xaml_element *impl, void *iface );
 static void wv2_start_browser( struct xaml_element *impl );
 static void wv2_defer_start_browser( struct xaml_element *impl );
+static void wv2_paste_clipboard_text( HWND hwnd );
 
 static struct xaml_element *g_active_wv2_impl;
 static HWND g_wv2_core_hwnd;
@@ -3836,6 +3837,7 @@ static BOOL g_wv2_alt_down;
 #define WM_APP_WV2_MOUSE (WM_APP + 0x59)
 #define WM_APP_WV2_KEY   (WM_APP + 0x5a)
 #define WM_APP_WV2_CHAR  (WM_APP + 0x5b)
+#define WM_APP_WV2_PASTE (WM_APP + 0x5c)
 
 static BOOL CALLBACK wv2_post_wheel_cb( HWND child, LPARAM lparam )
 {
@@ -4107,6 +4109,14 @@ static LRESULT CALLBACK wv2_sta_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPA
         wv2_sta_send_character_input( g_active_wv2_impl, host, ch, keydown, lparam );
         return 0;
     }
+    if (msg == WM_APP_WV2_PASTE)
+    {
+        /* The whole clipboard read + per-character key/char pump runs here, on
+         * the STA bridge thread (same pattern as WM_APP_WV2_WHEEL), so the
+         * host wndproc returns from the Ctrl+V keydown without blocking. */
+        wv2_paste_clipboard_text( hwnd );
+        return 0;
+    }
     return DefWindowProcW( hwnd, msg, wparam, lparam );
 }
 
@@ -4202,15 +4212,33 @@ static void wv2_paste_clipboard_text( HWND hwnd )
         return;
     }
 
+    if (len > 32768) len = 32768; /* clamp to 64 KiB of UTF-16 code units: each
+                                   * unit costs a PostMessage + a Blink
+                                   * execCommand round-trip, unbounded clips
+                                   * stalled the paste pump */
+
     TRACE( "wv2_paste_clipboard_text: pasting %zu chars %s\n", len, debugstr_w( buf ) );
     for (i = 0; i < len; i++)
     {
-        WCHAR ch = buf[i];
+        WCHAR ch = buf[i], ch2 = 0;
         SHORT vks;
         UINT32 vk = 0, scan = 0;
         LPARAM lp_down, lp_up;
 
-        if (ch == '\r' && buf[i + 1] == '\n') continue;
+        /* CRLF is one Enter keypress: emit it as keydown(VK_RETURN) +
+         * WM_CHAR('\r') + keyup once (the CR carried the key events, the LF
+         * used to arrive as a bare, keydown-less WM_CHAR('\n')). */
+        if (ch == '\r' && i + 1 < len && buf[i + 1] == '\n') i++;
+        else if (ch >= 0xd800 && ch <= 0xdbff && i + 1 < len &&
+                 buf[i + 1] >= 0xdc00 && buf[i + 1] <= 0xdfff)
+        {
+            /* Surrogate pair (emoji, astral CJK): Chromium's WM_CHAR
+             * convention sends a pair as two WM_CHAR messages — high unit
+             * first, then low — inside ONE keydown/keyup press. Two separate
+             * keypresses made Blink decode 2× U+FFFD. */
+            ch2 = buf[++i];
+        }
+
         vks = VkKeyScanW( ch );
         if (vks != -1)
         {
@@ -4222,6 +4250,8 @@ static void wv2_paste_clipboard_text( HWND hwnd )
         if (vk)
             wv2_send_keyboard_input( hwnd, WM_KEYDOWN, vk, scan, 1, 0, lp_down );
         wv2_send_character_input( hwnd, ch, TRUE, lp_down );
+        if (ch2)
+            wv2_send_character_input( hwnd, ch2, TRUE, lp_down );
         if (vk)
             wv2_send_keyboard_input( hwnd, WM_KEYUP, vk, scan, 1, 0, lp_up );
     }
@@ -4277,7 +4307,17 @@ static LRESULT CALLBACK wv2_host_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LP
 
         wv2_send_keyboard_input( hwnd, msg, vk, scan, repeat, mods, lparam );
         if (msg == WM_KEYDOWN && vk == 'V' && (mods & MK_CONTROL))
-            wv2_paste_clipboard_text( hwnd );
+        {
+            /* Hand the paste loop to the STA bridge (pattern: WM_APP_WV2_WHEEL)
+             * so the clipboard read + per-char pump does not block this
+             * wndproc; the bridge window always exists once the host window is
+             * live, the inline call is the fallback. */
+            wv2_ensure_sta_hwnd();
+            if (g_wv2_sta_hwnd && IsWindow( g_wv2_sta_hwnd ))
+                PostMessageW( g_wv2_sta_hwnd, WM_APP_WV2_PASTE, 0, 0 );
+            else
+                wv2_paste_clipboard_text( hwnd );
+        }
     }
     else if (msg == WM_CHAR && g_active_wv2_impl)
     {
