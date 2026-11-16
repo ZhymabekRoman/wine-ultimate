@@ -127,6 +127,10 @@ int config_dir_fd = -1;    /* file descriptor for the config dir */
 static struct master_socket *master_socket;  /* the master socket object */
 static struct timeout_user *master_timeout;
 
+/* inline scratch buffers to avoid malloc/free on <= 4 KB request/reply payloads */
+static char reply_inline_buf[4096];
+static char req_inline_buf[4096];
+
 /* complain about a protocol error and terminate the client connection */
 void fatal_protocol_error( struct thread *thread, const char *err, ... )
 {
@@ -156,7 +160,13 @@ void fatal_error( const char *err, ... )
 void *set_reply_data_size( data_size_t size )
 {
     assert( size <= get_reply_max_size() );
-    if (size && !(current->reply_data = mem_alloc( size ))) size = 0;
+    if (size)
+    {
+        if (size <= sizeof(reply_inline_buf))
+            current->reply_data = reply_inline_buf;
+        else if (!(current->reply_data = mem_alloc( size )))
+            size = 0;
+    }
     current->reply_size = size;
     return current->reply_data;
 }
@@ -269,16 +279,29 @@ static void send_reply( union generic_reply *reply )
         if ((current->reply_towrite = current->reply_size - (ret - sizeof(*reply))))
         {
             /* couldn't write it all, wait for POLLOUT */
+            if (current->reply_data == reply_inline_buf)
+            {
+                char *buf = mem_alloc( current->reply_size );
+                if (!buf)
+                {
+                    current->reply_data = NULL;
+                    fatal_protocol_error( current, "no memory for partial reply\n" );
+                    return;
+                }
+                memcpy( buf, reply_inline_buf, current->reply_size );
+                current->reply_data = buf;
+            }
             set_fd_events( current->reply_fd, POLLOUT );
             set_fd_events( current->request_fd, 0 );
             return;
         }
     }
-    free( current->reply_data );
+    if (current->reply_data != reply_inline_buf) free( current->reply_data );
     current->reply_data = NULL;
     return;
 
  error:
+    if (current->reply_data == reply_inline_buf) current->reply_data = NULL;
     if (ret >= 0)
         fatal_protocol_error( current, "partial write %d\n", ret );
     else if (errno == EPIPE)
@@ -316,6 +339,7 @@ static void call_req_handler( struct thread *thread )
         }
         else
         {
+            if (current->reply_data == reply_inline_buf) current->reply_data = NULL;
             current->exit_code = 1;
             kill_thread( current, 1 );  /* no way to continue without reply fd */
         }
@@ -327,6 +351,7 @@ static void call_req_handler( struct thread *thread )
 void read_request( struct thread *thread )
 {
     int ret;
+    unsigned int drain_count = 0;
 
     if (!thread->req_toread)  /* no pending request */
     {
@@ -337,6 +362,38 @@ void read_request( struct thread *thread )
             /* no data, handle request at once */
             call_req_handler( thread );
             goto drain;
+        }
+        if (thread->req_toread <= sizeof(req_inline_buf))
+        {
+            data_size_t total = thread->req_toread;
+            for (;;)
+            {
+                ret = read( get_unix_fd( thread->request_fd ),
+                            req_inline_buf + total - thread->req_toread,
+                            thread->req_toread );
+                if (ret <= 0)
+                {
+                    if (ret < 0 && (errno == EWOULDBLOCK || (EWOULDBLOCK != EAGAIN && errno == EAGAIN)))
+                    {
+                        if (!(thread->req_data = malloc( total )))
+                        {
+                            fatal_protocol_error( thread, "no memory for %u bytes request %d\n",
+                                                  total, thread->req.request_header.req );
+                            return;
+                        }
+                        memcpy( thread->req_data, req_inline_buf, total - thread->req_toread );
+                        return;
+                    }
+                    goto error;
+                }
+                if (!(thread->req_toread -= ret))
+                {
+                    thread->req_data = req_inline_buf;
+                    call_req_handler( thread );
+                    thread->req_data = NULL;
+                    goto drain;
+                }
+            }
         }
         if (!(thread->req_data = malloc( thread->req_toread )))
         {
@@ -374,9 +431,14 @@ error:
 
 drain:
     /* Opportunistic drain: if thread has another request queued, process it immediately */
-    while (thread->request_fd && !thread->wait && !thread->reply_towrite && !thread->req_toread)
+    while (drain_count++ < 16 && thread->request_fd && !thread->wait && !thread->reply_towrite && !thread->req_toread)
     {
-        ret = recv( get_unix_fd( thread->request_fd ), &thread->req, sizeof(thread->req), MSG_DONTWAIT );
+        struct pollfd pfd;
+        pfd.fd = get_unix_fd( thread->request_fd );
+        pfd.events = POLLIN;
+        pfd.revents = 0;
+        if (poll( &pfd, 1, 0 ) <= 0 || !(pfd.revents & POLLIN)) break;
+        ret = read( pfd.fd, &thread->req, sizeof(thread->req) );
         if (ret != sizeof(thread->req)) break;
         if (!(thread->req_toread = thread->req.request_header.request_size))
         {

@@ -26,6 +26,7 @@
 #include <errno.h>
 #include <fcntl.h>
 #include <limits.h>
+#include <pthread.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -654,7 +655,7 @@ static inline void main_loop_epoll(void)
 {
     int i, ret, timeout;
     struct timespec ts;
-    struct epoll_event events[128];
+    struct epoll_event events[512];
 #ifdef HAVE_EPOLL_PWAIT2
     static int failed_epoll_pwait2 = 0;
 #endif
@@ -1043,6 +1044,103 @@ static int get_next_timeout( struct timespec *ts )
     return ret;
 }
 
+#define ASYNC_CLOSE_RING_SIZE 4096
+
+static int async_close_ring[ASYNC_CLOSE_RING_SIZE];
+static unsigned int async_close_head = 0;
+static unsigned int async_close_tail = 0;
+static pthread_mutex_t async_close_mutex = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t async_close_cond = PTHREAD_COND_INITIALIZER;
+static pthread_t async_close_thread;
+static int async_close_started = 0;
+static int async_close_stop = 0;
+
+static void *async_close_worker( void *arg )
+{
+    int batch[64];
+    sigset_t sigset;
+
+    sigfillset( &sigset );
+    pthread_sigmask( SIG_BLOCK, &sigset, NULL );
+
+    pthread_mutex_lock( &async_close_mutex );
+    for (;;)
+    {
+        unsigned int count = 0;
+
+        while (async_close_head == async_close_tail && !async_close_stop)
+            pthread_cond_wait( &async_close_cond, &async_close_mutex );
+
+        if (async_close_head == async_close_tail && async_close_stop)
+            break;
+
+        while (async_close_head != async_close_tail && count < ARRAY_SIZE( batch ))
+        {
+            batch[count++] = async_close_ring[async_close_tail];
+            async_close_tail = (async_close_tail + 1) & (ASYNC_CLOSE_RING_SIZE - 1);
+        }
+        pthread_mutex_unlock( &async_close_mutex );
+
+        for (unsigned int i = 0; i < count; i++)
+            close( batch[i] );
+
+        pthread_mutex_lock( &async_close_mutex );
+    }
+    pthread_mutex_unlock( &async_close_mutex );
+    return NULL;
+}
+
+static void async_close_fd( int fd )
+{
+    unsigned int next_head;
+    int was_empty;
+
+    if (fd == -1) return;
+
+    if (!async_close_started)
+    {
+        async_close_stop = 0;
+        if (pthread_create( &async_close_thread, NULL, async_close_worker, NULL ) == 0)
+            async_close_started = 1;
+        else
+            async_close_started = -1;
+    }
+
+    if (async_close_started < 0)
+    {
+        close( fd );
+        return;
+    }
+
+    pthread_mutex_lock( &async_close_mutex );
+    next_head = (async_close_head + 1) & (ASYNC_CLOSE_RING_SIZE - 1);
+    if (next_head == async_close_tail)
+    {
+        pthread_mutex_unlock( &async_close_mutex );
+        close( fd );
+        return;
+    }
+    was_empty = (async_close_head == async_close_tail);
+    async_close_ring[async_close_head] = fd;
+    async_close_head = next_head;
+    if (was_empty) pthread_cond_signal( &async_close_cond );
+    pthread_mutex_unlock( &async_close_mutex );
+}
+
+static void async_close_shutdown( void )
+{
+    if (async_close_started == 1)
+    {
+        pthread_mutex_lock( &async_close_mutex );
+        async_close_stop = 1;
+        pthread_cond_signal( &async_close_cond );
+        pthread_mutex_unlock( &async_close_mutex );
+        pthread_join( async_close_thread, NULL );
+    }
+    async_close_started = 0;
+    async_close_stop = 0;
+}
+
 /* server main poll() loop */
 void main_loop(void)
 {
@@ -1075,6 +1173,8 @@ void main_loop(void)
             }
         }
     }
+
+    async_close_shutdown();
 }
 
 
@@ -1191,7 +1291,10 @@ static void inode_close_pending( struct inode *inode, int keep_unlinks )
 
         if (fd->unix_fd != -1)
         {
-            close( fd->unix_fd );
+            if (fd->disp_flags & FILE_DISPOSITION_DELETE)
+                close( fd->unix_fd );
+            else
+                async_close_fd( fd->unix_fd );
             fd->unix_fd = -1;
         }
 
@@ -1335,7 +1438,7 @@ static void inode_add_closed_fd( struct inode *inode, struct closed_fd *fd )
     }
     else  /* no locks on this inode and no unlink, get rid of the fd */
     {
-        if (fd->unix_fd != -1) close( fd->unix_fd );
+        if (fd->unix_fd != -1) async_close_fd( fd->unix_fd );
         free( fd->unix_name );
         free( fd );
     }
@@ -1741,11 +1844,11 @@ static void fd_destroy( struct object *obj )
     }
     else  /* no inode, close it right away */
     {
-        if (fd->unix_fd != -1) close( fd->unix_fd );
+        if (fd->unix_fd != -1) async_close_fd( fd->unix_fd );
         free( fd->unix_name );
     }
-    if (fd->sync_pipe[0] != -1) close( fd->sync_pipe[0] );
-    if (fd->sync_pipe[1] != -1) close( fd->sync_pipe[1] );
+    if (fd->sync_pipe[0] != -1) async_close_fd( fd->sync_pipe[0] );
+    if (fd->sync_pipe[1] != -1) async_close_fd( fd->sync_pipe[1] );
     if (fd->sync) release_object( fd->sync );
 }
 
