@@ -169,6 +169,16 @@ HRESULT apartment_increment_mta_usage(CO_MTA_USAGE_COOKIE *cookie);
 void apartment_decrement_mta_usage(CO_MTA_USAGE_COOKIE cookie);
 HRESULT ensure_mta(void);
 struct apartment * apartment_get_mta(void);
+BOOL apartment_has_mta(void);
+OXID apartment_get_mta_oxid(void);
+
+static inline OXID com_get_current_oxid(void)
+{
+    struct tlsdata *tlsdata = NtCurrentTeb()->ReservedForOle;
+    if (tlsdata && tlsdata->apt)
+        return tlsdata->apt->oxid;
+    return apartment_get_mta_oxid();
+}
 HRESULT apartment_get_inproc_class_object(struct apartment *apt, const struct class_reg_data *regdata,
         REFCLSID rclsid, REFIID riid, DWORD class_context, void **ppv);
 HRESULT apartment_get_local_server_stream(struct apartment *apt, IStream **ret);

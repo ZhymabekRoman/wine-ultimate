@@ -48,6 +48,7 @@ enum comclass_threadingmodel
 };
 
 static struct apartment *mta;
+static OXID mta_oxid;
 static struct apartment *main_sta; /* the first STA */
 static struct list apts = LIST_INIT(apts);
 
@@ -485,7 +486,11 @@ void apartment_release(struct apartment *apt)
     if (!refcount)
     {
         apt->being_destroyed = TRUE;
-        if (apt == mta) mta = NULL;
+        if (apt == mta)
+        {
+            mta = NULL;
+            __atomic_store_n(&mta_oxid, 0, __ATOMIC_RELEASE);
+        }
         else if (apt == main_sta) main_sta = NULL;
         list_remove(&apt->entry);
     }
@@ -621,7 +626,11 @@ static struct apartment *apartment_get_or_create(DWORD model)
                 apartment_addref(mta);
             }
             else
+            {
                 mta = apartment_construct(model);
+                if (mta)
+                    __atomic_store_n(&mta_oxid, mta->oxid, __ATOMIC_RELEASE);
+            }
 
             data->flags |= OLETLS_MULTITHREADED | OLETLS_DISABLE_OLE1DDE;
 
@@ -647,6 +656,16 @@ struct apartment * apartment_get_mta(void)
     LeaveCriticalSection(&apt_cs);
 
     return apt;
+}
+
+BOOL apartment_has_mta(void)
+{
+    return __atomic_load_n(&mta_oxid, __ATOMIC_ACQUIRE) != 0;
+}
+
+OXID apartment_get_mta_oxid(void)
+{
+    return __atomic_load_n(&mta_oxid, __ATOMIC_ACQUIRE);
 }
 
 /* Return the current apartment if it exists, or, failing that, the MTA. Caller
@@ -1241,7 +1260,11 @@ HRESULT apartment_increment_mta_usage(CO_MTA_USAGE_COOKIE *cookie)
     if (mta)
         apartment_addref(mta);
     else
+    {
         mta = apartment_construct(COINIT_MULTITHREADED);
+        if (mta)
+            __atomic_store_n(&mta_oxid, mta->oxid, __ATOMIC_RELEASE);
+    }
     list_add_head(&mta->usage_cookies, &mta_cookie->entry);
 
     LeaveCriticalSection(&apt_cs);

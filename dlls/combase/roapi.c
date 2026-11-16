@@ -2191,8 +2191,9 @@ struct agile_reference
     IAgileReference IAgileReference_iface;
     enum AgileReferenceOptions option;
     IStream *marshal_stream;
-    CRITICAL_SECTION cs;
+    RTL_SRWLOCK lock;
     IUnknown *obj;
+    OXID source_oxid;
     BOOLEAN is_agile;
     LONG ref;
 };
@@ -2265,7 +2266,6 @@ static ULONG WINAPI agile_ref_Release(IAgileReference *iface)
             CoReleaseMarshalData(impl->marshal_stream);
             IStream_Release(impl->marshal_stream);
         }
-        DeleteCriticalSection(&impl->cs);
         free(impl);
     }
 
@@ -2283,23 +2283,23 @@ static HRESULT WINAPI agile_ref_Resolve(IAgileReference *iface, REFIID riid, voi
     if (impl->is_agile)
         return IUnknown_QueryInterface(impl->obj, riid, obj);
 
-    EnterCriticalSection(&impl->cs);
+    if (impl->obj && impl->source_oxid && impl->source_oxid == com_get_current_oxid())
+        return IUnknown_QueryInterface(impl->obj, riid, obj);
+
+    RtlAcquireSRWLockExclusive(&impl->lock);
     if (impl->option == AGILEREFERENCE_DELAYEDMARSHAL && impl->marshal_stream == NULL)
     {
         if (FAILED(hr = marshal_object_in_agile_reference(impl, riid, impl->obj)))
         {
-            LeaveCriticalSection(&impl->cs);
+            RtlReleaseSRWLockExclusive(&impl->lock);
             return hr;
         }
-
-        IUnknown_Release(impl->obj);
-        impl->obj = NULL;
     }
 
     if (SUCCEEDED(hr = IStream_Seek(impl->marshal_stream, zero, STREAM_SEEK_SET, NULL)))
         hr = CoUnmarshalInterface(impl->marshal_stream, riid, obj);
 
-    LeaveCriticalSection(&impl->cs);
+    RtlReleaseSRWLockExclusive(&impl->lock);
     return hr;
 }
 
@@ -2356,21 +2356,29 @@ HRESULT WINAPI RoGetAgileReference(enum AgileReferenceOptions option, REFIID rii
     impl->is_agile = object_has_interface(obj, &IID_IAgileObject);
     impl->ref = 1;
 
-    if (option == AGILEREFERENCE_DELAYEDMARSHAL || impl->is_agile)
+    if (impl->is_agile)
     {
         impl->obj = obj;
         IUnknown_AddRef(impl->obj);
     }
-    else if (option == AGILEREFERENCE_DEFAULT)
+    else
     {
-        if (FAILED(hr = marshal_object_in_agile_reference(impl, riid, obj)))
+        impl->source_oxid = com_get_current_oxid();
+        impl->obj = obj;
+        IUnknown_AddRef(impl->obj);
+
+        if (option == AGILEREFERENCE_DEFAULT)
         {
-            free(impl);
-            return hr;
+            if (FAILED(hr = marshal_object_in_agile_reference(impl, riid, obj)))
+            {
+                IUnknown_Release(impl->obj);
+                free(impl);
+                return hr;
+            }
         }
     }
 
-    InitializeCriticalSection(&impl->cs);
+    RtlInitializeSRWLock(&impl->lock);
 
     *agile_reference = &impl->IAgileReference_iface;
     return S_OK;

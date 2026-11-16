@@ -404,13 +404,10 @@ HRESULT open_appidkey_from_clsid(REFCLSID clsid, REGSAM access, HKEY *subkey)
  */
 BOOL WINAPI InternalIsProcessInitialized(void)
 {
-    struct apartment *apt;
-
-    if (!(apt = apartment_get_current_or_mta()))
-        return FALSE;
-    apartment_release(apt);
-
-    return TRUE;
+    struct tlsdata *tlsdata = NtCurrentTeb()->ReservedForOle;
+    if (tlsdata && tlsdata->apt)
+        return TRUE;
+    return apartment_has_mta();
 }
 
 /***********************************************************************
@@ -569,10 +566,268 @@ static const IClassFactoryVtbl global_options_factory_vtbl =
 
 static IClassFactory global_options_factory = { &global_options_factory_vtbl };
 
+struct git_slot
+{
+    DWORD cookie;
+    DWORD next_free;
+    IID iid;
+    IUnknown *obj;
+    OXID source_oxid;
+    BOOL is_agile;
+    IStream *stream;
+};
+
+static RTL_SRWLOCK git_lock = RTL_SRWLOCK_INIT;
+static struct git_slot *git_slots;
+static DWORD git_cap;
+static DWORD git_free_head = ~0u;
+static DWORD git_next_seq = 1;
+
+static HRESULT WINAPI std_git_QueryInterface(IGlobalInterfaceTable *iface, REFIID riid, void **ppv)
+{
+    if (!ppv) return E_INVALIDARG;
+    *ppv = NULL;
+
+    if (IsEqualIID(riid, &IID_IUnknown) ||
+        IsEqualIID(riid, &IID_IGlobalInterfaceTable) ||
+        IsEqualIID(riid, &IID_IAgileObject))
+    {
+        *ppv = iface;
+        IGlobalInterfaceTable_AddRef(iface);
+        return S_OK;
+    }
+
+    FIXME("(%s), not supported.\n", debugstr_guid(riid));
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI std_git_AddRef(IGlobalInterfaceTable *iface)
+{
+    return 1;
+}
+
+static ULONG WINAPI std_git_Release(IGlobalInterfaceTable *iface)
+{
+    return 1;
+}
+
+static HRESULT WINAPI std_git_RegisterInterfaceInGlobal(IGlobalInterfaceTable *iface,
+        IUnknown *pUnk, REFIID riid, DWORD *pdwCookie)
+{
+    IUnknown *agile_unk = NULL;
+    IStream *stream = NULL;
+    BOOL is_agile;
+    OXID source_oxid;
+    DWORD idx, seq, cookie;
+    HRESULT hr;
+
+    TRACE("iface=%p, pUnk=%p, riid=%s, pdwCookie=%p\n", iface, pUnk, debugstr_guid(riid), pdwCookie);
+
+    if (!pUnk || !riid || !pdwCookie)
+        return E_INVALIDARG;
+
+    if (!InternalIsProcessInitialized())
+        return CO_E_NOTINITIALIZED;
+
+    is_agile = SUCCEEDED(IUnknown_QueryInterface(pUnk, &IID_IAgileObject, (void **)&agile_unk));
+    if (agile_unk)
+        IUnknown_Release(agile_unk);
+
+    if (!is_agile)
+    {
+        LARGE_INTEGER zero = {0};
+
+        hr = CreateStreamOnHGlobal(0, TRUE, &stream);
+        if (hr != S_OK)
+            return hr;
+        hr = CoMarshalInterface(stream, riid, pUnk, MSHCTX_INPROC, NULL, MSHLFLAGS_TABLESTRONG);
+        if (hr != S_OK)
+        {
+            IStream_Release(stream);
+            return hr;
+        }
+        IStream_Seek(stream, zero, STREAM_SEEK_SET, NULL);
+        source_oxid = com_get_current_oxid();
+    }
+    else
+    {
+        source_oxid = 0;
+    }
+
+    IUnknown_AddRef(pUnk);
+
+    RtlAcquireSRWLockExclusive(&git_lock);
+    if (git_free_head == ~0u)
+    {
+        DWORD new_cap = git_cap ? git_cap * 2 : 64;
+        struct git_slot *new_slots;
+        DWORD i;
+
+        if (new_cap > 0x100000)
+            new_cap = 0x100000;
+        if (new_cap <= git_cap || !(new_slots = realloc(git_slots, new_cap * sizeof(*new_slots))))
+        {
+            RtlReleaseSRWLockExclusive(&git_lock);
+            if (stream)
+            {
+                CoReleaseMarshalData(stream);
+                IStream_Release(stream);
+            }
+            IUnknown_Release(pUnk);
+            return E_OUTOFMEMORY;
+        }
+        git_slots = new_slots;
+        for (i = git_cap; i < new_cap; i++)
+        {
+            git_slots[i].cookie = 0;
+            git_slots[i].next_free = (i + 1 < new_cap) ? (i + 1) : ~0u;
+        }
+        git_free_head = git_cap;
+        git_cap = new_cap;
+    }
+
+    idx = git_free_head;
+    git_free_head = git_slots[idx].next_free;
+
+    seq = (git_next_seq++) & 0xfff;
+    if (!seq)
+        seq = (git_next_seq++) & 0xfff;
+    cookie = (seq << 20) | idx;
+
+    git_slots[idx].cookie = cookie;
+    git_slots[idx].iid = *riid;
+    git_slots[idx].obj = pUnk;
+    git_slots[idx].source_oxid = source_oxid;
+    git_slots[idx].is_agile = is_agile;
+    git_slots[idx].stream = stream;
+    *pdwCookie = cookie;
+
+    RtlReleaseSRWLockExclusive(&git_lock);
+    return S_OK;
+}
+
+static HRESULT WINAPI std_git_RevokeInterfaceFromGlobal(IGlobalInterfaceTable *iface, DWORD dwCookie)
+{
+    DWORD idx;
+    IUnknown *obj;
+    IStream *stream;
+    HRESULT hr = S_OK;
+
+    TRACE("%p, %#lx.\n", iface, dwCookie);
+
+    if (!dwCookie)
+        return E_INVALIDARG;
+
+    RtlAcquireSRWLockExclusive(&git_lock);
+    idx = dwCookie & 0xfffff;
+    if (idx >= git_cap || git_slots[idx].cookie != dwCookie)
+    {
+        RtlReleaseSRWLockExclusive(&git_lock);
+        return E_INVALIDARG;
+    }
+
+    obj = git_slots[idx].obj;
+    stream = git_slots[idx].stream;
+    git_slots[idx].cookie = 0;
+    git_slots[idx].obj = NULL;
+    git_slots[idx].stream = NULL;
+    git_slots[idx].next_free = git_free_head;
+    git_free_head = idx;
+    RtlReleaseSRWLockExclusive(&git_lock);
+
+    if (stream)
+    {
+        hr = CoReleaseMarshalData(stream);
+        IStream_Release(stream);
+    }
+    if (obj)
+        IUnknown_Release(obj);
+
+    return hr;
+}
+
+static HRESULT WINAPI std_git_GetInterfaceFromGlobal(IGlobalInterfaceTable *iface,
+        DWORD dwCookie, REFIID riid, void **ppv)
+{
+    DWORD idx;
+    struct git_slot *slot;
+    IStream *stream = NULL;
+    HRESULT hr;
+
+    TRACE("%#lx, %s, %p.\n", dwCookie, debugstr_guid(riid), ppv);
+
+    if (!ppv)
+        return E_INVALIDARG;
+    *ppv = NULL;
+    if (!dwCookie)
+        return E_INVALIDARG;
+
+    RtlAcquireSRWLockShared(&git_lock);
+    idx = dwCookie & 0xfffff;
+    if (idx >= git_cap || git_slots[idx].cookie != dwCookie)
+    {
+        RtlReleaseSRWLockShared(&git_lock);
+        return E_INVALIDARG;
+    }
+
+    slot = &git_slots[idx];
+    if (slot->is_agile || (slot->source_oxid && slot->source_oxid == com_get_current_oxid()))
+    {
+        IUnknown *obj = slot->obj;
+        IUnknown_AddRef(obj);
+        RtlReleaseSRWLockShared(&git_lock);
+        hr = IUnknown_QueryInterface(obj, riid, ppv);
+        IUnknown_Release(obj);
+        return hr;
+    }
+
+    hr = IStream_Clone(slot->stream, &stream);
+    RtlReleaseSRWLockShared(&git_lock);
+
+    if (hr != S_OK)
+        return hr;
+
+    hr = CoUnmarshalInterface(stream, riid, ppv);
+    IStream_Release(stream);
+    return hr;
+}
+
+static const IGlobalInterfaceTableVtbl std_git_vtbl =
+{
+    std_git_QueryInterface,
+    std_git_AddRef,
+    std_git_Release,
+    std_git_RegisterInterfaceInGlobal,
+    std_git_RevokeInterfaceFromGlobal,
+    std_git_GetInterfaceFromGlobal
+};
+
+static IGlobalInterfaceTable std_git_instance = { &std_git_vtbl };
+
+static HRESULT WINAPI std_git_CreateInstance(IClassFactory *iface, IUnknown *outer, REFIID riid, void **ppv)
+{
+    if (outer)
+        return CLASS_E_NOAGGREGATION;
+    return IGlobalInterfaceTable_QueryInterface(&std_git_instance, riid, ppv);
+}
+
+static const IClassFactoryVtbl std_git_factory_vtbl =
+{
+    class_factory_QueryInterface,
+    class_factory_AddRef,
+    class_factory_Release,
+    std_git_CreateInstance,
+    class_factory_LockServer
+};
+
+static IClassFactory std_git_factory = { &std_git_factory_vtbl };
+
 static HRESULT get_builtin_class_factory(REFCLSID rclsid, REFIID riid, void **obj)
 {
     if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
         return IClassFactory_QueryInterface(&global_options_factory, riid, obj);
+    if (IsEqualCLSID(rclsid, &CLSID_StdGlobalInterfaceTable))
+        return IClassFactory_QueryInterface(&std_git_factory, riid, obj);
     return E_UNEXPECTED;
 }
 
@@ -1781,7 +2036,8 @@ static HRESULT com_get_class_object(REFCLSID rclsid, DWORD clscontext,
         {
             apartment_release(apt);
 
-            if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
+            if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions) ||
+                    IsEqualCLSID(rclsid, &CLSID_StdGlobalInterfaceTable))
                 return get_builtin_class_factory(rclsid, riid, obj);
             else
                 return Ole32DllGetClassObject(rclsid, riid, obj);
@@ -3163,7 +3419,6 @@ HRESULT WINAPI CoDecrementMTAUsage(CO_MTA_USAGE_COOKIE cookie)
 HRESULT WINAPI CoGetApartmentType(APTTYPE *type, APTTYPEQUALIFIER *qualifier)
 {
     struct tlsdata *tlsdata;
-    struct apartment *apt;
     HRESULT hr;
 
     TRACE("%p, %p\n", type, qualifier);
@@ -3174,26 +3429,28 @@ HRESULT WINAPI CoGetApartmentType(APTTYPE *type, APTTYPEQUALIFIER *qualifier)
     if (FAILED(hr = com_get_tlsdata(&tlsdata)))
         return hr;
 
-    if (!tlsdata->apt)
-        *type = APTTYPE_CURRENT;
-    else if (tlsdata->apt->multi_threaded)
-        *type = APTTYPE_MTA;
-    else if (tlsdata->apt->main)
-        *type = APTTYPE_MAINSTA;
-    else
-        *type = APTTYPE_STA;
-
     *qualifier = APTTYPEQUALIFIER_NONE;
 
-    if (!tlsdata->apt && (apt = apartment_get_mta()))
+    if (tlsdata->apt)
     {
-        apartment_release(apt);
+        if (tlsdata->apt->multi_threaded)
+            *type = APTTYPE_MTA;
+        else if (tlsdata->apt->main)
+            *type = APTTYPE_MAINSTA;
+        else
+            *type = APTTYPE_STA;
+        return S_OK;
+    }
+
+    if (apartment_has_mta())
+    {
         *type = APTTYPE_MTA;
         *qualifier = APTTYPEQUALIFIER_IMPLICIT_MTA;
         return S_OK;
     }
 
-    return tlsdata->apt ? S_OK : CO_E_NOTINITIALIZED;
+    *type = APTTYPE_CURRENT;
+    return CO_E_NOTINITIALIZED;
 }
 
 /******************************************************************************
@@ -3719,8 +3976,9 @@ HRESULT WINAPI DllGetClassObject(REFCLSID rclsid, REFIID riid, void **obj)
 
     *obj = NULL;
 
-    if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions))
-        return IClassFactory_QueryInterface(&global_options_factory, riid, obj);
+    if (IsEqualCLSID(rclsid, &CLSID_GlobalOptions) ||
+            IsEqualCLSID(rclsid, &CLSID_StdGlobalInterfaceTable))
+        return get_builtin_class_factory(rclsid, riid, obj);
 
     return COMBASE_DllGetClassObject(rclsid, riid, obj);
 }
