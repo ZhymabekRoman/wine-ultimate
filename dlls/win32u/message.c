@@ -25,6 +25,15 @@
 #endif
 
 #include <assert.h>
+#include <errno.h>
+#include <fcntl.h>
+#include <pthread.h>
+#include <stdint.h>
+#include <stdio.h>
+#include <stdlib.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
 #include "ntstatus.h"
 #include "winternl.h"
 #include "ddk/wdm.h"
@@ -48,6 +57,207 @@ WINE_DECLARE_DEBUG_CHANNEL(relay);
 /* queue conditions that are messages, not hardware input events: a message pump's
  * event mask gates the latter only, the former always satisfy a message-queue wait */
 #define QUEUE_MSG_WAKE_BITS (QS_POSTMESSAGE | QS_ALLPOSTMESSAGE | QS_SENDMESSAGE | QS_TIMER | QS_PAINT | QS_HOTKEY)
+
+#define MSG_SHM_MAGIC       0x4d534751u /* 'MSGQ' */
+#define MSG_SHM_VERSION     1u
+#define MSG_SHM_BUCKETS     1024u
+#define MSG_SHM_WAYS        4u
+#define MSG_SHM_SLOTS       (MSG_SHM_BUCKETS * MSG_SHM_WAYS)
+#define MSG_SHM_RING_SIZE   64u
+#define MSG_SHM_SPIN_LIMIT  10000
+
+struct msg_shm_entry
+{
+    uint64_t hwnd;
+    uint64_t wparam;
+    uint64_t lparam;
+    uint32_t msg;
+    uint32_t time;
+    int32_t  x;
+    int32_t  y;
+};
+
+struct msg_shm_queue
+{
+    uint32_t seq;
+    uint32_t tid;
+    uint32_t lock;
+    uint32_t waiting;
+    uint32_t server_posted;
+    uint32_t server_sent;
+    uint32_t hooks_active;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t owner_seen_tail;
+    struct msg_shm_entry ring[MSG_SHM_RING_SIZE];
+};
+
+struct msg_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    struct msg_shm_queue queues[MSG_SHM_SLOTS];
+};
+
+static struct msg_shm *msg_shm = NULL;
+static int msg_shm_disabled = 0;
+static pthread_mutex_t msg_shm_mutex = PTHREAD_MUTEX_INITIALIZER;
+static __thread struct msg_shm_queue *tls_msg_shm_slot = NULL;
+static __thread uint32_t tls_msg_shm_tid = 0;
+
+static inline uint32_t msg_shm_hash_tid( uint32_t tid )
+{
+    uint32_t x = tid;
+    x ^= x >> 16;
+    x *= 0x45d9f3bu;
+    x ^= x >> 16;
+    return x;
+}
+
+static inline int msg_shm_spin_lock( uint32_t *lock )
+{
+    int i;
+    for (i = 0; i < MSG_SHM_SPIN_LIMIT; i++)
+    {
+        if (__atomic_exchange_n( lock, 1, __ATOMIC_ACQUIRE ) == 0)
+            return 1;
+        while (__atomic_load_n( lock, __ATOMIC_RELAXED ))
+        {
+#if defined(__i386__) || defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    return 0;
+}
+
+static inline void msg_shm_spin_unlock( uint32_t *lock )
+{
+    __atomic_store_n( lock, 0, __ATOMIC_RELEASE );
+}
+
+static struct msg_shm *get_msg_shm(void)
+{
+    struct msg_shm *shm = __atomic_load_n( &msg_shm, __ATOMIC_ACQUIRE );
+    struct stat st;
+    const char *prefix;
+    char prefix_buf[1024];
+    char path[1024];
+    int fd;
+    struct msg_shm *ptr;
+
+    if (shm) return shm;
+    if (__atomic_load_n( &msg_shm_disabled, __ATOMIC_RELAXED )) return NULL;
+
+    pthread_mutex_lock( &msg_shm_mutex );
+    shm = msg_shm;
+    if (!shm && !msg_shm_disabled)
+    {
+        prefix = getenv( "WINEPREFIX" );
+        if (!prefix || !*prefix)
+        {
+            const char *home = getenv( "HOME" );
+            if (!home || !*home)
+            {
+                msg_shm_disabled = 1;
+                pthread_mutex_unlock( &msg_shm_mutex );
+                return NULL;
+            }
+            snprintf( prefix_buf, sizeof(prefix_buf), "%s/.wine", home );
+            prefix = prefix_buf;
+        }
+        if (stat( prefix, &st ) == -1)
+        {
+            msg_shm_disabled = 1;
+            pthread_mutex_unlock( &msg_shm_mutex );
+            return NULL;
+        }
+#ifdef __ANDROID__
+        snprintf( path, sizeof(path), "%s/.wineserver/server-%llx-%llx/msg_shm",
+                  prefix, (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#else
+        snprintf( path, sizeof(path), "/tmp/.wine-%u/server-%llx-%llx/msg_shm",
+                  getuid(), (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#endif
+        fd = open( path, O_RDWR | O_CLOEXEC );
+        if (fd != -1)
+        {
+            if (fstat( fd, &st ) != -1 && st.st_size >= (off_t)sizeof(struct msg_shm))
+            {
+                ptr = mmap( NULL, sizeof(struct msg_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+                if (ptr != MAP_FAILED)
+                {
+                    if (__atomic_load_n( &ptr->magic, __ATOMIC_ACQUIRE ) == MSG_SHM_MAGIC &&
+                        ptr->version == MSG_SHM_VERSION)
+                    {
+                        __atomic_store_n( &msg_shm, ptr, __ATOMIC_RELEASE );
+                        shm = ptr;
+                    }
+                    else
+                    {
+                        munmap( ptr, sizeof(struct msg_shm) );
+                        msg_shm_disabled = 1;
+                    }
+                }
+                else msg_shm_disabled = 1;
+            }
+            close( fd );
+        }
+        else if (errno != ENOENT)
+        {
+            msg_shm_disabled = 1;
+        }
+    }
+    pthread_mutex_unlock( &msg_shm_mutex );
+    return shm;
+}
+
+static struct msg_shm_queue *msg_shm_find_slot( struct msg_shm *shm, uint32_t tid )
+{
+    uint32_t bucket, probe, way, idx;
+
+    if (!shm || !tid) return NULL;
+
+    bucket = msg_shm_hash_tid( tid ) & (MSG_SHM_BUCKETS - 1);
+    for (probe = 0; probe < 16; probe++)
+    {
+        uint32_t b = (bucket + probe) & (MSG_SHM_BUCKETS - 1);
+        for (way = 0; way < MSG_SHM_WAYS; way++)
+        {
+            struct msg_shm_queue *slot;
+            uint32_t seq;
+            idx = b * MSG_SHM_WAYS + way;
+            slot = &shm->queues[idx];
+            seq = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+            if (!(seq & 1) && __atomic_load_n( &slot->tid, __ATOMIC_RELAXED ) == tid)
+                return slot;
+        }
+    }
+    return NULL;
+}
+
+static inline struct msg_shm_queue *msg_shm_get_self_slot(void)
+{
+    uint32_t tid = GetCurrentThreadId();
+    struct msg_shm_queue *slot = tls_msg_shm_slot;
+    struct msg_shm *shm;
+
+    if (slot && tls_msg_shm_tid == tid)
+    {
+        uint32_t seq = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+        if (!(seq & 1) && __atomic_load_n( &slot->tid, __ATOMIC_RELAXED ) == tid)
+            return slot;
+    }
+    shm = get_msg_shm();
+    if (!shm) return NULL;
+    slot = msg_shm_find_slot( shm, tid );
+    if (slot)
+    {
+        tls_msg_shm_slot = slot;
+        tls_msg_shm_tid = tid;
+    }
+    return slot;
+}
 
 static const struct _KUSER_SHARED_DATA *user_shared_data = (struct _KUSER_SHARED_DATA *)0x7ffe0000;
 
@@ -2969,6 +3179,94 @@ static BOOL check_queue_bits( UINT wake_mask, UINT changed_mask, UINT signal_bit
 }
 
 /***********************************************************************
+ *           msg_shm_try_peek
+ *
+ * Try to peek/pop a posted message directly from the current thread's
+ * msg_shm ring when there are no older server-side sent or posted messages.
+ * Returns 1 if a matching message was retrieved, 0 otherwise.
+ */
+static int msg_shm_try_peek( HWND hwnd, UINT first, UINT last, BOOL remove, MSG *out_msg )
+{
+    struct msg_shm_queue *slot = msg_shm_get_self_slot();
+    uint32_t tid = GetCurrentThreadId();
+    HWND full_hwnd = hwnd;
+    uint32_t seq, head, tail, i;
+
+    if (!slot) return 0;
+
+    if (hwnd && hwnd != (HWND)-1 && hwnd != (HWND)1)
+    {
+        if (!is_window( hwnd )) return 0;
+        full_hwnd = get_full_window_handle( hwnd );
+    }
+
+    seq = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+    if ((seq & 1) || __atomic_load_n( &slot->tid, __ATOMIC_RELAXED ) != tid) return 0;
+
+    if (!msg_shm_spin_lock( &slot->lock )) return 0;
+
+    if ((__atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE ) != seq) ||
+        slot->tid != tid ||
+        __atomic_load_n( &slot->server_sent, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &slot->server_posted, __ATOMIC_ACQUIRE ) != 0)
+    {
+        msg_shm_spin_unlock( &slot->lock );
+        return 0;
+    }
+
+    head = slot->head;
+    tail = slot->tail;
+    for (i = head; i != tail; i++)
+    {
+        struct msg_shm_entry *e = &slot->ring[i & (MSG_SHM_RING_SIZE - 1)];
+        HWND msg_hwnd = (HWND)(ULONG_PTR)e->hwnd;
+
+        if (e->msg < first || e->msg > last) continue;
+        if (full_hwnd)
+        {
+            if (full_hwnd == (HWND)-1 || full_hwnd == (HWND)1)
+            {
+                if (msg_hwnd) continue;
+            }
+            else if (msg_hwnd != full_hwnd && (!msg_hwnd || !is_child( full_hwnd, msg_hwnd )))
+            {
+                continue;
+            }
+        }
+
+        out_msg->hwnd    = msg_hwnd;
+        out_msg->message = e->msg;
+        out_msg->wParam  = (WPARAM)e->wparam;
+        out_msg->lParam  = (LPARAM)e->lparam;
+        out_msg->time    = e->time;
+        out_msg->pt.x    = e->x;
+        out_msg->pt.y    = e->y;
+
+        if (remove)
+        {
+            uint32_t j;
+            for (j = i; j != head; j--)
+                slot->ring[j & (MSG_SHM_RING_SIZE - 1)] = slot->ring[(j - 1) & (MSG_SHM_RING_SIZE - 1)];
+            __atomic_store_n( &slot->head, head + 1, __ATOMIC_RELEASE );
+        }
+        msg_shm_spin_unlock( &slot->lock );
+        return 1;
+    }
+
+    slot->owner_seen_tail = tail;
+    msg_shm_spin_unlock( &slot->lock );
+    return 0;
+}
+
+static BOOL msg_shm_has_messages(void)
+{
+    struct msg_shm_queue *slot = msg_shm_get_self_slot();
+    if (!slot) return FALSE;
+    return __atomic_load_n( &slot->head, __ATOMIC_ACQUIRE ) !=
+           __atomic_load_n( &slot->tail, __ATOMIC_ACQUIRE );
+}
+
+/***********************************************************************
  *           peek_message
  *
  * Peek for a message matching the given parameters. Return 0 if none are
@@ -3013,6 +3311,21 @@ static int peek_message( MSG *msg, const struct peek_message_filter *filter )
         if (signal_bits & QS_RAWINPUT) signal_bits |= QS_KEY | QS_MOUSEMOVE | QS_MOUSEBUTTON;
 
         wake_mask = filter->mask & (QS_SENDMESSAGE | QS_SMRESULT);
+
+        if (!filter->internal && (signal_bits & QS_POSTMESSAGE) &&
+            msg_shm_try_peek( hwnd, first, last, flags & PM_REMOVE, &info.msg ))
+        {
+            *msg = info.msg;
+            msg->pt = point_phys_to_win_dpi( info.msg.hwnd, info.msg.pt );
+            thread_info->message_pos   = MAKELONG( msg->pt.x, msg->pt.y );
+            thread_info->message_time  = info.msg.time;
+            thread_info->message_extra = 0;
+            if (buffer != buffer_init) free( buffer );
+            if (!thread_info->client_info) return 1;
+            thread_info->client_info->msg_source = msg_source_unavailable;
+            call_hooks( WH_GETMESSAGE, HC_ACTION, flags & PM_REMOVE, (LPARAM)msg, sizeof(*msg) );
+            return 1;
+        }
 
         if (check_queue_bits( wake_mask, filter->mask, wake_mask | signal_bits, filter->mask | clear_bits,
                               &wake_bits, &changed_bits, filter->internal, !(flags & PM_REMOVE) ))
@@ -3329,6 +3642,9 @@ static BOOL is_queue_signaled(void)
         sync_client_queue_status( queue_shm );
         signaled = (queue_shm->wake_bits & queue_shm->wake_mask) ||
                    (queue_shm->changed_bits & queue_shm->changed_mask);
+        if (!signaled && ((queue_shm->wake_mask | queue_shm->changed_mask) & (QS_POSTMESSAGE | QS_ALLPOSTMESSAGE)) &&
+            msg_shm_has_messages())
+            signaled = TRUE;
     }
     if (status) return FALSE;
 
@@ -3469,9 +3785,30 @@ static DWORD wait_message( DWORD count, const HANDLE *handles, DWORD timeout, DW
     if (!(changed_mask & QS_SMRESULT) && (event = get_user_thread_info()->idle_event)) NtSetEvent( event, NULL );
 
     TRACE( "enter count=%u timeout=%u wm=%x cm=%x qis=%u\n", count, timeout, wake_mask, changed_mask, queue_in_set );
-    do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
-    while (queue_in_set && ret == count - 1 && check_internal_bits( QS_DRIVER ) &&
-           !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
+    {
+        struct msg_shm_queue *shm_slot = queue_in_set ? msg_shm_get_self_slot() : NULL;
+        BOOL shm_waiting = FALSE;
+
+        if (shm_slot && msg_shm_spin_lock( &shm_slot->lock ))
+        {
+            if (shm_slot->tail != shm_slot->owner_seen_tail)
+            {
+                msg_shm_spin_unlock( &shm_slot->lock );
+                KeUserDispatchCallback( &params.dispatch, sizeof(params), &ret_ptr, &ret_len );
+                return count - 1;
+            }
+            __atomic_store_n( &shm_slot->waiting, 1, __ATOMIC_RELEASE );
+            shm_waiting = TRUE;
+            msg_shm_spin_unlock( &shm_slot->lock );
+        }
+
+        do ret = NtWaitForMultipleObjects( count, handles, type, !!(flags & MWMO_ALERTABLE), abs );
+        while (queue_in_set && ret == count - 1 && check_internal_bits( QS_DRIVER ) &&
+               !process_driver_events( QS_ALLINPUT, wake_mask, changed_mask ));
+
+        if (shm_waiting)
+            __atomic_store_n( &shm_slot->waiting, 0, __ATOMIC_RELEASE );
+    }
     TRACE( "ret=%Ix\n", (DWORD_PTR)ret );
 
     if (HIWORD(ret)) /* is it an error code? */
@@ -3793,6 +4130,66 @@ BOOL WINAPI NtUserGetMessage( MSG *msg, HWND hwnd, UINT first, UINT last )
 }
 
 /***********************************************************************
+ *           msg_shm_try_post
+ *
+ * Try to push a posted message (WM_USER .. 0xBFFF) directly into the target
+ * thread's msg_shm ring when the target is not blocked inside wineserver
+ * and has no WH_GETMESSAGE hook active.
+ */
+static BOOL msg_shm_try_post( DWORD dest_tid, HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
+{
+    struct msg_shm *shm = get_msg_shm();
+    struct msg_shm_queue *slot;
+    struct object_lock dlock = OBJECT_LOCK_INIT;
+    const desktop_shm_t *desktop_shm;
+    struct msg_shm_entry *e;
+    HWND full_hwnd;
+    POINT pt = {0, 0};
+    uint32_t seq, time;
+
+    if (!shm || !dest_tid) return FALSE;
+    slot = msg_shm_find_slot( shm, dest_tid );
+    if (!slot) return FALSE;
+
+    seq = __atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE );
+    if ((seq & 1) || __atomic_load_n( &slot->tid, __ATOMIC_RELAXED ) != dest_tid) return FALSE;
+    if (__atomic_load_n( &slot->waiting, __ATOMIC_ACQUIRE ) != 0) return FALSE;
+    if (__atomic_load_n( &slot->hooks_active, __ATOMIC_ACQUIRE ) != 0) return FALSE;
+
+    full_hwnd = hwnd ? get_full_window_handle( hwnd ) : 0;
+    time = (uint32_t)get_tick_count();
+    while (get_shared_desktop( &dlock, &desktop_shm ) == STATUS_PENDING)
+    {
+        pt.x = desktop_shm->cursor.x;
+        pt.y = desktop_shm->cursor.y;
+    }
+
+    if (!msg_shm_spin_lock( &slot->lock )) return FALSE;
+
+    if ((__atomic_load_n( &slot->seq, __ATOMIC_ACQUIRE ) != seq) ||
+        slot->tid != dest_tid ||
+        __atomic_load_n( &slot->waiting, __ATOMIC_ACQUIRE ) != 0 ||
+        __atomic_load_n( &slot->hooks_active, __ATOMIC_ACQUIRE ) != 0 ||
+        (uint32_t)(slot->tail - slot->head) >= MSG_SHM_RING_SIZE)
+    {
+        msg_shm_spin_unlock( &slot->lock );
+        return FALSE;
+    }
+
+    e = &slot->ring[slot->tail & (MSG_SHM_RING_SIZE - 1)];
+    e->hwnd   = (uint64_t)(ULONG_PTR)full_hwnd;
+    e->msg    = msg;
+    e->wparam = (uint64_t)wparam;
+    e->lparam = (uint64_t)lparam;
+    e->time   = time;
+    e->x      = pt.x;
+    e->y      = pt.y;
+    __atomic_store_n( &slot->tail, slot->tail + 1, __ATOMIC_RELEASE );
+    msg_shm_spin_unlock( &slot->lock );
+    return TRUE;
+}
+
+/***********************************************************************
  *           put_message_in_queue
  *
  * Put a sent message into the destination queue.
@@ -3805,6 +4202,10 @@ static BOOL put_message_in_queue( const struct send_message_info *info, size_t *
     unsigned int res;
     int i;
     timeout_t timeout = TIMEOUT_INFINITE;
+
+    if (info->type == MSG_POSTED && info->msg >= WM_USER && info->msg < 0xc000 &&
+        msg_shm_try_post( info->dest_tid, info->hwnd, info->msg, info->wparam, info->lparam ))
+        return TRUE;
 
     /* Check for INFINITE timeout for compatibility with Win9x,
      * although Windows >= NT does not do so

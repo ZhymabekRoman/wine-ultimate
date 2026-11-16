@@ -21,9 +21,13 @@
 #include "config.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
+#include <sys/mman.h>
 #include <unistd.h>
 #include <poll.h>
 #include <limits.h>
@@ -138,7 +142,183 @@ struct msg_queue
     struct hook_table     *hooks;           /* hook table */
     int                    keystate_lock;   /* owns an input keystate lock */
     queue_shm_t           *shared;          /* queue in session shared memory */
+    int                    shm_idx;         /* index in msg_shm table (-1 if none) */
+    unsigned int           tid;             /* owner thread id */
 };
+
+#define MSG_SHM_MAGIC       0x4d534751u /* 'MSGQ' */
+#define MSG_SHM_VERSION     1u
+#define MSG_SHM_BUCKETS     1024u
+#define MSG_SHM_WAYS        4u
+#define MSG_SHM_SLOTS       (MSG_SHM_BUCKETS * MSG_SHM_WAYS)
+#define MSG_SHM_RING_SIZE   64u
+#define MSG_SHM_SPIN_LIMIT  10000
+
+struct msg_shm_entry
+{
+    uint64_t hwnd;
+    uint64_t wparam;
+    uint64_t lparam;
+    uint32_t msg;
+    uint32_t time;
+    int32_t  x;
+    int32_t  y;
+};
+
+struct msg_shm_queue
+{
+    uint32_t seq;
+    uint32_t tid;
+    uint32_t lock;
+    uint32_t waiting;
+    uint32_t server_posted;
+    uint32_t server_sent;
+    uint32_t hooks_active;
+    uint32_t head;
+    uint32_t tail;
+    uint32_t owner_seen_tail;
+    struct msg_shm_entry ring[MSG_SHM_RING_SIZE];
+};
+
+struct msg_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    struct msg_shm_queue queues[MSG_SHM_SLOTS];
+};
+
+static struct msg_shm *msg_shm = NULL;
+static int msg_shm_inited = 0;
+
+static inline uint32_t msg_shm_hash_tid( uint32_t tid )
+{
+    uint32_t x = tid;
+    x ^= x >> 16;
+    x *= 0x45d9f3bu;
+    x ^= x >> 16;
+    return x;
+}
+
+static inline int msg_shm_spin_lock( uint32_t *lock )
+{
+    int i;
+    for (i = 0; i < MSG_SHM_SPIN_LIMIT; i++)
+    {
+        if (__atomic_exchange_n( lock, 1, __ATOMIC_ACQUIRE ) == 0)
+            return 1;
+        while (__atomic_load_n( lock, __ATOMIC_RELAXED ))
+        {
+#if defined(__i386__) || defined(__x86_64__)
+            __builtin_ia32_pause();
+#endif
+        }
+    }
+    return 0;
+}
+
+static inline void msg_shm_spin_unlock( uint32_t *lock )
+{
+    __atomic_store_n( lock, 0, __ATOMIC_RELEASE );
+}
+
+static void init_msg_shm(void)
+{
+    int fd;
+    void *ptr;
+
+    if (msg_shm_inited) return;
+    msg_shm_inited = 1;
+    if (server_dir_fd == -1) return;
+
+    fd = openat( server_dir_fd, "msg_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
+    if (fd == -1) return;
+    if (ftruncate( fd, sizeof(struct msg_shm) ) == -1)
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct msg_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+
+    msg_shm = (struct msg_shm *)ptr;
+    msg_shm->version = MSG_SHM_VERSION;
+    __atomic_store_n( &msg_shm->magic, MSG_SHM_MAGIC, __ATOMIC_RELEASE );
+}
+
+static int msg_shm_alloc_slot( unsigned int tid )
+{
+    uint32_t bucket, probe, way, idx;
+
+    init_msg_shm();
+    if (!msg_shm || !tid) return -1;
+
+    bucket = msg_shm_hash_tid( tid ) & (MSG_SHM_BUCKETS - 1);
+    for (probe = 0; probe < 16; probe++)
+    {
+        uint32_t b = (bucket + probe) & (MSG_SHM_BUCKETS - 1);
+        for (way = 0; way < MSG_SHM_WAYS; way++)
+        {
+            struct msg_shm_queue *slot;
+            idx = b * MSG_SHM_WAYS + way;
+            slot = &msg_shm->queues[idx];
+            if (slot->tid == 0)
+            {
+                if (!msg_shm_spin_lock( &slot->lock )) continue;
+                if (slot->tid == 0)
+                {
+                    __atomic_fetch_add( &slot->seq, 1, __ATOMIC_ACQ_REL );
+                    slot->waiting = 0;
+                    slot->server_posted = 0;
+                    slot->server_sent = 0;
+                    slot->hooks_active = 0;
+                    slot->head = 0;
+                    slot->tail = 0;
+                    slot->owner_seen_tail = 0;
+                    __atomic_store_n( &slot->tid, tid, __ATOMIC_RELEASE );
+                    __atomic_fetch_add( &slot->seq, 1, __ATOMIC_RELEASE );
+                    msg_shm_spin_unlock( &slot->lock );
+                    return (int)idx;
+                }
+                msg_shm_spin_unlock( &slot->lock );
+            }
+        }
+    }
+    return -1;
+}
+
+static void msg_shm_free_slot( struct msg_queue *queue )
+{
+    struct msg_shm_queue *slot;
+
+    if (queue->shm_idx < 0 || !msg_shm) return;
+    slot = &msg_shm->queues[queue->shm_idx];
+    if (msg_shm_spin_lock( &slot->lock ))
+    {
+        __atomic_fetch_add( &slot->seq, 1, __ATOMIC_ACQ_REL );
+        __atomic_store_n( &slot->tid, 0, __ATOMIC_RELEASE );
+        slot->head = 0;
+        slot->tail = 0;
+        slot->owner_seen_tail = 0;
+        slot->waiting = 0;
+        slot->server_posted = 0;
+        slot->server_sent = 0;
+        slot->hooks_active = 0;
+        __atomic_fetch_add( &slot->seq, 1, __ATOMIC_RELEASE );
+        msg_shm_spin_unlock( &slot->lock );
+    }
+    queue->shm_idx = -1;
+}
+
+static inline void msg_shm_sync_state( struct msg_queue *queue )
+{
+    struct msg_shm_queue *slot;
+
+    if (queue->shm_idx < 0 || !msg_shm) return;
+    slot = &msg_shm->queues[queue->shm_idx];
+    __atomic_store_n( &slot->server_posted, !list_empty( &queue->msg_list[POST_MESSAGE] ), __ATOMIC_RELEASE );
+    __atomic_store_n( &slot->server_sent, !list_empty( &queue->msg_list[SEND_MESSAGE] ), __ATOMIC_RELEASE );
+}
 
 struct hotkey
 {
@@ -318,6 +498,8 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
         queue->input           = (struct thread_input *)grab_object( input );
         queue->hooks           = NULL;
         queue->keystate_lock   = 0;
+        queue->shm_idx         = -1;
+        queue->tid             = thread->id;
         list_init( &queue->send_result );
         list_init( &queue->callback_result );
         list_init( &queue->pending_timers );
@@ -349,6 +531,15 @@ static struct msg_queue *create_msg_queue( struct thread *thread, struct thread_
         {
             add_desktop_hook_count( desktop, thread, 1 );
             release_object( desktop );
+        }
+
+        queue->shm_idx = msg_shm_alloc_slot( thread->id );
+        if (queue->shm_idx >= 0 && msg_shm)
+        {
+            struct msg_shm_queue *slot = &msg_shm->queues[queue->shm_idx];
+            __atomic_store_n( &slot->hooks_active,
+                              queue->shared->hooks_count[WH_GETMESSAGE - WH_MINHOOK] > 0,
+                              __ATOMIC_RELEASE );
         }
     }
     if (new_input) release_object( new_input );
@@ -716,6 +907,14 @@ void add_queue_hook_count( struct thread *thread, unsigned int index, int count 
     SHARED_WRITE_END;
 
     assert( thread->queue->shared->hooks_count[index] >= 0 );
+
+    if (index == WH_GETMESSAGE - WH_MINHOOK && thread->queue->shm_idx >= 0 && msg_shm)
+    {
+        struct msg_shm_queue *slot = &msg_shm->queues[thread->queue->shm_idx];
+        __atomic_store_n( &slot->hooks_active,
+                          thread->queue->shared->hooks_count[index] > 0,
+                          __ATOMIC_RELEASE );
+    }
 }
 
 /* check the queue status */
@@ -787,6 +986,8 @@ static inline void set_queue_bits( struct msg_queue *queue, unsigned int bits )
     }
     SHARED_WRITE_END;
 
+    msg_shm_sync_state( queue );
+
     if (get_queue_msgs( queue ))
     {
         const char *tag = "setbits->sig";
@@ -811,6 +1012,8 @@ static inline void clear_queue_bits( struct msg_queue *queue, unsigned int bits 
     }
     SHARED_WRITE_END;
 
+    msg_shm_sync_state( queue );
+
     /* release the keystate lock when last key message has been processed */
     if (!internal && !(bits & (QS_KEY | QS_MOUSEBUTTON)))
     {
@@ -823,6 +1026,49 @@ static inline void clear_queue_bits( struct msg_queue *queue, unsigned int bits 
         QSTATE;
         reset_sync( queue->sync );
     }
+}
+
+static void msg_shm_flush_to_queue( struct msg_queue *queue )
+{
+    struct msg_shm_queue *slot;
+    uint32_t head, tail;
+    int flushed = 0;
+
+    if (!queue || queue->shm_idx < 0 || !msg_shm) return;
+    slot = &msg_shm->queues[queue->shm_idx];
+
+    head = __atomic_load_n( &slot->head, __ATOMIC_ACQUIRE );
+    tail = __atomic_load_n( &slot->tail, __ATOMIC_ACQUIRE );
+    if (head == tail) return;
+
+    if (!msg_shm_spin_lock( &slot->lock )) return;
+    head = slot->head;
+    tail = slot->tail;
+    while (head != tail)
+    {
+        struct msg_shm_entry *e = &slot->ring[head & (MSG_SHM_RING_SIZE - 1)];
+        struct message *msg = mem_alloc( sizeof(*msg) );
+        if (!msg) break;
+        msg->type      = MSG_POSTED;
+        msg->win       = get_user_full_handle( (user_handle_t)e->hwnd );
+        msg->msg       = e->msg;
+        msg->wparam    = (lparam_t)e->wparam;
+        msg->lparam    = (lparam_t)e->lparam;
+        msg->x         = e->x;
+        msg->y         = e->y;
+        msg->time      = e->time;
+        msg->data      = NULL;
+        msg->data_size = 0;
+        msg->result    = NULL;
+        list_add_tail( &queue->msg_list[POST_MESSAGE], &msg->entry );
+        head++;
+        flushed = 1;
+    }
+    __atomic_store_n( &slot->head, head, __ATOMIC_RELEASE );
+    msg_shm_sync_state( queue );
+    msg_shm_spin_unlock( &slot->lock );
+
+    if (flushed) set_queue_bits( queue, QS_POSTMESSAGE | QS_ALLPOSTMESSAGE );
 }
 
 /* check if message is matched by the filter */
@@ -1331,6 +1577,7 @@ static void cleanup_results( struct msg_queue *queue )
 /* check if the thread owning the queue is hung (not checking for messages) */
 static int is_queue_hung( struct msg_queue *queue )
 {
+    msg_shm_flush_to_queue( queue );
     /* queue is hung if it's signaled and thread didn't access it for more than 5 seconds */
     return get_queue_status( queue ) && monotonic_time - queue->shared->access_time > 5 * TICKS_PER_SEC;
 }
@@ -1359,6 +1606,7 @@ static void msg_queue_destroy( struct object *obj )
     int i;
 
     cleanup_results( queue );
+    msg_shm_free_slot( queue );
     for (i = 0; i < NB_MSG_KINDS; i++) empty_msg_list( &queue->msg_list[i] );
 
     LIST_FOR_EACH_ENTRY_SAFE( hotkey, hotkey2, &queue->input->desktop->hotkeys, struct hotkey, entry )
@@ -2953,6 +3201,7 @@ void post_message( user_handle_t win, unsigned int message, lparam_t wparam, lpa
 
         get_message_defaults( thread->queue, &msg->x, &msg->y, &msg->time );
 
+        msg_shm_flush_to_queue( thread->queue );
         list_add_tail( &thread->queue->msg_list[POST_MESSAGE], &msg->entry );
         set_queue_bits( thread->queue, QS_POSTMESSAGE|QS_ALLPOSTMESSAGE );
         if (message == WM_HOTKEY)
@@ -3162,6 +3411,7 @@ DECL_HANDLER(set_queue_mask)
     queue_shm_t *queue_shm;
 
     if (!queue) return;
+    msg_shm_flush_to_queue( queue );
     queue_shm = queue->shared;
 
     if (req->poll_events)
@@ -3203,6 +3453,7 @@ DECL_HANDLER(get_queue_status)
     queue_shm_t *queue_shm;
 
     if (!queue) return;
+    msg_shm_flush_to_queue( queue );
     queue_shm = queue->shared;
 
     SHARED_WRITE_BEGIN( queue_shm, queue_shm_t )
@@ -3282,6 +3533,7 @@ DECL_HANDLER(send_message)
             set_queue_bits( recv_queue, QS_SENDMESSAGE );
             break;
         case MSG_POSTED:
+            msg_shm_flush_to_queue( recv_queue );
             list_add_tail( &recv_queue->msg_list[POST_MESSAGE], &msg->entry );
             set_queue_bits( recv_queue, QS_POSTMESSAGE|QS_ALLPOSTMESSAGE );
             if (msg->msg == WM_HOTKEY)
@@ -3376,6 +3628,7 @@ DECL_HANDLER(get_message)
     }
 
     if (!queue) return;
+    msg_shm_flush_to_queue( queue );
     queue_shm = queue->shared;
 
     /* check for any hardware internal message */
