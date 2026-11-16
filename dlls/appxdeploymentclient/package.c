@@ -1315,10 +1315,154 @@ static HRESULT WINAPI package_manager3_stub( void *iface, ... )
 {
     return S_OK;
 }
+/* Windows.Management.Deployment.PackageVolume
+ *
+ * IPackageVolume is not in Wine's idl set, so the vtable is spelled out here.
+ * The slots follow the SDK declaration order of IPackageVolume
+ * ({cf2672c3-1a40-4450-9739-2ace2e898853}): IsOffline, IsSystemVolume,
+ * MountPoint, Name, PackageStorePath, SupportsHardLinks, with the newer
+ * AppDataPath getter appended. One volume — the prefix's system drive — backs
+ * every deployment, so a single agile singleton answers all of them. Getters
+ * hand out fresh HSTRINGs, as every WinRT string property does. */
+static const GUID IID_IPackageVolume =
+    { 0xcf2672c3, 0x1a40, 0x4450, { 0x97, 0x39, 0x2a, 0xce, 0x2e, 0x89, 0x88, 0x53 } };
+
+struct package_volume
+{
+    const void *vtbl;
+    LONG ref;
+};
+
+static const void *package_volume_vtbl[];
+
+static struct package_volume default_package_volume =
+{
+    package_volume_vtbl,
+    1,
+};
+
+static HRESULT WINAPI package_volume_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    struct package_volume *impl = CONTAINING_RECORD( iface, struct package_volume, vtbl );
+
+    TRACE( "iface %p, iid %s, out %p.\n", iface, debugstr_guid( iid ), out );
+
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IPackageVolume ))
+    {
+        *out = &impl->vtbl;
+        IInspectable_AddRef( *out );
+        return S_OK;
+    }
+    FIXME( "%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid( iid ) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI package_volume_AddRef( void *iface )
+{
+    struct package_volume *impl = CONTAINING_RECORD( iface, struct package_volume, vtbl );
+    return InterlockedIncrement( &impl->ref );
+}
+
+static ULONG WINAPI package_volume_Release( void *iface )
+{
+    struct package_volume *impl = CONTAINING_RECORD( iface, struct package_volume, vtbl );
+    return InterlockedDecrement( &impl->ref );
+}
+
+static HRESULT WINAPI package_volume_GetIids( void *iface, ULONG *count, IID **iids )
+{
+    if (count) *count = 0;
+    if (iids) *iids = NULL;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_volume_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( L"Windows.Management.Deployment.PackageVolume", 43, name );
+}
+
+static HRESULT WINAPI package_volume_GetTrustLevel( void *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust;
+    return S_OK;
+}
+
+static HRESULT package_volume_create_string( const WCHAR *path, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( path, (UINT32)lstrlenW( path ), value );
+}
+
+static HRESULT WINAPI package_volume_get_IsOffline( void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_volume_get_IsSystemVolume( void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_volume_get_MountPoint( void *iface, HSTRING *value )
+{
+    return package_volume_create_string( L"C:\\", value );
+}
+
+static HRESULT WINAPI package_volume_get_Name( void *iface, HSTRING *value )
+{
+    return package_volume_create_string( L"C:\\", value );
+}
+
+static HRESULT WINAPI package_volume_get_PackageStorePath( void *iface, HSTRING *value )
+{
+    return package_volume_create_string( L"C:\\Program Files\\WindowsApps", value );
+}
+
+static HRESULT WINAPI package_volume_get_SupportsHardLinks( void *iface, boolean *value )
+{
+    if (!value) return E_POINTER;
+    *value = 1;
+    return S_OK;
+}
+
+static HRESULT WINAPI package_volume_get_AppDataPath( void *iface, HSTRING *value )
+{
+    return package_volume_create_string( L"C:\\ProgramData\\Packages", value );
+}
+
+static const void *package_volume_vtbl[] =
+{
+    package_volume_QueryInterface,
+    package_volume_AddRef,
+    package_volume_Release,
+    /* IInspectable methods */
+    package_volume_GetIids,
+    package_volume_GetRuntimeClassName,
+    package_volume_GetTrustLevel,
+    /* IPackageVolume methods */
+    package_volume_get_IsOffline,
+    package_volume_get_IsSystemVolume,
+    package_volume_get_MountPoint,
+    package_volume_get_Name,
+    package_volume_get_PackageStorePath,
+    package_volume_get_SupportsHardLinks,
+    package_volume_get_AppDataPath,
+};
+
 static HRESULT WINAPI package_manager3_GetDefaultPackageVolume( void *iface, void **volume )
 {
     TRACE( "iface %p, volume %p\n", iface, volume );
-    if (volume) *volume = NULL;
+    if (!volume) return E_POINTER;
+    *volume = &default_package_volume.vtbl;
+    IInspectable_AddRef( *volume );
     return S_OK;
 }
 static const void *package_manager3_vtbl[] =
