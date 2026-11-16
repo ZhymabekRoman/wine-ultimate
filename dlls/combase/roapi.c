@@ -158,6 +158,14 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         return S_OK;
     }
 
+    /* winget's pre-indexed source resolution: AppExtensionCatalog + friends are
+     * implemented in-proc by windows.applicationmodel.dll (appextensions.c). */
+    if (!wcsncmp(classid, L"Windows.ApplicationModel.AppExtensions.", 39))
+    {
+        *out = wcsdup(L"windows.applicationmodel.dll");
+        return S_OK;
+    }
+
     if (!wcsncmp(classid, L"Windows.ApplicationModel.Core.", 30) ||
         !wcsncmp(classid, L"Windows.ApplicationModel.Background.", 36) ||
         !wcscmp(classid, L"Windows.ApplicationModel.AppInstance") ||
@@ -968,6 +976,133 @@ static IActivationFactory *agile_wrap_factory( IActivationFactory *factory, cons
     return (IActivationFactory *)impl;
 }
 
+/* The same wrap with the ThreadingModel probe (class_is_agile) already answered by
+ * the factory cache's is_agile flag. */
+static IActivationFactory *agile_wrap_agile( IActivationFactory *factory )
+{
+    struct agile_factory *impl;
+
+    if (!(impl = malloc( sizeof(*impl) ))) return factory;
+    impl->IActivationFactory_iface.lpVtbl = &agile_factory_vtbl;
+    impl->inner = factory;
+    return (IActivationFactory *)impl;
+}
+
+/*
+ * O(1) activation-factory cache: RoGetActivationFactory resolves a class through a
+ * linear registered-factory scan, a namespace-route wcsncmp chain, two to four
+ * RegOpenKeyExW wineserver round trips, LoadLibraryW and GetProcAddress, then an
+ * agile wrap that re-reads the ThreadingModel from the registry.  Every one of those
+ * steps is per-call and the same class is activated again and again across a session.
+ *
+ * A 512-bucket FNV-1a table keyed on the class name collapses the repeat lookup to a
+ * hash probe.  Two levels:
+ *   Level A caches the provider's (pfn, module) pair, so a hit re-invokes the module's
+ *     DllGetActivationFactory (a cheap in-proc call) with no registry/library walk.
+ *   Level B, when the resolved factory answers IAgileObject, records that fact next to
+ *     the provider, so the hit skips the ThreadingModel registry probe of the agile
+ *     wrap; the factory itself is not cached, every handout is a fresh reference (the
+ *     provider's own), so a caller's Release drops the count to zero as on the slow path.
+ * The cache is read under a shared lock and inserted under an exclusive lock.  A
+ * factory pointer is per-apartment, so only (pfn, module, is_agile) is cached, never
+ * the pointer.  registered_factories_gen is bumped whenever
+ * RoRegisterActivationFactories / RoRevokeActivationFactories changes the in-proc
+ * registration table; an entry records the generation it was resolved under and is
+ * re-resolved once the generation moves, so a revoked factory is never served stale.
+ * The (pfn, module) a cache entry points at is kept loaded for the process life, the
+ * same module RoGetActivationFactory keeps loaded on the success path.
+ */
+#define FACTORY_CACHE_SIZE 512   /* power of two; masked below */
+
+struct factory_cache_entry
+{
+    struct factory_cache_entry *next;   /* bucket chain */
+    WCHAR *classid;                     /* owned key, re-checked on a hash hit */
+    PFNGETACTIVATIONFACTORY pfn;        /* provider DllGetActivationFactory, kept loaded */
+    HMODULE pfn_mod;                    /* module holding pfn (kept loaded) */
+    BOOL is_agile;                      /* Level B: the factory pfn hands out answers IAgileObject */
+    UINT64 gen;                         /* registered_factories_gen at resolve time */
+};
+
+static RTL_SRWLOCK factory_cache_lock = RTL_SRWLOCK_INIT;
+static struct factory_cache_entry *factory_cache[FACTORY_CACHE_SIZE];
+static UINT64 registered_factories_gen = 1;   /* bumped on register / revoke */
+
+static UINT32 factory_cache_hash( const WCHAR *classid )
+{
+    UINT32 h = 2166136261u;   /* FNV-1a 32-bit offset basis */
+    for (; *classid; classid++)
+    {
+        h ^= (UINT32)*classid;
+        h *= 16777619u;       /* FNV-1a prime */
+    }
+    return h;
+}
+
+/* Shared-lock probe.  On a generation-current hit returns the entry's provider pfn in
+ * *pfn_out and its agility flag in *is_agile_out (the entry's module is kept loaded).
+ * Returns TRUE when an entry matched; a hit whose provider call fails falls back to
+ * full resolution by the caller. */
+static BOOL factory_cache_lookup( const WCHAR *classid, PFNGETACTIVATIONFACTORY *pfn_out,
+                                  BOOL *is_agile_out )
+{
+    struct factory_cache_entry *entry;
+    UINT64 gen = registered_factories_gen;
+
+    RtlAcquireSRWLockShared( &factory_cache_lock );
+    for (entry = factory_cache[factory_cache_hash( classid ) & (FACTORY_CACHE_SIZE - 1)];
+         entry; entry = entry->next)
+    {
+        if (entry->gen == gen && !wcscmp( entry->classid, classid ))
+        {
+            *pfn_out = entry->pfn;
+            *is_agile_out = entry->is_agile;
+            RtlReleaseSRWLockShared( &factory_cache_lock );
+            return TRUE;
+        }
+    }
+    RtlReleaseSRWLockShared( &factory_cache_lock );
+    return FALSE;
+}
+
+/* Exclusive-lock insert/overwrite of the (pfn, pfn_mod, is_agile) triple.  A pfn_mod
+ * that is not NULL is kept loaded for the process life. */
+static void factory_cache_store( const WCHAR *classid, PFNGETACTIVATIONFACTORY pfn,
+                                 HMODULE pfn_mod, BOOL is_agile )
+{
+    struct factory_cache_entry *entry;
+    UINT32 bucket = factory_cache_hash( classid ) & (FACTORY_CACHE_SIZE - 1);
+    UINT64 gen = registered_factories_gen;
+
+    RtlAcquireSRWLockExclusive( &factory_cache_lock );
+    for (entry = factory_cache[bucket]; entry; entry = entry->next)
+    {
+        if (!wcscmp( entry->classid, classid ))
+        {
+            entry->pfn = pfn;
+            entry->pfn_mod = pfn_mod;
+            entry->is_agile = is_agile;
+            entry->gen = gen;
+            RtlReleaseSRWLockExclusive( &factory_cache_lock );
+            return;
+        }
+    }
+    if ((entry = malloc( sizeof(*entry) )))
+    {
+        if ((entry->classid = wcsdup( classid )))
+        {
+            entry->pfn = pfn;
+            entry->pfn_mod = pfn_mod;
+            entry->is_agile = is_agile;
+            entry->gen = gen;
+            entry->next = factory_cache[bucket];
+            factory_cache[bucket] = entry;
+        }
+        else free( entry );
+    }
+    RtlReleaseSRWLockExclusive( &factory_cache_lock );
+}
+
 /***********************************************************************
  *      RoInitialize (combase.@)
  */
@@ -1003,7 +1138,8 @@ void WINAPI RoUninitialize(void)
  * its provider gave it; when the provider was a loaded library, *module is that
  * module, so a caller whose next step (a QueryInterface, say) fails can unload it.
  */
-static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **factory, HMODULE *module)
+static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **factory, HMODULE *module,
+                                          PFNGETACTIVATIONFACTORY *pfn_out, HMODULE *pfn_mod_out)
 {
     PFNGETACTIVATIONFACTORY pDllGetActivationFactory;
     PFNGETACTIVATIONFACTORY registered_callback;
@@ -1014,8 +1150,10 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
 
     *factory = NULL;
     *module = NULL;
+    if (pfn_out) *pfn_out = NULL;
+    if (pfn_mod_out) *pfn_mod_out = NULL;
 
-    ERR("resolve_activation_factory: %s\n", debugstr_w(raw));
+    TRACE("resolve_activation_factory: %s\n", debugstr_w(raw));
 
     if (!wcscmp(raw, L"Windows.ApplicationModel.Resources.ResourceLoader"))
     {
@@ -1032,6 +1170,8 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
                 if (SUCCEEDED(hr))
                 {
                     *factory = result;
+                    if (pfn_out) *pfn_out = pfn;
+                    if (pfn_mod_out) *pfn_mod_out = hMod;
                     return S_OK;
                 }
                 return hr;
@@ -1054,7 +1194,13 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
          * that registration outranks the routes and the ActivatableClassId registry,
          * it is the process's own statement about its classes. */
         TRACE("registered factory answers %s\n", debugstr_hstring(classid));
-        return registered_callback(classid, factory);
+        hr = registered_callback(classid, factory);
+        if (SUCCEEDED(hr))
+        {
+            if (pfn_out) *pfn_out = registered_callback;
+            if (pfn_mod_out) *pfn_mod_out = NULL;
+        }
+        return hr;
     }
 
     hr = get_library_for_classid(raw, &library);
@@ -1118,6 +1264,8 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
                         free(seed_lib);
                         free(library);
                         *module = seed_mod;
+                        if (pfn_out) *pfn_out = seed_pfn;
+                        if (pfn_mod_out) *pfn_mod_out = seed_mod;
                         return S_OK;
                     }
                     FreeLibrary(seed_mod);
@@ -1126,6 +1274,11 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
             free(seed_lib);
         }
         ERR("Class %s not found in %s, hr %#lx.\n", wine_dbgstr_hstring(classid), debugstr_w(library), hr);
+    }
+    if (SUCCEEDED(hr))
+    {
+        if (pfn_out) *pfn_out = pDllGetActivationFactory;
+        if (pfn_mod_out) *pfn_mod_out = *module;
     }
     free(library);
     return hr;
@@ -1146,8 +1299,12 @@ static HRESULT resolve_activation_factory(HSTRING classid, IActivationFactory **
  */
 HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID iid, void **class_factory)
 {
+    PFNGETACTIVATIONFACTORY provider_pfn = NULL;
+    BOOL cached_agile = FALSE;
     IActivationFactory *factory;
+    const WCHAR *raw;
     HMODULE module = NULL;
+    HMODULE pfn_mod = NULL;
     HRESULT hr;
 
     TRACE("(%s, %s, %p)\n", debugstr_hstring(classid), debugstr_guid(iid), class_factory);
@@ -1169,19 +1326,50 @@ HRESULT WINAPI DECLSPEC_HOTPATCH RoGetActivationFactory(HSTRING classid, REFIID 
             return CO_E_NOTINITIALIZED;
     }
 
-    hr = resolve_activation_factory(classid, &factory, &module);
+    raw = WindowsGetStringRawBuffer(classid, NULL);
+
+    /* Cache fast path.  A hit re-invokes the provider's DllGetActivationFactory (its
+     * module kept loaded) with no registry/library walk; the apartment answer is the
+     * provider factory wrapped for agility when is_agile was recorded, the same object
+     * the slow path returns.  Its fresh reference is released by the caller as on the
+     * slow path.  A provider that fails this time falls through to full resolution. */
+    if (raw && factory_cache_lookup(raw, &provider_pfn, &cached_agile) && provider_pfn)
+    {
+        IActivationFactory *provider = NULL;
+        if (SUCCEEDED(hr = provider_pfn(classid, &provider)))
+        {
+            IActivationFactory *agile = cached_agile ? agile_wrap_agile( provider ) : provider;
+            hr = IActivationFactory_QueryInterface( agile, iid, class_factory );
+            IActivationFactory_Release( agile );
+            return hr;
+        }
+    }
+
+    hr = resolve_activation_factory(classid, &factory, &module, &provider_pfn, &pfn_mod);
     if (SUCCEEDED(hr))
     {
         /* The apartment answer is RoGetActivationFactory's: wrap an agile class's
          * factory so the returned object answers IAgileObject, then hand out the
          * requested interface (transparently the provider factory's, except the
          * agile marker). */
-        IActivationFactory *agile = agile_wrap_factory( factory, WindowsGetStringRawBuffer( classid, NULL ) );
+        IActivationFactory *agile = agile_wrap_factory( factory, raw );
         hr = IActivationFactory_QueryInterface( agile, iid, class_factory );
         if (SUCCEEDED(hr))
         {
             TRACE("Created interface %p\n", *class_factory);
             module = NULL; /* the provider module has to stay loaded: the factory's code lives in it */
+            /* Populate the cache for the next activation of this class.  The provider
+             * (pfn, module) is cached with an is_agile flag recording whether the factory
+             * answers IAgileObject, so the next hit skips the registry/library walk and
+             * the ThreadingModel probe.  The factory pointer itself is apartment-affine
+             * and not cached. */
+            if (raw && provider_pfn)
+            {
+                IUnknown *probe = NULL;
+                BOOL is_agile = SUCCEEDED(IActivationFactory_QueryInterface( agile, &IID_IAgileObject, (void **)&probe ));
+                if (is_agile) IUnknown_Release( probe );
+                factory_cache_store( raw, provider_pfn, pfn_mod, is_agile );
+            }
         }
         IActivationFactory_Release( agile );
     }
@@ -1220,7 +1408,7 @@ HRESULT WINAPI RoGetActivatableClassRegistration(HSTRING activatable_class_id, I
     if (!factory)
         return E_POINTER;
 
-    hr = resolve_activation_factory(activatable_class_id, factory, &module);
+    hr = resolve_activation_factory(activatable_class_id, factory, &module, NULL, NULL);
     if (FAILED(hr) && module) FreeLibrary(module);
     return hr;
 }
@@ -2317,8 +2505,24 @@ static struct registered_factory *registered_factories;
 
 static BOOL find_registered_factory(const WCHAR *classid, PFNGETACTIVATIONFACTORY *callback)
 {
+    /* C++/WinRT registers class "Ns.Sub.Foo" under the synthesized factory name
+     * "Ns.Sub.__FooActivationFactory".  That name depends only on classid, so build it
+     * once before the scan instead of re-formatting it for every registered entry. */
+    WCHAR synthesized[256];
+    BOOL have_synthesized = FALSE;
     struct registered_factory *entry;
     BOOL found = FALSE;
+
+    {
+        const WCHAR *dot = wcsrchr(classid, '.');
+        if (dot)
+        {
+            int prefix_len = dot - classid + 1;
+            swprintf(synthesized, ARRAY_SIZE(synthesized), L"%.*ls__%lsActivationFactory",
+                     prefix_len, classid, dot + 1);
+            have_synthesized = TRUE;
+        }
+    }
 
     RtlAcquireSRWLockShared(&registered_factories_lock);
     for (entry = registered_factories; entry; entry = entry->next)
@@ -2330,23 +2534,11 @@ static BOOL find_registered_factory(const WCHAR *classid, PFNGETACTIVATIONFACTOR
             found = TRUE;
             break;
         }
-        /* Match C++/WinRT __...ActivationFactory naming:
-         * e.g. "WhatsAppNative.__MiscCppActivationFactory" for "WhatsAppNative.MiscCpp" */
+        if (have_synthesized && !wcscmp(reg_name, synthesized))
         {
-            const WCHAR *dot = wcsrchr(classid, '.');
-            if (dot)
-            {
-                WCHAR synthesized[256];
-                int prefix_len = dot - classid + 1;
-                swprintf(synthesized, ARRAY_SIZE(synthesized), L"%.*ls__%lsActivationFactory",
-                         prefix_len, classid, dot + 1);
-                if (!wcscmp(reg_name, synthesized))
-                {
-                    *callback = entry->callback;
-                    found = TRUE;
-                    break;
-                }
-            }
+            *callback = entry->callback;
+            found = TRUE;
+            break;
         }
     }
     RtlReleaseSRWLockShared(&registered_factories_lock);
@@ -2402,6 +2594,7 @@ HRESULT WINAPI RoRegisterActivationFactories(HSTRING *classes, PFNGETACTIVATIONF
         entries[i].next = registered_factories;
         registered_factories = &entries[i];
     }
+    registered_factories_gen++;   /* invalidate cached resolutions against the new set */
     RtlReleaseSRWLockExclusive(&registered_factories_lock);
 
     registration->entries = entries;
@@ -2434,6 +2627,7 @@ HRESULT WINAPI RoRevokeActivationFactories(RO_REGISTRATION_COOKIE cookie)
         else
             link = &entry->next;
     }
+    registered_factories_gen++;   /* cached resolutions against this set are now stale */
     RtlReleaseSRWLockExclusive(&registered_factories_lock);
 
     free(registration->entries);

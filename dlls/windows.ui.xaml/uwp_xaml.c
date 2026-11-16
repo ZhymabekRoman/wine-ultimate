@@ -33,6 +33,8 @@
 #define WIDL_using_Windows_ApplicationModel
 #define WIDL_using_Windows_Management_Deployment
 #include "windows.management.deployment.h"
+#define WIDL_using_Windows_UI_Composition
+#include "windows.ui.composition.h"
 
 static const GUID CLSID_WICImagingFactory_local =
     { 0xcacaf262, 0x9370, 0x4615, { 0xa1, 0x3b, 0x9f, 0x55, 0x39, 0xda, 0x4c, 0x0a } };
@@ -2360,6 +2362,7 @@ struct uwp_element
     IInspectable IContentDialog_iface;
     IInspectable IContentDialog2_iface;
     IInspectable ITeachingTip_iface;
+    IInspectable IAutoSuggestBox_iface;
     IWeakReferenceSource IWeakReferenceSource_iface;
 
     LONG ref;
@@ -3738,12 +3741,59 @@ static struct uwp_element *uwp_elem_from_any( void *ptr )
     }
     if (xaml_get_app_profile()->seed_xbf != NULL && ptr != uwp_get_app_outer())
     {
+        static const GUID IID_IResourceDictionary_UWP_g =
+            { 0x44a9796f, 0x723e, 0x4fdf, { 0xa2, 0x18, 0x03, 0x3e, 0x75, 0xb0, 0xc0, 0x84 } };
+        static const GUID IID_IResourceDictionary_WinUI_g =
+            { 0x1b690975, 0xa710, 0x5783, { 0xa6, 0xe1, 0x15, 0x83, 0x6f, 0x61, 0x86, 0xc2 } };
         void *pv_iface = NULL;
+        void *ui_iface = NULL;
         void *cand = NULL;
-        /* Boxed primitive PropertyValues are never UIElements; do not probe vtbl[6]/[7] on them */
-        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IPropertyValue_g, &pv_iface )) && pv_iface)
+        HSTRING hcls = NULL;
+        HRESULT cls_hr;
+        /* Boxed primitive PropertyValues and ResourceDictionaries are never UIElements; do not probe vtbl[6]/[7] on them */
+        if ((SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IPropertyValue_g, &pv_iface )) && pv_iface) ||
+            (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IResourceDictionary_UWP_g, &pv_iface )) && pv_iface) ||
+            (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IResourceDictionary_WinUI_g, &pv_iface )) && pv_iface))
         {
             IUnknown_Release( (IUnknown *)pv_iface );
+            return NULL;
+        }
+        /* If ptr answers IUIElement, resolve directly via IID_UWP_ELEM_SELF or table without probing vtbl[6] */
+        if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ptr, &IID_IUIElement_UWP, &ui_iface )) && ui_iface)
+        {
+            if (SUCCEEDED(IUnknown_QueryInterface( (IUnknown *)ui_iface, &IID_UWP_ELEM_SELF, &self_iface )) && self_iface)
+            {
+                AcquireSRWLockExclusive( &g_all_uwp_elems_lock );
+                for (el = g_all_uwp_elems_head; el; el = el->next_reg)
+                {
+                    if (self_iface == (void *)&el->nondelegating_iface ||
+                        ((char *)self_iface >= (char *)el && (char *)self_iface < (char *)(el + 1)))
+                    {
+                        ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+                        IUnknown_Release( (IUnknown *)self_iface );
+                        IUnknown_Release( (IUnknown *)ui_iface );
+                        return el;
+                    }
+                }
+                ReleaseSRWLockExclusive( &g_all_uwp_elems_lock );
+                IUnknown_Release( (IUnknown *)self_iface );
+            }
+            IUnknown_Release( (IUnknown *)ui_iface );
+        }
+        /* Only probe MCG __ComObject get_Inner (vtbl[6]/[7]) if GetRuntimeClassName is not implemented */
+        cls_hr = E_FAIL;
+        __TRY
+        {
+            cls_hr = IInspectable_GetRuntimeClassName( (IInspectable *)ptr, &hcls );
+        }
+        __EXCEPT_ALL
+        {
+            cls_hr = E_FAIL;
+        }
+        __ENDTRY;
+        if (SUCCEEDED(cls_hr))
+        {
+            if (hcls) WindowsDeleteString( hcls );
             return NULL;
         }
         __TRY
@@ -4136,7 +4186,12 @@ static HRESULT WINAPI uwp_nondelegating_QueryInterface( IInspectable *iface, REF
     else if (IsEqualGUID( iid, &IID_IMenuFlyout2_Real_UWP ))
         *out = &impl->IMenuFlyout2_iface;
     else if (IsEqualGUID( iid, &IID_IContentDialog_UWP ))
-        *out = &impl->IContentDialog_iface;
+    {
+        if (wcsstr( impl->class_name, L"AutoSuggestBox" ))
+            *out = &impl->IAutoSuggestBox_iface;
+        else
+            *out = &impl->IContentDialog_iface;
+    }
     else if (IsEqualGUID( iid, &IID_IContentDialog2_UWP ))
         *out = &impl->IContentDialog2_iface;
     else if (IsEqualGUID( iid, &IID_ITeachingTip_WinUI ))
@@ -7453,6 +7508,29 @@ static const void *uwp_cd_vtbl[48] =
     [39] = uwp_cd_ShowAsync,
 };
 
+static const void *uwp_asb_vtbl[32] =
+{
+    [0] = uwp_sub_QueryInterface,
+    [1] = uwp_sub_AddRef,
+    [2] = uwp_sub_Release,
+    [3] = uwp_sub_GetIids,
+    [4] = uwp_sub_GetRuntimeClassName,
+    [5] = uwp_sub_GetTrustLevel,
+    [6 ... 31] = uwp_generic_noop,
+    [8] = uwp_cd_get_BoolFalse,
+    [10] = uwp_tb_get_Text,
+    [12] = uwp_tb_get_Text,
+    [13] = uwp_tb_put_Text,
+    [14] = uwp_cd_get_BoolTrue,
+    [16] = uwp_tb_get_Text,
+    [18] = uwp_cd_get_NullOut,
+    [20] = uwp_cd_get_BoolTrue,
+    [22] = uwp_cd_get_NullOut,
+    [24] = uwp_ui_event_add,
+    [26] = uwp_ui_event_add,
+    [28] = uwp_ui_event_add,
+};
+
 static const void *uwp_cd2_vtbl[24] =
 {
     [0] = uwp_sub_QueryInterface,
@@ -8000,6 +8078,7 @@ HRESULT uwp_element_create( const WCHAR *class_name, IInspectable *outer, IInspe
     impl->IContentDialog_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cd_vtbl;
     impl->IContentDialog2_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cd2_vtbl;
     impl->ITeachingTip_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_teachingtip_vtbl;
+    impl->IAutoSuggestBox_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_asb_vtbl;
     impl->IWeakReferenceSource_iface.lpVtbl = &uwp_wrs_vtbl;
 
     impl->ref = 1;
@@ -8937,293 +9016,7 @@ static void store_query_installed_packages( struct store_catalog_item **out_item
     *out_count = count;
 }
 
-/* Documented fallback only: invoked strictly when XBF parsing fails to build a visual tree. */
-static void uwp_seed_store_catalog( struct uwp_element *page_el )
-{
-    static const WCHAR *nav_names[5] = { L"Home", L"Apps", L"Games", L"Movies", L"Library" };
-    static const WCHAR *nav_icons[5] = { L"\x2302", L"\x25a6", L"\x25c8", L"\x25b6", L"\x25a4" };
-
-    struct store_catalog_item *apps = NULL;
-    int app_count = 0;
-    IInspectable *root_grid_raw = NULL, *nav_rail_raw = NULL, *main_grid_raw = NULL;
-    IInspectable *search_raw = NULL, *banner_raw = NULL;
-    IInspectable *sec_title_raw = NULL, *tiles_grid_raw = NULL;
-    struct uwp_element *root_grid, *nav_rail, *main_grid, *tiles_grid;
-    int i;
-
-    if (!page_el || page_el->children_coll) return;
-    TRACE( "xbf: falling back to seed tree\n" );
-    store_query_installed_packages( &apps, &app_count );
-
-    /* 2. Build Root Layout: Page -> RootGrid (Col 0: NavRail 68px, Col 1: MainContent 1*) */
-    if (FAILED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&root_grid_raw )) || !root_grid_raw)
-    {
-        free( apps );
-        return;
-    }
-    root_grid = uwp_elem_from_any( root_grid_raw );
-    IInspectable_Release( root_grid_raw );
-    if (!root_grid) { free( apps ); return; }
-    lstrcpynW( root_grid->name, L"RootStoreGrid", ARRAY_SIZE(root_grid->name) );
-    uwp_vec_create( root_grid, &root_grid->children_coll );
-
-    /* Left Navigation Rail */
-    if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&nav_rail_raw )) && nav_rail_raw)
-    {
-        nav_rail = uwp_elem_from_any( nav_rail_raw );
-        IInspectable_Release( nav_rail_raw );
-        if (nav_rail)
-        {
-            IInspectable *logo_raw = NULL;
-            struct uwp_element *logo;
-
-            lstrcpynW( nav_rail->name, L"NavRail", ARRAY_SIZE(nav_rail->name) );
-            nav_rail->grid_col = 0;
-            nav_rail->grid_row = 0;
-            nav_rail->parent = root_grid;
-            uwp_vec_create( nav_rail, &nav_rail->children_coll );
-
-            /* Logo at top */
-            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&logo_raw )) && logo_raw)
-            {
-                logo = uwp_elem_from_any( logo_raw );
-                IInspectable_Release( logo_raw );
-                if (logo)
-                {
-                    lstrcpynW( logo->name, L"StoreBrandLogo", ARRAY_SIZE(logo->name) );
-                    lstrcpynW( logo->text, L"\x229e Store", ARRAY_SIZE(logo->text) );
-                    logo->grid_row = 0;
-                    logo->font_size = 14.0;
-                    logo->parent = nav_rail;
-                    uwp_vec_Append( nav_rail->children_coll, &logo->IInspectable_iface );
-                }
-            }
-
-            /* Nav items */
-            for (i = 0; i < 5; i++)
-            {
-                IInspectable *item_raw = NULL;
-                struct uwp_element *item;
-                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&item_raw )) && item_raw)
-                {
-                    item = uwp_elem_from_any( item_raw );
-                    IInspectable_Release( item_raw );
-                    if (item)
-                    {
-                        swprintf( item->name, ARRAY_SIZE(item->name), L"NavItem_%s", nav_names[i] );
-                        swprintf( item->text, ARRAY_SIZE(item->text), L"%s %s", nav_icons[i], nav_names[i] );
-                        item->grid_row = i + 1;
-                        item->parent = nav_rail;
-                        uwp_vec_Append( nav_rail->children_coll, &item->IInspectable_iface );
-                    }
-                }
-            }
-            uwp_vec_Append( root_grid->children_coll, &nav_rail->IInspectable_iface );
-        }
-    }
-
-    /* Main Content Area (Col 1) */
-    if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&main_grid_raw )) && main_grid_raw)
-    {
-        main_grid = uwp_elem_from_any( main_grid_raw );
-        IInspectable_Release( main_grid_raw );
-        if (main_grid)
-        {
-            lstrcpynW( main_grid->name, L"MainContentGrid", ARRAY_SIZE(main_grid->name) );
-            main_grid->grid_col = 1;
-            main_grid->grid_row = 0;
-            main_grid->parent = root_grid;
-            uwp_vec_create( main_grid, &main_grid->children_coll );
-
-            /* Top Search Bar (Row 0) */
-            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&search_raw )) && search_raw)
-            {
-                struct uwp_element *search = uwp_elem_from_any( search_raw );
-                IInspectable_Release( search_raw );
-                if (search)
-                {
-                    lstrcpynW( search->name, L"SearchBoxHolderControl", ARRAY_SIZE(search->name) );
-                    lstrcpynW( search->text, L"\x26b2 Search apps, games, movies and more", ARRAY_SIZE(search->text) );
-                    search->grid_row = 0;
-                    search->font_size = 14.0;
-                    search->parent = main_grid;
-                    uwp_vec_Append( main_grid->children_coll, &search->IInspectable_iface );
-                }
-            }
-
-            /* Featured Hero Banner (Row 1) */
-            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Border", NULL, NULL, (void **)&banner_raw )) && banner_raw)
-            {
-                struct uwp_element *banner = uwp_elem_from_any( banner_raw );
-                IInspectable_Release( banner_raw );
-                if (banner)
-                {
-                    lstrcpynW( banner->name, L"HeroBanner", ARRAY_SIZE(banner->name) );
-                    banner->grid_row = 1;
-                    banner->parent = main_grid;
-                    uwp_vec_Append( main_grid->children_coll, &banner->IInspectable_iface );
-                }
-            }
-
-            /* Section Header (Row 2) */
-            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&sec_title_raw )) && sec_title_raw)
-            {
-                struct uwp_element *st = uwp_elem_from_any( sec_title_raw );
-                IInspectable_Release( sec_title_raw );
-                if (st)
-                {
-                    lstrcpynW( st->name, L"TopAppsHeader", ARRAY_SIZE(st->name) );
-                    swprintf( st->text, ARRAY_SIZE(st->text), L"Installed Packages (%d)", app_count );
-                    st->grid_row = 2;
-                    st->font_size = 20.0;
-                    st->parent = main_grid;
-                    uwp_vec_Append( main_grid->children_coll, &st->IInspectable_iface );
-                }
-            }
-
-            /* Catalog Tiles Grid (Row 3): dynamic rows x 4 columns of cards */
-            if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Grid", NULL, NULL, (void **)&tiles_grid_raw )) && tiles_grid_raw)
-            {
-                tiles_grid = uwp_elem_from_any( tiles_grid_raw );
-                IInspectable_Release( tiles_grid_raw );
-                if (tiles_grid)
-                {
-                    lstrcpynW( tiles_grid->name, L"HomeIslandTilesGrid", ARRAY_SIZE(tiles_grid->name) );
-                    tiles_grid->grid_row = 3;
-                    tiles_grid->parent = main_grid;
-                    uwp_vec_create( tiles_grid, &tiles_grid->children_coll );
-
-                    for (i = 0; i < app_count && i < 8; i++)
-                    {
-                        IInspectable *card_raw = NULL;
-                        struct uwp_element *card;
-                        if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Border", NULL, NULL, (void **)&card_raw )) && card_raw)
-                        {
-                            card = uwp_elem_from_any( card_raw );
-                            IInspectable_Release( card_raw );
-                            if (card)
-                            {
-                                IInspectable *icon_raw = NULL, *t_raw = NULL, *c_raw = NULL, *r_raw = NULL, *b_raw = NULL;
-                                struct uwp_element *icon, *t, *c, *r, *b;
-
-                                swprintf( card->name, ARRAY_SIZE(card->name), L"TileCard_%s", apps[i].name );
-                                card->grid_row = i / 4;
-                                card->grid_col = i % 4;
-                                card->parent = tiles_grid;
-                                uwp_vec_create( card, &card->children_coll );
-
-                                /* App Icon */
-                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Border", NULL, NULL, (void **)&icon_raw )) && icon_raw)
-                                {
-                                    icon = uwp_elem_from_any( icon_raw );
-                                    IInspectable_Release( icon_raw );
-                                    if (icon)
-                                    {
-                                        swprintf( icon->name, ARRAY_SIZE(icon->name), L"AppIcon_%s", apps[i].name );
-                                        lstrcpynW( icon->text, apps[i].icon, ARRAY_SIZE(icon->text) );
-                                        icon->parent = card;
-                                        uwp_vec_Append( card->children_coll, &icon->IInspectable_iface );
-                                    }
-                                }
-                                /* App Title */
-                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&t_raw )) && t_raw)
-                                {
-                                    t = uwp_elem_from_any( t_raw );
-                                    IInspectable_Release( t_raw );
-                                    if (t)
-                                    {
-                                        swprintf( t->name, ARRAY_SIZE(t->name), L"TitleText_%s", apps[i].name );
-                                        lstrcpynW( t->text, apps[i].name, ARRAY_SIZE(t->text) );
-                                        t->font_size = 14.0;
-                                        t->parent = card;
-                                        uwp_vec_Append( card->children_coll, &t->IInspectable_iface );
-                                    }
-                                }
-                                /* Category */
-                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&c_raw )) && c_raw)
-                                {
-                                    c = uwp_elem_from_any( c_raw );
-                                    IInspectable_Release( c_raw );
-                                    if (c)
-                                    {
-                                        swprintf( c->name, ARRAY_SIZE(c->name), L"CategoryText_%s", apps[i].name );
-                                        lstrcpynW( c->text, apps[i].cat, ARRAY_SIZE(c->text) );
-                                        c->font_size = 11.0;
-                                        c->parent = card;
-                                        uwp_vec_Append( card->children_coll, &c->IInspectable_iface );
-                                    }
-                                }
-                                /* Rating */
-                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.TextBlock", NULL, NULL, (void **)&r_raw )) && r_raw)
-                                {
-                                    r = uwp_elem_from_any( r_raw );
-                                    IInspectable_Release( r_raw );
-                                    if (r)
-                                    {
-                                        swprintf( r->name, ARRAY_SIZE(r->name), L"RatingText_%s", apps[i].name );
-                                        lstrcpynW( r->text, apps[i].rating, ARRAY_SIZE(r->text) );
-                                        r->font_size = 11.0;
-                                        r->parent = card;
-                                        uwp_vec_Append( card->children_coll, &r->IInspectable_iface );
-                                    }
-                                }
-                                /* Get Button */
-                                if (SUCCEEDED(uwp_element_create( L"Windows.UI.Xaml.Controls.Button", NULL, NULL, (void **)&b_raw )) && b_raw)
-                                {
-                                    b = uwp_elem_from_any( b_raw );
-                                    IInspectable_Release( b_raw );
-                                    if (b)
-                                    {
-                                        swprintf( b->name, ARRAY_SIZE(b->name), L"GetButton_%s", apps[i].name );
-                                        lstrcpynW( b->text, apps[i].btn, ARRAY_SIZE(b->text) );
-                                        b->parent = card;
-                                        uwp_vec_Append( card->children_coll, &b->IInspectable_iface );
-                                    }
-                                }
-                                uwp_vec_Append( tiles_grid->children_coll, &card->IInspectable_iface );
-                            }
-                        }
-                    }
-                    uwp_vec_Append( main_grid->children_coll, &tiles_grid->IInspectable_iface );
-                }
-            }
-            uwp_vec_Append( root_grid->children_coll, &main_grid->IInspectable_iface );
-        }
-    }
-
-    uwp_vec_create( page_el, &page_el->children_coll );
-    uwp_vec_Append( page_el->children_coll, &root_grid->IInspectable_iface );
-    root_grid->parent = page_el;
-    page_el->content = &root_grid->IInspectable_iface;
-    IInspectable_AddRef( page_el->content );
-    free( apps );
-    TRACE( "uwp_seed_store_catalog: successfully populated %d dynamic Store catalog items into page %p\n",
-           app_count, page_el );
-}
-
-HRESULT uwp_store_create_initial_page( IInspectable **out )
-{
-    IInspectable *p_raw = NULL;
-    struct uwp_element *page_el;
-    HRESULT hr;
-
-    if (!out) return E_POINTER;
-    *out = NULL;
-
-    hr = uwp_element_create( L"Windows.UI.Xaml.Controls.Page", NULL, NULL, (void **)&p_raw );
-    if (FAILED(hr) || !p_raw) return hr;
-
-    page_el = uwp_elem_from_any( p_raw );
-    if (page_el)
-    {
-        lstrcpynW( page_el->name, xaml_get_app_profile()->seed_xbf ? xaml_get_app_profile()->seed_xbf : L"StoreManifestPage", ARRAY_SIZE(page_el->name) );
-        uwp_seed_store_catalog( page_el );
-        g_navigated_page_el = page_el;
-    }
-    *out = p_raw;
-    TRACE( "uwp_store_create_initial_page created page %p (raw %p)\n", page_el, p_raw );
-    return S_OK;
-}
+static struct uwp_element *g_focused_textbox = NULL;
 
 static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_ptr, void *param, boolean *result )
 {
@@ -9287,10 +9080,6 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                         TRACE( "xbf: falling back to seed tree\n" );
                         uwp_seed_synthetic_calculator( holder ? holder : page_el );
                     }
-                    else if (!wcscmp( xaml_get_app_profile()->seed_xbf, L"StoreManifestPage" ))
-                    {
-                        uwp_seed_store_catalog( page_el );
-                    }
                 }
             }
             else
@@ -9298,23 +9087,6 @@ static HRESULT WINAPI uwp_frame_NavigateWithParam( void *iface, void *type_name_
                 impl->content = page;
             }
             xaml_window_present_current();
-        }
-        if ((FAILED(hr) || !impl->content) && is_store_app())
-        {
-            IInspectable *store_page = NULL;
-            TRACE( "uwp_frame_NavigateWithParam: store fallback to uwp_store_create_initial_page\n" );
-            if (SUCCEEDED(uwp_store_create_initial_page( &store_page )) && store_page)
-            {
-                struct uwp_element *page_el = uwp_elem_from_any( store_page );
-                impl->content = store_page;
-                g_navigated_page_el = page_el;
-                if (page_el)
-                {
-                    page_el->parent = impl;
-                    uwp_fire_loaded_tree( page_el );
-                }
-                xaml_window_present_current();
-            }
         }
     }
     return S_OK;
@@ -10659,10 +10431,9 @@ static void xbf_exec_substream_rd( struct xbf_ctx *ctx, int sub_idx, struct uwp_
                 {
                     cls_name = ctx->types[tid].full_name;
                     if (ctx->root_el) uwp_mark_xbf_ref_instantiated( ctx->root_el, cls_name );
-                    /* Do not activate ResourceString, ResourceVirtualKey, or Microsoft.UI.Xaml controls via provider */
+                    /* Do not activate ResourceString or ResourceVirtualKey via provider */
                     if (is_rd_type || wcsstr( cls_name, L"ResourceString" ) ||
-                        wcsstr( cls_name, L"ResourceVirtualKey" ) ||
-                        !wcsncmp( cls_name, L"Microsoft.UI.Xaml.", 18 ))
+                        wcsstr( cls_name, L"ResourceVirtualKey" ))
                     {
                         uwp_element_create( cls_name, NULL, NULL, (void **)&inst );
                         el = uwp_elem_from_any( inst );
@@ -12728,8 +12499,8 @@ static void uwp_arrange_element( struct uwp_element *el, RECT rc )
             int r, c;
             RECT card_rc;
             if (!ch_elem) continue;
-            r = k / 4;
-            c = k % 4;
+            r = (int)(k / 4);
+            c = (int)(k % 4);
             SetRect( &card_rc, rc.left + c * (cw + 16), rc.top + r * (ch + 16),
                      rc.left + c * (cw + 16) + cw, rc.top + r * (ch + 16) + ch );
             uwp_arrange_element( ch_elem, card_rc );
@@ -13005,29 +12776,41 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
              wcsstr( el->name, L"SuggestBox" ))
     {
         RECT rc = el->bounds;
+        BOOL focused = (g_focused_textbox == el);
         COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
             ? blend_argb_over( el->bg_argb, surface_bg )
             : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 42, 42, 42 ), surface_bg );
-        COLORREF sbd = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 90, 90, 90 ), surface_bg );
-        COLORREF sfg = (el->has_fg && el->fg_alpha > 0)
-            ? blend_argb_over( el->fg_argb, sbg )
-            : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 185, 185, 185 ), sbg );
+        COLORREF sbd = focused
+            ? uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg )
+            : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 90, 90, 90 ), surface_bg );
+        COLORREF sfg = el->text[0]
+            ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), sbg )
+            : ((el->has_fg && el->fg_alpha > 0)
+                ? blend_argb_over( el->fg_argb, sbg )
+                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 185, 185, 185 ), sbg ));
         HBRUSH br = CreateSolidBrush( sbg );
-        HPEN pen = CreatePen( PS_SOLID, 1, sbd );
+        HPEN pen = CreatePen( PS_SOLID, focused ? 2 : 1, sbd );
         HFONT font = CreateFontW( -13, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                                   DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                   CLEARTYPE_QUALITY, FF_SWISS, L"Segoe UI" );
         HGDIOBJ old_br = SelectObject( hdc, br );
         HGDIOBJ old_pen = SelectObject( hdc, pen );
         HGDIOBJ old_font = SelectObject( hdc, font );
+        WCHAR disp[264];
         const WCHAR *fallback = wcsstr( el->name, L"SearchBox" )
             ? L"\x26b2  Search apps, games, movies and more"
             : L"Find";
+        if (el->text[0])
+            swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2  %s|" : L"\x26b2  %s", el->text );
+        else if (focused)
+            lstrcpynW( disp, L"\x26b2  |", ARRAY_SIZE(disp) );
+        else
+            lstrcpynW( disp, fallback, ARRAY_SIZE(disp) );
         RoundRect( hdc, rc.left, rc.top, rc.right, rc.bottom, 6, 6 );
         SetTextColor( hdc, sfg );
         SetBkMode( hdc, TRANSPARENT );
         rc.left += 10;
-        DrawTextW( hdc, el->text[0] ? el->text : fallback, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
+        DrawTextW( hdc, disp, -1, &rc, DT_LEFT | DT_VCENTER | DT_SINGLELINE );
         SelectObject( hdc, old_font );
         SelectObject( hdc, old_pen );
         SelectObject( hdc, old_br );
@@ -13259,7 +13042,20 @@ static void uwp_paint_element( HDC hdc, struct uwp_element *el )
         if (wcsstr( el->name, L"NavItem" ))
         {
             RECT rc = el->bounds;
-            BOOL selected = (wcsstr( el->name, L"Home" ) != NULL);
+            BOOL selected = (el->is_checked == 1);
+            if (selected || el->is_hovered || el->is_pressed)
+            {
+                COLORREF nav_bg = el->is_pressed ? RGB( 52, 52, 52 ) : (selected ? RGB( 40, 40, 40 ) : RGB( 34, 34, 34 ));
+                HBRUSH nbr = CreateSolidBrush( nav_bg );
+                HPEN npen = CreatePen( PS_SOLID, 1, nav_bg );
+                HGDIOBJ obr = SelectObject( hdc, nbr );
+                HGDIOBJ open = SelectObject( hdc, npen );
+                RoundRect( hdc, rc.left + 2, rc.top + 2, rc.right - 2, rc.bottom - 2, 6, 6 );
+                SelectObject( hdc, open );
+                SelectObject( hdc, obr );
+                DeleteObject( npen );
+                DeleteObject( nbr );
+            }
             if (selected)
             {
                 RECT bar = rc;
@@ -13546,25 +13342,6 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
         }
         uwp_paint_element( hdc, root_el );
     }
-    else if (is_store_app())
-    {
-        /* Fallback strictly when Store XBF failed to populate a visual tree */
-        if (!g_navigated_page_el)
-        {
-            IInspectable *store_page = NULL;
-            if (SUCCEEDED(uwp_store_create_initial_page( &store_page )) && store_page)
-            {
-                g_navigated_page_el = uwp_elem_from_any( store_page );
-                IInspectable_Release( store_page );
-            }
-        }
-        if (g_navigated_page_el)
-        {
-            uwp_arrange_element( g_navigated_page_el, rc );
-            uwp_paint_element( hdc, g_navigated_page_el );
-            return;
-        }
-    }
     else TRACE( "xaml_layout_render: root_el NULL (content %p)\n", (void *)content );
 }
 
@@ -13629,10 +13406,72 @@ static struct uwp_element *uwp_find_button_by_text( struct uwp_element *el, cons
     return NULL;
 }
 
+static BOOL uwp_is_textbox( const struct uwp_element *el )
+{
+    if (!el || el->visibility != 0 || !el->is_enabled) return FALSE;
+    return wcsstr( el->class_name, L"TextBox" ) != NULL ||
+           wcsstr( el->class_name, L"AutoSuggestBox" ) != NULL ||
+           wcsstr( el->name, L"SearchBox" ) != NULL;
+}
+
+static struct uwp_element *uwp_hit_test_textbox( struct uwp_element *el, int x, int y )
+{
+    if (!el || !el->has_bounds || el->visibility != 0 || !el->is_enabled) return NULL;
+    if (x < el->bounds.left || x >= el->bounds.right || y < el->bounds.top || y >= el->bounds.bottom)
+        return NULL;
+
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        int k;
+        for (k = (int)children->count - 1; k >= 0; k--)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            struct uwp_element *hit = uwp_hit_test_textbox( ch, x, y );
+            if (hit) return hit;
+        }
+    }
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        struct uwp_element *hit = uwp_hit_test_textbox( ch, x, y );
+        if (hit) return hit;
+    }
+    if (uwp_is_textbox( el ))
+        return el;
+    return NULL;
+}
+
 void uwp_keyboard_press_char( WCHAR ch )
 {
     WCHAR buf[2] = { ch, 0 };
     struct uwp_element *root = g_navigated_page_el, *hit;
+
+    if (g_focused_textbox && g_focused_textbox->visibility == 0 && g_focused_textbox->is_enabled)
+    {
+        size_t len = wcslen( g_focused_textbox->text );
+        if (ch == L'\b')
+        {
+            if (len > 0) g_focused_textbox->text[len - 1] = 0;
+        }
+        else if (ch == 27)
+        {
+            if (len > 0) g_focused_textbox->text[0] = 0;
+            else g_focused_textbox = NULL;
+        }
+        else if (ch == L'\r')
+        {
+            /* Confirm search */
+        }
+        else if (ch >= 0x20 && len + 1 < ARRAY_SIZE(g_focused_textbox->text))
+        {
+            g_focused_textbox->text[len] = ch;
+            g_focused_textbox->text[len + 1] = 0;
+        }
+        uwp_invalidate_window();
+        xaml_window_present_current();
+        return;
+    }
 
     if (!root) return;
     if ((hit = uwp_find_button_by_text( root, buf ))) uwp_invoke_button( hit );
@@ -13929,6 +13768,21 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
     if (msg == WM_LBUTTONDOWN)
     {
         struct uwp_element *btn = uwp_hit_test_button( root_el, x, y );
+        struct uwp_element *tb = btn ? NULL : uwp_hit_test_textbox( root_el, x, y );
+        if (tb)
+        {
+            g_focused_textbox = tb;
+            TRACE( "uwp_handle_mouse_input: FOCUS TextBox (%d,%d) -> %s\n", x, y, debugstr_w(tb->name) );
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            return TRUE;
+        }
+        if (g_focused_textbox)
+        {
+            g_focused_textbox = NULL;
+            if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+        }
         if (btn && wcsstr( btn->class_name, L"MenuBarItem" ))
         {
             if (uwp_popup_is_open_for( btn ))
@@ -13993,8 +13847,10 @@ BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int h
                 uwp_show_flyout_popup( hit, hwnd ? GetAncestor( hwnd, GA_ROOT ) : NULL, spt.x, spt.y );
             }
             if (hwnd) InvalidateRect( hwnd, NULL, FALSE );
+            uwp_invalidate_window();
+            return TRUE;
         }
-        return hit != NULL;
+        return FALSE;
     }
     else if (msg == WM_LBUTTONUP)
     {
@@ -15153,6 +15009,132 @@ static const GUID IID_ISolidColorBrushFactory_local =
 static const GUID IID_IButtonBaseStatics_Calc =
     { 0x67ef17e1, 0xfe37, 0x474f, { 0x9e, 0x97, 0x3b, 0x5e, 0x0b, 0x30, 0xf2, 0xdf } };
 
+static const GUID IID_IElementCompositionPreviewStatics_UWP =
+    { 0x08c92b38, 0xec99, 0x4c55, { 0xbc, 0x85, 0xa1, 0xc1, 0x80, 0xb2, 0x76, 0x46 } };
+
+static __x_ABI_CWindows_CUI_CComposition_CICompositor *g_ecp_compositor = NULL;
+
+static __x_ABI_CWindows_CUI_CComposition_CICompositor *ecp_get_compositor( void )
+{
+    if (!g_ecp_compositor)
+    {
+        HSTRING cls = NULL;
+        IActivationFactory *af = NULL;
+        if (SUCCEEDED(WindowsCreateString( L"Windows.UI.Composition.Compositor", 33, &cls )) && cls)
+        {
+            if (SUCCEEDED(RoGetActivationFactory( cls, &IID_IActivationFactory, (void **)&af )) && af)
+            {
+                IInspectable *inst = NULL;
+                if (SUCCEEDED(IActivationFactory_ActivateInstance( af, &inst )) && inst)
+                {
+                    IInspectable_QueryInterface( inst, &IID___x_ABI_CWindows_CUI_CComposition_CICompositor, (void **)&g_ecp_compositor );
+                    IInspectable_Release( inst );
+                }
+                IActivationFactory_Release( af );
+            }
+            WindowsDeleteString( cls );
+        }
+    }
+    return g_ecp_compositor;
+}
+
+static HRESULT WINAPI ecp_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_UWP ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI ecp_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI ecp_Release( void *iface ) { return 1; }
+static HRESULT WINAPI ecp_GetIids( void *iface, ULONG *c, IID **i )
+{
+    if (c) *c = 0;
+    if (i) *i = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI ecp_GetRuntimeClassName( void *iface, HSTRING *n )
+{
+    return WindowsCreateString( L"Windows.UI.Xaml.Hosting.ElementCompositionPreview", 49, n );
+}
+static HRESULT WINAPI ecp_GetTrustLevel( void *iface, TrustLevel *l )
+{
+    if (l) *l = BaseTrust;
+    return S_OK;
+}
+static HRESULT WINAPI ecp_GetElementVisual( void *iface, void *elem, void **out )
+{
+    __x_ABI_CWindows_CUI_CComposition_CICompositor *comp;
+    __x_ABI_CWindows_CUI_CComposition_CIContainerVisual *cv = NULL;
+    HRESULT hr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    comp = ecp_get_compositor();
+    if (!comp) return E_FAIL;
+    hr = __x_ABI_CWindows_CUI_CComposition_CICompositor_CreateContainerVisual( comp, &cv );
+    if (SUCCEEDED(hr) && cv)
+    {
+        hr = __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_QueryInterface( cv, &IID___x_ABI_CWindows_CUI_CComposition_CIVisual, out );
+        __x_ABI_CWindows_CUI_CComposition_CIContainerVisual_Release( cv );
+    }
+    TRACE( "ecp_GetElementVisual(%p) -> hr %#lx, visual %p\n", elem, hr, *out );
+    return hr;
+}
+static HRESULT WINAPI ecp_GetElementChildVisual( void *iface, void *elem, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = NULL;
+    return S_OK;
+}
+static HRESULT WINAPI ecp_SetElementChildVisual( void *iface, void *elem, void *visual )
+{
+    return S_OK;
+}
+static HRESULT WINAPI ecp_GetScrollViewerManipulationPropertySet( void *iface, void *sv, void **out )
+{
+    __x_ABI_CWindows_CUI_CComposition_CICompositor *comp;
+    __x_ABI_CWindows_CUI_CComposition_CICompositionPropertySet *ps = NULL;
+    HRESULT hr;
+    if (!out) return E_POINTER;
+    *out = NULL;
+    comp = ecp_get_compositor();
+    if (!comp) return E_FAIL;
+    hr = __x_ABI_CWindows_CUI_CComposition_CICompositor_CreatePropertySet( comp, &ps );
+    if (SUCCEEDED(hr) && ps) *out = ps;
+    return hr;
+}
+static HRESULT WINAPI ecp_SetImplicitShowAnimation( void *iface, void *elem, void *anim ) { return S_OK; }
+static HRESULT WINAPI ecp_SetImplicitHideAnimation( void *iface, void *elem, void *anim ) { return S_OK; }
+static HRESULT WINAPI ecp_SetIsTranslationEnabled( void *iface, void *elem, boolean val ) { return S_OK; }
+static HRESULT WINAPI ecp_GetPointerPositionPropertySet( void *iface, void *elem, void **out )
+{
+    return ecp_GetScrollViewerManipulationPropertySet( iface, elem, out );
+}
+
+static const void *ecp_statics_vtbl[] =
+{
+    ecp_QueryInterface,
+    ecp_AddRef,
+    ecp_Release,
+    ecp_GetIids,
+    ecp_GetRuntimeClassName,
+    ecp_GetTrustLevel,
+    ecp_GetElementVisual,
+    ecp_GetElementChildVisual,
+    ecp_SetElementChildVisual,
+    ecp_GetScrollViewerManipulationPropertySet,
+    ecp_SetImplicitShowAnimation,
+    ecp_SetImplicitHideAnimation,
+    ecp_SetIsTranslationEnabled,
+    ecp_GetPointerPositionPropertySet,
+};
+static const void *ecp_statics_obj = ecp_statics_vtbl;
+
 static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **out )
 {
     struct uwp_class_factory *f = uwp_cf_from_any( iface );
@@ -15175,12 +15157,30 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         return S_OK;
     }
 
-    if (IsEqualGUID( iid, &IID_IButtonBaseStatics_UWP ) ||
-        IsEqualGUID( iid, &IID_IButtonBaseStatics_Calc ) ||
-        IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ))
+    if (IsEqualGUID( iid, &IID_IElementCompositionPreviewStatics_UWP ))
     {
-        *out = f && f->IDpStatics_iface.lpVtbl ? (void *)&f->IDpStatics_iface : (void *)&f->IStatics_iface;
+        *out = (void *)&ecp_statics_obj;
         return S_OK;
+    }
+
+    {
+        static const GUID IID_IControlStatics_UWP =
+            { 0x473b305b, 0x877d, 0x4c35, { 0x8f, 0xca, 0x46, 0xa0, 0x5f, 0x96, 0x60, 0x7a } };
+        static const GUID IID_IRangeBaseStatics_UWP =
+            { 0x67ef17e1, 0xfe37, 0x474f, { 0x9e, 0x97, 0x3b, 0x5e, 0x0b, 0x30, 0xf2, 0xe0 } };
+        static const GUID IID_IAutoSuggestBoxStatics_UWP =
+            { 0xee22c7f4, 0xc15d, 0x4ff3, { 0x8a, 0x94, 0xf5, 0x0d, 0xfd, 0xfb, 0xe8, 0x9a } };
+        if (IsEqualGUID( iid, &IID_IButtonBaseStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IButtonBaseStatics_Calc ) ||
+            IsEqualGUID( iid, &IID_IToggleButtonStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IControlStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IRangeBaseStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IAutoSuggestBoxStatics_UWP ) ||
+            IsEqualGUID( iid, &IID_IToggleButtonFactory2_UWP )) /* ISelectorStatics {13300b06-...} */
+        {
+            *out = f && f->IDpStatics_iface.lpVtbl ? (void *)&f->IDpStatics_iface : (void *)&f->IStatics_iface;
+            return S_OK;
+        }
     }
 
     if (f == &auto_props_factory_obj ||
@@ -15196,6 +15196,18 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         *out = (void *)&f->IStatics_iface;
         return S_OK;
     }
+    {
+        static const GUID IID_IRangeBaseFactory_UWP =
+            { 0x389b7c71, 0x5220, 0x42b2, { 0x99, 0x92, 0x26, 0x90, 0xc1, 0xa6, 0x70, 0x30 } };
+        static const GUID IID_INotifyCollectionChangedEventArgsFactory_UWP =
+            { 0xb30c3e3a, 0xdf8d, 0x44a5, { 0x9a, 0x38, 0x7a, 0xc0, 0xd0, 0x8c, 0xe6, 0x3d } };
+        if (IsEqualGUID( iid, &IID_IRangeBaseFactory_UWP ) ||
+            IsEqualGUID( iid, &IID_INotifyCollectionChangedEventArgsFactory_UWP ))
+        {
+            *out = f ? (void *)&f->IComposableFactory_iface : (void *)iface;
+            return S_OK;
+        }
+    }
     if (IsEqualGUID( iid, &IID_IFrameFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IPageFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IUserControlFactory_UWP ) ||
@@ -15208,7 +15220,6 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
         IsEqualGUID( iid, &IID_IButtonFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IButtonBaseFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IToggleButtonFactory_UWP ) ||
-        IsEqualGUID( iid, &IID_IToggleButtonFactory2_UWP ) ||
         IsEqualGUID( iid, &IID_IPanelFactory_UWP ) ||
         IsEqualGUID( iid, &IID_IPanelFactory_UWP2 ) ||
         IsEqualGUID( iid, &IID_IGridFactory_UWP ) ||
@@ -15263,11 +15274,14 @@ static HRESULT WINAPI uwp_cf_QI( IActivationFactory *iface, REFIID iid, void **o
          wcsstr( f->class_name, L"Timer" ) ||
          wcsstr( f->class_name, L"Collection" )))
     {
+        WARN( "uwp_cf_QI(%s) unknown iid %s -> ComposableFactory fallback\n",
+              debugstr_w(f->class_name), debugstr_guid(iid) );
         *out = (void *)&f->IComposableFactory_iface;
         return S_OK;
     }
-    /* Unknown IID on factory: log so we can see exact Statics/Factory IID, return Statics/Composable */
-    TRACE( "uwp_cf_QI(%s) -> %s\n", f ? debugstr_w(f->class_name) : "?", debugstr_guid(iid) );
+    /* Unknown IID on factory: log so we can see exact Statics/Factory IID, return Statics */
+    WARN( "uwp_cf_QI(%s) unknown iid %s -> Statics fallback\n",
+          f ? debugstr_w(f->class_name) : "?", debugstr_guid(iid) );
     *out = f ? (void *)&f->IStatics_iface : (void *)iface;
     return S_OK;
 }
@@ -15310,14 +15324,7 @@ static HRESULT WINAPI uwp_cf_CreateInstance( void *iface, IInspectable *outer, I
         TRACE( "uwp_cf_CreateInstance(PropertyPath, path=%p, out=%p)\n", outer, inner );
         return uwp_element_create( cls, NULL, NULL, (void **)inner );
     }
-    /* If called as I*Statics::get_*Property(iface, IDependencyProperty **out),
-     * `outer` is the out-pointer (with *(void **)outer == NULL or on the stack). */
-    if (outer && (*(void **)outer == NULL ||
-                  (uintptr_t)outer - (uintptr_t)&f < 0x100000 ||
-                  (uintptr_t)outer - (uintptr_t)&f > ~(uintptr_t)0x100000))
-    {
-        return dependency_property_create( NULL, (IDependencyProperty **)outer );
-    }
+    if ((ULONG_PTR)outer < 0x10000) outer = NULL;
     TRACE( "uwp_cf_CreateInstance(%s, outer=%p, inner=%p, inst=%p)\n", debugstr_w(cls), outer, inner, instance );
     return uwp_element_create( cls, outer, inner, instance );
 }
@@ -15648,6 +15655,86 @@ static const void *th_statics_vtbl[16] =
 static struct uwp_class_factory th_factory_obj =
     { {(const struct IActivationFactoryVtbl *)th_statics_vtbl}, {(const struct IInspectableVtbl *)th_statics_vtbl}, {(const struct IInspectableVtbl *)th_statics_vtbl}, L"Windows.UI.Xaml.ThicknessHelper" };
 
+/*
+ * Static class -> factory map for the UWP/XAML activation factory.  The classes below
+ * resolve to a fixed singleton factory object; the lookup used to be a linear chain of
+ * wcscmp over every name, re-run on every activation.  A 32-bucket FNV-1a index over the
+ * same (name, factory) pairs turns that into a hash probe.  The index is built once
+ * (InitOnceExecuteOnce) from this table, then read-only, so it needs no lock after the
+ * first call.  Behavior is identical to the old chain: the first matching name wins, and
+ * each entry hands out exactly the factory object the old wcscmp branch returned.
+ */
+struct xaml_static_factory
+{
+    const WCHAR *name;
+    IActivationFactory *factory;
+};
+
+static const struct xaml_static_factory xaml_static_factories[] =
+{
+    { L"Windows.UI.Xaml.ThicknessHelper",                                (IActivationFactory *)&th_factory_obj.IActivationFactory_iface },
+    { L"Microsoft.UI.Xaml.ThicknessHelper",                              (IActivationFactory *)&th_factory_obj.IActivationFactory_iface },
+    { L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer",(IActivationFactory *)&feap_factory_obj.IActivationFactory_iface },
+    { L"Windows.UI.Xaml.Media.SolidColorBrush",                          (IActivationFactory *)&scb_factory_obj.IActivationFactory_iface },
+    { L"Windows.UI.Xaml.Markup.XamlBindingHelper",                       (IActivationFactory *)&xbh_factory_obj },
+    { L"Microsoft.UI.Xaml.Markup.XamlBindingHelper",                     (IActivationFactory *)&xbh_factory_obj },
+    { L"Windows.UI.Xaml.Markup.XamlReader",                              (IActivationFactory *)&xbh_factory_obj },
+    { L"Microsoft.UI.Xaml.Markup.XamlReader",                            (IActivationFactory *)&xbh_factory_obj },
+    { L"Windows.UI.Xaml.VisualStateManager",                             (IActivationFactory *)&vsm_factory_obj.IActivationFactory_iface },
+    { L"Microsoft.UI.Xaml.VisualStateManager",                           (IActivationFactory *)&vsm_factory_obj.IActivationFactory_iface },
+    { L"Windows.UI.Xaml.Media.VisualTreeHelper",                         (IActivationFactory *)&vth_factory_obj.IActivationFactory_iface },
+    { L"Microsoft.UI.Xaml.Media.VisualTreeHelper",                       (IActivationFactory *)&vth_factory_obj.IActivationFactory_iface },
+    { L"Windows.UI.Xaml.Automation.AutomationProperties",                (IActivationFactory *)&auto_props_factory_obj.IActivationFactory_iface },
+    { L"Windows.UI.Xaml.Controls.ToolTipService",                        (IActivationFactory *)&auto_props_factory_obj.IActivationFactory_iface },
+};
+
+#define XAML_FACTORY_HASH_SIZE 32   /* power of two, > 2x the entry count */
+static const struct xaml_static_factory *xaml_factory_hash[XAML_FACTORY_HASH_SIZE];
+static INIT_ONCE xaml_factory_hash_once = INIT_ONCE_STATIC_INIT;
+
+static UINT32 xaml_factory_hash_fnv( const WCHAR *name )
+{
+    UINT32 h = 2166136261u;   /* FNV-1a 32-bit offset basis */
+    for (; *name; name++)
+    {
+        h ^= (UINT32)*name;
+        h *= 16777619u;       /* FNV-1a prime */
+    }
+    return h;
+}
+
+static BOOL WINAPI init_xaml_factory_hash( INIT_ONCE *once, void *param, void **ctx )
+{
+    size_t i;
+    for (i = 0; i < ARRAY_SIZE( xaml_static_factories ); i++)
+    {
+        const struct xaml_static_factory *e = &xaml_static_factories[i];
+        UINT32 h = xaml_factory_hash_fnv( e->name ) & (XAML_FACTORY_HASH_SIZE - 1);
+        while (xaml_factory_hash[h])   /* linear probe; first insert wins */
+            h = (h + 1) & (XAML_FACTORY_HASH_SIZE - 1);
+        xaml_factory_hash[h] = e;
+    }
+    return TRUE;
+}
+
+/* O(1) probe of the built index.  Returns the singleton factory for a known static
+ * class name, NULL when the class is not in the table (the caller then falls through to
+ * the dynamic per-class-name factory). */
+static IActivationFactory *xaml_lookup_static_factory( const WCHAR *name )
+{
+    const struct xaml_static_factory *e;
+    UINT32 h;
+
+    InitOnceExecuteOnce( &xaml_factory_hash_once, init_xaml_factory_hash, NULL, NULL );
+    h = xaml_factory_hash_fnv( name ) & (XAML_FACTORY_HASH_SIZE - 1);
+    while ((e = xaml_factory_hash[h]))
+    {
+        if (!wcscmp( e->name, name )) return e->factory;
+        h = (h + 1) & (XAML_FACTORY_HASH_SIZE - 1);
+    }
+    return NULL;
+}
+
 HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory )
 {
     const WCHAR *buf = WindowsGetStringRawBuffer( classid, NULL );
@@ -15655,49 +15742,16 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
 
     if (!buf || !factory) return E_NOINTERFACE;
 
-    if (!wcscmp( buf, L"Windows.UI.Xaml.ThicknessHelper" ) ||
-        !wcscmp( buf, L"Microsoft.UI.Xaml.ThicknessHelper" ))
+    /* Fixed singleton factories resolved through the FNV-1a index (one hash probe) in
+     * place of the old linear wcscmp chain.  A miss falls through to the dynamic
+     * per-class-name factory below. */
     {
-        *factory = &th_factory_obj.IActivationFactory_iface;
-        return S_OK;
-    }
-
-    if (!wcscmp( buf, L"Windows.UI.Xaml.Automation.Peers.FrameworkElementAutomationPeer" ))
-    {
-        *factory = &feap_factory_obj.IActivationFactory_iface;
-        return S_OK;
-    }
-    if (!wcscmp( buf, L"Windows.UI.Xaml.Media.SolidColorBrush" ))
-    {
-        *factory = &scb_factory_obj.IActivationFactory_iface;
-        return S_OK;
-    }
-
-    if (!wcscmp( buf, L"Windows.UI.Xaml.Markup.XamlBindingHelper" ) ||
-        !wcscmp( buf, L"Microsoft.UI.Xaml.Markup.XamlBindingHelper" ) ||
-        !wcscmp( buf, L"Windows.UI.Xaml.Markup.XamlReader" ) ||
-        !wcscmp( buf, L"Microsoft.UI.Xaml.Markup.XamlReader" ))
-    {
-        *factory = (IActivationFactory *)&xbh_factory_obj;
-        return S_OK;
-    }
-    if (!wcscmp( buf, L"Windows.UI.Xaml.VisualStateManager" ) ||
-        !wcscmp( buf, L"Microsoft.UI.Xaml.VisualStateManager" ))
-    {
-        *factory = &vsm_factory_obj.IActivationFactory_iface;
-        return S_OK;
-    }
-    if (!wcscmp( buf, L"Windows.UI.Xaml.Media.VisualTreeHelper" ) ||
-        !wcscmp( buf, L"Microsoft.UI.Xaml.Media.VisualTreeHelper" ))
-    {
-        *factory = &vth_factory_obj.IActivationFactory_iface;
-        return S_OK;
-    }
-    if (!wcscmp( buf, L"Windows.UI.Xaml.Automation.AutomationProperties" ) ||
-        !wcscmp( buf, L"Windows.UI.Xaml.Controls.ToolTipService" ))
-    {
-        *factory = &auto_props_factory_obj.IActivationFactory_iface;
-        return S_OK;
+        IActivationFactory *sf = xaml_lookup_static_factory( buf );
+        if (sf)
+        {
+            *factory = sf;
+            return S_OK;
+        }
     }
 
     /* For UWP apps (Calculator, Store), serve all Windows.UI.Xaml.* and Microsoft.UI.Xaml.* runtime classes with our UWP multi-iface element factory;
@@ -15743,6 +15797,7 @@ HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factor
             g_dyn_factories[idx].IActivationFactory_iface.lpVtbl = (const struct IActivationFactoryVtbl *)uwp_cf_act_vtbl;
             g_dyn_factories[idx].IComposableFactory_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_comp_vtbl;
             g_dyn_factories[idx].IStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_cf_statics_vtbl;
+            g_dyn_factories[idx].IDpStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dp_statics_vtbl;
             g_dyn_factories[idx].IDpStatics_iface.lpVtbl = (const struct IInspectableVtbl *)uwp_dp_statics_vtbl;
             g_dyn_factories[idx].class_name = g_dyn_factory_names[idx];
             *factory = &g_dyn_factories[idx].IActivationFactory_iface;
