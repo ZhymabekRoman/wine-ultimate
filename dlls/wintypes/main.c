@@ -2276,37 +2276,349 @@ static const void *async_causality_tracer_factory_vtbl[] =
 static struct { const void **vtbl; } async_causality_tracer_factory_obj = { async_causality_tracer_factory_vtbl };
 
 /* Windows.Foundation.Diagnostics.LoggingChannelOptions */
+static const GUID IID_ILoggingChannelOptionsFactory =
+    { 0xa93151da, 0x7faf, 0x4191, { 0x87, 0x55, 0x5e, 0x86, 0xdc, 0x65, 0xd8, 0x96 } };
+static const GUID IID_ILoggingChannelOptions =
+    { 0xe6f4e768, 0xd38b, 0x4013, { 0x96, 0x5e, 0x8b, 0x53, 0xe9, 0xe2, 0x9a, 0x3f } };
+
+static HRESULT WINAPI logging_channel_options_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_ILoggingChannelOptions ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    FIXME( "logging_channel_options: unknown iid %s\n", debugstr_guid(iid) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI logging_channel_options_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Diagnostics.LoggingChannelOptions", 52, name );
+}
+
 static HRESULT WINAPI logging_channel_options_stub_ok( void *iface, ... ) { return S_OK; }
 static const void *logging_channel_options_vtbl[] =
 {
-    async_causality_tracer_QueryInterface,
+    logging_channel_options_QueryInterface,
     async_causality_tracer_AddRef,
     async_causality_tracer_Release,
     async_causality_tracer_GetIids,
-    async_causality_tracer_GetRuntimeClassName,
+    logging_channel_options_GetRuntimeClassName,
     async_causality_tracer_GetTrustLevel,
     logging_channel_options_stub_ok, logging_channel_options_stub_ok,
     logging_channel_options_stub_ok, logging_channel_options_stub_ok,
 };
 static struct { const void **vtbl; } logging_channel_options_obj = { logging_channel_options_vtbl };
 
+struct logging_channel_options_factory
+{
+    const void **vtbl_factory;
+    const void **vtbl_options_factory;
+};
+static struct logging_channel_options_factory logging_channel_options_factory_obj;
+
+static HRESULT WINAPI logging_channel_options_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &logging_channel_options_factory_obj.vtbl_factory;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ILoggingChannelOptionsFactory ))
+    {
+        *out = &logging_channel_options_factory_obj.vtbl_options_factory;
+        return S_OK;
+    }
+    FIXME( "logging_channel_options_factory: unknown iid %s\n", debugstr_guid(iid) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
 static HRESULT WINAPI logging_channel_options_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
 {
-    if (instance) *instance = (IInspectable *)&logging_channel_options_obj;
+    if (!instance) return E_POINTER;
+    *instance = (IInspectable *)&logging_channel_options_obj;
     return S_OK;
 }
+
+static HRESULT WINAPI logging_channel_options_factory_CreateWithGroup( void *iface, GUID group, IInspectable **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = (IInspectable *)&logging_channel_options_obj;
+    return S_OK;
+}
+
 static const void *logging_channel_options_factory_vtbl[] =
 {
-    async_causality_tracer_QueryInterface,
+    logging_channel_options_factory_QueryInterface,
     async_causality_tracer_AddRef,
     async_causality_tracer_Release,
     async_causality_tracer_GetIids,
-    async_causality_tracer_GetRuntimeClassName,
+    logging_channel_options_GetRuntimeClassName,
     async_causality_tracer_GetTrustLevel,
     logging_channel_options_factory_ActivateInstance,
-    logging_channel_options_factory_ActivateInstance,
 };
-static struct { const void **vtbl; } logging_channel_options_factory_obj = { logging_channel_options_factory_vtbl };
+static const void *logging_channel_options_options_factory_vtbl[] =
+{
+    logging_channel_options_factory_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    logging_channel_options_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    logging_channel_options_factory_CreateWithGroup,
+};
+static struct logging_channel_options_factory logging_channel_options_factory_obj =
+{
+    logging_channel_options_factory_vtbl,
+    logging_channel_options_options_factory_vtbl,
+};
+
+/* Windows.Foundation.Diagnostics.LoggingChannel */
+static const GUID IID_ILoggingChannelFactory2 =
+    { 0x4c6ef5dd, 0x3b27, 0x4dc9, { 0x99, 0xf0, 0x29, 0x9c, 0x6e, 0x46, 0x03, 0xa1 } };
+static const GUID IID_ILoggingTarget =
+    { 0xe9a50343, 0x11d7, 0x4f01, { 0xb5, 0xca, 0xcf, 0x49, 0x52, 0x78, 0xc0, 0xa8 } };
+
+static HRESULT WINAPI logging_channel_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IClosable ) ||
+        IsEqualGUID( iid, &IID_ILoggingTarget ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    FIXME( "logging_channel: unknown iid %s\n", debugstr_guid(iid) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI logging_channel_GetRuntimeClassName( IInspectable *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.Diagnostics.LoggingChannel", 45, name );
+}
+
+static HRESULT WINAPI logging_channel_stub_ok( void *iface, ... ) { return S_OK; }
+static const void *logging_channel_vtbl[] =
+{
+    logging_channel_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    logging_channel_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+    logging_channel_stub_ok, logging_channel_stub_ok,
+};
+static struct { const void **vtbl; } logging_channel_obj = { logging_channel_vtbl };
+
+struct logging_channel_factory
+{
+    const void **vtbl_factory;
+    const void **vtbl_factory2;
+};
+static struct logging_channel_factory logging_channel_factory_obj;
+
+static HRESULT WINAPI logging_channel_factory_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &logging_channel_factory_obj.vtbl_factory;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_ILoggingChannelFactory2 ))
+    {
+        *out = &logging_channel_factory_obj.vtbl_factory2;
+        return S_OK;
+    }
+    FIXME( "logging_channel_factory: unknown iid %s\n", debugstr_guid(iid) );
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI logging_channel_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = (IInspectable *)&logging_channel_obj;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_channel_factory2_CreateWithOptions( void *iface, HSTRING name, void *options, IInspectable **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = (IInspectable *)&logging_channel_obj;
+    return S_OK;
+}
+
+static HRESULT WINAPI logging_channel_factory2_CreateWithOptionsAndId( void *iface, HSTRING name, void *options, GUID id, IInspectable **instance )
+{
+    if (!instance) return E_POINTER;
+    *instance = (IInspectable *)&logging_channel_obj;
+    return S_OK;
+}
+
+static const void *logging_channel_factory_vtbl[] =
+{
+    logging_channel_factory_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    logging_channel_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    logging_channel_factory_ActivateInstance,
+};
+static const void *logging_channel_factory2_vtbl[] =
+{
+    logging_channel_factory_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    logging_channel_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    logging_channel_factory2_CreateWithOptions,
+    logging_channel_factory2_CreateWithOptionsAndId,
+};
+static struct logging_channel_factory logging_channel_factory_obj =
+{
+    logging_channel_factory_vtbl,
+    logging_channel_factory2_vtbl,
+};
+
+/* Windows.Foundation.GuidHelper (IGuidHelperStatics {59c7966b-ae52-5283-ad7f-a1b9e9678add}) */
+static const GUID IID_IGuidHelperStatics =
+    { 0x59c7966b, 0xae52, 0x5283, { 0xad, 0x7f, 0xa1, 0xb9, 0xe9, 0x67, 0x8a, 0xdd } };
+
+struct guid_helper_factory
+{
+    const void **vtbl_factory;
+    const void **vtbl_statics;
+};
+static struct guid_helper_factory guid_helper_factory_obj;
+
+static HRESULT WINAPI guid_helper_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IActivationFactory ))
+    {
+        *out = &guid_helper_factory_obj.vtbl_factory;
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IGuidHelperStatics ))
+    {
+        *out = &guid_helper_factory_obj.vtbl_statics;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI guid_helper_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{
+    return WindowsCreateString( L"Windows.Foundation.GuidHelper", 29, name );
+}
+
+static HRESULT WINAPI guid_helper_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    if (instance) *instance = NULL;
+    return E_NOTIMPL;
+}
+
+static HRESULT WINAPI guid_helper_CreateNewGuid( void *iface, GUID *value )
+{
+    static LONG seq;
+    FILETIME ft = { 0 };
+    LARGE_INTEGER qpc = { 0 };
+    ULONG s;
+
+    if (!value) return E_POINTER;
+    GetSystemTimeAsFileTime( &ft );
+    QueryPerformanceCounter( &qpc );
+    s = (ULONG)InterlockedIncrement( &seq );
+    value->Data1 = ft.dwLowDateTime ^ (ULONG)qpc.LowPart ^ (s * 0x9e3779b9u);
+    value->Data2 = (USHORT)(ft.dwHighDateTime ^ (qpc.HighPart & 0xffff));
+    value->Data3 = (USHORT)(((qpc.LowPart >> 16) & 0x0fff) | 0x4000);
+    value->Data4[0] = (BYTE)(((s >> 8) & 0x3f) | 0x80);
+    value->Data4[1] = (BYTE)(s & 0xff);
+    value->Data4[2] = (BYTE)(GetCurrentProcessId() & 0xff);
+    value->Data4[3] = (BYTE)((GetCurrentProcessId() >> 8) & 0xff);
+    value->Data4[4] = (BYTE)(GetCurrentThreadId() & 0xff);
+    value->Data4[5] = (BYTE)((GetCurrentThreadId() >> 8) & 0xff);
+    value->Data4[6] = (BYTE)((ft.dwLowDateTime >> 8) & 0xff);
+    value->Data4[7] = (BYTE)((qpc.LowPart >> 24) ^ (s & 0xff));
+    return S_OK;
+}
+
+static HRESULT WINAPI guid_helper_get_Empty( void *iface, GUID *value )
+{
+    if (!value) return E_POINTER;
+    memset( value, 0, sizeof(*value) );
+    return S_OK;
+}
+
+static HRESULT WINAPI guid_helper_Equals( void *iface, const GUID *target, const GUID *value, BYTE *result )
+{
+    if (!target || !value || !result) return E_POINTER;
+    *result = IsEqualGUID( target, value ) ? 1 : 0;
+    return S_OK;
+}
+
+static const void *guid_helper_factory_vtbl[] =
+{
+    guid_helper_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    guid_helper_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    guid_helper_ActivateInstance,
+};
+
+static const void *guid_helper_statics_vtbl[] =
+{
+    guid_helper_QueryInterface,
+    async_causality_tracer_AddRef,
+    async_causality_tracer_Release,
+    async_causality_tracer_GetIids,
+    guid_helper_GetRuntimeClassName,
+    async_causality_tracer_GetTrustLevel,
+    guid_helper_CreateNewGuid,
+    guid_helper_get_Empty,
+    guid_helper_Equals,
+};
+
+static struct guid_helper_factory guid_helper_factory_obj =
+{
+    guid_helper_factory_vtbl,
+    guid_helper_statics_vtbl,
+};
 
 HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **factory)
 {
@@ -2335,6 +2647,10 @@ HRESULT WINAPI DllGetActivationFactory(HSTRING classid, IActivationFactory **fac
         *factory = (IActivationFactory *)&async_causality_tracer_factory_obj;
     if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.LoggingChannelOptions"))
         *factory = (IActivationFactory *)&logging_channel_options_factory_obj;
+    if (!wcscmp(buffer, L"Windows.Foundation.Diagnostics.LoggingChannel"))
+        *factory = (IActivationFactory *)&logging_channel_factory_obj;
+    if (!wcscmp(buffer, L"Windows.Foundation.GuidHelper"))
+        *factory = (IActivationFactory *)&guid_helper_factory_obj.vtbl_factory;
 
     if (*factory) return S_OK;
     return E_NOINTERFACE;
@@ -2347,17 +2663,491 @@ HRESULT WINAPI RoIsApiContractMajorVersionPresent(const WCHAR *name, UINT16 majo
     return S_OK;
 }
 
+/*
+ * Global WinRT Type-Metadata Reflection Cache
+ *
+ * O(1) FNV-1a hash table mapping WinRT type names and namespaces to their
+ * resolved metadata descriptor { package_path, winmd_file, type_id, ns },
+ * protected by RTL_SRWLOCK (shared read for lookups, exclusive write on miss).
+ * Core WinRT namespaces and common types are pre-seeded on first use so
+ * RoResolveNamespace and RoGetMetaDataFile avoid repetitive filesystem /
+ * wineserver RPCs.
+ */
+#define METADATA_CACHE_SIZE 1024
+
+struct metadata_cache_entry
+{
+    struct metadata_cache_entry *next;
+    WCHAR *full_name;       /* owned key: namespace or full type name */
+    WCHAR *ns_buf;          /* owned namespace string */
+    HSTRING package_path;   /* directory containing the .winmd */
+    HSTRING winmd_file;     /* full path to .winmd file */
+    UINT32 type_id;         /* mdTypeDef token (0x02000001+) or 0 for namespace */
+};
+
+static RTL_SRWLOCK metadata_cache_lock = RTL_SRWLOCK_INIT;
+static INIT_ONCE metadata_cache_once = INIT_ONCE_STATIC_INIT;
+static struct metadata_cache_entry *metadata_cache[METADATA_CACHE_SIZE];
+static HSTRING default_metadata_dir;
+
+static UINT32 metadata_cache_hash( const WCHAR *str )
+{
+    UINT32 h = 2166136261u;
+    for (; *str; str++)
+    {
+        h ^= (UINT32)*str;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void metadata_cache_insert_locked( const WCHAR *full_name, const WCHAR *ns,
+                                          HSTRING pkg_path, HSTRING winmd_file, UINT32 type_id )
+{
+    UINT32 bucket = metadata_cache_hash( full_name ) & (METADATA_CACHE_SIZE - 1);
+    struct metadata_cache_entry *entry;
+
+    for (entry = metadata_cache[bucket]; entry; entry = entry->next)
+    {
+        if (!wcscmp( entry->full_name, full_name ))
+        {
+            if (type_id && !entry->type_id) entry->type_id = type_id;
+            return;
+        }
+    }
+
+    entry = calloc( 1, sizeof(*entry) );
+    if (!entry) return;
+    entry->full_name = wcsdup( full_name );
+    entry->ns_buf = wcsdup( ns );
+    if (!entry->full_name || !entry->ns_buf)
+    {
+        free( entry->full_name );
+        free( entry->ns_buf );
+        free( entry );
+        return;
+    }
+    if (pkg_path) WindowsDuplicateString( pkg_path, &entry->package_path );
+    if (winmd_file) WindowsDuplicateString( winmd_file, &entry->winmd_file );
+    entry->type_id = type_id;
+    entry->next = metadata_cache[bucket];
+    metadata_cache[bucket] = entry;
+}
+
+static void metadata_cache_seed_entry( const WCHAR *full_name, const WCHAR *ns,
+                                       const WCHAR *base_dir, const WCHAR *winmd_name, UINT32 type_id )
+{
+    WCHAR full_path[MAX_PATH];
+    HSTRING h_winmd = NULL;
+
+    swprintf( full_path, ARRAY_SIZE(full_path), L"%s\\%s", base_dir, winmd_name );
+    if (SUCCEEDED(WindowsCreateString( full_path, wcslen( full_path ), &h_winmd )))
+    {
+        metadata_cache_insert_locked( full_name, ns, default_metadata_dir, h_winmd, type_id );
+        WindowsDeleteString( h_winmd );
+    }
+}
+
+static BOOL WINAPI init_metadata_cache( INIT_ONCE *once, void *param, void **ctx )
+{
+    static const struct
+    {
+        const WCHAR *ns;
+        const WCHAR *winmd;
+    } core_namespaces[] =
+    {
+        { L"Windows.Foundation",                              L"windows.foundation.winmd" },
+        { L"Windows.Foundation.Collections",                  L"windows.foundation.winmd" },
+        { L"Windows.Foundation.Metadata",                     L"windows.foundation.winmd" },
+        { L"Windows.Foundation.Diagnostics",                  L"windows.foundation.winmd" },
+        { L"Windows.Foundation.Numerics",                     L"windows.foundation.winmd" },
+        { L"Windows.UI",                                      L"windows.ui.winmd" },
+        { L"Windows.UI.Core",                                 L"windows.ui.winmd" },
+        { L"Windows.UI.ViewManagement",                       L"windows.ui.winmd" },
+        { L"Windows.UI.Composition",                          L"windows.ui.winmd" },
+        { L"Windows.UI.Input",                                L"windows.ui.winmd" },
+        { L"Windows.UI.Notifications",                        L"windows.ui.winmd" },
+        { L"Windows.UI.Popups",                               L"windows.ui.winmd" },
+        { L"Windows.UI.Text",                                 L"windows.ui.winmd" },
+        { L"Windows.UI.Xaml",                                 L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Automation",                      L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Controls",                        L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Controls.Primitives",             L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Data",                            L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Documents",                       L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Input",                           L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Interop",                         L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Markup",                          L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Media",                           L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Media.Animation",                 L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Media.Imaging",                   L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Navigation",                      L"windows.ui.xaml.winmd" },
+        { L"Windows.UI.Xaml.Shapes",                          L"windows.ui.xaml.winmd" },
+        { L"Windows.Storage",                                 L"windows.storage.winmd" },
+        { L"Windows.Storage.Streams",                         L"windows.storage.winmd" },
+        { L"Windows.Storage.Pickers",                         L"windows.storage.winmd" },
+        { L"Windows.Storage.FileProperties",                  L"windows.storage.winmd" },
+        { L"Windows.ApplicationModel",                        L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.Activation",             L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.AppExtensions",          L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.Background",             L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.Calls",                  L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.Core",                   L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.DataTransfer",           L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.Resources",              L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.Resources.Core",         L"windows.applicationmodel.winmd" },
+        { L"Windows.ApplicationModel.Store",                  L"windows.applicationmodel.winmd" },
+        { L"Windows.Networking",                              L"windows.networking.winmd" },
+        { L"Windows.Networking.Connectivity",                 L"windows.networking.winmd" },
+        { L"Windows.Networking.PushNotifications",            L"windows.networking.winmd" },
+        { L"Windows.Networking.Sockets",                      L"windows.networking.winmd" },
+        { L"Windows.System",                                  L"windows.system.winmd" },
+        { L"Windows.System.Profile",                          L"windows.system.winmd" },
+        { L"Windows.System.Threading",                        L"windows.system.winmd" },
+        { L"Windows.System.UserProfile",                      L"windows.system.winmd" },
+        { L"Windows.Graphics",                                L"windows.graphics.winmd" },
+        { L"Windows.Graphics.Display",                        L"windows.graphics.winmd" },
+        { L"Windows.Graphics.Imaging",                        L"windows.graphics.winmd" },
+        { L"Windows.Graphics.Printing",                       L"windows.graphics.winmd" },
+        { L"Windows.Data",                                    L"windows.data.winmd" },
+        { L"Windows.Data.Json",                               L"windows.data.winmd" },
+        { L"Windows.Data.Xml",                                L"windows.data.winmd" },
+        { L"Windows.Data.Xml.Dom",                            L"windows.data.winmd" },
+        { L"Windows.Media",                                   L"windows.media.winmd" },
+        { L"Windows.Media.Capture",                           L"windows.media.winmd" },
+        { L"Windows.Media.Editing",                           L"windows.media.winmd" },
+        { L"Windows.Media.Playback",                          L"windows.media.winmd" },
+        { L"Windows.Media.Transcoding",                       L"windows.media.winmd" },
+        { L"Windows.Security",                                L"windows.security.winmd" },
+        { L"Windows.Security.Authentication.Web.Core",        L"windows.security.winmd" },
+        { L"Windows.Security.Credentials",                    L"windows.security.winmd" },
+        { L"Windows.Security.Cryptography",                   L"windows.security.winmd" },
+        { L"Windows.Devices",                                 L"windows.devices.winmd" },
+        { L"Windows.Devices.Enumeration",                     L"windows.devices.winmd" },
+        { L"Windows.Devices.Geolocation",                     L"windows.devices.winmd" },
+        { L"Windows.Devices.Input",                           L"windows.devices.winmd" },
+        { L"Windows.Web",                                     L"windows.web.winmd" },
+        { L"Windows.Web.Http",                                L"windows.web.winmd" },
+        { L"Microsoft.UI",                                    L"microsoft.ui.winmd" },
+        { L"Microsoft.UI.Composition",                        L"microsoft.ui.winmd" },
+        { L"Microsoft.UI.Content",                            L"microsoft.ui.winmd" },
+        { L"Microsoft.UI.Dispatching",                        L"microsoft.ui.winmd" },
+        { L"Microsoft.UI.Windowing",                          L"microsoft.ui.winmd" },
+        { L"Microsoft.UI.Xaml",                               L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.UI.Xaml.Controls",                      L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.UI.Xaml.Controls.Primitives",           L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.UI.Xaml.Data",                          L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.UI.Xaml.Input",                         L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.UI.Xaml.Markup",                        L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.UI.Xaml.Media",                         L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.UI.Xaml.Shapes",                        L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.UI.Xaml.XamlTypeInfo",                  L"microsoft.ui.xaml.winmd" },
+        { L"Microsoft.Windows.ApplicationModel.Resources",    L"microsoft.windows.winmd" },
+        { L"Microsoft.Windows.AppLifecycle",                  L"microsoft.windows.winmd" },
+        { L"Microsoft.Windows.AppNotifications",              L"microsoft.windows.winmd" },
+        { L"Microsoft.Windows.Management.Deployment",         L"microsoft.windows.winmd" },
+        { L"Microsoft.Windows.PushNotifications",             L"microsoft.windows.winmd" },
+        { L"Microsoft.Windows.System",                        L"microsoft.windows.winmd" },
+    };
+    static const struct
+    {
+        const WCHAR *type_name;
+        const WCHAR *ns;
+        const WCHAR *winmd;
+        UINT32 type_id;
+    } core_types[] =
+    {
+        { L"Windows.Foundation.Uri",                          L"Windows.Foundation",             L"windows.foundation.winmd",       0x02000001 },
+        { L"Windows.Foundation.PropertyValue",                L"Windows.Foundation",             L"windows.foundation.winmd",       0x02000002 },
+        { L"Windows.Foundation.Collections.PropertySet",      L"Windows.Foundation.Collections", L"windows.foundation.winmd",       0x02000003 },
+        { L"Windows.Storage.StorageFile",                     L"Windows.Storage",                L"windows.storage.winmd",          0x02000004 },
+        { L"Windows.Storage.StorageFolder",                   L"Windows.Storage",                L"windows.storage.winmd",          0x02000005 },
+        { L"Windows.Storage.ApplicationData",                 L"Windows.Storage",                L"windows.storage.winmd",          0x02000006 },
+        { L"Windows.ApplicationModel.Package",                L"Windows.ApplicationModel",       L"windows.applicationmodel.winmd", 0x02000007 },
+        { L"Windows.UI.Xaml.Application",                     L"Windows.UI.Xaml",                L"windows.ui.xaml.winmd",          0x02000008 },
+        { L"Windows.UI.Xaml.Window",                          L"Windows.UI.Xaml",                L"windows.ui.xaml.winmd",          0x02000009 },
+        { L"Windows.UI.Xaml.DependencyObject",                L"Windows.UI.Xaml",                L"windows.ui.xaml.winmd",          0x0200000a },
+        { L"Windows.UI.Xaml.UIElement",                       L"Windows.UI.Xaml",                L"windows.ui.xaml.winmd",          0x0200000b },
+        { L"Windows.UI.Xaml.FrameworkElement",                L"Windows.UI.Xaml",                L"windows.ui.xaml.winmd",          0x0200000c },
+        { L"Windows.UI.Xaml.Controls.Grid",                   L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x0200000d },
+        { L"Windows.UI.Xaml.Controls.StackPanel",             L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x0200000e },
+        { L"Windows.UI.Xaml.Controls.TextBlock",              L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x0200000f },
+        { L"Windows.UI.Xaml.Controls.Button",                 L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000010 },
+        { L"Windows.UI.Xaml.Controls.Page",                   L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000011 },
+        { L"Windows.UI.Xaml.Controls.Frame",                  L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000012 },
+        { L"Windows.UI.Xaml.Controls.Border",                 L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000013 },
+        { L"Windows.UI.Xaml.Controls.ContentControl",         L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000014 },
+        { L"Windows.UI.Xaml.Controls.UserControl",            L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000015 },
+        { L"Windows.UI.Xaml.Controls.Image",                  L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000016 },
+        { L"Windows.UI.Xaml.Controls.ListView",               L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000017 },
+        { L"Windows.UI.Xaml.Controls.ScrollViewer",           L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000018 },
+        { L"Windows.UI.Xaml.Controls.SwapChainPanel",         L"Windows.UI.Xaml.Controls",       L"windows.ui.xaml.winmd",          0x02000019 },
+        { L"Microsoft.UI.Xaml.Application",                   L"Microsoft.UI.Xaml",              L"microsoft.ui.xaml.winmd",        0x0200001a },
+        { L"Microsoft.UI.Xaml.Window",                        L"Microsoft.UI.Xaml",              L"microsoft.ui.xaml.winmd",        0x0200001b },
+        { L"Microsoft.UI.Xaml.Controls.Grid",                 L"Microsoft.UI.Xaml.Controls",     L"microsoft.ui.xaml.winmd",        0x0200001c },
+        { L"Microsoft.UI.Xaml.Controls.WebView2",             L"Microsoft.UI.Xaml.Controls",     L"microsoft.ui.xaml.winmd",        0x0200001d },
+        { L"Microsoft.UI.Xaml.Controls.SwapChainPanel",       L"Microsoft.UI.Xaml.Controls",     L"microsoft.ui.xaml.winmd",        0x0200001e },
+    };
+
+    WCHAR sysdir[MAX_PATH], meta_dir[MAX_PATH];
+    BOOL wow64 = FALSE;
+    size_t i;
+
+    IsWow64Process( GetCurrentProcess(), &wow64 );
+    if (wow64)
+    {
+        GetWindowsDirectoryW( sysdir, ARRAY_SIZE(sysdir) );
+        swprintf( meta_dir, ARRAY_SIZE(meta_dir), L"%s\\sysnative\\winmetadata", sysdir );
+    }
+    else
+    {
+        GetSystemDirectoryW( sysdir, ARRAY_SIZE(sysdir) );
+        swprintf( meta_dir, ARRAY_SIZE(meta_dir), L"%s\\winmetadata", sysdir );
+    }
+    WindowsCreateString( meta_dir, wcslen( meta_dir ), &default_metadata_dir );
+
+    RtlAcquireSRWLockExclusive( &metadata_cache_lock );
+    for (i = 0; i < ARRAY_SIZE(core_namespaces); i++)
+        metadata_cache_seed_entry( core_namespaces[i].ns, core_namespaces[i].ns,
+                                   meta_dir, core_namespaces[i].winmd, 0 );
+    for (i = 0; i < ARRAY_SIZE(core_types); i++)
+        metadata_cache_seed_entry( core_types[i].type_name, core_types[i].ns,
+                                   meta_dir, core_types[i].winmd, core_types[i].type_id );
+    RtlReleaseSRWLockExclusive( &metadata_cache_lock );
+    return TRUE;
+}
+
+static BOOL metadata_cache_lookup( const WCHAR *name, HSTRING *winmd_file, UINT32 *type_id )
+{
+    struct metadata_cache_entry *entry;
+    WCHAR parent[256];
+    WCHAR *dot;
+    BOOL found = FALSE;
+
+    InitOnceExecuteOnce( &metadata_cache_once, init_metadata_cache, NULL, NULL );
+
+    RtlAcquireSRWLockShared( &metadata_cache_lock );
+    for (entry = metadata_cache[metadata_cache_hash( name ) & (METADATA_CACHE_SIZE - 1)];
+         entry; entry = entry->next)
+    {
+        if (!wcscmp( entry->full_name, name ))
+        {
+            if (winmd_file && entry->winmd_file)
+                WindowsDuplicateString( entry->winmd_file, winmd_file );
+            if (type_id)
+                *type_id = entry->type_id;
+            RtlReleaseSRWLockShared( &metadata_cache_lock );
+            return TRUE;
+        }
+    }
+    RtlReleaseSRWLockShared( &metadata_cache_lock );
+
+    /* Check parent namespaces in cache and memoize on hit */
+    lstrcpynW( parent, name, ARRAY_SIZE(parent) );
+    while ((dot = wcsrchr( parent, '.' )) != NULL)
+    {
+        *dot = 0;
+        RtlAcquireSRWLockShared( &metadata_cache_lock );
+        for (entry = metadata_cache[metadata_cache_hash( parent ) & (METADATA_CACHE_SIZE - 1)];
+             entry; entry = entry->next)
+        {
+            if (!wcscmp( entry->full_name, parent ))
+            {
+                HSTRING cached_pkg = NULL, cached_winmd = NULL;
+                if (entry->package_path) WindowsDuplicateString( entry->package_path, &cached_pkg );
+                if (entry->winmd_file) WindowsDuplicateString( entry->winmd_file, &cached_winmd );
+                RtlReleaseSRWLockShared( &metadata_cache_lock );
+
+                RtlAcquireSRWLockExclusive( &metadata_cache_lock );
+                metadata_cache_insert_locked( name, parent, cached_pkg, cached_winmd, 0 );
+                RtlReleaseSRWLockExclusive( &metadata_cache_lock );
+
+                if (winmd_file) *winmd_file = cached_winmd;
+                else if (cached_winmd) WindowsDeleteString( cached_winmd );
+                if (cached_pkg) WindowsDeleteString( cached_pkg );
+                if (type_id) *type_id = 0;
+                found = TRUE;
+                break;
+            }
+        }
+        if (found) return TRUE;
+        RtlReleaseSRWLockShared( &metadata_cache_lock );
+    }
+
+    return FALSE;
+}
+
+static BOOL probe_winmd_dir( const WCHAR *dir, const WCHAR *name, HSTRING *out_path )
+{
+    WCHAR candidate[MAX_PATH];
+    WCHAR prefix[256];
+    WCHAR *dot;
+
+    if (!dir || !dir[0] || !name || !name[0]) return FALSE;
+    lstrcpynW( prefix, name, ARRAY_SIZE(prefix) );
+
+    while (prefix[0])
+    {
+        swprintf( candidate, ARRAY_SIZE(candidate), L"%s\\%s.winmd", dir, prefix );
+        if (GetFileAttributesW( candidate ) != INVALID_FILE_ATTRIBUTES)
+        {
+            HSTRING h_dir = NULL, h_winmd = NULL;
+            if (SUCCEEDED(WindowsCreateString( candidate, wcslen( candidate ), &h_winmd )))
+            {
+                WindowsCreateString( dir, wcslen( dir ), &h_dir );
+                RtlAcquireSRWLockExclusive( &metadata_cache_lock );
+                metadata_cache_insert_locked( name, prefix, h_dir, h_winmd, 0 );
+                RtlReleaseSRWLockExclusive( &metadata_cache_lock );
+                if (h_dir) WindowsDeleteString( h_dir );
+                *out_path = h_winmd;
+                return TRUE;
+            }
+        }
+        dot = wcsrchr( prefix, '.' );
+        if (!dot) break;
+        *dot = 0;
+    }
+    return FALSE;
+}
+
 HRESULT WINAPI RoResolveNamespace(HSTRING name, HSTRING windowsMetaDataDir,
                                   DWORD packageGraphDirsCount, const HSTRING *packageGraphDirs,
                                   DWORD *metaDataFilePathsCount, HSTRING **metaDataFilePaths,
                                   DWORD *subNamespacesCount, HSTRING **subNamespaces)
 {
-    FIXME("name %s, windowsMetaDataDir %s, metaDataFilePaths %p, subNamespaces %p stub!\n",
-            debugstr_hstring(name), debugstr_hstring(windowsMetaDataDir),
-            metaDataFilePaths, subNamespaces);
+    const WCHAR *raw_name, *raw_dir;
+    HSTRING found_winmd = NULL;
+    DWORD i;
 
-    if (!metaDataFilePaths && !subNamespaces)
+    TRACE("name %s, windowsMetaDataDir %s, metaDataFilePaths %p, subNamespaces %p\n",
+          debugstr_hstring(name), debugstr_hstring(windowsMetaDataDir),
+          metaDataFilePaths, subNamespaces);
+
+    if (!name || (!metaDataFilePaths && !subNamespaces))
         return E_INVALIDARG;
+
+    if (metaDataFilePathsCount) *metaDataFilePathsCount = 0;
+    if (metaDataFilePaths) *metaDataFilePaths = NULL;
+    if (subNamespacesCount) *subNamespacesCount = 0;
+    if (subNamespaces) *subNamespaces = NULL;
+
+    raw_name = WindowsGetStringRawBuffer( name, NULL );
+    if (!raw_name || !raw_name[0])
+        return E_INVALIDARG;
+
+    /* Fast path: O(1) lookup in the reflection cache when using default WinMetadata dir */
+    raw_dir = windowsMetaDataDir ? WindowsGetStringRawBuffer( windowsMetaDataDir, NULL ) : NULL;
+    if ((!raw_dir || !raw_dir[0]) && packageGraphDirsCount == 0)
+    {
+        if (metadata_cache_lookup( raw_name, &found_winmd, NULL ) && found_winmd)
+        {
+            if (metaDataFilePaths && metaDataFilePathsCount)
+            {
+                HSTRING *arr = CoTaskMemAlloc( sizeof(HSTRING) );
+                if (!arr)
+                {
+                    WindowsDeleteString( found_winmd );
+                    return E_OUTOFMEMORY;
+                }
+                arr[0] = found_winmd;
+                *metaDataFilePaths = arr;
+                *metaDataFilePathsCount = 1;
+            }
+            else WindowsDeleteString( found_winmd );
+            return S_OK;
+        }
+    }
+
+    /* Probe explicit windowsMetaDataDir or packageGraphDirs on disk (memoized on hit) */
+    if (raw_dir && raw_dir[0] && probe_winmd_dir( raw_dir, raw_name, &found_winmd ))
+    {
+        if (metaDataFilePaths && metaDataFilePathsCount)
+        {
+            HSTRING *arr = CoTaskMemAlloc( sizeof(HSTRING) );
+            if (!arr)
+            {
+                WindowsDeleteString( found_winmd );
+                return E_OUTOFMEMORY;
+            }
+            arr[0] = found_winmd;
+            *metaDataFilePaths = arr;
+            *metaDataFilePathsCount = 1;
+        }
+        else WindowsDeleteString( found_winmd );
+        return S_OK;
+    }
+
+    for (i = 0; i < packageGraphDirsCount; i++)
+    {
+        const WCHAR *pkg_dir = packageGraphDirs && packageGraphDirs[i]
+            ? WindowsGetStringRawBuffer( packageGraphDirs[i], NULL ) : NULL;
+        if (pkg_dir && pkg_dir[0] && probe_winmd_dir( pkg_dir, raw_name, &found_winmd ))
+        {
+            if (metaDataFilePaths && metaDataFilePathsCount)
+            {
+                HSTRING *arr = CoTaskMemAlloc( sizeof(HSTRING) );
+                if (!arr)
+                {
+                    WindowsDeleteString( found_winmd );
+                    return E_OUTOFMEMORY;
+                }
+                arr[0] = found_winmd;
+                *metaDataFilePaths = arr;
+                *metaDataFilePathsCount = 1;
+            }
+            else WindowsDeleteString( found_winmd );
+            return S_OK;
+        }
+    }
+
+    /* Fall back to seeded reflection cache even when custom dirs were provided */
+    if (metadata_cache_lookup( raw_name, &found_winmd, NULL ) && found_winmd)
+    {
+        if (metaDataFilePaths && metaDataFilePathsCount)
+        {
+            HSTRING *arr = CoTaskMemAlloc( sizeof(HSTRING) );
+            if (!arr)
+            {
+                WindowsDeleteString( found_winmd );
+                return E_OUTOFMEMORY;
+            }
+            arr[0] = found_winmd;
+            *metaDataFilePaths = arr;
+            *metaDataFilePathsCount = 1;
+        }
+        else WindowsDeleteString( found_winmd );
+        return S_OK;
+    }
+
+    return RO_E_METADATA_NAME_NOT_FOUND;
+}
+
+HRESULT WINAPI RoGetMetaDataFile(const HSTRING name, void *metaDataDispenser,
+                                 HSTRING *metaDataFilePath, void **metaDataImport,
+                                 UINT32 *typeDefToken)
+{
+    const WCHAR *raw_name;
+    HSTRING found_winmd = NULL;
+    UINT32 tid = 0;
+
+    TRACE("name %s, dispenser %p, metaDataFilePath %p, metaDataImport %p, typeDefToken %p\n",
+          debugstr_hstring(name), metaDataDispenser, metaDataFilePath, metaDataImport, typeDefToken);
+
+    if (metaDataFilePath) *metaDataFilePath = NULL;
+    if (metaDataImport) *metaDataImport = NULL;
+    if (typeDefToken) *typeDefToken = 0;
+
+    if (!name) return E_INVALIDARG;
+    raw_name = WindowsGetStringRawBuffer( name, NULL );
+    if (!raw_name || !raw_name[0]) return E_INVALIDARG;
+
+    if (metadata_cache_lookup( raw_name, &found_winmd, &tid ) && found_winmd)
+    {
+        if (metaDataFilePath) *metaDataFilePath = found_winmd;
+        else WindowsDeleteString( found_winmd );
+        if (typeDefToken) *typeDefToken = tid ? tid : 0x02000001;
+        return S_OK;
+    }
 
     return RO_E_METADATA_NAME_NOT_FOUND;
 }

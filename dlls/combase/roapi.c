@@ -128,6 +128,158 @@ static HRESULT seed_dllpath_from_classid( const WCHAR *classid, WCHAR **out )
 }
 
 /*
+ * O(1) FNV-1a cache for get_library_for_classid, protected by RTL_SRWLOCK
+ * (shared read on lookup, exclusive write on miss).  Pre-seeded with the
+ * exact-match static WinRT/WinUI3 class routes so hot activation/metadata
+ * lookups avoid linear wcscmp chains, HKCU/HKLM registry opens, and
+ * side-by-side LoadLibraryW probes.
+ */
+#define CLASS_LIB_CACHE_SIZE 512
+
+struct class_lib_entry
+{
+    struct class_lib_entry *next;
+    WCHAR *classid;
+    WCHAR *library;   /* NULL when server class or negative cache */
+    HRESULT hr;
+};
+
+static RTL_SRWLOCK class_lib_cache_lock = RTL_SRWLOCK_INIT;
+static INIT_ONCE class_lib_cache_once = INIT_ONCE_STATIC_INIT;
+static struct class_lib_entry *class_lib_cache[CLASS_LIB_CACHE_SIZE];
+
+static UINT32 class_lib_hash( const WCHAR *s )
+{
+    UINT32 h = 2166136261u;
+    for (; *s; s++)
+    {
+        h ^= (UINT32)*s;
+        h *= 16777619u;
+    }
+    return h;
+}
+
+static void class_lib_insert_locked( const WCHAR *classid, const WCHAR *library, HRESULT hr )
+{
+    UINT32 bucket = class_lib_hash( classid ) & (CLASS_LIB_CACHE_SIZE - 1);
+    struct class_lib_entry *e;
+
+    for (e = class_lib_cache[bucket]; e; e = e->next)
+        if (!wcscmp( e->classid, classid )) return;
+
+    if (!(e = malloc( sizeof(*e) ))) return;
+    e->classid = wcsdup( classid );
+    e->library = library ? wcsdup( library ) : NULL;
+    if (!e->classid || (library && !e->library))
+    {
+        free( e->classid );
+        free( e->library );
+        free( e );
+        return;
+    }
+    e->hr = hr;
+    e->next = class_lib_cache[bucket];
+    class_lib_cache[bucket] = e;
+}
+
+static BOOL WINAPI init_class_lib_cache( INIT_ONCE *once, void *param, void **ctx )
+{
+    static const struct
+    {
+        const WCHAR *classid;
+        const WCHAR *library;
+    } static_exact_routes[] =
+    {
+        { L"FakeClass.ClassName",                                       L"windows.applicationmodel.resources.dll" },
+        { L"Windows.System.MemoryManager",                              L"windows.applicationmodel.resources.core.dll" },
+        { L"Windows.ApplicationModel.AppInstance",                      L"twinapi.appcore.dll" },
+        { L"Microsoft.Windows.AppLifecycle.AppInstance",                L"twinapi.appcore.dll" },
+        { L"Windows.ApplicationModel.StartupTask",                      L"twinapi.appcore.dll" },
+        { L"Windows.UI.Xaml",                                           L"windows.ui.xaml.dll" },
+        { L"Windows.UI.ColorHelper",                                    L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml",                                         L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Application",                             L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Window",                                  L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.PropertyMetadata",                        L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.DependencyProperty",                      L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Data.CollectionViewSource",               L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.PropertyPath",                            L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.SizeHelper",                              L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Frame",                          L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Page",                           L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Grid",                           L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Canvas",                         L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.StackPanel",                     L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Border",                         L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.RowDefinition",                  L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.ColumnDefinition",               L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.RowDefinitionCollection",        L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.ColumnDefinitionCollection",     L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.ContentControl",                 L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Image",                          L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.SwapChainPanel",                 L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.WebView2",                       L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.UserControl",                    L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Button",                         L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.TextBlock",                      L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Controls.Viewbox",                        L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Shapes.Rectangle",                        L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.Style",                                   L"windows.ui.xaml.dll" },
+        { L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider", L"windows.ui.xaml.dll" },
+        { L"Windows.UI.Composition.Compositor",                         L"windows.ui.composition.dll" },
+        { L"Microsoft.UI.Composition.Compositor",                       L"dcompi.dll" },
+        { L"Microsoft.UI.Composition.CompositionEasingFunction",        L"dcompi.dll" },
+        { L"Windows.Storage.StorageFile",                               L"windows.storage.dll" },
+        { L"Windows.Storage.StorageFolder",                             L"windows.storage.dll" },
+        { L"Windows.Storage.FileIO",                                    L"windows.storage.dll" },
+        { L"Windows.Storage.PathIO",                                    L"windows.storage.dll" },
+        { L"Windows.System.Profile.EducationSettings",                  L"windows.system.profile.dll" },
+        { L"Windows.Devices.Input.PenDevice",                           L"windows.devices.input.dll" },
+        { L"Windows.System.User",                                       L"windows.system.dll" },
+        { L"Windows.System.DispatcherQueue",                            L"coremessaging.dll" },
+        { L"Windows.System.DispatcherQueueController",                  L"coremessaging.dll" },
+        { L"Microsoft.UI.Dispatching.DispatcherQueue",                  L"coremessaging.dll" },
+        { L"Microsoft.UI.Dispatching.DispatcherQueueController",        L"coremessaging.dll" },
+    };
+    size_t i;
+
+    RtlAcquireSRWLockExclusive( &class_lib_cache_lock );
+    for (i = 0; i < ARRAY_SIZE(static_exact_routes); i++)
+        class_lib_insert_locked( static_exact_routes[i].classid, static_exact_routes[i].library, S_OK );
+    RtlReleaseSRWLockExclusive( &class_lib_cache_lock );
+    return TRUE;
+}
+
+static BOOL class_lib_cache_lookup( const WCHAR *classid, WCHAR **out, HRESULT *hr_out )
+{
+    struct class_lib_entry *e;
+
+    InitOnceExecuteOnce( &class_lib_cache_once, init_class_lib_cache, NULL, NULL );
+
+    RtlAcquireSRWLockShared( &class_lib_cache_lock );
+    for (e = class_lib_cache[class_lib_hash( classid ) & (CLASS_LIB_CACHE_SIZE - 1)];
+         e; e = e->next)
+    {
+        if (!wcscmp( e->classid, classid ))
+        {
+            *out = e->library ? wcsdup( e->library ) : NULL;
+            *hr_out = e->hr;
+            RtlReleaseSRWLockShared( &class_lib_cache_lock );
+            return TRUE;
+        }
+    }
+    RtlReleaseSRWLockShared( &class_lib_cache_lock );
+    return FALSE;
+}
+
+static void class_lib_cache_store( const WCHAR *classid, const WCHAR *library, HRESULT hr )
+{
+    RtlAcquireSRWLockExclusive( &class_lib_cache_lock );
+    class_lib_insert_locked( classid, library, hr );
+    RtlReleaseSRWLockExclusive( &class_lib_cache_lock );
+}
+
+/*
  * get_library_for_classid answers the module an activatable class's factory lives
  * in.  An out-of-proc (Server) class answers *out == NULL with S_OK: its key carries a
  * Server subkey (whose LocalServer32 registration launches the server exe through the
@@ -157,6 +309,9 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         *out = wcsdup(ptr);
         return S_OK;
     }
+
+    if (class_lib_cache_lookup(classid, out, &hr))
+        return hr;
 
     /* winget's pre-indexed source resolution: AppExtensionCatalog + friends are
      * implemented in-proc by windows.applicationmodel.dll (appextensions.c). */
@@ -735,11 +890,13 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
                         FreeLibrary( h );
                         TRACE( "Found class %s in side-by-side dll %s\n", debugstr_w( classid ), debugstr_w( dll_name ) );
                         *out = wcsdup( dll_name );
+                        class_lib_cache_store( classid, *out, S_OK );
                         return S_OK;
                     }
                 }
             }
             WARN("Class %s not found in registry\n", debugstr_w(classid));
+            class_lib_cache_store( classid, NULL, REGDB_E_CLASSNOTREG );
             return REGDB_E_CLASSNOTREG;
         }
     }
@@ -753,6 +910,7 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
         {
             RegCloseKey(hserver);
             RegCloseKey(hkey_class);
+            class_lib_cache_store( classid, NULL, S_OK );
             return S_OK;
         }
     }
@@ -793,6 +951,7 @@ static HRESULT get_library_for_classid(const WCHAR *classid, WCHAR **out)
     }
 
     TRACE( "registry seed answers %s with %s\n", debugstr_w( classid ), debugstr_w( buf ) );
+    class_lib_cache_store( classid, buf, S_OK );
     *out = buf;
     return S_OK;
 
@@ -956,11 +1115,36 @@ static ULONG WINAPI agile_factory_Release( IActivationFactory *iface )
     return ref;
 }
 
+static HRESULT WINAPI agile_factory_GetIids( IActivationFactory *iface, ULONG *count, IID **ids )
+{
+    return IActivationFactory_GetIids( impl_from_IActivationFactory( iface )->inner, count, ids );
+}
+
+static HRESULT WINAPI agile_factory_GetRuntimeClassName( IActivationFactory *iface, HSTRING *name )
+{
+    return IActivationFactory_GetRuntimeClassName( impl_from_IActivationFactory( iface )->inner, name );
+}
+
+static HRESULT WINAPI agile_factory_GetTrustLevel( IActivationFactory *iface, TrustLevel *level )
+{
+    return IActivationFactory_GetTrustLevel( impl_from_IActivationFactory( iface )->inner, level );
+}
+
+static HRESULT WINAPI agile_factory_ActivateInstance( IActivationFactory *iface, IInspectable **instance )
+{
+    struct agile_factory *impl = impl_from_IActivationFactory( iface );
+    return impl->inner->lpVtbl->ActivateInstance( impl->inner, instance );
+}
+
 static const IActivationFactoryVtbl agile_factory_vtbl =
 {
     agile_factory_QueryInterface,
     agile_factory_AddRef,
     agile_factory_Release,
+    agile_factory_GetIids,
+    agile_factory_GetRuntimeClassName,
+    agile_factory_GetTrustLevel,
+    agile_factory_ActivateInstance,
 };
 
 /* Wrap a freshly resolved factory for an agile class; a non-agile class (and an

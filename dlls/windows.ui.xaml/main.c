@@ -822,10 +822,14 @@ static HRESULT WINAPI meta_provider_GetRuntimeClassName( void *iface, HSTRING *n
 { return WindowsCreateString( L"Microsoft.UI.Xaml.XamlTypeInfo.XamlControlsXamlMetaDataProvider", 63, name ); }
 static HRESULT WINAPI meta_provider_GetTrustLevel( void *iface, TrustLevel *level )
 { if (level) *level = BaseTrust; return S_OK; }
-static HRESULT WINAPI meta_provider_GetXamlType( void *iface, void *type_name, void **out )
-{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI meta_provider_GetXamlType( void *iface, TypeName type_name, void **out )
+{
+    return xaml_metadata_cache_get_type_hstring( type_name.Name, out );
+}
 static HRESULT WINAPI meta_provider_GetXamlTypeByFullName( void *iface, HSTRING name, void **out )
-{ if (out) *out = NULL; return S_OK; }
+{
+    return xaml_metadata_cache_get_type_hstring( name, out );
+}
 static HRESULT WINAPI meta_provider_GetXmlnsDefinitions( void *iface, ULONG *count, void ***out )
 { if (count) *count = 0; if (out) *out = NULL; return S_OK; }
 

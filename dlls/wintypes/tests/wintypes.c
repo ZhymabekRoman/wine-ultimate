@@ -1083,7 +1083,7 @@ static void test_RoResolveNamespace(void)
 
         count = 0;
         hr = RoResolveNamespace(name, NULL, 0, NULL, &count, &paths, 0, NULL);
-        todo_wine ok(hr == S_OK, "got %#lx\n", hr);
+        ok(hr == S_OK, "got %#lx\n", hr);
         if (hr == S_OK)
         {
             const WCHAR *str = WindowsGetStringRawBuffer(paths[0], NULL);
@@ -1103,6 +1103,38 @@ static void test_RoResolveNamespace(void)
     }
 
     RoUninitialize();
+}
+
+static void test_RoGetMetaDataFile(void)
+{
+    HSTRING name, path;
+    UINT32 token;
+    HRESULT hr;
+
+    hr = RoGetMetaDataFile(NULL, NULL, &path, NULL, &token);
+    ok(hr == E_INVALIDARG, "got %#lx\n", hr);
+
+    hr = WindowsCreateString(L"Windows.UI.Xaml.Controls.Grid", 29, &name);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    path = NULL;
+    token = 0;
+    hr = RoGetMetaDataFile(name, NULL, &path, NULL, &token);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    ok(path != NULL, "expected non-NULL path\n");
+    ok(token != 0, "expected non-zero token\n");
+    if (path)
+    {
+        const WCHAR *raw = WindowsGetStringRawBuffer(path, NULL);
+        ok(wcsstr(raw, L"windows.ui.xaml.winmd") != NULL, "unexpected path %s\n", wine_dbgstr_w(raw));
+        WindowsDeleteString(path);
+    }
+    WindowsDeleteString(name);
+
+    hr = WindowsCreateString(L"NonExistent.Namespace.Type", 26, &name);
+    ok(hr == S_OK, "got %#lx\n", hr);
+    hr = RoGetMetaDataFile(name, NULL, &path, NULL, &token);
+    ok(hr == RO_E_METADATA_NAME_NOT_FOUND, "got %#lx\n", hr);
+    WindowsDeleteString(name);
 }
 
 static void test_RoParseTypeName(void)
@@ -1704,6 +1736,7 @@ START_TEST(wintypes)
     test_IPropertyValueStatics();
     test_RoParseTypeName();
     test_RoResolveNamespace();
+    test_RoGetMetaDataFile();
     test_IPropertySet();
     test_PropertySet_MapChanged();
 }

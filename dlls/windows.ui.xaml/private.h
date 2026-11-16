@@ -118,7 +118,9 @@ struct xaml_app_profile
 extern const struct xaml_app_profile *g_profile;
 const struct xaml_app_profile *xaml_get_app_profile( void );
 BOOL is_calculator_app( void );
-BOOL is_store_app( void );
+HRESULT xaml_metadata_cache_get_type( const WCHAR *full_name, void **out );
+HRESULT xaml_metadata_cache_get_type_hstring( HSTRING full_name, void **out );
+WORD xaml_metadata_cache_find_xbf_id( const WCHAR *full_name );
 BOOL is_whatsapp_app( void );
 BOOL is_uwp_xaml_app( void );
 void *uwp_get_app_outer( void );
@@ -131,7 +133,6 @@ BOOL uwp_try_load_xbf_component( void *component, void *resourceLocator, void *a
 BOOL uwp_handle_mouse_input( HWND hwnd, UINT msg, int x, int y, int width, int height, IInspectable *root_content );
 HRESULT uwp_get_activation_factory( HSTRING classid, IActivationFactory **factory );
 ICoreWindow *get_current_core_window( void );
-HRESULT uwp_store_create_initial_page( IInspectable **out );
 BOOL uwp_pri_find_xbf( const WCHAR *uri_or_name, const BYTE **out_ptr, DWORD *out_sz );
 
 /* Shared token-based WinRT event registry (twinapi bg_events pattern) */

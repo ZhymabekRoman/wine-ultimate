@@ -22,6 +22,7 @@
 #include <string.h>
 
 #include "private.h"
+#include "weakreference.h"
 #include "wine/exception.h"
 #include "windows.applicationmodel.activation.h"
 #include "appmodel.h"
@@ -107,10 +108,12 @@ struct xaml_window
 {
     IInspectable IInspectable_iface;
     IInspectable IWindow2_iface;
+    IInspectable IWindow3_iface;
     IInspectable IWindowPrivate_iface;
     IInspectable ms_IWindow_iface;
     IInspectable ms_IWindow2_iface;
     IWindowNative IWindowNative_iface;
+    const void **IWeakReferenceSource_iface;
     LONG ref;
     IInspectable *content;
     ICoreWindow *core_window;
@@ -122,6 +125,15 @@ struct xaml_window
     ID3D11DeviceContext *d3d11_ctx;
     HWND target_hwnd;
     UINT width, height;
+    HDC retained_dc;
+    HBITMAP retained_bmp;
+    HBITMAP retained_old_bmp;
+    void *retained_bits;
+    UINT retained_width;
+    UINT retained_height;
+    BOOL retained_valid;
+    RECT dirty_rect;
+    BOOL has_dirty_rect;
     BOOL core_window_subscribed;
     void *activated_handlers[8];
     int activated_handler_count;
@@ -164,13 +176,7 @@ static HRESULT WINAPI app_view_activated_Invoke(
                 HRESULT (WINAPI *on_launched)( void *, void * ) = (void *)ov_vtbl[7];
                 WARN( "invoking UWP App OnLaunched via QI %p (overrides %p, args %p)\n",
                        on_launched, overrides, args );
-                if (is_store_app())
-                {
-                    IInspectable *store_page = NULL;
-                    if (SUCCEEDED(uwp_store_create_initial_page( &store_page )) && store_page)
-                        global_xaml_window.content = store_page;
-                }
-                else if (on_launched) on_launched( overrides, args );
+                if (on_launched) on_launched( overrides, args );
                 IInspectable_Release( overrides );
             }
             else
@@ -1617,11 +1623,6 @@ static ICoreWindow *wrap_core_window( ICoreWindow *inner )
 {
     struct xaml_core_window *wrap;
     if (!inner) return NULL;
-    if (is_store_app())
-    {
-        ICoreWindow_AddRef( inner );
-        return inner;
-    }
     if (inner->lpVtbl == &xaml_cw_vtbl)
     {
         ICoreWindow_AddRef( inner );
@@ -3143,10 +3144,14 @@ static HRESULT WINAPI application_inner_GetIids( IInspectable *iface, ULONG *iid
 static HRESULT WINAPI application_inner_GetRuntimeClassName( IInspectable *iface, HSTRING *class_name );
 static HRESULT WINAPI application_inner_GetTrustLevel( IInspectable *iface, TrustLevel *trust_level );
 
-static HRESULT WINAPI app_meta_GetXamlType( void *iface, void *type_name, void **out )
-{ if (out) *out = NULL; return S_OK; }
+static HRESULT WINAPI app_meta_GetXamlType( void *iface, TypeName type_name, void **out )
+{
+    return xaml_metadata_cache_get_type_hstring( type_name.Name, out );
+}
 static HRESULT WINAPI app_meta_GetXamlTypeByFullName( void *iface, HSTRING name, void **out )
-{ if (out) *out = NULL; return S_OK; }
+{
+    return xaml_metadata_cache_get_type_hstring( name, out );
+}
 static HRESULT WINAPI app_meta_GetXmlnsDefinitions( void *iface, ULONG *count, void ***out )
 { if (count) *count = 0; if (out) *out = NULL; return S_OK; }
 
@@ -3540,6 +3545,17 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
     }
 
     {
+        static const GUID IID_IWindow3_UWP =
+            { 0xb70bdc9d, 0x1c35, 0x462a, { 0x9b, 0x97, 0x80, 0x8d, 0x5a, 0xf9, 0xf2, 0x8e } };
+        if (IsEqualGUID( iid, &IID_IWindow3_UWP ))
+        {
+            *out = &impl->IWindow3_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+    }
+
+    {
         static const GUID IID_IWindowPrivate =
             { 0x06636c29, 0x5a17, 0x458d, { 0x8e, 0xa2, 0x24, 0x22, 0xd9, 0x97, 0xa9, 0x22 } };
         if (IsEqualGUID( iid, &IID_IWindowPrivate ))
@@ -3560,6 +3576,17 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         {
             *out = &impl->ms_IWindow_iface;
             IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+    }
+
+    {
+        static const GUID IID_IWeakReferenceSource_w =
+            { 0x00000038, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+        if (IsEqualGUID( iid, &IID_IWeakReferenceSource_w ))
+        {
+            *out = &impl->IWeakReferenceSource_iface;
+            IInspectable_AddRef( &impl->IInspectable_iface );
             return S_OK;
         }
     }
@@ -4417,16 +4444,10 @@ BOOL is_calculator_app( void )
     return seed && !wcscmp( seed, L"Calculator" );
 }
 
-BOOL is_store_app( void )
-{
-    const WCHAR *seed = xaml_get_app_profile()->seed_xbf;
-    return seed && !wcscmp( seed, L"StoreManifestPage" );
-}
-
 BOOL is_uwp_xaml_app( void )
 {
     const struct xaml_app_profile *p = xaml_get_app_profile();
-    return p->family_prefix != NULL && p->serve_core_controls;
+    return !p->use_winui3_window_class && p->serve_core_controls;
 }
 
 void *uwp_get_app_outer( void )
@@ -4510,6 +4531,144 @@ static void xaml_fill_pointer_info( HWND hwnd, HWND top, UINT msg, WPARAM wparam
     info->is_in_window = (pt.x >= 0 && pt.y >= 0 && pt.x < rc.right && pt.y < rc.bottom);
 }
 
+static volatile LONG g_xaml_window_dirty = 1;
+static BOOL g_xaml_post_load_presented;
+static HWND g_xaml_timer_armed_hwnd;
+static int g_xaml_timer_idle_ticks;
+static BOOL g_in_xaml_present;
+static HRESULT xaml_window_present( struct xaml_window *impl );
+
+static BOOL xaml_ensure_retained_surface( struct xaml_window *impl, UINT width, UINT height )
+{
+    BITMAPINFO bmi;
+    HDC screen_dc;
+
+    if (width == 0 || height == 0)
+        return FALSE;
+    if (impl->retained_dc && impl->retained_bmp &&
+        impl->retained_width == width && impl->retained_height == height)
+        return TRUE;
+
+    if (impl->retained_dc)
+    {
+        if (impl->retained_old_bmp)
+            SelectObject( impl->retained_dc, impl->retained_old_bmp );
+        if (impl->retained_bmp)
+            DeleteObject( impl->retained_bmp );
+        DeleteDC( impl->retained_dc );
+    }
+    impl->retained_dc = NULL;
+    impl->retained_bmp = NULL;
+    impl->retained_old_bmp = NULL;
+    impl->retained_bits = NULL;
+    impl->retained_width = 0;
+    impl->retained_height = 0;
+    impl->retained_valid = FALSE;
+
+    screen_dc = GetDC( NULL );
+    impl->retained_dc = CreateCompatibleDC( screen_dc );
+    if (screen_dc) ReleaseDC( NULL, screen_dc );
+    if (!impl->retained_dc)
+        return FALSE;
+
+    memset( &bmi, 0, sizeof(bmi) );
+    bmi.bmiHeader.biSize = sizeof(bmi.bmiHeader);
+    bmi.bmiHeader.biWidth = (LONG)width;
+    bmi.bmiHeader.biHeight = -(LONG)height; /* top-down 32-bpp BGRA */
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+
+    impl->retained_bmp = CreateDIBSection( impl->retained_dc, &bmi, DIB_RGB_COLORS, &impl->retained_bits, NULL, 0 );
+    if (!impl->retained_bmp || !impl->retained_bits)
+    {
+        if (impl->retained_bmp) DeleteObject( impl->retained_bmp );
+        DeleteDC( impl->retained_dc );
+        impl->retained_dc = NULL;
+        impl->retained_bmp = NULL;
+        impl->retained_bits = NULL;
+        return FALSE;
+    }
+    impl->retained_old_bmp = (HBITMAP)SelectObject( impl->retained_dc, impl->retained_bmp );
+    impl->retained_width = width;
+    impl->retained_height = height;
+    SetRect( &impl->dirty_rect, 0, 0, (int)width, (int)height );
+    impl->has_dirty_rect = TRUE;
+    return TRUE;
+}
+
+static void xaml_upload_retained_to_swapchain( struct xaml_window *impl, const RECT *dirty )
+{
+    ID3D11Texture2D *backbuf = NULL;
+    D3D11_BOX box;
+    UINT row_pitch;
+    const BYTE *src;
+    HRESULT hr;
+
+    if (!impl->swapchain || !impl->d3d11_ctx || !impl->retained_bits || !impl->retained_valid)
+        return;
+
+    box.left = dirty && dirty->left >= 0 ? (UINT)dirty->left : 0;
+    box.top = dirty && dirty->top >= 0 ? (UINT)dirty->top : 0;
+    box.right = dirty && dirty->right > 0 && (UINT)dirty->right <= impl->retained_width ? (UINT)dirty->right : impl->retained_width;
+    box.bottom = dirty && dirty->bottom > 0 && (UINT)dirty->bottom <= impl->retained_height ? (UINT)dirty->bottom : impl->retained_height;
+    box.front = 0;
+    box.back = 1;
+    if (box.left >= box.right || box.top >= box.bottom)
+        return;
+
+    hr = IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_ID3D11Texture2D, (void **)&backbuf );
+    if (SUCCEEDED(hr) && backbuf)
+    {
+        row_pitch = impl->retained_width * 4;
+        src = (const BYTE *)impl->retained_bits + box.top * row_pitch + box.left * 4;
+        ID3D11DeviceContext_UpdateSubresource( impl->d3d11_ctx, (ID3D11Resource *)backbuf, 0, &box, src, row_pitch, 0 );
+        ID3D11Texture2D_Release( backbuf );
+        IDXGISwapChain1_Present( impl->swapchain, 0, 0 );
+    }
+}
+
+static BOOL xaml_render_retained_if_dirty( struct xaml_window *impl, HWND hwnd, UINT width, UINT height, RECT *out_dirty )
+{
+    BOOL dirty;
+    BOOL size_changed;
+    RECT upload_rc;
+
+    if (width == 0 || height == 0)
+        return FALSE;
+
+    dirty = InterlockedExchange( &g_xaml_window_dirty, 0 ) != 0;
+    size_changed = (!impl->retained_valid || impl->retained_width != width || impl->retained_height != height);
+    if (!dirty && !size_changed)
+    {
+        if (out_dirty) SetRectEmpty( out_dirty );
+        return FALSE;
+    }
+
+    if (!xaml_ensure_retained_surface( impl, width, height ))
+        return FALSE;
+
+    xaml_layout_render( hwnd, impl->retained_dc, (int)width, (int)height, impl->content );
+    impl->retained_valid = TRUE;
+
+    if (!size_changed && impl->has_dirty_rect && !IsRectEmpty( &impl->dirty_rect ))
+    {
+        upload_rc = impl->dirty_rect;
+        if (upload_rc.left < 0) upload_rc.left = 0;
+        if (upload_rc.top < 0) upload_rc.top = 0;
+        if (upload_rc.right > (LONG)width) upload_rc.right = (LONG)width;
+        if (upload_rc.bottom > (LONG)height) upload_rc.bottom = (LONG)height;
+    }
+    else
+    {
+        SetRect( &upload_rc, 0, 0, (int)width, (int)height );
+    }
+    impl->has_dirty_rect = FALSE;
+    SetRectEmpty( &impl->dirty_rect );
+    if (out_dirty) *out_dirty = upload_rc;
+    return TRUE;
+}
+
 /* Paint every child's DC as well: the X tree shows a child window at the same
  * geometry as the mapped top-level, and the visible surface may be that child. */
 static BOOL CALLBACK xaml_paint_child( HWND hwnd, LPARAM lparam )
@@ -4520,22 +4679,17 @@ static BOOL CALLBACK xaml_paint_child( HWND hwnd, LPARAM lparam )
     {
         GetClientRect( hwnd, &rc );
         if (rc.right > 0 && rc.bottom > 0)
-            xaml_layout_render( hwnd, hdc, rc.right, rc.bottom, global_xaml_window.content );
+        {
+            if (global_xaml_window.retained_valid && global_xaml_window.retained_dc)
+                BitBlt( hdc, 0, 0, rc.right, rc.bottom, global_xaml_window.retained_dc, 0, 0, SRCCOPY );
+            else
+                xaml_layout_render( hwnd, hdc, rc.right, rc.bottom, global_xaml_window.content );
+        }
         ReleaseDC( hwnd, hdc );
         TRACE( "xaml painted child %p %ldx%ld\n", hwnd, rc.right, rc.bottom );
     }
     return TRUE;
 }
-
-/* Paint the composed layout inside WM_PAINT. A GetDC() blit lands on the window's
- * GDI surface, but on the winex11 driver only the BeginPaint/EndPaint cycle flushes
- * a surface to the X pixmap, so the mapped window is painted from here. */
-static volatile LONG g_xaml_window_dirty = 1;
-static BOOL g_xaml_post_load_presented;
-static HWND g_xaml_timer_armed_hwnd;
-static int g_xaml_timer_idle_ticks;
-static BOOL g_in_xaml_present;
-static HRESULT xaml_window_present( struct xaml_window *impl );
 
 static void xaml_window_refresh_present( HWND hwnd )
 {
@@ -4550,28 +4704,38 @@ static void xaml_window_refresh_present( HWND hwnd )
     in_refresh = TRUE;
     if (impl->swapchain && is_uwp_xaml_app())
     {
-        IDXGISurface1 *surface1 = NULL;
         HWND target = impl->target_hwnd && IsWindow( impl->target_hwnd ) ? impl->target_hwnd : hwnd;
         GetClientRect( target, &rc );
         width = rc.right > 0 ? (UINT)rc.right : impl->width;
         height = rc.bottom > 0 ? (UINT)rc.bottom : impl->height;
         if (width > 0 && height > 0)
         {
-            if (SUCCEEDED(IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_IDXGISurface1, (void **)&surface1 )) && surface1)
-            {
-                HDC hdc = NULL;
-                if (SUCCEEDED(IDXGISurface1_GetDC( surface1, FALSE, &hdc )) && hdc)
-                {
-                    xaml_layout_render( target, hdc, width, height, impl->content );
-                    IDXGISurface1_ReleaseDC( surface1, NULL );
-                }
-                IDXGISurface1_Release( surface1 );
-            }
-            IDXGISwapChain1_Present( impl->swapchain, 0, 0 );
+            RECT dirty_rc;
+            if (xaml_render_retained_if_dirty( impl, target, width, height, &dirty_rc ))
+                xaml_upload_retained_to_swapchain( impl, &dirty_rc );
         }
     }
     IDCompositionDesktopDevice_Commit( impl->dcomp_device );
     in_refresh = FALSE;
+}
+
+void xaml_mark_dirty_rect( const RECT *rc )
+{
+    struct xaml_window *impl = &global_xaml_window;
+    if (rc && !IsRectEmpty( rc ))
+    {
+        if (impl->has_dirty_rect && !IsRectEmpty( &impl->dirty_rect ))
+            UnionRect( &impl->dirty_rect, &impl->dirty_rect, rc );
+        else
+            impl->dirty_rect = *rc;
+        impl->has_dirty_rect = TRUE;
+    }
+    else
+    {
+        SetRect( &impl->dirty_rect, 0, 0, (int)impl->width, (int)impl->height );
+        impl->has_dirty_rect = TRUE;
+    }
+    xaml_mark_window_dirty();
 }
 
 void xaml_mark_window_dirty( void )
@@ -4593,20 +4757,34 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     {
         if (is_uwp_xaml_app())
         {
-            RECT rc;
+            RECT rc, dirty_rc;
             HWND top = GetAncestor( hwnd, GA_ROOT );
-            HDC hdc = GetDC( top );
+            if (!top) top = hwnd;
             GetClientRect( top, &rc );
-            TRACE( "xaml corewindow WM_PAINT hdc %p rc %ldx%ld\n", hdc, rc.right, rc.bottom );
+            TRACE( "xaml corewindow WM_PAINT top %p rc %ldx%ld\n", top, rc.right, rc.bottom );
             if (rc.right > 0 && rc.bottom > 0)
             {
-                xaml_layout_render( top, hdc, rc.right, rc.bottom, global_xaml_window.content );
-                InterlockedExchange( &g_xaml_window_dirty, 0 );
+                if (xaml_render_retained_if_dirty( &global_xaml_window, top, (UINT)rc.right, (UINT)rc.bottom, &dirty_rc ))
+                {
+                    if (!g_in_xaml_present && global_xaml_window.swapchain && global_xaml_window.d3d11_ctx)
+                    {
+                        xaml_upload_retained_to_swapchain( &global_xaml_window, &dirty_rc );
+                        if (global_xaml_window.dcomp_device)
+                            IDCompositionDesktopDevice_Commit( global_xaml_window.dcomp_device );
+                    }
+                }
+                if (global_xaml_window.retained_valid && global_xaml_window.retained_dc)
+                {
+                    HDC hdc = GetDC( top );
+                    if (hdc)
+                    {
+                        BitBlt( hdc, 0, 0, rc.right, rc.bottom, global_xaml_window.retained_dc, 0, 0, SRCCOPY );
+                        ReleaseDC( top, hdc );
+                    }
+                }
             }
-            ReleaseDC( top, hdc );
         }
         ValidateRect( hwnd, NULL );
-        xaml_window_refresh_present( hwnd );
         return 0;
     }
     if (msg == WM_MOVE || msg == WM_EXITSIZEMOVE)
@@ -4660,8 +4838,6 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
                 (UINT)rc.bottom != global_xaml_window.height)
             {
                 xaml_mark_window_dirty();
-                InvalidateRect( top, NULL, FALSE );
-                if (top != hwnd) InvalidateRect( hwnd, NULL, FALSE );
                 xaml_window_present( &global_xaml_window );
             }
         }
@@ -4676,7 +4852,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
     }
     if (msg == WM_TIMER && wparam == 0x5756)
     {
-        if (InterlockedExchange( &g_xaml_window_dirty, 0 ))
+        if (InterlockedCompareExchange( &g_xaml_window_dirty, 1, 1 ))
         {
             SIZE sz;
             g_xaml_timer_idle_ticks = 0;
@@ -4705,10 +4881,8 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         if (msg == WM_CHAR && !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
             uwp_keyboard_press_char( (WCHAR)wparam );
         uwp_sync_calc_display_from_vm();
-        xaml_window_present( &global_xaml_window );
         xaml_mark_window_dirty();
-        InvalidateRect( GetAncestor( hwnd, GA_ROOT ), NULL, FALSE );
-        UpdateWindow( GetAncestor( hwnd, GA_ROOT ) );
+        xaml_window_present( &global_xaml_window );
         if ((accel_handled || (msg != WM_SYSKEYDOWN && SUCCEEDED( hr ))) &&
             xaml_corewindow_prev_proc == (WNDPROC)GetClassLongPtrW( hwnd, GCLP_WNDPROC ))
             return 0;
@@ -4809,17 +4983,14 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         if (global_xaml_window.content && rc.right > 0 && rc.bottom > 0)
         {
             tree_routed = uwp_route_pointer_event( top, kind, &info, rc.right, rc.bottom, global_xaml_window.content );
-            if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)
+            if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_MOUSEMOVE)
                 btn_handled = uwp_handle_mouse_input( top, msg, pt.x, pt.y, rc.right, rc.bottom, global_xaml_window.content );
         }
 
         if (btn_handled || (tree_routed && (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP)))
         {
             xaml_mark_window_dirty();
-            InvalidateRect( top, NULL, FALSE );
-            InvalidateRect( hwnd, NULL, FALSE );
-            UpdateWindow( top );
-            UpdateWindow( hwnd );
+            xaml_window_present( &global_xaml_window );
             return 0;
         }
         return 0;
@@ -4935,8 +5106,6 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                 SetWindowLongW( top, GWL_STYLE, top_style | WS_CLIPCHILDREN );
         }
     }
-    InvalidateRect( hwnd, NULL, FALSE );
-    UpdateWindow( hwnd );
 
     if (impl->core_window) xaml_window_subscribe_core_window( impl );
 
@@ -5007,8 +5176,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     if (impl->swapchain && (width != prev_width || height != prev_height))
     {
         hr = IDXGISwapChain1_ResizeBuffers( impl->swapchain, 0, width, height,
-                                            DXGI_FORMAT_B8G8R8A8_UNORM,
-                                            DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE );
+                                            DXGI_FORMAT_B8G8R8A8_UNORM, 0 );
         TRACE( "XAML: resized composition swapchain %p to %ux%u (hr %#lx)\n",
                impl->swapchain, width, height, hr );
     }
@@ -5038,11 +5206,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         desc.Scaling = DXGI_SCALING_STRETCH;
         desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
         desc.AlphaMode = DXGI_ALPHA_MODE_PREMULTIPLIED;
-        /* GDI_COMPATIBLE: wined3d_texture_get_dc only serves a DC for swapchain
-         * buffers created with this flag; without it the per-frame buffer fill
-         * in WM_PAINT gets WINED3DERR_INVALIDCALL and present shows a black
-         * never-painted texture. */
-        desc.Flags = DXGI_SWAP_CHAIN_FLAG_GDI_COMPATIBLE;
+        desc.Flags = 0;
 
         hr = D3D11CreateDevice( NULL, D3D_DRIVER_TYPE_HARDWARE, NULL,
                                 D3D11_CREATE_DEVICE_BGRA_SUPPORT,
@@ -5087,52 +5251,45 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         }
     }
 
-    /* 6. Render the XAML layout / visual elements onto the swapchain backbuffer */
-    if (impl->swapchain && is_uwp_xaml_app())
+    /* 6. Render the XAML layout once into the retained DIB surface and upload dirty rect */
     {
-        IDXGISurface1 *surface1 = NULL;
-        hr = IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_IDXGISurface1, (void **)&surface1 );
-        if (SUCCEEDED(hr) && surface1)
-        {
-            HDC hdc = NULL;
-            hr = IDXGISurface1_GetDC( surface1, FALSE, &hdc );
-            if (SUCCEEDED(hr) && hdc)
-            {
-                xaml_layout_render( hwnd, hdc, width, height, impl->content );
-                IDXGISurface1_ReleaseDC( surface1, NULL );
-            }
-            IDXGISurface1_Release( surface1 );
-        }
+        LARGE_INTEGER t0, t1, t2, freq;
+        RECT dirty_rc;
+        BOOL rendered;
 
-        /* 7. Present swapchain via wined3d CS-thread path */
-        IDXGISwapChain1_Present( impl->swapchain, 1, 0 );
+        QueryPerformanceFrequency( &freq );
+        QueryPerformanceCounter( &t0 );
+        rendered = xaml_render_retained_if_dirty( impl, hwnd, width, height, &dirty_rc );
+        QueryPerformanceCounter( &t1 );
+        if (rendered && impl->swapchain && impl->d3d11_ctx && is_uwp_xaml_app())
+            xaml_upload_retained_to_swapchain( impl, &dirty_rc );
+        QueryPerformanceCounter( &t2 );
+        TRACE( "XAML perf: rendered=%d render_us=%lld upload_us=%lld dirty=(%ld,%ld-%ld,%ld)\n",
+               rendered,
+               (long long)((t1.QuadPart - t0.QuadPart) * 1000000 / freq.QuadPart),
+               (long long)((t2.QuadPart - t1.QuadPart) * 1000000 / freq.QuadPart),
+               dirty_rc.left, dirty_rc.top, dirty_rc.right, dirty_rc.bottom );
     }
 
     /* 8. Commit the DirectComposition tree */
     IDCompositionDesktopDevice_Commit( impl->dcomp_device );
 
-    /* 9. Blit the composed layout into the top-level window DC. A composition swapchain
-     * has no GDI backing store, so the winex11 driver's window pixmap stays blank until
-     * something paints the HWND; drawing the same layout here is what makes the mapped
-     * window show content on screen. */
+    /* 9. Blit the retained DIB into the top-level window DC for winex11 backing store. */
+    if (impl->retained_valid && impl->retained_dc)
     {
-        /* The X11 driver paints the root ancestor's pixmap; a child HWND has no backing
-         * store of its own on screen, so blit through the root window. */
         HWND root = GetAncestor( hwnd, GA_ROOT );
         HDC hdc = root ? GetDC( root ) : NULL;
         if (hdc)
         {
             RECT rc;
+            UINT blit_w = width, blit_h = height;
             if (root != hwnd && GetClientRect( root, &rc ))
             {
-                width = rc.right > 0 ? rc.right : width;
-                height = rc.bottom > 0 ? rc.bottom : height;
+                blit_w = rc.right > 0 ? (UINT)rc.right : width;
+                blit_h = rc.bottom > 0 ? (UINT)rc.bottom : height;
             }
-            xaml_layout_render( root, hdc, width, height, impl->content );
-            TRACE( "xaml step9 root %p hwnd %p hdc %p probe=%06lx\n", root, hwnd, hdc, GetPixel( hdc, 5, 5 ) );
+            BitBlt( hdc, 0, 0, blit_w, blit_h, impl->retained_dc, 0, 0, SRCCOPY );
             ReleaseDC( root, hdc );
-            /* Flush after the blit: the X11 driver copies the DC surface on the paint
-             * cycle, so an invalidate issued before the draw shows a stale pixmap. */
             InvalidateRect( root, NULL, FALSE );
             UpdateWindow( root );
         }
@@ -5259,6 +5416,7 @@ void xaml_dcomp_commit( void )
 
 HRESULT xaml_window_present_current( void )
 {
+    xaml_mark_window_dirty();
     return xaml_window_present( &global_xaml_window );
 }
 
@@ -5272,6 +5430,7 @@ static HRESULT WINAPI xaml_window_put_Content( IInspectable *iface, void *a2, vo
     if (impl->content) IInspectable_Release( impl->content );
     impl->content = content;
     if (impl->content) IInspectable_AddRef( impl->content );
+    xaml_mark_window_dirty();
     xaml_window_present( impl );
     return S_OK;
 }
@@ -5638,6 +5797,57 @@ static HRESULT WINAPI xaml_window2_set_SystemBackdrop( void *iface, void *value 
     return S_OK;
 }
 
+static HRESULT WINAPI xaml_window3_get_DispatcherQueue( void *iface, void **value )
+{
+    static const WCHAR name[] = L"Windows.System.DispatcherQueue";
+    HSTRING hstr;
+    IActivationFactory *af = NULL;
+    HRESULT hr;
+
+    if (!value) return E_POINTER;
+    *value = NULL;
+    hr = WindowsCreateString( name, ARRAY_SIZE(name) - 1, &hstr );
+    if (FAILED(hr)) return hr;
+    hr = RoGetActivationFactory( hstr, &IID_IActivationFactory, (void **)&af );
+    WindowsDeleteString( hstr );
+    if (SUCCEEDED(hr) && af)
+    {
+        void **vtbl = *(void ***)af;
+        HRESULT (WINAPI *pGetForCurrentThread)(void *, void **) = (void *)vtbl[6];
+        hr = pGetForCurrentThread( af, value );
+        IActivationFactory_Release( af );
+    }
+    TRACE( "IWindow3::get_DispatcherQueue -> hr %#lx, value %p\n", hr, *value );
+    return hr;
+}
+
+static HRESULT WINAPI xaml_window3_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    return xaml_window_QueryInterface( &global_xaml_window.IInspectable_iface, iid, out );
+}
+static ULONG WINAPI xaml_window3_AddRef( IInspectable *iface )
+{
+    return xaml_window_AddRef( &global_xaml_window.IInspectable_iface );
+}
+static ULONG WINAPI xaml_window3_Release( IInspectable *iface )
+{
+    return xaml_window_Release( &global_xaml_window.IInspectable_iface );
+}
+
+static const void *xaml_window3_vtbl[] =
+{
+    xaml_window3_QueryInterface,     /* 0 */
+    xaml_window3_AddRef,             /* 1 */
+    xaml_window3_Release,            /* 2 */
+    xaml_window2_GetIids,            /* 3 */
+    xaml_window2_GetRuntimeClassName,/* 4 */
+    xaml_window2_GetTrustLevel,      /* 5 */
+    xaml_window2_get_Compositor,     /* 6: slot 6 (0x30) is get_Compositor! */
+    xaml_window3_get_DispatcherQueue,/* 7: get_DispatcherQueue */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 8..11 */
+    xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 12..15 */
+};
+
 static const void *xaml_window2_vtbl[] =
 {
     xaml_window2_QueryInterface,     /* 0 */
@@ -5994,14 +6204,74 @@ static const struct IWindowNativeVtbl xaml_window_native_vtbl =
     xaml_window_native_GetWindowHandle,
 };
 
+static const GUID IID_IWeakReference_w =
+    { 0x00000037, 0x0000, 0x0000, { 0xc0, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x46 } };
+
+static HRESULT WINAPI xaml_window_wr_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) ||
+        IsEqualGUID( iid, &IID_IWeakReference_w ))
+    {
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+static ULONG WINAPI xaml_window_wr_AddRef( void *iface ) { return 2; }
+static ULONG WINAPI xaml_window_wr_Release( void *iface ) { return 1; }
+static HRESULT WINAPI xaml_window_wr_Resolve( void *iface, REFIID iid, IInspectable **out )
+{
+    if (!out) return E_POINTER;
+    return xaml_window_QueryInterface( &global_xaml_window.IInspectable_iface, iid, (void **)out );
+}
+static const void *xaml_window_wr_vtbl[] =
+{
+    xaml_window_wr_QueryInterface,
+    xaml_window_wr_AddRef,
+    xaml_window_wr_Release,
+    xaml_window_wr_Resolve,
+};
+static struct { const void **vtbl; } xaml_window_weakref = { xaml_window_wr_vtbl };
+
+static HRESULT WINAPI xaml_window_wrs_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    return xaml_window_QueryInterface( &global_xaml_window.IInspectable_iface, iid, out );
+}
+static ULONG WINAPI xaml_window_wrs_AddRef( void *iface )
+{
+    return xaml_window_AddRef( &global_xaml_window.IInspectable_iface );
+}
+static ULONG WINAPI xaml_window_wrs_Release( void *iface )
+{
+    return xaml_window_Release( &global_xaml_window.IInspectable_iface );
+}
+static HRESULT WINAPI xaml_window_wrs_GetWeakReference( void *iface, void **out )
+{
+    if (!out) return E_POINTER;
+    *out = &xaml_window_weakref;
+    return S_OK;
+}
+static const void *xaml_window_wrs_vtbl[] =
+{
+    xaml_window_wrs_QueryInterface,
+    xaml_window_wrs_AddRef,
+    xaml_window_wrs_Release,
+    xaml_window_wrs_GetWeakReference,
+};
+
 static struct xaml_window global_xaml_window =
 {
     {(const struct IInspectableVtbl *)&xaml_window_vtbl},
     {(const struct IInspectableVtbl *)xaml_window2_vtbl},
+    {(const struct IInspectableVtbl *)xaml_window3_vtbl},
     {(const struct IInspectableVtbl *)xaml_window_private_vtbl},
     {(const struct IInspectableVtbl *)ms_xaml_window_vtbl},
     {(const struct IInspectableVtbl *)ms_xaml_window2_vtbl},
     {&xaml_window_native_vtbl},
+    xaml_window_wrs_vtbl,
     1,
     NULL,
     NULL,

@@ -22,6 +22,7 @@
 #include <windef.h>
 #include <hstring.h>
 
+HRESULT WINAPI RoGetMetaDataFile(const HSTRING, void *, HSTRING *, void **, UINT32 *);
 HRESULT WINAPI RoIsApiContractMajorVersionPresent(const WCHAR *, UINT16, BOOL *);
 HRESULT WINAPI RoParseTypeName(HSTRING, DWORD *, HSTRING **);
 HRESULT WINAPI RoResolveNamespace(HSTRING, HSTRING, DWORD, const HSTRING *, DWORD *, HSTRING **, DWORD *, HSTRING **);
