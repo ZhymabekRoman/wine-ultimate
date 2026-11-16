@@ -421,7 +421,7 @@ static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int so
 
     if (!(pid = fork()))  /* child */
     {
-        if (!(pid = fork()))  /* grandchild */
+        if (!(pid = vfork()))  /* grandchild */
         {
             if ((peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
                 params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
@@ -559,7 +559,7 @@ static NTSTATUS fork_and_exec( OBJECT_ATTRIBUTES *attr, const char *unix_name, i
 
     if (!(pid = fork()))  /* child */
     {
-        if (!(pid = fork()))  /* grandchild */
+        if (!(pid = vfork()))  /* grandchild */
         {
             close( fd[0] );
 

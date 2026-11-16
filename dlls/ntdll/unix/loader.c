@@ -25,6 +25,7 @@
 #include "config.h"
 
 #include <assert.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <stdarg.h>
@@ -1060,6 +1061,271 @@ static inline char *prepend_build_dir_path( char *ptr, const char *ext, const ch
 }
 
 
+#define MAX_BUILTIN_SEC_CACHE 512
+#define SEC_CACHE_BUCKETS     1024
+#define MAX_BUILTIN_MACHINES  4
+
+struct builtin_index_entry
+{
+    char *name;
+    UINT32 hash;
+    UINT16 dir_idx;
+    BYTE in_pe_dir;
+};
+
+struct builtin_machine_index
+{
+    USHORT machine;
+    int initialized;
+    unsigned int count;
+    unsigned int mask;
+    struct builtin_index_entry *entries;
+};
+
+struct builtin_sec_entry
+{
+    char *path;
+    UINT64 hash1;
+    UINT64 hash2;
+    HANDLE mapping;
+};
+
+static pthread_mutex_t builtin_index_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct builtin_machine_index builtin_indices[MAX_BUILTIN_MACHINES];
+
+static pthread_mutex_t sec_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+static struct builtin_sec_entry sec_cache[SEC_CACHE_BUCKETS];
+static unsigned int sec_cache_count;
+
+static inline UINT32 fnv1a_32( const char *s )
+{
+    UINT32 h = 2166136261u;
+    while (*s) h = (h ^ (unsigned char)*s++) * 16777619u;
+    return h ? h : 1;
+}
+
+static inline void hash_path_128( const char *s, UINT64 *h1_out, UINT64 *h2_out )
+{
+    UINT64 h1 = 14695981039346656037ULL;
+    UINT64 h2 = 0x9e3779b97f4a7c15ULL;
+    while (*s)
+    {
+        unsigned char c = (unsigned char)*s++;
+        h1 = (h1 ^ c) * 1099511628211ULL;
+        h2 = (h2 * 6364136223846793005ULL) ^ (c + 0x517cc1b727220a95ULL);
+    }
+    *h1_out = h1;
+    *h2_out = h2;
+}
+
+static void builtin_index_insert( struct builtin_machine_index *idx, const char *name,
+                                  UINT32 hash, UINT16 dir_idx, BYTE in_pe_dir )
+{
+    unsigned int slot;
+
+    if (!idx->entries)
+    {
+        unsigned int cap = 4096;
+        idx->entries = calloc( cap, sizeof(*idx->entries) );
+        if (!idx->entries) return;
+        idx->mask = cap - 1;
+    }
+    else if ((idx->count + 1) * 2 >= idx->mask + 1)
+    {
+        unsigned int new_cap = (idx->mask + 1) * 2;
+        struct builtin_index_entry *new_entries = calloc( new_cap, sizeof(*new_entries) );
+        unsigned int i;
+        if (!new_entries) return;
+        for (i = 0; i <= idx->mask; i++)
+        {
+            if (!idx->entries[i].name) continue;
+            slot = idx->entries[i].hash & (new_cap - 1);
+            while (new_entries[slot].name) slot = (slot + 1) & (new_cap - 1);
+            new_entries[slot] = idx->entries[i];
+        }
+        free( idx->entries );
+        idx->entries = new_entries;
+        idx->mask = new_cap - 1;
+    }
+
+    slot = hash & idx->mask;
+    while (idx->entries[slot].name)
+    {
+        if (idx->entries[slot].hash == hash && !strcmp( idx->entries[slot].name, name ))
+            return;  /* earlier dll_paths[] entry takes precedence */
+        slot = (slot + 1) & idx->mask;
+    }
+    idx->entries[slot].name = strdup( name );
+    if (!idx->entries[slot].name) return;
+    idx->entries[slot].hash = hash;
+    idx->entries[slot].dir_idx = dir_idx;
+    idx->entries[slot].in_pe_dir = in_pe_dir;
+    idx->count++;
+}
+
+static void builtin_index_scan_dir( struct builtin_machine_index *idx, const char *dir_path,
+                                    UINT16 dir_idx, BYTE in_pe_dir )
+{
+    DIR *dir = opendir( dir_path );
+    struct dirent *de;
+    char lower[256];
+
+    if (!dir) return;
+    while ((de = readdir( dir )))
+    {
+        size_t len, j;
+        if (de->d_name[0] == '.' && (de->d_name[1] == 0 || (de->d_name[1] == '.' && de->d_name[2] == 0)))
+            continue;
+#ifdef DT_DIR
+        if (de->d_type == DT_DIR) continue;
+#endif
+        len = strlen( de->d_name );
+        if (!len || len >= sizeof(lower)) continue;
+        for (j = 0; j < len; j++)
+        {
+            char c = de->d_name[j];
+            lower[j] = (c >= 'A' && c <= 'Z') ? (c + 'a' - 'A') : c;
+        }
+        lower[len] = 0;
+        builtin_index_insert( idx, lower, fnv1a_32( lower ), dir_idx, in_pe_dir );
+    }
+    closedir( dir );
+}
+
+static struct builtin_machine_index *get_builtin_machine_index( USHORT machine )
+{
+    const char *pe_dir = get_pe_dir( machine );
+    struct builtin_machine_index *idx = NULL;
+    unsigned int i;
+
+    for (i = 0; i < MAX_BUILTIN_MACHINES; i++)
+    {
+        if (__atomic_load_n( &builtin_indices[i].initialized, __ATOMIC_ACQUIRE ) &&
+            builtin_indices[i].machine == machine)
+            return &builtin_indices[i];
+    }
+
+    pthread_mutex_lock( &builtin_index_mutex );
+    for (i = 0; i < MAX_BUILTIN_MACHINES; i++)
+    {
+        if (builtin_indices[i].initialized && builtin_indices[i].machine == machine)
+        {
+            idx = &builtin_indices[i];
+            break;
+        }
+        if (!builtin_indices[i].initialized && !idx)
+        {
+            idx = &builtin_indices[i];
+            idx->machine = machine;
+            idx->count = 0;
+            idx->mask = 0;
+            idx->entries = NULL;
+            for (unsigned int d = 0; dll_paths[d]; d++)
+            {
+                char *path;
+                if (asprintf( &path, "%s%s", dll_paths[d], pe_dir ) != -1)
+                {
+                    builtin_index_scan_dir( idx, path, d, 1 );
+                    free( path );
+                }
+                builtin_index_scan_dir( idx, dll_paths[d], d, 0 );
+            }
+            __atomic_store_n( &idx->initialized, 1, __ATOMIC_RELEASE );
+            break;
+        }
+    }
+    pthread_mutex_unlock( &builtin_index_mutex );
+    return idx;
+}
+
+static const struct builtin_index_entry *lookup_builtin_index( const struct builtin_machine_index *idx,
+                                                               const char *name )
+{
+    UINT32 hash;
+    unsigned int slot;
+
+    if (!idx || !idx->entries) return NULL;
+    hash = fnv1a_32( name );
+    slot = hash & idx->mask;
+    while (idx->entries[slot].name)
+    {
+        if (idx->entries[slot].hash == hash && !strcmp( idx->entries[slot].name, name ))
+            return &idx->entries[slot];
+        slot = (slot + 1) & idx->mask;
+    }
+    return NULL;
+}
+
+static HANDLE lookup_sec_cache( const char *path, UINT64 h1, UINT64 h2 )
+{
+    unsigned int slot = (unsigned int)(h1 & (SEC_CACHE_BUCKETS - 1));
+    HANDLE mapping = 0;
+
+    pthread_mutex_lock( &sec_cache_mutex );
+    while (sec_cache[slot].path)
+    {
+        if (sec_cache[slot].hash1 == h1 && sec_cache[slot].hash2 == h2 &&
+            !strcmp( sec_cache[slot].path, path ))
+        {
+            mapping = sec_cache[slot].mapping;
+            break;
+        }
+        slot = (slot + 1) & (SEC_CACHE_BUCKETS - 1);
+    }
+    pthread_mutex_unlock( &sec_cache_mutex );
+    return mapping;
+}
+
+static BOOL store_sec_cache( const char *path, UINT64 h1, UINT64 h2, HANDLE mapping )
+{
+    unsigned int slot = (unsigned int)(h1 & (SEC_CACHE_BUCKETS - 1));
+    BOOL stored = FALSE;
+
+    pthread_mutex_lock( &sec_cache_mutex );
+    if (sec_cache_count < MAX_BUILTIN_SEC_CACHE)
+    {
+        while (sec_cache[slot].path)
+        {
+            if (sec_cache[slot].hash1 == h1 && sec_cache[slot].hash2 == h2 &&
+                !strcmp( sec_cache[slot].path, path ))
+                goto out;
+            slot = (slot + 1) & (SEC_CACHE_BUCKETS - 1);
+        }
+        sec_cache[slot].path = strdup( path );
+        if (sec_cache[slot].path)
+        {
+            sec_cache[slot].hash1 = h1;
+            sec_cache[slot].hash2 = h2;
+            sec_cache[slot].mapping = mapping;
+            sec_cache_count++;
+            stored = TRUE;
+        }
+    }
+out:
+    pthread_mutex_unlock( &sec_cache_mutex );
+    return stored;
+}
+
+static void build_sec_object_name( UINT64 h1, UINT64 h2, WCHAR *buf, UNICODE_STRING *ustr )
+{
+    static const WCHAR prefix[] = {'\\','K','e','r','n','e','l','O','b','j','e','c','t','s',
+                                   '\\','_','_','w','i','n','e','_','s','e','c','_'};
+    static const char hex[] = "0123456789abcdef";
+    unsigned int pos = ARRAY_SIZE(prefix);
+    int i;
+
+    memcpy( buf, prefix, sizeof(prefix) );
+    for (i = 60; i >= 0; i -= 4) buf[pos++] = hex[(h1 >> i) & 0xf];
+    buf[pos++] = '_';
+    for (i = 60; i >= 0; i -= 4) buf[pos++] = hex[(h2 >> i) & 0xf];
+    buf[pos] = 0;
+
+    ustr->Length = pos * sizeof(WCHAR);
+    ustr->MaximumLength = (pos + 1) * sizeof(WCHAR);
+    ustr->Buffer = buf;
+}
+
+
 /***********************************************************************
  *	open_dll_file
  *
@@ -1106,6 +1372,60 @@ static NTSTATUS open_builtin_pe_file( const char *name, OBJECT_ATTRIBUTES *attr,
     HANDLE mapping;
 
     *module = NULL;
+    if (!build_dir && !offset)
+    {
+        UINT64 h1, h2;
+        WCHAR sec_name_buf[64];
+        UNICODE_STRING sec_ustr;
+        OBJECT_ATTRIBUTES sec_attr;
+        HANDLE file_handle;
+        LARGE_INTEGER sec_size;
+
+        hash_path_128( name, &h1, &h2 );
+        if ((mapping = lookup_sec_cache( name, h1, h2 )))
+        {
+            return virtual_map_builtin_module( mapping, module, size, image_info,
+                                               limit_low, limit_high, machine, prefer_native, offset );
+        }
+
+        build_sec_object_name( h1, h2, sec_name_buf, &sec_ustr );
+        InitializeObjectAttributes( &sec_attr, &sec_ustr, OBJ_OPENIF, 0, NULL );
+        status = NtOpenSection( &mapping, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY |
+                                SECTION_MAP_READ | SECTION_MAP_EXECUTE, &sec_attr );
+        if (status)
+        {
+            if ((status = open_unix_file( &file_handle, name, GENERIC_READ | SYNCHRONIZE, attr, 0,
+                                          FILE_SHARE_READ | FILE_SHARE_DELETE, FILE_OPEN,
+                                          FILE_SYNCHRONOUS_IO_NONALERT | FILE_NON_DIRECTORY_FILE, NULL, 0 )))
+            {
+                if (status != STATUS_OBJECT_PATH_NOT_FOUND && status != STATUS_OBJECT_NAME_NOT_FOUND)
+                {
+                    struct stat st;
+                    if (!stat( name, &st )) return status;
+                }
+                return STATUS_DLL_NOT_FOUND;
+            }
+            sec_size.QuadPart = 0;
+            status = NtCreateSection( &mapping, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY |
+                                      SECTION_MAP_READ | SECTION_MAP_EXECUTE,
+                                      &sec_attr, &sec_size, PAGE_EXECUTE_READ, SEC_IMAGE, file_handle );
+            if (!NT_SUCCESS(status))
+            {
+                status = NtCreateSection( &mapping, STANDARD_RIGHTS_REQUIRED | SECTION_QUERY |
+                                          SECTION_MAP_READ | SECTION_MAP_EXECUTE,
+                                          NULL, &sec_size, PAGE_EXECUTE_READ, SEC_IMAGE, file_handle );
+            }
+            NtClose( file_handle );
+            if (!NT_SUCCESS(status)) return status;
+        }
+
+        status = virtual_map_builtin_module( mapping, module, size, image_info,
+                                             limit_low, limit_high, machine, prefer_native, offset );
+        if (status != STATUS_SUCCESS || !store_sec_cache( name, h1, h2, mapping ))
+            NtClose( mapping );
+        return status;
+    }
+
     status = open_dll_file( name, attr, &mapping );
     if (!status)
     {
@@ -1199,6 +1519,39 @@ static NTSTATUS find_builtin_dll( UNICODE_STRING *nt_name, ANSI_STRING *exp_name
         status = open_builtin_so_file( ptr, &attr, module, image_info,
                                        search_machine, load_machine, prefer_native );
         if (status != STATUS_DLL_NOT_FOUND) goto done;
+    }
+    else
+    {
+        struct builtin_machine_index *idx = get_builtin_machine_index( search_machine );
+        if (idx)
+        {
+            const struct builtin_index_entry *entry = lookup_builtin_index( idx, file + pos + 1 );
+            if (entry)
+            {
+                ptr = file + pos;
+                if (entry->in_pe_dir) ptr = prepend( ptr, pe_dir, strlen(pe_dir) );
+                ptr = prepend( ptr, dll_paths[entry->dir_idx], strlen(dll_paths[entry->dir_idx]) );
+                status = open_builtin_pe_file( ptr, &attr, module, size_ptr, image_info, limit_low, limit_high,
+                                               load_machine, prefer_native, offset );
+                if (status != STATUS_DLL_NOT_FOUND && status != STATUS_NOT_SUPPORTED)
+                {
+                    if (entry->in_pe_dir)
+                    {
+                        ptr = file + pos;
+                        ptr = prepend( ptr, so_dir, strlen(so_dir) );
+                        ptr = prepend( ptr, dll_paths[entry->dir_idx], strlen(dll_paths[entry->dir_idx]) );
+                    }
+                    goto done;
+                }
+            }
+#ifndef SO_DLLS_SUPPORTED
+            else
+            {
+                WARN( "cannot find builtin library for %s\n", debugstr_us(nt_name) );
+                goto done;
+            }
+#endif
+        }
     }
 
     for (i = 0; dll_paths[i]; i++)
