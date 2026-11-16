@@ -3562,8 +3562,12 @@ HRESULT WINAPI SHGetKnownFolderPath(REFKNOWNFOLDERID rfid, DWORD flags, HANDLE t
     if (folder < 0)
         return HRESULT_FROM_WIN32( ERROR_FILE_NOT_FOUND );
 
+    /* KF_FLAG_NO_APPCONTAINER_REDIRECTION is the same bit as the newer SDK's
+     * KF_FLAG_NO_PACKAGE_REDIRECTION (0x00010000). Wine has no package folder
+     * redirection to suppress, so accept it and let it fall through ignored. */
     if (flags & ~(KF_FLAG_CREATE|KF_FLAG_SIMPLE_IDLIST|KF_FLAG_DONT_UNEXPAND|
-        KF_FLAG_DONT_VERIFY|KF_FLAG_NO_ALIAS|KF_FLAG_INIT|KF_FLAG_DEFAULT_PATH|KF_FLAG_NOT_PARENT_RELATIVE))
+        KF_FLAG_DONT_VERIFY|KF_FLAG_NO_ALIAS|KF_FLAG_INIT|KF_FLAG_DEFAULT_PATH|KF_FLAG_NOT_PARENT_RELATIVE|
+        KF_FLAG_NO_APPCONTAINER_REDIRECTION))
     {
         FIXME("flags 0x%08lx not supported\n", flags);
         return E_INVALIDARG;
