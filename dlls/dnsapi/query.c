@@ -37,6 +37,115 @@
 WINE_DEFAULT_DEBUG_CHANNEL(dnsapi);
 
 #define DEFAULT_TTL  1200
+#define MAX_TTL      604800
+#define NEGATIVE_TTL 60
+
+#ifndef DNS_REQUEST_PENDING
+#define DNS_REQUEST_PENDING 9714
+#endif
+
+#ifndef DNS_QUERY_REQUEST_VERSION2
+#define DNS_QUERY_REQUEST_VERSION2 0x2
+#endif
+
+/* TTL-bounded record cache shared by DnsQuery_W and DnsQueryEx (A/AAAA/CNAME/negative).
+ * Keyed on (name, type); stored lists are cloned on hit so callers can
+ * DnsRecordListFree() them freely. */
+#define CACHE_ENTRIES 128
+
+struct cache_entry
+{
+    WCHAR *name;          /* utf-16 key, owned */
+    WORD type;
+    WORD flags;           /* DnsCharSet of stored list */
+    DNS_STATUS status;    /* ERROR_SUCCESS => records list cached, else negative entry */
+    ULONG64 expires;      /* GetTickCount64() domain, ms */
+    DNS_RECORDW *records; /* owned unicode record list, NULL for negative */
+};
+
+static struct cache_entry record_cache[CACHE_ENTRIES];
+static SRWLOCK cache_lock = SRWLOCK_INIT;
+static unsigned int cache_next;
+
+static struct cache_entry *cache_find( const WCHAR *name, WORD type )
+{
+    unsigned int i;
+
+    for (i = 0; i < CACHE_ENTRIES; i++)
+    {
+        struct cache_entry *e = &record_cache[i];
+        if (e->name && e->type == type && !lstrcmpiW( e->name, name )) return e;
+    }
+    return NULL;
+}
+
+static void cache_entry_fill( struct cache_entry *e, const WCHAR *name, WORD type,
+                              DNS_STATUS status, DNS_RECORDW *records )
+{
+    DWORD ttl;
+
+    free( e->name );
+    DnsRecordListFree( (DNS_RECORD *)e->records, DnsFreeRecordList );
+
+    e->name = NULL;
+    e->records = records;
+    e->type = type;
+    e->status = status;
+    e->flags = DnsCharSetUnicode;
+
+    if (status) ttl = NEGATIVE_TTL;
+    else if (records && records->dwTtl) ttl = min( records->dwTtl, (DWORD)MAX_TTL );
+    else ttl = DEFAULT_TTL;
+    e->expires = GetTickCount64() + (ULONG64)ttl * 1000;
+
+    if (name)
+    {
+        DWORD len = lstrlenW( name ) + 1;
+        if ((e->name = malloc( len * sizeof(WCHAR) ))) lstrcpyW( e->name, name );
+    }
+}
+
+/* returns TRUE on hit; on positive hit *result receives a fresh clone */
+static BOOL cache_lookup( const WCHAR *name, WORD type, DNS_STATUS *status, DNS_RECORDW **result )
+{
+    struct cache_entry *e;
+    BOOL hit = FALSE;
+
+    AcquireSRWLockShared( &cache_lock );
+    if ((e = cache_find( name, type )) && GetTickCount64() < e->expires)
+    {
+        hit = TRUE;
+        *status = e->status;
+        if (!e->status)
+        {
+            *result = (DNS_RECORDW *)DnsRecordSetCopyEx( (DNS_RECORD *)e->records,
+                                                         DnsCharSetUnicode, DnsCharSetUnicode );
+        }
+    }
+    ReleaseSRWLockShared( &cache_lock );
+    return hit;
+}
+
+static void cache_store( const WCHAR *name, WORD type, DNS_STATUS status, DNS_RECORDW *records )
+{
+    struct cache_entry *e;
+    DNS_RECORDW *clone = NULL;
+
+    if (status && status != DNS_ERROR_RCODE_NAME_ERROR && status != DNS_INFO_NO_RECORDS) return;
+
+    if (records && !(clone = (DNS_RECORDW *)DnsRecordSetCopyEx( (DNS_RECORD *)records,
+                       DnsCharSetUnicode, DnsCharSetUnicode )))
+        return;
+
+    AcquireSRWLockExclusive( &cache_lock );
+    if (!(e = cache_find( name, type )))
+    {
+        e = &record_cache[cache_next];
+        cache_next = (cache_next + 1) % CACHE_ENTRIES;
+    }
+    cache_entry_fill( e, name, type, status, clone );
+    ReleaseSRWLockExclusive( &cache_lock );
+}
 
 static DNS_STATUS do_query_netbios( PCSTR name, DNS_RECORDA **recp )
 {
@@ -118,14 +227,146 @@ static const char *debugstr_query_request(const DNS_QUERY_REQUEST *req)
             req->pQueryCompletionCallback, req->pQueryContext);
 }
 
+static IP4_ARRAY *dup_server_list( const DNS_ADDR_ARRAY *list )
+{
+    IP4_ARRAY *arr;
+    DWORD i, size;
+
+    if (!list || !list->AddrCount) return NULL;
+    size = FIELD_OFFSET( IP4_ARRAY, AddrArray[list->AddrCount] );
+    if (!(arr = malloc( size ))) return NULL;
+    arr->AddrCount = list->AddrCount;
+    for (i = 0; i < list->AddrCount; i++)
+        arr->AddrArray[i] = ((const SOCKADDR_IN *)list->AddrArray[i].MaxSa)->sin_addr.s_addr;
+    return arr;
+}
+
+struct query_ctx
+{
+    DNS_QUERY_RESULT *result;             /* caller-owned, filled before callback */
+    PDNS_QUERY_COMPLETION_ROUTINE callback;
+    void *context;
+    WCHAR *name;                          /* owned copy */
+    IP4_ARRAY *servers;                   /* owned copy, NULL => default servers */
+    WORD type;
+    DWORD options;
+    volatile LONG canceled;
+};
+
+static void complete_query( struct query_ctx *ctx )
+{
+    DNS_RECORDW *records = NULL;
+    DNS_STATUS status;
+
+    if (InterlockedCompareExchange( &ctx->canceled, 0, 0 )) status = ERROR_CANCELLED;
+    else status = DnsQuery_W( ctx->name, ctx->type, ctx->options, ctx->servers, &records, NULL );
+
+    ctx->result->QueryStatus = status;
+    ctx->result->QueryOptions = ctx->options;
+    ctx->result->pQueryRecords = (DNS_RECORD *)records;
+    ctx->result->Reserved = NULL;
+    ctx->callback( ctx->context, ctx->result );
+}
+
+static DWORD WINAPI query_work( void *param )
+{
+    struct query_ctx *ctx = param;
+
+    complete_query( ctx );
+    free( ctx->name );
+    free( ctx->servers );
+    free( ctx );
+    return 0;
+}
+
 /******************************************************************************
  * DnsQueryEx           [DNSAPI.@]
  *
  */
 DNS_STATUS WINAPI DnsQueryEx(DNS_QUERY_REQUEST *request, DNS_QUERY_RESULT *result, DNS_QUERY_CANCEL *cancel)
 {
-    FIXME("(%s, %p, %p)\n", debugstr_query_request(request), result, cancel);
-    return DNS_ERROR_RCODE_NOT_IMPLEMENTED;
+    struct query_ctx *ctx;
+    DNS_STATUS status;
+
+    TRACE("(%s, %p, %p)\n", debugstr_query_request(request), result, cancel);
+
+    if (!request || !result) return ERROR_INVALID_PARAMETER;
+    if (request->Version != DNS_QUERY_REQUEST_VERSION1 &&
+        request->Version != DNS_QUERY_REQUEST_VERSION2) return ERROR_INVALID_PARAMETER;
+    if (result->Version != DNS_QUERY_RESULTS_VERSION1) return ERROR_INVALID_PARAMETER;
+
+    if (cancel)
+    {
+        memset( cancel->Reserved, 0, sizeof(cancel->Reserved) );
+        if (request->pQueryCompletionCallback)
+        {
+            /* context is published below; cancel flag lives in it */
+        }
+    }
+
+    if (!request->pQueryCompletionCallback)
+    {
+        IP4_ARRAY *servers = dup_server_list( request->pDnsServerList );
+        DNS_RECORDW *records = NULL;
+
+        status = DnsQuery_W( request->QueryName, request->QueryType,
+                             (DWORD)request->QueryOptions, servers, &records, NULL );
+        result->QueryStatus = status;
+        result->QueryOptions = request->QueryOptions;
+        result->pQueryRecords = (DNS_RECORD *)records;
+        result->Reserved = NULL;
+        free( servers );
+        return status;
+    }
+
+    if (!(ctx = calloc( 1, sizeof(*ctx) ))) return ERROR_NOT_ENOUGH_MEMORY;
+    {
+        const WCHAR *name = request->QueryName;
+        DWORD len = (name ? lstrlenW( name ) : 0) + 1;
+        if (!(ctx->name = malloc( len * sizeof(WCHAR) )))
+        {
+            free( ctx );
+            return ERROR_NOT_ENOUGH_MEMORY;
+        }
+        lstrcpyW( ctx->name, name ? name : L"" );
+    }
+    ctx->result = result;
+    ctx->callback = request->pQueryCompletionCallback;
+    ctx->context = request->pQueryContext;
+    ctx->servers = dup_server_list( request->pDnsServerList );
+    ctx->type = request->QueryType;
+    ctx->options = (DWORD)request->QueryOptions;
+    ctx->canceled = 0;
+
+    if (cancel) memcpy( cancel->Reserved, &ctx, sizeof(ctx) );
+
+    if (!QueueUserWorkItem( query_work, ctx, 0 ))
+    {
+        /* threadpool unavailable: complete synchronously */
+        complete_query( ctx );
+        free( ctx->name );
+        free( ctx->servers );
+        status = ctx->result->QueryStatus;
+        free( ctx );
+        return status;
+    }
+    return DNS_REQUEST_PENDING;
+}
+
+/******************************************************************************
+ * DnsCancelQuery       [DNSAPI.@]
+ *
+ */
+DNS_STATUS WINAPI DnsCancelQuery( DNS_QUERY_CANCEL *cancel )
+{
+    struct query_ctx *ctx = NULL;
+
+    TRACE("(%p)\n", cancel);
+
+    if (!cancel) return ERROR_INVALID_PARAMETER;
+    memcpy( &ctx, cancel->Reserved, sizeof(ctx) );
+    if (ctx) InterlockedExchange( &ctx->canceled, 1 );
+    return ERROR_SUCCESS;
 }
 
 /******************************************************************************
@@ -264,6 +505,7 @@ DNS_STATUS WINAPI DnsQuery_W( const WCHAR *name, WORD type, DWORD options, void 
 {
     char *nameU;
     DNS_RECORDA *resultA;
+    DNS_RECORDW *cached = NULL;
     DNS_STATUS status;
 
     TRACE( "(%s, %s, %#lx, %p, %p, %p)\n", debugstr_w(name), debugstr_type( type ),
@@ -271,6 +513,20 @@ DNS_STATUS WINAPI DnsQuery_W( const WCHAR *name, WORD type, DWORD options, void 
 
     if (!name || !result)
         return ERROR_INVALID_PARAMETER;
+
+    if (!(options & DNS_QUERY_BYPASS_CACHE))
+    {
+        status = ERROR_SUCCESS;
+        if (cache_lookup( name, type, &status, &cached ))
+        {
+            TRACE( "cache hit\n" );
+            if (status == ERROR_SUCCESS)
+            {
+                if (!(*result = cached)) return ERROR_NOT_ENOUGH_MEMORY;
+            }
+            return status;
+        }
+    }
 
     nameU = strdup_wu( name );
     if (!nameU) return ERROR_NOT_ENOUGH_MEMORY;
@@ -285,6 +541,9 @@ DNS_STATUS WINAPI DnsQuery_W( const WCHAR *name, WORD type, DWORD options, void 
         if (!*result) status = ERROR_NOT_ENOUGH_MEMORY;
         DnsRecordListFree( (DNS_RECORD *)resultA, DnsFreeRecordList );
     }
+
+    if (!(options & DNS_QUERY_BYPASS_CACHE) && status != ERROR_NOT_ENOUGH_MEMORY)
+        cache_store( name, type, status, status == ERROR_SUCCESS ? *result : NULL );
 
     free( nameU );
     return status;

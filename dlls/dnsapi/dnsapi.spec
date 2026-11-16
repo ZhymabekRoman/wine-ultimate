@@ -77,6 +77,7 @@
 @ stub DnsNameCopy
 @ stub DnsNameCopyAllocate
 @ stub DnsNotifyResolver
+@ stdcall DnsCancelQuery(ptr)
 @ stdcall DnsQuery_A(str long long ptr ptr ptr)
 @ stdcall DnsQueryConfig(long long wstr ptr ptr ptr)
 @ stdcall DnsQueryEx(ptr ptr ptr)
