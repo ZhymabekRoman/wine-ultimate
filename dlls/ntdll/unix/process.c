@@ -34,6 +34,7 @@
 #include <string.h>
 #include <time.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
 #include <sys/time.h>
 #ifdef HAVE_SYS_TIMES_H
 # include <sys/times.h>
@@ -262,16 +263,69 @@ static NTSTATUS get_non_pe_file_info( int fd, struct pe_image_info *info )
 /***********************************************************************
  *           get_pe_file_info
  */
+struct pe_info_cache_entry
+{
+    char                *unix_name;
+    dev_t                dev;
+    ino_t                ino;
+    off_t                size;
+    time_t               mtime_sec;
+    long                 mtime_nsec;
+    struct pe_image_info info;
+};
+
+#define PE_INFO_CACHE_SIZE 32
+static struct pe_info_cache_entry pe_info_cache[PE_INFO_CACHE_SIZE];
+static unsigned int pe_info_cache_next;
+static pthread_mutex_t pe_info_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
+
+static inline void get_stat_mtime( const struct stat *st, time_t *sec, long *nsec )
+{
+    *sec = st->st_mtime;
+#ifdef HAVE_STRUCT_STAT_ST_MTIM_TV_NSEC
+    *nsec = st->st_mtim.tv_nsec;
+#else
+    *nsec = 0;
+#endif
+}
+
 static unsigned int get_pe_file_info( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *nt_name,
                                       char **unix_name, HANDLE *handle, struct pe_image_info *info )
 {
     unsigned int status;
     HANDLE mapping;
+    struct stat st;
+    BOOL have_stat = FALSE;
 
     *handle = 0;
     memset( info, 0, sizeof(*info) );
     if (!(status = get_nt_and_unix_names( attr, nt_name, unix_name, FILE_OPEN, FALSE )))
     {
+        if (*unix_name && !stat( *unix_name, &st ) && S_ISREG( st.st_mode ))
+        {
+            time_t mtime_sec;
+            long mtime_nsec;
+            unsigned int i;
+
+            have_stat = TRUE;
+            get_stat_mtime( &st, &mtime_sec, &mtime_nsec );
+            pthread_mutex_lock( &pe_info_cache_mutex );
+            for (i = 0; i < PE_INFO_CACHE_SIZE; i++)
+            {
+                struct pe_info_cache_entry *e = &pe_info_cache[i];
+                if (e->unix_name &&
+                    e->dev == st.st_dev && e->ino == st.st_ino &&
+                    e->size == st.st_size &&
+                    e->mtime_sec == mtime_sec && e->mtime_nsec == mtime_nsec &&
+                    !strcmp( e->unix_name, *unix_name ))
+                {
+                    *info = e->info;
+                    pthread_mutex_unlock( &pe_info_cache_mutex );
+                    return STATUS_SUCCESS;
+                }
+            }
+            pthread_mutex_unlock( &pe_info_cache_mutex );
+        }
         status = open_unix_file( handle, *unix_name, GENERIC_READ, attr, 0,
                                  FILE_SHARE_READ | FILE_SHARE_DELETE,
                                  FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
@@ -300,6 +354,29 @@ static unsigned int get_pe_file_info( OBJECT_ATTRIBUTES *attr, UNICODE_STRING *n
         SERVER_END_REQ;
         NtClose( mapping );
         if (info->image_charact & IMAGE_FILE_DLL) return STATUS_INVALID_IMAGE_FORMAT;
+        if (!status && have_stat)
+        {
+            char *copy = strdup( *unix_name );
+            if (copy)
+            {
+                struct pe_info_cache_entry *e;
+                time_t mtime_sec;
+                long mtime_nsec;
+
+                get_stat_mtime( &st, &mtime_sec, &mtime_nsec );
+                pthread_mutex_lock( &pe_info_cache_mutex );
+                e = &pe_info_cache[pe_info_cache_next++ % PE_INFO_CACHE_SIZE];
+                free( e->unix_name );
+                e->unix_name  = copy;
+                e->dev        = st.st_dev;
+                e->ino        = st.st_ino;
+                e->size       = st.st_size;
+                e->mtime_sec  = mtime_sec;
+                e->mtime_nsec = mtime_nsec;
+                e->info       = *info;
+                pthread_mutex_unlock( &pe_info_cache_mutex );
+            }
+        }
     }
     else if (status == STATUS_INVALID_IMAGE_NOT_MZ || status == STATUS_INVALID_IMAGE_WIN_16)
     {
@@ -343,12 +420,12 @@ static ULONG get_env_size( const RTL_USER_PROCESS_PARAMETERS *params, char **win
  */
 static int get_unix_curdir( const RTL_USER_PROCESS_PARAMETERS *params )
 {
-    UNICODE_STRING nt_name, true_nt_name;
+    UNICODE_STRING nt_name, true_nt_name = {0};
     OBJECT_ATTRIBUTES attr;
     NTSTATUS status;
     HANDLE handle;
     int fd = -1;
-    char *unix_name;
+    char *unix_name = NULL;
 
     if (get_nt_path( params->CurrentDirectory.DosPath.Buffer, &nt_name )) return -1;
     nt_name.Length = wcslen( nt_name.Buffer ) * sizeof(WCHAR);
@@ -356,6 +433,8 @@ static int get_unix_curdir( const RTL_USER_PROCESS_PARAMETERS *params )
     InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
     status = get_nt_and_unix_names( &attr, &true_nt_name, &unix_name, FILE_OPEN, FALSE );
     if (status) goto done;
+    if (unix_name && (fd = open( unix_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC )) != -1)
+        goto done;
     status = open_unix_file( &handle, unix_name, FILE_TRAVERSE | SYNCHRONIZE, &attr, 0,
                              FILE_SHARE_READ | FILE_SHARE_DELETE,
                              FILE_OPEN, FILE_SYNCHRONOUS_IO_NONALERT, NULL, 0 );
@@ -403,30 +482,301 @@ static BOOL is_unix_console_handle( HANDLE handle )
 /***********************************************************************
  *           spawn_process
  */
+struct zygote_req
+{
+    struct pe_image_info pe_info;
+    ULONG cmdline_len;
+    ULONG winedebug_len;
+    BOOL  detached;
+    BOOL  has_unixdir;
+    BOOL  has_stdin;
+    BOOL  has_stdout;
+};
+
+static pthread_mutex_t zygote_mutex = PTHREAD_MUTEX_INITIALIZER;
+static int zygote_sock = -1;
+static pid_t zygote_pid = -1;
+
+static int read_exact( int fd, void *buf, size_t len )
+{
+    char *p = buf;
+    while (len)
+    {
+        ssize_t r = read( fd, p, len );
+        if (r < 0)
+        {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        if (r == 0) return -1;
+        p += r;
+        len -= r;
+    }
+    return 0;
+}
+
+static int write_exact( int fd, const void *buf, size_t len )
+{
+    const char *p = buf;
+    while (len)
+    {
+        ssize_t r = write( fd, p, len );
+        if (r < 0)
+        {
+            if (errno == EINTR) continue;
+            return -1;
+        }
+        p += r;
+        len -= r;
+    }
+    return 0;
+}
+
+static void DECLSPEC_NORETURN zygote_loop( int sock )
+{
+    for (;;)
+    {
+        struct zygote_req req;
+        char cbuf[CMSG_SPACE( sizeof(int) * 4 )];
+        struct iovec iov = { &req, sizeof(req) };
+        struct msghdr msg = { 0 };
+        struct cmsghdr *cmsg;
+        int fds[4] = { -1, -1, -1, -1 };
+        int nfds = 0, idx = 0;
+        int z_socketfd = -1, z_unixdir = -1, z_stdin_fd = -1, z_stdout_fd = -1;
+        WCHAR *cmdline_buf = NULL;
+        char *winedebug_buf = NULL;
+        ssize_t r;
+        pid_t pid;
+        NTSTATUS ack;
+
+        msg.msg_iov = &iov;
+        msg.msg_iovlen = 1;
+        msg.msg_control = cbuf;
+        msg.msg_controllen = sizeof(cbuf);
+
+        do {
+            r = recvmsg( sock, &msg, 0 );
+        } while (r < 0 && errno == EINTR);
+
+        if (r <= 0) break;
+        if ((size_t)r < sizeof(req))
+        {
+            if (read_exact( sock, (char *)&req + r, sizeof(req) - r ) < 0) break;
+        }
+
+        for (cmsg = CMSG_FIRSTHDR( &msg ); cmsg; cmsg = CMSG_NXTHDR( &msg, cmsg ))
+        {
+            if (cmsg->cmsg_level == SOL_SOCKET && cmsg->cmsg_type == SCM_RIGHTS)
+            {
+                int count = (cmsg->cmsg_len - CMSG_LEN(0)) / sizeof(int);
+                if (count > 4) count = 4;
+                memcpy( fds, CMSG_DATA(cmsg), count * sizeof(int) );
+                nfds = count;
+                break;
+            }
+        }
+
+        if (idx < nfds) z_socketfd = fds[idx++];
+        if (req.has_unixdir && idx < nfds) z_unixdir = fds[idx++];
+        if (req.has_stdin && idx < nfds) z_stdin_fd = fds[idx++];
+        if (req.has_stdout && idx < nfds) z_stdout_fd = fds[idx++];
+
+        if (req.cmdline_len)
+        {
+            if (!(cmdline_buf = malloc( req.cmdline_len ))) break;
+            if (read_exact( sock, cmdline_buf, req.cmdline_len ) < 0) { free( cmdline_buf ); break; }
+        }
+        if (req.winedebug_len)
+        {
+            if (!(winedebug_buf = malloc( req.winedebug_len ))) { free( cmdline_buf ); break; }
+            if (read_exact( sock, winedebug_buf, req.winedebug_len ) < 0) { free( cmdline_buf ); free( winedebug_buf ); break; }
+        }
+
+        if (!(pid = fork()))
+        {
+            if (!(pid = vfork()))
+            {
+                UNICODE_STRING cmd_us;
+                char **argv;
+
+                close( sock );
+                if (req.detached)
+                {
+                    setsid();
+                    set_stdio_fd( -1, -1 );
+                }
+                else set_stdio_fd( z_stdin_fd, z_stdout_fd );
+
+                if (z_stdin_fd != -1 && z_stdin_fd != 0) close( z_stdin_fd );
+                if (z_stdout_fd != -1 && z_stdout_fd != 1) close( z_stdout_fd );
+
+                if (winedebug_buf) putenv( winedebug_buf );
+                if (z_unixdir != -1)
+                {
+                    fchdir( z_unixdir );
+                    close( z_unixdir );
+                }
+                cmd_us.Length = cmd_us.MaximumLength = req.cmdline_len;
+                cmd_us.Buffer = cmdline_buf;
+                argv = build_argv( &cmd_us, 2 );
+
+                exec_wineloader( argv, z_socketfd, &req.pe_info );
+                _exit(1);
+            }
+            _exit(pid == -1);
+        }
+
+        if (z_socketfd != -1) close( z_socketfd );
+        if (z_unixdir != -1) close( z_unixdir );
+        if (z_stdin_fd != -1) close( z_stdin_fd );
+        if (z_stdout_fd != -1) close( z_stdout_fd );
+        free( cmdline_buf );
+        free( winedebug_buf );
+
+        if (pid != -1)
+        {
+            pid_t wret;
+            do {
+                wret = waitpid( pid, NULL, 0 );
+            } while (wret < 0 && errno == EINTR);
+            ack = STATUS_SUCCESS;
+        }
+        else ack = STATUS_NO_MEMORY;
+
+        if (write_exact( sock, &ack, sizeof(ack) ) < 0) break;
+    }
+    _exit(0);
+}
+
+static int start_zygote( void )
+{
+    int sv[2];
+    pid_t pid;
+
+    if (socketpair( PF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv ) == -1) return -1;
+    pid = fork();
+    if (pid == -1)
+    {
+        close( sv[0] );
+        close( sv[1] );
+        return -1;
+    }
+    if (pid == 0)
+    {
+        close( sv[0] );
+        zygote_loop( sv[1] );
+    }
+    close( sv[1] );
+    zygote_sock = sv[0];
+    zygote_pid = pid;
+    return 0;
+}
+
+static int zygote_spawn( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
+                         int unixdir, int stdin_fd, int stdout_fd, BOOL detached,
+                         const char *winedebug, const struct pe_image_info *pe_info, NTSTATUS *out_status )
+{
+    struct zygote_req req;
+    char cbuf[CMSG_SPACE( sizeof(int) * 4 )];
+    struct iovec iov = { &req, sizeof(req) };
+    struct msghdr msg = { 0 };
+    struct cmsghdr *cmsg;
+    int fds[4];
+    int nfds = 0;
+    ssize_t r;
+
+    pthread_mutex_lock( &zygote_mutex );
+    if (zygote_sock == -1 && start_zygote() < 0)
+    {
+        pthread_mutex_unlock( &zygote_mutex );
+        return -1;
+    }
+
+    memset( &req, 0, sizeof(req) );
+    req.pe_info       = *pe_info;
+    req.cmdline_len   = params->CommandLine.Length;
+    req.winedebug_len = winedebug ? strlen( winedebug ) + 1 : 0;
+    req.detached      = detached;
+    req.has_unixdir   = (unixdir != -1);
+    req.has_stdin     = (!detached && stdin_fd != -1);
+    req.has_stdout    = (!detached && stdout_fd != -1);
+
+    fds[nfds++] = socketfd;
+    if (req.has_unixdir) fds[nfds++] = unixdir;
+    if (req.has_stdin) fds[nfds++] = stdin_fd;
+    if (req.has_stdout) fds[nfds++] = stdout_fd;
+
+    msg.msg_iov = &iov;
+    msg.msg_iovlen = 1;
+    msg.msg_control = cbuf;
+    msg.msg_controllen = CMSG_SPACE( sizeof(int) * nfds );
+    cmsg = CMSG_FIRSTHDR( &msg );
+    cmsg->cmsg_level = SOL_SOCKET;
+    cmsg->cmsg_type = SCM_RIGHTS;
+    cmsg->cmsg_len = CMSG_LEN( sizeof(int) * nfds );
+    memcpy( CMSG_DATA(cmsg), fds, sizeof(int) * nfds );
+
+    do {
+        r = sendmsg( zygote_sock, &msg, MSG_NOSIGNAL );
+    } while (r < 0 && errno == EINTR);
+
+    if (r != sizeof(req) ||
+        (req.cmdline_len && write_exact( zygote_sock, params->CommandLine.Buffer, req.cmdline_len ) < 0) ||
+        (req.winedebug_len && write_exact( zygote_sock, winedebug, req.winedebug_len ) < 0) ||
+        read_exact( zygote_sock, out_status, sizeof(*out_status) ) < 0)
+    {
+        close( zygote_sock );
+        if (zygote_pid > 0) waitpid( zygote_pid, NULL, WNOHANG );
+        zygote_sock = -1;
+        zygote_pid = -1;
+        pthread_mutex_unlock( &zygote_mutex );
+        return -1;
+    }
+
+    pthread_mutex_unlock( &zygote_mutex );
+    return 0;
+}
+
 static NTSTATUS spawn_process( const RTL_USER_PROCESS_PARAMETERS *params, int socketfd,
                                int unixdir, char *winedebug, const struct pe_image_info *pe_info )
 {
     NTSTATUS status = STATUS_SUCCESS;
     int stdin_fd = -1, stdout_fd = -1;
+    BOOL detached;
     pid_t pid;
     char **argv;
 
-    if (wine_server_handle_to_fd( params->hStdInput, FILE_READ_DATA, &stdin_fd, NULL ) &&
-        isatty(0) && is_unix_console_handle( params->hStdInput ))
-        stdin_fd = 0;
+    detached = (peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
+               params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
+               params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
+               params->ConsoleHandle == NULL;
 
-    if (wine_server_handle_to_fd( params->hStdOutput, FILE_WRITE_DATA, &stdout_fd, NULL ) &&
-        isatty(1) && is_unix_console_handle( params->hStdOutput ))
-        stdout_fd = 1;
+    if (!detached)
+    {
+        if (params->hStdInput &&
+            wine_server_handle_to_fd( params->hStdInput, FILE_READ_DATA, &stdin_fd, NULL ) &&
+            isatty(0) && is_unix_console_handle( params->hStdInput ))
+            stdin_fd = 0;
+
+        if (params->hStdOutput &&
+            wine_server_handle_to_fd( params->hStdOutput, FILE_WRITE_DATA, &stdout_fd, NULL ) &&
+            isatty(1) && is_unix_console_handle( params->hStdOutput ))
+            stdout_fd = 1;
+    }
+
+    if (zygote_spawn( params, socketfd, unixdir, stdin_fd, stdout_fd, detached, winedebug, pe_info, &status ) == 0)
+    {
+        if (stdin_fd != -1 && stdin_fd != 0) close( stdin_fd );
+        if (stdout_fd != -1 && stdout_fd != 1) close( stdout_fd );
+        return status;
+    }
 
     if (!(pid = fork()))  /* child */
     {
         if (!(pid = vfork()))  /* grandchild */
         {
-            if ((peb->ProcessParameters && params->ProcessGroupId != peb->ProcessParameters->ProcessGroupId) ||
-                params->ConsoleHandle == CONSOLE_HANDLE_ALLOC ||
-                params->ConsoleHandle == CONSOLE_HANDLE_ALLOC_NO_WINDOW ||
-                params->ConsoleHandle == NULL)
+            if (detached)
             {
                 setsid();
                 set_stdio_fd( -1, -1 );  /* close stdin and stdout */
