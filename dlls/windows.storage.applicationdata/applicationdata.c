@@ -391,6 +391,7 @@ struct application_data
 {
     IApplicationData IApplicationData_iface;
     IApplicationData2 IApplicationData2_iface;
+    IApplicationData3 IApplicationData3_iface;
     IApplicationDataMethods IApplicationDataMethods_iface;
     struct IApplicationDataGetForApplication IApplicationDataGetForApplication_iface;
     LONG ref;
@@ -411,6 +412,11 @@ static inline struct application_data *impl_from_IApplicationData2( IApplication
     return CONTAINING_RECORD( iface, struct application_data, IApplicationData2_iface );
 }
 
+static inline struct application_data *impl_from_IApplicationData3( IApplicationData3 *iface )
+{
+    return CONTAINING_RECORD( iface, struct application_data, IApplicationData3_iface );
+}
+
 static inline struct application_data *impl_from_IApplicationDataMethods( IApplicationDataMethods *iface )
 {
     return CONTAINING_RECORD( iface, struct application_data, IApplicationDataMethods_iface );
@@ -418,6 +424,7 @@ static inline struct application_data *impl_from_IApplicationDataMethods( IAppli
 
 static const struct IApplicationDataVtbl application_data_vtbl;
 static const struct IApplicationData2Vtbl application_data2_vtbl;
+static const struct IApplicationData3Vtbl application_data3_vtbl;
 static const struct IApplicationDataMethodsVtbl application_data_methods_vtbl;
 static const struct IApplicationDataGetForApplicationVtbl application_data_getforapp_vtbl;
 
@@ -440,6 +447,13 @@ static HRESULT WINAPI application_data_qi_impl( IApplicationData *iface, REFIID 
     if (IsEqualGUID( iid, &IID_IApplicationData2 ))
     {
         *out = &impl->IApplicationData2_iface;
+        IInspectable_AddRef( (IInspectable *)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IApplicationData3 ))
+    {
+        *out = &impl->IApplicationData3_iface;
         IInspectable_AddRef( (IInspectable *)*out );
         return S_OK;
     }
@@ -1111,6 +1125,9 @@ static void reg_store_value( HKEY hkey, HSTRING key, IInspectable *value )
 struct settings_values
 {
     IPropertySet IPropertySet_iface;
+    IMap_HSTRING_IInspectable IMap_iface;
+    IIterable_IKeyValuePair_HSTRING_IInspectable IIterable_iface;
+    IObservableMap_HSTRING_IInspectable IObservableMap_iface;
     LONG ref;
     IPropertySet *inner;
     HKEY hkey;
@@ -1122,6 +1139,21 @@ struct settings_values
 static inline struct settings_values *impl_from_IPropertySet( IPropertySet *iface )
 {
     return CONTAINING_RECORD( iface, struct settings_values, IPropertySet_iface );
+}
+
+static inline struct settings_values *impl_from_IMap( IMap_HSTRING_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct settings_values, IMap_iface );
+}
+
+static inline struct settings_values *impl_from_IIterable( IIterable_IKeyValuePair_HSTRING_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct settings_values, IIterable_iface );
+}
+
+static inline struct settings_values *impl_from_IObservableMap( IObservableMap_HSTRING_IInspectable *iface )
+{
+    return CONTAINING_RECORD( iface, struct settings_values, IObservableMap_iface );
 }
 
 struct settings_vtbl
@@ -1158,13 +1190,27 @@ static HRESULT WINAPI settings_values_QueryInterface( IPropertySet *iface, REFII
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
-        IsEqualGUID( iid, &IID_IPropertySet ) ||
-        IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ))
+        IsEqualGUID( iid, &IID_IPropertySet ))
     {
         *out = &impl->IPropertySet_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ))
+    {
+        *out = &impl->IMap_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ))
+    {
+        *out = &impl->IIterable_iface;
+        InterlockedIncrement( &impl->ref );
+        return S_OK;
+    }
+    if (IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ))
+    {
+        *out = &impl->IObservableMap_iface;
         InterlockedIncrement( &impl->ref );
         return S_OK;
     }
@@ -1220,7 +1266,8 @@ static HRESULT WINAPI settings_values_GetIids( IPropertySet *iface, ULONG *count
 
 static HRESULT WINAPI settings_values_GetRuntimeClassName( IPropertySet *iface, HSTRING *name )
 {
-    return WindowsCreateString( L"Windows.Foundation.Collections.PropertySet", 44, name );
+    static const WCHAR class_name[] = L"Windows.Foundation.Collections.PropertySet";
+    return WindowsCreateString( class_name, ARRAY_SIZE(class_name) - 1, name );
 }
 
 static HRESULT WINAPI settings_values_GetTrustLevel( IPropertySet *iface, TrustLevel *level )
@@ -1330,6 +1377,198 @@ static const struct settings_vtbl settings_values_vtbl =
     settings_values_remove_MapChanged,
 };
 
+static HRESULT WINAPI settings_map_QueryInterface( IMap_HSTRING_IInspectable *iface, REFIID iid, void **out )
+{
+    return settings_values_QueryInterface( &impl_from_IMap( iface )->IPropertySet_iface, iid, out );
+}
+
+static ULONG WINAPI settings_map_AddRef( IMap_HSTRING_IInspectable *iface )
+{
+    return settings_values_AddRef( &impl_from_IMap( iface )->IPropertySet_iface );
+}
+
+static ULONG WINAPI settings_map_Release( IMap_HSTRING_IInspectable *iface )
+{
+    return settings_values_Release( &impl_from_IMap( iface )->IPropertySet_iface );
+}
+
+static HRESULT WINAPI settings_map_GetIids( IMap_HSTRING_IInspectable *iface, ULONG *count, IID **iids )
+{
+    return settings_values_GetIids( &impl_from_IMap( iface )->IPropertySet_iface, count, iids );
+}
+
+static HRESULT WINAPI settings_map_GetRuntimeClassName( IMap_HSTRING_IInspectable *iface, HSTRING *name )
+{
+    return settings_values_GetRuntimeClassName( &impl_from_IMap( iface )->IPropertySet_iface, name );
+}
+
+static HRESULT WINAPI settings_map_GetTrustLevel( IMap_HSTRING_IInspectable *iface, TrustLevel *level )
+{
+    return settings_values_GetTrustLevel( &impl_from_IMap( iface )->IPropertySet_iface, level );
+}
+
+static HRESULT WINAPI settings_map_Lookup( IMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable **value )
+{
+    return settings_values_Lookup( &impl_from_IMap( iface )->IPropertySet_iface, key, value );
+}
+
+static HRESULT WINAPI settings_map_get_Size( IMap_HSTRING_IInspectable *iface, unsigned int *size )
+{
+    return settings_values_get_Size( &impl_from_IMap( iface )->IPropertySet_iface, size );
+}
+
+static HRESULT WINAPI settings_map_HasKey( IMap_HSTRING_IInspectable *iface, HSTRING key, boolean *found )
+{
+    return settings_values_HasKey( &impl_from_IMap( iface )->IPropertySet_iface, key, found );
+}
+
+static HRESULT WINAPI settings_map_GetView( IMap_HSTRING_IInspectable *iface, IMapView_HSTRING_IInspectable **view )
+{
+    return settings_values_GetView( &impl_from_IMap( iface )->IPropertySet_iface, view );
+}
+
+static HRESULT WINAPI settings_map_Insert( IMap_HSTRING_IInspectable *iface, HSTRING key, IInspectable *value, boolean *replaced )
+{
+    return settings_values_Insert( &impl_from_IMap( iface )->IPropertySet_iface, key, value, replaced );
+}
+
+static HRESULT WINAPI settings_map_Remove( IMap_HSTRING_IInspectable *iface, HSTRING key )
+{
+    return settings_values_Remove( &impl_from_IMap( iface )->IPropertySet_iface, key );
+}
+
+static HRESULT WINAPI settings_map_Clear( IMap_HSTRING_IInspectable *iface )
+{
+    return settings_values_Clear( &impl_from_IMap( iface )->IPropertySet_iface );
+}
+
+static const struct IMap_HSTRING_IInspectableVtbl settings_map_vtbl =
+{
+    settings_map_QueryInterface,
+    settings_map_AddRef,
+    settings_map_Release,
+    settings_map_GetIids,
+    settings_map_GetRuntimeClassName,
+    settings_map_GetTrustLevel,
+    settings_map_Lookup,
+    settings_map_get_Size,
+    settings_map_HasKey,
+    settings_map_GetView,
+    settings_map_Insert,
+    settings_map_Remove,
+    settings_map_Clear,
+};
+
+static HRESULT WINAPI settings_iterable_QueryInterface( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, REFIID iid, void **out )
+{
+    return settings_values_QueryInterface( &impl_from_IIterable( iface )->IPropertySet_iface, iid, out );
+}
+
+static ULONG WINAPI settings_iterable_AddRef( IIterable_IKeyValuePair_HSTRING_IInspectable *iface )
+{
+    return settings_values_AddRef( &impl_from_IIterable( iface )->IPropertySet_iface );
+}
+
+static ULONG WINAPI settings_iterable_Release( IIterable_IKeyValuePair_HSTRING_IInspectable *iface )
+{
+    return settings_values_Release( &impl_from_IIterable( iface )->IPropertySet_iface );
+}
+
+static HRESULT WINAPI settings_iterable_GetIids( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, ULONG *count, IID **iids )
+{
+    return settings_values_GetIids( &impl_from_IIterable( iface )->IPropertySet_iface, count, iids );
+}
+
+static HRESULT WINAPI settings_iterable_GetRuntimeClassName( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, HSTRING *name )
+{
+    return settings_values_GetRuntimeClassName( &impl_from_IIterable( iface )->IPropertySet_iface, name );
+}
+
+static HRESULT WINAPI settings_iterable_GetTrustLevel( IIterable_IKeyValuePair_HSTRING_IInspectable *iface, TrustLevel *level )
+{
+    return settings_values_GetTrustLevel( &impl_from_IIterable( iface )->IPropertySet_iface, level );
+}
+
+static HRESULT WINAPI settings_iterable_First( IIterable_IKeyValuePair_HSTRING_IInspectable *iface,
+                                               IIterator_IKeyValuePair_HSTRING_IInspectable **first )
+{
+    struct settings_values *impl = impl_from_IIterable( iface );
+    IIterable_IKeyValuePair_HSTRING_IInspectable *inner_iter;
+    HRESULT hr;
+
+    if (FAILED(hr = IPropertySet_QueryInterface( impl->inner, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable, (void **)&inner_iter )))
+        return hr;
+    hr = IIterable_IKeyValuePair_HSTRING_IInspectable_First( inner_iter, first );
+    IIterable_IKeyValuePair_HSTRING_IInspectable_Release( inner_iter );
+    return hr;
+}
+
+static const struct IIterable_IKeyValuePair_HSTRING_IInspectableVtbl settings_iterable_vtbl =
+{
+    settings_iterable_QueryInterface,
+    settings_iterable_AddRef,
+    settings_iterable_Release,
+    settings_iterable_GetIids,
+    settings_iterable_GetRuntimeClassName,
+    settings_iterable_GetTrustLevel,
+    settings_iterable_First,
+};
+
+static HRESULT WINAPI settings_observable_QueryInterface( IObservableMap_HSTRING_IInspectable *iface, REFIID iid, void **out )
+{
+    return settings_values_QueryInterface( &impl_from_IObservableMap( iface )->IPropertySet_iface, iid, out );
+}
+
+static ULONG WINAPI settings_observable_AddRef( IObservableMap_HSTRING_IInspectable *iface )
+{
+    return settings_values_AddRef( &impl_from_IObservableMap( iface )->IPropertySet_iface );
+}
+
+static ULONG WINAPI settings_observable_Release( IObservableMap_HSTRING_IInspectable *iface )
+{
+    return settings_values_Release( &impl_from_IObservableMap( iface )->IPropertySet_iface );
+}
+
+static HRESULT WINAPI settings_observable_GetIids( IObservableMap_HSTRING_IInspectable *iface, ULONG *count, IID **iids )
+{
+    return settings_values_GetIids( &impl_from_IObservableMap( iface )->IPropertySet_iface, count, iids );
+}
+
+static HRESULT WINAPI settings_observable_GetRuntimeClassName( IObservableMap_HSTRING_IInspectable *iface, HSTRING *name )
+{
+    return settings_values_GetRuntimeClassName( &impl_from_IObservableMap( iface )->IPropertySet_iface, name );
+}
+
+static HRESULT WINAPI settings_observable_GetTrustLevel( IObservableMap_HSTRING_IInspectable *iface, TrustLevel *level )
+{
+    return settings_values_GetTrustLevel( &impl_from_IObservableMap( iface )->IPropertySet_iface, level );
+}
+
+static HRESULT WINAPI settings_observable_add_MapChanged( IObservableMap_HSTRING_IInspectable *iface,
+                                                          IMapChangedEventHandler_HSTRING_IInspectable *handler,
+                                                          EventRegistrationToken *token )
+{
+    return settings_values_add_MapChanged( &impl_from_IObservableMap( iface )->IPropertySet_iface, handler, token );
+}
+
+static HRESULT WINAPI settings_observable_remove_MapChanged( IObservableMap_HSTRING_IInspectable *iface,
+                                                             EventRegistrationToken token )
+{
+    return settings_values_remove_MapChanged( &impl_from_IObservableMap( iface )->IPropertySet_iface, token );
+}
+
+static const struct IObservableMap_HSTRING_IInspectableVtbl settings_observable_vtbl =
+{
+    settings_observable_QueryInterface,
+    settings_observable_AddRef,
+    settings_observable_Release,
+    settings_observable_GetIids,
+    settings_observable_GetRuntimeClassName,
+    settings_observable_GetTrustLevel,
+    settings_observable_add_MapChanged,
+    settings_observable_remove_MapChanged,
+};
+
 static HRESULT settings_values_create( struct application_data *owner, const WCHAR *subkey, IPropertySet **out )
 {
     static const WCHAR class_name[] = L"Windows.Foundation.Collections.PropertySet";
@@ -1339,6 +1578,9 @@ static HRESULT settings_values_create( struct application_data *owner, const WCH
 
     if (!(impl = calloc( 1, sizeof(*impl) ))) return E_OUTOFMEMORY;
     impl->IPropertySet_iface.lpVtbl = (const struct IPropertySetVtbl *)&settings_values_vtbl;
+    impl->IMap_iface.lpVtbl = &settings_map_vtbl;
+    impl->IIterable_iface.lpVtbl = &settings_iterable_vtbl;
+    impl->IObservableMap_iface.lpVtbl = &settings_observable_vtbl;
     impl->ref = 1;
     impl->owner = owner;
 
@@ -2169,6 +2411,70 @@ static const struct IApplicationData2Vtbl application_data2_vtbl =
     application_data2_get_LocalCacheFolder,
 };
 
+static HRESULT WINAPI application_data3_QueryInterface( IApplicationData3 *iface, REFIID iid, void **out )
+{
+    return application_data_QueryInterface( &impl_from_IApplicationData3( iface )->IApplicationData_iface, iid, out );
+}
+static ULONG WINAPI application_data3_AddRef( IApplicationData3 *iface )
+{
+    return application_data_AddRef( &impl_from_IApplicationData3( iface )->IApplicationData_iface );
+}
+static ULONG WINAPI application_data3_Release( IApplicationData3 *iface )
+{
+    return application_data_Release( &impl_from_IApplicationData3( iface )->IApplicationData_iface );
+}
+static HRESULT WINAPI application_data3_GetIids( IApplicationData3 *iface, ULONG *count, IID **iids )
+{
+    return application_data_GetIids( &impl_from_IApplicationData3( iface )->IApplicationData_iface, count, iids );
+}
+static HRESULT WINAPI application_data3_GetRuntimeClassName( IApplicationData3 *iface, HSTRING *name )
+{
+    return application_data_GetRuntimeClassName( &impl_from_IApplicationData3( iface )->IApplicationData_iface, name );
+}
+static HRESULT WINAPI application_data3_GetTrustLevel( IApplicationData3 *iface, TrustLevel *level )
+{
+    if (level) *level = BaseTrust; return S_OK;
+}
+static HRESULT WINAPI application_data3_GetPublisherCacheFolder( IApplicationData3 *iface, HSTRING folder_name, IStorageFolder **value )
+{
+    const WCHAR *sub = WindowsGetStringRawBuffer( folder_name, NULL );
+    WCHAR rel[MAX_PATH];
+
+    TRACE( "iface %p, folder_name %s, value %p\n", iface, debugstr_w(sub), value );
+    if (!value) return E_POINTER;
+    if (sub && sub[0])
+        swprintf( rel, ARRAY_SIZE(rel), L"PublisherCache\\%s", sub );
+    else
+        lstrcpyW( rel, L"PublisherCache" );
+    return appdata_folder_create( rel, value );
+}
+static HRESULT WINAPI application_data3_ClearPublisherCacheFolderAsync( IApplicationData3 *iface, HSTRING folder_name, IAsyncAction **operation )
+{
+    FIXME( "iface %p, folder_name %s, operation %p stub!\n", iface, debugstr_hstring(folder_name), operation );
+    return E_NOTIMPL;
+}
+static HRESULT WINAPI application_data3_get_SharedLocalFolder( IApplicationData3 *iface, IStorageFolder **value )
+{
+    TRACE( "iface %p, value %p\n", iface, value );
+    if (!value) return E_POINTER;
+    return appdata_folder_create( L"SharedLocal", value );
+}
+
+static const struct IApplicationData3Vtbl application_data3_vtbl =
+{
+    application_data3_QueryInterface,
+    application_data3_AddRef,
+    application_data3_Release,
+    /* IInspectable methods */
+    application_data3_GetIids,
+    application_data3_GetRuntimeClassName,
+    application_data3_GetTrustLevel,
+    /* IApplicationData3 methods */
+    application_data3_GetPublisherCacheFolder,
+    application_data3_ClearPublisherCacheFolderAsync,
+    application_data3_get_SharedLocalFolder,
+};
+
 DEFINE_IINSPECTABLE( application_data_statics, IApplicationDataStatics, struct application_data_statics, IActivationFactory_iface )
 
 /* IApplicationData.Current is a process-wide singleton on Windows: the CLR RCW
@@ -2186,6 +2492,7 @@ static struct application_data *application_data_current( void )
         if (!(impl = calloc( 1, sizeof(*impl) ))) return NULL;
         impl->IApplicationData_iface.lpVtbl = &application_data_vtbl;
         impl->IApplicationData2_iface.lpVtbl = &application_data2_vtbl;
+        impl->IApplicationData3_iface.lpVtbl = &application_data3_vtbl;
         impl->IApplicationDataMethods_iface.lpVtbl = &application_data_methods_vtbl;
         impl->IApplicationDataGetForApplication_iface.lpVtbl = &application_data_getforapp_vtbl;
         impl->ref = 1;
