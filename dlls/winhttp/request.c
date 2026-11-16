@@ -1001,15 +1001,17 @@ static WCHAR *build_absolute_request_path( struct request *request, const WCHAR 
 
 static WCHAR *build_request_string( struct request *request )
 {
-    WCHAR *path, *ret;
-    unsigned int i, len;
+    WCHAR *path, *ret, *p;
+    unsigned int i, len, verb_len, path_len, ver_len;
 
     if (!wcsicmp( request->connect->hostname, request->connect->servername )) path = request->path;
     else if (!(path = build_absolute_request_path( request, NULL ))) return NULL;
 
-    len = lstrlenW( request->verb ) + 1 /* ' ' */;
-    len += lstrlenW( path ) + 1 /* ' ' */;
-    len += lstrlenW( request->version );
+    verb_len = lstrlenW( request->verb );
+    path_len = lstrlenW( path );
+    ver_len = lstrlenW( request->version );
+
+    len = verb_len + 1 + path_len + 1 + ver_len;
 
     for (i = 0; i < request->num_headers; i++)
     {
@@ -1018,25 +1020,34 @@ static WCHAR *build_request_string( struct request *request )
     }
     len += 4; /* '\r\n\r\n' */
 
-    if ((ret = malloc( (len + 1) * sizeof(WCHAR) )))
+    if ((ret = p = malloc( (len + 1) * sizeof(WCHAR) )))
     {
-        lstrcpyW( ret, request->verb );
-        lstrcatW( ret, L" " );
-        lstrcatW( ret, path );
-        lstrcatW( ret, L" " );
-        lstrcatW( ret, request->version );
+        memcpy( p, request->verb, verb_len * sizeof(WCHAR) );
+        p += verb_len;
+        *p++ = ' ';
+        memcpy( p, path, path_len * sizeof(WCHAR) );
+        p += path_len;
+        *p++ = ' ';
+        memcpy( p, request->version, ver_len * sizeof(WCHAR) );
+        p += ver_len;
 
         for (i = 0; i < request->num_headers; i++)
         {
             if (request->headers[i].is_request)
             {
-                lstrcatW( ret, L"\r\n" );
-                lstrcatW( ret, request->headers[i].field );
-                lstrcatW( ret, L": " );
-                lstrcatW( ret, request->headers[i].value );
+                unsigned int flen = lstrlenW( request->headers[i].field );
+                unsigned int vlen = lstrlenW( request->headers[i].value );
+                *p++ = '\r';
+                *p++ = '\n';
+                memcpy( p, request->headers[i].field, flen * sizeof(WCHAR) );
+                p += flen;
+                *p++ = ':';
+                *p++ = ' ';
+                memcpy( p, request->headers[i].value, vlen * sizeof(WCHAR) );
+                p += vlen;
             }
         }
-        lstrcatW( ret, L"\r\n\r\n" );
+        memcpy( p, L"\r\n\r\n", 5 * sizeof(WCHAR) );
     }
 
     if (path != request->path) free( path );
@@ -1957,27 +1968,103 @@ static DWORD map_secure_protocols( DWORD mask )
     return ret;
 }
 
+#define CRED_CACHE_SIZE 16
+
+struct cred_cache_entry
+{
+    DWORD enabled_protocols;
+    CredHandle cred_handle;
+};
+
+static struct cred_cache_entry cred_cache[CRED_CACHE_SIZE];
+static unsigned int cred_cache_count;
+static SRWLOCK cred_cache_lock = SRWLOCK_INIT;
+
+void cred_cache_unload( void )
+{
+    unsigned int i;
+
+    AcquireSRWLockExclusive( &cred_cache_lock );
+    for (i = 0; i < cred_cache_count; i++)
+        FreeCredentialsHandle( &cred_cache[i].cred_handle );
+    cred_cache_count = 0;
+    ReleaseSRWLockExclusive( &cred_cache_lock );
+}
+
 static DWORD ensure_cred_handle( struct request *request )
 {
     SECURITY_STATUS status = SEC_E_OK;
+    DWORD enabled_protocols;
+    SCHANNEL_CRED cred;
+    unsigned int i;
 
     if (request->cred_handle_initialized) return ERROR_SUCCESS;
 
-    if (!request->cred_handle_initialized)
+    enabled_protocols = map_secure_protocols( request->connect->session->secure_protocols );
+
+    if (!request->client_cert)
     {
-        SCHANNEL_CRED cred;
+        AcquireSRWLockShared( &cred_cache_lock );
+        for (i = 0; i < cred_cache_count; i++)
+        {
+            if (cred_cache[i].enabled_protocols == enabled_protocols)
+            {
+                request->cred_handle = cred_cache[i].cred_handle;
+                request->cred_handle_initialized = TRUE;
+                request->cred_handle_cached = TRUE;
+                ReleaseSRWLockShared( &cred_cache_lock );
+                return ERROR_SUCCESS;
+            }
+        }
+        ReleaseSRWLockShared( &cred_cache_lock );
+
+        AcquireSRWLockExclusive( &cred_cache_lock );
+        for (i = 0; i < cred_cache_count; i++)
+        {
+            if (cred_cache[i].enabled_protocols == enabled_protocols)
+            {
+                request->cred_handle = cred_cache[i].cred_handle;
+                request->cred_handle_initialized = TRUE;
+                request->cred_handle_cached = TRUE;
+                ReleaseSRWLockExclusive( &cred_cache_lock );
+                return ERROR_SUCCESS;
+            }
+        }
+
         memset( &cred, 0, sizeof(cred) );
         cred.dwVersion             = SCHANNEL_CRED_VERSION;
-        cred.grbitEnabledProtocols = map_secure_protocols( request->connect->session->secure_protocols );
-        if (request->client_cert)
-        {
-            cred.paCred = &request->client_cert;
-            cred.cCreds = 1;
-        }
+        cred.grbitEnabledProtocols = enabled_protocols;
         status = AcquireCredentialsHandleW( NULL, (WCHAR *)UNISP_NAME_W, SECPKG_CRED_OUTBOUND, NULL,
                                             &cred, NULL, NULL, &request->cred_handle, NULL );
         if (status == SEC_E_OK)
+        {
             request->cred_handle_initialized = TRUE;
+            if (cred_cache_count < CRED_CACHE_SIZE)
+            {
+                cred_cache[cred_cache_count].enabled_protocols = enabled_protocols;
+                cred_cache[cred_cache_count].cred_handle = request->cred_handle;
+                cred_cache_count++;
+                request->cred_handle_cached = TRUE;
+            }
+            else
+                request->cred_handle_cached = FALSE;
+        }
+        ReleaseSRWLockExclusive( &cred_cache_lock );
+    }
+    else
+    {
+        memset( &cred, 0, sizeof(cred) );
+        cred.dwVersion             = SCHANNEL_CRED_VERSION;
+        cred.grbitEnabledProtocols = enabled_protocols;
+        cred.paCred = &request->client_cert;
+        cred.cCreds = 1;
+        status = AcquireCredentialsHandleW( NULL, (WCHAR *)UNISP_NAME_W, SECPKG_CRED_OUTBOUND, NULL,
+                                            &cred, NULL, NULL, &request->cred_handle, NULL );
+        if (status == SEC_E_OK)
+        {
+            request->cred_handle_initialized = TRUE;
+            request->cred_handle_cached = FALSE;
+        }
     }
 
     if (status != SEC_E_OK)
@@ -2313,16 +2400,18 @@ static DWORD escape_string( const char *src, DWORD len, char *dst, enum escape_f
 
 static DWORD str_to_wire( const WCHAR *src, int src_len, char *dst, enum escape_flags flags )
 {
+    char stack_buf[512];
     DWORD len;
     char *utf8;
 
     if (src_len < 0) src_len = lstrlenW( src );
     len = WideCharToMultiByte( CP_UTF8, 0, src, src_len, NULL, 0, NULL, NULL );
-    if (!(utf8 = malloc( len ))) return 0;
+    if (len <= sizeof(stack_buf)) utf8 = stack_buf;
+    else if (!(utf8 = malloc( len ))) return 0;
 
-    WideCharToMultiByte( CP_UTF8, 0, src, -1, utf8, len, NULL, NULL );
+    WideCharToMultiByte( CP_UTF8, 0, src, src_len, utf8, len, NULL, NULL );
     len = escape_string( utf8, len, dst, flags );
-    free( utf8 );
+    if (utf8 != stack_buf) free( utf8 );
 
     return len;
 }

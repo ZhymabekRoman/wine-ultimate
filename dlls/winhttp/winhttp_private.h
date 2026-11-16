@@ -232,6 +232,7 @@ struct request
     const CERT_CONTEXT *client_cert;
     CredHandle cred_handle;
     BOOL cred_handle_initialized;
+    BOOL cred_handle_cached;
     int resolve_timeout;
     int connect_timeout;
     int send_timeout;
@@ -435,6 +436,7 @@ void netconn_addref( struct netconn * );
 void netconn_release( struct netconn * );
 DWORD netconn_create( struct hostdata *, const struct sockaddr_storage *, int, struct netconn ** );
 void netconn_unload( void );
+void cred_cache_unload( void );
 DWORD netconn_recv( struct netconn *, void *, size_t, int, int * );
 DWORD netconn_resolve( const WCHAR *, INTERNET_PORT, DWORD, struct sockaddr_storage *, int );
 DWORD netconn_secure_connect( struct netconn *, WCHAR *, DWORD, CredHandle *, BOOL );

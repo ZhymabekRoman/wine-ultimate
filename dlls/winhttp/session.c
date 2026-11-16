@@ -729,7 +729,8 @@ static void request_destroy( struct object_header *hdr )
     stop_queue( &request->queue );
     release_object( &request->connect->hdr );
 
-    if (request->cred_handle_initialized) FreeCredentialsHandle( &request->cred_handle );
+    if (request->cred_handle_initialized && !request->cred_handle_cached)
+        FreeCredentialsHandle( &request->cred_handle );
     CertFreeCertificateContext( request->server_cert );
     CertFreeCertificateContext( request->client_cert );
 
@@ -1277,8 +1278,10 @@ static BOOL request_set_option( struct object_header *hdr, DWORD option, void *b
         }
         if (request->cred_handle_initialized)
         {
-            FreeCredentialsHandle( &request->cred_handle );
+            if (!request->cred_handle_cached)
+                FreeCredentialsHandle( &request->cred_handle );
             request->cred_handle_initialized = FALSE;
+            request->cred_handle_cached = FALSE;
         }
         TRACE( "client_cert %p\n", request->client_cert );
         return TRUE;

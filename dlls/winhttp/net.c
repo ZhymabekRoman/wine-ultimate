@@ -181,6 +181,7 @@ static BOOL winsock_loaded;
 
 void netconn_unload( void )
 {
+    cred_cache_unload();
     if (winsock_loaded) WSACleanup();
 }
 
@@ -700,6 +701,24 @@ BOOL netconn_is_alive( struct netconn *netconn )
     char b;
     DWORD err;
     BOOL eof;
+    FD_SET set_read, set_error;
+    TIMEVAL tv = { 0, 0 };
+    int res;
+
+    if (netconn->secure && netconn->peek_msg)
+        return TRUE;
+
+    FD_ZERO( &set_read );
+    FD_SET( netconn->socket, &set_read );
+    FD_ZERO( &set_error );
+    FD_SET( netconn->socket, &set_error );
+    res = select( netconn->socket + 1, &set_read, NULL, &set_error, &tv );
+    if (res == 0)
+        return TRUE;
+    if (res < 0)
+        return FALSE;
+    if (FD_ISSET( netconn->socket, &set_error ))
+        return FALSE;
 
     set_blocking( netconn, FALSE );
     if (netconn->secure)
