@@ -20,6 +20,7 @@
 #include <string.h>
 
 #include "private.h"
+#include "appmodel.h"
 #include "objbase.h"
 #include "initguid.h"
 #include "weakref.h"
@@ -300,8 +301,13 @@ DEFINE_IINSPECTABLE( uisettings2, IUISettings2, struct uisettings, IUISettings_i
 
 static HRESULT WINAPI uisettings2_get_TextScaleFactor( IUISettings2 *iface, DOUBLE *value )
 {
-    /* the projection exposes the scale in percent: 100 is the default 1:1 */
-    *value = 100.0;
+    UINT32 len = 0;
+    /* Packaged WinUI/C++/WinRT apps multiply TextScaleFactor directly (1.0 = 100%) */
+    if (GetCurrentPackageFullName( &len, NULL ) == ERROR_INSUFFICIENT_BUFFER)
+        *value = 1.0;
+    else
+        /* the projection exposes the scale in percent: 100 is the default 1:1 */
+        *value = 100.0;
     return S_OK;
 }
 

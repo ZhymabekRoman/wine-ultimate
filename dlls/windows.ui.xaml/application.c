@@ -106,6 +106,7 @@ struct xaml_window
 {
     IInspectable IInspectable_iface;
     IInspectable IWindow2_iface;
+    IInspectable IWindowPrivate_iface;
     IInspectable ms_IWindow_iface;
     IInspectable ms_IWindow2_iface;
     IWindowNative IWindowNative_iface;
@@ -3440,6 +3441,17 @@ static HRESULT WINAPI xaml_window_QueryInterface( IInspectable *iface, REFIID ii
         return S_OK;
     }
 
+    {
+        static const GUID IID_IWindowPrivate =
+            { 0x06636c29, 0x5a17, 0x458d, { 0x8e, 0xa2, 0x24, 0x22, 0xd9, 0x97, 0xa9, 0x22 } };
+        if (IsEqualGUID( iid, &IID_IWindowPrivate ))
+        {
+            *out = &impl->IWindowPrivate_iface;
+            IInspectable_AddRef( (IInspectable *)*out );
+            return S_OK;
+        }
+    }
+
     /* Windows.UI.Xaml.Window v2 (titlebar/Compositor contract, {d384759f-...}):
      * TitleBar..ctor QIs Window.Current for it and casts the result to
      * Windows.UI.Xaml.Window, so the returned face must answer that QI too. */
@@ -4254,6 +4266,20 @@ static const struct xaml_app_profile xaml_app_profiles[] =
         .seed_xbf                = NULL,
     },
     {
+        .family_prefix           = L"Microsoft.WindowsNotepad",
+        .use_winui3_window_class = FALSE,
+        .webview2_template       = NULL,
+        .design_component        = NULL,
+        .serve_core_controls     = TRUE,
+        .vm_type_name            = NULL,
+        .vm_init_cmd             = NULL,
+        .vm_command_modebasic    = 0,
+        .vm_slot79               = FALSE,
+        .display_sync            = FALSE,
+        .teardown_vm             = FALSE,
+        .seed_xbf                = NULL,
+    },
+    {
         .family_prefix           = NULL,
         .use_winui3_window_class = FALSE,
         .webview2_template       = NULL,
@@ -4315,7 +4341,8 @@ BOOL is_store_app( void )
 
 BOOL is_uwp_xaml_app( void )
 {
-    return xaml_get_app_profile()->seed_xbf != NULL;
+    const struct xaml_app_profile *p = xaml_get_app_profile();
+    return p->family_prefix != NULL && p->serve_core_controls;
 }
 
 void *uwp_get_app_outer( void )
@@ -4515,6 +4542,7 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         else if (g_xaml_post_load_presented && ++g_xaml_timer_idle_ticks >= 4)
         {
             KillTimer( hwnd, 0x5756 );
+            g_xaml_timer_armed_hwnd = NULL;
         }
         return 0;
     }
@@ -5440,8 +5468,8 @@ static HRESULT WINAPI xaml_window2_get_Compositor( void *iface, void **value )
 static HRESULT WINAPI xaml_window_zero_out( void *iface, void *a2, void *a3 )
 {
     TRACE( "iface %p, a2 %p, a3 %p\n", iface, a2, a3 );
-    if (a3) *(void **)a3 = NULL;
-    else if (a2) *(void **)a2 = NULL;
+    if ((ULONG_PTR)a3 >= 0x10000 && !IsBadWritePtr( a3, sizeof(void *) )) *(void **)a3 = NULL;
+    else if ((ULONG_PTR)a2 >= 0x10000 && !IsBadWritePtr( a2, sizeof(void *) )) *(void **)a2 = NULL;
     return S_OK;
 }
 
@@ -5483,6 +5511,48 @@ static const void *xaml_window2_vtbl[] =
     xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 55..58 */
     xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, xaml_window_zero_out, /* 59..62 */
     xaml_window_zero_out                                                                    /* 63 */
+};
+
+static inline struct xaml_window *impl_from_IWindowPrivate( void *iface )
+{
+    return CONTAINING_RECORD( iface, struct xaml_window, IWindowPrivate_iface );
+}
+static HRESULT WINAPI xaml_window_private_QueryInterface( IInspectable *iface, REFIID iid, void **out )
+{
+    struct xaml_window *impl = impl_from_IWindowPrivate( iface );
+    return xaml_window_QueryInterface( &impl->IInspectable_iface, iid, out );
+}
+static ULONG WINAPI xaml_window_private_AddRef( IInspectable *iface )
+{
+    struct xaml_window *impl = impl_from_IWindowPrivate( iface );
+    return xaml_window_AddRef( &impl->IInspectable_iface );
+}
+static ULONG WINAPI xaml_window_private_Release( IInspectable *iface )
+{
+    struct xaml_window *impl = impl_from_IWindowPrivate( iface );
+    return xaml_window_Release( &impl->IInspectable_iface );
+}
+static HRESULT WINAPI xaml_window_private_get_TransparentBackground( void *iface, boolean *value )
+{
+    if (value) *value = FALSE;
+    return S_OK;
+}
+static HRESULT WINAPI xaml_window_private_put_TransparentBackground( void *iface, boolean value )
+{
+    TRACE( "iface %p, value %d\n", iface, value );
+    return S_OK;
+}
+static const void *xaml_window_private_vtbl[24] =
+{
+    [0] = xaml_window_private_QueryInterface,
+    [1] = xaml_window_private_AddRef,
+    [2] = xaml_window_private_Release,
+    [3] = xaml_window2_GetIids,
+    [4] = xaml_window2_GetRuntimeClassName,
+    [5] = xaml_window2_GetTrustLevel,
+    [6] = xaml_window_private_get_TransparentBackground,
+    [7] = xaml_window_private_put_TransparentBackground,
+    [8 ... 23] = xaml_window_zero_out,
 };
 
 static inline struct xaml_window *impl_from_ms_IWindow( void *iface )
@@ -5777,6 +5847,7 @@ static struct xaml_window global_xaml_window =
 {
     {(const struct IInspectableVtbl *)&xaml_window_vtbl},
     {(const struct IInspectableVtbl *)xaml_window2_vtbl},
+    {(const struct IInspectableVtbl *)xaml_window_private_vtbl},
     {(const struct IInspectableVtbl *)ms_xaml_window_vtbl},
     {(const struct IInspectableVtbl *)ms_xaml_window2_vtbl},
     {&xaml_window_native_vtbl},
@@ -6158,6 +6229,7 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
     HANDLE hFile;
     void *binding = NULL;
     IInspectable *target_conn = (IInspectable *)component;
+    BOOL is_winui_conn = TRUE;
 
     if (is_uwp_xaml_app() && uwp_try_load_xbf_component( component, resourceLocator, uwp_get_app_outer() ))
         return;
@@ -6171,12 +6243,20 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
 
     TRACE( "xaml_load_xbf_components: target_conn %p, uri_insp %p, depth %d\n", target_conn, uri_insp, load_depth );
 
-    if (!target_conn || (FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_x, (void **)&connector)) &&
-                         FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_UWP, (void **)&connector))))
+    if (!target_conn)
     {
-        TRACE( "failed to QI target_conn for IComponentConnector\n" );
         load_depth--;
         return;
+    }
+    if (FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_x, (void **)&connector)))
+    {
+        is_winui_conn = FALSE;
+        if (FAILED(IInspectable_QueryInterface(target_conn, &IID_IComponentConnector_UWP, (void **)&connector)))
+        {
+            TRACE( "failed to QI target_conn for IComponentConnector\n" );
+            load_depth--;
+            return;
+        }
     }
 
     TRACE( "got connector %p\n", connector );
@@ -6380,7 +6460,8 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
     }
 
     connector->lpVtbl->Connect(connector, 1, component);
-    connector->lpVtbl->GetBindingConnector(connector, 1, component, &binding);
+    if (is_winui_conn)
+        connector->lpVtbl->GetBindingConnector(connector, 1, component, &binding);
     if (binding)
     {
         struct { const struct comp_connector_vtbl *lpVtbl; } *b_conn = binding;
@@ -6647,9 +6728,9 @@ static HRESULT WINAPI application_factory_CreateInstance( IApplicationFactory *i
         }
 
         /* If this is the main application instance registration (called from Main/App..ctor),
-         * drive the view lifecycle and message pump. In WinRT, Application.Start / base..ctor
-         * blocks for the lifetime of the application view. */
-        if (!lifecycle_started)
+         * drive the view lifecycle and message pump for pure UWP apps. FullTrust / XAML Islands
+         * apps (seed_xbf == NULL) construct Application and run their own Win32 window + pump. */
+        if (!lifecycle_started && xaml_get_app_profile()->seed_xbf)
         {
             struct view_source *source;
             lifecycle_started = TRUE;
