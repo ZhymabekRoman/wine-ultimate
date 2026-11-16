@@ -1089,6 +1089,8 @@ static HRESULT WINAPI core_window_add_CharacterReceived( ICoreWindow *iface,
     if (handler)
     {
         __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_AddRef( handler );
+        if (impl->character_received_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Release( impl->character_received_handler );
         impl->character_received_handler = handler;
     }
     return S_OK;
@@ -1118,6 +1120,8 @@ static HRESULT WINAPI core_window_add_KeyDown( ICoreWindow *iface,
     if (handler)
     {
         __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( handler );
+        if (impl->keydown_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keydown_handler );
         impl->keydown_handler = handler;
     }
     return S_OK;
@@ -1142,6 +1146,8 @@ static HRESULT WINAPI core_window_add_KeyUp( ICoreWindow *iface,
     if (handler)
     {
         __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_AddRef( handler );
+        if (impl->keyup_handler)
+            __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Release( impl->keyup_handler );
         impl->keyup_handler = handler;
     }
     return S_OK;
@@ -1929,7 +1935,7 @@ static void core_window_deliver_keydown( struct core_window *impl, __x_ABI_CWind
     if (!(args = key_event_args_create( key ))) return;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
         impl->keydown_handler, &impl->ICoreWindow_iface, args );
-    /* args outlive Invoke: handlers queue them through the dispatcher */
+    __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs_Release( args );
 }
 
 static void core_window_deliver_keyup( struct core_window *impl, __x_ABI_CWindows_CSystem_CVirtualKey key )
@@ -2085,7 +2091,7 @@ static void core_window_deliver_character_received( struct core_window *impl, UI
     if (!(args = character_received_args_create( key_code ))) return;
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Invoke(
         impl->character_received_handler, &impl->ICoreWindow_iface, args );
-    /* args outlive Invoke: handlers queue them through the dispatcher */
+    __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs_Release( args );
 }
 
 /* PointerEventArgs */
@@ -2704,25 +2710,27 @@ ICoreWindow *core_window_create( void )
  * windows.ui.xaml's host window proc sits on the window slot ahead of core_window_proc
  * (it swallows pointer messages), so it drives this for keyboard messages it has
  * already routed to its own listener registries. */
-void core_window_notify_key( HWND hwnd, UINT msg, WPARAM wparam )
+HRESULT WINAPI core_window_notify_key( HWND hwnd, UINT msg, WPARAM wparam )
 {
     struct core_window *impl = (struct core_window *)GetWindowLongPtrW( hwnd, GWLP_USERDATA );
     if (!impl) impl = thread_core_window; /* the XAML host window is not always the CoreWindow's own HWND */
-    if (!impl) return;
+    if (!impl) return E_FAIL;
     switch (msg)
     {
     case WM_KEYDOWN:
         if (impl->keydown_handler)
             core_window_deliver_keydown( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
-        break;
+        return S_OK;
     case WM_KEYUP:
         if (impl->keyup_handler)
             core_window_deliver_keyup( impl, (__x_ABI_CWindows_CSystem_CVirtualKey)wparam );
-        break;
+        return S_OK;
     case WM_CHAR:
         if (impl->character_received_handler)
             core_window_deliver_character_received( impl, (UINT32)wparam );
-        break;
+        return S_OK;
+    default:
+        return E_INVALIDARG;
     }
 }
 

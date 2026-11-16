@@ -998,6 +998,9 @@ struct xaml_core_window
     struct xaml_event_registry key_down;
     struct xaml_event_registry key_up;
     struct xaml_event_registry character_received;
+    EventRegistrationToken key_down_inner_tokens[64];
+    EventRegistrationToken key_up_inner_tokens[64];
+    EventRegistrationToken character_received_inner_tokens[64];
 };
 
 static const ICoreWindowVtbl xaml_cw_vtbl;
@@ -1251,18 +1254,79 @@ static HRESULT WINAPI xaml_cw_remove_AutomationProviderRequested( ICoreWindow *i
     struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
     return impl->inner ? ICoreWindow_remove_AutomationProviderRequested( impl->inner, c ) : E_NOTIMPL;
 }
+static void xaml_event_registry_set_inner_token( struct xaml_event_registry *reg,
+    EventRegistrationToken *inner_tokens, EventRegistrationToken wrapper_token, EventRegistrationToken inner_token )
+{
+    unsigned int i;
+
+    if (!reg || !inner_tokens || !wrapper_token.value) return;
+    EnterCriticalSection( &xaml_event_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    {
+        if (reg->entries[i].handler && reg->entries[i].token == wrapper_token.value)
+        {
+            inner_tokens[i] = inner_token;
+            break;
+        }
+    }
+    LeaveCriticalSection( &xaml_event_cs );
+}
+
+static HRESULT xaml_event_registry_remove_with_inner( struct xaml_event_registry *reg,
+    EventRegistrationToken *inner_tokens, EventRegistrationToken token,
+    EventRegistrationToken *out_inner_token, BOOL *out_found )
+{
+    unsigned int i;
+
+    if (out_inner_token) out_inner_token->value = 0;
+    if (out_found) *out_found = FALSE;
+    if (!reg) return E_INVALIDARG;
+    EnterCriticalSection( &xaml_event_cs );
+    for (i = 0; i < ARRAY_SIZE( reg->entries ); i++)
+    {
+        if (reg->entries[i].handler && reg->entries[i].token == token.value)
+        {
+            void *h = reg->entries[i].handler;
+            reg->entries[i].handler = NULL;
+            reg->entries[i].token = 0;
+            if (inner_tokens)
+            {
+                if (out_inner_token) *out_inner_token = inner_tokens[i];
+                inner_tokens[i].value = 0;
+            }
+            if (out_found) *out_found = TRUE;
+            LeaveCriticalSection( &xaml_event_cs );
+            IUnknown_Release( (IUnknown *)h );
+            return S_OK;
+        }
+    }
+    LeaveCriticalSection( &xaml_event_cs );
+    return S_OK;
+}
+
 static HRESULT WINAPI xaml_cw_add_CharacterReceived( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *h, EventRegistrationToken *c )
 {
     struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
-    HRESULT hr = xaml_event_registry_add( &impl->character_received, h, c );
-    if (impl->inner) ICoreWindow_add_CharacterReceived( impl->inner, h, NULL );
+    EventRegistrationToken tok = { 0 }, inner_tok = { 0 };
+    HRESULT hr = xaml_event_registry_add( &impl->character_received, h, &tok );
+    if (c) *c = tok;
+    if (SUCCEEDED( hr ) && impl->inner && impl->inner->lpVtbl->add_CharacterReceived)
+    {
+        if (SUCCEEDED( impl->inner->lpVtbl->add_CharacterReceived( impl->inner, h, &inner_tok ) ))
+            xaml_event_registry_set_inner_token( &impl->character_received, impl->character_received_inner_tokens, tok, inner_tok );
+    }
     return hr;
 }
 static HRESULT WINAPI xaml_cw_remove_CharacterReceived( ICoreWindow *iface, EventRegistrationToken c )
 {
     struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
-    return xaml_event_registry_remove( &impl->character_received, c );
+    EventRegistrationToken inner_tok = { 0 };
+    BOOL found = FALSE;
+    HRESULT hr = xaml_event_registry_remove_with_inner( &impl->character_received, impl->character_received_inner_tokens, c, &inner_tok, &found );
+    if (found && impl->inner && impl->inner->lpVtbl->remove_CharacterReceived)
+        impl->inner->lpVtbl->remove_CharacterReceived( impl->inner, inner_tok );
+    return hr;
 }
 static HRESULT WINAPI xaml_cw_add_Closed( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCoreWindowEventArgs *h, EventRegistrationToken *c )
@@ -1290,27 +1354,49 @@ static HRESULT WINAPI xaml_cw_add_KeyDown( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *h, EventRegistrationToken *c )
 {
     struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
-    HRESULT hr = xaml_event_registry_add( &impl->key_down, h, c );
-    if (impl->inner) ICoreWindow_add_KeyDown( impl->inner, h, NULL );
+    EventRegistrationToken tok = { 0 }, inner_tok = { 0 };
+    HRESULT hr = xaml_event_registry_add( &impl->key_down, h, &tok );
+    if (c) *c = tok;
+    if (SUCCEEDED( hr ) && impl->inner && impl->inner->lpVtbl->add_KeyDown)
+    {
+        if (SUCCEEDED( impl->inner->lpVtbl->add_KeyDown( impl->inner, h, &inner_tok ) ))
+            xaml_event_registry_set_inner_token( &impl->key_down, impl->key_down_inner_tokens, tok, inner_tok );
+    }
     return hr;
 }
 static HRESULT WINAPI xaml_cw_remove_KeyDown( ICoreWindow *iface, EventRegistrationToken c )
 {
     struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
-    return xaml_event_registry_remove( &impl->key_down, c );
+    EventRegistrationToken inner_tok = { 0 };
+    BOOL found = FALSE;
+    HRESULT hr = xaml_event_registry_remove_with_inner( &impl->key_down, impl->key_down_inner_tokens, c, &inner_tok, &found );
+    if (found && impl->inner && impl->inner->lpVtbl->remove_KeyDown)
+        impl->inner->lpVtbl->remove_KeyDown( impl->inner, inner_tok );
+    return hr;
 }
 static HRESULT WINAPI xaml_cw_add_KeyUp( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *h, EventRegistrationToken *c )
 {
     struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
-    HRESULT hr = xaml_event_registry_add( &impl->key_up, h, c );
-    if (impl->inner) ICoreWindow_add_KeyUp( impl->inner, h, NULL );
+    EventRegistrationToken tok = { 0 }, inner_tok = { 0 };
+    HRESULT hr = xaml_event_registry_add( &impl->key_up, h, &tok );
+    if (c) *c = tok;
+    if (SUCCEEDED( hr ) && impl->inner && impl->inner->lpVtbl->add_KeyUp)
+    {
+        if (SUCCEEDED( impl->inner->lpVtbl->add_KeyUp( impl->inner, h, &inner_tok ) ))
+            xaml_event_registry_set_inner_token( &impl->key_up, impl->key_up_inner_tokens, tok, inner_tok );
+    }
     return hr;
 }
 static HRESULT WINAPI xaml_cw_remove_KeyUp( ICoreWindow *iface, EventRegistrationToken c )
 {
     struct xaml_core_window *impl = impl_from_cw_ICoreWindow( iface );
-    return xaml_event_registry_remove( &impl->key_up, c );
+    EventRegistrationToken inner_tok = { 0 };
+    BOOL found = FALSE;
+    HRESULT hr = xaml_event_registry_remove_with_inner( &impl->key_up, impl->key_up_inner_tokens, c, &inner_tok, &found );
+    if (found && impl->inner && impl->inner->lpVtbl->remove_KeyUp)
+        impl->inner->lpVtbl->remove_KeyUp( impl->inner, inner_tok );
+    return hr;
 }
 static HRESULT WINAPI xaml_cw_add_PointerCaptureLost( ICoreWindow *iface,
     __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CPointerEventArgs *h, EventRegistrationToken *c )
@@ -1889,25 +1975,36 @@ static void xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARA
     if (msg == WM_CHAR)
     {
         __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs *args = xaml_core_char_args_create( wparam, lparam );
-        if (!args) return;
+        if (!args)
+        {
+            for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+            return;
+        }
         for (i = 0; i < count; i++)
         {
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs *h = handlers[i];
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CCharacterReceivedEventArgs_Invoke(
                 h, &cw->ICoreWindow_iface, args );
+            IUnknown_Release( (IUnknown *)h );
         }
-        /* args outlive Invoke: handlers queue them through the dispatcher */
+        __x_ABI_CWindows_CUI_CCore_CICharacterReceivedEventArgs_Release( args );
     }
     else
     {
         __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs *args = xaml_core_key_args_create( wparam, msg, lparam );
-        if (!args) return;
+        if (!args)
+        {
+            for (i = 0; i < count; i++) IUnknown_Release( (IUnknown *)handlers[i] );
+            return;
+        }
         for (i = 0; i < count; i++)
         {
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs *h = handlers[i];
             __FITypedEventHandler_2_Windows__CUI__CCore__CCoreWindow_Windows__CUI__CCore__CKeyEventArgs_Invoke(
                 h, &cw->ICoreWindow_iface, args );
+            IUnknown_Release( (IUnknown *)h );
         }
+        __x_ABI_CWindows_CUI_CCore_CIKeyEventArgs_Release( args );
     }
 }
 
@@ -1915,19 +2012,19 @@ static void xaml_cw_fire_key_event( struct xaml_core_window *cw, UINT msg, WPARA
  * (store apps reach it through twinapi's view.CoreWindow, not the XAML
  * wrapper).  Resolved by name out of windows.ui, the same way the module
  * reaches the core-window creation entry points. */
-static void notify_inner_core_window_key( HWND hwnd, UINT msg, WPARAM wparam )
+static HRESULT notify_inner_core_window_key( HWND hwnd, UINT msg, WPARAM wparam )
 {
-    static void (WINAPI *pnotify)( HWND, UINT, WPARAM );
+    static HRESULT (WINAPI *pnotify)( HWND, UINT, WPARAM );
     HMODULE module;
 
     if (!pnotify)
     {
         module = GetModuleHandleW( L"windows.ui.dll" );
         if (!module) module = LoadLibraryW( L"windows.ui.dll" );
-        if (!module) return;
-        if (!(pnotify = (void *)GetProcAddress( module, "CoreWindow_NotifyKeyMsg" ))) return;
+        if (!module) return E_FAIL;
+        if (!(pnotify = (void *)GetProcAddress( module, "CoreWindow_NotifyKeyMsg" ))) return E_FAIL;
     }
-    pnotify( hwnd, msg, wparam );
+    return pnotify( hwnd, msg, wparam );
 }
 
 static void xaml_cw_fire_pointer_event( struct xaml_core_window *cw, enum xaml_pointer_event_kind kind,
@@ -4546,17 +4643,23 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
         }
         return 0;
     }
+    if (msg == WM_DEADCHAR || msg == WM_SYSCHAR)
+        goto forward_msg;
     if (msg == WM_KEYDOWN || msg == WM_KEYUP || msg == WM_CHAR)
     {
         struct xaml_core_window *cw = as_xaml_core_window( global_xaml_window.core_window );
+        HRESULT hr;
         xaml_cw_fire_key_event( cw, msg, wparam, lparam );
-        notify_inner_core_window_key( hwnd, msg, wparam );
-        if (msg == WM_CHAR) uwp_keyboard_press_char( (WCHAR)wparam );
+        hr = notify_inner_core_window_key( hwnd, msg, wparam );
+        if (msg == WM_CHAR && !(GetKeyState( VK_CONTROL ) & 0x8000) && !(GetKeyState( VK_MENU ) & 0x8000))
+            uwp_keyboard_press_char( (WCHAR)wparam );
         uwp_sync_calc_display_from_vm();
         xaml_window_present( &global_xaml_window );
         xaml_mark_window_dirty();
         InvalidateRect( GetAncestor( hwnd, GA_ROOT ), NULL, FALSE );
         UpdateWindow( GetAncestor( hwnd, GA_ROOT ) );
+        if (SUCCEEDED( hr ) && xaml_corewindow_prev_proc == (WNDPROC)GetClassLongPtrW( hwnd, GCLP_WNDPROC ))
+            return 0;
         goto forward_msg;
     }
     if (msg == WM_LBUTTONDOWN || msg == WM_LBUTTONUP || msg == WM_RBUTTONDOWN || msg == WM_RBUTTONUP ||
@@ -6231,8 +6334,30 @@ static void xaml_load_xbf_components( void *component, void *resourceLocator )
     IInspectable *target_conn = (IInspectable *)component;
     BOOL is_winui_conn = TRUE;
 
-    if (is_uwp_xaml_app() && uwp_try_load_xbf_component( component, resourceLocator, uwp_get_app_outer() ))
-        return;
+    if (is_uwp_xaml_app())
+    {
+        static const GUID IID_IControl_uwp =
+            { 0xa8912263, 0x2951, 0x4f58, { 0xa9, 0xc5, 0x5a, 0x13, 0x4e, 0xaa, 0x7f, 0x07 } };
+        static void *uwp_xbf_controls[64];
+        static unsigned int uwp_xbf_control_cnt;
+        void *ctrl = NULL;
+        unsigned int i;
+
+        if (target_conn && uwp_xbf_control_cnt < ARRAY_SIZE( uwp_xbf_controls ) &&
+            SUCCEEDED( IInspectable_QueryInterface( target_conn, &IID_IControl_uwp, &ctrl ) ) && ctrl)
+            uwp_xbf_controls[uwp_xbf_control_cnt++] = ctrl;
+
+        if (uwp_try_load_xbf_component( component, resourceLocator, uwp_get_app_outer() ))
+        {
+            for (i = 0; i < uwp_xbf_control_cnt; i++)
+            {
+                void *c = uwp_xbf_controls[i];
+                HRESULT (WINAPI *put_enabled)( void *, boolean ) = (void *)(*(void ***)c)[23];
+                if (put_enabled) put_enabled( c, TRUE );
+            }
+            return;
+        }
+    }
 
     if (load_depth > 4)
     {
