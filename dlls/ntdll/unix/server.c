@@ -1209,7 +1209,7 @@ int server_get_unix_fd( HANDLE handle, unsigned int wanted_access, int *unix_fd,
                 }
                 else ret = STATUS_TOO_MANY_OPENED_FILES;
             }
-            else if (reply->cacheable)
+            else if (reply->cacheable || ret == STATUS_BAD_DEVICE_TYPE)
             {
                 add_fd_to_cache( handle, ret, FD_TYPE_INVALID, 0, 0 );
             }
