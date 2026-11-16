@@ -2994,6 +2994,7 @@ ME_TextEditor *ME_MakeEditor(ITextHost *texthost, BOOL bEmulateVersion10)
   ed->lpOleCallback = NULL;
   ed->mode = TM_MULTILEVELUNDO | TM_MULTICODEPAGE;
   ed->mode |= (ed->props & TXTBIT_RICHTEXT) ? TM_RICHTEXT : TM_PLAINTEXT;
+  ed->eol_mode = 1;
   ed->AutoURLDetect_bEnable = FALSE;
   ed->bHaveFocus = FALSE;
   ed->freeze_count = 0;
@@ -4201,6 +4202,15 @@ LRESULT editor_handle_message( ME_TextEditor *editor, UINT msg, WPARAM wParam,
   }
   case EM_GETTEXTMODE:
     return editor->mode;
+  case 0x150c: /* EM_SETENDOFLINE */
+  {
+    int prev = editor->eol_mode;
+    if (wParam <= 3)
+      editor->eol_mode = (int)wParam;
+    return prev;
+  }
+  case 0x150d: /* EM_GETENDOFLINE */
+    return editor->eol_mode;
   case EM_SETTEXTMODE:
   {
     int mask = 0;

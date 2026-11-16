@@ -424,6 +424,7 @@ typedef struct tagME_TextEditor
    *TM_SINGLELEVELUNDO or TM_MULTILEVELUNDO
    *TM_SINGLECODEPAGE or TM_MULTICODEPAGE*/
   int mode;
+  int eol_mode;
   BOOL bHideSelection;
   BOOL AutoURLDetect_bEnable;
   WCHAR password_char;

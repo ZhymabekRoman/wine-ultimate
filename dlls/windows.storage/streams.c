@@ -519,6 +519,10 @@ static struct in_memory_content *content_addref( struct in_memory_content *conte
 
 static void content_release( struct in_memory_content *content )
 {
+    EnterCriticalSection( &content->cs );
+    content_flush_to_file( content );
+    LeaveCriticalSection( &content->cs );
+
     if (!InterlockedDecrement( &content->ref ))
     {
         DeleteCriticalSection( &content->cs );

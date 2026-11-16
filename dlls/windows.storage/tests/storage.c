@@ -401,7 +401,7 @@ static void test_FileIO_PathIO(void)
     IPathIOStatics_Release( path_io );
 
     /* FileIO tests */
-    hr = WindowsCreateString( L"Windows.Storage.StorageFile", 26, &str );
+    hr = WindowsCreateString( L"Windows.Storage.StorageFile", 27, &str );
     hr = RoGetActivationFactory( str, &IID_IStorageFileStatics, (void **)&file_statics );
     WindowsDeleteString( str );
 
@@ -441,12 +441,13 @@ static void test_FileIO_PathIO(void)
 
 static IStorageFolder *get_temp_folder( const WCHAR *dir )
 {
+    static const WCHAR *folder_statics_name = L"Windows.Storage.StorageFolder";
     IStorageFolderStatics *statics = NULL;
     IAsyncOperation_StorageFolder *op = NULL;
     IStorageFolder *folder = NULL;
     HSTRING str;
 
-    WindowsCreateString( dir, wcslen( dir ), &str );
+    WindowsCreateString( folder_statics_name, wcslen( folder_statics_name ), &str );
     RoGetActivationFactory( str, &IID_IStorageFolderStatics, (void **)&statics );
     WindowsDeleteString( str );
 

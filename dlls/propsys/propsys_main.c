@@ -299,10 +299,83 @@ HRESULT WINAPI PSGetPropertyDescription(REFPROPERTYKEY propkey, REFIID riid, voi
     return hr;
 }
 
+struct prop_desc_list
+{
+    IPropertyDescriptionList IPropertyDescriptionList_iface;
+    LONG ref;
+};
+
+static inline struct prop_desc_list *impl_from_IPropertyDescriptionList(IPropertyDescriptionList *iface)
+{
+    return CONTAINING_RECORD(iface, struct prop_desc_list, IPropertyDescriptionList_iface);
+}
+
+static HRESULT WINAPI prop_desc_list_QueryInterface(IPropertyDescriptionList *iface, REFIID riid, void **ppv)
+{
+    if (!ppv) return E_POINTER;
+    if (IsEqualIID(riid, &IID_IUnknown) || IsEqualIID(riid, &IID_IPropertyDescriptionList))
+    {
+        *ppv = iface;
+        IPropertyDescriptionList_AddRef(iface);
+        return S_OK;
+    }
+    *ppv = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG WINAPI prop_desc_list_AddRef(IPropertyDescriptionList *iface)
+{
+    struct prop_desc_list *impl = impl_from_IPropertyDescriptionList(iface);
+    return InterlockedIncrement(&impl->ref);
+}
+
+static ULONG WINAPI prop_desc_list_Release(IPropertyDescriptionList *iface)
+{
+    struct prop_desc_list *impl = impl_from_IPropertyDescriptionList(iface);
+    LONG ref = InterlockedDecrement(&impl->ref);
+    if (!ref) free(impl);
+    return ref;
+}
+
+static HRESULT WINAPI prop_desc_list_GetCount(IPropertyDescriptionList *iface, UINT *count)
+{
+    if (!count) return E_POINTER;
+    *count = 0;
+    return S_OK;
+}
+
+static HRESULT WINAPI prop_desc_list_GetAt(IPropertyDescriptionList *iface, UINT index, REFIID riid, void **ppv)
+{
+    if (ppv) *ppv = NULL;
+    return E_INVALIDARG;
+}
+
+static const IPropertyDescriptionListVtbl prop_desc_list_vtbl =
+{
+    prop_desc_list_QueryInterface,
+    prop_desc_list_AddRef,
+    prop_desc_list_Release,
+    prop_desc_list_GetCount,
+    prop_desc_list_GetAt,
+};
+
 HRESULT WINAPI PSGetPropertyDescriptionListFromString(LPCWSTR proplist, REFIID riid, void **ppv)
 {
-    FIXME("%s, %p, %p\n", debugstr_w(proplist), riid, ppv);
-    return E_NOTIMPL;
+    struct prop_desc_list *impl;
+    HRESULT hr;
+
+    TRACE("%s, %s, %p\n", debugstr_w(proplist), debugstr_guid(riid), ppv);
+    if (!ppv) return E_POINTER;
+    *ppv = NULL;
+    if (!proplist) return E_INVALIDARG;
+
+    if (!(impl = calloc(1, sizeof(*impl)))) return E_OUTOFMEMORY;
+    impl->IPropertyDescriptionList_iface.lpVtbl = &prop_desc_list_vtbl;
+    impl->ref = 1;
+
+    hr = IPropertyDescriptionList_QueryInterface(&impl->IPropertyDescriptionList_iface, riid, ppv);
+    IPropertyDescriptionList_Release(&impl->IPropertyDescriptionList_iface);
+    return hr;
 }
 
 HRESULT WINAPI PSGetNameFromPropertyKey(REFPROPERTYKEY key, LPWSTR *name)

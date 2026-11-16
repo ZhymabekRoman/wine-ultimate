@@ -44,6 +44,21 @@
 /* This seems to be another version of IID_IFileDialogCustomize. If
  * there is any difference I have yet to find it. */
 DEFINE_GUID(IID_IFileDialogCustomizeAlt, 0x8016B7B3, 0x3D49, 0x4504, 0xA0,0xAA, 0x2A,0x37,0x49,0x4E,0x60,0x6F);
+DEFINE_GUID(IID_IInitializeWithWindow, 0x3E68D4BD, 0x7135, 0x4D10, 0x80,0x18, 0x9F,0xB6, 0xD9,0xF3, 0x3F,0xA1);
+
+typedef struct IInitializeWithWindow IInitializeWithWindow;
+typedef struct IInitializeWithWindowVtbl
+{
+    HRESULT (WINAPI *QueryInterface)( IInitializeWithWindow *This, REFIID riid, void **ppv );
+    ULONG (WINAPI *AddRef)( IInitializeWithWindow *This );
+    ULONG (WINAPI *Release)( IInitializeWithWindow *This );
+    HRESULT (WINAPI *Initialize)( IInitializeWithWindow *This, HWND hwnd );
+} IInitializeWithWindowVtbl;
+
+struct IInitializeWithWindow
+{
+    const IInitializeWithWindowVtbl *lpVtbl;
+};
 
 WINE_DEFAULT_DEBUG_CHANNEL(commdlg);
 
@@ -103,6 +118,8 @@ typedef struct FileDialogImpl {
     ICommDlgBrowser3       ICommDlgBrowser3_iface;
     IOleWindow             IOleWindow_iface;
     IFileDialogCustomize   IFileDialogCustomize_iface;
+    IInitializeWithWindow  IInitializeWithWindow_iface;
+    HWND                   init_hwnd;
     LONG ref;
 
     FILEOPENDIALOGOPTIONS options;
@@ -2369,6 +2386,9 @@ static HRESULT create_dialog(FileDialogImpl *This, HWND parent)
     ULONG_PTR ctx_cookie = 0;
     INT_PTR res;
 
+    if (!parent)
+        parent = This->init_hwnd;
+
     if (This->dlg_hwnd)
         return E_UNEXPECTED;
 
@@ -2456,6 +2476,10 @@ static HRESULT WINAPI IFileDialog2_fnQueryInterface(IFileDialog2 *iface,
             IsEqualGUID(riid, &IID_IFileDialogCustomizeAlt))
     {
         *ppvObject = &This->IFileDialogCustomize_iface;
+    }
+    else if(IsEqualGUID(riid, &IID_IInitializeWithWindow))
+    {
+        *ppvObject = &This->IInitializeWithWindow_iface;
     }
     else
         FIXME("Unknown interface requested: %s.\n", debugstr_guid(riid));
@@ -3381,15 +3405,18 @@ static HRESULT WINAPI IFileSaveDialog_fnSetFilter(IFileSaveDialog *iface, IShell
 static HRESULT WINAPI IFileSaveDialog_fnSetSaveAsItem(IFileSaveDialog* iface, IShellItem *psi)
 {
     FileDialogImpl *This = impl_from_IFileSaveDialog(iface);
-    FIXME("stub - %p (%p)\n", This, psi);
-    return E_NOTIMPL;
+    TRACE("%p (%p)\n", This, psi);
+    if (This->psi_setfolder) IShellItem_Release(This->psi_setfolder);
+    This->psi_setfolder = psi;
+    if (psi) IShellItem_AddRef(psi);
+    return S_OK;
 }
 
 static HRESULT WINAPI IFileSaveDialog_fnSetProperties(IFileSaveDialog* iface, IPropertyStore *pStore)
 {
     FileDialogImpl *This = impl_from_IFileSaveDialog(iface);
-    FIXME("stub - %p (%p)\n", This, pStore);
-    return E_NOTIMPL;
+    TRACE("stub - %p (%p)\n", This, pStore);
+    return S_OK;
 }
 
 static HRESULT WINAPI IFileSaveDialog_fnSetCollectedProperties(IFileSaveDialog* iface,
@@ -3397,8 +3424,8 @@ static HRESULT WINAPI IFileSaveDialog_fnSetCollectedProperties(IFileSaveDialog* 
                                                                BOOL fAppendDefault)
 {
     FileDialogImpl *This = impl_from_IFileSaveDialog(iface);
-    FIXME("stub - %p (%p, %d)\n", This, pList, fAppendDefault);
-    return E_NOTIMPL;
+    TRACE("stub - %p (%p, %d)\n", This, pList, fAppendDefault);
+    return S_OK;
 }
 
 static HRESULT WINAPI IFileSaveDialog_fnGetProperties(IFileSaveDialog* iface, IPropertyStore **ppStore)
@@ -3415,8 +3442,8 @@ static HRESULT WINAPI IFileSaveDialog_fnApplyProperties(IFileSaveDialog* iface,
                                                         IFileOperationProgressSink *pSink)
 {
     FileDialogImpl *This = impl_from_IFileSaveDialog(iface);
-    FIXME("%p (%p, %p, %p, %p)\n", This, psi, pStore, hwnd, pSink);
-    return E_NOTIMPL;
+    TRACE("stub - %p (%p, %p, %p, %p)\n", This, psi, pStore, hwnd, pSink);
+    return S_OK;
 }
 
 static const IFileSaveDialogVtbl vt_IFileSaveDialog = {
@@ -4723,8 +4750,38 @@ static HRESULT WINAPI IFileDialogCustomize_fnSetControlItemText(IFileDialogCusto
                                                                 LPCWSTR pszLabel)
 {
     FileDialogImpl *This = impl_from_IFileDialogCustomize(iface);
-    FIXME("stub - %p (%ld, %ld, %s)\n", This, dwIDCtl, dwIDItem, debugstr_w(pszLabel));
-    return E_NOTIMPL;
+    customctrl *ctrl = get_cctrl(This, dwIDCtl);
+    cctrl_item *item;
+    LPWSTR label_copy;
+
+    TRACE("%p (%ld, %ld, %s)\n", This, dwIDCtl, dwIDItem, debugstr_w(pszLabel));
+
+    if (!ctrl || !pszLabel) return E_INVALIDARG;
+
+    item = get_item(ctrl, dwIDItem, 0, NULL);
+    if (!item) return E_UNEXPECTED;
+
+    label_copy = StrDupW(pszLabel);
+    if (!label_copy) return E_OUTOFMEMORY;
+    free(item->label);
+    item->label = label_copy;
+
+    if (ctrl->type == IDLG_CCTRL_COMBOBOX && ctrl->hwnd)
+    {
+        DWORD pos;
+        if (get_item(ctrl, dwIDItem, CDCS_VISIBLE|CDCS_ENABLED, &pos))
+        {
+            SendMessageW(ctrl->hwnd, CB_DELETESTRING, pos, 0);
+            SendMessageW(ctrl->hwnd, CB_INSERTSTRING, pos, (LPARAM)item->label);
+            SendMessageW(ctrl->hwnd, CB_SETITEMDATA, pos, dwIDItem);
+        }
+    }
+    else if (ctrl->type == IDLG_CCTRL_RADIOBUTTONLIST && item->hwnd)
+    {
+        SendMessageW(item->hwnd, WM_SETTEXT, 0, (LPARAM)item->label);
+    }
+
+    return S_OK;
 }
 
 static const IFileDialogCustomizeVtbl vt_IFileDialogCustomize = {
@@ -4760,6 +4817,48 @@ static const IFileDialogCustomizeVtbl vt_IFileDialogCustomize = {
     IFileDialogCustomize_fnSetControlItemText
 };
 
+/**************************************************************************
+ * IInitializeWithWindow implementation
+ */
+static inline FileDialogImpl *impl_from_IInitializeWithWindow(IInitializeWithWindow *iface)
+{
+    return CONTAINING_RECORD(iface, FileDialogImpl, IInitializeWithWindow_iface);
+}
+
+static HRESULT WINAPI IInitializeWithWindow_fnQueryInterface(IInitializeWithWindow *iface,
+                                                             REFIID riid, void **ppvObject)
+{
+    FileDialogImpl *This = impl_from_IInitializeWithWindow(iface);
+    return IFileDialog2_QueryInterface(&This->IFileDialog2_iface, riid, ppvObject);
+}
+
+static ULONG WINAPI IInitializeWithWindow_fnAddRef(IInitializeWithWindow *iface)
+{
+    FileDialogImpl *This = impl_from_IInitializeWithWindow(iface);
+    return IFileDialog2_AddRef(&This->IFileDialog2_iface);
+}
+
+static ULONG WINAPI IInitializeWithWindow_fnRelease(IInitializeWithWindow *iface)
+{
+    FileDialogImpl *This = impl_from_IInitializeWithWindow(iface);
+    return IFileDialog2_Release(&This->IFileDialog2_iface);
+}
+
+static HRESULT WINAPI IInitializeWithWindow_fnInitialize(IInitializeWithWindow *iface, HWND hwnd)
+{
+    FileDialogImpl *This = impl_from_IInitializeWithWindow(iface);
+    TRACE("%p (%p)\n", This, hwnd);
+    This->init_hwnd = hwnd;
+    return S_OK;
+}
+
+static const IInitializeWithWindowVtbl vt_IInitializeWithWindow = {
+    IInitializeWithWindow_fnQueryInterface,
+    IInitializeWithWindow_fnAddRef,
+    IInitializeWithWindow_fnRelease,
+    IInitializeWithWindow_fnInitialize
+};
+
 static HRESULT FileDialog_constructor(IUnknown *pUnkOuter, REFIID riid, void **ppv, enum ITEMDLG_TYPE type)
 {
     FileDialogImpl *fdimpl;
@@ -4783,6 +4882,7 @@ static HRESULT FileDialog_constructor(IUnknown *pUnkOuter, REFIID riid, void **p
     fdimpl->ICommDlgBrowser3_iface.lpVtbl = &vt_ICommDlgBrowser3;
     fdimpl->IOleWindow_iface.lpVtbl = &vt_IOleWindow;
     fdimpl->IFileDialogCustomize_iface.lpVtbl = &vt_IFileDialogCustomize;
+    fdimpl->IInitializeWithWindow_iface.lpVtbl = &vt_IInitializeWithWindow;
 
     if(type == ITEMDLG_TYPE_OPEN)
     {
