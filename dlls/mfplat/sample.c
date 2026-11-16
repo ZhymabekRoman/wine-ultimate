@@ -51,6 +51,7 @@ struct sample
 
     /* Tracked sample functionality. */
     IRtwqAsyncResult *tracked_result;
+    IMFAsyncCallback *tracked_sync_callback;
     LONG tracked_refcount;
 };
 
@@ -183,6 +184,7 @@ static ULONG WINAPI sample_tracked_Release(IMFSample *iface)
 {
     struct sample *sample = impl_from_IMFSample(iface);
     ULONG refcount = InterlockedDecrement(&sample->attributes.ref);
+    IMFAsyncCallback *tracked_sync_callback = NULL;
     IRtwqAsyncResult *tracked_result = NULL;
     HRESULT hr;
 
@@ -190,17 +192,27 @@ static ULONG WINAPI sample_tracked_Release(IMFSample *iface)
     if (sample->tracked_result && sample->tracked_refcount == refcount)
     {
         tracked_result = sample->tracked_result;
+        tracked_sync_callback = sample->tracked_sync_callback;
         sample->tracked_result = NULL;
+        sample->tracked_sync_callback = NULL;
         sample->tracked_refcount = 0;
-
-        /* Call could fail if queue system is not initialized, it's not critical. */
-        if (FAILED(hr = RtwqInvokeCallback(tracked_result)))
-            WARN("Failed to invoke tracking callback, hr %#lx.\n", hr);
     }
     LeaveCriticalSection(&sample->attributes.cs);
 
     if (tracked_result)
+    {
+        if (tracked_sync_callback)
+        {
+            if (FAILED(hr = IMFAsyncCallback_Invoke(tracked_sync_callback, (IMFAsyncResult *)tracked_result)))
+                WARN("Failed to invoke sync tracking callback, hr %#lx.\n", hr);
+        }
+        else if (FAILED(hr = RtwqInvokeCallback(tracked_result)))
+        {
+            /* Call could fail if queue system is not initialized, it's not critical. */
+            WARN("Failed to invoke tracking callback, hr %#lx.\n", hr);
+        }
         IRtwqAsyncResult_Release(tracked_result);
+    }
 
     TRACE("%p, refcount %lu.\n", iface, refcount);
 
@@ -962,6 +974,11 @@ static HRESULT WINAPI tracked_sample_SetAllocator(IMFTrackedSample *iface,
         if (SUCCEEDED(hr = RtwqCreateAsyncResult((IUnknown *)iface, (IRtwqAsyncCallback *)sample_allocator,
                 state, &sample->tracked_result)))
         {
+            DWORD cb_flags = 0, cb_queue = 0;
+
+            if (SUCCEEDED(IMFAsyncCallback_GetParameters(sample_allocator, &cb_flags, &cb_queue))
+                    && (cb_flags & MFASYNC_FAST_IO_PROCESSING_CALLBACK))
+                sample->tracked_sync_callback = sample_allocator;
             /* Account for additional refcount brought by 'state' object. This threshold is used
                on Release() to invoke tracker callback.  */
             sample->tracked_refcount = 1;
@@ -1728,7 +1745,9 @@ static ULONG WINAPI sample_allocator_tracking_callback_Release(IMFAsyncCallback 
 static HRESULT WINAPI sample_allocator_tracking_callback_GetParameters(IMFAsyncCallback *iface,
         DWORD *flags, DWORD *queue)
 {
-    return E_NOTIMPL;
+    *flags = MFASYNC_FAST_IO_PROCESSING_CALLBACK;
+    *queue = 0;
+    return S_OK;
 }
 
 static HRESULT WINAPI sample_allocator_tracking_callback_Invoke(IMFAsyncCallback *iface, IMFAsyncResult *result)

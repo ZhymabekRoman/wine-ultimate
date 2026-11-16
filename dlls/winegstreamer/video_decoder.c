@@ -106,8 +106,6 @@ struct video_decoder
 
     IMFVideoSampleAllocatorEx *allocator;
     BOOL allocator_initialized;
-    IMFTransform *copier;
-    IMFMediaBuffer *temp_buffer;
 
     DMO_MEDIA_TYPE dmo_input_type;
     DMO_MEDIA_TYPE dmo_output_type;
@@ -166,10 +164,7 @@ static ULONG WINAPI unknown_Release(IUnknown *iface)
 
     if (!refcount)
     {
-        IMFTransform_Release(decoder->copier);
         IMFVideoSampleAllocatorEx_Release(decoder->allocator);
-        if (decoder->temp_buffer)
-            IMFMediaBuffer_Release(decoder->temp_buffer);
         if (decoder->wg_transform)
             wg_transform_destroy(decoder->wg_transform);
         if (decoder->input_type)
@@ -440,18 +435,18 @@ done:
 
 static HRESULT init_allocator(struct video_decoder *decoder)
 {
+    UINT32 count = 0;
     HRESULT hr;
 
     if (decoder->allocator_initialized)
         return S_OK;
 
-    if (FAILED(hr = IMFTransform_SetInputType(decoder->copier, 0, decoder->output_type, 0)))
-        return hr;
-    if (FAILED(hr = IMFTransform_SetOutputType(decoder->copier, 0, decoder->output_type, 0)))
-        return hr;
+    if (FAILED(IMFAttributes_GetUINT32(decoder->attributes, &MF_SA_MINIMUM_OUTPUT_SAMPLE_COUNT, &count)))
+        count = 10;
+    count = max(count, 10);
 
-    if (FAILED(hr = IMFVideoSampleAllocatorEx_InitializeSampleAllocatorEx(decoder->allocator, 10, 10,
-            decoder->attributes, decoder->output_type)))
+    if (FAILED(hr = IMFVideoSampleAllocatorEx_InitializeSampleAllocatorEx(decoder->allocator, count, count,
+            decoder->output_attributes, decoder->output_type)))
         return hr;
     decoder->allocator_initialized = TRUE;
     return S_OK;
@@ -845,6 +840,7 @@ static HRESULT WINAPI transform_ProcessMessage(IMFTransform *iface, MFT_MESSAGE_
             return hr;
 
         uninit_allocator(decoder);
+        decoder->wg_transform_attrs.allow_hw = !!param;
         if (param)
             decoder->output_info.dwFlags |= MFT_OUTPUT_STREAM_PROVIDES_SAMPLES;
         else
@@ -855,7 +851,11 @@ static HRESULT WINAPI transform_ProcessMessage(IMFTransform *iface, MFT_MESSAGE_
         return decoder->wg_transform ? wg_transform_drain(decoder->wg_transform) : MF_E_TRANSFORM_TYPE_NOT_SET;
 
     case MFT_MESSAGE_COMMAND_FLUSH:
-        return decoder->wg_transform ? wg_transform_flush(decoder->wg_transform) : MF_E_TRANSFORM_TYPE_NOT_SET;
+        if (!decoder->wg_transform)
+            return MF_E_TRANSFORM_TYPE_NOT_SET;
+        hr = wg_transform_flush(decoder->wg_transform);
+        wg_sample_queue_flush(decoder->wg_sample_queue, true);
+        return hr;
 
     case MFT_MESSAGE_NOTIFY_START_OF_STREAM:
         decoder->sample_time = -1;
@@ -883,36 +883,6 @@ static HRESULT WINAPI transform_ProcessInput(IMFTransform *iface, DWORD id, IMFS
         set_previous_stride(decoder);
 
     return wg_transform_push_mf(decoder->wg_transform, sample, decoder->wg_sample_queue);
-}
-
-static HRESULT output_sample(struct video_decoder *decoder, IMFSample **out, IMFSample *src_sample)
-{
-    MFT_OUTPUT_DATA_BUFFER output[1];
-    IMFSample *sample;
-    DWORD status;
-    HRESULT hr;
-
-    if (FAILED(hr = init_allocator(decoder)))
-    {
-        ERR("Failed to initialize allocator, hr %#lx.\n", hr);
-        return hr;
-    }
-    if (FAILED(hr = IMFVideoSampleAllocatorEx_AllocateSample(decoder->allocator, &sample)))
-        return hr;
-
-    if (FAILED(hr = IMFTransform_ProcessInput(decoder->copier, 0, src_sample, 0)))
-    {
-        IMFSample_Release(sample);
-        return hr;
-    }
-    output[0].pSample = sample;
-    if (FAILED(hr = IMFTransform_ProcessOutput(decoder->copier, 0, 1, output, &status)))
-    {
-        IMFSample_Release(sample);
-        return hr;
-    }
-    *out = sample;
-    return S_OK;
 }
 
 static HRESULT handle_stream_type_change(struct video_decoder *decoder)
@@ -951,7 +921,6 @@ static HRESULT WINAPI transform_ProcessOutput(IMFTransform *iface, DWORD flags, 
     UINT64 frame_size, frame_rate;
     bool preserve_timestamps;
     GUID subtype;
-    DWORD size;
     HRESULT hr;
 
     TRACE("iface %p, flags %#lx, count %lu, samples %p, status %p.\n", iface, flags, count, samples, status);
@@ -975,23 +944,15 @@ static HRESULT WINAPI transform_ProcessOutput(IMFTransform *iface, DWORD flags, 
 
     if (decoder->output_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)
     {
-        if (decoder->temp_buffer)
+        if (!wg_transform_can_output(decoder->wg_transform))
+            return MF_E_TRANSFORM_NEED_MORE_INPUT;
+        if (FAILED(hr = init_allocator(decoder)))
         {
-            if (FAILED(IMFMediaBuffer_GetMaxLength(decoder->temp_buffer, &size)) || size < sample_size)
-            {
-                IMFMediaBuffer_Release(decoder->temp_buffer);
-                decoder->temp_buffer = NULL;
-            }
-        }
-        if (!decoder->temp_buffer && FAILED(hr = MFCreateMemoryBuffer(sample_size, &decoder->temp_buffer)))
-            return hr;
-        if (FAILED(hr = MFCreateSample(&sample)))
-            return hr;
-        if (FAILED(hr = IMFSample_AddBuffer(sample, decoder->temp_buffer)))
-        {
-            IMFSample_Release(sample);
+            ERR("Failed to initialize allocator, hr %#lx.\n", hr);
             return hr;
         }
+        if (FAILED(hr = IMFVideoSampleAllocatorEx_AllocateSample(decoder->allocator, &sample)))
+            return hr;
     }
 
     if (SUCCEEDED(hr = wg_transform_read_mf(decoder->wg_transform, sample,
@@ -1032,9 +993,10 @@ static HRESULT WINAPI transform_ProcessOutput(IMFTransform *iface, DWORD flags, 
 
     if (decoder->output_info.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)
     {
-        if (hr == S_OK && FAILED(hr = output_sample(decoder, &samples->pSample, sample)))
-            ERR("Failed to output sample, hr %#lx.\n", hr);
-        IMFSample_Release(sample);
+        if (hr == S_OK)
+            samples->pSample = sample;
+        else
+            IMFSample_Release(sample);
     }
 
     return hr;
@@ -1666,8 +1628,6 @@ static HRESULT video_decoder_create_with_types(const GUID *const *input_types, U
     if (FAILED(hr = wg_sample_queue_create(&decoder->wg_sample_queue)))
         goto failed;
     if (FAILED(hr = MFCreateVideoSampleAllocatorEx(&IID_IMFVideoSampleAllocatorEx, (void **)&decoder->allocator)))
-        goto failed;
-    if (FAILED(hr = MFCreateSampleCopierMFT(&decoder->copier)))
         goto failed;
 
     decoder->wg_transform_attrs.input_queue_length = 15;

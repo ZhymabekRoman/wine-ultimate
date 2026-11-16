@@ -962,8 +962,30 @@ static HRESULT dxgi_surface_buffer_create_readback_texture(struct buffer *buffer
 static HRESULT dxgi_surface_buffer_map(struct buffer *buffer, MF2DBuffer_LockFlags flags)
 {
     ID3D11DeviceContext *immediate_context;
+    D3D11_TEXTURE2D_DESC texture_desc;
     ID3D11Device *device;
+    D3D11_MAP map_type;
     HRESULT hr;
+
+    ID3D11Texture2D_GetDesc(buffer->dxgi_surface.texture, &texture_desc);
+    map_type = (flags == MF2DBuffer_LockFlags_Write) ? D3D11_MAP_WRITE : D3D11_MAP_READ_WRITE;
+
+    if (texture_desc.Usage == D3D11_USAGE_STAGING)
+    {
+        ID3D11Texture2D_GetDevice(buffer->dxgi_surface.texture, &device);
+        ID3D11Device_GetImmediateContext(device, &immediate_context);
+
+        memset(&buffer->dxgi_surface.map_desc, 0, sizeof(buffer->dxgi_surface.map_desc));
+        if (FAILED(hr = ID3D11DeviceContext_Map(immediate_context, (ID3D11Resource *)buffer->dxgi_surface.texture,
+                buffer->dxgi_surface.sub_resource_idx, map_type, 0, &buffer->dxgi_surface.map_desc)))
+        {
+            WARN("Failed to map staging texture, hr %#lx.\n", hr);
+        }
+
+        ID3D11DeviceContext_Release(immediate_context);
+        ID3D11Device_Release(device);
+        return hr;
+    }
 
     if (FAILED(hr = dxgi_surface_buffer_create_readback_texture(buffer)))
         return hr;
@@ -979,7 +1001,7 @@ static HRESULT dxgi_surface_buffer_map(struct buffer *buffer, MF2DBuffer_LockFla
 
     memset(&buffer->dxgi_surface.map_desc, 0, sizeof(buffer->dxgi_surface.map_desc));
     if (FAILED(hr = ID3D11DeviceContext_Map(immediate_context, (ID3D11Resource *)buffer->dxgi_surface.rb_texture,
-            0, D3D11_MAP_READ_WRITE, 0, &buffer->dxgi_surface.map_desc)))
+            0, map_type, 0, &buffer->dxgi_surface.map_desc)))
     {
         WARN("Failed to map readback texture, hr %#lx.\n", hr);
     }
@@ -997,13 +1019,21 @@ static void dxgi_surface_buffer_unmap(struct buffer *buffer, MF2DBuffer_LockFlag
 
     ID3D11Texture2D_GetDevice(buffer->dxgi_surface.texture, &device);
     ID3D11Device_GetImmediateContext(device, &immediate_context);
-    ID3D11DeviceContext_Unmap(immediate_context, (ID3D11Resource *)buffer->dxgi_surface.rb_texture, 0);
     memset(&buffer->dxgi_surface.map_desc, 0, sizeof(buffer->dxgi_surface.map_desc));
 
-    if (flags == MF2DBuffer_LockFlags_Write || flags == MF2DBuffer_LockFlags_ReadWrite)
+    if (!buffer->dxgi_surface.rb_texture)
     {
-        ID3D11DeviceContext_CopySubresourceRegion(immediate_context, (ID3D11Resource *)buffer->dxgi_surface.texture,
-                buffer->dxgi_surface.sub_resource_idx, 0, 0, 0, (ID3D11Resource *)buffer->dxgi_surface.rb_texture, 0, NULL);
+        ID3D11DeviceContext_Unmap(immediate_context, (ID3D11Resource *)buffer->dxgi_surface.texture,
+                buffer->dxgi_surface.sub_resource_idx);
+    }
+    else
+    {
+        ID3D11DeviceContext_Unmap(immediate_context, (ID3D11Resource *)buffer->dxgi_surface.rb_texture, 0);
+        if (flags == MF2DBuffer_LockFlags_Write || flags == MF2DBuffer_LockFlags_ReadWrite)
+        {
+            ID3D11DeviceContext_CopySubresourceRegion(immediate_context, (ID3D11Resource *)buffer->dxgi_surface.texture,
+                    buffer->dxgi_surface.sub_resource_idx, 0, 0, 0, (ID3D11Resource *)buffer->dxgi_surface.rb_texture, 0, NULL);
+        }
     }
 
     ID3D11DeviceContext_Release(immediate_context);

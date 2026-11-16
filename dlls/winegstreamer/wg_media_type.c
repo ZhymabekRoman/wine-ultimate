@@ -335,12 +335,43 @@ static void init_caps_from_video_mpeg(GstCaps *caps, const struct mpeg_video_for
     gst_caps_set_simple(caps, "parsed", G_TYPE_BOOLEAN, TRUE, NULL);
 }
 
+static void init_caps_from_video_h265(GstCaps *caps, const MFVIDEOFORMAT *format, UINT format_size)
+{
+    gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
+    gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-h265");
+    gst_caps_set_simple(caps, "stream-format", G_TYPE_STRING, "byte-stream", NULL);
+    if (format_size > sizeof(*format))
+        init_caps_codec_data(caps, format + 1, format_size - sizeof(*format));
+}
+
+static void init_caps_from_video_vp9(GstCaps *caps, const MFVIDEOFORMAT *format, UINT format_size)
+{
+    gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
+    gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-vp9");
+    if (format_size > sizeof(*format))
+        init_caps_codec_data(caps, format + 1, format_size - sizeof(*format));
+}
+
+static void init_caps_from_video_av1(GstCaps *caps, const MFVIDEOFORMAT *format, UINT format_size)
+{
+    gst_structure_remove_field(gst_caps_get_structure(caps, 0), "format");
+    gst_structure_set_name(gst_caps_get_structure(caps, 0), "video/x-av1");
+    if (format_size > sizeof(*format))
+        init_caps_codec_data(caps, format + 1, format_size - sizeof(*format));
+}
+
 static void init_caps_from_video_subtype(GstCaps *caps, const GUID *subtype, const void *format, UINT format_size)
 {
     if (IsEqualGUID(subtype, &MFVideoFormat_CVID))
         return init_caps_from_video_cinepak(caps, format, format_size);
     if (IsEqualGUID(subtype, &MFVideoFormat_H264))
         return init_caps_from_video_h264(caps, format, format_size);
+    if (IsEqualGUID(subtype, &MFVideoFormat_HEVC) || IsEqualGUID(subtype, &MFVideoFormat_HEVC_ES))
+        return init_caps_from_video_h265(caps, format, format_size);
+    if (IsEqualGUID(subtype, &MFVideoFormat_VP90))
+        return init_caps_from_video_vp9(caps, format, format_size);
+    if (IsEqualGUID(subtype, &MFVideoFormat_AV1))
+        return init_caps_from_video_av1(caps, format, format_size);
     if (IsEqualGUID(subtype, &MFVideoFormat_WMV1))
         return init_caps_from_video_wmv(caps, format, format_size, 1, "WMV1");
     if (IsEqualGUID(subtype, &MFVideoFormat_WMV2))

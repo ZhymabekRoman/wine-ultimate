@@ -110,6 +110,7 @@ void wg_transform_destroy(wg_transform_t transform);
 HRESULT wg_transform_get_output_type(wg_transform_t transform, IMFMediaType **media_type);
 HRESULT wg_transform_set_output_type(wg_transform_t transform, IMFMediaType *media_type);
 bool wg_transform_get_status(wg_transform_t transform, bool *accepts_input);
+bool wg_transform_can_output(wg_transform_t transform);
 HRESULT wg_transform_drain(wg_transform_t transform);
 HRESULT wg_transform_flush(wg_transform_t transform);
 void wg_transform_notify_qos(wg_transform_t transform,

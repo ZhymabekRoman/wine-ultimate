@@ -95,6 +95,7 @@ struct wg_transform
     GstCaps *input_caps;
 
     bool draining;
+    bool is_hw_decoder;
     INT64 ts_offset;
 };
 
@@ -540,13 +541,170 @@ static GstCaps *transform_get_parsed_caps(GstCaps *caps, const char *media_type)
     return parsed_caps;
 }
 
+static bool is_hw_decoder_disabled(void)
+{
+    const char *env = getenv("WINE_DISABLE_VAAPI_MFT");
+    if (env && (!strcmp(env, "1") || !strcasecmp(env, "true")))
+        return true;
+    env = getenv("WINE_DISABLE_HW_MFT");
+    if (env && (!strcmp(env, "1") || !strcasecmp(env, "true")))
+        return true;
+    return false;
+}
+
+static int hw_decoder_priority(GstElementFactory *factory)
+{
+    const gchar *name = gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory));
+    const gchar *klass = gst_element_factory_get_metadata(factory, GST_ELEMENT_METADATA_KLASS);
+
+    if (!name || !klass)
+        return 0;
+    if (!strcmp(name, "vaapidecodebin"))
+        return 0;
+    if (!strstr(klass, "Decoder") || !strstr(klass, "Video"))
+        return 0;
+    if (!strncmp(name, "va", 2))
+        return 3;
+    if (!strncmp(name, "vulkan", 6) && strstr(name, "dec"))
+        return 2;
+    if ((!strncmp(name, "nv", 2) || !strncmp(name, "v4l2", 4)) && strstr(klass, "Hardware"))
+        return 1;
+    return 0;
+}
+
+static bool hw_decoder_get_post_element(GstElementFactory *factory, const char **post_name)
+{
+    bool supports_sysmem = false, supports_vulkan = false, supports_va = false, supports_dmabuf = false;
+    const GList *templates;
+
+    *post_name = NULL;
+    for (templates = gst_element_factory_get_static_pad_templates(factory); templates; templates = templates->next)
+    {
+        GstStaticPadTemplate *tmpl = templates->data;
+        GstCaps *caps;
+        guint i;
+
+        if (tmpl->direction != GST_PAD_SRC)
+            continue;
+        caps = gst_static_pad_template_get_caps(tmpl);
+        for (i = 0; i < gst_caps_get_size(caps); ++i)
+        {
+            const gchar *st_name = gst_structure_get_name(gst_caps_get_structure(caps, i));
+            GstCapsFeatures *feat = gst_caps_get_features(caps, i);
+
+            if (strcmp(st_name, "video/x-raw"))
+                continue;
+            if (!feat || gst_caps_features_is_equal(feat, GST_CAPS_FEATURES_MEMORY_SYSTEM_MEMORY))
+                supports_sysmem = true;
+            else if (gst_caps_features_contains(feat, "memory:VulkanImage"))
+                supports_vulkan = true;
+            else if (gst_caps_features_contains(feat, "memory:VAMemory")
+                    || gst_caps_features_contains(feat, "memory:VASurface"))
+                supports_va = true;
+            else if (gst_caps_features_contains(feat, "memory:DMABuf"))
+                supports_dmabuf = true;
+        }
+        gst_caps_unref(caps);
+    }
+
+    if (supports_sysmem)
+        return true;
+    if (supports_vulkan)
+    {
+        GstElementFactory *f = gst_element_factory_find("vulkandownload");
+        if (f)
+        {
+            gst_object_unref(f);
+            *post_name = "vulkandownload";
+            return true;
+        }
+    }
+    if (supports_va)
+    {
+        GstElementFactory *f = gst_element_factory_find("vapostproc");
+        if (f)
+        {
+            gst_object_unref(f);
+            *post_name = "vapostproc";
+            return true;
+        }
+        if ((f = gst_element_factory_find("vaapipostproc")))
+        {
+            gst_object_unref(f);
+            *post_name = "vaapipostproc";
+            return true;
+        }
+    }
+    if (supports_dmabuf)
+        return true;
+    return false;
+}
+
+static bool try_create_hw_video_decoder(struct wg_transform *transform, GstCaps *parsed_caps,
+        GstElement **first, GstElement **last)
+{
+    const char *force_hw = getenv("WINE_FORCE_HW_MFT");
+    int min_tier = (transform->attrs.allow_hw || (force_hw && !strcmp(force_hw, "1"))) ? 1 : 3;
+    GList *factories, *tmp;
+    int tier;
+
+    if (is_hw_decoder_disabled())
+        return false;
+
+    if (!(factories = find_element_factories(GST_ELEMENT_FACTORY_TYPE_DECODER, GST_RANK_NONE, parsed_caps, NULL)))
+        return false;
+
+    for (tier = 3; tier >= min_tier; --tier)
+    {
+        for (tmp = factories; tmp; tmp = tmp->next)
+        {
+            GstElementFactory *factory = GST_ELEMENT_FACTORY(tmp->data);
+            const char *post_name = NULL;
+            GstElement *elem, *post_elem = NULL;
+
+            if (hw_decoder_priority(factory) != tier)
+                continue;
+            if (!hw_decoder_get_post_element(factory, &post_name))
+                continue;
+            if (!(elem = factory_create_element(factory)))
+                continue;
+            if (post_name && !(post_elem = create_element(post_name, "bad")))
+            {
+                g_object_unref(elem);
+                continue;
+            }
+            if (!append_element(transform->container, elem, first, last))
+            {
+                if (post_elem)
+                    g_object_unref(post_elem);
+                gst_plugin_feature_list_free(factories);
+                return false;
+            }
+            if (post_elem && !append_element(transform->container, post_elem, first, last))
+            {
+                gst_plugin_feature_list_free(factories);
+                return false;
+            }
+
+            GST_INFO("Using hardware video decoder %s%s%s.",
+                    gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory)),
+                    post_name ? " + " : "", post_name ? post_name : "");
+            transform->is_hw_decoder = true;
+            gst_plugin_feature_list_free(factories);
+            return true;
+        }
+    }
+
+    gst_plugin_feature_list_free(factories);
+    return false;
+}
+
 static bool transform_create_decoder_elements(struct wg_transform *transform,
-        const gchar *input_mime, const gchar *output_mime, GstElement **first, GstElement **last)
+        const gchar *input_mime, const gchar *output_mime, GstElement **first, GstElement **last,
+        bool allow_hw)
 {
     GstCaps *parsed_caps = NULL, *sink_caps = NULL;
     GstElement *element, *capsfilter;
-    const char *shortname = NULL;
-    GstElementFactory *factory;
     bool ret = false;
     char *str;
 
@@ -583,26 +741,11 @@ static bool transform_create_decoder_elements(struct wg_transform *transform,
         parsed_caps = gst_caps_ref(transform->input_caps);
     }
 
-    if (!(element = find_element(GST_ELEMENT_FACTORY_TYPE_DECODER, parsed_caps, sink_caps)))
-        goto done;
-
-    /* h264parse currently has a bug where it will send an avc caps without codec_data when it
-     * has received an SPS but not PPS. As a result, when a drain request is made, the caps is fixated
-     * to avc but no codec_data is provided to the decoder. This results in libav rejecting every
-     * packet it receives.
-     * As a workaround, we need to insert a capsfilter for avdec_h264 in order for it to use
-     * the byte-stream stream-format.
-     */
-    if ((factory = gst_element_get_factory(element)) &&
-            (shortname = gst_plugin_feature_get_name(GST_PLUGIN_FEATURE(factory))) &&
-            !strcmp(shortname, "avdec_h264"))
+    if (!strcmp(input_mime, "video/x-h264"))
     {
         if (!(capsfilter = create_element("capsfilter", "good")) ||
                 !append_element(transform->container, capsfilter, first, last))
-        {
-            g_object_unref(element);
             goto done;
-        }
 
         gst_caps_set_simple(parsed_caps, "stream-format", G_TYPE_STRING, "byte-stream", NULL);
         gst_caps_set_simple(parsed_caps, "alignment", G_TYPE_STRING, "au", NULL);
@@ -613,6 +756,16 @@ static bool transform_create_decoder_elements(struct wg_transform *transform,
             free(str);
         }
     }
+
+    if (allow_hw && g_str_has_prefix(output_mime, "video/")
+            && try_create_hw_video_decoder(transform, parsed_caps, first, last))
+    {
+        ret = true;
+        goto done;
+    }
+
+    if (!(element = find_element(GST_ELEMENT_FACTORY_TYPE_DECODER, parsed_caps, sink_caps)))
+        goto done;
 
     if (!append_element(transform->container, element, first, last))
         goto done;
@@ -677,20 +830,124 @@ static bool transform_create_encoder_element(struct wg_transform *transform,
             && append_element(transform->container, element, first, last);
 }
 
+static void wg_transform_reset_pipeline(struct wg_transform *transform)
+{
+    GstSample *sample;
+
+    if (transform->container)
+    {
+        gst_element_set_state(transform->container, GST_STATE_NULL);
+        gst_object_unref(transform->container);
+        transform->container = NULL;
+    }
+    if (transform->my_sink)
+    {
+        gst_object_unref(transform->my_sink);
+        transform->my_sink = NULL;
+    }
+    if (transform->my_src)
+    {
+        gst_object_unref(transform->my_src);
+        transform->my_src = NULL;
+    }
+    if (transform->desired_caps)
+    {
+        gst_caps_unref(transform->desired_caps);
+        transform->desired_caps = NULL;
+    }
+    while ((sample = gst_atomic_queue_pop(transform->output_queue)))
+        gst_sample_unref(sample);
+    transform->stepper = NULL;
+    transform->output_caps_changed = false;
+    transform->is_hw_decoder = false;
+}
+
+static bool wg_transform_init_pipeline(struct wg_transform *transform,
+        const gchar *input_mime, const gchar *output_mime, bool allow_hw)
+{
+    GstElement *first = NULL, *last = NULL;
+    GstPadTemplate *template = NULL;
+    GstEvent *event;
+
+    if (!(transform->container = gst_bin_new("wg_transform")))
+        goto fail;
+
+    if (!(template = gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS, transform->input_caps)))
+        goto fail;
+    transform->my_src = gst_pad_new_from_template(template, "src");
+    g_object_unref(template);
+    if (!transform->my_src)
+        goto fail;
+
+    gst_pad_set_element_private(transform->my_src, transform);
+    gst_pad_set_query_function(transform->my_src, transform_src_query_cb);
+
+    transform->desired_caps = gst_caps_ref(transform->output_caps);
+    if (!(template = gst_pad_template_new("sink", GST_PAD_SINK, GST_PAD_ALWAYS, transform->output_caps)))
+        goto fail;
+    transform->my_sink = gst_pad_new_from_template(template, "sink");
+    g_object_unref(template);
+    if (!transform->my_sink)
+        goto fail;
+
+    gst_pad_set_element_private(transform->my_sink, transform);
+    gst_pad_set_event_function(transform->my_sink, transform_sink_event_cb);
+    gst_pad_set_query_function(transform->my_sink, transform_sink_query_cb);
+    gst_pad_set_chain_function(transform->my_sink, transform_sink_chain_cb);
+
+    if (!transform_create_decoder_elements(transform, input_mime, output_mime, &first, &last, allow_hw))
+        goto fail;
+    if (!transform_create_converter_elements(transform, output_mime, &first, &last))
+        goto fail;
+    if (!transform_create_encoder_element(transform, output_mime, &first, &last))
+        goto fail;
+
+    if (!link_src_to_element(transform->my_src, first))
+        goto fail;
+    if (!link_element_to_sink(last, transform->my_sink))
+        goto fail;
+    if (!gst_pad_set_active(transform->my_sink, 1))
+        goto fail;
+    if (!gst_pad_set_active(transform->my_src, 1))
+        goto fail;
+
+    if (gst_element_set_state(transform->container, GST_STATE_PAUSED) == GST_STATE_CHANGE_FAILURE)
+        goto fail;
+    if (!gst_element_get_state(transform->container, NULL, NULL, -1))
+        goto fail;
+
+    if (!(event = gst_event_new_stream_start("stream"))
+            || !push_event(transform->my_src, event))
+        goto fail;
+    if (!(event = gst_event_new_caps(transform->input_caps))
+            || !push_event(transform->my_src, event))
+        goto fail;
+
+    /* We need to use GST_FORMAT_TIME here because it's the only format
+     * some elements such avdec_wmav2 correctly support. */
+    gst_segment_init(&transform->segment, GST_FORMAT_TIME);
+    transform->segment.start = 0;
+    transform->segment.stop = -1;
+    if (!(event = gst_event_new_segment(&transform->segment))
+            || !push_event(transform->my_src, event))
+        goto fail;
+
+    return true;
+
+fail:
+    wg_transform_reset_pipeline(transform);
+    return false;
+}
+
 NTSTATUS wg_transform_create(void *args)
 {
     struct wg_transform_create_params *params = args;
-    GstElement *first = NULL, *last = NULL;
     NTSTATUS status = STATUS_UNSUCCESSFUL;
     const gchar *input_mime, *output_mime;
-    GstPadTemplate *template = NULL;
     struct wg_transform *transform;
-    GstEvent *event;
 
     if (!(transform = calloc(1, sizeof(*transform))))
         return STATUS_NO_MEMORY;
-    if (!(transform->container = gst_bin_new("wg_transform")))
-        goto out;
     if (!(transform->input_queue = gst_atomic_queue_new(8)))
         goto out;
     if (!(transform->output_queue = gst_atomic_queue_new(8)))
@@ -716,79 +973,22 @@ NTSTATUS wg_transform_create(void *args)
     if (IsEqualGUID(&params->output_type.major, &MFMediaType_Video))
         transform->output_info = params->output_type.u.video->videoInfo;
 
-    if (!(template = gst_pad_template_new("src", GST_PAD_SRC, GST_PAD_ALWAYS, transform->input_caps)))
-        goto out;
-    transform->my_src = gst_pad_new_from_template(template, "src");
-    g_object_unref(template);
-    if (!transform->my_src)
-        goto out;
-
-    gst_pad_set_element_private(transform->my_src, transform);
-    gst_pad_set_query_function(transform->my_src, transform_src_query_cb);
-
-    transform->desired_caps = gst_caps_ref(transform->output_caps);
-    if (!(template = gst_pad_template_new("sink", GST_PAD_SINK, GST_PAD_ALWAYS, transform->output_caps)))
-        goto out;
-    transform->my_sink = gst_pad_new_from_template(template, "sink");
-    g_object_unref(template);
-    if (!transform->my_sink)
-        goto out;
-
-    gst_pad_set_element_private(transform->my_sink, transform);
-    gst_pad_set_event_function(transform->my_sink, transform_sink_event_cb);
-    gst_pad_set_query_function(transform->my_sink, transform_sink_query_cb);
-    gst_pad_set_chain_function(transform->my_sink, transform_sink_chain_cb);
-
-    /* Create elements. */
-    if (!transform_create_decoder_elements(transform, input_mime, output_mime, &first, &last))
-        goto out;
-    if (!transform_create_converter_elements(transform, output_mime, &first, &last))
-        goto out;
-    if (!transform_create_encoder_element(transform, output_mime, &first, &last))
-        goto out;
-
-    if (!link_src_to_element(transform->my_src, first))
-        goto out;
-    if (!link_element_to_sink(last, transform->my_sink))
-        goto out;
-    if (!gst_pad_set_active(transform->my_sink, 1))
-        goto out;
-    if (!gst_pad_set_active(transform->my_src, 1))
-        goto out;
-
-    gst_element_set_state(transform->container, GST_STATE_PAUSED);
-    if (!gst_element_get_state(transform->container, NULL, NULL, -1))
-        goto out;
-
-    if (!(event = gst_event_new_stream_start("stream"))
-            || !push_event(transform->my_src, event))
-        goto out;
-    if (!(event = gst_event_new_caps(transform->input_caps))
-            || !push_event(transform->my_src, event))
-        goto out;
-
-    /* We need to use GST_FORMAT_TIME here because it's the only format
-     * some elements such avdec_wmav2 correctly support. */
-    gst_segment_init(&transform->segment, GST_FORMAT_TIME);
-    transform->segment.start = 0;
-    transform->segment.stop = -1;
-    if (!(event = gst_event_new_segment(&transform->segment))
-            || !push_event(transform->my_src, event))
-        goto out;
+    if (!wg_transform_init_pipeline(transform, input_mime, output_mime, true))
+    {
+        GST_WARNING("Hardware pipeline failed for %s -> %s, falling back to software.",
+                input_mime, output_mime);
+        if (!wg_transform_init_pipeline(transform, input_mime, output_mime, false))
+            goto out;
+    }
 
     GST_INFO("Created winegstreamer transform %p.", transform);
     params->transform = (wg_transform_t)(ULONG_PTR)transform;
     return STATUS_SUCCESS;
 
 out:
-    if (transform->my_sink)
-        gst_object_unref(transform->my_sink);
-    if (transform->desired_caps)
-        gst_caps_unref(transform->desired_caps);
+    wg_transform_reset_pipeline(transform);
     if (transform->output_caps)
         gst_caps_unref(transform->output_caps);
-    if (transform->my_src)
-        gst_object_unref(transform->my_src);
     if (transform->input_caps)
         gst_caps_unref(transform->input_caps);
     if (transform->allocator)
@@ -799,11 +999,6 @@ out:
         gst_atomic_queue_unref(transform->output_queue);
     if (transform->input_queue)
         gst_atomic_queue_unref(transform->input_queue);
-    if (transform->container)
-    {
-        gst_element_set_state(transform->container, GST_STATE_NULL);
-        gst_object_unref(transform->container);
-    }
     free(transform);
     GST_ERROR("Failed to create winegstreamer transform.");
     return status;
@@ -1083,16 +1278,28 @@ static void set_sample_flags_from_buffer(struct wg_sample *sample, GstBuffer *bu
         sample->flags |= WG_SAMPLE_FLAG_DISCONTINUITY;
 }
 
-static bool sample_needs_buffer_copy(struct wg_sample *sample, GstBuffer *buffer, gsize *total_size)
+static bool sample_needs_buffer_copy(struct wg_sample *sample, GstBuffer *buffer, gsize *total_size, bool is_video)
 {
+    GstMemory *mem;
     GstMapInfo info;
     bool needs_copy;
+
+    if (gst_buffer_n_memory(buffer) == 1 && (mem = gst_buffer_peek_memory(buffer, 0)))
+    {
+        if (gst_memory_is_type(mem, "dmabuf"))
+            GST_LOG("Reading DMABuf buffer %"GST_PTR_FORMAT, buffer);
+        if (is_video && (!mem->allocator || g_strcmp0(mem->allocator->mem_type, "Wine")))
+        {
+            *total_size = sample->size = gst_buffer_get_size(buffer);
+            return true;
+        }
+    }
 
     if (!gst_buffer_map(buffer, &info, GST_MAP_READ))
     {
         GST_ERROR("Failed to map buffer %"GST_PTR_FORMAT, buffer);
         sample->size = 0;
-        return STATUS_UNSUCCESSFUL;
+        return true;
     }
     needs_copy = info.data != wg_sample_data(sample);
     *total_size = sample->size = info.size;
@@ -1108,7 +1315,7 @@ static NTSTATUS read_transform_output_video(struct wg_sample *sample, GstBuffer 
     NTSTATUS status;
     bool needs_copy;
 
-    if (!(needs_copy = sample_needs_buffer_copy(sample, buffer, &total_size)))
+    if (!(needs_copy = sample_needs_buffer_copy(sample, buffer, &total_size, true)))
         status = STATUS_SUCCESS;
     else
         status = copy_video_buffer(buffer, src_video_info, dst_video_info, sample, &total_size);
@@ -1138,7 +1345,7 @@ static NTSTATUS read_transform_output(struct wg_sample *sample, GstBuffer *buffe
     NTSTATUS status;
     bool needs_copy;
 
-    if (!(needs_copy = sample_needs_buffer_copy(sample, buffer, &total_size)))
+    if (!(needs_copy = sample_needs_buffer_copy(sample, buffer, &total_size, false)))
         status = STATUS_SUCCESS;
     else
         status = copy_buffer(buffer, sample, &total_size);
@@ -1333,6 +1540,10 @@ NTSTATUS wg_transform_get_status(void *args)
     struct wg_transform *transform = get_transform(params->transform);
 
     params->accepts_input = gst_atomic_queue_length(transform->input_queue) < transform->attrs.input_queue_length + 1;
+    params->can_output = transform->output_sample
+            || gst_atomic_queue_length(transform->output_queue) > 0
+            || gst_atomic_queue_length(transform->input_queue) > 0
+            || (transform->stepper && gst_atomic_queue_length(transform->stepper->fifo) > 0);
     return STATUS_SUCCESS;
 }
 

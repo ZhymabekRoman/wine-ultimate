@@ -340,6 +340,7 @@ struct wg_transform_attrs
     BOOL allow_format_change;
     BOOL low_latency;
     BOOL preserve_timestamps;
+    BOOL allow_hw;
 };
 
 struct wg_transform_create_params
@@ -380,6 +381,7 @@ struct wg_transform_get_status_params
 {
     wg_transform_t transform;
     UINT32 accepts_input;
+    UINT32 can_output;
 };
 
 struct wg_transform_notify_qos_params

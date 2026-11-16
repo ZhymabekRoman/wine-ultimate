@@ -98,7 +98,8 @@ static const struct wg_sample_ops mf_sample_ops =
     mf_sample_destroy,
 };
 
-HRESULT wg_sample_create_mf(IMFSample *mf_sample, struct wg_sample **out)
+static HRESULT wg_sample_create_mf_with_flags(IMFSample *mf_sample, MF2DBuffer_LockFlags lock_flags,
+        struct wg_sample **out)
 {
     DWORD current_length, max_length;
     BYTE *scanline0, *buffer = NULL;
@@ -119,7 +120,7 @@ HRESULT wg_sample_create_mf(IMFSample *mf_sample, struct wg_sample **out)
          * This avoids Lock() copying the entire contents into a linear buffer even though the
          * current contents are about to be overwritten, and avoids Unlock() copying the new
          * contents. Resolves performance issues on lower spec hardware. */
-        if (SUCCEEDED(hr = IMF2DBuffer2_Lock2DSize(buffer2d, MF2DBuffer_LockFlags_ReadWrite, &scanline0, &pitch, &buffer, &max_length)))
+        if (SUCCEEDED(hr = IMF2DBuffer2_Lock2DSize(buffer2d, lock_flags, &scanline0, &pitch, &buffer, &max_length)))
         {
             IMFMediaBuffer_Release(sample->u.mf.buffer);
             sample->u.mf.buffer = NULL;
@@ -155,6 +156,11 @@ fail:
         IMFMediaBuffer_Release(sample->u.mf.buffer);
     free(sample);
     return hr;
+}
+
+HRESULT wg_sample_create_mf(IMFSample *mf_sample, struct wg_sample **out)
+{
+    return wg_sample_create_mf_with_flags(mf_sample, MF2DBuffer_LockFlags_ReadWrite, out);
 }
 
 static const struct wg_sample_ops quartz_sample_ops;
@@ -350,7 +356,7 @@ HRESULT wg_transform_push_mf(wg_transform_t transform, IMFSample *sample,
 
     TRACE_(mfplat)("transform %#I64x, sample %p, queue %p.\n", transform, sample, queue);
 
-    if (FAILED(hr = wg_sample_create_mf(sample, &wg_sample)))
+    if (FAILED(hr = wg_sample_create_mf_with_flags(sample, MF2DBuffer_LockFlags_Read, &wg_sample)))
         return hr;
 
     if (SUCCEEDED(IMFSample_GetSampleTime(sample, &time)))
@@ -385,7 +391,7 @@ HRESULT wg_transform_read_mf(wg_transform_t transform, IMFSample *sample,
 
     TRACE_(mfplat)("transform %#I64x, sample %p, flags %p.\n", transform, sample, flags);
 
-    if (FAILED(hr = wg_sample_create_mf(sample, &wg_sample)))
+    if (FAILED(hr = wg_sample_create_mf_with_flags(sample, MF2DBuffer_LockFlags_Write, &wg_sample)))
         return hr;
 
     wg_sample->size = 0;

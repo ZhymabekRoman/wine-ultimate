@@ -542,6 +542,19 @@ bool wg_transform_get_status(wg_transform_t transform, bool *accepts_input)
     return true;
 }
 
+bool wg_transform_can_output(wg_transform_t transform)
+{
+    struct wg_transform_get_status_params params =
+    {
+        .transform = transform,
+    };
+
+    if (WINE_UNIX_CALL(unix_wg_transform_get_status, &params))
+        return true;
+
+    return !!params.can_output;
+}
+
 HRESULT wg_transform_get_output_type(wg_transform_t transform, IMFMediaType **media_type)
 {
     struct wg_transform_get_output_type_params params =
