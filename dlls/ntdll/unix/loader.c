@@ -1017,6 +1017,7 @@ static const unixlib_entry_t unix_call_funcs[] =
     unixcall_wine_spawnvp,
     system_time_precise,
     unixcall_flight_recorder_log,
+    unixcall_relocate_cached_image,
 };
 
 
@@ -1036,6 +1037,7 @@ const unixlib_entry_t unix_call_wow64_funcs[] =
     wow64_wine_spawnvp,
     system_time_precise,
     wow64_flight_recorder_log,
+    wow64_relocate_cached_image,
 };
 
 #endif  /* _WIN64 */

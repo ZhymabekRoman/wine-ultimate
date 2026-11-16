@@ -128,6 +128,10 @@ struct file_view
     void         *base;          /* base address */
     size_t        size;          /* size in bytes */
     unsigned int  protect;       /* protection for all pages at allocation time and SEC_* flags */
+    dev_t         pe_dev;        /* backing file identity for pe_reloc cache */
+    ino_t         pe_ino;
+    off_t         pe_size;
+    time_t        pe_mtime;
 };
 
 /* per-page protection flags */
@@ -1966,9 +1970,13 @@ static NTSTATUS create_view( struct file_view **view_ret, void *base, size_t siz
         return STATUS_NO_MEMORY;
     }
 
-    view->base    = base;
-    view->size    = size;
-    view->protect = vprot;
+    view->base     = base;
+    view->size     = size;
+    view->protect  = vprot;
+    view->pe_dev   = 0;
+    view->pe_ino   = 0;
+    view->pe_size  = 0;
+    view->pe_mtime = 0;
     if (use_kernel_writewatch) vprot &= ~VPROT_WRITEWATCH;
     set_page_vprot( base, size, vprot );
 
@@ -3246,6 +3254,266 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
 }
 
 
+#define PE_RELOC_CACHE_MAGIC   0x5045524CU  /* "PERL" */
+#define PE_RELOC_CACHE_VERSION 1
+#define PE_RELOC_MIN_SIZE      (256 * 1024)
+#define PE_RELOC_MAX_SECS      252
+
+struct pe_reloc_cache_sec
+{
+    ULONG virtual_address;
+    ULONG map_size;
+    ULONG cache_offset;
+    ULONG reserved;
+};
+
+struct pe_reloc_cache_hdr
+{
+    ULONG     magic;
+    ULONG     version;
+    ULONGLONG dev;
+    ULONGLONG ino;
+    ULONGLONG file_size;
+    LONGLONG  mtime_sec;
+    ULONGLONG reloc_base;
+    ULONG     num_ro_secs;
+    ULONG     total_cache_size;
+};
+
+static ULONGLONG pe_reloc_file_hash( dev_t dev, ino_t ino, off_t size, time_t mtime )
+{
+    ULONGLONG vals[4] = { (ULONGLONG)dev, (ULONGLONG)ino, (ULONGLONG)size, (ULONGLONG)mtime };
+    ULONGLONG h = 14695981039346656037ULL;
+    const unsigned char *p = (const unsigned char *)vals;
+    size_t i;
+
+    for (i = 0; i < sizeof(vals); i++)
+    {
+        h ^= p[i];
+        h *= 1099511628211ULL;
+    }
+    return h;
+}
+
+static const char *get_pe_reloc_dir(void)
+{
+    static char cached_dir[512];
+    static LONG init_state;
+
+    if (init_state == 2) return cached_dir[0] ? cached_dir : NULL;
+    if (InterlockedCompareExchange( &init_state, 1, 0 ) == 0)
+    {
+        struct stat st;
+        if (config_dir && !stat( config_dir, &st ))
+        {
+#ifdef __ANDROID__
+            snprintf( cached_dir, sizeof(cached_dir), "%s/.wineserver/server-%llx-%llx",
+                      config_dir, (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#else
+            snprintf( cached_dir, sizeof(cached_dir), "/tmp/.wine-%u/server-%llx-%llx",
+                      getuid(), (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#endif
+        }
+        InterlockedExchange( &init_state, 2 );
+    }
+    else
+    {
+        while (init_state != 2) sched_yield();
+    }
+    return cached_dir[0] ? cached_dir : NULL;
+}
+
+static void format_pe_reloc_path( char *buf, size_t buf_size, ULONGLONG hash, ULONG_PTR reloc_base )
+{
+    const char *dir = get_pe_reloc_dir();
+    if (!dir) { buf[0] = 0; return; }
+    snprintf( buf, buf_size, "%s/pe_reloc_%016llx_%016llx.shm",
+              dir, (unsigned long long)hash, (unsigned long long)reloc_base );
+}
+
+static BOOL is_rva_in_writable_section( ULONG rva, const IMAGE_SECTION_HEADER *sec, ULONG num_secs, SIZE_T align_mask )
+{
+    ULONG i;
+    for (i = 0; i < num_secs; i++)
+    {
+        SIZE_T sz;
+        if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)) continue;
+        sz = sec[i].Misc.VirtualSize ? ROUND_SIZE( sec[i].VirtualAddress, sec[i].Misc.VirtualSize, align_mask )
+                                     : ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
+        if (rva >= sec[i].VirtualAddress && rva < sec[i].VirtualAddress + sz) return TRUE;
+    }
+    return FALSE;
+}
+
+static int pe_reloc_cache_open( dev_t dev, ino_t ino, off_t file_size, time_t mtime,
+                                ULONG_PTR reloc_base, struct pe_reloc_cache_hdr *hdr_out,
+                                struct pe_reloc_cache_sec *secs_out, ULONG max_secs )
+{
+    char path[640], page_buf[4096];
+    struct stat st;
+    ULONGLONG hash;
+    ssize_t n;
+    ULONG i;
+    int fd;
+
+    if (file_size < PE_RELOC_MIN_SIZE) return -1;
+    hash = pe_reloc_file_hash( dev, ino, file_size, mtime );
+    format_pe_reloc_path( path, sizeof(path), hash, reloc_base );
+    if (!path[0]) return -1;
+
+    fd = open( path, O_RDONLY | O_CLOEXEC );
+    if (fd == -1) return -1;
+
+    if (fstat( fd, &st ) == -1 || st.st_size < (off_t)sizeof(page_buf)) goto fail;
+    n = pread( fd, page_buf, sizeof(page_buf), 0 );
+    if (n != sizeof(page_buf)) goto fail;
+
+    memcpy( hdr_out, page_buf, sizeof(*hdr_out) );
+    if (hdr_out->magic != PE_RELOC_CACHE_MAGIC || hdr_out->version != PE_RELOC_CACHE_VERSION ||
+        hdr_out->dev != (ULONGLONG)dev || hdr_out->ino != (ULONGLONG)ino ||
+        hdr_out->file_size != (ULONGLONG)file_size || hdr_out->mtime_sec != (LONGLONG)mtime ||
+        hdr_out->reloc_base != (ULONGLONG)reloc_base ||
+        hdr_out->num_ro_secs == 0 || hdr_out->num_ro_secs > max_secs ||
+        hdr_out->total_cache_size > (ULONGLONG)st.st_size ||
+        sizeof(*hdr_out) + hdr_out->num_ro_secs * sizeof(*secs_out) > sizeof(page_buf))
+        goto fail;
+
+    memcpy( secs_out, page_buf + sizeof(*hdr_out), hdr_out->num_ro_secs * sizeof(*secs_out) );
+    for (i = 0; i < hdr_out->num_ro_secs; i++)
+    {
+        if ((secs_out[i].cache_offset & host_page_mask) ||
+            (secs_out[i].map_size & host_page_mask) ||
+            (ULONGLONG)secs_out[i].cache_offset + secs_out[i].map_size > hdr_out->total_cache_size)
+            goto fail;
+    }
+    return fd;
+
+fail:
+    close( fd );
+    return -1;
+}
+
+static BOOL write_all_fd( int fd, const void *buf, size_t len )
+{
+    const char *p = buf;
+    while (len)
+    {
+        ssize_t w = write( fd, p, len );
+        if (w <= 0)
+        {
+            if (w < 0 && errno == EINTR) continue;
+            return FALSE;
+        }
+        p += w;
+        len -= w;
+    }
+    return TRUE;
+}
+
+static int pe_reloc_cache_publish( dev_t dev, ino_t ino, off_t file_size, time_t mtime,
+                                   ULONG_PTR reloc_base, char *ptr, const IMAGE_SECTION_HEADER *sec,
+                                   ULONG num_secs, SIZE_T align_mask )
+{
+    char final_path[640], tmp_path[700], page_buf[4096];
+    struct pe_reloc_cache_sec secs[PE_RELOC_MAX_SECS];
+    struct pe_reloc_cache_hdr hdr;
+    ULONGLONG hash;
+    ULONG i, num_ro = 0;
+    size_t offset;
+    int fd;
+
+    if (file_size < PE_RELOC_MIN_SIZE || host_page_mask > 0xfff) return -1;
+    hash = pe_reloc_file_hash( dev, ino, file_size, mtime );
+    format_pe_reloc_path( final_path, sizeof(final_path), hash, reloc_base );
+    if (!final_path[0]) return -1;
+
+    offset = sizeof(page_buf);
+    for (i = 0; i < num_secs; i++)
+    {
+        SIZE_T map_size;
+        if ((sec[i].Characteristics & IMAGE_SCN_MEM_WRITE) || !sec[i].PointerToRawData || !sec[i].SizeOfRawData)
+            continue;
+        map_size = sec[i].Misc.VirtualSize ? ROUND_SIZE( sec[i].VirtualAddress, sec[i].Misc.VirtualSize, align_mask )
+                                           : ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
+        if (!map_size || (map_size & host_page_mask) || ((ULONG_PTR)(ptr + sec[i].VirtualAddress) & host_page_mask))
+            continue;
+        if (num_ro >= PE_RELOC_MAX_SECS) return -1;
+        if (offset + map_size > 0x7fffffffU) return -1;
+
+        secs[num_ro].virtual_address = sec[i].VirtualAddress;
+        secs[num_ro].map_size        = (ULONG)map_size;
+        secs[num_ro].cache_offset    = (ULONG)offset;
+        secs[num_ro].reserved        = 0;
+        offset += map_size;
+        num_ro++;
+    }
+    if (!num_ro) return -1;
+
+    memset( &hdr, 0, sizeof(hdr) );
+    hdr.magic            = PE_RELOC_CACHE_MAGIC;
+    hdr.version          = PE_RELOC_CACHE_VERSION;
+    hdr.dev              = (ULONGLONG)dev;
+    hdr.ino              = (ULONGLONG)ino;
+    hdr.file_size        = (ULONGLONG)file_size;
+    hdr.mtime_sec        = (LONGLONG)mtime;
+    hdr.reloc_base       = (ULONGLONG)reloc_base;
+    hdr.num_ro_secs      = num_ro;
+    hdr.total_cache_size = (ULONG)offset;
+
+    memset( page_buf, 0, sizeof(page_buf) );
+    memcpy( page_buf, &hdr, sizeof(hdr) );
+    memcpy( page_buf + sizeof(hdr), secs, num_ro * sizeof(secs[0]) );
+
+    snprintf( tmp_path, sizeof(tmp_path), "%s.tmp.%u.%lu",
+              final_path, (unsigned int)getpid(), (unsigned long)pthread_self() );
+    fd = open( tmp_path, O_WRONLY | O_CREAT | O_EXCL | O_CLOEXEC, 0600 );
+    if (fd == -1) return -1;
+
+    if (!write_all_fd( fd, page_buf, sizeof(page_buf) )) goto fail;
+    for (i = 0; i < num_ro; i++)
+    {
+        if (!write_all_fd( fd, ptr + secs[i].virtual_address, secs[i].map_size )) goto fail;
+    }
+    close( fd );
+
+    if (rename( tmp_path, final_path ) == -1)
+    {
+        unlink( tmp_path );
+        return -1;
+    }
+    return open( final_path, O_RDONLY | O_CLOEXEC );
+
+fail:
+    close( fd );
+    unlink( tmp_path );
+    return -1;
+}
+
+static BOOL pe_reloc_cache_map_ro_sections( int cache_fd, char *ptr, const IMAGE_SECTION_HEADER *sec,
+                                           ULONG num_secs, SIZE_T align_mask,
+                                           const struct pe_reloc_cache_sec *csecs, ULONG num_ro )
+{
+    ULONG i, j;
+
+    for (j = 0; j < num_ro; j++)
+    {
+        int unix_prot = PROT_READ;
+        for (i = 0; i < num_secs; i++)
+        {
+            if (sec[i].VirtualAddress == csecs[j].virtual_address)
+            {
+                if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) unix_prot |= PROT_EXEC;
+                break;
+            }
+        }
+        if (mmap( ptr + csecs[j].virtual_address, csecs[j].map_size, unix_prot,
+                  MAP_PRIVATE | MAP_FIXED, cache_fd, csecs[j].cache_offset ) == MAP_FAILED)
+            return FALSE;
+    }
+    return TRUE;
+}
+
+
 /***********************************************************************
  *           map_image_into_view
  *
@@ -3254,7 +3522,7 @@ static IMAGE_BASE_RELOCATION *process_relocation_block( char *page, IMAGE_BASE_R
  */
 static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRING *nt_name, int fd,
                                      struct pe_image_info *image_info, USHORT machine,
-                                     int shared_fd, BOOL removable )
+                                     int shared_fd, BOOL removable, BOOL allow_reloc_cache )
 {
     IMAGE_DOS_HEADER *dos;
     IMAGE_NT_HEADERS *nt;
@@ -3275,6 +3543,13 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
     /* map the header */
 
     fstat( fd, &st );
+    if (allow_reloc_cache)
+    {
+        view->pe_dev   = st.st_dev;
+        view->pe_ino   = st.st_ino;
+        view->pe_size  = st.st_size;
+        view->pe_mtime = st.st_mtime;
+    }
     header_size = min( image_info->header_size, st.st_size );
     header_map_size = min( image_info->header_map_size, ROUND_SIZE( 0, st.st_size, host_page_mask ));
     if ((status = map_pe_header( view->base, header_size, header_map_size, fd, &removable )))
@@ -3441,6 +3716,8 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
 
     if (image_info->map_addr && (delta = image_info->map_addr - image_info->base))
     {
+        BOOL used_cache = FALSE;
+
         TRACE_(module)( "relocating %s dynamic base %lx -> %lx mapped at %p\n", debugstr_us(nt_name),
                         (ULONG_PTR)image_info->base, (ULONG_PTR)image_info->map_addr, ptr );
 
@@ -3454,8 +3731,62 @@ static NTSTATUS map_image_into_view( struct file_view *view, const UNICODE_STRIN
             IMAGE_BASE_RELOCATION *rel = (IMAGE_BASE_RELOCATION *)(ptr + dir->VirtualAddress);
             IMAGE_BASE_RELOCATION *end = (IMAGE_BASE_RELOCATION *)((char *)rel + dir->Size);
 
-            while (rel && rel < end - 1 && rel->SizeOfBlock && rel->VirtualAddress < total_size)
-                rel = process_relocation_block( ptr + rel->VirtualAddress, rel, delta );
+            if (allow_reloc_cache && ptr == wine_server_get_ptr( image_info->map_addr ) &&
+                st.st_size >= PE_RELOC_MIN_SIZE &&
+                !(image_info->image_flags & IMAGE_FLAGS_ImageMappedFlat))
+            {
+                struct pe_reloc_cache_hdr chdr;
+                struct pe_reloc_cache_sec csecs[PE_RELOC_MAX_SECS];
+                int cache_fd = pe_reloc_cache_open( st.st_dev, st.st_ino, st.st_size, st.st_mtime,
+                                                    (ULONG_PTR)image_info->map_addr, &chdr, csecs, PE_RELOC_MAX_SECS );
+                if (cache_fd >= 0)
+                {
+                    if (pe_reloc_cache_map_ro_sections( cache_fd, ptr, sec, nt->FileHeader.NumberOfSections,
+                                                        align_mask, csecs, chdr.num_ro_secs ))
+                    {
+                        while (rel && rel < end - 1 && rel->SizeOfBlock && rel->VirtualAddress < total_size)
+                        {
+                            if (is_rva_in_writable_section( rel->VirtualAddress, sec,
+                                                            nt->FileHeader.NumberOfSections, align_mask ))
+                                rel = process_relocation_block( ptr + rel->VirtualAddress, rel, delta );
+                            else
+                                rel = (IMAGE_BASE_RELOCATION *)((char *)rel + rel->SizeOfBlock);
+                        }
+                        used_cache = TRUE;
+                    }
+                    close( cache_fd );
+                }
+            }
+
+            if (!used_cache)
+            {
+                while (rel && rel < end - 1 && rel->SizeOfBlock && rel->VirtualAddress < total_size)
+                    rel = process_relocation_block( ptr + rel->VirtualAddress, rel, delta );
+
+                if (allow_reloc_cache && ptr == wine_server_get_ptr( image_info->map_addr ) &&
+                    st.st_size >= PE_RELOC_MIN_SIZE &&
+                    !(image_info->image_flags & IMAGE_FLAGS_ImageMappedFlat))
+                {
+                    int cache_fd = pe_reloc_cache_publish( st.st_dev, st.st_ino, st.st_size, st.st_mtime,
+                                                           (ULONG_PTR)image_info->map_addr, ptr, sec,
+                                                           nt->FileHeader.NumberOfSections, align_mask );
+                    if (cache_fd >= 0)
+                    {
+                        struct pe_reloc_cache_hdr chdr;
+                        struct pe_reloc_cache_sec csecs[PE_RELOC_MAX_SECS];
+                        int verify_fd = pe_reloc_cache_open( st.st_dev, st.st_ino, st.st_size, st.st_mtime,
+                                                             (ULONG_PTR)image_info->map_addr, &chdr, csecs,
+                                                             PE_RELOC_MAX_SECS );
+                        if (verify_fd >= 0)
+                        {
+                            pe_reloc_cache_map_ro_sections( verify_fd, ptr, sec, nt->FileHeader.NumberOfSections,
+                                                            align_mask, csecs, chdr.num_ro_secs );
+                            close( verify_fd );
+                        }
+                        close( cache_fd );
+                    }
+                }
+            }
         }
     }
 
@@ -3686,7 +4017,7 @@ static BOOL is_redhawk_image_name( const UNICODE_STRING *nt_name )
 #endif
 
 static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_info *image_info, SIZE_T size,
-                                ULONG_PTR limit_low, ULONG_PTR limit_high, ULONG alloc_type )
+                                ULONG_PTR limit_low, ULONG_PTR limit_high, ULONG alloc_type, ULONG_PTR det_base )
 {
     unsigned int vprot = SEC_IMAGE | SEC_FILE | VPROT_COMMITTED | VPROT_READ | VPROT_EXEC | VPROT_WRITECOPY;
     void *base;
@@ -3715,6 +4046,17 @@ static NTSTATUS map_image_view( struct file_view **view_ret, struct pe_image_inf
         status = map_view( view_ret, base, size, alloc_type, vprot, limit_low, limit_high, 0 );
         if (!status) return status;
     }
+
+#ifdef _WIN64
+    /* on collision, try deterministic secondary preferred base so processes share relocations */
+    if (det_base && (image_info->image_charact & IMAGE_FILE_DLL) &&
+        det_base >= limit_low && det_base + size <= limit_high &&
+        (image_info->base >= limit_4g || (image_info->image_charact & IMAGE_FILE_LARGE_ADDRESS_AWARE)))
+    {
+        status = map_view( view_ret, (void *)det_base, size, alloc_type, vprot, limit_low, limit_high, 0 );
+        if (!status) return status;
+    }
+#endif
 
     /* then some appropriate address range */
 
@@ -3755,6 +4097,8 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
     SIZE_T size = pe_mapping->image.map_size;
     struct file_view *view;
     unsigned int status;
+    ULONG_PTR det_base = 0;
+    struct stat st;
     sigset_t sigset;
 
     if (offset >= size)
@@ -3788,13 +4132,19 @@ static NTSTATUS virtual_map_image( HANDLE mapping, void **addr_ptr, SIZE_T *size
 #ifdef _WIN64
     if (!redhawk_arena_done && is_redhawk_image_name( &pe_mapping->nt_name ))
         reserve_redhawk_arena();
+    if (!offset && (pe_mapping->image.image_charact & IMAGE_FILE_DLL) && !fstat( unix_fd, &st ) &&
+        st.st_size >= PE_RELOC_MIN_SIZE)
+    {
+        ULONGLONG h = pe_reloc_file_hash( st.st_dev, st.st_ino, st.st_size, st.st_mtime );
+        det_base = (ULONG_PTR)(0x600000000000ULL + ((h & 0x3fffffULL) << 20));
+    }
 #endif
 
-    status = map_image_view( &view, &pe_mapping->image, size, limit_low, limit_high, alloc_type );
+    status = map_image_view( &view, &pe_mapping->image, size, limit_low, limit_high, alloc_type, det_base );
     if (status) goto done;
 
     status = map_image_into_view( view, &pe_mapping->nt_name, unix_fd, &pe_mapping->image,
-                                  machine, shared_fd, needs_close );
+                                  machine, shared_fd, needs_close, !offset );
     if (status == STATUS_SUCCESS)
     {
         if (offset)
@@ -4369,6 +4719,183 @@ NTSTATUS virtual_relocate_module( void *module )
     free( protect_old );
     return STATUS_SUCCESS;
 }
+
+
+/***********************************************************************
+ *           unixcall_relocate_cached_image
+ */
+NTSTATUS unixcall_relocate_cached_image( void *args )
+{
+    void *module = args;
+    char *ptr = module;
+    struct file_view *view;
+    IMAGE_DOS_HEADER *dos;
+    IMAGE_NT_HEADERS *nt;
+    IMAGE_DATA_DIRECTORY *relocs;
+    IMAGE_BASE_RELOCATION *rel, *end;
+    IMAGE_SECTION_HEADER *sec;
+    ULONG total_size, i;
+    ULONG_PTR image_base;
+    INT_PTR delta;
+    SIZE_T align_mask;
+    sigset_t sigset;
+    NTSTATUS status = STATUS_NOT_IMPLEMENTED;
+
+    if (!module) return STATUS_INVALID_PARAMETER;
+
+    server_enter_uninterrupted_section( &virtual_mutex, &sigset );
+
+    view = find_view( module, page_size );
+    if (!view || view->base != module || !(view->protect & SEC_IMAGE) ||
+        (view->protect & VPROT_WRITEWATCH) || enable_write_exceptions ||
+        view->pe_size < PE_RELOC_MIN_SIZE)
+    {
+        goto done;
+    }
+
+    dos = (IMAGE_DOS_HEADER *)ptr;
+    if (dos->e_lfanew <= 0 || (SIZE_T)dos->e_lfanew + sizeof(IMAGE_NT_HEADERS32) > view->size)
+        goto done;
+    nt = (IMAGE_NT_HEADERS *)(ptr + dos->e_lfanew);
+    if (nt->Signature != IMAGE_NT_SIGNATURE) goto done;
+
+    if (nt->OptionalHeader.SectionAlignment < page_size)
+    {
+        status = STATUS_SUCCESS;
+        goto done;
+    }
+    if (nt->FileHeader.Characteristics & IMAGE_FILE_RELOCS_STRIPPED)
+    {
+        status = STATUS_CONFLICTING_ADDRESSES;
+        goto done;
+    }
+
+    if (nt->OptionalHeader.Magic == IMAGE_NT_OPTIONAL_HDR64_MAGIC)
+        image_base = ((const IMAGE_NT_HEADERS64 *)nt)->OptionalHeader.ImageBase;
+    else
+        image_base = ((const IMAGE_NT_HEADERS32 *)nt)->OptionalHeader.ImageBase;
+
+    if (!(delta = (ULONG_PTR)module - image_base))
+    {
+        status = STATUS_SUCCESS;
+        goto done;
+    }
+
+    total_size = ROUND_SIZE( 0, nt->OptionalHeader.SizeOfImage, page_mask );
+    if (total_size > view->size) total_size = view->size;
+    if (!(relocs = get_data_dir( nt, total_size, IMAGE_DIRECTORY_ENTRY_BASERELOC )) || !relocs->Size)
+    {
+        status = STATUS_SUCCESS;
+        goto done;
+    }
+
+    align_mask = max( nt->OptionalHeader.SectionAlignment - 1, page_mask );
+    sec = IMAGE_FIRST_SECTION( nt );
+    rel = (IMAGE_BASE_RELOCATION *)(ptr + relocs->VirtualAddress);
+    end = (IMAGE_BASE_RELOCATION *)((char *)rel + relocs->Size);
+
+    {
+        struct pe_reloc_cache_hdr chdr;
+        struct pe_reloc_cache_sec csecs[PE_RELOC_MAX_SECS];
+        int cache_fd = pe_reloc_cache_open( view->pe_dev, view->pe_ino, view->pe_size, view->pe_mtime,
+                                            (ULONG_PTR)module, &chdr, csecs, PE_RELOC_MAX_SECS );
+        if (cache_fd >= 0)
+        {
+            if (pe_reloc_cache_map_ro_sections( cache_fd, ptr, sec, nt->FileHeader.NumberOfSections,
+                                                align_mask, csecs, chdr.num_ro_secs ))
+            {
+                for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+                {
+                    SIZE_T sz;
+                    if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)) continue;
+                    sz = sec[i].Misc.VirtualSize ? ROUND_SIZE( sec[i].VirtualAddress, sec[i].Misc.VirtualSize, align_mask )
+                                                 : ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
+                    if (sz) mprotect( ptr + sec[i].VirtualAddress, sz, PROT_READ | PROT_WRITE );
+                }
+                while (rel && rel < end - 1 && rel->SizeOfBlock && rel->VirtualAddress < total_size)
+                {
+                    if (is_rva_in_writable_section( rel->VirtualAddress, sec,
+                                                    nt->FileHeader.NumberOfSections, align_mask ))
+                        rel = process_relocation_block( ptr + rel->VirtualAddress, rel, delta );
+                    else
+                        rel = (IMAGE_BASE_RELOCATION *)((char *)rel + rel->SizeOfBlock);
+                }
+                for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+                {
+                    SIZE_T sz;
+                    BYTE vprot = VPROT_COMMITTED;
+                    if (!(sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)) continue;
+                    if (sec[i].Characteristics & IMAGE_SCN_MEM_READ)    vprot |= VPROT_READ;
+                    if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)   vprot |= VPROT_WRITECOPY;
+                    if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
+                    sz = sec[i].Misc.VirtualSize ? ROUND_SIZE( sec[i].VirtualAddress, sec[i].Misc.VirtualSize, align_mask )
+                                                 : ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
+                    if (sz) mprotect( ptr + sec[i].VirtualAddress, sz, get_unix_prot( vprot ) );
+                }
+                close( cache_fd );
+                status = STATUS_SUCCESS;
+                goto done;
+            }
+            close( cache_fd );
+        }
+    }
+
+    /* cache miss: relocate all sections, publish ro sections, then remap ro sections from cache */
+    for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+    {
+        SIZE_T sz = sec[i].Misc.VirtualSize ? ROUND_SIZE( sec[i].VirtualAddress, sec[i].Misc.VirtualSize, align_mask )
+                                            : ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
+        if (sz) mprotect( ptr + sec[i].VirtualAddress, sz, PROT_READ | PROT_WRITE );
+    }
+
+    while (rel && rel < end - 1 && rel->SizeOfBlock && rel->VirtualAddress < total_size)
+        rel = process_relocation_block( ptr + rel->VirtualAddress, rel, delta );
+
+    {
+        int cache_fd = pe_reloc_cache_publish( view->pe_dev, view->pe_ino, view->pe_size, view->pe_mtime,
+                                               (ULONG_PTR)module, ptr, sec,
+                                               nt->FileHeader.NumberOfSections, align_mask );
+        if (cache_fd >= 0)
+        {
+            struct pe_reloc_cache_hdr chdr;
+            struct pe_reloc_cache_sec csecs[PE_RELOC_MAX_SECS];
+            int verify_fd = pe_reloc_cache_open( view->pe_dev, view->pe_ino, view->pe_size, view->pe_mtime,
+                                                 (ULONG_PTR)module, &chdr, csecs, PE_RELOC_MAX_SECS );
+            if (verify_fd >= 0)
+            {
+                pe_reloc_cache_map_ro_sections( verify_fd, ptr, sec, nt->FileHeader.NumberOfSections,
+                                                align_mask, csecs, chdr.num_ro_secs );
+                close( verify_fd );
+            }
+            close( cache_fd );
+        }
+    }
+
+    for (i = 0; i < nt->FileHeader.NumberOfSections; i++)
+    {
+        SIZE_T sz;
+        BYTE vprot = VPROT_COMMITTED;
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_READ)    vprot |= VPROT_READ;
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_WRITE)   vprot |= VPROT_WRITECOPY;
+        if (sec[i].Characteristics & IMAGE_SCN_MEM_EXECUTE) vprot |= VPROT_EXEC;
+        sz = sec[i].Misc.VirtualSize ? ROUND_SIZE( sec[i].VirtualAddress, sec[i].Misc.VirtualSize, align_mask )
+                                     : ROUND_SIZE( sec[i].VirtualAddress, sec[i].SizeOfRawData, align_mask );
+        if (sz) mprotect( ptr + sec[i].VirtualAddress, sz, get_unix_prot( vprot ) );
+    }
+
+    status = STATUS_SUCCESS;
+
+done:
+    server_leave_uninterrupted_section( &virtual_mutex, &sigset );
+    return status;
+}
+
+#ifdef _WIN64
+NTSTATUS wow64_relocate_cached_image( void *args )
+{
+    return unixcall_relocate_cached_image( args );
+}
+#endif
 
 
 /* set some initial values in a new TEB */

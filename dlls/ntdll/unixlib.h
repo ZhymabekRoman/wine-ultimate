@@ -77,6 +77,7 @@ enum ntdll_unix_funcs
     unix_wine_spawnvp,
     unix_system_time_precise,
     unix_flight_recorder_log,
+    unix_relocate_cached_image,
 };
 
 extern unixlib_handle_t __wine_unixlib_handle;

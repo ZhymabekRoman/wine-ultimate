@@ -2336,6 +2336,9 @@ static NTSTATUS perform_relocations( void *module, IMAGE_NT_HEADERS *nt, SIZE_T 
     if (!relocs->Size) return STATUS_SUCCESS;
     if (!relocs->VirtualAddress) return STATUS_CONFLICTING_ADDRESSES;
 
+    if (!WINE_UNIX_CALL( unix_relocate_cached_image, module ))
+        return STATUS_SUCCESS;
+
     if (!(protect_old = RtlAllocateHeap( GetProcessHeap(), 0,
                                          nt->FileHeader.NumberOfSections * sizeof(*protect_old ))))
         return STATUS_NO_MEMORY;
