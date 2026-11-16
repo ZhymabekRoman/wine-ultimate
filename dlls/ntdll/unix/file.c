@@ -4365,20 +4365,14 @@ static inline uint64_t path_cache_timestamp_ns(void)
     return 0;
 }
 
-/* Monotonic timestamp in 100ns ticks taken from the shared user data page.
- * The page is refreshed by the wineserver poll loop, so reading it is a plain
- * user-space memory read: zero syscalls, unlike clock_gettime. */
+/* Monotonic timestamp in 100ns ticks. user_shared_data->InterruptTime is refreshed
+ * from the host clock by the wineserver poll loop, but on this build it advances at
+ * the raw host-clock frequency (~59.5 MHz, i.e. ~16.8 ns per tick), not in 100ns
+ * units, so a PATH_CACHE_LEASE_TICKS lease computed from it expires ~6x early.
+ * clock_gettime(CLOCK_MONOTONIC_COARSE) is answered by the vDSO (zero syscalls,
+ * ~20 ns) with ~250 us granularity, which is far below the lease window. */
 static inline uint64_t path_cache_now_ticks(void)
 {
-    LARGE_INTEGER t;
-
-    do
-    {
-        t.HighPart = user_shared_data->InterruptTime.High1Time;
-        t.LowPart  = user_shared_data->InterruptTime.LowPart;
-    } while (t.HighPart != user_shared_data->InterruptTime.High2Time);
-
-    if (t.QuadPart) return t.QuadPart;
     return path_cache_timestamp_ns() / 100;
 }
 
@@ -4415,12 +4409,25 @@ static void path_cache_dump_stats(void)
              (unsigned long long)validated, (unsigned long long)misses,
              (unsigned long long)__atomic_load_n( &path_cache_stat_negative_inserts, __ATOMIC_RELAXED ),
              (unsigned long long)__atomic_load_n( &path_cache_attr_direct_hits, __ATOMIC_RELAXED ) );
+    fflush( stdout );
 }
 
-__attribute__((destructor)) static void path_cache_stats_dtor(void)
+/* Entry point for test tools: dump path cache stats on demand (process exit paths
+ * in Wine do not reliably run ntdll.so destructors). */
+void wine_path_cache_dump_stats(void);
+void wine_path_cache_dump_stats(void)
+{
+    path_cache_dump_stats();
+}
+
+/* ELF destructors of ntdll.so do not run on every Wine exit path; atexit handlers do. */
+static uint64_t path_cache_gfi_calls;
+
+
+__attribute__((constructor)) static void path_cache_stats_init(void)
 {
     static BOOL done;
-    if (!done && getenv( "WINE_PATH_CACHE_STATS" )) { done = TRUE; path_cache_dump_stats(); }
+    if (!done && getenv( "WINE_PATH_CACHE_STATS" )) { done = TRUE; atexit( path_cache_dump_stats ); }
 }
 
 /* Case-insensitive downcase used for cache keys: inline the ASCII range, which covers
