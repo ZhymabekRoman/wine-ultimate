@@ -52,6 +52,7 @@
 #include <stdarg.h>
 #include <stdio.h>
 #include <ctype.h>
+#include <wctype.h>
 
 #define COBJMACROS
 #include "winerror.h"
@@ -1202,6 +1203,13 @@ typedef struct tagTLBImplType
     struct list custdata_list;
 } TLBImplType;
 
+typedef struct tagTLBFuncIndex
+{
+    UINT mask;
+    UINT *memid_slots;
+    UINT *name_slots;
+} TLBFuncIndex;
+
 /* internal TypeInfo data */
 typedef struct tagITypeInfoImpl
 {
@@ -1231,6 +1239,7 @@ typedef struct tagITypeInfoImpl
 
     /* functions  */
     TLBFuncDesc *funcdescs;
+    TLBFuncIndex *func_index;
 
     /* variables  */
     TLBVarDesc *vardescs;
@@ -1677,6 +1686,75 @@ static inline TLBFuncDesc *TLB_get_funcdesc_by_memberid_invkind(ITypeInfoImpl *t
     }
 
     return NULL;
+}
+
+static inline UINT tlb_hash_name(const WCHAR *name)
+{
+    UINT hash = 2166136261u;
+    while (*name)
+    {
+        WCHAR c = *name++;
+        if (c >= 'A' && c <= 'Z')
+            c += 'a' - 'A';
+        else if (c >= 0x80)
+            c = towlower(c);
+        hash = (hash ^ c) * 16777619u;
+    }
+    return hash;
+}
+
+static inline void typeinfo_invalidate_func_index(ITypeInfoImpl *This)
+{
+    free(This->func_index);
+    This->func_index = NULL;
+}
+
+static const TLBFuncIndex *typeinfo_get_func_index(ITypeInfoImpl *This)
+{
+    TLBFuncIndex *idx = ReadPointerNoFence((void * volatile *)&This->func_index);
+    UINT size, mask, i;
+
+    if (idx)
+        return idx;
+    if (This->typeattr.cFuncs <= 8)
+        return NULL;
+
+    size = 32;
+    while (size < (UINT)This->typeattr.cFuncs * 2)
+        size <<= 1;
+    mask = size - 1;
+
+    idx = calloc(1, sizeof(TLBFuncIndex) + 2 * size * sizeof(UINT));
+    if (!idx)
+        return NULL;
+
+    idx->mask = mask;
+    idx->memid_slots = (UINT *)(idx + 1);
+    idx->name_slots = idx->memid_slots + size;
+
+    for (i = 0; i < This->typeattr.cFuncs; ++i)
+    {
+        const TLBFuncDesc *fdesc = &This->funcdescs[i];
+        UINT h = ((UINT)fdesc->funcdesc.memid * 2654435761u) & mask;
+        while (idx->memid_slots[h])
+            h = (h + 1) & mask;
+        idx->memid_slots[h] = i + 1;
+
+        if (fdesc->Name && fdesc->Name->str)
+        {
+            UINT nh = tlb_hash_name(fdesc->Name->str) & mask;
+            while (idx->name_slots[nh])
+                nh = (nh + 1) & mask;
+            idx->name_slots[nh] = i + 1;
+        }
+    }
+
+    if (InterlockedCompareExchangePointer((void **)&This->func_index, idx, NULL) != NULL)
+    {
+        free(idx);
+        idx = This->func_index;
+    }
+    return idx;
 }
 
 static inline TLBVarDesc *TLB_get_vardesc_by_memberid(ITypeInfoImpl *typeinfo, MEMBERID memid)
@@ -5689,6 +5767,7 @@ static void ITypeInfoImpl_Destroy(ITypeInfoImpl *This)
         typeinfo_release_funcdesc(&This->funcdescs[i]);
     }
     free(This->funcdescs);
+    free(This->func_index);
 
     for(i = 0; i < This->typeattr.cVars; ++i)
     {
@@ -5726,6 +5805,8 @@ static ULONG WINAPI ITypeInfo_fnRelease(ITypeInfo2 *iface)
     if (!ref)
     {
         BOOL not_attached_to_typelib = This->not_attached_to_typelib;
+        if (not_attached_to_typelib)
+            free(This->func_index);
         ITypeLib2_Release(&This->pTypeLib->ITypeLib2_iface);
         if (not_attached_to_typelib)
             free(This);
@@ -6342,6 +6423,7 @@ static HRESULT WINAPI ITypeInfo_fnGetIDsOfNames( ITypeInfo2 *iface,
         LPOLESTR  *rgszNames, UINT cNames, MEMBERID  *pMemId)
 {
     ITypeInfoImpl *This = impl_from_ITypeInfo2(iface);
+    const TLBFuncIndex *func_index;
     const TLBVarDesc *pVDesc;
     HRESULT ret=S_OK;
     UINT i, fdc;
@@ -6352,22 +6434,57 @@ static HRESULT WINAPI ITypeInfo_fnGetIDsOfNames( ITypeInfo2 *iface,
     for (i = 0; i < cNames; i++)
         pMemId[i] = MEMBERID_NIL;
 
-    for (fdc = 0; fdc < This->typeattr.cFuncs; ++fdc) {
-        int j;
-        const TLBFuncDesc *pFDesc = &This->funcdescs[fdc];
-        if(!lstrcmpiW(*rgszNames, TLB_get_bstr(pFDesc->Name))) {
-            if(cNames) *pMemId=pFDesc->funcdesc.memid;
-            for(i=1; i < cNames; i++){
-                for(j=0; j<pFDesc->funcdesc.cParams; j++)
-                    if(!lstrcmpiW(rgszNames[i],TLB_get_bstr(pFDesc->pParamDesc[j].Name)))
+    func_index = *rgszNames ? typeinfo_get_func_index(This) : NULL;
+    if (func_index)
+    {
+        UINT mask = func_index->mask;
+        UINT h = tlb_hash_name(*rgszNames) & mask;
+        for (;;)
+        {
+            UINT slot = func_index->name_slots[h];
+            const TLBFuncDesc *pFDesc;
+            if (!slot)
+                break;
+            pFDesc = &This->funcdescs[slot - 1];
+            if (!lstrcmpiW(*rgszNames, TLB_get_bstr(pFDesc->Name)))
+            {
+                int j;
+                if (cNames) *pMemId = pFDesc->funcdesc.memid;
+                for (i = 1; i < cNames; i++)
+                {
+                    for (j = 0; j < pFDesc->funcdesc.cParams; j++)
+                        if (!lstrcmpiW(rgszNames[i], TLB_get_bstr(pFDesc->pParamDesc[j].Name)))
                             break;
-                if( j<pFDesc->funcdesc.cParams)
-                    pMemId[i]=j;
-                else
-                   ret=DISP_E_UNKNOWNNAME;
-            };
-            TRACE("-- %#lx.\n", ret);
-            return ret;
+                    if (j < pFDesc->funcdesc.cParams)
+                        pMemId[i] = j;
+                    else
+                        ret = DISP_E_UNKNOWNNAME;
+                }
+                TRACE("-- %#lx.\n", ret);
+                return ret;
+            }
+            h = (h + 1) & mask;
+        }
+    }
+    else
+    {
+        for (fdc = 0; fdc < This->typeattr.cFuncs; ++fdc) {
+            int j;
+            const TLBFuncDesc *pFDesc = &This->funcdescs[fdc];
+            if(!lstrcmpiW(*rgszNames, TLB_get_bstr(pFDesc->Name))) {
+                if(cNames) *pMemId=pFDesc->funcdesc.memid;
+                for(i=1; i < cNames; i++){
+                    for(j=0; j<pFDesc->funcdesc.cParams; j++)
+                        if(!lstrcmpiW(rgszNames[i],TLB_get_bstr(pFDesc->pParamDesc[j].Name)))
+                                break;
+                    if( j<pFDesc->funcdesc.cParams)
+                        pMemId[i]=j;
+                    else
+                       ret=DISP_E_UNKNOWNNAME;
+                };
+                TRACE("-- %#lx.\n", ret);
+                return ret;
+            }
         }
     }
     pVDesc = TLB_get_vardesc_by_name(This, *rgszNames);
@@ -6516,6 +6633,7 @@ HRESULT WINAPI DispCallFunc( void* pvInstance, ULONG_PTR oVft, CALLCONV cc, VART
 {
     int argspos = 0;
     UINT i;
+    DWORD_PTR stack_args[10];
     DWORD_PTR *args;
     void *func;
 
@@ -6530,7 +6648,7 @@ HRESULT WINAPI DispCallFunc( void* pvInstance, ULONG_PTR oVft, CALLCONV cc, VART
     }
 
     /* maximum size for an argument is sizeof(DWORD_PTR) */
-    args = malloc( sizeof(DWORD_PTR) * (cActuals + 2) );
+    args = cActuals <= 8 ? stack_args : malloc( sizeof(DWORD_PTR) * (cActuals + 2) );
 
     if (pvInstance)
     {
@@ -6548,7 +6666,7 @@ HRESULT WINAPI DispCallFunc( void* pvInstance, ULONG_PTR oVft, CALLCONV cc, VART
         break;
     case VT_HRESULT:
         WARN("invalid return type %u\n", vtReturn);
-        free( args );
+        if (args != stack_args) free( args );
         return E_INVALIDARG;
     default:
         break;
@@ -6591,7 +6709,7 @@ HRESULT WINAPI DispCallFunc( void* pvInstance, ULONG_PTR oVft, CALLCONV cc, VART
         V_UI8(pvargResult) = call_method( func, argspos, args );
         break;
     }
-    free( args );
+    if (args != stack_args) free( args );
     if (vtReturn != VT_VARIANT) V_VT(pvargResult) = vtReturn;
     TRACE("retval: %s\n", debugstr_variant(pvargResult));
     return S_OK;
@@ -7106,6 +7224,7 @@ static inline BOOL func_restricted( const FUNCDESC *desc )
     return (desc->wFuncFlags & FUNCFLAG_FRESTRICTED) && (desc->memid >= 0);
 }
 
+#define INVBUF_STACK_MAX_PARAMS 8
 #define INVBUF_ELEMENT_SIZE \
     (sizeof(VARIANTARG) + sizeof(VARIANTARG) + sizeof(VARIANTARG *) + sizeof(VARTYPE))
 #define INVBUF_GET_ARG_ARRAY(buffer, params) (buffer)
@@ -7131,7 +7250,8 @@ static HRESULT WINAPI ITypeInfo_fnInvoke(
     unsigned int var_index;
     TYPEKIND type_kind;
     HRESULT hres;
-    const TLBFuncDesc *pFuncInfo;
+    const TLBFuncDesc *pFuncInfo = NULL;
+    const TLBFuncIndex *func_index;
     UINT fdc;
 
     TRACE("%p, %p, %ld, %#x, %p, %p, %p, %p.\n", iface, pIUnk, memid, wFlags, pDispParams,
@@ -7146,7 +7266,8 @@ static HRESULT WINAPI ITypeInfo_fnInvoke(
         return E_INVALIDARG;
     }
 
-    dump_DispParms(pDispParams);
+    if (TRACE_ON(ole))
+        dump_DispParms(pDispParams);
 
     if (pDispParams->cNamedArgs > pDispParams->cArgs)
     {
@@ -7157,12 +7278,37 @@ static HRESULT WINAPI ITypeInfo_fnInvoke(
 
     /* we do this instead of using GetFuncDesc since it will return a fake
      * FUNCDESC for dispinterfaces and we want the real function description */
-    for (fdc = 0; fdc < This->typeattr.cFuncs; ++fdc){
-        pFuncInfo = &This->funcdescs[fdc];
-        if ((memid == pFuncInfo->funcdesc.memid) &&
-            (wFlags & pFuncInfo->funcdesc.invkind) &&
-            !func_restricted( &pFuncInfo->funcdesc ))
-            break;
+    func_index = typeinfo_get_func_index(This);
+    if (func_index)
+    {
+        UINT mask = func_index->mask;
+        UINT h = ((UINT)memid * 2654435761u) & mask;
+        for (;;)
+        {
+            UINT slot = func_index->memid_slots[h];
+            if (!slot)
+            {
+                fdc = This->typeattr.cFuncs;
+                break;
+            }
+            fdc = slot - 1;
+            pFuncInfo = &This->funcdescs[fdc];
+            if ((memid == pFuncInfo->funcdesc.memid) &&
+                (wFlags & pFuncInfo->funcdesc.invkind) &&
+                !func_restricted(&pFuncInfo->funcdesc))
+                break;
+            h = (h + 1) & mask;
+        }
+    }
+    else
+    {
+        for (fdc = 0; fdc < This->typeattr.cFuncs; ++fdc){
+            pFuncInfo = &This->funcdescs[fdc];
+            if ((memid == pFuncInfo->funcdesc.memid) &&
+                (wFlags & pFuncInfo->funcdesc.invkind) &&
+                !func_restricted( &pFuncInfo->funcdesc ))
+                break;
+        }
     }
 
     if (fdc < This->typeattr.cFuncs) {
@@ -7173,21 +7319,39 @@ static HRESULT WINAPI ITypeInfo_fnInvoke(
             TRACE("invoking:\n");
             dump_TLBFuncDescOne(pFuncInfo);
         }
-        
+
 	switch (func_desc->funckind) {
 	case FUNC_PUREVIRTUAL:
 	case FUNC_VIRTUAL: {
-            void *buffer = calloc(func_desc->cParams, INVBUF_ELEMENT_SIZE);
+            ULONGLONG stack_buf[(INVBUF_STACK_MAX_PARAMS * INVBUF_ELEMENT_SIZE + sizeof(ULONGLONG) - 1) / sizeof(ULONGLONG)];
+            void *buffer;
             VARIANT varresult;
             VARIANT retval = {{{0}}}; /* pointer for storing byref retvals in */
-            VARIANTARG **prgpvarg = INVBUF_GET_ARG_PTR_ARRAY(buffer, func_desc->cParams);
-            VARIANTARG *rgvarg = INVBUF_GET_ARG_ARRAY(buffer, func_desc->cParams);
-            VARTYPE *rgvt = INVBUF_GET_ARG_TYPE_ARRAY(buffer, func_desc->cParams);
-            VARIANTARG *missing_arg = INVBUF_GET_MISSING_ARG_ARRAY(buffer, func_desc->cParams);
+            VARIANTARG **prgpvarg;
+            VARIANTARG *rgvarg;
+            VARTYPE *rgvt;
+            VARIANTARG *missing_arg;
             UINT cNamedArgs = pDispParams->cNamedArgs;
             DISPID *rgdispidNamedArgs = pDispParams->rgdispidNamedArgs;
             UINT vargs_converted=0;
             SAFEARRAY *a;
+
+            if (func_desc->cParams <= INVBUF_STACK_MAX_PARAMS)
+            {
+                buffer = stack_buf;
+                if (func_desc->cParams)
+                    memset(buffer, 0, func_desc->cParams * INVBUF_ELEMENT_SIZE);
+            }
+            else
+            {
+                buffer = calloc(func_desc->cParams, INVBUF_ELEMENT_SIZE);
+                if (!buffer)
+                    return E_OUTOFMEMORY;
+            }
+            prgpvarg = INVBUF_GET_ARG_PTR_ARRAY(buffer, func_desc->cParams);
+            rgvarg = INVBUF_GET_ARG_ARRAY(buffer, func_desc->cParams);
+            rgvt = INVBUF_GET_ARG_TYPE_ARRAY(buffer, func_desc->cParams);
+            missing_arg = INVBUF_GET_MISSING_ARG_ARRAY(buffer, func_desc->cParams);
 
             hres = S_OK;
 
@@ -7211,9 +7375,27 @@ static HRESULT WINAPI ITypeInfo_fnInvoke(
             for (i = 0; i < func_desc->cParams; i++)
             {
                 TYPEDESC *tdesc = &func_desc->lprgelemdescParam[i].tdesc;
-                hres = typedescvt_to_variantvt((ITypeInfo *)iface, tdesc, &rgvt[i]);
-                if (FAILED(hres))
-                    goto func_fail;
+                switch (tdesc->vt)
+                {
+                case VT_I4: case VT_UI4: case VT_I8: case VT_UI8:
+                case VT_R4: case VT_R8: case VT_BOOL: case VT_BSTR:
+                case VT_DISPATCH: case VT_UNKNOWN: case VT_VARIANT:
+                case VT_I2: case VT_UI2: case VT_I1: case VT_UI1:
+                case VT_CY: case VT_DATE: case VT_DECIMAL: case VT_ERROR:
+                    rgvt[i] = tdesc->vt;
+                    break;
+                case VT_INT:
+                    rgvt[i] = VT_I4;
+                    break;
+                case VT_UINT:
+                    rgvt[i] = VT_UI4;
+                    break;
+                default:
+                    hres = typedescvt_to_variantvt((ITypeInfo *)iface, tdesc, &rgvt[i]);
+                    if (FAILED(hres))
+                        goto func_fail;
+                    break;
+                }
             }
 
             TRACE("changing args\n");
@@ -7446,6 +7628,8 @@ static HRESULT WINAPI ITypeInfo_fnInvoke(
              * handled in the general function */
             if (func_desc->elemdescFunc.tdesc.vt == VT_VOID)
                 V_VT(&varresult) = VT_EMPTY;
+            else if (func_desc->elemdescFunc.tdesc.vt == VT_HRESULT)
+                V_VT(&varresult) = VT_ERROR;
             else
             {
                 V_VT(&varresult) = 0;
@@ -7523,16 +7707,18 @@ static HRESULT WINAPI ITypeInfo_fnInvoke(
                             break;
                         }
                     }
-                    VariantClear(&rgvarg[i]);
+                    if (V_VT(&rgvarg[i]) != VT_EMPTY)
+                        VariantClear(&rgvarg[i]);
                     vargs_converted++;
                 }
                 else if (wParamFlags & PARAMFLAG_FOPT)
                 {
-                    if (wParamFlags & PARAMFLAG_FHASDEFAULT)
+                    if ((wParamFlags & PARAMFLAG_FHASDEFAULT) && V_VT(&rgvarg[i]) != VT_EMPTY)
                         VariantClear(&rgvarg[i]);
                 }
 
-                VariantClear(&missing_arg[i]);
+                if (V_VT(&missing_arg[i]) != VT_EMPTY)
+                    VariantClear(&missing_arg[i]);
             }
 
             if ((V_VT(&varresult) == VT_ERROR) && FAILED(V_ERROR(&varresult)))
@@ -7591,7 +7777,8 @@ static HRESULT WINAPI ITypeInfo_fnInvoke(
             }
 
 func_fail:
-            free(buffer);
+            if (buffer != stack_buf)
+                free(buffer);
             break;
         }
 	case FUNC_DISPATCH:  {
@@ -7853,6 +8040,7 @@ static HRESULT WINAPI ITypeInfo_fnGetRefTypeInfo(
 
         *pTypeInfoImpl = *This;
         pTypeInfoImpl->ref = 0;
+        pTypeInfoImpl->func_index = NULL;
         list_init(&pTypeInfoImpl->custdata_list);
 
         if (This->typeattr.typekind == TKIND_INTERFACE)
@@ -8216,13 +8404,35 @@ static HRESULT WINAPI ITypeInfo2_fnGetFuncIndexOfMemId( ITypeInfo2 * iface,
     MEMBERID memid, INVOKEKIND invKind, UINT *pFuncIndex)
 {
     ITypeInfoImpl *This = impl_from_ITypeInfo2(iface);
+    const TLBFuncIndex *func_index = typeinfo_get_func_index(This);
     UINT fdc;
     HRESULT result;
 
-    for (fdc = 0; fdc < This->typeattr.cFuncs; ++fdc){
-        const TLBFuncDesc *pFuncInfo = &This->funcdescs[fdc];
-        if(memid == pFuncInfo->funcdesc.memid && (invKind & pFuncInfo->funcdesc.invkind))
-            break;
+    if (func_index)
+    {
+        UINT mask = func_index->mask;
+        UINT h = ((UINT)memid * 2654435761u) & mask;
+        for (;;)
+        {
+            UINT slot = func_index->memid_slots[h];
+            if (!slot)
+            {
+                fdc = This->typeattr.cFuncs;
+                break;
+            }
+            fdc = slot - 1;
+            if (memid == This->funcdescs[fdc].funcdesc.memid && (invKind & This->funcdescs[fdc].funcdesc.invkind))
+                break;
+            h = (h + 1) & mask;
+        }
+    }
+    else
+    {
+        for (fdc = 0; fdc < This->typeattr.cFuncs; ++fdc){
+            const TLBFuncDesc *pFuncInfo = &This->funcdescs[fdc];
+            if(memid == pFuncInfo->funcdesc.memid && (invKind & pFuncInfo->funcdesc.invkind))
+                break;
+        }
     }
     if(fdc < This->typeattr.cFuncs) {
         *pFuncIndex = fdc;
@@ -10738,6 +10948,7 @@ static HRESULT WINAPI ICreateTypeInfo2_fnAddFuncDesc(ICreateTypeInfo2 *iface,
     list_init(&func_desc->custdata_list);
 
     ++This->typeattr.cFuncs;
+    typeinfo_invalidate_func_index(This);
 
     This->needs_layout = TRUE;
 
@@ -10937,6 +11148,7 @@ static HRESULT WINAPI ICreateTypeInfo2_fnSetFuncAndParamNames(ICreateTypeInfo2 *
     }
 
     func_desc->Name = TLB_append_str(&This->pTypeLib->name_list, *names);
+    typeinfo_invalidate_func_index(This);
 
     for (i = 1; i < numNames; ++i) {
         TLBParDesc *par_desc = func_desc->pParamDesc + i - 1;
@@ -11189,6 +11401,7 @@ static HRESULT WINAPI ICreateTypeInfo2_fnLayOut(ICreateTypeInfo2 *iface)
         ++func_desc;
         ++i;
     }
+    typeinfo_invalidate_func_index(This);
 
     if (user_vft > This->typeattr.cbSizeVft)
         This->typeattr.cbSizeVft = user_vft + This->pTypeLib->ptr_size;
@@ -11237,6 +11450,7 @@ static HRESULT WINAPI ICreateTypeInfo2_fnDeleteFuncDesc(ICreateTypeInfo2 *iface,
     typeinfo_release_funcdesc(&This->funcdescs[index]);
 
     --This->typeattr.cFuncs;
+    typeinfo_invalidate_func_index(This);
     if (index != This->typeattr.cFuncs)
     {
         memmove(This->funcdescs + index, This->funcdescs + index + 1,
