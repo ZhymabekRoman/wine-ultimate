@@ -260,6 +260,8 @@ HRESULT create_target(struct composition_device *device, HWND hwnd, BOOL topmost
     prop = target->topmost ? wine_window_topmost_composed : wine_window_non_topmost_composed;
     SetPropW(target->hwnd, prop, (HANDLE)1);
     ensure_composite_thread(device);
+    if (device->wake_event)
+        SetEvent(device->wake_event);
     return S_OK;
 }
 

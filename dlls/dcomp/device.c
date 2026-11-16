@@ -2784,7 +2784,7 @@ static BOOL composite_device(struct composition_device *device)
 static DWORD WINAPI composite_thread_proc(void *iface)
 {
     struct composition_device *device = impl_from_IDCompositionDevice(iface);
-    unsigned int frequency, refresh_period, tick = 0;
+    unsigned int frequency, refresh_period, tick = 0, idle_ticks = 0;
     HDC hdc;
 
     /* Refresh interval for the emulated-vblank fallback of composite_wait_vblank(). */
@@ -2810,8 +2810,19 @@ static DWORD WINAPI composite_thread_proc(void *iface)
 
         if (!device->commit_pending && !device->last_has_shared && !sc_updated)
         {
-            DWORD wait_ms = (elapsed < refresh_period && refresh_period - elapsed > 0)
-                    ? refresh_period - elapsed : refresh_period;
+            DWORD wait_ms;
+
+            if (!has_sc)
+                idle_ticks++;
+            else
+                idle_ticks = 0;
+
+            if (!has_sc && idle_ticks >= 3)
+                wait_ms = 250;
+            else
+                wait_ms = (elapsed < refresh_period && refresh_period - elapsed > 0)
+                        ? refresh_period - elapsed : refresh_period;
+
             if (device->wake_event)
                 WaitForSingleObject(device->wake_event, wait_ms);
             else
@@ -2820,12 +2831,20 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 break;
             sc_updated = device->committed && device_check_swapchains(device, &has_sc);
             device->last_has_swapchain = has_sc;
+            if (device->commit_pending || device->last_has_shared || sc_updated || has_sc)
+                idle_ticks = 0;
+            else if (idle_ticks >= 3 && !InterlockedCompareExchange(&g_compositor_clock_handle_count, 0, 0))
+                continue;
         }
-        else if (elapsed < refresh_period)
+        else
         {
-            DWORD rem = refresh_period - elapsed;
-            Sleep(rem > 0 ? rem : 1);
-            continue;
+            idle_ticks = 0;
+            if (elapsed < refresh_period)
+            {
+                DWORD rem = refresh_period - elapsed;
+                Sleep(rem > 0 ? rem : 1);
+                continue;
+            }
         }
 
         /* Present/vblank cadence. Reset the manual-reset compositor clock, do the
@@ -2848,7 +2867,10 @@ static DWORD WINAPI composite_thread_proc(void *iface)
                 if (g_compositor_clock_event)
                     ResetEvent(g_compositor_clock_event);
                 if (composite_device(device) || had_pending || device->last_has_shared)
+                {
                     device->last_composite_qpc = qpc_now();
+                    idle_ticks = 0;
+                }
                 if (g_compositor_clock_event)
                     SetEvent(g_compositor_clock_event);
             }

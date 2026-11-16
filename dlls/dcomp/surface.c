@@ -357,6 +357,8 @@ static HRESULT STDMETHODCALLTYPE surface_EndDraw(IDCompositionSurfaceUnknown *if
     ID3D11Device_Release(d3d11_device);
 
     SetRectEmpty(&surface->draw_rect);
+    if (device->wake_event)
+        SetEvent(device->wake_event);
     return S_OK;
 }
 

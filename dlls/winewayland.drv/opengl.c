@@ -116,7 +116,9 @@ static BOOL wayland_opengl_surface_create(HWND hwnd, int format, struct opengl_d
     opengl_drawable_map_buffer(&gl->base, GL_FRONT_AND_BACK, GL_BACK);
     if (gl->base.stereo) opengl_drawable_map_buffer(&gl->base, GL_FRONT_RIGHT, GL_BACK_RIGHT);
 
-    if (!(gl->wl_egl_window = wl_egl_window_create(client->wl_surface, rect.right, rect.bottom))) goto err;
+    if (!(gl->wl_egl_window = wl_egl_window_create(client->wl_surface,
+                                                   rect.right - rect.left,
+                                                   rect.bottom - rect.top))) goto err;
     if (!(gl->base.surface = funcs->p_eglCreateWindowSurface(egl->display, config, gl->wl_egl_window, attribs))) goto err;
     set_client_surface(hwnd, client);
 
