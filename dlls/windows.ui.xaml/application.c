@@ -4548,7 +4548,45 @@ static volatile LONG g_xaml_window_dirty = 1;
 static BOOL g_xaml_post_load_presented;
 static HWND g_xaml_timer_armed_hwnd;
 static int g_xaml_timer_idle_ticks;
+static BOOL g_in_xaml_present;
 static HRESULT xaml_window_present( struct xaml_window *impl );
+
+static void xaml_window_refresh_present( HWND hwnd )
+{
+    static BOOL in_refresh;
+    struct xaml_window *impl = &global_xaml_window;
+    UINT width, height;
+    RECT rc;
+
+    if (in_refresh || g_in_xaml_present || !impl->dcomp_device)
+        return;
+
+    in_refresh = TRUE;
+    if (impl->swapchain && is_uwp_xaml_app())
+    {
+        IDXGISurface1 *surface1 = NULL;
+        HWND target = impl->target_hwnd && IsWindow( impl->target_hwnd ) ? impl->target_hwnd : hwnd;
+        GetClientRect( target, &rc );
+        width = rc.right > 0 ? (UINT)rc.right : impl->width;
+        height = rc.bottom > 0 ? (UINT)rc.bottom : impl->height;
+        if (width > 0 && height > 0)
+        {
+            if (SUCCEEDED(IDXGISwapChain1_GetBuffer( impl->swapchain, 0, &IID_IDXGISurface1, (void **)&surface1 )) && surface1)
+            {
+                HDC hdc = NULL;
+                if (SUCCEEDED(IDXGISurface1_GetDC( surface1, FALSE, &hdc )) && hdc)
+                {
+                    xaml_layout_render( target, hdc, width, height, impl->content );
+                    IDXGISurface1_ReleaseDC( surface1, NULL );
+                }
+                IDXGISurface1_Release( surface1 );
+            }
+            IDXGISwapChain1_Present( impl->swapchain, 0, 0 );
+        }
+    }
+    IDCompositionDesktopDevice_Commit( impl->dcomp_device );
+    in_refresh = FALSE;
+}
 
 void xaml_mark_window_dirty( void )
 {
@@ -4563,7 +4601,7 @@ void xaml_mark_window_dirty( void )
 
 static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wparam, LPARAM lparam )
 {
-    if (msg == WM_ERASEBKGND && !is_uwp_xaml_app())
+    if (msg == WM_ERASEBKGND)
         return TRUE;
     if (msg == WM_PAINT)
     {
@@ -4582,7 +4620,30 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             ReleaseDC( top, hdc );
         }
         ValidateRect( hwnd, NULL );
+        xaml_window_refresh_present( hwnd );
         return 0;
+    }
+    if (msg == WM_MOVE || msg == WM_EXITSIZEMOVE)
+    {
+        LRESULT ret;
+        if (xaml_corewindow_prev_proc && xaml_corewindow_prev_proc != xaml_corewindow_wndproc)
+            ret = CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
+        else
+            ret = DefWindowProcW( hwnd, msg, wparam, lparam );
+        xaml_window_refresh_present( hwnd );
+        return ret;
+    }
+    if (msg == WM_WINDOWPOSCHANGED)
+    {
+        const WINDOWPOS *wp = (const WINDOWPOS *)lparam;
+        LRESULT ret;
+        if (xaml_corewindow_prev_proc && xaml_corewindow_prev_proc != xaml_corewindow_wndproc)
+            ret = CallWindowProcW( xaml_corewindow_prev_proc, hwnd, msg, wparam, lparam );
+        else
+            ret = DefWindowProcW( hwnd, msg, wparam, lparam );
+        if (!wp || !(wp->flags & SWP_NOMOVE) || !(wp->flags & SWP_NOSIZE) || (wp->flags & SWP_SHOWWINDOW))
+            xaml_window_refresh_present( hwnd );
+        return ret;
     }
     if (msg == WM_APP_WV2_START)
     {
@@ -4786,7 +4847,6 @@ forward_msg:
 
 static HRESULT xaml_window_present( struct xaml_window *impl )
 {
-    static BOOL in_present;
     static BOOL d3d11_create_failed;
     HWND hwnd = NULL;
     SIZE sz;
@@ -4795,8 +4855,8 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     HRESULT hr;
 
     impl = &global_xaml_window;
-    if (in_present) return S_OK;
-    in_present = TRUE;
+    if (g_in_xaml_present) return S_OK;
+    g_in_xaml_present = TRUE;
 
     if (!impl->core_window) ensure_core_window( impl );
     if (impl->core_window)
@@ -4810,7 +4870,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     }
     if (!hwnd) hwnd = xaml_find_core_window();
     if (!hwnd) hwnd = GetActiveWindow();
-    if (!hwnd) { in_present = FALSE; return S_FALSE; }
+    if (!hwnd) { g_in_xaml_present = FALSE; return S_FALSE; }
 
     ERR( "xaml_window_present: hwnd=%p swapchain=%p dev=%p is_uwp=%d\n",
          hwnd, impl->swapchain, impl->d3d11_dev, is_uwp_xaml_app() );
@@ -4889,7 +4949,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                 SetWindowLongW( top, GWL_STYLE, top_style | WS_CLIPCHILDREN );
         }
     }
-    InvalidateRect( hwnd, NULL, TRUE );
+    InvalidateRect( hwnd, NULL, FALSE );
     UpdateWindow( hwnd );
 
     if (impl->core_window) xaml_window_subscribe_core_window( impl );
@@ -4911,7 +4971,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "xaml_get_or_create_dcomp_device failed hr %#lx\n", hr );
-            in_present = FALSE;
+            g_in_xaml_present = FALSE;
             return hr;
         }
     }
@@ -4923,7 +4983,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "CreateTargetForHwnd failed hr %#lx\n", hr );
-            in_present = FALSE;
+            g_in_xaml_present = FALSE;
             return hr;
         }
     }
@@ -4935,7 +4995,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         if (FAILED(hr))
         {
             WARN( "CreateVisual failed hr %#lx\n", hr );
-            in_present = FALSE;
+            g_in_xaml_present = FALSE;
             return hr;
         }
         IDCompositionTarget_SetRoot( impl->dcomp_target, (IDCompositionVisual *)impl->dcomp_root_visual );
@@ -5022,13 +5082,10 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
                     hr = IDXGIAdapter_GetParent( dxgi_adapter, &IID_IDXGIFactory2, (void **)&dxgi_factory );
                     if (SUCCEEDED(hr))
                     {
-                        /* ForHwnd (not ForComposition): wined3d binds the swapchain to a
-                         * GLX drawable for this HWND once, and each Present shows the front
-                         * buffer on the mapped X window. A composition swapchain needs the
-                         * compositor to re-attach the window every present, which resets the
-                         * drawable and shows a cleared front buffer. */
-                        hr = IDXGIFactory2_CreateSwapChainForHwnd( dxgi_factory, (IUnknown *)impl->d3d11_dev,
-                                                                    hwnd, &desc, NULL, NULL, &impl->swapchain );
+                        /* Composition swapchain: DComp owns the single onscreen GLX swapchain
+                         * on hwnd and composites impl->swapchain's front buffer on Commit. */
+                        hr = IDXGIFactory2_CreateSwapChainForComposition( dxgi_factory, (IUnknown *)impl->d3d11_dev,
+                                                                           &desc, NULL, &impl->swapchain );
                         IDXGIFactory2_Release( dxgi_factory );
                     }
                     IDXGIAdapter_Release( dxgi_adapter );
@@ -5090,7 +5147,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
             ReleaseDC( root, hdc );
             /* Flush after the blit: the X11 driver copies the DC surface on the paint
              * cycle, so an invalidate issued before the draw shows a stale pixmap. */
-            InvalidateRect( root, NULL, TRUE );
+            InvalidateRect( root, NULL, FALSE );
             UpdateWindow( root );
         }
     }
@@ -5106,7 +5163,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         SetTimer( hwnd, 0x5756, 500, NULL );
     }
     xaml_wv2_on_window_ready( hwnd, width, height );
-    in_present = FALSE;
+    g_in_xaml_present = FALSE;
     return S_OK;
 }
 
