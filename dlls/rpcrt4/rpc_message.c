@@ -785,6 +785,7 @@ RPC_STATUS RPCRT4_SendWithAuth(RpcConnection *Connection, RpcPktHdr *Header,
   alen = RPC_AUTH_VERIFIER_LEN(&Header->common);
 
   while (!(Header->common.flags & RPC_FLG_LAST)) {
+    unsigned char stack_pkt[4096];
     unsigned char auth_pad_len = Header->common.auth_len ? ROUND_UP_AMOUNT(BufferLength, AUTH_ALIGNMENT) : 0;
     unsigned int pkt_size = BufferLength + hdr_size + alen + auth_pad_len;
 
@@ -800,7 +801,21 @@ RPC_STATUS RPCRT4_SendWithAuth(RpcConnection *Connection, RpcPktHdr *Header,
         hdr_size + alen;
     }
 
-    pkt = calloc(1, Header->common.frag_len);
+    if (Header->common.frag_len <= sizeof(stack_pkt))
+    {
+      pkt = stack_pkt;
+      if (auth_pad_len)
+        memset(pkt + Header->common.frag_len - alen - auth_pad_len, 0, auth_pad_len);
+    }
+    else
+    {
+      pkt = calloc(1, Header->common.frag_len);
+      if (!pkt)
+      {
+        RPCRT4_SetThreadCurrentConnection(NULL);
+        return RPC_S_OUT_OF_RESOURCES;
+      }
+    }
 
     memcpy(pkt, Header, hdr_size);
 
@@ -833,7 +848,8 @@ RPC_STATUS RPCRT4_SendWithAuth(RpcConnection *Connection, RpcPktHdr *Header,
             (unsigned char *)(auth_hdr + 1), Header->common.auth_len);
         if (status != RPC_S_OK)
         {
-          free(pkt);
+          if (pkt != stack_pkt)
+            free(pkt);
           RPCRT4_SetThreadCurrentConnection(NULL);
           return status;
         }
@@ -842,7 +858,8 @@ RPC_STATUS RPCRT4_SendWithAuth(RpcConnection *Connection, RpcPktHdr *Header,
 
 write:
     count = rpcrt4_conn_write(Connection, pkt, Header->common.frag_len);
-    free(pkt);
+    if (pkt != stack_pkt)
+      free(pkt);
     if (count<0) {
       WARN("rpcrt4_conn_write failed (auth)\n");
       RPCRT4_SetThreadCurrentConnection(NULL);

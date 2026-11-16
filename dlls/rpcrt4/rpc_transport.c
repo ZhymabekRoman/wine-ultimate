@@ -88,6 +88,16 @@ static void release_np_event(RpcConnection_np *connection, HANDLE event)
         CloseHandle(event);
 }
 
+static void np_set_skip_completion_flags(HANDLE pipe)
+{
+    FILE_IO_COMPLETION_NOTIFICATION_INFORMATION info;
+    IO_STATUS_BLOCK io_status;
+
+    info.Flags = FILE_SKIP_COMPLETION_PORT_ON_SUCCESS | FILE_SKIP_SET_EVENT_ON_HANDLE;
+    NtSetInformationFile(pipe, &io_status, &info, sizeof(info),
+                         FileIoCompletionNotificationInformation);
+}
+
 static RPC_STATUS rpcrt4_conn_create_pipe(RpcConnection *conn)
 {
     RpcConnection_np *connection = (RpcConnection_np *) conn;
@@ -108,6 +118,7 @@ static RPC_STATUS rpcrt4_conn_create_pipe(RpcConnection *conn)
             return RPC_S_CANT_CREATE_ENDPOINT;
     }
 
+    np_set_skip_completion_flags(connection->pipe);
     return RPC_S_OK;
 }
 
@@ -168,6 +179,7 @@ static RPC_STATUS rpcrt4_conn_open_pipe(RpcConnection *Connection, LPCSTR pname,
   /* pipe is connected; change to message-read mode. */
   dwMode = PIPE_READMODE_MESSAGE;
   SetNamedPipeHandleState(pipe, &dwMode, NULL, NULL);
+  np_set_skip_completion_flags(pipe);
   npc->pipe = pipe;
 
   return RPC_S_OK;
@@ -380,6 +392,25 @@ static int rpcrt4_conn_np_read(RpcConnection *conn, void *buffer, unsigned int c
     HANDLE event;
     NTSTATUS status;
 
+    if (!connection->read_closed && count > 0)
+    {
+        FILE_PIPE_PEEK_BUFFER peek;
+        IO_STATUS_BLOCK peek_io;
+        NTSTATUS peek_st = NtFsControlFile(connection->pipe, NULL, NULL, NULL, &peek_io,
+                                           FSCTL_PIPE_PEEK, NULL, 0, &peek, sizeof(peek));
+        if (peek_st == STATUS_SUCCESS && peek.ReadDataAvailable > 0)
+        {
+            status = NtReadFile(connection->pipe, NULL, NULL, NULL, &connection->io_status,
+                                buffer, count, NULL, NULL);
+            if (status != STATUS_PENDING)
+            {
+                TRACE("conn %p ep %s read (fast) -> %u bytes\n", conn, debugstr_a(conn->Endpoint),
+                      status && status != STATUS_BUFFER_OVERFLOW ? (unsigned)-1 : (unsigned)connection->io_status.Information);
+                return status && status != STATUS_BUFFER_OVERFLOW ? -1 : connection->io_status.Information;
+            }
+        }
+    }
+
     event = get_np_event(connection);
     if (!event)
         return -1;
@@ -401,8 +432,129 @@ static int rpcrt4_conn_np_read(RpcConnection *conn, void *buffer, unsigned int c
     }
     release_np_event(connection, event);
     TRACE("conn %p ep %s read -> %u bytes\n", conn, debugstr_a(conn->Endpoint),
-          status && status != STATUS_BUFFER_OVERFLOW ? (unsigned)-1 : connection->io_status.Information);
+          status && status != STATUS_BUFFER_OVERFLOW ? (unsigned)-1 : (unsigned)connection->io_status.Information);
     return status && status != STATUS_BUFFER_OVERFLOW ? -1 : connection->io_status.Information;
+}
+
+static RPC_STATUS rpcrt4_conn_np_receive_fragment(RpcConnection *conn, RpcPktHdr **Header, void **Payload)
+{
+    RpcConnection_np *connection = (RpcConnection_np *)conn;
+    unsigned char stack_buf[4096];
+    DWORD dwRead;
+    RPC_STATUS status;
+    DWORD hdr_length;
+    RpcPktCommonHdr *common_hdr;
+    unsigned int payload_len;
+    HANDLE event = NULL;
+    NTSTATUS ntstatus;
+
+    *Header = NULL;
+    *Payload = NULL;
+
+    if (connection->read_closed)
+        return RPC_S_CALL_FAILED;
+
+    {
+        FILE_PIPE_PEEK_BUFFER peek;
+        IO_STATUS_BLOCK peek_io;
+        NTSTATUS peek_st = NtFsControlFile(connection->pipe, NULL, NULL, NULL, &peek_io,
+                                           FSCTL_PIPE_PEEK, NULL, 0, &peek, sizeof(peek));
+        if (peek_st == STATUS_SUCCESS && peek.ReadDataAvailable > 0)
+        {
+            ntstatus = NtReadFile(connection->pipe, NULL, NULL, NULL, &connection->io_status,
+                                  stack_buf, sizeof(stack_buf), NULL, NULL);
+            if (ntstatus != STATUS_PENDING)
+                goto got_read;
+        }
+    }
+
+    event = get_np_event(connection);
+    if (!event)
+        return RPC_S_OUT_OF_RESOURCES;
+
+    if (connection->read_closed)
+        ntstatus = STATUS_CANCELLED;
+    else
+        ntstatus = NtReadFile(connection->pipe, event, NULL, NULL, &connection->io_status,
+                              stack_buf, sizeof(stack_buf), NULL, NULL);
+    if (ntstatus == STATUS_PENDING)
+    {
+        if (connection->read_closed)
+        {
+            IO_STATUS_BLOCK io_status;
+            NtCancelIoFileEx(connection->pipe, &connection->io_status, &io_status);
+        }
+        WaitForSingleObject(event, INFINITE);
+        ntstatus = connection->io_status.Status;
+    }
+    release_np_event(connection, event);
+
+got_read:
+    if (ntstatus && ntstatus != STATUS_BUFFER_OVERFLOW)
+        return RPC_S_CALL_FAILED;
+
+    dwRead = connection->io_status.Information;
+    if (dwRead < sizeof(RpcPktCommonHdr))
+    {
+        int r = rpcrt4_conn_np_read(conn, stack_buf + dwRead, sizeof(RpcPktCommonHdr) - dwRead);
+        if (r != (int)(sizeof(RpcPktCommonHdr) - dwRead))
+            return RPC_S_CALL_FAILED;
+        dwRead = sizeof(RpcPktCommonHdr);
+    }
+
+    common_hdr = (RpcPktCommonHdr *)stack_buf;
+    status = RPCRT4_ValidateCommonHeader(common_hdr);
+    if (status != RPC_S_OK)
+        return status;
+
+    hdr_length = RPCRT4_GetHeaderSize((RpcPktHdr *)common_hdr);
+    if (!hdr_length)
+        return RPC_S_PROTOCOL_ERROR;
+
+    if (dwRead < hdr_length)
+    {
+        int r = rpcrt4_conn_np_read(conn, stack_buf + dwRead, hdr_length - dwRead);
+        if (r != (int)(hdr_length - dwRead))
+            return RPC_S_CALL_FAILED;
+        dwRead = hdr_length;
+    }
+
+    *Header = malloc(hdr_length);
+    if (!*Header)
+        return RPC_S_OUT_OF_RESOURCES;
+    memcpy(*Header, stack_buf, hdr_length);
+
+    payload_len = common_hdr->frag_len - hdr_length;
+    if (payload_len)
+    {
+        DWORD already = dwRead - hdr_length;
+        *Payload = malloc(payload_len);
+        if (!*Payload)
+        {
+            free(*Header);
+            *Header = NULL;
+            return RPC_S_OUT_OF_RESOURCES;
+        }
+        if (already > payload_len)
+            already = payload_len;
+        if (already)
+            memcpy(*Payload, stack_buf + hdr_length, already);
+        while (already < payload_len)
+        {
+            int r = rpcrt4_conn_np_read(conn, (unsigned char *)*Payload + already, payload_len - already);
+            if (r <= 0)
+            {
+                free(*Payload);
+                *Payload = NULL;
+                free(*Header);
+                *Header = NULL;
+                return RPC_S_CALL_FAILED;
+            }
+            already += r;
+        }
+    }
+
+    return RPC_S_OK;
 }
 
 static int rpcrt4_conn_np_write(RpcConnection *conn, const void *buffer, unsigned int count)
@@ -3136,7 +3288,7 @@ static const struct connection_ops conn_protseq_list[] = {
     rpcrt4_conn_np_wait_for_incoming_data,
     rpcrt4_ncacn_np_get_top_of_tower,
     rpcrt4_ncacn_np_parse_top_of_tower,
-    NULL,
+    rpcrt4_conn_np_receive_fragment,
     RPCRT4_default_is_authorized,
     RPCRT4_default_authorize,
     RPCRT4_default_secure_packet,
@@ -3159,7 +3311,7 @@ static const struct connection_ops conn_protseq_list[] = {
     rpcrt4_conn_np_wait_for_incoming_data,
     rpcrt4_ncalrpc_get_top_of_tower,
     rpcrt4_ncalrpc_parse_top_of_tower,
-    NULL,
+    rpcrt4_conn_np_receive_fragment,
     rpcrt4_ncalrpc_is_authorized,
     rpcrt4_ncalrpc_authorize,
     rpcrt4_ncalrpc_secure_packet,
