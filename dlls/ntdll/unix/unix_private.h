@@ -258,6 +258,8 @@ extern int wine_server_receive_fd( obj_handle_t *handle );
 extern void process_exit_wrapper( int status ) DECLSPEC_NORETURN;
 extern size_t server_init_process(void);
 extern void server_init_process_done(void);
+extern BOOL obj_shm_query_basic( HANDLE handle, ULONG *attr, ULONG *access, ULONG *handle_count );
+extern BOOL obj_shm_query_type( HANDLE handle, struct object_type_info *info, WCHAR *name_buf, ULONG name_buf_size );
 extern void server_init_thread( struct thread_data *data );
 extern int server_pipe( int fd[2] );
 

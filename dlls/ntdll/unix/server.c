@@ -39,6 +39,7 @@
 #endif
 #include <signal.h>
 #include <stdarg.h>
+#include <stdint.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -1953,12 +1954,261 @@ NTSTATUS WINAPI NtDuplicateObject( HANDLE source_process, HANDLE source, HANDLE 
 }
 
 
+#define OBJ_SHM_MAGIC           0x4f424a53u /* 'OBJS' */
+#define OBJ_SHM_VERSION         1u
+#define OBJ_SHM_HANDLE_BUCKETS  2048u
+#define OBJ_SHM_HANDLE_WAYS     4u
+#define OBJ_SHM_HANDLE_SLOTS    (OBJ_SHM_HANDLE_BUCKETS * OBJ_SHM_HANDLE_WAYS)
+#define OBJ_SHM_OBJ_BUCKETS     1024u
+#define OBJ_SHM_OBJ_WAYS        4u
+#define OBJ_SHM_OBJ_SLOTS       (OBJ_SHM_OBJ_BUCKETS * OBJ_SHM_OBJ_WAYS)
+#define OBJ_SHM_MAX_TYPE_WCHARS 24u
+
+struct obj_shm_handle_slot
+{
+    uint32_t seq;
+    uint32_t pid;
+    uint32_t handle;
+    uint32_t access;
+    uint32_t attr;
+    uint32_t type_len;
+    uint32_t type_index;
+    uint32_t valid_access;
+    uint32_t mapping_read;
+    uint32_t mapping_write;
+    uint32_t mapping_exec;
+    uint32_t mapping_all;
+    uint64_t obj_ptr;
+    WCHAR    type_name[OBJ_SHM_MAX_TYPE_WCHARS];
+};
+
+struct obj_shm_obj_slot
+{
+    uint32_t seq;
+    uint32_t handle_count;
+    uint64_t obj_ptr;
+};
+
+struct obj_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t rr_handle;
+    uint32_t rr_obj;
+    struct obj_shm_handle_slot handle_table[OBJ_SHM_HANDLE_SLOTS];
+    struct obj_shm_obj_slot    obj_table[OBJ_SHM_OBJ_SLOTS];
+};
+
+static struct obj_shm *obj_shm = NULL;
+static pthread_once_t obj_shm_once = PTHREAD_ONCE_INIT;
+
+static void init_obj_shm(void)
+{
+    struct stat st;
+    char path[1024];
+    int fd;
+    struct obj_shm *ptr;
+
+    if (!config_dir || stat( config_dir, &st ) == -1) return;
+#ifdef __ANDROID__
+    snprintf( path, sizeof(path), "%s/.wineserver/server-%llx-%llx/obj_shm",
+              config_dir, (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#else
+    snprintf( path, sizeof(path), "/tmp/.wine-%u/server-%llx-%llx/obj_shm",
+              getuid(), (unsigned long long)st.st_dev, (unsigned long long)st.st_ino );
+#endif
+    fd = open( path, O_RDONLY | O_CLOEXEC );
+    if (fd == -1) return;
+    if (fstat( fd, &st ) == -1 || st.st_size < (off_t)sizeof(struct obj_shm))
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct obj_shm), PROT_READ, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+    if (__atomic_load_n( &ptr->magic, __ATOMIC_ACQUIRE ) != OBJ_SHM_MAGIC ||
+        ptr->version != OBJ_SHM_VERSION)
+    {
+        munmap( ptr, sizeof(struct obj_shm) );
+        return;
+    }
+    __atomic_store_n( &obj_shm, ptr, __ATOMIC_RELEASE );
+}
+
+static inline struct obj_shm *get_obj_shm(void)
+{
+    struct obj_shm *shm = __atomic_load_n( &obj_shm, __ATOMIC_ACQUIRE );
+    if (!shm)
+    {
+        pthread_once( &obj_shm_once, init_obj_shm );
+        shm = __atomic_load_n( &obj_shm, __ATOMIC_ACQUIRE );
+    }
+    return shm;
+}
+
+static inline uint32_t obj_shm_hash_handle( uint32_t pid_val, uint32_t handle )
+{
+    uint64_t x = ((uint64_t)pid_val << 32) | handle;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return (uint32_t)(x & (OBJ_SHM_HANDLE_BUCKETS - 1));
+}
+
+static inline uint32_t obj_shm_hash_ptr( uint64_t ptr )
+{
+    uint64_t x = ptr;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return (uint32_t)(x & (OBJ_SHM_OBJ_BUCKETS - 1));
+}
+
+static inline BOOL obj_shm_is_valid_handle( obj_handle_t h, uint32_t *lookup_pid )
+{
+    if (!h || h == 0x7fffffff || h >= 0xfffffff0u) return FALSE;
+    if ((h ^ 0x544a4defu) <= (0x00ffffffu << 2))
+    {
+        *lookup_pid = 0;
+        return TRUE;
+    }
+    if ((h & 3) != 0) return FALSE;
+    *lookup_pid = pid;
+    return TRUE;
+}
+
+static BOOL obj_shm_lookup_handle( HANDLE handle, struct obj_shm_handle_slot *out )
+{
+    struct obj_shm *shm = get_obj_shm();
+    obj_handle_t h = wine_server_obj_handle( handle );
+    uint32_t lookup_pid, bucket, base, i;
+    int retry;
+
+    if (!shm || !pid || !obj_shm_is_valid_handle( h, &lookup_pid )) return FALSE;
+
+    bucket = obj_shm_hash_handle( lookup_pid, h );
+    base = bucket * OBJ_SHM_HANDLE_WAYS;
+
+    for (retry = 0; retry < 4; retry++)
+    {
+        BOOL saw_odd = FALSE;
+        for (i = 0; i < OBJ_SHM_HANDLE_WAYS; i++)
+        {
+            const struct obj_shm_handle_slot *s = &shm->handle_table[base + i];
+            uint32_t s1 = __atomic_load_n( &s->seq, __ATOMIC_ACQUIRE );
+            uint32_t s2;
+            struct obj_shm_handle_slot tmp;
+
+            if (s1 & 1) { saw_odd = TRUE; continue; }
+            if (!s1) continue;
+
+            tmp.pid = s->pid;
+            tmp.handle = s->handle;
+            tmp.obj_ptr = s->obj_ptr;
+            if (tmp.pid != lookup_pid || tmp.handle != h || !tmp.obj_ptr)
+            {
+                __atomic_thread_fence( __ATOMIC_ACQUIRE );
+                s2 = __atomic_load_n( &s->seq, __ATOMIC_ACQUIRE );
+                if (s1 != s2) saw_odd = TRUE;
+                continue;
+            }
+            memcpy( &tmp, s, sizeof(tmp) );
+            __atomic_thread_fence( __ATOMIC_ACQUIRE );
+            s2 = __atomic_load_n( &s->seq, __ATOMIC_ACQUIRE );
+            if (s1 == s2 && tmp.pid == lookup_pid && tmp.handle == h && tmp.obj_ptr)
+            {
+                *out = tmp;
+                return TRUE;
+            }
+            saw_odd = TRUE;
+        }
+        if (!saw_odd) break;
+    }
+    return FALSE;
+}
+
+static BOOL obj_shm_lookup_obj_count( uint64_t obj_ptr, uint32_t *handle_count )
+{
+    struct obj_shm *shm = get_obj_shm();
+    uint32_t bucket, base, i;
+    int retry;
+
+    if (!shm || !obj_ptr) return FALSE;
+    bucket = obj_shm_hash_ptr( obj_ptr );
+    base = bucket * OBJ_SHM_OBJ_WAYS;
+
+    for (retry = 0; retry < 4; retry++)
+    {
+        BOOL saw_odd = FALSE;
+        for (i = 0; i < OBJ_SHM_OBJ_WAYS; i++)
+        {
+            const struct obj_shm_obj_slot *s = &shm->obj_table[base + i];
+            uint32_t s1 = __atomic_load_n( &s->seq, __ATOMIC_ACQUIRE );
+            uint32_t s2, cnt;
+            uint64_t ptr;
+
+            if (s1 & 1) { saw_odd = TRUE; continue; }
+            if (!s1) continue;
+
+            ptr = s->obj_ptr;
+            cnt = s->handle_count;
+            __atomic_thread_fence( __ATOMIC_ACQUIRE );
+            s2 = __atomic_load_n( &s->seq, __ATOMIC_ACQUIRE );
+            if (s1 != s2) { saw_odd = TRUE; continue; }
+            if (ptr == obj_ptr && cnt)
+            {
+                *handle_count = cnt;
+                return TRUE;
+            }
+        }
+        if (!saw_odd) break;
+    }
+    return FALSE;
+}
+
+BOOL obj_shm_query_basic( HANDLE handle, ULONG *attr, ULONG *access, ULONG *handle_count )
+{
+    struct obj_shm_handle_slot hslot;
+    uint32_t cnt;
+
+    if (!obj_shm_lookup_handle( handle, &hslot )) return FALSE;
+    if (!obj_shm_lookup_obj_count( hslot.obj_ptr, &cnt )) return FALSE;
+    *attr = hslot.attr;
+    *access = hslot.access;
+    *handle_count = cnt;
+    return TRUE;
+}
+
+BOOL obj_shm_query_type( HANDLE handle, struct object_type_info *info, WCHAR *name_buf, ULONG name_buf_size )
+{
+    struct obj_shm_handle_slot hslot;
+
+    if (!obj_shm_lookup_handle( handle, &hslot )) return FALSE;
+    if (hslot.type_len == 0xffffffffu || hslot.type_len > name_buf_size) return FALSE;
+
+    memset( info, 0, sizeof(*info) );
+    info->name_len = hslot.type_len;
+    info->index = hslot.type_index;
+    info->valid_access = hslot.valid_access;
+    info->mapping.read = hslot.mapping_read;
+    info->mapping.write = hslot.mapping_write;
+    info->mapping.exec = hslot.mapping_exec;
+    info->mapping.all = hslot.mapping_all;
+    memcpy( name_buf, hslot.type_name, hslot.type_len );
+    return TRUE;
+}
+
 /**************************************************************************
  *           NtCompareObjects   (NTDLL.@)
  */
 NTSTATUS WINAPI NtCompareObjects( HANDLE first, HANDLE second )
 {
     unsigned int status;
+    struct obj_shm_handle_slot e1, e2;
+
+    if (obj_shm_lookup_handle( first, &e1 ) && obj_shm_lookup_handle( second, &e2 ))
+        return (e1.obj_ptr == e2.obj_ptr) ? STATUS_SUCCESS : STATUS_NOT_SAME_OBJECT;
 
     SERVER_START_REQ( compare_objects )
     {

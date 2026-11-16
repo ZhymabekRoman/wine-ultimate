@@ -21,12 +21,16 @@
 #include "config.h"
 
 #include <assert.h>
+#include <fcntl.h>
 #include <limits.h>
+#include <stdint.h>
 #include <string.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <sys/mman.h>
 #include <sys/types.h>
+#include <unistd.h>
 
 #include "ntstatus.h"
 #include "windef.h"
@@ -97,12 +101,240 @@ static inline obj_handle_t handle_global_to_local( obj_handle_t handle )
     return handle ^ HANDLE_OBFUSCATOR;
 }
 
+#define OBJ_SHM_MAGIC          0x4f424a53u /* 'OBJS' */
+#define OBJ_SHM_VERSION        1u
+#define OBJ_SHM_HANDLE_BUCKETS 2048u
+#define OBJ_SHM_HANDLE_WAYS    4u
+#define OBJ_SHM_HANDLE_SLOTS   (OBJ_SHM_HANDLE_BUCKETS * OBJ_SHM_HANDLE_WAYS)
+#define OBJ_SHM_OBJ_BUCKETS    1024u
+#define OBJ_SHM_OBJ_WAYS       4u
+#define OBJ_SHM_OBJ_SLOTS      (OBJ_SHM_OBJ_BUCKETS * OBJ_SHM_OBJ_WAYS)
+#define OBJ_SHM_MAX_TYPE_WCHARS 24u
+
+struct obj_shm_handle_slot
+{
+    uint32_t seq;
+    uint32_t pid;
+    uint32_t handle;
+    uint32_t access;
+    uint32_t attr;
+    uint32_t type_len;
+    uint32_t type_index;
+    uint32_t valid_access;
+    uint32_t mapping_read;
+    uint32_t mapping_write;
+    uint32_t mapping_exec;
+    uint32_t mapping_all;
+    uint64_t obj_ptr;
+    WCHAR    type_name[OBJ_SHM_MAX_TYPE_WCHARS];
+};
+
+struct obj_shm_obj_slot
+{
+    uint32_t seq;
+    uint32_t handle_count;
+    uint64_t obj_ptr;
+};
+
+struct obj_shm
+{
+    uint32_t magic;
+    uint32_t version;
+    uint32_t rr_handle;
+    uint32_t rr_obj;
+    struct obj_shm_handle_slot handle_table[OBJ_SHM_HANDLE_SLOTS];
+    struct obj_shm_obj_slot    obj_table[OBJ_SHM_OBJ_SLOTS];
+};
+
+static struct obj_shm *obj_shm = NULL;
+static int obj_shm_tried = 0;
+
+static void init_obj_shm(void)
+{
+    int fd;
+    void *ptr;
+
+    if (obj_shm || obj_shm_tried || server_dir_fd == -1) return;
+    obj_shm_tried = 1;
+    fd = openat( server_dir_fd, "obj_shm", O_RDWR | O_CREAT | O_TRUNC | O_CLOEXEC, 0600 );
+    if (fd == -1) return;
+    if (ftruncate( fd, sizeof(struct obj_shm) ) == -1)
+    {
+        close( fd );
+        return;
+    }
+    ptr = mmap( NULL, sizeof(struct obj_shm), PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0 );
+    close( fd );
+    if (ptr == MAP_FAILED) return;
+
+    obj_shm = ptr;
+    memset( obj_shm, 0, sizeof(*obj_shm) );
+    obj_shm->version = OBJ_SHM_VERSION;
+    __atomic_store_n( &obj_shm->magic, OBJ_SHM_MAGIC, __ATOMIC_RELEASE );
+}
+
+static inline uint32_t obj_shm_hash_handle( uint32_t pid, uint32_t handle )
+{
+    uint64_t x = ((uint64_t)pid << 32) | handle;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return (uint32_t)(x & (OBJ_SHM_HANDLE_BUCKETS - 1));
+}
+
+static inline uint32_t obj_shm_hash_ptr( uint64_t ptr )
+{
+    uint64_t x = ptr;
+    x ^= x >> 33;
+    x *= 0xff51afd7ed558ccdULL;
+    x ^= x >> 33;
+    return (uint32_t)(x & (OBJ_SHM_OBJ_BUCKETS - 1));
+}
+
+static inline void obj_shm_write_begin( uint32_t *seq )
+{
+    uint32_t s = *seq;
+    if (s & 1) s++;
+    __atomic_store_n( seq, s + 1, __ATOMIC_RELAXED );
+    __atomic_thread_fence( __ATOMIC_SEQ_CST );
+}
+
+static inline void obj_shm_write_end( uint32_t *seq )
+{
+    uint32_t s = *seq;
+    __atomic_store_n( seq, s + 1, __ATOMIC_RELEASE );
+}
+
+static void obj_shm_set_obj_count( const struct object *obj, unsigned int count )
+{
+    uint64_t key = (uint64_t)(uintptr_t)obj;
+    uint32_t bucket, i, base;
+    struct obj_shm_obj_slot *slot = NULL, *empty = NULL;
+
+    if (!obj_shm) return;
+    bucket = obj_shm_hash_ptr( key );
+    base = bucket * OBJ_SHM_OBJ_WAYS;
+
+    for (i = 0; i < OBJ_SHM_OBJ_WAYS; i++)
+    {
+        struct obj_shm_obj_slot *s = &obj_shm->obj_table[base + i];
+        if (s->obj_ptr == key)
+        {
+            slot = s;
+            break;
+        }
+        if (!empty && !s->obj_ptr) empty = s;
+    }
+
+    if (count == 0)
+    {
+        if (slot)
+        {
+            obj_shm_write_begin( &slot->seq );
+            slot->obj_ptr = 0;
+            slot->handle_count = 0;
+            obj_shm_write_end( &slot->seq );
+        }
+        return;
+    }
+
+    if (!slot)
+    {
+        if (empty) slot = empty;
+        else slot = &obj_shm->obj_table[base + (obj_shm->rr_obj++ & (OBJ_SHM_OBJ_WAYS - 1))];
+    }
+
+    obj_shm_write_begin( &slot->seq );
+    slot->obj_ptr = key;
+    slot->handle_count = count;
+    obj_shm_write_end( &slot->seq );
+}
+
+static void obj_shm_set_handle( uint32_t pid, obj_handle_t handle, const struct handle_entry *entry )
+{
+    uint32_t bucket, i, base, attr = 0;
+    struct obj_shm_handle_slot *slot = NULL, *empty = NULL;
+    struct object *obj = entry->ptr;
+    struct type_descr *type;
+
+    if (!obj_shm || !obj) return;
+    bucket = obj_shm_hash_handle( pid, handle );
+    base = bucket * OBJ_SHM_HANDLE_WAYS;
+
+    for (i = 0; i < OBJ_SHM_HANDLE_WAYS; i++)
+    {
+        struct obj_shm_handle_slot *s = &obj_shm->handle_table[base + i];
+        if (s->pid == pid && s->handle == handle && s->obj_ptr)
+        {
+            slot = s;
+            break;
+        }
+        if (!empty && !s->obj_ptr) empty = s;
+    }
+    if (!slot)
+    {
+        if (empty) slot = empty;
+        else slot = &obj_shm->handle_table[base + (obj_shm->rr_handle++ & (OBJ_SHM_HANDLE_WAYS - 1))];
+    }
+
+    if (entry->access & RESERVED_INHERIT) attr |= OBJ_INHERIT;
+    if (entry->access & RESERVED_CLOSE_PROTECT) attr |= OBJ_PROTECT_CLOSE;
+
+    type = obj->ops->type;
+    obj_shm_write_begin( &slot->seq );
+    slot->pid = pid;
+    slot->handle = handle;
+    slot->access = entry->access & ~RESERVED_ALL;
+    slot->attr = attr;
+    slot->obj_ptr = (uint64_t)(uintptr_t)obj;
+    if (type && type->name.len && type->name.len <= OBJ_SHM_MAX_TYPE_WCHARS * sizeof(WCHAR))
+    {
+        slot->type_len = type->name.len;
+        slot->type_index = type->index;
+        slot->valid_access = type->valid_access;
+        slot->mapping_read = type->mapping.read;
+        slot->mapping_write = type->mapping.write;
+        slot->mapping_exec = type->mapping.exec;
+        slot->mapping_all = type->mapping.all;
+        memcpy( slot->type_name, type->name.str, type->name.len );
+    }
+    else
+    {
+        slot->type_len = 0xffffffffu;
+    }
+    obj_shm_write_end( &slot->seq );
+}
+
+static void obj_shm_remove_handle( uint32_t pid, obj_handle_t handle )
+{
+    uint32_t bucket, i, base;
+
+    if (!obj_shm) return;
+    bucket = obj_shm_hash_handle( pid, handle );
+    base = bucket * OBJ_SHM_HANDLE_WAYS;
+
+    for (i = 0; i < OBJ_SHM_HANDLE_WAYS; i++)
+    {
+        struct obj_shm_handle_slot *s = &obj_shm->handle_table[base + i];
+        if (s->pid == pid && s->handle == handle && s->obj_ptr)
+        {
+            obj_shm_write_begin( &s->seq );
+            s->pid = 0;
+            s->handle = 0;
+            s->obj_ptr = 0;
+            obj_shm_write_end( &s->seq );
+            return;
+        }
+    }
+}
+
 /* grab an object and increment its handle count */
 static struct object *grab_object_for_handle( struct object *obj )
 {
     obj->handle_count++;
     obj->ops->type->handle_count++;
     obj->ops->type->handle_max = max( obj->ops->type->handle_max, obj->ops->type->handle_count );
+    obj_shm_set_obj_count( obj, obj->handle_count );
     return grab_object( obj );
 }
 
@@ -112,6 +344,7 @@ static void release_object_from_handle( struct object *obj )
     assert( obj->handle_count );
     obj->ops->type->handle_count--;
     obj->handle_count--;
+    obj_shm_set_obj_count( obj, obj->handle_count );
     release_object( obj );
 }
 
@@ -181,8 +414,11 @@ static void handle_table_destroy( struct object *obj )
         entry->ptr = NULL;
         if (obj)
         {
+            obj_handle_t h = index_to_handle(i);
+            obj_shm_remove_handle( table->process ? table->process->id : 0,
+                                   table->process ? h : handle_local_to_global(h) );
             if (table->process)
-                obj->ops->close_handle( obj, table->process, index_to_handle(i) );
+                obj->ops->close_handle( obj, table->process, h );
             release_object_from_handle( obj );
         }
     }
@@ -203,6 +439,7 @@ struct handle_table *alloc_handle_table( struct process *process, int count )
 {
     struct handle_table *table;
 
+    init_obj_shm();
     if (count < MIN_HANDLE_ENTRIES) count = MIN_HANDLE_ENTRIES;
     if (!(table = alloc_object( &handle_table_ops )))
         return NULL;
@@ -268,7 +505,12 @@ static obj_handle_t alloc_entry( struct handle_table *table, void *obj, unsigned
     entry = table->entries + i;
     entry->ptr    = grab_object_for_handle( obj );
     entry->access = access;
-    return index_to_handle(i);
+    {
+        obj_handle_t h = index_to_handle(i);
+        obj_shm_set_handle( table->process ? table->process->id : 0,
+                            table->process ? h : handle_local_to_global(h), entry );
+        return h;
+    }
 }
 
 /* allocate a handle for an object, incrementing its refcount */
@@ -393,6 +635,7 @@ static void inherit_handle( struct process *parent, const obj_handle_t handle, s
     grab_object_for_handle( src->ptr );
     dst[index] = *src;
     table->last = max( table->last, index );
+    if (table->process) obj_shm_set_handle( table->process->id, handle, &dst[index] );
 }
 
 /* copy the handle table of the parent process */
@@ -434,7 +677,11 @@ struct handle_table *copy_handle_table( struct process *process, struct process 
             for (i = 0; i <= table->last; i++, ptr++)
             {
                 if (!ptr->ptr) continue;
-                if (ptr->access & RESERVED_INHERIT) grab_object_for_handle( ptr->ptr );
+                if (ptr->access & RESERVED_INHERIT)
+                {
+                    grab_object_for_handle( ptr->ptr );
+                    obj_shm_set_handle( process->id, index_to_handle(i), ptr );
+                }
                 else ptr->ptr = NULL; /* don't inherit this entry */
             }
         }
@@ -458,6 +705,7 @@ unsigned int close_handle( struct process *process, obj_handle_t handle )
     if (!obj->ops->close_handle( obj, process, handle )) return STATUS_HANDLE_NOT_CLOSABLE;
 
     table = handle_is_global(handle) ? global_table : process->handles;
+    obj_shm_remove_handle( table->process ? table->process->id : 0, handle );
     table->entries[index].ptr = NULL;
     if (index < table->free) table->free = index;
     if (index > table->hint) table->hint = index;  /* next allocation takes the highest free slot */
@@ -512,6 +760,7 @@ struct object *get_handle_obj( struct process *process, obj_handle_t handle,
             if (process == current->process)
             {
                 entry->access |= access;
+                obj_shm_set_handle( handle_is_global(handle) ? 0 : process->id, handle, entry );
             }
             else
             {
@@ -595,6 +844,7 @@ static int set_handle_flags( struct process *process, obj_handle_t handle,
     mask  = (mask << RESERVED_SHIFT) & RESERVED_ALL;
     flags = (flags << RESERVED_SHIFT) & mask;
     entry->access = (entry->access & ~mask) | flags;
+    obj_shm_set_handle( handle_is_global(handle) ? 0 : process->id, handle, entry );
     return (old_access & RESERVED_ALL) >> RESERVED_SHIFT;
 }
 
@@ -645,6 +895,7 @@ obj_handle_t duplicate_handle( struct process *src, obj_handle_t src_handle, str
             if (attr & OBJ_INHERIT) access |= RESERVED_INHERIT;
             entry->access = access;
             res = src_handle;
+            obj_shm_set_handle( handle_is_global(res) ? 0 : dst->id, res, entry );
         }
         else
             res = alloc_handle_entry( dst, obj, access, attr );
@@ -741,8 +992,15 @@ DECL_HANDLER(dup_handle)
 DECL_HANDLER(get_object_info)
 {
     struct object *obj;
+    struct handle_entry *entry;
 
     if (!(obj = get_handle_obj( current->process, req->handle, 0, NULL ))) return;
+
+    if ((entry = get_handle( current->process, req->handle )))
+    {
+        obj_shm_set_handle( handle_is_global(req->handle) ? 0 : current->process->id, req->handle, entry );
+        obj_shm_set_obj_count( obj, obj->handle_count );
+    }
 
     reply->access = get_handle_access( current->process, req->handle );
     reply->ref_count = obj->refcount;

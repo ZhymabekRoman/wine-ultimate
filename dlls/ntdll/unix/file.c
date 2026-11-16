@@ -10164,8 +10164,20 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
     case ObjectBasicInformation:
     {
         OBJECT_BASIC_INFORMATION *p = ptr;
+        ULONG attr, access, handle_count;
 
         if (len < sizeof(*p)) return STATUS_INFO_LENGTH_MISMATCH;
+
+        if (obj_shm_query_basic( handle, &attr, &access, &handle_count ))
+        {
+            memset( p, 0, sizeof(*p) );
+            p->Attributes = attr;
+            p->GrantedAccess = access;
+            p->HandleCount = handle_count;
+            p->PointerCount = handle_count + 1;
+            if (used_len) *used_len = sizeof(*p);
+            return STATUS_SUCCESS;
+        }
 
         SERVER_START_REQ( get_object_info )
         {
@@ -10229,35 +10241,45 @@ NTSTATUS WINAPI NtQueryObject( HANDLE handle, OBJECT_INFORMATION_CLASS info_clas
         struct object_type_info *info = NULL;
         unsigned int i;
 
-        for (i = 0; i < type_cache_count; i++)
+        if (obj_shm_query_type( handle, (struct object_type_info *)buffer,
+                                (WCHAR *)(buffer + sizeof(struct object_type_info)),
+                                sizeof(buffer) - sizeof(struct object_type_info) ))
         {
-            if (type_cache[i].handle == handle)
-            {
-                info = (struct object_type_info *)type_cache[i].buffer;
-                break;
-            }
-        }
-
-        if (!info)
-        {
-            SERVER_START_REQ( get_object_type )
-            {
-                req->handle = wine_server_obj_handle( handle );
-                wine_server_set_reply( req, buffer, sizeof(buffer) );
-                status = wine_server_call( req );
-            }
-            SERVER_END_REQ;
-            if (status) break;
-
             info = (struct object_type_info *)buffer;
-            if (type_cache_count < TYPE_CACHE_MAX)
-            {
-                type_cache[type_cache_count].handle = handle;
-                memcpy( type_cache[type_cache_count].buffer, buffer, sizeof(buffer) );
-                type_cache_count++;
-            }
+            status = STATUS_SUCCESS;
         }
-        else status = STATUS_SUCCESS;
+        else
+        {
+            for (i = 0; i < type_cache_count; i++)
+            {
+                if (type_cache[i].handle == handle)
+                {
+                    info = (struct object_type_info *)type_cache[i].buffer;
+                    break;
+                }
+            }
+
+            if (!info)
+            {
+                SERVER_START_REQ( get_object_type )
+                {
+                    req->handle = wine_server_obj_handle( handle );
+                    wine_server_set_reply( req, buffer, sizeof(buffer) );
+                    status = wine_server_call( req );
+                }
+                SERVER_END_REQ;
+                if (status) break;
+
+                info = (struct object_type_info *)buffer;
+                if (type_cache_count < TYPE_CACHE_MAX)
+                {
+                    type_cache[type_cache_count].handle = handle;
+                    memcpy( type_cache[type_cache_count].buffer, buffer, sizeof(buffer) );
+                    type_cache_count++;
+                }
+            }
+            else status = STATUS_SUCCESS;
+        }
 
         if (sizeof(*p) + info->name_len + sizeof(WCHAR) <= len)
         {
