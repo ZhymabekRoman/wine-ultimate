@@ -4338,12 +4338,19 @@ struct path_cache_entry {
     HANDLE   root_dir;            /* attr->RootDirectory */
     uint64_t timestamp;           /* monotonic timestamp */
     uint64_t verified_ts;         /* 100ns ticks at which this entry was last validated */
+    uint32_t stat_gen;            /* stat generation this entry's st/attributes belong to */
+    ULONG    attributes;          /* cached DOS attributes from the last successful query */
+    struct stat st;               /* cached stat data from the last successful query */
     WCHAR    nt_name[MAX_PATH];   /* original ObjectName buffer for exact match */
     char     unix_path[MAX_PATH]; /* resolved Unix path */
 };
 
 static struct path_cache_entry path_cache[PATH_CACHE_SIZE];
 static uint32_t path_cache_generation = 1;
+/* Bumped by mutations whose file name is unknown (handle-based). An entry carries the
+ * stat data of generation stat_gen, so dropping all cached stat data is O(1). Zero is
+ * never a valid generation, matching the zeroed static array of entries. */
+static uint32_t path_cache_stat_generation = 1;
 static pthread_mutex_t path_cache_mutex = PTHREAD_MUTEX_INITIALIZER;
 
 static inline uint64_t path_cache_timestamp_ns(void)
@@ -4388,6 +4395,7 @@ static uint64_t path_cache_stat_negative_hits;  /* negative hits served with 0 s
 static uint64_t path_cache_stat_validated_hits; /* hits validated with fstatat */
 static uint64_t path_cache_stat_misses;         /* full namespace lookups */
 static uint64_t path_cache_stat_negative_inserts;
+static uint64_t path_cache_attr_direct_hits;    /* attribute queries served from cached stat data */
 
 static void path_cache_dump_stats(void)
 {
@@ -4399,18 +4407,38 @@ static void path_cache_dump_stats(void)
 
     if (!lookups) return;
     fprintf( stderr, "PATH_CACHE stats: lookups=%llu lease_hits=%llu negative_hits=%llu "
-             "zero_syscall=%llu (%u%%) validated_hits=%llu misses=%llu negative_inserts=%llu\n",
+             "zero_syscall=%llu (%u%%) validated_hits=%llu misses=%llu negative_inserts=%llu "
+             "attr_direct_hits=%llu\n",
              (unsigned long long)lookups, (unsigned long long)lease, (unsigned long long)neg,
              (unsigned long long)(lease + neg),
              (unsigned int)(((lease + neg) * 100) / lookups),
              (unsigned long long)validated, (unsigned long long)misses,
-             (unsigned long long)__atomic_load_n( &path_cache_stat_negative_inserts, __ATOMIC_RELAXED ) );
+             (unsigned long long)__atomic_load_n( &path_cache_stat_negative_inserts, __ATOMIC_RELAXED ),
+             (unsigned long long)__atomic_load_n( &path_cache_attr_direct_hits, __ATOMIC_RELAXED ) );
 }
 
 __attribute__((destructor)) static void path_cache_stats_dtor(void)
 {
     static BOOL done;
     if (!done && getenv( "WINE_PATH_CACHE_STATS" )) { done = TRUE; path_cache_dump_stats(); }
+}
+
+/* Case-insensitive downcase used for cache keys: inline the ASCII range, which covers
+ * virtually every path name, and fall back to the Unicode table for the rest. */
+static inline WCHAR path_cache_downcase( WCHAR c )
+{
+    if (c < 0x80) return (c - 'A' < 26) ? c + 32 : c;
+    return RtlDowncaseUnicodeChar( c );
+}
+
+/* wcsnicmp( a, b, lenW ) == 0 with an ASCII fast path, for the seqlock reader that
+ * must not pay for a function call per character. */
+static inline BOOL path_cache_name_equal( const WCHAR *a, const WCHAR *b, unsigned int lenW )
+{
+    unsigned int i;
+
+    for (i = 0; i < lenW; i++) if (path_cache_downcase( a[i] ) != path_cache_downcase( b[i] )) return FALSE;
+    return TRUE;
 }
 
 static inline uint32_t path_cache_hash( const WCHAR *str, unsigned int len, HANDLE root_dir, BOOL open_reparse )
@@ -4420,7 +4448,7 @@ static inline uint32_t path_cache_hash( const WCHAR *str, unsigned int len, HAND
 
     while (remaining-- > 0)
     {
-        WCHAR c = RtlDowncaseUnicodeChar( *str++ );
+        WCHAR c = path_cache_downcase( *str++ );
         h ^= (uint32_t)(c & 0xff);
         h *= 0x01000193;
         h ^= (uint32_t)(c >> 8);
@@ -4661,6 +4689,121 @@ static void path_cache_invalidate( const OBJECT_ATTRIBUTES *attr )
 static inline void path_cache_invalidate_all(void)
 {
     __atomic_fetch_add( &path_cache_generation, 1, __ATOMIC_RELEASE );
+}
+
+/* Drop the cached stat data of every entry, keeping the resolved Unix paths. Used by
+ * the handle-based mutations (NtWriteFile, FileBasicInformation, FileEndOfFileInformation,
+ * ...) that change size, times or DOS attributes without naming the file. */
+void path_cache_invalidate_stat_all(void)
+{
+    uint32_t gen = __atomic_add_fetch( &path_cache_stat_generation, 1, __ATOMIC_RELEASE );
+
+    if (!gen) __atomic_add_fetch( &path_cache_stat_generation, 1, __ATOMIC_RELEASE );  /* skip 0 = empty */
+}
+
+/* Fast path for NtQueryAttributesFile / NtQueryFullAttributesFile: a positive entry whose
+ * lease is still live carries the full stat data of the last successful query, so the
+ * attribute query needs no syscall (lstat + 2 xattr_get) and no heap allocation. */
+static BOOL path_cache_lookup_stat( const OBJECT_ATTRIBUTES *attr, struct stat *st, ULONG *attributes )
+{
+    const UNICODE_STRING *obj_name;
+    const WCHAR *name;
+    unsigned int lenW, hash, probe;
+    uint32_t cur_gen, cur_stat_gen;
+
+    if (vfs_cache_disabled == -1) vfs_cache_disabled = getenv( "WINE_DISABLE_VFS_CACHE" ) != NULL;
+    if (vfs_cache_disabled) return FALSE;
+
+    if (!attr || !(obj_name = attr->ObjectName) || !(name = obj_name->Buffer)) return FALSE;
+    lenW = obj_name->Length / sizeof(WCHAR);
+    if (!lenW || lenW >= MAX_PATH) return FALSE;
+
+    cur_gen = __atomic_load_n( &path_cache_generation, __ATOMIC_ACQUIRE );
+    cur_stat_gen = __atomic_load_n( &path_cache_stat_generation, __ATOMIC_ACQUIRE );
+    hash = path_cache_hash( name, lenW, attr->RootDirectory, TRUE );
+
+    for (probe = 0; probe < PATH_CACHE_PROBE_MAX; probe++)
+    {
+        unsigned int slot = (hash + probe) & (PATH_CACHE_SIZE - 1);
+        struct path_cache_entry *entry = &path_cache[slot];
+        uint32_t seq1, seq2;
+
+        seq1 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+        if (!seq1 || (seq1 & 1)) continue;
+
+        if (entry->hash != hash || entry->name_len != lenW ||
+            entry->root_dir != attr->RootDirectory || !entry->open_reparse)
+            continue;
+
+        if (__atomic_load_n( &entry->generation, __ATOMIC_RELAXED ) != cur_gen) continue;
+        if (entry->is_negative || entry->status != STATUS_SUCCESS) continue;
+        if (__atomic_load_n( &entry->stat_gen, __ATOMIC_ACQUIRE ) != cur_stat_gen) continue;
+        if (!path_cache_name_equal( entry->nt_name, name, lenW )) continue;
+
+        /* seqlock read: sample, then confirm the entry was not rewritten */
+        *st = entry->st;
+        *attributes = entry->attributes;
+        if (__atomic_load_n( &entry->stat_gen, __ATOMIC_ACQUIRE ) != cur_stat_gen) continue;
+
+        seq2 = __atomic_load_n( &entry->seq, __ATOMIC_ACQUIRE );
+        if (seq1 != seq2) continue;
+
+        if (!path_cache_lease_valid( entry->verified_ts )) continue;
+
+        __atomic_fetch_add( &path_cache_attr_direct_hits, 1, __ATOMIC_RELAXED );
+        return TRUE;
+    }
+
+    return FALSE;
+}
+
+/* Record the stat data of a successful attribute query so that the following queries
+ * for the same name within the lease window are served with zero syscalls. Takes the
+ * original (unredirected) attr, matching the key used by path_cache_lookup_stat(). */
+static void path_cache_store_stat( const OBJECT_ATTRIBUTES *attr, const char *unix_path,
+                                   const struct stat *st, ULONG attributes )
+{
+    const UNICODE_STRING *obj_name;
+    const WCHAR *name;
+    unsigned int lenW, hash, probe;
+    uint32_t cur_gen, cur_stat_gen, seq;
+    struct path_cache_entry *entry;
+
+    if (vfs_cache_disabled == -1) vfs_cache_disabled = getenv( "WINE_DISABLE_VFS_CACHE" ) != NULL;
+    if (vfs_cache_disabled) return;
+
+    if (!attr || !(obj_name = attr->ObjectName) || !(name = obj_name->Buffer)) return;
+    lenW = obj_name->Length / sizeof(WCHAR);
+    if (!lenW || lenW >= MAX_PATH) return;
+    if (!unix_path) return;
+
+    /* make sure a positive entry with a valid Unix path exists for this key */
+    path_cache_insert( attr, unix_path, TRUE, STATUS_SUCCESS );
+
+    cur_gen = __atomic_load_n( &path_cache_generation, __ATOMIC_ACQUIRE );
+    cur_stat_gen = __atomic_load_n( &path_cache_stat_generation, __ATOMIC_ACQUIRE );
+    hash = path_cache_hash( name, lenW, attr->RootDirectory, TRUE );
+
+    pthread_mutex_lock( &path_cache_mutex );
+    for (probe = 0; probe < PATH_CACHE_PROBE_MAX; probe++)
+    {
+        unsigned int slot = (hash + probe) & (PATH_CACHE_SIZE - 1);
+        entry = &path_cache[slot];
+
+        if (entry->hash != hash || entry->name_len != lenW || entry->root_dir != attr->RootDirectory
+            || !entry->open_reparse || entry->generation != cur_gen || wcsnicmp( entry->nt_name, name, lenW ))
+            continue;
+
+        seq = entry->seq;
+        if (seq & 1) seq++;
+        __atomic_store_n( &entry->seq, seq + 1, __ATOMIC_RELEASE );
+        entry->attributes = attributes;
+        entry->st = *st;
+        __atomic_store_n( &entry->stat_gen, cur_stat_gen, __ATOMIC_RELEASE );
+        __atomic_store_n( &entry->seq, seq + 2, __ATOMIC_RELEASE );
+        break;
+    }
+    pthread_mutex_unlock( &path_cache_mutex );
 }
 
 
@@ -5978,6 +6121,9 @@ NTSTATUS WINAPI NtCreateFile( HANDLE *handle, ACCESS_MASK access, OBJECT_ATTRIBU
             path_cache_invalidate( &new_attr );
             path_cache_invalidate( attr );
         }
+        /* Size, times and DOS attributes can change through the new handle, and a
+         * disposition-delete or delete-on-close handle unlinks the name on close. */
+        path_cache_invalidate_stat_all();
 
         if (io->Information == FILE_CREATED &&
             ((attributes & XATTR_ATTRIBS_MASK) || name_hidden))
@@ -6156,17 +6302,22 @@ NTSTATUS WINAPI NtDeleteFile( OBJECT_ATTRIBUTES *attr )
 NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
                                            FILE_NETWORK_OPEN_INFORMATION *info )
 {
+    ULONG attributes;
+    struct stat st;
     char *unix_name;
     unsigned int status;
     UNICODE_STRING nt_name, base_name;
     OBJECT_ATTRIBUTES new_attr = *attr;
     BOOL is_zone = split_zone_identifier_stream( attr, &new_attr, &base_name );
 
+    if (!is_zone && path_cache_lookup_stat( attr, &st, &attributes ))
+    {
+        fill_file_info( &st, attributes, info, FileNetworkOpenInformation );
+        return STATUS_SUCCESS;
+    }
+
     if (!(status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE )))
     {
-        ULONG attributes;
-        struct stat st;
-
         if (get_file_info( unix_name, &st, &attributes, NULL ) == -1)
             status = errno_to_status( errno );
         else if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
@@ -6184,7 +6335,10 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
             }
         }
         else
+        {
+            path_cache_store_stat( attr, unix_name, &st, attributes );
             fill_file_info( &st, attributes, info, FileNetworkOpenInformation );
+        }
     }
     else WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), status );
     free( unix_name );
@@ -6199,17 +6353,22 @@ NTSTATUS WINAPI NtQueryFullAttributesFile( const OBJECT_ATTRIBUTES *attr,
  */
 NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC_INFORMATION *info )
 {
+    ULONG attributes;
+    struct stat st;
     char *unix_name;
     unsigned int status;
     UNICODE_STRING nt_name, base_name;
     OBJECT_ATTRIBUTES new_attr = *attr;
     BOOL is_zone = split_zone_identifier_stream( attr, &new_attr, &base_name );
 
+    if (!is_zone && path_cache_lookup_stat( attr, &st, &attributes ))
+    {
+        status = fill_file_info( &st, attributes, info, FileBasicInformation );
+        return status;
+    }
+
     if (!(status = get_nt_and_unix_names( &new_attr, &nt_name, &unix_name, FILE_OPEN, TRUE )))
     {
-        ULONG attributes;
-        struct stat st;
-
         if (get_file_info( unix_name, &st, &attributes, NULL ) == -1)
             status = errno_to_status( errno );
         else if (!S_ISREG(st.st_mode) && !S_ISDIR(st.st_mode))
@@ -6223,7 +6382,10 @@ NTSTATUS WINAPI NtQueryAttributesFile( const OBJECT_ATTRIBUTES *attr, FILE_BASIC
                 status = fill_file_info( &st, attributes, info, FileBasicInformation );
         }
         else
+        {
+            path_cache_store_stat( attr, unix_name, &st, attributes );
             status = fill_file_info( &st, attributes, info, FileBasicInformation );
+        }
     }
     else WARN( "%s not found (%x)\n", debugstr_us(attr->ObjectName), status );
     free( unix_name );
@@ -6542,6 +6704,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
 
             if (needs_close) close( fd );
             free( unix_name );
+            if (!status) path_cache_invalidate_stat_all();  /* times and DOS attributes changed */
         }
         else status = STATUS_INVALID_PARAMETER_3;
         break;
@@ -6582,6 +6745,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
                     if (needs_close) close( fd );
                 }
             }
+            if (!status) path_cache_invalidate_stat_all();  /* file size changed */
         }
         else status = STATUS_INVALID_PARAMETER_3;
         break;
@@ -6702,6 +6866,7 @@ NTSTATUS WINAPI NtSetInformationFile( HANDLE handle, IO_STATUS_BLOCK *io,
 #endif
             }
             if (needs_close) close( fd );
+            if (!status) path_cache_invalidate_stat_all();  /* valid data length changed */
         }
         else status = STATUS_INVALID_PARAMETER_3;
         break;
@@ -8478,11 +8643,14 @@ NTSTATUS WINAPI NtWriteFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE apc, v
     }
 
 done:
-    if (status == STATUS_SUCCESS && type == FD_TYPE_FILE &&
-        __atomic_load_n( &zone_streams_active, __ATOMIC_ACQUIRE ))
+    if (status == STATUS_SUCCESS && type == FD_TYPE_FILE)
     {
-        NTSTATUS sync_status = zone_stream_sync_from_fd( unix_handle );
-        if (sync_status) status = sync_status;
+        path_cache_invalidate_stat_all();  /* written data changes size and times */
+        if (__atomic_load_n( &zone_streams_active, __ATOMIC_ACQUIRE ))
+        {
+            NTSTATUS sync_status = zone_stream_sync_from_fd( unix_handle );
+            if (sync_status) status = sync_status;
+        }
     }
     send_completion = cvalue != 0;
 

@@ -2264,6 +2264,9 @@ NTSTATUS WINAPI NtClose( HANDLE handle )
 
     server_leave_uninterrupted_section( &fd_cache_mutex, &sigset );
 
+    /* closing the last handle can unlink the file (disposition or delete-on-close) */
+    if (ret == STATUS_SUCCESS) path_cache_invalidate_stat_all();
+
     if (fd != -1) close( fd );
 
     if (ret != STATUS_INVALID_HANDLE || !handle) return ret;
