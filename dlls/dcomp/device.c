@@ -331,7 +331,8 @@ static BOOL CALLBACK find_top_level_window_proc(HWND hwnd, LPARAM lparam)
 
     RealGetWindowClassW(hwnd, class_name, ARRAY_SIZE(class_name));
     if (!wcscmp(class_name, L"Progman") || !wcscmp(class_name, L"Shell_TrayWnd") ||
-        !wcscmp(class_name, L"static") || !wcscmp(class_name, L"Message"))
+        !wcscmp(class_name, L"static") || !wcscmp(class_name, L"Message") ||
+        !wcscmp(class_name, L"WineConsoleClass"))
         return TRUE;
 
     *out_hwnd = hwnd;
@@ -468,7 +469,7 @@ static HRESULT ensure_composite_swapchain(struct composition_target *target,
     desc.Height = height;
     desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     desc.SampleDesc.Count = 1;
-    desc.BufferCount = 2;
+    desc.BufferCount = 3;
     desc.BufferUsage = DXGI_USAGE_RENDER_TARGET_OUTPUT;
     desc.SwapEffect = DXGI_SWAP_EFFECT_FLIP_SEQUENTIAL;
     desc.Flags = 0;
@@ -836,7 +837,11 @@ static BOOL do_composite_dxgi_surface(struct composition_target *target,
                 root_hwnd = target_hwnd;
 
             if (root_hwnd != target_hwnd)
+            {
                 MapWindowPoints(target_hwnd, root_hwnd, &win_off, 1);
+                if (win_off.x <= -2000 || win_off.y <= -2000)
+                    win_off.x = win_off.y = 0;
+            }
         }
     }
 
@@ -1699,11 +1704,16 @@ static void collect_visual_frames(struct composition_device *device, struct comp
      * surface, which changes on every publisher frame, so queue it every tick. */
     {
         unsigned int content_ver = visual->content_version;
+        BOOL has_drawn_content = TRUE;
         if (visual->content)
         {
             struct composition_surface *surf = unsafe_impl_from_IDCompositionSurface((IDCompositionSurface *)visual->content);
             if (surf)
+            {
+                if (surf->factory && !surf->content_version)
+                    has_drawn_content = FALSE;
                 content_ver += surf->content_version;
+            }
             else if (visual->wined3d_swapchain)
             {
                 UINT present_count = 0;
@@ -1712,8 +1722,8 @@ static void collect_visual_frames(struct composition_device *device, struct comp
                     content_ver += present_count + 1;
             }
         }
-        if (visual->is_shared_proxy
-                || (visual->content && (content_ver != visual->composited_version
+        if ((visual->is_shared_proxy && visual->shared_content_handle)
+                || (visual->content && has_drawn_content && (content_ver != visual->composited_version
                     || xform_ver != visual->composited_transform_version
                     || visual->composited_hwnd != target_hwnd)))
         {

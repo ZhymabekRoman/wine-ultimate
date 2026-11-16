@@ -4351,6 +4351,8 @@ struct wv2_enum_ctx
     int count;
 };
 
+static HWND wv2_get_controller_parent( void );
+
 static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
 {
     struct wv2_enum_ctx *ctx = (struct wv2_enum_ctx *)lparam;
@@ -4362,7 +4364,9 @@ static BOOL CALLBACK wv2_sync_child_cb( HWND child, LPARAM lparam )
     {
         if (g_active_wv2_impl && g_active_wv2_impl->has_comp_ctrl)
         {
-            SetWindowPos( child, HWND_BOTTOM, -4000, -4000, ctx->width, ctx->height,
+            HWND parent = GetParent( child );
+            int pos = (!parent || parent == wv2_get_controller_parent()) ? -4000 : 0;
+            SetWindowPos( child, HWND_BOTTOM, pos, pos, ctx->width, ctx->height,
                           SWP_NOACTIVATE );
         }
         else
@@ -5492,6 +5496,7 @@ static void wv2_start_browser( struct xaml_element *impl )
     if (impl->browser_started) return;
     impl->browser_started = TRUE;
 
+    SetEnvironmentVariableW( L"WINE_HEADLESS_CONSOLE", L"1" );
     CoInitializeEx( NULL, COINIT_APARTMENTTHREADED );
 
     if (GetModuleFileNameW( NULL, exe_dir, ARRAY_SIZE(exe_dir) ))

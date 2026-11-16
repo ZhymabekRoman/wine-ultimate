@@ -533,6 +533,7 @@ static BOOL CALLBACK find_top_level_window_proc(HWND hwnd, LPARAM lparam)
 {
     HWND *out_hwnd = (HWND *)lparam;
     WCHAR class_name[256];
+    DWORD pid = 0;
 
     if (!IsWindowVisible(hwnd) || IsIconic(hwnd))
         return TRUE;
@@ -540,13 +541,25 @@ static BOOL CALLBACK find_top_level_window_proc(HWND hwnd, LPARAM lparam)
     if (GetWindowLongW(hwnd, GWL_STYLE) & WS_CHILD)
         return TRUE;
 
+    GetWindowThreadProcessId(hwnd, &pid);
+    if (pid != GetCurrentProcessId())
+        return TRUE;
+
     RealGetWindowClassW(hwnd, class_name, ARRAY_SIZE(class_name));
     if (!wcscmp(class_name, L"Progman") || !wcscmp(class_name, L"Shell_TrayWnd") ||
-        !wcscmp(class_name, L"static") || !wcscmp(class_name, L"Message"))
+        !wcscmp(class_name, L"static") || !wcscmp(class_name, L"Message") ||
+        !wcscmp(class_name, L"WineConsoleClass") || !wcscmp(class_name, L"Chrome_WidgetWin_0") ||
+        !wcscmp(class_name, L"Intermediate D3D Window"))
         return TRUE;
 
     *out_hwnd = hwnd;
     return FALSE;
+}
+
+static BOOL is_current_process_window(HWND hwnd)
+{
+    DWORD pid = 0;
+    return hwnd && GetWindowThreadProcessId(hwnd, &pid) && pid == GetCurrentProcessId();
 }
 
 static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWineDXGIFactory *iface,
@@ -567,16 +580,14 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
 
     swapchain_desc = *desc;
 
-    if (hwnd)
+    if (is_current_process_window(hwnd))
     {
         core_window = TRUE;
     }
     else
     {
         hwnd = FindWindowW(L"WinUIDesktopWin32WindowClass", NULL);
-        if (!hwnd) hwnd = GetActiveWindow();
-        if (!hwnd) hwnd = GetForegroundWindow();
-        if (!hwnd || hwnd == GetDesktopWindow())
+        if (!is_current_process_window(hwnd))
         {
             HWND found_hwnd = NULL;
             EnumWindows(find_top_level_window_proc, (LPARAM)&found_hwnd);
@@ -585,7 +596,7 @@ static HRESULT STDMETHODCALLTYPE dxgi_factory_CreateSwapChainForComposition(IWin
         if (hwnd)
         {
             HWND root = GetAncestor(hwnd, GA_ROOT);
-            if (root) hwnd = root;
+            hwnd = is_current_process_window(root) ? root : NULL;
         }
     }
 
