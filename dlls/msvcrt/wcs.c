@@ -32,6 +32,288 @@
 #include "wtypes.h"
 #include "wine/debug.h"
 
+#if defined(__x86_64__) && !defined(__arm64ec__)
+#include <immintrin.h>
+
+static inline int msvcrt_wcs_has_avx2(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        unsigned int eax, ebx, ecx, edx;
+        __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
+        if ((ecx & (1 << 27)) && (ecx & (1 << 28)))
+        {
+            unsigned int xcr0_low, xcr0_high;
+            __asm__ volatile ("xgetbv" : "=a"(xcr0_low), "=d"(xcr0_high) : "c"(0));
+            if ((xcr0_low & 6) == 6)
+            {
+                __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0), "c"(0));
+                if (eax >= 7)
+                {
+                    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
+                    cached = (ebx & (1 << 5)) != 0;
+                    return cached;
+                }
+            }
+        }
+        cached = 0;
+    }
+    return cached;
+}
+
+__attribute__((target("avx2")))
+static size_t avx2_wcslen(const wchar_t *str)
+{
+    const wchar_t *s = str;
+    __m256i zero;
+
+    if (((ULONG_PTR)s & 1) != 0)
+    {
+        while (*s) s++;
+        return s - str;
+    }
+
+    zero = _mm256_setzero_si256();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xfe0)
+    {
+        __m256i v = _mm256_loadu_si256((const __m256i *)s);
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi16(v, zero));
+        if (mask) return (size_t)__builtin_ctz((unsigned int)mask) >> 1;
+        s += 16;
+    }
+
+    while ((ULONG_PTR)s & 31)
+    {
+        if (!*s) return s - str;
+        s++;
+    }
+
+    for (;;)
+    {
+        __m256i v = _mm256_load_si256((const __m256i *)s);
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi16(v, zero));
+        if (mask) return (s - str) + ((size_t)__builtin_ctz((unsigned int)mask) >> 1);
+        s += 16;
+    }
+}
+
+static inline size_t sse2_wcslen(const wchar_t *str)
+{
+    const wchar_t *s = str;
+    __m128i zero;
+
+    if (((ULONG_PTR)s & 1) != 0)
+    {
+        while (*s) s++;
+        return s - str;
+    }
+
+    zero = _mm_setzero_si128();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xff0)
+    {
+        __m128i v = _mm_loadu_si128((const __m128i *)s);
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi16(v, zero));
+        if (mask) return (size_t)__builtin_ctz((unsigned int)mask) >> 1;
+        s += 8;
+    }
+
+    while ((ULONG_PTR)s & 15)
+    {
+        if (!*s) return s - str;
+        s++;
+    }
+
+    for (;;)
+    {
+        __m128i v = _mm_load_si128((const __m128i *)s);
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi16(v, zero));
+        if (mask) return (s - str) + ((size_t)__builtin_ctz((unsigned int)mask) >> 1);
+        s += 8;
+    }
+}
+
+__attribute__((target("avx2")))
+static size_t avx2_wcsnlen(const wchar_t *str, size_t len)
+{
+    const wchar_t *s = str;
+    __m256i zero;
+
+    if (((ULONG_PTR)s & 1) != 0 || len < 16)
+    {
+        while (len && *s) { s++; len--; }
+        return s - str;
+    }
+
+    zero = _mm256_setzero_si256();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xfe0)
+    {
+        __m256i v = _mm256_loadu_si256((const __m256i *)s);
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi16(v, zero));
+        if (mask)
+        {
+            size_t idx = (size_t)__builtin_ctz((unsigned int)mask) >> 1;
+            return idx < len ? idx : len;
+        }
+        s += 16;
+        len -= 16;
+    }
+
+    while (((ULONG_PTR)s & 31) && len)
+    {
+        if (!*s) return s - str;
+        s++;
+        len--;
+    }
+
+    while (len >= 16)
+    {
+        __m256i v = _mm256_load_si256((const __m256i *)s);
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi16(v, zero));
+        if (mask) return (s - str) + ((size_t)__builtin_ctz((unsigned int)mask) >> 1);
+        s += 16;
+        len -= 16;
+    }
+
+    while (len && *s) { s++; len--; }
+    return s - str;
+}
+
+static inline size_t sse2_wcsnlen(const wchar_t *str, size_t len)
+{
+    const wchar_t *s = str;
+    __m128i zero;
+
+    if (((ULONG_PTR)s & 1) != 0 || len < 8)
+    {
+        while (len && *s) { s++; len--; }
+        return s - str;
+    }
+
+    zero = _mm_setzero_si128();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xff0)
+    {
+        __m128i v = _mm_loadu_si128((const __m128i *)s);
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi16(v, zero));
+        if (mask)
+        {
+            size_t idx = (size_t)__builtin_ctz((unsigned int)mask) >> 1;
+            return idx < len ? idx : len;
+        }
+        s += 8;
+        len -= 8;
+    }
+
+    while (((ULONG_PTR)s & 15) && len)
+    {
+        if (!*s) return s - str;
+        s++;
+        len--;
+    }
+
+    while (len >= 8)
+    {
+        __m128i v = _mm_load_si128((const __m128i *)s);
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi16(v, zero));
+        if (mask) return (s - str) + ((size_t)__builtin_ctz((unsigned int)mask) >> 1);
+        s += 8;
+        len -= 8;
+    }
+
+    while (len && *s) { s++; len--; }
+    return s - str;
+}
+
+__attribute__((target("avx2")))
+static int avx2_wcscmp(const wchar_t *s1, const wchar_t *s2)
+{
+    __m256i zero = _mm256_setzero_si256();
+
+    if (((ULONG_PTR)s1 & 1) != 0 || ((ULONG_PTR)s2 & 1) != 0)
+    {
+        while (*s1 && (*s1 == *s2)) { s1++; s2++; }
+        return *s1 < *s2 ? -1 : (*s1 > *s2 ? 1 : 0);
+    }
+
+    for (;;)
+    {
+        if (((ULONG_PTR)s1 & 0xfff) <= 0xfe0 && ((ULONG_PTR)s2 & 0xfff) <= 0xfe0)
+        {
+            __m256i v1 = _mm256_loadu_si256((const __m256i *)s1);
+            __m256i v2 = _mm256_loadu_si256((const __m256i *)s2);
+            unsigned int eq = (unsigned int)_mm256_movemask_epi8(_mm256_cmpeq_epi16(v1, v2));
+            unsigned int z = (unsigned int)_mm256_movemask_epi8(_mm256_cmpeq_epi16(v1, zero));
+            unsigned int stop = (~eq) | z;
+            if (stop)
+            {
+                unsigned int idx = (unsigned int)__builtin_ctz(stop) >> 1;
+                wchar_t c1 = s1[idx], c2 = s2[idx];
+                return c1 < c2 ? -1 : (c1 > c2 ? 1 : 0);
+            }
+            s1 += 16;
+            s2 += 16;
+        }
+        else
+        {
+            int i;
+            for (i = 0; i < 16; i++)
+            {
+                if (*s1 != *s2 || !*s1)
+                    return *s1 < *s2 ? -1 : (*s1 > *s2 ? 1 : 0);
+                s1++;
+                s2++;
+            }
+        }
+    }
+}
+
+static inline int sse2_wcscmp(const wchar_t *s1, const wchar_t *s2)
+{
+    __m128i zero = _mm_setzero_si128();
+
+    if (((ULONG_PTR)s1 & 1) != 0 || ((ULONG_PTR)s2 & 1) != 0)
+    {
+        while (*s1 && (*s1 == *s2)) { s1++; s2++; }
+        return *s1 < *s2 ? -1 : (*s1 > *s2 ? 1 : 0);
+    }
+
+    for (;;)
+    {
+        if (((ULONG_PTR)s1 & 0xfff) <= 0xff0 && ((ULONG_PTR)s2 & 0xfff) <= 0xff0)
+        {
+            __m128i v1 = _mm_loadu_si128((const __m128i *)s1);
+            __m128i v2 = _mm_loadu_si128((const __m128i *)s2);
+            unsigned int eq = (unsigned int)_mm_movemask_epi8(_mm_cmpeq_epi16(v1, v2));
+            unsigned int z = (unsigned int)_mm_movemask_epi8(_mm_cmpeq_epi16(v1, zero));
+            unsigned int stop = ((~eq) & 0xffffU) | z;
+            if (stop)
+            {
+                unsigned int idx = (unsigned int)__builtin_ctz(stop) >> 1;
+                wchar_t c1 = s1[idx], c2 = s2[idx];
+                return c1 < c2 ? -1 : (c1 > c2 ? 1 : 0);
+            }
+            s1 += 8;
+            s2 += 8;
+        }
+        else
+        {
+            int i;
+            for (i = 0; i < 8; i++)
+            {
+                if (*s1 != *s2 || !*s1)
+                    return *s1 < *s2 ? -1 : (*s1 > *s2 ? 1 : 0);
+                s1++;
+                s2++;
+            }
+        }
+    }
+}
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 
 typedef struct
@@ -1968,6 +2250,11 @@ int WINAPIV _swprintf_p_l(wchar_t *buffer, size_t length,
  */
 int CDECL wcscmp(const wchar_t *str1, const wchar_t *str2)
 {
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (msvcrt_wcs_has_avx2())
+        return avx2_wcscmp(str1, str2);
+    return sse2_wcscmp(str1, str2);
+#else
     while (*str1 && (*str1 == *str2))
     {
         str1++;
@@ -1979,6 +2266,7 @@ int CDECL wcscmp(const wchar_t *str1, const wchar_t *str2)
     if (*str1 > *str2)
         return 1;
     return 0;
+#endif
 }
 
 /*********************************************************************
@@ -2907,11 +3195,17 @@ __msvcrt_ulong __cdecl wcstoul(const wchar_t *s, wchar_t **end, int base)
  */
 size_t CDECL wcsnlen(const wchar_t *s, size_t maxlen)
 {
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (msvcrt_wcs_has_avx2())
+        return avx2_wcsnlen(s, maxlen);
+    return sse2_wcsnlen(s, maxlen);
+#else
     size_t i;
 
     for (i = 0; i < maxlen; i++)
         if (!s[i]) break;
     return i;
+#endif
 }
 
 /*********************************************************************
@@ -2970,9 +3264,15 @@ wchar_t* CDECL wcsrchr(const wchar_t *str, wchar_t ch)
  */
 size_t CDECL wcslen(const wchar_t *str)
 {
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (msvcrt_wcs_has_avx2())
+        return avx2_wcslen(str);
+    return sse2_wcslen(str);
+#else
     const wchar_t *s = str;
     while (*s) s++;
     return s - str;
+#endif
 }
 
 /*********************************************************************

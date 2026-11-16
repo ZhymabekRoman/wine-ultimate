@@ -38,6 +38,177 @@
 #include "kernelbase.h"
 #include "wine/debug.h"
 
+#if defined(__x86_64__) && !defined(__arm64ec__)
+#include <immintrin.h>
+
+static inline int locale_has_avx2(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        unsigned int eax, ebx, ecx, edx;
+        __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
+        if ((ecx & (1 << 27)) && (ecx & (1 << 28)))
+        {
+            unsigned int xcr0_low, xcr0_high;
+            __asm__ volatile ("xgetbv" : "=a"(xcr0_low), "=d"(xcr0_high) : "c"(0));
+            if ((xcr0_low & 6) == 6)
+            {
+                __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0), "c"(0));
+                if (eax >= 7)
+                {
+                    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
+                    cached = (ebx & (1 << 5)) != 0;
+                    return cached;
+                }
+            }
+        }
+        cached = 0;
+    }
+    return cached;
+}
+
+__attribute__((target("avx2")))
+static int avx2_utf8_ascii_scan( const char *src, int len )
+{
+    int i = 0;
+    while (i + 32 <= len)
+    {
+        __m256i v = _mm256_loadu_si256( (const __m256i *)(src + i) );
+        if (_mm256_movemask_epi8( v )) break;
+        i += 32;
+    }
+    return i;
+}
+
+__attribute__((target("avx2")))
+static int avx2_utf8_ascii_widen( const char *src, WCHAR *dst, int len )
+{
+    int i = 0;
+    while (i + 32 <= len)
+    {
+        __m256i v = _mm256_loadu_si256( (const __m256i *)(src + i) );
+        __m128i lo, hi;
+        if (_mm256_movemask_epi8( v )) break;
+        lo = _mm256_castsi256_si128( v );
+        hi = _mm256_extracti128_si256( v, 1 );
+        _mm256_storeu_si256( (__m256i *)(dst + i), _mm256_cvtepu8_epi16( lo ) );
+        _mm256_storeu_si256( (__m256i *)(dst + i + 16), _mm256_cvtepu8_epi16( hi ) );
+        i += 32;
+    }
+    return i;
+}
+
+static inline int sse2_utf8_ascii_scan( const char *src, int len )
+{
+    int i = 0;
+    while (i + 16 <= len)
+    {
+        __m128i v = _mm_loadu_si128( (const __m128i *)(src + i) );
+        if (_mm_movemask_epi8( v )) break;
+        i += 16;
+    }
+    return i;
+}
+
+static inline int sse2_utf8_ascii_widen( const char *src, WCHAR *dst, int len )
+{
+    int i = 0;
+    __m128i zero = _mm_setzero_si128();
+    while (i + 16 <= len)
+    {
+        __m128i v = _mm_loadu_si128( (const __m128i *)(src + i) );
+        if (_mm_movemask_epi8( v )) break;
+        _mm_storeu_si128( (__m128i *)(dst + i), _mm_unpacklo_epi8( v, zero ) );
+        _mm_storeu_si128( (__m128i *)(dst + i + 8), _mm_unpackhi_epi8( v, zero ) );
+        i += 16;
+    }
+    return i;
+}
+
+__attribute__((target("avx2")))
+static int avx2_utf16_ascii_scan( const WCHAR *src, int len )
+{
+    int i = 0;
+    __m256i hi_mask = _mm256_set1_epi16( (short)0xff80 );
+    while (i + 32 <= len)
+    {
+        __m256i v0 = _mm256_loadu_si256( (const __m256i *)(src + i) );
+        __m256i v1 = _mm256_loadu_si256( (const __m256i *)(src + i + 16) );
+        if (!_mm256_testz_si256( _mm256_or_si256( v0, v1 ), hi_mask )) break;
+        i += 32;
+    }
+    while (i + 16 <= len)
+    {
+        __m256i v = _mm256_loadu_si256( (const __m256i *)(src + i) );
+        if (!_mm256_testz_si256( v, hi_mask )) break;
+        i += 16;
+    }
+    return i;
+}
+
+__attribute__((target("avx2")))
+static int avx2_utf16_ascii_narrow( const WCHAR *src, char *dst, int len )
+{
+    int i = 0;
+    __m256i hi_mask = _mm256_set1_epi16( (short)0xff80 );
+    while (i + 32 <= len)
+    {
+        __m256i v0 = _mm256_loadu_si256( (const __m256i *)(src + i) );
+        __m256i v1 = _mm256_loadu_si256( (const __m256i *)(src + i + 16) );
+        __m256i packed;
+        if (!_mm256_testz_si256( _mm256_or_si256( v0, v1 ), hi_mask )) break;
+        packed = _mm256_permute4x64_epi64( _mm256_packus_epi16( v0, v1 ), 0xd8 );
+        _mm256_storeu_si256( (__m256i *)(dst + i), packed );
+        i += 32;
+    }
+    while (i + 16 <= len)
+    {
+        __m256i v = _mm256_loadu_si256( (const __m256i *)(src + i) );
+        __m128i lo, hi;
+        if (!_mm256_testz_si256( v, hi_mask )) break;
+        lo = _mm256_castsi256_si128( v );
+        hi = _mm256_extracti128_si256( v, 1 );
+        _mm_storeu_si128( (__m128i *)(dst + i), _mm_packus_epi16( lo, hi ) );
+        i += 16;
+    }
+    return i;
+}
+
+static inline int sse2_utf16_ascii_scan( const WCHAR *src, int len )
+{
+    int i = 0;
+    __m128i hi_mask = _mm_set1_epi16( (short)0xff80 );
+    __m128i zero = _mm_setzero_si128();
+    while (i + 16 <= len)
+    {
+        __m128i v0 = _mm_loadu_si128( (const __m128i *)(src + i) );
+        __m128i v1 = _mm_loadu_si128( (const __m128i *)(src + i + 8) );
+        __m128i bad = _mm_and_si128( _mm_or_si128( v0, v1 ), hi_mask );
+        if (_mm_movemask_epi8( _mm_cmpeq_epi16( bad, zero ) ) != 0xffff) break;
+        i += 16;
+    }
+    return i;
+}
+
+static inline int sse2_utf16_ascii_narrow( const WCHAR *src, char *dst, int len )
+{
+    int i = 0;
+    __m128i hi_mask = _mm_set1_epi16( (short)0xff80 );
+    __m128i zero = _mm_setzero_si128();
+    while (i + 16 <= len)
+    {
+        __m128i v0 = _mm_loadu_si128( (const __m128i *)(src + i) );
+        __m128i v1 = _mm_loadu_si128( (const __m128i *)(src + i + 8) );
+        __m128i bad = _mm_and_si128( _mm_or_si128( v0, v1 ), hi_mask );
+        if (_mm_movemask_epi8( _mm_cmpeq_epi16( bad, zero ) ) != 0xffff) break;
+        _mm_storeu_si128( (__m128i *)(dst + i), _mm_packus_epi16( v0, v1 ) );
+        i += 16;
+    }
+    return i;
+}
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(nls);
 
 #define CALINFO_MAX_YEAR 2029
@@ -2530,6 +2701,44 @@ static int mbstowcs_utf8( DWORD flags, const char *src, int srclen, WCHAR *dst, 
 {
     DWORD reslen;
     NTSTATUS status;
+    int done = 0;
+
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (!dstlen)
+    {
+        done = locale_has_avx2() ? avx2_utf8_ascii_scan( src, srclen )
+                                 : sse2_utf8_ascii_scan( src, srclen );
+        src += done;
+        srclen -= done;
+        while (srclen > 0 && !((unsigned char)*src & 0x80))
+        {
+            src++;
+            srclen--;
+            done++;
+        }
+        if (!srclen) return done;
+    }
+    else
+    {
+        int avail = srclen < dstlen ? srclen : dstlen;
+        done = locale_has_avx2() ? avx2_utf8_ascii_widen( src, dst, avail )
+                                 : sse2_utf8_ascii_widen( src, dst, avail );
+        src += done;
+        dst += done;
+        srclen -= done;
+        dstlen -= done;
+        avail -= done;
+        while (avail > 0 && !((unsigned char)*src & 0x80))
+        {
+            *dst++ = (unsigned char)*src++;
+            srclen--;
+            dstlen--;
+            avail--;
+            done++;
+        }
+        if (!srclen) return done;
+    }
+#endif
 
     if (!dstlen) dst = NULL;
     status = RtlUTF8ToUnicodeN( dst, dstlen * sizeof(WCHAR), &reslen, src, srclen );
@@ -2541,9 +2750,9 @@ static int mbstowcs_utf8( DWORD flags, const char *src, int srclen, WCHAR *dst, 
             return 0;
         }
     }
-    else if (!set_ntstatus( status )) reslen = 0;
+    else if (!set_ntstatus( status )) return 0;
 
-    return reslen / sizeof(WCHAR);
+    return done + reslen / sizeof(WCHAR);
 }
 
 
@@ -2934,8 +3143,47 @@ static int wcstombs_utf8( DWORD flags, const WCHAR *src, int srclen, char *dst, 
 {
     DWORD reslen;
     NTSTATUS status;
+    int done = 0;
 
     if (used) *used = FALSE;
+
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (!dstlen)
+    {
+        done = locale_has_avx2() ? avx2_utf16_ascii_scan( src, srclen )
+                                 : sse2_utf16_ascii_scan( src, srclen );
+        src += done;
+        srclen -= done;
+        while (srclen > 0 && *src < 0x80)
+        {
+            src++;
+            srclen--;
+            done++;
+        }
+        if (!srclen) return done;
+    }
+    else
+    {
+        int avail = srclen < dstlen ? srclen : dstlen;
+        done = locale_has_avx2() ? avx2_utf16_ascii_narrow( src, dst, avail )
+                                 : sse2_utf16_ascii_narrow( src, dst, avail );
+        src += done;
+        dst += done;
+        srclen -= done;
+        dstlen -= done;
+        avail -= done;
+        while (avail > 0 && *src < 0x80)
+        {
+            *dst++ = (char)*src++;
+            srclen--;
+            dstlen--;
+            avail--;
+            done++;
+        }
+        if (!srclen) return done;
+    }
+#endif
+
     if (!dstlen) dst = NULL;
     status = RtlUnicodeToUTF8N( dst, dstlen, &reslen, src, srclen * sizeof(WCHAR) );
     if (status == STATUS_SOME_NOT_MAPPED)
@@ -2947,8 +3195,8 @@ static int wcstombs_utf8( DWORD flags, const WCHAR *src, int srclen, char *dst, 
         }
         if (used) *used = TRUE;
     }
-    else if (!set_ntstatus( status )) reslen = 0;
-    return reslen;
+    else if (!set_ntstatus( status )) return 0;
+    return done + reslen;
 }
 
 
@@ -7193,6 +7441,14 @@ INT WINAPI DECLSPEC_HOTPATCH MultiByteToWideChar( UINT codepage, DWORD flags, co
     case CP_UTF7:
         ret = mbstowcs_utf7( flags, src, srclen, dst, dstlen );
         break;
+    case CP_UTF8:
+        if (flags & ~(MB_PRECOMPOSED | MB_COMPOSITE | MB_USEGLYPHCHARS | MB_ERR_INVALID_CHARS))
+        {
+            SetLastError( ERROR_INVALID_FLAGS );
+            return 0;
+        }
+        ret = mbstowcs_utf8( flags, src, srclen, dst, dstlen );
+        break;
     case CP_UNIXCP:
         codepage = unix_cp;
         /* fall through */
@@ -7549,6 +7805,15 @@ INT WINAPI DECLSPEC_HOTPATCH WideCharToMultiByte( UINT codepage, DWORD flags, LP
         break;
     case CP_UTF7:
         ret = wcstombs_utf7( flags, src, srclen, dst, dstlen, defchar, used );
+        break;
+    case CP_UTF8:
+        if (flags & ~(WC_DISCARDNS | WC_SEPCHARS | WC_DEFAULTCHAR | WC_ERR_INVALID_CHARS |
+                      WC_COMPOSITECHECK | WC_NO_BEST_FIT_CHARS))
+        {
+            SetLastError( ERROR_INVALID_FLAGS );
+            return 0;
+        }
+        ret = wcstombs_utf8( flags, src, srclen, dst, dstlen, defchar, used );
         break;
     case CP_UNIXCP:
         codepage = unix_cp;

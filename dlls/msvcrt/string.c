@@ -34,6 +34,319 @@
 #include "wine/asm.h"
 #include "wine/debug.h"
 
+#if defined(__x86_64__) && !defined(__arm64ec__)
+#include <immintrin.h>
+
+static inline int msvcrt_str_has_avx2(void)
+{
+    static int cached = -1;
+    if (cached < 0)
+    {
+        unsigned int eax, ebx, ecx, edx;
+        __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(1), "c"(0));
+        if ((ecx & (1 << 27)) && (ecx & (1 << 28)))
+        {
+            unsigned int xcr0_low, xcr0_high;
+            __asm__ volatile ("xgetbv" : "=a"(xcr0_low), "=d"(xcr0_high) : "c"(0));
+            if ((xcr0_low & 6) == 6)
+            {
+                __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(0), "c"(0));
+                if (eax >= 7)
+                {
+                    __asm__ volatile ("cpuid" : "=a"(eax), "=b"(ebx), "=c"(ecx), "=d"(edx) : "a"(7), "c"(0));
+                    cached = (ebx & (1 << 5)) != 0;
+                    return cached;
+                }
+            }
+        }
+        cached = 0;
+    }
+    return cached;
+}
+
+__attribute__((target("avx2")))
+static size_t avx2_strlen(const char *str)
+{
+    const char *s = str;
+    __m256i zero = _mm256_setzero_si256();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xfe0)
+    {
+        __m256i v = _mm256_loadu_si256((const __m256i *)s);
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, zero));
+        if (mask) return (size_t)__builtin_ctz((unsigned int)mask);
+        s += 32;
+    }
+
+    while ((ULONG_PTR)s & 31)
+    {
+        if (!*s) return s - str;
+        s++;
+    }
+
+    for (;;)
+    {
+        __m256i v = _mm256_load_si256((const __m256i *)s);
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, zero));
+        if (mask) return (s - str) + (size_t)__builtin_ctz((unsigned int)mask);
+        s += 32;
+    }
+}
+
+static inline size_t sse2_strlen(const char *str)
+{
+    const char *s = str;
+    __m128i zero = _mm_setzero_si128();
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xff0)
+    {
+        __m128i v = _mm_loadu_si128((const __m128i *)s);
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(v, zero));
+        if (mask) return (size_t)__builtin_ctz((unsigned int)mask);
+        s += 16;
+    }
+
+    while ((ULONG_PTR)s & 15)
+    {
+        if (!*s) return s - str;
+        s++;
+    }
+
+    for (;;)
+    {
+        __m128i v = _mm_load_si128((const __m128i *)s);
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(v, zero));
+        if (mask) return (s - str) + (size_t)__builtin_ctz((unsigned int)mask);
+        s += 16;
+    }
+}
+
+__attribute__((target("avx2")))
+static size_t avx2_strnlen(const char *str, size_t maxlen)
+{
+    const char *s = str;
+    __m256i zero = _mm256_setzero_si256();
+
+    if (maxlen < 32)
+    {
+        while (maxlen && *s) { s++; maxlen--; }
+        return s - str;
+    }
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xfe0)
+    {
+        __m256i v = _mm256_loadu_si256((const __m256i *)s);
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, zero));
+        if (mask)
+        {
+            size_t idx = (size_t)__builtin_ctz((unsigned int)mask);
+            return idx < maxlen ? idx : maxlen;
+        }
+        s += 32;
+        maxlen -= 32;
+    }
+
+    while (((ULONG_PTR)s & 31) && maxlen)
+    {
+        if (!*s) return s - str;
+        s++;
+        maxlen--;
+    }
+
+    while (maxlen >= 32)
+    {
+        __m256i v = _mm256_load_si256((const __m256i *)s);
+        int mask = _mm256_movemask_epi8(_mm256_cmpeq_epi8(v, zero));
+        if (mask) return (s - str) + (size_t)__builtin_ctz((unsigned int)mask);
+        s += 32;
+        maxlen -= 32;
+    }
+
+    while (maxlen && *s) { s++; maxlen--; }
+    return s - str;
+}
+
+static inline size_t sse2_strnlen(const char *str, size_t maxlen)
+{
+    const char *s = str;
+    __m128i zero = _mm_setzero_si128();
+
+    if (maxlen < 16)
+    {
+        while (maxlen && *s) { s++; maxlen--; }
+        return s - str;
+    }
+
+    if (((ULONG_PTR)s & 0xfff) <= 0xff0)
+    {
+        __m128i v = _mm_loadu_si128((const __m128i *)s);
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(v, zero));
+        if (mask)
+        {
+            size_t idx = (size_t)__builtin_ctz((unsigned int)mask);
+            return idx < maxlen ? idx : maxlen;
+        }
+        s += 16;
+        maxlen -= 16;
+    }
+
+    while (((ULONG_PTR)s & 15) && maxlen)
+    {
+        if (!*s) return s - str;
+        s++;
+        maxlen--;
+    }
+
+    while (maxlen >= 16)
+    {
+        __m128i v = _mm_load_si128((const __m128i *)s);
+        int mask = _mm_movemask_epi8(_mm_cmpeq_epi8(v, zero));
+        if (mask) return (s - str) + (size_t)__builtin_ctz((unsigned int)mask);
+        s += 16;
+        maxlen -= 16;
+    }
+
+    while (maxlen && *s) { s++; maxlen--; }
+    return s - str;
+}
+
+__attribute__((target("avx2")))
+static int avx2_memcmp(const unsigned char *p1, const unsigned char *p2, size_t n)
+{
+    typedef uint64_t DECLSPEC_ALIGN(1) unaligned_ui64;
+
+    while (n >= 32)
+    {
+        __m256i v1 = _mm256_loadu_si256((const __m256i *)p1);
+        __m256i v2 = _mm256_loadu_si256((const __m256i *)p2);
+        unsigned int eq = (unsigned int)_mm256_movemask_epi8(_mm256_cmpeq_epi8(v1, v2));
+        if (eq != 0xffffffffU)
+        {
+            unsigned int idx = __builtin_ctz(~eq);
+            return p1[idx] > p2[idx] ? 1 : -1;
+        }
+        p1 += 32;
+        p2 += 32;
+        n -= 32;
+    }
+    if (n >= 16)
+    {
+        __m128i v1 = _mm_loadu_si128((const __m128i *)p1);
+        __m128i v2 = _mm_loadu_si128((const __m128i *)p2);
+        unsigned int eq = (unsigned int)_mm_movemask_epi8(_mm_cmpeq_epi8(v1, v2));
+        if (eq != 0xffffU)
+        {
+            unsigned int idx = __builtin_ctz(~eq & 0xffffU);
+            return p1[idx] > p2[idx] ? 1 : -1;
+        }
+        p1 += 16;
+        p2 += 16;
+        n -= 16;
+    }
+    while (n >= 8)
+    {
+        if (*(const unaligned_ui64 *)p1 != *(const unaligned_ui64 *)p2)
+        {
+            while (*p1 == *p2) { p1++; p2++; }
+            return *p1 > *p2 ? 1 : -1;
+        }
+        p1 += 8;
+        p2 += 8;
+        n -= 8;
+    }
+    while (n--)
+    {
+        if (*p1 != *p2) return *p1 > *p2 ? 1 : -1;
+        p1++;
+        p2++;
+    }
+    return 0;
+}
+
+static inline int sse2_memcmp(const unsigned char *p1, const unsigned char *p2, size_t n)
+{
+    typedef uint64_t DECLSPEC_ALIGN(1) unaligned_ui64;
+
+    while (n >= 16)
+    {
+        __m128i v1 = _mm_loadu_si128((const __m128i *)p1);
+        __m128i v2 = _mm_loadu_si128((const __m128i *)p2);
+        unsigned int eq = (unsigned int)_mm_movemask_epi8(_mm_cmpeq_epi8(v1, v2));
+        if (eq != 0xffffU)
+        {
+            unsigned int idx = __builtin_ctz(~eq & 0xffffU);
+            return p1[idx] > p2[idx] ? 1 : -1;
+        }
+        p1 += 16;
+        p2 += 16;
+        n -= 16;
+    }
+    while (n >= 8)
+    {
+        if (*(const unaligned_ui64 *)p1 != *(const unaligned_ui64 *)p2)
+        {
+            while (*p1 == *p2) { p1++; p2++; }
+            return *p1 > *p2 ? 1 : -1;
+        }
+        p1 += 8;
+        p2 += 8;
+        n -= 8;
+    }
+    while (n--)
+    {
+        if (*p1 != *p2) return *p1 > *p2 ? 1 : -1;
+        p1++;
+        p2++;
+    }
+    return 0;
+}
+
+__attribute__((target("avx2")))
+static void *avx2_memset(void *dst, int c, size_t n)
+{
+    unsigned char *d = dst;
+    unsigned char *end = d + n;
+    __m256i v = _mm256_set1_epi8((char)c);
+
+    _mm256_storeu_si256((__m256i *)d, v);
+    _mm256_storeu_si256((__m256i *)(end - 32), v);
+    if (n <= 64) return dst;
+
+    d = (unsigned char *)(((uintptr_t)d + 32) & ~(uintptr_t)31);
+    while (d + 64 <= end)
+    {
+        _mm256_store_si256((__m256i *)d, v);
+        _mm256_store_si256((__m256i *)(d + 32), v);
+        d += 64;
+    }
+    if (d + 32 <= end)
+        _mm256_store_si256((__m256i *)d, v);
+    return dst;
+}
+
+static inline void *sse2_memset(void *dst, int c, size_t n)
+{
+    unsigned char *d = dst;
+    unsigned char *end = d + n;
+    __m128i v = _mm_set1_epi8((char)c);
+
+    _mm_storeu_si128((__m128i *)d, v);
+    _mm_storeu_si128((__m128i *)(end - 16), v);
+    if (n <= 32) return dst;
+
+    d = (unsigned char *)(((uintptr_t)d + 16) & ~(uintptr_t)15);
+    while (d + 32 <= end)
+    {
+        _mm_store_si128((__m128i *)d, v);
+        _mm_store_si128((__m128i *)(d + 16), v);
+        d += 32;
+    }
+    if (d + 16 <= end)
+        _mm_store_si128((__m128i *)d, v);
+    return dst;
+}
+#endif
+
 WINE_DEFAULT_DEBUG_CHANNEL(msvcrt);
 
 struct MSVCRT__LDOUBLE
@@ -1564,9 +1877,15 @@ int CDECL _atoldbl(_LDOUBLE *value, char *str)
  */
 size_t __cdecl strlen(const char *str)
 {
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (msvcrt_str_has_avx2())
+        return avx2_strlen(str);
+    return sse2_strlen(str);
+#else
     const char *s = str;
     while (*s) s++;
     return s - str;
+#endif
 }
 
 /******************************************************************
@@ -1574,12 +1893,18 @@ size_t __cdecl strlen(const char *str)
  */
 size_t CDECL strnlen(const char *s, size_t maxlen)
 {
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (msvcrt_str_has_avx2())
+        return avx2_strnlen(s, maxlen);
+    return sse2_strnlen(s, maxlen);
+#else
     size_t i;
 
     for(i=0; i<maxlen; i++)
         if(!s[i]) break;
 
     return i;
+#endif
 }
 
 /*********************************************************************
@@ -2771,6 +3096,17 @@ int __cdecl memcmp(const void *ptr1, const void *ptr2, size_t n)
     size_t align;
     int result;
 
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (n >= 32)
+    {
+        if (msvcrt_str_has_avx2())
+            return avx2_memcmp(p1, p2, n);
+        return sse2_memcmp(p1, p2, n);
+    }
+    if (n >= 16)
+        return sse2_memcmp(p1, p2, n);
+#endif
+
     if (n < sizeof(uint64_t))
         return memcmp_bytes(p1, p2, n);
 
@@ -3050,9 +3386,67 @@ __ASM_GLOBAL_FUNC( sse2_memmove,
 #else
 # define MERGE(w1, sh1, w2, sh2) ((w1 >> sh1) | (w2 << sh2))
 #endif
+#if defined(__x86_64__) && !defined(__arm64ec__)
+__attribute__((target("avx2")))
+static void *avx2_memmove_fwd(void *dst, const void *src, size_t n)
+{
+    unsigned char *d = dst;
+    const unsigned char *s = src;
+
+    if (n <= 128)
+    {
+        __m256i v0 = _mm256_loadu_si256((const __m256i *)s);
+        __m256i v1 = _mm256_loadu_si256((const __m256i *)(s + 32));
+        __m256i v2 = _mm256_loadu_si256((const __m256i *)(s + n - 64));
+        __m256i v3 = _mm256_loadu_si256((const __m256i *)(s + n - 32));
+        _mm256_storeu_si256((__m256i *)d, v0);
+        _mm256_storeu_si256((__m256i *)(d + 32), v1);
+        _mm256_storeu_si256((__m256i *)(d + n - 64), v2);
+        _mm256_storeu_si256((__m256i *)(d + n - 32), v3);
+        return dst;
+    }
+    else
+    {
+        __m256i tail0 = _mm256_loadu_si256((const __m256i *)(s + n - 64));
+        __m256i tail1 = _mm256_loadu_si256((const __m256i *)(s + n - 32));
+        size_t align = 32 - ((uintptr_t)d & 31);
+        _mm256_storeu_si256((__m256i *)d, _mm256_loadu_si256((const __m256i *)s));
+        d += align;
+        s += align;
+        n -= align;
+        while (n >= 128)
+        {
+            __m256i v0 = _mm256_loadu_si256((const __m256i *)s);
+            __m256i v1 = _mm256_loadu_si256((const __m256i *)(s + 32));
+            __m256i v2 = _mm256_loadu_si256((const __m256i *)(s + 64));
+            __m256i v3 = _mm256_loadu_si256((const __m256i *)(s + 96));
+            _mm256_store_si256((__m256i *)d, v0);
+            _mm256_store_si256((__m256i *)(d + 32), v1);
+            _mm256_store_si256((__m256i *)(d + 64), v2);
+            _mm256_store_si256((__m256i *)(d + 96), v3);
+            s += 128;
+            d += 128;
+            n -= 128;
+        }
+        while (n >= 32)
+        {
+            _mm256_store_si256((__m256i *)d, _mm256_loadu_si256((const __m256i *)s));
+            s += 32;
+            d += 32;
+            n -= 32;
+        }
+        _mm256_storeu_si256((__m256i *)(d + n - 64), tail0);
+        _mm256_storeu_si256((__m256i *)(d + n - 32), tail1);
+        return dst;
+    }
+}
+#endif
+
 void * __cdecl memmove(void *dst, const void *src, size_t n)
 {
 #if defined(__x86_64__) && !defined(__arm64ec__)
+    if (n >= 64 && (uintptr_t)dst - (uintptr_t)src >= n && msvcrt_str_has_avx2())
+        return avx2_memmove_fwd(dst, src, n);
     return sse2_memmove(dst, src, n);
 #else
     unsigned char *d = dst;
@@ -3197,9 +3591,22 @@ void *__cdecl memset(void *dst, int c, size_t n)
     typedef uint32_t DECLSPEC_ALIGN(1) unaligned_ui32;
     typedef uint16_t DECLSPEC_ALIGN(1) unaligned_ui16;
 
-    uint64_t v = 0x101010101010101ull * (unsigned char)c;
-    unsigned char *d = (unsigned char *)dst;
-    size_t a = 0x20 - ((uintptr_t)d & 0x1f);
+    uint64_t v;
+    unsigned char *d;
+    size_t a;
+
+#if defined(__x86_64__) && !defined(__arm64ec__)
+    if (n >= 32)
+    {
+        if (msvcrt_str_has_avx2())
+            return avx2_memset(dst, c, n);
+        return sse2_memset(dst, c, n);
+    }
+#endif
+
+    v = 0x101010101010101ull * (unsigned char)c;
+    d = (unsigned char *)dst;
+    a = 0x20 - ((uintptr_t)d & 0x1f);
 
     if (n >= 16)
     {
