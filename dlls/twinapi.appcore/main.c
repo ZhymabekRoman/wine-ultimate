@@ -2224,6 +2224,81 @@ static const GUID IID_IResourceLoaderStatics2 = {0x0cc04141, 0x6466, 0x4989, {0x
 static const GUID IID_IResourceLoaderStatics2_old = {0x0cc6354d, 0x2a52, 0x4d2c, {0xae, 0x8c, 0xe5, 0x4b, 0x67, 0x95, 0xf7, 0x0b}};
 static const GUID IID_IResourceLoaderStatics3 = {0x64609dfb, 0x64ac, 0x491b, {0x81, 0x00, 0x0e, 0x55, 0x8d, 0x61, 0xc1, 0xd0}};
 
+static HRESULT WINAPI resource_loader_GetIids( void *iface, ULONG *count, IID **iids );
+
+/* Windows.Globalization.Language, the value type ResourceLoader.Culture
+ * returns.  ILanguage ({9b708f8b-ff1c-4b74-a3f5-4c0b34813eed}) getters follow
+ * the SDK declaration order: LanguageTag (get/put), Current, LayoutDirection.
+ * The culture never changes here, so one agile singleton answers every
+ * ResourceLoader in the process. */
+static const GUID IID_ILanguage = {0x9b708f8b, 0xff1c, 0x4b74, {0xa3, 0xf5, 0x4c, 0x0b, 0x34, 0x81, 0x3e, 0xed}};
+
+static const void *language_vtbl[];
+
+static struct
+{
+    const void *vtbl;
+    LONG ref;
+} language_obj = { language_vtbl, 1 };
+
+static HRESULT WINAPI language_QueryInterface( void *iface, REFIID iid, void **out )
+{
+    if (!out) return E_POINTER;
+    if (IsEqualGUID( iid, &IID_IUnknown ) || IsEqualGUID( iid, &IID_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IAgileObject ) || IsEqualGUID( iid, &IID_ILanguage ))
+    {
+        *out = &language_obj.vtbl;
+        InterlockedIncrement( &language_obj.ref );
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static HRESULT WINAPI language_GetRuntimeClassName( void *iface, HSTRING *name )
+{
+    if (!name) return E_POINTER;
+    return WindowsCreateString( L"Windows.Globalization.Language", 31, name );
+}
+
+static HRESULT WINAPI language_get_LanguageTag( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( L"en-US", 5, value );
+}
+
+static HRESULT WINAPI language_put_LanguageTag( void *iface, HSTRING value )
+{
+    return S_OK;
+}
+
+static HRESULT WINAPI language_get_Current( void *iface, void *languages, HSTRING *value )
+{
+    return language_get_LanguageTag( iface, value );
+}
+
+static HRESULT WINAPI language_get_LayoutDirection( void *iface, INT32 *value )
+{
+    /* LanguageLayoutDirection_LeftToRight */
+    if (!value) return E_POINTER;
+    *value = 0;
+    return S_OK;
+}
+
+static const void *language_vtbl[] =
+{
+    language_QueryInterface,
+    dummy_async_AddRef,
+    dummy_async_Release,
+    resource_loader_GetIids,
+    language_GetRuntimeClassName,
+    dummy_async_GetTrustLevel,
+    language_get_LanguageTag,
+    language_put_LanguageTag,
+    language_get_Current,
+    language_get_LayoutDirection,
+};
+
 struct resource_loader_impl
 {
     const void *vtbl_loader;
@@ -2348,6 +2423,31 @@ static HRESULT WINAPI resource_loader_GetStringForUri( void *iface, void *uri, H
     return WindowsCreateString( L"", 0, value );
 }
 
+/* ResourceLoader.Culture: the culture never varies per loader here, so the
+ * shared Language above answers for every one of them. */
+static HRESULT WINAPI resource_loader_get_Culture( void *iface, void **value )
+{
+    if (!value) return E_POINTER;
+    *value = &language_obj.vtbl;
+    InterlockedIncrement( &language_obj.ref );
+    return S_OK;
+}
+
+static HRESULT WINAPI resource_loader_put_Culture( void *iface, void *value )
+{
+    return S_OK;
+}
+
+/* ResourceLoader.PriName: the resource scope named by the factory entry point
+ * that created this loader (GetForCurrentViewWithName, the ResourceLoader
+ * constructor, ...), empty when the loader is the package's default one. */
+static HRESULT WINAPI resource_loader_get_PriName( void *iface, HSTRING *value )
+{
+    if (!value) return E_POINTER;
+    return WindowsCreateString( resource_loader_scope, (UINT32)lstrlenW( resource_loader_scope ), value );
+}
+
+/* IResourceLoader: GetString, GetStringForUri, get_Culture. */
 static const void *resource_loader_vtbl[] =
 {
     resource_loader_QueryInterface,
@@ -2357,8 +2457,12 @@ static const void *resource_loader_vtbl[] =
     resource_loader_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
     resource_loader_GetString,
+    resource_loader_GetStringForUri,
+    resource_loader_get_Culture,
 };
 
+/* IResourceLoader2 derives from IInspectable, not IResourceLoader: get_Culture,
+ * put_Culture, get_PriName. */
 static const void *resource_loader2_vtbl[] =
 {
     resource_loader2_QueryInterface,
@@ -2367,7 +2471,9 @@ static const void *resource_loader2_vtbl[] =
     resource_loader_GetIids,
     resource_loader_GetRuntimeClassName,
     dummy_async_GetTrustLevel,
-    resource_loader_GetStringForUri,
+    resource_loader_get_Culture,
+    resource_loader_put_Culture,
+    resource_loader_get_PriName,
 };
 
 struct resource_loader_factory_impl
