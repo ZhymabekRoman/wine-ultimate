@@ -20,6 +20,8 @@
 
 #include "initguid.h"
 #include "private.h"
+#include "ntstatus.h"
+#include "weakreference.h"
 #include "winternl.h"
 
 WINE_DEFAULT_DEBUG_CHANNEL(wintypes);
@@ -485,13 +487,61 @@ static const struct IActivationFactoryVtbl property_value_statics_factory_vtbl =
     property_value_statics_factory_ActivateInstance,
 };
 
+struct iref_uint16_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *iface, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(void *iface);
+    ULONG (STDMETHODCALLTYPE *Release)(void *iface);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(void *iface, ULONG *iid_count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(void *iface, HSTRING *class_name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(void *iface, TrustLevel *trust_level);
+    HRESULT (STDMETHODCALLTYPE *get_Value)(void *iface, UINT16 *value);
+};
+
+struct iref_char16_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *iface, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(void *iface);
+    ULONG (STDMETHODCALLTYPE *Release)(void *iface);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(void *iface, ULONG *iid_count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(void *iface, HSTRING *class_name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(void *iface, TrustLevel *trust_level);
+    HRESULT (STDMETHODCALLTYPE *get_Value)(void *iface, WCHAR *value);
+};
+
+struct iref_array_vtbl
+{
+    HRESULT (STDMETHODCALLTYPE *QueryInterface)(void *iface, REFIID iid, void **out);
+    ULONG (STDMETHODCALLTYPE *AddRef)(void *iface);
+    ULONG (STDMETHODCALLTYPE *Release)(void *iface);
+    HRESULT (STDMETHODCALLTYPE *GetIids)(void *iface, ULONG *iid_count, IID **iids);
+    HRESULT (STDMETHODCALLTYPE *GetRuntimeClassName)(void *iface, HSTRING *class_name);
+    HRESULT (STDMETHODCALLTYPE *GetTrustLevel)(void *iface, TrustLevel *trust_level);
+    HRESULT (STDMETHODCALLTYPE *get_Value)(void *iface, UINT32 *value_size, void **value);
+};
+
+struct iref_uint16_iface { const struct iref_uint16_vtbl *lpVtbl; };
+struct iref_char16_iface { const struct iref_char16_vtbl *lpVtbl; };
+struct iref_array_iface { const struct iref_array_vtbl *lpVtbl; };
+
+struct property_value;
+
+struct property_value_weakref
+{
+    IWeakReference IWeakReference_iface;
+    LONG ref;
+    struct property_value *obj;
+};
+
 struct property_value
 {
     IPropertyValue IPropertyValue_iface;
+    IWeakReferenceSource IWeakReferenceSource_iface;
     union
     {
         IReference_BYTE byte_iface;
         IReference_INT16 int16_iface;
+        struct iref_uint16_iface uint16_iface;
         IReference_INT32 int32_iface;
         IReference_UINT32 uint32_iface;
         IReference_INT64 int64_iface;
@@ -499,6 +549,7 @@ struct property_value
         IReference_boolean boolean_iface;
         IReference_FLOAT float_iface;
         IReference_DOUBLE double_iface;
+        struct iref_char16_iface char16_iface;
         IReference_DateTime datetime_iface;
         IReference_TimeSpan timespan_iface;
         IReference_GUID guid_iface;
@@ -506,10 +557,12 @@ struct property_value
         IReference_Size size_iface;
         IReference_Rect rect_iface;
         IReference_HSTRING hstring_iface;
+        struct iref_array_iface array_iface;
     } irefs;
     PropertyType type;
     unsigned int value_size;
     void *value;
+    struct property_value_weakref *weakref;
     LONG ref;
 };
 
@@ -560,6 +613,206 @@ static HRESULT _property_value_get_primitive_array(IPropertyValue *iface, Proper
  */
 static const struct IReference_FLOATVtbl iref_float_vtbl;
 static const struct IReference_DOUBLEVtbl iref_double_vtbl;
+static const struct iref_uint16_vtbl iref_uint16_vtbl;
+static const struct iref_char16_vtbl iref_char16_vtbl;
+static const struct iref_array_vtbl iref_array_vtbl;
+
+static CRITICAL_SECTION pv_weakref_cs;
+static RTL_RUN_ONCE pv_weakref_cs_once = RTL_RUN_ONCE_INIT;
+
+static DWORD WINAPI pv_weakref_cs_init(PRTL_RUN_ONCE once, PVOID param, PVOID *context)
+{
+    RtlInitializeCriticalSection(&pv_weakref_cs);
+    return STATUS_SUCCESS;
+}
+
+static void pv_weakref_lock(void)
+{
+    RtlRunOnceExecuteOnce(&pv_weakref_cs_once, pv_weakref_cs_init, NULL, NULL);
+    EnterCriticalSection(&pv_weakref_cs);
+}
+
+static void pv_weakref_unlock(void)
+{
+    LeaveCriticalSection(&pv_weakref_cs);
+}
+
+static inline struct property_value_weakref *impl_from_IWeakReference(IWeakReference *iface)
+{
+    return CONTAINING_RECORD(iface, struct property_value_weakref, IWeakReference_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE pv_weakref_QueryInterface(IWeakReference *iface, REFIID iid, void **out)
+{
+    if (!out) return E_POINTER;
+    if (IsEqualIID(iid, &IID_IUnknown) || IsEqualIID(iid, &IID_IWeakReference))
+    {
+        IWeakReference_AddRef(iface);
+        *out = iface;
+        return S_OK;
+    }
+    *out = NULL;
+    return E_NOINTERFACE;
+}
+
+static ULONG STDMETHODCALLTYPE pv_weakref_AddRef(IWeakReference *iface)
+{
+    struct property_value_weakref *impl = impl_from_IWeakReference(iface);
+    return InterlockedIncrement(&impl->ref);
+}
+
+static ULONG STDMETHODCALLTYPE pv_weakref_Release(IWeakReference *iface)
+{
+    struct property_value_weakref *impl = impl_from_IWeakReference(iface);
+    ULONG ref = InterlockedDecrement(&impl->ref);
+    if (!ref)
+    {
+        pv_weakref_lock();
+        if (impl->obj) impl->obj->weakref = NULL;
+        pv_weakref_unlock();
+        free(impl);
+    }
+    return ref;
+}
+
+static HRESULT STDMETHODCALLTYPE pv_weakref_Resolve(IWeakReference *iface, REFIID riid, IInspectable **out)
+{
+    struct property_value_weakref *impl = impl_from_IWeakReference(iface);
+    struct property_value *obj = NULL;
+    HRESULT hr = S_OK;
+
+    if (!out) return E_POINTER;
+    *out = NULL;
+
+    pv_weakref_lock();
+    if (impl->obj)
+    {
+        LONG cur = impl->obj->ref;
+        while (cur > 0)
+        {
+            LONG prev = InterlockedCompareExchange(&impl->obj->ref, cur + 1, cur);
+            if (prev == cur)
+            {
+                obj = impl->obj;
+                break;
+            }
+            cur = prev;
+        }
+    }
+    pv_weakref_unlock();
+
+    if (obj)
+    {
+        hr = IPropertyValue_QueryInterface(&obj->IPropertyValue_iface, riid, (void **)out);
+        IPropertyValue_Release(&obj->IPropertyValue_iface);
+    }
+    return hr;
+}
+
+static const struct IWeakReferenceVtbl pv_weakref_vtbl =
+{
+    pv_weakref_QueryInterface,
+    pv_weakref_AddRef,
+    pv_weakref_Release,
+    pv_weakref_Resolve,
+};
+
+static inline struct property_value *impl_from_IWeakReferenceSource(IWeakReferenceSource *iface)
+{
+    return CONTAINING_RECORD(iface, struct property_value, IWeakReferenceSource_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE pv_weakref_source_QueryInterface(IWeakReferenceSource *iface, REFIID iid, void **out)
+{
+    struct property_value *impl = impl_from_IWeakReferenceSource(iface);
+    return IPropertyValue_QueryInterface(&impl->IPropertyValue_iface, iid, out);
+}
+
+static ULONG STDMETHODCALLTYPE pv_weakref_source_AddRef(IWeakReferenceSource *iface)
+{
+    struct property_value *impl = impl_from_IWeakReferenceSource(iface);
+    return IPropertyValue_AddRef(&impl->IPropertyValue_iface);
+}
+
+static ULONG STDMETHODCALLTYPE pv_weakref_source_Release(IWeakReferenceSource *iface)
+{
+    struct property_value *impl = impl_from_IWeakReferenceSource(iface);
+    return IPropertyValue_Release(&impl->IPropertyValue_iface);
+}
+
+static HRESULT STDMETHODCALLTYPE pv_weakref_source_GetWeakReference(IWeakReferenceSource *iface, IWeakReference **weak_ref)
+{
+    struct property_value *impl = impl_from_IWeakReferenceSource(iface);
+    struct property_value_weakref *wr;
+
+    if (!weak_ref) return E_POINTER;
+
+    pv_weakref_lock();
+    if (!impl->weakref)
+    {
+        wr = calloc(1, sizeof(*wr));
+        if (!wr)
+        {
+            pv_weakref_unlock();
+            *weak_ref = NULL;
+            return E_OUTOFMEMORY;
+        }
+        wr->IWeakReference_iface.lpVtbl = &pv_weakref_vtbl;
+        wr->ref = 1;
+        wr->obj = impl;
+        impl->weakref = wr;
+    }
+    else
+    {
+        wr = impl->weakref;
+        InterlockedIncrement(&wr->ref);
+    }
+    pv_weakref_unlock();
+
+    *weak_ref = &wr->IWeakReference_iface;
+    return S_OK;
+}
+
+static const struct IWeakReferenceSourceVtbl pv_weakref_source_vtbl =
+{
+    pv_weakref_source_QueryInterface,
+    pv_weakref_source_AddRef,
+    pv_weakref_source_Release,
+    pv_weakref_source_GetWeakReference,
+};
+
+/* UUID5 pinterface IIDs for IReference<UInt16/Char16> and IReferenceArray<T> */
+static const GUID IID_IReference_UINT16 =
+    { 0x5ab7d2c3, 0x6b62, 0x5e71, { 0xa4, 0xb6, 0x2d, 0x49, 0xc4, 0xf2, 0x38, 0xfd } };
+static const GUID IID_IReference_Char16 =
+    { 0xfb393ef3, 0xbbac, 0x5bd5, { 0x91, 0x44, 0x84, 0xf2, 0x35, 0x76, 0xf4, 0x15 } };
+
+static const struct
+{
+    PropertyType type;
+    const GUID iid;
+} iref_array_iids[] =
+{
+    { PropertyType_UInt8Array,       { 0x2af22683, 0x3734, 0x56d0, { 0xa6, 0x0e, 0x68, 0x8c, 0xc8, 0x5d, 0x16, 0x19 } } },
+    { PropertyType_Int16Array,       { 0x912f8fd7, 0xadc0, 0x5d60, { 0xa8, 0x96, 0x7e, 0xd7, 0x60, 0x89, 0xcc, 0x5b } } },
+    { PropertyType_UInt16Array,      { 0x6624a2dd, 0x83f7, 0x519c, { 0x9d, 0x55, 0xbb, 0x1f, 0x65, 0x60, 0x45, 0x6b } } },
+    { PropertyType_Int32Array,       { 0xa6d080a5, 0xb087, 0x5bc2, { 0x9a, 0x9f, 0x5c, 0xd6, 0x87, 0xb4, 0xd1, 0xf7 } } },
+    { PropertyType_UInt32Array,      { 0x97374b68, 0xeb87, 0x56cc, { 0xb1, 0x8e, 0x27, 0xef, 0x0f, 0x9c, 0xfc, 0x0c } } },
+    { PropertyType_Int64Array,       { 0x6e333271, 0x2e2a, 0x5955, { 0x87, 0x90, 0x83, 0x6c, 0x76, 0xee, 0x53, 0xb6 } } },
+    { PropertyType_UInt64Array,      { 0x38b60434, 0xd67c, 0x523e, { 0x9d, 0x0e, 0x24, 0xd6, 0x43, 0x41, 0x10, 0x73 } } },
+    { PropertyType_SingleArray,      { 0x6ab1ea83, 0xcb41, 0x5f99, { 0x92, 0xcc, 0x23, 0xbd, 0x43, 0x36, 0xa1, 0xfb } } },
+    { PropertyType_DoubleArray,      { 0xd301f253, 0xe0a3, 0x5d2b, { 0x9a, 0x41, 0xa4, 0xd6, 0x2b, 0xec, 0x46, 0x23 } } },
+    { PropertyType_Char16Array,      { 0xa4095aab, 0xeb7d, 0x5782, { 0x8f, 0xad, 0x16, 0x09, 0xde, 0xa2, 0x49, 0xad } } },
+    { PropertyType_BooleanArray,     { 0xe8e72666, 0x48cc, 0x593f, { 0xba, 0x85, 0x26, 0x63, 0x49, 0x69, 0x56, 0xe3 } } },
+    { PropertyType_StringArray,      { 0x0385688e, 0xe3c7, 0x5c5e, { 0xa3, 0x89, 0x55, 0x24, 0xed, 0xe3, 0x49, 0xf1 } } },
+    { PropertyType_InspectableArray, { 0x9cd7a84f, 0x0c80, 0x59c5, { 0xb4, 0x4e, 0x97, 0x78, 0x41, 0xbb, 0x43, 0xd9 } } },
+    { PropertyType_GuidArray,        { 0xeecf9838, 0xc1c2, 0x5b4a, { 0x97, 0x6f, 0xce, 0xc2, 0x61, 0xae, 0x1d, 0x55 } } },
+    { PropertyType_DateTimeArray,    { 0x1b8e9594, 0x588e, 0x5a07, { 0x9e, 0x65, 0x07, 0x31, 0xa4, 0xc9, 0xa2, 0xdb } } },
+    { PropertyType_TimeSpanArray,    { 0xad73197d, 0x2cfa, 0x57a6, { 0x89, 0x93, 0x9f, 0xac, 0x40, 0xfe, 0xb7, 0x91 } } },
+    { PropertyType_PointArray,       { 0x39313214, 0x5c7d, 0x599d, { 0xae, 0x5a, 0x17, 0xd9, 0xd6, 0x49, 0x22, 0x58 } } },
+    { PropertyType_SizeArray,        { 0x3b40e9d4, 0xe0c3, 0x56f6, { 0xb8, 0x8b, 0xe5, 0x05, 0xeb, 0x73, 0x75, 0x7b } } },
+    { PropertyType_RectArray,        { 0x8a444256, 0xd661, 0x5e9a, { 0xa7, 0x2b, 0xd8, 0xf1, 0xd7, 0x96, 0x2d, 0x0c } } },
+};
 
 /*
  * CoreCLR's ComWrappers probes for XAML reference tracking interfaces on COM/WinRT
@@ -593,6 +846,12 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
     else if (IsEqualIID(riid, &IID_IMarshal))
     {
         return CoCreateFreeThreadedMarshaler((IUnknown *)iface, (IUnknown **)out);
+    }
+    else if (IsEqualIID(riid, &IID_IWeakReferenceSource))
+    {
+        IPropertyValue_AddRef(iface);
+        *out = &impl->IWeakReferenceSource_iface;
+        return S_OK;
     }
     else if (IsEqualIID(riid, &IID_IReference_BYTE) && impl->type == PropertyType_UInt8)
     {
@@ -692,6 +951,31 @@ static HRESULT STDMETHODCALLTYPE property_value_QueryInterface(IPropertyValue *i
         *out = &impl->irefs.hstring_iface;
         return S_OK;
     }
+    else if (IsEqualIID(riid, &IID_IReference_UINT16) && impl->type == PropertyType_UInt16)
+    {
+        IPropertyValue_AddRef(iface);
+        *out = &impl->irefs.uint16_iface;
+        return S_OK;
+    }
+    else if (IsEqualIID(riid, &IID_IReference_Char16) && impl->type == PropertyType_Char16)
+    {
+        IPropertyValue_AddRef(iface);
+        *out = &impl->irefs.char16_iface;
+        return S_OK;
+    }
+    else if (impl->type >= PropertyType_UInt8Array && impl->type <= PropertyType_RectArray)
+    {
+        unsigned int i;
+        for (i = 0; i < ARRAY_SIZE(iref_array_iids); i++)
+        {
+            if (iref_array_iids[i].type == impl->type && IsEqualIID(riid, &iref_array_iids[i].iid))
+            {
+                IPropertyValue_AddRef(iface);
+                *out = &impl->irefs.array_iface;
+                return S_OK;
+            }
+        }
+    }
 
     FIXME("%s not implemented, returning E_NOINTERFACE.\n", debugstr_guid(riid));
     *out = NULL;
@@ -717,6 +1001,14 @@ static ULONG STDMETHODCALLTYPE property_value_Release(IPropertyValue *iface)
 
     if (!refcount)
     {
+        pv_weakref_lock();
+        if (impl->weakref)
+        {
+            impl->weakref->obj = NULL;
+            impl->weakref = NULL;
+        }
+        pv_weakref_unlock();
+
         if (impl->value)
         {
             if (impl->type == PropertyType_String)
@@ -730,6 +1022,14 @@ static ULONG STDMETHODCALLTYPE property_value_Release(IPropertyValue *iface)
 
                 for (i = 0; i < impl->value_size; i++)
                     WindowsDeleteString(string_array[i]);
+            }
+            else if (impl->type == PropertyType_InspectableArray)
+            {
+                IInspectable **insp_array = impl->value;
+                unsigned int i;
+
+                for (i = 0; i < impl->value_size; i++)
+                    if (insp_array[i]) IInspectable_Release(insp_array[i]);
             }
             free(impl->value);
         }
@@ -786,6 +1086,9 @@ static HRESULT STDMETHODCALLTYPE property_value_GetRuntimeClassName(IPropertyVal
     case PropertyType_Int16:
         name = L"Windows.Foundation.IReference`1<Int16>";
         break;
+    case PropertyType_UInt16:
+        name = L"Windows.Foundation.IReference`1<UInt16>";
+        break;
     case PropertyType_UInt8:
         name = L"Windows.Foundation.IReference`1<UInt8>";
         break;
@@ -812,6 +1115,63 @@ static HRESULT STDMETHODCALLTYPE property_value_GetRuntimeClassName(IPropertyVal
         break;
     case PropertyType_Rect:
         name = L"Windows.Foundation.IReference`1<Windows.Foundation.Rect>";
+        break;
+    case PropertyType_UInt8Array:
+        name = L"Windows.Foundation.IReferenceArray`1<UInt8>";
+        break;
+    case PropertyType_Int16Array:
+        name = L"Windows.Foundation.IReferenceArray`1<Int16>";
+        break;
+    case PropertyType_UInt16Array:
+        name = L"Windows.Foundation.IReferenceArray`1<UInt16>";
+        break;
+    case PropertyType_Int32Array:
+        name = L"Windows.Foundation.IReferenceArray`1<Int32>";
+        break;
+    case PropertyType_UInt32Array:
+        name = L"Windows.Foundation.IReferenceArray`1<UInt32>";
+        break;
+    case PropertyType_Int64Array:
+        name = L"Windows.Foundation.IReferenceArray`1<Int64>";
+        break;
+    case PropertyType_UInt64Array:
+        name = L"Windows.Foundation.IReferenceArray`1<UInt64>";
+        break;
+    case PropertyType_SingleArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Single>";
+        break;
+    case PropertyType_DoubleArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Double>";
+        break;
+    case PropertyType_Char16Array:
+        name = L"Windows.Foundation.IReferenceArray`1<Char16>";
+        break;
+    case PropertyType_BooleanArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Boolean>";
+        break;
+    case PropertyType_StringArray:
+        name = L"Windows.Foundation.IReferenceArray`1<String>";
+        break;
+    case PropertyType_InspectableArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Object>";
+        break;
+    case PropertyType_GuidArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Guid>";
+        break;
+    case PropertyType_DateTimeArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Windows.Foundation.DateTime>";
+        break;
+    case PropertyType_TimeSpanArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Windows.Foundation.TimeSpan>";
+        break;
+    case PropertyType_PointArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Windows.Foundation.Point>";
+        break;
+    case PropertyType_SizeArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Windows.Foundation.Size>";
+        break;
+    case PropertyType_RectArray:
+        name = L"Windows.Foundation.IReferenceArray`1<Windows.Foundation.Rect>";
         break;
     default:
         name = RuntimeClass_Windows_Foundation_PropertyValue;
@@ -1091,8 +1451,32 @@ static HRESULT STDMETHODCALLTYPE property_value_GetStringArray(IPropertyValue *i
 
 static HRESULT STDMETHODCALLTYPE property_value_GetInspectableArray(IPropertyValue *iface, UINT32 *value_size, IInspectable ***value)
 {
-    FIXME("iface %p, value_size %p, value %p stub!\n", iface, value_size, value);
-    return E_NOTIMPL;
+    struct property_value *impl = impl_from_IPropertyValue(iface);
+    IInspectable **src, **dst;
+    unsigned int i;
+
+    TRACE("iface %p, value_size %p, value %p.\n", iface, value_size, value);
+
+    if (!value_size || !value)
+        return E_POINTER;
+
+    if (impl->type != PropertyType_InspectableArray)
+        return TYPE_E_TYPEMISMATCH;
+
+    dst = CoTaskMemAlloc((impl->value_size ? impl->value_size : 1) * sizeof(IInspectable *));
+    if (!dst)
+        return E_OUTOFMEMORY;
+
+    src = impl->value;
+    for (i = 0; i < impl->value_size; i++)
+    {
+        dst[i] = src[i];
+        if (dst[i]) IInspectable_AddRef(dst[i]);
+    }
+
+    *value_size = impl->value_size;
+    *value = dst;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_GetGuidArray(IPropertyValue *iface, UINT32 *value_size, GUID **value)
@@ -1197,17 +1581,20 @@ static HRESULT _create_primitive_property_value(PropertyType type, void *value,
         return E_OUTOFMEMORY;
 
     impl->IPropertyValue_iface.lpVtbl = &property_value_vtbl;
+    impl->IWeakReferenceSource_iface.lpVtbl = &pv_weakref_source_vtbl;
     impl->type = type;
     impl->ref = 1;
+    if (type >= PropertyType_UInt8Array && type <= PropertyType_RectArray)
+        impl->irefs.array_iface.lpVtbl = &iref_array_vtbl;
     if (type != PropertyType_Empty)
     {
-        impl->value = malloc(unit_size * count);
+        impl->value = malloc(count ? unit_size * count : 1);
         if (!impl->value)
         {
             free(impl);
             return E_OUTOFMEMORY;
         }
-        memcpy(impl->value, value, unit_size * count);
+        if (count) memcpy(impl->value, value, unit_size * count);
         impl->value_size = count;
     }
 
@@ -1627,6 +2014,111 @@ static const struct IReference_RectVtbl iref_rect_vtbl =
     iref_rect_get_Value,
 };
 
+DEFINE_IINSPECTABLE_(iref_uint16, void, struct property_value,
+                     impl_from_iref_uint16, irefs.uint16_iface, &impl->IPropertyValue_iface);
+
+static HRESULT STDMETHODCALLTYPE iref_uint16_get_Value(void *iface, UINT16 *value)
+{
+    struct property_value *impl = impl_from_iref_uint16(iface);
+    return property_value_GetUInt16(&impl->IPropertyValue_iface, value);
+}
+
+static const struct iref_uint16_vtbl iref_uint16_vtbl =
+{
+    iref_uint16_QueryInterface,
+    iref_uint16_AddRef,
+    iref_uint16_Release,
+    iref_uint16_GetIids,
+    iref_uint16_GetRuntimeClassName,
+    iref_uint16_GetTrustLevel,
+    iref_uint16_get_Value,
+};
+
+DEFINE_IINSPECTABLE_(iref_char16, void, struct property_value,
+                     impl_from_iref_char16, irefs.char16_iface, &impl->IPropertyValue_iface);
+
+static HRESULT STDMETHODCALLTYPE iref_char16_get_Value(void *iface, WCHAR *value)
+{
+    struct property_value *impl = impl_from_iref_char16(iface);
+    return property_value_GetChar16(&impl->IPropertyValue_iface, value);
+}
+
+static const struct iref_char16_vtbl iref_char16_vtbl =
+{
+    iref_char16_QueryInterface,
+    iref_char16_AddRef,
+    iref_char16_Release,
+    iref_char16_GetIids,
+    iref_char16_GetRuntimeClassName,
+    iref_char16_GetTrustLevel,
+    iref_char16_get_Value,
+};
+
+DEFINE_IINSPECTABLE_(iref_array, void, struct property_value,
+                     impl_from_iref_array, irefs.array_iface, &impl->IPropertyValue_iface);
+
+static HRESULT STDMETHODCALLTYPE iref_array_get_Value(void *iface, UINT32 *value_size, void **value)
+{
+    struct property_value *impl = impl_from_iref_array(iface);
+
+    TRACE("iface %p, value_size %p, value %p, type %d.\n", iface, value_size, value, impl->type);
+
+    switch (impl->type)
+    {
+    case PropertyType_UInt8Array:
+        return property_value_GetUInt8Array(&impl->IPropertyValue_iface, value_size, (BYTE **)value);
+    case PropertyType_Int16Array:
+        return property_value_GetInt16Array(&impl->IPropertyValue_iface, value_size, (INT16 **)value);
+    case PropertyType_UInt16Array:
+        return property_value_GetUInt16Array(&impl->IPropertyValue_iface, value_size, (UINT16 **)value);
+    case PropertyType_Int32Array:
+        return property_value_GetInt32Array(&impl->IPropertyValue_iface, value_size, (INT32 **)value);
+    case PropertyType_UInt32Array:
+        return property_value_GetUInt32Array(&impl->IPropertyValue_iface, value_size, (UINT32 **)value);
+    case PropertyType_Int64Array:
+        return property_value_GetInt64Array(&impl->IPropertyValue_iface, value_size, (INT64 **)value);
+    case PropertyType_UInt64Array:
+        return property_value_GetUInt64Array(&impl->IPropertyValue_iface, value_size, (UINT64 **)value);
+    case PropertyType_SingleArray:
+        return property_value_GetSingleArray(&impl->IPropertyValue_iface, value_size, (FLOAT **)value);
+    case PropertyType_DoubleArray:
+        return property_value_GetDoubleArray(&impl->IPropertyValue_iface, value_size, (DOUBLE **)value);
+    case PropertyType_Char16Array:
+        return property_value_GetChar16Array(&impl->IPropertyValue_iface, value_size, (WCHAR **)value);
+    case PropertyType_BooleanArray:
+        return property_value_GetBooleanArray(&impl->IPropertyValue_iface, value_size, (boolean **)value);
+    case PropertyType_StringArray:
+        return property_value_GetStringArray(&impl->IPropertyValue_iface, value_size, (HSTRING **)value);
+    case PropertyType_InspectableArray:
+        return property_value_GetInspectableArray(&impl->IPropertyValue_iface, value_size, (IInspectable ***)value);
+    case PropertyType_GuidArray:
+        return property_value_GetGuidArray(&impl->IPropertyValue_iface, value_size, (GUID **)value);
+    case PropertyType_DateTimeArray:
+        return property_value_GetDateTimeArray(&impl->IPropertyValue_iface, value_size, (DateTime **)value);
+    case PropertyType_TimeSpanArray:
+        return property_value_GetTimeSpanArray(&impl->IPropertyValue_iface, value_size, (TimeSpan **)value);
+    case PropertyType_PointArray:
+        return property_value_GetPointArray(&impl->IPropertyValue_iface, value_size, (Point **)value);
+    case PropertyType_SizeArray:
+        return property_value_GetSizeArray(&impl->IPropertyValue_iface, value_size, (Size **)value);
+    case PropertyType_RectArray:
+        return property_value_GetRectArray(&impl->IPropertyValue_iface, value_size, (Rect **)value);
+    default:
+        return TYPE_E_TYPEMISMATCH;
+    }
+}
+
+static const struct iref_array_vtbl iref_array_vtbl =
+{
+    iref_array_QueryInterface,
+    iref_array_AddRef,
+    iref_array_Release,
+    iref_array_GetIids,
+    iref_array_GetRuntimeClassName,
+    iref_array_GetTrustLevel,
+    iref_array_get_Value,
+};
+
 DEFINE_IINSPECTABLE(property_value_statics, IPropertyValueStatics, struct property_value_statics, IActivationFactory_iface)
 
 static HRESULT STDMETHODCALLTYPE property_value_statics_CreateEmpty(IPropertyValueStatics *iface,
@@ -1659,7 +2151,7 @@ static HRESULT STDMETHODCALLTYPE property_value_statics_CreateUInt16(IPropertyVa
         UINT16 value, IInspectable **property_value)
 {
     TRACE("iface %p, value %u, property_value %p.\n", iface, value, property_value);
-    return create_primitive_property_value(PropertyType_UInt16);
+    create_primitive_property_value_iref(PropertyType_UInt16, irefs.uint16_iface.lpVtbl, iref_uint16_vtbl);
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_statics_CreateInt32(IPropertyValueStatics *iface,
@@ -1708,7 +2200,7 @@ static HRESULT STDMETHODCALLTYPE property_value_statics_CreateChar16(IPropertyVa
         WCHAR value, IInspectable **property_value)
 {
     TRACE("iface %p, value %s, property_value %p.\n", iface, wine_dbgstr_wn(&value, 1), property_value);
-    return create_primitive_property_value(PropertyType_Char16);
+    create_primitive_property_value_iref(PropertyType_Char16, irefs.char16_iface.lpVtbl, iref_char16_vtbl);
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_statics_CreateBoolean(IPropertyValueStatics *iface,
@@ -1741,8 +2233,14 @@ static HRESULT STDMETHODCALLTYPE property_value_statics_CreateString(IPropertyVa
 static HRESULT STDMETHODCALLTYPE property_value_statics_CreateInspectable(IPropertyValueStatics *iface,
         IInspectable *value, IInspectable **property_value)
 {
-    FIXME("iface %p, value %p, property_value %p stub!\n", iface, value, property_value);
-    return E_NOTIMPL;
+    TRACE("iface %p, value %p, property_value %p.\n", iface, value, property_value);
+
+    if (!property_value)
+        return E_POINTER;
+
+    *property_value = value;
+    if (value) IInspectable_AddRef(value);
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_statics_CreateGuid(IPropertyValueStatics *iface,
@@ -1892,6 +2390,8 @@ static HRESULT STDMETHODCALLTYPE property_value_statics_CreateStringArray(IPrope
         WindowsDuplicateString(value[i], &new_value[i]);
 
     impl->IPropertyValue_iface.lpVtbl = &property_value_vtbl;
+    impl->IWeakReferenceSource_iface.lpVtbl = &pv_weakref_source_vtbl;
+    impl->irefs.array_iface.lpVtbl = &iref_array_vtbl;
     impl->type = PropertyType_StringArray;
     impl->ref = 1;
     impl->value = new_value;
@@ -1905,8 +2405,42 @@ static HRESULT STDMETHODCALLTYPE property_value_statics_CreateStringArray(IPrope
 static HRESULT STDMETHODCALLTYPE property_value_statics_CreateInspectableArray(IPropertyValueStatics *iface,
         UINT32 value_size, IInspectable **value, IInspectable **property_value)
 {
-    FIXME("iface %p, value_size %u, value %p, property_value %p stub!\n", iface, value_size, value, property_value);
-    return E_NOTIMPL;
+    struct property_value *impl;
+    IInspectable **new_value;
+    unsigned int i;
+
+    TRACE("iface %p, value_size %u, value %p, property_value %p.\n", iface, value_size, value, property_value);
+
+    if (!value || !property_value)
+        return E_POINTER;
+
+    impl = calloc(1, sizeof(*impl));
+    if (!impl)
+        return E_OUTOFMEMORY;
+
+    new_value = calloc(value_size ? value_size : 1, sizeof(IInspectable *));
+    if (!new_value)
+    {
+        free(impl);
+        return E_OUTOFMEMORY;
+    }
+
+    for (i = 0; i < value_size; i++)
+    {
+        new_value[i] = value[i];
+        if (new_value[i]) IInspectable_AddRef(new_value[i]);
+    }
+
+    impl->IPropertyValue_iface.lpVtbl = &property_value_vtbl;
+    impl->IWeakReferenceSource_iface.lpVtbl = &pv_weakref_source_vtbl;
+    impl->irefs.array_iface.lpVtbl = &iref_array_vtbl;
+    impl->type = PropertyType_InspectableArray;
+    impl->ref = 1;
+    impl->value = new_value;
+    impl->value_size = value_size;
+
+    *property_value = (IInspectable *)&impl->IPropertyValue_iface;
+    return S_OK;
 }
 
 static HRESULT STDMETHODCALLTYPE property_value_statics_CreateGuidArray(IPropertyValueStatics *iface,

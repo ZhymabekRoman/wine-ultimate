@@ -336,21 +336,43 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
     if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
         return E_NOINTERFACE;
 
+    if (IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_StringObject_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IMapView_String_Object ) ||
+        IsEqualGUID( iid, &IID_IMapView_Object_Object ))
+    {
+        *out = &impl->IMapView_HSTRING_IInspectable_iface;
+        IUnknown_AddRef( (IUnknown *)*out );
+        TRACE( "handing out mapview face %p, vtbl %p\n", *out, *(void **)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IIterable_KeyValuePair_Object_Object ))
+    {
+        *out = &impl->IIterable_IKeyValuePair_HSTRING_IInspectable_iface;
+        IUnknown_AddRef( (IUnknown *)*out );
+        TRACE( "handing out iterable face %p, vtbl %p\n", *out, *(void **)*out );
+        return S_OK;
+    }
+
+    if (IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ) ||
+        IsEqualGUID( iid, &IID_IObservableMap_String_Object ))
+    {
+        *out = &impl->IObservableMap_HSTRING_IInspectable_iface;
+        IUnknown_AddRef( (IUnknown *)*out );
+        TRACE( "handing out observable_map face %p, vtbl %p\n", *out, *(void **)*out );
+        return S_OK;
+    }
+
     if (IsEqualGUID( iid, &IID_IUnknown ) ||
         IsEqualGUID( iid, &IID_IInspectable ) ||
         IsEqualGUID( iid, &IID_IAgileObject ) ||
         IsEqualGUID( iid, &IID_IPropertySet ) ||
         IsEqualGUID( iid, &IID_IMap_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IMapView_String_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IIterable_IKeyValuePair_HSTRING_IInspectable ) ||
-        IsEqualGUID( iid, &IID_IObservableMap_HSTRING_IInspectable ) ||
         IsEqualGUID( iid, &IID_IMap_String_Object ) ||
-        IsEqualGUID( iid, &IID_IMapView_String_Object ) ||
-        IsEqualGUID( iid, &IID_IObservableMap_String_Object ) ||
         IsEqualGUID( iid, &IID_IMap_Object_Object ) ||
-        IsEqualGUID( iid, &IID_IMapView_Object_Object ) ||
-        IsEqualGUID( iid, &IID_IIterable_KeyValuePair_Object_Object ) ||
         IsEqualGUID( iid, &IID_IResourceDictionary ) ||
         IsEqualGUID( iid, &IID_INotifyCollectionChanged_g ) ||
         IsEqualGUID( iid, &IID_INotifyPropertyChanged_g ))
@@ -359,12 +381,6 @@ static HRESULT STDMETHODCALLTYPE propertyset_QueryInterface( IPropertySet *iface
         IUnknown_AddRef( (IUnknown *)*out );
         TRACE( "handing out face %p, vtbl %p\n", *out, *(void **)*out );
         return S_OK;
-    }
-
-    if (IsEqualGUID( iid, &IID_IReferenceTracker_g ))
-    {
-        *out = NULL;
-        return E_NOINTERFACE;
     }
 
     if (SUCCEEDED(IInspectable_QueryInterface( impl->map_inner, iid, out ))) return S_OK;
@@ -574,30 +590,21 @@ static HSTRING propertyset_decode_key( void *key, BOOL *allocated )
     return str;
 }
 
-/* Slot 6: IMap::Lookup / IIterable::First (First passes the iterator pointer
- * in the key slot and nothing in the value slot). */
-static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, void *key, void *value )
+/* Slot 6: IMap::Lookup */
+static HRESULT STDMETHODCALLTYPE propertyset_Lookup( IPropertySet *iface, HSTRING key, IInspectable **value )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
     BOOL allocated = FALSE;
     HSTRING hkey;
     HRESULT hr;
 
-    if (!value)
-    {
-        /* Shared slot 6: IMapView/IMap consumers reach IIterable::First here
-         * with the iterator out-pointer in the key slot. A null out-pointer
-         * is E_POINTER, not an AV inside First's *value store. */
-        if (!key) return E_POINTER;
-        return IIterable_IKeyValuePair_HSTRING_IInspectable_First( impl->inner_iterable,
-                                                                   (IIterator_IKeyValuePair_HSTRING_IInspectable **)key );
-    }
+    if (!value) return E_POINTER;
 
     hkey = propertyset_decode_key( key, &allocated );
     TRACE( "iface %p (vtbl %p), key %p (decoded %s), value %p\n",
            iface, *(void **)iface, key, debugstr_hstring( hkey ), value );
 
-    hr = IMap_HSTRING_IInspectable_Lookup( impl->inner_map, hkey, (IInspectable **)value );
+    hr = IMap_HSTRING_IInspectable_Lookup( impl->inner_map, hkey, value );
     if (FAILED(hr) && hkey)
     {
         const WCHAR *name = WindowsGetStringRawBuffer( hkey, NULL );
@@ -658,24 +665,15 @@ static HRESULT STDMETHODCALLTYPE propertyset_HasKey( IPropertySet *iface, HSTRIN
     return hr;
 }
 
-/* Slot 9: IMap::GetView / IMapView::Split (Split passes both view outs). */
-static HRESULT STDMETHODCALLTYPE propertyset_GetView( IPropertySet *iface, void *first, void *second )
+/* Slot 9: IMap::GetView */
+static HRESULT STDMETHODCALLTYPE propertyset_GetView( IPropertySet *iface, IMapView_HSTRING_IInspectable **view )
 {
     struct propertyset *impl = impl_from_IPropertySet( iface );
-    IMapView_HSTRING_IInspectable *view;
-    HRESULT hr;
 
-    TRACE( "iface %p (vtbl %p), first %p, second %p\n", iface, *(void **)iface, first, second );
+    TRACE( "iface %p (vtbl %p), view %p\n", iface, *(void **)iface, view );
 
-    if (FAILED(hr = IMap_HSTRING_IInspectable_GetView( impl->inner_map, &view ))) return hr;
-    if (second)
-    {
-        hr = IMapView_HSTRING_IInspectable_Split( view, (IMapView_HSTRING_IInspectable **)first,
-                                                  (IMapView_HSTRING_IInspectable **)second );
-        IMapView_HSTRING_IInspectable_Release( view );
-    }
-    else *(IMapView_HSTRING_IInspectable **)first = view;
-    return hr;
+    if (!view) return E_POINTER;
+    return IMap_HSTRING_IInspectable_GetView( impl->inner_map, view );
 }
 
 static void propertyset_fire_map_changed( struct propertyset *impl, HSTRING key, enum CollectionChange status );
@@ -1256,8 +1254,15 @@ static HRESULT STDMETHODCALLTYPE propertyset_IMapView_Split( IMapView_HSTRING_II
                                                             IMapView_HSTRING_IInspectable **second )
 {
     struct propertyset *impl = CONTAINING_RECORD( iface, struct propertyset, IMapView_HSTRING_IInspectable_iface );
+    IMapView_HSTRING_IInspectable *view;
+    HRESULT hr;
+
     TRACE( "viewface %p, first %p, second %p\n", iface, first, second );
-    return propertyset_GetView( &impl->IPropertySet_iface, first, second );
+    if (!first || !second) return E_POINTER;
+    if (FAILED(hr = IMap_HSTRING_IInspectable_GetView( impl->inner_map, &view ))) return hr;
+    hr = IMapView_HSTRING_IInspectable_Split( view, first, second );
+    IMapView_HSTRING_IInspectable_Release( view );
+    return hr;
 }
 
 static const struct propertyset_imapview_vtbl_full_s

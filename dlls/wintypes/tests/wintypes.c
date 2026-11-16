@@ -38,6 +38,7 @@
 #include "windows.storage.streams.h"
 
 #include "robuffer.h"
+#include "weakreference.h"
 
 #include "wine/test.h"
 
@@ -1042,6 +1043,104 @@ static void test_IPropertyValueStatics(void)
 
 #undef TEST_PROPERTY_VALUE_IREFERENCE
 
+    /* Test IReference<UInt16>, IReference<Char16>, CreateInspectable, CreateInspectableArray, IReferenceArray<T>, IWeakReferenceSource */
+    {
+        static const GUID iid_iref_uint16 = { 0x5ab7d2c3, 0x6b62, 0x5e71, { 0xa4, 0xb6, 0x2d, 0x49, 0xc4, 0xf2, 0x38, 0xfd } };
+        static const GUID iid_iref_char16 = { 0xfb393ef3, 0xbbac, 0x5bd5, { 0x91, 0x44, 0x84, 0xf2, 0x35, 0x76, 0xf4, 0x15 } };
+        static const GUID iid_irefa_int32 = { 0xa6d080a5, 0xb087, 0x5bc2, { 0x9a, 0x9f, 0x5c, 0xd6, 0x87, 0xb4, 0xd1, 0xf7 } };
+        static const GUID iid_irefa_insp  = { 0x9cd7a84f, 0x0c80, 0x59c5, { 0xb4, 0x4e, 0x97, 0x78, 0x41, 0xbb, 0x43, 0xd9 } };
+        IInspectable *pv = NULL, *item1 = NULL, *item2 = NULL, *arr_in[2], **arr_out = NULL;
+        IWeakReferenceSource *wrs = NULL;
+        IWeakReference *wr = NULL;
+        IInspectable *resolved = NULL;
+        HSTRING cls = NULL;
+        UINT16 u16 = 0;
+        WCHAR ch = 0;
+        INT32 ints[2] = { 10, 20 }, *ints_out = NULL;
+        UINT32 cnt = 0;
+        void *iref = NULL;
+
+        /* IReference<UInt16> */
+        hr = IPropertyValueStatics_CreateUInt16(statics, 0x1234, &pv);
+        ok(hr == S_OK, "got %#lx\n", hr);
+        hr = IInspectable_QueryInterface(pv, &iid_iref_uint16, &iref);
+        ok(hr == S_OK, "QI IReference<UInt16> got %#lx\n", hr);
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, UINT16 *))(*(void ***)iref)[6])(iref, &u16);
+        ok(hr == S_OK && u16 == 0x1234, "get_Value got %#lx, %#x\n", hr, u16);
+        IUnknown_Release((IUnknown *)iref);
+        hr = IInspectable_GetRuntimeClassName(pv, &cls);
+        ok(hr == S_OK && !wcscmp(WindowsGetStringRawBuffer(cls, NULL), L"Windows.Foundation.IReference`1<UInt16>"), "got %s\n", wine_dbgstr_w(WindowsGetStringRawBuffer(cls, NULL)));
+        WindowsDeleteString(cls);
+        IInspectable_Release(pv);
+
+        /* IReference<Char16> */
+        hr = IPropertyValueStatics_CreateChar16(statics, L'Z', &pv);
+        ok(hr == S_OK, "got %#lx\n", hr);
+        hr = IInspectable_QueryInterface(pv, &iid_iref_char16, &iref);
+        ok(hr == S_OK, "QI IReference<Char16> got %#lx\n", hr);
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, WCHAR *))(*(void ***)iref)[6])(iref, &ch);
+        ok(hr == S_OK && ch == L'Z', "get_Value got %#lx, %#x\n", hr, ch);
+        IUnknown_Release((IUnknown *)iref);
+        IInspectable_Release(pv);
+
+        /* CreateInspectable */
+        hr = IPropertyValueStatics_CreateInspectable(statics, NULL, &pv);
+        ok(hr == S_OK && pv == NULL, "CreateInspectable(NULL) got %#lx, %p\n", hr, pv);
+        hr = IPropertyValueStatics_CreateInt32(statics, 42, &item1);
+        ok(hr == S_OK, "got %#lx\n", hr);
+        hr = IPropertyValueStatics_CreateInspectable(statics, item1, &pv);
+        ok(hr == S_OK && pv == item1, "CreateInspectable(item1) got %#lx\n", hr);
+        IInspectable_Release(pv);
+
+        /* CreateInspectableArray + IReferenceArray<Object> */
+        hr = IPropertyValueStatics_CreateInt32(statics, 99, &item2);
+        ok(hr == S_OK, "got %#lx\n", hr);
+        arr_in[0] = item1;
+        arr_in[1] = item2;
+        hr = IPropertyValueStatics_CreateInspectableArray(statics, 2, arr_in, &pv);
+        ok(hr == S_OK, "CreateInspectableArray got %#lx\n", hr);
+        hr = IInspectable_QueryInterface(pv, &iid_irefa_insp, &iref);
+        ok(hr == S_OK, "QI IReferenceArray<Object> got %#lx\n", hr);
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, UINT32 *, IInspectable ***))(*(void ***)iref)[6])(iref, &cnt, &arr_out);
+        ok(hr == S_OK && cnt == 2 && arr_out[0] == item1 && arr_out[1] == item2, "get_Value got %#lx, cnt %u\n", hr, cnt);
+        IInspectable_Release(arr_out[0]);
+        IInspectable_Release(arr_out[1]);
+        CoTaskMemFree(arr_out);
+        IUnknown_Release((IUnknown *)iref);
+        hr = IInspectable_GetRuntimeClassName(pv, &cls);
+        ok(hr == S_OK && !wcscmp(WindowsGetStringRawBuffer(cls, NULL), L"Windows.Foundation.IReferenceArray`1<Object>"), "got %s\n", wine_dbgstr_w(WindowsGetStringRawBuffer(cls, NULL)));
+        WindowsDeleteString(cls);
+        IInspectable_Release(pv);
+        IInspectable_Release(item1);
+        IInspectable_Release(item2);
+
+        /* IReferenceArray<Int32> + IWeakReferenceSource */
+        hr = IPropertyValueStatics_CreateInt32Array(statics, 2, ints, &pv);
+        ok(hr == S_OK, "got %#lx\n", hr);
+        hr = IInspectable_QueryInterface(pv, &iid_irefa_int32, &iref);
+        ok(hr == S_OK, "QI IReferenceArray<Int32> got %#lx\n", hr);
+        hr = ((HRESULT (STDMETHODCALLTYPE *)(void *, UINT32 *, INT32 **))(*(void ***)iref)[6])(iref, &cnt, &ints_out);
+        ok(hr == S_OK && cnt == 2 && ints_out[0] == 10 && ints_out[1] == 20, "get_Value got %#lx, cnt %u\n", hr, cnt);
+        IUnknown_Release((IUnknown *)iref);
+        hr = IInspectable_GetRuntimeClassName(pv, &cls);
+        ok(hr == S_OK && !wcscmp(WindowsGetStringRawBuffer(cls, NULL), L"Windows.Foundation.IReferenceArray`1<Int32>"), "got %s\n", wine_dbgstr_w(WindowsGetStringRawBuffer(cls, NULL)));
+        WindowsDeleteString(cls);
+
+        hr = IInspectable_QueryInterface(pv, &IID_IWeakReferenceSource, (void **)&wrs);
+        ok(hr == S_OK, "QI IWeakReferenceSource got %#lx\n", hr);
+        hr = IWeakReferenceSource_GetWeakReference(wrs, &wr);
+        ok(hr == S_OK && wr != NULL, "GetWeakReference got %#lx\n", hr);
+        IWeakReferenceSource_Release(wrs);
+        hr = IWeakReference_Resolve(wr, &IID_IPropertyValue, &resolved);
+        ok(hr == S_OK && resolved != NULL, "Resolve(alive) got %#lx, %p\n", hr, resolved);
+        IInspectable_Release(resolved);
+        IInspectable_Release(pv);
+        resolved = (IInspectable *)0xdeadbeef;
+        hr = IWeakReference_Resolve(wr, &IID_IPropertyValue, &resolved);
+        ok(hr == S_OK && resolved == NULL, "Resolve(dead) got %#lx, %p\n", hr, resolved);
+        IWeakReference_Release(wr);
+    }
+
     IPropertyValueStatics_Release(statics);
     IActivationFactory_Release(factory);
     WindowsDeleteString(str);
@@ -1678,13 +1777,19 @@ static void test_PropertySet_MapChanged(void)
     ok( handler.status == CollectionChange_ItemChanged, "got status %d\n", handler.status );
     ok( !lstrcmpW( handler.key, L"key" ), "got key %s\n", debugstr_w( handler.key ) );
 
-    /* Insert through the IObservableMap face fires the same way */
-    handler.status = (enum CollectionChange)-1;
-    replaced = TRUE;
-    hr = IMap_HSTRING_IInspectable_Insert( (IMap_HSTRING_IInspectable *)observable_map, key, value, &replaced );
-    ok( hr == S_OK, "got %#lx\n", hr );
-    ok( handler.called == 3, "got %u calls\n", handler.called );
-    ok( handler.status == CollectionChange_ItemChanged, "got status %d\n", handler.status );
+    /* Insert through the IPropertySet / IMap face queried from IObservableMap fires the same way */
+    {
+        IMap_HSTRING_IInspectable *obs_as_map = NULL;
+        hr = IObservableMap_HSTRING_IInspectable_QueryInterface( observable_map, &IID_IMap_HSTRING_IInspectable, (void **)&obs_as_map );
+        ok( hr == S_OK, "got %#lx\n", hr );
+        handler.status = (enum CollectionChange)-1;
+        replaced = TRUE;
+        hr = IMap_HSTRING_IInspectable_Insert( obs_as_map, key, value, &replaced );
+        ok( hr == S_OK, "got %#lx\n", hr );
+        ok( handler.called == 3, "got %u calls\n", handler.called );
+        ok( handler.status == CollectionChange_ItemChanged, "got status %d\n", handler.status );
+        IMap_HSTRING_IInspectable_Release( obs_as_map );
+    }
 
     /* Remove fires ItemRemoved */
     handler.status = (enum CollectionChange)-1;
