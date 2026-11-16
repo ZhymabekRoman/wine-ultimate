@@ -8108,11 +8108,6 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
 
     if (!io) return STATUS_INVALID_PARAMETER;
 
-    status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options );
-    if (status && status != STATUS_BAD_DEVICE_TYPE)
-        return status;
-    if (needs_close) close( fd );
-
     ignore_server_ioctl_struct_holes( code, in_buffer, in_size );
 
     switch (code)
@@ -8128,6 +8123,29 @@ NTSTATUS WINAPI NtFsControlFile( HANDLE handle, HANDLE event, PIO_APC_ROUTINE ap
         return server_ioctl_file( handle, event, apc, apc_context, io, code,
                                   in_buffer, in_size, out_buffer, out_size );
 
+    case FSCTL_IS_VOLUME_MOUNTED:
+    case FSCTL_LOCK_VOLUME:
+    case FSCTL_UNLOCK_VOLUME:
+    case FSCTL_GET_RETRIEVAL_POINTERS:
+    case FSCTL_GET_OBJECT_ID:
+    case FSCTL_SET_ZERO_DATA:
+    case FSCTL_SET_COMPRESSION:
+    case FSCTL_GET_COMPRESSION:
+    case FSCTL_SET_SPARSE:
+        break;
+
+    default:
+        return server_ioctl_file( handle, event, apc, apc_context, io, code,
+                                  in_buffer, in_size, out_buffer, out_size );
+    }
+
+    status = server_get_unix_fd( handle, 0, &fd, &needs_close, NULL, &options );
+    if (status && status != STATUS_BAD_DEVICE_TYPE)
+        return status;
+    if (needs_close) close( fd );
+
+    switch (code)
+    {
     case FSCTL_IS_VOLUME_MOUNTED:
     case FSCTL_LOCK_VOLUME:
     case FSCTL_UNLOCK_VOLUME:
