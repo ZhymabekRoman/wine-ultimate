@@ -4476,7 +4476,8 @@ static BOOL caps_probe( IInspectable *outer )
 
     /* A StandardCalculatorViewModel-style VM registered in the app's provider
      * drives the display sync/teardown behaviour for any app exposing one. */
-    if (caps_find_type( provider, ns, vm_suffixes, ARRAY_SIZE( vm_suffixes ), NULL,
+    if (caps_find_type( provider, ns, vm_suffixes, ARRAY_SIZE( vm_suffixes ),
+                        L"CalculatorApp.ViewModel.StandardCalculatorViewModel",
                         g_caps.vm_type, ARRAY_SIZE( g_caps.vm_type ) ))
     {
         g_caps.teardown_vm = TRUE;

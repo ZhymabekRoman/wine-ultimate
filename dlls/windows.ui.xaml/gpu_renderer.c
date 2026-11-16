@@ -92,6 +92,7 @@ static struct
     ID3D11ShaderResourceView *atlas_srv;
 
     ID3D11RenderTargetView *rtv;
+    IDXGISwapChain1 *rtv_swapchain;
     UINT rtv_width;
     UINT rtv_height;
 
@@ -259,6 +260,7 @@ void xaml_gpu_release_rtv( void )
         ID3D11RenderTargetView_Release( g_gpu.rtv );
         g_gpu.rtv = NULL;
     }
+    g_gpu.rtv_swapchain = NULL;
     g_gpu.rtv_width = 0;
     g_gpu.rtv_height = 0;
 }
@@ -536,7 +538,7 @@ BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwa
     if (!xaml_gpu_init( dev ))
         return FALSE;
 
-    if (!g_gpu.rtv || g_gpu.rtv_width != width || g_gpu.rtv_height != height)
+    if (!g_gpu.rtv || g_gpu.rtv_swapchain != swapchain || g_gpu.rtv_width != width || g_gpu.rtv_height != height)
     {
         ID3D11Texture2D *backbuf = NULL;
         xaml_gpu_release_rtv();
@@ -547,6 +549,7 @@ BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwa
         ID3D11Texture2D_Release( backbuf );
         if (FAILED(hr) || !g_gpu.rtv)
             return FALSE;
+        g_gpu.rtv_swapchain = swapchain;
         g_gpu.rtv_width = width;
         g_gpu.rtv_height = height;
     }
