@@ -53,6 +53,7 @@ typedef struct
     FINDEX_SEARCH_OPS search_op;   /* Flags passed to FindFirst.  */
     FINDEX_INFO_LEVELS level;      /* Level passed to FindFirst */
     UNICODE_STRING    path;        /* NT path used to open the directory */
+    BOOL              is_stack;    /* path buffer is a caller stack buffer, not heap */
     BOOL              is_root;     /* is directory the root of the drive? */
     UINT              data_pos;    /* current position in dir data */
     UINT              data_len;    /* length of dir data */
@@ -63,6 +64,102 @@ typedef struct
 #define FIND_FIRST_MAGIC  0xc0ffee11
 
 static const UINT max_entry_size = offsetof( FILE_BOTH_DIRECTORY_INFORMATION, FileName[256] );
+
+/* cached result of the Win9x check in GetVersion() (constant for a process lifetime) */
+static inline BOOL is_win9x(void)
+{
+    static INT win9x = -1;
+    if (win9x == -1) win9x = (GetVersion() & 0x80000000) != 0;
+    return win9x;
+}
+
+#define DOS_FASTPATH_MAX_DOS 248                              /* max DOS path length handled */
+#define DOS_FASTPATH_BUF_SIZE (DOS_FASTPATH_MAX_DOS + 4 + 1)  /* \??\ prefix + path + NUL */
+
+/* Fast path for RtlDosPathNameToNtPathName_U: build the NT name for a clean
+ * absolute 'X:\dir\file.ext' DOS path as '\??\' + path on the caller stack
+ * buffer, with zero heap allocations. Returns TRUE on success, filling in
+ * nt_name (buffer-backed, caller must not free) and optionally *part_name
+ * (pointer into path at the start of the last component, like the API).
+ * Returns FALSE (caller falls back to RtlDosPathNameToNtPathName_U) for
+ * paths containing '/' separators, dot-only segments, trailing dots/spaces
+ * in components, consecutive backslashes, wildcards, DOS device names, or
+ * paths longer than DOS_FASTPATH_MAX_DOS chars. */
+static inline BOOL dos_to_nt_path_fast( LPCWSTR path, UNICODE_STRING *nt_name,
+                                        WCHAR *buffer, WCHAR **part_name )
+{
+    static const WCHAR prefix[] = { '\\', '?', '?', '\\' };
+    const WCHAR *p, *name;
+    WCHAR *out = buffer;
+    WCHAR *name_out; /* position in buffer of the last component */
+    SIZE_T len;
+    WCHAR a, b, c;
+
+    if (!path) return FALSE;
+    if (((*path < 'A' || *path > 'Z') && (*path < 'a' || *path > 'z')) ||
+        path[1] != ':' || path[2] != '\\')
+        return FALSE;
+
+    memcpy( out, prefix, sizeof(prefix) );
+    out += 4;
+    len = 4;
+    p = path;
+    name = p;
+    name_out = out;
+
+    for (;;)
+    {
+        WCHAR ch = *p;
+        if (!ch)
+        {
+            if (p[-1] == '.' || p[-1] == ' ') return FALSE; /* trailing dot/space */
+            break;
+        }
+        if (len >= DOS_FASTPATH_MAX_DOS + 4) return FALSE;
+        switch (ch)
+        {
+        case '/': case '*': case '?':
+            return FALSE;
+        case '\\':
+            if (p[1] == '\\' || p[1] == 0 || p[1] == ' ') return FALSE;
+            if (p[-1] == '.' || p[-1] == ' ') return FALSE; /* component trailing dot/space */
+            name = p + 1;
+            name_out = out + 1;
+            break;
+        case '.':
+            if ((p[1] == '\\' || p[1] == 0) && (p[-1] == '.' || p[-1] == '\\'))
+                return FALSE; /* '.' / '..' / '...' dot-only segments */
+            break;
+        case ' ':
+            if (p[1] == '\\') return FALSE;
+            break;
+        }
+        *out++ = ch;
+        p++;
+        len++;
+    }
+
+    /* conservative fallback for DOS device names in the last component */
+    a = name[0];
+    b = name[1];
+    c = name[2];
+    if (a >= 'a' && a <= 'z') a -= 32;
+    if (b >= 'a' && b <= 'z') b -= 32;
+    if (c >= 'a' && c <= 'z') c -= 32;
+    if ((a == 'C' && b == 'O' && (c == 'N' || c == 'M')) ||  /* CON*, COM* */
+        (a == 'P' && b == 'R' && c == 'N') ||                /* PRN* */
+        (a == 'A' && b == 'U' && c == 'X') ||                /* AUX */
+        (a == 'N' && b == 'U' && c == 'L') ||                /* NUL */
+        (a == 'L' && b == 'P' && c == 'T'))                  /* LPT* */
+        return FALSE;
+
+    *out = 0;
+    nt_name->Buffer = buffer;
+    nt_name->Length = len * sizeof(WCHAR);
+    nt_name->MaximumLength = (len + 1) * sizeof(WCHAR);
+    if (part_name) *part_name = name_out;
+    return TRUE;
+}
 
 const WCHAR windows_dir[] = L"C:\\windows";
 const WCHAR system_dir[] = L"C:\\windows\\system32";
@@ -667,15 +764,18 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateDirectoryA( LPCSTR path, LPSECURITY_ATTRIBUT
  */
 BOOL WINAPI DECLSPEC_HOTPATCH CreateDirectoryW( LPCWSTR path, LPSECURITY_ATTRIBUTES sa )
 {
+    WCHAR buf[DOS_FASTPATH_BUF_SIZE];
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING nt_name;
     IO_STATUS_BLOCK io;
     NTSTATUS status;
     HANDLE handle;
+    BOOL fast;
 
     TRACE( "%s\n", debugstr_w(path) );
 
-    if (!RtlDosPathNameToNtPathName_U( path, &nt_name, NULL, NULL ))
+    if (!(fast = dos_to_nt_path_fast( path, &nt_name, buf, NULL )) &&
+        !RtlDosPathNameToNtPathName_U( path, &nt_name, NULL, NULL ))
     {
         SetLastError( ERROR_PATH_NOT_FOUND );
         return FALSE;
@@ -686,7 +786,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH CreateDirectoryW( LPCWSTR path, LPSECURITY_ATTRIBU
                            FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT, NULL, 0 );
     if (status == STATUS_SUCCESS) NtClose( handle );
 
-    RtlFreeUnicodeString( &nt_name );
+    if (!fast) RtlFreeUnicodeString( &nt_name );
     return set_ntstatus( status );
 }
 
@@ -755,7 +855,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileA( LPCSTR name, DWORD access, DWORD sh
 {
     WCHAR *nameW;
 
-    if ((GetVersion() & 0x80000000) && IsBadStringPtrA( name, -1 )) return INVALID_HANDLE_VALUE;
+    if (is_win9x() && IsBadStringPtrA( name, -1 )) return INVALID_HANDLE_VALUE;
     if (!(nameW = file_name_AtoW( name, FALSE ))) return INVALID_HANDLE_VALUE;
     return CreateFileW( nameW, access, sharing, sa, creation, attributes, template );
 }
@@ -805,6 +905,8 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
     HANDLE ret;
     const WCHAR *vxd_name = NULL;
     SECURITY_QUALITY_OF_SERVICE qos;
+    WCHAR buf[DOS_FASTPATH_BUF_SIZE];
+    BOOL fast;
 
     static const UINT nt_disposition[5] =
     {
@@ -834,7 +936,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
            (sharing & FILE_SHARE_DELETE) ? "FILE_SHARE_DELETE " : "",
            creation, attributes);
 
-    if ((GetVersion() & 0x80000000) && !wcsncmp( filename, L"\\\\.\\", 4 ) &&
+    if (is_win9x() && !wcsncmp( filename, L"\\\\.\\", 4 ) &&
         !RtlIsDosDeviceName_U( filename + 4 ) &&
         wcsnicmp( filename + 4, L"PIPE\\", 5 ) &&
         wcsnicmp( filename + 4, L"MAILSLOT\\", 9 ))
@@ -849,7 +951,8 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
         return INVALID_HANDLE_VALUE;
     }
 
-    if (!RtlDosPathNameToNtPathName_U( filename, &nameW, NULL, NULL ))
+    if (!(fast = dos_to_nt_path_fast( filename, &nameW, buf, NULL )) &&
+        !RtlDosPathNameToNtPathName_U( filename, &nameW, NULL, NULL ))
     {
         SetLastError( ERROR_PATH_NOT_FOUND );
         return INVALID_HANDLE_VALUE;
@@ -881,7 +984,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
                            get_nt_file_options( attributes, creation ), NULL, 0 );
 
     /* Before Windows NT, the write flag was ignored on CD drives */
-    if (status == STATUS_ACCESS_DENIED && (access & GENERIC_WRITE) && (GetVersion() & 0x80000000))
+    if (status == STATUS_ACCESS_DENIED && (access & GENERIC_WRITE) && is_win9x())
     {
         WCHAR volume[MAX_PATH];
         if (GetVolumePathNameW( filename, volume, ARRAY_SIZE(volume) ) &&
@@ -949,7 +1052,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH CreateFileW( LPCWSTR filename, DWORD access, DWO
         else
             SetLastError( 0 );
     }
-    RtlFreeUnicodeString( &nameW );
+    if (!fast) RtlFreeUnicodeString( &nameW );
 
  done:
     if (!ret) ret = INVALID_HANDLE_VALUE;
@@ -1145,15 +1248,18 @@ BOOL WINAPI DECLSPEC_HOTPATCH DeleteFileA( LPCSTR path )
  */
 BOOL WINAPI DECLSPEC_HOTPATCH DeleteFileW( LPCWSTR path )
 {
+    WCHAR buf[DOS_FASTPATH_BUF_SIZE];
     UNICODE_STRING nameW;
     OBJECT_ATTRIBUTES attr;
     NTSTATUS status;
     HANDLE hFile;
     IO_STATUS_BLOCK io;
+    BOOL fast;
 
     TRACE( "%s\n", debugstr_w(path) );
 
-    if (!RtlDosPathNameToNtPathName_U( path, &nameW, NULL, NULL ))
+    if (!(fast = dos_to_nt_path_fast( path, &nameW, buf, NULL )) &&
+        !RtlDosPathNameToNtPathName_U( path, &nameW, NULL, NULL ))
     {
         SetLastError( ERROR_PATH_NOT_FOUND );
         return FALSE;
@@ -1165,7 +1271,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH DeleteFileW( LPCWSTR path )
                            FILE_DELETE_ON_CLOSE | FILE_NON_DIRECTORY_FILE | FILE_OPEN_REPARSE_POINT, NULL, 0 );
     if (status == STATUS_SUCCESS) status = NtClose(hFile);
 
-    RtlFreeUnicodeString( &nameW );
+    if (!fast) RtlFreeUnicodeString( &nameW );
     return set_ntstatus( status );
 }
 
@@ -1322,6 +1428,8 @@ HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstFileExW( LPCWSTR filename, FINDEX_INFO_
     IO_STATUS_BLOCK io;
     NTSTATUS status;
     DWORD size, device = 0;
+    WCHAR buf[DOS_FASTPATH_BUF_SIZE];
+    BOOL fast;
 
     TRACE( "%s %d %p %d %p %lx\n", debugstr_w(filename), level, data, search_op, filter, flags );
 
@@ -1342,7 +1450,8 @@ HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstFileExW( LPCWSTR filename, FINDEX_INFO_
         return INVALID_HANDLE_VALUE;
     }
 
-    if (!RtlDosPathNameToNtPathName_U( filename, &nt_name, &mask, NULL ))
+    if (!(fast = dos_to_nt_path_fast( filename, &nt_name, buf, &mask )) &&
+        !RtlDosPathNameToNtPathName_U( filename, &nt_name, &mask, NULL ))
     {
         SetLastError( ERROR_PATH_NOT_FOUND );
         return INVALID_HANDLE_VALUE;
@@ -1422,6 +1531,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstFileExW( LPCWSTR filename, FINDEX_INFO_
     RtlInitializeCriticalSectionEx( &info->cs, 0, RTL_CRITICAL_SECTION_FLAG_FORCE_DEBUG_INFO );
     info->cs.DebugInfo->Spare[0] = (DWORD_PTR)(__FILE__ ": FIND_FIRST_INFO.cs");
     info->path      = nt_name;
+    info->is_stack  = fast;
     info->magic     = FIND_FIRST_MAGIC;
     info->data_pos  = 0;
     info->data_len  = 0;
@@ -1479,7 +1589,7 @@ HANDLE WINAPI DECLSPEC_HOTPATCH FindFirstFileExW( LPCWSTR filename, FINDEX_INFO_
 
 error:
     HeapFree( GetProcessHeap(), 0, info );
-    RtlFreeUnicodeString( &nt_name );
+    if (!fast) RtlFreeUnicodeString( &nt_name );
     return INVALID_HANDLE_VALUE;
 }
 
@@ -1674,7 +1784,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH FindClose( HANDLE handle )
                 info->magic = 0;
                 if (info->handle) CloseHandle( info->handle );
                 info->handle = 0;
-                RtlFreeUnicodeString( &info->path );
+                if (!info->is_stack) RtlFreeUnicodeString( &info->path );
                 info->data_pos = 0;
                 info->data_len = 0;
                 RtlLeaveCriticalSection( &info->cs );
@@ -1796,14 +1906,17 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetFileAttributesA( LPCSTR name )
  */
 DWORD WINAPI DECLSPEC_HOTPATCH GetFileAttributesW( LPCWSTR name )
 {
+    WCHAR buf[DOS_FASTPATH_BUF_SIZE];
     FILE_BASIC_INFORMATION info;
     UNICODE_STRING nt_name;
     OBJECT_ATTRIBUTES attr;
     NTSTATUS status;
+    BOOL fast;
 
     TRACE( "%s\n", debugstr_w(name) );
 
-    if (!RtlDosPathNameToNtPathName_U( name, &nt_name, NULL, NULL ))
+    if (!(fast = dos_to_nt_path_fast( name, &nt_name, buf, NULL )) &&
+        !RtlDosPathNameToNtPathName_U( name, &nt_name, NULL, NULL ))
     {
         SetLastError( ERROR_PATH_NOT_FOUND );
         return INVALID_FILE_ATTRIBUTES;
@@ -1811,7 +1924,7 @@ DWORD WINAPI DECLSPEC_HOTPATCH GetFileAttributesW( LPCWSTR name )
 
     InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
     status = NtQueryAttributesFile( &attr, &info );
-    RtlFreeUnicodeString( &nt_name );
+    if (!fast) RtlFreeUnicodeString( &nt_name );
 
     if (status == STATUS_SUCCESS) return info.FileAttributes;
 
@@ -1840,11 +1953,13 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetFileAttributesExA( LPCSTR name, GET_FILEEX_INFO
  */
 BOOL WINAPI DECLSPEC_HOTPATCH GetFileAttributesExW( LPCWSTR name, GET_FILEEX_INFO_LEVELS level, void *ptr )
 {
+    WCHAR buf[DOS_FASTPATH_BUF_SIZE];
     FILE_NETWORK_OPEN_INFORMATION info;
     WIN32_FILE_ATTRIBUTE_DATA *data = ptr;
     UNICODE_STRING nt_name;
     OBJECT_ATTRIBUTES attr;
     NTSTATUS status;
+    BOOL fast;
 
     TRACE("%s %d %p\n", debugstr_w(name), level, ptr);
 
@@ -1854,7 +1969,8 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetFileAttributesExW( LPCWSTR name, GET_FILEEX_INF
         return FALSE;
     }
 
-    if (!RtlDosPathNameToNtPathName_U( name, &nt_name, NULL, NULL ))
+    if (!(fast = dos_to_nt_path_fast( name, &nt_name, buf, NULL )) &&
+        !RtlDosPathNameToNtPathName_U( name, &nt_name, NULL, NULL ))
     {
         SetLastError( ERROR_PATH_NOT_FOUND );
         return FALSE;
@@ -1862,7 +1978,7 @@ BOOL WINAPI DECLSPEC_HOTPATCH GetFileAttributesExW( LPCWSTR name, GET_FILEEX_INF
 
     InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
     status = NtQueryFullAttributesFile( &attr, &info );
-    RtlFreeUnicodeString( &nt_name );
+    if (!fast) RtlFreeUnicodeString( &nt_name );
     if (!set_ntstatus( status )) return FALSE;
 
     data->dwFileAttributes                = info.FileAttributes;
@@ -3759,22 +3875,27 @@ BOOL WINAPI DECLSPEC_HOTPATCH RemoveDirectoryA( LPCSTR path )
  */
 BOOL WINAPI DECLSPEC_HOTPATCH RemoveDirectoryW( LPCWSTR path )
 {
+    WCHAR buf[DOS_FASTPATH_BUF_SIZE];
     OBJECT_ATTRIBUTES attr;
     UNICODE_STRING nt_name;
     IO_STATUS_BLOCK io;
     NTSTATUS status;
     HANDLE handle;
+    BOOL fast;
 
     TRACE( "%s\n", debugstr_w(path) );
 
-    status = RtlDosPathNameToNtPathName_U_WithStatus( path, &nt_name, NULL, NULL );
-    if (!set_ntstatus( status )) return FALSE;
+    if (!(fast = dos_to_nt_path_fast( path, &nt_name, buf, NULL )))
+    {
+        status = RtlDosPathNameToNtPathName_U_WithStatus( path, &nt_name, NULL, NULL );
+        if (!set_ntstatus( status )) return FALSE;
+    }
 
     InitializeObjectAttributes( &attr, &nt_name, OBJ_CASE_INSENSITIVE, 0, NULL );
     status = NtOpenFile( &handle, DELETE | SYNCHRONIZE, &attr, &io,
                          FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
                          FILE_DIRECTORY_FILE | FILE_SYNCHRONOUS_IO_NONALERT | FILE_OPEN_REPARSE_POINT );
-    RtlFreeUnicodeString( &nt_name );
+    if (!fast) RtlFreeUnicodeString( &nt_name );
 
     if (!status)
     {
