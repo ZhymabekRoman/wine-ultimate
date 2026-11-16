@@ -132,6 +132,8 @@ struct xaml_window
     UINT retained_width;
     UINT retained_height;
     BOOL retained_valid;
+    BOOL gpu_active;
+    BOOL gpu_rendered_once;
     RECT dirty_rect;
     BOOL has_dirty_rect;
     BOOL core_window_subscribed;
@@ -4758,9 +4760,19 @@ static void xaml_window_refresh_present( HWND hwnd )
         height = rc.bottom > 0 ? (UINT)rc.bottom : impl->height;
         if (width > 0 && height > 0)
         {
-            RECT dirty_rc;
-            if (xaml_render_retained_if_dirty( impl, target, width, height, &dirty_rc ))
-                xaml_upload_retained_to_swapchain( impl, &dirty_rc );
+            if (impl->d3d11_dev && impl->d3d11_ctx &&
+                xaml_layout_render_gpu( target, (int)width, (int)height, impl->content,
+                                        impl->d3d11_dev, impl->d3d11_ctx, impl->swapchain ))
+            {
+                impl->gpu_active = TRUE;
+                impl->gpu_rendered_once = TRUE;
+            }
+            else
+            {
+                RECT dirty_rc;
+                if (xaml_render_retained_if_dirty( impl, target, width, height, &dirty_rc ))
+                    xaml_upload_retained_to_swapchain( impl, &dirty_rc );
+            }
         }
     }
     IDCompositionDesktopDevice_Commit( impl->dcomp_device );
@@ -4812,22 +4824,39 @@ static LRESULT WINAPI xaml_corewindow_wndproc( HWND hwnd, UINT msg, WPARAM wpara
             TRACE( "xaml corewindow WM_PAINT top %p rc %ldx%ld\n", top, rc.right, rc.bottom );
             if (rc.right > 0 && rc.bottom > 0)
             {
-                if (xaml_render_retained_if_dirty( &global_xaml_window, top, (UINT)rc.right, (UINT)rc.bottom, &dirty_rc ))
+                if (global_xaml_window.gpu_active && global_xaml_window.swapchain &&
+                    global_xaml_window.d3d11_dev && global_xaml_window.d3d11_ctx)
                 {
-                    if (!g_in_xaml_present && global_xaml_window.swapchain && global_xaml_window.d3d11_ctx)
+                    if (!g_in_xaml_present && InterlockedExchange( &g_xaml_window_dirty, 0 ) != 0)
                     {
-                        xaml_upload_retained_to_swapchain( &global_xaml_window, &dirty_rc );
-                        if (global_xaml_window.dcomp_device)
+                        if (xaml_layout_render_gpu( top, (int)rc.right, (int)rc.bottom, global_xaml_window.content,
+                                                    global_xaml_window.d3d11_dev, global_xaml_window.d3d11_ctx,
+                                                    global_xaml_window.swapchain ) &&
+                            global_xaml_window.dcomp_device)
+                        {
                             IDCompositionDesktopDevice_Commit( global_xaml_window.dcomp_device );
+                        }
                     }
                 }
-                if (global_xaml_window.retained_valid && global_xaml_window.retained_dc)
+                else
                 {
-                    HDC hdc = GetDC( top );
-                    if (hdc)
+                    if (xaml_render_retained_if_dirty( &global_xaml_window, top, (UINT)rc.right, (UINT)rc.bottom, &dirty_rc ))
                     {
-                        BitBlt( hdc, 0, 0, rc.right, rc.bottom, global_xaml_window.retained_dc, 0, 0, SRCCOPY );
-                        ReleaseDC( top, hdc );
+                        if (!g_in_xaml_present && global_xaml_window.swapchain && global_xaml_window.d3d11_ctx)
+                        {
+                            xaml_upload_retained_to_swapchain( &global_xaml_window, &dirty_rc );
+                            if (global_xaml_window.dcomp_device)
+                                IDCompositionDesktopDevice_Commit( global_xaml_window.dcomp_device );
+                        }
+                    }
+                    if (global_xaml_window.retained_valid && global_xaml_window.retained_dc)
+                    {
+                        HDC hdc = GetDC( top );
+                        if (hdc)
+                        {
+                            BitBlt( hdc, 0, 0, rc.right, rc.bottom, global_xaml_window.retained_dc, 0, 0, SRCCOPY );
+                            ReleaseDC( top, hdc );
+                        }
                     }
                 }
             }
@@ -5223,6 +5252,7 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
     /* 5. Ensure composition swapchain created via CreateSwapChainForComposition */
     if (impl->swapchain && (width != prev_width || height != prev_height))
     {
+        xaml_gpu_release_rtv();
         hr = IDXGISwapChain1_ResizeBuffers( impl->swapchain, 0, width, height,
                                             DXGI_FORMAT_B8G8R8A8_UNORM, 0 );
         TRACE( "XAML: resized composition swapchain %p to %ux%u (hr %#lx)\n",
@@ -5299,24 +5329,57 @@ static HRESULT xaml_window_present( struct xaml_window *impl )
         }
     }
 
-    /* 6. Render the XAML layout once into the retained DIB surface and upload dirty rect */
+    /* 6. Render the XAML layout directly on GPU (Instanced SDF + Atlas) or fall back to retained DIB */
     {
         LARGE_INTEGER t0, t1, t2, freq;
         RECT dirty_rc;
-        BOOL rendered;
+        BOOL rendered = FALSE;
+        BOOL gpu_ok = FALSE;
 
         QueryPerformanceFrequency( &freq );
         QueryPerformanceCounter( &t0 );
-        rendered = xaml_render_retained_if_dirty( impl, hwnd, width, height, &dirty_rc );
-        QueryPerformanceCounter( &t1 );
-        if (rendered && impl->swapchain && impl->d3d11_ctx && !xaml_get_app_caps()->winui3)
-            xaml_upload_retained_to_swapchain( impl, &dirty_rc );
-        QueryPerformanceCounter( &t2 );
-        TRACE( "XAML perf: rendered=%d render_us=%lld upload_us=%lld dirty=(%ld,%ld-%ld,%ld)\n",
-               rendered,
-               (long long)((t1.QuadPart - t0.QuadPart) * 1000000 / freq.QuadPart),
-               (long long)((t2.QuadPart - t1.QuadPart) * 1000000 / freq.QuadPart),
-               dirty_rc.left, dirty_rc.top, dirty_rc.right, dirty_rc.bottom );
+        if (impl->swapchain && impl->d3d11_dev && impl->d3d11_ctx && !xaml_get_app_caps()->winui3)
+        {
+            BOOL dirty = InterlockedExchange( &g_xaml_window_dirty, 0 ) != 0;
+            BOOL size_changed = (width != prev_width || height != prev_height || !impl->gpu_rendered_once);
+            if (dirty || size_changed)
+            {
+                gpu_ok = xaml_layout_render_gpu( hwnd, (int)width, (int)height, impl->content,
+                                                 impl->d3d11_dev, impl->d3d11_ctx, impl->swapchain );
+                if (gpu_ok)
+                {
+                    impl->gpu_active = TRUE;
+                    impl->gpu_rendered_once = TRUE;
+                    rendered = TRUE;
+                    QueryPerformanceCounter( &t1 );
+                    TRACE( "XAML perf (GPU): total_us=%lld (%ux%u)\n",
+                           (long long)((t1.QuadPart - t0.QuadPart) * 1000000 / freq.QuadPart),
+                           width, height );
+                }
+                else
+                {
+                    InterlockedExchange( &g_xaml_window_dirty, 1 );
+                }
+            }
+            else if (impl->gpu_active)
+            {
+                gpu_ok = TRUE;
+            }
+        }
+        if (!gpu_ok)
+        {
+            impl->gpu_active = FALSE;
+            rendered = xaml_render_retained_if_dirty( impl, hwnd, width, height, &dirty_rc );
+            QueryPerformanceCounter( &t1 );
+            if (rendered && impl->swapchain && impl->d3d11_ctx && !xaml_get_app_caps()->winui3)
+                xaml_upload_retained_to_swapchain( impl, &dirty_rc );
+            QueryPerformanceCounter( &t2 );
+            TRACE( "XAML perf (CPU): rendered=%d render_us=%lld upload_us=%lld dirty=(%ld,%ld-%ld,%ld)\n",
+                   rendered,
+                   (long long)((t1.QuadPart - t0.QuadPart) * 1000000 / freq.QuadPart),
+                   (long long)((t2.QuadPart - t1.QuadPart) * 1000000 / freq.QuadPart),
+                   dirty_rc.left, dirty_rc.top, dirty_rc.right, dirty_rc.bottom );
+        }
     }
 
     /* 8. Commit the DirectComposition tree */

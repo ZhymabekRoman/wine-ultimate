@@ -87,6 +87,23 @@ HRESULT element_create( IInspectable *outer, IInspectable **inner, void **instan
 HRESULT element_create_typed( const WCHAR *class_name, void **instance );
 HRESULT xaml_create_webview2( void **out );
 void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable *content );
+BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *content,
+                             ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain );
+void xaml_gpu_release_rtv( void );
+void xaml_gpu_shutdown( void );
+BOOL xaml_gpu_begin_frame( ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
+                           UINT width, UINT height, COLORREF clear_color );
+void xaml_gpu_push_rect( float x0, float y0, float x1, float y1, const RECT *clip_rc,
+                         float radius, UINT32 fill_argb, UINT32 border_argb,
+                         float border_thickness, float opacity );
+void xaml_gpu_push_ring( float x0, float y0, float x1, float y1, const RECT *clip_rc,
+                         UINT32 color_argb, float thickness, BOOL arc_quadrant );
+void xaml_gpu_push_text( ID3D11DeviceContext *ctx, const WCHAR *text, int font_height, int font_weight,
+                         UINT dt_flags, const RECT *rc, const RECT *clip_rc, COLORREF color, float opacity );
+void xaml_gpu_push_image( ID3D11DeviceContext *ctx, UINT64 img_key, const BYTE *bgra_pixels,
+                          UINT img_w, UINT img_h, const RECT *dst_rc, const RECT *clip_rc );
+BOOL xaml_gpu_end_frame( ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain,
+                         UINT *out_instances, UINT *out_hits, UINT *out_misses );
 HRESULT xaml_window_present_current( void );
 void xaml_mark_window_dirty( void );
 void xaml_fire_all_loaded( void );

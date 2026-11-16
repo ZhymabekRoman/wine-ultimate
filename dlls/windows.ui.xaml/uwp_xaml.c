@@ -13798,6 +13798,459 @@ void xaml_layout_render( HWND hwnd, HDC hdc, int width, int height, IInspectable
     else TRACE( "xaml_layout_render: root_el NULL (content %p)\n", (void *)content );
 }
 
+static inline UINT32 cr_to_argb( COLORREF cr )
+{
+    return 0xff000000u | ((UINT32)GetRValue( cr ) << 16) | ((UINT32)GetGValue( cr ) << 8) | (UINT32)GetBValue( cr );
+}
+
+static void uwp_gpu_paint_element( ID3D11DeviceContext *ctx, struct uwp_element *el )
+{
+    COLORREF surface_bg = g_paint_page_bg;
+    if (!el || !el->has_bounds || el->visibility != 0) return;
+
+    if (el->kind == UWP_KIND_IMAGE)
+    {
+        uwp_load_image_asset( el );
+        if (el->img_pixels && el->img_w > 0 && el->img_h > 0)
+        {
+            RECT rc = el->bounds, dst;
+            int bw = rc.right - rc.left, bh = rc.bottom - rc.top;
+            int dw = (int)el->img_w, dh = (int)el->img_h;
+            int dx, dy;
+            if (dw > bw && bw > 0) { dh = MulDiv( dh, bw, dw ); dw = bw; }
+            if (dh > bh && bh > 0) { dw = MulDiv( dw, bh, dh ); dh = bh; }
+            dx = rc.left + (bw - dw) / 2;
+            dy = rc.top + (bh - dh) / 2;
+            SetRect( &dst, dx, dy, dx + dw, dy + dh );
+            xaml_gpu_push_image( ctx, (UINT64)(ULONG_PTR)el, el->img_pixels, el->img_w, el->img_h, &dst, NULL );
+        }
+        return;
+    }
+
+    if (el->kind == UWP_KIND_PROGRESS_RING)
+    {
+        RECT rc = el->bounds;
+        int cx = (rc.left + rc.right) / 2;
+        int cy = min( rc.bottom - 36, (rc.top + rc.bottom) / 2 + 120 );
+        int r = 18;
+        COLORREF track_cr = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 68, 68, 68 ), surface_bg );
+        COLORREF arc_cr = (el->has_fg && el->fg_alpha > 0)
+            ? blend_argb_over( el->fg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"AccentBrush", uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+        xaml_gpu_push_ring( (float)(cx - r), (float)(cy - r), (float)(cx + r), (float)(cy + r), NULL, cr_to_argb( track_cr ), 3.0f, FALSE );
+        xaml_gpu_push_ring( (float)(cx - r), (float)(cy - r), (float)(cx + r), (float)(cy + r), NULL, cr_to_argb( arc_cr ), 3.0f, TRUE );
+        return;
+    }
+
+    if (wcsstr( el->name, L"NavRail" ))
+    {
+        RECT rc = el->bounds;
+        COLORREF rail_bg = (el->has_bg && el->bg_alpha > 0)
+            ? blend_argb_over( el->bg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"BodyBackgroundBrush", RGB( 22, 22, 22 ), surface_bg );
+        COLORREF rail_bd = (el->has_border && el->border_alpha > 0)
+            ? blend_argb_over( el->border_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"BodyBackgroundStroke", RGB( 38, 38, 38 ), surface_bg );
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                            0.0f, cr_to_argb( rail_bg ), cr_to_argb( rail_bd ), 1.0f, 1.0f );
+    }
+    else if (wcsstr( el->name, L"SearchBox" ) || wcsstr( el->class_name, L"AutoSuggestBox" ) ||
+             wcsstr( el->name, L"SuggestBox" ))
+    {
+        RECT rc = el->bounds;
+        BOOL focused = (g_focused_textbox == el);
+        COLORREF sbg = (el->has_bg && el->bg_alpha > 0)
+            ? blend_argb_over( el->bg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 42, 42, 42 ), surface_bg );
+        COLORREF sbd = focused
+            ? uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg )
+            : uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 90, 90, 90 ), surface_bg );
+        COLORREF sfg = el->text[0]
+            ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), sbg )
+            : ((el->has_fg && el->fg_alpha > 0)
+                ? blend_argb_over( el->fg_argb, sbg )
+                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 185, 185, 185 ), sbg ));
+        WCHAR disp[264];
+        const WCHAR *fallback = wcsstr( el->name, L"SearchBox" )
+            ? L"\x26b2  Search apps, games, movies and more"
+            : L"Find";
+        if (el->text[0])
+            swprintf( disp, ARRAY_SIZE(disp), focused ? L"\x26b2  %s|" : L"\x26b2  %s", el->text );
+        else if (focused)
+            lstrcpynW( disp, L"\x26b2  |", ARRAY_SIZE(disp) );
+        else
+            lstrcpynW( disp, fallback, ARRAY_SIZE(disp) );
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                            3.0f, cr_to_argb( sbg ), cr_to_argb( sbd ), focused ? 2.0f : 1.0f, 1.0f );
+        rc.left += 10;
+        xaml_gpu_push_text( ctx, disp, 13, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &rc, NULL, sfg, 1.0f );
+        return;
+    }
+    else if (wcsstr( el->class_name, L"TeachingTip" ) && el->is_open)
+    {
+        RECT rc = el->bounds;
+        COLORREF tbg = (el->has_bg && el->bg_alpha > 0)
+            ? blend_argb_over( el->bg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"SolidBackgroundFillColorTertiaryBrush", RGB( 44, 44, 44 ), surface_bg );
+        COLORREF tbd = uwp_paint_resolve_color( el, L"SurfaceStrokeColorFlyoutBrush", RGB( 82, 82, 82 ), surface_bg );
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                            4.0f, cr_to_argb( tbg ), cr_to_argb( tbd ), 1.0f, 1.0f );
+    }
+    else if (wcsstr( el->name, L"HeroBanner" ))
+    {
+        RECT rc = el->bounds, trc;
+        COLORREF hbg = uwp_paint_resolve_color( el, L"SystemAccentColorDark2", RGB( 20, 36, 56 ), surface_bg );
+        COLORREF hbd = uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg );
+        COLORREF hfg = uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), hbg );
+        COLORREF hsfg = uwp_paint_resolve_color( el, L"AccentTextFillColorPrimaryBrush", RGB( 200, 220, 240 ), hbg );
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                            6.0f, cr_to_argb( hbg ), cr_to_argb( hbd ), 1.0f, 1.0f );
+        trc = rc;
+        trc.left += 28; trc.top += 24; trc.right -= 28;
+        xaml_gpu_push_text( ctx, L"Featured: Essential Windows Apps", 22, FW_BOLD, DT_LEFT | DT_TOP | DT_SINGLELINE, &trc, NULL, hfg, 1.0f );
+        trc.top += 34;
+        xaml_gpu_push_text( ctx, L"Discover top-rated tools for communication, productivity, and entertainment.", 13, FW_NORMAL, DT_LEFT | DT_TOP | DT_SINGLELINE, &trc, NULL, hsfg, 1.0f );
+        return;
+    }
+    else if (wcsstr( el->name, L"TileCard" ))
+    {
+        RECT rc = el->bounds;
+        COLORREF cbg = (el->has_bg && el->bg_alpha > 0)
+            ? blend_argb_over( el->bg_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"ProductCardBackground", uwp_paint_resolve_color( el, L"CardBackgroundFillColorDefaultBrush", RGB( 38, 38, 38 ), surface_bg ), surface_bg );
+        COLORREF cbd = (el->has_border && el->border_alpha > 0)
+            ? blend_argb_over( el->border_argb, surface_bg )
+            : uwp_paint_resolve_color( el, L"DefaultCardBorderBrush", RGB( 58, 58, 58 ), surface_bg );
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                            5.0f, cr_to_argb( cbg ), cr_to_argb( cbd ), 1.0f, 1.0f );
+    }
+    else if (wcsstr( el->name, L"AppIcon" ))
+    {
+        static const COLORREF colors[] = {
+            RGB(37, 211, 102), RGB(30, 215, 96), RGB(229, 9, 20), RGB(0, 122, 204),
+            RGB(16, 124, 65), RGB(88, 101, 242), RGB(85, 170, 85), RGB(255, 136, 0)
+        };
+        RECT rc = el->bounds;
+        int idx = (int)(el->bounds.left / 100 + el->bounds.top / 80) % ARRAY_SIZE(colors);
+        xaml_gpu_push_rect( (float)rc.left, (float)rc.top, (float)rc.right, (float)rc.bottom, NULL,
+                            4.0f, cr_to_argb( colors[idx] ), cr_to_argb( RGB( 70, 70, 70 ) ), 1.0f, 1.0f );
+        if (el->text[0])
+            xaml_gpu_push_text( ctx, el->text, 16, FW_BOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &rc, NULL, RGB( 255, 255, 255 ), 1.0f );
+        return;
+    }
+    else if (el->kind != UWP_KIND_BUTTON && el->kind != UWP_KIND_TOGGLE_BUTTON && el->kind != UWP_KIND_TEXT_BLOCK)
+    {
+        if ((el->has_bg && el->bg_alpha > 0) || (el->has_border && el->border_alpha > 0))
+        {
+            UINT32 fill_c = (el->has_bg && el->bg_alpha > 0) ? cr_to_argb( blend_argb_over( el->bg_argb, surface_bg ) ) : 0;
+            UINT32 bord_c = (el->has_border && el->border_alpha > 0) ? cr_to_argb( blend_argb_over( el->border_argb, surface_bg ) ) : 0;
+            float bw = (el->has_border && el->border_alpha > 0) ? 1.0f : 0.0f;
+            xaml_gpu_push_rect( (float)el->bounds.left, (float)el->bounds.top, (float)el->bounds.right, (float)el->bounds.bottom,
+                                NULL, 0.0f, fill_c, bord_c, bw, 1.0f );
+        }
+        if (wcsstr( el->class_name, L"TabView" ) && !wcsstr( el->class_name, L"TabViewItem" ))
+        {
+            static const GUID IID_ITabItemViewModel_local =
+                { 0x609b13b7, 0x05f6, 0x5a02, { 0xb8, 0xe7, 0x5b, 0xbd, 0x2c, 0x33, 0x51, 0x8d } };
+            RECT trc = el->bounds;
+            WCHAR tab_title[128] = {0};
+            if (el->selected_item)
+            {
+                void *vm = NULL;
+                if (SUCCEEDED(IInspectable_QueryInterface( el->selected_item, &IID_ITabItemViewModel_local, &vm )) && vm)
+                {
+                    HRESULT (WINAPI *get_name)(void *, HSTRING *) = (void *)(*(void ***)vm)[6];
+                    HSTRING hname = NULL;
+                    if (get_name && SUCCEEDED(get_name( vm, &hname )) && hname)
+                    {
+                        const WCHAR *s = WindowsGetStringRawBuffer( hname, NULL );
+                        if (s && s[0]) lstrcpynW( tab_title, s, ARRAY_SIZE(tab_title) );
+                        WindowsDeleteString( hname );
+                    }
+                    IUnknown_Release( (IUnknown *)vm );
+                }
+            }
+            if (!tab_title[0] && el->text[0])
+                lstrcpynW( tab_title, el->text, ARRAY_SIZE(tab_title) );
+            if (tab_title[0])
+            {
+                RECT pill = { trc.left + 4, trc.top + 3, min( trc.right - 34, trc.left + 190 ), trc.bottom };
+                RECT close_rc = { pill.right - 22, pill.top + 2, pill.right - 4, pill.bottom - 2 };
+                RECT add_rc = { pill.right + 6, trc.top + 4, min( trc.right - 2, pill.right + 30 ), trc.bottom - 2 };
+                xaml_gpu_push_rect( (float)pill.left, (float)pill.top, (float)pill.right, (float)pill.bottom, NULL,
+                                    0.0f, cr_to_argb( RGB( 44, 44, 44 ) ), 0, 0.0f, 1.0f );
+                pill.left += 10;
+                pill.right = max( pill.left, close_rc.left - 2 );
+                xaml_gpu_push_text( ctx, tab_title, 13, FW_SEMIBOLD, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_END_ELLIPSIS, &pill, NULL, RGB( 255, 255, 255 ), 1.0f );
+                xaml_gpu_push_text( ctx, L"\x00d7", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &close_rc, NULL, RGB( 185, 185, 185 ), 1.0f );
+                if (add_rc.right > add_rc.left + 12)
+                    xaml_gpu_push_text( ctx, L"+", 13, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &add_rc, NULL, RGB( 210, 210, 210 ), 1.0f );
+            }
+            return;
+        }
+        if (wcsstr( el->class_name, L"PivotItem" ) && el->text[0])
+        {
+            RECT trc = el->bounds;
+            BOOL is_first = (wcsstr( el->name, L"History" ) != NULL);
+            int fh = max( 13, (int)(15 * g_layout_scale + 0.5f) );
+            COLORREF tfg = is_first
+                ? uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), surface_bg )
+                : uwp_paint_resolve_color( el, L"TextFillColorSecondaryBrush", RGB( 175, 175, 175 ), surface_bg );
+            xaml_gpu_push_text( ctx, el->text, fh, is_first ? FW_SEMIBOLD : FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &trc, NULL, tfg, 1.0f );
+            if (is_first)
+            {
+                COLORREF acc = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
+                                   uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+                xaml_gpu_push_rect( (float)trc.left, (float)(trc.bottom - 3), (float)min( trc.right, trc.left + 52 ), (float)trc.bottom,
+                                    NULL, 0.0f, cr_to_argb( acc ), 0, 0.0f, 1.0f );
+            }
+            return;
+        }
+    }
+
+    if (el->kind == UWP_KIND_BUTTON || el->kind == UWP_KIND_TOGGLE_BUTTON)
+    {
+        RECT brc = el->bounds;
+        WCHAR tmp[64];
+        const WCHAR *label = uwp_format_display_label( el, tmp, ARRAY_SIZE(tmp) );
+        COLORREF bg, fg, bd;
+        BOOL draw_bg = TRUE, draw_bd = TRUE;
+        int fh;
+
+        if (wcsstr( el->name, L"CopyButton" ) || wcsstr( el->name, L"PasteButton" ))
+            return;
+
+        if (wcsstr( el->name, L"NavItem" ))
+        {
+            RECT rc = el->bounds;
+            BOOL selected = (el->is_checked == 1);
+            if (selected || el->is_hovered || el->is_pressed)
+            {
+                COLORREF nav_bg = el->is_pressed ? RGB( 52, 52, 52 ) : (selected ? RGB( 40, 40, 40 ) : RGB( 34, 34, 34 ));
+                xaml_gpu_push_rect( (float)(rc.left + 2), (float)(rc.top + 2), (float)(rc.right - 2), (float)(rc.bottom - 2),
+                                    NULL, 3.0f, cr_to_argb( nav_bg ), 0, 0.0f, 1.0f );
+            }
+            if (selected)
+            {
+                COLORREF accent_cr = uwp_paint_resolve_color( el, L"AccentBrush", uwp_paint_resolve_color( el, L"SystemAccentColor", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+                xaml_gpu_push_rect( (float)rc.left, (float)(rc.top + 4), (float)(rc.left + 3), (float)(rc.bottom - 4),
+                                    NULL, 0.0f, cr_to_argb( accent_cr ), 0, 0.0f, 1.0f );
+            }
+            if (label[0])
+            {
+                COLORREF nfg = selected
+                    ? uwp_paint_resolve_color( el, L"PrimaryForegroundBrush", RGB( 255, 255, 255 ), surface_bg )
+                    : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 180, 180, 180 ), surface_bg );
+                xaml_gpu_push_text( ctx, label, 12, selected ? FW_SEMIBOLD : FW_NORMAL, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &rc, NULL, nfg, 1.0f );
+            }
+            return;
+        }
+
+        InflateRect( &brc, -2, -2 );
+        if (brc.right <= brc.left || brc.bottom <= brc.top) return;
+
+        if (el->has_bg)
+        {
+            if (el->bg_alpha == 0)
+            {
+                draw_bg = el->is_pressed || el->is_hovered;
+                bg = el->is_pressed ? RGB( 55, 55, 55 ) : (el->is_hovered ? RGB( 45, 45, 45 ) : surface_bg);
+            }
+            else
+            {
+                bg = blend_argb_over( el->bg_argb, surface_bg );
+                if (el->is_pressed)
+                    bg = RGB( max( 0, (int)GetRValue(bg) - 20 ), max( 0, (int)GetGValue(bg) - 20 ), max( 0, (int)GetBValue(bg) - 20 ) );
+            }
+        }
+        else if (wcsstr( el->name, L"GetButton" ) || !wcscmp( label, L"Get" ) || !wcscmp( label, L"Free" ) ||
+                 !wcscmp( el->name, L"EqualButton" ) || (!wcscmp( label, L"=" ) && label[1] == 0))
+        {
+            bg = uwp_paint_resolve_color( el, L"AccentFillColorDefaultBrush",
+                     uwp_paint_resolve_color( el, L"AccentBrush", RGB( 0, 120, 215 ), surface_bg ), surface_bg );
+            if (el->is_pressed)
+                bg = RGB( max( 0, (int)GetRValue(bg) - 25 ), max( 0, (int)GetGValue(bg) - 25 ), max( 0, (int)GetBValue(bg) - 25 ) );
+        }
+        else if (wcsstr( el->name, L"Num" ) || !wcscmp( el->name, L"DecimalSeparatorButton" ) ||
+                 !wcscmp( el->name, L"NegateButton" ))
+        {
+            bg = uwp_paint_resolve_color( el, L"CalcButtonFillColorDefaultBrush",
+                     uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 59, 59, 59 ), surface_bg ), surface_bg );
+            if (el->is_pressed)
+                bg = RGB( max( 0, (int)GetRValue(bg) - 14 ), max( 0, (int)GetGValue(bg) - 14 ), max( 0, (int)GetBValue(bg) - 14 ) );
+        }
+        else
+        {
+            bg = uwp_paint_resolve_color( el, L"CalcButtonAltFillColorDefaultBrush",
+                     uwp_paint_resolve_color( el, L"ControlFillColorDefaultBrush", RGB( 50, 50, 50 ), surface_bg ), surface_bg );
+            if (el->is_pressed)
+                bg = RGB( max( 0, (int)GetRValue(bg) - 12 ), max( 0, (int)GetGValue(bg) - 12 ), max( 0, (int)GetBValue(bg) - 12 ) );
+        }
+
+        if (el->has_border)
+        {
+            draw_bd = (el->border_alpha > 0);
+            bd = blend_argb_over( el->border_argb, surface_bg );
+        }
+        else if (!draw_bg)
+        {
+            draw_bd = FALSE;
+            bd = surface_bg;
+        }
+        else
+        {
+            bd = uwp_paint_resolve_color( el, L"ControlStrokeColorDefaultBrush", RGB( 68, 68, 68 ), surface_bg );
+        }
+
+        if (!el->is_enabled)
+            fg = uwp_paint_resolve_color( el, L"TextFillColorDisabledBrush", RGB( 120, 120, 120 ), bg );
+        else if (el->has_fg && el->fg_alpha > 0)
+            fg = blend_argb_over( el->fg_argb, bg );
+        else
+            fg = uwp_paint_resolve_color( el, L"TextFillColorPrimaryBrush", RGB( 255, 255, 255 ), bg );
+
+        fh = max( (int)(12 * g_layout_scale + 0.5f), min( (int)(24 * g_layout_scale + 0.5f), (int)((brc.bottom - brc.top) * 2 / 5) ) );
+        if (draw_bg || draw_bd)
+        {
+            xaml_gpu_push_rect( (float)brc.left, (float)brc.top, (float)brc.right, (float)brc.bottom, NULL,
+                                4.0f, draw_bg ? cr_to_argb( bg ) : 0, draw_bd ? cr_to_argb( bd ) : 0,
+                                draw_bd ? 1.0f : 0.0f, 1.0f );
+        }
+        if (label[0])
+            xaml_gpu_push_text( ctx, label, fh, FW_SEMIBOLD, DT_CENTER | DT_VCENTER | DT_SINGLELINE, &brc, NULL, fg, 1.0f );
+        return;
+    }
+
+    if (el->kind == UWP_KIND_TEXT_BLOCK)
+    {
+        if (wcsstr( el->name, L"RatingText" ))
+        {
+            RECT rc = el->bounds;
+            COLORREF rfg = (el->has_fg && el->fg_alpha > 0) ? blend_argb_over( el->fg_argb, surface_bg ) : RGB( 255, 215, 0 );
+            xaml_gpu_push_text( ctx, el->text[0] ? el->text : L"\x2605 4.8", 11, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &rc, NULL, rfg, 1.0f );
+            return;
+        }
+        if (wcsstr( el->name, L"CategoryText" ))
+        {
+            RECT rc = el->bounds;
+            COLORREF cfg = (el->has_fg && el->fg_alpha > 0)
+                ? blend_argb_over( el->fg_argb, surface_bg )
+                : uwp_paint_resolve_color( el, L"SecondaryForegroundBrush", RGB( 150, 150, 150 ), surface_bg );
+            xaml_gpu_push_text( ctx, el->text, 11, FW_NORMAL, DT_LEFT | DT_VCENTER | DT_SINGLELINE, &rc, NULL, cfg, 1.0f );
+            return;
+        }
+        if (el->tpl_normal_output && el->content == &el->tpl_normal_output->IInspectable_iface &&
+            el->tpl_normal_output->has_bounds && el->tpl_normal_output->visibility == 0)
+        {
+            if (el->text[0] && wcscmp( el->tpl_normal_output->text, el->text ) != 0)
+                lstrcpynW( el->tpl_normal_output->text, el->text, ARRAY_SIZE(el->tpl_normal_output->text) );
+            uwp_gpu_paint_element( ctx, el->tpl_normal_output );
+            return;
+        }
+        if (el->text[0])
+        {
+            RECT trc = el->bounds;
+            BOOL is_result = uwp_is_display_result_element( el );
+            int fh = is_result
+                ? max( (int)(20 * g_layout_scale + 0.5f), min( (int)(56 * g_layout_scale + 0.5f), (int)((trc.bottom - trc.top) * 3 / 5) ) )
+                : max( (int)(12 * g_layout_scale + 0.5f), min( (int)(22 * g_layout_scale + 0.5f), (int)(el->font_size * g_layout_scale + 0.5f) ) );
+            COLORREF tfg = (el->has_fg && el->fg_alpha > 0)
+                ? blend_argb_over( el->fg_argb, surface_bg )
+                : uwp_paint_resolve_color( el, L"DefaultTextForegroundThemeBrush", RGB( 255, 255, 255 ), surface_bg );
+            if (wcsstr( el->class_name, L"MenuBarItem" ) &&
+                (el->is_pressed || el->is_hovered || uwp_popup_is_open_for( el )))
+            {
+                RECT hrc = trc;
+                InflateRect( &hrc, -2, -3 );
+                xaml_gpu_push_rect( (float)hrc.left, (float)hrc.top, (float)hrc.right, (float)hrc.bottom, NULL,
+                                    3.0f, cr_to_argb( RGB( 54, 54, 54 ) ), 0, 0.0f, 1.0f );
+            }
+            InflateRect( &trc, -8, 0 );
+            xaml_gpu_push_text( ctx, el->text, fh, is_result ? FW_SEMIBOLD : FW_NORMAL,
+                                (is_result ? DT_RIGHT : DT_LEFT) | DT_VCENTER | DT_SINGLELINE, &trc, NULL, tfg, 1.0f );
+        }
+    }
+
+    if (el->content)
+    {
+        struct uwp_element *ch = uwp_elem_from_any( el->content );
+        if (ch && ch != el) uwp_gpu_paint_element( ctx, ch );
+    }
+    if (el->children_coll)
+    {
+        struct uwp_vec_view *children = CONTAINING_RECORD( el->children_coll, struct uwp_vec_view, IInspectable_iface );
+        unsigned int k;
+        for (k = 0; k < children->count; k++)
+        {
+            struct uwp_element *ch = uwp_elem_from_any( children->items[k] );
+            if (ch && ch != el) uwp_gpu_paint_element( ctx, ch );
+        }
+    }
+}
+
+BOOL xaml_layout_render_gpu( HWND hwnd, int width, int height, IInspectable *content,
+                             ID3D11Device *dev, ID3D11DeviceContext *ctx, IDXGISwapChain1 *swapchain )
+{
+    RECT rc;
+    struct uwp_element *root_el, *bg_scope;
+    COLORREF page_bg;
+    double eval_w, eval_h;
+    UINT inst_cnt = 0, hits = 0, misses = 0;
+
+    if (width <= 0 || height <= 0 || !dev || !ctx || !swapchain) return FALSE;
+    uwp_ensure_app_resources_loaded();
+    xaml_get_layout_metrics( hwnd, NULL, &g_layout_scale );
+    SetRect( &rc, 0, 0, width, height );
+    eval_w = (double)width / g_layout_scale;
+    eval_h = (double)height / g_layout_scale;
+    if (hwnd && IsWindow( hwnd ))
+    {
+        HWND top = GetAncestor( hwnd, GA_ROOT );
+        RECT top_rc;
+        if (top && GetClientRect( top, &top_rc ) && top_rc.right > 0 && top_rc.bottom > 0)
+        {
+            eval_w = (double)(top_rc.right - top_rc.left) / g_layout_scale;
+            eval_h = (double)(top_rc.bottom - top_rc.top) / g_layout_scale;
+        }
+    }
+
+    root_el = uwp_elem_from_any( content );
+    bg_scope = (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
+                !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
+        ? g_navigated_page_el : root_el;
+
+    if (bg_scope && bg_scope->has_bg && bg_scope->bg_alpha > 0)
+        page_bg = blend_argb_over( bg_scope->bg_argb, RGB( 31, 31, 31 ) );
+    else
+        page_bg = uwp_paint_resolve_color( bg_scope, L"ApplicationPageBackgroundThemeBrush",
+                                           RGB( 31, 31, 31 ), RGB( 31, 31, 31 ) );
+    g_paint_page_bg = page_bg;
+
+    if (!xaml_gpu_begin_frame( dev, ctx, swapchain, (UINT)width, (UINT)height, page_bg ))
+        return FALSE;
+
+    if (root_el && root_el->kind == UWP_KIND_FRAME && root_el->content &&
+        !uwp_elem_from_any( root_el->content ) && g_navigated_page_el)
+    {
+        uwp_vsm_evaluate_tree( g_navigated_page_el, eval_w, eval_h );
+        uwp_arrange_element( g_navigated_page_el, rc );
+        uwp_gpu_paint_element( ctx, g_navigated_page_el );
+    }
+    else if (root_el && (root_el->content || root_el->children_coll || root_el->xbf_parsed))
+    {
+        uwp_vsm_evaluate_tree( root_el, eval_w, eval_h );
+        uwp_arrange_element( root_el, rc );
+        uwp_gpu_paint_element( ctx, root_el );
+    }
+
+    if (!xaml_gpu_end_frame( ctx, swapchain, &inst_cnt, &hits, &misses ))
+        return FALSE;
+
+    TRACE( "xaml_layout_render_gpu: %ux%u instances=%u atlas_hits=%u atlas_misses=%u\n",
+           width, height, inst_cnt, hits, misses );
+    return TRUE;
+}
+
 static struct uwp_element *uwp_hit_test_button( struct uwp_element *el, int x, int y )
 {
     if (!el || !el->has_bounds || el->visibility != 0 || !el->is_enabled) return NULL;

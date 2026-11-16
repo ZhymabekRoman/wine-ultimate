@@ -6,6 +6,7 @@ SOURCES = \
 	classes.idl \
 	color_helper.c \
 	frame.c \
+	gpu_renderer.c \
 	main.c \
 	pri.c \
 	swapchain_panel.c \
