@@ -110,9 +110,6 @@ struct xaml_app_profile
     const WCHAR *design_component;   /* application.c:6265 e.g. WhatsApp.Design.FontScaleControlPanel, NULL none */
     BOOL serve_core_controls;        /* uwp_xaml.c:11951 !is_whatsapp_app serve-list gate */
     const WCHAR *vm_type_name;       /* uwp_xaml.c:2877 StandardCalculatorViewModel fallback, NULL none */
-    const WCHAR *vm_init_cmd;        /* ModeBasic command name, uwp_xaml.c:2947 */
-    UINT vm_command_modebasic;       /* numeric 200 ModeBasic command code, uwp_xaml.c:2947 */
-    BOOL vm_slot79;                  /* uwp_xaml.c:2213-2708 RCW shim enable */
     BOOL display_sync;               /* uwp_xaml.c:5762 sync-from-VM gate */
     BOOL teardown_vm;                /* uwp_xaml.c:5685 gate */
     const WCHAR *seed_xbf;           /* seed-tree fallback page name (uwp_xaml.c:6112-6194/6505-6788 gate) */

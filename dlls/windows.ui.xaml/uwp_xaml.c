@@ -3474,6 +3474,8 @@ static void uwp_resolve_vm_type_from_metadata( WCHAR *out_type_name, size_t max_
         lstrcpynW( out_type_name, xaml_get_app_profile()->vm_type_name, (int)max_chars );
 }
 
+static IInspectable *uwp_make_button_pressed_args( int code );
+
 static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name )
 {
     void *npc = NULL;
@@ -3528,7 +3530,12 @@ static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name 
     if (g_calc_vm.vm_class_name[0] && uwp_get_app_outer() &&
         uwp_get_custom_xaml_member( uwp_get_app_outer(), g_calc_vm.vm_class_name, L"ButtonPressed", vm, &cmd_prop ) && cmd_prop)
     {
-        if (SUCCEEDED(IInspectable_QueryInterface( cmd_prop, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
+        HRESULT qhr = IInspectable_QueryInterface( cmd_prop, &IID_ICommand_UWP2, &cmd_iface );
+        if (FAILED(qhr))
+            qhr = IInspectable_QueryInterface( cmd_prop, &IID_ICommand_UWP, &cmd_iface );
+        TRACE( "uwp_calc_vm_set_instance: ButtonPressed=%p QI(ICommand) -> %#lx (%p)\n",
+               (void *)cmd_prop, qhr, cmd_iface );
+        if (SUCCEEDED(qhr) && cmd_iface)
             g_calc_vm.cmd = (IInspectable *)cmd_iface;
         else
         {
@@ -3537,8 +3544,28 @@ static void uwp_calc_vm_set_instance( IInspectable *vm, const WCHAR *class_name 
         }
         IInspectable_Release( cmd_prop );
     }
-    if (!g_calc_vm.cmd && SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICommand_UWP, &cmd_iface )) && cmd_iface)
+    if (!g_calc_vm.cmd &&
+        (SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICommand_UWP2, &cmd_iface )) ||
+         SUCCEEDED(IInspectable_QueryInterface( vm, &IID_ICommand_UWP, &cmd_iface ))) && cmd_iface)
         g_calc_vm.cmd = (IInspectable *)cmd_iface;
+
+    if (g_calc_vm.cmd && is_calculator_app())
+    {
+        IInspectable *mode_args = uwp_make_button_pressed_args( 200 );
+        if (mode_args)
+        {
+            HRESULT mhr = E_FAIL;
+            __TRY
+            {
+                struct command_iface *cmd = (struct command_iface *)g_calc_vm.cmd;
+                if (cmd->lpVtbl->Execute) mhr = cmd->lpVtbl->Execute( cmd, mode_args );
+            }
+            __EXCEPT_ALL { mhr = E_FAIL; }
+            __ENDTRY;
+            TRACE( "uwp_calc_vm_set_instance: ModeBasic(200) via ICommand::Execute -> %#lx\n", mhr );
+            IInspectable_Release( mode_args );
+        }
+    }
 
     g_calc_vm.pumped = TRUE;
     uwp_sync_calc_display_from_vm();
@@ -3574,13 +3601,11 @@ static void uwp_calc_vm_ensure( void )
     }
 }
 
-static IInspectable *uwp_make_button_pressed_args( int code, IInspectable *cmd_param )
+static IInspectable *uwp_make_button_pressed_args( int code )
 {
     static const WCHAR args_cls[] = L"CalculatorApp.ViewModel.Common.CalculatorButtonPressedEventArgs";
-    HSTRING h_cls = NULL, h_mem = NULL;
+    HSTRING h_cls = NULL;
     IInspectable *args = NULL;
-    void *app_outer = uwp_get_app_outer();
-    void *provider = NULL, *xaml_type = NULL, *member = NULL;
     HRESULT hr;
 
     if (SUCCEEDED(WindowsCreateString( args_cls, ARRAY_SIZE(args_cls) - 1, &h_cls )) && h_cls)
@@ -3620,60 +3645,8 @@ static IInspectable *uwp_make_button_pressed_args( int code, IInspectable *cmd_p
             }
             IActivationFactory_Release( af );
         }
+        WindowsDeleteString( h_cls );
     }
-    if (!args && app_outer && h_cls &&
-        SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider)
-    {
-        struct xaml_metadata_provider *mp = (struct xaml_metadata_provider *)provider;
-        if (mp->lpVtbl->GetXamlTypeByFullName &&
-            SUCCEEDED(mp->lpVtbl->GetXamlTypeByFullName( mp, h_cls, (struct xaml_type **)&xaml_type )) && xaml_type)
-        {
-            struct xaml_type *xt = (struct xaml_type *)xaml_type;
-            if (xt->lpVtbl->ActivateInstance)
-            {
-                __TRY { hr = xt->lpVtbl->ActivateInstance( xt, &args ); }
-                __EXCEPT_ALL { hr = E_FAIL; args = NULL; }
-                __ENDTRY;
-                TRACE( "uwp_make_button_pressed_args: IXamlType::ActivateInstance -> %#lx args=%p\n", hr, (void *)args );
-            }
-        }
-    }
-    if (args && app_outer && h_cls)
-    {
-        if (!provider && SUCCEEDED(IInspectable_QueryInterface( (IInspectable *)app_outer, &IID_IXamlMetadataProvider_UWP_g, &provider )) && provider) {}
-        if (provider && !xaml_type)
-        {
-            struct xaml_metadata_provider *mp = (struct xaml_metadata_provider *)provider;
-            if (mp->lpVtbl->GetXamlTypeByFullName)
-                mp->lpVtbl->GetXamlTypeByFullName( mp, h_cls, (struct xaml_type **)&xaml_type );
-        }
-        if (xaml_type)
-        {
-            struct xaml_type *xt = (struct xaml_type *)xaml_type;
-            if (xt->lpVtbl->GetMember && SUCCEEDED(WindowsCreateString( L"ButtonId", 8, &h_mem )) && h_mem)
-            {
-                if (SUCCEEDED(xt->lpVtbl->GetMember( xt, h_mem, (struct xaml_member **)&member )) && member)
-                {
-                    struct xaml_member *xm = (struct xaml_member *)member;
-                    IInspectable *val = cmd_param ? cmd_param : box_int32_value( code );
-                    if (cmd_param) IInspectable_AddRef( cmd_param );
-                    if (xm->lpVtbl->SetValue && val)
-                    {
-                        __TRY { hr = xm->lpVtbl->SetValue( xm, args, val ); }
-                        __EXCEPT_ALL { hr = E_FAIL; }
-                        __ENDTRY;
-                        TRACE( "uwp_make_button_pressed_args: SetValue(ButtonId=%d) -> %#lx\n", code, hr );
-                    }
-                    if (val) IInspectable_Release( val );
-                    IInspectable_Release( (IInspectable *)member );
-                }
-                WindowsDeleteString( h_mem );
-            }
-        }
-    }
-    if (xaml_type) IInspectable_Release( (IInspectable *)xaml_type );
-    if (provider) IInspectable_Release( (IInspectable *)provider );
-    if (h_cls) WindowsDeleteString( h_cls );
     return args;
 }
 
@@ -3689,7 +3662,7 @@ static void uwp_calc_vm_send( int code, IInspectable *cmd_param )
 
     if (g_calc_vm.cmd)
     {
-        IInspectable *args = uwp_make_button_pressed_args( code, cmd_param );
+        IInspectable *args = uwp_make_button_pressed_args( code );
         IInspectable *param = args ? args : (cmd_param ? cmd_param : box_int32_value( code ));
         HRESULT chr = E_FAIL;
         if (!args && cmd_param) IInspectable_AddRef( cmd_param );

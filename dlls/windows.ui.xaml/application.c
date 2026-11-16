@@ -4328,9 +4328,6 @@ static const struct xaml_app_profile xaml_app_profiles[] =
         .design_component        = NULL,
         .serve_core_controls     = TRUE,
         .vm_type_name            = L"CalculatorApp.ViewModel.StandardCalculatorViewModel",
-        .vm_init_cmd             = L"ModeBasic",
-        .vm_command_modebasic    = 200,
-        .vm_slot79               = TRUE,
         .display_sync            = TRUE,
         .teardown_vm             = TRUE,
         .seed_xbf                = L"Calculator",
@@ -4342,9 +4339,6 @@ static const struct xaml_app_profile xaml_app_profiles[] =
         .design_component        = NULL,
         .serve_core_controls     = TRUE,
         .vm_type_name            = NULL,
-        .vm_init_cmd             = NULL,
-        .vm_command_modebasic    = 0,
-        .vm_slot79               = FALSE,
         .display_sync            = FALSE,
         .teardown_vm             = FALSE,
         .seed_xbf                = L"StoreManifestPage",
@@ -4356,9 +4350,6 @@ static const struct xaml_app_profile xaml_app_profiles[] =
         .design_component        = L"WhatsApp.Design.FontScaleControlPanel",
         .serve_core_controls     = FALSE,
         .vm_type_name            = NULL,
-        .vm_init_cmd             = NULL,
-        .vm_command_modebasic    = 0,
-        .vm_slot79               = FALSE,
         .display_sync            = FALSE,
         .teardown_vm             = FALSE,
         .seed_xbf                = NULL,
@@ -4370,9 +4361,6 @@ static const struct xaml_app_profile xaml_app_profiles[] =
         .design_component        = NULL,
         .serve_core_controls     = TRUE,
         .vm_type_name            = NULL,
-        .vm_init_cmd             = NULL,
-        .vm_command_modebasic    = 0,
-        .vm_slot79               = FALSE,
         .display_sync            = FALSE,
         .teardown_vm             = FALSE,
         .seed_xbf                = NULL,
@@ -4384,9 +4372,6 @@ static const struct xaml_app_profile xaml_app_profiles[] =
         .design_component        = NULL,
         .serve_core_controls     = TRUE,
         .vm_type_name            = NULL,
-        .vm_init_cmd             = NULL,
-        .vm_command_modebasic    = 0,
-        .vm_slot79               = FALSE,
         .display_sync            = FALSE,
         .teardown_vm             = FALSE,
         .seed_xbf                = NULL,
@@ -4428,7 +4413,8 @@ const struct xaml_app_profile *xaml_get_app_profile( void )
 
 BOOL is_calculator_app( void )
 {
-    return xaml_get_app_profile()->vm_slot79;
+    const WCHAR *seed = xaml_get_app_profile()->seed_xbf;
+    return seed && !wcscmp( seed, L"Calculator" );
 }
 
 BOOL is_store_app( void )
