@@ -227,6 +227,10 @@ DWORD netconn_create( struct hostdata *host, const struct sockaddr_storage *sock
     }
     if (!SetFileCompletionNotificationModes( (HANDLE)(UINT_PTR)conn->socket, FILE_SKIP_COMPLETION_PORT_ON_SUCCESS ))
         ERR( "SetFileCompletionNotificationModes failed.\n" );
+    {
+        int nodelay = 1;
+        setsockopt( conn->socket, IPPROTO_TCP, TCP_NODELAY, (const char *)&nodelay, sizeof(nodelay) );
+    }
 
     switch (conn->sockaddr.ss_family)
     {
@@ -723,10 +727,97 @@ BOOL netconn_is_alive( struct netconn *netconn )
     return len == 1 || (len == -1 && err == WSAEWOULDBLOCK);
 }
 
+#define DNS_CACHE_SIZE 64
+#define DNS_CACHE_TTL_MS 60000
+#define DNS_CACHE_MAX_NAME 256
+
+struct dns_cache_entry
+{
+    WCHAR hostname[DNS_CACHE_MAX_NAME];
+    DWORD flags;
+    struct sockaddr_storage addr;
+    ULONGLONG expires;
+    BOOL valid;
+};
+
+static struct dns_cache_entry dns_cache[DNS_CACHE_SIZE];
+static unsigned int dns_cache_next;
+static SRWLOCK dns_cache_lock = SRWLOCK_INIT;
+
+static void set_sockaddr_port( struct sockaddr_storage *sa, INTERNET_PORT port )
+{
+    switch (sa->ss_family)
+    {
+    case AF_INET:
+        ((struct sockaddr_in *)sa)->sin_port = htons( port );
+        break;
+    case AF_INET6:
+        ((struct sockaddr_in6 *)sa)->sin6_port = htons( port );
+        break;
+    }
+}
+
+static BOOL dns_cache_lookup( const WCHAR *name, INTERNET_PORT port, DWORD flags, struct sockaddr_storage *sa )
+{
+    ULONGLONG now;
+    unsigned int i;
+
+    if (!name || wcslen( name ) >= DNS_CACHE_MAX_NAME) return FALSE;
+    now = GetTickCount64();
+
+    AcquireSRWLockShared( &dns_cache_lock );
+    for (i = 0; i < DNS_CACHE_SIZE; i++)
+    {
+        if (dns_cache[i].valid && dns_cache[i].flags == flags &&
+            dns_cache[i].expires > now && !wcsicmp( dns_cache[i].hostname, name ))
+        {
+            *sa = dns_cache[i].addr;
+            set_sockaddr_port( sa, port );
+            ReleaseSRWLockShared( &dns_cache_lock );
+            return TRUE;
+        }
+    }
+    ReleaseSRWLockShared( &dns_cache_lock );
+    return FALSE;
+}
+
+static void dns_cache_insert( const WCHAR *name, DWORD flags, const struct sockaddr_storage *sa )
+{
+    ULONGLONG now;
+    unsigned int i, slot = DNS_CACHE_SIZE;
+
+    if (!name || wcslen( name ) >= DNS_CACHE_MAX_NAME) return;
+    now = GetTickCount64();
+
+    AcquireSRWLockExclusive( &dns_cache_lock );
+    for (i = 0; i < DNS_CACHE_SIZE; i++)
+    {
+        if (dns_cache[i].valid && dns_cache[i].flags == flags && !wcsicmp( dns_cache[i].hostname, name ))
+        {
+            slot = i;
+            break;
+        }
+        if (slot == DNS_CACHE_SIZE && (!dns_cache[i].valid || dns_cache[i].expires <= now))
+            slot = i;
+    }
+    if (slot == DNS_CACHE_SIZE)
+        slot = dns_cache_next++ % DNS_CACHE_SIZE;
+
+    wcscpy( dns_cache[slot].hostname, name );
+    dns_cache[slot].flags = flags;
+    dns_cache[slot].addr = *sa;
+    set_sockaddr_port( &dns_cache[slot].addr, 0 );
+    dns_cache[slot].expires = now + DNS_CACHE_TTL_MS;
+    dns_cache[slot].valid = TRUE;
+    ReleaseSRWLockExclusive( &dns_cache_lock );
+}
+
 static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, DWORD flags, struct sockaddr_storage *sa )
 {
     ADDRINFOW *res, hints;
     int ret;
+
+    if (dns_cache_lookup( name, port, flags, sa )) return ERROR_SUCCESS;
 
     memset( &hints, 0, sizeof(hints) );
     /* Prefer IPv4 to IPv6 addresses, since some web servers do not listen on
@@ -748,15 +839,8 @@ static DWORD resolve_hostname( const WCHAR *name, INTERNET_PORT port, DWORD flag
         }
     }
     memcpy( sa, res->ai_addr, res->ai_addrlen );
-    switch (res->ai_family)
-    {
-    case AF_INET:
-        ((struct sockaddr_in *)sa)->sin_port = htons( port );
-        break;
-    case AF_INET6:
-        ((struct sockaddr_in6 *)sa)->sin6_port = htons( port );
-        break;
-    }
+    set_sockaddr_port( sa, port );
+    dns_cache_insert( name, flags, sa );
 
     FreeAddrInfoW( res );
     return ERROR_SUCCESS;
@@ -816,6 +900,8 @@ static void CALLBACK resolve_proc( TP_CALLBACK_INSTANCE *instance, void *ctx )
 DWORD netconn_resolve( const WCHAR *hostname, INTERNET_PORT port, DWORD flags, struct sockaddr_storage *addr, int timeout )
 {
     DWORD ret;
+
+    if (dns_cache_lookup( hostname, port, flags, addr )) return ERROR_SUCCESS;
 
     if (!timeout) ret = resolve_hostname( hostname, port, flags, addr );
     else

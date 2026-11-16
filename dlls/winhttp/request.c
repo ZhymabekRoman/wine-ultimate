@@ -2013,7 +2013,7 @@ static DWORD open_connection( struct request *request )
 
     LIST_FOR_EACH_ENTRY( iter, &connection_pool, struct hostdata, entry )
     {
-        if (iter->port == port && !wcscmp( connect->servername, iter->hostname ) && !is_secure == !iter->secure)
+        if (iter->port == port && !wcsicmp( connect->servername, iter->hostname ) && !is_secure == !iter->secure)
         {
             host = iter;
             host->ref++;
@@ -2164,9 +2164,19 @@ done:
     return ERROR_SUCCESS;
 }
 
+static void finished_reading( struct request *request );
+
 void close_connection( struct request *request )
 {
     if (!request->netconn) return;
+
+    if (!(request->flags & REQUEST_FLAG_WEBSOCKET_UPGRADE) &&
+        request->state == REQUEST_STATE_RESPONSE_RECEIVED &&
+        end_of_data_stream( request ))
+    {
+        finished_reading( request );
+        return;
+    }
 
     netconn_release( request->netconn );
     request->netconn = NULL;
