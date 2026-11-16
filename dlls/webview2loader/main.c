@@ -74,6 +74,8 @@ static BOOL module_has_exports( HMODULE mod )
 {
     size_t i, hits = 0;
 
+    if (GetProcAddress( mod, "CreateWebViewEnvironmentWithOptionsInternal" ))
+        return TRUE;
     for (i = 0; i < ARRAY_SIZE( eb_exports ); i++)
         if (GetProcAddress( mod, eb_exports[i] )) hits++;
     return hits >= 3;
@@ -106,7 +108,7 @@ static HMODULE try_dir( const WCHAR *root )
         lstrcatW( path, subdirs[i] );
         lstrcatW( path, eb_dll_name );
         if (GetFileAttributesW( path ) == INVALID_FILE_ATTRIBUTES) continue;
-        mod = LoadLibraryW( path );
+        mod = LoadLibraryExW( path, NULL, LOAD_WITH_ALTERED_SEARCH_PATH );
         if (!mod)
         {
             WARN("LoadLibraryW(%s) failed, gle=%lu\n", debugstr_w( path ), GetLastError());
@@ -489,9 +491,12 @@ HRESULT WINAPI CreateCoreWebView2EnvironmentWithOptions( LPCWSTR browser_folder,
         LPCWSTR user_data_folder, void *options, void *handler )
 {
     HRESULT (WINAPI *p)( LPCWSTR, LPCWSTR, void *, void * );
-    if (!(p = get_eb_export( "CreateCoreWebView2EnvironmentWithOptions" )))
-        return mock_create_environment( handler );
-    return p( browser_folder, user_data_folder, options, handler );
+    HRESULT (WINAPI *p_int)( BOOL, int, LPCWSTR, void *, void * );
+    if ((p = get_eb_export( "CreateCoreWebView2EnvironmentWithOptions" )))
+        return p( browser_folder, user_data_folder, options, handler );
+    if ((p_int = get_eb_export( "CreateWebViewEnvironmentWithOptionsInternal" )))
+        return p_int( TRUE, 0, user_data_folder, options, handler );
+    return mock_create_environment( handler );
 }
 
 HRESULT WINAPI GetAvailableCoreWebView2BrowserVersionString( LPCWSTR browser_folder,
