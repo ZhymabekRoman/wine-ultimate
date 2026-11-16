@@ -5579,7 +5579,9 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
         else if (view->protect & VPROT_FREE_PLACEHOLDER) status = STATUS_CONFLICTING_ADDRESSES;
         else
         {
-            if (is_view_valloc( view ))
+            BOOL had_uncommitted = FALSE;
+
+            if (is_view_valloc( view ) || (view->protect & SEC_RESERVE))
             {
                 char *p = base;
                 size_t remaining = size;
@@ -5588,12 +5590,16 @@ static NTSTATUS allocate_virtual_memory( void **ret, SIZE_T *size_ptr, ULONG typ
                     BYTE page_vprot;
                     size_t range_len = get_vprot_range_size( p, remaining, VPROT_COMMITTED, &page_vprot );
                     if (!(page_vprot & VPROT_COMMITTED))
+                    {
+                        had_uncommitted = TRUE;
+                        if (!is_view_valloc( view )) break;
                         madvise( p, range_len, MADV_DONTNEED );
+                    }
                     p += range_len;
                     remaining -= range_len;
                 }
             }
-            if (!(status = set_protection( view, base, size, protect )) && (view->protect & SEC_RESERVE))
+            if (!(status = set_protection( view, base, size, protect )) && (view->protect & SEC_RESERVE) && had_uncommitted)
             {
                 SERVER_START_REQ( add_mapping_committed_range )
                 {

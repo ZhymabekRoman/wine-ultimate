@@ -502,7 +502,7 @@ struct srw_lock
 C_ASSERT( sizeof(struct srw_lock) == 4 );
 
 /* Adaptive spin iterations (hardware pause) before sleeping on RtlWaitOnAddress */
-#define SRW_SPIN_COUNT 256
+#define SRW_SPIN_COUNT 40
 
 /***********************************************************************
  *              RtlInitializeSRWLock (NTDLL.@)
@@ -563,9 +563,12 @@ void WINAPI RtlAcquireSRWLockExclusive( RTL_SRWLOCK *lock )
         {
             union { struct srw_lock s; LONG l; } spin_old, spin_new;
 
-            for (int spin = 0; spin < SRW_SPIN_COUNT; spin++)
+            for (int spin = 0; spin <= SRW_SPIN_COUNT; spin++)
             {
-                YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
+                if (spin < SRW_SPIN_COUNT)
+                    YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
+                else
+                    NtYieldExecution(); /* Sleep(0) yield fallback */
                 spin_old.l = *(volatile LONG *)u.l;
                 if (spin_old.s.owners)
                 {
@@ -625,9 +628,12 @@ void WINAPI RtlAcquireSRWLockShared( RTL_SRWLOCK *lock )
         {
             union { struct srw_lock s; LONG l; } spin_old, spin_new;
 
-            for (int spin = 0; spin < SRW_SPIN_COUNT; spin++)
+            for (int spin = 0; spin <= SRW_SPIN_COUNT; spin++)
             {
-                YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
+                if (spin < SRW_SPIN_COUNT)
+                    YieldProcessor(); /* hardware pause, e.g. _mm_pause on x86/x64 */
+                else
+                    NtYieldExecution(); /* Sleep(0) yield fallback */
                 spin_old.l = *(volatile LONG *)u.l;
                 if (spin_old.s.exclusive_waiters || spin_old.s.owners == 0xffff)
                 {
